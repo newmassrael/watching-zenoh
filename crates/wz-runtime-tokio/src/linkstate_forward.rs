@@ -759,6 +759,9 @@ struct DeferredQuery {
     keyexpr: String,
     inbound: FaceId,
     reliable: bool,
+    /// R2594 — the query's QoS, held so the redelivered answer inherits it as
+    /// the immediate one does.
+    qos: wz_session_core::sample::QosLevel,
 }
 
 /// R311y46 (§5.23 Phase 3a) — the heap handler backing a [`LocalSubscriber`]:
@@ -793,6 +796,10 @@ pub(crate) struct LocalSubscriber {
 pub(crate) struct LocalQueryView<'a> {
     pub(crate) keyexpr: &'a str,
     pub(crate) rid: u64,
+    /// R2594 — the routed Request's `ext_qos`. Unlike parameters and
+    /// attachment this one IS threaded, because it is not read by the handler
+    /// alone: every reply the router's own queryable stages inherits it.
+    pub(crate) qos: wz_session_core::sample::QosLevel,
 }
 
 impl QueryView for LocalQueryView<'_> {
@@ -807,6 +814,9 @@ impl QueryView for LocalQueryView<'_> {
     }
     fn rid(&self) -> u64 {
         self.rid
+    }
+    fn qos(&self) -> wz_session_core::sample::QosLevel {
+        self.qos
     }
 }
 
@@ -3012,6 +3022,7 @@ impl LinkstateForwarder {
         let view = LocalQueryView {
             keyexpr,
             rid: request.rid,
+            qos: wz_session_core::declare_ext_qos::read_request_qos(request),
         };
         // Accumulate via the SAME Session-side `QueryResponder` + `QueryReply`
         // currency the wire queryable path uses, and map each reply to a Response
@@ -3048,6 +3059,7 @@ impl LinkstateForwarder {
                 request.rid,
                 keyexpr.to_string(),
                 wz_session_core::reply_acceptance::ReplyKeyExpr::MatchingQuery,
+                view.qos,
                 &mut replies,
             );
             for handler in &matched {
@@ -3083,6 +3095,7 @@ impl LinkstateForwarder {
                 keyexpr: keyexpr.to_string(),
                 inbound,
                 reliable,
+                qos: view.qos,
             });
         }
         true
@@ -3172,6 +3185,7 @@ impl LinkstateForwarder {
             let view = LocalQueryView {
                 keyexpr: &dq.keyexpr,
                 rid: dq.rid,
+                qos: dq.qos,
             };
             let mut replies: Vec<QueryReply> = Vec::new();
             {
@@ -3182,6 +3196,7 @@ impl LinkstateForwarder {
                     dq.rid,
                     dq.keyexpr.clone(),
                     wz_session_core::reply_acceptance::ReplyKeyExpr::MatchingQuery,
+                    dq.qos,
                     &mut replies,
                 );
                 for handler in &dq.handlers {

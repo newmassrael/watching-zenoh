@@ -5104,7 +5104,8 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// the hard-coded DEFAULT. This differs from the base ONLY in the Push arm — all
     /// other arms are control-plane and IGNORE `priority` by construction (Declare /
     /// Oam self-specify `Priority::Control` inside their own dispatch; Request /
-    /// Interest / Response carry no priority parameter at all), so a non-DEFAULT
+    /// Interest carry no priority parameter at all; R2594 — a Response reads its
+    /// band off its own `ext_qos` in `dispatch_response`), so a non-DEFAULT
     /// priority reaching a non-Push message is inert rather than mis-banded. A
     /// non-QoS session further clamps `priority` back to DEFAULT downstream in
     /// [`Self::dispatch_network_message`] (`is_qos()` gate), so the twin is a no-op
@@ -5370,13 +5371,31 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         reliable: bool,
     ) -> Result<(), SendWireError> {
         let class = self.outbound_response_class(&response);
+        // R2594 — the band and the express bit come off the Response ITSELF,
+        // not a constant chosen here. A queryable's reply carries its query's
+        // QoS and a relayed Response carries whatever its sender stamped, so
+        // this is the one place both are honoured. Upstream's transport reads
+        // them the same way:
+        // `commons/zenoh-protocol/src/network/mod.rs` @ `NetworkBodyRef::Response(msg) => msg.ext_qos.get_priority(),`
+        // It
+        // was `Priority::DEFAULT` for every reply, so a `RealTime` query was
+        // answered in the `Data` band. A non-QoS session still clamps the band
+        // downstream.
+        let qos = crate::declare_ext_qos::read_response_qos(&response);
         self.dispatch_network_message(
-            Priority::DEFAULT,
+            qos.priority(),
             reliable,
             wz_codecs::response::Response::MAX_ENCODED_BYTES,
             class,
             crate::frame_encode::response_body(&response),
-        )
+        )?;
+        // Express drains the open batch window, as the Push arm does for an
+        // express publish.
+        #[cfg(feature = "transport-batching")]
+        if qos.is_express() {
+            self.flush_open_batch();
+        }
+        Ok(())
     }
 
     /// See [`Self::dispatch_push`].

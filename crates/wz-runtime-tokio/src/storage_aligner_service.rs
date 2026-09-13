@@ -700,6 +700,7 @@ mod tests {
             encoding: None,
             rid: 1,
             is_local: false,
+            qos: wz_session_core::sample::QosLevel::DEFAULT,
         }
     }
 

@@ -63,6 +63,14 @@
 //! `declare_envelope_extensions` — a chain constructor invites every Interest
 //! builder to call it, which would be a divergence dressed as parity.
 //!
+//! ## The Request and Response readers
+//!
+//! R2594 added `read_request_qos` and `read_response_qos` here for the reason
+//! the Interest arm is here: the extension is the same `zextz64!(0x1, false)`
+//! on both, read by the same chain scan. The Response is BUILT with its QoS by
+//! `response_build` rather than edited afterwards through a setter, because its
+//! chain also holds the responder identity and upstream writes qos first.
+//!
 //! ## Chain order
 //!
 //! zenoh writes the Declare extensions in id order — qos, then tstamp, then
@@ -206,6 +214,32 @@ pub fn read_declare_qos(declare: &DeclareOwned) -> QosLevel {
 #[cfg(feature = "codec-declare")]
 pub fn set_declare_qos(declare: &mut DeclareOwned, qos: QosLevel) {
     set_qos_chain(&mut declare.extensions, &mut declare.header, qos);
+}
+
+/// R2594 — read a `Request`'s `ext_qos`: the QoS the QUERY arrived with, and
+/// therefore the QoS every reply to it starts from.
+///
+/// The same extension again — `pub type QoS = zextz64!(0x1, false)` on the
+/// Request — and the same absent-means-DEFAULT read. It matters here in a way
+/// it does not for a Declare: upstream seeds each reply's QoS from this value
+/// (`zenoh/src/api/builders/reply.rs` @ `qos: query.inner.qos.into(),`, fed by
+/// `msg.ext_qos` when the query is remote), and a stock `get` sends
+/// `QoSType::REQUEST`, whose `Block` makes it non-DEFAULT, so the reply
+/// carries the extension too.
+#[cfg(feature = "codec-request")]
+pub fn read_request_qos(request: &wz_codecs::request::RequestOwned) -> QosLevel {
+    read_qos_chain(request.extensions.as_ref())
+}
+
+/// R2594 — read a `Response`'s `ext_qos`. Absent means `QosLevel::DEFAULT`.
+///
+/// The dispatch reads the band and the express bit off the Response itself
+/// through this, so a reply built here and a Response relayed from another
+/// node go out on the QoS they CARRY rather than on a constant the send seam
+/// chose — the relay forwards `msg.ext_qos` unchanged upstream.
+#[cfg(feature = "codec-response")]
+pub fn read_response_qos(response: &wz_codecs::response::ResponseOwned) -> QosLevel {
+    read_qos_chain(response.extensions.as_ref())
 }
 
 /// The Interest arm's own tests — separate from the Declare module below

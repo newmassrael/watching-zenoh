@@ -4952,6 +4952,7 @@ impl RouterForwarder {
         let view = LocalQueryView {
             keyexpr,
             rid: request.rid,
+            qos: wz_session_core::declare_ext_qos::read_request_qos(request),
         };
         let mut replies: Vec<QueryReply> = Vec::new();
         {
@@ -4963,6 +4964,7 @@ impl RouterForwarder {
                 request.rid,
                 keyexpr.to_string(),
                 wz_session_core::reply_acceptance::ReplyKeyExpr::MatchingQuery,
+                view.qos,
                 &mut replies,
             );
             for handler in &matched {

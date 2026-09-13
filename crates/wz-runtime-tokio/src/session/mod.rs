@@ -2927,11 +2927,17 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
                         // accessor exists to close. Gated, an `AllComplete` GET
                         // fires only complete SessionLocal queryables, as the wire
                         // path does; `query-target` OFF leaves the leg inert.
+                        // R2594 — the GET's QoS rides the call beside its
+                        // target, and it is the value a remote queryable reads
+                        // off this GET's Request: an absent `opts.qos` emits no
+                        // ext, which the receiver decodes as DEFAULT.
                         observer.queryables.local_query(
                             rid,
                             keyexpr,
                             &query,
                             opts.effective_target(),
+                            opts.qos
+                                .unwrap_or(wz_session_core::sample::QosLevel::DEFAULT),
                             &mut replies,
                         );
                         for reply in replies.drain(..) {
@@ -3188,11 +3194,14 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
                         // `query-target` OFF keeps this loopback leg inert
                         // (R311y317 pub-field bypass class), and ON fires only
                         // complete SessionLocal queryables here too.
+                        // R2594 — the GET's QoS, as on the leg above.
                         observer.queryables.local_query(
                             rid,
                             loopback_keyexpr,
                             &query,
                             opts.effective_target(),
+                            opts.qos
+                                .unwrap_or(wz_session_core::sample::QosLevel::DEFAULT),
                             &mut replies,
                         );
                         for reply in replies.drain(..) {

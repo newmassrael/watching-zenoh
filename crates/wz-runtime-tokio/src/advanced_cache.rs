@@ -691,6 +691,7 @@ mod tests {
             encoding: None,
             rid: 0,
             is_local: true,
+            qos: wz_session_core::sample::QosLevel::DEFAULT,
         };
 
         // `_sn=1..` → sn 1 and 2, oldest-first. (No `_time` param, so the
@@ -777,6 +778,7 @@ mod tests {
             encoding: None,
             rid: 0,
             is_local: true,
+            qos: wz_session_core::sample::QosLevel::DEFAULT,
         };
 
         let mut out = Rec::default();
@@ -895,6 +897,7 @@ mod tests {
             encoding: None,
             rid: 0,
             is_local: true,
+            qos: wz_session_core::sample::QosLevel::DEFAULT,
         };
         let mut out = Rec::default();
         answer_from_ring(&ring, &q, &mut out, 0);
@@ -1047,6 +1050,7 @@ mod tests {
             encoding: None,
             rid: 0,
             is_local: true,
+            qos: wz_session_core::sample::QosLevel::DEFAULT,
         };
         let mut out = Rec::default();
         answer_from_ring(&ring, &q, &mut out, now);

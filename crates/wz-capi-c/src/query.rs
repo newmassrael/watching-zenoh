@@ -137,6 +137,9 @@ struct DeferredResponder {
     /// acceptance policy as the in-dispatch leg, and neither default is right
     /// without the query's actual selector.
     accept: wz_runtime_tokio::reply_acceptance::ReplyKeyExpr,
+    /// R2594 — the escaped query's own QoS, for the reason its `wz-capi-pico`
+    /// twin carries one: a deferred reply inherits it as an immediate one does.
+    qos: wz_runtime_tokio::sample::QosLevel,
 }
 
 impl DeferredResponder {
@@ -149,6 +152,7 @@ impl DeferredResponder {
                 self.rid,
                 query_keyexpr.to_owned(),
                 self.accept,
+                self.qos,
                 &mut replies,
             );
             let mut out: &mut dyn ReplyOut = &mut responder;
@@ -375,6 +379,10 @@ pub(crate) struct QueryMarshal {
     /// The request id this query answers — the correlator a deferred reply and
     /// the terminator both need.
     rid: u64,
+    /// R2594 — the query's QoS, which a DEFERRED reply inherits. Carried only
+    /// so the escaped responder can seed its replies from it, as the
+    /// in-dispatch responder does.
+    qos: wz_runtime_tokio::sample::QosLevel,
     /// The FACE's session, on a marshal the dispatch built. `None` on one built
     /// outside a dispatch, which is exactly the case that cannot be escaped.
     session: Option<TokioSession>,
@@ -420,6 +428,7 @@ impl QueryMarshal {
             loaned_attachment: z_loaned_bytes_t::null_value(),
             loaned_encoding: crate::abi::z_loaned_encoding_t::null_value(),
             rid: view.rid(),
+            qos: view.qos(),
             session: None,
             escapes: Cell::new(0),
             deferred: None,
@@ -495,6 +504,7 @@ impl QueryMarshal {
             loaned_attachment: z_loaned_bytes_t::null_value(),
             loaned_encoding: crate::abi::z_loaned_encoding_t::null_value(),
             rid: self.rid,
+            qos: self.qos,
             // The COPY is the escaped end of the chain: it carries the responder
             // rather than the raw session, so it can never be escaped again.
             session: None,
@@ -507,6 +517,7 @@ impl QueryMarshal {
                 } else {
                     wz_runtime_tokio::reply_acceptance::ReplyKeyExpr::MatchingQuery
                 },
+                qos: self.qos,
             }),
             replies: UnsafeCell::new(Vec::new()),
         }
@@ -1847,6 +1858,9 @@ mod tests {
         }
         fn is_local(&self) -> bool {
             false
+        }
+        fn qos(&self) -> wz_runtime_tokio::sample::QosLevel {
+            wz_runtime_tokio::sample::QosLevel::DEFAULT
         }
     }
 

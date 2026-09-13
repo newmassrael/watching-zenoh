@@ -378,11 +378,25 @@ pub(crate) fn interest_body(
 /// the consequence.
 #[cfg(feature = "codec-response")]
 pub fn encode_frame_with_response(sn: u64, response: ResponseOwned, reliable: bool) -> Vec<u8> {
+    encode_frame_with_response_qos(sn, response, reliable, None)
+}
+
+/// R2594 — the QoS-carrying twin of [`encode_frame_with_response`], for the
+/// reason `encode_frame_with_push_qos` exists: the multicast TX emit rides a
+/// reply on the band its Response carries, so the Frame must say which. `None`
+/// is byte-identical to the anchor.
+#[cfg(feature = "codec-response")]
+pub fn encode_frame_with_response_qos(
+    sn: u64,
+    response: ResponseOwned,
+    reliable: bool,
+    ext_qos: Option<Priority>,
+) -> Vec<u8> {
     encode_frame_envelope(
         sn,
         frame_flags(reliable),
         Response::MAX_ENCODED_BYTES,
-        None,
+        ext_qos,
         response_body(&response),
     )
 }

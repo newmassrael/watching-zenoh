@@ -32,8 +32,9 @@ use alloc::boxed::Box;
 use alloc::vec::Vec;
 
 // R311y227 — the per-priority multicast conduit send-side band type. Gated on the
-// data codec that carries a band (Push); the reply-plane variants are DEFAULT.
-#[cfg(feature = "codec-push")]
+// codecs that carry a band: Push, and (R2594) Response, which rides the band its
+// own `ext_qos` names. ResponseFinal and the declare reply stay DEFAULT.
+#[cfg(any(feature = "codec-push", feature = "codec-response"))]
 use crate::qos::Priority;
 
 /// One queued outbound data emission for a multicast drive loop's TX half
@@ -182,7 +183,7 @@ pub struct MulticastTxFrames {
 /// conduit, so the band is always elided to DEFAULT — no non-DEFAULT frame can
 /// ride (the pico-faithful 2-channel default), and a non-qos / pico receiver
 /// never decodes an "Unknown priority" frame.
-#[cfg(feature = "codec-push")]
+#[cfg(any(feature = "codec-push", feature = "codec-response"))]
 fn effective_mcast_priority(priority: Priority, is_qos: bool) -> Priority {
     #[cfg(feature = "transport-qos")]
     {
@@ -203,7 +204,7 @@ fn effective_mcast_priority(priority: Priority, is_qos: bool) -> Priority {
 /// a non-DEFAULT priority (zenoh OMITS the QoS ext on a DEFAULT / Data frame; the
 /// receiver decodes its ABSENCE as DEFAULT). `None` ⇒ byte-identical to the
 /// pre-qos wire — the anchor the layer3 byte-equiv tests pin.
-#[cfg(feature = "codec-push")]
+#[cfg(any(feature = "codec-push", feature = "codec-response"))]
 fn frame_ext_qos(priority: Priority) -> Option<Priority> {
     (priority != Priority::DEFAULT).then_some(priority)
 }
@@ -264,9 +265,21 @@ pub fn multicast_tx_emit(
         // chain exactly like an oversize Push.
         #[cfg(feature = "codec-response")]
         MulticastTxItem::Response { response } => {
-            let frame_sn = tx_sn.mint(crate::qos::Priority::DEFAULT, /* reliable = */ true);
-            let dgram = crate::frame_encode::encode_frame_with_response(
-                frame_sn, *response, /* reliable = */ true,
+            // R2594 — the band comes off the Response's own `ext_qos`, clamped
+            // exactly as a Push's is, because upstream's transport reads a
+            // Response's band there:
+            // `commons/zenoh-protocol/src/network/mod.rs` @ `NetworkBodyRef::Response(msg) => msg.ext_qos.get_priority(),`
+            // This arm used to pin DEFAULT with a note that "zenoh treats reply
+            // priority as a separate concern", which that match arm refutes. A
+            // non-qos group still clamps to DEFAULT, byte-identical to before.
+            let eff = effective_mcast_priority(
+                crate::declare_ext_qos::read_response_qos(&response).priority(),
+                params.is_qos,
+            );
+            let ext_qos = frame_ext_qos(eff);
+            let frame_sn = tx_sn.mint(eff, /* reliable = */ true);
+            let dgram = crate::frame_encode::encode_frame_with_response_qos(
+                frame_sn, *response, /* reliable = */ true, ext_qos,
             );
             let datagrams = crate::frame_encode::multicast_frame_or_fragments(
                 dgram,
@@ -274,10 +287,9 @@ pub fn multicast_tx_emit(
                 true,
                 params.batch_size as usize,
                 tx_sn,
-                // Control-plane reply frames (Response / ResponseFinal /
-                // DeclareReply) are DEFAULT-band (zenoh treats reply priority as a
-                // separate concern); no frame ext_qos, no per-priority conduit.
-                None,
+                // ResponseFinal and DeclareReply below stay DEFAULT-band: neither
+                // carries a band wz stamps yet.
+                ext_qos,
             );
             MulticastTxFrames {
                 datagrams,

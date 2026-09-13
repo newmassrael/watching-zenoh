@@ -691,6 +691,12 @@ impl From<QueryReply> for InboundReply {
                 // sample identically whether it arrived loopback or over the
                 // wire. Put-only (a Del reply carries no source_info slot).
                 source_info,
+                // R2594 — dropped for the reason `responder` is: the wire
+                // decode does not surface a Response's `ext_qos` on
+                // `InboundReply` either, so the two origins lose the same
+                // thing. That receive-side gap is the querier's, not this
+                // projection's.
+                qos: _,
             } => {
                 let body = match body {
                     ReplyBody::Put(payload) => InboundReplyBody::Put {
@@ -736,6 +742,7 @@ impl From<QueryReply> for InboundReply {
                 encoding,
                 payload,
                 responder: _,
+                qos: _,
             } => Self {
                 rid,
                 keyexpr_literal,
@@ -2115,6 +2122,7 @@ mod tests {
             responder: None,
             attachment: None,
             source_info: Some(si.clone()),
+            qos: crate::sample::QosLevel::DEFAULT,
         };
         let inbound: InboundReply = qr.into();
         let got = inbound
@@ -2190,6 +2198,7 @@ mod tests {
             responder: None,
             attachment: None,
             source_info: Some(si.clone()),
+            qos: crate::sample::QosLevel::DEFAULT,
         };
         let inbound: InboundReply = qr.into();
         assert_eq!(inbound.kind(), ReplyKind::Del);
@@ -3045,6 +3054,7 @@ mod tests {
             responder: None,
             attachment: None,
             source_info: None,
+            qos: crate::sample::QosLevel::DEFAULT,
         };
         let inbound: InboundReply = qr.into();
         assert_eq!(inbound.rid, 11);
@@ -3082,6 +3092,7 @@ mod tests {
             responder: None,
             attachment: Some(b"align".to_vec()),
             source_info: None,
+            qos: crate::sample::QosLevel::DEFAULT,
         };
         let inbound: InboundReply = qr.into();
         match inbound.body {
@@ -3113,6 +3124,7 @@ mod tests {
             responder: Some((vec![0xaa, 0xbb], 5)),
             attachment: None,
             source_info: None,
+            qos: crate::sample::QosLevel::DEFAULT,
         };
         let inbound: InboundReply = qr.into();
         assert_eq!(inbound.rid, 12);
@@ -3142,6 +3154,7 @@ mod tests {
             encoding: Some((4, Some("schema_v1".to_string()))),
             payload: b"err-payload".to_vec(),
             responder: None,
+            qos: crate::sample::QosLevel::DEFAULT,
         };
         let inbound: InboundReply = qr.into();
         assert_eq!(inbound.rid, 13);

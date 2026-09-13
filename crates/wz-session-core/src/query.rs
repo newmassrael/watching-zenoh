@@ -187,7 +187,7 @@ use crate::query_sink::{QuerySink, QueryView, ReplyOut};
 // before. Both sites fully qualify instead, which cannot drift.
 use crate::response_build::ResponseReplyBuilder;
 #[cfg(feature = "alloc")]
-use crate::sample::{EncodingHint, SourceInfo, TimestampHint};
+use crate::sample::{EncodingHint, QosLevel, SourceInfo, TimestampHint};
 
 /// R311v — extract the attachment payload view from an inbound
 /// [`Query`]'s extensions chain.
@@ -474,6 +474,14 @@ pub enum QueryReply {
         /// advanced-recovery gate); threaded into
         /// [`crate::response_build::ResponseReplyBuilder::source_info`].
         source_info: Option<SourceInfo>,
+        /// R2594 — the Response-envelope `ext_qos` this reply goes out with.
+        /// Staged from the responder, which holds its QUERY's QoS: upstream's
+        /// reply builders start from `query.inner.qos`
+        /// (`zenoh/src/api/builders/reply.rs` @ `qos: query.inner.qos.into(),`).
+        /// `QosLevel::DEFAULT` emits no extension. Threaded into
+        /// `ResponseReplyBuilder::qos` (a code span: that builder needs
+        /// `codec-response`, which this staging type does not).
+        qos: QosLevel,
     },
     /// Error reply — `MID = _Z_MID_Z_ERR(0x05)`. The `encoding` tuple
     /// (id, optional schema) maps onto
@@ -501,6 +509,9 @@ pub enum QueryReply {
         /// responder ext on the emitted Response. Mirror of
         /// [`Self::Reply::responder`] — same shape, same wire slot.
         responder: Option<(Vec<u8>, u32)>,
+        /// R2594 — mirror of [`Self::Reply::qos`]: upstream's Err reply is
+        /// seeded from the query's QoS the same way.
+        qos: QosLevel,
     },
 }
 
@@ -537,6 +548,7 @@ impl QueryReply {
                 responder,
                 attachment,
                 source_info,
+                qos,
             } => {
                 let mut builder = match body {
                     ReplyBody::Put(payload) => {
@@ -583,7 +595,7 @@ impl QueryReply {
                 if let Some((zid, eid)) = responder {
                     builder = builder.responder(&zid, eid);
                 }
-                builder.build()
+                builder.qos(qos).build()
             }
             #[cfg(feature = "query-reply-err")]
             QueryReply::Err {
@@ -592,6 +604,7 @@ impl QueryReply {
                 encoding,
                 payload,
                 responder,
+                qos,
             } => {
                 let mut builder = crate::response_build::ResponseErrBuilder::new(
                     rid,
@@ -605,7 +618,7 @@ impl QueryReply {
                 if let Some((zid, eid)) = responder {
                     builder = builder.responder(&zid, eid);
                 }
-                builder.build()
+                builder.qos(qos).build()
             }
         }
     }
@@ -653,6 +666,12 @@ pub struct QueryResponder<'a> {
     /// back through [`Self::refused_replies`] by whoever owns the responder.
     /// The divergence is named rather than hidden — see that accessor.
     refused: u32,
+    /// R2594 — the QUERY's QoS, stamped onto every reply this responder
+    /// stages. Upstream seeds `reply`, `reply_del` and `reply_err` alike from
+    /// it (`zenoh/src/api/builders/reply.rs` @ `qos: query.inner.qos.into(),`),
+    /// and a remote query's QoS is the `ext_qos` its Request arrived with
+    /// ([`crate::declare_ext_qos::read_request_qos`]).
+    qos: QosLevel,
 }
 
 #[cfg(all(feature = "codec-request", feature = "alloc"))]
@@ -671,10 +690,18 @@ impl<'a> QueryResponder<'a> {
     /// [`crate::reply_acceptance::ReplyKeyExpr::from_parameters`] over the
     /// query's OWN parameters — never from a local opinion — so the two ends of
     /// the exchange read the same `_anyke` token.
+    ///
+    /// R2594 — `qos` is REQUIRED for the same reason `accept` is. It is the
+    /// query's own QoS ([`QueryView::qos`]), and a constructor that defaulted
+    /// it would stamp DEFAULT on every reply whose caller forgot. That silent
+    /// default is exactly the shape this seam shipped with: every wz reply
+    /// read as droppable while both references mark a default query's reply
+    /// `Block`.
     pub fn new(
         rid: u64,
         keyexpr_literal: String,
         accept: ReplyKeyExpr,
+        qos: QosLevel,
         replies: &'a mut Vec<QueryReply>,
     ) -> Self {
         Self {
@@ -684,6 +711,7 @@ impl<'a> QueryResponder<'a> {
             responder: None,
             accept,
             refused: 0,
+            qos,
         }
     }
 
@@ -737,6 +765,7 @@ impl<'a> QueryResponder<'a> {
             encoding: None,
             timestamp: None,
             responder: self.responder.clone(),
+            qos: self.qos,
             attachment: None,
             source_info: None,
         });
@@ -764,6 +793,7 @@ impl<'a> QueryResponder<'a> {
             encoding: None,
             timestamp: None,
             responder: self.responder.clone(),
+            qos: self.qos,
             attachment: None,
             source_info: None,
         });
@@ -796,6 +826,7 @@ impl<'a> QueryResponder<'a> {
             encoding: encoding.cloned(),
             timestamp: Some(timestamp.clone()),
             responder: self.responder.clone(),
+            qos: self.qos,
             attachment: None,
             source_info: None,
         });
@@ -831,6 +862,7 @@ impl<'a> QueryResponder<'a> {
             encoding: encoding.cloned(),
             timestamp: Some(timestamp.clone()),
             responder: self.responder.clone(),
+            qos: self.qos,
             attachment: None,
             source_info: source_info.cloned(),
         });
@@ -868,6 +900,7 @@ impl<'a> QueryResponder<'a> {
             encoding: encoding.cloned(),
             timestamp: None,
             responder: self.responder.clone(),
+            qos: self.qos,
             attachment: Some(attachment.to_vec()),
             source_info: None,
         });
@@ -898,6 +931,7 @@ impl<'a> QueryResponder<'a> {
             encoding: encoding.cloned(),
             timestamp: None,
             responder: self.responder.clone(),
+            qos: self.qos,
             attachment: None,
             source_info: None,
         });
@@ -915,6 +949,7 @@ impl<'a> QueryResponder<'a> {
             encoding: None,
             timestamp: None,
             responder: self.responder.clone(),
+            qos: self.qos,
             attachment: None,
             source_info: None,
         });
@@ -952,6 +987,7 @@ impl<'a> QueryResponder<'a> {
             encoding: None,
             timestamp: None,
             responder: self.responder.clone(),
+            qos: self.qos,
             attachment: None,
             source_info: None,
         });
@@ -978,6 +1014,7 @@ impl<'a> QueryResponder<'a> {
             encoding: None,
             timestamp: None,
             responder: self.responder.clone(),
+            qos: self.qos,
             attachment: None,
             source_info: source_info.cloned(),
         });
@@ -1015,6 +1052,7 @@ impl<'a> QueryResponder<'a> {
             encoding: None,
             timestamp: Some(timestamp.clone()),
             responder: self.responder.clone(),
+            qos: self.qos,
             attachment: None,
             source_info: source_info.cloned(),
         });
@@ -1044,6 +1082,7 @@ impl<'a> QueryResponder<'a> {
             encoding: meta.encoding.cloned(),
             timestamp: meta.timestamp.cloned(),
             responder: self.responder.clone(),
+            qos: self.qos,
             attachment: meta.attachment.map(<[u8]>::to_vec),
             source_info: meta.source_info.cloned(),
         });
@@ -1084,6 +1123,7 @@ impl<'a> QueryResponder<'a> {
             encoding: None,
             timestamp: meta.timestamp.cloned(),
             responder: self.responder.clone(),
+            qos: self.qos,
             attachment: meta.attachment.map(<[u8]>::to_vec),
             source_info: meta.source_info.cloned(),
         });
@@ -1109,6 +1149,7 @@ impl<'a> QueryResponder<'a> {
             encoding,
             payload: payload.to_vec(),
             responder: self.responder.clone(),
+            qos: self.qos,
         });
     }
 
@@ -1591,6 +1632,21 @@ impl<C: QuerySink> QueryableRegistry<C> {
 /// Final. It is orthogonal to the match count, which is the axis at issue.) zenoh-pico states it outright on the same
 /// boundary: `if (qle_nb == 0) { ...; _z_session_send_reply_final(zn, qid,
 /// is_local); return _Z_RES_OK; }` (`vendor/zenoh-pico/src/session/queryable.c:246-252`).
+/// R2594 — what a query's REQUEST ENVELOPE says about it, beside its body: the
+/// correlation id, the completeness target and the QoS every reply inherits.
+/// For a local query the requester's options stand in for the envelope.
+///
+/// Grouped because the fan-out reads all three once per query and never per
+/// queryable, and the positional list had outgrown clippy's argument budget
+/// the moment the QoS joined it.
+#[cfg(all(feature = "codec-request", feature = "alloc"))]
+#[derive(Debug, Clone, Copy)]
+struct QueryEnvelope {
+    rid: u64,
+    target: Option<QueryTarget>,
+    qos: QosLevel,
+}
+
 #[cfg(all(feature = "codec-request", feature = "alloc"))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct DispatchOutcome {
@@ -1709,13 +1765,17 @@ impl<C: QuerySink> QueryableRegistry<C> {
         // R311y337 — past this point the query HAS been routed (wz's equivalent
         // of zenoh entering `handle_query`), so the requester is owed a Final
         // even if `matched` comes back 0.
-        let matched = self.fire_matching_queryables(
-            request.rid,
-            &resolved,
-            query,
-            replies,
+        // R2594 — the query's QoS, off the same envelope as its target. Every
+        // reply a matched queryable stages inherits it (upstream: `msg.ext_qos`
+        // into `QueryInner::qos`, then into each reply builder).
+        let qos = crate::declare_ext_qos::read_request_qos(request);
+        let envelope = QueryEnvelope {
+            rid: request.rid,
             target,
-            /* is_remote = */ true,
+            qos,
+        };
+        let matched = self.fire_matching_queryables(
+            envelope, &resolved, query, replies, /* is_remote = */ true,
         );
         DispatchOutcome {
             dispatched: true,
@@ -1763,6 +1823,12 @@ impl<C: QuerySink> QueryableRegistry<C> {
     /// `Some(AllComplete)` restricts to complete queryables, mirroring the wire
     /// path's `dispatch_request` completeness filter on one host.
     ///
+    /// `qos` is the requester's QoS, lifted from the GET options for the same
+    /// reason `target` is: the body does not carry it. R2594 — upstream hands a
+    /// local query the get's own QoS exactly as it hands a remote one its
+    /// Request's, so a session-local queryable's replies inherit it the same
+    /// way.
+    ///
     /// R311dx — gate carried by the enclosing
     /// `#[cfg(all(codec-request, alloc))] impl` (the `&QueryOwned` param).
     pub fn local_query(
@@ -1771,10 +1837,12 @@ impl<C: QuerySink> QueryableRegistry<C> {
         keyexpr: &str,
         query: &QueryOwned,
         target: Option<QueryTarget>,
+        qos: QosLevel,
         replies: &mut Vec<QueryReply>,
     ) -> usize {
+        let envelope = QueryEnvelope { rid, target, qos };
         self.fire_matching_queryables(
-            rid, keyexpr, query, replies, target, /* is_remote = */ false,
+            envelope, keyexpr, query, replies, /* is_remote = */ false,
         )
     }
 
@@ -1797,13 +1865,13 @@ impl<C: QuerySink> QueryableRegistry<C> {
     /// `#[cfg(all(codec-request, alloc))] impl` (the `&QueryOwned` param).
     fn fire_matching_queryables(
         &mut self,
-        rid: u64,
+        envelope: QueryEnvelope,
         keyexpr: &str,
         query: &QueryOwned,
         replies: &mut Vec<QueryReply>,
-        target: Option<QueryTarget>,
         is_remote: bool,
     ) -> usize {
+        let QueryEnvelope { rid, target, qos } = envelope;
         // R311gb-3b-cleanup — extract the projection inputs ONCE per
         // matched queryable (the parameters byte slice and attachment
         // view are stable across all matched handlers for a single
@@ -1861,6 +1929,7 @@ impl<C: QuerySink> QueryableRegistry<C> {
                     responder: None,
                     accept: accept_mode,
                     refused: 0,
+                    qos,
                 };
                 // R311gb-3b-cleanup — dispatch through the QuerySink seam
                 // with no intermediate wrapper: `QueryResponder` impls
@@ -1883,6 +1952,7 @@ impl<C: QuerySink> QueryableRegistry<C> {
                     // parity); the deferred Session-tier sink routes
                     // its replies by this.
                     is_local: !is_remote,
+                    qos,
                 };
                 queryable.sink.handle(&query_view, &mut responder);
             }
@@ -3203,6 +3273,7 @@ mod tests {
             responder: None,
             attachment: None,
             source_info: None,
+            qos: QosLevel::DEFAULT,
         };
         let response = reply.into_response().unwrap();
         // The Response should encode to the same bytes as the
@@ -3236,6 +3307,7 @@ mod tests {
             responder: None,
             attachment: None,
             source_info: Some(si.clone()),
+            qos: QosLevel::DEFAULT,
         };
         let via_chain = reply.into_response().unwrap().wire();
         let via_builder = ResponseReplyBuilder::new(42, 0, Some("demo/data"), b"v")
@@ -3559,6 +3631,7 @@ mod tests {
             responder: None,
             attachment: None,
             source_info: None,
+            qos: QosLevel::DEFAULT,
         };
         let response = reply.into_response().unwrap();
         let via_builder = ResponseReplyBuilder::new(42, 0, Some("clear/me"), &[])
@@ -3581,6 +3654,7 @@ mod tests {
             encoding: Some((4, Some("schema_v1".to_string()))),
             payload: b"oops".to_vec(),
             responder: None,
+            qos: QosLevel::DEFAULT,
         };
         let response = reply.into_response().unwrap();
         let via_builder =
@@ -3859,7 +3933,7 @@ mod tests {
 
         let mut replies = Vec::new();
         let query = Query::default().try_into_owned().unwrap();
-        reg.local_query(7, "demo/**", &query, None, &mut replies);
+        reg.local_query(7, "demo/**", &query, None, QosLevel::DEFAULT, &mut replies);
 
         let staged: Vec<&str> = replies
             .iter()
@@ -3888,6 +3962,7 @@ mod tests {
             7,
             "demo/**".to_string(),
             ReplyKeyExpr::MatchingQuery,
+            QosLevel::DEFAULT,
             &mut replies,
         );
         assert_eq!(responder.refused_replies(), 0, "nothing refused yet");
@@ -3927,7 +4002,7 @@ mod tests {
         }
         .try_into_owned()
         .unwrap();
-        reg.local_query(7, "demo/**", &query, None, &mut replies);
+        reg.local_query(7, "demo/**", &query, None, QosLevel::DEFAULT, &mut replies);
 
         let staged: Vec<&str> = replies
             .iter()
@@ -3965,6 +4040,7 @@ mod tests {
             "home/temp",
             &query,
             /*target=*/ None,
+            QosLevel::DEFAULT,
             &mut replies,
         );
 
@@ -4006,7 +4082,14 @@ mod tests {
 
         let mut replies = Vec::new();
         let query = Query::default().try_into_owned().unwrap();
-        reg.local_query(1, "home/temp", &query, /*target=*/ None, &mut replies);
+        reg.local_query(
+            1,
+            "home/temp",
+            &query,
+            /*target=*/ None,
+            QosLevel::DEFAULT,
+            &mut replies,
+        );
 
         assert_eq!(
             invocations.load(Ordering::SeqCst),
@@ -4034,7 +4117,14 @@ mod tests {
 
         let mut replies = Vec::new();
         let query = Query::default().try_into_owned().unwrap();
-        reg.local_query(1, "home/temp", &query, /*target=*/ None, &mut replies);
+        reg.local_query(
+            1,
+            "home/temp",
+            &query,
+            /*target=*/ None,
+            QosLevel::DEFAULT,
+            &mut replies,
+        );
 
         assert_eq!(
             invocations.load(Ordering::SeqCst),
@@ -4059,7 +4149,14 @@ mod tests {
 
         let mut replies = Vec::new();
         let query = Query::default().try_into_owned().unwrap();
-        reg.local_query(1, "home/humid", &query, /*target=*/ None, &mut replies);
+        reg.local_query(
+            1,
+            "home/humid",
+            &query,
+            /*target=*/ None,
+            QosLevel::DEFAULT,
+            &mut replies,
+        );
 
         assert_eq!(invocations.load(Ordering::SeqCst), 0);
         assert!(replies.is_empty());
@@ -4106,6 +4203,7 @@ mod tests {
             "home/temp",
             &query,
             Some(QueryTarget::AllComplete),
+            QosLevel::DEFAULT,
             &mut replies,
         );
         assert_eq!(
@@ -4127,6 +4225,7 @@ mod tests {
             "home/temp",
             &query,
             Some(QueryTarget::All),
+            QosLevel::DEFAULT,
             &mut replies_all,
         );
         assert_eq!(complete_hits.load(Ordering::SeqCst), 2);
@@ -4140,7 +4239,14 @@ mod tests {
         // BestMatching (absent target = None): both fire on the local path,
         // matching zenoh (only AllComplete filters by completeness locally).
         let mut replies_bm = Vec::new();
-        reg.local_query(3, "home/temp", &query, None, &mut replies_bm);
+        reg.local_query(
+            3,
+            "home/temp",
+            &query,
+            None,
+            QosLevel::DEFAULT,
+            &mut replies_bm,
+        );
         assert_eq!(complete_hits.load(Ordering::SeqCst), 3);
         assert_eq!(
             incomplete_hits.load(Ordering::SeqCst),
@@ -4215,6 +4321,90 @@ mod tests {
         assert_eq!(replies_plain.len(), 2);
     }
 
+    /// R2594 — every reply INHERITS the QoS its query arrived with, on every
+    /// reply arm, and not a constant.
+    ///
+    /// This is the half the foreign differential
+    /// (`reply_qos_zenohd_differential.rs`) cannot supply: a stock `z_get` has
+    /// no flag to vary its QoS, so that file only proves a default query gets
+    /// a stock queryable's answer, which a wz stamping `Block` on every reply
+    /// would also pass. Here two queries differ in EVERY field of the byte —
+    /// band, congestion and express — so a constant satisfies at most one, and
+    /// an implementation that dropped any one field fails the other. The plain
+    /// Request is the anti-vacuity leg: no ext in, no ext out, byte-identical
+    /// to the envelope before this change.
+    #[test]
+    fn every_reply_inherits_the_qos_its_request_arrived_with() {
+        use crate::declare_ext_qos::read_response_qos;
+        use crate::qos::{CongestionControl, Priority};
+        use crate::request_build::RequestQueryBuilder;
+
+        let seen: Arc<Mutex<Vec<QosLevel>>> = Arc::new(Mutex::new(Vec::new()));
+        let seen_cb = Arc::clone(&seen);
+        let mut reg = QueryableRegistry::new();
+        reg.register("metrics/cpu", move |q, responder| {
+            seen_cb.lock().unwrap().push(q.qos());
+            responder.reply(b"put");
+            responder.reply_del();
+            responder.reply_err(None, None, b"err");
+        });
+        let arms = 2 + usize::from(cfg!(feature = "query-reply-err"));
+
+        let block_data = QosLevel::from_parts(Priority::Data, CongestionControl::Block, false);
+        let express_rt = QosLevel::from_parts(Priority::RealTime, CongestionControl::Drop, true);
+        assert_ne!(block_data.raw, express_rt.raw);
+        for (rid, qos) in [(1, block_data), (2, express_rt)] {
+            let request = RequestQueryBuilder::new(rid, 0, Some("metrics/cpu"))
+                .request_qos(qos.raw)
+                .build()
+                .unwrap();
+            let mut replies = Vec::new();
+            reg.dispatch_request(&request, &HashMap::new(), &mut replies);
+            assert_eq!(replies.len(), arms, "every reply arm staged one reply");
+            for reply in replies {
+                let response = reply.into_response().unwrap();
+                assert_eq!(
+                    read_response_qos(&response),
+                    qos,
+                    "the Response envelope carries the QoS its query arrived with"
+                );
+            }
+        }
+        assert_eq!(
+            *seen.lock().unwrap(),
+            vec![block_data, express_rt],
+            "the handler's view reports the query's QoS"
+        );
+
+        let mut replies = Vec::new();
+        reg.dispatch_request(
+            &request_query(3, 0, Some("metrics/cpu")),
+            &HashMap::new(),
+            &mut replies,
+        );
+        assert_eq!(replies.len(), arms);
+        for reply in replies {
+            let response = reply.into_response().unwrap();
+            assert!(
+                response.extensions.is_none(),
+                "a Request without ext_qos is DEFAULT, and DEFAULT is omitted"
+            );
+            assert_eq!(response.header & 0x80, 0, "no envelope Z bit");
+        }
+
+        // The loopback leg inherits the requester's QoS the same way.
+        let mut replies = Vec::new();
+        let query = Query::default().try_into_owned().unwrap();
+        reg.local_query(4, "metrics/cpu", &query, None, express_rt, &mut replies);
+        assert_eq!(replies.len(), arms);
+        for reply in replies {
+            assert_eq!(
+                read_response_qos(&reply.into_response().unwrap()),
+                express_rt
+            );
+        }
+    }
+
     #[test]
     fn dispatch_request_still_treats_inbound_as_remote_after_r238_split() {
         // R238 invariance check: extracting the fan-out body into
@@ -4269,6 +4459,7 @@ mod tests {
             responder: None,
             accept: ReplyKeyExpr::MatchingQuery,
             refused: 0,
+            qos: QosLevel::DEFAULT,
         };
         let fired = reg.dispatch_borrowed(
             &BorrowedQuery {
@@ -4280,6 +4471,7 @@ mod tests {
                 encoding: None,
                 rid: 7,
                 is_local: false,
+                qos: QosLevel::DEFAULT,
             },
             &mut responder,
             /* is_remote = */ true,

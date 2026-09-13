@@ -295,12 +295,21 @@ pub fn build_response_err_aliased(
 ///
 /// FIDELITY (honest): the EMPTY keyexpr matches zenoh's `WireExpr::empty()`
 /// (mapping = Sender, so the M bit is set, as here). The Response ENVELOPE
-/// follows wz's pico-calibrated omit-on-DEFAULT convention shared by every wz
-/// Response/ResponseFinal builder — it omits the `ext_qos` / `ext_respid`
-/// extensions that zenoh-Rust's timeout reply attaches (zenoh sets `Z=1` because
-/// `QoSType::RESPONSE` is non-default). A zenoh receiver still decodes this as a
-/// valid Err reply (default qos, no responder id); the omission is the
-/// established wz convention, not a byte-for-byte zenoh-Rust copy.
+/// omits the `ext_qos` / `ext_respid` extensions that zenoh-Rust's timeout reply
+/// attaches. A zenoh receiver still decodes this as a valid Err reply (default
+/// qos, no responder id).
+///
+/// R2594 — that omission is a DIVERGENCE, not a convention. This paragraph
+/// used to call it "pico-calibrated" and "shared by every wz Response
+/// builder", and both halves were wrong. pico's reply options default to
+/// `Block`, so a pico reply carries a non-DEFAULT qos too. And the
+/// queryable-reply builders now stamp their query's QoS
+/// ([`ResponseReplyBuilder::qos`]). Upstream's timeout reply carries the
+/// ORIGINATING query's QoS
+/// (`zenoh/src/net/routing/dispatcher/queries.rs` @ `ext_qos: self.qos,`),
+/// which this function's signature has no slot for. It
+/// shares that shape with every router-side relay, which upstream re-stamps
+/// with `query.src_qos`, so it is fixed with them rather than alone.
 ///
 /// Wire shape (empty-keyexpr case):
 ///
@@ -610,6 +619,49 @@ pub struct ResponseReplyBuilder {
     // body is unaffected; envelope-level Z(0x80) on Response.header
     // signals chain presence.
     responder: Option<(Vec<u8>, u32)>,
+    // R2594: Response-ENVELOPE-level `ext_qos` (ext id 0x01, Z64). A
+    // queryable's reply seeds it from its query's own QoS. DEFAULT is omitted
+    // on the wire, so a builder nobody sets stays byte-identical.
+    qos: crate::sample::QosLevel,
+}
+
+/// R2594 — the Response ENVELOPE extension chain, in the order upstream's
+/// encoder writes it: `ext_qos` first, then the responder identity
+/// (`commons/zenoh-codec/src/network/response.rs` @ `if ext_qos != &ext::QoSType::DEFAULT {`,
+/// which precedes the `ext_respid` arm). ONE body for the Reply and Err builders, which each carried their own
+/// copy of the responder arm while it was the only entry; a second entry is
+/// where two copies would start to disagree about the chain bits.
+///
+/// DEFAULT is omitted, which is the same encode gate upstream applies, so a
+/// Response with neither entry keeps `extensions: None` and a clear `Z` bit.
+#[cfg(feature = "codec-response")]
+fn stamp_envelope_extensions(
+    response: &mut ResponseOwned,
+    qos: crate::sample::QosLevel,
+    responder: Option<(Vec<u8>, u32)>,
+) -> Result<(), CodecError> {
+    let mut exts: Vec<ExtEntryOwned> = Vec::new();
+    if qos != crate::sample::QosLevel::DEFAULT {
+        exts.push(crate::declare_ext_qos::qos_ext(qos));
+    }
+    if let Some((zid, eid)) = responder {
+        let value = encode_responder_ext_body(&zid, eid);
+        exts.push(ExtEntryOwned {
+            // ENC_ZBUF(0x40) | id_responder(0x03). No M flag.
+            header: 0x40 | 0x03,
+            body: ExtEntryOwnedVariant::CodecZenohExtZbuf(ExtZbufOwned {
+                value_len: value.len() as u64,
+                value: owned_bytes(&value)?,
+            }),
+        });
+    }
+    if exts.is_empty() {
+        return Ok(());
+    }
+    crate::ext_nodeid::apply_chain_z_bits(&mut exts);
+    response.header |= 0x80; // _Z_FLAG_Z_Z on Response envelope
+    response.extensions = Some(exts);
+    Ok(())
 }
 
 #[cfg(feature = "codec-response")]
@@ -636,7 +688,21 @@ impl ResponseReplyBuilder {
             attachment: None,
             source_info: None,
             responder: None,
+            qos: crate::sample::QosLevel::DEFAULT,
         }
+    }
+
+    /// R2594 — set the Response-envelope `ext_qos`. Subsequent calls overwrite
+    /// (last-wins). `QosLevel::DEFAULT` emits nothing.
+    ///
+    /// What a queryable's reply threads its QUERY's QoS through: upstream's
+    /// reply builders start from `query.inner.qos`
+    /// (`zenoh/src/api/builders/reply.rs` @ `qos: query.inner.qos.into(),`),
+    /// and the dispatch sends the Response on the band and express bit this
+    /// value carries.
+    pub fn qos(mut self, qos: crate::sample::QosLevel) -> Self {
+        self.qos = qos;
+        self
     }
 
     /// Set the inner-MsgPut value encoding (the `_Z_FLAG_Z_P_E` E-flag).
@@ -734,7 +800,7 @@ impl ResponseReplyBuilder {
     /// `eid` is the responder's entity-id (z-int).
     ///
     /// **Envelope-level vs body-level**: the responder ext sits on
-    /// `Response.extensions` (alongside future qos / timestamp exts —
+    /// `Response.extensions` (alongside the qos ext and a future timestamp —
     /// network.c emit order is qos → tstamp → responder), NOT on the
     /// Reply body's inner push-body extensions chain. The Reply LAYER
     /// itself has no extensions surface (`_z_reply_encode`
@@ -744,11 +810,9 @@ impl ResponseReplyBuilder {
     /// identification of the responding queryable is the wire-level shape
     /// regardless of Reply vs Err inner body.
     ///
-    /// Today this lands as the sole entry in `Response.extensions`
-    /// (no Z chain-continuation bit). When future envelope exts (qos,
-    /// tstamp) land, the chain-plumb step mirrors
-    /// `RequestQueryBuilder::build` at
-    /// session_glue.rs:2772-2782.
+    /// R2594 — it is no longer the sole entry: a non-DEFAULT [`Self::qos`]
+    /// precedes it, and the chain bits are set in one place for both
+    /// builders (`stamp_envelope_extensions`).
     ///
     /// Panics if `zid.len()` is outside `1..=16`.
     pub fn responder(mut self, zid: &[u8], eid: u32) -> Self {
@@ -910,23 +974,9 @@ impl ResponseReplyBuilder {
             );
         }
 
-        // Envelope-level extension (Response.extensions). Today the
-        // only ext we expose is responder (R121j-3c); future qos /
-        // tstamp setters layer in here with the same Vec<ExtEntry>
-        // chain-plumb idiom used in RequestQueryBuilder.build.
-        if let Some((zid, eid)) = self.responder {
-            let value = encode_responder_ext_body(&zid, eid);
-            response.header |= 0x80; // _Z_FLAG_Z_Z on Response envelope
-            response.extensions = Some(vec![ExtEntryOwned {
-                // ENC_ZBUF(0x40) | id_responder(0x03). No M flag and no
-                // Z chain-continuation (sole envelope ext today).
-                header: 0x40 | 0x03,
-                body: ExtEntryOwnedVariant::CodecZenohExtZbuf(ExtZbufOwned {
-                    value_len: value.len() as u64,
-                    value: owned_bytes(&value)?,
-                }),
-            }]);
-        }
+        // Envelope-level extensions (Response.extensions): qos, then the
+        // responder (R121j-3c), through the one chain body both builders share.
+        stamp_envelope_extensions(&mut response, self.qos, self.responder)?;
 
         Ok(response)
     }
@@ -965,6 +1015,10 @@ pub struct ResponseErrBuilder {
     // inner bodies (zenoh-pico network.c:281-291 has one encoder branch
     // that fires for both _Z_RESPONSE_BODY_REPLY and _Z_RESPONSE_BODY_ERR).
     responder: Option<(Vec<u8>, u32)>,
+    // R2594: Response-ENVELOPE-level `ext_qos`, the twin of
+    // `ResponseReplyBuilder::qos`. Upstream's `reply_err` seeds it from the
+    // query exactly as `reply` does.
+    qos: crate::sample::QosLevel,
 }
 
 #[cfg(feature = "codec-response")]
@@ -987,7 +1041,18 @@ impl ResponseErrBuilder {
             encoding: None,
             source_info: None,
             responder: None,
+            qos: crate::sample::QosLevel::DEFAULT,
         }
+    }
+
+    /// R2594 — set the Response-envelope `ext_qos` on an Err reply. Mirror of
+    /// [`ResponseReplyBuilder::qos`]: the same envelope slot, and upstream's
+    /// Err builder seeds it from the query the same way
+    /// (`zenoh/src/api/builders/reply.rs` @ `qos: query.inner.qos.into(),`, which
+    /// the `ReplyErrBuilder` constructor carries as the `ReplyBuilder` ones do).
+    pub fn qos(mut self, qos: crate::sample::QosLevel) -> Self {
+        self.qos = qos;
+        self
     }
 
     /// Set the Err encoding hint. `id` is the zenoh-pico content-type
@@ -1102,20 +1167,10 @@ impl ResponseErrBuilder {
             );
         }
 
-        // Envelope-level extension (Response.extensions). Mirror of the
-        // same step in [`ResponseReplyBuilder::build`] — the responder
-        // ext is shared between Reply and Err envelopes.
-        if let Some((zid, eid)) = self.responder {
-            let value = encode_responder_ext_body(&zid, eid);
-            response.header |= 0x80; // _Z_FLAG_Z_Z on Response envelope
-            response.extensions = Some(vec![ExtEntryOwned {
-                header: 0x40 | 0x03,
-                body: ExtEntryOwnedVariant::CodecZenohExtZbuf(ExtZbufOwned {
-                    value_len: value.len() as u64,
-                    value: owned_bytes(&value)?,
-                }),
-            }]);
-        }
+        // Envelope-level extensions (Response.extensions). The same chain body
+        // as [`ResponseReplyBuilder::build`] — qos and the responder are shared
+        // between Reply and Err envelopes.
+        stamp_envelope_extensions(&mut response, self.qos, self.responder)?;
 
         Ok(response)
     }
@@ -1421,8 +1476,8 @@ mod tests {
             msg.wire(),
             expected,
             "Response(Err) empty-keyexpr wire: the EMPTY keyexpr matches zenoh's \
-             WireExpr::empty() (M set); the envelope follows wz's pico-calibrated \
-             omit-on-DEFAULT convention (no qos/respid exts, unlike zenoh-Rust)",
+             WireExpr::empty() (M set); the envelope carries no qos/respid exts, \
+             a named divergence from zenoh-Rust's timeout reply (see the fn doc)",
         );
         // Inner-arm sanity: the body is an Err carrying the payload, and the
         // keyexpr is the empty local wireexpr (id=0, no suffix).
@@ -1838,6 +1893,71 @@ mod tests {
             baseline.len() + 8,
             "wire length grows by exactly the envelope ext size (1+1+6=8 bytes)"
         );
+    }
+
+    /// R2594 — `qos` leads the envelope chain and the responder follows it,
+    /// the order upstream's Response encoder writes them in, on BOTH builders.
+    /// LITERAL bytes rather than the constants, so a wrong ext header or a
+    /// lost continuation bit reds here and not only in a round-trip.
+    /// `QosLevel::DEFAULT` is the anti-vacuity leg: it must leave the wire
+    /// byte-identical to a builder that never heard of qos.
+    #[cfg(feature = "codec-response")]
+    #[test]
+    fn qos_leads_the_responder_on_the_response_envelope_chain() {
+        use crate::qos::{CongestionControl, Priority};
+        use crate::sample::QosLevel;
+        let block = QosLevel::from_parts(Priority::Data, CongestionControl::Block, false);
+        assert_eq!(block.raw, 13, "Data | nodrop, the QoSType::REQUEST byte");
+
+        let reply = ResponseReplyBuilder::new(42, 7, None, b"hello")
+            .responder(&[0xAA; 1], 11)
+            .qos(block)
+            .build()
+            .unwrap()
+            .wire();
+        let err = ResponseErrBuilder::new(42, 7, None, b"oops")
+            .qos(block)
+            .responder(&[0xAA; 1], 11)
+            .build()
+            .unwrap()
+            .wire();
+        for (arm, wire) in [("reply", &reply), ("err", &err)] {
+            assert_eq!(wire[0] & 0x80, 0x80, "{arm}: envelope Z set");
+            assert_eq!(
+                &wire[3..10],
+                &[0xA1, 0x0D, 0x43, 0x03, 0x00, 0xAA, 0x0B],
+                "{arm}: ext_qos (0x21 | Z) = 13, then the terminal responder ext"
+            );
+        }
+
+        for (arm, with_default, without) in [
+            (
+                "reply",
+                ResponseReplyBuilder::new(42, 7, None, b"hello")
+                    .qos(QosLevel::DEFAULT)
+                    .build()
+                    .unwrap()
+                    .wire(),
+                ResponseReplyBuilder::new(42, 7, None, b"hello")
+                    .build()
+                    .unwrap()
+                    .wire(),
+            ),
+            (
+                "err",
+                ResponseErrBuilder::new(42, 7, None, b"oops")
+                    .qos(QosLevel::DEFAULT)
+                    .build()
+                    .unwrap()
+                    .wire(),
+                ResponseErrBuilder::new(42, 7, None, b"oops")
+                    .build()
+                    .unwrap()
+                    .wire(),
+            ),
+        ] {
+            assert_eq!(with_default, without, "{arm}: DEFAULT qos emits nothing");
+        }
     }
 
     /// R121j-3c — responder (envelope-level) composes with consolidation

@@ -3226,6 +3226,7 @@ mod tests {
             encoding: None,
             rid: 1,
             is_local: false,
+            qos: crate::sample::QosLevel::DEFAULT,
         }
     }
 

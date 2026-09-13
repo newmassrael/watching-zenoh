@@ -295,6 +295,11 @@ struct DeferredResponder {
     /// admitted, and assuming `Any` would make the escaped path the one place
     /// the contract is not kept.
     accept: wz_runtime_tokio::reply_acceptance::ReplyKeyExpr,
+    /// R2594 — the escaped query's own QoS, carried for the reason `accept`
+    /// is: the deferred responder is rebuilt away from the dispatch, and a
+    /// reply issued through it must inherit the same QoS a reply issued inside
+    /// the callback does.
+    qos: wz_runtime_tokio::sample::QosLevel,
 }
 
 impl DeferredResponder {
@@ -312,6 +317,7 @@ impl DeferredResponder {
                 self.rid,
                 query_keyexpr.to_owned(),
                 self.accept,
+                self.qos,
                 &mut replies,
             );
             let mut out: &mut dyn ReplyOut = &mut responder;
@@ -404,6 +410,10 @@ struct QueryMarshal {
     /// the terminator both need, and the one piece of the query that is not
     /// reachable through any accessor.
     rid: u64,
+    /// R2594 — the query's QoS, which a DEFERRED reply inherits. Like `rid` it
+    /// has no pico accessor; it is carried only so the escaped responder can
+    /// seed its replies from it.
+    qos: wz_runtime_tokio::sample::QosLevel,
     /// The FACE's session, on a marshal the dispatch built. `None` on one built
     /// outside a dispatch (a test fixture), which is exactly the case that
     /// cannot be escaped — see [`clone_query_marshal`].
@@ -485,6 +495,7 @@ impl QueryMarshal {
                 _pad: [std::ptr::null_mut(); 3],
             },
             rid: view.rid(),
+            qos: view.qos(),
             session: None,
             escapes: Cell::new(0),
             deferred: None,
@@ -532,6 +543,7 @@ impl QueryMarshal {
                 _pad: [std::ptr::null_mut(); 3],
             },
             rid: self.rid,
+            qos: self.qos,
             // The COPY is the escaped end of the chain, so it carries the
             // responder rather than the raw session: it must never be escaped
             // again, and having no session is what makes that structural.
@@ -545,6 +557,7 @@ impl QueryMarshal {
                 } else {
                     wz_runtime_tokio::reply_acceptance::ReplyKeyExpr::MatchingQuery
                 },
+                qos: self.qos,
             }),
             replies: UnsafeCell::new(Vec::new()),
         }
@@ -1678,6 +1691,9 @@ mod tests {
         }
         fn rid(&self) -> u64 {
             7
+        }
+        fn qos(&self) -> wz_runtime_tokio::sample::QosLevel {
+            wz_runtime_tokio::sample::QosLevel::DEFAULT
         }
     }
 

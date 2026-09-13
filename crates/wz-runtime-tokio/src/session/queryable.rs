@@ -126,6 +126,10 @@ struct OwnedQueryEvent {
     encoding: Option<EncodingHint>,
     rid: u64,
     is_local: bool,
+    // R2594 — the query's QoS, copied out for the same reason as every field
+    // above: the deferred job rebuilds the responder after the borrowed view
+    // is gone, and every reply it stages inherits this value.
+    qos: wz_session_core::sample::QosLevel,
 }
 
 impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
@@ -186,6 +190,7 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
                 encoding: view.encoding().cloned(),
                 rid: view.rid(),
                 is_local: view.is_local(),
+                qos: view.qos(),
             };
             let cell = cell_for_sink.clone();
             let observer = observer.clone();
@@ -201,6 +206,7 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
                         encoding: owned.encoding.as_ref(),
                         rid: owned.rid,
                         is_local: owned.is_local,
+                        qos: owned.qos,
                     };
                     let mut replies: Vec<crate::query::QueryReply> = Vec::new();
                     {
@@ -221,6 +227,7 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
                                     wz_session_core::reply_acceptance::ReplyKeyExpr::MatchingQuery,
                                     wz_session_core::reply_acceptance::ReplyKeyExpr::from_parameters,
                                 ),
+                            owned.qos,
                             &mut replies,
                         );
                         handler(&view, &mut responder);

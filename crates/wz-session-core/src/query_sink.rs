@@ -123,6 +123,24 @@ pub trait QueryView {
     fn is_local(&self) -> bool {
         false
     }
+    /// R2594 — the QoS the query arrived with: the `ext_qos` of its Request,
+    /// or the requester's options for a local query. `QosLevel::DEFAULT` when
+    /// the Request carried none.
+    ///
+    /// It is what every reply to this query starts from. Upstream's reply
+    /// builders read `query.inner.qos`
+    /// (`zenoh/src/api/builders/reply.rs` @ `qos: query.inner.qos.into(),`),
+    /// so a runtime that rebuilds a responder away from the dispatcher reads it
+    /// back here.
+    ///
+    /// NO default body, unlike the optional accessors above. Those return
+    /// `None` meaning "absent", which is a true answer for an impl that never
+    /// sees the ext. A default QoS is not "absent": it is a specific value
+    /// that marks a reply droppable, so an impl that inherited it would give
+    /// a wrong answer silently. `alloc`-only because `QosLevel` lives in the
+    /// `alloc`-gated `sample` module.
+    #[cfg(feature = "alloc")]
+    fn qos(&self) -> crate::sample::QosLevel;
 }
 
 /// R311y562 — every optional piece of per-reply metadata, in ONE value.
@@ -537,6 +555,11 @@ pub struct BorrowedQuery<'a> {
     /// R311li — in-process loopback origin marker (see
     /// [`QueryView::is_local`]). `false` for wire dispatch.
     pub is_local: bool,
+    /// R2594 — the query's QoS (see [`QueryView::qos`]). The dispatcher reads
+    /// it off the Request envelope once per query and hands every matched
+    /// queryable the same value.
+    #[cfg(feature = "alloc")]
+    pub qos: crate::sample::QosLevel,
 }
 
 impl QueryView for BorrowedQuery<'_> {
@@ -565,6 +588,10 @@ impl QueryView for BorrowedQuery<'_> {
     }
     fn is_local(&self) -> bool {
         self.is_local
+    }
+    #[cfg(feature = "alloc")]
+    fn qos(&self) -> crate::sample::QosLevel {
+        self.qos
     }
 }
 
@@ -690,6 +717,8 @@ mod tests {
                 encoding: None,
                 rid: 42,
                 is_local: false,
+                #[cfg(feature = "alloc")]
+                qos: crate::sample::QosLevel::DEFAULT,
             },
             &mut out,
         );
@@ -755,6 +784,7 @@ mod tests {
                 encoding: None,
                 rid: 1,
                 is_local: false,
+                qos: crate::sample::QosLevel::DEFAULT,
             },
             &mut out,
         );
@@ -768,6 +798,7 @@ mod tests {
                 encoding: None,
                 rid: 2,
                 is_local: false,
+                qos: crate::sample::QosLevel::DEFAULT,
             },
             &mut out,
         );
