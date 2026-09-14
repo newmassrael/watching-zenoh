@@ -2130,6 +2130,32 @@ def selftest() -> int:
             if got != want:
                 failures.append(f"run() on {label}: expected rc={want}, got {got}")
 
+    # R2615 — `resolve_mode`, the hook's opportunistic decision, graded on all
+    # SIX combinations rather than the two the hook happens to take. The mode
+    # lived in `main()` for exactly as long as it took to notice that nothing
+    # could see it, which is the shape R2613 had just paid for one gate over.
+    # The notice rows assert the CONSTANT, not a paraphrase: a skip that stops
+    # announcing itself is the failure this mode exists to avoid, and a test
+    # comparing against its own copy of the words would not catch it.
+    for label, got, want in (
+        ("neither flag", resolve_mode(False, False, None), (False, None)),
+        ("neither flag, pin present", resolve_mode(False, False, ref), (False, None)),
+        ("--resolve with a pin", resolve_mode(True, False, ref), (True, None)),
+        # `--resolve` without a pin must still reach run(), which is what FAILS
+        # on it. Deciding False here would turn Layer Z's hard failure into a
+        # quiet form-only pass -- the regression this mode must not cause.
+        ("--resolve with NO pin still demands resolution",
+         resolve_mode(True, False, None), (True, None)),
+        ("--resolve-if-pinned with a pin resolves",
+         resolve_mode(False, True, ref), (True, None)),
+        ("--resolve-if-pinned with NO pin announces",
+         resolve_mode(False, True, None), (False, FORM_ONLY_NOTICE)),
+        ("both flags with NO pin: explicit wins",
+         resolve_mode(True, True, None), (True, None)),
+    ):
+        if got != want:
+            failures.append(f"resolve_mode on {label}: expected {want}, got {got}")
+
     for f in failures:
         print(f"  upstream-citation-anchor: SELFTEST FAIL -- {f}", file=sys.stderr)
     if failures:
@@ -2184,6 +2210,54 @@ def selftest() -> int:
     return 0
 
 
+#: THE FORM-ONLY NOTICE. A constant so the selftest asserts the SAME string the
+#: hook prints, rather than a paraphrase that could drift away from it.
+FORM_ONLY_NOTICE = (
+    "  upstream-citation-anchor: the RESOLUTION arm did NOT run -- no checkout "
+    "declaring the pinned version is reachable on this machine. The FORM arm "
+    "below graded shape only; a citation naming a path or needle that no longer "
+    "exists upstream will reach origin and be caught by hosted Layer Z."
+)
+
+
+def resolve_mode(
+    explicit: bool, opportunistic: bool, ref: pathlib.Path | None
+) -> tuple[bool, str | None]:
+    """`(resolve, notice)` for one invocation -- R2615.
+
+    WHY THE OPPORTUNISTIC MODE IS A THIRD MODE rather than a softening of
+    `--resolve`. `--resolve` must keep FAILING without a checkout: in Layer Z,
+    which builds zenohd, an absent source IS the failure (open debt 581
+    condition 3), and letting that arm fall back would silently retire the only
+    lane grading resolution today. `--resolve-if-pinned` is for the other
+    caller -- a git hook, where the checkout's presence is a fact about the
+    DEVELOPER'S MACHINE and not about the push being made, so refusing the push
+    would punish the wrong subject.
+
+    It is safe by construction rather than by care: `upstream_root()` already
+    returns None for a checkout whose manifest does not declare the pinned
+    version, so this either grades against the RIGHT source or grades nothing
+    and says so. It cannot grade against a stale pin -- the failure that
+    function's own docstring records having measured.
+
+    THE NOTICE IS NOT OPTIONAL when the arm is skipped. A skip that prints
+    nothing is indistinguishable from a pass, which is the whole class this
+    gate's deferral comments keep naming; it is returned here rather than
+    printed so a caller cannot forget it and a test can read it.
+
+    ⚠ `explicit` WINS. `--resolve --resolve-if-pinned` together must still fail
+    without a pin: the opportunistic flag may only ADD resolution, never remove
+    a demand the caller already made.
+    """
+    if explicit:
+        return True, None
+    if not opportunistic:
+        return False, None
+    if ref is not None:
+        return True, None
+    return False, FORM_ONLY_NOTICE
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(
         prog="upstream_citation_anchor_gate.py",
@@ -2197,10 +2271,21 @@ def main() -> int:
         help="also resolve every path and needle against the pinned checkout "
         "(requires one; without this flag only the FORM arm runs)",
     )
+    ap.add_argument(
+        "--resolve-if-pinned",
+        action="store_true",
+        help="resolve when a correctly-pinned checkout is reachable, and "
+        "ANNOUNCE a form-only run when none is (for a git hook, where the "
+        "checkout is a fact about the machine and not about the push)",
+    )
     args = ap.parse_args()
     if args.selftest:
         return selftest()
-    return run(ROOT, upstream_root(), resolve=args.resolve)
+    ref = upstream_root()
+    resolve, notice = resolve_mode(args.resolve, args.resolve_if_pinned, ref)
+    if notice:
+        print(notice, file=sys.stderr)
+    return run(ROOT, ref, resolve=resolve)
 
 
 if __name__ == "__main__":

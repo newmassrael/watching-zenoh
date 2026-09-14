@@ -423,12 +423,30 @@ fi
 # oracles, which answer 1.10.0 against a 1.10.1 pin, so these gates sit behind a
 # red that has nothing to do with them.
 #
-# CHEAP AND CHECKOUT-FREE, which is what makes them hook material: the anchor
-# gate's FORM arm reads tracked files only (~8s) and the store-reason gate reads
-# the store (~0.5s). The RESOLUTION arm — does each path and needle still exist
-# upstream? — stays on Layer Z, which has the pinned tree; do not read a pass
-# here as "every citation resolves".
-if ! python3 scripts/lib/upstream_citation_anchor_gate.py; then
+# CHEAP, which is what makes them hook material: the anchor gate's FORM arm
+# reads tracked files only (~8s) and the store-reason gate reads the store
+# (~0.5s).
+#
+# R2615 — THE RESOLUTION ARM NOW RUNS HERE TOO, when this machine has the pin.
+# It used to be deferred to Layer Z outright, on a rationale of "cheap and
+# CHECKOUT-FREE", and half of that rationale was never measured: resolving costs
+# 8.82s against the form arm's 8.32s on this tree, so it adds about half a
+# second to a scan the hook already pays for. What is real is availability — a
+# clone need not have a zenoh checkout — and that is a runtime fact, not a
+# reason to never look. `--resolve-if-pinned` resolves when `upstream_root()`
+# answers and PRINTS a form-only notice when it does not, so a machine without
+# the pin still pushes and nobody reads its pass as "every citation resolves".
+#
+# The cost of the old deferral was paid in full: a citation in `session_open.rs`
+# named the link-COMMONS tls module for a host helper that lives in the tls
+# LINK's own utils module, with the signature mis-quoted too — both halves
+# rotted, and the only thing that could see it was Layer Z, which sat behind a
+# seven-deep queue, so the red arrived rounds later attached to a commit that
+# did not cause it. (The two paths are DESCRIBED and not written out: this hook
+# is a tracked file, so spelling them here would add two bare citations to the
+# very count the gate below enforces — measured, at +2 over budget.)
+# Layer Z keeps `--resolve` (there, an absent checkout IS the failure).
+if ! python3 scripts/lib/upstream_citation_anchor_gate.py --resolve-if-pinned; then
     echo "" >&2
     echo "pre-push: [gate 2f] upstream citation FORM gate FAILED — a citation is" >&2
     echo "          bare, line-numbered, or missing its root. Write it as" >&2

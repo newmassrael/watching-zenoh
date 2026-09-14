@@ -2902,7 +2902,14 @@ async fn tls_dial_client_config(
 /// R2606 — the name a NUMERIC tls dial verifies the peer certificate against:
 /// the configured `server_name` when an ambient config supplies one, else the
 /// locator's own host text, which is upstream's rule
-/// (`io/zenoh-link-commons/src/tls.rs` @ `pub fn get_tls_host<'a>(address: &Address<'a>) -> ZResult<&'a str> {`).
+/// (`io/zenoh-links/zenoh-link-tls/src/utils.rs` @
+/// `pub fn get_tls_host<'a>(address: &'a Address<'a>) -> ZResult<&'a str> {`).
+/// R2615 — BOTH halves of that citation had rotted: the path named
+/// `zenoh-link-commons`, whose `tls.rs` at the pin holds rustls verifiers and
+/// config keys and no host helper at all, and the signature dropped the `'a` on
+/// the reference. The CLAIM was re-measured and stands: the function returns the
+/// locator text before its last `:`, and the tls dial verifies against it
+/// through `get_tls_server_name` (`io/zenoh-links/zenoh-link-tls/src/unicast.rs` @ `let server_name = get_tls_server_name(&epaddr)?;`).
 ///
 /// FALLIBLE where the quic twin is not, and that is the one part of this seam
 /// that is not a mirror: `TlsDialConfig::server_name` is a typed
