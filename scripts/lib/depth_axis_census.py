@@ -868,7 +868,14 @@ CITATION = re.compile(r"\b((?:[A-Za-z0-9_.-]+/)*[A-Za-z0-9_.-]+\.(?:rs|c|h))(?::
 # runs under `transport-link-tls` -- so it leaves this count with the
 # population; UNREACHED and NO_SYMBOL hold, exactly as they did for the quic
 # pair one entry above.
-PIN_REACHED = 40
+# R2612 — 40 -> 39: `scouting-active` went PARTIAL -> COMPLETE when its last
+# residual was closed BY DELIVERY, a Scout reaching an interface the kernel's
+# default route does not (R2611 built the ask-side fan-out; this round witnessed
+# it across a veth pair). It is a reached atom -- `scouting_glue` and
+# `scouting_fanout` both run under `scouting-active` -- so it leaves this count
+# with the population; UNREACHED and NO_SYMBOL hold, as for the tls and quic
+# retirements above.
+PIN_REACHED = 39
 PIN_UNREACHED = 3
 PIN_NO_SYMBOL = 2
 # R2534 — 346 -> 347. The atom is `adminspace-metrics` and the citation is the
@@ -1237,7 +1244,18 @@ PIN_NO_SYMBOL = 2
 # reason measured wz 4 -> 6 before `git add` and 4 -> 7 after. Stage the round's
 # new sources BEFORE deriving this number, or it lands two low and the next
 # round pays for it.
-PIN_WZ_CITATIONS = 236
+# R2612 — 236 -> 229, AMBIGUOUS unchanged at 45. The R2609 shape, not the R2611
+# one: `scouting-active` went PARTIAL -> COMPLETE, and a COMPLETE atom is not
+# graded here, so it takes its whole citation set with it.
+# DERIVED with THIS module's own `citation_audit`, and with the R2609 correction
+# applied rather than rediscovered — the round that retires an atom also EDITS
+# its reason, so the set leaving is not the set the old pin counted. This reason
+# went wz 7 -> 9 when R2612 recorded the delivery leg, and then all 9 left:
+# 236 + 2 - 9 = 229, which is exactly what the census measures. 236 - 7 = 229
+# arrives at the same number by luck, not by derivation, because the two terms
+# happen to cancel; do not read it as the shorter form working.
+# ⚠ AMBIGUOUS does not move: this atom's reason carried none.
+PIN_WZ_CITATIONS = 229
 PIN_AMBIGUOUS = 45
 
 
