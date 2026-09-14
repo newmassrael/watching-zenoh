@@ -63,7 +63,7 @@ where
 /// [`crate::tls_config::client_config_from_pem`], diverging only in the TLS-1.3
 /// pin and the ALPN; `custom_root_ca_pem` is an ADDITIONAL server-trust anchor
 /// on top of the public WebPKI roots
-/// ([`server_trust_roots`](crate::tls_config::server_trust_roots)), `None`
+/// ([`server_trust_roots`]), `None`
 /// meaning the public roots alone as zenoh dials (R2603, open-debt 727), and
 /// `client_auth`
 /// is the optional mTLS cert the dialer presents. The returned config feeds
