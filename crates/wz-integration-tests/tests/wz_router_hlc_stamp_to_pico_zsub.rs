@@ -45,19 +45,27 @@
 //! router WITHOUT `time-hlc`, which is the same assertion from the other side
 //! (the negative twin below runs exactly that build).
 //!
-//! ## What this does NOT prove — stated because the gap is easy to overclaim
+//! ## R2624 — THIS SECTION USED TO SAY THE INBOUND ARMS WERE UNWITNESSABLE, AND
+//! IT WAS WRONG
 //!
-//! The `treat_timestamp` ABSORB branch (an inbound timestamp fed to the node
-//! clock via `uhlc::update_with_timestamp`) is NOT witnessed here and cannot be
-//! witnessed by this harness at all. Every oracle in the inventory runs on this
-//! one host with one system clock, so an inbound timestamp is never far enough
-//! ahead to leave uhlc's 500 ms drift bound, and the Ok arm deliberately does
-//! nothing to the message. Driving it would need a foreign publisher able to emit
-//! a FUTURE timestamp, and none of `z_put` / `z_pub` / `z_pub_attachment` /
-//! `z_advanced_pub` / zenohd does (each stamps its own now, or not at all). The
-//! branch is unit-covered in `node_clock`'s tests, which construct the future
-//! timestamp directly — that is a wz-side proof, not a cross-impl one, and the
-//! atom is claimed `partial` for exactly this reason.
+//! The claim, kept here because the correction is worth more than a clean file:
+//! the `treat_timestamp` ABSORB branch "is NOT witnessed here and cannot be
+//! witnessed by this harness at all", because driving it "would need a foreign
+//! publisher able to emit a FUTURE timestamp, and none of `z_put` / `z_pub` /
+//! `z_pub_attachment` / `z_advanced_pub` / zenohd does".
+//!
+//! That is a HAND-WRITTEN LIST OF FIVE BINARIES standing in for a population.
+//! The population is not the examples upstream happens to ship — it is what
+//! upstream's API can be made to do, and upstream's publisher builder takes an
+//! arbitrary `uhlc::Timestamp`
+//! (`zenoh/src/api/builders/publisher.rs` @ `fn timestamp<TS: Into<Option<uhlc::Timestamp>>>(self, timestamp: TS) -> Self {`).
+//! The capability was never missing; the example that calls it was.
+//!
+//! So both inbound arms are witnessed below, against `oracles/future-stamp` — a
+//! wz-authored oracle LINKED against the pinned zenoh, whose `--offset-ms`
+//! chooses which arm runs. What remains unwitnessed is the `drop_future_timestamp:
+//! true` arm, and that is because wz does not IMPLEMENT it, which is a different
+//! and honest reason. The atom is `partial` for exactly that.
 //!
 //! ## Harness shape
 //!
@@ -79,7 +87,7 @@ use std::time::Duration;
 use wz_integration_tests::common::{
     assert_demo_binary_newer_than_sources, graceful_terminate, read_captured,
     spawn_on_ephemeral_port, spawn_subscribed_zsub, wait_for_substring, wz_ap_demo_binary,
-    zenoh_pico_cli_binary, ChildGuard,
+    wz_zenoh_oracle_binary, zenoh_pico_cli_binary, ChildGuard,
 };
 
 /// The pico witness. `z_sub_attachment` prints `with timestamp: <ntp64-u64>` only
@@ -105,6 +113,17 @@ enum Publisher {
     /// A real zenoh-pico `z_put`. FOREIGN on the publishing end, so the only wz
     /// in the path is the router itself.
     Pico,
+    /// R2624 — the wz-AUTHORED oracle built against the PINNED upstream zenoh,
+    /// publishing a Put whose timestamp is offset from the session's own clock
+    /// by `offset_ms`.
+    ///
+    /// This is the only publisher that can select WHICH arm of
+    /// `treat_timestamp` runs, because the arm is chosen by how far ahead the
+    /// inbound timestamp is against uhlc's 500 ms drift bound. Inside the bound
+    /// the router ABSORBS and relays the value unchanged; beyond it the router
+    /// REPLACES with its own now. No upstream example can drive either, since
+    /// none lets the timestamp be chosen at all.
+    UpstreamStamped { offset_ms: i64 },
 }
 
 /// The outcome of one publisher -> router -> pico run: what pico printed, plus the
@@ -113,6 +132,11 @@ struct RelayOutcome {
     pico_stdout: String,
     router_stderr: String,
     saw_sample: bool,
+    /// R2624 — what the PUBLISHER printed. The inbound-timestamp legs compare
+    /// the value they sent against the value pico received, so the publisher's
+    /// own output is evidence rather than diagnosis: without it a leg could only
+    /// assert that SOME timestamp arrived, which both arms satisfy.
+    publisher_stdout: String,
 }
 
 /// Drive the whole star topology once, against a demo binary built with whatever
@@ -246,6 +270,30 @@ fn relay_a_bare_put_from(publisher: Publisher, router_extra: &[&str]) -> RelayOu
                 .spawn()
                 .expect("spawn zenoh-pico z_put via stdbuf"),
         ),
+        // R2624 — one-shot like z_put: open -> put with the chosen timestamp ->
+        // close -> exit. `stdbuf` for the same buffering reason.
+        Publisher::UpstreamStamped { offset_ms } => ChildGuard::wrap(
+            format!("wz-oracle-future-stamp (offset_ms={offset_ms} -> wz router-hat)"),
+            Command::new("stdbuf")
+                .args(["-oL", "-eL"])
+                .arg(wz_zenoh_oracle_binary("future-stamp"))
+                .args([
+                    "--endpoint",
+                    &endpoint,
+                    "--key",
+                    PUBLISH_KEY,
+                    "--value",
+                    PUBLISH_VALUE,
+                    "--offset-ms",
+                    &offset_ms.to_string(),
+                ])
+                .stdout(Stdio::from(
+                    pub_writer.try_clone().expect("dup oracle stdout handle"),
+                ))
+                .stderr(Stdio::from(pub_writer))
+                .spawn()
+                .expect("spawn wz-oracle-future-stamp via stdbuf"),
+        ),
     };
 
     let received = wait_for_substring(&mut z_sub_reader, RECEIVED_WITNESS, Duration::from_secs(15));
@@ -268,7 +316,50 @@ fn relay_a_bare_put_from(publisher: Publisher, router_extra: &[&str]) -> RelayOu
         saw_sample: received.is_ok(),
         pico_stdout,
         router_stderr,
+        publisher_stdout: pub_captured,
     }
+}
+
+/// R2624 — the `ntp64=<u64>` the publisher says it SENT.
+fn sent_ntp64(outcome: &RelayOutcome) -> u64 {
+    parse_ntp64(
+        &outcome.publisher_stdout,
+        "future-stamp: sending timestamp ntp64=",
+    )
+    .unwrap_or_else(|| {
+        panic!(
+            "the oracle never printed the timestamp it sent, so there is \
+                 nothing to compare against\n--- publisher ---\n{}",
+            outcome.publisher_stdout
+        )
+    })
+}
+
+/// R2624 — the `with timestamp: <u64>` pico says it RECEIVED.
+///
+/// zenoh-pico's `z_sub_attachment` prints the raw NTP64 as a decimal u64
+/// (`vendor/zenoh-pico/examples/unix/c11/z_sub_attachment.c`), which is the same
+/// unit the oracle prints, so the two are directly comparable without either
+/// side formatting a date.
+fn received_ntp64(outcome: &RelayOutcome) -> u64 {
+    parse_ntp64(&outcome.pico_stdout, TIMESTAMP_WITNESS).unwrap_or_else(|| {
+        panic!(
+            "pico received the sample but printed no parsable '{TIMESTAMP_WITNESS}' \
+             value\n--- pico stdout ---\n{}",
+            outcome.pico_stdout
+        )
+    })
+}
+
+/// First run of decimal digits after `needle`, as a u64.
+fn parse_ntp64(haystack: &str, needle: &str) -> Option<u64> {
+    let tail = haystack.split(needle).nth(1)?;
+    let digits: String = tail
+        .chars()
+        .skip_while(|c| c.is_whitespace())
+        .take_while(|c| c.is_ascii_digit())
+        .collect();
+    digits.parse().ok()
 }
 
 /// wz publisher (no timestamp) -> wz router-hat (`time-hlc`) -> pico
@@ -426,6 +517,92 @@ fn wz_router_hat_hlc_stamps_a_bare_pico_put_for_pico_zsub_attachment() {
          ---\n{}",
         outcome.pico_stdout,
         outcome.router_stderr
+    );
+}
+
+/// R2624 — the ABSORB arm: a timestamp INSIDE uhlc's drift bound is taken into
+/// the node clock and the message is relayed UNCHANGED.
+///
+/// wz returns early on the Ok arm (`crates/wz-runtime-tokio/src/node_clock.rs`
+/// @ `                    .update_with_timestamp(&to_uhlc_timestamp(&inbound))`),
+/// mirroring zenoh, which absorbs at `pubsub.rs:184` and leaves the sample
+/// alone. So the discriminating observable is EQUALITY: what pico receives must
+/// be the exact value the foreign publisher sent, to the bit.
+///
+/// Paired with the REPLACE leg below, which is the same binary, the same
+/// topology and the same assertion shape with ONE NUMBER changed — and the
+/// opposite outcome. Neither leg alone separates "wz relayed the timestamp" from
+/// "wz stamped its own and happened to look right"; together they pin both arms.
+// wz-proves: time-hlc zenoh->wz partial
+#[test]
+#[ignore = "binary-dep e2e (wz-ap-demo --features router-hat-router,time-hlc + oracles/future-stamp + zenoh-pico z_sub_attachment); Layer E8t runs via --ignored"]
+fn wz_router_hat_absorbs_an_upstream_timestamp_inside_the_drift_bound() {
+    // 100 ms: comfortably inside the 500 ms bound, and far enough above clock
+    // jitter on one host that it cannot land on the wrong side by accident.
+    let outcome = relay_a_bare_put_from(Publisher::UpstreamStamped { offset_ms: 100 }, &[]);
+
+    assert!(
+        outcome.saw_sample,
+        "pico z_sub_attachment never logged '{RECEIVED_WITNESS}' within 15s — the \
+         upstream-linked oracle's Put did not route through the wz router-hat, so \
+         the timestamp comparison below would be vacuous\n--- pico stdout ---\n{}\n\
+         --- publisher ---\n{}\n--- router-hat stderr ---\n{}",
+        outcome.pico_stdout, outcome.publisher_stdout, outcome.router_stderr
+    );
+    let sent = sent_ntp64(&outcome);
+    let received = received_ntp64(&outcome);
+    assert_eq!(
+        received, sent,
+        "a timestamp {}ms ahead is INSIDE uhlc's 500ms drift bound, so wz must \
+         absorb it into the node clock and relay the sample untouched — pico \
+         received a DIFFERENT value, which is the REPLACE arm running where \
+         ABSORB belongs\n--- publisher ---\n{}\n--- pico stdout ---\n{}",
+        100, outcome.publisher_stdout, outcome.pico_stdout
+    );
+}
+
+/// R2624 — the REPLACE arm: a timestamp BEYOND the drift bound is rejected by
+/// uhlc and wz re-stamps with its own now.
+///
+/// This is zenoh's shipped `drop_future_timestamp: false` behaviour
+/// (`DEFAULT_CONFIG.json5:207-209`, "messages with timestamps in the future are
+/// retimestamped"), and until this leg its only witness was a wz-side unit test
+/// (`node_clock.rs` @ `        fn an_inbound_timestamp_beyond_the_drift_bound_is_replaced() {`)
+/// which constructs the future timestamp in-process — a wz-side proof, not a
+/// cross-impl one.
+///
+/// The observable is STRICTLY SMALLER, not merely different: the replacement is
+/// the router's own clock reading, which is necessarily behind a timestamp that
+/// was rejected for being too far ahead. Asserting only inequality would also
+/// pass for a router that corrupted the value.
+// wz-proves: time-hlc zenoh->wz partial
+#[test]
+#[ignore = "binary-dep e2e (wz-ap-demo --features router-hat-router,time-hlc + oracles/future-stamp + zenoh-pico z_sub_attachment); Layer E8t runs via --ignored"]
+fn wz_router_hat_replaces_an_upstream_timestamp_beyond_the_drift_bound() {
+    // 10s: two orders of magnitude past the 500ms bound, the same margin the
+    // wz-side unit test uses, so this does not sit near a threshold.
+    let outcome = relay_a_bare_put_from(Publisher::UpstreamStamped { offset_ms: 10_000 }, &[]);
+
+    assert!(
+        outcome.saw_sample,
+        "pico z_sub_attachment never logged '{RECEIVED_WITNESS}' within 15s — a \
+         router that DROPPED the future-stamped message would look like this, and \
+         wz implements the `drop_future_timestamp: false` arm, so the sample must \
+         still arrive\n--- pico stdout ---\n{}\n--- publisher ---\n{}\n--- \
+         router-hat stderr ---\n{}",
+        outcome.pico_stdout, outcome.publisher_stdout, outcome.router_stderr
+    );
+    let sent = sent_ntp64(&outcome);
+    let received = received_ntp64(&outcome);
+    assert!(
+        received < sent,
+        "a timestamp 10s ahead is BEYOND uhlc's 500ms drift bound, so wz must \
+         re-stamp it with its own now — pico received {received}, which is not \
+         behind the {sent} the oracle sent. Equal means wz absorbed a timestamp \
+         uhlc should have rejected; greater means something else stamped it\n\
+         --- publisher ---\n{}\n--- pico stdout ---\n{}",
+        outcome.publisher_stdout,
+        outcome.pico_stdout
     );
 }
 

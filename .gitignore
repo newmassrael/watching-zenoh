@@ -7,6 +7,19 @@
 # as a gitlink; only its target/ stays local).
 /target/
 
+# R2624 — build output of the wz-AUTHORED oracles under `oracles/`, which are
+# standalone cargo projects OUTSIDE the `crates/` workspace (they link against
+# the pinned upstream, so they cannot be members). Each has its own `target/`,
+# and both spellings are here for the reason `crates/target` carries two: a
+# build cache may be a SYMLINK, which a trailing-slash pattern does not match.
+#
+# ⚠ Their `Cargo.lock` files are NOT ignored and are meant to be committed. An
+# oracle's whole value is being a FIXED reference: a lock that floated would let
+# its dependency tree move under a leg that is asserting byte-level behaviour,
+# and the round would not be able to say which side changed.
+oracles/*/target/
+oracles/*/target
+
 # Headless round runner (scripts/round-runner.sh): verdict file, logs, lock.
 # NOT under .git/ -- the agent that writes the verdict is blocked from that
 # path by the permission layer, which a headless round cannot answer.

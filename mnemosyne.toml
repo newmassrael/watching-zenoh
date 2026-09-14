@@ -55,8 +55,15 @@ entry_id_prefix = "Round "
 # release.yml uses `submodules: recursive`, so hosted CI is safe; a LOCAL clone
 # with uninitialised submodules will fail this gate in the pre-commit hook
 # until `git submodule update --init --recursive` has run.
+# R2624 — `oracles` joins `paths`, and WHICH LIST it joins is the whole decision.
+# It holds wz-AUTHORED source (a test oracle linked against the pinned upstream),
+# so it is exactly what this validator exists to scan; putting it in
+# `scan_exclusions` instead would assert it is not author-written, which is
+# false, and would be the silencing this file's own rule forbids. Adding it here
+# RAISES coverage rather than lowering it: measured, the new root arrived as
+# `1 unscanned` and a rc=1 validate, and lands as 0 unscanned under the gate.
 [plugins.set_equality_validator]
-paths = ["crates", "deploy", "xtask"]
+paths = ["crates", "deploy", "oracles", "xtask"]
 scan_exclusions = ["vendor", "out"]
 
 # R311y462 — WHICH Mnemosyne build is allowed to interpret this workspace.

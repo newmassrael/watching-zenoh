@@ -1,0 +1,51 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later OR LicenseRef-watching-zenoh-Commercial
+# SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
+#
+# R2624 — a wz-AUTHORED oracle linked against the PINNED upstream zenoh.
+#
+# This is the first of its kind in the tree, and the shape is deliberate. Every
+# other foreign oracle wz uses is a binary upstream itself ships -- zenohd, the
+# zenoh-ext examples, the zenoh-pico CLI -- provisioned by
+# `scripts/build-zenohd.sh` / `scripts/build-zenoh-pico-cli.sh`. That works
+# whenever the counterparty a leg needs happens to exist as an example. It does
+# not work here: `time-hlc`'s inbound-timestamp arms need a publisher that emits
+# a timestamp OF OUR CHOOSING, and no upstream example takes one.
+#
+# ⚠ THE PREMISE THIS REPLACES WAS FALSE, which is why this project exists at all.
+# The atom's reason argued the arms "cannot be witnessed by this harness at all"
+# because "none of z_put / z_pub / z_pub_attachment / z_advanced_pub / zenohd"
+# can emit a future timestamp -- a hand-written list of five BINARIES standing in
+# for the population. Upstream's own API takes an arbitrary timestamp
+# (`zenoh/src/api/builders/publisher.rs` @ `fn timestamp<TS: Into<Option<uhlc::Timestamp>>>(self, timestamp: TS) -> Self {`),
+# so the capability was never missing; the example that calls it was.
+#
+# ⛔ NOT A WORKSPACE MEMBER, and not reachable from one. `crates/Cargo.toml` is
+# the workspace and this directory is outside it, so `zenoh` never enters wz's
+# own dependency graph -- "wz is a from-scratch reimplementation, nothing here is
+# a cargo dep of this workspace" stays literally true. This is a TEST ORACLE that
+# happens to be written in Rust, exactly as the pico CLI is a test oracle that
+# happens to be written in C.
+#
+# ⛔ THE DEPENDENCY IS PINNED BY TAG, not by path. A path would have to name the
+# machine-local checkout, which this tree forbids recording (and which
+# `build-zenohd.sh` resolves differently per machine: usually the read-only cargo
+# git checkout, only sometimes a clone it owns). The tag is the same pin
+# `ZENOHD_VERSION` carries, so cargo resolves it to the very checkout the
+# citation gates already grade against.
+[package]
+name = "wz-oracle-future-stamp"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+# `internal` is load-bearing rather than incidental: `TimestampBuilderTrait` --
+# the trait carrying `.timestamp(..)` on a publication builder -- lives in
+# `zenoh::internal::traits`, which is what `zenoh-ext` itself imports it from
+# (`zenoh-ext/src/advanced_publisher.rs` @ `        traits::{`). Without the
+# feature the method is not in scope and this oracle cannot express its subject.
+zenoh = { git = "https://github.com/eclipse-zenoh/zenoh", tag = "1.10.1", features = [
+    "internal",
+    "unstable",
+] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros"] }

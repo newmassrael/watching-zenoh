@@ -1363,7 +1363,12 @@ PIN_NO_SYMBOL = 2
 # wz's router-role session", and the new fully-foreign stamp leg that replaces
 # it. 198 + 2 = 200. REACHED holds at 34 and AMBIGUOUS at 44: both citations are
 # rooted and unambiguous, and no atom left the population.
-PIN_WZ_CITATIONS = 200
+# R2624 — 200 -> 203, RISING because no atom retired: `time-hlc` stays PARTIAL on
+# its last clause (the `drop_future_timestamp: true` arm), so it is still graded
+# and the correction's three wz citations join the population -- the two new
+# inbound-timestamp legs and the forwarder call site the next round has to
+# change. 200 + 3 = 203. REACHED holds at 34 and AMBIGUOUS at 44.
+PIN_WZ_CITATIONS = 203
 PIN_AMBIGUOUS = 44
 
 

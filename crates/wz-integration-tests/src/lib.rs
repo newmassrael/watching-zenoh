@@ -1494,6 +1494,46 @@ pub mod common {
         path
     }
 
+    /// R2624 — locate a wz-AUTHORED oracle from `oracles/<name>/`, built
+    /// against the PINNED upstream rather than against wz.
+    ///
+    /// A THIRD kind of oracle, and the distinction is the reason this is its own
+    /// resolver rather than a branch in one of the two above.
+    /// [`zenoh_pico_cli_binary`] and [`zenohd_binary`] both locate a binary
+    /// UPSTREAM ITSELF SHIPS, which is why each carries a "run the provisioning
+    /// script" hint and a freshness assert against that script's output. This
+    /// one locates a binary THIS TREE AUTHORS whose dependency is upstream, so
+    /// its build is an ordinary `cargo build --manifest-path`, its staleness is
+    /// ordinary cargo staleness, and no provisioning script owns it.
+    ///
+    /// It exists because a leg needed a counterparty no upstream example could
+    /// be: `time-hlc`'s inbound-timestamp arms are selected by the VALUE of the
+    /// timestamp a publisher sends, and no shipped example lets that be chosen.
+    /// The atom's reason had recorded that as impossible over a hand-written
+    /// list of five binaries; upstream's own API takes the value.
+    /// ⚠ THE NAME CARRIES THE FOREIGN CLASS, and that is a contract rather than
+    /// a style choice. `crossimpl_corpus.py`'s `FOREIGN_ROOTS` maps a RESOLVER
+    /// FUNCTION NAME to the implementation a test is witnessing against, which
+    /// is why every sibling is spelled for its own class
+    /// (`zenoh_pico_cli_binary` -> pico, `zenoh_ext_example_binary` ->
+    /// zenoh-ext). A generic `wz_oracle_binary` would map ONE entry to ONE
+    /// class and then silently mislabel the first wz oracle that links
+    /// zenoh-pico instead. Name a new resolver after what it links.
+    pub fn wz_zenoh_oracle_binary(name: &str) -> PathBuf {
+        let path = project_root()
+            .join("oracles")
+            .join(name)
+            .join("target/release")
+            .join(format!("wz-oracle-{name}"));
+        assert!(
+            path.is_file(),
+            "wz oracle `{name}` missing at {}; build it with \
+             `cargo build --manifest-path oracles/{name}/Cargo.toml --release`",
+            path.display()
+        );
+        path
+    }
+
     /// Locate the `zenohd` (zenoh-full REFERENCE Rust router) binary: the
     /// `WZ_ZENOHD_BIN` env override, else `scripts/build-zenohd.sh`'s
     /// `target/zenohd/zenohd` install. zenohd is NOT a wz build artifact

@@ -110,6 +110,23 @@ FOREIGN_ROOTS = {
     # them into `zenohd` would make every claim in this family read
     # `wz->zenohd` against a counterparty that is not zenohd.
     "zenoh_core_example_binary": "zenoh-core",
+    # R2624 — a wz-AUTHORED oracle LINKED against the pinned zenoh, and the
+    # first root here that upstream does not ship as a binary. It is the
+    # `zenoh-core` class and not one of its own, because the class names the
+    # IMPLEMENTATION a claim is witnessed against, and that implementation is
+    # identical: the session, the codec and the `Timestamp` type on the wire are
+    # zenoh 1.10.1's. Only `main()` is ours, and choosing a VALUE upstream's API
+    # accepts is the same parameterisation `z_view_size --id <x>` already relies
+    # on -- which is why this is not the zenoh-ext / zenoh-core split, where the
+    # two classes genuinely carry different planes.
+    #
+    # ⚠ The residue, stated because a reader deserves it: a `zenoh->wz` claim
+    # from this root means "upstream's LIBRARY, driven by our main(), did X"
+    # rather than "upstream's own program did X". For the subject that needed it
+    # -- a publisher emitting a timestamp of our choosing -- no upstream program
+    # exists, and the alternative was recording the arm as unwitnessable, which
+    # is what the atom's reason did for rounds on a premise that was false.
+    "wz_zenoh_oracle_binary": "zenoh-core",
     # R311y536 — the real pico as a LIBRARY. Both resolvers were previously
     # inlined in the test files (a `project_root().join(..)` for the dlopen
     # oracle, a local `libdir` for the compile-twice reference arm), so this

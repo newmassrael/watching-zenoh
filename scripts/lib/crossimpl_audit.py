@@ -670,7 +670,12 @@ HOST_GATED_CI_TARGETS: dict[str, str] = {
 # claim are foreign and wz is the only hop in between. Its two claims
 # (`time-hlc pico->wz`, `router-hat-router pico->wz`) reach five adjudicator
 # links across the lanes that run this binary.
-FOREIGN_ADJUDICATOR_LINKS = 916
+# R2624 — 916 -> 918, rising because the round added foreign adjudication of a
+# kind this tree had none of: a wz-AUTHORED oracle linked against the pinned
+# zenoh (`oracles/future-stamp`), driving the two `treat_timestamp` arms that are
+# selected by the VALUE of an inbound timestamp. Its two legs claim
+# `time-hlc zenoh->wz`, which the `zenoh-core` class admits.
+FOREIGN_ADJUDICATOR_LINKS = 918
 
 # ── Execution disclosure ────────────────────────────────────────────────────────
 #
