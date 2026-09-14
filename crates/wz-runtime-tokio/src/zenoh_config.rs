@@ -912,6 +912,15 @@ pub struct ZenohNodeConfig {
     pub compression: bool,
     /// `timestamping/enabled`.
     pub timestamping: bool,
+    /// R2626 — `timestamping/drop_future_timestamp`.
+    ///
+    /// ⚠ A PLAIN BOOL, not a mode table, and that is upstream's asymmetry rather
+    /// than a simplification here: its sibling `enabled` is a
+    /// `ModeDependentValue<bool>` resolved against the node's whatami, while
+    /// this one is read once. It is therefore parsed with `want_bool` and NOT
+    /// `want_bool_for_mode`, and it is absent from `MODE_TABLE_UPSTREAM_KEYS`
+    /// for the same reason.
+    pub drop_future_timestamp: bool,
     /// `adminspace` — `None` leaves the block out entirely, which is not the
     /// same as emitting `enabled: false`: an omitted key takes zenoh's
     /// default, and saying so explicitly is a decision the caller should have
@@ -1124,6 +1133,10 @@ impl Default for ZenohNodeConfig {
             lowlatency: false,
             compression: false,
             timestamping: false,
+            // R2626 — upstream's shipped default
+            // (`commons/zenoh-config/src/defaults.rs`: `drop_future_timestamp:
+            // bool = false`), so an unset key relays the re-stamped message.
+            drop_future_timestamp: false,
             adminspace: None,
             // R311y844 — every one of these is zenoh's own resolved value for
             // an unset key, taken from a running zenohd rather than from
@@ -1463,6 +1476,13 @@ impl ZenohNodeConfig {
         }
         out.push_str(" },\n  \"timestamping\": { \"enabled\": ");
         let _ = write!(out, "{}", self.timestamping);
+        // R2626 — the section's second key rides the same block, so a round-trip
+        // through this emitter preserves it rather than silently dropping it.
+        let _ = write!(
+            out,
+            ", \"drop_future_timestamp\": {}",
+            self.drop_future_timestamp
+        );
         out.push_str(" },\n  \"transport\": {\n    \"unicast\": {\n");
         let _ = writeln!(out, "      \"max_links\": {},", self.max_links);
         let _ = writeln!(out, "      \"lowlatency\": {},", self.lowlatency);
@@ -1583,6 +1603,18 @@ pub const HONOURED_CONFIG_KEYS: &[&str] = &[
     "transport/auth/usrpwd/dictionary_file",
     "scouting/multicast/enabled",
     "timestamping/enabled",
+    // R2626 — MOVED HERE from `UNHONOURED_UPSTREAM_CONFIG_KEYS` /
+    // `UNHONOURED_BEYOND_WZ` / the `TimestampingConf` beyond-group, because wz
+    // now ACTS on it: `NodeHlc::with_drop_future_timestamp` carries the value,
+    // `treat_timestamp` returns `TimestampVerdict::Drop` on the
+    // `update_with_timestamp` Err arm, and both forwarders return before any
+    // fan-out. `--drop-future-timestamp` is the demo's spelling of the key.
+    //
+    // ⚠ It was classed BEYOND WZ — "anchored on a name absent from wz's code" —
+    // and gate 2g is what noticed the anchor had stopped being absent. That is
+    // the gate working: a key wz's source names while a ledger still calls it
+    // unreachable is exactly the drift it exists to catch.
+    "timestamping/drop_future_timestamp",
     "transport/unicast/max_links",
     "transport/unicast/lowlatency",
     "transport/unicast/qos/enabled",
@@ -1930,7 +1962,9 @@ pub const UNHONOURED_UPSTREAM_CONFIG_KEYS: &[&str] = &[
     // neither of which sees a key expression, so there is no dimension here to
     // filter on.
     "stats/filters",
-    "timestamping/drop_future_timestamp",
+    // R2626 — `timestamping/drop_future_timestamp` LEFT this list for
+    // [`HONOURED_CONFIG_KEYS`]: wz now implements zenoh's drop arm and exposes
+    // the knob, so the key is acted on rather than merely accepted.
     // R2336 (open-debt item 15, `access-extauth-pubkey`) —
     // `transport/auth/pubkey/key_size` and `known_keys_file` LEFT this list,
     // for [`UPSTREAM_INERT_CONFIG_KEYS`]. The pinned upstream declares and
@@ -2043,8 +2077,6 @@ pub const UNHONOURED_UPSTREAM_CONFIG_KEYS: &[&str] = &[
 ///   large-message SHM promotion path (`LargeMessageTransportOpt`). wz HAS
 ///   shared memory and still lacks this one, which is why it is worth a group.
 /// * `scouting/delay` — a startup scouting delay (`ScoutingDelay`).
-/// * `timestamping/drop_future_timestamp` — a future-timestamp drop policy
-///   (`TimestampingConf`).
 /// * `metadata` — a config-metadata surface (`ConfigMetadata`). Free-form
 ///   operator annotation upstream never reads either; `AdminLocalData` emits a
 ///   hardcoded null where it would land.
@@ -2133,7 +2165,9 @@ pub const UNHONOURED_BEYOND_WZ: &[&str] = &[
     // block with no selector. There is no dimension here to filter on; wz's own
     // doc already records that even a per-priority split is a later extension.
     "stats/filters",
-    "timestamping/drop_future_timestamp",
+    // R2626 — `timestamping/drop_future_timestamp` left this half of the
+    // partition too, and for the sharper reason: this list is "beyond wz", and
+    // wz now HAS the surface.
     // R2336 (open-debt item 15) — `key_size` / `known_keys_file` left the
     // SURFACE, so they left this half of its partition with it. They are
     // [`UPSTREAM_INERT_CONFIG_KEYS`]: still accepted, still reported ignored,
@@ -2500,11 +2534,11 @@ pub const UNHONOURED_BEYOND_GROUPS: &[(&str, &str, &[&str])] = &[
         "ScoutingDelay",
         &["scouting/delay"],
     ),
-    (
-        "a future-timestamp drop policy",
-        "TimestampingConf",
-        &["timestamping/drop_future_timestamp"],
-    ),
+    // R2626 — the `TimestampingConf` group is GONE, not emptied. Its single key
+    // `timestamping/drop_future_timestamp` moved to [`HONOURED_CONFIG_KEYS`]
+    // when wz built zenoh's drop arm, and a group anchored on "a name absent
+    // from wz's code" cannot survive that name arriving. An empty group left
+    // behind would be a claim with no subject.
     ("a config-metadata surface", "ConfigMetadata", &["metadata"]),
     (
         "a gate that turns the gossip plane off",
@@ -4038,6 +4072,12 @@ impl ZenohNodeConfig {
             ModeRead::ForOtherModes => other_modes.push("timestamping/enabled"),
             ModeRead::Absent => {}
         }
+        // R2626 — the section's second key. `want_bool`, not `want_bool_for_mode`:
+        // upstream reads it once rather than per-role.
+        if let Some(v) = want_bool(&doc, "timestamping/drop_future_timestamp")? {
+            out.drop_future_timestamp = v;
+            named.push("timestamping/drop_future_timestamp");
+        }
         if let Some(v) = want_u64(&doc, "transport/unicast/max_links")? {
             out.max_links = usize::try_from(v).map_err(|_| ConfigIngestError::OutOfRange {
                 path: "transport/unicast/max_links",
@@ -4989,6 +5029,15 @@ mod tests {
             (
                 "timestamping/enabled",
                 r#"{ "timestamping": { "enabled": true } }"#,
+            ),
+            // R2626 — `true`, because the shipped default is `false` and this
+            // gate requires the ingest to MOVE: a fixture naming the default
+            // would report the key honoured while proving only that the reader
+            // did not crash. Note the value is a PLAIN BOOL and not a mode
+            // table — unlike its sibling above, upstream reads this one once.
+            (
+                "timestamping/drop_future_timestamp",
+                r#"{ "timestamping": { "drop_future_timestamp": true } }"#,
             ),
             (
                 "transport/unicast/max_links",

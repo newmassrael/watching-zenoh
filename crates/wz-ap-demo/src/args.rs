@@ -1564,6 +1564,36 @@ pub(crate) fn expand_stock_zenoh_config_for_build(
             ),
         };
     }
+    // R2626 — the section's SECOND key, and it is deliberately much shorter than
+    // the arm above. `enabled` needs all that role machinery because upstream
+    // resolves it against the node's `whatami`; this one upstream reads ONCE, so
+    // there is no run-role to agree with and nothing to withhold on. Inventing a
+    // role check here would be mirroring the sibling's shape rather than
+    // upstream's semantics.
+    if named("timestamping/drop_future_timestamp")
+        && no_sink("timestamping/drop_future_timestamp").is_some()
+    {
+        exp.record(
+            "timestamping/drop_future_timestamp",
+            KeyEffect::NoSinkInThisBuild,
+        );
+    } else if named("timestamping/drop_future_timestamp") {
+        // `false` is upstream's shipped default, so a document stating it asks
+        // for the behaviour the node already has.
+        if !cfg.drop_future_timestamp {
+            exp.record(
+                "timestamping/drop_future_timestamp",
+                KeyEffect::AlreadyTheBehaviour,
+            );
+        } else {
+            exp.pair(
+                "timestamping/drop_future_timestamp",
+                "--drop-future-timestamp",
+                cfg.drop_future_timestamp.to_string(),
+                None,
+            );
+        }
+    }
     // R2145 (unregistered open-debt item 209) — the switch's own line, and it
     // is no longer `NoSinkInThisBuild`.
     //
@@ -2583,6 +2613,19 @@ pub(crate) const ARGV_ONLY_KIND_LEDGER: &[(&str, &str, &str)] = &[
     ),
     // ── (3) a leg already observes the effect ───────────────────────────
     (
+        "timestamping/drop_future_timestamp",
+        KIND_LEG_JUDGED,
+        "wz_router_hat_told_to_drop_future_timestamps_delivers_nothing, \
+         wz-integration-tests/tests/wz_router_hlc_stamp_to_pico_zsub.rs, \
+         drives a real zenoh-linked publisher at +10s through a wz router-hat \
+         told `--drop-future-timestamp true` and requires a REAL zenoh-pico \
+         subscriber to receive NOTHING. ⚠ It is `leg-judged` and not \
+         `not-yet-read` on purpose: the effect of this key is an ABSENCE, so no \
+         frame field can ever carry it — a dissector fixture has nothing to \
+         look at. Its control is one argv word (drop the flag and the identical \
+         Put arrives re-stamped), which is what makes the absence attributable.",
+    ),
+    (
         "adminspace/enabled",
         KIND_LEG_JUDGED,
         "apfull_adminspace_plane_decoded_by_a_real_pico_z_get, in \
@@ -2635,6 +2678,14 @@ pub(crate) fn config_keys_the_demo_drops() -> Vec<&'static str> {
     // demo now withholds them. Nothing here is withheld on the dictionary: the
     // plane it configures is absent, not ignored.
     out.push("transport/auth/usrpwd/dictionary_file");
+    // R2626 — `timestamping/drop_future_timestamp`'s sink is a FORWARDER, and a
+    // build with neither has nothing to hand the value to. The same union that
+    // gates the field on `NodeTimestamping`, for the same reason: the two must
+    // not drift, or this report would call a key honoured in a binary that
+    // silently drops it.
+    if !cfg!(any(feature = "routing-peer", feature = "router-hat-router")) {
+        out.push("timestamping/drop_future_timestamp");
+    }
     if !cfg!(feature = "routing-interest-pending-gc") {
         out.push("routing/interests/timeout");
     }
@@ -3519,6 +3570,15 @@ mod stock_config_tests {
                 LISTEN_ONLY,
                 r#"{ listen: { endpoints: ["tcp/0.0.0.0:7447"] },
                      timestamping: { enabled: true } }"#,
+            ),
+            // R2626 — `true`, because upstream ships `false`: a fixture naming
+            // the default would report the key reaching the demo while the
+            // expansion correctly emitted nothing for it.
+            (
+                "timestamping/drop_future_timestamp",
+                LISTEN_ONLY,
+                r#"{ listen: { endpoints: ["tcp/0.0.0.0:7447"] },
+                     timestamping: { drop_future_timestamp: true } }"#,
             ),
             (
                 "transport/unicast/max_links",

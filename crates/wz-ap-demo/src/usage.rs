@@ -110,6 +110,13 @@ pub(crate) fn print_usage() {
     eprintln!("                             it relays. zenoh timestamping/enabled, which is a");
     eprintln!("                             PER-ROLE default: a router stamps, a peer and a");
     eprintln!("                             client do not. Absent = that shipped default");
+    eprintln!("    --drop-future-timestamp <bool>");
+    eprintln!("                             what to do with a relayed Put whose timestamp is");
+    eprintln!("                             further ahead than uhlc's 500ms drift bound: true");
+    eprintln!("                             DROPS the message, false (the shipped default)");
+    eprintln!("                             re-stamps it. zenoh");
+    eprintln!("                             timestamping/drop_future_timestamp, which unlike");
+    eprintln!("                             its sibling above is NOT per-role");
     eprintln!("    --scout                  initiator mode with a DISCOVERED locator: emit a");
     eprintln!("                             multicast Scout on 224.0.0.224:7446 and dial the");
     eprintln!("                             locator the first peer Hello advertises. Mutually");
