@@ -180,6 +180,16 @@ pub async fn bind_tcp_host(host: &str, link_socket: &LinkSocket<'_>) -> io::Resu
 /// fails where wz succeeds. It can never make wz fail where zenoh succeeds,
 /// which is the property that makes the divergence safe to keep.
 ///
+/// ⚠ R2606 (open-debt 732) — THAT LAST SENTENCE IS TRUE ABOUT OUTCOMES AND WAS
+/// FALSE ABOUT TIME, which is why the bound on [`first_reachable`] exists. On
+/// exactly the dual-stack name this paragraph calls wz's win, zenoh fails in no
+/// time at all while wz used to spend the unreachable candidate's FULL upper
+/// protocol timeout before trying the address that was listening — thirty
+/// seconds for quic, measured. The divergence traded a fast failure for a slow
+/// success, and the sentence above credited only the success half. It is kept
+/// rather than rewritten because the outcome claim still holds; what it was
+/// missing is named here.
+///
 /// # Errors
 ///
 /// The resolver's own error, or [`io::ErrorKind::AddrNotAvailable`] when the
@@ -208,6 +218,34 @@ pub async fn resolve_locator_addrs(host: &str, port: u16) -> io::Result<Vec<Sock
 /// [`resolve_locator_addrs`]'s contract; the `AddrNotAvailable` fallback exists
 /// only so a hand-built empty vector cannot silently return a success-shaped
 /// error-free `None`.
+/// R2606 (open-debt 732) — how long a NON-FINAL candidate may take before the
+/// walk moves on.
+///
+/// The walk was written assuming a dial that cannot reach its peer fails
+/// quickly. That holds for the TCP-backed schemes (`ws`, `tls`): a dead port
+/// answers RST and `connect` returns at once. It is FALSE for the UDP-backed
+/// ones (`udp`, `quic`, `quic-datagram`), where nothing answers and the dial
+/// waits out the upper protocol's own timeout — for quic that is quinn's
+/// default `max_idle_timeout`, which wz does not override, of THIRTY SECONDS
+/// (`quinn-proto-0.11.14/src/config/transport.rs` @ `max_idle_timeout: Some(VarInt(30_000)),`).
+///
+/// MEASURED, and this is what the constant is derived from rather than chosen:
+/// hosted run 34800714184 on `de9808c0` failed both quic certificate-expiry
+/// witnesses with a mint-to-handshake gap of 30, 30, 30, 30 seconds and then
+/// 60. Those witnesses bind `127.0.0.1` and dial `localhost`; on a runner whose
+/// resolver answers `::1` first, the `::1` candidate burned a full idle timeout
+/// before the walk reached the address that was listening. Four identical
+/// values to the second are a fixed cost, not the scheduler stall an earlier
+/// round diagnosed.
+///
+/// Three seconds is an order of magnitude below the 30 it is racing and orders
+/// of magnitude above what a reachable peer needs on loopback or a LAN. ⚠ THE
+/// RESIDUE, stated rather than hidden: a non-final candidate that genuinely
+/// needs longer than this is treated as dead and the walk moves on. That is the
+/// trade the walk exists to make — an address that will not answer inside the
+/// bound is indistinguishable from one that never will.
+pub const CANDIDATE_DIAL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3);
+
 pub async fn first_reachable<T, F, Fut>(
     addrs: Vec<SocketAddr>,
     what: &str,
@@ -218,8 +256,30 @@ where
     Fut: std::future::Future<Output = io::Result<T>>,
 {
     let mut last_err: Option<io::Error> = None;
-    for addr in addrs {
-        match dial(addr).await {
+    // The LAST candidate is deliberately UNBOUNDED. There is nothing to move on
+    // to, so bounding it would only swap one failure for another, and it is the
+    // single-candidate case — the overwhelmingly common one, and the only shape
+    // a machine whose resolver answers one address ever sees — that must behave
+    // exactly as it did before this bound existed.
+    let last = addrs.len().saturating_sub(1);
+    for (i, addr) in addrs.into_iter().enumerate() {
+        let attempt = dial(addr);
+        let outcome = if i == last {
+            attempt.await
+        } else {
+            match tokio::time::timeout(CANDIDATE_DIAL_TIMEOUT, attempt).await {
+                Ok(result) => result,
+                Err(_) => Err(io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    format!(
+                        "{what}: candidate {addr} did not answer within {}s; \
+                         moving on to the next resolved address",
+                        CANDIDATE_DIAL_TIMEOUT.as_secs()
+                    ),
+                )),
+            }
+        };
+        match outcome {
             Ok(link) => return Ok(link),
             Err(e) => last_err = Some(e),
         }
@@ -506,6 +566,61 @@ mod tests {
         assert!(
             stream.peer_addr().is_ok(),
             "the device-bound-arm stream is connected"
+        );
+    }
+
+    /// R2606 (open-debt 732) — a NON-FINAL candidate that never answers costs
+    /// the walk [`CANDIDATE_DIAL_TIMEOUT`] and not the upper protocol's own
+    /// timeout.
+    ///
+    /// This is the shape that redded hosted CI for four rounds: a witness
+    /// binding `127.0.0.1` and dialing `localhost`, on a runner whose resolver
+    /// answers `::1` first. The unreachable candidate held the walk for quinn's
+    /// full 30-second default while the certificate under test expired.
+    ///
+    /// Virtual time (`start_paused`), so the bound is asserted rather than
+    /// waited out: tokio advances the clock when every task is idle, which is
+    /// exactly the state a candidate that never answers leaves it in.
+    #[tokio::test(start_paused = true)]
+    async fn an_unreachable_candidate_does_not_hold_the_walk() {
+        let first = "127.0.0.1:1".parse().expect("addr");
+        let second = "127.0.0.1:2".parse().expect("addr");
+        let reached = first_reachable(vec![first, second], "probe", |addr| async move {
+            if addr == first {
+                // Never answers — a UDP-backed dial to an address nothing is
+                // bound to, which returns no RST and simply waits.
+                std::future::pending::<io::Result<SocketAddr>>().await
+            } else {
+                Ok(addr)
+            }
+        })
+        .await
+        .expect("the walk moves past the candidate that never answers");
+        assert_eq!(
+            reached, second,
+            "the walk must reach the second candidate, not hang on the first"
+        );
+    }
+
+    /// R2606 — the OTHER half of that design, and the arm that makes the first
+    /// one mean something: the LAST candidate is deliberately NOT bounded.
+    ///
+    /// Without this a green above would also be produced by bounding every
+    /// candidate, which is a different and worse design — it would cap the
+    /// caller's patience on the single-address case that every machine with an
+    /// ordinary resolver takes, turning a slow but real connect into a failure.
+    #[tokio::test(start_paused = true)]
+    async fn the_last_candidate_keeps_the_callers_patience() {
+        let only = "127.0.0.1:1".parse().expect("addr");
+        let walk = first_reachable(vec![only], "probe", |_| async move {
+            std::future::pending::<io::Result<SocketAddr>>().await
+        });
+        // Far beyond the per-candidate bound. If the last candidate were
+        // bounded too, the walk would have resolved with a TimedOut error.
+        let outer = CANDIDATE_DIAL_TIMEOUT * 10;
+        assert!(
+            tokio::time::timeout(outer, walk).await.is_err(),
+            "a single candidate must inherit the caller's patience, not the walk's bound"
         );
     }
 }
