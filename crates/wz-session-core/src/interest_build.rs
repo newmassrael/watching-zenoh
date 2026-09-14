@@ -91,8 +91,7 @@ pub fn build_interest_liveliness_subscriber(
         interest_id,
         /*current=*/ history,
         /*future=*/ true,
-        keyexpr_mapping_id,
-        keyexpr_suffix,
+        Some((keyexpr_mapping_id, keyexpr_suffix)),
     )?;
     // R311y801 — the `ext_qos` upstream stamps on THIS Interest and on no other
     // api-level one: `zenoh/src/api/session.rs`
@@ -133,8 +132,7 @@ pub fn build_interest_liveliness_get(
         interest_id,
         /*current=*/ true,
         /*future=*/ false,
-        keyexpr_mapping_id,
-        keyexpr_suffix,
+        Some((keyexpr_mapping_id, keyexpr_suffix)),
     )
 }
 
@@ -177,18 +175,23 @@ pub fn build_interest_liveliness_get(
 /// Kinds stay [`InterestKinds::TOKENS`]: the broker this serves is the
 /// liveliness one, and propagating a wider kind set than the node can itself
 /// answer is a separate decision from the QoS one this builder exists for.
+///
+/// `keyexpr: None` propagates an UNRESTRICTED interest (R2614) — the copy of a
+/// downstream interest that itself carried no keyexpr. The broker used to
+/// decline that case outright, which was defensible only while the dump leg
+/// declined it too; now that the dump answers it, refusing to propagate would
+/// leave this node answering from what it happens to hold while never asking
+/// the upstreams that hold the rest.
 pub fn build_interest_propagated(
     interest_id: u64,
     current_future: bool,
-    keyexpr_mapping_id: u64,
-    keyexpr_suffix: Option<&str>,
+    keyexpr: Option<(u64, Option<&str>)>,
 ) -> Result<InterestOwned, CodecError> {
     let mut interest = build_liveliness_token_interest(
         interest_id,
         /*current=*/ true,
         /*future=*/ current_future,
-        keyexpr_mapping_id,
-        keyexpr_suffix,
+        keyexpr,
     )?;
     crate::declare_ext_qos::set_interest_qos(&mut interest, crate::declare_ext_qos::QOS_DECLARE);
     Ok(interest)
@@ -288,27 +291,31 @@ impl core::ops::BitOr for InterestKinds {
 /// with the C/F positions on the outer `Interest.header`; that is
 /// intentional and matches zenoh-pico's `_Z_INTEREST_FLAG_COPY_MASK`
 /// reorder (the two `header` bytes are distinct wire bytes, so no
-/// collision). The inner body always sets KE (carries a keyexpr) and R
-/// (restricted to the attached keyexpr); AG stays clear (wz stages no
-/// aggregate reply — see [`InterestKinds`]).
+/// collision). The inner body always sets KE (asks for keyexpr
+/// declarations); AG stays clear (wz stages no aggregate reply — see
+/// [`InterestKinds`]).
 ///
 /// `keyexpr_suffix.is_some()` is the ONLY source of N and the `Local`
 /// wireexpr arm the only source of M, both derived here rather than passed:
 /// see [`InterestKinds`] for why the protocol forbids the combinations a
 /// caller-supplied form would allow.
+///
+/// R IS DERIVED FROM `keyexpr`, NOT HARDCODED (R2614). It used to be a
+/// constant `0x10`, which made the RESTRICTED form the only one this module
+/// could express and left `routing-interest-pending-gc` unable to broker an
+/// unrestricted interest even after its dump leg learned to answer one.
+/// Deriving it is upstream's own rule rather than a wz convention: zenoh sets
+/// the flag from the field's presence and clears it otherwise
+/// (`commons/zenoh-protocol/src/network/interest.rs` @ `interest -= InterestOptions::RESTRICTED`),
+/// so `keyexpr: None` here is exactly its `wire_expr: None`. N and M follow the
+/// keyexpr too — an absent wireexpr has neither a suffix nor a mapping arm.
 fn build_restricted_interest(
     interest_id: u64,
     kinds: InterestKinds,
     current: bool,
     future: bool,
-    keyexpr_mapping_id: u64,
-    keyexpr_suffix: Option<&str>,
+    keyexpr: Option<(u64, Option<&str>)>,
 ) -> Result<InterestOwned, CodecError> {
-    let suffix_len = keyexpr_suffix.map(|s| s.len() as u64);
-    let suffix_string = keyexpr_suffix
-        .map(crate::codec_owned::owned_string)
-        .transpose()?;
-
     // Outer header: MID 0x19 | (current ? C) | (future ? F). Z stays
     // clear — wz emits no Interest-level extensions today; the
     // wz-codecs envelope leaves bit 7 free for a future ext-chain.
@@ -316,13 +323,25 @@ fn build_restricted_interest(
     let f_flag = if future { 0x40u8 } else { 0x00u8 };
 
     let ke_flag = 0x01u8;
-    let r_flag = 0x10u8;
-    let n_flag = if keyexpr_suffix.is_some() {
-        0x20u8
-    } else {
-        0x00u8
+    let (r_flag, n_flag, m_flag, wireexpr) = match keyexpr {
+        Some((mapping_id, suffix)) => {
+            let suffix_len = suffix.map(|s| s.len() as u64);
+            let suffix_string = suffix.map(crate::codec_owned::owned_string).transpose()?;
+            (
+                0x10u8,
+                if suffix.is_some() { 0x20u8 } else { 0x00u8 },
+                0x40u8, // Local arm (M=1)
+                Some(WireexprOwned {
+                    body: WireexprOwnedVariant::WireexprLocal(WireexprLocalOwned {
+                        id: mapping_id,
+                        suffix_len,
+                        suffix: suffix_string,
+                    }),
+                }),
+            )
+        }
+        None => (0x00u8, 0x00u8, 0x00u8, None),
     };
-    let m_flag = 0x40u8; // Local arm (M=1)
     let body_header = ke_flag | kinds.bits() | r_flag | n_flag | m_flag;
 
     Ok(InterestOwned {
@@ -330,13 +349,7 @@ fn build_restricted_interest(
         interest_id,
         body: Some(InterestBodyOwned {
             header: body_header,
-            keyexpr: Some(WireexprOwned {
-                body: WireexprOwnedVariant::WireexprLocal(WireexprLocalOwned {
-                    id: keyexpr_mapping_id,
-                    suffix_len,
-                    suffix: suffix_string,
-                }),
-            }),
+            keyexpr: wireexpr,
         }),
         extensions: None,
     })
@@ -350,17 +363,9 @@ fn build_liveliness_token_interest(
     interest_id: u64,
     current: bool,
     future: bool,
-    keyexpr_mapping_id: u64,
-    keyexpr_suffix: Option<&str>,
+    keyexpr: Option<(u64, Option<&str>)>,
 ) -> Result<InterestOwned, CodecError> {
-    build_restricted_interest(
-        interest_id,
-        InterestKinds::TOKENS,
-        current,
-        future,
-        keyexpr_mapping_id,
-        keyexpr_suffix,
-    )
+    build_restricted_interest(interest_id, InterestKinds::TOKENS, current, future, keyexpr)
 }
 
 /// Build an `Interest` asking the peer for its SUBSCRIBER declarations
@@ -408,8 +413,7 @@ pub fn build_interest_subscribers(
         InterestKinds::SUBSCRIBERS,
         current,
         future,
-        keyexpr_mapping_id,
-        keyexpr_suffix,
+        Some((keyexpr_mapping_id, keyexpr_suffix)),
     )
 }
 
@@ -437,8 +441,7 @@ pub fn build_interest_queryables(
         InterestKinds::QUERYABLES,
         current,
         future,
-        keyexpr_mapping_id,
-        keyexpr_suffix,
+        Some((keyexpr_mapping_id, keyexpr_suffix)),
     )
 }
 
@@ -465,8 +468,7 @@ pub fn build_interest_kinds(
         kinds,
         current,
         future,
-        keyexpr_mapping_id,
-        keyexpr_suffix,
+        Some((keyexpr_mapping_id, keyexpr_suffix)),
     )
 }
 
@@ -719,8 +721,7 @@ mod tests {
         let current = build_interest_propagated(
             7,
             /*current_future=*/ false,
-            /*mapping_id=*/ 0,
-            Some("demo/**"),
+            Some((/*mapping_id=*/ 0, Some("demo/**"))),
         )
         .unwrap();
         let mut expected = vec![
@@ -749,8 +750,7 @@ mod tests {
         let current_future = build_interest_propagated(
             7,
             /*current_future=*/ true,
-            /*mapping_id=*/ 0,
-            Some("demo/**"),
+            Some((/*mapping_id=*/ 0, Some("demo/**"))),
         )
         .unwrap();
         let mut expected_cf = vec![0xF9u8, 0x07, 0x79, 0x00, 0x07];

@@ -213,10 +213,46 @@ impl<V> LinkstatepeerInterest<V> {
         target: &str,
         exclude: Option<&Zid>,
     ) -> Vec<(&str, Zid, &V)> {
-        let target_chunks: Vec<&str> = target.split('/').collect();
+        self.entries_matching(Some(target), exclude)
+    }
+
+    /// The same tuples for an UNRESTRICTED interest — one carrying no keyexpr at
+    /// all, i.e. with the wire's `R` flag clear
+    /// (`commons/zenoh-protocol/src/network/interest.rs` @ `then the interest is restricted to the matching key expression, else it is for all key expressions`).
+    /// EVERY declaration matches, which is upstream's own reading: its matcher is
+    /// `res.is_none_or(|res| res.matches(token))`
+    /// (`zenoh/src/net/routing/hat/peer/token.rs` @ `res.is_none_or`), so a `None`
+    /// resource admits the whole table rather than none of it.
+    ///
+    /// R2614 — wz used to answer such an interest with NOTHING, which is the
+    /// opposite of upstream and not a narrower version of it. Neither reference
+    /// EMITS one (zenoh derives `R` from `wire_expr.is_some()` and its liveliness
+    /// GET always supplies one; pico sets `_Z_INTEREST_FLAG_RESTRICTED` explicitly
+    /// at both of its liveliness sites), so this is reachable only from a peer
+    /// that builds the message itself -- but wz is a drop-in for the node that
+    /// ANSWERS, and upstream answers it.
+    pub(crate) fn unrestricted_entries(&self, exclude: Option<&Zid>) -> Vec<(&str, Zid, &V)> {
+        self.entries_matching(None, exclude)
+    }
+
+    /// The one traversal behind both accessors above. `target` is `Option` for
+    /// exactly the reason upstream's `res` is: the absence of a keyexpr is a
+    /// MATCHES-EVERYTHING, not a matches-nothing, and keeping the two arms in one
+    /// function is what stops the unrestricted case drifting into a second,
+    /// disagreeing definition of what a match is.
+    fn entries_matching(
+        &self,
+        target: Option<&str>,
+        exclude: Option<&Zid>,
+    ) -> Vec<(&str, Zid, &V)> {
+        let target_chunks: Option<Vec<&str>> = target.map(|t| t.split('/').collect());
         let mut out: Vec<(&str, Zid, &V)> = Vec::new();
         for (decl, peers) in &self.by_key {
-            if keyexpr_intersects_target(decl, &target_chunks) {
+            let matched = match target_chunks.as_deref() {
+                None => true,
+                Some(chunks) => keyexpr_intersects_target(decl, chunks),
+            };
+            if matched {
                 out.extend(
                     peers
                         .iter()

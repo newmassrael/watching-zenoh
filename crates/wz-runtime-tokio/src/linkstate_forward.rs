@@ -4761,10 +4761,14 @@ impl LinkstateForwarder {
     /// answers against the id it was given. The id rewrite back to the client's own
     /// is [`relay_brokered_declare`]'s job.
     ///
-    /// A match-all (`target == None`) interest is NOT propagated: the dump legs
-    /// already decline it (`dump_interest_tokens` returns early), so brokering one
-    /// would ask an upstream a question this node cannot itself answer, and the
-    /// client would wait out the GC for a reply it was never going to use.
+    /// A match-all (`target == None`) interest IS propagated as of R2614, as an
+    /// UNRESTRICTED copy. It used to be declined, and the reason given was that
+    /// the dump legs decline it too — a justification that was internally
+    /// consistent and externally wrong, and which stopped being even internally
+    /// consistent once [`dump_interest_tokens`] learned to answer one. Upstream
+    /// propagates it: its `route_interest` has no
+    /// resource-is-`None` guard and its matcher admits the whole table
+    /// (`zenoh/src/net/routing/hat/peer/token.rs` @ `res.is_none_or`).
     #[cfg(feature = "routing-interest-pending-gc")]
     fn propagate_current_interest(
         &self,
@@ -4773,9 +4777,7 @@ impl LinkstateForwarder {
         current_future: bool,
         target: &Option<String>,
     ) -> usize {
-        let Some(target) = target.as_deref() else {
-            return 0;
-        };
+        let target = target.as_deref();
         let upstreams: Vec<FaceId> = self
             .faces
             .borrow()
@@ -4802,7 +4804,8 @@ impl LinkstateForwarder {
             // propagation sites writes it), and reusing the api builders made
             // that true only for the CurrentFuture arm, by inheritance rather
             // than by decision.
-            let built = build_interest_propagated(up_id, current_future, 0, Some(target));
+            let built =
+                build_interest_propagated(up_id, current_future, target.map(|t| (0, Some(t))));
             let Ok(msg) = built else {
                 continue; // a keyexpr this node cannot re-encode is not brokered
             };
@@ -4954,6 +4957,12 @@ impl LinkstateForwarder {
     /// the ungated `declare_build` one — NOT `declare::local_token::build_token_reply`,
     /// which sits behind `liveliness-token`; the routing token plane must not pull
     /// that feature, exactly as the router's twin documents.
+    ///
+    /// R2614 — `target: None` is an UNRESTRICTED interest and is now ANSWERED with
+    /// every token rather than dropped. It used to return early, so a peer asking
+    /// without a keyexpr got an empty `DeclareFinal` where upstream would have sent
+    /// the whole table; see [`LinkstatepeerInterest::unrestricted_entries`] for the
+    /// upstream matcher this follows and for why neither reference emits one.
     fn dump_interest_tokens(
         &self,
         inbound: FaceId,
@@ -4962,30 +4971,45 @@ impl LinkstateForwarder {
         requester_zid: Option<&Zid>,
         interest_id: u64,
     ) {
-        let Some(target) = target else {
-            return; // match-all deferred; the caller's DeclareFinal still closes it.
-        };
-        let target_chunks: Vec<&str> = target.split('/').collect();
+        let target_chunks: Option<Vec<&str>> = target.map(|t| t.split('/').collect());
         let mut per_ke: HashMap<String, ()> = HashMap::new();
         // MESH tier first: every OTHER zid holding a matching token. The requester's
         // own zid is excluded (zenoh's `*r != tables.zid` shape) so a client is never
         // replayed a token its own peer advertised on its behalf.
-        for (ke, _zid, ()) in self.tokens.borrow().matching_entries(target, requester_zid) {
+        let mesh = self.tokens.borrow();
+        let mesh_hits = match target {
+            Some(t) => mesh.matching_entries(t, requester_zid),
+            None => mesh.unrestricted_entries(requester_zid),
+        };
+        for (ke, _zid, ()) in mesh_hits {
             per_ke.insert(ke.to_string(), ());
         }
+        drop(mesh);
         for (face, ids) in self.client_tokens.borrow().iter() {
             if *face == inbound {
                 continue; // never replay a face its own token
             }
             for ke in ids.values() {
-                if keyexpr_intersects_target(ke, &target_chunks) {
+                let matched = match target_chunks.as_deref() {
+                    None => true,
+                    Some(chunks) => keyexpr_intersects_target(ke, chunks),
+                };
+                if matched {
                     per_ke.insert(ke.clone(), ());
                 }
             }
         }
+        // AN UNRESTRICTED INTEREST CANNOT AGGREGATE, and the reason is that there
+        // is no keyexpr to aggregate UNDER: the aggregate reply is built against
+        // the interest's own target, which this interest does not carry. Upstream
+        // never aggregates a token dump at all -- its peer hat emits one
+        // `DeclareToken` per match with no aggregate arm
+        // (`zenoh/src/net/routing/hat/peer/interests.rs` @ `fn send_current_tokens`)
+        // -- so emitting per-keyexpr here is the faithful arm, not a fallback.
+        let aggregate = aggregate && target.is_some();
         emit_current_interest_replies(
             interest_id,
-            target,
+            target.unwrap_or(""),
             aggregate,
             per_ke,
             |a, _b| a,
@@ -10355,6 +10379,112 @@ mod tests {
         );
     }
 
+    // R2614 — an UNRESTRICTED CURRENT token interest is answered with EVERY
+    // token, not with silence.
+    //
+    // "Unrestricted" is the wire's `R` flag CLEAR: the interest carries no
+    // keyexpr at all, which the protocol defines as asking for all key
+    // expressions (`commons/zenoh-protocol/src/network/interest.rs`
+    // @ `then the interest is restricted to the matching key expression, else it is for all key expressions`).
+    // Upstream answers it with the whole table, because its matcher treats an
+    // absent resource as matching everything
+    // (`zenoh/src/net/routing/hat/peer/token.rs` @ `res.is_none_or`). wz used to
+    // return early and send only the terminating Final, so a peer asking this way
+    // read EMPTY -- the opposite of upstream rather than a narrower version of it.
+    //
+    // THE TWO TOKENS SHARE NO PREFIX ON PURPOSE. A reply that still matched some
+    // target, or that fell back to a default keyexpr, could not produce BOTH;
+    // only a genuine match-everything can. A single-token fixture would pass on
+    // any implementation that happened to match one thing.
+    //
+    // THE CONTROL IS THE SECOND HALF OF THIS TEST, not a separate one: the same
+    // two tokens asked for with a RESTRICTED interest naming one of them must
+    // yield exactly ONE. Without it, "unrestricted returns 2" is equally
+    // consistent with a dump that ignores the target and always sends everything,
+    // which would be a worse defect than the one being fixed.
+    #[test]
+    fn a_peer_answers_an_unrestricted_liveliness_token_interest_with_every_token() {
+        use wz_session_core::declare_build::build_declare_token;
+        use wz_session_core::interest_build::{
+            build_interest_liveliness_get, build_interest_propagated,
+        };
+
+        let fwd = LinkstateForwarder::new(zid(0x05), WhatAmI::Peer);
+        let (face_a, _sink_a) = peer_face_whatami(zid(0x0A), 2);
+        let (face_b, sink_b) = peer_face_whatami(zid(0x0B), 2);
+        fwd.register(FaceId(0), &face_a);
+        fwd.register(FaceId(1), &face_b);
+
+        for (id, ke) in [(1u64, "demo/alive"), (2u64, "other/thing")] {
+            let declare_token = build_declare_token(id, 0, Some(ke)).expect("build token");
+            fwd.forward(
+                FaceId(0),
+                IterationEvent::Poll(&DriverLoopOutcome::FramePayload {
+                    priority: wz_session_core::qos::Priority::DEFAULT,
+                    reliable: true,
+                    sn: id,
+                    messages: vec![NetworkMessage::Declare(Box::new(declare_token))],
+                    has_ext: false,
+                    extensions: Vec::new(),
+                }),
+            );
+        }
+
+        // THE SUBJECT: no keyexpr at all.
+        sink_b.reset();
+        let unrestricted = build_interest_propagated(7, /*current_future=*/ false, None)
+            .expect("build unrestricted get");
+        fwd.forward(
+            FaceId(1),
+            IterationEvent::Poll(&DriverLoopOutcome::FramePayload {
+                priority: wz_session_core::qos::Priority::DEFAULT,
+                reliable: true,
+                sn: 10,
+                messages: vec![NetworkMessage::Interest(unrestricted)],
+                has_ext: false,
+                extensions: Vec::new(),
+            }),
+        );
+        let bodies: Vec<String> = (0..sink_b.frame_count())
+            .map(|i| format!("{:?}", forwarded_declare(&sink_b.frame_bytes(i)).body))
+            .collect();
+        let unrestricted_tokens = bodies.iter().filter(|b| b.contains("DeclToken")).count();
+        assert_eq!(
+            unrestricted_tokens, 2,
+            "an unrestricted CURRENT token interest must be answered with EVERY \
+             token, as upstream's `res.is_none_or` matcher does; got {bodies:?}"
+        );
+
+        // THE CONTROL: a RESTRICTED interest over the same two tokens still
+        // discriminates. If this also returned 2 the dump would be ignoring its
+        // target, and the assertion above would be meaningless.
+        sink_b.reset();
+        let restricted = build_interest_liveliness_get(8, 0, Some("demo/**")).expect("build get");
+        fwd.forward(
+            FaceId(1),
+            IterationEvent::Poll(&DriverLoopOutcome::FramePayload {
+                priority: wz_session_core::qos::Priority::DEFAULT,
+                reliable: true,
+                sn: 11,
+                messages: vec![NetworkMessage::Interest(restricted)],
+                has_ext: false,
+                extensions: Vec::new(),
+            }),
+        );
+        let control_bodies: Vec<String> = (0..sink_b.frame_count())
+            .map(|i| format!("{:?}", forwarded_declare(&sink_b.frame_bytes(i)).body))
+            .collect();
+        let control_tokens = control_bodies
+            .iter()
+            .filter(|b| b.contains("DeclToken"))
+            .count();
+        assert_eq!(
+            control_tokens, 1,
+            "the RESTRICTED arm must still match only `demo/**`, or the \
+             unrestricted assertion above proves nothing; got {control_bodies:?}"
+        );
+    }
+
     /// R311y513 — the BROKER's propagation reaches the WIRE on a bare routing
     /// build, and the client's final is withheld.
     ///
@@ -10418,6 +10548,101 @@ mod tests {
             "the client's terminating DeclareFinal is OWED BY THE UNWIND while an \
              upstream copy is outstanding; sending it here would close the get \
              before the upstream could answer"
+        );
+    }
+
+    /// R2614 — a propagated copy BLOCKED BY THE EGRESS ACL closes the client
+    /// immediately instead of stranding it for a GC window. This is the
+    /// measurement that settles whether wz owes upstream's `rejection_token`.
+    ///
+    /// Upstream carries a SECOND cancellation path beside the timeout: a
+    /// `rejection_token` on each `PendingCurrentInterest`, cancelled by
+    /// `Face::reject_interest` when the egress interceptor refuses the outgoing
+    /// Interest, whose own comment gives the purpose —
+    /// `zenoh/src/net/primitives/mux.rs` @ `send declare final to avoid timeout on blocked interest`.
+    /// The cleanup task then finalizes on that arm rather than after
+    /// `interests_timeout` (`zenoh/src/net/routing/dispatcher/interests.rs`
+    /// @ `rejection_token.cancelled()`).
+    ///
+    /// wz has no such token, and the atom's reason recorded that as a residual.
+    /// The re-measurement REFUTES it: upstream needs a retraction because it
+    /// inserts the pending entry and THEN sends through the mux, so a mux-level
+    /// block leaves an entry already registered. wz's R311y513 ordering sends
+    /// FIRST and inserts only for a copy the fan-out counted, and the egress
+    /// denial `continue`s before that count — so a blocked interest never becomes
+    /// a pending entry, and there is nothing to cancel. Same outcome, reached by
+    /// an ordering rather than by a second token.
+    ///
+    /// THE ASSERTIONS ARE THE OUTCOME, NOT THE MECHANISM, which is the point: a
+    /// test that looked for a rejection token would pin wz to upstream's
+    /// implementation instead of to its behaviour.
+    #[cfg(all(feature = "routing-interest-pending-gc", feature = "access-acl"))]
+    #[test]
+    fn an_acl_blocked_propagation_closes_the_client_instead_of_stranding_it() {
+        use wz_session_core::interest_build::build_interest_liveliness_get;
+
+        let fwd = LinkstateForwarder::new(zid(0x05), WhatAmI::Peer);
+        let (upstream, sink_up) = peer_face(zid(0x0B));
+        let (client, sink_client) = peer_face_whatami(zid(0x0C), 2);
+        fwd.register(FaceId(0), &upstream);
+        fwd.register(FaceId(1), &client);
+
+        // DENY the liveliness GET on EGRESS. A CURRENT-only token-carrying
+        // Interest is what the propagated copy is, and it maps to
+        // `AclMessage::LivelinessQuery` (see `interceptor::access_control`'s
+        // mode split).
+        fwd.set_interceptors(
+            InterceptorConfig::default().with_acl(AclPolicy::new(AclConfig {
+                default_permission: Permission::Allow,
+                rules: vec![AclRule {
+                    subject: SubjectSelector::Any,
+                    key_exprs: vec!["demo/**".to_owned()],
+                    messages: vec![AclMessage::LivelinessQuery],
+                    flow: AclFlow::Egress,
+                    permission: Permission::Deny,
+                    link_protocols: Vec::new(),
+                    interfaces: Vec::new(),
+                }],
+            })),
+        );
+        sink_up.reset();
+        sink_client.reset();
+
+        let get = build_interest_liveliness_get(7, 0, Some("demo/**")).expect("build get");
+        fwd.forward(
+            FaceId(1),
+            IterationEvent::Poll(&DriverLoopOutcome::FramePayload {
+                priority: wz_session_core::qos::Priority::DEFAULT,
+                reliable: true,
+                sn: 0,
+                messages: vec![NetworkMessage::Interest(get)],
+                has_ext: false,
+                extensions: Vec::new(),
+            }),
+        );
+
+        assert_eq!(
+            sink_up.frame_count(),
+            0,
+            "the egress ACL must actually block the propagated Interest, or this \
+             test is measuring the ordinary brokered path"
+        );
+        assert_eq!(
+            fwd.pending_interests_len(),
+            0,
+            "a copy the wire never carried must leave NO pending entry — this is \
+             the structure that makes upstream's `rejection_token` unnecessary \
+             here, and if it ever becomes 1 the client is stranded for a whole GC \
+             window and wz then genuinely owes that second cancellation path"
+        );
+        let client_bodies: Vec<String> = (0..sink_client.frame_count())
+            .map(|i| format!("{:?}", forwarded_declare(&sink_client.frame_bytes(i)).body))
+            .collect();
+        assert!(
+            client_bodies.iter().any(|b| b.contains("DeclFinal")),
+            "the client must be closed IN THIS CALL rather than at the GC \
+             deadline — that is what upstream's rejection arm buys, reached here \
+             by the send-first ordering; got {client_bodies:?}"
         );
     }
 

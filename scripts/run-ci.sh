@@ -7616,7 +7616,10 @@ layer_c1y_cargo_test_routing_peer() {
     # pending fan carries its query's QoS out through the timeout sweep and the
     # face-down drain. Ungated like its siblings, so it lands in the bare arm
     # too — and both numbers are what the two runs PRINTED, not a diff count.
-    _runci_guarded_test "C1y linkstate" 204 \
+    # R2614 204 -> 205: a_peer_answers_an_unrestricted_liveliness_token_interest_
+    # with_every_token, which pins that an interest carrying NO keyexpr is
+    # answered with the whole token table rather than with silence.
+    _runci_guarded_test "C1y linkstate" 205 \
         cargo test -p wz-runtime-tokio --features routing-peer --lib linkstate --quiet || return 1
     # R311y513 — the BARE routing peer, and the pin that would have caught the
     # defect this round fixed. Every arm above passes `--features routing-peer`
@@ -7629,7 +7632,9 @@ layer_c1y_cargo_test_routing_peer() {
     # compile that feature ALONE at least once, or it is measuring the default
     # set and reporting the feature's name. 200 not 202: two access-tier tests
     # need the access set, which bare routing-peer does not pull.
-    _runci_guarded_test "C1y linkstate bare" 202 \
+    # R2614 202 -> 203: the unrestricted-interest witness is ungated, so it lands
+    # here exactly as the sibling comment above predicts.
+    _runci_guarded_test "C1y linkstate bare" 203 \
         cargo test -p wz-runtime-tokio --no-default-features --features routing-peer \
         --lib linkstate --quiet || return 1
     # R311y451 — 10 -> 16: the six low-pass fidelity tests (attachment in the
@@ -7721,7 +7726,11 @@ layer_c1y_cargo_test_routing_peer() {
     # reading of this red assumed all three had shifted; counting them is what
     # showed otherwise, and hosted's fail-fast would have hidden the other two
     # either way.
-    _runci_guarded_test "C1y linkstate+access" 215 \
+    # R2614 215 -> 216, and all THREE linkstate arms moved this time (204 -> 205,
+    # 202 -> 203, 215 -> 216) where R2567's did not. Each was READ off the run
+    # that printed it rather than derived from the first: the comment above is
+    # the standing reason not to infer the other two from one.
+    _runci_guarded_test "C1y linkstate+access" 216 \
         cargo test -p wz-runtime-tokio --features "$access" --lib linkstate --quiet || return 1
     # R2567 — the three usrpwd counts move together because ONE structure landed
     # under them: the shared credential store that closed `access-extauth-usrpwd`.
