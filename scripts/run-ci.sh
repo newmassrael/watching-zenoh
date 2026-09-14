@@ -6269,9 +6269,9 @@ layer_c1ag_cargo_test_transport_compose() {
 layer_c1ah_cargo_test_time_hlc() {
     _runci_guarded_test "C1ah timestamp_source" 5 \
         cargo test -p wz-runtime-tokio --features time-hlc --lib timestamp_source:: --quiet || return 1
-    _runci_guarded_test "C1ah node_clock" 12 \
+    _runci_guarded_test "C1ah node_clock" 14 \
         cargo test -p wz-runtime-tokio --features time-hlc --lib node_clock:: --quiet || return 1
-    _runci_guarded_test "C1ah node_clock (advanced-cache leg)" 12 \
+    _runci_guarded_test "C1ah node_clock (advanced-cache leg)" 14 \
         cargo test -p wz-runtime-tokio --features time-hlc,ext-pubsub-advanced-cache \
         --lib node_clock:: --quiet || return 1
     # R311y818 — the PUBLISH-side auto-stamp (zenoh `resolve_put`'s head,
