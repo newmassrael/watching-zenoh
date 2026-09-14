@@ -875,7 +875,15 @@ CITATION = re.compile(r"\b((?:[A-Za-z0-9_.-]+/)*[A-Za-z0-9_.-]+\.(?:rs|c|h))(?::
 # `scouting_fanout` both run under `scouting-active` -- so it leaves this count
 # with the population; UNREACHED and NO_SYMBOL hold, as for the tls and quic
 # retirements above.
-PIN_REACHED = 39
+# R2614 — 39 -> 38: `routing-interest-pending-gc` went PARTIAL -> COMPLETE. Three
+# of its four residuals were refuted at the pin (a CURRENT interest upstream is
+# token-only, so two of them debited wz for a plane that never enters the path;
+# the third, the missing `rejection_token`, is true about the mechanism and false
+# about the debt) and the fourth was built -- an unrestricted interest is now
+# answered and brokered. It is a REACHED atom, its units run under
+# `routing-interest-pending-gc` in Layer C1y, so it leaves this count with the
+# population; UNREACHED and NO_SYMBOL hold, as for every retirement above.
+PIN_REACHED = 38
 PIN_UNREACHED = 3
 PIN_NO_SYMBOL = 2
 # R2534 — 346 -> 347. The atom is `adminspace-metrics` and the citation is the
@@ -1255,7 +1263,20 @@ PIN_NO_SYMBOL = 2
 # arrives at the same number by luck, not by derivation, because the two terms
 # happen to cancel; do not read it as the shorter form working.
 # ⚠ AMBIGUOUS does not move: this atom's reason carried none.
-PIN_WZ_CITATIONS = 229
+# R2614 — 229 -> 228, AMBIGUOUS unchanged at 45. The same retirement shape:
+# `routing-interest-pending-gc` went PARTIAL -> COMPLETE and takes its citation
+# set with it.
+# DERIVED with THIS module's own `citation_audit` over that atom's reason before
+# and after this round's append, with the R2609 correction applied rather than
+# rediscovered: wz 1 -> 1 (the append adds FIVE upstream citations, 4 -> 9, and
+# not one wz path), so the round contributes 0 and the atom removes 1.
+# 229 + 0 - 1 = 228, which is what the census measures.
+# ⚠ THE ADDED CITATIONS ARE ALL UPSTREAM, and that is the whole reason this
+# delta is 1 rather than the larger number the append's size suggests. A round
+# whose correction argues FROM the pin cites the pin, and upstream paths are
+# read as unjudged here by construction (R2215) -- so a long correction can move
+# this count by nothing at all. Measure it; do not size it by the diff.
+PIN_WZ_CITATIONS = 228
 PIN_AMBIGUOUS = 45
 
 
