@@ -816,7 +816,11 @@ pub enum BoundListener {
     /// handshake). The `Arc<ServerConfig>` (the cert it presents) is taken from
     /// [`AcceptConfig::tls`] at bind time and carried until the accept runs it.
     #[cfg(feature = "transport-link-tls")]
-    Tls(TcpListener, Arc<ServerConfig>),
+    /// R2608 — the `bool` is `close_link_on_expiration` off the LISTEN locator,
+    /// the accept twin of [`DialedLink::Tls`]'s. The chain it watches is the
+    /// CLIENT's, which exists only under mTLS; without it the fold finds no
+    /// chain and nothing arms, exactly as upstream leaves it.
+    Tls(TcpListener, Arc<ServerConfig>, bool),
     /// A bound unix-domain [`UnixsockListener`]; [`accept_bound`] accepts a raw
     /// [`DialedLink::Unixsock`] with NO post-accept handshake (a `UnixStream` is
     /// wrapped directly, like `tcp`). The FIRST non-`TcpListener` variant
@@ -1256,7 +1260,7 @@ impl BoundListener {
             #[cfg(feature = "transport-link-ws")]
             BoundListener::Ws(l) => l.local_addr()?.to_string(),
             #[cfg(feature = "transport-link-tls")]
-            BoundListener::Tls(l, _) => l.local_addr()?.to_string(),
+            BoundListener::Tls(l, ..) => l.local_addr()?.to_string(),
             // A unix listener has no IP address; render the bound socket PATH
             // (the non-IP address type this per-variant String accessor exists
             // for, R311y374). An abstract/unnamed socket has no pathname.
@@ -1321,7 +1325,7 @@ impl BoundListener {
             #[cfg(feature = "transport-link-ws")]
             BoundListener::Ws(l) => l.local_addr(),
             #[cfg(feature = "transport-link-tls")]
-            BoundListener::Tls(l, _) => l.local_addr(),
+            BoundListener::Tls(l, ..) => l.local_addr(),
             // A unix listener has no IP `SocketAddr` (R311y374 anticipated this
             // typed error for the first non-IP variant); an IP-address caller
             // (the demo's `--peer` / `--router-hat` zid-from-port derivation)
@@ -1401,10 +1405,10 @@ impl BoundListener {
                 (AcceptedLink::Ws(stream), AcceptedPeer::Ip(peer))
             }
             #[cfg(feature = "transport-link-tls")]
-            BoundListener::Tls(l, server_config) => {
+            BoundListener::Tls(l, server_config, closes_on_expiration) => {
                 let (stream, peer) = accept_tcp_on(l).await?;
                 (
-                    AcceptedLink::Tls(stream, server_config.clone()),
+                    AcceptedLink::Tls(stream, server_config.clone(), *closes_on_expiration),
                     AcceptedPeer::Ip(peer),
                 )
             }
@@ -1595,7 +1599,9 @@ pub enum AcceptedLink {
     /// ([`accept_tls`]) with the cert carried since bind; [`Self::handshake`] runs
     /// it into [`DialedLink::Tls`].
     #[cfg(feature = "transport-link-tls")]
-    Tls(TcpStream, Arc<ServerConfig>),
+    /// R2608 — `close_link_on_expiration`, carried from the listen locator
+    /// through [`BoundListener::Tls`] to the handshake that produces the link.
+    Tls(TcpStream, Arc<ServerConfig>, bool),
     /// A raw accepted unix-domain stream — NO post-accept handshake (like
     /// [`Self::Tcp`]); [`Self::handshake`] wraps it directly as
     /// [`DialedLink::Unixsock`] (R311y378).
@@ -1692,15 +1698,15 @@ impl AcceptedLink {
             #[cfg(feature = "transport-link-ws")]
             AcceptedLink::Ws(stream) => DialedLink::Ws(Box::new(accept_ws(stream).await?)),
             #[cfg(feature = "transport-link-tls")]
-            AcceptedLink::Tls(stream, server_config) => {
-                // R2608 — `false`: the ACCEPT half of `close_link_on_expiration`
-                // is NOT wired yet. The dial half below is, and the listen half
-                // needs the flag carried on `BoundListener::Tls` and
-                // `AcceptedLink::Tls` the way `Quic` carries it, which is its
-                // own increment. Stated here rather than left to be inferred
-                // from a literal: a reader must not read this `false` as "a tls
-                // acceptor cannot arm expiry".
-                DialedLink::Tls(Box::new(accept_tls(stream, server_config).await?), false)
+            AcceptedLink::Tls(stream, server_config, closes_on_expiration) => {
+                // R2608 — the listen locator's own policy, carried through the
+                // bind. The chain this watches is the CLIENT's, so it is the
+                // mTLS case; without a client certificate the fold finds no
+                // chain and nothing arms, which is upstream's behaviour too.
+                DialedLink::Tls(
+                    Box::new(accept_tls(stream, server_config).await?),
+                    closes_on_expiration,
+                )
             }
             // No post-accept handshake — a `UnixStream` is wrapped directly, the
             // acceptor mirror of `dial_locator`'s direct `DialedLink::Unixsock`
@@ -2987,6 +2993,9 @@ pub async fn bind_locator(locator: AnyLocator, cfg: &AcceptConfig) -> io::Result
                 Some(server_config) => Ok(BoundListener::Tls(
                     bind_tcp(ip.addr, &cfg.link_socket(ip.socket(), ip.proto).await?).await?,
                     server_config,
+                    // R2608 — a listen tail carries the policy, as the quic
+                    // bind arms already do.
+                    ip.tls().closes_on_expiration(),
                 )),
                 None => Err(unsupported(
                     "tls acceptor requires AcceptConfig.tls (a server cert + key), \
@@ -3134,6 +3143,8 @@ pub async fn bind_locator(locator: AnyLocator, cfg: &AcceptConfig) -> io::Result
                         )
                         .await?,
                         server_config,
+                        // R2608 — the named bind twin of the numeric arm.
+                        named_tls_material(&tls).closes_on_expiration(),
                     )),
                     None => Err(unsupported(
                         "tls acceptor requires AcceptConfig.tls (a server cert + key), \

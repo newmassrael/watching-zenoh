@@ -241,11 +241,11 @@ async fn a_named_tls_locator_verifies_against_the_locator_name_not_the_configure
          configured `wrong.example`",
     );
     assert!(
-        matches!(dialed, DialedLink::Tls(_)),
+        matches!(dialed, DialedLink::Tls(..)),
         "the named dial produced a TLS link"
     );
     assert!(
-        matches!(accepted, DialedLink::Tls(_)),
+        matches!(accepted, DialedLink::Tls(..)),
         "the acceptor completed its side of the same handshake"
     );
 
@@ -334,7 +334,7 @@ async fn a_tls_link_disables_nagle_on_both_the_dial_and_the_accept_half() {
     let (accepted, dialed) = tokio::join!(acc, dial);
 
     for (half, link) in [("dial", &dialed), ("accept", &accepted)] {
-        let DialedLink::Tls(tls) = link else {
+        let DialedLink::Tls(tls, _) = link else {
             panic!("{half}: expected a TLS link");
         };
         assert!(
@@ -447,5 +447,120 @@ async fn a_tls_locator_carrying_its_own_material_handshakes_with_no_ambient_conf
         err.kind(),
         std::io::ErrorKind::Unsupported,
         "with neither a locator tail nor AcceptConfig.tls the acceptor is still Unsupported"
+    );
+}
+
+/// R2608 — `close_link_on_expiration=true` on a `tls/...` DIAL tail tears the
+/// link down when the peer's certificate chain expires, and a tail without the
+/// key leaves it alone.
+///
+/// This witnesses the whole production path, which the unit arms on the signal
+/// itself cannot: locator parse, the flag reaching `DialedLink::Tls`, the chain
+/// read from the rustls connection BEFORE `wire_tls_stream` splits the stream,
+/// the watcher, and the read half reporting `LostCause::CertificateExpired`.
+///
+/// NUMERIC locator on purpose. A named one would resolve, and on a host whose
+/// resolver answers `::1` first the walk would spend R2607's per-candidate
+/// bound before reaching the listener — deterministic, but slower for no gain
+/// here. The certificate is minted for the IP so the numeric SNI matches.
+///
+/// The SECOND arm is what makes this a witness: upstream defaults the key to
+/// `false`, so a build that armed unconditionally would pass the first
+/// assertion and silently tear down every link whose peer certificate ever
+/// expires.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_expiring_peer_chain_closes_only_the_tls_link_that_asked_for_it() {
+    use wz_runtime_tokio::session_open::{bind_locator, dial_locator, AcceptConfig, DialedLink};
+    use wz_runtime_tokio::tls_pipeline::wire_tls_stream;
+    use wz_runtime_tokio::LinkDriver;
+    use wz_session_core::link::{LinkEvent, LostCause};
+
+    let lifetime = 3i64;
+    let deadline = time::OffsetDateTime::now_utc() + time::Duration::seconds(lifetime);
+    let key_pair = rcgen::KeyPair::generate().expect("generate key pair");
+    let mut params =
+        rcgen::CertificateParams::new(vec!["127.0.0.1".to_string()]).expect("cert params");
+    params.not_after = deadline;
+    let issued = params
+        .self_signed(&key_pair)
+        .expect("self-signed loopback cert");
+    let cert_pem = issued.pem();
+    let key_pem = key_pair.serialize_pem();
+
+    let listen = parse_any_locator(&format!(
+        "tls/127.0.0.1:0#listen_certificate_raw={cert_pem};listen_private_key_raw={key_pem}"
+    ))
+    .expect("the listen locator parses");
+    let mut listener = bind_locator(listen, &AcceptConfig::default())
+        .await
+        .expect("the listen material binds a tls acceptor");
+    let addr: std::net::SocketAddr = listener
+        .local_addr_display()
+        .expect("the bound address is readable")
+        .parse()
+        .expect("a tls listener's address is numeric");
+
+    let dial_at = |armed: bool| {
+        let tail = if armed {
+            ";close_link_on_expiration=true"
+        } else {
+            ""
+        };
+        parse_any_locator(&format!(
+            "tls/127.0.0.1:{}#root_ca_certificate_raw={cert_pem}{tail}",
+            addr.port()
+        ))
+        .expect("the dial locator parses")
+    };
+
+    // Both dials happen while the chain is still valid, so both handshake.
+    let accepting = tokio::spawn(async move {
+        let a = wz_runtime_tokio::session_open::accept_bound_on(&mut listener).await;
+        let b = wz_runtime_tokio::session_open::accept_bound_on(&mut listener).await;
+        (a, b)
+    });
+    let armed = match dial_locator(dial_at(true), &DialConfig::default()).await {
+        Ok(DialedLink::Tls(stream, closes)) => {
+            assert!(closes, "the armed tail must reach DialedLink::Tls");
+            wire_tls_stream(*stream, closes).0
+        }
+        Ok(_) => panic!("expected a tls link"),
+        Err(e) => panic!("the armed dial must handshake inside the window: {e}"),
+    };
+    let unarmed = match dial_locator(dial_at(false), &DialConfig::default()).await {
+        Ok(DialedLink::Tls(stream, closes)) => {
+            assert!(!closes, "a tail without the key must not arm");
+            wire_tls_stream(*stream, closes).0
+        }
+        Ok(_) => panic!("expected a tls link"),
+        Err(e) => panic!("the unarmed dial must handshake inside the window: {e}"),
+    };
+    // HELD, not dropped. `let _ = ..` drops the accepted links at once, the
+    // peer closes, and both dials are Lost for the ORDINARY reason before any
+    // certificate expires — which is exactly how this witness first failed: in
+    // 0.38s, well inside a 3s window, with `OsError`. A named binding keeps the
+    // far ends alive so the only thing that can end these links is the clock.
+    let _accepted = accepting.await;
+
+    let mut armed = armed;
+    let event = tokio::time::timeout(Duration::from_secs(30), armed.poll_event())
+        .await
+        .expect("the armed link must be torn down once its chain expires");
+    match event {
+        LinkEvent::Lost { cause } => assert_eq!(
+            cause,
+            LostCause::CertificateExpired,
+            "the cause must name the certificate, not a generic OS error"
+        ),
+        other => panic!("the armed link must be Lost; got {other:?}"),
+    }
+
+    // ── The refutation arm: the same expiry, a tail that did not ask.
+    let mut unarmed = unarmed;
+    assert!(
+        tokio::time::timeout(Duration::from_secs(2), unarmed.poll_event())
+            .await
+            .is_err(),
+        "a link whose tail omitted the key must survive its peer's expiry"
     );
 }

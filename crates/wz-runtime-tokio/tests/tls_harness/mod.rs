@@ -68,7 +68,9 @@ pub async fn open_both_to_established(
         let mut params = fixture_session_init_params();
         params.zid = vec![0x02; 4];
         accept_and_open_session(
-            DialedLink::Tls(Box::new(tls)),
+            // R2608 — `false`: this harness drives the plain open path, whose
+            // subject is the handshake and not `close_link_on_expiration`.
+            DialedLink::Tls(Box::new(tls), false),
             params,
             TokioTime::new(),
             Some(ITER_CAP),
