@@ -891,7 +891,15 @@ CITATION = re.compile(r"\b((?:[A-Za-z0-9_.-]+/)*[A-Za-z0-9_.-]+\.(?:rs|c|h))(?::
 # owned symbols and 20 referencing tests, and its witnesses sit in the DEFAULT
 # lib population rather than behind a lane), so it leaves this count with the
 # population; UNREACHED and NO_SYMBOL hold, as for every retirement above.
-PIN_REACHED = 37
+# R2617 — 37 -> 36: `ext-pubsub-advanced-recovery` went PARTIAL -> COMPLETE.
+# R2487's re-audit had left five clauses standing; three had since gone stale
+# (the GET target, the dropped reply, the unbounded sequenced buffer, closed by
+# R2505 / R2554 / the two capped arms) and the two that were real were built
+# here -- the RecoveryConfig typestate and the heartbeat's global-pull guard, in
+# that order, because upstream's guard relies on the exclusion the typestate
+# provides. It is a REACHED atom (its units run in Layers C1at and C1av), so it
+# leaves this count with the population; UNREACHED and NO_SYMBOL hold.
+PIN_REACHED = 36
 PIN_UNREACHED = 3
 PIN_NO_SYMBOL = 2
 # R2534 — 346 -> 347. The atom is `adminspace-metrics` and the citation is the
@@ -1295,8 +1303,19 @@ PIN_NO_SYMBOL = 2
 # for its own retirement: the two terms happen to cancel again. Do not read that
 # as the shorter form working -- it is the third round in a row where it would
 # have agreed by coincidence, which is precisely what makes it untrustworthy.
-PIN_WZ_CITATIONS = 223
-PIN_AMBIGUOUS = 45
+# R2617 — 223 -> 211, and THE AMBIGUOUS PIN MOVES TOO, which the notes above
+# say repeatedly that it does not. `ext-pubsub-advanced-recovery` retires and
+# takes its whole citation set with it, and that set happened to include exactly
+# one ambiguous occurrence -- so the usual "the additions are all rooted, the
+# ambiguous pin is untouched" reasoning does not apply to a RETIREMENT, which
+# removes whatever the atom held rather than adding rooted ones.
+# DERIVED with this module's own `citation_audit` over that reason before and
+# after the append: wz 12 -> 12 and ambiguous 1 -> 1 (all four citations the
+# correction adds are UPSTREAM paths, 5 -> 9), so the round contributes 0 and
+# the atom removes 12 wz and 1 ambiguous. 223 + 0 - 12 = 211 and 45 - 1 = 44,
+# which is what the census measures on both axes.
+PIN_WZ_CITATIONS = 211
+PIN_AMBIGUOUS = 44
 
 
 class Fatal(Exception):
