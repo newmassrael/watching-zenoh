@@ -1213,7 +1213,19 @@ PIN_NO_SYMBOL = 2
 # ⚠ AMBIGUOUS does not move: this atom's reason carried none, so the 45 that
 # remain are other atoms'. The two numbers are not expected to fall together --
 # R2603 recorded the same asymmetry for the quic pair.
-PIN_WZ_CITATIONS = 229
+# R2610 — 229 -> 233, AMBIGUOUS unchanged at 45. The R2607 shape rather than
+# the R2609 one: `scouting-active` stays PARTIAL and so stays in the population,
+# and its reason grew this round's record — the residual it closed, the
+# exit-on-first defect the re-audit found, and the interface-fan-out residual
+# that keeps the tag where it is.
+# DERIVED with THIS module's own `citation_audit`, run over that atom's reason
+# before and after the append: wz 0 -> 4, ambiguous 0 -> 0. So 229 + 4 = 233 and
+# 45 + 0 = 45, which is exactly what the census measures.
+# ⚠ THE SAME REASON GAINED FOUR UPSTREAM CITATIONS TOO (12 -> 16) and none of
+# them is in this number, for the R2607 reason: upstream citations are read and
+# NOT judged by this axis (R2215). An atom whose round adds only upstream
+# anchors moves this pin by zero.
+PIN_WZ_CITATIONS = 233
 PIN_AMBIGUOUS = 45
 
 
