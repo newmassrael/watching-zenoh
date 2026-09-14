@@ -881,7 +881,7 @@ transport-link-serial = [
 # is supplied at the explicit `dial_tls`/`accept_tls` call site, so the
 # generic `dial_locator` returns Unsupported for `tls/...`. NOT in the
 # default set — zenoh-pico ships TLS as an optional link (Z_FEATURE_LINK_TLS).
-transport-link-tls = ["transport-link-tcp", "dep:tokio-rustls", "dep:rustls-pemfile", "dep:base64"]
+transport-link-tls = ["transport-link-tcp", "dep:tokio-rustls", "dep:rustls-pemfile", "dep:base64", "dep:webpki-roots"]
 # R311y578 (G10) — TLS / QUIC session-key export in the NSS key-log format
 # (`crate::tls_keylog`). OFF by default and deliberately a compile-time gate
 # rather than a runtime one: exporting session keys makes the traffic readable
@@ -957,7 +957,7 @@ transport-link-unixpipe = ["transport-link-tcp", "dep:libc", "dep:rand"]
 # dial/accept BACKEND is gated here. Cert material the locator cannot carry is
 # threaded via `DialConfig.quic` (the tls pattern), so the generic
 # `dial_locator` returns Unsupported for `quic/...` without it. NOT default.
-transport-link-quic = ["transport-link-tcp", "dep:quinn", "dep:tokio-rustls", "dep:rustls-pemfile", "dep:base64", "dep:x509-parser"]
+transport-link-quic = ["transport-link-tcp", "dep:quinn", "dep:tokio-rustls", "dep:rustls-pemfile", "dep:base64", "dep:x509-parser", "dep:webpki-roots"]
 # R311y8 — host QUIC unreliable-DATAGRAM link backend (RFC9221). IMPLIES
 # `transport-link-quic`: it reuses that backend's `quic_config` TLS-1.3 + ALPN
 # builders + the quinn/rustls stack, swapping the bidi stream for the
@@ -1734,6 +1734,22 @@ base64 = { version = "0.22", optional = true }
 # Unix seconds, which `std::time` compares, so wz declares one crate where
 # upstream declares two.
 x509-parser = { version = "0.18", optional = true }
+# R2603 (open-debt 727) — the PUBLIC WebPKI trust anchors a client seeds its
+# server-trust roots with, behind BOTH encrypted links (`dep:webpki-roots` on
+# `transport-link-tls` and `transport-link-quic`), which is the union
+# `pub mod tls_config` is gated on. zenoh seeds the same bundle at both of its
+# client builders — `io/zenoh-links/zenoh-link-tls/src/utils.rs` @ `roots: webpki_roots::TLS_SERVER_ROOTS.to_vec(),`
+# and `io/zenoh-link-commons/src/quic/utils.rs` @ `roots: webpki_roots::TLS_SERVER_ROOTS.to_vec(),`
+# — so without it a wz dial cannot reach a publicly-trusted peer that zenoh
+# reaches.
+# It pulls NO new crate into the tree: its only dependency is
+# `rustls-pki-types`, which tokio-rustls already locks at 1.14.1 against this
+# crate's `^1.8` requirement — so `TLS_SERVER_ROOTS: &[TrustAnchor<'static>]`
+# drops into rustls 0.23's `RootCertStore.roots` with no conversion and no
+# second pki-types to mismatch silently.
+# No feature knobs to choose: the crate declares no `[features]` at all and is
+# `#![no_std]` (`webpki-roots-1.0.9/src/lib.rs:25`) — it is one const table.
+webpki-roots = { version = "1", optional = true }
 # transport-shm — the AP POSIX shared-memory provider (behind the optional
 # `transport-shm` feature). A /dev/shm tmpfs file mmap'd MAP_SHARED is exactly
 # POSIX shared memory for the same-host scoped proof; memmap2 is the stable,

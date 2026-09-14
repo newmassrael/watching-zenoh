@@ -104,7 +104,15 @@ use crate::udp_pipeline::{
     bind_udp_demux, dial_udp, dial_udp_host, wire_udp_demuxed, wire_udp_socket, NewUdpFace,
     UdpAcceptedInputs, UdpDemux, UdpReadDriver,
 };
-#[cfg(feature = "transport-link-udp")]
+// R2603 — gated on the union of the arms that name `SocketAddr` UNQUALIFIED,
+// which is not just the udp one it arrived with: `DialedLink::Udp` /
+// `UdpDemuxed` (udp) and `quic_dial_server_name` (quic). R2599 added the quic
+// site without widening this, leaving `transport-link-quic` + `transport-unicast`
+// with no udp unable to compile at all — `cannot find type SocketAddr`. No lane
+// builds that pair (this module needs `transport-unicast`, which the quic-only
+// lanes do not set, and every lane that does set it also carries udp), so it is
+// open-debt item 374's combination gap rather than a lane anyone can point at.
+#[cfg(any(feature = "transport-link-udp", feature = "transport-link-quic"))]
 use std::net::SocketAddr;
 #[cfg(feature = "transport-link-udp")]
 use tokio::net::UdpSocket;
@@ -358,9 +366,14 @@ pub struct TlsDialConfig {
 
 #[cfg(feature = "transport-link-tls")]
 impl TlsDialConfig {
-    /// Build server-auth-only TLS client material from a root-CA PEM, verifying
-    /// that the peer's presented server cert chains to that root AND its SAN
+    /// Build server-auth-only TLS client material, verifying that the peer's
+    /// presented server cert chains to a trusted root AND its SAN
     /// matches `server_name` ([`ServerNameVerification::Verify`](crate::tls_config::ServerNameVerification)).
+    ///
+    /// R2603 (open-debt 727) — `custom_root_ca_pem` is an ADDITIONAL anchor on
+    /// top of the public WebPKI roots, not the whole trust bundle: `None` dials
+    /// with the public roots alone, which is what makes a publicly-trusted peer
+    /// reachable at all.
     /// The consumer convenience a `tls/...` --connect needs (the demo's
     /// `--tls-ca`): the connect ADDRESS (a numeric `tls/1.2.3.4:port`, all wz's
     /// locator parser accepts) and the VERIFIED NAME are decoupled — dial by IP,
@@ -368,10 +381,10 @@ impl TlsDialConfig {
     /// [`ServerName`], not from the socket address. So one self-signed
     /// `localhost` cert can be dialed at `tls/127.0.0.1:port` and still verify,
     /// with no IP SAN required on the cert. For a self-signed leaf the cert IS
-    /// its own root, so the same PEM serves as `root_ca_pem`.
-    pub fn from_ca_pem(root_ca_pem: &[u8], server_name: &str) -> io::Result<Self> {
+    /// its own root, so the same PEM serves as `custom_root_ca_pem`.
+    pub fn from_ca_pem(custom_root_ca_pem: Option<&[u8]>, server_name: &str) -> io::Result<Self> {
         Self::from_pem(
-            root_ca_pem,
+            custom_root_ca_pem,
             server_name,
             None,
             crate::tls_config::ServerNameVerification::Verify,
@@ -396,13 +409,16 @@ impl TlsDialConfig {
     /// `server_name` is still required with `AnyName`: rustls sends it as SNI
     /// regardless of whether the response is name-checked.
     pub fn from_pem(
-        root_ca_pem: &[u8],
+        custom_root_ca_pem: Option<&[u8]>,
         server_name: &str,
         client_auth: Option<crate::tls_config::ClientAuthPem<'_>>,
         name_verification: crate::tls_config::ServerNameVerification,
     ) -> io::Result<Self> {
-        let client_config =
-            crate::tls_config::client_config_from_pem(root_ca_pem, client_auth, name_verification)?;
+        let client_config = crate::tls_config::client_config_from_pem(
+            custom_root_ca_pem,
+            client_auth,
+            name_verification,
+        )?;
         let server_name = ServerName::try_from(server_name.to_owned()).map_err(|e| {
             io::Error::new(
                 io::ErrorKind::InvalidInput,
@@ -430,19 +446,23 @@ pub struct QuicDialConfig {
 
 #[cfg(feature = "transport-link-quic")]
 impl QuicDialConfig {
-    /// Build server-auth-only QUIC client material from a root-CA PEM — the QUIC
-    /// sibling of [`TlsDialConfig::from_ca_pem`]. The rustls config is TLS-1.3 +
+    /// Build server-auth-only QUIC client material — the QUIC
+    /// sibling of [`TlsDialConfig::from_ca_pem`], `custom_root_ca_pem` carrying
+    /// the same meaning: an ADDITIONAL anchor above the public WebPKI roots,
+    /// `None` for the public roots alone (R2603, open-debt 727). The rustls
+    /// config is TLS-1.3 +
     /// ALPN `hq-29` ([`quic_client_config_from_pem`](crate::quic_config::quic_client_config_from_pem)),
-    /// verifying the peer's server cert chains to `root_ca_pem` AND its SAN
+    /// verifying the peer's server cert chains to a trusted root AND its SAN
     /// matches `server_name`. Like the TLS sibling, the connect ADDRESS (a numeric
     /// `quic/1.2.3.4:port`, all wz's locator parser accepts) and the VERIFIED NAME
     /// are decoupled — dial by IP, verify by name — because quinn takes the SNI as
     /// an explicit `&str`, not from the socket address. So one self-signed
     /// `localhost` cert can be dialed at `quic/127.0.0.1:port` and still verify,
     /// with no IP SAN required; the self-signed leaf IS its own root, so the same
-    /// PEM serves as `root_ca_pem`.
-    pub fn from_ca_pem(root_ca_pem: &[u8], server_name: &str) -> io::Result<Self> {
-        let client_config = crate::quic_config::quic_client_config_from_pem(root_ca_pem, None)?;
+    /// PEM serves as `custom_root_ca_pem`.
+    pub fn from_ca_pem(custom_root_ca_pem: Option<&[u8]>, server_name: &str) -> io::Result<Self> {
+        let client_config =
+            crate::quic_config::quic_client_config_from_pem(custom_root_ca_pem, None)?;
         Ok(Self {
             client_config,
             server_name: server_name.to_owned(),
@@ -2026,8 +2046,7 @@ pub async fn dial_locator(locator: AnyLocator, cfg: &DialConfig) -> io::Result<D
             // carrying its own certificate material dials with no ambient
             // config at all.
             Proto::Quic => {
-                let client_config =
-                    quic_dial_client_config(ip.tls(), cfg.quic.as_ref(), "quic").await?;
+                let client_config = quic_dial_client_config(ip.tls(), cfg.quic.as_ref()).await?;
                 let server_name = quic_dial_server_name(cfg.quic.as_ref(), ip.addr);
                 let link = dial_quic(
                     ip.addr,
@@ -2064,8 +2083,7 @@ pub async fn dial_locator(locator: AnyLocator, cfg: &DialConfig) -> io::Result<D
             // seam: the two schemes share `cfg.quic`, and they now share the
             // locator layer over it.
             Proto::QuicDatagram => {
-                let client_config =
-                    quic_dial_client_config(ip.tls(), cfg.quic.as_ref(), "quic-datagram").await?;
+                let client_config = quic_dial_client_config(ip.tls(), cfg.quic.as_ref()).await?;
                 let server_name = quic_dial_server_name(cfg.quic.as_ref(), ip.addr);
                 let link = dial_quic_datagram(
                     ip.addr,
@@ -2242,7 +2260,7 @@ pub async fn dial_locator(locator: AnyLocator, cfg: &DialConfig) -> io::Result<D
                 // fallback here: a named locator's host IS the verified name,
                 // whether the material came from the tail or from the config.
                 let client_config =
-                    quic_dial_client_config(named_tls(&tls), cfg.quic.as_ref(), "quic").await?;
+                    quic_dial_client_config(named_tls(&tls), cfg.quic.as_ref()).await?;
                 let addrs = resolve_locator_addrs(&host, port).await?;
                 let link_socket = &cfg.link_socket(named_options(&socket), proto).await?;
                 let link = first_reachable(addrs, &format!("quic/{host}:{port}"), |addr| {
@@ -2268,8 +2286,7 @@ pub async fn dial_locator(locator: AnyLocator, cfg: &DialConfig) -> io::Result<D
             Proto::QuicDatagram => {
                 // R2599 — the datagram twin, through the same seam.
                 let client_config =
-                    quic_dial_client_config(named_tls(&tls), cfg.quic.as_ref(), "quic-datagram")
-                        .await?;
+                    quic_dial_client_config(named_tls(&tls), cfg.quic.as_ref()).await?;
                 let addrs = resolve_locator_addrs(&host, port).await?;
                 let link_socket = &cfg.link_socket(named_options(&socket), proto).await?;
                 let link =
@@ -2701,30 +2718,31 @@ fn named_tls(tls: &Option<Box<LinkTlsMaterial>>) -> &LinkTlsMaterial {
 /// material when its tail carries any, else the ambient `DialConfig.quic`.
 ///
 /// ONE seam for all four quic dial arms — stream and datagram, numeric and
-/// named — so the layering cannot drift between them. The typed `Unsupported`
-/// for the case where NEITHER supplies material is the arm each
-/// `match &cfg.quic { None => .. }` used to carry; moving it here is what lets
-/// a locator carrying its own material dial with no ambient config at all,
-/// which is upstream's behaviour — there the endpoint's own config IS the
-/// configuration.
+/// named — so the layering cannot drift between them. A locator carrying its
+/// own material dials with no ambient config at all, which is upstream's
+/// behaviour — there the endpoint's own config IS the configuration.
+///
+/// R2603 (open-debt 727) — the third layer, and the one that decides wz's
+/// DEFAULT TRUST POSTURE. Where neither the locator nor the ambient config
+/// supplies material this used to return a typed `Unsupported`, on the premise
+/// that with no configured CA there was nothing to verify a peer against. The
+/// public WebPKI roots overturn that premise: zenoh dials such a peer, so wz
+/// now builds the same public-roots-only client config rather than refusing.
+/// Fixing only the builders would have left this refusal standing in front of
+/// them, and a plain `quic/host:port` dial with a default `DialConfig` is
+/// exactly the case 727 is about — it reaches HERE, not the builders.
 #[cfg(feature = "transport-link-quic")]
 async fn quic_dial_client_config(
     material: &LinkTlsMaterial,
     ambient: Option<&QuicDialConfig>,
-    scheme: &'static str,
 ) -> io::Result<Arc<ClientConfig>> {
     if let Some(config) = crate::quic_config::quic_client_config_from_locator(material).await? {
         return Ok(config);
     }
-    ambient.map(|q| q.client_config.clone()).ok_or_else(|| {
-        io::Error::new(
-            io::ErrorKind::Unsupported,
-            format!(
-                "{scheme} dial requires DialConfig.quic (rustls client config + SNI name), \
-                 or a locator tail carrying its own certificate material"
-            ),
-        )
-    })
+    if let Some(quic) = ambient {
+        return Ok(quic.client_config.clone());
+    }
+    crate::quic_config::quic_client_config_from_pem(None, None)
 }
 
 /// R2599 — the name a NUMERIC quic dial verifies the peer certificate against:
@@ -6225,5 +6243,31 @@ mod tests {
             Ok(AnyLocator::Ip(_))
         ));
         drop(listener);
+    }
+
+    /// R2603 (open-debt 727) — a quic dial with NEITHER a locator tail NOR an
+    /// ambient config builds a public-roots client config instead of refusing.
+    ///
+    /// This is the layer the fix would have missed by stopping at the builders:
+    /// a plain `quic/host:port` dial against a default `DialConfig` never
+    /// reaches `quic_client_config_from_pem` at all — it reaches HERE, where
+    /// the answer used to be a typed `Unsupported` on the premise that with no
+    /// configured CA there was nothing to verify a peer against. zenoh dials
+    /// such a peer, so wz now does too.
+    #[cfg(feature = "transport-link-quic")]
+    #[tokio::test]
+    async fn a_quic_dial_with_no_material_anywhere_uses_the_public_roots() {
+        let config =
+            super::quic_dial_client_config(&wz_session_core::locator::LinkTlsMaterial::NONE, None)
+                .await
+                .expect(
+                    "a quic dial with no locator tail and no ambient config must build \
+             against the public WebPKI roots, not report Unsupported",
+                );
+        assert_eq!(
+            config.alpn_protocols,
+            vec![crate::quic_config::QUIC_ALPN.to_vec()],
+            "the fallback config must be a real QUIC client config, ALPN included"
+        );
     }
 }

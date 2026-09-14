@@ -69,8 +69,8 @@ async fn wz_to_wz_over_quic_reaches_established_and_delivers_put() {
     let key_pem = issued.key_pair.serialize_pem();
     let server_config = quic_server_config_from_pem(cert_pem.as_bytes(), key_pem.as_bytes(), None)
         .expect("build quic server config");
-    let client_config =
-        quic_client_config_from_pem(cert_pem.as_bytes(), None).expect("build quic client config");
+    let client_config = quic_client_config_from_pem(Some(cert_pem.as_bytes()), None)
+        .expect("build quic client config");
 
     // Bind the QUIC server endpoint BEFORE the initiator dials (learn the
     // OS-chosen port race-free, the bind/accept split pattern). The test owns
@@ -269,8 +269,8 @@ async fn a_listen_iface_bind_decides_whether_a_loopback_quic_dial_connects() {
         let server_config =
             quic_server_config_from_pem(cert_pem.as_bytes(), key_pem.as_bytes(), None)
                 .expect("build quic server config");
-        let client_config =
-            quic_client_config_from_pem(cert_pem.as_bytes(), None).expect("build quic client");
+        let client_config = quic_client_config_from_pem(Some(cert_pem.as_bytes()), None)
+            .expect("build quic client");
         let options = LinkSocketOptions {
             iface: Some(iface.to_string()),
             ..LinkSocketOptions::NONE
@@ -358,8 +358,8 @@ async fn a_named_quic_locator_verifies_against_the_locator_name_not_the_configur
     let key_pem = issued.key_pair.serialize_pem();
     let server_config = quic_server_config_from_pem(cert_pem.as_bytes(), key_pem.as_bytes(), None)
         .expect("build quic server config");
-    let client_config =
-        quic_client_config_from_pem(cert_pem.as_bytes(), None).expect("build quic client config");
+    let client_config = quic_client_config_from_pem(Some(cert_pem.as_bytes()), None)
+        .expect("build quic client config");
 
     let accept_cfg = AcceptConfig::default().with_quic(QuicAcceptConfig { server_config });
     let dial_cfg = DialConfig::default().with_quic(QuicDialConfig {
@@ -474,8 +474,19 @@ async fn a_named_quic_locator_verifies_against_the_locator_name_not_the_configur
 ///
 /// The SECOND half is the refutation arm, and it is permanent rather than a
 /// control run once: the SAME pair of locators with the material stripped out
-/// must still be refused. Without it a build that ignored the tails and quietly
-/// fell back to some ambient default would pass the first half.
+/// must NOT reach Established. Without it a build that ignored the tails and
+/// quietly fell back to some ambient default would pass the first half.
+///
+/// R2603 (open-debt 727) — the two halves of that arm stopped being the same
+/// assertion, and saying so is the point. A bare LISTEN is still a typed
+/// `Unsupported`: a listener has no certificate to present and nothing can
+/// invent one. A bare DIAL is no longer refused at all — it now builds a
+/// public-WebPKI-roots client config, as zenoh does, so it gets as far as a
+/// handshake and is rejected THERE by a peer whose self-signed certificate no
+/// public authority signed. The arm still refutes the fallback it was written
+/// to refute, and it now also pins WHICH rejection each half gives, so a build
+/// that silently moved the dial back to a cert-absence refusal would fail here
+/// rather than read as unchanged.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_locator_carrying_its_own_material_handshakes_with_no_ambient_config() {
     let issued = rcgen::generate_simple_self_signed(vec!["localhost".to_string()])
@@ -559,16 +570,152 @@ async fn a_locator_carrying_its_own_material_handshakes_with_no_ambient_config()
         std::io::ErrorKind::Unsupported,
         "the bind refusal must be the cert-absence one (got {listen_err:?})"
     );
+    // The DIAL half, where R2603 moved WHERE the dial is rejected without
+    // moving WHETHER. It no longer refuses before the wire: it builds the
+    // public-roots client config 727 restored and goes out to handshake. What
+    // must stay true is that it never reaches Established off some ambient
+    // default, and that the OLD refusal is gone.
+    //
+    // ⚠ The specific rejection is deliberately NOT pinned, and the reason is a
+    // measurement rather than caution. This arm's listener is no longer being
+    // accepted on — the first half consumed its one accept — and quinn sends a
+    // server certificate only once `Endpoint::accept` has been driven, so the
+    // dialer never receives one to judge. MEASURED here: the dial fails
+    // `Custom { kind: Other, error: TimedOut }`, not a trust decision. Pinning
+    // that timeout would pin the dial budget, and pinning a trust decision
+    // would assert something this fixture cannot produce. That the public
+    // roots really are in the fallback config is witnessed where it can be —
+    // `tls_config::trust_root_tests` on the store's contents, and
+    // `session_open::tests::a_quic_dial_with_no_material_anywhere_uses_the_public_roots`
+    // on the seam that builds it.
     let bare_dial = parse_any_locator(&format!("quic/localhost:{}", addr.port()))
         .expect("the bare dial parses");
     let dial_err = match dial_locator(bare_dial, &DialConfig::default()).await {
-        Ok(_) => panic!("a bare dial locator carries no material and no DialConfig.quic"),
+        Ok(_) => panic!("a bare dial locator must not reach Established off an ambient default"),
         Err(err) => err,
     };
-    assert_eq!(
+    assert_ne!(
         dial_err.kind(),
         std::io::ErrorKind::Unsupported,
-        "the dial refusal must be the cert-absence one (got {dial_err:?})"
+        "R2603 removed the cert-absence refusal on the dial: a bare dial must now \
+         reach the wire against the public roots rather than be refused before it \
+         (got {dial_err:?})"
+    );
+}
+
+/// R2603 — the smallest certificate lifetime a wall-clock expiry witness tries,
+/// in seconds. The value R2600 used as its ONLY one.
+const EXPIRY_BASE_LIFETIME: i64 = 3;
+
+// The widening below is a DOUBLING, so a base of zero or less would never grow
+// and the bounded retry would silently become a fixed one. Checked at compile
+// time rather than trusted to the literal above staying positive.
+const _: () = assert!(EXPIRY_BASE_LIFETIME > 0);
+
+/// R2603 — how many widenings a witness gets before it gives up. Five doublings
+/// run 3 / 6 / 12 / 24 / 48 seconds, so the last is comfortably past the
+/// 30-second setup stall hosted measured (below); a witness that cannot land
+/// inside 48 seconds is reporting something other than a busy runner, and
+/// should say so rather than widen forever.
+const EXPIRY_ATTEMPTS: u32 = 5;
+
+/// R2603 — what one attempt at a wall-clock expiry witness observed.
+enum ExpiryAttempt {
+    /// The handshake landed inside the certificate's validity window and the
+    /// product assertions ran. There is nothing to retry.
+    Observed,
+    /// The window had already closed when the handshake failed, so the attempt
+    /// witnessed NOTHING about the product. Carries what the handshake said,
+    /// for the give-up message.
+    VoidFixture(String),
+}
+
+/// R2603 — did the certificate window close before this handshake failed?
+///
+/// The attempt minted `deadline` itself, so this compares the two quantities
+/// that actually decide the question and reads no error text. A failure at or
+/// after the deadline had no valid fixture left to fail against; one before it
+/// is a real result about the product.
+fn fixture_window_closed(deadline: time::OffsetDateTime) -> bool {
+    time::OffsetDateTime::now_utc() >= deadline
+}
+
+/// R2603 — run a certificate-expiry witness with a lifetime the MACHINE earns,
+/// rather than one this file asserts.
+///
+/// ## What was measured
+///
+/// Both witnesses below mint a certificate valid for a few seconds and then
+/// need a TLS handshake to complete inside that window. The window opens when
+/// the certificate is MINTED; the handshake runs whenever the host schedules
+/// it, and nothing bounds the gap between the two. Hosted Layer C1bn runs this
+/// crate's whole test binary — 1463 lib tests plus every integration test, at
+/// 80 non-default features, on a shared runner — and measured that gap at
+/// THIRTY seconds against a three-second window. Run 34785424635 failed both
+/// witnesses with `certificate expired: verification time 1789339175 (UNIX),
+/// but certificate is not valid after 1789339148 (27 seconds ago)`, the same
+/// pair of timestamps in each, which is one scheduler stall catching both
+/// rather than either product path misbehaving.
+///
+/// ## Why a bigger constant is not the repair
+///
+/// It swaps one number the host never agreed to meet for another, and the
+/// number that proved too small had already been chosen to be comfortable. The
+/// witness would keep passing here and keep deciding hosted CI's colour by how
+/// busy the runner happened to be.
+///
+/// ## What the witness was conflating
+///
+/// Two unrelated outcomes reached the same `panic!`: "the product failed to
+/// close the link" and "my certificate expired before I could use it". Only
+/// the first is a defect; the second observed nothing at all. They are
+/// separable without reading any error text, because the attempt knows the
+/// deadline it minted — see [`fixture_window_closed`].
+///
+/// Once they are told apart the window stops being a guess: a void attempt
+/// DOUBLES it and runs again, so the lifetime becomes whatever this machine
+/// turned out to need, and a machine that needs nothing pays one attempt at the
+/// smallest one. Bounded, so a real regression cannot turn into a hang — after
+/// [`EXPIRY_ATTEMPTS`] widenings the witness fails and prints every attempt.
+async fn witness_earning_its_lifetime<F, Fut>(witness: &str, attempt: F)
+where
+    F: Fn(i64) -> Fut,
+    Fut: std::future::Future<Output = ExpiryAttempt>,
+{
+    let mut lifetime = EXPIRY_BASE_LIFETIME;
+    let mut voided = Vec::new();
+    for _ in 0..EXPIRY_ATTEMPTS {
+        match attempt(lifetime).await {
+            ExpiryAttempt::Observed => {
+                // Say which window finally held, ALWAYS -- including the
+                // ordinary first-try case. A widening that happens in silence
+                // is indistinguishable from one that never fires, which is the
+                // same reason a gate prints the population it read; without
+                // this line a hosted log cannot tell "the host was fast" from
+                // "the retry is dead code".
+                eprintln!(
+                    "{witness}: observed at a {lifetime}s certificate lifetime \
+                     after {} void attempt(s)",
+                    voided.len()
+                );
+                return;
+            }
+            ExpiryAttempt::VoidFixture(why) => {
+                eprintln!(
+                    "{witness}: fixture void at {lifetime}s ({why}); widening to {}s",
+                    lifetime * 2
+                );
+                voided.push(format!("{lifetime}s -> {why}"));
+                lifetime *= 2;
+            }
+        }
+    }
+    panic!(
+        "{witness}: all {EXPIRY_ATTEMPTS} attempts lost the certificate before the \
+         handshake could use it, widening {EXPIRY_BASE_LIFETIME}s -> {}s, so the \
+         witness never ran: {}",
+        lifetime / 2,
+        voided.join("; "),
     );
 }
 
@@ -583,97 +730,117 @@ async fn a_locator_carrying_its_own_material_handshakes_with_no_ambient_config()
 /// assertion and silently tear down every link whose peer cert ever expires.
 ///
 /// Wall-clock bounded on purpose: the certificate is issued valid-now and
-/// expiring in `LIFETIME`, which is the only way to observe a real expiry —
+/// expiring in `lifetime`, which is the only way to observe a real expiry —
 /// an already-expired chain is refused by rustls at handshake, so the link
-/// under test would never exist to be closed.
+/// under test would never exist to be closed. R2603 made that lifetime earned
+/// rather than constant; see [`witness_earning_its_lifetime`].
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn an_expiring_peer_chain_closes_only_the_link_that_asked_for_it() {
-    use std::time::Duration as StdDuration;
+    witness_earning_its_lifetime(
+        "an_expiring_peer_chain_closes_only_the_link_that_asked_for_it",
+        |lifetime| async move {
+            use std::time::Duration as StdDuration;
 
-    const LIFETIME: i64 = 3;
+            // A `localhost` cert valid now and expiring shortly. `not_after`
+            // needs second granularity, which rcgen's day-granular
+            // `date_time_ymd` cannot express — hence the `time` dev-dep.
+            let deadline = time::OffsetDateTime::now_utc() + time::Duration::seconds(lifetime);
+            let key_pair = rcgen::KeyPair::generate().expect("generate key pair");
+            let mut params =
+                rcgen::CertificateParams::new(vec!["localhost".to_string()]).expect("cert params");
+            params.not_after = deadline;
+            let issued = params
+                .self_signed(&key_pair)
+                .expect("self-signed localhost cert");
+            let cert_pem = issued.pem();
+            let key_pem = key_pair.serialize_pem();
 
-    // A `localhost` cert valid now and expiring shortly. `not_after` needs
-    // second granularity, which rcgen's day-granular `date_time_ymd` cannot
-    // express — hence the `time` dev-dep.
-    let key_pair = rcgen::KeyPair::generate().expect("generate key pair");
-    let mut params =
-        rcgen::CertificateParams::new(vec!["localhost".to_string()]).expect("cert params");
-    params.not_after = time::OffsetDateTime::now_utc() + time::Duration::seconds(LIFETIME);
-    let issued = params
-        .self_signed(&key_pair)
-        .expect("self-signed localhost cert");
-    let cert_pem = issued.pem();
-    let key_pem = key_pair.serialize_pem();
+            let server_config =
+                quic_server_config_from_pem(cert_pem.as_bytes(), key_pem.as_bytes(), None)
+                    .expect("build quic server config");
+            let endpoint = bind_quic(
+                "127.0.0.1:0".parse().expect("loopback addr"),
+                server_config,
+                &LinkSocket::NONE,
+            )
+            .await
+            .expect("bind quic server endpoint");
+            let addr = endpoint.local_addr().expect("endpoint local addr");
 
-    let server_config = quic_server_config_from_pem(cert_pem.as_bytes(), key_pem.as_bytes(), None)
-        .expect("build quic server config");
-    let endpoint = bind_quic(
-        "127.0.0.1:0".parse().expect("loopback addr"),
-        server_config,
-        &LinkSocket::NONE,
-    )
-    .await
-    .expect("bind quic server endpoint");
-    let addr = endpoint.local_addr().expect("endpoint local addr");
+            // One dial ARMS the watcher, one does not. Both run before expiry,
+            // so both handshake against a chain rustls still accepts; only the
+            // armed one should be torn down when that chain goes stale.
+            let dial_at = |armed: bool| {
+                let tail = if armed {
+                    ";close_link_on_expiration=true"
+                } else {
+                    ""
+                };
+                parse_any_locator(&format!(
+                    "quic/localhost:{}#root_ca_certificate_raw={cert_pem}{tail}",
+                    addr.port()
+                ))
+                .expect("dial locator parses")
+            };
 
-    // One dial ARMS the watcher, one does not. Both run before expiry, so both
-    // handshake against a chain rustls still accepts; only the armed one should
-    // be torn down when that chain goes stale.
-    let dial_at = |armed: bool| {
-        let tail = if armed {
-            ";close_link_on_expiration=true"
-        } else {
-            ""
-        };
-        parse_any_locator(&format!(
-            "quic/localhost:{}#root_ca_certificate_raw={cert_pem}{tail}",
-            addr.port()
-        ))
-        .expect("dial locator parses")
-    };
+            let server = endpoint.clone();
+            let accepting = tokio::spawn(async move {
+                let a = accept_quic_on(&server).await;
+                let b = accept_quic_on(&server).await;
+                (a, b)
+            });
 
-    let server = endpoint.clone();
-    let accepting = tokio::spawn(async move {
-        let a = accept_quic_on(&server).await;
-        let b = accept_quic_on(&server).await;
-        (a, b)
-    });
+            // Each dial must land INSIDE the window its certificate was minted
+            // for. One that fails once the window has closed says nothing about
+            // `close_link_on_expiration` — only that the host took longer to
+            // reach here than the certificate lived.
+            let armed = match dial_locator(dial_at(true), &DialConfig::default()).await {
+                Ok(DialedLink::Quic(link)) => link,
+                Ok(_) => panic!("expected a quic link"),
+                Err(err) => {
+                    accepting.abort();
+                    if fixture_window_closed(deadline) {
+                        return ExpiryAttempt::VoidFixture(format!("armed dial: {err:?}"));
+                    }
+                    panic!("armed dial reaches Established: {err:?}");
+                }
+            };
+            let bare = match dial_locator(dial_at(false), &DialConfig::default()).await {
+                Ok(DialedLink::Quic(link)) => link,
+                Ok(_) => panic!("expected a quic link"),
+                Err(err) => {
+                    accepting.abort();
+                    if fixture_window_closed(deadline) {
+                        return ExpiryAttempt::VoidFixture(format!("unarmed dial: {err:?}"));
+                    }
+                    panic!("unarmed dial reaches Established: {err:?}");
+                }
+            };
 
-    let armed = match dial_locator(dial_at(true), &DialConfig::default())
-        .await
-        .expect("armed dial reaches Established")
-    {
-        DialedLink::Quic(link) => link,
-        _ => panic!("expected a quic link"),
-    };
-    let bare = match dial_locator(dial_at(false), &DialConfig::default())
-        .await
-        .expect("unarmed dial reaches Established")
-    {
-        DialedLink::Quic(link) => link,
-        _ => panic!("expected a quic link"),
-    };
+            // The armed link must die once the chain expires.
+            let closed = tokio::time::timeout(
+                StdDuration::from_secs((lifetime as u64) + 12),
+                armed.connection.closed(),
+            )
+            .await;
+            assert!(
+                closed.is_ok(),
+                "an armed link must be closed once the peer's chain expires"
+            );
 
-    // The armed link must die once the chain expires.
-    let closed = tokio::time::timeout(
-        StdDuration::from_secs((LIFETIME as u64) + 12),
-        armed.connection.closed(),
+            // ...and the unarmed one must still be alive at that same moment,
+            // which is already PAST the expiry the armed link just died of.
+            assert!(
+                bare.connection.close_reason().is_none(),
+                "an unarmed link must survive its peer's chain expiring (got {:?})",
+                bare.connection.close_reason()
+            );
+
+            drop(accepting);
+            ExpiryAttempt::Observed
+        },
     )
     .await;
-    assert!(
-        closed.is_ok(),
-        "an armed link must be closed once the peer's chain expires"
-    );
-
-    // ...and the unarmed one must still be alive at that same moment, which is
-    // already PAST the expiry the armed link just died of.
-    assert!(
-        bare.connection.close_reason().is_none(),
-        "an unarmed link must survive its peer's chain expiring (got {:?})",
-        bare.connection.close_reason()
-    );
-
-    drop(accepting);
 }
 
 /// R2600 — the ACCEPT half: a listener arming `close_link_on_expiration` tears
@@ -690,125 +857,146 @@ async fn an_expiring_peer_chain_closes_only_the_link_that_asked_for_it() {
 /// peer chain at all, so there is nothing to expire. That makes this test also
 /// the behavioural cover open-debt item 728 asks for on `enable_mtls` — the
 /// listener demands a client certificate, and the dialer presents one.
+///
+/// R2603 made the client leaf's lifetime earned rather than constant; see
+/// [`witness_earning_its_lifetime`].
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn an_expiring_client_chain_closes_the_listener_that_asked_for_it() {
-    use rcgen::{
-        BasicConstraints, CertificateParams, ExtendedKeyUsagePurpose, IsCa, KeyPair,
-        KeyUsagePurpose,
-    };
-    use std::time::Duration as StdDuration;
+    witness_earning_its_lifetime(
+        "an_expiring_client_chain_closes_the_listener_that_asked_for_it",
+        |lifetime| async move {
+            use rcgen::{
+                BasicConstraints, CertificateParams, ExtendedKeyUsagePurpose, IsCa, KeyPair,
+                KeyUsagePurpose,
+            };
+            use std::time::Duration as StdDuration;
 
-    const LIFETIME: i64 = 3;
+            // One CA signs both ends; only the CLIENT leaf is short-lived, so the
+            // listener's own certificate is never what expires.
+            let ca_key = KeyPair::generate().expect("ca key");
+            let mut ca_params = CertificateParams::new(Vec::new()).expect("ca params");
+            ca_params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
+            ca_params.key_usages = vec![KeyUsagePurpose::KeyCertSign, KeyUsagePurpose::CrlSign];
+            let ca = ca_params.self_signed(&ca_key).expect("self-signed ca");
+            let ca_pem = ca.pem();
 
-    // One CA signs both ends; only the CLIENT leaf is short-lived, so the
-    // listener's own certificate is never what expires.
-    let ca_key = KeyPair::generate().expect("ca key");
-    let mut ca_params = CertificateParams::new(Vec::new()).expect("ca params");
-    ca_params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
-    ca_params.key_usages = vec![KeyUsagePurpose::KeyCertSign, KeyUsagePurpose::CrlSign];
-    let ca = ca_params.self_signed(&ca_key).expect("self-signed ca");
-    let ca_pem = ca.pem();
+            let server_key = KeyPair::generate().expect("server key");
+            let mut server_params =
+                CertificateParams::new(vec!["localhost".to_string()]).expect("server params");
+            server_params.extended_key_usages = vec![ExtendedKeyUsagePurpose::ServerAuth];
+            let server = server_params
+                .signed_by(&server_key, &ca, &ca_key)
+                .expect("ca-signed server cert");
 
-    let server_key = KeyPair::generate().expect("server key");
-    let mut server_params =
-        CertificateParams::new(vec!["localhost".to_string()]).expect("server params");
-    server_params.extended_key_usages = vec![ExtendedKeyUsagePurpose::ServerAuth];
-    let server = server_params
-        .signed_by(&server_key, &ca, &ca_key)
-        .expect("ca-signed server cert");
+            // A FRESH client cert per iteration. One shared short-lived cert cannot
+            // serve both arms: the armed arm spends the whole lifetime waiting for the
+            // close, so the second handshake would be refused by rustls for a cert that
+            // has already expired — which is a fact about the fixture, not the feature.
+            // Each hands back the DEADLINE it minted, which is what tells a void
+            // attempt from a real one ([`fixture_window_closed`]).
+            let issue_client = || {
+                let key = KeyPair::generate().expect("client key");
+                let mut params =
+                    CertificateParams::new(vec!["wz-client".to_string()]).expect("client params");
+                params.extended_key_usages = vec![ExtendedKeyUsagePurpose::ClientAuth];
+                let deadline = time::OffsetDateTime::now_utc() + time::Duration::seconds(lifetime);
+                params.not_after = deadline;
+                let cert = params
+                    .signed_by(&key, &ca, &ca_key)
+                    .expect("ca-signed client cert");
+                (cert.pem(), key.serialize_pem(), deadline)
+            };
 
-    // A FRESH client cert per iteration. One shared short-lived cert cannot
-    // serve both arms: the armed arm spends the whole lifetime waiting for the
-    // close, so the second handshake would be refused by rustls for a cert that
-    // has already expired — which is a fact about the fixture, not the feature.
-    let issue_client = || {
-        let key = KeyPair::generate().expect("client key");
-        let mut params =
-            CertificateParams::new(vec!["wz-client".to_string()]).expect("client params");
-        params.extended_key_usages = vec![ExtendedKeyUsagePurpose::ClientAuth];
-        params.not_after = time::OffsetDateTime::now_utc() + time::Duration::seconds(LIFETIME);
-        let cert = params
-            .signed_by(&key, &ca, &ca_key)
-            .expect("ca-signed client cert");
-        (cert.pem(), key.serialize_pem())
-    };
-
-    let listen_at = |armed: bool| {
-        let tail = if armed {
-            ";close_link_on_expiration=true"
-        } else {
-            ""
-        };
-        parse_any_locator(&format!(
-            "quic/127.0.0.1:0#listen_certificate_raw={};listen_private_key_raw={};\
+            let listen_at = |armed: bool| {
+                let tail = if armed {
+                    ";close_link_on_expiration=true"
+                } else {
+                    ""
+                };
+                parse_any_locator(&format!(
+                    "quic/127.0.0.1:0#listen_certificate_raw={};listen_private_key_raw={};\
              root_ca_certificate_raw={ca_pem};enable_mtls=true{tail}",
-            server.pem(),
-            server_key.serialize_pem(),
-        ))
-        .expect("listen locator parses")
-    };
+                    server.pem(),
+                    server_key.serialize_pem(),
+                ))
+                .expect("listen locator parses")
+            };
 
-    // The armed listener, and an unarmed twin as the permanent refutation arm.
-    for armed in [true, false] {
-        let mut listener = bind_locator(listen_at(armed), &AcceptConfig::default())
-            .await
-            .expect("mTLS listen material binds a quic acceptor");
-        let addr: std::net::SocketAddr = listener
-            .local_addr_display()
-            .expect("bound address")
-            .parse()
-            .expect("numeric listener address");
+            // The armed listener, and an unarmed twin as the permanent refutation arm.
+            for armed in [true, false] {
+                let mut listener = bind_locator(listen_at(armed), &AcceptConfig::default())
+                    .await
+                    .expect("mTLS listen material binds a quic acceptor");
+                let addr: std::net::SocketAddr = listener
+                    .local_addr_display()
+                    .expect("bound address")
+                    .parse()
+                    .expect("numeric listener address");
 
-        let (client_pem, client_key_pem) = issue_client();
-        let dial = parse_any_locator(&format!(
-            "quic/localhost:{}#root_ca_certificate_raw={ca_pem};enable_mtls=true;\
+                let (client_pem, client_key_pem, deadline) = issue_client();
+                let dial = parse_any_locator(&format!(
+                    "quic/localhost:{}#root_ca_certificate_raw={ca_pem};enable_mtls=true;\
              connect_certificate_raw={client_pem};connect_private_key_raw={client_key_pem}",
-            addr.port(),
-        ))
-        .expect("dial locator parses");
+                    addr.port(),
+                ))
+                .expect("dial locator parses");
 
-        let dial_cfg = DialConfig::default();
-        // The dialer must WRITE, not merely connect. quinn's `open_bi` puts
-        // nothing on the wire until the stream is written, so a server-side
-        // `accept_bi` waits forever on a dialer that connects and goes quiet —
-        // the trap this atom's own reason records from R311y601, and the reason
-        // the sibling witnesses drive a full session open rather than stopping
-        // at `dial_locator`.
-        let (accepted, dialed) = tokio::join!(accept_bound_on(&mut listener), async {
-            let mut d = dial_locator(dial, &dial_cfg).await?;
-            if let DialedLink::Quic(ref mut link) = d {
-                use tokio::io::AsyncWriteExt;
-                link.send.write_all(b"wz").await?;
-                link.send.flush().await?;
+                let dial_cfg = DialConfig::default();
+                // The dialer must WRITE, not merely connect. quinn's `open_bi` puts
+                // nothing on the wire until the stream is written, so a server-side
+                // `accept_bi` waits forever on a dialer that connects and goes quiet —
+                // the trap this atom's own reason records from R311y601, and the reason
+                // the sibling witnesses drive a full session open rather than stopping
+                // at `dial_locator`.
+                let (accepted, dialed) = tokio::join!(accept_bound_on(&mut listener), async {
+                    let mut d = dial_locator(dial, &dial_cfg).await?;
+                    if let DialedLink::Quic(ref mut link) = d {
+                        use tokio::io::AsyncWriteExt;
+                        link.send.write_all(b"wz").await?;
+                        link.send.flush().await?;
+                    }
+                    Ok::<_, std::io::Error>(d)
+                });
+                let dial_err = dialed.as_ref().err().map(|e| format!("{e:?}"));
+                // Neither half of the handshake can be judged once the client leaf's
+                // window has closed — it was the leaf being VALID that this arm needed,
+                // and the host took longer to get here than the leaf lived.
+                if (accepted.is_err() || dialed.is_err()) && fixture_window_closed(deadline) {
+                    let accept_err = accepted.as_ref().err().map(|e| format!("{e:?}"));
+                    return ExpiryAttempt::VoidFixture(format!(
+                        "armed={armed} accept: {accept_err:?} dial: {dial_err:?}"
+                    ));
+                }
+                let accepted = accepted.unwrap_or_else(|e| {
+                    panic!("listener accept failed: {e:?}; dial side: {dial_err:?}")
+                });
+                let _dialed = dialed.expect("the client's cert is accepted by the listener");
+                let acc_link = match accepted {
+                    DialedLink::Quic(link) => link,
+                    _ => panic!("expected a quic link"),
+                };
+
+                if armed {
+                    let closed = tokio::time::timeout(
+                        StdDuration::from_secs((lifetime as u64) + 12),
+                        acc_link.connection.closed(),
+                    )
+                    .await;
+                    assert!(
+                        closed.is_ok(),
+                        "an armed LISTENER must close the link once the client's chain expires"
+                    );
+                } else {
+                    tokio::time::sleep(StdDuration::from_secs((lifetime as u64) + 2)).await;
+                    assert!(
+                        acc_link.connection.close_reason().is_none(),
+                        "an unarmed listener must survive the client's chain expiring (got {:?})",
+                        acc_link.connection.close_reason()
+                    );
+                }
             }
-            Ok::<_, std::io::Error>(d)
-        });
-        let dial_err = dialed.as_ref().err().map(|e| format!("{e:?}"));
-        let accepted = accepted
-            .unwrap_or_else(|e| panic!("listener accept failed: {e:?}; dial side: {dial_err:?}"));
-        let _dialed = dialed.expect("the client's cert is accepted by the listener");
-        let acc_link = match accepted {
-            DialedLink::Quic(link) => link,
-            _ => panic!("expected a quic link"),
-        };
-
-        if armed {
-            let closed = tokio::time::timeout(
-                StdDuration::from_secs((LIFETIME as u64) + 12),
-                acc_link.connection.closed(),
-            )
-            .await;
-            assert!(
-                closed.is_ok(),
-                "an armed LISTENER must close the link once the client's chain expires"
-            );
-        } else {
-            tokio::time::sleep(StdDuration::from_secs((LIFETIME as u64) + 2)).await;
-            assert!(
-                acc_link.connection.close_reason().is_none(),
-                "an unarmed listener must survive the client's chain expiring (got {:?})",
-                acc_link.connection.close_reason()
-            );
-        }
-    }
+            ExpiryAttempt::Observed
+        },
+    )
+    .await;
 }

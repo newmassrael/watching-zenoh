@@ -3519,7 +3519,7 @@ mod tests {
         use crate::session_open::{connect_and_open_session, DialConfig, QuicDialConfig};
         use wz_session_core::locator::parse_any_locator;
         let locator = parse_any_locator(&format!("quic/{addr}")).expect("parse quic locator");
-        let client_config = quic_client_config_from_pem(cert_pem.as_bytes(), None)
+        let client_config = quic_client_config_from_pem(Some(cert_pem.as_bytes()), None)
             .expect("build quic client config");
         let cfg = DialConfig::default().with_quic(QuicDialConfig {
             client_config,
@@ -3585,7 +3585,7 @@ mod tests {
         use wz_session_core::locator::parse_any_locator;
         let locator = parse_any_locator(&format!("quic-datagram/{addr}"))
             .expect("parse quic-datagram locator");
-        let client_config = quic_client_config_from_pem(cert_pem.as_bytes(), None)
+        let client_config = quic_client_config_from_pem(Some(cert_pem.as_bytes()), None)
             .expect("build quic client config");
         let cfg = DialConfig::default().with_quic(QuicDialConfig {
             client_config,
@@ -4705,7 +4705,7 @@ mod tests {
             .expect("a quic mesh dial target resolves");
         let dial_config = Arc::new(
             DialConfig::default().with_quic(QuicDialConfig {
-                client_config: quic_client_config_from_pem(cert_pem.as_bytes(), None)
+                client_config: quic_client_config_from_pem(Some(cert_pem.as_bytes()), None)
                     .expect("build quic client config"),
                 server_name: "localhost".to_string(),
             }),

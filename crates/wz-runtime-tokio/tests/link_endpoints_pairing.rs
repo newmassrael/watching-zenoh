@@ -228,7 +228,7 @@ async fn quic_datagram_link_pair(
     let key_pem = issued.key_pair.serialize_pem();
     let server_config = quic_server_config_from_pem(cert_pem.as_bytes(), key_pem.as_bytes(), None)
         .expect("build the quic server config");
-    let client_config = quic_client_config_from_pem(cert_pem.as_bytes(), None)
+    let client_config = quic_client_config_from_pem(Some(cert_pem.as_bytes()), None)
         .expect("build the quic client config");
 
     let endpoint = bind_quic_datagram(

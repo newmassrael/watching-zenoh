@@ -16,7 +16,8 @@
 //! Everything else is shared with the TLS link: the PEM → DER loaders
 //! ([`certs_from_pem`](crate::tls_config::certs_from_pem) /
 //! [`private_key_from_pem`](crate::tls_config::private_key_from_pem) /
-//! [`root_store_from_pem`](crate::tls_config::root_store_from_pem)), the
+//! [`server_trust_roots`](crate::tls_config::server_trust_roots) /
+//! [`client_auth_roots`](crate::tls_config::client_auth_roots)), the
 //! [`ClientAuthPem`](crate::tls_config::ClientAuthPem) mTLS knob, the `ring`
 //! crypto provider, and the rustls 0.23 stack itself (quinn 0.11 + tokio-rustls
 //! 0.26 share one `rustls` — verified at integration). The built rustls config
@@ -29,7 +30,9 @@ use std::sync::Arc;
 use tokio_rustls::rustls::crypto::ring;
 use tokio_rustls::rustls::{version::TLS13, ClientConfig, ServerConfig};
 
-use crate::tls_config::{certs_from_pem, private_key_from_pem, root_store_from_pem, ClientAuthPem};
+use crate::tls_config::{
+    certs_from_pem, client_auth_roots, private_key_from_pem, server_trust_roots, ClientAuthPem,
+};
 // R2602 — these two serve ONLY the locator-material builders below, which are
 // `transport-unicast`-gated because `session_open` is their sole consumer.
 // Ungated here they are `unused_imports` in a `--no-default-features --features
@@ -58,7 +61,11 @@ where
 /// Build a TLS-1.3 + ALPN-`hq-29` rustls [`ClientConfig`] for a `quic/...` dial
 /// from PEM. The QUIC sibling of
 /// [`crate::tls_config::client_config_from_pem`], diverging only in the TLS-1.3
-/// pin and the ALPN; `root_ca_pem` is the server-trust bundle and `client_auth`
+/// pin and the ALPN; `custom_root_ca_pem` is an ADDITIONAL server-trust anchor
+/// on top of the public WebPKI roots
+/// ([`server_trust_roots`](crate::tls_config::server_trust_roots)), `None`
+/// meaning the public roots alone as zenoh dials (R2603, open-debt 727), and
+/// `client_auth`
 /// is the optional mTLS cert the dialer presents. The returned config feeds
 /// `quinn::crypto::rustls::QuicClientConfig::try_from` in
 /// [`crate::quic_pipeline::dial_quic`].
@@ -68,10 +75,10 @@ where
 /// dial would need that knob added here (a clean extension point), mirroring how
 /// the TLS link grew it.
 pub fn quic_client_config_from_pem(
-    root_ca_pem: &[u8],
+    custom_root_ca_pem: Option<&[u8]>,
     client_auth: Option<ClientAuthPem<'_>>,
 ) -> io::Result<Arc<ClientConfig>> {
-    let roots = root_store_from_pem(root_ca_pem)?;
+    let roots = server_trust_roots(custom_root_ca_pem)?;
     let provider = Arc::new(ring::default_provider());
 
     let builder = ClientConfig::builder_with_provider(provider)
@@ -121,7 +128,7 @@ pub fn quic_server_config_from_pem(
     let mut config = match client_ca_pem {
         Some(ca_pem) => {
             use tokio_rustls::rustls::server::WebPkiClientVerifier;
-            let client_roots = root_store_from_pem(ca_pem)?;
+            let client_roots = client_auth_roots(ca_pem)?;
             let verifier =
                 WebPkiClientVerifier::builder_with_provider(Arc::new(client_roots), provider)
                     .build()
@@ -167,9 +174,7 @@ pub fn quic_server_config_from_pem(
 pub(crate) async fn quic_client_config_from_locator(
     material: &LinkTlsMaterial,
 ) -> io::Result<Option<Arc<ClientConfig>>> {
-    let Some(root_ca) = resolve_optional_pem(material.root_ca.as_ref()).await? else {
-        return Ok(None);
-    };
+    let root_ca = resolve_optional_pem(material.root_ca.as_ref()).await?;
     let (cert, key) = if material.mtls() {
         (
             resolve_optional_pem(material.connect_certificate.as_ref()).await?,
@@ -189,7 +194,20 @@ pub(crate) async fn quic_client_config_from_locator(
                 "a locator enabling mTLS needs both connect_certificate and connect_private_key",
             )),
         };
-    quic_client_config_from_pem(&root_ca, auth).map(Some)
+    // R2603 (open-debt 727) — WHICH tails claim the dial. `root_ca` alone does,
+    // as before. A tail naming only CONNECT material now does too, because the
+    // public roots make it buildable: before 727 such a tail fell through to
+    // the ambient config and the client certificate it named was silently
+    // dropped, since a client config could not be built without a CA.
+    //
+    // Deliberately NOT `!material.is_empty()`: a LISTEN-only tail must still
+    // fall through. Claiming the dial for it would build a public-roots config
+    // that REPLACES an ambient one which may carry a private CA — narrowing
+    // trust on a locator that said nothing about dialing.
+    if root_ca.is_none() && auth.is_none() {
+        return Ok(None);
+    }
+    quic_client_config_from_pem(root_ca.as_deref(), auth).map(Some)
 }
 
 /// R2599 — the rustls SERVER config a quic-family listen uses when the LOCATOR
@@ -231,4 +249,97 @@ pub(crate) async fn quic_server_config_from_locator(
         None
     };
     quic_server_config_from_pem(&cert, &key, client_ca.as_deref()).map(Some)
+}
+
+/// R2603 (open-debt 727) — WHICH locator tails claim the dial, now that a
+/// client config is buildable without a configured CA.
+///
+/// The unit under test is the discriminator, not the rustls config: `Some(_)`
+/// means "this tail supplied the dial's material", `None` means "fall through
+/// to the ambient config". Before R2603 that answer was simply "did the tail
+/// name `root_ca`", which silently discarded a tail that named a client
+/// certificate and no CA.
+#[cfg(all(test, feature = "transport-unicast"))]
+mod locator_dial_claim_tests {
+    use super::quic_client_config_from_locator;
+    use wz_session_core::locator::{LinkTlsMaterial, PemSource};
+
+    fn mtls_pems() -> wz_runtime_tokio_test_support::MtlsPems {
+        wz_runtime_tokio_test_support::loopback_mtls_pems()
+    }
+
+    /// A tail naming nothing falls through, as it always has. The anti-vacuity
+    /// arm: without it every assertion below would pass on a function that
+    /// returned `None` unconditionally.
+    #[tokio::test]
+    async fn an_empty_tail_does_not_claim_the_dial() {
+        let claimed = quic_client_config_from_locator(&LinkTlsMaterial::NONE)
+            .await
+            .expect("an empty tail is not an error");
+        assert!(
+            claimed.is_none(),
+            "a tail naming no TLS material must fall through to the ambient config"
+        );
+    }
+
+    /// A LISTEN-only tail still falls through. This is the arm that keeps the
+    /// change from narrowing trust: claiming the dial here would build a
+    /// public-roots config that REPLACES an ambient one carrying a private CA,
+    /// on a locator that said nothing about dialing.
+    #[tokio::test]
+    async fn a_listen_only_tail_does_not_claim_the_dial() {
+        let pems = mtls_pems();
+        let material = LinkTlsMaterial {
+            listen_certificate: Some(PemSource::Raw(pems.server_cert_pem.clone())),
+            listen_private_key: Some(PemSource::Raw(pems.server_key_pem.clone())),
+            ..LinkTlsMaterial::NONE
+        };
+        let claimed = quic_client_config_from_locator(&material)
+            .await
+            .expect("a listen-only tail is not a dial error");
+        assert!(
+            claimed.is_none(),
+            "a tail carrying only LISTEN material must leave the dial to the ambient config"
+        );
+    }
+
+    /// THE 727 CASE. A tail naming a client certificate under mTLS and NO root
+    /// CA now claims the dial and carries that certificate. Before R2603 this
+    /// returned `None` and the certificate the operator wrote in the locator
+    /// was silently dropped, because no client config could be built without a
+    /// CA to verify the peer against.
+    #[tokio::test]
+    async fn a_connect_only_tail_claims_the_dial_and_keeps_its_client_certificate() {
+        let pems = mtls_pems();
+        let material = LinkTlsMaterial {
+            connect_certificate: Some(PemSource::Raw(pems.client_cert_pem.clone())),
+            connect_private_key: Some(PemSource::Raw(pems.client_key_pem.clone())),
+            enable_mtls: Some(true),
+            ..LinkTlsMaterial::NONE
+        };
+        let claimed = quic_client_config_from_locator(&material)
+            .await
+            .expect("a connect-only tail must build against the public roots");
+        assert!(
+            claimed.is_some(),
+            "a tail naming a client certificate must claim the dial even with no root_ca; \
+             falling through drops the certificate it named"
+        );
+    }
+
+    /// A tail naming only a root CA keeps claiming the dial, as before — the
+    /// path R2599 built. Present so the change is shown to ADD a claiming case
+    /// rather than trade one for another.
+    #[tokio::test]
+    async fn a_root_ca_tail_still_claims_the_dial() {
+        let pems = mtls_pems();
+        let material = LinkTlsMaterial {
+            root_ca: Some(PemSource::Raw(pems.ca_pem.clone())),
+            ..LinkTlsMaterial::NONE
+        };
+        let claimed = quic_client_config_from_locator(&material)
+            .await
+            .expect("a root_ca tail builds a client config");
+        assert!(claimed.is_some(), "a tail naming root_ca claims the dial");
+    }
 }

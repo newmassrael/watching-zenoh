@@ -119,7 +119,7 @@ async fn mtls_mutual_auth_reaches_established() {
 
     // Client trusts the CA (to verify the server) AND presents its own leaf.
     let client_config = client_config_from_pem(
-        pems.ca_pem.as_bytes(),
+        Some(pems.ca_pem.as_bytes()),
         Some(ClientAuthPem {
             cert_chain_pem: pems.client_cert_pem.as_bytes(),
             private_key_pem: pems.client_key_pem.as_bytes(),
@@ -167,9 +167,12 @@ async fn mtls_server_rejects_anonymous_client() {
 
     // Client presents NO cert (one-way client config) — the anonymous case the
     // mTLS server must reject.
-    let client_config =
-        client_config_from_pem(pems.ca_pem.as_bytes(), None, ServerNameVerification::Verify)
-            .expect("build anonymous client config from PEM");
+    let client_config = client_config_from_pem(
+        Some(pems.ca_pem.as_bytes()),
+        None,
+        ServerNameVerification::Verify,
+    )
+    .expect("build anonymous client config from PEM");
 
     let server_name = ServerName::try_from("localhost").expect("server name");
     // The dial's own result is intentionally not asserted: under TLS 1.3 the
@@ -200,9 +203,12 @@ async fn plain_tls_from_pem_reaches_established() {
     .expect("build one-way server config from PEM");
 
     // Client trusts the CA, presents NO cert.
-    let client_config =
-        client_config_from_pem(pems.ca_pem.as_bytes(), None, ServerNameVerification::Verify)
-            .expect("build one-way client config from PEM");
+    let client_config = client_config_from_pem(
+        Some(pems.ca_pem.as_bytes()),
+        None,
+        ServerNameVerification::Verify,
+    )
+    .expect("build one-way client config from PEM");
 
     let (opened_acc, opened_init) = open_both_to_established(server_config, client_config).await;
 
@@ -246,8 +252,9 @@ async fn one_way_tls_from_pem_files_reaches_established() {
 
     let server_config = server_config_from_pem(&server_cert, &server_key, None)
         .expect("build server config from file PEM");
-    let client_config = client_config_from_pem(&ca, None, ServerNameVerification::Verify)
-        .expect("build client config from file PEM");
+    let client_config =
+        client_config_from_pem(Some(ca.as_slice()), None, ServerNameVerification::Verify)
+            .expect("build client config from file PEM");
 
     let (opened_acc, opened_init) = open_both_to_established(server_config, client_config).await;
     assert!(
@@ -290,8 +297,9 @@ async fn one_way_tls_from_base64_pem_reaches_established() {
         None,
     )
     .expect("build server config from PEM");
-    let client_config = client_config_from_pem(&ca, None, ServerNameVerification::Verify)
-        .expect("build client config from base64-sourced CA");
+    let client_config =
+        client_config_from_pem(Some(ca.as_slice()), None, ServerNameVerification::Verify)
+            .expect("build client config from base64-sourced CA");
 
     let (opened_acc, opened_init) = open_both_to_established(server_config, client_config).await;
     assert!(
@@ -333,9 +341,12 @@ async fn server_name_verification_controls_san_mismatch_dial() {
     .expect("build one-way server config from PEM");
 
     // Default `Verify`: the SAN mismatch is rejected by the client handshake.
-    let strict_client =
-        client_config_from_pem(pems.ca_pem.as_bytes(), None, ServerNameVerification::Verify)
-            .expect("build strict client config");
+    let strict_client = client_config_from_pem(
+        Some(pems.ca_pem.as_bytes()),
+        None,
+        ServerNameVerification::Verify,
+    )
+    .expect("build strict client config");
     let (_acc, strict_dial) =
         tls_handshake_pair(server_config.clone(), strict_client, mismatched.clone()).await;
     assert!(
@@ -345,7 +356,7 @@ async fn server_name_verification_controls_san_mismatch_dial() {
 
     // `AnyName`: the same mismatch is accepted (the cert still chains to the CA).
     let any_name_client = client_config_from_pem(
-        pems.ca_pem.as_bytes(),
+        Some(pems.ca_pem.as_bytes()),
         None,
         ServerNameVerification::AnyName,
     )

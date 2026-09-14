@@ -304,7 +304,7 @@ fn apply_tls_ca(cfg: DialConfig, tls_ca: &Option<String>) -> io::Result<DialConf
     match tls_ca {
         Some(path) => {
             let ca_pem = read_pem_file(path)?;
-            let tls = TlsDialConfig::from_ca_pem(&ca_pem, "localhost")?;
+            let tls = TlsDialConfig::from_ca_pem(Some(ca_pem.as_slice()), "localhost")?;
             Ok(cfg.with_tls(tls))
         }
         None => Ok(cfg),
@@ -836,7 +836,7 @@ fn apply_quic_ca(cfg: DialConfig, quic_ca: &Option<String>) -> io::Result<DialCo
     match quic_ca {
         Some(path) => {
             let ca_pem = read_pem_file(path)?;
-            let quic = QuicDialConfig::from_ca_pem(&ca_pem, "localhost")?;
+            let quic = QuicDialConfig::from_ca_pem(Some(ca_pem.as_slice()), "localhost")?;
             Ok(cfg.with_quic(quic))
         }
         None => Ok(cfg),

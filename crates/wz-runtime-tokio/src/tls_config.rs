@@ -121,7 +121,8 @@ where
 
 /// Read TLS PEM material (a cert chain, a private key, or a CA bundle) from a
 /// file into the bytes the decoders below consume — the file-path SOURCE for
-/// [`certs_from_pem`] / [`private_key_from_pem`] / [`root_store_from_pem`]. This
+/// [`certs_from_pem`] / [`private_key_from_pem`] / [`server_trust_roots`] /
+/// [`client_auth_roots`]. This
 /// is the wz analogue of zenoh-rust reading the `*_FILE` config keys
 /// (`tokio::fs::read` in `zenoh-link-tls/src/utils.rs`) and of pico's file-path
 /// `TLS_CONFIG_*` keys.
@@ -142,7 +143,8 @@ pub fn read_pem_file(path: impl AsRef<Path>) -> io::Result<Vec<u8>> {
 
 /// Decode base64-wrapped PEM into the raw PEM bytes the decoders consume — the
 /// base64 SOURCE for [`certs_from_pem`] / [`private_key_from_pem`] /
-/// [`root_store_from_pem`]. Mirrors pico's `*_BASE64` TLS config keys (and
+/// [`server_trust_roots`] / [`client_auth_roots`]. Mirrors pico's `*_BASE64`
+/// TLS config keys (and
 /// zenoh-rust's `*_base64`): a multi-line PEM base64-wrapped into one token so it
 /// survives a transport that cannot carry raw newlines (an env var, a JSON
 /// field). The decoded bytes ARE PEM — feed them to a decoder like any other PEM
@@ -212,7 +214,8 @@ pub async fn resolve_optional_pem(source: Option<&PemSource>) -> io::Result<Opti
 
 /// Parse a PEM cert chain into DER certificates (leaf first). The chain a TLS
 /// peer PRESENTS (`with_single_cert` / `with_client_auth_cert`) and the trust
-/// bundle a peer VERIFIES against (via [`root_store_from_pem`]) are both decoded
+/// bundle a peer VERIFIES against (via [`server_trust_roots`] /
+/// [`client_auth_roots`]) are both decoded
 /// through this. Mirrors zenoh-rust's `rustls_pemfile::certs(...)` usage.
 pub fn certs_from_pem(pem: &[u8]) -> io::Result<Vec<CertificateDer<'static>>> {
     // `&[u8]` implements `BufRead`, so the PEM bytes are their own reader.
@@ -230,15 +233,68 @@ pub fn private_key_from_pem(pem: &[u8]) -> io::Result<PrivateKeyDer<'static>> {
         .ok_or_else(|| invalid_data("no private key found in PEM material"))
 }
 
-/// Build a [`RootCertStore`] trusting every certificate in the PEM bundle. Used
-/// for both the client's server-trust roots and the server's client-CA roots
-/// (the wz analogue of pico's `ROOT_CA_CERTIFICATE`). Each parsed cert is added
-/// as a trust anchor.
-pub fn root_store_from_pem(ca_pem: &[u8]) -> io::Result<RootCertStore> {
-    let mut roots = RootCertStore::empty();
+/// Add every certificate in the PEM bundle to `roots` as a trust anchor.
+///
+/// R2603 — deliberately NOT a trust-store constructor. It decides nothing about
+/// what the store already holds, which is the whole question
+/// [`server_trust_roots`] and [`client_auth_roots`] answer differently; it only
+/// decodes PEM and appends. Keeping the append in one place keeps the two
+/// constructors' PEM handling identical while leaving the SEED to their names.
+fn extend_roots_from_pem(roots: &mut RootCertStore, ca_pem: &[u8]) -> io::Result<()> {
     for cert in certs_from_pem(ca_pem)? {
         roots.add(cert).map_err(invalid_data)?;
     }
+    Ok(())
+}
+
+/// Build the roots a CLIENT verifies a SERVER's certificate against: the public
+/// WebPKI bundle, extended with `custom_root_ca_pem` when one is configured.
+///
+/// R2603 (open-debt 727) — the seed is what makes wz reach a publicly-trusted
+/// peer at all, and it is zenoh's own behaviour at both of its client builders
+/// (`io/zenoh-link-commons/src/quic/utils.rs` @ `roots: webpki_roots::TLS_SERVER_ROOTS.to_vec(),`,
+/// with `io/zenoh-links/zenoh-link-tls/src/utils.rs` @ `roots: webpki_roots::TLS_SERVER_ROOTS.to_vec(),`
+/// the identical line for the TLS link): seed the public roots, then extend
+/// with the configured CA, which
+/// upstream comments as "Allows mixed user-generated CA and webPKI CA".
+/// `None` is therefore the ordinary public posture rather than a failure, and
+/// `Some(..)` WIDENS trust rather than replacing it — a self-signed peer stays
+/// reachable because its own cert is passed here as the custom CA.
+///
+/// ⚠ THIS FUNCTION TRUSTS 121 PUBLIC CERTIFICATE AUTHORITIES (the
+/// `webpki_roots::TLS_SERVER_ROOTS` table, which the bundle's own releases
+/// grow and shrink). That is the correct default for verifying a SERVER, and
+/// the wrong one for verifying a CLIENT — which is why
+/// [`client_auth_roots`] exists as a separate name rather than a flag on this
+/// one. Calling this on an mTLS listener's client-cert verifier would make it
+/// accept any certificate signed by any of those authorities as an authorized
+/// client.
+pub fn server_trust_roots(custom_root_ca_pem: Option<&[u8]>) -> io::Result<RootCertStore> {
+    let mut roots = RootCertStore {
+        roots: webpki_roots::TLS_SERVER_ROOTS.to_vec(),
+    };
+    if let Some(ca_pem) = custom_root_ca_pem {
+        extend_roots_from_pem(&mut roots, ca_pem)?;
+    }
+    Ok(roots)
+}
+
+/// Build the roots a SERVER verifies a CLIENT's certificate against under mTLS:
+/// EXACTLY the certificates in `ca_pem`, and nothing else.
+///
+/// R2603 (open-debt 727) — the twin of [`server_trust_roots`], split from it
+/// because the two answer OPPOSITE questions and the single
+/// `root_store_from_pem` they replaced said in neither its name nor its type
+/// which one a caller was asking. Seeding public roots here would let every
+/// mTLS listener accept a client certificate signed by any public CA as
+/// authorized, so the empty start is load-bearing, not incidental.
+/// Upstream keeps the same separation: its `load_trust_anchors` starts from
+/// `RootCertStore::empty()` and its server path FAILS when that yields nothing
+/// (`io/zenoh-link-commons/src/quic/utils.rs` @ `|| Err(zerror!("Missing root certificates while mTLS is enabled.")),`),
+/// where its client path seeds the public bundle before extending.
+pub fn client_auth_roots(ca_pem: &[u8]) -> io::Result<RootCertStore> {
+    let mut roots = RootCertStore::empty();
+    extend_roots_from_pem(&mut roots, ca_pem)?;
     Ok(roots)
 }
 
@@ -349,8 +405,12 @@ impl ServerCertVerifier for AnyServerNameVerifier {
 
 /// Build a rustls [`ClientConfig`] for a `tls/...` dial from PEM.
 ///
-/// `root_ca_pem` is the trust bundle the dialer verifies the SERVER's cert
-/// against (its certificate, or the CA that issued it). `client_auth` is the
+/// `custom_root_ca_pem` is an ADDITIONAL trust anchor the dialer verifies the
+/// SERVER's cert against (its certificate, or the CA that issued it), on top of
+/// the public WebPKI roots [`server_trust_roots`] always seeds. R2603 made it
+/// `Option`: `None` dials with the public roots alone, as zenoh does, where
+/// before it was required and a publicly-trusted peer was unreachable
+/// (open-debt 727). `client_auth` is the
 /// mTLS knob: `Some(_)` makes the dialer PRESENT a client cert (mutual TLS),
 /// `None` is one-way TLS where only the server authenticates. `name_verification`
 /// chooses whether the server cert's SAN must match the dialed name
@@ -360,11 +420,11 @@ impl ServerCertVerifier for AnyServerNameVerifier {
 /// The returned config feeds [`crate::session_open::TlsDialConfig::client_config`]
 /// (the caller supplies the `ServerName` to verify alongside it).
 pub fn client_config_from_pem(
-    root_ca_pem: &[u8],
+    custom_root_ca_pem: Option<&[u8]>,
     client_auth: Option<ClientAuthPem<'_>>,
     name_verification: ServerNameVerification,
 ) -> io::Result<Arc<ClientConfig>> {
-    let roots = root_store_from_pem(root_ca_pem)?;
+    let roots = server_trust_roots(custom_root_ca_pem)?;
     let provider = Arc::new(ring::default_provider());
 
     let builder = ClientConfig::builder_with_provider(provider)
@@ -427,7 +487,7 @@ pub fn server_config_from_pem(
     // `WantsServerCert` builder state so the cert install below is shared.
     let config = match client_ca_pem {
         Some(ca_pem) => {
-            let client_roots = root_store_from_pem(ca_pem)?;
+            let client_roots = client_auth_roots(ca_pem)?;
             let verifier =
                 WebPkiClientVerifier::builder_with_provider(Arc::new(client_roots), provider)
                     .build()
@@ -447,4 +507,107 @@ pub fn server_config_from_pem(
     config.key_log = crate::tls_keylog::key_log();
 
     Ok(Arc::new(config))
+}
+
+/// R2603 (open-debt 727) — the two trust-root constructors, graded by the
+/// CONTENTS of the store each returns.
+///
+/// Why contents and not a handshake: the behaviour 727 restores is "dial a peer
+/// whose certificate a PUBLIC CA signed", and that cannot be witnessed on this
+/// machine — no test can mint a certificate under one of the bundled
+/// authorities, and reaching out to the real internet is not a test. The store
+/// contents ARE the thing that changed, so they are what is measured.
+#[cfg(test)]
+mod trust_root_tests {
+    use super::{client_auth_roots, server_trust_roots};
+
+    /// A self-signed CA in PEM, the shape both constructors take. `is_ca` marks
+    /// it a trust anchor webpki will accept, as `loopback_mtls_pems` does.
+    fn ca_pem() -> String {
+        use rcgen::{BasicConstraints, CertificateParams, IsCa, KeyPair};
+
+        let key = KeyPair::generate().expect("ca keypair");
+        let mut params = CertificateParams::new(Vec::<String>::new()).expect("ca params");
+        params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
+        params.self_signed(&key).expect("ca self-signed").pem()
+    }
+
+    /// The public bundle's size, read from the bundle itself. Never written as a
+    /// literal: the count moves whenever webpki-roots ships a new CA list, and a
+    /// hardcoded number would turn that release into a red with no defect
+    /// behind it.
+    fn public_root_count() -> usize {
+        webpki_roots::TLS_SERVER_ROOTS.len()
+    }
+
+    /// With no configured CA a client still trusts the full public bundle —
+    /// this is 727 itself. Before R2603 there was no such call: the parameter
+    /// was required and this state was unrepresentable.
+    #[test]
+    fn server_trust_with_no_configured_ca_is_the_public_bundle() {
+        let roots = server_trust_roots(None).expect("build public-only server-trust roots");
+        assert_eq!(
+            roots.roots.len(),
+            public_root_count(),
+            "a client with no configured CA must trust exactly the public WebPKI bundle"
+        );
+        assert!(
+            public_root_count() > 0,
+            "the public bundle must not be empty -- an empty one would make the \
+             assertion above pass while trusting nothing"
+        );
+    }
+
+    /// A configured CA WIDENS that trust rather than replacing it: the private
+    /// anchor is added to the public bundle, which is upstream's "Allows mixed
+    /// user-generated CA and webPKI CA".
+    #[test]
+    fn a_configured_ca_extends_the_public_bundle_rather_than_replacing_it() {
+        let ca = ca_pem();
+        let roots =
+            server_trust_roots(Some(ca.as_bytes())).expect("build extended server-trust roots");
+        assert_eq!(
+            roots.roots.len(),
+            public_root_count() + 1,
+            "a configured CA must be ADDED to the public bundle, not swapped for it"
+        );
+    }
+
+    /// THE CONTROL, and the reason the helper was split rather than seeded.
+    ///
+    /// The server's client-auth roots must hold EXACTLY the configured CA. If
+    /// this ever returns the public count instead, every mTLS listener accepts
+    /// any certificate signed by any public CA as an authorized client — a
+    /// silent authorization bypass that every happy-path mTLS test in this
+    /// crate would sail straight past, because a client presenting the RIGHT
+    /// certificate still connects either way.
+    #[test]
+    fn client_auth_roots_hold_only_the_configured_ca() {
+        let ca = ca_pem();
+        let roots = client_auth_roots(ca.as_bytes()).expect("build client-auth roots");
+        assert_eq!(
+            roots.roots.len(),
+            1,
+            "an mTLS listener must authorize ONLY the configured CA; \
+             {} would mean the public bundle leaked into the client verifier",
+            public_root_count()
+        );
+    }
+
+    /// The two constructors must not agree on the same store. Stated as its own
+    /// assertion because it is the SPLIT being verified, not either half: a
+    /// refactor that quietly routed both names back through one body would keep
+    /// the three tests above honest only by accident.
+    #[test]
+    fn the_two_root_constructors_answer_different_questions() {
+        let ca = ca_pem();
+        let server = server_trust_roots(Some(ca.as_bytes())).expect("server-trust roots");
+        let client = client_auth_roots(ca.as_bytes()).expect("client-auth roots");
+        assert_ne!(
+            server.roots.len(),
+            client.roots.len(),
+            "server-trust and client-auth roots must differ; equal counts mean \
+             one of them is seeding what the other does not"
+        );
+    }
 }

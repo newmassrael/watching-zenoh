@@ -106,7 +106,7 @@ async fn a_tls_session_exports_its_keys_in_nss_format() {
     let server_config = server_config_from_pem(cert_pem.as_bytes(), key_pem.as_bytes(), None)
         .expect("server config from pem");
     let client_config = client_config_from_pem(
-        cert_pem.as_bytes(),
+        Some(cert_pem.as_bytes()),
         None,
         wz_runtime_tokio::tls_config::ServerNameVerification::Verify,
     )
@@ -270,7 +270,7 @@ async fn a_tls_session_exports_its_keys_in_nss_format() {
     let server2 = server_config_from_pem(cert_pem2.as_bytes(), key_pem2.as_bytes(), None)
         .expect("server config 2");
     let client2 = client_config_from_pem(
-        cert_pem2.as_bytes(),
+        Some(cert_pem2.as_bytes()),
         None,
         wz_runtime_tokio::tls_config::ServerNameVerification::Verify,
     )

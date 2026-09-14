@@ -77,8 +77,8 @@ async fn wz_to_wz_over_quic_datagram_reaches_established_and_delivers_put() {
     let key_pem = issued.key_pair.serialize_pem();
     let server_config = quic_server_config_from_pem(cert_pem.as_bytes(), key_pem.as_bytes(), None)
         .expect("build quic server config");
-    let client_config =
-        quic_client_config_from_pem(cert_pem.as_bytes(), None).expect("build quic client config");
+    let client_config = quic_client_config_from_pem(Some(cert_pem.as_bytes()), None)
+        .expect("build quic client config");
 
     // Bind the QUIC datagram server endpoint BEFORE the initiator dials (learn
     // the OS-chosen port race-free, the bind/accept split). The test owns the
@@ -245,8 +245,8 @@ async fn a_named_quic_datagram_locator_verifies_against_the_locator_name() {
     let key_pem = issued.key_pair.serialize_pem();
     let server_config = quic_server_config_from_pem(cert_pem.as_bytes(), key_pem.as_bytes(), None)
         .expect("build quic server config");
-    let client_config =
-        quic_client_config_from_pem(cert_pem.as_bytes(), None).expect("build quic client config");
+    let client_config = quic_client_config_from_pem(Some(cert_pem.as_bytes()), None)
+        .expect("build quic client config");
 
     let accept_cfg = AcceptConfig::default().with_quic(QuicAcceptConfig { server_config });
     let dial_cfg = DialConfig::default().with_quic(QuicDialConfig {
@@ -388,8 +388,8 @@ async fn initial_mtu_on_the_locator_moves_each_sides_link_mtu_independently() {
         let server_config =
             quic_server_config_from_pem(cert_pem.as_bytes(), key_pem.as_bytes(), None)
                 .expect("build quic server config");
-        let client_config =
-            quic_client_config_from_pem(cert_pem.as_bytes(), None).expect("build quic client");
+        let client_config = quic_client_config_from_pem(Some(cert_pem.as_bytes()), None)
+            .expect("build quic client");
 
         let listen_opts = opts(listen_mtu);
         let listen_sock = LinkSocket::resolve(

@@ -529,15 +529,21 @@ fn listen_accept_config(tls: &CapiTlsConfig) -> std::io::Result<AcceptConfig> {
 ///
 /// Before it existed the C ABI dialed with [`DialConfig::default`] unconditionally,
 /// so a `tls/...` connect had no trust bundle and no name to verify and could not
-/// complete a handshake at all, regardless of what the caller had configured. The
-/// root CA is what makes the config non-default: without one there is nothing to
-/// verify the peer against, so the cert-free default is returned and the runtime
-/// reports the unsupported dial rather than this function inventing a trust policy.
+/// complete a handshake at all, regardless of what the caller had configured.
+///
+/// R2603 (open-debt 727) — it no longer bails when the caller configured no root
+/// CA. That bail was correct on its own premise, which it stated: without a
+/// configured CA there was nothing to verify the peer against, so it returned
+/// the cert-free default and let the runtime report an unsupported dial "rather
+/// than this function inventing a trust policy". 727 overturns the premise. A
+/// trust policy now EXISTS one layer down — `server_trust_roots` seeds the
+/// public WebPKI roots, as zenoh does — so this function invents nothing by
+/// passing the caller's `Option` straight through: `None` means the public
+/// roots, which is what a pico application dialing a publicly-trusted peer
+/// expects and what it could not get before.
 fn dial_config(tls: &CapiTlsConfig, endpoint: &str) -> std::io::Result<DialConfig> {
     let cfg = DialConfig::default();
-    let Some(root_ca) = tls.root_ca_pem.as_deref() else {
-        return Ok(cfg);
-    };
+    let root_ca = tls.root_ca_pem.as_deref();
     // The dialed host doubles as SNI and, under `Verify`, as the name checked
     // against the peer cert's SAN.
     let server_name = locator_host(endpoint).unwrap_or("localhost");
