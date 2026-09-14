@@ -1337,7 +1337,12 @@ PIN_NO_SYMBOL = 2
 # reason happened to hold one ambiguous occurrence and this one holds none. The
 # rule is not "retirements move it" but "a retirement removes whatever the atom
 # held" — measure it, do not infer it from the previous retirement.
-PIN_WZ_CITATIONS = 203
+# R2621 — 203 -> 204, RISING because no atom retired: `ext-pubsub-advanced-
+# subscriber` stays PARTIAL (its retention clause is built, the handler /
+# background surface is not), so it is still graded and the correction's one wz
+# citation — the sweep itself — is ADDED to the population. 203 + 1 = 204.
+# AMBIGUOUS is untouched: that citation is rooted and unambiguous.
+PIN_WZ_CITATIONS = 204
 PIN_AMBIGUOUS = 44
 
 
