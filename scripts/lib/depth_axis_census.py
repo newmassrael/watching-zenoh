@@ -1355,7 +1355,15 @@ PIN_NO_SYMBOL = 2
 # reason, and the new citations it wrote went into the retiring atom's own text,
 # which is no longer read here. 204 - 6 = 198. AMBIGUOUS holds at 44 -- none of
 # the six was one of the ambiguous ones.
-PIN_WZ_CITATIONS = 198
+# R2623 — 198 -> 200, RISING because no atom retired: `time-hlc` stays PARTIAL
+# (its auto-stamp residual is closed and two impossibility premises refuted, but
+# the absorb branch's cross-impl witness is still unbuilt), so it is still graded
+# and the correction's two wz citations are ADDED to the population -- the
+# pico-routes leg that refutes "neither upstream can be made to publish through
+# wz's router-role session", and the new fully-foreign stamp leg that replaces
+# it. 198 + 2 = 200. REACHED holds at 34 and AMBIGUOUS at 44: both citations are
+# rooted and unambiguous, and no atom left the population.
+PIN_WZ_CITATIONS = 200
 PIN_AMBIGUOUS = 44
 
 

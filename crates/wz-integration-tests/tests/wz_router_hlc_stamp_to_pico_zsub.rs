@@ -77,8 +77,9 @@ use std::process::{Command, Stdio};
 use std::time::Duration;
 
 use wz_integration_tests::common::{
-    graceful_terminate, read_captured, spawn_on_ephemeral_port, spawn_subscribed_zsub,
-    wait_for_substring, wz_ap_demo_binary, zenoh_pico_cli_binary, ChildGuard,
+    assert_demo_binary_newer_than_sources, graceful_terminate, read_captured,
+    spawn_on_ephemeral_port, spawn_subscribed_zsub, wait_for_substring, wz_ap_demo_binary,
+    zenoh_pico_cli_binary, ChildGuard,
 };
 
 /// The pico witness. `z_sub_attachment` prints `with timestamp: <ntp64-u64>` only
@@ -88,6 +89,23 @@ const RECEIVED_WITNESS: &str = ">> [Subscriber] Received";
 const PUBLISH_KEY: &str = "demo/hlc";
 const SUB_KEY: &str = "demo/**";
 const PUBLISH_VALUE: &str = "bare-put-stamped-by-wz-router";
+
+/// R2623 — which implementation publishes the bare Put.
+///
+/// A PARAMETER rather than a second topology, deliberately: every other hop --
+/// the router argv, the pico subscriber, the barrier, the witnesses -- has to be
+/// identical for the two publishers to be comparable at all, and a copied
+/// harness drifts. This is the same reason `relay_a_bare_put_with` takes the
+/// router's extra argv rather than forking.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Publisher {
+    /// `wz-ap-demo --publish`. wz on the publishing end as well as the routing
+    /// one, which is what the original three legs run.
+    Wz,
+    /// A real zenoh-pico `z_put`. FOREIGN on the publishing end, so the only wz
+    /// in the path is the router itself.
+    Pico,
+}
 
 /// The outcome of one publisher -> router -> pico run: what pico printed, plus the
 /// router's stderr for diagnosis.
@@ -105,7 +123,13 @@ struct RelayOutcome {
 /// running the same topology both ways is what makes the positive result
 /// attributable to the stamp rather than to the topology.
 fn relay_a_bare_put() -> RelayOutcome {
-    relay_a_bare_put_with(&[])
+    relay_a_bare_put_from(Publisher::Wz, &[])
+}
+
+/// [`relay_a_bare_put`] with EXTRA argv words on the router-hat, publishing from
+/// wz. Kept so the two pre-R2623 callers read unchanged.
+fn relay_a_bare_put_with(router_extra: &[&str]) -> RelayOutcome {
+    relay_a_bare_put_from(Publisher::Wz, router_extra)
 }
 
 /// [`relay_a_bare_put`] with EXTRA argv words on the router-hat.
@@ -115,8 +139,22 @@ fn relay_a_bare_put() -> RelayOutcome {
 /// nothing else moves. Everything downstream — the pico client, the barrier, the
 /// publisher, the witnesses — is shared, which is what makes a difference in the
 /// outcome attributable to the flag.
-fn relay_a_bare_put_with(router_extra: &[&str]) -> RelayOutcome {
+///
+/// R2623 — the PUBLISHER joined the router argv as a parameter, for the leg that
+/// takes wz off the publishing end entirely.
+fn relay_a_bare_put_from(publisher: Publisher, router_extra: &[&str]) -> RelayOutcome {
     let demo = wz_ap_demo_binary();
+    // R2623 — every leg in this file spawns the router through here, so the
+    // staleness check belongs here rather than in four places.
+    //
+    // It is load-bearing in THIS file specifically: three of the four legs are
+    // attribution twins that vary the ROUTER BUILD (`time-hlc` compiled in or
+    // out) or its argv, and they read the verdict out of a foreign subscriber's
+    // stdout. A demo not rebuilt between the two builds reports the previous
+    // one, which turns an attribution twin green for the wrong reason -- a
+    // control coming back green, which is a finding about the control read as a
+    // pass.
+    assert_demo_binary_newer_than_sources(&demo);
     let z_sub = zenoh_pico_cli_binary("z_sub_attachment");
 
     // The wz router-hat binds first so the pico client + the wz publisher can dial
@@ -159,29 +197,56 @@ fn relay_a_bare_put_with(router_extra: &[&str]) -> RelayOutcome {
         )
     });
 
-    // wz-ap-demo: a WhatAmI::Client of the same router emitting a Put burst that
-    // carries NO timestamp (see fact 1 in the module note). Any timestamp pico
-    // reports therefore did not come from here.
-    let pub_stderr = tempfile::tempfile().expect("tempfile for wz publisher stderr");
-    let pub_writer = pub_stderr
-        .try_clone()
-        .expect("dup wz publisher stderr handle");
+    // THE PUBLISHER. Either way it emits a Put carrying NO timestamp, so any
+    // timestamp pico reports did not come from here (see fact 1 in the module
+    // note for wz; for pico, `vendor/zenoh-pico/examples/unix/c11/z_put.c`
+    // contains the string `timestamp` zero times).
+    let pub_stderr = tempfile::tempfile().expect("tempfile for publisher output");
+    let pub_writer = pub_stderr.try_clone().expect("dup publisher output handle");
     let mut pub_reader = pub_stderr;
-    let mut pub_child = ChildGuard::wrap(
-        "wz-ap-demo (--connect wz-router --publish, no timestamp)".to_string(),
-        Command::new(&demo)
-            .arg("--connect")
-            .arg(format!("127.0.0.1:{port}"))
-            .arg("--publish")
-            .arg(PUBLISH_KEY)
-            .arg("--value")
-            .arg(PUBLISH_VALUE)
-            .env("RUST_LOG", "info")
-            .stdout(Stdio::null())
-            .stderr(Stdio::from(pub_writer))
-            .spawn()
-            .expect("spawn wz-ap-demo --connect wz-router --publish"),
-    );
+    let mut pub_child = match publisher {
+        Publisher::Wz => ChildGuard::wrap(
+            "wz-ap-demo (--connect wz-router --publish, no timestamp)".to_string(),
+            Command::new(&demo)
+                .arg("--connect")
+                .arg(format!("127.0.0.1:{port}"))
+                .arg("--publish")
+                .arg(PUBLISH_KEY)
+                .arg("--value")
+                .arg(PUBLISH_VALUE)
+                .env("RUST_LOG", "info")
+                .stdout(Stdio::null())
+                .stderr(Stdio::from(pub_writer))
+                .spawn()
+                .expect("spawn wz-ap-demo --connect wz-router --publish"),
+        ),
+        // One-shot: open -> declare keyexpr -> put -> exit. Spawned through
+        // `stdbuf` for the same reason the routes leg does it — pico's stdout is
+        // a pipe here, so it would otherwise be block-buffered and the exit
+        // could race the flush.
+        Publisher::Pico => ChildGuard::wrap(
+            "zenoh-pico z_put (-> wz router-hat, no timestamp)".to_string(),
+            Command::new("stdbuf")
+                .args(["-oL", "-eL"])
+                .arg(zenoh_pico_cli_binary("z_put"))
+                .args([
+                    "-k",
+                    PUBLISH_KEY,
+                    "-v",
+                    PUBLISH_VALUE,
+                    "-e",
+                    &endpoint,
+                    "-m",
+                    "client",
+                ])
+                .stdout(Stdio::from(
+                    pub_writer.try_clone().expect("dup z_put stdout handle"),
+                ))
+                .stderr(Stdio::from(pub_writer))
+                .spawn()
+                .expect("spawn zenoh-pico z_put via stdbuf"),
+        ),
+    };
 
     let received = wait_for_substring(&mut z_sub_reader, RECEIVED_WITNESS, Duration::from_secs(15));
 
@@ -298,6 +363,67 @@ fn wz_router_hat_told_not_to_timestamp_relays_a_bare_put_unstamped() {
          line at the pico end — zenoh's `timestamping.enabled` did not reach the \
          forward-path gate, so wz stamps where a stock zenohd would relay \
          bare\n--- pico stdout ---\n{}\n--- router-hat stderr ---\n{}",
+        outcome.pico_stdout,
+        outcome.router_stderr
+    );
+}
+
+/// R2623 — the FULLY FOREIGN leg: a real zenoh-pico `z_put` publishes a bare Put,
+/// a wz `--router-hat` stamps it, and a real zenoh-pico `z_sub_attachment` decodes
+/// the timestamp. wz is the only non-pico hop in the path.
+///
+/// ## Why this leg exists, and what it refutes
+///
+/// `time-hlc`'s reason carried a residual saying the auto-stamp's foreign witness
+/// "is still non-discriminating because neither upstream can be made to publish
+/// through wz's router-role session". That premise is FALSE against this tree and
+/// was false before this round: `wz_router_routes_pico_interop.rs` already routes
+/// a real pico `z_pub` and a real pico `z_put` through a wz `--router`. The
+/// capability was never missing; no leg had combined it with the timestamp
+/// assertion.
+///
+/// The difference this makes is not decorative. The three legs above all put wz
+/// on the PUBLISHING end, so each of them proves "wz's router stamps what wz's
+/// publisher sent" — and a shared wz assumption about the bare-Put encoding sits
+/// on both ends of that claim. Here the Put is encoded by zenoh-pico and decoded
+/// by zenoh-pico; the only thing wz contributes is the stamp, which is exactly
+/// the thing under test.
+///
+/// The attribution twins above cover this leg too, because they vary the ROUTER
+/// (its `time-hlc` feature, its `--timestamping` flag) and the router is shared.
+// wz-proves: time-hlc pico->wz partial
+// wz-proves: router-hat-router pico->wz partial
+#[test]
+#[ignore = "binary-dep e2e (wz-ap-demo --features router-hat-router,time-hlc + zenoh-pico z_put/z_sub_attachment); Layer E8t runs via --ignored"]
+fn wz_router_hat_hlc_stamps_a_bare_pico_put_for_pico_zsub_attachment() {
+    let outcome = relay_a_bare_put_from(Publisher::Pico, &[]);
+
+    assert!(
+        outcome.saw_sample,
+        "pico z_sub_attachment never logged '{RECEIVED_WITNESS}' within 15s — the \
+         pico z_put did not route through the wz router-hat to the pico \
+         subscriber, so the timestamp assertion below would be vacuous\n--- pico \
+         stdout ---\n{}\n--- router-hat stderr ---\n{}",
+        outcome.pico_stdout, outcome.router_stderr
+    );
+    assert!(
+        outcome
+            .pico_stdout
+            .contains(&format!("'{PUBLISH_KEY}': '{PUBLISH_VALUE}'")),
+        "the pico subscriber received a sample, but not the pico z_put's \
+         '{PUBLISH_KEY}' Put with payload '{PUBLISH_VALUE}'\n--- pico stdout ---\n{}",
+        outcome.pico_stdout
+    );
+    // THE PROOF: pico's z_put sets no timestamp, the only hop was the wz router,
+    // and pico prints this line only when the sample carries one. Both ends are
+    // foreign, so nothing wz encodes is being read back by wz.
+    assert!(
+        outcome.pico_stdout.contains(TIMESTAMP_WITNESS),
+        "a real pico z_put routed through the wz router-hat reached a real pico \
+         subscriber with no '{TIMESTAMP_WITNESS}' line — the §5.18 forward-path \
+         stamp does not apply to a FOREIGN publisher's Put, which the wz-published \
+         legs above cannot see\n--- pico stdout ---\n{}\n--- router-hat stderr \
+         ---\n{}",
         outcome.pico_stdout,
         outcome.router_stderr
     );

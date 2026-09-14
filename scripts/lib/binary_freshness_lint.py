@@ -173,7 +173,17 @@ REFUSAL_TOKENS = frozenset({"code", "success"})
 # log, so a demo not rebuilt between the damage and the run reports the
 # undamaged product -- a control returning green, which is a finding about the
 # control, read as a pass.
-CARRIED_SUBJECT = 225
+# 225 -> 222 (R2623), the same route a third time. R2623 added one fully-foreign
+# leg to `wz_router_hlc_stamp_to_pico_zsub.rs` with no freshness call and this
+# budget went 225 -> 226; the repair is the CALL, and it went into
+# `relay_a_bare_put_from`, which every leg in that file spawns the router
+# through, so all FOUR left the carried bucket at once. 226 measured, 222 after.
+#
+# That file is the sharpest case for the check in the tree: three of its four
+# legs are attribution twins that vary the ROUTER BUILD (`time-hlc` in or out)
+# and read their verdict from a foreign subscriber's stdout, so a demo not
+# rebuilt between the two builds makes a twin agree with the wrong binary.
+CARRIED_SUBJECT = 222
 PROBE_ROUTE = 24
 REFUSAL_ONLY = 8
 

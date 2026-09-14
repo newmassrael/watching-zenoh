@@ -17512,6 +17512,17 @@ layer_e8t_router_hat_hlc_stamp_pico() {
         --test wz_router_hlc_stamp_to_pico_zsub -- --ignored --quiet --test-threads=1 \
         --exact wz_router_hat_hlc_stamps_a_bare_put_for_pico_zsub_attachment 2>&1 \
         | tee /dev/stderr | grep -qE '^test result: ok\. 1 passed') || return 1
+    # R2623 — the FULLY FOREIGN leg, on the SAME build as leg 1: a real pico
+    # `z_put` publishes the bare Put instead of wz-ap-demo, so the only non-pico
+    # hop in the path is the router doing the stamping. Legs 1-3 all put wz on
+    # the publishing end, which means a shared wz assumption about the bare-Put
+    # encoding sits on both ends of their claim; here the Put is encoded and
+    # decoded by zenoh-pico. The attribution twins below cover it too, because
+    # they vary the ROUTER and the router is shared.
+    (cd crates && cargo test -p wz-integration-tests \
+        --test wz_router_hlc_stamp_to_pico_zsub -- --ignored --quiet --test-threads=1 \
+        --exact wz_router_hat_hlc_stamps_a_bare_pico_put_for_pico_zsub_attachment 2>&1 \
+        | tee /dev/stderr | grep -qE '^test result: ok\. 1 passed') || return 1
     # R2112 (open-debt items 102 + 210) — the CONFIG twin, on the SAME build as
     # leg 1 and deliberately so: it varies an ARGV WORD, not a cargo feature, so
     # a rebuild between the two would confound the axis it exists to isolate. It

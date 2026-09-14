@@ -662,7 +662,15 @@ HOST_GATED_CI_TARGETS: dict[str, str] = {
 # `ext_qos` must equal the stock one recorded in that run. Partial because the
 # ResponseFinal's QoS is printed there and not yet asserted, and because a stock
 # get cannot vary its QoS, so inheritance itself is witnessed in-tree.
-FOREIGN_ADJUDICATOR_LINKS = 911
+# R2623 — 911 -> 916, RISING because a round added foreign adjudication, which
+# is what this counter exists to record. The leg is
+# `wz_router_hat_hlc_stamps_a_bare_pico_put_for_pico_zsub_attachment`: a real
+# zenoh-pico `z_put` publishes a bare Put, a wz `--router-hat` stamps it, and a
+# real zenoh-pico `z_sub_attachment` decodes the timestamp, so BOTH ends of the
+# claim are foreign and wz is the only hop in between. Its two claims
+# (`time-hlc pico->wz`, `router-hat-router pico->wz`) reach five adjudicator
+# links across the lanes that run this binary.
+FOREIGN_ADJUDICATOR_LINKS = 916
 
 # ── Execution disclosure ────────────────────────────────────────────────────────
 #
