@@ -883,7 +883,15 @@ CITATION = re.compile(r"\b((?:[A-Za-z0-9_.-]+/)*[A-Za-z0-9_.-]+\.(?:rs|c|h))(?::
 # answered and brokered. It is a REACHED atom, its units run under
 # `routing-interest-pending-gc` in Layer C1y, so it leaves this count with the
 # population; UNREACHED and NO_SYMBOL hold, as for every retirement above.
-PIN_REACHED = 38
+# R2616 — 38 -> 37: `declare-interest` went PARTIAL -> COMPLETE. Its LAST
+# surviving residual had already been BUILT, by R2577, which did not edit this
+# atom's reason -- so the grading stood stale while the code moved (open debt
+# 47's shape). A bare `get_matching_status()` poll now reads a registry the
+# DECLARE filled. It is a REACHED atom by a wide margin (the derivation gives 32
+# owned symbols and 20 referencing tests, and its witnesses sit in the DEFAULT
+# lib population rather than behind a lane), so it leaves this count with the
+# population; UNREACHED and NO_SYMBOL hold, as for every retirement above.
+PIN_REACHED = 37
 PIN_UNREACHED = 3
 PIN_NO_SYMBOL = 2
 # R2534 — 346 -> 347. The atom is `adminspace-metrics` and the citation is the
@@ -1276,7 +1284,18 @@ PIN_NO_SYMBOL = 2
 # whose correction argues FROM the pin cites the pin, and upstream paths are
 # read as unjudged here by construction (R2215) -- so a long correction can move
 # this count by nothing at all. Measure it; do not size it by the diff.
-PIN_WZ_CITATIONS = 228
+# R2616 — 228 -> 223, AMBIGUOUS unchanged at 45. The same retirement shape:
+# `declare-interest` went PARTIAL -> COMPLETE and takes its citation set with it.
+# DERIVED with THIS module's own `citation_audit` over that atom's reason before
+# and after this round's append, with the R2609 correction applied rather than
+# rediscovered: wz 5 -> 7 (the correction cites two wz paths, the publisher and
+# querier declare sites), so the round contributes 2 and the atom removes 7.
+# 228 + 2 - 7 = 223, which is what the census measures.
+# ⚠ 228 - 5 = 223 ARRIVES AT THE SAME NUMBER BY LUCK, exactly as R2612 recorded
+# for its own retirement: the two terms happen to cancel again. Do not read that
+# as the shorter form working -- it is the third round in a row where it would
+# have agreed by coincidence, which is precisely what makes it untrustworthy.
+PIN_WZ_CITATIONS = 223
 PIN_AMBIGUOUS = 45
 
 
