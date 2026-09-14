@@ -835,6 +835,15 @@ pub use wz_session_core::session_fsm_unicast;
 #[cfg(feature = "scouting-active")]
 pub mod scouting_glue;
 
+// R2611 — the ASK side of that window, over every multicast-capable interface
+// instead of the one the kernel's default route picks. Gated on
+// `scouting-active` ALONE, and not additionally on `link-interfaces`, because
+// the addresses are a PARAMETER: enumeration is the caller's (it needs libc,
+// which an embedded scouting profile must not pay for), exactly as the
+// responder half takes its `locals` rather than resolving them.
+#[cfg(feature = "scouting-active")]
+pub mod scouting_fanout;
+
 // R311y846 — the ANSWERING half of multicast scouting: the socket loop that
 // replies to a Scout with this node's Hello. Gated separately from
 // `scouting-active` on purpose rather than folded into it: the two are opposite
@@ -2394,6 +2403,27 @@ impl UdpDriver {
             .as_ref()
             .ok_or_else(|| io::Error::new(io::ErrorKind::NotConnected, "no socket"))?
             .local_addr()
+    }
+
+    /// R2611 — the egress interface the KERNEL holds for this socket, read back
+    /// from `IP_MULTICAST_IF`.
+    ///
+    /// A pin is a setsockopt, and a setsockopt that returned `Ok` is not yet
+    /// evidence: the value the kernel kept is. This is the same instrument
+    /// R2584 used to witness the v6 pin from `/proc` and from
+    /// `IPV6_MULTICAST_IF`, and it is what lets a scouting fan-out be graded on
+    /// a host with ONE network interface — the pin is decidable per socket,
+    /// where delivery needs a second NIC to discriminate.
+    ///
+    /// `0.0.0.0` is the kernel's "unpinned", so a caller can tell a socket that
+    /// leaves by the default route from one that was pinned to an address.
+    #[cfg(all(feature = "locator-iface", feature = "transport-link-udp"))]
+    pub fn multicast_egress_v4(&self) -> io::Result<std::net::Ipv4Addr> {
+        let socket = self
+            .socket
+            .as_ref()
+            .ok_or_else(|| io::Error::new(io::ErrorKind::NotConnected, "no socket"))?;
+        socket2::SockRef::from(socket).multicast_if_v4()
     }
 }
 

@@ -139,6 +139,9 @@ pub fn run_scout(
     budget_ms: u64,
     on_hello: impl FnMut(&ScoutedHello),
 ) -> usize {
+    use wz_runtime_tokio::scouting_fanout::{
+        bind_scout_sockets, scout_interface_addresses, ScoutFanOut,
+    };
     use wz_runtime_tokio::scouting_glue::{
         drive_scouting_until_resolved, new_scouting_engine, ScoutParams, ScoutingActions,
     };
@@ -155,11 +158,27 @@ pub fn run_scout(
     let hellos = runtime.block_on(async move {
         // `None`: the scouting group is deliberately NOT interface-narrowed — a
         // discovery beacon must reach every interface a peer could answer on.
-        let Ok(mut driver) =
+        let Ok(group_socket) =
             UdpDriver::bind_multicast(group, port, McastSocketConfig::default()).await
         else {
             return Vec::new();
         };
+        // R2611 — and that sentence is only true if the Scout LEAVES by every
+        // one of them, which one socket on the default route does not do. pico's
+        // `z_scout` opens a link per interface when the config names none
+        // (`vendor/zenoh-pico/src/session/scout.c` @
+        // `_z_udp_unicast_interface_iterator_next(&iter)`), and this is the same
+        // window, so it asks the same way. A build that cannot enumerate or
+        // cannot pin offers nothing and the group socket asks alone, which is
+        // the pre-R2611 behaviour kept as a floor.
+        let locals = scout_interface_addresses().unwrap_or_default();
+        let (ask, refused) = bind_scout_sockets(group.into(), port, &locals, None).await;
+        // The shape `over` returns is REPORTED by `over` itself, at the one
+        // place that knows it — this crate carries no logger, and a value
+        // dropped here would make "the survey found nothing" and "the Scout
+        // left by one interface of four" the same observation to everyone
+        // downstream.
+        let (mut driver, _shape) = ScoutFanOut::over(group_socket, ask, refused);
         let actions = ScoutingActions::new(ScoutParams {
             version: SCOUT_PROTO_VERSION,
             what,

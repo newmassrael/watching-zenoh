@@ -109,10 +109,21 @@ getrandom = "0.2"
 # rather than a silent no-op. Selecting it here also means `cargo test -p
 # wz-capi-core` alone builds, which feature UNIFICATION would otherwise hide —
 # the R311y533 lesson, one crate later.
+# R2611 — `link-interfaces` and `locator-iface` are the two halves of a scouting
+# fan-out: the first ENUMERATES the multicast interfaces (it owns `getifaddrs`),
+# the second PINS a socket's egress to one. Both are named here rather than
+# folded into `scouting-active`, which an embedded profile also selects and
+# which must not grow a libc dependency for a capability that profile cannot
+# use. This crate is the C-ABI drop-in for zenoh-pico, whose own `z_scout` opens
+# a link per interface, so it is exactly the build that owes the fan-out.
+# With either absent `scout_interface_addresses` reports "cannot ask" and the
+# window scouts on the group socket alone, which is what it did before.
 wz-runtime-tokio = { path = "../wz-runtime-tokio", features = [
     "routing-accept",
     "liveliness-get",
     "scouting-active",
+    "link-interfaces",
+    "locator-iface",
     "ext-pubsub-advanced-publisher",
     "ext-pubsub-advanced-history",
     "ext-pubsub-sample-miss-detection",

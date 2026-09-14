@@ -8950,7 +8950,20 @@ layer_c1i_cargo_test_scouting() {
     # codecs, so pre-push runs them. That was ASKED of the census rather than
     # worked out by hand, which is the point of having it.
     _runci_guarded_test C1i 15 \
-        cargo test -p wz-runtime-tokio --features scouting-active --lib scouting_glue --quiet
+        cargo test -p wz-runtime-tokio --features scouting-active --lib scouting_glue --quiet || return 1
+    # R2611 — the ASK-side fan-out: one socket per multicast interface, which is
+    # what both references do and wz did not.
+    #
+    # `locator-iface` is named DELIBERATELY and is not decoration. It is the
+    # feature that compiles the `#iface=` honour, and without it the two arms
+    # that assert the egress pin assert a rule the build does not have — the
+    # selector warns and leaves the socket unpinned, so N "fan-out" sockets all
+    # leave by the default route. Those two arms are `#[cfg]`-gated on it and
+    # this count is what stops them going missing quietly: a build that dropped
+    # the feature runs 3 here, not 5, and the guard reds.
+    _runci_guarded_test "C1i scout fan-out" 5 \
+        cargo test -p wz-runtime-tokio --features scouting-active,locator-iface \
+        --lib scouting_fanout --quiet
 }
 
 # ─── Layer C1k — cargo test ... --features scouting-static ──────────
