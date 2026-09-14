@@ -61,9 +61,28 @@ pub(crate) const KE_EMPTY: &str = "_";
 /// is the `<eid>` (SequenceNumber sequencing) or `uhlc` (timestamp / none) chunk.
 /// The subscriber's [`recovery_get_ke`] + [`heartbeat_sub_ke`] are the matching
 /// wildcards (zenoh advanced_publisher.rs:317-329).
+/// R2619 — `meta` is the caller's publisher-detection metadata, upstream's
+/// `zenoh-ext/src/advanced_publisher.rs` @ `pub fn publisher_detection_metadata<TryIntoKeyExpr>(mut self, meta: TryIntoKeyExpr) -> Self`.
+/// `None` keeps the [`KE_EMPTY`] routing-workaround chunk, which is what this
+/// function always emitted before. It SUBSTITUTES for that chunk rather than
+/// being appended after it, and may itself be multi-chunk — exactly the shape
+/// [`subscriber_adv_ke`] has carried since it was written, which is why the
+/// publisher hardcoding `_` was the odd one out rather than the safe one.
+///
+/// ⚠ THE RESULT IS NO LONGER WELL-FORMED BY CONSTRUCTION once a caller can
+/// contribute a chunk, so the declare path's
+/// `check_outbound_keyexpr_pico_safe` is what stands between this and the wire.
+/// That check already ran on this expression; it now has a subject it did not
+/// have before, and a bad chunk surfaces as `AdvancedPublisherError::InvalidAdvKeyexpr`.
 #[cfg(feature = "ext-pubsub-advanced-publisher")]
-pub(crate) fn publisher_adv_ke(base: &str, zid_hex: &str, discriminator: &str) -> String {
-    format!("{base}/{KE_ADV_PREFIX}/{KE_ADV_PUB}/{zid_hex}/{discriminator}/{KE_EMPTY}")
+pub(crate) fn publisher_adv_ke(
+    base: &str,
+    zid_hex: &str,
+    discriminator: &str,
+    meta: Option<&str>,
+) -> String {
+    let tail = meta.unwrap_or(KE_EMPTY);
+    format!("{base}/{KE_ADV_PREFIX}/{KE_ADV_PUB}/{zid_hex}/{discriminator}/{tail}")
 }
 
 /// The subscriber's own detection KE:

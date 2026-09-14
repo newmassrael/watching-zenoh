@@ -4138,7 +4138,7 @@ mod tests {
     fn publisher_adv_ke_round_trips_through_parse() {
         let zid = vec![0x09u8, 0xAB];
         let zid_hex = zid_to_zenoh_hex(&zid);
-        let ke = crate::advanced_ke::publisher_adv_ke("demo/data", &zid_hex, "7");
+        let ke = crate::advanced_ke::publisher_adv_ke("demo/data", &zid_hex, "7", None);
         assert!(
             ke.starts_with("demo/data/@adv/pub/") && ke.ends_with("/7/_"),
             "the publisher @adv KE has the @adv/pub/.../_ shape, got {ke}"
@@ -4159,6 +4159,7 @@ mod tests {
             "demo/data",
             &zid_hex,
             crate::advanced_ke::KE_ADV_UHLC,
+            None,
         );
         assert_eq!(
             parse_heartbeat_source(&uhlc_ke),
@@ -5607,6 +5608,7 @@ mod tests {
             "demo/data",
             &zid_hex,
             crate::advanced_ke::KE_ADV_UHLC,
+            None,
         );
 
         let cache = AdvancedCache::declare(

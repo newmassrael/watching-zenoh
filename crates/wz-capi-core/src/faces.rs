@@ -1252,7 +1252,11 @@ impl SharedSession {
             if let Ok(pub_) = AdvancedPublisher::declare(
                 &session,
                 entry.keyexpr.clone(),
-                entry.options,
+                // R2619 — cloned, not copied: `AdvancedPublisherOptions` owns a
+                // `String` since it gained `publisher_detection_metadata`, so
+                // it is `Clone` and no longer `Copy`. The keyexpr beside it was
+                // already cloned for the same reason.
+                entry.options.clone(),
                 zid.to_vec(),
             ) {
                 adv_pubs.insert(entry.id, pub_);
@@ -2412,7 +2416,15 @@ impl SharedSession {
             // thing the beacon depended on. See `FaceEntry::runtime`.
             let _guard = face.runtime.as_ref().map(|rt| rt.enter());
             if let Ok(pub_) =
-                AdvancedPublisher::declare(&face.session, keyexpr.clone(), options, zid)
+                // R2619 — cloned per face, as the keyexpr beside it already is:
+                // the options own a `String` now and this loop declares one
+                // publisher per face from the same value.
+                AdvancedPublisher::declare(
+                    &face.session,
+                    keyexpr.clone(),
+                    options.clone(),
+                    zid,
+                )
             {
                 face.adv_pubs.insert(id, pub_);
             }

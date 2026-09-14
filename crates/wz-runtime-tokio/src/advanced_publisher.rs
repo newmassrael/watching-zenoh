@@ -136,7 +136,12 @@ impl AdvancedPutOptions {
 /// [`AdvancedPublisherError`] carry it too): a future option field cannot break a
 /// downstream struct-literal construction. External callers build from [`Default`]
 /// plus the public fields; in-crate construction is unaffected.
-#[derive(Clone, Copy, Debug)]
+/// R2619 — NO LONGER `Copy`: [`Self::publisher_detection_metadata`] is a
+/// caller-supplied key expression and so owns a `String`. This is the same
+/// trade `AdvancedSubscriberOptions` made at R311y826 for the same field on the
+/// subscriber side, and it is recorded here so the two read alike. `Clone`
+/// stays.
+#[derive(Clone, Debug)]
 #[non_exhaustive]
 pub struct AdvancedPublisherOptions {
     /// Per-sample tagging mode.
@@ -175,6 +180,21 @@ pub struct AdvancedPublisherOptions {
     /// `zenoh-ext/src/advanced_publisher.rs` @ `fn express(self, is_express: bool) -> Self {`.
     /// `pubsub-qos`-gated in effect, as [`Self::priority`] documents.
     pub express: bool,
+    /// R2619 — application metadata carried in the publisher's `@adv` key
+    /// expression, upstream's
+    /// `zenoh-ext/src/advanced_publisher.rs` @ `pub fn publisher_detection_metadata<TryIntoKeyExpr>(mut self, meta: TryIntoKeyExpr) -> Self`.
+    ///
+    /// `None` (default) keeps the `_` routing-workaround chunk this publisher
+    /// always emitted. A value SUBSTITUTES for that chunk and may be
+    /// multi-chunk, matching the subscriber side's long-standing shape.
+    ///
+    /// ⚠ A value makes the derived `@adv` expression depend on caller input, so
+    /// it is validated at declare time: a chunk that would not survive
+    /// canonisation is refused as
+    /// [`AdvancedPublisherError::InvalidAdvKeyexpr`] rather than put on the
+    /// wire. That check already guarded this expression; this field is the
+    /// first thing that gives it a subject.
+    pub publisher_detection_metadata: Option<String>,
 }
 
 /// R2618 — the five wire knobs an [`AdvancedPublisher`] carries, folded onto
@@ -270,6 +290,7 @@ impl Default for AdvancedPublisherOptions {
             priority: Priority::DEFAULT,
             congestion_control: CongestionControl::Drop,
             express: false,
+            publisher_detection_metadata: None,
         }
     }
 }
@@ -511,6 +532,7 @@ where
             &keyexpr,
             &zid_to_zenoh_hex(&local_zid),
             &discriminator,
+            options.publisher_detection_metadata.as_deref(),
         );
 
         // R2559 — THE DERIVED `@adv` EXPRESSION HAS TO PARSE AS A KEY
@@ -2014,6 +2036,84 @@ mod tests {
     /// and wz now answers the same on the state it models identically.
     ///
     /// THE ARMS ARE THE POINT. A refusal test alone would pass on a build that
+    /// R2619 — publisher-detection metadata reaches the `@adv` key expression,
+    /// and a chunk that would not survive the wire is REFUSED rather than sent.
+    ///
+    /// wz hardcoded the `_` chunk where upstream offers
+    /// `zenoh-ext/src/advanced_publisher.rs` @ `pub fn publisher_detection_metadata<TryIntoKeyExpr>(mut self, meta: TryIntoKeyExpr) -> Self`.
+    /// The subscriber side of this crate has taken a `meta` since it was
+    /// written, so the publisher was the odd one out.
+    ///
+    /// THE REFUSAL ARM IS THE ONE THAT MATTERS. Until this field existed the
+    /// derived expression was well-formed BY CONSTRUCTION — every chunk was a
+    /// validated base, a fixed literal, or hex — so the declare path's
+    /// canonisation check guarded something that could not fail. Giving a
+    /// caller a chunk removes that guarantee, and the second arm is what proves
+    /// the check now has a subject instead of being decoration.
+    #[test]
+    fn publisher_detection_metadata_rides_the_adv_keyexpr_and_a_bad_chunk_is_refused() {
+        use std::sync::Mutex;
+
+        use crate::observer::ApplicationLayerObserver;
+        use crate::runtime_impl::TokioTime;
+        use crate::session::TokioSession;
+
+        let new_session = || {
+            let (actions, _driver) = crate::test_fixtures::recording_actions();
+            let observer = Arc::new(Mutex::new(ApplicationLayerObserver::new()));
+            let clock = Arc::new(TokioTime::new());
+            (TokioSession::new(actions, observer, clock), _driver)
+        };
+        let opts = |meta: Option<&str>| AdvancedPublisherOptions {
+            cache: None,
+            publisher_detection: false,
+            publisher_detection_metadata: meta.map(str::to_owned),
+            ..AdvancedPublisherOptions::default()
+        };
+
+        // ARM 1 + its CONTROL, at the derivation itself: the meta SUBSTITUTES
+        // for the `_` chunk, and without it the chunk is still `_`. The pair is
+        // what makes arm 1 about the metadata rather than about any tail.
+        let with_meta =
+            crate::advanced_ke::publisher_adv_ke("demo/data", "07", "1", Some("room/kitchen"));
+        assert!(
+            with_meta.ends_with("/room/kitchen"),
+            "the meta replaces the `_` chunk; got {with_meta}"
+        );
+        let without = crate::advanced_ke::publisher_adv_ke("demo/data", "07", "1", None);
+        assert!(
+            without.ends_with("/_"),
+            "without metadata the routing-workaround chunk stands; got {without}"
+        );
+
+        // ...and a well-formed chunk still DECLARES, so arm 2's refusal is
+        // about the chunk rather than about the field existing.
+        let (session, _d) = new_session();
+        AdvancedPublisher::declare(
+            &session,
+            "demo/data",
+            opts(Some("room/kitchen")),
+            vec![0x07],
+        )
+        .expect("a well-formed meta chunk declares");
+
+        // ARM 2: a chunk that cannot go on the wire is REFUSED at declare.
+        let (session, _d) = new_session();
+        assert!(
+            matches!(
+                AdvancedPublisher::declare(
+                    &session,
+                    "demo/data",
+                    opts(Some("bad?chunk")),
+                    vec![0x07]
+                ),
+                Err(AdvancedPublisherError::InvalidAdvKeyexpr(_))
+            ),
+            "a caller chunk that breaks the derived expression must be refused, \
+             not published"
+        );
+    }
+
     /// R2619 — the publisher-handle surface upstream exposes and wz did not:
     /// identity, key expression, matching status, and an undeclare.
     ///

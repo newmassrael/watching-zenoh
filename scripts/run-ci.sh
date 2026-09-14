@@ -6901,7 +6901,10 @@ layer_c1aq_cargo_test_ext_pubsub_advanced() {
     # matching_declarations, which pins that declaring an advanced publisher
     # takes a reference on the SUBSCRIBERS Interest rather than merely owning a
     # matching method.
-    _runci_guarded_test "C1aq advanced_" 21 \
+    # R2619 — 21 -> 22 with the publisher-detection-metadata witness, whose
+    # second arm is the refusal: a caller chunk that breaks the derived `@adv`
+    # expression is `InvalidAdvKeyexpr` rather than wire traffic.
+    _runci_guarded_test "C1aq advanced_" 22 \
         cargo test -p wz-runtime-tokio --features ext-pubsub-advanced-publisher,query-get,pubsub-allow-loop \
         --lib advanced_ --quiet || return 1
     (cd crates \
@@ -7114,7 +7117,8 @@ layer_c1au_cargo_test_ext_pubsub_sample_miss_detection() {
     # of the diff, which is the discipline the paragraph above already states.
     # R2619 — 15 -> 16, the publisher-surface witness; ungated like R2618's, so
     # it lands in this lane as well as C1aq.
-    _runci_guarded_test "C1au advanced_publisher" 16 \
+    # R2619 — 16 -> 17 with the metadata witness, ungated like its siblings.
+    _runci_guarded_test "C1au advanced_publisher" 17 \
         cargo test -p wz-runtime-tokio --features ext-pubsub-sample-miss-detection,ext-pubsub-advanced-recovery,pubsub-allow-loop \
         --lib advanced_publisher --quiet || return 1
     (cd crates \
