@@ -190,6 +190,14 @@ impl<R: AsyncRead + Unpin> StreamReadDriver<R> {
     /// pipeline that knows the peer's chain, which is the only place that can:
     /// the certificate is readable from the rustls connection BEFORE the stream
     /// is split, and not after.
+    ///
+    /// Gated on its ONE consumer's feature rather than left open. Ungated it is
+    /// dead code in every build without the tls link — which the workspace
+    /// type-check runs at DEFAULT features and reds under `-D warnings`. That
+    /// is open-debt 730's class (a gate wider than its consumers this time,
+    /// the mirror of the narrower case), and it was caught here by the gate
+    /// rather than on hosted.
+    #[cfg(feature = "transport-link-tls")]
     pub(crate) fn set_expiry(&mut self, signal: Arc<ExpirySignal>) {
         self.expiry = Some(signal);
     }
@@ -454,6 +462,11 @@ mod tests {
     /// peer had nothing to say. `io::empty()` would be the wrong reader -- it
     /// returns EOF at once and the driver would report loss for the ordinary
     /// reason, proving nothing.
+    /// Gated with its subject: `set_expiry` exists only where the tls link
+    /// does, so a test that calls it must carry the same gate. The three arms
+    /// below move together on purpose -- the unarmed control discriminates the
+    /// other two, and a control compiled without its subject grades nothing.
+    #[cfg(feature = "transport-link-tls")]
     #[tokio::test(start_paused = true)]
     async fn a_fired_signal_loses_the_link_with_no_bytes() {
         let (near, _far) = tokio::io::duplex(64);
@@ -471,6 +484,7 @@ mod tests {
     /// signal that fires while the driver is ALREADY PARKED in its read must
     /// still wake it. That is the whole reason this is a `Notify` race and not
     /// a bool, so it gets its own arm rather than riding on the first.
+    #[cfg(feature = "transport-link-tls")]
     #[tokio::test(start_paused = true)]
     async fn a_signal_fired_while_parked_still_wakes_the_read() {
         let (near, _far) = tokio::io::duplex(64);
@@ -492,6 +506,7 @@ mod tests {
     /// UNARMED driver over the same silent duplex must NOT report loss. Without
     /// this, both arms above would also pass if `poll_event` had been made to
     /// return `Lost` unconditionally.
+    #[cfg(feature = "transport-link-tls")]
     #[tokio::test(start_paused = true)]
     async fn an_unarmed_driver_does_not_lose_a_silent_link() {
         let (near, _far) = tokio::io::duplex(64);

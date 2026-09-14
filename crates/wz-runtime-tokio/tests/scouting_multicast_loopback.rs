@@ -512,7 +512,9 @@ mod round3_tls {
             let mut params = fixture_session_init_params();
             params.zid = vec![0x02; 4]; // distinct from the initiator
             accept_and_open_session(
-                DialedLink::Tls(Box::new(tls)),
+                // R2608 — `false`: this fixture's subject is multicast
+                // scouting, not `close_link_on_expiration`.
+                DialedLink::Tls(Box::new(tls), false),
                 params,
                 TokioTime::new(),
                 Some(ITER_CAP),
