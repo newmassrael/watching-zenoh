@@ -6247,14 +6247,22 @@ layer_c1ag_cargo_test_transport_compose() {
 #       not the same axis. Driving `time-hlc,storage-backend` AND
 #       `time-hlc,ext-pubsub-advanced-cache` clippy-covers the cache consumer's
 #       compiled surface as well as the storage one. MEASURED: both legs select
-#       the same counts today (5 / 12) because time-hlc pulls storage-backend
+#       the same counts today (5 / 14) because time-hlc pulls storage-backend
 #       either way — the legs differ in COMPILED FEATURE SET, not in selection.
 #   (b) node_clock coverage. The node-scoped HLC + the forward-path stamp landed
 #       in a NEW module, so the pre-existing `--lib timestamp_source` filter did
-#       not select a single one of its tests. Twelve tests, filter `node_clock::`
-#       — with the `::` deliberately, because the bare substring `node_clock`
-#       ALSO matches timestamp_source's `..._not_the_node_clocks` test and would
-#       report 13 (pin SETS, not counts).
+#       not select a single one of its tests. Fourteen tests, filter
+#       `node_clock::` — with the `::` deliberately, because the bare substring
+#       `node_clock` ALSO matches TWO tests OUTSIDE the module and would report
+#       16 (pin SETS, not counts):
+#         timestamp_source::tests::the_stamp_zid_is_the_consumers_not_the_node_clocks
+#         session::tests::auto_stamp_fills_an_absent_timestamp_from_the_node_clock
+#       R2626 MEASURED all three of these numbers rather than deriving them. The
+#       second matcher arrived later, with the auto-stamp leg, and nobody moved
+#       this prose: computing the bare count as 14+1 says 15, the tree says 16.
+#       That is this file's own "pin SETS, not counts" applied to its own
+#       comment — the guard constants below are gated by pre-push gate 4b, and
+#       NOTHING gates the paragraph that explains them.
 #   (c) a ROUTING leg. The forward-path stamp lives in `route_push`
 #       (router_forward.rs) and `forward_push` (linkstate_forward.rs), which are
 #       compiled only under the routing features. No lane composed
