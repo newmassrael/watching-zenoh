@@ -90,6 +90,47 @@ pub enum ScoutRxIgnored {
         /// The datagram header's low 5 bits.
         mid: u8,
     },
+    /// R2610 — a well-formed Hello that advertised NO address, declined by an
+    /// exit-on-first window: a peer that answered with nothing to dial.
+    ///
+    /// Upstream's `_Z_NO_DATA_PROCESSED` — see [`hello_advances_window`] for
+    /// the rule and both references it is read from. The window does not end on
+    /// it, so it is neither a discovery nor a silent drop, which is exactly the
+    /// gap this verdict fills.
+    LocatorlessHello,
+}
+
+/// Does this Hello ADVANCE the cycle that observed it, or is it a peer with
+/// nothing to dial that a still-searching window must keep looking past?
+///
+/// # The rule, and that both references hold it
+///
+/// A Hello advertising no locator gives an initiator nothing to connect to.
+/// Upstream declines it in the arm that would otherwise CLOSE the search, and
+/// keeps it in the arm that is only collecting:
+///
+/// * zenoh-pico returns `_Z_NO_DATA_PROCESSED` before recording it, but ONLY
+///   under `exit_on_first` — `vendor/zenoh-pico/src/session/scout.c` @
+///   `if ((locator_count == 0) && exit_on_first) {`. Its window break is driven
+///   by whether a hello was RECORDED (the same file, `} else if (exit_on_first
+///   && (*hellos != NULL)) {`), so declining to record IS declining to end the
+///   window. The survey arm records it, which is why the mode is a parameter
+///   here rather than a constant.
+/// * zenoh does the same thing in its own vocabulary: its scout callback
+///   returns `Loop::Continue` for a locator-less Hello and only `Loop::Break`
+///   once a hello's locators produce a connection —
+///   `zenoh/src/net/runtime/orchestrator.rs` @ `if !hello.locators.is_empty() {`.
+///
+/// # Why it is a FUNCTION, and in this crate
+///
+/// The consequence of getting it wrong is not cosmetic: the exit-on-first arm
+/// is the SESSION-OPEN scout, and the group it listens on is untrusted. A rule
+/// spelled inline in the runtime's drive loop would be decidable only with a
+/// socket, so the case that matters — one stranger's empty answer ending
+/// everybody's discovery — would be testable only in an environment-dependent
+/// lane. Here it is a pure predicate over the two quantities that decide it.
+pub fn hello_advances_window(exit_on_first: bool, locator_count: usize) -> bool {
+    !(exit_on_first && locator_count == 0)
 }
 
 /// Read one datagram the initiator did NOT take as this cycle's Hello, and say
@@ -103,13 +144,19 @@ pub enum ScoutRxIgnored {
 ///
 /// # Precondition, and why it is not an `unreachable!`
 ///
-/// The caller has already decided this datagram is not a Hello it can use, so a
-/// `Hello` frame arriving here means the namespace parser accepted bytes the
-/// cycle's own Hello decoder refused. That is reported as
-/// [`ScoutRxIgnored::Undecodable`] — which is what it is — rather than as a
-/// panic. A scouting group is UNTRUSTED input: a disagreement between two
-/// decoders is a thing a stranger can provoke, and provoking a panic must not
-/// be one of the things it buys.
+/// The caller has already decided this datagram is not a Hello it can use, and
+/// a `Hello` frame arriving here therefore means ONE of two things. Either it
+/// advertised no address and the cycle declined it by the exit-on-first rule
+/// ([`hello_advances_window`]) — [`ScoutRxIgnored::LocatorlessHello`] — or the
+/// namespace parser accepted bytes the cycle's own Hello decoder refused, which
+/// is reported as [`ScoutRxIgnored::Undecodable`] rather than as a panic. A
+/// scouting group is UNTRUSTED input: a disagreement between two decoders is a
+/// thing a stranger can provoke, and provoking a panic must not be one of the
+/// things it buys.
+///
+/// The two are told apart by the locator count and nothing else, so this stays
+/// a pure function of the bytes: the mode is not a parameter because a
+/// locator-less Hello only ever REACHES here from the arm that declines it.
 pub fn classify_ignored_scout_rx(zid: &[u8], datagram: &[u8]) -> ScoutRxIgnored {
     match parse_scouting(datagram) {
         Err(_) => ScoutRxIgnored::Undecodable,
@@ -118,6 +165,14 @@ pub fn classify_ignored_scout_rx(zid: &[u8], datagram: &[u8]) -> ScoutRxIgnored 
             _ => ScoutRxIgnored::ForeignScout,
         },
         Ok(ScoutingFrame::Unknown { mid }) => ScoutRxIgnored::UnknownMid { mid },
+        // R2610 — a Hello the cycle COULD read and still declined; see the
+        // precondition above. The L flag clear and an empty list are the same
+        // statement, so the decoded list is what is counted.
+        Ok(ScoutingFrame::Hello { ref body, .. })
+            if body.locators.as_ref().map_or(0, |locs| locs.len()) == 0 =>
+        {
+            ScoutRxIgnored::LocatorlessHello
+        }
         // See "Precondition" above: the caller's own Hello decoder refused it.
         Ok(_) => ScoutRxIgnored::Undecodable,
     }
@@ -220,5 +275,87 @@ mod tests {
             classify_ignored_scout_rx(OUR_ZID, &[]),
             ScoutRxIgnored::Undecodable,
         );
+    }
+
+    /// R2610 — a framed Hello advertising `locators`, built through the CODEC
+    /// for the reason [`scout_datagram`] is: the header's L flag and the body's
+    /// locator list are two spellings of one fact, and bytes that disagree
+    /// decode to a shape no window ever observes.
+    fn hello_datagram(locators: &[&str]) -> Vec<u8> {
+        use wz_codecs::hello::HelloOwned;
+        use wz_codecs::locator::LocatorOwned;
+
+        const ZID: &[u8] = &[0x07, 0x08];
+        let l_flag = u8::from(!locators.is_empty());
+        let owned: HelloOwned = HelloOwned {
+            version: 0x09,
+            // whatami=router | zid_len_m1 << 4, the layout `scout_responder`
+            // reads back.
+            cbyte: 0x01 | (((ZID.len() as u8) - 1) << 4),
+            zid: crate::codec_owned::owned_bytes(ZID).unwrap(),
+            num_locators: (!locators.is_empty()).then_some(locators.len() as u64),
+            locators: (!locators.is_empty()).then(|| {
+                locators
+                    .iter()
+                    .map(|l| LocatorOwned {
+                        locator_len: l.len() as u64,
+                        locator: crate::codec_owned::owned_string(l).unwrap(),
+                    })
+                    .collect()
+            }),
+        };
+        let body = owned
+            .try_as_borrowed()
+            .expect("borrowed projection of owned Hello")
+            .encode_to_vec(l_flag);
+
+        let mut wire = vec![if l_flag == 1 {
+            crate::wire_const::S_MID_HELLO | crate::wire_const::FLAG_S_HELLO_L
+        } else {
+            crate::wire_const::S_MID_HELLO
+        }];
+        wire.extend_from_slice(&body);
+        wire
+    }
+
+    /// R2610 — a peer that answered with no address is NOT a malformed message.
+    ///
+    /// The distinction is the verdict's whole reason to exist: before it, the
+    /// only Hello arm here was the decoder-disagreement one, so the exit-on-first
+    /// rule could not decline a Hello without reporting a stranger's well-formed
+    /// answer as corrupt.
+    #[test]
+    fn a_locator_less_hello_is_a_peer_with_nothing_to_dial_not_a_malformed_message() {
+        assert_eq!(
+            classify_ignored_scout_rx(OUR_ZID, &hello_datagram(&[])),
+            ScoutRxIgnored::LocatorlessHello,
+        );
+    }
+
+    /// DISCRIMINATOR for the arm above: a Hello that DOES carry a locator can
+    /// only reach this function through the precondition's other door, and must
+    /// still read as the decoder disagreement it is. Without this the verdict
+    /// would pass on a classifier that called every Hello locator-less.
+    #[test]
+    fn a_hello_that_carries_a_locator_reaching_here_is_a_decoder_disagreement() {
+        assert_eq!(
+            classify_ignored_scout_rx(OUR_ZID, &hello_datagram(&["udp/127.0.0.1:7447"])),
+            ScoutRxIgnored::Undecodable,
+        );
+    }
+
+    /// R2610 — the rule itself, as its truth table. Three of the four inputs
+    /// must ADVANCE: upstream declines a locator-less Hello only in the arm
+    /// that would otherwise stop searching, and records it in the arm that is
+    /// only collecting (`vendor/zenoh-pico/src/session/scout.c` @
+    /// `if ((locator_count == 0) && exit_on_first) {`). A predicate that read
+    /// the locator count alone would pass every test above and silently drop a
+    /// survey's locator-less peers, which is a record upstream keeps.
+    #[test]
+    fn only_an_exit_on_first_cycle_declines_a_locator_less_hello() {
+        assert!(!hello_advances_window(true, 0));
+        assert!(hello_advances_window(true, 1));
+        assert!(hello_advances_window(false, 0));
+        assert!(hello_advances_window(false, 2));
     }
 }

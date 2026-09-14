@@ -8936,13 +8936,20 @@ layer_c1i_cargo_test_scouting() {
     # scripts/run-ci.sh` (R311y784's mechanical prescription) returns this one
     # line, so this is the whole population for that filter.
     #
+    # R2610: 14 -> 15. The THIRD datagram that does not advance an
+    # exit-on-first cycle — a Hello advertising no address, which both
+    # references keep searching past and wz used to stop on. The count moves by
+    # one, not two: the same round's other assertion moved the locator-less
+    # FSM-level test onto the survey arm rather than adding a test, because
+    # upstream makes that claim only there.
+    #
     # The classifier's own six unit tests are NOT here: they live in
     # `wz-session-core` behind `codec-scout` / `codec-hello`, and
     # `nondefault-tests-gate.sh --census` reports that crate 1333/1333 run by a
     # leg — its `wz-session-core` row is `hook`-scoped and already carries both
     # codecs, so pre-push runs them. That was ASKED of the census rather than
     # worked out by hand, which is the point of having it.
-    _runci_guarded_test C1i 14 \
+    _runci_guarded_test C1i 15 \
         cargo test -p wz-runtime-tokio --features scouting-active --lib scouting_glue --quiet
 }
 
@@ -14182,8 +14189,17 @@ PY
     # empty and the scouted-side TLS dial path is unexercised (gate-skew). The
     # default features already carry tcp+udp+unicast, so round2 (tcp) and the
     # discovery-only test are unaffected — tls is purely additive.
-    (cd crates && cargo test -p wz-runtime-tokio --features scouting-active,transport-link-tls \
-        --test scouting_multicast_loopback -- --ignored --quiet) || return 1
+    # R2610 — COUNT-GUARDED at 6, where it used to be a bare invocation. The
+    # argument is the one the responder leg below already makes and this leg was
+    # missing: the selection is a whole binary and the binary is
+    # `#![cfg(feature = "scouting-active")]`-gated, so a build that lost the
+    # feature compiles an EMPTY target and `cargo test` exits 0 having run
+    # nothing — the shape that reports green for a lane that did not run. 4 -> 6
+    # in this round: the two legs that observe the initiator's ignore verdicts
+    # from a REAL group rather than from a scripted link.
+    _runci_guarded_test "M scouting multicast loopback" 6 \
+        cargo test -p wz-runtime-tokio --features scouting-active,transport-link-tls \
+        --test scouting_multicast_loopback -- --ignored --quiet || return 1
     # R311of — clippy-gate the scouting-active + transport-link-tls combo so the
     # round3_tls module (and round2) get clippy coverage, not only the rustc-deny
     # the test build above already applies (mirrors the C1u/C1v all-targets

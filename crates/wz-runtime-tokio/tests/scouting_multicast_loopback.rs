@@ -30,7 +30,8 @@ use wz_codecs::locator::LocatorOwned;
 use wz_codecs::wire_const;
 use wz_runtime_tokio::runtime_impl::TokioTime;
 use wz_runtime_tokio::scouting_glue::{
-    drive_scouting_until_resolved, new_scouting_engine, ScoutOutcome, ScoutingActions,
+    drive_scouting_until_resolved, new_scouting_engine, ScoutOutcome, ScoutRxIgnored,
+    ScoutingActions,
 };
 use wz_runtime_tokio::{McastSocketConfig, UdpDriver};
 use wz_session_core::scout_params::ScoutParams;
@@ -63,6 +64,60 @@ fn craft_hello_datagram(locator: &str) -> Vec<u8> {
     dgram.push(wire_const::S_MID_HELLO | wire_const::FLAG_S_HELLO_L);
     dgram.extend_from_slice(&body);
     dgram
+}
+
+/// R2610 — the same Hello shape with NO locator: the L flag CLEAR and the body
+/// carrying no list, which is how a peer says it advertised no address.
+///
+/// Built through the codec rather than by truncating the one above, because the
+/// flag and the list are two spellings of one fact and bytes that disagree
+/// decode to a shape no scouting window ever observes.
+fn craft_locator_less_hello(zid: &[u8]) -> Vec<u8> {
+    let owned: HelloOwned = HelloOwned {
+        version: 0x09,
+        cbyte: 0x01 | (((zid.len() as u8) - 1) << 4),
+        zid: wz_session_core::codec_owned::owned_bytes(zid).unwrap(),
+        num_locators: None,
+        locators: None,
+    };
+    let body = owned
+        .try_as_borrowed()
+        .expect("borrowed projection of owned Hello")
+        .encode_to_vec(0 /* L flag clear */);
+
+    let mut dgram = Vec::with_capacity(1 + body.len());
+    dgram.push(wire_const::S_MID_HELLO);
+    dgram.extend_from_slice(&body);
+    dgram
+}
+
+/// R2610 — a Scout carrying `zid`, built through the codec.
+///
+/// By hand it decodes to `zid: None` — the id rides an `I` flag as well as the
+/// `zid_len_m1` nibble — and every self-echo would then read as a stranger,
+/// which is the discriminator these legs turn on.
+fn craft_scout(zid: &[u8]) -> Vec<u8> {
+    use wz_codecs::scout::Scout;
+
+    let mut scout = Scout::new();
+    scout.version = 0x09;
+    scout.set_what(0x03);
+    scout.set_i(true);
+    scout.set_zid_len_m1((zid.len() - 1) as u8);
+    scout.zid = Some(zid);
+    let mut dgram = vec![wire_const::S_MID_SCOUT];
+    dgram.extend_from_slice(&scout.encode_to_vec());
+    dgram
+}
+
+/// How many times `want` occurs in an observed verdict list.
+///
+/// The legs below assert on COUNTS rather than on a vector in arrival order:
+/// on a real group the ordering of our own looped-back Scout against a sender's
+/// datagrams is the kernel's business, and an assertion on it would be pinning
+/// the scheduler rather than the product.
+fn verdicts(observed: &[ScoutRxIgnored], want: &ScoutRxIgnored) -> usize {
+    observed.iter().filter(|seen| *seen == want).count()
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -214,6 +269,182 @@ async fn a_scouter_told_to_use_another_group_joins_that_group_and_only_that_grou
         "a scouter configured onto {MOVED_GROUP}:{MOVED_PORT} still heard a Hello \
          sent to the DEFAULT {GROUP}:{PORT}, so it stayed on the compiled-in group \
          and the configured address changed nothing"
+    );
+}
+
+/// R2610 — the `scouting-active` residual: every verdict the window records is
+/// observed from a REAL group here, not from a scripted link.
+///
+/// ## What was only proven socket-free
+///
+/// `ScoutingActions::ignored_datagrams` and the conservation it satisfies —
+/// `hellos + ignored == observed` — were witnessed by feeding a scripted list
+/// into the drive loop. That grades the CLASSIFIER, and it cannot grade the two
+/// halves that only a socket has: whether the datagrams reach the window at all,
+/// and whether our own Scout comes back. `SelfEcho` in particular is a verdict
+/// that exists BECAUSE wz asks for `IP_MULTICAST_LOOP`; a scripted list can
+/// hand the loop a copy of our Scout whether or not the socket would ever
+/// deliver one.
+///
+/// ## The five shapes, and where each comes from
+///
+/// Four are sent by a blind ephemeral socket on the group; the fifth is wz's
+/// OWN Scout, which arrives because the scouting socket asked the kernel for
+/// it. The window runs the SURVEY arm so one window can observe them all.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "multicast loopback e2e; Layer M runs via --layer M / WZ_RUN_LAYER_M=1 --ignored"]
+async fn every_datagram_from_a_real_group_lands_in_exactly_one_accumulator() {
+    // Its own group port: the legs in this file run in one binary and a shared
+    // port would let one leg's traffic answer another's window.
+    const PORT: u16 = 7450;
+    const OUR_ZID: &[u8] = &[0xAA, 0xBB, 0xCC, 0xDD];
+
+    let mut driver = UdpDriver::bind_multicast(GROUP, PORT, McastSocketConfig::default())
+        .await
+        .expect("bind multicast scouting link");
+    let actions = ScoutingActions::new(ScoutParams {
+        version: 0x09,
+        what: 0x03,
+        zid: OUR_ZID.to_vec(),
+        timeout_ms: 1500,
+        // The survey arm: the window is closed by its deadline, so every
+        // datagram below is observed by ONE window.
+        exit_on_first: false,
+    });
+    let mut engine = new_scouting_engine(&actions);
+
+    let stranger = UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0))
+        .await
+        .expect("bind ephemeral sender");
+    let sent: Vec<Vec<u8>> = vec![
+        // 1. a usable Hello -> `hellos`
+        craft_hello_datagram(PEER_LOCATOR),
+        // 2. the Hello MID with a body that cannot decode -> `Undecodable`
+        vec![wire_const::S_MID_HELLO | wire_const::FLAG_S_HELLO_L, 0x09],
+        // 3. another node's Scout: a question, not an answer -> `ForeignScout`
+        craft_scout(&[0x77]),
+        // 4. a MID in neither scouting arm -> `UnknownMid`
+        vec![0x1E, 0x00, 0x00],
+    ];
+    let sender = tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        for dgram in &sent {
+            stranger
+                .send_to(dgram, (GROUP, PORT))
+                .await
+                .expect("send to the group");
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        sent.len()
+    });
+
+    let clock = TokioTime::new();
+    drive_scouting_until_resolved(&mut driver, &actions, &mut engine, &clock, Some(10_000), 50)
+        .await;
+    let sent_count = sender.await.expect("sender task");
+
+    let hellos = actions.scouted_hellos();
+    let ignored = actions.ignored_datagrams();
+
+    // The SELF-ECHO is the half no scripted link can witness: it is on the wire
+    // only because the scouting socket asked for the loopback.
+    assert_eq!(
+        verdicts(&ignored, &ScoutRxIgnored::SelfEcho),
+        1,
+        "our own Scout must come back from the group exactly once; ignored={ignored:?}"
+    );
+    assert_eq!(verdicts(&ignored, &ScoutRxIgnored::Undecodable), 1);
+    assert_eq!(verdicts(&ignored, &ScoutRxIgnored::ForeignScout), 1);
+    assert_eq!(
+        verdicts(&ignored, &ScoutRxIgnored::UnknownMid { mid: 0x1E }),
+        1
+    );
+    assert_eq!(
+        hellos.len(),
+        1,
+        "only the well-formed Hello is a peer; hellos={hellos:?}"
+    );
+
+    // CONSERVATION, over datagrams that crossed a socket: the four sent plus
+    // our own echo, each accounted for exactly once.
+    assert_eq!(
+        hellos.len() + ignored.len(),
+        sent_count + 1,
+        "every datagram the window observed must land in exactly one accumulator; \
+         hellos={hellos:?} ignored={ignored:?}"
+    );
+}
+
+/// R2610 — the exit-on-first window survives an empty answer FROM THE GROUP.
+///
+/// The drive-loop twin of this leg is socket-free by construction, and the case
+/// it describes is not: the session-open scout listens on a group anyone can
+/// send to, and before this round one Hello advertising no address — six bytes,
+/// from anywhere — ended that window with nothing discovered. Both references
+/// keep searching past it:
+/// `vendor/zenoh-pico/src/session/scout.c` @ `if ((locator_count == 0) && exit_on_first) {`
+/// and
+/// `zenoh/src/net/runtime/orchestrator.rs` @ `if !hello.locators.is_empty() {`.
+///
+/// The second responder is what makes the claim positive: the window must go on
+/// to discover the peer that DID advertise an address.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "multicast loopback e2e; Layer M runs via --layer M / WZ_RUN_LAYER_M=1 --ignored"]
+async fn an_empty_answer_from_the_group_does_not_end_an_exit_on_first_window() {
+    const PORT: u16 = 7451;
+
+    let mut driver = UdpDriver::bind_multicast(GROUP, PORT, McastSocketConfig::default())
+        .await
+        .expect("bind multicast scouting link");
+    let actions = ScoutingActions::new(ScoutParams {
+        version: 0x09,
+        what: 0x03,
+        zid: vec![0xAA, 0xBB, 0xCC, 0xDD],
+        timeout_ms: 2000,
+        // The SESSION-OPEN arm, which is the one the defect reached.
+        exit_on_first: true,
+    });
+    let mut engine = new_scouting_engine(&actions);
+
+    let stranger = UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0))
+        .await
+        .expect("bind ephemeral sender");
+    let empty = craft_locator_less_hello(&[0xA1]);
+    let usable = craft_hello_datagram(PEER_LOCATOR);
+    let sender = tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        stranger
+            .send_to(&empty, (GROUP, PORT))
+            .await
+            .expect("send the locator-less Hello");
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        stranger
+            .send_to(&usable, (GROUP, PORT))
+            .await
+            .expect("send the usable Hello");
+    });
+
+    let clock = TokioTime::new();
+    let outcome =
+        drive_scouting_until_resolved(&mut driver, &actions, &mut engine, &clock, Some(10_000), 50)
+            .await;
+    sender.await.expect("sender task");
+
+    assert_eq!(
+        outcome,
+        ScoutOutcome::Discovered(PEER_LOCATOR.to_string()),
+        "the empty answer must not have ended the window before the real peer"
+    );
+    let ignored = actions.ignored_datagrams();
+    assert_eq!(
+        verdicts(&ignored, &ScoutRxIgnored::LocatorlessHello),
+        1,
+        "the empty answer is ACCOUNTED for, not dropped silently; ignored={ignored:?}"
+    );
+    assert_eq!(
+        actions.scouted_hellos().len(),
+        1,
+        "only the peer that advertised an address is a discovery"
     );
 }
 

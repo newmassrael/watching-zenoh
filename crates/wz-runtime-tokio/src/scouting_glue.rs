@@ -83,7 +83,13 @@ use wz_session_core::reliability::Reliability;
 // R2334 — the initiator's ignore verdict. Re-exported because it is part of
 // this module's READ surface: `ScoutingActions::ignored_datagrams` returns it,
 // so a caller must be able to name it without depending on the core crate.
-pub use wz_session_core::scout_initiator::{classify_ignored_scout_rx, ScoutRxIgnored};
+// R2610 — `hello_advances_window` joins them for the same reason: it is the
+// rule the drive loop below applies to decide whether an observed Hello ends
+// the cycle, and a caller reading `ignored_datagrams` cannot interpret a
+// `LocatorlessHello` entry without being able to name it.
+pub use wz_session_core::scout_initiator::{
+    classify_ignored_scout_rx, hello_advances_window, ScoutRxIgnored,
+};
 pub use wz_session_core::scout_params::ScoutParams;
 use wz_session_core::scout_trace::ScoutTrace;
 // The generated engine-free action trait. Aliased so the trait name does
@@ -342,6 +348,16 @@ impl ScoutingActions<TokioRuntime> {
             ScoutRxIgnored::ForeignScout => {
                 log::debug!("scouting window: another node's Scout; ignored")
             }
+            // R2610 — zenoh's own severity for the same observation: at
+            // `zenoh/src/net/runtime/orchestrator.rs` @ `if !hello.locators.is_empty() {`
+            // the other branch is a `tracing::debug!`. A peer answering
+            // without an address is a peer,
+            // not an anomaly; what would be anomalous is the window ENDING
+            // there, which is the behaviour this verdict exists to record the
+            // absence of.
+            ScoutRxIgnored::LocatorlessHello => {
+                log::debug!("scouting window: a Hello advertising no locator; still searching")
+            }
         }
         self.ignored.lock().unwrap().push(why);
     }
@@ -565,11 +581,26 @@ where
                     // match cannot forget to account for its datagram. Every
                     // datagram the window observes now lands in exactly one of
                     // `hellos` / `ignored`.
+                    //
+                    // R2610 — a THIRD datagram does not advance the cycle, and
+                    // it is the one a stranger can send on purpose: a
+                    // well-formed Hello advertising no address. Both upstreams
+                    // keep searching past it and wz used to stop, so an
+                    // exit-on-first window — the SESSION-OPEN scout — could be
+                    // closed with nothing discovered by one empty answer from
+                    // anywhere on the group. The rule lives in
+                    // [`hello_advances_window`]; the `advanced` flag it feeds
+                    // is unchanged, so the accounting above still holds.
                     let advanced = if rx.bytes.first().map(|h| h & 0x1f)
                         == Some(wire_const::S_MID_HELLO)
                     {
                         match decode_scouted_hello(&rx.bytes) {
-                            Some(hello) => {
+                            Some(hello)
+                                if hello_advances_window(
+                                    actions.params.exit_on_first,
+                                    hello.locators.len(),
+                                ) =>
+                            {
                                 *actions.pending_hello.lock().unwrap() = Some(hello);
                                 // The cycle's mode rides the event: the
                                 // engine-free statechart has no datamodel, so
@@ -582,7 +613,10 @@ where
                                 engine.step();
                                 true
                             }
-                            None => false,
+                            // Undecodable, or decodable and declined by the
+                            // rule above — both land in `ignored`, each under
+                            // its own verdict.
+                            _ => false,
                         }
                     } else {
                         false
@@ -851,12 +885,36 @@ mod tests {
     ///
     /// This is the sharpest of the three, because the old code and a timed-out
     /// window were indistinguishable to every caller: both left `discovered`
-    /// at `None`. Pico clears the locator vector and KEEPS the hello
-    /// (`scout.c:104-110`). The assertion pairs the two reads deliberately —
-    /// a recorded peer WITH no dial target.
+    /// at `None`. The assertion pairs the two reads deliberately — a recorded
+    /// peer WITH no dial target.
+    ///
+    /// R2610 MOVED IT TO THE SURVEY ARM, which is the only arm where upstream
+    /// makes this claim. `vendor/zenoh-pico/src/session/scout.c` @
+    /// `if ((locator_count == 0) && exit_on_first) {` records a locator-less
+    /// Hello when it is COLLECTING and declines it when a first hello would
+    /// close the search; the test used to run the exit-on-first fixture and so
+    /// asserted the half upstream does not hold. The drive-loop twin of the
+    /// other half is
+    /// [`a_locator_less_hello_does_not_end_an_exit_on_first_window`].
     #[test]
     fn a_locator_less_hello_is_still_a_discovered_peer() {
-        let (actions, hellos) = scout_one(craft_hello_with(0x00, &[0x07, 0x08], &[]));
+        let actions = fixture_actions_mode(false);
+        let mut engine = new_scouting_engine(&actions);
+        engine.initialize();
+        engine.process_event(ScoutingEvent::SessionOpenRequested);
+        engine.process_event(ScoutingEvent::ScoutTxDone);
+        assert_eq!(engine.get_current_state(), ScoutingState::AwaitingHello);
+        feed_hello(
+            &actions,
+            &mut engine,
+            &craft_hello_with(0x00, &[0x07, 0x08], &[]),
+        );
+        assert_eq!(
+            engine.get_current_state(),
+            ScoutingState::AwaitingHello,
+            "a survey window is closed by its deadline, not by a responder"
+        );
+        let hellos = actions.scouted_hellos();
         assert_eq!(
             hellos.len(),
             1,
@@ -1232,6 +1290,63 @@ mod tests {
             actions.ignored_datagrams(),
             vec![ScoutRxIgnored::ForeignScout],
             "a Scout carrying somebody else's zid is not our loopback",
+        );
+    }
+
+    /// R2610 — ONE empty answer must not close the session-open scout.
+    ///
+    /// The exit-on-first arm is the implicit scout a session open runs, and the
+    /// group it listens on is untrusted, so "a Hello ends the window" hands
+    /// anyone on that group a way to end everybody's discovery with a datagram
+    /// that costs nothing to send. Both references keep looking past it.
+    /// zenoh-pico declines to RECORD it, which is what its break reads:
+    /// `vendor/zenoh-pico/src/session/scout.c` @ `if ((locator_count == 0) && exit_on_first) {`
+    /// And zenoh's scout callback returns `Loop::Continue` at
+    /// `zenoh/src/net/runtime/orchestrator.rs` @ `if !hello.locators.is_empty() {`
+    ///
+    /// The second responder is what makes this a POSITIVE claim rather than the
+    /// absence of one: the window must go on to discover the peer that did
+    /// advertise an address, so a loop that merely dropped the first datagram on
+    /// the floor would still have to reach it.
+    #[tokio::test]
+    async fn a_locator_less_hello_does_not_end_an_exit_on_first_window() {
+        let mut driver = ScriptedScoutLink::with([
+            craft_hello_with(0x01, &[0xA1], &[]),
+            craft_hello_with(0x01, &[0xB2], &["udp/127.0.0.1:7447"]),
+        ]);
+        let actions = ScoutingActions::new(ScoutParams {
+            version: 0x09,
+            what: 0x03,
+            zid: vec![0xAA],
+            timeout_ms: 400,
+            exit_on_first: true,
+        });
+        let mut engine = new_scouting_engine(&actions);
+        let clock = TokioTime::new();
+
+        let outcome =
+            drive_scouting_until_resolved(&mut driver, &actions, &mut engine, &clock, None, 5)
+                .await;
+
+        assert_eq!(
+            outcome,
+            ScoutOutcome::Discovered("udp/127.0.0.1:7447".into()),
+            "the empty answer must not have ended the window before the real peer",
+        );
+        assert_eq!(
+            actions.scouted_hellos().len(),
+            1,
+            "only the peer that advertised an address is a discovery",
+        );
+        assert_eq!(
+            actions.trace_snapshot().record_hello,
+            1,
+            "the declined Hello never reached the FSM action",
+        );
+        assert_eq!(
+            actions.ignored_datagrams(),
+            vec![ScoutRxIgnored::LocatorlessHello],
+            "and it is ACCOUNTED for, not dropped silently",
         );
     }
 
