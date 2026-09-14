@@ -513,9 +513,11 @@ pub fn server_config_from_pem(
 /// carries the material, or `None` to fall back to the ambient
 /// `DialConfig.tls`. The tls twin of
 /// [`quic_client_config_from_locator`](crate::quic_config::quic_client_config_from_locator),
-/// and deliberately the same shape: the two schemes read ONE vocabulary
-/// (`io/zenoh-link-commons/src/tls.rs`), so a tail that means one thing on a
-/// `quic/` locator must not mean another on a `tls/` one.
+/// and deliberately the same shape: the two schemes read ONE vocabulary, which
+/// upstream declares in COMMONS rather than in either link crate
+/// (`io/zenoh-link-commons/src/tls.rs` @ `pub const TLS_ROOT_CA_CERTIFICATE_RAW: &str = "root_ca_certificate_raw";`),
+/// so a tail that means one thing on a `quic/` locator must not mean another on
+/// a `tls/` one.
 ///
 /// WHICH TAILS CLAIM THE DIAL is quic's rule unchanged — `root_ca` alone, or
 /// CONNECT material alone now that the public roots make such a tail
