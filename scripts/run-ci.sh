@@ -7185,7 +7185,11 @@ layer_c1av_cargo_test_ext_pubsub_advanced_history() {
     # global-GETs witness. The parser case was EXTENDED rather than added, so
     # it moves no count. Both `ext-pubsub-advanced-history`-gated — MEASURED:
     # C1ar printed 5 and C1at 22.
-    _runci_guarded_test "C1av advanced_subscriber" 45 \
+    # R2617 — 45 -> 46: a_beacon_from_a_new_source_is_skipped_only_while_a_
+    # global_pull_is_running, the guard upstream takes only for a source it has
+    # just inserted. `ext-pubsub-advanced-history`-gated like its neighbours
+    # (the counter it reads exists only there), so only this lane moves.
+    _runci_guarded_test "C1av advanced_subscriber" 46 \
         cargo test -p wz-runtime-tokio --features ext-pubsub-advanced-history,ext-pubsub-advanced-publisher,pubsub-allow-loop \
         --lib advanced_subscriber --quiet || return 1
     (cd crates \

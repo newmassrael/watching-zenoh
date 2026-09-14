@@ -1254,18 +1254,23 @@ unsafe fn advanced_subscriber_options(
     unsafe {
         if (*options).recovery.is_enabled {
             let last = &(*options).recovery.last_sample_miss_detection;
-            let mut recovery = RecoveryConfig::default();
-            if last.is_enabled {
-                if last.periodic_queries_period_ms > 0 {
-                    recovery.periodic_queries =
-                        Some(Duration::from_millis(last.periodic_queries_period_ms));
-                } else {
-                    // Upstream: "If set to 0, the last sample(s) miss detection
-                    // will be performed based on publisher's heartbeat" — which
-                    // is wz's `heartbeat` trigger, not "no trigger at all".
-                    recovery.heartbeat = true;
-                }
-            }
+            // R2617 — through the BUILDERS, because `RecoveryConfig`'s fields
+            // are private now and the two triggers are mutually exclusive by
+            // type. The branch below was ALREADY exclusive, so this is the same
+            // decision expressed in a form that cannot express the other one:
+            // assigning to a field of a value this crate already held was how
+            // the pair stayed constructible from outside the defining crate.
+            let recovery = if !last.is_enabled {
+                RecoveryConfig::new()
+            } else if last.periodic_queries_period_ms > 0 {
+                RecoveryConfig::new()
+                    .with_periodic_queries(Duration::from_millis(last.periodic_queries_period_ms))
+            } else {
+                // Upstream: "If set to 0, the last sample(s) miss detection
+                // will be performed based on publisher's heartbeat" — which
+                // is wz's `heartbeat` trigger, not "no trigger at all".
+                RecoveryConfig::new().with_heartbeat()
+            };
             out.recovery = Some(recovery);
         }
         if (*options).history.is_enabled {

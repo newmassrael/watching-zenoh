@@ -335,10 +335,38 @@ impl From<crate::session::LivelinessAliasError> for AdvancedSubscribeError {
 /// timeout + the (independent) startup history live on [`AdvancedSubscriberOptions`],
 /// NOT here — zenoh keeps `.recovery()` and `.history()` SEPARATE so
 /// history-without-retransmission is representable (R311y91, review M1).
+/// R2617 — THE PAIR IS NOW UNREPRESENTABLE, not merely unwise.
+///
+/// `periodic_queries` and `heartbeat` are two triggers for the same recovery
+/// GET, and upstream makes choosing both a TYPE error rather than a validation:
+/// `zenoh-ext/src/advanced_subscriber.rs` @ `pub struct RecoveryConfig<const CONFIGURED: bool = true> {`
+/// with both setters living on @ `impl RecoveryConfig<false> {` and each
+/// returning `RecoveryConfig<true>`, so the second call has no method to reach.
+/// wz carried a plain struct with public fields, so the invalid pair was
+/// constructible here and unrepresentable there.
+///
+/// THIS IS NOT A TIDINESS CHANGE. Upstream's heartbeat handler relies on the
+/// exclusion as a load-bearing invariant, and says so at the line that spawns
+/// the periodic task for a newly-seen source: `zenoh-ext/src/advanced_subscriber.rs` @ `// NOTE: API does not allow both heartbeat and periodic_queries`.
+/// Porting that handler's guard onto a tree where both CAN be set would be
+/// inheriting an invariant this crate does not hold, which is why the type
+/// moves first and the guard follows it.
+///
+/// THE FIELDS ARE PRIVATE, and that is the half that does the work.
+/// `#[non_exhaustive]` stops an external crate writing a struct LITERAL but not
+/// assigning to a field of a value it already holds -- which is exactly what
+/// both C ABIs were doing. Each setter also CLEARS the other trigger, mirroring
+/// upstream, so even the in-crate path cannot leave both set.
+///
+/// `new()` is generic over the flag on purpose: `RecoveryConfig::new()` in a
+/// position wanting the default `true` infers it and stays sample-driven, while
+/// `RecoveryConfig::new().with_heartbeat()` infers `false` because that is the
+/// only parameter for which the method exists. That is upstream's own
+/// inference trick, and it is why no caller of the builder form had to change.
 #[cfg(feature = "ext-pubsub-advanced-recovery")]
 #[derive(Clone, Copy, Debug, Default)]
 #[non_exhaustive]
-pub struct RecoveryConfig {
+pub struct RecoveryConfig<const CONFIGURED: bool = true> {
     /// R311y83 — when `Some(period)`, a background task re-asks every known
     /// source `_sn=last+1..` every `period`, catching a lost LAST sample that
     /// no further live sample would trigger sample-driven recovery for (zenoh's
@@ -347,7 +375,7 @@ pub struct RecoveryConfig {
     /// recovery only. NB enabling this spawns a tokio task at declare time, so
     /// the caller MUST be inside a tokio runtime context (the sample-driven and
     /// no-recovery paths have no such requirement).
-    pub periodic_queries: Option<Duration>,
+    periodic_queries: Option<Duration>,
     /// R311y84 — when `true`, declare a second subscriber on
     /// `<key_expr>/@adv/pub/**` that decodes each publisher's last-sn heartbeat
     /// beacon (`z_deserialize::<u32>`) and issues a BOUNDED `_sn=last+1..hb`
@@ -356,27 +384,62 @@ pub struct RecoveryConfig {
     /// last sample like the periodic trigger, but driven by the publisher's
     /// beacon instead of a local timer (the producer beacon is the separate
     /// `ext-pubsub-sample-miss-detection` atom). `false` (default) = off.
-    pub heartbeat: bool,
+    heartbeat: bool,
 }
 
 #[cfg(feature = "ext-pubsub-advanced-recovery")]
-impl RecoveryConfig {
+impl<const CONFIGURED: bool> RecoveryConfig<CONFIGURED> {
     /// Sample-driven recovery (no periodic / heartbeat trigger).
+    ///
+    /// Generic over the flag so both spellings keep working: used directly it
+    /// infers the default `true` and is a complete, trigger-less config; used
+    /// as the receiver of a `with_*` call it infers `false`, because that is
+    /// the only parameter for which those methods exist.
     pub fn new() -> Self {
         Self::default()
     }
 
-    /// Enable the periodic recovery trigger with the given re-ask period (see
-    /// [`Self::periodic_queries`]). Requires a tokio runtime at declare time.
-    pub fn with_periodic_queries(mut self, period: Duration) -> Self {
-        self.periodic_queries = Some(period);
-        self
+    /// The configured periodic re-ask period, if that trigger was chosen.
+    ///
+    /// An accessor rather than a public field (R2617): a public field is
+    /// assignable from another crate even under `#[non_exhaustive]`, which is
+    /// how both C ABIs used to set a trigger and is precisely the hole the
+    /// typestate exists to close.
+    pub fn periodic_queries(&self) -> Option<Duration> {
+        self.periodic_queries
     }
 
-    /// Enable the heartbeat recovery trigger (see [`Self::heartbeat`]).
-    pub fn with_heartbeat(mut self) -> Self {
-        self.heartbeat = true;
-        self
+    /// Whether the heartbeat trigger was chosen.
+    pub fn heartbeat(&self) -> bool {
+        self.heartbeat
+    }
+}
+
+#[cfg(feature = "ext-pubsub-advanced-recovery")]
+impl RecoveryConfig<false> {
+    /// Enable the periodic recovery trigger with the given re-ask period.
+    /// Requires a tokio runtime at declare time.
+    ///
+    /// CLEARS the heartbeat trigger, exactly as upstream's does
+    /// (`zenoh-ext/src/advanced_subscriber.rs` @ `pub fn periodic_queries(self, period: Duration) -> RecoveryConfig<true> {`,
+    /// whose body writes `heartbeat: false`). Returning `RecoveryConfig<true>`
+    /// is what removes the other setter from the value's type.
+    pub fn with_periodic_queries(self, period: Duration) -> RecoveryConfig<true> {
+        RecoveryConfig {
+            periodic_queries: Some(period),
+            heartbeat: false,
+        }
+    }
+
+    /// Enable the heartbeat recovery trigger.
+    ///
+    /// CLEARS the periodic trigger, mirroring
+    /// `zenoh-ext/src/advanced_subscriber.rs` @ `pub fn heartbeat(self) -> RecoveryConfig<true> {`.
+    pub fn with_heartbeat(self) -> RecoveryConfig<true> {
+        RecoveryConfig {
+            periodic_queries: None,
+            heartbeat: true,
+        }
     }
 }
 
@@ -1266,7 +1329,34 @@ impl State {
             return None;
         }
         let key = (zid, eid);
+        // R2617 — SKIP THE HEARTBEAT FOR A SOURCE THIS SUBSCRIBER HAS JUST MET
+        // WHILE A GLOBAL PULL IS STILL RUNNING. Upstream's guard, on the arm it
+        // takes only for a newly-inserted source:
+        // `zenoh-ext/src/advanced_subscriber.rs` @ `if states.global_pending_queries > 0 {`,
+        // whose trace calls it "publisher that is currently being pulled by
+        // global query". Without it the beacon fires a per-source
+        // `_sn=last+1..hb` GET for a publisher the startup history GET is
+        // already fetching in full, so the same samples are asked for twice and
+        // the per-source slot is occupied by a query the global one makes
+        // redundant.
+        //
+        // THE STATE IS STILL INSERTED BEFORE THE RETURN, exactly as upstream
+        // inserts through `get_or_insert_mut` and only then decides: the source
+        // has been SEEN, and forgetting it here would make the next beacon look
+        // new all over again.
+        //
+        // The `history` cfg is the honest scope: `global_pending_queries` only
+        // exists where a global pull can exist, and with history compiled out
+        // there is nothing for this guard to be about.
+        #[cfg(feature = "ext-pubsub-advanced-history")]
+        let global_pull_in_flight = self.global_pending_queries != 0;
+        #[cfg(not(feature = "ext-pubsub-advanced-history"))]
+        let global_pull_in_flight = false;
+        let newly_seen = !self.sequenced.contains_key(&key);
         let state = self.sequenced.entry(key.clone()).or_default();
+        if newly_seen && global_pull_in_flight {
+            return None;
+        }
         let caught_up = state
             .last_delivered
             .map(|last| hb_sn <= last)
@@ -4129,6 +4219,71 @@ mod tests {
             plain.handle_heartbeat(vec![0x01], 1, 9).is_none(),
             "no retransmission -> heartbeat is inert"
         );
+    }
+
+    /// R2617 — a beacon from a publisher this subscriber has NEVER SEEN is
+    /// skipped while a GLOBAL pull is in flight, and only then.
+    ///
+    /// Upstream takes that arm only for a source it just inserted
+    /// (`zenoh-ext/src/advanced_subscriber.rs` @ `if states.global_pending_queries > 0 {`),
+    /// because the startup history GET is already fetching that publisher in
+    /// full; a per-source `_sn=last+1..hb` GET on top of it asks for the same
+    /// samples twice.
+    ///
+    /// THREE ARMS, and the last two are the control. "New source + global pull
+    /// -> skipped" alone is equally consistent with a guard that skips every
+    /// heartbeat while a pull runs, or with one that skips every new source —
+    /// both of which would be worse defects than the gap being closed. So a
+    /// KNOWN source under the same in-flight pull must still recover, and a new
+    /// source with NO pull in flight must still recover.
+    #[cfg(feature = "ext-pubsub-advanced-history")]
+    #[test]
+    fn a_beacon_from_a_new_source_is_skipped_only_while_a_global_pull_is_running() {
+        let new_state = |global: usize| State {
+            sequenced: HashMap::new(),
+            timestamped: HashMap::new(),
+            on_sample: Box::new(|_| {}),
+            on_miss: Box::new(|_| {}),
+            retransmission: true,
+            global_pending_queries: global,
+            max_history_depth: usize::MAX,
+        };
+
+        // THE SUBJECT: never-seen source, global pull running -> skipped.
+        let mut pulling = new_state(1);
+        assert!(
+            pulling.handle_heartbeat(vec![0x0Au8], 7, 5).is_none(),
+            "a beacon from a publisher the global query is already pulling must \
+             not raise a second, redundant per-source GET"
+        );
+        // ...and the source is REMEMBERED anyway, or the next beacon would look
+        // new all over again and the skip would repeat forever.
+        assert!(
+            pulling.sequenced.contains_key(&(vec![0x0Au8], 7)),
+            "the skipped source must still be recorded, as upstream records it \
+             before deciding"
+        );
+
+        // CONTROL A: same in-flight pull, but a source already KNOWN -> recovers.
+        let mut known = new_state(1);
+        known.sequenced.insert(
+            (vec![0x0Bu8], 7),
+            SourceState {
+                last_delivered: Some(1),
+                ..Default::default()
+            },
+        );
+        let req = known
+            .handle_heartbeat(vec![0x0Bu8], 7, 5)
+            .expect("the guard is about NEW sources only; a known one still recovers");
+        assert_eq!((req.from_sn, req.to_sn), (2, Some(5)));
+
+        // CONTROL B: never-seen source, NO global pull -> recovers.
+        let mut idle = new_state(0);
+        let req = idle
+            .handle_heartbeat(vec![0x0Cu8], 7, 5)
+            .expect("with no global pull in flight a new source must recover normally");
+        assert_eq!((req.from_sn, req.to_sn), (0, Some(5)));
     }
 
     /// R311y84 composed heartbeat recovery e2e: the publisher's last-sn beacon
