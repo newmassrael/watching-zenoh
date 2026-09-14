@@ -6897,7 +6897,11 @@ layer_c1aq_cargo_test_ext_pubsub_advanced() {
     # R2618 — 19 -> 20: the_publisher_knobs_reach_the_publish_options_and_
     # default_changes_nothing, the five wire knobs plus the control that a
     # default config still folds to a bare put().
-    _runci_guarded_test "C1aq advanced_" 20 \
+    # R2619 — 20 -> 21: the_publisher_surface_reports_identity_and_asks_for_
+    # matching_declarations, which pins that declaring an advanced publisher
+    # takes a reference on the SUBSCRIBERS Interest rather than merely owning a
+    # matching method.
+    _runci_guarded_test "C1aq advanced_" 21 \
         cargo test -p wz-runtime-tokio --features ext-pubsub-advanced-publisher,query-get,pubsub-allow-loop \
         --lib advanced_ --quiet || return 1
     (cd crates \
@@ -7108,7 +7112,9 @@ layer_c1au_cargo_test_ext_pubsub_sample_miss_detection() {
     # R2618 — 14 -> 15, the wire-knob witness. It is UNGATED, so it lands in
     # this lane as well as C1aq; the count guard found this one, not a reading
     # of the diff, which is the discipline the paragraph above already states.
-    _runci_guarded_test "C1au advanced_publisher" 15 \
+    # R2619 — 15 -> 16, the publisher-surface witness; ungated like R2618's, so
+    # it lands in this lane as well as C1aq.
+    _runci_guarded_test "C1au advanced_publisher" 16 \
         cargo test -p wz-runtime-tokio --features ext-pubsub-sample-miss-detection,ext-pubsub-advanced-recovery,pubsub-allow-loop \
         --lib advanced_publisher --quiet || return 1
     (cd crates \

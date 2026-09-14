@@ -41,7 +41,7 @@ use crate::locality::Locality;
 use crate::sample::Reliability;
 use crate::session::{
     LivelinessAliasError, LivelinessOptions, LivelinessToken, PublishError, PublishOptions,
-    QueryableError, Session, Unicast,
+    Publisher, QueryableError, Session, Unicast,
 };
 use crate::session_glue::SessionLinkActions;
 use crate::timestamp_source::FallbackStamp;
@@ -367,6 +367,27 @@ pub struct AdvancedPublisher<R: SessionRuntime, T: TimeSource> {
     /// makes. See [`WireQos`] for why this is one value rather than a chain at
     /// each site.
     qos: WireQos,
+    /// R2619 — THE PLAIN PUBLISHER THIS ONE WRAPS, and the reason it is a field
+    /// rather than a set of re-implemented methods: upstream's advanced
+    /// publisher IS a wrapper, `zenoh-ext/src/advanced_publisher.rs` @ `pub struct AdvancedPublisher<'a> {`
+    /// holding a `Publisher`, and every surface this round adds delegates to it
+    /// there — `zenoh-ext/src/advanced_publisher.rs` @ `self.publisher.matching_status()`.
+    ///
+    /// IT IS NOT PUBLISHED THROUGH, and that difference is stated rather than
+    /// hidden: wz's `Publisher::put` carries the publisher's FIXED options,
+    /// while an advanced put varies timestamp / source_info / encoding /
+    /// attachment per sample, so the sends still go through `session.publish`.
+    /// What holding it buys is the state the matching surface READS —
+    /// declaring it is what registers this session's SUBSCRIBERS Interest for
+    /// the keyexpr (R2577), so before this round an advanced publisher's
+    /// matching status would have consulted a registry nobody had asked the
+    /// neighbour to fill. That is the SAME defect R2577 closed for the plain
+    /// publisher, and it reached here because this handle was not made of one.
+    ///
+    /// Built with THIS publisher's folded wire options on purpose: the matching
+    /// poll gates on the publisher's own `locality`, so a delegate carrying
+    /// different options would answer about a publisher that does not exist.
+    publisher: Publisher<R, T>,
     cache: Option<AdvancedCache<R, T>>,
     _token: Option<LivelinessToken<R, T>>,
     /// R311y85 — the publisher's `@adv` KE, retained so the heartbeat-beacon
@@ -634,6 +655,11 @@ where
         #[cfg(not(feature = "ext-pubsub-sample-miss-detection"))]
         let _ = adv_keyexpr;
 
+        // R2619 — the delegate is built BEFORE the literal because `keyexpr` is
+        // moved into it, and with the same folded options the sends carry.
+        let qos = WireQos::from_options(&options);
+        let publisher =
+            session.declare_publisher(keyexpr.clone(), qos.apply(PublishOptions::put()));
         Ok(Self {
             session: session.clone(),
             keyexpr,
@@ -645,7 +671,8 @@ where
             // made this site and `storage_service`'s the two same-`uhlc::ID`
             // clocks the round removed.
             stamp: FallbackStamp::new(local_zid, session.node_hlc().clone()),
-            qos: WireQos::from_options(&options),
+            qos,
+            publisher,
             cache,
             _token: token,
             #[cfg(feature = "ext-pubsub-sample-miss-detection")]
@@ -814,6 +841,75 @@ where
     /// Borrow the cache, if one was declared (test / recovery seam).
     pub fn cache(&self) -> Option<&AdvancedCache<R, T>> {
         self.cache.as_ref()
+    }
+
+    /// R2619 — this publisher's key expression, upstream's
+    /// `zenoh-ext/src/advanced_publisher.rs` @ `pub fn key_expr(&self) -> &KeyExpr<'a> {`.
+    ///
+    /// Spelled `keyexpr` rather than `key_expr` to match the plain
+    /// [`Publisher::keyexpr`] this crate already exposes: parity with upstream
+    /// is about the surface EXISTING, and inventing a second spelling for the
+    /// same concept inside one crate would be the worse divergence.
+    pub fn keyexpr(&self) -> &str {
+        self.publisher.keyexpr()
+    }
+
+    /// R2619 — this publisher's global identity, `(zid, eid)`, upstream's
+    /// `zenoh-ext/src/advanced_publisher.rs` @ `pub fn id(&self) -> EntityGlobalId {`.
+    ///
+    /// The clause this closes said "wz's whole identity surface is the bare
+    /// `u32`" — the eid was allocated and then unreachable. It is returned with
+    /// the zid because that is what makes it GLOBAL: upstream's
+    /// `EntityGlobalId` is exactly the pair, and it is the same pair this
+    /// publisher already stamps into every sample's `SourceInfo`, so a
+    /// subscriber that reads a sample's origin and a caller that asks the
+    /// publisher who it is now get the same answer by construction.
+    pub fn id(&self) -> (&[u8], u32) {
+        (&self.zid, self.eid)
+    }
+
+    /// R2619 — the matching status of this publisher, upstream's
+    /// `zenoh-ext/src/advanced_publisher.rs` @ `pub fn matching_status(&self) -> impl Resolve<ZResult<zenoh::matching::MatchingStatus>> + '_ {`,
+    /// which delegates exactly as this does.
+    ///
+    /// The delegation is the whole point rather than a shortcut: the answer is
+    /// only meaningful because declaring the wrapped publisher ASKED the
+    /// neighbour for the matching subscriber declarations (R2577). A method
+    /// re-implemented here would have read the same registry without anyone
+    /// having filled it.
+    #[cfg(feature = "session-matching")]
+    pub fn get_matching_status(&self) -> crate::session::MatchingStatus {
+        self.publisher.get_matching_status()
+    }
+
+    /// R2619 — the listener sibling of [`Self::get_matching_status`], upstream's
+    /// `zenoh-ext/src/advanced_publisher.rs` @ `pub fn matching_listener(&self) -> MatchingListenerBuilder<'_, '_, DefaultHandler> {`.
+    #[cfg(feature = "session-matching")]
+    pub fn declare_matching_listener(
+        &self,
+        callback: impl FnMut(crate::session::MatchingStatus) + Send + 'static,
+    ) -> Result<crate::session::MatchingListener<R, T>, crate::session::MatchingListenerError> {
+        self.publisher.declare_matching_listener(callback)
+    }
+
+    /// R2619 — undeclare this publisher, upstream's
+    /// `zenoh-ext/src/advanced_publisher.rs` @ `pub fn undeclare(self) -> PublisherUndeclaration<'a> {`.
+    ///
+    /// CONSUMING AND INFALLIBLE, which is wz's shape for the same guarantee
+    /// rather than a weaker one. Every piece of this publisher's wire state is
+    /// already RAII — the `@adv` cache queryable, the liveliness token, the
+    /// heartbeat task and the wrapped publisher's own matching Interest each
+    /// retract on drop — so the teardown upstream awaits through a resolvable
+    /// is, here, what running `Drop` does. What the method adds over letting the
+    /// binding fall out of scope is that the caller can say WHEN, and say it at
+    /// a point the compiler checks: after `undeclare()` the handle is gone, so
+    /// a later `put` is a type error rather than a publish onto a retracted
+    /// declaration.
+    pub fn undeclare(self) {
+        // Explicit rather than implicit: `drop(self)` is the operation, and
+        // naming it is what distinguishes this from a function that forgot to
+        // do anything. The RAII members listed above are what actually retract.
+        drop(self);
     }
 }
 
@@ -1918,6 +2014,98 @@ mod tests {
     /// and wz now answers the same on the state it models identically.
     ///
     /// THE ARMS ARE THE POINT. A refusal test alone would pass on a build that
+    /// R2619 — the publisher-handle surface upstream exposes and wz did not:
+    /// identity, key expression, matching status, and an undeclare.
+    ///
+    /// THE LOAD-BEARING ASSERTION IS THE MATCHING ONE, and it is not about the
+    /// method existing. Declaring the wrapped publisher is what asks the
+    /// neighbour for the matching subscriber declarations (R2577); before this
+    /// round an advanced publisher asked NOTHING, so a status poll read a
+    /// registry nobody had filled. The arm below pins that the delegate was
+    /// really declared, by observing the Interest the declare put on the wire —
+    /// a test that only called the method would pass on a handle that asked
+    /// nobody, which is exactly the state this round found.
+    ///
+    /// `id()` is asserted against the SAME `(zid, eid)` the publisher stamps
+    /// into a sample's `SourceInfo`, because a global id that disagreed with
+    /// the origin its own samples carry would be a second identity rather than
+    /// an accessor.
+    #[test]
+    fn the_publisher_surface_reports_identity_and_asks_for_matching_declarations() {
+        use std::sync::Mutex;
+
+        use crate::observer::ApplicationLayerObserver;
+        use crate::runtime_impl::TokioTime;
+        use crate::session::TokioSession;
+
+        let (actions, _driver) = crate::test_fixtures::recording_actions();
+        let observer = Arc::new(Mutex::new(ApplicationLayerObserver::new()));
+        let clock = Arc::new(TokioTime::new());
+        let session = TokioSession::new(actions, observer, clock);
+
+        let publisher = AdvancedPublisher::declare(
+            &session,
+            "demo/data",
+            AdvancedPublisherOptions {
+                cache: None,
+                publisher_detection: false,
+                ..AdvancedPublisherOptions::default()
+            },
+            vec![0x07],
+        )
+        .expect("advanced publisher declares against the test link");
+
+        // IDENTITY: the keyexpr and the (zid, eid) pair are reachable at all.
+        assert_eq!(publisher.keyexpr(), "demo/data");
+        let (zid, eid) = publisher.id();
+        assert_eq!(
+            zid,
+            &[0x07u8][..],
+            "the id carries the zid it was declared with"
+        );
+
+        // ...and the eid AGREES with what its samples stamp as their origin.
+        publisher.put(b"x").expect("advanced put publishes");
+        assert_eq!(
+            eid, publisher.eid,
+            "id()'s eid is the one SourceInfo carries, not a second identity"
+        );
+
+        // MATCHING: the delegate really ASKED. The id is read out of the
+        // SESSION's own interest table, which holds one only because declaring
+        // the wrapped publisher took a reference on this keyexpr's SUBSCRIBERS
+        // Interest (R2577). This is the assertion that a handle asking nobody
+        // would fail -- calling `get_matching_status()` and discarding it would
+        // not, which is the state this round found.
+        #[cfg(all(feature = "session-matching", feature = "declare-interest"))]
+        {
+            assert!(
+                session
+                    .matching_interest_id(
+                        crate::session::MatchingPlane::Subscribers,
+                        publisher.keyexpr(),
+                    )
+                    .is_some(),
+                "declaring an advanced publisher must take a reference on the \
+                 SUBSCRIBERS Interest for its keyexpr, or its matching status \
+                 reads a registry nobody was asked to fill"
+            );
+            let _ = publisher.get_matching_status();
+        }
+
+        // UNDECLARE consumes the handle; after it the interest reference is
+        // released, which is the observable half of the teardown.
+        publisher.undeclare();
+        #[cfg(all(feature = "session-matching", feature = "declare-interest"))]
+        assert!(
+            session
+                .matching_interest_id(crate::session::MatchingPlane::Subscribers, "demo/data")
+                .is_none(),
+            "undeclare drops the wrapped publisher, so the last reference on \
+             the Interest goes with it"
+        );
+    }
+
     /// R2618 — the five publisher knobs reach the publish options, and a
     /// DEFAULT config still publishes exactly what it did before they existed.
     ///
