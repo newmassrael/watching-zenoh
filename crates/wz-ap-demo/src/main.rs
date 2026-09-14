@@ -1720,6 +1720,24 @@ fn main() -> ExitCode {
         );
         return ExitCode::from(2);
     }
+    // R2617 — the two triggers are now MUTUALLY EXCLUSIVE, and the demo has to
+    // say so at the flag layer because the type no longer lets the runner
+    // express the pair. This is not a new restriction on the legs: this file's
+    // own runner comment already recorded that "the legs arm exactly one, which
+    // is what keeps a recovery GET attributable to the trigger under test" --
+    // it was a convention the API did not enforce, and upstream enforces it
+    // (`zenoh-ext/src/advanced_subscriber.rs` @ `// NOTE: API does not allow both heartbeat and periodic_queries`).
+    // Refusing beats silently picking one: a leg that asked for both would
+    // otherwise measure a trigger it did not name.
+    if advanced_recovery_heartbeat && advanced_recovery_periodic_ms.is_some() {
+        eprintln!(
+            "wz-ap-demo: --advanced-recovery-heartbeat and \
+             --advanced-recovery-periodic are mutually exclusive (they are two \
+             triggers for the same recovery GET, and RecoveryConfig makes the \
+             pair unrepresentable, as zenoh-ext does); arm exactly one"
+        );
+        return ExitCode::from(2);
+    }
     // R311y442 — `--advanced-publish <keyexpr>` is the ANSWERING half: a wz
     // AdvancedPublisher whose `@adv` cache a FOREIGN advanced subscriber drains.
     // `--cache-max` sets the ring depth, `--advanced-publish-count` the burst size.

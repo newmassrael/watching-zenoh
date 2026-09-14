@@ -2171,25 +2171,27 @@ fn install_session_handles(
             // R311y444 — the heartbeat trigger is ADDITIVE: sample-driven cannot be
             // switched off (it is implied by recovering at all), so this arms a
             // second way for the same GET to be issued, not a different one.
-            let mut recovery = if advanced_recovery_heartbeat {
+            // R311y447 / R2617 — the two triggers are EXCLUSIVE and the type now
+            // says so, so this is one choice rather than an accumulation.
+            // `RecoveryConfig<false>::with_heartbeat()` and
+            // `::with_periodic_queries()` each consume self and return
+            // `RecoveryConfig<true>`, mirroring upstream, whose heartbeat callback
+            // relies on the exclusion ("API does not allow both"). The previous
+            // shape armed the heartbeat and then ADDED the periodic on top, which
+            // the comment here called independent flags while noting that the legs
+            // arm exactly one; the pair is now refused at the flag layer in
+            // `main.rs`, so reaching this code with both set is impossible.
+            //
+            // Fully qualified `Duration` rather than a file-level `use`: this sits
+            // behind `#[cfg(feature = "advanced")]`, so an import would be unused
+            // on the feature-off build and trip -D warnings there.
+            let recovery = if advanced_recovery_heartbeat {
                 RecoveryConfig::new().with_heartbeat()
+            } else if let Some(ms) = advanced_recovery_periodic_ms {
+                RecoveryConfig::new().with_periodic_queries(std::time::Duration::from_millis(ms))
             } else {
                 RecoveryConfig::new()
             };
-            // R311y447 — the PERIODIC trigger is additive in the same way, and
-            // upstream keeps the two mutually exclusive at the TYPE level
-            // (`RecoveryConfig<false>::heartbeat()` and `::periodic_queries()` each
-            // consume self, and the heartbeat callback's own comment says "API does
-            // not allow both", advanced_subscriber.rs:1087). wz's builder does not
-            // encode that exclusion, so a caller CAN arm both; the demo leaves them
-            // independent flags and the legs arm exactly one, which is what keeps a
-            // recovery GET attributable to the trigger under test.
-            if let Some(ms) = advanced_recovery_periodic_ms {
-                // Fully qualified rather than a file-level `use`: this call sits
-                // behind `#[cfg(feature = "advanced")]`, so an import would be
-                // unused on the feature-off build and trip -D warnings there.
-                recovery = recovery.with_periodic_queries(std::time::Duration::from_millis(ms));
-            }
             options = options.with_recovery(recovery);
         }
         let declared = AdvancedSubscriber::declare_with_options(
