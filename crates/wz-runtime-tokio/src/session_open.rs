@@ -48,7 +48,12 @@ use wz_session_core::locator::{
 // `unused_imports` error in every build without the backend, which `-D warnings`
 // makes fatal: the R311y408 shape, caught by the count gate rather than by a
 // check run at `--all-features`.
-#[cfg(feature = "transport-link-quic")]
+// R2606 — widened from `transport-link-quic` to the UNION of the schemes that
+// name this type, now that the tls arms read the locator's material too. A
+// gate narrower than its consumers is open-debt 730's class; a gate WIDER than
+// them is the `unused_imports` error this comment's first half warns about, so
+// the union is the only spelling that is right in both directions.
+#[cfg(any(feature = "transport-link-quic", feature = "transport-link-tls"))]
 use wz_session_core::locator::LinkTlsMaterial;
 #[cfg(feature = "scouting-static")]
 use wz_session_core::scout_static::{resolve_static_config, StaticConfigError};
@@ -1993,21 +1998,24 @@ pub async fn dial_locator(locator: AnyLocator, cfg: &DialConfig) -> io::Result<D
             // (no certs to verify the peer), so a TLS dial is opt-in via the
             // config. `dial_tls` stays the primitive; this arm orchestrates it.
             #[cfg(feature = "transport-link-tls")]
-            Proto::Tls => match &cfg.tls {
-                // Clone the TLS material here, lazily — only when a TLS dial
-                // actually happens (dial_tls owns its rustls config + name).
-                Some(t) => Ok(DialedLink::Tls(Box::new(
+            // R2606 — the locator's own material is read FIRST, then the
+            // ambient config, which is the layering the quic arms already use.
+            // Clone the rustls config lazily, only when a dial happens
+            // (dial_tls owns its config + name).
+            Proto::Tls => match tls_dial_client_config(ip.tls(), cfg.tls.as_ref()).await? {
+                Some(client_config) => Ok(DialedLink::Tls(Box::new(
                     dial_tls(
                         ip.addr,
-                        t.client_config.clone(),
-                        t.server_name.clone(),
+                        client_config,
+                        tls_dial_server_name(cfg.tls.as_ref(), ip.addr)?,
                         &cfg.link_socket(ip.socket(), ip.proto).await?,
                     )
                     .await?,
                 ))),
                 None => Err(io::Error::new(
                     io::ErrorKind::Unsupported,
-                    "tls dial requires DialConfig.tls (rustls client config + server name)",
+                    "tls dial requires DialConfig.tls (rustls client config + server name), \
+                     or a locator tail carrying its own certificate material",
                 )),
             },
             // With the backend feature off, the same `Unsupported` shape as the
@@ -2142,13 +2150,14 @@ pub async fn dial_locator(locator: AnyLocator, cfg: &DialConfig) -> io::Result<D
             // arm is a single dial (or bind): it has no schedule to layer over.
             retry: _,
             // R2599 — the certificate material the quic-family arms below lay
-            // over the ambient config, unused by every other scheme. The
-            // cfg-twin is the shape every sibling here uses: without the quic
-            // backend there is no consumer, and a bound-but-unused field is an
-            // error under `-D warnings`.
-            #[cfg(feature = "transport-link-quic")]
+            // over the ambient config. The cfg-twin is the shape every sibling
+            // here uses: with no consumer compiled, a bound-but-unused field is
+            // an error under `-D warnings`.
+            // R2606 — the tls arm is now a consumer too, so the gate is the
+            // UNION rather than quic alone (open-debt 730's class).
+            #[cfg(any(feature = "transport-link-quic", feature = "transport-link-tls"))]
             tls,
-            #[cfg(not(feature = "transport-link-quic"))]
+            #[cfg(not(any(feature = "transport-link-quic", feature = "transport-link-tls")))]
                 tls: _,
         } => match proto {
             Proto::Tcp => Ok(DialedLink::Tcp(
@@ -2217,33 +2226,40 @@ pub async fn dial_locator(locator: AnyLocator, cfg: &DialConfig) -> io::Result<D
             // is `InvalidInput`, NOT `Unsupported`: the transport is wired, the
             // argument is wrong.
             #[cfg(feature = "transport-link-tls")]
-            Proto::Tls => match &cfg.tls {
-                Some(t) => {
-                    let server_name = ServerName::try_from(host.clone()).map_err(|e| {
-                        io::Error::new(
-                            io::ErrorKind::InvalidInput,
-                            format!("tls dial: {host:?} is not a valid TLS server name: {e}"),
-                        )
-                    })?;
-                    let addrs = resolve_locator_addrs(&host, port).await?;
-                    let link_socket = &cfg.link_socket(named_options(&socket), proto).await?;
-                    Ok(DialedLink::Tls(Box::new(
-                        first_reachable(addrs, &format!("tls/{host}:{port}"), |addr| {
-                            dial_tls(
-                                addr,
-                                t.client_config.clone(),
-                                server_name.clone(),
-                                link_socket,
+            // R2606 — the locator's own material first, then the ambient
+            // config. The NAME is unchanged: for a named locator the host IS
+            // the verified name whatever supplied the certificates, which is
+            // upstream's rule and predates this seam.
+            Proto::Tls => {
+                match tls_dial_client_config(named_tls_material(&tls), cfg.tls.as_ref()).await? {
+                    Some(client_config) => {
+                        let server_name = ServerName::try_from(host.clone()).map_err(|e| {
+                            io::Error::new(
+                                io::ErrorKind::InvalidInput,
+                                format!("tls dial: {host:?} is not a valid TLS server name: {e}"),
                             )
-                        })
-                        .await?,
-                    )))
+                        })?;
+                        let addrs = resolve_locator_addrs(&host, port).await?;
+                        let link_socket = &cfg.link_socket(named_options(&socket), proto).await?;
+                        Ok(DialedLink::Tls(Box::new(
+                            first_reachable(addrs, &format!("tls/{host}:{port}"), |addr| {
+                                dial_tls(
+                                    addr,
+                                    client_config.clone(),
+                                    server_name.clone(),
+                                    link_socket,
+                                )
+                            })
+                            .await?,
+                        )))
+                    }
+                    None => Err(io::Error::new(
+                        io::ErrorKind::Unsupported,
+                        "tls dial requires DialConfig.tls (rustls client config + server name), \
+                         or a locator tail carrying its own certificate material",
+                    )),
                 }
-                None => Err(io::Error::new(
-                    io::ErrorKind::Unsupported,
-                    "tls dial requires DialConfig.tls (rustls client config + server name)",
-                )),
-            },
+            }
             #[cfg(not(feature = "transport-link-tls"))]
             Proto::Tls => Err(io::Error::new(
                 io::ErrorKind::Unsupported,
@@ -2786,6 +2802,84 @@ async fn quic_accept_server_config(
     })
 }
 
+/// R2606 — the TLS material an [`AnyLocator::Named`] carries, all-`None` when
+/// its tail named none. The tls twin of [`named_tls`], which is gated on quic
+/// alone; one gate per scheme rather than a union, because a `use` or helper
+/// whose gate is WIDER than its callers is dead code under `-D warnings` in
+/// exactly the reduced builds Layer C1ac compiles (open-debt 730's class).
+#[cfg(feature = "transport-link-tls")]
+fn named_tls_material(tls: &Option<Box<LinkTlsMaterial>>) -> &LinkTlsMaterial {
+    tls.as_deref().unwrap_or(&LinkTlsMaterial::NONE)
+}
+
+/// R2606 — the rustls client config a `tls/...` dial uses: the LOCATOR's own
+/// material when its tail carries any, else the ambient `DialConfig.tls`.
+/// `None` means NEITHER supplied one, which the caller turns into the same
+/// `Unsupported` it raised before this seam existed.
+///
+/// ONE seam for both tls dial arms — numeric and named — so the layering
+/// cannot drift between them, which is why the quic twin exists in this file
+/// rather than in the config module.
+///
+/// ⚠ DELIBERATELY NOT quic's third layer. `quic_dial_client_config` falls
+/// through to a public-roots config where neither source supplies material
+/// (R2603, open-debt 727); this returns `None` and preserves the refusal. The
+/// premise 727 overturned is scheme-agnostic and tls carries the same refusal,
+/// but that is a BEHAVIOUR change with its own witness to earn, and folding it
+/// into the round that wires the locator material would leave neither change
+/// with a control of its own.
+#[cfg(feature = "transport-link-tls")]
+async fn tls_dial_client_config(
+    material: &LinkTlsMaterial,
+    ambient: Option<&TlsDialConfig>,
+) -> io::Result<Option<Arc<ClientConfig>>> {
+    if let Some(config) = crate::tls_config::tls_client_config_from_locator(material).await? {
+        return Ok(Some(config));
+    }
+    Ok(ambient.map(|t| t.client_config.clone()))
+}
+
+/// R2606 — the name a NUMERIC tls dial verifies the peer certificate against:
+/// the configured `server_name` when an ambient config supplies one, else the
+/// locator's own host text, which is upstream's rule
+/// (`io/zenoh-link-commons/src/tls.rs` @ `pub fn get_tls_host<'a>(address: &Address<'a>) -> ZResult<&'a str> {`).
+///
+/// FALLIBLE where the quic twin is not, and that is the one part of this seam
+/// that is not a mirror: `TlsDialConfig::server_name` is a typed
+/// `ServerName<'static>` where `QuicDialConfig`'s is a `String`, so the
+/// fallback has to parse and can fail. Returning the error names the locator
+/// the operator typed; unwrapping would panic on it.
+#[cfg(feature = "transport-link-tls")]
+fn tls_dial_server_name(
+    ambient: Option<&TlsDialConfig>,
+    addr: SocketAddr,
+) -> io::Result<ServerName<'static>> {
+    if let Some(t) = ambient {
+        return Ok(t.server_name.clone());
+    }
+    let host = addr.ip().to_string();
+    ServerName::try_from(host.clone()).map_err(|e| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("tls dial: {host:?} is not a valid TLS server name: {e}"),
+        )
+    })
+}
+
+/// R2606 — the rustls server config a `tls/...` listen uses: the LOCATOR's own
+/// material when its tail carries any, else the ambient `AcceptConfig.tls`.
+/// The accept twin of [`tls_dial_client_config`].
+#[cfg(feature = "transport-link-tls")]
+async fn tls_accept_server_config(
+    material: &LinkTlsMaterial,
+    ambient: Option<&TlsAcceptConfig>,
+) -> io::Result<Option<Arc<ServerConfig>>> {
+    if let Some(config) = crate::tls_config::tls_server_config_from_locator(material).await? {
+        return Ok(Some(config));
+    }
+    Ok(ambient.map(|t| t.server_config.clone()))
+}
+
 /// Accept-side dispatcher for [`accept_endpoint`]: bind + accept ONE inbound
 /// link for the [`AnyLocator`]'s scheme, returning the same [`DialedLink`]
 /// union the dial path produces so [`accept_and_open_session`] consumes one
@@ -2868,13 +2962,14 @@ pub async fn bind_locator(locator: AnyLocator, cfg: &AcceptConfig) -> io::Result
             // config => typed `Unsupported`, so a TLS acceptor is opt-in — the
             // accept mirror of dial_locator's `Proto::Tls => match &cfg.tls`.
             #[cfg(feature = "transport-link-tls")]
-            Proto::Tls => match &cfg.tls {
-                Some(t) => Ok(BoundListener::Tls(
+            Proto::Tls => match tls_accept_server_config(ip.tls(), cfg.tls.as_ref()).await? {
+                Some(server_config) => Ok(BoundListener::Tls(
                     bind_tcp(ip.addr, &cfg.link_socket(ip.socket(), ip.proto).await?).await?,
-                    t.server_config.clone(),
+                    server_config,
                 )),
                 None => Err(unsupported(
-                    "tls acceptor requires AcceptConfig.tls (a server cert + key)",
+                    "tls acceptor requires AcceptConfig.tls (a server cert + key), \
+                     or a locator tail carrying its own certificate material",
                 )),
             },
             // With the backend off, a typed `Unsupported` (the same shape as the
@@ -2979,11 +3074,12 @@ pub async fn bind_locator(locator: AnyLocator, cfg: &AcceptConfig) -> io::Result
             // arm is a single dial (or bind): it has no schedule to layer over.
             retry: _,
             // R2599 — the listen material the quic-family arms below lay over
-            // the ambient config, unused by every other scheme; the same
-            // cfg-twin as the dial dispatcher, for the same reason.
-            #[cfg(feature = "transport-link-quic")]
+            // the ambient config; the same cfg-twin as the dial dispatcher,
+            // for the same reason. R2606 widened it to the union for the tls
+            // acceptor, exactly as on the dial side.
+            #[cfg(any(feature = "transport-link-quic", feature = "transport-link-tls"))]
             tls,
-            #[cfg(not(feature = "transport-link-quic"))]
+            #[cfg(not(any(feature = "transport-link-quic", feature = "transport-link-tls")))]
                 tls: _,
         } => match proto {
             Proto::Tcp => Ok(BoundListener::Tcp(
@@ -3007,19 +3103,23 @@ pub async fn bind_locator(locator: AnyLocator, cfg: &AcceptConfig) -> io::Result
             // A `tls/...` NAME acceptor: bind the resolved TCP host + carry the
             // server cert (the handshake is per-accept, as in the numeric arm).
             #[cfg(feature = "transport-link-tls")]
-            Proto::Tls => match &cfg.tls {
-                Some(t) => Ok(BoundListener::Tls(
-                    bind_tcp_host(
-                        &format!("{host}:{port}"),
-                        &cfg.link_socket(named_options(&socket), proto).await?,
-                    )
-                    .await?,
-                    t.server_config.clone(),
-                )),
-                None => Err(unsupported(
-                    "tls acceptor requires AcceptConfig.tls (a server cert + key)",
-                )),
-            },
+            // R2606 — same seam as the numeric bind arm.
+            Proto::Tls => {
+                match tls_accept_server_config(named_tls_material(&tls), cfg.tls.as_ref()).await? {
+                    Some(server_config) => Ok(BoundListener::Tls(
+                        bind_tcp_host(
+                            &format!("{host}:{port}"),
+                            &cfg.link_socket(named_options(&socket), proto).await?,
+                        )
+                        .await?,
+                        server_config,
+                    )),
+                    None => Err(unsupported(
+                        "tls acceptor requires AcceptConfig.tls (a server cert + key), \
+                         or a locator tail carrying its own certificate material",
+                    )),
+                }
+            }
             // R311y601 — the remaining three NAME acceptors, so the listen half
             // resolves names for every scheme its dial half does. Each resolves
             // through the [`resolve_locator_addrs`] SSOT and binds the first

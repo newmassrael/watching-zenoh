@@ -4849,7 +4849,11 @@ layer_c1u_cargo_test_tls() {
     # all — it is a citation, and a citation has to say when it is wrong.
     _runci_guarded_test C1u + cargo test -p wz-session-core --features alloc --lib locator --quiet \
         || return 1
-    _runci_guarded_test C1u 4 cargo test -p wz-runtime-tokio --features transport-link-tls --test tls_e2e --quiet \
+    # R2606 — 4 -> 5. The locator-material witness: a `tls/...` tail carrying
+    # its own certificates reaches Established with no ambient config, with a
+    # refutation arm that the stripped locator does not bind. The number is what
+    # the command PRINTED, not what the diff counts.
+    _runci_guarded_test C1u 5 cargo test -p wz-runtime-tokio --features transport-link-tls --test tls_e2e --quiet \
         || return 1
     #
     # R311y801 — 6 -> 7, the THIRD instance of the same missed update, and this

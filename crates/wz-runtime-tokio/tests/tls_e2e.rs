@@ -344,3 +344,108 @@ async fn a_tls_link_disables_nagle_on_both_the_dial_and_the_accept_half() {
         );
     }
 }
+
+/// R2606 — a `tls/...` locator carrying its OWN certificate material reaches
+/// Established with no ambient config at all, on both halves.
+///
+/// The atom this closes part of is `transport-link-tls`, whose reason recorded a
+/// LIVE over-credit: R2599/R2600 declared the inline-PEM keys in the shared
+/// locator parser, so the config-key gate counted them read, while the
+/// `Proto::Tls` arms took their material from `DialConfig.tls` /
+/// `AcceptConfig.tls` alone and DROPPED whatever the tail carried. Measured
+/// before this round: every consumer of the parsed material was
+/// `#[cfg(feature = "transport-link-quic")]`.
+///
+/// The refutation arm is what makes this a witness rather than a demonstration:
+/// the same locator with the material stripped must NOT bind. Without it a
+/// green would also be produced by an ambient config leaking in from somewhere,
+/// or by the assertion never being reached at all.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_tls_locator_carrying_its_own_material_handshakes_with_no_ambient_config() {
+    use wz_runtime_tokio::runtime_impl::TokioTime;
+    use wz_runtime_tokio::session_open::{
+        accept_and_open_session, accept_bound_on, bind_locator, connect_and_open_session,
+        AcceptConfig, DEFAULT_OPEN_TICK_MS,
+    };
+    use wz_runtime_tokio_test_support::fixture_session_init_params;
+
+    const ITER_CAP: usize = 4096;
+
+    let issued = rcgen::generate_simple_self_signed(vec!["localhost".to_string()])
+        .expect("generate self-signed localhost cert");
+    let cert_pem = issued.cert.pem();
+    let key_pem = issued.key_pair.serialize_pem();
+
+    // Bind BEFORE the dial, to learn the OS-chosen port race-free.
+    let listen = parse_any_locator(&format!(
+        "tls/127.0.0.1:0#listen_certificate_raw={cert_pem};listen_private_key_raw={key_pem}"
+    ))
+    .expect("the listen locator parses");
+    let mut listener = bind_locator(listen, &AcceptConfig::default())
+        .await
+        .expect("a locator's own listen material binds a tls acceptor with no AcceptConfig.tls");
+    let addr: std::net::SocketAddr = listener
+        .local_addr_display()
+        .expect("the bound address is readable")
+        .parse()
+        .expect("a tls listener's address is numeric");
+
+    // `localhost` on the DIAL side, so the SNI is the locator's own host and
+    // matches the cert's SAN — the named-locator rule, unchanged by this round.
+    let dial = parse_any_locator(&format!(
+        "tls/localhost:{}#root_ca_certificate_raw={cert_pem}",
+        addr.port()
+    ))
+    .expect("the dial locator parses");
+
+    let acc_open = async {
+        let link = accept_bound_on(&mut listener)
+            .await
+            .expect("accept the inbound tls peer");
+        let mut params = fixture_session_init_params();
+        params.zid = vec![0x02; 4];
+        accept_and_open_session(
+            link,
+            params,
+            TokioTime::new(),
+            Some(ITER_CAP),
+            DEFAULT_OPEN_TICK_MS,
+        )
+        .await
+        .expect("acceptor reaches Established on locator-supplied material")
+    };
+    let init_open = async {
+        let mut params = fixture_session_init_params();
+        params.zid = vec![0x01; 4];
+        connect_and_open_session(
+            dial,
+            params,
+            &DialConfig::default(),
+            TokioTime::new(),
+            Some(ITER_CAP),
+            DEFAULT_OPEN_TICK_MS,
+        )
+        .await
+        .expect("initiator reaches Established on locator-supplied material")
+    };
+    let (opened_acc, opened_init) = tokio::join!(acc_open, init_open);
+    assert!(
+        opened_init.actions.trace_snapshot().record_established_at >= 1,
+        "initiator established with its material taken from the tls locator alone"
+    );
+    assert!(
+        opened_acc.actions.trace_snapshot().record_established_at >= 1,
+        "acceptor established with its material taken from the tls locator alone"
+    );
+
+    // ── The refutation arm: the same listen locator, stripped of its material.
+    let bare_listen = parse_any_locator("tls/127.0.0.1:0").expect("the bare listen locator parses");
+    let Err(err) = bind_locator(bare_listen, &AcceptConfig::default()).await else {
+        panic!("a tls listen with no material anywhere must not bind");
+    };
+    assert_eq!(
+        err.kind(),
+        std::io::ErrorKind::Unsupported,
+        "with neither a locator tail nor AcceptConfig.tls the acceptor is still Unsupported"
+    );
+}

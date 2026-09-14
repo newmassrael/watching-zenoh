@@ -509,6 +509,91 @@ pub fn server_config_from_pem(
     Ok(Arc::new(config))
 }
 
+/// R2606 — the rustls CLIENT config a `tls/...` dial uses when the LOCATOR
+/// carries the material, or `None` to fall back to the ambient
+/// `DialConfig.tls`. The tls twin of
+/// [`quic_client_config_from_locator`](crate::quic_config::quic_client_config_from_locator),
+/// and deliberately the same shape: the two schemes read ONE vocabulary
+/// (`io/zenoh-link-commons/src/tls.rs`), so a tail that means one thing on a
+/// `quic/` locator must not mean another on a `tls/` one.
+///
+/// WHICH TAILS CLAIM THE DIAL is quic's rule unchanged — `root_ca` alone, or
+/// CONNECT material alone now that the public roots make such a tail
+/// buildable. A LISTEN-only tail still falls through, because claiming the
+/// dial for it would replace an ambient config that may carry a private CA.
+///
+/// Name verification is [`ServerNameVerification::Verify`], not a parameter:
+/// the `AnyName` superset exists for a CONFIGURED dial whose cert cannot carry
+/// the dialed name, and a locator supplying its own material has said nothing
+/// to ask for that weakening.
+#[cfg(all(feature = "transport-link-tls", feature = "transport-unicast"))]
+pub(crate) async fn tls_client_config_from_locator(
+    material: &wz_session_core::locator::LinkTlsMaterial,
+) -> io::Result<Option<Arc<ClientConfig>>> {
+    let root_ca = resolve_optional_pem(material.root_ca.as_ref()).await?;
+    let (cert, key) = if material.mtls() {
+        (
+            resolve_optional_pem(material.connect_certificate.as_ref()).await?,
+            resolve_optional_pem(material.connect_private_key.as_ref()).await?,
+        )
+    } else {
+        (None, None)
+    };
+    let auth =
+        match (&cert, &key) {
+            (None, None) => None,
+            (Some(cert_chain_pem), Some(private_key_pem)) => Some(ClientAuthPem {
+                cert_chain_pem,
+                private_key_pem,
+            }),
+            _ => return Err(invalid_data(
+                "a locator enabling mTLS needs both connect_certificate and connect_private_key",
+            )),
+        };
+    if root_ca.is_none() && auth.is_none() {
+        return Ok(None);
+    }
+    client_config_from_pem(root_ca.as_deref(), auth, ServerNameVerification::Verify).map(Some)
+}
+
+/// R2606 — the rustls SERVER config a `tls/...` listen uses when the LOCATOR
+/// carries the material, or `None` to fall back to the ambient
+/// `AcceptConfig.tls`. The accept twin of [`tls_client_config_from_locator`].
+///
+/// `root_ca` becomes the client-cert verifier ONLY under `enable_mtls`, for the
+/// reason the quic twin spells out: the same key is a DIAL's trust bundle, so
+/// reading it unconditionally here would make a tail written for the dial half
+/// turn a listener into one that DEMANDS client certificates.
+#[cfg(all(feature = "transport-link-tls", feature = "transport-unicast"))]
+pub(crate) async fn tls_server_config_from_locator(
+    material: &wz_session_core::locator::LinkTlsMaterial,
+) -> io::Result<Option<Arc<ServerConfig>>> {
+    let cert = resolve_optional_pem(material.listen_certificate.as_ref()).await?;
+    let key = resolve_optional_pem(material.listen_private_key.as_ref()).await?;
+    let (cert, key) = match (cert, key) {
+        (None, None) => return Ok(None),
+        (Some(cert), Some(key)) => (cert, key),
+        _ => {
+            return Err(invalid_data(
+                "a locator listening with its own material needs both listen_certificate and listen_private_key",
+            ))
+        }
+    };
+    let client_ca = if material.mtls() {
+        match resolve_optional_pem(material.root_ca.as_ref()).await? {
+            Some(roots) => Some(roots),
+            None => {
+                return Err(invalid_data(
+                    "a locator enabling mTLS on a listen needs root_ca_certificate for the client roots",
+                ))
+            }
+        }
+    } else {
+        None
+    };
+    server_config_from_pem(&cert, &key, client_ca.as_deref()).map(Some)
+}
+
 /// R2603 (open-debt 727) — the two trust-root constructors, graded by the
 /// CONTENTS of the store each returns.
 ///
