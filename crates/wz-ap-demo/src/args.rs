@@ -6966,6 +6966,15 @@ pub(crate) struct NodeTimestamping {
     /// `timestamping.drop_future_timestamp`, or `None` for upstream's `false`.
     /// A separate `Option` from [`Self::stated`] because the two keys are
     /// independent: a document may state either, both, or neither.
+    ///
+    /// ⚠ PRESENT ONLY WHERE A FORWARDER CAN ACT ON IT, and the union is exact
+    /// rather than guessed: the two consumers are `run_peer_until`
+    /// (`routing-peer`) and `run_router_hat_until` (`router-hat-router`). On the
+    /// default feature set `-D warnings` called this field dead and the accessor
+    /// unused, which is the build telling the truth — storing a knob a binary
+    /// cannot act on is the shape R2621 was bitten by. The argv is still
+    /// VALIDATED on every build; see [`Self::from_argv`].
+    #[cfg(any(feature = "routing-peer", feature = "router-hat-router"))]
     drop_future: Option<bool>,
 }
 
@@ -7000,10 +7009,24 @@ impl NodeTimestamping {
                 ))
             }
         };
-        Ok(Self {
-            stated,
-            drop_future,
-        })
+        // ⚠ VALIDATED IN EVERY BUILD, STORED ONLY WHERE SOMETHING READS IT.
+        // Both halves are deliberate. Refusing a malformed spelling
+        // unconditionally is what `--timestamping` already does, and a build
+        // that silently accepted `--drop-future-timestamp yes` would be the
+        // quiet fallback this parser exists to remove. Storing it where no
+        // forwarder exists would be the opposite error.
+        #[cfg(any(feature = "routing-peer", feature = "router-hat-router"))]
+        {
+            Ok(Self {
+                stated,
+                drop_future,
+            })
+        }
+        #[cfg(not(any(feature = "routing-peer", feature = "router-hat-router")))]
+        {
+            let _ = drop_future;
+            Ok(Self { stated })
+        }
     }
 
     /// R2626 — the `timestamping.drop_future_timestamp` this node runs with.
@@ -7012,6 +7035,9 @@ impl NodeTimestamping {
     /// simplification: `enabled` is a `ModeDependentValue<bool>` (hence
     /// [`Self::map_for`] taking a `whatami`), while `drop_future_timestamp` is a
     /// plain `Option<bool>` read once. Silence means upstream's shipped `false`.
+    ///
+    /// Gated with the field it reads — see [`Self::drop_future`].
+    #[cfg(any(feature = "routing-peer", feature = "router-hat-router"))]
     pub(crate) fn drop_future_timestamp(self) -> bool {
         self.drop_future.unwrap_or(false)
     }
