@@ -7105,7 +7105,10 @@ layer_c1au_cargo_test_ext_pubsub_sample_miss_detection() {
     # which only this feature's tests name. The number is what the lane PRINTED,
     # not what the diff suggests — `guarded_count_gate.py --range` is what moved
     # it, and it read the run.
-    _runci_guarded_test "C1au advanced_publisher" 14 \
+    # R2618 — 14 -> 15, the wire-knob witness. It is UNGATED, so it lands in
+    # this lane as well as C1aq; the count guard found this one, not a reading
+    # of the diff, which is the discipline the paragraph above already states.
+    _runci_guarded_test "C1au advanced_publisher" 15 \
         cargo test -p wz-runtime-tokio --features ext-pubsub-sample-miss-detection,ext-pubsub-advanced-recovery,pubsub-allow-loop \
         --lib advanced_publisher --quiet || return 1
     (cd crates \
