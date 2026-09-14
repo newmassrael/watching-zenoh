@@ -506,7 +506,7 @@ mod round3_tls {
         //    scouted side (dial_locator's tls arm -> dial_tls).
         let acc_open = async {
             let (tcp, _peer) = listener.accept().await.expect("accept tcp");
-            let tls = accept_tls(tcp, server_config)
+            let tls = accept_tls(tcp, server_config, std::time::Duration::from_millis(10_000))
                 .await
                 .expect("server tls handshake");
             let mut params = fixture_session_init_params();

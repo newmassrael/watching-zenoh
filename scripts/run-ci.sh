@@ -4855,7 +4855,8 @@ layer_c1u_cargo_test_tls() {
     # the command PRINTED, not what the diff counts.
     # R2608 — 5 -> 6. The `close_link_on_expiration` witness on a tls dial, with
     # its unarmed refutation arm. The number is what the command PRINTED.
-    _runci_guarded_test C1u 6 cargo test -p wz-runtime-tokio --features transport-link-tls --test tls_e2e --quiet \
+    # R2609 — 6 -> 7. The `tls_handshake_timeout_ms` witness and its control.
+    _runci_guarded_test C1u 7 cargo test -p wz-runtime-tokio --features transport-link-tls --test tls_e2e --quiet \
         || return 1
     #
     # R311y801 — 6 -> 7, the THIRD instance of the same missed update, and this

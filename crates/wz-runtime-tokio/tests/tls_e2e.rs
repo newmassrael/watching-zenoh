@@ -564,3 +564,96 @@ async fn an_expiring_peer_chain_closes_only_the_tls_link_that_asked_for_it() {
         "a link whose tail omitted the key must survive its peer's expiry"
     );
 }
+
+/// R2609 — `tls_handshake_timeout_ms` on a LISTEN tail drops a peer that
+/// connects and never finishes the TLS handshake, and a peer that handshakes
+/// normally is untouched.
+///
+/// The witness is a raw `TcpStream` that connects and sends NOTHING: the TCP
+/// accept succeeds, the rustls server handshake then waits for a ClientHello
+/// that never comes, and the bound is the only thing that can end it. Before
+/// this key was honoured that accept waited forever.
+///
+/// The SECOND arm is the control. Without it the first would also pass if
+/// `accept_tls` had been made to fail unconditionally — which is the shape a
+/// mis-wired timeout actually takes.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_listen_tail_bounds_a_handshake_that_never_arrives() {
+    use wz_runtime_tokio::session_open::{accept_bound_on, bind_locator, AcceptConfig};
+
+    let issued = rcgen::generate_simple_self_signed(vec!["127.0.0.1".to_string()])
+        .expect("generate self-signed loopback cert");
+    let cert_pem = issued.cert.pem();
+    let key_pem = issued.key_pair.serialize_pem();
+
+    // 300ms: far below the 10s default, so the assertion cannot pass by the
+    // default alone -- the tail's own value has to be the one in force.
+    let listen = parse_any_locator(&format!(
+        "tls/127.0.0.1:0#listen_certificate_raw={cert_pem};listen_private_key_raw={key_pem};\
+         tls_handshake_timeout_ms=300"
+    ))
+    .expect("the listen locator parses");
+    let mut listener = bind_locator(listen, &AcceptConfig::default())
+        .await
+        .expect("the listen material binds a tls acceptor");
+    let addr: std::net::SocketAddr = listener
+        .local_addr_display()
+        .expect("the bound address is readable")
+        .parse()
+        .expect("a tls listener's address is numeric");
+
+    // Connect and say nothing. `_silent` is HELD: dropping it would close the
+    // socket and end the handshake for the ordinary reason, which is the same
+    // trap that made R2608's expiry witness pass for the wrong cause.
+    let _silent = tokio::net::TcpStream::connect(addr)
+        .await
+        .expect("the raw peer connects");
+
+    let started = std::time::Instant::now();
+    let outcome =
+        tokio::time::timeout(Duration::from_secs(5), accept_bound_on(&mut listener)).await;
+    let elapsed = started.elapsed();
+    match outcome {
+        Ok(Err(e)) => assert_eq!(
+            e.kind(),
+            std::io::ErrorKind::TimedOut,
+            "the bound must surface as TimedOut, not some other failure: {e}"
+        ),
+        Ok(Ok(_)) => panic!("a peer that sent no ClientHello must not yield a link"),
+        Err(_) => panic!("the accept was never bounded; the tail's timeout did not apply"),
+    }
+    assert!(
+        elapsed < Duration::from_secs(5),
+        "the accept must end on the tail's 300ms bound, not the test's own ceiling"
+    );
+
+    // ── The control: an ordinary dial against the SAME listener still works,
+    // so the bound rejects a silent peer rather than every peer.
+    let mut listener2 = bind_locator(
+        parse_any_locator(&format!(
+            "tls/127.0.0.1:0#listen_certificate_raw={cert_pem};listen_private_key_raw={key_pem};\
+             tls_handshake_timeout_ms=300"
+        ))
+        .expect("the second listen locator parses"),
+        &AcceptConfig::default(),
+    )
+    .await
+    .expect("the second acceptor binds");
+    let addr2: std::net::SocketAddr = listener2
+        .local_addr_display()
+        .expect("readable")
+        .parse()
+        .expect("numeric");
+    let dial = parse_any_locator(&format!(
+        "tls/127.0.0.1:{}#root_ca_certificate_raw={cert_pem}",
+        addr2.port()
+    ))
+    .expect("the dial locator parses");
+    let accepting = tokio::spawn(async move { accept_bound_on(&mut listener2).await });
+    let dialed = wz_runtime_tokio::session_open::dial_locator(dial, &DialConfig::default()).await;
+    assert!(
+        dialed.is_ok(),
+        "a peer that DOES handshake must be accepted under the same bound"
+    );
+    let _accepted = accepting.await.expect("the accept task joins");
+}

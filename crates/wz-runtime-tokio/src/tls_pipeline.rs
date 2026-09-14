@@ -88,12 +88,39 @@ pub async fn dial_tls(
 /// handshake using `config` (a [`ServerConfig`] carrying the cert chain +
 /// private key). The acceptor's caller owns the `TcpListener::accept`; this is
 /// the TLS analogue of handing `accept_and_open_session` a `DialedLink::Tcp`.
+/// R2609 — `handshake_timeout` bounds the rustls SERVER handshake, as upstream
+/// bounds it on its listener builder
+/// (`io/zenoh-links/zenoh-link-tls/src/unicast.rs` @ `.handshake_timeout(tls_handshake_timeout)`).
+///
+/// ⚠ It is NOT optional, and that is upstream's shape rather than a choice
+/// made here: upstream reads the key with `.unwrap_or(..DEFAULT)`, so every
+/// listener carries ten seconds and the key only MOVES it. A wz that bounded
+/// only the locators naming the key would satisfy the config-key gate and
+/// still diverge everywhere the key is absent.
+///
+/// ⚠ The bound is about reclaiming a stuck task, NOT about keeping the
+/// acceptor alive: wz already runs this handshake in a spawned future rather
+/// than the accept loop's `select!` arm, so a peer that never sends a
+/// ClientHello cannot stall the listener with or without it. Upstream's own
+/// motivation is stronger than wz's here, and saying otherwise would overstate
+/// the parity.
 pub async fn accept_tls(
     tcp: TcpStream,
     config: Arc<ServerConfig>,
+    handshake_timeout: std::time::Duration,
 ) -> io::Result<TlsStream<TcpStream>> {
     let acceptor = TlsAcceptor::from(config);
-    let tls = acceptor.accept(tcp).await?;
+    let tls = tokio::time::timeout(handshake_timeout, acceptor.accept(tcp))
+        .await
+        .map_err(|_| {
+            io::Error::new(
+                io::ErrorKind::TimedOut,
+                format!(
+                    "tls accept: the peer did not finish the handshake within {}ms",
+                    handshake_timeout.as_millis()
+                ),
+            )
+        })??;
     Ok(TlsStream::Server(tls))
 }
 

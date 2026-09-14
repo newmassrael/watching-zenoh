@@ -62,7 +62,9 @@ pub async fn open_both_to_established(
 
     let acc_open = async {
         let (tcp, _peer) = listener.accept().await.expect("accept tcp");
-        let tls = accept_tls(tcp, server_config)
+        // R2609 — upstream's own default; this fixture's subject is the open
+        // path, not the handshake bound.
+        let tls = accept_tls(tcp, server_config, std::time::Duration::from_millis(10_000))
             .await
             .expect("server tls handshake");
         let mut params = fixture_session_init_params();

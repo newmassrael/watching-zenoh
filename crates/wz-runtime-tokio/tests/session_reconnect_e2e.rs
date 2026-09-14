@@ -777,9 +777,13 @@ mod tls_reconnect {
         server_config: Arc<ServerConfig>,
     ) -> (OpenedSession, Vec<String>) {
         let (stream, _peer) = listener.accept().await.expect("accept");
-        let tls = accept_tls(stream, server_config)
-            .await
-            .expect("server tls handshake");
+        let tls = accept_tls(
+            stream,
+            server_config,
+            std::time::Duration::from_millis(10_000),
+        )
+        .await
+        .expect("server tls handshake");
         let mut params = fixture_session_init_params();
         params.zid = vec![0x02; 4]; // distinct zid from the initiator
         let mut opened = accept_and_open_session(

@@ -800,6 +800,37 @@ impl DialedLink {
 /// plus a [`DialedLink`] variant (R311y375 — the accept side made symmetric to
 /// the dial side, retiring the per-scheme `bind_locator`-returns-`TcpListener`
 /// special-casing).
+/// R2609 — the per-listen policy a `tls/...` locator tail carries, as ONE value
+/// rather than a widening tuple.
+///
+/// Two policies arrive from the same tail and both are consumed on the ACCEPT
+/// side; the dial side takes only the expiry flag, because by the time a dialed
+/// link exists its handshake bound is already spent. That asymmetry is why the
+/// dial variant keeps a bare `bool` while the two accept variants carry this:
+/// the shape follows where each policy is READ, not a wish for symmetry.
+#[cfg(feature = "transport-link-tls")]
+#[derive(Debug, Clone, Copy)]
+pub struct TlsAcceptPolicy {
+    /// `close_link_on_expiration` — watch the peer's chain and tear the link
+    /// down at its earliest `not_after`.
+    pub closes_on_expiration: bool,
+    /// `tls_handshake_timeout_ms` — how long the peer has to finish the
+    /// handshake. NOT optional: upstream defaults it to ten seconds for every
+    /// listener, so a silent tail means the default, never "no bound".
+    pub handshake_timeout: std::time::Duration,
+}
+
+#[cfg(feature = "transport-link-tls")]
+impl TlsAcceptPolicy {
+    /// Read both policies off a locator tail's material.
+    pub fn from_material(material: &LinkTlsMaterial) -> Self {
+        Self {
+            closes_on_expiration: material.closes_on_expiration(),
+            handshake_timeout: std::time::Duration::from_millis(material.handshake_timeout_ms()),
+        }
+    }
+}
+
 pub enum BoundListener {
     /// A bound TCP listener; [`accept_bound`] accepts a raw [`DialedLink::Tcp`].
     Tcp(TcpListener),
@@ -820,7 +851,7 @@ pub enum BoundListener {
     /// the accept twin of [`DialedLink::Tls`]'s. The chain it watches is the
     /// CLIENT's, which exists only under mTLS; without it the fold finds no
     /// chain and nothing arms, exactly as upstream leaves it.
-    Tls(TcpListener, Arc<ServerConfig>, bool),
+    Tls(TcpListener, Arc<ServerConfig>, TlsAcceptPolicy),
     /// A bound unix-domain [`UnixsockListener`]; [`accept_bound`] accepts a raw
     /// [`DialedLink::Unixsock`] with NO post-accept handshake (a `UnixStream` is
     /// wrapped directly, like `tcp`). The FIRST non-`TcpListener` variant
@@ -1405,10 +1436,10 @@ impl BoundListener {
                 (AcceptedLink::Ws(stream), AcceptedPeer::Ip(peer))
             }
             #[cfg(feature = "transport-link-tls")]
-            BoundListener::Tls(l, server_config, closes_on_expiration) => {
+            BoundListener::Tls(l, server_config, policy) => {
                 let (stream, peer) = accept_tcp_on(l).await?;
                 (
-                    AcceptedLink::Tls(stream, server_config.clone(), *closes_on_expiration),
+                    AcceptedLink::Tls(stream, server_config.clone(), *policy),
                     AcceptedPeer::Ip(peer),
                 )
             }
@@ -1601,7 +1632,7 @@ pub enum AcceptedLink {
     #[cfg(feature = "transport-link-tls")]
     /// R2608 — `close_link_on_expiration`, carried from the listen locator
     /// through [`BoundListener::Tls`] to the handshake that produces the link.
-    Tls(TcpStream, Arc<ServerConfig>, bool),
+    Tls(TcpStream, Arc<ServerConfig>, TlsAcceptPolicy),
     /// A raw accepted unix-domain stream — NO post-accept handshake (like
     /// [`Self::Tcp`]); [`Self::handshake`] wraps it directly as
     /// [`DialedLink::Unixsock`] (R311y378).
@@ -1698,14 +1729,16 @@ impl AcceptedLink {
             #[cfg(feature = "transport-link-ws")]
             AcceptedLink::Ws(stream) => DialedLink::Ws(Box::new(accept_ws(stream).await?)),
             #[cfg(feature = "transport-link-tls")]
-            AcceptedLink::Tls(stream, server_config, closes_on_expiration) => {
+            AcceptedLink::Tls(stream, server_config, policy) => {
                 // R2608 — the listen locator's own policy, carried through the
                 // bind. The chain this watches is the CLIENT's, so it is the
                 // mTLS case; without a client certificate the fold finds no
                 // chain and nothing arms, which is upstream's behaviour too.
+                // R2609 — and the handshake bound applies HERE, which is the
+                // only place the rustls server handshake runs.
                 DialedLink::Tls(
-                    Box::new(accept_tls(stream, server_config).await?),
-                    closes_on_expiration,
+                    Box::new(accept_tls(stream, server_config, policy.handshake_timeout).await?),
+                    policy.closes_on_expiration,
                 )
             }
             // No post-accept handshake — a `UnixStream` is wrapped directly, the
@@ -2993,9 +3026,9 @@ pub async fn bind_locator(locator: AnyLocator, cfg: &AcceptConfig) -> io::Result
                 Some(server_config) => Ok(BoundListener::Tls(
                     bind_tcp(ip.addr, &cfg.link_socket(ip.socket(), ip.proto).await?).await?,
                     server_config,
-                    // R2608 — a listen tail carries the policy, as the quic
-                    // bind arms already do.
-                    ip.tls().closes_on_expiration(),
+                    // R2608/R2609 — a listen tail carries BOTH policies, as the
+                    // quic bind arms carry their one.
+                    TlsAcceptPolicy::from_material(ip.tls()),
                 )),
                 None => Err(unsupported(
                     "tls acceptor requires AcceptConfig.tls (a server cert + key), \
@@ -3143,8 +3176,8 @@ pub async fn bind_locator(locator: AnyLocator, cfg: &AcceptConfig) -> io::Result
                         )
                         .await?,
                         server_config,
-                        // R2608 — the named bind twin of the numeric arm.
-                        named_tls_material(&tls).closes_on_expiration(),
+                        // R2608/R2609 — the named bind twin of the numeric arm.
+                        TlsAcceptPolicy::from_material(named_tls_material(&tls)),
                     )),
                     None => Err(unsupported(
                         "tls acceptor requires AcceptConfig.tls (a server cert + key), \
