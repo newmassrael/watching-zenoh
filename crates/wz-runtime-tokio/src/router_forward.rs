@@ -1083,6 +1083,14 @@ impl RouterForwarder {
         Self::build(self_zid, Box::new(Instant::now), timestamping)
     }
 
+    /// R2626 — set zenoh's `timestamping.drop_future_timestamp` (builder), the
+    /// router twin of
+    /// [`LinkstateForwarder::with_drop_future_timestamp`](crate::linkstate_forward::LinkstateForwarder::with_drop_future_timestamp).
+    pub fn with_drop_future_timestamp(mut self, drop_future: bool) -> Self {
+        self.node_hlc = self.node_hlc.with_drop_future_timestamp(drop_future);
+        self
+    }
+
     /// As [`new`](Self::new), but with an INJECTED monotonic clock — the dependency
     /// injection a deterministic pending-query-timeout test uses to advance "now"
     /// across a deadline (the router twin of
@@ -2888,7 +2896,15 @@ impl RouterForwarder {
         let stamped;
         let push = if self.node_hlc.is_stamping() {
             let mut carrier = push.clone();
-            self.node_hlc.treat_timestamp(&mut carrier);
+            // R2626 — the DROP arm, at the same single stamp point the paragraph
+            // above defends. zenoh's spelling is a bare `return` out of
+            // `route_data`, so no destination is reached; here that means none of
+            // the four blocks below runs, which is the same statement.
+            if self.node_hlc.treat_timestamp(&mut carrier)
+                == crate::node_clock::TimestampVerdict::Drop
+            {
+                return;
+            }
             stamped = carrier;
             &stamped
         } else {

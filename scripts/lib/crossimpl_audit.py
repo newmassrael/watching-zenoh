@@ -675,7 +675,11 @@ HOST_GATED_CI_TARGETS: dict[str, str] = {
 # zenoh (`oracles/future-stamp`), driving the two `treat_timestamp` arms that are
 # selected by the VALUE of an inbound timestamp. Its two legs claim
 # `time-hlc zenoh->wz`, which the `zenoh-core` class admits.
-FOREIGN_ADJUDICATOR_LINKS = 918
+# R2626 — 918 -> 919: the DROP arm's leg
+# (`wz_router_hat_told_to_drop_future_timestamps_delivers_nothing`) claims
+# `time-hlc zenoh->wz`, adjudicated by the same upstream-linked oracle the
+# absorb / replace arms use. That closes the last clause `time-hlc` carried.
+FOREIGN_ADJUDICATOR_LINKS = 919
 
 # ── Execution disclosure ────────────────────────────────────────────────────────
 #

@@ -619,6 +619,56 @@ fn wz_router_hat_replaces_an_upstream_timestamp_beyond_the_drift_bound() {
     );
 }
 
+/// R2626 — the DROP arm: a router told `--drop-future-timestamp true` delivers
+/// NOTHING for a Put whose inbound timestamp uhlc rejects.
+///
+/// This is zenoh's `drop_future_timestamp: true`, whose upstream spelling is a
+/// bare `return` out of `route_data` before any destination is reached
+/// (`zenoh/src/net/routing/dispatcher/pubsub.rs` @ `                                return;`).
+/// Until R2626 wz implemented only the `false` arm.
+///
+/// ## Why this leg is attributable
+///
+/// Its control is the REPLACE leg above and it is nearly free: SAME binary, SAME
+/// topology, SAME `--offset-ms 10000`, ONE argv word added. The replace leg
+/// proves the sample ARRIVES re-stamped without the flag; this one proves it
+/// does not arrive with it. A silent topology failure cannot explain the pair,
+/// because it would have to red the sibling too.
+///
+/// The absence is asserted over the SAME 15s budget the positive legs use to
+/// observe an arrival, so "dropped" is not a synonym for "we did not wait long
+/// enough" — and the `RECEIVED_WITNESS` check is on the pico subscriber, which
+/// prints that line for ANY sample, so a delivered-but-unstamped Put would fail
+/// this assertion rather than pass it.
+// wz-proves: time-hlc zenoh->wz partial
+#[test]
+#[ignore = "binary-dep e2e (wz-ap-demo --features router-hat-router,time-hlc + oracles/future-stamp + zenoh-pico z_sub_attachment); Layer E8t runs via --ignored"]
+fn wz_router_hat_told_to_drop_future_timestamps_delivers_nothing() {
+    let outcome = relay_a_bare_put_from(
+        Publisher::UpstreamStamped { offset_ms: 10_000 },
+        &["--drop-future-timestamp", "true"],
+    );
+
+    assert!(
+        !outcome.saw_sample,
+        "a router told `--drop-future-timestamp true` DELIVERED a Put whose \
+         timestamp is 10s ahead — beyond uhlc's 500ms drift bound, which is the \
+         only arm zenoh's drop knob reaches. The sibling REPLACE leg shows this \
+         same Put arriving re-stamped WITHOUT the flag, so the topology works and \
+         the flag did not\n--- pico stdout ---\n{}\n--- publisher ---\n{}\n--- \
+         router-hat stderr ---\n{}",
+        outcome.pico_stdout, outcome.publisher_stdout, outcome.router_stderr
+    );
+    // The publisher must still have RUN, or the absence above is about a dead
+    // oracle rather than about the router's decision.
+    assert!(
+        outcome.publisher_stdout.contains("future-stamp: put done"),
+        "the oracle never completed its Put, so nothing was offered to the router \
+         and its silence proves nothing\n--- publisher ---\n{}",
+        outcome.publisher_stdout
+    );
+}
+
 /// The NEGATIVE twin: the SAME topology through a router built WITHOUT `time-hlc`
 /// must deliver the Put and print NO timestamp line.
 ///

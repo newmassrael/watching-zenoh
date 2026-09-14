@@ -871,6 +871,19 @@ impl LinkstateForwarder {
         )
     }
 
+    /// R2626 — set zenoh's `timestamping.drop_future_timestamp` (builder).
+    ///
+    /// A BUILDER beside [`Self::with_timestamping`] rather than a fourth
+    /// argument to it, and that follows this tree's own precedent:
+    /// `Session::with_timestamping` is already `mut self -> Self`. The two knobs
+    /// share upstream's config SECTION but not its shape — `enabled` is
+    /// whatami-scoped and this one is a single node value — so pairing them in
+    /// one positional argument list would suggest a symmetry that is not there.
+    pub fn with_drop_future_timestamp(mut self, drop_future: bool) -> Self {
+        self.node_hlc = self.node_hlc.with_drop_future_timestamp(drop_future);
+        self
+    }
+
     /// As [`new`](Self::new), but with an explicit spanning-tree recompute
     /// coalescing window (the SPF-throttle delay D2c debounces topology changes
     /// by). A shorter window converges faster at the cost of more frequent
@@ -2038,7 +2051,14 @@ impl LinkstateForwarder {
         let stamped;
         let push = if self.node_hlc.is_stamping() {
             let mut carrier = push.clone();
-            self.node_hlc.treat_timestamp(&mut carrier);
+            // R2626 — the DROP arm. zenoh spells it as a bare `return` out of
+            // `route_data`, so nothing reaches any destination; this is the same
+            // statement at wz's one stamp point, before any fan-out.
+            if self.node_hlc.treat_timestamp(&mut carrier)
+                == crate::node_clock::TimestampVerdict::Drop
+            {
+                return;
+            }
             stamped = carrier;
             &stamped
         } else {

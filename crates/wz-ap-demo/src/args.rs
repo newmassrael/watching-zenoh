@@ -6962,6 +6962,11 @@ pub(crate) struct NodeTimestamping {
     /// The operator's answer for the role this node plays, or `None` when they
     /// gave none.
     stated: Option<bool>,
+    /// R2626 — the operator's answer for
+    /// `timestamping.drop_future_timestamp`, or `None` for upstream's `false`.
+    /// A separate `Option` from [`Self::stated`] because the two keys are
+    /// independent: a document may state either, both, or neither.
+    drop_future: Option<bool>,
 }
 
 impl NodeTimestamping {
@@ -6974,14 +6979,41 @@ impl NodeTimestamping {
     /// the only spellings, because they are the two json5 spellings the key
     /// itself has.
     pub(crate) fn from_argv(rest: &[String]) -> Result<Self, String> {
-        match parse_pair(rest, "--timestamping") {
-            None => Ok(Self::default()),
-            Some(v) if v == "true" => Ok(Self { stated: Some(true) }),
-            Some(v) if v == "false" => Ok(Self {
-                stated: Some(false),
-            }),
-            Some(v) => Err(format!("--timestamping expects true or false, got '{v}'")),
-        }
+        let stated = match parse_pair(rest, "--timestamping") {
+            None => None,
+            Some(v) if v == "true" => Some(true),
+            Some(v) if v == "false" => Some(false),
+            Some(v) => return Err(format!("--timestamping expects true or false, got '{v}'")),
+        };
+        // R2626 — `--drop-future-timestamp`, the section's SECOND key. Parsed
+        // here rather than as its own type because upstream puts both under one
+        // `timestamping { .. }` section, and splitting them in the demo would
+        // make the run-mode plumbing carry two things a config document carries
+        // as one.
+        let drop_future = match parse_pair(rest, "--drop-future-timestamp") {
+            None => None,
+            Some(v) if v == "true" => Some(true),
+            Some(v) if v == "false" => Some(false),
+            Some(v) => {
+                return Err(format!(
+                    "--drop-future-timestamp expects true or false, got '{v}'"
+                ))
+            }
+        };
+        Ok(Self {
+            stated,
+            drop_future,
+        })
+    }
+
+    /// R2626 — the `timestamping.drop_future_timestamp` this node runs with.
+    ///
+    /// ⚠ NOT role-resolved, and that asymmetry is upstream's rather than a
+    /// simplification: `enabled` is a `ModeDependentValue<bool>` (hence
+    /// [`Self::map_for`] taking a `whatami`), while `drop_future_timestamp` is a
+    /// plain `Option<bool>` read once. Silence means upstream's shipped `false`.
+    pub(crate) fn drop_future_timestamp(self) -> bool {
+        self.drop_future.unwrap_or(false)
     }
 
     /// The `timestamping.enabled` map a node of role `whatami` should run with.

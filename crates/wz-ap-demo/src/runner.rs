@@ -4421,11 +4421,15 @@ async fn run_peer_until(
     // node runs with, resolved against the role it ANNOUNCES. The forwarder is
     // seeded with `WhatAmI::Peer` and resolves the same map against that same
     // role, so the two cannot disagree about which entry applies.
+    // R2626 — `--drop-future-timestamp` rides the same section. Applied as a
+    // builder because it is not role-resolved: upstream reads it once as a plain
+    // bool, unlike the map above.
     let forwarder = LinkstateForwarder::with_timestamping(
         Zid::from_slice(&params.zid),
         WhatAmI::Peer,
         opts.timestamping.map_for(WhatAmI::Peer),
-    );
+    )
+    .with_drop_future_timestamp(opts.timestamping.drop_future_timestamp());
     // `--peer-mode` (zenoh `routing.peer.mode`). Set BEFORE any face registers,
     // because the mode governs how the very first inbound flood is ingested; a
     // node that learned one flood in the wrong mode has already mis-shaped its
@@ -5981,8 +5985,11 @@ async fn run_router_hat_until(
     let node_timestamping = opts
         .timestamping
         .map_for(wz::runtime_tokio::session_glue::WhatAmI::Router);
+    // R2626 — the section's second key, applied as a builder for the reason the
+    // linkstate host states: it is not role-resolved.
     let forwarder =
-        RouterForwarder::with_timestamping(Zid::from_slice(&params.zid), node_timestamping);
+        RouterForwarder::with_timestamping(Zid::from_slice(&params.zid), node_timestamping)
+            .with_drop_future_timestamp(opts.timestamping.drop_future_timestamp());
 
     // R311y188 — router-multicast-faces slice 3: the EGRESS run-mode host. A
     // router built with `router-multicast-faces` attaches a data-plane multicast

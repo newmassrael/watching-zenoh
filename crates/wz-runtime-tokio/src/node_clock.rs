@@ -176,6 +176,43 @@ pub struct NodeHlc {
     /// `None` arm.
     #[cfg(feature = "time-hlc")]
     clock: Option<std::sync::Arc<NodeClock>>,
+    /// R2626 — zenoh's `timestamping.drop_future_timestamp`: DROP a Put whose
+    /// inbound timestamp uhlc rejects, instead of re-stamping it.
+    ///
+    /// ⚠ A PLAIN BOOL AND NOT PART OF [`TimestampingEnabled`], which is the one
+    /// thing to get wrong here. Upstream's two keys in the same config section
+    /// have different shapes: `enabled: Option<ModeDependentValue<bool>>` is
+    /// resolved against the node's `whatami` (which is why wz mirrors it as a
+    /// three-role map), while `drop_future_timestamp: Option<bool>` is a single
+    /// node-scoped value read once
+    /// (`zenoh/src/net/routing/dispatcher/tables.rs` @ `            unwrap_or_default!(config.timestamping().drop_future_timestamp());`).
+    /// Folding it into the map would invent a per-role axis upstream does not
+    /// have.
+    ///
+    /// `false` is upstream's shipped default
+    /// (`commons/zenoh-config/src/defaults.rs` @ `    pub const drop_future_timestamp: bool = false;`),
+    /// and it is what `Default` yields here.
+    #[cfg(feature = "time-hlc")]
+    drop_future_timestamp: bool,
+}
+
+/// R2626 — what [`NodeHlc::treat_timestamp`] tells its caller to do with the
+/// message it was just handed.
+///
+/// wz needs this and zenoh does not, and the reason is structural rather than a
+/// difference of opinion: upstream's `treat_timestamp!` is a MACRO expanded
+/// INSIDE `route_data`, so its drop arm is a bare `return;` that leaves the
+/// forwarding function directly. wz's is a function called by two forwarders, so
+/// the same decision has to cross a call boundary — and a `()` return cannot
+/// carry it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TimestampVerdict {
+    /// Forward the message. It may have been stamped or re-stamped in place.
+    Relay,
+    /// Do not forward it AT ALL — zenoh's `drop_future_timestamp: true` arm,
+    /// whose upstream spelling is a `return` out of `route_data` before any
+    /// destination is reached. Not a per-destination skip.
+    Drop,
 }
 
 /// The clock plus the identity its stamps carry. Held behind one `Arc` so a
@@ -210,7 +247,12 @@ impl NodeHlc {
             let clock = enabled
                 .get(whatami)
                 .then(|| build_clock(zid, wz_physical_clock));
-            Self { clock }
+            // Upstream's shipped default; `with_drop_future_timestamp` is how a
+            // host that read the key states otherwise.
+            Self {
+                clock,
+                drop_future_timestamp: false,
+            }
         }
         #[cfg(not(feature = "time-hlc"))]
         {
@@ -223,6 +265,26 @@ impl NodeHlc {
     /// fixture, or a construction path with no role to consult yet).
     pub fn disabled() -> Self {
         Self::default()
+    }
+
+    /// R2626 — set zenoh's `timestamping.drop_future_timestamp` (builder).
+    ///
+    /// A BUILDER rather than a fourth argument to [`Self::for_node`], because
+    /// this knob is orthogonal to the role gate and every one of that
+    /// constructor's callers means the upstream default. Making it positional
+    /// would have edited a dozen sites to write `false`.
+    ///
+    /// ⚠ It has no effect on a node that does not stamp: with no clock there is
+    /// no `update_with_timestamp` to reject anything, so nothing can reach the
+    /// drop arm. That mirrors upstream, where the whole macro body sits inside
+    /// `if let Some(hlc)`.
+    #[cfg_attr(not(feature = "time-hlc"), allow(unused_mut, unused_variables))]
+    pub fn with_drop_future_timestamp(mut self, drop_future: bool) -> Self {
+        #[cfg(feature = "time-hlc")]
+        {
+            self.drop_future_timestamp = drop_future;
+        }
+        self
     }
 
     /// Whether this node holds a clock — zenoh's `runtime.hlc().is_some()`.
@@ -279,13 +341,22 @@ impl NodeHlc {
     ///   (`hlc.update_with_timestamp`, `pubsub.rs:184`), so this node's future
     ///   stamps sort after a timestamp it has relayed. On the error return
     ///   (the peer's timestamp is further ahead than uhlc's drift bound) zenoh
-    ///   branches on `drop_future_timestamp`; wz implements the `false` arm —
-    ///   REPLACE the timestamp — which is zenoh's shipped default
+    ///   branches on `drop_future_timestamp`. wz implements BOTH arms: `false`
+    ///   REPLACES the timestamp, which is zenoh's shipped default
     ///   (`DEFAULT_CONFIG.json5:207-209`, "If set to false (default), messages
-    ///   with timestamps in the future are retimestamped"). The `true` arm (drop
-    ///   the message) is NOT implemented and NOT exposed as a knob: nothing in
-    ///   the oracle inventory can drive a future timestamp past the drift bound,
-    ///   so a config field for it would be inert by construction.
+    ///   with timestamps in the future are retimestamped"), and `true` DROPS the
+    ///   message — reported to the caller as [`TimestampVerdict::Drop`].
+    ///
+    ///   ⛔ R2626 CORRECTED THE REASON THIS ARM WAS MISSING, and the correction
+    ///   is worth keeping because the argument was load-bearing for rounds. This
+    ///   comment used to say the `true` arm was "NOT implemented and NOT exposed
+    ///   as a knob: nothing in the oracle inventory can drive a future timestamp
+    ///   past the drift bound, so a config field for it would be inert by
+    ///   construction". That is a hand-written list of oracle BINARIES standing
+    ///   in for a population — the population is what upstream's API can be made
+    ///   to do, and its publisher builder takes an arbitrary `uhlc::Timestamp`.
+    ///   R2624 built the counterexample (`oracles/future-stamp`), so the knob is
+    ///   witnessable rather than inert, and R2626 built it.
     ///
     /// A `Del` body is left alone, faithfully — zenoh guards the whole macro on
     /// `if let PushBody::Put(data)` (`pubsub.rs:181`).
@@ -294,14 +365,14 @@ impl NodeHlc {
     /// egress leg must carry the SAME timestamp. zenoh stamps at `pubsub.rs:328`
     /// and fans the one stamped `msg` out to all of `route`.
     #[cfg(feature = "codec-push")]
-    pub fn treat_timestamp(&self, push: &mut wz_codecs::push::PushOwned) {
+    pub fn treat_timestamp(&self, push: &mut wz_codecs::push::PushOwned) -> TimestampVerdict {
         #[cfg(feature = "time-hlc")]
         {
             let Some(clock) = self.clock.as_deref() else {
-                return;
+                return TimestampVerdict::Relay;
             };
             if !wz_session_core::push_build::push_is_put(push) {
-                return;
+                return TimestampVerdict::Relay;
             }
             if let Some(inbound) = wz_session_core::push_build::read_push_timestamp(push) {
                 if clock
@@ -309,19 +380,26 @@ impl NodeHlc {
                     .update_with_timestamp(&to_uhlc_timestamp(&inbound))
                     .is_ok()
                 {
-                    return;
+                    return TimestampVerdict::Relay;
                 }
                 // Absorb rejected the inbound timestamp (beyond the drift
-                // bound). zenoh's default `drop_future_timestamp: false` arm
-                // replaces it rather than dropping the message.
+                // bound). This is the ONLY arm either branch of
+                // `drop_future_timestamp` can reach: a bare Put is always
+                // stamped below, and an accepted timestamp already returned.
+                if self.drop_future_timestamp {
+                    return TimestampVerdict::Drop;
+                }
+                // zenoh's default `false` arm replaces rather than dropping.
             }
             if let Some(stamp) = self.stamp() {
                 let _ = wz_session_core::push_build::set_push_timestamp(push, &stamp);
             }
+            TimestampVerdict::Relay
         }
         #[cfg(not(feature = "time-hlc"))]
         {
             let _ = push;
+            TimestampVerdict::Relay
         }
     }
 }
@@ -456,6 +534,7 @@ mod tests {
     fn frozen_node(zid: &[u8]) -> NodeHlc {
         NodeHlc {
             clock: Some(build_clock(zid, frozen_clock)),
+            drop_future_timestamp: false,
         }
     }
 
@@ -676,6 +755,89 @@ mod tests {
             assert!(
                 ts.time < future_time,
                 "the replacement is this node's own now, behind the rejected future"
+            );
+        }
+
+        /// R2626 — `drop_future_timestamp: true` DROPS the same message the
+        /// default arm re-stamps.
+        ///
+        /// THE TWO ARMS ARE ONE TEST ON PURPOSE. The knob's whole meaning is
+        /// which of two things happens to an IDENTICAL input, so asserting the
+        /// drop alone would not separate "the knob works" from "this input is
+        /// rejected either way" — the default arm here is the control, and it is
+        /// the same `future_time` through the same node.
+        #[cfg(feature = "time-hlc")]
+        #[test]
+        fn the_drop_knob_drops_the_future_timestamp_the_default_arm_replaces() {
+            let node_zid = [0x01];
+            let ten_seconds = 10u64 << 32;
+            let future_time = crate::timestamp_source::wall_clock_ntp64() + ten_seconds;
+
+            // CONTROL: shipped default — relay, with the timestamp replaced.
+            let keeps =
+                NodeHlc::for_node(&node_zid, WhatAmI::Router, TimestampingEnabled::default());
+            let mut relayed = stamped_put(future_time, &[0x0B, 0x0C]);
+            assert_eq!(
+                keeps.treat_timestamp(&mut relayed),
+                TimestampVerdict::Relay,
+                "the shipped default must RELAY a future-stamped Put"
+            );
+            assert_ne!(
+                read_push_timestamp(&relayed).expect("still stamped").time,
+                future_time,
+                "and re-stamp it, which is the arm the drop knob replaces"
+            );
+
+            // The knob ON: the same input through the same role, dropped.
+            let drops =
+                NodeHlc::for_node(&node_zid, WhatAmI::Router, TimestampingEnabled::default())
+                    .with_drop_future_timestamp(true);
+            let mut dropped = stamped_put(future_time, &[0x0B, 0x0C]);
+            assert_eq!(
+                drops.treat_timestamp(&mut dropped),
+                TimestampVerdict::Drop,
+                "`drop_future_timestamp: true` must report Drop for a timestamp \
+                 uhlc rejects"
+            );
+        }
+
+        /// R2626 — the knob does NOT reach the arms that never fail.
+        ///
+        /// zenoh's drop lives on the `update_with_timestamp` Err branch ONLY, so
+        /// a bare Put is still stamped and an in-bound timestamp is still
+        /// absorbed even with the knob on. Without this, `drop_future_timestamp`
+        /// could be implemented as "drop anything timestamped" and both
+        /// assertions above would still pass.
+        #[cfg(feature = "time-hlc")]
+        #[test]
+        fn the_drop_knob_leaves_the_mint_and_absorb_arms_alone() {
+            let node = NodeHlc::for_node(&[0x01], WhatAmI::Router, TimestampingEnabled::default())
+                .with_drop_future_timestamp(true);
+
+            let mut bare = bare_put();
+            assert_eq!(
+                node.treat_timestamp(&mut bare),
+                TimestampVerdict::Relay,
+                "a Put with NO timestamp cannot reach the Err arm, so the knob \
+                 must not touch it"
+            );
+            assert!(
+                read_push_timestamp(&bare).is_some(),
+                "and it must still be minted"
+            );
+
+            let inbound_time = crate::timestamp_source::wall_clock_ntp64();
+            let mut inside = stamped_put(inbound_time, &[0x0B, 0x0C]);
+            assert_eq!(
+                node.treat_timestamp(&mut inside),
+                TimestampVerdict::Relay,
+                "a timestamp INSIDE the drift bound is absorbed, not rejected, so \
+                 the knob must not drop it"
+            );
+            assert_eq!(
+                read_push_timestamp(&inside).expect("still stamped").time,
+                inbound_time,
+                "and it must survive the relay untouched"
             );
         }
     }

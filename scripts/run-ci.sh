@@ -17533,9 +17533,14 @@ layer_e8t_router_hat_hlc_stamp_pico() {
     # topology, ONE NUMBER changed, opposite assertions. Measured — swapping the
     # offsets reds both and leaves the other three legs green.
     (cd oracles && cargo build -p wz-oracle-future-stamp --release --quiet) || return 1
+    # R2626 — the DROP arm joins them, on the same build and the same oracle.
+    # It varies ONE argv word against the replace arm above, which is what makes
+    # its ABSENCE attributable: measured, removing `--drop-future-timestamp true`
+    # makes the identical Put arrive.
     for _e8t_arm in \
         wz_router_hat_absorbs_an_upstream_timestamp_inside_the_drift_bound \
-        wz_router_hat_replaces_an_upstream_timestamp_beyond_the_drift_bound; do
+        wz_router_hat_replaces_an_upstream_timestamp_beyond_the_drift_bound \
+        wz_router_hat_told_to_drop_future_timestamps_delivers_nothing; do
         (cd crates && cargo test -p wz-integration-tests \
             --test wz_router_hlc_stamp_to_pico_zsub -- --ignored --quiet --test-threads=1 \
             --exact "$_e8t_arm" 2>&1 \
