@@ -1182,7 +1182,18 @@ PIN_NO_SYMBOL = 2
 # The R2600 entry above credits each with the same gains, which makes it easy to
 # assume they leave symmetrically -- they do not, and the derivation is what
 # says so rather than the symmetry.
-PIN_WZ_CITATIONS = 242
+# R2607 — 242 -> 247, AMBIGUOUS unchanged at 45. One atom GAINING a clause, the
+# opposite shape to the entry above: `transport-link-tls` stays PARTIAL and so
+# stays in the population, and its reason grew the record of R2606's inline-PEM
+# build plus R2607's correction to the walk-divergence claim.
+# DERIVED with THIS module's own `citation_audit`, run over that atom's reason
+# before and after the rewrite: wz 13 -> 18, ambiguous 0 -> 0. So 242 + 5 = 247
+# and 45 + 0 = 45, which is exactly what the census measures.
+# ⚠ The gain is FIVE wz citations and ONE upstream (6 -> 7). Only the wz half is
+# pinned here -- upstream citations are read and NOT judged by this axis
+# (R2215) -- so a rewrite that adds upstream anchors alone moves neither number,
+# and reading the totals as "citations added" would overcount by that one.
+PIN_WZ_CITATIONS = 247
 PIN_AMBIGUOUS = 45
 
 
