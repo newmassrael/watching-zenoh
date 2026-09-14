@@ -861,7 +861,14 @@ CITATION = re.compile(r"\b((?:[A-Za-z0-9_.-]+/)*[A-Za-z0-9_.-]+\.(?:rs|c|h))(?::
 # residual each reason still named. Both are reached atoms (`quic_e2e.rs` and
 # `quic_datagram_e2e.rs` run under their own features), so they leave this count
 # with the population; UNREACHED and NO_SYMBOL hold.
-PIN_REACHED = 41
+# R2609 — 41 -> 40: `transport-link-tls` went PARTIAL -> COMPLETE when its last
+# two residuals were built (`close_link_on_expiration` in R2608, and
+# `tls_handshake_timeout_ms` here), leaving ZERO of the 24 upstream locator
+# config keys this scheme consumes unread. It is a reached atom -- `tls_e2e.rs`
+# runs under `transport-link-tls` -- so it leaves this count with the
+# population; UNREACHED and NO_SYMBOL hold, exactly as they did for the quic
+# pair one entry above.
+PIN_REACHED = 40
 PIN_UNREACHED = 3
 PIN_NO_SYMBOL = 2
 # R2534 — 346 -> 347. The atom is `adminspace-metrics` and the citation is the
@@ -1193,7 +1200,20 @@ PIN_NO_SYMBOL = 2
 # pinned here -- upstream citations are read and NOT judged by this axis
 # (R2215) -- so a rewrite that adds upstream anchors alone moves neither number,
 # and reading the totals as "citations added" would overcount by that one.
-PIN_WZ_CITATIONS = 247
+# R2609 — 247 -> 229, AMBIGUOUS unchanged at 45. `transport-link-tls` went
+# PARTIAL -> COMPLETE, and a COMPLETE atom is not graded here, so it takes its
+# whole citation set with it.
+# DERIVED with THIS module's own `citation_audit`, and the derivation has TWO
+# terms rather than one, which is why a first pass of it was wrong: the round
+# that retires the atom also EDITED its reason, so the set leaving is not the
+# set the old pin counted. That reason went 18 -> 22 wz citations when R2609
+# recorded the two builds, and then all 22 left. 247 + 4 - 22 = 229, which is
+# exactly what the census measures; 247 - 22 = 225 is the answer that forgets
+# the round's own additions, and it does not reconcile.
+# ⚠ AMBIGUOUS does not move: this atom's reason carried none, so the 45 that
+# remain are other atoms'. The two numbers are not expected to fall together --
+# R2603 recorded the same asymmetry for the quic pair.
+PIN_WZ_CITATIONS = 229
 PIN_AMBIGUOUS = 45
 
 
