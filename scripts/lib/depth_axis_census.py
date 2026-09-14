@@ -854,7 +854,14 @@ CITATION = re.compile(r"\b((?:[A-Za-z0-9_.-]+/)*[A-Za-z0-9_.-]+\.(?:rs|c|h))(?::
 # last clause, `replies_config`. It was a reached atom (its module's own suite
 # runs under `ext-pubsub-advanced-cache`), so it leaves this count with the
 # population; UNREACHED and NO_SYMBOL hold.
-PIN_REACHED = 43
+# R2603 — 43 -> 41: the last two of R2589's four returned together.
+# `transport-link-quic` and `transport-link-quic-datagram` went PARTIAL ->
+# COMPLETE when open-debt 727 closed -- wz now seeds the public WebPKI roots and
+# extends them with the configured CA, as zenoh does, which was the single
+# residual each reason still named. Both are reached atoms (`quic_e2e.rs` and
+# `quic_datagram_e2e.rs` run under their own features), so they leave this count
+# with the population; UNREACHED and NO_SYMBOL hold.
+PIN_REACHED = 41
 PIN_UNREACHED = 3
 PIN_NO_SYMBOL = 2
 # R2534 — 346 -> 347. The atom is `adminspace-metrics` and the citation is the
@@ -1163,8 +1170,20 @@ PIN_NO_SYMBOL = 2
 # recorded that `upstream_link_config_keys_gate` OVER-CREDITS that scheme: the
 # shared locator parser declares consts the `Proto::Tls` arms never read. The
 # count moving is a record of a defect being written down, not of work done.
-PIN_WZ_CITATIONS = 279
-PIN_AMBIGUOUS = 47
+# R2603 — 279 -> 242 and AMBIGUOUS 47 -> 45, two atoms LEAVING the population
+# rather than a clause being added. `transport-link-quic` and
+# `transport-link-quic-datagram` went PARTIAL -> COMPLETE (open-debt 727), and a
+# COMPLETE atom is not graded here, so each takes its whole citation set with it.
+# DERIVED with THIS module's own `citation_audit` against the reasons as they
+# stood BEFORE the retag: `transport-link-quic` wz 19 / ambiguous 2 and
+# `transport-link-quic-datagram` wz 18 / ambiguous 0, so 279 - 19 - 18 = 242 and
+# 47 - 2 - 0 = 45, exactly what the census measures.
+# ⚠ BOTH ambiguous citations were the quic atom's; the datagram one had none.
+# The R2600 entry above credits each with the same gains, which makes it easy to
+# assume they leave symmetrically -- they do not, and the derivation is what
+# says so rather than the symmetry.
+PIN_WZ_CITATIONS = 242
+PIN_AMBIGUOUS = 45
 
 
 class Fatal(Exception):
