@@ -1314,7 +1314,14 @@ PIN_NO_SYMBOL = 2
 # correction adds are UPSTREAM paths, 5 -> 9), so the round contributes 0 and
 # the atom removes 12 wz and 1 ambiguous. 223 + 0 - 12 = 211 and 45 - 1 = 44,
 # which is what the census measures on both axes.
-PIN_WZ_CITATIONS = 211
+# R2618 — 211 -> 212, and this one RISES where the last three fell, because no
+# atom retired: `ext-pubsub-advanced-publisher` stays PARTIAL (clause (2) built,
+# three clauses open, item 15's rule), so it is still graded and the correction's
+# citations are ADDED to the population rather than leaving with it. The append
+# names exactly one wz path -- the sibling pin that establishes an absent qos
+# already MEANS the defaults -- so 211 + 1 = 212. AMBIGUOUS is untouched: that
+# citation is rooted and unambiguous.
+PIN_WZ_CITATIONS = 212
 PIN_AMBIGUOUS = 44
 
 
