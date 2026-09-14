@@ -432,9 +432,10 @@ if ! python3 scripts/lib/upstream_citation_anchor_gate.py; then
     echo "" >&2
     echo "pre-push: [gate 2f] upstream citation FORM gate FAILED — a citation is" >&2
     echo "          bare, line-numbered, or missing its root. Write it as" >&2
-    echo "          \`<root-included path>\` @ \`<needle>\`, ON ONE LINE: the" >&2
-    echo "          scanner is line-based, so a path wrapped away from its" >&2
-    echo "          needle reads as bare." >&2
+    echo "          \`<root-included path>\` @ \`<needle>\`. The halves MAY sit" >&2
+    echo "          on separate comment lines, breaking on either side of the" >&2
+    echo "          \`@\` (R2613); what still reads as bare is a needle with no" >&2
+    echo "          backticks, or a path with no \`@ <needle>\` after it." >&2
     echo "          Bypass with \`git push --no-verify\` only for genuine hotfixes." >&2
     exit 1
 fi

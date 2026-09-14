@@ -196,8 +196,24 @@ LINE_CITE = re.compile(rf"(?<![\w/.-])({_PATH}):(\d+)")
 #: because the citation it broke spanned `/// \`path\`` / `/// @ \`needle\`` and
 #: `\s*` cannot step over `/// `. A gate that cannot see the form it defines
 #: grades nothing.
+#:
+#: R2613 -- the allowance was ONE-SIDED for six rounds, and the sentence above
+#: did not say so. A wrap falling BEFORE the `@` was tolerated (that is the
+#: shape the R2241 mutation happened to have); the same citation wrapped AFTER
+#: it -- `\`path\` @` / `\`needle\`` -- still hit a bare `\s*` against the next
+#: line's leader and was demoted, which is verbatim the failure this comment
+#: claims to prevent. Two rounds paid for it: R2577 read the demotion off the
+#: hook message, and R2611 wrote a correct citation in the untolerated half and
+#: could not push for two rounds. Which side the line breaks on is a fact about
+#: the author's line width, never about the claim, so the leader is now
+#: crossable on BOTH sides of the `@` and `selftest` case 4b grades both.
+#:
+#: ⚠ The separator still admits at most ONE leader per side, so it cannot run
+#: across a blank line or a paragraph into an unrelated needle, and the needle
+#: itself stays `[^\`\n]`, single-line by construction.
+_LEADER = r"(?:\s*(?://[/!]?|#!?|\*)?\s*)"
 ANCHOR_CITE = re.compile(
-    rf"`({_PATH})`(?:\s*(?://[/!]?|#!?|\*)?\s*)@\s*`([^`\n]{{1,200}})`"
+    rf"`({_PATH})`{_LEADER}@{_LEADER}`([^`\n]{{1,200}})`"
 )
 BARE_CITE = re.compile(rf"(?<![\w/.-])({_PATH})(?!:\d)")
 
@@ -1490,6 +1506,24 @@ def selftest() -> int:
             failures.append(f"a resolving anchor red: {f}")
         if (c["anchored"], c["bare"], c["line"]) != (1, 0, 0):
             failures.append(f"anchored occurrence was double-counted: {c}")
+
+        # 4b. AND it is still an anchor when the line breaks, on EITHER side of
+        # the `@`. The form's own comment has promised this since R2241 while
+        # the pattern delivered only the first half; nothing graded it, so the
+        # promise and the code disagreed for six rounds (R2613). Both rows are
+        # asserted together because a one-sided fixture is exactly what let the
+        # one-sided pattern read as correct.
+        for where, fixture in (
+            ("before", f"/// `{UNICAST}`\n/// @ `fn keeper()`\n"),
+            ("after", f"/// `{UNICAST}` @\n/// `fn keeper()`\n"),
+        ):
+            c, f = scan_text(fixture)
+            if f:
+                failures.append(f"an anchor wrapped {where} the `@` red: {f}")
+            if (c["anchored"], c["bare"], c["line"]) != (1, 0, 0):
+                failures.append(
+                    f"an anchor wrapped {where} the `@` was not read as one: {c}"
+                )
 
         # 5. An anchor whose needle is GONE reds -- the arm the whole form is for.
         c, f = scan_text(f"// `{UNICAST}` @ `fn vanished()`\n")
