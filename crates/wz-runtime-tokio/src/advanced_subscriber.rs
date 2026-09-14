@@ -3440,6 +3440,7 @@ mod tests {
                 }),
                 publisher_detection: true,
                 sample_miss_detection: MissDetectionConfig::default(),
+                ..AdvancedPublisherOptions::default()
             },
             vec![0x09],
         )

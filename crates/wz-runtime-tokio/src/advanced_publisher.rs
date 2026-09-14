@@ -34,12 +34,18 @@ use wz_session_core::zid_hex::zid_to_zenoh_hex;
 use wz_session_core::serde_codec::z_serialize;
 
 use crate::advanced_cache::{AdvancedCache, CacheConfig, CachedSample};
+// R2618 — the five wire knobs, imported from the same modules
+// `session::publish_common` reads them from, so this file and the publish path
+// cannot come to mean different things by the same name.
+use crate::locality::Locality;
+use crate::sample::Reliability;
 use crate::session::{
     LivelinessAliasError, LivelinessOptions, LivelinessToken, PublishError, PublishOptions,
     QueryableError, Session, Unicast,
 };
 use crate::session_glue::SessionLinkActions;
 use crate::timestamp_source::FallbackStamp;
+use wz_session_core::qos::{CongestionControl, Priority};
 
 /// How an advanced publisher tags its samples for downstream detection /
 /// recovery. Mirror of zenoh-ext `Sequencing` (advanced_publisher.rs:55-59).
@@ -146,6 +152,99 @@ pub struct AdvancedPublisherOptions {
     /// the `ext-pubsub-sample-miss-detection` feature (a documented no-op
     /// otherwise), plus a tokio runtime at declare time for the spawn.
     pub sample_miss_detection: MissDetectionConfig,
+    /// R2618 — the publisher-side locality predicate, upstream's
+    /// `zenoh-ext/src/advanced_publisher.rs` @ `pub fn allowed_destination(mut self, destination: Locality) -> Self {`.
+    pub allowed_destination: Locality,
+    /// R2618 — the link-layer reliability hint, upstream's
+    /// `zenoh-ext/src/advanced_publisher.rs` @ `pub fn reliability(self, reliability: Reliability) -> Self {`.
+    pub reliability: Reliability,
+    /// R2618 — the outer QoS priority, upstream's
+    /// `zenoh-ext/src/advanced_publisher.rs` @ `fn priority(self, priority: Priority) -> Self {`.
+    ///
+    /// A DOCUMENTED NO-OP without the `pubsub-qos` feature, exactly as
+    /// `sample_miss_detection` is without its own: the setter this folds into
+    /// is gated, and `ext-pubsub-advanced-publisher` does not compose it. The
+    /// field is ungated so a struct literal keeps compiling either way, which
+    /// is the same shape [`AdvancedPutOptions`]'s encoding / attachment take.
+    pub priority: Priority,
+    /// R2618 — congestion control, upstream's
+    /// `zenoh-ext/src/advanced_publisher.rs` @ `fn congestion_control(self, congestion_control: CongestionControl) -> Self {`.
+    /// `pubsub-qos`-gated in effect, as [`Self::priority`] documents.
+    pub congestion_control: CongestionControl,
+    /// R2618 — the express (no-batching) bit, upstream's
+    /// `zenoh-ext/src/advanced_publisher.rs` @ `fn express(self, is_express: bool) -> Self {`.
+    /// `pubsub-qos`-gated in effect, as [`Self::priority`] documents.
+    pub express: bool,
+}
+
+/// R2618 — the five wire knobs an [`AdvancedPublisher`] carries, folded onto
+/// EVERY publish it makes through ONE function.
+///
+/// The fold is a type rather than a chain repeated at each call site because
+/// there are two of them -- the Put and the Del -- and they have already drifted
+/// once on exactly this axis: the Del site documents that it deliberately omits
+/// the encoding / attachment chain, which is correct for those two and would be
+/// wrong for these five. QoS, locality and reliability are properties of the
+/// PUBLISHER, so a Del must carry them as a Put does; keeping them in one place
+/// is what stops the next edit applying them to one arm only.
+#[derive(Clone, Copy, Debug)]
+struct WireQos {
+    allowed_destination: Locality,
+    reliability: Reliability,
+    #[cfg_attr(not(feature = "pubsub-qos"), allow(dead_code))]
+    priority: Priority,
+    #[cfg_attr(not(feature = "pubsub-qos"), allow(dead_code))]
+    congestion_control: CongestionControl,
+    #[cfg_attr(not(feature = "pubsub-qos"), allow(dead_code))]
+    express: bool,
+}
+
+impl WireQos {
+    fn from_options(options: &AdvancedPublisherOptions) -> Self {
+        Self {
+            allowed_destination: options.allowed_destination,
+            reliability: options.reliability,
+            priority: options.priority,
+            congestion_control: options.congestion_control,
+            express: options.express,
+        }
+    }
+
+    /// Fold these knobs onto a publish. Each gated call sits behind the gate of
+    /// the SETTER it calls, which is the discipline the encoding / attachment
+    /// folds in this file already record paying for: an ungated call compiles
+    /// under this crate's default features and breaks the `wz` facade's
+    /// `--features ext-pubsub-advanced-publisher` build.
+    fn apply(&self, opts: PublishOptions) -> PublishOptions {
+        let opts = opts
+            .with_locality(self.allowed_destination)
+            .with_reliability(self.reliability);
+        // ⚠ THE QOS FOLD IS CONDITIONAL, AND THE CONTROL IS WHY. Applied
+        // unconditionally it ATTACHES a qos byte where a bare `put()` carries
+        // none: measured, a default advanced publisher went from `None` to
+        // `Some(5)` -- `Priority::DEFAULT` written out explicitly. In this tree
+        // an ABSENT qos already MEANS the defaults ("No QoS attached -> DEFAULT
+        // conduit band (byte-identical to a pre-QoS send)", the sibling pin in
+        // `session::tests`), so writing them is not a no-op on the wire: it
+        // adds an extension every default publisher would suddenly emit.
+        //
+        // So the byte is attached only when one of the three actually departs
+        // from the wire default. That is what makes "a default config publishes
+        // what it published before" true rather than merely claimed, and the
+        // second arm of the witness grades exactly this.
+        #[cfg(feature = "pubsub-qos")]
+        let opts = if self.priority != Priority::DEFAULT
+            || self.congestion_control != CongestionControl::Drop
+            || self.express
+        {
+            opts.with_priority(self.priority)
+                .with_congestion_control(self.congestion_control)
+                .with_express(self.express)
+        } else {
+            opts
+        };
+        opts
+    }
 }
 
 impl Default for AdvancedPublisherOptions {
@@ -155,6 +254,22 @@ impl Default for AdvancedPublisherOptions {
             cache: Some(CacheConfig::default()),
             publisher_detection: true,
             sample_miss_detection: MissDetectionConfig::default(),
+            // R2618 — the five defaults are the PUBLISH path's own, not a
+            // second opinion about them: `PublishOptions::put()` starts at
+            // these values, so an `AdvancedPublisherOptions::default()`
+            // publishes byte-identically to before this round.
+            allowed_destination: Locality::default(),
+            reliability: Reliability::default(),
+            // `Priority` and `CongestionControl` implement no `Default` — they
+            // carry NAMED wire defaults instead, and those names are what the
+            // publish path means by "unset": `Priority::DEFAULT` is `Data`
+            // (`Z_PRIORITY_DEFAULT`) and `Z_CONGESTION_CONTROL_DEFAULT` is
+            // `Drop`. Spelling them rather than reaching for a derive is the
+            // point: a `Default` impl on those enums would be a SECOND opinion
+            // about a value the wire already fixes.
+            priority: Priority::DEFAULT,
+            congestion_control: CongestionControl::Drop,
+            express: false,
         }
     }
 }
@@ -248,6 +363,10 @@ pub struct AdvancedPublisher<R: SessionRuntime, T: TimeSource> {
     eid: u32,
     seqnum: Option<Arc<AtomicU32>>,
     stamp: FallbackStamp,
+    /// R2618 — the publisher's wire knobs, applied to every Put and Del it
+    /// makes. See [`WireQos`] for why this is one value rather than a chain at
+    /// each site.
+    qos: WireQos,
     cache: Option<AdvancedCache<R, T>>,
     _token: Option<LivelinessToken<R, T>>,
     /// R311y85 — the publisher's `@adv` KE, retained so the heartbeat-beacon
@@ -526,6 +645,7 @@ where
             // made this site and `storage_service`'s the two same-`uhlc::ID`
             // clocks the round removed.
             stamp: FallbackStamp::new(local_zid, session.node_hlc().clone()),
+            qos: WireQos::from_options(&options),
             cache,
             _token: token,
             #[cfg(feature = "ext-pubsub-sample-miss-detection")]
@@ -582,7 +702,10 @@ where
         // construction. `None` under timestamp / no sequencing.
         let source_info = sn.map(|sn| SourceInfo::new(&self.zid, self.eid, sn));
 
-        let mut opts = PublishOptions::put().with_timestamp(timestamp.clone());
+        let mut opts = self
+            .qos
+            .apply(PublishOptions::put())
+            .with_timestamp(timestamp.clone());
         if let Some(si) = &source_info {
             opts = opts.with_source_info(si.clone());
         }
@@ -651,7 +774,13 @@ where
         let timestamp = self.stamp.stamp();
         let source_info = sn.map(|sn| SourceInfo::new(&self.zid, self.eid, sn));
 
-        let mut opts = PublishOptions::put()
+        // R2618 — the SAME fold as the Put arm. The encoding / attachment chain
+        // is deliberately absent here (a Del body carries neither ext), but QoS,
+        // locality and reliability are properties of the PUBLISHER and a Del
+        // carries them exactly as a Put does.
+        let mut opts = self
+            .qos
+            .apply(PublishOptions::put())
             .with_kind(crate::sample::SampleKind::Del)
             .with_timestamp(timestamp.clone());
         if let Some(si) = &source_info {
@@ -903,6 +1032,7 @@ mod tests {
             }),
             publisher_detection: true,
             sample_miss_detection: MissDetectionConfig::default(),
+            ..AdvancedPublisherOptions::default()
         };
         let publisher = AdvancedPublisher::declare(&session, "demo/data", options, vec![0x01])
             .expect("advanced publisher declares against the test link");
@@ -997,6 +1127,7 @@ mod tests {
             }),
             publisher_detection: true,
             sample_miss_detection: MissDetectionConfig::default(),
+            ..AdvancedPublisherOptions::default()
         };
         let publisher = AdvancedPublisher::declare(&session, "demo/data", options, vec![0x01])
             .expect("advanced publisher declares against the test link");
@@ -1115,6 +1246,7 @@ mod tests {
             }),
             publisher_detection: true,
             sample_miss_detection: MissDetectionConfig::default(),
+            ..AdvancedPublisherOptions::default()
         };
         let publisher = AdvancedPublisher::declare(&session, "demo/data", options, vec![0x01])
             .expect("advanced publisher declares against the test link");
@@ -1366,6 +1498,7 @@ mod tests {
                 }),
                 publisher_detection: true,
                 sample_miss_detection: MissDetectionConfig::default(),
+                ..AdvancedPublisherOptions::default()
             },
             vec![0x09],
         )
@@ -1434,6 +1567,7 @@ mod tests {
                 }),
                 publisher_detection: true,
                 sample_miss_detection: MissDetectionConfig::default(),
+                ..AdvancedPublisherOptions::default()
             },
             vec![0x01],
         )
@@ -1480,6 +1614,7 @@ mod tests {
                 publisher_detection: false,
                 sample_miss_detection: MissDetectionConfig::default()
                     .heartbeat(Duration::from_millis(100)),
+                ..AdvancedPublisherOptions::default()
             },
             vec![0x09],
         );
@@ -1534,6 +1669,7 @@ mod tests {
                 publisher_detection: false,
                 sample_miss_detection: MissDetectionConfig::default()
                     .heartbeat(Duration::from_millis(100)),
+                ..AdvancedPublisherOptions::default()
             },
             vec![0x09],
         );
@@ -1634,6 +1770,7 @@ mod tests {
             publisher_detection: false,
             sample_miss_detection: MissDetectionConfig::default()
                 .heartbeat(Duration::from_millis(100)),
+            ..AdvancedPublisherOptions::default()
         };
         // The arm that already refused, kept as the comparison rather than
         // assumed: it is the half of the pair that gives the other one a
@@ -1643,6 +1780,7 @@ mod tests {
             cache: None,
             publisher_detection: true,
             sample_miss_detection: MissDetectionConfig::default(),
+            ..AdvancedPublisherOptions::default()
         };
 
         for base in ["demo/foo?bar", "demo//data", "demo/data/"] {
@@ -1780,6 +1918,64 @@ mod tests {
     /// and wz now answers the same on the state it models identically.
     ///
     /// THE ARMS ARE THE POINT. A refusal test alone would pass on a build that
+    /// R2618 — the five publisher knobs reach the publish options, and a
+    /// DEFAULT config still publishes exactly what it did before they existed.
+    ///
+    /// Upstream carries these on its advanced-publisher builder
+    /// (`zenoh-ext/src/advanced_publisher.rs` @ `pub fn allowed_destination(mut self, destination: Locality) -> Self {`
+    /// and its four siblings) where `AdvancedPublisherOptions` carried four
+    /// fields and none of them, which the atom's clause (2) called structural.
+    ///
+    /// THE SECOND ARM IS THE CONTROL AND IT GRADES A CLAIM THIS ROUND MAKES IN
+    /// PROSE: the new defaults are the publish path's own, so a default-built
+    /// publisher emits what it emitted before. Asserting the folded options
+    /// equal a bare `PublishOptions::put()` is what stops that sentence being
+    /// decoration -- if any default were a second opinion about a wire value,
+    /// this arm fails rather than the claim quietly being false.
+    #[test]
+    fn the_publisher_knobs_reach_the_publish_options_and_default_changes_nothing() {
+        // ARM 1: non-default knobs all land.
+        let opts = AdvancedPublisherOptions {
+            allowed_destination: Locality::SessionLocal,
+            reliability: Reliability::BestEffort,
+            priority: Priority::InteractiveHigh,
+            congestion_control: CongestionControl::Block,
+            express: true,
+            ..AdvancedPublisherOptions::default()
+        };
+        let folded = WireQos::from_options(&opts).apply(PublishOptions::put());
+        assert_eq!(folded.allowed_destination, Locality::SessionLocal);
+        assert_eq!(folded.reliability, Reliability::BestEffort);
+        #[cfg(feature = "pubsub-qos")]
+        {
+            let q = folded.qos.expect("the QoS knobs attach a qos byte");
+            assert_eq!(q.priority(), Priority::InteractiveHigh);
+            assert!(q.is_express(), "express rides the qos byte");
+            assert_eq!(q.raw & (1 << 3), 1 << 3, "Block sets the nodrop bit");
+        }
+
+        // ARM 2 (CONTROL): the DEFAULT config folds to a bare put().
+        let base = PublishOptions::put();
+        let unchanged = WireQos::from_options(&AdvancedPublisherOptions::default())
+            .apply(PublishOptions::put());
+        assert_eq!(
+            unchanged.allowed_destination, base.allowed_destination,
+            "a default advanced publisher must not move the locality"
+        );
+        assert_eq!(
+            unchanged.reliability, base.reliability,
+            "a default advanced publisher must not move the reliability"
+        );
+        #[cfg(feature = "pubsub-qos")]
+        assert_eq!(
+            unchanged.qos.map(|q| q.raw),
+            base.qos.map(|q| q.raw),
+            "a default advanced publisher must not move the qos byte -- and \
+             that includes not ATTACHING one where a bare put() has none, \
+             which is the way this could regress silently"
+        );
+    }
+
     /// refused EVERYTHING, so the two arms beside it are what give this one a
     /// subject: the same request succeeds on a stamping node, and the sequencing
     /// upstream's own default carries (`None` — its builder promotes to
@@ -1796,6 +1992,7 @@ mod tests {
             cache: None,
             publisher_detection: false,
             sample_miss_detection: MissDetectionConfig::default(),
+            ..AdvancedPublisherOptions::default()
         };
 
         // A Peer does not stamp under zenoh's shipped default.

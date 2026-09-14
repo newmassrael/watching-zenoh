@@ -6894,7 +6894,10 @@ layer_c1aq_cargo_test_ext_pubsub_advanced() {
     # witness for the `replies_config` override that re-graded the atom. Like
     # its neighbour above, MEASURED by running this exact command rather than
     # counted off the diff.
-    _runci_guarded_test "C1aq advanced_" 19 \
+    # R2618 — 19 -> 20: the_publisher_knobs_reach_the_publish_options_and_
+    # default_changes_nothing, the five wire knobs plus the control that a
+    # default config still folds to a bare put().
+    _runci_guarded_test "C1aq advanced_" 20 \
         cargo test -p wz-runtime-tokio --features ext-pubsub-advanced-publisher,query-get,pubsub-allow-loop \
         --lib advanced_ --quiet || return 1
     (cd crates \
