@@ -586,6 +586,23 @@ fn the_defaults_each_implementation_falls_back_to_are_pinned_against_a_real_zeno
         // key is now asserted by the loop below instead — the stronger claim,
         // and the one that reds if upstream ever brings it back.
         "timestamping/enabled",
+        // R2626 — `timestamping/drop_future_timestamp`, and it is here for the
+        // `connect/*` scalars' reason rather than its sibling's above. That one
+        // is listed because upstream's default is a function of `mode`; this
+        // one's default is FLAT (`false`). What puts it here is where the
+        // default LIVES: upstream declares the field `Option<bool>`
+        // (`commons/zenoh-config/src/lib.rs`) and applies the default only at
+        // the read site, via `unwrap_or_default!`
+        // (`zenoh/src/net/routing/dispatcher/tables.rs`), with the constant in
+        // `commons/zenoh-config/src/defaults.rs`. A silent file therefore leaves
+        // the Option `None` and the resolved tree has nothing to answer with.
+        //
+        // ⚠ DERIVED FROM THE DECLARATION, NOT FROM A RUNNING TREE: this leg is
+        // `#[ignore]` and needs a built zenohd, which this round had no way to
+        // consult. If a hosted run ever shows the tree answering `false` here,
+        // the honest move is to MOVE the key into `claims` and compare it, not
+        // to leave it excepted because the exception is quieter.
+        "timestamping/drop_future_timestamp",
     ];
 
     // `adminspace` is a BLOCK on wz's side and three resolved leaves on
@@ -3270,7 +3287,11 @@ fn a_wz_node_configured_only_by_a_stock_zenoh_config_reaches_a_real_zenohd() {
   // is about the ones wz claims to apply.
   id: "a1b2c3d4",
   namespace: "demo/ns",
-  timestamping: {{ enabled: true }},
+  // R2626 — `drop_future_timestamp` joins the EXISTING `timestamping` block for
+  // the reason `peer/mode` joined `routing` below: a second block naming the
+  // same section would be a document no operator writes. `true` and not the
+  // shipped `false`, so the expansion has something to emit.
+  timestamping: {{ enabled: true, drop_future_timestamp: true }},
   queries_default_timeout: 11000,
   // R2065 — `peer/mode` joins the EXISTING `routing` block rather than opening
   // a second one. The first cut added its own `routing: {{ … }}` earlier in the
