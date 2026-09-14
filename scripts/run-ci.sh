@@ -7050,7 +7050,10 @@ layer_c1at_cargo_test_ext_pubsub_advanced_recovery() {
     # path, which shares `State::deliver_unsequenced` with the recovery-off
     # `handle` — so a regression on either side is visible in both lanes rather
     # than only in whichever one happens to be read.
-    _runci_guarded_test "C1at advanced_subscriber" 22 \
+    # R2621 — 22 -> 23: the_retention_sweep_reclaims_only_quiet_sources_that_no_
+    # token_calls_live. UNGATED (the sweep is the subscriber surface's, not
+    # history's), so it lands in every advanced_subscriber lane.
+    _runci_guarded_test "C1at advanced_subscriber" 23 \
         cargo test -p wz-runtime-tokio --features ext-pubsub-advanced-recovery,ext-pubsub-advanced-publisher,pubsub-allow-loop \
         --lib advanced_subscriber --quiet || return 1
     # R311y836 — the SAME 22 cases again, with `query-consolidation` composed on
@@ -7072,7 +7075,8 @@ layer_c1at_cargo_test_ext_pubsub_advanced_recovery() {
     # being INCIDENTAL: C1 has it only because some other workspace member
     # happens to enable the feature, so a Cargo.toml edit elsewhere could retire
     # it silently. Here it is named.
-    _runci_guarded_test "C1at advanced_subscriber (query-consolidation)" 22 \
+    # R2621 — 22 -> 23, the same ungated retention witness as the leg above.
+    _runci_guarded_test "C1at advanced_subscriber (query-consolidation)" 23 \
         cargo test -p wz-runtime-tokio --features ext-pubsub-advanced-recovery,ext-pubsub-advanced-publisher,pubsub-allow-loop,query-consolidation \
         --lib advanced_subscriber --quiet || return 1
     (cd crates \
@@ -7205,7 +7209,9 @@ layer_c1av_cargo_test_ext_pubsub_advanced_history() {
     # global_pull_is_running, the guard upstream takes only for a source it has
     # just inserted. `ext-pubsub-advanced-history`-gated like its neighbours
     # (the counter it reads exists only there), so only this lane moves.
-    _runci_guarded_test "C1av advanced_subscriber" 46 \
+    # R2621 — 46 -> 47, the retention-sweep witness. It is recovery-gated, and
+    # this lane carries recovery through the history feature's own composition.
+    _runci_guarded_test "C1av advanced_subscriber" 47 \
         cargo test -p wz-runtime-tokio --features ext-pubsub-advanced-history,ext-pubsub-advanced-publisher,pubsub-allow-loop \
         --lib advanced_subscriber --quiet || return 1
     (cd crates \

@@ -106,6 +106,9 @@ use crate::session_glue::SessionLinkActions;
 use std::collections::BTreeMap;
 #[cfg(feature = "ext-pubsub-advanced-recovery")]
 use std::time::Duration;
+// R2621 — the retention surface's clock; scoped like the surface itself.
+#[cfg(feature = "ext-pubsub-advanced-recovery")]
+use std::time::Instant;
 #[cfg(feature = "ext-pubsub-advanced-recovery")]
 use wz_session_core::locality::Locality;
 #[cfg(feature = "ext-pubsub-advanced-recovery")]
@@ -147,8 +150,84 @@ pub struct Miss {
 /// sn-ordered) + the in-flight recovery-GET count ([`Self::pending_queries`])
 /// — the wz mirror of zenoh-ext `SourceState<u32>` (advanced_subscriber.rs:
 /// 444-448).
+/// R2621 — THE RETENTION BOOKKEEPING EVERY PER-SOURCE STATE CARRIES, and the
+/// reason it is one type rather than two fields copied into three structs.
+///
+/// wz's source maps were never reclaimed: `sequenced` and `timestamped` grew one
+/// entry per distinct source ever seen, for the life of the subscriber, where
+/// upstream bounds them by a retention period
+/// (`zenoh-ext/src/advanced_subscriber.rs` @ `async fn gc_task(statesref: Weak<Mutex<State>>, retention_period: Duration) {`).
+/// That sweep needs exactly two things from a state — WHEN it was last touched,
+/// and whether its publisher is still ALIVE — so they live together in the type
+/// that exists because the sweep does.
+///
+/// ⚠ THE PAIR IS INDIVISIBLE AND THIS MODULE ALREADY SAID SO. Upstream's sweep
+/// spares a live publisher rather than popping it
+/// (`zenoh-ext/src/advanced_subscriber.rs` @ `} else if state.alive {`), so a
+/// sweep shipped without `alive` reclaims LIVE sources and destroys their
+/// `last_delivered`, turning the next sample from that publisher into a false
+/// gap. And `alive` shipped without the sweep is the write-only flag
+/// [`TimestampedState`]'s own doc refuses — "a condition that can never be false
+/// reads as coverage while grading nothing". Neither half is shippable alone,
+/// which is why they arrive in one type in one round.
+///
+/// `Default` is `now()` + alive, and that is correct rather than convenient:
+/// a state is created through `entry(..).or_default()` at the moment its source
+/// is first seen, so creation IS the first access.
+///
+/// ⚠ SCOPED TO THE RECOVERY FEATURE, and the limit is stated rather than hidden:
+/// the retention PERIOD is configured through [`RecoveryConfig`], because that
+/// is where upstream puts it, so a subscriber built without recovery has no
+/// knob, no sweep, and keeps the unbounded growth this closes. Upstream has the
+/// same scope — its `gc_task` is spawned from the recovery path — and compiling
+/// the bookkeeping into a build that can never sweep would be the dead surface
+/// this module refuses elsewhere.
+#[cfg(feature = "ext-pubsub-advanced-recovery")]
+struct Retention {
+    /// When this source was last touched. Upstream's `latest_access`, which its
+    /// sweep compares against `now` and its heartbeat arm refreshes.
+    latest_access: Instant,
+    /// Whether a LIVENESS TOKEN says this publisher is live — upstream's own
+    /// wording, "Alive as per liveliness subscriber". Set true by the token's
+    /// Put arm and false by its Delete arm; read only by the sweep.
+    ///
+    /// ⚠ DEFAULTS FALSE, and that is upstream's default rather than a guess:
+    /// `zenoh-ext/src/advanced_subscriber.rs` @ `alive: false,` in its
+    /// `SourceState`'s `Default`. Defaulting TRUE was this round's first
+    /// attempt and it is a silent no-op bug — nothing would ever clear the flag
+    /// on a source that has no liveliness token, so the sweep would refresh
+    /// every entry forever and reclaim nothing while appearing to run. False is
+    /// also the right MEANING: the flag records a positive statement by a token,
+    /// so its absence is "no token says so", not "assume live".
+    alive: bool,
+}
+
+#[cfg(feature = "ext-pubsub-advanced-recovery")]
+impl Default for Retention {
+    fn default() -> Self {
+        Self {
+            latest_access: Instant::now(),
+            alive: false,
+        }
+    }
+}
+
+#[cfg(feature = "ext-pubsub-advanced-recovery")]
+impl Retention {
+    /// Mark this source touched. Called wherever a state is reached for a
+    /// sample, a beacon or a reply, so the sweep's age means "unheard from"
+    /// rather than "declared long ago".
+    fn touch(&mut self) {
+        self.latest_access = Instant::now();
+    }
+}
+
 #[derive(Default)]
 struct SourceState {
+    /// R2621 — see [`Retention`]. Carried by both shapes, because the gap this
+    /// closes is the SUBSCRIBER surface's and not either shape's.
+    #[cfg(feature = "ext-pubsub-advanced-recovery")]
+    retention: Retention,
     /// Last in-order delivered sequence number (`None` before the first
     /// sample from this source).
     last_delivered: Option<u32>,
@@ -200,6 +279,10 @@ struct SourceState {
 #[cfg(feature = "ext-pubsub-advanced-history")]
 #[derive(Default)]
 struct TimestampedState {
+    /// R2621 — see [`Retention`]. The `alive` flag this doc used to say was
+    /// waiting for a sweep now HAS that sweep, so it lands here.
+    #[cfg(feature = "ext-pubsub-advanced-recovery")]
+    retention: Retention,
     /// Newest instant delivered for this timestamp-id (`None` before the
     /// first). Upstream's `last_delivered: Option<T>` at `T = Timestamp`.
     last_delivered: Option<wz_session_core::sample::TimestampHint>,
@@ -236,6 +319,12 @@ struct TimestampedState {
 #[cfg(not(feature = "ext-pubsub-advanced-history"))]
 #[derive(Default)]
 struct TimestampedState {
+    /// R2621 — see [`Retention`]. Present in the history-off build too: an
+    /// unreclaimed map grows the same either way, so the retention surface is
+    /// not a history feature — though it IS a recovery one, because that is
+    /// where its period is configured.
+    #[cfg(feature = "ext-pubsub-advanced-recovery")]
+    retention: Retention,
     /// Newest instant delivered for this timestamp-id (`None` before the first).
     last_delivered: Option<wz_session_core::sample::TimestampHint>,
 }
@@ -385,10 +474,20 @@ pub struct RecoveryConfig<const CONFIGURED: bool = true> {
     /// beacon instead of a local timer (the producer beacon is the separate
     /// `ext-pubsub-sample-miss-detection` atom). `false` (default) = off.
     heartbeat: bool,
+    /// R2621 — how long a source's ordering state survives unheard-from before
+    /// the retention sweep reclaims it. `None` means
+    /// [`Self::RETENTION_PERIOD_DEFAULT`], upstream's own 1h.
+    retention_period: Option<Duration>,
 }
 
 #[cfg(feature = "ext-pubsub-advanced-recovery")]
 impl<const CONFIGURED: bool> RecoveryConfig<CONFIGURED> {
+    /// R2621 — upstream's own default, `zenoh-ext/src/advanced_subscriber.rs`
+    /// @ `const RETENTION_PERIOD_DEFAULT: Duration = Duration::from_secs(3600);`.
+    /// Hours rather than milliseconds, which is what makes a full-scan sweep an
+    /// acceptable trade against upstream's LRU.
+    pub const RETENTION_PERIOD_DEFAULT: Duration = Duration::from_secs(3600);
+
     /// Sample-driven recovery (no periodic / heartbeat trigger).
     ///
     /// Generic over the flag so both spellings keep working: used directly it
@@ -413,6 +512,24 @@ impl<const CONFIGURED: bool> RecoveryConfig<CONFIGURED> {
     pub fn heartbeat(&self) -> bool {
         self.heartbeat
     }
+
+    /// R2621 — how long a source's ordering state survives without being heard
+    /// from, upstream's
+    /// `zenoh-ext/src/advanced_subscriber.rs` @ `pub fn retention_period(mut self, period: Duration) -> RecoveryConfig<CONFIGURED> {`.
+    ///
+    /// On the GENERIC impl rather than the `<false>` one, exactly as upstream
+    /// places it: retention is orthogonal to WHICH trigger was chosen, so it
+    /// must remain settable after a trigger has moved the type to `<true>`.
+    pub fn with_retention_period(mut self, period: Duration) -> Self {
+        self.retention_period = Some(period);
+        self
+    }
+
+    /// The configured retention period, or [`Self::RETENTION_PERIOD_DEFAULT`].
+    pub fn retention_period(&self) -> Duration {
+        self.retention_period
+            .unwrap_or(Self::RETENTION_PERIOD_DEFAULT)
+    }
 }
 
 #[cfg(feature = "ext-pubsub-advanced-recovery")]
@@ -428,6 +545,10 @@ impl RecoveryConfig<false> {
         RecoveryConfig {
             periodic_queries: Some(period),
             heartbeat: false,
+            // R2621 — carried across the typestate transition, as upstream
+            // carries it (`retention_period: self.retention_period`): choosing a
+            // trigger must not silently reset an orthogonal setting.
+            retention_period: self.retention_period,
         }
     }
 
@@ -439,6 +560,7 @@ impl RecoveryConfig<false> {
         RecoveryConfig {
             periodic_queries: None,
             heartbeat: true,
+            retention_period: self.retention_period,
         }
     }
 }
@@ -889,6 +1011,9 @@ impl State {
         } = self;
         let on_sample: &mut dyn FnMut(Sample) = &mut **on_sample;
         let state = timestamped.entry(ts.zid.clone()).or_default();
+        // R2621 — a sample IS being heard from, so the retention clock restarts.
+        #[cfg(feature = "ext-pubsub-advanced-recovery")]
+        state.retention.touch();
 
         // STRICTLY newer, so a retransmission at an equal instant and a late
         // arrival at an older one are both dropped before anything else.
@@ -1028,6 +1153,9 @@ impl State {
         let on_sample: &mut dyn FnMut(Sample) = &mut **on_sample;
         let on_miss: &mut dyn FnMut(Miss) = &mut **on_miss;
         let state = sequenced.entry(key.clone()).or_default();
+        // R2621 — see the timestamped twin: delivery is activity.
+        #[cfg(feature = "ext-pubsub-advanced-recovery")]
+        state.retention.touch();
         match state.last_delivered {
             // First sample from this source: deliver, record.
             None => {
@@ -1108,6 +1236,9 @@ impl State {
         let on_sample: &mut dyn FnMut(Sample) = &mut **on_sample;
         let on_miss: &mut dyn FnMut(Miss) = &mut **on_miss;
         let state = sequenced.entry(key.clone()).or_default();
+        // R2621 — delivery is activity, as on the two paths above.
+        #[cfg(feature = "ext-pubsub-advanced-recovery")]
+        state.retention.touch();
 
         match state.last_delivered {
             // First sample / in order: deliver, advance, drain contiguous buffer.
@@ -1300,6 +1431,96 @@ impl State {
     /// upstream issues overlapping GETs while wz issues at most one. wz is the
     /// more conservative of the two and no leg in the cross-impl corpus witnesses
     /// the difference; removing this gate reds nothing today.
+    /// R2621 — RECLAIM SOURCE STATES NOBODY HAS HEARD FROM, the sweep wz had
+    /// none of. Returns how many entries were dropped, across BOTH maps.
+    ///
+    /// This is the deterministic core; the background task is thin timer glue
+    /// over it, the same split [`PeriodicTask`] uses over
+    /// [`Self::periodic_requests`]. Written that way so the policy is unit
+    /// tested at an instant the test chooses rather than through a sleep.
+    ///
+    /// THE RULE IS UPSTREAM'S, CLAUSE FOR CLAUSE
+    /// (`zenoh-ext/src/advanced_subscriber.rs` @ `async fn gc_task(statesref: Weak<Mutex<State>>, retention_period: Duration) {`):
+    /// a state younger than the retention period stays; an older one whose
+    /// publisher is still ALIVE has its access refreshed instead of being
+    /// dropped; an older one that is not alive is reclaimed. The middle arm is
+    /// the one that matters — without it a live but quiet publisher loses its
+    /// `last_delivered` and its next sample reads as a gap.
+    ///
+    /// ⚠ A FULL SCAN WHERE UPSTREAM POPS AN LRU, and the cost is stated rather
+    /// than hidden: upstream holds an `LruCache` and walks from the
+    /// least-recently-accessed end, stopping at the first entry young enough,
+    /// so it touches only what it reclaims. wz holds plain `HashMap`s, so this
+    /// is O(sources) per tick. That is a deliberate trade — an LRU here would
+    /// be a second index to keep coherent with two maps that are otherwise
+    /// keyed lookups — and it is bounded by the same retention period, which is
+    /// hours by default rather than milliseconds.
+    #[cfg(feature = "ext-pubsub-advanced-recovery")]
+    fn reclaim_expired_sources(&mut self, now: Instant, retention_period: Duration) -> usize {
+        fn sweep<K, V>(
+            map: &mut HashMap<K, V>,
+            now: Instant,
+            retention_period: Duration,
+            retention_of: impl Fn(&mut V) -> &mut Retention,
+        ) -> usize
+        where
+            K: std::hash::Hash + Eq,
+        {
+            let before = map.len();
+            map.retain(|_, state| {
+                let retention = retention_of(state);
+                if now.duration_since(retention.latest_access) <= retention_period {
+                    return true;
+                }
+                if retention.alive {
+                    // Spare it AND refresh, so a live-but-quiet publisher is not
+                    // re-examined every tick for the rest of the session.
+                    retention.latest_access = now;
+                    return true;
+                }
+                false
+            });
+            before - map.len()
+        }
+
+        sweep(&mut self.sequenced, now, retention_period, |s| {
+            &mut s.retention
+        }) + sweep(&mut self.timestamped, now, retention_period, |s| {
+            &mut s.retention
+        })
+    }
+
+    /// R2621 — the liveliness token's writer for [`Retention::alive`], both
+    /// arms through one function: a Put says the publisher is live and a Delete
+    /// says it is gone, which is upstream's pair
+    /// (`zenoh-ext/src/advanced_subscriber.rs` @ `state.alive = true;` and its
+    /// Delete twin).
+    ///
+    /// Both SHAPES, because a `uhlc` publisher and a sequenced one are equally
+    /// live or gone when their token says so. The sequenced map is keyed by
+    /// `(zid, eid)` and the timestamped one by `zid` alone, which is why a token
+    /// naming only a zid reaches every sequenced entry sharing it.
+    ///
+    /// Gated with its callers: the liveliness subscriber that drives it exists
+    /// only under the history feature, and a writer compiled where nothing can
+    /// call it is the dead code this module already refuses.
+    #[cfg(all(
+        feature = "ext-pubsub-advanced-history",
+        feature = "ext-pubsub-advanced-recovery"
+    ))]
+    fn set_source_alive(&mut self, zid: &[u8], eid: Option<u32>, alive: bool) {
+        for (key, state) in self.sequenced.iter_mut() {
+            // `map_or(true, ..)` rather than `is_none_or`: the latter is stable
+            // only since 1.82 and this crate's MSRV is 1.81.
+            if key.0 == zid && eid.map_or(true, |e| e == key.1) {
+                state.retention.alive = alive;
+            }
+        }
+        if let Some(state) = self.timestamped.get_mut(zid) {
+            state.retention.alive = alive;
+        }
+    }
+
     fn periodic_requests(&mut self) -> Vec<RecoveryRequest> {
         if !self.retransmission {
             return Vec::new();
@@ -1354,6 +1575,10 @@ impl State {
         let global_pull_in_flight = false;
         let newly_seen = !self.sequenced.contains_key(&key);
         let state = self.sequenced.entry(key.clone()).or_default();
+        // R2621 — a beacon is the publisher saying it is still there, which is
+        // exactly what upstream's heartbeat arm refreshes `latest_access` for.
+        #[cfg(feature = "ext-pubsub-advanced-recovery")]
+        state.retention.touch();
         if newly_seen && global_pull_in_flight {
             return None;
         }
@@ -2118,26 +2343,54 @@ fn on_late_publisher_detected<R, T>(
     <R as SessionRuntime>::LinkSink: Send + Sync,
     SessionLinkActions<R, T>: Send + Sync + 'static,
 {
-    // A Delete (the token's publisher left) needs no recovery.
+    // A Delete (the token's publisher left) needs no recovery — but it is no
+    // longer a bare early return.
     //
-    // ⚠ R2553 MEASURED WHAT UPSTREAM DOES INSTEAD OF RETURNING, because the
-    // difference had been carried as an unexamined "wz returns early on every
-    // non-Put besides": upstream's Delete arms do exactly one thing, set
-    // `state.alive = false`, and that flag has exactly one reader — its LRU
-    // retention sweep. wz reclaims neither source map, so there is no reader to
-    // set it for; see [`TimestampedState`] for why the flag waits for the sweep
-    // rather than landing as a field nothing consults. The early return is
-    // therefore the same behaviour, not a shortcut past it, and it is the same
-    // for both shapes.
+    // ⚠ R2553 MEASURED WHAT UPSTREAM DOES INSTEAD OF RETURNING: its Delete arms
+    // do exactly one thing, set `state.alive = false`, and that flag has exactly
+    // one reader — its retention sweep. R2553 could not follow, because wz
+    // reclaimed neither source map, so the flag would have been written by this
+    // arm and read by nobody.
+    //
+    // R2621 BUILT THE READER, so the write lands. `mark_source_gone` sets the
+    // flag on both shapes and the sweep is what acts on it; the recovery
+    // short-circuit below is unchanged, because a departed publisher still has
+    // nothing to recover.
     if sample_kind != LivelinessSampleKind::Put {
+        // The write is recovery-scoped because the flag's only reader, the
+        // retention sweep, is: see [`Retention`] for why that scope is the
+        // configuration's and not an omission.
+        #[cfg(feature = "ext-pubsub-advanced-recovery")]
+        if let Some(source) = parse_heartbeat_source(sample_keyexpr) {
+            // `Unidentified` names no source, so there is no state to mark —
+            // the same reason it is accounted globally on the Put side.
+            if let Some((zid, eid)) = match source {
+                AdvPublisherSource::Sequenced { zid, eid } => Some((zid, Some(eid))),
+                AdvPublisherSource::Timestamped { zid } => Some((zid, None)),
+                AdvPublisherSource::Unidentified => None,
+            } {
+                statesref
+                    .lock()
+                    .expect("advanced subscriber state mutex poisoned")
+                    .set_source_alive(&zid, eid, false);
+            }
+        }
         return;
     }
     match parse_heartbeat_source(sample_keyexpr) {
         Some(AdvPublisherSource::Sequenced { zid, eid }) => {
-            let issue = statesref
-                .lock()
-                .expect("advanced subscriber state mutex poisoned")
-                .handle_late_publisher(zid.clone(), eid);
+            let issue = {
+                let mut states = statesref
+                    .lock()
+                    .expect("advanced subscriber state mutex poisoned");
+                // R2621 — the token's PUT arm is where `alive` becomes true,
+                // upstream's `state.alive = true;`. Ordered before the late-
+                // publisher decision so the state exists to mark.
+                let issue = states.handle_late_publisher(zid.clone(), eid);
+                #[cfg(feature = "ext-pubsub-advanced-recovery")]
+                states.set_source_alive(&zid, Some(eid), true);
+                issue
+            };
             if issue {
                 issue_late_publisher_query(
                     session,
@@ -2154,10 +2407,16 @@ fn on_late_publisher_detected<R, T>(
             }
         }
         Some(AdvPublisherSource::Timestamped { zid }) => {
-            let issue = statesref
-                .lock()
-                .expect("advanced subscriber state mutex poisoned")
-                .handle_late_timestamped_publisher(zid.clone());
+            let issue = {
+                let mut states = statesref
+                    .lock()
+                    .expect("advanced subscriber state mutex poisoned");
+                // R2621 — the `uhlc` twin of the sequenced Put arm above.
+                let issue = states.handle_late_timestamped_publisher(zid.clone());
+                #[cfg(feature = "ext-pubsub-advanced-recovery")]
+                states.set_source_alive(&zid, None, true);
+                issue
+            };
             if issue {
                 issue_timestamped_late_publisher_query(
                     session,
@@ -2243,6 +2502,28 @@ fn run_periodic_tick<R, T>(
 /// loop so a torn-down subscriber stops re-asking (the [`crate::storage_replication_service::DigestPublisher`]
 /// teardown shape). The spawn loop is thin timer glue over the deterministically
 /// tested [`run_periodic_tick`] / [`State::periodic_requests`].
+/// R2621 — RAII handle for the retention sweep, the same shape [`PeriodicTask`]
+/// has and for the same reason: the loop is thin timer glue over the
+/// deterministically tested [`State::reclaim_expired_sources`], and dropping the
+/// subscriber must stop it.
+///
+/// Upstream's counterpart is `zenoh-ext/src/advanced_subscriber.rs`
+/// @ `async fn gc_task(statesref: Weak<Mutex<State>>, retention_period: Duration) {`,
+/// which holds a WEAK reference so the task cannot keep the state alive. wz
+/// aborts on drop instead, which reaches the same end through this tree's
+/// existing teardown primitive rather than adding a second one.
+#[cfg(feature = "ext-pubsub-advanced-recovery")]
+struct RetentionTask {
+    handle: tokio::task::JoinHandle<()>,
+}
+
+#[cfg(feature = "ext-pubsub-advanced-recovery")]
+impl Drop for RetentionTask {
+    fn drop(&mut self) {
+        self.handle.abort();
+    }
+}
+
 #[cfg(feature = "ext-pubsub-advanced-recovery")]
 struct PeriodicTask {
     handle: tokio::task::JoinHandle<()>,
@@ -2516,6 +2797,10 @@ pub struct AdvancedSubscriber<R: SessionRuntime = crate::runtime_impl::TokioRunt
     /// when `RecoveryConfig::periodic_queries` was set.
     #[cfg(feature = "ext-pubsub-advanced-recovery")]
     _periodic: Option<PeriodicTask>,
+    /// R2621 — the retention sweep's RAII handle. Held so a dropped subscriber
+    /// stops sweeping; see [`RetentionTask`].
+    #[cfg(feature = "ext-pubsub-advanced-recovery")]
+    _retention: Option<RetentionTask>,
     /// R311y592 — the in-flight recovery / history GET cancellation (RAII
     /// cancel-on-drop), `None` only for the plain [`Self::declare`] form, which
     /// issues no GET at all. Aborting `_periodic` stops the subscriber ASKING;
@@ -2710,6 +2995,8 @@ impl<R: SessionRuntime> AdvancedSubscriber<R> {
             #[cfg(test)]
             _statesref: state,
             _periodic: None,
+            #[cfg(feature = "ext-pubsub-advanced-recovery")]
+            _retention: None,
             // The plain miss-form `declare()` issues no recovery / history GET
             // (its callback only orders), so there is nothing to cancel.
             _recovery_cancel: None,
@@ -2801,6 +3088,10 @@ impl<R: SessionRuntime> AdvancedSubscriber<R> {
         let dest = options.get_locality;
         let sub_origin = options.allowed_origin;
         let periodic = recovery.and_then(|c| c.periodic_queries);
+        // R2621 — retention is configured through `RecoveryConfig` because that
+        // is where upstream puts it, so a subscriber with no recovery config
+        // runs no sweep: the same scope its `gc_task` has.
+        let retention = recovery.map(|c| c.retention_period());
         // R311y90 (review C5) — fail fast & clear if off-runtime: the periodic
         // task (below) is a tokio::spawn, which PANICS without a runtime. Check
         // before declaring the subscriber so no half-declared subscriber needs
@@ -2874,6 +3165,26 @@ impl<R: SessionRuntime> AdvancedSubscriber<R> {
         // The loop is thin glue over `run_periodic_tick` / `periodic_requests`
         // (the deterministically tested core; the storage_replication
         // DigestPublisher pattern).
+        // R2621 — the retention sweep. Same glue shape as the periodic task
+        // below, and the same clamp: a sub-ms period would truncate to a
+        // zero-delay spin.
+        let retention_task = retention.map(|period| {
+            let r_state = Arc::clone(&state);
+            let clock = Arc::clone(session.clock());
+            let period_ms = (period.as_millis() as u64).max(1);
+            RetentionTask {
+                handle: crate::runtime_pool::WzRuntime::Application.spawn(async move {
+                    loop {
+                        clock.sleep(period_ms).await;
+                        r_state
+                            .lock()
+                            .expect("advanced subscriber state mutex poisoned")
+                            .reclaim_expired_sources(Instant::now(), period);
+                    }
+                }),
+            }
+        });
+
         let periodic_task = periodic.map(|period| {
             let p_session = session.clone();
             let p_state = Arc::clone(&state);
@@ -3098,6 +3409,8 @@ impl<R: SessionRuntime> AdvancedSubscriber<R> {
             #[cfg(test)]
             _statesref: state,
             _periodic: periodic_task,
+            #[cfg(feature = "ext-pubsub-advanced-recovery")]
+            _retention: retention_task,
             _recovery_cancel: recovery_cancel,
             _heartbeat_sub: heartbeat_sub,
             #[cfg(feature = "ext-pubsub-advanced-history")]
@@ -4238,6 +4551,84 @@ mod tests {
     /// both of which would be worse defects than the gap being closed. So a
     /// KNOWN source under the same in-flight pull must still recover, and a new
     /// source with NO pull in flight must still recover.
+    /// R2621 — the retention sweep reclaims a quiet source, SPARES a live one,
+    /// and leaves a recently-heard one alone.
+    ///
+    /// wz reclaimed neither source map: they grew one entry per distinct source
+    /// ever seen, for the life of the subscriber, where upstream bounds them by
+    /// a retention period (`zenoh-ext/src/advanced_subscriber.rs`
+    /// @ `async fn gc_task(statesref: Weak<Mutex<State>>, retention_period: Duration) {`).
+    ///
+    /// THE MIDDLE ARM IS WHY THE FLAG COULD NOT SHIP SEPARATELY: a sweep without
+    /// `alive` reclaims a publisher that is still there, destroying its
+    /// `last_delivered`, and the next sample from it reads as a gap. The third
+    /// arm is the anti-vacuity control — without it "reclaims a quiet source" is
+    /// equally consistent with a sweep that empties the map unconditionally.
+    #[cfg(feature = "ext-pubsub-advanced-recovery")]
+    #[test]
+    fn the_retention_sweep_reclaims_only_quiet_sources_that_no_token_calls_live() {
+        let mut state = State {
+            sequenced: HashMap::new(),
+            timestamped: HashMap::new(),
+            on_sample: Box::new(|_| {}),
+            on_miss: Box::new(|_| {}),
+            retransmission: true,
+            #[cfg(feature = "ext-pubsub-advanced-history")]
+            global_pending_queries: 0,
+            #[cfg(feature = "ext-pubsub-advanced-history")]
+            max_history_depth: usize::MAX,
+        };
+
+        let retention = Duration::from_secs(60);
+        let now = Instant::now();
+        let long_ago = now - Duration::from_secs(600);
+        let quiet = (vec![0xAAu8], 1u32);
+        let live = (vec![0xBBu8], 1u32);
+        let recent = (vec![0xCCu8], 1u32);
+
+        state
+            .sequenced
+            .insert(quiet.clone(), SourceState::default());
+        state.sequenced.get_mut(&quiet).unwrap().retention = Retention {
+            latest_access: long_ago,
+            alive: false,
+        };
+        state.sequenced.insert(live.clone(), SourceState::default());
+        state.sequenced.get_mut(&live).unwrap().retention = Retention {
+            latest_access: long_ago,
+            alive: true,
+        };
+        // Recently heard from: `Default` stamps `now()` at insertion.
+        state
+            .sequenced
+            .insert(recent.clone(), SourceState::default());
+
+        let reclaimed = state.reclaim_expired_sources(now, retention);
+
+        assert_eq!(
+            reclaimed, 1,
+            "exactly the quiet, token-less source is dropped"
+        );
+        assert!(
+            !state.sequenced.contains_key(&quiet),
+            "a source nothing has heard from and no token calls live is reclaimed"
+        );
+        assert!(
+            state.sequenced.contains_key(&live),
+            "a LIVE publisher must survive being quiet, or its last_delivered is \
+             lost and its next sample reads as a gap"
+        );
+        assert!(
+            state.sequenced.contains_key(&recent),
+            "a recently-heard source is not swept at all"
+        );
+        assert!(
+            state.sequenced[&live].retention.latest_access >= now,
+            "sparing a live source also REFRESHES its access, so it is not \
+             re-examined every tick for the rest of the session"
+        );
+    }
+
     #[cfg(feature = "ext-pubsub-advanced-history")]
     #[test]
     fn a_beacon_from_a_new_source_is_skipped_only_while_a_global_pull_is_running() {
@@ -4942,6 +5333,7 @@ mod tests {
                 last_delivered: None,
                 pending_samples: buffered,
                 pending_queries: 1,
+                ..SourceState::default()
             },
         );
 
