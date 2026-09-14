@@ -329,7 +329,7 @@ pub(crate) async fn query_task<T>(
 /// and then discarded. Two of this atom's three standing witness gaps
 /// (leader election across implementations, and the lease-expiry eviction path)
 /// are gaps in that direction, and neither is a missing library capability:
-/// [`Group::subscribe`] and [`Group::leader`] were both built in R311y97. What
+/// `Group::subscribe` and `Group::leader` were both built in R311y97. What
 /// was missing was any way for a fixture to READ them, which is why the base
 /// repaired here is the demo's silence and not the group module.
 #[cfg(feature = "group")]
