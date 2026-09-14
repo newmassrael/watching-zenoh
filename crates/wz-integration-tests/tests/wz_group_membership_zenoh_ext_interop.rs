@@ -91,8 +91,8 @@ use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
 use wz_integration_tests::common::{
-    spawn_zenohd_on_ephemeral_tcp, wait_for_substring, wz_ap_demo_binary, zenoh_ext_example_binary,
-    ChildGuard,
+    assert_demo_binary_newer_than_sources, spawn_zenohd_on_ephemeral_tcp, wait_for_substring,
+    wz_ap_demo_binary, zenoh_ext_example_binary, ChildGuard,
 };
 
 /// How long a leg waits for a marker line before declaring the fixture dead.
@@ -222,6 +222,17 @@ fn tempfile() -> std::fs::File {
 /// member than the legs wz is observed by.
 fn spawn_wz_group_member(port: u16, group: &str, lease_secs: u64) -> (ChildGuard, File, String) {
     let demo = wz_ap_demo_binary();
+    // R2622 — every leg in this file spawns the demo through here, so the
+    // staleness check belongs here too rather than in six places.
+    //
+    // It is not a formality in this file. R2622's controls damage the LIBRARY
+    // (the leader comparison, the eviction clock) and read the result out of
+    // the DEMO's log, so a demo that was not rebuilt between the damage and the
+    // run reports the undamaged product -- a control coming back green, which
+    // is a finding about the control, read as a pass. The demo was rebuilt four
+    // times in that round; this is what makes the fifth time a failure rather
+    // than a silence.
+    assert_demo_binary_newer_than_sources(&demo);
     let stderr = tempfile();
     let writer = stderr.try_clone().expect("dup wz-ap-demo stderr");
     let mut reader = stderr;

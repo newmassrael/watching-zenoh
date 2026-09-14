@@ -160,7 +160,20 @@ REFUSAL_TOKENS = frozenset({"code", "success"})
 # once, the four that predate R2393 included. Hence a move of four rather than
 # the two the red was about: 234 measured, 228 after the call, and this number
 # follows it DOWN in the same commit.
-CARRIED_SUBJECT = 228
+# 228 -> 225 (R2622), by the same route and with the same shape as R2394 above.
+# R2622 added three OBSERVER legs to `wz_group_membership_zenoh_ext_interop.rs`
+# with no freshness call and this budget went 228 -> 231 -- the direction that
+# means a new fixture needs the demo ALIVE and does not check it. The repair is
+# the CALL: it went into `spawn_wz_group_member`, which every leg in that file
+# spawns through, so all SIX left the carried bucket at once, the three that
+# predate this round included. 231 measured, 225 after the call.
+#
+# That file is where the check earns its keep rather than satisfies a rule: the
+# round's controls damage the LIBRARY and read the verdict out of the DEMO's
+# log, so a demo not rebuilt between the damage and the run reports the
+# undamaged product -- a control returning green, which is a finding about the
+# control, read as a pass.
+CARRIED_SUBJECT = 225
 PROBE_ROUTE = 24
 REFUSAL_ONLY = 8
 
