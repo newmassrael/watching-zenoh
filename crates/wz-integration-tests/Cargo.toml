@@ -440,6 +440,16 @@ wz-runtime-tokio = { path = "../wz-runtime-tokio", features = [
     # subject. Adds no third-party dep: `libc` is already in this table's closure.
     # Same additive-unification note as the storage-* pins above.
     "locator-iface",
+    # R2612 — the scouting fan-out's DELIVERY witness
+    # (tests/wz_scout_fanout_netns.rs) drives `scouting_fanout` over the same
+    # veth pair, so it needs the module (`scouting-active`) and the enumerator
+    # (`link-interfaces`) beside the pin above. All three are the fan-out's own
+    # requirement, not this leg's: `scout_interface_addresses` reports "cannot
+    # ask" unless a build both enumerates and pins, which is what stops a
+    # fan-out from becoming the same ask sent N times. `libc` is already in this
+    # table's closure, so `link-interfaces` adds no third-party dep either.
+    "scouting-active",
+    "link-interfaces",
 ] }
 # R71 — `fixture_session_init_params` / `install_session_actions_for_test`
 # / `dispatch_script` live in this sibling crate. Replaces the

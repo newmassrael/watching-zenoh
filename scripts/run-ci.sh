@@ -14521,6 +14521,17 @@ run: bash scripts/build-zenoh-pico-cli.sh)"
         _runci_guarded_test "M pico->wz #join= across a namespace" 1 \
             cargo test -p wz-integration-tests \
             --test wz_multicast_extra_join_pico_netns_interop -- --ignored || return 1
+        # R2612 — the scouting fan-out's DELIVERY witness, on the same substrate
+        # and behind the same probe. The veth host end is a second
+        # multicast-capable interface in THIS namespace and is not the default
+        # multicast route, which is the only thing that can tell a Scout sent on
+        # every interface from one sent on the kernel's choice. Its control is
+        # the pre-R2611 product -- a single group socket -- and runs first.
+        # Count-guarded for the reason its neighbour above is: a renamed fn would
+        # select nothing and pass.
+        _runci_guarded_test "M scout fan-out reaches a second interface" 1 \
+            cargo test -p wz-integration-tests \
+            --test wz_scout_fanout_netns -- --ignored || return 1
     fi
     # R311y193 — router-multicast-faces S4: a wz `--router-hat` egresses a routed,
     # re-literalized Put over the data-plane multicast group to a foreign pico
