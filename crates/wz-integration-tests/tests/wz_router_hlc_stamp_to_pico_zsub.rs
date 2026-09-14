@@ -533,6 +533,19 @@ fn wz_router_hat_hlc_stamps_a_bare_pico_put_for_pico_zsub_attachment() {
 /// topology and the same assertion shape with ONE NUMBER changed — and the
 /// opposite outcome. Neither leg alone separates "wz relayed the timestamp" from
 /// "wz stamped its own and happened to look right"; together they pin both arms.
+///
+/// ⚠⚠ THIS LEG IS VACUOUS ON A BUILD WITHOUT `time-hlc`, AND IT WAS MEASURED
+/// RATHER THAN REASONED — R2625 ran it by accident against the negative twin's
+/// binary and it PASSED. The reason is structural and not a flaw to fix here:
+/// with the clock compiled out `treat_timestamp` does nothing, so the sample is
+/// relayed unchanged, which is exactly what a working ABSORB produces. Equality
+/// cannot tell "absorbed correctly" from "no clock at all".
+///
+/// So do NOT read this leg as a witness that the node clock exists. Its
+/// discriminating partner is the REPLACE leg, which reds both ways (no clock, or
+/// the wrong arm); the `time-hlc` build axis is witnessed by the negative twin
+/// at the bottom of this file. Every leg here needs its own twin, and this one's
+/// is the leg below rather than the build variant.
 // wz-proves: time-hlc zenoh->wz partial
 #[test]
 #[ignore = "binary-dep e2e (wz-ap-demo --features router-hat-router,time-hlc + oracles/future-stamp + zenoh-pico z_sub_attachment); Layer E8t runs via --ignored"]

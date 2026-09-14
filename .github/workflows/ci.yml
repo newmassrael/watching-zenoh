@@ -1897,9 +1897,22 @@ jobs:
         run: rustup toolchain install 1.97.1 --profile minimal
 
       - name: Cache Cargo registry + build artifacts
+        # R2625 — `oracles -> target` joins the list, and it is a REPAIR rather
+        # than an addition. R2624 gave Layer E8t a wz-authored oracle that links
+        # the pinned zenoh; with only `crates -> target` declared here its build
+        # tree sat outside the cache, so the lane would have rebuilt the WHOLE of
+        # zenoh from source on every hosted run — against a job whose own comment
+        # promises "the steady state is cached and fast". It never showed locally,
+        # because a developer's cache is warm; this is the hosted-only shape.
+        #
+        # ONE entry covers every future oracle because `oracles/` is a workspace
+        # with a shared target dir. A per-project line would have needed editing
+        # for each new oracle, which is the kind of rule that rots silently.
         uses: Swatinem/rust-cache@v2
         with:
-          workspaces: crates -> target
+          workspaces: |
+            crates -> target
+            oracles -> target
           key: interop
 
       - name: Cache the zenohd binary (pinned version)

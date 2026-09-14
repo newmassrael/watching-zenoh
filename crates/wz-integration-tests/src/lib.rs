@@ -1520,15 +1520,17 @@ pub mod common {
     /// class and then silently mislabel the first wz oracle that links
     /// zenoh-pico instead. Name a new resolver after what it links.
     pub fn wz_zenoh_oracle_binary(name: &str) -> PathBuf {
+        // R2625 — ONE shared `oracles/target`, because the oracles are members of
+        // a workspace rather than independent projects. The binary name keeps the
+        // `wz-oracle-` prefix so a shared target dir cannot collide with anything
+        // upstream's own builds put there.
         let path = project_root()
-            .join("oracles")
-            .join(name)
-            .join("target/release")
+            .join("oracles/target/release")
             .join(format!("wz-oracle-{name}"));
         assert!(
             path.is_file(),
             "wz oracle `{name}` missing at {}; build it with \
-             `cargo build --manifest-path oracles/{name}/Cargo.toml --release`",
+             `(cd oracles && cargo build -p wz-oracle-{name} --release)`",
             path.display()
         );
         path

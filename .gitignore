@@ -7,18 +7,22 @@
 # as a gitlink; only its target/ stays local).
 /target/
 
-# R2624 — build output of the wz-AUTHORED oracles under `oracles/`, which are
-# standalone cargo projects OUTSIDE the `crates/` workspace (they link against
-# the pinned upstream, so they cannot be members). Each has its own `target/`,
-# and both spellings are here for the reason `crates/target` carries two: a
-# build cache may be a SYMLINK, which a trailing-slash pattern does not match.
+# R2624 — build output of the wz-AUTHORED oracles under `oracles/`, a cargo
+# workspace OUTSIDE the `crates/` one (its members link against the pinned
+# upstream, so they cannot be wz members). Both spellings are here for the reason
+# `crates/target` carries two: a build cache may be a SYMLINK, which a
+# trailing-slash pattern does not match.
 #
-# ⚠ Their `Cargo.lock` files are NOT ignored and are meant to be committed. An
-# oracle's whole value is being a FIXED reference: a lock that floated would let
-# its dependency tree move under a leg that is asserting byte-level behaviour,
-# and the round would not be able to say which side changed.
-oracles/*/target/
-oracles/*/target
+# R2625 — ONE `oracles/target`, not one per project, because the members share a
+# workspace. That is also what lets the hosted cargo cache cover the whole
+# directory with a single `oracles -> target` entry instead of a line per oracle.
+#
+# ⚠ `oracles/Cargo.lock` is NOT ignored and is meant to be committed. An oracle's
+# whole value is being a FIXED reference: a lock that floated would let its
+# dependency tree move under a leg asserting byte-level behaviour, and the round
+# would not be able to say which side changed.
+oracles/target/
+oracles/target
 
 # Headless round runner (scripts/round-runner.sh): verdict file, logs, lock.
 # NOT under .git/ -- the agent that writes the verdict is blocked from that

@@ -1,0 +1,35 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later OR LicenseRef-watching-zenoh-Commercial
+# SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
+#
+# R2625 — the wz-AUTHORED oracle workspace, and it is a WORKSPACE rather than a
+# directory of independent projects for one measured reason.
+#
+# R2624 added `oracles/future-stamp` as a standalone project and, in doing so,
+# introduced a HOSTED-ONLY defect: the interop job's cargo cache is declared as
+# `workspaces: crates -> target`, so a per-project `oracles/future-stamp/target`
+# sat outside it and Layer E8t would have rebuilt the whole of zenoh from source
+# on EVERY hosted run. Locally it never showed, because the local cache was warm
+# -- the exact shape this tree records as invisible to the commit that moves it.
+#
+# The per-project fix (add one more path to the cache list) works and is wrong:
+# it needs a new line for every oracle ever added, which is a rule with no
+# structure behind it. A workspace fixes it once. One `oracles/target` means ONE
+# cache entry that never needs editing again, and -- the part that actually
+# matters as this directory grows -- a second oracle linking the same pinned
+# zenoh REUSES those compiled artifacts instead of paying its own cold build.
+#
+# ⛔ NOT related to `crates/Cargo.toml`, which is wz's own workspace. These
+# members depend on the pinned UPSTREAM; keeping the two workspaces separate is
+# what keeps zenoh out of wz's dependency graph, so "wz is a from-scratch
+# reimplementation, nothing here is a cargo dep of this workspace" stays
+# literally true. This tree has no root `Cargo.toml`, so the two never meet.
+#
+# ⚠ The root `rust-toolchain.toml` (1.97.0) still applies here, while
+# `scripts/build-zenohd.sh` builds upstream with the channel UPSTREAM pins
+# (1.97.1). That divergence is deliberate and registered as unregistered
+# open-debt item 740: the rule it diverges from exists to protect the reference
+# router's codegen fidelity, and an oracle whose output is a wire message and a
+# printed integer does not need it.
+[workspace]
+resolver = "2"
+members = ["future-stamp"]

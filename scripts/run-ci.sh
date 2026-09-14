@@ -17532,7 +17532,7 @@ layer_e8t_router_hat_hlc_stamp_pico() {
     # The two are each other's control BY CONSTRUCTION: same binary, same
     # topology, ONE NUMBER changed, opposite assertions. Measured — swapping the
     # offsets reds both and leaves the other three legs green.
-    (cd oracles/future-stamp && cargo build --release --quiet) || return 1
+    (cd oracles && cargo build -p wz-oracle-future-stamp --release --quiet) || return 1
     for _e8t_arm in \
         wz_router_hat_absorbs_an_upstream_timestamp_inside_the_drift_bound \
         wz_router_hat_replaces_an_upstream_timestamp_beyond_the_drift_bound; do
