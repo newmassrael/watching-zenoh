@@ -905,7 +905,9 @@ where
     }
 
     /// R2619 — the listener sibling of [`Self::get_matching_status`], upstream's
-    /// `zenoh-ext/src/advanced_publisher.rs` @ `pub fn matching_listener(&self) -> MatchingListenerBuilder<'_, '_, DefaultHandler> {`.
+    /// `zenoh-ext/src/advanced_publisher.rs` @ `pub fn matching_listener(`,
+    /// whose body is `self.publisher.matching_listener()` — the same delegation
+    /// this one is.
     #[cfg(feature = "session-matching")]
     pub fn declare_matching_listener(
         &self,
