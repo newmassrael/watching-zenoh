@@ -684,8 +684,12 @@ pub enum DialedLink {
     /// state (buffers + crypto), so an unboxed variant would bloat every
     /// `DialedLink` value (incl. the small `Tcp` arm) to that size on the
     /// stack — boxing keeps the union compact (clippy `large_enum_variant`).
+    /// R2608 — the `bool` is `close_link_on_expiration`, read off the LOCATOR
+    /// at dial time and carried here because the peer's certificate chain is
+    /// only reachable BEFORE `wire_tls_stream` splits the stream. The same
+    /// shape [`BoundListener::Quic`] uses for the same key.
     #[cfg(feature = "transport-link-tls")]
-    Tls(Box<TlsStream<TcpStream>>),
+    Tls(Box<TlsStream<TcpStream>>, bool),
     /// A connected + WebSocket-handshaked stream, split downstream via
     /// [`wire_ws_stream`] (R311ob). DATAGRAM flow (each batch = one WS BINARY
     /// message), so the steady state is uniform with UDP, not TCP/TLS. UNLIKE
@@ -769,7 +773,7 @@ impl DialedLink {
             #[cfg(feature = "transport-link-serial")]
             DialedLink::Serial { .. } => "serial",
             #[cfg(feature = "transport-link-tls")]
-            DialedLink::Tls(_) => "tls",
+            DialedLink::Tls(..) => "tls",
             #[cfg(feature = "transport-link-ws")]
             DialedLink::Ws(_) => "ws",
             #[cfg(feature = "transport-link-unixsock")]
@@ -1689,7 +1693,14 @@ impl AcceptedLink {
             AcceptedLink::Ws(stream) => DialedLink::Ws(Box::new(accept_ws(stream).await?)),
             #[cfg(feature = "transport-link-tls")]
             AcceptedLink::Tls(stream, server_config) => {
-                DialedLink::Tls(Box::new(accept_tls(stream, server_config).await?))
+                // R2608 — `false`: the ACCEPT half of `close_link_on_expiration`
+                // is NOT wired yet. The dial half below is, and the listen half
+                // needs the flag carried on `BoundListener::Tls` and
+                // `AcceptedLink::Tls` the way `Quic` carries it, which is its
+                // own increment. Stated here rather than left to be inferred
+                // from a literal: a reader must not read this `false` as "a tls
+                // acceptor cannot arm expiry".
+                DialedLink::Tls(Box::new(accept_tls(stream, server_config).await?), false)
             }
             // No post-accept handshake — a `UnixStream` is wrapped directly, the
             // acceptor mirror of `dial_locator`'s direct `DialedLink::Unixsock`
@@ -2003,15 +2014,20 @@ pub async fn dial_locator(locator: AnyLocator, cfg: &DialConfig) -> io::Result<D
             // Clone the rustls config lazily, only when a dial happens
             // (dial_tls owns its config + name).
             Proto::Tls => match tls_dial_client_config(ip.tls(), cfg.tls.as_ref()).await? {
-                Some(client_config) => Ok(DialedLink::Tls(Box::new(
-                    dial_tls(
-                        ip.addr,
-                        client_config,
-                        tls_dial_server_name(cfg.tls.as_ref(), ip.addr)?,
-                        &cfg.link_socket(ip.socket(), ip.proto).await?,
-                    )
-                    .await?,
-                ))),
+                Some(client_config) => Ok(DialedLink::Tls(
+                    Box::new(
+                        dial_tls(
+                            ip.addr,
+                            client_config,
+                            tls_dial_server_name(cfg.tls.as_ref(), ip.addr)?,
+                            &cfg.link_socket(ip.socket(), ip.proto).await?,
+                        )
+                        .await?,
+                    ),
+                    // R2608 — the dial tail decides whether this link watches
+                    // the PEER's chain, exactly as the quic arms read it.
+                    ip.tls().closes_on_expiration(),
+                )),
                 None => Err(io::Error::new(
                     io::ErrorKind::Unsupported,
                     "tls dial requires DialConfig.tls (rustls client config + server name), \
@@ -2241,17 +2257,22 @@ pub async fn dial_locator(locator: AnyLocator, cfg: &DialConfig) -> io::Result<D
                         })?;
                         let addrs = resolve_locator_addrs(&host, port).await?;
                         let link_socket = &cfg.link_socket(named_options(&socket), proto).await?;
-                        Ok(DialedLink::Tls(Box::new(
-                            first_reachable(addrs, &format!("tls/{host}:{port}"), |addr| {
-                                dial_tls(
-                                    addr,
-                                    client_config.clone(),
-                                    server_name.clone(),
-                                    link_socket,
-                                )
-                            })
-                            .await?,
-                        )))
+                        Ok(DialedLink::Tls(
+                            Box::new(
+                                first_reachable(addrs, &format!("tls/{host}:{port}"), |addr| {
+                                    dial_tls(
+                                        addr,
+                                        client_config.clone(),
+                                        server_name.clone(),
+                                        link_socket,
+                                    )
+                                })
+                                .await?,
+                            ),
+                            // R2608 — a NAMED tail carries the policy too, the
+                            // twin of the numeric arm above.
+                            named_tls_material(&tls).closes_on_expiration(),
+                        ))
                     }
                     None => Err(io::Error::new(
                         io::ErrorKind::Unsupported,
@@ -3598,8 +3619,8 @@ pub fn wire_dialed_link_with_lowlatency(
             (InboundLink::Serial(inbound), outbound, handle)
         }
         #[cfg(feature = "transport-link-tls")]
-        DialedLink::Tls(stream) => {
-            let (inbound, outbound, handle) = wire_tls_stream(*stream);
+        DialedLink::Tls(stream, closes_on_expiration) => {
+            let (inbound, outbound, handle) = wire_tls_stream(*stream, closes_on_expiration);
             (InboundLink::Tls(inbound), outbound, handle)
         }
         #[cfg(feature = "transport-link-ws")]

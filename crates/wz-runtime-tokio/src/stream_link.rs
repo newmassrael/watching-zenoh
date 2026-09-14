@@ -39,6 +39,7 @@ use crate::{poll_framed, LinkDriver, LinkEvent, ReadState, Reliability, TxFrame}
 use wz_session_core::link::BoxedLinkDriver;
 use wz_session_core::link::LinkEndpoints;
 use wz_session_core::link::LinkSubject;
+use wz_session_core::link::LostCause;
 use wz_session_core::link::{LinkDropCause, LinkSendOutcome};
 
 /// Inbound read half of a split byte-stream link — owns the read half `R`
@@ -61,6 +62,113 @@ pub struct StreamReadDriver<R> {
     /// so a non-lowlatency link and the handshake frames of a lowlatency link read
     /// byte-identically to before.
     lowlatency: Arc<AtomicBool>,
+    /// R2608 — `close_link_on_expiration`, as the READ half can actually
+    /// observe it. `None` on every link that did not ask for the key, which is
+    /// every link today except a `tls/...` one whose locator armed it.
+    ///
+    /// WHY A SIGNAL AND NOT A FLAG: [`Self::poll_event`] awaits the read, so an
+    /// idle driver is PARKED inside it. A bool would not be looked at again
+    /// until bytes arrived — which, for a peer that has gone silent behind an
+    /// expired certificate, may be never. The read therefore has to be RACED,
+    /// which is the shape upstream uses for its own tls expiry
+    /// (`io/zenoh-link-commons/src/tls.rs` @ `pub mod expiration {`).
+    ///
+    /// WHY NOT THE QUIC SHORTCUT: quic arms by cloning the `quinn::Connection`
+    /// and closing it, needing nothing here. That works because the connection
+    /// is a cheap cloneable handle; a stream link is `split` into halves that
+    /// leave no such handle behind, so the signal has to reach the half that is
+    /// waiting. The quic comment saying wz "already carries the signal" is true
+    /// of quic and only of quic.
+    expiry: Option<Arc<ExpirySignal>>,
+}
+
+/// R2608 — the one-shot "this link's certificate chain has expired" signal,
+/// shared between the arming task and the read half it must interrupt.
+///
+/// `fired` is checked BEFORE the race and the `Notify` is what wakes a parked
+/// read. Both are needed: a signal that fired while the driver was between
+/// polls would be missed by the notify alone, and the bool alone cannot wake a
+/// parked read. `notify_waiters` is deliberately not used for that first
+/// reason — the permit-storing `notify_one` plus the pre-check is what makes
+/// the ordering irrelevant.
+#[derive(Debug, Default)]
+pub struct ExpirySignal {
+    fired: AtomicBool,
+    notify: tokio::sync::Notify,
+}
+
+impl ExpirySignal {
+    /// Fire the signal. Idempotent: the link is lost once.
+    pub fn fire(&self) {
+        self.fired.store(true, Ordering::Release);
+        self.notify.notify_one();
+    }
+
+    fn has_fired(&self) -> bool {
+        self.fired.load(Ordering::Acquire)
+    }
+}
+
+/// R2600 — the longest single sleep an expiry watcher takes, mirroring
+/// upstream's own cap
+/// (`io/zenoh-link-commons/src/tls.rs` @ `const MAX_SLEEP_DURATION: tokio::time::Duration = tokio::time::Duration::from_secs(600);`).
+///
+/// NOT a precision limit: the loop re-reads the clock each pass and its LAST
+/// sleep is exactly the remaining time, so the fire lands on the expiry
+/// instant. The cap exists because one enormous sleep is the unsound shape, and
+/// because re-reading the wall clock is what lets a machine whose time jumped
+/// forward notice.
+#[cfg(any(feature = "transport-link-quic", feature = "transport-link-tls"))]
+const EXPIRY_MAX_SLEEP: std::time::Duration = std::time::Duration::from_secs(600);
+
+/// R2600, moved here by R2608 — sleep until `deadline` (Unix seconds),
+/// re-reading the wall clock.
+///
+/// It lived in `quic_pipeline` behind the quic gate until tls needed the same
+/// loop. Copying it would have put the same clock reasoning in two files, which
+/// is the shape that drifts the day either moves; the gate is therefore the
+/// UNION of its consumers, which is open-debt 730's rule applied before the
+/// second consumer rather than after.
+#[cfg(any(feature = "transport-link-quic", feature = "transport-link-tls"))]
+pub(crate) async fn sleep_until_unix(deadline: i64) {
+    loop {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(i64::MAX);
+        if deadline <= now {
+            return;
+        }
+        let remaining = std::time::Duration::from_secs((deadline - now) as u64);
+        tokio::time::sleep(remaining.min(EXPIRY_MAX_SLEEP)).await;
+    }
+}
+
+/// R2608 — the earliest `not_after` across a peer's certificate chain, as Unix
+/// seconds, or `None` when there is no chain to expire.
+///
+/// The FOLD is `min`, not the leaf's own validity, because upstream folds the
+/// whole chain
+/// (`io/zenoh-link-commons/src/quic/utils.rs` @ `pub fn get_cert_chain_expiration(conn: &quinn::Connection) -> ZResult<Option<OffsetDateTime>> {`):
+/// an intermediate CA that expires first governs, and reading only the leaf
+/// would keep a link alive that upstream drops.
+///
+/// `None` for an absent or unparseable chain is deliberate and matches
+/// upstream: an absent chain is not an immediate expiry.
+#[cfg(feature = "transport-link-tls")]
+pub(crate) fn peer_chain_deadline(
+    chain: Option<&[tokio_rustls::rustls::pki_types::CertificateDer<'_>]>,
+) -> Option<i64> {
+    use x509_parser::prelude::{FromDer, X509Certificate};
+
+    chain?
+        .iter()
+        .filter_map(|cert| {
+            X509Certificate::from_der(cert.as_ref())
+                .ok()
+                .map(|(_, parsed)| parsed.validity().not_after.timestamp())
+        })
+        .min()
 }
 
 impl<R: AsyncRead + Unpin> StreamReadDriver<R> {
@@ -74,7 +182,16 @@ impl<R: AsyncRead + Unpin> StreamReadDriver<R> {
             reader,
             read_state: ReadState::Idle,
             lowlatency,
+            expiry: None,
         }
+    }
+
+    /// R2608 — arm `close_link_on_expiration` on this read half. Called by the
+    /// pipeline that knows the peer's chain, which is the only place that can:
+    /// the certificate is readable from the rustls connection BEFORE the stream
+    /// is split, and not after.
+    pub(crate) fn set_expiry(&mut self, signal: Arc<ExpirySignal>) {
+        self.expiry = Some(signal);
     }
 }
 
@@ -102,12 +219,32 @@ impl<R: AsyncRead + Unpin> LinkDriver for StreamReadDriver<R> {
     }
 
     async fn poll_event(&mut self) -> LinkEvent {
-        poll_framed(
-            &mut self.read_state,
-            &mut self.reader,
-            self.lowlatency.load(Ordering::Acquire),
-        )
-        .await
+        // Destructured so the read future and the signal borrow disjoint
+        // fields; `select!` over `&mut self` twice would not compile.
+        let Self {
+            reader,
+            read_state,
+            lowlatency,
+            expiry,
+        } = self;
+        let lowlatency = lowlatency.load(Ordering::Acquire);
+        let Some(signal) = expiry.as_ref() else {
+            return poll_framed(read_state, reader, lowlatency).await;
+        };
+        // Checked BEFORE the race: a signal that fired while this driver was
+        // between polls has no waiter to notify, and would otherwise be missed
+        // until the next byte — which for an expired peer may never come.
+        if signal.has_fired() {
+            return LinkEvent::Lost {
+                cause: LostCause::CertificateExpired,
+            };
+        }
+        tokio::select! {
+            event = poll_framed(read_state, reader, lowlatency) => event,
+            () = signal.notify.notified() => LinkEvent::Lost {
+                cause: LostCause::CertificateExpired,
+            },
+        }
     }
 }
 
@@ -306,6 +443,64 @@ mod tests {
         assert_eq!(
             rx.recv().await.as_deref(),
             Some([0x02, 0x00, b'o', b'k'].as_slice())
+        );
+    }
+
+    /// R2608 — an armed read half reports `CertificateExpired` on a signal that
+    /// fired BEFORE the poll, without a byte arriving.
+    ///
+    /// The peer side of the duplex is held open and never written, which is the
+    /// state this mechanism exists for: a link whose certificate died while the
+    /// peer had nothing to say. `io::empty()` would be the wrong reader -- it
+    /// returns EOF at once and the driver would report loss for the ordinary
+    /// reason, proving nothing.
+    #[tokio::test(start_paused = true)]
+    async fn a_fired_signal_loses_the_link_with_no_bytes() {
+        let (near, _far) = tokio::io::duplex(64);
+        let mut driver = StreamReadDriver::new(near, Arc::new(AtomicBool::new(false)));
+        let signal = Arc::new(ExpirySignal::default());
+        signal.fire();
+        driver.set_expiry(Arc::clone(&signal));
+        match driver.poll_event().await {
+            LinkEvent::Lost { cause } => assert_eq!(cause, LostCause::CertificateExpired),
+            other => panic!("an armed, fired link must be Lost; got {other:?}"),
+        }
+    }
+
+    /// R2608 — the OTHER half, and the one a pre-check alone would fail: a
+    /// signal that fires while the driver is ALREADY PARKED in its read must
+    /// still wake it. That is the whole reason this is a `Notify` race and not
+    /// a bool, so it gets its own arm rather than riding on the first.
+    #[tokio::test(start_paused = true)]
+    async fn a_signal_fired_while_parked_still_wakes_the_read() {
+        let (near, _far) = tokio::io::duplex(64);
+        let mut driver = StreamReadDriver::new(near, Arc::new(AtomicBool::new(false)));
+        let signal = Arc::new(ExpirySignal::default());
+        driver.set_expiry(Arc::clone(&signal));
+        let firing = tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+            signal.fire();
+        });
+        match driver.poll_event().await {
+            LinkEvent::Lost { cause } => assert_eq!(cause, LostCause::CertificateExpired),
+            other => panic!("a parked read must wake on the signal; got {other:?}"),
+        }
+        firing.await.expect("the firing task completes");
+    }
+
+    /// R2608 -- the CONTROL, as a test rather than as an assertion in prose: an
+    /// UNARMED driver over the same silent duplex must NOT report loss. Without
+    /// this, both arms above would also pass if `poll_event` had been made to
+    /// return `Lost` unconditionally.
+    #[tokio::test(start_paused = true)]
+    async fn an_unarmed_driver_does_not_lose_a_silent_link() {
+        let (near, _far) = tokio::io::duplex(64);
+        let mut driver = StreamReadDriver::new(near, Arc::new(AtomicBool::new(false)));
+        let parked =
+            tokio::time::timeout(std::time::Duration::from_secs(3600), driver.poll_event()).await;
+        assert!(
+            parked.is_err(),
+            "an unarmed driver over a silent peer must stay parked, not report loss"
         );
     }
 }

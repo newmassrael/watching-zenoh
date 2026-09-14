@@ -661,4 +661,25 @@ pub enum LostCause {
     PeerClosed,
     Timeout,
     OsError,
+    /// R2608 — `close_link_on_expiration` tore this link down because the
+    /// PEER'S CERTIFICATE CHAIN reached its earliest `not_after`, not because
+    /// anything went wrong on the wire.
+    ///
+    /// A variant rather than a reuse of [`Self::Timeout`]: that one already
+    /// means "the peer went quiet for too long", and a certificate deadline is
+    /// a different fact about a healthy link. Folding the two together is the
+    /// one-word-two-meanings shape this workspace keeps paying for, and it
+    /// would make a log unreadable exactly where an operator is asking WHY a
+    /// working session dropped.
+    ///
+    /// DERIVED as cheap before it was added: nothing in this workspace BRANCHES
+    /// on a `LostCause`. The session FSM's only cause-match is over
+    /// `LinkDropCause`, a different enum, so this variant is diagnostic and
+    /// costs no arm anywhere.
+    ///
+    /// ⚠ The quic link does NOT report this yet: it closes the `quinn::Connection`
+    /// and quinn maps that to `NotConnected`, which surfaces as
+    /// [`Self::OsError`] — the divergence R2600 named and this round does not
+    /// retire.
+    CertificateExpired,
 }

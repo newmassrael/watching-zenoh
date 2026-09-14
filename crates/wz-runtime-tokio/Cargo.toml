@@ -881,7 +881,11 @@ transport-link-serial = [
 # is supplied at the explicit `dial_tls`/`accept_tls` call site, so the
 # generic `dial_locator` returns Unsupported for `tls/...`. NOT in the
 # default set — zenoh-pico ships TLS as an optional link (Z_FEATURE_LINK_TLS).
-transport-link-tls = ["transport-link-tcp", "dep:tokio-rustls", "dep:rustls-pemfile", "dep:base64", "dep:webpki-roots"]
+# R2608 — `dep:x509-parser` joins for `close_link_on_expiration`: the tls link
+# folds the peer chain's earliest `not_after` exactly as the quic link does, and
+# the parse is the same one. Declared on BOTH schemes rather than moved to a
+# shared feature, because either can be built without the other.
+transport-link-tls = ["transport-link-tcp", "dep:tokio-rustls", "dep:rustls-pemfile", "dep:base64", "dep:webpki-roots", "dep:x509-parser"]
 # R311y578 (G10) — TLS / QUIC session-key export in the NSS key-log format
 # (`crate::tls_keylog`). OFF by default and deliberately a compile-time gate
 # rather than a runtime one: exporting session keys makes the traffic readable

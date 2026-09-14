@@ -96,33 +96,16 @@ pub(crate) fn peer_chain_expiry(connection: &Connection) -> Option<i64> {
         .min()
 }
 
-/// R2600 — the longest single sleep the expiry watcher takes, mirroring
-/// upstream's own cap
-/// (`io/zenoh-link-commons/src/tls.rs` @ `const MAX_SLEEP_DURATION: tokio::time::Duration = tokio::time::Duration::from_secs(600);`).
-///
-/// It is NOT a precision limit: the loop re-reads the clock each pass and its
-/// LAST sleep is exactly the remaining time, so the close lands on the expiry
-/// instant. The cap exists because one enormous `tokio::time::sleep` is the
-/// unsound shape, and because re-reading the wall clock is what lets a machine
-/// whose time jumped forward notice.
-#[cfg(all(feature = "transport-link-quic", feature = "transport-unicast"))]
-const EXPIRY_MAX_SLEEP: std::time::Duration = std::time::Duration::from_secs(600);
+// R2608 — the cap moved with the loop it bounds, to
+// `crate::stream_link::EXPIRY_MAX_SLEEP`. A constant separated from its only
+// reader is the shape that goes stale unnoticed, so it travelled rather than
+// being left behind pointing at nothing.
 
-/// R2600 — sleep until `deadline` (Unix seconds), re-reading the wall clock.
+/// R2608 — the loop moved to [`crate::stream_link::sleep_until_unix`] when tls
+/// became its second consumer. Re-exported under the old name so this module's
+/// call site reads unchanged, and so the clock reasoning lives in ONE file.
 #[cfg(all(feature = "transport-link-quic", feature = "transport-unicast"))]
-async fn sleep_until_unix(deadline: i64) {
-    loop {
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_secs() as i64)
-            .unwrap_or(i64::MAX);
-        if deadline <= now {
-            return;
-        }
-        let remaining = std::time::Duration::from_secs((deadline - now) as u64);
-        tokio::time::sleep(remaining.min(EXPIRY_MAX_SLEEP)).await;
-    }
-}
+use crate::stream_link::sleep_until_unix;
 
 /// R2600 — arm `close_link_on_expiration` for one QUIC link.
 ///

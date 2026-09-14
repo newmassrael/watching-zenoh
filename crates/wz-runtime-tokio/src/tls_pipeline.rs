@@ -45,7 +45,10 @@ use tokio_rustls::rustls::{ClientConfig, ServerConfig};
 use tokio_rustls::{TlsAcceptor, TlsConnector, TlsStream};
 
 use crate::link_interfaces::ip_link_subject;
-use crate::stream_link::{writer_task, StreamReadDriver, StreamWriteDriver};
+use crate::stream_link::{
+    peer_chain_deadline, sleep_until_unix, writer_task, ExpirySignal, StreamReadDriver,
+    StreamWriteDriver,
+};
 use crate::writer_queue::WriterHandle;
 use wz_session_core::link::InterceptorLink;
 
@@ -102,8 +105,12 @@ pub async fn accept_tls(
 /// is split with [`tokio::io::split`] (no owned-half split exists) but
 /// otherwise the StreamEnvelope framing and write driver are the SAME shared
 /// [`crate::stream_link`] code.
+/// R2608 — `close_link_on_expiration` arrives as the second argument because
+/// the chain it needs is readable only before the split below, and the LOCATOR
+/// that asked for it is three frames up the stack.
 pub fn wire_tls_stream(
     stream: TlsStream<TcpStream>,
+    closes_on_expiration: bool,
 ) -> (TlsReadDriver, Arc<StreamWriteDriver>, WriterHandle) {
     // R311y453 — the §5.16 subject: a TLS link is a TCP socket underneath, so
     // its local address comes from the wrapped stream.
@@ -115,11 +122,28 @@ pub fn wire_tls_stream(
         stream.get_ref().0.local_addr().ok(),
         stream.get_ref().0.peer_addr().ok(),
     );
+    // R2608 — the peer's chain is read HERE, before the split, because this is
+    // the last moment it exists: `stream.get_ref().1` is the rustls connection
+    // and `split` consumes the stream. Reading it after would need the raw fd,
+    // which is reaching around the abstraction rather than through it.
+    let expiry = closes_on_expiration
+        .then(|| peer_chain_deadline(stream.get_ref().1.peer_certificates()))
+        .flatten();
     let (reader, writer) = split(stream);
     // transport-lowlatency is a TCP-path negotiation; TLS keeps the universal
     // u16 prefix (an always-false flag).
-    let inbound =
+    let mut inbound =
         StreamReadDriver::new(reader, Arc::new(std::sync::atomic::AtomicBool::new(false)));
+    if let Some(deadline) = expiry {
+        // An absent chain is NOT an immediate expiry — `peer_chain_deadline`
+        // answers `None` there, as upstream does, and this arm never runs.
+        let signal = Arc::new(ExpirySignal::default());
+        inbound.set_expiry(Arc::clone(&signal));
+        crate::runtime_pool::WzRuntime::Net.spawn(async move {
+            sleep_until_unix(deadline).await;
+            signal.fire();
+        });
+    }
     let (tx, rx) = mpsc::unbounded_channel::<Vec<u8>>();
     let writer_handle = WriterHandle::spawn(rx, |queue| writer_task(writer, queue));
     // transport-lowlatency is a TCP-path negotiation; TLS keeps the universal
