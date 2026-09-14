@@ -59,6 +59,7 @@ use wz_session_core::group_membership::{
 };
 use wz_session_core::link::SessionRuntime;
 use wz_session_core::locality::Locality;
+use wz_session_core::qos::Priority;
 use wz_session_core::query_sink::{QueryView, ReplyOut};
 use wz_session_core::reply_sink::ReplyView;
 use wz_session_core::sink::SampleView;
@@ -108,6 +109,30 @@ fn is_wild(ke: &str) -> bool {
     ke.contains('*')
 }
 
+/// R2622 — whether `ke` is a CANONICAL key expression, the property upstream
+/// gets from its type and wz has to check.
+///
+/// zenoh-ext types both group ids as `OwnedKeyExpr`, and a key expression "must
+/// be in canon-form" to construct one
+/// (`commons/zenoh-keyexpr/src/key_expr/borrowed.rs`
+/// @ `/// Note that to be considered a valid key expression, a string MUST be canon.`),
+/// so `a//b` never reaches its `Group::join`. wz types them as `String`, which
+/// carries no such guarantee, and the wildcard checks alone did not supply it.
+///
+/// Canonical means the canonizer returns the input UNCHANGED -- not merely that
+/// it succeeds, which is the `autocanonize` contract upstream deliberately keeps
+/// as a separate constructor. A canonizer error (invalid grammar) is likewise
+/// not canonical.
+///
+/// The Pico dialect is used and the choice does not matter here: the two
+/// dialects differ only on where a `$*` chunk lands inside a WILD run, and every
+/// caller pairs this with [`is_wild`], which rejects the whole class.
+fn is_canonical(ke: &str) -> bool {
+    wz_session_core::keyexpr_canon::canonize_keyexpr(ke)
+        .map(|canon| canon.as_str() == ke)
+        .unwrap_or(false)
+}
+
 /// The keep-alive beacon period: `lease * refresh_ratio`, so a refresh always
 /// precedes the lease elapsing (zenoh-ext group.rs:190-193). Clamped to
 /// `>= 1ms` BY CONSTRUCTION so a degenerate zero period cannot spin the beacon
@@ -126,12 +151,46 @@ pub struct GroupOptions {
     /// [`Locality::Any`] (members are normally remote); set
     /// [`Locality::SessionLocal`] for a same-session loopback deployment.
     pub get_locality: Locality,
+    /// R2622 — the outer QoS priority every group event is published at:
+    /// the `Join` announcement, the keep-alive beacon, and the manual
+    /// [`Group::assert_liveliness`] beacon, which are exactly the three
+    /// publishes upstream routes through one declared publisher.
+    ///
+    /// Upstream's knob is `zenoh-ext/src/group.rs`
+    /// @ `pub fn priority(mut self, p: Priority) -> Self {`, a `Member`
+    /// builder whose value is applied once at
+    /// `zenoh-ext/src/group.rs` @ `.priority(with.priority)`.
+    ///
+    /// ⚠ IT SITS HERE RATHER THAN ON [`Member`], and that placement is a
+    /// deliberate divergence. wz's `Member` is the no_std WIRE model, whose
+    /// module documents its five wire fields as exhaustive; upstream's is a
+    /// combined user builder that happens to carry one `#[serde(skip)]`
+    /// field. wz had already split the local-only knobs out —
+    /// [`Self::get_locality`] is one — so this is where the split says it
+    /// goes, and putting a QoS type into the wire crate to mirror a
+    /// spelling would trade wz's own structure for upstream's.
+    ///
+    /// ⚠ R2622 CORRECTION, and the reason this field exists at all: the wire
+    /// module used to justify omitting upstream's field with "the runtime
+    /// sets publish QoS separately". The runtime did not. All three publishes
+    /// went out as bare `PublishOptions::put()`, so the sentence asserted a
+    /// binding nothing made, and a wz user had no way to reach a knob a zenoh
+    /// user has. The value is observable on the wire even though the FIELD is
+    /// not — it is the Push outer QoS byte — so "never reaches the wire" was
+    /// true of the serialization and false of the effect.
+    ///
+    /// A DOCUMENTED NO-OP without the `pubsub-qos` feature, the shape
+    /// `AdvancedPublisherOptions::priority` takes for the same reason: the
+    /// setter it folds into is gated, and the field stays ungated so a struct
+    /// literal keeps compiling either way.
+    pub event_priority: Priority,
 }
 
 impl Default for GroupOptions {
     fn default() -> Self {
         Self {
             get_locality: Locality::Any,
+            event_priority: Priority::DEFAULT,
         }
     }
 }
@@ -147,6 +206,40 @@ impl GroupOptions {
         self.get_locality = locality;
         self
     }
+
+    /// R2622 — set the group event publish priority (builder). See
+    /// [`Self::event_priority`].
+    pub fn with_event_priority(mut self, priority: Priority) -> Self {
+        self.event_priority = priority;
+        self
+    }
+}
+
+/// R2622 — the publish options every group EVENT goes out with, derived in one
+/// place.
+///
+/// One function rather than three call sites, because upstream has one declared
+/// publisher and therefore cannot have the three drift apart; wz publishes each
+/// event separately, so the single derivation is what stands in for upstream's
+/// single publisher. A future fourth event site that forgets the priority is the
+/// failure this shape removes.
+///
+/// The byte is attached only when the priority DEPARTS from the wire default, so
+/// a group that was never configured publishes exactly the bytes it published
+/// before this field existed. That is the same conditional
+/// `AdvancedPublisherOptions` applies, and for the same measured reason: writing
+/// the default explicitly is not a no-op on the wire, it adds an extension every
+/// default publisher would suddenly emit.
+fn event_publish_options(priority: Priority) -> PublishOptions {
+    let opts = PublishOptions::put();
+    #[cfg(feature = "pubsub-qos")]
+    let opts = if priority != Priority::DEFAULT {
+        opts.with_qos(wz_session_core::sample::QosLevel::default().with_priority(priority))
+    } else {
+        opts
+    };
+    let _ = priority;
+    opts
 }
 
 /// A change in the group the user is informed of via [`Group::subscribe`].
@@ -179,6 +272,18 @@ pub enum GroupError {
     WildcardGroupId(String),
     /// The member id contained a key-expression wildcard.
     WildcardMemberId(String),
+    /// R2622 — the group id was not a CANONICAL key expression. Upstream types
+    /// it as an `OwnedKeyExpr`, which cannot hold a non-canonical string
+    /// (`commons/zenoh-keyexpr/src/key_expr/borrowed.rs`
+    /// @ `/// Note that to be considered a valid key expression, a string MUST be canon.`),
+    /// so `zenoh-ext/src/group.rs` @ `let group: OwnedKeyExpr = group.try_into().map_err(|e| e.into())?;`
+    /// refuses it before the group exists. wz types it as `String`, so the
+    /// check has to be made rather than inherited from the type.
+    NonCanonicalGroupId(String),
+    /// R2622 — the member id was not a CANONICAL key expression. The sibling of
+    /// [`Self::NonCanonicalGroupId`], for upstream's
+    /// `zenoh-ext/src/group.rs` @ `let mid: OwnedKeyExpr = mid.try_into().map_err(|e| e.into())?;`.
+    NonCanonicalMemberId(String),
     /// Publishing the initial join announcement failed.
     Publish(PublishError),
     /// Declaring the group event subscriber failed.
@@ -204,6 +309,10 @@ struct GroupState {
     notify: Notify,
     /// The unknown-member `get` destination.
     get_locality: Locality,
+    /// R2622 — the QoS priority the keep-alive beacon publishes at. Held on the
+    /// state because that task outlives `join` and has no other route to the
+    /// options; the two publishes `Group` itself makes read it off `self`.
+    event_priority: Priority,
 }
 
 impl GroupState {
@@ -291,8 +400,17 @@ where
         options: GroupOptions,
     ) -> Result<Self, GroupError> {
         let gid = group.into();
+        // R2622 — canonicity BEFORE the wildcard test, mirroring the order
+        // upstream is forced into: its `try_into` to `OwnedKeyExpr` runs first
+        // and its `is_wild` bail second, on both ids.
+        if !is_canonical(&gid) {
+            return Err(GroupError::NonCanonicalGroupId(gid));
+        }
         if is_wild(&gid) {
             return Err(GroupError::WildcardGroupId(gid));
+        }
+        if !is_canonical(&member.mid) {
+            return Err(GroupError::NonCanonicalMemberId(member.mid.clone()));
         }
         if is_wild(&member.mid) {
             return Err(GroupError::WildcardMemberId(member.mid.clone()));
@@ -313,6 +431,7 @@ where
             event_tx: Mutex::new(None),
             notify: Notify::new(),
             get_locality: options.get_locality,
+            event_priority: options.event_priority,
         });
 
         // 1) Announce the member BEFORE declaring the subscriber, so we never
@@ -320,7 +439,11 @@ where
         //    not). Mirrors zenoh-ext's "publish join, then spawn handlers".
         let join_buf = encode_net_event(&GroupNetEvent::Join(member.clone()));
         session
-            .publish(&event_keyexpr, &join_buf, PublishOptions::put())
+            .publish(
+                &event_keyexpr,
+                &join_buf,
+                event_publish_options(options.event_priority),
+            )
             .map_err(GroupError::Publish)?;
 
         // 2) The net-event subscriber: decode + dispatch each inbound event.
@@ -359,6 +482,7 @@ where
             let ka_clock = Arc::clone(session.clock());
             let ka_keyexpr = event_keyexpr.clone();
             let ka_buf = encode_net_event(&GroupNetEvent::KeepAlive(member.mid.clone()));
+            let ka_opts = event_publish_options(options.event_priority);
             let period_ms = keepalive_period_ms(member.lease, member.refresh_ratio);
             // The APPLICATION subsystem. zenoh-ext's group runs its four tasks
             // through `TaskController::spawn_abortable`
@@ -378,7 +502,7 @@ where
                         // link) is transient — the next tick re-beacons, and the
                         // peer's lease has not yet elapsed. Dropping it is the
                         // zenoh-ext behavior (group.rs:197 `let _ = ...put()`).
-                        let _ = ka_session.publish(&ka_keyexpr, &ka_buf, PublishOptions::put());
+                        let _ = ka_session.publish(&ka_keyexpr, &ka_buf, ka_opts.clone());
                     }
                 }),
             )
@@ -477,8 +601,11 @@ where
         let buf = encode_net_event(&GroupNetEvent::KeepAlive(
             self.state.local_member.mid.clone(),
         ));
-        self.session
-            .publish(&self.event_keyexpr, &buf, PublishOptions::put())?;
+        self.session.publish(
+            &self.event_keyexpr,
+            &buf,
+            event_publish_options(self.state.event_priority),
+        )?;
         Ok(())
     }
 
@@ -670,6 +797,61 @@ mod tests {
         ids
     }
 
+    /// R2622 — the group event priority reaches the publish options, and a
+    /// DEFAULT group still publishes exactly what it published before the knob
+    /// existed.
+    ///
+    /// Upstream applies its `Member::priority` once, at
+    /// `zenoh-ext/src/group.rs` @ `.priority(with.priority)`, to the publisher
+    /// all three group events go out on; wz publishes each separately and
+    /// derives the options in one function, so this grades that function.
+    ///
+    /// ARM 2 IS THE CONTROL AND IT IS THE ARM THAT MATTERS. Writing the default
+    /// priority explicitly is not a no-op on the wire: it ATTACHES a QoS
+    /// extension where a bare `put()` has none, so every existing group peer
+    /// would start seeing a byte it never saw. R2618 shipped exactly that claim
+    /// falsely one round before its own control caught it, which is why the
+    /// conditional exists and why this asserts the absence rather than trusting
+    /// it.
+    #[test]
+    fn the_event_priority_reaches_the_publish_options_and_default_changes_nothing() {
+        // ARM 1: a non-default priority lands on the qos byte.
+        let opts = GroupOptions::new().with_event_priority(Priority::InteractiveHigh);
+        assert_eq!(opts.event_priority, Priority::InteractiveHigh);
+        let folded = event_publish_options(opts.event_priority);
+        #[cfg(feature = "pubsub-qos")]
+        {
+            let q = folded
+                .qos
+                .expect("a non-default event priority attaches a qos byte");
+            assert_eq!(q.priority(), Priority::InteractiveHigh);
+        }
+
+        // ARM 2 (CONTROL): the DEFAULT group folds to a bare put().
+        let base = PublishOptions::put();
+        let unchanged = event_publish_options(GroupOptions::default().event_priority);
+        assert_eq!(
+            unchanged.allowed_destination, base.allowed_destination,
+            "a default group must not move the locality"
+        );
+        assert_eq!(
+            unchanged.reliability, base.reliability,
+            "a default group must not move the reliability"
+        );
+        #[cfg(feature = "pubsub-qos")]
+        assert_eq!(
+            unchanged.qos.map(|q| q.raw),
+            base.qos.map(|q| q.raw),
+            "a default group must not ATTACH a qos byte where a bare put() has \
+             none -- every group peer would start seeing an extension it never \
+             saw, and the priority happening to be the default value is exactly \
+             why that regression is silent"
+        );
+        // Named so the binding is not dead on a build without `pubsub-qos`,
+        // where the two arms above are the whole test.
+        let _ = folded;
+    }
+
     /// keepalive_period_ms = lease * refresh_ratio (the beacon must precede the
     /// lease elapsing), clamped to >= 1ms BY CONSTRUCTION (the spin guard lives
     /// in the function, not the call site).
@@ -849,5 +1031,69 @@ mod tests {
         let session = loopback_session();
         let result = Group::join(&session, "grp", Member::new("a/*"), GroupOptions::new());
         assert!(matches!(result, Err(GroupError::WildcardMemberId(_))));
+    }
+
+    /// R2622 — a group or member id that is not CANONICAL is refused up front,
+    /// the way upstream refuses it.
+    ///
+    /// Upstream types both ids as `OwnedKeyExpr`, and a key expression "must be
+    /// in canon-form" to construct one (`commons/zenoh-keyexpr/src/key_expr/
+    /// borrowed.rs` @ `/// Note that to be considered a valid key expression, a string MUST be canon.`),
+    /// so `zenoh-ext/src/group.rs` @ `pub fn new<T>(mid: T) -> ZResult<Member>`
+    /// rejects `a//b` before a group exists. wz typed them as `String` and
+    /// checked only for wildcards, so the same id got as far as the session.
+    ///
+    /// THE DEFECT WAS NOT "wz ACCEPTS IT" -- it is refused either way, because
+    /// the declare path validates. It is WHERE: the wildcard checks sit above a
+    /// comment promising the join is "checked BEFORE any declare / publish so a
+    /// failure leaves nothing half-built", and a malformed MEMBER id with a
+    /// sound GROUP id slipped past them into step 1, which PUBLISHES the Join.
+    /// A peer would then hold a member record for a member whose own queryable
+    /// never came up, and the caller would read `GroupError::Queryable` for what
+    /// is an invalid argument. Canonicity now sits with the wildcard checks, so
+    /// the comment above them is true of both.
+    ///
+    /// ARM 3 IS THE ANTI-VACUITY ARM. A check that refused everything would
+    /// satisfy arms 1 and 2 exactly as well as the right one; multi-chunk ids
+    /// are legal on both sides, so the correct check has to let them through.
+    /// Off-runtime, `NoRuntime` is what "got past the id checks" looks like --
+    /// it is the next guard in `join`.
+    #[test]
+    fn non_canonical_group_and_member_ids_are_rejected_before_anything_is_published() {
+        let session = loopback_session();
+
+        // `Group` is not `Debug`, so the WHOLE `Result` cannot be formatted --
+        // which is how the first draft of this test failed to COMPILE rather
+        // than to assert. Reduced to the error alone, which is.
+        let joined = |gid: &str, mid: &str| {
+            Group::join(&session, gid, Member::new(mid), GroupOptions::new())
+                .err()
+                .map(|e| format!("{e:?}"))
+                .unwrap_or_else(|| "Ok(Group)".to_string())
+        };
+
+        // ARM 1: the member id.
+        let err = joined("grp", "a//b");
+        assert!(
+            err.starts_with("NonCanonicalMemberId"),
+            "a non-canonical member id must be refused as such, not carried into \
+             the declare path: got {err}"
+        );
+
+        // ARM 2: the group id.
+        let err = joined("a//b", "m");
+        assert!(
+            err.starts_with("NonCanonicalGroupId"),
+            "a non-canonical group id must be refused as such: got {err}"
+        );
+
+        // ARM 3 (ANTI-VACUITY): legal multi-chunk ids reach the next guard.
+        let err = joined("g/h", "a/b");
+        assert!(
+            err.starts_with("NoRuntime"),
+            "multi-chunk ids are canonical and legal on both sides; refusing \
+             them would make the two arms above pass for a check that refuses \
+             everything: got {err}"
+        );
     }
 }

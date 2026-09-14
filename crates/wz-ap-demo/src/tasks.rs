@@ -321,6 +321,17 @@ pub(crate) async fn query_task<T>(
 /// event subscriber and per-member queryable and stops the keep-alive, which is
 /// precisely the state a foreign peer's view is supposed to reflect -- so the
 /// task parks instead of completing, and the fixture terminates the process.
+///
+/// R2622 — the task also REPORTS each view change, and that is what makes wz the
+/// observing end rather than only the observed one. Until this round it parked
+/// in a bare sleep loop, so everything wz learned about a foreign member -- that
+/// it joined, who the resulting leader is, that its lease elapsed -- was computed
+/// and then discarded. Two of this atom's three standing witness gaps
+/// (leader election across implementations, and the lease-expiry eviction path)
+/// are gaps in that direction, and neither is a missing library capability:
+/// [`Group::subscribe`] and [`Group::leader`] were both built in R311y97. What
+/// was missing was any way for a fixture to READ them, which is why the base
+/// repaired here is the demo's silence and not the group module.
 #[cfg(feature = "group")]
 pub(crate) async fn group_join_task<T>(
     session: TokioSession,
@@ -329,7 +340,7 @@ pub(crate) async fn group_join_task<T>(
 ) where
     T: TimeSource + Send + 'static,
 {
-    use wz::runtime_tokio::group::{Group, GroupOptions, Member};
+    use wz::runtime_tokio::group::{Group, GroupEvent, GroupOptions, Member};
 
     let actions = session.actions();
     let deadline_ms = clock.now_monotonic_ms() + QUERY_HANDSHAKE_TIMEOUT_MS;
@@ -370,6 +381,11 @@ pub(crate) async fn group_join_task<T>(
             return;
         }
     };
+    // Subscribed BEFORE the join line is printed, so a fixture that waits for
+    // `JOINED GROUP` and then expects the next event cannot lose one in the
+    // window between the two. `subscribe` replaces any previous receiver, and
+    // there is none here.
+    let mut events = group.subscribe();
     log::info!(
         "wz-ap-demo: JOINED GROUP group='{}' member_id='{}' lease_secs={:?} view_size={}",
         spec.group,
@@ -378,10 +394,32 @@ pub(crate) async fn group_join_task<T>(
         group.size(),
     );
 
-    // Hold the membership. See the doc comment: dropping `group` would retract
-    // exactly what the foreign peer is being asked to observe.
-    loop {
-        clock.sleep(1_000).await;
+    // Hold the membership and report every view change. See the doc comment:
+    // dropping `group` would retract exactly what the foreign peer is being
+    // asked to observe, so this loop parks on the event channel rather than
+    // completing. The channel closes only when the group is dropped, which
+    // cannot happen while this loop owns it -- the `None` arm is the
+    // unreachable-in-practice branch, kept so the loop is total.
+    while let Some(event) = events.recv().await {
+        let (kind, mid) = match &event {
+            GroupEvent::Join(m) => ("Join", m.id().to_string()),
+            GroupEvent::Leave(mid) => ("Leave", mid.clone()),
+            GroupEvent::LeaseExpired(mid) => ("LeaseExpired", mid.clone()),
+            GroupEvent::NewLeader(mid) => ("NewLeader", mid.clone()),
+        };
+        let mut members: Vec<String> = group.view().iter().map(|m| m.id().to_string()).collect();
+        members.sort();
+        // `leader` is a PULL query over the view, not a field the event carries
+        // -- printing it here is what lets a fixture grade wz's election rule
+        // against the foreign member it just learned about.
+        log::info!(
+            "wz-ap-demo: GROUP VIEW event={} mid='{}' size={} leader='{}' members=[{}]",
+            kind,
+            mid,
+            group.size(),
+            group.leader().id(),
+            members.join(","),
+        );
     }
 }
 

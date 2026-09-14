@@ -49,8 +49,21 @@
 //! - zenoh-ext's `Member` carries a `#[serde(skip)] priority: Priority`
 //!   field used only to set the local event publisher's QoS priority; being
 //!   `serde(skip)` it never reaches the wire, so it is NOT part of this data
-//!   model (the runtime sets publish QoS separately). The five wire fields
-//!   (`mid`, `info`, `liveliness`, `lease`, `refresh_ratio`) are exhaustive.
+//!   model. The five wire fields (`mid`, `info`, `liveliness`, `lease`,
+//!   `refresh_ratio`) are exhaustive.
+//!
+//!   ⚠ R2622 CORRECTION. This bullet used to close with "(the runtime sets
+//!   publish QoS separately)", and the runtime did not: all three group event
+//!   publishes went out as a bare `PublishOptions::put()`, so the parenthesis
+//!   asserted a binding nothing made and a wz user had no route to a knob a
+//!   zenoh user has. Note also what is and is not true of "never reaches the
+//!   wire" — the FIELD does not, but its effect does, as the Push outer QoS
+//!   byte on every group event. The knob now exists, on
+//!   `crates/wz-runtime-tokio/src/group.rs`
+//!   @ `pub fn with_event_priority(mut self, priority: Priority) -> Self {`,
+//!   which is where wz keeps the group's other local-only knob rather than on
+//!   this wire struct; the omission from THIS data model stands, and it is
+//!   still faithful.
 
 extern crate alloc;
 

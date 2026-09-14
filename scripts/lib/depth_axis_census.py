@@ -904,7 +904,13 @@ CITATION = re.compile(r"\b((?:[A-Za-z0-9_.-]+/)*[A-Za-z0-9_.-]+\.(?:rs|c|h))(?::
 # R2485's survivors are answered. It is a REACHED atom (its units run in Layers
 # C1aq and C1au), so it leaves this count with the population; UNREACHED and
 # NO_SYMBOL hold, as for every retirement above.
-PIN_REACHED = 35
+# R2622 — 35 -> 34: `ext-pubsub-group-membership` went PARTIAL -> COMPLETE. Its
+# two real residuals (leader election across implementations, the lease-expiry
+# eviction path) are now foreign-witnessed, and the two family-wide items this
+# atom had been charged with turned out to have no subject in it. It is a
+# REACHED atom (its units run in Layer C1aw), so it leaves this count with the
+# population; UNREACHED and NO_SYMBOL hold, as for every retirement above.
+PIN_REACHED = 34
 PIN_UNREACHED = 3
 PIN_NO_SYMBOL = 2
 # R2534 — 346 -> 347. The atom is `adminspace-metrics` and the citation is the
@@ -1342,7 +1348,14 @@ PIN_NO_SYMBOL = 2
 # background surface is not), so it is still graded and the correction's one wz
 # citation — the sweep itself — is ADDED to the population. 203 + 1 = 204.
 # AMBIGUOUS is untouched: that citation is rooted and unambiguous.
-PIN_WZ_CITATIONS = 204
+# R2622 — 204 -> 198, FALLING because an atom RETIRED: `ext-pubsub-group-
+# membership` re-graded PARTIAL -> COMPLETE, so its whole reason leaves the
+# graded population and takes its six resolving wz citations with it. Nothing is
+# added in the other direction: this round rewrote no OTHER partial atom's
+# reason, and the new citations it wrote went into the retiring atom's own text,
+# which is no longer read here. 204 - 6 = 198. AMBIGUOUS holds at 44 -- none of
+# the six was one of the ambiguous ones.
+PIN_WZ_CITATIONS = 198
 PIN_AMBIGUOUS = 44
 
 

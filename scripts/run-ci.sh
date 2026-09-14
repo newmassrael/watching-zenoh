@@ -7245,7 +7245,18 @@ layer_c1aw_cargo_test_ext_pubsub_group_membership() {
     # nothing delivers both answers. Its DISCRIMINATION lives where the feature
     # is on (C1at's query-consolidation leg): with the pin both answers land,
     # without it `Latest` collapses them. Green here is not the proof.
-    _runci_guarded_test "C1aw group" 7 \
+    # R2622 — 7 -> 8:
+    # `the_event_priority_reaches_the_publish_options_and_default_changes_nothing`,
+    # the witness for the group event publish priority. ⚠ Like the R2557 row
+    # above it runs in a build that cannot discriminate it: this lane carries no
+    # `pubsub-qos`, so both of its `#[cfg]`-guarded qos assertions compile away
+    # and what is left is the locality / reliability half of the control. The
+    # arm that grades the qos byte needs `pubsub-qos` composed.
+    # R2622 — 8 -> 9: `non_canonical_group_and_member_ids_are_rejected_before_
+    # anything_is_published`, which needs no feature at all (the ids are checked
+    # before any declare), so unlike the two rows either side of it this one is
+    # fully discriminated HERE.
+    _runci_guarded_test "C1aw group" 9 \
         cargo test -p wz-runtime-tokio --features ext-pubsub-group-membership,pubsub-allow-loop \
         --lib group --quiet || return 1
     # R2557 — the SAME seven cases with `query-consolidation` ON, which is the
@@ -7254,9 +7265,19 @@ layer_c1aw_cargo_test_ext_pubsub_group_membership() {
     # where it passes because nothing consolidates — a test green by not being
     # asked the question. The pin's control probe (drop it, `Latest` collapses
     # the two answers, 3 members become 2) reds HERE and nowhere else.
-    _runci_guarded_test "C1aw group (query-consolidation)" 7 \
+    _runci_guarded_test "C1aw group (query-consolidation)" 9 \
         cargo test -p wz-runtime-tokio \
         --features ext-pubsub-group-membership,query-consolidation,pubsub-allow-loop,query-get \
+        --lib group --quiet || return 1
+    # R2622 — the same cases with `pubsub-qos` ON, the only configuration in
+    # which the event-priority witness is asked its question. Without this leg
+    # both of its qos assertions are `#[cfg]`-compiled away and the witness is
+    # green for not having been asked -- the shape the R2557 comment above
+    # names, and the shape the control for this round (attach the byte
+    # unconditionally) reds in. It reds HERE and nowhere else.
+    _runci_guarded_test "C1aw group (pubsub-qos)" 9 \
+        cargo test -p wz-runtime-tokio \
+        --features ext-pubsub-group-membership,pubsub-qos,pubsub-allow-loop \
         --lib group --quiet || return 1
     (cd crates \
         && cargo clippy -p wz-session-core \
@@ -15912,7 +15933,16 @@ layer_z_zenohd_interop() {
         # and a wrong-group control. Oracle = z_view_size, which prints its own
         # verdict, so the pass/fail judgement is the FOREIGN implementation's
         # rather than an inference from wz's logs.
-        _runci_guarded_test Zgroup 3 env WZ_ZENOHD_BIN="$zenohd" \
+        #
+        # R2622 — 6, not 3. The three added legs run the OTHER DIRECTION: wz is
+        # the observer and the oracle is the foreign member it decodes, which is
+        # the only direction the atom's two standing residuals live in (the
+        # leader election, whose pair of arms is legs 4 and 5, and the
+        # lease-expiry sweep, leg 6). The oracle's verdict is not the observable
+        # there -- wz's own view is -- so those legs read wz's log and the oracle
+        # is asked for a view size it cannot reach, purely so it exits at a
+        # moment the fixture picked. Same binary, so the same guard counts them.
+        _runci_guarded_test Zgroup 6 env WZ_ZENOHD_BIN="$zenohd" \
             WZ_ZENOH_EXT_EXAMPLES_DIR="$ext_examples_dir" cargo test -p wz-integration-tests \
             --test wz_group_membership_zenoh_ext_interop -- --ignored --quiet --test-threads=1 \
             || return 1

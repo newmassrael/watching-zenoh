@@ -53,6 +53,31 @@
 //!    keep-alive (lease * 0.75 = 45s) lands long after the leg ends — measured at
 //!    exactly +45.0s against a 0.2s leg.
 //!
+//! ## R2622 — the three legs where wz is the OBSERVER
+//!
+//! Legs 1-3 all grade wz's ENCODERS: the observable is upstream's verdict, and
+//! what it says is that a real zenoh-ext `Group` could read what wz wrote. The
+//! other direction was unwitnessed, and the two residuals this atom carried into
+//! R2622 both live there — the election rule and the lease-expiry sweep are
+//! things wz COMPUTES from a foreign member's record, so no amount of upstream
+//! reading wz can reach them.
+//!
+//! 4. **PROOF (leader election, foreign wins).** A zenoh-ext member whose id
+//!    sorts above wz's joins, and wz must hand it the leadership.
+//! 5. **PROOF (leader election, local wins) + leg 4's ANTI-VACUITY ARM.** Same
+//!    fixture, an id that sorts below wz's, and the answer must flip. Either arm
+//!    alone passes for a wz that always answers the same way.
+//! 6. **PROOF (lease-expiry eviction).** A zenoh-ext member joins, exits, and wz
+//!    must drop it on the lease THAT MEMBER advertised. wz advertises 60s against
+//!    the oracle's 3s, so the eviction window is itself the control.
+//!
+//! The third residual this atom carried, `Leave`, is NOT here, and that is a
+//! finding rather than an omission: neither implementation ever SENDS one.
+//! `GroupNetEvent::Leave` has a decode arm on both sides and no construction site
+//! on either, so a leg driving an undeclare could only be built by giving wz an
+//! emitter upstream does not have. Eviction by lease is how a member leaves a
+//! view in both implementations, which is leg 6.
+//!
 //! Every test fn carries the `zenoh_ext` token, per the naming obligation
 //! R311y443 recorded: run-ci's Layer E catch-all skips by that substring and runs
 //! a demo built without these features, where `--group-join` is INERT.
@@ -61,8 +86,9 @@
 //! external binaries, and wz-ap-demo must be built `--features group` (without it
 //! the demo logs INERT and joins nothing, which the legs assert against).
 
+use std::fs::File;
 use std::process::{Command, Stdio};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use wz_integration_tests::common::{
     spawn_zenohd_on_ephemeral_tcp, wait_for_substring, wz_ap_demo_binary, zenoh_ext_example_binary,
@@ -81,6 +107,54 @@ const WZ_MEMBER: &str = "wz-member";
 /// The oracle's own member id, so the listing is unambiguous about which line is
 /// wz's and which is upstream's own.
 const ORACLE_MEMBER: &str = "oracle";
+
+/// R2622 — an oracle id that sorts ABOVE [`WZ_MEMBER`], for the leg where the
+/// elected leader must be the FOREIGN member.
+///
+/// The election rule is `max` by id, byte-compared, on both sides (`zenoh-ext/
+/// src/group.rs` @ `pub async fn leader(&self) -> Member {`, which folds the view
+/// with `leader.id().as_str().cmp(m.id().as_str()) == Ordering::Less`). `'z'`
+/// (0x7a) is above `'w'` (0x77), so this id wins against `wz-member` and the id
+/// below loses to it. Both are asserted in the leg itself rather than trusted
+/// here, because a constant that silently stopped satisfying its own ordering
+/// would turn the pair into two copies of the same arm.
+const ORACLE_MEMBER_ABOVE_WZ: &str = "zz-oracle";
+
+/// R2622 — an oracle id that sorts BELOW [`WZ_MEMBER`], for the leg where the
+/// elected leader must be the LOCAL member. See [`ORACLE_MEMBER_ABOVE_WZ`].
+const ORACLE_MEMBER_BELOW_WZ: &str = "aa-oracle";
+
+/// R2622 — the view size the OBSERVING legs ask the oracle for, and it is
+/// deliberately unreachable.
+///
+/// Those legs read wz's log, not the oracle's verdict, and what they need from
+/// the oracle is that it JOINS (so wz decodes its record) and then EXITS (so its
+/// keep-alives stop). Asking for a size that can never be met makes the exit
+/// happen on the timeout, at a moment the fixture picks, instead of at whatever
+/// moment wz's beacon happens to complete the oracle's view. Two members exist,
+/// so three is out of reach by construction.
+const UNREACHABLE_VIEW_SIZE: usize = 3;
+
+/// R2622 — how long the observing legs let the oracle run before it gives up and
+/// exits. Short on purpose: it is the START of the eviction clock, not a budget.
+const OBSERVER_ORACLE_TIMEOUT_SECS: u64 = 3;
+
+/// R2622 — how long wz is given to evict the departed oracle, and this bound is
+/// the lease-expiry leg's CONTROL rather than a comfort margin.
+///
+/// The leg makes wz advertise [`JOIN_ISOLATION_LEASE_SECS`] (60s) while the
+/// oracle advertises 3s, which upstream's example hardcodes:
+/// `zenoh-ext/examples/examples/z_view_size.rs` @ `.lease(Duration::from_secs(3))`.
+/// An eviction can
+/// therefore only land inside this window if wz timed it on the lease the FOREIGN
+/// member advertised -- the one that crossed the wire inside upstream's bincode
+/// `Member`. A wz that fell back to its own advertised lease, or to
+/// `DEFAULT_LEASE` (18s), lands outside it and the leg reds. Budget: the oracle
+/// beacons at 3 * 0.75 = 2.25s and exits at 3s, so the last refresh wz sees is at
+/// 2.25s and the deadline it computes is 5.25s, swept within 1s by the watchdog.
+/// The two fallbacks land at 2.25 + 18 = 20.25s and 2.25 + 60 = 62.25s, so both
+/// sit outside this window while the correct answer sits at roughly half of it.
+const EVICTION_DEADLINE: Duration = Duration::from_secs(12);
 
 /// The member lease for the legs that need wz's keep-alive beacon running.
 ///
@@ -139,7 +213,14 @@ fn tempfile() -> std::fs::File {
 /// Waiting for the join marker is what makes a later oracle failure attributable:
 /// without it, "the oracle never saw wz" and "wz never joined" are the same
 /// observation.
-fn spawn_wz_group_member(port: u16, group: &str, lease_secs: u64) -> (ChildGuard, String) {
+///
+/// R2622 — the open READER comes back with the child, because three of this
+/// file's legs read wz's log only up to the join line and two read it afterwards.
+/// Returning the handle rather than adding a second spawn function keeps ONE
+/// derivation of how a wz group member is started: a second one would drift, and
+/// the legs that observe wz would then be observing a differently-configured
+/// member than the legs wz is observed by.
+fn spawn_wz_group_member(port: u16, group: &str, lease_secs: u64) -> (ChildGuard, File, String) {
     let demo = wz_ap_demo_binary();
     let stderr = tempfile();
     let writer = stderr.try_clone().expect("dup wz-ap-demo stderr");
@@ -181,12 +262,13 @@ fn spawn_wz_group_member(port: u16, group: &str, lease_secs: u64) -> (ChildGuard
         captured.contains(&format!("group='{group}'")),
         "wz-ap-demo joined a different group than {group:?}\n--- captured ---\n{captured}"
     );
-    (child, captured)
+    (child, reader, captured)
 }
 
 /// Run upstream's `z_view_size` against `port` and return everything it printed.
 fn run_zenoh_ext_view_size(port: u16, group: &str, size: usize) -> String {
-    let (child, mut reader) = spawn_zenoh_ext_view_size(port, group, size);
+    let (child, mut reader) =
+        spawn_zenoh_ext_view_size(port, group, size, ORACLE_MEMBER, VIEW_TIMEOUT_SECS);
     let verdict = wait_view_verdict(&mut reader);
     drop(child);
     verdict
@@ -204,7 +286,19 @@ fn run_zenoh_ext_view_size(port: u16, group: &str, size: usize) -> String {
 ///
 /// Those are different encoders on wz's side, and a leg that does not control the
 /// order silently proves whichever one happened to run.
-fn spawn_zenoh_ext_view_size(port: u16, group: &str, size: usize) -> (ChildGuard, std::fs::File) {
+///
+/// R2622 — `id` and `timeout_secs` became parameters because the legs where wz is
+/// the OBSERVER vary exactly those two. The member id is the whole variable of
+/// the leader-election pair (it is what the election compares), and the timeout
+/// is what decides when the oracle EXITS, which is the event the lease-expiry leg
+/// is waiting on.
+fn spawn_zenoh_ext_view_size(
+    port: u16,
+    group: &str,
+    size: usize,
+    id: &str,
+    timeout_secs: u64,
+) -> (ChildGuard, File) {
     let bin = zenoh_ext_example_binary("z_view_size");
     let output = tempfile();
     let writer = output.try_clone().expect("dup z_view_size stdout");
@@ -222,9 +316,9 @@ fn spawn_zenoh_ext_view_size(port: u16, group: &str, size: usize) -> (ChildGuard
             .arg("--size")
             .arg(size.to_string())
             .arg("--timeout")
-            .arg(VIEW_TIMEOUT_SECS.to_string())
+            .arg(timeout_secs.to_string())
             .arg("--id")
-            .arg(ORACLE_MEMBER)
+            .arg(id)
             .env("RUST_LOG", "error")
             .stderr(Stdio::from(writer.try_clone().expect("dup stderr handle")))
             .stdout(Stdio::from(writer))
@@ -299,7 +393,7 @@ fn wait_view_verdict(reader: &mut std::fs::File) -> String {
 #[ignore = "external binaries: zenohd + zenoh-ext z_view_size; run-ci Layer Z"]
 fn zenoh_ext_group_view_recovers_the_wz_member_after_its_keepalive() {
     let (_zenohd, port) = spawn_zenohd_on_ephemeral_tcp(tempfile);
-    let (_wz, wz_log) = spawn_wz_group_member(port, GROUP, LEASE_SECS);
+    let (_wz, _wz_out, wz_log) = spawn_wz_group_member(port, GROUP, LEASE_SECS);
     let view = run_zenoh_ext_view_size(port, GROUP, 2);
     let ctx = format!("--- z_view_size ---\n{view}\n--- wz ---\n{wz_log}");
 
@@ -332,7 +426,7 @@ fn zenoh_ext_group_view_recovers_the_wz_member_after_its_keepalive() {
 #[ignore = "external binaries: zenohd + zenoh-ext z_view_size; run-ci Layer Z"]
 fn zenoh_ext_group_view_excludes_a_wz_member_of_another_group() {
     let (_zenohd, port) = spawn_zenohd_on_ephemeral_tcp(tempfile);
-    let (_wz, wz_log) = spawn_wz_group_member(port, "other-group", LEASE_SECS);
+    let (_wz, _wz_out, wz_log) = spawn_wz_group_member(port, "other-group", LEASE_SECS);
     let view = run_zenoh_ext_view_size(port, GROUP, 2);
     let ctx = format!("--- z_view_size ---\n{view}\n--- wz ---\n{wz_log}");
 
@@ -367,8 +461,9 @@ fn zenoh_ext_group_view_excludes_a_wz_member_of_another_group() {
 fn zenoh_ext_group_view_learns_the_wz_member_from_its_join_broadcast() {
     let (_zenohd, port) = spawn_zenohd_on_ephemeral_tcp(tempfile);
     // ORACLE FIRST. It is already waiting, with an empty view, before wz exists.
-    let (_oracle, mut oracle_out) = spawn_zenoh_ext_view_size(port, GROUP, 2);
-    let (_wz, wz_log) = spawn_wz_group_member(port, GROUP, JOIN_ISOLATION_LEASE_SECS);
+    let (_oracle, mut oracle_out) =
+        spawn_zenoh_ext_view_size(port, GROUP, 2, ORACLE_MEMBER, VIEW_TIMEOUT_SECS);
+    let (_wz, _wz_out, wz_log) = spawn_wz_group_member(port, GROUP, JOIN_ISOLATION_LEASE_SECS);
     let view = wait_view_verdict(&mut oracle_out);
     let ctx = format!("--- z_view_size ---\n{view}\n--- wz ---\n{wz_log}");
 
@@ -381,5 +476,221 @@ fn zenoh_ext_group_view_learns_the_wz_member_from_its_join_broadcast() {
     assert!(
         view.contains(&format!(" - {WZ_MEMBER}")),
         "the oracle reached a view of 2 without naming {WZ_MEMBER:?}\n{ctx}"
+    );
+}
+
+/// R2622 — what [`wz_observes_foreign_member`] hands back.
+///
+/// A struct rather than a tuple because THREE of its five fields exist only to
+/// be held: dropping any of the guards kills the process the leg is still
+/// reading from, and a tuple invites a caller to bind the ones it reads and
+/// discard the rest. The wz guard is the sharp one — `-D warnings` caught the
+/// first draft doing exactly that, which would have killed wz before any leg
+/// observed anything.
+struct Observed {
+    _zenohd: ChildGuard,
+    _wz: ChildGuard,
+    _oracle: ChildGuard,
+    /// wz's still-open log, positioned to be read for events AFTER the join.
+    wz_out: File,
+    /// Everything wz had logged when the foreign member entered its view.
+    seen: String,
+}
+
+/// R2622 — the fixture for the legs where wz is the OBSERVER, returning once wz
+/// has logged the foreign member into its own view.
+///
+/// Legs 1-3 all read the ORACLE's verdict, which makes them statements about
+/// wz's ENCODERS. The two residuals this fixture serves — the election rule and
+/// the lease-expiry sweep — are statements about wz's DECODERS and about what it
+/// computes from them, so the observable has to be wz's log and the foreign
+/// member has to be the thing wz reports on.
+///
+/// Order and leases are both load-bearing, and neither is free choice:
+///
+///   * **wz FIRST.** Upstream's `Group::join` broadcasts its `Join` and only then
+///     spawns the task that declares its subscriber (`zenoh-ext/src/group.rs`
+///     @ `async fn net_event_handler(z: Arc<Session>, state: Arc<GroupState>) {`),
+///     which is the same race leg 3 documents in the other direction. Here wz is
+///     the listener, so wz must be joined and subscribed before the oracle
+///     announces itself, or the announcement lands on nobody.
+///   * **wz advertises 60s.** wz is not being observed in these legs, so it needs
+///     no beacon of its own, and a long lease makes wz's own lease unusable as an
+///     eviction clock — see [`EVICTION_DEADLINE`].
+///   * **the oracle is asked for an unreachable view size.** It then exits on its
+///     own timeout at a moment the fixture chose, rather than the moment its view
+///     happened to fill. See [`UNREACHABLE_VIEW_SIZE`].
+fn wz_observes_foreign_member(oracle_id: &str) -> Observed {
+    let (zenohd, port) = spawn_zenohd_on_ephemeral_tcp(tempfile);
+    let (wz, mut wz_out, join_log) = spawn_wz_group_member(port, GROUP, JOIN_ISOLATION_LEASE_SECS);
+    let (oracle, _oracle_out) = spawn_zenoh_ext_view_size(
+        port,
+        GROUP,
+        UNREACHABLE_VIEW_SIZE,
+        oracle_id,
+        OBSERVER_ORACLE_TIMEOUT_SECS,
+    );
+    // The barrier: wz has DECODED upstream's `Member` record and folded it into
+    // its view. Everything downstream is about what wz computed from it, so a
+    // failure here is attributable to the decode rather than to the election or
+    // the sweep.
+    let seen = wait_for_substring(
+        &mut wz_out,
+        &format!("GROUP VIEW event=Join mid='{oracle_id}' size=2"),
+        MARKER_TIMEOUT,
+    )
+    .unwrap_or_else(|snapshot| {
+        panic!(
+            "wz never folded the foreign member {oracle_id:?} into its view. wz DID \
+             join (asserted above) and the oracle DID start waiting (asserted in \
+             its spawn), so upstream's `Join` either never arrived or wz did not \
+             decode it\n--- wz ---\n{snapshot}\n--- wz join ---\n{join_log}"
+        )
+    });
+    Observed {
+        _zenohd: zenohd,
+        _wz: wz,
+        _oracle: oracle,
+        wz_out,
+        seen,
+    }
+}
+
+/// Leg 4 — the PROOF for LEADER ELECTION ACROSS IMPLEMENTATIONS, foreign-wins arm.
+///
+/// The elected leader here is a member wz has never been configured with: its id
+/// reached wz only inside upstream's bincode `Member`, and wz must then rank it
+/// above its own. That is the part no wz<->wz test can reach — a wz pair agrees
+/// on an ordering even if the ordering is upstream's reversed.
+///
+/// The rule is `max` by id on both sides: `zenoh-ext/src/group.rs`
+/// @ `pub async fn leader(&self) -> Member {` folds the view keeping the greater
+/// id, and `crates/wz-runtime-tokio/src/group.rs`
+/// @ `pub fn leader(&self) -> Member {` does the same over the same view. Note
+/// what is NOT claimed: upstream never PUBLISHES a leader (its
+/// `GroupEvent::NewLeader` has no construction site anywhere in the protocol, and
+/// wz mirrors that omission), so there is no foreign leader announcement to agree
+/// with. The election is a pull over the view, and this leg grades wz's fold
+/// against a view containing a real foreign member.
+///
+/// Paired with leg 5, which is the same fixture with the ordering reversed. Alone
+/// either arm passes for a wz that always answers the same way.
+// wz-proves: ext-pubsub-group-membership zenoh-ext->wz
+#[test]
+#[ignore = "external binaries: zenohd + zenoh-ext z_view_size; run-ci Layer Z"]
+fn wz_group_elects_the_zenoh_ext_member_whose_id_sorts_above_its_own() {
+    assert!(
+        ORACLE_MEMBER_ABOVE_WZ > WZ_MEMBER,
+        "this leg's premise is that {ORACLE_MEMBER_ABOVE_WZ:?} sorts above \
+         {WZ_MEMBER:?}; with the constants as they stand it does not, so the leg \
+         would grade the opposite of what it claims"
+    );
+    let observed = wz_observes_foreign_member(ORACLE_MEMBER_ABOVE_WZ);
+    let seen = observed.seen;
+
+    assert!(
+        seen.contains(&format!(
+            "event=Join mid='{ORACLE_MEMBER_ABOVE_WZ}' size=2 \
+             leader='{ORACLE_MEMBER_ABOVE_WZ}'"
+        )),
+        "wz reached a view of 2 with the foreign member in it but did not elect \
+         {ORACLE_MEMBER_ABOVE_WZ:?}, whose id sorts above wz's own — so wz's \
+         election does not agree with zenoh-ext's over a shared view\n--- wz ---\n{seen}"
+    );
+}
+
+/// Leg 5 — the PROOF for LEADER ELECTION ACROSS IMPLEMENTATIONS, local-wins arm,
+/// and leg 4's anti-vacuity control.
+///
+/// Identical fixture, one variable: the foreign member's id now sorts BELOW wz's,
+/// so the correct answer flips to wz itself.
+///
+/// MEASURED, and not what the first draft of this comment claimed. Reversing the
+/// comparison in `crates/wz-runtime-tokio/src/group.rs`
+/// @ `if leader.id() < m.id() {` reds BOTH arms, not one: with the fold keeping
+/// the smaller id, leg 4 elects wz where the oracle should win and leg 5 elects
+/// the oracle where wz should. Legs 1-3 stay green, so the damage is localised.
+/// What the PAIR buys is therefore not reversal-detection -- either arm alone
+/// catches that -- but the CONSTANT answer: a wz that always named the local
+/// member, or always the foreign one, passes whichever single arm agrees with it.
+/// Only two arms whose correct answers differ can tell an election from a habit.
+// wz-proves: ext-pubsub-group-membership zenoh-ext->wz
+#[test]
+#[ignore = "external binaries: zenohd + zenoh-ext z_view_size; run-ci Layer Z"]
+fn wz_group_keeps_the_leadership_over_a_zenoh_ext_member_that_sorts_below_it() {
+    assert!(
+        ORACLE_MEMBER_BELOW_WZ < WZ_MEMBER,
+        "this leg's premise is that {ORACLE_MEMBER_BELOW_WZ:?} sorts below \
+         {WZ_MEMBER:?}; with the constants as they stand it does not, so the leg \
+         would grade the opposite of what it claims"
+    );
+    let observed = wz_observes_foreign_member(ORACLE_MEMBER_BELOW_WZ);
+    let seen = observed.seen;
+
+    assert!(
+        seen.contains(&format!(
+            "event=Join mid='{ORACLE_MEMBER_BELOW_WZ}' size=2 leader='{WZ_MEMBER}'"
+        )),
+        "wz saw a foreign member whose id sorts BELOW its own and handed it the \
+         leadership anyway, so wz's election is not comparing ids in zenoh-ext's \
+         direction\n--- wz ---\n{seen}"
+    );
+}
+
+/// Leg 6 — the PROOF for the LEASE-EXPIRY EVICTION PATH against a real zenoh-ext
+/// member.
+///
+/// Neither implementation announces its departure: `GroupNetEvent::Leave` has a
+/// decode arm on both sides and NO construction site on either
+/// (`zenoh-ext/src/group.rs` @ `enum GroupNetEvent {` declares it; nothing in the
+/// crate serialises one). Eviction by lease is therefore the ONLY way a group
+/// member ever leaves a view, in either implementation, which is what makes this
+/// leg the one that matters rather than a completeness exercise.
+///
+/// What crosses the wire here is a `Duration` inside upstream's bincode `Member`,
+/// and wz's eviction deadline is computed from it —
+/// `crates/wz-runtime-tokio/src/group.rs`
+/// @ `let alive_till = now_ms.saturating_add(member.lease.as_millis() as u64);`,
+/// mirroring `zenoh-ext/src/group.rs` @ `let alive_till = Instant::now().add(je.member.lease);`.
+/// The control is built into [`EVICTION_DEADLINE`] rather than bolted on: wz
+/// advertises 60s and the oracle 3s, so an eviction inside the window can only
+/// have been timed on the foreign value.
+// wz-proves: ext-pubsub-group-membership zenoh-ext->wz
+#[test]
+#[ignore = "external binaries: zenohd + zenoh-ext z_view_size; run-ci Layer Z"]
+fn wz_group_evicts_a_departed_zenoh_ext_member_on_the_lease_it_advertised() {
+    let mut observed = wz_observes_foreign_member(ORACLE_MEMBER);
+    // Timed from the moment wz HAS the member, not from the spawn: the oracle's
+    // own start-up is not part of the lease, and folding it in would make the
+    // window a measurement of process launch cost.
+    let joined_at = Instant::now();
+
+    let expired = wait_for_substring(
+        &mut observed.wz_out,
+        &format!("event=LeaseExpired mid='{ORACLE_MEMBER}' size=1"),
+        EVICTION_DEADLINE,
+    )
+    .unwrap_or_else(|snapshot| {
+        panic!(
+            "wz still held the departed zenoh-ext member after {EVICTION_DEADLINE:?}. \
+             The oracle exits on its own {OBSERVER_ORACLE_TIMEOUT_SECS}s timeout and \
+             advertised a 3s lease, so an eviction timed on the FOREIGN lease is due \
+             at ~5.25s; wz advertised {JOIN_ISOLATION_LEASE_SECS}s, so this is the \
+             shape of wz timing the sweep on its own lease (or on DEFAULT_LEASE) \
+             instead of the decoded one\n--- wz ---\n{snapshot}\n--- wz at join ---\n{}",
+            observed.seen
+        )
+    });
+    let elapsed = joined_at.elapsed();
+
+    // Not a second spelling of the wait above: the wait proves an eviction landed
+    // in the window, this proves it was not ALREADY there when the window opened.
+    // A wz that evicted the member the instant it learned it would satisfy the
+    // wait and is a different defect entirely.
+    assert!(
+        elapsed >= Duration::from_secs(1),
+        "wz evicted the foreign member {elapsed:?} after folding it in, which is \
+         shorter than any lease either side advertises — the sweep is not waiting \
+         for a lease at all\n--- wz ---\n{expired}"
     );
 }
