@@ -562,6 +562,42 @@ def findings_for(
     return findings, read, named
 
 
+def shared_declaration_credits(
+    keys: dict[str, list[str]], declared: set[str]
+) -> tuple[int, int]:
+    """How much of READ rests on a declaration no scheme owns.
+
+    Open-debt 726, measured one level sharper at R2605. `wz_declared_keys` globs
+    `crates/**/src/*.rs` and returns a GLOBAL set, and `findings_for` credits a
+    scheme with `if key in declared`. So a `const` written ONCE, anywhere,
+    credits EVERY scheme whose upstream link consumes that key -- the predicate
+    is scheme-agnostic as well as declaration-shaped.
+
+    MEASURED at R2605 against the 1.10.0 pin: 408 declared keys, 24 of them
+    credited to more than one scheme, 76 (scheme, key) credits resting on a
+    shared declaration (`bind`, `dscp` and `iface` at five schemes each).
+    `close_link_on_expiration` and the five inline-PEM spellings are declared
+    ONLY in `crates/wz-session-core/src/locator.rs` -- the shared locator parser
+    -- and are credited to three schemes, while the only code reading the parsed
+    value is `#[cfg(feature = "transport-link-quic")]`.
+
+    This REPORTS rather than judges, deliberately. Raising the predicate is not
+    a tightening of this regex: the shared parser's consts DO occur outside
+    their own declaration, and the scheme that genuinely reads them never names
+    the const at all -- it reads the struct field. A correct predicate has to
+    follow the VALUE (const -> the field it fills -> that scheme's consumer),
+    which is item 726's own round. Until then the number is printed every run,
+    because a blind spot nobody counts is one nobody pays off.
+    """
+    per_key: dict[str, int] = {}
+    for scheme_keys in keys.values():
+        for key in scheme_keys:
+            if key in declared:
+                per_key[key] = per_key.get(key, 0) + 1
+    shared = {k: n for k, n in per_key.items() if n > 1}
+    return len(shared), sum(shared.values())
+
+
 def check(require: bool) -> int:
     root = upstream_root()
     if root is None:
@@ -610,9 +646,11 @@ def check(require: bool) -> int:
             "READ graded nothing (is the submodule initialised?)"
         )
         return 1
+    declared = wz_declared_keys()
+    shared_keys, shared_credits = shared_declaration_credits(keys, declared)
     more, read, named = findings_for(
         keys,
-        wz_declared_keys(),
+        declared,
         store_reasons(),
         spellings,
         honoured,
@@ -630,6 +668,12 @@ def check(require: bool) -> int:
         f"{len(keys)} upstream link crate(s) at {root} ({total - consumed_total} "
         f"declared by the link, {consumed_total} consumed from zenoh-link-commons) "
         f"-- {read} read by wz, {named} named as their atom's residual"
+    )
+    print(
+        f"  upstream-link-config-keys: of that READ, {shared_credits} credit(s) "
+        f"over {shared_keys} key(s) rest on a `const` no scheme owns (open-debt "
+        f"726); this gate cannot yet tell a scheme that reads the value from one "
+        f"that only shares its declaration"
     )
     return 0
 
@@ -918,13 +962,42 @@ def selftest() -> int:
             print("upstream-link-config-keys: SELFTEST FAIL -- an empty tree is not empty")
             return 1
 
+    # R2605 -- the shared-declaration counter, BOTH ways. A key credited to one
+    # scheme only must not count, or the number would grow with the population
+    # instead of with the blind spot; a key credited to several must, and by its
+    # credits rather than by one per key.
+    shared_keys, shared_credits = shared_declaration_credits(
+        {"tls": ["bind", "solo"], "quic": ["bind"], "udp": ["bind"]},
+        {"bind", "solo"},
+    )
+    if (shared_keys, shared_credits) != (1, 3):
+        print(
+            "upstream-link-config-keys: SELFTEST FAIL -- the shared-declaration "
+            f"counter must read (1 key, 3 credits) there; got {(shared_keys, shared_credits)}"
+        )
+        return 1
+    if shared_declaration_credits({"tls": ["solo"]}, {"solo"}) != (0, 0):
+        print(
+            "upstream-link-config-keys: SELFTEST FAIL -- a key credited to ONE "
+            "scheme rests on no shared declaration and must not be counted"
+        )
+        return 1
+    if shared_declaration_credits({"tls": ["bind"], "quic": ["bind"]}, set()) != (0, 0):
+        print(
+            "upstream-link-config-keys: SELFTEST FAIL -- an UNDECLARED key is "
+            "not a credit at all, shared or otherwise"
+        )
+        return 1
+
     print(
         "upstream-link-config-keys: selftest OK -- the derivation reads "
         "upstream's own `pub mod config` blocks; an unread AND unnamed key is "
         "refused (R2363's own defect); a named one is accepted; a COMPLETE atom "
         "with an unread key is refused; a doc-comment mention is not a reader; "
         "an upstream link crate with no wz owner is refused; an empty "
-        "population is empty -- past one clean control"
+        "population is empty; the shared-declaration counter counts credits not "
+        "keys, ignores a solo credit and ignores an undeclared key -- past one "
+        "clean control"
     )
     return 0
 
