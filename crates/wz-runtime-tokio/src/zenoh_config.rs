@@ -1134,8 +1134,9 @@ impl Default for ZenohNodeConfig {
             compression: false,
             timestamping: false,
             // R2626 — upstream's shipped default
-            // (`commons/zenoh-config/src/defaults.rs`: `drop_future_timestamp:
-            // bool = false`), so an unset key relays the re-stamped message.
+            // (`commons/zenoh-config/src/defaults.rs`
+            // @ `    pub const drop_future_timestamp: bool = false;`), so an
+            // unset key relays the re-stamped message.
             drop_future_timestamp: false,
             adminspace: None,
             // R311y844 — every one of these is zenoh's own resolved value for

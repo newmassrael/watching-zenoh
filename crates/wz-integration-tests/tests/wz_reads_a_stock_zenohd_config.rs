@@ -590,12 +590,16 @@ fn the_defaults_each_implementation_falls_back_to_are_pinned_against_a_real_zeno
         // `connect/*` scalars' reason rather than its sibling's above. That one
         // is listed because upstream's default is a function of `mode`; this
         // one's default is FLAT (`false`). What puts it here is where the
-        // default LIVES: upstream declares the field `Option<bool>`
-        // (`commons/zenoh-config/src/lib.rs`) and applies the default only at
-        // the read site, via `unwrap_or_default!`
-        // (`zenoh/src/net/routing/dispatcher/tables.rs`), with the constant in
-        // `commons/zenoh-config/src/defaults.rs`. A silent file therefore leaves
-        // the Option `None` and the resolved tree has nothing to answer with.
+        // default LIVES: upstream declares the field as an Option
+        // (`commons/zenoh-config/src/lib.rs`
+        // @ `            drop_future_timestamp: Option<bool>,`) and applies the
+        // default only at the read site
+        // (`zenoh/src/net/routing/dispatcher/tables.rs`
+        // @ `            unwrap_or_default!(config.timestamping().drop_future_timestamp());`),
+        // with the constant in `commons/zenoh-config/src/defaults.rs`
+        // @ `    pub const drop_future_timestamp: bool = false;`. A silent file
+        // therefore leaves the Option `None` and the resolved tree has nothing
+        // to answer with.
         //
         // ⚠ DERIVED FROM THE DECLARATION, NOT FROM A RUNNING TREE: this leg is
         // `#[ignore]` and needs a built zenohd, which this round had no way to
