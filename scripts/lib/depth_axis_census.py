@@ -899,7 +899,12 @@ CITATION = re.compile(r"\b((?:[A-Za-z0-9_.-]+/)*[A-Za-z0-9_.-]+\.(?:rs|c|h))(?::
 # that order, because upstream's guard relies on the exclusion the typestate
 # provides. It is a REACHED atom (its units run in Layers C1at and C1av), so it
 # leaves this count with the population; UNREACHED and NO_SYMBOL hold.
-PIN_REACHED = 36
+# R2619 — 36 -> 35: `ext-pubsub-advanced-publisher` went PARTIAL -> COMPLETE.
+# R2618 built clause (2) and this round built (1), (3) and (4), so all four of
+# R2485's survivors are answered. It is a REACHED atom (its units run in Layers
+# C1aq and C1au), so it leaves this count with the population; UNREACHED and
+# NO_SYMBOL hold, as for every retirement above.
+PIN_REACHED = 35
 PIN_UNREACHED = 3
 PIN_NO_SYMBOL = 2
 # R2534 — 346 -> 347. The atom is `adminspace-metrics` and the citation is the
@@ -1321,7 +1326,18 @@ PIN_NO_SYMBOL = 2
 # names exactly one wz path -- the sibling pin that establishes an absent qos
 # already MEANS the defaults -- so 211 + 1 = 212. AMBIGUOUS is untouched: that
 # citation is rooted and unambiguous.
-PIN_WZ_CITATIONS = 212
+# R2619 — 212 -> 203. A retirement again, so the count FALLS where R2618's rose:
+# the atom is no longer graded and takes its whole citation set with it.
+# DERIVED with this module's own `citation_audit` over that reason before and
+# after the append, the R2609 correction applied rather than rediscovered: wz
+# 9 -> 10 (the correction cites one wz path, the wrapped-publisher field), so the
+# round contributes 1 and the atom removes 10. 212 + 1 - 10 = 203, which is what
+# the census measures.
+# ⚠ AMBIGUOUS does NOT move this time, unlike R2617's retirement: that atom's
+# reason happened to hold one ambiguous occurrence and this one holds none. The
+# rule is not "retirements move it" but "a retirement removes whatever the atom
+# held" — measure it, do not infer it from the previous retirement.
+PIN_WZ_CITATIONS = 203
 PIN_AMBIGUOUS = 44
 
 
