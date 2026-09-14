@@ -1225,7 +1225,19 @@ PIN_NO_SYMBOL = 2
 # them is in this number, for the R2607 reason: upstream citations are read and
 # NOT judged by this axis (R2215). An atom whose round adds only upstream
 # anchors moves this pin by zero.
-PIN_WZ_CITATIONS = 233
+# R2611 — 233 -> 236, AMBIGUOUS unchanged at 45. `scouting-active` again: it
+# stays PARTIAL, so it stays in the population, and its reason grew the record of
+# the ask-side fan-out this round built and of the delivery leg that keeps the
+# tag where it is.
+# DERIVED with THIS module's own `citation_audit` over that atom's reason before
+# and after the append: wz 4 -> 7, ambiguous 0 -> 0. So 233 + 3 = 236.
+# ⚠ THE DERIVATION IS SENSITIVE TO WHAT IS STAGED, which cost a first pass here.
+# A citation resolves against `git ls-files`, so a clause naming a file the SAME
+# round adds reads as upstream-and-unjudged until that file is tracked: the same
+# reason measured wz 4 -> 6 before `git add` and 4 -> 7 after. Stage the round's
+# new sources BEFORE deriving this number, or it lands two low and the next
+# round pays for it.
+PIN_WZ_CITATIONS = 236
 PIN_AMBIGUOUS = 45
 
 
