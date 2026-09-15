@@ -866,6 +866,18 @@ impl LinkstateNetwork {
         self.gossip_multihop = enabled;
     }
 
+    /// Whether this graph rides distant nodes' locators on every flood — the
+    /// reader half of [`set_gossip_multihop`](Self::set_gossip_multihop).
+    ///
+    /// R2641 added it for the reason [`full_linkstate`](Self::full_linkstate)
+    /// already had one: a setter whose value nothing can read back is a
+    /// write-only knob, so a caller that sets it on several graphs cannot check
+    /// that it landed on all of them. Its sibling was symmetric; this one was
+    /// not.
+    pub fn gossip_multihop(&self) -> bool {
+        self.gossip_multihop
+    }
+
     /// Select the peer routing mode this graph ingests for — zenoh
     /// `routing.peer.mode`. `true` (the default) = `"linkstate"`; `false` =
     /// zenoh's default `"peer_to_peer"` gossip mode.

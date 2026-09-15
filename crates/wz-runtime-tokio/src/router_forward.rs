@@ -337,7 +337,9 @@ use wz_codecs::wireexpr::WireexprOwned;
 // `attach_mcast_group` (a later slice, the reserved→active flip).
 #[cfg(feature = "router-multicast-faces")]
 use tokio::sync::mpsc::UnboundedSender;
-use wz_routing_graph::{Changes, LinkEdgeWeight, LinkId, LinkInfo, LinkstateNetwork, WhatAmI, Zid};
+use wz_routing_graph::{
+    AutoConnect, Changes, LinkEdgeWeight, LinkId, LinkInfo, LinkstateNetwork, WhatAmI, Zid,
+};
 use wz_session_core::declare_build::{
     build_declare_final_reply, build_declare_queryable_reply,
     build_declare_queryable_reply_with_id, build_declare_queryable_with_id_info,
@@ -368,7 +370,9 @@ use wz_session_core::query::{QueryReply, QueryResponder};
 use wz_session_core::wireexpr_resolve::{resolve_wireexpr, wireexpr_is_empty};
 use wz_session_core::zid_hex::zid_to_zenoh_hex;
 
-use crate::accept_loop::{FaceForwarder, FaceId};
+use crate::accept_loop::{
+    DialIntent, DialIntentOrigin, DialIntentReceiver, DialIntentSender, FaceForwarder, FaceId,
+};
 use crate::future_interest::{FutureQablStore, FutureSubStore};
 #[cfg(feature = "routing-interceptor-hotreload")]
 use crate::interceptor::InterceptorKeyexprCache;
@@ -709,6 +713,29 @@ pub struct RouterForwarder {
     /// [`LinkstateNetView`] already makes for the two graphs. Use sites are
     /// unchanged — `Rc<RefCell<T>>` derefs to `RefCell<T>`.
     faces: Rc<RefCell<HashMap<FaceId, RouterFaceState>>>,
+    /// R2639 — the gossip AUTOCONNECT policy, part of the residual that named
+    /// `gossip` / `gossip_multihop` / `gossip_target` / `AutoConnect` as never
+    /// wired into this forwarder's nets.
+    ///
+    /// ONE policy for BOTH tiers, settled by the type rather than chosen:
+    /// `AutoConnect` carries a role `WhatAmIMatcher` and
+    /// `AutoConnectStrategies::get(target)` already resolves `to_router` and
+    /// `to_peer` separately, so a per-tier policy would duplicate a
+    /// discrimination the value itself makes.
+    ///
+    /// It lives on the DRIVER rather than on a `LinkstateNetwork`, for the
+    /// reason that crate's own module doc gives: the gossip driver applies the
+    /// gate at its discovery emit and the accept loop dials. Same placement as
+    /// [`LinkstateForwarder`](crate::linkstate_forward::LinkstateForwarder).
+    ///
+    /// Default `disabled` is the prior behaviour EXACTLY — an empty matcher
+    /// admits nobody, so a host that never calls
+    /// [`enable_autoconnect`](Self::enable_autoconnect) emits no intent at all.
+    autoconnect: Cell<AutoConnect>,
+    /// The dial-intent sink, `None` until a host installs one. Shared with the
+    /// scouting plane when a deploy runs both — see
+    /// [`enable_autoconnect_into`](Self::enable_autoconnect_into).
+    dial_tx: RefCell<Option<DialIntentSender>>,
     /// EGRESS-only multicast group faces (zenoh `Tables.mcast_groups`,
     /// `dispatcher/tables.rs:79`) — a SEPARATE collection from `faces`, mirroring
     /// zenoh's separate `mcast_groups` Vec (the egress polymorphism is WHICH
@@ -1221,6 +1248,10 @@ impl RouterForwarder {
                 timestamping,
             ),
             faces: Rc::new(RefCell::new(HashMap::new())),
+            // R2639 — `disabled` seeds the empty matcher, so a router that never
+            // enables autoconnect behaves byte-for-byte as before.
+            autoconnect: Cell::new(AutoConnect::disabled(self_zid)),
+            dial_tx: RefCell::new(None),
             #[cfg(feature = "router-multicast-faces")]
             mcast_groups: RefCell::new(Vec::new()),
             #[cfg(feature = "router-multicast-faces")]
@@ -1282,6 +1313,108 @@ impl RouterForwarder {
             recomputes: Cell::new(0),
             trees_delay: Self::DEFAULT_TREES_DELAY,
             clock,
+        }
+    }
+
+    /// R2639 — enable gossip autoconnect on this ROUTER: install `policy` and
+    /// return the receiving end of the dial-intent channel. From then on, every
+    /// node either tier's topology ingest DISCOVERS (a `changes.new` node that
+    /// advertised locators) whose role and zid the policy admits is emitted as a
+    /// [`DialIntent`]; the accept loop drains the receiver and dials.
+    ///
+    /// The router twin of
+    /// [`LinkstateForwarder::enable_autoconnect`](crate::linkstate_forward::LinkstateForwarder::enable_autoconnect),
+    /// deliberately the same shape: one policy, one channel, the gate applied at
+    /// the discovery emit. BOTH tiers feed it, because the policy's own role
+    /// matcher is what separates a Router target from a Peer one — this
+    /// forwarder's tier gate scopes FLOODS, not dials.
+    ///
+    /// Call ONCE at setup, before the drive loop starts. A host that never calls
+    /// it keeps the prior behaviour: no autoconnect, an empty matcher.
+    pub fn enable_autoconnect(&self, policy: AutoConnect) -> DialIntentReceiver {
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        self.enable_autoconnect_into(policy, tx);
+        rx
+    }
+
+    /// [`enable_autoconnect`](Self::enable_autoconnect) against a channel the
+    /// CALLER already owns — for a deploy running the multicast-scouting plane
+    /// too, since the accept loop drains ONE receiver and the two producers must
+    /// share its ends. The same split the peer forwarder offers, and for the
+    /// same reason.
+    pub fn enable_autoconnect_into(&self, policy: AutoConnect, tx: DialIntentSender) {
+        self.autoconnect.set(policy);
+        *self.dial_tx.borrow_mut() = Some(tx);
+    }
+
+    /// R2641 — set `scouting/gossip/multihop` on BOTH of this router's graphs
+    /// (zenoh's `gossip_multihop`, a `Network::new` argument upstream). On: a
+    /// node's locators ride every flood regardless of hop distance; off (the
+    /// default): only self's and direct neighbours' do.
+    ///
+    /// ONE value for both nets because the config carries one — upstream reads
+    /// `scouting.gossip.multihop` once and hands it to the network it builds.
+    /// Applying it to one graph and not the other would make a router advertise
+    /// distant locators to its routers and not its peers, which no config can
+    /// express.
+    ///
+    /// # The two knobs of this residual that get NO code here, and why
+    ///
+    /// * `gossip_target` — upstream's role matcher for who receives a flood.
+    ///   INERT on this forwarder: its fan-out gates on TIER
+    ///   ([`fan_out_tier`](Self::fan_out_tier)), which already separates Router,
+    ///   Peer and Client faces, and the matcher could not separate the two nets
+    ///   anyway since `default_gossip_target(Router) ==
+    ///   default_gossip_target(Peer)`. A field here would look like parity and
+    ///   do nothing.
+    /// * `full_linkstate` — left `true` on BOTH nets deliberately. The upstream
+    ///   call that passes `false` is the PEER hat's, for a network its own code
+    ///   names `"[Gossip]"` — a different kind of object from this router's
+    ///   linkstate peer-tier graph. And `routing.peer.mode` must hold the same
+    ///   value across every peer and router of a subsystem, so a router whose
+    ///   peers run linkstate must too.
+    pub fn set_gossip_multihop(&self, enabled: bool) {
+        self.routers_net.borrow_mut().set_gossip_multihop(enabled);
+        self.linkstatepeers_net
+            .borrow_mut()
+            .set_gossip_multihop(enabled);
+    }
+
+    /// R2639 — emit a [`DialIntent`] for each node this ingest DISCOVERED that
+    /// the autoconnect policy admits. Called with the `Changes` an ingest
+    /// produced, for EITHER tier.
+    ///
+    /// A node with no advertised locators is skipped (nothing to dial), and one
+    /// whose role has not surfaced is skipped too: a `None` whatami cannot pass
+    /// the role matcher, so it is never a candidate. `DialIntentOrigin::Gossip`
+    /// is stamped here because this is the only place this plane emits, which is
+    /// what keeps the loop's gossip counter a gossip discriminator now that the
+    /// scouting plane shares the channel.
+    fn emit_dial_intents(&self, net: &Rc<RefCell<LinkstateNetwork>>, changes: &Changes) {
+        if changes.new.is_empty() {
+            return;
+        }
+        let autoconnect = self.autoconnect.get();
+        let net = net.borrow();
+        for zid in &changes.new {
+            let Some(locators) = net.node_locators(zid) else {
+                continue;
+            };
+            let Some(whatami) = net.get_node(zid).and_then(|n| n.whatami) else {
+                continue;
+            };
+            if !autoconnect.should_autoconnect(*zid, whatami) {
+                continue;
+            }
+            if let Some(tx) = self.dial_tx.borrow().as_ref() {
+                // Unbounded, so this never blocks the sync ingest; an Err means
+                // the drive loop is gone (shutdown) and the intent is dropped.
+                let _ = tx.send(DialIntent {
+                    zid: zid.as_slice().to_vec(),
+                    locators: locators.to_vec(),
+                    origin: DialIntentOrigin::Gossip,
+                });
+            }
         }
     }
 
@@ -1907,6 +2040,10 @@ impl RouterForwarder {
             }
         };
         let changes = net.borrow_mut().ingest_linkstate_list(link_id, list);
+        // R2639 — the discovery emit, for EITHER tier. Placed here rather than in
+        // each caller because this is the one site where an ingest's `Changes`
+        // originate, so a later tier cannot be added and silently miss it.
+        self.emit_dial_intents(net, &changes);
         self.ingested.set(self.ingested.get() + 1);
         changes
     }
@@ -6729,6 +6866,32 @@ mod tests {
     /// MUST flag the present optional fields: `OPT_P` (zid) | `OPT_W` (whatami).
     /// Otherwise the encoder writes the zid bytes the decoder then skips, and
     /// the OAM parses as `Malformed`.
+    /// R2639 — [`entry`] that also ADVERTISES locators, which the autoconnect
+    /// emit requires: a node with nothing to dial is skipped, so the plain
+    /// `entry` (locators `None`) can never produce a dial intent.
+    fn entry_with_locators(
+        psid: u64,
+        sn: u64,
+        node: u8,
+        links: &[u64],
+        locators: &[&str],
+    ) -> LinkstateOwned {
+        const OPT_L: u8 = 0x04; // locators present (wz_routing_graph OPT_L)
+        let mut e = entry(psid, sn, node, links);
+        e.options |= OPT_L;
+        e.num_locators = Some(locators.len() as u64);
+        e.locators = Some(
+            locators
+                .iter()
+                .map(|s| wz_codecs::locator::LocatorOwned {
+                    locator_len: s.len() as u64,
+                    locator: sce_forge_runtime::codec::SceString::from_view(s).unwrap(),
+                })
+                .collect(),
+        );
+        e
+    }
+
     fn entry(psid: u64, sn: u64, node: u8, links: &[u64]) -> LinkstateOwned {
         const OPT_P: u8 = 0x01; // zid present (wz_routing_graph OPT_P)
         const OPT_W: u8 = 0x02; // whatami present (wz_routing_graph OPT_W)
@@ -7186,6 +7349,90 @@ mod tests {
             3,
             "the view is live, not a snapshot taken when it was made"
         );
+    }
+
+    /// R2639 — the router's gossip autoconnect: a node its topology ingest
+    /// discovers, advertising locators and a role the policy admits, is emitted
+    /// as a dial intent tagged `Gossip`.
+    ///
+    /// The fixture discovers a node through the ROUTERS tier, which is the half
+    /// the residual named. ⚠ The control that matters here is the DEFAULT arm
+    /// asserted first: a forwarder that never enables autoconnect must emit
+    /// nothing, because `AutoConnect::disabled` is what preserves every existing
+    /// router's behaviour byte-for-byte.
+    #[test]
+    fn autoconnect_emits_a_dial_intent_for_a_node_the_router_discovers() {
+        use wz_routing_graph::AutoConnectStrategy;
+
+        // ARM 1 — the untouched default: discovery happens, nothing is emitted.
+        let quiet = RouterForwarder::new(zid(0x01));
+        let (a_q, _sq) = face(zid(0xAA), WIRE_ROUTER);
+        quiet.register(FaceId(0), &a_q);
+        discover_via(&quiet, FaceId(0), 0x01, 0xAA, 0xDD, 12, 5);
+        assert!(
+            quiet.dial_tx.borrow().is_none(),
+            "a router that never enabled autoconnect installs no sink"
+        );
+
+        // ARM 2 — enabled with the zenoh default matcher (router|peer).
+        let fwd = RouterForwarder::new(zid(0x01));
+        let policy = AutoConnect::new(
+            zid(0x01),
+            wz_codecs::whatami::WhatAmIMatcher::empty().router().peer(),
+            AutoConnectStrategy::Always,
+        );
+        let mut rx = fwd.enable_autoconnect(policy);
+        let (a_r, _s1) = face(zid(0xAA), WIRE_ROUTER);
+        fwd.register(FaceId(0), &a_r);
+        // 0xDD is a 2-hop node relayed by 0xAA, advertising a locator — without
+        // one there is nothing to dial and the emit correctly skips it.
+        let oam = build_linkstate_oam_owned(&list(vec![
+            entry(0, 1, 0x01, &[]),
+            entry_with_locators(12, 5, 0xDD, &[1], &["tcp/10.0.0.187:7447"]),
+            entry(1, 5, 0xAA, &[0, 12]),
+        ]))
+        .expect("build oam");
+        forward_one(&fwd, FaceId(0), NetworkMessage::Oam(oam));
+
+        let mut seen: Vec<Vec<u8>> = Vec::new();
+        while let Ok(intent) = rx.try_recv() {
+            assert_eq!(
+                intent.origin,
+                DialIntentOrigin::Gossip,
+                "the router's gossip plane stamps its own origin"
+            );
+            seen.push(intent.zid);
+        }
+        assert!(
+            seen.contains(&zid(0xDD).as_slice().to_vec()),
+            "the DISCOVERED node is dialled, not the face it arrived on: {seen:?}"
+        );
+    }
+
+    /// R2641 — `gossip_multihop` reaches BOTH graphs, and the default is
+    /// unchanged. The asymmetric arm is the load-bearing one: a setter that
+    /// touched only `routers_net` would pass a fixture that reads just that
+    /// graph, and would leave a router advertising distant locators to its
+    /// routers but not its peers — a state no config can express.
+    #[test]
+    fn gossip_multihop_reaches_both_of_the_routers_graphs() {
+        let fwd = RouterForwarder::new(zid(0x01));
+        assert!(
+            !fwd.routers_net.borrow().gossip_multihop(),
+            "off by default, as zenoh's config default is"
+        );
+        assert!(!fwd.linkstatepeers_net.borrow().gossip_multihop());
+
+        fwd.set_gossip_multihop(true);
+        assert!(fwd.routers_net.borrow().gossip_multihop(), "routers tier");
+        assert!(
+            fwd.linkstatepeers_net.borrow().gossip_multihop(),
+            "peers tier too — one config value, both graphs"
+        );
+
+        fwd.set_gossip_multihop(false);
+        assert!(!fwd.routers_net.borrow().gossip_multihop());
+        assert!(!fwd.linkstatepeers_net.borrow().gossip_multihop());
     }
 
     /// R2637 — the weight reaches the WIRE record, end to end: a configured
