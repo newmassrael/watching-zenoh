@@ -451,29 +451,39 @@ fn tier_of(whatami: WhatAmI) -> FaceTier {
 /// hash for a given (keyexpr, zid) pair — all routers therefore agree on the one
 /// master, which is what makes exactly one router bridge the two meshes
 /// (cross-mesh loop-freedom rests on this agreement, not on the hop budget,
-/// which [`compute_self_publish_forward`] RESETS at each origination). That
-/// agreement is proven BETWEEN WZ ROUTERS by this module's unit tests.
+/// which [`compute_self_publish_forward`] RESETS at each origination). BETWEEN
+/// WZ ROUTERS that agreement is exercised end-to-end and not only in unit
+/// tests: `wz_router_hat_non_master_defers_a_client_double_delivery` fixes both
+/// zids so HRW reproducibly makes one router the NON-master, and the defer it
+/// then witnesses fires only inside the non-master gate.
 ///
 /// ⚠ R2641 — this doc used to add "so a wz router elects the same master as a
 /// zenohd router sharing the mesh (cross-impl federation)". That claim is
-/// withdrawn, for two measured reasons rather than one:
+/// withdrawn. The reason is NOT that nothing witnesses it — an earlier draft of
+/// this very note said so and was WRONG, having read four "no election is
+/// exercised here" scope notes as if they were the whole tree. A declared
+/// cross-impl witness exists; the sentence simply asserted more than it reaches.
 ///
-/// * **The pin has no election at all.** `elect_router` occurs ZERO times in the
-///   pinned upstream — what was removed there is the whole mechanism, not the
-///   per-face accessor an earlier residual named. So there is no zenohd at this
-///   pin for a master to be agreed WITH.
-/// * **It was never witnessed against any version.** No lane exercises it;
-///   `wz-integration-tests/tests/wz_router_hat_mesh.rs` says so three times in
-///   its own words ("master-election is a NO-OP here — unit-proven separately,
-///   not exercised by this lane"). The byte-feed order does mirror zenoh 1.5.0,
-///   which is the shape this port came from, but mirroring an algorithm is not
-///   evidence that two implementations agree on a wire.
+/// * **The pin has no election at all.** `elect_router`, `shared_nodes` and
+///   `is_master` occur ZERO times in the checkout that declares the pinned
+///   upstream version — the whole mechanism was removed there, not the per-face
+///   accessor an earlier residual named. So there is no zenohd at this pin for a
+///   master to be agreed WITH.
+/// * **The declared witness grades ITSELF partial, and says why.**
+///   `wz-integration-tests/tests/wz_router_hat_zenohd_interop.rs` carries this
+///   module's cross-impl marker for the master election in the wz-to-zenohd
+///   direction, at grade `partial`, and states in its own words that its two
+///   routers are each the SOLE master of their domain: what it proves is the
+///   master GATE being live and load-bearing on a foreign path, never an
+///   election DISCRIMINATING between candidates, since a one-candidate election
+///   has no order to invert. Its header names the topology that would reach it —
+///   a 3-plus-router mixed-vendor mesh where a non-master wz router must bridge.
 ///
-/// ⛔ Do NOT restore the claim by re-dating it to 1.5.0: an unwitnessed
-/// interoperability claim is unwitnessed whichever version it names. Restoring
-/// it means marking it `wz-proves:` and letting Layer A4 demand the witness —
-/// which is the shape open-debt item 751 records, along with the question this
-/// round does NOT answer: whether wz keeps a mechanism the reference dropped.
+/// ⛔ Do NOT restore the claim by re-dating it to 1.5.0. The gap is the
+/// MULTI-CANDIDATE mixed-vendor topology, and that is missing whichever version
+/// the claim names. Leave the marker at `partial` so Layer A4 keeps asking for
+/// the rest; open-debt item 751 carries the question this round does NOT answer,
+/// which is whether wz keeps a mechanism the reference dropped.
 fn elect_router<'a>(
     self_zid: &Zid,
     keyexpr: &str,

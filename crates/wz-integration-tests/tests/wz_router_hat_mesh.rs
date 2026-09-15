@@ -946,7 +946,9 @@ fn wz_router_hat_shares_a_router_across_both_meshes() {
 /// Witness: R1's `deferred a non-master client delivery` — a POSITIVE observable
 /// that fires ONLY inside the non-master block-3 gate. A broken guard (the gate
 /// removed) never defers, so the witness never fires: the RED discriminator. zids
-/// are FIXED (R1=01, R2=02) so the HRW election is deterministic; KE is chosen so
+/// are FIXED (R1=02020202, R2=01010101 — the spelling the spawns below use, and
+/// R2641 corrects this line, which had them the other way round) so the HRW
+/// election is deterministic; KE is chosen so
 /// R1 is the non-master (the witness fires only when it is — empirically pinned).
 #[test]
 #[ignore = "binary-dep e2e (wz-ap-demo --features router-hat-router); run via --ignored / Layer E7"]
