@@ -2733,6 +2733,68 @@ mod tests {
         }
     }
 
+    /// R2646 — THE JOIN: a real sample carries its kind through
+    /// [`AdminConfigWriteBody::of_sample`] into the gate, and the gate answers
+    /// for the body the sample actually had.
+    ///
+    /// ⚠ This test exists because the two ends were proven separately and the
+    /// SEAM between them was not. The forwarder was proven to deliver a Del
+    /// sample; the gate was proven to decode an `AdminConfigWriteBody::Del`;
+    /// neither says that a Del SAMPLE becomes a Del BODY, and `of_sample` is the
+    /// one line where that could go wrong for every host at once. A claim true
+    /// at both ends can be false in the join.
+    ///
+    /// Both kinds go through one fixture with the SAME keyexpr, so the only
+    /// difference between the two halves is the kind — which makes the differing
+    /// outcomes attributable to it and nothing else. The Put half also carries a
+    /// payload the Del half cannot, so a mapping that ignored the kind would fail
+    /// on whichever half it defaulted to.
+    #[test]
+    fn a_samples_kind_reaches_the_gate_through_of_sample() {
+        use crate::sink::BorrowedSample;
+
+        let key = "@/a1b2/peer/config/adminspace/permissions/read";
+        let put = BorrowedSample {
+            keyexpr: key,
+            payload: b"false",
+            kind: crate::sample_kind::SampleKind::Put,
+            reliability: crate::reliability::Reliability::Reliable,
+        };
+        assert_eq!(
+            parse_admin_config_write(
+                WRITE_PREFIX,
+                put.keyexpr,
+                AdminConfigWriteBody::of_sample(&put),
+                true
+            ),
+            AdminConfigWriteOutcome::Apply(AdminConfigWrite::SetKey {
+                key: String::from("adminspace/permissions/read"),
+                value: String::from("false"),
+            }),
+            "a Put sample reaches the gate as a Put, carrying its payload"
+        );
+
+        let del = BorrowedSample {
+            keyexpr: key,
+            payload: b"",
+            kind: crate::sample_kind::SampleKind::Del,
+            reliability: crate::reliability::Reliability::Reliable,
+        };
+        assert_eq!(
+            parse_admin_config_write(
+                WRITE_PREFIX,
+                del.keyexpr,
+                AdminConfigWriteBody::of_sample(&del),
+                true
+            ),
+            AdminConfigWriteOutcome::Apply(AdminConfigWrite::RemoveKey {
+                key: String::from("adminspace/permissions/read"),
+            }),
+            "a Del sample reaches the gate as a Del — the join the forwarder's \
+             delivery test and the gate's decode test do not cover between them"
+        );
+    }
+
     /// R2646 — a DELETE is a WRITE, so `permissions.write == false` refuses it.
     ///
     /// The half of the permission gate that a separate delete entry point would
