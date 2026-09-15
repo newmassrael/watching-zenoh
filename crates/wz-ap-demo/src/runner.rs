@@ -6391,9 +6391,15 @@ async fn run_router_hat_until(
         // `Rc` clone is what makes "the same" literal — both gates read one
         // `RefCell`, so a permit change cannot leave the read and write halves
         // disagreeing about what this node permits.
-        #[cfg(feature = "router-connect-reconcile")]
+        // R2648 — the union of the INTENTS this plane can serve, not the name of
+        // whichever one arrived first. `router-connect-reconcile` gated the whole
+        // config-write host until this round, which made every other runtime write
+        // to a router unreachable by construction: the link weights could be
+        // installed at startup and never changed, because the only door was behind
+        // a routing feature that has nothing to do with them.
+        #[cfg(any(feature = "router-connect-reconcile", feature = "router-config-mutate"))]
         let write_zid_hex = zid_hex.clone();
-        #[cfg(feature = "router-connect-reconcile")]
+        #[cfg(any(feature = "router-connect-reconcile", feature = "router-config-mutate"))]
         let write_admin_cfg = std::rc::Rc::clone(&admin_cfg);
         let handler = move |view: &dyn QueryView, out: &mut dyn ReplyOut| {
             // Resolved per GET off the shared config, exactly as the peer host does —
@@ -6477,7 +6483,7 @@ async fn run_router_hat_until(
         // On the FORWARDER (`register_local_subscriber`, R2393) rather than a Session
         // declare: this host is forwarder-based with no single Session, which is why
         // `run_storage_host` exists as a separate per-client-Session mode at all.
-        #[cfg(feature = "router-connect-reconcile")]
+        #[cfg(any(feature = "router-connect-reconcile", feature = "router-config-mutate"))]
         {
             use wz::runtime_tokio::adminspace::{
                 admin_config_write_key, admin_config_write_prefix, parse_admin_config_write,
@@ -6486,6 +6492,10 @@ async fn run_router_hat_until(
             use wz::runtime_tokio::sink::SampleView;
             let write_key = admin_config_write_key(&write_zid_hex, whatami_str);
             let write_cfg = write_admin_cfg;
+            // Belongs to the ConnectAdd arm alone: the reconcile channel exists
+            // only under the feature that intent is named for, and the plane
+            // above no longer does.
+            #[cfg(feature = "router-connect-reconcile")]
             let write_tx = reconcile_tx.clone();
             // The STRIP prefix comes from `admin_config_write_prefix`, NOT from the
             // subscription pattern above. The first cut of this host wrote
@@ -6508,6 +6518,7 @@ async fn run_router_hat_until(
                     AdminConfigWriteBody::of_sample(sample),
                     write_permitted,
                 ) {
+                    #[cfg(feature = "router-connect-reconcile")]
                     AdminConfigWriteOutcome::Apply(AdminConfigWrite::ConnectAdd(eps)) => {
                         // ⚠ NOT the same entry point as `--connect-after`, and R2393
                         // corrected this comment after claiming it was. The CLI path

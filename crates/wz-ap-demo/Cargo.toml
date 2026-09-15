@@ -752,6 +752,21 @@ router-multicast-faces = ["router-hat-router", "wz/router-multicast-faces"]
 # facade passthrough; the atom is active <=> its own cfg sites in run_router_hat +
 # main.rs arg parse (mirrors router-multicast-faces / routing-token-tables).
 router-connect-reconcile = ["router-hat-router", "wz/router-connect-reconcile"]
+# §5.23 adminspace-write (R2648) — compiles the RUNTIME config-key write intent
+# into run_router_hat: the `SetKey` arm of the config-write host, the pending
+# slot it stashes into, and the app-tick drain that hands the rows to
+# `reconfigure_router_link_weights`. A DEMO cfg key in its own right, the shape
+# `adminspace-write` and `router-connect-reconcile` above both use, and needed
+# because `wz/config-mutate-runtime` turns the feature on for the DEPENDENCY and
+# leaves `cfg(feature = "config-mutate-runtime")` in this crate always false —
+# a gate that reads as widened and compiles to nothing.
+#
+# It exists at all because the config-write HOST used to be gated on
+# `router-connect-reconcile`: a §5.23 write plane behind a §5.21 routing
+# feature, so link weights could be installed at startup and never changed. The
+# host's gate is now the UNION of the intents it serves and each arm names its
+# own, which is what lets this one be compiled without the other.
+router-config-mutate = ["router-hat-router", "wz/config-mutate-runtime"]
 # §5.23 adminspace-router-linkstate (R311y204) — compiles the demo router-hat's
 # admin-queryable registration + the per-GET LinkstateNetView render INSIDE
 # run_router_hat. Pulls router-hat-router (the run-mode — a bare `["wz/adminspace-
