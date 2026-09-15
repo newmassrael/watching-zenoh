@@ -6060,6 +6060,31 @@ async fn run_router_hat_until(
     // ordering is upstream's too: its router hat builds the network WITH the
     // weights at `init` and only re-applies them on a config update.
     //
+    // R2648 (§5.23 adminspace-write) — the runtime config-write INTENT slot for
+    // this run-mode, the router twin of `pending_acl_deny` in `run_peer`, and it
+    // is split for the same structural reason that one is: the config-write
+    // handler is stored INSIDE the forwarder, so it cannot also hold
+    // `&forwarder` to drive the reconfigure. The handler turns wire into INTENT
+    // and stashes it here; the app-tick loop below — which does hold both the
+    // shared config and `&forwarder` — drains it and applies it.
+    //
+    // Typed rather than a type-erased carrier of the parsed ingest: there are
+    // three config slices and only TWO of them are push-discipline, so there is
+    // no population to generalise over, and each drain calls a DIFFERENT
+    // `reconfigure_*` with a different typed argument. Erasing the type would
+    // buy a match of the same length inside the drain and lose the type.
+    //
+    // NOT validated here, deliberately. `reconfigure_router_link_weights`
+    // refuses a duplicate destination BEFORE it commits the rows, which is the
+    // one rule the install block below already routes through; checking here as
+    // well would make a second judge of the same question. This host is a Push
+    // subscriber and answers no one, so an earlier refusal would only move a log
+    // line, not reach the writer.
+    #[cfg(feature = "router-config-mutate")]
+    let pending_router_link_weights: std::rc::Rc<
+        std::cell::RefCell<Option<Vec<wz::runtime_tokio::linkstate_forward::TransportWeight>>>,
+    > = std::rc::Rc::new(std::cell::RefCell::new(None));
+
     // Driven through the config's install seam, not by translating rows here, so
     // setup and any later reconfigure take ONE path. A duplicate destination is
     // refused inside it, because that is where upstream refuses it and where the
@@ -6505,6 +6530,10 @@ async fn run_router_hat_until(
             // is silently ignored. Both shapes now come from one origin in
             // `wz-session-core`, which is what makes them impossible to mismatch.
             let write_prefix = admin_config_write_prefix(&write_zid_hex, whatami_str);
+            // The intent slot this handler stashes into; the app-tick loop owns
+            // the sink and drains it.
+            #[cfg(feature = "router-config-mutate")]
+            let write_pending_weights = std::rc::Rc::clone(&pending_router_link_weights);
             let write_handler = move |sample: &dyn SampleView| {
                 // Re-read per PUT off the SAME live config the GET gate reads —
                 // a permit captured at setup could not answer a permission changed
@@ -6563,12 +6592,68 @@ async fn run_router_hat_until(
                             }
                         }
                     }
+                    // R2648 — the RUNTIME config-key write. `SetKey` carries the
+                    // key as DATA rather than as a variant of its own (its doc
+                    // says so: no decoder arm, no intent and no host arm per
+                    // key), so what decides whether this host can serve a given
+                    // key is the runtime-mutable REGISTRY, never a literal list
+                    // here. A literal would be a second answer to "which keys
+                    // can change while this node runs".
+                    #[cfg(feature = "router-config-mutate")]
+                    AdminConfigWriteOutcome::Apply(AdminConfigWrite::SetKey { key, value }) => {
+                        let row = wz::runtime_tokio::config::RUNTIME_MUTABLE_CONFIG_KEYS
+                            .iter()
+                            .find(|row| row.key == key);
+                        match row {
+                            // The one slice this run-mode owns a sink for. Parse
+                            // ONLY: this is a sync closure on the Push ingress and
+                            // holds no `&forwarder`, exactly as the ConnectAdd arm
+                            // above explains for its own resolver.
+                            Some(row) if row.slice == "router_link_weights" => {
+                                match wz::runtime_tokio::config::WzConfig::ingest_for_key(
+                                    &key, &value,
+                                ) {
+                                    Ok(ingest) => {
+                                        let rows = ingest.config.router_transport_weights;
+                                        log::info!(
+                                            "wz-ap-demo router-hat: config-write {key} \
+                                             accepted with {} row(s); queued for apply",
+                                            rows.len()
+                                        );
+                                        // LAST WRITE WINS while a tick is pending,
+                                        // which is what a config key means: the
+                                        // value is the whole slice, so an older
+                                        // pending value has been superseded rather
+                                        // than lost.
+                                        *write_pending_weights.borrow_mut() = Some(rows);
+                                    }
+                                    Err(e) => log::warn!(
+                                        "wz-ap-demo router-hat: config-write {key} refused: \
+                                         {e:?}"
+                                    ),
+                                }
+                            }
+                            // Known to the registry, but its sink lives on another
+                            // host. Named rather than lumped in with an unknown
+                            // key: this one wz CAN change at runtime, just not here.
+                            Some(row) => log::warn!(
+                                "wz-ap-demo router-hat: config-write {key} is \
+                                 runtime-mutable on slice {} but this host holds no \
+                                 sink for it; ignored",
+                                row.slice
+                            ),
+                            None => log::warn!(
+                                "wz-ap-demo router-hat: config-write {key} is not a \
+                                 runtime-mutable key; ignored"
+                            ),
+                        }
+                    }
                     // Every other intent decodes here (the decoder is one SSOT) but
                     // this host applies none: the ACL slice and the storage manager
                     // belong to the peer and storage hosts.
                     AdminConfigWriteOutcome::Apply(other) => log::warn!(
                         "wz-ap-demo router-hat: config-write intent {other:?} decoded but \
-                         this host applies only connect-add; ignored"
+                         this host does not apply it; ignored"
                     ),
                     // zenoh logs a denied write at error (`adminspace.rs:397`).
                     AdminConfigWriteOutcome::Denied => log::error!(
@@ -6722,6 +6807,41 @@ async fn run_router_hat_until(
                 }
             }
             _ = app_tick.tick() => {
+                // R2648 — the config-write DRAIN: intent -> reconfigure. This is
+                // the half the handler structurally cannot do, because it is
+                // stored inside the forwarder and so cannot hold `&forwarder`;
+                // here both that and the shared config are in hand.
+                //
+                // `take()` into a local FIRST so the slot's borrow ends before
+                // the reconfigure runs -- the handler is free to stash the next
+                // write while this one is being applied.
+                //
+                // A refusal is LOGGED and the live weights are left alone, which
+                // is the one place this differs from the startup install above:
+                // there a duplicate destination is a hard error because the node
+                // has not started yet, and here it must not take the node down.
+                // `reconfigure_*` builds the map BEFORE it commits the rows, so
+                // a refused write has changed nothing.
+                #[cfg(feature = "router-config-mutate")]
+                {
+                    let queued = pending_router_link_weights.borrow_mut().take();
+                    if let Some(rows) = queued {
+                        let count = rows.len();
+                        match host_cfg
+                            .borrow_mut()
+                            .reconfigure_router_link_weights(rows, &forwarder)
+                        {
+                            Ok(_) => log::info!(
+                                "wz-ap-demo router-hat: config-write applied \
+                                 {count} link weight(s) at runtime"
+                            ),
+                            Err(dup) => log::error!(
+                                "wz-ap-demo router-hat: config-write link weights \
+                                 REFUSED, live weights unchanged: {dup:?}"
+                            ),
+                        }
+                    }
+                }
                 // `--connect-after` reconcile fire: once the deadline elapses, send
                 // the NEW full desired connect-set on the reconcile channel; the loop
                 // dials the added endpoint(s) (add-dedup skips the initial dials). One

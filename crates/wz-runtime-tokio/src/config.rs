@@ -2286,6 +2286,48 @@ mod tests {
             assert_eq!(sink.calls(), 0);
         }
 
+        /// R2648 — THE JOIN a runtime config-key write adds, and the one thing
+        /// neither end's tests can see.
+        ///
+        /// Both ends were already covered: [`WzConfig::ingest_for_key`] is the
+        /// reader's own acceptance path, and `reconfigure_router_link_weights`
+        /// has the two tests above. What nothing asserted is that the rows a
+        /// WIRE VALUE names are the rows the sink is handed — and this tree has
+        /// paid repeatedly for assuming a join because both of its ends hold.
+        ///
+        /// Anti-vacuity is the point of comparing the rows to literals rather
+        /// than to `is_empty()`: the parse yielding NOTHING would satisfy a
+        /// weaker assertion while proving the opposite of this one, because an
+        /// empty list is a legitimate value here ("weight nothing").
+        #[cfg(all(
+            feature = "zenoh-config",
+            any(feature = "adminspace-core", feature = "routing-router-hat")
+        ))]
+        #[test]
+        fn a_wire_value_for_the_weights_key_reaches_the_sink_through_the_front_end() {
+            let ingest = WzConfig::ingest_for_key(
+                "routing/router/linkstate/transport_weights",
+                r#"[{ dst_zid: "aa", weight: 250 }, { dst_zid: "bb", weight: 7 }]"#,
+            )
+            .expect("the reader honours this key");
+            let rows = ingest.config.router_transport_weights;
+            assert_eq!(
+                rows,
+                vec![row(0xAA, 250), row(0xBB, 7)],
+                "the rows carry the values the wire named, in the order it named them"
+            );
+
+            let sink = RecordingSink::new(true);
+            let mut cfg = WzConfig::new();
+            assert_eq!(cfg.reconfigure_router_link_weights(rows, &sink), Ok(true));
+            assert_eq!(sink.calls(), 1, "the sink is driven exactly once");
+            assert_eq!(
+                cfg.router_link_weights(),
+                &[row(0xAA, 250), row(0xBB, 7)],
+                "and the live rows are what the wire asked for"
+            );
+        }
+
         /// The runtime leg: new rows become the live value, and under
         /// `config-mutate-runtime` they are re-applied to the sink — the
         /// `update_from_config` half. Without that feature the rows are stored
