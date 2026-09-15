@@ -7684,6 +7684,38 @@ pub(crate) async fn run_storage_host(listen: &str, opts: StorageHostOpts) -> io:
                             ),
                         }
                     }
+                    // R2644 — the GENERIC config-key write, upstream's only admin-PUT
+                    // shape. The `admin-read` arm above is the same capability for one
+                    // key, hand-rolled; this one places any runtime-mutable key by
+                    // name. The refusal is LOGGED rather than swallowed: `set_by_key`
+                    // distinguishes a key wz never heard of, one it knowingly ignores,
+                    // and one it reads but cannot change while running, and an
+                    // operator needs to be told which.
+                    // ⚠ Gated on the feature `set_by_key` itself needs. Without it
+                    // the intent falls to the stash arm below, which LOGS it — a
+                    // build that cannot write a key says so rather than failing to
+                    // compile. The demo's combination space has no instrument
+                    // (open-debt item 374), so this is robust by construction
+                    // rather than by having enumerated the combinations.
+                    #[cfg(feature = "zenoh-config")]
+                    AdminConfigWriteOutcome::Apply(AdminConfigWrite::SetKey { key, value }) => {
+                        match sub_cfg.lock() {
+                            Ok(mut c) => match c.set_by_key(&key, &value) {
+                                Ok(()) => log::info!(
+                                    "wz-ap-demo storage-host: config key {key} written \
+                                     over the wire"
+                                ),
+                                Err(err) => log::warn!(
+                                    "wz-ap-demo storage-host: config key {key} refused: \
+                                     {err:?}"
+                                ),
+                            },
+                            Err(_) => log::warn!(
+                                "wz-ap-demo storage-host: config key {key} ignored; the \
+                                 config lock is poisoned"
+                            ),
+                        }
+                    }
                     AdminConfigWriteOutcome::Apply(intent) => {
                         log::info!(
                             "wz-ap-demo storage-host: config-write intent stashed: {intent:?}"
@@ -7868,6 +7900,17 @@ pub(crate) async fn run_storage_host(listen: &str, opts: StorageHostOpts) -> io:
                         // dropped, which is what a `_` would have done.
                         AdminConfigWrite::AdminReadPermit(read) => log::warn!(
                             "wz-ap-demo storage-host: admin-read {read} reached the \
+                         dispatch queue; it is applied in the subscriber and \
+                         should never be stashed"
+                        ),
+                        // R2644 — the generic config-key write. Never queued, for the
+                        // same reason `AdminReadPermit` is not: the subscriber applies
+                        // it where it stands against the live config, so a copy that
+                        // waited for the next iteration would take effect later than
+                        // it was granted. The arm exists so the match stays exhaustive
+                        // and so an intent that DID arrive here is reported.
+                        AdminConfigWrite::SetKey { key, .. } => log::warn!(
+                            "wz-ap-demo storage-host: config key {key} reached the \
                          dispatch queue; it is applied in the subscriber and \
                          should never be stashed"
                         ),

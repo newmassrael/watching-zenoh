@@ -1571,6 +1571,30 @@ pub fn answer_router_admin_query(
 /// construct the storage ones are `#[cfg]`-gated.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AdminConfigWrite {
+    /// R2644 — `.../config/<a/config/key/path> <json5>`: write ONE config key at
+    /// runtime, which is the ONLY shape upstream's admin PUT has.
+    ///
+    /// The variants below are wz's own per-capability spellings, and each cost a
+    /// decoder arm, an intent and a host arm to add. This one costs none of
+    /// that: the key travels as data and the runtime places it against the
+    /// registry of runtime-mutable keys.
+    ///
+    /// ⚠ NEITHER HALF IS VALIDATED HERE. This crate cannot see that registry —
+    /// it is in the crate that depends on this one — so `key` may name nothing
+    /// and `value` may not be JSON5. Both are checked where they are applied,
+    /// and both refusals name the key. A host must not assume this intent is
+    /// applicable merely because it decoded.
+    ///
+    /// ⚠ `AdminReadPermit` below is the LEGACY spelling of the key
+    /// `adminspace/permissions/read`, which this variant now also carries. It
+    /// stays because a foreign client speaks it and a lane witnesses it; it is
+    /// not the shape to copy for a new key.
+    SetKey {
+        /// The upstream config key path, `/`-separated, exactly as the PUT spelled it.
+        key: String,
+        /// The value's JSON5 text, trimmed.
+        value: String,
+    },
     /// `.../config/acl-deny <keyexpr>` — deny the keyexpr carried in the payload.
     AclDeny(String),
     /// `.../config/storage-add <name>[@<volume_id>]:<keyexpr>` — live-spawn a
@@ -1832,6 +1856,36 @@ pub fn parse_admin_config_write(
                 "false" => AdminConfigWriteOutcome::Apply(AdminConfigWrite::AdminReadPermit(false)),
                 _ => AdminConfigWriteOutcome::Malformed,
             }
+        }
+        // R2644 — THE GENERIC CONFIG PATH, which is the only shape upstream has:
+        // its admin PUT carries the config key as the suffix and the value as
+        // the payload, and it refuses an unknown path at insert. wz grew a
+        // bespoke sub-key per capability instead (`acl-deny`, `storage-add`,
+        // `admin-read`), which is why writing a new key has cost a new arm here
+        // plus a new intent plus a host edit. This arm is the one that scales.
+        //
+        // ⛔ THE KEY IS NOT VALIDATED HERE, and that is forced rather than lazy:
+        // the runtime-mutable registry lives in `wz-runtime-tokio`, which
+        // depends on THIS crate and not the other way round, so this decoder
+        // structurally cannot see it. The runtime refuses an unplaceable key by
+        // name when it applies — the same split every other arm here uses,
+        // shape decided here and applied there.
+        //
+        // ⚠ ROUTED ON `/`, and the bound that draws is stated rather than
+        // hidden: a config key that is a SINGLE segment still reaches
+        // `UnknownKey` below. Measured — the only single-segment keys in the
+        // registry today (`downsampling`, `low_pass_filter`) are ones wz does
+        // not honour, so both routes end in a refusal that names the key and
+        // the bound is currently inert. It stops being inert the day a
+        // single-segment key becomes honoured AND runtime-mutable, and the fix
+        // then is a distinct wire prefix, not a guess here.
+        other if other.contains('/') => {
+            let value = String::from_utf8_lossy(payload);
+            let value = value.trim();
+            AdminConfigWriteOutcome::Apply(AdminConfigWrite::SetKey {
+                key: String::from(other),
+                value: String::from(value),
+            })
         }
         other => AdminConfigWriteOutcome::UnknownKey(String::from(other)),
     }
@@ -2265,6 +2319,56 @@ mod tests {
             out,
             AdminConfigWriteOutcome::Apply(AdminConfigWrite::AclDeny(String::from("mesh/data")))
         );
+    }
+
+    /// R2644 — a config KEY PATH decodes to the generic write, carrying both
+    /// halves as data. This is upstream's only admin-PUT shape.
+    #[test]
+    fn parse_config_write_takes_a_config_key_path() {
+        let out = parse_admin_config_write(
+            WRITE_PREFIX,
+            "@/a1b2/peer/config/adminspace/permissions/read",
+            b"  true  ",
+            true,
+        );
+        assert_eq!(
+            out,
+            AdminConfigWriteOutcome::Apply(AdminConfigWrite::SetKey {
+                key: String::from("adminspace/permissions/read"),
+                value: String::from("true"),
+            })
+        );
+    }
+
+    /// R2644 — ⭐ THE CONTROL that the generic arm did not swallow the sub-key
+    /// space. A name that is not a path must still reach `UnknownKey`, or every
+    /// typo of a bespoke sub-key would silently become a config write and be
+    /// refused a whole crate away with a different message.
+    #[test]
+    fn parse_config_write_leaves_non_path_subkeys_to_the_named_arms() {
+        let out = parse_admin_config_write(
+            WRITE_PREFIX,
+            "@/a1b2/peer/config/acl-denyy",
+            b"mesh/data",
+            true,
+        );
+        assert_eq!(
+            out,
+            AdminConfigWriteOutcome::UnknownKey(String::from("acl-denyy"))
+        );
+    }
+
+    /// R2644 — the write gate still precedes the generic arm, exactly as it
+    /// precedes every named one.
+    #[test]
+    fn parse_config_write_gate_precedes_the_generic_arm() {
+        let out = parse_admin_config_write(
+            WRITE_PREFIX,
+            "@/a1b2/peer/config/adminspace/permissions/read",
+            b"true",
+            false,
+        );
+        assert_eq!(out, AdminConfigWriteOutcome::Denied);
     }
 
     #[test]

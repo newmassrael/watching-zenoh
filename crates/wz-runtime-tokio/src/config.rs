@@ -189,6 +189,38 @@ pub const RUNTIME_MUTABLE_CONFIG_KEYS: &[RuntimeMutableKey] = &[
     },
 ];
 
+/// Why a runtime key write was refused — see [`WzConfig::set_by_key`].
+///
+/// Every arm NAMES the key. Upstream refuses an unknown config path at insert
+/// and says which; a write that failed silently would be indistinguishable from
+/// one that applied, which is the shape this whole seam exists to end.
+#[cfg(all(
+    feature = "zenoh-config",
+    any(feature = "adminspace-core", feature = "routing-router-hat")
+))]
+#[derive(Debug, Clone, PartialEq)]
+pub enum SetByKeyError {
+    /// A segment was empty or carried something outside `[A-Za-z0-9_]`. Refused
+    /// before the document is built, because the key is spliced INTO it.
+    MalformedKey { key: String },
+    /// The value is not JSON5. Refused before the document is built, for the
+    /// same reason.
+    MalformedValue { key: String },
+    /// The reader's own verdict on the one-key document: a key wz does not know
+    /// at all, a wrong type, or a value the acceptance boundary refuses.
+    Document(crate::zenoh_config::ConfigIngestError),
+    /// wz KNOWS this key and deliberately does not honour it, so the reader
+    /// accepted the document and reported the key as ignored. Kept distinct
+    /// from both neighbours: `Document` would claim wz has never heard of it,
+    /// and `NotRuntimeMutable` would claim wz acts on it at startup.
+    NotHonoured { key: String },
+    /// wz READS this key but holds no live slice for it in this build, so
+    /// storing it would change nothing a consumer can see. Distinct from
+    /// `Document` on purpose: that one means "wz does not know this key", this
+    /// one means "wz knows it and cannot change it while running".
+    NotRuntimeMutable { key: String },
+}
+
 /// The typed wz runtime config SSOT — see the module doc. The read-at-open
 /// fields are `pub` (introspection-readable); the live `interceptors`
 /// field is private so every mutation routes through
@@ -940,6 +972,90 @@ impl WzConfig {
         applied
     }
 
+    /// Write ONE config key at runtime, the way upstream's admin PUT does.
+    ///
+    /// `key` is the upstream spelling (`adminspace/permissions/read`) and
+    /// `value` is its JSON5 text (`true`, `[{...}]`). The key is built into a
+    /// NESTED one-key document and handed to the ordinary reader, so the
+    /// acceptance boundary, the type check and the unknown-key refusal are the
+    /// reader's rather than a second implementation of them.
+    ///
+    /// ⛔ THE DOCUMENT IS BUILT, NEVER CONCATENATED FROM UNTRUSTED TEXT. Both
+    /// halves arrive from the wire, so both are injection vectors into the
+    /// document this assembles:
+    ///
+    /// * the KEY is refused unless every segment is `[A-Za-z0-9_]+`, so a
+    ///   segment cannot carry a quote and close the object early;
+    /// * the VALUE is PARSED as a standalone JSON5 value before it is embedded,
+    ///   so text like `true, "write": false` is refused — a single value cannot
+    ///   carry a trailing member. Embedded raw, that text would have produced a
+    ///   well-formed document setting a key nobody asked for.
+    ///
+    /// ⚠ THE PARSE IS THE GUARD, NOT THE RE-EMIT, and this sentence is here
+    /// because R2644's first control proved it the other way round. Damaging
+    /// only the re-emit — splicing the raw text while still parsing it — left
+    /// every test GREEN, because the parse had already refused the value. A
+    /// control that comes back green is a finding: the re-emit is belt and
+    /// braces (it normalises what is embedded), and removing the PARSE is what
+    /// lets the smuggled key land.
+    ///
+    /// ⚠ `get` splits on `/`, so the document must be NESTED — the flat
+    /// spelling a wire PUT carries would resolve to nothing and the write would
+    /// silently do nothing.
+    #[cfg(all(
+        feature = "zenoh-config",
+        any(feature = "adminspace-core", feature = "routing-router-hat")
+    ))]
+    pub fn set_by_key(&mut self, key: &str, value: &str) -> Result<(), SetByKeyError> {
+        let segments: Vec<&str> = key.split('/').collect();
+        if segments.is_empty()
+            || segments
+                .iter()
+                .any(|s| s.is_empty() || !s.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_'))
+        {
+            return Err(SetByKeyError::MalformedKey {
+                key: String::from(key),
+            });
+        }
+
+        let parsed =
+            wz_session_core::json5::parse(value).map_err(|_| SetByKeyError::MalformedValue {
+                key: String::from(key),
+            })?;
+        let canonical = parsed.to_json5_text();
+
+        let mut document = String::new();
+        for segment in &segments {
+            document.push('{');
+            document.push('"');
+            document.push_str(segment);
+            document.push_str("\":");
+        }
+        document.push_str(&canonical);
+        for _ in &segments {
+            document.push('}');
+        }
+
+        let ingest = crate::zenoh_config::ZenohNodeConfig::from_json5(&document)
+            .map_err(SetByKeyError::Document)?;
+        // The reader ACCEPTS a key wz knows and does not honour — a stock zenoh
+        // document carries many, and refusing the whole document over one would
+        // be wrong. It reports them separately instead, and a write naming one
+        // must not be answered the same way as a write naming a key wz reads:
+        // R2644's first draft collapsed the two and a test said so.
+        if ingest.ignored.iter().any(|ignored| ignored == key) {
+            return Err(SetByKeyError::NotHonoured {
+                key: String::from(key),
+            });
+        }
+        if self.apply_zenoh_config(&ingest).is_empty() {
+            return Err(SetByKeyError::NotRuntimeMutable {
+                key: String::from(key),
+            });
+        }
+        Ok(())
+    }
+
     /// One key of [`Self::apply_zenoh_config`]; `true` when the value landed.
     ///
     /// The catch-all is NOT a silent pass: a registry key with no arm here
@@ -1129,6 +1245,111 @@ mod tests {
         assert!(
             cfg.apply_zenoh_config(&ingest).is_empty(),
             "a silent document is not an instruction"
+        );
+    }
+
+    /// R2644 — a runtime key write reaches the live value, by the upstream
+    /// spelling of the key.
+    #[cfg(all(feature = "zenoh-config", feature = "adminspace-core"))]
+    #[test]
+    fn a_runtime_key_write_reaches_the_live_value() {
+        let mut cfg = WzConfig::new();
+        cfg.set_admin_permissions(wz_session_core::adminspace::AdminSpacePermissions {
+            read: false,
+            write: true,
+        });
+        cfg.set_by_key("adminspace/permissions/read", "true")
+            .expect("a honoured, runtime-mutable key is written");
+        assert!(cfg.admin_permissions.read);
+        assert!(cfg.admin_permissions.write, "its sibling is untouched");
+    }
+
+    /// R2644 — ⭐ THE INJECTION CONTROL for the VALUE, and the reason
+    /// `set_by_key` parses the value and re-emits it instead of splicing the
+    /// text it was handed.
+    ///
+    /// Both halves of a runtime write arrive from the wire. Spliced raw, the
+    /// value below would have produced
+    /// `{"adminspace":{"permissions":{"read":true, "write": false}}}` — a
+    /// perfectly well-formed document that parses cleanly and sets a key the
+    /// caller never named. Parsing the value first refuses it as a value,
+    /// because a single JSON5 value cannot carry a trailing member.
+    #[cfg(all(feature = "zenoh-config", feature = "adminspace-core"))]
+    #[test]
+    fn a_value_that_smuggles_a_second_key_is_refused() {
+        let mut cfg = WzConfig::new();
+        cfg.set_admin_permissions(wz_session_core::adminspace::AdminSpacePermissions {
+            read: false,
+            write: true,
+        });
+        let err = cfg
+            .set_by_key("adminspace/permissions/read", r#"true, "write": false"#)
+            .expect_err("a value carrying a second member is not a value");
+        assert_eq!(
+            err,
+            SetByKeyError::MalformedValue {
+                key: String::from("adminspace/permissions/read")
+            }
+        );
+        assert!(!cfg.admin_permissions.read, "nothing was applied");
+        assert!(cfg.admin_permissions.write, "the smuggled key did NOT land");
+    }
+
+    /// R2644 — the injection control for the KEY. A segment carrying a quote
+    /// would close the object the document builder is opening.
+    #[cfg(all(feature = "zenoh-config", feature = "adminspace-core"))]
+    #[test]
+    fn a_key_segment_outside_the_alphabet_is_refused() {
+        let mut cfg = WzConfig::new();
+        for bad in [
+            r#"adminspace/permissions/read", "mode": "client"#,
+            "",
+            "a//b",
+        ] {
+            assert!(
+                matches!(
+                    cfg.set_by_key(bad, "true"),
+                    Err(SetByKeyError::MalformedKey { .. })
+                ),
+                "refused before the document is built: {bad:?}"
+            );
+        }
+    }
+
+    /// R2644 — THREE refusals wz must keep distinct, and the first draft of
+    /// this test proved the code was collapsing two of them.
+    ///
+    /// A key wz has never heard of, a key it knows and deliberately ignores,
+    /// and a key it reads at startup but cannot change while running are three
+    /// different answers to an operator. Returning one answer for the last two
+    /// would tell someone writing `downsampling` that wz reads the key, which
+    /// it does not.
+    #[cfg(all(feature = "zenoh-config", feature = "adminspace-core"))]
+    #[test]
+    fn the_three_refusals_are_kept_distinct() {
+        let mut cfg = WzConfig::new();
+
+        // Never heard of it: the reader's acceptance boundary refuses.
+        assert!(matches!(
+            cfg.set_by_key("no_such_key", "true"),
+            Err(SetByKeyError::Document(_))
+        ));
+
+        // Known and deliberately NOT honoured: the reader accepts the document
+        // — a stock zenoh file carries many such keys — and reports it ignored.
+        assert_eq!(
+            cfg.set_by_key("downsampling", "[]"),
+            Err(SetByKeyError::NotHonoured {
+                key: String::from("downsampling")
+            })
+        );
+
+        // Honoured at startup, not runtime-mutable: accepted, read, unapplied.
+        assert_eq!(
+            cfg.set_by_key("mode", r#""router""#),
+            Err(SetByKeyError::NotRuntimeMutable {
+                key: String::from("mode")
+            })
         );
     }
 
