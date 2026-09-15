@@ -7765,7 +7765,14 @@ layer_c1y_cargo_test_routing_peer() {
     # with a two-kind slice it went GREEN under its own damage, because nothing
     # bound the classifier arm that produces that slice. It drives a real
     # unknown-tag push now.
-    _runci_guarded_test "C1y interceptor" 40 \
+    # R2631 — 40 -> 41: `a_username_scoped_deny_reaches_the_direct_and_the_cached_verdict`,
+    # the enforcer's witness that the username axis reaches both verdict paths.
+    # READ off this command with `$access` expanded, which printed 41.
+    # ⚠ The pre-push count-guard gate could not have caught this: `$access` is
+    # assembled by the shell, so the gate reports the guard unrunnable and skips
+    # it. The move was found by running the command by hand after checking which
+    # skipped guards this push's tests could fall under.
+    _runci_guarded_test "C1y interceptor" 41 \
         cargo test -p wz-runtime-tokio --features "$access" --lib interceptor --quiet || return 1
     # R311y509 — 211 -> 213: the peer's CURRENT liveliness-TOKEN dump, in its two
     # tiers. Each test is bound by a damage that reds it ALONE: disabling the client
