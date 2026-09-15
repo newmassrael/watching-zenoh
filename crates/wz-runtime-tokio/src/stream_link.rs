@@ -118,7 +118,17 @@ impl ExpirySignal {
 /// instant. The cap exists because one enormous sleep is the unsound shape, and
 /// because re-reading the wall clock is what lets a machine whose time jumped
 /// forward notice.
-#[cfg(any(feature = "transport-link-quic", feature = "transport-link-tls"))]
+/// The quic arm carries `transport-unicast` because the CONSUMER does.
+/// `quic_pipeline::arm_expiry_close` is gated `all(transport-link-quic,
+/// transport-unicast)`, so a `--no-default-features --features
+/// transport-link-quic` build compiled this constant and `sleep_until_unix`
+/// with no caller left, and Layer C1ac died at `-D dead-code` (hosted run
+/// 34891263159). The union-of-consumers rule below is unchanged; what had been
+/// copied here was one half of a consumer gate that is a CONJUNCTION.
+#[cfg(any(
+    all(feature = "transport-link-quic", feature = "transport-unicast"),
+    feature = "transport-link-tls"
+))]
 const EXPIRY_MAX_SLEEP: std::time::Duration = std::time::Duration::from_secs(600);
 
 /// R2600, moved here by R2608 — sleep until `deadline` (Unix seconds),
@@ -129,7 +139,10 @@ const EXPIRY_MAX_SLEEP: std::time::Duration = std::time::Duration::from_secs(600
 /// is the shape that drifts the day either moves; the gate is therefore the
 /// UNION of its consumers, which is open-debt 730's rule applied before the
 /// second consumer rather than after.
-#[cfg(any(feature = "transport-link-quic", feature = "transport-link-tls"))]
+#[cfg(any(
+    all(feature = "transport-link-quic", feature = "transport-unicast"),
+    feature = "transport-link-tls"
+))]
 pub(crate) async fn sleep_until_unix(deadline: i64) {
     loop {
         let now = std::time::SystemTime::now()
