@@ -1462,6 +1462,35 @@ pub(crate) fn expand_stock_zenoh_config_for_build(
     // here follows -- an explicit argv beats a file. A file that STATES the
     // default therefore reads as already-the-behaviour rather than as expanded,
     // which is the honest verdict for it.
+    // R2633 — `routing/router/linkstate/transport_weights` reaches the flag that
+    // implements it, on the ROUTER-HAT run mode alone.
+    //
+    // The key is a router's, and a node this file selects as a peer or a client
+    // has no routers network to weight — so for those the honest verdict is
+    // `NotTheRoleTheseEndpointsSelect`, the same one `mode` uses when the file's
+    // role and the endpoints disagree. An EMPTY list is `AlreadyTheBehaviour`:
+    // it is what an unset key already means, and emitting nothing for it is not
+    // a key that failed to reach the node.
+    if named("routing/router/linkstate/transport_weights") {
+        let is_router_hat = selected.map(|s| s.flag) == Some("--router-hat");
+        if !is_router_hat {
+            exp.record(
+                "routing/router/linkstate/transport_weights",
+                KeyEffect::NotTheRoleTheseEndpointsSelect,
+            );
+        } else if cfg.router_transport_weights.is_empty() {
+            exp.record(
+                "routing/router/linkstate/transport_weights",
+                KeyEffect::AlreadyTheBehaviour,
+            );
+        } else {
+            exp.router_link_weights(
+                "routing/router/linkstate/transport_weights",
+                &cfg.router_transport_weights,
+                no_sink("routing/router/linkstate/transport_weights"),
+            );
+        }
+    }
     if named("routing/peer/mode") {
         if cfg.peer_linkstate {
             exp.record("routing/peer/mode", KeyEffect::AlreadyTheBehaviour);
@@ -2117,6 +2146,49 @@ impl Expansion<'_> {
         }
     }
 
+    /// R2633 — the configured router link weights, onto a repeatable
+    /// `--router-link-weight <zid>=<weight>`.
+    ///
+    /// Built on [`Self::link_config`]'s rule and not on [`Self::pair`]'s: the
+    /// flag is repeatable, so "already typed" is a question about the
+    /// DESTINATION rather than about the flag. An operator's weight toward one
+    /// neighbour says nothing about the file's weight toward another, and a row
+    /// whose destination the operator already typed must not be expanded over.
+    ///
+    /// The key's single verdict comes from [`list_key_effect`], the same
+    /// derivation the endpoint lists use: all rows carried is `Expanded`, some
+    /// carried is `PartlyExpanded { named, carried }` — a count, because an
+    /// operator told "some of your weights reached the node" without being told
+    /// how many has been handed a puzzle instead of a fact.
+    fn router_link_weights(
+        &mut self,
+        key: &'static str,
+        rows: &[wz::runtime_tokio::zenoh_config::TransportWeight],
+        blocked: Option<KeyEffect>,
+    ) -> KeyEffect {
+        if let Some(blocked) = blocked {
+            self.record(key, blocked);
+            return blocked;
+        }
+        let typed: Vec<String> = parse_pairs(self.rest, "--router-link-weight")
+            .iter()
+            .filter_map(|v| v.split_once('=').map(|(z, _)| String::from(z)))
+            .collect();
+        let mut carried = 0usize;
+        for row in rows {
+            let hex = wz::runtime_tokio::zid_hex::zid_to_zenoh_hex(row.dst_zid.as_slice());
+            if typed.contains(&hex) {
+                continue;
+            }
+            self.added.push(String::from("--router-link-weight"));
+            self.added.push(format!("{hex}={}", row.weight.get()));
+            carried += 1;
+        }
+        let effect = list_key_effect(rows.len(), carried);
+        self.record(key, effect);
+        effect
+    }
+
     fn presence(
         &mut self,
         key: &'static str,
@@ -2421,6 +2493,22 @@ pub(crate) const ARGV_ONLY_KIND_LEDGER: &[(&str, &str, &str)] = &[
     // wz spawning a multicast egress inside `run_router_hat` alone; the leg
     // DERIVES that from what each arm broadcast rather than excusing arms by
     // name, so an arm that starts beaconing is judged the moment it does.
+    // ⚠ R2633 (open-debt item 220) — this kind is NOT empty any more, and that
+    // is the honest entry rather than a regression: R2204 recorded the queue as
+    // exhausted over the nine keys that existed then, and this round honours a
+    // TENTH key whose effect a frame does carry. The queue reopening is what a
+    // new wire-carried key is supposed to do to it.
+    (
+        "routing/router/linkstate/transport_weights",
+        KIND_NOT_YET_READ,
+        "expands to `--router-link-weight <zid>=<weight>`. The configured weight \
+         rides the LinkState entry's per-link weight list — upstream writes it in \
+         `zenoh/src/net/protocol/network.rs` @ `fn make_link_state` behind the \
+         `H` option, and wz emits the same field — so a fixture pair of a \
+         weighted and an unweighted router shows the option and the value. What \
+         no leg does yet is drive it from the FILE: the flooded weight is read \
+         off a frame today only by a unit test that calls the setter directly.",
+    ),
     // ── (2) no frame field carries it ───────────────────────────────────
     (
         "connect/timeout_ms",
@@ -4000,6 +4088,19 @@ mod stock_config_tests {
                      exit_on_failure: true } }"#,
                 r#"{ mode: "peer", listen: { endpoints: ["tcp/127.0.0.1:0"],
                      exit_on_failure: false } }"#,
+            ),
+            // R2633 — `mode: "router"` on BOTH sides, because this key expands
+            // only for the run mode that owns a routers network: a `peer`
+            // document would make the pair differ by nothing and report the key
+            // as reaching no behaviour. The control states no weight (which is
+            // what an unset key means) and the variant states one, so the argv
+            // difference is attributable to this key alone.
+            (
+                "routing/router/linkstate/transport_weights",
+                r#"{ mode: "router", listen: { endpoints: ["tcp/127.0.0.1:0"] } }"#,
+                r#"{ mode: "router", listen: { endpoints: ["tcp/127.0.0.1:0"] },
+                     routing: { router: { linkstate: { transport_weights:
+                       [ { dst_zid: "b1b2c3d4", weight: 200 } ] } } } }"#,
             ),
         ]
     }
@@ -6504,6 +6605,52 @@ pub(crate) fn parse_connect_retry(args: &[String]) -> Result<Option<RetryPolicy>
     parse_retry_schedule(args, "--connect-retry")
 }
 
+/// R2633 — `--router-link-weight <zid>=<weight>`, repeatable: the weights this
+/// ROUTER advertises on its links to named neighbours (zenoh
+/// `routing.router.linkstate.transport_weights`).
+///
+/// REPEATABLE rather than one comma-separated value, because the key names a SET
+/// and [`parse_pairs`]' own doc draws that line; and `Result` rather than an
+/// exit, for [`parse_connect_retry`]'s reason — the accept/reject set is the
+/// whole content of this function and a parser that exits cannot be tested.
+///
+/// Every refusal here is one a stock zenohd makes on the equivalent document,
+/// measured against the pinned binary (R2633): an uppercase or leading-zero zid
+/// ("Invalid id"), a zero or over-wide weight ("expected a nonzero u16"). The
+/// DUPLICATE destination is deliberately NOT refused here — it is refused by
+/// [`link_weights_from_config`](wz::runtime_tokio::zenoh_config::link_weights_from_config),
+/// where upstream refuses it, so the flag and the config file are judged by one
+/// rule instead of two.
+pub(crate) fn parse_router_link_weights(
+    args: &[String],
+) -> Result<Vec<wz::runtime_tokio::zenoh_config::TransportWeight>, String> {
+    use core::num::NonZeroU16;
+    let mut out = Vec::new();
+    for raw in parse_pairs(args, "--router-link-weight") {
+        let (zid_text, weight_text) = raw
+            .split_once('=')
+            .ok_or_else(|| format!("--router-link-weight expects <zid>=<weight>, got {raw:?}"))?;
+        let bytes = wz::runtime_tokio::zid_hex::zenoh_hex_to_zid(zid_text).ok_or_else(|| {
+            format!(
+                "--router-link-weight {raw:?}: {zid_text:?} is not a zid \
+                 (lowercase hex, no leading zero, at most 16 bytes)"
+            )
+        })?;
+        let weight = weight_text
+            .parse::<u16>()
+            .ok()
+            .and_then(NonZeroU16::new)
+            .ok_or_else(|| {
+                format!("--router-link-weight {raw:?}: {weight_text:?} is not 1..=65535")
+            })?;
+        out.push(wz::runtime_tokio::zenoh_config::TransportWeight {
+            dst_zid: wz::runtime_tokio::linkstate_forward::Zid::from_slice(&bytes),
+            weight,
+        });
+    }
+    Ok(out)
+}
+
 /// R2159 (open-debt item 229) — `--listen-retry <init_ms>,<max_ms>,<factor>`,
 /// the BIND phase's schedule (zenoh's `listen.retry`).
 ///
@@ -7920,6 +8067,73 @@ mod link_config_flag_tests {
             let err = tuning(&["--link-config", value]).expect_err(value);
             assert!(err.contains(needle), "{value} -> {err}");
         }
+    }
+}
+
+/// R2633 — `--router-link-weight <zid>=<weight>`: what the flag takes, and what
+/// it refuses because a stock zenohd refuses the equivalent document.
+#[cfg(test)]
+mod router_link_weight_flag_tests {
+    use super::*;
+
+    fn argv(specs: &[&str]) -> Vec<String> {
+        let mut out = vec!["--router-hat".to_string(), "tcp/127.0.0.1:0".to_string()];
+        for s in specs {
+            out.push("--router-link-weight".to_string());
+            out.push((*s).to_string());
+        }
+        out
+    }
+
+    /// Absent is not an error: a router with no weighted link is the shipped
+    /// configuration, and every link then carries zenoh's default.
+    #[test]
+    fn an_absent_flag_yields_no_rows() {
+        assert_eq!(parse_router_link_weights(&argv(&[])), Ok(Vec::new()));
+    }
+
+    /// REPEATABLE, in argv order, one destination each.
+    #[test]
+    fn each_occurrence_is_one_destination() {
+        let rows = parse_router_link_weights(&argv(&["1=10", "b1b2c3d4=65535"]))
+            .expect("two well-formed rows");
+        assert_eq!(rows.len(), 2);
+        assert_eq!(
+            rows[0].dst_zid,
+            wz::runtime_tokio::linkstate_forward::Zid::from_slice(&[0x01])
+        );
+        assert_eq!(rows[0].weight.get(), 10);
+        assert_eq!(rows[1].weight.get(), 65535);
+    }
+
+    /// The refusals, each one a stock zenohd makes on the config that says the
+    /// same thing (measured against the pinned binary, R2633). A DUPLICATE is
+    /// deliberately absent from this list: it parses here and is refused by
+    /// `link_weights_from_config`, which is where the config file's duplicate is
+    /// refused too — one rule for both entry points.
+    #[test]
+    fn a_spelling_a_conforming_node_refuses_is_refused_here() {
+        for spec in [
+            "1",       // no `=`
+            "=10",     // no zid
+            "1=",      // no weight
+            "ABC=10",  // uppercase zid
+            "01=10",   // leading-zero zid
+            "1=0",     // zero weight
+            "1=65536", // past u16
+            "1=-1",    // negative
+            "1=ten",   // not a number
+        ] {
+            assert!(
+                parse_router_link_weights(&argv(&[spec])).is_err(),
+                "{spec} was accepted"
+            );
+        }
+        // A duplicate destination PARSES — the refusal is the map build's.
+        let rows = parse_router_link_weights(&argv(&["1=10", "1=20"]))
+            .expect("a duplicate parses at the flag");
+        assert_eq!(rows.len(), 2);
+        assert!(wz::runtime_tokio::zenoh_config::link_weights_from_config(&rows).is_err());
     }
 }
 

@@ -5755,6 +5755,17 @@ pub(crate) struct RouterHatOpts {
     /// identity/topology, which is why it belongs in this bundle; see
     /// [`DialCertPaths`].
     pub dial_certs: DialCertPaths,
+    /// R2633 — `routing/router/linkstate/transport_weights`, as the operator's
+    /// `--router-link-weight <zid>=<weight>` rows.
+    ///
+    /// Carried as ROWS rather than as the `zid -> weight` map the forwarder
+    /// takes, so the one refusal a well-formed row list can still earn — two
+    /// rows naming the same destination — is made by
+    /// [`link_weights_from_config`](wz::runtime_tokio::zenoh_config::link_weights_from_config),
+    /// which is where upstream makes it and where the CONFIG FILE path is
+    /// judged too. Two entry points with one rule, rather than one rule per
+    /// entry point.
+    pub router_link_weights: Vec<wz::runtime_tokio::zenoh_config::TransportWeight>,
 }
 
 #[cfg(feature = "router-hat-router")]
@@ -5991,6 +6002,36 @@ async fn run_router_hat_until(
     let forwarder =
         RouterForwarder::with_timestamping(Zid::from_slice(&params.zid), node_timestamping)
             .with_drop_future_timestamp(opts.timestamping.drop_future_timestamp());
+
+    // R2633 — the configured link weights reach the ROUTER tier here, before any
+    // face registers, so the first link this router forms already advertises its
+    // weight rather than being re-weighted a moment later. That ordering is
+    // upstream's too: its router hat builds the network WITH the weights at
+    // `init` and only re-applies them on a config update.
+    //
+    // A duplicate destination is refused here and not earlier, because that is
+    // where upstream refuses it and where the config-file path is judged: one
+    // rule for both entry points. Hard error, never a degraded default — the
+    // silently-dropped weight is the failure mode that looks healthy.
+    if !opts.router_link_weights.is_empty() {
+        match wz::runtime_tokio::zenoh_config::link_weights_from_config(&opts.router_link_weights) {
+            Ok(weights) => {
+                let count = weights.len();
+                forwarder.update_router_link_weights(weights);
+                log::info!("router-hat: {count} configured link weight(s) applied");
+            }
+            Err(dup) => {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!(
+                        "wz-ap-demo router-hat: two link weights name the same \
+                         destination {:?}; a stock zenohd refuses the same document",
+                        dup.dst_zid
+                    ),
+                ));
+            }
+        }
+    }
 
     // R311y188 — router-multicast-faces slice 3: the EGRESS run-mode host. A
     // router built with `router-multicast-faces` attaches a data-plane multicast

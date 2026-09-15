@@ -472,6 +472,63 @@ impl LinkEdgeWeight {
     }
 }
 
+/// One CONFIGURED link weight: the weight this node advertises on its link to
+/// `dst_zid`. Mirrors zenoh `TransportWeight`
+/// (`commons/zenoh-config/src/lib.rs` @ `pub struct TransportWeight`), the row
+/// shape of `routing.router.linkstate.transport_weights`.
+///
+/// The weight is a `NonZeroU16` because upstream's is: a zero weight is not a
+/// weight of zero but an unrepresentable value, and a stock zenohd refuses the
+/// document that carries one ("invalid value: integer `0`, expected a nonzero
+/// u16" — measured, R2633). Holding the config row in the routing layer rather
+/// than the config reader follows upstream's own split: the config crate carries
+/// the row, the network layer turns rows into weights.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TransportWeight {
+    /// The neighbour this weight applies to.
+    pub dst_zid: Zid,
+    /// The weight to advertise toward it.
+    pub weight: NonZeroU16,
+}
+
+/// Two configured rows named the same destination — the one way a
+/// well-formed `transport_weights` list is still refused.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DuplicateLinkWeight {
+    /// The destination named twice.
+    pub dst_zid: Zid,
+}
+
+/// Turn configured rows into the map [`LinkstateNetwork::update_link_weights`]
+/// takes, refusing a duplicate destination. Mirrors zenoh
+/// `link_weights_from_config` (`zenoh/src/net/protocol/linkstate.rs` @
+/// `fn link_weights_from_config`), including that the refusal happens HERE and
+/// not at the config parse.
+///
+/// R2633 measured why that placement matters: a stock zenohd RESOLVES a document
+/// whose rows collide (the parser is satisfied) and then dies building the
+/// network — `[Routers Network] config contains a duplicate zid value for
+/// transport weight: 1`, exit 255, against exit 134 for a value the parser
+/// itself rejects. wz's config ingest also validates documents destined for
+/// OTHER nodes, so it must accept what the parser accepts; this is where the
+/// collision is caught.
+pub fn link_weights_from_config(
+    rows: &[TransportWeight],
+) -> Result<HashMap<Zid, LinkEdgeWeight>, DuplicateLinkWeight> {
+    let mut out = HashMap::with_capacity(rows.len());
+    for row in rows {
+        if out
+            .insert(row.dst_zid, LinkEdgeWeight::from_raw(row.weight.get()))
+            .is_some()
+        {
+            return Err(DuplicateLinkWeight {
+                dst_zid: row.dst_zid,
+            });
+        }
+    }
+    Ok(out)
+}
+
 /// A node (vertex) in the topology graph — one peer's advertised state.
 /// Mirrors zenoh `Node` (`network.rs:56-62`). `whatami` is the typed
 /// [`WhatAmI`] role (`None` until a link-state for the node arrives); the wire
@@ -2673,6 +2730,30 @@ mod tests {
             .position(|l| l.psid == psid)
             .expect("self advertises the link");
         entry.weights.as_ref().map(|w| w[slot].weight)
+    }
+
+    /// Rows become weights keyed by destination, and a destination named twice
+    /// is refused rather than last-wins — zenoh's own disposition, and the
+    /// reason it lives here instead of in the config parse.
+    #[test]
+    fn configured_rows_become_weights_and_a_repeated_destination_is_refused() {
+        let row = |b: u8, w: u16| TransportWeight {
+            dst_zid: zid(b),
+            weight: NonZeroU16::new(w).expect("test weight is non-zero"),
+        };
+        let map = link_weights_from_config(&[row(0xAA, 250), row(0xBB, 10)])
+            .expect("distinct destinations");
+        assert_eq!(map.len(), 2);
+        assert_eq!(map[&zid(0xAA)], LinkEdgeWeight::from_raw(250));
+        assert_eq!(map[&zid(0xBB)], LinkEdgeWeight::from_raw(10));
+
+        assert_eq!(
+            link_weights_from_config(&[row(0xAA, 250), row(0xAA, 10)]),
+            Err(DuplicateLinkWeight { dst_zid: zid(0xAA) }),
+            "the second row does not silently win"
+        );
+        // An empty list is a valid configuration: no link is weighted.
+        assert!(link_weights_from_config(&[]).expect("no rows").is_empty());
     }
 
     /// A weight configured BEFORE the neighbour connects is the one its link

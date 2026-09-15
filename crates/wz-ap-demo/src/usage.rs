@@ -200,6 +200,16 @@ pub(crate) fn print_usage() {
     eprintln!("    --listen-retry <i,m,f>   zenoh listen.retry — what paces the bind retries when");
     eprintln!("                             --listen-timeout allows any. Same triple as");
     eprintln!("                             --connect-retry; default 1000,4000,2.");
+    eprintln!("    --router-link-weight <zid>=<weight>");
+    eprintln!(
+        "                             zenoh routing.router.linkstate.transport_weights — the"
+    );
+    eprintln!("                             weight this ROUTER advertises on its link to <zid>.");
+    eprintln!("                             Repeatable, one destination each; 1..=65535, and the");
+    eprintln!("                             zid is lowercase hex with no leading zero. Unset");
+    eprintln!("                             links carry zenoh's default 100. Two entries naming");
+    eprintln!("                             one destination are REFUSED, as a zenohd refuses");
+    eprintln!("                             the same config. Requires --router-hat.");
     eprintln!("    --zid <hex>              PIN this node's routing zid (else it is derived from");
     eprintln!("                             the listen port). REQUIRED for a non-IP listen, which");
     eprintln!("                             has no port to derive a distinct mesh id from.");

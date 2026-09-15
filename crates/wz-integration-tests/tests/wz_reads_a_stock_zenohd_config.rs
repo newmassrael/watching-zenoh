@@ -658,6 +658,15 @@ fn the_defaults_each_implementation_falls_back_to_are_pinned_against_a_real_zeno
     let wz = &ingest.config;
     let claims: Vec<(&str, String)> = vec![
         ("connect/endpoints", String::from("[]")),
+        // R2633 — in `claims` and not `THE_TREE_ANSWERS_NULL`, because a silent
+        // file leaves this key resolving to an EMPTY LIST rather than to null
+        // (measured against this same binary before the class was chosen), and
+        // wz's struct answers with the same empty list. The row is what notices
+        // if either side starts inventing a weight nobody configured.
+        (
+            "routing/router/linkstate/transport_weights",
+            String::from("[]"),
+        ),
         ("transport/unicast/max_links", wz.max_links.to_string()),
         ("transport/unicast/lowlatency", wz.lowlatency.to_string()),
         ("transport/unicast/qos/enabled", wz.qos.to_string()),
@@ -677,6 +686,14 @@ fn the_defaults_each_implementation_falls_back_to_are_pinned_against_a_real_zeno
         ),
     ];
     assert!(wz.connect.is_empty(), "the fixture states no connect list");
+    // R2633 — the claim above is the literal `[]`, so the value it stands for is
+    // asserted here rather than formatted into the row: the gate that keeps this
+    // table honest reads the row's KEY with a regex, and an expression holding a
+    // string would read as a second key (measured — it did).
+    assert!(
+        wz.router_transport_weights.is_empty(),
+        "the fixture states no transport weights"
+    );
 
     for (path, wz_says) in &claims {
         let zenoh_says = resolved
@@ -3340,7 +3357,20 @@ fn a_wz_node_configured_only_by_a_stock_zenoh_config_reaches_a_real_zenohd() {
   // and this says `linkstate`, which is upstream's default and what an absent
   // flag already means; a client dialling one endpoint has no discovery plane
   // to switch.
-  routing: {{ interests: {{ timeout: 9000 }}, peer: {{ mode: "linkstate" }} }},
+  // R2633 — `router/linkstate/transport_weights` joins the SAME block, for the
+  // reason `peer/mode` did: a second `routing` object would silently win and
+  // leave one of them unnamed. The weight is UNQUOTED and the zid lowercase
+  // without a leading zero, because this file is loaded by a REAL zenohd —
+  // upstream's own commented example writes `weight: "200"`, which that binary
+  // refuses in its parser (measured, R2633), and an uppercase or leading-zero
+  // zid is refused by name.
+  routing: {{
+    interests: {{ timeout: 9000 }},
+    peer: {{ mode: "linkstate" }},
+    router: {{ linkstate: {{ transport_weights: [
+      {{ dst_zid: "b1b2c3d4", weight: 200 }},
+    ] }} }},
+  }},
   adminspace: {{ enabled: true, permissions: {{ read: true, write: false }} }},
 }}
 "#

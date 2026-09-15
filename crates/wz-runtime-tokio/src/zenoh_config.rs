@@ -125,8 +125,16 @@ pub use wz_codecs::whatami::{WhatAmI, WhatAmIMatcher};
 // `wz-codecs`, so the `zenoh-config` feature pulling it adds no cycle; no
 // footprint preset carries that feature.
 pub use wz_routing_graph::{AutoConnectStrategies, AutoConnectStrategy};
+// R2633 — the CONFIGURED link-weight row, re-exported rather than redefined:
+// the type belongs beside `LinkEdgeWeight` (upstream keeps the row in its config
+// crate and the map-building in its network layer), and a second definition here
+// would let the reader and the router disagree about the same document.
+use core::num::NonZeroU16;
+use wz_routing_graph::Zid;
+pub use wz_routing_graph::{link_weights_from_config, DuplicateLinkWeight, TransportWeight};
 use wz_session_core::json::escape_into;
 use wz_session_core::json5::{number_as_u64, Json5Value};
+use wz_session_core::zid_hex::zenoh_hex_to_zid;
 // R2070b (open-debt item 486) — the topology pass compares endpoints, and the
 // tested parser is the one the dial seam already uses. Writing a second
 // splitter here would be a second opinion about IPv6 brackets and `#iface=`
@@ -1123,6 +1131,22 @@ pub struct ZenohNodeConfig {
     /// the budget alone cannot pace anything: upstream's `add_listener_retry`
     /// takes its wait from THIS block (`orchestrator.rs:534`).
     pub listen_retry: Option<crate::retry_period::RetryPolicy>,
+    /// R2633 — `routing/router/linkstate/transport_weights`: the weights this
+    /// ROUTER advertises on its links to named neighbours.
+    ///
+    /// The rows are carried as upstream's own row type
+    /// ([`TransportWeight`](wz_routing_graph::TransportWeight)) and NOT as the
+    /// `zid -> weight` map the router consumes, for a reason this round
+    /// measured rather than assumed: a stock zenohd RESOLVES a document whose
+    /// rows name the same destination twice and only refuses it later, when the
+    /// router hat builds its network. This reader also judges configs destined
+    /// for OTHER nodes, so it must accept exactly what the parser accepts;
+    /// [`link_weights_from_config`](wz_routing_graph::link_weights_from_config)
+    /// is where the collision is caught, as upstream's is.
+    ///
+    /// Empty = no row, which is upstream's default (an unset key resolves to an
+    /// empty list, not to `null`) and means no link carries a configured weight.
+    pub router_transport_weights: Vec<TransportWeight>,
 }
 
 impl Default for ZenohNodeConfig {
@@ -1222,6 +1246,12 @@ impl Default for ZenohNodeConfig {
             listen_timeout_ms: None,
             listen_exit_on_failure: None,
             listen_retry: None,
+            // R2633 — upstream's own default for this key is the EMPTY LIST, not
+            // `null`: `transport_weights: Vec<TransportWeight>` has no Option
+            // around it, and a running zenohd that names nothing here resolves
+            // `"transport_weights":[]`. So the empty vec is a measured default
+            // rather than this struct's convenience.
+            router_transport_weights: Vec::new(),
         }
     }
 }
@@ -1705,6 +1735,13 @@ pub const HONOURED_CONFIG_KEYS: &[&str] = &[
     "namespace",
     "queries_default_timeout",
     "routing/interests/timeout",
+    // R2633 — MOVED here from `UNHONOURED_READER_GAP`, where R2632 had just put
+    // it after building the router-side capability. The reader is what was
+    // missing: the rows now reach
+    // `RouterForwarder::update_router_link_weights` through
+    // `link_weights_from_config`. The surface total is unchanged — honouring a
+    // key is a move between halves of one partition, not an addition.
+    "routing/router/linkstate/transport_weights",
     "scouting/timeout",
     "transport/multicast/qos/enabled",
     "transport/shared_memory/enabled",
@@ -2012,7 +2049,10 @@ pub const UNHONOURED_UPSTREAM_CONFIG_KEYS: &[&str] = &[
     // a deprecated wrapper and discards, so neither is an upstream capability
     // wz is failing to reach; leaving them here would count two non-features in
     // the denominator that "wz honours N of M" divides by.
-    "routing/router/linkstate/transport_weights",
+    //
+    // R2633 — the ROUTER weighting left too, upward: it is in
+    // [`HONOURED_CONFIG_KEYS`] now. The surface total is unchanged, which is the
+    // invariant a move must keep and a deletion would break.
     "scouting/delay",
     "scouting/gossip/autoconnect",
     "scouting/gossip/autoconnect_strategy",
@@ -2403,15 +2443,12 @@ pub const UNHONOURED_READER_GAP: &[&str] = &[
     // wire; what no code does is READ this key and call that setter, which is
     // this list's exact subject.
     "region_name",
-    // R2632 — ARRIVED here from [`UNHONOURED_BEYOND_WZ`] the round wz grew the
-    // capability, `region_name`'s shape exactly.
-    // `LinkstateNetwork::update_link_weights` weights self's links as upstream
-    // does (max of the two advertised directions, default 100) and
-    // `RouterForwarder::update_router_link_weights` applies a map to the ROUTER
-    // tier, re-floods and schedules the recompute — which is the whole of what
-    // upstream's router hat does with this key's value. What no code does is
-    // READ the key and call that setter, which is this list's exact subject.
-    "routing/router/linkstate/transport_weights",
+    // ⚠ R2633 — `routing/router/linkstate/transport_weights` LEFT this list for
+    // [`HONOURED_CONFIG_KEYS`], one round after R2632 put it here. That is this
+    // list's whole purpose working as designed: R2632 built the capability and
+    // the key became a READER gap; R2633 built the reader and it stopped being
+    // unhonoured at all. A row here is a statement about what is missing, so it
+    // is expected to be short-lived when the missing thing is a reader.
     "scouting/gossip/autoconnect",
     "scouting/gossip/autoconnect_strategy",
     "scouting/gossip/multihop",
@@ -2775,16 +2812,13 @@ pub const UNHONOURED_CITATION_LEDGER: &[(&str, &str, &str)] = &[
         "foreign-node-config",
         "spawn_publishing_zenoh_zpub",
     ),
-    // R2632 — wz's source spells this key in the doc of the graph field that
-    // holds its value and of the router entry that applies it. The citation IS
-    // the capability, which is what `wz-has-it` means; the reader that would
-    // turn the key into a call to that entry is what does not exist, and the
-    // row sits in [`UNHONOURED_READER_GAP`] accordingly.
-    (
-        "routing/router/linkstate/transport_weights",
-        "wz-has-it",
-        "update_router_link_weights",
-    ),
+    // R2633 — the `routing/router/linkstate/transport_weights` / `wz-has-it` /
+    // `update_router_link_weights` row R2632 added is GONE, deleted one round
+    // after it was written, because the key is honoured now and this ledger's
+    // population is the UNHONOURED keys wz's source names. Check 2 of
+    // `unhonoured_kind_evidence_gate.py` forces the deletion, in the same words
+    // it used for `connect/timeout_ms`: a verdict about a key no longer in the
+    // population is "a verdict about evidence that is gone".
     // R2437 — the FIRST naming of this key in `crates/`, and it arrived from the
     // wire side rather than the config side. `zenoh_config.rs` itself used to
     // record that `region_name` / `regionname` occur nowhere here; the pin's
@@ -3319,6 +3353,19 @@ pub enum ConfigIngestError {
         /// The key path as the document spelled it.
         path: String,
     },
+    /// R2633 — a zid-valued field carried text no conforming node reads as a
+    /// zid: uppercase hex, a leading `0`, non-hex, or more than 16 bytes.
+    ///
+    /// Its own variant rather than [`WrongType`](Self::WrongType) because the
+    /// JSON type is right — it IS a string — and the operator needs to be told
+    /// which spelling was refused, exactly as zenohd tells them ("Invalid id:
+    /// ABC - uppercase hexadecimal is not accepted, use lowercase").
+    MalformedZid {
+        /// The key path.
+        path: &'static str,
+        /// The text as given.
+        value: String,
+    },
 }
 
 impl core::fmt::Display for ConfigIngestError {
@@ -3337,6 +3384,13 @@ impl core::fmt::Display for ConfigIngestError {
             }
             ConfigIngestError::UnknownKey { path } => {
                 write!(f, "unknown config key {path:?}; stock zenoh refuses it too")
+            }
+            ConfigIngestError::MalformedZid { path, value } => {
+                write!(
+                    f,
+                    "{path} carries {value:?}, which is not a zid: lowercase \
+                     hex, no leading zero, at most 16 bytes"
+                )
             }
         }
     }
@@ -3791,6 +3845,107 @@ fn matcher_of(value: &Json5Value, path: &'static str) -> Result<WhatAmIMatcher, 
         };
     }
     Ok(matcher)
+}
+
+/// R2633 — `routing/router/linkstate/transport_weights`: a LIST of
+/// `{ dst_zid, weight }` rows.
+///
+/// Every refusal here was measured against the pinned zenohd before it was
+/// written, because upstream's own documented example is not loadable and the
+/// stages differ (`DEFAULT_CONFIG.json5` shows `weight: "10"`, quoted, which
+/// dies in the parser):
+///
+/// * a QUOTED weight is refused — `TransportWeight::weight` is a plain
+///   `NonZeroU16` with no string coercion, and zenohd answers "error parsing
+///   number";
+/// * `0` is refused — "invalid value: integer `0`, expected a nonzero u16";
+/// * a non-canonical `dst_zid` is refused by
+///   [`zenoh_hex_to_zid`](wz_session_core::zid_hex::zenoh_hex_to_zid), which
+///   carries zenoh's own alphabet;
+/// * a DUPLICATE `dst_zid` is NOT refused here. It is a well-formed document to
+///   the parser, and upstream refuses it one layer on, in
+///   [`link_weights_from_config`](wz_routing_graph::link_weights_from_config).
+///
+/// A missing field, an extra field, or a non-object row is a type error: the row
+/// shape is `deny_unknown_fields` upstream, so a typo inside a row must not pass
+/// as a row that means something else.
+fn transport_weights_of(
+    value: &Json5Value,
+    path: &'static str,
+) -> Result<Vec<TransportWeight>, ConfigIngestError> {
+    const SHAPE: &str = "a list of { dst_zid: \"<hex zid>\", weight: <1..=65535> }";
+    let Json5Value::Array(items) = value else {
+        return Err(ConfigIngestError::WrongType {
+            path,
+            expected: SHAPE,
+        });
+    };
+    let mut rows = Vec::with_capacity(items.len());
+    for item in items {
+        let Json5Value::Object(fields) = item else {
+            return Err(ConfigIngestError::WrongType {
+                path,
+                expected: SHAPE,
+            });
+        };
+        let mut dst_zid = None;
+        let mut weight = None;
+        for (key, field) in fields {
+            match key.as_str() {
+                "dst_zid" => {
+                    let Json5Value::String(text) = field else {
+                        return Err(ConfigIngestError::WrongType {
+                            path,
+                            expected: SHAPE,
+                        });
+                    };
+                    let bytes =
+                        zenoh_hex_to_zid(text).ok_or_else(|| ConfigIngestError::MalformedZid {
+                            path,
+                            value: text.clone(),
+                        })?;
+                    dst_zid = Some(Zid::from_slice(&bytes));
+                }
+                "weight" => {
+                    // A QUOTED weight is a type error, not a range error: it is
+                    // the spelling upstream's own DEFAULT_CONFIG comment shows
+                    // and a real zenohd refuses in the parser ("error parsing
+                    // number"), so wz must refuse the document too.
+                    let Json5Value::Number(text) = field else {
+                        return Err(ConfigIngestError::WrongType {
+                            path,
+                            expected: SHAPE,
+                        });
+                    };
+                    // The value must land in `NonZeroU16` exactly: `0` and
+                    // anything past 65535 are what a real zenohd refuses, and a
+                    // fractional weight is not an integer at all (`parse::<u16>`
+                    // rejects all three).
+                    let raw = text.parse::<u16>().ok().and_then(NonZeroU16::new);
+                    weight = Some(raw.ok_or_else(|| ConfigIngestError::OutOfRange {
+                        path,
+                        value: text.clone(),
+                    })?);
+                }
+                _ => {
+                    return Err(ConfigIngestError::WrongType {
+                        path,
+                        expected: SHAPE,
+                    })
+                }
+            }
+        }
+        match (dst_zid, weight) {
+            (Some(dst_zid), Some(weight)) => rows.push(TransportWeight { dst_zid, weight }),
+            _ => {
+                return Err(ConfigIngestError::WrongType {
+                    path,
+                    expected: SHAPE,
+                })
+            }
+        }
+    }
+    Ok(rows)
 }
 
 /// [`matcher_of`] for the key upstream declares
@@ -4249,6 +4404,21 @@ impl ZenohNodeConfig {
         if let Some(v) = want_u64(&doc, "routing/interests/timeout")? {
             out.interests_timeout_ms = Some(v);
             named.push("routing/interests/timeout");
+        }
+        // R2633 — the router's configured link weights. NOT mode-dependent:
+        // upstream's key sits under `routing.router`, so the ROLE is in the path
+        // rather than in a `{router, peer, client}` table, and `for_this_mode`
+        // would be reading a shape this key never has. A non-router node that
+        // states it has stated something it will not act on, which is true of
+        // every `routing/router/*` key and is upstream's own arrangement.
+        if let Some(value) = honoured(&doc, "routing/router/linkstate/transport_weights") {
+            let rows = transport_weights_of(value, "routing/router/linkstate/transport_weights")?;
+            // An EMPTY list is a statement ("weight nothing"), and it is also
+            // what an absent key resolves to on a running zenohd (measured), so
+            // the two are the same instruction and both are recorded as named:
+            // the file did speak here.
+            out.router_transport_weights = rows;
+            named.push("routing/router/linkstate/transport_weights");
         }
         if let Some(v) = want_u64(&doc, "scouting/timeout")? {
             out.scouting_timeout_ms = Some(v);
@@ -5232,6 +5402,18 @@ mod tests {
                 "routing/interests/timeout",
                 r#"{ "routing": { "interests": { "timeout": 9000 } } }"#,
             ),
+            // R2633 — a NON-EMPTY list, for the reason the `routing/peer/mode`
+            // row at the tail gives: the default is the empty list, so a fixture
+            // stating `[]` would report the key honoured while proving only that
+            // the reader did not crash. The weight is written UNQUOTED because
+            // upstream's own commented example writes it quoted and a real
+            // zenohd cannot load that (measured, R2633) — a fixture copied from
+            // that comment would pin wz to a document zenoh refuses.
+            (
+                "routing/router/linkstate/transport_weights",
+                r#"{ "routing": { "router": { "linkstate": { "transport_weights":
+                     [ { "dst_zid": "1", "weight": 200 } ] } } } }"#,
+            ),
             ("scouting/timeout", r#"{ "scouting": { "timeout": 2500 } }"#),
             (
                 "transport/multicast/qos/enabled",
@@ -5963,6 +6145,60 @@ mod tests {
         assert!(ingest.ignored.is_empty(), "{:?}", ingest.ignored);
     }
 
+    /// R2633 — what the parse must ACCEPT, which is the half a refusal list
+    /// cannot state: every case here was loaded by the pinned zenohd first.
+    ///
+    /// The DUPLICATE row is the load-bearing one. A document naming the same
+    /// destination twice is well-formed to zenoh's parser — that binary resolves
+    /// it and then dies building the router network, at a different exit code
+    /// from a parse error (255 against 134). This reader also judges files
+    /// destined for other nodes, so refusing it here would make wz reject a
+    /// document zenohd accepts; the collision is caught in
+    /// [`link_weights_from_config`](wz_routing_graph::link_weights_from_config).
+    #[test]
+    fn the_weight_rows_a_conforming_node_loads_are_read_not_refused() {
+        let ingest = ZenohNodeConfig::from_json5(
+            r#"{ "routing": { "router": { "linkstate": { "transport_weights":
+                 [ { "dst_zid": "1", "weight": 10 },
+                   { "dst_zid": "b1b2c3d4", "weight": 65535 } ] } } } }"#,
+        )
+        .expect("two distinct destinations load");
+        let rows = &ingest.config.router_transport_weights;
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].dst_zid, Zid::from_slice(&[0x01]));
+        assert_eq!(rows[0].weight.get(), 10);
+        assert_eq!(rows[1].weight.get(), 65535);
+        assert!(ingest
+            .named
+            .contains(&"routing/router/linkstate/transport_weights"));
+
+        // A DUPLICATE parses. The map build is where it is refused.
+        let dup = ZenohNodeConfig::from_json5(
+            r#"{ "routing": { "router": { "linkstate": { "transport_weights":
+                 [ { "dst_zid": "1", "weight": 10 },
+                   { "dst_zid": "1", "weight": 20 } ] } } } }"#,
+        )
+        .expect("a duplicate destination is a well-formed document");
+        assert_eq!(dup.config.router_transport_weights.len(), 2);
+        assert_eq!(
+            wz_routing_graph::link_weights_from_config(&dup.config.router_transport_weights),
+            Err(wz_routing_graph::DuplicateLinkWeight {
+                dst_zid: Zid::from_slice(&[0x01])
+            }),
+            "the refusal is the map build's, one layer on"
+        );
+
+        // An EMPTY list is an instruction the file gave, not a silence.
+        let empty = ZenohNodeConfig::from_json5(
+            r#"{ "routing": { "router": { "linkstate": { "transport_weights": [] } } } }"#,
+        )
+        .expect("an empty list loads");
+        assert!(empty.config.router_transport_weights.is_empty());
+        assert!(empty
+            .named
+            .contains(&"routing/router/linkstate/transport_weights"));
+    }
+
     /// A key wz DOES honour, carrying a value it cannot mean, is a hard error
     /// rather than a default — that one the operator has to see.
     #[test]
@@ -6010,6 +6246,93 @@ mod tests {
             ZenohNodeConfig::from_json5("[]").unwrap_err(),
             ConfigIngestError::NotAnObject
         ));
+        // R2633 — the transport-weight rows, each spelling measured against the
+        // pinned zenohd before it was written here (see the test below for the
+        // ones that binary ACCEPTS).
+        const W: &str = "routing/router/linkstate/transport_weights";
+        const SHAPE: &str = "a list of { dst_zid: \"<hex zid>\", weight: <1..=65535> }";
+        for (doc, want) in [
+            (
+                // Upstream's own DEFAULT_CONFIG example writes the weight
+                // QUOTED, and a real zenohd dies in its parser on it ("error
+                // parsing number"). wz must refuse the same document.
+                r#"{ "routing": { "router": { "linkstate": { "transport_weights":
+                     [ { "dst_zid": "1", "weight": "10" } ] } } } }"#,
+                ConfigIngestError::WrongType {
+                    path: W,
+                    expected: SHAPE,
+                },
+            ),
+            (
+                // "invalid value: integer `0`, expected a nonzero u16".
+                r#"{ "routing": { "router": { "linkstate": { "transport_weights":
+                     [ { "dst_zid": "1", "weight": 0 } ] } } } }"#,
+                ConfigIngestError::OutOfRange {
+                    path: W,
+                    value: "0".into(),
+                },
+            ),
+            (
+                r#"{ "routing": { "router": { "linkstate": { "transport_weights":
+                     [ { "dst_zid": "1", "weight": 65536 } ] } } } }"#,
+                ConfigIngestError::OutOfRange {
+                    path: W,
+                    value: "65536".into(),
+                },
+            ),
+            (
+                // "Invalid id: ABC - uppercase hexadecimal is not accepted".
+                r#"{ "routing": { "router": { "linkstate": { "transport_weights":
+                     [ { "dst_zid": "ABC", "weight": 10 } ] } } } }"#,
+                ConfigIngestError::MalformedZid {
+                    path: W,
+                    value: "ABC".into(),
+                },
+            ),
+            (
+                // "Invalid id: 01 - Leading 0s are not valid".
+                r#"{ "routing": { "router": { "linkstate": { "transport_weights":
+                     [ { "dst_zid": "01", "weight": 10 } ] } } } }"#,
+                ConfigIngestError::MalformedZid {
+                    path: W,
+                    value: "01".into(),
+                },
+            ),
+            (
+                // A row is `deny_unknown_fields` upstream, so a typo inside one
+                // must not pass as a row that means something else.
+                r#"{ "routing": { "router": { "linkstate": { "transport_weights":
+                     [ { "dst_zid": "1", "weight": 10, "wieght": 20 } ] } } } }"#,
+                ConfigIngestError::WrongType {
+                    path: W,
+                    expected: SHAPE,
+                },
+            ),
+            (
+                r#"{ "routing": { "router": { "linkstate": { "transport_weights":
+                     [ { "dst_zid": "1" } ] } } } }"#,
+                ConfigIngestError::WrongType {
+                    path: W,
+                    expected: SHAPE,
+                },
+            ),
+            (
+                // An OBJECT where the list belongs is refused EARLIER and by a
+                // different name, and the measured answer is pinned rather than
+                // the one this case first expected: the leaf walk descends into
+                // objects, so the acceptance boundary sees
+                // `…/transport_weights/dst_zid` — a path no zenoh config has —
+                // and reports the typo as a typo before any value is read. That
+                // ordering is this reader's stated contract, not an accident.
+                r#"{ "routing": { "router": { "linkstate": { "transport_weights":
+                     { "dst_zid": "1", "weight": 10 } } } } }"#,
+                ConfigIngestError::UnknownKey {
+                    path: "routing/router/linkstate/transport_weights/dst_zid".into(),
+                },
+            ),
+        ] {
+            assert_eq!(ZenohNodeConfig::from_json5(doc).unwrap_err(), want, "{doc}");
+        }
         assert!(matches!(
             ZenohNodeConfig::from_json5("{").unwrap_err(),
             ConfigIngestError::Syntax(_)

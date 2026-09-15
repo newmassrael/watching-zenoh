@@ -1024,6 +1024,18 @@ fn main() -> ExitCode {
                     return ExitCode::from(2);
                 }
             };
+            // R2633 — `--router-link-weight <zid>=<weight>`, the argv the
+            // `routing/router/linkstate/transport_weights` expansion emits.
+            // REFUSED loudly rather than degraded, the rule every parsed-value
+            // flag here follows: a weight the operator asked for and did not get
+            // is a routing decision made silently.
+            let router_link_weights = match crate::args::parse_router_link_weights(rest) {
+                Ok(rows) => rows,
+                Err(msg) => {
+                    eprintln!("wz-ap-demo: {msg}");
+                    return ExitCode::from(2);
+                }
+            };
             return run_router_hat_mode(
                 // R2099 (open-debt item 512) — an endpoint LIST, exactly as
                 // `--peer` now takes: both are BINDING run-modes reading the same
@@ -1050,6 +1062,9 @@ fn main() -> ExitCode {
                         quic_ca: parse_pair(rest, "--quic-ca"),
                     },
                     multicast_qos,
+                    // R2633 — the router's configured link weights (see the
+                    // parse above).
+                    router_link_weights,
                     // R311y454 — `--multicast-locator udp/<group>:<port>[#iface=<name>]`:
                     // the router's data-plane multicast group, spelled as a LOCATOR so
                     // the `#iface=` tail is honoured by the same parser every unicast

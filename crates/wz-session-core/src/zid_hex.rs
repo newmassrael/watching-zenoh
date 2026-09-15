@@ -52,9 +52,36 @@ pub fn zid_to_zenoh_hex(zid: &[u8]) -> String {
 
 /// The inverse of [`zid_to_zenoh_hex`]: parse the lowercase hex back to the
 /// length-trimmed zid bytes ([`crate::sample::TimestampHint::zid`] form), or
-/// `None` if it is not a `<= 16`-byte id. zenoh `ZenohIdProto::from_str`
-/// (`core/mod.rs:168-183`).
+/// `None` if the text is not a zid a conforming implementation would accept.
+///
+/// R2633 — the refusals are zenoh's, and they were MEASURED against the pinned
+/// zenohd rather than read off this function's model, because the model is two
+/// layers deep: `ZenohIdProto::from_str`
+/// (`commons/zenoh-protocol/src/core/mod.rs` @
+/// `uppercase hexadecimal is not accepted`) pre-checks the case and then defers
+/// to uhlc (`uhlc-0.8.1/src/id.rs` @ `Leading 0s are not valid`).
+///
+/// * UPPERCASE hex is refused — by zenoh, by name, before any parse.
+/// * A LEADING `0` is refused, which is also how the id `0` is refused: the only
+///   spellings that parse to zero start with one, so uhlc's separate non-zero
+///   check is unreachable from a string and is deliberately not mirrored here.
+/// * An EMPTY string is refused.
+/// * Anything `u128::from_str_radix` rejects is refused: non-hex, and more than
+///   32 digits (the `> 16`-byte id).
+///
+/// Until R2633 this was `from_str_radix` alone, so `"ABC"`, `"01"` and `"0"` all
+/// parsed — three spellings a real zenohd refuses at config load. The callers
+/// were parsing zids a conforming peer had RENDERED, where the difference never
+/// showed; a config file is operator-written text, where it does.
+///
+/// ⚠ A leading `+` IS accepted, here and upstream — `from_str_radix` takes it and
+/// neither zenoh nor uhlc screens it out. Measured, not assumed: a stock zenohd
+/// loads `dst_zid: "+1"` and resolves it to `"1"`. Mirroring the quirk is what
+/// keeps the two implementations accepting the same documents.
 pub fn zenoh_hex_to_zid(hex: &str) -> Option<Vec<u8>> {
+    if hex.is_empty() || hex.starts_with('0') || hex.contains(|c: char| c.is_ascii_uppercase()) {
+        return None;
+    }
     let id = u128::from_str_radix(hex, 16).ok()?;
     let bytes = id.to_le_bytes();
     let trimmed_len = bytes.iter().rposition(|&b| b != 0).map_or(0, |i| i + 1);
@@ -99,5 +126,36 @@ mod tests {
             assert_eq!(zenoh_hex_to_zid(&hex).as_deref(), Some(zid.as_slice()));
         }
         assert_eq!(zenoh_hex_to_zid("not-hex"), None);
+    }
+
+    /// R2633 — the three spellings a real zenohd refuses at config load, each
+    /// measured against the pinned binary before this test was written:
+    /// `dst_zid: "ABC"` dies with "uppercase hexadecimal is not accepted", and
+    /// both `"0"` and `"01"` with "Leading 0s are not valid".
+    ///
+    /// Each case is a spelling `from_str_radix` ALONE accepts, which is what
+    /// this function was until R2633 — so a green here is the repair, not the
+    /// absence of a subject.
+    #[test]
+    fn a_spelling_a_conforming_node_refuses_is_not_a_zid() {
+        assert_eq!(zenoh_hex_to_zid("ABC"), None, "uppercase");
+        assert_eq!(zenoh_hex_to_zid("aBc"), None, "mixed case is uppercase too");
+        assert_eq!(zenoh_hex_to_zid("0"), None, "the zero id");
+        assert_eq!(zenoh_hex_to_zid("01"), None, "a leading zero");
+        assert_eq!(zenoh_hex_to_zid(""), None, "empty");
+        assert_eq!(zenoh_hex_to_zid(&"f".repeat(33)), None, "> 16 bytes");
+        // The canonical spelling of the same ids still parses, so the refusals
+        // above narrow the input alphabet without losing any real zid.
+        assert_eq!(zenoh_hex_to_zid("abc").as_deref(), Some(&[0xbc, 0x0a][..]));
+        assert_eq!(zenoh_hex_to_zid("1").as_deref(), Some(&[0x01][..]));
+    }
+
+    /// A leading `+` is accepted HERE because it is accepted THERE: a stock
+    /// zenohd loads `dst_zid: "+1"` and resolves it to `"1"` (measured). The
+    /// case is pinned so a later tightening cannot quietly make wz refuse a
+    /// document upstream takes.
+    #[test]
+    fn a_plus_prefix_parses_because_upstream_takes_it() {
+        assert_eq!(zenoh_hex_to_zid("+1").as_deref(), Some(&[0x01][..]));
     }
 }
