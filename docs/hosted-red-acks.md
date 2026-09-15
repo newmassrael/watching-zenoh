@@ -29,6 +29,15 @@ uses the ack. Keep the columns exact — `run` is the hosted run id the gate
 printed, `commit` is the tip being replaced (the sha the run graded), and
 `debt` is the register item that owns the red.
 
+⚠ **R2641 broke that ordering and the row above is the evidence**: the push went
+out, the ack printed, and the row was written afterwards. The cost is not
+bookkeeping neatness — a row written after the fact is a row that depends on
+someone remembering, which is the exact failure this file was built to end. It
+is recorded rather than quietly back-dated. And writing it late has a shape of
+its own: the follow-up push needs an ack too, so the repair is TWO rows in one
+commit — the one that was missed, and the one the next push will use — which is
+why the ordering rule says *before*.
+
 | round | run | commit | failing steps | debt | paid |
 |---|---|---|---|---|---|
 | R2496 | `34393145847` | `0df6bfeb` | C0 binary-dep · C0 (armed) provenance · C1bt wz-capture | 709 | R2498 |
@@ -43,6 +52,7 @@ printed, `commit` is the tip being replaced (the sha the run graded), and
 | R2585 | `34713345823` | `dbc20e6f` | C0 skip-token naming, two R2581 `zenohd` legs carried no token (two C0 jobs) · E ran the same two legs without zenohd (three jobs, one cause) | — | R2585 |
 | R2639 | `34921831690` | `951d23cf` | C1ac quic e2e, `EXPIRY_MAX_SLEEP` dead under quic-without-unicast · Z oracle-pin, `zenohd-unixpipe` and `zenohd-vsock` answer `1211779c` against pin 1.10.1 (two jobs, two causes) | — | |
 | R2639 | `34919206483` | `0ddc4f26` | same two jobs, same two causes — read individually, not assumed | — | |
+| R2641 | `34922821640` | `96b2dedd` | the same run the R2639 row names, re-read at this push rather than inherited: Z zenohd interop (the oracle-pin red) · C1ac quic link e2e (R2638's `EXPIRY_MAX_SLEEP` fix is in and unverified) | — | |
 | R2639 | `34922821640` | `96b2dedd` | same two jobs, same two causes — read individually, not assumed | — | |
 
 ⚠ The three rows above are ONE push. The gate now grades the newest FINISHED
