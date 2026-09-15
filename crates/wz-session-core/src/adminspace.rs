@@ -1061,6 +1061,19 @@ fn admin_entity_key(zid_hex: &str, whatami: &str, kind: &str, pattern: &str) -> 
 /// become an explicit non-zenoh alias). The read sibling [`admin_config_key`]
 /// (`@/<zid>/<whatami>/config`, single key) is itself beyond-zenoh (zenoh has no
 /// config READ).
+///
+/// ⚠ R2644 — THE CAVEAT ABOVE IS NOW PARTLY FALSE, and it is corrected here
+/// rather than deleted because what it predicted is exactly what happened. wz
+/// DOES now strip this prefix and feed the remaining path plus a JSON5 body to a
+/// keyed write: that is [`AdminConfigWrite::SetKey`], produced for any sub-key
+/// carrying `/`. So "the SUB-KEY + PAYLOAD shape does NOT (yet)" holds only for
+/// the bespoke sub-keys, not for config key paths.
+///
+/// Its other two sentences STAND and must not be swept up in the correction:
+/// `acl-deny` really is a bare keyexpr payload rather than a json-pointer
+/// subset, so it is not subsumed by the keyed write; and it has become the
+/// "explicit non-zenoh alias" this caveat foresaw — as has `admin-read`, which
+/// names a key the generic path now also carries.
 pub fn admin_config_write_key(zid_hex: &str, whatami: &str) -> String {
     let mut s = admin_config_write_prefix(zid_hex, whatami);
     s.push_str("**");
