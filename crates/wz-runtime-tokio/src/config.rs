@@ -219,6 +219,12 @@ pub enum SetByKeyError {
     /// `Document` on purpose: that one means "wz does not know this key", this
     /// one means "wz knows it and cannot change it while running".
     NotRuntimeMutable { key: String },
+    /// The key IS runtime-mutable, but its consumer holds state compiled from
+    /// the value, so it can only be changed through the sink-taking
+    /// `reconfigure_*` seam. Refused rather than stored: storing would report a
+    /// success the consumer never saw, and would also skip the validation
+    /// `reconfigure_*` performs before it commits.
+    NeedsSink { key: String },
 }
 
 /// The typed wz runtime config SSOT — see the module doc. The read-at-open
@@ -1048,6 +1054,36 @@ impl WzConfig {
                 key: String::from(key),
             });
         }
+        // ⛔ A PUSH-discipline key cannot be written through this path. Two
+        // independent reasons, both measured:
+        //
+        //  * the consumer holds state COMPILED from the value, and this path only
+        //    STORES — so the write would look applied while the forwarder kept its
+        //    old map. `apply_zenoh_config`'s own doc says it stores and does not
+        //    push; this function is the running-node caller that doc warns about.
+        //  * `reconfigure_*` builds the map BEFORE it commits the rows
+        //    (`link_weights_from_config(&rows)?` and only then the assignment), so
+        //    a refused document never becomes live. Storing here skips that, and a
+        //    row set `reconfigure_*` would REJECT — two rows naming one
+        //    destination — could be installed.
+        //
+        // ⚠ ORDERED AFTER THE IGNORED CHECK, and a test said so: `downsampling` is
+        // a push-discipline row that wz does NOT honour, and refusing it for
+        // wanting a sink would claim wz acts on a key it ignores entirely. Only a
+        // key wz actually reads can meaningfully need one.
+        //
+        // The startup path is unaffected and deliberately so: there `install_*` is
+        // the gate, validating before the value first reaches a consumer.
+        if let Some(row) = RUNTIME_MUTABLE_CONFIG_KEYS
+            .iter()
+            .find(|row| row.key == key)
+        {
+            if row.discipline == MutationDiscipline::Push {
+                return Err(SetByKeyError::NeedsSink {
+                    key: String::from(key),
+                });
+            }
+        }
         if self.apply_zenoh_config(&ingest).is_empty() {
             return Err(SetByKeyError::NotRuntimeMutable {
                 key: String::from(key),
@@ -1350,6 +1386,42 @@ mod tests {
             Err(SetByKeyError::NotRuntimeMutable {
                 key: String::from("mode")
             })
+        );
+    }
+
+    /// R2644 — ⭐ THE CONTROL for the Push-discipline refusal, and the defect it
+    /// closes: `set_by_key` used to return `Ok(())` for this key while STORING
+    /// rows no consumer would ever see, and while skipping the map build
+    /// `reconfigure_*` does before it commits.
+    ///
+    /// The fixture writes a row set that `reconfigure_*` would REJECT — two rows
+    /// naming one destination — so the assertion covers both halves at once: the
+    /// refusal is named, and the invalid rows did not become live. Deleting the
+    /// discipline check turns this red on the stored rows, not merely on the
+    /// error kind.
+    #[cfg(all(feature = "zenoh-config", feature = "routing-router-hat"))]
+    #[test]
+    fn a_push_discipline_key_is_refused_rather_than_stored() {
+        let mut cfg = WzConfig::new();
+        let before = cfg.router_link_weights.len();
+
+        let err = cfg
+            .set_by_key(
+                "routing/router/linkstate/transport_weights",
+                r#"[ { "dst_zid": "b1b2c3d4", "weight": 10 },
+                     { "dst_zid": "b1b2c3d4", "weight": 20 } ]"#,
+            )
+            .expect_err("a push-discipline key cannot be written without a sink");
+        assert_eq!(
+            err,
+            SetByKeyError::NeedsSink {
+                key: String::from("routing/router/linkstate/transport_weights")
+            }
+        );
+        assert_eq!(
+            cfg.router_link_weights.len(),
+            before,
+            "nothing was stored — including a row set reconfigure_* would refuse"
         );
     }
 
