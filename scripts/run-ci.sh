@@ -17359,10 +17359,16 @@ layer_e7b_router_connect_reconcile() {
     # R2393 — `--skip connect_add` too, and this filter is a POPULATION rather than a
     # convenience. The selection is "every ignored test in the file except one NAME",
     # so a test ADDED to the file joins it silently: R2393's two `connect_add` e2es
-    # need `adminspace-router-linkstate` (the cfg block the config-write subscriber
-    # lives in) and `routing-peer` (only `PeerOpts` parses `--put-key`), neither of
-    # which this binary carries, so they would have run here against a build with the
-    # whole path compiled out and failed on the missing subscriber. They have their
+    # need `routing-peer` (only `PeerOpts` parses `--put-key`), which this binary does
+    # not carry, so they would have run here against a build with no writer and failed.
+    # R2649 — they used to need `adminspace-router-linkstate` as well, because the
+    # config-write subscriber was NESTED inside that feature's admin-queryable block.
+    # That was a write plane gated on a RENDER feature, and its consequence was
+    # exactly this note: `router-connect-reconcile`'s own wire producer was compiled
+    # out of a build that enables `router-connect-reconcile` and nothing else. The
+    # subscriber now sits outside that block under the union of the intents it serves,
+    # so THIS binary hosts it — proven by a damage probe, since a green build cannot
+    # tell "compiled in" from "compiled out". They have their
     # own binary in Layer E7b2. (The default Layer E sweep needs no change: its
     # `--skip wz_router` already covers the `wz_router_hat_` name prefix.)
     (cd crates && cargo build -p wz-ap-demo --features router-hat-router,router-connect-reconcile --quiet) || return 1
@@ -17385,11 +17391,13 @@ layer_e7b_router_connect_reconcile() {
 # hosts.
 #
 # ITS OWN BINARY, and the feature set is why this is a separate lane rather than two
-# more tests in E7b: the config-write subscriber lives inside the
-# `adminspace-router-linkstate` block, which E7b does NOT build, and the writer is a
-# `--peer` (only `PeerOpts` parses `--put-key`), which needs `routing-peer`. Running
-# these against E7b's binary would compile the whole path out and pass vacuously —
-# the exact shape R311y269's uplift note warns about.
+# more tests in E7b: the writer is a `--peer` (only `PeerOpts` parses `--put-key`),
+# which needs `routing-peer`, and E7b does not build it. Running these against E7b's
+# binary would leave them with no writer at all — the vacuous shape R311y269's uplift
+# note warns about.
+# R2649 — the OTHER half of that reason is gone: the config-write subscriber used to
+# live inside the `adminspace-router-linkstate` block, so E7b's binary hosted none.
+# It now sits outside, under the union of the intents it serves.
 #
 # THIS LANE EXISTS BECAUSE THE FEATURE SHIPPED INERT AND NOTHING NOTICED. Three
 # defects, none visible to any unit test: the handler took the subscription PATTERN

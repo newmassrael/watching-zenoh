@@ -6411,21 +6411,6 @@ async fn run_router_hat_until(
             "wz-ap-demo router-hat: adminspace read permit = {}",
             wz::runtime_tokio::admin_read_permit(&admin_cfg.borrow().admin_permissions())
         );
-        // R2393 — taken BEFORE the GET handler moves them: the config-WRITE
-        // subscriber below needs the same zid and the same live config, and the
-        // `Rc` clone is what makes "the same" literal — both gates read one
-        // `RefCell`, so a permit change cannot leave the read and write halves
-        // disagreeing about what this node permits.
-        // R2648 — the union of the INTENTS this plane can serve, not the name of
-        // whichever one arrived first. `router-connect-reconcile` gated the whole
-        // config-write host until this round, which made every other runtime write
-        // to a router unreachable by construction: the link weights could be
-        // installed at startup and never changed, because the only door was behind
-        // a routing feature that has nothing to do with them.
-        #[cfg(any(feature = "router-connect-reconcile", feature = "router-config-mutate"))]
-        let write_zid_hex = zid_hex.clone();
-        #[cfg(any(feature = "router-connect-reconcile", feature = "router-config-mutate"))]
-        let write_admin_cfg = std::rc::Rc::clone(&admin_cfg);
         let handler = move |view: &dyn QueryView, out: &mut dyn ReplyOut| {
             // Resolved per GET off the shared config, exactly as the peer host does —
             // zenoh re-reads the live config inside its admin handler
@@ -6491,197 +6476,214 @@ async fn run_router_hat_until(
             "wz-ap-demo router-hat: adminspace router legs hosted at {queryable_key} \
              (linkstate/routers, linkstate/peers, route/successor)"
         );
+    }
 
-        // R2393 (router-connect-reconcile) — the config-WRITE subscriber that makes
-        // the runtime connect list reachable from the WIRE, closing this atom's last
-        // live residual: "the trigger is a one-shot --connect-after CLI argument
-        // rather than a live config-modification subscription, where upstream
-        // re-enters update_peers on config change".
-        //
-        // NOTHING about the dial changes. The reconcile channel, its add-dedup and
-        // the accept loop's ADD-ONLY apply have existed since R311y202; what the
-        // residual named was that the channel had exactly ONE producer, a timer that
-        // fires once. This is a second producer — the same shape R2333 closed on
-        // transport-multicast, where the residual had moved from "there is no way to
-        // stop" to "nothing asks to stop".
-        //
-        // On the FORWARDER (`register_local_subscriber`, R2393) rather than a Session
-        // declare: this host is forwarder-based with no single Session, which is why
-        // `run_storage_host` exists as a separate per-client-Session mode at all.
-        #[cfg(any(feature = "router-connect-reconcile", feature = "router-config-mutate"))]
-        {
-            use wz::runtime_tokio::adminspace::{
-                admin_config_write_key, admin_config_write_prefix, parse_admin_config_write,
-                AdminConfigWrite, AdminConfigWriteBody, AdminConfigWriteOutcome,
-            };
-            use wz::runtime_tokio::sink::SampleView;
-            let write_key = admin_config_write_key(&write_zid_hex, whatami_str);
-            let write_cfg = write_admin_cfg;
-            // Belongs to the ConnectAdd arm alone: the reconcile channel exists
-            // only under the feature that intent is named for, and the plane
-            // above no longer does.
-            #[cfg(feature = "router-connect-reconcile")]
-            let write_tx = reconcile_tx.clone();
-            // The STRIP prefix comes from `admin_config_write_prefix`, NOT from the
-            // subscription pattern above. The first cut of this host wrote
-            // `format!("{write_key}/")`, which is the PATTERN plus a slash
-            // (`@/<zid>/router/config/**/`) — it compiles, it registers, it logs, and
-            // then `strip_prefix` never matches, so every PUT decodes `NotAWrite` and
-            // is silently ignored. Both shapes now come from one origin in
-            // `wz-session-core`, which is what makes them impossible to mismatch.
-            let write_prefix = admin_config_write_prefix(&write_zid_hex, whatami_str);
-            // The intent slot this handler stashes into; the app-tick loop owns
-            // the sink and drains it.
-            #[cfg(feature = "router-config-mutate")]
-            let write_pending_weights = std::rc::Rc::clone(&pending_router_link_weights);
-            let write_handler = move |sample: &dyn SampleView| {
-                // Re-read per PUT off the SAME live config the GET gate reads —
-                // a permit captured at setup could not answer a permission changed
-                // since, which is the frozen-permit divergence this tree has already
-                // paid for twice.
-                let write_permitted =
-                    wz::runtime_tokio::admin_write_permit(&write_cfg.borrow().admin_permissions());
-                match parse_admin_config_write(
-                    &write_prefix,
-                    sample.keyexpr(),
-                    AdminConfigWriteBody::of_sample(sample),
-                    write_permitted,
-                ) {
-                    #[cfg(feature = "router-connect-reconcile")]
-                    AdminConfigWriteOutcome::Apply(AdminConfigWrite::ConnectAdd(eps)) => {
-                        // ⚠ NOT the same entry point as `--connect-after`, and R2393
-                        // corrected this comment after claiming it was. The CLI path
-                        // goes through `resolve_mesh_dial_target`, which is ASYNC and
-                        // RESOLVES a DNS name before dialling; this handler is a sync
-                        // closure on the Push ingress and cannot await a resolver, so
-                        // it parses only. The consequence, stated rather than left to
-                        // be discovered: a NAMED endpoint is accepted here and then
-                        // refused downstream by the accept loop's `mesh_dial_plan`
-                        // fold (R2233), which warns by name. So the wire form takes
-                        // an IP locator; the CLI's accepted set is a strict superset.
-                        //
-                        // ALL-OR-NOTHING at this layer too: the decoder rejected
-                        // empty elements, and an element that does not PARSE stops
-                        // the whole batch rather than dialling its parsable half.
-                        let mut locs = Vec::with_capacity(eps.len());
-                        let mut bad: Option<String> = None;
-                        for ep in &eps {
-                            match wz::runtime_tokio::locator::parse_any_locator(ep) {
-                                Ok(l) => locs.push(l),
-                                Err(_) => {
-                                    bad = Some(ep.clone());
-                                    break;
-                                }
-                            }
-                        }
-                        match bad {
-                            Some(ep) => log::warn!(
-                                "wz-ap-demo router-hat: config-write connect-add ignored; \
-                                 {ep} is not a locator (the batch applies whole or not at all)"
-                            ),
-                            None => {
-                                let n = locs.len();
-                                // A closed channel means the face loop is gone — a
-                                // shutdown, not an error to shout about.
-                                if write_tx.send(locs).is_ok() {
-                                    log::info!(
-                                        "wz-ap-demo router-hat: config-write connect-add \
-                                         reconciled {n} endpoint(s) onto the connect list"
-                                    );
-                                }
+    // R2649 — the config-WRITE plane sits OUTSIDE the admin-QUERYABLE block above,
+    // and that is a correction rather than a tidy-up. It used to be nested inside
+    // it, so hosting a WRITE required `adminspace-router-linkstate`, which is the
+    // feature for RENDERING the link-state trees to a GET. The consequence was
+    // stated in `run-ci.sh`'s own E7b note without being read as a defect:
+    // `router-connect-reconcile`'s WIRE producer was compiled out of a build that
+    // enables `router-connect-reconcile` and nothing else, so the feature could
+    // not reach its own second producer.
+    //
+    // It needs none of that block: a forwarder to register on, the shared config
+    // for the permit, and the node's own zid and role. All three come from
+    // function scope, which is why unnesting costs nothing but re-deriving them.
+    //
+    // R2393 (router-connect-reconcile) — the config-WRITE subscriber that makes
+    // the runtime connect list reachable from the WIRE, closing this atom's last
+    // live residual: "the trigger is a one-shot --connect-after CLI argument
+    // rather than a live config-modification subscription, where upstream
+    // re-enters update_peers on config change".
+    //
+    // NOTHING about the dial changes. The reconcile channel, its add-dedup and
+    // the accept loop's ADD-ONLY apply have existed since R311y202; what the
+    // residual named was that the channel had exactly ONE producer, a timer that
+    // fires once. This is a second producer — the same shape R2333 closed on
+    // transport-multicast, where the residual had moved from "there is no way to
+    // stop" to "nothing asks to stop".
+    //
+    // On the FORWARDER (`register_local_subscriber`, R2393) rather than a Session
+    // declare: this host is forwarder-based with no single Session, which is why
+    // `run_storage_host` exists as a separate per-client-Session mode at all.
+    #[cfg(any(feature = "router-connect-reconcile", feature = "router-config-mutate"))]
+    {
+        use wz::runtime_tokio::adminspace::{
+            admin_config_write_key, admin_config_write_prefix, parse_admin_config_write,
+            AdminConfigWrite, AdminConfigWriteBody, AdminConfigWriteOutcome,
+        };
+        use wz::runtime_tokio::sink::SampleView;
+        // Re-derived here rather than borrowed from the queryable block, which
+        // is the whole point of the unnesting: both come from `params`, and the
+        // config is the SAME `RefCell` through an `Rc` clone, so the read and
+        // write gates still cannot disagree about what this node permits —
+        // which is what the clone was for when it lived up there.
+        let write_zid_hex = wz::runtime_tokio::zid_hex::zid_to_zenoh_hex(&params.zid);
+        let write_whatami_str = params.whatami.to_str();
+        let write_key = admin_config_write_key(&write_zid_hex, write_whatami_str);
+        let write_cfg = std::rc::Rc::clone(&host_cfg);
+        // Belongs to the ConnectAdd arm alone: the reconcile channel exists
+        // only under the feature that intent is named for, and the plane
+        // above no longer does.
+        #[cfg(feature = "router-connect-reconcile")]
+        let write_tx = reconcile_tx.clone();
+        // The STRIP prefix comes from `admin_config_write_prefix`, NOT from the
+        // subscription pattern above. The first cut of this host wrote
+        // `format!("{write_key}/")`, which is the PATTERN plus a slash
+        // (`@/<zid>/router/config/**/`) — it compiles, it registers, it logs, and
+        // then `strip_prefix` never matches, so every PUT decodes `NotAWrite` and
+        // is silently ignored. Both shapes now come from one origin in
+        // `wz-session-core`, which is what makes them impossible to mismatch.
+        let write_prefix = admin_config_write_prefix(&write_zid_hex, write_whatami_str);
+        // The intent slot this handler stashes into; the app-tick loop owns
+        // the sink and drains it.
+        #[cfg(feature = "router-config-mutate")]
+        let write_pending_weights = std::rc::Rc::clone(&pending_router_link_weights);
+        let write_handler = move |sample: &dyn SampleView| {
+            // Re-read per PUT off the SAME live config the GET gate reads —
+            // a permit captured at setup could not answer a permission changed
+            // since, which is the frozen-permit divergence this tree has already
+            // paid for twice.
+            let write_permitted =
+                wz::runtime_tokio::admin_write_permit(&write_cfg.borrow().admin_permissions());
+            match parse_admin_config_write(
+                &write_prefix,
+                sample.keyexpr(),
+                AdminConfigWriteBody::of_sample(sample),
+                write_permitted,
+            ) {
+                #[cfg(feature = "router-connect-reconcile")]
+                AdminConfigWriteOutcome::Apply(AdminConfigWrite::ConnectAdd(eps)) => {
+                    // ⚠ NOT the same entry point as `--connect-after`, and R2393
+                    // corrected this comment after claiming it was. The CLI path
+                    // goes through `resolve_mesh_dial_target`, which is ASYNC and
+                    // RESOLVES a DNS name before dialling; this handler is a sync
+                    // closure on the Push ingress and cannot await a resolver, so
+                    // it parses only. The consequence, stated rather than left to
+                    // be discovered: a NAMED endpoint is accepted here and then
+                    // refused downstream by the accept loop's `mesh_dial_plan`
+                    // fold (R2233), which warns by name. So the wire form takes
+                    // an IP locator; the CLI's accepted set is a strict superset.
+                    //
+                    // ALL-OR-NOTHING at this layer too: the decoder rejected
+                    // empty elements, and an element that does not PARSE stops
+                    // the whole batch rather than dialling its parsable half.
+                    let mut locs = Vec::with_capacity(eps.len());
+                    let mut bad: Option<String> = None;
+                    for ep in &eps {
+                        match wz::runtime_tokio::locator::parse_any_locator(ep) {
+                            Ok(l) => locs.push(l),
+                            Err(_) => {
+                                bad = Some(ep.clone());
+                                break;
                             }
                         }
                     }
-                    // R2648 — the RUNTIME config-key write. `SetKey` carries the
-                    // key as DATA rather than as a variant of its own (its doc
-                    // says so: no decoder arm, no intent and no host arm per
-                    // key), so what decides whether this host can serve a given
-                    // key is the runtime-mutable REGISTRY, never a literal list
-                    // here. A literal would be a second answer to "which keys
-                    // can change while this node runs".
-                    #[cfg(feature = "router-config-mutate")]
-                    AdminConfigWriteOutcome::Apply(AdminConfigWrite::SetKey { key, value }) => {
-                        let row = wz::runtime_tokio::config::RUNTIME_MUTABLE_CONFIG_KEYS
-                            .iter()
-                            .find(|row| row.key == key);
-                        match row {
-                            // The one slice this run-mode owns a sink for. Parse
-                            // ONLY: this is a sync closure on the Push ingress and
-                            // holds no `&forwarder`, exactly as the ConnectAdd arm
-                            // above explains for its own resolver.
-                            Some(row) if row.slice == "router_link_weights" => {
-                                match wz::runtime_tokio::config::WzConfig::ingest_for_key(
-                                    &key, &value,
-                                ) {
-                                    Ok(ingest) => {
-                                        let rows = ingest.config.router_transport_weights;
-                                        log::info!(
-                                            "wz-ap-demo router-hat: config-write {key} \
-                                             accepted with {} row(s); queued for apply",
-                                            rows.len()
-                                        );
-                                        // LAST WRITE WINS while a tick is pending,
-                                        // which is what a config key means: the
-                                        // value is the whole slice, so an older
-                                        // pending value has been superseded rather
-                                        // than lost.
-                                        *write_pending_weights.borrow_mut() = Some(rows);
-                                    }
-                                    Err(e) => log::warn!(
-                                        "wz-ap-demo router-hat: config-write {key} refused: \
-                                         {e:?}"
-                                    ),
-                                }
+                    match bad {
+                        Some(ep) => log::warn!(
+                            "wz-ap-demo router-hat: config-write connect-add ignored; \
+                                 {ep} is not a locator (the batch applies whole or not at all)"
+                        ),
+                        None => {
+                            let n = locs.len();
+                            // A closed channel means the face loop is gone — a
+                            // shutdown, not an error to shout about.
+                            if write_tx.send(locs).is_ok() {
+                                log::info!(
+                                    "wz-ap-demo router-hat: config-write connect-add \
+                                         reconciled {n} endpoint(s) onto the connect list"
+                                );
                             }
-                            // Known to the registry, but its sink lives on another
-                            // host. Named rather than lumped in with an unknown
-                            // key: this one wz CAN change at runtime, just not here.
-                            Some(row) => log::warn!(
-                                "wz-ap-demo router-hat: config-write {key} is \
+                        }
+                    }
+                }
+                // R2648 — the RUNTIME config-key write. `SetKey` carries the
+                // key as DATA rather than as a variant of its own (its doc
+                // says so: no decoder arm, no intent and no host arm per
+                // key), so what decides whether this host can serve a given
+                // key is the runtime-mutable REGISTRY, never a literal list
+                // here. A literal would be a second answer to "which keys
+                // can change while this node runs".
+                #[cfg(feature = "router-config-mutate")]
+                AdminConfigWriteOutcome::Apply(AdminConfigWrite::SetKey { key, value }) => {
+                    let row = wz::runtime_tokio::config::RUNTIME_MUTABLE_CONFIG_KEYS
+                        .iter()
+                        .find(|row| row.key == key);
+                    match row {
+                        // The one slice this run-mode owns a sink for. Parse
+                        // ONLY: this is a sync closure on the Push ingress and
+                        // holds no `&forwarder`, exactly as the ConnectAdd arm
+                        // above explains for its own resolver.
+                        Some(row) if row.slice == "router_link_weights" => {
+                            match wz::runtime_tokio::config::WzConfig::ingest_for_key(&key, &value)
+                            {
+                                Ok(ingest) => {
+                                    let rows = ingest.config.router_transport_weights;
+                                    log::info!(
+                                        "wz-ap-demo router-hat: config-write {key} \
+                                             accepted with {} row(s); queued for apply",
+                                        rows.len()
+                                    );
+                                    // LAST WRITE WINS while a tick is pending,
+                                    // which is what a config key means: the
+                                    // value is the whole slice, so an older
+                                    // pending value has been superseded rather
+                                    // than lost.
+                                    *write_pending_weights.borrow_mut() = Some(rows);
+                                }
+                                Err(e) => log::warn!(
+                                    "wz-ap-demo router-hat: config-write {key} refused: \
+                                         {e:?}"
+                                ),
+                            }
+                        }
+                        // Known to the registry, but its sink lives on another
+                        // host. Named rather than lumped in with an unknown
+                        // key: this one wz CAN change at runtime, just not here.
+                        Some(row) => log::warn!(
+                            "wz-ap-demo router-hat: config-write {key} is \
                                  runtime-mutable on slice {} but this host holds no \
                                  sink for it; ignored",
-                                row.slice
-                            ),
-                            None => log::warn!(
-                                "wz-ap-demo router-hat: config-write {key} is not a \
+                            row.slice
+                        ),
+                        None => log::warn!(
+                            "wz-ap-demo router-hat: config-write {key} is not a \
                                  runtime-mutable key; ignored"
-                            ),
-                        }
+                        ),
                     }
-                    // Every other intent decodes here (the decoder is one SSOT) but
-                    // this host applies none: the ACL slice and the storage manager
-                    // belong to the peer and storage hosts.
-                    AdminConfigWriteOutcome::Apply(other) => log::warn!(
-                        "wz-ap-demo router-hat: config-write intent {other:?} decoded but \
-                         this host does not apply it; ignored"
-                    ),
-                    // zenoh logs a denied write at error (`adminspace.rs:397`).
-                    AdminConfigWriteOutcome::Denied => log::error!(
-                        "wz-ap-demo router-hat: config-write on {} DENIED \
-                         (adminspace.permissions.write is false)",
-                        sample.keyexpr()
-                    ),
-                    AdminConfigWriteOutcome::Malformed => {
-                        log::warn!("wz-ap-demo router-hat: config-write malformed payload; ignored")
-                    }
-                    AdminConfigWriteOutcome::UnknownKey(k) => log::warn!(
-                        "wz-ap-demo router-hat: config-write unknown sub-key {k}; ignored"
-                    ),
-                    // R2646 — a DELETE of an action-named sub-key, kept apart
-                    // from UnknownKey above: this node HAS the sub-key and has
-                    // no meaning for deleting it.
-                    AdminConfigWriteOutcome::NotDeletable(k) => log::warn!(
-                        "wz-ap-demo router-hat: config-write DELETE of '{k}' has no meaning \
-                         (it names an action, not a config key); ignored"
-                    ),
-                    AdminConfigWriteOutcome::NotAWrite => {}
                 }
-            };
-            forwarder.register_local_subscriber(&write_key, Box::new(write_handler));
-            log::info!(
-                "wz-ap-demo router-hat: adminspace config WRITE at {write_key} (connect-add)"
-            );
-        }
+                // Every other intent decodes here (the decoder is one SSOT) but
+                // this host applies none: the ACL slice and the storage manager
+                // belong to the peer and storage hosts.
+                AdminConfigWriteOutcome::Apply(other) => log::warn!(
+                    "wz-ap-demo router-hat: config-write intent {other:?} decoded but \
+                         this host does not apply it; ignored"
+                ),
+                // zenoh logs a denied write at error (`adminspace.rs:397`).
+                AdminConfigWriteOutcome::Denied => log::error!(
+                    "wz-ap-demo router-hat: config-write on {} DENIED \
+                         (adminspace.permissions.write is false)",
+                    sample.keyexpr()
+                ),
+                AdminConfigWriteOutcome::Malformed => {
+                    log::warn!("wz-ap-demo router-hat: config-write malformed payload; ignored")
+                }
+                AdminConfigWriteOutcome::UnknownKey(k) => {
+                    log::warn!("wz-ap-demo router-hat: config-write unknown sub-key {k}; ignored")
+                }
+                // R2646 — a DELETE of an action-named sub-key, kept apart
+                // from UnknownKey above: this node HAS the sub-key and has
+                // no meaning for deleting it.
+                AdminConfigWriteOutcome::NotDeletable(k) => log::warn!(
+                    "wz-ap-demo router-hat: config-write DELETE of '{k}' has no meaning \
+                         (it names an action, not a config key); ignored"
+                ),
+                AdminConfigWriteOutcome::NotAWrite => {}
+            }
+        };
+        forwarder.register_local_subscriber(&write_key, Box::new(write_handler));
+        log::info!("wz-ap-demo router-hat: adminspace config WRITE at {write_key}");
     }
 
     let loop_fut = peer_loop(
