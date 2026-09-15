@@ -573,6 +573,54 @@ const MCAST_INGRESS_FACE: FaceId = FaceId(u64::MAX);
 /// already `Rc<RefCell<..>>`, unlike the peer's owned-snapshot `subscriptions()`).
 pub struct LinkstateNetView(Rc<RefCell<LinkstateNetwork>>);
 
+/// R2636 (open-debt item 748) — a read-only handle over a router's live face
+/// set, rendering the admin `sessions[]` transport table.
+///
+/// Its own type rather than a method on the forwarder because the admin GET
+/// handler is STORED INSIDE the forwarder, so it cannot borrow the forwarder to
+/// read the faces at query time. [`LinkstateNetView`] sidesteps the same
+/// self-reference for the two graphs; this is that pattern for the third piece
+/// of live state the adminspace renders.
+#[cfg(feature = "adminspace-core")]
+pub struct RouterSessionsView(Rc<RefCell<HashMap<FaceId, RouterFaceState>>>);
+
+#[cfg(feature = "adminspace-core")]
+impl RouterSessionsView {
+    /// ONE entry per face, read LIVE — the same enumeration
+    /// [`LinkstateForwarder::admin_sessions`](crate::linkstate_forward::LinkstateForwarder::admin_sessions)
+    /// gives the peer host, and upstream gives per transport
+    /// (`zenoh/src/net/runtime/adminspace.rs` @ `"links": links,`).
+    ///
+    /// Until this existed the router host passed a literal `&[]`, so a wz
+    /// router's admin GET reported no sessions at all whatever it was connected
+    /// to — the SAME deferral R311y473 paid off for the peer, left standing on
+    /// the router. It is also what `sessions[].weight` is blocked behind: a
+    /// weight is reported per session, so with no sessions there is nowhere for
+    /// one to go, on the one host that has a router graph to compute it from.
+    ///
+    /// EVERY tier, not only the routers one. A face is a transport whatever tier
+    /// its routing zid lands in, and upstream's table is the transport manager's
+    /// rather than a network's — a Client face is a session this router holds,
+    /// and an operator asking what this node is connected to must see it.
+    pub fn admin_sessions(&self) -> Vec<wz_session_core::adminspace::AdminSession> {
+        self.0
+            .borrow()
+            .values()
+            .map(|face| wz_session_core::adminspace::AdminSession {
+                peer_zid_hex: peer_zid_routing(&face.actions)
+                    .map(|z| wz_session_core::zid_hex::zid_to_zenoh_hex(z.as_slice()))
+                    .unwrap_or_default(),
+                whatami: Some(String::from(peer_whatami_routing(&face.actions).to_str())),
+                links: face.actions.admin_links(),
+                #[cfg(feature = "transport-shm")]
+                shm: face.actions.is_shm(),
+                #[cfg(not(feature = "transport-shm"))]
+                shm: false,
+            })
+            .collect()
+    }
+}
+
 impl LinkstateNetView {
     /// The graph as GraphViz DOT with zenoh-hex node labels — the wz mirror of
     /// zenoh `info(..)` = `net.dot()` (`net/runtime/adminspace.rs:753,773`). The
@@ -621,7 +669,14 @@ pub struct RouterForwarder {
     /// its zid is known) its graph link. One id-keyed map across BOTH tiers
     /// (the `RouterFaceState.tier` says which net), so the flood can scope to a
     /// single net by filtering this map.
-    faces: RefCell<HashMap<FaceId, RouterFaceState>>,
+    ///
+    /// R2636 — behind an `Rc` for the reason `routers_net` is: the admin GET
+    /// handler is stored INSIDE this forwarder
+    /// (`register_local_queryable`), so it cannot capture the forwarder to read
+    /// the live face set. A shared handle to the sub-part is the same sidestep
+    /// [`LinkstateNetView`] already makes for the two graphs. Use sites are
+    /// unchanged — `Rc<RefCell<T>>` derefs to `RefCell<T>`.
+    faces: Rc<RefCell<HashMap<FaceId, RouterFaceState>>>,
     /// EGRESS-only multicast group faces (zenoh `Tables.mcast_groups`,
     /// `dispatcher/tables.rs:79`) — a SEPARATE collection from `faces`, mirroring
     /// zenoh's separate `mcast_groups` Vec (the egress polymorphism is WHICH
@@ -1133,7 +1188,7 @@ impl RouterForwarder {
                 WhatAmI::Router,
                 timestamping,
             ),
-            faces: RefCell::new(HashMap::new()),
+            faces: Rc::new(RefCell::new(HashMap::new())),
             #[cfg(feature = "router-multicast-faces")]
             mcast_groups: RefCell::new(Vec::new()),
             #[cfg(feature = "router-multicast-faces")]
@@ -1234,6 +1289,38 @@ impl RouterForwarder {
         let _ = self.flood_self_links_changed_tier(FaceTier::Routers, &self.routers_net);
         self.trees_dirty_routers.set(true);
         true
+    }
+
+    /// R2636 (open-debt item 748) — the router's admin `sessions[]` transport
+    /// table: ONE entry per face, the same enumeration
+    /// [`LinkstateForwarder::admin_sessions`](crate::linkstate_forward::LinkstateForwarder::admin_sessions)
+    /// gives the peer host, and upstream gives per transport
+    /// (`zenoh/src/net/runtime/adminspace.rs` @ `"links": links,`).
+    ///
+    /// Until this existed the router host passed a literal `&[]`, so a wz router's
+    /// admin GET reported no sessions at all whatever it was connected to — the
+    /// SAME deferral R311y473 paid off for the peer, left standing on the router.
+    /// It is also what `sessions[].weight` was blocked behind: a weight is reported
+    /// per session, so with no sessions there was nowhere for one to go, on the one
+    /// host that has a router graph to compute it from.
+    ///
+    /// EVERY tier, not just the routers one. A face is a transport whatever tier
+    /// its routing zid lands in, and upstream's table is the transport manager's,
+    /// not a network's — a Client face is a session this router holds and an
+    /// operator asking what this node is connected to must see it.
+    #[cfg(feature = "adminspace-core")]
+    pub fn admin_sessions(&self) -> Vec<wz_session_core::adminspace::AdminSession> {
+        RouterSessionsView(Rc::clone(&self.faces)).admin_sessions()
+    }
+
+    /// A read-only handle over the live face set — the admin host's `sessions[]`
+    /// render seam, the transport-table twin of
+    /// [`routers_net_view`](Self::routers_net_view). Held by the GET handler the
+    /// forwarder itself stores, which is why it exists rather than the handler
+    /// borrowing the forwarder.
+    #[cfg(feature = "adminspace-core")]
+    pub fn sessions_view(&self) -> RouterSessionsView {
+        RouterSessionsView(Rc::clone(&self.faces))
     }
 
     /// What this router can report about each of its ROUTER-tier links — zenoh's
@@ -7016,6 +7103,62 @@ mod tests {
         assert!(!fwd.update_router_link_weights(link_weights(&[(0xAA, 300)])));
         assert_eq!(sink_a.frame_count() + sink_c.frame_count(), 0);
         assert!(!fwd.trees_dirty_routers.get());
+    }
+
+    /// R2636 (open-debt item 748) — the router reports its transports. Before
+    /// this the host passed a literal `&[]`, so the answer was "no sessions"
+    /// whatever was connected.
+    ///
+    /// BOTH tiers are asserted, and that is the load-bearing half: the doc
+    /// claims a face is a session whatever tier its routing zid lands in, so a
+    /// renderer that filtered to `routers_net` would still satisfy a
+    /// Router-only fixture. The Peer face is what makes that claim falsifiable.
+    #[cfg(feature = "adminspace-core")]
+    #[test]
+    fn admin_sessions_reports_one_entry_per_face_across_both_tiers() {
+        let fwd = RouterForwarder::new(zid(0x01));
+        assert!(
+            fwd.admin_sessions().is_empty(),
+            "a router holding nothing reports nothing"
+        );
+
+        let (a_r, _s1) = face(zid(0xAA), WIRE_ROUTER);
+        let (b_p, _s2) = face(zid(0xBB), WIRE_PEER);
+        fwd.register(FaceId(0), &a_r);
+        fwd.register(FaceId(1), &b_p);
+
+        let sessions = fwd.admin_sessions();
+        assert_eq!(sessions.len(), 2, "one entry per face, both tiers");
+        let mut by_zid: Vec<(String, Option<String>)> = sessions
+            .iter()
+            .map(|s| (s.peer_zid_hex.clone(), s.whatami.clone()))
+            .collect();
+        by_zid.sort();
+        assert_eq!(
+            by_zid,
+            vec![
+                (
+                    wz_session_core::zid_hex::zid_to_zenoh_hex(zid(0xAA).as_slice()),
+                    Some(String::from("router"))
+                ),
+                (
+                    wz_session_core::zid_hex::zid_to_zenoh_hex(zid(0xBB).as_slice()),
+                    Some(String::from("peer"))
+                ),
+            ],
+            "each face reports its own peer and role"
+        );
+
+        // The view the admin handler actually holds answers the same, and LIVE:
+        // it is an `Rc` handle, so a face registered after it was taken is seen.
+        let view = fwd.sessions_view();
+        let (c_r, _s3) = face(zid(0xCC), WIRE_ROUTER);
+        fwd.register(FaceId(2), &c_r);
+        assert_eq!(
+            view.admin_sessions().len(),
+            3,
+            "the view is live, not a snapshot taken when it was made"
+        );
     }
 
     /// R2634 — the RELOAD, end to end and against the real graph: a weight

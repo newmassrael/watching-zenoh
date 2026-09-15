@@ -6345,6 +6345,10 @@ async fn run_router_hat_until(
         let locators: Vec<String> = self_locators.clone();
         let queryable_key = admin_queryable_key(&zid_hex, whatami_str);
         let routers_view = forwarder.routers_net_view();
+        // R2636 — taken BEFORE the handler moves, for the same reason the two
+        // graph views are: the handler is stored INSIDE the forwarder and so
+        // cannot borrow it back.
+        let sessions_view = forwarder.sessions_view();
         let peers_view = forwarder.peers_net_view();
         // R311y781 — the router's permit source, closing the y780 residual. The SAME
         // shape the peer host uses: one shared `WzConfig` whose live
@@ -6396,7 +6400,15 @@ async fn run_router_hat_until(
             let plugins = wz::runtime_tokio::compiled_plugins(&version);
             #[cfg(not(feature = "adminspace-plugins-handlers"))]
             let plugins: Vec<wz::runtime_tokio::adminspace::AdminPlugin> = Vec::new();
-            if answer_admin_query(view, out, &ctx, &[], &[], &plugins, "{}")
+            // R2636 (open-debt item 748) — the router's `sessions[]` transport
+            // table, read LIVE per GET off the shared face set. It was a literal
+            // `&[]` here, so this node answered "no sessions" whatever it was
+            // connected to; the peer host has reported its own since R311y473.
+            // Per GET and not captured once, because faces come and go and an
+            // operator asking what this router holds must get the answer as of
+            // the question.
+            let sessions = sessions_view.admin_sessions();
+            if answer_admin_query(view, out, &ctx, &sessions, &[], &plugins, "{}")
                 == AdminAnswerOutcome::DeniedRead
             {
                 log::error!(
