@@ -5701,7 +5701,13 @@ layer_c1ay_cargo_test_router_hat() {
     # "adminspace-core")]`, which this is the only one of the seven to pull; the
     # R2634 test beside it was ungated and so moved all seven. Number PRINTED by
     # the guard, not 143 + 1 counted off the diff.
-    _runci_guarded_test "C1AY router_forward 144" 144 \
+    #
+    # R2637 — 144 -> 145, same arm and the same reason: the added test asserts a
+    # router's `sessions[].weight` and is `adminspace-core`-gated. PRINTED by the
+    # command itself, after that round's full sweep STALLED with an empty log on a
+    # machine at load 37 — so the one guard predicted to move and the one predicted
+    # NOT to (`C1AM adminspace`, still 33) were each run directly instead.
+    _runci_guarded_test "C1AY router_forward 145" 145 \
         cargo test -p wz-runtime-tokio --features routing-router-hat,adminspace-router-linkstate --lib router_forward --quiet || return 1
     # R311y786 (§5.21 router-connect-reconcile) — the re-dial BACKOFF. Until y786
     # the loop slept a `const RECONNECT_BACKOFF_MS = 1000`, so an unreachable

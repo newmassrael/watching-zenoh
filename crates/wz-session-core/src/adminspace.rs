@@ -88,7 +88,6 @@ pub struct AdminSession {
 /// R2637 — a `u16` as JSON, and its optional twin. Written out rather than
 /// `format!`ed for the reason the whole builder is hand-rolled: it stays
 /// `alloc`-only and no_std-feasible, with no `serde_json` in the session kernel.
-#[cfg(feature = "adminspace-core")]
 fn push_u16(v: u16, out: &mut String) {
     use core::fmt::Write as _;
     let _ = write!(out, "{v}");
@@ -96,7 +95,6 @@ fn push_u16(v: u16, out: &mut String) {
 
 /// `None` renders `null` — the JSON `serde` would emit for an `Option<u16>`,
 /// which is what upstream serializes this through.
-#[cfg(feature = "adminspace-core")]
 fn push_opt_u16(v: Option<u16>, out: &mut String) {
     match v {
         Some(v) => push_u16(v, out),
