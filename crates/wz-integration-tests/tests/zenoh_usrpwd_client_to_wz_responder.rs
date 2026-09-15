@@ -40,6 +40,14 @@
 //!
 //! `#[ignore]` binary-dep e2e: needs the core zenoh `z_get` example beside
 //! zenohd (`scripts/build-zenohd.sh`, or `WZ_ZENOH_CORE_EXAMPLES_DIR`).
+//!
+//! ⚠ Both function names carry `zenoh_zget`, and that is load-bearing, not
+//! style: Layer E's `--ignored` sweep builds only the pico CLI and wz-ap-demo, so
+//! a `z_get` leg it selected would die on the helper's missing-oracle assert.
+//! The token skips them out of E, and Layer Z — the lane `build-zenohd.sh`
+//! provisions — runs this file under a count guard (R2358's arrangement for the
+//! storage-history legs). This file was first committed saying "Layer E runs via
+//! --ignored"; `layer_e_oracle_scope_gate.py` refused that before any push.
 
 use std::process::{Command, Stdio};
 use std::time::Duration;
@@ -140,8 +148,8 @@ async fn accept_one(
 // wz-proves: session-extauth wz->zenoh
 // wz-proves: access-extauth-usrpwd zenoh->wz
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[ignore = "binary-dep e2e (zenoh core example z_get, usrpwd); Layer E runs via --ignored"]
-async fn a_stock_usrpwd_client_authenticates_to_wz_and_wz_holds_its_name() {
+#[ignore = "binary-dep e2e (zenoh core example z_get, usrpwd); Layer Z runs via --ignored"]
+async fn a_stock_zenoh_zget_usrpwd_client_authenticates_to_wz_and_wz_holds_its_name() {
     let listener = TcpListener::bind("127.0.0.1:0")
         .await
         .expect("bind wz responder");
@@ -175,8 +183,8 @@ async fn a_stock_usrpwd_client_authenticates_to_wz_and_wz_holds_its_name() {
 // wz-proves: session-extauth zenoh->wz
 // wz-proves: access-extauth-usrpwd zenoh->wz
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[ignore = "binary-dep e2e (zenoh core example z_get, usrpwd); Layer E runs via --ignored"]
-async fn a_stock_usrpwd_client_with_the_wrong_password_is_refused_by_wz() {
+#[ignore = "binary-dep e2e (zenoh core example z_get, usrpwd); Layer Z runs via --ignored"]
+async fn a_stock_zenoh_zget_usrpwd_client_with_the_wrong_password_is_refused_by_wz() {
     let listener = TcpListener::bind("127.0.0.1:0")
         .await
         .expect("bind wz responder");

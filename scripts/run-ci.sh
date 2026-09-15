@@ -15494,6 +15494,16 @@ layer_z_zenohd_interop() {
     _runci_guarded_test Z 3 env WZ_ZENOHD_BIN="$zenohd" cargo test -p wz-integration-tests \
         --test wz_storage_history_versions_to_a_zenoh_zget -- --ignored --quiet --test-threads=1 \
         || return 1
+    # R2631 — the usrpwd RESPONDER legs, landed here for the reason the storage
+    # legs above are: they drive the core example `z_get`, which only this lane
+    # provisions, and their `zenoh_zget` token skips them out of Layer E. A stock
+    # zenoh usrpwd INITIATOR authenticates to a wz responder, which must hold its
+    # name, and the same client with a wrong password is refused by name.
+    # COUNT-GUARDED at 2 so an `#[ignore]` sweep that selected nothing cannot pass
+    # green in both lanes.
+    _runci_guarded_test Z 2 env WZ_ZENOHD_BIN="$zenohd" cargo test -p wz-integration-tests \
+        --test zenoh_usrpwd_client_to_wz_responder -- --ignored --quiet --test-threads=1 \
+        || return 1
     # R311y439 — wz RX FRAGMENTATION cross-impl (transport-fragmentation
     # zenohd->wz), the direction R311y438 explicitly left open ("the tiny MTU
     # binds BOTH ways ... but nothing asserts it, so no claim is made"). wz
