@@ -6571,6 +6571,13 @@ async fn run_router_hat_until(
                     AdminConfigWriteOutcome::UnknownKey(k) => log::warn!(
                         "wz-ap-demo router-hat: config-write unknown sub-key {k}; ignored"
                     ),
+                    // R2646 — a DELETE of an action-named sub-key, kept apart
+                    // from UnknownKey above: this node HAS the sub-key and has
+                    // no meaning for deleting it.
+                    AdminConfigWriteOutcome::NotDeletable(k) => log::warn!(
+                        "wz-ap-demo router-hat: config-write DELETE of '{k}' has no meaning \
+                         (it names an action, not a config key); ignored"
+                    ),
                     AdminConfigWriteOutcome::NotAWrite => {}
                 }
             };

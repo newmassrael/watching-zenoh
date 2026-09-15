@@ -1609,6 +1609,14 @@ mod tests {
     /// ⚠ What this test does NOT claim: that wz could not one day want such a
     /// hook. The day `plugins` becomes honoured, this test reds — which is the
     /// point of pinning it here rather than writing it down.
+    ///
+    /// Gated exactly as its SUBJECT is: `set_by_key` / `remove_by_key` live
+    /// behind this cfg, so a test naming them without it does not compile on a
+    /// build that elides them. Gate 2h found this by running a leg that does.
+    #[cfg(all(
+        feature = "zenoh-config",
+        any(feature = "adminspace-core", feature = "routing-router-hat")
+    ))]
     #[test]
     fn a_plugin_config_write_is_refused_rather_than_applied_unvalidated() {
         let key = "plugins/rest/http_port";
