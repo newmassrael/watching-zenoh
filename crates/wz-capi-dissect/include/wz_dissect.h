@@ -255,6 +255,8 @@
  *                    `Push`, `Request`, `Response`, `ResponseFinal`,
  *                    `Interest`, `Declare` inside a `Frame` batch. `Oam` is
  *                    both -- it has a transport MID and a network one.
+ *                    `Scout` and `Hello` are the SCOUTING space's, each on a
+ *                    datagram row of its own (revision 10, below).
  *
  * R2440 -- AND THE KEY THAT MESSAGE TRAVELLED UNDER, at field-document
  * revision 6.
@@ -336,6 +338,26 @@
  *
  * @values fields message
  *
+ * R2629 -- AND A SCOUTING DATAGRAM IS A ROW, at field-document revision 10.
+ *
+ * A datagram flow's `messages` now also holds its SCOUT and HELLO datagrams.
+ * Until this revision they were not rendered at all: a discovery capture
+ * reached this document as `"messages":[]` with no disagreement named, while
+ * the summary beside it counted `"scouting":N`. If you read an empty listing
+ * on a scouting flow from revision 9 or earlier as "nothing was said", that
+ * reading was wrong.
+ *
+ * Such a row carries the keys every walked row carries. Its `carried` holds one
+ * entry, `Scout` or `Hello`, read off the MID byte in the SCOUTING space -- and
+ * that space reuses the transport space's numbers: `0x01` is `Scout` here and
+ * `Init` on a session. So the WORD, never the byte, tells you which space a
+ * row was read in, and no word belongs to both. `keyexpr` and `keyexpr_cause`
+ * are `null` on it, because a scouting message references no key.
+ *
+ * ORDER: a flow lists its transport messages first and its scouting messages
+ * after them, each row with its own `packet`. Merge on `packet` when you need
+ * one timeline.
+ *
  * R2180 — AND A DOCUMENT SAYS WHICH OF ITS TOP-LEVEL KEYS ARE PLANES, which is
  * a third question neither number above can answer. A PLANE is an independent
  * fold over the capture that this build may be unable to feed at all; when it
@@ -404,7 +426,7 @@
  *
  * Every family in `value_families` now carries a `carries` axis:
  *
- *     {"name":"fields","revision":9,"key":"kind","values":[...],
+ *     {"name":"fields","revision":10,"key":"kind","values":[...],
  *      "carries":[{"word":"bits","shapes":[["end","name","start","value"]]},
  *                 {"word":"opaque","shapes":[["end","name","start"]]}, ...]}
  *
@@ -1161,7 +1183,7 @@ int wz_dissect_declarations_diagnose(const char *declarations, char **out);
  *
  * R2175 -- the document is at REVISION 3, and the fourth key is `value_families`:
  *
- *     "value_families":[{"name":"fields","revision":9,"key":"state",
+ *     "value_families":[{"name":"fields","revision":10,"key":"state",
  *                        "values":["decoded","encoding_mismatch",…]}, …]
  *
  * every key in every document whose VALUE this build draws from a closed set,

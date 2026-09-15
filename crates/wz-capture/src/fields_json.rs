@@ -393,7 +393,15 @@ fn push_stream_flow(
         );
         match flow.message_bytes(frame) {
             Err(why) => push_declined(&why, out),
-            Ok(bytes) => push_walk(bytes, frame, spaces, declarations, out),
+            Ok(bytes) => push_walk(
+                bytes,
+                MidSpace::Transport,
+                frame.direction,
+                &message_name(frame),
+                spaces,
+                declarations,
+                out,
+            ),
         }
         out.push('}');
     }
@@ -427,59 +435,13 @@ fn push_datagram_flow(
         let Some(file) = reread else {
             continue;
         };
-        let Some(packet) = file.packet(index) else {
-            note(&mut named, &mut disagreed, cap, index, "absent");
-            continue;
+        let datagram = match reread_datagram(file, flow, frame.direction, index) {
+            Ok(datagram) => datagram,
+            Err(why) => {
+                note(&mut named, &mut disagreed, cap, index, why);
+                continue;
+            }
         };
-        // Round 2443 (open-debt item 694) — BOTH DATAGRAM ARMS, not one.
-        //
-        // This read `Transport::Udp(..)` alone, so every raweth (L2) frame fell
-        // through to the note below and the flow went out with `"messages":[]`
-        // — while `summary` counted the same frames and `census` read the node's
-        // zid off them. A downstream consumer measured exactly that split and
-        // reported it.
-        //
-        // The first pass tells the two apart deliberately (`Dissection`'s own
-        // `Transport::Udp` / `Transport::RawEth` arms, whose comment calls that
-        // site "the last place that knows which one it was") because a raweth
-        // flow is keyed by MAC with no ports. That distinction is about how a
-        // flow is NAMED. It is not a reason to refuse to read the payload back,
-        // and `Transport::RawEth` carries the same `Datagram` this arm binds —
-        // which is why `Dissection::push_tunnelled` already spells the pattern
-        // this way.
-        let Ok(crate::link::Transport::Udp(datagram) | crate::link::Transport::RawEth(datagram)) =
-            crate::link::decapsulate(packet.link_type, packet.index, packet.data)
-        else {
-            // RENAMED with the widening, because the old word became false in
-            // the useful direction: with raweth accepted, a frame reaching here
-            // is TCP, vsock or undecodable on a flow the first pass called a
-            // datagram flow. "not_udp" named a UDP-shaped expectation that was
-            // never what this loop wanted, and it read as a defect in the
-            // CAPTURE when the fact was that the reader declined a link kind it
-            // knows.
-            note(&mut named, &mut disagreed, cap, index, "not_datagram");
-            continue;
-        };
-        // The second read's own coordinates, against the first read's. Three
-        // axes rather than one boolean, because they fail for different reasons
-        // and a reader chasing one of them needs to know which.
-        let travels = if datagram.from_low {
-            Direction::A
-        } else {
-            Direction::B
-        };
-        if datagram.flow != flow.flow {
-            note(&mut named, &mut disagreed, cap, index, "flow");
-            continue;
-        }
-        if travels != frame.direction {
-            note(&mut named, &mut disagreed, cap, index, "direction");
-            continue;
-        }
-        if datagram.packet_index != index {
-            note(&mut named, &mut disagreed, cap, index, "index");
-            continue;
-        }
         let Some(message) = datagram.payload.get(frame.unit_offset..) else {
             note(&mut named, &mut disagreed, cap, index, "short_payload");
             continue;
@@ -507,7 +469,69 @@ fn push_datagram_flow(
             dir_name(frame.direction),
             crate::anchor_space_of(frame).name()
         );
-        push_walk(message, frame, spaces, declarations, out);
+        push_walk(
+            message,
+            MidSpace::Transport,
+            frame.direction,
+            &message_name(frame),
+            spaces,
+            declarations,
+            out,
+        );
+        out.push('}');
+    }
+    // R2629 (open-debt item 744) — AND THE SCOUTING LIST, which this document
+    // never read.
+    //
+    // The first pass puts a datagram in `scouting` rather than `frames` when it
+    // belongs to the scouting MID space. The summary has counted that list since
+    // R311y608 and the census folds it, while this loop walked `frames` alone —
+    // so a discovery capture went out as `"messages":[]` with no disagreement
+    // named, and the listing that most needed a row was the one with none.
+    //
+    // AFTER the transport rows rather than interleaved: `wz-analyze`'s listing
+    // orders the two the same way, and every row's `packet` is the coordinate a
+    // consumer merges on. NOT stamped into the id spaces: a scouting message
+    // references no keyexpr, and its packet may precede the last frame's, which
+    // would move a cursor that only moves forward.
+    for datagram in &flow.scouting {
+        let index = datagram.packet_index;
+        let Some(file) = reread else {
+            continue;
+        };
+        let read = match reread_datagram(file, flow, datagram.direction, index) {
+            Ok(read) => read,
+            Err(why) => {
+                note(&mut named, &mut disagreed, cap, index, why);
+                continue;
+            }
+        };
+        if cap.is_some_and(|c| shown >= c) {
+            // No `note_unwalked` here: that counter says a PAYLOAD went
+            // unexamined, and a scouting message carries none.
+            omitted += 1;
+            continue;
+        }
+        shown += 1;
+        if emitted > 0 {
+            out.push(',');
+        }
+        emitted += 1;
+        let _ = write!(
+            out,
+            "{{\"direction\":\"{}\",\"offset_space\":\"{}\",\"packet\":{index},",
+            dir_name(datagram.direction),
+            crate::AnchorSpace::PacketIndex.name()
+        );
+        push_walk(
+            &read.payload,
+            MidSpace::Scouting,
+            datagram.direction,
+            &scouting_name(datagram),
+            spaces,
+            declarations,
+            out,
+        );
         out.push('}');
     }
     let _ = write!(
@@ -522,6 +546,72 @@ fn push_datagram_flow(
         let _ = write!(out, "{{\"at\":{at},\"why\":\"{why}\"}}");
     }
     out.push_str("]}}");
+}
+
+/// R2629 (open-debt item 744) — the SECOND read of one datagram, judged against
+/// the first, for both of a datagram flow's lists.
+///
+/// Hoisted out of the transport loop when the scouting list joined it. The same
+/// re-read written twice is the shape Round 2443 paid for, where widening one
+/// copy to raweth and not the other would have left a flow answering differently
+/// depending on which list asked.
+///
+/// `Err` is the disagreement's word, exactly as `note` records it.
+fn reread_datagram(
+    file: &Reread,
+    flow: &crate::DatagramDissection,
+    direction: Direction,
+    index: usize,
+) -> Result<crate::link::Datagram, &'static str> {
+    let Some(packet) = file.packet(index) else {
+        return Err("absent");
+    };
+    // Round 2443 (open-debt item 694) — BOTH DATAGRAM ARMS, not one.
+    //
+    // This read `Transport::Udp(..)` alone, so every raweth (L2) frame fell
+    // through to the refusal below and the flow went out with `"messages":[]`
+    // — while `summary` counted the same frames and `census` read the node's
+    // zid off them. A downstream consumer measured exactly that split and
+    // reported it.
+    //
+    // The first pass tells the two apart deliberately (`Dissection`'s own
+    // `Transport::Udp` / `Transport::RawEth` arms, whose comment calls that
+    // site "the last place that knows which one it was") because a raweth
+    // flow is keyed by MAC with no ports. That distinction is about how a
+    // flow is NAMED. It is not a reason to refuse to read the payload back,
+    // and `Transport::RawEth` carries the same `Datagram` this arm binds —
+    // which is why `Dissection::push_tunnelled` already spells the pattern
+    // this way.
+    let Ok(crate::link::Transport::Udp(datagram) | crate::link::Transport::RawEth(datagram)) =
+        crate::link::decapsulate(packet.link_type, packet.index, packet.data)
+    else {
+        // RENAMED with the widening, because the old word became false in
+        // the useful direction: with raweth accepted, a frame reaching here
+        // is TCP, vsock or undecodable on a flow the first pass called a
+        // datagram flow. "not_udp" named a UDP-shaped expectation that was
+        // never what this loop wanted, and it read as a defect in the
+        // CAPTURE when the fact was that the reader declined a link kind it
+        // knows.
+        return Err("not_datagram");
+    };
+    // The second read's own coordinates, against the first read's. Three
+    // axes rather than one boolean, because they fail for different reasons
+    // and a reader chasing one of them needs to know which.
+    let travels = if datagram.from_low {
+        Direction::A
+    } else {
+        Direction::B
+    };
+    if datagram.flow != flow.flow {
+        return Err("flow");
+    }
+    if travels != direction {
+        return Err("direction");
+    }
+    if datagram.packet_index != index {
+        return Err("index");
+    }
+    Ok(datagram)
 }
 
 /// Walk `bytes` and emit either the tree or the reason it was declined.
@@ -549,31 +639,45 @@ fn push_datagram_flow(
 /// decline means the bytes are not the message the session framed, and decoding
 /// a payload out of them would be a confident statement about bytes nobody
 /// asked for -- the failure the decline itself exists to avoid.
+///
+/// R2629 (open-debt item 744) — `space` is which MID space the first pass read
+/// these bytes in, and `framed` is the name it gave them. Both are handed in
+/// rather than recovered here, because the bytes cannot answer either: `0x01`
+/// is `Init` on a session and `Scout` on the scouting group, and a walker
+/// choosing by byte is the confident wrong answer.
 fn push_walk(
     bytes: &[u8],
-    frame: &PassiveFrame,
+    space: MidSpace,
+    direction: Direction,
+    framed: &str,
     spaces: &crate::agg::KeyexprSpaces,
     declarations: Option<&Declarations<'_>>,
     out: &mut String,
 ) {
-    match wz_session_core::dissect::dissect_transport_message(bytes, 0) {
-        // The error type is `sce_forge_runtime`'s and is not re-exported here,
-        // so it is rendered rather than named — a dependency this crate has no
-        // reason to take on for one message string.
+    match space.walk(bytes) {
         Err(err) => {
             let mut why = String::from("the field walker refused these bytes: ");
-            let _ = write!(why, "{err:?}");
+            why.push_str(&err);
             push_declined(&why, out);
         }
-        Ok(field) => {
-            let framed = message_name(frame);
-            if walk_agrees(&field.name, &framed) {
-                let at = KeyexprAt::new(frame.direction, spaces);
+        // Only the scouting walker gives this answer, and only for a byte
+        // outside its space — which the first pass, having put these bytes in
+        // the scouting list, said they were not. A disagreement between the two
+        // readers, so it is declined the way the arm below declines one.
+        Ok(None) => {
+            let mut why = String::from("the session read these bytes as ");
+            why.push_str(framed);
+            why.push_str(" and the field walker names no message in their MID space");
+            push_declined(&why, out);
+        }
+        Ok(Some(field)) => {
+            if walk_agrees(&field.name, framed) {
+                let at = KeyexprAt::new(direction, spaces);
                 out.push_str("\"name\":");
                 escape_into(&field.name, out);
                 out.push_str(",\"fields\":");
                 out.push_str(&to_json(&field));
-                push_carried(bytes, &field, at, out);
+                push_carried(bytes, &field, space, at, out);
                 if let Some(declarations) = declarations {
                     out.push_str(",\"payload_decode\":");
                     push_decoding(&decode_payload(&field, declarations, at), out);
@@ -604,7 +708,7 @@ fn push_walk(
                 }
             } else {
                 let mut why = String::from("the session read these bytes as ");
-                why.push_str(&framed);
+                why.push_str(framed);
                 why.push_str(" and the field walker reads them as ");
                 why.push_str(&field.name);
                 why.push_str(
@@ -637,8 +741,10 @@ fn push_declined(why: &str, out: &mut String) {
 ///
 /// # Read off the WIRE, through the vocabulary
 ///
-/// The word comes from the MID BYTE — `bytes[0]` for the transport message,
-/// and the first byte of each batched record's span for the network ones —
+/// The word comes from the MID BYTE — `bytes[0]` for the row's own message,
+/// read in the row's [`MidSpace`] (R2629, open-debt item 744: `0x01` is `Init`
+/// on a session and `Scout` on the scouting group), and the first byte of each
+/// batched record's span for the network ones —
 /// resolved through [`MessageName`]. Not from the tree's node names: those are
 /// the walker's own strings, and asking the walker to confirm the walker is the
 /// tautology this whole axis exists to avoid. `dissect_transport_message` is
@@ -720,6 +826,7 @@ fn push_declined(why: &str, out: &mut String) {
 fn push_carried(
     bytes: &[u8],
     field: &wz_session_core::dissect::Field,
+    space: MidSpace,
     at: KeyexprAt<'_>,
     out: &mut String,
 ) {
@@ -753,10 +860,7 @@ fn push_carried(
         out.push('}');
     };
     let records = batched_records(field);
-    if let Some(message) = bytes
-        .first()
-        .and_then(|b| MessageName::of_transport(b & 0x1F))
-    {
+    if let Some(message) = bytes.first().and_then(|b| space.head(b & 0x1F)) {
         let keyexpr = if records.is_empty() {
             crate::payload_decode::subtree_keyexpr_outcome(field, at)
         } else {
@@ -832,8 +936,18 @@ fn message_at(frame: &PassiveFrame) -> usize {
 }
 
 fn message_name(frame: &PassiveFrame) -> String {
-    match &frame.frame {
-        Ok(f) => f.kind_name().to_string(),
+    framed_name(frame.frame.as_ref().map(|f| f.kind_name()))
+}
+
+/// R2629 (open-debt item 744) — the first pass's name for a scouting datagram,
+/// on the rule [`message_name`] follows.
+fn scouting_name(datagram: &crate::ScoutingDatagram) -> String {
+    framed_name(datagram.frame.as_ref().map(|f| f.kind_name()))
+}
+
+fn framed_name<E: core::fmt::Debug>(frame: Result<&'static str, &E>) -> String {
+    match frame {
+        Ok(name) => name.to_string(),
         // A message this reader could NOT decode is named as such rather than
         // omitted: a listing that shows only the successes is the silence this
         // layer exists to end.
@@ -842,6 +956,57 @@ fn message_name(frame: &PassiveFrame) -> String {
             let _ = write!(s, "{e:?}");
             s.push(')');
             s
+        }
+    }
+}
+
+/// R2629 (open-debt item 744) — WHICH MID SPACE a row's bytes are read in.
+///
+/// Two spaces reach this document and they reuse each other's numbers: `0x01`
+/// is `Init` on a session and `Scout` on the scouting group. The first pass
+/// already decided which list a datagram belongs to, so a row carries that
+/// decision here rather than letting the walker or the vocabulary guess it from
+/// the byte.
+#[derive(Clone, Copy)]
+enum MidSpace {
+    /// A session message: walked by `dissect_transport_message`, named through
+    /// `MessageName::of_transport`.
+    Transport,
+    /// A scouting datagram: walked by `dissect_scouting_message`, named through
+    /// `MessageName::of_scouting`.
+    Scouting,
+}
+
+impl MidSpace {
+    /// Walk `bytes` at base 0 in this space.
+    ///
+    /// `Ok(None)` is the scouting walker's "not a MID of mine"; the transport
+    /// walker has no such answer and names what it does not know `Unknown`.
+    /// The error is rendered rather than named: its type is
+    /// `sce_forge_runtime`'s and is not re-exported here, and this crate has no
+    /// reason to take that dependency on for one message string.
+    fn walk(self, bytes: &[u8]) -> Result<Option<wz_session_core::dissect::Field>, String> {
+        fn rendered<E: core::fmt::Debug>(err: E) -> String {
+            let mut s = String::new();
+            let _ = write!(s, "{err:?}");
+            s
+        }
+        match self {
+            Self::Transport => wz_session_core::dissect::dissect_transport_message(bytes, 0)
+                .map(Some)
+                .map_err(rendered),
+            Self::Scouting => {
+                wz_session_core::dissect::dissect_scouting_message(bytes, 0).map_err(rendered)
+            }
+        }
+    }
+
+    /// The message this space's MID byte names, through the one vocabulary.
+    fn head(self, mid: u8) -> Option<wz_session_core::dissect::MessageName> {
+        use wz_session_core::dissect::MessageName;
+        match self {
+            Self::Transport => MessageName::of_transport(mid),
+            Self::Scouting => MessageName::of_scouting(mid),
         }
     }
 }
@@ -3181,9 +3346,11 @@ mod tests {
         use crate::datagram_tests::{init_message, raweth_packet};
 
         // THE SAME MESSAGE ON BOTH LINKS, so the only thing that differs is the
-        // link kind. A first cut put a SCOUT on the UDP side and it rendered no
-        // message row at all -- scouting is its own plane -- which would have
-        // made the UDP half of this fixture prove nothing.
+        // link kind. A first cut put a SCOUT on the UDP side, and until R2629
+        // (open-debt item 744) that rendered no message row at all, which would
+        // have made the UDP half of this fixture prove nothing. It renders one
+        // now, but out of a different list and MID space than the raweth INIT,
+        // so it still could not grade the link-kind boundary this test is for.
         let udp = udp_packet(
             [192, 168, 1, 5],
             43210,
@@ -3220,6 +3387,95 @@ mod tests {
             !out.contains("\"messages\":[]"),
             "every datagram flow here carries a message, so an empty listing is \
              the defect this test was written for: {out}"
+        );
+    }
+
+    /// R2629 (open-debt item 744) — A SCOUTING DATAGRAM IS A ROW, NAMED IN ITS
+    /// OWN MID SPACE.
+    ///
+    /// # The defect
+    ///
+    /// The first pass keeps a datagram flow's scouting messages in
+    /// `DatagramDissection::scouting`, apart from `frames`, because the two MID
+    /// spaces collide: `S_MID_SCOUT` and `T_MID_INIT` are both `0x01`. The
+    /// summary has counted that list since R311y608 and the census folds it,
+    /// while this document walked `frames` alone — so a discovery capture
+    /// crossed the C ABI as `"messages":[]` with no disagreement named, beside a
+    /// summary reporting `"scouting":1`. One capture, two doors, two answers:
+    /// item 694's shape, on a list this document did not read at all.
+    ///
+    /// # The misread it has to refuse, not only the absence
+    ///
+    /// The two bytes are `0x01` and `0x02`, so a row that reused the transport
+    /// lookup would carry `Init` and `Open` with every key in place. A test
+    /// asserting only that SOME row exists would pass against that renderer,
+    /// which is why the transport words are named below.
+    #[test]
+    fn a_scouting_datagram_is_a_row_named_in_its_own_mid_space() {
+        use crate::datagram_tests::{hello_with_locators, scout_message, SCOUT_GROUP};
+
+        let asker = [192, 168, 1, 5];
+        let asker_port = 43210;
+        let scout = udp_packet(asker, asker_port, SCOUT_GROUP, 7446, &scout_message());
+        let hello = udp_packet(
+            [192, 168, 1, 9],
+            7447,
+            asker,
+            asker_port,
+            &hello_with_locators(),
+        );
+
+        let mut d = Dissection::new();
+        d.push_packet_at(LINKTYPE_ETHERNET, 0, Some(0), &scout);
+        d.push_packet_at(LINKTYPE_ETHERNET, 1, Some(1), &hello);
+        d.finish();
+
+        // The population this test grades: both messages in the SCOUTING list
+        // and nothing in `frames`, so every row below can only have come from
+        // the list the defect left unread.
+        let lists: Vec<(usize, usize)> = d
+            .datagram_flows()
+            .iter()
+            .map(|f| (f.frames.len(), f.scouting.len()))
+            .collect();
+        assert_eq!(
+            lists,
+            [(0, 1), (0, 1)],
+            "the fixture must hold one scouting message per flow and no transport \
+             frame, or the rows below are graded against something else"
+        );
+
+        let file = crate::pcap::write(
+            LINKTYPE_ETHERNET,
+            &[(0, 0, scout.as_slice()), (1, 0, hello.as_slice())],
+        );
+        let out = fields_json(&d, &file, None, None);
+
+        for word in ["Scout", "Hello"] {
+            let row = alloc::format!("\"name\":\"{word}\",\"fields\":");
+            let entry = alloc::format!("\"carried\":[{{\"message\":\"{word}\",\"start\":0,");
+            assert_eq!(
+                (out.matches(&row).count(), out.matches(&entry).count()),
+                (1, 1),
+                "the {word} datagram must render exactly one walked row whose \
+                 `carried` word is read in the scouting MID space: {out}"
+            );
+        }
+        for misread in ["\"message\":\"Init\"", "\"message\":\"Open\""] {
+            assert!(
+                !out.contains(misread),
+                "{misread} is `0x01`/`0x02` read in the TRANSPORT space, which is \
+                 the confident wrong answer the scouting list exists to prevent: {out}"
+            );
+        }
+        assert!(
+            !out.contains("\"declined\":"),
+            "both readers agree on both messages, so no row may be declined: {out}"
+        );
+        assert_eq!(
+            out.matches("\"disagreements\":{\"count\":0,").count(),
+            2,
+            "both second reads agree with the first, on both flows: {out}"
         );
     }
 

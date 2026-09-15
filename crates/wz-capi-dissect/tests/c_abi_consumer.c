@@ -1524,8 +1524,11 @@ int main(void) {
      * ⚠ THIS IS THE ROW THAT STOOD STALE BEHIND THE CENSUS ONE, for the third
      * time in this file's history. It was invisible because the C loop's
      * `CHECK` aborts, so Layer C1bo can only ever report the FIRST mismatch --
-     * which is why the gate R2463 added reports all of them at once. */
-    revisioned[2].revision = 9;
+     * which is why the gate R2463 added reports all of them at once.
+     * R2629 (item 744) -- 10: a datagram flow's `messages` gains its SCOUT and
+     * HELLO rows, which no revision rendered, and `carried[].message` gains
+     * `Scout` and `Hello`, read in the scouting MID space. */
+    revisioned[2].revision = 10;
     revisioned[2].doc = NULL;
     rc = wz_dissect_pcap_fields(pcap, sizeof pcap, 0, &revisioned[2].doc);
     CHECK(rc == WZ_DISSECT_OK, "fields rc=%d", rc);

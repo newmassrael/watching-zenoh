@@ -2858,11 +2858,16 @@ pub fn dissect_scouting_message(bytes: &[u8], base: usize) -> Result<Option<Fiel
     let mid = header & 0x1F;
     let l = (header & wz_codecs::wire_const::FLAG_S_HELLO_L) != 0;
     let mut fields = alloc::vec![header_field, bits("mid", carrier, mid as u64),];
+    // R2629 (open-debt item 744) — the WORD comes from `MessageName`, on the
+    // rule the transport and network dispatchers already follow. These two were
+    // literals for as long as no document rendered a scouting row, which is what
+    // kept them out of the declared vocabulary: a word no consumer could receive
+    // needed no declaration.
     let (name, body) = match mid {
-        wz_codecs::wire_const::S_MID_SCOUT => ("Scout", walk_scout(&mut c)?),
+        wz_codecs::wire_const::S_MID_SCOUT => (MessageName::Scout.name(), walk_scout(&mut c)?),
         wz_codecs::wire_const::S_MID_HELLO => {
             fields.push(flag("l", carrier, l));
-            ("Hello", walk_hello(&mut c, l)?)
+            (MessageName::Hello.name(), walk_hello(&mut c, l)?)
         }
         // NOT an error: a byte that is not a scouting MID means these bytes
         // are not a scouting message, which the caller decides what to do
@@ -2873,8 +2878,17 @@ pub fn dissect_scouting_message(bytes: &[u8], base: usize) -> Result<Option<Fiel
     Ok(Some(group(name, start, c.offset(), fields)))
 }
 
-/// Every MESSAGE this dissector names, transport and network, as ONE closed
-/// vocabulary joined to the wire.
+/// Every MESSAGE this dissector names — transport, network and scouting — as
+/// ONE closed vocabulary joined to the wire.
+///
+/// R2629 (open-debt item 744) — `Scout` and `Hello` joined, from the THIRD MID
+/// space. They were literals in [`dissect_scouting_message`] for as long as no
+/// document rendered a scouting row, which is what made the omission invisible:
+/// a word no consumer could receive needed no declaration. The field document
+/// renders those rows now and reads each row's word off its MID byte, where
+/// `0x01` is `Init` on a session and `Scout` on the scouting group — so the
+/// space is part of the question, and [`Self::scouting_mid`] is its own
+/// accessor for the same reason `Oam` has two.
 ///
 /// R2223 (open-debt item 573) — the list existed and was unreachable. It lived
 /// as `MESSAGE_NAMES` in `wz-integration-tests`, a `publish = false` crate no
@@ -2890,8 +2904,9 @@ pub fn dissect_scouting_message(bytes: &[u8], base: usize) -> Result<Option<Fiel
 ///
 /// A slice is a list somebody remembers to extend. Here every arm below is
 /// exhaustive over this enum, so a variant added later does not compile until
-/// it has a name, a transport MID answer and a network MID answer — and
-/// [`Self::of_transport`] / [`Self::of_network`] are then a SECOND opinion
+/// it has a name and an answer in each of the three MID spaces — and
+/// [`Self::of_transport`] / [`Self::of_network`] / [`Self::of_scouting`] are
+/// then a SECOND opinion
 /// about which byte carries it, independent of the dispatchers' own arms.
 /// `the_message_vocabulary_is_the_one_the_dispatchers_produce` is the joint: it
 /// asks both walkers about all thirty-two values a 5-bit MID can take and holds
@@ -2937,6 +2952,10 @@ pub enum MessageName {
     Push,
     /// `wire_const::N_MID_DECLARE`.
     Declare,
+    /// `wire_const::S_MID_SCOUT`, in the SCOUTING space.
+    Scout,
+    /// `wire_const::S_MID_HELLO`, in the SCOUTING space.
+    Hello,
 }
 
 impl MessageName {
@@ -2965,11 +2984,13 @@ impl MessageName {
             Self::Request => "Request",
             Self::Push => "Push",
             Self::Declare => "Declare",
+            Self::Scout => "Scout",
+            Self::Hello => "Hello",
         }
     }
 
-    /// The TRANSPORT MID that carries this message, or `None` for one that only
-    /// travels inside a `Frame` batch.
+    /// The TRANSPORT MID that carries this message, or `None` for one the
+    /// transport space does not carry — a batched record or a scouting message.
     ///
     /// Every arm names a `wire_const` constant rather than a literal byte: the
     /// binding is the compiler's, so a constant renamed or removed in
@@ -2990,12 +3011,14 @@ impl MessageName {
             | Self::Response
             | Self::Request
             | Self::Push
-            | Self::Declare => return None,
+            | Self::Declare
+            | Self::Scout
+            | Self::Hello => return None,
         })
     }
 
     /// The NETWORK MID that carries this message inside a `Frame` batch, or
-    /// `None` for a transport-only message.
+    /// `None` for one no batch carries.
     pub const fn network_mid(self) -> Option<u8> {
         Some(match self {
             Self::Oam => wz_codecs::wire_const::N_MID_OAM,
@@ -3011,7 +3034,37 @@ impl MessageName {
             | Self::KeepAlive
             | Self::Frame
             | Self::Fragment
-            | Self::Join => return None,
+            | Self::Join
+            | Self::Scout
+            | Self::Hello => return None,
+        })
+    }
+
+    /// R2629 (open-debt item 744) — the SCOUTING MID that carries this message,
+    /// or `None` for one that travels on a session.
+    ///
+    /// A third accessor rather than a flag on the other two: the scouting space
+    /// reuses the transport space's numbers (`S_MID_SCOUT` and `T_MID_INIT` are
+    /// both `0x01`), so a byte alone never names a message and the caller has
+    /// to say which space it read the byte in.
+    pub const fn scouting_mid(self) -> Option<u8> {
+        Some(match self {
+            Self::Scout => wz_codecs::wire_const::S_MID_SCOUT,
+            Self::Hello => wz_codecs::wire_const::S_MID_HELLO,
+            Self::Oam
+            | Self::Init
+            | Self::Open
+            | Self::Close
+            | Self::KeepAlive
+            | Self::Frame
+            | Self::Fragment
+            | Self::Join
+            | Self::Interest
+            | Self::ResponseFinal
+            | Self::Response
+            | Self::Request
+            | Self::Push
+            | Self::Declare => return None,
         })
     }
 
@@ -3033,7 +3086,9 @@ impl MessageName {
             Self::Response => Self::Request,
             Self::Request => Self::Push,
             Self::Push => Self::Declare,
-            Self::Declare => return None,
+            Self::Declare => Self::Scout,
+            Self::Scout => Self::Hello,
+            Self::Hello => return None,
         })
     }
 
@@ -3073,6 +3128,14 @@ impl MessageName {
         Self::all()
             .into_iter()
             .find(|m| m.network_mid() == Some(mid))
+    }
+
+    /// R2629 (open-debt item 744) — which message a SCOUTING MID carries, or
+    /// `None` for a byte this build does not name in that space.
+    pub fn of_scouting(mid: u8) -> Option<Self> {
+        Self::all()
+            .into_iter()
+            .find(|m| m.scouting_mid() == Some(mid))
     }
 
     /// The message this WORD names, or `None` for a word that is not one.
@@ -3671,6 +3734,59 @@ mod tests {
             }
         }
 
+        // ── The SCOUTING half ────────────────────────────────────────────
+        //
+        // R2629 (open-debt item 744). `dissect_scouting_message` reads the
+        // header and answers `Ok(None)` for a MID outside its space before any
+        // body, so the claim is exact here as it is for the network walker. It
+        // is asked SEPARATELY because its space reuses the transport numbers:
+        // folded into the transport half, `0x01` would have to be two messages.
+        let mut scouting: Vec<(u8, Option<&str>)> = Vec::new();
+        for mid in 0u8..32 {
+            bytes[0] = mid;
+            match dissect_scouting_message(&bytes, 0) {
+                Ok(None) => {}
+                Ok(Some(field)) => {
+                    let m = MessageName::named(&field.name).unwrap_or_else(|| {
+                        panic!(
+                            "the scouting dispatcher names mid {mid:#04x} {:?}, which no \
+                             `MessageName` variant carries",
+                            field.name
+                        )
+                    });
+                    scouting.push((mid, Some(m.name())));
+                }
+                Err(_) => scouting.push((mid, None)),
+            }
+        }
+        let expected_scouting: Vec<u8> = (0u8..32)
+            .filter(|mid| MessageName::of_scouting(*mid).is_some())
+            .collect();
+        let claimed: Vec<u8> = scouting.iter().map(|(mid, _)| *mid).collect();
+        assert_eq!(
+            claimed, expected_scouting,
+            "the scouting dispatcher and `MessageName::scouting_mid` disagree about which \
+             MIDs it walks"
+        );
+        // Every claimed MID must have produced a WORD, or the comparison below
+        // compares nothing: a zero body is a complete SCOUT and a complete
+        // locator-less HELLO, so a refusal here is a walker change to read.
+        assert!(
+            scouting.iter().all(|(_, word)| word.is_some()),
+            "a scouting MID walked without a name, so this half graded no word: \
+             {scouting:?}"
+        );
+        for (mid, word) in &scouting {
+            if let Some(word) = word {
+                assert_eq!(
+                    Some(*word),
+                    MessageName::of_scouting(*mid).map(|m| m.name()),
+                    "the scouting dispatcher names mid {mid:#04x} differently from the \
+                     vocabulary"
+                );
+            }
+        }
+
         // ── AND EVERY VARIANT IS REACHED BY A DISPATCHER ─────────────────
         //
         // The direction the two comparisons above cannot cover on their own: a
@@ -3684,6 +3800,11 @@ mod tests {
                 expected_network
                     .iter()
                     .filter_map(|mid| MessageName::of_network(*mid).map(|m| m.name())),
+            )
+            .chain(
+                expected_scouting
+                    .iter()
+                    .filter_map(|mid| MessageName::of_scouting(*mid).map(|m| m.name())),
             )
             .collect();
         reached.sort_unstable();

@@ -839,6 +839,30 @@ pub const DOCUMENT_HISTORY: &[DocumentShape] = &[
         planes: &[],
         carries: FIELDS_R9_CARRIES,
     },
+    // R2629 (open-debt item 744) — A SCOUTING DATAGRAM IS A ROW.
+    //
+    // An ADDITION to one family: `message` gains `Scout` and `Hello`, see
+    // [`MESSAGE_R10`]. No key arrives and none retires — a scouting row carries
+    // exactly the keys every walked row carries. The carries axis moves once:
+    // `offset_space = packet` gains the `payload_decode` shape, which revision 9
+    // under-declared — see [`FIELD_OFFSET_SPACE_CARRIES_R10`].
+    //
+    // The number is the notice for what no axis here can say: a datagram flow's
+    // `messages` listing now holds rows it never held. The first pass kept those
+    // datagrams in `DatagramDissection::scouting` and this document walked
+    // `frames` alone, so a discovery capture went out as `"messages":[]` with no
+    // disagreement named while the summary beside it counted them. A consumer
+    // pinned to 9 that read an empty listing on a scouting flow as "nothing was
+    // said" read it wrong.
+    DocumentShape {
+        document: FIELDS,
+        revision: 10,
+        keys: FIELDS_R10_KEYS,
+        retiring: &[],
+        families: FIELDS_R10_FAMILIES,
+        planes: &[],
+        carries: FIELDS_R10_CARRIES,
+    },
     DocumentShape {
         document: SUMMARY,
         revision: 1,
@@ -3269,6 +3293,128 @@ pub const FIELDS_R9_CARRIES: &[KeyCarries] = &[
     },
 ];
 
+/// `carried[].message` at field-document revision 10 — revision 5's words PLUS
+/// the scouting space's two, sorted the way [`MESSAGE_R5`] is.
+///
+/// R2629 (open-debt item 744). `Scout` and `Hello` reach this family because a
+/// datagram flow's scouting list is now rendered as rows, and each row's word is
+/// read off its MID byte in the scouting space. No word is shared with the
+/// transport space even though the BYTES are (`0x01` is `Init` there), which is
+/// what lets a consumer tell the two kinds of row apart by the word alone.
+pub const MESSAGE_R10: &[&str] = &[
+    "Close",
+    "Declare",
+    // ⚠ BEFORE `Frame`, for the reason `MESSAGE_R5` gives.
+    "Fragment",
+    "Frame",
+    "Hello",
+    "Init",
+    "Interest",
+    "Join",
+    "KeepAlive",
+    "Oam",
+    "Open",
+    "Push",
+    "Request",
+    "Response",
+    "ResponseFinal",
+    "Scout",
+];
+
+/// The field document's keys at revision 10 — revision 9's, unchanged.
+///
+/// R2629 (open-debt item 744). A scouting row is a walked row and carries the
+/// keys every walked row carries; what moved is which rows the listing holds,
+/// which no key list can say. See the history entry.
+pub const FIELDS_R10_KEYS: &[&str] = FIELDS_R9_KEYS;
+
+/// The value families the field document declares at revision 10 — revision
+/// 9's, with `message` widened to [`MESSAGE_R10`].
+pub const FIELDS_R10_FAMILIES: &[ValueFamily] = &[
+    ValueFamily {
+        key: "direction",
+        values: DIRECTION_FIELDS_R2,
+    },
+    ValueFamily {
+        key: "keyexpr_cause",
+        values: UNRESOLVED_CAUSE_R11,
+    },
+    ValueFamily {
+        key: "kind",
+        values: FIELD_VALUE_KIND_R3,
+    },
+    ValueFamily {
+        key: "link",
+        values: LINK_KIND_R7,
+    },
+    ValueFamily {
+        key: "message",
+        values: MESSAGE_R10,
+    },
+    ValueFamily {
+        key: "offset_space",
+        values: ANCHOR_SPACE_FIELDS_R2,
+    },
+    ValueFamily {
+        key: "state",
+        values: PAYLOAD_STATE_R2,
+    },
+    ValueFamily {
+        key: "under",
+        values: REFUSED_UNDER_R2,
+    },
+    ValueFamily {
+        key: "wrong",
+        values: MISBOUND_R2,
+    },
+];
+
+/// What each field-document family's WORD decides at revision 10 — revision
+/// 9's, with `offset_space` read from [`FIELD_OFFSET_SPACE_CARRIES_R10`].
+///
+/// R2629 (open-debt item 744). `message` stays a PASSENGER: a scouting entry is
+/// `message` / `start` / `end` / `keyexpr` / `keyexpr_cause` like every other.
+/// What moved is the `packet` word's companion set — see that table for why the
+/// shape it adds is a correction as much as an addition.
+pub const FIELDS_R10_CARRIES: &[KeyCarries] = &[
+    KeyCarries {
+        key: "direction",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "keyexpr_cause",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "kind",
+        shape: CarriesShape::Discriminant(FIELD_VALUE_KIND_CARRIES_R4),
+    },
+    KeyCarries {
+        key: "link",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "message",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "offset_space",
+        shape: CarriesShape::Discriminant(FIELD_OFFSET_SPACE_CARRIES_R10),
+    },
+    KeyCarries {
+        key: "state",
+        shape: CarriesShape::Discriminant(PAYLOAD_STATE_CARRIES_R4),
+    },
+    KeyCarries {
+        key: "under",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "wrong",
+        shape: CarriesShape::Passenger,
+    },
+];
+
 /// Every shape each `fields[].kind` word's object takes, at field-document
 /// revision 4.
 ///
@@ -3363,6 +3509,52 @@ pub const FIELD_OFFSET_SPACE_CARRIES_R5: &[WordCarries] = &[
     WordCarries {
         word: "packet",
         shapes: &[&["carried", "direction", "fields", "name", "packet"]],
+    },
+    WordCarries {
+        word: "stream_byte",
+        shapes: &[
+            &["carried", "direction", "fields", "message_at", "name"],
+            &[
+                "carried",
+                "direction",
+                "fields",
+                "message_at",
+                "name",
+                "payload_decode",
+            ],
+        ],
+    },
+];
+
+/// Every shape each `fields[].offset_space` word's object takes, at
+/// field-document revision 10 — revision 5's, with `packet` gaining the
+/// `payload_decode` shape `stream_byte` already declares.
+///
+/// R2629 (open-debt item 744). MEASURED, as revision 5's was: the scouting
+/// datagrams of the every-plane capture became rows, and that capture is
+/// rendered with a mapping declared, so the first `packet` row with a
+/// `payload_decode` beside it reached this population.
+///
+/// ⚠ The shape itself is NOT new, and revision 5's map under-declared it.
+/// `push_walk` attaches `payload_decode` to every walked row whenever a mapping
+/// is declared, in either list, so a datagram TRANSPORT row under a mapping has
+/// rendered this shape all along. The map was measured over a population that
+/// never declared a mapping on a datagram row, which is the population-shaped
+/// hole this axis's own test warns about; this revision is where it is stated.
+pub const FIELD_OFFSET_SPACE_CARRIES_R10: &[WordCarries] = &[
+    WordCarries {
+        word: "packet",
+        shapes: &[
+            &["carried", "direction", "fields", "name", "packet"],
+            &[
+                "carried",
+                "direction",
+                "fields",
+                "name",
+                "packet",
+                "payload_decode",
+            ],
+        ],
     },
     WordCarries {
         word: "stream_byte",
@@ -5234,7 +5426,10 @@ mod tests {
             // number, and only the first is expressible as an axis: the second
             // moved which references RESOLVE, which no list in this module can
             // say.
-            (FIELDS, 9),
+            // R2629 (item 744) — to 10 when a datagram flow's scouting list
+            // became rows and `message` gained `Scout` and `Hello`. The family
+            // is the axis; the rows are the notice.
+            (FIELDS, 10),
             // R2121 (open-debt item 460) — the summary moved to 2 when it
             // gained `inert_counters`; R2122 (item 238) to 3 when its
             // `framing` group stopped disagreeing with the capture report's.
