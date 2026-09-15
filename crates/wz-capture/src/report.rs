@@ -3414,6 +3414,16 @@ fn skips_text(sk: &crate::SkipCensus, s: &mut String) {
 /// without caps, and STRUCTURALLY so, because no cap exists to bite. The group
 /// is emitted anyway so a consumer can tell "no caps" from "caps that did not
 /// bite" — and behind the bounded doors the numbers are a measurement.
+///
+/// # R2630 (open-debt item 745) — SIX counters, and the sixth was the gap
+///
+/// `DissectionDrops::scouting` counts the SCOUT and HELLO datagrams a
+/// `frames_per_flow` ceiling evicted, and has since R311y651. The capture
+/// report's `drops` object rendered it; this group named the other five, so
+/// every document embedding it — census, fields, health, the command line —
+/// reported a discovery flow the bound had trimmed as one that lost nothing.
+/// That is the failure R311y651's own comment names: a bound that bites and
+/// does not reach the export reports itself as the wire.
 pub fn dropped_by_limits_json(d: &crate::Dissection) -> String {
     let drops = d.health().drops;
     let l = d.limits();
@@ -3436,13 +3446,19 @@ pub fn dropped_by_limits_json(d: &crate::Dissection) -> String {
     };
     format!(
         "{{\"frames\":{},\"stream_bytes\":{},\"skipped\":{},\"flows\":{},\
-         \"scout_askers\":{},\"caps\":{{\"frames_per_flow\":{},\
+         \"scouting\":{},\"scout_askers\":{},\"caps\":{{\"frames_per_flow\":{},\
          \"stream_bytes_per_direction\":{},\"skipped_packets\":{},\
          \"max_flows_per_table\":{},\"max_scout_askers\":{}}}}}",
         drops.frames,
         drops.stream_bytes,
         drops.skipped,
         drops.flows,
+        // R2630 (open-debt item 745) — the sixth counter, in the capture
+        // report's own `drops` order. It has no ceiling of its own: the
+        // scouting list is bounded by `frames_per_flow`, which `caps` already
+        // names, and counted apart from `frames` so a reader can tell which of
+        // the two lists that ceiling bit.
+        drops.scouting,
         drops.scout_askers,
         cap(l.frames_per_flow),
         cap(l.stream_bytes_per_direction),
@@ -3471,7 +3487,8 @@ pub fn dropped_by_limits_text(d: &crate::Dissection) -> String {
     };
     format!(
         "  dissection caps: {} frame(s) of {}, {} stream byte(s) of {}, \
-         {} skipped of {}, {} flow(s) of {}, {} scout asker(s) of {}\n",
+         {} skipped of {}, {} flow(s) of {}, {} scouting datagram(s) of {}, \
+         {} scout asker(s) of {}\n",
         drops.frames,
         cap(l.frames_per_flow),
         drops.stream_bytes,
@@ -3480,6 +3497,8 @@ pub fn dropped_by_limits_text(d: &crate::Dissection) -> String {
         cap(l.skipped_packets),
         drops.flows,
         cap(l.max_flows_per_table),
+        drops.scouting,
+        cap(l.frames_per_flow),
         drops.scout_askers,
         cap(l.max_scout_askers)
     )
@@ -6313,6 +6332,57 @@ mod tests {
                 && bounded.1.contains("\"max_flows_per_table\":1024"),
             "{}",
             bounded.1
+        );
+    }
+
+    /// R2630 (open-debt item 745) — THE SCOUTING LOSS REACHES THE SHARED GROUP.
+    ///
+    /// # The defect
+    ///
+    /// `DissectionDrops::scouting` has counted the SCOUT and HELLO datagrams a
+    /// `frames_per_flow` ceiling evicted since R311y651, and the capture report's
+    /// `drops` object renders it. This group — the ONE rendering the census, the
+    /// field document, the health object and the command line all embed — named
+    /// five counters and not that one, so each of those surfaces reported a
+    /// discovery flow the bound had trimmed as a flow that lost nothing.
+    ///
+    /// # Why the frame count is asserted beside it
+    ///
+    /// The two lists share one ceiling and keep separate counts on purpose. A
+    /// group that folded the scouting loss into `frames` would satisfy a test
+    /// that only looked for the number 27.
+    #[test]
+    fn a_scouting_loss_reaches_the_shared_drop_group() {
+        use crate::datagram_tests::{scout_message, udp_packet, SCOUT_GROUP};
+
+        let mut d = crate::Dissection::with_limits(crate::DissectionLimits {
+            frames_per_flow: Some(3),
+            ..crate::DissectionLimits::default()
+        });
+        for i in 0..30 {
+            let pkt = udp_packet([10, 0, 0, 1], 43210, SCOUT_GROUP, 7446, &scout_message());
+            d.push_packet(crate::link::LINKTYPE_ETHERNET, i, &pkt);
+        }
+        d.finish();
+
+        // The population: the bound bit the scouting list and nothing else.
+        assert_eq!(
+            (d.drops().scouting, d.drops().frames),
+            (27, 0),
+            "the fixture must evict scouting datagrams and no transport frame: {:?}",
+            d.drops()
+        );
+
+        let json = dropped_by_limits_json(&d);
+        assert!(
+            json.contains("\"frames\":0,") && json.contains("\"scouting\":27,"),
+            "a bound that bit the scouting list must say so in the group every \
+             document embeds, apart from the frame count: {json}"
+        );
+        let text = dropped_by_limits_text(&d);
+        assert!(
+            text.contains("27 scouting datagram(s) of 3"),
+            "and in the line a person reads, beside the ceiling it shares: {text}"
         );
     }
 

@@ -1462,8 +1462,10 @@ int main(void) {
      * time. Four leaks of one class is why R2463 stopped writing paragraphs
      * here and built `scripts/lib/doc_revision_consumer_pin.py`: it reads
      * `doc_revision::DOCUMENT_HISTORY` and this file, reports EVERY stale pin
-     * rather than only the first, and runs in pre-push in about a second. */
-    revisioned[0].revision = 11;
+     * rather than only the first, and runs in pre-push in about a second.
+     * R2630 (item 745) -- 12: `dropped_by_limits` gains `scouting`, the SCOUT
+     * and HELLO datagrams a `frames_per_flow` ceiling evicted. */
+    revisioned[0].revision = 12;
     revisioned[0].doc = NULL;
     rc = wz_dissect_pcap_census(pcap, sizeof pcap, &revisioned[0].doc);
     CHECK(rc == WZ_DISSECT_OK, "census rc=%d", rc);
@@ -1477,8 +1479,10 @@ int main(void) {
      * from the Rust table: a check that read the number out of the thing it is
      * checking would agree with any value. The cost is that a revision bump
      * must be written here too, and R2121 did not -- it moved the summary to 2,
-     * ran the crate tests, and left this at 1, which only this lane can see. */
-    revisioned[1].revision = 3;
+     * ran the crate tests, and left this at 1, which only this lane can see.
+     * R2630 (item 745) -- 4: the health object's `dropped_by_limits` gains
+     * `scouting`, a key `datagram_flows[]` rows already carried undeclared. */
+    revisioned[1].revision = 4;
     revisioned[1].doc = NULL;
     rc = wz_dissect_pcap_summary(pcap, sizeof pcap, &revisioned[1].doc);
     CHECK(rc == WZ_DISSECT_OK, "summary rc=%d", rc);
@@ -1527,8 +1531,10 @@ int main(void) {
      * which is why the gate R2463 added reports all of them at once.
      * R2629 (item 744) -- 10: a datagram flow's `messages` gains its SCOUT and
      * HELLO rows, which no revision rendered, and `carried[].message` gains
-     * `Scout` and `Hello`, read in the scouting MID space. */
-    revisioned[2].revision = 10;
+     * `Scout` and `Hello`, read in the scouting MID space.
+     * R2630 (item 745) -- 11: `dropped_by_limits` gains `scouting`, the same
+     * addition the census row above records. */
+    revisioned[2].revision = 11;
     revisioned[2].doc = NULL;
     rc = wz_dissect_pcap_fields(pcap, sizeof pcap, 0, &revisioned[2].doc);
     CHECK(rc == WZ_DISSECT_OK, "fields rc=%d", rc);

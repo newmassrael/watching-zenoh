@@ -2830,6 +2830,9 @@ mod tests {
         for key in [
             "\"health\"",
             "\"dropped_by_limits\"",
+            // R2630 (open-debt item 745). This capture has no datagram flow, so
+            // the only place `scouting` can come from is the loss group.
+            "\"scouting\"",
             "\"scout_askers\"",
             "\"fragments\"",
             "\"completed\"",
@@ -3267,7 +3270,7 @@ mod tests {
     /// third class an over-inclusive name sweep claims, and splitting it is
     /// how this workspace keeps such a literal out of the population.
     const NO_CAPS_NO_BITE: &str = "\"dropped_by_limits\":{\"frames\":0,\
-         \"stream_bytes\":0,\"skipped\":0,\"flows\":0,\"scout_askers\":0,\
+         \"stream_bytes\":0,\"skipped\":0,\"flows\":0,\"scouting\":0,\"scout_askers\":0,\
          \"caps\":{\"frames_per_flow\":null,\"stream_bytes_per_direction\":null,\
          \"skipped_packets\":null,\"max_flows_per_table\":null,\
          \"max_scout_askers\":null}}";
@@ -3279,7 +3282,7 @@ mod tests {
     /// `flows: 1` reads as `1 of 1024` and a reader can see which ceiling was
     /// nearest without one having to bite.
     const LIVE_TAP_ONE_FLOW_BIT: &str = "\"dropped_by_limits\":{\"frames\":0,\
-         \"stream_bytes\":0,\"skipped\":0,\"flows\":1,\"scout_askers\":0,\
+         \"stream_bytes\":0,\"skipped\":0,\"flows\":1,\"scouting\":0,\"scout_askers\":0,\
          \"caps\":{\"frames_per_flow\":10000,\"stream_bytes_per_direction\":4194304,\
          \"skipped_packets\":10000,\"max_flows_per_table\":1024,\
          \"max_scout_askers\":1024}}";

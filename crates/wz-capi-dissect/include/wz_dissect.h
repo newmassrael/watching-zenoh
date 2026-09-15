@@ -380,7 +380,7 @@
  *
  * SO THE DOCUMENT CARRIES THE LIST. Its envelope reads
  *
- *     {"document":{"name":"census","revision":11,
+ *     {"document":{"name":"census","revision":12,
  *                  "planes":["exchanges","interests","keyexprs","nodes",
  *                            "payloads"]}, ...}
  *
@@ -426,11 +426,11 @@
  *
  * Every family in `value_families` now carries a `carries` axis:
  *
- *     {"name":"fields","revision":10,"key":"kind","values":[...],
+ *     {"name":"fields","revision":11,"key":"kind","values":[...],
  *      "carries":[{"word":"bits","shapes":[["end","name","start","value"]]},
  *                 {"word":"opaque","shapes":[["end","name","start"]]}, ...]}
  *
- *     {"name":"census","revision":11,"key":"mode","values":[...],
+ *     {"name":"census","revision":12,"key":"mode","values":[...],
  *      "carries":null}
  *
  * `null` is a VALUE here and not an absence: it says the word is a PASSENGER --
@@ -769,7 +769,14 @@ int wz_dissect_pcap_summary(const unsigned char *bytes, size_t len, char **out);
  * a bounded one no longer render identically. Before this a `0` said nothing
  * about whether a cap existed to bite, which is the whole distinction this
  * bounded door was added to make. Reading a loss beside its ceiling is also
- * how you tell which cap is NEAREST without waiting for one to bite. */
+ * how you tell which cap is NEAREST without waiting for one to bite.
+ *
+ * R2630 -- and the group counts `scouting`: the SCOUT and HELLO datagrams a
+ * `frames_per_flow` ceiling evicted from a flow's scouting list. It shares
+ * that ceiling with `frames` and is counted apart from it, so a discovery
+ * flow the bound trimmed no longer reads as a flow that lost nothing. It
+ * arrived at census revision 12, field-document revision 11 and summary
+ * revision 4 -- every document that embeds this group. */
 int wz_dissect_pcap_summary_bounded(const unsigned char *bytes, size_t len,
                                     char **out);
 
@@ -1183,7 +1190,7 @@ int wz_dissect_declarations_diagnose(const char *declarations, char **out);
  *
  * R2175 -- the document is at REVISION 3, and the fourth key is `value_families`:
  *
- *     "value_families":[{"name":"fields","revision":10,"key":"state",
+ *     "value_families":[{"name":"fields","revision":11,"key":"state",
  *                        "values":["decoded","encoding_mismatch",…]}, …]
  *
  * every key in every document whose VALUE this build draws from a closed set,

@@ -5748,7 +5748,8 @@ mod tests {
         assert!(
             bounded.contains(
                 "\"dropped_by_limits\":{\"frames\":0,\"stream_bytes\":0,\"skipped\":0,\
-                 \"flows\":1,\"scout_askers\":0,\"caps\":{\"frames_per_flow\":10000,\
+                 \"flows\":1,\"scouting\":0,\"scout_askers\":0,\
+                 \"caps\":{\"frames_per_flow\":10000,\
                  \"stream_bytes_per_direction\":4194304,\"skipped_packets\":10000,\
                  \"max_flows_per_table\":1024,\"max_scout_askers\":1024}}"
             ),
