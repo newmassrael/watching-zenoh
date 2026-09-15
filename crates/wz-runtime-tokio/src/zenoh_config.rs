@@ -2217,10 +2217,16 @@ pub const UNHONOURED_BEYOND_WZ: &[&str] = &[
     // reader gaps, not keys wz cannot act on" — after the round's own comment
     // had argued the classification still stood. It did not.
     // R2230 (item 579/582) — the peer twin and `peers_failover_brokering` left
-    // with the surface; see [`WZ_EXTENSION_CONFIG_KEYS`]. The router weighting
-    // stays: upstream 1.10.0 still CARRIES it (`routing.router.linkstate`), so
-    // it is a capability wz does not have rather than one upstream retired.
-    "routing/router/linkstate/transport_weights",
+    // with the surface; see [`WZ_EXTENSION_CONFIG_KEYS`].
+    //
+    // ⚠ R2632 — `routing/router/linkstate/transport_weights` LEFT THIS LIST for
+    // [`UNHONOURED_READER_GAP`], the second time this round's shape has happened
+    // (R2539's `region_name` was the first) and the second time the gate is what
+    // said so rather than the round. R2230's sentence above was true when
+    // written: wz had no configurable link weighting at all, because
+    // `LinkstateNetwork` hardcoded the unset weight and had nowhere to put a
+    // configured one. It has one now, so "a capability wz does not have" became
+    // false in the direction this list cannot express.
     "scouting/delay",
     "scouting/gossip/enabled",
     // R2230 (open-debt item 579) — ARRIVED in 1.10.0, and it is the row most at
@@ -2397,6 +2403,15 @@ pub const UNHONOURED_READER_GAP: &[&str] = &[
     // wire; what no code does is READ this key and call that setter, which is
     // this list's exact subject.
     "region_name",
+    // R2632 — ARRIVED here from [`UNHONOURED_BEYOND_WZ`] the round wz grew the
+    // capability, `region_name`'s shape exactly.
+    // `LinkstateNetwork::update_link_weights` weights self's links as upstream
+    // does (max of the two advertised directions, default 100) and
+    // `RouterForwarder::update_router_link_weights` applies a map to the ROUTER
+    // tier, re-floods and schedules the recompute — which is the whole of what
+    // upstream's router hat does with this key's value. What no code does is
+    // READ the key and call that setter, which is this list's exact subject.
+    "routing/router/linkstate/transport_weights",
     "scouting/gossip/autoconnect",
     "scouting/gossip/autoconnect_strategy",
     "scouting/gossip/multihop",
@@ -2555,17 +2570,18 @@ pub const UNHONOURED_BEYOND_GROUPS: &[(&str, &str, &[&str])] = &[
             "open/return_conditions/declares",
         ],
     ),
-    // R2230 (item 579/582) — the sentence LOST "and failover brokering", and the
-    // group lost two of its three rows, because upstream 1.10.0 retired both:
-    // `peers_failover_brokering` is a deprecated no-op and `routing.peer` is
-    // parsed and discarded. This is the group table working in the direction
-    // R2151 built it for, mirrored — a row goes when UPSTREAM stops naming the
-    // capability, not only when wz grows it.
-    (
-        "configurable link-state weighting",
-        "RoutingConf",
-        &["routing/router/linkstate/transport_weights"],
-    ),
+    // R2230 (item 579/582) — the `configurable link-state weighting` /
+    // `RoutingConf` group lost two of its three rows, because upstream 1.10.0
+    // retired both: `peers_failover_brokering` is a deprecated no-op and
+    // `routing.peer` is parsed and discarded. This is the group table working in
+    // the direction R2151 built it for, mirrored — a row goes when UPSTREAM
+    // stops naming the capability, not only when wz grows it.
+    //
+    // ⚠ R2632 — the group is GONE, not edited, because wz grew the thing it
+    // said wz had no part of: `LinkstateNetwork::update_link_weights` plus
+    // `RouterForwarder::update_router_link_weights`. Its last key moved to
+    // [`UNHONOURED_READER_GAP`], and a group with no keys is a hard failure by
+    // design, so the row could not be left standing empty either.
     // R2230 (open-debt item 579) — the four groups the 1.10.0 pin brought in.
     // Each states the thing wz would need as a NAME that must not exist in wz's
     // code, which is what makes a future capability red its own row rather than
@@ -2758,6 +2774,16 @@ pub const UNHONOURED_CITATION_LEDGER: &[(&str, &str, &str)] = &[
         "qos/publication",
         "foreign-node-config",
         "spawn_publishing_zenoh_zpub",
+    ),
+    // R2632 — wz's source spells this key in the doc of the graph field that
+    // holds its value and of the router entry that applies it. The citation IS
+    // the capability, which is what `wz-has-it` means; the reader that would
+    // turn the key into a call to that entry is what does not exist, and the
+    // row sits in [`UNHONOURED_READER_GAP`] accordingly.
+    (
+        "routing/router/linkstate/transport_weights",
+        "wz-has-it",
+        "update_router_link_weights",
     ),
     // R2437 — the FIRST naming of this key in `crates/`, and it arrived from the
     // wire side rather than the config side. `zenoh_config.rs` itself used to
