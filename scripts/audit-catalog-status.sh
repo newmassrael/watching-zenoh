@@ -508,6 +508,20 @@ print("  REMAINING WORK (UNBUILT + PARTIAL + UNVERIFIED) %s: %s" % (
     "= %d  [EXACT -- every atom's impl axis is tagged]" % len(remaining),
     ", ".join(remaining) if remaining else "(none)"))
 
+# R2628 — the same numbers, for a PROGRAM. `scripts/lib/loop_milestone.py`
+# judges an agent loop's milestone as "REMAINING WORK fell below the baseline
+# taken when the run started", so it needs exactly `remaining` and whether it is
+# exact. It reads them from here rather than from the line above: a grep of
+# that line missed once already when its pattern predetermined the match, and
+# re-deriving the tally elsewhere would be a second definition free to drift.
+# The oracle writes what it computed to the path its caller names, and nothing
+# when unasked. It is written BEFORE the invariant verdicts below, so a caller
+# must still read this script's exit status -- a red audit is not a baseline.
+if os.environ.get("WZ_A3_REMAINING_JSON"):
+    with open(os.environ["WZ_A3_REMAINING_JSON"], "w") as fh:
+        json.dump({"remaining": remaining, "unaudited": len(unaudited),
+                   "exact": not unaudited}, fh)
+
 if fail_undeclared:
     ok = False
     print("FAIL: catalog atom with NO cargo [features] key (phantom): %d" % len(fail_undeclared))
