@@ -582,7 +582,14 @@ pub struct LinkstateNetView(Rc<RefCell<LinkstateNetwork>>);
 /// self-reference for the two graphs; this is that pattern for the third piece
 /// of live state the adminspace renders.
 #[cfg(feature = "adminspace-core")]
-pub struct RouterSessionsView(Rc<RefCell<HashMap<FaceId, RouterFaceState>>>);
+pub struct RouterSessionsView {
+    faces: Rc<RefCell<HashMap<FaceId, RouterFaceState>>>,
+    /// R2637 — the ROUTERS-tier graph, because a session's weight is a property
+    /// of the link and not of the face. Two handles rather than moving the
+    /// renderer back onto the forwarder: the enumeration stays ONE derivation
+    /// site, and both fields are already `Rc` so this costs nothing.
+    routers_net: Rc<RefCell<LinkstateNetwork>>,
+}
 
 #[cfg(feature = "adminspace-core")]
 impl RouterSessionsView {
@@ -608,19 +615,39 @@ impl RouterSessionsView {
     /// rather than a network's — a Client face is a session this router holds,
     /// and an operator asking what this node is connected to must see it.
     pub fn admin_sessions(&self) -> Vec<wz_session_core::adminspace::AdminSession> {
-        self.0
+        // R2637 — ONE lookup of the tier's weights for the whole table, not one
+        // per face: `links_info` walks the graph, so calling it per session would
+        // re-walk it N times to answer N questions about one snapshot.
+        let weights = self.routers_net.borrow().links_info();
+        self.faces
             .borrow()
             .values()
-            .map(|face| wz_session_core::adminspace::AdminSession {
-                peer_zid_hex: peer_zid_routing(&face.actions)
-                    .map(|z| wz_session_core::zid_hex::zid_to_zenoh_hex(z.as_slice()))
-                    .unwrap_or_default(),
-                whatami: Some(String::from(peer_whatami_routing(&face.actions).to_str())),
-                links: face.actions.admin_links(),
-                #[cfg(feature = "transport-shm")]
-                shm: face.actions.is_shm(),
-                #[cfg(not(feature = "transport-shm"))]
-                shm: false,
+            .map(|face| {
+                let zid = peer_zid_routing(&face.actions);
+                wz_session_core::adminspace::AdminSession {
+                    peer_zid_hex: zid
+                        .map(|z| wz_session_core::zid_hex::zid_to_zenoh_hex(z.as_slice()))
+                        .unwrap_or_default(),
+                    whatami: Some(String::from(peer_whatami_routing(&face.actions).to_str())),
+                    links: face.actions.admin_links(),
+                    #[cfg(feature = "transport-shm")]
+                    shm: face.actions.is_shm(),
+                    #[cfg(not(feature = "transport-shm"))]
+                    shm: false,
+                    // A face whose zid is absent from the ROUTERS-tier map reports
+                    // `None`, and that covers three real cases with one rule: a
+                    // Peer/Client-tier face, a Router face that has not
+                    // reciprocated yet, and a face whose routing zid never
+                    // surfaced. Upstream answers the same way — a transport absent
+                    // from its `links_info` renders `null`.
+                    weight: zid.and_then(|z| weights.get(&z)).map(|i| {
+                        wz_session_core::adminspace::AdminLinkWeight {
+                            actual_weight: i.actual_weight,
+                            dst_weight: i.dst_weight,
+                            src_weight: i.src_weight,
+                        }
+                    }),
+                }
             })
             .collect()
     }
@@ -1317,7 +1344,10 @@ impl RouterForwarder {
     /// borrowing the forwarder.
     #[cfg(feature = "adminspace-core")]
     pub fn sessions_view(&self) -> RouterSessionsView {
-        RouterSessionsView(Rc::clone(&self.faces))
+        RouterSessionsView {
+            faces: Rc::clone(&self.faces),
+            routers_net: Rc::clone(&self.routers_net),
+        }
     }
 
     /// What this router can report about each of its ROUTER-tier links — zenoh's
@@ -7155,6 +7185,59 @@ mod tests {
             view.admin_sessions().len(),
             3,
             "the view is live, not a snapshot taken when it was made"
+        );
+    }
+
+    /// R2637 — the weight reaches the WIRE record, end to end: a configured
+    /// weight, a neighbour that reciprocates, and the admin `sessions[]` entry
+    /// for that face carries the triple instead of the `null` it carried for as
+    /// long as this host has existed.
+    ///
+    /// The second face is the load-bearing half of the fixture. It reciprocates
+    /// nothing, so it has no edge, and its entry must report `None` — which is
+    /// what makes `None` mean "no weighted link to this peer" rather than "this
+    /// build cannot answer". A single-face fixture would grade neither.
+    #[cfg(feature = "adminspace-core")]
+    #[test]
+    fn admin_sessions_carry_the_link_weight_for_a_reciprocated_router_link() {
+        let fwd = RouterForwarder::new(zid(0x01));
+        // Self advertises 300 toward A, before any face — the ordering R2634 built.
+        assert!(!fwd.update_router_link_weights(link_weights(&[(0xAA, 300)])));
+
+        let (a_r, _s1) = face(zid(0xAA), WIRE_ROUTER);
+        let (b_r, _s2) = face(zid(0xBB), WIRE_ROUTER);
+        fwd.register(FaceId(0), &a_r);
+        fwd.register(FaceId(1), &b_r);
+        // A advertises a link back; B stays silent, so only A gets an edge.
+        advertise_link_back(&fwd, FaceId(0), 0x01, 0xAA, 5);
+        fwd.tick();
+
+        let by_peer: std::collections::HashMap<String, Option<_>> = fwd
+            .admin_sessions()
+            .into_iter()
+            .map(|s| (s.peer_zid_hex, s.weight))
+            .collect();
+
+        let hex_a = wz_session_core::zid_hex::zid_to_zenoh_hex(zid(0xAA).as_slice());
+        let hex_b = wz_session_core::zid_hex::zid_to_zenoh_hex(zid(0xBB).as_slice());
+
+        let a = by_peer[&hex_a].expect("A reciprocated, so it has a weighted link");
+        assert_eq!(a.src_weight, Some(300), "what SELF advertises toward A");
+        assert_eq!(
+            a.dst_weight, None,
+            "A advertised no weight of its own, which is not the same as the default"
+        );
+        assert!(
+            (300..=303).contains(&a.actual_weight),
+            "max(300, unset) plus the sub-1% jitter, got {}",
+            a.actual_weight
+        );
+
+        assert_eq!(
+            by_peer[&hex_b], None,
+            "B has a face but no mutual link, so it holds no weighted link — and \
+             that `None` is an answer, the same one the pin gives for a transport \
+             absent from its links_info"
         );
     }
 

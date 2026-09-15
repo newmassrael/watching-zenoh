@@ -2739,6 +2739,12 @@ impl LinkstateForwarder {
                 shm: face.actions.is_shm(),
                 #[cfg(not(feature = "transport-shm"))]
                 shm: false,
+                // R2637 — always `None` on this path, and that is an ANSWER rather
+                // than a deferral: link weights live in the ROUTER-tier graph, and
+                // this forwarder has no `routers_net` to read one from. A peer
+                // holds no weighted link, so it reports none. The router host's
+                // `RouterSessionsView` is where a real value comes from.
+                weight: None,
             })
             .collect()
     }

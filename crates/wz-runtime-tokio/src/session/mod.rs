@@ -3920,6 +3920,11 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
                     shm: actions.is_shm(),
                     #[cfg(not(feature = "transport-shm"))]
                     shm: false,
+                    // R2637 — `None` on the Session-hosted path for the same reason
+                    // the forwarder-hosted peer reports none: a link weight is a
+                    // ROUTER-tier graph value, and a Session holds no such graph.
+                    // Reporting none is the answer, not a gap.
+                    weight: None,
                 });
             }
             // The match+reply SSOT (root local_data / metrics / config + the read

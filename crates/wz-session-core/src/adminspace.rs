@@ -47,7 +47,7 @@ pub struct AdminLink {
 /// zenoh's `transport_unicast_to_json` (`adminspace.rs:607-637`). `whatami` is
 /// `None` when the peer's role is not known (rendered as zenoh's `"unknown"`
 /// fallback, `:630`). The `weight` zenoh carries (`:632`) is a router-linkstate
-/// value, always `null` at this core (a router-mode follow-up atom).
+/// value; R2637 made it real here — see [`Self::weight`].
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct AdminSession {
     /// The peer's zid in zenoh `ZenohId` Display form
@@ -69,6 +69,61 @@ pub struct AdminSession {
     /// unconditional there too and only the VALUE is gated. A build without
     /// `transport-shm` reports `false`, which is what it means.
     pub shm: bool,
+    /// R2637 — what this node can report about the LINK to this peer, zenoh's
+    /// `"weight"` (`zenoh/src/net/runtime/adminspace.rs` @
+    /// `let transport_unicast_to_json = move |transport: &TransportUnicast| {`),
+    /// which emits the whole `LinkInfo` object or `null`.
+    ///
+    /// `None` is a real answer and NOT a silence: it means this node holds no
+    /// weighted link to that peer — which is upstream's answer too, since a
+    /// transport whose zid is absent from the router's `links_info` map renders
+    /// `null`. That is why it left `admin_unspoken_fields`.
+    ///
+    /// UNGATED, for the reason [`Self::shm`] states: a `#[cfg]` pub field forces
+    /// a matching `#[cfg]` at every construction site. Only the VALUE is gated —
+    /// a host with no router graph has nothing to fill it from and says `None`.
+    pub weight: Option<AdminLinkWeight>,
+}
+
+/// R2637 — a `u16` as JSON, and its optional twin. Written out rather than
+/// `format!`ed for the reason the whole builder is hand-rolled: it stays
+/// `alloc`-only and no_std-feasible, with no `serde_json` in the session kernel.
+#[cfg(feature = "adminspace-core")]
+fn push_u16(v: u16, out: &mut String) {
+    use core::fmt::Write as _;
+    let _ = write!(out, "{v}");
+}
+
+/// `None` renders `null` — the JSON `serde` would emit for an `Option<u16>`,
+/// which is what upstream serializes this through.
+#[cfg(feature = "adminspace-core")]
+fn push_opt_u16(v: Option<u16>, out: &mut String) {
+    match v {
+        Some(v) => push_u16(v, out),
+        None => out.push_str("null"),
+    }
+}
+
+/// R2637 — the three weights a link carries, zenoh `LinkInfo`
+/// (`zenoh/src/net/protocol/linkstate.rs` @ `pub(crate) struct LinkInfo`).
+///
+/// Declared HERE rather than reused from `wz-routing-graph` because this crate
+/// does not depend on it and must not start: the routing layer computes the
+/// triple and hands it over as DATA. The runtime converts.
+///
+/// Integer-only by obligation, not by taste: [`AdminSession`] derives `Eq`, so a
+/// float could not live here. That costs nothing, because upstream also reports
+/// `actual_weight` as a `u16` — it casts its jittered `f64` down before
+/// reporting.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AdminLinkWeight {
+    /// The weight routing resolved for the edge, after reconciling both ends.
+    pub actual_weight: u16,
+    /// What the NEIGHBOUR advertises back toward this node; `None` = it
+    /// advertised nothing, which is distinct from advertising the default.
+    pub dst_weight: Option<u16>,
+    /// What THIS node advertises toward the neighbour, same distinction.
+    pub src_weight: Option<u16>,
 }
 
 /// wz-native plugin state — the compile-time analogue of zenoh's `PluginState`
@@ -429,14 +484,18 @@ impl AdminLocalData {
     /// * `region` — upstream's own recent addition, still carrying a `FIXME(regions)`
     ///   and recomputed per query there. wz has no analogue, so this is an honest
     ///   ABSENCE, not a defect, and must not be written up as parity.
-    /// * `weight` — router-tier: upstream reads a `links_info` lookup, wz emits
-    ///   `null`. Named as a router-mode follow-up long before this round.
+    /// * `weight` — CLOSED by R2637. A router now fills it from its own
+    ///   `links_info`, emitting the same `{actual_weight, dst_weight, src_weight}`
+    ///   object the pin does, or `null` where it holds no weighted link to that
+    ///   peer — which is the pin's answer for that case too. A host with no router
+    ///   graph reports `null` for every session, correctly.
     /// * `metadata` (top level) — upstream serves `config.metadata()`; wz's config
     ///   has no such field at all, so this is a config-surface question.
     ///
     /// So the honest statement is the one above — the key ORDER is upstream's, and
-    /// the field SET diverges by the three named residuals. `admin_unspoken_fields`
-    /// is where a consumer learns which of them arrive as `null`.
+    /// the field SET diverges by the TWO residuals still open (`region` and
+    /// `metadata`), `weight` having closed in R2637. `admin_unspoken_fields` is
+    /// where a consumer learns which of them arrive as `null`.
     pub fn to_json(&self) -> String {
         let mut out = String::new();
         // R311y60 — the locators string array via the json::push_str_array SSOT.
@@ -471,10 +530,28 @@ impl AdminLocalData {
             // serde_json Map is a BTreeMap and emits keys ALPHABETICALLY; inserting
             // it anywhere else would be a different byte stream for the same facts.
             out.push_str(if session.shm {
-                ",\"shm\":true,\"weight\":null,\"whatami\":"
+                ",\"shm\":true,\"weight\":"
             } else {
-                ",\"shm\":false,\"weight\":null,\"whatami\":"
+                ",\"shm\":false,\"weight\":"
             });
+            // R2637 — the whole object or `null`, as upstream emits it. The INNER
+            // keys are alphabetical for the same reason the outer ones are:
+            // upstream serializes this through the same `serde_json` Map. So
+            // `actual_weight` precedes `dst_weight` precedes `src_weight`, which is
+            // NOT the declaration order of either struct.
+            match &session.weight {
+                Some(w) => {
+                    out.push_str("{\"actual_weight\":");
+                    push_u16(w.actual_weight, &mut out);
+                    out.push_str(",\"dst_weight\":");
+                    push_opt_u16(w.dst_weight, &mut out);
+                    out.push_str(",\"src_weight\":");
+                    push_opt_u16(w.src_weight, &mut out);
+                    out.push('}');
+                }
+                None => out.push_str("null"),
+            }
+            out.push_str(",\"whatami\":");
             match &session.whatami {
                 Some(w) => push_json_str(w, &mut out),
                 None => push_json_str("unknown", &mut out),
@@ -764,17 +841,35 @@ pub fn admin_legs(zid_hex: &str, whatami: &str) -> Vec<AdminLeg> {
 /// census document (R2180, open-debt item 554), and it is filled the same way — by
 /// DECLARING, in the document, which `null`s are the library's silence.
 ///
-/// # Two of these are permanent, one is a build fact
+/// # One is permanent, one is a build fact
 ///
-/// `metadata` and `sessions[].weight` are `null` in every wz build; the pin fills
-/// both (`config.metadata()` at `local_data`, and a `links_info` lookup for
-/// `weight`). They are listed because a consumer cannot tell a permanent silence
-/// from a build-conditional one either, and both mean "do not wait for this".
+/// `metadata` is `null` in every wz build (the pin serves `config.metadata()`;
+/// wz's config has no such field at all), and `plugins` is `null` only on a build
+/// without the handlers. Both are listed because a consumer cannot tell a
+/// permanent silence from a build-conditional one, and both mean "do not wait
+/// for this".
+///
+/// R2637 — `sessions[].weight` used to be named here as a third, permanent
+/// silence. It is no longer silent: a router fills it from its own `links_info`,
+/// and where it is `null` that is an ANSWER ("no weighted link to this peer"),
+/// which is what the pin reports too. A consumer SHOULD wait for it.
 pub fn admin_unspoken_fields() -> Vec<&'static str> {
     let mut fields = alloc::vec!["metadata"];
     #[cfg(not(feature = "adminspace-plugins-handlers"))]
     fields.push("plugins");
-    fields.push("sessions[].weight");
+    // R2637 — `sessions[].weight` LEFT this list, unconditionally, and the reason
+    // is semantic rather than a feature question. Once the field can be filled, a
+    // `null` weight means "this node holds no weighted link to that peer" — which
+    // is upstream's answer too, since a transport absent from `links_info` renders
+    // `null`. That is an ANSWER, and this list names SILENCES.
+    //
+    // ⚠ NOT gated the way `plugins` above is, and the difference is measured: a
+    // feature flag changes whether `plugins` is `null` or `{}`, while no flag
+    // changes whether a given session's weight is null. A cfg-gated entry would
+    // desynchronise from the emitted document the moment a session reported no
+    // weighted link — which is exactly what
+    // `unspoken_names_exactly_the_nulls_the_root_document_emits` grades, since it
+    // reads the DOCUMENT rather than the cfgs used to write it.
     fields
 }
 
@@ -782,9 +877,9 @@ pub fn admin_unspoken_fields() -> Vec<&'static str> {
 /// node replies under [`admin_surface_key`].
 ///
 /// ```json
-/// {"revision":1,
+/// {"revision":2,
 ///  "legs":[{"key":"@/<zid>/peer","encoding":"application/json","cardinality":"single"}, …],
-///  "unspoken":["metadata","plugins","sessions[].weight"]}
+///  "unspoken":["metadata","plugins"]}
 /// ```
 ///
 /// `revision` is the document's own contract number, the convention
@@ -810,7 +905,13 @@ pub fn admin_unspoken_fields() -> Vec<&'static str> {
 /// Merging the two into one row was the alternative and it loses the encoding
 /// axis, which is question two of the three this document exists to answer.
 pub fn admin_surface_json(zid_hex: &str, whatami: &str) -> String {
-    let mut out = String::from("{\"revision\":1,\"legs\":[");
+    // R2637 — revision 1 -> 2. Moved by this document's OWN rule: it moves "when a
+    // consumer that parsed the previous shape would misread this one". A consumer
+    // of revision 1 read `sessions[].weight` in `unspoken` and therefore knew the
+    // value was permanently `null`; at revision 2 it is an object or a meaningful
+    // `null`, so that consumer would misread it. A leg appearing or disappearing
+    // still does NOT move it — that is what the document is for.
+    let mut out = String::from("{\"revision\":2,\"legs\":[");
     for (i, leg) in admin_legs(zid_hex, whatami).iter().enumerate() {
         if i > 0 {
             out.push(',');
@@ -2046,6 +2147,15 @@ mod tests {
                 // pins `false`. A single fixture would leave one of the two
                 // renderings unexercised.
                 shm: true,
+                // R2637 — the SOME rendering, with the two Options deliberately
+                // DIFFERENT so their alphabetical slots cannot be transposed
+                // unnoticed; the sibling below pins the `null` rendering. A
+                // `dst`/`src` pair with equal values would pass either order.
+                weight: Some(AdminLinkWeight {
+                    actual_weight: 300,
+                    dst_weight: Some(50),
+                    src_weight: None,
+                }),
             }],
             plugins: vec![],
         };
@@ -2063,7 +2173,12 @@ mod tests {
                 concat!(
                     r#"{{"locators":["tcp/127.0.0.1:7447"],"metadata":null,"plugins":{plugins_tok},"#,
                     r#""sessions":[{{"links":[{{"dst":"tcp/127.0.0.1:51000","src":"tcp/127.0.0.1:7447"}}],"#,
-                    r#""peer":"c3d4","shm":true,"weight":null,"whatami":"router"}}],"#,
+                    // R2637 — the weight OBJECT, with its own keys alphabetical
+                    // for the same BTreeMap reason the outer levels are, and an
+                    // unadvertised end rendering `null` rather than the default.
+                    r#""peer":"c3d4","shm":true,"#,
+                    r#""weight":{{"actual_weight":300,"dst_weight":50,"src_weight":null}},"#,
+                    r#""whatami":"router"}}],"#,
                     r#""version":"0.1.0","zid":"a1b2"}}"#
                 ),
                 plugins_tok = plugins_tok
@@ -2084,6 +2199,8 @@ mod tests {
                 whatami: None,
                 links: vec![],
                 shm: false,
+                // R2637 — the `null` rendering, the twin of the `Some` above.
+                weight: None,
             }],
             plugins: vec![],
         };
@@ -2997,6 +3114,17 @@ mod tests {
                 whatami: Some(String::from("peer")),
                 links: alloc::vec![],
                 shm: false,
+                // R2637 — FILLED on purpose. This test compares the document's
+                // nulls to `admin_unspoken_fields()` by set equality, so a `None`
+                // here would put `sessions[].weight` back among the observed nulls
+                // and demand it rejoin a list of SILENCES — which it is not: a
+                // null weight is the answer "no weighted link to this peer". The
+                // fixture therefore shows a session that HAS one.
+                weight: Some(AdminLinkWeight {
+                    actual_weight: 100,
+                    dst_weight: None,
+                    src_weight: None,
+                }),
             }],
             plugins: fixture_plugins(),
         };

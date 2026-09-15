@@ -3142,8 +3142,12 @@ fn declare_adminspace_surface_document_arrives_over_the_query_path() {
     assert_eq!(*enc.lock().unwrap(), Some((10, None)));
 
     let doc: serde_json::Value = serde_json::from_str(&got).expect("the surface document is JSON");
+    // R2637 — 1 -> 2. `sessions[].weight` left `unspoken` and became a real
+    // value, so a consumer that parsed revision 1 (and therefore knew that field
+    // was permanently `null`) would misread this document. That is exactly the
+    // condition the revision exists to signal.
     assert_eq!(
-        doc["revision"], 1,
+        doc["revision"], 2,
         "the document declares its contract: {got}"
     );
 
