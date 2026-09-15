@@ -470,6 +470,40 @@ impl LinkEdgeWeight {
     pub fn is_set(&self) -> bool {
         self.0.is_some()
     }
+
+    /// The ADVERTISED weight, or `None` when none was — zenoh's
+    /// `impl From<LinkEdgeWeight> for Option<u16>`
+    /// (`zenoh/src/net/protocol/linkstate.rs` @ `impl From<LinkEdgeWeight> for Option<u16>`).
+    ///
+    /// Distinct from [`value`](Self::value) on exactly the unset case, and the
+    /// distinction is the whole point of the admin report: `value` answers
+    /// "what does routing use" (the default stands in), while this answers
+    /// "what did anyone actually say", where the default is silence and must
+    /// travel as `null`.
+    pub fn advertised(&self) -> Option<u16> {
+        self.0.map(NonZeroU16::get)
+    }
+}
+
+/// What this node can report about ONE of its links — zenoh `LinkInfo`
+/// (`zenoh/src/net/protocol/linkstate.rs` @ `pub(crate) struct LinkInfo`), the
+/// value behind an admin `sessions[].weight`.
+///
+/// Three numbers and not one, because a link has three different weights and
+/// collapsing them loses the operator's whole question. `src_weight` and
+/// `dst_weight` are what the two ENDS advertise (`None` = advertised nothing),
+/// while `actual_weight` is what routing actually used after the graph resolved
+/// the pair.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LinkInfo {
+    /// What SELF advertises toward this neighbour.
+    pub src_weight: Option<u16>,
+    /// What the NEIGHBOUR advertises back toward self.
+    pub dst_weight: Option<u16>,
+    /// The weight routing resolved for the edge — `max` of whatever the two
+    /// ends advertised (the default standing in for silence), truncated back
+    /// from the jittered `f64` the graph stores.
+    pub actual_weight: u16,
 }
 
 /// One CONFIGURED link weight: the weight this node advertises on its link to
@@ -918,6 +952,65 @@ impl LinkstateNetwork {
         let ib = self.get_idx(b)?;
         let edge = self.graph.find_edge(ia, ib)?;
         self.graph.edge_weight(edge).copied()
+    }
+
+    /// What this node can report about EACH of its own links — zenoh
+    /// `Net::links_info` (`zenoh/src/net/protocol/network.rs` @ `fn links_info`),
+    /// the map an admin `sessions[].weight` is looked up in.
+    ///
+    /// ONE derivation site, deliberately, and that is the reason this is a graph
+    /// method rather than something the admin layer assembles. `src_weight` and
+    /// `dst_weight` are the SAME lookup with the two zids swapped, so a caller
+    /// doing it itself can transpose them and produce a report that is
+    /// well-formed, plausible, and backwards — no type and no test of the
+    /// caller's would catch it. Here the swap is written once.
+    ///
+    /// Keyed by NEIGHBOUR zid, over self's incident edges only: an edge exists
+    /// exactly where a mutual link does, so a neighbour that has not yet
+    /// reciprocated is absent rather than present-with-nulls — which is what
+    /// makes the admin layer's `None` mean "no such link" and not "no weight".
+    ///
+    /// ⚠ `actual_weight` truncates the stored `f64` back to `u16`, as upstream
+    /// does. That is NOT always the configured number: the stored value carries
+    /// the sub-1% tie-break jitter, so a weight above ~100 can truncate a whole
+    /// unit high. The cast is upstream's, and mirroring it is the point.
+    pub fn links_info(&self) -> HashMap<Zid, LinkInfo> {
+        use petgraph::visit::EdgeRef;
+
+        let self_idx = self.self_idx();
+        let self_zid = *self.self_zid();
+        let mut out = HashMap::new();
+        for edge in self.graph.edges(self_idx) {
+            // `edges()` on an UNdirected graph normalises `source()` to the
+            // queried node, but the far end is taken by comparison rather than
+            // by trusting that, because getting it backwards here is exactly
+            // the transposition this method exists to prevent.
+            let peer_idx = if edge.source() == self_idx {
+                edge.target()
+            } else {
+                edge.source()
+            };
+            let peer_zid = self.graph[peer_idx].zid;
+            out.insert(
+                peer_zid,
+                LinkInfo {
+                    src_weight: self.graph[self_idx]
+                        .links
+                        .get(&peer_zid)
+                        .copied()
+                        .unwrap_or_default()
+                        .advertised(),
+                    dst_weight: self.graph[peer_idx]
+                        .links
+                        .get(&self_zid)
+                        .copied()
+                        .unwrap_or_default()
+                        .advertised(),
+                    actual_weight: *edge.weight() as u16,
+                },
+            );
+        }
+        out
     }
 
     /// Find a node index by zid — an O(1) secondary-index lookup (the
@@ -2844,6 +2937,115 @@ mod tests {
         multihop.set_gossip_multihop(true);
         multihop.add_link(zid(0xAA), WhatAmI::Peer);
         assert!(multihop.update_link_weights(weights(&[(0xAA, 300)])));
+    }
+
+    /// R2635 — the report names WHICH END said what, and the two ends are given
+    /// DIFFERENT weights on purpose: transposing `src_weight` and `dst_weight`
+    /// is the one defect this accessor exists to make impossible, and it is
+    /// invisible to any test whose two ends agree.
+    #[test]
+    fn links_info_does_not_transpose_the_two_ends() {
+        let mut net = LinkstateNetwork::new(zid(0x01), WhatAmI::Router);
+        let la = net.add_link(zid(0xAA), WhatAmI::Router);
+        // A advertises self back at 50 => the edge exists and A's end says 50.
+        net.ingest_linkstate_list(
+            la,
+            list(vec![
+                entry(10, 0, Some(&zid(0x01)), Some(1), &[]),
+                entry_weighted(11, 5, Some(&zid(0xAA)), Some(1), &[10], &[50]),
+            ]),
+        );
+        // Self's end says 300 — deliberately not 50.
+        assert!(net.update_link_weights(weights(&[(0xAA, 300)])));
+
+        let info = net.links_info();
+        let a = info
+            .get(&zid(0xAA))
+            .copied()
+            .expect("the link to A is reported");
+        assert_eq!(a.src_weight, Some(300), "src is what SELF advertises");
+        assert_eq!(
+            a.dst_weight,
+            Some(50),
+            "dst is what the NEIGHBOUR advertises"
+        );
+        // Routing resolved the pair by `max`, and the report agrees with the
+        // graph's own stored edge — asserted against the graph rather than a
+        // literal, so the jitter is not re-derived here.
+        let stored = net.edge_weight(&zid(0x01), &zid(0xAA)).expect("edge");
+        assert_eq!(a.actual_weight, stored as u16);
+        assert!(
+            (300..=303).contains(&a.actual_weight),
+            "max(300, 50) plus the sub-1% jitter, got {}",
+            a.actual_weight
+        );
+    }
+
+    /// An advertised weight and an ABSENT one are different facts, and the
+    /// report keeps them apart: silence travels as `None`, never as the 100 the
+    /// router substitutes when it prices the edge. `LinkEdgeWeight::value` would
+    /// have flattened the two.
+    #[test]
+    fn links_info_reports_silence_as_none_not_as_the_default() {
+        let mut net = LinkstateNetwork::new(zid(0x01), WhatAmI::Router);
+        let la = net.add_link(zid(0xAA), WhatAmI::Router);
+        net.ingest_linkstate_list(
+            la,
+            list(vec![
+                entry(10, 0, Some(&zid(0x01)), Some(1), &[]),
+                entry(11, 5, Some(&zid(0xAA)), Some(1), &[10]),
+            ]),
+        );
+
+        let info = net.links_info();
+        let a = info
+            .get(&zid(0xAA))
+            .copied()
+            .expect("the link to A is reported");
+        assert_eq!(a.src_weight, None, "self advertised nothing");
+        assert_eq!(a.dst_weight, None, "A advertised nothing");
+        assert!(
+            (100..=101).contains(&a.actual_weight),
+            "the DEFAULT still prices the edge, got {}",
+            a.actual_weight
+        );
+    }
+
+    /// Only links that EXIST are reported. A neighbour self has a face to but
+    /// which has not advertised self back has no edge, so it is absent from the
+    /// map rather than present with nulls — which is what lets a consumer read
+    /// an absent entry as "no such link" instead of "no weight".
+    #[test]
+    fn links_info_omits_a_neighbour_that_has_not_reciprocated() {
+        let mut net = LinkstateNetwork::new(zid(0x01), WhatAmI::Router);
+        let la = net.add_link(zid(0xAA), WhatAmI::Router);
+        net.add_link(zid(0xBB), WhatAmI::Router);
+        net.ingest_linkstate_list(
+            la,
+            list(vec![
+                entry(10, 0, Some(&zid(0x01)), Some(1), &[]),
+                entry(11, 5, Some(&zid(0xAA)), Some(1), &[10]),
+            ]),
+        );
+        // Weights are configured for BOTH, so a map keyed off the configured
+        // weights rather than off the graph would wrongly report B.
+        assert!(net.update_link_weights(weights(&[(0xAA, 300), (0xBB, 250)])));
+
+        let info = net.links_info();
+        assert!(info.contains_key(&zid(0xAA)), "A reciprocated");
+        assert!(
+            !info.contains_key(&zid(0xBB)),
+            "B has a face but no mutual link, so there is nothing to report"
+        );
+        assert_eq!(info.len(), 1);
+    }
+
+    /// A fresh node reports nothing rather than reporting itself: self is in the
+    /// graph from the start, and a self-entry would be a link to nowhere.
+    #[test]
+    fn links_info_is_empty_on_a_node_with_no_links() {
+        let net = LinkstateNetwork::new(zid(0x01), WhatAmI::Router);
+        assert!(net.links_info().is_empty());
     }
 
     /// The weight is a route PRICE, not bookkeeping: self reaches D through A

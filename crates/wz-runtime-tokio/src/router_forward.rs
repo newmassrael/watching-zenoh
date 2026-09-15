@@ -337,7 +337,7 @@ use wz_codecs::wireexpr::WireexprOwned;
 // `attach_mcast_group` (a later slice, the reserved→active flip).
 #[cfg(feature = "router-multicast-faces")]
 use tokio::sync::mpsc::UnboundedSender;
-use wz_routing_graph::{Changes, LinkEdgeWeight, LinkId, LinkstateNetwork, WhatAmI, Zid};
+use wz_routing_graph::{Changes, LinkEdgeWeight, LinkId, LinkInfo, LinkstateNetwork, WhatAmI, Zid};
 use wz_session_core::declare_build::{
     build_declare_final_reply, build_declare_queryable_reply,
     build_declare_queryable_reply_with_id, build_declare_queryable_with_id_info,
@@ -1234,6 +1234,19 @@ impl RouterForwarder {
         let _ = self.flood_self_links_changed_tier(FaceTier::Routers, &self.routers_net);
         self.trees_dirty_routers.set(true);
         true
+    }
+
+    /// What this router can report about each of its ROUTER-tier links — zenoh's
+    /// router hat `links_info` (`zenoh/src/net/routing/hat/router/mod.rs` @
+    /// `fn links_info`), which likewise answers from `routers_net` and returns an
+    /// empty map when there is no such network.
+    ///
+    /// The ROUTERS tier alone, for the same reason
+    /// [`update_router_link_weights`](Self::update_router_link_weights) writes
+    /// only there: the configured weights upstream reads are the routers
+    /// network's, so the peers tier has nothing weighted to report.
+    pub fn router_links_info(&self) -> HashMap<Zid, LinkInfo> {
+        self.routers_net.borrow().links_info()
     }
 
     /// Number of nodes in the ROUTER-tier graph (self + every learned Router) —
