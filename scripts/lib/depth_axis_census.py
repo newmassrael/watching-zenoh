@@ -1422,7 +1422,17 @@ PIN_NO_SYMBOL = 2
 # by re-inserting the atom's old reason into the live population: doing so
 # restores 177 -> 181 and 38 -> 42 exactly, so both drops are this atom's and
 # no other atom moved. 181 - 4 = 177.
-PIN_WZ_CITATIONS = 177
+# R2642 — 177 -> 179, RISING, and rising for the ordinary reason a correction
+# does: `config-mutate-runtime` stays PARTIAL, so its reason stays in this
+# population, and R2642's CORRECTION cites two more tracked wz files by rooted
+# path — the config registry it added and the gate that derives it. AMBIGUOUS
+# holds at 38 (neither citation is ambiguous) and the unpinned upstream total
+# moves 306 -> 307 on the one anchored upstream citation that correction makes.
+# MEASURED by substituting origin's copy of that one reason back into the live
+# population: doing so restores 179 -> 177 and leaves 38 and the upstream count
+# where they were, so both the rise and its size are this atom's alone.
+# 177 + 2 = 179.
+PIN_WZ_CITATIONS = 179
 # R2626 — 44 -> 42, and this one is worth a sentence because it HELD through
 # every earlier retirement in this run (R2612, R2622). `time-hlc`'s reason is the
 # first retiree carrying AMBIGUOUS citations of its own: its oldest clauses cite
