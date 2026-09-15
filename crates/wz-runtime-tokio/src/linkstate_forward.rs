@@ -14575,8 +14575,7 @@ mod tests {
         let (face_a, _sink_a) = peer_face(zid(0x0A));
         fwd.register(FaceId(0), &face_a);
         advertise_link_back(&fwd, FaceId(0), 0x0A, 0x05);
-        let seen: std::rc::Rc<std::cell::RefCell<Vec<(SampleKind, Vec<u8>)>>> =
-            std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let seen = std::rc::Rc::new(std::cell::RefCell::new(Vec::<(SampleKind, Vec<u8>)>::new()));
         let s = seen.clone();
         fwd.register_local_subscriber(
             "demo/data",
