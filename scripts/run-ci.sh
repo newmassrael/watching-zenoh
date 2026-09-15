@@ -5696,7 +5696,12 @@ layer_c1ay_cargo_test_router_hat() {
     # appear here. The number moves because the plane correctly is not there.
     _runci_guarded_test "C1AY router_forward 143" 143 \
         cargo test -p wz-runtime-tokio --features routing-router-hat,transport-multicast --lib router_forward --quiet || return 1
-    _runci_guarded_test "C1AY router_forward 143" 143 \
+    # R2636 — 143 -> 144, and ONLY this arm of the seven moves. The added test
+    # renders the router's `sessions[]` table and is `#[cfg(feature =
+    # "adminspace-core")]`, which this is the only one of the seven to pull; the
+    # R2634 test beside it was ungated and so moved all seven. Number PRINTED by
+    # the guard, not 143 + 1 counted off the diff.
+    _runci_guarded_test "C1AY router_forward 144" 144 \
         cargo test -p wz-runtime-tokio --features routing-router-hat,adminspace-router-linkstate --lib router_forward --quiet || return 1
     # R311y786 (§5.21 router-connect-reconcile) — the re-dial BACKOFF. Until y786
     # the loop slept a `const RECONNECT_BACKOFF_MS = 1000`, so an unreachable

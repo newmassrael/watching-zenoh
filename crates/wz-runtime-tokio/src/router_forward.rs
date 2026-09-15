@@ -589,7 +589,12 @@ impl RouterSessionsView {
     /// ONE entry per face, read LIVE — the same enumeration
     /// [`LinkstateForwarder::admin_sessions`](crate::linkstate_forward::LinkstateForwarder::admin_sessions)
     /// gives the peer host, and upstream gives per transport
-    /// (`zenoh/src/net/runtime/adminspace.rs` @ `"links": links,`).
+    /// (`zenoh/src/net/runtime/adminspace.rs` @
+    /// `let transport_unicast_to_json = move |transport: &TransportUnicast| {`).
+    /// ⚠ That needle is the closure's DECLARATION and not the `"links"` line
+    /// inside it: the shorter forms each match twice at the pin, once in this
+    /// renderer and once in the multicast one, so they resolve without
+    /// identifying.
     ///
     /// Until this existed the router host passed a literal `&[]`, so a wz
     /// router's admin GET reported no sessions at all whatever it was connected
@@ -1292,25 +1297,17 @@ impl RouterForwarder {
     }
 
     /// R2636 (open-debt item 748) — the router's admin `sessions[]` transport
-    /// table: ONE entry per face, the same enumeration
-    /// [`LinkstateForwarder::admin_sessions`](crate::linkstate_forward::LinkstateForwarder::admin_sessions)
-    /// gives the peer host, and upstream gives per transport
-    /// (`zenoh/src/net/runtime/adminspace.rs` @ `"links": links,`).
+    /// table, for a caller that holds the forwarder itself (tests, and a host
+    /// that renders once rather than per GET).
     ///
-    /// Until this existed the router host passed a literal `&[]`, so a wz router's
-    /// admin GET reported no sessions at all whatever it was connected to — the
-    /// SAME deferral R311y473 paid off for the peer, left standing on the router.
-    /// It is also what `sessions[].weight` was blocked behind: a weight is reported
-    /// per session, so with no sessions there was nowhere for one to go, on the one
-    /// host that has a router graph to compute it from.
-    ///
-    /// EVERY tier, not just the routers one. A face is a transport whatever tier
-    /// its routing zid lands in, and upstream's table is the transport manager's,
-    /// not a network's — a Client face is a session this router holds and an
-    /// operator asking what this node is connected to must see it.
+    /// A one-line delegate to [`RouterSessionsView::admin_sessions`], which is
+    /// where the enumeration and its reasoning live. Deliberately NOT a
+    /// second copy of that doc: this method and the view would then carry two
+    /// descriptions of one behaviour, and the round that changes the behaviour
+    /// would update whichever it happened to open.
     #[cfg(feature = "adminspace-core")]
     pub fn admin_sessions(&self) -> Vec<wz_session_core::adminspace::AdminSession> {
-        RouterSessionsView(Rc::clone(&self.faces)).admin_sessions()
+        self.sessions_view().admin_sessions()
     }
 
     /// A read-only handle over the live face set — the admin host's `sessions[]`
