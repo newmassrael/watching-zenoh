@@ -337,7 +337,7 @@ use wz_codecs::wireexpr::WireexprOwned;
 // `attach_mcast_group` (a later slice, the reserved→active flip).
 #[cfg(feature = "router-multicast-faces")]
 use tokio::sync::mpsc::UnboundedSender;
-use wz_routing_graph::{Changes, LinkId, LinkstateNetwork, WhatAmI, Zid};
+use wz_routing_graph::{Changes, LinkEdgeWeight, LinkId, LinkstateNetwork, WhatAmI, Zid};
 use wz_session_core::declare_build::{
     build_declare_final_reply, build_declare_queryable_reply,
     build_declare_queryable_reply_with_id, build_declare_queryable_with_id_info,
@@ -1204,6 +1204,33 @@ impl RouterForwarder {
     /// are not retroactively changed.
     pub fn set_query_timeout(&self, timeout: Duration) {
         self.query_timeout.set(timeout);
+    }
+
+    /// Replace the configured per-neighbour link weights of the ROUTER-tier
+    /// graph — zenoh's router hat `update_from_config`
+    /// (`hat/router/mod.rs:509-531`), which is also where the weights enter at
+    /// `init` (`:303-320`). Only `routers_net` takes them: upstream reads
+    /// `routing.router.linkstate.transport_weights` into the routers network
+    /// alone, so the peers tier keeps unset weights whatever the map names.
+    ///
+    /// Weights set before a Router face registers are what its link carries
+    /// from the first flood. When the graph reports that a live link moved
+    /// ([`LinkstateNetwork::update_link_weights`] returns `true`), self's
+    /// links-only link-state is flooded to every Router face — the
+    /// `send_on_links` zenoh performs inside the graph call — and the tier's
+    /// recompute is coalesced onto the next [`tick`](Self::tick), the
+    /// counterpart of upstream's `compute_trees_async`. Returns that `bool`.
+    pub fn update_router_link_weights(&self, link_weights: HashMap<Zid, LinkEdgeWeight>) -> bool {
+        if !self
+            .routers_net
+            .borrow_mut()
+            .update_link_weights(link_weights)
+        {
+            return false;
+        }
+        let _ = self.flood_self_links_changed_tier(FaceTier::Routers, &self.routers_net);
+        self.trees_dirty_routers.set(true);
+        true
     }
 
     /// Number of nodes in the ROUTER-tier graph (self + every learned Router) —
@@ -6825,6 +6852,122 @@ mod tests {
         // An idle tick is a no-op poll.
         fwd.tick();
         assert_eq!(fwd.recomputes.get(), 2, "an idle window adds no recompute");
+    }
+
+    fn link_weights(entries: &[(u8, u16)]) -> HashMap<Zid, LinkEdgeWeight> {
+        entries
+            .iter()
+            .map(|&(b, w)| (zid(b), LinkEdgeWeight::from_raw(w)))
+            .collect()
+    }
+
+    /// Self's advertised weight toward `peer` in one tier's graph.
+    fn self_link_weight(net: &Rc<RefCell<LinkstateNetwork>>, peer: u8) -> LinkEdgeWeight {
+        let net = net.borrow();
+        net.get_node(net.self_zid())
+            .expect("self node")
+            .links
+            .get(&zid(peer))
+            .copied()
+            .expect("self links to the peer")
+    }
+
+    /// The link-state entries of a flooded OAM frame.
+    fn flooded_link_states(frame: &[u8]) -> Vec<LinkstateOwned> {
+        use crate::session_glue::{parse_frame_payload, parse_inbound, InboundFrame};
+        let InboundFrame::Frame { payload, .. } =
+            parse_inbound(frame).expect("parse flooded frame")
+        else {
+            panic!("flooded bytes are not a Frame");
+        };
+        let msgs = parse_frame_payload(&payload).expect("parse frame payload");
+        match msgs.first() {
+            Some(NetworkMessage::Oam(oam)) => match try_parse_linkstate_oam(oam) {
+                LinkstateOam::Decoded(list) => list.link_states,
+                other => panic!("OAM did not decode as a link-state list: {other:?}"),
+            },
+            other => panic!("expected a flooded OAM, got {other:?}"),
+        }
+    }
+
+    /// A weight configured before a Router face registers is the weight its
+    /// link carries; the same zid on the PEER tier is not weighted, because
+    /// upstream hands `transport_weights` to the routers network alone
+    /// (`hat/router/mod.rs:303-320`).
+    #[test]
+    fn a_router_link_weight_set_before_register_rides_only_the_routers_tier() {
+        let fwd = RouterForwarder::new(zid(0x01));
+        assert!(
+            !fwd.update_router_link_weights(link_weights(&[(0xAA, 250), (0xBB, 250)])),
+            "no live link moved"
+        );
+        assert!(!fwd.trees_dirty_routers.get(), "nothing to recompute");
+        let (a_r, _s1) = face(zid(0xAA), WIRE_ROUTER);
+        let (b_p, _s2) = face(zid(0xBB), WIRE_PEER);
+        fwd.register(FaceId(0), &a_r);
+        fwd.register(FaceId(1), &b_p);
+        assert_eq!(
+            self_link_weight(&fwd.routers_net, 0xAA),
+            LinkEdgeWeight::from_raw(250)
+        );
+        assert!(
+            !self_link_weight(&fwd.linkstatepeers_net, 0xBB).is_set(),
+            "the peers tier takes no router link weight"
+        );
+    }
+
+    /// Re-weighting a live Router link floods self's links-only entry, carrying
+    /// the new weight, to every Router face and to no Peer face, and schedules
+    /// the routers-tier recompute only. The same map again moves nothing.
+    #[test]
+    fn a_router_link_weight_change_refloods_the_routers_tier_and_schedules_its_recompute() {
+        let fwd = RouterForwarder::new(zid(0x01));
+        let (a_r, sink_a) = face(zid(0xAA), WIRE_ROUTER);
+        let (b_p, sink_b) = face(zid(0xBB), WIRE_PEER);
+        let (c_r, sink_c) = face(zid(0xCC), WIRE_ROUTER);
+        fwd.register(FaceId(0), &a_r);
+        fwd.register(FaceId(1), &b_p);
+        fwd.register(FaceId(2), &c_r);
+        fwd.tick();
+        sink_a.reset();
+        sink_b.reset();
+        sink_c.reset();
+        let recomputes = fwd.recomputes.get();
+
+        assert!(fwd.update_router_link_weights(link_weights(&[(0xAA, 300)])));
+        assert_eq!(sink_b.frame_count(), 0, "no Peer face is flooded");
+        let psid_a = fwd
+            .routers_net
+            .borrow()
+            .local_psid_of(&zid(0xAA))
+            .expect("A indexed");
+        for (name, sink) in [("A", &sink_a), ("C", &sink_c)] {
+            assert_eq!(sink.frame_count(), 1, "Router face {name} flooded once");
+            let states = flooded_link_states(&sink.frame_bytes(0));
+            assert_eq!(states.len(), 1, "self's links-only entry alone");
+            assert!(states[0].zid.is_none(), "links-only: no zid");
+            let slot = states[0]
+                .links
+                .iter()
+                .position(|l| l.psid == psid_a)
+                .expect("the link to A is advertised");
+            let weights = states[0].weights.as_ref().expect("a set weight rides");
+            assert_eq!(weights[slot].weight, 300, "Router face {name} sees 300");
+        }
+        assert!(fwd.trees_dirty_routers.get());
+        assert!(!fwd.trees_dirty_peers.get());
+        fwd.tick();
+        assert_eq!(
+            fwd.recomputes.get(),
+            recomputes + 1,
+            "one routers recompute"
+        );
+
+        sink_a.reset();
+        sink_c.reset();
+        assert!(!fwd.update_router_link_weights(link_weights(&[(0xAA, 300)])));
+        assert_eq!(sink_a.frame_count() + sink_c.frame_count(), 0);
+        assert!(!fwd.trees_dirty_routers.get());
     }
 
     #[test]

@@ -690,6 +690,15 @@ pub struct LinkstateNetwork {
     /// dial candidate. Defaults to `true` (wz's own mode); flipped via
     /// [`set_full_linkstate`](Self::set_full_linkstate).
     full_linkstate: bool,
+    /// zenoh `Network::link_weights` (`network.rs:148`): the CONFIGURED weight
+    /// self advertises on its link to each named neighbour, sourced upstream
+    /// from `routing.router.linkstate.transport_weights`
+    /// (`linkstate.rs:195-213`). A neighbour absent from the map is advertised
+    /// at the unset weight, so the edge falls back to whatever the far end
+    /// advertises, or [`LinkEdgeWeight::DEFAULT`]. Read by
+    /// [`add_link`](Self::add_link) and replaced by
+    /// [`update_link_weights`](Self::update_link_weights). Empty by default.
+    link_weights: HashMap<Zid, LinkEdgeWeight>,
 }
 
 impl LinkstateNetwork {
@@ -727,6 +736,9 @@ impl LinkstateNetwork {
             // (this graph mirrors `hat/linkstate_peer`), so the linkstate ingest
             // is the default; a deploy joining a gossip subsystem flips it.
             full_linkstate: true,
+            // no configured weights: every self link advertises the unset
+            // weight, as a zenoh router with no `transport_weights` does.
+            link_weights: HashMap::new(),
         }
     }
 
@@ -903,7 +915,9 @@ impl LinkstateNetwork {
     /// face is established (step c3). Mirrors zenoh `add_link`
     /// (`network.rs:812-859`): introduce the neighbour node, record that
     /// self now links to it (bumping self's link-state sn), and form the
-    /// edge if the neighbour already advertises self back.
+    /// edge if the neighbour already advertises self back. The link carries
+    /// the weight configured for `peer_zid`, as zenoh's does through
+    /// `get_default_link_weight_to` (`network.rs:862`).
     pub fn add_link(&mut self, peer_zid: Zid, peer_whatami: WhatAmI) -> LinkId {
         let id = self.next_link_id;
         self.next_link_id += 1;
@@ -918,12 +932,65 @@ impl LinkstateNetwork {
                 links: HashMap::new(),
             });
         }
-        self.graph[self.idx]
-            .links
-            .insert(peer_zid, LinkEdgeWeight::default());
+        let weight = self
+            .link_weights
+            .get(&peer_zid)
+            .copied()
+            .unwrap_or_default();
+        self.graph[self.idx].links.insert(peer_zid, weight);
         self.graph[self.idx].sn += 1;
         self.rebuild_edges(self.idx);
         id
+    }
+
+    /// Replace the configured per-neighbour link weights, re-weighting every
+    /// self link whose configured weight changed. Mirrors zenoh
+    /// `update_link_weights` (`network.rs:197-252`) clause for clause:
+    ///
+    /// - a link is touched only when its entry in the OLD map differs from its
+    ///   entry in the NEW one; it then takes the new weight, or the unset
+    ///   weight when the neighbour left the map;
+    /// - the new map is stored whether or not any link moved, so a neighbour
+    ///   that connects later reads it in [`add_link`](Self::add_link);
+    /// - returns `false`, with self's sn untouched, when no link moved or when
+    ///   this graph is in neither linkstate nor multihop mode — a gossip graph
+    ///   carries no edges to re-weight and floods no links;
+    /// - otherwise refreshes the edge to every touched neighbour that already
+    ///   advertises self back, bumps self's sn, and returns `true`.
+    ///
+    /// `true` is the caller's obligation to flood self's links-only
+    /// link-state — zenoh does that inside this function
+    /// (`send_on_links`, `network.rs:239-250`); this graph owns no transports,
+    /// so the driver does it on the return value.
+    pub fn update_link_weights(&mut self, link_weights: HashMap<Zid, LinkEdgeWeight>) -> bool {
+        let mut dests_to_update = Vec::new();
+        for (dst_zid, weight) in &mut self.graph[self.idx].links {
+            let old_weight = self.link_weights.get(dst_zid);
+            let new_weight = link_weights.get(dst_zid);
+            if old_weight == new_weight {
+                continue;
+            }
+            *weight = new_weight.copied().unwrap_or_default();
+            dests_to_update.push(*dst_zid);
+        }
+
+        self.link_weights = link_weights;
+
+        if dests_to_update.is_empty() || !(self.full_linkstate || self.gossip_multihop) {
+            return false;
+        }
+
+        let self_zid = self.graph[self.idx].zid;
+        for dest in dests_to_update {
+            if let Some(dest_idx) = self.get_idx(&dest) {
+                if self.graph[dest_idx].links.contains_key(&self_zid) {
+                    self.update_edge(self.idx, dest_idx);
+                }
+            }
+        }
+
+        self.graph[self.idx].sn += 1;
+        true
     }
 
     /// Borrow a link by id.
@@ -2569,6 +2636,158 @@ mod tests {
             (80.0..=80.8).contains(&w),
             "max(50,80)=80 plus sub-1% jitter, got {w}"
         );
+    }
+
+    // ── configured link weights (zenoh `Network::link_weights`) ─────
+
+    fn weights(entries: &[(u8, u16)]) -> HashMap<Zid, LinkEdgeWeight> {
+        entries
+            .iter()
+            .map(|&(b, w)| (zid(b), LinkEdgeWeight::from_raw(w)))
+            .collect()
+    }
+
+    fn self_link_weight(net: &LinkstateNetwork, peer: u8) -> LinkEdgeWeight {
+        net.get_node(net.self_zid())
+            .expect("self node")
+            .links
+            .get(&zid(peer))
+            .copied()
+            .expect("self links to the peer")
+    }
+
+    /// The weight emitted for `peer` in self's links-only delta, or `None`
+    /// when the entry carries no weights at all (no link is set).
+    fn advertised_weight(net: &LinkstateNetwork, peer: u8) -> Option<u64> {
+        let delta = net.build_self_links_delta();
+        let entry = &delta.link_states[0];
+        let psid = net.local_psid_of(&zid(peer)).expect("peer indexed");
+        let slot = entry
+            .links
+            .iter()
+            .position(|l| l.psid == psid)
+            .expect("self advertises the link");
+        entry.weights.as_ref().map(|w| w[slot].weight)
+    }
+
+    /// A weight configured BEFORE the neighbour connects is the one its link
+    /// carries and advertises; an unconfigured neighbour's link stays unset.
+    /// zenoh `add_link` reads `get_default_link_weight_to` (`network.rs:862`).
+    #[test]
+    fn a_configured_link_weight_rides_the_link_add_link_creates() {
+        let mut net = LinkstateNetwork::new(zid(0x01), WhatAmI::Router);
+        let sn = net.get_node(&zid(0x01)).expect("self").sn;
+        assert!(
+            !net.update_link_weights(weights(&[(0xAA, 250)])),
+            "no self link to re-weight => false"
+        );
+        assert_eq!(net.get_node(&zid(0x01)).expect("self").sn, sn, "no sn bump");
+
+        net.add_link(zid(0xAA), WhatAmI::Router);
+        net.add_link(zid(0xBB), WhatAmI::Router);
+        assert_eq!(self_link_weight(&net, 0xAA), LinkEdgeWeight::from_raw(250));
+        assert!(!self_link_weight(&net, 0xBB).is_set());
+        assert_eq!(advertised_weight(&net, 0xAA), Some(250));
+        assert_eq!(advertised_weight(&net, 0xBB), Some(0), "unset rides as 0");
+    }
+
+    /// Only a link whose configured entry CHANGED is touched; a repeat of the
+    /// same map is `false` with no sn bump; leaving the map resets the link to
+    /// unset. The edge to a neighbour that advertises self back is re-priced.
+    #[test]
+    fn update_link_weights_reweights_only_the_links_whose_entry_changed() {
+        let mut net = LinkstateNetwork::new(zid(0x01), WhatAmI::Router);
+        let la = net.add_link(zid(0xAA), WhatAmI::Router);
+        net.add_link(zid(0xBB), WhatAmI::Router);
+        // A advertises self back => the self<->A edge exists; B does not.
+        net.ingest_linkstate_list(
+            la,
+            list(vec![
+                entry(10, 0, Some(&zid(0x01)), Some(1), &[]),
+                entry(11, 5, Some(&zid(0xAA)), Some(1), &[10]),
+            ]),
+        );
+        let base = net.edge_weight(&zid(0x01), &zid(0xAA)).expect("edge");
+        assert!((100.0..=101.0).contains(&base), "default edge, got {base}");
+        let sn = net.get_node(&zid(0x01)).expect("self").sn;
+
+        assert!(net.update_link_weights(weights(&[(0xAA, 300)])));
+        assert_eq!(net.get_node(&zid(0x01)).expect("self").sn, sn + 1);
+        assert_eq!(self_link_weight(&net, 0xAA), LinkEdgeWeight::from_raw(300));
+        assert!(!self_link_weight(&net, 0xBB).is_set(), "B untouched");
+        let priced = net.edge_weight(&zid(0x01), &zid(0xAA)).expect("edge");
+        assert!(
+            (300.0..=303.0).contains(&priced),
+            "re-priced edge, got {priced}"
+        );
+
+        assert!(
+            !net.update_link_weights(weights(&[(0xAA, 300)])),
+            "the same map moves no link"
+        );
+        assert_eq!(net.get_node(&zid(0x01)).expect("self").sn, sn + 1);
+
+        assert!(net.update_link_weights(HashMap::new()), "A left the map");
+        assert!(!self_link_weight(&net, 0xAA).is_set());
+        let reset = net.edge_weight(&zid(0x01), &zid(0xAA)).expect("edge");
+        assert_eq!(reset, base, "back to the default edge");
+        assert_eq!(net.get_node(&zid(0x01)).expect("self").sn, sn + 2);
+    }
+
+    /// A graph in neither linkstate nor multihop mode re-weights its self link
+    /// but reports `false` and keeps its sn — upstream's early return sits
+    /// AFTER the weight write (`network.rs:204-220`). Multihop alone suffices.
+    #[test]
+    fn update_link_weights_is_false_on_a_graph_that_floods_no_links() {
+        let mut gossip = LinkstateNetwork::new(zid(0x01), WhatAmI::Peer);
+        gossip.set_full_linkstate(false);
+        gossip.add_link(zid(0xAA), WhatAmI::Peer);
+        let sn = gossip.get_node(&zid(0x01)).expect("self").sn;
+        assert!(!gossip.update_link_weights(weights(&[(0xAA, 300)])));
+        assert_eq!(gossip.get_node(&zid(0x01)).expect("self").sn, sn);
+        assert_eq!(
+            self_link_weight(&gossip, 0xAA),
+            LinkEdgeWeight::from_raw(300)
+        );
+
+        let mut multihop = LinkstateNetwork::new(zid(0x01), WhatAmI::Peer);
+        multihop.set_full_linkstate(false);
+        multihop.set_gossip_multihop(true);
+        multihop.add_link(zid(0xAA), WhatAmI::Peer);
+        assert!(multihop.update_link_weights(weights(&[(0xAA, 300)])));
+    }
+
+    /// The weight is a route PRICE, not bookkeeping: self reaches D through A
+    /// or B at equal default cost; pricing the link to A sends D through B,
+    /// and moving the price to B sends it back through A. Whichever way the
+    /// jitter breaks the initial tie, one of the two flips is a change.
+    #[test]
+    fn a_configured_link_weight_changes_the_route_it_prices() {
+        let mut net = LinkstateNetwork::new(zid(0x01), WhatAmI::Router);
+        let la = net.add_link(zid(0xAA), WhatAmI::Router);
+        net.add_link(zid(0xBB), WhatAmI::Router);
+        net.ingest_linkstate_list(
+            la,
+            list(vec![
+                entry(10, 0, Some(&zid(0x01)), Some(1), &[]),
+                entry(11, 5, Some(&zid(0xAA)), Some(1), &[10, 13]),
+                entry(12, 5, Some(&zid(0xBB)), Some(1), &[10, 13]),
+                entry(13, 5, Some(&zid(0xDD)), Some(1), &[11, 12]),
+            ]),
+        );
+        net.compute_trees();
+        assert!(
+            matches!(net.next_hop(&zid(0x01), &zid(0xDD)), Some(h) if h == zid(0xAA) || h == zid(0xBB)),
+            "D is reachable at equal cost"
+        );
+
+        assert!(net.update_link_weights(weights(&[(0xAA, 1000)])));
+        net.compute_trees();
+        assert_eq!(net.next_hop(&zid(0x01), &zid(0xDD)), Some(zid(0xBB)));
+
+        assert!(net.update_link_weights(weights(&[(0xBB, 1000)])));
+        net.compute_trees();
+        assert_eq!(net.next_hop(&zid(0x01), &zid(0xDD)), Some(zid(0xAA)));
     }
 
     /// A weight whose wire encoding is wider than `u16` must be FOLDED, at the
