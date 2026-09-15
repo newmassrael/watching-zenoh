@@ -921,7 +921,13 @@ CITATION = re.compile(r"\b((?:[A-Za-z0-9_.-]+/)*[A-Za-z0-9_.-]+\.(?:rs|c|h))(?::
 # in the C1y extauth_pubkey guards), so it leaves this count with the population;
 # UNREACHED and NO_SYMBOL hold. MEASURED with this module's own `reach_partition`
 # over origin's store and this one: exactly that atom left `reached`, none joined.
-PIN_REACHED = 32
+# R2631 — 32 -> 31: `session-extauth` went PARTIAL -> COMPLETE. Its last clause,
+# the authenticated identity, is built on both halves: a stock zenoh usrpwd
+# initiator's name reaches a wz responder's session, and the ACL's new username
+# axis consumes it. A REACHED atom, so it leaves this count with the population;
+# UNREACHED and NO_SYMBOL hold. MEASURED with `reach_partition` over origin's
+# store and this one: exactly that atom left `reached`, none joined.
+PIN_REACHED = 31
 PIN_UNREACHED = 3
 PIN_NO_SYMBOL = 2
 # R2534 — 346 -> 347. The atom is `adminspace-metrics` and the citation is the
@@ -1393,7 +1399,14 @@ PIN_NO_SYMBOL = 2
 # reader and the handshake drive, plus the bare `auth_dispatch.rs` and
 # `session_actions.rs` naming what R2411 had claimed. 197 - 2 + 6 = 201.
 # AMBIGUOUS holds at 42: neither atom's changed citations were ambiguous.
-PIN_WZ_CITATIONS = 201
+# R2631 — 201 -> 181, FALLING because an atom retired, and falling by far more than
+# any retirement above because `session-extauth` had been re-measured and corrected
+# more often than most: its reason took TWENTY-ONE resolving wz citations with it
+# (-21). Something was added back, as at R2627, and measured the same way: the
+# `access-acl` correction names one rooted path to the ACL crate (+1, 8 -> 9).
+# Both halves read with `citation_audit` per atom over origin's store and this
+# one. 201 - 21 + 1 = 181. AMBIGUOUS holds at 42.
+PIN_WZ_CITATIONS = 181
 # R2626 — 44 -> 42, and this one is worth a sentence because it HELD through
 # every earlier retirement in this run (R2612, R2622). `time-hlc`'s reason is the
 # first retiree carrying AMBIGUOUS citations of its own: its oldest clauses cite
