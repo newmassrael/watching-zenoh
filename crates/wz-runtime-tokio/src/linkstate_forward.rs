@@ -173,6 +173,15 @@ use crate::session_glue::{IterationEvent, SessionLinkActions};
 /// this re-export exists to prevent.
 pub use wz_codecs::whatami::WhatAmIMatcher;
 pub use wz_routing_graph::{AutoConnect, AutoConnectStrategies, AutoConnectStrategy, WhatAmI, Zid};
+// R2633 — the CONFIGURED link-weight surface, re-exported for the same reason
+// and gated by the same feature: `wz-routing-graph` is an OPTIONAL dependency
+// pulled by `routing-peer`, so these types exist exactly where this module does.
+// A deploy that weights its router links names them on one path
+// (`wz::runtime_tokio::linkstate_forward::{TransportWeight, link_weights_from_config}`)
+// rather than re-typing the row shape at the call site. `zenoh_config`
+// re-exports the same three for the CONFIG-FILE half, which needs its own
+// feature; a build with the router hat and no config reader reaches them here.
+pub use wz_routing_graph::{link_weights_from_config, DuplicateLinkWeight, TransportWeight};
 // R311tt — re-export the §5.16 access-control policy-construction surface
 // beside `set_interceptors`, so a deploy builds an `AclPolicy` from one facade
 // path (`wz::runtime_tokio::linkstate_forward::{AclPolicy, ..}`) — the same

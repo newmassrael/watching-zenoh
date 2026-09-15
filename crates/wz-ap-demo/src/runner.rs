@@ -5761,11 +5761,11 @@ pub(crate) struct RouterHatOpts {
     /// Carried as ROWS rather than as the `zid -> weight` map the forwarder
     /// takes, so the one refusal a well-formed row list can still earn — two
     /// rows naming the same destination — is made by
-    /// [`link_weights_from_config`](wz::runtime_tokio::zenoh_config::link_weights_from_config),
+    /// [`link_weights_from_config`](wz::runtime_tokio::linkstate_forward::link_weights_from_config),
     /// which is where upstream makes it and where the CONFIG FILE path is
     /// judged too. Two entry points with one rule, rather than one rule per
     /// entry point.
-    pub router_link_weights: Vec<wz::runtime_tokio::zenoh_config::TransportWeight>,
+    pub router_link_weights: Vec<wz::runtime_tokio::linkstate_forward::TransportWeight>,
 }
 
 #[cfg(feature = "router-hat-router")]
@@ -6014,7 +6014,9 @@ async fn run_router_hat_until(
     // rule for both entry points. Hard error, never a degraded default — the
     // silently-dropped weight is the failure mode that looks healthy.
     if !opts.router_link_weights.is_empty() {
-        match wz::runtime_tokio::zenoh_config::link_weights_from_config(&opts.router_link_weights) {
+        match wz::runtime_tokio::linkstate_forward::link_weights_from_config(
+            &opts.router_link_weights,
+        ) {
             Ok(weights) => {
                 let count = weights.len();
                 forwarder.update_router_link_weights(weights);

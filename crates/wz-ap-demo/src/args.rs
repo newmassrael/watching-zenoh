@@ -1471,6 +1471,17 @@ pub(crate) fn expand_stock_zenoh_config_for_build(
     // role and the endpoints disagree. An EMPTY list is `AlreadyTheBehaviour`:
     // it is what an unset key already means, and emitting nothing for it is not
     // a key that failed to reach the node.
+    // A build without the router hat has no parser for the flag and no routers
+    // network to weight, so the key is DROPPED there (the `no_sink` row) rather
+    // than expanded into a refusal — the `scouting/multicast/listen` shape.
+    #[cfg(not(feature = "router-hat-router"))]
+    if named("routing/router/linkstate/transport_weights") {
+        exp.record(
+            "routing/router/linkstate/transport_weights",
+            KeyEffect::NoSinkInThisBuild,
+        );
+    }
+    #[cfg(feature = "router-hat-router")]
     if named("routing/router/linkstate/transport_weights") {
         let is_router_hat = selected.map(|s| s.flag) == Some("--router-hat");
         if !is_router_hat {
@@ -2160,10 +2171,11 @@ impl Expansion<'_> {
     /// carried is `PartlyExpanded { named, carried }` — a count, because an
     /// operator told "some of your weights reached the node" without being told
     /// how many has been handed a puzzle instead of a fact.
+    #[cfg(feature = "router-hat-router")]
     fn router_link_weights(
         &mut self,
         key: &'static str,
-        rows: &[wz::runtime_tokio::zenoh_config::TransportWeight],
+        rows: &[wz::runtime_tokio::linkstate_forward::TransportWeight],
         blocked: Option<KeyEffect>,
     ) -> KeyEffect {
         if let Some(blocked) = blocked {
@@ -2893,6 +2905,13 @@ pub(crate) fn config_keys_the_demo_drops() -> Vec<&'static str> {
     // rather than expand into a refusal.
     if !cfg!(feature = "scouting-responder") {
         out.push("scouting/multicast/listen");
+    }
+    // R2633 — `--router-link-weight` is parsed by the `--router-hat` arm alone,
+    // and the types it builds come from an OPTIONAL dependency the same feature
+    // pulls in, so a build without it has no sink AND no parser. Same shape as
+    // the responder row above.
+    if !cfg!(feature = "router-hat-router") {
+        out.push("routing/router/linkstate/transport_weights");
     }
     // R311y849 listed `connect/retry` here: `--connect-retry` was parsed by the
     // `--peer` and `--router-hat` arms only, and neither exists without its
@@ -6618,12 +6637,23 @@ pub(crate) fn parse_connect_retry(args: &[String]) -> Result<Option<RetryPolicy>
 /// measured against the pinned binary (R2633): an uppercase or leading-zero zid
 /// ("Invalid id"), a zero or over-wide weight ("expected a nonzero u16"). The
 /// DUPLICATE destination is deliberately NOT refused here — it is refused by
-/// [`link_weights_from_config`](wz::runtime_tokio::zenoh_config::link_weights_from_config),
+/// [`link_weights_from_config`](wz::runtime_tokio::linkstate_forward::link_weights_from_config),
 /// where upstream refuses it, so the flag and the config file are judged by one
 /// rule instead of two.
+///
+/// ⛔ Gated on `router-hat-router`, and the gate is the TYPES' as much as the
+/// sink's: `wz-routing-graph` is an OPTIONAL dependency of the runtime crate,
+/// pulled in by `routing-peer`, so `TransportWeight` does not exist in a build
+/// without it. R2633's first cut left this ungated and reached `Zid` through a
+/// feature-gated module — measured by the count-guard gate, which reported five
+/// demo legs producing NO libtest summary, because a build that cannot compile
+/// runs no tests. A build without the router hat DROPS the key (see
+/// [`config_keys_the_demo_drops`]) rather than expanding into a flag it has no
+/// parser for.
+#[cfg(feature = "router-hat-router")]
 pub(crate) fn parse_router_link_weights(
     args: &[String],
-) -> Result<Vec<wz::runtime_tokio::zenoh_config::TransportWeight>, String> {
+) -> Result<Vec<wz::runtime_tokio::linkstate_forward::TransportWeight>, String> {
     use core::num::NonZeroU16;
     let mut out = Vec::new();
     for raw in parse_pairs(args, "--router-link-weight") {
@@ -6643,7 +6673,7 @@ pub(crate) fn parse_router_link_weights(
             .ok_or_else(|| {
                 format!("--router-link-weight {raw:?}: {weight_text:?} is not 1..=65535")
             })?;
-        out.push(wz::runtime_tokio::zenoh_config::TransportWeight {
+        out.push(wz::runtime_tokio::linkstate_forward::TransportWeight {
             dst_zid: wz::runtime_tokio::linkstate_forward::Zid::from_slice(&bytes),
             weight,
         });
@@ -8072,7 +8102,7 @@ mod link_config_flag_tests {
 
 /// R2633 — `--router-link-weight <zid>=<weight>`: what the flag takes, and what
 /// it refuses because a stock zenohd refuses the equivalent document.
-#[cfg(test)]
+#[cfg(all(test, feature = "router-hat-router"))]
 mod router_link_weight_flag_tests {
     use super::*;
 
@@ -8133,7 +8163,7 @@ mod router_link_weight_flag_tests {
         let rows = parse_router_link_weights(&argv(&["1=10", "1=20"]))
             .expect("a duplicate parses at the flag");
         assert_eq!(rows.len(), 2);
-        assert!(wz::runtime_tokio::zenoh_config::link_weights_from_config(&rows).is_err());
+        assert!(wz::runtime_tokio::linkstate_forward::link_weights_from_config(&rows).is_err());
     }
 }
 
