@@ -53,6 +53,7 @@ why the ordering rule says *before*.
 | R2639 | `34921831690` | `951d23cf` | C1ac quic e2e, `EXPIRY_MAX_SLEEP` dead under quic-without-unicast · Z oracle-pin, `zenohd-unixpipe` and `zenohd-vsock` answer `1211779c` against pin 1.10.1 (two jobs, two causes) | — | |
 | R2639 | `34919206483` | `0ddc4f26` | same two jobs, same two causes — read individually, not assumed | — | |
 | R2641 | `34922821640` | `96b2dedd` | the same run the R2639 row names, re-read at this push rather than inherited: Z zenohd interop (the oracle-pin red) · C1ac quic link e2e (R2638's `EXPIRY_MAX_SLEEP` fix is in and unverified) | — | |
+| R2641 | `34922821640` | `96b2dedd` | the follow-up push that carries this ledger repair, refused by the same run a third time because the queue has not started a job since 05:35Z — the run for the graded tip (`34967102042`) is itself queued | — | |
 | R2639 | `34922821640` | `96b2dedd` | same two jobs, same two causes — read individually, not assumed | — | |
 
 ⚠ The three rows above are ONE push. The gate now grades the newest FINISHED
