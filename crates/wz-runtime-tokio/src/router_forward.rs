@@ -451,9 +451,29 @@ fn tier_of(whatami: WhatAmI) -> FaceTier {
 /// hash for a given (keyexpr, zid) pair — all routers therefore agree on the one
 /// master, which is what makes exactly one router bridge the two meshes
 /// (cross-mesh loop-freedom rests on this agreement, not on the hop budget,
-/// which [`compute_self_publish_forward`] RESETS at each origination). The
-/// byte-feed order matches zenoh's so a wz router elects the same master as a
-/// zenohd router sharing the mesh (cross-impl federation).
+/// which [`compute_self_publish_forward`] RESETS at each origination). That
+/// agreement is proven BETWEEN WZ ROUTERS by this module's unit tests.
+///
+/// ⚠ R2641 — this doc used to add "so a wz router elects the same master as a
+/// zenohd router sharing the mesh (cross-impl federation)". That claim is
+/// withdrawn, for two measured reasons rather than one:
+///
+/// * **The pin has no election at all.** `elect_router` occurs ZERO times in the
+///   pinned upstream — what was removed there is the whole mechanism, not the
+///   per-face accessor an earlier residual named. So there is no zenohd at this
+///   pin for a master to be agreed WITH.
+/// * **It was never witnessed against any version.** No lane exercises it;
+///   `wz-integration-tests/tests/wz_router_hat_mesh.rs` says so three times in
+///   its own words ("master-election is a NO-OP here — unit-proven separately,
+///   not exercised by this lane"). The byte-feed order does mirror zenoh 1.5.0,
+///   which is the shape this port came from, but mirroring an algorithm is not
+///   evidence that two implementations agree on a wire.
+///
+/// ⛔ Do NOT restore the claim by re-dating it to 1.5.0: an unwitnessed
+/// interoperability claim is unwitnessed whichever version it names. Restoring
+/// it means marking it `wz-proves:` and letting Layer A4 demand the witness —
+/// which is the shape open-debt item 751 records, along with the question this
+/// round does NOT answer: whether wz keeps a mechanism the reference dropped.
 fn elect_router<'a>(
     self_zid: &Zid,
     keyexpr: &str,
@@ -1361,8 +1381,8 @@ impl RouterForwarder {
     /// # The two knobs of this residual that get NO code here, and why
     ///
     /// * `gossip_target` — upstream's role matcher for who receives a flood.
-    ///   INERT on this forwarder: its fan-out gates on TIER
-    ///   ([`fan_out_tier`](Self::fan_out_tier)), which already separates Router,
+    ///   INERT on this forwarder: its fan-out gates on TIER (`fan_out_tier`),
+    ///   which already separates Router,
     ///   Peer and Client faces, and the matcher could not separate the two nets
     ///   anyway since `default_gossip_target(Router) ==
     ///   default_gossip_target(Peer)`. A field here would look like parity and
