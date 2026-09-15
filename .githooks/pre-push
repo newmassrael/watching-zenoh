@@ -695,6 +695,7 @@ round_fed_gates=(
     "armed_skip_guard.py --check"
     "decline_arming_gate.py --check"
     "gate_provenance_lint.py"
+    "runtime_mutable_surface_gate.py --check"
     "gate_test_pin_lint.py"
     "lane_reach_gate.py --check"
     "python_floor_lint.py"

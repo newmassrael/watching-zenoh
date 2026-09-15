@@ -55,11 +55,148 @@ use wz_codecs::whatami::WhatAmI;
 use wz_routing_graph::{link_weights_from_config, DuplicateLinkWeight, TransportWeight};
 use wz_session_core::session_init_params::SessionInitParams;
 
+/// How a runtime config change reaches the code that uses the value.
+///
+/// This is a real distinction and not a style note — it is the reason one of
+/// the slices below deliberately has no sink. Recording it as DATA rather than
+/// as prose is what lets a gate check it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MutationDiscipline {
+    /// The consumer holds state COMPILED from the value — an interceptor chain,
+    /// a `zid -> weight` map — so a change must be pushed into it through a
+    /// sink. Storing the new value is not applying it, and the gap between the
+    /// two is exactly what `reconfigure_*` closes.
+    Push,
+    /// The consumer re-reads the value on every use, so STORING it IS applying
+    /// it and there is no inert mirror to keep in step. Upstream forces this
+    /// shape where it takes the config lock inside a handler.
+    Pull,
+}
+
+/// One upstream config key that this node can change at RUNTIME, and the typed
+/// slice of [`WzConfig`] it lands in.
+///
+/// ## Why this table exists
+///
+/// wz carries TWO config surfaces and, until this table, nothing stated the
+/// relationship between them: the keys honoured when a config document is READ
+/// at startup (`zenoh_config::HONOURED_CONFIG_KEYS`) and the keys that can be
+/// mutated while the node runs. They are not nested in either direction —
+/// `interceptors` is mutable at runtime while all seven of its keys sit in
+/// `UNHONOURED_UPSTREAM_CONFIG_KEYS`, so a stock zenoh document naming
+/// `access_control/enabled` starts wz with the ACL off even though an admin PUT
+/// could turn it on afterwards.
+///
+/// ⚠ The count of these slices was being kept as an ENGLISH ORDINAL in each
+/// field's own doc — "the SECOND runtime-mutable typed slice", "the THIRD" —
+/// and in an atom reason that still says there are two. A number spelled in
+/// prose at four sites is a number nobody derives: it went stale the moment the
+/// third slice landed, and the only thing that would have caught it was a
+/// reader who happened to compare. This table is the single declaration, and
+/// `scripts/lib/runtime_mutable_surface_gate.py` derives the slice set from the
+/// `set_*` / `reconfigure_*` methods and refuses a table that does not match it.
+///
+/// ⛔ Do not add a row for a key wz merely READS at startup. The subject here is
+/// mutation after `WzConfig` is built; a build-time `with_*` builder consumes
+/// `self` and is not a runtime mutation, which is why the four `with_*`-only
+/// fields (`max_links`, `qos`, `qos_link`, `connect_retry`) are absent.
+#[derive(Debug, Clone, Copy)]
+pub struct RuntimeMutableKey {
+    /// The upstream config key, spelled as `zenoh_config`'s key lists spell it.
+    pub key: &'static str,
+    /// The private [`WzConfig`] field this key lands in.
+    pub slice: &'static str,
+    /// Push or pull — see [`MutationDiscipline`].
+    pub discipline: MutationDiscipline,
+    /// The cargo feature gating the FIELD, carried as data rather than as a
+    /// `#[cfg]` on the row. A conditional member would strand the table's own
+    /// scaffolding on the builds that elide it, and a table that shrinks by
+    /// build cannot state the surface; the gate checks this against the real
+    /// `#[cfg]` instead.
+    pub feature: &'static str,
+}
+
+/// Every config key this node can change at runtime — see [`RuntimeMutableKey`].
+///
+/// MEASURED, not asserted: each key is spelled as it appears in
+/// `zenoh_config`'s own key lists, and each slice is a private field carrying a
+/// `set_*` or `reconfigure_*` method.
+pub const RUNTIME_MUTABLE_CONFIG_KEYS: &[RuntimeMutableKey] = &[
+    // The ACL / downsampling / low-pass chain, all three compiled into one
+    // interceptor stack, so every key here is PUSH through `InterceptorSink`.
+    RuntimeMutableKey {
+        key: "access_control/default_permission",
+        slice: "interceptors",
+        discipline: MutationDiscipline::Push,
+        feature: "routing-peer",
+    },
+    RuntimeMutableKey {
+        key: "access_control/enabled",
+        slice: "interceptors",
+        discipline: MutationDiscipline::Push,
+        feature: "routing-peer",
+    },
+    RuntimeMutableKey {
+        key: "access_control/policies",
+        slice: "interceptors",
+        discipline: MutationDiscipline::Push,
+        feature: "routing-peer",
+    },
+    RuntimeMutableKey {
+        key: "access_control/rules",
+        slice: "interceptors",
+        discipline: MutationDiscipline::Push,
+        feature: "routing-peer",
+    },
+    RuntimeMutableKey {
+        key: "access_control/subjects",
+        slice: "interceptors",
+        discipline: MutationDiscipline::Push,
+        feature: "routing-peer",
+    },
+    RuntimeMutableKey {
+        key: "downsampling",
+        slice: "interceptors",
+        discipline: MutationDiscipline::Push,
+        feature: "routing-peer",
+    },
+    RuntimeMutableKey {
+        key: "low_pass_filter",
+        slice: "interceptors",
+        discipline: MutationDiscipline::Push,
+        feature: "routing-peer",
+    },
+    // PULL: both admin gates take the value off the live config per request, so
+    // storing it is applying it and there is no sink to install.
+    RuntimeMutableKey {
+        key: "adminspace/permissions/read",
+        slice: "admin_permissions",
+        discipline: MutationDiscipline::Pull,
+        feature: "adminspace-core",
+    },
+    RuntimeMutableKey {
+        key: "adminspace/permissions/write",
+        slice: "admin_permissions",
+        discipline: MutationDiscipline::Pull,
+        feature: "adminspace-core",
+    },
+    // PUSH: the forwarder holds a `zid -> weight` map built from these rows.
+    RuntimeMutableKey {
+        key: "routing/router/linkstate/transport_weights",
+        slice: "router_link_weights",
+        discipline: MutationDiscipline::Push,
+        feature: "routing-router-hat",
+    },
+];
+
 /// The typed wz runtime config SSOT — see the module doc. The read-at-open
 /// fields are `pub` (introspection-readable); the live `interceptors`
 /// field is private so every mutation routes through
 /// [`Self::reconfigure_interceptors`] (the re-apply seam), never a bare
 /// field write that would silently desync the config from the forwarder.
+///
+/// The private slices that can change while the node runs are declared once in
+/// [`RUNTIME_MUTABLE_CONFIG_KEYS`]; do not count them in prose.
 #[derive(Debug, Clone)]
 #[non_exhaustive]
 pub struct WzConfig {
@@ -78,8 +215,10 @@ pub struct WzConfig {
     #[cfg(feature = "routing-peer")]
     interceptors: InterceptorConfig,
     /// The LIVE adminspace permissions (zenoh `adminspace.permissions`, the
-    /// `PermissionsConf` read/write pair). The SECOND runtime-mutable typed slice
-    /// after [`Self::interceptors`], and it is here for the same reason: zenoh
+    /// `PermissionsConf` read/write pair). A runtime-mutable typed slice, declared
+    /// in [`RUNTIME_MUTABLE_CONFIG_KEYS`] — R2642 removed the ORDINAL this doc
+    /// used to carry ("the SECOND"), because an ordinal spelled at each field is
+    /// a count nobody derives and it was already stale. It is here because zenoh
     /// re-reads `conf.adminspace.permissions()` from the LIVE config on EVERY admin
     /// request — the GET gate at `net/runtime/adminspace.rs:456-457` and the
     /// config-WRITE gate at `:394-396` both take the config lock inside the handler,
@@ -94,9 +233,9 @@ pub struct WzConfig {
     #[cfg(feature = "adminspace-core")]
     admin_permissions: wz_session_core::adminspace::AdminSpacePermissions,
     /// R2634 (`router-hat-router`) — the LIVE configured router link weights,
-    /// zenoh's `routing.router.linkstate.transport_weights`. The THIRD
-    /// runtime-mutable typed slice after [`Self::interceptors`] and
-    /// [`Self::admin_permissions`], and it is here for upstream's own reason:
+    /// zenoh's `routing.router.linkstate.transport_weights`. A runtime-mutable
+    /// typed slice, declared in [`RUNTIME_MUTABLE_CONFIG_KEYS`] — R2642 removed
+    /// the ORDINAL here too. It is here for upstream's own reason:
     /// the router hat RE-READS this key off the live config
     /// (`zenoh/src/net/routing/hat/router/mod.rs` @ `fn update_from_config`),
     /// which is the only thing that makes the key reloadable without a restart.

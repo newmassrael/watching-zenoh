@@ -1846,6 +1846,16 @@ layer_c0_test_discipline() {
     # baselined gate that gains its citation reds asking for the baseline to
     # shrink, and a stale baseline entry reds — each revert returns OK.
     python3 scripts/lib/gate_provenance_lint.py >/dev/null || return 1
+    # R2642 (no register item) — the RUNTIME-MUTABLE config surface. wz carries
+    # two config surfaces, honoured-at-startup and mutable-at-runtime, and the
+    # second had no declaration: its size lived as an English ordinal inside
+    # each field's doc ("the SECOND runtime-mutable typed slice", "the THIRD")
+    # and in an atom reason that still said there were two after the third
+    # landed. The gate DERIVES the slice set from the `set_*`/`reconfigure_*`
+    # methods, pins it as a SET, and checks each row's declared feature against
+    # the field's real `#[cfg]`. Its selftest drives both damage directions.
+    python3 scripts/lib/runtime_mutable_surface_gate.py --selftest >/dev/null || return 1
+    python3 scripts/lib/runtime_mutable_surface_gate.py --check || return 1
     # R2338 (no register item) — the ROOT-RELATIVE EXCLUSION lint. Hosted run
     # 33839814655 failed with `upstream-reads: FAIL -- ... yielded 0 Rust
     # file(s), under the floor of 200` about a checkout that was COMPLETE:
