@@ -50,7 +50,11 @@ moved the test set a guard counts, and only the guards that push reaches:
     `tests/T.rs` itself to have changed, everything else needs a changed file
     under `src/`;
   * and when the guard applies a substring filter, that filter must occur in a
-    changed file of that package.
+    changed file of that package, or in the MODULE PATH such a file gives its
+    tests. R2631 added the second half: a libtest filter matches
+    `auth_dispatch::tests::a_test`, a path the file `src/auth_dispatch.rs`
+    never spells, and text-only matching let `C1y auth_dispatch` go unreached
+    while that push moved its count.
 
 MEASURED on R2166's own commit: 3 guards selected out of the 17 that name
 `wz-ap-demo`, and out of 291 in the file. The whole C1ay lane is 175s; the two
@@ -281,6 +285,33 @@ def package_manifest_names(crates_root=None):
     return names
 
 
+def module_path_prefix(rel):
+    """The libtest path prefix every test in crate-relative `rel` carries, or "".
+
+    R2631. A libtest filter is matched against a test's MODULE PATH
+    (`auth_dispatch::tests::a_test`), and that path comes from the FILE'S PATH,
+    not from anything the file says: `src/auth_dispatch.rs` never spells
+    `auth_dispatch`. `select` used to search only file TEXT, so a guard whose
+    filter is the module path of the very file a push changed was invisible
+    unless that text happened to name itself -- R2631 measured `C1y
+    auth_dispatch` (declared 6, printed 7) passing this gate unreached.
+
+    The trailing `::` is the boundary, and it is what makes this safe to add: the
+    prefix of `src/extauth_pubkey_store.rs` is `extauth_pubkey_store::`, which a
+    filter `extauth_pubkey::` does not occur in (R2627's substring lesson).
+    `lib.rs` / `main.rs` are the crate root and contribute nothing; `a/mod.rs` is
+    module `a`.
+    """
+    if not (rel.startswith("src/") and rel.endswith(".rs")):
+        return ""
+    parts = rel[len("src/"):-len(".rs")].split("/")
+    if parts[-1] == "mod":
+        parts = parts[:-1]
+    if parts in ([], ["lib"], ["main"]):
+        return ""
+    return "::".join(parts) + "::"
+
+
 def select(guards, changed_files, changed_lines, manifest_names, read_text):
     """`(selected, skipped)` — which guards this push must RUN, and why not.
 
@@ -324,6 +355,9 @@ def select(guards, changed_files, changed_lines, manifest_names, read_text):
         if g.filters:
             haystack = "\n".join(read_text(d, r) for r in reachable)
             haystack += "\n" + "\n".join(changed_lines.get(d, []))
+            # R2631 — and the module path each reachable file GIVES its tests,
+            # which no file text contains. See `module_path_prefix`.
+            haystack += "\n" + "\n".join(module_path_prefix(r) for r in reachable)
             if not any(f in haystack for f in g.filters):
                 continue
         selected.append(g)
@@ -635,6 +669,58 @@ def selftest():
         "CONTROL: a LITERAL env prefix stays runnable",
         5 in [g.want for g in sel_env],
         "skipping every `env` prefix would excuse the reproducible ones too",
+    )
+
+    # R2631: the filter is the MODULE PATH of the changed file, and the file's
+    # TEXT never spells it. Text-only matching left `C1y auth_dispatch` unreached
+    # while the push moved its count 6 -> 7. The two controls are what keep the
+    # repair from being "select on any change": a different module with the SAME
+    # text is not reached, and a longer module name does not satisfy a `name::`
+    # filter across the boundary.
+    mp_guards = parse_guards(
+        '    _runci_guarded_test "C1AY auth 6" 6 \\\n'
+        "        cargo test -p demo-crate --features x --lib auth_dispatch --quiet || return 1\n"
+        '    _runci_guarded_test "C1AY pubkey 12" 12 \\\n'
+        "        cargo test -p demo-crate --features x --lib extauth_pubkey:: --quiet || return 1\n"
+    )
+    body = "mod tests {\n    #[test]\n    fn t() {}\n}\n"
+
+    def mp_reader(_d, _rel):
+        return body
+
+    def wants(changed):
+        s, _ = select(mp_guards, [f"crates/demo/{changed}"], {"demo": ["    #[test]"]},
+                      MANIFESTS, mp_reader)
+        return sorted(g.want for g in s)
+
+    arm(
+        "R2631: a filter naming the changed file's MODULE PATH reaches the guard",
+        wants("src/auth_dispatch.rs") == [6],
+        "the file text never spells its own module name, so text-only matching misses it",
+    )
+    arm(
+        "CONTROL: the same text in a DIFFERENT module reaches nothing",
+        wants("src/other_module.rs") == [],
+        "reaching every guard on any change would be the 175s lane, not a repair",
+    )
+    arm(
+        "R2631: a `name::` filter reaches the module it names",
+        wants("src/extauth_pubkey.rs") == [12],
+        "the anchored spelling must still select its own module",
+    )
+    arm(
+        "CONTROL: `extauth_pubkey::` is NOT reached by `extauth_pubkey_store`",
+        wants("src/extauth_pubkey_store.rs") == [],
+        "without the `::` boundary a longer module name would satisfy the filter",
+    )
+    arm(
+        "module_path_prefix: crate roots contribute nothing, mod.rs names its dir",
+        module_path_prefix("src/lib.rs") == ""
+        and module_path_prefix("src/main.rs") == ""
+        and module_path_prefix("src/interceptor/mod.rs") == "interceptor::"
+        and module_path_prefix("src/interceptor/access_control.rs") == "interceptor::access_control::"
+        and module_path_prefix("tests/x.rs") == "",
+        "a wrong root would make every src change reach every unfiltered-looking guard",
     )
 
     # A package the push did not touch must not be selected. An implementation

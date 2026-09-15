@@ -7797,7 +7797,13 @@ layer_c1y_cargo_test_routing_peer() {
     # Each number is what the command PRINTED, not what the diff suggests.
     _runci_guarded_test "C1y extauth" 17 \
         cargo test -p wz-session-core --features access-extauth-usrpwd --lib extauth --quiet || return 1
-    _runci_guarded_test "C1y auth_dispatch" 6 \
+    # R2631 — 6 -> 7: `an_identity_is_an_acl_username_only_when_it_is_utf8`, the
+    # witness for `AuthIdentity::acl_username`, the one bytes-to-name step the
+    # ACL's new username axis reads through. READ off the command, which printed 7.
+    # ⚠ The pre-push count-guard gate did NOT select this guard on the push that
+    # moved it: the filter `auth_dispatch` is the MODULE PATH of the changed file,
+    # which that file's text never spells. The gate now derives that path too.
+    _runci_guarded_test "C1y auth_dispatch" 7 \
         cargo test -p wz-session-core --features access-extauth-usrpwd --lib auth_dispatch --quiet || return 1
     _runci_guarded_test "C1y usrpwd e2e" 5 \
         cargo test -p wz-runtime-tokio --features access-extauth-usrpwd \
