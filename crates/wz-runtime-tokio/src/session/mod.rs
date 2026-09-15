@@ -3883,6 +3883,11 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
         let plugins = crate::compiled_plugins(&version);
         #[cfg(not(feature = "adminspace-plugins-handlers"))]
         let plugins: Vec<wz_session_core::adminspace::AdminPlugin> = Vec::new();
+        // ⚠ GATED, not underscore-prefixed: this handle exists only for the build
+        // that reports stats, and spelling that with a `#[cfg]` says so, where
+        // `_stats_actions` would merely silence the compiler on every other build.
+        // R2637 paid for this distinction once already.
+        #[cfg(feature = "transport-stats")]
         let stats_actions = self.actions().clone();
         self.declare_adminspace_with_live_inputs(version, locators, move || {
             wz_session_core::adminspace::AdminLiveInputs {
