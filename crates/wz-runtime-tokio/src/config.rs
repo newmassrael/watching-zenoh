@@ -1024,6 +1024,82 @@ impl WzConfig {
         any(feature = "adminspace-core", feature = "routing-router-hat")
     ))]
     pub fn set_by_key(&mut self, key: &str, value: &str) -> Result<(), ConfigKeyWriteError> {
+        let ingest = Self::ingest_for_key(key, value)?;
+        // ⛔ A PUSH-discipline key cannot be written through this path. Two
+        // independent reasons, both measured:
+        //
+        //  * the consumer holds state COMPILED from the value, and this path only
+        //    STORES — so the write would look applied while the forwarder kept its
+        //    old map. `apply_zenoh_config`'s own doc says it stores and does not
+        //    push; this function is the running-node caller that doc warns about.
+        //  * `reconfigure_*` builds the map BEFORE it commits the rows
+        //    (`link_weights_from_config(&rows)?` and only then the assignment), so
+        //    a refused document never becomes live. Storing here skips that, and a
+        //    row set `reconfigure_*` would REJECT — two rows naming one
+        //    destination — could be installed.
+        //
+        // ⚠ ORDERED AFTER THE IGNORED CHECK, and a test said so: `downsampling` is
+        // a push-discipline row that wz does NOT honour, and refusing it for
+        // wanting a sink would claim wz acts on a key it ignores entirely. Only a
+        // key wz actually reads can meaningfully need one.
+        //
+        // The startup path is unaffected and deliberately so: there `install_*` is
+        // the gate, validating before the value first reaches a consumer.
+        if let Some(row) = RUNTIME_MUTABLE_CONFIG_KEYS
+            .iter()
+            .find(|row| row.key == key)
+        {
+            if row.discipline == MutationDiscipline::Push {
+                return Err(ConfigKeyWriteError::NeedsSink {
+                    key: String::from(key),
+                });
+            }
+        }
+        if self.apply_zenoh_config(&ingest).is_empty() {
+            return Err(ConfigKeyWriteError::NotRuntimeMutable {
+                key: String::from(key),
+            });
+        }
+        Ok(())
+    }
+
+    /// R2648 — the PARSE-AND-ACCEPT front end that every runtime write shares,
+    /// whatever its key's [`MutationDiscipline`] turns out to be.
+    ///
+    /// # Why this is a function and not the head of [`Self::set_by_key`]
+    ///
+    /// A PUSH-discipline key cannot be written through `set_by_key` (it refuses
+    /// with [`ConfigKeyWriteError::NeedsSink`], for the two reasons stated
+    /// there), so its host has to reach the same parsed value by some other
+    /// route in order to hand it to the drain that owns the sink. The only
+    /// other route is to repeat this: split the segments, splice the value into
+    /// a one-key document, read it back, and ask whether wz honours the key.
+    /// A SECOND copy of that is a second answer to "does wz honour this key?"
+    /// and to "is this value acceptable?", and the two would drift — this tree
+    /// has paid for that class often enough to name it. One front end, and the
+    /// discipline decides only what happens to the result.
+    ///
+    /// Takes no `&self`: nothing here reads the live config. What comes back is
+    /// the reader's verdict on a document carrying exactly this one key, which
+    /// is a question about the KEY and the VALUE and not about this node.
+    ///
+    /// The `ignored` check is the last thing it does, and it stays last for the
+    /// reason `set_by_key` records: the reader ACCEPTS a key wz knows and does
+    /// not honour, so a write naming one must be told that specifically rather
+    /// than be answered as if wz had never heard of it.
+    ///
+    /// Carries the gate of the callers it was lifted out of, spelled literally
+    /// rather than inherited: `ConfigKeyWriteError` and the `zenoh_config`
+    /// module it returns are themselves behind it, so an ungated copy does not
+    /// fail to LINK on a narrower build — it fails to NAME its own types.
+    #[cfg(all(
+        feature = "zenoh-config",
+        any(feature = "adminspace-core", feature = "routing-router-hat")
+    ))]
+    pub fn ingest_for_key(
+        key: &str,
+        value: &str,
+    ) -> Result<crate::zenoh_config::ZenohConfigIngest, ConfigKeyWriteError> {
         let segments = Self::key_segments(key)?;
 
         let parsed = wz_session_core::json5::parse(value).map_err(|_| {
@@ -1061,42 +1137,7 @@ impl WzConfig {
                 key: String::from(key),
             });
         }
-        // ⛔ A PUSH-discipline key cannot be written through this path. Two
-        // independent reasons, both measured:
-        //
-        //  * the consumer holds state COMPILED from the value, and this path only
-        //    STORES — so the write would look applied while the forwarder kept its
-        //    old map. `apply_zenoh_config`'s own doc says it stores and does not
-        //    push; this function is the running-node caller that doc warns about.
-        //  * `reconfigure_*` builds the map BEFORE it commits the rows
-        //    (`link_weights_from_config(&rows)?` and only then the assignment), so
-        //    a refused document never becomes live. Storing here skips that, and a
-        //    row set `reconfigure_*` would REJECT — two rows naming one
-        //    destination — could be installed.
-        //
-        // ⚠ ORDERED AFTER THE IGNORED CHECK, and a test said so: `downsampling` is
-        // a push-discipline row that wz does NOT honour, and refusing it for
-        // wanting a sink would claim wz acts on a key it ignores entirely. Only a
-        // key wz actually reads can meaningfully need one.
-        //
-        // The startup path is unaffected and deliberately so: there `install_*` is
-        // the gate, validating before the value first reaches a consumer.
-        if let Some(row) = RUNTIME_MUTABLE_CONFIG_KEYS
-            .iter()
-            .find(|row| row.key == key)
-        {
-            if row.discipline == MutationDiscipline::Push {
-                return Err(ConfigKeyWriteError::NeedsSink {
-                    key: String::from(key),
-                });
-            }
-        }
-        if self.apply_zenoh_config(&ingest).is_empty() {
-            return Err(ConfigKeyWriteError::NotRuntimeMutable {
-                key: String::from(key),
-            });
-        }
-        Ok(())
+        Ok(ingest)
     }
 
     /// The key-segment check both halves of the write gate apply, returning the
