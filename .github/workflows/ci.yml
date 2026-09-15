@@ -1953,7 +1953,13 @@ jobs:
           # re-saves only on a miss, so widening `path` under the OLD key would
           # restore binary-only entries forever and red the assert below on every
           # run. Widening a cached path and moving its key are one edit.
-          key: zenohd-1.10.1-src-ubuntu-22.04-${{ hashFiles('scripts/build-zenohd.sh') }}
+          # R2647 — the key is bound to the ENSURE script too. Two reasons, and
+          # the second is why this is not a one-off bump: it abandons the
+          # entries measured poisoned (they answered `1211779c` under a key
+          # naming 1.10.1), and it keeps the key moving with the logic that
+          # decides whether a restore is acceptable, so a future change to that
+          # decision cannot be masked by a cache written under the old one.
+          key: zenohd-1.10.1-src-ubuntu-22.04-${{ hashFiles('scripts/build-zenohd.sh', 'scripts/lib/ensure_zenohd_at_pin.py') }}
 
       - name: Build zenohd 1.10.1 + the storage-manager plugin (cache miss only)
         if: steps.zenohd-cache.outputs.cache-hit != 'true'
@@ -1973,9 +1979,17 @@ jobs:
         # Trusting the cache is how a "restored" build quietly becomes a missing one. Layer
         # Z's guards would SKIP green on either absence, and Layer A4 would keep counting
         # its proofs as executed, so check before the lanes run rather than after.
+        #
+        # R2647 — the zenohd line asks what the binary IS, not merely that a file
+        # is there, and rebuilds when the answer is not the pin. "Trusting the
+        # cache" above named the MISSING case; the restored-but-WRONG case had no
+        # reader at all, and two runs shipped an oracle answering `1211779c` under
+        # a key naming 1.10.1. The checks below stay presence-only on purpose:
+        # they are artifacts the pin gate does not judge, and a rebuild triggered
+        # by the line above reinstalls them, so they still read what it produced.
         run: |
-          test -x target/zenohd/zenohd \
-            || { echo "::error::zenohd missing after build/restore"; exit 1; }
+          python3 scripts/lib/ensure_zenohd_at_pin.py target/zenohd \
+            || { echo "::error::zenohd is not at the pin and could not be rebuilt"; exit 1; }
           test -f target/zenohd/libzenoh_plugin_storage_manager.so \
             || { echo "::error::storage-manager plugin missing — the storage-replication proof would SKIP green"; exit 1; }
           # R311y442 — the advanced-pubsub oracles. They are the ONLY foreign
@@ -2390,7 +2404,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: target/zenohd-unixpipe
-          key: zenohd-unixpipe-1.10.1-ubuntu-22.04-${{ hashFiles('scripts/build-zenohd.sh') }}
+          key: zenohd-unixpipe-1.10.1-ubuntu-22.04-${{ hashFiles('scripts/build-zenohd.sh', 'scripts/lib/ensure_zenohd_at_pin.py') }}
 
       - name: Build the unixpipe-enabled zenohd (cache miss only)
         if: steps.zenohd-unixpipe-cache.outputs.cache-hit != 'true'
@@ -2403,13 +2417,18 @@ jobs:
           ZENOHD_ALLOW_CLONE: "1"
         run: bash scripts/build-zenohd.sh
 
-      - name: Assert the unixpipe zenohd is present
-        # A restored-but-missing cache would make Layer Z's unixpipe legs FAIL under
-        # WZ_Z_REQUIRE (correct — the proof must run), but assert here for a clearer
-        # error than a mid-lane cargo-test failure.
+      - name: Ensure the unixpipe zenohd ANSWERS at the pin (R2647)
+        # R2647 — was `test -x`, which asked whether a file exists. A cache
+        # restores what a KEY promised; only the binary knows what it IS, and
+        # runs 34977306103 / 34996365804 restored one answering `1211779c`
+        # under a key naming 1.10.1, hiding 77 of Layer Z's 78 legs for as long
+        # as the key held. The build above runs on a cache MISS, so its own
+        # version assert cannot fire on a hit — this step is the reading that
+        # was missing, and it rebuilds rather than only reporting, because a
+        # poisoned cache entry is not a code defect the lane should fail on.
         run: |
-          test -x target/zenohd-unixpipe/zenohd \
-            || { echo "::error::unixpipe zenohd missing after build/restore — the wz<->zenohd unixpipe interop would FAIL under WZ_Z_REQUIRE"; exit 1; }
+          python3 scripts/lib/ensure_zenohd_at_pin.py target/zenohd-unixpipe \
+            || { echo "::error::the unixpipe zenohd is not at the pin and could not be rebuilt"; exit 1; }
 
       - name: Enable AF_VSOCK loopback (R311y422)
         # MEASURED, not assumed. R311y421 shipped this as a probe because whether the
@@ -2448,7 +2467,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: target/zenohd-vsock
-          key: zenohd-vsock-1.10.1-ubuntu-22.04-${{ hashFiles('scripts/build-zenohd.sh') }}
+          key: zenohd-vsock-1.10.1-ubuntu-22.04-${{ hashFiles('scripts/build-zenohd.sh', 'scripts/lib/ensure_zenohd_at_pin.py') }}
 
       - name: Build the vsock-enabled zenohd (cache miss only)
         if: steps.zenohd-vsock-cache.outputs.cache-hit != 'true'
@@ -2457,10 +2476,14 @@ jobs:
           ZENOHD_ALLOW_CLONE: "1"
         run: bash scripts/build-zenohd.sh
 
-      - name: Assert the vsock zenohd is present
+      - name: Ensure the vsock zenohd ANSWERS at the pin (R2647)
+        # R2647 — the unixpipe step's twin, and stale for the same reason: this
+        # variant's cache entry also answered `1211779c` under a key naming
+        # 1.10.1. Both are edited together because one presence check left
+        # behind is the whole defect again, on whichever oracle was missed.
         run: |
-          test -x target/zenohd-vsock/zenohd \
-            || { echo "::error::vsock zenohd missing after build/restore — the wz vsock acceptor interop would FAIL under WZ_Z_REQUIRE"; exit 1; }
+          python3 scripts/lib/ensure_zenohd_at_pin.py target/zenohd-vsock \
+            || { echo "::error::the vsock zenohd is not at the pin and could not be rebuilt"; exit 1; }
 
       - name: Layer Z — zenohd (zenoh-full) interop
         # The ONLY proofs against the canonical Rust implementation. Until this
