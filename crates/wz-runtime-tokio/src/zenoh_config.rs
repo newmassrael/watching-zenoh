@@ -3229,7 +3229,7 @@ pub const DEEPENABLE_UPSTREAM_KEYS: &[&str] = &[
 /// honour this key" is precisely how the set half and the delete half of one
 /// gate start refusing different keys.
 ///
-/// ⚠ NOT the same predicate as [`wz_accepts`], which is deliberately WIDER: it
+/// ⚠ NOT the same predicate as `wz_accepts`, which is deliberately WIDER: it
 /// answers "would wz start on a document containing this", and says yes to keys
 /// wz parses and discards. This one answers "does writing this change
 /// anything".
