@@ -927,7 +927,14 @@ CITATION = re.compile(r"\b((?:[A-Za-z0-9_.-]+/)*[A-Za-z0-9_.-]+\.(?:rs|c|h))(?::
 # axis consumes it. A REACHED atom, so it leaves this count with the population;
 # UNREACHED and NO_SYMBOL hold. MEASURED with `reach_partition` over origin's
 # store and this one: exactly that atom left `reached`, none joined.
-PIN_REACHED = 31
+# R2641 — 31 -> 30: `router-hat-router` went PARTIAL -> COMPLETE. Its last
+# standing residual, the gossip trio plus AutoConnect, is built; the fourth item
+# was not missing code but a FALSE cross-impl claim in `elect_router`'s doc, and
+# that was withdrawn rather than witnessed. A REACHED atom (12 tests name its
+# symbols), so it leaves this count with the population; UNREACHED and NO_SYMBOL
+# hold. MEASURED with `reach_partition` over origin's store and this one:
+# exactly that atom left `reached`, none joined.
+PIN_REACHED = 30
 PIN_UNREACHED = 3
 PIN_NO_SYMBOL = 2
 # R2534 — 346 -> 347. The atom is `adminspace-metrics` and the citation is the
@@ -1406,13 +1413,27 @@ PIN_NO_SYMBOL = 2
 # `access-acl` correction names one rooted path to the ACL crate (+1, 8 -> 9).
 # Both halves read with `citation_audit` per atom over origin's store and this
 # one. 201 - 21 + 1 = 181. AMBIGUOUS holds at 42.
-PIN_WZ_CITATIONS = 181
+# R2641 — 181 -> 177, FALLING because `router-hat-router` retired. Its reason
+# took FOUR resolving wz citations with it and nothing was added back: the
+# round's own CORRECTION cites the interop lane and the mesh lane by rooted
+# path, but it rides on the reason that LEFT the population, so it adds
+# nothing here. Unlike R2627 and R2631 this retirement is therefore a plain
+# subtraction. MEASURED with `citation_audit` over origin's store and this one,
+# by re-inserting the atom's old reason into the live population: doing so
+# restores 177 -> 181 and 38 -> 42 exactly, so both drops are this atom's and
+# no other atom moved. 181 - 4 = 177.
+PIN_WZ_CITATIONS = 177
 # R2626 — 44 -> 42, and this one is worth a sentence because it HELD through
 # every earlier retirement in this run (R2612, R2622). `time-hlc`'s reason is the
 # first retiree carrying AMBIGUOUS citations of its own: its oldest clauses cite
 # upstream by bare `pubsub.rs:328` / `tables.rs:74` forms that resolve to more
 # than one tracked file. They leave with the atom. 44 - 2 = 42.
-PIN_AMBIGUOUS = 42
+# R2641 — 42 -> 38, and this is the SECOND retiree to carry AMBIGUOUS citations
+# out with it. `router-hat-router`'s reason names upstream by bare file forms
+# that end-match more than one tracked wz file, so they were never graded
+# against one subject; they leave with the atom. Attributed by the same
+# re-insertion measurement recorded at PIN_WZ_CITATIONS. 42 - 4 = 38.
+PIN_AMBIGUOUS = 38
 
 
 class Fatal(Exception):
