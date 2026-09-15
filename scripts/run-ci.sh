@@ -7807,8 +7807,19 @@ layer_c1y_cargo_test_routing_peer() {
     # (`5a8ad35b`, `e8af0d92`, and again on `0a0cf608` once R311y580's C1w fix
     # stopped masking it). DERIVED from `--list` under this exact feature set:
     # all 11 are `extauth_pubkey::tests::`, so the filter did not widen.
-    _runci_guarded_test "C1y extauth_pubkey" 11 \
-        cargo test -p wz-runtime-tokio --features access-extauth-pubkey --lib extauth_pubkey --quiet || return 1
+    # R2627 — IT DID WIDEN, and the fix is the filter rather than the number. The
+    # bare `extauth_pubkey` is a SUBSTRING, so the new `extauth_pubkey_store`
+    # module fell under it and the run printed 24; writing 24 here would have
+    # kept the sentence above false and put two modules behind one count, where a
+    # test added to one could hide a test lost from the other. Each guard now
+    # names its module PATH (`extauth_pubkey::` cannot match `extauth_pubkey_store::`),
+    # and both numbers were read off `--list` under this feature set: 12 method
+    # tests (the 11 above plus the runtime-add handshake witness) and 12 store
+    # tests, which sum to the 24 the widened filter printed.
+    _runci_guarded_test "C1y extauth_pubkey" 12 \
+        cargo test -p wz-runtime-tokio --features access-extauth-pubkey --lib extauth_pubkey:: --quiet || return 1
+    _runci_guarded_test "C1y extauth_pubkey_store" 12 \
+        cargo test -p wz-runtime-tokio --features access-extauth-pubkey --lib extauth_pubkey_store:: --quiet || return 1
     _runci_guarded_test "C1y pubkey e2e" 1 \
         cargo test -p wz-runtime-tokio --features access-extauth-pubkey \
         --test pubkey_handshake_e2e --quiet || return 1
