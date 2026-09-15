@@ -59,10 +59,18 @@ use sce_forge_runtime::codec::SceCursor;
 use wz_session_core::auth_dispatch::{id, AuthError, AuthIdentity, AuthMethod, AuthSubExt};
 use wz_session_core::vle::{read_zbuf, write_zbuf};
 
+use crate::extauth_pubkey_store::PubKeyLookup;
+
 /// Generate a fresh RSA keypair of `bits` size from OS entropy — for ephemeral
-/// identities and tests. A persistent deploy instead loads its key from PEM (a
-/// config surface deferred until a deploy needs it); zenoh's `key_size` config
-/// drives the same `RsaPrivateKey::new`. The public half is `RsaPublicKey::from`.
+/// identities and tests. The public half is `RsaPublicKey::from`.
+///
+/// A persistent deploy loads its key from PEM instead, through
+/// [`keypair_from_config`](crate::extauth_pubkey_store::keypair_from_config).
+/// R2627 corrected this comment: it used to call that surface "deferred until a
+/// deploy needs it", which was the reason the atom's PEM residual stayed shut and
+/// was never a measurement of anything. (zenoh's `key_size` does not drive this
+/// function or any other: upstream declares that key and reads it nowhere, which
+/// R2336 measured — the earlier wording here claimed otherwise.)
 pub fn generate_keypair(bits: usize) -> Result<RsaPrivateKey, AuthError> {
     RsaPrivateKey::new(&mut OsRng, bits)
         .map_err(|_| AuthError::Rejected("pubkey: key generation failed"))
@@ -168,7 +176,13 @@ pub struct PubKeyMethod {
     /// `Some(empty)` (its `known_keys_file` loader is an unimplemented `@TODO` at
     /// pubkey.rs:122), which is exactly why a stock pubkey zenohd rejects all
     /// clients that dial it.
-    lookup: Option<Vec<RsaPublicKey>>,
+    ///
+    /// R2627 — this is a SHARED [`PubKeyLookup`], not an owned set. It used to be
+    /// `Option<Vec<RsaPublicKey>>` held by value, which gave every handshake a
+    /// private copy and made runtime `add_pubkey` / `del_pubkey` inexpressible:
+    /// mutating one handshake's copy said nothing about the next. The rules above
+    /// are unchanged and now live on the store, where they are read.
+    lookup: PubKeyLookup,
     /// Responder side: the per-handshake `u64` challenge, injected via
     /// [`AuthMethod::set_challenge_nonce`] (the accept seam's OS-entropy draw --
     /// the SAME shared nonce path usrpwd uses; only the RSA padding/blinding
@@ -212,16 +226,16 @@ impl PubKeyMethod {
         private_key: RsaPrivateKey,
         lookup: Option<Vec<RsaPublicKey>>,
     ) -> Self {
-        let public_key = RsaPublicKey::from(&private_key);
-        Self {
-            private_key,
-            public_key,
-            lookup,
-            challenge: 0,
-            peer_pubkey: None,
-            resp_pubkey: None,
-            decrypted_challenge: None,
-        }
+        Self::initiator_with_store(private_key, PubKeyLookup::from_option(lookup))
+    }
+
+    /// An INITIATOR-side method gating the responder's key against a SHARED
+    /// [`PubKeyLookup`]. Keys added to or removed from `lookup` after this call —
+    /// through any clone of it — govern this method's handshake, which is what
+    /// [`initiator_with_lookup`](Self::initiator_with_lookup)'s by-value set could
+    /// not express. The admission rule is the initiator's, unchanged.
+    pub fn initiator_with_store(private_key: RsaPrivateKey, lookup: PubKeyLookup) -> Self {
+        Self::with_store(private_key, lookup)
     }
 
     /// A RESPONDER-side method with `private_key` and an accepted-initiator-key
@@ -231,6 +245,21 @@ impl PubKeyMethod {
     /// [`AuthMethod::set_challenge_nonce`] (the accept seam draws a fresh one from
     /// OS entropy) — a fixed / reused challenge is a replay hole.
     pub fn responder(private_key: RsaPrivateKey, lookup: Option<Vec<RsaPublicKey>>) -> Self {
+        Self::responder_with_store(private_key, PubKeyLookup::from_option(lookup))
+    }
+
+    /// A RESPONDER-side method gating initiators against a SHARED
+    /// [`PubKeyLookup`] — the wz analogue of zenoh handing each handshake a
+    /// reference to its one `RwLock<AuthPubKey>`. A key added through any clone of
+    /// `lookup` is admitted by the NEXT handshake built on it, with no dispatch
+    /// re-installed. The admission rule is the responder's, unchanged.
+    pub fn responder_with_store(private_key: RsaPrivateKey, lookup: PubKeyLookup) -> Self {
+        Self::with_store(private_key, lookup)
+    }
+
+    /// The single construction path. The side is not stored: it is decided by
+    /// which [`AuthMethod`] half runs, exactly as before this constructor existed.
+    fn with_store(private_key: RsaPrivateKey, lookup: PubKeyLookup) -> Self {
         let public_key = RsaPublicKey::from(&private_key);
         Self {
             private_key,
@@ -243,15 +272,21 @@ impl PubKeyMethod {
         }
     }
 
+    /// The shared accepted-key store this method reads — the wz analogue of the
+    /// handle zenoh's manager exposes (`get_pubkey()`) so a caller can
+    /// `add_pubkey` / `del_pubkey` on a live authenticator. Mutating it affects
+    /// every method sharing the store, including this one's handshake if it has
+    /// not reached its key check yet.
+    pub fn lookup(&self) -> &PubKeyLookup {
+        &self.lookup
+    }
+
     /// Whether this RESPONDER admits the initiator key `peer`. Mirrors zenoh
     /// `recv_init_syn`'s `if let Some(lookup) { contains }` (pubkey.rs:566-570):
     /// `None` accepts any key; `Some(set)` requires membership, so an empty `Some`
-    /// rejects all.
+    /// rejects all. The rule is read on [`PubKeyLookup::admits_initiator`].
     fn admits_initiator(&self, peer: &RsaPublicKey) -> bool {
-        match &self.lookup {
-            None => true,
-            Some(set) => set.iter().any(|k| k == peer),
-        }
+        self.lookup.admits_initiator(peer)
     }
 
     /// Whether this INITIATOR admits the responder key `peer`. Mirrors zenoh
@@ -265,10 +300,7 @@ impl PubKeyMethod {
     /// can dial into an authenticated session while admitting nobody who dials it.
     /// Collapsing the two rules onto one would silently break that direction.
     fn admits_responder(&self, peer: &RsaPublicKey) -> bool {
-        match &self.lookup {
-            None => true,
-            Some(set) => set.is_empty() || set.iter().any(|k| k == peer),
-        }
+        self.lookup.admits_responder(peer)
     }
 }
 

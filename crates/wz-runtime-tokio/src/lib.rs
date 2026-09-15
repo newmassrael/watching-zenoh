@@ -723,6 +723,17 @@ pub mod session;
 #[cfg(feature = "access-extauth-pubkey")]
 pub mod extauth_pubkey;
 
+/// R2627 — the SHARED pubkey accepted-key store (`PubKeyLookup`) and the RSA
+/// identity loader (`keypair_from_config`), the wz analogues of zenoh's
+/// `RwLock<AuthPubKey>` and `AuthPubKey::from_config`. It carries runtime
+/// `add_pubkey` / `del_pubkey` / `disable` and the inline-PEM / PEM-file load,
+/// the two residuals that kept `access-extauth-pubkey` PARTIAL. Split from the
+/// wire method for the reason `extauth_usrpwd_store` is: a lock and a filesystem
+/// belong here, not in the code that encodes a handshake. Gated on
+/// `access-extauth-pubkey`.
+#[cfg(feature = "access-extauth-pubkey")]
+pub mod extauth_pubkey_store;
+
 /// R2567 — the SHARED usrpwd credential store (`UsrPwdStore`), the wz analogue
 /// of zenoh's `RwLock<AuthUsrPwd>`. It carries runtime `add_user` / `del_user`
 /// and the `user:password` dictionary-file load, both of which need `std` (a

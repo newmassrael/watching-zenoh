@@ -540,6 +540,15 @@ fn the_defaults_each_implementation_falls_back_to_are_pinned_against_a_real_zeno
         // carries `dictionary_file: null` beside `user` and `password`, so the
         // resolved tree answers null exactly as it does for the TLS paths above.
         "transport/auth/usrpwd/dictionary_file",
+        // R2627 — the four pubkey identity keys, classed the way the dictionary
+        // above is and on the same kind of evidence: the pinned upstream's
+        // `DEFAULT_CONFIG.json5` carries `public_key_pem`, `private_key_pem`,
+        // `public_key_file` and `private_key_file` all as `null`, so a silent
+        // file resolves each to null and the tree has no default to compare.
+        "transport/auth/pubkey/private_key_file",
+        "transport/auth/pubkey/private_key_pem",
+        "transport/auth/pubkey/public_key_file",
+        "transport/auth/pubkey/public_key_pem",
         "scouting/multicast/address",
         "scouting/multicast/interface",
         "scouting/multicast/ttl",
@@ -3260,6 +3269,29 @@ fn a_wz_node_configured_only_by_a_stock_zenoh_config_reaches_a_real_zenohd() {
     }},
     multicast: {{ qos: {{ enabled: true }} }},
     shared_memory: {{ enabled: false }},
+    // R2627 — the pubkey identity, NAMED rather than excepted, and the contrast
+    // with `usrpwd/dictionary_file` (excepted below) is the whole decision. That
+    // dictionary is RESPONDER state, so a node that only dials carries none. The
+    // pubkey identity is not: zenoh's pubkey is MUTUAL, the INITIATOR sends its
+    // own public key on InitSyn and decrypts the responder's challenge with its
+    // own private key, so a connecting client genuinely carries one. Excepting it
+    // on the dictionary's reason would make this leg's assertion pass while
+    // falsifying the sentence it asserts.
+    // The values are placeholders and never decoded, which is a property of the
+    // binary rather than a hope: `wz-ap-demo` has no auth plane and no
+    // `access-extauth-*` feature, so it names these keys and reports them
+    // `NoSinkInThisBuild`, and the loader that would parse them does not exist in
+    // that build. This file is fed to the DEMO; the zenohd it dials is started on
+    // `router_file`, which names no pubkey. Both pairs are named so the file names
+    // every honoured key; upstream would take the inline pair first.
+    auth: {{
+      pubkey: {{
+        public_key_pem: "PLACEHOLDER-PUBLIC-PEM",
+        private_key_pem: "PLACEHOLDER-PRIVATE-PEM",
+        public_key_file: "/etc/wz/pubkey.pem",
+        private_key_file: "/etc/wz/pubkey.key",
+      }},
+    }},
     link: {{
       // R2593 — the per-link-kind socket buffers. A client that dials tcp
       // takes the tcp pair; the tls pair reaches its `--link-config` and waits

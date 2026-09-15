@@ -1525,6 +1525,23 @@ pub(crate) fn expand_stock_zenoh_config_for_build(
             exp.record("transport/auth/usrpwd/dictionary_file", effect);
         }
     }
+    // R2627 — the pubkey identity's decision site, shaped like the dictionary's
+    // and for its reason: no auth plane, so no flag branch to guard, and the
+    // verdict is the whole site. One loop over the four rather than four copies,
+    // because they share a sink (none) and a verdict; routed through `no_sink`
+    // so the site stays bound to `config_keys_the_demo_drops`.
+    for key in [
+        "transport/auth/pubkey/private_key_file",
+        "transport/auth/pubkey/private_key_pem",
+        "transport/auth/pubkey/public_key_file",
+        "transport/auth/pubkey/public_key_pem",
+    ] {
+        if named(key) {
+            if let Some(effect) = no_sink(key) {
+                exp.record(key, effect);
+            }
+        }
+    }
     if named("timestamping/enabled") && no_sink("timestamping/enabled").is_some() {
         exp.record("timestamping/enabled", KeyEffect::NoSinkInThisBuild);
     } else if named("timestamping/enabled") {
@@ -2534,6 +2551,50 @@ pub(crate) const ARGV_ONLY_KIND_LEDGER: &[(&str, &str, &str)] = &[
          re-attempted; a successful handshake looks identical whether it was \
          the first attempt or the fourth.",
     ),
+    // R2627 — the pubkey identity, and the two halves of ONE key pair take
+    // DIFFERENT kinds. That is the point of classifying by the frame rather than
+    // by resemblance: all four are "pubkey config keys" and a row copied from the
+    // dictionary below would call every one `off-wire`, which is false for two.
+    (
+        "transport/auth/pubkey/private_key_file",
+        KIND_OFF_WIRE,
+        "expands to NO flag: this binary carries --acl-deny, --downsample and \
+         --max-payload and no auth flag. Off-wire even where a sink exists: the \
+         private key decrypts the responder's challenge locally and no frame \
+         field carries it. OpenSyn is \
+         `io/zenoh-transport/src/unicast/establishment/ext/auth/pubkey.rs` @ `nonce_encrypted_with_bob_pubkey` \
+         -- encrypted under the RESPONDER's key, so its effect is visible only \
+         as the responder accepting or closing, never as a readable field.",
+    ),
+    (
+        "transport/auth/pubkey/private_key_pem",
+        KIND_OFF_WIRE,
+        "expands to NO flag: this binary carries --acl-deny, --downsample and \
+         --max-payload and no auth flag. The same key as private_key_file, \
+         supplied inline, so the same frame analysis: OpenSyn carries \
+         `io/zenoh-transport/src/unicast/establishment/ext/auth/pubkey.rs` @ `nonce_encrypted_with_bob_pubkey` \
+         and never the private key.",
+    ),
+    (
+        "transport/auth/pubkey/public_key_file",
+        KIND_NOT_YET_READ,
+        "a frame DOES carry it: the initiator writes its public key into the \
+         Z_EXT_AUTH pubkey sub-extension of InitSyn, \
+         `io/zenoh-transport/src/unicast/establishment/ext/auth/pubkey.rs` @ `pub(crate) alice_pubkey: ZPublicKey,` \
+         as two ZBufs (n, then e). No \
+         leg reads a CONFIG-sourced key off that frame yet, and this binary \
+         expands it to NO flag (--acl-deny, --downsample, --max-payload only).",
+    ),
+    (
+        "transport/auth/pubkey/public_key_pem",
+        KIND_NOT_YET_READ,
+        "a frame DOES carry it: the same public key as public_key_file, \
+         supplied inline, written into InitSyn at \
+         `io/zenoh-transport/src/unicast/establishment/ext/auth/pubkey.rs` @ `pub(crate) alice_pubkey: ZPublicKey,` \
+         -- no leg reads a config-sourced \
+         key off that frame; this binary expands it to NO flag (--acl-deny and \
+         the other two access knobs are its only access flags).",
+    ),
     (
         "transport/auth/usrpwd/dictionary_file",
         KIND_OFF_WIRE,
@@ -2658,26 +2719,48 @@ pub(crate) fn config_keys_the_demo_drops() -> Vec<&'static str> {
     // says nothing about the keys the FILE asks for. Upstream gates exactly
     // those on it (`orchestrator.rs:213`), so it now withholds them; see the
     // master switch in `expand_stock_zenoh_config`.
-    let mut out: Vec<&'static str> = Vec::new();
-    // R2568 — the FIRST kind again, and the first row of it since R2145: a key
-    // with no sink AT ALL in this binary, which the doc above calls a legitimate
-    // state that has to be written down rather than hidden behind a report that
-    // calls it honoured. UNCONDITIONAL on purpose — there is no build of THIS
-    // binary in which the sink appears, so a `cfg!` guard would be a claim about
-    // a feature that does not exist here.
-    //
-    // MEASURED: `wz-ap-demo` names `usrpwd` and `extauth` ZERO times and its
-    // manifest carries no `access-extauth-*` feature. It holds the three §5.16
-    // interceptor knobs (`--acl-deny` / `--downsample` / `--max-payload`) and no
-    // auth plane, so the dictionary that builds a RESPONDER's credential store
-    // has nothing here to build.
-    //
-    // ⚠ NOT the R2145 case, and the difference is the whole reason this row is
-    // honest. `scouting/multicast/enabled` left this list because the demo
-    // genuinely should have honoured it — upstream gates real keys on it, so the
-    // demo now withholds them. Nothing here is withheld on the dictionary: the
-    // plane it configures is absent, not ignored.
-    out.push("transport/auth/usrpwd/dictionary_file");
+    // R2627 — the UNCONDITIONAL rows are the initializer rather than a run of
+    // `push`es: adding the four pubkey rows as pushes made clippy's
+    // `vec_init_then_push` fire on this function under `--features zenoh-config
+    // -D warnings`. The rows and their comments are unchanged, only where they
+    // are written.
+    let mut out: Vec<&'static str> = vec![
+        // R2568 — the FIRST kind again, and the first row of it since R2145: a
+        // key with no sink AT ALL in this binary, which the doc above calls a
+        // legitimate state that has to be written down rather than hidden behind
+        // a report that calls it honoured. UNCONDITIONAL on purpose — there is no
+        // build of THIS binary in which the sink appears, so a `cfg!` guard would
+        // be a claim about a feature that does not exist here.
+        //
+        // MEASURED: `wz-ap-demo` names `usrpwd` and `extauth` ZERO times and its
+        // manifest carries no `access-extauth-*` feature. It holds the three
+        // §5.16 interceptor knobs (`--acl-deny` / `--downsample` /
+        // `--max-payload`) and no auth plane, so the dictionary that builds a
+        // RESPONDER's credential store has nothing here to build.
+        //
+        // ⚠ NOT the R2145 case, and the difference is the whole reason this row
+        // is honest. `scouting/multicast/enabled` left this list because the demo
+        // genuinely should have honoured it — upstream gates real keys on it, so
+        // the demo now withholds them. Nothing here is withheld on the
+        // dictionary: the plane it configures is absent, not ignored.
+        "transport/auth/usrpwd/dictionary_file",
+        // R2627 — the pubkey identity: the same FIRST kind as the dictionary and
+        // on the same measurement, re-taken for these keys rather than inherited
+        // from that row. `wz-ap-demo` still names `extauth` zero times and
+        // carries no `access-extauth-*` feature, and
+        // `ZenohNodeConfig::pubkey_pem_config` — the one mapping to the loader —
+        // is gated on `access-extauth-pubkey`, so it is not even compiled into
+        // this binary. The plane these keys configure is absent, not ignored.
+        // UNCONDITIONAL for the reason given above.
+        // ⚠ The ROLE argument that excepts the dictionary from the drop-in
+        // fixture does NOT carry over (pubkey is mutual, so a client carries an
+        // identity); only this "no sink in this binary" verdict does. The two are
+        // different claims and these keys make one without the other.
+        "transport/auth/pubkey/private_key_file",
+        "transport/auth/pubkey/private_key_pem",
+        "transport/auth/pubkey/public_key_file",
+        "transport/auth/pubkey/public_key_pem",
+    ];
     // R2626 — `timestamping/drop_future_timestamp`'s sink is a FORWARDER, and a
     // build with neither has nothing to hand the value to. The same union that
     // gates the field on `NodeTimestamping`, for the same reason: the two must
@@ -3674,6 +3757,39 @@ mod stock_config_tests {
                 r#"{ listen: { endpoints: ["tcp/0.0.0.0:7447"] },
                      transport: { auth: { usrpwd: {
                        dictionary_file: "/etc/wz/usrpwd.txt" } } } }"#,
+            ),
+            // R2627 — the pubkey identity, one row per key so the table stays
+            // universal. Each reaches NOTHING here (no auth plane) and is pinned
+            // in `config_keys_the_demo_drops()`. The vacuity guard bites as it
+            // does for the dictionary: the reader must NAME each key from its
+            // own document. Values are placeholders the demo never decodes.
+            (
+                "transport/auth/pubkey/private_key_file",
+                LISTEN_ONLY,
+                r#"{ listen: { endpoints: ["tcp/0.0.0.0:7447"] },
+                     transport: { auth: { pubkey: {
+                       private_key_file: "/etc/wz/pubkey.key" } } } }"#,
+            ),
+            (
+                "transport/auth/pubkey/private_key_pem",
+                LISTEN_ONLY,
+                r#"{ listen: { endpoints: ["tcp/0.0.0.0:7447"] },
+                     transport: { auth: { pubkey: {
+                       private_key_pem: "PLACEHOLDER-PRIVATE-PEM" } } } }"#,
+            ),
+            (
+                "transport/auth/pubkey/public_key_file",
+                LISTEN_ONLY,
+                r#"{ listen: { endpoints: ["tcp/0.0.0.0:7447"] },
+                     transport: { auth: { pubkey: {
+                       public_key_file: "/etc/wz/pubkey.pem" } } } }"#,
+            ),
+            (
+                "transport/auth/pubkey/public_key_pem",
+                LISTEN_ONLY,
+                r#"{ listen: { endpoints: ["tcp/0.0.0.0:7447"] },
+                     transport: { auth: { pubkey: {
+                       public_key_pem: "PLACEHOLDER-PUBLIC-PEM" } } } }"#,
             ),
             (
                 "routing/interests/timeout",

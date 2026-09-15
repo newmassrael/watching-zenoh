@@ -860,6 +860,28 @@ pub struct ZenohNodeConfig {
     /// [`UsrPwdStore::from_dictionary_file`](crate::extauth_usrpwd_store::UsrPwdStore::from_dictionary_file),
     /// which is where the filesystem belongs.
     pub usrpwd_dictionary_file: Option<String>,
+    /// R2627 — `transport/auth/pubkey/public_key_pem`, the node's RSA public key
+    /// as inline PEM text.
+    ///
+    /// The four `pubkey_*` fields below carry the config's TEXT and PATHS, not a
+    /// loaded key, for the reason `usrpwd_dictionary_file` does: parsing a config
+    /// must not depend on the machine it is parsed on, and this ingest also
+    /// VALIDATES configs destined for other nodes. The pairing rules (inline PEM
+    /// before files, half a pair is an error, a mismatched pair is refused) are
+    /// applied by `extauth_pubkey_store::keypair_from_config`, which takes these
+    /// four as one `PubKeyPemConfig` so that decision lives in one place.
+    ///
+    /// They are unconditional rather than gated on `access-extauth-pubkey`, again
+    /// like the usrpwd path: the ingest is how a config is judged, and whether
+    /// this build compiled the pubkey method must not change which files it
+    /// accepts.
+    pub pubkey_public_key_pem: Option<String>,
+    /// R2627 — `transport/auth/pubkey/private_key_pem`. See `pubkey_public_key_pem`.
+    pub pubkey_private_key_pem: Option<String>,
+    /// R2627 — `transport/auth/pubkey/public_key_file`. See `pubkey_public_key_pem`.
+    pub pubkey_public_key_file: Option<String>,
+    /// R2627 — `transport/auth/pubkey/private_key_file`. See `pubkey_public_key_pem`.
+    pub pubkey_private_key_file: Option<String>,
     /// R2063 (open-debt item 214) — `routing/peer/mode`, a
     /// [`WZ_EXTENSION_CONFIG_KEYS`] member since R2230.
     ///
@@ -1120,6 +1142,14 @@ impl Default for ZenohNodeConfig {
             // dictionary_file is an `Option` with no default path, and a node
             // that names none does not respond to usrpwd.
             usrpwd_dictionary_file: None,
+            // R2627 — all four absent, which is upstream's default: every
+            // `PubKeyConf` identity field is an `Option` with no default, and a
+            // node naming none of them has no pubkey identity
+            // (`AuthPubKey::from_config` returns `Ok(None)`).
+            pubkey_public_key_pem: None,
+            pubkey_private_key_pem: None,
+            pubkey_public_key_file: None,
+            pubkey_private_key_file: None,
             // R2063 (item 214) — upstream's default is `linkstate`
             // (`DEFAULT_CONFIG.json5`'s `routing.peer.mode`), and R2051's rule
             // applies: a documented default is not a behaviour, so this
@@ -1192,6 +1222,33 @@ impl Default for ZenohNodeConfig {
             listen_timeout_ms: None,
             listen_exit_on_failure: None,
             listen_retry: None,
+        }
+    }
+}
+
+/// R2627 — the ONE place the four parsed pubkey identity fields become the
+/// loader's input.
+///
+/// The reader stores four `Option<String>`s and the loader takes one
+/// `PubKeyPemConfig`; without a single mapping, every caller would re-pair
+/// them by hand, and that hand-pairing is where a transposed public/private
+/// gets written — a node advertising its private key, which no test of the
+/// reader or of the loader alone could see, because each half would be
+/// correct. So the join is a method here, and it has its own test.
+///
+/// Gated on `access-extauth-pubkey` because the type it builds exists only
+/// there; the fields themselves stay unconditional, so a build without pubkey
+/// still ACCEPTS a config naming these keys and simply has nothing to build.
+#[cfg(feature = "access-extauth-pubkey")]
+impl ZenohNodeConfig {
+    /// The parsed pubkey identity, borrowed as the loader's input. Pass it to
+    /// [`keypair_from_config`](crate::extauth_pubkey_store::keypair_from_config).
+    pub fn pubkey_pem_config(&self) -> crate::extauth_pubkey_store::PubKeyPemConfig<'_> {
+        crate::extauth_pubkey_store::PubKeyPemConfig {
+            public_key_pem: self.pubkey_public_key_pem.as_deref(),
+            private_key_pem: self.pubkey_private_key_pem.as_deref(),
+            public_key_file: self.pubkey_public_key_file.as_deref(),
+            private_key_file: self.pubkey_private_key_file.as_deref(),
         }
     }
 }
@@ -1602,6 +1659,18 @@ pub const HONOURED_CONFIG_KEYS: &[&str] = &[
     // — caught by this round's own config-parse test, which is the only thing
     // that exercises the boundary rather than the reader.
     "transport/auth/usrpwd/dictionary_file",
+    // R2627 — the pubkey identity, MOVED here from
+    // `UNHONOURED_UPSTREAM_CONFIG_KEYS` / `UNHONOURED_BEYOND_WZ` / the
+    // `CredentialStore` beyond-group, and moved rather than deleted for the
+    // reason R2567 records above. wz now ACTS on all four:
+    // `extauth_pubkey_store::keypair_from_config` pairs them with upstream's
+    // precedence and refusals, and `PubKeyLookup` is the store the group said
+    // wz lacked. They were kept out on "`AuthPubKey::from_config` reads all four",
+    // which was true and is now true of wz too.
+    "transport/auth/pubkey/private_key_file",
+    "transport/auth/pubkey/private_key_pem",
+    "transport/auth/pubkey/public_key_file",
+    "transport/auth/pubkey/public_key_pem",
     "scouting/multicast/enabled",
     "timestamping/enabled",
     // R2626 — MOVED HERE from `UNHONOURED_UPSTREAM_CONFIG_KEYS` /
@@ -1971,11 +2040,9 @@ pub const UNHONOURED_UPSTREAM_CONFIG_KEYS: &[&str] = &[
     // for [`UPSTREAM_INERT_CONFIG_KEYS`]. The pinned upstream declares and
     // SERIALISES both and READS neither: each leaf identifier occurs exactly
     // once in the whole checkout, on its own declaration line. Their four PEM
-    // siblings below stay, because `AuthPubKey::from_config` reads all four.
-    "transport/auth/pubkey/private_key_file",
-    "transport/auth/pubkey/private_key_pem",
-    "transport/auth/pubkey/public_key_file",
-    "transport/auth/pubkey/public_key_pem",
+    // siblings stayed then, because `AuthPubKey::from_config` reads all four.
+    // R2627 — and those four have now LEFT too, for [`HONOURED_CONFIG_KEYS`]:
+    // wz reads them the same way, through `keypair_from_config`.
     // R2567 — `transport/auth/usrpwd/dictionary_file` LEFT this list: wz now
     // parses it into `ZenohNodeConfig::usrpwd_dictionary_file` and loads it
     // through `UsrPwdStore::from_dictionary_file`. Its two siblings stay, and
@@ -2173,10 +2240,9 @@ pub const UNHONOURED_BEYOND_WZ: &[&str] = &[
     // SURFACE, so they left this half of its partition with it. They are
     // [`UPSTREAM_INERT_CONFIG_KEYS`]: still accepted, still reported ignored,
     // no longer counted as something upstream does.
-    "transport/auth/pubkey/private_key_file",
-    "transport/auth/pubkey/private_key_pem",
-    "transport/auth/pubkey/public_key_file",
-    "transport/auth/pubkey/public_key_pem",
+    // R2627 — the four PEM identity keys left this half too, FORCED by the rule
+    // the R2567 note below states: this list asserts what wz cannot act on, and
+    // wz now acts on them.
     // R2567 — `transport/auth/usrpwd/dictionary_file` LEFT this list too, and
     // leaving it was FORCED rather than chosen: every row here asserts a thing
     // wz cannot act on, and wz now acts on this one. That is what a
@@ -2416,16 +2482,15 @@ pub const UNHONOURED_BEYOND_GROUPS: &[(&str, &str, &[&str])] = &[
             // [`UPSTREAM_INERT_CONFIG_KEYS`] now, so they are no longer part of
             // the population this grouping has to cover. Upstream has no
             // credential store behind either: nothing reads them.
-            "transport/auth/pubkey/private_key_file",
-            "transport/auth/pubkey/private_key_pem",
-            "transport/auth/pubkey/public_key_file",
-            "transport/auth/pubkey/public_key_pem",
             // R2567 — the dictionary key left this group with the list above.
             // The group's claim is that wz has no CREDENTIAL STORE; it now has
-            // one (`UsrPwdStore`), but only behind usrpwd's responder table, so
-            // the claim still holds for every key remaining here: the pubkey
-            // material has no store behind it, and usrpwd's `user` / `password`
-            // are initiator credentials this layer never reads from config.
+            // one (`UsrPwdStore`), but only behind usrpwd's responder table.
+            // R2627 — the four pubkey identity keys left as well, which is the
+            // half of R2567's sentence that has stopped being true: it said "the
+            // pubkey material has no store behind it", and `PubKeyLookup` plus
+            // `keypair_from_config` are that store. What remains is usrpwd's
+            // `user` / `password`, initiator credentials this layer never reads
+            // from config, and for those the group's claim still holds.
             "transport/auth/usrpwd/password",
             "transport/auth/usrpwd/user",
         ],
@@ -2743,16 +2808,11 @@ pub const UNHONOURED_CITATION_LEDGER: &[(&str, &str, &str)] = &[
     // still spells it, and what those citations say is precisely that upstream
     // never implemented it (`// @TODO: populate lookup file`), which is the
     // classification rather than a gap in it.
-    (
-        "transport/auth/pubkey/private_key_file",
-        "foreign-node-config",
-        "zenohd",
-    ),
-    (
-        "transport/auth/pubkey/public_key_file",
-        "foreign-node-config",
-        "zenohd",
-    ),
+    // R2627 — the `foreign-node-config` rows for `transport/auth/pubkey/
+    // private_key_file` and `public_key_file` are GONE, for the reason R2567
+    // gives below and in the same words: they said wz names these keys only to
+    // configure a FOREIGN zenohd in an interop test, and wz now honours them for
+    // itself. A verdict about evidence that is gone is removed, not reworded.
     // R2567 — the `foreign-node-config` verdict for
     // `transport/auth/usrpwd/dictionary_file` is GONE, because the evidence it
     // stood on is gone: it said wz names this key only to configure a FOREIGN
@@ -4003,6 +4063,42 @@ impl ZenohNodeConfig {
             out.usrpwd_dictionary_file = Some(v);
             named.push("transport/auth/usrpwd/dictionary_file");
         }
+        // R2627 — the pubkey identity. Taken as text/paths and paired later, for
+        // the reason the dictionary above is: the pairing reads files, and this
+        // function must not. Each key is its own arm so a wrong type names the
+        // key that carried it.
+        if let Some(v) = want_string(
+            &doc,
+            "transport/auth/pubkey/public_key_pem",
+            "an RSA public key as PKCS#1 PEM text",
+        )? {
+            out.pubkey_public_key_pem = Some(v);
+            named.push("transport/auth/pubkey/public_key_pem");
+        }
+        if let Some(v) = want_string(
+            &doc,
+            "transport/auth/pubkey/private_key_pem",
+            "an RSA private key as PKCS#1 PEM text",
+        )? {
+            out.pubkey_private_key_pem = Some(v);
+            named.push("transport/auth/pubkey/private_key_pem");
+        }
+        if let Some(v) = want_string(
+            &doc,
+            "transport/auth/pubkey/public_key_file",
+            "a path to an RSA public key PKCS#1 PEM file",
+        )? {
+            out.pubkey_public_key_file = Some(v);
+            named.push("transport/auth/pubkey/public_key_file");
+        }
+        if let Some(v) = want_string(
+            &doc,
+            "transport/auth/pubkey/private_key_file",
+            "a path to an RSA private key PKCS#1 PEM file",
+        )? {
+            out.pubkey_private_key_file = Some(v);
+            named.push("transport/auth/pubkey/private_key_file");
+        }
         // R311y845 — the scouting SOCKET. Upstream types `address` as a
         // `SocketAddr` and so refuses a malformed one at deserialization; the
         // parse here is what keeps that refusal, and it is worth keeping: the
@@ -5023,6 +5119,29 @@ mod tests {
                 "transport/auth/usrpwd/dictionary_file",
                 r#"{ "transport": { "auth": { "usrpwd": { "dictionary_file": "/etc/wz/creds" } } } }"#,
             ),
+            // R2627 — the four pubkey identity keys, driven the way the
+            // dictionary above is and for the same reason: the reader takes TEXT
+            // and PATHS, and `keypair_from_config` pairs and decodes them later.
+            // So these values are deliberately not valid PEM and name no real
+            // file — a fixture needing a real key would make validating a config
+            // depend on key material, and would be testing the loader here
+            // rather than the reader. The loader has its own tests.
+            (
+                "transport/auth/pubkey/private_key_file",
+                r#"{ "transport": { "auth": { "pubkey": { "private_key_file": "/etc/wz/pri.pem" } } } }"#,
+            ),
+            (
+                "transport/auth/pubkey/private_key_pem",
+                r#"{ "transport": { "auth": { "pubkey": { "private_key_pem": "PRIVATE" } } } }"#,
+            ),
+            (
+                "transport/auth/pubkey/public_key_file",
+                r#"{ "transport": { "auth": { "pubkey": { "public_key_file": "/etc/wz/pub.pem" } } } }"#,
+            ),
+            (
+                "transport/auth/pubkey/public_key_pem",
+                r#"{ "transport": { "auth": { "pubkey": { "public_key_pem": "PUBLIC" } } } }"#,
+            ),
             (
                 "scouting/multicast/enabled",
                 r#"{ "scouting": { "multicast": { "enabled": false } } }"#,
@@ -5949,6 +6068,80 @@ mod tests {
             without.config.usrpwd_dictionary_file, None,
             "an absent key is None, not an empty path"
         );
+    }
+
+    /// R2627 — each pubkey identity key lands in ITS OWN field.
+    ///
+    /// `every_honoured_key_is_actually_read` cannot see this: it drives one key
+    /// at a time and asserts only that the config differs from the default, so an
+    /// arm writing `public_key_pem` into the PRIVATE field would satisfy it. That
+    /// transposition is the one that matters here — it produces a node that
+    /// advertises its private key. So all four are driven at once with four
+    /// DISTINCT values, and a swap of any two arms fails on the value.
+    #[test]
+    fn the_pubkey_identity_keys_each_land_in_their_own_field() {
+        let ingest = ZenohNodeConfig::from_json5(
+            r#"{ "transport": { "auth": { "pubkey": {
+                   "public_key_pem": "PUB-PEM", "private_key_pem": "PRI-PEM",
+                   "public_key_file": "/pub.pem", "private_key_file": "/pri.pem" } } } }"#,
+        )
+        .unwrap();
+        assert!(ingest.ignored.is_empty(), "{:?}", ingest.ignored);
+        let c = &ingest.config;
+        assert_eq!(c.pubkey_public_key_pem.as_deref(), Some("PUB-PEM"));
+        assert_eq!(c.pubkey_private_key_pem.as_deref(), Some("PRI-PEM"));
+        assert_eq!(c.pubkey_public_key_file.as_deref(), Some("/pub.pem"));
+        assert_eq!(c.pubkey_private_key_file.as_deref(), Some("/pri.pem"));
+
+        // Absence is None on all four, not an empty string: `keypair_from_config`
+        // treats an absent pair as "not configured" and a present-but-empty one
+        // as a decode error, so collapsing them would turn an unconfigured node
+        // into one that fails to start.
+        let without = ZenohNodeConfig::from_json5(r#"{"mode": "peer"}"#).unwrap();
+        assert_eq!(without.config.pubkey_public_key_pem, None);
+        assert_eq!(without.config.pubkey_private_key_pem, None);
+        assert_eq!(without.config.pubkey_public_key_file, None);
+        assert_eq!(without.config.pubkey_private_key_file, None);
+    }
+
+    /// R2627 — the JOIN: a config document, through the reader, through
+    /// `pubkey_pem_config`, through the loader, yields the key it named.
+    ///
+    /// The reader test above and the loader's own tests are each correct about
+    /// their half, and the transposition this guards against lives in neither —
+    /// it lives in the mapping between them. A real keypair is used, because the
+    /// assertion is that the SAME key comes back, and only a real key can be
+    /// wrong in the way a swapped mapping would make it wrong: the public and
+    /// private PEMs are not interchangeable text, so a swap fails to decode.
+    #[cfg(feature = "access-extauth-pubkey")]
+    #[test]
+    fn a_configured_pubkey_identity_loads_through_the_one_mapping() {
+        use rsa::pkcs1::{EncodeRsaPrivateKey, EncodeRsaPublicKey, LineEnding};
+        use rsa::{RsaPrivateKey, RsaPublicKey};
+
+        let private =
+            RsaPrivateKey::new(&mut rand::rngs::OsRng, 512).expect("512-bit test RSA key");
+        let public_pem = RsaPublicKey::from(&private)
+            .to_pkcs1_pem(LineEnding::LF)
+            .expect("public PEM");
+        let private_pem = private.to_pkcs1_pem(LineEnding::LF).expect("private PEM");
+
+        // Built as a JSON value so the multi-line PEM is escaped correctly rather
+        // than hand-quoted into a raw string.
+        let doc = serde_json::json!({
+            "transport": { "auth": { "pubkey": {
+                "public_key_pem": public_pem,
+                "private_key_pem": private_pem.as_str(),
+            } } }
+        })
+        .to_string();
+
+        let ingest = ZenohNodeConfig::from_json5(&doc).unwrap();
+        let loaded =
+            crate::extauth_pubkey_store::keypair_from_config(ingest.config.pubkey_pem_config())
+                .expect("a configured, matched pair loads")
+                .expect("and is reported configured");
+        assert_eq!(loaded, private);
     }
 
     #[test]
