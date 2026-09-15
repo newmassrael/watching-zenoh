@@ -1432,7 +1432,19 @@ PIN_NO_SYMBOL = 2
 # population: doing so restores 179 -> 177 and leaves 38 and the upstream count
 # where they were, so both the rise and its size are this atom's alone.
 # 177 + 2 = 179.
-PIN_WZ_CITATIONS = 179
+# R2646 — 179 -> 185, RISING, and for the same ordinary reason R2642's rise had:
+# `adminspace-write` stays PARTIAL, so its reason stays in this population, and
+# this round's CORRECTION cites six more tracked wz files by rooted path — the
+# two forwarder planes whose dispatch was the delete half's real base, the
+# decoder and the config seam that carry the intent, the control that pins the
+# validator refutation, and the gate whose selftest anchor moved with them.
+# AMBIGUOUS holds at 38 (none of the six is ambiguous) and the unpinned upstream
+# total moves 307 -> 311 on the four anchored upstream citations the correction
+# adds. MEASURED by the re-insertion this file's earlier entries use: putting
+# origin's copy of that ONE reason back into the live population restores
+# 185 -> 179 and leaves 38 exactly where it was, so both the rise and its size
+# are this atom's alone and no surviving atom moved. 179 + 6 = 185.
+PIN_WZ_CITATIONS = 185
 # R2626 — 44 -> 42, and this one is worth a sentence because it HELD through
 # every earlier retirement in this run (R2612, R2622). `time-hlc`'s reason is the
 # first retiree carrying AMBIGUOUS citations of its own: its oldest clauses cite
