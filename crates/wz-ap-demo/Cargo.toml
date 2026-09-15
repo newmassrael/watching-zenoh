@@ -766,7 +766,13 @@ router-connect-reconcile = ["router-hat-router", "wz/router-connect-reconcile"]
 # feature, so link weights could be installed at startup and never changed. The
 # host's gate is now the UNION of the intents it serves and each arm names its
 # own, which is what lets this one be compiled without the other.
-router-config-mutate = ["router-hat-router", "wz/config-mutate-runtime"]
+#
+# It names `zenoh-config` because the arm calls `WzConfig::ingest_for_key`, whose
+# own gate is `all(zenoh-config, any(adminspace-core, routing-router-hat))`. A demo
+# feature that enabled the ARM without the function it calls would compile only in
+# whatever wider set happened to supply it, which is the drift a leg naming its own
+# features exists to prevent — and the build caught exactly that here.
+router-config-mutate = ["router-hat-router", "zenoh-config", "wz/config-mutate-runtime"]
 # §5.23 adminspace-router-linkstate (R311y204) — compiles the demo router-hat's
 # admin-queryable registration + the per-GET LinkstateNetView render INSIDE
 # run_router_hat. Pulls router-hat-router (the run-mode — a bare `["wz/adminspace-

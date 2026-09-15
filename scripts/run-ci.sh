@@ -17373,7 +17373,7 @@ layer_e7b_router_connect_reconcile() {
     # `--skip wz_router` already covers the `wz_router_hat_` name prefix.)
     (cd crates && cargo build -p wz-ap-demo --features router-hat-router,router-connect-reconcile --quiet) || return 1
     (cd crates && cargo test -p wz-integration-tests \
-        --test wz_router_hat_connect_reconcile -- --ignored --skip requires_feature --skip connect_add --quiet) || return 1
+        --test wz_router_hat_connect_reconcile -- --ignored --skip requires_feature --skip connect_add --skip config_key_write --quiet) || return 1
     # NEGATIVE (feature OFF): --connect-after inert on the router-hat-router-only
     # binary (rebuilt here so it never shares the reconcile build).
     (cd crates && cargo build -p wz-ap-demo --features router-hat-router --quiet) || return 1
@@ -17414,13 +17414,24 @@ layer_e7b_router_connect_reconcile() {
 # deny log) rather than waits-for-absence. wz<->wz only — the write adds no new wire
 # format (a standard Put, cross-impl-proven by adminspace-write's own pico leg).
 layer_e7b2_router_connect_add_over_the_wire() {
+    # R2649 — `router-config-mutate` joins the set for the config-KEY pair below.
+    # Without it the `SetKey` arm is compiled out and BOTH of those tests would pass
+    # vacuously against a host that decodes the PUT and applies nothing, which is the
+    # same containment argument `adminspace-write` already carries here.
     (cd crates && cargo build -p wz-ap-demo \
-        --features router-hat-router,router-connect-reconcile,adminspace-router-linkstate,routing-peer,adminspace-write --quiet) || return 1
-    # `--test-threads=1`: both tests bind ephemeral ports and scrape their own
+        --features router-hat-router,router-connect-reconcile,adminspace-router-linkstate,routing-peer,adminspace-write,router-config-mutate --quiet) || return 1
+    # `--test-threads=1`: these tests bind ephemeral ports and scrape their own
     # node's zid out of a shared stderr genre; serial keeps each pair's logs
     # unambiguous.
     (cd crates && cargo test -p wz-integration-tests \
         --test wz_router_hat_connect_reconcile wz_router_hat_connect_add \
+        -- --ignored --test-threads=1 --quiet) || return 1
+    # R2649 — the config-KEY write pair, run as its OWN invocation rather than by
+    # widening the filter above: the two names share only the prefix
+    # `wz_router_hat_con`, and a filter that selects by a prefix coincidence is one
+    # rename away from silently running nothing.
+    (cd crates && cargo test -p wz-integration-tests \
+        --test wz_router_hat_connect_reconcile wz_router_hat_config_key_write \
         -- --ignored --test-threads=1 --quiet) || return 1
 }
 

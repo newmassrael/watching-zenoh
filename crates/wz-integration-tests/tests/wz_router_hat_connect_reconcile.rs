@@ -395,13 +395,19 @@ fn spawn_config_writer(
     (guard, reader)
 }
 
-/// Read R1's advertised config-WRITE key out of its log and turn it into the
-/// concrete PUT target `@/<zid>/router/config/connect-add`.
+/// Read R1's advertised config-WRITE key out of its log and return the BASE
+/// `@/<zid>/router/config` that every intent hangs off.
 ///
 /// Scraped rather than derived: the zid is assigned at startup, so deriving it in
 /// the test would duplicate the demo's own zid policy and could drift from it. The
-/// `/**` suffix assertion is what makes the strip below safe.
-fn connect_add_key(write_log: &str) -> String {
+/// `/**` suffix assertion is what makes the strip safe.
+///
+/// R2649 — split out of `connect_add_key` when a SECOND intent needed the same
+/// base. The scrape is not a convenience: the two asserts are what stop a silently
+/// reshaped key from producing a PUT target that decodes `NotAWrite`, an arm that
+/// is quiet by design and was one of the three defects this lane exists for. Two
+/// copies of a safety check are two things that can drift apart, so there is one.
+fn config_write_base(write_log: &str) -> String {
     let write_key = write_log
         .lines()
         .find_map(|l| {
@@ -416,7 +422,20 @@ fn connect_add_key(write_log: &str) -> String {
         base.starts_with("@/") && base.ends_with("/router/config"),
         "scraped config-write base has the @/<zid>/router/config shape: {base}"
     );
-    format!("{base}/connect-add")
+    String::from(base)
+}
+
+/// The concrete PUT target `@/<zid>/router/config/connect-add`.
+fn connect_add_key(write_log: &str) -> String {
+    format!("{}/connect-add", config_write_base(write_log))
+}
+
+/// R2649 — the PUT target for a runtime config-KEY write, which is the base plus
+/// the upstream config key path itself. Unlike `connect-add` this is not a wz
+/// spelling: `AdminConfigWrite::SetKey` carries the key as DATA, so the wire form
+/// is the very key `HONOURED_CONFIG_KEYS` names.
+fn config_key_write_key(write_log: &str, config_key: &str) -> String {
+    format!("{}/{config_key}", config_write_base(write_log))
 }
 
 #[test]
@@ -593,5 +612,168 @@ fn wz_router_hat_connect_add_is_denied_without_the_write_permit() {
         "a router whose config write was denied must NOT federate with the endpoint \
          the denied write named — the permit is not load-bearing if it does\n\
          --- router-hat-1 stderr ---\n{r1_captured}"
+    );
+}
+
+// ─── R2649 — the runtime config-KEY write, over the wire ────────────────────────
+//
+// The second intent this host serves, and the first that is not a wz spelling:
+// `AdminConfigWrite::SetKey` carries the config key as DATA, so the PUT target is
+// the upstream key itself and the payload is its JSON5 value.
+//
+// WHY A LANE AND NOT A UNIT TEST, which is the same answer this file's header
+// already gives for connect-add: the path from a decoded intent to the live value
+// runs through a handler stored INSIDE the forwarder, a slot it stashes into, and
+// an app-tick drain that owns the sink. None of that is reachable from a unit test,
+// and the library seam on either side of it is already covered — `ingest_for_key`
+// -> `reconfigure_router_link_weights` -> sink is pinned by
+// `a_wire_value_for_the_weights_key_reaches_the_sink_through_the_front_end`.
+// What no test could see until this one is whether a real PUT reaches that stash.
+//
+// WHAT THE APPLIED LINE PROVES, because it is weaker-looking than it is:
+// `reconfigure_router_link_weights` returns `Ok(sink.set_router_link_weights(..))`
+// under `config-mutate-runtime`, and the drain logs "applied" ONLY on `Ok`. So the
+// line is not "the drain ran" — it is "the sink was driven with the parsed rows".
+// The rows' CONTENT is the library test's job; reaching the sink is this one's.
+//
+// The pair is a positive/negative twin on ONE binary, permit as the only variable,
+// exactly as the connect-add pair above. No R2: applying a weight needs no live
+// destination, so the fixture is two processes rather than three.
+
+#[test]
+#[ignore = "binary-dep e2e (wz-ap-demo --features router-hat-router,router-connect-reconcile,adminspace-router-linkstate,routing-peer,adminspace-write,router-config-mutate); Layer E7b2 runs via --ignored"]
+fn wz_router_hat_config_key_write_applies_a_link_weight_over_the_wire() {
+    let (mut r1_guard, mut r1_reader, p_r1) = spawn_router_hat(
+        "router-hat-1",
+        &["--router-hat", "127.0.0.1:0", "--config-write-permit"],
+    );
+    let addr_r1 = format!("127.0.0.1:{p_r1}");
+
+    let write_log = wait_for_substring(
+        &mut r1_reader,
+        "adminspace config WRITE at ",
+        Duration::from_secs(10),
+    )
+    .unwrap_or_else(|c| {
+        let _ = r1_guard.child_mut().kill();
+        panic!(
+            "router-hat-1 never logged 'adminspace config WRITE at' — it did not \
+             register the config-write subscriber, so no wire write can reach \
+             it.\n--- router-hat-1 stderr ---\n{c}"
+        )
+    });
+    let put_key = config_key_write_key(&write_log, "routing/router/linkstate/transport_weights");
+
+    // The value spelling is the reader's own, not this test's invention: the SHAPE
+    // const in `transport_weights_of` says `{ dst_zid: "<hex zid>", weight: <1..=65535> }`.
+    // The destination need not exist — a weight is a statement about a link, and
+    // installing it is what is under test, not routing to it.
+    let (mut w_guard, mut w_reader) = spawn_config_writer(
+        "config-writer",
+        &addr_r1,
+        &put_key,
+        r#"[{ dst_zid: "aa", weight: 7 }]"#,
+    );
+
+    let applied = wait_for_substring(
+        &mut r1_reader,
+        "config-write applied 1 link weight(s) at runtime",
+        Duration::from_secs(20),
+    );
+
+    graceful_terminate(w_guard.child_mut(), Duration::from_secs(5));
+    graceful_terminate(r1_guard.child_mut(), Duration::from_secs(5));
+    let r1_captured = read_captured(&mut r1_reader);
+    let w_captured = read_captured(&mut w_reader);
+    eprintln!("--- router-hat-1 stderr ---\n{r1_captured}");
+    eprintln!("--- config-writer stderr ---\n{w_captured}");
+
+    applied.unwrap_or_else(|c| {
+        panic!(
+            "router-hat-1 never logged that it APPLIED the link weight within 20s. \
+             That line is written only when `reconfigure_router_link_weights` \
+             returns Ok, which is only when the sink was driven — so its absence \
+             means the PUT never reached the stash, the drain never ran, or the \
+             rows were refused.\n\
+             --- router-hat-1 stderr at deadline ---\n{c}\n\
+             --- config-writer stderr ---\n{w_captured}"
+        )
+    });
+    // The two halves, named separately: the handler DECODED and stashed, and the
+    // drain APPLIED. A run that logged only the first would mean the intent slot
+    // filled and nothing drained it.
+    assert!(
+        r1_captured.contains("accepted with 1 row(s); queued for apply"),
+        "the handler must report the parse it stashed, not only the apply\n\
+         --- router-hat-1 stderr ---\n{r1_captured}"
+    );
+    assert!(
+        !r1_captured.contains("REFUSED, live weights unchanged"),
+        "a well-formed single row must not be refused by the sink's validator\n\
+         --- router-hat-1 stderr ---\n{r1_captured}"
+    );
+}
+
+#[test]
+#[ignore = "binary-dep e2e (wz-ap-demo --features router-hat-router,router-connect-reconcile,adminspace-router-linkstate,routing-peer,adminspace-write,router-config-mutate); Layer E7b2 runs via --ignored"]
+fn wz_router_hat_config_key_write_is_denied_without_the_write_permit() {
+    // Same binary, same PUT, no `--config-write-permit`. The deny is a POSITIVE
+    // edge (the demo logs the refusal at error), so this is not a wait-for-absence.
+    let (mut r1_guard, mut r1_reader, p_r1) =
+        spawn_router_hat("router-hat-1", &["--router-hat", "127.0.0.1:0"]);
+    let addr_r1 = format!("127.0.0.1:{p_r1}");
+
+    let write_log = wait_for_substring(
+        &mut r1_reader,
+        "adminspace config WRITE at ",
+        Duration::from_secs(10),
+    )
+    .unwrap_or_else(|c| {
+        let _ = r1_guard.child_mut().kill();
+        panic!(
+            "router-hat-1 never logged 'adminspace config WRITE at'\n\
+             --- router-hat-1 stderr ---\n{c}"
+        )
+    });
+    let put_key = config_key_write_key(&write_log, "routing/router/linkstate/transport_weights");
+
+    let (mut w_guard, mut w_reader) = spawn_config_writer(
+        "config-writer",
+        &addr_r1,
+        &put_key,
+        r#"[{ dst_zid: "aa", weight: 7 }]"#,
+    );
+
+    let denied = wait_for_substring(&mut r1_reader, "config-write on", Duration::from_secs(20));
+
+    graceful_terminate(w_guard.child_mut(), Duration::from_secs(5));
+    graceful_terminate(r1_guard.child_mut(), Duration::from_secs(5));
+    let r1_captured = read_captured(&mut r1_reader);
+    let w_captured = read_captured(&mut w_reader);
+    eprintln!("--- router-hat-1 stderr ---\n{r1_captured}");
+    eprintln!("--- config-writer stderr ---\n{w_captured}");
+
+    denied.unwrap_or_else(|c| {
+        panic!(
+            "router-hat-1 never logged the config-write DENY within 20s\n\
+             --- router-hat-1 stderr at deadline ---\n{c}\n\
+             --- config-writer stderr ---\n{w_captured}"
+        )
+    });
+    assert!(
+        r1_captured.contains("DENIED"),
+        "the deny line must name the refusal\n--- router-hat-1 stderr ---\n{r1_captured}"
+    );
+    // The refusal is LOAD-BEARING: the gate runs BEFORE the key is even looked up,
+    // so neither the stash nor the drain may report anything.
+    assert!(
+        !r1_captured.contains("queued for apply"),
+        "a DENIED write must not reach the intent slot\n\
+         --- router-hat-1 stderr ---\n{r1_captured}"
+    );
+    assert!(
+        !r1_captured.contains("config-write applied"),
+        "a DENIED write must never be applied — the permit is not load-bearing if \
+         it is\n--- router-hat-1 stderr ---\n{r1_captured}"
     );
 }
