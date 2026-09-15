@@ -6827,7 +6827,23 @@ async fn run_router_hat_until(
                 #[cfg(feature = "router-config-mutate")]
                 {
                     let queued = pending_router_link_weights.borrow_mut().take();
-                    if let Some(rows) = queued {
+                    // IDEMPOTENT, and it has to be: `--put-key` fires once per app
+                    // tick, so an operator writing a value ONCE has it delivered
+                    // every tick for the life of the node. Without this the sink is
+                    // re-driven forever for a configuration that never changed, and
+                    // the log says "applied" each time.
+                    //
+                    // Compared against the LIVE rows rather than against a
+                    // `last_applied` shadow, which is where this differs from the
+                    // peer's `acl-deny` drain and why: that one holds a deny
+                    // keyexpr, and its live value is a COMPILED policy it cannot be
+                    // compared with, so a shadow is the only option there. Here the
+                    // live value IS the rows, and a shadow would be a second
+                    // representation that could fall out of step with them.
+                    let unchanged = queued
+                        .as_ref()
+                        .is_some_and(|rows| host_cfg.borrow().router_link_weights() == rows);
+                    if let Some(rows) = queued.filter(|_| !unchanged) {
                         let count = rows.len();
                         match host_cfg
                             .borrow_mut()

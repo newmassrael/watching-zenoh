@@ -681,6 +681,14 @@ fn wz_router_hat_config_key_write_applies_a_link_weight_over_the_wire() {
         Duration::from_secs(20),
     );
 
+    // R2650 — settle long enough for the writer to re-deliver the SAME value
+    // several times. `--put-key` fires once per 250ms app tick, so ~6 more PUTs
+    // land in this window, and the apply is idempotent only if none of them
+    // reaches the sink again. The fixture GENERATES the repeat rather than the
+    // assertion merely hoping for its absence, which is what makes the count
+    // below a real discriminator instead of a wait-for-nothing.
+    std::thread::sleep(Duration::from_millis(1500));
+
     graceful_terminate(w_guard.child_mut(), Duration::from_secs(5));
     graceful_terminate(r1_guard.child_mut(), Duration::from_secs(5));
     let r1_captured = read_captured(&mut r1_reader);
@@ -711,6 +719,16 @@ fn wz_router_hat_config_key_write_applies_a_link_weight_over_the_wire() {
         !r1_captured.contains("REFUSED, live weights unchanged"),
         "a well-formed single row must not be refused by the sink's validator\n\
          --- router-hat-1 stderr ---\n{r1_captured}"
+    );
+    // R2650 — EXACTLY once, over a window in which the same value arrived many
+    // times. An unchanged config must not re-drive the sink: the drain compares
+    // the queued rows against the LIVE ones and applies only a difference.
+    let applies = r1_captured.matches("config-write applied").count();
+    assert_eq!(
+        applies, 1,
+        "the same value re-delivered every tick must be applied ONCE — {applies} \
+         applies means the drain re-drives the sink for a configuration that \
+         never changed\n--- router-hat-1 stderr ---\n{r1_captured}"
     );
 }
 
