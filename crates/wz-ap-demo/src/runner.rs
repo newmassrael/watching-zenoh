@@ -4934,7 +4934,7 @@ async fn run_peer_until(
         use wz::runtime_tokio::admin_write_permit;
         use wz::runtime_tokio::adminspace::{
             admin_config_write_key, admin_config_write_prefix, parse_admin_config_write,
-            AdminConfigWrite, AdminConfigWriteOutcome,
+            AdminConfigWrite, AdminConfigWriteBody, AdminConfigWriteOutcome,
         };
         use wz::runtime_tokio::sink::SampleView;
         use wz::runtime_tokio::zid_hex::zid_to_zenoh_hex;
@@ -4974,7 +4974,11 @@ async fn run_peer_until(
             match parse_admin_config_write(
                 &write_prefix,
                 sample.keyexpr(),
-                sample.payload(),
+                // R2646 — the sample's OWN kind, not an assumed Put. The
+                // forwarder began delivering Del samples this round; passing
+                // `sample.payload()` alone would have decoded every delete as a
+                // write of the empty value.
+                AdminConfigWriteBody::of_sample(sample),
                 write_permitted,
             ) {
                 AdminConfigWriteOutcome::Apply(AdminConfigWrite::AclDeny(deny_kx)) => {
@@ -4987,10 +4991,17 @@ async fn run_peer_until(
                 // deferred follow-up (run_peer is forwarder-based, no single Session for
                 // add_storage), so log + ignore rather than apply. The arm is always compiled
                 // (the variants are always present) even when the parse never produces them.
+                //
+                // R2646 — the message no longer says "storage intent". It has not been only
+                // storage intents since R2644 gave the decoder the generic `SetKey`, and this
+                // round adds `RemoveKey`: an operator who writes a config PATH at this peer was
+                // being told the node lacked a storage manager, which is true and irrelevant.
+                // What this arm actually means is "decoded, and this host applies only
+                // acl-deny", so that is what it says.
                 AdminConfigWriteOutcome::Apply(other) => log::warn!(
-                    "wz-ap-demo peer: config-write storage intent {other:?} decoded but this \
-                     demo build hosts no storage manager (the storage config-hotreload run-mode \
-                     is a deferred follow-up); ignored"
+                    "wz-ap-demo peer: config-write intent {other:?} decoded but this demo peer \
+                     applies only acl-deny (it hosts no storage manager and holds no live config \
+                     to write); ignored"
                 ),
                 // permissions.write=false — zenoh logs this at error (adminspace.rs:397).
                 AdminConfigWriteOutcome::Denied => log::error!(
@@ -5006,6 +5017,14 @@ async fn run_peer_until(
                 AdminConfigWriteOutcome::UnknownKey(key) => log::warn!(
                     "wz-ap-demo peer: config-write unknown key '{key}' (only 'acl-deny' is \
                      recognized; the full json5 config engine is a deferred §5.23 layer); ignored"
+                ),
+                // R2646 — a DELETE of one of wz's action-named sub-keys. Logged
+                // distinctly from an unknown key on purpose: the operator spelled a
+                // sub-key this node has, and the answer is that deleting it means
+                // nothing, not that the node has never heard of it.
+                AdminConfigWriteOutcome::NotDeletable(key) => log::warn!(
+                    "wz-ap-demo peer: config-write DELETE of '{key}' has no meaning (it names an \
+                     action, not a config key; delete a config key by its path); ignored"
                 ),
                 // The bare `.../config` GET key the `/**` subscriber also matches.
                 AdminConfigWriteOutcome::NotAWrite => {}
@@ -6462,7 +6481,7 @@ async fn run_router_hat_until(
         {
             use wz::runtime_tokio::adminspace::{
                 admin_config_write_key, admin_config_write_prefix, parse_admin_config_write,
-                AdminConfigWrite, AdminConfigWriteOutcome,
+                AdminConfigWrite, AdminConfigWriteBody, AdminConfigWriteOutcome,
             };
             use wz::runtime_tokio::sink::SampleView;
             let write_key = admin_config_write_key(&write_zid_hex, whatami_str);
@@ -6486,7 +6505,7 @@ async fn run_router_hat_until(
                 match parse_admin_config_write(
                     &write_prefix,
                     sample.keyexpr(),
-                    sample.payload(),
+                    AdminConfigWriteBody::of_sample(sample),
                     write_permitted,
                 ) {
                     AdminConfigWriteOutcome::Apply(AdminConfigWrite::ConnectAdd(eps)) => {
@@ -7203,7 +7222,7 @@ pub(crate) async fn run_storage_host(listen: &str, opts: StorageHostOpts) -> io:
     // the library seam and hands it the live inputs.
     use wz::runtime_tokio::adminspace::{
         admin_config_key, admin_config_write_key, admin_config_write_prefix,
-        parse_admin_config_write, AdminConfigWrite, AdminConfigWriteOutcome,
+        parse_admin_config_write, AdminConfigWrite, AdminConfigWriteBody, AdminConfigWriteOutcome,
     };
     use wz::runtime_tokio::compiled_plugins_dyn;
     use wz::runtime_tokio::config::WzConfig;
@@ -7684,7 +7703,7 @@ pub(crate) async fn run_storage_host(listen: &str, opts: StorageHostOpts) -> io:
                 match parse_admin_config_write(
                     &sub_prefix,
                     sample.keyexpr(),
-                    sample.payload(),
+                    AdminConfigWriteBody::of_sample(sample),
                     write_permitted,
                 ) {
                     AdminConfigWriteOutcome::Apply(AdminConfigWrite::AdminReadPermit(read)) => {
@@ -7739,6 +7758,32 @@ pub(crate) async fn run_storage_host(listen: &str, opts: StorageHostOpts) -> io:
                             ),
                         }
                     }
+                    // R2646 — the DELETE twin of the arm above, and deliberately
+                    // beside it: they are the two halves of upstream's ONE write
+                    // gate, and a reader who finds one must find the other. The
+                    // refusals are the same set and are logged the same way, because
+                    // `remove_by_key` answers with the same error type for the same
+                    // reasons — an operator deleting a key wz ignores needs the same
+                    // sentence as one writing it.
+                    #[cfg(feature = "zenoh-config")]
+                    AdminConfigWriteOutcome::Apply(AdminConfigWrite::RemoveKey { key }) => {
+                        match sub_cfg.lock() {
+                            Ok(mut c) => match c.remove_by_key(&key) {
+                                Ok(()) => log::info!(
+                                    "wz-ap-demo storage-host: config key {key} deleted \
+                                     over the wire (restored to its schema default)"
+                                ),
+                                Err(err) => log::warn!(
+                                    "wz-ap-demo storage-host: config key {key} delete \
+                                     refused: {err:?}"
+                                ),
+                            },
+                            Err(_) => log::warn!(
+                                "wz-ap-demo storage-host: config key {key} delete \
+                                 ignored; the config lock is poisoned"
+                            ),
+                        }
+                    }
                     AdminConfigWriteOutcome::Apply(intent) => {
                         log::info!(
                             "wz-ap-demo storage-host: config-write intent stashed: {intent:?}"
@@ -7761,6 +7806,13 @@ pub(crate) async fn run_storage_host(listen: &str, opts: StorageHostOpts) -> io:
                     ),
                     AdminConfigWriteOutcome::UnknownKey(k) => log::warn!(
                         "wz-ap-demo storage-host: config-write unknown key '{k}'; ignored"
+                    ),
+                    // R2646 — a DELETE of an action-named sub-key. Kept apart from
+                    // UnknownKey above: the node HAS this sub-key, and what it lacks
+                    // is a meaning for deleting it.
+                    AdminConfigWriteOutcome::NotDeletable(k) => log::warn!(
+                        "wz-ap-demo storage-host: config-write DELETE of '{k}' has no meaning \
+                         (it names an action, not a config key); ignored"
                     ),
                     AdminConfigWriteOutcome::NotAWrite => {}
                 }
@@ -7932,6 +7984,12 @@ pub(crate) async fn run_storage_host(listen: &str, opts: StorageHostOpts) -> io:
                         // waited for the next iteration would take effect later than
                         // it was granted. The arm exists so the match stays exhaustive
                         // and so an intent that DID arrive here is reported.
+                        // R2646 — the delete twin, never queued for the same reason.
+                        AdminConfigWrite::RemoveKey { key } => log::warn!(
+                            "wz-ap-demo storage-host: config key {key} delete reached \
+                         the dispatch queue; it is applied in the subscriber and \
+                         should never be stashed"
+                        ),
                         AdminConfigWrite::SetKey { key, .. } => log::warn!(
                             "wz-ap-demo storage-host: config key {key} reached the \
                          dispatch queue; it is applied in the subscriber and \

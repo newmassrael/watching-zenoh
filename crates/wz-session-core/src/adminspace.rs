@@ -1654,6 +1654,23 @@ pub enum AdminConfigWrite {
         /// The value's JSON5 text, trimmed.
         value: String,
     },
+    /// R2646 — `.../config/<a/config/key/path>` arriving as a DELETE: drop the
+    /// override on ONE config key, which is upstream's other write shape
+    /// (`zenoh/src/net/runtime/adminspace.rs` @ `PushBody::Del(_) => {`
+    /// reaching @ `config.remove(key)`). The [`SetKey`](Self::SetKey) twin, and
+    /// it carries no value because a `MsgDel` has no payload slot on the wire.
+    ///
+    /// ⚠ The same non-validation warning [`SetKey`](Self::SetKey) carries
+    /// applies: `key` may name nothing, and the runtime refuses it by name.
+    ///
+    /// ⚠ The runtime applies this as "restore that key to its schema default",
+    /// which is what a delete can mean against a config of TYPED FIELDS with no
+    /// absent state — see `WzConfig::remove_by_key`, which carries the
+    /// derivation and names what it does not cover.
+    RemoveKey {
+        /// The upstream config key path, `/`-separated, exactly as the DEL spelled it.
+        key: String,
+    },
     /// `.../config/acl-deny <keyexpr>` — deny the keyexpr carried in the payload.
     AclDeny(String),
     /// `.../config/storage-add <name>[@<volume_id>]:<keyexpr>` — live-spawn a
@@ -1804,6 +1821,69 @@ pub enum AdminConfigWriteOutcome {
     /// (under `adminspace-config-hotreload`) are decoded; the full json5 engine is
     /// deferred. The caller logs + ignores an unknown sub-key.
     UnknownKey(String),
+    /// R2646 — the sub-key IS recognized, and a DELETE of it means nothing.
+    ///
+    /// Distinct from both neighbours on purpose. `Malformed` would blame a
+    /// payload, and a delete has none to blame; `UnknownKey` would claim wz has
+    /// never heard of the sub-key. The population is exactly wz's own
+    /// capability-named sub-keys (`acl-deny`, `connect-add`, `storage-add`,
+    /// `storage-del`, `admin-read`), which name ACTIONS rather than config
+    /// paths — deleting an action has no meaning, whereas deleting a config key
+    /// has one upstream states. Upstream never meets this case because it has
+    /// no such sub-keys: every one of its admin writes is a config path.
+    NotDeletable(String),
+}
+
+/// R2646 — the body of an admin config write, as the wire carries it.
+///
+/// Upstream's write gate is ONE gate that checks the permission once, extracts
+/// the key once, and then matches on the body
+/// (`zenoh/src/net/runtime/adminspace.rs` @ `match &msg.payload {`). This type
+/// is what lets [`parse_admin_config_write`] have that shape instead of a
+/// second entry point for deletes, which would have put the permission check in
+/// two places.
+///
+/// ⭐ A TYPE RATHER THAN AN `is_delete` FLAG BESIDE THE PAYLOAD, and the
+/// difference is the point: a flag makes `(payload = b"x", is_delete = true)`
+/// representable and meaningless, and a decoder reached from the wire must not
+/// have states its caller can only get wrong. A `MsgDel` has no payload slot,
+/// so `Del` carries nothing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AdminConfigWriteBody<'a> {
+    /// A `MsgPut` body and its payload bytes.
+    Put(&'a [u8]),
+    /// A `MsgDel` body, which carries no payload.
+    Del,
+}
+
+impl<'a> AdminConfigWriteBody<'a> {
+    /// The payload a Put carries, or `None` for a Del.
+    ///
+    /// The accessor every action sub-key's arm uses to say "this arm needs a
+    /// value": `let Some(payload) = body.put_payload() else { .. }` reads as the
+    /// refusal it is, and there is no way to reach an arm's payload logic
+    /// without having answered the question.
+    pub fn put_payload(self) -> Option<&'a [u8]> {
+        match self {
+            Self::Put(payload) => Some(payload),
+            Self::Del => None,
+        }
+    }
+
+    /// The body an inbound sample carries.
+    ///
+    /// THE one derivation of "which body is this", living beside the type
+    /// rather than in each host. Three hosts subscribe to the config write
+    /// keyexpr in this tree, and a mapping written three times is three chances
+    /// to pass `sample.payload()` under a Del — which is not a hypothetical:
+    /// until R2646 every one of them passed exactly that, because the payload
+    /// was all the gate accepted.
+    pub fn of_sample(sample: &'a dyn crate::sink::SampleView) -> Self {
+        match sample.kind() {
+            crate::sample_kind::SampleKind::Put => Self::Put(sample.payload()),
+            crate::sample_kind::SampleKind::Del => Self::Del,
+        }
+    }
 }
 
 /// R311y51 (§5.23 `adminspace-write`) — the Session-independent config-WRITE
@@ -1818,10 +1898,17 @@ pub enum AdminConfigWriteOutcome {
 /// `true` (the gate compiled out — the pre-gate behavior), so this decoder stays
 /// feature-toggle-independent (the gate is the value, not a cfg here). The payload
 /// is decoded lossily then trimmed, byte-for-byte the demo's prior inline parse.
+///
+/// R2646 — `body` replaced a bare `payload: &[u8]`, so this gate covers BOTH of
+/// upstream's write shapes rather than only the Put. The permission check
+/// therefore still happens exactly once for both, which is the property that
+/// would have been lost to a separate `parse_admin_config_delete`: a delete is
+/// a write, and a node that gates one and not the other has a write path that
+/// ignores `permissions.write`.
 pub fn parse_admin_config_write(
     write_prefix: &str,
     keyexpr: &str,
-    payload: &[u8],
+    body: AdminConfigWriteBody<'_>,
     permissions_write: bool,
 ) -> AdminConfigWriteOutcome {
     if !permissions_write {
@@ -1830,8 +1917,20 @@ pub fn parse_admin_config_write(
     let Some(subkey) = keyexpr.strip_prefix(write_prefix) else {
         return AdminConfigWriteOutcome::NotAWrite;
     };
+    // R2646 — THE KEY IS MATCHED FIRST AND THE BODY SECOND, which is upstream's
+    // own order (`adminspace.rs` extracts `key` and only then reaches `match
+    // &msg.payload`). Each action sub-key below asks `body.put_payload()` and
+    // answers `NotDeletable` when there is none, so "which sub-keys exist" is
+    // stated ONCE — by these arms — instead of once here and once in a list of
+    // deletable names that would drift from them. The feature-gated arms are
+    // the proof this matters: a second list would have to carry their `#[cfg]`s
+    // too, and a build where it did not would answer `NotDeletable` for a
+    // sub-key it does not have.
     match subkey {
         "acl-deny" => {
+            let Some(payload) = body.put_payload() else {
+                return AdminConfigWriteOutcome::NotDeletable(String::from(subkey));
+            };
             let deny = String::from_utf8_lossy(payload);
             let deny = deny.trim();
             if deny.is_empty() {
@@ -1857,6 +1956,9 @@ pub fn parse_admin_config_write(
         // `permissions_write`, not a `#[cfg]`. A host holding no reconcile sender
         // simply has nothing to apply it to, and says so.
         "connect-add" => {
+            let Some(payload) = body.put_payload() else {
+                return AdminConfigWriteOutcome::NotDeletable(String::from(subkey));
+            };
             let raw = String::from_utf8_lossy(payload);
             let eps: alloc::vec::Vec<alloc::string::String> = raw
                 .split(',')
@@ -1875,20 +1977,28 @@ pub fn parse_admin_config_write(
         // or keyexpr is Malformed. Gated so a build without the feature falls the
         // sub-key through to UnknownKey (signature-stable; the decoder is one SSOT).
         #[cfg(feature = "adminspace-config-hotreload")]
-        "storage-add" => match parse_storage_add_payload(payload) {
-            Some((name, key_expr, volume_id, volume_cfg)) => {
-                AdminConfigWriteOutcome::Apply(AdminConfigWrite::AddStorage {
-                    name,
-                    key_expr,
-                    volume_id,
-                    volume_cfg,
-                })
+        "storage-add" => {
+            let Some(payload) = body.put_payload() else {
+                return AdminConfigWriteOutcome::NotDeletable(String::from(subkey));
+            };
+            match parse_storage_add_payload(payload) {
+                Some((name, key_expr, volume_id, volume_cfg)) => {
+                    AdminConfigWriteOutcome::Apply(AdminConfigWrite::AddStorage {
+                        name,
+                        key_expr,
+                        volume_id,
+                        volume_cfg,
+                    })
+                }
+                None => AdminConfigWriteOutcome::Malformed,
             }
-            None => AdminConfigWriteOutcome::Malformed,
-        },
+        }
         // `storage-del <name>` — despawn the named storage; empty name is Malformed.
         #[cfg(feature = "adminspace-config-hotreload")]
         "storage-del" => {
+            let Some(payload) = body.put_payload() else {
+                return AdminConfigWriteOutcome::NotDeletable(String::from(subkey));
+            };
             let name = String::from_utf8_lossy(payload);
             let name = name.trim();
             if name.is_empty() {
@@ -1909,6 +2019,9 @@ pub fn parse_admin_config_write(
         // failure this whole gate exists to prevent, and a typo must be reported
         // to the operator rather than silently locking or unlocking a node.
         "admin-read" => {
+            let Some(payload) = body.put_payload() else {
+                return AdminConfigWriteOutcome::NotDeletable(String::from(subkey));
+            };
             let value = String::from_utf8_lossy(payload);
             match value.trim() {
                 "true" => AdminConfigWriteOutcome::Apply(AdminConfigWrite::AdminReadPermit(true)),
@@ -1938,14 +2051,24 @@ pub fn parse_admin_config_write(
         // the bound is currently inert. It stops being inert the day a
         // single-segment key becomes honoured AND runtime-mutable, and the fix
         // then is a distinct wire prefix, not a guess here.
-        other if other.contains('/') => {
-            let value = String::from_utf8_lossy(payload);
-            let value = value.trim();
-            AdminConfigWriteOutcome::Apply(AdminConfigWrite::SetKey {
-                key: String::from(other),
-                value: String::from(value),
-            })
-        }
+        // R2646 — the one arm that takes BOTH bodies, because it is the one that
+        // names a config PATH rather than an action, and a config path is
+        // exactly what upstream's delete removes.
+        other if other.contains('/') => match body {
+            AdminConfigWriteBody::Put(payload) => {
+                let value = String::from_utf8_lossy(payload);
+                let value = value.trim();
+                AdminConfigWriteOutcome::Apply(AdminConfigWrite::SetKey {
+                    key: String::from(other),
+                    value: String::from(value),
+                })
+            }
+            AdminConfigWriteBody::Del => {
+                AdminConfigWriteOutcome::Apply(AdminConfigWrite::RemoveKey {
+                    key: String::from(other),
+                })
+            }
+        },
         other => AdminConfigWriteOutcome::UnknownKey(String::from(other)),
     }
 }
@@ -2169,7 +2292,12 @@ mod tests {
         // remainder is the sub-key, and a real intent comes back.
         let key = format!("{prefix}connect-add");
         assert_eq!(
-            parse_admin_config_write(&prefix, &key, b"tcp/127.0.0.1:7447", true),
+            parse_admin_config_write(
+                &prefix,
+                &key,
+                AdminConfigWriteBody::Put(b"tcp/127.0.0.1:7447"),
+                true
+            ),
             AdminConfigWriteOutcome::Apply(AdminConfigWrite::ConnectAdd(vec![String::from(
                 "tcp/127.0.0.1:7447"
             )])),
@@ -2180,7 +2308,12 @@ mod tests {
         // CONTROL — the defect itself, reproduced: the same key stripped by the
         // PATTERN plus a slash must NOT decode.
         assert_eq!(
-            parse_admin_config_write(&format!("{pattern}/"), &key, b"tcp/127.0.0.1:7447", true),
+            parse_admin_config_write(
+                &format!("{pattern}/"),
+                &key,
+                AdminConfigWriteBody::Put(b"tcp/127.0.0.1:7447"),
+                true
+            ),
             AdminConfigWriteOutcome::NotAWrite,
             "the PATTERN where the PREFIX belongs must not decode — if this arm ever \
              passes, this test no longer discriminates"
@@ -2371,7 +2504,7 @@ mod tests {
         let out = parse_admin_config_write(
             WRITE_PREFIX,
             "@/a1b2/peer/config/acl-deny",
-            b"  mesh/data  ",
+            AdminConfigWriteBody::Put(b"  mesh/data  "),
             true,
         );
         assert_eq!(
@@ -2387,7 +2520,7 @@ mod tests {
         let out = parse_admin_config_write(
             WRITE_PREFIX,
             "@/a1b2/peer/config/adminspace/permissions/read",
-            b"  true  ",
+            AdminConfigWriteBody::Put(b"  true  "),
             true,
         );
         assert_eq!(
@@ -2408,7 +2541,7 @@ mod tests {
         let out = parse_admin_config_write(
             WRITE_PREFIX,
             "@/a1b2/peer/config/acl-denyy",
-            b"mesh/data",
+            AdminConfigWriteBody::Put(b"mesh/data"),
             true,
         );
         assert_eq!(
@@ -2424,7 +2557,7 @@ mod tests {
         let out = parse_admin_config_write(
             WRITE_PREFIX,
             "@/a1b2/peer/config/adminspace/permissions/read",
-            b"true",
+            AdminConfigWriteBody::Put(b"true"),
             false,
         );
         assert_eq!(out, AdminConfigWriteOutcome::Denied);
@@ -2437,7 +2570,7 @@ mod tests {
         let out = parse_admin_config_write(
             WRITE_PREFIX,
             "@/a1b2/peer/config/acl-deny",
-            b"mesh/data",
+            AdminConfigWriteBody::Put(b"mesh/data"),
             false,
         );
         assert_eq!(out, AdminConfigWriteOutcome::Denied);
@@ -2448,7 +2581,12 @@ mod tests {
         // The gate is checked BEFORE strip/decode (zenoh order): even a well-formed
         // acl-deny is Denied when the permission is off — the deny does not depend
         // on the payload being valid.
-        let out = parse_admin_config_write(WRITE_PREFIX, "@/a1b2/peer/config/acl-deny", b"", false);
+        let out = parse_admin_config_write(
+            WRITE_PREFIX,
+            "@/a1b2/peer/config/acl-deny",
+            AdminConfigWriteBody::Put(b""),
+            false,
+        );
         assert_eq!(out, AdminConfigWriteOutcome::Denied);
     }
 
@@ -2462,7 +2600,7 @@ mod tests {
         let out = parse_admin_config_write(
             WRITE_PREFIX,
             "@/a1b2/peer/config/connect-add",
-            b" tcp/127.0.0.1:7447 , tcp/127.0.0.1:7448 ",
+            AdminConfigWriteBody::Put(b" tcp/127.0.0.1:7447 , tcp/127.0.0.1:7448 "),
             true,
         );
         assert_eq!(
@@ -2491,7 +2629,7 @@ mod tests {
                 parse_admin_config_write(
                     WRITE_PREFIX,
                     "@/a1b2/peer/config/connect-add",
-                    payload,
+                    AdminConfigWriteBody::Put(payload),
                     true,
                 ),
                 AdminConfigWriteOutcome::Malformed,
@@ -2508,7 +2646,7 @@ mod tests {
         let out = parse_admin_config_write(
             WRITE_PREFIX,
             "@/a1b2/peer/config/connect-add",
-            b"tcp/127.0.0.1:7447",
+            AdminConfigWriteBody::Put(b"tcp/127.0.0.1:7447"),
             false,
         );
         assert_eq!(out, AdminConfigWriteOutcome::Denied);
@@ -2516,19 +2654,102 @@ mod tests {
 
     #[test]
     fn parse_config_write_empty_acl_deny_is_malformed() {
-        let out =
-            parse_admin_config_write(WRITE_PREFIX, "@/a1b2/peer/config/acl-deny", b"   ", true);
+        let out = parse_admin_config_write(
+            WRITE_PREFIX,
+            "@/a1b2/peer/config/acl-deny",
+            AdminConfigWriteBody::Put(b"   "),
+            true,
+        );
         assert_eq!(out, AdminConfigWriteOutcome::Malformed);
     }
 
     #[test]
     fn parse_config_write_unknown_subkey() {
         // Only acl-deny is decoded; the full json5 engine is deferred §5.23.
-        let out =
-            parse_admin_config_write(WRITE_PREFIX, "@/a1b2/peer/config/batch-size", b"100", true);
+        let out = parse_admin_config_write(
+            WRITE_PREFIX,
+            "@/a1b2/peer/config/batch-size",
+            AdminConfigWriteBody::Put(b"100"),
+            true,
+        );
         assert_eq!(
             out,
             AdminConfigWriteOutcome::UnknownKey(String::from("batch-size"))
+        );
+    }
+
+    /// R2646 — the DELETE half of the gate, across the whole sub-key
+    /// population at once rather than on the one case that motivated it.
+    ///
+    /// The population is what makes this a test of the DISPATCH rather than of
+    /// one arm: a config PATH deletes to a remove-key intent, wz's own
+    /// action-named sub-keys answer `NotDeletable`, an unrecognized sub-key
+    /// still answers `UnknownKey` (it is not "recognized but undeletable"), and
+    /// a key outside the write prefix is still `NotAWrite`. Collapsing any two
+    /// of those four is a behaviour an operator reads off the node's log, so
+    /// each is asserted by NAME.
+    ///
+    /// ⚠ `admin-read` is in the list deliberately: it names the same underlying
+    /// permission as the path `adminspace/permissions/read` one row below, and
+    /// the two answer DIFFERENTLY to a delete. That is correct rather than
+    /// inconsistent — one is an action spelling, the other is the config path
+    /// upstream would remove — and asserting both here is what stops a later
+    /// round "fixing" the asymmetry by making the action spelling deletable.
+    #[test]
+    fn the_delete_half_decodes_by_sub_key_shape() {
+        for (keyexpr, expected) in [
+            (
+                "@/a1b2/peer/config/adminspace/permissions/read",
+                AdminConfigWriteOutcome::Apply(AdminConfigWrite::RemoveKey {
+                    key: String::from("adminspace/permissions/read"),
+                }),
+            ),
+            (
+                "@/a1b2/peer/config/acl-deny",
+                AdminConfigWriteOutcome::NotDeletable(String::from("acl-deny")),
+            ),
+            (
+                "@/a1b2/peer/config/connect-add",
+                AdminConfigWriteOutcome::NotDeletable(String::from("connect-add")),
+            ),
+            (
+                "@/a1b2/peer/config/admin-read",
+                AdminConfigWriteOutcome::NotDeletable(String::from("admin-read")),
+            ),
+            (
+                "@/a1b2/peer/config/batch-size",
+                AdminConfigWriteOutcome::UnknownKey(String::from("batch-size")),
+            ),
+            (
+                "@/a1b2/other/config/x/y",
+                AdminConfigWriteOutcome::NotAWrite,
+            ),
+        ] {
+            assert_eq!(
+                parse_admin_config_write(WRITE_PREFIX, keyexpr, AdminConfigWriteBody::Del, true),
+                expected,
+                "the delete of '{keyexpr}'"
+            );
+        }
+    }
+
+    /// R2646 — a DELETE is a WRITE, so `permissions.write == false` refuses it.
+    ///
+    /// The half of the permission gate that a separate delete entry point would
+    /// have lost. Asserted on the key that WOULD otherwise decode to an intent,
+    /// so a `Denied` here cannot be the sub-key failing to decode for some
+    /// other reason.
+    #[test]
+    fn a_delete_is_denied_without_the_write_permission() {
+        assert_eq!(
+            parse_admin_config_write(
+                WRITE_PREFIX,
+                "@/a1b2/peer/config/adminspace/permissions/read",
+                AdminConfigWriteBody::Del,
+                false
+            ),
+            AdminConfigWriteOutcome::Denied,
+            "a delete is a write and the write permission gates it"
         );
     }
 
@@ -2536,7 +2757,12 @@ mod tests {
     fn parse_config_write_bare_config_key_is_not_a_write() {
         // The bare `.../config` GET key the `/**` write subscriber also matches has
         // no trailing sub-key -> NotAWrite (the demo's prior `else { return }`).
-        let out = parse_admin_config_write(WRITE_PREFIX, "@/a1b2/peer/config", b"x", true);
+        let out = parse_admin_config_write(
+            WRITE_PREFIX,
+            "@/a1b2/peer/config",
+            AdminConfigWriteBody::Put(b"x"),
+            true,
+        );
         assert_eq!(out, AdminConfigWriteOutcome::NotAWrite);
     }
 
@@ -2550,7 +2776,7 @@ mod tests {
             let out = parse_admin_config_write(
                 WRITE_PREFIX,
                 "@/a1b2/peer/config/admin-read",
-                payload,
+                AdminConfigWriteBody::Put(payload),
                 true,
             );
             assert_eq!(
@@ -2566,7 +2792,7 @@ mod tests {
             parse_admin_config_write(
                 WRITE_PREFIX,
                 "@/a1b2/peer/config/admin-read",
-                b" false\n",
+                AdminConfigWriteBody::Put(b" false\n"),
                 true
             ),
             AdminConfigWriteOutcome::Apply(AdminConfigWrite::AdminReadPermit(false))
@@ -2587,7 +2813,7 @@ mod tests {
                 parse_admin_config_write(
                     WRITE_PREFIX,
                     "@/a1b2/peer/config/admin-read",
-                    payload,
+                    AdminConfigWriteBody::Put(payload),
                     true
                 ),
                 AdminConfigWriteOutcome::Malformed,
@@ -2607,7 +2833,7 @@ mod tests {
             parse_admin_config_write(
                 WRITE_PREFIX,
                 "@/a1b2/peer/config/admin-read",
-                b"true",
+                AdminConfigWriteBody::Put(b"true"),
                 false
             ),
             AdminConfigWriteOutcome::Denied
@@ -2627,7 +2853,7 @@ mod tests {
             let out = parse_admin_config_write(
                 WRITE_PREFIX,
                 "@/a1b2/peer/config/storage-add",
-                b"demo:demo/**",
+                AdminConfigWriteBody::Put(b"demo:demo/**"),
                 true,
             );
             assert_eq!(
@@ -2649,7 +2875,7 @@ mod tests {
             let out = parse_admin_config_write(
                 WRITE_PREFIX,
                 "@/a1b2/peer/config/storage-add",
-                b"demo:demo/**",
+                AdminConfigWriteBody::Put(b"demo:demo/**"),
                 true,
             );
             let AdminConfigWriteOutcome::Apply(intent) = out else {
@@ -2667,7 +2893,7 @@ mod tests {
             let out = parse_admin_config_write(
                 WRITE_PREFIX,
                 "@/a1b2/peer/config/storage-add",
-                b"demo@wzvol_example:demo/**",
+                AdminConfigWriteBody::Put(b"demo@wzvol_example:demo/**"),
                 true,
             );
             assert_eq!(
@@ -2701,7 +2927,7 @@ mod tests {
             let out = parse_admin_config_write(
                 WRITE_PREFIX,
                 "@/a1b2/peer/config/storage-add",
-                b"mirror:@/a1b2/peer/**",
+                AdminConfigWriteBody::Put(b"mirror:@/a1b2/peer/**"),
                 true,
             );
             assert_eq!(
@@ -2722,7 +2948,7 @@ mod tests {
             let out = parse_admin_config_write(
                 WRITE_PREFIX,
                 "@/a1b2/peer/config/storage-add",
-                b"a@b@fsdyn:demo/**",
+                AdminConfigWriteBody::Put(b"a@b@fsdyn:demo/**"),
                 true,
             );
             assert_eq!(
@@ -2747,7 +2973,7 @@ mod tests {
             let out = parse_admin_config_write(
                 WRITE_PREFIX,
                 "@/a1b2/peer/config/storage-add",
-                b"demo@fsdyn?dir=/tmp/wz&mode=rw:demo/**",
+                AdminConfigWriteBody::Put(b"demo@fsdyn?dir=/tmp/wz&mode=rw:demo/**"),
                 true,
             );
             let AdminConfigWriteOutcome::Apply(intent) = out else {
@@ -2773,7 +2999,7 @@ mod tests {
             let out = parse_admin_config_write(
                 WRITE_PREFIX,
                 "@/a1b2/peer/config/storage-add",
-                b"demo@fsdyn:demo/**",
+                AdminConfigWriteBody::Put(b"demo@fsdyn:demo/**"),
                 true,
             );
             let AdminConfigWriteOutcome::Apply(intent) = out else {
@@ -2797,7 +3023,7 @@ mod tests {
                     parse_admin_config_write(
                         WRITE_PREFIX,
                         "@/a1b2/peer/config/storage-add",
-                        payload,
+                        AdminConfigWriteBody::Put(payload),
                         true,
                     ),
                     AdminConfigWriteOutcome::Malformed,
@@ -2816,7 +3042,7 @@ mod tests {
                 parse_admin_config_write(
                     WRITE_PREFIX,
                     "@/a1b2/peer/config/storage-add",
-                    b"demo@?dir=/tmp:demo/**",
+                    AdminConfigWriteBody::Put(b"demo@?dir=/tmp:demo/**"),
                     true,
                 ),
                 AdminConfigWriteOutcome::Malformed,
@@ -2830,7 +3056,7 @@ mod tests {
             let out = parse_admin_config_write(
                 WRITE_PREFIX,
                 "@/a1b2/peer/config/storage-add",
-                b"  demo : foo:bar/**  ",
+                AdminConfigWriteBody::Put(b"  demo : foo:bar/**  "),
                 true,
             );
             assert_eq!(
@@ -2861,7 +3087,7 @@ mod tests {
                 let out = parse_admin_config_write(
                     WRITE_PREFIX,
                     "@/a1b2/peer/config/storage-add",
-                    payload,
+                    AdminConfigWriteBody::Put(payload),
                     true,
                 );
                 assert_eq!(
@@ -2877,7 +3103,7 @@ mod tests {
             let out = parse_admin_config_write(
                 WRITE_PREFIX,
                 "@/a1b2/peer/config/storage-del",
-                b"  demo  ",
+                AdminConfigWriteBody::Put(b"  demo  "),
                 true,
             );
             assert_eq!(
@@ -2893,7 +3119,7 @@ mod tests {
             let out = parse_admin_config_write(
                 WRITE_PREFIX,
                 "@/a1b2/peer/config/storage-del",
-                b"  ",
+                AdminConfigWriteBody::Put(b"  "),
                 true,
             );
             assert_eq!(out, AdminConfigWriteOutcome::Malformed);
@@ -2905,7 +3131,7 @@ mod tests {
             let out = parse_admin_config_write(
                 WRITE_PREFIX,
                 "@/a1b2/peer/config/storage-add",
-                b"demo:demo/**",
+                AdminConfigWriteBody::Put(b"demo:demo/**"),
                 false,
             );
             assert_eq!(out, AdminConfigWriteOutcome::Denied);

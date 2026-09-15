@@ -357,9 +357,18 @@ def selftest() -> int:
         return 1
 
     # R2643 — a HONOURED row whose mapping arm is gone must be caught.
+    #
+    # R2646 re-anchored the damage onto the arm's KEY LITERAL ALONE. It used to
+    # carry the arm's body text (`=> match ingest.config.adminspace {`), and when
+    # `apply_one_key` grew its delete half — the same arms now serve both, so the
+    # body changed shape — this replacement stopped matching and the fixture went
+    # INERT. It was the selftest's own inertness check that said so rather than a
+    # green run, which is the whole reason that check exists; the lesson is that a
+    # damage anchored to a body is a damage that decays whenever the body is
+    # refactored, while the key literal is what the gate actually parses.
     unmapped = real.replace(
-        '            "adminspace/permissions/write" => match ingest.config.adminspace {',
-        '            "adminspace/permissions/WRITE" => match ingest.config.adminspace {',
+        '            "adminspace/permissions/write" =>',
+        '            "adminspace/permissions/WRITE" =>',
     )
     if unmapped == real:
         print("selftest FAIL: could not damage a mapping arm; the fixture is inert")

@@ -189,17 +189,27 @@ pub const RUNTIME_MUTABLE_CONFIG_KEYS: &[RuntimeMutableKey] = &[
     },
 ];
 
-/// Why a runtime key write was refused — see [`WzConfig::set_by_key`].
+/// Why a runtime key write was refused — see [`WzConfig::set_by_key`] and
+/// [`WzConfig::remove_by_key`].
 ///
 /// Every arm NAMES the key. Upstream refuses an unknown config path at insert
 /// and says which; a write that failed silently would be indistinguishable from
 /// one that applied, which is the shape this whole seam exists to end.
+///
+/// R2646 renamed this from `SetByKeyError`, and the rename is the change: the
+/// delete half now returns it too, and upstream's write gate is ONE gate that
+/// matches on the body (`zenoh/src/net/runtime/adminspace.rs` @ `match
+/// &msg.payload {`) after ONE permission check. A name saying "set" would have
+/// made the shared refusals read as the set half's, which is how two halves of
+/// one gate start justifying separate rules. `MalformedValue` is the one arm
+/// only the set half can raise — a delete carries no value to malform — and
+/// that asymmetry is real rather than a naming accident.
 #[cfg(all(
     feature = "zenoh-config",
     any(feature = "adminspace-core", feature = "routing-router-hat")
 ))]
 #[derive(Debug, Clone, PartialEq)]
-pub enum SetByKeyError {
+pub enum ConfigKeyWriteError {
     /// A segment was empty or carried something outside `[A-Za-z0-9_]`. Refused
     /// before the document is built, because the key is spliced INTO it.
     MalformedKey { key: String },
@@ -971,7 +981,7 @@ impl WzConfig {
             if !ingest.named.contains(&row.key) {
                 continue;
             }
-            if self.apply_one_key(row.key, ingest) {
+            if self.apply_one_key(row.key, Some(ingest)) {
                 applied.push(row.key);
             }
         }
@@ -1012,22 +1022,14 @@ impl WzConfig {
         feature = "zenoh-config",
         any(feature = "adminspace-core", feature = "routing-router-hat")
     ))]
-    pub fn set_by_key(&mut self, key: &str, value: &str) -> Result<(), SetByKeyError> {
-        let segments: Vec<&str> = key.split('/').collect();
-        if segments.is_empty()
-            || segments
-                .iter()
-                .any(|s| s.is_empty() || !s.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_'))
-        {
-            return Err(SetByKeyError::MalformedKey {
-                key: String::from(key),
-            });
-        }
+    pub fn set_by_key(&mut self, key: &str, value: &str) -> Result<(), ConfigKeyWriteError> {
+        let segments = Self::key_segments(key)?;
 
-        let parsed =
-            wz_session_core::json5::parse(value).map_err(|_| SetByKeyError::MalformedValue {
+        let parsed = wz_session_core::json5::parse(value).map_err(|_| {
+            ConfigKeyWriteError::MalformedValue {
                 key: String::from(key),
-            })?;
+            }
+        })?;
         let canonical = parsed.to_json5_text();
 
         let mut document = String::new();
@@ -1043,14 +1045,18 @@ impl WzConfig {
         }
 
         let ingest = crate::zenoh_config::ZenohNodeConfig::from_json5(&document)
-            .map_err(SetByKeyError::Document)?;
+            .map_err(ConfigKeyWriteError::Document)?;
         // The reader ACCEPTS a key wz knows and does not honour — a stock zenoh
         // document carries many, and refusing the whole document over one would
         // be wrong. It reports them separately instead, and a write naming one
         // must not be answered the same way as a write naming a key wz reads:
         // R2644's first draft collapsed the two and a test said so.
+        // R2646 — `ignored` is now computed by `zenoh_config::honours_config_key`,
+        // which is also what the DELETE half asks directly (it has no document to
+        // partition). One definition, so the two halves of this gate cannot come
+        // to disagree about which keys wz honours.
         if ingest.ignored.iter().any(|ignored| ignored == key) {
-            return Err(SetByKeyError::NotHonoured {
+            return Err(ConfigKeyWriteError::NotHonoured {
                 key: String::from(key),
             });
         }
@@ -1079,13 +1085,96 @@ impl WzConfig {
             .find(|row| row.key == key)
         {
             if row.discipline == MutationDiscipline::Push {
-                return Err(SetByKeyError::NeedsSink {
+                return Err(ConfigKeyWriteError::NeedsSink {
                     key: String::from(key),
                 });
             }
         }
         if self.apply_zenoh_config(&ingest).is_empty() {
-            return Err(SetByKeyError::NotRuntimeMutable {
+            return Err(ConfigKeyWriteError::NotRuntimeMutable {
+                key: String::from(key),
+            });
+        }
+        Ok(())
+    }
+
+    /// The key-segment check both halves of the write gate apply, returning the
+    /// split segments the set half then splices into its document.
+    ///
+    /// Shared rather than repeated because it is a SAFETY check on the set side
+    /// (the segments are built INTO a JSON5 document, so a segment carrying a
+    /// quote could close the object early) and the delete side takes the same
+    /// key from the same wire. A delete builds no document, so the check is not
+    /// load-bearing there in the same way — which is exactly why it would have
+    /// been tempting to write a laxer one, and why there is only one.
+    #[cfg(all(
+        feature = "zenoh-config",
+        any(feature = "adminspace-core", feature = "routing-router-hat")
+    ))]
+    fn key_segments(key: &str) -> Result<Vec<&str>, ConfigKeyWriteError> {
+        let segments: Vec<&str> = key.split('/').collect();
+        if segments.is_empty()
+            || segments
+                .iter()
+                .any(|s| s.is_empty() || !s.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_'))
+        {
+            return Err(ConfigKeyWriteError::MalformedKey {
+                key: String::from(key),
+            });
+        }
+        Ok(segments)
+    }
+
+    /// Delete ONE config key at runtime, the way upstream's admin DEL does —
+    /// restoring it to the schema default.
+    ///
+    /// ⭐ WHY A RESTORE IS THE FAITHFUL READING OF A DELETE HERE, stated because
+    /// R2644's note said the opposite and was right about a different subject.
+    /// That note ("setting a key to its default is not removing it, so a delete
+    /// needs the held document") is true when a config ROUND-TRIPS a document:
+    /// there, removing a key and defaulting it differ observably, because the
+    /// re-emitted document still shows the defaulted key. wz's live config is a
+    /// struct of TYPED FIELDS with no absent state — there is no document to
+    /// re-emit and no way to observe "present at the default" apart from "absent"
+    /// — so in a typed config the entire observable content of a delete is that
+    /// the key goes back to its default. Upstream agrees on what the NODE then
+    /// does: its `config.remove(key)` drops the override so the default applies.
+    ///
+    /// ⚠ WHAT THIS DOES NOT COVER, named rather than left to be found: upstream
+    /// tries `try_remove_json5_array_item(key)` FIRST and only then `remove`, so
+    /// a key addressing ONE ELEMENT of an array is removable there and is not
+    /// here — the same asymmetry the set half carries against
+    /// `try_insert_json5_array_item`. Both halves are missing the array-item
+    /// route, which makes it one gap in the array addressing of this seam rather
+    /// than a property of the delete, and it is registered as such.
+    ///
+    /// The refusals are the set half's, in the set half's order, for the reason
+    /// given at [`Self::set_by_key`]: an unhonoured key must not be answered as
+    /// if wz acted on it, and a PUSH-discipline key must not be silently stored.
+    /// `MalformedValue` alone cannot arise — a delete carries no value.
+    #[cfg(all(
+        feature = "zenoh-config",
+        any(feature = "adminspace-core", feature = "routing-router-hat")
+    ))]
+    pub fn remove_by_key(&mut self, key: &str) -> Result<(), ConfigKeyWriteError> {
+        let _ = Self::key_segments(key)?;
+        if !crate::zenoh_config::honours_config_key(key) {
+            return Err(ConfigKeyWriteError::NotHonoured {
+                key: String::from(key),
+            });
+        }
+        if let Some(row) = RUNTIME_MUTABLE_CONFIG_KEYS
+            .iter()
+            .find(|row| row.key == key)
+        {
+            if row.discipline == MutationDiscipline::Push {
+                return Err(ConfigKeyWriteError::NeedsSink {
+                    key: String::from(key),
+                });
+            }
+        }
+        if !self.apply_one_key(key, None) {
+            return Err(ConfigKeyWriteError::NotRuntimeMutable {
                 key: String::from(key),
             });
         }
@@ -1093,6 +1182,26 @@ impl WzConfig {
     }
 
     /// One key of [`Self::apply_zenoh_config`]; `true` when the value landed.
+    ///
+    /// `source` is the document the value comes from. `None` means THE SCHEMA
+    /// DEFAULT — the delete half, where upstream removes the override so the
+    /// default applies again (`zenoh/src/net/runtime/adminspace.rs`
+    /// @ `PushBody::Del(_) => {` reaching @ `config.remove(key)`).
+    ///
+    /// ⭐ THE TWO HALVES SHARE THIS ONE TABLE, and that is the design rather
+    /// than a saving. R2646's first sketch was a second `reset_one_key` with
+    /// the same key list, which is two tables that must agree about which keys
+    /// exist — the shape this file already refuses for the runtime-mutable
+    /// count. Sharing the arms means a new registry key gets its delete half
+    /// from the same edit that gives it its set half, and it means
+    /// `runtime_mutable_surface_gate.py`'s existing "every honoured row is
+    /// named here" check covers BOTH halves without learning anything new.
+    ///
+    /// ⚠ The default is taken from [`Self::default`], not from a literal
+    /// repeated here: that impl is where this crate states zenoh's defaults
+    /// (its own doc names `PermissionsConf`'s read `true` / write `false`, and
+    /// R2634 recorded that an empty weight list is upstream's default too). A
+    /// literal here would be a third copy of a number nobody re-derives.
     ///
     /// The catch-all is NOT a silent pass: a registry key with no arm here
     /// returns `false`, so it never appears in the applied list, and
@@ -1105,28 +1214,37 @@ impl WzConfig {
     fn apply_one_key(
         &mut self,
         key: &str,
-        ingest: &crate::zenoh_config::ZenohConfigIngest,
+        source: Option<&crate::zenoh_config::ZenohConfigIngest>,
     ) -> bool {
         match key {
             #[cfg(feature = "adminspace-core")]
-            "adminspace/permissions/read" => match ingest.config.adminspace {
-                Some(admin) => {
-                    self.admin_permissions.read = admin.read;
-                    true
-                }
-                None => false,
-            },
+            "adminspace/permissions/read" => {
+                self.admin_permissions.read = match source {
+                    Some(ingest) => match ingest.config.adminspace {
+                        Some(admin) => admin.read,
+                        None => return false,
+                    },
+                    None => Self::default().admin_permissions.read,
+                };
+                true
+            }
             #[cfg(feature = "adminspace-core")]
-            "adminspace/permissions/write" => match ingest.config.adminspace {
-                Some(admin) => {
-                    self.admin_permissions.write = admin.write;
-                    true
-                }
-                None => false,
-            },
+            "adminspace/permissions/write" => {
+                self.admin_permissions.write = match source {
+                    Some(ingest) => match ingest.config.adminspace {
+                        Some(admin) => admin.write,
+                        None => return false,
+                    },
+                    None => Self::default().admin_permissions.write,
+                };
+                true
+            }
             #[cfg(feature = "routing-router-hat")]
             "routing/router/linkstate/transport_weights" => {
-                self.router_link_weights = ingest.config.router_transport_weights.clone();
+                self.router_link_weights = match source {
+                    Some(ingest) => ingest.config.router_transport_weights.clone(),
+                    None => Self::default().router_link_weights,
+                };
                 true
             }
             _ => false,
@@ -1323,7 +1441,7 @@ mod tests {
             .expect_err("a value carrying a second member is not a value");
         assert_eq!(
             err,
-            SetByKeyError::MalformedValue {
+            ConfigKeyWriteError::MalformedValue {
                 key: String::from("adminspace/permissions/read")
             }
         );
@@ -1345,7 +1463,7 @@ mod tests {
             assert!(
                 matches!(
                     cfg.set_by_key(bad, "true"),
-                    Err(SetByKeyError::MalformedKey { .. })
+                    Err(ConfigKeyWriteError::MalformedKey { .. })
                 ),
                 "refused before the document is built: {bad:?}"
             );
@@ -1368,14 +1486,14 @@ mod tests {
         // Never heard of it: the reader's acceptance boundary refuses.
         assert!(matches!(
             cfg.set_by_key("no_such_key", "true"),
-            Err(SetByKeyError::Document(_))
+            Err(ConfigKeyWriteError::Document(_))
         ));
 
         // Known and deliberately NOT honoured: the reader accepts the document
         // — a stock zenoh file carries many such keys — and reports it ignored.
         assert_eq!(
             cfg.set_by_key("downsampling", "[]"),
-            Err(SetByKeyError::NotHonoured {
+            Err(ConfigKeyWriteError::NotHonoured {
                 key: String::from("downsampling")
             })
         );
@@ -1383,7 +1501,7 @@ mod tests {
         // Honoured at startup, not runtime-mutable: accepted, read, unapplied.
         assert_eq!(
             cfg.set_by_key("mode", r#""router""#),
-            Err(SetByKeyError::NotRuntimeMutable {
+            Err(ConfigKeyWriteError::NotRuntimeMutable {
                 key: String::from("mode")
             })
         );
@@ -1414,7 +1532,7 @@ mod tests {
             .expect_err("a push-discipline key cannot be written without a sink");
         assert_eq!(
             err,
-            SetByKeyError::NeedsSink {
+            ConfigKeyWriteError::NeedsSink {
                 key: String::from("routing/router/linkstate/transport_weights")
             }
         );
@@ -1423,6 +1541,89 @@ mod tests {
             before,
             "nothing was stored — including a row set reconfigure_* would refuse"
         );
+    }
+
+    /// R2646 — the DELETE half restores the schema default, and it is measured
+    /// as a RESTORE rather than as "the value we happened to write is gone".
+    ///
+    /// ⭐ The fixture moves the key AWAY from its default first, and the
+    /// assertion is against [`WzConfig::default`] rather than against the
+    /// literal `true`. A test asserting the literal would still pass if
+    /// `apply_one_key`'s delete arm were rewired to any other source that
+    /// happened to yield `true` — including the value already there, which is
+    /// the one wrong behaviour a delete can have (doing nothing and reporting
+    /// success). Reading the default through the same accessor the production
+    /// arm reads it through is what makes this a property rather than a
+    /// coincidence.
+    ///
+    /// The anti-vacuity half is the `assert_ne!`: if the write never moved the
+    /// value off its default, the restore assertion would hold for a
+    /// `remove_by_key` that did nothing at all.
+    #[cfg(all(feature = "zenoh-config", feature = "adminspace-core"))]
+    #[test]
+    fn a_delete_restores_the_schema_default() {
+        let mut cfg = WzConfig::new();
+        let schema_default = WzConfig::default().admin_permissions().read;
+
+        cfg.set_by_key("adminspace/permissions/read", "false")
+            .expect("the read permission is runtime-mutable");
+        assert_ne!(
+            cfg.admin_permissions().read,
+            schema_default,
+            "the fixture must first move the key OFF its default, or the \
+             restore below proves nothing"
+        );
+
+        cfg.remove_by_key("adminspace/permissions/read")
+            .expect("a runtime-mutable honoured key can be deleted");
+        assert_eq!(
+            cfg.admin_permissions().read,
+            schema_default,
+            "a delete restores the key to the schema default — upstream drops \
+             the override so the default applies again"
+        );
+    }
+
+    /// R2646 — the delete half refuses exactly what the set half refuses, and
+    /// by the same names.
+    ///
+    /// This is the test that would catch the two halves drifting: it drives the
+    /// SAME three keys through BOTH entry points and asserts the refusals match
+    /// pairwise. A delete that quietly accepted an unhonoured key — or that
+    /// stored a push-discipline key the set half refuses to store — would be a
+    /// second, laxer write path into the same config, reachable from the same
+    /// wire by changing one message kind.
+    ///
+    /// `downsampling` is here for the reason R2644 put it in the set half's
+    /// tests: it is push-discipline AND unhonoured, so it is the key that
+    /// tells `NotHonoured` from `NeedsSink` and proves the ordering did not
+    /// swap.
+    #[cfg(all(
+        feature = "zenoh-config",
+        feature = "adminspace-core",
+        feature = "routing-router-hat"
+    ))]
+    #[test]
+    fn the_delete_half_refuses_what_the_set_half_refuses() {
+        for (key, value) in [
+            // Malformed: a segment outside `[A-Za-z0-9_]`.
+            ("adminspace/permissions/re-ad", "true"),
+            // Known, deliberately unhonoured.
+            ("downsampling", "[]"),
+            // Honoured and runtime-mutable, but PUSH discipline.
+            ("routing/router/linkstate/transport_weights", "[]"),
+        ] {
+            let set = WzConfig::new()
+                .set_by_key(key, value)
+                .expect_err("the set half refuses this key");
+            let del = WzConfig::new()
+                .remove_by_key(key)
+                .expect_err("so must the delete half");
+            assert_eq!(
+                set, del,
+                "the two halves of ONE write gate must refuse '{key}' identically"
+            );
+        }
     }
 
     /// R2643 — the weights row reaches the live slice, and the applied list

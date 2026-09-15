@@ -535,7 +535,8 @@ mod tests {
     async fn config_hotreload_spawns_despawns_storage_and_reflects_plugin_state() {
         use crate::compiled_plugins_dyn;
         use wz_session_core::adminspace::{
-            parse_admin_config_write, AdminConfigWrite, AdminConfigWriteOutcome, AdminPluginState,
+            parse_admin_config_write, AdminConfigWrite, AdminConfigWriteBody,
+            AdminConfigWriteOutcome, AdminPluginState,
         };
 
         let session = make_session();
@@ -551,8 +552,12 @@ mod tests {
 
         // A config-write `storage-add demo:demo/**` → AddStorage → StorageConfig → live spawn.
         let prefix = "@/z/peer/config/";
-        let out =
-            parse_admin_config_write(prefix, "@/z/peer/config/storage-add", b"demo:demo/**", true);
+        let out = parse_admin_config_write(
+            prefix,
+            "@/z/peer/config/storage-add",
+            AdminConfigWriteBody::Put(b"demo:demo/**"),
+            true,
+        );
         let AdminConfigWriteOutcome::Apply(intent) = out else {
             panic!("storage-add must Apply: {out:?}");
         };
@@ -575,7 +580,12 @@ mod tests {
         );
 
         // A `storage-del demo` → RemoveStorage → despawn (RAII undeclare) → back to Loaded.
-        let out = parse_admin_config_write(prefix, "@/z/peer/config/storage-del", b"demo", true);
+        let out = parse_admin_config_write(
+            prefix,
+            "@/z/peer/config/storage-del",
+            AdminConfigWriteBody::Put(b"demo"),
+            true,
+        );
         let AdminConfigWriteOutcome::Apply(AdminConfigWrite::RemoveStorage(name)) = out else {
             panic!("storage-del must Apply RemoveStorage: {out:?}");
         };

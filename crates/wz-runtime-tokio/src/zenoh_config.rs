@@ -3218,6 +3218,37 @@ pub const DEEPENABLE_UPSTREAM_KEYS: &[&str] = &[
 /// it now accepts are ones upstream parses and discards. This round exists
 /// because a surface whose NAME is wrong makes the number it yields
 /// unreadable, and a predicate is not exempt from that.
+/// Whether a document naming `path` LANDS somewhere in wz, rather than coming
+/// back in [`ZenohConfigIngest::ignored`].
+///
+/// R2646 lifted this out of the `ignored` partition inside
+/// [`ZenohNodeConfig::from_json5`] so it has two callers rather than one. The
+/// second is [`crate::config::WzConfig::remove_by_key`], the DELETE half of the
+/// admin write gate, which has no document to partition — a delete carries no
+/// value — and so must ask the question directly. Two spellings of "does wz
+/// honour this key" is precisely how the set half and the delete half of one
+/// gate start refusing different keys.
+///
+/// ⚠ NOT the same predicate as [`wz_accepts`], which is deliberately WIDER: it
+/// answers "would wz start on a document containing this", and says yes to keys
+/// wz parses and discards. This one answers "does writing this change
+/// anything".
+pub fn honours_config_key(path: &str) -> bool {
+    HONOURED_CONFIG_KEYS.contains(&path)
+        || HONOURED_SUBTREE_LEAVES.contains(&path)
+        // R2230 (items 579 / 582) — an extension key wz HONOURS is applied, so
+        // reporting it ignored would tell the operator the opposite of what
+        // just happened. The extension keys wz does NOT honour are absent from
+        // this list and so still reported, which is the treatment they had as
+        // unhonoured surface keys and the only signal an operator gets that
+        // upstream retired them.
+        || WZ_EXTENSION_HONOURED_KEYS.contains(&path)
+        // R2075 — a mode table's own leaves (`listen/endpoints/router`) are
+        // wz's to honour, so reporting them as unhonoured would contradict the
+        // resolution that just happened.
+        || inside_a_mode_table(path)
+}
+
 fn wz_accepts(path: &str) -> bool {
     let under = |known: &&str| {
         path.len() > known.len() && path.starts_with(*known) && path.as_bytes()[known.len()] == b'/'
@@ -4493,22 +4524,7 @@ impl ZenohNodeConfig {
 
         let mut ignored: Vec<String> = leaves
             .into_iter()
-            .filter(|p| {
-                !HONOURED_CONFIG_KEYS.contains(&p.as_str())
-                    && !HONOURED_SUBTREE_LEAVES.contains(&p.as_str())
-                    // R2230 (items 579 / 582) — an extension key wz HONOURS is
-                    // applied, so naming it here would tell the operator the
-                    // opposite of what just happened. The extension keys wz does
-                    // NOT honour are absent from this list and so still reported,
-                    // which is the treatment they had as unhonoured surface keys
-                    // and the only signal an operator gets that upstream retired
-                    // them.
-                    && !WZ_EXTENSION_HONOURED_KEYS.contains(&p.as_str())
-                    // R2075 — a mode table's own leaves (`listen/endpoints/router`)
-                    // are wz's to honour, so reporting them as unhonoured would
-                    // contradict the resolution that just happened.
-                    && !inside_a_mode_table(p)
-            })
+            .filter(|p| !honours_config_key(p))
             .collect();
         ignored.dedup();
         Ok(ZenohConfigIngest {
