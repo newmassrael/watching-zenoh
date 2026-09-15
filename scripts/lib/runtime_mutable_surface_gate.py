@@ -154,6 +154,22 @@ def table_rows(text: str) -> list[dict[str, str]]:
     return rows
 
 
+def applied_keys(text: str) -> frozenset[str]:
+    """The keys `WzConfig::apply_one_key` actually has an arm for.
+
+    R2643 — the registry says which key lands in which slice; this says which
+    key the document->live mapping can actually carry. Without this check the
+    two halves drift: a row could name a slice while no arm ever applies it, and
+    the registry would keep asserting a join nothing performs.
+    """
+    m = re.search(r"fn apply_one_key\(.*?\n    \}\n", text, re.S)
+    if not m:
+        raise SystemExit("config.rs: no `apply_one_key` to read")
+    return frozenset(
+        re.findall(r'"([A-Za-z0-9_]+(?:/[A-Za-z0-9_]+)+)"\s*=>', m.group(0))
+    )
+
+
 def key_lists(text: str) -> dict[str, frozenset[str]]:
     out = {}
     for name in ("HONOURED_CONFIG_KEYS", "UNHONOURED_UPSTREAM_CONFIG_KEYS"):
@@ -229,13 +245,51 @@ def grade(config_text: str, zenoh_text: str) -> tuple[int, list[str]]:
             "key no surface count includes." % key
         )
 
+    # R2643 — a key wz HONOURS must also be carried by the document->live
+    # mapping. An UNHONOURED key deliberately is not: the reader refuses it by
+    # name, so a document could never name it, and an arm for it would be an
+    # arm nothing can reach. That asymmetry is the measured one this gate
+    # already prints -- `interceptors` is mutable and unhonoured.
+    applied = applied_keys(config_text)
+    if not applied:
+        findings.append(
+            "`apply_one_key` has no key arms at all. The document->live mapping "
+            "is the half of the join the registry cannot state, and an empty one "
+            "would let every row claim a join nothing performs."
+        )
+    for row in rows:
+        if row["key"] not in lists["HONOURED_CONFIG_KEYS"]:
+            continue
+        if row["key"] not in applied:
+            findings.append(
+                "key `%s` is HONOURED and runtime-mutable, but `apply_one_key` "
+                "has no arm for it, so a config document naming it changes "
+                "nothing. Add the arm, or the registry row asserts a join that "
+                "does not happen." % row["key"]
+            )
+    for key in sorted(applied - {r["key"] for r in rows}):
+        findings.append(
+            "`apply_one_key` applies `%s`, which no RUNTIME_MUTABLE_CONFIG_KEYS "
+            "row names. The mapping and the registry must agree in both "
+            "directions." % key
+        )
+
     push = sum(1 for r in rows if r["discipline"] == "Push")
     pull = sum(1 for r in rows if r["discipline"] == "Pull")
     print(
         "runtime-mutable-surface: %d key(s) over %d slice(s) derived from "
         "config.rs -- %d push, %d pull; %d honoured at startup, %d unhonoured, "
-        "%d unclassified"
-        % (len(rows), len(derived), push, pull, len(honoured), len(unhonoured), len(unknown))
+        "%d unclassified; %d carried by the document->live mapping"
+        % (
+            len(rows),
+            len(derived),
+            push,
+            pull,
+            len(honoured),
+            len(unhonoured),
+            len(unknown),
+            len(applied),
+        )
     )
     print(
         "  the two surfaces are NOT nested: %s"
@@ -302,7 +356,22 @@ def selftest() -> int:
         print("selftest FAIL: a wrong feature was not caught: %s" % findings)
         return 1
 
-    print("runtime-mutable-surface: selftest OK (3 derivations driven)")
+    # R2643 — a HONOURED row whose mapping arm is gone must be caught.
+    unmapped = real.replace(
+        '            "adminspace/permissions/write" => match ingest.config.adminspace {',
+        '            "adminspace/permissions/WRITE" => match ingest.config.adminspace {',
+    )
+    if unmapped == real:
+        print("selftest FAIL: could not damage a mapping arm; the fixture is inert")
+        return 1
+    rc, findings = grade(unmapped, zenoh)
+    if rc == 0 or not any(
+        "has no arm for it" in f and "adminspace/permissions/write" in f for f in findings
+    ):
+        print("selftest FAIL: a honoured row with no mapping arm was not caught: %s" % findings)
+        return 1
+
+    print("runtime-mutable-surface: selftest OK (4 derivations driven)")
     return 0
 
 

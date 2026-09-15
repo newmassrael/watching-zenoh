@@ -879,6 +879,108 @@ impl WzConfig {
         self.admin_permissions = permissions;
     }
 
+    /// Apply a parsed config document's runtime-mutable keys to this config,
+    /// returning the keys it applied, in [`RUNTIME_MUTABLE_CONFIG_KEYS`] order.
+    ///
+    /// ## Why this exists
+    ///
+    /// Until R2643 there was no declared mapping from a config DOCUMENT to the
+    /// live config at all. The document was parsed, its values were poured into
+    /// builder calls by hand at each host — `wz-ap-demo`'s runner spells
+    /// `.with_interceptors(..)` and `.with_admin_permissions(..)` one key at a
+    /// time — and then the document was DISCARDED. That is why so few keys are
+    /// runtime-mutable: with no document to write into, every mutable key costs
+    /// a bespoke setter plus a host edit, so the cost is per key.
+    ///
+    /// Upstream's `Config` IS the document, with typed accessors over it, which
+    /// is what makes `insert_json5(key, value)` reach any path. This function is
+    /// the half of that join wz can have without giving up its typed fields: one
+    /// place that says which document key lands in which live slice, driven by
+    /// the registry rather than by a second hand-written list.
+    ///
+    /// ## Two rules it obeys, both of them measured rather than chosen
+    ///
+    /// ⚠ IT READS `named`, NOT THE MERGED VALUES. `ZenohConfigIngest::named` is
+    /// the set of keys the document actually STATED, and its own doc says why
+    /// the distinction is load-bearing: a merged value resolves to a default for
+    /// a key nobody wrote, so a caller acting on it "would carry a decision the
+    /// operator never made".
+    ///
+    /// ⛔ IT APPLIES PER KEY, NEVER PER SLICE. Two keys share the
+    /// `admin_permissions` slice, and the parser fills the absent one with
+    /// `unwrap_or` — so applying the whole slice from a document that named only
+    /// `read` would silently reset `write` to its default. The control test for
+    /// this is `a_document_naming_one_permission_leaves_its_sibling_alone`;
+    /// collapsing these arms back into one slice assignment reddens it.
+    ///
+    /// ## What it deliberately does NOT do
+    ///
+    /// It stores; it does not push. For a [`MutationDiscipline::Push`] slice the
+    /// consumer holds compiled state, and reaching it is `reconfigure_*`'s job
+    /// through a sink. This is the STARTUP half of the join, before any sink
+    /// exists; calling it on a running node would store a value no consumer has
+    /// seen.
+    #[cfg(all(
+        feature = "zenoh-config",
+        any(feature = "adminspace-core", feature = "routing-router-hat")
+    ))]
+    pub fn apply_zenoh_config(
+        &mut self,
+        ingest: &crate::zenoh_config::ZenohConfigIngest,
+    ) -> Vec<&'static str> {
+        let mut applied = Vec::new();
+        for row in RUNTIME_MUTABLE_CONFIG_KEYS {
+            if !ingest.named.contains(&row.key) {
+                continue;
+            }
+            if self.apply_one_key(row.key, ingest) {
+                applied.push(row.key);
+            }
+        }
+        applied
+    }
+
+    /// One key of [`Self::apply_zenoh_config`]; `true` when the value landed.
+    ///
+    /// The catch-all is NOT a silent pass: a registry key with no arm here
+    /// returns `false`, so it never appears in the applied list, and
+    /// `runtime_mutable_surface_gate.py` refuses a HONOURED registry row this
+    /// function does not name.
+    #[cfg(all(
+        feature = "zenoh-config",
+        any(feature = "adminspace-core", feature = "routing-router-hat")
+    ))]
+    fn apply_one_key(
+        &mut self,
+        key: &str,
+        ingest: &crate::zenoh_config::ZenohConfigIngest,
+    ) -> bool {
+        match key {
+            #[cfg(feature = "adminspace-core")]
+            "adminspace/permissions/read" => match ingest.config.adminspace {
+                Some(admin) => {
+                    self.admin_permissions.read = admin.read;
+                    true
+                }
+                None => false,
+            },
+            #[cfg(feature = "adminspace-core")]
+            "adminspace/permissions/write" => match ingest.config.adminspace {
+                Some(admin) => {
+                    self.admin_permissions.write = admin.write;
+                    true
+                }
+                None => false,
+            },
+            #[cfg(feature = "routing-router-hat")]
+            "routing/router/linkstate/transport_weights" => {
+                self.router_link_weights = ingest.config.router_transport_weights.clone();
+                true
+            }
+            _ => false,
+        }
+    }
+
     /// Builder-style initial router link weights (consumed at setup) — the
     /// weights twin of [`Self::with_admin_permissions`]. A router host builds ONE
     /// `WzConfig` carrying its startup rows and hands it to both the forwarder
@@ -967,6 +1069,89 @@ impl WzConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// R2643 — ⭐ THE CONTROL for `apply_zenoh_config`'s per-key rule, and the
+    /// reason that rule exists rather than a per-slice assignment.
+    ///
+    /// Two keys share the `admin_permissions` slice and the parser fills the one
+    /// the document did not name with `unwrap_or` — `read` defaults `true`,
+    /// `write` defaults `false`. So a per-SLICE apply driven by a document that
+    /// named only `read` would write the parsed struct wholesale and silently
+    /// reset `write` to `false`. This fixture makes the live value the OPPOSITE
+    /// of that default in both positions, so the wrong shape cannot pass by
+    /// coincidence: collapsing the two arms into one slice assignment turns the
+    /// second assertion red.
+    #[cfg(all(feature = "zenoh-config", feature = "adminspace-core"))]
+    #[test]
+    fn a_document_naming_one_permission_leaves_its_sibling_alone() {
+        use crate::zenoh_config::ZenohNodeConfig;
+
+        let mut cfg = WzConfig::new();
+        cfg.set_admin_permissions(wz_session_core::adminspace::AdminSpacePermissions {
+            read: false,
+            write: true,
+        });
+
+        let ingest =
+            ZenohNodeConfig::from_json5(r#"{ "adminspace": { "permissions": { "read": true } } }"#)
+                .expect("a one-key document parses");
+        assert_eq!(
+            ingest.named,
+            vec!["adminspace/permissions/read"],
+            "the document stated exactly one key"
+        );
+
+        let applied = cfg.apply_zenoh_config(&ingest);
+        assert_eq!(applied, vec!["adminspace/permissions/read"]);
+        assert!(cfg.admin_permissions.read, "the named key is applied");
+        assert!(
+            cfg.admin_permissions.write,
+            "the SIBLING the document never named keeps its LIVE value; the parser \
+             resolved it to `false` as a default, and applying that would carry a \
+             decision the operator never made"
+        );
+    }
+
+    /// R2643 — a document that states nothing applies nothing. The anti-vacuity
+    /// half of the test above: without it, an `apply_zenoh_config` that simply
+    /// did nothing at all would pass that one.
+    #[cfg(all(
+        feature = "zenoh-config",
+        any(feature = "adminspace-core", feature = "routing-router-hat")
+    ))]
+    #[test]
+    fn a_document_that_names_nothing_applies_nothing() {
+        use crate::zenoh_config::ZenohNodeConfig;
+
+        let ingest = ZenohNodeConfig::from_json5("{}").expect("an empty document parses");
+        assert!(ingest.named.is_empty(), "nothing was stated");
+        let mut cfg = WzConfig::new();
+        assert!(
+            cfg.apply_zenoh_config(&ingest).is_empty(),
+            "a silent document is not an instruction"
+        );
+    }
+
+    /// R2643 — the weights row reaches the live slice, and the applied list
+    /// names the key that moved.
+    #[cfg(all(feature = "zenoh-config", feature = "routing-router-hat"))]
+    #[test]
+    fn a_named_weight_row_reaches_the_live_slice() {
+        use crate::zenoh_config::ZenohNodeConfig;
+
+        let ingest = ZenohNodeConfig::from_json5(
+            r#"{ "routing": { "router": { "linkstate": { "transport_weights":
+                 [ { "dst_zid": "b1b2c3d4", "weight": 10 } ] } } } }"#,
+        )
+        .expect("one weight row loads");
+
+        let mut cfg = WzConfig::new();
+        assert!(cfg.router_link_weights.is_empty(), "nothing configured yet");
+        let applied = cfg.apply_zenoh_config(&ingest);
+        assert_eq!(applied, vec!["routing/router/linkstate/transport_weights"]);
+        assert_eq!(cfg.router_link_weights.len(), 1);
+        assert_eq!(cfg.router_link_weights[0].weight.get(), 10);
+    }
 
     // R311y40/y49/y50/y53 — the config GET reply shape: TYPED fields, serde_json-
     // BTreeMap alphabetical key order, whatami as the zenoh role string. The emitted
