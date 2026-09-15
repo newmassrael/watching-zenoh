@@ -690,10 +690,12 @@ pub struct LinkstateNetwork {
     /// dial candidate. Defaults to `true` (wz's own mode); flipped via
     /// [`set_full_linkstate`](Self::set_full_linkstate).
     full_linkstate: bool,
-    /// zenoh `Network::link_weights` (`network.rs:148`): the CONFIGURED weight
+    /// zenoh `Network::link_weights`
+    /// (`zenoh/src/net/protocol/network.rs` @ `pub(crate) link_weights`): the CONFIGURED weight
     /// self advertises on its link to each named neighbour, sourced upstream
     /// from `routing.router.linkstate.transport_weights`
-    /// (`linkstate.rs:195-213`). A neighbour absent from the map is advertised
+    /// (`zenoh/src/net/protocol/linkstate.rs` @ `fn link_weights_from_config`).
+    /// A neighbour absent from the map is advertised
     /// at the unset weight, so the edge falls back to whatever the far end
     /// advertises, or [`LinkEdgeWeight::DEFAULT`]. Read by
     /// [`add_link`](Self::add_link) and replaced by
@@ -917,7 +919,8 @@ impl LinkstateNetwork {
     /// self now links to it (bumping self's link-state sn), and form the
     /// edge if the neighbour already advertises self back. The link carries
     /// the weight configured for `peer_zid`, as zenoh's does through
-    /// `get_default_link_weight_to` (`network.rs:862`).
+    /// `get_default_link_weight_to`
+    /// (`zenoh/src/net/protocol/network.rs` @ `fn get_default_link_weight_to`).
     pub fn add_link(&mut self, peer_zid: Zid, peer_whatami: WhatAmI) -> LinkId {
         let id = self.next_link_id;
         self.next_link_id += 1;
@@ -945,7 +948,9 @@ impl LinkstateNetwork {
 
     /// Replace the configured per-neighbour link weights, re-weighting every
     /// self link whose configured weight changed. Mirrors zenoh
-    /// `update_link_weights` (`network.rs:197-252`) clause for clause:
+    /// `update_link_weights`
+    /// (`zenoh/src/net/protocol/network.rs` @ `fn update_link_weights`) clause
+    /// for clause:
     ///
     /// - a link is touched only when its entry in the OLD map differs from its
     ///   entry in the NEW one; it then takes the new weight, or the unset
@@ -960,7 +965,7 @@ impl LinkstateNetwork {
     ///
     /// `true` is the caller's obligation to flood self's links-only
     /// link-state — zenoh does that inside this function
-    /// (`send_on_links`, `network.rs:239-250`); this graph owns no transports,
+    /// (`zenoh/src/net/protocol/network.rs` @ `fn send_on_links`); this graph owns no transports,
     /// so the driver does it on the return value.
     pub fn update_link_weights(&mut self, link_weights: HashMap<Zid, LinkEdgeWeight>) -> bool {
         let mut dests_to_update = Vec::new();
@@ -2672,7 +2677,8 @@ mod tests {
 
     /// A weight configured BEFORE the neighbour connects is the one its link
     /// carries and advertises; an unconfigured neighbour's link stays unset.
-    /// zenoh `add_link` reads `get_default_link_weight_to` (`network.rs:862`).
+    /// zenoh `add_link` reads `get_default_link_weight_to`
+    /// (`zenoh/src/net/protocol/network.rs` @ `fn get_default_link_weight_to`).
     #[test]
     fn a_configured_link_weight_rides_the_link_add_link_creates() {
         let mut net = LinkstateNetwork::new(zid(0x01), WhatAmI::Router);
@@ -2736,7 +2742,9 @@ mod tests {
 
     /// A graph in neither linkstate nor multihop mode re-weights its self link
     /// but reports `false` and keeps its sn — upstream's early return sits
-    /// AFTER the weight write (`network.rs:204-220`). Multihop alone suffices.
+    /// AFTER the weight write
+    /// (`zenoh/src/net/protocol/network.rs` @ `dests_to_update.is_empty()`).
+    /// Multihop alone suffices.
     #[test]
     fn update_link_weights_is_false_on_a_graph_that_floods_no_links() {
         let mut gossip = LinkstateNetwork::new(zid(0x01), WhatAmI::Peer);

@@ -1208,8 +1208,11 @@ impl RouterForwarder {
 
     /// Replace the configured per-neighbour link weights of the ROUTER-tier
     /// graph — zenoh's router hat `update_from_config`
-    /// (`hat/router/mod.rs:509-531`), which is also where the weights enter at
-    /// `init` (`:303-320`). Only `routers_net` takes them: upstream reads
+    /// (`zenoh/src/net/routing/hat/router/mod.rs` @ `fn update_from_config`),
+    /// which is also where the weights enter at `init`
+    /// (`zenoh/src/net/routing/hat/router/mod.rs` @
+    /// `link_weights_from_config(router_link_weights`).
+    /// Only `routers_net` takes them: upstream reads
     /// `routing.router.linkstate.transport_weights` into the routers network
     /// alone, so the peers tier keeps unset weights whatever the map names.
     ///
@@ -6893,7 +6896,8 @@ mod tests {
     /// A weight configured before a Router face registers is the weight its
     /// link carries; the same zid on the PEER tier is not weighted, because
     /// upstream hands `transport_weights` to the routers network alone
-    /// (`hat/router/mod.rs:303-320`).
+    /// (`zenoh/src/net/routing/hat/router/mod.rs` @
+    /// `link_weights_from_config(router_link_weights`).
     #[test]
     fn a_router_link_weight_set_before_register_rides_only_the_routers_tier() {
         let fwd = RouterForwarder::new(zid(0x01));
