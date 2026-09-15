@@ -1135,13 +1135,13 @@ pub struct ZenohNodeConfig {
     /// ROUTER advertises on its links to named neighbours.
     ///
     /// The rows are carried as upstream's own row type
-    /// ([`TransportWeight`](wz_routing_graph::TransportWeight)) and NOT as the
+    /// ([`TransportWeight`]) and NOT as the
     /// `zid -> weight` map the router consumes, for a reason this round
     /// measured rather than assumed: a stock zenohd RESOLVES a document whose
     /// rows name the same destination twice and only refuses it later, when the
     /// router hat builds its network. This reader also judges configs destined
     /// for OTHER nodes, so it must accept exactly what the parser accepts;
-    /// [`link_weights_from_config`](wz_routing_graph::link_weights_from_config)
+    /// [`link_weights_from_config`]
     /// is where the collision is caught, as upstream's is.
     ///
     /// Empty = no row, which is upstream's default (an unset key resolves to an

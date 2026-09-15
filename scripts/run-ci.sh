@@ -5635,9 +5635,15 @@ layer_c1ay_cargo_test_router_hat() {
     # structural reason: both added tests are UNGATED (the router link-weight
     # entry and its tier separation), so each lands in every combination below.
     # The numbers are what the gate PRINTED, not 140 + 2 computed by hand.
-    _runci_guarded_test "C1AY router_forward 142" 142 \
+    #
+    # R2634 — every arm +1. The added test drives the config seam
+    # (`WzConfig::reconfigure_router_link_weights`) against the REAL graph and is
+    # ungated, so like R2632's pair it lands in all seven combinations. Both of
+    # its arms are asserted in one test rather than split by `#[cfg]`, which is
+    # why this is +1 and not +1-in-some-arms. Numbers PRINTED, again.
+    _runci_guarded_test "C1AY router_forward 143" 143 \
         cargo test -p wz-runtime-tokio --features routing-router-hat --lib router_forward --quiet || return 1
-    _runci_guarded_test "C1AY router_forward 144" 144 \
+    _runci_guarded_test "C1AY router_forward 145" 145 \
         cargo test -p wz-runtime-tokio --features routing-router-hat,transport-qos --lib router_forward --quiet || return 1
     # R2346 — 140 -> 141, and ONLY this arm moves: the added test is
     # `#[cfg(feature = "access-acl")]`, so the five sibling resolutions that do
@@ -5658,7 +5664,7 @@ layer_c1ay_cargo_test_router_hat() {
     # unattributable message, which would strand a face that has merely not
     # finished its handshake. Still `#[cfg(feature = "access-acl")]`, so the
     # five sibling resolutions are unchanged for R2346's reason.
-    _runci_guarded_test "C1AY router_forward 147" 147 \
+    _runci_guarded_test "C1AY router_forward 148" 148 \
         cargo test -p wz-runtime-tokio --features routing-router-hat,access-acl --lib router_forward --quiet || return 1
     # R2348 — a NEW arm, and it exists because without it this round's central
     # tests would have been compiled out while the lane stayed green. The router
@@ -5676,21 +5682,21 @@ layer_c1ay_cargo_test_router_hat() {
     # before the cache is consulted (the same vacuity that made R311y508's first
     # cross-impl leg prove nothing), so a cache test with no policy installed
     # tests nothing.
-    _runci_guarded_test "C1AY router_forward hotreload 150" 150 \
+    _runci_guarded_test "C1AY router_forward hotreload 151" 151 \
         cargo test -p wz-runtime-tokio --features routing-router-hat,routing-interceptor-hotreload,access-acl --lib router_forward --quiet || return 1
     # R311y464 — 171 -> 173: y463 added token_current_future_interest_replies_with_a
     # _client_token and token_current_future_interest_matches_a_wildcard_target, both
     # cfg(routing-token-tables), so ONLY this arm of the six moves. The other five
     # feature sets compile them out, which is why they still read 137/139/140/143/137.
-    _runci_guarded_test "C1AY router_forward 179" 179 \
+    _runci_guarded_test "C1AY router_forward 180" 180 \
         cargo test -p wz-runtime-tokio --features routing-router-hat,routing-token-tables --lib router_forward --quiet || return 1
     # R2415 — 146 -> 140. NOT this round's tests: `d7cd078f` re-gated the mcast
     # egress plane from `transport-multicast` onto `router-multicast-faces`, so six
     # tests that ran in this broad-feature lane now need the atom and no longer
     # appear here. The number moves because the plane correctly is not there.
-    _runci_guarded_test "C1AY router_forward 142" 142 \
+    _runci_guarded_test "C1AY router_forward 143" 143 \
         cargo test -p wz-runtime-tokio --features routing-router-hat,transport-multicast --lib router_forward --quiet || return 1
-    _runci_guarded_test "C1AY router_forward 142" 142 \
+    _runci_guarded_test "C1AY router_forward 143" 143 \
         cargo test -p wz-runtime-tokio --features routing-router-hat,adminspace-router-linkstate --lib router_forward --quiet || return 1
     # R311y786 (§5.21 router-connect-reconcile) — the re-dial BACKOFF. Until y786
     # the loop slept a `const RECONNECT_BACKOFF_MS = 1000`, so an unreachable
@@ -6675,7 +6681,11 @@ layer_c1ba_cargo_clippy_transport_multilink() {
 layer_c1am_cargo_test_adminspace() {
     _runci_guarded_test "C1AM adminspace 33" 33 \
         cargo test -p wz-session-core --features adminspace-metrics --lib adminspace --quiet || return 1
-    _runci_guarded_test "C1AM zid_hex 3" 3 \
+    # R2633 — 3 -> 5. `zenoh_hex_to_zid` grew the two refusals a conforming node
+    # makes, needed because the router link-weight rows name neighbours by the
+    # hex zid an operator types. Number PRINTED by the guard, not counted off
+    # the diff.
+    _runci_guarded_test "C1AM zid_hex 5" 5 \
         cargo test -p wz-session-core --features adminspace-core --lib zid_hex --quiet || return 1
     _runci_guarded_test "C1AM zid_to_zenoh_hex 1" 1 \
         cargo test -p wz-session-core --features storage-replication --lib zid_to_zenoh_hex --quiet || return 1

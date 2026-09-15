@@ -503,7 +503,13 @@ ROOTLESS_STALE_LINE_BUDGET = 1
 #: re-anchored WITH their roots, so the occurrences left this residue rather than
 #: moving between buckets. (Their paths are described rather than spelled, for the
 #: reason the LINE_BUDGET note above now carries.)
-ROOTLESS_UNDECLARED_BUDGET = 660
+#: R2634 — 660 -> 659. The router-hat demo host's weight-install block was
+#: rewritten to drive the config seam instead of translating rows inline, and
+#: the root-less citation that block carried went with the prose it annotated.
+#: Down is the direction this arm wants; the replacement text cites upstream in
+#: the rooted `path` @ `needle` form, which lands in the anchored bucket rather
+#: than here.
+ROOTLESS_UNDECLARED_BUDGET = 659
 #: EVERY root-less occurrence, graded or not: `rootless_line + rootless_bare +
 #: residue`. One ratchet over the union of the three above, and it exists
 #: because those three CANNOT express the invariant that matters.
@@ -550,7 +556,8 @@ ROOTLESS_UNDECLARED_BUDGET = 660
 #: the retired path would re-add the occurrence being removed.)
 #: R2578 — 791 -> 790, the same single occurrence as the budget above.
 #: R2578 — 790 -> 789, the same single occurrence as the budget above.
-ROOTLESS_TOTAL_BUDGET = 789
+#: R2634 — 789 -> 788, the same single occurrence as the budget above.
+ROOTLESS_TOTAL_BUDGET = 788
 
 #: A LIVE invocation of the RESOLUTION arm. R2242 split this gate in two and,
 #: in doing so, made `--resolve` a flag someone can simply stop passing: delete
