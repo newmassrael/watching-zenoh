@@ -679,7 +679,14 @@ HOST_GATED_CI_TARGETS: dict[str, str] = {
 # (`wz_router_hat_told_to_drop_future_timestamps_delivers_nothing`) claims
 # `time-hlc zenoh->wz`, adjudicated by the same upstream-linked oracle the
 # absorb / replace arms use. That closes the last clause `time-hlc` carried.
-FOREIGN_ADJUDICATOR_LINKS = 919
+# R2631 — 919 -> 923, RISING because a round added foreign adjudication in the
+# direction this tree had none of for usrpwd: a stock zenoh `z_get` configured as a
+# usrpwd INITIATOR authenticating to a wz RESPONDER
+# (`zenoh_usrpwd_client_to_wz_responder.rs`). Every earlier usrpwd leg had wz
+# dialing. Two tests each claim `session-extauth` and `access-extauth-usrpwd`,
+# and a link is a distinct (atom, test) pair, so the first test's two
+# `session-extauth` directions count once: 2 tests x 2 atoms = 4.
+FOREIGN_ADJUDICATOR_LINKS = 923
 
 # ── Execution disclosure ────────────────────────────────────────────────────────
 #
