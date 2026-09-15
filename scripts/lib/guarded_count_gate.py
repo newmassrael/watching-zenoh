@@ -112,6 +112,59 @@ TRIGGER_RE = re.compile(
 )
 SUMMARY_RE = re.compile(r"^test result: ok\. (\d+) passed", re.M)
 
+# R2650 — a shell variable this file assigns ONE whitespace-free literal, and the
+# uses of it that can therefore be resolved.
+#
+# # Why this exists, and why announcing the gap was not enough
+#
+# `select` defers any guard whose command the shell assembles, because a command
+# this runner cannot reproduce cannot be measured. That is right, and it is also
+# a HOLE: `C1y linkstate+access` reads `--features "$access"`, so the gate has
+# never been able to check it. The hole was documented at the sibling `C1y
+# interceptor` guard in R2631, with a MANUAL remedy -- run the command by hand
+# after working out which skipped guards a push's tests could fall under -- and
+# R2650 is the second red it cost, which is the point at which a rule that needs
+# remembering is the wrong instrument.
+#
+# Resolution is deliberately narrow. A name assigned two DIFFERENT literals is
+# left unresolved, and so is a value carrying whitespace: expanding those would
+# make a guard measurable and WRONG, which is worse than deferring it, because a
+# deferral is at least visible in the count this gate prints.
+LITERAL_ASSIGN_RE = re.compile(
+    r"^[ \t]*(?:local[ \t]+)?([A-Za-z_][A-Za-z0-9_]*)=\"([^\"$`]*)\"[ \t]*$", re.M
+)
+VAR_USE_RE = re.compile(
+    r"\"\$(?P<quoted>[A-Za-z_][A-Za-z0-9_]*)\"|\$(?P<bare>[A-Za-z_][A-Za-z0-9_]*)"
+)
+
+
+def literal_vars(text):
+    """`{name: value}` for each variable this file assigns exactly one literal."""
+    seen = {}
+    for name, value in LITERAL_ASSIGN_RE.findall(text):
+        if any(c.isspace() for c in value):
+            seen[name] = None
+        elif name in seen and seen[name] != value:
+            seen[name] = None
+        elif name not in seen:
+            seen[name] = value
+    return {k: v for k, v in seen.items() if v is not None}
+
+
+def expand_literal_vars(logical, vars_):
+    """`"$access"` -> the literal, leaving every unresolvable use untouched.
+
+    The quotes go with it: they are what made the token unreproducible, and the
+    value is whitespace-free by construction, so dropping them cannot change how
+    the command tokenizes.
+    """
+
+    def sub(m):
+        name = m.group("quoted") or m.group("bare")
+        return vars_.get(name, m.group(0))
+
+    return VAR_USE_RE.sub(sub, logical)
+
 
 class Guard:
     """One count guard, as `run-ci.sh` writes it."""
@@ -162,9 +215,14 @@ def parse_guards(text):
     `count_guard_lint`'s — one guard table, read one way.
     """
     guards = []
+    vars_ = literal_vars(text)
     for lineno, logical in cgl.logical_lines(text):
         if logical.lstrip().startswith("#"):
             continue
+        # BEFORE the parse, so every field derived from the command -- package,
+        # test target, libtest filters -- is read off the resolved spelling
+        # rather than off one the shell would have rewritten.
+        logical = expand_literal_vars(logical, vars_)
         m = cgl.HELPER_RE.search(logical)
         if m:
             seg = logical[m.start():]
@@ -522,6 +580,22 @@ def main():
         f"guarded-count gate: {len(guards)} numeric count guard(s) in "
         f"run-ci.sh; {len(selected)} reached by this push"
     )
+    # R2650 — the DEFERRALS print with the measurement, every time, not behind
+    # `--verbose`. A gate that reports what it measured and stays quiet about
+    # what it could not is read as complete, and this one was: the guard whose
+    # features the shell assembles has never been checked here, and its move
+    # reached origin twice before a hosted lane said so. Printing them is what
+    # turns "89 reached" from a result into a result WITH a boundary.
+    shell_deferred = [g for g, why in skipped if "shell assembles" in why]
+    if shell_deferred:
+        print(
+            f"guarded-count gate: {len(shell_deferred)} guard(s) DEFERRED — the "
+            "shell assembles part of their command and this runner could not "
+            "resolve it, so ONLY the hosted lane that owns them measures these. "
+            "A green above does not cover them:"
+        )
+        for g in shell_deferred:
+            print(f"  DEFERRED  {g.where}: {' '.join(g.whole_command)}")
     if args.verbose and skipped:
         for g, why in skipped:
             print(f"  unrunnable {g.where}: {why}")
@@ -868,6 +942,47 @@ def selftest():
         "R2248: and `` is not `None` -- the two answers stay apart (the control)",
         len(dg) == 3 and dg[2].demo_features is not None and dg[1].demo_features is None,
         "folding the featureless case into None puts it back on the build host",
+    )
+
+    # R2650 — the literal-assignment pass, with its refusals as controls. A
+    # resolver that only ever resolves cannot show that it declines the cases it
+    # must decline, and a WRONG expansion is worse than the deferral it replaces.
+    lv = literal_vars(
+        'local access="a,b"\n'
+        'dup="one"\n'
+        'dup="two"\n'
+        'spaced="-D warnings"\n'
+        'computed="$other"\n'
+    )
+    arm(
+        "R2650: one literal assignment resolves",
+        lv.get("access") == "a,b",
+        "the guard whose features the shell assembles stays unmeasurable, which "
+        "is the hole this pass exists to close",
+    )
+    arm(
+        "R2650: a name assigned two DIFFERENT literals is refused (the control)",
+        "dup" not in lv,
+        "guessing between them would make a guard measurable and WRONG, which "
+        "is worse than deferring it",
+    )
+    arm(
+        "R2650: a value carrying whitespace is refused (the control)",
+        "spaced" not in lv,
+        "dropping the quotes around it would re-tokenize the command",
+    )
+    arm(
+        "R2650: a value that is itself an expansion is refused (the control)",
+        "computed" not in lv,
+        "resolving one level and calling it literal would substitute a `$`",
+    )
+    arm(
+        "R2650: an unresolvable use is left exactly as written",
+        expand_literal_vars('--features "$access" --lib x', lv)
+        == "--features a,b --lib x"
+        and expand_literal_vars('--features "$dup"', lv) == '--features "$dup"',
+        "rewriting a use this pass cannot resolve would hide the deferral it is "
+        "supposed to leave visible",
     )
 
     bad = [(n, w) for n, ok, w in arms if not ok]

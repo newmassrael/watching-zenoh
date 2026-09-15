@@ -7852,7 +7852,15 @@ layer_c1y_cargo_test_routing_peer() {
     # 202 -> 203, 215 -> 216) where R2567's did not. Each was READ off the run
     # that printed it rather than derived from the first: the comment above is
     # the standing reason not to infer the other two from one.
-    _runci_guarded_test "C1y linkstate+access" 216 \
+    # R2650 — 216 -> 217: R2648's Del witness. It is gated on `pubsub-delete`, and
+    # this leg keeps DEFAULT features, which carry that one, so the test compiles in
+    # here exactly as it does in the bare-`routing-peer` leg's sibling. READ off this
+    # command with `$access` expanded, which printed 217.
+    # ⚠ Found on HOSTED, not by the pre-push gate — for the reason the `C1y
+    # interceptor` note above already records, which is now the second time this
+    # blind spot has cost a red. The gate can resolve this one from now on; see
+    # `guarded_count_gate.py`'s literal-assignment pass.
+    _runci_guarded_test "C1y linkstate+access" 217 \
         cargo test -p wz-runtime-tokio --features "$access" --lib linkstate --quiet || return 1
     # R2567 — the three usrpwd counts move together because ONE structure landed
     # under them: the shared credential store that closed `access-extauth-usrpwd`.
