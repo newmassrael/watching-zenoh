@@ -6003,24 +6003,57 @@ async fn run_router_hat_until(
         RouterForwarder::with_timestamping(Zid::from_slice(&params.zid), node_timestamping)
             .with_drop_future_timestamp(opts.timestamping.drop_future_timestamp());
 
-    // R2633 — the configured link weights reach the ROUTER tier here, before any
-    // face registers, so the first link this router forms already advertises its
-    // weight rather than being re-weighted a moment later. That ordering is
-    // upstream's too: its router hat builds the network WITH the weights at
-    // `init` and only re-applies them on a config update.
+    // R2634 — the ONE live `WzConfig` this host runs on, built before the first
+    // face so the weights it carries are what the first flood advertises. R2633
+    // applied the rows from a startup local, which no later reader could reach;
+    // holding them on the live config is what makes zenoh's `update_from_config`
+    // (`zenoh/src/net/routing/hat/router/mod.rs` @ `fn update_from_config`)
+    // expressible here rather than merely unwired. The `adminspace-*` host below
+    // borrows THIS cell instead of building a second config, for the same reason
+    // `with_max_links` states: one source, not two.
+    let host_cfg = std::rc::Rc::new(std::cell::RefCell::new({
+        let cfg = wz::runtime_tokio::config::WzConfig::from_init_params(&params)
+            // R311y786 — the SAME policy the face loop is handed, so the config
+            // GET reports the cadence actually in force rather than the default.
+            .with_connect_retry(opts.connect_retry);
+        // Gated on the DEMO's admin feature (this crate has no `adminspace-core`
+        // of its own; that is the wz-side name the permit type lives behind), so
+        // the arm is present exactly where the admin host below is.
+        #[cfg(feature = "adminspace-router-linkstate")]
+        let cfg =
+            cfg.with_admin_permissions(wz::runtime_tokio::adminspace::AdminSpacePermissions {
+                read: !no_admin_read,
+                // R2393 — the WRITE half, seeded from `--config-write-permit` and
+                // re-read per PUT below. It was `..Default::default()` (write: false)
+                // when this host first grew a config-write subscriber, so the
+                // subscriber was reachable and its gate was not: every PUT returned
+                // `Denied` before the decoder ran, and no flag existed to grant it.
+                // Default-DENY is kept — zenoh's own `PermissionsConf` default — the
+                // flag is what makes the grant expressible at all.
+                write: config_write_permit,
+            });
+        cfg.with_router_link_weights(opts.router_link_weights.clone())
+    }));
+
+    // R2633/R2634 — the configured link weights reach the ROUTER tier here,
+    // before any face registers, so the first link this router forms already
+    // advertises its weight rather than being re-weighted a moment later. That
+    // ordering is upstream's too: its router hat builds the network WITH the
+    // weights at `init` and only re-applies them on a config update.
     //
-    // A duplicate destination is refused here and not earlier, because that is
-    // where upstream refuses it and where the config-file path is judged: one
-    // rule for both entry points. Hard error, never a degraded default — the
-    // silently-dropped weight is the failure mode that looks healthy.
-    if !opts.router_link_weights.is_empty() {
-        match wz::runtime_tokio::linkstate_forward::link_weights_from_config(
-            &opts.router_link_weights,
-        ) {
-            Ok(weights) => {
-                let count = weights.len();
-                forwarder.update_router_link_weights(weights);
-                log::info!("router-hat: {count} configured link weight(s) applied");
+    // Driven through the config's install seam, not by translating rows here, so
+    // setup and any later reconfigure take ONE path. A duplicate destination is
+    // refused inside it, because that is where upstream refuses it and where the
+    // config-file path is judged: one rule for both entry points. Hard error,
+    // never a degraded default — the silently-dropped weight is the failure mode
+    // that looks healthy.
+    {
+        let count = host_cfg.borrow().router_link_weights().len();
+        match host_cfg.borrow().install_router_link_weights(&forwarder) {
+            Ok(_) => {
+                if count > 0 {
+                    log::info!("router-hat: {count} configured link weight(s) applied");
+                }
             }
             Err(dup) => {
                 return Err(io::Error::new(
@@ -6318,23 +6351,14 @@ async fn run_router_hat_until(
         // `admin_permissions` slice both admin ctxs re-read per GET, seeded once from
         // `--no-admin-read`. A router that answered its adminspace unconditionally was
         // the last shipping wz node the gate could not reach.
-        let admin_cfg = std::rc::Rc::new(std::cell::RefCell::new(
-            wz::runtime_tokio::config::WzConfig::from_init_params(&params)
-                .with_admin_permissions(wz::runtime_tokio::adminspace::AdminSpacePermissions {
-                    read: !no_admin_read,
-                    // R2393 — the WRITE half, seeded from `--config-write-permit` and
-                    // re-read per PUT below. It was `..Default::default()` (write:
-                    // false) when this host first grew a config-write subscriber, so
-                    // the subscriber was reachable and its gate was not: every PUT
-                    // returned `Denied` before the decoder ran, and no flag existed to
-                    // grant it. Default-DENY is kept — zenoh's own `PermissionsConf`
-                    // default — the flag is what makes the grant expressible at all.
-                    write: config_write_permit,
-                })
-                // R311y786 — the SAME policy the face loop is handed, so the config
-                // GET reports the cadence actually in force rather than the default.
-                .with_connect_retry(opts.connect_retry),
-        ));
+        // R2634 — BORROWED, not rebuilt. This host used to construct a second
+        // `WzConfig` here, seeded from the same flags as the one the forwarder
+        // runs on; two instances of a LIVE config is the desync `with_max_links`
+        // warns about, and it became load-bearing the moment a config slice
+        // (the router link weights) had to be both applied to the forwarder and
+        // re-readable afterwards. The permits and the retry policy it used to set
+        // are set where the cell is built, above.
+        let admin_cfg = std::rc::Rc::clone(&host_cfg);
         log::info!(
             "wz-ap-demo router-hat: adminspace read permit = {}",
             wz::runtime_tokio::admin_read_permit(&admin_cfg.borrow().admin_permissions())

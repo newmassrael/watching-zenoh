@@ -6526,6 +6526,37 @@ impl crate::interceptor::InterceptorSink for RouterForwarder {
     }
 }
 
+/// R2634 — the sink a [`WzConfig`](crate::config::WzConfig)'s configured router
+/// link weights are installed onto: the seam the typed config SSOT drives,
+/// decoupled from the concrete forwarder type, exactly as
+/// [`InterceptorSink`](crate::interceptor::InterceptorSink) is for the
+/// interceptor slice. `WzConfig::install_router_link_weights` /
+/// `reconfigure_router_link_weights` take `&dyn RouterLinkWeightSink`, so the
+/// config crate composes the config-drive surface against this abstraction
+/// rather than against [`RouterForwarder`] (which is the production impl).
+///
+/// One method — replace the tier's configured weights from an already-built map
+/// — so a reconfigure re-drives the live graph through the same path setup uses.
+/// The map is built by the CALLER (the config seam) because that is where
+/// upstream builds it and where its one refusal lives
+/// (`zenoh/src/net/routing/hat/router/mod.rs` @ `fn update_from_config`, which
+/// calls `link_weights_from_config` before touching the net).
+pub trait RouterLinkWeightSink {
+    /// Replace the ROUTER-tier configured link weights, returning whether a live
+    /// link moved (and therefore whether a recompute was scheduled) — the `bool`
+    /// upstream branches its `compute_trees_async` on.
+    fn set_router_link_weights(&self, weights: HashMap<Zid, LinkEdgeWeight>) -> bool;
+}
+
+/// The production [`RouterLinkWeightSink`] impl. Delegates to the inherent
+/// [`update_router_link_weights`](RouterForwarder::update_router_link_weights),
+/// the same shape the `InterceptorSink` impl above takes.
+impl RouterLinkWeightSink for RouterForwarder {
+    fn set_router_link_weights(&self, weights: HashMap<Zid, LinkEdgeWeight>) -> bool {
+        RouterForwarder::update_router_link_weights(self, weights)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -6972,6 +7003,104 @@ mod tests {
         assert!(!fwd.update_router_link_weights(link_weights(&[(0xAA, 300)])));
         assert_eq!(sink_a.frame_count() + sink_c.frame_count(), 0);
         assert!(!fwd.trees_dirty_routers.get());
+    }
+
+    /// R2634 — the RELOAD, end to end and against the real graph: a weight
+    /// changed on the LIVE config after the node is up re-floods the routers
+    /// tier and schedules its recompute, without a restart and without the
+    /// caller touching the graph. This is zenoh's `update_from_config`
+    /// (`zenoh/src/net/routing/hat/router/mod.rs` @ `fn update_from_config`),
+    /// whose whole purpose is that the key is re-readable off the live config;
+    /// the config seam's own contract is graded in `config.rs` against a
+    /// recording sink, and what is graded HERE is that the real forwarder is
+    /// moved by it.
+    ///
+    /// Both arms are asserted rather than the test being gated, so the
+    /// `config-mutate-runtime` opt-out is graded too: without it the live rows
+    /// change and the network deliberately does not.
+    #[test]
+    fn a_config_reconfigure_after_startup_reweights_the_live_routers_tier() {
+        use crate::config::WzConfig;
+        use core::num::NonZeroU16;
+        use wz_routing_graph::TransportWeight;
+
+        let row = |b: u8, w: u16| TransportWeight {
+            dst_zid: zid(b),
+            weight: NonZeroU16::new(w).expect("test weight is non-zero"),
+        };
+
+        let fwd = RouterForwarder::new(zid(0x01));
+        let mut cfg = WzConfig::new().with_router_link_weights(vec![row(0xAA, 250)]);
+        assert_eq!(
+            cfg.install_router_link_weights(&fwd),
+            Ok(false),
+            "setup weights no live link — no face has registered yet"
+        );
+
+        let (a_r, sink_a) = face(zid(0xAA), WIRE_ROUTER);
+        fwd.register(FaceId(0), &a_r);
+        fwd.tick();
+        assert_eq!(
+            self_link_weight(&fwd.routers_net, 0xAA),
+            LinkEdgeWeight::from_raw(250),
+            "the first flood already carries the configured weight"
+        );
+        sink_a.reset();
+        let recomputes = fwd.recomputes.get();
+
+        // The reload: the operator's new document, applied to the running node.
+        let moved = cfg
+            .reconfigure_router_link_weights(vec![row(0xAA, 400)], &fwd)
+            .expect("distinct destinations");
+
+        #[cfg(feature = "config-mutate-runtime")]
+        {
+            assert!(moved, "a live link moved");
+            assert_eq!(
+                self_link_weight(&fwd.routers_net, 0xAA),
+                LinkEdgeWeight::from_raw(400)
+            );
+            assert_eq!(sink_a.frame_count(), 1, "the Router face is re-flooded");
+            let states = flooded_link_states(&sink_a.frame_bytes(0));
+            let psid_a = fwd
+                .routers_net
+                .borrow()
+                .local_psid_of(&zid(0xAA))
+                .expect("A indexed");
+            let slot = states[0]
+                .links
+                .iter()
+                .position(|l| l.psid == psid_a)
+                .expect("the link to A is advertised");
+            let weights = states[0].weights.as_ref().expect("a set weight rides");
+            assert_eq!(
+                weights[slot].weight, 400,
+                "the RELOADED weight is on the wire"
+            );
+            assert!(fwd.trees_dirty_routers.get());
+            fwd.tick();
+            assert_eq!(
+                fwd.recomputes.get(),
+                recomputes + 1,
+                "one routers recompute"
+            );
+        }
+        #[cfg(not(feature = "config-mutate-runtime"))]
+        {
+            assert!(!moved, "the inert mirror moves nothing");
+            assert_eq!(
+                self_link_weight(&fwd.routers_net, 0xAA),
+                LinkEdgeWeight::from_raw(250),
+                "the graph keeps the installed weight"
+            );
+            assert_eq!(sink_a.frame_count(), 0, "nothing is re-flooded");
+            assert!(!fwd.trees_dirty_routers.get());
+            let _ = recomputes;
+        }
+
+        // Either way the LIVE config is the new document — the introspection
+        // SSOT moves even where the network deliberately does not.
+        assert_eq!(cfg.router_link_weights(), &[row(0xAA, 400)]);
     }
 
     #[test]

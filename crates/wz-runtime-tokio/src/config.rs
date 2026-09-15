@@ -48,7 +48,11 @@
 #[cfg(feature = "routing-peer")]
 use crate::interceptor::{InterceptorConfig, InterceptorSink};
 use crate::retry_period::RetryPolicy;
+#[cfg(feature = "routing-router-hat")]
+use crate::router_forward::RouterLinkWeightSink;
 use wz_codecs::whatami::WhatAmI;
+#[cfg(feature = "routing-router-hat")]
+use wz_routing_graph::{link_weights_from_config, DuplicateLinkWeight, TransportWeight};
 use wz_session_core::session_init_params::SessionInitParams;
 
 /// The typed wz runtime config SSOT — see the module doc. The read-at-open
@@ -89,6 +93,28 @@ pub struct WzConfig {
     /// Default = zenoh's `PermissionsConf::default` (read `true`, write `false`).
     #[cfg(feature = "adminspace-core")]
     admin_permissions: wz_session_core::adminspace::AdminSpacePermissions,
+    /// R2634 (`router-hat-router`) — the LIVE configured router link weights,
+    /// zenoh's `routing.router.linkstate.transport_weights`. The THIRD
+    /// runtime-mutable typed slice after [`Self::interceptors`] and
+    /// [`Self::admin_permissions`], and it is here for upstream's own reason:
+    /// the router hat RE-READS this key off the live config
+    /// (`zenoh/src/net/routing/hat/router/mod.rs` @ `fn update_from_config`),
+    /// which is the only thing that makes the key reloadable without a restart.
+    /// Rows handed to a forwarder from a startup-only local can be applied once
+    /// and re-read by nobody, so the capability is not "unwired" without this
+    /// field — it is unexpressible.
+    ///
+    /// Private, like the two slices before it: mutate via
+    /// [`Self::reconfigure_router_link_weights`] so "one live config, applied
+    /// through one seam" is structural rather than a convention.
+    ///
+    /// Held as ROWS and not as the `zid -> weight` map the graph takes, because
+    /// rows are what the config document carries and what upstream stores; the
+    /// map — and the one refusal a well-formed row list can still earn, two rows
+    /// naming one destination — is built at APPLY time, which is where upstream
+    /// builds it.
+    #[cfg(feature = "routing-router-hat")]
+    router_link_weights: Vec<TransportWeight>,
     /// R311y205 (transport-multilink) — the EMBEDDER-facing max number of physical
     /// links this node aggregates into ONE logical unicast session (zenoh
     /// `TransportManager` `unicast.max_links`). Default `1` = single-link,
@@ -211,6 +237,12 @@ impl Default for WzConfig {
             interceptors: InterceptorConfig::default(),
             #[cfg(feature = "adminspace-core")]
             admin_permissions: wz_session_core::adminspace::AdminSpacePermissions::default(),
+            // R2634 — no configured weight is upstream's default too: the config
+            // row list is a `Vec` with no `Option` around it, so an absent key and
+            // an empty array are the same document to a stock zenohd, and both
+            // leave every link unweighted.
+            #[cfg(feature = "routing-router-hat")]
+            router_link_weights: Vec::new(),
             #[cfg(feature = "transport-multilink")]
             max_links: 1,
             #[cfg(feature = "transport-qos")]
@@ -707,6 +739,90 @@ impl WzConfig {
     ) {
         self.admin_permissions = permissions;
     }
+
+    /// Builder-style initial router link weights (consumed at setup) — the
+    /// weights twin of [`Self::with_admin_permissions`]. A router host builds ONE
+    /// `WzConfig` carrying its startup rows and hands it to both the forwarder
+    /// install and its admin host, so there is one weight source, not two: the
+    /// same structural no-desync `with_max_links` and `with_connect_retry` are
+    /// there for.
+    #[cfg(feature = "routing-router-hat")]
+    pub fn with_router_link_weights(mut self, rows: Vec<TransportWeight>) -> Self {
+        self.router_link_weights = rows;
+        self
+    }
+
+    /// Read the LIVE configured router link weights — the read accessor
+    /// symmetric with [`Self::reconfigure_router_link_weights`]. Borrowing, not
+    /// cloning: a caller clones only when it intends to mutate-and-reapply.
+    #[cfg(feature = "routing-router-hat")]
+    pub fn router_link_weights(&self) -> &[TransportWeight] {
+        &self.router_link_weights
+    }
+
+    /// The config-DRIVEN initial install: drive `sink` from this config's
+    /// configured router link weights. Called once at routing setup — the same
+    /// [`RouterLinkWeightSink::set_router_link_weights`] seam the live
+    /// reconfigure re-uses, so setup and runtime go through ONE code path, as
+    /// [`Self::install_interceptors`] does for the interceptor slice. It is also
+    /// upstream's own ordering: its router hat builds the network WITH the
+    /// weights at `init` (`zenoh/src/net/routing/hat/router/mod.rs` @
+    /// `link_weights_from_config(router_link_weights`) and re-applies the same
+    /// map-building step on a config update.
+    ///
+    /// Returns whether a live link moved — `false` for the ordinary setup call,
+    /// where no face has registered yet and the weights are simply what the
+    /// first flood carries.
+    ///
+    /// `Err` is the one refusal a well-formed row list can still earn: two rows
+    /// naming the same destination. It is raised HERE and not at the config
+    /// parse because that is where upstream raises it — a stock zenohd RESOLVES
+    /// such a document and then dies building the network — and because wz's
+    /// config ingest also validates documents destined for OTHER nodes, so it
+    /// must accept what the parser accepts.
+    #[cfg(feature = "routing-router-hat")]
+    pub fn install_router_link_weights(
+        &self,
+        sink: &dyn RouterLinkWeightSink,
+    ) -> Result<bool, DuplicateLinkWeight> {
+        Ok(sink.set_router_link_weights(link_weights_from_config(&self.router_link_weights)?))
+    }
+
+    /// Runtime reconfigure of the live router link weights — the weights twin of
+    /// [`Self::reconfigure_interceptors`], and the mutation that makes zenoh's
+    /// `update_from_config` (`zenoh/src/net/routing/hat/router/mod.rs` @
+    /// `fn update_from_config`) expressible here at all: store the new rows and,
+    /// under `config-mutate-runtime`, RE-APPLY them to the live `sink` so the
+    /// routers tier re-floods and re-computes without a restart.
+    ///
+    /// `config-mutate-runtime` OFF: the new rows are stored (the typed config
+    /// stays the introspection SSOT) but NOT re-applied — the inert mirror, the
+    /// same opt-out arm the interceptor slice offers, and the return is then
+    /// `Ok(false)` because no link moved.
+    ///
+    /// The map is built BEFORE the rows are stored, so a refused document never
+    /// becomes the live value. That is stricter than upstream, which stores the
+    /// rows and fails at every apply, and it is deliberate: the two agree on what
+    /// the NETWORK does (the old weights stand) and wz additionally cannot end up
+    /// reporting a live config it would refuse to apply.
+    #[cfg(feature = "routing-router-hat")]
+    pub fn reconfigure_router_link_weights(
+        &mut self,
+        rows: Vec<TransportWeight>,
+        sink: &dyn RouterLinkWeightSink,
+    ) -> Result<bool, DuplicateLinkWeight> {
+        let weights = link_weights_from_config(&rows)?;
+        self.router_link_weights = rows;
+        #[cfg(feature = "config-mutate-runtime")]
+        {
+            Ok(sink.set_router_link_weights(weights))
+        }
+        #[cfg(not(feature = "config-mutate-runtime"))]
+        {
+            let _ = (sink, weights);
+            Ok(false)
+        }
+    }
 }
 
 #[cfg(test)]
@@ -1137,6 +1253,153 @@ mod tests {
                 write: true,
             });
             assert!(crate::admin_write_permit(&cfg.admin_permissions()));
+        }
+    }
+
+    /// R2634 — the configured-router-link-weight slice: the third live slice, and
+    /// the one zenoh re-reads per `update_from_config`. Driven against a
+    /// RECORDING sink rather than the forwarder, so what is graded here is the
+    /// config seam's own contract (what it hands on, when, and what it refuses)
+    /// and not the graph's — `router_forward.rs` grades the graph.
+    #[cfg(feature = "routing-router-hat")]
+    mod router_link_weights {
+        use super::*;
+        use core::num::NonZeroU16;
+        use std::cell::RefCell;
+        use wz_routing_graph::{LinkEdgeWeight, Zid};
+
+        /// Records every map handed to it, and reports the `bool` it is told to.
+        struct RecordingSink {
+            installs: RefCell<Vec<std::collections::HashMap<Zid, LinkEdgeWeight>>>,
+            moved: bool,
+        }
+
+        impl RecordingSink {
+            fn new(moved: bool) -> Self {
+                Self {
+                    installs: RefCell::new(Vec::new()),
+                    moved,
+                }
+            }
+            fn calls(&self) -> usize {
+                self.installs.borrow().len()
+            }
+            fn last(&self) -> std::collections::HashMap<Zid, LinkEdgeWeight> {
+                self.installs
+                    .borrow()
+                    .last()
+                    .cloned()
+                    .expect("the sink was driven")
+            }
+        }
+
+        impl RouterLinkWeightSink for RecordingSink {
+            fn set_router_link_weights(
+                &self,
+                weights: std::collections::HashMap<Zid, LinkEdgeWeight>,
+            ) -> bool {
+                self.installs.borrow_mut().push(weights);
+                self.moved
+            }
+        }
+
+        fn zid(b: u8) -> Zid {
+            Zid::from_slice(&[b])
+        }
+
+        fn row(b: u8, w: u16) -> TransportWeight {
+            TransportWeight {
+                dst_zid: zid(b),
+                weight: NonZeroU16::new(w).expect("test weight is non-zero"),
+            }
+        }
+
+        /// Setup drives the sink from the LIVE rows, and the map it hands on is
+        /// the rows resolved by destination — the same translation the runtime
+        /// reconfigure uses, which is the whole reason the seam exists.
+        #[test]
+        fn setup_installs_the_live_rows_as_a_map() {
+            let cfg = WzConfig::new().with_router_link_weights(vec![row(0xAA, 250), row(0xBB, 10)]);
+            let sink = RecordingSink::new(false);
+            assert_eq!(cfg.install_router_link_weights(&sink), Ok(false));
+            assert_eq!(sink.calls(), 1);
+            let map = sink.last();
+            assert_eq!(map.len(), 2);
+            assert_eq!(map[&zid(0xAA)], LinkEdgeWeight::from_raw(250));
+            assert_eq!(map[&zid(0xBB)], LinkEdgeWeight::from_raw(10));
+            // The rows stay readable afterwards: an install is not a hand-off.
+            assert_eq!(cfg.router_link_weights().len(), 2);
+        }
+
+        /// An empty list is a legal document (upstream's field is a bare `Vec`),
+        /// so the seam still runs and hands on an empty map rather than skipping
+        /// the sink — which is what makes "clear the weights" expressible.
+        #[test]
+        fn an_empty_row_list_still_drives_the_sink() {
+            let cfg = WzConfig::new();
+            let sink = RecordingSink::new(false);
+            assert_eq!(cfg.install_router_link_weights(&sink), Ok(false));
+            assert_eq!(sink.calls(), 1);
+            assert!(sink.last().is_empty());
+        }
+
+        /// The one refusal a well-formed row list can earn, at BOTH entry
+        /// points, and on the runtime one it happens BEFORE the store: a refused
+        /// document never becomes the live value and never reaches the sink.
+        #[test]
+        fn a_repeated_destination_is_refused_before_anything_is_stored_or_applied() {
+            let sink = RecordingSink::new(true);
+            let mut cfg = WzConfig::new().with_router_link_weights(vec![row(0xAA, 250)]);
+            assert_eq!(
+                cfg.reconfigure_router_link_weights(vec![row(0xBB, 5), row(0xBB, 6)], &sink),
+                Err(wz_routing_graph::DuplicateLinkWeight { dst_zid: zid(0xBB) })
+            );
+            assert_eq!(sink.calls(), 0, "the sink is never driven by a refusal");
+            assert_eq!(
+                cfg.router_link_weights(),
+                &[row(0xAA, 250)],
+                "the live rows are the ones that were accepted"
+            );
+
+            // Setup refuses the same document, through the same builder.
+            let bad = WzConfig::new().with_router_link_weights(vec![row(0xCC, 1), row(0xCC, 2)]);
+            assert_eq!(
+                bad.install_router_link_weights(&sink),
+                Err(wz_routing_graph::DuplicateLinkWeight { dst_zid: zid(0xCC) })
+            );
+            assert_eq!(sink.calls(), 0);
+        }
+
+        /// The runtime leg: new rows become the live value, and under
+        /// `config-mutate-runtime` they are re-applied to the sink — the
+        /// `update_from_config` half. Without that feature the rows are stored
+        /// and NOT applied (the inert mirror the interceptor slice also offers),
+        /// so the returned "a link moved" is `false`.
+        #[test]
+        fn a_runtime_reconfigure_stores_and_reapplies() {
+            let sink = RecordingSink::new(true);
+            let mut cfg = WzConfig::new().with_router_link_weights(vec![row(0xAA, 250)]);
+            let moved = cfg
+                .reconfigure_router_link_weights(vec![row(0xAA, 300), row(0xBB, 7)], &sink)
+                .expect("distinct destinations");
+            assert_eq!(
+                cfg.router_link_weights(),
+                &[row(0xAA, 300), row(0xBB, 7)],
+                "the live rows are the new ones"
+            );
+            #[cfg(feature = "config-mutate-runtime")]
+            {
+                assert!(moved, "the sink reported a moved link");
+                assert_eq!(sink.calls(), 1);
+                let map = sink.last();
+                assert_eq!(map[&zid(0xAA)], LinkEdgeWeight::from_raw(300));
+                assert_eq!(map[&zid(0xBB)], LinkEdgeWeight::from_raw(7));
+            }
+            #[cfg(not(feature = "config-mutate-runtime"))]
+            {
+                assert!(!moved, "an inert mirror moves nothing");
+                assert_eq!(sink.calls(), 0);
+            }
         }
     }
 }
