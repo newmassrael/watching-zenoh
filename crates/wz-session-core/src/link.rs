@@ -402,9 +402,15 @@ impl LinkEndpoints {
 ///
 /// One value type rather than one accessor per axis, because the axis set GROWS:
 /// zenoh's ACL subject also has cert-CN and username
-/// (`interceptor/authorization.rs:39-46`), which wz does not resolve yet. Those
-/// land as fields here, not as a fourth trait method and a fourth constructor
+/// (`interceptor/authorization.rs:39-46`). The cert-CN is a LINK fact and lands
+/// as a field here, not as a fourth trait method and a fourth constructor
 /// parameter on six pipelines.
+///
+/// R2631 — the username did NOT land here, and that corrects this note rather
+/// than contradicting it: a username is a SESSION fact. A link driver cannot know
+/// who authenticated over it; the accept handshake does, so the name lives on the
+/// session and reaches the ACL through the interceptor context's `username`,
+/// beside the zid it resembles.
 ///
 /// Every field is an [`Option`], and the distinction is load-bearing — see
 /// [`interfaces`](Self::interfaces).

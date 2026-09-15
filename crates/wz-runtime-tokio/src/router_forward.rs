@@ -381,8 +381,8 @@ use crate::linkstate_forward::{
     absorb_keyexpr_into, all_query_directions, build_declare_queryable_with_info,
     complete_query_directions, compute_push_forward, compute_self_publish_forward,
     declare_queryable_wireexpr, declare_subscriber_wireexpr, emit_current_interest_replies,
-    is_tree_forward_target, peer_whatami_routing, peer_zid_routing, re_advertise_interest_into,
-    resolve_governed_keyexpr, resolve_source_in, select_best_matching,
+    is_tree_forward_target, peer_acl_username, peer_whatami_routing, peer_zid_routing,
+    re_advertise_interest_into, resolve_governed_keyexpr, resolve_source_in, select_best_matching,
     synthesize_drained_fan_finals, synthesize_expired_query_returns, LocalQueryHandler,
     LocalQueryView, LocalQueryable, LocalSubscriber, LocalSubscriberHandler,
 };
@@ -6472,6 +6472,12 @@ impl InterceptorContext for RouterFaceContext<'_> {
         self.face.actions.link_subject()
     }
 
+    // R2631 — the authenticated name, through the reader the single-net twin
+    // uses, so both forwarders answer the username axis identically.
+    fn username(&self) -> Option<String> {
+        peer_acl_username(&self.face.actions)
+    }
+
     fn full_keyexpr(&self, msg: &NetworkMessage) -> Option<String> {
         // Delegates to the shared SSOT (the single-net FaceContext delegates to the
         // same free fn), alias-resolved against THIS face's table — one
@@ -7145,6 +7151,7 @@ mod tests {
                 permission: Permission::Deny,
                 link_protocols: Vec::new(),
                 interfaces: Vec::new(),
+                usernames: Vec::new(),
             }],
         })
     }
@@ -7170,6 +7177,65 @@ mod tests {
         sink_a.reset();
         sink_c.reset();
         (fwd, sink_a, sink_c)
+    }
+
+    /// R2631 — the router twin of the single-net
+    /// `a_face_authenticated_as_a_denied_user_is_dropped_and_another_user_is_not`.
+    /// Both forwarders implement the interceptor context separately, so a join
+    /// witnessed on one says nothing about the other; that is why the reader is a
+    /// shared function and why each forwarder carries its own witness of it.
+    #[cfg(all(feature = "access-acl", feature = "session-extauth"))]
+    #[test]
+    fn a_router_face_authenticated_as_a_denied_user_is_dropped_and_another_user_is_not() {
+        use wz_session_core::auth_dispatch::AuthIdentity;
+
+        let fwd = RouterForwarder::new(zid(0x01));
+        let (alice, _sink_alice) = face(zid(0xAA), WIRE_PEER);
+        let (bob, _sink_bob) = face(zid(0xBB), WIRE_PEER);
+        alice.set_peer_auth_id(Some(AuthIdentity(b"alice".to_vec())));
+        bob.set_peer_auth_id(Some(AuthIdentity(b"bob".to_vec())));
+        fwd.register(FaceId(0), &alice);
+        fwd.register(FaceId(1), &bob);
+        advertise_link_back(&fwd, FaceId(0), 0x01, 0xAA, 5);
+        advertise_link_back(&fwd, FaceId(1), 0x01, 0xBB, 5);
+        fwd.tick();
+
+        let base = deny_put_policy("demo/**", AclFlow::Ingress);
+        fwd.set_interceptors(InterceptorConfig {
+            acl: Some(AclPolicy::new(AclConfig {
+                default_permission: Permission::Allow,
+                rules: vec![AclRule {
+                    usernames: vec![
+                        wz_access_control::AclUsername::new("alice").expect("non-blank")
+                    ],
+                    ..base.rules()[0].clone()
+                }],
+            })),
+            ..Default::default()
+        });
+
+        let put = || {
+            NetworkMessage::Push(Box::new(
+                wz_session_core::push_build::build_push_literal("demo/data", b"payload")
+                    .expect("build push"),
+            ))
+        };
+
+        forward_one(&fwd, FaceId(0), put());
+        assert_eq!(fwd.interceptor_dropped(), 1, "alice's Put is denied");
+        assert_eq!(
+            fwd.data_seen(),
+            0,
+            "a denied Put is not counted as received"
+        );
+
+        forward_one(&fwd, FaceId(1), put());
+        assert_eq!(
+            fwd.interceptor_dropped(),
+            1,
+            "bob's identical Put is not denied"
+        );
+        assert_eq!(fwd.data_seen(), 1, "bob's Put is admitted and counted");
     }
 
     #[cfg(feature = "access-acl")]
@@ -7347,6 +7413,7 @@ mod tests {
                     permission: Permission::Deny,
                     link_protocols: Vec::new(),
                     interfaces: Vec::new(),
+                    usernames: Vec::new(),
                 }],
             })),
             ..Default::default()
@@ -7388,6 +7455,7 @@ mod tests {
                 permission: Permission::Deny,
                 link_protocols: Vec::new(),
                 interfaces: Vec::new(),
+                usernames: Vec::new(),
             }],
         })
     }

@@ -47,6 +47,23 @@ impl AclInterceptor {
     pub fn new(policy: AclPolicy, flow: AclFlow) -> Self {
         Self { policy, flow }
     }
+
+    /// R2631 — the face's authenticated username, read ONLY when some rule names a
+    /// user. Both verdict paths — the per-message one and the cached one — take it
+    /// from here, so they cannot read the identity differently.
+    ///
+    /// Skipping the read is not a semantic choice: when
+    /// [`AclPolicy::reads_username`] is `false` every rule's username axis admits
+    /// any argument, so `None` gives the verdict the real name would. What it saves
+    /// is the session-identity lock and copy on every message of every policy that
+    /// predates the axis.
+    fn face_username(&self, ctx: &dyn InterceptorContext) -> Option<String> {
+        if self.policy.reads_username() {
+            ctx.username()
+        } else {
+            None
+        }
+    }
 }
 
 /// One governed message kind's verdict inputs: the [`AclMessage`] a rule is
@@ -230,12 +247,14 @@ impl Interceptor for AclInterceptor {
         let Some(keyexpr) = ctx.full_keyexpr(msg) else {
             return governed.undeclare && self.flow == AclFlow::Ingress;
         };
+        let username = self.face_username(ctx);
         self.policy.decision(
             subject.as_ref(),
             self.flow,
             governed.action,
             &keyexpr,
             ctx.link_subject(),
+            username.as_deref(),
         ) == Permission::Allow
     }
 
@@ -265,10 +284,25 @@ impl Interceptor for AclInterceptor {
     ) -> Option<Box<dyn Any>> {
         let subject = ctx.subject()?;
         let link = ctx.link_subject();
+        // R2631 — the username is face-derived too, and it is safe to fold into a
+        // (face, keyexpr) row for a reason worth writing down, since the SUBJECT
+        // above is not: an accepting session learns its peer's name while it
+        // processes OpenSyn, and no data message crosses a face before that
+        // handshake completes, so the first message this row is computed for
+        // already sees the final name. A name could only change under a surviving
+        // row through `reset_for_reopen`, and its one production caller is the
+        // DIAL-side reconnect supervisor, where upstream and wz alike record no
+        // username at all. A departing face purges its rows, as for the zid.
+        let username = self.face_username(ctx);
         let allow = |action: AclMessage| {
-            self.policy
-                .decision(Some(&subject), self.flow, action, keyexpr, link)
-                == Permission::Allow
+            self.policy.decision(
+                Some(&subject),
+                self.flow,
+                action,
+                keyexpr,
+                link,
+                username.as_deref(),
+            ) == Permission::Allow
         };
         Some(Box::new(AclKeyexprCache {
             put: allow(AclMessage::Put),
@@ -385,6 +419,8 @@ mod tests {
         /// trait default) cannot show that, because `None` matches every
         /// narrowed rule — the axis would look reached whether or not it was.
         link: Option<LinkSubject>,
+        /// R2631 — the name this face's peer authenticated as.
+        username: Option<String>,
     }
 
     impl MockCtx {
@@ -396,6 +432,7 @@ mod tests {
                 subject,
                 aliases: HashMap::new(),
                 link: None,
+                username: None,
             }
         }
 
@@ -410,6 +447,15 @@ mod tests {
                     protocol: Some(protocol),
                     interfaces: None,
                 }),
+                username: None,
+            }
+        }
+
+        /// R2631 — the same context, with a peer that authenticated as `name`.
+        fn with_username(subject: Option<Zid>, name: Option<&str>) -> Self {
+            Self {
+                username: name.map(str::to_owned),
+                ..Self::with_subject(subject)
             }
         }
     }
@@ -423,6 +469,9 @@ mod tests {
         }
         fn link_subject(&self) -> Option<&LinkSubject> {
             self.link.as_ref()
+        }
+        fn username(&self) -> Option<String> {
+            self.username.clone()
         }
     }
 
@@ -441,6 +490,7 @@ mod tests {
                 permission: Permission::Deny,
                 link_protocols: Vec::new(),
                 interfaces: Vec::new(),
+                usernames: Vec::new(),
             }],
         })
     }
@@ -573,6 +623,7 @@ mod tests {
                         permission: Permission::Deny,
                         link_protocols: vec![protocol],
                         interfaces: Vec::new(),
+                        usernames: Vec::new(),
                     }],
                 }),
                 AclFlow::Ingress,
@@ -647,6 +698,7 @@ mod tests {
             subject: Some(Zid::from_slice(&[0x0A])),
             aliases,
             link: None,
+            username: None,
         };
         let put = aliased_put(7);
         assert_eq!(
@@ -673,6 +725,7 @@ mod tests {
             subject: Some(Zid::from_slice(&[0x0A])),
             aliases,
             link: None,
+            username: None,
         };
         let put = aliased_put(7);
         assert_eq!(ctx.full_keyexpr(&put).as_deref(), Some("admin/data"));
@@ -766,6 +819,7 @@ mod tests {
                 permission: Permission::Deny,
                 link_protocols: Vec::new(),
                 interfaces: Vec::new(),
+                usernames: Vec::new(),
             }],
         })
     }
@@ -1084,5 +1138,51 @@ mod tests {
             acl.intercept(&ctx, &msg),
             "cached and direct verdicts agree for a face that caches nothing"
         );
+    }
+
+    /// R2631 — a username-scoped DENY reaches the enforcer on BOTH verdict paths.
+    ///
+    /// The policy crate proves the matcher; this proves the enforcer hands it the
+    /// face's name at all. `face_username` sits between them and is allowed to
+    /// SKIP the read, so an enforcer that always skipped would pass every policy
+    /// test while exempting alice here. Three faces are driven through the same
+    /// message — alice, bob, and a face that authenticated no name — and for each
+    /// the cached table must give the direct verdict, because the name is one of
+    /// the face-derived inputs that table is keyed on.
+    #[test]
+    fn a_username_scoped_deny_reaches_the_direct_and_the_cached_verdict() {
+        let policy = AclPolicy::new(AclConfig {
+            default_permission: Permission::Allow,
+            rules: vec![AclRule {
+                usernames: vec![wz_access_control::AclUsername::new("alice").expect("non-blank")],
+                ..deny_admin_policy().rules()[0].clone()
+            }],
+        });
+        assert!(policy.reads_username(), "the fixture must name a user");
+        let acl = AclInterceptor::new(policy, AclFlow::Ingress);
+        let subject = Some(Zid::from_slice(&[0x0A]));
+        let msg = NetworkMessage::Push(Box::new(
+            build_push_literal("admin/secret", b"x").expect("build push"),
+        ));
+
+        for (face, name, admitted) in [
+            ("alice", Some("alice"), false),
+            ("bob", Some("bob"), true),
+            ("an unnamed face", None, true),
+        ] {
+            let ctx = MockCtx::with_username(subject, name);
+            assert_eq!(
+                acl.intercept(&ctx, &msg),
+                admitted,
+                "direct verdict for {face}"
+            );
+            let cache = acl.compute_keyexpr_cache(&ctx, "admin/secret");
+            assert!(cache.is_some(), "a resolved face caches a table ({face})");
+            assert_eq!(
+                acl.intercept_cached(&ctx, &msg, cache.as_deref()),
+                admitted,
+                "cached verdict for {face}"
+            );
+        }
     }
 }

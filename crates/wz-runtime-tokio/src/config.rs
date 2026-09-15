@@ -1067,6 +1067,7 @@ mod tests {
                 permission: Permission::Deny,
                 link_protocols: Vec::new(),
                 interfaces: Vec::new(),
+                usernames: Vec::new(),
             }],
         }));
         let json = c.to_admin_json();

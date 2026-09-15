@@ -1452,6 +1452,12 @@ impl InterceptorContext for FaceContext<'_> {
         self.face.actions.link_subject()
     }
 
+    // R2631 — the authenticated name, through the same shared reader the router
+    // twin uses, exactly as `subject` goes through `peer_zid_routing`.
+    fn username(&self) -> Option<String> {
+        peer_acl_username(&self.face.actions)
+    }
+
     fn full_keyexpr(&self, msg: &NetworkMessage) -> Option<String> {
         // The governed-kind resolution is the shared SSOT (the router twin
         // delegates to the same free fn), alias-resolved against THIS face's table.
@@ -5475,6 +5481,28 @@ pub(crate) fn peer_zid_routing(actions: &SessionLinkActions) -> Option<Zid> {
     actions
         .peer_zid()
         .and_then(|bytes| Zid::try_from(bytes).ok())
+}
+
+/// R2631 — the name this face's peer AUTHENTICATED as, for an ACL `usernames`
+/// subject: [`peer_zid_routing`]'s twin for the other session-derived identity,
+/// and the one place both forwarders' interceptor contexts read it, so the two
+/// cannot drift.
+///
+/// The bytes-to-name decision is `AuthIdentity::acl_username`'s, not this
+/// function's. Without `session-extauth` no handshake can carry a name, so the
+/// honest answer is `None` rather than a compile error at every caller.
+pub(crate) fn peer_acl_username(actions: &SessionLinkActions) -> Option<String> {
+    #[cfg(feature = "session-extauth")]
+    {
+        actions
+            .peer_auth_id()
+            .and_then(|id| id.acl_username().map(str::to_owned))
+    }
+    #[cfg(not(feature = "session-extauth"))]
+    {
+        let _ = actions;
+        None
+    }
 }
 
 /// The neighbour's [`WhatAmI`] role for [`add_link`](LinkstateNetwork::add_link),
@@ -10156,6 +10184,7 @@ mod tests {
                 permission: Permission::Deny,
                 link_protocols: Vec::new(),
                 interfaces: Vec::new(),
+                usernames: Vec::new(),
             }],
         })
     }
@@ -10184,8 +10213,74 @@ mod tests {
                 permission: Permission::Deny,
                 link_protocols: Vec::new(),
                 interfaces: Vec::new(),
+                usernames: Vec::new(),
             }],
         })
+    }
+
+    /// R2631 — THE JOIN: a face's AUTHENTICATED name, held on its real
+    /// `SessionLinkActions`, decides an ACL verdict in the forwarder.
+    ///
+    /// Each half is proven elsewhere and neither proves this: the usrpwd e2e shows
+    /// a real handshake leaves the name on the session, and the policy crate shows
+    /// a username rule matches a name. What only this can show is that the
+    /// forwarder's interceptor context READS the session's name at all, through
+    /// `peer_acl_username`. Two source faces send the SAME Put; alice's is dropped
+    /// and bob's is admitted. Asserting on the verdict witnesses (`interceptor_dropped`,
+    /// `data_seen`) rather than on relay delivery keeps it about the ACL and not
+    /// about the topology.
+    #[cfg(all(feature = "access-acl", feature = "session-extauth"))]
+    #[test]
+    fn a_face_authenticated_as_a_denied_user_is_dropped_and_another_user_is_not() {
+        use wz_session_core::auth_dispatch::AuthIdentity;
+
+        let fwd = LinkstateForwarder::new(zid(0x05), WhatAmI::Peer);
+        let (alice, _sink_alice) = peer_face(zid(0x0A));
+        let (bob, _sink_bob) = peer_face(zid(0x0C));
+        alice.set_peer_auth_id(Some(AuthIdentity(b"alice".to_vec())));
+        bob.set_peer_auth_id(Some(AuthIdentity(b"bob".to_vec())));
+        fwd.register(FaceId(0), &alice);
+        fwd.register(FaceId(2), &bob);
+        advertise_link_back(&fwd, FaceId(0), 0x0A, 0x05);
+        advertise_link_back(&fwd, FaceId(2), 0x0C, 0x05);
+
+        let base = deny_put_policy("demo/**");
+        fwd.set_interceptors(
+            InterceptorConfig::default().with_acl(AclPolicy::new(AclConfig {
+                default_permission: Permission::Allow,
+                rules: vec![AclRule {
+                    usernames: vec![
+                        wz_access_control::AclUsername::new("alice").expect("non-blank")
+                    ],
+                    ..base.rules()[0].clone()
+                }],
+            })),
+        );
+
+        let put = || DriverLoopOutcome::FramePayload {
+            priority: wz_session_core::qos::Priority::DEFAULT,
+            reliable: true,
+            sn: 0,
+            messages: vec![NetworkMessage::Push(Box::new(data_push()))], // demo/data
+            has_ext: false,
+            extensions: Vec::new(),
+        };
+
+        fwd.forward(FaceId(0), IterationEvent::Poll(&put()));
+        assert_eq!(fwd.interceptor_dropped(), 1, "alice's Put is denied");
+        assert_eq!(
+            fwd.data_seen(),
+            0,
+            "a denied Put is not counted as received"
+        );
+
+        fwd.forward(FaceId(2), IterationEvent::Poll(&put()));
+        assert_eq!(
+            fwd.interceptor_dropped(),
+            1,
+            "bob's identical Put is not denied"
+        );
+        assert_eq!(fwd.data_seen(), 1, "bob's Put is admitted and counted");
     }
 
     #[cfg(feature = "access-acl")]
@@ -10622,6 +10717,7 @@ mod tests {
                     permission: Permission::Deny,
                     link_protocols: Vec::new(),
                     interfaces: Vec::new(),
+                    usernames: Vec::new(),
                 }],
             })),
         );
@@ -11454,6 +11550,7 @@ mod tests {
                     permission: Permission::Deny,
                     link_protocols: Vec::new(),
                     interfaces: Vec::new(),
+                    usernames: Vec::new(),
                 }],
             })),
         );
@@ -11525,6 +11622,7 @@ mod tests {
                     permission: Permission::Deny,
                     link_protocols: Vec::new(),
                     interfaces: Vec::new(),
+                    usernames: Vec::new(),
                 }],
             })),
         );
@@ -11602,6 +11700,7 @@ mod tests {
                     permission: Permission::Deny,
                     link_protocols: Vec::new(),
                     interfaces: Vec::new(),
+                    usernames: Vec::new(),
                 }],
             })),
         );
@@ -11697,6 +11796,7 @@ mod tests {
                     permission: Permission::Deny,
                     link_protocols: Vec::new(),
                     interfaces: Vec::new(),
+                    usernames: Vec::new(),
                 }],
             })),
         );
@@ -11752,6 +11852,7 @@ mod tests {
                     permission: Permission::Deny,
                     link_protocols: Vec::new(),
                     interfaces: Vec::new(),
+                    usernames: Vec::new(),
                 }],
             })),
         );
@@ -11881,6 +11982,7 @@ mod tests {
                         permission: Permission::Deny,
                         link_protocols: Vec::new(),
                         interfaces: Vec::new(),
+                        usernames: Vec::new(),
                     }],
                 }))
                 .with_downsampling(vec![DownsamplingRule {

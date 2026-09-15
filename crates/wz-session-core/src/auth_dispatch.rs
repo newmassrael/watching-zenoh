@@ -144,6 +144,24 @@ impl AuthSubExt {
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct AuthIdentity(pub Vec<u8>);
 
+impl AuthIdentity {
+    /// R2631 — this identity as an ACL `usernames` subject: its UTF-8 text, or
+    /// `None` when the bytes are not UTF-8.
+    ///
+    /// The ONE place the bytes become a name, and upstream decides it the same way,
+    /// at the same moment: the transport converts the authenticated id with
+    /// `from_utf8` and, on failure, logs and keeps NO username
+    /// (`io/zenoh-transport/src/unicast/authentication.rs` @ `match std::str::from_utf8(username) {`).
+    /// So a non-UTF-8 principal is not refused a session; it simply matches only the
+    /// rules that do not name a user. Keeping the identity as bytes above and
+    /// converting only here is what lets both halves stay true: the handshake
+    /// invents no UTF-8 validation, and the ACL compares names, as upstream's
+    /// `Username(String)` does.
+    pub fn acl_username(&self) -> Option<&str> {
+        core::str::from_utf8(&self.0).ok()
+    }
+}
+
 /// An auth dispatch error. The handshake aborts on either: a malformed auth ext
 /// (the inner method chain did not decode) or a method rejecting the peer.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -731,5 +749,23 @@ mod tests {
         );
         // A recv with no peer auth ext admits (no method to reject).
         d.open_recv_init_ack(&[]).unwrap();
+    }
+
+    /// R2631 — an authenticated identity reads as an ACL username exactly when its
+    /// bytes are UTF-8, and a non-UTF-8 one reads as NO username rather than a
+    /// lossy one. Lossy would be the tempting wrong answer: `\u{FFFD}` substitution
+    /// could make a stranger's malformed bytes equal a configured name, where
+    /// upstream's `from_utf8` failure leaves the transport with no username at all.
+    #[test]
+    fn an_identity_is_an_acl_username_only_when_it_is_utf8() {
+        assert_eq!(
+            AuthIdentity(b"alice".to_vec()).acl_username(),
+            Some("alice")
+        );
+        assert_eq!(AuthIdentity(Vec::new()).acl_username(), Some(""));
+        assert_eq!(
+            AuthIdentity([0x61, 0xFF, 0x62].to_vec()).acl_username(),
+            None
+        );
     }
 }

@@ -24,10 +24,11 @@
 //!
 //! - The subject is the routing [`Zid`] (wz-routing-graph), the same identity
 //!   the routing layer keys on — not a parallel id type. zenoh's full subject
-//!   (`SubjectProperty<{interface,cert_cn,username,link,zid}>`) is reduced here
-//!   to the auth-free [`SubjectSelector`] (`Any` | `Zid`); the cert/username
-//!   subjects need transport authentication and arrive with the extauth
-//!   features (§5.16 `access-extauth-*`).
+//!   (`SubjectProperty<{interface,cert_cn,username,link,zid}>`) is carried here
+//!   as [`SubjectSelector`] (`Any` | `Zid`) plus the rule's inline narrowing
+//!   axes: link protocol and interface (R311y453) and username (R2631). The
+//!   cert-common-name is the one axis still absent; it comes from a TLS / QUIC
+//!   certificate, not from `Z_EXT_AUTH`.
 //! - Keyexpr rule matching uses
 //!   [`keyexpr_includes_target`]:
 //!   a rule keyexpr must INCLUDE the message keyexpr (`rule ⊇ msg`), the
@@ -175,15 +176,15 @@ impl AclMessage {
     }
 }
 
-/// Which subject a rule applies to — the auth-free subset of zenoh's
-/// `SubjectProperty`. [`Any`](SubjectSelector::Any) is zenoh's `Wildcard` (the
-/// rule applies to every peer); [`Zid`](SubjectSelector::Zid) is `Exactly(zid)`
-/// (only that peer). The link-protocol and interface subjects are NOT here: they
-/// narrow a rule rather than name a peer, so R311y453 put them on
-/// [`AclRule`](AclRule#structfield.link_protocols) instead. What remains absent
-/// from zenoh's `SubjectProperty` set is the cert-common-name and the username
-/// (`interceptor/authorization.rs:40-45`), both of which need transport
-/// authentication — deferred to the §5.16 `access-extauth-*` features.
+/// Which subject a rule applies to — the zid part of zenoh's `SubjectProperty`.
+/// [`Any`](SubjectSelector::Any) is zenoh's `Wildcard` (the rule applies to every
+/// peer); [`Zid`](SubjectSelector::Zid) is `Exactly(zid)` (only that peer). The
+/// link-protocol and interface subjects are NOT here: they narrow a rule rather
+/// than name a peer, so R311y453 put them on
+/// [`AclRule`](AclRule#structfield.link_protocols) instead, and R2631 put the
+/// username on [`AclRule`](AclRule#structfield.usernames) beside them. What remains
+/// absent from zenoh's `SubjectProperty` set is the cert-common-name, which comes
+/// from a TLS / QUIC link's certificate rather than from `Z_EXT_AUTH`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum SubjectSelector {
     /// Matches every peer (zenoh `SubjectProperty::Wildcard`).
@@ -256,8 +257,55 @@ pub struct AclRule {
     /// unix socket, pipe, serial, vsock) is a definite non-match — see
     /// [`LinkSubject::opt_matches_interfaces`].
     pub interfaces: Vec<String>,
+    /// R2631 — the USERNAME subject axis: the rule governs only a face whose peer
+    /// authenticated as one of these. EMPTY means the rule does not narrow by
+    /// user, which is zenoh's `usernames: None` expanding to `Wildcard`:
+    ///
+    /// `zenoh/src/net/routing/interceptor/authorization.rs` @ `let usernames = config_subject`
+    ///
+    /// NOT fail-closed, and deliberately unlike the two link axes above: a face
+    /// with NO username does not match a rule that names one. That is upstream's
+    /// `(SubjectProperty::Exactly(_), None) => false`, and it is a definite answer
+    /// rather than an indeterminate one — a session either authenticated a name or
+    /// it did not, and there is no "the resolver failed" state to be cautious
+    /// about. See [`AclRule::governs_username`].
+    pub usernames: Vec<AclUsername>,
     /// The verdict when the rule applies.
     pub permission: Permission,
+}
+
+/// R2631 — a username an ACL rule can name: non-blank text.
+///
+/// A type rather than a `String` so a blank name is UNREPRESENTABLE on a rule
+/// instead of silently matching nobody. Upstream refuses it when the policy is
+/// built, using `trim().is_empty()`:
+///
+/// `zenoh/src/net/routing/interceptor/authorization.rs` @ `"Found empty username value in subject '{}'",`
+///
+/// wz's policy constructor is infallible, so the refusal
+/// moves to the one place a username enters a rule. The stored value is NOT trimmed,
+/// exactly as upstream compares the configured string as written.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct AclUsername(String);
+
+/// A username that is empty or whitespace-only, which upstream refuses.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BlankUsername;
+
+impl AclUsername {
+    /// A rule username, refused when blank.
+    pub fn new(name: impl Into<String>) -> Result<Self, BlankUsername> {
+        let name = name.into();
+        if name.trim().is_empty() {
+            return Err(BlankUsername);
+        }
+        Ok(Self(name))
+    }
+
+    /// The name as configured.
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
 }
 
 impl AclRule {
@@ -271,6 +319,28 @@ impl AclRule {
     pub fn governs_link(&self, subject: Option<&LinkSubject>) -> bool {
         LinkSubject::opt_matches_protocols(subject, &self.link_protocols)
             && LinkSubject::opt_matches_interfaces(subject, &self.interfaces)
+    }
+
+    /// R2631 — whether this rule's USERNAME axis admits the face's authenticated
+    /// `username`: upstream's `SubjectProperty::matches` for that one axis.
+    ///
+    /// - no usernames listed — `Wildcard`, governs every face, named or not;
+    /// - a name listed, the face has one — governs only on equality;
+    /// - a name listed, the face has none — does NOT govern
+    ///   (`(SubjectProperty::Exactly(_), None) => false`).
+    ///
+    /// `None` covers every face that authenticated no name: an unauthenticated
+    /// session, a pubkey-only one, a session whose identity was not UTF-8, and
+    /// every INITIATOR-side face, since upstream records `UsrPwdId(None)` when
+    /// dialing and only the accepting side learns who connected.
+    pub fn governs_username(&self, username: Option<&str>) -> bool {
+        if self.usernames.is_empty() {
+            return true;
+        }
+        match username {
+            Some(name) => self.usernames.iter().any(|u| u.as_str() == name),
+            None => false,
+        }
     }
 }
 
@@ -300,6 +370,8 @@ pub struct AclConfig {
 // (zid), `link_protocols` and `interfaces` — so `cert_common_names` and
 // `usernames` are the two a reader cannot bridge, which is what the
 // `access-acl` catalog atom's reason has said since R311y453.
+// R2631 — FOUR now: `usernames` has an axis on `AclRule`, so only
+// `cert_common_names` is left for a reader to have nowhere to put.
 // R2151 (open-debt item 540) moved the five and added this comment:
 // until then the classification lived only in the reader's own doc, which made
 // it a claim with no witness at the capability.
@@ -333,12 +405,32 @@ impl AclConfig {
 #[derive(Debug, Clone)]
 pub struct AclPolicy {
     config: AclConfig,
+    /// R2631 — whether any rule narrows by username, computed once here. See
+    /// [`Self::reads_username`].
+    reads_username: bool,
 }
 
 impl AclPolicy {
     /// Compile a policy from its configuration.
     pub fn new(config: AclConfig) -> Self {
-        Self { config }
+        let reads_username = config.rules.iter().any(|r| !r.usernames.is_empty());
+        Self {
+            config,
+            reads_username,
+        }
+    }
+
+    /// R2631 — whether a face's username can change any verdict of this policy.
+    ///
+    /// `false` means no rule names a user, so [`Self::decision`] gives the same
+    /// answer for every username including `None`. An enforcer uses it to skip
+    /// reading the session identity at all — a lock and an allocation per message
+    /// — for every policy that does not ask for it, which is every policy that
+    /// existed before the axis did. It is an optimisation that cannot change a
+    /// verdict: when it is `false`, [`AclRule::governs_username`] is `true` for
+    /// every rule regardless of its argument.
+    pub fn reads_username(&self) -> bool {
+        self.reads_username
     }
 
     /// The configured default verdict — exposed so a caller can distinguish a
@@ -407,6 +499,13 @@ impl AclPolicy {
     /// can match it, lands on that same default whenever no wildcard rule
     /// applies. So this is not a divergence: it is what upstream would do if
     /// upstream could reach the branch.
+    ///
+    /// R2631 — `username` is the face's authenticated name
+    /// ([`AclRule::governs_username`] says how each rule reads it). It is a
+    /// parameter of THIS function rather than a second entry point on purpose: a
+    /// username-blind `decision` left callable beside it would make every
+    /// username-scoped DENY skippable at a call site, which is the shape open-debt
+    /// item 655 closed for the zid.
     pub fn decision(
         &self,
         subject: Option<&Zid>,
@@ -414,6 +513,7 @@ impl AclPolicy {
         action: AclMessage,
         keyexpr: &str,
         link: Option<&LinkSubject>,
+        username: Option<&str>,
     ) -> Permission {
         if self.config.rules.is_empty() {
             return self.config.default_permission;
@@ -430,6 +530,10 @@ impl AclPolicy {
                 // transport); wz has one chain for every face, so the same
                 // narrowing happens per rule, here.
                 && rule.governs_link(link)
+                // R2631 — the USERNAME axis. Upstream resolves it in the factory
+                // with the other four; wz reads it per rule here for the reason
+                // the link axes above give.
+                && rule.governs_username(username)
                 && rule.messages.contains(&action)
                 && rule
                     .key_exprs
@@ -480,6 +584,7 @@ mod tests {
             permission: Permission::Deny,
             link_protocols: Vec::new(),
             interfaces: Vec::new(),
+            usernames: Vec::new(),
         }
     }
 
@@ -556,6 +661,7 @@ mod tests {
                 AclFlow::Ingress,
                 AclMessage::Put,
                 "x/y",
+                None,
                 None
             ),
             Permission::Allow
@@ -566,6 +672,7 @@ mod tests {
                 AclFlow::Ingress,
                 AclMessage::Put,
                 "x/y",
+                None,
                 None
             ),
             Permission::Deny
@@ -588,7 +695,14 @@ mod tests {
             rules: vec![deny_rule(SubjectSelector::Any, "admin/**")],
         });
         assert_eq!(
-            wildcard_deny.decision(None, AclFlow::Ingress, AclMessage::Put, "admin/cfg", None),
+            wildcard_deny.decision(
+                None,
+                AclFlow::Ingress,
+                AclMessage::Put,
+                "admin/cfg",
+                None,
+                None
+            ),
             Permission::Deny,
             "a rule that does not name a peer governs a peer with no name"
         );
@@ -600,7 +714,14 @@ mod tests {
             rules: vec![allow_rule(SubjectSelector::Zid(zid(&[7])), "admin/**")],
         });
         assert_eq!(
-            named_allow.decision(None, AclFlow::Ingress, AclMessage::Put, "admin/cfg", None),
+            named_allow.decision(
+                None,
+                AclFlow::Ingress,
+                AclMessage::Put,
+                "admin/cfg",
+                None,
+                None
+            ),
             Permission::Deny,
             "a rule naming one peer does not reach a peer with no name"
         );
@@ -610,6 +731,7 @@ mod tests {
                 AclFlow::Ingress,
                 AclMessage::Put,
                 "admin/cfg",
+                None,
                 None
             ),
             Permission::Allow,
@@ -620,7 +742,14 @@ mod tests {
         //    request lands on the configured default, exactly where upstream's
         //    no-matched-subject path lands.
         assert_eq!(
-            wildcard_deny.decision(None, AclFlow::Ingress, AclMessage::Put, "demo/data", None),
+            wildcard_deny.decision(
+                None,
+                AclFlow::Ingress,
+                AclMessage::Put,
+                "demo/data",
+                None,
+                None
+            ),
             Permission::Allow,
             "outside every rule, the default permission carries it"
         );
@@ -630,6 +759,7 @@ mod tests {
                 AclFlow::Ingress,
                 AclMessage::Put,
                 "demo/data",
+                None,
                 None
             ),
             Permission::Deny,
@@ -651,6 +781,7 @@ mod tests {
                 AclFlow::Ingress,
                 AclMessage::Put,
                 "admin/cfg",
+                None,
                 None
             ),
             Permission::Deny
@@ -662,6 +793,7 @@ mod tests {
                 AclFlow::Ingress,
                 AclMessage::Put,
                 "demo/data",
+                None,
                 None
             ),
             Permission::Allow
@@ -681,6 +813,7 @@ mod tests {
                 AclFlow::Ingress,
                 AclMessage::Put,
                 "metrics/cpu",
+                None,
                 None
             ),
             Permission::Allow
@@ -692,6 +825,7 @@ mod tests {
                 AclFlow::Ingress,
                 AclMessage::Put,
                 "admin/cfg",
+                None,
                 None
             ),
             Permission::Deny
@@ -715,6 +849,7 @@ mod tests {
                 AclFlow::Ingress,
                 AclMessage::Put,
                 "secret/key",
+                None,
                 None
             ),
             Permission::Deny
@@ -726,6 +861,7 @@ mod tests {
                 AclFlow::Ingress,
                 AclMessage::Put,
                 "secret/pub",
+                None,
                 None
             ),
             Permission::Allow
@@ -747,6 +883,7 @@ mod tests {
                 AclFlow::Ingress,
                 AclMessage::Put,
                 "admin/cfg",
+                None,
                 None
             ),
             Permission::Deny
@@ -758,6 +895,7 @@ mod tests {
                 AclFlow::Ingress,
                 AclMessage::Put,
                 "admin/cfg",
+                None,
                 None
             ),
             Permission::Allow
@@ -778,6 +916,7 @@ mod tests {
                 AclFlow::Egress,
                 AclMessage::Put,
                 "admin/cfg",
+                None,
                 None
             ),
             Permission::Allow
@@ -800,6 +939,7 @@ mod tests {
                 permission: Permission::Deny,
                 link_protocols: Vec::new(),
                 interfaces: Vec::new(),
+                usernames: Vec::new(),
             }],
         });
         assert_eq!(
@@ -808,6 +948,7 @@ mod tests {
                 AclFlow::Ingress,
                 AclMessage::Delete,
                 "admin/cfg",
+                None,
                 None
             ),
             Permission::Deny
@@ -818,6 +959,7 @@ mod tests {
                 AclFlow::Ingress,
                 AclMessage::DeclareSubscriber,
                 "admin/cfg",
+                None,
                 None
             ),
             Permission::Deny
@@ -829,9 +971,141 @@ mod tests {
                 AclFlow::Ingress,
                 AclMessage::Put,
                 "admin/cfg",
+                None,
                 None
             ),
             Permission::Allow
         );
+    }
+
+    // ── R2631: the USERNAME subject axis ─────────────────────────────────
+
+    fn user(name: &str) -> AclUsername {
+        AclUsername::new(name).expect("a non-blank test username")
+    }
+
+    fn put(policy: &AclPolicy, subject: Option<&Zid>, username: Option<&str>) -> Permission {
+        policy.decision(
+            subject,
+            AclFlow::Ingress,
+            AclMessage::Put,
+            "admin/cfg",
+            None,
+            username,
+        )
+    }
+
+    /// A rule naming a user governs that user, not another one, and not a face
+    /// that authenticated no name at all.
+    ///
+    /// The three faces are asserted together because each alone is satisfiable
+    /// by a wrong matcher: "deny everyone" passes alice, "ignore the axis" passes
+    /// alice too, and only the unnamed face separates upstream's
+    /// `(Exactly(_), None) => false` from a fail-closed reading that would deny
+    /// it. The default-deny half is the mirror: an allow naming alice must not
+    /// rescue bob or the unnamed face.
+    #[test]
+    fn a_username_rule_governs_only_the_named_user_and_never_an_unnamed_face() {
+        let z = zid(&[7]);
+        let deny_alice = AclPolicy::new(AclConfig {
+            default_permission: Permission::Allow,
+            rules: vec![AclRule {
+                usernames: vec![user("alice")],
+                ..deny_rule(SubjectSelector::Any, "admin/**")
+            }],
+        });
+        assert_eq!(put(&deny_alice, Some(&z), Some("alice")), Permission::Deny);
+        assert_eq!(put(&deny_alice, Some(&z), Some("bob")), Permission::Allow);
+        assert_eq!(put(&deny_alice, Some(&z), None), Permission::Allow);
+
+        let allow_alice = AclPolicy::new(AclConfig {
+            default_permission: Permission::Deny,
+            rules: vec![AclRule {
+                usernames: vec![user("alice")],
+                ..allow_rule(SubjectSelector::Any, "admin/**")
+            }],
+        });
+        assert_eq!(
+            put(&allow_alice, Some(&z), Some("alice")),
+            Permission::Allow
+        );
+        assert_eq!(put(&allow_alice, Some(&z), Some("bob")), Permission::Deny);
+        assert_eq!(put(&allow_alice, Some(&z), None), Permission::Deny);
+    }
+
+    /// An EMPTY username list does not narrow: upstream's `usernames: None`
+    /// becomes `Wildcard`, which matches a named face and an unnamed one alike.
+    /// Without this, adding the axis would have silently narrowed every rule
+    /// written before it existed.
+    #[test]
+    fn a_rule_that_names_no_user_governs_every_face() {
+        let z = zid(&[7]);
+        let policy = AclPolicy::new(AclConfig {
+            default_permission: Permission::Allow,
+            rules: vec![deny_rule(SubjectSelector::Any, "admin/**")],
+        });
+        assert_eq!(put(&policy, Some(&z), Some("alice")), Permission::Deny);
+        assert_eq!(put(&policy, Some(&z), None), Permission::Deny);
+    }
+
+    /// The axes combine by AND, as upstream's `Subject::matches` does: a rule
+    /// naming both a zid and a user governs only the face that is both.
+    #[test]
+    fn a_username_narrows_together_with_the_zid_rather_than_instead_of_it() {
+        let (z1, z2) = (zid(&[1]), zid(&[2]));
+        let policy = AclPolicy::new(AclConfig {
+            default_permission: Permission::Allow,
+            rules: vec![AclRule {
+                usernames: vec![user("alice")],
+                ..deny_rule(SubjectSelector::Zid(z1), "admin/**")
+            }],
+        });
+        assert_eq!(put(&policy, Some(&z1), Some("alice")), Permission::Deny);
+        assert_eq!(put(&policy, Some(&z2), Some("alice")), Permission::Allow);
+        assert_eq!(put(&policy, Some(&z1), Some("bob")), Permission::Allow);
+    }
+
+    /// A blank username cannot be put on a rule, as upstream refuses it at
+    /// policy build; a padded one is kept exactly as written, since upstream
+    /// rejects on `trim().is_empty()` but compares the configured string itself.
+    #[test]
+    fn a_blank_username_is_refused_and_a_padded_one_is_kept_verbatim() {
+        assert_eq!(AclUsername::new(""), Err(BlankUsername));
+        assert_eq!(AclUsername::new("  \t "), Err(BlankUsername));
+        assert_eq!(user(" alice ").as_str(), " alice ");
+        let z = zid(&[7]);
+        let policy = AclPolicy::new(AclConfig {
+            default_permission: Permission::Allow,
+            rules: vec![AclRule {
+                usernames: vec![user(" alice ")],
+                ..deny_rule(SubjectSelector::Any, "admin/**")
+            }],
+        });
+        assert_eq!(put(&policy, Some(&z), Some("alice")), Permission::Allow);
+        assert_eq!(put(&policy, Some(&z), Some(" alice ")), Permission::Deny);
+    }
+
+    /// `reads_username` is `true` exactly when some rule names a user — the
+    /// condition under which an enforcer may skip reading the identity is the
+    /// condition under which the answer cannot depend on it.
+    #[test]
+    fn reads_username_is_set_exactly_when_a_rule_names_a_user() {
+        let plain = AclPolicy::new(AclConfig {
+            default_permission: Permission::Allow,
+            rules: vec![deny_rule(SubjectSelector::Any, "admin/**")],
+        });
+        assert!(!plain.reads_username());
+        assert!(!AclPolicy::new(AclConfig::deny_all()).reads_username());
+        let named = AclPolicy::new(AclConfig {
+            default_permission: Permission::Allow,
+            rules: vec![
+                deny_rule(SubjectSelector::Any, "a/**"),
+                AclRule {
+                    usernames: vec![user("alice")],
+                    ..deny_rule(SubjectSelector::Any, "b/**")
+                },
+            ],
+        });
+        assert!(named.reads_username());
     }
 }

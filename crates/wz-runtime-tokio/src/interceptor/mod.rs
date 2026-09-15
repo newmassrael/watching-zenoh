@@ -120,6 +120,30 @@ pub trait InterceptorContext {
     fn link_subject(&self) -> Option<&LinkSubject> {
         None
     }
+
+    /// R2631 — the name the peer on this face AUTHENTICATED as, for the ACL's
+    /// `usernames` subject axis: the wz counterpart of the username zenoh reads
+    /// off the transport's auth ids when it resolves a subject
+    /// (`zenoh/src/net/routing/interceptor/access_control.rs` @ `let username = auth_ids.username().cloned().map(Username);`).
+    ///
+    /// A SESSION fact, not a link one, which is why it is a method beside
+    /// [`subject`](Self::subject) and not a field of [`LinkSubject`]: a link
+    /// driver cannot know who authenticated over it, and the name comes from the
+    /// accept handshake the session ran, exactly as the zid does.
+    ///
+    /// ⛔ DELIBERATELY NO DEFAULT, unlike [`link_subject`](Self::link_subject)
+    /// above, and the asymmetry is the point. That method's `None` is
+    /// fail-CLOSED: a narrowed rule still applies to a link that cannot describe
+    /// itself. This one's `None` is a definite "no name", under which a rule
+    /// naming a user does NOT apply — so a context that inherited a silent `None`
+    /// would exempt an authenticated user from every username-scoped DENY. Making
+    /// each implementation write the answer is what keeps that from being a
+    /// thing a new forwarder can forget.
+    ///
+    /// `None` for an unauthenticated session, a pubkey-only one, a name that is
+    /// not UTF-8 (upstream keeps no username then either), and every face this
+    /// node DIALED, since only the accepting side learns who connected.
+    fn username(&self) -> Option<String>;
 }
 
 /// WHICH interceptor a chain verdict came from — R2371.
