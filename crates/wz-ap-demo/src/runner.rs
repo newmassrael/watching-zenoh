@@ -7197,14 +7197,16 @@ pub(crate) async fn run_storage_host(listen: &str, opts: StorageHostOpts) -> io:
 
     use std::sync::atomic::Ordering::Relaxed;
 
+    // R2645 — `answer_admin_query` / `AdminAnswerCtx` / `QueryView` / `ReplyOut`
+    // are GONE from this host's imports, and their absence is the point: this
+    // run-mode no longer re-implements the admin answerer, it declares through
+    // the library seam and hands it the live inputs.
     use wz::runtime_tokio::adminspace::{
-        admin_config_key, admin_config_write_key, admin_config_write_prefix, admin_queryable_key,
-        answer_admin_query, parse_admin_config_write, AdminAnswerCtx, AdminConfigWrite,
-        AdminConfigWriteOutcome,
+        admin_config_key, admin_config_write_key, admin_config_write_prefix,
+        parse_admin_config_write, AdminConfigWrite, AdminConfigWriteOutcome,
     };
     use wz::runtime_tokio::compiled_plugins_dyn;
     use wz::runtime_tokio::config::WzConfig;
-    use wz::runtime_tokio::query_sink::{QueryView, ReplyOut};
     use wz::runtime_tokio::session_open::{accept_bound_on, bind_endpoint_with_config};
     use wz::runtime_tokio::sink::SampleView;
     use wz::runtime_tokio::storage_manager_service::RuntimeStorageManager;
@@ -7294,7 +7296,9 @@ pub(crate) async fn run_storage_host(listen: &str, opts: StorageHostOpts) -> io:
     let local = listener.local_addr_display()?;
 
     // The admin keys this host serves (SSOT-derived from the same zid/whatami).
-    let queryable_key = admin_queryable_key(&zid_hex, whatami_str); // @/<zid>/peer/**
+    // R2645 — the QUERYABLE key is no longer built here: the library declare
+    // derives it from the same `admin_queryable_key(zid, whatami)` SSOT, so
+    // naming it twice would be two spellings of one fact.
     let config_key = admin_config_key(&zid_hex, whatami_str); // @/<zid>/peer/config
     let write_key = admin_config_write_key(&zid_hex, whatami_str); // @/<zid>/peer/config/**
                                                                    // The `@/<zid>/peer/config/` prefix a config-write PUT's sub-key hangs under.
@@ -7560,7 +7564,8 @@ pub(crate) async fn run_storage_host(listen: &str, opts: StorageHostOpts) -> io:
         let get_started = storage_started.clone();
         // R311y828 — the sub-tree snapshot, cloned per declare like the flag above.
         let get_leaves = storage_leaves.clone();
-        let get_zid = zid_hex.clone();
+        // R2645 — no `get_zid`: the ctx this host used to build by hand is now the
+        // library's, and it derives the zid from the session's own params.
         let get_version = version.clone();
         // Cloned per-declare like `get_version`: the closure is `Send + 'static`,
         // so it owns its copy of the records rather than borrowing the outer Vec.
@@ -7570,30 +7575,27 @@ pub(crate) async fn run_storage_host(listen: &str, opts: StorageHostOpts) -> io:
         // than the peer/router-hat `Rc` for the reason this function's doc gives:
         // the callback is `Send + 'static`.
         let get_cfg = admin_cfg.clone();
-        let _admin_queryable: Option<Queryable> = match session.declare_queryable(
-            queryable_key.clone(),
-            QueryableOptions::default(),
-            move |view: &dyn QueryView, out: &mut dyn ReplyOut| {
-                // R311y812 — resolved PER GET off the shared config through the
-                // library `admin_read_permit` cfg site, exactly as the peer and
-                // router-hat hosts do. ONE read feeds the ctx below; with
-                // `adminspace-read` compiled out the site returns a constant true and
-                // the value here is ignored.
-                let permissions = admin_permissions_of(&get_cfg);
-                let admin_read = wz::runtime_tokio::admin_read_permit(&permissions);
-                // The `config` leg is rendered from the SAME live instance per GET
-                // (the peer host already did this), so the two things this handler
-                // reports about the config cannot come from different moments.
-                let config_json = admin_config_json_of(&get_cfg);
-                let ctx = AdminAnswerCtx {
-                    zid_hex: &get_zid,
-                    whatami: whatami_str,
-                    version: &get_version,
-                    locators: &get_locators,
-                    read: admin_read,
-                    // R311y810 — the mesh-host `None`; see the peer host above.
-                    stats: None,
-                };
+        // R2645 — THIS HOST NO LONGER RE-IMPLEMENTS THE ANSWERER. It used to build
+        // its own `declare_queryable` handler that assembled the ctx and called
+        // `answer_admin_query` itself, duplicating what the library declare does —
+        // and a re-implementation is exactly what the library's per-GET witness
+        // (`declare_adminspace_live_permit_source_flips_the_gate_at_runtime`)
+        // cannot cover, which is why `adminspace-read` carried a residual saying
+        // the per-GET resolve had no witness HERE.
+        //
+        // The seam could not take this host before: it admitted ONE live input (the
+        // permit) and froze the config, the registry and the stats. Now it takes the
+        // whole live set, so everything this handler re-read per GET is re-read per
+        // GET by the library, in ONE source call so the reply cannot pair a permit
+        // from one instant with a config from another.
+        //
+        // ⚠ The key is unchanged: the seam derives `admin_queryable_key(zid, whatami)`,
+        // which is the same function that built `queryable_key` above.
+        let get_version_arg = get_version.clone();
+        let _admin_queryable: Option<Queryable> = match session.declare_adminspace_with_live_inputs(
+            get_version_arg,
+            get_locators.clone(),
+            move || {
                 // The DYNAMIC registry: storage_manager is Started when a storage is
                 // live (!manager.is_empty(), reflected into storage_started), Loaded
                 // otherwise. This is what binds the witness to REAL add_storage.
@@ -7615,13 +7617,34 @@ pub(crate) async fn run_storage_host(listen: &str, opts: StorageHostOpts) -> io:
                 // admin surface, and the only difference visible on the wire is
                 // the `path` field (a real `.so` vs `"__static__"`).
                 plugins.extend(get_plugin_records.iter().cloned());
-                if answer_admin_query(view, out, &ctx, &[], &[], &plugins, &config_json)
-                    == wz::runtime_tokio::adminspace::AdminAnswerOutcome::DeniedRead
-                {
-                    log::error!(
-                        "{}",
-                        wz::runtime_tokio::adminspace::denied_read_diagnostic(view.keyexpr())
-                    );
+                wz::runtime_tokio::adminspace::AdminLiveInputs {
+                    // R311y812 — resolved PER GET off the shared config through the
+                    // library `admin_read_permit` cfg site, which the declare now
+                    // applies for us.
+                    // R311y812 — resolved PER GET off the shared config through the
+                    // library `admin_read_permit` cfg site, which the declare now
+                    // applies for us.
+                    //
+                    // ⚠ R2645 measured what this does and does NOT buy. Freezing it
+                    // here — capturing the same value once at declare time — leaves
+                    // all three E6i lanes GREEN, reproducing R2374's control. The
+                    // liveness is real but UNWITNESSED, because every pico `z_get`
+                    // arrives on its own connection, so no lane can tell a per-GET
+                    // read from a per-connection one. Routing this host onto the
+                    // library seam moved that read; it did not make anything
+                    // observe it.
+                    permissions: admin_permissions_of(&get_cfg),
+                    plugins,
+                    // The `config` leg is rendered from the SAME live instance per
+                    // GET, so the two things this reply reports about the config
+                    // cannot come from different moments.
+                    config_json: admin_config_json_of(&get_cfg),
+                    // R311y810 — the mesh-host `None`, KEPT: wz's counters are
+                    // per-session and this node holds N faces, so there is no single
+                    // report to serve. The seam takes this from the caller precisely
+                    // so a mesh host does not have to re-implement the answerer to
+                    // say so.
+                    stats: None,
                 }
             },
         ) {

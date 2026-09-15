@@ -3866,6 +3866,71 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
     where
         SessionLinkActions<R, T>: Send + Sync + 'static,
     {
+        // R2645 — now a thin wrapper over the live-input seam, and deliberately so:
+        // one implementation answers, and this signature keeps the shape a session
+        // with FIXED inputs wants. The two frozen values are computed exactly where
+        // they were before — the config mirror once at declare time, the compiled
+        // registry from the version — so a caller of this method sees what it saw.
+        let version: String = version.into();
+        // R311y40/y45 — the typed WzConfig read-at-open mirror, serialized once at
+        // declare time (the handshake params are fixed for the session's life).
+        let config_json =
+            crate::config::WzConfig::from_init_params(&self.actions().params).to_admin_json();
+        // R311y237 — the node's compiled-in plugin registry (the wz-native
+        // subsystem set this binary carries; `Loaded` state). Empty vec without
+        // the feature so the answerer's `plugins` param is signature-stable.
+        #[cfg(feature = "adminspace-plugins-handlers")]
+        let plugins = crate::compiled_plugins(&version);
+        #[cfg(not(feature = "adminspace-plugins-handlers"))]
+        let plugins: Vec<wz_session_core::adminspace::AdminPlugin> = Vec::new();
+        let stats_actions = self.actions().clone();
+        self.declare_adminspace_with_live_inputs(version, locators, move || {
+            wz_session_core::adminspace::AdminLiveInputs {
+                permissions: permissions(),
+                // The one-session host's own report IS the node's, which is what
+                // this method resolved inline before the live seam existed.
+                #[cfg(feature = "transport-stats")]
+                stats: Some(stats_actions.stats_report()),
+                #[cfg(not(feature = "transport-stats"))]
+                stats: None,
+                // ⚠ CLONED per GET where the old shape borrowed a captured value.
+                // Behaviourally identical — the same bytes, frozen at the same
+                // moment — and the cost is one `String` clone on a path that
+                // already allocates its reply. A borrow cannot cross a `Fn()`.
+                plugins: plugins.clone(),
+                config_json: config_json.clone(),
+            }
+        })
+    }
+
+    /// R2645 — declare the adminspace with a source for everything a hosting node
+    /// RE-READS per GET: the permit, the rendered config, and the plugin registry.
+    ///
+    /// ## Why this exists rather than a third permissions-only declare
+    ///
+    /// [`Self::declare_adminspace_with_permissions_source`] takes ONE live input
+    /// and freezes the rest, which is right for a session whose handshake params
+    /// are fixed for its life. A node that HOSTS an adminspace is not that: its
+    /// config can be rewritten over the wire, and a dynamic plugin registry
+    /// reports whether its subsystem is actually live. Because the seam admitted
+    /// only one live input, `wz-ap-demo`'s storage host could not use it and
+    /// re-implemented the answer handler inline — and the library's per-GET
+    /// witness (`declare_adminspace_live_permit_source_flips_the_gate_at_runtime`)
+    /// cannot cover a re-implementation. This seam is what lets that host stop
+    /// duplicating and inherit the witnessed behaviour instead.
+    ///
+    /// ⚠ ONE call to `inputs` per GET, never three closures: a reply must not pair
+    /// a permit read at one instant with a config rendered at another.
+    #[cfg(feature = "adminspace-core")]
+    pub fn declare_adminspace_with_live_inputs(
+        &self,
+        version: impl Into<String>,
+        locators: Vec<String>,
+        inputs: impl Fn() -> wz_session_core::adminspace::AdminLiveInputs + Send + 'static,
+    ) -> Result<Queryable<R, T>, QueryableError>
+    where
+        SessionLinkActions<R, T>: Send + Sync + 'static,
+    {
         use wz_codecs::whatami::WhatAmI;
         use wz_session_core::adminspace::{
             admin_queryable_key, answer_admin_query, AdminAnswerCtx, AdminAnswerOutcome,
@@ -3876,19 +3941,22 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
         let zid_hex = zid_to_zenoh_hex(&self.actions().params.zid);
         let whatami = self.actions().params.whatami.to_str();
         let queryable_key = admin_queryable_key(&zid_hex, whatami);
-        // R311y40/y45 — the typed WzConfig read-at-open mirror, serialized once at
-        // declare time (the handshake params are fixed for the session's life).
-        let config_json =
-            crate::config::WzConfig::from_init_params(&self.actions().params).to_admin_json();
         let version: String = version.into();
         let actions = self.actions().clone();
 
         let handler = move |view: &dyn QueryView, out: &mut dyn ReplyOut| {
+            // R2645 — ONE call to the source per GET, so the permit, the config
+            // rendering and the registry this reply reports all come from the SAME
+            // moment. Reading them through three separate closures would let a
+            // reply pair a permit from one instant with a config from another,
+            // which is the defect the storage host's own inline handler already
+            // guarded against by rendering both off one captured handle.
+            let live = inputs();
             // The LIVE permit read — the whole reason this handler takes a source.
             // Resolved through the `admin_read_permit` cfg site (ONE place decides
             // what "the gate compiled out" means), once per GET so the dispatch
             // below runs under a single consistent verdict.
-            let read = crate::admin_read_permit(&permissions());
+            let read = crate::admin_read_permit(&live.permissions);
             // The connected peer is the session-centric `sessions[]` entry,
             // resolved LIVE per query off the captured bundle so a reconnect / peer
             // change is reflected (zenoh's `get_transports_unicast`,
@@ -3937,10 +4005,11 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
             // struct field: gating the field would force a matching `#[cfg]` on
             // every construction site, including crates that carry no such
             // feature of their own.
-            #[cfg(feature = "transport-stats")]
-            let stats = Some(actions.stats_report());
-            #[cfg(not(feature = "transport-stats"))]
-            let stats = None;
+            // R2645 — the CALLER decides, through the live source. A one-session
+            // host serves its own report; a mesh host serves none, because wz's
+            // counters are per-session and it holds N faces (R311y810). Resolving
+            // it here would force the second kind to re-implement the answerer.
+            let stats = live.stats;
             let ctx = AdminAnswerCtx {
                 zid_hex: &zid_hex,
                 whatami,
@@ -3949,19 +4018,17 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
                 read,
                 stats,
             };
-            // R311y237 — the node's compiled-in plugin registry (the wz-native
-            // subsystem set this binary carries; `Loaded` state). Empty vec without
-            // the feature so the answerer's `plugins` param is signature-stable.
-            #[cfg(feature = "adminspace-plugins-handlers")]
-            let plugins = crate::compiled_plugins(&version);
-            #[cfg(not(feature = "adminspace-plugins-handlers"))]
-            let plugins: Vec<wz_session_core::adminspace::AdminPlugin> = Vec::new();
+            // R2645 — the registry now comes from the LIVE source with the permit
+            // and the config, rather than being rebuilt here from a compiled list.
+            // A caller whose registry is compiled-in returns the same vec every
+            // call; a caller hosting a dynamic subsystem returns its current state.
+            let plugins = live.plugins;
             // The pure-Session admin host does not enumerate declarations (its admin
             // sink fires while the observer is locked mid-`iter_mut`, so it cannot
             // re-read the declaration registries — the introspection materialization
             // for this host is a NAMED follow-up). The forwarder-hosted demo admin
             // (`--config-queryable`) is the wired introspection host for §5.23.
-            if answer_admin_query(view, out, &ctx, &sessions, &[], &plugins, &config_json)
+            if answer_admin_query(view, out, &ctx, &sessions, &[], &plugins, &live.config_json)
                 == AdminAnswerOutcome::DeniedRead
             {
                 // zenoh's own deny diagnostic, at the same severity and naming the

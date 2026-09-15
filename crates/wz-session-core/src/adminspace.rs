@@ -397,6 +397,52 @@ impl Default for AdminSpacePermissions {
     }
 }
 
+/// Everything a hosting node must RE-READ on every admin GET.
+///
+/// ## Why this type exists
+///
+/// The pure-Session admin declare takes one live input — a permissions source —
+/// and freezes the rest at declare time, which is correct for a session whose
+/// handshake params are fixed for its life. A node that HOSTS an adminspace is
+/// not that: its config can be rewritten over the wire, and its plugin registry
+/// reports live subsystem state. Because the seam admitted only one live input,
+/// the demo's storage host could not use it and re-implemented the handler
+/// inline instead — and a re-implementation is exactly what the library's own
+/// per-GET witness cannot cover.
+///
+/// Naming the live set as a type is what lets one seam serve both: a caller with
+/// fixed inputs returns the same values every call, and a caller whose inputs
+/// move returns the current ones. Neither has to re-implement the answerer.
+///
+/// ⚠ The FIELDS ARE OWNED, not borrowed, and that is forced rather than
+/// preferred: this is produced by a `Fn()` the handler calls per GET, and a
+/// closure cannot hand out a borrow of state it does not own. A caller whose
+/// values are fixed clones them, which is one `String` per admin GET on a path
+/// that already allocates its reply.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AdminLiveInputs {
+    /// The read/write gate, resolved per GET — see [`AdminSpacePermissions`].
+    pub permissions: AdminSpacePermissions,
+    /// The plugin registry as it stands NOW. A compiled-in registry is constant;
+    /// a dynamic one reports whether its subsystem is actually live.
+    pub plugins: alloc::vec::Vec<AdminPlugin>,
+    /// The `config` leg's rendered JSON. A host that can be reconfigured over
+    /// the wire must render this per GET, or two answers in one reply could come
+    /// from different moments.
+    pub config_json: alloc::string::String,
+    /// The transport-stats report to serve, or `None` to serve none.
+    ///
+    /// ⚠ THE CALLER OWNS THIS CHOICE, and that is the whole reason it is here
+    /// rather than resolved inside the declare. A pure-Session host holds ONE
+    /// session, so its own report IS the node's. A MESH host holds N faces and
+    /// wz's counters are per-session, so there is no single report to serve —
+    /// `None` states that rather than serving one face's numbers as if they were
+    /// the node's (R311y810). A seam that picked for the caller would force the
+    /// second kind of host to re-implement the answerer, which is exactly the
+    /// duplication this type exists to end.
+    pub stats: Option<crate::stats::TransportStatsReport>,
+}
+
 /// The outcome of an admin-query answer — whether the `read` gate served the GET
 /// or denied it.
 ///
