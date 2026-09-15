@@ -915,7 +915,13 @@ CITATION = re.compile(r"\b((?:[A-Za-z0-9_.-]+/)*[A-Za-z0-9_.-]+\.(?:rs|c|h))(?::
 # the whole of what kept the tag. A REACHED atom (its units run in the node_clock
 # lane and its legs in Layer E8t), so it leaves this count with the population;
 # UNREACHED and NO_SYMBOL hold, as for every retirement above.
-PIN_REACHED = 33
+# R2627 — 33 -> 32: `access-extauth-pubkey` went PARTIAL -> COMPLETE. Both clauses
+# R2434 left standing are built -- runtime add/delete of a public key (a shared
+# lookup store) and PEM / PEM-file identity loading. A REACHED atom (its units run
+# in the C1y extauth_pubkey guards), so it leaves this count with the population;
+# UNREACHED and NO_SYMBOL hold. MEASURED with this module's own `reach_partition`
+# over origin's store and this one: exactly that atom left `reached`, none joined.
+PIN_REACHED = 32
 PIN_UNREACHED = 3
 PIN_NO_SYMBOL = 2
 # R2534 — 346 -> 347. The atom is `adminspace-metrics` and the citation is the
@@ -1378,7 +1384,16 @@ PIN_NO_SYMBOL = 2
 # its six resolving wz citations with it. Nothing is added back: this round wrote
 # no OTHER partial atom's reason, and the citations it added went into the
 # retiring atom's own text, which is no longer read here. 203 - 6 = 197.
-PIN_WZ_CITATIONS = 197
+# R2627 — 197 -> 201, RISING even though an atom RETIRED, because the round also
+# rewrote ANOTHER partial atom's reason. Both halves were measured with this
+# module's own `citation_audit`, per atom, over origin's store and this one:
+# `access-extauth-pubkey` re-graded COMPLETE and took its two resolving wz
+# citations with it (-2); `session-extauth` stays PARTIAL and gained a correction
+# with six (+6) -- four rooted paths to the store modules, the session identity
+# reader and the handshake drive, plus the bare `auth_dispatch.rs` and
+# `session_actions.rs` naming what R2411 had claimed. 197 - 2 + 6 = 201.
+# AMBIGUOUS holds at 42: neither atom's changed citations were ambiguous.
+PIN_WZ_CITATIONS = 201
 # R2626 — 44 -> 42, and this one is worth a sentence because it HELD through
 # every earlier retirement in this run (R2612, R2622). `time-hlc`'s reason is the
 # first retiree carrying AMBIGUOUS citations of its own: its oldest clauses cite
