@@ -1584,6 +1584,54 @@ mod tests {
         );
     }
 
+    /// R2646 — a PLUGIN config write is REFUSED, by both halves, rather than
+    /// applied without a validator.
+    ///
+    /// ⭐ THIS TEST EXISTS TO PIN A REFUTATION, so that it is falsifiable code
+    /// rather than a paragraph. `adminspace-write`'s reason has carried a
+    /// residual since 1.5.0 saying "upstream routes every config write through
+    /// the ConfigValidator seam before mutating and wz applies unvalidated".
+    /// MEASURED at the pin, the first half is false: that seam is reachable
+    /// ONLY through the plugins field — both of its call sites are inside
+    /// `commons/zenoh-config/src/lib.rs` @ `impl PluginsConfig`, one in
+    /// @ `pub fn remove(&mut self, key: &str) -> ZResult<()> {` and one in the
+    /// `ValidatedMap` insert, each keyed by a plugin NAME and delegating to
+    /// that started plugin's own `config_checker`. A write to
+    /// `adminspace/permissions/read` passes no validator upstream either.
+    ///
+    /// So the comparison the residual draws has no subject here: wz does not
+    /// honour `plugins` at all (it is in `UNHONOURED_UPSTREAM_CONFIG_KEYS`, with
+    /// its own `PluginRegistry` cited as what wz has instead), and a write
+    /// naming it is refused BY NAME. Refusing is not the same as applying
+    /// unvalidated — it is strictly more conservative.
+    ///
+    /// ⚠ What this test does NOT claim: that wz could not one day want such a
+    /// hook. The day `plugins` becomes honoured, this test reds — which is the
+    /// point of pinning it here rather than writing it down.
+    #[test]
+    fn a_plugin_config_write_is_refused_rather_than_applied_unvalidated() {
+        let key = "plugins/rest/http_port";
+        assert_eq!(
+            WzConfig::new()
+                .set_by_key(key, "8000")
+                .expect_err("wz does not honour plugin config"),
+            ConfigKeyWriteError::NotHonoured {
+                key: String::from(key)
+            },
+            "a plugin config WRITE is refused by name, not applied unvalidated"
+        );
+        assert_eq!(
+            WzConfig::new()
+                .remove_by_key(key)
+                .expect_err("nor can it be deleted"),
+            ConfigKeyWriteError::NotHonoured {
+                key: String::from(key)
+            },
+            "and so is the DELETE — upstream's validator covers its remove path \
+             too, so a delete that slipped through would be the same gap"
+        );
+    }
+
     /// R2646 — the delete half refuses exactly what the set half refuses, and
     /// by the same names.
     ///
