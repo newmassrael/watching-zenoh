@@ -261,7 +261,15 @@ else:
     rid="$(printf '%s' "$rest" | cut -f2)"
     conclusion="$(printf '%s' "$rest" | cut -f3)"
 
-    if [[ "${WZ_ACK_RED:-}" == "$rid" ]]; then
+    # R2639b — `WZ_ACK_RED` takes a COMMA-SEPARATED LIST, and a single id parses
+    # exactly as before. MEASURED while landing R2639: the fallback grades the
+    # newest FINISHED run, a hook run takes tens of minutes, and a deep queue
+    # drains during it — so the id the gate printed was stale by the time the
+    # acknowledged push reached the gate, and the push was refused naming a
+    # NEWER red of the same shape. A moving anchor cannot be named in advance,
+    # so the escape has to admit every run the pusher actually read. It is still
+    # per-run: each id is written out, none of them covers a run nobody looked at.
+    if [[ ",${WZ_ACK_RED:-}," == *",$rid,"* ]]; then
         echo "$context: previous run $rid is $conclusion — ACKNOWLEDGED via WZ_ACK_RED."
         echo "          Pay it off as its own round; this push proceeds."
         # R2502 (open-debt item 695, done-when 3) — the acknowledgement used to
