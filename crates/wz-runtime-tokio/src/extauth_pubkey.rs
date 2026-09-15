@@ -544,6 +544,56 @@ mod tests {
         );
     }
 
+    /// R2627 — runtime `add_pubkey` / `del_pubkey` change a REAL handshake's
+    /// verdict, which is the capability the atom's residual named.
+    ///
+    /// `extauth_pubkey_store`'s own tests prove the store's clones share state,
+    /// and none of them can see whether `PubKeyMethod` READS that state at the
+    /// moment it checks a key. The distinguishing case is a method BUILT BEFORE
+    /// the add: a `with_store` that snapshotted the set at construction would
+    /// pass every store test, and would even pass "a method built after the add
+    /// admits the key", while failing here. So the responder below is constructed
+    /// first and the key arrives afterwards, through a different clone.
+    ///
+    /// This is upstream's own witness shape
+    /// (`io/zenoh-transport/tests/unicast_authenticator.rs` @ `.add_pubkey(client02_pub_key.into())`),
+    /// driven through the dispatch rather than a transport manager.
+    #[test]
+    fn a_key_added_at_runtime_admits_a_handshake_that_already_holds_the_store() {
+        let init = keypair();
+        let init_pub = RsaPublicKey::from(&init);
+        let responder_key = keypair();
+        let store = PubKeyLookup::gated(vec![]);
+        let unauthorized = Err(AuthError::Rejected("pubkey: unauthorized public key"));
+
+        // The gate is live and closed: the same pair is refused before any add,
+        // so an `Ok` below is attributable to the add and not to a permissive
+        // store.
+        let refused = run_handshake(
+            PubKeyMethod::initiator(init.clone()),
+            PubKeyMethod::responder_with_store(responder_key.clone(), store.clone()),
+            0x42,
+        );
+        assert_eq!(refused, unauthorized, "an empty gate refuses the initiator");
+
+        // BUILT FIRST, then the key is added through another clone.
+        let already_built =
+            PubKeyMethod::responder_with_store(responder_key.clone(), store.clone());
+        assert!(store.add_pubkey(init_pub.clone()));
+        let admitted = run_handshake(PubKeyMethod::initiator(init.clone()), already_built, 0x43);
+        assert_eq!(
+            admitted,
+            Ok(()),
+            "a method built before the add must read the store when it checks"
+        );
+
+        // Revocation is live the same way.
+        let built_before_del = PubKeyMethod::responder_with_store(responder_key, store.clone());
+        assert!(store.del_pubkey(&init_pub));
+        let revoked = run_handshake(PubKeyMethod::initiator(init), built_before_del, 0x44);
+        assert_eq!(revoked, unauthorized, "a deleted key is refused again");
+    }
+
     // ── R311y576: the INITIATOR-side lookup gate ─────────────────────────
     //
     // Four tests over one axis. Before y576 the initiator carried no gate at
