@@ -3304,16 +3304,45 @@ impl LinkstateForwarder {
                 None => return,
             }
         };
-        // The MsgPut payload, delivered raw. A non-Put body (MsgDel) is skipped;
-        // a body-level SHM descriptor is delivered un-decoded (a deferred layer).
-        let payload: &[u8] = match &push.body {
-            PushOwnedVariant::CodecZenohMsgPut(put) => put.payload.as_slice(),
+        // The body a local subscriber sees. A Put delivers its payload raw; a Del
+        // delivers the Del KIND with an empty payload. The kind travels WITH the
+        // slice rather than being recovered from its emptiness, because a
+        // zero-length Put is a legal Put — emptiness does not name the body. A
+        // body-level SHM descriptor is still delivered un-decoded (a deferred
+        // layer), as is the `Default` arm's unrecognized tag.
+        //
+        // R2646 — THE DEL ARM. Until this round every non-Put body `return`ed
+        // here while `kind` was hardcoded `Put`, so no forwarder-hosted local
+        // subscriber in this tree could observe a delete, for ANY keyexpr. The
+        // forwarder still FORWARDED the Del onward (`forward_push` never reads
+        // the body), which is what kept the hole invisible from outside: a
+        // delete crossed the node correctly and vanished on the way to the
+        // node's own host. Upstream hands its admin subscriber the whole body
+        // and matches on it (`zenoh/src/net/runtime/adminspace.rs`
+        // @ `match &msg.payload {` reaching @ `PushBody::Del(_) => {`), so this
+        // was the wire-level half of why that delete branch was unrepresentable
+        // here — one level BELOW the config-write decoder, which also cannot
+        // express it yet.
+        //
+        // Gated on `pubsub-delete` because that is precisely what the feature
+        // means — the RECEIVE-side projection gate (`wz-runtime-tokio`
+        // Cargo.toml @ `pubsub-delete = ["wz-session-core/pubsub-delete"]`,
+        // documented there as a pure forward to the "receive-side Sample
+        // projection + dispatch arm"), whose Session-path twin is
+        // `wz-session-core/src/pubsub.rs` @ `PushOwnedVariant::CodecZenohMsgDel`.
+        // Off, both ingress paths agree this build projects no deletes; on, both
+        // do. An ungated arm here would have made the two disagree in a build
+        // that carries one and not the other.
+        let (payload, kind): (&[u8], SampleKind) = match &push.body {
+            PushOwnedVariant::CodecZenohMsgPut(put) => (put.payload.as_slice(), SampleKind::Put),
+            #[cfg(feature = "pubsub-delete")]
+            PushOwnedVariant::CodecZenohMsgDel(_) => (&[], SampleKind::Del),
             _ => return,
         };
         let sample = BorrowedSample {
             keyexpr: &keyexpr,
             payload,
-            kind: SampleKind::Put,
+            kind,
             reliability: if reliable {
                 Reliability::Reliable
             } else {
@@ -14525,6 +14554,63 @@ mod tests {
         );
     }
 
+    // R2646 — a LOCALLY-hosted subscriber sees a Del, under the Del kind and with
+    // an empty payload. Until this round `dispatch_local_subscribers` matched only
+    // `CodecZenohMsgPut` and `return`ed on everything else while hardcoding
+    // `kind: SampleKind::Put`, so no forwarder-hosted subscriber in this tree could
+    // observe a delete for ANY keyexpr — the adminspace config-write handler
+    // included, which is what made upstream's delete half (`adminspace.rs`
+    // @ `PushBody::Del(_) => {`) unrepresentable here at the WIRE, one level below
+    // the decoder that also could not express it.
+    //
+    // BOTH bodies go through ONE subscriber in ONE test, and the assertion is on
+    // the ORDERED pair, for a reason this tree has paid for: a fixture that drives
+    // only the Del arm cannot tell "the Del kind is delivered" from "every sample
+    // is now delivered as a Del", and a symmetric one (same payload on both arms)
+    // cannot see a transposition. The payloads differ and the order is fixed, so a
+    // swap reds on the payload and a collapse reds on the kind.
+    #[test]
+    fn peer_local_subscriber_sees_a_del_under_the_del_kind() {
+        let fwd = LinkstateForwarder::new(zid(0x05), WhatAmI::Peer);
+        let (face_a, _sink_a) = peer_face(zid(0x0A));
+        fwd.register(FaceId(0), &face_a);
+        advertise_link_back(&fwd, FaceId(0), 0x0A, 0x05);
+        let seen: std::rc::Rc<std::cell::RefCell<Vec<(SampleKind, Vec<u8>)>>> =
+            std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let s = seen.clone();
+        fwd.register_local_subscriber(
+            "demo/data",
+            Box::new(move |v: &dyn SampleView| {
+                s.borrow_mut().push((v.kind(), v.payload().to_vec()));
+            }),
+        )
+        .expect("register local subscriber");
+
+        fwd.forward(
+            FaceId(0),
+            IterationEvent::Poll(&push_outcome("demo/data", b"p")),
+        );
+        fwd.forward(FaceId(0), IterationEvent::Poll(&del_outcome("demo/data")));
+
+        let seen = seen.borrow();
+        assert_eq!(
+            seen.len(),
+            2,
+            "both bodies reach the local subscriber: the Put AND the Del"
+        );
+        assert_eq!(
+            seen[0],
+            (SampleKind::Put, b"p".to_vec()),
+            "the Put arrives first, under the Put kind, carrying its payload"
+        );
+        assert_eq!(
+            seen[1],
+            (SampleKind::Del, Vec::new()),
+            "the Del arrives second, under the Del kind, with an empty payload \
+             (a MsgDel has no payload slot on the wire)"
+        );
+    }
+
     #[test]
     fn forward_request_self_dispatch_replies_under_the_handler_keyexpr_with_encoding() {
         // The Phase-2b PRODUCTION path: a handler that answers a WILDCARD query by
@@ -14609,6 +14695,25 @@ mod tests {
             final_msg.request_id, 8,
             "the bare final carries the querier's rid"
         );
+    }
+
+    // R2646 — the Del twin of `push_outcome`, carrying a `MsgDel` body rather
+    // than a `MsgPut`. Separate builder rather than a kind parameter on
+    // `push_outcome`: a Del has NO payload slot on the wire
+    // (`build_push_del_literal` takes no payload), so a shared signature would
+    // have to accept a payload it then discards, which is the representable-
+    // but-meaningless pair this round is removing one seam over.
+    fn del_outcome(keyexpr: &str) -> DriverLoopOutcome {
+        let push =
+            wz_session_core::push_build::build_push_del_literal(keyexpr).expect("build del push");
+        DriverLoopOutcome::FramePayload {
+            priority: wz_session_core::qos::Priority::DEFAULT,
+            reliable: true,
+            sn: 0,
+            messages: vec![NetworkMessage::Push(Box::new(push))],
+            has_ext: false,
+            extensions: Vec::new(),
+        }
     }
 
     // R311y46 (§5.23 Phase 3a) — drive a Put into the forwarder and capture what a

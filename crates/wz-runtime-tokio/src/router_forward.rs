@@ -5187,16 +5187,23 @@ impl RouterForwarder {
         if self.local_subscribers.borrow().is_empty() {
             return;
         }
-        // The MsgPut payload, delivered raw. A non-Put body (MsgDel) is skipped, as
-        // the peer twin skips it — a host subscriber sees Puts.
-        let payload: &[u8] = match &push.body {
-            PushOwnedVariant::CodecZenohMsgPut(put) => put.payload.as_slice(),
+        // The body a host subscriber sees — Put payload raw, Del as the Del kind
+        // with an empty payload, moved with the peer twin in R2646 and for the
+        // same reason (`linkstate_forward.rs` @ `R2646 — THE DEL ARM`, which
+        // carries the full note). Both planes stay one behaviour: this comment
+        // used to read "a host subscriber sees Puts", which described the twin
+        // accurately and was a statement of the LIMIT, not of a policy —
+        // upstream's admin subscriber is handed the whole body.
+        let (payload, kind): (&[u8], SampleKind) = match &push.body {
+            PushOwnedVariant::CodecZenohMsgPut(put) => (put.payload.as_slice(), SampleKind::Put),
+            #[cfg(feature = "pubsub-delete")]
+            PushOwnedVariant::CodecZenohMsgDel(_) => (&[], SampleKind::Del),
             _ => return,
         };
         let sample = BorrowedSample {
             keyexpr,
             payload,
-            kind: SampleKind::Put,
+            kind,
             reliability: if reliable {
                 crate::Reliability::Reliable
             } else {
@@ -7771,6 +7778,71 @@ mod tests {
             hits.get(),
             1,
             "a Put outside the declared pattern must NOT reach the handler"
+        );
+    }
+
+    /// R2646 — the ROUTER plane's twin of
+    /// `linkstate_forward::tests::peer_local_subscriber_sees_a_del_under_the_del_kind`:
+    /// a router-hosted subscriber observes a Del, under the Del kind and with an
+    /// empty payload.
+    ///
+    /// Written as its own test on this plane rather than trusted from the peer one.
+    /// The two dispatches are separate functions with separate match arms, and this
+    /// file's own header names a place where they already DIVERGE on purpose (the
+    /// busy-handler requeue), so "the twin was fixed" is not evidence about this
+    /// plane. It is the router that hosts the `router-connect-reconcile` admin
+    /// config-write handler, so this is the plane an operator's delete actually
+    /// arrives on.
+    ///
+    /// Both bodies go through ONE subscriber and the assertion is on the ORDERED
+    /// pair: a Del-only fixture cannot separate "the Del kind is delivered" from
+    /// "everything is delivered as a Del", and equal payloads could not see a
+    /// transposition.
+    #[test]
+    fn a_router_hosted_subscriber_sees_a_del_under_the_del_kind() {
+        use wz_session_core::sample_kind::SampleKind;
+        use wz_session_core::sink::SampleView;
+
+        let fwd = RouterForwarder::new(zid(0x01));
+        let (a, _sink_a) = face(zid(0xAA), WIRE_PEER);
+        fwd.register(FaceId(0), &a);
+        advertise_link_back(&fwd, FaceId(0), 0x01, 0xAA, 5);
+        fwd.tick();
+
+        let seen = Rc::new(RefCell::new(Vec::<(SampleKind, Vec<u8>)>::new()));
+        {
+            let seen = Rc::clone(&seen);
+            fwd.register_local_subscriber(
+                "demo/host/**",
+                Box::new(move |s: &dyn SampleView| {
+                    seen.borrow_mut().push((s.kind(), s.payload().to_vec()));
+                }),
+            );
+        }
+
+        let put = wz_session_core::push_build::build_push_literal("demo/host/k", b"payload")
+            .expect("build push");
+        forward_one(&fwd, FaceId(0), NetworkMessage::Push(Box::new(put)));
+        let del = wz_session_core::push_build::build_push_del_literal("demo/host/k")
+            .expect("build del push");
+        forward_one(&fwd, FaceId(0), NetworkMessage::Push(Box::new(del)));
+
+        let seen = seen.borrow();
+        assert_eq!(
+            seen.len(),
+            2,
+            "both bodies reach the router-hosted subscriber: the Put AND the Del"
+        );
+        assert_eq!(
+            seen[0],
+            (SampleKind::Put, b"payload".to_vec()),
+            "the Put arrives first, under the Put kind, carrying its payload"
+        );
+        assert_eq!(
+            seen[1],
+            (SampleKind::Del, Vec::new()),
+            "the Del arrives second, under the Del kind, with an empty payload \
+             (a MsgDel has no payload slot on the wire)"
         );
     }
 
