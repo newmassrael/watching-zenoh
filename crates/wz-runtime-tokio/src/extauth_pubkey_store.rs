@@ -23,7 +23,7 @@
 //!
 //! `io/zenoh-transport/tests/unicast_authenticator.rs` @ `.add_pubkey(client02_pub_key.into())`
 //!
-//! [`PubKeyLookup`] is that object.
+//! [`PubKeyLookup`](crate::extauth_pubkey_store::PubKeyLookup) is that object.
 //!
 //! ⚠ This is NOT the `key_size` / `known_keys_file` case R2336 disposed of. Those
 //! are declared upstream and read by nothing — one occurrence each, on their own
