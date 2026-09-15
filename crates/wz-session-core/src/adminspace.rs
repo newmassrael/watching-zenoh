@@ -852,10 +852,22 @@ pub fn admin_legs(zid_hex: &str, whatami: &str) -> Vec<AdminLeg> {
 /// and where it is `null` that is an ANSWER ("no weighted link to this peer"),
 /// which is what the pin reports too. A consumer SHOULD wait for it.
 pub fn admin_unspoken_fields() -> Vec<&'static str> {
-    let mut fields = alloc::vec!["metadata"];
+    // R2637 — SPELLED OUT PER BUILD rather than accumulated with pushes. The
+    // accumulator earned its keep while this list had two conditional members;
+    // with `sessions[].weight` gone only `plugins` is conditional, so a build
+    // that speaks plugins pushed NOTHING and the `mut` became dead — caught by
+    // gate 2h on the `adminspace-plugins-handlers` combination, which a default
+    // or `adminspace-core`-only build never reaches.
+    //
+    // ⛔ Deliberately NOT silenced with `allow(unused_mut)`: the warning was
+    // correct, and the shape (start from a base, add to it) is simply the wrong
+    // one for a list with a single conditional entry. Two literals say the same
+    // thing and say it in full.
+    #[cfg(feature = "adminspace-plugins-handlers")]
+    let fields = alloc::vec!["metadata"];
     #[cfg(not(feature = "adminspace-plugins-handlers"))]
-    fields.push("plugins");
-    // R2637 — `sessions[].weight` LEFT this list, unconditionally, and the reason
+    let fields = alloc::vec!["metadata", "plugins"];
+    // `sessions[].weight` LEFT this list, unconditionally, and the reason
     // is semantic rather than a feature question. Once the field can be filled, a
     // `null` weight means "this node holds no weighted link to that peer" — which
     // is upstream's answer too, since a transport absent from `links_info` renders
