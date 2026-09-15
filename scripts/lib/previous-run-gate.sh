@@ -137,7 +137,12 @@ else:
         return 0
     fi
 
-    local kind rest
+    # `graded_sha` is the commit the verdict below actually describes. It is the
+    # pushed predecessor in the ordinary path, and the older commit the fallback
+    # found when that predecessor had not finished — naming the wrong one would
+    # send the reader to a commit whose run said nothing.
+    local kind rest graded_sha
+    graded_sha="$sha"
     kind="${verdict%%$'\t'*}"
     rest="${verdict#*$'\t'}"
 
@@ -190,7 +195,55 @@ else:
                 echo "          progressing from one where no job has started." >&2
             fi
             echo "          Not waiting — it will be graded at the next push."
-            return 0
+            # R2639 (carry N70) — BUT "not finished" must not be the last word.
+            # MEASURED 2026-09-15: verdicts were arriving about eight hours
+            # after their push, so every push found its predecessor pending and
+            # this arm passed every time, while the last three runs that had
+            # actually FINISHED were all red -- two of them on one defect,
+            # unrecorded for eleven rounds. Passing on pending is right; taking
+            # it as "no red" is what made the queue a hiding place. So when the
+            # immediate predecessor has not finished, grade the newest run on
+            # this history that HAS.
+            local anc_file fallback fb_kind
+            anc_file="$(mktemp)"
+            if git rev-list --max-count=400 "$sha" > "$anc_file" 2>/dev/null \
+                && runs="$(gh run list --limit 40 \
+                    --json databaseId,status,conclusion,workflowName,headSha,createdAt \
+                    2>/dev/null)" \
+                && [[ -n "$runs" ]]; then
+                fallback="$(printf '%s' "$runs" | python3 \
+                    scripts/lib/newest_completed_ancestor_run.py \
+                    --ancestors-file "$anc_file" 2>/dev/null)"
+            else
+                fallback=""
+            fi
+            rm -f "$anc_file"
+            fb_kind="${fallback%%$'\t'*}"
+            case "$fb_kind" in
+                GREEN)
+                    echo "          the newest FINISHED run on this history was green (run ${fallback#*$'\t'})."
+                    return 0
+                    ;;
+                RED|AMBER)
+                    # Fall through to the shared refusal below, naming the run
+                    # that actually graded something.
+                    kind="$fb_kind"
+                    rest="${fallback#*$'\t'}"
+                    graded_sha="$(printf '%s' "$rest" | cut -f4)"
+                    echo "" >&2
+                    echo "$context: the pending run above hides an EARLIER verdict on this history." >&2
+                    ;;
+                NONE)
+                    echo "          NOTHING on this history has finished (${fallback#*$'\t'} run(s) seen)," >&2
+                    echo "          so this gate measured nothing — that is not the same as no red." >&2
+                    return 0
+                    ;;
+                *)
+                    echo "          the earlier-verdict fallback did NOT run (no gh, no python3," >&2
+                    echo "          or an unreadable payload); only the pending line above is known." >&2
+                    return 0
+                    ;;
+            esac
             ;;
         UNREADABLE|NORUN)
             # Announced, never green: this gate graded nothing about this
@@ -231,7 +284,7 @@ else:
 
     echo "" >&2
     echo "$context: THE PREVIOUS PUSH'S HOSTED RUN IS NOT GREEN." >&2
-    echo "          workflow=$wf  run=$rid  conclusion=$conclusion  commit=${sha:0:12}" >&2
+    echo "          workflow=$wf  run=$rid  conclusion=$conclusion  commit=${graded_sha:0:12}" >&2
     if [[ "$kind" == "AMBER" ]]; then
         echo "          \`$conclusion\` is not a failure and it is not a pass — that run" >&2
         echo "          graded nothing, and reading it as green is the mistake this" >&2

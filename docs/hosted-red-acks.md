@@ -41,6 +41,7 @@ printed, `commit` is the tip being replaced (the sha the run graded), and
 | R2577 | `34697207229` | `cb57df67` | C0 hook-gate-boundary, `gate 2z` hid its commands in an array expansion (two jobs, one cause) | — | R2577 |
 | R2578 | `34701444387` | `f394e114` | C0 prose-dep-graph, a witness header's dependency clause took a pronoun subject (two jobs, one cause) | — | R2578 |
 | R2585 | `34713345823` | `dbc20e6f` | C0 skip-token naming, two R2581 `zenohd` legs carried no token (two C0 jobs) · E ran the same two legs without zenohd (three jobs, one cause) | — | R2585 |
+| R2639 | `34921831690` | `951d23cf` | C1ac quic e2e, `EXPIRY_MAX_SLEEP` dead under quic-without-unicast · Z oracle-pin, `zenohd-unixpipe` and `zenohd-vsock` answer `1211779c` against pin 1.10.1 (two jobs, two causes) | — | |
 
 ## What the rows above say
 
