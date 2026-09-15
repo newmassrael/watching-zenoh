@@ -7798,6 +7798,13 @@ mod tests {
     /// pair: a Del-only fixture cannot separate "the Del kind is delivered" from
     /// "everything is delivered as a Del", and equal payloads could not see a
     /// transposition.
+    //
+    // Gated on the same feature as the arm it drives, for the reason its
+    // linkstate twin carries. No lane exposes it here — every guarded
+    // `router_forward` leg keeps default features, and `pubsub-delete` is one
+    // — so this gate is written from the twin's measurement rather than from a
+    // red of its own. Ungated it is a claim that happens to be unmeasured.
+    #[cfg(feature = "pubsub-delete")]
     #[test]
     fn a_router_hosted_subscriber_sees_a_del_under_the_del_kind() {
         use wz_session_core::sample_kind::SampleKind;

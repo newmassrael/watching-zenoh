@@ -14569,6 +14569,14 @@ mod tests {
     // is now delivered as a Del", and a symmetric one (same payload on both arms)
     // cannot see a transposition. The payloads differ and the order is fixed, so a
     // swap reds on the payload and a collapse reds on the kind.
+    //
+    // Gated on the SAME feature as the arm it drives (the `CodecZenohMsgDel`
+    // arm above). Without `pubsub-delete` that arm does not exist, the Del
+    // body falls to the catch-all `_ => return`, and the subscriber sees the
+    // Put alone — so this assertion is false by construction there, not
+    // failing. The `C1y linkstate bare` guard is what said so: a lane that
+    // compiles `routing-peer` ALONE ran this at 204 tests against its 203.
+    #[cfg(feature = "pubsub-delete")]
     #[test]
     fn peer_local_subscriber_sees_a_del_under_the_del_kind() {
         let fwd = LinkstateForwarder::new(zid(0x05), WhatAmI::Peer);
@@ -14702,6 +14710,9 @@ mod tests {
     // (`build_push_del_literal` takes no payload), so a shared signature would
     // have to accept a payload it then discards, which is the representable-
     // but-meaningless pair this round is removing one seam over.
+    // Carries its only caller's `pubsub-delete` gate: ungated it would be dead
+    // code on every build that strips the feature.
+    #[cfg(feature = "pubsub-delete")]
     fn del_outcome(keyexpr: &str) -> DriverLoopOutcome {
         let push =
             wz_session_core::push_build::build_push_del_literal(keyexpr).expect("build del push");
