@@ -198,8 +198,9 @@ pub const RUNTIME_MUTABLE_CONFIG_KEYS: &[RuntimeMutableKey] = &[
 ///
 /// R2646 renamed this from `SetByKeyError`, and the rename is the change: the
 /// delete half now returns it too, and upstream's write gate is ONE gate that
-/// matches on the body (`zenoh/src/net/runtime/adminspace.rs` @ `match
-/// &msg.payload {`) after ONE permission check. A name saying "set" would have
+/// matches on the body (`zenoh/src/net/runtime/adminspace.rs`
+/// @ `match &msg.payload {`) after ONE permission check. A name saying "set"
+/// would have
 /// made the shared refusals read as the set half's, which is how two halves of
 /// one gate start justifying separate rules. `MalformedValue` is the one arm
 /// only the set half can raise — a delete carries no value to malform — and
