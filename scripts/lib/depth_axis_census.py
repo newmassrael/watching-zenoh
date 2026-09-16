@@ -1494,7 +1494,26 @@ PIN_NO_SYMBOL = 2
 # 14 wz / 0 ambiguous / 6 upstream becomes 16 / 0 / 7. The rise is +2 wz, this
 # atom's alone; AMBIGUOUS held, and the one UPSTREAM occurrence the correction
 # adds rides the unpinned total this gate prints and does not judge. 194 + 2 = 196.
-PIN_WZ_CITATIONS = 196
+# R2661 — 196 -> 204, `adminspace-write` a FOURTH round running, and the rise is
+# larger because this round's CORRECTION covers THREE rounds: R2658 and R2660
+# landed without one, which is open debt 756's subject exactly. The atom stays
+# PARTIAL, so its reason stays in this population. The files the correction
+# cites are the ones that carry the three closures and the one residual: the
+# vocabulary join (`lib.rs` @ `admin_write_knows_config_key` and
+# @ `mod admin_write_vocabulary_tests`), the space itself (`adminspace.rs`
+# @ `pub struct AdminConfigWriteSpace` and @ `pub fn subkey`), the composition
+# that keeps it from being inert on a slim profile (`Cargo.toml`
+# @ `adminspace-core`, `keyexpr_match.rs` @ `fn chunk_intersects`), and the
+# residual that is NOT in this crate (`linkstate_forward.rs`
+# @ `fn dispatch_local_subscribers`, `pubsub.rs` @ `fn fire_to_subscribers`,
+# with `query.rs` @ `fn matches` as the plane that already migrated).
+# MEASURED with THIS FILE'S OWN `citation_audit` over that ONE reason in both
+# versions -- origin's body against the new one, never by diffing the totals,
+# which cannot say whose the rise is: 16 wz / 0 ambiguous / 7 upstream becomes
+# 24 / 0 / 9. The rise is +8 wz, this atom's ALONE; AMBIGUOUS held at 0, and the
+# +2 UPSTREAM rides the unpinned total this gate prints and does not judge.
+# 196 + 8 = 204, which is the number the gate reported.
+PIN_WZ_CITATIONS = 204
 # R2626 — 44 -> 42, and this one is worth a sentence because it HELD through
 # every earlier retirement in this run (R2612, R2622). `time-hlc`'s reason is the
 # first retiree carrying AMBIGUOUS citations of its own: its oldest clauses cite
