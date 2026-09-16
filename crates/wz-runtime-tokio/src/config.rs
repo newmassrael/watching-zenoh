@@ -264,6 +264,96 @@ pub enum ConfigKeyWriteError {
     /// matters — rules and subjects before the policy that names them, exactly
     /// as upstream's own `init` demands of a whole document.
     SubtreeRefused { key: String },
+    /// R2657 — the key addressed ONE MEMBER of an array
+    /// (`<array>/<field>=<value>`) and the key it named has no member addressing
+    /// in wz.
+    ///
+    /// ⚠ NOT SPELLED "not an array", which was this variant's first name and was
+    /// wrong about what it catches. Upstream answers "not an array" because it
+    /// reads the key's JSON and finds a scalar; wz builds a ONE-ELEMENT ARRAY
+    /// document and hands it to the reader, so a key that holds no array is
+    /// refused earlier, by the reader, as a type error. What is left for this
+    /// arm is a key whose value IS an array and whose elements have no field to
+    /// address them by — `connect/endpoints` is an array of bare strings — plus
+    /// any array key this build compiles no splice for. "Has no member
+    /// addressing" covers both; "not an array" is false of the first.
+    NotMemberAddressable { key: String },
+    /// R2657 — a member INSERT whose value does not carry the field the key
+    /// addressed it by.
+    ///
+    /// Upstream refuses it in its own words — "field filter mismatch: value must
+    /// be an object containing `<field>="<value>"`" — and the reason is worth
+    /// keeping: without it, a write addressed as `…/id=a` carrying an element
+    /// named `b` would append an element under a name it does not answer to, and
+    /// the next write to `…/id=a` would append a second one.
+    MemberFilterMismatch {
+        /// The array the member belongs to.
+        key: String,
+        /// The field the key addressed it by.
+        field: String,
+    },
+}
+
+/// R2657 — which half of upstream's array-member gate a key is asking for.
+#[cfg(all(
+    feature = "zenoh-config",
+    any(feature = "adminspace-core", feature = "routing-router-hat")
+))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MemberWrite {
+    /// Replace the FIRST matching member, or append when none matches.
+    Upsert,
+    /// Drop EVERY matching member.
+    Remove,
+}
+
+/// R2657 — one array spliced by the member the key named.
+///
+/// ⚠ THE TWO MODES ARE NOT SYMMETRIC, and that asymmetry is upstream's rather
+/// than a choice: its insert walks the list, replaces the first match and
+/// `break`s, then appends when nothing was taken; its remove `retain`s away
+/// every match. A round that implemented one shape twice would be wrong once,
+/// and nothing about the operation's name says which.
+///
+/// `identity` answers what the element's NAMED field holds, or `None` when the
+/// element has no such field — which is upstream's `map.get(field_name)` on a
+/// JSON object, and is why a field the type does not carry matches nothing
+/// rather than erroring.
+#[cfg(all(
+    feature = "zenoh-config",
+    any(feature = "adminspace-core", feature = "routing-router-hat")
+))]
+fn splice_members<T: Clone>(
+    current: &[T],
+    incoming: Option<T>,
+    field: &str,
+    field_value: &str,
+    identity: impl Fn(&T, &str) -> Option<String>,
+    mode: MemberWrite,
+) -> Vec<T> {
+    let matches = |item: &T| identity(item, field).as_deref() == Some(field_value);
+    match mode {
+        MemberWrite::Remove => current.iter().filter(|i| !matches(i)).cloned().collect(),
+        MemberWrite::Upsert => {
+            let Some(incoming) = incoming else {
+                return current.to_vec();
+            };
+            let mut out = Vec::with_capacity(current.len() + 1);
+            let mut placed = false;
+            for item in current {
+                if !placed && matches(item) {
+                    out.push(incoming.clone());
+                    placed = true;
+                } else {
+                    out.push(item.clone());
+                }
+            }
+            if !placed {
+                out.push(incoming);
+            }
+            out
+        }
+    }
 }
 
 /// R2656 — the DOCUMENT inputs of the `interceptors` slice: what the operator
@@ -1406,7 +1496,31 @@ impl WzConfig {
         value: &str,
         sinks: &ConfigSinks<'_>,
     ) -> Result<(), ConfigKeyWriteError> {
-        let ingest = Self::ingest_for_key(key, value)?;
+        let (key, ingest) = match self.member_write(key, Some(value)) {
+            Some(resolved) => resolved?,
+            None => (String::from(key), Self::ingest_for_key(key, value)?),
+        };
+        self.apply_resolved_write(&key, &ingest, sinks)
+    }
+
+    /// R2657 — the half of a runtime write that runs once the KEY and the
+    /// DOCUMENT are settled: resolve the sink, snapshot, store, push, roll back.
+    ///
+    /// Extracted so the member route reaches it from BOTH halves of the gate.
+    /// A member delete produces a document exactly as a member write does — the
+    /// current array minus every match — so it has to land here rather than in
+    /// `apply_one_key`'s schema-default arm, and having one function say so is
+    /// what stops the two halves growing separate rules again.
+    #[cfg(all(
+        feature = "zenoh-config",
+        any(feature = "adminspace-core", feature = "routing-router-hat")
+    ))]
+    fn apply_resolved_write(
+        &mut self,
+        key: &str,
+        ingest: &crate::zenoh_config::ZenohConfigIngest,
+        sinks: &ConfigSinks<'_>,
+    ) -> Result<(), ConfigKeyWriteError> {
         let row = RUNTIME_MUTABLE_CONFIG_KEYS
             .iter()
             .find(|row| row.key == key);
@@ -1437,7 +1551,7 @@ impl WzConfig {
         // The STORE is the startup half's own function, per key, with the ACL
         // subtree's atomic compile inside it -- not a second implementation of
         // either.
-        let (applied, settled) = self.apply_document(&ingest);
+        let (applied, settled) = self.apply_document(ingest);
         if applied.is_empty() {
             if let Some(previous) = restore {
                 *self = previous;
@@ -1462,6 +1576,196 @@ impl WzConfig {
             }
         }
         Ok(())
+    }
+
+    /// R2657 — upstream's ARRAY-MEMBER key form, `<array>/<field>=<value>`,
+    /// resolved into an ordinary whole-array write.
+    ///
+    /// `None` means the key carries no `=` and is not a member write at all,
+    /// which is upstream's `Ok(false)` — its admin handler tries the array route
+    /// FIRST and falls through to the ordinary insert or remove. So this is a
+    /// PREFIX STEP in front of the write gate rather than a second gate, and
+    /// everything after it — the acceptance boundary, the sink resolution, the
+    /// snapshot, the push, the rollback — is the path a whole-array write
+    /// already takes.
+    ///
+    /// # The semantics are upstream's, measured at the pin rather than inferred
+    ///
+    /// `commons/zenoh-config/src/lib.rs` @ `pub fn try_insert_json5_array_item(`
+    /// and @ `pub fn try_remove_json5_array_item<K: AsRef<str>>(`:
+    ///
+    /// * the prefix splits on its LAST `/` into the array key and the field
+    ///   name; a prefix with no `/` is "missing field filter";
+    /// * an INSERT requires the value to be an object whose named field is the
+    ///   STRING being matched, replaces the FIRST item that matches, and appends
+    ///   when none does;
+    /// * a REMOVE drops EVERY item that matches;
+    /// * the comparison is `serde_json`'s `as_str()`, so a NUMERIC field matches
+    ///   nothing at all — `weight` cannot address a link-weight row and
+    ///   `dst_zid` can. That is not a limitation wz adds; it is the one upstream
+    ///   has, and reproducing it is what keeps the two acceptance boundaries the
+    ///   same.
+    ///
+    /// # Why it splices the TYPED list rather than a document
+    ///
+    /// Upstream can splice generically because its config IS a JSON document.
+    /// wz's is a struct of typed fields, so a document to splice would have to
+    /// be a second representation kept in step by hand — the inert mirror this
+    /// tree refuses. What it has instead is the RETAINED document inputs, one
+    /// per array key, which R2656 completed for all seven interceptor keys
+    /// precisely so this step would have something to read. The new element goes
+    /// through the slice's OWN parser as a one-element array, so every member of
+    /// the spliced list has crossed the acceptance boundary.
+    #[cfg(all(
+        feature = "zenoh-config",
+        any(feature = "adminspace-core", feature = "routing-router-hat")
+    ))]
+    #[allow(clippy::type_complexity)]
+    fn member_write(
+        &self,
+        key: &str,
+        value: Option<&str>,
+    ) -> Option<Result<(String, crate::zenoh_config::ZenohConfigIngest), ConfigKeyWriteError>> {
+        let (prefix, field_value) = key.split_once('=')?;
+        Some(self.resolve_member_write(prefix, field_value, value))
+    }
+
+    /// The body of [`Self::member_write`], once the key is known to be one.
+    #[cfg(all(
+        feature = "zenoh-config",
+        any(feature = "adminspace-core", feature = "routing-router-hat")
+    ))]
+    fn resolve_member_write(
+        &self,
+        prefix: &str,
+        field_value: &str,
+        value: Option<&str>,
+    ) -> Result<(String, crate::zenoh_config::ZenohConfigIngest), ConfigKeyWriteError> {
+        let Some((array_key, field)) = prefix.rsplit_once('/') else {
+            // Upstream's "missing field filter". The key is malformed as a
+            // MEMBER key, which is what it claimed to be by carrying `=`.
+            return Err(ConfigKeyWriteError::MalformedKey {
+                key: String::from(prefix),
+            });
+        };
+        // ⛔ THE ELEMENT IS PARSED BY THE SLICE'S OWN PARSER, as a one-element
+        // array, so an element this reader would refuse in a whole-array write
+        // is refused here for the same reason and with the same error. A delete
+        // carries no element, and an empty array is what says so.
+        let element_doc = match value {
+            Some(text) => format!("[{text}]"),
+            None => String::from("[]"),
+        };
+        let mut ingest = Self::ingest_for_key(array_key, &element_doc)?;
+        let mode = if value.is_some() {
+            MemberWrite::Upsert
+        } else {
+            MemberWrite::Remove
+        };
+        self.splice_into(array_key, field, field_value, mode, &mut ingest)?;
+        Ok((String::from(array_key), ingest))
+    }
+
+    /// Replace `ingest`'s array field for `array_key` with the CURRENT list
+    /// spliced by the member the caller named.
+    ///
+    /// One arm per array-valued registry key, which is the shape `apply_one_key`
+    /// already has and for the same reason: the lists are different types, so
+    /// there is nothing to write once. What IS written once is the splice itself
+    /// and the identity comparison — each arm supplies only which list to read
+    /// and how to read the named field off one of its elements.
+    ///
+    /// A key with no arm answers [`ConfigKeyWriteError::NotMemberAddressable`] —
+    /// see that variant for why it is not spelled "not an array".
+    #[cfg(all(
+        feature = "zenoh-config",
+        any(feature = "adminspace-core", feature = "routing-router-hat")
+    ))]
+    fn splice_into(
+        &self,
+        array_key: &str,
+        field: &str,
+        field_value: &str,
+        mode: MemberWrite,
+        ingest: &mut crate::zenoh_config::ZenohConfigIngest,
+    ) -> Result<(), ConfigKeyWriteError> {
+        // The filter check upstream makes before it touches the list: an insert
+        // whose value does not carry `field = "<field_value>"` is refused rather
+        // than appended under a name it does not answer to.
+        macro_rules! splice_arm {
+            ($list:expr, $target:expr, $identity:expr) => {{
+                let incoming = $target.first().cloned();
+                if let Some(element) = &incoming {
+                    if $identity(element, field).as_deref() != Some(field_value) {
+                        return Err(ConfigKeyWriteError::MemberFilterMismatch {
+                            key: String::from(array_key),
+                            field: String::from(field),
+                        });
+                    }
+                }
+                $target = splice_members($list, incoming, field, field_value, $identity, mode);
+                Ok(())
+            }};
+        }
+        match array_key {
+            #[cfg(feature = "routing-router-hat")]
+            "routing/router/linkstate/transport_weights" => splice_arm!(
+                &self.router_link_weights,
+                ingest.config.router_transport_weights,
+                |row: &TransportWeight, f: &str| (f == "dst_zid")
+                    .then(|| wz_session_core::zid_hex::zid_to_zenoh_hex(row.dst_zid.as_slice()))
+            ),
+            #[cfg(all(feature = "routing-peer", feature = "access-acl"))]
+            "access_control/rules" => splice_arm!(
+                &self.interceptor_inputs.acl.rules,
+                ingest.config.access_control.rules,
+                |row: &crate::zenoh_config::AclConfigRuleConf, f: &str| (f == "id")
+                    .then(|| row.id.clone())
+            ),
+            #[cfg(all(feature = "routing-peer", feature = "access-acl"))]
+            "access_control/subjects" => splice_arm!(
+                &self.interceptor_inputs.acl.subjects,
+                ingest.config.access_control.subjects,
+                |row: &crate::zenoh_config::AclConfigSubjectsConf, f: &str| (f == "id")
+                    .then(|| row.id.clone())
+            ),
+            // The policy `id` is OPTIONAL upstream, so an unnamed policy matches
+            // nothing and can only be appended — which is what an entry with no
+            // name means.
+            #[cfg(all(feature = "routing-peer", feature = "access-acl"))]
+            "access_control/policies" => splice_arm!(
+                &self.interceptor_inputs.acl.policies,
+                ingest.config.access_control.policies,
+                |row: &crate::zenoh_config::AclConfigPolicyConf, f: &str| if f == "id" {
+                    row.id.clone()
+                } else {
+                    None
+                }
+            ),
+            #[cfg(all(feature = "routing-peer", feature = "access-downsampling"))]
+            "downsampling" => splice_arm!(
+                &self.interceptor_inputs.downsampling,
+                ingest.config.downsampling,
+                |row: &crate::zenoh_config::DownsamplingItemConf, f: &str| if f == "id" {
+                    row.id.clone()
+                } else {
+                    None
+                }
+            ),
+            #[cfg(all(feature = "routing-peer", feature = "access-quota"))]
+            "low_pass_filter" => splice_arm!(
+                &self.interceptor_inputs.low_pass,
+                ingest.config.low_pass_filter,
+                |row: &crate::zenoh_config::LowPassFilterConf, f: &str| if f == "id" {
+                    row.id.clone()
+                } else {
+                    None
+                }
+            ),
+            _ => Err(ConfigKeyWriteError::NotMemberAddressable {
+                key: String::from(array_key),
+            }),
+        }
     }
 
     /// Whether `sinks` carries the consumer `slice` needs — asked BEFORE a value
@@ -1700,6 +2004,19 @@ impl WzConfig {
         key: &str,
         sinks: &ConfigSinks<'_>,
     ) -> Result<(), ConfigKeyWriteError> {
+        // R2657 — the MEMBER half of the delete, tried FIRST and falling through
+        // when the key carries no `=`, which is the order upstream's admin
+        // handler takes (`try_remove_json5_array_item` and only then `remove`).
+        //
+        // ⚠ IT GOES THROUGH THE SET HALF'S STORE, not through `apply_one_key`'s
+        // default arm, and it has to: a member delete produces a SPECIFIC array —
+        // the current one minus every match — where a whole-key delete produces
+        // the schema default. Routing both through the default arm would empty
+        // the array for a key that asked to lose one row of it.
+        if let Some(resolved) = self.member_write(key, None) {
+            let (array_key, ingest) = resolved?;
+            return self.apply_resolved_write(&array_key, &ingest, sinks);
+        }
         let _ = Self::key_segments(key)?;
         if !crate::zenoh_config::honours_config_key(key) {
             return Err(ConfigKeyWriteError::NotHonoured {
@@ -3161,6 +3478,111 @@ mod tests {
             );
         }
 
+        /// R2657 — the member route over an ACL list, which is the `id` identity
+        /// path rather than the weights' `dst_zid` one, and which lands in a
+        /// SUBTREE: the spliced rules are recompiled against the policies that
+        /// name them before anything becomes live.
+        #[test]
+        fn a_member_write_edits_one_acl_rule_and_recompiles_the_subtree() {
+            let sink = RecordingInterceptorSink::new();
+            let sinks = ConfigSinks::none().with_interceptors(&sink);
+            let mut cfg = WzConfig::new();
+            install_a_one_rule_policy(&mut cfg, &sinks).expect("the policy installs");
+            assert_eq!(
+                cfg.interceptors().acl.as_ref().map(|p| p.rules().len()),
+                Some(2),
+                "one document rule with no `flows` is two compiled rules"
+            );
+
+            // REPLACE r1 with a version naming ONE flow, so the compiled count
+            // halves -- a change no whole-array write could make without
+            // restating the rule set, and one the compiled form cannot be read
+            // back into.
+            assert_eq!(
+                cfg.set_by_key_with(
+                    "access_control/rules/id=r1",
+                    r#"{ id: "r1", key_exprs: ["demo/**"], messages: ["put"],
+                         flows: ["ingress"], permission: "deny" }"#,
+                    &sinks,
+                ),
+                Ok(())
+            );
+            assert_eq!(
+                cfg.interceptors().acl.as_ref().map(|p| p.rules().len()),
+                Some(1),
+                "the spliced rule recompiled: one flow, one rule"
+            );
+
+            // And a member DELETE of the rule the policy still names is refused
+            // as a SUBTREE, exactly as the whole-key delete of that list is --
+            // the member route changes which array is produced, never which
+            // rules the subtree has to satisfy.
+            assert_eq!(
+                cfg.remove_by_key_with("access_control/rules/id=r1", &sinks),
+                Err(ConfigKeyWriteError::SubtreeRefused {
+                    key: String::from("access_control/rules")
+                })
+            );
+            assert_eq!(
+                cfg.interceptors().acl.as_ref().map(|p| p.rules().len()),
+                Some(1),
+                "and the refused delete left the live policy alone"
+            );
+        }
+
+        /// ⭐ R2657 — THE ASYMMETRY, and the only place in this tree where it can
+        /// be seen.
+        ///
+        /// Upstream's insert replaces the FIRST match and its remove drops EVERY
+        /// match. That difference is observable only where two members may share
+        /// an identity, and for five of the six array keys a duplicate is
+        /// refused before it can be stored: two link-weight rows naming one
+        /// destination are refused by the map build, and two ACL entries sharing
+        /// an id are refused by the policy compile. `downsampling`'s `id` is a
+        /// diagnostic label upstream checks nothing about, so a document may
+        /// carry two — which is what makes this the fixture for the asymmetry
+        /// rather than an arbitrary choice of key.
+        #[cfg(feature = "access-downsampling")]
+        #[test]
+        fn a_member_delete_drops_every_match_where_a_duplicate_is_legal() {
+            let sink = RecordingInterceptorSink::new();
+            let sinks = ConfigSinks::none().with_interceptors(&sink);
+            let mut cfg = WzConfig::new();
+            assert_eq!(
+                cfg.set_by_key_with(
+                    "downsampling",
+                    r#"[ { id: "ds", messages: ["put"],
+                           rules: [ { key_expr: "a/**", freq: 1 } ] },
+                         { id: "keep", messages: ["put"],
+                           rules: [ { key_expr: "b/**", freq: 2 } ] },
+                         { id: "ds", messages: ["put"],
+                           rules: [ { key_expr: "c/**", freq: 3 } ] } ]"#,
+                    &sinks,
+                ),
+                Ok(())
+            );
+            assert_eq!(
+                cfg.interceptor_inputs.downsampling.len(),
+                3,
+                "a duplicate label is a document a real zenohd accepts"
+            );
+
+            assert_eq!(cfg.remove_by_key_with("downsampling/id=ds", &sinks), Ok(()));
+            let left: Vec<Option<&str>> = cfg
+                .interceptor_inputs
+                .downsampling
+                .iter()
+                .map(|i| i.id.as_deref())
+                .collect();
+            assert_eq!(
+                left,
+                vec![Some("keep")],
+                "BOTH items named `ds` are gone. A delete that dropped only the \
+                 first would leave the second answering to a name the operator \
+                 has just removed"
+            );
+        }
+
         /// R2654 — a write that is well formed, runtime-mutable and STILL
         /// refused, because the subtree it lands in does not compile.
         ///
@@ -3585,6 +4007,168 @@ mod tests {
                 &[row(0xAA, 250)],
                 "the refused rows did not become live, and the previous ones \
                  are still there"
+            );
+        }
+
+        /// R2657 — upstream's MEMBER key form, `<array>/<field>=<value>`, which
+        /// is the last clause `adminspace-write` stood on.
+        ///
+        /// The three shapes in one test, because they are one operation and
+        /// splitting them would let a fixture pass by never meeting the other
+        /// two: REPLACE an existing row, APPEND a row whose name is new, and
+        /// leave every row the key did not name alone.
+        #[test]
+        fn a_member_write_replaces_by_name_and_appends_when_the_name_is_new() {
+            let sink = RecordingSink::new(true);
+            let sinks = ConfigSinks::none().with_router_link_weights(&sink);
+            let mut cfg =
+                WzConfig::new().with_router_link_weights(vec![row(0xAA, 250), row(0xBB, 7)]);
+
+            // REPLACE: `aa` exists, so its weight moves and nothing else does.
+            assert_eq!(
+                cfg.set_by_key_with(
+                    "routing/router/linkstate/transport_weights/dst_zid=aa",
+                    r#"{ dst_zid: "aa", weight: 99 }"#,
+                    &sinks,
+                ),
+                Ok(())
+            );
+            assert_eq!(
+                cfg.router_link_weights(),
+                &[row(0xAA, 99), row(0xBB, 7)],
+                "the named row moved IN PLACE and its sibling is untouched -- an \
+                 append-only splice would have left the old `aa` behind, and a \
+                 whole-array write would have lost `bb`"
+            );
+
+            // APPEND: `cc` is new, so it joins the end.
+            assert_eq!(
+                cfg.set_by_key_with(
+                    "routing/router/linkstate/transport_weights/dst_zid=cc",
+                    r#"{ dst_zid: "cc", weight: 5 }"#,
+                    &sinks,
+                ),
+                Ok(())
+            );
+            assert_eq!(
+                cfg.router_link_weights(),
+                &[row(0xAA, 99), row(0xBB, 7), row(0xCC, 5)]
+            );
+        }
+
+        /// R2657 — the member DELETE, which upstream reaches through a different
+        /// function and wz reaches through the same route.
+        #[test]
+        fn a_member_delete_drops_the_named_row_and_keeps_the_rest() {
+            let sink = RecordingSink::new(true);
+            let sinks = ConfigSinks::none().with_router_link_weights(&sink);
+            let mut cfg =
+                WzConfig::new().with_router_link_weights(vec![row(0xAA, 250), row(0xBB, 7)]);
+
+            assert_eq!(
+                cfg.remove_by_key_with(
+                    "routing/router/linkstate/transport_weights/dst_zid=aa",
+                    &sinks,
+                ),
+                Ok(())
+            );
+            assert_eq!(
+                cfg.router_link_weights(),
+                &[row(0xBB, 7)],
+                "⭐ and `bb` SURVIVES, which is the whole difference between a \
+                 member delete and a whole-key delete: the key half of this \
+                 route used to restore the schema default, which for this key is \
+                 no weights at all"
+            );
+        }
+
+        /// R2657 — the three refusals the member route adds, each by its own
+        /// name, and the one shape that is NOT a refusal.
+        #[test]
+        fn the_member_route_refuses_by_name_and_falls_through_without_an_equals() {
+            let sink = RecordingSink::new(true);
+            let sinks = ConfigSinks::none().with_router_link_weights(&sink);
+            let mut cfg = WzConfig::new().with_router_link_weights(vec![row(0xAA, 250)]);
+
+            // The value must answer to the name it was addressed by. Without
+            // this an element called `bb` would be appended under `aa`, and the
+            // next write to `aa` would append a second one.
+            assert_eq!(
+                cfg.set_by_key_with(
+                    "routing/router/linkstate/transport_weights/dst_zid=aa",
+                    r#"{ dst_zid: "bb", weight: 1 }"#,
+                    &sinks,
+                ),
+                Err(ConfigKeyWriteError::MemberFilterMismatch {
+                    key: String::from("routing/router/linkstate/transport_weights"),
+                    field: String::from("dst_zid"),
+                })
+            );
+
+            // A prefix with no `/` cannot name a field -- upstream's "missing
+            // field filter".
+            assert!(matches!(
+                cfg.set_by_key_with("weights=aa", r#"{ dst_zid: "aa", weight: 1 }"#, &sinks),
+                Err(ConfigKeyWriteError::MalformedKey { .. })
+            ));
+
+            // An array whose elements have no field to be addressed by. ⚠ The
+            // first cut of this arm used `adminspace/permissions/read=x` and
+            // expected the same refusal; it does not reach here at all, because
+            // the prefix rsplits into the array key `adminspace/permissions` and
+            // the reader refuses THAT before the splice is consulted. The case
+            // this arm can actually be reached for is an array of bare strings.
+            assert!(matches!(
+                cfg.set_by_key_with("connect/endpoints/x=abc", r#""abc""#, &sinks),
+                Err(ConfigKeyWriteError::NotMemberAddressable { .. })
+            ));
+
+            // ⚠ AND THE NON-REFUSAL: a key with no `=` is not a member write at
+            // all. Upstream answers `Ok(false)` and falls through to the
+            // ordinary insert, which is why this must still work unchanged.
+            assert_eq!(
+                cfg.set_by_key_with(
+                    "routing/router/linkstate/transport_weights",
+                    r#"[{ dst_zid: "cc", weight: 3 }]"#,
+                    &sinks,
+                ),
+                Ok(())
+            );
+            assert_eq!(
+                cfg.router_link_weights(),
+                &[row(0xCC, 3)],
+                "a whole-array write still REPLACES the array"
+            );
+        }
+
+        /// ⭐ R2657 — a NUMERIC field addresses nothing, and that is upstream's
+        /// behaviour rather than a limitation wz adds.
+        ///
+        /// Its comparison is `serde_json`'s `as_str()`, which answers `None` for
+        /// a number, so no item ever matches and the insert appends. Reproducing
+        /// it is what keeps the two acceptance boundaries the same: a wz that
+        /// matched numerically would apply a write upstream would not.
+        #[test]
+        fn a_numeric_field_matches_nothing_and_appends_as_upstream_does() {
+            let sink = RecordingSink::new(true);
+            let sinks = ConfigSinks::none().with_router_link_weights(&sink);
+            let mut cfg = WzConfig::new().with_router_link_weights(vec![row(0xAA, 250)]);
+
+            // The filter check comes first and refuses this, because `weight` on
+            // the incoming element is not the STRING "250" either -- which is
+            // the same reading, one step earlier.
+            assert!(matches!(
+                cfg.set_by_key_with(
+                    "routing/router/linkstate/transport_weights/weight=250",
+                    r#"{ dst_zid: "aa", weight: 250 }"#,
+                    &sinks,
+                ),
+                Err(ConfigKeyWriteError::MemberFilterMismatch { .. })
+            ));
+            assert_eq!(
+                cfg.router_link_weights(),
+                &[row(0xAA, 250)],
+                "and nothing moved"
             );
         }
 

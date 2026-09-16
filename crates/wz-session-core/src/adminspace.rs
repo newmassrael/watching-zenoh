@@ -2045,12 +2045,33 @@ pub fn parse_admin_config_write(
         //
         // ⚠ ROUTED ON `/`, and the bound that draws is stated rather than
         // hidden: a config key that is a SINGLE segment still reaches
-        // `UnknownKey` below. Measured — the only single-segment keys in the
-        // registry today (`downsampling`, `low_pass_filter`) are ones wz does
-        // not honour, so both routes end in a refusal that names the key and
-        // the bound is currently inert. It stops being inert the day a
-        // single-segment key becomes honoured AND runtime-mutable, and the fix
-        // then is a distinct wire prefix, not a guess here.
+        // `UnknownKey` below.
+        //
+        // ⛔⛔ R2657 — THAT BOUND IS NO LONGER INERT, and this comment used to
+        // say it was. It read: "the only single-segment keys in the registry
+        // today (`downsampling`, `low_pass_filter`) are ones wz does not
+        // honour, so both routes end in a refusal that names the key ... It
+        // stops being inert the day a single-segment key becomes honoured AND
+        // runtime-mutable". That day came and went: R2651 honoured both, and
+        // R2654 made every runtime-mutable key writable through the sinks. So a
+        // wire write to `downsampling` decodes `UnknownKey` on a node that can
+        // apply it, and — absurdly — its MEMBER form `downsampling/id=x` carries
+        // a `/` and decodes fine. A key whose whole-value write is unreachable
+        // while one of its rows is reachable is not a bound, it is a defect.
+        //
+        // THE FIX IS THE ONE THIS COMMENT ALREADY NAMED, and re-deriving it
+        // reaches the same place: upstream's rule is that EVERY sub-key of
+        // `config/` is a config path — it has no action names in that space at
+        // all. wz put its own (`acl-deny`, `connect-add`, `admin-read`,
+        // `storage-add`, `storage-del`) beside them and needed a discriminator,
+        // and `contains('/')` is not one. Moving wz's actions behind a prefix of
+        // their own makes the two vocabularies structurally disjoint and lets
+        // this arm become "everything else", which is upstream's rule restored
+        // rather than approximated. Matching the action literals first and
+        // treating the rest as config would ALSO work today and is weaker: it
+        // keeps the divergence and proves it harmless, where the prefix removes
+        // it. NOT DONE HERE: it moves keyexprs the demo and the e2e lanes
+        // construct, so it is its own round; registered on `adminspace-write`.
         // R2646 — the one arm that takes BOTH bodies, because it is the one that
         // names a config PATH rather than an action, and a config path is
         // exactly what upstream's delete removes.
