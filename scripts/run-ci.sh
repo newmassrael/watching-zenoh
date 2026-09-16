@@ -6499,7 +6499,7 @@ layer_c1ak_cargo_test_transport_stats() {
     # are R2646's delete half: the sub-key decode, the write-permission refusal,
     # and the `of_sample` join. All are ungated, so every `--lib adminspace`
     # count moves by the same three.
-    _runci_guarded_test C1ak 42 cargo test -p wz-session-core --features adminspace-metrics,transport-stats --lib adminspace --quiet \
+    _runci_guarded_test C1ak 44 cargo test -p wz-session-core --features adminspace-metrics,transport-stats --lib adminspace --quiet \
         || return 1
     (cd crates \
         && cargo clippy -p wz-runtime-tokio --all-targets --features transport-stats --quiet -- -D warnings \
@@ -6719,7 +6719,7 @@ layer_c1ba_cargo_clippy_transport_multilink() {
 # two self-sufficiency fixes that the slim build surfaced (the session/mod.rs
 # unused-ResponseSink import + the test-module dead-code re-gating).
 layer_c1am_cargo_test_adminspace() {
-    _runci_guarded_test "C1AM adminspace 42" 42 \
+    _runci_guarded_test "C1AM adminspace 44" 44 \
         cargo test -p wz-session-core --features adminspace-metrics --lib adminspace --quiet || return 1
     # R2633 — 3 -> 5. `zenoh_hex_to_zid` grew the two refusals a conforming node
     # makes, needed because the router link-weight rows name neighbours by the
@@ -6757,9 +6757,9 @@ layer_c1am_cargo_test_adminspace() {
     # in BOTH directions (a one-way assertion would pass on a latch).
     _runci_guarded_test "C1AM admin_permissions 1" 1 \
         cargo test -p wz-runtime-tokio --features adminspace-read,adminspace-write,query-get --lib admin_permissions --quiet || return 1
-    _runci_guarded_test "C1AM adminspace 39" 39 \
+    _runci_guarded_test "C1AM adminspace 41" 41 \
         cargo test -p wz-session-core --features adminspace-introspection-handlers --lib adminspace --quiet || return 1
-    _runci_guarded_test "C1AM adminspace 40" 40 \
+    _runci_guarded_test "C1AM adminspace 42" 42 \
         cargo test -p wz-session-core --features adminspace-router-linkstate --lib adminspace --quiet || return 1
     # R311y828 25 -> 29: the storage_manager status SUB-TREE. Four legs — the
     # no-leaf CONTROL, the served sub-tree, the narrowed GET's own filtering, and
@@ -6767,7 +6767,7 @@ layer_c1am_cargo_test_adminspace() {
     # guard below because `wz-session-core`'s own `adminspace-config-hotreload`
     # does NOT compose `adminspace-plugins-handlers` (the runtime crate's does),
     # so the whole `tests::plugins` module is absent from that build.
-    _runci_guarded_test "C1AM adminspace 48" 48 \
+    _runci_guarded_test "C1AM adminspace 50" 50 \
         cargo test -p wz-session-core --features adminspace-plugins-handlers --lib adminspace --quiet || return 1
     _runci_guarded_test "C1AM declare_adminspace 4" 4 \
         cargo test -p wz-runtime-tokio --features adminspace-plugins-handlers,query-get --lib declare_adminspace --quiet || return 1
@@ -6781,7 +6781,7 @@ layer_c1am_cargo_test_adminspace() {
     # `@` inside a KEYEXPR left untouched (the delimiter must not narrow the keyexpr
     # grammar), and a name that itself contains `@` splitting on the last one. This
     # pin is why the count moved visibly instead of the module quietly growing.
-    _runci_guarded_test "C1AM adminspace 49" 49 \
+    _runci_guarded_test "C1AM adminspace 51" 51 \
         cargo test -p wz-session-core --features adminspace-config-hotreload --lib adminspace --quiet || return 1
     # R311y828 5 -> 6: the live manager's admin sub-tree render. It is gated on
     # `adminspace-plugins-handlers`, so the C1z sibling guard over the SAME module
@@ -6828,9 +6828,9 @@ layer_c1am_cargo_test_adminspace() {
 #      test-module dead-code (R311y38 re-gated them to their codec-response-final
 #      consumers), both of which only surface WITHOUT the full default codec set.
 layer_c1an_cargo_test_adminspace_nodefault() {
-    _runci_guarded_test "C1AN adminspace 35" 35 \
+    _runci_guarded_test "C1AN adminspace 37" 37 \
         cargo test -p wz-session-core --no-default-features --features adminspace-core --lib adminspace --quiet || return 1
-    _runci_guarded_test "C1AN adminspace 40" 40 \
+    _runci_guarded_test "C1AN adminspace 42" 42 \
         cargo test -p wz-session-core --no-default-features --features adminspace-router-linkstate --lib adminspace --quiet || return 1
     _runci_guarded_test "C1AN declare_adminspace 4" 4 \
         cargo test -p wz-runtime-tokio --no-default-features --features adminspace-core,query-get --lib declare_adminspace --quiet || return 1
