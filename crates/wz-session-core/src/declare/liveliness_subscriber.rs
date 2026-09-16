@@ -89,7 +89,12 @@ use crate::bounded::{BoundedString, BoundedVec};
 use crate::caps;
 #[cfg(feature = "alloc")]
 use crate::driver_loop::{DriverLoopOutcome, IterationEvent};
-use crate::keyexpr_match::{keyexpr_pattern_matches, MAX_KEYEXPR_CHUNKS};
+// R2662 — `keyexpr_pattern_matches` is gone from this module: both fan paths
+// were its last callers, so a token keyexpr cannot be read as a literal here
+// again without the import being restored deliberately. `MAX_KEYEXPR_CHUNKS`
+// stays: the doc above `fan_to_matching_slots` still names it as the bound the
+// intersect seam applies on the no-alloc backing.
+use crate::keyexpr_match::{keyexpr_intersects_target, MAX_KEYEXPR_CHUNKS};
 #[cfg(feature = "alloc")]
 use crate::network_message::NetworkMessage;
 use crate::registry_error::RegisterError;
@@ -637,14 +642,31 @@ impl<C: LivelinessSampleSink> LivelinessSubscriberRegistry<C> {
                 // here rather than one keyexpr against many patterns. An
                 // over-long pattern is skipped rather than matched truncated,
                 // the same refusal `fan_to_matching_slots` makes.
-                let mut chunks: BoundedVec<&str, MAX_KEYEXPR_CHUNKS> = BoundedVec::new();
-                for c in slot.pattern.split('/') {
-                    if chunks.push(c).is_err() {
-                        return 0;
-                    }
-                }
+                // R2662 (open-debt item 763) — INTERSECTION. A TOKEN's keyexpr
+                // may itself be a pattern: `local_token.rs` @ `pub fn register`
+                // constrains only the id, the byte length and the table
+                // capacity, and upstream's `declare_token` takes a
+                // `TryIntoKeyExpr` with no wildcard refusal either. The prior
+                // `keyexpr_pattern_matches(&chunks, keyexpr)` read the token
+                // keyexpr as a LITERAL, so a subscriber on `demo/a` never saw a
+                // token declared on `demo/*`.
+                // ⛔ `BoundedVec`, never `Vec`: this module compiles on the
+                // no-alloc MCU profile. An over-deep TOKEN keyexpr is skipped
+                // rather than intersected truncated — the same refusal the
+                // hand-rolled pattern split made for an over-deep pattern.
                 for (token_id, keyexpr) in peer_token_table.iter() {
-                    if keyexpr_pattern_matches(&chunks, keyexpr) {
+                    let mut target: BoundedVec<&str, MAX_KEYEXPR_CHUNKS> = BoundedVec::new();
+                    let mut overflow = false;
+                    for c in keyexpr.split('/') {
+                        if target.push(c).is_err() {
+                            overflow = true;
+                            break;
+                        }
+                    }
+                    if overflow {
+                        continue;
+                    }
+                    if keyexpr_intersects_target(&slot.pattern, &target) {
                         matched.push((*token_id, keyexpr.as_str()));
                     }
                 }
@@ -681,6 +703,17 @@ impl<C: LivelinessSampleSink> LivelinessSubscriberRegistry<C> {
         historical: bool,
     ) -> usize {
         let mut fired: usize = 0;
+        // R2662 — the arriving token keyexpr is split ONCE for the whole scan,
+        // the shape `query.rs` @ `fn matches` and `declared_intersects` share.
+        // ⛔ `BoundedVec`, never `Vec` — no-alloc profile. An over-deep arriving
+        // keyexpr fires nothing, which is the direction the per-slot loop took
+        // for an over-deep pattern.
+        let mut resolved_chunks: BoundedVec<&str, MAX_KEYEXPR_CHUNKS> = BoundedVec::new();
+        for c in resolved.split('/') {
+            if resolved_chunks.push(c).is_err() {
+                return 0;
+            }
+        }
         for slot in self.slots.iter_mut() {
             // R2359 — a HISTORICAL delivery (an answer to a CURRENT interest)
             // reaches only the slots that asked for history. zenoh's own
@@ -691,18 +724,12 @@ impl<C: LivelinessSampleSink> LivelinessSubscriberRegistry<C> {
             if historical && !slot.history {
                 continue;
             }
-            let mut chunks: BoundedVec<&str, MAX_KEYEXPR_CHUNKS> = BoundedVec::new();
-            let mut overflow = false;
-            for c in slot.pattern.split('/') {
-                if chunks.push(c).is_err() {
-                    overflow = true;
-                    break;
-                }
-            }
-            if overflow {
-                continue;
-            }
-            if keyexpr_pattern_matches(&chunks, resolved) {
+            // R2662 (open-debt item 763) — INTERSECTION, the same repair as
+            // `replay_known_tokens` above and for the same reason: `resolved`
+            // is a TOKEN keyexpr and nothing forbids it carrying a wildcard.
+            // The bounded split moves behind `keyexpr_intersects_target`, which
+            // makes the identical over-depth refusal the hand-rolled loop made.
+            if keyexpr_intersects_target(&slot.pattern, &resolved_chunks) {
                 // R311gb-3d — deliver through the LivelinessSampleSink seam.
                 slot.sink.on_sample(LivelinessSample {
                     kind,
@@ -1081,6 +1108,110 @@ mod tests {
         assert_eq!(captured[0].1, "liveliness/dev42");
         assert_eq!(captured[0].2, 42);
         assert_eq!(reg.peer_token_count(), 1);
+    }
+
+    /// R2662 (open-debt item 763) — A TOKEN DECLARED ON A WILDCARD REACHES A
+    /// CONCRETE LIVELINESS SUBSCRIBER, which is the half of item 763 that could
+    /// not be settled by reading a signature.
+    ///
+    /// The item recorded these two fan paths as "유력하되 미확정" — probable but
+    /// unconfirmed — because the open question was REACHABILITY, not shape: can
+    /// a token keyexpr carry a wildcard at all? It can, and this test is the
+    /// construction that says so rather than an argument from
+    /// `declare_token`'s signature. `local_token.rs` @ `pub fn register`
+    /// constrains the token id, the keyexpr BYTE LENGTH and the table capacity
+    /// — and nothing else; upstream's `declare_token` takes an unconstrained
+    /// `TryIntoKeyExpr` likewise. So `liveliness/*` is a declarable token, and
+    /// before this round a subscriber on the concrete `liveliness/dev42` never
+    /// saw it: `keyexpr_pattern_matches` read the TOKEN keyexpr as a literal.
+    ///
+    /// ⛔ NOTE THE DIRECTION, which is the mirror of the test above it. There
+    /// the SUBSCRIBER holds the wildcard (`liveliness/*`) and the token is
+    /// concrete; that case always worked, because the wildcard sat on the side
+    /// the one-sided matcher treats as a pattern. Here they are swapped. One
+    /// test passing while the other could not is exactly what a one-sided
+    /// predicate looks like from outside.
+    #[test]
+    fn decl_token_on_a_wildcard_reaches_a_concrete_subscriber() {
+        let mut reg = LivelinessSubscriberRegistry::new();
+        let sink: Arc<Mutex<Vec<_>>> = Arc::new(Mutex::new(Vec::new()));
+        reg.register(1, "liveliness/dev42", false, make_subscriber(sink.clone()))
+            .unwrap();
+
+        // The TOKEN carries the wildcard this time.
+        let body =
+            DeclareOwnedVariant::CodecZenohDeclToken(decl_token(42, 0, Some("liveliness/*")));
+        reg.dispatch_declare(&body, &HashMap::new());
+
+        let captured = sink.lock().unwrap().clone();
+        assert_eq!(
+            captured.len(),
+            1,
+            "`liveliness/*` intersects the subscriber `liveliness/dev42`, so the \
+             token must be delivered; 0 here is the one-sided match this round \
+             replaced"
+        );
+        assert_eq!(captured[0].0, LivelinessSampleKind::Put);
+        assert_eq!(captured[0].1, "liveliness/*");
+        assert_eq!(captured[0].2, 42);
+    }
+
+    /// R2662 (open-debt item 763) — THE REPLAY PATH'S OWN WITNESS. The two
+    /// tests around this one both reach `fan_to_matching_slots` via
+    /// `dispatch_declare`; `replay_known_tokens` is a SECOND fan with its own
+    /// matcher call, and a test that never enters it would leave half the
+    /// migration unwitnessed while looking complete.
+    ///
+    /// A history subscriber declared AFTER a wildcard token is already known
+    /// must be replayed it. Before this round the replay compared the slot
+    /// pattern against the stored token keyexpr as a LITERAL, so the concrete
+    /// subscriber was owed nothing.
+    #[test]
+    fn a_history_subscriber_is_replayed_a_wildcard_token_it_intersects() {
+        let mut reg = LivelinessSubscriberRegistry::new();
+        // The token is known BEFORE any subscriber exists, so the only way it
+        // can be delivered is the replay.
+        reg.dispatch_declare(
+            &DeclareOwnedVariant::CodecZenohDeclToken(decl_token(7, 0, Some("liveliness/*"))),
+            &HashMap::new(),
+        );
+        reg.dispatch_declare(
+            &DeclareOwnedVariant::CodecZenohDeclToken(decl_token(8, 0, Some("other/*"))),
+            &HashMap::new(),
+        );
+
+        let sink: Arc<Mutex<Vec<_>>> = Arc::new(Mutex::new(Vec::new()));
+        reg.register(1, "liveliness/dev42", true, make_subscriber(sink.clone()))
+            .unwrap();
+
+        let replayed = sink.lock().unwrap().clone();
+        assert_eq!(
+            replayed,
+            vec![(LivelinessSampleKind::Put, "liveliness/*".to_string(), 7)],
+            "the history subscriber is owed the wildcard token it INTERSECTS \
+             (id 7) and not the one it does not (id 8); an empty vec here is \
+             the one-sided match this round replaced"
+        );
+    }
+
+    /// R2662 — the ANTI-VACUITY twin: a wildcard token that does NOT cover the
+    /// subscriber still reaches nobody. Without this, a predicate that answered
+    /// `true` unconditionally would satisfy the test above.
+    #[test]
+    fn a_wildcard_token_outside_the_subscribers_space_reaches_nobody() {
+        let mut reg = LivelinessSubscriberRegistry::new();
+        let sink: Arc<Mutex<Vec<_>>> = Arc::new(Mutex::new(Vec::new()));
+        reg.register(1, "liveliness/dev42", false, make_subscriber(sink.clone()))
+            .unwrap();
+
+        let body = DeclareOwnedVariant::CodecZenohDeclToken(decl_token(43, 0, Some("other/*")));
+        reg.dispatch_declare(&body, &HashMap::new());
+
+        assert!(
+            sink.lock().unwrap().is_empty(),
+            "`other/*` does not intersect `liveliness/dev42`; intersection must \
+             not mean 'fires for any wildcard'"
+        );
     }
 
     /// R311y790 — THE HEADLINE WITNESS. A history subscriber declared while

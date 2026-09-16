@@ -103,7 +103,7 @@ use hashbrown::HashMap;
 
 use crate::bounded::{BoundedString, BoundedVec};
 use crate::caps;
-use crate::keyexpr_match::MAX_KEYEXPR_CHUNKS;
+use crate::keyexpr_match::{keyexpr_intersects_target, MAX_KEYEXPR_CHUNKS};
 use crate::registry_error::RegisterError;
 
 // R311gb (Track 2) — `resolve_wireexpr` lives in the `alloc`-gated
@@ -1633,6 +1633,35 @@ impl<C: SampleSink> SubscriberRegistry<C> {
     fn fire_to_subscribers(&mut self, view: &dyn SampleView, is_remote: bool) -> usize {
         let mut fired: usize = 0;
         let keyexpr = view.keyexpr();
+        // R2662 (open-debt item 763) — THE ARRIVING KEYEXPR MAY ITSELF BE A
+        // PATTERN, so it is split ONCE here and each subscriber is INTERSECTED
+        // against it. The prior `keyexpr_pattern_matches(&chunks, keyexpr)`
+        // compared a subscriber pattern against the arriving key as a LITERAL,
+        // so a `demo/*` Put matched the subscriber `demo/*` character-for-
+        // character and missed `demo/a` — upstream's subscriber rule is
+        // intersection, and a real zenoh-pico client does send such keys
+        // (`wz_storage_wildcard_update_pico_interop` fires `demo/**` and the
+        // storage plane applies it, so they ARRIVE; only local delivery dropped
+        // them).
+        //
+        // ⛔ FOR A CONCRETE ARRIVING KEY THIS IS IDENTICAL TO THE PRIOR MATCH —
+        // the argument `query.rs` @ `fn matches` already recorded when the QUERY
+        // plane made this same move. So this widens delivery to the wildcard
+        // case and changes nothing about the concrete one.
+        //
+        // The split is hoisted OUT of the loop because the target is one value
+        // for the whole scan, which is also the shape
+        // `crate::declare::declared_intersects` uses: split the target once,
+        // then ask per candidate.
+        let mut target: BoundedVec<&str, MAX_KEYEXPR_CHUNKS> = BoundedVec::new();
+        for c in keyexpr.split('/') {
+            // Over-depth arriving key: conservatively deliver to nobody, the
+            // same direction `keyexpr_intersects_target` takes for an
+            // over-depth candidate on the no-alloc backing.
+            if target.push(c).is_err() {
+                return 0;
+            }
+        }
         for subscriber in self.subscribers.iter_mut() {
             let pass = if is_remote {
                 subscriber.allowed_origin.allows_remote()
@@ -1642,24 +1671,11 @@ impl<C: SampleSink> SubscriberRegistry<C> {
             if !pass {
                 continue;
             }
-            // Split the bounded pattern into a stack chunk view. On the
-            // no-alloc backing `BoundedVec` is heapless-backed (no heap);
-            // the canon stored at register time already bounds the chunk
-            // count to `MAX_KEYEXPR_CHUNKS`, so the push is infallible in
-            // practice — skip defensively on overflow rather than match a
-            // truncated pattern.
-            let mut chunks: BoundedVec<&str, MAX_KEYEXPR_CHUNKS> = BoundedVec::new();
-            let mut overflow = false;
-            for c in subscriber.pattern.split('/') {
-                if chunks.push(c).is_err() {
-                    overflow = true;
-                    break;
-                }
-            }
-            if overflow {
-                continue;
-            }
-            if keyexpr_pattern_matches(&chunks, keyexpr) {
+            // R2662 — the subscriber's pattern is the CANDIDATE now, and
+            // `keyexpr_intersects_target` does its own bounded split (the same
+            // defensive over-depth skip the hand-rolled loop here used to do,
+            // moved behind the one seam so every scan inherits it).
+            if keyexpr_intersects_target(&subscriber.pattern, &target) {
                 // R311gb-2b — deliver via the DIP seam (borrowed view,
                 // no projection step). On MCU `C` is a closed `enum`
                 // whose `deliver` injects; on AP a `BoxedSink` closure.
@@ -2019,6 +2035,51 @@ mod tests {
             counter.load(Ordering::SeqCst),
             1,
             "matching keyexpr fires the callback exactly once"
+        );
+    }
+
+    /// R2662 (open-debt item 763) — A WILDCARD-ADDRESSED PUT REACHES A CONCRETE
+    /// SUBSCRIBER. This is the witness for the delivery half of the migration
+    /// the QUERY plane completed first.
+    ///
+    /// Before this round `fire_to_subscribers` compared the subscriber pattern
+    /// against the arriving keyexpr as a LITERAL, so `topic/*` matched the
+    /// subscriber `topic/*` character-for-character and reached `topic/a`
+    /// NEVER. Upstream's subscriber rule is intersection, and such keys really
+    /// do arrive: `wz_storage_wildcard_update_pico_interop` fires `demo/**`
+    /// from a real zenoh-pico `z_put` and the storage plane applies it — so the
+    /// sample crosses the node correctly and only LOCAL delivery dropped it.
+    ///
+    /// ⛔ THE SECOND ASSERTION IS WHY THIS IS NOT A WIDENING-BY-ACCIDENT: a
+    /// wildcard that does NOT cover the subscriber must still not fire. A
+    /// change that merely made intersection permissive would pass the first
+    /// assertion and fail this one.
+    #[test]
+    fn dispatch_fires_a_concrete_subscriber_on_a_wildcard_addressed_put() {
+        let mut registry = SubscriberRegistry::new();
+        let counter = Arc::new(AtomicUsize::new(0));
+        let counter_clone = counter.clone();
+        let _id = registry.register("topic/a", move |_push| {
+            counter_clone.fetch_add(1, Ordering::SeqCst);
+        });
+
+        let push = push_with_keyexpr("topic/*");
+        registry.dispatch(&NetworkMessage::Push(Box::new(push)), Reliability::Reliable);
+        assert_eq!(
+            counter.load(Ordering::SeqCst),
+            1,
+            "a `topic/*` PUT intersects the subscriber `topic/a`, so it must be \
+             delivered; 0 here is the one-sided match this round replaced"
+        );
+
+        // NEGATIVE CONTROL — a wildcard under a DIFFERENT prefix stays out.
+        let push = push_with_keyexpr("other/*");
+        registry.dispatch(&NetworkMessage::Push(Box::new(push)), Reliability::Reliable);
+        assert_eq!(
+            counter.load(Ordering::SeqCst),
+            1,
+            "`other/*` does not intersect `topic/a`; intersection must not mean \
+             'fires for any wildcard'"
         );
     }
 

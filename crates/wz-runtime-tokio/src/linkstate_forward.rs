@@ -108,9 +108,11 @@ use wz_session_core::declare_routing_context::{read_declare_source, set_declare_
 use wz_session_core::driver_loop::DriverLoopOutcome;
 #[cfg(feature = "routing-interest-pending-gc")]
 use wz_session_core::interest_build::build_interest_propagated;
-use wz_session_core::keyexpr_match::{
-    keyexpr_includes_target, keyexpr_intersects_target, keyexpr_pattern_matches,
-};
+// R2662 — `keyexpr_pattern_matches` is GONE from this file's imports, and its
+// absence is the repair: the forwarder's local-subscriber delivery was its last
+// caller here, so there is no longer a way to match an arriving key as a
+// literal on this plane without re-adding the import deliberately.
+use wz_session_core::keyexpr_match::{keyexpr_includes_target, keyexpr_intersects_target};
 use wz_session_core::linkstate_oam::{
     build_linkstate_oam_owned, try_parse_linkstate_oam, LinkstateOam,
 };
@@ -3394,17 +3396,30 @@ impl LinkstateForwarder {
                 Reliability::BestEffort
             },
         };
-        // Snapshot every LOCAL subscriber whose declared keyexpr (a PATTERN) matches
-        // the concrete Put key (the R227 subscriber-side match) under a SHORT borrow,
-        // drop it, then fire — so a handler may re-enter the registry (contract above).
+        // Snapshot every LOCAL subscriber whose declared keyexpr INTERSECTS the
+        // arriving Put key under a SHORT borrow, drop it, then fire — so a
+        // handler may re-enter the registry (contract above).
+        //
+        // R2662 (open-debt item 763) — INTERSECTION, not a one-sided match, and
+        // the comment above used to say "the concrete Put key" because that was
+        // the assumption rather than a fact. An arriving key MAY be a pattern:
+        // `wz_storage_wildcard_update_pico_interop` fires `demo/**` from a real
+        // zenoh-pico `z_put` and the storage plane applies it, so such samples
+        // reach this node and this filter dropped them on the way to the node's
+        // OWN hosts. The adminspace config-write handler is one of those hosts,
+        // which is why `adminspace-write` could decode `@/*/<whatami>/config/x`
+        // after R2661 and still never be handed one.
+        //
+        // The target is split ONCE for the whole scan — `query.rs` @ `fn matches`
+        // and `declare::declared_intersects` both have this shape — and for a
+        // CONCRETE arriving key the answer is identical to the prior match, so
+        // this widens the wildcard case and changes nothing else.
+        let target_chunks: Vec<&str> = keyexpr.split('/').collect();
         let matched: Vec<Rc<RefCell<LocalSubscriberHandler>>> = {
             let locals = self.local_subscribers.borrow();
             locals
                 .iter()
-                .filter(|sub| {
-                    let pattern_chunks: Vec<&str> = sub.keyexpr.split('/').collect();
-                    keyexpr_pattern_matches(&pattern_chunks, &keyexpr)
-                })
+                .filter(|sub| keyexpr_intersects_target(&sub.keyexpr, &target_chunks))
                 .map(|sub| Rc::clone(&sub.handler))
                 .collect()
         };
@@ -14728,6 +14743,59 @@ mod tests {
             "the Del arrives second, under the Del kind, with an empty payload \
              (a MsgDel has no payload slot on the wire)"
         );
+    }
+
+    /// R2662 (open-debt item 763) — A WILDCARD-ADDRESSED PUT REACHES THIS
+    /// NODE'S OWN LOCAL SUBSCRIBER, which is the half of the delivery plane the
+    /// forwarder owns.
+    ///
+    /// The forwarder already FORWARDED such a sample onward — that is exactly
+    /// what kept the hole invisible from outside, the same way R2646's missing
+    /// Del arm did: the key crossed the node correctly and vanished on the way
+    /// to the node's own hosts. The adminspace config-write handler IS one of
+    /// those hosts, so after R2661 the decoder could answer
+    /// `@/*/<whatami>/config/<key>` and never be handed one.
+    ///
+    /// ⛔ THE SECOND HALF IS THE ANTI-VACUITY ARM: a wildcard that does not
+    /// cover the subscriber must still not fire. Without it, any predicate that
+    /// simply said `true` would pass.
+    #[test]
+    fn peer_local_subscriber_sees_a_wildcard_addressed_put() {
+        let fwd = LinkstateForwarder::new(zid(0x05), WhatAmI::Peer);
+        let (face_a, _sink_a) = peer_face(zid(0x0A));
+        fwd.register(FaceId(0), &face_a);
+        advertise_link_back(&fwd, FaceId(0), 0x0A, 0x05);
+        let seen = std::rc::Rc::new(std::cell::RefCell::new(Vec::<Vec<u8>>::new()));
+        let s = seen.clone();
+        fwd.register_local_subscriber(
+            "demo/data",
+            Box::new(move |v: &dyn SampleView| {
+                s.borrow_mut().push(v.payload().to_vec());
+            }),
+        )
+        .expect("register local subscriber");
+
+        // A PATTERN key, the shape a real zenoh-pico `z_put` sends and the
+        // storage plane already applies.
+        fwd.forward(
+            FaceId(0),
+            IterationEvent::Poll(&push_outcome("demo/*", b"w")),
+        );
+        // ... and one that does NOT intersect the subscriber.
+        fwd.forward(
+            FaceId(0),
+            IterationEvent::Poll(&push_outcome("other/*", b"x")),
+        );
+
+        let seen = seen.borrow();
+        assert_eq!(
+            seen.len(),
+            1,
+            "`demo/*` intersects the local subscriber `demo/data` and must be \
+             delivered, while `other/*` must not; 0 here is the one-sided match \
+             this round replaced, 2 is a predicate that stopped discriminating"
+        );
+        assert_eq!(seen[0], b"w".to_vec());
     }
 
     #[test]

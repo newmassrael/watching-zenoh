@@ -775,6 +775,37 @@ mod tests {
         assert!(!keyexpr_intersects_target("other/**", &["home", "a", "b"]));
     }
 
+    /// R2662 (open-debt item 763) — THE OTHER DIRECTION: a CONCRETE candidate
+    /// against a WILDCARD target, which is what an inbound wildcard PUT is.
+    ///
+    /// The two tests above both put the wildcard on the CANDIDATE side, because
+    /// that is the shape a subscription scan has: a registered `home/**` against
+    /// a concrete published key. The delivery planes have the mirror problem — a
+    /// subscriber registered on a CONCRETE keyexpr, and a sample arriving under
+    /// `demo/*` — and nothing pinned it, which is why item 763 named "build the
+    /// control FIRST" as a precondition of the migration rather than part of it.
+    ///
+    /// ⛔ THE CONTRAST IS THE POINT, so both matchers are asserted on the SAME
+    /// inputs. `keyexpr_pattern_matches` treats its target as a literal, so it
+    /// compares the pattern chunk `a` against the character sequence `*` and
+    /// answers NO; intersection answers YES. Upstream's subscriber rule is
+    /// intersection, so the NO is the defect five delivery sites still carry.
+    #[cfg(feature = "keyexpr-wildcard-single")]
+    #[test]
+    fn intersects_target_when_the_target_itself_is_the_wildcard() {
+        // A concrete subscriber keyexpr, a wildcard-addressed sample.
+        assert!(keyexpr_intersects_target("demo/a", &["demo", "*"]));
+        assert!(keyexpr_intersects_target("demo/a/b", &["demo", "*", "b"]));
+        // ... and the one-sided matcher, on the SAME pair, says no. This is not
+        // a bug in it: it is a MATCH predicate, and `demo/*` is not a literal
+        // key. It is the wrong predicate for a target that may be a pattern.
+        assert!(!keyexpr_pattern_matches(&["demo", "a"], "demo/*"));
+
+        // NEGATIVE CONTROLS — the widening must not swallow disjoint keys.
+        assert!(!keyexpr_intersects_target("other/a", &["demo", "*"]));
+        assert!(!keyexpr_intersects_target("demo/a/b", &["demo", "*"]));
+    }
+
     #[cfg(all(
         feature = "keyexpr-includes",
         feature = "keyexpr-wildcard-double",

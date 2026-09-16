@@ -123,7 +123,10 @@ pub use alloc_impl::{SwitchboardEntry, SwitchboardRegistry};
 mod alloc_impl {
     use super::EventInjector;
     use crate::driver_loop::{DriverLoopOutcome, IterationEvent};
-    use crate::keyexpr_match::keyexpr_pattern_matches;
+    // R2662 — the one-sided matcher is gone from this module: `dispatch` was
+    // its last caller, so a literal read of an arriving key cannot return here
+    // without the import being re-added on purpose.
+    use crate::keyexpr_match::keyexpr_intersects_target;
     use crate::network_message::NetworkMessage;
     use crate::reliability::Reliability;
     use crate::sample_kind::SampleKind;
@@ -261,11 +264,20 @@ mod alloc_impl {
         /// `dispatch_switchboard`'s per-arm semantics, so the AP dynamic and
         /// MCU static paths agree (one guard semantics across profiles).
         pub fn dispatch(&self, sample: &dyn SampleView, injector: &mut dyn EventInjector) -> usize {
-            let target = sample.keyexpr();
+            // R2662 (open-debt item 763) — INTERSECTION, and the arriving key is
+            // split ONCE for the whole scan. The prior
+            // `keyexpr_pattern_matches(&chunks, target)` read `target` as a
+            // literal, so a switchboard row on `demo/data` never fired for a
+            // `demo/*` sample even though such samples reach this node (a real
+            // zenoh-pico `z_put` sends them, and the storage plane applies
+            // them). The QUERY plane made this same move first — `query.rs`
+            // @ `fn matches` — and its argument carries over verbatim: for a
+            // CONCRETE arriving key this is identical to the prior match.
+            let target: Vec<&str> = sample.keyexpr().split('/').collect();
             let mut injected: usize = 0;
             for entry in &self.entries {
-                let chunks: Vec<&str> = entry.pattern_chunks.iter().map(String::as_str).collect();
-                if !keyexpr_pattern_matches(&chunks, target) {
+                let pattern = entry.pattern_chunks.join("/");
+                if !keyexpr_intersects_target(&pattern, &target) {
                     continue;
                 }
                 if entry.is_value {
@@ -437,6 +449,43 @@ mod tests {
             .calls
             .iter()
             .all(|(n, d)| n == "temp_update" && d.is_empty()));
+    }
+
+    /// R2662 (open-debt item 763) — A WILDCARD-ADDRESSED SAMPLE FIRES A
+    /// CONCRETE ROW, which is the mirror of `wildcard_pattern_matches` above.
+    ///
+    /// ⛔ THE PAIR IS THE EVIDENCE. That test puts the wildcard on the ROW
+    /// (`home/**/temp`) and a concrete sample against it, and it has always
+    /// passed — because the wildcard sat on the side a one-sided matcher treats
+    /// as a pattern. Swap the sides and the old predicate answered NO: it
+    /// compared the row `home/livingroom/temp` against the character sequence
+    /// `home/*/temp`. A suite can therefore look like it "covers wildcards"
+    /// while never testing the direction the wire actually uses, which is how
+    /// this survived on every delivery plane at once.
+    ///
+    /// Such samples do arrive: `wz_storage_wildcard_update_pico_interop` fires
+    /// `demo/**` from a real zenoh-pico `z_put` and the storage plane applies
+    /// it, so the key crosses the node and only local delivery dropped it.
+    #[test]
+    fn a_wildcard_addressed_sample_fires_a_concrete_row() {
+        let mut board = SwitchboardRegistry::new();
+        board.register("home/livingroom/temp", "temp_update");
+        let mut inj = RecordingInjector::default();
+
+        assert_eq!(
+            board.dispatch(&sample("home/*/temp"), &mut inj),
+            1,
+            "`home/*/temp` intersects the row `home/livingroom/temp`, so it must \
+             inject; 0 here is the one-sided match this round replaced"
+        );
+        // ANTI-VACUITY — a wildcard that does not cover the row stays out.
+        assert_eq!(
+            board.dispatch(&sample("away/*/temp"), &mut inj),
+            0,
+            "intersection must not mean 'fires for any wildcard'"
+        );
+        assert_eq!(inj.calls.len(), 1);
+        assert_eq!(inj.calls[0].0, "temp_update");
     }
 
     #[test]
