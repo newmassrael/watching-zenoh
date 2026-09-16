@@ -5053,6 +5053,13 @@ async fn run_peer_until(
                     "wz-ap-demo peer: config-write DELETE of '{key}' has no meaning (it names an \
                      action, not a config key; delete a config key by its path); ignored"
                 ),
+                // R2660 — the payload was not text, so nothing was written. Said
+                // separately from `Malformed` because that blames the VALUE and
+                // this blames the ENCODING, which is upstream's own split.
+                AdminConfigWriteOutcome::NotUtf8 => log::error!(
+                    "wz-ap-demo peer: config-write payload is not utf8; ignored {}",
+                    sample.keyexpr()
+                ),
                 // The bare `.../config` GET key the `/**` subscriber also matches.
                 AdminConfigWriteOutcome::NotAWrite => {}
             }
@@ -6743,6 +6750,11 @@ async fn run_router_hat_until(
                     "wz-ap-demo router-hat: config-write DELETE of '{k}' has no meaning \
                          (it names an action, not a config key); ignored"
                 ),
+                // R2660 — the ENCODING is refused, not the value.
+                AdminConfigWriteOutcome::NotUtf8 => log::error!(
+                    "wz-ap-demo router-hat: config-write payload is not utf8; ignored {}",
+                    sample.keyexpr()
+                ),
                 AdminConfigWriteOutcome::NotAWrite => {}
             }
         };
@@ -8066,6 +8078,11 @@ pub(crate) async fn run_storage_host(listen: &str, opts: StorageHostOpts) -> io:
                     AdminConfigWriteOutcome::NotDeletable(k) => log::warn!(
                         "wz-ap-demo storage-host: config-write DELETE of '{k}' has no meaning \
                          (it names an action, not a config key); ignored"
+                    ),
+                    // R2660 — the ENCODING is refused, not the value.
+                    AdminConfigWriteOutcome::NotUtf8 => log::error!(
+                        "wz-ap-demo storage-host: config-write payload is not utf8; ignored {}",
+                        sample.keyexpr()
                     ),
                     AdminConfigWriteOutcome::NotAWrite => {}
                 }

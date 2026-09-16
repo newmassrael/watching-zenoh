@@ -1832,6 +1832,25 @@ pub enum AdminConfigWriteOutcome {
     /// has one upstream states. Upstream never meets this case because it has
     /// no such sub-keys: every one of its admin writes is a config path.
     NotDeletable(String),
+    /// R2660 — the PUT carried a payload that is not UTF-8, so there is no text
+    /// to interpret and nothing is written.
+    ///
+    /// ⛔ NOT `Malformed`, and the distinction is upstream's own. Upstream
+    /// decodes the payload ONCE per Put and, on failure, logs "Received non utf8
+    /// conf value" and performs no write —
+    /// `zenoh/src/net/runtime/adminspace.rs` @ `Received non utf8 conf value`.
+    /// `Malformed` here says "the text was read and
+    /// means nothing usable"; this says the bytes were never text. Collapsing
+    /// them would tell an operator their value was rejected when the truth is
+    /// their ENCODING was.
+    ///
+    /// ⚠ IT OUTRANKS `UnknownKey` AND IS OUTRANKED BY `NotAWrite`, which is
+    /// upstream's order rather than a choice: it returns at the keyexpr
+    /// membership test before touching the payload, and decides whether the key
+    /// is one it holds only at `insert`, which is AFTER the utf8 decode. So a
+    /// broken byte under an unrecognized sub-key reports the encoding, not the
+    /// name.
+    NotUtf8,
 }
 
 /// R2646 — the body of an admin config write, as the wire carries it.
@@ -1968,12 +1987,34 @@ pub fn parse_admin_config_write(
     // the proof this matters: a second list would have to carry their `#[cfg]`s
     // too, and a build where it did not would answer `NotDeletable` for a
     // sub-key it does not have.
+    //
+    // ⛔⛔ R2660 — THE PAYLOAD IS DECODED ONCE, HERE, and every arm below takes
+    // the `&str`. It used to be decoded per arm with `String::from_utf8_lossy`
+    // in six places, which SUBSTITUTES U+FFFD for an invalid byte and then
+    // writes: an `acl-deny` carrying a bad byte installed a deny keyexpr with a
+    // replacement character in it. Upstream refuses such a write outright —
+    // `zenoh/src/net/runtime/adminspace.rs` @ `Received non utf8 conf value` —
+    // and it decodes ONCE inside the Put arm for the same
+    // reason this does: six decoders are six chances to differ.
+    //
+    // ⚠ THE POSITION IS THE PRECEDENCE. It sits AFTER the prefix strip, so a
+    // write for another node's config space still answers `NotAWrite` without
+    // the payload being read — upstream returns at its membership test before
+    // touching it. And it sits BEFORE the sub-key match, so a broken byte
+    // outranks `UnknownKey`, which is again upstream's order: it decides whether
+    // the key is one it holds at `insert`, after the decode.
+    let text = match body {
+        AdminConfigWriteBody::Put(payload) => match core::str::from_utf8(payload) {
+            Ok(text) => Some(text),
+            Err(_) => return AdminConfigWriteOutcome::NotUtf8,
+        },
+        AdminConfigWriteBody::Del => None,
+    };
     match subkey {
         "acl-deny" => {
-            let Some(payload) = body.put_payload() else {
+            let Some(deny) = text else {
                 return AdminConfigWriteOutcome::NotDeletable(String::from(subkey));
             };
-            let deny = String::from_utf8_lossy(payload);
             let deny = deny.trim();
             if deny.is_empty() {
                 AdminConfigWriteOutcome::Malformed
@@ -1998,10 +2039,9 @@ pub fn parse_admin_config_write(
         // `permissions_write`, not a `#[cfg]`. A host holding no reconcile sender
         // simply has nothing to apply it to, and says so.
         "connect-add" => {
-            let Some(payload) = body.put_payload() else {
+            let Some(raw) = text else {
                 return AdminConfigWriteOutcome::NotDeletable(String::from(subkey));
             };
-            let raw = String::from_utf8_lossy(payload);
             let eps: alloc::vec::Vec<alloc::string::String> = raw
                 .split(',')
                 .map(|e| alloc::string::String::from(e.trim()))
@@ -2020,7 +2060,7 @@ pub fn parse_admin_config_write(
         // sub-key through to UnknownKey (signature-stable; the decoder is one SSOT).
         #[cfg(feature = "adminspace-config-hotreload")]
         "storage-add" => {
-            let Some(payload) = body.put_payload() else {
+            let Some(payload) = text else {
                 return AdminConfigWriteOutcome::NotDeletable(String::from(subkey));
             };
             match parse_storage_add_payload(payload) {
@@ -2038,10 +2078,9 @@ pub fn parse_admin_config_write(
         // `storage-del <name>` — despawn the named storage; empty name is Malformed.
         #[cfg(feature = "adminspace-config-hotreload")]
         "storage-del" => {
-            let Some(payload) = body.put_payload() else {
+            let Some(name) = text else {
                 return AdminConfigWriteOutcome::NotDeletable(String::from(subkey));
             };
-            let name = String::from_utf8_lossy(payload);
             let name = name.trim();
             if name.is_empty() {
                 AdminConfigWriteOutcome::Malformed
@@ -2061,10 +2100,9 @@ pub fn parse_admin_config_write(
         // failure this whole gate exists to prevent, and a typo must be reported
         // to the operator rather than silently locking or unlocking a node.
         "admin-read" => {
-            let Some(payload) = body.put_payload() else {
+            let Some(value) = text else {
                 return AdminConfigWriteOutcome::NotDeletable(String::from(subkey));
             };
-            let value = String::from_utf8_lossy(payload);
             match value.trim() {
                 "true" => AdminConfigWriteOutcome::Apply(AdminConfigWrite::AdminReadPermit(true)),
                 "false" => AdminConfigWriteOutcome::Apply(AdminConfigWrite::AdminReadPermit(false)),
@@ -2127,21 +2165,18 @@ pub fn parse_admin_config_write(
         // R2646 — the one arm that takes BOTH bodies, because it is the one that
         // names a config PATH rather than an action, and a config path is
         // exactly what upstream's delete removes.
-        other if !ADMIN_CONFIG_WRITE_ACTIONS.contains(&other) && is_config_key(other) => match body
+        other if !ADMIN_CONFIG_WRITE_ACTIONS.contains(&other) && is_config_key(other) => match text
         {
-            AdminConfigWriteBody::Put(payload) => {
-                let value = String::from_utf8_lossy(payload);
+            Some(value) => {
                 let value = value.trim();
                 AdminConfigWriteOutcome::Apply(AdminConfigWrite::SetKey {
                     key: String::from(other),
                     value: String::from(value),
                 })
             }
-            AdminConfigWriteBody::Del => {
-                AdminConfigWriteOutcome::Apply(AdminConfigWrite::RemoveKey {
-                    key: String::from(other),
-                })
-            }
+            None => AdminConfigWriteOutcome::Apply(AdminConfigWrite::RemoveKey {
+                key: String::from(other),
+            }),
         },
         other => AdminConfigWriteOutcome::UnknownKey(String::from(other)),
     }
@@ -2181,10 +2216,14 @@ pub const DEFAULT_STORAGE_VOLUME_ID: &str = "mem";
 /// storage on a volume called "".
 #[cfg(feature = "adminspace-config-hotreload")]
 #[allow(clippy::type_complexity)]
+// R2660 — takes `&str`, not `&[u8]`. The decoder now decodes the payload ONCE
+// before its sub-key match, so this helper is the one place the single decode
+// could not reach: it was the sixth `from_utf8_lossy` site and the only one
+// behind a function boundary, which is why counting the six as "six arms"
+// understated the change.
 fn parse_storage_add_payload(
-    payload: &[u8],
+    text: &str,
 ) -> Option<(String, String, Option<String>, Vec<(String, String)>)> {
-    let text = String::from_utf8_lossy(payload);
     let (head, key_expr) = text.split_once(':')?;
     let head = head.trim();
     let key_expr = key_expr.trim();
@@ -2823,6 +2862,84 @@ mod tests {
         assert_eq!(
             out,
             AdminConfigWriteOutcome::UnknownKey(String::from("batch-size"))
+        );
+    }
+
+    /// R2660 — a PUT whose payload is not UTF-8 is REFUSED, and the refusal
+    /// outranks the sub-key's own answer.
+    ///
+    /// Upstream decodes once per Put and, on failure, logs and writes nothing —
+    /// `zenoh/src/net/runtime/adminspace.rs` @ `Received non utf8 conf value`.
+    /// wz used `String::from_utf8_lossy` in six places,
+    /// which SUBSTITUTES U+FFFD and proceeds: an `acl-deny` carrying a bad byte
+    /// installed a deny keyexpr with a replacement character in it.
+    ///
+    /// ⚠ THE THIRD CASE IS THE PRECEDENCE AND IS THE POINT. `batch-size` is in
+    /// neither vocabulary, so before this round it answered `UnknownKey` — and
+    /// it still would if the decode sat inside the arms rather than before the
+    /// match. Upstream reports the ENCODING there, because it decides whether a
+    /// key is one it holds at `insert`, which runs after the decode. The fourth
+    /// case pins the other side: `NotAWrite` still wins, because upstream
+    /// returns at the keyexpr membership test without reading the payload.
+    #[test]
+    fn a_non_utf8_put_is_refused_before_the_subkey_is_judged() {
+        // 0x80 is a continuation byte with no lead byte: never valid UTF-8.
+        for (keyexpr, expected) in [
+            (
+                "@/a1b2/peer/config/acl-deny",
+                AdminConfigWriteOutcome::NotUtf8,
+            ),
+            (
+                "@/a1b2/peer/config/adminspace/permissions/read",
+                AdminConfigWriteOutcome::NotUtf8,
+            ),
+            // outranks UnknownKey
+            (
+                "@/a1b2/peer/config/batch-size",
+                AdminConfigWriteOutcome::NotUtf8,
+            ),
+            // ... but NOT NotAWrite: another node's config space is refused
+            // before the payload is looked at.
+            ("@/a1b2/other/config/x", AdminConfigWriteOutcome::NotAWrite),
+        ] {
+            assert_eq!(
+                parse_admin_config_write(
+                    WRITE_PREFIX,
+                    keyexpr,
+                    AdminConfigWriteBody::Put(b"\x80"),
+                    true,
+                    &stub_config_key,
+                ),
+                expected,
+                "a non-utf8 payload at '{keyexpr}'"
+            );
+        }
+    }
+
+    /// R2660 — the ANTI-VACUITY twin: the same keyexprs with VALID utf8 must
+    /// still reach their own answers, or the test above would pass on a decoder
+    /// that refused everything.
+    #[test]
+    fn a_valid_utf8_put_still_reaches_the_subkeys_own_answer() {
+        assert_eq!(
+            parse_admin_config_write(
+                WRITE_PREFIX,
+                "@/a1b2/peer/config/batch-size",
+                AdminConfigWriteBody::Put(b"100"),
+                true,
+                &stub_config_key,
+            ),
+            AdminConfigWriteOutcome::UnknownKey(String::from("batch-size"))
+        );
+        assert_eq!(
+            parse_admin_config_write(
+                WRITE_PREFIX,
+                "@/a1b2/peer/config/acl-deny",
+                AdminConfigWriteBody::Put(b"mesh/data"),
+                true,
+                &stub_config_key,
+            ),
+            AdminConfigWriteOutcome::Apply(AdminConfigWrite::AclDeny(String::from("mesh/data")))
         );
     }
 
