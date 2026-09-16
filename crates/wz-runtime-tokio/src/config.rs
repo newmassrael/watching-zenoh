@@ -266,6 +266,62 @@ pub enum ConfigKeyWriteError {
     SubtreeRefused { key: String },
 }
 
+/// R2656 — the DOCUMENT inputs of the `interceptors` slice: what the operator
+/// wrote, for all seven of the keys that feed it.
+///
+/// # One statement, made once
+///
+/// R2652 gave the five `access_control/*` keys a retention because their
+/// compile is LOSSY: given an expanded `AclRule` there is no way back to the
+/// rule, subject and policy that produced it. That argument was never about the
+/// ACL. `downsampling`'s compile turns a frequency into a minimum interval —
+/// `0.0` becomes `Duration::MAX` and a negative rate saturates to no throttle —
+/// so a compiled rule cannot say what rate it was written with; `low_pass_filter`
+/// folds one document filter into rules that no longer carry its `id`. Both were
+/// compiled straight out of the ingest and retained nothing, which made the
+/// sentence "the compiled form is a pure function of the retained inputs" true
+/// of five keys and silent about two.
+///
+/// It is one type rather than three fields for that reason: the slice is ONE
+/// slice, the claim is ONE claim, and three fields would be three places for it
+/// to be written and two for it to go stale.
+///
+/// # What it is not
+///
+/// NOT a second representation of the live config. Each field is the SOURCE its
+/// compiled form is derived from, and nothing reads the compiled form to
+/// maintain it — which is the difference between a retention and the inert
+/// mirror this tree refuses elsewhere.
+///
+/// It carries no `set_`/`reconfigure_` method, deliberately:
+/// `runtime_mutable_surface_gate.py` derives its slice population as exactly
+/// "private fields having such a method", and all seven keys already name
+/// `interceptors` as their slice. Giving this one a method would make it a
+/// DECLARED slice demanding registry rows of its own.
+#[cfg(all(
+    feature = "routing-peer",
+    feature = "zenoh-config",
+    any(feature = "adminspace-core", feature = "routing-router-hat"),
+    any(
+        feature = "access-acl",
+        feature = "access-quota",
+        feature = "access-downsampling"
+    )
+))]
+#[derive(Debug, Clone, Default, PartialEq)]
+struct InterceptorInputs {
+    /// The five `access_control/*` keys, in the document's own shape.
+    #[cfg(all(feature = "routing-peer", feature = "access-acl"))]
+    acl: crate::zenoh_config::AclConfigInputs,
+    /// `low_pass_filter`, as the document spells it.
+    #[cfg(all(feature = "routing-peer", feature = "access-quota"))]
+    low_pass: Vec<crate::zenoh_config::LowPassFilterConf>,
+    /// `downsampling`, as the document spells it — items, each holding the axes
+    /// its rate rules share.
+    #[cfg(all(feature = "routing-peer", feature = "access-downsampling"))]
+    downsampling: Vec<crate::zenoh_config::DownsamplingItemConf>,
+}
+
 /// R2654 — the `access_control/*` document inputs as they stood before a write.
 ///
 /// ⚠ THE FIELD IS CONDITIONAL AND THE TYPE IS NOT, which is the same choice
@@ -407,45 +463,38 @@ pub struct WzConfig {
     /// [`Self::reconfigure_interceptors`] so the forwarder stays in sync.
     #[cfg(feature = "routing-peer")]
     interceptors: InterceptorConfig,
-    /// R2652 — the `access_control/*` document inputs the live policy above was
-    /// COMPILED from, kept because that compilation cannot be inverted.
+    /// R2652/R2656 — the DOCUMENT inputs the live interceptor config above was
+    /// COMPILED from, kept because that compilation cannot be inverted. See
+    /// [`InterceptorInputs`] for why all seven keys are one type.
     ///
-    /// # Why this exists rather than merging into the compiled form
+    /// # Why the `#[cfg]` is this long rather than the type's own features
     ///
-    /// [`InterceptorConfig::acl`] holds a policy whose rules are the expansion of
-    /// upstream's `rules x subjects x policies`. Given an expanded rule there is
-    /// no way back to the three entries that produced it, so a write to any one
-    /// of those keys cannot be merged — it must be RE-EXPANDED against the
-    /// current other two, which is what these inputs are for.
+    /// It names exactly the builds where the field is READ, which is the
+    /// interceptor arms of `apply_one_key`: that function needs `zenoh-config`
+    /// and one of the two admin hats, and its arms need `routing-peer` for the
+    /// live slice. A shorter `#[cfg]` would compile the field into builds that
+    /// never touch it, and this crate denies dead code, so the conjunction is not
+    /// tidiness — it is the condition under which a document-driven interceptor
+    /// apply exists at all. The per-key `access-*` conditions sit on the TYPE's
+    /// own fields, which is where they belong: a build with one access feature
+    /// and not another retains what it can compile and nothing else.
     ///
-    /// # Why it carries no `set_`/`reconfigure_` method, deliberately
-    ///
-    /// `runtime_mutable_surface_gate` derives its slice population as exactly
-    /// "private fields having such a method", and the five ACL keys already name
-    /// `interceptors` as their slice. Giving this one a method would make it a
-    /// DECLARED slice demanding registry rows of its own, and the resulting
-    /// mismatch would read as a registry error when the registry is correct.
-    /// Updates happen inside the existing `apply_one_key` arms, which re-derive
-    /// the compiled policy from here — so these inputs are the SSOT and the
-    /// compiled form is a pure function of them, which is what stops the two
-    /// from drifting into the inert mirror this tree keeps paying for.
-    ///
-    /// # Why the `#[cfg]` is this long rather than the field's own two features
-    ///
-    /// It names exactly the builds where the field is READ, which is the ACL
-    /// arms of `apply_one_key`: that function needs `zenoh-config` and one of
-    /// the two admin hats, its ACL arms need `routing-peer` for the live slice
-    /// and `access-acl` for the engine. A shorter `#[cfg]` would compile the
-    /// field into builds that never touch it, and this crate denies dead code,
-    /// so the conjunction is not tidiness — it is the condition under which a
-    /// document-driven ACL apply exists at all.
+    /// ⚠ The `any(access-*)` clause is not decoration either. With no access
+    /// feature the type has NO fields, so nothing reads this one and the crate's
+    /// `deny(dead_code)` refuses it — which is the same lesson gate 2h taught
+    /// twice in R2652, one level up: a conditional aggregate needs the
+    /// disjunction of its members' conditions, not the intersection.
     #[cfg(all(
         feature = "routing-peer",
-        feature = "access-acl",
         feature = "zenoh-config",
-        any(feature = "adminspace-core", feature = "routing-router-hat")
+        any(feature = "adminspace-core", feature = "routing-router-hat"),
+        any(
+            feature = "access-acl",
+            feature = "access-quota",
+            feature = "access-downsampling"
+        )
     ))]
-    acl_inputs: crate::zenoh_config::AclConfigInputs,
+    interceptor_inputs: InterceptorInputs,
     /// The LIVE adminspace permissions (zenoh `adminspace.permissions`, the
     /// `PermissionsConf` read/write pair). A runtime-mutable typed slice, declared
     /// in [`RUNTIME_MUTABLE_CONFIG_KEYS`] — R2642 removed the ORDINAL this doc
@@ -608,11 +657,15 @@ impl Default for WzConfig {
             interceptors: InterceptorConfig::default(),
             #[cfg(all(
                 feature = "routing-peer",
-                feature = "access-acl",
                 feature = "zenoh-config",
-                any(feature = "adminspace-core", feature = "routing-router-hat")
+                any(feature = "adminspace-core", feature = "routing-router-hat"),
+                any(
+                    feature = "access-acl",
+                    feature = "access-quota",
+                    feature = "access-downsampling"
+                )
             ))]
-            acl_inputs: crate::zenoh_config::AclConfigInputs::default(),
+            interceptor_inputs: InterceptorInputs::default(),
             #[cfg(feature = "adminspace-core")]
             admin_permissions: wz_session_core::adminspace::AdminSpacePermissions::default(),
             // R2634 — no configured weight is upstream's default too: the config
@@ -1210,7 +1263,7 @@ impl WzConfig {
     fn acl_snapshot(&self) -> AclSnapshot {
         AclSnapshot {
             #[cfg(all(feature = "routing-peer", feature = "access-acl"))]
-            inputs: self.acl_inputs.clone(),
+            inputs: self.interceptor_inputs.acl.clone(),
         }
     }
 
@@ -1779,12 +1832,20 @@ impl WzConfig {
             // the same values in every build -- and those two types are not.
             #[cfg(all(feature = "routing-peer", feature = "access-quota"))]
             "low_pass_filter" => {
-                let confs = match source {
+                // R2656 — RETAINED, then compiled FROM the retention. Until this
+                // round the confs were a local and the document form was gone
+                // the moment the rules were built, so the sentence the ACL
+                // retention states — the compiled form is a pure function of the
+                // inputs — was true of five keys and silent about this one. The
+                // compile is lossy here too: an item's `id` survives nowhere in
+                // the rules it becomes.
+                self.interceptor_inputs.low_pass = match source {
                     Some(ingest) => ingest.config.low_pass_filter.clone(),
                     // The schema default is NO filter, which is also what a real
                     // zenohd resolves a silent document to (it renders `[]`).
                     None => Vec::new(),
                 };
+                let confs = self.interceptor_inputs.low_pass.clone();
                 let mut rules = Vec::with_capacity(confs.len());
                 for conf in &confs {
                     // Every literal was validated at PARSE, so none of these can
@@ -1830,10 +1891,17 @@ impl WzConfig {
             // varies per rule — so this is a re-spelling, not a reinterpretation.
             #[cfg(all(feature = "routing-peer", feature = "access-downsampling"))]
             "downsampling" => {
-                let items = match source {
+                // R2656 — RETAINED, then compiled FROM the retention, for its
+                // sibling's reason and with a sharper loss of its own: the
+                // compile turns a FREQUENCY into a minimum interval, where `0.0`
+                // becomes `Duration::MAX` and a negative rate saturates to no
+                // throttle at all, so a compiled rule cannot say what rate it
+                // was written with.
+                self.interceptor_inputs.downsampling = match source {
                     Some(ingest) => ingest.config.downsampling.clone(),
                     None => Vec::new(),
                 };
+                let items = self.interceptor_inputs.downsampling.clone();
                 let mut rules = Vec::new();
                 for item in &items {
                     let (Some(messages), Some(flows), Some(links)) = (
@@ -1893,15 +1961,15 @@ impl WzConfig {
             // document that named one key would reset the other four.
             #[cfg(all(feature = "routing-peer", feature = "access-acl"))]
             "access_control/default_permission" => {
-                self.acl_inputs.default_permission = match source {
+                self.interceptor_inputs.acl.default_permission = match source {
                     Some(ingest) => ingest.config.access_control.default_permission.clone(),
-                    None => Self::default().acl_inputs.default_permission,
+                    None => Self::default().interceptor_inputs.acl.default_permission,
                 };
                 true
             }
             #[cfg(all(feature = "routing-peer", feature = "access-acl"))]
             "access_control/enabled" => {
-                self.acl_inputs.enabled = match source {
+                self.interceptor_inputs.acl.enabled = match source {
                     Some(ingest) => ingest.config.access_control.enabled,
                     // Upstream's `enabled` is a bare `bool` defaulting to FALSE,
                     // measured off a real zenohd rendering a document that never
@@ -1912,7 +1980,7 @@ impl WzConfig {
             }
             #[cfg(all(feature = "routing-peer", feature = "access-acl"))]
             "access_control/policies" => {
-                self.acl_inputs.policies = match source {
+                self.interceptor_inputs.acl.policies = match source {
                     Some(ingest) => ingest.config.access_control.policies.clone(),
                     None => Vec::new(),
                 };
@@ -1920,7 +1988,7 @@ impl WzConfig {
             }
             #[cfg(all(feature = "routing-peer", feature = "access-acl"))]
             "access_control/rules" => {
-                self.acl_inputs.rules = match source {
+                self.interceptor_inputs.acl.rules = match source {
                     Some(ingest) => ingest.config.access_control.rules.clone(),
                     None => Vec::new(),
                 };
@@ -1928,7 +1996,7 @@ impl WzConfig {
             }
             #[cfg(all(feature = "routing-peer", feature = "access-acl"))]
             "access_control/subjects" => {
-                self.acl_inputs.subjects = match source {
+                self.interceptor_inputs.acl.subjects = match source {
                     Some(ingest) => ingest.config.access_control.subjects.clone(),
                     None => Vec::new(),
                 };
@@ -1958,13 +2026,13 @@ impl WzConfig {
         any(feature = "adminspace-core", feature = "routing-router-hat")
     ))]
     fn recompile_acl(&mut self, restore: &crate::zenoh_config::AclConfigInputs) -> bool {
-        match crate::zenoh_config::acl_config_from_inputs(&self.acl_inputs) {
+        match crate::zenoh_config::acl_config_from_inputs(&self.interceptor_inputs.acl) {
             Ok(compiled) => {
                 self.interceptors.acl = compiled.map(wz_access_control::AclPolicy::new);
                 true
             }
             Err(_) => {
-                self.acl_inputs = restore.clone();
+                self.interceptor_inputs.acl = restore.clone();
                 false
             }
         }
@@ -3127,6 +3195,117 @@ mod tests {
                 Some(0),
                 "the refused write installed no rule; the enabled-and-empty \
                  policy is what the switch alone already meant"
+            );
+        }
+    }
+
+    /// R2656 — the two interceptor keys whose retention this round built, and the
+    /// WITNESS that makes the retention more than a field nobody would miss.
+    ///
+    /// Each test writes a document and then reads back something the COMPILE
+    /// throws away. Without the retention there is nowhere for that to come
+    /// from, so deleting the field cannot leave these green — which is the whole
+    /// difference between a retention and a value the arm happened to keep.
+    #[cfg(all(
+        feature = "routing-peer",
+        feature = "zenoh-config",
+        any(feature = "adminspace-core", feature = "routing-router-hat")
+    ))]
+    mod interceptor_document_retention {
+        use super::*;
+
+        /// ⭐ THE FREQUENCY IS THE DISCRIMINATOR. `interval_from_freq` is not
+        /// injective in the direction that matters here: `0.0` becomes
+        /// `Duration::MAX` and so does any rate slow enough to round there, and
+        /// a NEGATIVE rate saturates to no throttle at all. So a compiled rule
+        /// cannot say what was written, and a test that read the interval back
+        /// would be asserting about the compile rather than about the retention.
+        #[cfg(feature = "access-downsampling")]
+        #[test]
+        fn a_downsampling_document_survives_its_own_compile() {
+            let mut cfg = WzConfig::new();
+            let ingest = crate::zenoh_config::ZenohNodeConfig::from_json5(
+                r#"{ downsampling: [ { id: "ds1", messages: ["put"],
+                     rules: [ { key_expr: "demo/**", freq: 0 } ] } ] }"#,
+            )
+            .expect("a real zenohd starts on this");
+            assert_eq!(cfg.apply_zenoh_config(&ingest), vec!["downsampling"]);
+
+            assert_eq!(
+                cfg.interceptors().downsampling.len(),
+                1,
+                "the compile ran and produced the rule"
+            );
+            assert_eq!(
+                cfg.interceptors().downsampling[0].min_interval,
+                core::time::Duration::MAX,
+                "a zero rate is upstream's DROP-ALL, not `no throttle`"
+            );
+            let retained = &cfg.interceptor_inputs.downsampling;
+            assert_eq!(retained.len(), 1);
+            assert_eq!(
+                retained[0].id.as_deref(),
+                Some("ds1"),
+                "the item's label survives, and the compiled rules carry it nowhere"
+            );
+            assert_eq!(
+                retained[0].rules[0].freq, 0.0,
+                "and so does the RATE, which `Duration::MAX` cannot be read back \
+                 into: every rate that rounds there compiles to the same value"
+            );
+        }
+
+        /// The low-pass twin. Its loss is smaller and is still a loss: the
+        /// item's `id` reaches no rule, so a document that named two filters and
+        /// a document that named one filter with two keyexpr sets compile to the
+        /// same rules.
+        #[cfg(feature = "access-quota")]
+        #[test]
+        fn a_low_pass_document_survives_its_own_compile() {
+            let mut cfg = WzConfig::new();
+            let ingest = crate::zenoh_config::ZenohNodeConfig::from_json5(
+                r#"{ low_pass_filter: [ { id: "f1", messages: ["put"],
+                     key_exprs: ["demo/**"], size_limit: 8192 } ] }"#,
+            )
+            .expect("a real zenohd starts on this");
+            assert_eq!(cfg.apply_zenoh_config(&ingest), vec!["low_pass_filter"]);
+
+            assert_eq!(cfg.interceptors().low_pass.len(), 1);
+            assert_eq!(cfg.interceptors().low_pass[0].max_payload_size, 8192);
+            let retained = &cfg.interceptor_inputs.low_pass;
+            assert_eq!(retained.len(), 1);
+            assert_eq!(
+                retained[0].id.as_deref(),
+                Some("f1"),
+                "the filter's label survives; no `LowPassRule` has a field for it"
+            );
+        }
+
+        /// R2656 — a DELETE empties the retention too, which is the half a
+        /// retention makes easy to forget: the compiled form going empty is
+        /// visible and the retained document going stale is not.
+        #[cfg(feature = "access-downsampling")]
+        #[test]
+        fn deleting_the_key_empties_the_retention_with_the_rules() {
+            let mut cfg = WzConfig::new();
+            let ingest = crate::zenoh_config::ZenohNodeConfig::from_json5(
+                r#"{ downsampling: [ { id: "ds1", messages: ["put"],
+                     rules: [ { key_expr: "demo/**", freq: 2 } ] } ] }"#,
+            )
+            .expect("a real zenohd starts on this");
+            cfg.apply_zenoh_config(&ingest);
+            assert_eq!(cfg.interceptor_inputs.downsampling.len(), 1);
+
+            assert!(cfg.apply_one_key("downsampling", None));
+            assert!(
+                cfg.interceptors().downsampling.is_empty(),
+                "the compiled rules are gone"
+            );
+            assert!(
+                cfg.interceptor_inputs.downsampling.is_empty(),
+                "and so is the document they were compiled from -- a retention \
+                 that outlived its own key would answer the next read with a \
+                 document the node is no longer running"
             );
         }
     }
