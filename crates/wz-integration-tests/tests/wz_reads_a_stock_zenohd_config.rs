@@ -288,6 +288,22 @@ fn resolved_config_of(captured: &str) -> Json5Value {
 /// silence leg. Two renderers would be two opinions about how a number or an
 /// array is spelled, and the whole point of both legs is that one side's answer
 /// is compared to the other's without a translation step in between.
+/// R2652 — one string as [`render_resolved`] renders a `Json5Value::String`:
+/// wrapped in quotes.
+///
+/// It exists because the defaults leg's `claims` table cannot hold a string
+/// LITERAL in a value position — `config_key_fixture_gate.py` reads that table
+/// with a regex over `("key",` and would report the literal as a honoured key it
+/// cannot find. Building the quotes character by character keeps the row's value
+/// derived from wz's own struct while leaving the gate exactly one key to read.
+fn quoted(text: &str) -> String {
+    let mut out = String::with_capacity(text.len() + 2);
+    out.push('"');
+    out.push_str(text);
+    out.push('"');
+    out
+}
+
 fn render_resolved(value: &Json5Value) -> String {
     match value {
         Json5Value::Bool(b) => b.to_string(),
@@ -567,6 +583,17 @@ fn the_defaults_each_implementation_falls_back_to_are_pinned_against_a_real_zeno
         "scouting/multicast/interface",
         "scouting/multicast/ttl",
         "scouting/multicast/listen",
+        // R2652 — the three `access_control` LISTS, MEASURED on this binary with
+        // a file that never names the subtree: it resolves
+        // `"policies":null,"rules":null,"subjects":null` while giving the two
+        // scalars beside them real defaults (`false` and `"deny"`, which is why
+        // those two are compared instead). Upstream's own types say the same
+        // thing — the lists are `Option<Vec<_>>` and the scalars are not — so
+        // "absent" and "empty" are different documents here, unlike
+        // `downsampling` and `low_pass_filter`, which resolve to `[]`.
+        "access_control/policies",
+        "access_control/rules",
+        "access_control/subjects",
         // R2142 — R2141 moved these two into `HONOURED_CONFIG_KEYS` and did not
         // class them here, which is what redded hosted Layer Z (run
         // 33022841480). MEASURED rather than assumed, the way this leg's doc
@@ -692,6 +719,30 @@ fn the_defaults_each_implementation_falls_back_to_are_pinned_against_a_real_zeno
         // mentions `downsampling` renders it `[]`, not `null`, so the tree
         // answers and the key is comparable.
         ("downsampling", String::from("[]")),
+        // R2652 — the two `access_control` leaves the tree ANSWERS for a silent
+        // file, measured against this binary: `"enabled":false` and
+        // `"default_permission":"deny"`. Their three siblings resolve to `null`
+        // and are classed there instead, so this one subtree is split across two
+        // classes — which is the measurement, not an inconsistency: upstream
+        // gives the two scalars schema defaults and leaves the three lists
+        // absent.
+        //
+        // ⚠ `default_permission` is rendered through [`quoted`] rather than a
+        // `format!`, and that is the weights row's trap paid twice rather than
+        // once: this table is read by `config_key_fixture_gate.py` with a regex
+        // over `("key",`, and ANY string literal in the value position reads as
+        // a second key. `format!("{:?}", …)` was the first cut and the gate
+        // reported a honoured key named `{:?}`. The helper has no literal, and
+        // the value still comes off wz's own struct, so a wz-side default that
+        // stopped matching upstream's would still red here.
+        (
+            "access_control/enabled",
+            wz.access_control.enabled.to_string(),
+        ),
+        (
+            "access_control/default_permission",
+            quoted(&wz.access_control.default_permission),
+        ),
         ("transport/unicast/max_links", wz.max_links.to_string()),
         ("transport/unicast/lowlatency", wz.lowlatency.to_string()),
         ("transport/unicast/qos/enabled", wz.qos.to_string()),
@@ -3398,6 +3449,46 @@ fn a_wz_node_configured_only_by_a_stock_zenoh_config_reaches_a_real_zenohd() {
        messages: ["put", "delete", "query", "reply"],
        rules: [ {{ key_expr: "demo/slow", freq: 0.5 }} ] }},
   ],
+  // R2652 — the five `access_control/*` keys, the last of the seven interceptor
+  // keys to get a reader. Named together because they ARE one subtree: upstream
+  // compiles `rules` x `subjects` x `policies` into its enforcer in one step and
+  // a file naming only some of them configures nothing.
+  //
+  // ⚠ ENABLED AND INERT, which is deliberate and not a half-measure. `enabled`
+  // is `true` because upstream's default is `false`, so a fixture saying `false`
+  // would name the key while proving the reader only parsed a boolean. The
+  // policy is then written so that turning it on cannot change what this leg
+  // observes: `default_permission` is `allow`, and the single rule DENIES a
+  // keyexpr this leg never publishes or subscribes to. A fixture that gated the
+  // leg's own traffic would make a reader bug and an enforcement bug produce the
+  // same red.
+  //
+  // The subject names four of upstream's five axes. `cert_common_names` is the
+  // fifth and it is absent on purpose: wz's rule model has no certificate axis,
+  // so a subject carrying it is handled by the permission-asymmetric rule at
+  // `acl_config_from_inputs`, and THAT belongs in a unit test that can assert
+  // which rules were installed -- not in a leg whose verdict is "the node came
+  // up and reached a real zenohd".
+  access_control: {{
+    enabled: true,
+    default_permission: "allow",
+    rules: [
+      {{ id: "r1",
+         key_exprs: ["forbidden/**"],
+         messages: ["put", "delete", "query", "reply"],
+         flows: ["ingress", "egress"],
+         permission: "deny" }},
+    ],
+    subjects: [
+      {{ id: "s1",
+         interfaces: ["lo"],
+         usernames: ["demo"],
+         link_protocols: ["tcp"] }},
+    ],
+    policies: [
+      {{ id: "p1", rules: ["r1"], subjects: ["s1"] }},
+    ],
+  }},
   // R2065 — `peer/mode` joins the EXISTING `routing` block rather than opening
   // a second one. The first cut added its own `routing: {{ … }}` earlier in the
   // file and this later object silently won, so `interests/timeout` was named

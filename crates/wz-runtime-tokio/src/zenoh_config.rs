@@ -134,6 +134,10 @@ use wz_routing_graph::Zid;
 pub use wz_routing_graph::{link_weights_from_config, DuplicateLinkWeight, TransportWeight};
 use wz_session_core::json::escape_into;
 use wz_session_core::json5::{number_as_u64, Json5Value};
+// R2652 — the ACL subject axis `link_protocols` is TYPED in the retained inputs,
+// because upstream types it too; the reader therefore names the enum rather than
+// carrying protocol text it has already validated.
+use wz_session_core::link::InterceptorLink;
 use wz_session_core::zid_hex::zenoh_hex_to_zid;
 // R2070b (open-debt item 486) — the topology pass compares endpoints, and the
 // tested parser is the one the dial seam already uses. Writing a second
@@ -1160,6 +1164,13 @@ pub struct ZenohNodeConfig {
     /// to (MEASURED: it renders `"downsampling":[]`, not `null`), so the absent
     /// and the empty document say the same thing and neither is a wildcard.
     pub downsampling: Vec<DownsamplingItemConf>,
+    /// R2652 — the five `access_control/*` keys, in the document's own shape.
+    ///
+    /// Unlike the two interceptor keys above, these do NOT map one-to-one onto a
+    /// live field: they compile into a single policy through a join that cannot
+    /// be inverted, so the inputs are kept and the compiled form is derived from
+    /// them. See [`AclConfigInputs`].
+    pub access_control: AclConfigInputs,
 }
 
 impl Default for ZenohNodeConfig {
@@ -1267,6 +1278,7 @@ impl Default for ZenohNodeConfig {
             router_transport_weights: Vec::new(),
             low_pass_filter: Vec::new(),
             downsampling: Vec::new(),
+            access_control: AclConfigInputs::default(),
         }
     }
 }
@@ -1772,6 +1784,20 @@ pub const HONOURED_CONFIG_KEYS: &[&str] = &[
     // slice is fed by it ALONE. Moved for the reason its sibling records: the
     // acceptance boundary is the two lists chained, so honouring is a move.
     "downsampling",
+    // R2652 — the five that close the interceptor seam, moved together because
+    // upstream compiles them together: they are ONE subtree, and its
+    // `PolicyEnforcer::init` reads all five before any rule exists. The
+    // retention `low_pass_filter`'s note above said these would need is
+    // `WzConfig::acl_inputs`, and the join it holds open — a policy names rule
+    // ids and subject ids, so an expanded rule cannot be traced back to the
+    // entries that produced it — is why the document shape is kept rather than
+    // merged away. Moved, not added: `wz_accepts` chains both lists, so the
+    // surface total below is unchanged.
+    "access_control/default_permission",
+    "access_control/enabled",
+    "access_control/policies",
+    "access_control/rules",
+    "access_control/subjects",
     "scouting/timeout",
     "transport/multicast/qos/enabled",
     "transport/shared_memory/enabled",
@@ -2031,11 +2057,11 @@ pub const UPSTREAM_INERT_CONFIG_KEYS: &[&str] = &[
 /// file. Naming them is what turns "wz does not honour this" from an absence
 /// nobody can see into a recorded fact with a place to change.
 pub const UNHONOURED_UPSTREAM_CONFIG_KEYS: &[&str] = &[
-    "access_control/default_permission",
-    "access_control/enabled",
-    "access_control/policies",
-    "access_control/rules",
-    "access_control/subjects",
+    // R2652 — the five `access_control/*` keys LEFT this list for
+    // [`HONOURED_CONFIG_KEYS`]. What this list's own preamble said of them —
+    // "`qos/*` and `downsampling` an interceptor chain configured from the same
+    // file" — is the sentence that stopped being true: the chain is now
+    // configured from the file, for all seven of its keys.
     "aggregation/publishers",
     "aggregation/subscribers",
     // R311y849 removed `connect/retry` from here -- it moved to
@@ -2408,28 +2434,6 @@ pub const UNHONOURED_BEYOND_WZ: &[&str] = &[
 /// * `low_pass_filter` — `LowPassRule` on the same chain, driven by
 ///   `--max-payload`. R2150 moved both: the group sentence that held them
 ///   claimed wz needed an interceptor chain, and wz has one.
-/// * `access_control/{default_permission,enabled,policies,rules,subjects}` —
-///   the `wz-access-control` crate. `AclConfig` carries `default_permission`
-///   and an ordered `Vec<AclRule>`; each rule carries a `SubjectSelector`, a
-///   flow set, a message set and a permission, which is upstream's rule model
-///   with the subject inlined instead of named. `enabled` is here rather than
-///   with `scouting/gossip/enabled` because wz's OFF state EXISTS and is the
-///   default — a peer with no policy installed enforces nothing — so the reader
-///   would not be building a switch, only choosing not to install. `policies`
-///   is upstream's rules-by-name × subjects-by-name join, which a reader
-///   expands into wz's inline rules. `subjects` reaches three of upstream's
-///   five axes — `AclRule` carries `subject: SubjectSelector` (zid),
-///   `link_protocols` and `interfaces`, against upstream's `zids`,
-///   `link_protocols`, `interfaces`, `cert_common_names` and `usernames` — so
-///   the two genuinely absent are `cert_common_names` and `usernames`. That is
-///   the partiality this list warns about below, not absence.
-///
-///   ⚠ R2152 correcting R2151, which wrote "reaches only wz's zid axis" here.
-///   That sentence was measured off `SubjectSelector` alone and missed the two
-///   axes R311y453 put on `AclRule` beside it. The `access-acl` catalog atom
-///   had the right answer already and its reason says so; a doc sentence about
-///   parity that contradicts the atom grading the same thing is worth more than
-///   a typo, because this list exists to answer exactly that question.
 /// * `plugins`, `plugins_loading/enabled` — `PluginRegistry`, which loads,
 ///   starts, stops and admin-reports `DynamicPlugin`s, driven today by the
 ///   demo's repeated `--plugin`. `plugins_loading/search_dirs` stays in
@@ -2456,11 +2460,6 @@ pub const UNHONOURED_BEYOND_WZ: &[&str] = &[
 /// build a strategy representation first. This list says the capability EXISTS,
 /// not that the reader change is free.
 pub const UNHONOURED_READER_GAP: &[&str] = &[
-    "access_control/default_permission",
-    "access_control/enabled",
-    "access_control/policies",
-    "access_control/rules",
-    "access_control/subjects",
     // R2159 (open-debt item 229) — `connect/timeout_ms` LEFT this list for
     // `HONOURED_CONFIG_KEYS`, and it is the one member of item 229's four that
     // WAS a reader gap: R2150 had already found `StaticConnectRetry::timeout_ms`
@@ -2469,10 +2468,11 @@ pub const UNHONOURED_READER_GAP: &[&str] = &[
     // they are one seam, not one classification.
     // R2650 — `low_pass_filter` LEFT this list: the classification "wz has the
     // engine and no reader" stopped being true of it the moment the reader landed.
-    // R2651 — and `downsampling` follows it out for the same reason, which is the
-    // whole of that seam: both interceptor keys now have readers, so what stays
-    // here are the five `access_control/*` keys, whose reader needs the retention
-    // structure their lossy rules-x-subjects-x-policies join demands.
+    // R2651 — and `downsampling` follows it out for the same reason.
+    // R2652 — and so do the five `access_control/*` keys, which is the whole of
+    // that seam: the retention structure their lossy
+    // rules-x-subjects-x-policies join demanded is `WzConfig::acl_inputs`, and
+    // with it built, none of the seven interceptor keys is a reader gap.
     "plugins",
     "plugins_loading/enabled",
     // R2539 — ARRIVED here from [`UNHONOURED_BEYOND_WZ`] the round wz grew the
@@ -2808,15 +2808,11 @@ pub const UNHONOURED_CITATION_KINDS: &[&str] = &[
 /// that a wrong kind now costs a symbol that must exist and a list the row must
 /// sit in, instead of a sentence.
 pub const UNHONOURED_CITATION_LEDGER: &[(&str, &str, &str)] = &[
-    (
-        "access_control/default_permission",
-        "wz-has-it",
-        "AclConfig",
-    ),
-    ("access_control/enabled", "wz-has-it", "AclPolicy"),
-    ("access_control/policies", "wz-has-it", "AclRule"),
-    ("access_control/rules", "wz-has-it", "AclRule"),
-    ("access_control/subjects", "wz-has-it", "SubjectSelector"),
+    // R2652 — the five `access_control/*` rows are GONE, for the reason the
+    // `connect/timeout_ms` note below records: this ledger's population is the
+    // UNHONOURED keys wz's source names, and honouring a key removes it from
+    // that population. Their kind was `wz-has-it`, which was true throughout —
+    // what changed is that the reader wz-has-it described is now built.
     // R2159 (open-debt item 229) — the `connect/timeout_ms` / `wz-has-it` /
     // `StaticConnectRetry` row is GONE, because the key is honoured now and
     // this ledger's population is the UNHONOURED keys wz's source names. Check
@@ -4095,6 +4091,680 @@ fn downsampling_rules_of(
     Ok(out)
 }
 
+/// R2652 — the nine message kinds `access_control` rules accept.
+///
+/// `AclMessage`'s set, snake_case, and deliberately NOT the four
+/// `DATA_MESSAGE_LITERALS` below: the two interceptor keys take `DataMessage`
+/// and this one takes `AclMessage`, so a reader that shared one list between
+/// them would be wrong in both directions at once.
+///
+/// Literals here rather than the enum because `wz-access-control` is an OPTIONAL
+/// dependency (`access-acl`) and this module must read the same document in
+/// every build. `acl_literals_match_the_enum` pins the correspondence where both
+/// are visible, so the two cannot drift.
+pub const ACL_MESSAGE_LITERALS: &[&str] = &[
+    "put",
+    "delete",
+    "declare_subscriber",
+    "query",
+    "declare_queryable",
+    "reply",
+    "liveliness_token",
+    "declare_liveliness_subscriber",
+    "liveliness_query",
+];
+
+/// R2652 — the two verdicts a rule or a default can carry.
+pub const ACL_PERMISSION_LITERALS: &[&str] = &["allow", "deny"];
+
+/// R2652 — one `access_control/rules[]` entry, as the document spells it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct AclConfigRuleConf {
+    /// Unique within the rule set; `policies[]` names it.
+    pub id: String,
+    /// Key expressions this rule governs. `NEVec` upstream.
+    pub key_exprs: Vec<String>,
+    /// Message kinds this rule governs. `NEVec` upstream.
+    pub messages: Vec<String>,
+    /// Flows, where ABSENT means both and an EMPTY list is invalid — which is
+    /// why this is an `Option` and the interceptor keys' axes are not. Upstream
+    /// types it `Option<NEVec<_>>` and resolves `None` to both directions.
+    pub flows: Option<Vec<String>>,
+    /// `allow` or `deny`.
+    pub permission: String,
+}
+
+/// R2652 — one `access_control/subjects[]` entry.
+///
+/// Every axis is `Option`, and the distinction is load-bearing: upstream reads
+/// an absent property as a WILDCARD and refuses an empty list outright
+/// ("a subject property cannot be an empty list"), so `None` and `Some(vec![])`
+/// mean different things and only one of them is a document.
+#[derive(Debug, Clone, PartialEq)]
+pub struct AclConfigSubjectsConf {
+    /// Unique within the subjects list; `policies[]` names it.
+    pub id: String,
+    pub interfaces: Option<Vec<String>>,
+    /// The one axis wz cannot carry onto a rule — see the write-up on how a
+    /// rule naming it is handled, which is NOT a silent drop.
+    pub cert_common_names: Option<Vec<String>>,
+    /// Plain text, unlike the two axes below, and that is upstream's own split:
+    /// its `Username` is a bare `String` newtype, so a BLANK name parses there
+    /// and is refused later, by name, when the policy is built. wz refuses it in
+    /// the same place — see [`AclCompileError::BlankUsername`].
+    pub usernames: Option<Vec<String>>,
+    /// TYPED at the parse because upstream types it too
+    /// (`Option<NEVec<InterceptorLink>>`), so an unknown protocol name is a
+    /// document error there and must be one here.
+    pub link_protocols: Option<Vec<InterceptorLink>>,
+    /// TYPED at the parse for the same reason as `link_protocols`: upstream's
+    /// `Option<NEVec<ZenohId>>` refuses a malformed id while deserializing, so a
+    /// reader that kept the text would accept a document a real zenohd rejects.
+    pub zids: Option<Vec<Zid>>,
+}
+
+/// R2652 — one `access_control/policies[]` entry: the JOIN of rule ids to
+/// subject ids.
+#[derive(Debug, Clone, PartialEq)]
+pub struct AclConfigPolicyConf {
+    /// Optional upstream, unlike the rule and subject ids.
+    pub id: Option<String>,
+    pub rules: Vec<String>,
+    pub subjects: Vec<String>,
+}
+
+/// R2652 — the five `access_control/*` keys, retained in the shape the OPERATOR
+/// wrote them.
+///
+/// # Why the document shape is kept at all
+///
+/// wz's live ACL slice holds a COMPILED policy whose rules are the expansion of
+/// `rules x subjects x policies`, and that expansion is LOSSY: given an expanded
+/// rule there is no way back to the rule, subject and policy that produced it.
+/// So a write to any one of those three keys cannot be merged into the compiled
+/// form — it has to be re-expanded against the current other two, and that needs
+/// them kept.
+///
+/// These five are one unit for a second reason, upstream's: its `init` builds a
+/// policy only when rules, subjects AND policies are all present, so naming one
+/// while the others are absent yields no rules — which is upstream's answer, not
+/// a wz limitation to work around.
+#[derive(Debug, Clone, PartialEq)]
+pub struct AclConfigInputs {
+    /// `access_control/enabled`. Upstream's default is FALSE and its `init`
+    /// builds the rule set only when this is true, so a document carrying rules
+    /// and not this key enforces nothing — measured against a real zenohd.
+    pub enabled: bool,
+    /// `access_control/default_permission`, `allow` or `deny`. Assigned by
+    /// upstream OUTSIDE the `enabled` guard, so it is read either way.
+    ///
+    /// Not an `Option`: a silent document RESOLVES this key to `"deny"` on a
+    /// real zenohd (measured), so holding `None` would make wz's struct answer
+    /// differently from the tree for a file neither of them was given. Whether
+    /// the document STATED it is `ZenohConfigIngest::named`'s question, not this
+    /// field's.
+    pub default_permission: String,
+    pub rules: Vec<AclConfigRuleConf>,
+    pub subjects: Vec<AclConfigSubjectsConf>,
+    pub policies: Vec<AclConfigPolicyConf>,
+}
+
+impl Default for AclConfigInputs {
+    /// Upstream's resolved defaults for a document that never names the subtree,
+    /// measured off a real zenohd rather than read off its schema: `enabled`
+    /// false, `default_permission` `"deny"`, and the three lists absent.
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            default_permission: String::from("deny"),
+            rules: Vec::new(),
+            subjects: Vec::new(),
+            policies: Vec::new(),
+        }
+    }
+}
+
+/// R2652 — why an `access_control` subtree that PARSED still cannot become a
+/// policy.
+///
+/// ⭐ EVERY VARIANT MIRRORS AN UPSTREAM `bail!`, and none of them mirrors a
+/// serde refusal. That split is the whole design: upstream deserializes the
+/// subtree with plain `Vec`s and `String` ids, and every cross-entry check —
+/// the ids being unique, the ids being non-blank, a policy naming ids that
+/// exist — happens later, in `policy_information_point`. A real zenohd
+/// therefore STARTS on a document this type refuses, whenever the ACL is
+/// disabled, which is why these refusals sit at the apply rather than at the
+/// parse. The one precedent this follows is the link-weight reader: a duplicate
+/// destination parses and is refused where upstream refuses it, when the
+/// network is built.
+#[cfg(feature = "access-acl")]
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum AclCompileError {
+    /// A rule or subject carries a blank id, or a policy names one.
+    ///
+    /// `zenoh/src/net/routing/interceptor/authorization.rs`
+    /// @ `bail!("Found empty rule id in rules list")`
+    BlankId,
+    /// Two rules, two subjects or two policies carry one id. Upstream refuses
+    /// each of the three separately and with the same reason, so one variant
+    /// states the property rather than three stating the site.
+    DuplicateId {
+        /// The id spelled twice.
+        id: String,
+    },
+    /// A policy names no rules, or no subjects. Upstream's `Vec<String>` lets
+    /// this through the parse — see the note at `acl_policies_of`.
+    EmptyPolicy {
+        /// The policy's position in `policies`, which is how upstream names one
+        /// (its `id` is optional).
+        index: usize,
+    },
+    /// A policy names a rule id no rule defines.
+    UnknownRule {
+        /// The dangling id.
+        id: String,
+        /// The naming policy's position in `policies`.
+        index: usize,
+    },
+    /// A policy names a subject id no subject defines.
+    UnknownSubject {
+        /// The dangling id.
+        id: String,
+        /// The naming policy's position in `policies`.
+        index: usize,
+    },
+    /// A subject names a blank username, which [`wz_access_control::AclUsername`]
+    /// makes unrepresentable on a rule and upstream refuses by name.
+    BlankUsername {
+        /// The subject entry naming it.
+        subject: String,
+    },
+    /// A literal this module ACCEPTED at the parse that the engine's vocabulary
+    /// does not know — a defect in this reader, not in the document.
+    ///
+    /// It cannot arise while `acl_literals_match_the_enum` passes: that test
+    /// pins [`ACL_MESSAGE_LITERALS`] and [`ACL_PERMISSION_LITERALS`] against the
+    /// enums on a build where both are visible. It is a variant rather than an
+    /// `unwrap` so the drift surfaces as a refused document instead of a panic
+    /// in a running node.
+    VocabularyDrift {
+        /// The literal with no variant.
+        literal: String,
+    },
+}
+
+/// R2652 — compile the retained `access_control/*` inputs into the engine's
+/// policy, the way upstream's `PolicyEnforcer::init` compiles the same subtree.
+///
+/// `Ok(None)` is `enabled: false`, which upstream answers by installing no
+/// enforcer at all (`acl_interceptor_factories` builds one only inside
+/// `if acl_config.enabled`). It is NOT "an empty policy": an empty policy would
+/// still impose `default_permission` on every message.
+///
+/// # The expansion, and why it is five deep
+///
+/// One `AclRule` here carries ONE subject zid and ONE flow, so the document's
+/// `policies x rules x subjects` join fans out across those two axes as well:
+/// a policy naming two rules and a subject listing three zids, with the rules
+/// leaving `flows` absent, is 2 x 3 x 2 = 12 rules. The other three subject axes
+/// — interfaces, usernames, link protocols — are VECTORS on an `AclRule`, so
+/// they are copied rather than expanded. Missing that asymmetry would silently
+/// apply only the first zid of a list.
+///
+/// # `cert_common_names`, the one axis with nowhere to go
+///
+/// An `AclRule` has no certificate axis, and upstream reads the subject axes as
+/// a CONJUNCTION with an absent axis meaning wildcard — so dropping this one
+/// WIDENS the rule. The answer is therefore asymmetric in the rule's own
+/// permission, and it is this crate's existing posture rather than a new one
+/// ([`wz_access_control::AclRule`]'s link and interface axes both document
+/// "FAIL-CLOSED on an indeterminate subject"):
+///
+/// * `permission: allow` — the rule is NOT installed. Installing it would grant
+///   access to peers whose certificate the document meant to narrow to.
+/// * `permission: deny` — the axis is dropped and the rule IS installed. It then
+///   denies a SUPERSET of what the document asked for, which cannot open
+///   anything.
+///
+/// ⚠ The residue, stated rather than hidden: a deny rule narrowed by certificate
+/// denies more than the operator wrote, costing availability. The alternative —
+/// dropping the rule — turns a denial into whatever `default_permission` says,
+/// which on a permissive document is an ALLOW. Denying too much is recoverable;
+/// allowing too much is not.
+#[cfg(feature = "access-acl")]
+pub fn acl_config_from_inputs(
+    inputs: &AclConfigInputs,
+) -> Result<Option<wz_access_control::AclConfig>, AclCompileError> {
+    use std::collections::{HashMap, HashSet};
+    use wz_access_control::{
+        AclConfig, AclFlow, AclMessage, AclRule, AclUsername, Permission, SubjectSelector,
+    };
+
+    // ⚠ READ OUTSIDE THE `enabled` GUARD upstream, and this order is measured:
+    // `PolicyEnforcer::init` assigns `default_permission` before the
+    // `if self.acl_enabled` block. Here the guard comes first because a disabled
+    // ACL installs nothing for a default to belong to.
+    if !inputs.enabled {
+        return Ok(None);
+    }
+    let default_permission =
+        Permission::from_upstream_str(&inputs.default_permission).ok_or_else(|| {
+            AclCompileError::VocabularyDrift {
+                literal: inputs.default_permission.clone(),
+            }
+        })?;
+
+    let mut rules_by_id: HashMap<&str, &AclConfigRuleConf> = HashMap::new();
+    for rule in &inputs.rules {
+        if rule.id.trim().is_empty() {
+            return Err(AclCompileError::BlankId);
+        }
+        if rules_by_id.insert(rule.id.as_str(), rule).is_some() {
+            return Err(AclCompileError::DuplicateId {
+                id: rule.id.clone(),
+            });
+        }
+    }
+    let mut subjects_by_id: HashMap<&str, &AclConfigSubjectsConf> = HashMap::new();
+    for subject in &inputs.subjects {
+        if subject.id.trim().is_empty() {
+            return Err(AclCompileError::BlankId);
+        }
+        if subjects_by_id
+            .insert(subject.id.as_str(), subject)
+            .is_some()
+        {
+            return Err(AclCompileError::DuplicateId {
+                id: subject.id.clone(),
+            });
+        }
+    }
+
+    let mut policy_ids: HashSet<&str> = HashSet::new();
+    let mut out: Vec<AclRule> = Vec::new();
+    for (index, policy) in inputs.policies.iter().enumerate() {
+        if let Some(id) = &policy.id {
+            if !policy_ids.insert(id.as_str()) {
+                return Err(AclCompileError::DuplicateId { id: id.clone() });
+            }
+        }
+        if policy.rules.is_empty() || policy.subjects.is_empty() {
+            return Err(AclCompileError::EmptyPolicy { index });
+        }
+        // Both id lists are resolved BEFORE any rule is built, so a policy that
+        // names one good id and one dangling id contributes nothing rather than
+        // half of itself. Upstream validates its subject list up front for the
+        // same reason.
+        let mut subjects = Vec::with_capacity(policy.subjects.len());
+        for id in &policy.subjects {
+            if id.trim().is_empty() {
+                return Err(AclCompileError::BlankId);
+            }
+            let subject =
+                subjects_by_id
+                    .get(id.as_str())
+                    .ok_or_else(|| AclCompileError::UnknownSubject {
+                        id: id.clone(),
+                        index,
+                    })?;
+            subjects.push(*subject);
+        }
+        let mut rules = Vec::with_capacity(policy.rules.len());
+        for id in &policy.rules {
+            if id.trim().is_empty() {
+                return Err(AclCompileError::BlankId);
+            }
+            let rule =
+                rules_by_id
+                    .get(id.as_str())
+                    .ok_or_else(|| AclCompileError::UnknownRule {
+                        id: id.clone(),
+                        index,
+                    })?;
+            rules.push(*rule);
+        }
+
+        for rule in &rules {
+            let permission = Permission::from_upstream_str(&rule.permission).ok_or_else(|| {
+                AclCompileError::VocabularyDrift {
+                    literal: rule.permission.clone(),
+                }
+            })?;
+            let messages = rule
+                .messages
+                .iter()
+                .map(|m| {
+                    AclMessage::from_upstream_str(m)
+                        .ok_or_else(|| AclCompileError::VocabularyDrift { literal: m.clone() })
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            // ABSENT means BOTH directions, which upstream resolves the same way
+            // and warns about; an EMPTY list is refused at the parse, so the two
+            // cannot be confused here.
+            let flows = match &rule.flows {
+                None => vec![AclFlow::Ingress, AclFlow::Egress],
+                Some(list) => list
+                    .iter()
+                    .map(|f| {
+                        AclFlow::from_upstream_str(f)
+                            .ok_or_else(|| AclCompileError::VocabularyDrift { literal: f.clone() })
+                    })
+                    .collect::<Result<Vec<_>, _>>()?,
+            };
+            for subject in &subjects {
+                if subject.cert_common_names.is_some() && permission == Permission::Allow {
+                    continue;
+                }
+                let usernames = match &subject.usernames {
+                    None => Vec::new(),
+                    Some(list) => list
+                        .iter()
+                        .map(|u| {
+                            AclUsername::new(u.clone()).map_err(|_| {
+                                AclCompileError::BlankUsername {
+                                    subject: subject.id.clone(),
+                                }
+                            })
+                        })
+                        .collect::<Result<Vec<_>, _>>()?,
+                };
+                let interfaces = subject.interfaces.clone().unwrap_or_default();
+                let link_protocols = subject.link_protocols.clone().unwrap_or_default();
+                // An ABSENT zid list is upstream's wildcard, which is ONE rule;
+                // a present one is one rule per named peer, because a selector
+                // holds a single zid.
+                let selectors = match &subject.zids {
+                    None => vec![SubjectSelector::Any],
+                    Some(list) => list.iter().copied().map(SubjectSelector::Zid).collect(),
+                };
+                for selector in selectors {
+                    for flow in &flows {
+                        out.push(AclRule {
+                            subject: selector,
+                            key_exprs: rule.key_exprs.clone(),
+                            messages: messages.clone(),
+                            flow: *flow,
+                            link_protocols: link_protocols.clone(),
+                            interfaces: interfaces.clone(),
+                            usernames: usernames.clone(),
+                            permission,
+                        });
+                    }
+                }
+            }
+        }
+    }
+
+    Ok(Some(AclConfig {
+        default_permission,
+        rules: out,
+    }))
+}
+
+/// An optional subject axis: ABSENT is a wildcard, an EMPTY list is refused.
+///
+/// Upstream says so in its own words -- "a subject property cannot be an empty
+/// list" -- so the two are different documents and only one of them is valid.
+fn optional_axis_of(
+    value: &Json5Value,
+    path: &'static str,
+    expected: &'static str,
+    allowed: Option<&[&str]>,
+) -> Result<Option<Vec<String>>, ConfigIngestError> {
+    let list = match allowed {
+        Some(set) => enum_list_of(value, path, expected, set)?,
+        None => string_list_of(value, path, expected)?,
+    };
+    if list.is_empty() {
+        return Err(ConfigIngestError::WrongType { path, expected });
+    }
+    Ok(Some(list))
+}
+
+/// R2652 — `access_control/rules` as a list of [`AclConfigRuleConf`].
+fn acl_rules_of(
+    value: &Json5Value,
+    path: &'static str,
+) -> Result<Vec<AclConfigRuleConf>, ConfigIngestError> {
+    const SHAPE: &str = "a list of { id, key_exprs: [..], messages: [..], \
+                         permission: allow|deny, flows? }";
+    let Json5Value::Array(items) = value else {
+        return Err(ConfigIngestError::WrongType {
+            path,
+            expected: SHAPE,
+        });
+    };
+    let mut out = Vec::with_capacity(items.len());
+    for item in items {
+        let Json5Value::Object(fields) = item else {
+            return Err(ConfigIngestError::WrongType {
+                path,
+                expected: SHAPE,
+            });
+        };
+        let (mut id, mut permission) = (None, None);
+        let mut rule = AclConfigRuleConf {
+            id: String::new(),
+            key_exprs: Vec::new(),
+            messages: Vec::new(),
+            flows: None,
+            permission: String::new(),
+        };
+        for (key, field) in fields {
+            match key.as_str() {
+                "id" => id = Some(want_text(field, path, SHAPE)?),
+                "key_exprs" => rule.key_exprs = string_list_of(field, path, SHAPE)?,
+                "messages" => {
+                    rule.messages = enum_list_of(field, path, SHAPE, ACL_MESSAGE_LITERALS)?
+                }
+                "flows" => {
+                    rule.flows =
+                        optional_axis_of(field, path, SHAPE, Some(INTERCEPTOR_FLOW_LITERALS))?
+                }
+                "permission" => {
+                    let text = want_text(field, path, SHAPE)?;
+                    if !ACL_PERMISSION_LITERALS.contains(&text.as_str()) {
+                        return Err(ConfigIngestError::WrongType {
+                            path,
+                            expected: SHAPE,
+                        });
+                    }
+                    permission = Some(text);
+                }
+                _ => {
+                    return Err(ConfigIngestError::WrongType {
+                        path,
+                        expected: SHAPE,
+                    })
+                }
+            }
+        }
+        // `id`, `key_exprs`, `messages` and `permission` are all required
+        // upstream, the last three as non-empty lists or a plain enum.
+        let (Some(id), Some(permission)) = (id, permission) else {
+            return Err(ConfigIngestError::WrongType {
+                path,
+                expected: SHAPE,
+            });
+        };
+        if rule.key_exprs.is_empty() || rule.messages.is_empty() {
+            return Err(ConfigIngestError::WrongType {
+                path,
+                expected: SHAPE,
+            });
+        }
+        rule.id = id;
+        rule.permission = permission;
+        out.push(rule);
+    }
+    Ok(out)
+}
+
+/// R2652 — `access_control/subjects` as a list of [`AclConfigSubjectsConf`].
+fn acl_subjects_of(
+    value: &Json5Value,
+    path: &'static str,
+) -> Result<Vec<AclConfigSubjectsConf>, ConfigIngestError> {
+    const SHAPE: &str = "a list of { id, interfaces?, cert_common_names?, \
+                         usernames?, link_protocols?, zids? }";
+    let Json5Value::Array(items) = value else {
+        return Err(ConfigIngestError::WrongType {
+            path,
+            expected: SHAPE,
+        });
+    };
+    let mut out = Vec::with_capacity(items.len());
+    for item in items {
+        let Json5Value::Object(fields) = item else {
+            return Err(ConfigIngestError::WrongType {
+                path,
+                expected: SHAPE,
+            });
+        };
+        let mut id = None;
+        let mut subj = AclConfigSubjectsConf {
+            id: String::new(),
+            interfaces: None,
+            cert_common_names: None,
+            usernames: None,
+            link_protocols: None,
+            zids: None,
+        };
+        for (key, field) in fields {
+            match key.as_str() {
+                "id" => id = Some(want_text(field, path, SHAPE)?),
+                "interfaces" => subj.interfaces = optional_axis_of(field, path, SHAPE, None)?,
+                // RECOGNISED here precisely because wz cannot carry it onto a
+                // rule. Leaving it to the catch-all would refuse a document a
+                // real zenohd starts on, which is stricter than the acceptance
+                // boundary this reader is held to; what happens to a rule that
+                // names it is decided at expansion, not by pretending the
+                // document is malformed.
+                "cert_common_names" => {
+                    subj.cert_common_names = optional_axis_of(field, path, SHAPE, None)?
+                }
+                "usernames" => subj.usernames = optional_axis_of(field, path, SHAPE, None)?,
+                "link_protocols" => {
+                    subj.link_protocols = match optional_axis_of(field, path, SHAPE, None)? {
+                        Some(names) => Some(
+                            names
+                                .iter()
+                                .map(|n| InterceptorLink::from_upstream_str(n))
+                                .collect::<Option<Vec<_>>>()
+                                .ok_or(ConfigIngestError::WrongType {
+                                    path,
+                                    expected: SHAPE,
+                                })?,
+                        ),
+                        None => None,
+                    };
+                }
+                // The zid alphabet is `zenoh_hex_to_zid`'s, the one the weights
+                // reader already answers to, so a document cannot spell a peer
+                // one way for weights and another way for an ACL subject.
+                "zids" => {
+                    subj.zids = match optional_axis_of(field, path, SHAPE, None)? {
+                        Some(texts) => {
+                            let mut zids = Vec::with_capacity(texts.len());
+                            for text in &texts {
+                                let bytes = zenoh_hex_to_zid(text).ok_or_else(|| {
+                                    ConfigIngestError::MalformedZid {
+                                        path,
+                                        value: text.clone(),
+                                    }
+                                })?;
+                                zids.push(Zid::from_slice(&bytes));
+                            }
+                            Some(zids)
+                        }
+                        None => None,
+                    };
+                }
+                _ => {
+                    return Err(ConfigIngestError::WrongType {
+                        path,
+                        expected: SHAPE,
+                    })
+                }
+            }
+        }
+        let Some(id) = id else {
+            return Err(ConfigIngestError::WrongType {
+                path,
+                expected: SHAPE,
+            });
+        };
+        subj.id = id;
+        out.push(subj);
+    }
+    Ok(out)
+}
+
+/// R2652 — `access_control/policies` as a list of [`AclConfigPolicyConf`].
+fn acl_policies_of(
+    value: &Json5Value,
+    path: &'static str,
+) -> Result<Vec<AclConfigPolicyConf>, ConfigIngestError> {
+    const SHAPE: &str = "a list of { rules: [id..], subjects: [id..], id? }";
+    let Json5Value::Array(items) = value else {
+        return Err(ConfigIngestError::WrongType {
+            path,
+            expected: SHAPE,
+        });
+    };
+    let mut out = Vec::with_capacity(items.len());
+    for item in items {
+        let Json5Value::Object(fields) = item else {
+            return Err(ConfigIngestError::WrongType {
+                path,
+                expected: SHAPE,
+            });
+        };
+        let mut policy = AclConfigPolicyConf {
+            id: None,
+            rules: Vec::new(),
+            subjects: Vec::new(),
+        };
+        for (key, field) in fields {
+            match key.as_str() {
+                "id" => policy.id = Some(want_text(field, path, SHAPE)?),
+                "rules" => policy.rules = string_list_of(field, path, SHAPE)?,
+                "subjects" => policy.subjects = string_list_of(field, path, SHAPE)?,
+                _ => {
+                    return Err(ConfigIngestError::WrongType {
+                        path,
+                        expected: SHAPE,
+                    })
+                }
+            }
+        }
+        // ⛔ AN EMPTY `rules` OR `subjects` LIST IS NOT REFUSED HERE, and the
+        // omission is deliberate: upstream types both `Vec<String>` (not
+        // `NEVec`), so its deserializer ACCEPTS the document and its
+        // `policy_information_point` is what refuses it — "Policy #{} is
+        // malformed: empty subjects or rules list". A real zenohd therefore
+        // starts on such a document whenever the ACL is disabled, and a parse
+        // refusal here would be stricter than the acceptance boundary this
+        // reader is held to. See [`AclCompileError::EmptyPolicy`], which is
+        // where the refusal lives instead.
+        out.push(policy);
+    }
+    Ok(out)
+}
+
+/// One JSON5 string, or `WrongType`.
+fn want_text(
+    value: &Json5Value,
+    path: &'static str,
+    expected: &'static str,
+) -> Result<String, ConfigIngestError> {
+    match value {
+        Json5Value::String(text) => Ok(text.clone()),
+        _ => Err(ConfigIngestError::WrongType { path, expected }),
+    }
+}
+
 /// R2650 — the message kinds `downsampling` and `low_pass_filter` accept.
 ///
 /// FOUR, and they are NOT `AclMessage`'s nine. Upstream types both interceptor
@@ -4883,6 +5553,37 @@ impl ZenohNodeConfig {
         if let Some(value) = honoured(&doc, "downsampling") {
             out.downsampling = downsampling_items_of(value, "downsampling")?;
             named.push("downsampling");
+        }
+        // R2652 — the five `access_control/*` keys. Read INDIVIDUALLY, because
+        // each is its own honoured key and a document may name any subset; they
+        // become one unit only at expansion, where upstream's own `init` builds
+        // nothing unless rules, subjects and policies are all present.
+        if let Some(v) = want_bool(&doc, "access_control/enabled")? {
+            out.access_control.enabled = v;
+            named.push("access_control/enabled");
+        }
+        if let Some(value) = honoured(&doc, "access_control/default_permission") {
+            let text = want_text(value, "access_control/default_permission", "allow|deny")?;
+            if !ACL_PERMISSION_LITERALS.contains(&text.as_str()) {
+                return Err(ConfigIngestError::WrongType {
+                    path: "access_control/default_permission",
+                    expected: "allow|deny",
+                });
+            }
+            out.access_control.default_permission = text;
+            named.push("access_control/default_permission");
+        }
+        if let Some(value) = honoured(&doc, "access_control/rules") {
+            out.access_control.rules = acl_rules_of(value, "access_control/rules")?;
+            named.push("access_control/rules");
+        }
+        if let Some(value) = honoured(&doc, "access_control/subjects") {
+            out.access_control.subjects = acl_subjects_of(value, "access_control/subjects")?;
+            named.push("access_control/subjects");
+        }
+        if let Some(value) = honoured(&doc, "access_control/policies") {
+            out.access_control.policies = acl_policies_of(value, "access_control/policies")?;
+            named.push("access_control/policies");
         }
         if let Some(v) = want_u64(&doc, "scouting/timeout")? {
             out.scouting_timeout_ms = Some(v);
@@ -5880,6 +6581,40 @@ mod tests {
                 r#"{ "downsampling": [ { "messages": ["put"],
                      "rules": [ { "key_expr": "demo/**", "freq": 0.5 } ] } ] }"#,
             ),
+            // R2652 — the five `access_control/*` keys, each driven off a value
+            // its own slice does not default to, and in the ALPHABETICAL order
+            // `HONOURED_CONFIG_KEYS` lists them: this table's rows are compared
+            // to that list as a SEQUENCE, so a row out of order reds here with
+            // the whole surface printed twice.
+            //
+            // `allow` because the resolved default is `deny`, and `enabled` is
+            // `true` because upstream's default is FALSE — both measured off a
+            // real zenohd. A row stating the default would report the key
+            // honoured while proving only that the reader parsed a scalar.
+            (
+                "access_control/default_permission",
+                r#"{ "access_control": { "default_permission": "allow" } }"#,
+            ),
+            (
+                "access_control/enabled",
+                r#"{ "access_control": { "enabled": true } }"#,
+            ),
+            (
+                "access_control/policies",
+                r#"{ "access_control": { "policies": [ { "rules": ["r1"],
+                     "subjects": ["s1"] } ] } }"#,
+            ),
+            (
+                "access_control/rules",
+                r#"{ "access_control": { "rules": [ { "id": "r1",
+                     "key_exprs": ["demo/**"], "messages": ["put"],
+                     "permission": "deny" } ] } }"#,
+            ),
+            (
+                "access_control/subjects",
+                r#"{ "access_control": { "subjects": [ { "id": "s1",
+                     "usernames": ["alice"] } ] } }"#,
+            ),
             ("scouting/timeout", r#"{ "scouting": { "timeout": 2500 } }"#),
             (
                 "transport/multicast/qos/enabled",
@@ -6679,6 +7414,409 @@ mod tests {
                 "the reader must refuse {why}"
             );
         }
+    }
+
+    /// R2652 — the `access_control` PARSE boundary, which is narrower than the
+    /// subtree's total refusal surface and deliberately so.
+    ///
+    /// ⛔ WHAT IS *NOT* HERE IS THE POINT. Upstream deserializes this subtree
+    /// with plain `Vec`s and `String` ids and refuses every CROSS-ENTRY property
+    /// later, when `PolicyEnforcer::init` compiles it. Both halves were measured
+    /// against the pinned zenohd 1.10.0 rather than read off its types:
+    ///
+    /// * a policy naming a rule id no rule defines, with `enabled: true`, makes
+    ///   zenohd EXIT — "Access control not enabled due to: Rule 'r2' in policy
+    ///   #0 does not exist in rules list ... Exiting...";
+    /// * the SAME dangling id, plus a policy carrying `rules: []` and
+    ///   `subjects: []`, with `enabled: false`, starts that binary normally.
+    ///
+    /// So those refusals belong to [`AclCompileError`] and a parse refusal here
+    /// would be stricter than the acceptance boundary this reader is held to.
+    #[test]
+    fn the_acl_reader_refuses_exactly_what_upstream_refuses() {
+        let ok = ZenohNodeConfig::from_json5(
+            r#"{ access_control: { enabled: true, default_permission: "allow",
+                 rules: [ { id: "r1", key_exprs: ["demo/**"],
+                            messages: ["put", "declare_subscriber"],
+                            flows: ["ingress"], permission: "deny" } ],
+                 subjects: [ { id: "s1", interfaces: ["lo"],
+                               cert_common_names: ["example.org"],
+                               usernames: ["alice"], link_protocols: ["tcp"],
+                               zids: ["1a2b"] } ],
+                 policies: [ { id: "p1", rules: ["r1"], subjects: ["s1"] } ] } }"#,
+        )
+        .expect("the shape a real zenohd starts on is accepted");
+        let acl = &ok.config.access_control;
+        assert!(acl.enabled);
+        assert_eq!(acl.default_permission, "allow");
+        assert_eq!(acl.rules.len(), 1);
+        assert_eq!(acl.rules[0].messages, vec!["put", "declare_subscriber"]);
+        assert_eq!(
+            acl.rules[0].flows.as_deref(),
+            Some(&[String::from("ingress")][..])
+        );
+        assert_eq!(acl.subjects.len(), 1);
+        assert_eq!(
+            acl.subjects[0].zids.as_ref().map(Vec::len),
+            Some(1),
+            "the zid axis is parsed into the same type the weights reader builds"
+        );
+        assert_eq!(
+            acl.subjects[0].cert_common_names.as_deref(),
+            Some(&[String::from("example.org")][..]),
+            "the axis wz cannot carry onto a rule is still READ — leaving it to \
+             the unknown-field catch-all would refuse a file zenohd starts on"
+        );
+        assert_eq!(acl.policies.len(), 1);
+        for key in [
+            "access_control/enabled",
+            "access_control/default_permission",
+            "access_control/rules",
+            "access_control/subjects",
+            "access_control/policies",
+        ] {
+            assert!(ok.named.contains(&key), "{key} is named by this document");
+        }
+
+        // An ABSENT axis is upstream's wildcard and an EMPTY one is a document
+        // it refuses; both are stated here so the pair cannot collapse.
+        let wild =
+            ZenohNodeConfig::from_json5(r#"{ access_control: { subjects: [ { id: "s1" } ] } }"#)
+                .expect("a subject narrowing nothing is a wildcard subject");
+        assert!(wild.config.access_control.subjects[0].zids.is_none());
+        assert_eq!(
+            wild.config.access_control.default_permission, "deny",
+            "a document that does not state it resolves to upstream's default"
+        );
+
+        for (why, doc) in [
+            (
+                "a permission outside allow|deny",
+                r#"{ access_control: { rules: [ { id: "r", key_exprs: ["x"],
+                     messages: ["put"], permission: "maybe" } ] } }"#,
+            ),
+            (
+                "a message kind outside the NINE an AclMessage carries",
+                r#"{ access_control: { rules: [ { id: "r", key_exprs: ["x"],
+                     messages: ["pigeon"], permission: "deny" } ] } }"#,
+            ),
+            (
+                "an EMPTY messages list, which is a NEVec upstream",
+                r#"{ access_control: { rules: [ { id: "r", key_exprs: ["x"],
+                     messages: [], permission: "deny" } ] } }"#,
+            ),
+            (
+                "a rule with no permission",
+                r#"{ access_control: { rules: [ { id: "r", key_exprs: ["x"],
+                     messages: ["put"] } ] } }"#,
+            ),
+            (
+                "an unknown field on a rule, which upstream denies too",
+                r#"{ access_control: { rules: [ { id: "r", key_exprs: ["x"],
+                     messages: ["put"], permission: "deny", nope: 1 } ] } }"#,
+            ),
+            (
+                "an EMPTY subject axis, which upstream calls out by name",
+                r#"{ access_control: { subjects: [ { id: "s", zids: [] } ] } }"#,
+            ),
+            (
+                "a zid outside the alphabet the weights reader answers to",
+                r#"{ access_control: { subjects: [ { id: "s", zids: ["0xAB"] } ] } }"#,
+            ),
+            (
+                "a link protocol outside the vocabulary",
+                r#"{ access_control: { subjects: [ { id: "s",
+                     link_protocols: ["pigeon"] } ] } }"#,
+            ),
+            (
+                "an unknown field on a subject",
+                r#"{ access_control: { subjects: [ { id: "s", nope: 1 } ] } }"#,
+            ),
+            (
+                "an unknown field on a policy",
+                r#"{ access_control: { policies: [ { rules: ["r"],
+                     subjects: ["s"], nope: 1 } ] } }"#,
+            ),
+        ] {
+            assert!(
+                ZenohNodeConfig::from_json5(doc).is_err(),
+                "the reader must refuse {why}"
+            );
+        }
+
+        // ⭐ THE CONTROL: what the parse must ACCEPT although a running zenohd
+        // refuses it once the ACL is on. Both were measured against the pinned
+        // binary (see this test's doc). If either of these ever starts failing,
+        // the refusal moved to the wrong side and wz refuses a file zenohd
+        // starts on.
+        for (why, doc) in [
+            (
+                "a policy naming a rule id nothing defines",
+                r#"{ access_control: { policies: [ { rules: ["ghost"],
+                     subjects: ["s"] } ] } }"#,
+            ),
+            (
+                "a policy naming NO rules and NO subjects",
+                r#"{ access_control: { policies: [ { rules: [], subjects: [] } ] } }"#,
+            ),
+            (
+                "two rules sharing one id",
+                r#"{ access_control: { rules: [
+                     { id: "r", key_exprs: ["x"], messages: ["put"], permission: "deny" },
+                     { id: "r", key_exprs: ["y"], messages: ["put"], permission: "allow" } ] } }"#,
+            ),
+            (
+                "a BLANK username, which upstream's `Username` is a bare String for",
+                r#"{ access_control: { subjects: [ { id: "s", usernames: ["  "] } ] } }"#,
+            ),
+        ] {
+            assert!(
+                ZenohNodeConfig::from_json5(doc).is_ok(),
+                "the reader must ACCEPT {why} — a real zenohd parses it and \
+                 refuses it later, and refusing it here is stricter than the \
+                 acceptance boundary"
+            );
+        }
+    }
+
+    /// R2652 — the COMPILE, which is the half of the `access_control` seam the
+    /// parse deliberately leaves alone.
+    ///
+    /// The document here is one a real zenohd was measured to start on, and the
+    /// assertions are about VALUES rather than shapes: the count alone would
+    /// pass an expansion that dropped the second zid and duplicated the first,
+    /// so every axis is read back off a named rule.
+    #[cfg(feature = "access-acl")]
+    #[test]
+    fn the_acl_compile_expands_the_join_the_way_upstream_does() {
+        let ok = ZenohNodeConfig::from_json5(
+            r#"{ access_control: { enabled: true, default_permission: "allow",
+                 rules: [ { id: "r1", key_exprs: ["demo/**"],
+                            messages: ["put"], permission: "deny" },
+                          { id: "r2", key_exprs: ["demo/one"],
+                            messages: ["query"], flows: ["egress"],
+                            permission: "deny" } ],
+                 subjects: [ { id: "s1", interfaces: ["lo"],
+                               usernames: ["alice"], link_protocols: ["tcp"],
+                               zids: ["1a2b", "3c4d"] } ],
+                 policies: [ { rules: ["r1", "r2"], subjects: ["s1"] } ] } }"#,
+        )
+        .expect("the shape a real zenohd starts on is accepted");
+        let compiled = acl_config_from_inputs(&ok.config.access_control)
+            .expect("a consistent subtree compiles")
+            .expect("`enabled: true` installs a policy");
+        assert_eq!(
+            compiled.default_permission,
+            wz_access_control::Permission::Allow
+        );
+        // r1 leaves `flows` absent, which is BOTH directions: 2 zids x 2 flows.
+        // r2 names one flow: 2 zids x 1. Five-deep, and the two rules differ so
+        // a fan-out that collapsed either axis cannot land on this number.
+        assert_eq!(compiled.rules.len(), 6);
+
+        let first: Vec<_> = compiled
+            .rules
+            .iter()
+            .filter(|r| r.key_exprs == vec![String::from("demo/**")])
+            .collect();
+        assert_eq!(first.len(), 4, "r1 fans out over 2 zids and 2 flows");
+        let zids: std::collections::HashSet<_> = first
+            .iter()
+            .map(|r| match r.subject {
+                wz_access_control::SubjectSelector::Zid(z) => z,
+                wz_access_control::SubjectSelector::Any => {
+                    panic!("a subject naming zids is not a wildcard")
+                }
+            })
+            .collect();
+        assert_eq!(
+            zids.len(),
+            2,
+            "BOTH named peers reach a rule — an expansion that kept only the \
+             first zid would still produce four rules"
+        );
+        let flows: std::collections::HashSet<_> = first.iter().map(|r| r.flow).collect();
+        assert_eq!(flows.len(), 2, "an absent `flows` is both directions");
+        assert_eq!(
+            first[0].usernames.len(),
+            1,
+            "the username axis is COPIED onto the rule, not expanded"
+        );
+        assert_eq!(first[0].interfaces, vec![String::from("lo")]);
+        assert_eq!(
+            first[0].link_protocols,
+            vec![wz_session_core::link::InterceptorLink::Tcp]
+        );
+        assert_eq!(first[0].permission, wz_access_control::Permission::Deny);
+        assert_eq!(first[0].messages, vec![wz_access_control::AclMessage::Put]);
+
+        let second: Vec<_> = compiled
+            .rules
+            .iter()
+            .filter(|r| r.key_exprs == vec![String::from("demo/one")])
+            .collect();
+        assert_eq!(
+            second.len(),
+            2,
+            "r2 names one flow, so only the zids fan out"
+        );
+        assert!(second
+            .iter()
+            .all(|r| r.flow == wz_access_control::AclFlow::Egress));
+    }
+
+    /// R2652 — `enabled` is the switch, and a policy with no rules is NOT the
+    /// same thing as no policy: the first still imposes `default_permission` on
+    /// every message.
+    ///
+    /// Upstream's `acl_interceptor_factories` builds an enforcer only inside
+    /// `if acl_config.enabled`, and its default is FALSE — measured off a real
+    /// zenohd, whose silent config renders `"enabled":false`. A reader that
+    /// installed the rules anyway would enforce where a stock zenohd does not.
+    #[cfg(feature = "access-acl")]
+    #[test]
+    fn a_disabled_acl_installs_no_policy_at_all() {
+        let off = ZenohNodeConfig::from_json5(
+            r#"{ access_control: { default_permission: "deny",
+                 rules: [ { id: "r1", key_exprs: ["demo/**"],
+                            messages: ["put"], permission: "deny" } ],
+                 subjects: [ { id: "s1" } ],
+                 policies: [ { rules: ["r1"], subjects: ["s1"] } ] } }"#,
+        )
+        .expect("a document may carry a policy without turning it on");
+        assert!(
+            acl_config_from_inputs(&off.config.access_control)
+                .expect("a consistent subtree compiles")
+                .is_none(),
+            "rules written and `enabled` unstated must install NOTHING — the \
+             default is false and the whole reason this key exists is the case \
+             where rules are present and switched off"
+        );
+    }
+
+    /// R2652 — every cross-entry refusal upstream raises in
+    /// `policy_information_point`, raised HERE rather than at the parse.
+    #[cfg(feature = "access-acl")]
+    #[test]
+    fn the_acl_compile_refuses_what_upstreams_init_refuses() {
+        // Returns the REFUSAL, not the result: `AclConfig` is not `PartialEq`
+        // (it holds rules, and comparing rule sets is what the expansion test
+        // does axis by axis), so the comparison here is over the error alone.
+        let compile = |doc: &str| {
+            let ingest = ZenohNodeConfig::from_json5(doc)
+                .expect("each of these documents PARSES, which is the point");
+            acl_config_from_inputs(&ingest.config.access_control)
+                .expect_err("this subtree must not compile")
+        };
+        let head = r#"{ access_control: { enabled: true,
+             rules: [ { id: "r1", key_exprs: ["x"], messages: ["put"],
+                        permission: "deny" } ],
+             subjects: [ { id: "s1" } ], "#;
+        assert_eq!(
+            compile(&format!(
+                r#"{head} policies: [ {{ rules: ["ghost"], subjects: ["s1"] }} ] }} }}"#
+            )),
+            AclCompileError::UnknownRule {
+                id: String::from("ghost"),
+                index: 0,
+            }
+        );
+        assert_eq!(
+            compile(&format!(
+                r#"{head} policies: [ {{ rules: ["r1"], subjects: ["ghost"] }} ] }} }}"#
+            )),
+            AclCompileError::UnknownSubject {
+                id: String::from("ghost"),
+                index: 0,
+            }
+        );
+        assert_eq!(
+            compile(&format!(
+                r#"{head} policies: [ {{ rules: [], subjects: [] }} ] }} }}"#
+            )),
+            AclCompileError::EmptyPolicy { index: 0 }
+        );
+        assert_eq!(
+            compile(
+                r#"{ access_control: { enabled: true,
+                     rules: [ { id: "r1", key_exprs: ["x"], messages: ["put"],
+                                permission: "deny" },
+                              { id: "r1", key_exprs: ["y"], messages: ["put"],
+                                permission: "allow" } ] } }"#
+            ),
+            AclCompileError::DuplicateId {
+                id: String::from("r1")
+            }
+        );
+        assert_eq!(
+            compile(
+                r#"{ access_control: { enabled: true, rules: [ { id: " ",
+                     key_exprs: ["x"], messages: ["put"], permission: "deny" } ] } }"#
+            ),
+            AclCompileError::BlankId
+        );
+        assert_eq!(
+            compile(
+                r#"{ access_control: { enabled: true,
+                     rules: [ { id: "r1", key_exprs: ["x"], messages: ["put"],
+                                permission: "deny" } ],
+                     subjects: [ { id: "s1", usernames: ["  "] } ],
+                     policies: [ { rules: ["r1"], subjects: ["s1"] } ] } }"#
+            ),
+            AclCompileError::BlankUsername {
+                subject: String::from("s1")
+            }
+        );
+    }
+
+    /// R2652 — `cert_common_names`, the one subject axis an `AclRule` has
+    /// nowhere to put, handled ASYMMETRICALLY in the rule's own permission.
+    ///
+    /// Upstream reads a subject's axes as a CONJUNCTION with an absent axis
+    /// meaning wildcard, so dropping this one WIDENS the rule. Widening an
+    /// `allow` grants access the document meant to withhold; widening a `deny`
+    /// withholds access the document meant to grant, which cannot open anything.
+    /// So an allow rule naming it is not installed and a deny rule is.
+    #[cfg(feature = "access-acl")]
+    #[test]
+    fn a_certificate_narrowed_subject_is_fail_closed_in_both_directions() {
+        let compile = |permission: &str| {
+            let doc = format!(
+                r#"{{ access_control: {{ enabled: true,
+                     rules: [ {{ id: "r1", key_exprs: ["demo/**"],
+                                messages: ["put"], flows: ["ingress"],
+                                permission: "{permission}" }} ],
+                     subjects: [ {{ id: "s1", cert_common_names: ["example.org"] }},
+                                 {{ id: "s2", interfaces: ["lo"] }} ],
+                     policies: [ {{ rules: ["r1"], subjects: ["s1", "s2"] }} ] }} }}"#
+            );
+            let ingest = ZenohNodeConfig::from_json5(&doc).expect("a real zenohd starts on this");
+            acl_config_from_inputs(&ingest.config.access_control)
+                .expect("a consistent subtree compiles")
+                .expect("`enabled: true` installs a policy")
+        };
+
+        let denying = compile("deny");
+        assert_eq!(
+            denying.rules.len(),
+            2,
+            "a DENY rule keeps both subjects — the certificate axis is dropped \
+             and the rule denies a superset"
+        );
+        let allowing = compile("allow");
+        assert_eq!(
+            allowing.rules.len(),
+            1,
+            "an ALLOW rule keeps only the subject it can enforce in full; \
+             installing the other would grant access to every peer, not to the \
+             certificate the document named"
+        );
+        assert_eq!(
+            allowing.rules[0].interfaces,
+            vec![String::from("lo")],
+            "and it is the CERTIFICATE subject that was dropped, not whichever \
+             one came second"
+        );
     }
 
     /// The DROP-IN half is the load, not the list. These two keys left the

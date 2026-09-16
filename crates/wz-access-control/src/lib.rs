@@ -89,6 +89,14 @@ impl Permission {
             Permission::Deny => "deny",
         }
     }
+
+    /// R2652 — the verdict upstream spells `text`, or `None`. One table, as
+    /// everywhere else in this vocabulary family.
+    pub fn from_upstream_str(text: &str) -> Option<Permission> {
+        [Permission::Allow, Permission::Deny]
+            .into_iter()
+            .find(|p| p.as_str() == text)
+    }
 }
 
 /// The flow a rule (and a request) applies to — zenoh `InterceptorFlow`.
@@ -110,6 +118,17 @@ impl AclFlow {
             AclFlow::Ingress => "ingress",
             AclFlow::Egress => "egress",
         }
+    }
+
+    /// R2652 — both directions, which is also what upstream's absent `flows`
+    /// resolves to.
+    pub const ALL: [AclFlow; 2] = [AclFlow::Ingress, AclFlow::Egress];
+
+    /// The flow upstream spells `text`, or `None` — derived by searching
+    /// [`Self::ALL`] through [`Self::as_str`], so there is ONE table and the
+    /// inverse cannot disagree with it.
+    pub fn from_upstream_str(text: &str) -> Option<AclFlow> {
+        AclFlow::ALL.iter().copied().find(|f| f.as_str() == text)
     }
 }
 
@@ -173,6 +192,29 @@ impl AclMessage {
             AclMessage::DeclareLivelinessSubscriber => "declare_liveliness_subscriber",
             AclMessage::LivelinessQuery => "liveliness_query",
         }
+    }
+
+    /// R2652 — every kind, so the INVERSE of [`Self::as_str`] can be derived
+    /// rather than written a second time.
+    ///
+    /// Its completeness is held by `every_acl_message_is_listed_in_all`, whose
+    /// exhaustive `match` stops compiling when a kind is added — the only thing
+    /// that makes a hand-written list like this trustworthy.
+    pub const ALL: [AclMessage; 9] = [
+        AclMessage::Put,
+        AclMessage::Delete,
+        AclMessage::DeclareSubscriber,
+        AclMessage::Query,
+        AclMessage::DeclareQueryable,
+        AclMessage::Reply,
+        AclMessage::LivelinessToken,
+        AclMessage::DeclareLivelinessSubscriber,
+        AclMessage::LivelinessQuery,
+    ];
+
+    /// The kind upstream spells `text`, or `None`.
+    pub fn from_upstream_str(text: &str) -> Option<AclMessage> {
+        AclMessage::ALL.iter().copied().find(|m| m.as_str() == text)
     }
 }
 
@@ -360,21 +402,35 @@ pub struct AclConfig {
 // WHICH KEYS THIS ANSWERS. Upstream configures the same engine under
 // `access_control/default_permission`, `access_control/rules`,
 // `access_control/subjects`, `access_control/policies` and
-// `access_control/enabled`. wz's config reader honours none of them, so all five
-// are carried in `UNHONOURED_READER_GAP` — the engine is HERE, and what is
-// missing is the reader. Three shape notes the reader will have to bridge:
-// upstream names subjects and rules and then JOINS them under `policies`, while
-// an `AclRule` here carries its subject axes inline; `enabled` has no switch to
-// build, because a peer with no policy installed already enforces nothing; and
-// a `subjects` entry reaches THREE of upstream's five axes here — `subject`
-// (zid), `link_protocols` and `interfaces` — so `cert_common_names` and
-// `usernames` are the two a reader cannot bridge, which is what the
-// `access-acl` catalog atom's reason has said since R311y453.
-// R2631 — FOUR now: `usernames` has an axis on `AclRule`, so only
-// `cert_common_names` is left for a reader to have nowhere to put.
-// R2151 (open-debt item 540) moved the five and added this comment:
+// `access_control/enabled`.
+//
+// ⚠ R2652 — ALL FIVE ARE HONOURED NOW, and the three sentences that used to
+// stand here have to be replaced rather than amended, because two of them were
+// wrong about upstream and the third described a gap that no longer exists.
+// They moved to `HONOURED_CONFIG_KEYS`; `WzConfig::acl_inputs` retains the
+// document and `zenoh_config::acl_config_from_inputs` compiles it into an
+// `AclConfig`.
+//
+//  * "wz's config reader honours none of them, so all five are carried in
+//    `UNHONOURED_READER_GAP`" — true until the reader was built, and the note
+//    was the witness that said what was missing. It has been paid.
+//  * "`enabled` has no switch to build, because a peer with no policy installed
+//    already enforces nothing" — FALSE, and measured false against a real
+//    zenohd. The sentence answers the wrong question: the switch is not for a
+//    node with no rules, it is for a node WITH rules that are turned off, which
+//    is the only reason the key exists. Upstream's `init` compiles rules only
+//    inside `if self.acl_enabled`, and its default is `false`, so a document
+//    carrying rules and not the key enforces NOTHING on a stock zenohd.
+//  * "a `subjects` entry reaches THREE of upstream's five axes" — R2631 made it
+//    four by putting `usernames` on `AclRule`, and only `cert_common_names` has
+//    nowhere to go. A subject naming it is handled by permission, not dropped:
+//    an `allow` rule is not installed and a `deny` rule is installed with the
+//    axis dropped, so neither can end up looser than the document asked for.
+//    See `acl_config_from_inputs`.
+//
+// R2151 (open-debt item 540) added this comment when the five moved lists:
 // until then the classification lived only in the reader's own doc, which made
-// it a claim with no witness at the capability.
+// it a claim with no witness at the capability. That is still why it is here.
 
 impl AclConfig {
     /// A default-deny configuration with no rules — every request denied. The

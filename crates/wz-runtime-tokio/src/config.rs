@@ -263,6 +263,45 @@ pub struct WzConfig {
     /// [`Self::reconfigure_interceptors`] so the forwarder stays in sync.
     #[cfg(feature = "routing-peer")]
     interceptors: InterceptorConfig,
+    /// R2652 — the `access_control/*` document inputs the live policy above was
+    /// COMPILED from, kept because that compilation cannot be inverted.
+    ///
+    /// # Why this exists rather than merging into the compiled form
+    ///
+    /// [`InterceptorConfig::acl`] holds a policy whose rules are the expansion of
+    /// upstream's `rules x subjects x policies`. Given an expanded rule there is
+    /// no way back to the three entries that produced it, so a write to any one
+    /// of those keys cannot be merged — it must be RE-EXPANDED against the
+    /// current other two, which is what these inputs are for.
+    ///
+    /// # Why it carries no `set_`/`reconfigure_` method, deliberately
+    ///
+    /// `runtime_mutable_surface_gate` derives its slice population as exactly
+    /// "private fields having such a method", and the five ACL keys already name
+    /// `interceptors` as their slice. Giving this one a method would make it a
+    /// DECLARED slice demanding registry rows of its own, and the resulting
+    /// mismatch would read as a registry error when the registry is correct.
+    /// Updates happen inside the existing `apply_one_key` arms, which re-derive
+    /// the compiled policy from here — so these inputs are the SSOT and the
+    /// compiled form is a pure function of them, which is what stops the two
+    /// from drifting into the inert mirror this tree keeps paying for.
+    ///
+    /// # Why the `#[cfg]` is this long rather than the field's own two features
+    ///
+    /// It names exactly the builds where the field is READ, which is the ACL
+    /// arms of `apply_one_key`: that function needs `zenoh-config` and one of
+    /// the two admin hats, its ACL arms need `routing-peer` for the live slice
+    /// and `access-acl` for the engine. A shorter `#[cfg]` would compile the
+    /// field into builds that never touch it, and this crate denies dead code,
+    /// so the conjunction is not tidiness — it is the condition under which a
+    /// document-driven ACL apply exists at all.
+    #[cfg(all(
+        feature = "routing-peer",
+        feature = "access-acl",
+        feature = "zenoh-config",
+        any(feature = "adminspace-core", feature = "routing-router-hat")
+    ))]
+    acl_inputs: crate::zenoh_config::AclConfigInputs,
     /// The LIVE adminspace permissions (zenoh `adminspace.permissions`, the
     /// `PermissionsConf` read/write pair). A runtime-mutable typed slice, declared
     /// in [`RUNTIME_MUTABLE_CONFIG_KEYS`] — R2642 removed the ORDINAL this doc
@@ -423,6 +462,13 @@ impl Default for WzConfig {
             lease_ms: 0,
             #[cfg(feature = "routing-peer")]
             interceptors: InterceptorConfig::default(),
+            #[cfg(all(
+                feature = "routing-peer",
+                feature = "access-acl",
+                feature = "zenoh-config",
+                any(feature = "adminspace-core", feature = "routing-router-hat")
+            ))]
+            acl_inputs: crate::zenoh_config::AclConfigInputs::default(),
             #[cfg(feature = "adminspace-core")]
             admin_permissions: wz_session_core::adminspace::AdminSpacePermissions::default(),
             // R2634 — no configured weight is upstream's default too: the config
@@ -977,6 +1023,12 @@ impl WzConfig {
         &mut self,
         ingest: &crate::zenoh_config::ZenohConfigIngest,
     ) -> Vec<&'static str> {
+        #[cfg(all(
+            feature = "routing-peer",
+            feature = "access-acl",
+            any(feature = "adminspace-core", feature = "routing-router-hat")
+        ))]
+        let acl_before = self.acl_inputs.clone();
         let mut applied = Vec::new();
         for row in RUNTIME_MUTABLE_CONFIG_KEYS {
             if !ingest.named.contains(&row.key) {
@@ -985,6 +1037,31 @@ impl WzConfig {
             if self.apply_one_key(row.key, Some(ingest)) {
                 applied.push(row.key);
             }
+        }
+        // R2652 — THE ONE SUBTREE STEP. The five `access_control/*` arms store
+        // without compiling (their own comment says why), so the compile happens
+        // here, once, against the whole subtree — the same place upstream does
+        // it, which is after the config has been read rather than per key.
+        //
+        // ⚠ The `starts_with` is the SUBTREE, not a prefix trick: upstream's
+        // `AclConfig` IS the `access_control` subtree, so "did this document
+        // touch the ACL" and "did it name a key under that prefix" are the same
+        // question. The keys come from `RUNTIME_MUTABLE_CONFIG_KEYS` by way of
+        // `applied`, so there is no second list of them here.
+        //
+        // ⛔ GUARDED, and not merely as a saving: an unconditional recompile
+        // would overwrite a policy a host had built PROGRAMMATICALLY (through
+        // `with_interceptors`) every time any unrelated key was applied, because
+        // the retained inputs of such a host are empty and compile to no ACL.
+        #[cfg(all(
+            feature = "routing-peer",
+            feature = "access-acl",
+            any(feature = "adminspace-core", feature = "routing-router-hat")
+        ))]
+        if applied.iter().any(|key| key.starts_with("access_control/"))
+            && !self.recompile_acl(&acl_before)
+        {
+            applied.retain(|key| !key.starts_with("access_control/"));
         }
         applied
     }
@@ -1398,7 +1475,98 @@ impl WzConfig {
                 self.interceptors.downsampling = rules;
                 true
             }
+            // R2652 — the five `access_control/*` keys.
+            //
+            // ⭐ THESE ARMS STORE AND DO NOT COMPILE, which is the one thing
+            // that separates them from their two interceptor siblings above.
+            // The five are ONE document subtree that upstream compiles as a
+            // unit, and this function is called once PER KEY, in the registry's
+            // alphabetical order: `policies` lands before `rules` and
+            // `subjects`, so a compile inside these arms would run three times
+            // against a subtree naming ids that do not exist yet. The compile
+            // is therefore one step at the end of `apply_zenoh_config`, where
+            // the whole subtree has landed.
+            //
+            // ⚠ Each arm still writes only its OWN key's slice, for the reason
+            // that function's doc gives: the parser fills an unnamed sibling
+            // with a default, so assigning the whole `AclConfigInputs` from a
+            // document that named one key would reset the other four.
+            #[cfg(all(feature = "routing-peer", feature = "access-acl"))]
+            "access_control/default_permission" => {
+                self.acl_inputs.default_permission = match source {
+                    Some(ingest) => ingest.config.access_control.default_permission.clone(),
+                    None => Self::default().acl_inputs.default_permission,
+                };
+                true
+            }
+            #[cfg(all(feature = "routing-peer", feature = "access-acl"))]
+            "access_control/enabled" => {
+                self.acl_inputs.enabled = match source {
+                    Some(ingest) => ingest.config.access_control.enabled,
+                    // Upstream's `enabled` is a bare `bool` defaulting to FALSE,
+                    // measured off a real zenohd rendering a document that never
+                    // named the key.
+                    None => false,
+                };
+                true
+            }
+            #[cfg(all(feature = "routing-peer", feature = "access-acl"))]
+            "access_control/policies" => {
+                self.acl_inputs.policies = match source {
+                    Some(ingest) => ingest.config.access_control.policies.clone(),
+                    None => Vec::new(),
+                };
+                true
+            }
+            #[cfg(all(feature = "routing-peer", feature = "access-acl"))]
+            "access_control/rules" => {
+                self.acl_inputs.rules = match source {
+                    Some(ingest) => ingest.config.access_control.rules.clone(),
+                    None => Vec::new(),
+                };
+                true
+            }
+            #[cfg(all(feature = "routing-peer", feature = "access-acl"))]
+            "access_control/subjects" => {
+                self.acl_inputs.subjects = match source {
+                    Some(ingest) => ingest.config.access_control.subjects.clone(),
+                    None => Vec::new(),
+                };
+                true
+            }
             _ => false,
+        }
+    }
+
+    /// R2652 — recompile the live ACL slice from the retained document inputs,
+    /// ATOMICALLY: on refusal the inputs go back to `restore` and nothing about
+    /// the live policy moves.
+    ///
+    /// All-or-nothing because the subtree is all-or-nothing upstream: a
+    /// `policy_information_point` that bails leaves `acl_interceptor_factories`
+    /// bailing too, so no enforcer is built from a half-read subtree. Keeping
+    /// the stored inputs in step with that means rolling them back, otherwise
+    /// the retention would hold a document the live policy was never compiled
+    /// from — the inert-mirror shape this field's own doc exists to prevent.
+    ///
+    /// `false` says the subtree was refused, which is how the caller knows not
+    /// to report those keys as applied.
+    #[cfg(all(
+        feature = "routing-peer",
+        feature = "access-acl",
+        feature = "zenoh-config",
+        any(feature = "adminspace-core", feature = "routing-router-hat")
+    ))]
+    fn recompile_acl(&mut self, restore: &crate::zenoh_config::AclConfigInputs) -> bool {
+        match crate::zenoh_config::acl_config_from_inputs(&self.acl_inputs) {
+            Ok(compiled) => {
+                self.interceptors.acl = compiled.map(wz_access_control::AclPolicy::new);
+                true
+            }
+            Err(_) => {
+                self.acl_inputs = restore.clone();
+                false
+            }
         }
     }
 
@@ -1490,6 +1658,45 @@ impl WzConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// R2652 — a key wz KNOWS and deliberately does not honour, CHOSEN from the
+    /// registry rather than spelled.
+    ///
+    /// Three tests wanted such a key and all three wrote `downsampling`. R2651
+    /// honoured it; two of them went red and the third — which only asserts the
+    /// two halves AGREE — went quietly vacuous, because both halves now answer
+    /// `NeedsSink` and agreeing about the wrong thing still counts as agreeing.
+    /// None of it surfaced, because the tests need `zenoh-config` plus an admin
+    /// hat and no default lane compiles that.
+    ///
+    /// ⚠ The list is chained the way the acceptance boundary is, and the choice
+    /// SKIPS any key that is runtime-mutable: `ingest_for_key` reports
+    /// `NotHonoured` before it looks at discipline, so a push-discipline key
+    /// would still answer `NotHonoured` here — and the DELETE half asks
+    /// `honours_config_key` first and would too. Skipping them anyway keeps the
+    /// fixture a key with ONE classification, which is what the caller's
+    /// three-way distinction is about.
+    ///
+    /// ⚠ Gated as the UNION of its callers, not as its own dependencies. Both
+    /// are `zenoh-config` plus `adminspace-core`, and gate 2h found the shorter
+    /// `#[cfg]` by compiling a leg that has the first and not the second: this
+    /// crate denies dead code, so a helper compiled where no caller is becomes
+    /// a build error rather than a warning.
+    #[cfg(all(feature = "zenoh-config", feature = "adminspace-core"))]
+    fn a_known_but_unhonoured_key() -> &'static str {
+        crate::zenoh_config::UNHONOURED_UPSTREAM_CONFIG_KEYS
+            .iter()
+            .copied()
+            .find(|key| {
+                !RUNTIME_MUTABLE_CONFIG_KEYS
+                    .iter()
+                    .any(|row| row.key == *key)
+            })
+            .expect(
+                "the unhonoured surface is never empty — wz models a subset of \
+                 zenoh's config and this list is the rest of it",
+            )
+    }
 
     /// R2643 — ⭐ THE CONTROL for `apply_zenoh_config`'s per-key rule, and the
     /// reason that rule exists rather than a per-slice assignment.
@@ -1642,10 +1849,19 @@ mod tests {
 
         // Known and deliberately NOT honoured: the reader accepts the document
         // — a stock zenoh file carries many such keys — and reports it ignored.
+        //
+        // ⛔ THE KEY IS DERIVED, NOT NAMED, and R2652 rewrote it that way after
+        // paying for the literal. This line said `downsampling` from R2644
+        // until R2651 HONOURED that key, at which point the case stopped being
+        // "known and unhonoured" and started being "push-discipline", and this
+        // assertion went red — on a feature combination no default lane
+        // compiles, so nothing said so for a round. A literal here is a
+        // CLASSIFICATION, and the next honouring round invalidates it again.
+        let ignored = a_known_but_unhonoured_key();
         assert_eq!(
-            cfg.set_by_key("downsampling", "[]"),
+            cfg.set_by_key(ignored, "[]"),
             Err(ConfigKeyWriteError::NotHonoured {
-                key: String::from("downsampling")
+                key: String::from(ignored)
             })
         );
 
@@ -1801,10 +2017,18 @@ mod tests {
     /// second, laxer write path into the same config, reachable from the same
     /// wire by changing one message kind.
     ///
-    /// `downsampling` is here for the reason R2644 put it in the set half's
-    /// tests: it is push-discipline AND unhonoured, so it is the key that
-    /// tells `NotHonoured` from `NeedsSink` and proves the ordering did not
-    /// swap.
+    /// ⚠ R2652 CORRECTING R2646, which wrote here that "`downsampling` is
+    /// push-discipline AND unhonoured, so it is the key that tells
+    /// `NotHonoured` from `NeedsSink`". R2651 honoured that key, so the row
+    /// became a SECOND push-discipline case and this loop stopped covering the
+    /// unhonoured one at all — without failing, because a test that asserts two
+    /// halves AGREE goes on passing when they agree about something else.
+    /// That is the sharper half of the lesson: the vacuity was invisible where
+    /// the set half's own red was merely unrun.
+    ///
+    /// The unhonoured row is DERIVED now — see [`a_known_but_unhonoured_key`] —
+    /// and the loop asserts each row lands on the refusal it was chosen for, so
+    /// a row drifting into another classification reds instead of going quiet.
     #[cfg(all(
         feature = "zenoh-config",
         feature = "adminspace-core",
@@ -1812,13 +2036,32 @@ mod tests {
     ))]
     #[test]
     fn the_delete_half_refuses_what_the_set_half_refuses() {
-        for (key, value) in [
+        let ignored = a_known_but_unhonoured_key();
+        for (key, value, expected) in [
             // Malformed: a segment outside `[A-Za-z0-9_]`.
-            ("adminspace/permissions/re-ad", "true"),
+            (
+                "adminspace/permissions/re-ad",
+                "true",
+                ConfigKeyWriteError::MalformedKey {
+                    key: String::from("adminspace/permissions/re-ad"),
+                },
+            ),
             // Known, deliberately unhonoured.
-            ("downsampling", "[]"),
+            (
+                ignored,
+                "[]",
+                ConfigKeyWriteError::NotHonoured {
+                    key: String::from(ignored),
+                },
+            ),
             // Honoured and runtime-mutable, but PUSH discipline.
-            ("routing/router/linkstate/transport_weights", "[]"),
+            (
+                "routing/router/linkstate/transport_weights",
+                "[]",
+                ConfigKeyWriteError::NeedsSink {
+                    key: String::from("routing/router/linkstate/transport_weights"),
+                },
+            ),
         ] {
             let set = WzConfig::new()
                 .set_by_key(key, value)
@@ -1829,6 +2072,12 @@ mod tests {
             assert_eq!(
                 set, del,
                 "the two halves of ONE write gate must refuse '{key}' identically"
+            );
+            assert_eq!(
+                set, expected,
+                "'{key}' is in this loop to cover ONE refusal and it is \
+                 answering a different one — the row has drifted into another \
+                 classification and the loop has stopped covering the first"
             );
         }
     }
@@ -2428,8 +2677,35 @@ mod tests {
 
             let sink = RecordingSink::new(true);
             let mut cfg = WzConfig::new();
-            assert_eq!(cfg.reconfigure_router_link_weights(rows, &sink), Ok(true));
-            assert_eq!(sink.calls(), 1, "the sink is driven exactly once");
+            let moved = cfg.reconfigure_router_link_weights(rows, &sink);
+            // ⚠ R2652 — THE SINK HALF IS FEATURE-SPLIT, and this test asserted
+            // only the `config-mutate-runtime` arm while its own `#[cfg]` did
+            // not require that feature: without it `reconfigure_*` stores the
+            // rows and drives NOTHING, by design, so the assertion was red on
+            // every build that compiled the test and lacked the feature.
+            // Invisible because no default lane compiles this pair.
+            //
+            // ⛔ Both arms are spelled LITERALLY rather than folded into one
+            // expression keyed off the feature. A conditional expectation reads
+            // as the same assertion in both builds while asserting whatever the
+            // code does, which is the shape that let this sit red.
+            #[cfg(feature = "config-mutate-runtime")]
+            {
+                assert_eq!(moved, Ok(true), "the sink reports the link moved");
+                assert_eq!(sink.calls(), 1, "the sink is driven exactly once");
+            }
+            #[cfg(not(feature = "config-mutate-runtime"))]
+            {
+                assert_eq!(
+                    moved,
+                    Ok(false),
+                    "without the runtime-mutate feature there is no live \
+                     re-apply, so nothing moved"
+                );
+                assert_eq!(sink.calls(), 0, "and the sink is not driven at all");
+            }
+            // Unconditional: the rows are STORED either way, which is the half
+            // of the join this test is named for.
             assert_eq!(
                 cfg.router_link_weights(),
                 &[row(0xAA, 250), row(0xBB, 7)],

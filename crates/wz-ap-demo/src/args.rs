@@ -1589,6 +1589,34 @@ pub(crate) fn expand_stock_zenoh_config_for_build(
             exp.record("downsampling", effect);
         }
     }
+    // R2652 — the five `access_control/*` keys, one decision site each and all
+    // five routed through `no_sink` for the binding reason above.
+    //
+    // ⚠ ONE LOOP, NOT ONE SITE, because the five have one verdict and one
+    // reason: this binary's only ACL flag is `--acl-deny <keyexpr>`, which
+    // states a DENY list against every peer, and upstream's subtree is named
+    // rules joined to named subjects by named policies. Nothing in that argv
+    // can express a rule's flow set, its message kinds, or a subject at all, so
+    // no expansion exists for any of them — including the two scalars, because
+    // `enabled` and `default_permission` would be expanding a policy the other
+    // three keys could not state.
+    //
+    // NOT "reaches nothing": the reader honours all five and `apply_one_key`
+    // has an arm for each. What they do not reach is this binary's STARTUP flag
+    // path, which is what this list is for.
+    for key in [
+        "access_control/default_permission",
+        "access_control/enabled",
+        "access_control/policies",
+        "access_control/rules",
+        "access_control/subjects",
+    ] {
+        if named(key) {
+            if let Some(effect) = no_sink(key) {
+                exp.record(key, effect);
+            }
+        }
+    }
     // R2627 — the pubkey identity's decision site, shaped like the dictionary's
     // and for its reason: no auth plane, so no flag branch to guard, and the
     // verdict is the whole site. One loop over the four rather than four copies,
@@ -2745,6 +2773,64 @@ pub(crate) const ARGV_ONLY_KIND_LEDGER: &[(&str, &str, &str)] = &[
          never the rule that paced them.",
     ),
     (
+        "access_control/default_permission",
+        KIND_OFF_WIRE,
+        "expands to NO flag. This binary's one ACL flag is --acl-deny, which \
+         states a deny list against every peer, so nothing in argv can carry a \
+         default verdict alongside a rule set the flag cannot state either; the \
+         key is pinned in `config_keys_the_demo_drops()` and its decision site \
+         records NoSinkInThisBuild. Off-wire for the reason every access \
+         verdict is: the decision is local and the frames carry the messages it \
+         admits or drops, never the policy that judged them.",
+    ),
+    (
+        "access_control/enabled",
+        KIND_OFF_WIRE,
+        "expands to NO flag, and dropping it is what keeps the other four \
+         honest: turning enforcement on while the rules, subjects and policies \
+         cannot be expanded would leave a node enforcing its default verdict \
+         against every message and nothing else. This binary's only ACL flag is \
+         --acl-deny, and what the switch does upstream is \
+         `zenoh/src/net/routing/interceptor/access_control.rs` @ `if acl_config.enabled {` -- an \
+         enforcer is built only inside `if acl_config.enabled`, and the default \
+         is false. Pinned in `config_keys_the_demo_drops()`, decision site \
+         records NoSinkInThisBuild. Off-wire: the switch changes which messages \
+         exist on the wire, never appearing on it.",
+    ),
+    (
+        "access_control/policies",
+        KIND_OFF_WIRE,
+        "expands to NO flag: it is the JOIN of rule ids to subject ids and this \
+         binary has no argv for either side of it -- --acl-deny states a deny \
+         keyexpr and names no rule and no subject -- let alone the join. \
+         Upstream resolves it at \
+         `zenoh/src/net/routing/interceptor/authorization.rs` @ `does not exist in rules list` \
+         -- a policy naming an id no rule defines refuses the whole subtree. Pinned \
+         in `config_keys_the_demo_drops()`, decision site records \
+         NoSinkInThisBuild. Off-wire for its siblings' reason: an access \
+         decision is local and the frames carry its outcome, not its rule.",
+    ),
+    (
+        "access_control/rules",
+        KIND_OFF_WIRE,
+        "expands to NO flag. --acl-deny states a deny keyexpr and nothing else, \
+         while one upstream rule carries an id, a keyexpr list, a message-kind \
+         list, an optional flow list and a permission -- so no argv spells even \
+         a one-rule document. Pinned in `config_keys_the_demo_drops()`, \
+         decision site records NoSinkInThisBuild. Off-wire: local decision, and \
+         the frames carry what it admitted or dropped.",
+    ),
+    (
+        "access_control/subjects",
+        KIND_OFF_WIRE,
+        "expands to NO flag, and this is the axis the demo's flag lacks most \
+         completely: --acl-deny applies to EVERY peer, while a subject narrows \
+         by zid, interface, username, link protocol and certificate name. \
+         Pinned in `config_keys_the_demo_drops()`, decision site records \
+         NoSinkInThisBuild. Off-wire: the subject is resolved from the face the \
+         node already has, never carried in a frame.",
+    ),
+    (
         "low_pass_filter",
         KIND_OFF_WIRE,
         "expands to NO flag, and the reason is not an absent plane. This binary \
@@ -2934,6 +3020,33 @@ pub(crate) fn config_keys_the_demo_drops() -> Vec<&'static str> {
         // an arm for it, and it reaches a running node through the admin write
         // plane. What it does not reach is the STARTUP flag path.
         "downsampling",
+        // R2652 — the five `access_control/*` keys, the same THIRD kind as the
+        // two interceptor rows above and the widest gap of the three.
+        //
+        // This binary's one ACL flag is `--acl-deny <keyexpr>`: a deny list
+        // against EVERY peer, with no flow, no message kind and no subject.
+        // Upstream's subtree is named rules joined to named subjects by named
+        // policies, and a single `AclRule` needs four axes the flag cannot
+        // name. So there is no argv that spells even a one-rule document, let
+        // alone the join.
+        //
+        // ⚠ The two SCALARS are dropped for a reason of their own rather than
+        // by association, because expanding them alone would be the half-measure
+        // the rows above refuse in a sharper form: `enabled: true` with rules
+        // the flag path could not carry would start a node enforcing
+        // `default_permission` against every message and NOTHING else — a
+        // default-deny document would take the node off the air, and a
+        // default-allow one would silently enforce none of the denials it
+        // states. Both are worse than a named drop.
+        //
+        // NOT "reaches nothing": the reader honours all five, `apply_one_key`
+        // has an arm for each, and `acl_config_from_inputs` compiles them. What
+        // they do not reach is the STARTUP flag path.
+        "access_control/default_permission",
+        "access_control/enabled",
+        "access_control/policies",
+        "access_control/rules",
+        "access_control/subjects",
         // R2627 — the pubkey identity: the same FIRST kind as the dictionary and
         // on the same measurement, re-taken for these keys rather than inherited
         // from that row. `wz-ap-demo` still names `extauth` zero times and
@@ -3984,6 +4097,53 @@ mod stock_config_tests {
                      downsampling: [ { messages: ["put"],
                                        rules: [ { key_expr: "demo/**",
                                                   freq: 0.5 } ] } ] }"#,
+            ),
+            // R2652 — the five `access_control/*` keys, ONE ROW PER KEY so the
+            // table stays universal, and each document states ONLY its own key
+            // from the subtree. That is what the vacuity guard needs: a single
+            // row naming all five would prove the reader saw the subtree and say
+            // nothing about which of the five it read.
+            //
+            // ⚠ The three LIST keys are stated WITHOUT the joins that would make
+            // them a working policy, and deliberately: a document naming
+            // `policies` alone names a rule id nothing defines, which a real
+            // zenohd PARSES and refuses later when it compiles the ACL. These
+            // rows are about the reader naming the key, and the compile's own
+            // refusals are `AclCompileError`'s tests.
+            (
+                "access_control/default_permission",
+                LISTEN_ONLY,
+                r#"{ listen: { endpoints: ["tcp/0.0.0.0:7447"] },
+                     access_control: { default_permission: "allow" } }"#,
+            ),
+            (
+                "access_control/enabled",
+                LISTEN_ONLY,
+                r#"{ listen: { endpoints: ["tcp/0.0.0.0:7447"] },
+                     access_control: { enabled: true } }"#,
+            ),
+            (
+                "access_control/policies",
+                LISTEN_ONLY,
+                r#"{ listen: { endpoints: ["tcp/0.0.0.0:7447"] },
+                     access_control: { policies: [ { rules: ["r1"],
+                                                     subjects: ["s1"] } ] } }"#,
+            ),
+            (
+                "access_control/rules",
+                LISTEN_ONLY,
+                r#"{ listen: { endpoints: ["tcp/0.0.0.0:7447"] },
+                     access_control: { rules: [ { id: "r1",
+                                                  key_exprs: ["demo/**"],
+                                                  messages: ["put"],
+                                                  permission: "deny" } ] } }"#,
+            ),
+            (
+                "access_control/subjects",
+                LISTEN_ONLY,
+                r#"{ listen: { endpoints: ["tcp/0.0.0.0:7447"] },
+                     access_control: { subjects: [ { id: "s1",
+                                                     usernames: ["alice"] } ] } }"#,
             ),
             // R2627 — the pubkey identity, one row per key so the table stays
             // universal. Each reaches NOTHING here (no auth plane) and is pinned
@@ -6598,20 +6758,62 @@ mod stock_config_tests {
     /// A clean verdict still names every key the check could not read.
     ///
     /// Without those lines "these can form a network" is read as "these files
-    /// are understood", and an operator whose access-control block decides who
-    /// may connect at all would have been told nothing about it.
+    /// are understood", and an operator would be told nothing about the part of
+    /// their file that wz passed over.
+    ///
+    /// ⚠ R2652 — THE KEY IS DERIVED, and the round that derived it is the round
+    /// that broke the literal. This test used to state `access_control/enabled`
+    /// and read as an argument as much as a fixture: "an operator whose
+    /// access-control block decides who may connect at all would have been told
+    /// nothing about it". R2652 honoured all five `access_control` keys, so the
+    /// check READS that block now and the assertion went red. A named key here
+    /// is a claim about the honoured/unhonoured partition, and this tree moves
+    /// that partition most rounds — so the fixture asks the registry which key
+    /// is unhonoured instead of remembering an answer.
     #[test]
     fn a_clean_verdict_still_names_every_key_the_check_could_not_read() {
-        const WITH_ACL: &str = r#"{ id: "rtr", mode: "router",
-             listen: { endpoints: ["tcp/10.0.0.9:7447"] },
-             access_control: { enabled: true } }"#;
-
-        let ok = check(&[("rtr.json5", WITH_ACL)]).expect("one router is a network of one");
-        assert!(
-            ok.contains("rtr.json5: IGNORED access_control/enabled"),
-            "{ok}"
+        let (key, block) = a_document_naming_an_unhonoured_key();
+        let doc = format!(
+            r#"{{ id: "rtr", mode: "router",
+             listen: {{ endpoints: ["tcp/10.0.0.9:7447"] }},
+             {block} }}"#
         );
+
+        let ok = check(&[("rtr.json5", &doc)]).expect("one router is a network of one");
+        assert!(ok.contains(&format!("rtr.json5: IGNORED {key}")), "{ok}");
         assert!(ok.contains("1 node(s) can form"), "{ok}");
+    }
+
+    /// R2652 — one key wz's reader does NOT honour, with a document stating it,
+    /// both built from the registry.
+    ///
+    /// The value is an empty ARRAY whatever the key's real type is, and that is
+    /// not a shortcut: an unhonoured key is never parsed into a typed slice, and
+    /// the leaf walker treats an array as a leaf in its own right, so the path
+    /// this returns is the path the report names. A scalar would work equally
+    /// for a scalar-typed key and not for an object-typed one.
+    fn a_document_naming_an_unhonoured_key() -> (&'static str, String) {
+        let key = wz::runtime_tokio::zenoh_config::UNHONOURED_UPSTREAM_CONFIG_KEYS
+            .first()
+            .copied()
+            .expect(
+                "the unhonoured surface is never empty — wz models a subset of \
+                 zenoh's config and this list is the rest of it",
+            );
+        let segments: Vec<&str> = key.split('/').collect();
+        let mut block = String::from("[]");
+        for segment in segments.iter().rev() {
+            block = format!("{segment}: {block}");
+            block = format!("{{ {block} }}");
+        }
+        // The outermost pair of braces belongs to the document the caller
+        // builds, so the block it embeds is `name: { … }` rather than `{ … }`.
+        let block = block
+            .strip_prefix("{ ")
+            .and_then(|rest| rest.strip_suffix(" }"))
+            .expect("the loop above wrote at least one wrapper")
+            .to_string();
+        (key, block)
     }
 
     /// A verdict reached over a mode-less document says which reading it was
