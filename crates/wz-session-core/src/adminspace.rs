@@ -1173,6 +1173,15 @@ pub struct AdminConfigWriteSpace {
     /// `@/<zid>/<whatami>/config/**`. PRIVATE, and the only field: every other
     /// shape this type hands out is derived from it here rather than built by a
     /// caller.
+    ///
+    /// ⛔ IT ALWAYS ENDS IN [`ADMIN_CONFIG_WRITE_PATTERN_TAIL`], and
+    /// [`Self::prefix`] SUBTRACTS that length without checking. The invariant
+    /// holds by construction — [`Self::new`] is the only constructor, it always
+    /// appends the tail, and nothing outside it builds this struct — which is
+    /// why the derive list above must NOT gain `Default`: a default `String` is
+    /// empty, the subtraction underflows, and the panic lands on a path the
+    /// wire reaches. The absence of that derive is load-bearing, so it is
+    /// stated here rather than left to be inferred from its own absence.
     pattern: String,
 }
 
