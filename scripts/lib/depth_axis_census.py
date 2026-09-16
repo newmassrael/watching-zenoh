@@ -934,7 +934,16 @@ CITATION = re.compile(r"\b((?:[A-Za-z0-9_.-]+/)*[A-Za-z0-9_.-]+\.(?:rs|c|h))(?::
 # symbols), so it leaves this count with the population; UNREACHED and NO_SYMBOL
 # hold. MEASURED with `reach_partition` over origin's store and this one:
 # exactly that atom left `reached`, none joined.
-PIN_REACHED = 30
+# R2663 -- 30 -> 29: `adminspace-write` went PARTIAL -> COMPLETE. Its last named
+# residual -- open debt 763, the subscriber fans still matching one-sidedly, so a
+# wildcard-addressed config write decoded correctly and then reached nobody -- is
+# built, and the whole-atom re-audit open debt item 15 requires was carried in
+# R2662 rather than deferred. A REACHED atom (3 owned symbols, all 3 named by
+# tests), so it leaves this count with the population; UNREACHED and NO_SYMBOL
+# hold. MEASURED with `reach_partition` over this store and over the same store
+# with ONLY this atom's reason restored to its origin body, never by diffing the
+# totals: 30 -> 29, exactly that atom left `reached`, none joined.
+PIN_REACHED = 29
 PIN_UNREACHED = 3
 PIN_NO_SYMBOL = 2
 # R2534 — 346 -> 347. The atom is `adminspace-metrics` and the citation is the
@@ -1513,7 +1522,20 @@ PIN_NO_SYMBOL = 2
 # 24 / 0 / 9. The rise is +8 wz, this atom's ALONE; AMBIGUOUS held at 0, and the
 # +2 UPSTREAM rides the unpinned total this gate prints and does not judge.
 # 196 + 8 = 204, which is the number the gate reported.
-PIN_WZ_CITATIONS = 204
+# R2663 -- 204 -> 180, and it is the SAME re-grade as PIN_REACHED above.
+# `adminspace-write` is COMPLETE, so `partial_atoms()` no longer admits its
+# reason and the wz citations it contributed leave this population WITH it.
+# That distinction is load-bearing and is the reason this block exists: this is
+# a POPULATION change, not a citation removal -- the new body carries MORE
+# citations than the old one, not fewer, so a reader who assumed the fall meant
+# anchors were deleted would look for a deletion that never happened.
+# MEASURED with THIS FILE'S OWN `citation_audit` over that ONE reason in both
+# versions -- origin's PARTIAL body against the COMPLETE one -- never by diffing
+# the totals, which cannot say whose the fall is: the origin body audits
+# 24 wz / 0 ambiguous / 9 upstream, the new one 32 / 0 / 10. 204 - 24 = 180,
+# which is the number the gate reported. AMBIGUOUS held at 0 for this atom in
+# BOTH versions, which is why PIN_AMBIGUOUS does not move.
+PIN_WZ_CITATIONS = 180
 # R2626 — 44 -> 42, and this one is worth a sentence because it HELD through
 # every earlier retirement in this run (R2612, R2622). `time-hlc`'s reason is the
 # first retiree carrying AMBIGUOUS citations of its own: its oldest clauses cite
