@@ -102,6 +102,15 @@ UNRESOLVED_DECLARED: dict[tuple[str, str], str] = {
     ("scripts/lib/guarded_count_gate.py", "x"): (
         "the same fixture, second invented package (`other-crate`)"
     ),
+    ("scripts/lib/lane_feature_membership_gate.py", "harmless"): (
+        "R2659 — the same shape as the two rows above: a FIXTURE string in that "
+        "gate's `--selftest`, naming an invented package (`demo`) and an "
+        "invented feature, which is its own test input rather than a command "
+        "anyone runs. The fixture is deliberately synthetic because the selftest "
+        "INJECTS its package set, so naming a real package here would couple the "
+        "fixture to the workspace and its `--features` would then have to name a "
+        "real feature of that package too"
+    ),
     # R2551 — the `("scripts/run-ci.sh", "transport-link-vsock")` row is GONE,
     # and its deletion is the whole repair for a hosted red. It excused one
     # sentence: Layer C1ab's old comment quoting `cargo test --features
