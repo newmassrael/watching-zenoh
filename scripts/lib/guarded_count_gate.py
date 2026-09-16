@@ -437,12 +437,28 @@ def verdict(want, rc, output):
     two kinds of failure with one verdict pronounces on a subject it never
     reached. `UNMEASURED` is a broken instrument and says so; `MOVED` is the
     count claim and is the only one that means edit the constant.
+
+    ⛔⛔ R2661 — THE `rc` CHECK COMES FIRST, and until this round it did not,
+    which left `FAILED` nearly unreachable and sent its cases to `UNMEASURED`.
+    `SUMMARY_RE` matches `test result: ok.` alone, so a guard whose test binary
+    goes RED prints `test result: FAILED. 38 passed; 1 failed`, parses to no
+    counts, and was reported as "NO libtest summary — this gate measured
+    nothing". That sentence is false about that run, and it is DIRECTIONAL: it
+    sends the reader after a feature set that does not compile, which is a
+    different repair in a different file. `FAILED` used to fire only when some
+    OTHER binary in the same run happened to print an `ok` line, so the common
+    shape reported the rare cause. Ordering by what is KNOWN fixes it — a
+    non-zero exit is a fact about the run whether or not a count was readable,
+    and only `rc == 0` with no summary means the output never carried one,
+    which is the `$BX` log-routing hole its own arm below pins. This is the
+    same class the paragraph above is proud of having closed once: two kinds of
+    failure under one verdict.
     """
     counts = [int(m.group(1)) for m in SUMMARY_RE.finditer(output)]
-    if not counts:
-        return "UNMEASURED", counts
     if rc != 0:
         return "FAILED", counts
+    if not counts:
+        return "UNMEASURED", counts
     return ("OK" if want in counts else "MOVED"), counts
 
 
@@ -615,8 +631,14 @@ def main():
                 f"      {' '.join(g.cmd)}"
             )
         elif status == "FAILED":
+            # R2661 — say WHICH non-zero this was. A guard whose tests went red
+            # reads no `ok` summary, so `seen` is empty, and the reader must be
+            # sent to the failure rather than to a missing summary.
+            saw = f"it printed {seen}" if counts else "it printed no passing summary"
             broken.append(
-                f"{g.where}: the command exited non-zero (it printed {seen})\n"
+                f"{g.where}: the command exited non-zero ({saw}) — re-run it and "
+                f"read the failure; a RED test lands HERE, not in the "
+                f"no-summary case\n"
                 f"      {' '.join(g.cmd)}"
             )
         else:
@@ -884,6 +906,22 @@ def selftest():
         "verdict: a non-zero exit is not a count claim",
         verdict(38, 101, "test result: ok. 38 passed") == ("FAILED", [38]),
         "a crashed run can still have printed a passing summary",
+    )
+    # R2661 — THE SHAPE THE ARM ABOVE DOES NOT COVER, and the common one. A
+    # single-binary guard whose tests go RED prints `FAILED`, never `ok`, so
+    # `counts` is empty; with the `not counts` test first this answered
+    # UNMEASURED and the report said "NO libtest summary — measured nothing",
+    # which is false about the run and points at a compile error rather than at
+    # the failing test. `FAILED` was reachable only when some OTHER binary in
+    # the same run printed an `ok` line, i.e. never for the usual guard.
+    #
+    # MEASURED against both orderings before it was written: of the five
+    # verdict fixtures, this is the ONLY one whose answer moves, so the reorder
+    # is behaviour-preserving everywhere an arm already looked.
+    arm(
+        "verdict: a RED test binary is FAILED, not UNMEASURED",
+        verdict(38, 101, "test result: FAILED. 38 passed; 1 failed") == ("FAILED", []),
+        "reporting a red run as 'no summary' sends the reader to the wrong file",
     )
     # The hole the R2166 probe found in THIS file: routed through `$BX` the
     # summary is in a log the wrapper names, so the captured stdout has none,
