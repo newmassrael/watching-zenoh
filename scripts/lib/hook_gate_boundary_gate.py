@@ -262,10 +262,27 @@ def check(hook_text: str) -> tuple[bool, list[str]]:
         if not name:
             if n:
                 ok = False
-                lines.append(
-                    f"hook-gate-boundary FAIL: `{h[:48]}` is not a gate and owns "
-                    f"{n} `exit 1`. A refusal outside a gate is a gate nobody "
-                    f"named. Give it a `# ─── gate <N>` header.")
+                # R2653 — TWO diagnoses, because they ask for opposite repairs
+                # and R2652 was handed the wrong one. A section headed
+                # `gate 2d2` HAS the header this message used to demand; what it
+                # did not have was a name `GATE_RE` could read, and being told
+                # to add a header sends the reader to the one line that is
+                # already right. Split on whether the header even claims to be a
+                # gate: if it does, the name is the defect and this says so.
+                if h.lower().startswith("gate"):
+                    lines.append(
+                        f"hook-gate-boundary FAIL: `{h[:48]}` calls itself a "
+                        f"gate and owns {n} `exit 1`, but its NAME does not "
+                        f"match `{GATE_RE.pattern}` -- so nothing here can "
+                        f"attribute its refusals. The header is not the defect; "
+                        f"the name is. Spell it digits then letters or digits "
+                        f"(`2`, `2d`, `2d2`), or widen that pattern and say why."
+                    )
+                else:
+                    lines.append(
+                        f"hook-gate-boundary FAIL: `{h[:48]}` is not a gate and "
+                        f"owns {n} `exit 1`. A refusal outside a gate is a gate "
+                        f"nobody named. Give it a `# ─── gate <N>` header.")
             continue
 
         gid = name.group("n")
@@ -416,6 +433,15 @@ _CASES = [
      _sec("housekeeping (NOT a gate)", _SILENT)
      + _sec("gate 5 — the other lanes", _VERDICT, "worktree"),
      "is not a gate and owns"),
+    # R2653 — the SAME rejection, diagnosed the other way. Both arms are here
+    # because a message that sends the reader to the wrong line is what cost
+    # R2652 two hosted jobs, and only a pair can show the split holds: this one
+    # pins the needle "its NAME does not match", the arm above pins "is not a
+    # gate", and a single diagnosis for both would satisfy neither.
+    ("a section CALLING itself a gate with an unreadable name", False,
+     _sec("gate two — spelled in words", _verdict("two"), "worktree")
+     + _sec("gate 5 — the other lanes", _VERDICT, "worktree"),
+     "its NAME does not match"),
     ("a refusal quoted in a COMMENT is not a refusal", False,
      _sec("gate 5 — the other lanes",
           "# the old form ended in `exit 1` here\ncargo test\n", "worktree"),
