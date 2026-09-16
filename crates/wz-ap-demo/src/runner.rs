@@ -4994,6 +4994,12 @@ async fn run_peer_until(
                 // write of the empty value.
                 AdminConfigWriteBody::of_sample(sample),
                 write_permitted,
+                // R2658 — the config-key vocabulary, resolved by the library for
+                // the same reason `admin_write_permit` above is: the decoder
+                // owns wz's five action verbs and takes the config list as a
+                // parameter, and a host that picked its own list would classify
+                // differently from its neighbour.
+                &wz::runtime_tokio::admin_write_knows_config_key,
             ) {
                 AdminConfigWriteOutcome::Apply(AdminConfigWrite::AclDeny(deny_kx)) => {
                     log::info!("wz-ap-demo peer: config-write received acl-deny {deny_kx}");
@@ -5027,10 +5033,17 @@ async fn run_peer_until(
                 AdminConfigWriteOutcome::Malformed => {
                     log::warn!("wz-ap-demo peer: config-write acl-deny with empty payload; ignored")
                 }
-                // The full json5/json-pointer config engine is a deferred §5.23 layer.
+                // R2658 — the message no longer says "only acl-deny is
+                // recognized". Since this round the decoder routes on the two
+                // VOCABULARIES rather than on the key's shape, so reaching here
+                // means the sub-key is in neither: not one of wz's action verbs,
+                // and not a config key this build's registry carries. Naming
+                // that is the whole value of the outcome — the previous wording
+                // would have sent an operator looking for a typo in `acl-deny`
+                // after mistyping a config path.
                 AdminConfigWriteOutcome::UnknownKey(key) => log::warn!(
-                    "wz-ap-demo peer: config-write unknown key '{key}' (only 'acl-deny' is \
-                     recognized; the full json5 config engine is a deferred §5.23 layer); ignored"
+                    "wz-ap-demo peer: config-write unknown key '{key}' (it is neither a config \
+                     key this build carries nor one of wz's config-write actions); ignored"
                 ),
                 // R2646 — a DELETE of one of wz's action-named sub-keys. Logged
                 // distinctly from an unknown key on purpose: the operator spelled a
@@ -6609,6 +6622,7 @@ async fn run_router_hat_until(
                 sample.keyexpr(),
                 AdminConfigWriteBody::of_sample(sample),
                 write_permitted,
+                &wz::runtime_tokio::admin_write_knows_config_key,
             ) {
                 #[cfg(feature = "router-connect-reconcile")]
                 AdminConfigWriteOutcome::Apply(AdminConfigWrite::ConnectAdd(eps)) => {
@@ -7943,6 +7957,7 @@ pub(crate) async fn run_storage_host(listen: &str, opts: StorageHostOpts) -> io:
                     sample.keyexpr(),
                     AdminConfigWriteBody::of_sample(sample),
                     write_permitted,
+                    &wz::runtime_tokio::admin_write_knows_config_key,
                 ) {
                     AdminConfigWriteOutcome::Apply(AdminConfigWrite::AdminReadPermit(read)) => {
                         // ONE read-modify-write of the same slice both gates pull

@@ -3287,7 +3287,18 @@ pub fn honours_config_key(path: &str) -> bool {
         || inside_a_mode_table(path)
 }
 
-fn wz_accepts(path: &str) -> bool {
+/// R2658 — WIDENED TO `pub(crate)`, because it is the root of the config-key
+/// vocabulary the adminspace config-write decoder had none of.
+/// `crate::config::accepts_config_key` wraps it with the member-key shape and
+/// hands the result to `wz-session-core`'s `parse_admin_config_write`, which
+/// takes that vocabulary as a parameter.
+///
+/// ⚠ It is the RIGHT root precisely because it is wider than
+/// [`honours_config_key`]: a key upstream carries and wz discards (`plugins`)
+/// must decode as a config write so the runtime can answer `NotHonoured` for it
+/// by name, rather than the decoder answering "never heard of it" a crate
+/// earlier and collapsing the distinction R2644 built.
+pub(crate) fn wz_accepts(path: &str) -> bool {
     let under = |known: &&str| {
         path.len() > known.len() && path.starts_with(*known) && path.as_bytes()[known.len()] == b'/'
     };

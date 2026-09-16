@@ -463,6 +463,40 @@ pub fn admin_write_permit(permissions: &adminspace::AdminSpacePermissions) -> bo
     }
 }
 
+/// R2658 (§5.23 `adminspace-write`) — resolve the config-key VOCABULARY the
+/// config-write decoder classifies against, the twin of [`admin_write_permit`]
+/// and for the same reason.
+///
+/// `adminspace::parse_admin_config_write` decides whether a sub-key names one of
+/// wz's five action verbs or a config PATH. It owns the verb list and takes the
+/// config list as an `is_config_key` parameter, because the registry lives in
+/// THIS crate and `wz-session-core` cannot depend on it. This is the resolver
+/// that answers from whatever registry the build actually carries:
+/// [`config::accepts_config_key`] under `zenoh-config`, and "nothing" without
+/// it — a build with no config-key list has no config vocabulary, and the
+/// honest answer for such a host is that a config path is a name it does not
+/// know.
+///
+/// ⚠ THE CFG LIVES HERE AND NOWHERE ELSE, which is the whole point. Three hosts
+/// in this tree subscribe to the config-write keyexpr, and `admin_write_permit`
+/// exists because the `adminspace-write` gate written three times is three
+/// chances to gate differently; a vocabulary written three times is three
+/// chances to classify differently, and the failure is quieter — a host that
+/// picked the narrow list would answer `UnknownKey` for keys its neighbour
+/// writes.
+#[cfg(feature = "adminspace-core")]
+pub fn admin_write_knows_config_key(path: &str) -> bool {
+    #[cfg(feature = "zenoh-config")]
+    {
+        config::accepts_config_key(path)
+    }
+    #[cfg(not(feature = "zenoh-config"))]
+    {
+        let _ = path;
+        false
+    }
+}
+
 #[cfg(all(test, feature = "adminspace-core"))]
 mod admin_write_permit_tests {
     use super::admin_write_permit;
@@ -489,6 +523,101 @@ mod admin_write_permit_tests {
             // Gate elided (pre-y51 apply-all): the value is ignored, always permit.
             assert!(admin_write_permit(&granted));
             assert!(admin_write_permit(&denied));
+        }
+    }
+}
+
+/// R2658 — THE JOIN, in the one crate that can see both halves.
+///
+/// `wz-session-core` owns the config-write decoder and its five action verbs;
+/// this crate owns the config-key registry. The decoder's own tests supply a
+/// STUB vocabulary — they have no choice, the registry is a crate away — so
+/// everything they prove is about the decoder's shape and nothing about the
+/// list it will actually be handed. That is the exact "both ends true, the join
+/// unverified" shape this tree has paid for repeatedly, so the join gets its own
+/// fixture here, driving the REAL decoder with the REAL resolver.
+#[cfg(all(test, feature = "adminspace-core", feature = "zenoh-config"))]
+mod admin_write_vocabulary_tests {
+    use super::admin_write_knows_config_key;
+    use wz_session_core::adminspace::{
+        parse_admin_config_write, AdminConfigWrite, AdminConfigWriteBody, AdminConfigWriteOutcome,
+        ADMIN_CONFIG_WRITE_ACTIONS,
+    };
+
+    const WRITE_PREFIX: &str = "@/a1b2/peer/config/";
+
+    fn decode(subkey: &str) -> AdminConfigWriteOutcome {
+        parse_admin_config_write(
+            WRITE_PREFIX,
+            &format!("{WRITE_PREFIX}{subkey}"),
+            AdminConfigWriteBody::Put(b"x"),
+            true,
+            &admin_write_knows_config_key,
+        )
+    }
+
+    #[test]
+    fn the_real_vocabulary_routes_config_paths_and_keeps_the_typo_diagnosis() {
+        // (A) A SINGLE-SEGMENT key the registry carries is a config write. This
+        // is the defect R2658 closed: the decoder used to ask whether the name
+        // carried a `/`, so this one answered `UnknownKey` on a node that can
+        // apply it.
+        for key in ["downsampling", "low_pass_filter"] {
+            assert!(
+                admin_write_knows_config_key(key),
+                "{key} must be in the real vocabulary"
+            );
+            assert_eq!(
+                decode(key),
+                AdminConfigWriteOutcome::Apply(AdminConfigWrite::SetKey {
+                    key: String::from(key),
+                    value: String::from("x"),
+                })
+            );
+        }
+
+        // The MEMBER form of the same key, which R2657 made writable. The
+        // resolver has to answer for it too — `zenoh_config::wz_accepts` alone
+        // is a LEAF-PATH predicate and says no.
+        assert_eq!(
+            decode("downsampling/id=my_rule"),
+            AdminConfigWriteOutcome::Apply(AdminConfigWrite::SetKey {
+                key: String::from("downsampling/id=my_rule"),
+                value: String::from("x"),
+            })
+        );
+
+        // R2644's middle case: a key upstream carries and wz deliberately
+        // IGNORES still decodes as a config write, so the runtime answers
+        // `NotHonoured` for it BY NAME. A predicate narrowed to "honoured"
+        // would collapse this into "never heard of it" a crate earlier.
+        assert!(!crate::zenoh_config::honours_config_key("plugins"));
+        assert_eq!(
+            decode("plugins"),
+            AdminConfigWriteOutcome::Apply(AdminConfigWrite::SetKey {
+                key: String::from("plugins"),
+                value: String::from("x"),
+            })
+        );
+
+        // (B) A TYPO of one of wz's verbs is in NEITHER vocabulary and keeps the
+        // diagnosis R2644 pinned it for.
+        assert_eq!(
+            decode("acl-denyy"),
+            AdminConfigWriteOutcome::UnknownKey(String::from("acl-denyy"))
+        );
+    }
+
+    #[test]
+    fn the_two_vocabularies_are_disjoint_over_the_real_list() {
+        // The measured premise the decoder's arm order rests on. Nothing wz owns
+        // may be a name the registry claims — otherwise the const guard would be
+        // masking a real collision rather than covering an elided arm.
+        for action in ADMIN_CONFIG_WRITE_ACTIONS {
+            assert!(
+                !admin_write_knows_config_key(action),
+                "'{action}' is a name wz owns and must not also be a config key"
+            );
         }
     }
 }

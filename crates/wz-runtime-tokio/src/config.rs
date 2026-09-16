@@ -307,6 +307,89 @@ enum MemberWrite {
     Remove,
 }
 
+/// R2658 — the SHAPE of a runtime config write key, derived once.
+///
+/// Two callers need this split and they must not answer it differently:
+/// [`WzConfig::member_write`], which performs the write, and
+/// [`accepts_config_key`], which tells the adminspace decoder a crate away
+/// whether the key is in the config vocabulary at all. A decoder that decided
+/// the member form was not a config key would send `downsampling/id=x` to
+/// `UnknownKey` while `set_by_key_with` stood ready to apply it — the same class
+/// of split R2658 exists to close, one layer up.
+#[cfg(all(
+    feature = "zenoh-config",
+    any(feature = "adminspace-core", feature = "routing-router-hat")
+))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WriteKeyForm<'a> {
+    /// No `=`: the key names a whole value.
+    Whole,
+    /// `<array_key>/<field>=<field_value>`: the key names one ROW.
+    Member {
+        /// The array the row belongs to — the key the document is built for.
+        array_key: &'a str,
+        /// The field the row is addressed by.
+        field: &'a str,
+        /// The value that field must hold.
+        field_value: &'a str,
+    },
+    /// Carries `=` and so claims to be a member key, but names no field.
+    MalformedMember {
+        /// Everything left of the `=`, which is what the refusal names.
+        prefix: &'a str,
+    },
+}
+
+/// Classify a runtime write key into its [`WriteKeyForm`].
+#[cfg(all(
+    feature = "zenoh-config",
+    any(feature = "adminspace-core", feature = "routing-router-hat")
+))]
+fn classify_write_key(key: &str) -> WriteKeyForm<'_> {
+    let Some((prefix, field_value)) = key.split_once('=') else {
+        return WriteKeyForm::Whole;
+    };
+    match prefix.rsplit_once('/') {
+        Some((array_key, field)) => WriteKeyForm::Member {
+            array_key,
+            field,
+            field_value,
+        },
+        None => WriteKeyForm::MalformedMember { prefix },
+    }
+}
+
+/// R2658 — the config-key VOCABULARY, as the adminspace config-write decoder
+/// needs it.
+///
+/// `wz-session-core`'s `parse_admin_config_write` decides whether a sub-key
+/// under `@/<zid>/<whatami>/config/` names one of wz's five action verbs or a
+/// config PATH. It owns the verb list; the config list lives here, because the
+/// registry does, and the decoder takes it as a parameter rather than guessing
+/// from the key's shape.
+///
+/// ⚠ THE MEMBER FORM IS A CONFIG KEY, and answering that from the same
+/// `classify_write_key` the write itself uses — rather than from a second
+/// reading of the string — is the point: `zenoh_config::wz_accepts` is a
+/// LEAF-PATH predicate and says no to `downsampling/id=x`, so a decoder handed
+/// the raw predicate would refuse the very rows R2657 made writable.
+///
+/// A malformed member key answers `false` — it resolves to no config key at all,
+/// so the honest answer is that it is not in this vocabulary, and the typo
+/// diagnosis the decoder keeps for names in neither vocabulary is the right one
+/// for it.
+#[cfg(all(
+    feature = "zenoh-config",
+    any(feature = "adminspace-core", feature = "routing-router-hat")
+))]
+pub fn accepts_config_key(key: &str) -> bool {
+    match classify_write_key(key) {
+        WriteKeyForm::Whole => crate::zenoh_config::wz_accepts(key),
+        WriteKeyForm::Member { array_key, .. } => crate::zenoh_config::wz_accepts(array_key),
+        WriteKeyForm::MalformedMember { .. } => false,
+    }
+}
+
 /// R2657 — one array spliced by the member the key named.
 ///
 /// ⚠ THE TWO MODES ARE NOT SYMMETRIC, and that asymmetry is upstream's rather
@@ -1626,8 +1709,21 @@ impl WzConfig {
         key: &str,
         value: Option<&str>,
     ) -> Option<Result<(String, crate::zenoh_config::ZenohConfigIngest), ConfigKeyWriteError>> {
-        let (prefix, field_value) = key.split_once('=')?;
-        Some(self.resolve_member_write(prefix, field_value, value))
+        match classify_write_key(key) {
+            WriteKeyForm::Whole => None,
+            WriteKeyForm::Member {
+                array_key,
+                field,
+                field_value,
+            } => Some(self.resolve_member_write(array_key, field, field_value, value)),
+            // Upstream's "missing field filter". The key is malformed as a
+            // MEMBER key, which is what it claimed to be by carrying `=`.
+            WriteKeyForm::MalformedMember { prefix } => {
+                Some(Err(ConfigKeyWriteError::MalformedKey {
+                    key: String::from(prefix),
+                }))
+            }
+        }
     }
 
     /// The body of [`Self::member_write`], once the key is known to be one.
@@ -1637,17 +1733,11 @@ impl WzConfig {
     ))]
     fn resolve_member_write(
         &self,
-        prefix: &str,
+        array_key: &str,
+        field: &str,
         field_value: &str,
         value: Option<&str>,
     ) -> Result<(String, crate::zenoh_config::ZenohConfigIngest), ConfigKeyWriteError> {
-        let Some((array_key, field)) = prefix.rsplit_once('/') else {
-            // Upstream's "missing field filter". The key is malformed as a
-            // MEMBER key, which is what it claimed to be by carrying `=`.
-            return Err(ConfigKeyWriteError::MalformedKey {
-                key: String::from(prefix),
-            });
-        };
         // ⛔ THE ELEMENT IS PARSED BY THE SLICE'S OWN PARSER, as a one-element
         // array, so an element this reader would refuse in a whole-array write
         // is refused here for the same reason and with the same error. A delete

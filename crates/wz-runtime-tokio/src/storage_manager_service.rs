@@ -557,6 +557,12 @@ mod tests {
             "@/z/peer/config/storage-add",
             AdminConfigWriteBody::Put(b"demo:demo/**"),
             true,
+            // R2658 — the decoder takes the config-key vocabulary as a
+            // parameter, and this one says EVERY name is a config key. That is
+            // deliberately the hostile input for these two asserts: a name wz
+            // owns must reach its own arm even when the supplied vocabulary
+            // claims it, which is what `ADMIN_CONFIG_WRITE_ACTIONS` guarantees.
+            &|_| true,
         );
         let AdminConfigWriteOutcome::Apply(intent) = out else {
             panic!("storage-add must Apply: {out:?}");
@@ -585,6 +591,7 @@ mod tests {
             "@/z/peer/config/storage-del",
             AdminConfigWriteBody::Put(b"demo"),
             true,
+            &|_| true,
         );
         let AdminConfigWriteOutcome::Apply(AdminConfigWrite::RemoveStorage(name)) = out else {
             panic!("storage-del must Apply RemoveStorage: {out:?}");

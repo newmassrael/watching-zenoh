@@ -1886,6 +1886,32 @@ impl<'a> AdminConfigWriteBody<'a> {
     }
 }
 
+/// R2658 — wz's OWN sub-key vocabulary under the config write prefix, closed and
+/// stated once.
+///
+/// Upstream has no action names in that space at all: every sub-key of `config/`
+/// is a config PATH there. wz put five verbs of its own beside them, and
+/// [`parse_admin_config_write`] needs a discriminator between the two
+/// vocabularies. This const is wz's half of it — the half this crate owns — and
+/// the config half arrives as the `is_config_key` parameter, because the
+/// runtime-mutable registry lives in a crate that depends on this one.
+///
+/// ⛔ IT CARRIES ALL FIVE UNCONDITIONALLY, including the two whose arms are
+/// `#[cfg(feature = "adminspace-config-hotreload")]`. That is the whole reason
+/// it is load-bearing rather than documentation: on a build that compiles those
+/// arms out, `storage-add` must still not read as a config path — it is a name
+/// wz owns, and the honest answer for it is the same `UnknownKey` a caller got
+/// before, not a config write the runtime would refuse a crate away under a
+/// different message. A predicate this crate cannot see must not be able to
+/// claim one of wz's verbs, whatever it answers.
+pub const ADMIN_CONFIG_WRITE_ACTIONS: &[&str] = &[
+    "acl-deny",
+    "connect-add",
+    "storage-add",
+    "storage-del",
+    "admin-read",
+];
+
 /// R311y51 (§5.23 `adminspace-write`) — the Session-independent config-WRITE
 /// permission gate + decoder, the write-side SSOT mirror of [`answer_admin_query`]
 /// (the read SSOT). Gates on `permissions_write` FIRST — the wz mirror of zenoh's
@@ -1905,11 +1931,27 @@ impl<'a> AdminConfigWriteBody<'a> {
 /// would have been lost to a separate `parse_admin_config_delete`: a delete is
 /// a write, and a node that gates one and not the other has a write path that
 /// ignores `permissions.write`.
+///
+/// R2658 — `is_config_key` answers "is this sub-key a config key this node can
+/// place". It is a PARAMETER because the registry that knows lives in
+/// `wz-runtime-tokio`, which depends on this crate and not the other way round:
+/// before this, the decoder had no config vocabulary at all and substituted a
+/// shape heuristic (`subkey.contains('/')`) for one. See
+/// [`ADMIN_CONFIG_WRITE_ACTIONS`] for the half of the discriminator this crate
+/// owns.
+///
+/// ⚠ THE PREDICATE IS THE ACCEPTANCE BOUNDARY, NOT "does wz honour it". A key
+/// upstream carries and wz deliberately ignores (`plugins`) must answer `true`
+/// here, so it decodes as a config write and is refused BY NAME where it is
+/// applied. R2644 built a three-way distinction — never-heard-of /
+/// known-and-ignored / known-and-not-runtime-mutable — and a predicate narrowed
+/// to "honoured" collapses the middle case into the first.
 pub fn parse_admin_config_write(
     write_prefix: &str,
     keyexpr: &str,
     body: AdminConfigWriteBody<'_>,
     permissions_write: bool,
+    is_config_key: &dyn Fn(&str) -> bool,
 ) -> AdminConfigWriteOutcome {
     if !permissions_write {
         return AdminConfigWriteOutcome::Denied;
@@ -2036,46 +2078,57 @@ pub fn parse_admin_config_write(
         // `admin-read`), which is why writing a new key has cost a new arm here
         // plus a new intent plus a host edit. This arm is the one that scales.
         //
-        // ⛔ THE KEY IS NOT VALIDATED HERE, and that is forced rather than lazy:
+        // ⛔ THE KEY IS NOT PLACED HERE, and that is forced rather than lazy:
         // the runtime-mutable registry lives in `wz-runtime-tokio`, which
         // depends on THIS crate and not the other way round, so this decoder
-        // structurally cannot see it. The runtime refuses an unplaceable key by
-        // name when it applies — the same split every other arm here uses,
+        // structurally cannot reach it. The runtime refuses an unplaceable key
+        // by name when it applies — the same split every other arm here uses,
         // shape decided here and applied there.
         //
-        // ⚠ ROUTED ON `/`, and the bound that draws is stated rather than
-        // hidden: a config key that is a SINGLE segment still reaches
-        // `UnknownKey` below.
+        // ⛔⛔ R2658 — WHAT IS DECIDED HERE IS *WHICH VOCABULARY THE SUB-KEY IS
+        // IN*, and until this round that question was answered by the key's
+        // SHAPE. The arm read `other if other.contains('/')`, i.e. "a config key
+        // has more than one segment", and the comment it carried admitted the
+        // bound while calling it inert: a single-segment config key reached
+        // `UnknownKey` below. R2651 honoured `downsampling` and
+        // `low_pass_filter` and R2654 made every runtime-mutable key writable
+        // through the sinks, at which point a wire write to `downsampling`
+        // decoded `UnknownKey` on a node that could apply it while its MEMBER
+        // form `downsampling/id=x` — one `/` longer — decoded fine. A key whose
+        // whole-value write is unreachable while one of its rows is reachable is
+        // not a bound, it is a defect, and the shape heuristic is what generated
+        // it.
         //
-        // ⛔⛔ R2657 — THAT BOUND IS NO LONGER INERT, and this comment used to
-        // say it was. It read: "the only single-segment keys in the registry
-        // today (`downsampling`, `low_pass_filter`) are ones wz does not
-        // honour, so both routes end in a refusal that names the key ... It
-        // stops being inert the day a single-segment key becomes honoured AND
-        // runtime-mutable". That day came and went: R2651 honoured both, and
-        // R2654 made every runtime-mutable key writable through the sinks. So a
-        // wire write to `downsampling` decodes `UnknownKey` on a node that can
-        // apply it, and — absurdly — its MEMBER form `downsampling/id=x` carries
-        // a `/` and decodes fine. A key whose whole-value write is unreachable
-        // while one of its rows is reachable is not a bound, it is a defect.
+        // THE BASE WAS THE MISSING VOCABULARY, NOT THE HEURISTIC. A classifier
+        // with no list of config keys substitutes something that correlates with
+        // one; `contains('/')` correlated until it did not. So the list is now a
+        // PARAMETER (`is_config_key`), supplied by the crate that owns the
+        // registry, and the two vocabularies are named rather than guessed:
         //
-        // THE FIX IS THE ONE THIS COMMENT ALREADY NAMED, and re-deriving it
-        // reaches the same place: upstream's rule is that EVERY sub-key of
-        // `config/` is a config path — it has no action names in that space at
-        // all. wz put its own (`acl-deny`, `connect-add`, `admin-read`,
-        // `storage-add`, `storage-del`) beside them and needed a discriminator,
-        // and `contains('/')` is not one. Moving wz's actions behind a prefix of
-        // their own makes the two vocabularies structurally disjoint and lets
-        // this arm become "everything else", which is upstream's rule restored
-        // rather than approximated. Matching the action literals first and
-        // treating the rest as config would ALSO work today and is weaker: it
-        // keeps the divergence and proves it harmless, where the prefix removes
-        // it. NOT DONE HERE: it moves keyexprs the demo and the e2e lanes
-        // construct, so it is its own round; registered on `adminspace-write`.
+        //     a name wz owns       -> its arm, or `UnknownKey` if this build
+        //                             compiled that arm out
+        //     else a config key    -> HERE
+        //     else                 -> `UnknownKey`
+        //
+        // ⚠ THE LAST LINE IS NOT SPARE. R2644 pinned `acl-denyy` — a typo of
+        // `acl-deny` — as decoding `UnknownKey`, because a typo of a bespoke
+        // sub-key that silently became a config write would be refused a whole
+        // crate away under a different message. A plain catch-all here would
+        // lose that control to buy the single-segment key; the predicate buys
+        // both, because a typo is in NEITHER vocabulary.
+        //
+        // ⚠ AND `ADMIN_CONFIG_WRITE_ACTIONS` IS CHECKED FIRST rather than left
+        // to arm order: the arms above are the five names, but two of them are
+        // `#[cfg]`-gated, so on a build without `adminspace-config-hotreload`
+        // there IS no `storage-add` arm for this one to sit after. The const is
+        // what keeps a name wz owns out of the config vocabulary on every build,
+        // whatever the supplied predicate answers about it.
+        //
         // R2646 — the one arm that takes BOTH bodies, because it is the one that
         // names a config PATH rather than an action, and a config path is
         // exactly what upstream's delete removes.
-        other if other.contains('/') => match body {
+        other if !ADMIN_CONFIG_WRITE_ACTIONS.contains(&other) && is_config_key(other) => match body
+        {
             AdminConfigWriteBody::Put(payload) => {
                 let value = String::from_utf8_lossy(payload);
                 let value = value.trim();
@@ -2265,6 +2318,61 @@ mod tests {
     use alloc::string::ToString as _;
     use alloc::vec;
 
+    /// R2658 — the config-key vocabulary every decoder test below supplies.
+    ///
+    /// The REAL one is `wz-runtime-tokio`'s `zenoh_config::wz_accepts`, and this
+    /// crate cannot see it — which is precisely why
+    /// [`parse_admin_config_write`] takes it as a parameter. What this stub
+    /// reproduces is not that list but the one STRUCTURAL property the decoder's
+    /// contract rests on, measured over this tree's six key lists: upstream's
+    /// config keys are `validated_struct` field names, i.e. Rust identifiers, so
+    /// across 177 keys and 133 distinct segments not one contains a `-`. Every
+    /// name wz owns does.
+    ///
+    /// It reproduces the real predicate's MEMBER-key step too — a key carrying
+    /// `=` resolves to the array key left of its last `/` — because a stub that
+    /// refused `downsampling/id=x` would let these tests pass while the real
+    /// vocabulary accepted it, and the decoder's contract is the same for both.
+    ///
+    /// ⛔ SO THESE TESTS LEAVE THE REAL VOCABULARY UNWITNESSED, and saying so
+    /// here is the point: a stub that agrees with the decoder by construction
+    /// can prove the decoder's SHAPE and nothing about the join. The join is
+    /// tested where both halves are visible — `wz-runtime-tokio`, driving this
+    /// same decoder with `accepts_config_key` itself.
+    fn stub_config_key(path: &str) -> bool {
+        let whole = match path.split_once('=') {
+            Some((prefix, _)) => match prefix.rsplit_once('/') {
+                Some((array_key, _)) => array_key,
+                None => return false,
+            },
+            None => path,
+        };
+        !whole.is_empty()
+            && whole.split('/').all(|seg| {
+                !seg.is_empty() && seg.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_')
+            })
+    }
+
+    #[test]
+    fn stub_vocabulary_is_the_shape_the_real_one_has() {
+        // The two goals this parameter exists to hold at once (R2658): a
+        // SINGLE-SEGMENT upstream key is a config key, and a typo of one of
+        // wz's verbs is in neither vocabulary.
+        assert!(stub_config_key("downsampling"));
+        assert!(stub_config_key("low_pass_filter"));
+        assert!(stub_config_key("adminspace/permissions/read"));
+        assert!(stub_config_key("downsampling/id=my_rule"));
+        assert!(!stub_config_key("acl-denyy"));
+        assert!(!stub_config_key("batch-size"));
+        assert!(!stub_config_key("downsampling=my_rule"));
+        for action in ADMIN_CONFIG_WRITE_ACTIONS {
+            assert!(
+                !stub_config_key(action),
+                "a name wz owns is not in the config vocabulary: {action}"
+            );
+        }
+    }
+
     #[test]
     fn root_and_queryable_keys_match_zenoh_form() {
         // zenoh root_key = `@/{zid}/{whatami}` (adminspace.rs:159); the queryable
@@ -2317,7 +2425,8 @@ mod tests {
                 &prefix,
                 &key,
                 AdminConfigWriteBody::Put(b"tcp/127.0.0.1:7447"),
-                true
+                true,
+                &stub_config_key
             ),
             AdminConfigWriteOutcome::Apply(AdminConfigWrite::ConnectAdd(vec![String::from(
                 "tcp/127.0.0.1:7447"
@@ -2333,7 +2442,8 @@ mod tests {
                 &format!("{pattern}/"),
                 &key,
                 AdminConfigWriteBody::Put(b"tcp/127.0.0.1:7447"),
-                true
+                true,
+                &stub_config_key
             ),
             AdminConfigWriteOutcome::NotAWrite,
             "the PATTERN where the PREFIX belongs must not decode — if this arm ever \
@@ -2527,6 +2637,7 @@ mod tests {
             "@/a1b2/peer/config/acl-deny",
             AdminConfigWriteBody::Put(b"  mesh/data  "),
             true,
+            &stub_config_key,
         );
         assert_eq!(
             out,
@@ -2543,6 +2654,7 @@ mod tests {
             "@/a1b2/peer/config/adminspace/permissions/read",
             AdminConfigWriteBody::Put(b"  true  "),
             true,
+            &stub_config_key,
         );
         assert_eq!(
             out,
@@ -2564,6 +2676,7 @@ mod tests {
             "@/a1b2/peer/config/acl-denyy",
             AdminConfigWriteBody::Put(b"mesh/data"),
             true,
+            &stub_config_key,
         );
         assert_eq!(
             out,
@@ -2580,6 +2693,7 @@ mod tests {
             "@/a1b2/peer/config/adminspace/permissions/read",
             AdminConfigWriteBody::Put(b"true"),
             false,
+            &stub_config_key,
         );
         assert_eq!(out, AdminConfigWriteOutcome::Denied);
     }
@@ -2593,6 +2707,7 @@ mod tests {
             "@/a1b2/peer/config/acl-deny",
             AdminConfigWriteBody::Put(b"mesh/data"),
             false,
+            &stub_config_key,
         );
         assert_eq!(out, AdminConfigWriteOutcome::Denied);
     }
@@ -2607,6 +2722,7 @@ mod tests {
             "@/a1b2/peer/config/acl-deny",
             AdminConfigWriteBody::Put(b""),
             false,
+            &stub_config_key,
         );
         assert_eq!(out, AdminConfigWriteOutcome::Denied);
     }
@@ -2623,6 +2739,7 @@ mod tests {
             "@/a1b2/peer/config/connect-add",
             AdminConfigWriteBody::Put(b" tcp/127.0.0.1:7447 , tcp/127.0.0.1:7448 "),
             true,
+            &stub_config_key,
         );
         assert_eq!(
             out,
@@ -2652,6 +2769,7 @@ mod tests {
                     "@/a1b2/peer/config/connect-add",
                     AdminConfigWriteBody::Put(payload),
                     true,
+                    &stub_config_key,
                 ),
                 AdminConfigWriteOutcome::Malformed,
                 "a partially-parsable connect list must not dial its parsable half"
@@ -2669,6 +2787,7 @@ mod tests {
             "@/a1b2/peer/config/connect-add",
             AdminConfigWriteBody::Put(b"tcp/127.0.0.1:7447"),
             false,
+            &stub_config_key,
         );
         assert_eq!(out, AdminConfigWriteOutcome::Denied);
     }
@@ -2680,23 +2799,120 @@ mod tests {
             "@/a1b2/peer/config/acl-deny",
             AdminConfigWriteBody::Put(b"   "),
             true,
+            &stub_config_key,
         );
         assert_eq!(out, AdminConfigWriteOutcome::Malformed);
     }
 
     #[test]
     fn parse_config_write_unknown_subkey() {
-        // Only acl-deny is decoded; the full json5 engine is deferred §5.23.
+        // R2658 — `batch-size` is in NEITHER vocabulary: it is not one of wz's
+        // five verbs, and it is not a config key (upstream spells that one
+        // `transport/link/tx/batch_size`, with an underscore, because its keys
+        // are `validated_struct` field names). A sub-key in neither vocabulary
+        // is what `UnknownKey` is for. Until R2658 this arm was reached because
+        // the name carried no `/`, which is the same answer for the wrong
+        // reason — `downsampling` carries no `/` either and IS a config key.
         let out = parse_admin_config_write(
             WRITE_PREFIX,
             "@/a1b2/peer/config/batch-size",
             AdminConfigWriteBody::Put(b"100"),
             true,
+            &stub_config_key,
         );
         assert_eq!(
             out,
             AdminConfigWriteOutcome::UnknownKey(String::from("batch-size"))
         );
+    }
+
+    /// R2658 — THE DEFECT THIS ROUND CLOSED, as a control.
+    ///
+    /// A SINGLE-SEGMENT config key decodes as a config write. It did not until
+    /// this round: the arm asked `subkey.contains('/')`, so `downsampling` — a
+    /// key R2651 honoured and R2654 made writable through the interceptor sinks
+    /// — answered `UnknownKey` on a node that could apply it, while its MEMBER
+    /// form `downsampling/id=x` was one `/` longer and decoded fine.
+    ///
+    /// ⚠ BOTH FORMS ARE ASSERTED HERE, in that order, because the pair is the
+    /// evidence: a fixture that drove only the whole-value form could be
+    /// satisfied by any rule that admits it, and would say nothing about the
+    /// absurdity of a key whose row is reachable while the key is not.
+    #[test]
+    fn parse_config_write_takes_a_single_segment_config_key() {
+        for key in ["downsampling", "downsampling/id=my_rule"] {
+            let keyexpr = format!("{WRITE_PREFIX}{key}");
+            assert_eq!(
+                parse_admin_config_write(
+                    WRITE_PREFIX,
+                    &keyexpr,
+                    AdminConfigWriteBody::Put(b"  [{\"rate\": 1}]  "),
+                    true,
+                    &stub_config_key,
+                ),
+                AdminConfigWriteOutcome::Apply(AdminConfigWrite::SetKey {
+                    key: String::from(key),
+                    value: String::from("[{\"rate\": 1}]"),
+                }),
+                "the whole-value write of '{key}' must reach the runtime that can apply it"
+            );
+        }
+    }
+
+    /// R2658 — a name wz owns is never a config path, on EVERY build and
+    /// whatever vocabulary the host supplies.
+    ///
+    /// The hostile input is the point: `|_| true` is a vocabulary that claims
+    /// every name, which is what a host would effectively pass if the decoder
+    /// trusted its parameter alone. `ADMIN_CONFIG_WRITE_ACTIONS` is what keeps
+    /// the five verbs out of the config vocabulary regardless.
+    ///
+    /// ⛔⛔ THE FIRST HALF OF THIS TEST IS VACUOUS ON A BUILD THAT COMPILES ALL
+    /// FIVE ARMS, and measuring that is why the second half exists. Dropping the
+    /// const guard was probed both ways: with `adminspace-config-hotreload` the
+    /// whole suite stayed GREEN, because arm order alone answers a verb whose
+    /// arm is present; without it, `storage-add` decoded
+    /// `Apply(SetKey { key: "storage-add", value: "x" })`. So the const is
+    /// load-bearing on exactly the leg where an arm is ELIDED, and a control
+    /// that only ran on the full leg would have reported coverage it did not
+    /// have.
+    #[test]
+    fn no_name_wz_owns_decodes_as_a_config_write() {
+        for action in ADMIN_CONFIG_WRITE_ACTIONS {
+            let keyexpr = format!("{WRITE_PREFIX}{action}");
+            for body in [AdminConfigWriteBody::Put(b"x"), AdminConfigWriteBody::Del] {
+                let out = parse_admin_config_write(WRITE_PREFIX, &keyexpr, body, true, &|_| true);
+                assert!(
+                    !matches!(
+                        out,
+                        AdminConfigWriteOutcome::Apply(
+                            AdminConfigWrite::SetKey { .. } | AdminConfigWrite::RemoveKey { .. }
+                        )
+                    ),
+                    "'{action}' is a name wz owns and must never decode as a config write, \
+                     got {out:?}"
+                );
+            }
+        }
+        // The elided-arm leg, where the const is the only thing answering. The
+        // expected outcome is the one such a build gave before R2658 and must
+        // keep giving: a verb this build does not carry is a name it does not
+        // know, never a config key.
+        #[cfg(not(feature = "adminspace-config-hotreload"))]
+        for action in ["storage-add", "storage-del"] {
+            let keyexpr = format!("{WRITE_PREFIX}{action}");
+            assert_eq!(
+                parse_admin_config_write(
+                    WRITE_PREFIX,
+                    &keyexpr,
+                    AdminConfigWriteBody::Put(b"x"),
+                    true,
+                    &|_| true,
+                ),
+                AdminConfigWriteOutcome::UnknownKey(String::from(action)),
+                "a verb compiled out of this build is unknown, not a config key"
+            );
+        }
     }
 
     /// R2646 — the DELETE half of the gate, across the whole sub-key
@@ -2747,7 +2963,13 @@ mod tests {
             ),
         ] {
             assert_eq!(
-                parse_admin_config_write(WRITE_PREFIX, keyexpr, AdminConfigWriteBody::Del, true),
+                parse_admin_config_write(
+                    WRITE_PREFIX,
+                    keyexpr,
+                    AdminConfigWriteBody::Del,
+                    true,
+                    &stub_config_key,
+                ),
                 expected,
                 "the delete of '{keyexpr}'"
             );
@@ -2786,7 +3008,8 @@ mod tests {
                 WRITE_PREFIX,
                 put.keyexpr,
                 AdminConfigWriteBody::of_sample(&put),
-                true
+                true,
+                &stub_config_key
             ),
             AdminConfigWriteOutcome::Apply(AdminConfigWrite::SetKey {
                 key: String::from("adminspace/permissions/read"),
@@ -2806,7 +3029,8 @@ mod tests {
                 WRITE_PREFIX,
                 del.keyexpr,
                 AdminConfigWriteBody::of_sample(&del),
-                true
+                true,
+                &stub_config_key
             ),
             AdminConfigWriteOutcome::Apply(AdminConfigWrite::RemoveKey {
                 key: String::from("adminspace/permissions/read"),
@@ -2829,7 +3053,8 @@ mod tests {
                 WRITE_PREFIX,
                 "@/a1b2/peer/config/adminspace/permissions/read",
                 AdminConfigWriteBody::Del,
-                false
+                false,
+                &stub_config_key
             ),
             AdminConfigWriteOutcome::Denied,
             "a delete is a write and the write permission gates it"
@@ -2845,6 +3070,7 @@ mod tests {
             "@/a1b2/peer/config",
             AdminConfigWriteBody::Put(b"x"),
             true,
+            &stub_config_key,
         );
         assert_eq!(out, AdminConfigWriteOutcome::NotAWrite);
     }
@@ -2861,6 +3087,7 @@ mod tests {
                 "@/a1b2/peer/config/admin-read",
                 AdminConfigWriteBody::Put(payload),
                 true,
+                &stub_config_key,
             );
             assert_eq!(
                 out,
@@ -2876,7 +3103,8 @@ mod tests {
                 WRITE_PREFIX,
                 "@/a1b2/peer/config/admin-read",
                 AdminConfigWriteBody::Put(b" false\n"),
-                true
+                true,
+                &stub_config_key
             ),
             AdminConfigWriteOutcome::Apply(AdminConfigWrite::AdminReadPermit(false))
         );
@@ -2897,7 +3125,8 @@ mod tests {
                     WRITE_PREFIX,
                     "@/a1b2/peer/config/admin-read",
                     AdminConfigWriteBody::Put(payload),
-                    true
+                    true,
+                    &stub_config_key
                 ),
                 AdminConfigWriteOutcome::Malformed,
                 "payload {:?} must not be read as a permission",
@@ -2917,7 +3146,8 @@ mod tests {
                 WRITE_PREFIX,
                 "@/a1b2/peer/config/admin-read",
                 AdminConfigWriteBody::Put(b"true"),
-                false
+                false,
+                &stub_config_key
             ),
             AdminConfigWriteOutcome::Denied
         );
@@ -2938,6 +3168,7 @@ mod tests {
                 "@/a1b2/peer/config/storage-add",
                 AdminConfigWriteBody::Put(b"demo:demo/**"),
                 true,
+                &stub_config_key,
             );
             assert_eq!(
                 out,
@@ -2960,6 +3191,7 @@ mod tests {
                 "@/a1b2/peer/config/storage-add",
                 AdminConfigWriteBody::Put(b"demo:demo/**"),
                 true,
+                &stub_config_key,
             );
             let AdminConfigWriteOutcome::Apply(intent) = out else {
                 panic!("storage-add must Apply");
@@ -2978,6 +3210,7 @@ mod tests {
                 "@/a1b2/peer/config/storage-add",
                 AdminConfigWriteBody::Put(b"demo@wzvol_example:demo/**"),
                 true,
+                &stub_config_key,
             );
             assert_eq!(
                 out,
@@ -3012,6 +3245,7 @@ mod tests {
                 "@/a1b2/peer/config/storage-add",
                 AdminConfigWriteBody::Put(b"mirror:@/a1b2/peer/**"),
                 true,
+                &stub_config_key,
             );
             assert_eq!(
                 out,
@@ -3033,6 +3267,7 @@ mod tests {
                 "@/a1b2/peer/config/storage-add",
                 AdminConfigWriteBody::Put(b"a@b@fsdyn:demo/**"),
                 true,
+                &stub_config_key,
             );
             assert_eq!(
                 out,
@@ -3058,6 +3293,7 @@ mod tests {
                 "@/a1b2/peer/config/storage-add",
                 AdminConfigWriteBody::Put(b"demo@fsdyn?dir=/tmp/wz&mode=rw:demo/**"),
                 true,
+                &stub_config_key,
             );
             let AdminConfigWriteOutcome::Apply(intent) = out else {
                 panic!("expected Apply, got {out:?}")
@@ -3084,6 +3320,7 @@ mod tests {
                 "@/a1b2/peer/config/storage-add",
                 AdminConfigWriteBody::Put(b"demo@fsdyn:demo/**"),
                 true,
+                &stub_config_key,
             );
             let AdminConfigWriteOutcome::Apply(intent) = out else {
                 panic!("expected Apply, got {out:?}")
@@ -3108,6 +3345,7 @@ mod tests {
                         "@/a1b2/peer/config/storage-add",
                         AdminConfigWriteBody::Put(payload),
                         true,
+                        &stub_config_key,
                     ),
                     AdminConfigWriteOutcome::Malformed,
                     "payload {:?} must not resolve",
@@ -3127,6 +3365,7 @@ mod tests {
                     "@/a1b2/peer/config/storage-add",
                     AdminConfigWriteBody::Put(b"demo@?dir=/tmp:demo/**"),
                     true,
+                    &stub_config_key,
                 ),
                 AdminConfigWriteOutcome::Malformed,
             );
@@ -3141,6 +3380,7 @@ mod tests {
                 "@/a1b2/peer/config/storage-add",
                 AdminConfigWriteBody::Put(b"  demo : foo:bar/**  "),
                 true,
+                &stub_config_key,
             );
             assert_eq!(
                 out,
@@ -3172,6 +3412,7 @@ mod tests {
                     "@/a1b2/peer/config/storage-add",
                     AdminConfigWriteBody::Put(payload),
                     true,
+                    &stub_config_key,
                 );
                 assert_eq!(
                     out,
@@ -3188,6 +3429,7 @@ mod tests {
                 "@/a1b2/peer/config/storage-del",
                 AdminConfigWriteBody::Put(b"  demo  "),
                 true,
+                &stub_config_key,
             );
             assert_eq!(
                 out,
@@ -3204,6 +3446,7 @@ mod tests {
                 "@/a1b2/peer/config/storage-del",
                 AdminConfigWriteBody::Put(b"  "),
                 true,
+                &stub_config_key,
             );
             assert_eq!(out, AdminConfigWriteOutcome::Malformed);
         }
@@ -3216,6 +3459,7 @@ mod tests {
                 "@/a1b2/peer/config/storage-add",
                 AdminConfigWriteBody::Put(b"demo:demo/**"),
                 false,
+                &stub_config_key,
             );
             assert_eq!(out, AdminConfigWriteOutcome::Denied);
         }
