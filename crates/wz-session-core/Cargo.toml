@@ -76,7 +76,43 @@ alloc = ["wz-codecs/alloc"]
 # The queryable WIRING (registering the built-in queryable, snapshotting peer
 # state) lives in wz-runtime-tokio's `adminspace-core` feature, which composes
 # this with `query-queryable`.
-adminspace-core = ["alloc", "keyexpr-wildcard-double", "pubsub-encoding"]
+#
+# R2661 — `keyexpr-wildcard-single` JOINS the composition, on the same rule that
+# put `-double` here: the feature list states what this SURFACE needs, and the
+# admin config space is DEFINED in terms of single-chunk wildcards. Upstream
+# decides whether a config PUT is its own with
+# `local_config_key.intersects(&key_expr)` against the format
+# `@/${zid:*}/${whatami:*}/config/${key:**}`, and `AdminConfigWriteSpace::subkey`
+# now asks the same question. Without `-single`, `chunk_intersects` compiles no
+# `*` arm, so `@/*/peer/config/batch-size` answers `NotAWrite` -- a slim
+# adminspace build would register its config-write subscriber, log that it is
+# hosting it, and silently ignore a write upstream applies. That is the
+# "compiles, registers, logs, applies nothing" failure with a feature flag as its
+# cause instead of a transposition, and R2661 exists to end that class here.
+#
+# MEASURED on the profile itself (`--no-default-features --features
+# adminspace-core`) rather than argued from the `#[cfg]`: before this line, that
+# build answered `Ok("batch-size")` for the concrete key, `Err(NotAWrite)` for
+# `@/*/peer/config/batch-size`, and `Ok("**")` for a `**` SUB-KEY. The third
+# answer is this rule proving itself -- `**` worked on the same build precisely
+# because `-double` was already composed, so the only difference between a
+# wildcard this gate honours and one it drops is which feature this list names.
+#
+# Both compositions are pinned by a TEST rather than a cfg, which is what keeps
+# them falsifiable: `admin_queryable_double_wildcard_routes_root_and_subpath_gets`
+# for `-double`, `a_wildcard_addressed_write_reaches_this_nodes_config_space`
+# for this one. Drop either feature from this list and those positive assertions
+# flip to non-matches.
+# NOTE `keyexpr-dollar-star` is deliberately NOT composed, and the line is not
+# cost: `$*` is a general matcher facility a client may use anywhere, while `*`
+# is part of the admin space's own DEFINITION. A profile that omits `$*` narrows
+# every keyexpr consumer equally; one that omits `*` breaks this gate alone.
+adminspace-core = [
+    "alloc",
+    "keyexpr-wildcard-single",
+    "keyexpr-wildcard-double",
+    "pubsub-encoding",
+]
 
 # adminspace-metrics (§5.23) — the @/<zid>/<whatami>/metrics OpenMetrics body
 # (the build-info `zenoh_build` gauge; the transport-stats OpenMetrics

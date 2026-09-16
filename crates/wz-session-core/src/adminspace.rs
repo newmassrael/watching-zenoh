@@ -1238,20 +1238,25 @@ impl AdminConfigWriteSpace {
     ///
     /// Upstream's gate 2 is `KeFormat::parse`, a greedy intersection-based
     /// matcher. MEASURED against the pin rather than inferred: it does not
-    /// behave like the format it is parsing. `${zid:*}` and `${whatami:*}` are
-    /// ONE-CHUNK specs, but a `**` arriving in one of those slots is allowed to
-    /// absorb several chunks and re-anchor the literal `config`, so
-    /// `@/**/peer/config/batch-size` yields `batch-size` while
-    /// `@/a1b2/**/config/batch-size` yields the un-placeable
-    /// `**/config/batch-size` — two readings of one format, chosen by whichever
-    /// alignment the backtracker reached first.
+    /// behave like the format it is parsing. `@/**/peer/config/batch-size`
+    /// yields `batch-size` while `@/a1b2/**/config/batch-size` yields the
+    /// un-placeable `**/config/batch-size`.
     ///
-    /// wz reads the format as written: the sub-key begins at chunk
-    /// `ADMIN_CONFIG_SPACE_PREFIX_CHUNKS`, and a `**` in a one-chunk slot
-    /// means the keyexpr addresses a SET of config spaces without saying which
-    /// chunks are the sub-key — [`AdminConfigWriteOutcome::AmbiguousSpaceAddress`],
-    /// refused and REPORTED rather than guessed. On a write plane, applying a
-    /// key the operator did not name is worse than applying none.
+    /// wz reads the format as WRITTEN. `${zid:*}` and `${whatami:*}` are
+    /// ONE-CHUNK specs, so the sub-key begins at chunk
+    /// `ADMIN_CONFIG_SPACE_PREFIX_CHUNKS`; `${key:**}` is a `**` spec, so a
+    /// WILD sub-key is legitimate and passes through.
+    ///
+    /// A `**` in one of those one-chunk slots answers
+    /// [`AdminConfigWriteOutcome::AmbiguousSpaceAddress`], and the reason is
+    /// not taste — THE SUB-KEY IS UNDERDETERMINED. The concrete keys in the
+    /// intersection of such a keyexpr with this space have DIFFERENT sub-keys:
+    /// `@/**/peer/config/batch-size` covers `@/a1b2/peer/config/batch-size`
+    /// (sub-key `batch-size`) and `@/a1b2/peer/config/x/peer/config/batch-size`
+    /// (sub-key `x/peer/config/batch-size`) and unboundedly many more, so
+    /// upstream's answer is one arbitrary member of that set rather than the
+    /// set's answer. On a write plane, applying a key the operator did not name
+    /// is worse than applying none, so it is refused and REPORTED.
     ///
     /// THE DIVERGENCE IS COUNTED, one-directional, and confined to that
     /// variant. Over a 360-case cross product of zid / whatami / tail shapes
@@ -1276,19 +1281,22 @@ impl AdminConfigWriteSpace {
         // every measured divergence from upstream lands here and nowhere else,
         // which is what makes the variant a statement about a class rather than
         // about one input.
-        let own: Vec<&str> = self.pattern.split('/').collect();
         for slot in 1..ADMIN_CONFIG_SPACE_PREFIX_CHUNKS - 1 {
             if chunks.get(slot) == Some(&ADMIN_CONFIG_WRITE_PATTERN_TAIL) {
                 return Err(AdminConfigWriteOutcome::AmbiguousSpaceAddress);
             }
         }
         // GATE 2b — the format read positionally. The `@` and `config` literals
-        // are taken from this space's OWN pattern, so there is no second
-        // spelling of either to drift.
+        // are read out of this space's OWN pattern, so there is no second
+        // spelling of either to drift -- and read with `nth` rather than a
+        // `collect`, because a decoder the wire reaches should not allocate to
+        // compare two chunks.
+        let mut own = self.pattern.split('/');
+        let own_root = own.next();
+        let own_config = own.nth(ADMIN_CONFIG_SPACE_PREFIX_CHUNKS - 2);
         if chunks.len() <= ADMIN_CONFIG_SPACE_PREFIX_CHUNKS
-            || chunks[0] != own[0]
-            || chunks[ADMIN_CONFIG_SPACE_PREFIX_CHUNKS - 1]
-                != own[ADMIN_CONFIG_SPACE_PREFIX_CHUNKS - 1]
+            || Some(chunks[0]) != own_root
+            || Some(chunks[ADMIN_CONFIG_SPACE_PREFIX_CHUNKS - 1]) != own_config
         {
             return Err(AdminConfigWriteOutcome::NotAWrite);
         }
@@ -2019,10 +2027,10 @@ pub enum AdminConfigWriteOutcome {
     ///
     /// ⚠ IT IS A DELIBERATE DIVERGENCE FROM UPSTREAM, counted rather than
     /// asserted — see [`AdminConfigWriteSpace::subkey`] for the census and for
-    /// why the positional reading is the one the format denotes. Upstream's
-    /// greedy `KeFormat::parse` resolves the same input by whichever alignment
-    /// its backtracker reaches first; on a write plane, applying a key the
-    /// operator did not name is worse than applying none.
+    /// the proof that such a keyexpr's sub-key is UNDERDETERMINED, so upstream's
+    /// greedy `KeFormat::parse` answers with one arbitrary member of a set whose
+    /// members disagree. On a write plane, applying a key the operator did not
+    /// name is worse than applying none.
     AmbiguousSpaceAddress,
 }
 
@@ -2680,6 +2688,19 @@ mod tests {
     /// prefix with `strip_prefix`, so a wildcard write upstream applies to its
     /// own config was silently dropped here — `NotAWrite`, whose arm is silent
     /// by design, on a node that can apply it.
+    ///
+    /// ⛔ IT IS ALSO THIS FEATURE COMPOSITION'S PIN, exactly as
+    /// `admin_queryable_double_wildcard_routes_root_and_subpath_gets` is
+    /// `keyexpr-wildcard-double`'s. A `*` chunk is honoured ONLY when
+    /// `keyexpr-wildcard-single` is on — `keyexpr_match.rs`
+    /// @ `fn chunk_intersects` compiles its `*` arm behind that feature — so
+    /// drop it from `adminspace-core` and every positive assertion below flips
+    /// to a non-match. That is not hypothetical: the composition was MISSING
+    /// when this test was written, and `cargo test -p wz-session-core
+    /// --no-default-features --features adminspace-core` is what said so, while
+    /// the same suite on default features passed. A slim adminspace build would
+    /// have registered its config-write subscriber, logged that it was hosting
+    /// it, and ignored a write upstream applies.
     #[test]
     fn a_wildcard_addressed_write_reaches_this_nodes_config_space() {
         let space = AdminConfigWriteSpace::new("a1b2", "peer");
