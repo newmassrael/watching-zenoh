@@ -943,7 +943,18 @@ CITATION = re.compile(r"\b((?:[A-Za-z0-9_.-]+/)*[A-Za-z0-9_.-]+\.(?:rs|c|h))(?::
 # hold. MEASURED with `reach_partition` over this store and over the same store
 # with ONLY this atom's reason restored to its origin body, never by diffing the
 # totals: 30 -> 29, exactly that atom left `reached`, none joined.
-PIN_REACHED = 29
+# R2668 -- 29 -> 28: `config-mutate-runtime` went PARTIAL -> COMPLETE on the
+# whole-atom re-audit open debt item 15 requires. Its residual read as "no
+# json-pointer / json5 merge engine"; graded key by key on whether a RUNTIME
+# change produces an OBSERVABLE difference, 42 of its 44 honoured-but-
+# unappliable keys are eliminated because upstream reads them into a builder or
+# a constructor and merely stores the write, 1 (`connect/endpoints`) passed and
+# was built in R2667, and 1 (`mode`) is live-read into a plane no wz atom
+# declares (open debt 771). A REACHED atom, so it leaves this count with the
+# population; UNREACHED and NO_SYMBOL hold. MEASURED by SIMULATION before the
+# write -- the atom dropped from `partial_atoms()` and `reach_partition` re-run
+# over the remainder -- and the live gate then reported exactly that: 28.
+PIN_REACHED = 28
 PIN_UNREACHED = 3
 PIN_NO_SYMBOL = 2
 # R2534 — 346 -> 347. The atom is `adminspace-metrics` and the citation is the
@@ -1547,7 +1558,15 @@ PIN_NO_SYMBOL = 2
 # becomes 9 / 2 / 16. The rise is +1 wz, this atom's ALONE; AMBIGUOUS held at 2,
 # which is why PIN_AMBIGUOUS does not move, and the +2 UPSTREAM rides the
 # unpinned total this gate prints and does not judge. 180 + 1 = 181.
-PIN_WZ_CITATIONS = 181
+# R2668 -- 181 -> 172, the same re-grade as PIN_REACHED above.
+# `config-mutate-runtime` is COMPLETE, so `partial_atoms()` no longer admits its
+# reason and the 9 unique wz citations it contributed leave the population WITH
+# it. A POPULATION change, not a citation removal: the reason GREW in this round
+# (the correction carries the re-audit), and it still leaves whole.
+# MEASURED with THIS FILE'S OWN `citation_audit` over the population with and
+# without that one atom -- never by diffing the totals, which cannot say whose
+# the fall is: 181 - 9 = 172, and the live gate reported 172.
+PIN_WZ_CITATIONS = 172
 # R2626 — 44 -> 42, and this one is worth a sentence because it HELD through
 # every earlier retirement in this run (R2612, R2622). `time-hlc`'s reason is the
 # first retiree carrying AMBIGUOUS citations of its own: its oldest clauses cite
@@ -1558,7 +1577,15 @@ PIN_WZ_CITATIONS = 181
 # that end-match more than one tracked wz file, so they were never graded
 # against one subject; they leave with the atom. Attributed by the same
 # re-insertion measurement recorded at PIN_WZ_CITATIONS. 42 - 4 = 38.
-PIN_AMBIGUOUS = 38
+# R2668 -- 38 -> 36, and this one is worth a sentence because it HELD at R2663
+# and moving it here is not an inconsistency. That round retired
+# `adminspace-write`, whose reason carried ambiguous=0, so the ratchet correctly
+# did not move and the entry said so. `config-mutate-runtime` carries
+# ambiguous=2, so retiring it moves this pin by exactly that. Carrying the
+# previous re-grade's SHAPE across would have produced a wrong pin here, which
+# is why the value came from re-running `citation_audit` over the population
+# without this atom rather than from the precedent.
+PIN_AMBIGUOUS = 36
 
 
 class Fatal(Exception):
