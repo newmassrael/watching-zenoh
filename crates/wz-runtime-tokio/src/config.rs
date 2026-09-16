@@ -235,7 +235,151 @@ pub enum ConfigKeyWriteError {
     /// `reconfigure_*` seam. Refused rather than stored: storing would report a
     /// success the consumer never saw, and would also skip the validation
     /// `reconfigure_*` performs before it commits.
+    ///
+    /// ⚠ R2654 — THIS IS NOW "THE CALLER BROUGHT NO SINK", not "no sink can
+    /// exist". [`WzConfig::set_by_key_with`] takes the live consumers and
+    /// writes a push-discipline key through them; `set_by_key` is that function
+    /// with an EMPTY [`ConfigSinks`], so this arm is what an empty one answers.
+    /// The distinction matters to an operator: the key is writable, on a host
+    /// that has the consumer it names.
     NeedsSink { key: String },
+    /// The value parsed, and the CONSUMER refused it — two link-weight rows
+    /// naming one destination is the only such refusal today.
+    ///
+    /// Distinct from [`Self::Document`] because it is raised somewhere else and
+    /// means something else: the reader ACCEPTS such a document, deliberately,
+    /// because upstream's parser accepts it too and a wz node validates
+    /// documents destined for other nodes. Upstream then RESOLVES it and dies
+    /// building its network; wz refuses the write instead, at the same seam and
+    /// without the node going down.
+    ConsumerRefused { key: String },
+    /// The key belongs to a SUBTREE that is compiled as a unit, and the subtree
+    /// this write would produce does not compile — a policy naming a rule id no
+    /// rule defines is the shape.
+    ///
+    /// ⚠ NAMED SEPARATELY FROM [`Self::NotRuntimeMutable`], which is what this
+    /// used to answer and which sends an operator the wrong way entirely: the
+    /// key IS runtime-mutable and the value IS well formed. What is wrong is the
+    /// subtree AROUND it, which for `access_control` means the write order
+    /// matters — rules and subjects before the policy that names them, exactly
+    /// as upstream's own `init` demands of a whole document.
+    SubtreeRefused { key: String },
+}
+
+/// R2654 — the `access_control/*` document inputs as they stood before a write.
+///
+/// ⚠ THE FIELD IS CONDITIONAL AND THE TYPE IS NOT, which is the same choice
+/// [`RuntimeMutableKey`] makes about its `feature` column: a `#[cfg]` on a
+/// PARAMETER strands the signature of everything that takes it, so the
+/// condition lives on the field and every build can name the type. On a build
+/// with no ACL this is a zero-sized value that records the one true thing there
+/// is to record — that there were no inputs to put back.
+#[cfg(all(
+    feature = "zenoh-config",
+    any(feature = "adminspace-core", feature = "routing-router-hat")
+))]
+#[derive(Clone, Default)]
+struct AclSnapshot {
+    #[cfg(all(feature = "routing-peer", feature = "access-acl"))]
+    inputs: crate::zenoh_config::AclConfigInputs,
+}
+
+/// R2654 — the live consumers a runtime config write may have to reach.
+///
+/// # Why a write takes these at all
+///
+/// Eight of the ten rows in [`RUNTIME_MUTABLE_CONFIG_KEYS`] are
+/// [`MutationDiscipline::Push`]: their consumer holds state COMPILED from the
+/// value, so storing the value is not applying it. Until this type,
+/// [`WzConfig::set_by_key`] refused all eight by name, which left the wire-
+/// facing write surface exactly TWO BOOLEANS wide against upstream's whole
+/// config document — the residual the `adminspace-write` atom is graded on.
+///
+/// The refusal was never about the key. It was about the CALL SITE: a write
+/// entry point that cannot reach the consumers of what it writes has nothing
+/// honest to do with a push key. So the consumers come in with the value.
+///
+/// # Why builders rather than a struct literal
+///
+/// Which fields exist depends on the enabled routing features, so
+/// `ConfigSinks { interceptors, ..Default::default() }` is correct under the
+/// full set and a `clippy::needless_update` error under one of them. That is
+/// the same trap [`InterceptorConfig`] documents, and the same answer: a
+/// caller chains only the sinks its build has, and a new slice adds a builder
+/// without touching any existing call site.
+///
+/// ⚠ AN ABSENT SINK IS A REFUSAL, NEVER A SILENT STORE. A host that owns a
+/// consumer and forgets to name it here gets [`ConfigKeyWriteError::NeedsSink`]
+/// for that key — the same answer it got before this type existed, which is why
+/// adding it changes no behaviour until a caller supplies something.
+#[cfg(all(
+    feature = "zenoh-config",
+    any(feature = "adminspace-core", feature = "routing-router-hat")
+))]
+#[derive(Default)]
+pub struct ConfigSinks<'a> {
+    /// The interceptor stack, which every `access_control/*`, `downsampling`
+    /// and `low_pass_filter` write has to reach.
+    #[cfg(feature = "routing-peer")]
+    interceptors: Option<&'a dyn InterceptorSink>,
+    /// The router's configured link weights.
+    #[cfg(feature = "routing-router-hat")]
+    router_link_weights: Option<&'a dyn RouterLinkWeightSink>,
+    /// Holds `'a` on a build that compiles NEITHER sink field, where the
+    /// lifetime would otherwise be unused and the type would not compile. Such
+    /// a build has no push-discipline slice to reach, so the type is still
+    /// meaningful there: it is the empty set of consumers, which is what
+    /// `set_by_key` hands in.
+    _lifetime: core::marker::PhantomData<&'a ()>,
+}
+
+#[cfg(all(
+    feature = "zenoh-config",
+    any(feature = "adminspace-core", feature = "routing-router-hat")
+))]
+impl<'a> ConfigSinks<'a> {
+    /// No consumers — every push-discipline key answers `NeedsSink`.
+    #[must_use]
+    pub fn none() -> Self {
+        Self::default()
+    }
+
+    /// Name the live interceptor stack.
+    #[cfg(feature = "routing-peer")]
+    #[must_use]
+    pub fn with_interceptors(mut self, sink: &'a dyn InterceptorSink) -> Self {
+        self.interceptors = Some(sink);
+        self
+    }
+
+    /// Name the live router link-weight consumer.
+    #[cfg(feature = "routing-router-hat")]
+    #[must_use]
+    pub fn with_router_link_weights(mut self, sink: &'a dyn RouterLinkWeightSink) -> Self {
+        self.router_link_weights = Some(sink);
+        self
+    }
+}
+
+#[cfg(all(
+    feature = "zenoh-config",
+    any(feature = "adminspace-core", feature = "routing-router-hat")
+))]
+impl core::fmt::Debug for ConfigSinks<'_> {
+    /// Says WHICH consumers are present, never what they are: a sink is a live
+    /// forwarder and its `Debug` would print a routing table into a log line.
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        let mut named: Vec<&'static str> = Vec::new();
+        #[cfg(feature = "routing-peer")]
+        if self.interceptors.is_some() {
+            named.push("interceptors");
+        }
+        #[cfg(feature = "routing-router-hat")]
+        if self.router_link_weights.is_some() {
+            named.push("router_link_weights");
+        }
+        write!(f, "ConfigSinks{named:?}")
+    }
 }
 
 /// The typed wz runtime config SSOT — see the module doc. The read-at-open
@@ -1023,12 +1167,27 @@ impl WzConfig {
         &mut self,
         ingest: &crate::zenoh_config::ZenohConfigIngest,
     ) -> Vec<&'static str> {
-        #[cfg(all(
-            feature = "routing-peer",
-            feature = "access-acl",
-            any(feature = "adminspace-core", feature = "routing-router-hat")
-        ))]
-        let acl_before = self.acl_inputs.clone();
+        self.apply_document(ingest).0
+    }
+
+    /// [`Self::apply_zenoh_config`] plus the one thing its `Vec` cannot say:
+    /// whether the ACL subtree was REFUSED.
+    ///
+    /// The public function drops a refused subtree's keys from the applied list,
+    /// which is the right answer for a caller asking "what landed" — and the
+    /// wrong one for a caller asking "why did this ONE key not land", because
+    /// `NotRuntimeMutable` and "the subtree does not compile" send an operator
+    /// in opposite directions. The keyed write asks the second question, so it
+    /// gets the second answer, without a second copy of the loop.
+    #[cfg(all(
+        feature = "zenoh-config",
+        any(feature = "adminspace-core", feature = "routing-router-hat")
+    ))]
+    fn apply_document(
+        &mut self,
+        ingest: &crate::zenoh_config::ZenohConfigIngest,
+    ) -> (Vec<&'static str>, bool) {
+        let acl_before = self.acl_snapshot();
         let mut applied = Vec::new();
         for row in RUNTIME_MUTABLE_CONFIG_KEYS {
             if !ingest.named.contains(&row.key) {
@@ -1038,6 +1197,49 @@ impl WzConfig {
                 applied.push(row.key);
             }
         }
+        let settled = self.settle_acl_subtree(&mut applied, &acl_before);
+        (applied, settled)
+    }
+
+    /// The ACL document inputs as they stand, for a caller that is about to
+    /// change them and may have to put them back.
+    #[cfg(all(
+        feature = "zenoh-config",
+        any(feature = "adminspace-core", feature = "routing-router-hat")
+    ))]
+    fn acl_snapshot(&self) -> AclSnapshot {
+        AclSnapshot {
+            #[cfg(all(feature = "routing-peer", feature = "access-acl"))]
+            inputs: self.acl_inputs.clone(),
+        }
+    }
+
+    /// R2654 — the ACL subtree's compile, lifted out of
+    /// [`Self::apply_zenoh_config`] so the DELETE half reaches it too.
+    ///
+    /// # Why it had to move
+    ///
+    /// R2652 put this step at the end of the document apply, which was the only
+    /// caller that could reach an `access_control/*` arm: a delete refused every
+    /// push-discipline key before it got there. R2654 gave the delete half
+    /// sinks, so it can now reach those arms — and reaching them without this
+    /// step would store new inputs beside a policy compiled from the old ones,
+    /// which is precisely the inert-mirror state `acl_inputs`' own doc exists to
+    /// prevent. One function, both callers, no second implementation.
+    ///
+    /// `applied` is edited in place: a subtree that does not compile leaves its
+    /// keys out of the applied list, because they did not land. `false` says
+    /// that happened, which is the one thing the list itself cannot distinguish
+    /// from a key nobody wrote.
+    #[cfg(all(
+        feature = "zenoh-config",
+        any(feature = "adminspace-core", feature = "routing-router-hat")
+    ))]
+    fn settle_acl_subtree(
+        &mut self,
+        applied: &mut Vec<&'static str>,
+        before: &AclSnapshot,
+    ) -> bool {
         // R2652 — THE ONE SUBTREE STEP. The five `access_control/*` arms store
         // without compiling (their own comment says why), so the compile happens
         // here, once, against the whole subtree — the same place upstream does
@@ -1059,11 +1261,14 @@ impl WzConfig {
             any(feature = "adminspace-core", feature = "routing-router-hat")
         ))]
         if applied.iter().any(|key| key.starts_with("access_control/"))
-            && !self.recompile_acl(&acl_before)
+            && !self.recompile_acl(&before.inputs)
         {
             applied.retain(|key| !key.starts_with("access_control/"));
+            return false;
         }
-        applied
+        // Consumed by the `#[cfg]`-elided arm above on a build with no ACL.
+        let _ = (&applied, before);
+        true
     }
 
     /// Write ONE config key at runtime, the way upstream's admin PUT does.
@@ -1101,43 +1306,182 @@ impl WzConfig {
         any(feature = "adminspace-core", feature = "routing-router-hat")
     ))]
     pub fn set_by_key(&mut self, key: &str, value: &str) -> Result<(), ConfigKeyWriteError> {
+        self.set_by_key_with(key, value, &ConfigSinks::none())
+    }
+
+    /// R2654 — write ONE config key at runtime, THROUGH the consumers that hold
+    /// state compiled from it.
+    ///
+    /// [`Self::set_by_key`] is this function with an empty [`ConfigSinks`], so
+    /// there is one implementation of the write gate rather than two that must
+    /// agree. That matters more than it looks: the delete half already shares
+    /// `apply_one_key`'s table with the set half for exactly this reason, and a
+    /// second sink-aware write path would have re-opened the split at the level
+    /// above.
+    ///
+    /// # What a push-discipline key does here that it could not do before
+    ///
+    /// Eight of ten registry rows are [`MutationDiscipline::Push`] and were
+    /// refused by name, which left this seam two booleans wide. A push key now
+    /// goes to the `reconfigure_*` seam for the SLICE it names, which is the one
+    /// call that validates and commits together — so the two reasons the old
+    /// refusal gave are both answered rather than avoided:
+    ///
+    ///  * the consumer sees the change, because the sink is driven in the same
+    ///    call that stores it;
+    ///  * a value the consumer refuses never becomes live, because
+    ///    `reconfigure_router_link_weights` builds the map BEFORE it commits the
+    ///    rows and its `Err` is returned here as
+    ///    [`ConfigKeyWriteError::ConsumerRefused`].
+    ///
+    /// ⚠ THE REFUSAL ORDER IS THE OLD ONE AND A TEST SAYS WHY. `downsampling`
+    /// used to be a push row wz did not honour, and refusing it for wanting a
+    /// sink would have claimed wz acts on a key it ignores entirely. The
+    /// unhonoured check therefore still comes first, inside `ingest_for_key`.
+    ///
+    /// ⚠ DISPATCH IS BY SLICE, NOT BY KEY, and that is what makes the registry's
+    /// `slice` field load-bearing rather than decorative: seven keys share the
+    /// interceptor slice and one push is what all seven need, so a per-key arm
+    /// here would be seven copies of one sentence.
+    #[cfg(all(
+        feature = "zenoh-config",
+        any(feature = "adminspace-core", feature = "routing-router-hat")
+    ))]
+    pub fn set_by_key_with(
+        &mut self,
+        key: &str,
+        value: &str,
+        sinks: &ConfigSinks<'_>,
+    ) -> Result<(), ConfigKeyWriteError> {
         let ingest = Self::ingest_for_key(key, value)?;
-        // ⛔ A PUSH-discipline key cannot be written through this path. Two
-        // independent reasons, both measured:
-        //
-        //  * the consumer holds state COMPILED from the value, and this path only
-        //    STORES — so the write would look applied while the forwarder kept its
-        //    old map. `apply_zenoh_config`'s own doc says it stores and does not
-        //    push; this function is the running-node caller that doc warns about.
-        //  * `reconfigure_*` builds the map BEFORE it commits the rows
-        //    (`link_weights_from_config(&rows)?` and only then the assignment), so
-        //    a refused document never becomes live. Storing here skips that, and a
-        //    row set `reconfigure_*` would REJECT — two rows naming one
-        //    destination — could be installed.
-        //
-        // ⚠ ORDERED AFTER THE IGNORED CHECK, and a test said so: `downsampling` is
-        // a push-discipline row that wz does NOT honour, and refusing it for
-        // wanting a sink would claim wz acts on a key it ignores entirely. Only a
-        // key wz actually reads can meaningfully need one.
-        //
-        // The startup path is unaffected and deliberately so: there `install_*` is
-        // the gate, validating before the value first reaches a consumer.
-        if let Some(row) = RUNTIME_MUTABLE_CONFIG_KEYS
+        let row = RUNTIME_MUTABLE_CONFIG_KEYS
             .iter()
-            .find(|row| row.key == key)
-        {
-            if row.discipline == MutationDiscipline::Push {
-                return Err(ConfigKeyWriteError::NeedsSink {
+            .find(|row| row.key == key);
+        // ⛔ THE SINK IS RESOLVED BEFORE ANYTHING IS STORED. A missing one must
+        // not leave the value stored-but-unpushed, which is the state the old
+        // refusal existed to prevent; resolving first means a `NeedsSink` write
+        // changes nothing at all, exactly as it did before.
+        let pushes = matches!(row, Some(r) if r.discipline == MutationDiscipline::Push);
+        if pushes {
+            let slice = row.expect("`pushes` is false without a row").slice;
+            Self::push_slice_would_reach(slice, sinks).ok_or_else(|| {
+                ConfigKeyWriteError::NeedsSink {
                     key: String::from(key),
-                });
-            }
+                }
+            })?;
         }
-        if self.apply_zenoh_config(&ingest).is_empty() {
-            return Err(ConfigKeyWriteError::NotRuntimeMutable {
-                key: String::from(key),
+        // ⛔ ATOMIC ACROSS THE STORE AND THE PUSH, and the snapshot is what makes
+        // it so. `reconfigure_*` validates before IT commits, but by then the
+        // value is already in this struct -- so a consumer refusal has to undo
+        // the store or the write is half applied: stored, unpushed, and reported
+        // as an error. Snapshotting the whole config covers every slice with one
+        // rule, including the ones this registry has not grown yet, where a
+        // per-slice undo would be a second table to keep in step.
+        //
+        // Taken only for a PUSH key: a pull key's store IS its application, so
+        // there is nothing to undo and nothing to pay for the clone with.
+        let restore = if pushes { Some(self.clone()) } else { None };
+        // The STORE is the startup half's own function, per key, with the ACL
+        // subtree's atomic compile inside it -- not a second implementation of
+        // either.
+        let (applied, settled) = self.apply_document(&ingest);
+        if applied.is_empty() {
+            if let Some(previous) = restore {
+                *self = previous;
+            }
+            return Err(if settled {
+                ConfigKeyWriteError::NotRuntimeMutable {
+                    key: String::from(key),
+                }
+            } else {
+                ConfigKeyWriteError::SubtreeRefused {
+                    key: String::from(key),
+                }
             });
         }
+        if pushes {
+            let slice = row.expect("`pushes` is false without a row").slice;
+            if let Err(err) = self.push_slice(slice, sinks, key) {
+                if let Some(previous) = restore {
+                    *self = previous;
+                }
+                return Err(err);
+            }
+        }
         Ok(())
+    }
+
+    /// Whether `sinks` carries the consumer `slice` needs — asked BEFORE a value
+    /// is stored, so a write with no sink leaves the config untouched.
+    ///
+    /// `None` means "no consumer for that slice here", which the caller turns
+    /// into [`ConfigKeyWriteError::NeedsSink`]. It deliberately does not say
+    /// WHICH consumer is missing: the key names its slice and the registry maps
+    /// one to the other, so a second spelling of that here would be a table.
+    #[cfg(all(
+        feature = "zenoh-config",
+        any(feature = "adminspace-core", feature = "routing-router-hat")
+    ))]
+    fn push_slice_would_reach(slice: &str, sinks: &ConfigSinks<'_>) -> Option<()> {
+        match slice {
+            #[cfg(feature = "routing-peer")]
+            "interceptors" => sinks.interceptors.map(|_| ()),
+            #[cfg(feature = "routing-router-hat")]
+            "router_link_weights" => sinks.router_link_weights.map(|_| ()),
+            // A slice this build compiles no consumer for, or a registry row
+            // naming a slice nobody pushes. Both are "the write cannot reach a
+            // consumer", which is what the caller reports.
+            _ => None,
+        }
+    }
+
+    /// Drive the consumer of `slice` from the values this config now holds.
+    ///
+    /// Called only after the store, and only when
+    /// [`Self::push_slice_would_reach`] has already said the sink is there — so
+    /// the `else` arms below are unreachable rather than defensive, and they
+    /// answer `NeedsSink` rather than panicking because a running node must not
+    /// die on a mismatch between two functions in this file.
+    #[cfg(all(
+        feature = "zenoh-config",
+        any(feature = "adminspace-core", feature = "routing-router-hat")
+    ))]
+    fn push_slice(
+        &mut self,
+        slice: &str,
+        sinks: &ConfigSinks<'_>,
+        key: &str,
+    ) -> Result<(), ConfigKeyWriteError> {
+        match slice {
+            #[cfg(feature = "routing-peer")]
+            "interceptors" => {
+                let Some(sink) = sinks.interceptors else {
+                    return Err(ConfigKeyWriteError::NeedsSink {
+                        key: String::from(key),
+                    });
+                };
+                let live = self.interceptors.clone();
+                self.reconfigure_interceptors(live, sink);
+                Ok(())
+            }
+            #[cfg(feature = "routing-router-hat")]
+            "router_link_weights" => {
+                let Some(sink) = sinks.router_link_weights else {
+                    return Err(ConfigKeyWriteError::NeedsSink {
+                        key: String::from(key),
+                    });
+                };
+                let rows = self.router_link_weights.clone();
+                self.reconfigure_router_link_weights(rows, sink)
+                    .map(|_| ())
+                    .map_err(|_| ConfigKeyWriteError::ConsumerRefused {
+                        key: String::from(key),
+                    })
+            }
+            _ => Err(ConfigKeyWriteError::NeedsSink {
+                key: String::from(key),
+            }),
+        }
     }
 
     /// R2648 — the PARSE-AND-ACCEPT front end that every runtime write shares,
@@ -1276,26 +1620,82 @@ impl WzConfig {
         any(feature = "adminspace-core", feature = "routing-router-hat")
     ))]
     pub fn remove_by_key(&mut self, key: &str) -> Result<(), ConfigKeyWriteError> {
+        self.remove_by_key_with(key, &ConfigSinks::none())
+    }
+
+    /// R2654 — delete ONE config key at runtime, THROUGH the consumers that hold
+    /// state compiled from it. The delete twin of [`Self::set_by_key_with`], and
+    /// [`Self::remove_by_key`] is this function with an empty [`ConfigSinks`].
+    ///
+    /// The two halves stay one gate the way they already did: the same refusals
+    /// in the same order, the same per-key table for the store, and now the same
+    /// slice dispatch for the push. What differs is only the SOURCE of the value
+    /// — `None`, meaning the schema default — which is the difference a delete
+    /// IS.
+    ///
+    /// ⚠ IT SETTLES THE ACL SUBTREE, and R2654 had to lift that step out of the
+    /// document apply to make it possible. Deleting `access_control/rules`
+    /// stores an empty rule list; without the recompile the live policy would go
+    /// on enforcing the rules that were just removed, which is a deletion that
+    /// reports success and changes nothing an attacker would notice.
+    #[cfg(all(
+        feature = "zenoh-config",
+        any(feature = "adminspace-core", feature = "routing-router-hat")
+    ))]
+    pub fn remove_by_key_with(
+        &mut self,
+        key: &str,
+        sinks: &ConfigSinks<'_>,
+    ) -> Result<(), ConfigKeyWriteError> {
         let _ = Self::key_segments(key)?;
         if !crate::zenoh_config::honours_config_key(key) {
             return Err(ConfigKeyWriteError::NotHonoured {
                 key: String::from(key),
             });
         }
-        if let Some(row) = RUNTIME_MUTABLE_CONFIG_KEYS
+        let row = RUNTIME_MUTABLE_CONFIG_KEYS
             .iter()
-            .find(|row| row.key == key)
-        {
-            if row.discipline == MutationDiscipline::Push {
-                return Err(ConfigKeyWriteError::NeedsSink {
+            .find(|row| row.key == key);
+        let pushes = matches!(row, Some(r) if r.discipline == MutationDiscipline::Push);
+        if pushes {
+            let slice = row.expect("`pushes` is false without a row").slice;
+            Self::push_slice_would_reach(slice, sinks).ok_or_else(|| {
+                ConfigKeyWriteError::NeedsSink {
                     key: String::from(key),
-                });
+                }
+            })?;
+        }
+        let restore = if pushes { Some(self.clone()) } else { None };
+        let acl_before = self.acl_snapshot();
+        let mut applied: Vec<&'static str> = Vec::new();
+        if let Some(row) = row {
+            if self.apply_one_key(key, None) {
+                applied.push(row.key);
             }
         }
-        if !self.apply_one_key(key, None) {
-            return Err(ConfigKeyWriteError::NotRuntimeMutable {
-                key: String::from(key),
+        let settled = self.settle_acl_subtree(&mut applied, &acl_before);
+        if applied.is_empty() {
+            if let Some(previous) = restore {
+                *self = previous;
+            }
+            return Err(if settled {
+                ConfigKeyWriteError::NotRuntimeMutable {
+                    key: String::from(key),
+                }
+            } else {
+                ConfigKeyWriteError::SubtreeRefused {
+                    key: String::from(key),
+                }
             });
+        }
+        if pushes {
+            let slice = row.expect("`pushes` is false without a row").slice;
+            if let Err(err) = self.push_slice(slice, sinks, key) {
+                if let Some(previous) = restore {
+                    *self = previous;
+                }
+                return Err(err);
+            }
         }
         Ok(())
     }
@@ -2531,6 +2931,206 @@ mod tests {
         }
     }
 
+    /// R2654 — the INTERCEPTOR slice reached by a keyed write, which is the half
+    /// of this round the weights slice cannot grade.
+    ///
+    /// Seven of the eight push-discipline keys land here and they share ONE
+    /// consumer, so this is where "dispatch is by slice, not by key" is either
+    /// true or a sentence. It is also the only slice with a SUBTREE: the five
+    /// `access_control/*` keys compile as a unit, which a per-key write makes
+    /// visible in a way a whole-document apply never did.
+    #[cfg(all(
+        feature = "routing-peer",
+        feature = "access-acl",
+        feature = "zenoh-config",
+        any(feature = "adminspace-core", feature = "routing-router-hat")
+    ))]
+    mod interceptor_slice_writes {
+        use super::*;
+        use std::cell::RefCell;
+
+        /// Records every interceptor config handed to it.
+        struct RecordingInterceptorSink {
+            installs: RefCell<Vec<InterceptorConfig>>,
+        }
+
+        impl RecordingInterceptorSink {
+            fn new() -> Self {
+                Self {
+                    installs: RefCell::new(Vec::new()),
+                }
+            }
+            fn last_rule_count(&self) -> Option<usize> {
+                self.installs
+                    .borrow()
+                    .last()
+                    .map(|c| c.acl.as_ref().map_or(0, |p| p.rules().len()))
+            }
+        }
+
+        impl InterceptorSink for RecordingInterceptorSink {
+            fn set_interceptors(&self, config: InterceptorConfig) {
+                self.installs.borrow_mut().push(config);
+            }
+        }
+
+        /// Write the four keys a one-rule policy needs, in the order the subtree
+        /// admits: the named entries before the policy that names them.
+        fn install_a_one_rule_policy(
+            cfg: &mut WzConfig,
+            sinks: &ConfigSinks<'_>,
+        ) -> Result<(), ConfigKeyWriteError> {
+            cfg.set_by_key_with("access_control/enabled", "true", sinks)?;
+            cfg.set_by_key_with(
+                "access_control/rules",
+                r#"[{ id: "r1", key_exprs: ["demo/**"], messages: ["put"],
+                      permission: "deny" }]"#,
+                sinks,
+            )?;
+            cfg.set_by_key_with("access_control/subjects", r#"[{ id: "s1" }]"#, sinks)?;
+            cfg.set_by_key_with(
+                "access_control/policies",
+                r#"[{ rules: ["r1"], subjects: ["s1"] }]"#,
+                sinks,
+            )
+        }
+
+        /// R2654 — an ACL policy built over the wire, key by key, reaches the
+        /// live interceptor stack.
+        #[test]
+        fn the_acl_subtree_is_writable_one_key_at_a_time() {
+            let sink = RecordingInterceptorSink::new();
+            let sinks = ConfigSinks::none().with_interceptors(&sink);
+            let mut cfg = WzConfig::new();
+            assert_eq!(install_a_one_rule_policy(&mut cfg, &sinks), Ok(()));
+            // TWO, not one, and the fixture's own name says "one rule" about
+            // the DOCUMENT rather than the compiled form: the rule leaves
+            // `flows` absent, which upstream resolves to both directions, and an
+            // `AclRule` carries a single flow. So one document rule times two
+            // flows is two compiled rules. The first cut of this test asserted
+            // 1 and the expansion was right.
+            assert_eq!(
+                cfg.interceptors().acl.as_ref().map(|p| p.rules().len()),
+                Some(2),
+                "the four writes compiled to the policy they describe"
+            );
+            #[cfg(feature = "config-mutate-runtime")]
+            assert_eq!(
+                sink.last_rule_count(),
+                Some(2),
+                "and the CONSUMER holds it -- the seven interceptor keys share \
+                 one sink, so this is the slice dispatch working"
+            );
+        }
+
+        /// ⭐ R2654 — THE HAZARD THE WIDENING CREATED, and the reason
+        /// `settle_acl_subtree` had to be lifted out of the document apply.
+        ///
+        /// A delete stores new inputs through `apply_one_key`. Until this round
+        /// the subtree compile lived in `apply_zenoh_config`, which a delete
+        /// never reached — because a delete refused every push key before it got
+        /// there. Give the delete half a sink without moving that step and this
+        /// delete reports success while the live policy goes on enforcing the
+        /// rules that were just removed.
+        ///
+        /// ⚠ IT DELETES THE POLICY, NOT THE RULE SET, and that is a measurement
+        /// rather than a convenience. Deleting `access_control/rules` first
+        /// leaves `policies` naming an id nothing defines, so the subtree does
+        /// not compile and the write is refused as `SubtreeRefused` — which is
+        /// upstream's answer to the same document and is asserted in its own
+        /// test below. The JOIN is what this one grades, so it takes the delete
+        /// that leaves a compilable subtree.
+        #[test]
+        fn deleting_a_policy_recompiles_the_live_rule_set() {
+            let sink = RecordingInterceptorSink::new();
+            let sinks = ConfigSinks::none().with_interceptors(&sink);
+            let mut cfg = WzConfig::new();
+            install_a_one_rule_policy(&mut cfg, &sinks).expect("the policy installs");
+
+            assert_eq!(
+                cfg.remove_by_key_with("access_control/policies", &sinks),
+                Ok(())
+            );
+            assert_eq!(
+                cfg.interceptors().acl.as_ref().map(|p| p.rules().len()),
+                Some(0),
+                "the deleted policy left the LIVE rule set, not only the stored \
+                 inputs -- a delete that reported success and changed nothing an \
+                 attacker would notice is the defect this asserts against"
+            );
+            #[cfg(feature = "config-mutate-runtime")]
+            assert_eq!(
+                sink.last_rule_count(),
+                Some(0),
+                "and the consumer was handed the emptied policy"
+            );
+        }
+
+        /// R2654 — deleting one entry of the subtree while another still names
+        /// it is refused, and refused as a SUBTREE.
+        ///
+        /// The pair with the test above: same seam, same sink, and the delete
+        /// that cannot leave a compilable subtree is the one that is refused. A
+        /// delete allowed here would install a policy whose rule ids resolve to
+        /// nothing, which is the document upstream's `init` bails on.
+        #[test]
+        fn deleting_a_rule_set_a_policy_still_names_is_refused() {
+            let sink = RecordingInterceptorSink::new();
+            let sinks = ConfigSinks::none().with_interceptors(&sink);
+            let mut cfg = WzConfig::new();
+            install_a_one_rule_policy(&mut cfg, &sinks).expect("the policy installs");
+
+            assert_eq!(
+                cfg.remove_by_key_with("access_control/rules", &sinks),
+                Err(ConfigKeyWriteError::SubtreeRefused {
+                    key: String::from("access_control/rules")
+                })
+            );
+            assert_eq!(
+                cfg.interceptors().acl.as_ref().map(|p| p.rules().len()),
+                Some(2),
+                "and the refused delete left the live policy exactly as it was"
+            );
+        }
+
+        /// R2654 — a write that is well formed, runtime-mutable and STILL
+        /// refused, because the subtree it lands in does not compile.
+        ///
+        /// It answers by its own name. `NotRuntimeMutable` is what this used to
+        /// say, and it is false twice over: the key is runtime-mutable and the
+        /// value is fine. What an operator has to be told is the ORDER -- the
+        /// named entries before the policy naming them, which is upstream's own
+        /// demand of a whole document.
+        #[test]
+        fn a_policy_naming_nothing_yet_is_refused_as_a_subtree_not_as_a_key() {
+            let sink = RecordingInterceptorSink::new();
+            let sinks = ConfigSinks::none().with_interceptors(&sink);
+            let mut cfg = WzConfig::new();
+            cfg.set_by_key_with("access_control/enabled", "true", &sinks)
+                .expect("the switch goes first and stands alone");
+            assert_eq!(
+                cfg.set_by_key_with(
+                    "access_control/policies",
+                    r#"[{ rules: ["r1"], subjects: ["s1"] }]"#,
+                    &sinks,
+                ),
+                Err(ConfigKeyWriteError::SubtreeRefused {
+                    key: String::from("access_control/policies")
+                })
+            );
+            // ⚠ `acl` is SOME here and that is right: `enabled: true` with no
+            // rules is a real policy -- it imposes `default_permission` on every
+            // message -- so the switch landing is not the same as the policy
+            // landing. What the refused write must not have done is add a rule.
+            assert_eq!(
+                cfg.interceptors().acl.as_ref().map(|p| p.rules().len()),
+                Some(0),
+                "the refused write installed no rule; the enabled-and-empty \
+                 policy is what the switch alone already meant"
+            );
+        }
+    }
+
     /// R2634 — the configured-router-link-weight slice: the third live slice, and
     /// the one zenoh re-reads per `update_from_config`. Driven against a
     /// RECORDING sink rather than the forwarder, so what is graded here is the
@@ -2711,6 +3311,132 @@ mod tests {
                 cfg.router_link_weights(),
                 &[row(0xAA, 250), row(0xBB, 7)],
                 "and the live rows are what the wire asked for"
+            );
+        }
+
+        /// R2654 — THE RESIDUAL THIS ATOM IS GRADED ON, in one test: a
+        /// push-discipline key written over the wire lands AND reaches its
+        /// consumer, because the write was given one.
+        ///
+        /// Before this round `set_by_key` answered `NeedsSink` for eight of the
+        /// ten registry rows, which left the admin write surface two booleans
+        /// wide against upstream's whole document. The arms below are the two
+        /// halves of that: the same key, the same value, once with a consumer
+        /// and once without.
+        #[cfg(all(
+            feature = "zenoh-config",
+            any(feature = "adminspace-core", feature = "routing-router-hat")
+        ))]
+        #[test]
+        fn a_push_key_is_writable_when_the_write_is_given_its_consumer() {
+            const KEY: &str = "routing/router/linkstate/transport_weights";
+            const VALUE: &str = r#"[{ dst_zid: "aa", weight: 250 }]"#;
+
+            // WITH the consumer: stored and driven.
+            let sink = RecordingSink::new(true);
+            let mut cfg = WzConfig::new();
+            let sinks = ConfigSinks::none().with_router_link_weights(&sink);
+            assert_eq!(cfg.set_by_key_with(KEY, VALUE, &sinks), Ok(()));
+            assert_eq!(
+                cfg.router_link_weights(),
+                &[row(0xAA, 250)],
+                "the wire's rows are the live rows"
+            );
+            #[cfg(feature = "config-mutate-runtime")]
+            assert_eq!(sink.calls(), 1, "and the consumer was driven, exactly once");
+            #[cfg(not(feature = "config-mutate-runtime"))]
+            assert_eq!(
+                sink.calls(),
+                0,
+                "without the runtime-mutate feature the store is the whole of it"
+            );
+
+            // WITHOUT it: refused by name, and NOTHING stored. The second half
+            // is the one that matters -- a refusal that had already written the
+            // value would be the half-applied state the old blanket refusal
+            // existed to prevent.
+            let mut bare = WzConfig::new();
+            assert_eq!(
+                bare.set_by_key(KEY, VALUE),
+                Err(ConfigKeyWriteError::NeedsSink {
+                    key: String::from(KEY)
+                })
+            );
+            assert!(
+                bare.router_link_weights().is_empty(),
+                "a NeedsSink refusal leaves the config exactly as it was"
+            );
+        }
+
+        /// R2654 — a value the CONSUMER refuses is refused by name and leaves
+        /// nothing behind.
+        ///
+        /// Two rows naming one destination is the one such value today. The
+        /// reader ACCEPTS the document on purpose -- upstream's parser does too,
+        /// and a wz node validates documents destined for other nodes -- so this
+        /// is the seam where it is caught, exactly where upstream catches it
+        /// while building its network.
+        ///
+        /// ⚠ THE SECOND ASSERTION IS THE POINT. `reconfigure_*` validates before
+        /// IT commits, but the value is already stored by the time the push
+        /// runs, so without the snapshot this refusal would leave the duplicate
+        /// rows live and report an error about them.
+        #[cfg(all(
+            feature = "zenoh-config",
+            any(feature = "adminspace-core", feature = "routing-router-hat")
+        ))]
+        #[test]
+        fn a_value_the_consumer_refuses_is_named_and_rolled_back() {
+            const KEY: &str = "routing/router/linkstate/transport_weights";
+            let sink = RecordingSink::new(true);
+            let mut cfg = WzConfig::new().with_router_link_weights(vec![row(0xAA, 250)]);
+            let sinks = ConfigSinks::none().with_router_link_weights(&sink);
+            assert_eq!(
+                cfg.set_by_key_with(
+                    KEY,
+                    r#"[{ dst_zid: "cc", weight: 1 }, { dst_zid: "cc", weight: 2 }]"#,
+                    &sinks,
+                ),
+                Err(ConfigKeyWriteError::ConsumerRefused {
+                    key: String::from(KEY)
+                })
+            );
+            assert_eq!(
+                cfg.router_link_weights(),
+                &[row(0xAA, 250)],
+                "the refused rows did not become live, and the previous ones \
+                 are still there"
+            );
+        }
+
+        /// R2654 — the DELETE half reaches its consumer too, and restores the
+        /// schema default.
+        ///
+        /// It is here rather than beside the set half because the two are one
+        /// gate and this is what says so: the same key, the same sink, the same
+        /// slice dispatch, and the only difference is that the value comes from
+        /// `WzConfig::default` instead of from the wire.
+        #[cfg(all(
+            feature = "zenoh-config",
+            any(feature = "adminspace-core", feature = "routing-router-hat")
+        ))]
+        #[test]
+        fn the_delete_half_reaches_the_consumer_as_the_set_half_does() {
+            const KEY: &str = "routing/router/linkstate/transport_weights";
+            let sink = RecordingSink::new(true);
+            let mut cfg = WzConfig::new().with_router_link_weights(vec![row(0xAA, 250)]);
+            let sinks = ConfigSinks::none().with_router_link_weights(&sink);
+            assert_eq!(cfg.remove_by_key_with(KEY, &sinks), Ok(()));
+            assert!(
+                cfg.router_link_weights().is_empty(),
+                "the schema default for this key is no weights at all"
+            );
+            #[cfg(feature = "config-mutate-runtime")]
+            assert_eq!(
+                sink.last().len(),
+                0,
+                "and the consumer was handed the EMPTY map, not left holding \
+                 the deleted row"
             );
         }
 
