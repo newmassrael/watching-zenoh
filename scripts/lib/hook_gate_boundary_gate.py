@@ -134,7 +134,22 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 HOOK = ".githooks/pre-push"
 
 SECTION_RE = re.compile(r"^# ─── (?P<h>[^\n]*)$", re.M)
-GATE_RE = re.compile(r"^gate (?P<n>\d+[a-z]*)\b")
+# R2652 — a gate NAME is digits then any run of letters and digits, widened from
+# `\d+[a-z]*`.
+#
+# ⛔ THE OLD FORM MADE A NAME THE HOOK ALREADY USED UNREPRESENTABLE, and it
+# refused that gate as "not a gate" rather than as a bad name — the diagnosis
+# points at the section instead of at this line, which cost two hosted jobs to
+# read. `gate 2d2` matched `2d` and then failed `\b` against the `2`.
+#
+# The widening is not a convenience. The hook carries about thirty gates under
+# the number 2 and the single-letter suffixes are EXHAUSTED: `2e` is spelled
+# three times and `2k` and `2r` twice each, which is what a namespace overflows
+# into when its grammar admits no second level. Those duplicates are a real
+# defect — two gates sharing a name are indistinguishable in the `[gate 2e]`
+# attribution mark this file also reads — and they are not repaired here; what
+# this widening does is stop the grammar from FORCING another one.
+GATE_RE = re.compile(r"^gate (?P<n>\d+[a-z0-9]*)\b")
 EXIT1_RE = re.compile(r"\bexit\s+1\b")
 COMMENT_RE = re.compile(r"^\s*#")
 
@@ -144,7 +159,10 @@ COMMENT_RE = re.compile(r"^\s*#")
 STDERR_ECHO_RE = re.compile(r"^\s*(echo|printf)\b.*>&2\s*$")
 # Its ATTRIBUTION. Bracketed so a message that merely NAMES another gate in
 # prose is not read as claiming to be one.
-MARK_RE = re.compile(r"\[gate (?P<n>\d+[a-z]*)\]")
+# R2652 — widened with `GATE_RE` and necessarily so: a name this file can read
+# in a HEADER and not in a MARK would report the gate as unattributed, which is
+# the same silence one regex over.
+MARK_RE = re.compile(r"\[gate (?P<n>\d+[a-z0-9]*)\]")
 
 SURFACES = ("pushed-range", "worktree", "not-a-file")
 GRADES_RE = re.compile(r"^#\s*grades:\s*(?P<surface>[a-z-]+)\b", re.M)
@@ -386,6 +404,14 @@ _CASES = [
      _sec("the diff-base precondition, hoisted", _GUARD)
      + _sec("gate 5 — the other lanes", _VERDICT, "worktree")
      + _sec("gate 3 — changed-crate tests", _verdict("3"), "worktree"), None),
+    # R2652 — the TWO-LEVEL name, red-first before the widening: with
+    # `\d+[a-z]*` this case failed with "is not a gate and owns 1 `exit 1`",
+    # which is the hook's real refusal reproduced. Both halves are here because
+    # the header and the mark are read by different regexes and a name readable
+    # in one alone is an unattributed gate.
+    ("a two-level gate name is a gate, in the header and in the mark", True,
+     _sec("gate 2d2 — a sub-gate of 2d", _verdict("2d2"), "worktree")
+     + _sec("gate 5 — the other lanes", _VERDICT, "worktree"), None),
     ("a refusal in a section nobody called a gate", False,
      _sec("housekeeping (NOT a gate)", _SILENT)
      + _sec("gate 5 — the other lanes", _VERDICT, "worktree"),
