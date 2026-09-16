@@ -541,15 +541,14 @@ mod admin_write_vocabulary_tests {
     use super::admin_write_knows_config_key;
     use wz_session_core::adminspace::{
         parse_admin_config_write, AdminConfigWrite, AdminConfigWriteBody, AdminConfigWriteOutcome,
-        ADMIN_CONFIG_WRITE_ACTIONS,
+        AdminConfigWriteSpace, ADMIN_CONFIG_WRITE_ACTIONS,
     };
 
-    const WRITE_PREFIX: &str = "@/a1b2/peer/config/";
-
     fn decode(subkey: &str) -> AdminConfigWriteOutcome {
+        let space = AdminConfigWriteSpace::new("a1b2", "peer");
         parse_admin_config_write(
-            WRITE_PREFIX,
-            &format!("{WRITE_PREFIX}{subkey}"),
+            &space,
+            &space.key_for(subkey),
             AdminConfigWriteBody::Put(b"x"),
             true,
             &admin_write_knows_config_key,

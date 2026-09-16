@@ -536,7 +536,7 @@ mod tests {
         use crate::compiled_plugins_dyn;
         use wz_session_core::adminspace::{
             parse_admin_config_write, AdminConfigWrite, AdminConfigWriteBody,
-            AdminConfigWriteOutcome, AdminPluginState,
+            AdminConfigWriteOutcome, AdminConfigWriteSpace, AdminPluginState,
         };
 
         let session = make_session();
@@ -551,9 +551,9 @@ mod tests {
         );
 
         // A config-write `storage-add demo:demo/**` → AddStorage → StorageConfig → live spawn.
-        let prefix = "@/z/peer/config/";
+        let space = AdminConfigWriteSpace::new("z", "peer");
         let out = parse_admin_config_write(
-            prefix,
+            &space,
             "@/z/peer/config/storage-add",
             AdminConfigWriteBody::Put(b"demo:demo/**"),
             true,
@@ -587,7 +587,7 @@ mod tests {
 
         // A `storage-del demo` → RemoveStorage → despawn (RAII undeclare) → back to Loaded.
         let out = parse_admin_config_write(
-            prefix,
+            &space,
             "@/z/peer/config/storage-del",
             AdminConfigWriteBody::Put(b"demo"),
             true,

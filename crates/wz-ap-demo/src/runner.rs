@@ -4947,20 +4947,19 @@ async fn run_peer_until(
     if config_writable {
         use wz::runtime_tokio::admin_write_permit;
         use wz::runtime_tokio::adminspace::{
-            admin_config_write_key, admin_config_write_prefix, parse_admin_config_write,
-            AdminConfigWrite, AdminConfigWriteBody, AdminConfigWriteOutcome,
+            parse_admin_config_write, AdminConfigWrite, AdminConfigWriteBody,
+            AdminConfigWriteOutcome, AdminConfigWriteSpace,
         };
         use wz::runtime_tokio::sink::SampleView;
         use wz::runtime_tokio::zid_hex::zid_to_zenoh_hex;
         let zid_hex = zid_to_zenoh_hex(&params.zid);
         let whatami_str = params.whatami.to_str();
-        let write_key = admin_config_write_key(&zid_hex, whatami_str);
-        // The `@/<zid>/peer/config/` prefix a PUT key's config sub-key hangs under —
-        // stripped to recover the sub-key the handler routes on. R2393 replaced the
-        // hand-rolled `admin_config_key(..) + '/'` with the shared derivation: this
-        // host spelled it correctly and a third one did not, and one origin is what
-        // makes the pattern/prefix pair impossible to mismatch.
-        let write_prefix = admin_config_write_prefix(&zid_hex, whatami_str);
+        // R2661 — ONE value for this node's config-write space. It answers what
+        // to subscribe to AND whether an arriving keyexpr belongs here, so the
+        // pattern/prefix pair this host used to carry (and a third host once got
+        // the wrong way round) no longer exists to be mismatched.
+        let write_space = AdminConfigWriteSpace::new(&zid_hex, whatami_str);
+        let write_key = String::from(write_space.subscription_pattern());
         // R311y51/y52 (§5.23 adminspace-write) — the `permissions.write` gate, the
         // write-side mirror of the adminspace-read GET gate. `--config-writable`
         // HOSTS the write subscriber; `--config-write-permit` PERMITS the writes it
@@ -4986,7 +4985,7 @@ async fn run_peer_until(
             // write-side counterpart of answer_admin_query.
             let write_permitted = admin_write_permit(&write_cfg.borrow().admin_permissions());
             match parse_admin_config_write(
-                &write_prefix,
+                &write_space,
                 sample.keyexpr(),
                 // R2646 — the sample's OWN kind, not an assumed Put. The
                 // forwarder began delivering Del samples this round; passing
@@ -5058,6 +5057,17 @@ async fn run_peer_until(
                 // this blames the ENCODING, which is upstream's own split.
                 AdminConfigWriteOutcome::NotUtf8 => log::error!(
                     "wz-ap-demo peer: config-write payload is not utf8; ignored {}",
+                    sample.keyexpr()
+                ),
+                // R2661 — the write is aimed at THIS space but puts a `**` where
+                // the space's format writes a one-chunk slot, so which chunks are
+                // the sub-key is not decided. Reported rather than dropped: the
+                // silent arm below means "not mine", and this one means "mine,
+                // and I will not guess".
+                AdminConfigWriteOutcome::AmbiguousSpaceAddress => log::error!(
+                    "wz-ap-demo peer: config-write key addresses a SET of config spaces \
+                     (`**` in the zid or whatami chunk), so its config sub-key is not \
+                     determined; ignored {}",
                     sample.keyexpr()
                 ),
                 // The bare `.../config` GET key the `/**` subscriber also matches.
@@ -6587,8 +6597,8 @@ async fn run_router_hat_until(
     #[cfg(any(feature = "router-connect-reconcile", feature = "router-config-mutate"))]
     {
         use wz::runtime_tokio::adminspace::{
-            admin_config_write_key, admin_config_write_prefix, parse_admin_config_write,
-            AdminConfigWrite, AdminConfigWriteBody, AdminConfigWriteOutcome,
+            parse_admin_config_write, AdminConfigWrite, AdminConfigWriteBody,
+            AdminConfigWriteOutcome, AdminConfigWriteSpace,
         };
         use wz::runtime_tokio::sink::SampleView;
         // Re-derived here rather than borrowed from the queryable block, which
@@ -6598,21 +6608,23 @@ async fn run_router_hat_until(
         // which is what the clone was for when it lived up there.
         let write_zid_hex = wz::runtime_tokio::zid_hex::zid_to_zenoh_hex(&params.zid);
         let write_whatami_str = params.whatami.to_str();
-        let write_key = admin_config_write_key(&write_zid_hex, write_whatami_str);
+        let write_space = AdminConfigWriteSpace::new(&write_zid_hex, write_whatami_str);
+        let write_key = String::from(write_space.subscription_pattern());
         let write_cfg = std::rc::Rc::clone(&host_cfg);
         // Belongs to the ConnectAdd arm alone: the reconcile channel exists
         // only under the feature that intent is named for, and the plane
         // above no longer does.
         #[cfg(feature = "router-connect-reconcile")]
         let write_tx = reconcile_tx.clone();
-        // The STRIP prefix comes from `admin_config_write_prefix`, NOT from the
-        // subscription pattern above. The first cut of this host wrote
-        // `format!("{write_key}/")`, which is the PATTERN plus a slash
-        // (`@/<zid>/router/config/**/`) — it compiles, it registers, it logs, and
-        // then `strip_prefix` never matches, so every PUT decodes `NotAWrite` and
-        // is silently ignored. Both shapes now come from one origin in
-        // `wz-session-core`, which is what makes them impossible to mismatch.
-        let write_prefix = admin_config_write_prefix(&write_zid_hex, write_whatami_str);
+        // R2661 — THE STRIP PREFIX IS GONE, and with it the defect this comment
+        // used to describe. The first cut of this host passed
+        // `format!("{write_key}/")` — the PATTERN plus a slash — where the PREFIX
+        // belonged: it compiles, it registers, it logs, and then `strip_prefix`
+        // never matches, so every PUT decodes `NotAWrite` and is silently
+        // ignored. The comment that replaced it claimed one shared origin made
+        // the two "impossible to mismatch", which was FALSE while both were
+        // `String`: one origin stops a spelling slip, not a transposition. There
+        // is now one value, `write_space`, and no second string to hand over.
         // The intent queue this handler stashes into; the app-tick loop owns
         // the sinks and drains it.
         #[cfg(feature = "router-config-mutate")]
@@ -6625,7 +6637,7 @@ async fn run_router_hat_until(
             let write_permitted =
                 wz::runtime_tokio::admin_write_permit(&write_cfg.borrow().admin_permissions());
             match parse_admin_config_write(
-                &write_prefix,
+                &write_space,
                 sample.keyexpr(),
                 AdminConfigWriteBody::of_sample(sample),
                 write_permitted,
@@ -6753,6 +6765,13 @@ async fn run_router_hat_until(
                 // R2660 — the ENCODING is refused, not the value.
                 AdminConfigWriteOutcome::NotUtf8 => log::error!(
                     "wz-ap-demo router-hat: config-write payload is not utf8; ignored {}",
+                    sample.keyexpr()
+                ),
+                // R2661 — aimed at this space, but with a `**` where the format
+                // writes a one-chunk slot; reported rather than silently dropped.
+                AdminConfigWriteOutcome::AmbiguousSpaceAddress => log::error!(
+                    "wz-ap-demo router-hat: config-write key addresses a SET of config \
+                         spaces (`**` in the zid or whatami chunk); ignored {}",
                     sample.keyexpr()
                 ),
                 AdminConfigWriteOutcome::NotAWrite => {}
@@ -7485,8 +7504,8 @@ pub(crate) async fn run_storage_host(listen: &str, opts: StorageHostOpts) -> io:
     // run-mode no longer re-implements the admin answerer, it declares through
     // the library seam and hands it the live inputs.
     use wz::runtime_tokio::adminspace::{
-        admin_config_key, admin_config_write_key, admin_config_write_prefix,
-        parse_admin_config_write, AdminConfigWrite, AdminConfigWriteBody, AdminConfigWriteOutcome,
+        admin_config_key, parse_admin_config_write, AdminConfigWrite, AdminConfigWriteBody,
+        AdminConfigWriteOutcome, AdminConfigWriteSpace,
     };
     use wz::runtime_tokio::compiled_plugins_dyn;
     use wz::runtime_tokio::config::WzConfig;
@@ -7583,25 +7602,25 @@ pub(crate) async fn run_storage_host(listen: &str, opts: StorageHostOpts) -> io:
     // derives it from the same `admin_queryable_key(zid, whatami)` SSOT, so
     // naming it twice would be two spellings of one fact.
     let config_key = admin_config_key(&zid_hex, whatami_str); // @/<zid>/peer/config
-    let write_key = admin_config_write_key(&zid_hex, whatami_str); // @/<zid>/peer/config/**
-                                                                   // The `@/<zid>/peer/config/` prefix a config-write PUT's sub-key hangs under.
-                                                                   // R2393 — one shared derivation, see the peer host's note.
-    let write_prefix = admin_config_write_prefix(&zid_hex, whatami_str);
-    // R311y812 — the config the admin `config` leg answers from is now HELD, not
-    // rendered and dropped: it is this host's live permit source, the third and last
-    // shipping run-mode to get one (peer R311y780, router-hat R311y781). The GET
-    // handler re-reads `admin_permissions()` off this one instance per request,
-    // which is the whole of zenoh's gate — it takes the config lock INSIDE the
-    // handler (`net/runtime/adminspace.rs:456-457`), so a runtime permission change
-    // reaches the very next request where a captured bool never could.
-    //
-    // R2374 — `write` is now the FLAG rather than a hardcoded `true`. The round
-    // before this one recorded `write: true` as "this host's actual behaviour",
-    // because its config-WRITE subscriber passed a literal permit and consulted no
-    // `admin_write_permit`; that was the truth and it was also the last shipping
-    // run-mode outside `permissions.write`. Seeded here, re-read per PUT below,
-    // and default-DENY like zenoh's `PermissionsConf` — a host that granted writes
-    // to anyone by default is the asymmetry the write gate exists to remove.
+                                                              // R2661 — one value for the config-write SPACE: it is what this host
+                                                              // subscribes to AND what decides whether an arriving keyexpr belongs here.
+    let write_space = AdminConfigWriteSpace::new(&zid_hex, whatami_str);
+    let write_key = String::from(write_space.subscription_pattern()); // @/<zid>/peer/config/**
+                                                                      // R311y812 — the config the admin `config` leg answers from is now HELD, not
+                                                                      // rendered and dropped: it is this host's live permit source, the third and last
+                                                                      // shipping run-mode to get one (peer R311y780, router-hat R311y781). The GET
+                                                                      // handler re-reads `admin_permissions()` off this one instance per request,
+                                                                      // which is the whole of zenoh's gate — it takes the config lock INSIDE the
+                                                                      // handler (`net/runtime/adminspace.rs:456-457`), so a runtime permission change
+                                                                      // reaches the very next request where a captured bool never could.
+                                                                      //
+                                                                      // R2374 — `write` is now the FLAG rather than a hardcoded `true`. The round
+                                                                      // before this one recorded `write: true` as "this host's actual behaviour",
+                                                                      // because its config-WRITE subscriber passed a literal permit and consulted no
+                                                                      // `admin_write_permit`; that was the truth and it was also the last shipping
+                                                                      // run-mode outside `permissions.write`. Seeded here, re-read per PUT below,
+                                                                      // and default-DENY like zenoh's `PermissionsConf` — a host that granted writes
+                                                                      // to anyone by default is the asymmetry the write gate exists to remove.
     let admin_cfg = std::sync::Arc::new(std::sync::Mutex::new(
         WzConfig::from_init_params(&params).with_admin_permissions(
             wz::runtime_tokio::adminspace::AdminSpacePermissions {
@@ -7956,7 +7975,7 @@ pub(crate) async fn run_storage_host(listen: &str, opts: StorageHostOpts) -> io:
         // iteration event, and a permission that takes effect later than it was
         // granted is the frozen permit again, one seam over.
         let sub_pending = pending.clone();
-        let sub_prefix = write_prefix.clone();
+        let sub_space = write_space.clone();
         let sub_cfg = admin_cfg.clone();
         let _config_write_sub: Option<Subscriber> = match session.declare_subscriber(
             write_key.clone(),
@@ -7965,7 +7984,7 @@ pub(crate) async fn run_storage_host(listen: &str, opts: StorageHostOpts) -> io:
                 let write_permitted =
                     wz::runtime_tokio::admin_write_permit(&admin_permissions_of(&sub_cfg));
                 match parse_admin_config_write(
-                    &sub_prefix,
+                    &sub_space,
                     sample.keyexpr(),
                     AdminConfigWriteBody::of_sample(sample),
                     write_permitted,
@@ -8082,6 +8101,13 @@ pub(crate) async fn run_storage_host(listen: &str, opts: StorageHostOpts) -> io:
                     // R2660 — the ENCODING is refused, not the value.
                     AdminConfigWriteOutcome::NotUtf8 => log::error!(
                         "wz-ap-demo storage-host: config-write payload is not utf8; ignored {}",
+                        sample.keyexpr()
+                    ),
+                    // R2661 — aimed at this space, but with a `**` where the
+                    // format writes a one-chunk slot; reported, never dropped.
+                    AdminConfigWriteOutcome::AmbiguousSpaceAddress => log::error!(
+                        "wz-ap-demo storage-host: config-write key addresses a SET of config \
+                         spaces (`**` in the zid or whatami chunk); ignored {}",
                         sample.keyexpr()
                     ),
                     AdminConfigWriteOutcome::NotAWrite => {}

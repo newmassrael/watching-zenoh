@@ -1089,6 +1089,18 @@ fn admin_entity_key(zid_hex: &str, whatami: &str, kind: &str, pattern: &str) -> 
     s
 }
 
+/// The number of chunks in front of an admin config-write sub-key:
+/// `@` / `<zid>` / `<whatami>` / `config`. Upstream states the same four as a
+/// format, `@/${zid:*}/${whatami:*}/config/${key:**}`
+/// (`zenoh/src/net/runtime/adminspace.rs` @ `CONFIG_FORMAT`), whose `${..:*}`
+/// specs are ONE-CHUNK specs — which is why the count is a constant and the
+/// sub-key starts at a fixed index rather than wherever a scan finds `config`.
+const ADMIN_CONFIG_SPACE_PREFIX_CHUNKS: usize = 4;
+
+/// The trailing chunk that turns this node's config prefix into the SUBSCRIPTION
+/// pattern upstream declares (`adminspace.rs:350-353`).
+const ADMIN_CONFIG_WRITE_PATTERN_TAIL: &str = "**";
+
 /// R311y48 (§5.23 Phase 3b) — the admin config-WRITE keyexpr PATTERN
 /// `@/<zid>/<whatami>/config/**`. The PATTERN is faithful to zenoh, which declares
 /// its write-only config `DeclareSubscriber` on exactly this key
@@ -1120,37 +1132,178 @@ fn admin_entity_key(zid_hex: &str, whatami: &str, kind: &str, pattern: &str) -> 
 /// subset, so it is not subsumed by the keyed write; and it has become the
 /// "explicit non-zenoh alias" this caveat foresaw — as has `admin-read`, which
 /// names a key the generic path now also carries.
-pub fn admin_config_write_key(zid_hex: &str, whatami: &str) -> String {
-    let mut s = admin_config_write_prefix(zid_hex, whatami);
-    s.push_str("**");
-    s
+///
+/// ⭐ R2661 — THE PATTERN ABOVE IS NOW THIS TYPE, and the type is ONE node's
+/// admin config-WRITE keyexpr SPACE, built from the `(zid_hex, whatami)` pair
+/// that defines it and holding that single string.
+///
+/// It answers every question a config-write host has about that space, and it
+/// is the only thing that answers them: what to SUBSCRIBE to
+/// ([`subscription_pattern`](Self::subscription_pattern)), what CONCRETE key a
+/// sub-key has here ([`key_for`](Self::key_for)), and whether an arriving
+/// keyexpr belongs to this space and with which sub-key
+/// ([`subkey`](Self::subkey)).
+///
+/// # Why a type, where R311y48..R2393 had two strings
+///
+/// Until this round a host built TWO `String`s side by side from that same
+/// pair: the SUBSCRIPTION pattern `…/config/**` and a STRIP prefix
+/// `…/config/`, which [`parse_admin_config_write`] took as a `&str`. They are
+/// one fact wearing two shapes and nothing in the types related them, so
+/// passing the pattern where the prefix belonged type-checked, compiled, and
+/// produced a `strip_prefix` that could never match: every arriving PUT decoded
+/// [`AdminConfigWriteOutcome::NotAWrite`], whose handler arm is correctly
+/// silent. A host wired that way registers its subscriber, logs that it is
+/// hosting it, receives every sample, and applies nothing. `82fd09b2` shipped
+/// exactly that, and the round's own unit tests all passed because they pass
+/// the prefix as a `const` literal — so not one of them had to DERIVE it.
+///
+/// R2393 answered that with a round-trip test and a doc comment claiming the
+/// pair's single origin made the two shapes "impossible to mismatch". THE CLAIM
+/// WAS FALSE: one origin prevents a SPELLING slip, not a TRANSPOSITION, because
+/// both shapes were still `String` and a host could still hand over the wrong
+/// one. Here the strip prefix is not a value at all — it is a private slice of
+/// the one stored pattern — so there is no second string to pass and the
+/// transposition has stopped being expressible. The four assertions R2393 made
+/// survive as assertions about THIS type, minus its control arm, which is the
+/// one thing a type is allowed to take away (see
+/// `the_space_is_one_origin_and_round_trips`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AdminConfigWriteSpace {
+    /// `@/<zid>/<whatami>/config/**`. PRIVATE, and the only field: every other
+    /// shape this type hands out is derived from it here rather than built by a
+    /// caller.
+    pattern: String,
 }
 
-/// R2393 — the STRIP prefix `@/<zid>/<whatami>/config/` that
-/// [`parse_admin_config_write`] takes, the companion of the SUBSCRIPTION pattern
-/// [`admin_config_write_key`] returns.
-///
-/// # Why this is a function, and why the pattern above is now derived from it
-///
-/// The pattern and the prefix are one fact wearing two shapes, and nothing in the
-/// types relates them: the pattern ends `/**`, the prefix ends `/`, so passing the
-/// pattern where the prefix belongs type-checks, compiles, and yields a
-/// `strip_prefix` that can never match. Every PUT then decodes
-/// [`AdminConfigWriteOutcome::NotAWrite`], whose handler arm is correctly silent —
-/// so a host wired that way registers its subscriber, logs that it is hosting it,
-/// receives the samples, and applies nothing.
-///
-/// That is not hypothetical. Three shipping hosts need this prefix; two built it by
-/// hand from [`admin_config_key`] and the third built it from the PATTERN, and the
-/// mismatch survived its own round's unit tests because those tests pass the prefix
-/// as a LITERAL — the demo wiring was the only caller that had to derive it, and a
-/// demo is what no unit test drives. Deriving the pattern from the prefix gives the
-/// pair one origin, and `write_prefix_and_write_pattern_agree_on_the_subkey` pins
-/// that origin, so an edit to either shape has to keep the other true.
-pub fn admin_config_write_prefix(zid_hex: &str, whatami: &str) -> String {
-    let mut s = admin_config_key(zid_hex, whatami);
-    s.push('/');
-    s
+impl AdminConfigWriteSpace {
+    /// THE constructor — the `(zid_hex, whatami)` pair, which is what a node
+    /// knows about itself, and nothing else.
+    pub fn new(zid_hex: &str, whatami: &str) -> Self {
+        let mut pattern = admin_config_key(zid_hex, whatami);
+        pattern.push('/');
+        pattern.push_str(ADMIN_CONFIG_WRITE_PATTERN_TAIL);
+        Self { pattern }
+    }
+
+    /// What a host declares a subscriber on: `@/<zid>/<whatami>/config/**`,
+    /// which is the key upstream declares its write-only config
+    /// `DeclareSubscriber` on (`adminspace.rs:350-353`).
+    pub fn subscription_pattern(&self) -> &str {
+        &self.pattern
+    }
+
+    /// The concrete keyexpr `sub_key` has in this space — what a CLIENT puts to.
+    ///
+    /// The inverse of [`subkey`](Self::subkey) for every non-empty, non-wild
+    /// `sub_key`, which is the round-trip property R2393's test pinned across
+    /// two strings and this type pins across one.
+    pub fn key_for(&self, sub_key: &str) -> String {
+        let mut s = String::from(self.prefix());
+        s.push_str(sub_key);
+        s
+    }
+
+    /// `@/<zid>/<whatami>/config/` — a slice of [`Self::pattern`], never a
+    /// second string, and never leaves this type.
+    fn prefix(&self) -> &str {
+        &self.pattern[..self.pattern.len() - ADMIN_CONFIG_WRITE_PATTERN_TAIL.len()]
+    }
+
+    /// The sub-key `keyexpr` names in this space, or the refusal that stands in
+    /// its place.
+    ///
+    /// # Upstream's three gates, in upstream's order
+    ///
+    /// `zenoh/src/net/runtime/adminspace.rs` @ `fn send_push_consume` decides
+    /// membership in THREE steps after the permission check, not one:
+    ///
+    /// 1. @ `if !local_config_key.intersects(&key_expr)` — keyexpr SET
+    ///    semantics against this node's own `@/<zid>/<whatami>/config/**`. Its
+    ///    own NOTE says so: "First use keyexpr set semantics to decide whether
+    ///    this PUT/DEL targets this runtime's config space".
+    /// 2. @ `match config_format.parse(&key_expr)` — the key must present the
+    ///    format `@/${zid:*}/${whatami:*}/config/${key:**}`.
+    /// 3. @ `.ok().filter(|key| !key.is_empty())` — the sub-key must be
+    ///    non-empty.
+    ///
+    /// Gate 1 is what wz did NOT have. It compared a CONCRETE literal prefix
+    /// with `strip_prefix`, so `@/*/peer/config/batch-size` — an ordinary
+    /// wildcard write upstream applies to its own config — was silently
+    /// dropped. Set semantics is the fix, and it is [`crate::keyexpr_match`]'s
+    /// existing `keyexpr_intersects_target`, unconditionally available here
+    /// because `adminspace-core` implies `keyexpr-wildcard-double`.
+    ///
+    /// # Gate 2 is read POSITIONALLY, and that is a DELIBERATE divergence
+    ///
+    /// Upstream's gate 2 is `KeFormat::parse`, a greedy intersection-based
+    /// matcher. MEASURED against the pin rather than inferred: it does not
+    /// behave like the format it is parsing. `${zid:*}` and `${whatami:*}` are
+    /// ONE-CHUNK specs, but a `**` arriving in one of those slots is allowed to
+    /// absorb several chunks and re-anchor the literal `config`, so
+    /// `@/**/peer/config/batch-size` yields `batch-size` while
+    /// `@/a1b2/**/config/batch-size` yields the un-placeable
+    /// `**/config/batch-size` — two readings of one format, chosen by whichever
+    /// alignment the backtracker reached first.
+    ///
+    /// wz reads the format as written: the sub-key begins at chunk
+    /// `ADMIN_CONFIG_SPACE_PREFIX_CHUNKS`, and a `**` in a one-chunk slot
+    /// means the keyexpr addresses a SET of config spaces without saying which
+    /// chunks are the sub-key — [`AdminConfigWriteOutcome::AmbiguousSpaceAddress`],
+    /// refused and REPORTED rather than guessed. On a write plane, applying a
+    /// key the operator did not name is worse than applying none.
+    ///
+    /// THE DIVERGENCE IS COUNTED, one-directional, and confined to that
+    /// variant. Over a 360-case cross product of zid / whatami / tail shapes
+    /// against `@/a1b2/peer/config/**`, 142 keyexprs pass gate 1; of those, 78
+    /// get the identical answer, 42 are refused here while upstream extracts a
+    /// WILD key (one containing `*`, which names no config path), and 22 are
+    /// refused here while upstream extracts a concrete one. All 22 carry a `**`
+    /// in the zid or whatami slot and ALL 22 answer `AmbiguousSpaceAddress`.
+    /// There is NO case where wz applies a key upstream does not, and NO case
+    /// where wz applies a DIFFERENT key than upstream.
+    pub fn subkey<'k>(&self, keyexpr: &'k str) -> Result<&'k str, AdminConfigWriteOutcome> {
+        let chunks: Vec<&str> = keyexpr.split('/').collect();
+        // GATE 1 — upstream's set-semantics membership test. This also rejects
+        // an empty chunk in the arriving key (`keyexpr_intersects_target` ->
+        // `target_chunks_well_formed`), which is the non-canonical shape
+        // upstream never receives because its wire expression was validated.
+        if !crate::keyexpr_match::keyexpr_intersects_target(&self.pattern, &chunks) {
+            return Err(AdminConfigWriteOutcome::NotAWrite);
+        }
+        // GATE 2a — a `**` where the format writes a one-chunk spec. Checked
+        // BEFORE the positional read so the refusal reported is the true reason:
+        // every measured divergence from upstream lands here and nowhere else,
+        // which is what makes the variant a statement about a class rather than
+        // about one input.
+        let own: Vec<&str> = self.pattern.split('/').collect();
+        for slot in 1..ADMIN_CONFIG_SPACE_PREFIX_CHUNKS - 1 {
+            if chunks.get(slot) == Some(&ADMIN_CONFIG_WRITE_PATTERN_TAIL) {
+                return Err(AdminConfigWriteOutcome::AmbiguousSpaceAddress);
+            }
+        }
+        // GATE 2b — the format read positionally. The `@` and `config` literals
+        // are taken from this space's OWN pattern, so there is no second
+        // spelling of either to drift.
+        if chunks.len() <= ADMIN_CONFIG_SPACE_PREFIX_CHUNKS
+            || chunks[0] != own[0]
+            || chunks[ADMIN_CONFIG_SPACE_PREFIX_CHUNKS - 1]
+                != own[ADMIN_CONFIG_SPACE_PREFIX_CHUNKS - 1]
+        {
+            return Err(AdminConfigWriteOutcome::NotAWrite);
+        }
+        // GATE 3 — non-empty. The sub-key is a contiguous SUFFIX of the input,
+        // so it is returned as a slice and costs no allocation.
+        let mut offset = 0usize;
+        for chunk in chunks.iter().take(ADMIN_CONFIG_SPACE_PREFIX_CHUNKS) {
+            offset += chunk.len() + 1;
+        }
+        let sub_key = &keyexpr[offset..];
+        if sub_key.is_empty() {
+            return Err(AdminConfigWriteOutcome::NotAWrite);
+        }
+        Ok(sub_key)
+    }
 }
 
 /// R311y237 (§5.23 `adminspace-plugins-handlers`) — the per-plugin admin key
@@ -1621,7 +1774,7 @@ pub fn answer_router_admin_query(
 
 /// R311y51 (§5.23 `adminspace-write`) — the typed intent a recognized admin
 /// config-WRITE PUT decodes to. MVP affordance (NOT zenoh's full json5/json-pointer
-/// config engine — see the [`admin_config_write_key`] fidelity caveat): the bespoke
+/// config engine — see the [`AdminConfigWriteSpace`] fidelity caveat): the bespoke
 /// `acl-deny` sub-key (R311y51), and — under `adminspace-config-hotreload` (R311y239)
 /// — the `storage-add` / `storage-del` sub-keys that live-spawn / -despawn a storage
 /// via the compiled storage-manager subsystem (the wz-native superset of zenoh's
@@ -1851,6 +2004,26 @@ pub enum AdminConfigWriteOutcome {
     /// broken byte under an unrecognized sub-key reports the encoding, not the
     /// name.
     NotUtf8,
+    /// R2661 — the keyexpr intersects this node's config space but puts a `**`
+    /// where the space's format writes a ONE-CHUNK slot (`${zid:*}` /
+    /// `${whatami:*}`), so it addresses a SET of config spaces without saying
+    /// which chunks are the sub-key. Nothing is written.
+    ///
+    /// ⛔ NOT `NotAWrite`, and the distinction is the whole reason this variant
+    /// exists. `NotAWrite` means "not my config space", and its handler arm is
+    /// SILENT BY DESIGN — every node on a bus sees every other node's admin
+    /// writes and must not log them. This case is the opposite: the write IS
+    /// aimed at this space, and wz is declining to guess the alignment. Folding
+    /// it into `NotAWrite` would make wz drop, without a word, a write upstream
+    /// applies — the exact shape of defect this gate exists to prevent.
+    ///
+    /// ⚠ IT IS A DELIBERATE DIVERGENCE FROM UPSTREAM, counted rather than
+    /// asserted — see [`AdminConfigWriteSpace::subkey`] for the census and for
+    /// why the positional reading is the one the format denotes. Upstream's
+    /// greedy `KeFormat::parse` resolves the same input by whichever alignment
+    /// its backtracker reaches first; on a write plane, applying a key the
+    /// operator did not name is worse than applying none.
+    AmbiguousSpaceAddress,
 }
 
 /// R2646 — the body of an admin config write, as the wire carries it.
@@ -1876,18 +2049,15 @@ pub enum AdminConfigWriteBody<'a> {
 }
 
 impl<'a> AdminConfigWriteBody<'a> {
-    /// The payload a Put carries, or `None` for a Del.
-    ///
-    /// The accessor every action sub-key's arm uses to say "this arm needs a
-    /// value": `let Some(payload) = body.put_payload() else { .. }` reads as the
-    /// refusal it is, and there is no way to reach an arm's payload logic
-    /// without having answered the question.
-    pub fn put_payload(self) -> Option<&'a [u8]> {
-        match self {
-            Self::Put(payload) => Some(payload),
-            Self::Del => None,
-        }
-    }
+    // R2661 — `put_payload()` IS GONE. It was the accessor every action arm
+    // used to say "this arm needs a value", and R2660 replaced all five with a
+    // single decode ahead of the sub-key match, leaving it with zero callers
+    // while its doc still claimed "there is no way to reach an arm's payload
+    // logic without having answered the question". Being `pub`, dead-code
+    // analysis said nothing. The pattern it served no longer exists, so neither
+    // does it: `Option<&str>` from that one decode is what an arm now refuses
+    // on, and keeping a `pub` accessor with a false doc beside it is worse than
+    // having none.
 
     /// The body an inbound sample carries.
     ///
@@ -1935,8 +2105,9 @@ pub const ADMIN_CONFIG_WRITE_ACTIONS: &[&str] = &[
 /// permission gate + decoder, the write-side SSOT mirror of [`answer_admin_query`]
 /// (the read SSOT). Gates on `permissions_write` FIRST — the wz mirror of zenoh's
 /// `if !conf.adminspace.permissions().write { return }` at the top of the admin
-/// `send_push` handler (`adminspace.rs:396`) — and only then strips `write_prefix`
-/// (the `@/<zid>/<whatami>/config/` prefix) and decodes the recognized sub-key.
+/// `send_push` handler (`adminspace.rs:396`) — and only then asks the
+/// [`AdminConfigWriteSpace`] whether the keyexpr belongs to this node's config
+/// space, and decodes the sub-key it names there.
 ///
 /// The caller supplies `permissions_write`: under the `adminspace-write` cfg it is
 /// [`AdminSpacePermissions::write`] (default `false`, the zenoh asymmetry), else
@@ -1966,7 +2137,7 @@ pub const ADMIN_CONFIG_WRITE_ACTIONS: &[&str] = &[
 /// known-and-ignored / known-and-not-runtime-mutable — and a predicate narrowed
 /// to "honoured" collapses the middle case into the first.
 pub fn parse_admin_config_write(
-    write_prefix: &str,
+    space: &AdminConfigWriteSpace,
     keyexpr: &str,
     body: AdminConfigWriteBody<'_>,
     permissions_write: bool,
@@ -1975,12 +2146,18 @@ pub fn parse_admin_config_write(
     if !permissions_write {
         return AdminConfigWriteOutcome::Denied;
     }
-    let Some(subkey) = keyexpr.strip_prefix(write_prefix) else {
-        return AdminConfigWriteOutcome::NotAWrite;
+    // R2661 — MEMBERSHIP IS THE SPACE'S ANSWER, not a `strip_prefix` of a
+    // literal a caller built. Upstream asks the same question with keyexpr SET
+    // semantics and in three steps; [`AdminConfigWriteSpace::subkey`] is those
+    // three steps, and the refusal it returns is the one that gets reported.
+    let subkey = match space.subkey(keyexpr) {
+        Ok(subkey) => subkey,
+        Err(outcome) => return outcome,
     };
     // R2646 — THE KEY IS MATCHED FIRST AND THE BODY SECOND, which is upstream's
     // own order (`adminspace.rs` extracts `key` and only then reaches `match
-    // &msg.payload`). Each action sub-key below asks `body.put_payload()` and
+    // &msg.payload`). Each action sub-key below asks whether the single decode
+    // below produced text and
     // answers `NotDeletable` when there is none, so "which sub-keys exist" is
     // stated ONCE — by these arms — instead of once here and once in a list of
     // deletable names that would drift from them. The feature-gated arms are
@@ -2422,46 +2599,64 @@ mod tests {
         // R311y48 — the config-WRITE pattern hangs `/**` under the config key
         // (zenoh's write-only config subscriber, adminspace.rs:350-353).
         assert_eq!(
-            admin_config_write_key("a1b2", "peer"),
+            AdminConfigWriteSpace::new("a1b2", "peer").subscription_pattern(),
             "@/a1b2/peer/config/**"
         );
         assert_eq!(admin_root_key("0", "router"), "@/0/router");
     }
 
-    /// R2393 — the SUBSCRIPTION pattern and the STRIP prefix agree, on the only
-    /// thing they must agree about: a concrete key the pattern matches, stripped by
-    /// the prefix, leaves exactly the sub-key [`parse_admin_config_write`] switches
-    /// on.
+    /// R2393, carried forward by R2661 — the SUBSCRIPTION pattern and the key a
+    /// client writes to agree, on the only thing they must agree about: a
+    /// concrete key under the pattern names exactly the sub-key
+    /// [`parse_admin_config_write`] switches on.
     ///
-    /// This exists because the two shapes are interchangeable to the COMPILER and
-    /// not to `strip_prefix`. `82fd09b2` wired the router-hat's config-write handler
-    /// with `admin_config_write_key(..) + "/"` — the PATTERN where the PREFIX
-    /// belongs — which type-checks, registers, logs that it is hosting the
-    /// subscriber, and then decodes every arriving PUT as `NotAWrite`, whose arm is
-    /// silent by design. Every unit test of that round still passed: they pass the
-    /// prefix as a `const` literal, so not one of them had to DERIVE it.
+    /// # What this test was, and what R2661 took away from it
     ///
-    /// Written as a ROUND TRIP through the decoder rather than as two string
-    /// equalities, because an equality only re-states the constructors and would
-    /// still hold if both drifted the same direction. The control arm feeds the
-    /// decoder the PATTERN and requires `NotAWrite`, so this test discriminates
-    /// rather than restates: if the control ever starts decoding, the test has
-    /// stopped measuring anything.
+    /// It existed because the pattern (`…/config/**`) and the strip prefix
+    /// (`…/config/`) were two `String`s, interchangeable to the COMPILER and not
+    /// to `strip_prefix`. `82fd09b2` wired the router-hat's config-write handler
+    /// with the PATTERN where the PREFIX belonged, which type-checks, registers,
+    /// logs that it is hosting the subscriber, and then decodes every arriving
+    /// PUT as `NotAWrite`, whose arm is silent by design. Every unit test of that
+    /// round still passed: they pass the prefix as a `const` literal, so not one
+    /// of them had to DERIVE it.
+    ///
+    /// It made FOUR assertions: the prefix's shape, the pair's single origin,
+    /// the round trip, and a CONTROL feeding the decoder the PATTERN where the
+    /// PREFIX belongs and requiring `NotAWrite` — the defect itself, reproduced.
+    ///
+    /// ⭐ THE CONTROL IS GONE, AND ONLY THE CONTROL, because
+    /// [`AdminConfigWriteSpace`] made that transposition INEXPRESSIBLE: the
+    /// decoder takes the space, there is no second string to hand it, and the
+    /// strip prefix is a private slice of the one stored pattern rather than a
+    /// value anything can hold. A control that cannot be written is the one
+    /// thing a type is allowed to take away from a test — it is the difference
+    /// between "the defect is caught" and "the defect has no shape". The other
+    /// three survive below, re-aimed at the type's own outputs, and the round
+    /// trip is still a ROUND TRIP rather than two string equalities: an equality
+    /// only re-states the constructors and would hold if both drifted together.
     #[test]
-    fn write_prefix_and_write_pattern_agree_on_the_subkey() {
-        let pattern = admin_config_write_key("a1b2", "router");
-        let prefix = admin_config_write_prefix("a1b2", "router");
-        assert_eq!(prefix, "@/a1b2/router/config/");
-        // One origin: the pattern IS the prefix with the `**` chunk appended, so an
-        // edit to either shape cannot silently drift from the other.
-        assert_eq!(pattern, format!("{prefix}**"));
+    fn the_space_is_one_origin_and_round_trips() {
+        let space = AdminConfigWriteSpace::new("a1b2", "router");
 
-        // A concrete key under that pattern round-trips: the prefix strips, the
-        // remainder is the sub-key, and a real intent comes back.
-        let key = format!("{prefix}connect-add");
+        // (1) SHAPE — what a client writes to, pinned.
+        assert_eq!(space.key_for(""), "@/a1b2/router/config/");
+        // (2) ONE ORIGIN — the subscription pattern IS that shape with the `**`
+        // chunk appended, so an edit to either cannot silently drift from the
+        // other. It is now a derivation rather than a coincidence: both come
+        // out of the single stored string.
+        assert_eq!(
+            space.subscription_pattern(),
+            format!("{}**", space.key_for(""))
+        );
+
+        // (3) ROUND TRIP — a concrete key the pattern matches names its sub-key
+        // back, and a real intent comes out of the decoder.
+        let key = space.key_for("connect-add");
+        assert_eq!(space.subkey(&key), Ok("connect-add"));
         assert_eq!(
             parse_admin_config_write(
-                &prefix,
+                &space,
                 &key,
                 AdminConfigWriteBody::Put(b"tcp/127.0.0.1:7447"),
                 true,
@@ -2470,24 +2665,121 @@ mod tests {
             AdminConfigWriteOutcome::Apply(AdminConfigWrite::ConnectAdd(vec![String::from(
                 "tcp/127.0.0.1:7447"
             )])),
-            "a key under the write PATTERN must decode when stripped by the write \
-             PREFIX; NotAWrite here means the two shapes have drifted apart"
+            "a key built by this space must decode through this space; NotAWrite \
+             here means `key_for` and `subkey` have drifted apart"
+        );
+    }
+
+    /// R2661 — gate 1: MEMBERSHIP IS KEYEXPR SET SEMANTICS, which is the defect
+    /// this round closed.
+    ///
+    /// Upstream decides whether a PUT targets its config space with
+    /// `local_config_key.intersects(&key_expr)`
+    /// (`zenoh/src/net/runtime/adminspace.rs` @ `if !local_config_key.intersects`),
+    /// and its own NOTE says that is deliberate. wz compared a CONCRETE literal
+    /// prefix with `strip_prefix`, so a wildcard write upstream applies to its
+    /// own config was silently dropped here — `NotAWrite`, whose arm is silent
+    /// by design, on a node that can apply it.
+    #[test]
+    fn a_wildcard_addressed_write_reaches_this_nodes_config_space() {
+        let space = AdminConfigWriteSpace::new("a1b2", "peer");
+
+        // The shapes upstream applies and the old `strip_prefix` dropped.
+        for key in [
+            "@/*/peer/config/connect-add",
+            "@/*/*/config/connect-add",
+            "@/a1b2/*/config/connect-add",
+        ] {
+            assert_eq!(
+                space.subkey(key),
+                Ok("connect-add"),
+                "{key} intersects this node's config space, so it addresses it"
+            );
+        }
+
+        // NEGATIVE CONTROL — a concrete FOREIGN zid still does not, which is the
+        // property `strip_prefix` did have and set semantics must not lose.
+        assert_eq!(
+            space.subkey("@/ffff/peer/config/connect-add"),
+            Err(AdminConfigWriteOutcome::NotAWrite)
+        );
+        // ... and so does a foreign WHATAMI.
+        assert_eq!(
+            space.subkey("@/a1b2/router/config/connect-add"),
+            Err(AdminConfigWriteOutcome::NotAWrite)
+        );
+    }
+
+    /// R2661 — gates 2 and 3, including the one place wz deliberately answers
+    /// differently from upstream.
+    ///
+    /// The rows below are the MEASURED boundary, not a guess: each was run
+    /// against the pin's own `KeFormat::noalloc_new("@/${zid:*}/${whatami:*}/config/${key:**}")`
+    /// plus `OwnedKeyExpr::intersects` before being written here. See
+    /// [`AdminConfigWriteSpace::subkey`] for the census and for why the
+    /// positional reading is the one the format denotes.
+    #[test]
+    fn the_space_reads_the_format_positionally_and_says_so_when_it_refuses() {
+        let space = AdminConfigWriteSpace::new("a1b2", "peer");
+
+        // A `**` in a ONE-CHUNK slot: upstream's greedy parser re-anchors the
+        // literal `config` and extracts a concrete key; wz refuses and NAMES the
+        // reason. Every measured divergence is this shape and answers this
+        // variant — that is what makes the variant a claim about a class.
+        for key in [
+            "@/**/peer/config/batch-size",
+            "@/a1b2/**/config/batch-size",
+            "@/**/peer/x/config/y",
+            "@/**",
+        ] {
+            assert_eq!(
+                space.subkey(key),
+                Err(AdminConfigWriteOutcome::AmbiguousSpaceAddress),
+                "{key} puts `**` where the format writes a one-chunk slot"
+            );
+        }
+
+        // ⛔ AND IT IS NOT `NotAWrite`. The two refusals are different facts and
+        // one of them is silent by design; collapsing them is how a write
+        // upstream applies would vanish without a word.
+        assert_ne!(
+            space.subkey("@/**/peer/config/batch-size"),
+            Err(AdminConfigWriteOutcome::NotAWrite)
         );
 
-        // CONTROL — the defect itself, reproduced: the same key stripped by the
-        // PATTERN plus a slash must NOT decode.
+        // Gate 2b — the four-chunk prefix must be PRESENT. `@/a1b2/peer/**`
+        // intersects the space and names no sub-key position at all.
+        for key in ["@/a1b2/peer/**", "@/*/*/**"] {
+            assert_eq!(
+                space.subkey(key),
+                Err(AdminConfigWriteOutcome::NotAWrite),
+                "{key} does not present the four-chunk config prefix"
+            );
+        }
+
+        // The bare config key is the READ key and names no sub-key. Upstream
+        // refuses it at its own gate 3 (@ `.filter(|key| !key.is_empty())`);
+        // here the chunk COUNT already refuses it, and gate 3 is defensive
+        // rather than reachable — the only way to a five-chunk key with an empty
+        // fifth chunk is a trailing `/`, which gate 1 rejects as non-canonical.
         assert_eq!(
-            parse_admin_config_write(
-                &format!("{pattern}/"),
-                &key,
-                AdminConfigWriteBody::Put(b"tcp/127.0.0.1:7447"),
-                true,
-                &stub_config_key
-            ),
-            AdminConfigWriteOutcome::NotAWrite,
-            "the PATTERN where the PREFIX belongs must not decode — if this arm ever \
-             passes, this test no longer discriminates"
+            space.subkey("@/a1b2/peer/config"),
+            Err(AdminConfigWriteOutcome::NotAWrite)
         );
+        assert_eq!(
+            space.subkey("@/a1b2/peer/config/"),
+            Err(AdminConfigWriteOutcome::NotAWrite),
+            "a trailing slash is a non-canonical target and matches nothing"
+        );
+
+        // A deeper sub-key is the whole contiguous suffix, not just one chunk.
+        assert_eq!(
+            space.subkey("@/a1b2/peer/config/adminspace/permissions/read"),
+            Ok("adminspace/permissions/read")
+        );
+        // A wildcard SUB-KEY is passed through — upstream extracts it too, and
+        // what refuses it is the vocabulary, a crate away, not this gate.
+        assert_eq!(space.subkey("@/a1b2/peer/config/**"), Ok("**"));
     }
 
     #[test]
@@ -2663,16 +2955,29 @@ mod tests {
         assert!(!AdminSpacePermissions::default().write);
     }
 
-    // R311y51 — the config-WRITE gate + decoder (the write-side SSOT). The prefix
-    // a config sub-key hangs under: `admin_config_key` + the separating slash.
-    const WRITE_PREFIX: &str = "@/a1b2/peer/config/";
+    // R311y51 — the config-WRITE gate + decoder (the write-side SSOT).
+    //
+    // ⭐ R2661 — THESE FIXTURES NOW DERIVE THE SPACE instead of passing a
+    // `const` prefix literal, and that is not cosmetic. R2393's own docstring
+    // names the reason the `82fd09b2` defect survived a whole round of unit
+    // tests: "they pass the prefix as a `const` literal, so not one of them had
+    // to DERIVE it". Every fixture below now runs the real derivation, so a
+    // wrong one reds here rather than only in a demo no unit test drives.
+    //
+    // ⚠ The KEYEXPRS below stay LITERAL on purpose. Deriving both sides from the
+    // same origin would make the shape they pin unfalsifiable — the round trip
+    // that does derive both sides is `the_space_is_one_origin_and_round_trips`,
+    // and it is one test rather than forty for exactly that reason.
+    fn write_space() -> AdminConfigWriteSpace {
+        AdminConfigWriteSpace::new("a1b2", "peer")
+    }
 
     #[test]
     fn parse_config_write_acl_deny_when_permitted() {
         // permissions.write=true + a recognized acl-deny -> Apply, payload trimmed
         // (byte-for-byte the demo's prior from_utf8_lossy().trim() parse).
         let out = parse_admin_config_write(
-            WRITE_PREFIX,
+            &write_space(),
             "@/a1b2/peer/config/acl-deny",
             AdminConfigWriteBody::Put(b"  mesh/data  "),
             true,
@@ -2689,7 +2994,7 @@ mod tests {
     #[test]
     fn parse_config_write_takes_a_config_key_path() {
         let out = parse_admin_config_write(
-            WRITE_PREFIX,
+            &write_space(),
             "@/a1b2/peer/config/adminspace/permissions/read",
             AdminConfigWriteBody::Put(b"  true  "),
             true,
@@ -2711,7 +3016,7 @@ mod tests {
     #[test]
     fn parse_config_write_leaves_non_path_subkeys_to_the_named_arms() {
         let out = parse_admin_config_write(
-            WRITE_PREFIX,
+            &write_space(),
             "@/a1b2/peer/config/acl-denyy",
             AdminConfigWriteBody::Put(b"mesh/data"),
             true,
@@ -2728,7 +3033,7 @@ mod tests {
     #[test]
     fn parse_config_write_gate_precedes_the_generic_arm() {
         let out = parse_admin_config_write(
-            WRITE_PREFIX,
+            &write_space(),
             "@/a1b2/peer/config/adminspace/permissions/read",
             AdminConfigWriteBody::Put(b"true"),
             false,
@@ -2742,7 +3047,7 @@ mod tests {
         // permissions.write=false -> Denied, the adminspace-write gate (zenoh
         // `if !permissions().write { return }`, adminspace.rs:396).
         let out = parse_admin_config_write(
-            WRITE_PREFIX,
+            &write_space(),
             "@/a1b2/peer/config/acl-deny",
             AdminConfigWriteBody::Put(b"mesh/data"),
             false,
@@ -2757,7 +3062,7 @@ mod tests {
         // acl-deny is Denied when the permission is off — the deny does not depend
         // on the payload being valid.
         let out = parse_admin_config_write(
-            WRITE_PREFIX,
+            &write_space(),
             "@/a1b2/peer/config/acl-deny",
             AdminConfigWriteBody::Put(b""),
             false,
@@ -2774,7 +3079,7 @@ mod tests {
         // change. Whitespace around each element is trimmed, as every other arm here
         // trims, so an operator's spaced list dials what a tight one does.
         let out = parse_admin_config_write(
-            WRITE_PREFIX,
+            &write_space(),
             "@/a1b2/peer/config/connect-add",
             AdminConfigWriteBody::Put(b" tcp/127.0.0.1:7447 , tcp/127.0.0.1:7448 "),
             true,
@@ -2804,7 +3109,7 @@ mod tests {
         ] {
             assert_eq!(
                 parse_admin_config_write(
-                    WRITE_PREFIX,
+                    &write_space(),
                     "@/a1b2/peer/config/connect-add",
                     AdminConfigWriteBody::Put(payload),
                     true,
@@ -2822,7 +3127,7 @@ mod tests {
         // intent cannot become a way around `permissions.write` — it is the one arm
         // that makes a node dial arbitrary endpoints from the wire.
         let out = parse_admin_config_write(
-            WRITE_PREFIX,
+            &write_space(),
             "@/a1b2/peer/config/connect-add",
             AdminConfigWriteBody::Put(b"tcp/127.0.0.1:7447"),
             false,
@@ -2834,7 +3139,7 @@ mod tests {
     #[test]
     fn parse_config_write_empty_acl_deny_is_malformed() {
         let out = parse_admin_config_write(
-            WRITE_PREFIX,
+            &write_space(),
             "@/a1b2/peer/config/acl-deny",
             AdminConfigWriteBody::Put(b"   "),
             true,
@@ -2853,7 +3158,7 @@ mod tests {
         // the name carried no `/`, which is the same answer for the wrong
         // reason — `downsampling` carries no `/` either and IS a config key.
         let out = parse_admin_config_write(
-            WRITE_PREFIX,
+            &write_space(),
             "@/a1b2/peer/config/batch-size",
             AdminConfigWriteBody::Put(b"100"),
             true,
@@ -2904,7 +3209,7 @@ mod tests {
         ] {
             assert_eq!(
                 parse_admin_config_write(
-                    WRITE_PREFIX,
+                    &write_space(),
                     keyexpr,
                     AdminConfigWriteBody::Put(b"\x80"),
                     true,
@@ -2923,7 +3228,7 @@ mod tests {
     fn a_valid_utf8_put_still_reaches_the_subkeys_own_answer() {
         assert_eq!(
             parse_admin_config_write(
-                WRITE_PREFIX,
+                &write_space(),
                 "@/a1b2/peer/config/batch-size",
                 AdminConfigWriteBody::Put(b"100"),
                 true,
@@ -2933,7 +3238,7 @@ mod tests {
         );
         assert_eq!(
             parse_admin_config_write(
-                WRITE_PREFIX,
+                &write_space(),
                 "@/a1b2/peer/config/acl-deny",
                 AdminConfigWriteBody::Put(b"mesh/data"),
                 true,
@@ -2958,10 +3263,10 @@ mod tests {
     #[test]
     fn parse_config_write_takes_a_single_segment_config_key() {
         for key in ["downsampling", "downsampling/id=my_rule"] {
-            let keyexpr = format!("{WRITE_PREFIX}{key}");
+            let keyexpr = write_space().key_for(key);
             assert_eq!(
                 parse_admin_config_write(
-                    WRITE_PREFIX,
+                    &write_space(),
                     &keyexpr,
                     AdminConfigWriteBody::Put(b"  [{\"rate\": 1}]  "),
                     true,
@@ -2996,9 +3301,9 @@ mod tests {
     #[test]
     fn no_name_wz_owns_decodes_as_a_config_write() {
         for action in ADMIN_CONFIG_WRITE_ACTIONS {
-            let keyexpr = format!("{WRITE_PREFIX}{action}");
+            let keyexpr = write_space().key_for(action);
             for body in [AdminConfigWriteBody::Put(b"x"), AdminConfigWriteBody::Del] {
-                let out = parse_admin_config_write(WRITE_PREFIX, &keyexpr, body, true, &|_| true);
+                let out = parse_admin_config_write(&write_space(), &keyexpr, body, true, &|_| true);
                 assert!(
                     !matches!(
                         out,
@@ -3017,10 +3322,10 @@ mod tests {
         // know, never a config key.
         #[cfg(not(feature = "adminspace-config-hotreload"))]
         for action in ["storage-add", "storage-del"] {
-            let keyexpr = format!("{WRITE_PREFIX}{action}");
+            let keyexpr = write_space().key_for(action);
             assert_eq!(
                 parse_admin_config_write(
-                    WRITE_PREFIX,
+                    &write_space(),
                     &keyexpr,
                     AdminConfigWriteBody::Put(b"x"),
                     true,
@@ -3081,7 +3386,7 @@ mod tests {
         ] {
             assert_eq!(
                 parse_admin_config_write(
-                    WRITE_PREFIX,
+                    &write_space(),
                     keyexpr,
                     AdminConfigWriteBody::Del,
                     true,
@@ -3122,7 +3427,7 @@ mod tests {
         };
         assert_eq!(
             parse_admin_config_write(
-                WRITE_PREFIX,
+                &write_space(),
                 put.keyexpr,
                 AdminConfigWriteBody::of_sample(&put),
                 true,
@@ -3143,7 +3448,7 @@ mod tests {
         };
         assert_eq!(
             parse_admin_config_write(
-                WRITE_PREFIX,
+                &write_space(),
                 del.keyexpr,
                 AdminConfigWriteBody::of_sample(&del),
                 true,
@@ -3167,7 +3472,7 @@ mod tests {
     fn a_delete_is_denied_without_the_write_permission() {
         assert_eq!(
             parse_admin_config_write(
-                WRITE_PREFIX,
+                &write_space(),
                 "@/a1b2/peer/config/adminspace/permissions/read",
                 AdminConfigWriteBody::Del,
                 false,
@@ -3183,7 +3488,7 @@ mod tests {
         // The bare `.../config` GET key the `/**` write subscriber also matches has
         // no trailing sub-key -> NotAWrite (the demo's prior `else { return }`).
         let out = parse_admin_config_write(
-            WRITE_PREFIX,
+            &write_space(),
             "@/a1b2/peer/config",
             AdminConfigWriteBody::Put(b"x"),
             true,
@@ -3200,7 +3505,7 @@ mod tests {
     fn parse_config_write_admin_read_decodes_both_truth_values() {
         for (payload, want) in [(&b"true"[..], true), (&b"false"[..], false)] {
             let out = parse_admin_config_write(
-                WRITE_PREFIX,
+                &write_space(),
                 "@/a1b2/peer/config/admin-read",
                 AdminConfigWriteBody::Put(payload),
                 true,
@@ -3217,7 +3522,7 @@ mod tests {
         // shell that appends a newline must not lock a node out.
         assert_eq!(
             parse_admin_config_write(
-                WRITE_PREFIX,
+                &write_space(),
                 "@/a1b2/peer/config/admin-read",
                 AdminConfigWriteBody::Put(b" false\n"),
                 true,
@@ -3239,7 +3544,7 @@ mod tests {
         for payload in [&b""[..], b"1", b"0", b"yes", b"no", b"True", b"FALSE"] {
             assert_eq!(
                 parse_admin_config_write(
-                    WRITE_PREFIX,
+                    &write_space(),
                     "@/a1b2/peer/config/admin-read",
                     AdminConfigWriteBody::Put(payload),
                     true,
@@ -3260,7 +3565,7 @@ mod tests {
     fn parse_config_write_admin_read_is_refused_without_the_write_permit() {
         assert_eq!(
             parse_admin_config_write(
-                WRITE_PREFIX,
+                &write_space(),
                 "@/a1b2/peer/config/admin-read",
                 AdminConfigWriteBody::Put(b"true"),
                 false,
@@ -3281,7 +3586,7 @@ mod tests {
             // made that distinct from naming "mem": a host may map an un-named
             // storage onto its own volume, and must not do that to a named one.
             let out = parse_admin_config_write(
-                WRITE_PREFIX,
+                &write_space(),
                 "@/a1b2/peer/config/storage-add",
                 AdminConfigWriteBody::Put(b"demo:demo/**"),
                 true,
@@ -3304,7 +3609,7 @@ mod tests {
         #[test]
         fn a_payload_naming_no_volume_still_resolves_to_the_in_memory_one() {
             let out = parse_admin_config_write(
-                WRITE_PREFIX,
+                &write_space(),
                 "@/a1b2/peer/config/storage-add",
                 AdminConfigWriteBody::Put(b"demo:demo/**"),
                 true,
@@ -3323,7 +3628,7 @@ mod tests {
         #[test]
         fn storage_add_may_name_a_volume_after_the_name() {
             let out = parse_admin_config_write(
-                WRITE_PREFIX,
+                &write_space(),
                 "@/a1b2/peer/config/storage-add",
                 AdminConfigWriteBody::Put(b"demo@wzvol_example:demo/**"),
                 true,
@@ -3358,7 +3663,7 @@ mod tests {
         #[test]
         fn the_volume_delimiter_does_not_touch_an_at_sign_in_the_keyexpr() {
             let out = parse_admin_config_write(
-                WRITE_PREFIX,
+                &write_space(),
                 "@/a1b2/peer/config/storage-add",
                 AdminConfigWriteBody::Put(b"mirror:@/a1b2/peer/**"),
                 true,
@@ -3380,7 +3685,7 @@ mod tests {
         #[test]
         fn a_name_containing_an_at_sign_splits_on_the_last_one() {
             let out = parse_admin_config_write(
-                WRITE_PREFIX,
+                &write_space(),
                 "@/a1b2/peer/config/storage-add",
                 AdminConfigWriteBody::Put(b"a@b@fsdyn:demo/**"),
                 true,
@@ -3406,7 +3711,7 @@ mod tests {
         #[test]
         fn storage_add_carries_a_per_storage_volume_payload() {
             let out = parse_admin_config_write(
-                WRITE_PREFIX,
+                &write_space(),
                 "@/a1b2/peer/config/storage-add",
                 AdminConfigWriteBody::Put(b"demo@fsdyn?dir=/tmp/wz&mode=rw:demo/**"),
                 true,
@@ -3433,7 +3738,7 @@ mod tests {
         #[test]
         fn storage_add_without_a_payload_is_unchanged() {
             let out = parse_admin_config_write(
-                WRITE_PREFIX,
+                &write_space(),
                 "@/a1b2/peer/config/storage-add",
                 AdminConfigWriteBody::Put(b"demo@fsdyn:demo/**"),
                 true,
@@ -3458,7 +3763,7 @@ mod tests {
             ] {
                 assert_eq!(
                     parse_admin_config_write(
-                        WRITE_PREFIX,
+                        &write_space(),
                         "@/a1b2/peer/config/storage-add",
                         AdminConfigWriteBody::Put(payload),
                         true,
@@ -3478,7 +3783,7 @@ mod tests {
         fn storage_add_payload_without_a_volume_id_is_malformed() {
             assert_eq!(
                 parse_admin_config_write(
-                    WRITE_PREFIX,
+                    &write_space(),
                     "@/a1b2/peer/config/storage-add",
                     AdminConfigWriteBody::Put(b"demo@?dir=/tmp:demo/**"),
                     true,
@@ -3493,7 +3798,7 @@ mod tests {
             // Split on the FIRST `:` only: a keyexpr containing `:` (a legal keyexpr
             // byte) is preserved verbatim, NOT truncated.
             let out = parse_admin_config_write(
-                WRITE_PREFIX,
+                &write_space(),
                 "@/a1b2/peer/config/storage-add",
                 AdminConfigWriteBody::Put(b"  demo : foo:bar/**  "),
                 true,
@@ -3525,7 +3830,7 @@ mod tests {
                 b"@fsdyn:demo/**",
             ] {
                 let out = parse_admin_config_write(
-                    WRITE_PREFIX,
+                    &write_space(),
                     "@/a1b2/peer/config/storage-add",
                     AdminConfigWriteBody::Put(payload),
                     true,
@@ -3542,7 +3847,7 @@ mod tests {
         #[test]
         fn storage_del_decodes_name() {
             let out = parse_admin_config_write(
-                WRITE_PREFIX,
+                &write_space(),
                 "@/a1b2/peer/config/storage-del",
                 AdminConfigWriteBody::Put(b"  demo  "),
                 true,
@@ -3559,7 +3864,7 @@ mod tests {
         #[test]
         fn storage_del_empty_is_malformed() {
             let out = parse_admin_config_write(
-                WRITE_PREFIX,
+                &write_space(),
                 "@/a1b2/peer/config/storage-del",
                 AdminConfigWriteBody::Put(b"  "),
                 true,
@@ -3572,7 +3877,7 @@ mod tests {
         fn storage_write_gated_by_permission() {
             // permissions.write=false denies BEFORE decode (same gate as acl-deny).
             let out = parse_admin_config_write(
-                WRITE_PREFIX,
+                &write_space(),
                 "@/a1b2/peer/config/storage-add",
                 AdminConfigWriteBody::Put(b"demo:demo/**"),
                 false,
