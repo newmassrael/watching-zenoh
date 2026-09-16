@@ -1565,6 +1565,21 @@ pub(crate) fn expand_stock_zenoh_config_for_build(
             exp.record("transport/auth/usrpwd/dictionary_file", effect);
         }
     }
+    // R2650 — `low_pass_filter`'s decision site, and the shape is the dictionary's
+    // for a DIFFERENT reason worth keeping apart. There the plane is absent; here
+    // the plane exists and `--max-payload` is a real sink, but it takes one global
+    // cap with no selector while upstream's key is a LIST of filters each with its
+    // own key expressions, kinds, flows and subject axes. No argv states that, so
+    // the startup path cannot carry the document.
+    //
+    // Routed through `no_sink` for the binding reason above: teach the demo a flag
+    // that can express a filter list, drop the list row, and this site stops
+    // speaking rather than lying about a key it no longer describes.
+    if named("low_pass_filter") {
+        if let Some(effect) = no_sink("low_pass_filter") {
+            exp.record("low_pass_filter", effect);
+        }
+    }
     // R2627 — the pubkey identity's decision site, shaped like the dictionary's
     // and for its reason: no auth plane, so no flag branch to guard, and the
     // verdict is the whole site. One loop over the four rather than four copies,
@@ -2707,6 +2722,20 @@ pub(crate) const ARGV_ONLY_KIND_LEDGER: &[(&str, &str, &str)] = &[
          username and an HMAC rather than the store or its path.",
     ),
     (
+        "low_pass_filter",
+        KIND_OFF_WIRE,
+        "expands to NO flag, and the reason is not an absent plane. This binary \
+         HAS the low-pass knob -- `--max-payload <bytes>` -- but it states ONE \
+         global cap with no selector, while upstream's key is a LIST of filters \
+         each carrying its own key expressions, message kinds, flows and subject \
+         axes. No argv spells that, so the key is pinned in \
+         `config_keys_the_demo_drops()` and its decision site records \
+         NoSinkInThisBuild. Off-wire for a separate reason that would hold even \
+         with a richer flag: a low-pass filter is a local admission decision \
+         about a message's SIZE, so the frames carry the message it admits or \
+         drops, never the rule that judged it.",
+    ),
+    (
         "transport/link/tls/root_ca_certificate",
         KIND_OFF_WIRE,
         "expands to `--tls-ca`. A trust store consulted BENEATH zenoh, during \
@@ -2844,6 +2873,27 @@ pub(crate) fn config_keys_the_demo_drops() -> Vec<&'static str> {
         // the demo now withholds them. Nothing here is withheld on the
         // dictionary: the plane it configures is absent, not ignored.
         "transport/auth/usrpwd/dictionary_file",
+        // R2650 — `low_pass_filter`, and a THIRD kind again: the plane is here and
+        // the sink exists, but it cannot carry what the document says.
+        //
+        // Upstream's key is a LIST of filters, each with its own key expressions,
+        // message kinds, flows and subject axes. The demo's §5.16 knob is
+        // `--max-payload <bytes>`: ONE global cap with no selector at all. There
+        // is no argv that expands to a two-filter document, so the startup path
+        // cannot state it.
+        //
+        // ⚠ The tempting half-measure is worse than dropping it: expanding only
+        // when the list happens to hold ONE filter makes the demo's behaviour
+        // depend on the document's LENGTH, and a second filter then vanishes with
+        // nobody able to see that it did. A partial application no one can
+        // observe is worse than a named drop, which is why this row exists rather
+        // than a length check.
+        //
+        // NOT "reaches nothing": the key is honoured by the reader, has an
+        // `apply_one_key` arm, and reaches a running node through the admin write
+        // plane. What it does not reach is the STARTUP flag path, and that is the
+        // distinction this list is for.
+        "low_pass_filter",
         // R2627 — the pubkey identity: the same FIRST kind as the dictionary and
         // on the same measurement, re-taken for these keys rather than inherited
         // from that row. `wz-ap-demo` still names `extauth` zero times and
@@ -3864,6 +3914,24 @@ mod stock_config_tests {
                 r#"{ listen: { endpoints: ["tcp/0.0.0.0:7447"] },
                      transport: { auth: { usrpwd: {
                        dictionary_file: "/etc/wz/usrpwd.txt" } } } }"#,
+            ),
+            // R2650 — `low_pass_filter`, the first interceptor key with a reader.
+            // A dropped key like the rows above, so the pair proves the expansion
+            // does NOT change: what it must show is that the reader NAMES the key
+            // from this document, which is what the vacuity guard needs.
+            //
+            // The filter is spelled the way a real zenohd would take it: the two
+            // required members present (`messages` and `key_exprs` are `NEVec`
+            // upstream, so an empty list is a refusal rather than a wildcard) and
+            // `size_limit` UNQUOTED, because a quoted number is a type error here
+            // exactly as it is for a transport weight.
+            (
+                "low_pass_filter",
+                LISTEN_ONLY,
+                r#"{ listen: { endpoints: ["tcp/0.0.0.0:7447"] },
+                     low_pass_filter: [ { messages: ["put"],
+                                          key_exprs: ["demo/**"],
+                                          size_limit: 8192 } ] }"#,
             ),
             // R2627 — the pubkey identity, one row per key so the table stays
             // universal. Each reaches NOTHING here (no auth plane) and is pinned

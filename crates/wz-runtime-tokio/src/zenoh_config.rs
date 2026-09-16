@@ -1147,6 +1147,13 @@ pub struct ZenohNodeConfig {
     /// Empty = no row, which is upstream's default (an unset key resolves to an
     /// empty list, not to `null`) and means no link carries a configured weight.
     pub router_transport_weights: Vec<TransportWeight>,
+    /// R2650 — `low_pass_filter[]`, exactly as the document stated it.
+    ///
+    /// Empty = no filter, which is what a real zenohd resolves an unmentioned
+    /// key to (MEASURED: it renders `"low_pass_filter":[]`, not `null`), so the
+    /// absent and the empty document say the same thing here and neither is a
+    /// wildcard.
+    pub low_pass_filter: Vec<LowPassFilterConf>,
 }
 
 impl Default for ZenohNodeConfig {
@@ -1252,6 +1259,7 @@ impl Default for ZenohNodeConfig {
             // `"transport_weights":[]`. So the empty vec is a measured default
             // rather than this struct's convenience.
             router_transport_weights: Vec::new(),
+            low_pass_filter: Vec::new(),
         }
     }
 }
@@ -1742,6 +1750,17 @@ pub const HONOURED_CONFIG_KEYS: &[&str] = &[
     // `link_weights_from_config`. The surface total is unchanged — honouring a
     // key is a move between halves of one partition, not an addition.
     "routing/router/linkstate/transport_weights",
+    // R2650 (§5.23 adminspace-write) — `low_pass_filter`, MOVED here from
+    // `UNHONOURED_UPSTREAM_CONFIG_KEYS` for the reason R2567's note above gives:
+    // honouring a key is a MOVE, because `wz_accepts` chains both lists to decide
+    // the acceptance boundary, and deleting it from one alone makes wz REFUSE a
+    // file a real zenohd starts on.
+    //
+    // First of the seven interceptor keys to move, and first because it is one of
+    // only two whose live slice is fed by it ALONE. The five `access_control/*`
+    // keys collapse into a single `acl` field through a join wz cannot invert, so
+    // they need a retention structure this one does not.
+    "low_pass_filter",
     "scouting/timeout",
     "transport/multicast/qos/enabled",
     "transport/shared_memory/enabled",
@@ -2030,7 +2049,9 @@ pub const UNHONOURED_UPSTREAM_CONFIG_KEYS: &[&str] = &[
     // name. Seven arrived this way; each is beyond-wz and each earned that
     // classification from a search that states what it looked for.
     "gateway/south",
-    "low_pass_filter",
+    // R2650 — `low_pass_filter` LEFT this list for `HONOURED_CONFIG_KEYS`. The
+    // surface total is unchanged: this partition's two halves sum to the upstream
+    // surface, so a move keeps the denominator and only shifts the fraction.
     "metadata",
     "open/return_conditions/connect_scouted",
     "open/return_conditions/declares",
@@ -2434,7 +2455,9 @@ pub const UNHONOURED_READER_GAP: &[&str] = &[
     // item's four keys were never in one state; what made them one ROUND is that
     // they are one seam, not one classification.
     "downsampling",
-    "low_pass_filter",
+    // R2650 — `low_pass_filter` LEFT this list too: the classification "wz has the
+    // engine and no reader" stopped being true of it the moment the reader landed.
+    // `downsampling` above is the same seam and STAYS until its own reader does.
     "plugins",
     "plugins_loading/enabled",
     // R2539 — ARRIVED here from [`UNHONOURED_BEYOND_WZ`] the round wz grew the
@@ -2786,7 +2809,9 @@ pub const UNHONOURED_CITATION_LEDGER: &[(&str, &str, &str)] = &[
     // verdict about a key no longer in the population is "a verdict about
     // evidence that is gone".
     ("downsampling", "wz-has-it", "DownsamplingRule"),
-    ("low_pass_filter", "wz-has-it", "LowPassRule"),
+    // R2650 — `low_pass_filter`'s row is GONE: this ledger carries kind evidence
+    // for UNHONOURED keys, and `unhonoured_kind_evidence_gate` reds on a row whose
+    // key the reader now honours.
     ("metadata", "not-this-key", "AdminLocalData"),
     ("plugins", "wz-has-it", "PluginRegistry"),
     ("plugins_loading/enabled", "wz-has-it", "PluginRegistry"),
@@ -3900,6 +3925,208 @@ fn matcher_of(value: &Json5Value, path: &'static str) -> Result<WhatAmIMatcher, 
 /// A missing field, an extra field, or a non-object row is a type error: the row
 /// shape is `deny_unknown_fields` upstream, so a typo inside a row must not pass
 /// as a row that means something else.
+/// R2650 — the message kinds `downsampling` and `low_pass_filter` accept.
+///
+/// FOUR, and they are NOT [`AclMessage`]'s nine. Upstream types both interceptor
+/// keys' `messages` as `DataMessage` (`commons/zenoh-config/src/lib.rs` @ `pub
+/// enum DataMessage`) and the ACL's as `AclMessage`, so a reader that reused the
+/// wider set here would ACCEPT a document a real zenohd refuses -- looser than
+/// upstream, which the fixture lane cannot catch because it only ever drives
+/// documents zenohd starts on.
+pub const DATA_MESSAGE_LITERALS: &[&str] = &["put", "delete", "query", "reply"];
+
+/// R2650 — the two flow directions, upstream's `InterceptorFlow` spelling.
+pub const INTERCEPTOR_FLOW_LITERALS: &[&str] = &["egress", "ingress"];
+
+/// R2650 — one `low_pass_filter[]` entry as the OPERATOR's document spells it.
+///
+/// # Why this is not [`crate::interceptor::low_pass::LowPassRule`]
+///
+/// That type is doubly feature-gated -- its module is `routing-peer` and the
+/// type is `access-quota` -- and [`ZenohNodeConfig`] is deliberately
+/// feature-INDEPENDENT, so a build without those features must still read the
+/// same document to the same values. The conversion happens in
+/// `apply_one_key`'s arm, which already carries those gates.
+///
+/// The trick that lets `router_transport_weights` name a foreign type does not
+/// reach here: `zenoh-config` pulls `dep:wz-routing-graph` so that one is always
+/// available, but the interceptor types are behind a FEATURE of this same crate,
+/// and making the config reader imply the whole peer plane would be a far larger
+/// claim than reading a key.
+///
+/// Literals rather than enums, and it is the honest shape: this struct is an
+/// ECHO OF THE DOCUMENT, which `to_json5` re-emits verbatim. They are still
+/// VALIDATED at parse, against the sets above, so wz refuses exactly what
+/// upstream's `deny_unknown_fields` + enum deserialization refuses.
+#[derive(Debug, Clone, PartialEq)]
+pub struct LowPassFilterConf {
+    /// Optional operator label. Upstream carries it for diagnostics and wz has
+    /// nowhere to apply it; kept so the re-emit is the document that was read.
+    pub id: Option<String>,
+    /// NIC names this filter narrows to. Empty = every interface, which is
+    /// upstream's `None`.
+    pub interfaces: Vec<String>,
+    /// Link protocols this filter narrows to. Empty = every transport.
+    pub link_protocols: Vec<String>,
+    /// Flows this filter applies on. Empty = both, upstream's `None`.
+    pub flows: Vec<String>,
+    /// Message kinds filtered. Upstream types this `NEVec`, so an EMPTY list is
+    /// a refusal rather than a wildcard.
+    pub messages: Vec<String>,
+    /// Key expressions filtered. `NEVec` upstream, so likewise non-empty.
+    pub key_exprs: Vec<String>,
+    /// Inclusive max size of serialized payload + attachment.
+    pub size_limit: u64,
+}
+
+/// Every string in `value`, or `WrongType` naming `expected`.
+fn string_list_of(
+    value: &Json5Value,
+    path: &'static str,
+    expected: &'static str,
+) -> Result<Vec<String>, ConfigIngestError> {
+    let Json5Value::Array(items) = value else {
+        return Err(ConfigIngestError::WrongType { path, expected });
+    };
+    let mut out = Vec::with_capacity(items.len());
+    for item in items {
+        let Json5Value::String(text) = item else {
+            return Err(ConfigIngestError::WrongType { path, expected });
+        };
+        out.push(text.clone());
+    }
+    Ok(out)
+}
+
+/// The same, refusing any member outside `allowed`.
+///
+/// This is where wz stays exactly as strict as upstream rather than more
+/// permissive: upstream deserializes these into enums, so an unknown literal is
+/// a parse error there and must be one here.
+fn enum_list_of(
+    value: &Json5Value,
+    path: &'static str,
+    expected: &'static str,
+    allowed: &[&str],
+) -> Result<Vec<String>, ConfigIngestError> {
+    let out = string_list_of(value, path, expected)?;
+    if out.iter().any(|m| !allowed.contains(&m.as_str())) {
+        return Err(ConfigIngestError::WrongType { path, expected });
+    }
+    Ok(out)
+}
+
+/// R2650 — `low_pass_filter` as a list of [`LowPassFilterConf`].
+fn low_pass_filters_of(
+    value: &Json5Value,
+    path: &'static str,
+) -> Result<Vec<LowPassFilterConf>, ConfigIngestError> {
+    const SHAPE: &str = "a list of { messages: [put|delete|query|reply], \
+                         key_exprs: [\"<keyexpr>\"], size_limit: <bytes>, \
+                         id?, interfaces?, link_protocols?, flows? }";
+    let Json5Value::Array(items) = value else {
+        return Err(ConfigIngestError::WrongType {
+            path,
+            expected: SHAPE,
+        });
+    };
+    let mut out = Vec::with_capacity(items.len());
+    for item in items {
+        let Json5Value::Object(fields) = item else {
+            return Err(ConfigIngestError::WrongType {
+                path,
+                expected: SHAPE,
+            });
+        };
+        let mut conf = LowPassFilterConf {
+            id: None,
+            interfaces: Vec::new(),
+            link_protocols: Vec::new(),
+            flows: Vec::new(),
+            messages: Vec::new(),
+            key_exprs: Vec::new(),
+            size_limit: 0,
+        };
+        let mut saw_size = false;
+        for (key, field) in fields {
+            match key.as_str() {
+                "id" => {
+                    let Json5Value::String(text) = field else {
+                        return Err(ConfigIngestError::WrongType {
+                            path,
+                            expected: SHAPE,
+                        });
+                    };
+                    conf.id = Some(text.clone());
+                }
+                "interfaces" => conf.interfaces = string_list_of(field, path, SHAPE)?,
+                // Validated against the LINK vocabulary, not merely shaped: this
+                // axis deserializes into an enum upstream, so an unknown protocol
+                // is a parse error there and must be one here. Checking it at
+                // parse also makes the `apply_one_key` arm's conversion total.
+                "link_protocols" => {
+                    let names = string_list_of(field, path, SHAPE)?;
+                    if names.iter().any(|n| {
+                        wz_session_core::link::InterceptorLink::from_upstream_str(n).is_none()
+                    }) {
+                        return Err(ConfigIngestError::WrongType {
+                            path,
+                            expected: SHAPE,
+                        });
+                    }
+                    conf.link_protocols = names;
+                }
+                "flows" => {
+                    conf.flows = enum_list_of(field, path, SHAPE, INTERCEPTOR_FLOW_LITERALS)?
+                }
+                "messages" => {
+                    conf.messages = enum_list_of(field, path, SHAPE, DATA_MESSAGE_LITERALS)?
+                }
+                "key_exprs" => conf.key_exprs = string_list_of(field, path, SHAPE)?,
+                "size_limit" => {
+                    // `Number`, never `String`: a QUOTED size is a type error
+                    // rather than a range error, the same judgement the weights
+                    // parser records below — upstream's own commented example
+                    // shows the quoted spelling and a real zenohd refuses it.
+                    let Json5Value::Number(text) = field else {
+                        return Err(ConfigIngestError::WrongType {
+                            path,
+                            expected: SHAPE,
+                        });
+                    };
+                    let Some(n) = number_as_u64(text) else {
+                        return Err(ConfigIngestError::WrongType {
+                            path,
+                            expected: SHAPE,
+                        });
+                    };
+                    conf.size_limit = n;
+                    saw_size = true;
+                }
+                // Upstream's `LowPassFilterConf` carries `deny_unknown_fields`,
+                // so refusing an unknown field is upstream-CONSISTENT and not a
+                // stricter boundary. The catch-all stays; what must not happen
+                // is failing to know a field upstream knows.
+                _ => {
+                    return Err(ConfigIngestError::WrongType {
+                        path,
+                        expected: SHAPE,
+                    })
+                }
+            }
+        }
+        // `NEVec` upstream: absent or empty is a refusal, not a wildcard.
+        if conf.messages.is_empty() || conf.key_exprs.is_empty() || !saw_size {
+            return Err(ConfigIngestError::WrongType {
+                path,
+                expected: SHAPE,
+            });
+        }
+        out.push(conf);
+    }
+    Ok(out)
+}
+
 fn transport_weights_of(
     value: &Json5Value,
     path: &'static str,
@@ -4450,6 +4677,14 @@ impl ZenohNodeConfig {
             // the file did speak here.
             out.router_transport_weights = rows;
             named.push("routing/router/linkstate/transport_weights");
+        }
+        // R2650 — same shape as the weights above, and for the same reason an
+        // empty list counts as NAMED: a real zenohd resolves an unmentioned
+        // `low_pass_filter` to `[]` (measured), so "filter nothing" and "said
+        // nothing" are one instruction and the file did speak.
+        if let Some(value) = honoured(&doc, "low_pass_filter") {
+            out.low_pass_filter = low_pass_filters_of(value, "low_pass_filter")?;
+            named.push("low_pass_filter");
         }
         if let Some(v) = want_u64(&doc, "scouting/timeout")? {
             out.scouting_timeout_ms = Some(v);
@@ -5430,6 +5665,15 @@ mod tests {
                 r#"{ "routing": { "router": { "linkstate": { "transport_weights":
                      [ { "dst_zid": "1", "weight": 200 } ] } } } }"#,
             ),
+            // R2650 — NON-EMPTY for the reason the weights row above gives: the
+            // default here is the empty list too, so a fixture stating `[]` would
+            // report the key honoured while proving only that the reader did not
+            // crash. `size_limit` is UNQUOTED for that row's other reason.
+            (
+                "low_pass_filter",
+                r#"{ "low_pass_filter": [ { "messages": ["put"],
+                     "key_exprs": ["demo/**"], "size_limit": 8192 } ] }"#,
+            ),
             ("scouting/timeout", r#"{ "scouting": { "timeout": 2500 } }"#),
             (
                 "transport/multicast/qos/enabled",
@@ -6071,6 +6315,85 @@ mod tests {
     /// for that, in both directions. A claim about zenoh is adjudicated by
     /// zenoh's source, a claim about wz by wz.
     ///
+    /// R2650 — the `low_pass_filter` reader is EXACTLY as strict as upstream:
+    /// not looser, which would accept a file zenohd refuses, and not stricter,
+    /// which would refuse one it starts on.
+    ///
+    /// The REFUSALS carry the claim. An accept-only test would pass against a
+    /// reader that took anything, and "as strict as upstream" is a statement
+    /// about what is turned away.
+    ///
+    /// The first refusal is the sharp one. `declare_subscriber` is a perfectly
+    /// good `AclMessage` and NOT a `DataMessage`, which is the vocabulary this
+    /// key takes — so a reader that reused the ACL's nine here would accept it
+    /// and diverge from zenohd on a document, in the direction the stock-config
+    /// lane structurally cannot see: that lane only ever drives documents a real
+    /// zenohd already starts on.
+    #[test]
+    fn the_low_pass_reader_refuses_exactly_what_upstream_refuses() {
+        let ok = ZenohNodeConfig::from_json5(
+            r#"{ low_pass_filter: [ { id: "f1", interfaces: ["lo"],
+                 link_protocols: ["tcp"], flows: ["ingress"],
+                 messages: ["put", "delete"], key_exprs: ["demo/**"],
+                 size_limit: 8192 } ] }"#,
+        )
+        .expect("the shape a real zenohd starts on is accepted");
+        assert_eq!(ok.config.low_pass_filter.len(), 1);
+        let f = &ok.config.low_pass_filter[0];
+        assert_eq!(f.id.as_deref(), Some("f1"));
+        assert_eq!(f.messages, vec!["put", "delete"]);
+        assert_eq!(f.key_exprs, vec!["demo/**"]);
+        assert_eq!(f.size_limit, 8192);
+        assert!(
+            ok.named.contains(&"low_pass_filter"),
+            "a document that states the key must report it NAMED, or the reader \
+             honours it in the list and not in the report"
+        );
+
+        for (why, doc) in [
+            (
+                "an AclMessage kind that is not a DataMessage",
+                r#"{ low_pass_filter: [ { messages: ["declare_subscriber"],
+                     key_exprs: ["demo/**"], size_limit: 1 } ] }"#,
+            ),
+            (
+                "a QUOTED size_limit, which is a type error upstream",
+                r#"{ low_pass_filter: [ { messages: ["put"],
+                     key_exprs: ["demo/**"], size_limit: "1" } ] }"#,
+            ),
+            (
+                "a field upstream's deny_unknown_fields refuses",
+                r#"{ low_pass_filter: [ { messages: ["put"],
+                     key_exprs: ["demo/**"], size_limit: 1, nope: 1 } ] }"#,
+            ),
+            (
+                "an EMPTY messages list, which is a NEVec upstream",
+                r#"{ low_pass_filter: [ { messages: [],
+                     key_exprs: ["demo/**"], size_limit: 1 } ] }"#,
+            ),
+            (
+                "a missing size_limit, which upstream requires",
+                r#"{ low_pass_filter: [ { messages: ["put"],
+                     key_exprs: ["demo/**"] } ] }"#,
+            ),
+            (
+                "a link protocol outside the vocabulary",
+                r#"{ low_pass_filter: [ { messages: ["put"], key_exprs: ["x"],
+                     size_limit: 1, link_protocols: ["carrier-pigeon"] } ] }"#,
+            ),
+            (
+                "a flow outside the two directions",
+                r#"{ low_pass_filter: [ { messages: ["put"], key_exprs: ["x"],
+                     size_limit: 1, flows: ["sideways"] } ] }"#,
+            ),
+        ] {
+            assert!(
+                ZenohNodeConfig::from_json5(doc).is_err(),
+                "the reader must refuse {why}"
+            );
+        }
+    }
+
     /// The DROP-IN half is the load, not the list. These two keys left the
     /// surface for a reason that is entirely about upstream, so an operator's
     /// file that names them must go on starting a wz node exactly as before —

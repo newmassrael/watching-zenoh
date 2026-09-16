@@ -165,8 +165,15 @@ def applied_keys(text: str) -> frozenset[str]:
     m = re.search(r"fn apply_one_key\(.*?\n    \}\n", text, re.S)
     if not m:
         raise SystemExit("config.rs: no `apply_one_key` to read")
+    # R2650 — the segment repeat is `*`, not `+`. With `+` this pattern required
+    # every key to carry at least one `/`, and TWO of the registry's ten do not:
+    # `downsampling` and `low_pass_filter` are single-segment upstream keys. The
+    # asymmetry was silent and guaranteed a WRONG finding -- `key_lists` below
+    # reads a key list with plain `"([^"]+)"`, so those two were read from the
+    # LISTS and could never be read from the ARMS, which made this gate report
+    # "no arm for it" against an arm sitting right there.
     return frozenset(
-        re.findall(r'"([A-Za-z0-9_]+(?:/[A-Za-z0-9_]+)+)"\s*=>', m.group(0))
+        re.findall(r'"([A-Za-z0-9_]+(?:/[A-Za-z0-9_]+)*)"\s*=>', m.group(0))
     )
 
 
@@ -380,7 +387,37 @@ def selftest() -> int:
         print("selftest FAIL: a honoured row with no mapping arm was not caught: %s" % findings)
         return 1
 
-    print("runtime-mutable-surface: selftest OK (4 derivations driven)")
+    # R2650 — a SINGLE-SEGMENT key's arm is readable, which the arm pattern used
+    # to make impossible.
+    #
+    # `mutable_slices`'s key regex required at least one `/`, so `downsampling`
+    # and `low_pass_filter` -- two of the registry's ten, and upstream keys with
+    # no slash in them -- could be read from a key LIST and never from an ARM.
+    # The gate then reported "has no arm for it" against an arm sitting in the
+    # file. Nothing here would have caught it: every fixture key was multi-segment,
+    # so the population that could expose the bug was empty.
+    #
+    # The control is the damage, as everywhere else: renaming the single-segment
+    # arm must be NOTICED. If the pattern regresses to `+`, the key becomes
+    # invisible, the rename changes nothing the gate can see, and this fails.
+    single = real.replace(
+        '            "low_pass_filter" =>',
+        '            "low_pass_FILTER" =>',
+    )
+    if single == real:
+        print("selftest FAIL: could not damage the single-segment arm; fixture is inert")
+        return 1
+    rc, findings = grade(single, zenoh)
+    if rc == 0 or not any(
+        "has no arm for it" in f and "low_pass_filter" in f for f in findings
+    ):
+        print(
+            "selftest FAIL: a single-segment key's missing arm was not caught -- "
+            "the arm pattern cannot see keys without a `/`: %s" % findings
+        )
+        return 1
+
+    print("runtime-mutable-surface: selftest OK (5 derivations driven)")
     return 0
 
 

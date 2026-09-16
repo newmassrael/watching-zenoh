@@ -1289,6 +1289,61 @@ impl WzConfig {
                 };
                 true
             }
+            // R2650 — `low_pass_filter`, the first interceptor key with a reader.
+            //
+            // Gated on BOTH the module's feature and the rule type's, spelled
+            // literally rather than inherited: `interceptor` is `routing-peer`
+            // and `LowPassRule` is `access-quota`, and a build carrying one
+            // without the other must not see this arm.
+            //
+            // This is where the document's spelling becomes the enforcement
+            // type. It stays out of `ZenohNodeConfig` because that struct is
+            // feature-INDEPENDENT -- the reader must read the same document to
+            // the same values in every build -- and those two types are not.
+            #[cfg(all(feature = "routing-peer", feature = "access-quota"))]
+            "low_pass_filter" => {
+                let confs = match source {
+                    Some(ingest) => ingest.config.low_pass_filter.clone(),
+                    // The schema default is NO filter, which is also what a real
+                    // zenohd resolves a silent document to (it renders `[]`).
+                    None => Vec::new(),
+                };
+                let mut rules = Vec::with_capacity(confs.len());
+                for conf in &confs {
+                    // Every literal was validated at PARSE, so none of these can
+                    // be `None` here. Answering `false` rather than unwrapping
+                    // keeps that an assertion about the reader instead of a
+                    // panic in a running node if the two ever drift.
+                    let (Some(messages), Some(flows), Some(links)) = (
+                        conf.messages
+                            .iter()
+                            .map(|m| {
+                                crate::interceptor::low_pass::LowPassMessage::from_upstream_str(m)
+                            })
+                            .collect::<Option<Vec<_>>>(),
+                        conf.flows
+                            .iter()
+                            .map(|f| crate::interceptor::InterceptorFlow::from_upstream_str(f))
+                            .collect::<Option<Vec<_>>>(),
+                        conf.link_protocols
+                            .iter()
+                            .map(|l| wz_session_core::link::InterceptorLink::from_upstream_str(l))
+                            .collect::<Option<Vec<_>>>(),
+                    ) else {
+                        return false;
+                    };
+                    rules.push(crate::interceptor::low_pass::LowPassRule {
+                        key_exprs: conf.key_exprs.clone(),
+                        max_payload_size: conf.size_limit as usize,
+                        messages,
+                        flows,
+                        link_protocols: links,
+                        interfaces: conf.interfaces.clone(),
+                    });
+                }
+                self.interceptors.low_pass = rules;
+                true
+            }
             _ => false,
         }
     }

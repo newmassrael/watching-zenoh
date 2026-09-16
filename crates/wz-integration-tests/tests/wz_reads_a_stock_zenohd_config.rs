@@ -147,6 +147,20 @@ fn operator_config(port: u16) -> String {
   }},
   scouting: {{ multicast: {{ enabled: false }}, timeout: 2500 }},
   timestamping: {{ enabled: true }},
+  // R2650 — the first interceptor key with a reader. The shape is the one a
+  // REAL zenohd was measured to start on, not the one upstream's commented
+  // example shows: that block has never been parsed by a shipping binary, and
+  // this tree has already been bitten once by copying such an example (a
+  // quoted transport weight panics zenohd 1.10.0).
+  low_pass_filter: [
+    {{ id: "filter1",
+       interfaces: ["lo"],
+       link_protocols: ["tcp"],
+       flows: ["ingress", "egress"],
+       messages: ["put", "delete", "query", "reply"],
+       key_exprs: ["demo/**"],
+       size_limit: 8192 }},
+  ],
   adminspace: {{ enabled: true, permissions: {{ read: true, write: true }} }},
   transport: {{
     unicast: {{
@@ -667,6 +681,13 @@ fn the_defaults_each_implementation_falls_back_to_are_pinned_against_a_real_zeno
             "routing/router/linkstate/transport_weights",
             String::from("[]"),
         ),
+        // R2650 — the same class and the same reason, MEASURED against this
+        // binary rather than inherited from the row above: a zenohd whose file
+        // never mentions `low_pass_filter` renders it as `[]`, not `null`, so
+        // the tree DOES answer here and the key is comparable. wz's struct
+        // answers with the same empty list, and this row is what notices if
+        // either side starts inventing a filter nobody configured.
+        ("low_pass_filter", String::from("[]")),
         ("transport/unicast/max_links", wz.max_links.to_string()),
         ("transport/unicast/lowlatency", wz.lowlatency.to_string()),
         ("transport/unicast/qos/enabled", wz.qos.to_string()),
@@ -3346,6 +3367,21 @@ fn a_wz_node_configured_only_by_a_stock_zenoh_config_reaches_a_real_zenohd() {
   // shipped `false`, so the expansion has something to emit.
   timestamping: {{ enabled: true, drop_future_timestamp: true }},
   queries_default_timeout: 11000,
+  // R2650 — `low_pass_filter`, named here because a client's file can carry it
+  // and this fixture asserts the reader names every honoured key an operator
+  // could hand it. The SHAPE is one a real zenohd was measured to start on
+  // rather than one copied from upstream's commented example, which no shipping
+  // binary has ever parsed -- the trap that made a quoted transport weight panic
+  // zenohd 1.10.0.
+  low_pass_filter: [
+    {{ id: "filter1",
+       interfaces: ["lo"],
+       link_protocols: ["tcp"],
+       flows: ["ingress", "egress"],
+       messages: ["put", "delete", "query", "reply"],
+       key_exprs: ["demo/**"],
+       size_limit: 8192 }},
+  ],
   // R2065 — `peer/mode` joins the EXISTING `routing` block rather than opening
   // a second one. The first cut added its own `routing: {{ … }}` earlier in the
   // file and this later object silently won, so `interests/timeout` was named

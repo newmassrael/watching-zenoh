@@ -121,6 +121,36 @@ impl LowPassMessage {
         LowPassMessage::Query,
         LowPassMessage::Reply,
     ];
+
+    /// R2650 — upstream's wire spelling for this kind.
+    ///
+    /// These are `DataMessage`'s four, `#[serde(rename_all = "snake_case")]`
+    /// (`commons/zenoh-config/src/lib.rs` @ `pub enum DataMessage`) — NOT
+    /// `AclMessage`'s nine, which govern the access-control key instead.
+    ///
+    /// The match is exhaustive, which is the point: a new kind stops this
+    /// COMPILING, so the vocabulary cannot grow without someone deciding what
+    /// the document calls it.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            LowPassMessage::Put => "put",
+            LowPassMessage::Delete => "delete",
+            LowPassMessage::Query => "query",
+            LowPassMessage::Reply => "reply",
+        }
+    }
+
+    /// The kind upstream spells `text`, or `None`.
+    ///
+    /// Derived by searching [`Self::ALL`] through [`Self::as_str`] rather than
+    /// written as a reverse `match`, so there is ONE table and the inverse
+    /// cannot disagree with it.
+    pub fn from_upstream_str(text: &str) -> Option<LowPassMessage> {
+        LowPassMessage::ALL
+            .iter()
+            .copied()
+            .find(|m| m.as_str() == text)
+    }
 }
 
 /// A low-pass rule — a message of a governed [`kind`](LowPassRule::messages),

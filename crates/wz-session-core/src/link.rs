@@ -111,6 +111,43 @@ impl InterceptorLink {
         }
     }
 
+    /// R2650 — every variant, so the INVERSE of [`Self::as_str`] can be derived
+    /// rather than written a second time.
+    ///
+    /// A config reader has to turn upstream's spelling back into a variant, and
+    /// a hand-written reverse `match` would be a second copy of this vocabulary,
+    /// free to disagree with the one above. [`Self::from_upstream_str`] searches
+    /// THIS list through `as_str`, so there is one table and the inverse cannot
+    /// drift from it.
+    ///
+    /// Its completeness is held by `every_link_variant_is_listed_in_all`, which
+    /// carries an exhaustive `match`: adding a variant stops that test
+    /// compiling, which is the only way a list like this stays honest.
+    pub const ALL: &'static [InterceptorLink] = &[
+        InterceptorLink::Tcp,
+        InterceptorLink::Udp,
+        InterceptorLink::Tls,
+        InterceptorLink::Quic,
+        InterceptorLink::QuicDatagram,
+        InterceptorLink::Serial,
+        InterceptorLink::Unixpipe,
+        InterceptorLink::UnixsockStream,
+        InterceptorLink::Vsock,
+        InterceptorLink::Ws,
+    ];
+
+    /// The variant upstream spells `text`, or `None`.
+    ///
+    /// Upstream deserializes this axis into an enum, so an unknown protocol is a
+    /// parse error there; a reader that shrugged one off would accept a document
+    /// a real zenohd refuses.
+    pub fn from_upstream_str(text: &str) -> Option<InterceptorLink> {
+        InterceptorLink::ALL
+            .iter()
+            .copied()
+            .find(|link| link.as_str() == text)
+    }
+
     /// R2259 (open-debt item 593) — whether this protocol carries a BYTE STREAM
     /// rather than framed datagrams, which is what zenoh-c's `z_link_is_streamed`
     /// reports.
@@ -688,4 +725,58 @@ pub enum LostCause {
     /// [`Self::OsError`] — the divergence R2600 named and this round does not
     /// retire.
     CertificateExpired,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// R2650 — [`InterceptorLink::ALL`] is COMPLETE, and the compiler is what
+    /// says so rather than this test's own reading.
+    ///
+    /// The match below is exhaustive by construction, so adding a variant stops
+    /// this test COMPILING. That is the whole mechanism: a hand-written list is
+    /// trustworthy only when something forces a look at it, and a test that
+    /// merely counted would go stale silently the moment the count was updated
+    /// without the list.
+    #[test]
+    fn every_link_variant_is_listed_in_all() {
+        fn _adding_a_variant_must_not_compile_until_all_is_updated(link: InterceptorLink) {
+            match link {
+                InterceptorLink::Tcp
+                | InterceptorLink::Udp
+                | InterceptorLink::Tls
+                | InterceptorLink::Quic
+                | InterceptorLink::QuicDatagram
+                | InterceptorLink::Serial
+                | InterceptorLink::Unixpipe
+                | InterceptorLink::UnixsockStream
+                | InterceptorLink::Vsock
+                | InterceptorLink::Ws => {}
+            }
+        }
+        assert_eq!(
+            InterceptorLink::ALL.len(),
+            10,
+            "a variant was added: list it in ALL and move this count"
+        );
+
+        // The inverse is an inverse over the WHOLE list, not over a sample.
+        for link in InterceptorLink::ALL {
+            assert_eq!(
+                InterceptorLink::from_upstream_str(link.as_str()),
+                Some(*link),
+                "`{}` must round-trip through the one table",
+                link.as_str()
+            );
+        }
+        // And it REFUSES what upstream refuses: this axis deserializes into an
+        // enum there, so an unknown protocol is a parse error, not a shrug.
+        assert_eq!(InterceptorLink::from_upstream_str("carrier-pigeon"), None);
+        // The kebab-case spellings are upstream's, not wz's locator grammar.
+        assert_eq!(
+            InterceptorLink::from_upstream_str("unixsock-stream"),
+            Some(InterceptorLink::UnixsockStream)
+        );
+    }
 }

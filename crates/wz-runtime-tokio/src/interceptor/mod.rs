@@ -424,6 +424,28 @@ impl InterceptorFlow {
     /// `flows.get_or_insert(nev![Ingress, Egress])`
     /// (`net/routing/interceptor/low_pass.rs:83-85`). R311y451.
     pub const ALL: [InterceptorFlow; 2] = [InterceptorFlow::Ingress, InterceptorFlow::Egress];
+
+    /// R2650 — upstream's wire spelling, from its `InterceptorFlow`
+    /// (`commons/zenoh-config/src/lib.rs`), which a config document names on
+    /// the `flows` axis of both interceptor keys.
+    ///
+    /// Exhaustive on purpose: a third direction would stop this COMPILING
+    /// rather than quietly acquiring no spelling.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            InterceptorFlow::Ingress => "ingress",
+            InterceptorFlow::Egress => "egress",
+        }
+    }
+
+    /// The flow upstream spells `text`, or `None` — derived from [`Self::ALL`]
+    /// through [`Self::as_str`], so the inverse cannot drift from the table.
+    pub fn from_upstream_str(text: &str) -> Option<InterceptorFlow> {
+        InterceptorFlow::ALL
+            .iter()
+            .copied()
+            .find(|f| f.as_str() == text)
+    }
 }
 
 #[cfg(feature = "access-acl")]
