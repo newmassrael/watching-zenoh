@@ -711,9 +711,15 @@ async fn concurrent_peers_fragment_reassemble_in_isolation() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "multicast loopback e2e; Layer M runs via --layer M / WZ_RUN_LAYER_M=1 --ignored"]
 async fn router_egress_helper_reaches_group_subscriber() {
-    // Distinct group port from the sibling loopback tests (7449 / 7450) so the
+    // Distinct group port from every other test that binds this group, so the
     // --ignored lane never contends on the same multicast bind.
-    const HELPER_PORT: u16 = 7451;
+    //
+    // R2672 (item 774) — this used to say "distinct from 7449 / 7450" and was
+    // 7451, which is `concurrent_peers_fragment_reassemble_in_isolation`'s
+    // CONC_PORT in this same file: a hand-checked list that omitted one of its
+    // own members. `scripts/lib/multicast_address_collision_gate.py` now derives
+    // that set instead of anyone maintaining it by eye.
+    const HELPER_PORT: u16 = 7452;
 
     // Subscriber node: group-joined socket + observer-backed drive loop.
     let mut driver_b = UdpDriver::bind_multicast(GROUP, HELPER_PORT, McastSocketConfig::default())

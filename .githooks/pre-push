@@ -803,6 +803,17 @@ round_fed_gates=(
     # MEASURED: 2.3s, of which the whole cost is 27 `cargo tree` calls
     # (lru_cached from 163 requests); metadata only, no compilation.
     "lane_feature_membership_gate.py"
+    # R2672 (item 774) — no two tests may JOIN the same multicast address. A
+    # multicast group is machine-wide, and cargo runs test functions AND test
+    # binaries concurrently, so two tests that pick the same (group, port) read
+    # each other's datagrams on whichever run the scheduler overlaps them. That
+    # is how Layer M redded twice hosted while passing locally: the difference
+    # was scheduling, not correctness, which is exactly the shape no amount of
+    # care catches and a derived population does.
+    # Round-fed: it globs `crates/*/tests/*.rs` and resolves each bind's
+    # constants, so any test added tomorrow is inside its population already.
+    # MEASURED: 0.05s, pure parse, no build.
+    "multicast_address_collision_gate.py"
 )
 # ⚠ The module and its ARGUMENTS are expanded separately, and that too is
 # forced rather than chosen: `scripts/lib/"${cmd[@]}"` attaches the prefix to

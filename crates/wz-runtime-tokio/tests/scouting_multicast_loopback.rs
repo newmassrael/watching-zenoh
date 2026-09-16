@@ -123,6 +123,15 @@ fn verdicts(observed: &[ScoutRxIgnored], want: &ScoutRxIgnored) -> usize {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "multicast loopback e2e; Layer M runs via --layer M / WZ_RUN_LAYER_M=1 --ignored"]
 async fn scout_discovers_peer_locator_over_multicast() {
+    // R2672 (item 774) — ITS OWN PORT, and this is the test the omission cost.
+    // It used to bind the file-level `PORT`, which is the COMPILED-IN DEFAULT
+    // that `honours_a_configured_scouting_socket`'s control arm deliberately
+    // sprays a Hello at. Whenever the scheduler overlapped them this scout
+    // resolved that Hello's locator instead of its own and the assertion failed
+    // on a value that was never about this test. The control arm cannot move --
+    // it must target the default or it passes vacuously -- so this one does.
+    const PORT: u16 = 17452;
+
     // Scout side: bind the group port, join the group, loopback on.
     let mut driver = UdpDriver::bind_multicast(GROUP, PORT, McastSocketConfig::default())
         .await
@@ -296,7 +305,10 @@ async fn a_scouter_told_to_use_another_group_joins_that_group_and_only_that_grou
 async fn every_datagram_from_a_real_group_lands_in_exactly_one_accumulator() {
     // Its own group port: the legs in this file run in one binary and a shared
     // port would let one leg's traffic answer another's window.
-    const PORT: u16 = 7450;
+    // R2672 — moved out of the 74xx range: `multicast_pubsub_loopback.rs` also
+    // binds 7450 on this group, and cargo runs test BINARIES concurrently, so
+    // "one binary, one port" was never the whole rule.
+    const PORT: u16 = 17453;
     const OUR_ZID: &[u8] = &[0xAA, 0xBB, 0xCC, 0xDD];
 
     let mut driver = UdpDriver::bind_multicast(GROUP, PORT, McastSocketConfig::default())
@@ -391,7 +403,8 @@ async fn every_datagram_from_a_real_group_lands_in_exactly_one_accumulator() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "multicast loopback e2e; Layer M runs via --layer M / WZ_RUN_LAYER_M=1 --ignored"]
 async fn an_empty_answer_from_the_group_does_not_end_an_exit_on_first_window() {
-    const PORT: u16 = 7451;
+    // R2672 — 7451 collided with TWO tests in `multicast_pubsub_loopback.rs`.
+    const PORT: u16 = 17454;
 
     let mut driver = UdpDriver::bind_multicast(GROUP, PORT, McastSocketConfig::default())
         .await
@@ -660,12 +673,17 @@ mod round3_tls {
     use wz_runtime_tokio_test_support::{fixture_session_init_params, loopback_tls_configs};
     use wz_session_core::scout_params::ScoutParams;
 
-    // Distinct group port from the discovery-only test (7446) and round2
-    // (7448) so the three `#[ignore]` tests do not contend on the same
-    // multicast bind when the Layer M lane runs them together under
-    // `--ignored` (cargo's default multi-thread).
+    // Distinct group port from every other test that binds this group, so the
+    // `#[ignore]` tests never contend on the same multicast bind under cargo's
+    // default multi-thread.
+    //
+    // R2672 (item 774) — this used to reason only about its SIBLINGS IN THIS
+    // FILE ("distinct from 7446 and round2's 7448") and was 7449, which is the
+    // file-level PORT of `multicast_pubsub_loopback.rs`. Cargo runs test
+    // BINARIES concurrently and a multicast group is machine-wide, so one
+    // binary's bookkeeping was never the boundary that mattered.
     const GROUP: Ipv4Addr = Ipv4Addr::new(224, 0, 0, 224);
-    const PORT: u16 = 7449;
+    const PORT: u16 = 17456;
     const ITER_CAP: usize = 4096;
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
