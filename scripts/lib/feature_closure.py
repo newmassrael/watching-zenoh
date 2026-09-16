@@ -31,11 +31,19 @@ It refutes; it never confirms. Three gaps are inherent:
     it rotted silently — the same defect class R311y299 found in audit-catalog-status.sh's
     own examples. Layer A4 PRINTS the live denominator every run; read it there.)
     CAVEAT, and it is load-bearing: "zero cfg sites" is invariant #2's guarantee about
-    the atom's OWN feature name — it does NOT imply the code is always-on. session-extqos
-    is reserved with 0 own cfg sites yet gated by 155 `transport-qos` sites, so it is
-    elidable and the "compiled regardless" inference above is FALSE for it. It is not
-    FOUNDATIONAL today (it is PARTIAL), so this exemption does not currently reach it —
-    but the premise is narrower than the bullet's phrasing suggests.
+    the atom's OWN feature name — it does NOT imply the code is always-on. A feature with
+    no site of its own can still be elided by a feature that gates it, so the "compiled
+    regardless" inference above is FALSE for such an atom. The exemption reaches only
+    FOUNDATIONAL atoms, so it does not currently apply to a PARTIAL one either way — but
+    the premise is narrower than the bullet's phrasing suggests.
+    ⚠ R2659 — THIS CAVEAT NAMED `session-extqos` AS ITS EXAMPLE AND BOTH ITS NUMBERS HAVE
+    ROTTED, which is the very defect the paragraph above describes, sitting one sentence
+    below it. Re-measured against the tree: `session-extqos` now carries 65 cfg sites of
+    its OWN (13 in wz-runtime-tokio, 34 in wz-session-core, 18 in wz-ap-demo, 0 in tests),
+    not 0, and `transport-qos` carries 182, not 155. So it is no longer an example of
+    "elidable with zero own sites" at all — it is elidable by its own name. The caveat's
+    POINT stands and is stated above without an example rather than with a false one;
+    a replacement example must be MEASURED, never assumed.
   - **In-process tests have a broad closure.** A test that drives no wz binary links the
     `wz-integration-tests` dev-dependency graph, which enables ~83 wz features. For those
     45 corpus files the arm can refute very little.

@@ -17882,6 +17882,16 @@ layer_e11_apfull_advanced_pubsub_pico() {
         --test apfull_advanced_pubsub_pico_interop -- --ignored --quiet --test-threads=1 \
         --exact apfull_advanced_subscriber_recovers_history_from_a_real_pico_cache 2>&1 \
         | tee /dev/stderr | grep -qE '^test result: ok\. 1 passed') || return 1
+    # R2659 — the THIRD leg, which this lane owned by its `#[ignore]` note and
+    # never named. `lane_feature_membership_gate.py` found it: the note says
+    # "Layer E11 runs via --ignored" and the two invocations above name the
+    # file's OTHER two tests, so it was selected by no lane and had never run on
+    # CI since `8bffc0fc` added it. It carries `wz-proves: keyexpr-canon`, so a
+    # proof claim rested on a test that never executed.
+    (cd crates && cargo test -p wz-integration-tests \
+        --test apfull_advanced_pubsub_pico_interop -- --ignored --quiet --test-threads=1 \
+        --exact apfull_double_star_adv_keyexpr_does_not_crash_a_real_pico_peer 2>&1 \
+        | tee /dev/stderr | grep -qE '^test result: ok\. 1 passed') || return 1
 }
 
 # ─── Layer E12 — AP-full ADMINSPACE plane against a real zenoh-pico ────

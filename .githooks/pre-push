@@ -792,6 +792,17 @@ round_fed_gates=(
     "hook_graded_surface_gate.py --check"
     "job_budget_binding.py"
     "unwired_lane_lint.py"
+    # R2659 — the link BEFORE `unwired_lane_lint`'s. That one checks lane ->
+    # ci.yml; this checks test -> lane, so the chain is test -> lane -> workflow
+    # and this is its missing first link. Both exist for the same reason, stated
+    # in that lint's own header: the hazard "the workflow's own comments already
+    # name three separate times ... and nothing ever checked it". One level down,
+    # Layer E7b's comment said "a test ADDED to the file joins it silently" and
+    # then R2655 added one that did, reddening three hosted runs.
+    # Round-fed: it names `scripts/run-ci.sh` and globs under `crates/`.
+    # MEASURED: 2.3s, of which the whole cost is 27 `cargo tree` calls
+    # (lru_cached from 163 requests); metadata only, no compilation.
+    "lane_feature_membership_gate.py"
 )
 # ⚠ The module and its ARGUMENTS are expanded separately, and that too is
 # forced rather than chosen: `scripts/lib/"${cmd[@]}"` attaches the prefix to
