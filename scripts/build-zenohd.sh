@@ -182,6 +182,55 @@ if [[ "${ZENOHD_FORCE_CRATES_IO:-0}" -ne 1 ]]; then
     fi
 fi
 
+# R2665 (open-debt item 758) — A SOURCE TREE THAT CANNOT NAME THE PIN CANNOT
+# PRODUCE AN ORACLE, so it is refused HERE rather than after a build.
+#
+# The defect this closes was diagnosed twice and both diagnoses were wrong. It is
+# not "the variants build off-pin" — the version assert below proves they do not
+# — and it is not "a poisoned cache entry is restored without being read", which
+# is what `ensure_zenohd_at_pin.py` was built for: that reader runs, rebuilds
+# from the pinned source, and lands on the SAME answer, which is why four
+# consecutive hosted runs reduced to one step.
+#
+# WHAT IS ACTUALLY TRUE, measured: `zenohd/src/main.rs` @ `const GIT_VERSION`
+# takes its string from the `git-version` crate's `git_version!` macro, which
+# shells out to `git describe` AT BUILD TIME. A cargo git checkout is a detached
+# worktree cargo materialises by commit, and cargo does not fetch tags into it —
+# measured on this machine: `git tag` lists ZERO there while the same tree's
+# `Cargo.toml` says the pinned version. So that tree IS the pin and CANNOT SAY
+# so, and the oracle's identity ends up a function of BUILD ORDER: an oracle
+# built before `oracles/future-stamp`'s git dependency materialises the checkout
+# gets the tag clone and answers the version, one built after gets the checkout
+# and answers the short sha.
+#
+# ⚠ THE PREDICATE IS THE BUILD'S OWN, not a plausible substitute, and the
+# difference is load-bearing. `git-version` 0.3.9 documents its default as
+# `args = ["--always", "--dirty=-modified"]` — note the ABSENCE of `--tags`, so
+# only ANNOTATED tags count. A check written with `--tags` would accept a tree
+# whose pin tag is lightweight, the build would still fall through to the sha,
+# and this same red would come back having passed its own gate.
+zenohd_names_the_pin() {
+    local tree="$1" seen
+    seen="$(git -C "$tree" describe --always --dirty=-modified 2>/dev/null)" || return 1
+    [[ "$seen" == "$ZENOHD_VERSION" ]]
+}
+
+if [[ -n "$ZH" ]] && ! zenohd_names_the_pin "$ZH"; then
+    if [[ "${ZENOHD_ALLOW_CLONE:-0}" -eq 1 ]]; then
+        echo "build-zenohd: $ZH cannot name the pin (git describe says" \
+             "'$(git -C "$ZH" describe --always --dirty=-modified 2>/dev/null || echo '?')'," \
+             "pin is $ZENOHD_VERSION); falling through to the tag clone" >&2
+        ZH=""
+    else
+        # Refusing here would strand a developer who has no clone and did not ask
+        # for one; the build still works and only the oracle's SELF-DESCRIPTION is
+        # wrong, so this says exactly what will happen rather than failing.
+        echo "build-zenohd: WARNING — $ZH cannot name the pin, so the built" \
+             "zenohd will report a commit sha and oracle_pin_gate will call it" \
+             "STALE. Set ZENOHD_ALLOW_CLONE=1 to build from the pinned tag." >&2
+    fi
+fi
+
 # Source A2 (R311y264) — a SOURCE TREE from a shallow clone of the pinned tag, for a
 # machine that has no cargo-git checkout to reuse (a hosted CI runner).
 #
