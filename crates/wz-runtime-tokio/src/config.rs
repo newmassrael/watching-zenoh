@@ -4017,6 +4017,17 @@ mod tests {
         /// splitting them would let a fixture pass by never meeting the other
         /// two: REPLACE an existing row, APPEND a row whose name is new, and
         /// leave every row the key did not name alone.
+        // ⚠ GATED AS ITS SUBJECT IS, and the first cut was not. `ConfigSinks`
+        // and `set_by_key_with` need `zenoh-config`; this module needs only
+        // `routing-router-hat`, so the `C1y router_forward` legs -- which
+        // compile the router hat WITHOUT the config reader -- failed to build.
+        // Gate 4b is what said so, through its INPUT ERROR path rather than a
+        // count mismatch: "NO libtest summary in the run's output" is a BUILD
+        // FAILURE wearing a counting gate's clothes.
+        #[cfg(all(
+            feature = "zenoh-config",
+            any(feature = "adminspace-core", feature = "routing-router-hat")
+        ))]
         #[test]
         fn a_member_write_replaces_by_name_and_appends_when_the_name_is_new() {
             let sink = RecordingSink::new(true);
@@ -4058,6 +4069,10 @@ mod tests {
 
         /// R2657 — the member DELETE, which upstream reaches through a different
         /// function and wz reaches through the same route.
+        #[cfg(all(
+            feature = "zenoh-config",
+            any(feature = "adminspace-core", feature = "routing-router-hat")
+        ))]
         #[test]
         fn a_member_delete_drops_the_named_row_and_keeps_the_rest() {
             let sink = RecordingSink::new(true);
@@ -4084,6 +4099,10 @@ mod tests {
 
         /// R2657 — the three refusals the member route adds, each by its own
         /// name, and the one shape that is NOT a refusal.
+        #[cfg(all(
+            feature = "zenoh-config",
+            any(feature = "adminspace-core", feature = "routing-router-hat")
+        ))]
         #[test]
         fn the_member_route_refuses_by_name_and_falls_through_without_an_equals() {
             let sink = RecordingSink::new(true);
@@ -4148,6 +4167,10 @@ mod tests {
         /// a number, so no item ever matches and the insert appends. Reproducing
         /// it is what keeps the two acceptance boundaries the same: a wz that
         /// matched numerically would apply a write upstream would not.
+        #[cfg(all(
+            feature = "zenoh-config",
+            any(feature = "adminspace-core", feature = "routing-router-hat")
+        ))]
         #[test]
         fn a_numeric_field_matches_nothing_and_appends_as_upstream_does() {
             let sink = RecordingSink::new(true);
