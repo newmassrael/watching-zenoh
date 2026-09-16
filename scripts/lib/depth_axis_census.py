@@ -1566,7 +1566,7 @@ PIN_NO_SYMBOL = 2
 # MEASURED with THIS FILE'S OWN `citation_audit` over the population with and
 # without that one atom -- never by diffing the totals, which cannot say whose
 # the fall is: 181 - 9 = 172, and the live gate reported 172.
-PIN_WZ_CITATIONS = 172
+PIN_WZ_CITATIONS = 174
 # R2626 — 44 -> 42, and this one is worth a sentence because it HELD through
 # every earlier retirement in this run (R2612, R2622). `time-hlc`'s reason is the
 # first retiree carrying AMBIGUOUS citations of its own: its oldest clauses cite
