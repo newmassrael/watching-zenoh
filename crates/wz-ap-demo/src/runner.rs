@@ -6943,6 +6943,21 @@ async fn run_router_hat_until(
                     let sinks = wz::runtime_tokio::config::ConfigSinks::none()
                         .with_interceptors(&forwarder)
                         .with_router_link_weights(&forwarder);
+                    // R2667 — the `connect/endpoints` consumer, and it is the
+                    // only sink here that is NOT the forwarder. The desired
+                    // connect-set lives as a loop-local inside the face drive
+                    // loop, so there is no object to hand over; what can be
+                    // handed over is the SENDER the loop already drains, which
+                    // is also what `--connect-after` and the `connect-add`
+                    // intent write to. All three producers therefore converge
+                    // on one seam rather than each growing its own.
+                    //
+                    // Shadowed rather than chained because the builder method is
+                    // `#[cfg]`-gated on a feature this host does not require:
+                    // chaining it unconditionally would not compile on a
+                    // router-hat build without the reconcile substrate.
+                    #[cfg(feature = "router-connect-reconcile")]
+                    let sinks = sinks.with_connect_endpoints(&reconcile_tx);
                     for write in queued {
                         // IDEMPOTENT, and it has to be: the harness re-publishes
                         // the same PUT every app tick, so an operator writing a

@@ -65,7 +65,23 @@ MIN_SLICES = 3
 
 #: The pinned SET of runtime-mutable slices. Two-directional: a slice added
 #: without a row here fails, and so does one removed without the row leaving.
-PINNED_SLICES = frozenset({"interceptors", "admin_permissions", "router_link_weights"})
+#:
+#: R2667 — `connect_endpoints` joins, and the WHY is a measurement rather than a
+#: preference. `config-mutate-runtime` listed 44 keys wz honours at startup but
+#: could not apply at runtime, and each was graded on one predicate: does a
+#: RUNTIME change produce an OBSERVABLE difference. 38 were eliminated because
+#: upstream reads them into a builder or a constructor and stores them — the
+#: three transport managers for the whole `transport/*` family, and
+#: `start_client` / `start_peer` / `start_router` for the scouting and endpoint
+#: block — so upstream accepts the write and nothing re-reads it.
+#: `connect/endpoints` is the one that passed: `closed_session` and
+#: `closed_link` lock the LIVE config at CLOSE time and re-read the list to
+#: decide what to re-dial.
+#: ⚠ `listen/endpoints` did NOT pass and is deliberately absent despite the
+#: symmetric name — it is read only in the start path.
+PINNED_SLICES = frozenset(
+    {"interceptors", "admin_permissions", "router_link_weights", "connect_endpoints"}
+)
 
 
 def _struct_body(text: str, name: str) -> str:

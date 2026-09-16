@@ -255,7 +255,16 @@ NO_PUBLIC_PATH: dict[str, dict[str, str]] = {
             "ext-pubsub-sample-miss-detection",
             "multicast-declarations",
             "reply-source-info",
-            "router-connect-reconcile",
+            # R2667 — `router-connect-reconcile` LEAVES this list, the same way
+            # and for the same kind of reason `access-extauth-usrpwd` did above.
+            # The round that falsified it wired `connect/endpoints` into the
+            # runtime-mutable surface, and doing that needs a sink the config
+            # seam can name: `accept_loop.rs` now gates `pub trait
+            # ConnectEndpointsSink` on this feature, with `ConfigSinks`'s
+            # `with_connect_endpoints` builder and `WzConfig`'s
+            # `reconfigure_connect_endpoints` beside it. ⚠ Unlike R2571 this did
+            # NOT go unnoticed for a round: the census refused the push that
+            # introduced it, which is the behaviour the note above wanted.
             "storage-history",
             "storage-mgr-complete-flag",
             "storage-mgr-strip-prefix",

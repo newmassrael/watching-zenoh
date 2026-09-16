@@ -187,6 +187,16 @@ pub const RUNTIME_MUTABLE_CONFIG_KEYS: &[RuntimeMutableKey] = &[
         discipline: MutationDiscipline::Push,
         feature: "routing-router-hat",
     },
+    // R2667 — the ONLY key of the 44 wz honoured-but-could-not-apply that a
+    // runtime change makes an OBSERVABLE difference to upstream. PUSH, because
+    // the consumer is a loop-local desired-set reached through a channel, never
+    // a field this config can hand a reader.
+    RuntimeMutableKey {
+        key: "connect/endpoints",
+        slice: "connect_endpoints",
+        discipline: MutationDiscipline::Push,
+        feature: "router-connect-reconcile",
+    },
 ];
 
 /// Why a runtime key write was refused — see [`WzConfig::set_by_key`] and
@@ -554,6 +564,10 @@ pub struct ConfigSinks<'a> {
     /// The router's configured link weights.
     #[cfg(feature = "routing-router-hat")]
     router_link_weights: Option<&'a dyn RouterLinkWeightSink>,
+    /// The desired outbound connect list, which every `connect/endpoints` write
+    /// has to reach. R2667.
+    #[cfg(feature = "router-connect-reconcile")]
+    connect_endpoints: Option<&'a dyn crate::accept_loop::ConnectEndpointsSink>,
     /// Holds `'a` on a build that compiles NEITHER sink field, where the
     /// lifetime would otherwise be unused and the type would not compile. Such
     /// a build has no push-discipline slice to reach, so the type is still
@@ -588,6 +602,17 @@ impl<'a> ConfigSinks<'a> {
         self.router_link_weights = Some(sink);
         self
     }
+
+    /// Name the live desired-connect-set consumer (R2667).
+    #[cfg(feature = "router-connect-reconcile")]
+    #[must_use]
+    pub fn with_connect_endpoints(
+        mut self,
+        sink: &'a dyn crate::accept_loop::ConnectEndpointsSink,
+    ) -> Self {
+        self.connect_endpoints = Some(sink);
+        self
+    }
 }
 
 #[cfg(all(
@@ -606,6 +631,10 @@ impl core::fmt::Debug for ConfigSinks<'_> {
         #[cfg(feature = "routing-router-hat")]
         if self.router_link_weights.is_some() {
             named.push("router_link_weights");
+        }
+        #[cfg(feature = "router-connect-reconcile")]
+        if self.connect_endpoints.is_some() {
+            named.push("connect_endpoints");
         }
         write!(f, "ConfigSinks{named:?}")
     }
@@ -708,6 +737,35 @@ pub struct WzConfig {
     /// builds it.
     #[cfg(feature = "routing-router-hat")]
     router_link_weights: Vec<TransportWeight>,
+    /// R2667 (§5.23 `config-mutate-runtime`) — the DESIRED outbound connect list
+    /// (`connect/endpoints`), the live twin of the document's own list.
+    ///
+    /// ⭐ WHY THIS KEY AND NOT THE OTHER FORTY-THREE, measured rather than
+    /// chosen: of the 44 keys wz honours at startup but could not apply at
+    /// runtime, this is the ONLY one where a runtime change makes an OBSERVABLE
+    /// difference upstream. Every other one is read into a builder or a
+    /// constructor and stored — `zenoh/src/net/runtime/orchestrator.rs`
+    /// @ `async fn start_client` and its peer/router twins for the scouting and
+    /// endpoint block, and the three transport managers for the whole
+    /// `transport/*` family — so upstream accepts the write, stores it, and
+    /// nothing re-reads it. This key is different because
+    /// `zenoh/src/net/runtime/orchestrator.rs` @ `pub(super) fn closed_session`
+    /// and @ `pub(super) fn closed_link` lock the LIVE config AT CLOSE TIME and
+    /// re-read the list to decide what to re-dial.
+    ///
+    /// ⚠ REMOVAL IS NOT TEARDOWN, which is upstream's semantics and not a
+    /// narrowing wz chose. Dropping an endpoint stops it being RE-DIALLED; it
+    /// never closes a live face. That is why this is a full-list REPLACE while
+    /// the `connect-add` intent beside it stays add-only: the intent drives a
+    /// seam that is add-only by design, and a config write carries the whole
+    /// list exactly as the document does.
+    ///
+    /// Private, like the three slices before it: mutate via
+    /// [`Self::reconfigure_connect_endpoints`], so the surface gate's own
+    /// predicate — a private field carrying a `set_*`/`reconfigure_*` method —
+    /// holds without anyone maintaining a list.
+    #[cfg(feature = "router-connect-reconcile")]
+    connect_endpoints: Vec<String>,
     /// R311y205 (transport-multilink) — the EMBEDDER-facing max number of physical
     /// links this node aggregates into ONE logical unicast session (zenoh
     /// `TransportManager` `unicast.max_links`). Default `1` = single-link,
@@ -847,6 +905,12 @@ impl Default for WzConfig {
             // leave every link unweighted.
             #[cfg(feature = "routing-router-hat")]
             router_link_weights: Vec::new(),
+            // EMPTY is the honest default and not a placeholder: a node with no
+            // connect list dials nobody, which is what an absent `connect`
+            // section means to a stock zenohd. The host seeds this from the
+            // document at startup, exactly as it seeds the loop's dial targets.
+            #[cfg(feature = "router-connect-reconcile")]
+            connect_endpoints: Vec::new(),
             #[cfg(feature = "transport-multilink")]
             max_links: 1,
             #[cfg(feature = "transport-qos")]
@@ -1875,6 +1939,8 @@ impl WzConfig {
             "interceptors" => sinks.interceptors.map(|_| ()),
             #[cfg(feature = "routing-router-hat")]
             "router_link_weights" => sinks.router_link_weights.map(|_| ()),
+            #[cfg(feature = "router-connect-reconcile")]
+            "connect_endpoints" => sinks.connect_endpoints.map(|_| ()),
             // A slice this build compiles no consumer for, or a registry row
             // naming a slice nobody pushes. Both are "the write cannot reach a
             // consumer", which is what the caller reports.
@@ -1922,6 +1988,20 @@ impl WzConfig {
                 self.reconfigure_router_link_weights(rows, sink)
                     .map(|_| ())
                     .map_err(|_| ConfigKeyWriteError::ConsumerRefused {
+                        key: String::from(key),
+                    })
+            }
+            #[cfg(feature = "router-connect-reconcile")]
+            "connect_endpoints" => {
+                let Some(sink) = sinks.connect_endpoints else {
+                    return Err(ConfigKeyWriteError::NeedsSink {
+                        key: String::from(key),
+                    });
+                };
+                let rows = self.connect_endpoints.clone();
+                self.reconfigure_connect_endpoints(rows, sink)
+                    .map(|_| ())
+                    .map_err(|_| ConfigKeyWriteError::MalformedValue {
                         key: String::from(key),
                     })
             }
@@ -2233,6 +2313,21 @@ impl WzConfig {
                 };
                 true
             }
+            // R2667 — the desired outbound connect list. The document's own
+            // currency is STRINGS, and they are stored as strings here for the
+            // same reason upstream stores them so: the parse to a locator is
+            // where a refusal lives, and it happens at the push, not at the
+            // store. `None` (a delete) restores the schema default, which for
+            // this key is the empty list — a node that dials nobody, which is
+            // what an absent `connect` section means to a stock zenohd.
+            #[cfg(feature = "router-connect-reconcile")]
+            "connect/endpoints" => {
+                self.connect_endpoints = match source {
+                    Some(ingest) => ingest.config.connect.clone(),
+                    None => Self::default().connect_endpoints,
+                };
+                true
+            }
             // R2650 — `low_pass_filter`, the first interceptor key with a reader.
             //
             // Gated on BOTH the module's feature and the rule type's, spelled
@@ -2532,6 +2627,42 @@ impl WzConfig {
         #[cfg(not(feature = "config-mutate-runtime"))]
         {
             let _ = (sink, weights);
+            Ok(false)
+        }
+    }
+
+    /// R2667 — replace the desired outbound connect list and drive it into the
+    /// live loop: the connect twin of [`Self::reconfigure_router_link_weights`].
+    ///
+    /// ⚠ THE PARSE HAPPENS HERE, BEFORE THE STORE, for the reason the weights
+    /// twin gives about its own refusal: this is where a bad element is
+    /// knowable, and a write that stored a malformed endpoint and failed
+    /// downstream would be exactly the silent-store this seam refuses
+    /// everywhere else. A single unparsable element refuses the WHOLE list —
+    /// all-or-nothing, the same reading the `connect-add` intent takes, because
+    /// a node told to hold three peers and silently holding two is the outcome
+    /// an operator cannot see from outside.
+    ///
+    /// Returns whether the loop was still there to receive the new set; a
+    /// closed channel is a fact to report, not a failed write.
+    #[cfg(feature = "router-connect-reconcile")]
+    pub fn reconfigure_connect_endpoints(
+        &mut self,
+        rows: Vec<String>,
+        sink: &dyn crate::accept_loop::ConnectEndpointsSink,
+    ) -> Result<bool, crate::locator::AnyLocatorError> {
+        let mut locators = Vec::with_capacity(rows.len());
+        for row in &rows {
+            locators.push(crate::locator::parse_any_locator(row)?);
+        }
+        self.connect_endpoints = rows;
+        #[cfg(feature = "config-mutate-runtime")]
+        {
+            Ok(sink.set_connect_endpoints(locators))
+        }
+        #[cfg(not(feature = "config-mutate-runtime"))]
+        {
+            let _ = (sink, locators);
             Ok(false)
         }
     }
@@ -4353,6 +4484,131 @@ mod tests {
                 assert!(!moved, "an inert mirror moves nothing");
                 assert_eq!(sink.calls(), 0);
             }
+        }
+    }
+
+    /// R2667 (§5.23 `config-mutate-runtime`) — the `connect/endpoints` key, the
+    /// ONE of 44 honoured-but-unappliable keys a runtime change is observable
+    /// for upstream.
+    #[cfg(all(feature = "router-connect-reconcile", feature = "zenoh-config"))]
+    mod connect_endpoints_writes {
+        use super::*;
+        use crate::accept_loop::ConnectEndpointsSink;
+        use crate::locator::AnyLocator;
+        use core::cell::RefCell;
+
+        /// Records what the config seam pushed, so a test can assert the seam
+        /// drove the consumer rather than merely storing.
+        struct RecordingConnectSink {
+            sends: RefCell<Vec<Vec<AnyLocator>>>,
+            open: bool,
+        }
+
+        impl RecordingConnectSink {
+            fn new(open: bool) -> Self {
+                Self {
+                    sends: RefCell::new(Vec::new()),
+                    open,
+                }
+            }
+            fn calls(&self) -> usize {
+                self.sends.borrow().len()
+            }
+            fn last_len(&self) -> usize {
+                self.sends
+                    .borrow()
+                    .last()
+                    .map(Vec::len)
+                    .expect("the sink was driven")
+            }
+        }
+
+        impl ConnectEndpointsSink for RecordingConnectSink {
+            fn set_connect_endpoints(&self, endpoints: Vec<AnyLocator>) -> bool {
+                self.sends.borrow_mut().push(endpoints);
+                self.open
+            }
+        }
+
+        const KEY: &str = "connect/endpoints";
+
+        #[test]
+        fn a_connect_endpoints_write_reaches_the_desired_set() {
+            let sink = RecordingConnectSink::new(true);
+            let sinks = ConfigSinks::none().with_connect_endpoints(&sink);
+            let mut cfg = WzConfig::new();
+
+            assert_eq!(
+                cfg.set_by_key_with(KEY, r#"["tcp/10.0.0.1:7447","tcp/10.0.0.2:7447"]"#, &sinks),
+                Ok(())
+            );
+            assert_eq!(
+                cfg.connect_endpoints,
+                vec![
+                    String::from("tcp/10.0.0.1:7447"),
+                    String::from("tcp/10.0.0.2:7447")
+                ],
+                "the wire's list is the live list"
+            );
+            // BOTH arms assert, which is not tidiness: with only the positive
+            // arm the helpers are dead code on a build without the feature, and
+            // the witness quietly degrades to "the store happened" while still
+            // reporting green. That is the population-of-zero shape, and the
+            // compiler said so — `methods calls and last_len are never used`.
+            #[cfg(feature = "config-mutate-runtime")]
+            {
+                assert_eq!(sink.calls(), 1, "and the consumer was driven, exactly once");
+                assert_eq!(sink.last_len(), 2, "both endpoints reached it, parsed");
+            }
+            #[cfg(not(feature = "config-mutate-runtime"))]
+            assert_eq!(
+                sink.calls(),
+                0,
+                "without the runtime-mutate feature the store is the whole of it"
+            );
+        }
+
+        /// THE CONTROL. Without a consumer the write is REFUSED by name, not
+        /// stored quietly — which is the whole reason this key needed a sink
+        /// rather than a field nobody reads. Upstream's own behaviour here is to
+        /// store and let nothing re-read it; wz says so instead.
+        #[test]
+        fn without_its_consumer_the_same_write_is_refused_by_name() {
+            let mut cfg = WzConfig::new();
+            let empty = ConfigSinks::none();
+
+            assert_eq!(
+                cfg.set_by_key_with(KEY, r#"["tcp/10.0.0.1:7447"]"#, &empty),
+                Err(ConfigKeyWriteError::NeedsSink {
+                    key: String::from(KEY),
+                }),
+            );
+            assert!(
+                cfg.connect_endpoints.is_empty(),
+                "a refused write stores NOTHING — the refusal is not advisory"
+            );
+        }
+
+        /// ALL-OR-NOTHING, the same reading the `connect-add` intent takes: a
+        /// node told to hold two peers and silently holding one is the outcome
+        /// an operator cannot see from outside.
+        #[test]
+        fn one_unparsable_endpoint_refuses_the_whole_list() {
+            let sink = RecordingConnectSink::new(true);
+            let sinks = ConfigSinks::none().with_connect_endpoints(&sink);
+            let mut cfg = WzConfig::new();
+
+            let outcome =
+                cfg.set_by_key_with(KEY, r#"["tcp/10.0.0.1:7447","not-a-locator"]"#, &sinks);
+            assert!(
+                outcome.is_err(),
+                "a list with one bad element is refused whole, got {outcome:?}"
+            );
+            assert_eq!(
+                sink.calls(),
+                0,
+                "and NOTHING reached the consumer — not even the parsable half"
+            );
         }
     }
 }

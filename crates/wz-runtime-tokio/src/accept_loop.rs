@@ -333,6 +333,44 @@ pub type ReconcileSender = tokio::sync::mpsc::UnboundedSender<Vec<AnyLocator>>;
 /// the loop is byte-for-byte the prior behaviour.
 pub type ReconcileReceiver = tokio::sync::mpsc::UnboundedReceiver<Vec<AnyLocator>>;
 
+/// R2667 (§5.23 `config-mutate-runtime`) — the sink a `WzConfig`'s configured
+/// `connect/endpoints` list is installed onto, decoupled from the concrete
+/// channel exactly as `RouterLinkWeightSink` is for the router weights slice.
+///
+/// ⭐ THIS EXISTS BECAUSE THE CONSUMER IS A LOOP-LOCAL, which is the one shape
+/// the other two sinks did not have to face. The desired connect-set is a
+/// `HashMap` living inside `face_drive_loop`, not a field on a long-lived
+/// object, so nothing can implement a sink "on" it. What CAN be implemented on
+/// is the SENDER the loop already drains, and that is what this abstracts: the
+/// config seam names a sink, the host holds the channel.
+///
+/// ⚠ A FULL-LIST REPLACE, and deliberately not the add-only shape of the
+/// `connect-add` intent beside it. The intent is add-only because it drives a
+/// seam that excludes close-removed teardown on purpose; a CONFIG write carries
+/// the whole list the way the document does, and upstream reads that whole list
+/// at close time (`zenoh/src/net/runtime/orchestrator.rs`
+/// @ `pub(super) fn closed_session`) to decide what to re-dial. Dropping an
+/// endpoint therefore stops it being RE-DIALLED and never closes a live face —
+/// upstream's semantics, not a narrowing.
+#[cfg(feature = "router-connect-reconcile")]
+pub trait ConnectEndpointsSink {
+    /// Replace the desired outbound connect-set, returning whether the loop is
+    /// still there to receive it. `false` means the channel is closed — the
+    /// face loop is gone — which is a fact the caller should report rather than
+    /// a failure of the write.
+    fn set_connect_endpoints(&self, endpoints: Vec<AnyLocator>) -> bool;
+}
+
+/// The production [`ConnectEndpointsSink`]: the channel end itself. Sending on a
+/// closed channel answers `false` rather than panicking, which is the same
+/// reading the host's `connect-add` arm already takes.
+#[cfg(feature = "router-connect-reconcile")]
+impl ConnectEndpointsSink for ReconcileSender {
+    fn set_connect_endpoints(&self, endpoints: Vec<AnyLocator>) -> bool {
+        self.send(endpoints).is_ok()
+    }
+}
+
 /// Observable lifecycle events the accept loop emits to its caller (the demo
 /// logs them; tests count them). The faces table is internal; these events are
 /// the observation seam — `FaceUp`/`FaceDown` bracket exactly the interval a
