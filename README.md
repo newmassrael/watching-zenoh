@@ -84,6 +84,23 @@ binary-dep e2e fixtures pass via the local 10-lane CI (Layer 0 /
 A / A2 / B / C0 / C1 / C1b / C2 / D / E in scripts/run-ci.sh),
 mirrored by the GitHub Actions workflow.
 
+## Where to start reading
+
+Open these FILES. The table below says where things live, and a list of
+directories is not an entry point: it leaves a reader — or a reviewer with a
+time budget — searching the tree exactly as they would have without it.
+
+| Open this file | To answer |
+|---|---|
+| ARCHITECTURE.md | What this is and how the pieces fit |
+| CLAUDE.md | The operating rules any change must satisfy |
+| COMMIT_FORMAT.md | What a commit here has to look like |
+| docs/.atomic/workspace.atomic.json | The SSOT: every round's decision, and every atom's grade with its reason. Read it with `mnemosyne-cli query`, never by hand |
+| scripts/audit-catalog-status.sh | The implementation grade of every atom, and REMAINING WORK — the number this project is driving to zero |
+| scripts/lib/loop_milestone.py | How "is a milestone reached" is decided, so the answer is a command and not a claim |
+| .githooks/pre-push | The gates a change passes before it can land |
+| scripts/run-ci.sh | The full verification surface the hooks deliberately do not mirror |
+
 ## Directory layout
 
 | Path | Role |
