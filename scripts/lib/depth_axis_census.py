@@ -1456,7 +1456,18 @@ PIN_NO_SYMBOL = 2
 # entries use: putting origin's copy of that ONE reason back into the live
 # population restores 187 -> 185 and leaves 38 exactly where it was, so both the
 # rise and its size are this atom's alone. 185 + 2 = 187.
-PIN_WZ_CITATIONS = 187
+# R2652 — 187 -> 190, RISING, and the same atom a third time:
+# `config-mutate-runtime` stays PARTIAL, so its reason stays in this population,
+# and this round's CORRECTION closes its seven-key read-axis clause by citing the
+# three tracked files that closed it — the retention slice (`config.rs` @
+# `acl_inputs`), the compile (`zenoh_config.rs` @ `acl_config_from_inputs`), and
+# the demo's own drop list, which is why the five keys are honoured by the READER
+# and reach no argv. MEASURED with THIS FILE'S OWN `citation_audit`, driven over
+# that one reason in both versions rather than by re-inserting origin's copy into
+# the live store: origin's body answers 5 wz / 2 ambiguous / 14 upstream and the
+# new one answers 8 / 2 / 14. So the rise is +3, it is this atom's alone, and
+# nothing ambiguous or upstream moved with it. 187 + 3 = 190.
+PIN_WZ_CITATIONS = 190
 # R2626 — 44 -> 42, and this one is worth a sentence because it HELD through
 # every earlier retirement in this run (R2612, R2622). `time-hlc`'s reason is the
 # first retiree carrying AMBIGUOUS citations of its own: its oldest clauses cite
