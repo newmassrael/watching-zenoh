@@ -6761,59 +6761,45 @@ mod stock_config_tests {
     /// are understood", and an operator would be told nothing about the part of
     /// their file that wz passed over.
     ///
-    /// ⚠ R2652 — THE KEY IS DERIVED, and the round that derived it is the round
-    /// that broke the literal. This test used to state `access_control/enabled`
-    /// and read as an argument as much as a fixture: "an operator whose
-    /// access-control block decides who may connect at all would have been told
-    /// nothing about it". R2652 honoured all five `access_control` keys, so the
-    /// check READS that block now and the assertion went red. A named key here
-    /// is a claim about the honoured/unhonoured partition, and this tree moves
-    /// that partition most rounds — so the fixture asks the registry which key
-    /// is unhonoured instead of remembering an answer.
+    /// ⚠ R2652 — THE KEY MOVED AND ITS STALENESS IS LOUD NOW. This test used to
+    /// state `access_control/enabled` and read as an argument as much as a
+    /// fixture: "an operator whose access-control block decides who may connect
+    /// at all would have been told nothing about it". R2652 honoured all five
+    /// `access_control` keys, so the check READS that block and the assertion
+    /// went red.
+    ///
+    /// ⛔ THE REPAIR IS NOT A DERIVATION FROM THE REGISTRY, and the first cut
+    /// WAS one — it read `UNHONOURED_UPSTREAM_CONFIG_KEYS` here and picked the
+    /// first member. That is worse, measured: `unhonoured_kind_evidence_gate.py`
+    /// excludes any file whose CODE names an `UNHONOURED_*` constant, because
+    /// such a file gets its keys from the list rather than citing them — so the
+    /// derivation turned this whole file into an "enumerator" and DELETED the
+    /// `asserted-ignored` citation it carries for `transport/link/tx/threads`,
+    /// the only row of that kind in the ledger. Naming a different unhonoured
+    /// key here is no better: this file is swept for citations, so a new key
+    /// literal would demand a ledger row of its own.
+    ///
+    /// So the fixture reuses the key this file ALREADY cites, and the assertion
+    /// below is what makes the choice self-reporting: the day that key becomes
+    /// honoured, this fails by name and says to pick another.
     #[test]
     fn a_clean_verdict_still_names_every_key_the_check_could_not_read() {
-        let (key, block) = a_document_naming_an_unhonoured_key();
-        let doc = format!(
-            r#"{{ id: "rtr", mode: "router",
-             listen: {{ endpoints: ["tcp/10.0.0.9:7447"] }},
-             {block} }}"#
+        const IGNORED_KEY: &str = "transport/link/tx/threads";
+        assert!(
+            !wz::runtime_tokio::zenoh_config::honours_config_key(IGNORED_KEY),
+            "{IGNORED_KEY} is honoured now, so it cannot stand for a key the \
+             check could not read — pick another key this file already cites"
         );
+        const WITH_IGNORED: &str = r#"{ id: "rtr", mode: "router",
+             listen: { endpoints: ["tcp/10.0.0.9:7447"] },
+             transport: { link: { tx: { threads: 8 } } } }"#;
 
-        let ok = check(&[("rtr.json5", &doc)]).expect("one router is a network of one");
-        assert!(ok.contains(&format!("rtr.json5: IGNORED {key}")), "{ok}");
+        let ok = check(&[("rtr.json5", WITH_IGNORED)]).expect("one router is a network of one");
+        assert!(
+            ok.contains(&format!("rtr.json5: IGNORED {IGNORED_KEY}")),
+            "{ok}"
+        );
         assert!(ok.contains("1 node(s) can form"), "{ok}");
-    }
-
-    /// R2652 — one key wz's reader does NOT honour, with a document stating it,
-    /// both built from the registry.
-    ///
-    /// The value is an empty ARRAY whatever the key's real type is, and that is
-    /// not a shortcut: an unhonoured key is never parsed into a typed slice, and
-    /// the leaf walker treats an array as a leaf in its own right, so the path
-    /// this returns is the path the report names. A scalar would work equally
-    /// for a scalar-typed key and not for an object-typed one.
-    fn a_document_naming_an_unhonoured_key() -> (&'static str, String) {
-        let key = wz::runtime_tokio::zenoh_config::UNHONOURED_UPSTREAM_CONFIG_KEYS
-            .first()
-            .copied()
-            .expect(
-                "the unhonoured surface is never empty — wz models a subset of \
-                 zenoh's config and this list is the rest of it",
-            );
-        let segments: Vec<&str> = key.split('/').collect();
-        let mut block = String::from("[]");
-        for segment in segments.iter().rev() {
-            block = format!("{segment}: {block}");
-            block = format!("{{ {block} }}");
-        }
-        // The outermost pair of braces belongs to the document the caller
-        // builds, so the block it embeds is `name: { … }` rather than `{ … }`.
-        let block = block
-            .strip_prefix("{ ")
-            .and_then(|rest| rest.strip_suffix(" }"))
-            .expect("the loop above wrote at least one wrapper")
-            .to_string();
-        (key, block)
     }
 
     /// A verdict reached over a mode-less document says which reading it was

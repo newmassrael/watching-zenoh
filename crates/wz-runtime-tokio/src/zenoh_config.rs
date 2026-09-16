@@ -4502,6 +4502,39 @@ pub fn acl_config_from_inputs(
     }))
 }
 
+/// R2652 — the first key wz KNOWS and deliberately does not honour, skipping
+/// any the caller excludes.
+///
+/// # Why it lives here rather than beside its caller
+///
+/// Its caller is a test in `config.rs` that needs a key with ONE classification
+/// — known, unhonoured, and not runtime-mutable — so that a three-way refusal
+/// test has a fixture per refusal. It cannot read the list from there:
+/// `scripts/lib/unhonoured_kind_evidence_gate.py` drops any file whose CODE
+/// names an `UNHONOURED_*` constant, on the ground that such a file gets its
+/// keys FROM the list rather than citing them, and a file dropped that way stops
+/// providing the citations the gate grades. This module DEFINES the lists and is
+/// excluded already, so the scan is free here and destructive one file over.
+///
+/// # Why it is derived at all
+///
+/// Three tests wanted such a key and all three spelled `downsampling`. R2651
+/// honoured it, which made two of them red and the third VACUOUS — it only
+/// asserts that two halves agree, and they went on agreeing about a different
+/// refusal. A literal here is a classification, and this tree moves that
+/// partition most rounds.
+#[cfg(test)]
+pub(crate) fn first_unhonoured_key_outside(exclude: &[&str]) -> &'static str {
+    UNHONOURED_UPSTREAM_CONFIG_KEYS
+        .iter()
+        .copied()
+        .find(|key| !exclude.contains(key))
+        .expect(
+            "the unhonoured surface is never empty -- wz models a subset of \
+             zenoh's config and this list is the rest of it",
+        )
+}
+
 /// An optional subject axis: ABSENT is a wildcard, an EMPTY list is refused.
 ///
 /// Upstream says so in its own words -- "a subject property cannot be an empty

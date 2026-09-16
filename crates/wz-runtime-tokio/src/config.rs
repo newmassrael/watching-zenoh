@@ -1682,20 +1682,21 @@ mod tests {
     /// `#[cfg]` by compiling a leg that has the first and not the second: this
     /// crate denies dead code, so a helper compiled where no caller is becomes
     /// a build error rather than a warning.
+    ///
+    /// ⛔ THE SCAN ITSELF LIVES IN `zenoh_config`, and that is not tidiness.
+    /// `unhonoured_kind_evidence_gate.py` treats any file whose CODE names an
+    /// `UNHONOURED_*` constant as an ENUMERATOR and drops it from the citation
+    /// sweep — so reading the list here would have silently removed this file
+    /// from a gate that reads it. The module that DEFINES the lists is already
+    /// excluded, so the scan costs nothing there.
     #[cfg(all(feature = "zenoh-config", feature = "adminspace-core"))]
     fn a_known_but_unhonoured_key() -> &'static str {
-        crate::zenoh_config::UNHONOURED_UPSTREAM_CONFIG_KEYS
-            .iter()
-            .copied()
-            .find(|key| {
-                !RUNTIME_MUTABLE_CONFIG_KEYS
-                    .iter()
-                    .any(|row| row.key == *key)
-            })
-            .expect(
-                "the unhonoured surface is never empty — wz models a subset of \
-                 zenoh's config and this list is the rest of it",
-            )
+        crate::zenoh_config::first_unhonoured_key_outside(
+            &RUNTIME_MUTABLE_CONFIG_KEYS
+                .iter()
+                .map(|row| row.key)
+                .collect::<Vec<_>>(),
+        )
     }
 
     /// R2643 — ⭐ THE CONTROL for `apply_zenoh_config`'s per-key rule, and the
