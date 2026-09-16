@@ -2050,13 +2050,20 @@ impl WzConfig {
     /// the key goes back to its default. Upstream agrees on what the NODE then
     /// does: its `config.remove(key)` drops the override so the default applies.
     ///
-    /// ⚠ WHAT THIS DOES NOT COVER, named rather than left to be found: upstream
-    /// tries `try_remove_json5_array_item(key)` FIRST and only then `remove`, so
-    /// a key addressing ONE ELEMENT of an array is removable there and is not
-    /// here — the same asymmetry the set half carries against
-    /// `try_insert_json5_array_item`. Both halves are missing the array-item
-    /// route, which makes it one gap in the array addressing of this seam rather
-    /// than a property of the delete, and it is registered as such.
+    /// ⚠ THE ARRAY-ITEM ROUTE IS COVERED, and this paragraph asserted the
+    /// opposite until R2664: it read "both halves are missing the array-item
+    /// route" while the body below already took that route, and while the set
+    /// half took it too. Upstream tries `try_remove_json5_array_item(key)` FIRST
+    /// and only then `remove`; so does this function — `member_write` is the
+    /// prefix step at the top of the body below, and the set half calls that
+    /// same function. R2657 built it for BOTH halves, which is precisely what
+    /// the old sentence denied.
+    ///
+    /// ⛔ A STALE GAP CLAIM IS WORSE THAN NO CLAIM, which is why this is
+    /// recorded rather than quietly deleted: it invites a later round to build
+    /// what is already there, and it is the one defect class no test can fail
+    /// on, because a doc comment asserting an absence compiles exactly as well
+    /// as one asserting a presence.
     ///
     /// The refusals are the set half's, in the set half's order, for the reason
     /// given at [`Self::set_by_key`]: an unhonoured key must not be answered as

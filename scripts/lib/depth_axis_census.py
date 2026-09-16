@@ -1535,7 +1535,19 @@ PIN_NO_SYMBOL = 2
 # 24 wz / 0 ambiguous / 9 upstream, the new one 32 / 0 / 10. 204 - 24 = 180,
 # which is the number the gate reported. AMBIGUOUS held at 0 for this atom in
 # BOTH versions, which is why PIN_AMBIGUOUS does not move.
-PIN_WZ_CITATIONS = 180
+# R2664 -- 180 -> 181. `config-mutate-runtime` stays PARTIAL, so its reason stays
+# in this population and a rewrite of it reaches this page directly. The round
+# re-measured that atom's three residuals before acting on it and TWO came back
+# false: deletion exists (`remove_by_key`), and the runtime-mutable surface is
+# ten keys across two sinks rather than the one typed slice the clause claims.
+# The new wz anchor is the config module the corrections cite by symbol.
+# MEASURED with THIS FILE'S OWN `citation_audit` over that ONE reason in both
+# versions -- origin's body against the corrected one -- never by diffing the
+# totals, which cannot say whose the rise is: 8 wz / 2 ambiguous / 14 upstream
+# becomes 9 / 2 / 16. The rise is +1 wz, this atom's ALONE; AMBIGUOUS held at 2,
+# which is why PIN_AMBIGUOUS does not move, and the +2 UPSTREAM rides the
+# unpinned total this gate prints and does not judge. 180 + 1 = 181.
+PIN_WZ_CITATIONS = 181
 # R2626 — 44 -> 42, and this one is worth a sentence because it HELD through
 # every earlier retirement in this run (R2612, R2622). `time-hlc`'s reason is the
 # first retiree carrying AMBIGUOUS citations of its own: its oldest clauses cite
