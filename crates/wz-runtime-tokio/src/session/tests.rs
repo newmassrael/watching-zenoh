@@ -8395,6 +8395,89 @@ fn declare_liveliness_subscriber_rolls_back_slot_on_wire_emit_failure() {
     assert_eq!(driver.frame_count(), 0, "gated emit leaves no wire bytes");
 }
 
+/// R2674 — the CHANNEL form delivers every reply AND ends with the snapshot.
+///
+/// Two claims, and the second is the one a callback form never has to make:
+/// a receiver has no `on_final`, so end-of-stream is the only way it learns the
+/// snapshot is over. That signal is not written anywhere in the adapter — it
+/// falls out of the registry removing the pending entry, which drops the
+/// callbacks and with them the only sender. A test is the only thing that says
+/// those two facts are actually connected.
+/// ⚠ A RUNTIME TEST, because the form spawns its own timeout reaper and says
+/// so by refusing off-runtime (`LivelinessGetError::NoRuntime`). The sync
+/// shape this started as was not a smaller version of the same test — it was a
+/// test of a function that cannot exist.
+#[cfg(feature = "liveliness-get")]
+#[tokio::test]
+async fn a_liveliness_get_channel_carries_replies_then_closes_at_final() {
+    use tokio::sync::mpsc::error::TryRecvError;
+
+    let (session, _driver) = build_session();
+    mark_session_established(&session);
+
+    let (interest_id, mut rx) = session
+        .liveliness_get_with_channel("live/**", LivelinessGetOptions::default())
+        .expect("an established session registers the get");
+
+    // Nothing has been dispatched yet: pending, and NOT closed. Asserting
+    // `Empty` rather than merely "no item" is what separates "still open" from
+    // "already gone", which is the whole distinction this form rests on.
+    assert_eq!(rx.try_recv(), Err(TryRecvError::Empty));
+
+    {
+        let obs = session.observer();
+        let mut obs = obs.lock().unwrap();
+        assert_eq!(
+            obs.liveliness_gets
+                .dispatch_reply_borrowed(interest_id, "live/token/a"),
+            1,
+            "the solicited reply must fan to exactly this pending get",
+        );
+        assert_eq!(
+            obs.liveliness_gets
+                .dispatch_reply_borrowed(interest_id, "live/token/b"),
+            1,
+        );
+    }
+
+    // R311lg — the reply sink STAGES; the drive loop fires it after the
+    // observer lock drops. The channel form inherits that, and it is the
+    // correct inheritance: a send that ran under the lock would put the
+    // receiver's wakeup inside the lock-free path. So a test must drive the
+    // same drain the production loop does, not read the channel straight
+    // after the dispatch.
+    assert_eq!(
+        rx.try_recv(),
+        Err(TryRecvError::Empty),
+        "staged, not yet fired -- the send happens on the drain, not under the lock",
+    );
+    session.drain_deferred_fires();
+
+    let first = rx.try_recv().expect("the first reply reached the receiver");
+    assert_eq!(first.keyexpr_literal, "live/token/a");
+    let second = rx.try_recv().expect("and the second, in order");
+    assert_eq!(second.keyexpr_literal, "live/token/b");
+    // Still OPEN: the snapshot has not finalised, so a receiver must not read
+    // "no more items right now" as "the snapshot is over".
+    assert_eq!(rx.try_recv(), Err(TryRecvError::Empty));
+
+    {
+        let obs = session.observer();
+        let mut obs = obs.lock().unwrap();
+        assert!(
+            obs.liveliness_gets.dispatch_final(interest_id),
+            "the terminating final fires and removes the entry",
+        );
+        assert_eq!(obs.liveliness_gets.len(), 0, "and leaves no pending entry");
+    }
+    session.drain_deferred_fires();
+
+    // THE CLAIM: the entry's removal is the end-of-stream signal. Disconnected,
+    // not Empty -- a receiver blocked on `recv()` wakes with `None` instead of
+    // waiting out a snapshot that already finished.
+    assert_eq!(rx.try_recv(), Err(TryRecvError::Disconnected));
+}
+
 /// R311ll (Finding B) — the `liveliness_get` rollback is unregister-only
 /// (a get correlates by FRESH interest_id, so no reply can stage in the
 /// register->send window). A failed wire emit must still drop the pending

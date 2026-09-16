@@ -5231,6 +5231,153 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
     /// `declare_liveliness_subscriber` is deliberate: a lost subscription
     /// Interest can be re-declared, a lost one-shot get cannot).
     ///
+    /// R2674 — the CHANNEL form of the snapshot get: take replies through a
+    /// receiver instead of a callback. zenoh's handler form
+    /// (`zenoh/src/api/builders/liveliness.rs` @ `pub fn with<Handler>`) sits
+    /// beside its callback form on the same builder; this is that pair's other
+    /// half, and the reply-plane twin of
+    /// [`Self::declare_liveliness_subscriber_with_channel`].
+    ///
+    /// A THIN ADAPTER over the callback get, not a second get — the same
+    /// reason R2369 gives on the subscriber side: the establishment gate, the
+    /// interest-id alloc, the deadline arming and the rollback are behaviour a
+    /// second body would have to keep in lock-step by hand.
+    ///
+    /// THE CHANNEL CLOSES WHEN THE SNAPSHOT ENDS, and it needs no `on_final`
+    /// handling to do it. The registry removes the pending entry when the
+    /// terminating `Declare(DeclFinal)` arrives (and when the deadline sweep
+    /// reaps it), which drops both callbacks and with them the only sender, so
+    /// the receiver observes end-of-stream. That is upstream's handler
+    /// semantics — the channel ends with the query — reached without a shared
+    /// cell between the two closures, which matters because the R311lf
+    /// invariant keeps this path lock-free.
+    ///
+    /// The item is [`InboundReply`], the owned retention form of the borrowed
+    /// `&dyn ReplyView` the callback sees, materialised through
+    /// `InboundReply::from_view`. That projection is LOSSLESS across the whole
+    /// accessor surface — payload, attachment, both encodings, `source_info`
+    /// and `timestamp` — so a receiver is not handed a narrower reply than a
+    /// callback would have seen. The `Err` arm carries no attachment, stamp or
+    /// source because its wire form has no slot for them, not because this
+    /// copy drops them.
+    ///
+    /// UNBOUNDED, for the reason the subscriber form states: a bounded channel
+    /// would have to decide what happens when it fills, and both answers are
+    /// wrong here — blocking stalls the drive loop that fires the deferred
+    /// cell, and dropping loses a reply the caller can never ask for again,
+    /// since a get is one-shot.
+    ///
+    /// Dropping the receiver does not cancel the get; the snapshot runs to its
+    /// final or its deadline exactly as the callback form does, and the sends
+    /// are discarded.
+    /// R2674 — AND IT REAPS ITSELF. zenoh spawns a task per query to close it
+    /// on timeout — `zenoh/src/api/session.rs` @
+    /// `Timeout on query {}!`
+    /// — where wz's sweep existed but had no library-level caller,
+    /// so a snapshot expired only if the application happened to drive one —
+    /// the demo's ticker or the C ABI. This form spawns the missing caller, so
+    /// an AP consumer gets upstream's behaviour without driving anything.
+    ///
+    /// ⚠ THE BOUNDS SIT ON THIS METHOD, NOT ON THE IMPL BLOCK, which is
+    /// R311y503's rule from `add_storage`: only the path that actually spawns
+    /// pays for `Send + 'static`, so the generic `liveliness_get` and every
+    /// no_std-shaped caller keep their signatures. That asymmetry is the
+    /// profile's shape rather than a gap — a driver-run profile has no executor
+    /// to spawn into, and `sweep_expired_liveliness_gets` remains its seam.
+    ///
+    /// The task sleeps the get's effective timeout and then sweeps once. It is
+    /// detached because its lifetime is bounded by that sleep, and the sweep is
+    /// idempotent: a snapshot that already finalised leaves nothing to reap.
+    /// ⚠ FEATURE-GATED AT THE SIGNATURE, unlike the callback
+    /// [`Self::liveliness_get`], which keeps a stable signature and answers
+    /// [`LivelinessGetError::FeatureDisabled`] when the feature is off (R311g1).
+    /// That option is not open here: this signature NAMES `InboundReply`, whose
+    /// module is gated, so there is no feature-off spelling of it to keep
+    /// stable. The gate is the same one `sweep_expired_liveliness_gets` carries
+    /// for the same reason.
+    #[cfg(feature = "liveliness-get")]
+    pub fn liveliness_get_with_channel(
+        &self,
+        keyexpr: impl Into<String>,
+        options: LivelinessGetOptions,
+    ) -> Result<(u64, tokio::sync::mpsc::UnboundedReceiver<InboundReply>), LivelinessGetError>
+    where
+        R: 'static,
+        T: Send + Sync,
+        Session<R, T, Unicast>: Clone + Send + 'static,
+    {
+        // Fail fast & clear if off-runtime, BEFORE the get registers: the
+        // reaper below is a `tokio::spawn` that PANICS without a runtime, and
+        // checking after the register would leave a pending snapshot behind
+        // whose timeout nothing would ever reap. `group.rs`'s watchdog takes
+        // the same order for the same reason.
+        tokio::runtime::Handle::try_current().map_err(|_| LivelinessGetError::NoRuntime)?;
+        let timeout_ms = u64::from(options.effective_timeout_ms());
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        let rid = self.liveliness_get(
+            keyexpr,
+            options,
+            move |view: &dyn wz_session_core::reply_sink::ReplyView| {
+                // A closed receiver is not an error here; see the doc above.
+                let _ = tx.send(InboundReply::from_view(view));
+            },
+            // The final needs no body: the entry's removal is what closes the
+            // channel, and taking the sender here would race the last replies.
+            |_rid| {},
+        )?;
+        // Spawned only after the get REGISTERED: a task armed before the
+        // register would sweep a pending set this call never joined, and a
+        // failed register returns above with no task to leak.
+        self.spawn_liveliness_get_reaper(timeout_ms);
+        Ok((rid, rx))
+    }
+
+    /// R2674 — spawn the timeout reaper for a pending snapshot: upstream's
+    /// per-query task — `zenoh/src/api/session.rs` @
+    /// `Timeout on query {}!`
+    /// — in the shape wz's sweep already has.
+    ///
+    /// ⭐ A METHOD OF ITS OWN, not a step folded into one get form, because
+    /// upstream reaps for BOTH its callback and its handler form and wz cannot
+    /// make it automatic on the generic [`Session::liveliness_get`]: the spawn
+    /// needs `Send + 'static`, and putting those on the generic method would
+    /// break every driver-run caller. So the capability is exposed once and the
+    /// channel form calls it for you; a callback-form caller on an AP session
+    /// calls it explicitly, and a driver-run profile keeps reaping through
+    /// [`Session::sweep_expired_liveliness_gets`] as it always has.
+    ///
+    /// The sweep it calls is the one that already matches upstream's "send
+    /// error and close": an expired snapshot delivers a synthetic `Err` and
+    /// then its final (R311y323). `timeout_ms` is the get's
+    /// `effective_timeout_ms`; the task sleeps it once and exits, and the sweep
+    /// is idempotent, so a snapshot that finalised first leaves nothing to reap.
+    ///
+    /// ⚠ PANICS off-runtime, like any spawn. The channel form checks
+    /// `Handle::try_current()` before registering and refuses with
+    /// [`LivelinessGetError::NoRuntime`]; a direct caller is already inside the
+    /// runtime it is spawning into.
+    ///
+    /// THE SUBSYSTEM IS `Net`, AND UPSTREAM CHOSE IT: zenoh spawns this exact
+    /// task with `ZRuntime::Net` (`zenoh/src/api/session.rs` @
+    /// `.spawn_with_rt(zenoh_runtime::ZRuntime::Net, {`), so the reaper draws
+    /// against the same ceiling there. Naming it at all is what makes
+    /// `WZ_RUNTIME` able to pace a running node -- an unnamed production spawn
+    /// lands on whichever runtime is ambient, which is the defect
+    /// `subsystem_spawn_gate.py` exists to stop coming back.
+    #[cfg(feature = "liveliness-get")]
+    pub fn spawn_liveliness_get_reaper(&self, timeout_ms: u64) -> tokio::task::JoinHandle<()>
+    where
+        R: 'static,
+        T: Send + Sync,
+        Session<R, T, Unicast>: Clone + Send + 'static,
+    {
+        let reaper = self.clone();
+        crate::runtime_pool::WzRuntime::Net.spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(timeout_ms)).await;
+            reaper.sweep_expired_liveliness_gets();
+        })
+    }
+
     /// R311g1 — signature-stability: body cfg, signature stable. Returns
     /// [`LivelinessGetError::FeatureDisabled`] when `liveliness-get` is
     /// off (both the wire-emit and observer-dispatch paths are elided).

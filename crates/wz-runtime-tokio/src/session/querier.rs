@@ -992,6 +992,16 @@ pub enum LivelinessGetError {
     /// fragment), which is why this is not folded into
     /// [`Self::ExceedsCapacity`]; retry once the budget is refilled.
     FragmentChainAbandoned,
+    /// R2674 — [`Session::liveliness_get_with_channel`] spawns the snapshot's
+    /// timeout reaper, so it must be called from within a tokio runtime
+    /// context. Fail-clear instead of a `tokio::spawn` panic, exactly as
+    /// `GroupError::NoRuntime` does for the group watchdog.
+    ///
+    /// Only the CHANNEL form can return this. The callback
+    /// [`Session::liveliness_get`] spawns nothing and is unaffected, which is
+    /// the seam a driver-run profile keeps: it reaps through
+    /// [`Session::sweep_expired_liveliness_gets`] instead of an executor.
+    NoRuntime,
 }
 
 impl std::fmt::Display for LivelinessGetError {
@@ -1025,6 +1035,13 @@ impl std::fmt::Display for LivelinessGetError {
                  emitting this Interest's chain, so it was abandoned (a 0x3 Drop \
                  stop fragment followed any fragments already sent); retry once \
                  the budget is refilled"
+            ),
+            LivelinessGetError::NoRuntime => write!(
+                f,
+                "LivelinessGetError: the channel form spawns the snapshot's \
+                 timeout reaper and must be called from within a tokio runtime; \
+                 no snapshot was registered. Use the callback `liveliness_get` \
+                 and drive `sweep_expired_liveliness_gets` yourself off-runtime"
             ),
         }
     }
