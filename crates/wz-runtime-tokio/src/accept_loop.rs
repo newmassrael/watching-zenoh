@@ -326,12 +326,54 @@ pub type DialIntentReceiver = tokio::sync::mpsc::UnboundedReceiver<DialIntent>;
 /// operator affordance fires; the channel is UNBOUNDED (the producer is a sync
 /// timer callback that must not await) and reconcile events are rare (operator
 /// cadence), so unbounded growth is a non-issue.
-pub type ReconcileSender = tokio::sync::mpsc::UnboundedSender<Vec<AnyLocator>>;
+pub type ReconcileSender = tokio::sync::mpsc::UnboundedSender<ConnectReconcile>;
 /// The accept loop's receiving end of the reconcile channel, drained in the loop's
 /// `select!`. `None` when `router-connect-reconcile` is not wired (every non-router
 /// loop, and a router built without the feature) — then the arm parks forever and
 /// the loop is byte-for-byte the prior behaviour.
-pub type ReconcileReceiver = tokio::sync::mpsc::UnboundedReceiver<Vec<AnyLocator>>;
+pub type ReconcileReceiver = tokio::sync::mpsc::UnboundedReceiver<ConnectReconcile>;
+
+/// R2671 (open-debt item 770) — WHICH RECONCILE THIS IS, carried on the channel
+/// rather than assumed by the loop.
+///
+/// ⭐ THE DEFECT THIS CLOSES IS A MISMATCH OF ARITY, not of value. The channel
+/// used to carry a bare `Vec<AnyLocator>` and the loop always ADOPTED it whole,
+/// so every producer had to hand over the FULL desired set. Two of the three
+/// could: `--connect-after` composes `dials + addrs`, and a `connect/endpoints`
+/// config write carries the whole document list by definition. The third could
+/// not — `AdminConfigWrite::ConnectAdd` is one operator's ADD, and the host that
+/// receives it has no way to read the current set back (the desired map is a
+/// loop-local, and `WzConfig::connect_endpoints` is private, empty at startup,
+/// and holds TEXT where the loop holds RESOLVED locators). So it sent its
+/// fragment down a replace-shaped channel and every startup endpoint silently
+/// left the re-dial set, with no symptom until one of them dropped.
+///
+/// ⚠ THE FIX IS NOT A MERGE IN THE PRODUCER, and that is the whole point of
+/// putting the verb here: the only place that can merge correctly is the place
+/// that HOLDS the set, because a producer that re-derives it from text loses the
+/// DNS resolution `resolve_dial_targets` did at startup ([`AnyLocator`] has no
+/// `Display`, so a resolved endpoint cannot even be spelled back).
+///
+/// ⚠ `ConnectAdd`'s own doc still reads "deliberately an ADD" and stays true —
+/// the INTENT is unchanged. What changed is that the channel can now say so,
+/// instead of the intent being widened to a replace on the way down.
+#[cfg(feature = "router-connect-reconcile")]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ConnectReconcile {
+    /// Adopt this as the whole desired connect-set. An endpoint absent from it
+    /// stops being RE-DIALLED; its live face is not closed (the add-only /
+    /// close-removed asymmetry the module doc states).
+    Replace(Vec<AnyLocator>),
+    /// Add these to the desired connect-set, leaving every existing member —
+    /// including the DNS-resolved startup seed — in place.
+    Add(Vec<AnyLocator>),
+}
+
+/// The payload alias a feature-off build still needs for the channel types to
+/// name something. The reconcile arm parks in that build, so nothing is ever
+/// sent or received; this exists so the aliases above compile unchanged.
+#[cfg(not(feature = "router-connect-reconcile"))]
+pub type ConnectReconcile = Vec<AnyLocator>;
 
 /// R2667 (§5.23 `config-mutate-runtime`) — the sink a `WzConfig`'s configured
 /// `connect/endpoints` list is installed onto, decoupled from the concrete
@@ -361,13 +403,61 @@ pub trait ConnectEndpointsSink {
     fn set_connect_endpoints(&self, endpoints: Vec<AnyLocator>) -> bool;
 }
 
+/// R2671 (open-debt item 770) — APPLY one [`ConnectReconcile`] to the desired
+/// connect-set, and the ONE place that decides replace-versus-add.
+///
+/// ⭐ EXTRACTED RATHER THAN INLINED, and that is the repair rather than a
+/// tidy-up. The merge used to live inside `face_drive_loop`'s `select!` arm,
+/// where the only way to reach it is to stand up a loop, a listener and a host —
+/// so the arity defect above was structurally untestable, and the integration
+/// test that does exist never built a node whose desired set was non-empty,
+/// which is exactly the case where subset-versus-whole differs. A free function
+/// over a `HashMap` is reachable by a unit test in microseconds.
+///
+/// Refusals are reported through `on_refused` rather than logged here, so the
+/// caller keeps the loop's wording and a test can count them without a logger.
+#[cfg(feature = "router-connect-reconcile")]
+pub fn apply_connect_reconcile(
+    desired: &mut std::collections::HashMap<SocketAddr, ParsedLocator>,
+    request: ConnectReconcile,
+    mut on_refused: impl FnMut(AnyLocator),
+) {
+    let (rows, replace) = match request {
+        ConnectReconcile::Replace(rows) => (rows, true),
+        ConnectReconcile::Add(rows) => (rows, false),
+    };
+    // R2233 — fold each through the ONE classification and refuse a member with
+    // no pre-handshake identity, exactly as the startup seed does. Keyed by the
+    // resolved address, so a re-listed endpoint spelled differently still dedups
+    // to one dial.
+    let folded: std::collections::HashMap<SocketAddr, ParsedLocator> = rows
+        .into_iter()
+        .filter_map(
+            |locator| match crate::session_open::mesh_dial_plan(locator) {
+                Ok(target) => Some((target.addr, target)),
+                Err(rejected) => {
+                    on_refused(rejected);
+                    None
+                }
+            },
+        )
+        .collect();
+    if replace {
+        *desired = folded;
+    } else {
+        // An ADD leaves every existing member in place -- including the
+        // DNS-resolved startup seed, which no producer could have respelled.
+        desired.extend(folded);
+    }
+}
+
 /// The production [`ConnectEndpointsSink`]: the channel end itself. Sending on a
 /// closed channel answers `false` rather than panicking, which is the same
 /// reading the host's `connect-add` arm already takes.
 #[cfg(feature = "router-connect-reconcile")]
 impl ConnectEndpointsSink for ReconcileSender {
     fn set_connect_endpoints(&self, endpoints: Vec<AnyLocator>) -> bool {
-        self.send(endpoints).is_ok()
+        self.send(ConnectReconcile::Replace(endpoints)).is_ok()
     }
 }
 
@@ -1355,13 +1445,14 @@ enum Step {
     /// [`FaceSources::mcast_group_subs`] is `Some`.
     McastGroupSubs(Vec<String>),
     /// A runtime connect-list reconcile arrived (`router-connect-reconcile`) — the
-    /// NEW full desired outbound connect-set; dial each newly-listed address not
-    /// already being dialed (ADD-ONLY, the wz analogue of zenoh's `update_peers`
+    /// A desired-outbound-connect-set reconcile, carrying its own verb
+    /// ([`ConnectReconcile`]): dial each newly-listed address not already being
+    /// dialed (ADD-ONLY teardown-wise, the wz analogue of zenoh's `update_peers`
     /// Peer/Router branch). Only ever produced when [`FaceSources::reconcile`] is
     /// `Some`; the variant is always present so the `select!` arm carries no
     /// attribute (tokio's `select!` rejects branch attributes), and its handler body
     /// is `#[cfg]`-gated — inert without the feature.
-    Reconcile(Vec<AnyLocator>),
+    Reconcile(ConnectReconcile),
 }
 
 /// Await the forwarder's periodic tick, or park forever when no timer is armed
@@ -1517,7 +1608,7 @@ async fn recv_mcast_group_subs(
 /// taken so later polls park rather than hot-loop. Cancel-safe (tokio
 /// `mpsc::UnboundedReceiver::recv`), so losing the race to a sibling arm never drops
 /// a buffered reconcile request.
-async fn recv_reconcile(rx: &mut Option<ReconcileReceiver>) -> Vec<AnyLocator> {
+async fn recv_reconcile(rx: &mut Option<ReconcileReceiver>) -> ConnectReconcile {
     let closed = if let Some(r) = rx.as_mut() {
         match r.recv().await {
             Some(set) => return set,
@@ -1529,7 +1620,7 @@ async fn recv_reconcile(rx: &mut Option<ReconcileReceiver>) -> Vec<AnyLocator> {
     if closed {
         *rx = None;
     }
-    std::future::pending::<Vec<AnyLocator>>().await
+    std::future::pending::<ConnectReconcile>().await
 }
 
 /// The first locator a [`DialIntent`] carries that the dial path ([`dial_face`])
@@ -2656,31 +2747,24 @@ where
             Step::Reconcile(_desired_set) => {
                 #[cfg(feature = "router-connect-reconcile")]
                 {
-                    // Adopt the new full desired connect-set: the peer auto-reconnect
-                    // re-dial gate (`schedule_redial`) reads it, so an added endpoint
-                    // is both dialed now AND reconnected if it later drops, and a
-                    // removed endpoint stops being reconnected (its live face is NOT
-                    // closed — the add-only / close-removed asymmetry).
-                    // R2233 — the request carries LOCATORS; fold each through the
-                    // one classification and REFUSE (loudly) a member with no
-                    // pre-handshake identity, exactly as the startup seed does.
-                    // Keyed by the resolved address, so a re-listed endpoint with a
-                    // different spelling still dedups to one dial.
-                    desired = _desired_set
-                        .into_iter()
-                        .filter_map(|locator| match mesh_dial_plan(locator) {
-                            Ok(target) => Some((target.addr, target)),
-                            Err(rejected) => {
-                                log::warn!(
-                                    "reconcile: refusing connect endpoint {rejected:?} — a {} \
-                                     endpoint has no address to identify it by before the \
-                                     handshake",
-                                    crate::session_open::locator_scheme(&rejected)
-                                );
-                                None
-                            }
-                        })
-                        .collect();
+                    // Apply the request per its own verb — `Replace` adopts the
+                    // whole set, `Add` leaves the existing members standing. The
+                    // peer auto-reconnect re-dial gate (`schedule_redial`) reads
+                    // this map, so an added endpoint is both dialed now AND
+                    // reconnected if it later drops, and an endpoint a REPLACE
+                    // drops stops being reconnected (its live face is NOT closed
+                    // — the add-only / close-removed asymmetry).
+                    // R2671 — the fold, the refusal and the replace/add decision
+                    // all live in `apply_connect_reconcile` so a unit test can
+                    // reach them; this arm keeps only the loop's own wording.
+                    apply_connect_reconcile(&mut desired, _desired_set, |rejected| {
+                        log::warn!(
+                            "reconcile: refusing connect endpoint {rejected:?} — a {} \
+                             endpoint has no address to identify it by before the \
+                             handshake",
+                            crate::session_open::locator_scheme(&rejected)
+                        );
+                    });
                     // The addresses already being dialed (in-flight or held) — dial
                     // only the desired endpoints NOT among them (the address dedup;
                     // `desired` is keyed by address, so there are no intra-request
@@ -2967,6 +3051,96 @@ mod tests {
     fn tcp_dial(addr: SocketAddr) -> AnyLocator {
         wz_session_core::locator::parse_any_locator(&format!("tcp/{addr}"))
             .expect("tcp/<addr> locator")
+    }
+
+    /// R2671 (open-debt item 770) — THE CASE NO TEST BUILT: a node whose desired
+    /// connect-set is ALREADY NON-EMPTY.
+    ///
+    /// The `connect-add` defect was invisible for exactly one reason -- every
+    /// fixture that exercised the reconcile path started from an empty desired
+    /// set, and on an empty set a subset IS the whole set, so the arity mismatch
+    /// had no observable consequence anywhere it was tested. This seeds the map
+    /// the way `face_drive_loop` seeds it from `dial_targets` and then asks the
+    /// question the operator asks.
+    ///
+    /// ⚠ BOTH VERBS ARE ASSERTED AGAINST THE SAME SEED, deliberately. A fixture
+    /// that only checked `Add` would pass just as well if `Add` and `Replace`
+    /// were transposed; asserting that the same input produces DIFFERENT sets is
+    /// what makes the distinction load-bearing rather than incidental.
+    #[cfg(all(feature = "router-connect-reconcile", feature = "routing-peer"))]
+    #[test]
+    fn an_add_keeps_the_startup_seed_and_a_replace_does_not() {
+        let ep: Vec<SocketAddr> = ["127.0.0.1:7001", "127.0.0.1:7002", "127.0.0.1:7003"]
+            .iter()
+            .map(|s| s.parse().expect("fixture addr"))
+            .collect();
+
+        // Seeded the way the loop seeds it: the resolved startup dial targets.
+        let seed = |m: &mut std::collections::HashMap<SocketAddr, ParsedLocator>| {
+            m.clear();
+            for a in &ep[..2] {
+                let t = crate::session_open::mesh_dial_plan(tcp_dial(*a)).expect("ip locator");
+                m.insert(t.addr, t);
+            }
+        };
+
+        let mut desired = std::collections::HashMap::new();
+        seed(&mut desired);
+        assert_eq!(
+            desired.len(),
+            2,
+            "the seed itself must be the two startup targets"
+        );
+
+        // ADD: the third arrives, the two startup targets SURVIVE. Before R2671
+        // this evicted them, because the host sent its fragment on a channel the
+        // loop always read as a whole-set replace.
+        let mut refused = 0usize;
+        apply_connect_reconcile(
+            &mut desired,
+            ConnectReconcile::Add(vec![tcp_dial(ep[2])]),
+            |_| refused += 1,
+        );
+        assert_eq!(refused, 0, "every fixture endpoint is mesh-dialable");
+        let mut got: Vec<SocketAddr> = desired.keys().copied().collect();
+        got.sort();
+        let mut want = ep.clone();
+        want.sort();
+        assert_eq!(
+            got, want,
+            "an ADD must leave the startup seed in the desired set"
+        );
+
+        // REPLACE: the same input, the opposite outcome -- the anti-vacuity arm.
+        seed(&mut desired);
+        apply_connect_reconcile(
+            &mut desired,
+            ConnectReconcile::Replace(vec![tcp_dial(ep[2])]),
+            |_| refused += 1,
+        );
+        assert_eq!(
+            desired.keys().copied().collect::<Vec<_>>(),
+            vec![ep[2]],
+            "a REPLACE must adopt only what it carries -- otherwise the two verbs \
+             are the same verb and this distinction buys nothing"
+        );
+
+        // The refusal arm still reports, and an unusable member does not take the
+        // rest of the request with it.
+        seed(&mut desired);
+        refused = 0;
+        let named = wz_session_core::locator::parse_any_locator("tcp/example.org:7447")
+            .expect("a NAMED locator parses; it is the dial plan that refuses it");
+        apply_connect_reconcile(
+            &mut desired,
+            ConnectReconcile::Add(vec![named, tcp_dial(ep[2])]),
+            |_| refused += 1,
+        );
+        assert_eq!(
+            refused, 1,
+            "a pre-handshake-identityless endpoint is refused by name"
+        );
+        assert_eq!(desired.len(), 3, "and the rest of the ADD still applies");
     }
 
     use futures_util::future::join_all;

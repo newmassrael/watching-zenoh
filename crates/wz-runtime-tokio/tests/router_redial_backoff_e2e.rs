@@ -41,7 +41,9 @@ use std::time::{Duration, Instant};
 
 use tokio::sync::watch;
 
-use wz_runtime_tokio::accept_loop::{peer_loop, AcceptEvent, FaceSources, NoOpForwarder};
+use wz_runtime_tokio::accept_loop::{
+    peer_loop, AcceptEvent, ConnectReconcile, FaceSources, NoOpForwarder,
+};
 use wz_runtime_tokio::link_pipeline::bind_tcp;
 use wz_runtime_tokio::link_socket::LinkSocket;
 use wz_runtime_tokio::retry_period::RetryPolicy;
@@ -211,7 +213,7 @@ async fn a_peer_removed_and_re_added_starts_over_at_the_initial_wait() {
         .expect("bind SUT listener"),
     );
     let (shut_tx, shut_rx) = watch::channel(false);
-    let (reconcile_tx, reconcile_rx) = tokio::sync::mpsc::unbounded_channel::<Vec<AnyLocator>>();
+    let (reconcile_tx, reconcile_rx) = tokio::sync::mpsc::unbounded_channel::<ConnectReconcile>();
 
     let stamps: Arc<StdMutex<Vec<Instant>>> = Arc::new(StdMutex::new(Vec::new()));
     let sink = stamps.clone();
@@ -250,14 +252,19 @@ async fn a_peer_removed_and_re_added_starts_over_at_the_initial_wait() {
                 // Gaps so far: 50, 200. The schedule is now AT the 800ms ceiling,
                 // and the re-dial scheduled by this very failure will wait it.
                 3 => {
-                    reconcile_tx.send(Vec::new()).expect("send remove");
+                    // A REPLACE with an empty set is how this test REMOVES the
+                    // target; an `Add` of nothing would be a no-op, so the verb
+                    // is load-bearing here rather than cosmetic.
+                    reconcile_tx
+                        .send(ConnectReconcile::Replace(Vec::new()))
+                        .expect("send remove");
                 }
                 // That ceiling-length wait has now elapsed and failed, and because
                 // the address was no longer desired the loop dropped it instead of
                 // re-scheduling — which is the moment `forget` runs. Re-add it.
                 4 => {
                     reconcile_tx
-                        .send(vec![tcp_dial(target)])
+                        .send(ConnectReconcile::Replace(vec![tcp_dial(target)]))
                         .expect("send re-add");
                 }
                 // 5 = the reconcile-add's immediate dial failing. 6 = the retry it

@@ -6364,7 +6364,7 @@ async fn run_router_hat_until(
     // set as the desired gate. Created only when the feature is compiled.
     #[cfg(feature = "router-connect-reconcile")]
     let (reconcile_tx, reconcile_rx) =
-        tokio::sync::mpsc::unbounded_channel::<Vec<wz::runtime_tokio::locator::AnyLocator>>();
+        tokio::sync::mpsc::unbounded_channel::<wz::runtime_tokio::accept_loop::ConnectReconcile>();
     #[cfg(feature = "router-connect-reconcile")]
     let reconcile_schedule: Option<(
         tokio::time::Instant,
@@ -6679,7 +6679,18 @@ async fn run_router_hat_until(
                             let n = locs.len();
                             // A closed channel means the face loop is gone — a
                             // shutdown, not an error to shout about.
-                            if write_tx.send(locs).is_ok() {
+                            // R2671 (item 770) — an ADD on the channel, not a
+                            // replace. This used to send `locs` bare, which the
+                            // loop adopted as the WHOLE desired set, so a
+                            // `connect-add` of one endpoint silently evicted
+                            // every startup `--connect` target from the re-dial
+                            // set. Nothing failed at the time: the live faces
+                            // stay up, and the loss only shows when one of them
+                            // drops and never comes back.
+                            if write_tx
+                                .send(wz::runtime_tokio::accept_loop::ConnectReconcile::Add(locs))
+                                .is_ok()
+                            {
                                 log::info!(
                                     "wz-ap-demo router-hat: config-write connect-add \
                                          reconciled {n} endpoint(s) onto the connect list"
@@ -7016,7 +7027,14 @@ async fn run_router_hat_until(
                              connect-list to {} endpoint(s)",
                             full_set.len()
                         );
-                        let _ = reconcile_tx.send(full_set.clone());
+                        // A REPLACE, and correct as such: `full_set` is composed
+                        // as `dials + addrs`, so it already carries the startup
+                        // seed with its DNS resolution intact.
+                        let _ = reconcile_tx.send(
+                            wz::runtime_tokio::accept_loop::ConnectReconcile::Replace(
+                                full_set.clone(),
+                            ),
+                        );
                     }
                 }
                 let routers = forwarder.routers_net_node_count();
