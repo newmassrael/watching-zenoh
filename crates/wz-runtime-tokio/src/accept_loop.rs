@@ -290,11 +290,27 @@ pub type DialIntentReceiver = tokio::sync::mpsc::UnboundedReceiver<DialIntent>;
 
 /// A runtime connect-list reconcile request (`router-connect-reconcile`): the NEW
 /// full desired outbound connect-set, delivered to [`face_drive_loop`] when the
-/// operator changes the connect endpoints at runtime. The wz analogue of zenoh's
-/// `update_peers` (`net/runtime/orchestrator.rs:413`), which re-reads
-/// `connect().endpoints().get(whatami)` on the config `"connect/endpoints"` change
-/// event and, for a Peer/Router, `spawn_peer_connector`s each newly-listed peer it
-/// does not already hold a link to. wz carries the resolved LOCATORS (R2233 — the
+/// operator changes the connect endpoints at runtime.
+///
+/// ⚠ R2665 — THIS PARAGRAPH NAMED AN UPSTREAM MECHANISM THAT DOES NOT EXIST AT
+/// THE PIN, and the correction is kept rather than silently swapped because the
+/// wrong version described the wrong SHAPE, not merely the wrong line. It said
+/// this mirrored zenoh's `update_peers`, "which re-reads
+/// `connect().endpoints()` on the config `connect/endpoints` CHANGE EVENT".
+/// Measured against the pinned checkout: `update_peers` occurs ZERO times, and
+/// the line it cited is the middle of an ordinary peer-connect loop. There is no
+/// config change event for endpoints upstream either — the only config
+/// subscriber is `plugins`-gated.
+///
+/// What upstream ACTUALLY does, and therefore what this request is the analogue
+/// of: `zenoh/src/net/runtime/orchestrator.rs` @ `pub(super) fn closed_session`
+/// and @ `pub(super) fn closed_link` lock the LIVE config AT CLOSE TIME, re-read
+/// `connect().endpoints().get(whatami)`, and re-dial the addresses still listed.
+/// So the trigger is a CLOSE consulting current config, not an event fired by a
+/// write — which is why wz's equivalent is a set the loop holds and a request
+/// that replaces it, rather than a subscription.
+///
+/// wz carries the resolved LOCATORS (R2233 — the
 /// same currency as the static [`FaceSources::dial_targets`], which was a list of
 /// bare `SocketAddr`s until the mesh dial side learned to dispatch on scheme; a
 /// runtime add of a `quic/...` endpoint was unrepresentable while this channel

@@ -509,7 +509,19 @@ ROOTLESS_STALE_LINE_BUDGET = 1
 #: Down is the direction this arm wants; the replacement text cites upstream in
 #: the rooted `path` @ `needle` form, which lands in the anchored bucket rather
 #: than here.
-ROOTLESS_UNDECLARED_BUDGET = 659
+#: R2665 — 659 -> 658. `accept_loop.rs`'s reconcile doc carried a root-less
+#: line-form citation of a zenoh orchestrator symbol that occurs ZERO times at
+#: the pin, on a line that is the middle of an ordinary peer-connect loop. (The
+#: retired path is NOT quoted here, for the reason the note below records: doing
+#: so re-adds the occurrence being removed — measured, this budget bounced
+#: straight back to 659 on the first attempt.) It was stale in the way these
+#: ratchets cannot see: the path resolved and the line was inside the file, so
+#: every arm passed. The replacement names what upstream actually does in the
+#: rooted `path` @ `needle` form, so the occurrence leaves this bucket for the
+#: anchored one. Registered as open debt 769 — the line-form population is
+#: verified for PATH and end-of-file only, never for whether the line supports
+#: the claim, and this is ONE measured instance of 288, not a survey of them.
+ROOTLESS_UNDECLARED_BUDGET = 658
 #: EVERY root-less occurrence, graded or not: `rootless_line + rootless_bare +
 #: residue`. One ratchet over the union of the three above, and it exists
 #: because those three CANNOT express the invariant that matters.
@@ -557,7 +569,8 @@ ROOTLESS_UNDECLARED_BUDGET = 659
 #: R2578 — 791 -> 790, the same single occurrence as the budget above.
 #: R2578 — 790 -> 789, the same single occurrence as the budget above.
 #: R2634 — 789 -> 788, the same single occurrence as the budget above.
-ROOTLESS_TOTAL_BUDGET = 788
+#: R2665 — 788 -> 787, the same single occurrence as the budget above.
+ROOTLESS_TOTAL_BUDGET = 787
 
 #: A LIVE invocation of the RESOLUTION arm. R2242 split this gate in two and,
 #: in doing so, made `--resolve` a flag someone can simply stop passing: delete
