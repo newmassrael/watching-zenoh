@@ -1467,7 +1467,16 @@ PIN_NO_SYMBOL = 2
 # the live store: origin's body answers 5 wz / 2 ambiguous / 14 upstream and the
 # new one answers 8 / 2 / 14. So the rise is +3, it is this atom's alone, and
 # nothing ambiguous or upstream moved with it. 187 + 3 = 190.
-PIN_WZ_CITATIONS = 190
+# R2654 — 190 -> 192, RISING, and a DIFFERENT atom this time: `adminspace-write`
+# stays PARTIAL, so its reason stays in this population, and this round's
+# CORRECTION cites the one file that half-paid its residual twice — the
+# sink-taking write (`config.rs` @ `set_by_key_with`) and the subtree settle the
+# delete half needed (`config.rs` @ `settle_acl_subtree`). MEASURED with THIS
+# FILE'S OWN `citation_audit` over that one reason in both versions: origin's
+# body answers 10 wz / 0 ambiguous / 6 upstream and the new one answers
+# 12 / 0 / 6. So the rise is +2, it is this atom's alone, and nothing ambiguous
+# or upstream moved with it. 190 + 2 = 192.
+PIN_WZ_CITATIONS = 192
 # R2626 — 44 -> 42, and this one is worth a sentence because it HELD through
 # every earlier retirement in this run (R2612, R2622). `time-hlc`'s reason is the
 # first retiree carrying AMBIGUOUS citations of its own: its oldest clauses cite
