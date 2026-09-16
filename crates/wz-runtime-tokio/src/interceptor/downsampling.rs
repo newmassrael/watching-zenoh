@@ -153,6 +153,31 @@ impl DownsamplingMessage {
         DownsamplingMessage::Query,
         DownsamplingMessage::Reply,
     ];
+
+    /// R2651 — upstream's wire spelling for this kind, `DataMessage`'s four in
+    /// `#[serde(rename_all = "snake_case")]` — NOT `AclMessage`'s nine, which
+    /// govern the access-control key instead.
+    ///
+    /// Exhaustive on purpose: a new kind stops this COMPILING, so the vocabulary
+    /// cannot grow without someone deciding what the document calls it.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            DownsamplingMessage::Put => "put",
+            DownsamplingMessage::Delete => "delete",
+            DownsamplingMessage::Query => "query",
+            DownsamplingMessage::Reply => "reply",
+        }
+    }
+
+    /// The kind upstream spells `text`, or `None` — derived by searching
+    /// [`Self::ALL`] through [`Self::as_str`], so there is ONE table and the
+    /// inverse cannot disagree with it.
+    pub fn from_upstream_str(text: &str) -> Option<DownsamplingMessage> {
+        DownsamplingMessage::ALL
+            .iter()
+            .copied()
+            .find(|m| m.as_str() == text)
+    }
 }
 
 /// Nanoseconds per second — zenoh's `NANOS_PER_SEC` (`downsampling.rs:280`),

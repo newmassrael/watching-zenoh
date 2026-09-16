@@ -1580,6 +1580,15 @@ pub(crate) fn expand_stock_zenoh_config_for_build(
             exp.record("low_pass_filter", effect);
         }
     }
+    // R2651 — `downsampling`'s decision site, shaped like its sibling's and
+    // routed through `no_sink` for the same binding reason: teach the demo a flag
+    // that can state a rule LIST and this site stops speaking rather than lying
+    // about a key it no longer describes.
+    if named("downsampling") {
+        if let Some(effect) = no_sink("downsampling") {
+            exp.record("downsampling", effect);
+        }
+    }
     // R2627 — the pubkey identity's decision site, shaped like the dictionary's
     // and for its reason: no auth plane, so no flag branch to guard, and the
     // verdict is the whole site. One loop over the four rather than four copies,
@@ -2722,6 +2731,20 @@ pub(crate) const ARGV_ONLY_KIND_LEDGER: &[(&str, &str, &str)] = &[
          username and an HMAC rather than the store or its path.",
     ),
     (
+        "downsampling",
+        KIND_OFF_WIRE,
+        "expands to NO flag, for its sibling's reason one level deeper. The \
+         binary carries `--downsample` with `--downsample-freq` and two subject \
+         axes, but that states ONE rule of a fixed shape while upstream's key is \
+         a list of ITEMS each holding its own list of rate rules, so no argv \
+         spells the document; the key is pinned in \
+         `config_keys_the_demo_drops()` and its decision site records \
+         NoSinkInThisBuild. Off-wire for the separate reason that would hold even \
+         with a richer flag: downsampling is a local admission decision about a \
+         message's RATE, so the frames carry the messages it admits or drops, \
+         never the rule that paced them.",
+    ),
+    (
         "low_pass_filter",
         KIND_OFF_WIRE,
         "expands to NO flag, and the reason is not an absent plane. This binary \
@@ -2894,6 +2917,23 @@ pub(crate) fn config_keys_the_demo_drops() -> Vec<&'static str> {
         // plane. What it does not reach is the STARTUP flag path, and that is the
         // distinction this list is for.
         "low_pass_filter",
+        // R2651 — `downsampling`, the same THIRD kind as `low_pass_filter` above
+        // and for the same reason at one more level of nesting. This binary DOES
+        // carry the knob — `--downsample <keyexpr>` with `--downsample-freq` and
+        // its two subject axes — but that flag set states ONE rule of a fixed
+        // shape, while upstream's key is a list of ITEMS each carrying its own
+        // list of rate rules. No argv spells a two-item document, let alone a
+        // two-rule item.
+        //
+        // ⚠ Expanding only the one-item-one-rule case would make the demo's
+        // behaviour depend on the document's shape, and everything past the first
+        // rule would vanish unobserved. A partial application no one can see is
+        // worse than a named drop, which is the whole reason this list exists.
+        //
+        // NOT "reaches nothing": the reader honours the key, `apply_one_key` has
+        // an arm for it, and it reaches a running node through the admin write
+        // plane. What it does not reach is the STARTUP flag path.
+        "downsampling",
         // R2627 — the pubkey identity: the same FIRST kind as the dictionary and
         // on the same measurement, re-taken for these keys rather than inherited
         // from that row. `wz-ap-demo` still names `extauth` zero times and
@@ -3932,6 +3972,18 @@ mod stock_config_tests {
                      low_pass_filter: [ { messages: ["put"],
                                           key_exprs: ["demo/**"],
                                           size_limit: 8192 } ] }"#,
+            ),
+            // R2651 — `downsampling`'s pair. Both required members present
+            // (`messages` and `rules` are `NEVec` upstream) and `freq` UNQUOTED,
+            // because a quoted rate is a type error here exactly as a quoted
+            // weight is.
+            (
+                "downsampling",
+                LISTEN_ONLY,
+                r#"{ listen: { endpoints: ["tcp/0.0.0.0:7447"] },
+                     downsampling: [ { messages: ["put"],
+                                       rules: [ { key_expr: "demo/**",
+                                                  freq: 0.5 } ] } ] }"#,
             ),
             // R2627 — the pubkey identity, one row per key so the table stays
             // universal. Each reaches NOTHING here (no auth plane) and is pinned

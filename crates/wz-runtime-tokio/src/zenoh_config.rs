@@ -1154,6 +1154,12 @@ pub struct ZenohNodeConfig {
     /// absent and the empty document say the same thing here and neither is a
     /// wildcard.
     pub low_pass_filter: Vec<LowPassFilterConf>,
+    /// R2651 — `downsampling[]`, exactly as the document stated it.
+    ///
+    /// Empty = no item, which is what a real zenohd resolves an unmentioned key
+    /// to (MEASURED: it renders `"downsampling":[]`, not `null`), so the absent
+    /// and the empty document say the same thing and neither is a wildcard.
+    pub downsampling: Vec<DownsamplingItemConf>,
 }
 
 impl Default for ZenohNodeConfig {
@@ -1260,6 +1266,7 @@ impl Default for ZenohNodeConfig {
             // rather than this struct's convenience.
             router_transport_weights: Vec::new(),
             low_pass_filter: Vec::new(),
+            downsampling: Vec::new(),
         }
     }
 }
@@ -1761,6 +1768,10 @@ pub const HONOURED_CONFIG_KEYS: &[&str] = &[
     // keys collapse into a single `acl` field through a join wz cannot invert, so
     // they need a retention structure this one does not.
     "low_pass_filter",
+    // R2651 — `downsampling`, the second and last interceptor key whose live
+    // slice is fed by it ALONE. Moved for the reason its sibling records: the
+    // acceptance boundary is the two lists chained, so honouring is a move.
+    "downsampling",
     "scouting/timeout",
     "transport/multicast/qos/enabled",
     "transport/shared_memory/enabled",
@@ -2043,7 +2054,9 @@ pub const UNHONOURED_UPSTREAM_CONFIG_KEYS: &[&str] = &[
     // keys sat here for as long as they did, and the class it names ("a
     // different kind of debt") is real: it cost a round of its own, which is
     // what the item asked for.
-    "downsampling",
+    // R2651 — `downsampling` LEFT this list for `HONOURED_CONFIG_KEYS`. The
+    // surface total is unchanged: a move between the halves of one partition
+    // keeps the denominator and only shifts the fraction.
     // R2230 (open-debt item 579) — ARRIVED in 1.10.0, and the census leg is what
     // found it: upstream's own resolved tree carried a key wz's surface did not
     // name. Seven arrived this way; each is beyond-wz and each earned that
@@ -2454,10 +2467,12 @@ pub const UNHONOURED_READER_GAP: &[&str] = &[
     // implementing it. Its three siblings were in `UNHONOURED_BEYOND_WZ`, so the
     // item's four keys were never in one state; what made them one ROUND is that
     // they are one seam, not one classification.
-    "downsampling",
-    // R2650 — `low_pass_filter` LEFT this list too: the classification "wz has the
+    // R2650 — `low_pass_filter` LEFT this list: the classification "wz has the
     // engine and no reader" stopped being true of it the moment the reader landed.
-    // `downsampling` above is the same seam and STAYS until its own reader does.
+    // R2651 — and `downsampling` follows it out for the same reason, which is the
+    // whole of that seam: both interceptor keys now have readers, so what stays
+    // here are the five `access_control/*` keys, whose reader needs the retention
+    // structure their lossy rules-x-subjects-x-policies join demands.
     "plugins",
     "plugins_loading/enabled",
     // R2539 — ARRIVED here from [`UNHONOURED_BEYOND_WZ`] the round wz grew the
@@ -2808,7 +2823,9 @@ pub const UNHONOURED_CITATION_LEDGER: &[(&str, &str, &str)] = &[
     // 2 of `unhonoured_kind_evidence_gate.py` is what forces the deletion: a
     // verdict about a key no longer in the population is "a verdict about
     // evidence that is gone".
-    ("downsampling", "wz-has-it", "DownsamplingRule"),
+    // R2651 — `downsampling`'s row is GONE, as `low_pass_filter`'s was: this
+    // ledger carries kind evidence for UNHONOURED keys, and the evidence gate
+    // reds on a row whose key the reader now honours.
     // R2650 — `low_pass_filter`'s row is GONE: this ledger carries kind evidence
     // for UNHONOURED keys, and `unhonoured_kind_evidence_gate` reds on a row whose
     // key the reader now honours.
@@ -3903,6 +3920,181 @@ fn matcher_of(value: &Json5Value, path: &'static str) -> Result<WhatAmIMatcher, 
     Ok(matcher)
 }
 
+/// R2651 — one `downsampling[].rules[]` entry: a key expression and the maximum
+/// rate admitted for it.
+///
+/// `key_expr` is SINGULAR here, unlike the low-pass filter's `key_exprs` list,
+/// which is why one item's rules expand to one wz rule EACH rather than to one
+/// rule carrying them all.
+#[derive(Debug, Clone, PartialEq)]
+pub struct DownsamplingRuleConf {
+    /// The key expression this rate governs.
+    pub key_expr: String,
+    /// Maximum frequency in Hertz.
+    ///
+    /// NOT range-checked here, and that is deliberate: `interval_from_freq`
+    /// gives `0.0` its DROP-ALL meaning and mirrors a negative or non-finite
+    /// frequency onto "no throttle", which is what upstream's own `as u64`
+    /// saturation produces. Refusing either would tighten a surface that is
+    /// upstream's and not wz's — the same rule that keeps the reader from being
+    /// stricter than the document a real zenohd starts on.
+    pub freq: f64,
+}
+
+/// R2651 — one `downsampling[]` entry as the OPERATOR's document spells it.
+///
+/// Here rather than [`crate::interceptor::downsampling::DownsamplingRule`] for
+/// the reason `LowPassFilterConf` records: that type is gated twice over and
+/// [`ZenohNodeConfig`] must read the same document to the same values in every
+/// build.
+///
+/// ONE item carries N rules and the axes they SHARE. The arm expands that into N
+/// wz rules, copying the shared axes onto each — upstream's own shape, where the
+/// subject and kind selectors sit on the item and only the rate varies per rule.
+#[derive(Debug, Clone, PartialEq)]
+pub struct DownsamplingItemConf {
+    /// Optional operator label; upstream carries it for diagnostics only.
+    pub id: Option<String>,
+    /// NIC names this item narrows to. Empty = every interface.
+    pub interfaces: Vec<String>,
+    /// Link protocols this item narrows to. Empty = every transport.
+    pub link_protocols: Vec<String>,
+    /// Flows this item applies on. Empty = both, upstream's `None`.
+    pub flows: Vec<String>,
+    /// Message kinds downsampled. `NEVec` upstream, so empty is a refusal.
+    pub messages: Vec<String>,
+    /// The rate rules. `NEVec` upstream, so empty is a refusal.
+    pub rules: Vec<DownsamplingRuleConf>,
+}
+
+/// R2651 — `downsampling` as a list of [`DownsamplingItemConf`].
+fn downsampling_items_of(
+    value: &Json5Value,
+    path: &'static str,
+) -> Result<Vec<DownsamplingItemConf>, ConfigIngestError> {
+    const SHAPE: &str = "a list of { messages: [put|delete|query|reply], \
+                         rules: [{ key_expr: \"<keyexpr>\", freq: <hz> }], \
+                         id?, interfaces?, link_protocols?, flows? }";
+    let Json5Value::Array(items) = value else {
+        return Err(ConfigIngestError::WrongType {
+            path,
+            expected: SHAPE,
+        });
+    };
+    let mut out = Vec::with_capacity(items.len());
+    for item in items {
+        let Json5Value::Object(fields) = item else {
+            return Err(ConfigIngestError::WrongType {
+                path,
+                expected: SHAPE,
+            });
+        };
+        let mut conf = DownsamplingItemConf {
+            id: None,
+            interfaces: Vec::new(),
+            link_protocols: Vec::new(),
+            flows: Vec::new(),
+            messages: Vec::new(),
+            rules: Vec::new(),
+        };
+        for (key, field) in fields {
+            match key.as_str() {
+                "id" => {
+                    let Json5Value::String(text) = field else {
+                        return Err(ConfigIngestError::WrongType {
+                            path,
+                            expected: SHAPE,
+                        });
+                    };
+                    conf.id = Some(text.clone());
+                }
+                "interfaces" => conf.interfaces = string_list_of(field, path, SHAPE)?,
+                "link_protocols" => {
+                    let names = string_list_of(field, path, SHAPE)?;
+                    if names.iter().any(|n| {
+                        wz_session_core::link::InterceptorLink::from_upstream_str(n).is_none()
+                    }) {
+                        return Err(ConfigIngestError::WrongType {
+                            path,
+                            expected: SHAPE,
+                        });
+                    }
+                    conf.link_protocols = names;
+                }
+                "flows" => {
+                    conf.flows = enum_list_of(field, path, SHAPE, INTERCEPTOR_FLOW_LITERALS)?
+                }
+                "messages" => {
+                    conf.messages = enum_list_of(field, path, SHAPE, DATA_MESSAGE_LITERALS)?
+                }
+                "rules" => conf.rules = downsampling_rules_of(field, path, SHAPE)?,
+                // `deny_unknown_fields` upstream, so refusing is consistent.
+                _ => {
+                    return Err(ConfigIngestError::WrongType {
+                        path,
+                        expected: SHAPE,
+                    })
+                }
+            }
+        }
+        if conf.messages.is_empty() || conf.rules.is_empty() {
+            return Err(ConfigIngestError::WrongType {
+                path,
+                expected: SHAPE,
+            });
+        }
+        out.push(conf);
+    }
+    Ok(out)
+}
+
+/// The nested `rules[]` of one downsampling item.
+fn downsampling_rules_of(
+    value: &Json5Value,
+    path: &'static str,
+    expected: &'static str,
+) -> Result<Vec<DownsamplingRuleConf>, ConfigIngestError> {
+    let Json5Value::Array(items) = value else {
+        return Err(ConfigIngestError::WrongType { path, expected });
+    };
+    let mut out = Vec::with_capacity(items.len());
+    for item in items {
+        let Json5Value::Object(fields) = item else {
+            return Err(ConfigIngestError::WrongType { path, expected });
+        };
+        let mut key_expr = None;
+        let mut freq = None;
+        for (key, field) in fields {
+            match key.as_str() {
+                "key_expr" => {
+                    let Json5Value::String(text) = field else {
+                        return Err(ConfigIngestError::WrongType { path, expected });
+                    };
+                    key_expr = Some(text.clone());
+                }
+                "freq" => {
+                    // `Number`, never `String`: a quoted rate is a type error
+                    // rather than a range error, the judgement the weights
+                    // parser records and a real zenohd enforces.
+                    let Json5Value::Number(text) = field else {
+                        return Err(ConfigIngestError::WrongType { path, expected });
+                    };
+                    let Ok(v) = text.parse::<f64>() else {
+                        return Err(ConfigIngestError::WrongType { path, expected });
+                    };
+                    freq = Some(v);
+                }
+                _ => return Err(ConfigIngestError::WrongType { path, expected }),
+            }
+        }
+        let (Some(key_expr), Some(freq)) = (key_expr, freq) else {
+            return Err(ConfigIngestError::WrongType { path, expected });
+        };
+        out.push(DownsamplingRuleConf { key_expr, freq });
+    }
+    Ok(out)
+}
+
 /// R2650 — the message kinds `downsampling` and `low_pass_filter` accept.
 ///
 /// FOUR, and they are NOT `AclMessage`'s nine. Upstream types both interceptor
@@ -4685,6 +4877,12 @@ impl ZenohNodeConfig {
         if let Some(value) = honoured(&doc, "low_pass_filter") {
             out.low_pass_filter = low_pass_filters_of(value, "low_pass_filter")?;
             named.push("low_pass_filter");
+        }
+        // R2651 — the second interceptor key, same shape as the one above and
+        // the same reason an empty list counts as NAMED.
+        if let Some(value) = honoured(&doc, "downsampling") {
+            out.downsampling = downsampling_items_of(value, "downsampling")?;
+            named.push("downsampling");
         }
         if let Some(v) = want_u64(&doc, "scouting/timeout")? {
             out.scouting_timeout_ms = Some(v);
@@ -5674,6 +5872,14 @@ mod tests {
                 r#"{ "low_pass_filter": [ { "messages": ["put"],
                      "key_exprs": ["demo/**"], "size_limit": 8192 } ] }"#,
             ),
+            // R2651 — NON-EMPTY for the reason the two rows above give: the
+            // default is the empty list, so `[]` would report the key honoured
+            // while proving only that the reader did not crash.
+            (
+                "downsampling",
+                r#"{ "downsampling": [ { "messages": ["put"],
+                     "rules": [ { "key_expr": "demo/**", "freq": 0.5 } ] } ] }"#,
+            ),
             ("scouting/timeout", r#"{ "scouting": { "timeout": 2500 } }"#),
             (
                 "transport/multicast/qos/enabled",
@@ -6385,6 +6591,87 @@ mod tests {
                 "a flow outside the two directions",
                 r#"{ low_pass_filter: [ { messages: ["put"], key_exprs: ["x"],
                      size_limit: 1, flows: ["sideways"] } ] }"#,
+            ),
+        ] {
+            assert!(
+                ZenohNodeConfig::from_json5(doc).is_err(),
+                "the reader must refuse {why}"
+            );
+        }
+    }
+
+    /// R2651 — the `downsampling` reader, held to the same boundary as its
+    /// sibling: not looser than upstream, not stricter.
+    ///
+    /// The one place it deliberately does NOT refuse is `freq`. A zero is
+    /// upstream's DROP-ALL rule and a negative or non-finite rate saturates to
+    /// "no throttle" there, so both are documents a real zenohd accepts;
+    /// `interval_from_freq` owns those two edges and the reader must not
+    /// second-guess them. Refusing either would tighten a surface that is
+    /// upstream's — the mirror image of the `declare_subscriber` case below,
+    /// where accepting would LOOSEN it.
+    #[test]
+    fn the_downsampling_reader_refuses_exactly_what_upstream_refuses() {
+        let ok = ZenohNodeConfig::from_json5(
+            r#"{ downsampling: [ { id: "ds1", interfaces: ["lo"],
+                 link_protocols: ["tcp"], flows: ["ingress"],
+                 messages: ["put", "query"],
+                 rules: [ { key_expr: "demo/**", freq: 0.5 },
+                          { key_expr: "demo/off", freq: 0 } ] } ] }"#,
+        )
+        .expect("the shape a real zenohd starts on is accepted");
+        assert_eq!(ok.config.downsampling.len(), 1);
+        let item = &ok.config.downsampling[0];
+        assert_eq!(item.messages, vec!["put", "query"]);
+        assert_eq!(item.rules.len(), 2, "both rate rules survive the parse");
+        assert_eq!(item.rules[0].key_expr, "demo/**");
+        assert_eq!(item.rules[0].freq, 0.5);
+        assert_eq!(
+            item.rules[1].freq, 0.0,
+            "a zero rate is ACCEPTED — it is upstream's drop-all rule, not a \
+             malformed value"
+        );
+        assert!(ok.named.contains(&"downsampling"));
+
+        for (why, doc) in [
+            (
+                "an AclMessage kind that is not a DataMessage",
+                r#"{ downsampling: [ { messages: ["declare_subscriber"],
+                     rules: [ { key_expr: "x", freq: 1 } ] } ] }"#,
+            ),
+            (
+                "a QUOTED freq, which is a type error upstream",
+                r#"{ downsampling: [ { messages: ["put"],
+                     rules: [ { key_expr: "x", freq: "1" } ] } ] }"#,
+            ),
+            (
+                "an unknown field on the item",
+                r#"{ downsampling: [ { messages: ["put"], nope: 1,
+                     rules: [ { key_expr: "x", freq: 1 } ] } ] }"#,
+            ),
+            (
+                "an unknown field on a RULE, which nests one level deeper",
+                r#"{ downsampling: [ { messages: ["put"],
+                     rules: [ { key_expr: "x", freq: 1, nope: 1 } ] } ] }"#,
+            ),
+            (
+                "an EMPTY messages list, which is a NEVec upstream",
+                r#"{ downsampling: [ { messages: [],
+                     rules: [ { key_expr: "x", freq: 1 } ] } ] }"#,
+            ),
+            (
+                "an EMPTY rules list, likewise a NEVec",
+                r#"{ downsampling: [ { messages: ["put"], rules: [] } ] }"#,
+            ),
+            (
+                "a rule with no key_expr",
+                r#"{ downsampling: [ { messages: ["put"],
+                     rules: [ { freq: 1 } ] } ] }"#,
+            ),
+            (
+                "a link protocol outside the vocabulary",
+                r#"{ downsampling: [ { messages: ["put"], link_protocols: ["pigeon"],
+                     rules: [ { key_expr: "x", freq: 1 } ] } ] }"#,
             ),
         ] {
             assert!(

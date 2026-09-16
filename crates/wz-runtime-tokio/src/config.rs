@@ -1344,6 +1344,60 @@ impl WzConfig {
                 self.interceptors.low_pass = rules;
                 true
             }
+            // R2651 — `downsampling`, the second interceptor key with a reader.
+            //
+            // The EXPANSION is what differs from its sibling: one document item
+            // carries N rate rules and the axes they share, and each rule becomes
+            // one wz rule with those axes copied onto it. Upstream's own shape —
+            // the subject and kind selectors sit on the item, only the rate
+            // varies per rule — so this is a re-spelling, not a reinterpretation.
+            #[cfg(all(feature = "routing-peer", feature = "access-downsampling"))]
+            "downsampling" => {
+                let items = match source {
+                    Some(ingest) => ingest.config.downsampling.clone(),
+                    None => Vec::new(),
+                };
+                let mut rules = Vec::new();
+                for item in &items {
+                    let (Some(messages), Some(flows), Some(links)) = (
+                        item.messages
+                            .iter()
+                            .map(|m| {
+                                crate::interceptor::downsampling::DownsamplingMessage::from_upstream_str(m)
+                            })
+                            .collect::<Option<Vec<_>>>(),
+                        item.flows
+                            .iter()
+                            .map(|f| crate::interceptor::InterceptorFlow::from_upstream_str(f))
+                            .collect::<Option<Vec<_>>>(),
+                        item.link_protocols
+                            .iter()
+                            .map(|l| {
+                                wz_session_core::link::InterceptorLink::from_upstream_str(l)
+                            })
+                            .collect::<Option<Vec<_>>>(),
+                    ) else {
+                        return false;
+                    };
+                    for rule in &item.rules {
+                        rules.push(crate::interceptor::downsampling::DownsamplingRule {
+                            key_exprs: vec![rule.key_expr.clone()],
+                            // `0.0` is DROP-ALL and a negative or non-finite rate
+                            // is no throttle; both live in this one function, so
+                            // the reader does not restate either edge.
+                            min_interval: crate::interceptor::downsampling::interval_from_freq(
+                                rule.freq,
+                            ),
+                            messages: messages.clone(),
+                            flows: flows.clone(),
+                            link_protocols: links.clone(),
+                            interfaces: item.interfaces.clone(),
+                        });
+                    }
+                }
+                self.interceptors.downsampling = rules;
+                true
+            }
             _ => false,
         }
     }

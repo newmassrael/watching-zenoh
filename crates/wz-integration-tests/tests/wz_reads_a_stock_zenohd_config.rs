@@ -688,6 +688,10 @@ fn the_defaults_each_implementation_falls_back_to_are_pinned_against_a_real_zeno
         // answers with the same empty list, and this row is what notices if
         // either side starts inventing a filter nobody configured.
         ("low_pass_filter", String::from("[]")),
+        // R2651 — same class and same measurement: a zenohd whose file never
+        // mentions `downsampling` renders it `[]`, not `null`, so the tree
+        // answers and the key is comparable.
+        ("downsampling", String::from("[]")),
         ("transport/unicast/max_links", wz.max_links.to_string()),
         ("transport/unicast/lowlatency", wz.lowlatency.to_string()),
         ("transport/unicast/qos/enabled", wz.qos.to_string()),
@@ -3381,6 +3385,18 @@ fn a_wz_node_configured_only_by_a_stock_zenoh_config_reaches_a_real_zenohd() {
        messages: ["put", "delete", "query", "reply"],
        key_exprs: ["demo/**"],
        size_limit: 8192 }},
+  ],
+  // R2651 — `downsampling`, the second interceptor key with a reader. The shape
+  // is one a REAL zenohd was measured to start on, and `freq` is UNQUOTED for
+  // the reason a transport weight is: upstream's own commented example writes a
+  // weight quoted and a shipping zenohd cannot load that.
+  downsampling: [
+    {{ id: "ds1",
+       interfaces: ["lo"],
+       link_protocols: ["tcp"],
+       flows: ["ingress", "egress"],
+       messages: ["put", "delete", "query", "reply"],
+       rules: [ {{ key_expr: "demo/slow", freq: 0.5 }} ] }},
   ],
   // R2065 — `peer/mode` joins the EXISTING `routing` block rather than opening
   // a second one. The first cut added its own `routing: {{ … }}` earlier in the
