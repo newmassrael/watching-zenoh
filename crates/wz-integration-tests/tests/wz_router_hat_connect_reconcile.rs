@@ -395,6 +395,39 @@ fn spawn_config_writer(
     (guard, reader)
 }
 
+/// R2655 — the DELETE twin of [`spawn_config_writer`]: a peer that publishes a
+/// Del on the config-write key rather than a Put.
+///
+/// `--del-key` is the tick driver, NOT `--delete`. The first cut of this helper
+/// used `--delete <keyexpr>`, which is the demo's legacy burst-publisher MODE:
+/// it is mutually exclusive with `--publish`, never reaches `run_peer_until`'s
+/// app tick, and produced a run in which the deleter formed a mesh link and sent
+/// nothing at all. `--del-key` rides the same tick as `--put-key`, which is what
+/// a config write is.
+fn spawn_config_deleter(label: &str, addr: &str, del_key: &str) -> (ChildGuard, File) {
+    let stderr = tempfile::tempfile().expect("tempfile for deleter stderr");
+    let (guard, reader, _port) = spawn_on_ephemeral_port(
+        &wz_ap_demo_binary(),
+        &[
+            "--peer",
+            "127.0.0.1:0",
+            "--connect",
+            addr,
+            // `--publish` is REQUIRED for the tick drivers to fire, exactly as
+            // it is for `--put-key`: the drive sits inside the publisher's tick
+            // branch. The key published here is inert.
+            "--publish",
+            "r2655/deleter/tick",
+            "--del-key",
+            del_key,
+        ],
+        "peer: listening on 127.0.0.1:",
+        label,
+        stderr,
+    );
+    (guard, reader)
+}
+
 /// Read R1's advertised config-WRITE key out of its log and return the BASE
 /// `@/<zid>/router/config` that every intent hangs off.
 ///
@@ -641,7 +674,7 @@ fn wz_router_hat_connect_add_is_denied_without_the_write_permit() {
 // destination, so the fixture is two processes rather than three.
 
 #[test]
-#[ignore = "binary-dep e2e (wz-ap-demo --features router-hat-router,router-connect-reconcile,adminspace-router-linkstate,routing-peer,adminspace-write,router-config-mutate); Layer E7b2 runs via --ignored"]
+#[ignore = "binary-dep e2e (wz-ap-demo --features router-hat-router,router-connect-reconcile,adminspace-router-linkstate,routing-peer,adminspace-write,router-config-mutate,pubsub-delete); Layer E7b2 runs via --ignored"]
 fn wz_router_hat_config_key_write_applies_a_link_weight_over_the_wire() {
     let (mut r1_guard, mut r1_reader, p_r1) = spawn_router_hat(
         "router-hat-1",
@@ -675,9 +708,15 @@ fn wz_router_hat_config_key_write_applies_a_link_weight_over_the_wire() {
         r#"[{ dst_zid: "aa", weight: 7 }]"#,
     );
 
+    // R2655 — the line moved with the plane. The drain used to be typed to this
+    // one slice and said so ("applied N link weight(s)"); it now writes any key
+    // whose slice this host has a sink for, through `set_by_key_with`, so it
+    // names the KEY instead of the slice's units. The discriminator is the same:
+    // this line is written only when the write returned `Ok`, which is only when
+    // the value was stored AND the sink was driven.
     let applied = wait_for_substring(
         &mut r1_reader,
-        "config-write applied 1 link weight(s) at runtime",
+        "config-write wrote routing/router/linkstate/transport_weights at runtime",
         Duration::from_secs(20),
     );
 
@@ -698,32 +737,39 @@ fn wz_router_hat_config_key_write_applies_a_link_weight_over_the_wire() {
 
     applied.unwrap_or_else(|c| {
         panic!(
-            "router-hat-1 never logged that it APPLIED the link weight within 20s. \
-             That line is written only when `reconfigure_router_link_weights` \
-             returns Ok, which is only when the sink was driven — so its absence \
-             means the PUT never reached the stash, the drain never ran, or the \
-             rows were refused.\n\
+            "router-hat-1 never logged that it WROTE the link-weight key within \
+             20s. That line is written only when `set_by_key_with` returns Ok, \
+             which is only when the value was stored and the sink was driven — so \
+             its absence means the PUT never reached the queue, the drain never \
+             ran, or the write was refused.\n\
              --- router-hat-1 stderr at deadline ---\n{c}\n\
              --- config-writer stderr ---\n{w_captured}"
         )
     });
-    // The two halves, named separately: the handler DECODED and stashed, and the
-    // drain APPLIED. A run that logged only the first would mean the intent slot
-    // filled and nothing drained it.
+    // The two halves, named separately: the handler QUEUED and the drain WROTE.
+    // A run that logged only the first would mean the queue filled and nothing
+    // drained it.
+    //
+    // ⚠ R2655 — the handler's line says "queued", not "accepted", and the change
+    // is not cosmetic: the handler no longer parses or decides servability, so
+    // an acceptance is not a thing it can report any more. Both judgements moved
+    // into the one function the drain calls.
     assert!(
-        r1_captured.contains("accepted with 1 row(s); queued for apply"),
-        "the handler must report the parse it stashed, not only the apply\n\
+        r1_captured
+            .contains("config-write routing/router/linkstate/transport_weights queued for apply"),
+        "the handler must report the intent it queued, not only the apply\n\
          --- router-hat-1 stderr ---\n{r1_captured}"
     );
     assert!(
-        !r1_captured.contains("REFUSED, live weights unchanged"),
-        "a well-formed single row must not be refused by the sink's validator\n\
+        !r1_captured.contains("transport_weights refused"),
+        "a well-formed single row must not be refused by the write gate\n\
          --- router-hat-1 stderr ---\n{r1_captured}"
     );
     // R2650 — EXACTLY once, over a window in which the same value arrived many
     // times. An unchanged config must not re-drive the sink: the drain compares
-    // the queued rows against the LIVE ones and applies only a difference.
-    let applies = r1_captured.matches("config-write applied").count();
+    // each queued intent against the last one APPLIED for that key and skips a
+    // repeat.
+    let applies = r1_captured.matches("config-write wrote").count();
     assert_eq!(
         applies, 1,
         "the same value re-delivered every tick must be applied ONCE — {applies} \
@@ -733,7 +779,7 @@ fn wz_router_hat_config_key_write_applies_a_link_weight_over_the_wire() {
 }
 
 #[test]
-#[ignore = "binary-dep e2e (wz-ap-demo --features router-hat-router,router-connect-reconcile,adminspace-router-linkstate,routing-peer,adminspace-write,router-config-mutate); Layer E7b2 runs via --ignored"]
+#[ignore = "binary-dep e2e (wz-ap-demo --features router-hat-router,router-connect-reconcile,adminspace-router-linkstate,routing-peer,adminspace-write,router-config-mutate,pubsub-delete); Layer E7b2 runs via --ignored"]
 fn wz_router_hat_config_key_write_is_denied_without_the_write_permit() {
     // Same binary, same PUT, no `--config-write-permit`. The deny is a POSITIVE
     // edge (the demo logs the refusal at error), so this is not a wait-for-absence.
@@ -790,8 +836,101 @@ fn wz_router_hat_config_key_write_is_denied_without_the_write_permit() {
          --- router-hat-1 stderr ---\n{r1_captured}"
     );
     assert!(
-        !r1_captured.contains("config-write applied"),
+        !r1_captured.contains("config-write wrote"),
         "a DENIED write must never be applied — the permit is not load-bearing if \
          it is\n--- router-hat-1 stderr ---\n{r1_captured}"
+    );
+}
+
+/// R2655 — the DELETE half over the WIRE, which this host could not do before.
+///
+/// Until this round the router host's write handler had no `RemoveKey` arm: a
+/// wire delete decoded and fell through to "intent decoded but not applied".
+/// The two halves of upstream's ONE write gate are one gate here now, so the
+/// delete goes through the same queue, the same drain and the same
+/// `ConfigSinks` — and restores the key to its schema default, which for this
+/// one is no weights at all.
+///
+/// ⚠ IT WRITES FIRST AND DELETES AFTER, in one run, because a delete that
+/// restores a default is indistinguishable from a no-op against a node that
+/// never held a value. The PUT is what makes the DEL observable.
+#[test]
+#[ignore = "binary-dep e2e (wz-ap-demo --features router-hat-router,router-connect-reconcile,adminspace-router-linkstate,routing-peer,adminspace-write,router-config-mutate,pubsub-delete); Layer E7b2 runs via --ignored"]
+fn wz_router_hat_config_key_delete_restores_the_default_over_the_wire() {
+    let (mut r1_guard, mut r1_reader, p_r1) = spawn_router_hat(
+        "router-hat-1",
+        &["--router-hat", "127.0.0.1:0", "--config-write-permit"],
+    );
+    let addr_r1 = format!("127.0.0.1:{p_r1}");
+
+    let write_log = wait_for_substring(
+        &mut r1_reader,
+        "adminspace config WRITE at ",
+        Duration::from_secs(10),
+    )
+    .unwrap_or_else(|c| {
+        let _ = r1_guard.child_mut().kill();
+        panic!(
+            "router-hat-1 never logged 'adminspace config WRITE at'\n\
+             --- router-hat-1 stderr ---\n{c}"
+        )
+    });
+    let put_key = config_key_write_key(&write_log, "routing/router/linkstate/transport_weights");
+
+    let (mut w_guard, mut w_reader) = spawn_config_writer(
+        "config-writer",
+        &addr_r1,
+        &put_key,
+        r#"[{ dst_zid: "aa", weight: 7 }]"#,
+    );
+    let wrote = wait_for_substring(
+        &mut r1_reader,
+        "config-write wrote routing/router/linkstate/transport_weights at runtime",
+        Duration::from_secs(20),
+    );
+    // The writer is stopped BEFORE the delete is sent: it re-publishes its PUT
+    // every tick, and a live PUT racing the DEL would leave which one won up to
+    // scheduling rather than to the gate.
+    graceful_terminate(w_guard.child_mut(), Duration::from_secs(5));
+
+    let (mut d_guard, mut d_reader) = spawn_config_deleter("config-deleter", &addr_r1, &put_key);
+    let deleted = wait_for_substring(
+        &mut r1_reader,
+        "config-write deleted routing/router/linkstate/transport_weights at runtime",
+        Duration::from_secs(20),
+    );
+
+    graceful_terminate(d_guard.child_mut(), Duration::from_secs(5));
+    graceful_terminate(r1_guard.child_mut(), Duration::from_secs(5));
+    let r1_captured = read_captured(&mut r1_reader);
+    let w_captured = read_captured(&mut w_reader);
+    let d_captured = read_captured(&mut d_reader);
+    eprintln!("--- router-hat-1 stderr ---\n{r1_captured}");
+    eprintln!("--- config-writer stderr ---\n{w_captured}");
+    eprintln!("--- config-deleter stderr ---\n{d_captured}");
+
+    wrote.unwrap_or_else(|c| {
+        panic!(
+            "router-hat-1 never wrote the weight, so the DELETE below would have \
+             had nothing to restore\n--- router-hat-1 stderr at deadline ---\n{c}"
+        )
+    });
+    deleted.unwrap_or_else(|c| {
+        panic!(
+            "router-hat-1 never logged that it DELETED the key within 20s. That \
+             line is written only when `remove_by_key_with` returns Ok, so its \
+             absence means the DEL never reached the queue, the handler has no \
+             RemoveKey arm, or the delete was refused.\n\
+             --- router-hat-1 stderr at deadline ---\n{c}\n\
+             --- config-deleter stderr ---\n{d_captured}"
+        )
+    });
+    assert!(
+        r1_captured.contains(
+            "config-write routing/router/linkstate/transport_weights delete queued for apply"
+        ),
+        "the handler must report the DELETE it queued — a run without this line \
+         means the intent never decoded as a RemoveKey\n\
+         --- router-hat-1 stderr ---\n{r1_captured}"
     );
 }

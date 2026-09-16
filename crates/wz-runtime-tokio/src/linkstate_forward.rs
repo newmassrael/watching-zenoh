@@ -2612,6 +2612,51 @@ impl LinkstateForwarder {
         })
     }
 
+    /// R2655 — originate a data DELETE into the mesh, the Del twin of
+    /// [`Self::publish`].
+    ///
+    /// # Why this did not exist until now, and what its absence cost
+    ///
+    /// This forwarder has RECEIVED and FORWARDED a Del since R2646 — the
+    /// `CodecZenohMsgDel` arm resolves it to `SampleKind::Del` and hands it to a
+    /// local subscriber — and it could not ORIGINATE one. So a wz node could
+    /// relay somebody else's delete and never write its own, which made the
+    /// delete half of upstream's admin write gate unreachable from any wz node:
+    /// `WzConfig::remove_by_key_with` exists, the decoder resolves a Del sample
+    /// to `RemoveKey`, and nothing in this tree could put that sample on a wire.
+    /// The asymmetry was invisible because every end of it worked.
+    ///
+    /// # What it shares with `publish`, deliberately
+    ///
+    /// The same `compute_self_publish_forward` route, so a delete reaches
+    /// exactly the interested subscribers a Put to the same keyexpr would and a
+    /// keyexpr nobody subscribes to deletes nowhere (`Ok(0)`). Only the CARRIER
+    /// differs, and it differs in the one way a Del differs on the wire: it has
+    /// no payload slot, which is why this takes no payload rather than taking
+    /// one and discarding it.
+    ///
+    /// ⚠ NO QOS TWIN, and that is a measurement rather than an omission: a
+    /// `MsgDel` body carries neither encoding nor attachment, and
+    /// `AdvancedPublisher::delete` already records that QoS, locality and
+    /// reliability are properties of the PUBLISHER rather than of the body. A
+    /// priority-carrying delete would be a second answer to that question with
+    /// no caller asking it.
+    #[cfg(feature = "pubsub-delete")]
+    pub fn publish_delete(&self, keyexpr: &str) -> Result<usize, CodecError> {
+        let Some((push, children)) =
+            compute_self_publish_forward(&self.net, &self.subs, keyexpr, || {
+                wz_session_core::push_build::build_push_del_literal(keyexpr)
+            })?
+        else {
+            return Ok(0); // no remote subscriber / no tree direction -> nothing to send
+        };
+        self.fan_out(true, None, |_id, zid| {
+            Ok(zid
+                .is_some_and(|z| is_child(&children, z))
+                .then(|| NetworkMessage::Push(Box::new(push.clone()))))
+        })
+    }
+
     /// Originate a LOCAL subscription INTO the mesh: this node is interested in
     /// `keyexpr`, so flood a sourced `DeclareSubscriber` to self's CHILDREN in
     /// self's own spanning tree (this node is the source), stamped
@@ -10119,6 +10164,73 @@ mod tests {
         assert_eq!(sink_a.frame_count(), 1, "A received the published Put");
         // self-originated -> node_id 0 on the wire (zenoh DEFAULT).
         assert_eq!(forwarded_source(&sink_a.frame_bytes(0)), 0);
+    }
+
+    /// R2655 — the DELETE twin of the test above, and the capability it grades
+    /// did not exist until this round.
+    ///
+    /// This forwarder had RECEIVED and FORWARDED a Del since R2646 and could not
+    /// ORIGINATE one, so a wz node could relay another node's delete and never
+    /// write its own. That is what made the delete half of upstream's admin
+    /// write gate unreachable from any wz node: the config seam applies a
+    /// delete, the decoder resolves a Del sample to `RemoveKey`, and nothing
+    /// here could put that sample on a wire. Every end of it worked, which is
+    /// why the gap was invisible.
+    ///
+    /// ⚠ THE PAIR IS THE POINT, not this arm alone. Driven beside the Put above
+    /// on the same keyexpr and the same topology, the two differ in exactly one
+    /// thing — the body kind — so a Del that silently built a Put would pass
+    /// this test's count and fail its LAST assertion, and a route that reached
+    /// nobody would fail the first.
+    #[cfg(feature = "pubsub-delete")]
+    #[test]
+    fn publish_delete_sends_a_self_originated_del_to_an_interested_tree_child() {
+        let fwd = LinkstateForwarder::new(zid(0x05), WhatAmI::Peer);
+        let (face_a, sink_a) = peer_face(zid(0x0A));
+        fwd.register(FaceId(0), &face_a);
+        advertise_link_back(&fwd, FaceId(0), 0x0A, 0x05); // edge S<->A
+        declare_interest(&fwd, FaceId(0), "demo/data"); // A subscribes
+        sink_a.reset();
+
+        let sent = fwd
+            .publish_delete("demo/data")
+            .expect("publish_delete builds and fans out");
+        assert_eq!(sent, 1, "sent to the one interested tree child");
+        assert_eq!(sink_a.frame_count(), 1, "A received the published Del");
+        assert_eq!(
+            forwarded_source(&sink_a.frame_bytes(0)),
+            0,
+            "self-originated, exactly as the Put above"
+        );
+        // THE BODY KIND, which is the whole difference between the two, read off
+        // the WIRE rather than from a local callback: what a remote node decodes
+        // as `RemoveKey` is this byte, not anything this process holds.
+        //
+        // ⛔ COMPARED BY LENGTH, AND `assert_ne!` ON THE BYTES WAS THE FIRST CUT
+        // AND WAS VACUOUS. A red-first probe said so: building the Del as an
+        // empty Put left this test GREEN, because consecutive frames carry
+        // consecutive sequence numbers and two frames therefore never have equal
+        // bytes. The assertion measured the SN, not the kind.
+        //
+        // The length is the kind, here. An empty Put still encodes its
+        // `payload_len` field; a Del has no payload slot at all
+        // (`build_push_del_literal` takes no payload), so it is strictly shorter
+        // than a Put of nothing. Collapse the two and the lengths become equal.
+        let del_bytes = sink_a.frame_bytes(0);
+        sink_a.reset();
+        fwd.publish("demo/data", b"")
+            .expect("publish the empty Put");
+        let put_bytes = sink_a.frame_bytes(0);
+        assert!(
+            del_bytes.len() < put_bytes.len(),
+            "a delete must not go out as a Put: a Del has no payload slot and an \
+             empty Put still encodes a payload length, so the Del frame is the \
+             shorter of the two. Equal lengths mean the kinds collapsed and a \
+             remote node would apply this delete as a write of an empty value. \
+             del={} put={}",
+            del_bytes.len(),
+            put_bytes.len()
+        );
     }
 
     // Gated on the same qos-byte subset as the emit/decode path

@@ -4079,6 +4079,18 @@ pub(crate) struct PeerOpts {
     pub put_key: Option<String>,
     /// R311y48 — the payload bytes the [`put_key`](Self::put_key) Put carries.
     pub put_payload: Option<String>,
+    /// R2655 — originate a DELETE to this key each app tick: the wire driver for
+    /// a config-write DELETE, and the twin of [`put_key`](Self::put_key).
+    ///
+    /// It exists because the write gate has two halves and this driver had one,
+    /// so nothing in this tree could put a Del on a config-write keyexpr — the
+    /// delete half was reachable in the library and unreachable from a node.
+    /// Unlike `--delete`, which is a burst-publisher MODE mutually exclusive
+    /// with `--publish`, this rides the ordinary app tick beside the Put driver,
+    /// because a config write is a thing a mesh node does while it is doing
+    /// everything else.
+    #[cfg(feature = "pubsub-delete")]
+    pub del_key: Option<String>,
     /// R311y397 (Slice B) — pin this peer's routing zid (`--zid <hex>`) instead of
     /// deriving it from the listen port, mirroring [`run_router_hat`]'s override.
     /// REQUIRED for a non-IP listen (unixpipe / unixsock / vsock has no port to
@@ -4249,6 +4261,8 @@ async fn run_peer_until(
     let no_admin_read = opts.no_admin_read;
     let put_key = opts.put_key.as_deref();
     let put_payload = opts.put_payload.as_deref();
+    #[cfg(feature = "pubsub-delete")]
+    let del_key = opts.del_key.as_deref();
     // R311y397 — pin this peer's routing zid (`--zid`) instead of deriving it from
     // the listen port; owned (not borrowed) because the derivation below consumes it.
     let zid_override = opts.zid_override.clone();
@@ -5462,6 +5476,14 @@ async fn run_peer_until(
                 if let (Some(k), Some(v)) = (put_key, put_payload) {
                     let _ = forwarder.publish(k, v.as_bytes());
                 }
+                // R2655 — the DELETE twin of the driver above, on the same tick
+                // and for the same reason: a remote node uses it to DELETE a key
+                // in another node's `@/<A>/<role>/config/**`, which is the half
+                // of upstream's write gate nothing here could reach.
+                #[cfg(feature = "pubsub-delete")]
+                if let Some(k) = del_key {
+                    let _ = forwarder.publish_delete(k);
+                }
                 // R311y48 — apply a pending config-write: a remote PUT to
                 // `.../config/acl-deny` stashed a deny keyexpr; drain it and
                 // reconfigure the LIVE forwarder (the Phase-1 InterceptorSink drive),
@@ -5808,6 +5830,26 @@ pub(crate) async fn run_router_hat(
     .await
 }
 
+/// R2655 — one runtime config write this host has taken off the wire and not
+/// yet applied.
+///
+/// The key and the value TEXT, exactly as the PUT carried them, because
+/// `WzConfig::set_by_key_with` is the parse as well as the apply and a second
+/// parse at ingress would be a second judge of the same question. `value` is
+/// `None` for a DELETE — the same shape the config write gate itself takes,
+/// where `None` means the schema default.
+///
+/// `PartialEq` is what the drain dedups on: the test harness re-publishes the
+/// same PUT every app tick, so without it an operator writing a value ONCE
+/// would have the sink re-driven, and the log would say "applied", for the life
+/// of the node.
+#[cfg(all(feature = "router-hat-router", feature = "router-config-mutate"))]
+#[derive(Clone, PartialEq, Eq)]
+struct PendingConfigWrite {
+    key: String,
+    value: Option<String>,
+}
+
 /// The testable inner of [`run_router_hat`] (R311y406) — takes the shutdown as a
 /// parameter so a unit test can inject an immediately-ready future and witness the
 /// bind (e.g. a cert-threaded `--router-hat quic/` ADMIT) WITHOUT hanging on the real
@@ -6068,22 +6110,37 @@ async fn run_router_hat_until(
     // and stashes it here; the app-tick loop below — which does hold both the
     // shared config and `&forwarder` — drains it and applies it.
     //
-    // Typed rather than a type-erased carrier of the parsed ingest: there are
-    // three config slices and only TWO of them are push-discipline, so there is
-    // no population to generalise over, and each drain calls a DIFFERENT
-    // `reconfigure_*` with a different typed argument. Erasing the type would
-    // buy a match of the same length inside the drain and lose the type.
+    // ⚠ R2655 CORRECTING R2648, which argued the slot should be TYPED: "there
+    // are three config slices and only TWO of them are push-discipline, so
+    // there is no population to generalise over, and each drain calls a
+    // DIFFERENT `reconfigure_*` with a different typed argument. Erasing the
+    // type would buy a match of the same length inside the drain and lose the
+    // type." That was true when it was written and is not true now. R2654 gave
+    // `WzConfig::set_by_key_with` the sinks and made it dispatch on the
+    // registry's SLICE column, so the drain no longer calls a different
+    // `reconfigure_*` per slice — it calls ONE function with the key, the value
+    // and whatever sinks this host owns. There is nothing left to erase and
+    // nothing left to match on.
     //
-    // NOT validated here, deliberately. `reconfigure_router_link_weights`
-    // refuses a duplicate destination BEFORE it commits the rows, which is the
-    // one rule the install block below already routes through; checking here as
-    // well would make a second judge of the same question. This host is a Push
-    // subscriber and answers no one, so an earlier refusal would only move a log
-    // line, not reach the writer.
+    // What that buys is the whole of this host's share of the
+    // `adminspace-write` residual: a typed slot is one stash PER KEY, and this
+    // is one queue for every key whose slice this host has a sink for — which,
+    // because `RouterForwarder` is both an `InterceptorSink` and a
+    // `RouterLinkWeightSink`, is every push-discipline key in the registry.
+    //
+    // A QUEUE and not a slot, because ORDER is load-bearing for one of them:
+    // the five `access_control/*` keys compile as a subtree, so a policy naming
+    // a rule id has to arrive after the rules. A last-write-wins slot per key
+    // would keep both writes and lose the sequence.
+    //
+    // NOT parsed here, and that is the same rule R2648 stated for validation,
+    // now applied one step earlier: `set_by_key_with` IS the parse and the
+    // apply, so parsing at ingress would make a second judge of the same
+    // question. This host is a Push subscriber and answers no one, so an
+    // earlier refusal would only move a log line, not reach the writer.
     #[cfg(feature = "router-config-mutate")]
-    let pending_router_link_weights: std::rc::Rc<
-        std::cell::RefCell<Option<Vec<wz::runtime_tokio::linkstate_forward::TransportWeight>>>,
-    > = std::rc::Rc::new(std::cell::RefCell::new(None));
+    let pending_config_writes: std::rc::Rc<std::cell::RefCell<Vec<PendingConfigWrite>>> =
+        std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
 
     // Driven through the config's install seam, not by translating rows here, so
     // setup and any later reconfigure take ONE path. A duplicate destination is
@@ -6536,10 +6593,10 @@ async fn run_router_hat_until(
         // is silently ignored. Both shapes now come from one origin in
         // `wz-session-core`, which is what makes them impossible to mismatch.
         let write_prefix = admin_config_write_prefix(&write_zid_hex, write_whatami_str);
-        // The intent slot this handler stashes into; the app-tick loop owns
-        // the sink and drains it.
+        // The intent queue this handler stashes into; the app-tick loop owns
+        // the sinks and drains it.
         #[cfg(feature = "router-config-mutate")]
-        let write_pending_weights = std::rc::Rc::clone(&pending_router_link_weights);
+        let write_pending_config = std::rc::Rc::clone(&pending_config_writes);
         let write_handler = move |sample: &dyn SampleView| {
             // Re-read per PUT off the SAME live config the GET gate reads —
             // a permit captured at setup could not answer a permission changed
@@ -6605,53 +6662,46 @@ async fn run_router_hat_until(
                 // key is the runtime-mutable REGISTRY, never a literal list
                 // here. A literal would be a second answer to "which keys
                 // can change while this node runs".
+                //
+                // ⚠ R2655 — THE REGISTRY LOOKUP THAT USED TO BE HERE IS GONE,
+                // and removing it is the point rather than a tidy-up. It asked
+                // "is this key runtime-mutable, and is its slice the one slice
+                // this host serves", which is a SECOND answer to a question
+                // `set_by_key_with` now answers from the sinks it was handed —
+                // `NotRuntimeMutable` for the first half, `NeedsSink` for the
+                // second. Two answers to one question is how a host and a
+                // registry start disagreeing about which keys a node can change.
+                //
+                // So the handler queues, unconditionally, and the drain reports
+                // the verdict by name. A key this host cannot serve costs one
+                // queue entry and one log line a tick later, which is the price
+                // of having exactly one judge.
                 #[cfg(feature = "router-config-mutate")]
                 AdminConfigWriteOutcome::Apply(AdminConfigWrite::SetKey { key, value }) => {
-                    let row = wz::runtime_tokio::config::RUNTIME_MUTABLE_CONFIG_KEYS
-                        .iter()
-                        .find(|row| row.key == key);
-                    match row {
-                        // The one slice this run-mode owns a sink for. Parse
-                        // ONLY: this is a sync closure on the Push ingress and
-                        // holds no `&forwarder`, exactly as the ConnectAdd arm
-                        // above explains for its own resolver.
-                        Some(row) if row.slice == "router_link_weights" => {
-                            match wz::runtime_tokio::config::WzConfig::ingest_for_key(&key, &value)
-                            {
-                                Ok(ingest) => {
-                                    let rows = ingest.config.router_transport_weights;
-                                    log::info!(
-                                        "wz-ap-demo router-hat: config-write {key} \
-                                             accepted with {} row(s); queued for apply",
-                                        rows.len()
-                                    );
-                                    // LAST WRITE WINS while a tick is pending,
-                                    // which is what a config key means: the
-                                    // value is the whole slice, so an older
-                                    // pending value has been superseded rather
-                                    // than lost.
-                                    *write_pending_weights.borrow_mut() = Some(rows);
-                                }
-                                Err(e) => log::warn!(
-                                    "wz-ap-demo router-hat: config-write {key} refused: \
-                                         {e:?}"
-                                ),
-                            }
-                        }
-                        // Known to the registry, but its sink lives on another
-                        // host. Named rather than lumped in with an unknown
-                        // key: this one wz CAN change at runtime, just not here.
-                        Some(row) => log::warn!(
-                            "wz-ap-demo router-hat: config-write {key} is \
-                                 runtime-mutable on slice {} but this host holds no \
-                                 sink for it; ignored",
-                            row.slice
-                        ),
-                        None => log::warn!(
-                            "wz-ap-demo router-hat: config-write {key} is not a \
-                                 runtime-mutable key; ignored"
-                        ),
-                    }
+                    // ⚠ IT LOGS THE QUEUEING AND NOT AN ACCEPTANCE, and the
+                    // wording is the difference: this handler no longer knows
+                    // whether the key is servable here, so "queued" is the whole
+                    // of what it can truthfully say. The line is kept because it
+                    // is the only thing separating "the PUT never arrived" from
+                    // "the drain never ran" when an apply is missing.
+                    log::info!("wz-ap-demo router-hat: config-write {key} queued for apply");
+                    write_pending_config.borrow_mut().push(PendingConfigWrite {
+                        key,
+                        value: Some(value),
+                    });
+                }
+                // R2655 — the DELETE twin, and it is here for the reason the two
+                // halves of the write gate are everywhere else in this tree: a
+                // reader who finds one must find the other. Before this round it
+                // fell through to the `Apply(other)` arm below and was logged as
+                // decoded-but-not-applied, which was true of this host and is
+                // not any more.
+                #[cfg(feature = "router-config-mutate")]
+                AdminConfigWriteOutcome::Apply(AdminConfigWrite::RemoveKey { key }) => {
+                    log::info!("wz-ap-demo router-hat: config-write {key} delete queued for apply");
+                    write_pending_config
+                        .borrow_mut()
+                        .push(PendingConfigWrite { key, value: None });
                 }
                 // Every other intent decodes here (the decoder is one SSOT) but
                 // this host applies none: the ACL slice and the storage manager
@@ -6756,6 +6806,14 @@ async fn run_router_hat_until(
     // One-shot latch for the `--connect-after` reconcile fire (below).
     #[cfg(feature = "router-connect-reconcile")]
     let mut reconcile_fired = false;
+    // R2655 — the last value APPLIED per config key, which is what the drain
+    // below dedups the harness's repeated PUTs against. Keyed by config key
+    // rather than a single slot, because two keys are two independent writes and
+    // one superseding the other would be a fact about the queue rather than
+    // about the configuration.
+    #[cfg(feature = "router-config-mutate")]
+    let mut last_applied_config_write: std::collections::HashMap<String, Option<String>> =
+        std::collections::HashMap::new();
     // High-water node counts per tier (teardown collapses the live graphs toward
     // self, so the peak is the meaningful converged-size witness — the run_peer
     // peak_nodes discipline, per net).
@@ -6818,44 +6876,68 @@ async fn run_router_hat_until(
                 // the reconfigure runs -- the handler is free to stash the next
                 // write while this one is being applied.
                 //
-                // A refusal is LOGGED and the live weights are left alone, which
+                // A refusal is LOGGED and the live config is left alone, which
                 // is the one place this differs from the startup install above:
                 // there a duplicate destination is a hard error because the node
                 // has not started yet, and here it must not take the node down.
-                // `reconfigure_*` builds the map BEFORE it commits the rows, so
-                // a refused write has changed nothing.
+                // `set_by_key_with` snapshots before it stores and rolls back if
+                // the consumer refuses, so a refused write has changed nothing.
+                //
+                // ⚠ R2655 — THE SINKS ARE BOTH OF THE FORWARDER'S, which is what
+                // makes this host's write surface the whole registry rather than
+                // one slice: `RouterForwarder` implements `InterceptorSink` AND
+                // `RouterLinkWeightSink`, so naming both here is not optimism
+                // about a future sink — it is the two this object already is.
                 #[cfg(feature = "router-config-mutate")]
                 {
-                    let queued = pending_router_link_weights.borrow_mut().take();
-                    // IDEMPOTENT, and it has to be: `--put-key` fires once per app
-                    // tick, so an operator writing a value ONCE has it delivered
-                    // every tick for the life of the node. Without this the sink is
-                    // re-driven forever for a configuration that never changed, and
-                    // the log says "applied" each time.
-                    //
-                    // Compared against the LIVE rows rather than against a
-                    // `last_applied` shadow, which is where this differs from the
-                    // peer's `acl-deny` drain and why: that one holds a deny
-                    // keyexpr, and its live value is a COMPILED policy it cannot be
-                    // compared with, so a shadow is the only option there. Here the
-                    // live value IS the rows, and a shadow would be a second
-                    // representation that could fall out of step with them.
-                    let unchanged = queued
-                        .as_ref()
-                        .is_some_and(|rows| host_cfg.borrow().router_link_weights() == rows);
-                    if let Some(rows) = queued.filter(|_| !unchanged) {
-                        let count = rows.len();
-                        match host_cfg
-                            .borrow_mut()
-                            .reconfigure_router_link_weights(rows, &forwarder)
-                        {
-                            Ok(_) => log::info!(
-                                "wz-ap-demo router-hat: config-write applied \
-                                 {count} link weight(s) at runtime"
-                            ),
-                            Err(dup) => log::error!(
-                                "wz-ap-demo router-hat: config-write link weights \
-                                 REFUSED, live weights unchanged: {dup:?}"
+                    // `take` into a local FIRST so the queue's borrow ends before
+                    // the writes run -- the handler is free to stash the next one
+                    // while these are being applied.
+                    let queued: Vec<PendingConfigWrite> =
+                        std::mem::take(&mut *pending_config_writes.borrow_mut());
+                    let sinks = wz::runtime_tokio::config::ConfigSinks::none()
+                        .with_interceptors(&forwarder)
+                        .with_router_link_weights(&forwarder);
+                    for write in queued {
+                        // IDEMPOTENT, and it has to be: the harness re-publishes
+                        // the same PUT every app tick, so an operator writing a
+                        // value ONCE would have the sink re-driven, and the log
+                        // would say "applied", for the life of the node.
+                        //
+                        // ⚠ AGAINST THE LAST APPLIED INTENT, not against the live
+                        // value, and R2648's warning about a shadow does not reach
+                        // this one. That warning is about comparing a DERIVED form
+                        // with a source form -- the peer's `acl-deny` drain cannot
+                        // compare a keyexpr with the compiled policy it became. This
+                        // compares source text with the source text last applied,
+                        // which cannot drift from itself, and it is the only
+                        // comparison available once the queue stops being typed.
+                        if last_applied_config_write.get(&write.key) == Some(&write.value) {
+                            continue;
+                        }
+                        let key = write.key.clone();
+                        let outcome = match &write.value {
+                            Some(value) => {
+                                host_cfg.borrow_mut().set_by_key_with(&key, value, &sinks)
+                            }
+                            None => host_cfg.borrow_mut().remove_by_key_with(&key, &sinks),
+                        };
+                        match outcome {
+                            Ok(()) => {
+                                let verb = if write.value.is_some() { "wrote" } else { "deleted" };
+                                log::info!(
+                                    "wz-ap-demo router-hat: config-write {verb} {key} \
+                                     at runtime"
+                                );
+                                last_applied_config_write.insert(key, write.value);
+                            }
+                            // NOT recorded as applied: a refused write must be
+                            // retried if the operator writes it again, and a key
+                            // whose subtree is not ready yet becomes writable the
+                            // moment the entries it names arrive.
+                            Err(err) => log::warn!(
+                                "wz-ap-demo router-hat: config-write {key} refused: \
+                                 {err:?}"
                             ),
                         }
                     }
@@ -8829,6 +8911,8 @@ mod peer_quic_cert_tests {
             no_admin_read: false,
             put_key: None,
             put_payload: None,
+            #[cfg(feature = "pubsub-delete")]
+            del_key: None,
             zid_override: None,
             #[cfg(feature = "transport-multilink")]
             max_links: 1,
@@ -8963,6 +9047,8 @@ mod peer_failfast_tests {
             no_admin_read: false,
             put_key: None,
             put_payload: None,
+            #[cfg(feature = "pubsub-delete")]
+            del_key: None,
             zid_override: None,
             #[cfg(feature = "transport-multilink")]
             max_links: 1,

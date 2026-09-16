@@ -222,6 +222,13 @@ preset-ap-full = [
     # membership here is a decision, not a side effect of some other key pulling
     # it in.
     "router-config-mutate",
+    # R2655 — `pubsub-delete`, which is the OTHER half of the key above. The
+    # config-write plane applies a delete and, without this, the AP-full binary
+    # could not SEND one: a node that can write another node's config key and
+    # cannot delete it holds half of upstream's write gate. The rule this list
+    # states — membership is a decision — cuts the same way for a half as for a
+    # whole.
+    "pubsub-delete",
     # R311y492 — the `--plugin` CLI surface, now that `wz/preset-ap-full` claims
     # the atom. Held back before that for the reason this list's rule states.
     "plugin-dynamic-loading",
@@ -783,6 +790,22 @@ router-connect-reconcile = ["router-hat-router", "wz/router-connect-reconcile"]
 # whatever wider set happened to supply it, which is the drift a leg naming its own
 # features exists to prevent — and the build caught exactly that here.
 router-config-mutate = ["router-hat-router", "zenoh-config", "wz/config-mutate-runtime"]
+# R2655 — `--del-key <keyexpr>`, the wire driver for a config-write DELETE and
+# the twin of the `--put-key` / `--put-payload` pair.
+#
+# It exists because upstream's admin write gate has two halves and this binary
+# could only drive one: `WzConfig::remove_by_key_with` applies a delete, the
+# decoder resolves a Del sample to `RemoveKey`, and NOTHING in this tree could
+# put that sample on a wire. The forwarder had received and forwarded a Del
+# since R2646 and could not originate one, so every end of the delete half
+# worked and the half did not.
+#
+# It names `routing-peer` and is NOT a bare `["wz/pubsub-delete"]` passthrough,
+# for the reason `adminspace-router-linkstate` below records about its own: the
+# driver sits in `run_peer_until`'s app tick, which `routing-peer` compiles, so
+# a passthrough would let this feature enable with its only caller compiled out
+# — a flag that parses and drives nothing.
+pubsub-delete = ["routing-peer", "wz/pubsub-delete"]
 # §5.23 adminspace-router-linkstate (R311y204) — compiles the demo router-hat's
 # admin-queryable registration + the per-GET LinkstateNetView render INSIDE
 # run_router_hat. Pulls router-hat-router (the run-mode — a bare `["wz/adminspace-

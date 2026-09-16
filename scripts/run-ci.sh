@@ -17427,7 +17427,7 @@ layer_e7b2_router_connect_add_over_the_wire() {
     # vacuously against a host that decodes the PUT and applies nothing, which is the
     # same containment argument `adminspace-write` already carries here.
     (cd crates && cargo build -p wz-ap-demo \
-        --features router-hat-router,router-connect-reconcile,adminspace-router-linkstate,routing-peer,adminspace-write,router-config-mutate --quiet) || return 1
+        --features router-hat-router,router-connect-reconcile,adminspace-router-linkstate,routing-peer,adminspace-write,router-config-mutate,pubsub-delete --quiet) || return 1
     # `--test-threads=1`: these tests bind ephemeral ports and scrape their own
     # node's zid out of a shared stderr genre; serial keeps each pair's logs
     # unambiguous.

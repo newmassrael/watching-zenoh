@@ -522,6 +522,14 @@ fn main() -> ExitCode {
             // when both are set.
             let put_key = parse_pair(rest, "--put-key");
             let put_payload = parse_pair(rest, "--put-payload");
+            // R2655 — `--del-key <keyexpr>`, the DELETE twin of the pair above
+            // and the wire driver a remote node uses to DELETE a key in another
+            // node's `@/<A>/<role>/config/**`. It takes no payload, because a
+            // `MsgDel` has no payload slot on the wire; taking one and
+            // discarding it would be the representable-but-meaningless pair the
+            // Del carrier was built to avoid.
+            #[cfg(feature = "pubsub-delete")]
+            let del_key = parse_pair(rest, "--del-key");
             // R311y213 (transport-multilink) — `--max-links <N>` sets the aggregated-
             // link budget (the unicast.max_links analogue): `> 1` aggregates N physical
             // links to a peer zid into ONE logical session (achieved by dialing the
@@ -805,6 +813,8 @@ fn main() -> ExitCode {
                     no_admin_read,
                     put_key,
                     put_payload,
+                    #[cfg(feature = "pubsub-delete")]
+                    del_key,
                     zid_override,
                     #[cfg(feature = "transport-multilink")]
                     max_links,

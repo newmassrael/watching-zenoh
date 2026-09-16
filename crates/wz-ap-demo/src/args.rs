@@ -5168,6 +5168,14 @@ mod stock_config_tests {
             // types" had stopped being true, and this round's own `--listen-retry`
             // could not be documented without naming its twin.
             "declare-id",
+            // R2655 — the DELETE twin of `put-key` below, and it is undocumented
+            // for that flag's reason rather than for one of its own: both are
+            // wire DRIVERS for an admin config write, typed by a test harness
+            // and by nobody else. An operator writing another node's config uses
+            // a zenoh client, not this binary's tick loop. If `put-key` is ever
+            // printed, this goes with it -- they are one capability with two
+            // halves, and printing one would read as the other being absent.
+            "del-key",
             "downsample",
             "downsample-freq",
             "downsample-interface",
