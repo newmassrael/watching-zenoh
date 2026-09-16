@@ -425,9 +425,10 @@ impl InterceptorFlow {
     /// (`net/routing/interceptor/low_pass.rs:83-85`). R311y451.
     pub const ALL: [InterceptorFlow; 2] = [InterceptorFlow::Ingress, InterceptorFlow::Egress];
 
-    /// R2650 — upstream's wire spelling, from its `InterceptorFlow`
-    /// (`commons/zenoh-config/src/lib.rs`), which a config document names on
-    /// the `flows` axis of both interceptor keys.
+    /// R2650 — upstream's wire spelling, from its
+    /// `commons/zenoh-config/src/lib.rs`
+    /// @ `pub enum InterceptorFlow`, which a config document names on the
+    /// `flows` axis of both interceptor keys.
     ///
     /// Exhaustive on purpose: a third direction would stop this COMPILING
     /// rather than quietly acquiring no spelling.

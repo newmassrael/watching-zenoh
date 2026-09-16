@@ -3928,8 +3928,8 @@ fn matcher_of(value: &Json5Value, path: &'static str) -> Result<WhatAmIMatcher, 
 /// R2650 — the message kinds `downsampling` and `low_pass_filter` accept.
 ///
 /// FOUR, and they are NOT [`AclMessage`]'s nine. Upstream types both interceptor
-/// keys' `messages` as `DataMessage` (`commons/zenoh-config/src/lib.rs` @ `pub
-/// enum DataMessage`) and the ACL's as `AclMessage`, so a reader that reused the
+/// keys' `messages` as `DataMessage` (`commons/zenoh-config/src/lib.rs`
+/// @ `pub enum DataMessage`) and the ACL's as `AclMessage`, so a reader that used
 /// wider set here would ACCEPT a document a real zenohd refuses -- looser than
 /// upstream, which the fixture lane cannot catch because it only ever drives
 /// documents zenohd starts on.

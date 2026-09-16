@@ -378,6 +378,31 @@ if ! python3 scripts/lib/config_key_fixture_gate.py; then
     exit 1
 fi
 
+# ─── gate 2d2 — a declared demo feature has an AP-full membership verdict ──
+# grades: worktree
+#
+# R2650. Declaring a `wz-ap-demo` feature obliges a decision: either
+# `preset-ap-full` reaches it, or the manifest says it is held back. Without one,
+# the AP-full binary compiles a capability in and cannot reach it from argv —
+# which is what the demo manifest's own held-back rule exists to prevent.
+#
+# THIS GATE ALREADY EXISTED AND ONLY HOSTED RAN IT. R2650 declared
+# `router-config-mutate`, every local gate passed, and Layer A5 said so hours
+# later on a tree three pushes old. The script is 0.29s measured and reads two
+# manifests — the same profile as gate 2d above, whose own note says a check this
+# cheap is not worth scoping. A rule that needs remembering had a gate the whole
+# time; it just was not wired to the thing that runs before a push.
+if ! python3 scripts/lib/apfull_membership.py >/dev/null; then
+    echo "" >&2
+    echo "pre-push: [gate 2d2] AP-full membership FAILED — a demo feature is" >&2
+    echo "          declared with no verdict: either preset-ap-full reaches it" >&2
+    echo "          or the manifest holds it back BY NAME. Re-run" >&2
+    echo "          \`python3 scripts/lib/apfull_membership.py\` for the key." >&2
+    echo "          Hosted Layer A5 is the only other thing that checks this." >&2
+    echo "          Bypass with \`git push --no-verify\` only for genuine hotfixes." >&2
+    exit 1
+fi
+
 # ─── gate 2e — every attachment carrier witnesses its own capacity ──
 # grades: worktree
 #
