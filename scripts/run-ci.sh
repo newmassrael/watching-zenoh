@@ -17373,32 +17373,55 @@ layer_e7_router_hat() {
 # `--skip wz_router` from double-running these on an arbitrary-feature binary.
 layer_e7b_router_connect_reconcile() {
     # POSITIVE (feature ON): both the connect-added reconcile (slice 1) and the peer
-    # auto-reconnect redial-on-drop (slice 2) against the reconcile binary; skip the
-    # feature-off negative (it needs the no-reconcile binary below).
+    # auto-reconnect redial-on-drop (slice 2) against the reconcile binary; the
+    # feature-off negative runs below, on the binary it needs.
     #
-    # R2393 — `--skip connect_add` too, and this filter is a POPULATION rather than a
-    # convenience. The selection is "every ignored test in the file except one NAME",
-    # so a test ADDED to the file joins it silently: R2393's two `connect_add` e2es
-    # need `routing-peer` (only `PeerOpts` parses `--put-key`), which this binary does
-    # not carry, so they would have run here against a build with no writer and failed.
-    # R2649 — they used to need `adminspace-router-linkstate` as well, because the
-    # config-write subscriber was NESTED inside that feature's admin-queryable block.
-    # That was a write plane gated on a RENDER feature, and its consequence was
-    # exactly this note: `router-connect-reconcile`'s own wire producer was compiled
-    # out of a build that enables `router-connect-reconcile` and nothing else. The
-    # subscriber now sits outside that block under the union of the intents it serves,
-    # so THIS binary hosts it — proven by a damage probe, since a green build cannot
-    # tell "compiled in" from "compiled out". They have their
-    # own binary in Layer E7b2. (The default Layer E sweep needs no change: its
-    # `--skip wz_router` already covers the `wz_router_hat_` name prefix.)
+    # ⛔⛔ R2658 — THIS LANE NAMES THE TESTS IT RUNS, and until this round it named
+    # the ones it did NOT. The selection was `--ignored --skip requires_feature
+    # --skip connect_add --skip config_key_write`, i.e. "every ignored test in this
+    # file except three name fragments", and the note it carried said the risk out
+    # loud: "a test ADDED to the file joins it silently". R2655 added
+    # `wz_router_hat_config_key_delete_restores_the_default_over_the_wire`, which
+    # matches none of the three fragments, so it joined this lane and ran against a
+    # binary with no `router-config-mutate` — the host decoded the write and applied
+    # nothing, and the test failed on its own setup assert. THREE hosted runs died
+    # here (`35056847159`, `35058755117`, `35067974395`) and the layer is fail-fast,
+    # so E7b2 — the lane that owns that test — never ran on any of them.
+    #
+    # A deny-list is the defect: its correctness depends on what does NOT exist yet.
+    # An allow-list is wrong only about tests someone wrote, which is a thing a
+    # reader can check. ⚠ THE RESIDUE, stated rather than hidden: nothing yet
+    # asserts that every `#[ignore]`d test in this file is claimed by SOME lane, so
+    # a test added and named in neither lane now runs nowhere instead of running in
+    # the wrong place. That is the safer failure and still a silent one; it is
+    # registered as open debt, with its population derived over the whole tree
+    # (358 lane-attributed `#[ignore]` tests across ~38 lanes).
+    #
+    # R2649 — E7b2's tests used to need `adminspace-router-linkstate` as well,
+    # because the config-write subscriber was NESTED inside that feature's
+    # admin-queryable block. That was a write plane gated on a RENDER feature, and
+    # its consequence was that `router-connect-reconcile`'s own wire producer was
+    # compiled out of a build enabling `router-connect-reconcile` and nothing else.
+    # The subscriber now sits outside that block under the union of the intents it
+    # serves, so THIS binary hosts it — proven by a damage probe, since a green
+    # build cannot tell "compiled in" from "compiled out".
+    # (The default Layer E sweep needs no change: its `--skip wz_router` already
+    # covers the `wz_router_hat_` name prefix.)
     (cd crates && cargo build -p wz-ap-demo --features router-hat-router,router-connect-reconcile --quiet) || return 1
-    (cd crates && cargo test -p wz-integration-tests \
-        --test wz_router_hat_connect_reconcile -- --ignored --skip requires_feature --skip connect_add --skip config_key_write --quiet) || return 1
+    local e7b_test
+    for e7b_test in \
+        wz_router_hat_reconcile_dials_new_endpoint \
+        wz_router_hat_reconcile_dedups_already_dialed \
+        wz_router_hat_reconnect_redials_dropped_peer; do
+        (cd crates && cargo test -p wz-integration-tests \
+            --test wz_router_hat_connect_reconcile "$e7b_test" -- --ignored --exact --quiet) || return 1
+    done
     # NEGATIVE (feature OFF): --connect-after inert on the router-hat-router-only
     # binary (rebuilt here so it never shares the reconcile build).
     (cd crates && cargo build -p wz-ap-demo --features router-hat-router --quiet) || return 1
     (cd crates && cargo test -p wz-integration-tests \
-        --test wz_router_hat_connect_reconcile wz_router_hat_reconcile_requires_feature -- --ignored --quiet) || return 1
+        --test wz_router_hat_connect_reconcile wz_router_hat_reconcile_requires_feature \
+        -- --ignored --exact --quiet) || return 1
 }
 
 # ─── Layer E7b2 — router-connect-reconcile: the connect list told over the WIRE ──
@@ -17443,16 +17466,28 @@ layer_e7b2_router_connect_add_over_the_wire() {
     # `--test-threads=1`: these tests bind ephemeral ports and scrape their own
     # node's zid out of a shared stderr genre; serial keeps each pair's logs
     # unambiguous.
-    (cd crates && cargo test -p wz-integration-tests \
-        --test wz_router_hat_connect_reconcile wz_router_hat_connect_add \
-        -- --ignored --test-threads=1 --quiet) || return 1
-    # R2649 — the config-KEY write pair, run as its OWN invocation rather than by
-    # widening the filter above: the two names share only the prefix
-    # `wz_router_hat_con`, and a filter that selects by a prefix coincidence is one
-    # rename away from silently running nothing.
-    (cd crates && cargo test -p wz-integration-tests \
-        --test wz_router_hat_connect_reconcile wz_router_hat_config_key_write \
-        -- --ignored --test-threads=1 --quiet) || return 1
+    #
+    # ⛔⛔ R2658 — ONE INVOCATION PER TEST, BY EXACT NAME. R2649 had already split
+    # this into two invocations and said why — "a filter that selects by a prefix
+    # coincidence is one rename away from silently running nothing" — and then the
+    # next test added to the file proved the milder half of the same point: R2655's
+    # `..._config_key_delete_restores_the_default_over_the_wire` contains neither
+    # `connect_add` nor `config_key_write`, so this lane, which OWNS it by its own
+    # `#[ignore]` note, never selected it. It ran in E7b instead, against a binary
+    # without `router-config-mutate`, and reddened three hosted runs. A substring
+    # filter answers "what happens to share these characters"; `--exact` over a
+    # named list answers "what this lane runs".
+    local e7b2_test
+    for e7b2_test in \
+        wz_router_hat_connect_add_over_the_wire_dials_the_new_endpoint \
+        wz_router_hat_connect_add_is_denied_without_the_write_permit \
+        wz_router_hat_config_key_write_applies_a_link_weight_over_the_wire \
+        wz_router_hat_config_key_write_is_denied_without_the_write_permit \
+        wz_router_hat_config_key_delete_restores_the_default_over_the_wire; do
+        (cd crates && cargo test -p wz-integration-tests \
+            --test wz_router_hat_connect_reconcile "$e7b2_test" \
+            -- --ignored --exact --test-threads=1 --quiet) || return 1
+    done
 }
 
 # ─── Layer E7c — adminspace-router-linkstate: router admin legs CROSS-NODE E2E ───
