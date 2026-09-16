@@ -3903,34 +3903,12 @@ fn matcher_of(value: &Json5Value, path: &'static str) -> Result<WhatAmIMatcher, 
     Ok(matcher)
 }
 
-/// R2633 — `routing/router/linkstate/transport_weights`: a LIST of
-/// `{ dst_zid, weight }` rows.
-///
-/// Every refusal here was measured against the pinned zenohd before it was
-/// written, because upstream's own documented example is not loadable and the
-/// stages differ (`DEFAULT_CONFIG.json5` shows `weight: "10"`, quoted, which
-/// dies in the parser):
-///
-/// * a QUOTED weight is refused — `TransportWeight::weight` is a plain
-///   `NonZeroU16` with no string coercion, and zenohd answers "error parsing
-///   number";
-/// * `0` is refused — "invalid value: integer `0`, expected a nonzero u16";
-/// * a non-canonical `dst_zid` is refused by
-///   [`zenoh_hex_to_zid`](wz_session_core::zid_hex::zenoh_hex_to_zid), which
-///   carries zenoh's own alphabet;
-/// * a DUPLICATE `dst_zid` is NOT refused here. It is a well-formed document to
-///   the parser, and upstream refuses it one layer on, in
-///   [`link_weights_from_config`](wz_routing_graph::link_weights_from_config).
-///
-/// A missing field, an extra field, or a non-object row is a type error: the row
-/// shape is `deny_unknown_fields` upstream, so a typo inside a row must not pass
-/// as a row that means something else.
 /// R2650 — the message kinds `downsampling` and `low_pass_filter` accept.
 ///
-/// FOUR, and they are NOT [`AclMessage`]'s nine. Upstream types both interceptor
+/// FOUR, and they are NOT `AclMessage`'s nine. Upstream types both interceptor
 /// keys' `messages` as `DataMessage` (`commons/zenoh-config/src/lib.rs`
-/// @ `pub enum DataMessage`) and the ACL's as `AclMessage`, so a reader that used
-/// wider set here would ACCEPT a document a real zenohd refuses -- looser than
+/// @ `pub enum DataMessage`) and the ACL's as `AclMessage`, so a reader that
+/// reused the wider set here would ACCEPT a document a real zenohd refuses -- looser than
 /// upstream, which the fixture lane cannot catch because it only ever drives
 /// documents zenohd starts on.
 pub const DATA_MESSAGE_LITERALS: &[&str] = &["put", "delete", "query", "reply"];
@@ -4127,6 +4105,28 @@ fn low_pass_filters_of(
     Ok(out)
 }
 
+/// R2633 — `routing/router/linkstate/transport_weights`: a LIST of
+/// `{ dst_zid, weight }` rows.
+///
+/// Every refusal here was measured against the pinned zenohd before it was
+/// written, because upstream's own documented example is not loadable and the
+/// stages differ (`DEFAULT_CONFIG.json5` shows `weight: "10"`, quoted, which
+/// dies in the parser):
+///
+/// * a QUOTED weight is refused — `TransportWeight::weight` is a plain
+///   `NonZeroU16` with no string coercion, and zenohd answers "error parsing
+///   number";
+/// * `0` is refused — "invalid value: integer `0`, expected a nonzero u16";
+/// * a non-canonical `dst_zid` is refused by
+///   [`zenoh_hex_to_zid`](wz_session_core::zid_hex::zenoh_hex_to_zid), which
+///   carries zenoh's own alphabet;
+/// * a DUPLICATE `dst_zid` is NOT refused here. It is a well-formed document to
+///   the parser, and upstream refuses it one layer on, in
+///   [`link_weights_from_config`](wz_routing_graph::link_weights_from_config).
+///
+/// A missing field, an extra field, or a non-object row is a type error: the row
+/// shape is `deny_unknown_fields` upstream, so a typo inside a row must not pass
+/// as a row that means something else.
 fn transport_weights_of(
     value: &Json5Value,
     path: &'static str,
