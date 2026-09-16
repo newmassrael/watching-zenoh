@@ -1476,7 +1476,16 @@ PIN_NO_SYMBOL = 2
 # body answers 10 wz / 0 ambiguous / 6 upstream and the new one answers
 # 12 / 0 / 6. So the rise is +2, it is this atom's alone, and nothing ambiguous
 # or upstream moved with it. 190 + 2 = 192.
-PIN_WZ_CITATIONS = 192
+# R2655 — 192 -> 194, the same atom a second round running, and for the same
+# shape: `adminspace-write` stays PARTIAL on its one remaining clause, so its
+# reason stays in this population, and this round's CORRECTION cites the two
+# files that paid the clause beside it — the Del originator
+# (`linkstate_forward.rs` @ `publish_delete`) and the wire witness
+# (`wz_router_hat_connect_reconcile.rs` @ the link-weight write leg). MEASURED
+# with THIS FILE'S OWN `citation_audit` over that one reason in both versions:
+# 12 wz / 0 ambiguous / 6 upstream becomes 14 / 0 / 6. So the rise is +2, it is
+# this atom's alone, and nothing ambiguous or upstream moved. 192 + 2 = 194.
+PIN_WZ_CITATIONS = 194
 # R2626 — 44 -> 42, and this one is worth a sentence because it HELD through
 # every earlier retirement in this run (R2612, R2622). `time-hlc`'s reason is the
 # first retiree carrying AMBIGUOUS citations of its own: its oldest clauses cite
