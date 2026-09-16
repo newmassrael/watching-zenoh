@@ -7734,7 +7734,14 @@ layer_c1y_cargo_test_routing_peer() {
     # default features, so `pubsub-delete` is on and the test compiles IN; the
     # bare arm below stays 203 for exactly the opposite reason, which is the
     # pair that made the gate correct about both.
-    _runci_guarded_test "C1y linkstate" 206 \
+    # R2655 — 206 -> 207. `publish_delete_sends_a_self_originated_del_to_an_
+    # interested_tree_child` joins the module: the forwarder could forward a Del
+    # and not ORIGINATE one, and the new test is the Del twin of
+    # `publish_sends_self_originated_data_to_an_interested_tree_child` beside it.
+    # It carries the same `pubsub-delete` gate as the receive-side test named
+    # above, so it counts in on this default-features arm and stays out of the
+    # bare one below -- the pair this note already describes, one test wider.
+    _runci_guarded_test "C1y linkstate" 207 \
         cargo test -p wz-runtime-tokio --features routing-peer --lib linkstate --quiet || return 1
     # R311y513 — the BARE routing peer, and the pin that would have caught the
     # defect this round fixed. Every arm above passes `--features routing-peer`
@@ -7860,7 +7867,12 @@ layer_c1y_cargo_test_routing_peer() {
     # interceptor` note above already records, which is now the second time this
     # blind spot has cost a red. The gate can resolve this one from now on; see
     # `guarded_count_gate.py`'s literal-assignment pass.
-    _runci_guarded_test "C1y linkstate+access" 217 \
+    # R2655 — 217 -> 218, the same one test as the `C1y linkstate` arm above and
+    # for the same reason. Both arms carry default features, so both compile
+    # `pubsub-delete`; they move together and a round that moved only one would
+    # be reporting that the access subset changes what a Del origination test
+    # sees, which it does not.
+    _runci_guarded_test "C1y linkstate+access" 218 \
         cargo test -p wz-runtime-tokio --features "$access" --lib linkstate --quiet || return 1
     # R2567 — the three usrpwd counts move together because ONE structure landed
     # under them: the shared credential store that closed `access-extauth-usrpwd`.
