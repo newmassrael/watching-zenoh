@@ -178,7 +178,21 @@ fn zenohd_reports_back_every_value_the_emitted_config_carried() {
         r#""lowlatency":false"#,
         r#""compression":{"enabled":true}"#,
         r#""adminspace":{"enabled":true,"permissions":{"read":true,"write":true}}"#,
-        r#""timestamping":{"drop_future_timestamp":null,"enabled":true}"#,
+        // R2669 — `false`, not `null`, and this line is the first thing this
+        // test ever said when it finally RAN. It sat behind the zenohd pin wall
+        // that R2665 removed: `layer_z_zenohd_interop` reached 1 of 78 legs
+        // while the wall stood, so this expectation was written and never once
+        // executed against a real zenohd.
+        //
+        // The interop it grades is CORRECT and always was. wz emits
+        // `"timestamping": { "enabled": true, "drop_future_timestamp": false }`
+        // and zenohd's resolved config reports exactly that. Only the expected
+        // LITERAL was wrong — it spelled the field `null`, which neither side
+        // produces: wz emits the resolved boolean, and upstream would default an
+        // absent key to `false` in any case. An unexecuted expectation is not a
+        // weaker test than a failing one; it is a test that has never had a
+        // subject.
+        r#""timestamping":{"drop_future_timestamp":false,"enabled":true}"#,
         // R311y844 — the promoted ten, read back out of the same resolved line.
         r#""id":"a1b2c3d4""#,
         r#""namespace":"demo/ns""#,
