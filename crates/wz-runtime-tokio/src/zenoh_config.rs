@@ -4523,7 +4523,12 @@ pub fn acl_config_from_inputs(
 /// asserts that two halves agree, and they went on agreeing about a different
 /// refusal. A literal here is a classification, and this tree moves that
 /// partition most rounds.
-#[cfg(test)]
+/// ⚠ Gated on its CALLER's condition, not on `test` alone. The caller is a
+/// `config.rs` test needing both an admin hat and this reader; a `test` gate
+/// compiles this into a `zenoh-config`-only leg where nothing calls it, and this
+/// crate denies dead code. Gate 2h names that leg, and found this twice in one
+/// round — once for the caller, once for the callee.
+#[cfg(all(test, feature = "zenoh-config", feature = "adminspace-core"))]
 pub(crate) fn first_unhonoured_key_outside(exclude: &[&str]) -> &'static str {
     UNHONOURED_UPSTREAM_CONFIG_KEYS
         .iter()
