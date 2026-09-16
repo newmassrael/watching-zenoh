@@ -7741,7 +7741,7 @@ layer_c1y_cargo_test_routing_peer() {
     # It carries the same `pubsub-delete` gate as the receive-side test named
     # above, so it counts in on this default-features arm and stays out of the
     # bare one below -- the pair this note already describes, one test wider.
-    _runci_guarded_test "C1y linkstate" 207 \
+    _runci_guarded_test "C1y linkstate" 208 \
         cargo test -p wz-runtime-tokio --features routing-peer --lib linkstate --quiet || return 1
     # R311y513 — the BARE routing peer, and the pin that would have caught the
     # defect this round fixed. Every arm above passes `--features routing-peer`
@@ -7756,7 +7756,7 @@ layer_c1y_cargo_test_routing_peer() {
     # need the access set, which bare routing-peer does not pull.
     # R2614 202 -> 203: the unrestricted-interest witness is ungated, so it lands
     # here exactly as the sibling comment above predicts.
-    _runci_guarded_test "C1y linkstate bare" 203 \
+    _runci_guarded_test "C1y linkstate bare" 204 \
         cargo test -p wz-runtime-tokio --no-default-features --features routing-peer \
         --lib linkstate --quiet || return 1
     # R311y451 — 10 -> 16: the six low-pass fidelity tests (attachment in the
@@ -7872,7 +7872,7 @@ layer_c1y_cargo_test_routing_peer() {
     # `pubsub-delete`; they move together and a round that moved only one would
     # be reporting that the access subset changes what a Del origination test
     # sees, which it does not.
-    _runci_guarded_test "C1y linkstate+access" 218 \
+    _runci_guarded_test "C1y linkstate+access" 219 \
         cargo test -p wz-runtime-tokio --features "$access" --lib linkstate --quiet || return 1
     # R2567 — the three usrpwd counts move together because ONE structure landed
     # under them: the shared credential store that closed `access-extauth-usrpwd`.
@@ -9210,11 +9210,11 @@ layer_c1o_keyexpr_gating_behavior() {
     _runci_guarded_test "C1o keyexpr alloc" 7 \
         cargo test -p wz-session-core --no-default-features --features alloc \
         --lib keyexpr_match --quiet || return 1
-    _runci_guarded_test "C1o keyexpr alloc+wildcards" 17 \
+    _runci_guarded_test "C1o keyexpr alloc+wildcards" 18 \
         cargo test -p wz-session-core --no-default-features \
         --features alloc,keyexpr-wildcard-single,keyexpr-wildcard-double,keyexpr-dollar-star,keyexpr-includes \
         --lib keyexpr_match --quiet || return 1
-    _runci_guarded_test "C1o keyexpr wildcards-no-alloc" 17 \
+    _runci_guarded_test "C1o keyexpr wildcards-no-alloc" 18 \
         cargo test -p wz-session-core --no-default-features \
         --features keyexpr-wildcard-single,keyexpr-wildcard-double,keyexpr-dollar-star,keyexpr-includes \
         --lib keyexpr_match --quiet || return 1
