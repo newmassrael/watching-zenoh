@@ -35,18 +35,50 @@ the file the commit touched.
 The third instance is the argument for the rule below. R2576 wrote the seeds
 as "the store, and the gate corpus under `scripts/`", which is a list of the
 two subjects the two instances it had in hand happened to share -- not the
-class. The class is one sentence: A GATE IS ROUND-FED WHEN IT ENUMERATES
-TRACKED FILES, because tracked files are what a round changes.
+class.
+
+⚠ R2653 — THE CLASS SENTENCE WAS STILL A NARROWING, and a FOURTH instance is
+what says so. R2578 wrote it as A GATE IS ROUND-FED WHEN IT ENUMERATES TRACKED
+FILES, and rule 1 below already contradicted that sentence: the store is ONE
+file, not an enumeration, and it got a rule of its own. The general form was
+sitting in that exception the whole time. What a round changes is tracked
+files, so the class is: A GATE IS ROUND-FED WHEN IT READS TRACKED FILES,
+whether it finds them by enumerating a corpus or by naming one.
+
+The fourth instance, R2652: `hook_gate_boundary_gate.py` reads exactly one
+tracked file, `.githooks/pre-push`, and every round that adds a gate changes
+it. It enumerates nothing, so it sat outside the class, ran only in hosted CI,
+and refused the gate R2652 had just added -- for a NAME its own grammar could
+not express, which is a diagnosis that points at the section rather than at the
+grammar. Two hosted jobs died on that one line before anyone read them.
 
 A module is a SEED when its AST shows it doing one of:
 
-1. naming the atomic store file in a string constant. It is one file rather
-   than a corpus, and it earns its own rule because nearly every round mutates
-   it; or
+1. naming a TRACKED FILE in a string constant -- the repository's own
+   `git ls-files` decides what that means, re-read on every run, so no path is
+   written down here and nothing rots when the tree grows one;
 2. enumerating the tracked corpus -- either by invoking `git ls-files`, which
    IS the repository's own enumerator of exactly that set, or by a
    `glob`/`rglob` under a string constant whose first path segment is a
-   TRACKED TOP-LEVEL DIRECTORY.
+   TRACKED TOP-LEVEL DIRECTORY;
+3. naming the atomic store file as a SUBSTRING of a string constant. Rule 1
+   subsumes the store for a constant that IS the path; this survives for one
+   that embeds it, which is how several modules build a sidecar argument.
+
+## Why rule 1 is not simply "names a corpus directory"
+
+MEASURED at R2653 over the 142 modules under `scripts/lib`, because the looser
+rule is the obvious first draft and it is wrong:
+
+* as it stood (a corpus-dir string AND a glob call): 92 modules;
+* dropping the glob conjunction: 133, or +41 -- it captures every module that
+  mentions `crates/` in any string at all, including help text and error
+  messages, which is not a claim about what the module READS;
+* rule 1 as written (the constant IS a tracked file): 103, or +11.
+
+The +11 is the discriminator that settles it rather than the size: the pre-push
+hook ALREADY RUNS SIX of them. A rule whose additions were mostly noise would
+not have the hook agreeing with two thirds of them in advance.
 
 That directory set is read from `git ls-files` on every run and never written
 down here. A hand-written list would need re-typing the first time the tree
@@ -102,7 +134,8 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 LIB_REL = "scripts/lib"
 HOOK_REL = ".githooks/pre-push"
 
-#: Seed rule 1 -- the SSOT. A module naming this string is reading the store.
+#: Seed rule 3 -- the SSOT, as a SUBSTRING. Rule 1 covers a constant that is
+#: exactly this path; this covers one that embeds it.
 STORE_PATH = "docs/.atomic/workspace.atomic.json"
 
 #: Seed rule 2a -- the repository's own enumerator of the tracked set. A module
@@ -151,6 +184,16 @@ DEFERRED: dict[str, str] = {
         "offline it would red a push for a reason the push did not cause. "
         "Hosted Layer U owns it."
     ),
+    "cdylib_soname_gate.py": (
+        "R2653 -- it BUILDS its subject. The gate asks cargo which targets are "
+        "cdylibs, builds them, and reads the SONAME out of the linked `.so` "
+        "with `readelf -d`, so it cannot grade a tree it has not compiled. "
+        "MEASURED at 18.55s WARM, which is already more than the 16.49s that "
+        "keeps `prose_named_identifier_gate.py` out of a 68.4-74.8s block -- "
+        "and warm is the figure that flatters it, because a cold or "
+        "differently-featured target directory makes the build unbounded. "
+        "Hosted Layer C1cf owns it."
+    ),
     "bump_sweep.py": (
         "18.47s in --check mode, and it is an AGGREGATE: it sweeps a pin "
         "bump's whole re-measurement surface, most of whose members this hook "
@@ -163,6 +206,23 @@ DEFERRED: dict[str, str] = {
 def modules(root: Path) -> dict[str, str]:
     """`{filename: source}` for every python gate under scripts/lib."""
     return {p.name: p.read_text() for p in sorted((root / LIB_REL).glob("*.py"))}
+
+
+def tracked_paths(root: Path) -> set[str]:
+    """Every path `git ls-files` reports, derived on every run.
+
+    Seed rule 1's corpus. Written down nowhere, for the reason the directory
+    set below is not: a list here would rot in exactly the round that had no
+    reason to read it.
+    """
+    out = subprocess.run(
+        ["git", LS_FILES],
+        cwd=root,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    return {p for p in out.stdout.split("\n") if p}
 
 
 def tracked_dirs(root: Path) -> set[str]:
@@ -181,12 +241,24 @@ def tracked_dirs(root: Path) -> set[str]:
     return {p.split("/")[0] for p in out.stdout.split("\n") if "/" in p}
 
 
-def round_fed(sources: dict[str, str], corpus_dirs: set[str]) -> set[str]:
+def round_fed(
+    sources: dict[str, str],
+    corpus_dirs: set[str],
+    corpus_files: set[str] | None = None,
+) -> set[str]:
     """Modules a round's own changes feed: the seeds, plus whatever imports them.
 
-    Pure over `sources` and `corpus_dirs`, so the selftest drives both the rule
-    and the closure -- the two halves most able to narrow silently.
+    Pure over `sources`, `corpus_dirs` and `corpus_files`, so the selftest
+    drives both the rule and the closure -- the two halves most able to narrow
+    silently.
+
+    `corpus_files` defaults to EMPTY rather than to the real tree, and that is
+    the safe direction for a default nobody passes: seed rule 1 then finds
+    nothing and the population can only be too small, which this gate's own
+    accounting reports as an unwired module. A default that read the tree would
+    make a caller's omission invisible.
     """
+    corpus_files = corpus_files or set()
     seeds: set[str] = set()
     imports: dict[str, set[str]] = {}
     stems = {name[:-3]: name for name in sources if name.endswith(".py")}
@@ -206,6 +278,12 @@ def round_fed(sources: dict[str, str], corpus_dirs: set[str]) -> set[str]:
         for node in ast.walk(tree):
             if isinstance(node, ast.Constant) and isinstance(node.value, str):
                 if STORE_PATH in node.value:
+                    # Seed rule 3, the substring form.
+                    seeds.add(name)
+                if node.value.strip("/") in corpus_files:
+                    # Seed rule 1. One named tracked file is enough: the round
+                    # that changes it is exactly the round with no reason to
+                    # look at the gate reading it.
                     seeds.add(name)
                 if node.value == LS_FILES:
                     # Seed rule 2a. The enumerator itself, so no glob is wanted.
@@ -349,6 +427,7 @@ def report(population: set[str], invoked: set[str], deferred: dict[str, str]) ->
 def run(root: Path) -> int:
     sources = modules(root)
     corpus_dirs = tracked_dirs(root)
+    corpus_files = tracked_paths(root)
     if not corpus_dirs:
         # Seed rule 2b's input, and an empty one silently narrows the rule to
         # 2a. A derivation whose own input went missing does not report green.
@@ -359,7 +438,18 @@ def run(root: Path) -> int:
             file=sys.stderr,
         )
         return 1
-    population = round_fed(sources, corpus_dirs)
+    if not corpus_files:
+        # R2653 — seed rule 1's input, guarded the same way and for the same
+        # reason: an empty file set narrows that rule to nothing, and a
+        # derivation whose input went missing must not report a clean surface.
+        print(
+            "round-fed-gate-reach: FAIL -- `git ls-files` named no tracked "
+            "file, so seed rule 1 graded nothing and the population below is "
+            "narrower than the rule by an amount nobody measured.",
+            file=sys.stderr,
+        )
+        return 1
+    population = round_fed(sources, corpus_dirs, corpus_files)
     invoked = hook_invocations((root / HOOK_REL).read_text())
     findings, size = findings_from(population, invoked, DEFERRED)
     report(population, invoked, DEFERRED)
@@ -436,13 +526,46 @@ def selftest() -> int:
         ),
         ("an unrelated module stays out", {"a.py": store_seed, "z.py": "import json\n"}, {"a.py"}),
         ("a module that does not parse is reported, never dropped", {"a.py": "def (\n"}, {"a.py"}),
+        # R2653 — seed rule 1. The first of these is the shape that cost two
+        # hosted jobs: ONE named tracked file, no glob, no enumeration.
+        (
+            "naming ONE tracked file is a seed -- R2652's miss",
+            {"a.py": 'HOOK = ".githooks/pre-push"\nopen(HOOK)\n'},
+            {"a.py"},
+        ),
+        (
+            "and naming it in a COMMENT is not, as for every other rule",
+            {"a.py": "# .githooks/pre-push\nX = 1\n"},
+            set(),
+        ),
+        (
+            "a path the tree does not track is NOT a seed, however file-shaped",
+            {"a.py": 'P = "crates/target/debug/build.log"\nopen(P)\n'},
+            set(),
+        ),
     ]
+    # Seed rule 1's corpus for the fixture: two tracked files, one of which no
+    # arm names, so an arm cannot pass by the set being a wildcard.
+    files = {".githooks/pre-push", "scripts/run-ci.sh"}
     for name, sources, want in closure_cases:
-        got = round_fed(sources, dirs)
+        got = round_fed(sources, dirs, files)
         ok = got == want
         print(f"  [{'ok' if ok else 'FAIL'}] closure -- {name}: {sorted(got)}")
         if not ok:
             failed += 1
+
+    # R2653 — rule 1's input starved, the twin of the directory arm below: an
+    # empty file set drops a named-file seed in silence, which is why `run`
+    # refuses to grade with one.
+    starved_files = round_fed({"a.py": 'HOOK = ".githooks/pre-push"\nopen(HOOK)\n'}, dirs, set())
+    ok = starved_files == set()
+    print(
+        f"  [{'ok' if ok else 'FAIL'}] closure -- an EMPTY tracked-file set "
+        f"silently drops a named-file seed, which is why `run` refuses it: "
+        f"{sorted(starved_files)}"
+    )
+    if not ok:
+        failed += 1
 
     # The corpus rule with an EMPTY directory set narrows to rule 2a in
     # silence, which is why `run` refuses to grade with one. Pinned here so the

@@ -775,6 +775,23 @@ round_fed_gates=(
     "accessor_reach_census.py"
     "binary_freshness_lint.py"
     "genuine_axis_witness_gate.py --check"
+    # R2653 — the four `round_fed_gate_reach.py` named when its seed rule was
+    # widened to "a module NAMING one tracked file", not only one enumerating a
+    # corpus. Two of them read THIS FILE, which is the whole argument: a round
+    # that adds a gate changes the hook, and until now the gates grading the
+    # hook ran only in hosted CI. R2652 paid for that with two red jobs over a
+    # gate name its own grammar could not express.
+    #
+    # MEASURED before wiring, warm, each in the mode written here: 0.04 / 0.04 /
+    # 0.03 / 0.03 / 0.14 / 0.03 seconds. The fifth module the widening named --
+    # `cdylib_soname_gate.py`, 18.55s and a cargo build -- is DEFERRED instead,
+    # with its measurement in the row that says so.
+    "hook_gate_boundary_gate.py --selftest"
+    "hook_gate_boundary_gate.py --check"
+    "hook_graded_surface_gate.py --selftest"
+    "hook_graded_surface_gate.py --check"
+    "job_budget_binding.py"
+    "unwired_lane_lint.py"
 )
 # ⚠ The module and its ARGUMENTS are expanded separately, and that too is
 # forced rather than chosen: `scripts/lib/"${cmd[@]}"` attaches the prefix to
