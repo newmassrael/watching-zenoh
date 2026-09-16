@@ -7562,9 +7562,26 @@ pub(crate) async fn run_storage_host(listen: &str, opts: StorageHostOpts) -> io:
     let plugin_records: Vec<wz::runtime_tokio::adminspace::AdminPlugin> = {
         let mut registry = wz::runtime_tokio::plugin::PluginRegistry::new();
         for path in plugin_paths {
-            match registry.load(path) {
-                Ok(id) => {
-                    let id = id.to_string();
+            // R2673 — DECLARE before loading, so a load that fails leaves a
+            // record instead of vanishing. The declared NAME is the file stem:
+            // upstream takes it from the config that named the plugin, and wz's
+            // `--plugin` carries only a path, so the stem is the only name the
+            // operator actually supplied. It is used ONLY until the load
+            // succeeds, after which the library's own id keys the live slot.
+            let declared = std::path::Path::new(path)
+                .file_stem()
+                .map(|s| s.to_string_lossy().into_owned())
+                .unwrap_or_else(|| path.to_string());
+            if let Err(e) = registry.declare(&declared, path) {
+                log::warn!("wz-ap-demo storage-host: plugin '{declared}' not declared: {e}");
+                continue;
+            }
+            match registry.load_declared(&declared).map(|()| declared.clone()) {
+                Ok(_) => {
+                    // The live slot is keyed by the declared name, which is what
+                    // an admin client will see; the library's own id is reported
+                    // inside the record.
+                    let id = declared.clone();
                     log::info!("wz-ap-demo storage-host: dlopen'd plugin '{id}' from {path}");
                     match registry.start(&id, None) {
                         Ok(()) => {
@@ -7578,7 +7595,15 @@ pub(crate) async fn run_storage_host(listen: &str, opts: StorageHostOpts) -> io:
                         ),
                     }
                 }
-                Err(e) => log::warn!("wz-ap-demo storage-host: plugin load failed: {e}"),
+                // R2673 — the plugin STAYS in the registry as `Declared` and the
+                // admin plane reports it, so a zenoh client can tell
+                // declared-but-failed-to-load from never-asked-for. Before this
+                // the record vanished with the error and the two were the same
+                // observation.
+                Err(e) => log::warn!(
+                    "wz-ap-demo storage-host: plugin '{declared}' stays Declared — \
+                     load failed: {e}"
+                ),
             }
         }
         let records = registry.admin_records();

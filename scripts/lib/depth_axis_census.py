@@ -954,7 +954,7 @@ CITATION = re.compile(r"\b((?:[A-Za-z0-9_.-]+/)*[A-Za-z0-9_.-]+\.(?:rs|c|h))(?::
 # population; UNREACHED and NO_SYMBOL hold. MEASURED by SIMULATION before the
 # write -- the atom dropped from `partial_atoms()` and `reach_partition` re-run
 # over the remainder -- and the live gate then reported exactly that: 28.
-PIN_REACHED = 27
+PIN_REACHED = 26
 PIN_UNREACHED = 3
 PIN_NO_SYMBOL = 2
 # R2534 — 346 -> 347. The atom is `adminspace-metrics` and the citation is the
@@ -1566,7 +1566,7 @@ PIN_NO_SYMBOL = 2
 # MEASURED with THIS FILE'S OWN `citation_audit` over the population with and
 # without that one atom -- never by diffing the totals, which cannot say whose
 # the fall is: 181 - 9 = 172, and the live gate reported 172.
-PIN_WZ_CITATIONS = 169
+PIN_WZ_CITATIONS = 162
 # R2626 — 44 -> 42, and this one is worth a sentence because it HELD through
 # every earlier retirement in this run (R2612, R2622). `time-hlc`'s reason is the
 # first retiree carrying AMBIGUOUS citations of its own: its oldest clauses cite
@@ -1585,7 +1585,7 @@ PIN_WZ_CITATIONS = 169
 # previous re-grade's SHAPE across would have produced a wrong pin here, which
 # is why the value came from re-running `citation_audit` over the population
 # without this atom rather than from the precedent.
-PIN_AMBIGUOUS = 36
+PIN_AMBIGUOUS = 34
 
 
 class Fatal(Exception):

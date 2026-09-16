@@ -368,9 +368,33 @@ impl DynamicPlugin {
 /// merely the neighbour. Saying which is which HERE, where the mechanism and the
 /// key meet, is the only place the statement can be read against the code that
 /// would have to implement it.
+/// R2673 — one registry slot: a plugin the operator NAMED, and the library
+/// behind it once it loads.
+///
+/// ⭐ THE `Declared` ARM EXISTS SO A FAILED LOAD LEAVES A RECORD. Before it, a
+/// `dlopen` that failed returned `Err` and registered nothing, so the plugin was
+/// indistinguishable from one nobody ever asked for -- which is precisely the
+/// distinction `AdminPluginState::Declared` was reserved for and never able to
+/// express. Upstream can express it because it declares BY NAME before loading
+/// (`plugins/zenoh-plugin-trait/src/manager.rs` @ `fn declare_dynamic_plugin_by_name<S: Into<String>>(`),
+/// so the name outlives the attempt; a registry keyed only by the id a
+/// successful load reports cannot, because the failure is what withholds the id.
+#[derive(Debug)]
+enum Slot {
+    /// Named, and not loaded. `failure` is `None` before the first attempt and
+    /// carries the refusal after one -- the two are different facts and a reader
+    /// that folds them loses "declared but not yet tried".
+    Declared {
+        path: std::path::PathBuf,
+        failure: Option<String>,
+    },
+    /// Loaded, and possibly Started -- the plugin owns its own state from here.
+    Live(DynamicPlugin),
+}
+
 #[derive(Default)]
 pub struct PluginRegistry {
-    plugins: BTreeMap<String, DynamicPlugin>,
+    plugins: BTreeMap<String, Slot>,
 }
 
 impl std::fmt::Debug for PluginRegistry {
@@ -403,49 +427,149 @@ impl PluginRegistry {
                 path: plugin.path().to_path_buf(),
             });
         }
-        let entry = self.plugins.entry(id.clone()).or_insert(plugin);
-        Ok(&entry.id)
+        let entry = self.plugins.entry(id.clone()).or_insert(Slot::Live(plugin));
+        match entry {
+            Slot::Live(p) => Ok(&p.id),
+            // Unreachable: the key was absent a line above, so `or_insert` put
+            // the `Live` there. Spelled rather than `unwrap`ped so a later edit
+            // that makes it reachable has to say what it means.
+            Slot::Declared { .. } => Err(PluginError::NotLoaded { id }),
+        }
     }
 
-    /// `Loaded -> Started` for one plugin.
+    /// DECLARE `name` at `path` without loading it — upstream's
+    /// `declare_dynamic_plugin_by_name`, which is what makes a failed load
+    /// REPORTABLE rather than invisible.
+    ///
+    /// Rejects a duplicate name for the reason [`Self::load`] rejects a
+    /// duplicate id: the incumbent may already own a `Library`.
+    pub fn declare(
+        &mut self,
+        name: impl Into<String>,
+        path: impl AsRef<Path>,
+    ) -> Result<(), PluginError> {
+        let name = name.into();
+        if self.plugins.contains_key(&name) {
+            return Err(PluginError::DuplicateId {
+                id: name,
+                path: path.as_ref().to_path_buf(),
+            });
+        }
+        self.plugins.insert(
+            name,
+            Slot::Declared {
+                path: path.as_ref().to_path_buf(),
+                failure: None,
+            },
+        );
+        Ok(())
+    }
+
+    /// `Declared -> Loaded` for a name [`Self::declare`] already recorded.
+    ///
+    /// ⚠ ON FAILURE THE SLOT STAYS `Declared` and keeps the refusal, which is
+    /// the whole point: the admin plane then reports the plugin as declared, so
+    /// a zenoh client can tell declared-but-failed-to-load from absent. The
+    /// error is ALSO returned, because a caller that wants to react must not
+    /// have to re-read the registry to discover the attempt failed.
+    ///
+    /// ⚠ The id the library declares is NOT adopted as the key. Upstream keys a
+    /// declared plugin by the name the operator gave, and a load that fails
+    /// never yields an id at all -- so keying by the library's id would make the
+    /// slot's identity depend on the outcome this method exists to record.
+    pub fn load_declared(&mut self, name: &str) -> Result<(), PluginError> {
+        let path = match self.plugins.get(name) {
+            Some(Slot::Declared { path, .. }) => path.clone(),
+            Some(Slot::Live(_)) => return Ok(()),
+            None => return Err(PluginError::NotLoaded { id: name.into() }),
+        };
+        match DynamicPlugin::load(&path) {
+            Ok(plugin) => {
+                self.plugins.insert(name.to_string(), Slot::Live(plugin));
+                Ok(())
+            }
+            Err(e) => {
+                self.plugins.insert(
+                    name.to_string(),
+                    Slot::Declared {
+                        path,
+                        failure: Some(e.to_string()),
+                    },
+                );
+                Err(e)
+            }
+        }
+    }
+
+    /// `Loaded -> Started` for one plugin. A slot still `Declared` has nothing
+    /// to start and says so by name.
     pub fn start(&mut self, id: &str, config: Option<&str>) -> Result<(), PluginError> {
-        self.plugins
-            .get_mut(id)
-            .ok_or_else(|| PluginError::NotLoaded { id: id.to_string() })?
-            .start(config)
+        match self.plugins.get_mut(id) {
+            Some(Slot::Live(p)) => p.start(config),
+            _ => Err(PluginError::NotLoaded { id: id.to_string() }),
+        }
     }
 
     /// `Started -> Loaded` for one plugin.
     pub fn stop(&mut self, id: &str) -> Result<(), PluginError> {
-        self.plugins
-            .get_mut(id)
-            .ok_or_else(|| PluginError::NotLoaded { id: id.to_string() })?
-            .stop()
+        match self.plugins.get_mut(id) {
+            Some(Slot::Live(p)) => p.stop(),
+            _ => Err(PluginError::NotLoaded { id: id.to_string() }),
+        }
     }
 
-    /// Loaded plugin ids, sorted.
+    /// Every registry name, sorted — DECLARED ONES INCLUDED, because a declared
+    /// plugin is one this node was told about and upstream lists it too.
     pub fn ids(&self) -> Vec<&str> {
         self.plugins.keys().map(String::as_str).collect()
     }
 
-    /// One plugin's state.
+    /// One plugin's state; `Declared` for a name that has not loaded.
     pub fn state(&self, id: &str) -> Option<AdminPluginState> {
-        self.plugins.get(id).map(DynamicPlugin::state)
+        self.plugins.get(id).map(|s| match s {
+            Slot::Declared { .. } => AdminPluginState::Declared,
+            Slot::Live(p) => p.state(),
+        })
     }
 
-    /// `true` when nothing is loaded.
+    /// `true` when nothing is declared or loaded.
     pub fn is_empty(&self) -> bool {
         self.plugins.is_empty()
     }
 
-    /// The admin records for every loaded plugin, id-ordered — the slice the
+    /// The admin records for every registry name, id-ordered — the slice the
     /// `adminspace-plugins-handlers` reply blocks append to the statically
     /// composed ones.
+    ///
+    /// A `Declared` slot reports the name the operator gave, the path they gave,
+    /// and NO version: the version lives in the library's entry struct, which a
+    /// plugin that never loaded has not yielded. Claiming one would be inventing
+    /// the fact the state exists to say is unknown.
     pub fn admin_records(&self) -> Vec<AdminPlugin> {
         self.plugins
-            .values()
-            .map(DynamicPlugin::admin_record)
+            .iter()
+            .map(|(name, slot)| match slot {
+                Slot::Live(p) => p.admin_record(),
+                Slot::Declared { path, .. } => AdminPlugin {
+                    id: name.clone(),
+                    name: name.clone(),
+                    version: None,
+                    path: path.display().to_string(),
+                    state: AdminPluginState::Declared,
+                    status_leaves: Vec::new(),
+                },
+            })
             .collect()
+    }
+
+    /// Why a declared plugin has not loaded, when an attempt was made and
+    /// refused. `None` both for a live plugin and for one not yet attempted --
+    /// those are different facts, and [`Self::state`] is what separates them.
+    pub fn declared_failure(&self, id: &str) -> Option<&str> {
+        match self.plugins.get(id) {
+            Some(Slot::Declared { failure, .. }) => failure.as_deref(),
+            _ => None,
+        }
     }
 }
 
@@ -523,6 +647,56 @@ mod tests {
 
         plugin.stop().expect("it stops");
         assert_eq!(plugin.state(), AdminPluginState::Loaded);
+    }
+
+    /// R2673 (open-debt item 15, atom `adminspace-plugins-handlers`) — A FAILED
+    /// LOAD MUST STILL BE VISIBLE, and as `Declared` rather than as nothing.
+    ///
+    /// This is the distinction `AdminPluginState::Declared` was reserved for and
+    /// could not express: before the declare step, `PluginRegistry::load`
+    /// returned `Err` and registered nothing, so a plugin the operator named and
+    /// whose library would not open was indistinguishable — on the admin plane —
+    /// from one nobody ever mentioned. A zenoh client can tell those apart on a
+    /// zenoh node, which is what made this an upstream-parity residual.
+    ///
+    /// ⚠ NO EXAMPLE LIBRARY IS NEEDED, deliberately: the subject is the FAILURE
+    /// path, so a path that cannot open is the fixture. That also keeps this
+    /// test running in builds where `require_example()` would bail, which is
+    /// where a witness for this residual is most likely to be wanted.
+    #[test]
+    fn a_declared_plugin_that_fails_to_load_stays_visible_as_declared() {
+        let mut reg = PluginRegistry::new();
+        let missing = "/nonexistent/wz-no-such-plugin.so";
+
+        reg.declare("wz_absent", missing).expect("declare");
+        // Declared and NOT yet attempted: the failure is None, which is a
+        // different fact from "attempted and refused".
+        assert_eq!(reg.state("wz_absent"), Some(AdminPluginState::Declared));
+        assert_eq!(reg.declared_failure("wz_absent"), None);
+
+        let err = reg
+            .load_declared("wz_absent")
+            .expect_err("a path that does not exist cannot dlopen");
+
+        // The error reaches the caller AND the record survives it.
+        assert_eq!(reg.state("wz_absent"), Some(AdminPluginState::Declared));
+        assert!(
+            reg.declared_failure("wz_absent").is_some(),
+            "the refusal is retained so the host need not re-derive it: {err}"
+        );
+
+        // The admin plane is where the parity claim actually lives.
+        let records = reg.admin_records();
+        assert_eq!(records.len(), 1, "a failed load is not an absent plugin");
+        assert_eq!(records[0].state, AdminPluginState::Declared);
+        assert_eq!(records[0].id, "wz_absent");
+        assert_eq!(
+            records[0].version, None,
+            "a library that never opened yielded no version, and inventing one \
+             would assert the very fact this state exists to call unknown"
+        );
+        assert!(!reg.is_empty(), "the registry holds the declaration");
+        assert_eq!(reg.ids(), vec!["wz_absent"]);
     }
 
     #[test]

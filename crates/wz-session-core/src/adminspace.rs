@@ -124,17 +124,29 @@ pub struct AdminLinkWeight {
     pub src_weight: Option<u16>,
 }
 
-/// wz-native plugin state — the compile-time analogue of zenoh's `PluginState`
-/// (`zenoh-plugin-trait/src/plugin.rs:35-40`). wz has NO dynamic loading, so a
-/// subsystem's presence IS its compiled-in-ness: a compiled subsystem is at least
+/// wz plugin state — the analogue of zenoh's `PluginState`
+/// (`plugins/zenoh-plugin-trait/src/plugin.rs` @ `pub enum PluginState`).
+///
+/// A COMPILED subsystem's presence is its compiled-in-ness: it is at least
 /// [`Loaded`](Self::Loaded), and [`Started`](Self::Started) once the node
-/// activates it at runtime. [`Declared`](Self::Declared) — zenoh's
-/// config-named-but-unloaded state — has no wz analogue (presence == compiled;
-/// there is no "named but absent"), but the variant is retained for wire fidelity
-/// with zenoh's serde enum so an admin client parses the same `state` strings.
+/// activates it at runtime.
+///
+/// ⚠ R2673 — THE TWO SENTENCES THAT USED TO CLOSE THIS PARAGRAPH ARE STRUCK,
+/// because both had become false and together they read as a scope decision.
+/// They said wz has NO dynamic loading and that [`Declared`](Self::Declared)
+/// therefore has no wz analogue, retained only for wire fidelity. wz HAS dynamic
+/// loading (`plugin-dynamic-loading`, graded COMPLETE), and `Declared` is now a
+/// state the registry PRODUCES: a plugin the operator named whose library failed
+/// to open stays declared, with its refusal, so an admin client can tell
+/// declared-but-failed-to-load from never-asked-for. A doc that calls a live
+/// state decorative is worse than silence — it tells the next reader the
+/// producer they are looking for was never meant to exist.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AdminPluginState {
-    /// Config-named but not loaded (zenoh). wz never emits this (kept for parity).
+    /// Named but not loaded. R2673 — wz EMITS this now: `PluginRegistry`
+    /// declares a plugin by name before opening its library, so a failed
+    /// `dlopen` leaves the declaration standing instead of taking the record
+    /// with it.
     Declared,
     /// Compiled into the binary but not activated at runtime.
     Loaded,
@@ -205,7 +217,8 @@ impl AdminPluginStatusLeaf {
 }
 
 /// One entry in the wz-native plugin registry — the compile-time analogue of a
-/// zenoh `PluginStatusRec` (`zenoh-plugin-trait/src/plugin.rs:92-102`). A wz
+/// zenoh `PluginStatusRec`
+/// (`plugins/zenoh-plugin-trait/src/plugin.rs` @ `pub struct PluginStatusRec<'a> {`). A wz
 /// "plugin" is a COMPILED-IN composable subsystem with a zenoh-plugin analogue
 /// (`storage_manager` = zenoh-plugin-storage-manager; `rest` = zenoh-plugin-rest),
 /// NOT a dlopen shared library — the wz "superset via composition": the same admin
