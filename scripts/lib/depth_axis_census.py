@@ -1485,7 +1485,16 @@ PIN_NO_SYMBOL = 2
 # with THIS FILE'S OWN `citation_audit` over that one reason in both versions:
 # 12 wz / 0 ambiguous / 6 upstream becomes 14 / 0 / 6. So the rise is +2, it is
 # this atom's alone, and nothing ambiguous or upstream moved. 192 + 2 = 194.
-PIN_WZ_CITATIONS = 194
+# R2657 — 194 -> 196, `adminspace-write` a third round running: it stays PARTIAL
+# on the clause this round FOUND rather than the one it built, so its reason
+# stays in this population and the CORRECTION cites the two files that carry the
+# finding — the member route (`config.rs` @ `member_write`) and the decoder whose
+# slash test hides a honoured single-segment key (`adminspace.rs`). MEASURED with
+# THIS FILE'S OWN `citation_audit` over that one reason in both versions:
+# 14 wz / 0 ambiguous / 6 upstream becomes 16 / 0 / 7. The rise is +2 wz, this
+# atom's alone; AMBIGUOUS held, and the one UPSTREAM occurrence the correction
+# adds rides the unpinned total this gate prints and does not judge. 194 + 2 = 196.
+PIN_WZ_CITATIONS = 196
 # R2626 — 44 -> 42, and this one is worth a sentence because it HELD through
 # every earlier retirement in this run (R2612, R2622). `time-hlc`'s reason is the
 # first retiree carrying AMBIGUOUS citations of its own: its oldest clauses cite
