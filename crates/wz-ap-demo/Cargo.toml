@@ -212,6 +212,16 @@ preset-ap-full = [
     "router-hat-router",
     "router-multicast-faces",
     "router-connect-reconcile",
+    # R2650 — `router-config-mutate`, the OTHER intent of the config-write plane
+    # this preset already carries through `router-connect-reconcile`. The plane
+    # is one host and each arm names its own feature; taking one intent and not
+    # the other would give the AP-full binary a write subscriber that decodes a
+    # runtime config-key write and applies nothing.
+    #
+    # Named explicitly for the reason the `router-hat-router` note above gives:
+    # membership here is a decision, not a side effect of some other key pulling
+    # it in.
+    "router-config-mutate",
     # R311y492 — the `--plugin` CLI surface, now that `wz/preset-ap-full` claims
     # the atom. Held back before that for the reason this list's rule states.
     "plugin-dynamic-loading",
