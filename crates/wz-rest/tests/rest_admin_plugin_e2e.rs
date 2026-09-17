@@ -233,42 +233,56 @@ async fn the_bridge_reports_itself_on_the_adminspace() {
 
         // `@/local` is the bridge's alias for this node's own zid; the reply keys
         // must come back fully resolved, as a zenoh admin reply does.
+        //
+        // ⚠ EVERY assertion below pins a KEY AND ITS BODY TOGETHER, as the one
+        // contiguous `"key":<K>,"value":<V>` pair the bridge's renderer emits.
+        // Asserting them apart is what the first draft did, and it does not
+        // check what it says: `text.contains(VERSION)` passed with the version
+        // leaf ABSENT, because `"version":"0.4.2"` also occurs in `local_data`
+        // and in the registry record -- measured on this test's own control
+        // run, where the string survived twice with the whole sub-tree gone.
+        // Two substring assertions over one array never have to be about the
+        // same reply.
         let root = format!("@/{zid_hex}/{whatami}/status/plugins/{PLUGIN_ID}");
+        let pair = |key: &str, value: &str| format!("{{\"key\":\"{key}\",\"value\":{value}");
+
+        // The plugin path leg: `text/plain`, the wz static-subsystem marker.
         assert!(
-            text.contains(&format!("\"{root}/__path__\"")),
-            "the plugin path leg is served ({text})"
+            text.contains(&pair(&format!("{root}/__path__"), "\"__static__\"")),
+            "the plugin path leg is served with the static marker ({text})"
         );
+        // `version` -- the node build version a static wz subsystem reports,
+        // as a bare JSON string (upstream's `GIT_VERSION` shape).
         assert!(
-            text.contains(&format!("\"{root}/version\"")),
-            "the version leaf is served ({text})"
+            text.contains(&pair(&format!("{root}/version"), &format!("\"{VERSION}\""))),
+            "the version leaf carries the node build version ({text})"
         );
+        // `port` -- upstream's config object, carrying the address the listener
+        // is REALLY on. The request asked for port 0, so a record rendering the
+        // REQUESTED address would put `:0` here.
         assert!(
-            text.contains(&format!("\"{root}/port\"")),
-            "the port leaf is served ({text})"
-        );
-        // The bodies. `version` is the node build version a static wz subsystem
-        // reports; `port` is upstream's config object, carrying the address the
-        // listener is REALLY on (the request asked for port 0).
-        assert!(
-            text.contains(VERSION),
-            "the version leaf body is the node build version ({text})"
-        );
-        assert!(
-            text.contains(&format!("{}", http_addr.port())),
-            "the port body carries the live bound port {} ({text})",
-            http_addr.port()
+            text.contains(&pair(
+                &format!("{root}/port"),
+                &format!("{{\"http_port\":\"{http_addr}\"}}")
+            )),
+            "the port leaf carries the live bound address {http_addr} ({text})"
         );
 
-        // The registry leg (`plugins/<id>`) answered by the SAME call: the
-        // record is `Started`, which is also the gate the sub-tree above is
-        // behind, so the two halves cannot disagree about whether it is running.
+        // The registry leg (`plugins/<id>`) answered by the SAME call, pinned
+        // whole: `state` is checked INSIDE the bridge's own record rather than
+        // anywhere in the array, so another plugin's state can never satisfy
+        // it. `Started` is also the gate the sub-tree above sits behind, so the
+        // two halves cannot disagree about whether the bridge is running.
         assert!(
-            text.contains(&format!("\"@/{zid_hex}/{whatami}/plugins/{PLUGIN_ID}\"")),
-            "the registry leg names the bridge ({text})"
-        );
-        assert!(
-            text.contains("Started"),
-            "while serving, the bridge's record is Started ({text})"
+            text.contains(&pair(
+                &format!("@/{zid_hex}/{whatami}/plugins/{PLUGIN_ID}"),
+                &format!(
+                    "{{\"name\":\"{PLUGIN_ID}\",\"id\":\"{PLUGIN_ID}\",\
+                     \"version\":\"{VERSION}\",\"long_version\":null,\
+                     \"path\":\"__static__\",\"state\":\"Started\""
+                )
+            )),
+            "the registry record names the bridge and reports it Started ({text})"
         );
 
         // ── THE CONTROL, at the boundary the `Started` gate actually turns on.

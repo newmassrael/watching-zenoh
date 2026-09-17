@@ -47,11 +47,26 @@ pub const PLUGIN_ID: &str = "rest";
 ///
 /// Cheap to clone (one `Arc`); a host keeps a clone for its admin closure and
 /// hands another to [`serve_on_with_admin`](crate::serve_on_with_admin).
-/// ALWAYS compiled — only [`plugin_record`](Self::plugin_record) and
-/// [`status_leaves`](Self::status_leaves), which name `AdminPlugin`, are behind
-/// `adminspace-plugins-handlers`. That keeps `serve_on_with_admin`'s signature
-/// stable across the feature toggle, the same reason `AdminPlugin` itself is
-/// always compiled inside `answer_admin_query`'s signature.
+///
+/// The handle itself is ALWAYS compiled, so `serve_on_with_admin`'s signature
+/// is stable across the feature toggle. Only
+/// [`plugin_record`](Self::plugin_record) and
+/// [`status_leaves`](Self::status_leaves) sit behind
+/// `adminspace-plugins-handlers`, and that gate is FORCED rather than chosen:
+/// they name `AdminPlugin`, which lives in `wz_session_core::adminspace`, and
+/// that whole module is `#[cfg(feature = "adminspace-core")]`
+/// (`wz-session-core/src/lib.rs` @ `pub mod adminspace;`). This crate's feature
+/// composes it through wz-runtime-tokio's.
+///
+/// ⚠ THAT WAS ESTABLISHED BY REMOVING THE GATE AND FAILING TO BUILD, after a
+/// grep for `pub mod adminspace` printed the `pub mod` line and not the `#[cfg]`
+/// on the line above it, and the conclusion "the module is ungated" was drawn
+/// from the printed line alone. The attributes inside the module — `AdminPlugin`
+/// and friends really are outside the `adminspace-plugins-handlers` `#[cfg]`
+/// blocks — are what made the wrong reading plausible: they are ungated WITHIN a
+/// gated module, so reading them says nothing about reaching them. Recorded
+/// because the repair is not "grep more carefully" but "ask the compiler", which
+/// is the only reader that resolves a path.
 #[derive(Clone, Default)]
 pub struct RestAdmin {
     addr: Arc<Mutex<Option<SocketAddr>>>,

@@ -46,8 +46,8 @@ path = "src/lib.rs"
 # binary, and it is declared HERE because that is where the fact is structural:
 # a build in which this crate is linked IS a build carrying the bridge, so the
 # registry cannot report `rest` absent while the bridge is present. Naming it
-# only in the `wz` facade would leave a consumer that depends on `wz-rest`
-# directly with a registry that silently omits it.
+# only in the `wz` facade would leave any build that reaches this crate by
+# another route with a registry that silently omits the bridge it carries.
 wz-runtime-tokio = { path = "../wz-runtime-tokio", features = [
     "rest-http-bridge",
     "transport-unicast",
@@ -94,17 +94,20 @@ rest-sse-subscribe = [
 # The bridge's OWN entry on the adminspace (`src/admin.rs`): the `rest` plugin
 # record + its `status/plugins/rest/{version,port}` sub-tree, the wz analogue of
 # `zenoh-plugin-rest`'s `adminspace_getter`. Gated because a build can want the
-# bridge without an adminspace to advertise it on — and because the record names
-# `AdminPlugin`, which only the adminspace features compile the serializers for.
-# Both forwards are listed: the runtime-tokio one brings `compiled_plugins` (the
-# registry this record folds over) and the session-core one the `AdminPlugin` /
-# `AdminPluginStatusLeaf` types this crate names DIRECTLY through its own
-# `wz-session-core` dependency, which cargo would otherwise leave un-featured if
-# the runtime-tokio forward ever stopped composing it.
-adminspace-plugins-handlers = [
-    "wz-runtime-tokio/adminspace-plugins-handlers",
-    "wz-session-core/adminspace-plugins-handlers",
-]
+# bridge without an adminspace to advertise it on, and because `AdminPlugin`
+# lives in `wz_session_core::adminspace`, a module that is itself
+# `#[cfg(feature = "adminspace-core")]` — so the record cannot be built without
+# it. ONE forward: wz-runtime-tokio's own feature composes `adminspace-core`
+# down to wz-session-core, and it is also what brings `compiled_plugins` (the
+# registry this record folds over) and `declare_adminspace_with_live_inputs`,
+# which the crate's `rest_admin_plugin_e2e` names.
+#
+# ⚠ The second forward this line used to carry was justified by a claim that
+# did not survive measurement — that the `AdminPlugin` / `AdminPluginStatusLeaf`
+# TYPES needed it. They are ungated, but they are ungated INSIDE a gated
+# module, so reaching them still takes the feature. Removing the gate on that
+# reading failed to compile, which is the only reader that settles a path.
+adminspace-plugins-handlers = ["wz-runtime-tokio/adminspace-plugins-handlers"]
 
 [dev-dependencies]
 # The integration test drives the bridge over a real TCP socket against a live
