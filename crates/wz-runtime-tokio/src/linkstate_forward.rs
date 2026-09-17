@@ -2869,11 +2869,6 @@ impl LinkstateForwarder {
         use wz_session_core::adminspace::AdminSources;
         use wz_session_core::zid_hex::zid_to_zenoh_hex;
 
-        let empty = || AdminSources {
-            routers: Vec::new(),
-            peers: Vec::new(),
-            clients: Vec::new(),
-        };
         let self_zid = *self.net.borrow().self_zid();
         let mut by_key: HashMap<String, AdminSources> = HashMap::new();
         for (keyexpr, zid, _) in mesh.entries() {
@@ -2885,10 +2880,35 @@ impl LinkstateForwarder {
             }
             by_key
                 .entry(keyexpr)
-                .or_insert_with(empty)
+                .or_insert_with(Self::empty_sources)
                 .peers
                 .push(zid_to_zenoh_hex(zid.as_slice()));
         }
+        self.fold_client_tier(clients, &mut by_key);
+        Self::order_sources(by_key)
+    }
+
+    /// An all-empty `Sources` body, the `or_insert_with` seed both folds share.
+    #[cfg(feature = "adminspace-introspection-handlers")]
+    fn empty_sources() -> wz_session_core::adminspace::AdminSources {
+        wz_session_core::adminspace::AdminSources {
+            routers: Vec::new(),
+            peers: Vec::new(),
+            clients: Vec::new(),
+        }
+    }
+
+    /// Name each `(face, keyexpr)` pair's face in that key's `clients` bucket —
+    /// the CLIENT-tier arm, shared by the two-tier [`bucket_by_tier`](Self::bucket_by_tier)
+    /// fold and the client-only [`bucket_client_tier`](Self::bucket_client_tier) one.
+    #[cfg(feature = "adminspace-introspection-handlers")]
+    fn fold_client_tier(
+        &self,
+        clients: &[(FaceId, String)],
+        by_key: &mut HashMap<String, wz_session_core::adminspace::AdminSources>,
+    ) {
+        use wz_session_core::zid_hex::zid_to_zenoh_hex;
+
         let faces = self.faces.borrow();
         for (face, keyexpr) in clients {
             let Some(zid) = faces.get(face).and_then(|s| peer_zid_routing(&s.actions)) else {
@@ -2899,16 +2919,26 @@ impl LinkstateForwarder {
             };
             by_key
                 .entry(keyexpr.clone())
-                .or_insert_with(empty)
+                .or_insert_with(Self::empty_sources)
                 .clients
                 .push(zid_to_zenoh_hex(zid.as_slice()));
         }
-        // Sorted within each bucket and across keys: the iteration order of a
-        // `HashMap` otherwise follows its hashing, and a body that reorders
-        // between two identical GETs is a difference an operator has to
-        // explain. `dedup` after the sort because one face may hold the same
-        // keyexpr under two declaration ids, which is one SOURCE, not two.
-        let mut out: Vec<(String, AdminSources)> = by_key.into_iter().collect();
+    }
+
+    /// Settle a folded map into the reply's deterministic order.
+    ///
+    /// Sorted within each bucket and across keys: the iteration order of a
+    /// `HashMap` otherwise follows its hashing, and a body that reorders between
+    /// two identical GETs is a difference an operator has to explain. `dedup`
+    /// after the sort because one face may hold the same keyexpr under two
+    /// declaration ids — or, on the interest legs, under two interest ids — which
+    /// is one SOURCE, not two.
+    #[cfg(feature = "adminspace-introspection-handlers")]
+    fn order_sources(
+        by_key: HashMap<String, wz_session_core::adminspace::AdminSources>,
+    ) -> Vec<(String, wz_session_core::adminspace::AdminSources)> {
+        let mut out: Vec<(String, wz_session_core::adminspace::AdminSources)> =
+            by_key.into_iter().collect();
         for (_, sources) in out.iter_mut() {
             sources.peers.sort();
             sources.peers.dedup();
@@ -2917,6 +2947,28 @@ impl LinkstateForwarder {
         }
         out.sort_by(|a, b| a.0.cmp(&b.0));
         out
+    }
+
+    /// The CLIENT-tier-only fold: [`bucket_by_tier`](Self::bucket_by_tier) without
+    /// a mesh arm, for the legs whose whole source is a per-client-face table.
+    ///
+    /// ⛔ This is NOT `bucket_by_tier` called with an empty mesh table. The
+    /// distinction is the point: the `publisher` / `querier` legs have no mesh
+    /// tier to be empty, because the fact they report — a face's declared
+    /// INTEREST — is not an entity and never propagates. Upstream says so in the
+    /// oracle test's own words: "subscribers, queryables and tokens are
+    /// _entities_: they are propagated in the network. In contrast, publishers
+    /// and queriers only exist locally within nodes that have knowledge of
+    /// interests" (`zenoh/src/net/tests/regions/adminspace.rs` @ `NOTE(regions)`).
+    /// Handing this fold a mesh table would invite a later round to fill it.
+    #[cfg(feature = "adminspace-introspection-handlers")]
+    fn bucket_client_tier(
+        &self,
+        clients: &[(FaceId, String)],
+    ) -> Vec<(String, wz_session_core::adminspace::AdminSources)> {
+        let mut by_key: HashMap<String, wz_session_core::adminspace::AdminSources> = HashMap::new();
+        self.fold_client_tier(clients, &mut by_key);
+        Self::order_sources(by_key)
     }
 
     /// R2684 (§5.23 `adminspace-router-linkstate`) — a read-only
@@ -3016,6 +3068,71 @@ impl LinkstateForwarder {
             .flat_map(|(face, by_id)| by_id.values().map(move |ke| (*face, ke.clone())))
             .collect();
         self.bucket_by_tier(&self.tokens.borrow(), &clients, |_| false)
+    }
+
+    /// The publishers this node knows (`@/<zid>/<whatami>/publisher/**` admin
+    /// introspection, §5.23) — the FOURTH per-entity leg, and the one the atom's
+    /// reason carried as `OMITTED` from R311y441 until R2694 built it.
+    ///
+    /// ⚠ A publisher is NOT an entity this node holds a table of. Upstream folds
+    /// this leg from the same fact wz keeps in
+    /// [`future_subs`](Self#structfield.future_subs): a face's declared FUTURE
+    /// subscriber-plane `Interest`, which is what `declare_publisher` puts on the
+    /// wire (`zenoh/src/net/routing/hat/peer/pubsub.rs` @ `fn sourced_publishers`
+    /// walks `remote_interests` and keeps `i.options.subscribers()`). The plane
+    /// filter upstream spells as that option bit is structural here, because wz
+    /// keeps a SEPARATE store per plane and the admission already applied
+    /// `body.su()`.
+    ///
+    /// ⛔ SCOPE — the `peers` bucket is unreachable on this node, and that is a
+    /// property of wz's topology rather than a gap in this fold. Upstream fills it
+    /// from the peer hat, whose `owned_faces` are a south PEER subregion's; wz has
+    /// no such subregion, and its interest store admits CLIENT faces only
+    /// (`let store_future = interest.f() && body.su() && is_client`). Widening
+    /// that admission to fill this bucket would be changing the DATA plane to
+    /// change a report: the store's membership is not a ledger but a behaviour —
+    /// `push_future_subscription` sends a real `DeclareSubscriber` to every face
+    /// in it, and the mesh plane already services those peers through
+    /// `flood_to_tree_children`. So a mesh peer's interest is recorded nowhere,
+    /// and this leg reports the client tier alone.
+    #[cfg(feature = "adminspace-introspection-handlers")]
+    pub fn publisher_sources(&self) -> Vec<(String, wz_session_core::adminspace::AdminSources)> {
+        let clients: Vec<(FaceId, String)> = self
+            .future_subs
+            .borrow()
+            .iter_interests()
+            .map(|(face, target)| (face, target.to_owned()))
+            .collect();
+        self.bucket_client_tier(&clients)
+    }
+
+    /// The queriers this node knows (`@/<zid>/<whatami>/querier/**` admin
+    /// introspection, §5.23) — the query-plane twin of
+    /// [`publisher_sources`](Self::publisher_sources), reading
+    /// [`future_qabls`](Self#structfield.future_qabls) where that reads
+    /// `future_subs`.
+    ///
+    /// The twin holds at both ends and was read rather than assumed: upstream's
+    /// `sourced_queriers` is the same walk under `i.options.queryables()`
+    /// (`zenoh/src/net/routing/hat/peer/queries.rs` @ `fn sourced_queriers`), and
+    /// wz's admission is the exact pair of the subs one
+    /// (`let store_future_qabl = interest.f() && body.qu() && is_client`). The
+    /// value the qabl store carries per push is a `QueryableInfo`, which this leg
+    /// discards: upstream serializes the SAME `Sources` body for every entity
+    /// kind, never a per-declaration info — the same reduction
+    /// [`queryable_sources`](Self::queryable_sources) makes.
+    ///
+    /// ⛔ The same SCOPE as the publisher twin: `peers` is unreachable, for the
+    /// one reason given there.
+    #[cfg(feature = "adminspace-introspection-handlers")]
+    pub fn querier_sources(&self) -> Vec<(String, wz_session_core::adminspace::AdminSources)> {
+        let clients: Vec<(FaceId, String)> = self
+            .future_qabls
+            .borrow()
+            .iter_interests()
+            .map(|(face, target)| (face, target.to_owned()))
+            .collect();
+        self.bucket_client_tier(&clients)
     }
 
     /// R311y473 — the held faces as the adminspace `sessions[]` array: the
@@ -7914,6 +8031,146 @@ mod tests {
             flatten(fwd.token_sources()),
             vec![("leaf/token".to_string(), vec![], vec![], vec![client_hex])],
             "the client holds the token; the self mesh row is its advertisement"
+        );
+    }
+
+    /// The flattened `(keyexpr, routers, peers, clients)` rows of a `Sources`
+    /// answer, the shape the admin-leg assertions compare.
+    ///
+    /// Spelled as a free fn taking the vector rather than an annotated binding for
+    /// the reason the subscriber twin uses a closure: naming the flattened tuple
+    /// inline trips clippy's `type_complexity` at `-D warnings`, which gate 7
+    /// enforces.
+    #[cfg(feature = "adminspace-introspection-handlers")]
+    #[allow(clippy::type_complexity)]
+    fn flatten_sources(
+        rows: Vec<(String, wz_session_core::adminspace::AdminSources)>,
+    ) -> Vec<(String, Vec<String>, Vec<String>, Vec<String>)> {
+        rows.into_iter()
+            .map(|(k, s)| (k, s.routers, s.peers, s.clients))
+            .collect()
+    }
+
+    /// R2694 — the FOURTH per-entity leg: a client's FUTURE subscriber-plane
+    /// `Interest` is what `declare_publisher` puts on the wire, so the face that
+    /// declared it is this node's `publisher` source, named in `clients`.
+    ///
+    /// The plane arm is asserted in BOTH directions in one test because the two
+    /// stores are the only thing separating the legs: a subs-plane interest must
+    /// raise a publisher and NOT a querier. Reading the wrong store is the single
+    /// mistake this fold can make that still type-checks.
+    #[cfg(feature = "adminspace-introspection-handlers")]
+    #[test]
+    fn admin_publisher_sources_name_the_client_that_declared_the_interest() {
+        use wz_session_core::zid_hex::zid_to_zenoh_hex;
+
+        let fwd = LinkstateForwarder::new(zid(0x05), WhatAmI::Peer);
+        // ANTI-VACUITY: a peer nobody has solicited reports nothing on either
+        // leg, so the assertions below are refutable by an always-full answer.
+        assert!(
+            fwd.publisher_sources().is_empty(),
+            "a peer with no interests reports no publishers"
+        );
+        assert!(
+            fwd.querier_sources().is_empty(),
+            "a peer with no interests reports no queriers"
+        );
+
+        let (client_c, _s) = peer_face_whatami(zid(0x0C), 2);
+        fwd.register(FaceId(1), &client_c);
+        // FUTURE-only (C clear, F set), SUBSCRIBERS plane, restricted to a literal.
+        forward_one(
+            &fwd,
+            FaceId(1),
+            interest_with_mode(7, "demo/key", false, true, true, false, false),
+        );
+
+        let client_hex = zid_to_zenoh_hex(zid(0x0C).as_slice());
+        assert_eq!(
+            flatten_sources(fwd.publisher_sources()),
+            vec![(
+                "demo/key".to_string(),
+                vec![],
+                vec![],
+                vec![client_hex.clone()]
+            )],
+            "the client that declared the subs-plane interest is the publisher"
+        );
+        assert!(
+            fwd.querier_sources().is_empty(),
+            "a SUBSCRIBERS-plane interest is not a querier"
+        );
+
+        // The query-plane twin, on the same face: a QUERYABLES-plane interest
+        // raises a querier and leaves the publisher answer where it was.
+        forward_one(
+            &fwd,
+            FaceId(1),
+            interest_with_mode(8, "demo/q", false, true, false, true, false),
+        );
+        assert_eq!(
+            flatten_sources(fwd.querier_sources()),
+            vec![("demo/q".to_string(), vec![], vec![], vec![client_hex])],
+            "the client that declared the query-plane interest is the querier"
+        );
+        assert_eq!(
+            fwd.publisher_sources().len(),
+            1,
+            "the query-plane interest did not join the publisher leg"
+        );
+    }
+
+    /// R2694 — the fold reads what the face ASKED FOR, never what this node
+    /// DECLARED BACK.
+    ///
+    /// `ClientFutureInterests` holds both facts side by side — `interests` and
+    /// `pushed` — and a publisher leg folded from `pushed` would answer this
+    /// node's OWN declarations back as the remote's publishers, with a plausible
+    /// non-empty body. Upstream folds `remote_interests`, whose wz counterpart is
+    /// `interests` alone.
+    ///
+    /// ⚠ The setup is what gives the assertion teeth, and it took a control to
+    /// get right. Making the two tables merely NON-EMPTY is not enough, because
+    /// an AGGREGATE interest's dump replies under the interest keyexpr, so both
+    /// tables hold the same string and either fold answers alike. The interest
+    /// here is therefore C+F (so the dump interns at all — a CURRENT-only
+    /// interest is answered with id 0 and seeds nothing, which would make this
+    /// test pass vacuously) and NON-AGGREGATE, so the reply is keyed on the
+    /// matching declaration `demo/**` while the interest stays `demo/key`. The
+    /// two tables then disagree, and only one of them is the right answer.
+    #[cfg(feature = "adminspace-introspection-handlers")]
+    #[test]
+    fn admin_publisher_sources_read_the_asked_for_interest_not_the_pushed_reply() {
+        use wz_session_core::zid_hex::zid_to_zenoh_hex;
+
+        let fwd = LinkstateForwarder::new(zid(0x05), WhatAmI::Peer);
+        let (mesh, _sm) = peer_face(zid(0x0A));
+        let (client_c, sink_c) = peer_face_whatami(zid(0x0C), 2);
+        fwd.register(FaceId(0), &mesh);
+        fwd.register(FaceId(1), &client_c);
+        advertise_link_back(&fwd, FaceId(0), 0x0A, 0x05);
+        // A mesh neighbour subscribes to a keyexpr that is NOT the interest's, so
+        // the dump below writes a DIFFERENT string into `pushed` than the one
+        // `interests` holds.
+        declare_interest(&fwd, FaceId(0), "demo/**");
+        sink_c.reset();
+
+        forward_one(
+            &fwd,
+            FaceId(1),
+            interest_with_mode(7, "demo/key", true, true, true, false, false),
+        );
+        assert_eq!(
+            sink_c.frame_count(),
+            2,
+            "the dump really ran: one DeclareSubscriber reply + one DeclareFinal"
+        );
+
+        let client_hex = zid_to_zenoh_hex(zid(0x0C).as_slice());
+        assert_eq!(
+            flatten_sources(fwd.publisher_sources()),
+            vec![("demo/key".to_string(), vec![], vec![], vec![client_hex])],
+            "the publisher is what the face asked for, not what this node replied"
         );
     }
 

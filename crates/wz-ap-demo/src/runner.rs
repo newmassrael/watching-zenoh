@@ -5509,6 +5509,33 @@ async fn run_peer_until(
                             sources,
                         },
                     ));
+                    // R2694 — the FOURTH and FIFTH legs, and the last two
+                    // `AdminEntityKind::ALL` names. Unlike the three above they
+                    // are not entities: upstream's own oracle test says
+                    // "publishers and queriers only exist locally within nodes
+                    // that have knowledge of interests"
+                    // (`zenoh/src/net/tests/regions/adminspace.rs` @
+                    // `NOTE(regions)`), so they are folded from this node's
+                    // interest stores and never from the mesh tables. Only the
+                    // PEER host owes them: upstream's client and router hats both
+                    // return an empty map (`hat/client/pubsub.rs` @
+                    // `fn sourced_publishers`), so the pure-Session host and the
+                    // router forwarder emitting nothing here is faithful, not a
+                    // second gap.
+                    buf.extend(forwarder.publisher_sources().into_iter().map(
+                        |(keyexpr, sources)| AdminDeclaration {
+                            kind: AdminEntityKind::Publisher,
+                            keyexpr,
+                            sources,
+                        },
+                    ));
+                    buf.extend(forwarder.querier_sources().into_iter().map(
+                        |(keyexpr, sources)| AdminDeclaration {
+                            kind: AdminEntityKind::Querier,
+                            keyexpr,
+                            sources,
+                        },
+                    ));
                 }
                 // R311y473 (§5.23) — re-snapshot the HELD FACES into the admin
                 // `sessions[]` buffer, the same full-re-materialization discipline as

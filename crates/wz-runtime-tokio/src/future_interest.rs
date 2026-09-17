@@ -415,6 +415,36 @@ impl<V: Copy + PartialEq> FutureInterestStore<V> {
         self.by_face.remove(&face).is_some()
     }
 
+    /// Every stored FUTURE interest as `(declaring face, target keyexpr)` — the
+    /// read the `publisher` / `querier` admin legs fold (§5.23
+    /// `adminspace-introspection-handlers`). Upstream answers those two legs from
+    /// exactly this fact and no other: `sourced_publishers` walks
+    /// `face_hat(face).remote_interests` and keeps the resources whose interest
+    /// carries the plane's option bit
+    /// (`zenoh/src/net/routing/hat/peer/pubsub.rs` @ `fn sourced_publishers`),
+    /// which is what this store holds per plane.
+    ///
+    /// ⚠ It reads `interests`, NOT
+    /// `pushed`. The two are easy to confuse because they are neighbours on the
+    /// same struct, and they answer OPPOSITE questions: `interests` is what the
+    /// face ASKED FOR (upstream's `remote_interests`) and `pushed` is what this
+    /// node DECLARED BACK to it (upstream's `face_hat.local_subs`). A publisher
+    /// leg folded from `pushed` would report this node's own declarations as the
+    /// remote's publishers.
+    ///
+    /// ⚠ NOT deduplicated: a face holding two interests in the same target yields
+    /// its zid twice, exactly as upstream's `remote_interests.values()` push does.
+    /// The admin fold dedups per bucket after bucketing, which is where one SOURCE
+    /// is decided, so collapsing here would silently pre-empt that decision.
+    pub fn iter_interests(&self) -> impl Iterator<Item = (FaceId, &str)> + '_ {
+        self.by_face.iter().flat_map(|(face, state)| {
+            state
+                .interests
+                .values()
+                .map(move |i| (*face, i.target.as_str()))
+        })
+    }
+
     /// Test-only: number of faces holding any future state.
     #[cfg(test)]
     fn face_count(&self) -> usize {
