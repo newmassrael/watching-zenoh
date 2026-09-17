@@ -446,8 +446,13 @@ impl<V: Copy + PartialEq> FutureInterestStore<V> {
     }
 
     /// Test-only: number of faces holding any future state.
+    ///
+    /// `pub(crate)` rather than module-private because the forwarder's admin
+    /// tests read it as a CONTROL: the `publisher` leg records a mesh face for
+    /// reporting only, and "the push store did not gain that face" is the
+    /// assertion that separates that repair from a widened `is_client`.
     #[cfg(test)]
-    fn face_count(&self) -> usize {
+    pub(crate) fn face_count(&self) -> usize {
         self.by_face.len()
     }
 

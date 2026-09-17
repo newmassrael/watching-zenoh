@@ -556,6 +556,30 @@ impl<C: LivelinessSampleSink> LivelinessSubscriberRegistry<C> {
     /// shape one level up: a body-level cfg with a `0` fallback. `0` is the
     /// honest answer without `alloc` — there is no peer-token table, so
     /// nothing was flushed.
+    /// The peer tokens this session currently knows, as `(decl id, keyexpr)` —
+    /// the liveliness twin of `RemoteSubscriberRegistry::iter_declared`, and what
+    /// the pure-Session admin host's `token/**` leg folds (§5.23).
+    ///
+    /// ⚠ This table is the RIGHT one to fold and the obvious neighbour is not.
+    /// `LivelinessRegistry` — the declare-SINK registry next door — holds a
+    /// single observer pair and no table at all, so a reading that starts from
+    /// the name concludes this session records no tokens. It records them here,
+    /// on the SUBSCRIBER registry, because the keyexpr has to survive from the
+    /// `DeclToken` that resolved it to the `UndeclToken` that carries none.
+    ///
+    /// It is the upstream fact, not a subset of it: the insert runs before the
+    /// callback fan and is not conditioned on a matching subscriber, mirroring
+    /// `zenoh`'s `if let Entry::Vacant(e) = state.remote_tokens.entry(m.id)`. So
+    /// a session with no liveliness subscriber at all still reports what its
+    /// peer holds, which is what upstream's client hat does
+    /// (`zenoh/src/net/routing/hat/client/token.rs` @ `fn sourced_tokens`).
+    #[cfg(feature = "alloc")]
+    pub fn iter_peer_tokens(&self) -> impl Iterator<Item = (u64, &str)> + '_ {
+        self.peer_token_table
+            .iter()
+            .map(|(id, keyexpr)| (*id, keyexpr.as_str()))
+    }
+
     pub fn flush_peer_tokens_on_link_loss(&mut self) -> usize {
         #[cfg(feature = "alloc")]
         {

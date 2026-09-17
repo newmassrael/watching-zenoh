@@ -735,6 +735,17 @@ pub struct RouterDeclarationsView {
     linkstatepeer_qabls: Rc<RefCell<LinkstatepeerInterest<QueryableInfo>>>,
     client_subs: Rc<RefCell<HashMap<FaceId, HashSet<String>>>>,
     client_qabls: Rc<RefCell<HashMap<FaceId, HashMap<String, QueryableInfo>>>>,
+    /// The token plane's three tiers, present only where the tables are
+    /// (`routing-token-tables`). The `token/**` leg is folded from exactly the
+    /// same trio as the other two legs — upstream's router hat enumerates tokens
+    /// like every other hat (`zenoh/src/net/routing/hat/router/token.rs` @
+    /// `fn sourced_tokens`), which is what says this host owes the leg at all.
+    #[cfg(feature = "routing-token-tables")]
+    router_tokens: Rc<RefCell<LinkstatepeerInterest<()>>>,
+    #[cfg(feature = "routing-token-tables")]
+    linkstatepeer_tokens: Rc<RefCell<LinkstatepeerInterest<()>>>,
+    #[cfg(feature = "routing-token-tables")]
+    client_tokens: Rc<RefCell<HashMap<FaceId, HashMap<u64, String>>>>,
     /// A client's zid comes from its FACE: a Client joins no link-state graph,
     /// so there is nowhere else to read it from.
     faces: Rc<RefCell<HashMap<FaceId, RouterFaceState>>>,
@@ -801,6 +812,46 @@ impl RouterDeclarationsView {
         self.bucket_by_tier(
             &self.router_qabls.borrow(),
             &self.linkstatepeer_qabls.borrow(),
+            &clients,
+        )
+    }
+
+    /// The [`subscribers`](Self::subscribers) twin for liveliness tokens
+    /// (`@/<zid>/router/token/**`, §5.23) — the THIRD leg this host owes, and
+    /// the one the atom's reason reached only in R2690 after being silent about
+    /// it entirely.
+    ///
+    /// Every upstream hat enumerates tokens, unlike publishers and queriers
+    /// where the client and router hats return an empty map, so no host is
+    /// excused from this leg by its role — including this one, whose own
+    /// `fn sourced_tokens` folds `router_tokens`
+    /// (`zenoh/src/net/routing/hat/router/token.rs`).
+    ///
+    /// ⚠ The client store is keyed the OTHER WAY ROUND from the queryable one
+    /// and the reduction differs accordingly: `client_qabls` is
+    /// `keyexpr -> QueryableInfo` so its KEYS are the keyexprs, while
+    /// `client_tokens` is `decl id -> keyexpr` so its VALUES are. Taking `keys()`
+    /// here would fold a set of decl ids rendered as keyexprs. The id keying is
+    /// not incidental — the field doc explains that an `UndeclareToken` carries
+    /// no keyexpr on the wire, so only an id map can resolve a retraction.
+    ///
+    /// ⚠ NO self-exclusion predicate, unlike the peer forwarder's token fold.
+    /// This host never writes a self row for a client's token: a client-held
+    /// token is DERIVE-NOT-STORE here (`advertise_client_cross_tier_token`
+    /// advertises it without storing it in a mesh table), so a self row in these
+    /// tables can only be this router's own holding, which is what the peer's
+    /// `native` predicate had to distinguish and this one does not.
+    #[cfg(feature = "routing-token-tables")]
+    pub fn tokens(&self) -> Vec<(String, wz_session_core::adminspace::AdminSources)> {
+        let clients: HashMap<FaceId, HashSet<String>> = self
+            .client_tokens
+            .borrow()
+            .iter()
+            .map(|(face, by_id)| (*face, by_id.values().cloned().collect()))
+            .collect();
+        self.bucket_by_tier(
+            &self.router_tokens.borrow(),
+            &self.linkstatepeer_tokens.borrow(),
             &clients,
         )
     }
@@ -985,12 +1036,17 @@ pub struct RouterForwarder {
     /// the sub plane. Populated by the token-INGEST slice: NATIVE Router token
     /// sources keyed by their zid; within-tier re-flood (slice-1) + the cross-tier
     /// self-bubble (slice-2) + read by the token-INTEREST current dump (slice-4).
+    ///
+    /// R2694 — behind an `Rc` for the reason `faces` is (R2636): the admin GET
+    /// handler is stored inside this forwarder, so the `token/**` leg reads this
+    /// table through a shared handle on [`RouterDeclarationsView`] rather than by
+    /// recapturing the forwarder. Use sites are unchanged.
     #[cfg(feature = "routing-token-tables")]
-    router_tokens: RefCell<LinkstatepeerInterest<()>>,
+    router_tokens: Rc<RefCell<LinkstatepeerInterest<()>>>,
     /// Peer-tier liveliness-TOKEN interest (zenoh `HatTables.linkstatepeer_tokens`).
     /// The token twin of `linkstatepeer_subs` (native Peer token sources by zid).
     #[cfg(feature = "routing-token-tables")]
-    linkstatepeer_tokens: RefCell<LinkstatepeerInterest<()>>,
+    linkstatepeer_tokens: Rc<RefCell<LinkstatepeerInterest<()>>>,
     /// Per-CLIENT-face liveliness-TOKEN store (slice-3) — the token twin of
     /// [`client_subs`](Self#structfield.client_subs), but keyed the way zenoh's
     /// `face_hat.remote_tokens: HashMap<TokenId, Arc<Resource>>` is
@@ -1013,7 +1069,7 @@ pub struct RouterForwarder {
     /// folding `client_subs` — else a client-sourced token is invisible to a
     /// token-interest reader on this router.
     #[cfg(feature = "routing-token-tables")]
-    client_tokens: RefCell<HashMap<FaceId, HashMap<u64, String>>>,
+    client_tokens: Rc<RefCell<HashMap<FaceId, HashMap<u64, String>>>>,
     /// Per-CLIENT-face subscription store (C2) — zenoh's per-`Resource`
     /// `session_ctxs` leaf input, keyed by the client's [`FaceId`] (a Client face
     /// is HELD with no mesh, so its interest cannot live in a Zid-keyed tier
@@ -1448,11 +1504,11 @@ impl RouterForwarder {
             router_qabls: Rc::new(RefCell::new(LinkstatepeerInterest::new())),
             linkstatepeer_qabls: Rc::new(RefCell::new(LinkstatepeerInterest::new())),
             #[cfg(feature = "routing-token-tables")]
-            router_tokens: RefCell::new(LinkstatepeerInterest::new()),
+            router_tokens: Rc::new(RefCell::new(LinkstatepeerInterest::new())),
             #[cfg(feature = "routing-token-tables")]
-            linkstatepeer_tokens: RefCell::new(LinkstatepeerInterest::new()),
+            linkstatepeer_tokens: Rc::new(RefCell::new(LinkstatepeerInterest::new())),
             #[cfg(feature = "routing-token-tables")]
-            client_tokens: RefCell::new(HashMap::new()),
+            client_tokens: Rc::new(RefCell::new(HashMap::new())),
             client_subs: Rc::new(RefCell::new(HashMap::new())),
             client_qabls: Rc::new(RefCell::new(HashMap::new())),
             local_queryables: RefCell::new(Vec::new()),
@@ -5415,6 +5471,12 @@ impl RouterForwarder {
             linkstatepeer_qabls: Rc::clone(&self.linkstatepeer_qabls),
             client_subs: Rc::clone(&self.client_subs),
             client_qabls: Rc::clone(&self.client_qabls),
+            #[cfg(feature = "routing-token-tables")]
+            router_tokens: Rc::clone(&self.router_tokens),
+            #[cfg(feature = "routing-token-tables")]
+            linkstatepeer_tokens: Rc::clone(&self.linkstatepeer_tokens),
+            #[cfg(feature = "routing-token-tables")]
+            client_tokens: Rc::clone(&self.client_tokens),
             faces: Rc::clone(&self.faces),
         }
     }
@@ -7711,6 +7773,82 @@ mod tests {
                 .iter()
                 .any(|(k, s)| k == "mesh/router/late" && s.routers == vec![hex(0xDD)]),
             "the view is live, not a snapshot taken when it was made"
+        );
+    }
+
+    /// R2694 — the router's `token/**` leg, the THIRD the §5.23 host owes and
+    /// the one its reason was silent about until R2690 derived the population
+    /// from upstream's handler list rather than from the reason's own clauses.
+    ///
+    /// Same three-keyexpr discipline as the sub/qabl twin above and for the same
+    /// reason: `bucket_by_tier` is generic over the value type, so folding the
+    /// SUB tables here would type-check. Disjoint keys make any cross-wiring
+    /// move a keyexpr into a leg it does not belong to.
+    ///
+    /// ⚠ The client assertion carries a second charge. `client_tokens` is
+    /// `decl id -> keyexpr`, the transpose of `client_qabls`, so the fold must
+    /// take `values()` where the queryable one takes `keys()`. Reading the keys
+    /// would also type-check and would put the DECL ID where the keyexpr belongs
+    /// — pinning the literal `leaf/client/token` is what separates the two.
+    #[cfg(all(
+        feature = "adminspace-introspection-handlers",
+        feature = "routing-token-tables"
+    ))]
+    #[test]
+    fn admin_token_leg_buckets_each_tier_and_reads_the_client_store_by_value() {
+        use wz_session_core::zid_hex::zid_to_zenoh_hex;
+
+        let fwd = RouterForwarder::new(zid(0x01));
+        assert!(
+            fwd.declarations_view().tokens().is_empty(),
+            "a router holding no tokens reports none — the control that stops \
+             the assertion below from passing on an always-full answer"
+        );
+
+        let (a_r, _s1) = face(zid(0xAA), WIRE_ROUTER);
+        let (b_p, _s2) = face(zid(0xBB), WIRE_PEER);
+        let (c_c, _s3) = face(zid(0xCC), WIRE_CLIENT);
+        fwd.register(FaceId(0), &a_r);
+        fwd.register(FaceId(1), &b_p);
+        fwd.register(FaceId(2), &c_c);
+        for (id, token_key) in [
+            (FaceId(0), "mesh/router/token"),
+            (FaceId(1), "mesh/peer/token"),
+            (FaceId(2), "leaf/client/token"),
+        ] {
+            forward_one(&fwd, id, declare_token_msg(token_key));
+        }
+
+        let hex = |b| zid_to_zenoh_hex(zid(b).as_slice());
+        let flatten = |rows: Vec<(String, wz_session_core::adminspace::AdminSources)>| {
+            rows.into_iter()
+                .map(|(k, s)| (k, s.routers, s.peers, s.clients))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            flatten(fwd.declarations_view().tokens()),
+            vec![
+                (
+                    String::from("leaf/client/token"),
+                    vec![],
+                    vec![],
+                    vec![hex(0xCC)]
+                ),
+                (
+                    String::from("mesh/peer/token"),
+                    vec![],
+                    vec![hex(0xBB)],
+                    vec![]
+                ),
+                (
+                    String::from("mesh/router/token"),
+                    vec![hex(0xAA)],
+                    vec![],
+                    vec![]
+                ),
+            ],
+            "each tier's token table fills its OWN `Sources` bucket, and the \
+             client row is the keyexpr rather than the decl id it is keyed by"
         );
     }
 

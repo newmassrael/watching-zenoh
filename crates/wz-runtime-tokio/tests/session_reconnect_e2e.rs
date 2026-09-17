@@ -389,6 +389,160 @@ async fn a_dying_link_delivers_remote_liveliness_deletes_to_the_dialer() {
     );
 }
 
+/// R2694 — the ADMIN half of the link-loss liveliness flush: a departed peer's
+/// tokens must leave the `token/**` introspection answer with it.
+///
+/// This is a SEAM test and the seam is an ordering one. The supervisor refreshes
+/// the admin cache inside the guard that flushes DECLARATIONS, and it flushes
+/// LIVELINESS under a second, later lock — so a cache rebuilt by the first guard
+/// still holds tokens the second is about to drop. Both halves were individually
+/// correct before this round: the flush emptied the table and the refresh
+/// rebuilt the cache. Nothing rebuilt it AFTER the table was emptied.
+///
+/// No unit test can reach this. The registries agree at both ends, and the
+/// failure lives only in which lock ran first, which is a property of
+/// `reconnect.rs` rather than of anything the fold can see.
+///
+/// The BEFORE arm is what makes the AFTER arm evidence. Without it, a run where
+/// the admin surface never reported the token at all — the leg unwired, the GET
+/// unanswered — would report the same empty answer and pass.
+#[cfg(all(
+    feature = "adminspace-core",
+    feature = "adminspace-introspection-handlers",
+    feature = "query-get",
+    feature = "query-queryable",
+    feature = "liveliness-subscriber",
+    feature = "liveliness-token"
+))]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_dying_link_takes_its_tokens_out_of_the_admin_introspection_answer() {
+    use std::sync::Mutex as StdMutex;
+    use wz_runtime_tokio::observer::ApplicationLayerObserver;
+    use wz_runtime_tokio::session::{QueryOptions, TokioSession};
+    use wz_runtime_tokio::sync::Mutex as WzMutex;
+    use wz_session_core::locality::Locality;
+    use wz_session_core::zid_hex::zid_to_zenoh_hex;
+
+    const KEYEXPR: &str = "wz/live/adminflush";
+
+    let (listener, locator) = ip_loopback().await;
+    let mut params = fixture_session_init_params();
+    params.zid = vec![0x09; 4];
+
+    let policy = ReconnectPolicy {
+        retry_delay_ms: 50,
+        max_attempts: Some(100),
+        ..ReconnectPolicy::default()
+    };
+    let (client, server) = tokio::join!(
+        async {
+            open_session_with_reconnect(
+                locator,
+                params,
+                DialConfig::default(),
+                TokioTime::new(),
+                policy,
+                Some(ITER_CAP),
+                DEFAULT_OPEN_TICK_MS,
+            )
+            .await
+            .expect("client reaches Established")
+        },
+        async {
+            let (stream, _peer) = listener.accept().await.expect("accept");
+            accept_and_open_session(
+                DialedLink::Tcp(stream),
+                fixture_session_init_params(),
+                TokioTime::new(),
+                Some(ITER_CAP),
+                DEFAULT_OPEN_TICK_MS,
+            )
+            .await
+            .expect("acceptor reaches Established")
+        },
+    );
+    let mut client = client;
+
+    let observer = Arc::new(WzMutex::new(ApplicationLayerObserver::new()));
+    let session = TokioSession::new(
+        client.actions().clone(),
+        observer,
+        Arc::new(TokioTime::new()),
+    );
+    let _admin = session
+        .declare_adminspace("0.9.9", Vec::new())
+        .expect("adminspace-core ON in this build");
+    client.set_liveliness_flush(session.clone());
+
+    let zid_hex = zid_to_zenoh_hex(&session.actions().params.zid);
+    let whatami = session.actions().params.whatami.to_str();
+    let token_key = format!("@/{zid_hex}/{whatami}/token/{KEYEXPR}");
+
+    // A local GET of the token leg, returning whether THIS node's admin surface
+    // currently names the peer's token.
+    let admin_names_token = |s: &TokioSession| {
+        let hit = Arc::new(StdMutex::new(false));
+        let h = hit.clone();
+        let want = token_key.clone();
+        s.query(
+            &format!("@/{zid_hex}/{whatami}/token/**"),
+            QueryOptions::get().with_allowed_destination(Locality::SessionLocal),
+            move |reply| {
+                if reply.keyexpr() == want {
+                    *h.lock().unwrap() = true;
+                }
+            },
+            |_| {},
+        )
+        .expect("query-get ON in this build");
+        let seen = *hit.lock().unwrap();
+        seen
+    };
+
+    server
+        .actions
+        .send_declare_token(31, 0, Some(KEYEXPR))
+        .expect("acceptor declares a liveliness token");
+    let dispatch_session = session.clone();
+    let mut dispatch = |e: IterationEvent<'_>| dispatch_session.dispatch_iteration_event(e);
+    let stop = Arc::new(AtomicBool::new(false));
+    let stop_for_killer = stop.clone();
+    let probe_session = session.clone();
+    let before = Arc::new(StdMutex::new(false));
+    let before_for_killer = before.clone();
+
+    let timeouts = timeouts_for_gate();
+    let (drive_outcome, _) = tokio::join!(
+        client.drive(&timeouts, &stop, Some(ITER_CAP), &mut dispatch),
+        async {
+            // Wait until the admin surface HAS the token, which is also the
+            // signal that the declare landed, then vanish.
+            for _ in 0..400 {
+                if admin_names_token(&probe_session) {
+                    *before_for_killer.lock().unwrap() = true;
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+            stop_for_killer.store(true, Ordering::Release);
+            drop(server);
+        },
+    );
+
+    assert!(
+        *before.lock().unwrap(),
+        "the admin token leg never named the peer's token while the link was up, \
+         so the assertion below would be testing nothing (outcome {drive_outcome:?})"
+    );
+    assert!(
+        !admin_names_token(&session),
+        "the peer holding {KEYEXPR} vanished and the supervisor flushed its \
+         tokens, but the admin answer still names it — the cache was rebuilt \
+         BEFORE the liveliness flush emptied the table and never after \
+         (outcome {drive_outcome:?})"
+    );
+}
+
 /// R311y800 — THE DIAL-PATH DELIVERY GATE for the link-loss DECLARATION flush,
 /// the twin of [`a_dying_link_delivers_remote_liveliness_deletes_to_the_dialer`]
 /// one plane over.

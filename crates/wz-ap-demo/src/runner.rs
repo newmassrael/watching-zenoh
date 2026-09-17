@@ -6692,7 +6692,26 @@ async fn run_router_hat_until(
                         keyexpr,
                         sources,
                     });
-                subs.chain(qabls).collect::<Vec<_>>()
+                // R2694 — the THIRD leg. Gated a second time on the token TABLES:
+                // unlike subscribers and queryables the tier tables themselves are
+                // optional here, so without them there is no fact to fold rather
+                // than an empty one. The publisher/querier legs are absent by a
+                // DIFFERENT reason and correctly so — upstream's router hat
+                // returns an empty map from both (`hat/router/pubsub.rs` @
+                // `fn sourced_publishers`), so this host emitting nothing for them
+                // is faithful, not a gap.
+                #[cfg(feature = "routing-token-tables")]
+                let tokens = declarations_view
+                    .tokens()
+                    .into_iter()
+                    .map(|(keyexpr, sources)| AdminDeclaration {
+                        kind: AdminEntityKind::Token,
+                        keyexpr,
+                        sources,
+                    });
+                #[cfg(not(feature = "routing-token-tables"))]
+                let tokens = std::iter::empty::<AdminDeclaration>();
+                subs.chain(qabls).chain(tokens).collect::<Vec<_>>()
             };
             #[cfg(not(feature = "adminspace-introspection-handlers"))]
             let declarations: Vec<wz::runtime_tokio::adminspace::AdminDeclaration> = Vec::new();

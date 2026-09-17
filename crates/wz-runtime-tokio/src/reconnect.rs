@@ -558,12 +558,33 @@ impl ReconnectingSession {
                                  declaration(s) and re-evaluated matching"
                             );
                         }
+                        // R2694 (§5.23) — the TOKEN plane needs the same refresh
+                        // the declaration plane got above, and it cannot borrow
+                        // that one: this flush takes its OWN lock, AFTER the
+                        // refresh there has already run, so a cache rebuilt by
+                        // the earlier guard still holds the tokens this one is
+                        // about to drop. Refreshing inside this guard is what
+                        // stops a departed peer's tokens outliving it in the
+                        // admin answer — the identical failure the comment above
+                        // describes for its own plane.
+                        let flush_liveliness = |mut o: std::sync::MutexGuard<
+                            '_,
+                            wz_session_core::observer::ApplicationLayerObserver,
+                        >| {
+                            let staged = o.flush_liveliness_on_link_loss();
+                            #[cfg(all(
+                                feature = "adminspace-introspection-handlers",
+                                feature = "adminspace-core"
+                            ))]
+                            session.refresh_admin_declarations(&o);
+                            staged
+                        };
                         let staged = match session.observer().lock() {
-                            Ok(mut o) => o.flush_liveliness_on_link_loss(),
+                            Ok(o) => flush_liveliness(o),
                             // A panicking sink poisons the mutex; recover
                             // rather than leak the whole registry, matching
                             // every other shutdown path in this crate.
-                            Err(poisoned) => poisoned.into_inner().flush_liveliness_on_link_loss(),
+                            Err(poisoned) => flush_liveliness(poisoned.into_inner()),
                         };
                         // R311y522 — a flush only STAGES on the deferred-fire
                         // queue; the drive loop is what normally drains it,

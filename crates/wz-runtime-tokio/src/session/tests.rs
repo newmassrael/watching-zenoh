@@ -2992,6 +2992,104 @@ fn declare_adminspace_answers_the_subscriber_leg_from_the_peer_faces_table() {
     }
 }
 
+/// R2694 — the pure-Session host's `token/**` leg, the THIRD it owes.
+///
+/// Upstream's CLIENT hat — the one this host reduces to — enumerates tokens like
+/// every other hat (`zenoh/src/net/routing/hat/client/token.rs` @
+/// `fn sourced_tokens`), which is what makes this leg owed where publisher and
+/// querier are not: that same hat answers both of those with an empty map.
+///
+/// ⚠ WHAT THIS TEST EXISTS TO PIN is which table the fold reads. The carried
+/// design for this leg said the Session records no tokens at all and specified a
+/// new sink-fed table beside the admin cache, with a link-loss purge of its own.
+/// That was read off `LivelinessRegistry`, which indeed holds nothing but a pair
+/// of observer lists. The record is on the SUBSCRIBER registry
+/// (`peer_token_table`), already alloc-gated, already purged on link loss, and
+/// already written before the callback fan — so the leg is a fold and the second
+/// table would have been a second truth.
+///
+/// The declaration planes are driven too, and not for symmetry: all three legs
+/// come out of ONE `materialize` walk into ONE ordered map, so a token fold
+/// wired to a declaration table would still answer `token/**` — with the
+/// subscriber's keyexpr. Disjoint keyexprs are what separate those cases.
+#[cfg(all(
+    feature = "query-get",
+    feature = "query-queryable",
+    feature = "adminspace-core",
+    feature = "adminspace-introspection-handlers",
+    feature = "declare-subscriber",
+    feature = "declare-queryable",
+    feature = "liveliness-subscriber",
+    feature = "liveliness-token"
+))]
+#[test]
+fn declare_adminspace_answers_the_token_leg_from_the_peers_liveliness_tokens() {
+    use wz_session_core::zid_hex::zid_to_zenoh_hex;
+
+    let (session, _driver) = build_session();
+    let zid_hex = zid_to_zenoh_hex(&session.actions().params.zid);
+    let whatami = session.actions().params.whatami.to_str();
+    *session
+        .actions()
+        .remote_peer_zid
+        .lock()
+        .expect("remote_peer_zid poisoned in test fixture") = Some(vec![0x70, 0x73, 0x00, 0x03]);
+    *session
+        .actions()
+        .peer_whatami
+        .lock()
+        .expect("peer_whatami poisoned in test fixture") = Some(2); // INIT wire 2 = Client
+
+    let _admin = session
+        .declare_adminspace("0.9.9", Vec::new())
+        .expect("adminspace-core ON in this build");
+
+    // NO liveliness subscriber is installed anywhere in this test, and that is
+    // deliberate: upstream records a peer's token whether or not anything locally
+    // matches it, so a leg that only reported matched tokens would be a subset of
+    // the upstream answer while looking complete.
+    deliver_peer_declare(&session, make_decl_subscriber(7, "home/temp"));
+    deliver_peer_declare(&session, make_decl_token(9, "live/devA"));
+
+    let replies = Arc::new(Mutex::new(Vec::<(String, Vec<u8>)>::new()));
+    let r = replies.clone();
+    session
+        .query(
+            &format!("@/{zid_hex}/{whatami}/**"),
+            QueryOptions::get().with_allowed_destination(Locality::SessionLocal),
+            move |reply| {
+                r.lock()
+                    .unwrap()
+                    .push((reply.keyexpr().to_string(), reply.payload().to_vec()));
+            },
+            |_| {},
+        )
+        .expect("query-get ON in this build");
+
+    let got = replies.lock().unwrap().clone();
+    let keys: Vec<&String> = got.iter().map(|(k, _)| k).collect();
+    let token_key = format!("@/{zid_hex}/{whatami}/token/live/devA");
+    let entry = got
+        .iter()
+        .find(|(k, _)| k == &token_key)
+        .unwrap_or_else(|| {
+            panic!("the peer's declared token must appear at {token_key}: {keys:?}")
+        });
+    assert_eq!(
+        String::from_utf8(entry.1.clone()).expect("the Sources body is UTF-8 JSON"),
+        "{\"routers\":[],\"peers\":[],\"clients\":[\"3007370\"]}",
+        "a CLIENT face's token declaration belongs in the clients bucket"
+    );
+    // The token leg did not swallow the subscriber's keyexpr, nor the reverse —
+    // the transposition a shared walk makes possible.
+    assert!(
+        !keys
+            .iter()
+            .any(|k| k.ends_with("/token/home/temp") || k.ends_with("/subscriber/live/devA")),
+        "each leg answers from its own table: {keys:?}"
+    );
+}
+
 #[cfg(all(
     feature = "query-get",
     feature = "query-queryable",

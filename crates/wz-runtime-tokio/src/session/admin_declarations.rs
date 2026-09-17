@@ -193,6 +193,26 @@ pub(crate) fn materialize(
         face,
         &mut map,
     );
+    // R2694 — the THIRD leg. Every upstream hat enumerates tokens, including the
+    // CLIENT hat this one-face host corresponds to
+    // (`zenoh/src/net/routing/hat/client/token.rs` @ `fn sourced_tokens`), so
+    // this host owes it exactly as it owes the two above — unlike publisher and
+    // querier, which that same hat answers with an empty map.
+    //
+    // ⚠ The fact comes off `liveliness_subscribers`, NOT the `liveliness`
+    // registry whose name suggests it: see `iter_peer_tokens`. The reading that
+    // went by name concluded this session held no token state and costed a whole
+    // second table beside this cache.
+    #[cfg(feature = "liveliness-subscriber")]
+    fold_declarations(
+        AdminEntityKind::Token,
+        observer
+            .liveliness_subscribers
+            .iter_peer_tokens()
+            .map(|(_, ke)| ke),
+        face,
+        &mut map,
+    );
     // A build with neither declaration plane has no table to read, so the answer
     // is empty — which is the honest one, not a stub. The discard is spelled with
     // the same `#[cfg]` the readers carry, so it says WHICH build leaves these
