@@ -978,7 +978,15 @@ CITATION = re.compile(r"\b((?:[A-Za-z0-9_.-]+/)*[A-Za-z0-9_.-]+\.(?:rs|c|h))(?::
 # the ratchet. The pin rule ("a pin moves in the commit that moves the
 # measurement") is not weakened by that -- it is why the adopting round must
 # carry the explanation forward instead of just editing a number.
-PIN_REACHED = 23
+#
+# R2694 — 23 -> 22. The atom is `adminspace-introspection-handlers`, which went
+# COMPLETE when its last two residual families were built: the publisher and
+# querier legs on the peer forwarder, and the token leg on the router forwarder
+# and the pure-Session host. It leaves the PARTIAL population entirely, so its
+# row leaves the REACHED count with it. UNREACHED and NO_SYMBOL correctly hold —
+# this atom was reached, which is the half of the census that makes the drop a
+# subtraction of one known row rather than a shift between buckets.
+PIN_REACHED = 22
 PIN_UNREACHED = 3
 PIN_NO_SYMBOL = 2
 # R2534 — 346 -> 347. The atom is `adminspace-metrics` and the citation is the
@@ -1625,7 +1633,16 @@ PIN_NO_SYMBOL = 2
 # is live, it is load-bearing for the clause it sits in, and rooting it is what
 # the gate asks for; so the resolved count is where it belongs and this pin is
 # the one that moves.
-PIN_WZ_CITATIONS = 131
+#
+# R2694 -- 131 -> 125, the SAME atom one round later and by the opposite event.
+# `adminspace-introspection-handlers` went COMPLETE, so its reason leaves the
+# PARTIAL corpus this census reads and takes its six resolved wz citations with
+# it -- including the one R2690 rooted just above. AMBIGUOUS does NOT move, and
+# that is a measurement rather than an oversight: R2690's note records that this
+# reason's only ambiguous citation was the one it rooted INTO this bucket, so by
+# the time the atom retired it held none left to remove. The arithmetic closes
+# exactly, which is the property that distinguishes a retirement from a drift.
+PIN_WZ_CITATIONS = 125
 # R2626 — 44 -> 42, and this one is worth a sentence because it HELD through
 # every earlier retirement in this run (R2612, R2622). `time-hlc`'s reason is the
 # first retiree carrying AMBIGUOUS citations of its own: its oldest clauses cite
