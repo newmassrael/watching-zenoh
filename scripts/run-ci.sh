@@ -6757,7 +6757,13 @@ layer_c1am_cargo_test_adminspace() {
     # in BOTH directions (a one-way assertion would pass on a latch).
     _runci_guarded_test "C1AM admin_permissions 1" 1 \
         cargo test -p wz-runtime-tokio --features adminspace-read,adminspace-write,query-get --lib admin_permissions --quiet || return 1
-    _runci_guarded_test "C1AM adminspace 43" 43 \
+    # R2691 43 -> 44: `the_manifest_lists_a_leg_for_every_entity_kind`, the test
+    # that caught the manifest carrying a literal kind list while the stronger
+    # manifest-versus-answerer gate stayed green. Moved to what the command
+    # PRINTED, not to what the diff suggested. The label gains a word because the
+    # count is what used to tell these two apart and the line below is already 44
+    # (a different feature set that reaches neither the new test nor this one).
+    _runci_guarded_test "C1AM adminspace introspection 44" 44 \
         cargo test -p wz-session-core --features adminspace-introspection-handlers --lib adminspace --quiet || return 1
     _runci_guarded_test "C1AM adminspace 44" 44 \
         cargo test -p wz-session-core --features adminspace-router-linkstate --lib adminspace --quiet || return 1
