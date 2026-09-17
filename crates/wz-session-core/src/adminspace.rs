@@ -1049,7 +1049,16 @@ impl AdminSources {
 /// from `subscriber`, `publisher`, `queryable`, `querier` and `token`. The set is
 /// upstream's, not a wz choice, which is why [`Self::ALL`] can be the population
 /// every surface derives from.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// ⚠ `Ord` IS DERIVED, and an earlier comment on the one consumer that needed it
+/// argued against exactly that — "making it `Ord` would widen a `wz-session-core`
+/// public type for one consumer's map key". R2691 overturned that on evidence.
+/// Avoiding the widening bought a private ordinal table in ANOTHER crate, which
+/// is a second copy of this variant set: it went stale the moment three variants
+/// landed, broke the build in a feature combination only one gate compiles, and
+/// the derivation that replaced it put a runtime panic behind an invariant no
+/// compiler enforces. Deriving `Ord` on a fieldless enum is a trait impl, not a
+/// representation change, and the order it gives IS this declaration order.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum AdminEntityKind {
     /// `@/<zid>/<whatami>/subscriber/<keyexpr>`.
     Subscriber,

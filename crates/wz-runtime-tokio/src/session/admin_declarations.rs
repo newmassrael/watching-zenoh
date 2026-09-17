@@ -129,7 +129,16 @@ mod alloc_map {
 
     /// Ordered by kind then keyexpr; the key is owned because the accumulator
     /// outlives the registry borrows the keyexprs come from.
-    pub(super) struct Map(BTreeMap<(u8, String), AdminSources>);
+    ///
+    /// R2691 — keyed by the KIND ITSELF, where it used to carry a local `u8`
+    /// ordinal with a hand-written match each way. That ordinal was a second copy
+    /// of the variant set living one crate from the enum, and it cost twice: it
+    /// went stale when three variants landed (a build break only gate 2h
+    /// compiles), and deriving it from `AdminEntityKind::ALL` instead put a
+    /// runtime panic behind an invariant no compiler enforces. `AdminEntityKind`
+    /// now derives `Ord`, so there is no ordinal, no reverse lookup, and nothing
+    /// here to keep in step with the enum.
+    pub(super) struct Map(BTreeMap<(AdminEntityKind, String), AdminSources>);
 
     impl Map {
         pub(super) fn new() -> Self {
@@ -138,47 +147,20 @@ mod alloc_map {
 
         /// The entry for one admin entity, created empty on first sight.
         pub(super) fn entry(&mut self, kind: AdminEntityKind, keyexpr: &str) -> &mut AdminSources {
-            self.0
-                .entry((kind_ord(kind), keyexpr.to_string()))
-                .or_default()
+            self.0.entry((kind, keyexpr.to_string())).or_default()
         }
 
         /// Drain into the answerer's slice form, ordering preserved.
         pub(super) fn into_declarations(self) -> Vec<super::AdminDeclaration> {
             self.0
                 .into_iter()
-                .map(|((ord, keyexpr), sources)| super::AdminDeclaration {
-                    kind: kind_of(ord),
+                .map(|((kind, keyexpr), sources)| super::AdminDeclaration {
+                    kind,
                     keyexpr,
                     sources,
                 })
                 .collect()
         }
-    }
-
-    /// `AdminEntityKind` is not `Ord`, and making it so would widen a
-    /// `wz-session-core` public type for one consumer's map key. The ordinal is
-    /// local, total, and round-trips through [`kind_of`].
-    ///
-    /// R2691 — DERIVED from `AdminEntityKind::ALL`, where it used to be a
-    /// hand-written match. That match was a THIRD place the variant set lived,
-    /// one crate away from the other two, and it is how this round learned the
-    /// lesson twice: adding three variants left it non-exhaustive, and the build
-    /// that caught it was not the workspace check but gate 2h, because the only
-    /// configuration compiling this path is a non-default feature combination.
-    ///
-    /// Position in `ALL` is a better ordinal than any number written here: it is
-    /// total, it cannot disagree with the set the surfaces derive from, and it
-    /// orders replies in the sequence the kinds are declared in.
-    fn kind_ord(kind: AdminEntityKind) -> u8 {
-        AdminEntityKind::ALL
-            .iter()
-            .position(|k| *k == kind)
-            .expect("ALL is the variant set, so every kind has a position in it") as u8
-    }
-
-    fn kind_of(ord: u8) -> AdminEntityKind {
-        AdminEntityKind::ALL[ord as usize]
     }
 }
 
