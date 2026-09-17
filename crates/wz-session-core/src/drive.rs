@@ -823,8 +823,18 @@ pub fn check_requested_close<R: SessionRuntime, T: TimeSource>(
 }
 
 /// R2678 (`session-close-ingress`) — the switchboard ingress for session
-/// lifetime: an [`EventInjector`] that turns a matched row into a close
-/// request on [`SessionLinkActions`] instead of into an engine call.
+/// lifetime: an [`crate::switchboard::EventInjector`] that turns a matched row
+/// into a close request on [`SessionLinkActions`] instead of into an engine
+/// call.
+//
+// The link is spelled as a FULL PATH rather than `[`EventInjector`]`, which is
+// what R2678 wrote and what took `wz-session-core` to 534 broken doc links
+// against a budget of 533: the trait lives in `crate::switchboard` and nothing
+// brings it into scope here, so the bare label resolved to nothing. The
+// explicit-target form `[`EventInjector`](crate::switchboard::EventInjector)`
+// would fix it too and is NOT chosen: it is the shape of all 16 `redundant
+// explicit link target` errors already in this crate's budget, and it becomes
+// one the moment anyone adds a `use` for the trait here.
 ///
 /// This is what lets the session machine be a switchboard target without the
 /// matcher and the engine ever being in scope together. Every other injector in
