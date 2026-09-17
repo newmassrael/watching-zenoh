@@ -2990,6 +2990,34 @@ impl LinkstateForwarder {
         })
     }
 
+    /// The liveliness tokens this node knows (`@/<zid>/<whatami>/token/**` admin
+    /// introspection, §5.23) — the third per-entity leg, and the one the atom's
+    /// reason never named (R2691 registered it).
+    ///
+    /// Same two tiers as the subscriber twin, because the token plane's tables are
+    /// the same shape: `tokens` is the mesh `LinkstatepeerInterest<()>` and
+    /// `client_tokens` the per-face store, exactly as `subs` / `client_subs` are.
+    ///
+    /// ⚠ The backer predicate is CONSTANTLY FALSE, and that is measured rather
+    /// than assumed: this forwarder has NO native token path — no declare method,
+    /// no backer field — so every self-zid row in the mesh table is an
+    /// advertisement raised on behalf of a client, never this node's own holding.
+    /// The subs and qabl planes each need a `native_*` fact precisely because they
+    /// DO have such a path; asking the same question here would be asking about a
+    /// case that cannot arise. The same measurement is what says
+    /// `withdraw_mesh_token_if_unbacked` is correct to consult only the client
+    /// store, where the subscriber twin needed open-debt 779's repair.
+    #[cfg(feature = "adminspace-introspection-handlers")]
+    pub fn token_sources(&self) -> Vec<(String, wz_session_core::adminspace::AdminSources)> {
+        let clients: Vec<(FaceId, String)> = self
+            .client_tokens
+            .borrow()
+            .iter()
+            .flat_map(|(face, by_id)| by_id.values().map(move |ke| (*face, ke.clone())))
+            .collect();
+        self.bucket_by_tier(&self.tokens.borrow(), &clients, |_| false)
+    }
+
     /// R311y473 — the held faces as the adminspace `sessions[]` array: the
     /// forwarder-hosted counterpart of the enumeration `Session::declare_adminspace`
     /// does for its single peer, and the wz analogue of zenoh's
@@ -7823,6 +7851,68 @@ mod tests {
     /// (`forward`), so the is_client branch routes it to `ingest_client_subscription`
     /// (NOT the mesh `forward_subscription`). The `face` must be registered with a
     /// Client WhatAmI (`peer_face_whatami(_, 2)`).
+    /// Feed a client's `DeclareToken`, the token twin of [`client_declare_sub`].
+    #[cfg(feature = "liveliness-token")]
+    fn client_declare_token(fwd: &LinkstateForwarder, face: FaceId, id: u64, keyexpr: &str) {
+        let declare = build_declare_token(id, 0, Some(keyexpr)).expect("build token");
+        let outcome = DriverLoopOutcome::FramePayload {
+            priority: wz_session_core::qos::Priority::DEFAULT,
+            reliable: true,
+            sn: 0,
+            messages: vec![NetworkMessage::Declare(Box::new(declare))],
+            has_ext: false,
+            extensions: Vec::new(),
+        };
+        fwd.forward(face, IterationEvent::Poll(&outcome));
+    }
+
+    /// R2693 — the token leg buckets by the same two tiers its subscriber twin
+    /// does, and a client's token is named in `clients` rather than `peers`.
+    ///
+    /// The `peers` half is what this pins hardest. The ingest advertises a
+    /// client's token into the mesh under THIS node's zid, so the mesh table holds
+    /// a self row for a keyexpr this node does not itself hold — the exact shape
+    /// that made open-debt 779 report one subscriber declaration as two sources.
+    /// Here the fold's backer predicate is constantly false, because this
+    /// forwarder has no native token path at all, so that self row is always the
+    /// client stand-in and is always skipped.
+    #[cfg(all(
+        feature = "adminspace-introspection-handlers",
+        feature = "liveliness-token"
+    ))]
+    #[test]
+    fn admin_token_sources_name_the_client_not_the_self_advertisement() {
+        use wz_session_core::zid_hex::zid_to_zenoh_hex;
+
+        let fwd = LinkstateForwarder::new(zid(0x05), WhatAmI::Peer);
+        // ANTI-VACUITY: a peer nobody has declared to reports nothing, so the
+        // assertion below is refutable by an always-full answer.
+        assert!(
+            fwd.token_sources().is_empty(),
+            "a peer with no tokens reports no sources"
+        );
+
+        let (client_c, _s) = peer_face_whatami(zid(0x0C), 2);
+        fwd.register(FaceId(1), &client_c);
+        client_declare_token(&fwd, FaceId(1), 7, "leaf/token");
+
+        let client_hex = zid_to_zenoh_hex(zid(0x0C).as_slice());
+        // Spelled as a closure rather than an annotated binding for the reason the
+        // subscriber twin uses one: naming the flattened tuple inline trips
+        // clippy's `type_complexity` at `-D warnings`, which gate 7 enforces and
+        // the crate's own `MatchingInterestTable` alias exists to answer.
+        let flatten = |rows: Vec<(String, wz_session_core::adminspace::AdminSources)>| {
+            rows.into_iter()
+                .map(|(k, s)| (k, s.routers, s.peers, s.clients))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            flatten(fwd.token_sources()),
+            vec![("leaf/token".to_string(), vec![], vec![], vec![client_hex])],
+            "the client holds the token; the self mesh row is its advertisement"
+        );
+    }
+
     fn client_declare_sub(fwd: &LinkstateForwarder, face: FaceId, id: u64, keyexpr: &str) {
         let declare = build_declare_subscriber(id, 0, Some(keyexpr)).expect("build sub");
         let outcome = DriverLoopOutcome::FramePayload {

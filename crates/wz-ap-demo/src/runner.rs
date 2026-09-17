@@ -5496,6 +5496,19 @@ async fn run_peer_until(
                             sources,
                         },
                     ));
+                    // R2693 — the THIRD leg. Upstream serves five per-entity
+                    // handlers and this entry's reason named four; the token one
+                    // was claimed by no atom at all until R2691 registered it.
+                    // Every upstream hat enumerates tokens, unlike publishers and
+                    // queriers where the client and router hats return an empty
+                    // map, so no host is excused from this leg by its role.
+                    buf.extend(forwarder.token_sources().into_iter().map(
+                        |(keyexpr, sources)| AdminDeclaration {
+                            kind: AdminEntityKind::Token,
+                            keyexpr,
+                            sources,
+                        },
+                    ));
                 }
                 // R311y473 (§5.23) — re-snapshot the HELD FACES into the admin
                 // `sessions[]` buffer, the same full-re-materialization discipline as
