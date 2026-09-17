@@ -473,31 +473,49 @@ impl PluginRegistry {
     /// error is ALSO returned, because a caller that wants to react must not
     /// have to re-read the registry to discover the attempt failed.
     ///
-    /// ⚠ The id the library declares is NOT adopted as the key. Upstream keys a
+    /// ⚠ The id the library declares is NOT adopted as the KEY. Upstream keys a
     /// declared plugin by the name the operator gave, and a load that fails
     /// never yields an id at all -- so keying by the library's id would make the
     /// slot's identity depend on the outcome this method exists to record.
-    pub fn load_declared(&mut self, name: &str) -> Result<(), PluginError> {
+    ///
+    /// ⭐ BUT IT IS RETURNED, and that distinction is not cosmetic: the key and
+    /// the plugin's own identity are DIFFERENT FACTS, exactly as upstream's
+    /// `PluginStatusRec` carries a declared `name` beside the plugin's `id`.
+    /// `admin_records` reports the library's id for a loaded plugin, so a host
+    /// that logged the key instead would be naming the plugin something no
+    /// admin client ever sees -- which is precisely the regression R2675 paid
+    /// off: the e2e barrier waits on the library's id and the host had started
+    /// printing the file stem.
+    pub fn load_declared(&mut self, name: &str) -> Result<&str, PluginError> {
+        // `None` here means the slot is already Live: loading again would
+        // `dlopen` a second copy of a library this registry already owns.
         let path = match self.plugins.get(name) {
-            Some(Slot::Declared { path, .. }) => path.clone(),
-            Some(Slot::Live(_)) => return Ok(()),
+            Some(Slot::Declared { path, .. }) => Some(path.clone()),
+            Some(Slot::Live(_)) => None,
             None => return Err(PluginError::NotLoaded { id: name.into() }),
         };
-        match DynamicPlugin::load(&path) {
-            Ok(plugin) => {
-                self.plugins.insert(name.to_string(), Slot::Live(plugin));
-                Ok(())
+        if let Some(path) = path {
+            match DynamicPlugin::load(&path) {
+                Ok(plugin) => {
+                    self.plugins.insert(name.to_string(), Slot::Live(plugin));
+                }
+                Err(e) => {
+                    self.plugins.insert(
+                        name.to_string(),
+                        Slot::Declared {
+                            path,
+                            failure: Some(e.to_string()),
+                        },
+                    );
+                    return Err(e);
+                }
             }
-            Err(e) => {
-                self.plugins.insert(
-                    name.to_string(),
-                    Slot::Declared {
-                        path,
-                        failure: Some(e.to_string()),
-                    },
-                );
-                Err(e)
-            }
+        }
+        match self.plugins.get(name) {
+            Some(Slot::Live(p)) => Ok(&p.id),
+            // Unreachable: the slot was already Live, or the arm above inserted
+            // one and returned on failure.
+            _ => Err(PluginError::NotLoaded { id: name.into() }),
         }
     }
 
@@ -738,6 +756,50 @@ mod tests {
             "it reports the file it was loaded from\n  got: {}",
             rec.path
         );
+    }
+
+    /// R2675 (open-debt item 775) — A DECLARED LOAD REPORTS THE LIBRARY'S OWN
+    /// ID, NOT THE KEY IT WAS DECLARED UNDER.
+    ///
+    /// These are two facts and R2673 collapsed them: the storage host declares
+    /// by the path's file stem, so a host that printed the key announced
+    /// `libwz_plugin_example` where the admin record says `wz_example`. Layer
+    /// C1bp's barrier waits on the library id and timed out, which is a whole
+    /// e2e to catch one string. The fixture makes the two DIFFER on purpose --
+    /// a declared name equal to the library id would pass either way, which is
+    /// the symmetric-fixture trap.
+    #[test]
+    fn a_declared_load_reports_the_librarys_id_not_the_declared_key() {
+        let Some(so) = require_example() else {
+            return;
+        };
+        let mut reg = PluginRegistry::new();
+        let declared = "libwz_plugin_example";
+        reg.declare(declared, &so).expect("declare under the stem");
+
+        let reported = reg
+            .load_declared(declared)
+            .expect("the example loads")
+            .to_string();
+        assert_eq!(
+            reported, "wz_example",
+            "the load must report the id the LIBRARY declares",
+        );
+        assert_ne!(
+            reported, declared,
+            "the fixture is only meaningful while the two differ",
+        );
+
+        // The KEY is still the declared name -- that is what `start` and
+        // `state` take, and what a failed load would have left behind.
+        assert_eq!(reg.state(declared), Some(AdminPluginState::Loaded));
+        assert_eq!(reg.ids(), vec![declared]);
+
+        // And the admin plane reports the library's identity, so an operator
+        // and a zenoh client see the same name the log now prints.
+        let records = reg.admin_records();
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].id, "wz_example");
     }
 
     #[test]

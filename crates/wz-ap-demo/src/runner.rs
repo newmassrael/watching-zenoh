@@ -7576,14 +7576,21 @@ pub(crate) async fn run_storage_host(listen: &str, opts: StorageHostOpts) -> io:
                 log::warn!("wz-ap-demo storage-host: plugin '{declared}' not declared: {e}");
                 continue;
             }
-            match registry.load_declared(&declared).map(|()| declared.clone()) {
-                Ok(_) => {
-                    // The live slot is keyed by the declared name, which is what
-                    // an admin client will see; the library's own id is reported
-                    // inside the record.
-                    let id = declared.clone();
+            match registry.load_declared(&declared).map(str::to_string) {
+                Ok(id) => {
+                    // R2675 (item 775) — the plugin's OWN id, which is what the
+                    // admin record reports and what an operator recognises. The
+                    // registry KEY stays the declared name (a failed load yields
+                    // no id), but logging the key as the identity printed the
+                    // file stem and broke Layer C1bp's barrier, which waits on
+                    // `plugin '<library id>' Started`. Key and identity are two
+                    // facts; upstream keeps them apart as `name` and `id`.
                     log::info!("wz-ap-demo storage-host: dlopen'd plugin '{id}' from {path}");
-                    match registry.start(&id, None) {
+                    // ⚠ KEYED BY `declared`, NAMED BY `id`. Both are `&str`, so
+                    // the compiler cannot tell them apart -- passing `id` here
+                    // would look up a slot that does not exist under that key
+                    // and report NotLoaded for a plugin that just loaded.
+                    match registry.start(&declared, None) {
                         Ok(()) => {
                             log::info!("wz-ap-demo storage-host: plugin '{id}' Started — {path}")
                         }
