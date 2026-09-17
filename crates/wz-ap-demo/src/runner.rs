@@ -6491,9 +6491,15 @@ async fn run_router_hat_until(
     // `linkstate/peers` from `linkstatepeers_net` (the wz mirror of zenoh's
     // routers_linkstate_data / peers_linkstate_data / route_successor,
     // net/runtime/adminspace.rs:741-919). Root `local_data` (self identity + the
-    // listen locator) rides the shared `answer_admin_query` SSOT; the router's
-    // `sessions[]` transport table, its config surface (replies "{}"), and its
-    // per-tier sub/qabl introspection are NAMED deferrals.
+    // listen locator) rides the shared `answer_admin_query` SSOT.
+    //
+    // R2685 — this comment used to end "the router's `sessions[]` transport
+    // table, its config surface (replies \"{}\"), and its per-tier sub/qabl
+    // introspection are NAMED deferrals", and all three have since been paid:
+    // R2636 gave `sessions[]` the live face set, R2684 rendered the config leg,
+    // and the introspection legs are built below. A comment that names a
+    // deferral the code beneath it has already closed reads as the current
+    // contract, which is how this atom's reason kept re-counting residuals.
     #[cfg(feature = "adminspace-router-linkstate")]
     {
         use wz::runtime_tokio::adminspace::{
@@ -6518,6 +6524,11 @@ async fn run_router_hat_until(
         // cannot borrow it back.
         let sessions_view = forwarder.sessions_view();
         let peers_view = forwarder.peers_net_view();
+        // R2685 — the declaration tables, taken here for the SAME reason the
+        // three views above are: the handler is stored inside the forwarder and
+        // so cannot borrow it back at query time.
+        #[cfg(feature = "adminspace-introspection-handlers")]
+        let declarations_view = forwarder.declarations_view();
         // R311y781 — the router's permit source, closing the y780 residual. The SAME
         // shape the peer host uses: one shared `WzConfig` whose live
         // `admin_permissions` slice both admin ctxs re-read per GET, seeded once from
@@ -6584,8 +6595,48 @@ async fn run_router_hat_until(
             // answer captured once would describe a moment the operator did not ask
             // about.
             let config_json = admin_cfg.borrow().to_admin_json();
-            if answer_admin_query(view, out, &ctx, &sessions, &[], &plugins, &config_json)
-                == AdminAnswerOutcome::DeniedRead
+            // R2685 — the router's per-tier sub/qabl introspection, read LIVE per
+            // GET off the declaration tables. It was a literal `&[]` here, so this
+            // node answered "nothing is declared" whatever its mesh had told it,
+            // while the peer host has reported its own since R311y203.
+            //
+            // Built per GET and NOT re-snapshotted on an app tick the way the peer
+            // host's buffer is: that buffer exists because `run_peer`'s handler
+            // cannot reach the forwarder, and the view above removes the need. So
+            // freshness here is the GET, not a tick, which is what upstream gives
+            // (it answers from the live tables inside its own handler).
+            #[cfg(feature = "adminspace-introspection-handlers")]
+            let declarations = {
+                use wz::runtime_tokio::adminspace::{AdminDeclaration, AdminEntityKind};
+                let subs = declarations_view
+                    .subscribers()
+                    .into_iter()
+                    .map(|(keyexpr, sources)| AdminDeclaration {
+                        kind: AdminEntityKind::Subscriber,
+                        keyexpr,
+                        sources,
+                    });
+                let qabls = declarations_view
+                    .queryables()
+                    .into_iter()
+                    .map(|(keyexpr, sources)| AdminDeclaration {
+                        kind: AdminEntityKind::Queryable,
+                        keyexpr,
+                        sources,
+                    });
+                subs.chain(qabls).collect::<Vec<_>>()
+            };
+            #[cfg(not(feature = "adminspace-introspection-handlers"))]
+            let declarations: Vec<wz::runtime_tokio::adminspace::AdminDeclaration> = Vec::new();
+            if answer_admin_query(
+                view,
+                out,
+                &ctx,
+                &sessions,
+                &declarations,
+                &plugins,
+                &config_json,
+            ) == AdminAnswerOutcome::DeniedRead
             {
                 log::error!(
                     "{}",

@@ -307,3 +307,230 @@ fn wz_router_hat_federates_admin_linkstate_across_two_routers() {
         );
     }
 }
+
+/// R2685 — the router's per-tier sub/qabl introspection legs
+/// (`@/<zid>/router/subscriber/**`), the §5.23 residual the host answered with a
+/// literal `&[]` until this round.
+///
+/// TWO subscribers on DISTINCT keyexprs, reaching R2 by DIFFERENT routes, so the
+/// reply has to put them in different `Sources` buckets:
+///
+///   * `wz/introspect/at-r2` is declared by a client of R2 itself, so R2 holds it
+///     in its per-face client store and must report the CLIENT's zid;
+///   * `wz/introspect/via-r1` is declared by a client of R1 and reaches R2 only
+///     because R1 advertised it across the router mesh, so R2 must report R1's
+///     zid in the ROUTERS bucket — a zid that appears nowhere in the key it is
+///     reported under, which is what makes the body a live cross-node render
+///     rather than an echo.
+///
+/// The legs the GET must NOT carry are asserted too. The fold that builds these
+/// bodies is generic over the declaration value type, so reading the SUBSCRIBER
+/// tables where the QUERYABLE ones were meant type-checks; at the wire that
+/// mis-read would surface as a `queryable/` leg naming a key nobody declared a
+/// queryable on. Asserting its absence is sound here and not a race: it is the
+/// same one-shot GET whose subscriber legs are asserted PRESENT above it, so the
+/// reply set is complete by the time either claim is read.
+///
+/// Admin-space keyexprs are deliberately NOT the witness. Both routers host
+/// `@/<zid>/router/**` and each learns the other's across the mesh, so those are
+/// the declarations a two-router mesh has for free — but a chunk beginning with
+/// `@` is VERBATIM (`keyexpr_match::is_verbatim_chunk`, zenoh's rule), so `**`
+/// never reaches the nested `@` in `.../queryable/@/<other>/router/**` and the
+/// leg is correctly invisible to this GET. Measuring that first is what sent
+/// this fixture to ordinary keyexprs.
+#[test]
+#[ignore = "binary-dep e2e (wz-ap-demo --features router-hat-router,adminspace-router-linkstate,adminspace-introspection-handlers); Layer E7c runs via --ignored"]
+fn wz_router_hat_reports_declaration_sources_per_tier_across_two_routers() {
+    let (mut r2_guard, mut r2_reader, p_r2) =
+        spawn_router_hat("router-hat-2", &["--router-hat", "127.0.0.1:0"]);
+    let addr_r2 = format!("127.0.0.1:{p_r2}");
+    let (mut r1_guard, mut r1_reader, p_r1) = spawn_router_hat(
+        "router-hat-1",
+        &["--router-hat", "127.0.0.1:0", "--connect", &addr_r2],
+    );
+    let addr_r1 = format!("127.0.0.1:{p_r1}");
+
+    let r2_root = scrape_admin_root(&mut r2_reader, &mut r2_guard, "router-hat-2");
+    let r1_root = scrape_admin_root(&mut r1_reader, &mut r1_guard, "router-hat-1");
+    let r2_zid = zid_of(&r2_root);
+    let r1_zid = zid_of(&r1_root);
+
+    for (label, reader, guard) in [
+        ("router-hat-1", &mut r1_reader, &mut r1_guard),
+        ("router-hat-2", &mut r2_reader, &mut r2_guard),
+    ] {
+        wait_for_substring(
+            reader,
+            "router-hat: routers-net converged (2 node(s))",
+            Duration::from_secs(15),
+        )
+        .unwrap_or_else(|c| {
+            let _ = guard.child_mut().kill();
+            let _ = guard.child_mut().wait();
+            panic!("{label} never federated its router tier to 2 within 15s\n--- {label} ---\n{c}");
+        });
+    }
+
+    // The CLIENT-bucket source: a subscriber client of R2. The two spellings are
+    // BOTH pinned because they differ: `zid_to_zenoh_hex` reads the wire bytes
+    // little-endian into a `u128` and prints it big-endian, so the admin body
+    // reverses them. This fixture is chosen so neither end of that is guessed —
+    // the bytes are not a palindrome, so a render that skipped the reversal
+    // would show `1b0b0b0b` reversed and red; and the leading byte of the
+    // PRINTED form is `1b`, so the single-leading-zero strip in that same
+    // function never engages and cannot silently absorb a digit.
+    const CLIENT_ZID_WIRE: &str = "0b0b0b1b";
+    const CLIENT_ZID_HEX: &str = "1b0b0b0b";
+    let (mut sub_at_r2_guard, _sub_at_r2_reader) = spawn_session(
+        "sub-at-r2",
+        &[
+            "--connect",
+            &addr_r2,
+            "--key",
+            "wz/introspect/at-r2",
+            "--zid",
+            CLIENT_ZID_WIRE,
+        ],
+    );
+    // The ROUTERS-bucket source: a subscriber client of R1, which R2 can only
+    // learn through the mesh.
+    let (mut sub_via_r1_guard, _sub_via_r1_reader) = spawn_session(
+        "sub-via-r1",
+        &[
+            "--connect",
+            &addr_r1,
+            "--key",
+            "wz/introspect/via-r1",
+            "--zid",
+            "0c0c0c0c",
+        ],
+    );
+
+    // BARRIERS, both on R2 and both load-bearing: the GET is one-shot, so a
+    // declaration that has not landed yet is indistinguishable from one the
+    // handler failed to report. `learned a client sub` latches on R2's own
+    // client store; `learned a mesh sub` latches on a peer router's declaration
+    // arriving off the mesh, which is the cross-node half.
+    for needle in [
+        "router-hat: learned a client sub",
+        "router-hat: learned a mesh sub",
+    ] {
+        wait_for_substring(&mut r2_reader, needle, Duration::from_secs(15)).unwrap_or_else(|c| {
+            let _ = r1_guard.child_mut().kill();
+            let _ = r1_guard.child_mut().wait();
+            let _ = r2_guard.child_mut().kill();
+            let _ = r2_guard.child_mut().wait();
+            panic!(
+                "router-hat-2 never logged `{needle}` within 15s — the declaration \
+                 did not reach it, so an empty introspection leg would not be \
+                 evidence of anything\n--- router-hat-2 ---\n{c}"
+            )
+        });
+    }
+
+    let (mut iss_guard, mut iss_reader) = spawn_session(
+        "issuer",
+        &[
+            "--connect",
+            &addr_r1,
+            "--query",
+            &format!("{r2_root}/**"),
+            "--on-query-reply-log",
+            "--on-query-final-log",
+            "--zid",
+            "0a0a0a0a",
+        ],
+    );
+    let reply = wait_for_substring(&mut iss_reader, "REPLY RECEIVED", Duration::from_secs(15));
+    let final_recv = wait_for_substring(&mut iss_reader, "FINAL RECEIVED", Duration::from_secs(10));
+
+    graceful_terminate(iss_guard.child_mut(), Duration::from_secs(5));
+    graceful_terminate(sub_at_r2_guard.child_mut(), Duration::from_secs(5));
+    graceful_terminate(sub_via_r1_guard.child_mut(), Duration::from_secs(5));
+    graceful_terminate(r1_guard.child_mut(), Duration::from_secs(5));
+    graceful_terminate(r2_guard.child_mut(), Duration::from_secs(5));
+    let r1_captured = read_captured(&mut r1_reader);
+    let r2_captured = read_captured(&mut r2_reader);
+    let iss_captured = read_captured(&mut iss_reader);
+    eprintln!("--- router-hat-1 stderr ---\n{r1_captured}");
+    eprintln!("--- router-hat-2 stderr ---\n{r2_captured}");
+    eprintln!("--- issuer stderr ---\n{iss_captured}");
+
+    reply.unwrap_or_else(|c| {
+        panic!(
+            "issuer never received an admin reply within 15s\n--- issuer ---\n{c}\n\
+             --- R1 ---\n{r1_captured}\n--- R2 ---\n{r2_captured}"
+        )
+    });
+    final_recv.unwrap_or_else(|c| {
+        panic!("issuer never received the ResponseFinal within 10s\n--- issuer ---\n{c}")
+    });
+
+    // The reply log renders the payload as a Rust-debug string, so the JSON
+    // arrives quote-escaped and wrapped. Unescaping once here is what lets every
+    // assertion below compare the WHOLE body: a set of `contains` probes would
+    // each stay true on a body that also filled a bucket it should not have.
+    let body_of = |key: &str| -> Option<String> {
+        iss_captured
+            .lines()
+            .find(|l| l.contains("REPLY RECEIVED") && l.contains(&format!("keyexpr='{key}'")))
+            .and_then(|l| l.split_once("payload=").map(|(_, p)| p.to_string()))
+            .map(|p| p.trim().trim_matches('"').replace("\\\"", "\""))
+    };
+
+    // The CLIENT bucket: R2's own subscriber client, named by its zid.
+    let at_r2_key = format!("{r2_root}/subscriber/wz/introspect/at-r2");
+    let at_r2 = body_of(&at_r2_key).unwrap_or_else(|| {
+        panic!(
+            "no `subscriber/wz/introspect/at-r2` leg — R2 did not report the \
+             subscriber its OWN client declared\n--- issuer ---\n{iss_captured}"
+        )
+    });
+    assert_eq!(
+        at_r2,
+        format!("{{\"routers\":[],\"peers\":[],\"clients\":[\"{CLIENT_ZID_HEX}\"]}}"),
+        "a client's declaration belongs in the `clients` bucket, named by the \
+         face's zid — a Client joins no link-state graph, so a body that read the \
+         source's role off the graph would have nothing to put here"
+    );
+
+    // The ROUTERS bucket: R1's zid, learned across the mesh.
+    let via_r1_key = format!("{r2_root}/subscriber/wz/introspect/via-r1");
+    let via_r1 = body_of(&via_r1_key).unwrap_or_else(|| {
+        panic!(
+            "no `subscriber/wz/introspect/via-r1` leg — R2 did not report the \
+             subscriber R1 advertised across the router mesh\n--- issuer \
+             ---\n{iss_captured}"
+        )
+    });
+    assert_eq!(
+        via_r1,
+        format!("{{\"routers\":[\"{r1_zid}\"],\"peers\":[],\"clients\":[]}}"),
+        "a declaration that arrived over the router mesh is sourced to the ROUTER \
+         that advertised it (R1={r1_zid}), not to the client behind it and not to \
+         R2 itself — and R1's zid is in neither the key nor the reply metadata, so \
+         this body can only be a live render"
+    );
+
+    // Neither key is a queryable anywhere in this fixture, so neither may appear
+    // under the `queryable` kind. This is the wire-level discriminator for a
+    // sub/qabl table transposition, which the compiler cannot see.
+    for key in ["wz/introspect/at-r2", "wz/introspect/via-r1"] {
+        let leg = format!("{r2_root}/queryable/{key}");
+        assert!(
+            body_of(&leg).is_none(),
+            "`{leg}` was replied, but nothing in this fixture declares a QUERYABLE \
+             on `{key}` — the queryable leg is reading the subscriber \
+             tables\n--- issuer ---\n{iss_captured}"
+        );
+    }
+
+    // R2's zid is used above only to build keys; pin that the mesh was really
+    // crossed, as the linkstate test does.
+    assert!(
+        r1_captured.contains("router-hat: routed a query")
+            && r2_captured.contains("router-hat: routed a query"),
+        "the admin GET for {r2_zid} did not transit both routers\n--- R1 \
+         ---\n{r1_captured}\n--- R2 ---\n{r2_captured}"
+    );
+}

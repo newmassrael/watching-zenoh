@@ -17508,9 +17508,23 @@ layer_e7b2_router_connect_add_over_the_wire() {
 # `Node` — a named verification-leg deferral, not a build). The `wz_router_hat_` fn
 # prefix keeps the default Layer E sweep's `--skip wz_router` from double-running it.
 layer_e7c_router_adminspace_linkstate() {
-    (cd crates && cargo build -p wz-ap-demo --features router-hat-router,adminspace-router-linkstate --quiet) || return 1
+    # R2685 — `adminspace-introspection-handlers` joined this build because the
+    # router's per-tier sub/qabl legs are gated on it and the file's second test
+    # asserts them. A build without it compiles those legs OUT, so that test
+    # would find no `subscriber/**` reply and red; there is no arrangement in
+    # which it passes vacuously, which is the property that matters.
+    (cd crates && cargo build -p wz-ap-demo \
+        --features router-hat-router,adminspace-router-linkstate,adminspace-introspection-handlers \
+        --quiet) || return 1
+    # `--test-threads=1`: the file now holds TWO tests, each federating two
+    # routers and spawning client sessions, and each gating on time-bounded
+    # barrier waits. Serialising is the same choice Layer E7u already makes for
+    # the same reason, and it costs ~1s here (measured: 1.37s for both). No
+    # concurrent failure has been observed — this is a precaution taken before
+    # the second test existed on a loaded runner, not a diagnosed flake.
     (cd crates && cargo test -p wz-integration-tests \
-        --test wz_router_hat_adminspace_linkstate_interop -- --ignored --quiet) || return 1
+        --test wz_router_hat_adminspace_linkstate_interop \
+        -- --ignored --test-threads=1 --quiet) || return 1
 }
 
 # ─── Layer E7g — adminspace-read GET gate on the ROUTER tier (vs zenoh-pico) ────
