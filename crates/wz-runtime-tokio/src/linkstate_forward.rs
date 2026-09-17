@@ -7847,12 +7847,16 @@ mod tests {
 
     // ── R311y163 (D4) — the peer's co-attached CLIENT data plane ─────────────
 
-    /// Feed a co-attached CLIENT's `DeclareSubscriber` through the dispatch seam
-    /// (`forward`), so the is_client branch routes it to `ingest_client_subscription`
-    /// (NOT the mesh `forward_subscription`). The `face` must be registered with a
-    /// Client WhatAmI (`peer_face_whatami(_, 2)`).
     /// Feed a client's `DeclareToken`, the token twin of [`client_declare_sub`].
-    #[cfg(feature = "liveliness-token")]
+    ///
+    /// The cfg is the CONSUMER's, spelled out rather than widened: this helper has
+    /// exactly one caller, and a gate narrower than the caller leaves the function
+    /// compiled-but-uncalled on every build that turns the caller off, which
+    /// `-D dead-code` rejects. Widen it only together with a caller that needs it.
+    #[cfg(all(
+        feature = "adminspace-introspection-handlers",
+        feature = "liveliness-token"
+    ))]
     fn client_declare_token(fwd: &LinkstateForwarder, face: FaceId, id: u64, keyexpr: &str) {
         let declare = build_declare_token(id, 0, Some(keyexpr)).expect("build token");
         let outcome = DriverLoopOutcome::FramePayload {
@@ -7913,6 +7917,10 @@ mod tests {
         );
     }
 
+    /// Feed a co-attached CLIENT's `DeclareSubscriber` through the dispatch seam
+    /// (`forward`), so the is_client branch routes it to `ingest_client_subscription`
+    /// (NOT the mesh `forward_subscription`). The `face` must be registered with a
+    /// Client WhatAmI (`peer_face_whatami(_, 2)`).
     fn client_declare_sub(fwd: &LinkstateForwarder, face: FaceId, id: u64, keyexpr: &str) {
         let declare = build_declare_subscriber(id, 0, Some(keyexpr)).expect("build sub");
         let outcome = DriverLoopOutcome::FramePayload {

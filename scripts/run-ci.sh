@@ -6794,6 +6794,23 @@ layer_c1am_cargo_test_adminspace() {
     # (no adminspace feature) stays at 5 — measured, not assumed.
     _runci_guarded_test "C1AM storage_manager_service 6" 6 \
         cargo test -p wz-runtime-tokio --features adminspace-config-hotreload --lib storage_manager_service --quiet || return 1
+    # R2693 — the PEER's introspection tests had no running lane. The feature set
+    # `routing-peer,adminspace-introspection-handlers` occurred in this layer only
+    # inside the clippy block below, which COMPILES a test and never runs it, and
+    # it is not a default feature, so the changed-crate hook gate never reached it
+    # either. Both `admin_sources_*` tests on the peer forwarder lived in that
+    # hole: written, green by hand, executed by nothing. Number PRINTED by the
+    # command, not counted off the diff.
+    _runci_guarded_test "C1AM peer introspection admin_ 10" 10 \
+        cargo test -p wz-runtime-tokio --features routing-peer,adminspace-introspection-handlers --lib admin_ --quiet || return 1
+    # The router half of the same hole, found by asking the question of the twin
+    # rather than only of the test this round wrote: R2685's
+    # `admin_declarations_bucket_each_tier_into_its_own_sources_field` is gated on
+    # `adminspace-introspection-handlers`, and every `--lib router_forward` leg in
+    # this file names a DIFFERENT adminspace feature. It has never been run by a
+    # lane either.
+    _runci_guarded_test "C1AM router introspection admin_ 13" 13 \
+        cargo test -p wz-runtime-tokio --features routing-router-hat,adminspace-introspection-handlers --lib admin_ --quiet || return 1
     (cd crates \
         && cargo clippy -p wz-runtime-tokio --all-targets --features adminspace-core,query-get --quiet -- -D warnings \
         && cargo clippy -p wz-runtime-tokio --all-targets --features adminspace-metrics,query-get --quiet -- -D warnings \
