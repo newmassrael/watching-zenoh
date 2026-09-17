@@ -539,7 +539,8 @@ pub struct LinkstateForwarder {
     /// a `CurrentFuture` Interest per south-hat interest when the face opens
     /// (`zenoh/src/net/routing/hat/peer/interests.rs` @
     /// `fn repropagate_interests`), and a zenoh node in this position reports it
-    /// under `peers` (`hat/peer/pubsub.rs` @ `fn sourced_publishers`).
+    /// under `peers` (`zenoh/src/net/routing/hat/peer/pubsub.rs` @
+    /// `fn sourced_publishers`).
     ///
     /// A keyexpr SET per face, not a per-interest list: the fold dedups within a
     /// bucket anyway, so two interests in one target name the face once either

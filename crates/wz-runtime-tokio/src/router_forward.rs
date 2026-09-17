@@ -825,7 +825,7 @@ impl RouterDeclarationsView {
     /// where the client and router hats return an empty map, so no host is
     /// excused from this leg by its role — including this one, whose own
     /// `fn sourced_tokens` folds `router_tokens`
-    /// (`zenoh/src/net/routing/hat/router/token.rs`).
+    /// (`zenoh/src/net/routing/hat/router/token.rs` @ `fn sourced_tokens`).
     ///
     /// ⚠ The client store is keyed the OTHER WAY ROUND from the queryable one
     /// and the reduction differs accordingly: `client_qabls` is

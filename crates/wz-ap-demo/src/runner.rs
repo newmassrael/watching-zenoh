@@ -5518,7 +5518,8 @@ async fn run_peer_until(
                     // `NOTE(regions)`), so they are folded from this node's
                     // interest stores and never from the mesh tables. Only the
                     // PEER host owes them: upstream's client and router hats both
-                    // return an empty map (`hat/client/pubsub.rs` @
+                    // return an empty map
+                    // (`zenoh/src/net/routing/hat/client/pubsub.rs` @
                     // `fn sourced_publishers`), so the pure-Session host and the
                     // router forwarder emitting nothing here is faithful, not a
                     // second gap.
@@ -6697,7 +6698,8 @@ async fn run_router_hat_until(
                 // optional here, so without them there is no fact to fold rather
                 // than an empty one. The publisher/querier legs are absent by a
                 // DIFFERENT reason and correctly so — upstream's router hat
-                // returns an empty map from both (`hat/router/pubsub.rs` @
+                // returns an empty map from both
+                // (`zenoh/src/net/routing/hat/router/pubsub.rs` @
                 // `fn sourced_publishers`), so this host emitting nothing for them
                 // is faithful, not a gap.
                 #[cfg(feature = "routing-token-tables")]
