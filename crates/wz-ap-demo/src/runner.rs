@@ -6506,8 +6506,15 @@ async fn run_router_hat_until(
             // two halves of one GET disagreeing.
             let admin_read =
                 wz::runtime_tokio::admin_read_permit(&admin_cfg.borrow().admin_permissions());
-            // Root local_data / config / metrics via the shared SSOT (config "{}" +
-            // sessions[] empty are named deferrals on the pure router).
+            // Root local_data / config / metrics via the shared SSOT.
+            //
+            // R2684 — this comment said "config \"{}\" + sessions[] empty are named
+            // deferrals on the pure router" and BOTH halves had stopped being true:
+            // R2636 gave `sessions[]` the live face set twelve lines below, and the
+            // config leg is rendered here now. A comment that names a deferral the
+            // code beneath it has already paid is worse than no comment -- it is
+            // read as the current contract, which is how this atom's reason kept
+            // re-counting a residual R2636 had closed.
             let ctx = AdminAnswerCtx {
                 zid_hex: &zid_hex,
                 whatami: whatami_str,
@@ -6530,7 +6537,17 @@ async fn run_router_hat_until(
             // operator asking what this router holds must get the answer as of
             // the question.
             let sessions = sessions_view.admin_sessions();
-            if answer_admin_query(view, out, &ctx, &sessions, &[], &plugins, "{}")
+            // R2684 — the router's `config` leg, rendered PER GET off the same
+            // shared `WzConfig` the permit above is resolved from. It was the
+            // literal `"{}"`, so this node answered "no configuration" whatever it
+            // had been started with, while the peer host has rendered its own since
+            // R311y812. Same call (`to_admin_json`), same handle type
+            // (`Rc<RefCell<WzConfig>>`), and per GET for the reason `sessions[]`
+            // above is: a config can be rewritten over the admin plane, so an
+            // answer captured once would describe a moment the operator did not ask
+            // about.
+            let config_json = admin_cfg.borrow().to_admin_json();
+            if answer_admin_query(view, out, &ctx, &sessions, &[], &plugins, &config_json)
                 == AdminAnswerOutcome::DeniedRead
             {
                 log::error!(
