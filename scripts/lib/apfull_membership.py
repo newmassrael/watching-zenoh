@@ -93,11 +93,20 @@ EXCLUSIONS = {
     # member as of R311y496.
     "storage-backend-rocksdb": ("out-of-scope", "third-party system adapter"),
     "storage-backend-external-db": ("out-of-scope", "third-party system adapter"),
-    # The `unbuilt` CATEGORY and its predicate remain defined below with no entry
-    # using them, deliberately: it is the exclusion an atom lands in when work is
-    # scheduled but not done, and both atoms that ever used it (R311y497's
+    # The `unbuilt` CATEGORY is the exclusion an atom lands in when work is
+    # scheduled but not done, and every atom that has used it (R311y497's
     # storage-mgr-dynamic-volume-loading, R311y498's api-compat-c) left it the only
     # way it can be left -- by being built.
+    # R2676 — `session-close-ingress` is created here as reserved + UNBUILT, so it
+    # takes this category rather than a preset flag. The alternative was to make it
+    # a member and declare it INERT below; that route is REJECTED on this table's
+    # own reasoning. The inert declaration exists because `preset-ap-full =
+    # everything on` was "two flags wrong and no gate says so" -- it NAMES a defect
+    # so the headline stops lying, and a flag that is ON while toggling nothing is
+    # that defect, not a pattern to copy. The honest state of an atom whose code
+    # does not exist is out of the preset with the reason recorded, and it comes IN
+    # when the capability does.
+    "session-close-ingress": ("unbuilt", "declared for the build, no code gated yet"),
     # R311y498 REMOVED the `api-compat-c` entry that sat here. It was the LAST
     # atom this gate printed as OPEN, and it expired the only way an `unbuilt`
     # exclusion can: by being built (slice 1 — upstream's own z_put.c links and
