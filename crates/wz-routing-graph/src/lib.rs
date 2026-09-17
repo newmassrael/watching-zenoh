@@ -2157,18 +2157,21 @@ impl LinkstateNetwork {
                 write!(f, "{}", self.0)
             }
         }
-        let mut relabeled: StableUnGraph<DotLabel, f64> = StableUnGraph::default();
-        let mut remap: HashMap<NodeIndex, NodeIndex> = HashMap::new();
-        for idx in self.graph.node_indices() {
-            let new = relabeled.add_node(DotLabel(fmt(&self.graph[idx].zid)));
-            remap.insert(idx, new);
-        }
-        for edge in self.graph.edge_indices() {
-            if let Some((a, b)) = self.graph.edge_endpoints(edge) {
-                let weight = *self.graph.edge_weight(edge).unwrap_or(&0.0);
-                relabeled.add_edge(remap[&a], remap[&b], weight);
-            }
-        }
+        // R2684 — `map` PRESERVES node and edge indices; the loop this replaced
+        // re-added every node into a fresh graph and so renumbered them `0..n`.
+        //
+        // That renumbering was the `adminspace-router-linkstate` DOT-body
+        // residual, and the reason it is not cosmetic: zenoh renders its LIVE
+        // `StableGraph`, which retains index GAPS after a node is removed, and wz
+        // holds the same structure (`graph: StableUnGraph<Node, f64>`) and threw
+        // the property away at render time. Within ONE render a DOT node id is an
+        // arbitrary local handle, which is what the old note argued; ACROSS
+        // successive renders it is not, and diffing successive admin GETs is the
+        // obvious way to watch a topology change. A single removal renumbered
+        // every node on wz and none on zenoh.
+        let relabeled = self
+            .graph
+            .map(|_, node| DotLabel(fmt(&node.zid)), |_, weight| *weight);
         format!("{:?}", Dot::new(&relabeled))
     }
 
@@ -3385,6 +3388,89 @@ mod tests {
         assert!(
             !succ.iter().any(|(_, d, _)| *d == zid(0x01)),
             "no successor entry targets self (directions[self] is None)"
+        );
+    }
+
+    // R2684 — the DOT node ids must be the GRAPH's own indices, so a removal
+    // leaves a GAP instead of renumbering every survivor.
+    //
+    // Upstream renders its live `StableGraph` (`zenoh/src/net/protocol/
+    // network.rs` @ `Dot::new(&self.graph)`), which retains gaps; wz holds the
+    // same structure and used to re-add every node into a fresh graph, numbering
+    // them `0..n`. Within one render an id is an arbitrary handle — across two it
+    // is not, and diffing successive admin GETs is how a topology change is
+    // watched. This pins the property rather than the bytes: the ids are read out
+    // of the DOT and compared before and after, so it cannot pass by agreeing
+    // with a transcription of what wz used to emit.
+    #[test]
+    fn dot_node_ids_survive_a_removal_instead_of_renumbering() {
+        fn node_ids(dot: &str) -> Vec<u32> {
+            dot.lines()
+                .filter_map(|l| {
+                    let t = l.trim();
+                    // petgraph node lines are `<id> [ label = "…" ]`; edges carry `--`.
+                    if t.contains("--") {
+                        return None;
+                    }
+                    t.split_whitespace().next()?.parse::<u32>().ok()
+                })
+                .collect()
+        }
+
+        // A STAR, not the line fixture, and the shape is load-bearing. On a line
+        // (self-A-B) dropping the only link strands BOTH far nodes, leaving one
+        // survivor at index 0 — where compacting and preserving agree, so the
+        // test passes under the defect. Measured: the first draft did exactly
+        // that and its control came back green. A star lets a MIDDLE node go and
+        // a LATER one survive, which is the only arrangement where the two
+        // renderers disagree.
+        let mut net = LinkstateNetwork::new(zid(0x01), WhatAmI::Router);
+        let l_a = net.add_link(zid(0xAA), WhatAmI::Router);
+        net.ingest_linkstate_list(
+            l_a,
+            list(vec![
+                entry(10, 0, Some(&zid(0x01)), Some(2), &[11]),
+                entry(11, 5, Some(&zid(0xAA)), Some(2), &[10]),
+            ]),
+        );
+        let l_b = net.add_link(zid(0xBB), WhatAmI::Router);
+        net.ingest_linkstate_list(
+            l_b,
+            list(vec![
+                entry(10, 1, Some(&zid(0x01)), Some(2), &[11, 12]),
+                entry(12, 5, Some(&zid(0xBB)), Some(2), &[10]),
+            ]),
+        );
+        net.compute_trees();
+
+        let before = node_ids(&net.dot_with(|z| format!("z{}", z.as_slice()[0])));
+        assert_eq!(before.len(), 3, "fixture renders three nodes: {before:?}");
+
+        // Drop the MIDDLE node's link. `remove_link` prunes what it strands and
+        // returns the dropped zids, so its own result is the anti-vacuity
+        // evidence: with an empty return this would assert over an unchanged
+        // graph.
+        let pruned = net.remove_link(l_a);
+        assert!(!pruned.is_empty(), "the fixture must actually lose a node");
+
+        let after = node_ids(&net.dot_with(|z| format!("z{}", z.as_slice()[0])));
+        assert!(
+            after.len() < before.len(),
+            "the removal must shrink the rendered set: {before:?} -> {after:?}"
+        );
+        // THE PROPERTY, asserted as the GAP itself rather than as set membership.
+        //
+        // "every survivor was already that id" is satisfied by a COMPACTING
+        // renderer whenever the survivors happen to form a prefix, which is how
+        // the first two drafts of this test passed under the defect. What only
+        // preservation can produce is an id at or above the surviving COUNT --
+        // i.e. a hole where the removed node was.
+        let max = after.iter().copied().max().expect("a survivor remains");
+        assert!(
+            max as usize >= after.len(),
+            "the rendered ids are contiguous `0..n`, so the renderer renumbered \
+             after a removal instead of leaving the graph's own gap: \
+             {before:?} -> {after:?}"
         );
     }
 
