@@ -198,7 +198,21 @@ REFUSAL_TOKENS = frozenset({"code", "success"})
 # commits and pays the ratchet. That is the cost the stopped-round class
 # imposes, and it is invisible to every instrument except this one -- `cargo
 # test` cannot fail on a missing freshness call.
-CARRIED_SUBJECT = 221
+# 221 -> 220 (R2687), the R2623 route a FIFTH time and the cheapest instance of
+# it yet. R2687 added a second fixture to `wz_peer_adminspace_introspection.rs`
+# and put the freshness call in a `demo_binary()` helper both tests route
+# through, so the NEW fixture never entered the carried bucket and the file's
+# existing one left it: +1 and -1 net to -1, rather than the +1-then-repair the
+# budget usually records.
+#
+# ⚠ THE CHECK EARNED ITS KEEP IN THE SAME ROUND IT WAS ADDED HERE, which is why
+# this note is longer than the number deserves. R2687's control probe damaged
+# the product and re-ran the e2e WITHOUT rebuilding the demo; both fixtures
+# failed in 0.00s on this assert instead of reporting a bucketing verdict. A
+# control that reds for the wrong reason is a dead probe wearing a pass's
+# clothes -- it would have been read as "reverting the fix reds the gate", which
+# is exactly the sentence the control exists to earn.
+CARRIED_SUBJECT = 220
 PROBE_ROUTE = 24
 REFUSAL_ONLY = 8
 

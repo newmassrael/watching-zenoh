@@ -5304,6 +5304,10 @@ async fn run_peer_until(
     let mut announced_qos_publish = false;
     let mut declared = false;
     let mut undeclared = false;
+    // R2687 — one-shot latch for the IN-RUN client-sub barrier below, the
+    // peer-tier twin of the router hat's `announced_client_sub`. The peer had
+    // only the SHUTDOWN witness, which a still-running querier cannot gate on.
+    let mut announced_client_sub = false;
     // High-water mark of the topology-graph node count, sampled each tick. The
     // shutdown summary reports THIS, not the live `node_count()`: teardown
     // deregisters every face, and a face-down now GC-prunes the nodes it
@@ -5432,6 +5436,23 @@ async fn run_peer_until(
                         log::info!("wz-ap-demo peer: declared subscriber {key}");
                     }
                 }
+                // R2687 — the IN-RUN client-sub barrier, the peer-tier twin of the
+                // router hat's `learned a client sub`. Fires ONCE, from
+                // `client_subs_seen()` state, so a test can gate a querier's spawn on
+                // this peer provably holding a co-attached client's declaration. The
+                // peer had only the SHUTDOWN witness, which is latched for a test that
+                // reads stderr AFTER teardown and useless to one that must query while
+                // the node runs. Ordered BEFORE the re-snapshot below for the same
+                // reason the `declared subscriber` log is: the buffer is rebuilt later
+                // in THIS tick, so once this line appears the admin view already lists
+                // the client's entry.
+                if !announced_client_sub && forwarder.client_subs_seen() > 0 {
+                    announced_client_sub = true;
+                    log::info!(
+                        "wz-ap-demo peer: learned a client sub ({} sub(s))",
+                        forwarder.client_subs_seen()
+                    );
+                }
                 // §5.23 adminspace-introspection-handlers — re-snapshot the subs/qabls
                 // this node knows into the admin introspection buffer each tick (a FULL
                 // re-materialization from the live interest table, never an incremental
@@ -5439,35 +5460,42 @@ async fn run_peer_until(
                 // declares the --key subscriber also publishes it to the admin view. The
                 // queryable buffer is non-empty even here: `--config-queryable`
                 // registered the admin queryable itself (self-sourced), which
-                // `queryables()` lists — zenoh likewise self-lists its adminspace
-                // queryable. Each entity's source zids become the `peers` bucket of its
-                // admin `Sources` body (a peer-tier interest table's sources are peers).
+                // `queryable_sources()` lists — zenoh likewise self-lists its adminspace
+                // queryable.
+                //
+                // R2687 — the sentence that used to end this paragraph ("each entity's
+                // source zids become the `peers` bucket ... a peer-tier interest table's
+                // sources are peers") is GONE because it stopped being true: the body is
+                // now bucketed by the tier that declared each entity, and a co-attached
+                // client lands in `clients`.
                 #[cfg(feature = "adminspace-introspection-handlers")]
                 {
-                    use wz::runtime_tokio::adminspace::{
-                        AdminDeclaration, AdminEntityKind, AdminSources,
-                    };
-                    let sources = |peers: Vec<String>| AdminSources {
-                        routers: Vec::new(),
-                        peers,
-                        clients: Vec::new(),
-                    };
+                    use wz::runtime_tokio::adminspace::{AdminDeclaration, AdminEntityKind};
+                    // R2687 — the `Sources` body arrives already bucketed by the
+                    // TIER that declared each entity, so this host no longer names
+                    // a bucket. It used to build one here from a flat zid list —
+                    // `peers` filled, `routers` and `clients` hardcoded empty —
+                    // which is why a client-attached subscriber was invisible: its
+                    // declaration lives in the forwarder's per-face client store,
+                    // which the old accessor never read. The hardcoding was the
+                    // symptom; the accessor shape that made it the only option was
+                    // the cause.
                     let mut buf = introspection.borrow_mut();
                     buf.clear();
-                    buf.extend(forwarder.subscriptions().into_iter().map(|(keyexpr, zids)| {
-                        AdminDeclaration {
+                    buf.extend(forwarder.subscriber_sources().into_iter().map(
+                        |(keyexpr, sources)| AdminDeclaration {
                             kind: AdminEntityKind::Subscriber,
                             keyexpr,
-                            sources: sources(zids),
-                        }
-                    }));
-                    buf.extend(forwarder.queryables().into_iter().map(|(keyexpr, zids)| {
-                        AdminDeclaration {
+                            sources,
+                        },
+                    ));
+                    buf.extend(forwarder.queryable_sources().into_iter().map(
+                        |(keyexpr, sources)| AdminDeclaration {
                             kind: AdminEntityKind::Queryable,
                             keyexpr,
-                            sources: sources(zids),
-                        }
-                    }));
+                            sources,
+                        },
+                    ));
                 }
                 // R311y473 (§5.23) — re-snapshot the HELD FACES into the admin
                 // `sessions[]` buffer, the same full-re-materialization discipline as

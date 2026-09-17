@@ -753,10 +753,17 @@ impl RouterDeclarationsView {
     /// recompute a fact the data structure already asserts — and would disagree
     /// with it for a Client, which has no graph node at all.
     ///
-    /// This is what the peer host cannot do and correctly does not try: a plain
-    /// peer has ONE tier, so the `peers`-only body it builds
-    /// (`run_peer`'s `sources` closure) is locally true. Three tables is what
-    /// makes the router the place the distinction is real, and the pin agrees by
+    /// ⚠ R2687 CORRECTED THE CLAIM THAT USED TO STAND HERE. It read: "this is
+    /// what the peer host cannot do and correctly does not try — a plain peer
+    /// has ONE tier, so the `peers`-only body it builds (`run_peer`'s `sources`
+    /// closure) is locally true." The first half is right about the MESH and
+    /// wrong as a whole account: a plain peer also holds CLIENT faces, and their
+    /// declarations live in `client_subs` / `client_qabls`, which the peer's old
+    /// accessor never read — so that body was not locally true, it was silently
+    /// missing a tier. The peer now folds two tiers of its own
+    /// (`linkstate_forward::LinkstateForwarder::bucket_by_tier`) and no longer
+    /// has a `sources` closure. THREE tables is still what makes the router
+    /// distinct, and the pin agrees by
     /// a route this fold mirrors: each HAT fills ONE bucket for its own tier and
     /// the dispatcher merges them per resource
     /// (`zenoh/src/net/routing/dispatcher/tables.rs` @

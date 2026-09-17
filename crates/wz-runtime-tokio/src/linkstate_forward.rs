@@ -2760,29 +2760,114 @@ impl LinkstateForwarder {
         })
     }
 
-    /// Group an interest table's entries by keyexpr into `(keyexpr, source-zid-hex
-    /// list)` — the WHOLE-TABLE materialization the admin `subscriber`/`queryable`
-    /// introspection replies from. This mirrors zenoh's `get_subscriptions` /
-    /// `get_queryables`, which enumerate EVERY known declaration tagged by its source
-    /// (`net/routing/hat/mod.rs:211`), NOT only this node's own — a peer that has
-    /// learned a remote subscription lists it too. Each keyexpr's source zids become
-    /// the `peers` bucket of the admin `Sources` body (a peer-tier linkstate interest
-    /// table's sources are peers; the self-declared entry is registered under this
-    /// node's own zid). A fresh owned snapshot per call (the caller re-materializes it
-    /// each app-tick), never a retained side-table.
+    /// Fold this peer's TWO declaration tiers into one `keyexpr -> Sources` list
+    /// — the WHOLE-TABLE materialization the admin `subscriber`/`queryable`
+    /// introspection replies from. This mirrors zenoh's sourced accessors, which
+    /// enumerate EVERY known declaration tagged by its source, NOT only this
+    /// node's own: a peer that has learned a remote subscription lists it too.
+    /// A fresh owned snapshot per call (the caller re-materializes it each
+    /// app-tick), never a retained side-table.
+    ///
+    /// R2687 — THE BUCKETING LIVES HERE, and that is the whole repair. This
+    /// used to be `group_interest_sources`, returning `(keyexpr, zid-list)` with
+    /// the tier already thrown away, so the only thing its caller could do was
+    /// name a bucket by hand — which `run_peer` did, as `peers` with `routers`
+    /// and `clients` hardcoded empty. A shape that cannot carry the answer makes
+    /// the wrong answer the only reachable one; returning `Sources` is what
+    /// makes the defect unrepresentable rather than merely fixed at the one site
+    /// that had it.
+    ///
+    /// TWO tiers, not three, and `routers` is empty for a STATED reason rather
+    /// than a left-over: a plain linkstate peer joins one mesh and has no
+    /// router-tier table to read. The mesh half was always right; what was
+    /// missing is that a peer also holds CLIENT faces, whose declarations live
+    /// in `client_subs` / `client_qabls` — separate stores this accessor never
+    /// read, so a client-attached subscriber was not mis-bucketed into `peers`,
+    /// it was absent from the reply entirely.
+    ///
+    /// ⚠ THE CLIENT ARM'S ZID COMES FROM THE FACE, and it has to. `client_subs`
+    /// is keyed `FaceId -> {declaration id -> keyexpr}` and stores NO zid at
+    /// all, where the mesh table's `entries()` yields one per row. So identity
+    /// for a client is resolved through
+    /// [`peer_zid_routing`], which reads the TRANSPORT zid off the face's
+    /// `SessionLinkActions` — present on every face, including one that joined
+    /// no graph (`link: None`). That is why this needs no change to `FaceState`,
+    /// unlike the router's sibling fold, which had to start retaining
+    /// `peer_zid` unconditionally because a Client has no graph node to read it
+    /// from (`router_forward::RouterDeclarationsView::bucket_by_tier`).
+    /// ⚠ SELF IS *NOT* EXCLUDED FROM `peers`, AND THAT IS A KNOWN RESIDUAL THIS
+    /// ROUND DID NOT CLOSE — recorded here because it is one measurement away
+    /// from looking closable and is not. `ingest_client_subscription` records a
+    /// client's declaration in `client_subs` AND advertises it into the mesh
+    /// under SELF's zid (`self.subs.register(&keyexpr, self_zid, ())`), with
+    /// `ingest_client_queryable` doing the same for `qabls` — so for a
+    /// client-backed keyexpr the mesh table holds a row reading "this node
+    /// sources it", and the reply names that ONE declaration in TWO tiers:
+    /// `peers: ["<self>"]` beside the client. Upstream buckets by the declaring
+    /// face and excludes self outright
+    /// (`zenoh/src/net/routing/hat/router/pubsub.rs` @
+    /// `.filter(|router| router != &tables.zid)`).
+    ///
+    /// ⛔ IT CANNOT BE DERIVED FROM THIS TREE'S STATE, which is why no predicate
+    /// appears here. A self-native declaration and a client-backed
+    /// advertisement write the IDENTICAL row — same table, same self zid — so
+    /// telling them apart needs a fact nothing records. `local_subscribers`
+    /// looks like that fact and is not: it holds local HANDLERS
+    /// (`register_local_subscriber`), while a `--subscribe` peer declares
+    /// through the bare `declare_subscription` and never appears in it. Gating
+    /// on it would have dropped a plainly-native subscriber from its own reply.
+    /// Closing this needs the self-registration to record WHAT BACKS IT; that is
+    /// a state change, not a filter, and it is registered rather than guessed.
     #[cfg(feature = "adminspace-introspection-handlers")]
-    fn group_interest_sources<V: Clone>(
-        table: &LinkstatepeerInterest<V>,
-    ) -> Vec<(String, Vec<String>)> {
-        let mut by_key: std::collections::BTreeMap<String, Vec<String>> =
-            std::collections::BTreeMap::new();
-        for (ke, zid, _) in table.entries() {
+    fn bucket_by_tier<V: Clone>(
+        &self,
+        mesh: &LinkstatepeerInterest<V>,
+        clients: &[(FaceId, String)],
+    ) -> Vec<(String, wz_session_core::adminspace::AdminSources)> {
+        use wz_session_core::adminspace::AdminSources;
+        use wz_session_core::zid_hex::zid_to_zenoh_hex;
+
+        let empty = || AdminSources {
+            routers: Vec::new(),
+            peers: Vec::new(),
+            clients: Vec::new(),
+        };
+        let mut by_key: HashMap<String, AdminSources> = HashMap::new();
+        for (keyexpr, zid, _) in mesh.entries() {
             by_key
-                .entry(ke)
-                .or_default()
-                .push(wz_session_core::zid_hex::zid_to_zenoh_hex(zid.as_slice()));
+                .entry(keyexpr)
+                .or_insert_with(empty)
+                .peers
+                .push(zid_to_zenoh_hex(zid.as_slice()));
         }
-        by_key.into_iter().collect()
+        let faces = self.faces.borrow();
+        for (face, keyexpr) in clients {
+            let Some(zid) = faces.get(face).and_then(|s| peer_zid_routing(&s.actions)) else {
+                // A face whose handshake carried no routing zid contributes no
+                // SOURCE. Skipping is the honest answer: an entry naming no zid
+                // would claim a declaration nobody can be named for.
+                continue;
+            };
+            by_key
+                .entry(keyexpr.clone())
+                .or_insert_with(empty)
+                .clients
+                .push(zid_to_zenoh_hex(zid.as_slice()));
+        }
+        // Sorted within each bucket and across keys: the iteration order of a
+        // `HashMap` otherwise follows its hashing, and a body that reorders
+        // between two identical GETs is a difference an operator has to
+        // explain. `dedup` after the sort because one face may hold the same
+        // keyexpr under two declaration ids, which is one SOURCE, not two.
+        let mut out: Vec<(String, AdminSources)> = by_key.into_iter().collect();
+        for (_, sources) in out.iter_mut() {
+            sources.peers.sort();
+            sources.peers.dedup();
+            sources.clients.sort();
+            sources.clients.dedup();
+        }
+        out.sort_by(|a, b| a.0.cmp(&b.0));
+        out
     }
 
     /// R2684 (§5.23 `adminspace-router-linkstate`) — a read-only
@@ -2809,23 +2894,38 @@ impl LinkstateForwarder {
     }
 
     /// The declared subscribers this node knows (`@/<zid>/<whatami>/subscriber/**`
-    /// admin introspection, §5.23) — every keyexpr in the [`subs`](Self#structfield.subs)
-    /// interest table paired with the hex zids that declared it. See
-    /// [`group_interest_sources`](Self::group_interest_sources) for the whole-table /
-    /// Sources rationale.
+    /// admin introspection, §5.23), each keyexpr paired with the `Sources` body
+    /// naming WHICH TIER declared it: the [`subs`](Self#structfield.subs) mesh
+    /// table fills `peers`, the [`client_subs`](Self#structfield.client_subs)
+    /// per-face store fills `clients`. See
+    /// [`bucket_by_tier`](Self::bucket_by_tier) for why the bucketing is done
+    /// here rather than left to the caller.
     #[cfg(feature = "adminspace-introspection-handlers")]
-    pub fn subscriptions(&self) -> Vec<(String, Vec<String>)> {
-        Self::group_interest_sources(&self.subs.borrow())
+    pub fn subscriber_sources(&self) -> Vec<(String, wz_session_core::adminspace::AdminSources)> {
+        let clients: Vec<(FaceId, String)> = self
+            .client_subs
+            .borrow()
+            .iter()
+            .flat_map(|(face, by_id)| by_id.values().map(move |ke| (*face, ke.clone())))
+            .collect();
+        self.bucket_by_tier(&self.subs.borrow(), &clients)
     }
 
     /// The declared queryables this node knows (`@/<zid>/<whatami>/queryable/**` admin
     /// introspection, §5.23) — the [`qabls`](Self#structfield.qabls) twin of
-    /// [`subscriptions`](Self::subscriptions). The queryable body is the SAME `Sources`
-    /// struct zenoh serializes (`get_queryables`, `hat/mod.rs:252`), NOT the
-    /// per-declaration `QueryableInfoType`.
+    /// [`subscriber_sources`](Self::subscriber_sources). The queryable body is the
+    /// SAME `Sources` struct zenoh serializes for both entity kinds, NOT the
+    /// per-declaration `QueryableInfoType`, so the client store's inner value is
+    /// reduced to its keyexpr here and the `QueryableInfo` beside it discarded.
     #[cfg(feature = "adminspace-introspection-handlers")]
-    pub fn queryables(&self) -> Vec<(String, Vec<String>)> {
-        Self::group_interest_sources(&self.qabls.borrow())
+    pub fn queryable_sources(&self) -> Vec<(String, wz_session_core::adminspace::AdminSources)> {
+        let clients: Vec<(FaceId, String)> = self
+            .client_qabls
+            .borrow()
+            .iter()
+            .flat_map(|(face, by_id)| by_id.values().map(move |(ke, _)| (*face, ke.clone())))
+            .collect();
+        self.bucket_by_tier(&self.qabls.borrow(), &clients)
     }
 
     /// R311y473 — the held faces as the adminspace `sessions[]` array: the
@@ -7690,6 +7790,92 @@ mod tests {
         assert_eq!(
             forwarded_declare_keyexpr(&sink_b.frame_bytes(0)).as_deref(),
             Some("demo/**")
+        );
+    }
+
+    /// R2687 — each (tier, kind) cell of the peer's admin `Sources` body is fed
+    /// by its OWN table, with FOUR DISJOINT KEYEXPRS so a cross-wiring cannot
+    /// pass.
+    ///
+    /// The transposition this exists for TYPE-CHECKS: `bucket_by_tier` is
+    /// generic over the interest table's value, so reading `subs` where `qabls`
+    /// was meant — or `client_subs` where `client_qabls` was — compiles
+    /// silently. The e2e cannot see it either: it exercises the SUBSCRIBER leg
+    /// only, so a queryable-side swap would ship green. Disjoint keys are what
+    /// turn "the bucket is populated" into "populated FROM THE RIGHT TABLE": any
+    /// swap moves a keyexpr into a leg it does not belong to, and both
+    /// assertions below name the exact expected row.
+    #[cfg(feature = "adminspace-introspection-handlers")]
+    #[test]
+    fn admin_sources_bucket_the_mesh_and_client_tiers_from_their_own_tables() {
+        use wz_session_core::zid_hex::zid_to_zenoh_hex;
+
+        let fwd = LinkstateForwarder::new(zid(0x05), WhatAmI::Peer);
+        // The ANTI-VACUITY control: a peer nobody has declared to reports
+        // nothing, so every assertion below is refutable by an always-full
+        // answer rather than satisfied by one.
+        assert!(
+            fwd.subscriber_sources().is_empty() && fwd.queryable_sources().is_empty(),
+            "a peer with no declarations reports no sources"
+        );
+
+        let (peer_b, _s1) = peer_face(zid(0x0B));
+        let (client_c, _s2) = peer_face_whatami(zid(0x0C), 2);
+        fwd.register(FaceId(0), &peer_b);
+        fwd.register(FaceId(1), &client_c);
+        advertise_link_back(&fwd, FaceId(0), 0x0B, 0x05);
+
+        // SELF-native declarations fill the mesh tables under THIS node's zid;
+        // the client's fill `client_subs` / `client_qabls` under the face.
+        fwd.declare_subscription("mesh/sub").expect("mesh sub");
+        fwd.declare_queryable("mesh/qabl", true).expect("mesh qabl");
+        client_declare_sub(&fwd, FaceId(1), 1, "leaf/sub");
+        client_declare_qabl(&fwd, FaceId(1), 2, "leaf/qabl", true);
+
+        let self_hex = zid_to_zenoh_hex(zid(0x05).as_slice());
+        let client_hex = zid_to_zenoh_hex(zid(0x0C).as_slice());
+        let flatten = |rows: Vec<(String, wz_session_core::adminspace::AdminSources)>| {
+            rows.into_iter()
+                .map(|(k, s)| (k, s.routers, s.peers, s.clients))
+                .collect::<Vec<_>>()
+        };
+
+        // `leaf/sub` carries the CLIENT's zid in `clients`. It also carries self
+        // in `peers`, because the ingest advertises a client's declaration into
+        // the mesh under this node's zid — open-debt item 779, asserted here as
+        // the CURRENT truth rather than silently tolerated, so closing that item
+        // has to come past this test.
+        assert_eq!(
+            flatten(fwd.subscriber_sources()),
+            vec![
+                (
+                    "leaf/sub".to_string(),
+                    vec![],
+                    vec![self_hex.clone()],
+                    vec![client_hex.clone()]
+                ),
+                (
+                    "mesh/sub".to_string(),
+                    vec![],
+                    vec![self_hex.clone()],
+                    vec![]
+                ),
+            ],
+            "the subscriber legs come from `subs` + `client_subs`, keyed disjointly"
+        );
+        assert_eq!(
+            flatten(fwd.queryable_sources()),
+            vec![
+                (
+                    "leaf/qabl".to_string(),
+                    vec![],
+                    vec![self_hex.clone()],
+                    vec![client_hex]
+                ),
+                ("mesh/qabl".to_string(), vec![], vec![self_hex], vec![]),
+            ],
+            "the queryable legs come from `qabls` + `client_qabls` — a table swap \
+             would surface a `sub` key here"
         );
     }
 
