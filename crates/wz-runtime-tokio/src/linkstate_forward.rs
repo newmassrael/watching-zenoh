@@ -546,7 +546,7 @@ pub struct LinkstateForwarder {
     /// self, so this is the local-delivery seam). `RefCell` (the handler is `FnMut`)
     /// by the same single-task contract; no `Send` (a handler may capture an `Rc` —
     /// the §5.23 config-write handler's shared `WzConfig` in Phase 3b).
-    /// R2687 (open-debt 779) — the keyexprs THIS NODE has itself declared a
+    /// R2689 (open-debt 779) — the keyexprs THIS NODE has itself declared a
     /// subscription for, which is the backer fact nothing recorded.
     ///
     /// WHY IT CANNOT BE READ OFF ANYTHING ELSE. A self-native declaration and a
@@ -568,7 +568,7 @@ pub struct LinkstateForwarder {
     /// [`undeclare_subscription`](Self::undeclare_subscription) drops EVERY
     /// handler for a keyexpr in one call, so a keyexpr is declared or it is not.
     native_subs: RefCell<HashSet<String>>,
-    /// R2687 (open-debt 779) — the queryable twin of
+    /// R2689 (open-debt 779) — the queryable twin of
     /// [`native_subs`](Self#structfield.native_subs), carrying the declared
     /// [`QueryableInfo`] rather than bare presence because this plane MERGES
     /// values: a queryable advertises completeness and distance, where a
@@ -2776,7 +2776,7 @@ impl LinkstateForwarder {
     /// self-origination structure.
     pub fn declare_subscription(&self, keyexpr: &str) -> Result<usize, CodecError> {
         let self_zid = *self.net.borrow().self_zid();
-        // R2687 (open-debt 779) — record that SELF backs this keyexpr. This is the
+        // R2689 (open-debt 779) — record that SELF backs this keyexpr. This is the
         // ONLY place a native subscription is born: `register_local_subscriber`
         // reaches the mesh through here too, so one insert covers both the bare
         // `--subscribe` form and the handler-registered one. Without it the row
@@ -2835,7 +2835,7 @@ impl LinkstateForwarder {
     /// `peer_zid` unconditionally because a Client has no graph node to read it
     /// from (`router_forward::RouterDeclarationsView::bucket_by_tier`).
     /// ⚠ SELF IS EXCLUDED FROM `peers` UNLESS THIS NODE ITSELF DECLARED THE
-    /// KEYEXPR (R2687, open-debt 779), and that arm is half the repair rather
+    /// KEYEXPR (R2689, open-debt 779), and that arm is half the repair rather
     /// than a refinement of it. `ingest_client_subscription` records a client's
     /// declaration in `client_subs` AND advertises it into the mesh under SELF's
     /// zid (`self.subs.register(&keyexpr, self_zid, ())`), with
@@ -3240,7 +3240,7 @@ impl LinkstateForwarder {
         // per-hop increment); BestMatching reads the GRAPH distance, not this
         // carried value.
         let info = QueryableInfo::local(complete);
-        // R2687 (open-debt 779) — record that SELF backs this keyexpr, with its
+        // R2689 (open-debt 779) — record that SELF backs this keyexpr, with its
         // info. The twin of `native_subs`' insert in `declare_subscription`, and
         // the only place a native queryable is born: `register_local_queryable`
         // reaches the mesh through here.
@@ -3804,7 +3804,7 @@ impl LinkstateForwarder {
         // source's departure (no other local sub AND no client sub for `keyexpr`)
         // withdraws `subs` + floods the sourced UndeclareSubscriber + re-arms any
         // waiting future-push backer.
-        // R2687 (open-debt 779) — SELF stops backing this keyexpr, dropped BEFORE
+        // R2689 (open-debt 779) — SELF stops backing this keyexpr, dropped BEFORE
         // the union check below so that check sees the retraction in this same
         // call, exactly as the handler drop above is sequenced for.
         self.native_subs.borrow_mut().remove(keyexpr);
@@ -3845,7 +3845,7 @@ impl LinkstateForwarder {
     /// the client withdraw / face-down paths; the caller removes ITS OWN source (the
     /// local-sub handler or the `client_subs` entry) BEFORE calling.
     fn withdraw_mesh_sub_if_unbacked(&self, keyexpr: &str) -> Result<usize, CodecError> {
-        // R2687 (open-debt 779) — `native_subs` replaces the former
+        // R2689 (open-debt 779) — `native_subs` replaces the former
         // `any_local_subscriber`, which read `local_subscribers`. The two agree
         // whenever a subscription was registered WITH a handler, and differ
         // exactly where the bug was: a bare `declare_subscription` backs the
@@ -3893,7 +3893,7 @@ impl LinkstateForwarder {
     /// (whose `distance == 0` collapses the `min`).
     fn derived_self_qabl_info(&self, keyexpr: &str) -> Option<QueryableInfo> {
         let mut acc: Option<QueryableInfo> = None;
-        // R2687 (open-debt 779) — the queryable twin of `native_subs`, folded
+        // R2689 (open-debt 779) — the queryable twin of `native_subs`, folded
         // FIRST so a bare `declare_queryable` is a source like any other. This
         // method's own doc-invariant used to carry that weight by CONVENTION:
         // `declare_queryable` warns that a self-hosted queryable must go through
@@ -4361,7 +4361,7 @@ impl LinkstateForwarder {
         // withdraw_mesh_sub_if_unbacked (R311y163), with the qabl-specific info downgrade
         // (subs are presence-only). A never-registered ke with no client backer floods an
         // idempotent UndeclareQueryable (the None arm), preserving the prior behavior.
-        // R2687 (open-debt 779) — SELF stops backing this keyexpr, dropped BEFORE
+        // R2689 (open-debt 779) — SELF stops backing this keyexpr, dropped BEFORE
         // the re-derive below so `derived_self_qabl_info` sees the retraction in
         // this same call, exactly as the handler drop above is sequenced for.
         self.native_qabls.borrow_mut().remove(keyexpr);
@@ -7935,7 +7935,7 @@ mod tests {
                 .collect::<Vec<_>>()
         };
 
-        // R2687 (open-debt 779 closed for subs) — `leaf/sub` carries the CLIENT's
+        // R2689 (open-debt 779 closed for subs) — `leaf/sub` carries the CLIENT's
         // zid in `clients` and NOTHING in `peers`. It used to carry self there
         // too, because the ingest advertises a client's declaration into the mesh
         // under this node's zid and the fold read that row back as a peer-tier
@@ -8111,7 +8111,7 @@ mod tests {
         assert!(!fwd.interested("demo/**").contains(&zid(0x05)));
     }
 
-    /// R2687 / open-debt 779 — the MIRROR of the test above, and the direction
+    /// R2689 / open-debt 779 — the MIRROR of the test above, and the direction
     /// nobody ran. Same fixture, same one advertise slot; only the departure
     /// ORDER is reversed: the CLIENT leaves while the self-native subscriber is
     /// still declared.

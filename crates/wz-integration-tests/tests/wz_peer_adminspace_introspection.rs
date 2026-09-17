@@ -387,13 +387,16 @@ fn wz_peer_admin_client_declared_subscriber_lands_in_the_clients_bucket() {
     // THE BUCKETING ASSERTION, pinning the WHOLE body rather than one bucket.
     //
     // ⚠ AN EARLIER DRAFT ASSERTED ONLY `clients`, AND THAT PASSED IN BOTH STATES.
-    // Before the R2687 repair this reply read
-    // `{"routers":[],"peers":["<A>"],"clients":["<B>"]}` — B correctly named AND A
-    // wrongly named, because the peer advertises a client's declaration into the
-    // mesh under its own zid and the admin fold read that row back as a peer-tier
-    // source. A `clients`-only assertion cannot see the difference, so the repair
-    // would have landed unasserted. Pinning all three buckets is what makes this
-    // test the contract: ONE declaration, ONE source, in the tier that declared it.
+    // Two repairs stand behind this body and only the SECOND is visible here.
+    // R2687 gave the fold its tiers, which is what put B in `clients` at all —
+    // and left `{"routers":[],"peers":["<A>"],"clients":["<B>"]}`, B correctly
+    // named AND A wrongly named, because the peer advertises a client's
+    // declaration into the mesh under its own zid and the fold read that row
+    // back as a peer-tier source. R2689 (open-debt 779) removed A by recording
+    // what BACKS a keyexpr. A `clients`-only assertion cannot tell those two
+    // states apart, so the second repair would have landed unasserted. Pinning
+    // all three buckets is what makes this test the contract: ONE declaration,
+    // ONE source, in the tier that declared it.
     assert!(
         reply.contains(&format!(
             r#"{{\"routers\":[],\"peers\":[],\"clients\":[\"{CLIENT_B_ZID_RENDERED}\"]}}"#
