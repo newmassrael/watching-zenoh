@@ -4845,6 +4845,8 @@ async fn run_peer_until(
             admin_config_key, admin_queryable_key, answer_admin_query, AdminAnswerCtx,
             AdminAnswerOutcome,
         };
+        #[cfg(feature = "adminspace-router-linkstate")]
+        use wz::runtime_tokio::adminspace::{answer_router_admin_query, AdminRouterCtx};
         use wz::runtime_tokio::query_sink::{QueryView, ReplyOut};
         use wz::runtime_tokio::zid_hex::zid_to_zenoh_hex;
         let zid_hex = zid_to_zenoh_hex(&params.zid);
@@ -4879,6 +4881,20 @@ async fn run_peer_until(
             "wz-ap-demo peer: adminspace read permit = {}",
             wz::runtime_tokio::admin_read_permit(&shared.borrow().admin_permissions())
         );
+        // R2684 (§5.23 `adminspace-router-linkstate`) — this peer's OWN link-state
+        // graph, as the read-only render seam its `linkstate/peers` leg needs.
+        //
+        // Minted BEFORE the closure and moved in, for the reason the introspection
+        // and sessions buffers above are: the handler is registered INTO the
+        // forwarder, so it cannot borrow the forwarder at query time. The view is
+        // `Rc`-backed, so it renders LIVE per GET rather than from a snapshot.
+        //
+        // Upstream serves the peer-tier handler from ANY non-Client hat
+        // (`zenoh/src/net/runtime/adminspace.rs` @ `.filter(|(_, hat)|
+        // hat.mode().is_peer() || hat.mode().is_router())`), which is what wz did
+        // not do: the leg existed only on the router host.
+        #[cfg(feature = "adminspace-router-linkstate")]
+        let peers_view = forwarder.net_view();
         let handler = move |view: &dyn QueryView, out: &mut dyn ReplyOut| {
             let admin_read =
                 wz::runtime_tokio::admin_read_permit(&shared.borrow().admin_permissions());
@@ -4924,6 +4940,28 @@ async fn run_peer_until(
                     "{}",
                     wz::runtime_tokio::adminspace::denied_read_diagnostic(view.keyexpr())
                 );
+            }
+            // R2684 — the PEER-tier `linkstate/peers` leg, which upstream serves
+            // from any non-Client hat and wz served only from a router.
+            //
+            // `routers_dot: None` and an empty `successors` are not placeholders:
+            // they are what this node HAS. A plain linkstate peer keeps one graph,
+            // not the router's two, and `route/successor` is rendered from the
+            // ROUTER-tier net — so omitting both is the honest answer, and
+            // `AdminRouterCtx` documents `None` as "omit that leg" rather than
+            // "answer empty".
+            #[cfg(feature = "adminspace-router-linkstate")]
+            {
+                let peers_dot = peers_view.dot();
+                let rctx = AdminRouterCtx {
+                    zid_hex: &zid_hex,
+                    whatami: whatami_str,
+                    routers_dot: None,
+                    peers_dot: Some(&peers_dot),
+                    successors: &[],
+                    read: admin_read,
+                };
+                let _ = answer_router_admin_query(view, out, &rctx);
             }
         };
         match forwarder.register_local_queryable(&queryable_key, true, Box::new(handler)) {

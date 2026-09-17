@@ -368,7 +368,6 @@ use wz_session_core::push_routing_context::set_push_source;
 use wz_session_core::qos::Priority;
 use wz_session_core::query::{QueryReply, QueryResponder};
 use wz_session_core::wireexpr_resolve::{resolve_wireexpr, wireexpr_is_empty};
-use wz_session_core::zid_hex::zid_to_zenoh_hex;
 
 use crate::accept_loop::{
     DialIntent, DialIntentOrigin, DialIntentReceiver, DialIntentSender, FaceForwarder, FaceId,
@@ -596,16 +595,17 @@ struct McastGroup {
 #[cfg(feature = "router-multicast-faces")]
 const MCAST_INGRESS_FACE: FaceId = FaceId(u64::MAX);
 
-/// A read-only, `Rc`-backed handle to one of a [`RouterForwarder`]'s two
-/// link-state graphs, exposing ONLY the adminspace render seam (§5.23
-/// `adminspace-router-linkstate`): the GraphViz DOT and the `route_successors`
-/// enumeration, each zid rendered to the zenoh `ZenohId` Display hex an admin
-/// client expects ([`zid_to_zenoh_hex`]). Handed to the router's admin-queryable
-/// handler so it renders LIVE per GET (no per-tick snapshot buffer) WITHOUT
-/// leaking a `borrow_mut` handle that could mutate routing state — the wz-fit
-/// resolution of the render-accessor-vs-Rc-clone question (a router net is
-/// already `Rc<RefCell<..>>`, unlike the peer's owned-snapshot `subscriptions()`).
-pub struct LinkstateNetView(Rc<RefCell<LinkstateNetwork>>);
+/// R2684 — MOVED to [`crate::linkstate_forward`], re-exported here so the
+/// router-hat paths that already name it keep working.
+///
+/// It moved because of which FEATURE each module sits behind: this one is
+/// `routing-router-hat`, `linkstate_forward` is `routing-peer`, and the graph
+/// the view renders — `LinkstateNetwork` — belongs to the PEER tier. A plain
+/// linkstate peer therefore owned the data and could not name the handle that
+/// renders it, which is why `linkstate/peers` was servable only from a router.
+/// The type and its impl were never gated within this module; only the module's
+/// own `#[cfg]` confined them.
+pub use crate::linkstate_forward::LinkstateNetView;
 
 /// R2636 (open-debt item 748) — a read-only handle over a router's live face
 /// set, rendering the admin `sessions[]` transport table.
@@ -682,36 +682,6 @@ impl RouterSessionsView {
                         }
                     }),
                 }
-            })
-            .collect()
-    }
-}
-
-impl LinkstateNetView {
-    /// The graph as GraphViz DOT with zenoh-hex node labels — the wz mirror of
-    /// zenoh `info(..)` = `net.dot()` (`net/runtime/adminspace.rs:753,773`). The
-    /// zid formatter is injected because `dot_with` (in the lower `wz-routing-
-    /// graph` crate) cannot reach the [`zid_to_zenoh_hex`] SSOT itself.
-    pub fn dot(&self) -> String {
-        self.0.borrow().dot_with(|z| zid_to_zenoh_hex(z.as_slice()))
-    }
-
-    /// Every `(source, destination, successor)` triple, each zid in zenoh-hex —
-    /// the wz mirror of zenoh `route_successors()` (`net/protocol/network.rs:
-    /// 1187`). Rendered from THIS net (the router adminspace uses `routers_net`
-    /// for the `route/successor` legs, zenoh
-    /// `zenoh/src/net/routing/hat/router/mod.rs` @ `fn route_successors`).
-    pub fn route_successors_hex(&self) -> Vec<(String, String, String)> {
-        self.0
-            .borrow()
-            .route_successors()
-            .into_iter()
-            .map(|(s, d, h)| {
-                (
-                    zid_to_zenoh_hex(s.as_slice()),
-                    zid_to_zenoh_hex(d.as_slice()),
-                    zid_to_zenoh_hex(h.as_slice()),
-                )
             })
             .collect()
     }
@@ -5249,13 +5219,13 @@ impl RouterForwarder {
     /// A read-only [`LinkstateNetView`] over the ROUTER-tier graph (`routers_net`)
     /// — the adminspace host's DOT + `route/successor` render seam (§5.23).
     pub fn routers_net_view(&self) -> LinkstateNetView {
-        LinkstateNetView(Rc::clone(&self.routers_net))
+        LinkstateNetView::new(Rc::clone(&self.routers_net))
     }
 
     /// A read-only [`LinkstateNetView`] over the PEER-tier graph
     /// (`linkstatepeers_net`) — the adminspace host's `linkstate/peers` render seam.
     pub fn peers_net_view(&self) -> LinkstateNetView {
-        LinkstateNetView(Rc::clone(&self.linkstatepeers_net))
+        LinkstateNetView::new(Rc::clone(&self.linkstatepeers_net))
     }
 
     /// Self-dispatch a routed GET whose only match is a queryable HOSTED BY THIS

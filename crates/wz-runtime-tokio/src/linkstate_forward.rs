@@ -305,6 +305,61 @@ struct InterestRegistration<'t, V> {
 /// id-only `UndeclareQueryable` resolves the (ke, info) by id (R311y178 id-map).
 type ClientQabls = HashMap<FaceId, HashMap<u64, (String, QueryableInfo)>>;
 
+/// A read-only, `Rc`-backed handle to a link-state graph, exposing ONLY the
+/// adminspace render seam (§5.23 `adminspace-router-linkstate`): the GraphViz
+/// DOT and the `route_successors` enumeration, each zid rendered to the zenoh
+/// `ZenohId` Display hex an admin client expects. Handed to an admin-queryable
+/// handler so it renders LIVE per GET (no per-tick snapshot buffer) WITHOUT
+/// leaking a `borrow_mut` handle that could mutate routing state.
+///
+/// R2684 — it lives HERE, with `routing-peer`, rather than in the router hat
+/// where it was written. The graph it views belongs to the peer tier, so a
+/// plain linkstate peer owned the data while the handle that renders it sat
+/// behind `routing-router-hat` — which is the whole of why `linkstate/peers`
+/// could be served only from a router. `router_forward` re-exports it, so every
+/// path that already named it is unchanged.
+pub struct LinkstateNetView(Rc<RefCell<LinkstateNetwork>>);
+
+impl LinkstateNetView {
+    /// Wrap a shared graph in the render seam. `pub(crate)` rather than `pub`:
+    /// the handle is a VIEW a forwarder hands out, never something a consumer
+    /// mints over a graph it obtained some other way — which is the property
+    /// that keeps `borrow_mut` from escaping.
+    pub(crate) fn new(net: Rc<RefCell<LinkstateNetwork>>) -> Self {
+        Self(net)
+    }
+
+    /// The graph as GraphViz DOT with zenoh-hex node labels — the wz mirror of
+    /// zenoh `info(..)` = `net.dot()` (`net/runtime/adminspace.rs:753,773`). The
+    /// zid formatter is injected because `dot_with` (in the lower `wz-routing-
+    /// graph` crate) cannot reach the `zid_to_zenoh_hex` SSOT itself.
+    pub fn dot(&self) -> String {
+        self.0
+            .borrow()
+            .dot_with(|z| wz_session_core::zid_hex::zid_to_zenoh_hex(z.as_slice()))
+    }
+
+    /// Every `(source, destination, successor)` triple, each zid in zenoh-hex —
+    /// the wz mirror of zenoh `route_successors()` (`net/protocol/network.rs:
+    /// 1187`). Rendered from THIS net (the router adminspace uses `routers_net`
+    /// for the `route/successor` legs, zenoh
+    /// `zenoh/src/net/routing/hat/router/mod.rs` @ `fn route_successors`).
+    pub fn route_successors_hex(&self) -> Vec<(String, String, String)> {
+        self.0
+            .borrow()
+            .route_successors()
+            .into_iter()
+            .map(|(s, d, h)| {
+                (
+                    wz_session_core::zid_hex::zid_to_zenoh_hex(s.as_slice()),
+                    wz_session_core::zid_hex::zid_to_zenoh_hex(d.as_slice()),
+                    wz_session_core::zid_hex::zid_to_zenoh_hex(h.as_slice()),
+                )
+            })
+            .collect()
+    }
+}
+
 pub struct LinkstateForwarder {
     /// Shared single-task topology graph (`Rc<RefCell>`, not `Mutex`).
     net: Rc<RefCell<LinkstateNetwork>>,
@@ -2717,6 +2772,25 @@ impl LinkstateForwarder {
                 .push(wz_session_core::zid_hex::zid_to_zenoh_hex(zid.as_slice()));
         }
         by_key.into_iter().collect()
+    }
+
+    /// R2684 (§5.23 `adminspace-router-linkstate`) — a read-only
+    /// [`LinkstateNetView`] over THIS peer's link-state graph, the render seam
+    /// its `linkstate/peers` admin leg needs.
+    ///
+    /// The sibling on `RouterForwarder` has existed since R311y204; this one had
+    /// not, and its absence is the whole of why that leg was servable only from a
+    /// router. Upstream registers the peer-tier handler for ANY non-Client hat
+    /// (`zenoh/src/net/runtime/adminspace.rs` @ `.filter(|(_, hat)|
+    /// hat.mode().is_peer() || hat.mode().is_router())`), so a plain linkstate
+    /// peer answers it there and could not here.
+    ///
+    /// Read-only by construction: the view hands out `dot()` and
+    /// `route_successors_hex()` and never a `borrow_mut`, so an admin GET cannot
+    /// reach routing state through it.
+    #[cfg(feature = "adminspace-router-linkstate")]
+    pub fn net_view(&self) -> LinkstateNetView {
+        LinkstateNetView::new(Rc::clone(&self.net))
     }
 
     /// The declared subscribers this node knows (`@/<zid>/<whatami>/subscriber/**`

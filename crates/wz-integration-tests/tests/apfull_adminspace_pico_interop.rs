@@ -479,6 +479,42 @@ fn apfull_adminspace_plane_decoded_by_a_real_pico_z_get() {
         plugins.contains(r#""state":"Loaded""#) && plugins.contains(r#""path":"__static__""#),
         "the plugins leg reports the statically compiled storage_manager as Loaded\n  got: {plugins}"
     );
+
+    // ── adminspace-router-linkstate — the PEER-tier linkstate leg ────
+    //
+    // R2684. Upstream registers the peer-tier handler for ANY non-Client hat
+    // (`zenoh/src/net/runtime/adminspace.rs` @ `.filter(|(_, hat)|
+    // hat.mode().is_peer() || hat.mode().is_router())`), so a plain linkstate
+    // peer answers `linkstate/peers`. wz served it only from a router host,
+    // because the render seam (`LinkstateNetView`) lived behind
+    // `routing-router-hat` while the graph it renders belongs to the peer tier.
+    //
+    // THIS NODE IS A PEER, not a router hat: `root` is `@/<zid>/peer`, so the key
+    // asserted below cannot be answered by the router host at all. That is what
+    // makes this the witness for the move rather than a re-test of R311y204.
+    let linkstate_key = format!("{root}/linkstate/peers");
+    let linkstate = out
+        .lines()
+        .find(|l| l.contains(&format!("('{linkstate_key}':")))
+        .unwrap_or_else(|| {
+            panic!("pico decoded no peer-tier linkstate leg at `{linkstate_key}` — a non-Client hat serves it upstream, and this peer must too\n--- z_get ---\n{out}")
+        });
+    // The body is GraphViz DOT carrying THIS node as a labelled vertex. Pinning
+    // the runtime zid rather than the grammar alone: `graph {` would also match an
+    // empty template, and the zid is the one part a fixture cannot supply.
+    assert!(
+        linkstate.contains("graph {") && linkstate.contains(&zid),
+        "the peer-tier linkstate leg is live DOT naming this node's own zid `{zid}`\n  got: {linkstate}"
+    );
+    // The ROUTER-tier leg must be ABSENT here. `AdminRouterCtx` documents `None`
+    // as "omit that leg", and a plain peer keeps one graph, not the router's two —
+    // so answering an empty `linkstate/routers` would be a lie shaped like
+    // coverage. This arm is what separates "the peer serves its own tier" from
+    // "the peer serves both and one is empty".
+    assert!(
+        !out.contains(&format!("('{root}/linkstate/routers':")),
+        "a plain peer must omit the ROUTER-tier leg, not answer it empty\n--- z_get ---\n{out}"
+    );
 }
 
 // wz-proves: adminspace-read wz->pico
