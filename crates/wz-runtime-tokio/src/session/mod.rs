@@ -685,7 +685,8 @@ where
     ///
     /// The admin GET handler is stored INSIDE the observer's queryable registry
     /// and is dispatched with `&mut ApplicationLayerObserver` held
-    /// (`observer.rs` @ `self.queryables.dispatch_iteration_event`). It can
+    /// (`crates/wz-session-core/src/observer.rs` @
+    /// `self.queryables.dispatch_iteration_event`). It can
     /// therefore neither borrow the observer back nor re-lock it, and the tables
     /// it must report are sibling fields of the very struct that is borrowed. So
     /// the answer has to be somewhere the handler CAN reach, and this is it.
@@ -2321,7 +2322,8 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
     /// Two sites do today, and they are two because the tables have two mutators,
     /// not because two seemed enough: [`Self::dispatch_iteration_event_with`] (an
     /// inbound `Decl*` / `Undecl*` record) and the link-loss flush
-    /// (`reconnect.rs` @ `flush_declarations_on_link_loss`, which empties them
+    /// (`crates/wz-runtime-tokio/src/reconnect.rs` @
+    /// `flush_declarations_on_link_loss`, which empties them
     /// with no iteration event in sight — on a dead link there may be no further
     /// event at all, and a local GET would otherwise go on reporting a departed
     /// peer's subscriptions indefinitely).
@@ -2389,7 +2391,8 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
             // before: an inbound `DeclSubscriber` must be answerable by the very
             // next GET, and the GET that arrives in the SAME event was already
             // answered above (the queryable fan runs first inside `dispatch_event`
-            // — `observer.rs` @ `self.queryables.dispatch_iteration_event`), so a
+            // — `crates/wz-session-core/src/observer.rs` @
+            // `self.queryables.dispatch_iteration_event`), so a
             // pre-dispatch refresh would report this event's declare one event
             // late for nothing.
             #[cfg(all(
@@ -4177,8 +4180,8 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
             // serves NO introspection at all" residual.
             //
             // READ, not built: this handler runs INSIDE the observer lock,
-            // mid-dispatch (`observer.rs` @ `self.queryables
-            // .dispatch_iteration_event`), so it can neither borrow the
+            // mid-dispatch (`crates/wz-session-core/src/observer.rs` @
+            // `self.queryables.dispatch_iteration_event`), so it can neither borrow the
             // declaration registries nor re-lock the observer to reach them. What
             // it can do is read a cache written under that same lock, which is
             // what `Session::refresh_admin_declarations` fills.

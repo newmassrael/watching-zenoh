@@ -11,12 +11,14 @@
 //! than a link-state graph. Upstream's loop is
 //! `zenoh/src/net/routing/hat/client/pubsub.rs` @ `fn sourced_subscribers` — over
 //! `owned_faces`, over that face's `remote_subs`, bucketing by `face.whatami` —
-//! and its queryable twin in the sibling `queries.rs`. A Session owns exactly ONE
-//! face, so the outer loop has exactly one iteration here; nothing else about the
-//! shape changes.
+//! and its queryable twin,
+//! `zenoh/src/net/routing/hat/client/queries.rs` @ `fn sourced_queryables`.
+//! A Session owns exactly ONE face, so the outer loop has exactly one iteration
+//! here; nothing else about the shape changes.
 //!
 //! ⚠ The bucketing rule is the CLIENT hat's three-way `match face.whatami`, NOT
-//! the peer hat's unconditional `srcs.peers.push` (`hat/peer/pubsub.rs`). Both
+//! the peer hat's unconditional `srcs.peers.push`
+//! (`zenoh/src/net/routing/hat/peer/pubsub.rs` @ `fn sourced_subscribers`). Both
 //! were read at the pin before choosing. The peer hat can push unconditionally
 //! because the faces its region owns are peers by construction; a Session's one
 //! face is whatever connected to it, so collapsing the three buckets here would
@@ -28,7 +30,8 @@
 //!
 //! The admin GET handler is STORED INSIDE the observer's queryable registry and
 //! is dispatched with `&mut ApplicationLayerObserver` held
-//! (`observer.rs` @ `self.queryables.dispatch_iteration_event`), so it can
+//! (`crates/wz-session-core/src/observer.rs` @
+//! `self.queryables.dispatch_iteration_event`), so it can
 //! neither borrow the observer back nor re-lock it. The router host solves the
 //! same problem with a live handle
 //! ([`RouterDeclarationsView`](crate::router_forward::RouterDeclarationsView))
@@ -70,7 +73,8 @@ pub(crate) struct AdminFace<'a> {
 ///
 /// A face whose role the INIT exchange never reported is recorded as a PEER —
 /// the same default the routing boundary applies to the same missing slot
-/// (`linkstate_forward` @ `fn peer_whatami_routing`), so the two places that must
+/// (`crates/wz-runtime-tokio/src/linkstate_forward.rs` @
+/// `fn peer_whatami_routing`), so the two places that must
 /// name a role for an unroled face name the same one.
 fn file_source(sources: &mut AdminSources, face: AdminFace<'_>) {
     match face.whatami {

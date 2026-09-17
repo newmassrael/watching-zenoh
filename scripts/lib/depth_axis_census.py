@@ -1609,7 +1609,23 @@ PIN_NO_SYMBOL = 2
 # the live 28-atom population reproduces 137 / 22 / 261 exactly -- which is what
 # `origin/main` reports, that tree still carrying the pre-regrade reason. The
 # live population without it is 130 / 22 / 254. 137 - 7 = 130.
-PIN_WZ_CITATIONS = 130
+# R2690 -- 130 -> 131. The atom is `adminspace-introspection-handlers`, whose
+# reason this round appended a clause to, and the +1 is ONE citation MOVING
+# BUCKETS rather than a new one arriving: the clause first named `observer.rs`
+# bare, which is a tracked file in TWO crates, so it scored ambiguous and pushed
+# AMBIGUOUS to 23 against its pin of 22. Rooting it to
+# `crates/wz-session-core/src/observer.rs` -- the fix this census prescribes,
+# against raising that pin -- resolves it to one tracked file, so AMBIGUOUS
+# falls back to 22 and this count takes the same citation instead. The two
+# numbers moved in opposite directions by one, in the same edit, which is what
+# says it is a move and not an addition. The R2360 note above records the same
+# bucket-shift from the other side -- a requote that LANDED in ambiguous -- and
+# was paid by DELETION, correctly: what it reproduced was a STALE citation, so
+# the corpus was better without it. This one is the opposite case. The citation
+# is live, it is load-bearing for the clause it sits in, and rooting it is what
+# the gate asks for; so the resolved count is where it belongs and this pin is
+# the one that moves.
+PIN_WZ_CITATIONS = 131
 # R2626 — 44 -> 42, and this one is worth a sentence because it HELD through
 # every earlier retirement in this run (R2612, R2622). `time-hlc`'s reason is the
 # first retiree carrying AMBIGUOUS citations of its own: its oldest clauses cite
