@@ -7680,8 +7680,9 @@ mod tests {
         );
 
         // The router's OWN hosted queryable is NOT a source of itself. The pin is
-        // explicit (`hat/router/pubsub.rs` @ `.filter(|router| router != &tables.zid)`),
-        // and it is why an isolated router answers these legs empty.
+        // explicit (`zenoh/src/net/routing/hat/router/pubsub.rs` @
+        // `.filter(|router| router != &tables.zid)`), and it is why an isolated
+        // router answers these legs empty.
         fwd.register_local_queryable("wz/self/hosted", true, Box::new(|_, _| {}));
         assert!(
             !flatten(fwd.admin_queryables())

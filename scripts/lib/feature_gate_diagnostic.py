@@ -366,7 +366,21 @@ DEFERRED: dict[str, dict[str, str]] = {
                 "adjudicates"
             )
             for f in (
-                "adminspace-introspection-handlers",
+                # R2686 — `adminspace-introspection-handlers` LEFT this list,
+                # by the very route the note below describes for its sibling,
+                # and the note is why this took one measurement rather than an
+                # argument. R2683 added `pub struct RouterDeclarationsView`
+                # under a bare `#[cfg(feature = "adminspace-introspection-
+                # handlers")]` at `crates/wz-runtime-tokio/src/router_forward.rs`
+                # — a MODULE-LEVEL site under a simple cfg, which is the shape
+                # `derived_probes` reads off the crate root. The deferral's
+                # claim, "it gates only METHODS inside `impl` blocks", became
+                # false the moment that type landed, and the gate said so by
+                # refusing: probed and deferred cannot both be true.
+                #
+                # ⚠ THE ROUND THAT MADE IT FALSE IS NOT THE ROUND FIXING IT.
+                # R2683 never pushed, so no gate ever graded its tree; this is
+                # the adopting round paying a ratchet it did not feed.
                 # R2684 — `adminspace-router-linkstate` is NOT here, and the
                 # round that nearly put it here records why. It left this
                 # package's `NO_PUBLIC_PATH` when `LinkstateForwarder::net_view`

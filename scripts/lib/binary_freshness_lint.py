@@ -183,7 +183,22 @@ REFUSAL_TOKENS = frozenset({"code", "success"})
 # legs are attribution twins that vary the ROUTER BUILD (`time-hlc` in or out)
 # and read their verdict from a foreign subscriber's stdout, so a demo not
 # rebuilt between the two builds makes a twin agree with the wrong binary.
-CARRIED_SUBJECT = 222
+#
+# 222 -> 221 (R2686), by the R2623 route a FOURTH time, and the repetition is
+# the argument for where the call goes. R2684 added a second fixture to
+# `wz_router_hat_adminspace_linkstate_interop.rs` with no freshness call and
+# this budget went 222 -> 223. Putting the call in the new test BODY would have
+# returned it to 222 and left the file's older fixture unchecked; putting it
+# where the file RESOLVES the binary -- a `demo_binary()` both spawners route
+# through -- took both legs out of the carried bucket at once. 223 measured,
+# 221 after.
+#
+# ⚠ THE ROUND THAT RAISED THIS IS NOT THE ROUND LOWERING IT. R2684 never
+# pushed, so no gate graded its tree and nobody saw the 223; R2686 adopted its
+# commits and pays the ratchet. That is the cost the stopped-round class
+# imposes, and it is invisible to every instrument except this one -- `cargo
+# test` cannot fail on a missing freshness call.
+CARRIED_SUBJECT = 221
 PROBE_ROUTE = 24
 REFUSAL_ONLY = 8
 

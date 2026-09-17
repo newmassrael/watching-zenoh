@@ -962,7 +962,23 @@ CITATION = re.compile(r"\b((?:[A-Za-z0-9_.-]+/)*[A-Za-z0-9_.-]+\.(?:rs|c|h))(?::
 # `reach_partition` run over the live population and over the same population
 # with this one atom's pre-regrade reason put back: 24 against 25, and the atom
 # is in the `reached` set of the second. The live gate then reported 24.
-PIN_REACHED = 24
+# R2686 -- 24 -> 23. The atom is `adminspace-router-linkstate`, graded COMPLETE
+# by R2685 (all four residuals closed: the config leg renders per GET, a plain
+# linkstate peer serves its own `linkstate/peers`, `StableGraph::map` preserves
+# the DOT node ids, and the router buckets declarations by their own tier). A
+# REACHED atom, so it leaves this count with the population; UNREACHED (3) and
+# NO_SYMBOL (2) hold, which is what makes the whole delta attributable to it.
+# MEASURED BY RE-INSERTION, and here the re-insertion is a real tree rather than
+# a simulation: `origin/main` still carries this atom's pre-regrade PARTIAL
+# reason, and the census run there reports 29 PARTIAL / 24 reached / 3 / 2
+# against this tree's 28 / 23 / 3 / 2. One atom, one bucket, no other movement.
+#
+# ⚠ THE ROUND THAT MOVED THE MEASUREMENT IS NOT THE ROUND MOVING THE PIN. R2685
+# never pushed, so no gate graded its tree; R2686 adopted its commits and pays
+# the ratchet. The pin rule ("a pin moves in the commit that moves the
+# measurement") is not weakened by that -- it is why the adopting round must
+# carry the explanation forward instead of just editing a number.
+PIN_REACHED = 23
 PIN_UNREACHED = 3
 PIN_NO_SYMBOL = 2
 # R2534 — 346 -> 347. The atom is `adminspace-metrics` and the citation is the
@@ -1583,7 +1599,17 @@ PIN_NO_SYMBOL = 2
 # population with and without that one atom -- never by diffing the totals,
 # which cannot say whose the fall is: the atom's pre-regrade reason alone scores
 # wz=1 / ambiguous=9 / upstream=4, and 138 - 1 = 137.
-PIN_WZ_CITATIONS = 137
+# R2686 -- 137 -> 130. The atom is `adminspace-router-linkstate`, graded
+# COMPLETE by R2685, and the 7 unique wz citations it contributed leave the
+# population WITH it. A POPULATION change, not a citation removal -- and as at
+# R2680, the reason GREW while leaving: the regrade appends to a 6965-byte body.
+# MEASURED with THIS FILE'S OWN `citation_audit` over the population with and
+# without that one atom, never by diffing the totals. The atom's PRE-REGRADE
+# reason alone scores wz=7 / ambiguous=0 / upstream=7, and re-inserting it into
+# the live 28-atom population reproduces 137 / 22 / 261 exactly -- which is what
+# `origin/main` reports, that tree still carrying the pre-regrade reason. The
+# live population without it is 130 / 22 / 254. 137 - 7 = 130.
+PIN_WZ_CITATIONS = 130
 # R2626 — 44 -> 42, and this one is worth a sentence because it HELD through
 # every earlier retirement in this run (R2612, R2622). `time-hlc`'s reason is the
 # first retiree carrying AMBIGUOUS citations of its own: its oldest clauses cite

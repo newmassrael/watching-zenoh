@@ -42,15 +42,28 @@ use std::process::{Command, Stdio};
 use std::time::Duration;
 
 use wz_integration_tests::common::{
-    graceful_terminate, read_captured, spawn_on_ephemeral_port, wait_for_substring,
-    wz_ap_demo_binary, ChildGuard,
+    assert_demo_binary_newer_than_sources, graceful_terminate, read_captured,
+    spawn_on_ephemeral_port, wait_for_substring, wz_ap_demo_binary, ChildGuard,
 };
+
+/// Resolve the demo binary and refuse a STALE one.
+///
+/// R2686 — the freshness check lives HERE, at the one place this file resolves
+/// the binary, rather than in each test body. Both spawners below route through
+/// it, so a fixture cannot be added to this file that silently measures a
+/// yesterday's build: the check is a property of resolving the path, not
+/// something each test has to remember.
+fn demo_binary() -> std::path::PathBuf {
+    let demo = wz_ap_demo_binary();
+    assert_demo_binary_newer_than_sources(&demo);
+    demo
+}
 
 /// Spawn a router-hat node (`--router-hat`) — presents wire `WhatAmI::Router`.
 fn spawn_router_hat(label: &str, args: &[&str]) -> (ChildGuard, File, u16) {
     let stderr = tempfile::tempfile().expect("tempfile for node stderr");
     spawn_on_ephemeral_port(
-        &wz_ap_demo_binary(),
+        &demo_binary(),
         args,
         "router-hat: listening on 127.0.0.1:",
         label,
@@ -65,7 +78,7 @@ fn spawn_session(label: &str, args: &[&str]) -> (ChildGuard, File) {
     let mut reader = stderr;
     let mut guard = ChildGuard::wrap(
         label.to_string(),
-        Command::new(wz_ap_demo_binary())
+        Command::new(demo_binary())
             .args(args)
             .env("RUST_LOG", "info")
             .stdout(Stdio::null())
