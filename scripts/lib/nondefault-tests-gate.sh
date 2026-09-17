@@ -151,6 +151,23 @@ LEGS=(
     # `zenoh_config::` is the module the two instruments live in; the filter is
     # the module path so a test ADDED there is covered without touching this row.
     "wz-runtime-tokio|hook|zenoh-config|zenoh_config::"
+    # ── R2678 — session-close-ingress ──
+    #
+    # This row is REQUIRED for the atom's grade to mean anything, and the
+    # reason is worth stating because it is easy to ship without it: both
+    # features are non-default, so the changed-crate gate (default features)
+    # compiles the witness file to NOTHING, and no hosted lane turned either
+    # one on. Without this row the tests exist, pass when run by hand, and are
+    # executed by no lane at all -- a green backed by a population of zero.
+    #
+    # `switchboard` rides along because the ingress IS a switchboard target:
+    # the registry that matches the keyexpr is `alloc` + `switchboard` gated,
+    # so the seam cannot be exercised end to end without it.
+    #
+    # The filter is the atom's own name, and every test in the file carries it
+    # as a prefix on purpose -- a test ADDED there is covered without touching
+    # this row, which is the property the config rows above were chosen for.
+    "wz-runtime-tokio|hook|session-close-ingress,switchboard|session_close_ingress"
     # The demo's half of the same surface. Its
     # `a_key_that_is_read_while_reaching_nothing_is_not_reported_as_applied` is a
     # ZERO-POPULATION guard over the keys this build drops, which is exactly why

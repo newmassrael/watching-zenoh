@@ -48,7 +48,7 @@ const CLOSE_KEYEXPR: &str = "@/wz/session/close";
 
 /// The event name as the SCXML document spells it. Written here ONCE and
 /// checked against the machine's own mapping by
-/// `the_ingress_reads_the_event_name_off_the_machine` below, so this literal
+/// `session_close_ingress_reads_the_name_off_the_machine` below, so this literal
 /// cannot drift away from the document without a test saying so.
 const CLOSE_EVENT: &str = "session.close";
 
@@ -109,7 +109,7 @@ fn established_session() -> (
 }
 
 #[test]
-fn a_mapped_rail_message_closes_a_running_session() {
+fn session_close_ingress_closes_a_running_session() {
     let (actions, mut engine) = established_session();
     let mut observer = ApplicationLayerObserver::new();
     observer.switchboard.register(CLOSE_KEYEXPR, CLOSE_EVENT);
@@ -155,7 +155,7 @@ fn a_mapped_rail_message_closes_a_running_session() {
 }
 
 #[test]
-fn an_unmapped_rail_message_leaves_the_session_running() {
+fn session_close_ingress_leaves_an_unmapped_message_alone() {
     let (actions, mut engine) = established_session();
     let mut observer = ApplicationLayerObserver::new();
     observer.switchboard.register(CLOSE_KEYEXPR, CLOSE_EVENT);
@@ -178,7 +178,7 @@ fn an_unmapped_rail_message_leaves_the_session_running() {
 }
 
 #[test]
-fn the_request_slot_is_set_once_and_taken_once() {
+fn session_close_ingress_request_is_set_once_and_taken_once() {
     let (actions, _engine) = established_session();
 
     // Nothing standing to begin with.
@@ -197,7 +197,7 @@ fn the_request_slot_is_set_once_and_taken_once() {
 }
 
 #[test]
-fn the_ingress_reads_the_event_name_off_the_machine() {
+fn session_close_ingress_reads_the_name_off_the_machine() {
     use sce_rust_runtime::StatePolicy;
     type P = SessionFsmUnicastPolicy<SessionActionsBinding>;
 
