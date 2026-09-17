@@ -519,36 +519,6 @@ pub struct LinkstateForwarder {
     /// queryable querier's write-filter deactivates, and a completeness flip
     /// re-pushes the same id. Same OBLIGATION-1 purge as `future_subs`.
     future_qabls: RefCell<FutureQablStore>,
-    /// R2694 (§5.23) — a MESH face's declared FUTURE interest, per plane
-    /// (`[subs, qabls]`), recorded for ONE consumer: the `publisher` / `querier`
-    /// admin legs' `peers` bucket.
-    ///
-    /// ⛔ THIS IS DELIBERATELY NOT `future_subs` WIDENED, and the reason is that
-    /// the other store's membership is a BEHAVIOUR rather than a ledger:
-    /// [`push_future_subscription`](Self::push_future_subscription) sends a real
-    /// `Declare(DeclareSubscriber)` to every face in it. Its `is_client` gate is
-    /// upstream-faithful for that job — zenoh pushes future subs to
-    /// `whatami == Client` faces — and the mesh plane is already serviced by
-    /// `flood_to_tree_children`, so admitting mesh faces there would emit
-    /// DUPLICATE declarations. Fixing a REPORT by changing the data plane is the
-    /// trade this field exists to refuse.
-    ///
-    /// Upstream has no separate table because its peer hat reads the SAME
-    /// `remote_interests` for both purposes, its push side being scoped
-    /// elsewhere. The fact is real either way: a zenoh peer meshing with wz sends
-    /// a `CurrentFuture` Interest per south-hat interest when the face opens
-    /// (`zenoh/src/net/routing/hat/peer/interests.rs` @
-    /// `fn repropagate_interests`), and a zenoh node in this position reports it
-    /// under `peers` (`zenoh/src/net/routing/hat/peer/pubsub.rs` @
-    /// `fn sourced_publishers`).
-    ///
-    /// A keyexpr SET per face, not a per-interest list: the fold dedups within a
-    /// bucket anyway, so two interests in one target name the face once either
-    /// way. Purged with the two stores above in
-    /// [`deregister`](FaceForwarder::deregister) — a departed peer publishes
-    /// nothing.
-    #[cfg(feature = "adminspace-introspection-handlers")]
-    peer_future_interests: [RefCell<HashMap<FaceId, HashSet<String>>>; 2],
     /// The pending-query RETURN table (query-routing atom 3): the
     /// per-outbound-face `out qid -> (inbound face, inbound rid)` map that routes
     /// a routed Query's `Response` / `ResponseFinal` BACK to the querier — the wz
@@ -1090,8 +1060,6 @@ impl LinkstateForwarder {
             client_qabls: RefCell::new(HashMap::new()),
             future_subs: RefCell::new(FutureSubStore::new()),
             future_qabls: RefCell::new(FutureQablStore::new()),
-            #[cfg(feature = "adminspace-introspection-handlers")]
-            peer_future_interests: [RefCell::new(HashMap::new()), RefCell::new(HashMap::new())],
             pending: RefCell::new(PendingQueries::new()),
             #[cfg(feature = "routing-interest-pending-gc")]
             pending_interests: RefCell::new(PendingCurrentInterests::new()),
@@ -3010,16 +2978,29 @@ impl LinkstateForwarder {
         Self::order_sources(by_key)
     }
 
-    /// The `(face, keyexpr)` pairs a MESH face declared interest in on `plane`
-    /// (0 = subs, 1 = qabls) — the `peers` input to
-    /// [`bucket_interest_tiers`](Self::bucket_interest_tiers).
+    /// Split one plane's interest store into its `(clients, peers)` inputs for
+    /// [`bucket_interest_tiers`](Self::bucket_interest_tiers), by the role each
+    /// face holds its entry under.
+    ///
+    /// ONE walk over ONE store, because there is one store: the role tag is what
+    /// used to be a second table, and partitioning here is the whole of what that
+    /// table did for the reader.
     #[cfg(feature = "adminspace-introspection-handlers")]
-    fn peer_interest_entries(&self, plane: usize) -> Vec<(FaceId, String)> {
-        self.peer_future_interests[plane]
-            .borrow()
-            .iter()
-            .flat_map(|(face, keys)| keys.iter().map(move |ke| (*face, ke.clone())))
-            .collect()
+    #[allow(clippy::type_complexity)]
+    fn split_interest_entries<V: Copy + PartialEq>(
+        store: &crate::future_interest::FutureInterestStore<V>,
+    ) -> (Vec<(FaceId, String)>, Vec<(FaceId, String)>) {
+        use crate::future_interest::InterestOrigin;
+
+        let mut clients = Vec::new();
+        let mut peers = Vec::new();
+        for (face, target, origin) in store.iter_interests() {
+            match origin {
+                InterestOrigin::Client => clients.push((face, target.to_owned())),
+                InterestOrigin::Mesh => peers.push((face, target.to_owned())),
+            }
+        }
+        (clients, peers)
     }
 
     /// R2684 (§5.23 `adminspace-router-linkstate`) — a read-only
@@ -3135,21 +3116,20 @@ impl LinkstateForwarder {
     /// keeps a SEPARATE store per plane and the admission already applied
     /// `body.su()`.
     ///
-    /// TWO TIERS, from two records, because one table could not hold both. The
-    /// client tier is `future_subs`, whose membership doubles as a PUSH target
-    /// list; the peer tier is
-    /// [`peer_future_interests`](Self#structfield.peer_future_interests), which
-    /// exists precisely so this leg can report a mesh face without enrolling it
-    /// for pushes. See that field for why widening the first was the wrong repair.
+    /// TWO TIERS out of ONE store, split by the role each face holds its entry
+    /// under (`InterestOrigin`). A CLIENT face's interest is a `clients` source
+    /// and a MESH face's a `peers` one, which is the split upstream gets from
+    /// which HAT owns the face — the broker hat pushes `.clients`
+    /// (`zenoh/src/net/routing/hat/broker/pubsub.rs` @ `fn sourced_publishers`)
+    /// and the peer hat `.peers`.
+    ///
+    /// ⚠ The mesh role is recorded for THIS LEG ALONE and never enrolls the face
+    /// for pushes — see `FutureInterestStore::push_faces_mut`, which is the one
+    /// place that distinction is enforced.
     #[cfg(feature = "adminspace-introspection-handlers")]
     pub fn publisher_sources(&self) -> Vec<(String, wz_session_core::adminspace::AdminSources)> {
-        let clients: Vec<(FaceId, String)> = self
-            .future_subs
-            .borrow()
-            .iter_interests()
-            .map(|(face, target)| (face, target.to_owned()))
-            .collect();
-        self.bucket_interest_tiers(&clients, &self.peer_interest_entries(0))
+        let (clients, peers) = Self::split_interest_entries(&self.future_subs.borrow());
+        self.bucket_interest_tiers(&clients, &peers)
     }
 
     /// The queriers this node knows (`@/<zid>/<whatami>/querier/**` admin
@@ -3168,17 +3148,12 @@ impl LinkstateForwarder {
     /// kind, never a per-declaration info — the same reduction
     /// [`queryable_sources`](Self::queryable_sources) makes.
     ///
-    /// Two tiers for the same reason as the publisher twin, reading plane 1 of
-    /// the mesh record where that reads plane 0.
+    /// Two tiers for the same reason as the publisher twin, reading the QABL
+    /// plane's store where that reads the SUBS one.
     #[cfg(feature = "adminspace-introspection-handlers")]
     pub fn querier_sources(&self) -> Vec<(String, wz_session_core::adminspace::AdminSources)> {
-        let clients: Vec<(FaceId, String)> = self
-            .future_qabls
-            .borrow()
-            .iter_interests()
-            .map(|(face, target)| (face, target.to_owned()))
-            .collect();
-        self.bucket_interest_tiers(&clients, &self.peer_interest_entries(1))
+        let (clients, peers) = Self::split_interest_entries(&self.future_qabls.borrow());
+        self.bucket_interest_tiers(&clients, &peers)
     }
 
     /// R311y473 — the held faces as the adminspace `sessions[]` array: the
@@ -5281,26 +5256,39 @@ impl LinkstateForwarder {
                 );
             }
         }
-        // R2694 (§5.23) — the ADMIN-only record of a MESH face's future interest,
-        // the `peers` half of the publisher / querier legs. Same three conditions
-        // as the two stores above with the face role INVERTED, because this is the
-        // case they decline: `interest.f()` (upstream registers an interest only
-        // when `msg.mode.is_future()`), the plane bit, and a resolved literal
-        // target (upstream's `filter_map` on `i.res` drops a match-all). Nothing
-        // reads this but the admin fold, so no declaration is emitted for it and
-        // the push tables are untouched — see the field doc for why that
-        // separation is the point rather than an optimization.
+        // R2694 (§5.23) — the MESH face's future interest, the `peers` half of the
+        // publisher / querier legs. Same three conditions as the two stores above
+        // with the face role INVERTED, because this is the case they decline:
+        // `interest.f()` (upstream registers an interest only when
+        // `msg.mode.is_future()`), the plane bit, and a resolved literal target
+        // (upstream's `filter_map` on `i.res` drops a match-all).
+        //
+        // It lands in the SAME store under the `Mesh` role rather than a table of
+        // its own, which is what keeps its lifecycle correct for free: the
+        // `Interest(Final)` arm at the top of this function already calls
+        // `remove_interest` on both planes, `deregister` already calls
+        // `purge_face`, and the `interest_id` key already makes a re-declare
+        // last-wins. A second table had none of those and got two of them wrong.
         #[cfg(feature = "adminspace-introspection-handlers")]
         if interest.f() && !is_client {
             if let Some(t) = target.as_deref() {
-                for (plane, wanted) in [(0usize, body.su()), (1usize, body.qu())] {
-                    if wanted {
-                        self.peer_future_interests[plane]
-                            .borrow_mut()
-                            .entry(inbound)
-                            .or_default()
-                            .insert(t.to_owned());
-                    }
+                if body.su() {
+                    self.future_subs.borrow_mut().store_reporting_only_interest(
+                        inbound,
+                        interest_id,
+                        t.to_owned(),
+                        aggregate,
+                    );
+                }
+                if body.qu() {
+                    self.future_qabls
+                        .borrow_mut()
+                        .store_reporting_only_interest(
+                            inbound,
+                            interest_id,
+                            t.to_owned(),
+                            aggregate,
+                        );
                 }
             }
         }
@@ -6783,16 +6771,13 @@ impl FaceForwarder for LinkstateForwarder {
         // the router's OBLIGATION-1 client-leaf purge. pico clears its own
         // write-filter targets on the transport drop (filtering.c
         // CONNECTION_DROPPED), so no undeclare is owed.
+        // R2694 — this also purges the MESH-role entries the admin `publisher` /
+        // `querier` legs read, because they live in these same two stores. A
+        // departed peer publishes nothing, and an admin answer that goes on
+        // naming it is the departed-peer-outlives-its-link shape this tree has
+        // now paid for on three planes.
         self.future_subs.borrow_mut().purge_face(id);
         self.future_qabls.borrow_mut().purge_face(id);
-        // R2694 — the admin-only mesh-face interest record leaves with the face
-        // for the same reason: a departed peer publishes nothing, and an admin
-        // answer that goes on naming it is the departed-peer-outlives-its-link
-        // shape this tree has now paid for on three planes.
-        #[cfg(feature = "adminspace-introspection-handlers")]
-        for plane in &self.peer_future_interests {
-            plane.borrow_mut().remove(&id);
-        }
         // R311y163 (D4) — purge this face's co-attached CLIENT subscriptions (leaf
         // store) UNCONDITIONALLY, before the graph teardown below, and for each
         // keyexpr it was the LAST source of (no surviving client or self-native
@@ -8220,7 +8205,7 @@ mod tests {
         use wz_session_core::zid_hex::zid_to_zenoh_hex;
 
         let fwd = LinkstateForwarder::new(zid(0x05), WhatAmI::Peer);
-        let (mesh, _sm) = peer_face(zid(0x0A));
+        let (mesh, sm) = peer_face(zid(0x0A));
         let (client_c, _sc) = peer_face_whatami(zid(0x0C), 2);
         fwd.register(FaceId(0), &mesh);
         fwd.register(FaceId(1), &client_c);
@@ -8261,14 +8246,26 @@ mod tests {
             "a client face's interest is a CLIENT-tier querier source"
         );
 
-        // The push store never saw the mesh face. Were the repair a widened
-        // `is_client` instead, this would read 1 and the mesh neighbour would be
-        // getting `DeclareSubscriber`s the flood already sends it.
+        // THE INVARIANT ITSELF, not a proxy for it. An earlier version asserted
+        // `future_subs.face_count() == 0` — absence from a table standing in for
+        // absence of behaviour. That reads 1 now (the mesh face IS in the store,
+        // under the `Mesh` role) while the property that matters is unchanged, so
+        // the assertion has to be the property.
+        //
+        // ⚠ And the property is NO DUPLICATE, not NO FRAME — asserting zero here
+        // failed, correctly, because `declare_subscription` floods to mesh
+        // children and that ONE frame is `flood_to_tree_children` doing its job.
+        // The defect a widened role would cause is the SECOND frame: the flood
+        // plus a future-push of the same declaration. So `1` is the whole claim,
+        // and `2` is what a lost filter looks like.
+        sm.reset();
+        let _ = fwd.declare_subscription("mesh/pub");
         assert_eq!(
-            fwd.future_subs.borrow().face_count(),
-            0,
-            "the mesh face was recorded for the admin leg only, not enrolled as \
-             a future-push target"
+            sm.frame_count(),
+            1,
+            "the mesh face gets the FLOOD and nothing else: a face recorded for \
+             the admin leg must not also be a future-push target, which would \
+             declare the same subscriber to it twice"
         );
 
         // And it leaves with the face: a departed peer publishes nothing.
@@ -8279,10 +8276,65 @@ mod tests {
         );
     }
 
+    /// R2694 — the mesh record's LIFECYCLE, which is the half the first attempt
+    /// got wrong and the reason the two records became one.
+    ///
+    /// Both cases below are the SAME root — the interest id — and neither is
+    /// reachable by the other's path, which is why both are asserted:
+    ///
+    /// * `Interest(Final)` CANCELS. Upstream removes by id
+    ///   (`zenoh/src/net/routing/hat/peer/interests.rs` @ `fn unregister_interest`)
+    ///   and stops naming the face. A face→keyexpr SET cannot express that, so
+    ///   the first attempt reported a cancelled publisher until the face died.
+    /// * A RE-DECLARE of the same id REPLACES. `store_interest`'s contract is
+    ///   last-wins, so upstream reports only the new target; a SET accumulates
+    ///   and reports both forever — and this one needs no Final at all, so a
+    ///   cancel-shaped witness never touches it.
+    #[cfg(feature = "adminspace-introspection-handlers")]
+    #[test]
+    fn admin_publisher_sources_follow_a_mesh_interests_cancel_and_replace() {
+        use wz_session_core::zid_hex::zid_to_zenoh_hex;
+
+        let fwd = LinkstateForwarder::new(zid(0x05), WhatAmI::Peer);
+        let (mesh, _sm) = peer_face(zid(0x0A));
+        fwd.register(FaceId(0), &mesh);
+        advertise_link_back(&fwd, FaceId(0), 0x0A, 0x05);
+        let mesh_hex = zid_to_zenoh_hex(zid(0x0A).as_slice());
+
+        // REPLACE: the same interest id, a different target.
+        forward_one(
+            &fwd,
+            FaceId(0),
+            interest_with_mode(21, "mesh/first", false, true, true, false, false),
+        );
+        forward_one(
+            &fwd,
+            FaceId(0),
+            interest_with_mode(21, "mesh/second", false, true, true, false, false),
+        );
+        assert_eq!(
+            flatten_sources(fwd.publisher_sources()),
+            vec![("mesh/second".to_string(), vec![], vec![mesh_hex], vec![])],
+            "a re-declare of one id REPLACES its target; the old one must not \
+             survive alongside it"
+        );
+
+        // CANCEL: an Interest(Final) carrying neither C nor F.
+        forward_one(
+            &fwd,
+            FaceId(0),
+            interest_with_mode(21, "mesh/second", false, false, true, false, false),
+        );
+        assert!(
+            fwd.publisher_sources().is_empty(),
+            "a cancelled interest is no longer a publisher source"
+        );
+    }
+
     /// R2694 — the fold reads what the face ASKED FOR, never what this node
     /// DECLARED BACK.
     ///
-    /// `ClientFutureInterests` holds both facts side by side — `interests` and
+    /// `FaceFutureInterests` holds both facts side by side — `interests` and
     /// `pushed` — and a publisher leg folded from `pushed` would answer this
     /// node's OWN declarations back as the remote's publishers, with a plausible
     /// non-empty body. Upstream folds `remote_interests`, whose wz counterpart is

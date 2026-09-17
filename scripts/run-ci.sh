@@ -6802,8 +6802,9 @@ layer_c1am_cargo_test_adminspace() {
     # hole: written, green by hand, executed by nothing. Number PRINTED by the
     # command, not counted off the diff.
     # R2694 — 10 -> 13, the three `admin_publisher_sources_*` witnesses of the
-    # publisher / querier legs. PRINTED by the command, as the note above says.
-    _runci_guarded_test "C1AM peer introspection admin_ 13" 13 \
+    # publisher / querier legs, then 13 -> 14 for the mesh-interest lifecycle
+    # witness (cancel + replace). PRINTED by the command, as the note above says.
+    _runci_guarded_test "C1AM peer introspection admin_ 14" 14 \
         cargo test -p wz-runtime-tokio --features routing-peer,adminspace-introspection-handlers --lib admin_ --quiet || return 1
     # The router half of the same hole, found by asking the question of the twin
     # rather than only of the test this round wrote: R2685's
@@ -6816,7 +6817,9 @@ layer_c1am_cargo_test_adminspace() {
     # new `admin_` test is the router token leg, which is `routing-token-tables`
     # gated and so is NOT in this build — which is why this moves by three and
     # not by four, and why the number is taken from the run and not the diff.
-    _runci_guarded_test "C1AM router introspection admin_ 16" 16 \
+    # Then 16 -> 17 for the mesh-interest lifecycle witness, which lands on BOTH
+    # legs for that same implication.
+    _runci_guarded_test "C1AM router introspection admin_ 17" 17 \
         cargo test -p wz-runtime-tokio --features routing-router-hat,adminspace-introspection-handlers --lib admin_ --quiet || return 1
     (cd crates \
         && cargo clippy -p wz-runtime-tokio --all-targets --features adminspace-core,query-get --quiet -- -D warnings \

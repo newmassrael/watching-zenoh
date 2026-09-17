@@ -99,11 +99,39 @@ struct FutureInterest {
     aggregate: bool,
 }
 
-/// One CLIENT face's FUTURE interests + the declarations already pushed to it. See
+/// Which ROLE a face holds this store's entry under, and therefore whether the
+/// push paths may reach it.
+///
+/// R2694 — upstream keeps ONE `remote_interests` per face and scopes its pushing
+/// elsewhere; this enum is how wz says the same thing in one table. Before it,
+/// mesh-face interests lived in a SECOND record beside this one, and the
+/// duplicate lifecycle is what broke: that record could neither remove on
+/// `Interest(Final)` nor replace on a re-declare, because it had thrown the
+/// interest id away. Folding it in here makes all three of those operations the
+/// ones this type already implements.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InterestOrigin {
+    /// A CLIENT face. Push paths reach it: zenoh pushes future declarations to
+    /// `whatami == Client` faces, which is what those paths implement.
+    Client,
+    /// A MESH face, recorded for ADMIN REPORTING ONLY (§5.23's `publisher` /
+    /// `querier` legs).
+    ///
+    /// ⛔ Push paths must NOT reach it. The mesh plane is already serviced by
+    /// `flood_to_tree_children`, so pushing here would emit a DUPLICATE
+    /// declaration — which is why this is a role tag rather than a widening of
+    /// the admission's `is_client` gate. Fixing a REPORT by changing the data
+    /// plane is the trade this distinction exists to refuse.
+    Mesh,
+}
+
+/// One face's FUTURE interests + the declarations already pushed to it. See
 /// the module docs for the zenoh mapping. `V` is `()` for subs, [`QueryableInfo`]
 /// for queryables.
 #[derive(Debug)]
-struct ClientFutureInterests<V> {
+struct FaceFutureInterests<V> {
+    /// Whether the push paths may reach this face — see [`InterestOrigin`].
+    origin: InterestOrigin,
     /// Declared FUTURE interests, keyed by the soliciting `interest_id`.
     interests: HashMap<u64, FutureInterest>,
     /// `reply keyexpr -> (decl id declared to this face, last-declared value)`
@@ -118,10 +146,13 @@ struct ClientFutureInterests<V> {
 }
 
 // A manual `Default` (deriving it would demand `V: Default`, which is not needed —
-// an empty store holds no value).
-impl<V> Default for ClientFutureInterests<V> {
+// an empty store holds no value). `Client` is the default ROLE because it is the
+// one the push paths may reach: a face whose role was never stated must not
+// silently become admin-only and lose its pushes.
+impl<V> Default for FaceFutureInterests<V> {
     fn default() -> Self {
         Self {
+            origin: InterestOrigin::Client,
             interests: HashMap::new(),
             pushed: HashMap::new(),
             next_id: 0,
@@ -129,7 +160,7 @@ impl<V> Default for ClientFutureInterests<V> {
     }
 }
 
-impl<V: Copy + PartialEq> ClientFutureInterests<V> {
+impl<V: Copy + PartialEq> FaceFutureInterests<V> {
     /// Get-or-allocate the decl id for `reply_ke` carrying `value`, returning
     /// `(id, should_push)`. `should_push` is `true` when the reply ke is NEW (first
     /// declaration) or its value CHANGED (a value-aware re-push, same id, updated
@@ -157,11 +188,14 @@ impl<V: Copy + PartialEq> ClientFutureInterests<V> {
 
 /// The per-forwarder FUTURE-mode declare-interest store — the wz analogue of
 /// zenoh's per-`FaceState` `remote_interests` + `face_hat.local_subs`/`local_qabls`,
-/// keyed by the CLIENT [`FaceId`]. Both forwarders (router + peer) own one per plane
+/// keyed by [`FaceId`]. Both forwarders (router + peer) own one per plane
 /// ([`FutureSubStore`] + [`FutureQablStore`]); the store logic is shared here.
+///
+/// Holds BOTH roles — see [`InterestOrigin`]. The push paths walk only the
+/// `Client` ones, through the single private `push_faces_mut` filter.
 #[derive(Debug)]
 pub struct FutureInterestStore<V> {
-    by_face: HashMap<FaceId, ClientFutureInterests<V>>,
+    by_face: HashMap<FaceId, FaceFutureInterests<V>>,
 }
 
 impl<V> Default for FutureInterestStore<V> {
@@ -178,6 +212,25 @@ impl<V: Copy + PartialEq> FutureInterestStore<V> {
         Self::default()
     }
 
+    /// Every face whose entry the PUSH paths may reach, mutably — the walk
+    /// [`pushes_for_new`](Self::pushes_for_new),
+    /// [`forgets_for_withdrawn`](Self::forgets_for_withdrawn) and
+    /// [`re_pushes_for_withdrawn`](Self::re_pushes_for_withdrawn) share.
+    ///
+    /// ⛔ THOSE THREE MUST GO THROUGH THIS, never `by_face` directly, and
+    /// `by_face` is private so that they can be made to. A fourth push walker
+    /// added later reaches for this by construction — which is the point: the
+    /// role filter lives in ONE place instead of being an `if` each caller has
+    /// to remember. Forgetting it would put a mesh face on a push path and emit
+    /// duplicate declarations onto a plane `flood_to_tree_children` already
+    /// serves, which is a DATA-plane fault, strictly worse than the reporting
+    /// gap this whole arrangement exists to close.
+    fn push_faces_mut(&mut self) -> impl Iterator<Item = (&FaceId, &mut FaceFutureInterests<V>)> {
+        self.by_face
+            .iter_mut()
+            .filter(|(_, state)| state.origin == InterestOrigin::Client)
+    }
+
     /// Record a CLIENT face's FUTURE interest for `target` (a resolved literal; a
     /// match-all interest is not stored — see the module docs). Keyed by
     /// `interest_id`; a re-declare of the same id is last-wins.
@@ -191,6 +244,31 @@ impl<V: Copy + PartialEq> FutureInterestStore<V> {
         self.by_face
             .entry(face)
             .or_default()
+            .interests
+            .insert(interest_id, FutureInterest { target, aggregate });
+    }
+
+    /// Record a MESH face's FUTURE interest, for ADMIN REPORTING ONLY (R2694).
+    ///
+    /// Identical bookkeeping to [`store_interest`](Self::store_interest) — same
+    /// `interest_id` key, so the same last-wins replace and the same
+    /// [`remove_interest`](Self::remove_interest) teardown apply — and it differs
+    /// ONLY in the role it stamps, which keeps the face off every push path.
+    ///
+    /// ⚠ A SEPARATE METHOD rather than a `bool` on the one above, deliberately:
+    /// `store_interest(face, id, t, agg, true)` tells a reader nothing at the
+    /// call site, and the call sites are exactly where the distinction has to be
+    /// obvious. The two admissions sit a dozen lines apart in the same function.
+    pub fn store_reporting_only_interest(
+        &mut self,
+        face: FaceId,
+        interest_id: u64,
+        target: String,
+        aggregate: bool,
+    ) {
+        let state = self.by_face.entry(face).or_default();
+        state.origin = InterestOrigin::Mesh;
+        state
             .interests
             .insert(interest_id, FutureInterest { target, aggregate });
     }
@@ -242,7 +320,7 @@ impl<V: Copy + PartialEq> FutureInterestStore<V> {
         value_of: F,
     ) -> Vec<(FaceId, String, u64, V)> {
         let mut out = Vec::new();
-        for (face, state) in self.by_face.iter_mut() {
+        for (face, state) in self.push_faces_mut() {
             if origin == Some(*face) {
                 continue; // never echo a declaration back to the face that sourced it
             }
@@ -330,7 +408,7 @@ impl<V: Copy + PartialEq> FutureInterestStore<V> {
         still_backed: B,
     ) -> Vec<(FaceId, String, u64)> {
         let mut out = Vec::new();
-        for (face, state) in self.by_face.iter_mut() {
+        for (face, state) in self.push_faces_mut() {
             // Select the pushed reply kes the withdrawal could have un-backed (the
             // withdrawn ke intersects the reply ke) that are now unbacked — collect
             // before mutating `pushed` (the read borrow can't overlap the remove).
@@ -385,7 +463,7 @@ impl<V: Copy + PartialEq> FutureInterestStore<V> {
         value_of: F,
     ) -> Vec<(FaceId, String, u64, V)> {
         let mut out = Vec::new();
-        for (face, state) in self.by_face.iter_mut() {
+        for (face, state) in self.push_faces_mut() {
             // Collect the still-present pushed reply kes intersecting withdrawn_ke
             // BEFORE interning (the read borrow of `pushed` cannot overlap `intern`'s
             // mutable borrow) — the same collect-then-intern shape as `pushes_for_new`.
@@ -436,12 +514,20 @@ impl<V: Copy + PartialEq> FutureInterestStore<V> {
     /// its zid twice, exactly as upstream's `remote_interests.values()` push does.
     /// The admin fold dedups per bucket after bucketing, which is where one SOURCE
     /// is decided, so collapsing here would silently pre-empt that decision.
-    pub fn iter_interests(&self) -> impl Iterator<Item = (FaceId, &str)> + '_ {
+    ///
+    /// Yields BOTH roles, each tagged with its [`InterestOrigin`], because the
+    /// admin fold needs exactly that to bucket: a `Client` face is a `clients`
+    /// source and a `Mesh` face a `peers` one. Upstream draws the same line by
+    /// which HAT owns the face — the broker hat pushes `.clients`, the peer hat
+    /// `.peers` — so the tag is this store's way of carrying a fact wz has no
+    /// hats to carry for it.
+    pub fn iter_interests(&self) -> impl Iterator<Item = (FaceId, &str, InterestOrigin)> + '_ {
         self.by_face.iter().flat_map(|(face, state)| {
+            let origin = state.origin;
             state
                 .interests
                 .values()
-                .map(move |i| (*face, i.target.as_str()))
+                .map(move |i| (*face, i.target.as_str(), origin))
         })
     }
 
