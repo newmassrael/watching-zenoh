@@ -582,6 +582,16 @@ session-unicast = ["dep:sce-rust-runtime"]
 session-unicast-open = []
 session-unicast-accept = []
 
+# session-close-ingress — a rail message can close a RUNNING session. The
+# ingress (a keyexpr matcher) and the session FSM engine live in two different
+# ownership domains and never meet: the matcher runs under the observer lock on
+# the session handle, the engine is owned by the drive loop. This feature is the
+# seam between them — a take-once request on the shared `SessionCore` that the
+# ingress stages and `drive::check_requested_close` drains, beside the lease
+# comparator that is its only production peer. Shared by AP and MCU because both
+# live in this crate.
+session-close-ingress = []
+
 # session-extauth — the Z_EXT_AUTH establishment extension (catalog
 # §5.4 session, zenoh init.rs:156 / open.rs:121 `zextzbuf!(0x3, false)`).
 # Gates the `extauth` codec module (the wire-ext envelope on Init / Open).

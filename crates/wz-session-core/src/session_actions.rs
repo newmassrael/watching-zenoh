@@ -503,6 +503,29 @@ pub struct SessionCore<R: SessionRuntime, T: TimeSource> {
     /// [`Self::stats_report`]. Off by default (the adminspace consumer is P4).
     #[cfg(feature = "transport-stats")]
     pub stats: crate::stats::TransportStats,
+    /// R2678 (`session-close-ingress`) — a take-once request to close THIS
+    /// session, raised by an ingress that cannot reach the FSM engine.
+    ///
+    /// It exists because the two halves of that sentence are owned by different
+    /// things and never meet. The keyexpr matcher runs under the observer lock
+    /// on the `Session` handle, which does not hold the engine; the engine is
+    /// moved into the drive loop and borrowed `&mut` there for its whole life.
+    /// Widening the loop's `on_event` hook to lend the engine out would hand
+    /// every application callback the authority to drive the session's state
+    /// machine, which is not that hook's subject — so the request travels as
+    /// DATA and the raise stays where the engine already is
+    /// ([`crate::drive::check_requested_close`], the peer of
+    /// [`crate::drive::check_lease_deadline`]).
+    ///
+    /// Per SESSION rather than per link, unlike
+    /// [`LinkState::pending_batch`](LinkState): a close ends the session, and
+    /// an aggregated session's second link must not be able to survive it.
+    ///
+    /// Behind `R::Mutex` rather than an atomic for the reason the whole struct
+    /// gives: ARMv6-M has no `target_has_atomic = "ptr"` and every other
+    /// set-once slot here uses the same seam.
+    #[cfg(feature = "session-close-ingress")]
+    pub requested_close: R::Mutex<bool>,
     pub params: SessionInitParams,
     /// The largest message this profile can REASSEMBLE, in bytes — the TX
     /// twin of the RX reassembly slot `CAP`. A fragment chain longer than
@@ -1659,6 +1682,10 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             core: R::share(SessionCore {
                 #[cfg(feature = "transport-stats")]
                 stats: crate::stats::TransportStats::default(),
+                // Nobody has asked this session to close; the ingress is the
+                // only writer and it has not run yet.
+                #[cfg(feature = "session-close-ingress")]
+                requested_close: R::new_mutex(false),
                 params,
                 // "No cap" until a host declares one — a profile that never
                 // configures its reassembly bound keeps the prior behavior.
@@ -4281,6 +4308,37 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// R311y632 (§17) — take the parked remainder, if any.
     pub fn take_pending_batch(&self) -> Option<Vec<u8>> {
         R::with_mutex_mut(&self.link.pending_batch, |slot| slot.take())
+    }
+
+    /// R2678 (`session-close-ingress`) — ask this session to close.
+    ///
+    /// Sets the request; it is the drive loop that acts on it, through
+    /// [`crate::drive::check_requested_close`]. Idempotent by construction: a
+    /// second request before the loop drains changes nothing, because the
+    /// session can only be closed once and the slot records "asked", not "how
+    /// many times".
+    ///
+    /// The caller is an ingress with no access to the FSM engine — see
+    /// [`SessionCore::requested_close`] for why that separation is deliberate
+    /// rather than incidental.
+    #[cfg(feature = "session-close-ingress")]
+    pub fn request_close(&self) {
+        R::with_mutex_mut(&self.core.requested_close, |slot| *slot = true);
+    }
+
+    /// R2678 — take the close request, if one is standing.
+    ///
+    /// Take-once, the same shape as [`Self::take_pending_batch`]: the drive
+    /// loop drains it and raises the FSM event, and a later iteration must not
+    /// raise it again. `SessionClose` is idempotent in the machine (Closing has
+    /// no `session.close` transition), but a slot that kept returning `true`
+    /// would make every subsequent iteration do work for a session that is
+    /// already on its way out.
+    #[cfg(feature = "session-close-ingress")]
+    pub fn take_requested_close(&self) -> bool {
+        R::with_mutex_mut(&self.core.requested_close, |slot| {
+            core::mem::replace(slot, false)
+        })
     }
 
     /// R311kc — initiator-side InitAck params admission, the dispatcher

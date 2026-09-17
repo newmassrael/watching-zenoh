@@ -785,6 +785,99 @@ pub fn check_lease_deadline<R: SessionRuntime, T: TimeSource>(
     }
 }
 
+/// R2678 (`session-close-ingress`) — drain a standing close request and inject
+/// `SessionFsmUnicastEvent::SessionClose`, so the session-fsm
+/// `session.close -> Closing` transition fires.
+///
+/// The peer of [`check_lease_deadline`], and deliberately the same shape: a
+/// comparator that reads a fact off the shared [`SessionLinkActions`] and
+/// raises on the engine the caller owns. Generic over `R: SessionRuntime` for
+/// the same reason — the AP tokio loop and the MCU sync loop call this one
+/// function, so "a rail message can close a session" means the same thing on
+/// both profiles rather than being an AP-only verb.
+///
+/// Returns whether an event was raised, so a caller can tell "nobody asked"
+/// from "asked, and the machine has been told". Draining is take-once
+/// ([`SessionLinkActions::take_requested_close`]): the request is consumed here
+/// and a later iteration will not re-raise it.
+///
+/// ⚠ This does NOT wait for the close to complete. `SessionClose` is an input
+/// to the machine; the session reaches `Closed` through the ordinary Closing
+/// path (the goodbye frame, `ClosingTimeout`, the terminal outcome the loop
+/// already returns). A caller that wants to observe the effect must observe the
+/// SESSION, not this function's return — which is also why the ingress carries
+/// no reply channel: upstream's own admin handler is a Push primitive with no
+/// response path, so success is observable as an effect or not at all.
+#[cfg(feature = "session-close-ingress")]
+pub fn check_requested_close<R: SessionRuntime, T: TimeSource>(
+    actions: &SessionLinkActions<R, T>,
+    engine: &mut Engine<SessionFsmUnicastPolicy<SessionActionsBinding<R, T>>>,
+) -> bool {
+    use crate::session_fsm_unicast::SessionFsmUnicastEvent as E;
+    if actions.take_requested_close() {
+        engine.process_event(E::SessionClose);
+        true
+    } else {
+        false
+    }
+}
+
+/// R2678 (`session-close-ingress`) — the switchboard ingress for session
+/// lifetime: an [`EventInjector`] that turns a matched row into a close
+/// request on [`SessionLinkActions`] instead of into an engine call.
+///
+/// This is what lets the session machine be a switchboard target without the
+/// matcher and the engine ever being in scope together. Every other injector in
+/// the tree wraps an SCE `Engine` (`wz-statechart-bridge`'s `EngineInjector`,
+/// the generated per-machine ones); this one wraps the shared bundle, so the
+/// keyexpr table, the matcher and the `EventInjector` port are all the ones
+/// both profiles already share.
+///
+/// ⭐ It does NOT carry the event name as a literal. The name is asked of the
+/// MACHINE — `StatePolicy::get_event_from_name` on the generated session
+/// policy — so the mapping has exactly one definition, the generated one. A
+/// second copy of `"session.close"` here is precisely the defect class that
+/// open-debt item 777 records: a string agreed between two places by hand stays
+/// agreed only until one of them is edited.
+#[cfg(feature = "session-close-ingress")]
+pub struct SessionLifecycleInjector<'a, R: SessionRuntime, T: TimeSource> {
+    actions: &'a SessionLinkActions<R, T>,
+}
+
+#[cfg(feature = "session-close-ingress")]
+impl<'a, R: SessionRuntime, T: TimeSource> SessionLifecycleInjector<'a, R, T> {
+    /// Borrow the session's shared bundle as the lifetime-ingress port.
+    pub fn new(actions: &'a SessionLinkActions<R, T>) -> Self {
+        Self { actions }
+    }
+}
+
+// The `'static` bound is the MACHINE's, not this port's: the generated
+// `impl<A: SessionFsmUnicastActions + 'static> StatePolicy for
+// SessionFsmUnicastPolicy<A>` is what makes `get_event_from_name` reachable, so
+// naming that policy costs `T: 'static`. It sits on THIS impl rather than on
+// the struct (R311y503's shape) so only the path that asks the machine pays it
+// -- and it costs nothing in practice, because anything holding a session
+// engine already satisfies it.
+#[cfg(feature = "session-close-ingress")]
+impl<R: SessionRuntime, T: TimeSource + 'static> crate::switchboard::EventInjector
+    for SessionLifecycleInjector<'_, R, T>
+{
+    /// A name the session machine reads as `SessionClose` becomes a close
+    /// request; every other name is ignored, exactly as
+    /// `Engine::raise_external_by_name` graceful-ignores a name outside the
+    /// document's enum. `event_data` is unused because this event carries none
+    /// — the machine declares it as a bare trigger.
+    fn inject(&mut self, event_name: &str, _event_data: &str) {
+        use crate::session_fsm_unicast::SessionFsmUnicastEvent as E;
+        use sce_rust_runtime::StatePolicy;
+        type P<R2, T2> = SessionFsmUnicastPolicy<SessionActionsBinding<R2, T2>>;
+        if <P<R, T> as StatePolicy>::get_event_from_name(event_name) == Some(E::SessionClose) {
+            self.actions.request_close();
+        }
+    }
+}
+
 /// Merge two optional baseline stamps to the most recent one — the R84
 /// `max(established_at, <activity stamp>)` rule both wake computations
 /// apply.

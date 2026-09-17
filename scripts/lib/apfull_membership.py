@@ -97,16 +97,20 @@ EXCLUSIONS = {
     # scheduled but not done, and every atom that has used it (R311y497's
     # storage-mgr-dynamic-volume-loading, R311y498's api-compat-c) left it the only
     # way it can be left -- by being built.
-    # R2676 — `session-close-ingress` is created here as reserved + UNBUILT, so it
-    # takes this category rather than a preset flag. The alternative was to make it
-    # a member and declare it INERT below; that route is REJECTED on this table's
-    # own reasoning. The inert declaration exists because `preset-ap-full =
-    # everything on` was "two flags wrong and no gate says so" -- it NAMES a defect
-    # so the headline stops lying, and a flag that is ON while toggling nothing is
-    # that defect, not a pattern to copy. The honest state of an atom whose code
-    # does not exist is out of the preset with the reason recorded, and it comes IN
-    # when the capability does.
-    "session-close-ingress": ("unbuilt", "declared for the build, no code gated yet"),
+    # R2678 REMOVED the `session-close-ingress` entry R2676 added one round
+    # earlier, and the round trip is this category working rather than churn.
+    # R2676 declared the atom with nothing behind it and recorded WHY it was out
+    # ("declared for the build, no code gated yet"); R2678 built the seam --
+    # `SessionCore::requested_close`, `drive::check_requested_close`,
+    # `drive::SessionLifecycleInjector` -- and the entry expired the only way an
+    # entry here expires. It is a MEMBER now, and keeping the exclusion would
+    # have been the false statement, not the tidy one.
+    # R2676 also considered the other route and rejected it, which is worth
+    # keeping: making an unbuilt atom a member and declaring it INERT below. The
+    # inert declaration exists to NAME the defect of "a flag that is ON while
+    # toggling nothing", not to sanction it, so an atom with no code belongs out
+    # of the preset with its reason recorded and comes in when the capability
+    # does -- which is what happened.
     # R311y498 REMOVED the `api-compat-c` entry that sat here. It was the LAST
     # atom this gate printed as OPEN, and it expired the only way an `unbuilt`
     # exclusion can: by being built (slice 1 — upstream's own z_put.c links and

@@ -685,13 +685,15 @@ session-reconnect = ["wz-runtime-tokio?/session-reconnect"]
 # carry it. AP-only (alloc-gated watch keyexprs); an MCU no-heap watch
 # backing is a follow-up, same staging as the session-reconnect MCU seam.
 session-matching = ["wz-runtime-tokio?/session-matching"]
-# R2676 — session-close-ingress: a rail message drives the session FSM's
-# `session.close` through the switchboard, the one ingress AP and MCU share
-# (`EventInjector` is unconditional and alloc-free; only the registry is
-# alloc-gated). DECLARED ONLY — no code is gated on it yet, which is what
-# `reserved` + UNBUILT means to the catalog audit. The build order and the
-# measurement behind it live in the inventory entry's reason.
-session-close-ingress = []
+# R2676/R2678 — session-close-ingress: a rail message closes a RUNNING session.
+# Built in R2678: the ingress stages a take-once request on the shared
+# `SessionCore` and the drive loop, which owns the FSM engine, drains it beside
+# the lease comparator. Forwarded to BOTH runtimes because the whole seam lives
+# in wz-session-core — the AP and MCU interface is one interface, not two.
+session-close-ingress = [
+    "wz-runtime-tokio?/session-close-ingress",
+    "wz-runtime-coop?/session-close-ingress",
+]
 session-resumable = []
 session-stateless-accept = []
 # R311cd — session-unicast-* features forward to wz-runtime-tokio
@@ -1696,6 +1698,7 @@ preset-ap-full = [
     "transport-stats",
     "session-unicast-open",
     "session-unicast-accept",
+    "session-close-ingress",
     "session-reconnect",
     "session-matching",
     "session-multicast",
