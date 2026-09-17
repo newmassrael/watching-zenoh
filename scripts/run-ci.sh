@@ -4866,7 +4866,13 @@ layer_c1u_cargo_test_tls() {
     # R2608 — 5 -> 6. The `close_link_on_expiration` witness on a tls dial, with
     # its unarmed refutation arm. The number is what the command PRINTED.
     # R2609 — 6 -> 7. The `tls_handshake_timeout_ms` witness and its control.
-    _runci_guarded_test C1u 7 cargo test -p wz-runtime-tokio --features transport-link-tls --test tls_e2e --quiet \
+    # R2698 — 7 -> 8. THE JOIN: the peer certificate's common name reaches the
+    # link's §5.16 subject, which is what the ACL's fifth axis is judged against.
+    # Both ends had witnesses already (the extractor in `stream_link`, the
+    # matcher in `wz-access-control`) and neither said the wiring carried the
+    # value between them. Its anti-vacuity arm is a plain TCP link through the
+    # same accessor, answering `None`. The number is what the command PRINTED.
+    _runci_guarded_test C1u 8 cargo test -p wz-runtime-tokio --features transport-link-tls --test tls_e2e --quiet \
         || return 1
     #
     # R311y801 — 6 -> 7, the THIRD instance of the same missed update, and this
