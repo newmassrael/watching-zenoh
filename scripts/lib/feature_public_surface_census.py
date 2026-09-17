@@ -287,6 +287,13 @@ OFF_AXIS: dict[str, tuple[str, frozenset[str]]] = {
         "one feature, gating a Linux-only capture path",
         frozenset({"tap"}),
     ),
+    "wz-rest": (
+        "the REST bridge: the facade re-exports the whole crate as `wz::rest` "
+        "and is its ONLY workspace consumer, so the path a Rust caller names "
+        "into this gated surface is the facade's. Held to `FACADE_ONLY` below "
+        "rather than to this sentence",
+        frozenset({"adminspace-plugins-handlers"}),
+    ),
     "wz-runtime-coop": (
         "the no_std runtime: reached through the facade's `runtime-coop`, so "
         "the facade row above is where a consumer-facing probe would sit",
@@ -583,6 +590,17 @@ FACADE = "wz"
 # is the facade's, so THAT row is where the question belongs.
 #: package -> the features of its `OFF_AXIS` row reached only through the facade
 FACADE_ONLY: dict[str, frozenset[str]] = {
+    # R2680 — `wz-rest` gained its first feature to gate a public item
+    # (`RestAdmin::plugin_record` / `status_leaves`, behind
+    # `adminspace-plugins-handlers`), which is what put it in this file's
+    # population at all. MEASURED against `cargo metadata`, not asserted: the
+    # workspace holds exactly ONE edge into the crate, `wz` -> `wz-rest`
+    # (normal, optional), and `wz`'s own `OFF_AXIS` row names
+    # `rest-http-bridge`, whose definition opens with `dep:wz-rest`. The facade
+    # re-exports the whole crate (`pub use wz_rest as rest;`), so the path a
+    # caller names is `wz::rest::..` and the consumer-facing surface is the
+    # facade's.
+    "wz-rest": frozenset({"adminspace-plugins-handlers"}),
     "wz-session-lwip": frozenset({"transport-multicast"}),
 }
 

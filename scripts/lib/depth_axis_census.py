@@ -954,7 +954,15 @@ CITATION = re.compile(r"\b((?:[A-Za-z0-9_.-]+/)*[A-Za-z0-9_.-]+\.(?:rs|c|h))(?::
 # population; UNREACHED and NO_SYMBOL hold. MEASURED by SIMULATION before the
 # write -- the atom dropped from `partial_atoms()` and `reach_partition` re-run
 # over the remainder -- and the live gate then reported exactly that: 28.
-PIN_REACHED = 25
+# R2680 -- 25 -> 24. The atom is `rest-http-bridge`, graded COMPLETE this round
+# (its adminspace_getter residual built: the bridge now reports itself as the
+# `rest` plugin, with the `status/plugins/rest/{version,port}` sub-tree). A
+# REACHED atom, so it leaves this count with the population; UNREACHED and
+# NO_SYMBOL hold. MEASURED by RE-INSERTION rather than by diffing the totals --
+# `reach_partition` run over the live population and over the same population
+# with this one atom's pre-regrade reason put back: 24 against 25, and the atom
+# is in the `reached` set of the second. The live gate then reported 24.
+PIN_REACHED = 24
 PIN_UNREACHED = 3
 PIN_NO_SYMBOL = 2
 # R2534 — 346 -> 347. The atom is `adminspace-metrics` and the citation is the
@@ -1566,7 +1574,16 @@ PIN_NO_SYMBOL = 2
 # MEASURED with THIS FILE'S OWN `citation_audit` over the population with and
 # without that one atom -- never by diffing the totals, which cannot say whose
 # the fall is: 181 - 9 = 172, and the live gate reported 172.
-PIN_WZ_CITATIONS = 138
+# R2680 -- 138 -> 137, the same re-grade as PIN_REACHED above.
+# `rest-http-bridge` is COMPLETE, so `partial_atoms()` no longer admits its
+# reason and the 1 unique wz citation it contributed leaves the population WITH
+# it. A POPULATION change, not a citation removal: the reason GREW this round
+# (the regrade appends 5249 bytes to a body preserved byte for byte), and it
+# still leaves whole. MEASURED with THIS FILE'S OWN `citation_audit` over the
+# population with and without that one atom -- never by diffing the totals,
+# which cannot say whose the fall is: the atom's pre-regrade reason alone scores
+# wz=1 / ambiguous=9 / upstream=4, and 138 - 1 = 137.
+PIN_WZ_CITATIONS = 137
 # R2626 — 44 -> 42, and this one is worth a sentence because it HELD through
 # every earlier retirement in this run (R2612, R2622). `time-hlc`'s reason is the
 # first retiree carrying AMBIGUOUS citations of its own: its oldest clauses cite
@@ -1585,7 +1602,15 @@ PIN_WZ_CITATIONS = 138
 # previous re-grade's SHAPE across would have produced a wrong pin here, which
 # is why the value came from re-running `citation_audit` over the population
 # without this atom rather than from the precedent.
-PIN_AMBIGUOUS = 31
+# R2680 -- 31 -> 22, the same re-grade again, and the LARGEST single move this
+# pin has made. `rest-http-bridge`'s reason is the third retiree to carry
+# ambiguous citations and much the heaviest: its R311y160/y441/y501 clauses cite
+# upstream's REST plugin by bare `lib.rs:358` / `lib.rs:122-136` / `json.rs:75`
+# forms, and `lib.rs` and `json.rs` each end-match many tracked wz files, so
+# none was ever graded against one subject. They leave with the atom.
+# Attributed by the same re-insertion measurement recorded at PIN_WZ_CITATIONS,
+# not carried across from a precedent's shape: 31 - 9 = 22.
+PIN_AMBIGUOUS = 22
 
 
 class Fatal(Exception):
