@@ -1732,37 +1732,59 @@ fi
 # to sit above is labelled as one. Gate 5 is deliberately between the two —
 # "Placed BEFORE gate 3 on purpose", as its own header says, because the
 # no-crates early exit below is exactly the push shape gate 5 exists for.
-changed_dirs=()
-while IFS= read -r _d; do
-    [[ -n "$_d" ]] && changed_dirs+=("$_d")
-done < <(
-    git diff --name-only "$diff_base..$local_sha" -- 'crates/' 2>/dev/null \
-        | sed -nE 's#^crates/([^/]+)/.*#\1#p' \
-        | sort -u
-)
-
-if [[ ${#changed_dirs[@]} -eq 0 ]]; then
-    echo "pre-push: no crates/ changes in this push; skipping changed-crate tests."
-    echo "          full validation runs on hosted CI."
-    exit 0
+# R2686 — the crate-dir scan and the dir->package mapping that used to live
+# here are now `scripts/lib/changed_crate_packages.py`, which this calls and
+# anyone preparing a push calls with NO arguments. They were moved, not
+# rewritten: the module carries the same `crates/<dir>` match and the same
+# first-`name =`-wins manifest read, and its output was diffed against this
+# pipeline's on a real range before the swap.
+#
+# WHY IT IS A MODULE NOW. The set was computable only by running this hook, so
+# a round preparing a push RE-DERIVED it by hand, and the hand derivation is
+# what keeps being wrong. R2682 derived it from a PREFIX of its push, checked
+# 10 crates where this hook checked 25, and lost the push to a doc-link finding
+# in the 15 it never looked at. R2686 then under-counted a DIFFERENT gate's
+# population 33 -> 10 by substituting one reader into its pure functions, with
+# no error printed. Two measured re-derivations, both silently short.
+#
+# ⚠ It is NOT the separate preflight open-debt item 742 forbids. 742's subject
+# is this hook answering with ONE refusal per push, and its prescription is
+# that the hook's own static block collect them; a preflight is by definition a
+# second computation. This REMOVES a second computation: one derivation, here,
+# reachable by name.
+#
+# ⚠ THE RC IS READ, and a process substitution would have thrown it away. An
+# empty list means two different things — "this push touches no crate", which
+# is a fact and exits 0, and "the derivation FAILED", which must not read as
+# the first. That conflation is the shape this hook exists to refuse, so the
+# output is captured and the status checked before the emptiness is believed.
+#
+# ⚠⚠ `|| _pkgs_rc=$?` IS LOAD-BEARING, and the obvious spelling was wrong. This
+# file runs under `set -euo pipefail` (line 49), where a bare
+# `var="$(cmd)"` followed by `rc=$?` can never reach the second line: the
+# assignment CARRIES the substitution's status, so `set -e` exits the hook
+# first. The push would still have been refused — the safe direction — but with
+# no message, and a gate that cannot say why it refused is the defect one line
+# up, installed by the fix for it. `_pkgs_rc` is pre-seeded because `set -u`
+# would otherwise trip on the success path, where the `||` arm never runs.
+_pkgs_rc=0
+_pkgs_out="$(python3 scripts/lib/changed_crate_packages.py \
+    --range "$diff_base..$local_sha")" || _pkgs_rc=$?
+if [[ $_pkgs_rc -ne 0 ]]; then
+    echo "" >&2
+    echo "pre-push: [gate 3] the changed-crate derivation FAILED (rc=$_pkgs_rc)." >&2
+    echo "          Nothing measured the push, so nothing may report it clean." >&2
+    exit 1
 fi
 
-# Map each changed crate DIR to its cargo PACKAGE name (dir != package is
-# rare but allowed). A dir whose Cargo.toml is gone (renamed/deleted in the
-# diff) is skipped rather than failing the push.
 pkgs=()
-for d in "${changed_dirs[@]}"; do
-    manifest="crates/$d/Cargo.toml"
-    if [[ ! -f "$manifest" ]]; then
-        echo "pre-push:   crates/$d — Cargo.toml gone (renamed/deleted), skipping"
-        continue
-    fi
-    pkg="$(sed -nE 's/^name[[:space:]]*=[[:space:]]*"([^"]+)".*/\1/p' "$manifest" | head -1)"
-    [[ -n "$pkg" ]] && pkgs+=("$pkg")
-done
+while IFS= read -r _p; do
+    [[ -n "$_p" ]] && pkgs+=("$_p")
+done <<< "$_pkgs_out"
 
 if [[ ${#pkgs[@]} -eq 0 ]]; then
-    echo "pre-push: no live changed crates to test; full validation runs on hosted CI."
+    echo "pre-push: no live changed crates in this push; skipping changed-crate tests."
+    echo "          full validation runs on hosted CI."
     exit 0
 fi
 
@@ -1850,10 +1872,21 @@ echo "pre-push: changed-crate tests passed."
 # over 35 crate pairs. They disagree on the crate SET — wz-session-core is linked
 # from 14 crates by the first and 18 by the union — so y793's qualified-only
 # expander measured 14 of 18 and reported clean over the rest.
+#
+# R2686 — through `changed_crate_packages.py --doc-links`, which is the same
+# `doclink_dependents.py` call this line used to make, reached by the name a
+# preparing round can also call. The population R2682 got WRONG was this one,
+# and it got it wrong at the RANGE rather than at the expansion: with no
+# arguments that module resolves `<remote tip>..HEAD`, so the prefix that cost
+# that push is not a value a caller can supply by omission. Its own rc already
+# refuses a non-empty package list that expands to nothing; the check below is
+# kept anyway, because a refusal this hook makes itself is one that survives
+# the module being called some other way.
 doc_pkgs=()
 while IFS= read -r _p; do
     [[ -n "$_p" ]] && doc_pkgs+=("$_p")
-done < <(python3 scripts/lib/doclink_dependents.py "${pkgs[@]}")
+done < <(python3 scripts/lib/changed_crate_packages.py \
+    --range "$diff_base..$local_sha" --doc-links)
 if [[ ${#doc_pkgs[@]} -eq 0 ]]; then
     echo "pre-push: [gate 4] doc-link expansion produced NO crate — refusing to report clean." >&2
     exit 1

@@ -142,6 +142,15 @@ STORE_PATH = "docs/.atomic/workspace.atomic.json"
 #: that shells to it is asking exactly the question "what does this tree hold".
 LS_FILES = "ls-files"
 
+#: R2686 -- the call spellings `module_invocations` accepts as RUNNING another
+#: gate. `subprocess.run`/`check_call`/`check_output`/`call`/`Popen`, by the
+#: attribute or bare name, which is every form this tree's gates use to shell
+#: out. A spelling absent here reports the callee UNREACHED, which is a finding
+#: someone answers rather than a silence.
+SUBPROCESS_CALLS = frozenset(
+    {"run", "call", "check_call", "check_output", "Popen"}
+)
+
 #: module -> why the fast local hook does not run it. MEASURED on this tree at
 #: R2576 and R2578, warm, each figure the gate's own wall clock rather than an
 #: estimate. A row is not an exemption: every one is PRINTED on every run, a
@@ -375,6 +384,122 @@ def hook_invocations(hook_src: str) -> set[str]:
     return out
 
 
+def module_invocations(src: str, population: set[str]) -> set[str]:
+    """Which population modules THIS module names as a string constant in code.
+
+    R2686 — the reach question is "does a push RUN this gate", and until now it
+    was answered by reading the hook's text alone. A gate the hook runs may run
+    another: `changed_crate_packages.py` shells out to `doclink_dependents.py`,
+    which is how gate 4 gets its Layer C1bz population. Textually the hook
+    stopped naming `doclink_dependents.py` the moment that call moved one level
+    down, and this gate reported it unreached while every push still ran it.
+
+    The alternatives were both worse than widening the reader. A DEFERRED row
+    would have been FALSE -- the gate is not deferred, it runs on every push --
+    and re-adding a direct hook call would run the same expansion twice per
+    push to satisfy a text match. Neither is a measurement.
+
+    ⛔ A MENTION IS NOT A CALL, and the first cut of this got that wrong in the
+    loud direction -- worth recording because the tree has the same error filed
+    as a search defect ("counting NAMES and calling it counting CALLS"). Reading
+    any code-position string constant made the hook appear to run `bump_sweep`,
+    `capi_c_abi_pin`, `cdylib_soname_gate`, `debt_plane_census` and
+    `prose_named_identifier_gate` -- every one a module that some corpus-wide
+    gate ENUMERATES by name. Five false reaches, each contradicting a DEFERRED
+    row that was correct.
+
+    So the rule is a CALL: a string naming a population module that reaches the
+    argument list of a `subprocess` invocation, either written there or bound to
+    a name first (`DOCLINK = ... / "doclink_dependents.py"`, then
+    `subprocess.run([sys.executable, str(DOCLINK), ...])`, which is the shape
+    that prompted this). Docstrings fall out for free: nothing in one reaches a
+    call's arguments.
+
+    ⚠ THE ERROR DIRECTION IS CHOSEN. An invocation spelled in a way this cannot
+    see is reported UNREACHED -- a false finding someone must answer, which is
+    loud. The opposite, a mention read as a call, is silent under-reporting, and
+    under-reporting is the one defect this gate must not have. A file that does
+    not parse contributes nothing, for the same reason.
+    """
+    try:
+        tree = ast.parse(src)
+    except SyntaxError:
+        return set()
+
+    def py_names(node) -> set[str]:
+        found: set[str] = set()
+        for sub in ast.walk(node):
+            if isinstance(sub, ast.Constant) and isinstance(sub.value, str):
+                name = sub.value.strip().rsplit("/", 1)[-1]
+                if name in population:
+                    found.add(name)
+        return found
+
+    # A name bound to a module path anywhere in the file, so the common
+    # module-level-constant spelling is followed rather than missed.
+    bindings: dict[str, set[str]] = {}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Assign) and node.value is not None:
+            found = py_names(node.value)
+            if found:
+                for target in node.targets:
+                    if isinstance(target, ast.Name):
+                        bindings.setdefault(target.id, set()).update(found)
+        elif isinstance(node, ast.AnnAssign) and node.value is not None:
+            found = py_names(node.value)
+            if found and isinstance(node.target, ast.Name):
+                bindings.setdefault(node.target.id, set()).update(found)
+
+    out: set[str] = set()
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        func = node.func
+        callee = (
+            func.attr
+            if isinstance(func, ast.Attribute)
+            else func.id if isinstance(func, ast.Name) else ""
+        )
+        if callee not in SUBPROCESS_CALLS:
+            continue
+        for arg in list(node.args) + [kw.value for kw in node.keywords if kw.value]:
+            out |= py_names(arg)
+            for sub in ast.walk(arg):
+                if isinstance(sub, ast.Name) and sub.id in bindings:
+                    out |= bindings[sub.id]
+    return out
+
+
+def reachable_from_hook(
+    hook_src: str, sources: dict[str, str], population: set[str]
+) -> tuple[set[str], set[str]]:
+    """Every population gate a push RUNS: the hook's own calls, then theirs.
+
+    Returns (all reachable, reached only indirectly) so the report can say
+    which is which. A gate reached only through another is still run by every
+    push -- that is the whole claim -- but hiding the distinction would turn
+    this widening into a way for the direct set to rot unnoticed.
+    """
+    direct = hook_invocations(hook_src)
+    reachable = set(direct)
+    frontier = [n for n in direct]
+    seen: set[str] = set()
+    while frontier:
+        name = frontier.pop()
+        if name in seen:
+            continue
+        seen.add(name)
+        src = sources.get(name)
+        if src is None:
+            continue
+        for dep in module_invocations(src, population):
+            if dep not in reachable:
+                reachable.add(dep)
+            if dep not in seen:
+                frontier.append(dep)
+    return reachable, reachable - direct
+
+
 def findings_from(
     population: set[str], invoked: set[str], deferred: dict[str, str]
 ) -> tuple[list[str], int]:
@@ -414,12 +539,26 @@ def findings_from(
     return out, len(population)
 
 
-def report(population: set[str], invoked: set[str], deferred: dict[str, str]) -> None:
+def report(
+    population: set[str],
+    invoked: set[str],
+    deferred: dict[str, str],
+    indirect: set[str] | None = None,
+) -> None:
     ran = sorted(n for n in population if n in invoked)
     print(
         f"round-fed-gate-reach: {len(population)} gate(s) are fed by what a "
         f"round changes, {len(ran)} run in {HOOK_REL}, {len(deferred)} deferred"
     )
+    # R2686 — named, not folded into the count. A gate the hook reaches only
+    # THROUGH another is still run by every push, but printing which ones lets
+    # a reader see the indirection rather than infer a flat list that is no
+    # longer true.
+    via = sorted(n for n in (indirect or set()) if n in population)
+    if via:
+        print(
+            f"  reached INDIRECTLY, by a gate the hook runs: {', '.join(via)}"
+        )
     for name in sorted(deferred):
         print(f"  deferred: {name} -- {deferred[name]}")
 
@@ -450,9 +589,11 @@ def run(root: Path) -> int:
         )
         return 1
     population = round_fed(sources, corpus_dirs, corpus_files)
-    invoked = hook_invocations((root / HOOK_REL).read_text())
+    invoked, indirect = reachable_from_hook(
+        (root / HOOK_REL).read_text(), sources, population
+    )
     findings, size = findings_from(population, invoked, DEFERRED)
-    report(population, invoked, DEFERRED)
+    report(population, invoked, DEFERRED, indirect)
     if findings:
         print("round-fed-gate-reach: FAIL", file=sys.stderr)
         for finding in findings:
@@ -553,6 +694,80 @@ def selftest() -> int:
         print(f"  [{'ok' if ok else 'FAIL'}] closure -- {name}: {sorted(got)}")
         if not ok:
             failed += 1
+
+    # ── R2686 — reach through a gate the hook runs ──────────────────
+    #
+    # The population here is fixed so each arm is about the READER, not about
+    # which modules happen to be round-fed in this tree.
+    reach_pop = {"dep.py", "other.py"}
+    reach_cases: list[tuple[str, str, set[str]]] = [
+        (
+            "a bare subprocess call naming a module is a CALL",
+            'subprocess.run([sys.executable, "scripts/lib/dep.py"])\n',
+            {"dep.py"},
+        ),
+        (
+            "bound to a constant first, then called -- the real shape",
+            'D = P / "dep.py"\nsubprocess.run([sys.executable, str(D), *a])\n',
+            {"dep.py"},
+        ),
+        (
+            "a MENTION is not a call -- the five false reaches this cost",
+            'NAMES = ["dep.py", "other.py"]\nfor n in NAMES:\n    print(n)\n',
+            set(),
+        ),
+        (
+            "naming it in a DOCSTRING is not a call either",
+            '"""This gate is what dep.py exists beside."""\nX = 1\n',
+            set(),
+        ),
+        (
+            "a comment naming it is not, as for every other rule here",
+            '# dep.py\nX = 1\n',
+            set(),
+        ),
+        (
+            "check_output counts -- the spelling, not just `run`",
+            'subprocess.check_output(["python3", "scripts/lib/other.py"])\n',
+            {"other.py"},
+        ),
+        (
+            "a module outside the population is not reported, however called",
+            'subprocess.run([sys.executable, "scripts/lib/stranger.py"])\n',
+            set(),
+        ),
+        (
+            "a file that does not parse contributes nothing, never a guess",
+            "def (\n",
+            set(),
+        ),
+    ]
+    for name, src, want in reach_cases:
+        got = module_invocations(src, reach_pop)
+        ok = got == want
+        print(f"  [{'ok' if ok else 'FAIL'}] reach -- {name}: {sorted(got)}")
+        if not ok:
+            failed += 1
+
+    # The closure itself: the hook names `a.py`, `a.py` calls `dep.py`, and
+    # `dep.py` must come back REACHED and marked indirect. The second arm is
+    # the anti-vacuity one -- with the call gone, `dep.py` must come back
+    # unreached, or this whole widening could never fail.
+    hook_src = "python3 scripts/lib/a.py --check\n"
+    wired = {
+        "a.py": 'D = P / "dep.py"\nsubprocess.run([sys.executable, str(D)])\n',
+        "dep.py": "X = 1\n",
+    }
+    reach, indirect = reachable_from_hook(hook_src, wired, {"a.py", "dep.py"})
+    ok = reach == {"a.py", "dep.py"} and indirect == {"dep.py"}
+    print(f"  [{'ok' if ok else 'FAIL'}] reach -- closure marks the callee indirect: {sorted(reach)}")
+    failed += 0 if ok else 1
+
+    cut = {"a.py": 'D = P / "dep.py"\nprint(D)\n', "dep.py": "X = 1\n"}
+    reach2, _ = reachable_from_hook(hook_src, cut, {"a.py", "dep.py"})
+    ok = reach2 == {"a.py"}
+    print(f"  [{'ok' if ok else 'FAIL'}] reach -- ANTI-VACUITY, no call means unreached: {sorted(reach2)}")
+    failed += 0 if ok else 1
 
     # R2653 — rule 1's input starved, the twin of the directory arm below: an
     # empty file set drops a named-file seed in silence, which is why `run`
