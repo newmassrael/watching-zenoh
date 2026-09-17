@@ -258,6 +258,14 @@ adminspace-plugins-handlers = [
     "adminspace-core",
     "wz-session-core/adminspace-plugins-handlers",
 ]
+# rest-http-bridge (§5.26) — a MARKER, deliberately with no forward: the bridge
+# itself is the `wz-rest` crate, which sits ABOVE this one and cannot be named
+# from here. What this key carries is the single fact this crate needs and
+# cannot derive — that the binary compiled the bridge in — so `compiled_plugins`
+# can report `rest` as `Loaded` beside `storage_manager`. The `wz` facade's own
+# `rest-http-bridge` turns both on together, which is what keeps the marker and
+# the crate from disagreeing.
+rest-http-bridge = []
 # adminspace-config-hotreload (§5.23, R311y239) — the config-diff-driven storage
 # lifecycle: the storage-add/del config-write intents (parse in wz-session-core) +
 # the DYNAMIC plugin registry (compiled_plugins_dyn reflects storage_manager Started

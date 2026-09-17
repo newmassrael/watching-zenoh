@@ -323,32 +323,45 @@ pub use wz_session_core::adminspace;
 /// is `Loaded` (compiled into the binary); a host that actually instantiates the
 /// subsystem at runtime would report `Started` (which additionally surfaces it in
 /// the local_data `plugins` field, faithful to zenoh's `started_plugins_iter`).
-/// `version` is the node build version. Currently reports `storage_manager` (the wz
-/// mirror of `zenoh-plugin-storage-manager`) under `storage-backend`; `rest`
-/// (`zenoh-plugin-rest`, under `rest-http-bridge`) is an extension point.
+/// `version` is the node build version. Reports `storage_manager` (the wz mirror of
+/// `zenoh-plugin-storage-manager`) under `storage-backend` and `rest` (the wz mirror
+/// of `zenoh-plugin-rest`) under `rest-http-bridge`.
 #[cfg(feature = "adminspace-plugins-handlers")]
 pub fn compiled_plugins(version: &str) -> Vec<wz_session_core::adminspace::AdminPlugin> {
-    // Each compiled-in subsystem with a zenoh-plugin analogue contributes one entry;
-    // an empty registry (the surface compiled but no subsystem) is valid. Built
-    // branch-wise so `unused_mut` / unused-param lints stay clean across the
-    // storage-backend toggle (a `let mut` with all pushes cfg'd out is a hard error
-    // under `-D warnings`). Extending with `rest` (under `rest-http-bridge`) appends
-    // another cfg branch here.
-    #[cfg(feature = "storage-backend")]
-    {
-        use wz_session_core::adminspace::{AdminPlugin, AdminPluginState};
-        vec![AdminPlugin::wz_static(
-            "storage_manager",
-            "storage_manager",
-            Some(version),
-            AdminPluginState::Loaded,
-        )]
+    use wz_session_core::adminspace::{AdminPlugin, AdminPluginState};
+
+    compiled_plugin_ids()
+        .into_iter()
+        .map(|id| AdminPlugin::wz_static(id, id, Some(version), AdminPluginState::Loaded))
+        .collect()
+}
+
+/// The ids of every compiled-in subsystem with a zenoh-plugin analogue, in registry
+/// order — the ONE place the registry's membership is decided, which both
+/// [`compiled_plugins`] and [`compiled_plugins_dyn`] read.
+///
+/// `cfg!` rather than a `#[cfg]` ladder on purpose. The ladder this replaced was
+/// already 2 arms for 1 subsystem and would have been 4 for 2, because each
+/// subsystem's presence is INDEPENDENT of the others' — and the arms are where a
+/// registry stops agreeing with the features it claims to reflect. As one
+/// expression the membership is visible whole, and a test can assert it against
+/// `cfg!` without enumerating a combination.
+///
+/// A wz "plugin" is a cargo-feature/subsystem, so this list IS the registry: an
+/// empty one (the admin surface compiled, no subsystem) is valid and means what it
+/// says. `rest` is spelled here and as `wz_rest::admin::PLUGIN_ID` there, because
+/// `wz-rest` sits ABOVE this crate and cannot be named from it; the join is held by
+/// a test in `wz-rest`, which is the only crate that can see both spellings.
+#[cfg(feature = "adminspace-plugins-handlers")]
+fn compiled_plugin_ids() -> Vec<&'static str> {
+    let mut ids = Vec::new();
+    if cfg!(feature = "storage-backend") {
+        ids.push("storage_manager");
     }
-    #[cfg(not(feature = "storage-backend"))]
-    {
-        let _ = version;
-        Vec::new()
+    if cfg!(feature = "rest-http-bridge") {
+        ids.push("rest");
     }
+    ids
 }
 
 /// R311y239 (`adminspace-config-hotreload`) — the DYNAMIC plugin-registry BUILDER:
@@ -377,56 +390,99 @@ pub fn compiled_plugins_dyn(
     version: &str,
     storage_started: bool,
 ) -> Vec<wz_session_core::adminspace::AdminPlugin> {
-    #[cfg(feature = "storage-backend")]
-    {
-        use wz_session_core::adminspace::{AdminPlugin, AdminPluginState};
-        let state = if storage_started {
-            AdminPluginState::Started
-        } else {
-            AdminPluginState::Loaded
-        };
-        vec![AdminPlugin::wz_static(
-            "storage_manager",
-            "storage_manager",
-            Some(version),
-            state,
-        )]
+    use wz_session_core::adminspace::AdminPluginState;
+
+    // The SAME membership [`compiled_plugins`] reports, with the one subsystem this
+    // builder is told about promoted. `rest` is not promoted here and must not be:
+    // whether the bridge is accepting is a fact only the bridge holds, and it hands
+    // the host a whole `Started` record through `wz_rest::RestAdmin::plugin_record`
+    // to fold over this one. Adding a second bool here would ask the host to keep a
+    // flag in step with something it does not own, which is the shape
+    // `RestAdmin` exists to refuse.
+    let mut plugins = compiled_plugins(version);
+    if storage_started {
+        if let Some(sm) = plugins.iter_mut().find(|p| p.id == "storage_manager") {
+            sm.state = AdminPluginState::Started;
+        }
     }
-    #[cfg(not(feature = "storage-backend"))]
-    {
-        let _ = (version, storage_started);
-        Vec::new()
-    }
+    plugins
 }
 
 #[cfg(all(test, feature = "adminspace-plugins-handlers"))]
 mod compiled_plugins_tests {
     use super::compiled_plugins;
+    use wz_session_core::adminspace::{AdminPluginState, WZ_STATIC_PLUGIN_PATH};
 
-    // Locks the wz-native registry to the ACTUAL compiled feature set. Dropping the
-    // `#[cfg(feature="storage-backend")]` gate in `compiled_plugins` (returning
-    // storage_manager unconditionally) FAILS the storage-OFF arm of this test — a
-    // regression the E2E alone cannot catch (Layer E6e always builds storage-backend
-    // ON). CI runs BOTH cfg states (run-ci Layer C1am), so exactly one arm asserts
-    // per compilation and the pair pins the gating.
-    #[test]
-    fn compiled_plugins_reflects_the_storage_backend_cfg() {
-        let plugins = compiled_plugins("9.9.9");
-        #[cfg(feature = "storage-backend")]
-        {
-            use wz_session_core::adminspace::{AdminPluginState, WZ_STATIC_PLUGIN_PATH};
-            assert_eq!(plugins.len(), 1, "storage-backend ON -> one plugin");
-            assert_eq!(plugins[0].id, "storage_manager");
-            assert_eq!(plugins[0].name, "storage_manager");
-            assert_eq!(plugins[0].version.as_deref(), Some("9.9.9"));
-            assert_eq!(plugins[0].path, WZ_STATIC_PLUGIN_PATH);
-            assert_eq!(plugins[0].state, AdminPluginState::Loaded);
+    /// What THIS compilation's features say the registry must hold — read from
+    /// `cfg!` HERE rather than from the function under test, so the two can
+    /// disagree and the test is the disagreement.
+    ///
+    /// It restates `compiled_plugin_ids`, and deliberately: a cfg-derived list
+    /// has nothing else to be checked against, and what the restatement buys is
+    /// that dropping a gate (reporting a subsystem the build does not carry)
+    /// fails the arm where that feature is OFF. CI compiles both states
+    /// (run-ci Layer C1am for `storage-backend`), so the pair pins the gating
+    /// even though each compilation asserts only its own membership.
+    fn expected_ids() -> Vec<&'static str> {
+        let mut ids = Vec::new();
+        if cfg!(feature = "storage-backend") {
+            ids.push("storage_manager");
         }
-        #[cfg(not(feature = "storage-backend"))]
-        assert!(
-            plugins.is_empty(),
-            "storage-backend OFF -> empty registry (no subsystem compiled)"
+        if cfg!(feature = "rest-http-bridge") {
+            ids.push("rest");
+        }
+        ids
+    }
+
+    #[test]
+    fn compiled_plugins_reflects_the_compiled_subsystem_cfgs() {
+        let plugins = compiled_plugins("9.9.9");
+        let ids: Vec<&str> = plugins.iter().map(|p| p.id.as_str()).collect();
+        assert_eq!(
+            ids,
+            expected_ids(),
+            "the registry IS the compiled subsystem set, in registry order"
         );
+        for p in &plugins {
+            assert_eq!(p.name, p.id, "wz uses one string for id and name");
+            assert_eq!(p.version.as_deref(), Some("9.9.9"), "{}", p.id);
+            assert_eq!(
+                p.path, WZ_STATIC_PLUGIN_PATH,
+                "{} is compiled in, not a dlopen .so",
+                p.id
+            );
+            assert_eq!(
+                p.state,
+                AdminPluginState::Loaded,
+                "{}: compiled in is not running",
+                p.id
+            );
+            assert!(
+                p.status_leaves.is_empty(),
+                "{}: a sub-tree belongs to the live host that owns the subsystem",
+                p.id
+            );
+        }
+    }
+
+    // The DYNAMIC builder promotes the ONE subsystem it is told about and leaves
+    // every other member alone. `rest` in particular must stay `Loaded` here: its
+    // running state is the bridge's to report (`wz_rest::RestAdmin`), and a builder
+    // that guessed it would be reporting a port nobody is listening on.
+    #[cfg(feature = "adminspace-config-hotreload")]
+    #[test]
+    fn compiled_plugins_dyn_promotes_only_the_storage_manager() {
+        let plugins = super::compiled_plugins_dyn("9.9.9", true);
+        let ids: Vec<&str> = plugins.iter().map(|p| p.id.as_str()).collect();
+        assert_eq!(ids, expected_ids(), "promotion does not change membership");
+        for p in &plugins {
+            let expected = if p.id == "storage_manager" {
+                AdminPluginState::Started
+            } else {
+                AdminPluginState::Loaded
+            };
+            assert_eq!(p.state, expected, "{}", p.id);
+        }
     }
 }
 

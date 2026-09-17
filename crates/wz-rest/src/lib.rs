@@ -19,6 +19,21 @@
 //! `rest-http-bridge` cargo feature and, being std/AP-only, lives in its own
 //! crate so no_std/MCU builds never pull it.
 //!
+//! ## It reports itself on the adminspace
+//!
+//! Upstream's plugin is introspectable through the node it runs in: the
+//! adminspace hands it its own status key and replies whatever it returns
+//! (`RunningPluginTrait::adminspace_getter`). wz keeps that, with the
+//! subsystem still owning its rendering — see [`admin`]. A host passes a
+//! [`RestAdmin`] to [`serve_with_admin`] / [`serve_on_with_admin`] and folds
+//! [`RestAdmin::plugin_record`] into the slice its admin queryable rebuilds per
+//! GET, and the node then answers `@/<zid>/<whatami>/plugins/rest` and
+//! `.../status/plugins/rest/{version,port}` as a zenohd with the plugin loaded
+//! does. Doing nothing is also correct: `compiled_plugins` reports the bridge
+//! as `Loaded` whenever this crate is linked, so a node that composes the
+//! bridge but does not advertise it still says so rather than denying it
+//! exists.
+//!
 //! ## SECURITY — read before deploying
 //!
 //! **A loopback bind is a network-exposure boundary, NOT authentication.**
@@ -68,11 +83,14 @@ use tokio::time::{sleep, timeout, Duration};
 use wz_runtime_tokio::runtime_pool::WzRuntime;
 use wz_runtime_tokio::session::TokioSession;
 
+pub mod admin;
 mod bridge;
 mod http;
 mod json;
 #[cfg(feature = "rest-sse-subscribe")]
 mod sse;
+
+pub use admin::RestAdmin;
 
 /// Default GET query timeout (ms). A `GET` whose queryable never answers is
 /// bounded to this so the HTTP connection cannot hang forever; the HTTP-side
@@ -112,8 +130,21 @@ impl Drop for AbortOnDrop {
 /// SECURITY: see the crate-level docs. Prefer a `127.0.0.1` `addr`; binding a
 /// routable interface exposes an unauthenticated keyspace gateway.
 pub async fn serve(session: TokioSession, zid: Vec<u8>, addr: SocketAddr) -> io::Result<()> {
+    serve_with_admin(session, zid, addr, RestAdmin::new()).await
+}
+
+/// Like [`serve`], but reports the bridge's live serving state through `admin`
+/// so a host can put it on the adminspace as the `rest` plugin
+/// ([`RestAdmin::plugin_record`]). `addr` may carry port 0 — the record then
+/// reports the address the OS actually assigned.
+pub async fn serve_with_admin(
+    session: TokioSession,
+    zid: Vec<u8>,
+    addr: SocketAddr,
+    admin: RestAdmin,
+) -> io::Result<()> {
     let listener = TcpListener::bind(addr).await?;
-    serve_on(listener, session, zid).await
+    serve_on_with_admin(listener, session, zid, admin).await
 }
 
 /// Like [`serve`], but drives an already-bound listener. Useful when the caller
@@ -124,6 +155,27 @@ pub async fn serve_on(
     session: TokioSession,
     zid: Vec<u8>,
 ) -> io::Result<()> {
+    serve_on_with_admin(listener, session, zid, RestAdmin::new()).await
+}
+
+/// Like [`serve_on`], but reports the bridge's live serving state through
+/// `admin` so a host can put it on the adminspace as the `rest` plugin
+/// ([`RestAdmin::plugin_record`]).
+///
+/// The handle is filled with the listener's own `local_addr` before the first
+/// accept and cleared when this function returns, so what the adminspace
+/// reports is read off the accept loop rather than off a flag the host keeps in
+/// step by hand.
+pub async fn serve_on_with_admin(
+    listener: TcpListener,
+    session: TokioSession,
+    zid: Vec<u8>,
+    admin: RestAdmin,
+) -> io::Result<()> {
+    // Bound BEFORE the first accept and released on every exit path (including
+    // the listener error below) — see `admin::ServingGuard`.
+    let _serving = admin.serving(listener.local_addr()?);
+
     // Reap expired pending queries so a GET whose wire ResponseFinal never
     // arrives cannot leak its pending entry (the session drive loop no longer
     // ticks the reply sweep). Safe alongside any caller-side sweep (idempotent).

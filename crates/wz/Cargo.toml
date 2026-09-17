@@ -961,7 +961,14 @@ adminspace-router-linkstate = [
 # forward to the runtime cfg site, not a no-op `= []` (the
 # [[feedback-facade-forward-separate-edit]] dead-stub trap). The plugin registry is
 # the compiled-in subsystem set (storage_manager, rest), NOT a dlopen plugin-manager.
-adminspace-plugins-handlers = ["wz-runtime-tokio?/adminspace-plugins-handlers"]
+# The `wz-rest?/` forward is the INTERSECTION of this feature with
+# `rest-http-bridge`, which is what cargo's `?` spelling buys: the bridge
+# advertises itself on the adminspace exactly when a build has both the bridge and
+# the plugins surface, and neither feature alone drags in the other.
+adminspace-plugins-handlers = [
+    "wz-runtime-tokio?/adminspace-plugins-handlers",
+    "wz-rest?/adminspace-plugins-handlers",
+]
 # R311y36 — adminspace-read is now a real cfg gate (the permissions.read GET
 # gate); forward to the runtime cfg site, not a no-op `= []`.
 adminspace-read = ["wz-runtime-tokio?/adminspace-read"]
@@ -1060,6 +1067,12 @@ ext-pubsub-serde-codec = ["wz-runtime-tokio?/ext-pubsub-serde-codec"]
 rest-http-bridge = [
     "dep:wz-rest",
     "runtime-tokio",
+    # NOTE — the marker that makes wz-runtime-tokio's plugin registry report
+    # `rest` as `Loaded` is NOT forwarded here. `wz-rest` declares it on its own
+    # wz-runtime-tokio dependency, so it arrives with `dep:wz-rest` above and
+    # cannot be switched off independently of the crate it describes. Forwarding
+    # it here as well would be a second spelling of a fact that is already
+    # structural.
     "wz-runtime-tokio?/transport-unicast",
     "wz-runtime-tokio?/query-get",
     "wz-runtime-tokio?/codec-response-final",

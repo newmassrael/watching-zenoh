@@ -40,7 +40,16 @@ path = "src/lib.rs"
 # + query-selector-parameters (mirror the ?-selector + Latest consolidation).
 # Defaults are left ON (this crate is AP-only, so the heavier default set is
 # free here); the list only ADDS the non-default gates the bridge needs.
+#
+# `rest-http-bridge` is NOT one of those call-through gates — it is the marker
+# that tells wz-runtime-tokio's plugin registry the bridge is compiled into this
+# binary, and it is declared HERE because that is where the fact is structural:
+# a build in which this crate is linked IS a build carrying the bridge, so the
+# registry cannot report `rest` absent while the bridge is present. Naming it
+# only in the `wz` facade would leave a consumer that depends on `wz-rest`
+# directly with a registry that silently omits it.
 wz-runtime-tokio = { path = "../wz-runtime-tokio", features = [
+    "rest-http-bridge",
     "transport-unicast",
     "query-get",
     "codec-response-final",
@@ -81,6 +90,20 @@ rest-sse-subscribe = [
     "wz-runtime-tokio/declare-subscriber",
     "wz-runtime-tokio/pubsub-put",
     "wz-runtime-tokio/pubsub-delete",
+]
+# The bridge's OWN entry on the adminspace (`src/admin.rs`): the `rest` plugin
+# record + its `status/plugins/rest/{version,port}` sub-tree, the wz analogue of
+# `zenoh-plugin-rest`'s `adminspace_getter`. Gated because a build can want the
+# bridge without an adminspace to advertise it on — and because the record names
+# `AdminPlugin`, which only the adminspace features compile the serializers for.
+# Both forwards are listed: the runtime-tokio one brings `compiled_plugins` (the
+# registry this record folds over) and the session-core one the `AdminPlugin` /
+# `AdminPluginStatusLeaf` types this crate names DIRECTLY through its own
+# `wz-session-core` dependency, which cargo would otherwise leave un-featured if
+# the runtime-tokio forward ever stopped composing it.
+adminspace-plugins-handlers = [
+    "wz-runtime-tokio/adminspace-plugins-handlers",
+    "wz-session-core/adminspace-plugins-handlers",
 ]
 
 [dev-dependencies]
