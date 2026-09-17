@@ -293,10 +293,16 @@ fn wz_plugin_dlopened_is_read_by_a_real_pico_beside_the_static_one() {
 
 // wz-proves: none -- the CONTROL arm. It claims no atom because its subject is
 // what the host does NOT do: handed a real, loadable shared object that is not a
-// wz plugin, it refuses, stays up, and reports only the static subsystem. Without
-// it, leg 1 is equally consistent with a host that reports whatever path it was
-// handed, which is the one failure mode leg 1 cannot rule out from its own
-// transcript.
+// wz plugin, it refuses, stays up, and reports that object as DECLARED rather
+// than loaded. Without it, leg 1 is equally consistent with a host that reports
+// whatever path it was handed, which is the one failure mode leg 1 cannot rule
+// out from its own transcript.
+//
+// ⚠ This line said "reports only the static subsystem" until R2681, and that
+// stopped being true at R2673, when a declaration began outliving a failed
+// load. The sentence is replaced rather than deleted because the assertion at
+// the foot of the body moved with it, and a reader who finds one wants the
+// other.
 #[test]
 #[ignore = "binary-dep e2e (wz-ap-demo --features preset-ap-full + zenoh-pico z_get CLI); Layer C1bp runs via --ignored"]
 fn wz_plugin_non_plugin_shared_object_is_refused_and_the_node_survives() {
@@ -330,8 +336,35 @@ fn wz_plugin_non_plugin_shared_object_is_refused_and_the_node_survives() {
         out.contains(&format!("('{root}/plugins/storage_manager':")),
         "the statically composed subsystem is still reported\n--- z_get ---\n{out}"
     );
+    // R2681 — REFUSED NOW MEANS `Declared`, NOT ABSENT, and this arm asserted
+    // the absence until R2673 changed what a refusal leaves behind: the
+    // registry declares a plugin by NAME before opening its library, so a
+    // failed `dlopen` leaves the declaration standing
+    // (`AdminPluginState::Declared` -- "an admin client can tell
+    // declared-but-failed-to-load from never-asked-for"). The product moved and
+    // this consumer kept the old contract, so hosted Layer C1bp redded on two
+    // consecutive runs for behaviour that was working as designed.
+    //
+    // THE REPLACEMENT IS STRICTLY STRONGER than the absence it retires. A
+    // refusal is a claim about the STATE, not about whether the record exists:
+    // pinned this way, a host that actually LOADED the non-plugin -- the one
+    // defect this control arm exists for -- fails here, where
+    // `!contains("libc.so")` would equally have failed a host that merely
+    // mentioned the name in passing.
+    let refused_rec = out
+        .lines()
+        .find(|l| l.contains(&format!("('{root}/plugins/libc.so':")))
+        .unwrap_or_else(|| {
+            panic!("a refused shared object stays VISIBLE as a declaration\n--- z_get ---\n{out}")
+        });
     assert!(
-        !out.contains("libc.so"),
-        "a refused shared object must not appear in the plugin registry\n--- z_get ---\n{out}"
+        refused_rec.contains(r#""state":"Declared""#),
+        "a refused shared object stays at `Declared`\n  got: {refused_rec}"
     );
+    for reached in [r#""state":"Loaded""#, r#""state":"Started""#] {
+        assert!(
+            !refused_rec.contains(reached),
+            "a non-plugin must never reach {reached}\n  got: {refused_rec}"
+        );
+    }
 }
