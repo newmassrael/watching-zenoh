@@ -818,8 +818,12 @@ pub fn admin_legs(zid_hex: &str, whatami: &str) -> Vec<AdminLeg> {
         encoding: json(),
         cardinality: AdminLegCardinality::Single,
     });
+    // R2691 — DERIVED from the kind set, not listed. A literal here was a second
+    // place the variant set lived, and the gate that compares this manifest to the
+    // answerer could not catch an omission: its population is the fixture, so a
+    // kind nothing exercises is vacuous in both directions.
     #[cfg(feature = "adminspace-introspection-handlers")]
-    for kind in [AdminEntityKind::Subscriber, AdminEntityKind::Queryable] {
+    for kind in AdminEntityKind::ALL {
         legs.push(AdminLeg {
             key: admin_entity_key(zid_hex, whatami, kind.as_str(), "**"),
             encoding: json(),
@@ -1039,22 +1043,93 @@ impl AdminSources {
 }
 
 /// The kind of a per-entity admin introspection [`AdminDeclaration`].
+///
+/// One variant per handler upstream registers through its shared per-entity
+/// helper — `zenoh/src/net/runtime/adminspace.rs` @ `fn resources_data`, reached
+/// from `subscriber`, `publisher`, `queryable`, `querier` and `token`. The set is
+/// upstream's, not a wz choice, which is why [`Self::ALL`] can be the population
+/// every surface derives from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AdminEntityKind {
     /// `@/<zid>/<whatami>/subscriber/<keyexpr>`.
     Subscriber,
+    /// `@/<zid>/<whatami>/publisher/<keyexpr>`.
+    ///
+    /// Upstream does not read a publisher table — there is none. It reads each
+    /// face's declared INTERESTS and keeps the ones asking about subscribers
+    /// (`hat/peer/pubsub.rs` @ `fn sourced_publishers`): a face that wants to know
+    /// who subscribes is publishing.
+    Publisher,
     /// `@/<zid>/<whatami>/queryable/<keyexpr>`.
     Queryable,
+    /// `@/<zid>/<whatami>/querier/<keyexpr>`.
+    ///
+    /// The querier twin of [`Self::Publisher`], from the same interest tables
+    /// filtered on the queryable option instead.
+    Querier,
+    /// `@/<zid>/<whatami>/token/<keyexpr>`.
+    ///
+    /// The liveliness-token leg. Unlike publisher/querier, EVERY upstream hat
+    /// enumerates this one, so no host is excused from it by its role.
+    Token,
 }
 
-// `as_str` is consumed only by the introspection reply block (same rationale as
-// `AdminSources::to_json` above).
 #[cfg(feature = "adminspace-introspection-handlers")]
 impl AdminEntityKind {
+    /// Every kind, as the population a surface derives from instead of listing.
+    ///
+    /// ## Why this exists rather than each site spelling its own list
+    ///
+    /// Two surfaces have to agree with the answerer about which kinds exist: the
+    /// [`admin_legs`] manifest, which tells a consumer what this node answers,
+    /// and the fixture that feeds the manifest-versus-answerer gate. Both used to
+    /// carry their own literal `[Subscriber, Queryable]`.
+    ///
+    /// That gate RUNS the answerer and compares both directions, which is what
+    /// makes it strong — but its input is the fixture, and its own comment says
+    /// so: the fixture supplies an item per per-item leg precisely so that
+    /// "declared but never observed" means the declaration is wrong rather than
+    /// the fixture being thin. So a kind added to this enum and to neither list
+    /// produced no reply to compare and no leg to miss: the gate stayed green
+    /// while the manifest under-reported, and the manifest is the document a
+    /// consumer reads to learn what is answerable (open-debt 676 exists because
+    /// one consumer had never received a live reply and was reading this tree's
+    /// tests instead).
+    ///
+    /// Deriving both from here makes that invariant hold by CONSTRUCTION. Adding
+    /// a variant now reaches the manifest and the gate's population without
+    /// anyone remembering to go there.
+    ///
+    /// ⚠ WHAT THIS DOES NOT DO, stated rather than implied: this array is itself
+    /// written by hand, and stable Rust cannot prove a `const` slice names every
+    /// variant. What stands in for that proof is [`Self::as_str`] directly below
+    /// — an EXHAUSTIVE match, so a new variant fails to compile until it is given
+    /// an arm, which drags the author into this very block where the array is the
+    /// preceding item. That is a prompt at the right moment, and nothing more.
+    ///
+    /// ⛔ In particular, NO TEST HERE GUARDS THIS ARRAY'S COMPLETENESS, and one
+    /// that looked like it would does not: a variant absent from `ALL` is absent
+    /// from every population derived from `ALL`, so a check that iterates `ALL`
+    /// cannot miss it — it never sees it. A guard would have to enumerate the
+    /// variants independently, which is the thing stable Rust will not give.
+    /// Left as it is, named, rather than papered over with a check that reads
+    /// like cover and is not.
+    pub const ALL: &'static [AdminEntityKind] = &[
+        AdminEntityKind::Subscriber,
+        AdminEntityKind::Publisher,
+        AdminEntityKind::Queryable,
+        AdminEntityKind::Querier,
+        AdminEntityKind::Token,
+    ];
+
+    /// The key chunk this kind occupies: `@/<zid>/<whatami>/<HERE>/<keyexpr>`.
     fn as_str(self) -> &'static str {
         match self {
             AdminEntityKind::Subscriber => "subscriber",
+            AdminEntityKind::Publisher => "publisher",
             AdminEntityKind::Queryable => "queryable",
+            AdminEntityKind::Querier => "querier",
+            AdminEntityKind::Token => "token",
         }
     }
 }
@@ -4146,6 +4221,52 @@ mod tests {
         assert_eq!(body, metrics_text("a1b2", "peer", "0.1.0") + metrics_eof());
     }
 
+    /// R2691 — the manifest lists a leg for EVERY entity kind the answerer can
+    /// express.
+    ///
+    /// # Why this stands beside the stronger gate below rather than inside it
+    ///
+    /// That gate compares the manifest against what the answerer actually
+    /// REPLIED, in both directions, which is stronger in every respect but one:
+    /// its population is the fixture. For a kind no fixture item exercises, the
+    /// answerer emits nothing, so "replied but not declared" and "declared but
+    /// never observed" are BOTH vacuous — it stays green while the manifest omits
+    /// the leg entirely. And the manifest is the document a consumer reads to
+    /// learn what this node answers (open-debt 676).
+    ///
+    /// So this asserts against the KIND SET rather than against what either
+    /// surface lists.
+    ///
+    /// ⚠ WHAT IT IS NOW, after the manifest was made to derive from that same set:
+    /// a REGRESSION GUARD, not a completeness proof. It caught the real defect
+    /// once — with the manifest carrying a literal pair and five kinds declared,
+    /// it named `publisher`, `querier` and `token` while the stronger gate below
+    /// stayed green — and the repair that followed put both surfaces on one
+    /// source, which is what makes that defect unrepresentable rather than merely
+    /// detected. What is left for this test to fail on is someone re-listing the
+    /// kinds at the manifest by hand. That is worth a test; it is not worth
+    /// describing as more than it is, and it says nothing about whether
+    /// [`AdminEntityKind::ALL`] itself names every variant — it cannot, since a
+    /// variant missing from `ALL` is missing from this loop too.
+    #[cfg(feature = "adminspace-introspection-handlers")]
+    #[test]
+    fn the_manifest_lists_a_leg_for_every_entity_kind() {
+        let declared = admin_legs("a1b2", "peer");
+        let missing: Vec<&'static str> = AdminEntityKind::ALL
+            .iter()
+            .map(|kind| kind.as_str())
+            .filter(|chunk| {
+                let key = admin_entity_key("a1b2", "peer", chunk, "**");
+                !declared.iter().any(|leg| leg.key == key)
+            })
+            .collect();
+        assert!(
+            missing.is_empty(),
+            "the manifest omits a per-entity leg the answerer can express: \
+             {missing:?} — the surface document under-reports what this node serves"
+        );
+    }
+
     /// R2413 (open-debt item 676) — the manifest declares EXACTLY the legs this
     /// build answers, with the encoding each one actually replied in.
     ///
@@ -4437,21 +4558,25 @@ mod tests {
     /// The per-item fixture the manifest gate needs: one declared entity of EACH
     /// introspection kind. Empty when the build has no introspection leg, which is
     /// the same thing the manifest says.
+    /// One declaration per entity kind, DERIVED from [`AdminEntityKind::ALL`].
+    ///
+    /// R2691 — this was a literal pair, and it is the input to
+    /// `the_manifest_describes_exactly_the_legs_this_build_answers`, whose own
+    /// comment explains why that matters: the fixture supplies an item per
+    /// per-item leg precisely so "declared but never observed" means the
+    /// declaration is wrong rather than the fixture being thin. A kind absent
+    /// here is a kind that gate cannot judge in either direction.
     fn fixture_declarations() -> Vec<AdminDeclaration> {
         #[cfg(feature = "adminspace-introspection-handlers")]
         {
-            alloc::vec![
-                AdminDeclaration {
-                    kind: AdminEntityKind::Subscriber,
+            AdminEntityKind::ALL
+                .iter()
+                .map(|kind| AdminDeclaration {
+                    kind: *kind,
                     keyexpr: String::from("demo/example"),
                     sources: AdminSources::default(),
-                },
-                AdminDeclaration {
-                    kind: AdminEntityKind::Queryable,
-                    keyexpr: String::from("demo/example"),
-                    sources: AdminSources::default(),
-                },
-            ]
+                })
+                .collect()
         }
         #[cfg(not(feature = "adminspace-introspection-handlers"))]
         Vec::new()
