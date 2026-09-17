@@ -556,8 +556,33 @@ enum BestQueryWinner {
 struct RouterFaceState {
     actions: Arc<SessionLinkActions>,
     tier: FaceTier,
+    /// R2685 — the peer's routing zid, kept for EVERY face that has one,
+    /// independently of whether the face joined a graph.
+    ///
+    /// Identity and graph-membership are different facts and this struct used to
+    /// carry only the second. `peer_zid_routing` reads `actions.peer_zid()` — a
+    /// SESSION-derived value with no tier condition — but register only called it
+    /// inside the graph-joining arm, so a Client face's zid was never asked for.
+    /// The adminspace `Sources` body then had nothing to put in its `clients`
+    /// bucket, where upstream pushes the face's zid regardless of graph
+    /// participation (`zenoh/src/net/routing/hat/broker/pubsub.rs` @
+    /// `srcs.clients.push(face.zid)`).
+    ///
+    /// ⚠ `None` here means the handshake carried no routing zid, which is NOT
+    /// what [`link`](Self::link)'s `None` means — see that field.
+    ///
+    /// Gated with the consumer that reads it: identity-by-face is a general
+    /// fact, but a field no build reads is dead code, and this tree refuses a
+    /// `pub`-style silencer for that. The one reader today is the `clients`
+    /// bucket of the admin `Sources` body.
+    #[cfg(feature = "adminspace-introspection-handlers")]
+    peer_zid: Option<Zid>,
     /// The graph link in the face's tier-net, or `None` for a held face (a
     /// Client, or a Router/Peer whose routing zid never surfaced).
+    ///
+    /// ⚠ This `None` is about the GRAPH, not about identity. A Client has no
+    /// linkstate node and still has a zid; reading this field as "no identity"
+    /// is what left the `clients` source bucket empty.
     link: Option<LinkId>,
     /// Per-face keyexpr-alias table (1b): a `DeclKexpr` maps `id -> resolved
     /// keyexpr` here so a later aliased `DeclareSubscriber` on this link resolves
@@ -688,6 +713,158 @@ impl RouterSessionsView {
     }
 }
 
+/// R2685 — a read-only handle over a router's live DECLARATION tables,
+/// rendering the admin `subscriber/**` and `queryable/**` introspection legs.
+///
+/// The [`RouterSessionsView`] pattern, for the fourth piece of live state the
+/// adminspace renders and the one the router host still answered `&[]` for. Its
+/// own type for the same reason that one is: the admin GET handler is STORED
+/// INSIDE the forwarder and so cannot borrow the forwarder back at query time.
+///
+/// SEVEN handles because the answer is genuinely seven-sourced: the declaration
+/// tables are per TIER (zenoh's `HatTables.router_subs` /
+/// `linkstatepeer_subs` and their queryable twins) plus the two per-FACE client
+/// stores, and `faces` resolves a client face to the zid its bucket needs. The
+/// alternative — one pre-merged table — would erase the tier, which is the only
+/// thing the reply body is actually about.
+#[cfg(feature = "adminspace-introspection-handlers")]
+pub struct RouterDeclarationsView {
+    router_subs: Rc<RefCell<LinkstatepeerInterest<()>>>,
+    linkstatepeer_subs: Rc<RefCell<LinkstatepeerInterest<()>>>,
+    router_qabls: Rc<RefCell<LinkstatepeerInterest<QueryableInfo>>>,
+    linkstatepeer_qabls: Rc<RefCell<LinkstatepeerInterest<QueryableInfo>>>,
+    client_subs: Rc<RefCell<HashMap<FaceId, HashSet<String>>>>,
+    client_qabls: Rc<RefCell<HashMap<FaceId, HashMap<String, QueryableInfo>>>>,
+    /// A client's zid comes from its FACE: a Client joins no link-state graph,
+    /// so there is nowhere else to read it from.
+    faces: Rc<RefCell<HashMap<FaceId, RouterFaceState>>>,
+}
+
+#[cfg(feature = "adminspace-introspection-handlers")]
+impl RouterDeclarationsView {
+    /// The declared subscribers this ROUTER knows, bucketed by the tier the
+    /// declaration arrived on (`@/<zid>/router/subscriber/**`, §5.23).
+    ///
+    /// The bucketing lives HERE and not in the admin host because the tier is
+    /// not something a consumer can re-derive: it is which TABLE a declaration
+    /// was registered in. `router_subs`, `linkstatepeer_subs` and `client_subs`
+    /// map one-to-one onto the `Sources` body's `routers` / `peers` / `clients`,
+    /// so reading a source's role off the link-state graph instead would
+    /// recompute a fact the data structure already asserts — and would disagree
+    /// with it for a Client, which has no graph node at all.
+    ///
+    /// This is what the peer host cannot do and correctly does not try: a plain
+    /// peer has ONE tier, so the `peers`-only body it builds
+    /// (`run_peer`'s `sources` closure) is locally true. Three tables is what
+    /// makes the router the place the distinction is real, and the pin agrees by
+    /// a route this fold mirrors: each HAT fills ONE bucket for its own tier and
+    /// the dispatcher merges them per resource
+    /// (`zenoh/src/net/routing/dispatcher/tables.rs` @
+    /// `pub(crate) fn sourced_subscribers(&self)`). The three fillers are
+    /// `zenoh/src/net/routing/hat/broker/pubsub.rs` @ `srcs.clients.push(face.zid);`
+    /// and `zenoh/src/net/routing/hat/peer/pubsub.rs` @ `srcs.peers.push(face.zid);`
+    /// with the router hat's own, cited on the self-exclusion below.
+    ///
+    /// REMOTE declarations only, self EXCLUDED — the pin is explicit about it
+    /// (`zenoh/src/net/routing/hat/router/pubsub.rs` @
+    /// `.filter(|router| router != &tables.zid)`), and the other two hats reach
+    /// the same place by reading `remote_subs` per owned face. This node's OWN
+    /// `local_queryables` (the admin queryable it hosts) therefore do NOT appear
+    /// here, which is why an isolated router answers these legs with nothing:
+    /// what it knows about declarations is what its neighbours told it.
+    pub fn subscribers(&self) -> Vec<(String, wz_session_core::adminspace::AdminSources)> {
+        self.bucket_by_tier(
+            &self.router_subs.borrow(),
+            &self.linkstatepeer_subs.borrow(),
+            &self.client_subs.borrow(),
+        )
+    }
+
+    /// The [`subscribers`](Self::subscribers) twin for queryables. The body is
+    /// the SAME `Sources` struct zenoh serializes for both entity kinds, not the
+    /// per-declaration `QueryableInfo` — so the client store's inner map is
+    /// reduced to its keyexpr set here.
+    pub fn queryables(&self) -> Vec<(String, wz_session_core::adminspace::AdminSources)> {
+        let clients: HashMap<FaceId, HashSet<String>> = self
+            .client_qabls
+            .borrow()
+            .iter()
+            .map(|(face, by_key)| (*face, by_key.keys().cloned().collect()))
+            .collect();
+        self.bucket_by_tier(
+            &self.router_qabls.borrow(),
+            &self.linkstatepeer_qabls.borrow(),
+            &clients,
+        )
+    }
+
+    /// Fold three tier tables into one keyexpr -> `Sources` list, sorted by
+    /// keyexpr so two GETs of one unchanged state reply identically (a
+    /// `HashMap` iteration order would not).
+    fn bucket_by_tier<A, B>(
+        &self,
+        routers: &LinkstatepeerInterest<A>,
+        peers: &LinkstatepeerInterest<B>,
+        clients: &HashMap<FaceId, HashSet<String>>,
+    ) -> Vec<(String, wz_session_core::adminspace::AdminSources)>
+    where
+        A: Clone,
+        B: Clone,
+    {
+        use wz_session_core::adminspace::AdminSources;
+        use wz_session_core::zid_hex::zid_to_zenoh_hex;
+
+        let empty = || AdminSources {
+            routers: Vec::new(),
+            peers: Vec::new(),
+            clients: Vec::new(),
+        };
+        let mut by_key: HashMap<String, AdminSources> = HashMap::new();
+        for (keyexpr, zid, _) in routers.entries() {
+            by_key
+                .entry(keyexpr)
+                .or_insert_with(empty)
+                .routers
+                .push(zid_to_zenoh_hex(zid.as_slice()));
+        }
+        for (keyexpr, zid, _) in peers.entries() {
+            by_key
+                .entry(keyexpr)
+                .or_insert_with(empty)
+                .peers
+                .push(zid_to_zenoh_hex(zid.as_slice()));
+        }
+        let faces = self.faces.borrow();
+        for (face, keys) in clients.iter() {
+            let Some(zid) = faces.get(face).and_then(|f| f.peer_zid) else {
+                // A face whose handshake carried no routing zid contributes no
+                // SOURCE. Skipping is the honest answer: an entry naming no zid
+                // would claim a declaration nobody can be named for.
+                continue;
+            };
+            let hex = zid_to_zenoh_hex(zid.as_slice());
+            for keyexpr in keys {
+                by_key
+                    .entry(keyexpr.clone())
+                    .or_insert_with(empty)
+                    .clients
+                    .push(hex.clone());
+            }
+        }
+        // Within a bucket too: the zid order otherwise follows the table's
+        // hashing, and a body that reorders between two identical GETs is a
+        // difference an operator has to explain.
+        let mut out: Vec<(String, AdminSources)> = by_key.into_iter().collect();
+        for (_, sources) in out.iter_mut() {
+            sources.routers.sort();
+            sources.peers.sort();
+            sources.clients.sort();
+        }
+        out.sort_by(|a, b| a.0.cmp(&b.0));
+        out
+    }
+}
+
 /// A [`FaceForwarder`] that maintains zenoh's DUAL router meshes — `routers_net`
 /// (Router-tier) and `linkstatepeers_net` (Peer-tier) — from the face lifecycle
 /// and inbound `OAM_LINKSTATE` topology. The router counterpart to the
@@ -783,18 +960,18 @@ pub struct RouterForwarder {
     /// POPULATED by the subscription-INGEST slice (1b, this round): NATIVE
     /// Router sources keyed by their zid. The cross-tier self-bubble is NOT
     /// stored — it is DERIVED at route-compute from the native tables.
-    router_subs: RefCell<LinkstatepeerInterest<()>>,
+    router_subs: Rc<RefCell<LinkstatepeerInterest<()>>>,
     /// Peer-tier subscription interest (zenoh `HatTables.linkstatepeer_subs`).
     /// Populated by slice 1b (native Peer sources keyed by zid).
-    linkstatepeer_subs: RefCell<LinkstatepeerInterest<()>>,
+    linkstatepeer_subs: Rc<RefCell<LinkstatepeerInterest<()>>>,
     /// Router-tier queryable interest (zenoh `HatTables.router_qabls`).
     /// POPULATED by the queryable-INGEST slice (1c, this round): NATIVE Router
     /// queryable sources keyed by zid, VALUE = their declared `QueryableInfo`.
     /// The cross-tier self-bubble (a MERGED info in zenoh) is DERIVED at compute.
-    router_qabls: RefCell<LinkstatepeerInterest<QueryableInfo>>,
+    router_qabls: Rc<RefCell<LinkstatepeerInterest<QueryableInfo>>>,
     /// Peer-tier queryable interest (zenoh `HatTables.linkstatepeer_qabls`).
     /// Populated by slice 1c (native Peer queryable sources keyed by zid).
-    linkstatepeer_qabls: RefCell<LinkstatepeerInterest<QueryableInfo>>,
+    linkstatepeer_qabls: Rc<RefCell<LinkstatepeerInterest<QueryableInfo>>>,
     /// Router-tier liveliness-TOKEN interest (zenoh `HatTables.router_tokens`).
     /// The TOKEN TWIN of `router_subs` — a source-zid set with NO value payload
     /// (tokens carry no info, unlike `QueryableInfo`), so `V = ()` exactly like
@@ -848,7 +1025,7 @@ pub struct RouterForwarder {
     /// stale until face-down. The wz-PEER client-sub/qabl planes were converted to id-keyed
     /// at R311y178 (and `client_tokens` above at slice-3); the router client_subs/client_qabls
     /// are the remaining keyexpr-keyed holdouts — the symmetric id-map fix is a named follow-up.
-    client_subs: RefCell<HashMap<FaceId, HashSet<String>>>,
+    client_subs: Rc<RefCell<HashMap<FaceId, HashSet<String>>>>,
     /// Per-CLIENT-face QUERYABLE store (C5b) — the query-plane twin of
     /// [`client_subs`](Self#structfield.client_subs): zenoh's per-`Resource`
     /// `session_ctxs[..].qabl` leaf input, keyed by the client's [`FaceId`] and, per
@@ -873,7 +1050,7 @@ pub struct RouterForwarder {
     /// CARRIED FOLLOW-UP (id-map): still KEYEXPR-keyed, so a client's ID-ONLY graceful
     /// `UndeclareQueryable` no-ops in `withdraw_client_queryable` -> stale until face-down.
     /// The symmetric id-map fix (the wz-peer planes got it at R311y178) is a named follow-up.
-    client_qabls: RefCell<HashMap<FaceId, HashMap<String, QueryableInfo>>>,
+    client_qabls: Rc<RefCell<HashMap<FaceId, HashMap<String, QueryableInfo>>>>,
     /// Queryables HOSTED BY THIS ROUTER (§5.23 `adminspace-router-linkstate`) —
     /// e.g. the built-in admin queryable on `@/<self-zid>/router/**`. The
     /// router-idiom `derive-not-store` analogue of the peer
@@ -1259,18 +1436,18 @@ impl RouterForwarder {
             mcast_group_members: RefCell::new(Vec::new()),
             #[cfg(feature = "router-multicast-faces")]
             group_subs: RefCell::new(HashSet::new()),
-            router_subs: RefCell::new(LinkstatepeerInterest::new()),
-            linkstatepeer_subs: RefCell::new(LinkstatepeerInterest::new()),
-            router_qabls: RefCell::new(LinkstatepeerInterest::new()),
-            linkstatepeer_qabls: RefCell::new(LinkstatepeerInterest::new()),
+            router_subs: Rc::new(RefCell::new(LinkstatepeerInterest::new())),
+            linkstatepeer_subs: Rc::new(RefCell::new(LinkstatepeerInterest::new())),
+            router_qabls: Rc::new(RefCell::new(LinkstatepeerInterest::new())),
+            linkstatepeer_qabls: Rc::new(RefCell::new(LinkstatepeerInterest::new())),
             #[cfg(feature = "routing-token-tables")]
             router_tokens: RefCell::new(LinkstatepeerInterest::new()),
             #[cfg(feature = "routing-token-tables")]
             linkstatepeer_tokens: RefCell::new(LinkstatepeerInterest::new()),
             #[cfg(feature = "routing-token-tables")]
             client_tokens: RefCell::new(HashMap::new()),
-            client_subs: RefCell::new(HashMap::new()),
-            client_qabls: RefCell::new(HashMap::new()),
+            client_subs: Rc::new(RefCell::new(HashMap::new())),
+            client_qabls: Rc::new(RefCell::new(HashMap::new())),
             local_queryables: RefCell::new(Vec::new()),
             local_subscribers: RefCell::new(Vec::new()),
             future_subs: RefCell::new(FutureSubStore::new()),
@@ -5217,6 +5394,42 @@ impl RouterForwarder {
         }
     }
 
+    /// R2685 — a read-only [`RouterDeclarationsView`] over the live declaration
+    /// tables: the admin host's `subscriber/**` + `queryable/**` render seam.
+    /// Held by the GET handler the forwarder itself stores, which is why it
+    /// exists rather than the handler borrowing the forwarder — the
+    /// [`sessions_view`](Self::sessions_view) rationale, unchanged.
+    #[cfg(feature = "adminspace-introspection-handlers")]
+    pub fn declarations_view(&self) -> RouterDeclarationsView {
+        RouterDeclarationsView {
+            router_subs: Rc::clone(&self.router_subs),
+            linkstatepeer_subs: Rc::clone(&self.linkstatepeer_subs),
+            router_qabls: Rc::clone(&self.router_qabls),
+            linkstatepeer_qabls: Rc::clone(&self.linkstatepeer_qabls),
+            client_subs: Rc::clone(&self.client_subs),
+            client_qabls: Rc::clone(&self.client_qabls),
+            faces: Rc::clone(&self.faces),
+        }
+    }
+
+    /// The declared subscribers, for a caller that holds the forwarder itself
+    /// (tests, and a host that renders once rather than per GET).
+    ///
+    /// A one-line delegate to [`RouterDeclarationsView::subscribers`], where the
+    /// bucketing and its reasoning live — deliberately not a second copy of that
+    /// doc, for the reason [`admin_sessions`](Self::admin_sessions) gives.
+    #[cfg(feature = "adminspace-introspection-handlers")]
+    pub fn admin_subscribers(&self) -> Vec<(String, wz_session_core::adminspace::AdminSources)> {
+        self.declarations_view().subscribers()
+    }
+
+    /// The declared queryables — the [`admin_subscribers`](Self::admin_subscribers)
+    /// twin, delegating to [`RouterDeclarationsView::queryables`].
+    #[cfg(feature = "adminspace-introspection-handlers")]
+    pub fn admin_queryables(&self) -> Vec<(String, wz_session_core::adminspace::AdminSources)> {
+        self.declarations_view().queryables()
+    }
+
     /// A read-only [`LinkstateNetView`] over the ROUTER-tier graph (`routers_net`)
     /// — the adminspace host's DOT + `route/successor` render seam (§5.23).
     ///
@@ -6261,6 +6474,13 @@ impl FaceForwarder for RouterForwarder {
             RouterFaceState {
                 actions: actions.clone(),
                 tier,
+                // R2685 — read UNCONDITIONALLY, not from `added`. The graph arm
+                // above resolves a zid only when the face joins a net, so taking
+                // it from there would keep reproducing the defect: a Client face
+                // would be identity-less because it is a leaf, which conflates
+                // two independent facts.
+                #[cfg(feature = "adminspace-introspection-handlers")]
+                peer_zid: peer_zid_routing(actions),
                 link: added.map(|(link, _, _)| link),
                 keyexpr_table: hashbrown::HashMap::new(),
             },
@@ -7360,6 +7580,128 @@ mod tests {
         assert_eq!(
             view.admin_sessions().len(),
             3,
+            "the view is live, not a snapshot taken when it was made"
+        );
+    }
+
+    /// R2685 — the router's per-tier sub/qabl introspection, the §5.23 residual
+    /// the host answered with a literal `&[]`.
+    ///
+    /// SIX DISTINCT KEYEXPRS, one per (tier, kind) cell, and that asymmetry is
+    /// the point rather than tidiness. Every field this fold reads is a
+    /// `LinkstatepeerInterest` or a face-keyed map of the same shape, and
+    /// `bucket_by_tier` is generic over the value type, so reading the SUB table
+    /// where the QABL one was meant still type-checks — the compiler cannot see
+    /// that class at all. A fixture that declared one keyexpr on both planes
+    /// would be satisfied by the transposed program, so the keys are disjoint:
+    /// any cross-wiring moves a keyexpr into a leg it does not belong to.
+    #[cfg(feature = "adminspace-introspection-handlers")]
+    #[test]
+    fn admin_declarations_bucket_each_tier_into_its_own_sources_field() {
+        use wz_session_core::zid_hex::zid_to_zenoh_hex;
+
+        let fwd = RouterForwarder::new(zid(0x01));
+        assert!(
+            fwd.admin_subscribers().is_empty() && fwd.admin_queryables().is_empty(),
+            "a router nobody has declared to reports nothing — the control that \
+             stops every assertion below from passing on an always-full answer"
+        );
+
+        let (a_r, _s1) = face(zid(0xAA), WIRE_ROUTER);
+        let (b_p, _s2) = face(zid(0xBB), WIRE_PEER);
+        let (c_c, _s3) = face(zid(0xCC), WIRE_CLIENT);
+        fwd.register(FaceId(0), &a_r);
+        fwd.register(FaceId(1), &b_p);
+        fwd.register(FaceId(2), &c_c);
+
+        for (id, sub_key, qabl_key) in [
+            (FaceId(0), "mesh/router/sub", "mesh/router/qabl"),
+            (FaceId(1), "mesh/peer/sub", "mesh/peer/qabl"),
+            (FaceId(2), "leaf/client/sub", "leaf/client/qabl"),
+        ] {
+            forward_one(&fwd, id, declare_sub(sub_key));
+            forward_one(&fwd, id, declare_qabl(qabl_key, true));
+        }
+
+        let hex = |b| zid_to_zenoh_hex(zid(b).as_slice());
+        let flatten = |rows: Vec<(String, wz_session_core::adminspace::AdminSources)>| {
+            rows.into_iter()
+                .map(|(k, s)| (k, s.routers, s.peers, s.clients))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            flatten(fwd.admin_subscribers()),
+            vec![
+                (
+                    String::from("leaf/client/sub"),
+                    vec![],
+                    vec![],
+                    vec![hex(0xCC)]
+                ),
+                (
+                    String::from("mesh/peer/sub"),
+                    vec![],
+                    vec![hex(0xBB)],
+                    vec![]
+                ),
+                (
+                    String::from("mesh/router/sub"),
+                    vec![hex(0xAA)],
+                    vec![],
+                    vec![]
+                ),
+            ],
+            "each tier's table fills its OWN `Sources` bucket, sorted by keyexpr"
+        );
+        assert_eq!(
+            flatten(fwd.admin_queryables()),
+            vec![
+                (
+                    String::from("leaf/client/qabl"),
+                    vec![],
+                    vec![],
+                    vec![hex(0xCC)]
+                ),
+                (
+                    String::from("mesh/peer/qabl"),
+                    vec![],
+                    vec![hex(0xBB)],
+                    vec![]
+                ),
+                (
+                    String::from("mesh/router/qabl"),
+                    vec![hex(0xAA)],
+                    vec![],
+                    vec![]
+                ),
+            ],
+            "the queryable plane answers from the QABL tables — a sub-table read \
+             here would report the `sub` keyexprs and type-check while doing it"
+        );
+
+        // The router's OWN hosted queryable is NOT a source of itself. The pin is
+        // explicit (`hat/router/pubsub.rs` @ `.filter(|router| router != &tables.zid)`),
+        // and it is why an isolated router answers these legs empty.
+        fwd.register_local_queryable("wz/self/hosted", true, Box::new(|_, _| {}));
+        assert!(
+            !flatten(fwd.admin_queryables())
+                .iter()
+                .any(|(k, ..)| k == "wz/self/hosted"),
+            "a locally hosted queryable is this node's own declaration, not a \
+             source it learned from a neighbour"
+        );
+
+        // The view the admin handler actually holds answers the same, and LIVE —
+        // the `sessions_view` property, re-asserted because it is what makes a
+        // per-GET render correct rather than a snapshot of registration time.
+        let view = fwd.declarations_view();
+        let (d_r, _s4) = face(zid(0xDD), WIRE_ROUTER);
+        fwd.register(FaceId(3), &d_r);
+        forward_one(&fwd, FaceId(3), declare_sub("mesh/router/late"));
+        assert!(
+            view.subscribers()
+                .iter()
+                .any(|(k, s)| k == "mesh/router/late" && s.routers == vec![hex(0xDD)]),
             "the view is live, not a snapshot taken when it was made"
         );
     }
