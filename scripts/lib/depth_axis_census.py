@@ -986,7 +986,15 @@ CITATION = re.compile(r"\b((?:[A-Za-z0-9_.-]+/)*[A-Za-z0-9_.-]+\.(?:rs|c|h))(?::
 # row leaves the REACHED count with it. UNREACHED and NO_SYMBOL correctly hold —
 # this atom was reached, which is the half of the census that makes the drop a
 # subtraction of one known row rather than a shift between buckets.
-PIN_REACHED = 22
+# R2697 — 22 -> 23, and it is the previous entry run backwards: the atom is
+# `session-close-ingress`, regraded COMPLETE -> PARTIAL on the owner's
+# instruction of 2026-09-17 because open-debt item 761's interface decision
+# widened the scope past what the COMPLETE grade covered. It ENTERS the PARTIAL
+# population, so its row enters the REACHED count with it — R2679 attached lanes
+# to that atom, so it arrives already reached, and UNREACHED and NO_SYMBOL hold
+# at 3 and 2. All three pins in this file rise by that one atom's arrival, which
+# is why this is an ADDITION rather than a shift between buckets.
+PIN_REACHED = 23
 PIN_UNREACHED = 3
 PIN_NO_SYMBOL = 2
 # R2534 — 346 -> 347. The atom is `adminspace-metrics` and the citation is the
@@ -1642,7 +1650,13 @@ PIN_NO_SYMBOL = 2
 # reason's only ambiguous citation was the one it rooted INTO this bucket, so by
 # the time the atom retired it held none left to remove. The arithmetic closes
 # exactly, which is the property that distinguishes a retirement from a drift.
-PIN_WZ_CITATIONS = 125
+# R2697 — 125 -> 128. The same arrival as PIN_REACHED above:
+# `session-close-ingress` re-enters the PARTIAL population and brings its own
+# reason's wz citations with it. THREE, measured by the census rather than
+# counted off the reason, which is the rule this file states for itself — a
+# ceiling moved on a different measurement than the one checked against it is a
+# ceiling nobody can reason about.
+PIN_WZ_CITATIONS = 128
 # R2626 — 44 -> 42, and this one is worth a sentence because it HELD through
 # every earlier retirement in this run (R2612, R2622). `time-hlc`'s reason is the
 # first retiree carrying AMBIGUOUS citations of its own: its oldest clauses cite
@@ -1669,7 +1683,14 @@ PIN_WZ_CITATIONS = 125
 # none was ever graded against one subject. They leave with the atom.
 # Attributed by the same re-insertion measurement recorded at PIN_WZ_CITATIONS,
 # not carried across from a precedent's shape: 31 - 9 = 22.
-PIN_AMBIGUOUS = 22
+# R2697 -- 22 -> 23, the first ARRIVAL this pin has recorded where every entry
+# above is a departure. `session-close-ingress` is regraded COMPLETE -> PARTIAL
+# (owner instruction, open-debt item 761) and re-enters the population carrying
+# ONE ambiguous citation. Measured by re-running this census with the atom back
+# in, exactly as the two entries above insist: the ambiguous count is a property
+# of a reason's citation forms, and a precedent's arithmetic cannot be carried
+# across to a different reason.
+PIN_AMBIGUOUS = 23
 
 
 class Fatal(Exception):
