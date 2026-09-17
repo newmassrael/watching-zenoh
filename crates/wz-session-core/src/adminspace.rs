@@ -1111,7 +1111,7 @@ impl AdminEntityKind {
     ///
     /// ⚠ WHAT THIS DOES NOT DO, stated rather than implied: this array is itself
     /// written by hand, and stable Rust cannot prove a `const` slice names every
-    /// variant. What stands in for that proof is [`Self::as_str`] directly below
+    /// variant. What stands in for that proof is `as_str` directly below
     /// — an EXHAUSTIVE match, so a new variant fails to compile until it is given
     /// an arm, which drags the author into this very block where the array is the
     /// preceding item. That is a prompt at the right moment, and nothing more.
