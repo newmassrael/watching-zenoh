@@ -214,7 +214,20 @@ LEGS=(
     "wz-capture|hook|dissect,fixtures|"
     "wz-mcu-session-acceptor|hook|buffer-pool-session-rx-slim,reassembly|"
     "wz-packet-socket|hook|tap|"
-    "wz-rest|hook|rest-sse-subscribe|"
+    # R2680 — widened from `rest-sse-subscribe` alone when `wz-rest` gained
+    # `adminspace-plugins-handlers` (the bridge's own `rest` plugin record + its
+    # `status/plugins/rest/**` sub-tree). The R2524 lesson applied BEFORE the
+    # census had to say so: a leg only runs what its own feature list builds, so
+    # a crate that gains a non-default feature and keeps its old row reports
+    # green over tests nothing compiled.
+    # MEASURED before widening, per this block's own rule: `cargo test -p wz-rest
+    # --features rest-sse-subscribe,adminspace-plugins-handlers` = 21 passed /
+    # 0 failed, 11s. Ten of those seconds are one test: `rest_admin_plugin_e2e`
+    # asks the bridge about itself, and the admin GET is also routed to the far
+    # face, which has no matching queryable and never finals — so the query is
+    # reaped at the bridge's own `QUERY_TIMEOUT_MS`. Upstream's plugin issues its
+    # GET the same way; the cost is the shape of a REST admin GET, not a stall.
+    "wz-rest|hook|rest-sse-subscribe,adminspace-plugins-handlers|"
     "wz-runtime-coop|hook|\
         alloc,\
         codec-close,\
