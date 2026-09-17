@@ -159,18 +159,26 @@ mod alloc_map {
     /// `AdminEntityKind` is not `Ord`, and making it so would widen a
     /// `wz-session-core` public type for one consumer's map key. The ordinal is
     /// local, total, and round-trips through [`kind_of`].
+    ///
+    /// R2691 — DERIVED from `AdminEntityKind::ALL`, where it used to be a
+    /// hand-written match. That match was a THIRD place the variant set lived,
+    /// one crate away from the other two, and it is how this round learned the
+    /// lesson twice: adding three variants left it non-exhaustive, and the build
+    /// that caught it was not the workspace check but gate 2h, because the only
+    /// configuration compiling this path is a non-default feature combination.
+    ///
+    /// Position in `ALL` is a better ordinal than any number written here: it is
+    /// total, it cannot disagree with the set the surfaces derive from, and it
+    /// orders replies in the sequence the kinds are declared in.
     fn kind_ord(kind: AdminEntityKind) -> u8 {
-        match kind {
-            AdminEntityKind::Subscriber => 0,
-            AdminEntityKind::Queryable => 1,
-        }
+        AdminEntityKind::ALL
+            .iter()
+            .position(|k| *k == kind)
+            .expect("ALL is the variant set, so every kind has a position in it") as u8
     }
 
     fn kind_of(ord: u8) -> AdminEntityKind {
-        match ord {
-            0 => AdminEntityKind::Subscriber,
-            _ => AdminEntityKind::Queryable,
-        }
+        AdminEntityKind::ALL[ord as usize]
     }
 }
 
