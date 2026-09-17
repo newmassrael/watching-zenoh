@@ -814,6 +814,25 @@ round_fed_gates=(
     # constants, so any test added tomorrow is inside its population already.
     # MEASURED: 0.05s, pure parse, no build.
     "multicast_address_collision_gate.py"
+    # R2684 — `feature_gate_diagnostic --check` was HOSTED-ONLY (Layer C1bn) and
+    # nothing here reached it. `feature_public_surface_census` runs in this hook
+    # and IMPORTS its tables, which is why it looked covered and was not: the
+    # census asks whether a declared claim is FALSE, this asks whether a declared
+    # feature was DECIDED about at all. A feature that gates no public item and
+    # has no entry is invisible to the first and caught by the second.
+    #
+    # Measured by two rounds shipping silent: R2678's `session-close-ingress` and
+    # R2680's `rest-http-bridge` both reached origin undeclared, and hosted C1bn
+    # reported them together — one push after the round that could have fixed
+    # each in place. That is the registered class "a hosted-only gate is
+    # invisible to the commit that moves it".
+    #
+    # Round-fed: it reads `Cargo.toml` feature lists and every `#[cfg(feature)]`
+    # under `crates/`, so a feature added tomorrow is already in its population.
+    # MEASURED: 31s warm — the dearest member here, and affordable by this
+    # hook's own standard (gate 2h runs 12 legs at 34s). It builds throwaway
+    # probe crates, which is the cost.
+    "feature_gate_diagnostic.py --check"
 )
 # ⚠ The module and its ARGUMENTS are expanded separately, and that too is
 # forced rather than chosen: `scripts/lib/"${cmd[@]}"` attaches the prefix to
