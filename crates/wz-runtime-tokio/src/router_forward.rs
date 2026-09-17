@@ -605,6 +605,7 @@ const MCAST_INGRESS_FACE: FaceId = FaceId(u64::MAX);
 /// renders it, which is why `linkstate/peers` was servable only from a router.
 /// The type and its impl were never gated within this module; only the module's
 /// own `#[cfg]` confined them.
+#[cfg(feature = "adminspace-router-linkstate")]
 pub use crate::linkstate_forward::LinkstateNetView;
 
 /// R2636 (open-debt item 748) — a read-only handle over a router's live face
@@ -5218,12 +5219,17 @@ impl RouterForwarder {
 
     /// A read-only [`LinkstateNetView`] over the ROUTER-tier graph (`routers_net`)
     /// — the adminspace host's DOT + `route/successor` render seam (§5.23).
+    ///
+    /// R2684 — gated with the view type itself: both are the render half of the
+    /// admin linkstate legs and have no consumer without them.
+    #[cfg(feature = "adminspace-router-linkstate")]
     pub fn routers_net_view(&self) -> LinkstateNetView {
         LinkstateNetView::new(Rc::clone(&self.routers_net))
     }
 
     /// A read-only [`LinkstateNetView`] over the PEER-tier graph
     /// (`linkstatepeers_net`) — the adminspace host's `linkstate/peers` render seam.
+    #[cfg(feature = "adminspace-router-linkstate")]
     pub fn peers_net_view(&self) -> LinkstateNetView {
         LinkstateNetView::new(Rc::clone(&self.linkstatepeers_net))
     }

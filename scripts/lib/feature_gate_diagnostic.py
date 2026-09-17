@@ -249,12 +249,43 @@ NO_PUBLIC_PATH: dict[str, dict[str, str]] = {
             # which imports these tables.
             "adminspace-metrics",
             "adminspace-read",
-            "adminspace-router-linkstate",
+            # R2684 — `adminspace-router-linkstate` LEAVES this list, by the same
+            # route R2571 records above and R2454 before it: the claim was true
+            # when written and THIS round falsified it. Serving `linkstate/peers`
+            # from a plain peer needed the render seam to be reachable from the
+            # peer tier, so `LinkstateForwarder` gained
+            # `#[cfg(feature = "adminspace-router-linkstate")] pub fn net_view`
+            # — a `#[cfg]` in this package attaching the feature to a publicly
+            # visible item, which is exactly what this list denies.
+            #
+            # Removed rather than re-worded: the entry is a CLAIM the census
+            # re-derives every run, not an exemption, and the honest repair for a
+            # claim a change makes false is to withdraw it. The round that
+            # falsifies one is the round that owes the withdrawal — the comment
+            # above exists because a previous round did not come back for it and
+            # two gates reported the same defect.
             "adminspace-write",
             "config-mutate-runtime",
             "ext-pubsub-sample-miss-detection",
             "multicast-declarations",
             "reply-source-info",
+            # R2684 — TWO features this package declared and no table decided
+            # about, both added by recent rounds that did not come back for the
+            # declaration. Neither is new work: they were already silent when
+            # this round started, and the axis calls that silence the thing it
+            # exists to refuse.
+            #
+            # `rest-http-bridge` (R2680, mine) is a MARKER with no forward, and
+            # it appears in this package ONLY as `cfg!(feature = ..)` — a runtime
+            # boolean inside the private `compiled_plugin_ids`, never a `#[cfg]`
+            # on an item. The claim above names expressions in terms, so it is
+            # true of it literally rather than by stretch.
+            #
+            # `session-close-ingress` (R2678) forwards to wz-session-core and
+            # gates one integration-test crate root (`tests/`), which is not a
+            # publicly visible item of this library either.
+            "rest-http-bridge",
+            "session-close-ingress",
             # R2667 — `router-connect-reconcile` LEAVES this list, the same way
             # and for the same kind of reason `access-extauth-usrpwd` did above.
             # The round that falsified it wired `connect/endpoints` into the
@@ -336,6 +367,16 @@ DEFERRED: dict[str, dict[str, str]] = {
             )
             for f in (
                 "adminspace-introspection-handlers",
+                # R2684 — `adminspace-router-linkstate` is NOT here, and the
+                # round that nearly put it here records why. It left this
+                # package's `NO_PUBLIC_PATH` when `LinkstateForwarder::net_view`
+                # falsified that claim, and `@defer impl-method` was the obvious
+                # next home: a `pub fn` in an `impl` has no `module::name` path.
+                # Then gating the view TYPE on this feature — the repair for the
+                # dead-code the diagnostic's own probe build found — gave it two
+                # MODULE-LEVEL sites under a simple cfg, which is the shape
+                # `derived_probes` reads off the crate root. So it is probed, not
+                # deferred, and nothing is typed here for it.
                 "liveliness-get",
                 "router-multicast-faces",
                 "routing-interceptor-hotreload",

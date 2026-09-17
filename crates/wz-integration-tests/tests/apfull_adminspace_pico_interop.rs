@@ -483,9 +483,9 @@ fn apfull_adminspace_plane_decoded_by_a_real_pico_z_get() {
     // ── adminspace-router-linkstate — the PEER-tier linkstate leg ────
     //
     // R2684. Upstream registers the peer-tier handler for ANY non-Client hat
-    // (`zenoh/src/net/runtime/adminspace.rs` @ `.filter(|(_, hat)|
-    // hat.mode().is_peer() || hat.mode().is_router())`), so a plain linkstate
-    // peer answers `linkstate/peers`. wz served it only from a router host,
+    // (`zenoh/src/net/runtime/adminspace.rs` @ `hat.mode().is_peer()`), so a
+    // plain linkstate peer answers `linkstate/peers`. wz served it only from a
+    // router host,
     // because the render seam (`LinkstateNetView`) lived behind
     // `routing-router-hat` while the graph it renders belongs to the peer tier.
     //

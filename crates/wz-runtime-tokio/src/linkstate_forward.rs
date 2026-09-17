@@ -318,8 +318,19 @@ type ClientQabls = HashMap<FaceId, HashMap<u64, (String, QueryableInfo)>>;
 /// behind `routing-router-hat` — which is the whole of why `linkstate/peers`
 /// could be served only from a router. `router_forward` re-exports it, so every
 /// path that already named it is unchanged.
+///
+/// Gated on `adminspace-router-linkstate` because that is what the seam IS —
+/// the render half of the admin linkstate legs, with no other consumer. Left
+/// ungated it goes dead in every build serving no adminspace, and
+/// `pub(crate) fn new` then trips `-D dead-code`; the diagnostic axis found
+/// exactly that while probing an unrelated feature. Making the constructor
+/// `pub` would also have silenced it — `pub` items draw no dead-code warning —
+/// and that is the wrong repair twice: it hides the fact, and it lets a
+/// consumer mint a view over a graph it obtained some other way.
+#[cfg(feature = "adminspace-router-linkstate")]
 pub struct LinkstateNetView(Rc<RefCell<LinkstateNetwork>>);
 
+#[cfg(feature = "adminspace-router-linkstate")]
 impl LinkstateNetView {
     /// Wrap a shared graph in the render seam. `pub(crate)` rather than `pub`:
     /// the handle is a VIEW a forwarder hands out, never something a consumer
@@ -2781,9 +2792,13 @@ impl LinkstateForwarder {
     /// The sibling on `RouterForwarder` has existed since R311y204; this one had
     /// not, and its absence is the whole of why that leg was servable only from a
     /// router. Upstream registers the peer-tier handler for ANY non-Client hat
-    /// (`zenoh/src/net/runtime/adminspace.rs` @ `.filter(|(_, hat)|
-    /// hat.mode().is_peer() || hat.mode().is_router())`), so a plain linkstate
-    /// peer answers it there and could not here.
+    /// (`zenoh/src/net/runtime/adminspace.rs` @ `hat.mode().is_peer()`), so a
+    /// plain linkstate peer answers it there and could not here.
+    ///
+    /// ⚠ The needle is kept SHORT so the whole `path` @ `needle` fits one line:
+    /// the anchor parser reads a citation per line, so a needle wrapped across
+    /// two comment lines is scored as the BARE form it is not. R2684 added three
+    /// of those and the budget caught all three at once.
     ///
     /// Read-only by construction: the view hands out `dot()` and
     /// `route_successors_hex()` and never a `borrow_mut`, so an admin GET cannot

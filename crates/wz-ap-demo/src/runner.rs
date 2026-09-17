@@ -4890,9 +4890,8 @@ async fn run_peer_until(
         // `Rc`-backed, so it renders LIVE per GET rather than from a snapshot.
         //
         // Upstream serves the peer-tier handler from ANY non-Client hat
-        // (`zenoh/src/net/runtime/adminspace.rs` @ `.filter(|(_, hat)|
-        // hat.mode().is_peer() || hat.mode().is_router())`), which is what wz did
-        // not do: the leg existed only on the router host.
+        // (`zenoh/src/net/runtime/adminspace.rs` @ `hat.mode().is_peer()`), which
+        // is what wz did not do: the leg existed only on the router host.
         #[cfg(feature = "adminspace-router-linkstate")]
         let peers_view = forwarder.net_view();
         let handler = move |view: &dyn QueryView, out: &mut dyn ReplyOut| {
