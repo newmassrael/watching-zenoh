@@ -407,6 +407,14 @@ use crate::session_glue::{ConsolidationMode, QueryTarget};
 // (declare-listeners + publisher/querier matching status; a multicast session
 // has no declares / publishers / queriers), so the typestate gates them
 // `transport-unicast` and they store a `Session<R, T, Unicast>`.
+// R2690 — the pure-Session admin host's per-entity declaration materialization
+// (§5.23). Gated on the atom that consumes it: no other build has a reader, and
+// an always-compiled module would carry the fold as dead code.
+#[cfg(all(
+    feature = "adminspace-introspection-handlers",
+    feature = "adminspace-core"
+))]
+mod admin_declarations;
 #[cfg(feature = "transport-unicast")]
 mod decl_listener;
 #[cfg(feature = "transport-unicast")]
@@ -670,6 +678,38 @@ where
     /// owned the count would emit a Final the other still needs.
     #[cfg(all(feature = "session-matching", feature = "declare-interest"))]
     matching_interests: Arc<std::sync::Mutex<MatchingInterestTable>>,
+    /// R2690 (§5.23) — this host's per-entity admin introspection answer, rebuilt
+    /// WHOLESALE from the observer's declaration tables whenever they move.
+    ///
+    /// ## Why the admin host needs a cache at all
+    ///
+    /// The admin GET handler is stored INSIDE the observer's queryable registry
+    /// and is dispatched with `&mut ApplicationLayerObserver` held
+    /// (`observer.rs` @ `self.queryables.dispatch_iteration_event`). It can
+    /// therefore neither borrow the observer back nor re-lock it, and the tables
+    /// it must report are sibling fields of the very struct that is borrowed. So
+    /// the answer has to be somewhere the handler CAN reach, and this is it.
+    ///
+    /// ## Why this is a cache and not a second source of truth
+    ///
+    /// Every write is a whole-state rebuild from the live tables
+    /// ([`admin_declarations::materialize`]); nothing ever patches it in place
+    /// and nothing reads its previous value. What it holds is therefore always a
+    /// state the tables actually held, which an incremental side-table fed by
+    /// declaration sinks would not be — that shape can miss a mutation and then
+    /// disagree with the tables indefinitely.
+    ///
+    /// `R::Mutex` rather than `std::sync::Mutex` because it is written under the
+    /// observer lock and read by a `Fn()` the handler calls, so it must bind per
+    /// profile exactly as the observer does. Lock order is observer -> this, on
+    /// BOTH paths (the refresh holds the observer; the handler runs under it), so
+    /// the pair cannot invert.
+    #[cfg(all(
+        feature = "adminspace-introspection-handlers",
+        feature = "adminspace-core"
+    ))]
+    admin_declarations:
+        Arc<<R as Runtime>::Mutex<Vec<wz_session_core::adminspace::AdminDeclaration>>>,
 }
 
 /// R2578 — does THIS build carry `session-matching`?
@@ -883,6 +923,17 @@ where
             // Interest(Final) while the other still has publishers standing.
             #[cfg(all(feature = "session-matching", feature = "declare-interest"))]
             matching_interests: self.matching_interests.clone(),
+            // R2690 — shared, and here the reason is the tightest of the three:
+            // the cache is written by the dispatch SSOT and read by an admin
+            // handler that was declared through a DIFFERENT handle. A fork that
+            // copied it would leave the handler reading a vector nothing refreshes
+            // any more, which reports an empty table exactly as convincingly as a
+            // node with nothing declared.
+            #[cfg(all(
+                feature = "adminspace-introspection-handlers",
+                feature = "adminspace-core"
+            ))]
+            admin_declarations: self.admin_declarations.clone(),
         }
     }
 }
@@ -1800,6 +1851,15 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Multicast> {
             // multicast transport, and no auto-stamp consumer takes a multicast
             // session (both take `Session<R, T, Unicast>`).
             node_hlc: crate::node_clock::NodeHlc::disabled(),
+            // R2690 — allocated but never filled on a multicast session: the
+            // admin declare surface is `Session<R, T, Unicast>`-only, and a
+            // multicast session holds no face whose declarations could be
+            // reported. Empty is the answer, not a gap.
+            #[cfg(all(
+                feature = "adminspace-introspection-handlers",
+                feature = "adminspace-core"
+            ))]
+            admin_declarations: Arc::new(R::new_mutex(Vec::new())),
         })
     }
 
@@ -1976,6 +2036,15 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
             final_holds: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
             #[cfg(all(feature = "session-matching", feature = "declare-interest"))]
             matching_interests: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+            // R2690 — empty until the first dispatch refreshes it, which is
+            // correct: a session that has dispatched nothing has been told
+            // nothing, so "no declarations" is the true answer rather than an
+            // unfilled one.
+            #[cfg(all(
+                feature = "adminspace-introspection-handlers",
+                feature = "adminspace-core"
+            ))]
+            admin_declarations: Arc::new(R::new_mutex(Vec::new())),
         });
         // Forward the zid into the subscriber registry so wire-arrived
         // self-echo Pushes are dedup'd from session creation onward. The
@@ -2244,6 +2313,52 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
     /// the deferred wire-emit capability: the tokio profile satisfies
     /// it (`Arc` + `Send + Sync` link sink); the MCU profile drives
     /// registries directly and never constructs these jobs.
+    /// R2690 (§5.23) — rebuild this host's admin introspection answer from the
+    /// observer's live declaration tables.
+    ///
+    /// ## Call it from wherever those tables MOVE
+    ///
+    /// Two sites do today, and they are two because the tables have two mutators,
+    /// not because two seemed enough: [`Self::dispatch_iteration_event_with`] (an
+    /// inbound `Decl*` / `Undecl*` record) and the link-loss flush
+    /// (`reconnect.rs` @ `flush_declarations_on_link_loss`, which empties them
+    /// with no iteration event in sight — on a dead link there may be no further
+    /// event at all, and a local GET would otherwise go on reporting a departed
+    /// peer's subscriptions indefinitely).
+    ///
+    /// Safe to call more often than needed: it is a whole-state rebuild, so
+    /// calling it twice for one mutation costs a rebuild and changes nothing.
+    /// Calling it too SELDOM is the failure that matters, which is why the rule
+    /// is stated as a property of the call sites rather than left to a list.
+    ///
+    /// MUST be called with `obs` already borrowed from the observer lock — the
+    /// parameter is that borrow, not a handle to re-lock, which is what keeps the
+    /// observer -> cache lock order the same here as on the handler's path.
+    #[cfg(all(
+        feature = "adminspace-introspection-handlers",
+        feature = "adminspace-core"
+    ))]
+    pub(crate) fn refresh_admin_declarations(&self, obs: &ApplicationLayerObserver) {
+        use wz_codecs::whatami::WhatAmI;
+        use wz_session_core::zid_hex::zid_to_zenoh_hex;
+
+        // The face's identity, resolved the same way the `sessions[]` leg
+        // resolves it a few hundred lines below, so one node cannot name its peer
+        // one way in one admin leg and another way in the next.
+        let zid_hex = self.actions().peer_zid().map(|z| zid_to_zenoh_hex(&z));
+        let face = zid_hex
+            .as_deref()
+            .map(|zid_hex| admin_declarations::AdminFace {
+                zid_hex,
+                whatami: self
+                    .actions()
+                    .peer_whatami_wire()
+                    .and_then(WhatAmI::from_wire),
+            });
+        let built = admin_declarations::materialize(obs, face);
+        R::with_mutex_mut(&self.admin_declarations, |slot| *slot = built);
+    }
+
     pub fn dispatch_iteration_event_with(
         &self,
         event: crate::session_glue::IterationEvent<'_>,
@@ -2269,6 +2384,19 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
             #[cfg(feature = "transport-shm")]
             obs.subscribers.set_shm_negotiated(self.actions().is_shm());
             obs.dispatch_event(event);
+            // R2690 (§5.23) — refresh the admin introspection cache from the
+            // tables this dispatch has just moved. AFTER `dispatch_event`, not
+            // before: an inbound `DeclSubscriber` must be answerable by the very
+            // next GET, and the GET that arrives in the SAME event was already
+            // answered above (the queryable fan runs first inside `dispatch_event`
+            // — `observer.rs` @ `self.queryables.dispatch_iteration_event`), so a
+            // pre-dispatch refresh would report this event's declare one event
+            // late for nothing.
+            #[cfg(all(
+                feature = "adminspace-introspection-handlers",
+                feature = "adminspace-core"
+            ))]
+            self.refresh_admin_declarations(obs);
             // R311nf — the unicast reply flush + ResponseFinal staging run
             // UNCONDITIONALLY now: this method lives on `Session<R, T, Unicast>`,
             // so `actions()` is the infallible unicast bundle borrow. The
@@ -3948,6 +4076,21 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
         let queryable_key = admin_queryable_key(&zid_hex, whatami);
         let version: String = version.into();
         let actions = self.actions().clone();
+        // R2690 (§5.23) — a handle to the introspection cache the dispatch SSOT
+        // refreshes, cloned once at declare time.
+        //
+        // ## Why this is NOT an `AdminLiveInputs` field
+        //
+        // The live-input seam exists for what THE CALLER must choose — a mesh host
+        // serving no stats, a node with a dynamic plugin registry. The declared
+        // entities of a Session-hosted adminspace are not such a choice: every
+        // caller of this method IS a Session, a Session holds exactly one face,
+        // and that face's declarations are the answer with nothing to decide. Put
+        // on the seam it would be a field every host had to remember to fill, and
+        // the one that forgot would report an empty table as confidently as the
+        // one with nothing to report. Resolved HERE it cannot be forgotten.
+        #[cfg(feature = "adminspace-introspection-handlers")]
+        let declarations_cache = Arc::clone(&self.admin_declarations);
 
         let handler = move |view: &dyn QueryView, out: &mut dyn ReplyOut| {
             // R2645 — ONE call to the source per GET, so the permit, the config
@@ -4028,13 +4171,35 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
             // A caller whose registry is compiled-in returns the same vec every
             // call; a caller hosting a dynamic subsystem returns its current state.
             let plugins = live.plugins;
-            // The pure-Session admin host does not enumerate declarations (its admin
-            // sink fires while the observer is locked mid-`iter_mut`, so it cannot
-            // re-read the declaration registries — the introspection materialization
-            // for this host is a NAMED follow-up). The forwarder-hosted demo admin
-            // (`--config-queryable`) is the wired introspection host for §5.23.
-            if answer_admin_query(view, out, &ctx, &sessions, &[], &plugins, &live.config_json)
-                == AdminAnswerOutcome::DeniedRead
+            // R2690 — the per-entity introspection table. It was a literal `&[]`
+            // here, so this host answered "nothing is declared" however much its
+            // face had declared to it — §5.23's "the pure-Session admin host
+            // serves NO introspection at all" residual.
+            //
+            // READ, not built: this handler runs INSIDE the observer lock,
+            // mid-dispatch (`observer.rs` @ `self.queryables
+            // .dispatch_iteration_event`), so it can neither borrow the
+            // declaration registries nor re-lock the observer to reach them. What
+            // it can do is read a cache written under that same lock, which is
+            // what `Session::refresh_admin_declarations` fills.
+            //
+            // ⚠ CLONED per GET for the reason `plugins` is: a `Fn()`-shaped
+            // handler cannot hand out a borrow of state it does not own. The
+            // clone is of a vector rebuilt at most once per drive-loop iteration,
+            // on a path that already allocates its reply.
+            #[cfg(feature = "adminspace-introspection-handlers")]
+            let declarations = R::with_mutex_mut(&declarations_cache, |slot| slot.clone());
+            #[cfg(not(feature = "adminspace-introspection-handlers"))]
+            let declarations: Vec<wz_session_core::adminspace::AdminDeclaration> = Vec::new();
+            if answer_admin_query(
+                view,
+                out,
+                &ctx,
+                &sessions,
+                &declarations,
+                &plugins,
+                &live.config_json,
+            ) == AdminAnswerOutcome::DeniedRead
             {
                 // zenoh's own deny diagnostic, at the same severity and naming the
                 // same cause (`net/runtime/adminspace.rs:458-461`). Without it the

@@ -529,11 +529,28 @@ impl ReconnectingSession {
                         // (`net/filtering.c:217-220`). Flushed BEFORE the
                         // liveliness one so the single `drain_deferred_fires`
                         // below delivers both planes' staged fires.
+                        // R2690 (§5.23) — the admin introspection cache is
+                        // refreshed from the SAME guard that empties the tables.
+                        // This is the second of the two sites that move them, and
+                        // the one a dispatch-only refresh could not cover: on a
+                        // dead link there may be no further iteration event ever,
+                        // so without this a local admin GET would go on reporting
+                        // a departed peer's subscriptions indefinitely.
+                        let flush = |mut o: std::sync::MutexGuard<
+                            '_,
+                            wz_session_core::observer::ApplicationLayerObserver,
+                        >| {
+                            let dropped = o.flush_declarations_on_link_loss();
+                            #[cfg(all(
+                                feature = "adminspace-introspection-handlers",
+                                feature = "adminspace-core"
+                            ))]
+                            session.refresh_admin_declarations(&o);
+                            dropped
+                        };
                         let declarations = match session.observer().lock() {
-                            Ok(mut o) => o.flush_declarations_on_link_loss(),
-                            Err(poisoned) => {
-                                poisoned.into_inner().flush_declarations_on_link_loss()
-                            }
+                            Ok(o) => flush(o),
+                            Err(poisoned) => flush(poisoned.into_inner()),
                         };
                         if declarations > 0 {
                             log::info!(

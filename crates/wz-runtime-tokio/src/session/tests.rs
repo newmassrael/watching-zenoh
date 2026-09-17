@@ -2867,6 +2867,131 @@ fn declare_adminspace_leaves_sub_path_get_for_layered_handlers() {
     );
 }
 
+/// Deliver a peer's `Declare` body through the drive loop's dispatch SSOT,
+/// rather than poking the registry.
+///
+/// The distinction carries the whole weight of the introspection witness below:
+/// the pure-Session host's declaration cache is refreshed BY that dispatch, so a
+/// test that stamped `remote_subscribers` directly would measure the registry and
+/// nothing else — and would keep passing with the refresh never wired.
+// The SAME conjunction the one test below carries, spelled out rather than
+// widened to the planes this happens to touch: a helper reachable in builds that
+// have no caller is dead code, and `-D dead-code` is right to say so.
+#[cfg(all(
+    feature = "query-get",
+    feature = "query-queryable",
+    feature = "adminspace-core",
+    feature = "adminspace-introspection-handlers",
+    feature = "declare-subscriber",
+    feature = "declare-queryable"
+))]
+fn deliver_peer_declare(session: &TokioSession, body: wz_codecs::declare::DeclareOwnedVariant) {
+    let declare = wz_codecs::declare::DeclareOwned {
+        header: 0,
+        interest_id: None,
+        extensions: None,
+        body,
+    };
+    let outcome = wz_session_core::driver_loop::DriverLoopOutcome::FramePayload {
+        priority: wz_session_core::qos::Priority::DEFAULT,
+        reliable: true,
+        sn: 0,
+        messages: vec![wz_session_core::network_message::NetworkMessage::Declare(
+            Box::new(declare),
+        )],
+        has_ext: false,
+        extensions: Vec::new(),
+    };
+    session.dispatch_iteration_event(crate::session_glue::IterationEvent::Poll(&outcome));
+}
+
+#[cfg(all(
+    feature = "query-get",
+    feature = "query-queryable",
+    feature = "adminspace-core",
+    feature = "adminspace-introspection-handlers",
+    feature = "declare-subscriber",
+    feature = "declare-queryable"
+))]
+#[test]
+fn declare_adminspace_answers_the_subscriber_leg_from_the_peer_faces_table() {
+    // R2690 — the pure-Session admin host's per-entity introspection. §5.23's
+    // residual clause said this host "serves NO introspection at all": it handed
+    // `answer_admin_query` a literal `&[]`, so the node answered "nothing is
+    // declared" however much its peer had declared to it.
+    //
+    // wz's Session is upstream's CLIENT HAT — the one hat whose entire routing
+    // state is one face's `remote_subs`:
+    //   `zenoh/src/net/routing/hat/client/pubsub.rs` @ `fn sourced_subscribers`
+    // loops `owned_faces` -> `remote_subs` and buckets by `face.whatami`. A
+    // Session holds exactly ONE face, so that loop runs exactly once here, and the
+    // bucketing rule survives the reduction intact.
+    use wz_session_core::zid_hex::zid_to_zenoh_hex;
+
+    let (session, _driver) = build_session();
+    let zid_hex = zid_to_zenoh_hex(&session.actions().params.zid);
+    let whatami = session.actions().params.whatami.to_str();
+
+    // The face's identity, stamped the way the `shm` witness stamps it (the
+    // production path fills both from the INIT exchange). BOTH are needed and for
+    // DIFFERENT reasons — the zid is what lands IN a bucket, the whatami is what
+    // CHOOSES the bucket — so stamping one would leave half the rule unmeasured.
+    *session
+        .actions()
+        .remote_peer_zid
+        .lock()
+        .expect("remote_peer_zid poisoned in test fixture") = Some(vec![0x70, 0x73, 0x00, 0x03]);
+    *session
+        .actions()
+        .peer_whatami
+        .lock()
+        .expect("peer_whatami poisoned in test fixture") = Some(2); // INIT wire 2 = Client
+
+    let _admin = session
+        .declare_adminspace("0.9.9", Vec::new())
+        .expect("adminspace-core ON in this build");
+
+    // BOTH planes, because they read DIFFERENT registries. The fold they share is
+    // unit-tested next door; what only an e2e can catch is one plane wired to the
+    // other's table, or to none — and a test that declared a subscriber alone
+    // would report the queryable leg as working by never asking it.
+    deliver_peer_declare(&session, make_decl_subscriber(7, "home/temp"));
+    deliver_peer_declare(&session, make_decl_queryable(8, "home/lights"));
+
+    let replies = Arc::new(Mutex::new(Vec::<(String, Vec<u8>)>::new()));
+    let r = replies.clone();
+    session
+        .query(
+            &format!("@/{zid_hex}/{whatami}/**"),
+            QueryOptions::get().with_allowed_destination(Locality::SessionLocal),
+            move |reply| {
+                r.lock()
+                    .unwrap()
+                    .push((reply.keyexpr().to_string(), reply.payload().to_vec()));
+            },
+            |_| {},
+        )
+        .expect("query-get ON in this build");
+
+    let got = replies.lock().unwrap().clone();
+    let keys: Vec<&String> = got.iter().map(|(k, _)| k).collect();
+    // ALL THREE buckets pinned, not just the one this case fills. R2687 learned
+    // that the hard way: an e2e that asserted only `clients` passed both before and
+    // after the repair, because the defect was a SPURIOUS entry in `peers`.
+    let expected_body = "{\"routers\":[],\"peers\":[],\"clients\":[\"3007370\"]}";
+    for (kind, keyexpr) in [("subscriber", "home/temp"), ("queryable", "home/lights")] {
+        let entity = format!("@/{zid_hex}/{whatami}/{kind}/{keyexpr}");
+        let entry = got.iter().find(|(k, _)| k == &entity).unwrap_or_else(|| {
+            panic!("the peer's declared {kind} must appear at {entity}: {keys:?}")
+        });
+        let body = String::from_utf8(entry.1.clone()).expect("the Sources body is UTF-8 JSON");
+        assert_eq!(
+            body, expected_body,
+            "a CLIENT face's {kind} declaration belongs in the clients bucket and nowhere else"
+        );
+    }
+}
+
 #[cfg(all(
     feature = "query-get",
     feature = "query-queryable",
