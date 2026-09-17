@@ -6787,20 +6787,43 @@ layer_c1am_cargo_test_adminspace() {
     # `@` inside a KEYEXPR left untouched (the delimiter must not narrow the keyexpr
     # grammar), and a name that itself contains `@` splitting on the last one. This
     # pin is why the count moved visibly instead of the module quietly growing.
-    _runci_guarded_test "C1AM adminspace 53" 53 \
+    # R2696 — 53 -> 59, the volume-lifecycle decoder: two `volume-add` shapes
+    # (with a backend, without one), its two refusals (an empty id or backend,
+    # a parameter that is not a pair), and `volume-del`'s decode + empty. The
+    # vocabulary property is NOT among them and is not missing: a seventh test
+    # was written for it and deleted after its own control came back green,
+    # because on a build that compiles the arms the literal match answers before
+    # `ADMIN_CONFIG_WRITE_ACTIONS` is read. That property belongs to the C1z-tier
+    # legs, where the const is the only answerer. PRINTED by the command.
+    _runci_guarded_test "C1AM adminspace 59" 59 \
         cargo test -p wz-session-core --features adminspace-config-hotreload --lib adminspace --quiet || return 1
     # R311y828 5 -> 6: the live manager's admin sub-tree render. It is gated on
     # `adminspace-plugins-handlers`, so the C1z sibling guard over the SAME module
     # (no adminspace feature) stays at 5 — measured, not assumed.
-    _runci_guarded_test "C1AM storage_manager_service 6" 6 \
+    # R2696 — 6 -> 9: the volume lifecycle's manager half. The cascade (three
+    # storages over two volumes, so "tore down the right set" is separable from
+    # "tore down everything"), the refusal of an unknown id beside a registered
+    # volume that hosts nothing, and `build_volume`'s backend resolution. The
+    # fs-parameter test is a FOURTH and is not counted here: it is
+    # `storage-backend-filesystem`-gated, which this leg does not name — the
+    # same shape as the note above. PRINTED by the command.
+    _runci_guarded_test "C1AM storage_manager_service 9" 9 \
         cargo test -p wz-runtime-tokio --features adminspace-config-hotreload --lib storage_manager_service --quiet || return 1
-    # R2693 — the PEER's introspection tests had no running lane. The feature set
-    # `routing-peer,adminspace-introspection-handlers` occurred in this layer only
-    # inside the clippy block below, which COMPILES a test and never runs it, and
-    # it is not a default feature, so the changed-crate hook gate never reached it
-    # either. Both `admin_sources_*` tests on the peer forwarder lived in that
-    # hole: written, green by hand, executed by nothing. Number PRINTED by the
-    # command, not counted off the diff.
+    # R2693 — the PEER's introspection tests had no running lane IN THIS LAYER.
+    # The feature set `routing-peer,adminspace-introspection-handlers` occurs here
+    # only inside the clippy block below, which COMPILES a test and never runs it,
+    # and it is not a default feature, so the changed-crate hook gate never reaches
+    # it either. Number PRINTED by the command, not counted off the diff.
+    # R2696 corrects the clause R2693 wrote here — "written, green by hand,
+    # executed by nothing" was FALSE, and R2693 refuted it in its own round
+    # without the refutation reaching this line. Re-measured from the owning
+    # instrument: `scripts/lib/nondefault-tests-gate.sh`'s WIDE
+    # `wz-runtime-tokio|lane|` leg names `adminspace-introspection-handlers`,
+    # `routing-peer`, `routing-router-hat` and `routing-token-tables` with an
+    # EMPTY filter field, so it runs every test in that build, and no SKIPS row
+    # excuses an `admin_` test. Its scope is `lane`: pre-push does not run it,
+    # Layer C1cn does on every hosted push. The true statement is the narrow one
+    # — no LOCAL gate runs them — and that is what these two guards add.
     # R2694 — 10 -> 13, the three `admin_publisher_sources_*` witnesses of the
     # publisher / querier legs, then 13 -> 14 for the mesh-interest lifecycle
     # witness (cancel + replace). PRINTED by the command, as the note above says.
@@ -6810,8 +6833,10 @@ layer_c1am_cargo_test_adminspace() {
     # rather than only of the test this round wrote: R2685's
     # `admin_declarations_bucket_each_tier_into_its_own_sources_field` is gated on
     # `adminspace-introspection-handlers`, and every `--lib router_forward` leg in
-    # this file names a DIFFERENT adminspace feature. It has never been run by a
-    # lane either.
+    # this file names a DIFFERENT adminspace feature. No LOCAL gate reaches it
+    # either — the wide lane leg named above does, hosted. (R2696: this sentence
+    # read "It has never been run by a lane either", which was false twice over,
+    # since `lane` is exactly the scope that ran it.)
     # R2694 — 13 -> 16, the SAME three peer witnesses: `routing-router-hat`
     # implies `routing-peer`, so this leg compiles them too. The round's fourth
     # new `admin_` test is the router token leg, which is `routing-token-tables`
@@ -8074,7 +8099,13 @@ layer_c1z_cargo_test_storage_driver() {
         cargo test -p wz-session-core --features storage-backend --lib storage --quiet || return 1
     _runci_guarded_test "C1z storage" 44 \
         cargo test -p wz-session-core --features storage-mgr-multi-storage-host --lib storage --quiet || return 1
-    _runci_guarded_test "C1z storage_manager_service" 5 \
+    # R2696 — 5 -> 8: the volume lifecycle's manager half reaches this leg too,
+    # because none of the three (cascade, refusal, `build_volume`'s backend
+    # resolution) is gated on an adminspace feature. It moves by THREE where the
+    # C1AM sibling moves by three from a different base, and the fs-parameter
+    # test is in neither: it is `storage-backend-filesystem`-gated and this leg
+    # does not name that feature either. PRINTED by the command.
+    _runci_guarded_test "C1z storage_manager_service" 8 \
         cargo test -p wz-runtime-tokio --features storage-mgr-multi-storage-host,declare-subscriber,pubsub-allow-loop,storage-mgr-strip-prefix --lib storage_manager_service --quiet || return 1
     _runci_guarded_test "C1z storage_strip_prefix" 6 \
         cargo test -p wz-session-core --features storage-mgr-strip-prefix --lib storage_strip_prefix --quiet || return 1
