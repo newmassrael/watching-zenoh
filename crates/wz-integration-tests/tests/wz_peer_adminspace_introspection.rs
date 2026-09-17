@@ -384,14 +384,23 @@ fn wz_peer_admin_client_declared_subscriber_lands_in_the_clients_bucket() {
         "REPLY RECEIVED lacks keyexpr='{expected_reply_key}' — A did not enumerate \
          its co-attached client's subscription at all.\n--- C ---\n{reply}"
     );
-    // THE BUCKETING ASSERTION: B's zid, in `clients`. Naming the zid is what makes
-    // this a tier assertion rather than a presence one — before R2687 the entry was
-    // present with `clients` EMPTY and A's own zid in `peers`.
+    // THE BUCKETING ASSERTION, pinning the WHOLE body rather than one bucket.
+    //
+    // ⚠ AN EARLIER DRAFT ASSERTED ONLY `clients`, AND THAT PASSED IN BOTH STATES.
+    // Before the R2687 repair this reply read
+    // `{"routers":[],"peers":["<A>"],"clients":["<B>"]}` — B correctly named AND A
+    // wrongly named, because the peer advertises a client's declaration into the
+    // mesh under its own zid and the admin fold read that row back as a peer-tier
+    // source. A `clients`-only assertion cannot see the difference, so the repair
+    // would have landed unasserted. Pinning all three buckets is what makes this
+    // test the contract: ONE declaration, ONE source, in the tier that declared it.
     assert!(
-        reply.contains(&format!(r#"\"clients\":[\"{CLIENT_B_ZID_RENDERED}\"]"#)),
-        "the `demo/client` entry must name B ({CLIENT_B_ZID_RENDERED}) in the \
-         `clients` bucket — a client-declared subscription bucketed anywhere else \
-         is the degenerate `Sources` body this test exists for. A is {a_zid}.\n\
-         --- C ---\n{reply}"
+        reply.contains(&format!(
+            r#"{{\"routers\":[],\"peers\":[],\"clients\":[\"{CLIENT_B_ZID_RENDERED}\"]}}"#
+        )),
+        "the `demo/client` body must be exactly \
+         {{routers:[],peers:[],clients:[{CLIENT_B_ZID_RENDERED}]}} — B declared it \
+         and A ({a_zid}) did not, so A must not appear as a peer-tier source for \
+         someone else's subscription.\n--- C ---\n{reply}"
     );
 }
