@@ -353,8 +353,9 @@ pub fn wire_quic_datagram(
     // R311y453 — the §5.16 subject, off the quinn endpoint's bound address.
     // R2698 — with the peer's certificate common name. Upstream carries this
     // axis on the datagram link too and by the same route
-    // (`io/zenoh-links/zenoh-link-quic_datagram/src/unicast.rs`), so leaving it
-    // out here would have made a rule that governs a QUIC peer silently stop
+    // (`io/zenoh-links/zenoh-link-quic_datagram/src/unicast.rs` @
+    // `let auth_id = get_cert_common_name(&quic_conn)?;`), so leaving it out
+    // here would have made a rule that governs a QUIC peer silently stop
     // governing the same peer over datagrams.
     let subject = ip_link_subject(InterceptorLink::QuicDatagram, endpoint.local_addr().ok())
         .with_cert_common_name(crate::quic_pipeline::peer_chain_common_name(&connection));
