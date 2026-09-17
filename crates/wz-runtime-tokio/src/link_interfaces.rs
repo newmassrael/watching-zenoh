@@ -88,6 +88,13 @@ pub fn ip_link_subject(protocol: InterceptorLink, local: Option<SocketAddr>) -> 
     LinkSubject {
         protocol: Some(protocol),
         interfaces: local.and_then(|addr| interface_names_for(addr.ip())),
+        // R2698 — no certificate is reachable from an address alone. A link
+        // that HAS one fills this in afterwards with
+        // [`LinkSubject::with_cert_common_name`], which is the only way it can
+        // be right: the chain exists for one window inside the link's own
+        // `wire_*`, and this helper is called from every IP transport including
+        // the ones that never see a certificate.
+        cert_common_name: None,
     }
 }
 
@@ -122,6 +129,10 @@ pub fn addressless_link_subject(protocol: InterceptorLink, interfaces: Vec<Strin
     LinkSubject {
         protocol: Some(protocol),
         interfaces: Some(interfaces),
+        // R2698 — none of the four addressless links presents a peer
+        // certificate, so this is a definite absence rather than an unfilled
+        // field.
+        cert_common_name: None,
     }
 }
 

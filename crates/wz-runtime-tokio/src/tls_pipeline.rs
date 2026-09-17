@@ -141,7 +141,16 @@ pub fn wire_tls_stream(
 ) -> (TlsReadDriver, Arc<StreamWriteDriver>, WriterHandle) {
     // R311y453 — the §5.16 subject: a TLS link is a TCP socket underneath, so
     // its local address comes from the wrapped stream.
-    let subject = ip_link_subject(InterceptorLink::Tls, stream.get_ref().0.local_addr().ok());
+    // R2698 — the ACL's cert-common-name axis is filled HERE and only here, in
+    // the same before-the-split window the expiry below explains: this is the
+    // last moment `stream.get_ref().1` is a rustls connection. Read
+    // UNCONDITIONALLY, unlike the expiry, because no config key gates whether a
+    // rule may name a peer — the deadline is opt-in behaviour, the identity is
+    // just what the link knows about itself.
+    let subject = ip_link_subject(InterceptorLink::Tls, stream.get_ref().0.local_addr().ok())
+        .with_cert_common_name(crate::stream_link::peer_chain_common_name(
+            stream.get_ref().1.peer_certificates(),
+        ));
     // R311y473 — the adminspace `{src,dst}` pair, read off the same wrapped TCP
     // socket and in the same before-the-split window as the subject above.
     let endpoints = crate::link_interfaces::ip_link_endpoints(

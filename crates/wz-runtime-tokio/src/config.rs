@@ -3472,6 +3472,7 @@ mod tests {
                 link_protocols: Vec::new(),
                 interfaces: Vec::new(),
                 usernames: Vec::new(),
+                cert_common_names: Vec::new(),
             }],
         }));
         let json = c.to_admin_json();

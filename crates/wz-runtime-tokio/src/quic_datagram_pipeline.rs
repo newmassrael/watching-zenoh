@@ -351,7 +351,13 @@ pub fn wire_quic_datagram(
         quic_datagram_writer_task(connection.clone(), queue)
     });
     // R311y453 — the §5.16 subject, off the quinn endpoint's bound address.
-    let subject = ip_link_subject(InterceptorLink::QuicDatagram, endpoint.local_addr().ok());
+    // R2698 — with the peer's certificate common name. Upstream carries this
+    // axis on the datagram link too and by the same route
+    // (`io/zenoh-links/zenoh-link-quic_datagram/src/unicast.rs`), so leaving it
+    // out here would have made a rule that governs a QUIC peer silently stop
+    // governing the same peer over datagrams.
+    let subject = ip_link_subject(InterceptorLink::QuicDatagram, endpoint.local_addr().ok())
+        .with_cert_common_name(crate::quic_pipeline::peer_chain_common_name(&connection));
     // R311y474 — the adminspace `{src,dst}` pair. `Connection::remote_address` is
     // infallible (a completed handshake HAS a peer), so the only `None` arm is a
     // failed `local_addr`. The scheme carries the `?rel=0` datagram marker via

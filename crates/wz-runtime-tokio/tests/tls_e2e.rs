@@ -300,6 +300,103 @@ async fn a_named_tls_locator_verifies_against_the_locator_name_not_the_configure
 /// `tokio_rustls::TlsStream::get_ref()` yields `(&IO, &CommonState)` and the
 /// `IO` here is the `TcpStream` `connect_tcp_bound` returned — the same socket
 /// whose tuning is under test, not a re-connected one.
+/// R2698 — THE JOIN: the peer's certificate common name reaches the link's
+/// §5.16 SUBJECT, which is the value the ACL's fifth axis is judged against.
+///
+/// Both ends of this path already had witnesses of their own — the extractor
+/// (`stream_link::tests::peer_chain_common_name_reads_the_leaf_not_the_chain`)
+/// and the matcher (`wz_access_control`'s cert-common-name tests) — and neither
+/// says the WIRING carries the value from one to the other. That gap is the
+/// shape this workspace has paid for repeatedly: two true ends and an
+/// unverified join.
+///
+/// The assertion is `is_some` rather than an exact string ON PURPOSE. The
+/// fixture's certificate comes from `rcgen::generate_simple_self_signed`, whose
+/// distinguished name is rcgen's own default; pinning that string would make
+/// this test assert a dependency's internal choice, and it would break on a
+/// bump that changed nothing about wz. What the axis needs from the wiring is
+/// that a name ARRIVES, and the TCP arm below is what keeps that from being
+/// vacuous: the same accessor on a link with no certificate must answer `None`,
+/// so a subject hard-coding `Some(_)` fails here.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_tls_link_carries_its_peers_certificate_common_name_onto_its_subject() {
+    use wz_runtime_tokio::session_open::{
+        bind_locator, dial_locator, AcceptConfig, DialedLink, TlsAcceptConfig, TlsDialConfig,
+    };
+    use wz_runtime_tokio::tls_pipeline::wire_tls_stream;
+    // The accessor lives on the driver TRAIT, which an out-of-crate test has to
+    // bring into scope — inside the crate (the vsock pipeline's own test) it is
+    // already there, which is why that precedent does not show this line.
+    use wz_session_core::link::BoxedLinkDriver;
+
+    let (server_config, client_config) = loopback_tls_configs();
+    let accept_cfg = AcceptConfig::default().with_tls(TlsAcceptConfig { server_config });
+    let dial_cfg = DialConfig::default().with_tls(TlsDialConfig {
+        client_config,
+        server_name: tokio_rustls::rustls::pki_types::ServerName::try_from("localhost".to_string())
+            .expect("localhost is a valid server name"),
+    });
+
+    let mut listener = bind_locator(
+        parse_any_locator("tls/127.0.0.1:0").expect("parse tls listen locator"),
+        &accept_cfg,
+    )
+    .await
+    .expect("bind tls/127.0.0.1:0");
+    let port = listener.local_addr().expect("local_addr").port();
+
+    let acc = async move {
+        let (accepted, _peer) = listener.accept_raw().await.expect("accept a tls peer");
+        accepted.handshake().await.expect("rustls server handshake")
+    };
+    let dial = async {
+        let locator =
+            parse_any_locator(&format!("tls/localhost:{port}")).expect("parse tls name locator");
+        dial_locator(locator, &dial_cfg).await.expect("tls dial")
+    };
+    let (_accepted, dialed) = tokio::join!(acc, dial);
+
+    // The DIAL half, because the server always presents a certificate while a
+    // client only does under mTLS: this is the one half the fixture can reach.
+    let DialedLink::Tls(tls, _) = dialed else {
+        panic!("expected a TLS link from a tls/ locator");
+    };
+    let (_inbound, outbound, _writer) = wire_tls_stream(*tls, false);
+    let subject = outbound
+        .link_subject()
+        .expect("a tls link states a §5.16 subject");
+    assert!(
+        subject.cert_common_name.is_some(),
+        "the wiring dropped the peer's certificate common name, so every ACL \
+         rule narrowed by certificate would silently govern nobody",
+    );
+
+    // The ANTI-VACUITY arm: a link with no certificate reports no name through
+    // the same accessor.
+    // Its OWN listener: the TLS one above was moved into the accept task and is
+    // gone by now, and reusing a closed port would fail for a reason that has
+    // nothing to do with the axis under test.
+    let plain = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+        .await
+        .expect("bind a plain TCP listener");
+    let plain_port = plain.local_addr().expect("local_addr").port();
+    let accept_plain = tokio::spawn(async move { plain.accept().await });
+    let tcp = tokio::net::TcpStream::connect(("127.0.0.1", plain_port))
+        .await
+        .expect("a plain TCP connection");
+    let _served = accept_plain.await.expect("the accept task");
+    let (_tcp_in, tcp_out, _tcp_writer) = wz_runtime_tokio::link_pipeline::wire_tcp_stream(tcp);
+    assert_eq!(
+        tcp_out
+            .link_subject()
+            .expect("a tcp link states a §5.16 subject")
+            .cert_common_name,
+        None,
+        "a link with no certificate must report no name, or the assertion above \
+         is satisfied by a constant",
+    );
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_tls_link_disables_nagle_on_both_the_dial_and_the_accept_half() {
     use wz_runtime_tokio::session_open::{

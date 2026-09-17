@@ -446,6 +446,7 @@ mod tests {
                 link: Some(LinkSubject {
                     protocol: Some(protocol),
                     interfaces: None,
+                    cert_common_name: None,
                 }),
                 username: None,
             }
@@ -491,6 +492,7 @@ mod tests {
                 link_protocols: Vec::new(),
                 interfaces: Vec::new(),
                 usernames: Vec::new(),
+                cert_common_names: Vec::new(),
             }],
         })
     }
@@ -624,6 +626,7 @@ mod tests {
                         link_protocols: vec![protocol],
                         interfaces: Vec::new(),
                         usernames: Vec::new(),
+                        cert_common_names: Vec::new(),
                     }],
                 }),
                 AclFlow::Ingress,
@@ -820,6 +823,7 @@ mod tests {
                 link_protocols: Vec::new(),
                 interfaces: Vec::new(),
                 usernames: Vec::new(),
+                cert_common_names: Vec::new(),
             }],
         })
     }

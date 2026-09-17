@@ -4291,6 +4291,15 @@ pub enum AclCompileError {
         /// The subject entry naming it.
         subject: String,
     },
+    /// R2698 — a subject names a blank certificate common name, which
+    /// [`wz_access_control::AclCertCommonName`] makes unrepresentable on a rule
+    /// and upstream refuses by name
+    /// (`zenoh/src/net/routing/interceptor/authorization.rs` @
+    /// `"Found empty cert_common_name value in subject '{}'",`).
+    BlankCertCommonName {
+        /// The subject entry naming it.
+        subject: String,
+    },
     /// A literal this module ACCEPTED at the parse that the engine's vocabulary
     /// does not know — a defect in this reader, not in the document.
     ///
@@ -4323,33 +4332,36 @@ pub enum AclCompileError {
 /// they are copied rather than expanded. Missing that asymmetry would silently
 /// apply only the first zid of a list.
 ///
-/// # `cert_common_names`, the one axis with nowhere to go
+/// # `cert_common_names` — HONOURED as of R2698, and every axis now is
 ///
-/// An `AclRule` has no certificate axis, and upstream reads the subject axes as
-/// a CONJUNCTION with an absent axis meaning wildcard — so dropping this one
-/// WIDENS the rule. The answer is therefore asymmetric in the rule's own
-/// permission, and it is this crate's existing posture rather than a new one
-/// ([`wz_access_control::AclRule`]'s link and interface axes both document
-/// "FAIL-CLOSED on an indeterminate subject"):
+/// A document narrowing a subject by certificate common name compiles to a rule
+/// narrowed the same way: the names land on
+/// [`wz_access_control::AclRule`](wz_access_control::AclRule#structfield.cert_common_names)
+/// and the enforcer reads the peer's name off the link subject the TLS and QUIC
+/// wirings fill in. All five of upstream's subject axes are reachable from a
+/// document now, which is what closes this reader's last silent narrowing.
 ///
-/// * `permission: allow` — the rule is NOT installed. Installing it would grant
-///   access to peers whose certificate the document meant to narrow to.
-/// * `permission: deny` — the axis is dropped and the rule IS installed. It then
-///   denies a SUPERSET of what the document asked for, which cannot open
-///   anything.
+/// ⚠ WHAT THIS REPLACED, kept because the shape is worth recognising elsewhere.
+/// Until this round an `AclRule` had no certificate axis, and since upstream
+/// reads the axes as a CONJUNCTION with an absent axis meaning wildcard,
+/// dropping one WIDENS the rule. The reader's answer was asymmetric in the
+/// rule's own permission: an `allow` rule naming a certificate was NOT
+/// installed, and a `deny` rule was installed with the axis dropped so it denied
+/// a superset. That was the right posture for an unrepresentable axis — denying
+/// too much is recoverable, allowing too much is not — and it was never a
+/// substitute for the axis, which is why it is gone rather than kept as a
+/// fallback.
 ///
-/// ⚠ The residue, stated rather than hidden: a deny rule narrowed by certificate
-/// denies more than the operator wrote, costing availability. The alternative —
-/// dropping the rule — turns a denial into whatever `default_permission` says,
-/// which on a permissive document is an ALLOW. Denying too much is recoverable;
-/// allowing too much is not.
+/// ⚠ A BLANK name is refused by the document, not silently dropped, exactly as
+/// a blank username is: see [`AclCompileError::BlankCertCommonName`].
 #[cfg(feature = "access-acl")]
 pub fn acl_config_from_inputs(
     inputs: &AclConfigInputs,
 ) -> Result<Option<wz_access_control::AclConfig>, AclCompileError> {
     use std::collections::{HashMap, HashSet};
     use wz_access_control::{
-        AclConfig, AclFlow, AclMessage, AclRule, AclUsername, Permission, SubjectSelector,
+        AclCertCommonName, AclConfig, AclFlow, AclMessage, AclRule, AclUsername, Permission,
+        SubjectSelector,
     };
 
     // ⚠ READ OUTSIDE THE `enabled` GUARD upstream, and this order is measured:
@@ -4464,9 +4476,24 @@ pub fn acl_config_from_inputs(
                     .collect::<Result<Vec<_>, _>>()?,
             };
             for subject in &subjects {
-                if subject.cert_common_names.is_some() && permission == Permission::Allow {
-                    continue;
-                }
+                // R2698 — the certificate axis is HONOURED now. Until this round
+                // an `AclRule` had nowhere to put it, so an allow-rule naming a
+                // certificate was dropped and a deny-rule was installed with the
+                // axis removed; both are gone, and a rule narrowed by
+                // certificate now narrows by certificate.
+                let cert_common_names = match &subject.cert_common_names {
+                    None => Vec::new(),
+                    Some(list) => list
+                        .iter()
+                        .map(|c| {
+                            AclCertCommonName::new(c.clone()).map_err(|_| {
+                                AclCompileError::BlankCertCommonName {
+                                    subject: subject.id.clone(),
+                                }
+                            })
+                        })
+                        .collect::<Result<Vec<_>, _>>()?,
+                };
                 let usernames = match &subject.usernames {
                     None => Vec::new(),
                     Some(list) => list
@@ -4499,6 +4526,7 @@ pub fn acl_config_from_inputs(
                             link_protocols: link_protocols.clone(),
                             interfaces: interfaces.clone(),
                             usernames: usernames.clone(),
+                            cert_common_names: cert_common_names.clone(),
                             permission,
                         });
                     }
@@ -7816,19 +7844,37 @@ mod tests {
                 subject: String::from("s1")
             }
         );
+        // R2698 — the certificate axis gets the same answer as the username
+        // axis, and it is asserted beside it so the two cannot drift: both are
+        // names a document may narrow by, and upstream refuses a blank one in
+        // the same loop.
+        assert_eq!(
+            compile(
+                r#"{ access_control: { enabled: true,
+                     rules: [ { id: "r1", key_exprs: ["x"], messages: ["put"],
+                                permission: "deny" } ],
+                     subjects: [ { id: "s1", cert_common_names: ["  "] } ],
+                     policies: [ { rules: ["r1"], subjects: ["s1"] } ] } }"#
+            ),
+            AclCompileError::BlankCertCommonName {
+                subject: String::from("s1")
+            }
+        );
     }
 
-    /// R2652 — `cert_common_names`, the one subject axis an `AclRule` has
-    /// nowhere to put, handled ASYMMETRICALLY in the rule's own permission.
+    /// R2698 — `cert_common_names` is HONOURED, and this test is the R2652 one
+    /// turned around: it used to assert that an allow rule naming a certificate
+    /// was DROPPED and a deny rule installed with the axis removed, because an
+    /// `AclRule` had nowhere to put it.
     ///
-    /// Upstream reads a subject's axes as a CONJUNCTION with an absent axis
-    /// meaning wildcard, so dropping this one WIDENS the rule. Widening an
-    /// `allow` grants access the document meant to withhold; widening a `deny`
-    /// withholds access the document meant to grant, which cannot open anything.
-    /// So an allow rule naming it is not installed and a deny rule is.
+    /// Both subjects now survive in both directions, and the names ride on the
+    /// rule. The ALLOW half is the one that changed behaviour rather than just
+    /// wording — it was 1 rule and is 2 — so it is the discriminator: a build
+    /// that compiled the axis away would still install the deny pair and fail
+    /// only here.
     #[cfg(feature = "access-acl")]
     #[test]
-    fn a_certificate_narrowed_subject_is_fail_closed_in_both_directions() {
+    fn a_certificate_narrowed_subject_compiles_to_a_rule_that_names_it() {
         let compile = |permission: &str| {
             let doc = format!(
                 r#"{{ access_control: {{ enabled: true,
@@ -7845,27 +7891,25 @@ mod tests {
                 .expect("`enabled: true` installs a policy")
         };
 
-        let denying = compile("deny");
-        assert_eq!(
-            denying.rules.len(),
-            2,
-            "a DENY rule keeps both subjects — the certificate axis is dropped \
-             and the rule denies a superset"
-        );
-        let allowing = compile("allow");
-        assert_eq!(
-            allowing.rules.len(),
-            1,
-            "an ALLOW rule keeps only the subject it can enforce in full; \
-             installing the other would grant access to every peer, not to the \
-             certificate the document named"
-        );
-        assert_eq!(
-            allowing.rules[0].interfaces,
-            vec![String::from("lo")],
-            "and it is the CERTIFICATE subject that was dropped, not whichever \
-             one came second"
-        );
+        for permission in ["deny", "allow"] {
+            let compiled = compile(permission);
+            assert_eq!(
+                compiled.rules.len(),
+                2,
+                "both subjects compile now, in both directions ({permission})"
+            );
+            let named: Vec<&str> = compiled
+                .rules
+                .iter()
+                .flat_map(|r| r.cert_common_names.iter().map(|c| c.as_str()))
+                .collect();
+            assert_eq!(
+                named,
+                vec!["example.org"],
+                "the certificate subject carries its name onto the rule, and the \
+                 interface subject carries none ({permission})"
+            );
+        }
     }
 
     /// The DROP-IN half is the load, not the list. These two keys left the

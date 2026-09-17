@@ -11348,6 +11348,7 @@ mod tests {
                 link_protocols: Vec::new(),
                 interfaces: Vec::new(),
                 usernames: Vec::new(),
+                cert_common_names: Vec::new(),
             }],
         })
     }
@@ -11377,6 +11378,7 @@ mod tests {
                 link_protocols: Vec::new(),
                 interfaces: Vec::new(),
                 usernames: Vec::new(),
+                cert_common_names: Vec::new(),
             }],
         })
     }
@@ -11881,6 +11883,7 @@ mod tests {
                     link_protocols: Vec::new(),
                     interfaces: Vec::new(),
                     usernames: Vec::new(),
+                    cert_common_names: Vec::new(),
                 }],
             })),
         );
@@ -12714,6 +12717,7 @@ mod tests {
                     link_protocols: Vec::new(),
                     interfaces: Vec::new(),
                     usernames: Vec::new(),
+                    cert_common_names: Vec::new(),
                 }],
             })),
         );
@@ -12786,6 +12790,7 @@ mod tests {
                     link_protocols: Vec::new(),
                     interfaces: Vec::new(),
                     usernames: Vec::new(),
+                    cert_common_names: Vec::new(),
                 }],
             })),
         );
@@ -12864,6 +12869,7 @@ mod tests {
                     link_protocols: Vec::new(),
                     interfaces: Vec::new(),
                     usernames: Vec::new(),
+                    cert_common_names: Vec::new(),
                 }],
             })),
         );
@@ -12960,6 +12966,7 @@ mod tests {
                     link_protocols: Vec::new(),
                     interfaces: Vec::new(),
                     usernames: Vec::new(),
+                    cert_common_names: Vec::new(),
                 }],
             })),
         );
@@ -13016,6 +13023,7 @@ mod tests {
                     link_protocols: Vec::new(),
                     interfaces: Vec::new(),
                     usernames: Vec::new(),
+                    cert_common_names: Vec::new(),
                 }],
             })),
         );
@@ -13146,6 +13154,7 @@ mod tests {
                         link_protocols: Vec::new(),
                         interfaces: Vec::new(),
                         usernames: Vec::new(),
+                        cert_common_names: Vec::new(),
                     }],
                 }))
                 .with_downsampling(vec![DownsamplingRule {

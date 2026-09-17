@@ -26,9 +26,12 @@
 //!   the routing layer keys on — not a parallel id type. zenoh's full subject
 //!   (`SubjectProperty<{interface,cert_cn,username,link,zid}>`) is carried here
 //!   as [`SubjectSelector`] (`Any` | `Zid`) plus the rule's inline narrowing
-//!   axes: link protocol and interface (R311y453) and username (R2631). The
-//!   cert-common-name is the one axis still absent; it comes from a TLS / QUIC
-//!   certificate, not from `Z_EXT_AUTH`.
+//!   axes: link protocol and interface (R311y453), username (R2631) and
+//!   cert-common-name (R2698). ALL FIVE of upstream's axes are expressible now.
+//!   The certificate one arrives differently from the rest — off the TLS / QUIC
+//!   handshake rather than `Z_EXT_AUTH` — which is why it rides on the
+//!   [`LinkSubject`] the two link axes already travel on rather than taking a
+//!   parameter of its own.
 //! - Keyexpr rule matching uses
 //!   [`keyexpr_includes_target`]:
 //!   a rule keyexpr must INCLUDE the message keyexpr (`rule ⊇ msg`), the
@@ -312,6 +315,27 @@ pub struct AclRule {
     /// it did not, and there is no "the resolver failed" state to be cautious
     /// about. See [`AclRule::governs_username`].
     pub usernames: Vec<AclUsername>,
+    /// R2698 — the CERT-COMMON-NAME subject axis, upstream's fifth and the last
+    /// one wz had nowhere to put: the rule governs only a face whose peer
+    /// presented a leaf certificate carrying one of these common names. EMPTY
+    /// means the rule does not narrow by certificate, zenoh's
+    /// `cert_common_names: None` expanding to `Wildcard`:
+    ///
+    /// `zenoh/src/net/routing/interceptor/authorization.rs` @ `let cert_common_names = config_subject`
+    ///
+    /// It follows [`usernames`](AclRule#structfield.usernames) rather than the
+    /// two link axes above, and for the same reason: a peer either presented a
+    /// named certificate or it did not, so a face with NO common name is a
+    /// definite non-match for a rule that names one
+    /// (`(SubjectProperty::Exactly(_), None) => false`). There is no "the
+    /// resolver failed" state to be cautious about — the value is read from the
+    /// handshake the link already completed. See
+    /// [`AclRule::governs_cert_common_name`].
+    ///
+    /// ⚠ IT ARRIVES ON THE LINK, not the session, which is why nothing in this
+    /// struct's signature says where it comes from: the enforcer reads it off
+    /// the [`LinkSubject`] it already holds.
+    pub cert_common_names: Vec<AclCertCommonName>,
     /// The verdict when the rule applies.
     pub permission: Permission,
 }
@@ -340,6 +364,46 @@ impl AclUsername {
         let name = name.into();
         if name.trim().is_empty() {
             return Err(BlankUsername);
+        }
+        Ok(Self(name))
+    }
+
+    /// The name as configured.
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+/// R2698 — a certificate common name an ACL rule can name: non-blank text.
+///
+/// [`AclUsername`]'s twin, and deliberately a SEPARATE type rather than a reuse:
+/// the two axes are checked against different values from different layers, and
+/// a shared newtype would let a rule's usernames be compared against a
+/// certificate name by a single wrong field access. Upstream keeps them
+/// distinct for the same reason (`CertCommonName` beside `Username`).
+///
+/// Upstream refuses a blank one when the policy is built, by the same
+/// `trim().is_empty()` test it applies to usernames:
+///
+/// `zenoh/src/net/routing/interceptor/authorization.rs` @ `"Found empty cert_common_name value in subject '{}'",`
+///
+/// wz's policy constructor is infallible, so the refusal moves to the one place
+/// a common name enters a rule. The stored value is NOT trimmed, exactly as
+/// upstream compares the configured string as written.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct AclCertCommonName(String);
+
+/// A certificate common name that is empty or whitespace-only, which upstream
+/// refuses.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BlankCertCommonName;
+
+impl AclCertCommonName {
+    /// A rule certificate common name, refused when blank.
+    pub fn new(name: impl Into<String>) -> Result<Self, BlankCertCommonName> {
+        let name = name.into();
+        if name.trim().is_empty() {
+            return Err(BlankCertCommonName);
         }
         Ok(Self(name))
     }
@@ -381,6 +445,30 @@ impl AclRule {
         }
         match username {
             Some(name) => self.usernames.iter().any(|u| u.as_str() == name),
+            None => false,
+        }
+    }
+
+    /// R2698 — whether this rule's CERT-COMMON-NAME axis admits the face's peer
+    /// certificate name: upstream's `SubjectProperty::matches` for that one
+    /// axis, and [`governs_username`](Self::governs_username)'s twin arm for
+    /// arm.
+    ///
+    /// - no common names listed — `Wildcard`, governs every face, certificate
+    ///   or not;
+    /// - a name listed, the peer presented one — governs only on equality;
+    /// - a name listed, the peer presented none — does NOT govern.
+    ///
+    /// `None` covers every face with no certificate name to report, which
+    /// [`LinkSubject::cert_common_name`] enumerates: a link with no certificate
+    /// at all, a peer that sent no chain, and a certificate whose subject has no
+    /// common name.
+    pub fn governs_cert_common_name(&self, cert_common_name: Option<&str>) -> bool {
+        if self.cert_common_names.is_empty() {
+            return true;
+        }
+        match cert_common_name {
+            Some(name) => self.cert_common_names.iter().any(|c| c.as_str() == name),
             None => false,
         }
     }
@@ -590,6 +678,15 @@ impl AclPolicy {
                 // with the other four; wz reads it per rule here for the reason
                 // the link axes above give.
                 && rule.governs_username(username)
+                // R2698 — the CERT-COMMON-NAME axis, read off the SAME
+                // `LinkSubject` the two link axes above are judged from. It
+                // needs no parameter of its own for that reason, and the reason
+                // is not economy: the value is a property of the link the
+                // message arrived on, so a second channel for it could disagree
+                // with `governs_link`'s about which face is being judged.
+                && rule.governs_cert_common_name(
+                    link.and_then(|subject| subject.cert_common_name.as_deref()),
+                )
                 && rule.messages.contains(&action)
                 && rule
                     .key_exprs
@@ -641,6 +738,7 @@ mod tests {
             link_protocols: Vec::new(),
             interfaces: Vec::new(),
             usernames: Vec::new(),
+            cert_common_names: Vec::new(),
         }
     }
 
@@ -996,6 +1094,7 @@ mod tests {
                 link_protocols: Vec::new(),
                 interfaces: Vec::new(),
                 usernames: Vec::new(),
+                cert_common_names: Vec::new(),
             }],
         });
         assert_eq!(
@@ -1032,6 +1131,115 @@ mod tests {
             ),
             Permission::Allow
         );
+    }
+
+    // ── R2698: the CERT-COMMON-NAME subject axis ─────────────────────────
+
+    fn cn(name: &str) -> AclCertCommonName {
+        AclCertCommonName::new(name).expect("a non-blank test common name")
+    }
+
+    /// A link subject carrying `cert_common_name` and nothing else narrowed, so
+    /// a decision made through it is decided by that axis alone.
+    fn link_named(cert_common_name: Option<&str>) -> LinkSubject {
+        LinkSubject {
+            protocol: None,
+            interfaces: None,
+            cert_common_name: cert_common_name.map(str::to_string),
+        }
+    }
+
+    fn put_over_link(policy: &AclPolicy, link: &LinkSubject) -> Permission {
+        policy.decision(
+            None,
+            AclFlow::Ingress,
+            AclMessage::Put,
+            "admin/cfg",
+            Some(link),
+            None,
+        )
+    }
+
+    /// R2698 — a rule naming a certificate governs that peer, not another one,
+    /// and not a face that presented no certificate name at all.
+    ///
+    /// The three faces are asserted together for the reason the username twin
+    /// below gives: each alone is satisfiable by a wrong matcher, and only the
+    /// unnamed face separates upstream's `(Exactly(_), None) => false` from a
+    /// fail-closed reading that would deny it. The default-deny half is the
+    /// mirror — an allow naming one certificate must not rescue the others.
+    #[test]
+    fn a_cert_common_name_rule_governs_only_that_peer_and_never_an_unnamed_one() {
+        let deny_named = AclPolicy::new(AclConfig {
+            default_permission: Permission::Allow,
+            rules: vec![AclRule {
+                cert_common_names: vec![cn("leaf.example")],
+                ..deny_rule(SubjectSelector::Any, "admin/**")
+            }],
+        });
+        assert_eq!(
+            put_over_link(&deny_named, &link_named(Some("leaf.example"))),
+            Permission::Deny,
+        );
+        assert_eq!(
+            put_over_link(&deny_named, &link_named(Some("other.example"))),
+            Permission::Allow,
+        );
+        assert_eq!(
+            put_over_link(&deny_named, &link_named(None)),
+            Permission::Allow,
+            "a face with no certificate name is not the named peer",
+        );
+
+        let allow_named = AclPolicy::new(AclConfig {
+            default_permission: Permission::Deny,
+            rules: vec![AclRule {
+                cert_common_names: vec![cn("leaf.example")],
+                ..allow_rule(SubjectSelector::Any, "admin/**")
+            }],
+        });
+        assert_eq!(
+            put_over_link(&allow_named, &link_named(Some("leaf.example"))),
+            Permission::Allow,
+        );
+        assert_eq!(
+            put_over_link(&allow_named, &link_named(Some("other.example"))),
+            Permission::Deny,
+        );
+        assert_eq!(
+            put_over_link(&allow_named, &link_named(None)),
+            Permission::Deny,
+        );
+    }
+
+    /// R2698 — an EMPTY list is upstream's wildcard: the rule governs every
+    /// face, certificate or not. Without this arm the axis could be implemented
+    /// as "always require a name" and the test above would still pass.
+    #[test]
+    fn a_rule_naming_no_certificate_governs_every_face() {
+        let deny_all = AclPolicy::new(AclConfig {
+            default_permission: Permission::Allow,
+            rules: vec![deny_rule(SubjectSelector::Any, "admin/**")],
+        });
+        assert_eq!(
+            put_over_link(&deny_all, &link_named(Some("leaf.example"))),
+            Permission::Deny,
+        );
+        assert_eq!(
+            put_over_link(&deny_all, &link_named(None)),
+            Permission::Deny
+        );
+    }
+
+    /// R2698 — blank is refused where it enters a rule, and a padded name is
+    /// kept VERBATIM, because upstream compares the configured string as
+    /// written. The pair matters together: trimming on the way in would make
+    /// `" leaf "` match `leaf`, which the document did not ask for.
+    #[test]
+    fn a_blank_cert_common_name_is_refused_and_a_padded_one_is_kept_verbatim() {
+        assert!(AclCertCommonName::new("").is_err());
+        assert!(AclCertCommonName::new("   ").is_err());
+        assert_eq!(cn(" leaf.example ").as_str(), " leaf.example ");
     }
 
     // ── R2631: the USERNAME subject axis ─────────────────────────────────

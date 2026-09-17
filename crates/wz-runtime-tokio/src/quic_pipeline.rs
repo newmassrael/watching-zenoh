@@ -96,6 +96,41 @@ pub(crate) fn peer_chain_expiry(connection: &Connection) -> Option<i64> {
         .min()
 }
 
+/// R2698 — the COMMON NAME on the peer's LEAF certificate over QUIC, or `None`.
+///
+/// The sibling of [`peer_chain_expiry`] above: same `peer_identity` downcast,
+/// same parser, and the leaf-versus-whole-chain split its TLS twin
+/// (`crate::stream_link::peer_chain_common_name`) explains — an expiry is a
+/// property of the chain, an identity is a property of the peer. Upstream keeps
+/// the same pair for the same reason
+/// (`io/zenoh-link-commons/src/quic/utils.rs` @ `pub fn get_cert_common_name`).
+///
+/// ⚠ ITS `#[cfg]` IS ITS CALLER'S, not its sibling's, and the difference is
+/// load-bearing. [`peer_chain_expiry`] carries
+/// `all(transport-link-quic, transport-unicast)` because `session_open` is
+/// where it is used; this one is called from [`wire_quic_stream`] below, which
+/// the module gate alone reaches. Copying the wider gate would make it dead
+/// code in a `transport-link-quic`-only build, which `-D warnings` fails and
+/// neither the default nor the all-features leg would have shown.
+pub(crate) fn peer_chain_common_name(connection: &Connection) -> Option<String> {
+    use x509_parser::prelude::{FromDer, X509Certificate};
+
+    let identity = connection.peer_identity()?;
+    let chain = identity
+        .downcast::<Vec<tokio_rustls::rustls::pki_types::CertificateDer>>()
+        .ok()?;
+    let leaf = chain.first()?;
+    let (_, parsed) = X509Certificate::from_der(leaf.as_ref()).ok()?;
+    // The FIELD rather than the `subject()` accessor, for the borrow reason its
+    // TLS twin records.
+    let common_name = parsed
+        .subject
+        .iter_common_name()
+        .next()
+        .and_then(|cn| cn.as_str().ok())?;
+    Some(common_name.to_string())
+}
+
 // R2608 — the cap moved with the loop it bounds, to
 // `crate::stream_link::EXPIRY_MAX_SLEEP`. A constant separated from its only
 // reader is the shape that goes stale unnoticed, so it travelled rather than
@@ -451,7 +486,12 @@ pub fn wire_quic_stream(link: QuicLink) -> (QuicReadDriver, Arc<StreamWriteDrive
         recv,
     } = link;
     // R311y453 — the §5.16 subject: quinn reports the endpoint's bound address.
-    let subject = ip_link_subject(InterceptorLink::Quic, endpoint.local_addr().ok());
+    // R2698 — with the peer's certificate common name, the ACL's fifth subject
+    // axis. Unlike the TLS twin there is no split to race here: `connection`
+    // outlives the wiring, so this is placed beside the subject for symmetry
+    // rather than out of necessity.
+    let subject = ip_link_subject(InterceptorLink::Quic, endpoint.local_addr().ok())
+        .with_cert_common_name(peer_chain_common_name(&connection));
     // R311y473 — the adminspace `{src,dst}` pair: the endpoint's bound address is
     // this end, quinn's `Connection::remote_address` the peer's.
     let endpoints = crate::link_interfaces::ip_link_endpoints(

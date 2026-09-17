@@ -184,6 +184,53 @@ pub(crate) fn peer_chain_deadline(
         .min()
 }
 
+/// R2698 — the COMMON NAME on the peer's LEAF certificate, or `None`.
+///
+/// The sibling of [`peer_chain_deadline`] above, over the same chain and the
+/// same parser, and it answers the ACL's fifth subject axis
+/// (`AclRule::governs_cert_common_name`).
+///
+/// It mirrors upstream exactly, and each of the three differences from its
+/// sibling is upstream's rather than a choice made here
+/// (`io/zenoh-links/zenoh-link-tls/src/unicast.rs` @
+/// `fn get_client_cert_common_name`):
+///
+/// * THE LEAF ONLY — `client_certs[0]`, where the deadline folds the WHOLE
+///   chain with `min`. The two are asking different questions: an expiry is a
+///   property of the chain (any expired link in it ends the connection), an
+///   identity is a property of the peer.
+/// * THE FIRST COMMON NAME — `iter_common_name().next()`, where a subject may
+///   carry several. Upstream takes the first and so does this.
+/// * ABSENT IS ABSENT — no chain, an unparsable leaf, a subject with no common
+///   name, or a common name that is not UTF-8 all answer `None`, which is the
+///   single answer upstream's `auth_value: Option<String>` can carry.
+///
+/// ⚠ The `#[cfg]` is its CALLER's, matching the sibling above: `tokio_rustls`
+/// and `x509_parser` are `transport-link-tls` dependencies, so an ungated copy
+/// does not merely become dead code — it fails to RESOLVE in a build without
+/// the feature. The workspace check caught exactly that, which is the third
+/// time this crate has been bitten by a helper written with a wider gate than
+/// the site that calls it.
+#[cfg(feature = "transport-link-tls")]
+pub(crate) fn peer_chain_common_name(
+    chain: Option<&[tokio_rustls::rustls::pki_types::CertificateDer<'_>]>,
+) -> Option<String> {
+    use x509_parser::prelude::{FromDer, X509Certificate};
+
+    let leaf = chain?.first()?;
+    let (_, parsed) = X509Certificate::from_der(leaf.as_ref()).ok()?;
+    // The FIELD, as upstream reads it (`cert.subject`), not the `subject()`
+    // accessor: the accessor hands back a value whose borrow dies with the
+    // statement, so an iterator over it cannot outlive the expression. Measured
+    // — the first draft used the accessor and the borrow checker refused it.
+    let common_name = parsed
+        .subject
+        .iter_common_name()
+        .next()
+        .and_then(|cn| cn.as_str().ok())?;
+    Some(common_name.to_string())
+}
+
 impl<R: AsyncRead + Unpin> StreamReadDriver<R> {
     // `pub(crate)` so each transport's `wire_*` constructs it over its own split
     // read half; the type is transport-neutral. `lowlatency` is the flag the
@@ -434,6 +481,56 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// R2698 — a DER certificate whose subject carries `common_name`, built with
+    /// the same `rcgen` dev-dependency the TLS e2e uses for its own chain.
+    ///
+    /// A GENERATED certificate rather than a checked-in blob: a fixture that
+    /// cannot be read back to its inputs proves only that the parser agrees with
+    /// whoever made the file, and a certificate expires, which turns a pinned
+    /// blob into a test that fails on a date nobody chose.
+    #[cfg(feature = "transport-link-tls")]
+    fn der_with_common_name(
+        common_name: &str,
+    ) -> tokio_rustls::rustls::pki_types::CertificateDer<'static> {
+        let mut params = rcgen::CertificateParams::new(vec!["localhost".to_string()])
+            .expect("valid subject alt name");
+        params.distinguished_name = rcgen::DistinguishedName::new();
+        params
+            .distinguished_name
+            .push(rcgen::DnType::CommonName, common_name);
+        let key = rcgen::KeyPair::generate().expect("key");
+        let cert = params.self_signed(&key).expect("self-signed");
+        tokio_rustls::rustls::pki_types::CertificateDer::from(cert.der().to_vec())
+    }
+
+    /// R2698 — the ACL's cert-common-name axis reads the LEAF's first common
+    /// name. The chain holds TWO certificates with different names so the
+    /// assertion separates "read the leaf" from "read any of them", which is the
+    /// one behaviour that distinguishes this from its `peer_chain_deadline`
+    /// sibling (that one folds the whole chain with `min`).
+    #[cfg(feature = "transport-link-tls")]
+    #[test]
+    fn peer_chain_common_name_reads_the_leaf_not_the_chain() {
+        let chain = [
+            der_with_common_name("leaf.example"),
+            der_with_common_name("issuer.example"),
+        ];
+        assert_eq!(
+            peer_chain_common_name(Some(&chain)),
+            Some(String::from("leaf.example")),
+        );
+    }
+
+    /// R2698 — absent is absent, upstream's single answer for every way a name
+    /// can fail to arrive. An empty chain is the `first()?` arm and no chain at
+    /// all is the `chain?` arm; both are reachable and both answer `None`.
+    #[cfg(feature = "transport-link-tls")]
+    #[test]
+    fn peer_chain_common_name_answers_none_without_a_certificate() {
+        assert_eq!(peer_chain_common_name(None), None, "no chain");
+        assert_eq!(peer_chain_common_name(Some(&[])), None, "an empty chain");
+    }
 
     /// Oversize frames are dropped by `send_blocking` rather than overflowing
     /// the u16 prefix — the channel stays usable afterwards. (Transport-neutral

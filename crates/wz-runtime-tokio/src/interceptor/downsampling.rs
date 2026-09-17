@@ -744,6 +744,7 @@ mod tests {
         LinkSubject {
             protocol: Some(protocol),
             interfaces: Some(vec![nic.to_owned()]),
+            cert_common_name: None,
         }
     }
 
@@ -789,6 +790,7 @@ mod tests {
         let nic_only = LinkSubject {
             protocol: None,
             interfaces: Some(vec!["eth0".to_owned()]),
+            cert_common_name: None,
         };
         assert!(unknown_proto.admit_one(t0, DownsamplingMessage::Put, "demo/x", Some(&nic_only)));
         assert!(
@@ -852,6 +854,7 @@ mod tests {
                 LinkSubject {
                     protocol: Some(InterceptorLink::UnixsockStream),
                     interfaces: Some(Vec::new()),
+                    cert_common_name: None,
                 },
             ),
         ] {

@@ -470,6 +470,26 @@ pub struct LinkSubject {
     /// (`io/zenoh-link-commons/src/unicast.rs:112-118`), so upstream silently
     /// reads a broken syscall as a definite negative.
     pub interfaces: Option<Vec<String>>,
+    /// R2698 — the COMMON NAME on the peer's leaf certificate, for a link that
+    /// presents one:
+    ///
+    /// - `Some(name)` — the peer authenticated and its leaf certificate's
+    ///   subject carries that common name;
+    /// - `None` — there is no such name to report. That covers a link with no
+    ///   certificate at all (tcp, unixsock, serial), a TLS link whose peer sent
+    ///   no chain, and a certificate whose subject has no common name.
+    ///
+    /// ⚠ THE THREE CASES ARE ONE ANSWER HERE, deliberately, where `interfaces`
+    /// above splits "resolved to nothing" from "could not resolve". Upstream
+    /// makes the same collapse and it is not an oversight on either side: its
+    /// extraction answers `auth_value: None` both when `peer_certificates()` is
+    /// absent and when the subject has no common name
+    /// (`io/zenoh-links/zenoh-link-tls/src/unicast.rs` @
+    /// `fn get_client_cert_common_name`), so a rule narrowed by this axis has
+    /// only ever been able to ask "is this peer named X". Splitting it here
+    /// would invent a distinction no rule can express and no upstream document
+    /// can request.
+    pub cert_common_name: Option<String>,
 }
 
 impl LinkSubject {
@@ -479,7 +499,25 @@ impl LinkSubject {
     pub const UNKNOWN: Self = Self {
         protocol: None,
         interfaces: None,
+        cert_common_name: None,
     };
+
+    /// R2698 — this subject with its peer's leaf-certificate common name filled
+    /// in, consuming and returning so a link's `wire_*` can add it to the
+    /// subject a shared constructor already built.
+    ///
+    /// Separate from construction because of WHEN the value exists: the peer
+    /// chain is readable for one window inside the link's own wiring — before
+    /// the stream is split, after which the rustls connection is gone — while
+    /// the subject itself is built by a helper shared with every transport that
+    /// never sees a certificate. Threading an `Option<String>` through that
+    /// helper would put a TLS-only parameter on the tcp, vsock, serial and
+    /// unixsock paths, where the only honest argument is `None`.
+    #[must_use]
+    pub fn with_cert_common_name(mut self, cert_common_name: Option<String>) -> Self {
+        self.cert_common_name = cert_common_name;
+        self
+    }
 
     /// Whether this subject is governed by a rule narrowed to `protocols`.
     ///

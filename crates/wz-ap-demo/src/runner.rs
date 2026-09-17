@@ -4574,6 +4574,7 @@ async fn run_peer_until(
             link_protocols: Vec::new(),
             interfaces: Vec::new(),
             usernames: Vec::new(),
+            cert_common_names: Vec::new(),
         };
         AclPolicy::new(AclConfig {
             default_permission: Permission::Allow,
