@@ -1656,7 +1656,16 @@ PIN_NO_SYMBOL = 2
 # counted off the reason, which is the rule this file states for itself — a
 # ceiling moved on a different measurement than the one checked against it is a
 # ceiling nobody can reason about.
-PIN_WZ_CITATIONS = 128
+# R2701 — 128 -> 132. `access-acl`'s reason gained a correction that WITHDRAWS a
+# clause, and a withdrawal costs citations rather than saving them: saying the
+# cert-common-name axis is built names the rule field, the matcher, the link
+# subject it reads and the end-to-end witness, which is four tracked wz files
+# where the stale clause named none. READ off the census's own FAIL line, which
+# printed 132; the reason was never counted by hand. REACHED and AMBIGUOUS both
+# hold, and that is the expected shape here rather than a lucky one: the atom
+# neither entered nor left the PARTIAL population this round, and every added
+# citation is rooted at a tracked file, so neither bucket has a reason to move.
+PIN_WZ_CITATIONS = 132
 # R2626 — 44 -> 42, and this one is worth a sentence because it HELD through
 # every earlier retirement in this run (R2612, R2622). `time-hlc`'s reason is the
 # first retiree carrying AMBIGUOUS citations of its own: its oldest clauses cite
