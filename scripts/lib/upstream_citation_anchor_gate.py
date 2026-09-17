@@ -466,7 +466,20 @@ BARE_BUDGET = 58
 #: budget comment in THIS file, and a CI lane -- and each was found only because
 #: something else brought a reader to the file. That is the measurement behind
 #: "a citation is copied far more often than it is checked".
-ROOTLESS_LINE_BUDGET = 93
+# 93 -> 92 (R2687). The peer's introspection accessors were rewritten and their
+# docs re-cited: the replaced `group_interest_sources` carried a root-less
+# line-form citation of upstream's sourced-accessor module, and the text that
+# replaced it gives the same subject a ROOTED path with an anchored needle. A
+# repair rather than a deletion, which is the direction this ratchet wants; it
+# is lowered here so the next round cannot spend the slack.
+#
+# ⚠ THE PATH IS DESCRIBED, NOT SPELLED, and the first draft of this note spelled
+# it — then followed it with the WORD "needle" instead of a backticked one,
+# which is a rooted path carrying no anchor: a BARE-form citation. This gate
+# refused its own source over it, 59 against a budget of 58. R2577 paid for
+# exactly this class in exactly this file. A budget note explaining a citation
+# must not BE one.
+ROOTLESS_LINE_BUDGET = 92
 ROOTLESS_BARE_BUDGET = 36
 #: Root-less LINE citations whose file EXISTS at the pin but whose line number
 #: is past its end -- 1.5.0 line numbers on files that shrank. Measured, not
@@ -521,7 +534,9 @@ ROOTLESS_STALE_LINE_BUDGET = 1
 #: anchored one. Registered as open debt 769 — the line-form population is
 #: verified for PATH and end-of-file only, never for whether the line supports
 #: the claim, and this is ONE measured instance of 288, not a survey of them.
-ROOTLESS_UNDECLARED_BUDGET = 658
+# 658 -> 657 (R2687), the same repair seen from the residue axis: the citation
+# that gained a root left the ungraded-candidate bucket with it.
+ROOTLESS_UNDECLARED_BUDGET = 657
 #: EVERY root-less occurrence, graded or not: `rootless_line + rootless_bare +
 #: residue`. One ratchet over the union of the three above, and it exists
 #: because those three CANNOT express the invariant that matters.
@@ -570,7 +585,12 @@ ROOTLESS_UNDECLARED_BUDGET = 658
 #: R2578 — 790 -> 789, the same single occurrence as the budget above.
 #: R2634 — 789 -> 788, the same single occurrence as the budget above.
 #: R2665 — 788 -> 787, the same single occurrence as the budget above.
-ROOTLESS_TOTAL_BUDGET = 787
+# 787 -> 785 (R2687). TWO, where the line and residue axes each moved by one —
+# the rewrite replaced both peer accessors, and the queryable twin's doc carried
+# a root-less citation of its own. The total is the axis that cannot be moved by
+# declaring a segment, so a fall here is always a citation genuinely rooted or
+# marked @ REMOVED; these were rooted.
+ROOTLESS_TOTAL_BUDGET = 785
 
 #: A LIVE invocation of the RESOLUTION arm. R2242 split this gate in two and,
 #: in doing so, made `--resolve` a flag someone can simply stop passing: delete
