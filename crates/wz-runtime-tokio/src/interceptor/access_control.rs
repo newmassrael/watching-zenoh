@@ -30,7 +30,7 @@ use wz_codecs::push::PushOwnedVariant;
 use wz_codecs::request::RequestOwnedVariant;
 use wz_session_core::network_message::NetworkMessage;
 
-use super::{Interceptor, InterceptorContext};
+use super::{Interceptor, InterceptorCacheValue, InterceptorContext};
 
 /// An access-control enforcer for one flow — the wz mirror of zenoh's
 /// `IngressAclEnforcer` / `EgressAclEnforcer`. Holds the (shared) compiled
@@ -281,7 +281,7 @@ impl Interceptor for AclInterceptor {
         &self,
         ctx: &dyn InterceptorContext,
         keyexpr: &str,
-    ) -> Option<Box<dyn Any>> {
+    ) -> Option<InterceptorCacheValue> {
         let subject = ctx.subject()?;
         let link = ctx.link_subject();
         // R2631 — the username is face-derived too, and it is safe to fold into a
@@ -327,7 +327,7 @@ impl Interceptor for AclInterceptor {
         &self,
         ctx: &dyn InterceptorContext,
         msg: &NetworkMessage,
-        cache: Option<&dyn Any>,
+        cache: Option<&(dyn Any + Send + Sync)>,
     ) -> bool {
         let Some(cached) = cache.and_then(|c| c.downcast_ref::<AclKeyexprCache>()) else {
             return self.intercept(ctx, msg);
@@ -1188,5 +1188,68 @@ mod tests {
                 "cached verdict for {face}"
             );
         }
+    }
+
+    /// R2701 — a configured chain, held in SHARED state, giving its verdicts on
+    /// a thread that is not the one that built it.
+    ///
+    /// This is the property the §5.16 client-transport residual needs and did
+    /// not have. wz installs the chain at exactly two seams, both of them
+    /// forwarders, and a forwarder may keep it in a `RefCell` because it is
+    /// task-local. A client-mode session has no forwarder, and the thing that
+    /// would hold the chain instead — the session handle the application
+    /// publishes through — is shared. Until this round the trait object was
+    /// unbounded, so `Arc<InterceptorChain>` was not `Sync` and this test would
+    /// not COMPILE. That is the control, and it is a type-level one because the
+    /// defect is type-level: nothing about any verdict was wrong, the verdicts
+    /// were simply unreachable from where the next atom has to ask for them.
+    ///
+    /// ANTI-VACUITY: two messages, not one. A chain that denied everything —
+    /// and an empty chain, which admits everything — both fail this, so the
+    /// assertion is that the POLICY crossed the boundary, not merely that some
+    /// verdict did.
+    #[test]
+    fn a_configured_chain_gives_its_verdicts_from_another_thread() {
+        use crate::interceptor::{InterceptorConfig, InterceptorFlow};
+        use std::sync::Arc;
+
+        let subject = Zid::try_from([7u8; 16].as_slice()).expect("conformant zid");
+        let chain = Arc::new(
+            InterceptorConfig::default()
+                .with_acl(deny_admin_policy())
+                .build_chain(InterceptorFlow::Ingress),
+        );
+        assert!(
+            !chain.is_empty(),
+            "the fixture must install an enforcer, or the thread proves nothing"
+        );
+
+        let worker = {
+            let chain = Arc::clone(&chain);
+            std::thread::spawn(move || {
+                let ctx = MockCtx::with_subject(Some(subject));
+                let governed = NetworkMessage::Push(Box::new(
+                    build_push_literal("admin/secret", b"x").expect("build governed push"),
+                ));
+                let ungoverned = NetworkMessage::Push(Box::new(
+                    build_push_literal("demo/data", b"x").expect("build ungoverned push"),
+                ));
+                (
+                    chain.admit(&ctx, &governed).is_admitted(),
+                    chain.admit(&ctx, &ungoverned).is_admitted(),
+                )
+            })
+        };
+
+        let (governed_admitted, ungoverned_admitted) =
+            worker.join().expect("the verdict thread panicked");
+        assert!(
+            !governed_admitted,
+            "the deny rule governs admin/** on the other thread too"
+        );
+        assert!(
+            ungoverned_admitted,
+            "a keyexpr no rule names is still admitted -- the chain crossed, not a blanket deny"
+        );
     }
 }

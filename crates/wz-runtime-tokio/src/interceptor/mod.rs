@@ -209,7 +209,25 @@ impl InterceptorVerdict {
 /// Returns `true` to ADMIT the message, `false` to drop it. The implementation
 /// dispatches internally on the message kind (it checks only the kinds it
 /// governs and admits the rest).
-pub trait Interceptor {
+///
+/// R2701 — `Send + Sync`, which is the bound upstream's trait OBJECT carries
+/// (`zenoh/src/net/routing/interceptor/mod.rs` @ `pub(crate) type Interceptor = Box<dyn InterceptorTrait + Send + Sync>;`)
+/// and which wz had silently dropped. It reads like a formality and is not: an
+/// `InterceptorChain` is `Vec<Box<dyn Interceptor>>`, so without it the WHOLE
+/// chain is neither `Send` nor `Sync`, and the only thing that can hold one is a
+/// task-local cell. That was invisible for as long as the single holder WAS
+/// task-local (the forwarders' `RefCell`), and it is what refused every attempt
+/// to install a chain anywhere else — a `SessionInner` behind the runtime's
+/// `Mutex` GAT (which requires `T: Send`) does not compile against the unbounded
+/// trait, which is the measured reason the §5.16 client-transport residual had
+/// no seam to attach to.
+///
+/// `Sync` as well as `Send`, again as upstream: the egress door is called from
+/// every application thread that publishes, so a policy that could only be read
+/// under a lock would serialize publishing on the access check. The cost lands
+/// on implementations — see the downsampler's per-rule timer — and that is the
+/// correct place for it.
+pub trait Interceptor: Send + Sync {
     /// Which interceptor this is — the attribution a chain verdict carries.
     ///
     /// Declared rather than derived: the chain holds `Box<dyn Interceptor>` and
@@ -246,7 +264,7 @@ pub trait Interceptor {
         &self,
         _ctx: &dyn InterceptorContext,
         _keyexpr: &str,
-    ) -> Option<Box<dyn Any>> {
+    ) -> Option<InterceptorCacheValue> {
         None
     }
 
@@ -262,15 +280,34 @@ pub trait Interceptor {
     /// rather than decorative — a chain swap that failed to invalidate would
     /// keep answering with the OLD policy, which is exactly the failure the
     /// version in [`InterceptorChain`] exists to prevent.
+    /// R2701 — the borrowed form carries the same `Send + Sync` the owned
+    /// [`InterceptorCacheValue`] does, as upstream's accessor does
+    /// (`zenoh/src/net/routing/interceptor/mod.rs` @ `fn get_cache(&self, msg: &NetworkMessageMut) -> Option<&Box<dyn Any + Send + Sync>>;`).
+    /// Not cosmetic: `Option<&(dyn Any + Send + Sync)>` does not coerce to
+    /// `Option<&dyn Any>` — auto-trait removal is a coercion on the reference,
+    /// not through the `Option` — so an unbounded parameter here would force
+    /// every caller holding a real cache slot to launder it.
     fn intercept_cached(
         &self,
         ctx: &dyn InterceptorContext,
         msg: &NetworkMessage,
-        _cache: Option<&dyn Any>,
+        _cache: Option<&(dyn Any + Send + Sync)>,
     ) -> bool {
         self.intercept(ctx, msg)
     }
 }
+
+/// What one interceptor precomputes for one (face, keyexpr) — the type
+/// `Interceptor::compute_keyexpr_cache` returns and `InterceptorChain` stores
+/// a slot of per interceptor.
+///
+/// R2701 — `Send + Sync` on the erased value, matching upstream's own cache
+/// payload (`zenoh/src/net/routing/interceptor/mod.rs` @ `fn compute_keyexpr_cache(&self, key_expr: &keyexpr) -> Option<Box<dyn Any + Send + Sync>>;`).
+/// A cache slot is reachable from whatever holds the chain, so a payload without
+/// the bound would re-impose on every holder exactly the restriction the trait's
+/// own bound just lifted. Named as an alias rather than spelled at each of the
+/// four sites so the two cannot drift apart.
+pub type InterceptorCacheValue = Box<dyn Any + Send + Sync>;
 
 /// R311y508 — the per-(face, keyexpr) precomputed state for ONE chain, tagged
 /// with the version of the chain that produced it. The wz mirror of zenoh's
@@ -284,7 +321,7 @@ pub trait Interceptor {
 /// that silently does nothing for exactly the keyexprs that were already busy.
 pub struct InterceptorKeyexprCache {
     version: u64,
-    per_interceptor: Vec<Option<Box<dyn Any>>>,
+    per_interceptor: Vec<Option<InterceptorCacheValue>>,
 }
 
 impl InterceptorKeyexprCache {

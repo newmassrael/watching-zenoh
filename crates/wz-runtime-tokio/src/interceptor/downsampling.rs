@@ -93,7 +93,7 @@
 //! multicast ingress path (`route_mcast_ingress`) never reaches `admit`. The two
 //! agree, so this is not a gap.
 
-use std::cell::Cell;
+use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 use wz_codecs::push::PushOwnedVariant;
@@ -257,10 +257,20 @@ pub fn interval_from_freq(freq: f64) -> Duration {
 
 /// A rule plus its single last-admitted instant — the wz analogue of zenoh's
 /// per-rule `Timestate` entry (`HashMap<usize, Timestate>` keyed by rule id).
-/// `Cell` because [`Interceptor::intercept`] takes `&self` (`Instant` is `Copy`).
+/// Interior mutability because [`Interceptor::intercept`] takes `&self`.
+///
+/// R2701 — a `Mutex`, where this was a `Cell`, and upstream's own field is the
+/// same (`zenoh/src/net/routing/interceptor/downsampling.rs` @ `pub latest_message_timestamp: Mutex<std::time::Instant>,`).
+/// The `Cell` was the locally cheapest thing that satisfies `&self`, and its
+/// justification below argued correctly that nothing SHARES this state — but
+/// `Cell` is not `Sync` whatever it is shared with, so the choice narrowed the
+/// whole `Interceptor` seam to holders that are themselves task-local.
+/// The lesson is the direction of the inference: a field's interior-mutability
+/// choice is an assertion about who may hold the TYPE, not only about who writes
+/// the field.
 struct RuleState {
     rule: DownsamplingRule,
-    last_admitted: Cell<Option<Instant>>,
+    last_admitted: Mutex<Option<Instant>>,
 }
 
 /// The downsampling interceptor for ONE flow — holds the rules that apply to that
@@ -274,12 +284,17 @@ struct RuleState {
 /// structurally guaranteed and therefore untestable here:
 /// [`InterceptorConfig::build_chain`](super::InterceptorConfig::build_chain) is
 /// called once per flow (`linkstate_forward.rs:865-866`) and each call
-/// constructs fresh [`Cell`]s, so there is no shared state for a leak to travel
+/// constructs fresh timers, so there is no shared state for a leak to travel
 /// through. That was CHECKED, not assumed — a candidate test was written and
 /// then removed after no damage to either this module or `build_chain` could
-/// red it. zenoh needs its `Arc<Mutex<HashMap<usize, Timestate>>>` because its
-/// factory hands the rule set to two interceptors; wz's config-to-chain shape
-/// does not.
+/// red it. zenoh needs its per-rule timestate behind a lock because its factory
+/// hands the rule set to two interceptors; wz's config-to-chain shape does not.
+///
+/// ⚠ R2701 — that last sentence is about SHARING and stays true, but it was
+/// being read as settling the interior-mutability CHOICE, which it never did.
+/// The timer is a `Mutex` now, for the orthogonal reason recorded on
+/// `RuleState`: a `Cell` is not `Sync`, so it decided what may hold the whole
+/// interceptor chain. Nothing about the per-flow-independence argument changed.
 pub struct DownsamplingInterceptor {
     rules: Vec<RuleState>,
 }
@@ -295,7 +310,7 @@ impl DownsamplingInterceptor {
             .filter(|r| r.flows.contains(&flow))
             .map(|rule| RuleState {
                 rule: rule.clone(),
-                last_admitted: Cell::new(None),
+                last_admitted: Mutex::new(None),
             })
             .collect();
         (!rules.is_empty()).then_some(Self { rules })
@@ -332,7 +347,22 @@ impl DownsamplingInterceptor {
         else {
             return true; // ungoverned (kind, keyexpr) — never rate-limited
         };
-        match state.last_admitted.get() {
+        // R2701 — the guard is held ACROSS the decision and the record, so a
+        // rule cannot admit twice inside one interval when two threads publish
+        // together. That race is new with the R2701 `Sync` bound (the `Cell`
+        // this replaces could not be reached from two threads at all), so the
+        // lock is not a transliteration of the old read-then-write: it is what
+        // makes the sequence atomic now that it can be contended.
+        //
+        // Poison is absorbed rather than unwrapped, as
+        // `dynamic_volume.rs`'s registry lock does: a panic elsewhere must not
+        // turn a rate limiter into a data-plane panic, and the worst a
+        // recovered instant can be is one interval stale.
+        let mut last = state
+            .last_admitted
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        match *last {
             // The DROP-ALL rule (zenoh `freq == 0.0`): zenoh withholds the
             // shift-back that makes the first message due, so the first is
             // dropped too. Every LATER message is covered by the arm below, in
@@ -340,7 +370,7 @@ impl DownsamplingInterceptor {
             None if state.rule.min_interval == Duration::MAX => false,
             Some(prev) if now.saturating_duration_since(prev) < state.rule.min_interval => false,
             _ => {
-                state.last_admitted.set(Some(now));
+                *last = Some(now);
                 true
             }
         }
@@ -934,6 +964,51 @@ mod tests {
         assert!(
             message_kinds(&declare).is_empty(),
             "the control plane is never throttled"
+        );
+    }
+
+    /// R2701 — ONE rule timer, read and written from TWO threads, and the
+    /// interval holds across the boundary.
+    ///
+    /// This is the behavioural half of the `Send + Sync` bound the
+    /// [`Interceptor`](super::Interceptor) seam gained: an interceptor shared
+    /// between threads is now a shape the type system permits, so the timer has
+    /// to be correct in it. The previous `Cell` could not even be ASKED this
+    /// question — `&DownsamplingInterceptor` was not `Send`, so this test does
+    /// not compile against it, which is the control.
+    ///
+    /// DETERMINISTIC on purpose, not a race: the spawned thread is JOINED before
+    /// the second verdict is taken, so the assertion is about the timer being
+    /// SHARED, never about which thread won. A racing variant would witness the
+    /// same property less clearly and would be the kind of test that passes for
+    /// scheduling reasons.
+    #[test]
+    fn one_rule_timer_is_shared_across_threads() {
+        use std::sync::Arc;
+
+        let ds = Arc::new(ingress(vec![rule(&["demo/**"], Duration::from_secs(60))]));
+        let t0 = Instant::now();
+
+        // Thread A takes the rule's first admission and records the instant.
+        let worker = {
+            let ds = Arc::clone(&ds);
+            std::thread::spawn(move || ds.admit_one(t0, DownsamplingMessage::Put, "demo/a", None))
+        };
+        assert!(
+            worker.join().expect("the admitting thread panicked"),
+            "the first message under the rule is admitted"
+        );
+
+        // Thread B (this one) is inside the same interval, against the SAME
+        // timer. A per-thread timer would admit here; the shared one drops.
+        assert!(
+            !ds.admit_one(
+                t0 + Duration::from_millis(10),
+                DownsamplingMessage::Put,
+                "demo/b",
+                None
+            ),
+            "the interval recorded on the other thread still governs this one"
         );
     }
 }

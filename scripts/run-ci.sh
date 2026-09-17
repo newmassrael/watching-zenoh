@@ -7903,7 +7903,15 @@ layer_c1y_cargo_test_routing_peer() {
     # assembled by the shell, so the gate reports the guard unrunnable and skips
     # it. The move was found by running the command by hand after checking which
     # skipped guards this push's tests could fall under.
-    _runci_guarded_test "C1y interceptor" 41 \
+    # R2701 — 41 -> 43: the two witnesses of the `Send + Sync` bound the
+    # interceptor seam gained. `a_configured_chain_gives_its_verdicts_from_another_thread`
+    # takes a configured chain's verdicts off the building thread, and
+    # `one_rule_timer_is_shared_across_threads` shows one downsampling rule's
+    # timer governing both. Each is red on its own cause: removing the trait
+    # bound reds only the first (E0277 at the spawn), and reverting the timer to
+    # a `Cell` reds the whole impl. READ off this command's own printout, which
+    # said 43 — the gate CAN run this guard now and named the number itself.
+    _runci_guarded_test "C1y interceptor" 43 \
         cargo test -p wz-runtime-tokio --features "$access" --lib interceptor --quiet || return 1
     # R311y509 — 211 -> 213: the peer's CURRENT liveliness-TOKEN dump, in its two
     # tiers. Each test is bound by a damage that reds it ALONE: disabling the client
