@@ -93,6 +93,131 @@ struct HostedEntry<R: SessionRuntime, T: TimeSource> {
     _gc: crate::storage_gc_service::GarbageCollector,
 }
 
+/// R2696 — why a wire `volume-add` could not be turned into a [`Volume`].
+///
+/// The counterpart of upstream refusing to `declare_dynamic_plugin_by_name` for
+/// a backend it cannot find (`plugins/zenoh-plugin-storage-manager/src/lib.rs` @
+/// `fn spawn_volume`). wz resolves COMPILED backends instead of `dlopen`ing one,
+/// so "not found" here means "not in this build" — which is a different fact and
+/// says so.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum VolumeBuildError {
+    /// No backend of this name is compiled into this build. It is NOT a claim
+    /// that wz has no such backend: `fs` reads this way without
+    /// `storage-backend-filesystem`.
+    UnknownBackend(String),
+    /// The backend needs a parameter the client did not send.
+    MissingParameter {
+        /// The backend that needs it.
+        backend: String,
+        /// The `?<key>=` the payload was missing.
+        key: &'static str,
+    },
+    /// The client sent parameters this backend does not read. Refused rather
+    /// than ignored: a volume silently built from a config it did not honour is
+    /// a volume the operator cannot reason about, and `?rooot=/srv` must not
+    /// produce a volume rooted somewhere else.
+    UnknownParameters {
+        /// The backend that was asked for.
+        backend: String,
+        /// The keys it does not read, in the order the payload sent them.
+        keys: Vec<String>,
+    },
+}
+
+impl core::fmt::Display for VolumeBuildError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            VolumeBuildError::UnknownBackend(b) => {
+                write!(f, "no storage backend '{b}' is compiled into this build")
+            }
+            VolumeBuildError::MissingParameter { backend, key } => {
+                write!(f, "storage backend '{backend}' needs '?{key}=<value>'")
+            }
+            VolumeBuildError::UnknownParameters { backend, keys } => {
+                write!(
+                    f,
+                    "storage backend '{backend}' does not read {}",
+                    keys.join(", ")
+                )
+            }
+        }
+    }
+}
+
+/// R2696 — build the volume a wire `volume-add` named, from the COMPILED
+/// backends this build carries.
+///
+/// The wz counterpart of upstream's `spawn_volume`
+/// (`plugins/zenoh-plugin-storage-manager/src/lib.rs` @ `fn spawn_volume`),
+/// which resolves a backend name to a dynamic plugin and starts it. wz composes
+/// its backends, so this resolves a NAME to a constructor and the refusal for an
+/// unknown one names the build rather than a missing library.
+///
+/// The parameter vocabulary is each backend's own, and it is derived from the
+/// constructor rather than invented: `fs` takes `root` because
+/// [`FilesystemVolume::new`](crate::filesystem_storage::FilesystemVolume::new)
+/// takes a `root`. There is no upstream anchor for these names — zenoh's
+/// filesystem backend lives in a separate repository this tree does not pin — so
+/// they are stated here as wz's, not mirrored.
+///
+/// ⚠ `mem` takes NO parameters and says so rather than ignoring them, for the
+/// reason [`UnknownParameters`](VolumeBuildError::UnknownParameters) carries.
+///
+/// ⚠ The dlopen backend (`storage-mgr-dynamic-volume-loading`) is deliberately
+/// not reachable from here — see
+/// [`AdminConfigWrite::AddVolume`](wz_session_core::adminspace::AdminConfigWrite::AddVolume),
+/// which states why upstream's `paths` field is not carried on the wire.
+pub fn build_volume(
+    backend: &str,
+    volume_cfg: &[(String, String)],
+) -> Result<Box<dyn Volume>, VolumeBuildError> {
+    /// The keys a backend does not read, preserving the payload's order.
+    fn unknown_keys(volume_cfg: &[(String, String)], known: &[&str]) -> Vec<String> {
+        volume_cfg
+            .iter()
+            .map(|(k, _)| k)
+            .filter(|k| !known.contains(&k.as_str()))
+            .cloned()
+            .collect()
+    }
+
+    match backend {
+        "mem" => {
+            let unknown = unknown_keys(volume_cfg, &[]);
+            if !unknown.is_empty() {
+                return Err(VolumeBuildError::UnknownParameters {
+                    backend: String::from(backend),
+                    keys: unknown,
+                });
+            }
+            Ok(Box::new(wz_session_core::storage_volume::MemoryVolume))
+        }
+        #[cfg(feature = "storage-backend-filesystem")]
+        "fs" => {
+            let unknown = unknown_keys(volume_cfg, &["root"]);
+            if !unknown.is_empty() {
+                return Err(VolumeBuildError::UnknownParameters {
+                    backend: String::from(backend),
+                    keys: unknown,
+                });
+            }
+            let root = volume_cfg
+                .iter()
+                .find(|(k, _)| k == "root")
+                .map(|(_, v)| v.as_str())
+                .ok_or(VolumeBuildError::MissingParameter {
+                    backend: String::from(backend),
+                    key: "root",
+                })?;
+            Ok(Box::new(crate::filesystem_storage::FilesystemVolume::new(
+                root,
+            )))
+        }
+        other => Err(VolumeBuildError::UnknownBackend(String::from(other))),
+    }
+}
+
 /// Why [`RuntimeStorageManager::add_storage`] failed.
 #[derive(Debug)]
 pub enum RuntimeStorageManagerError {
@@ -184,6 +309,59 @@ impl<R: SessionRuntime, T: TimeSource> RuntimeStorageManager<R, T> {
     /// to re-add; the add-it counterpart is [`add_storage`](Self::add_storage).
     pub fn remove_storage(&mut self, name: &str) -> bool {
         self.services.remove(name).is_some()
+    }
+
+    /// R2696 — unregister the volume named `volume_id` AND tear down every live
+    /// storage hosted on it, returning those storages' names in hosted order, or
+    /// `None` when no such volume was registered.
+    ///
+    /// The wz counterpart of upstream's `kill_volume`
+    /// (`plugins/zenoh-plugin-storage-manager/src/lib.rs` @ `fn kill_volume`),
+    /// and the CASCADE is the whole of it: upstream stops every storage in the
+    /// volume's own `storages` map before stopping the volume, because a storage
+    /// outliving its volume answers queries out of a backend nothing can
+    /// re-create. wz holds no volume-keyed storage map — the ownership is
+    /// recorded the other way round, in each hosted
+    /// [`StorageConfig::volume_id`](wz_session_core::storage_config::StorageConfig)
+    /// — so the set is derived here rather than looked up, which is also why this
+    /// cannot live on
+    /// [`VolumeRegistry`](wz_session_core::storage_manager::VolumeRegistry): the
+    /// registry holds volumes and cannot see who resolved through it. This is the
+    /// one layer holding both maps.
+    ///
+    /// An unknown name is refused with no side effect: the hosted set is
+    /// computed without mutating, the volume is removed, and the storages go
+    /// last. A refusal that has already destroyed live state is not a refusal.
+    ///
+    /// ⚠ THAT ORDERING IS DEFENSIVE, NOT AN OBSERVABLE DIVERGENCE, and the
+    /// distinction was MEASURED rather than assumed — an earlier draft of this
+    /// comment claimed the stronger thing and a control proved it empty. The
+    /// hosted set is DERIVED from the volume id, so for a volume that is not
+    /// registered it is always empty and the two orderings cannot be told apart.
+    /// Upstream is the same shape for the same reason (`self.storages.remove(name)`
+    /// on an unknown name yields nothing before its `ok_or` refuses), so the
+    /// difference in statement order between the two functions has no consequence
+    /// either way. What IS observable, and what the witness holds, is that a
+    /// refusal is distinguishable from a successful removal of nothing.
+    ///
+    /// Dropping each [`StorageService`] undeclares its capture subscriber and
+    /// queryable (RAII), exactly as [`remove_storage`](Self::remove_storage)
+    /// documents — this is that operation over a derived set, not a second
+    /// teardown path.
+    pub fn remove_volume(&mut self, volume_id: &str) -> Option<Vec<String>> {
+        let hosted: Vec<String> = self
+            .services
+            .iter()
+            .filter(|(_, entry)| entry.config.volume_id == volume_id)
+            .map(|(name, _)| name.clone())
+            .collect();
+        if !self.registry.remove_volume(volume_id) {
+            return None;
+        }
+        for name in &hosted {
+            self.services.remove(name);
+        }
+        Some(hosted)
     }
 
     /// R311y828 — this manager's live state as the admin sub-tree below
@@ -489,6 +667,162 @@ mod tests {
             "nothing hosted on volume error"
         );
         assert!(mgr.is_empty());
+    }
+
+    // R2696 — the CASCADE, which is the whole of upstream's `kill_volume`
+    // (`plugins/zenoh-plugin-storage-manager/src/lib.rs` @ `fn kill_volume`).
+    // Three storages over two volumes, so the assertion can tell "tore down the
+    // right set" from "tore down everything": a cascade that ignored the volume
+    // id would pass a one-volume fixture.
+    #[tokio::test]
+    async fn remove_volume_takes_the_storages_hosted_on_it_and_leaves_the_others() {
+        let session = make_session();
+        let mut mgr = RuntimeStorageManager::new();
+        mgr.register_volume("mem", Box::new(MemoryVolume));
+        mgr.register_volume("other", Box::new(MemoryVolume));
+        for (name, volume) in [("s1", "mem"), ("s2", "other"), ("s3", "mem")] {
+            mgr.add_storage(
+                &session,
+                &StorageConfig::new(name, "demo/**", volume),
+                vec![0x01],
+            )
+            .expect("the fixture hosts all three");
+        }
+
+        let torn_down = mgr.remove_volume("mem").expect("the volume was registered");
+
+        assert_eq!(
+            torn_down,
+            vec![String::from("s1"), String::from("s3")],
+            "exactly the storages hosted on 'mem', named so an operator sees which went"
+        );
+        assert!(mgr.storage("s1").is_none(), "s1 went with its volume");
+        assert!(mgr.storage("s3").is_none(), "s3 went with its volume");
+        assert!(
+            mgr.storage("s2").is_some(),
+            "s2 is hosted on 'other' and the cascade must not reach it"
+        );
+        // And the volume itself is gone from the registry, not merely emptied of
+        // storages: a re-add naming it must fail to RESOLVE.
+        assert!(matches!(
+            mgr.add_storage(
+                &session,
+                &StorageConfig::new("s4", "demo/**", "mem"),
+                vec![0x01],
+            ),
+            Err(RuntimeStorageManagerError::Volume(
+                VolumeRegistryError::VolumeNotFound(_)
+            ))
+        ));
+    }
+
+    // R2696 — an unknown volume is REFUSED, and the refusal is distinguishable
+    // from "removed a volume that happened to host nothing". The caller acts on
+    // that difference: the demo host logs a warning for one and an info for the
+    // other, and a client that mistypes an id must not read success.
+    //
+    // ⚠ THIS TEST'S SUBJECT WAS NARROWED BY ITS OWN CONTROL. It first asserted
+    // an ORDERING (refuse before tearing anything down), and the control that
+    // reversed the two statements came back GREEN — because the hosted set is
+    // derived from the volume id and is therefore always empty for a volume that
+    // is not registered. The ordering was unobservable, so asserting it was
+    // asserting nothing; what survives is the refusal itself, which the control
+    // below does red.
+    #[tokio::test]
+    async fn remove_volume_refuses_an_unknown_name_rather_than_reporting_an_empty_success() {
+        let session = make_session();
+        let mut mgr = RuntimeStorageManager::new();
+        mgr.register_volume("mem", Box::new(MemoryVolume));
+        mgr.add_storage(
+            &session,
+            &StorageConfig::new("s1", "demo/**", "mem"),
+            vec![0x01],
+        )
+        .expect("the fixture hosts one storage");
+
+        assert_eq!(
+            mgr.remove_volume("nope"),
+            None,
+            "an unregistered volume is refused, never reported as a removal of nothing"
+        );
+        // And the ANTI-VACUITY arm: a volume that IS registered and hosts
+        // nothing reports success with an empty set, so the two answers this
+        // test is separating are both reachable in the same fixture.
+        mgr.register_volume("empty", Box::new(MemoryVolume));
+        assert_eq!(
+            mgr.remove_volume("empty"),
+            Some(Vec::new()),
+            "a registered volume hosting nothing is removed, and says it took nothing"
+        );
+        assert!(mgr.storage("s1").is_some(), "neither call tore s1 down");
+        mgr.add_storage(
+            &session,
+            &StorageConfig::new("s2", "demo/**", "mem"),
+            vec![0x01],
+        )
+        .expect("'mem' is still registered after a refused removal");
+    }
+
+    // R2696 — the wire's backend name resolves against what THIS BUILD carries,
+    // and every refusal names what it refused.
+    #[test]
+    fn build_volume_resolves_mem_and_names_what_it_cannot_build() {
+        assert!(
+            build_volume("mem", &[]).is_ok(),
+            "the in-memory backend is unconditional"
+        );
+        // `.err()` rather than `unwrap_err()` throughout: the Ok side is a
+        // `Box<dyn Volume>`, which is not `Debug` and cannot be — the trait is
+        // object-safe precisely because it carries no such bound.
+        assert_eq!(
+            build_volume("no-such-backend", &[]).err(),
+            Some(VolumeBuildError::UnknownBackend(String::from(
+                "no-such-backend"
+            ))),
+            "an unknown backend is refused BY NAME, never substituted"
+        );
+        // A backend that reads no parameters says so rather than ignoring them:
+        // a volume built from a config it did not honour is one the operator
+        // cannot reason about.
+        assert_eq!(
+            build_volume("mem", &[(String::from("root"), String::from("/srv"))]).err(),
+            Some(VolumeBuildError::UnknownParameters {
+                backend: String::from("mem"),
+                keys: vec![String::from("root")],
+            }),
+        );
+    }
+
+    // R2696 — the filesystem backend's parameter contract, on the build that
+    // carries it. The cfg is the CALLER's: without the feature there is no `fs`
+    // arm to test and the catch-all's answer is already pinned above.
+    #[cfg(feature = "storage-backend-filesystem")]
+    #[test]
+    fn build_volume_fs_needs_its_root_and_reads_nothing_else() {
+        assert_eq!(
+            build_volume("fs", &[]).err(),
+            Some(VolumeBuildError::MissingParameter {
+                backend: String::from("fs"),
+                key: "root",
+            }),
+            "a filesystem volume with no root would be rooted wherever the process stands"
+        );
+        assert!(build_volume("fs", &[(String::from("root"), String::from("/srv/wz"))]).is_ok());
+        assert_eq!(
+            build_volume(
+                "fs",
+                &[
+                    (String::from("root"), String::from("/srv/wz")),
+                    (String::from("rooot"), String::from("/srv/typo")),
+                ]
+            )
+            .err(),
+            Some(VolumeBuildError::UnknownParameters {
+                backend: String::from("fs"),
+                keys: vec![String::from("rooot")],
+            }),
+            "a typo'd key must not produce a volume rooted somewhere else"
+        );
     }
 
     // R311y503 — a live storage now starts its periodic garbage collector

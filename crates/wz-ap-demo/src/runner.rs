@@ -8525,6 +8525,65 @@ pub(crate) async fn run_storage_host(listen: &str, opts: StorageHostOpts) -> io:
                                 );
                             }
                         }
+                        // R2696 — the VOLUME half. `build_volume` resolves the
+                        // backend this build carries; an unknown one is refused BY
+                        // NAME, never registered as something else.
+                        AdminConfigWrite::AddVolume {
+                            volume_id,
+                            backend,
+                            volume_cfg,
+                        } => {
+                            // Upstream's own default: a volume that names no
+                            // backend is backed by the backend of its own name
+                            // (`plugins/zenoh-backend-traits/src/config.rs` @
+                            // `pub fn backend(&self) -> &str {`).
+                            let backend_name = backend.as_deref().unwrap_or(volume_id.as_str());
+                            match wz::runtime_tokio::storage_manager_service::build_volume(
+                                backend_name,
+                                volume_cfg,
+                            ) {
+                                Ok(volume) => {
+                                    manager.register_volume(volume_id.clone(), volume);
+                                    log::info!(
+                                        "wz-ap-demo storage-host: registered storage volume \
+                                         '{volume_id}' (backend '{backend_name}'); a client \
+                                         mounts on it with \
+                                         `storage-add <name>@{volume_id}:<keyexpr>`"
+                                    );
+                                }
+                                Err(e) => log::warn!(
+                                    "wz-ap-demo storage-host: volume-add '{volume_id}' \
+                                     refused: {e}"
+                                ),
+                            }
+                        }
+                        // The cascade is upstream's `kill_volume`, and the log
+                        // names every storage it took with it: this is the one
+                        // intent whose effect reaches storages the caller did not
+                        // name, so an operator reading the log must not have to
+                        // infer which ones went.
+                        AdminConfigWrite::RemoveVolume(volume_id) => {
+                            match manager.remove_volume(volume_id) {
+                                Some(hosted) if hosted.is_empty() => log::info!(
+                                    "wz-ap-demo storage-host: unregistered storage volume \
+                                     '{volume_id}' (no storage was hosted on it)"
+                                ),
+                                Some(hosted) => log::info!(
+                                    "wz-ap-demo storage-host: unregistered storage volume \
+                                     '{volume_id}', despawning {} — storage_manager {}",
+                                    hosted.join(", "),
+                                    if manager.is_empty() {
+                                        "Loaded"
+                                    } else {
+                                        "Started"
+                                    }
+                                ),
+                                None => log::warn!(
+                                    "wz-ap-demo storage-host: volume-del '{volume_id}' — \
+                                     no such volume"
+                                ),
+                            }
+                        }
                         // Not a storage intent; this run-mode hosts no interceptor chain.
                         AdminConfigWrite::AclDeny(_) => log::warn!(
                             "wz-ap-demo storage-host: acl-deny config-write ignored \

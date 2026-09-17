@@ -1980,6 +1980,65 @@ pub enum AdminConfigWrite {
     /// `.../config/storage-del <name>` — live-despawn the storage named `name`
     /// (RAII undeclare of its capture-sub + queryable). R311y239.
     RemoveStorage(String),
+    /// R2696 — `.../config/volume-add <id>[@<backend>][?<k>=<v>&…]`: register a
+    /// storage VOLUME at runtime, the half of the lifecycle that was reachable
+    /// only at host startup.
+    ///
+    /// # Why this exists, and why its fields are upstream's
+    ///
+    /// Upstream's config-diff set carries `AddVolume` beside `AddStorage`
+    /// (`plugins/zenoh-backend-traits/src/config.rs` @ `AddVolume(VolumeConfig),`),
+    /// applied by `plugins/zenoh-plugin-storage-manager/src/lib.rs` @
+    /// `fn spawn_volume`. wz could add a STORAGE over the wire and never a
+    /// VOLUME, so a client could only ever mount on what the operator had already
+    /// registered at startup — the residual this atom names as "no volume
+    /// lifecycle from the wire".
+    ///
+    /// The fields are `VolumeConfig`'s, not invented: `volume_id` is its `name`,
+    /// `backend` is its `backend`, and the `?k=v` pairs are its `rest`. The
+    /// default follows upstream's own accessor
+    /// (`plugins/zenoh-backend-traits/src/config.rs` @ `pub fn backend(&self) -> &str {`,
+    /// whose body is `self.backend.as_deref().unwrap_or(&self.name)`): a named
+    /// volume with no backend is backed by the backend of its own name, which is
+    /// exactly how the demo host's `fs` volume is registered today.
+    ///
+    /// ⚠ UPSTREAM'S `paths` IS DELIBERATELY NOT CARRIED, and that is a scope line
+    /// rather than an omission. `paths` names dynamic libraries to `dlopen`, and
+    /// wz's dynamic-volume seam is a three-phase operator flow (load every path,
+    /// refuse two libraries declaring one id, bind configs by declared id, only
+    /// then register) whose refusals are operator errors reported before ANY
+    /// volume is registered. Routing that through a per-client wire verb needs
+    /// that flow's decisions re-made for a caller who cannot see the other
+    /// clients' paths, which is its own round. A `volume-add` naming a backend no
+    /// build compiled in is refused by name where it is applied.
+    ///
+    /// ⚠ Nothing is validated here, exactly as [`SetKey`](Self::SetKey) warns:
+    /// this crate cannot see which backends the host compiled in, so `backend`
+    /// may name nothing. The refusal names it at the host.
+    AddVolume {
+        /// The volume's id, unique within the manager. Upstream's `name`.
+        volume_id: String,
+        /// The backend to build it from, or `None` when the client named none —
+        /// which resolves to `volume_id` itself, upstream's own default.
+        backend: Option<String>,
+        /// The backend's parameters, upstream's `rest`. Empty is a bare backend.
+        volume_cfg: Vec<(String, String)>,
+    },
+    /// R2696 — `.../config/volume-del <id>`: unregister the volume named `id`
+    /// AND tear down every storage hosted on it.
+    ///
+    /// THE CASCADE IS THE POINT, and it is upstream's: `kill_volume`
+    /// (`plugins/zenoh-plugin-storage-manager/src/lib.rs` @ `fn kill_volume`)
+    /// stops every storage in the volume's map before stopping the volume,
+    /// because a storage outliving its volume answers out of a backend nothing
+    /// can re-create. The intent therefore does NOT mean "unregister": it means
+    /// the whole of upstream's operation, and the host applies it through
+    /// `RuntimeStorageManager::remove_volume`, which owns both maps.
+    ///
+    /// ⚠ It is the one intent here whose effect reaches state the CLIENT did not
+    /// name — the storages another client added onto that volume. That is
+    /// upstream's semantics and the reason the reply reports which storages went.
+    RemoveVolume(String),
     /// R2374 (§5.23 `adminspace-read`) — `.../config/admin-read true|false`: set
     /// this node's `adminspace.permissions.read` on the LIVE config.
     ///
@@ -2194,13 +2253,13 @@ impl<'a> AdminConfigWriteBody<'a> {
 /// stated once.
 ///
 /// Upstream has no action names in that space at all: every sub-key of `config/`
-/// is a config PATH there. wz put five verbs of its own beside them, and
+/// is a config PATH there. wz put seven verbs of its own beside them, and
 /// [`parse_admin_config_write`] needs a discriminator between the two
 /// vocabularies. This const is wz's half of it — the half this crate owns — and
 /// the config half arrives as the `is_config_key` parameter, because the
 /// runtime-mutable registry lives in a crate that depends on this one.
 ///
-/// ⛔ IT CARRIES ALL FIVE UNCONDITIONALLY, including the two whose arms are
+/// ⛔ IT CARRIES ALL SEVEN UNCONDITIONALLY, including the four whose arms are
 /// `#[cfg(feature = "adminspace-config-hotreload")]`. That is the whole reason
 /// it is load-bearing rather than documentation: on a build that compiles those
 /// arms out, `storage-add` must still not read as a config path — it is a name
@@ -2213,6 +2272,12 @@ pub const ADMIN_CONFIG_WRITE_ACTIONS: &[&str] = &[
     "connect-add",
     "storage-add",
     "storage-del",
+    // R2696 — the VOLUME half of the same lifecycle. They join for the reason
+    // the paragraph above gives about `storage-add`: a build with the hotreload
+    // arms compiled out must answer `UnknownKey` for a verb wz owns, never treat
+    // it as a config path.
+    "volume-add",
+    "volume-del",
     "admin-read",
 ];
 
@@ -2380,6 +2445,36 @@ pub fn parse_admin_config_write(
                 AdminConfigWriteOutcome::Apply(AdminConfigWrite::RemoveStorage(String::from(name)))
             }
         }
+        // R2696 — the VOLUME half of the same lifecycle, gated with the storage
+        // half for the same reason: a build without the feature must answer
+        // UnknownKey rather than decode an intent no host here can apply.
+        // `volume-add <id>[@<backend>][?k=v&…]`.
+        #[cfg(feature = "adminspace-config-hotreload")]
+        "volume-add" => {
+            let Some(payload) = text else {
+                return AdminConfigWriteOutcome::NotDeletable(String::from(subkey));
+            };
+            match parse_volume_add_payload(payload) {
+                Some(intent) => AdminConfigWriteOutcome::Apply(intent),
+                None => AdminConfigWriteOutcome::Malformed,
+            }
+        }
+        // `volume-del <id>` — unregister the volume AND tear down the storages
+        // hosted on it (upstream's `kill_volume` cascade). Empty id is Malformed.
+        #[cfg(feature = "adminspace-config-hotreload")]
+        "volume-del" => {
+            let Some(volume_id) = text else {
+                return AdminConfigWriteOutcome::NotDeletable(String::from(subkey));
+            };
+            let volume_id = volume_id.trim();
+            if volume_id.is_empty() {
+                AdminConfigWriteOutcome::Malformed
+            } else {
+                AdminConfigWriteOutcome::Apply(AdminConfigWrite::RemoveVolume(String::from(
+                    volume_id,
+                )))
+            }
+        }
         // R2374 (§5.23 adminspace-read) — `admin-read true|false`, the one sub-key
         // here that names a key UPSTREAM's config document also carries
         // (`adminspace/permissions/read`). Ungated for the reason this decoder is
@@ -2540,17 +2635,7 @@ fn parse_storage_add_payload(
                 return None;
             }
             if let Some(cfg) = cfg_text {
-                // A pair with no `=` is a client error, not a key with an empty
-                // value: refusing it is what keeps `?k` from silently becoming
-                // `k=""`. An empty KEY is refused for the same reason.
-                for pair in cfg.split('&') {
-                    let (key, value) = pair.split_once('=')?;
-                    let key = key.trim();
-                    if key.is_empty() {
-                        return None;
-                    }
-                    volume_cfg.push((String::from(key), String::from(value.trim())));
-                }
+                volume_cfg = parse_volume_cfg_pairs(cfg)?;
             }
             (n, Some(String::from(v)))
         }
@@ -2565,6 +2650,81 @@ fn parse_storage_add_payload(
         volume_id,
         volume_cfg,
     ))
+}
+
+/// R2696 — the `?<k>=<v>&<k>=<v>` tail that BOTH volume-carrying payloads end
+/// in: `storage-add`'s `@<volume_id>?…` object form (R2571) and `volume-add`'s
+/// own. One parser rather than two, because a second copy of a grammar is a
+/// second answer to "is `?k` a key with an empty value" — and the answer is no.
+///
+/// A pair with no `=` is a client error, not a key with an empty value: refusing
+/// it is what keeps `?k` from silently becoming `k=""`. An empty KEY is refused
+/// for the same reason. An empty VALUE is allowed — `?k=` says the key is
+/// present and blank, which is a thing a backend can act on.
+///
+/// The cfg is its CALLERS' — both are `adminspace-config-hotreload` arms, so a
+/// build without the feature has no caller and a wider gate here would be dead
+/// code under `-D warnings`.
+#[cfg(feature = "adminspace-config-hotreload")]
+fn parse_volume_cfg_pairs(cfg: &str) -> Option<Vec<(String, String)>> {
+    let mut pairs = Vec::new();
+    for pair in cfg.split('&') {
+        let (key, value) = pair.split_once('=')?;
+        let key = key.trim();
+        if key.is_empty() {
+            return None;
+        }
+        pairs.push((String::from(key), String::from(value.trim())));
+    }
+    Some(pairs)
+}
+
+/// R2696 — decode `volume-add`'s payload: `<id>[@<backend>][?<k>=<v>&…]`.
+///
+/// `None` is Malformed. An empty id is refused, and so is an empty backend after
+/// `@` — `x@` is a client that meant to name one and did not, where `x` with no
+/// `@` at all is a client that meant the default. The two are different inputs
+/// and they get different answers.
+///
+/// The `?` split comes FIRST here, where [`parse_storage_add_payload`] takes it
+/// inside the `@` half. That is not a style difference: a storage payload ends
+/// in a KEYEXPR that may itself contain `?`, so its cfg tail can only be found
+/// within the volume part, and a volume payload has no such tail to protect.
+///
+/// Returns the INTENT rather than its parts, where its storage twin returns a
+/// tuple. The twin's shape is older and its parts are rearranged by the caller
+/// (the host's volume default lands there); nothing rearranges these, so handing
+/// back three positional values for one call site to re-assemble would be a
+/// second place the field order has to be right.
+#[cfg(feature = "adminspace-config-hotreload")]
+fn parse_volume_add_payload(text: &str) -> Option<AdminConfigWrite> {
+    let text = text.trim();
+    let (head, cfg_text) = match text.split_once('?') {
+        Some((head, cfg)) => (head.trim(), Some(cfg)),
+        None => (text, None),
+    };
+    let (volume_id, backend) = match head.rsplit_once('@') {
+        Some((id, backend)) => {
+            let (id, backend) = (id.trim(), backend.trim());
+            if backend.is_empty() {
+                return None;
+            }
+            (id, Some(String::from(backend)))
+        }
+        None => (head, None),
+    };
+    if volume_id.is_empty() {
+        return None;
+    }
+    let volume_cfg = match cfg_text {
+        Some(cfg) => parse_volume_cfg_pairs(cfg)?,
+        None => Vec::new(),
+    };
+    Some(AdminConfigWrite::AddVolume {
+        volume_id: String::from(volume_id),
+        backend,
+        volume_cfg,
+    })
 }
 
 /// The OpenMetrics build-info block the admin `@/<zid>/<whatami>/metrics` GET
@@ -3279,7 +3439,7 @@ mod tests {
     #[test]
     fn parse_config_write_unknown_subkey() {
         // R2658 — `batch-size` is in NEITHER vocabulary: it is not one of wz's
-        // five verbs, and it is not a config key (upstream spells that one
+        // seven verbs, and it is not a config key (upstream spells that one
         // `transport/link/tx/batch_size`, with an underscore, because its keys
         // are `validated_struct` field names). A sub-key in neither vocabulary
         // is what `UnknownKey` is for. Until R2658 this arm was reached because
@@ -3415,10 +3575,10 @@ mod tests {
     /// The hostile input is the point: `|_| true` is a vocabulary that claims
     /// every name, which is what a host would effectively pass if the decoder
     /// trusted its parameter alone. `ADMIN_CONFIG_WRITE_ACTIONS` is what keeps
-    /// the five verbs out of the config vocabulary regardless.
+    /// the seven verbs out of the config vocabulary regardless.
     ///
     /// ⛔⛔ THE FIRST HALF OF THIS TEST IS VACUOUS ON A BUILD THAT COMPILES ALL
-    /// FIVE ARMS, and measuring that is why the second half exists. Dropping the
+    /// SEVEN ARMS, and measuring that is why the second half exists. Dropping the
     /// const guard was probed both ways: with `adminspace-config-hotreload` the
     /// whole suite stayed GREEN, because arm order alone answers a verb whose
     /// arm is present; without it, `storage-add` decoded
@@ -3448,8 +3608,14 @@ mod tests {
         // expected outcome is the one such a build gave before R2658 and must
         // keep giving: a verb this build does not carry is a name it does not
         // know, never a config key.
+        // R2696 — all FOUR verbs behind that feature, not the two this leg was
+        // written with. The list is hand-written because the const carries its
+        // seven names unconditionally and cannot say which arms a build elides;
+        // what keeps it honest is that it is the same feature gating all four,
+        // so a fifth verb joining that gate joins here or the leg silently stops
+        // covering it.
         #[cfg(not(feature = "adminspace-config-hotreload"))]
-        for action in ["storage-add", "storage-del"] {
+        for action in ["storage-add", "storage-del", "volume-add", "volume-del"] {
             let keyexpr = write_space().key_for(action);
             assert_eq!(
                 parse_admin_config_write(
@@ -4001,6 +4167,139 @@ mod tests {
             assert_eq!(out, AdminConfigWriteOutcome::Malformed);
         }
 
+        // ── R2696: the VOLUME half of the lifecycle ──────────────────────────
+        #[test]
+        fn volume_add_decodes_an_id_a_backend_and_the_backend_parameters() {
+            let out = parse_admin_config_write(
+                &write_space(),
+                "@/a1b2/peer/config/volume-add",
+                AdminConfigWriteBody::Put(b"  archive@fs?root=/srv/wz&mode=rw  "),
+                true,
+                &stub_config_key,
+            );
+            assert_eq!(
+                out,
+                AdminConfigWriteOutcome::Apply(AdminConfigWrite::AddVolume {
+                    volume_id: String::from("archive"),
+                    backend: Some(String::from("fs")),
+                    volume_cfg: vec![
+                        (String::from("root"), String::from("/srv/wz")),
+                        (String::from("mode"), String::from("rw")),
+                    ],
+                })
+            );
+        }
+
+        // Upstream's own default: a volume that names no backend is backed by
+        // the backend of its own name
+        // (`plugins/zenoh-backend-traits/src/config.rs` @ `pub fn backend(&self) -> &str {`).
+        // The DECODER must not resolve it — it records that the client named
+        // none, so the host can tell "the client asked for backend `fs`" from
+        // "the client asked for a volume called `fs`", which is the same
+        // distinction R311y497 drew for `storage-add`'s volume field.
+        #[test]
+        fn volume_add_without_a_backend_records_that_none_was_named() {
+            let out = parse_admin_config_write(
+                &write_space(),
+                "@/a1b2/peer/config/volume-add",
+                AdminConfigWriteBody::Put(b"mem"),
+                true,
+                &stub_config_key,
+            );
+            assert_eq!(
+                out,
+                AdminConfigWriteOutcome::Apply(AdminConfigWrite::AddVolume {
+                    volume_id: String::from("mem"),
+                    backend: None,
+                    volume_cfg: Vec::new(),
+                })
+            );
+        }
+
+        // `x@` is a client that meant to name a backend and did not; `x` is one
+        // that meant the default. Different inputs, different answers — a
+        // decoder that read `x@` as `x` would build a volume from a payload the
+        // client can see is incomplete.
+        #[test]
+        fn volume_add_refuses_an_empty_id_or_an_empty_backend() {
+            for payload in [&b""[..], b"  ", b"archive@", b"@fs", b"?root=/srv"] {
+                let out = parse_admin_config_write(
+                    &write_space(),
+                    "@/a1b2/peer/config/volume-add",
+                    AdminConfigWriteBody::Put(payload),
+                    true,
+                    &stub_config_key,
+                );
+                assert_eq!(
+                    out,
+                    AdminConfigWriteOutcome::Malformed,
+                    "payload {:?} must not decode",
+                    core::str::from_utf8(payload).unwrap()
+                );
+            }
+        }
+
+        // The pair grammar is SHARED with `storage-add`'s object form, so this
+        // is the one place it is asserted from the volume side: a pair with no
+        // `=` is a client error rather than a key with an empty value.
+        #[test]
+        fn volume_add_refuses_a_parameter_that_is_not_a_pair() {
+            for payload in [&b"archive@fs?root"[..], b"archive@fs?=/srv"] {
+                let out = parse_admin_config_write(
+                    &write_space(),
+                    "@/a1b2/peer/config/volume-add",
+                    AdminConfigWriteBody::Put(payload),
+                    true,
+                    &stub_config_key,
+                );
+                assert_eq!(
+                    out,
+                    AdminConfigWriteOutcome::Malformed,
+                    "payload {:?} must not decode",
+                    core::str::from_utf8(payload).unwrap()
+                );
+            }
+        }
+
+        #[test]
+        fn volume_del_decodes_the_id() {
+            let out = parse_admin_config_write(
+                &write_space(),
+                "@/a1b2/peer/config/volume-del",
+                AdminConfigWriteBody::Put(b"  archive  "),
+                true,
+                &stub_config_key,
+            );
+            assert_eq!(
+                out,
+                AdminConfigWriteOutcome::Apply(AdminConfigWrite::RemoveVolume(String::from(
+                    "archive"
+                )))
+            );
+        }
+
+        #[test]
+        fn volume_del_empty_is_malformed() {
+            let out = parse_admin_config_write(
+                &write_space(),
+                "@/a1b2/peer/config/volume-del",
+                AdminConfigWriteBody::Put(b"  "),
+                true,
+                &stub_config_key,
+            );
+            assert_eq!(out, AdminConfigWriteOutcome::Malformed);
+        }
+
+        // ⚠ NO vocabulary test for the two verbs lives here, and that is a
+        // measured decision rather than an omission. One was written — "a
+        // predicate that claims every name must still not take them" — and its
+        // control, withdrawing both names from `ADMIN_CONFIG_WRITE_ACTIONS`,
+        // came back GREEN: on a build that COMPILES the arms, the literal match
+        // answers first and the const is never consulted, exactly as
+        // `no_name_wz_owns_decodes_as_a_config_write`'s own doc says. That test
+        // owns this property on both legs, and its elided-arm leg now names all
+        // four gated verbs. A second copy here would have asserted nothing while
+        // reading like coverage.
         #[test]
         fn storage_write_gated_by_permission() {
             // permissions.write=false denies BEFORE decode (same gate as acl-deny).

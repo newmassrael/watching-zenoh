@@ -95,6 +95,29 @@ impl VolumeRegistry {
             .map_err(VolumeRegistryError::VolumeCreate)
     }
 
+    /// Unregister the volume named `volume_id`, returning whether one was
+    /// registered. Backends already created from it keep working — this removes
+    /// the RESOLUTION, exactly as [`register_volume`](Self::register_volume)
+    /// documents that a replacement backs only future
+    /// [`create_backend`](Self::create_backend) calls.
+    ///
+    /// ⚠ This is the registry's half and it is NOT the whole of upstream's
+    /// `kill_volume`, which first stops every storage hosted on the volume
+    /// (`plugins/zenoh-plugin-storage-manager/src/lib.rs` @ `fn kill_volume`).
+    /// The registry cannot do that: it holds volumes, not the storages created
+    /// from them, and nothing here can see who resolved through it. The cascade
+    /// belongs to the layer that holds BOTH maps — see
+    /// `RuntimeStorageManager::remove_volume` in `wz-runtime-tokio`, which is
+    /// the counterpart of upstream's function and calls this one last.
+    ///
+    /// R2696 — the registry had insert, replace (insert again), lookup and
+    /// enumerate, and no removal at all, so a volume was a thing a node could
+    /// only ever gain. That absence is what made "no volume lifecycle from the
+    /// wire" structural rather than a missing decoder arm.
+    pub fn remove_volume(&mut self, volume_id: &str) -> bool {
+        self.volumes.remove(volume_id).is_some()
+    }
+
     /// R311y828 — every registered volume as `(id, volume)`, id-sorted (the
     /// backing `BTreeMap`). The enumeration the admin
     /// `status/plugins/storage_manager/volumes/**` legs render from, the wz
