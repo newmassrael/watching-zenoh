@@ -7607,9 +7607,17 @@ pub(crate) async fn run_storage_host(listen: &str, opts: StorageHostOpts) -> io:
                 // declared-but-failed-to-load from never-asked-for. Before this
                 // the record vanished with the error and the two were the same
                 // observation.
+                // R2676 — the phrase `plugin load failed` is a CONTRACT, not
+                // prose: Layer C1bp's negative arm waits on it to know the host
+                // refused a non-plugin rather than loading one or saying nothing
+                // (`wz_plugin_dynamic_loading_pico.rs`, the
+                // `wz_plugin_non_plugin_shared_object_is_refused_and_the_node_survives`
+                // barrier). R2673 rewrote this line and dropped the phrase; the
+                // barrier is hosted-only, so no local gate could see it go. Lead
+                // with the failure and keep the slot state after it.
                 Err(e) => log::warn!(
-                    "wz-ap-demo storage-host: plugin '{declared}' stays Declared — \
-                     load failed: {e}"
+                    "wz-ap-demo storage-host: plugin load failed, '{declared}' \
+                     stays Declared: {e}"
                 ),
             }
         }
