@@ -1066,7 +1066,8 @@ pub enum AdminEntityKind {
     ///
     /// Upstream does not read a publisher table — there is none. It reads each
     /// face's declared INTERESTS and keeps the ones asking about subscribers
-    /// (`hat/peer/pubsub.rs` @ `fn sourced_publishers`): a face that wants to know
+    /// (`zenoh/src/net/routing/hat/peer/pubsub.rs` @ `fn sourced_publishers`):
+    /// a face that wants to know
     /// who subscribes is publishing.
     Publisher,
     /// `@/<zid>/<whatami>/queryable/<keyexpr>`.
