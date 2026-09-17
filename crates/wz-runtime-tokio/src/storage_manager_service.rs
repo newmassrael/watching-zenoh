@@ -324,10 +324,12 @@ impl<R: SessionRuntime, T: TimeSource> RuntimeStorageManager<R, T> {
     /// recorded the other way round, in each hosted
     /// [`StorageConfig::volume_id`](wz_session_core::storage_config::StorageConfig)
     /// — so the set is derived here rather than looked up, which is also why this
-    /// cannot live on
-    /// [`VolumeRegistry`](wz_session_core::storage_manager::VolumeRegistry): the
-    /// registry holds volumes and cannot see who resolved through it. This is the
-    /// one layer holding both maps.
+    /// cannot live on [`VolumeRegistry`]: the registry holds volumes and cannot
+    /// see who resolved through it. This is the one layer holding both maps.
+    /// (The target is left implicit because the type is already in scope here;
+    /// spelling it out is what rustdoc calls a redundant explicit link target,
+    /// and Layer C1bz counts one of those exactly as it counts an unresolved
+    /// link.)
     ///
     /// An unknown name is refused with no side effect: the hosted set is
     /// computed without mutating, the volume is removed, and the storages go
