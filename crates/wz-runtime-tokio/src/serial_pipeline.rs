@@ -107,10 +107,69 @@ pub fn open_serial_device(endpoint: &SerialEndpoint) -> io::Result<SerialStream>
             ));
         }
     };
+    // R2704 — `tout` is deliberately NOT applied to the builder here, and the
+    // reason is measured rather than assumed: tokio-serial's `SerialStream`
+    // implements `SerialPort::timeout` as `Duration::from_secs(0)` whatever the
+    // builder said, because a blocking read timeout is meaningless for an async
+    // `AsyncFd` stream. Setting it would have been a line that reads as
+    // honouring the key while changing nothing. Upstream spends `tout` on
+    // `port.connect(Some(Duration::from_micros(tout)))` -- the serial-link
+    // HANDSHAKE -- so wz spends it there too; see [`dial_serial`].
     let builder = tokio_serial::new(path, endpoint.baudrate);
     // tokio_serial::Error impls std::error::Error -> io::Error::other carries
     // it without lossy stringly-typed remapping.
-    SerialStream::open(&builder).map_err(io::Error::other)
+    let mut stream = SerialStream::open(&builder).map_err(io::Error::other)?;
+    // `exclusive` is stated in BOTH directions rather than only when false.
+    // tokio-serial opens exclusive by default, so wz already matched upstream's
+    // default -- what was missing was the CHOICE, and a call that only fired on
+    // one value would leave the other resting on a library default that is
+    // nobody's stated intent.
+    stream
+        .set_exclusive(endpoint.options.exclusive)
+        .map_err(io::Error::other)?;
+    Ok(stream)
+}
+
+/// R2704 — the `interfaces` an ACL can narrow a serial link by: THIS link's
+/// device name, without the path.
+///
+/// ## Why not upstream's list
+///
+/// Upstream answers with every serial port on the host
+/// (`io/zenoh-links/zenoh-link-serial/src/unicast.rs` @ `match z_serial::get_available_port_names()`),
+/// and its own comment states the INTENT as the singular — "for serial port
+/// `/dev/ttyUSB0` interface name will be `ttyUSB0`". Those two disagree the
+/// moment a host has two ports: a rule naming `ttyUSB1` then governs a link
+/// running on `ttyUSB0`, because `ttyUSB1` merely EXISTS. wz answers the
+/// intent. That is a strict subset of upstream's answer, it always contains the
+/// name that identifies this link, and it differs only where upstream would
+/// govern a link by an unrelated device's presence — which this atom's own
+/// `SerialTarget::Pins` clause already settled as the criterion: refusing where
+/// refusing is right is not a gap.
+///
+/// ## And a second reason not to enumerate
+///
+/// wz takes `tokio-serial` with `default-features = false` to avoid a libudev
+/// system-lib build dep (see its Cargo.toml entry). The enumeration that
+/// remains on Linux without libudev scans `/sys/class/tty` and does so through
+/// an `.expect(..)` — so on a host without that directory, enumerating would
+/// PANIC rather than return the `Err` upstream's arm handles. Answering from
+/// the endpoint reaches no filesystem at all and cannot fail.
+///
+/// Pins yield NO name: there is no device file, and the host tty backend
+/// refuses that target anyway.
+pub(crate) fn serial_interface_names(endpoint: &SerialEndpoint) -> Vec<String> {
+    match &endpoint.target {
+        SerialTarget::Device(path) => {
+            let name = path.rsplit('/').next().unwrap_or(path);
+            if name.is_empty() {
+                Vec::new()
+            } else {
+                vec![name.to_string()]
+            }
+        }
+        SerialTarget::Pins { .. } => Vec::new(),
+    }
 }
 
 /// Dial a serial endpoint as the link Initiator: open the tty and drive
@@ -125,8 +184,53 @@ pub fn open_serial_device(endpoint: &SerialEndpoint) -> io::Result<SerialStream>
 /// `_z_connect_serial` does (serial_protocol.c:255-280).
 pub async fn dial_serial(endpoint: &SerialEndpoint) -> io::Result<SerialStream> {
     let mut stream = open_serial_device(endpoint)?;
-    drive_serial_handshake(&mut stream, SerialRole::Initiator).await?;
+    drive_serial_handshake_within(
+        &mut stream,
+        SerialRole::Initiator,
+        endpoint.options.timeout_us,
+    )
+    .await?;
     Ok(stream)
+}
+
+/// R2704 — [`drive_serial_handshake`] bounded by the locator's `tout`, in
+/// MICROSECONDS.
+///
+/// This is where upstream spends that key: its dial calls
+/// `io/zenoh-links/zenoh-link-serial/src/unicast.rs` @ `port.connect(Some(Duration::from_micros(tout))).await?;`,
+/// so the window bounds the INIT / INIT|ACK exchange rather than each read. wz
+/// had no handshake timeout at all and said so in [`dial_serial`]'s own docs --
+/// "bounding the wait is the caller's concern" -- which was a defensible
+/// position for a seam with no configured window and is simply wrong now that
+/// the locator carries one. Upstream's default is 50 ms.
+///
+/// ⚠ DIAL ONLY, matching upstream: its ACCEPT path takes no `tout` and instead
+/// retries `accept()` behind a throttle, which is what [`accept_serial`] does.
+/// A listener that timed out would be refusing a peer that has not spoken YET,
+/// which is the normal state of a listener.
+pub async fn drive_serial_handshake_within<S>(
+    stream: &mut S,
+    role: SerialRole,
+    timeout_us: u64,
+) -> io::Result<()>
+where
+    S: AsyncReadExt + AsyncWriteExt + Unpin,
+{
+    match tokio::time::timeout(
+        Duration::from_micros(timeout_us),
+        drive_serial_handshake(stream, role),
+    )
+    .await
+    {
+        Ok(result) => result,
+        Err(_) => Err(io::Error::new(
+            io::ErrorKind::TimedOut,
+            format!(
+                "serial link handshake did not complete within {timeout_us}us \
+                 (the locator's `tout`); the peer never answered"
+            ),
+        )),
+    }
 }
 
 /// Open a serial endpoint as the link Responder: open the tty and drive the
@@ -251,15 +355,11 @@ pub fn wire_serial_stream(
     let locator = endpoint.locator_address_with_config();
     let outbound = Arc::new(SerialWriteDriver::new(
         tx,
-        // R2548 — EMPTY, and this is the one call site where that is a KNOWN
-        // divergence rather than a match. Upstream reports the tty device names
-        // `io/zenoh-links/zenoh-link-serial/src/unicast.rs` @ `match z_serial::get_available_port_names()`
-        // is where it reads them, so an ACL narrowed by
-        // `interfaces` can target a serial link there and cannot here. Left as
-        // it stands rather than half-built: enumerating ports is
-        // `transport-link-serial`'s work and belongs in that atom's round, with
-        // the residual named on it rather than repaired in passing here.
-        addressless_link_subject(InterceptorLink::Serial, Vec::new()),
+        // R2704 — this link's OWN device name, which closes the R2548 residual.
+        // An ACL narrowed by `interfaces` can now target a serial link here as
+        // it can upstream. See [`serial_interface_names`] for why this is the
+        // link's device rather than the whole system's port list.
+        addressless_link_subject(InterceptorLink::Serial, serial_interface_names(endpoint)),
         Some(addressless_link_endpoints(
             InterceptorLink::Serial,
             &locator,
@@ -507,6 +607,60 @@ pub async fn serial_writer_task(mut writer: WriteHalf<SerialStream>, mut queue: 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use wz_session_core::locator::SerialOptions;
+
+    /// R2704 — the locator's `tout` bounds the handshake, as upstream's does.
+    ///
+    /// The peer end is opened and then NEVER written to, which is the case
+    /// upstream's `port.connect(Some(..))` exists for. Before this round the
+    /// initiator would re-send INIT on every RESET forever, so the only bound
+    /// was whatever the caller happened to compose.
+    #[tokio::test]
+    async fn a_handshake_is_bounded_by_the_locators_tout() {
+        let (mut a, _b) = SerialStream::pair().expect("openpty serial pair");
+        // A short window so the test costs nothing; the VALUE is the point, not
+        // the duration -- it is read from the endpoint, not hard-coded in the
+        // seam.
+        // ⚠ BOUNDED BY THE TEST TOO, and that is not belt-and-braces: without
+        // the seam's own bound this call never returns, so the control for this
+        // witness would HANG rather than red -- and a hang is not a failure, it
+        // is a suite that never finishes. The outer bound turns "the seam did
+        // not bound it" into an assertion with a message.
+        let err = tokio::time::timeout(
+            Duration::from_secs(5),
+            drive_serial_handshake_within(&mut a, SerialRole::Initiator, 20_000),
+        )
+        .await
+        .expect(
+            "the seam's own `tout` must fire far inside this test's 5s bound; \
+             reaching this means the handshake is unbounded",
+        )
+        .expect_err("a peer that never answers must not be waited on forever");
+        assert_eq!(
+            err.kind(),
+            io::ErrorKind::TimedOut,
+            "the handshake bound must report a timeout, not some other failure: {err}"
+        );
+    }
+
+    /// The ANTI-VACUITY half: the bound must not be so eager that it refuses a
+    /// handshake that DOES complete. Without this, a `drive_serial_handshake_within`
+    /// that returned `TimedOut` unconditionally would satisfy the test above.
+    #[tokio::test]
+    async fn a_bounded_handshake_still_completes_against_a_peer_that_answers() {
+        let (mut a, mut b) = SerialStream::pair().expect("openpty serial pair");
+        let responder =
+            tokio::spawn(
+                async move { drive_serial_handshake(&mut b, SerialRole::Responder).await },
+            );
+        drive_serial_handshake_within(&mut a, SerialRole::Initiator, 5_000_000)
+            .await
+            .expect("a peer that answers completes inside the window");
+        responder
+            .await
+            .expect("responder task")
+            .expect("the responder half completes too");
+    }
 
     /// The endpoint a PTY-pair test stands in for. `SerialStream::pair()` opens an
     /// `openpty` pair and exposes NEITHER end's device name, so a wired PTY link
@@ -516,6 +670,7 @@ mod tests {
         SerialEndpoint {
             target: SerialTarget::Device("/dev/wz-test-pty".to_string()),
             baudrate: 115_200,
+            options: SerialOptions::default(),
         }
     }
 

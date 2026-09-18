@@ -48,7 +48,9 @@ use wz_runtime_tokio::session_open::{
 };
 use wz_runtime_tokio::sync::Mutex;
 use wz_runtime_tokio_test_support::fixture_session_init_params;
-use wz_session_core::locator::{parse_any_locator, AnyLocator, SerialEndpoint, SerialTarget};
+use wz_session_core::locator::{
+    parse_any_locator, AnyLocator, SerialEndpoint, SerialOptions, SerialTarget,
+};
 use wz_session_core::serial_link::SerialRole;
 
 /// The endpoint a PTY-pair test stands in for — `SerialStream::pair()` exposes no
@@ -58,6 +60,7 @@ fn pty_endpoint() -> SerialEndpoint {
     SerialEndpoint {
         target: SerialTarget::Device("/dev/wz-test-pty".to_string()),
         baudrate: 115_200,
+        options: SerialOptions::default(),
     }
 }
 use wz_session_core::session_timeouts::SessionTimeouts;

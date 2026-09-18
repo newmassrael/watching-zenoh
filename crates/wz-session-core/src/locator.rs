@@ -1245,10 +1245,60 @@ pub enum SerialTarget {
 /// against a supported speed table is the tty backend's concern, not the
 /// parser's (pico parses the `u32` here and validates at tty-open,
 /// tty_posix.c:27-56).
+/// R2704 — upstream's default for `baudrate` when the locator omits it
+/// (`io/zenoh-links/zenoh-link-serial/src/lib.rs` @ `const DEFAULT_BAUDRATE: u32 = 9_600;`).
+///
+/// wz used to REFUSE a serial locator with no `#baudrate=` tail, which matched
+/// zenoh-pico (`vendor/zenoh-pico/src/link/transport/upper/serial_protocol.c`
+/// @ `baudrate_str = _z_str_intmap_get(&endpoint->_config, SERIAL_CONFIG_BAUDRATE_KEY);`
+/// feeds a parse that fails on the absent key) but not zenoh, which dials
+/// `serial//dev/ttyUSB0` happily at 9600. A locator zenoh accepts and wz
+/// refuses is a hole in the drop-in claim, and pico never EMITS such a locator,
+/// so accepting it costs pico parity nothing.
+pub const SERIAL_DEFAULT_BAUDRATE: u32 = 9_600;
+
+/// R2704 — the three serial locator config keys beyond `baudrate`, with
+/// upstream's own defaults.
+///
+/// zenoh's serial link declares FOUR keys in its `pub mod config`
+/// (`io/zenoh-links/zenoh-link-serial/src/lib.rs` @ `pub const PORT_EXCLUSIVE_RAW: &str = "exclusive";`)
+/// and reads every one off the endpoint config; wz bound only `baudrate`, so a
+/// locator asking for any of the other three was silently ignored. They are one
+/// struct rather than three loose fields because they share a fate: all three
+/// are READ at the same place (the locator) and CONSUMED at the same place (the
+/// tty open), and a default that lives in one named place cannot drift between
+/// the parser and the renderer the way two hand-kept copies would.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SerialOptions {
+    /// Claim the tty exclusively. Upstream default `true`
+    /// (`@ const DEFAULT_EXCLUSIVE: bool = true;`).
+    pub exclusive: bool,
+    /// Port-level read timeout in MICROSECONDS — upstream's unit, not
+    /// milliseconds (`@ const DEFAULT_TIMEOUT: u64 = 50_000;`, i.e. 50 ms).
+    pub timeout_us: u64,
+    /// Release the device when the link closes. Upstream default `true`
+    /// (`@ const DEFAULT_RELEASE_ON_CLOSE: bool = true;`).
+    pub release_on_close: bool,
+}
+
+impl Default for SerialOptions {
+    fn default() -> Self {
+        Self {
+            exclusive: true,
+            timeout_us: 50_000,
+            release_on_close: true,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SerialEndpoint {
     pub target: SerialTarget,
     pub baudrate: u32,
+    /// R2704 — the other three keys upstream reads. `Default` is upstream's
+    /// default row, so a locator that names none of them parses to exactly the
+    /// behaviour zenoh would give it.
+    pub options: SerialOptions,
 }
 
 impl SerialEndpoint {
@@ -1264,9 +1314,9 @@ impl SerialEndpoint {
     /// The SCHEME is not written here either — it comes from `locator_for`, the one
     /// table R311y473 collapsed every emitter onto.
     ///
-    /// The `#baudrate=` tail is NOT optional: [`parse_serial_locator`] rejects a
-    /// string without it (`MissingBaudrate`), so an emitter that dropped it would
-    /// produce a locator wz's own parser refuses.
+    /// The `#baudrate=` tail is always emitted even though [`parse_serial_locator`]
+    /// now defaults it (R2704): zenoh-pico's parser still requires the key, so an
+    /// emitter that dropped it would produce a locator a pico peer cannot read.
     pub fn locator_address_with_config(&self) -> alloc::string::String {
         use alloc::format;
         // The address form is the `.`-heuristic parse_serial_locator reads back
@@ -1275,7 +1325,36 @@ impl SerialEndpoint {
             SerialTarget::Device(path) => path.clone(),
             SerialTarget::Pins { tx, rx } => format!("{tx}.{rx}"),
         };
-        format!("{address}#{SERIAL_BAUDRATE_KEY}={}", self.baudrate)
+        // R2704 — `baudrate` is ALWAYS emitted even though the parser now
+        // defaults it: zenoh-pico's parser still requires the key, so dropping
+        // it would make wz emit a locator a pico peer cannot read.
+        let mut out = format!("{address}#{SERIAL_BAUDRATE_KEY}={}", self.baudrate);
+        // The other three are emitted ONLY when they differ from the default,
+        // and that is a round-trip property rather than tidiness: emitting them
+        // always would change every serial locator this tree already produces
+        // (and hand a pico peer three keys its config map has no slot for),
+        // while emitting them never would silently discard a caller's choice at
+        // the first reconnect, which re-parses this string.
+        let defaults = SerialOptions::default();
+        if self.options.exclusive != defaults.exclusive {
+            out.push_str(&format!(
+                ";{SERIAL_EXCLUSIVE_KEY}={}",
+                self.options.exclusive
+            ));
+        }
+        if self.options.timeout_us != defaults.timeout_us {
+            out.push_str(&format!(
+                ";{SERIAL_TIMEOUT_KEY}={}",
+                self.options.timeout_us
+            ));
+        }
+        if self.options.release_on_close != defaults.release_on_close {
+            out.push_str(&format!(
+                ";{SERIAL_RELEASE_ON_CLOSE_KEY}={}",
+                self.options.release_on_close
+            ));
+        }
+        out
     }
 }
 
@@ -1286,14 +1365,21 @@ pub enum SerialLocatorError {
     NotSerialScheme,
     /// The address (between the scheme and the `#config`) is empty.
     EmptyAddress,
-    /// The required `baudrate=<u32>` config key is absent.
-    MissingBaudrate,
+    // R2704 — `MissingBaudrate` was REMOVED, not deprecated. Nothing can
+    // construct it any more (an absent key now takes zenoh's default), and a
+    // variant no code path can produce is a claim the type makes falsely: a
+    // `match` arm for it reads as handling a case that cannot happen.
     /// A config value (the baud rate, or a pin) is not a valid `u32`.
     BadNumber(String),
 }
 
 const SERIAL_SCHEME: &str = "serial";
 const SERIAL_BAUDRATE_KEY: &str = "baudrate";
+// R2704 — the other three keys upstream's `pub mod config` declares, spelled
+// exactly as upstream spells them so a zenoh-authored locator parses here.
+const SERIAL_EXCLUSIVE_KEY: &str = "exclusive";
+const SERIAL_TIMEOUT_KEY: &str = "tout";
+const SERIAL_RELEASE_ON_CLOSE_KEY: &str = "release_on_close";
 
 /// Parse a zenoh serial locator into a [`SerialEndpoint`].
 ///
@@ -1327,6 +1413,7 @@ pub fn parse_serial_locator(locator: &str) -> Result<SerialEndpoint, SerialLocat
     }
 
     let baudrate = parse_baudrate(parts.config)?;
+    let options = parse_serial_options(parts.config);
 
     let target = match address.split_once('.') {
         Some((tx_str, rx_str)) => {
@@ -1337,13 +1424,56 @@ pub fn parse_serial_locator(locator: &str) -> Result<SerialEndpoint, SerialLocat
         None => SerialTarget::Device(address.to_string()),
     };
 
-    Ok(SerialEndpoint { target, baudrate })
+    Ok(SerialEndpoint {
+        target,
+        baudrate,
+        options,
+    })
 }
 
-/// Extract the required `baudrate=<u32>` from the `#`-delimited config
-/// tail (`key=value` pairs separated by `;`). Only `baudrate` is
-/// recognised — pico's serial config map has exactly one key
-/// (config/serial.h:29-52).
+/// R2704 — read `exclusive`, `tout` and `release_on_close` out of the same
+/// `#`-delimited config tail, each falling back to upstream's default.
+///
+/// ⚠ THE FALLBACK IS UPSTREAM'S AND IS DELIBERATELY LOOSER THAN [`parse_baudrate`]'s,
+/// and the asymmetry is DERIVED rather than chosen. These three keys exist in
+/// zenoh only, and zenoh reads each as `T::from_str(v).unwrap_or(DEFAULT)`
+/// (`io/zenoh-links/zenoh-link-serial/src/lib.rs` @ `pub fn get_exclusive(endpoint: &EndPoint) -> bool {`),
+/// so an unparseable value takes the default and the locator still dials.
+/// `baudrate` is the one key BOTH references know, and zenoh-pico REFUSES a
+/// malformed one, so wz keeps the refusing arm there: where the two references
+/// disagree about an error arm, wz takes the one that fails fast, and where only
+/// zenoh has an opinion, wz takes zenoh's.
+fn parse_serial_options(config: &str) -> SerialOptions {
+    let mut options = SerialOptions::default();
+    for pair in config.split(';') {
+        let Some((key, value)) = pair.split_once('=') else {
+            continue;
+        };
+        match key {
+            SERIAL_EXCLUSIVE_KEY => {
+                options.exclusive = value.parse().unwrap_or(options.exclusive);
+            }
+            SERIAL_TIMEOUT_KEY => {
+                options.timeout_us = value.parse().unwrap_or(options.timeout_us);
+            }
+            SERIAL_RELEASE_ON_CLOSE_KEY => {
+                options.release_on_close = value.parse().unwrap_or(options.release_on_close);
+            }
+            _ => {}
+        }
+    }
+    options
+}
+
+/// Extract `baudrate=<u32>` from the `#`-delimited config tail (`key=value`
+/// pairs separated by `;`).
+///
+/// R2704 — ABSENT is no longer an error. It yields [`SERIAL_DEFAULT_BAUDRATE`],
+/// which is what zenoh does; see that constant for why wz's old refusal was a
+/// hole rather than strictness. MALFORMED is still [`SerialLocatorError::BadNumber`],
+/// because that is the arm both references can be read for and zenoh-pico takes
+/// it — silently running a tty at 9600 because someone typed `baudrate=115.200`
+/// is the misconfiguration this tree refuses to paper over elsewhere.
 fn parse_baudrate(config: &str) -> Result<u32, SerialLocatorError> {
     for pair in config.split(';') {
         if let Some((key, value)) = pair.split_once('=') {
@@ -1352,7 +1482,7 @@ fn parse_baudrate(config: &str) -> Result<u32, SerialLocatorError> {
             }
         }
     }
-    Err(SerialLocatorError::MissingBaudrate)
+    Ok(SERIAL_DEFAULT_BAUDRATE)
 }
 
 /// Parse a positive `u32` config value (baud rate or pin). Pico's
@@ -1939,10 +2069,26 @@ mod tests {
             SerialEndpoint {
                 target: SerialTarget::Device("/dev/ttyUSB0".into()),
                 baudrate: 115_200,
+                options: SerialOptions::default(),
             },
             SerialEndpoint {
                 target: SerialTarget::Pins { tx: 12, rx: 13 },
                 baudrate: 9_600,
+                options: SerialOptions::default(),
+            },
+            // R2704 — a NON-DEFAULT row, and it is the one that makes this test
+            // grade the renderer rather than the parser. With defaults only,
+            // the three new keys are never emitted, so a renderer that dropped
+            // them entirely would round-trip perfectly and this test would
+            // report nothing about them.
+            SerialEndpoint {
+                target: SerialTarget::Device("/dev/ttyUSB1".into()),
+                baudrate: 57_600,
+                options: SerialOptions {
+                    exclusive: false,
+                    timeout_us: 12_345,
+                    release_on_close: false,
+                },
             },
         ] {
             let locator = crate::link::InterceptorLink::Serial
@@ -2636,10 +2782,15 @@ mod tests {
                 parse_serial_locator("serial//dev/ttyUSB0#baudrate=115200").unwrap()
             )
         );
-        // And the serial leaf error composes through too.
+        // And the serial leaf error composes through too. R2704 — the example
+        // moved from a missing baudrate (now a defaulted one, so no longer an
+        // error at all) to a malformed one, which is still refused; what this
+        // arm grades is the COMPOSITION, so it needs any surviving leaf error.
         assert_eq!(
-            parse_any_locator("serial//dev/ttyUSB0"),
-            Err(AnyLocatorError::Serial(SerialLocatorError::MissingBaudrate))
+            parse_any_locator("serial//dev/ttyUSB0#baudrate=fast"),
+            Err(AnyLocatorError::Serial(SerialLocatorError::BadNumber(
+                "fast".to_string()
+            )))
         );
     }
 
@@ -2857,11 +3008,18 @@ mod tests {
         );
     }
 
+    /// R2704 — this test used to be `rejects_missing_baudrate` and asserted the
+    /// opposite. The refusal it pinned was measured against zenoh and found to
+    /// be a hole rather than strictness, so the assertion is INVERTED here
+    /// rather than deleted: the locator that was refused is now the one that
+    /// must dial, and a later round reading this file sees which way it moved.
     #[test]
-    fn rejects_missing_baudrate() {
+    fn a_serial_locator_without_a_baudrate_dials_at_upstreams_default() {
         assert_eq!(
-            parse_serial_locator("serial//dev/ttyUSB0"),
-            Err(SerialLocatorError::MissingBaudrate)
+            parse_serial_locator("serial//dev/ttyUSB0")
+                .expect("zenoh dials this locator; so must wz")
+                .baudrate,
+            SERIAL_DEFAULT_BAUDRATE
         );
     }
 
@@ -2960,18 +3118,75 @@ mod tests {
             Ok(SerialEndpoint {
                 target: SerialTarget::Device("/dev/ttyUSB0".to_string()),
                 baudrate: 115200,
+                options: SerialOptions::default(),
             })
+        );
+    }
+
+    /// R2704 — a locator with NO `#baudrate=` tail is what zenoh dials at 9600,
+    /// and wz used to refuse it. Graded against zenoh's own default constant.
+    #[test]
+    fn serial_leaf_defaults_the_baudrate_zenoh_defaults() {
+        assert_eq!(
+            parse_serial_locator("serial//dev/ttyUSB0"),
+            Ok(SerialEndpoint {
+                target: SerialTarget::Device("/dev/ttyUSB0".to_string()),
+                baudrate: SERIAL_DEFAULT_BAUDRATE,
+                options: SerialOptions::default(),
+            })
+        );
+        // ...and the ANTI-VACUITY half: a MALFORMED value is still refused, so
+        // the default above cannot be read as "wz stopped parsing the key".
+        // zenoh-pico refuses this one too; see `parse_baudrate`.
+        assert!(matches!(
+            parse_serial_locator("serial//dev/ttyUSB0#baudrate=115.200"),
+            Err(SerialLocatorError::BadNumber(_))
+        ));
+    }
+
+    /// R2704 — the three keys upstream declares beside `baudrate`. A locator
+    /// naming them was silently ignored before this round.
+    #[test]
+    fn serial_leaf_reads_upstreams_other_three_config_keys() {
+        let parsed = parse_serial_locator(
+            "serial//dev/ttyUSB0#baudrate=115200;exclusive=false;tout=1000;release_on_close=false",
+        )
+        .expect("the four-key locator parses");
+        assert_eq!(
+            parsed.options,
+            SerialOptions {
+                exclusive: false,
+                timeout_us: 1_000,
+                release_on_close: false,
+            }
+        );
+        // Upstream reads each as `from_str(..).unwrap_or(DEFAULT)`, so an
+        // unparseable value takes the default rather than failing the dial.
+        let sloppy = parse_serial_locator("serial//dev/ttyUSB0#baudrate=115200;tout=soon")
+            .expect("an unparseable tout does not fail the locator");
+        assert_eq!(
+            sloppy.options.timeout_us,
+            SerialOptions::default().timeout_us
         );
     }
 
     #[test]
     fn serial_leaf_does_not_read_baudrate_out_of_metadata() {
         // DISCRIMINATOR, as for `iface` above: `baudrate` is a CONFIG key
-        // (pico config/serial.h:29-52). In the metadata span it is absent,
-        // so the required-baudrate reject must still fire.
+        // (pico config/serial.h:29-52), so one written in the METADATA span is
+        // not config at all.
+        //
+        // R2704 SHARPENED THIS. It used to assert the missing-baudrate refusal,
+        // which a parser that read metadata as config would ALSO have failed --
+        // the old assertion could not tell "did not read it" from "read it and
+        // rejected the locator". Now the locator parses and the VALUE is what
+        // discriminates: 9600 means the metadata span was not consulted, 115200
+        // would mean it was.
         assert_eq!(
-            parse_serial_locator("serial//dev/ttyUSB0?baudrate=115200"),
-            Err(SerialLocatorError::MissingBaudrate)
+            parse_serial_locator("serial//dev/ttyUSB0?baudrate=115200")
+                .expect("an absent config baudrate defaults rather than refusing")
+                .baudrate,
+            SERIAL_DEFAULT_BAUDRATE
         );
     }
 
@@ -3198,10 +3413,13 @@ mod tests {
         // so no config key can leak out of a metadata-only tail.
         let p = parse_locator("tcp/1.2.3.4:7447?prio=1-3").expect("addr parses");
         assert_eq!(p.socket().iface, None);
-        assert_eq!(
-            parse_serial_locator("serial//dev/ttyUSB0?meta=x"),
-            Err(SerialLocatorError::MissingBaudrate)
-        );
+        // R2704 — same inversion as the baudrate discriminator above: the
+        // locator now parses, and "the config is empty" is read off the values
+        // being upstream's defaults rather than off a refusal.
+        let serial = parse_serial_locator("serial//dev/ttyUSB0?meta=x")
+            .expect("a metadata-only tail leaves an empty config, not a bad one");
+        assert_eq!(serial.baudrate, SERIAL_DEFAULT_BAUDRATE);
+        assert_eq!(serial.options, SerialOptions::default());
     }
 
     /// R2599 — all five materials parse from their inline-PEM spelling, which

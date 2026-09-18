@@ -537,6 +537,7 @@ mod reconnect_locator_tests {
         let any = AnyLocator::Serial(SerialEndpoint {
             target: SerialTarget::Device("/dev/ttyUSB0".into()),
             baudrate: 115200,
+            options: Default::default(),
         });
         assert_eq!(
             ReconnectLocator::try_from(any),

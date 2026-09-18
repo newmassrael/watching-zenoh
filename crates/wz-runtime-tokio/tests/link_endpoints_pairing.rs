@@ -497,15 +497,17 @@ async fn serial_link_ends_report_their_own_endpoint_for_both_address_forms() {
     use tokio_serial::SerialStream;
     use wz_runtime_tokio::serial_pipeline::wire_serial_stream;
     use wz_session_core::link::BoxedLinkDriver;
-    use wz_session_core::locator::{SerialEndpoint, SerialTarget};
+    use wz_session_core::locator::{SerialEndpoint, SerialOptions, SerialTarget};
 
     let device_end = SerialEndpoint {
         target: SerialTarget::Device("/dev/ttyUSB0".to_string()),
         baudrate: 115_200,
+        options: SerialOptions::default(),
     };
     let pins_end = SerialEndpoint {
         target: SerialTarget::Pins { tx: 12, rx: 13 },
         baudrate: 9_600,
+        options: SerialOptions::default(),
     };
 
     let (a, b) = SerialStream::pair().expect("openpty serial pair");
@@ -530,6 +532,36 @@ async fn serial_link_ends_report_their_own_endpoint_for_both_address_forms() {
             }
         }
     }
+
+    // R2704 — the `interfaces` an ACL narrows by. Upstream resolves tty device
+    // names so a rule can target a serial link
+    // (`io/zenoh-links/zenoh-link-serial/src/unicast.rs` @ `match z_serial::get_available_port_names()`);
+    // wz answered an empty set, so such a rule silently governed nothing here.
+    //
+    // The PINS end is the anti-vacuity half and is not decoration: a helper that
+    // returned some constant name, or the device end's name, would satisfy the
+    // Device assertion alone. Pins have no device file, so the honest answer
+    // there is none -- and the two arms together say the answer is DERIVED from
+    // the endpoint rather than fixed.
+    assert_eq!(
+        a_out
+            .link_subject()
+            .expect("the serial Device end reports a subject")
+            .interfaces
+            .as_deref(),
+        Some(["ttyUSB0".to_string()].as_slice()),
+        "a serial link must name its own tty device, without the path, so an \
+         ACL narrowed by `interfaces` can target it"
+    );
+    assert_eq!(
+        b_out
+            .link_subject()
+            .expect("the serial Pins end reports a subject")
+            .interfaces
+            .as_deref(),
+        Some([].as_slice()),
+        "a pin-pair target has no device file, so it names no interface"
+    );
 
     // The two ends must not collapse onto one string: each reports its own tty.
     assert_ne!(
