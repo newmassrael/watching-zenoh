@@ -123,4 +123,106 @@ mod tests {
         // Bound below the true decompressed size => decompress_into errors.
         assert_eq!(decompress_batch(&wire, 1024), None);
     }
+
+    /// R2707 (open-debt item 784) — THE FIELD WALKER INVENTS NO RECORD OUT OF
+    /// GENUINELY COMPRESSED BYTES.
+    ///
+    /// # The half this closes
+    ///
+    /// A consuming surface asked what a dissector does with a `Frame` on a
+    /// compression-negotiated session, and named the outcome it wanted ruled
+    /// out rather than discovered: "it walks the compressed bytes and reports
+    /// whatever records fall out of them", which is worse than silence because
+    /// a reader cannot tell an invented record from a real one.
+    ///
+    /// R2706 answered the first half — the row now says `undecompressible`,
+    /// from the session that negotiated the compression and knows — and
+    /// measured the walk over `wz-capture`'s fixture, whose body is a four-byte
+    /// marker. That measured "the walk halts on bytes it cannot read". It did
+    /// NOT measure "no lz4 frame decodes into something", because those four
+    /// bytes are not a compressor's output.
+    ///
+    /// # Why the witness lives HERE
+    ///
+    /// This module is the only place that holds both halves at once. The
+    /// compressor is `compress_batch` beside it, and the walker is this crate's
+    /// `dissect`. `wz-capture` cannot host it: its whole compressed fixture
+    /// rests on that crate NOT carrying `transport-compression`, so enabling
+    /// the feature there to produce real lz4 would let `batch_of` open the body
+    /// and the fixture would lose its subject. Hand-writing lz4 bytes in a
+    /// fixture would be this workspace's other recorded defect — a constant
+    /// copied out of a format, drifting silently.
+    ///
+    /// # The control, and why it is the whole test
+    ///
+    /// The SAME records, walked UNCOMPRESSED, must come back. Without it this
+    /// asserts nothing: a walker that returned no record for any input would
+    /// satisfy the compressed arm and be useless.
+    #[cfg(all(feature = "dissect", feature = "codec-push"))]
+    #[test]
+    fn a_genuinely_compressed_body_yields_no_invented_record() {
+        // A real batch: one `Push` the walker knows, encoded by the codec
+        // rather than written out by hand, repeated so lz4 has something to
+        // shrink. The repetition is load-bearing twice -- the wrap ships RAW
+        // when it cannot compress, which would quietly make this test about the
+        // uncompressed path, and the assertion below catches that.
+        // NO keyexpr suffix: the subject here is the WALK, and a suffix needs
+        // the header's `N` flag, which would make this fixture a statement
+        // about the codec's flag derivation instead. An id-only `WireexprLocal`
+        // is a record the walker names in full, which is all this needs.
+        let record = wz_codecs::push::Push {
+            keyexpr: wz_codecs::wireexpr::Wireexpr {
+                body: wz_codecs::wireexpr::WireexprVariant::WireexprLocal(
+                    wz_codecs::wireexpr_local::WireexprLocal {
+                        id: 0,
+                        suffix_len: None,
+                        suffix: None,
+                    },
+                ),
+            },
+            body: wz_codecs::push::PushVariant::CodecZenohMsgPut(wz_codecs::msg_put::MsgPut {
+                payload_len: 8,
+                payload: &[0u8; 8],
+                ..Default::default()
+            }),
+            ..Default::default()
+        }
+        .encode_to_vec();
+        // Repeated enough that lz4 has something to shrink: the wrap ships RAW
+        // when it cannot, and the header assertion below is what stops this
+        // test from quietly becoming the control twice.
+        let mut payload = Vec::new();
+        for _ in 0..32 {
+            payload.extend_from_slice(&record);
+        }
+
+        // THE CONTROL FIRST, so a walker that answers nothing to everything
+        // fails here rather than passing the claim below.
+        let plain = crate::dissect::dissect_batch(&payload, 0);
+        assert_eq!(
+            plain.records.len(),
+            32,
+            "the control must walk every record: {plain:?}"
+        );
+
+        let wire = compress_batch(&payload);
+        assert_eq!(
+            wire[0] & BATCH_HEADER_COMPRESSION,
+            BATCH_HEADER_COMPRESSION,
+            "the fixture must actually be compressed, or it is the control twice"
+        );
+        // What a dissector without lz4 sees: the body as it lies on the wire.
+        let walked = crate::dissect::dissect_batch(&wire[1..], 0);
+        assert!(
+            walked.records.is_empty(),
+            "the walk invented {} record(s) out of compressed bytes, which is \
+             the outcome the reporting consumer asked to have ruled out: {walked:?}",
+            walked.records.len()
+        );
+        assert!(
+            walked.halt.is_some(),
+            "and it must SAY where it stopped rather than report a clean empty \
+             batch, which reads as 'this frame carried nothing': {walked:?}"
+        );
+    }
 }
