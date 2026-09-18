@@ -873,16 +873,91 @@ pub fn check_requested_close<R: SessionRuntime, T: TimeSource>(
 /// chain is wired by the host into the drive loop's stages, and a host that
 /// never wires it leaves a destructive verb answered by a node no policy ever
 /// consulted.
+/// R2718 — the lifecycle grammar, PARSED:
+/// `@/<zid>/<whatami>/session/<verb>/<peer-zid>`.
+///
+/// ⛔ UNTIL THIS TYPE, THE GRAMMAR WAS PROSE. It was written in the owner's
+/// interface decision and repeated in the doc comment above, and MEASURED
+/// before this was built: the literal appeared in exactly one doc comment and
+/// in test strings, and in no code at all. A `close` row worked because the
+/// switchboard PATTERN matched, and nothing ever read the key's structure.
+///
+/// That is why it has to exist rather than be a convenience. The whole reason
+/// the target rides in the key is so "may close session X only" is expressible;
+/// but an authority handed a raw `&str` must re-implement this grammar to say
+/// which X, so every binder would carry its own copy and they would drift. One
+/// definition, and both verbs read it.
+///
+/// It BORROWS the key rather than owning its parts: the caller already holds
+/// the arriving keyexpr for the life of the call, and this crate is `no_std`
+/// with `alloc` optional — a parse that allocated five `String`s per inbound
+/// command would be the wrong shape for the MCU profile that shares it.
+#[cfg(feature = "session-close-ingress")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LifecycleKey<'a> {
+    /// The node the command addresses — the `<zid>` chunk.
+    pub node_zid: &'a str,
+    /// That node's role as the sender spelled it — the `<whatami>` chunk.
+    pub whatami: &'a str,
+    /// The verb: `close`, and later its siblings.
+    pub verb: &'a str,
+    /// WHICH session the verb acts on — the `<peer-zid>` chunk, and the reason
+    /// the target is in the key instead of the payload.
+    pub peer_zid: &'a str,
+}
+
+#[cfg(feature = "session-close-ingress")]
+impl<'a> LifecycleKey<'a> {
+    /// Parse an arriving keyexpr, or `None` when it is not a lifecycle key.
+    ///
+    /// Exactly six chunks, `@` first and the literal `session` fourth. A
+    /// shorter, longer or differently-shaped key is NOT this grammar, and the
+    /// caller refuses rather than guessing — a row's pattern may be a wildcard
+    /// that matches keys this grammar does not describe, and admitting one
+    /// would hand an authority a target it cannot have read.
+    ///
+    /// No chunk may be empty: `@//peer/session/close/x` names no node, and a
+    /// blank target is the shape most likely to be read as "all of them".
+    pub fn parse(keyexpr: &'a str) -> Option<Self> {
+        let mut chunks = keyexpr.split('/');
+        let at = chunks.next()?;
+        let node_zid = chunks.next()?;
+        let whatami = chunks.next()?;
+        let session = chunks.next()?;
+        let verb = chunks.next()?;
+        let peer_zid = chunks.next()?;
+        if chunks.next().is_some() {
+            return None;
+        }
+        if at != "@" || session != "session" {
+            return None;
+        }
+        if node_zid.is_empty() || whatami.is_empty() || verb.is_empty() || peer_zid.is_empty() {
+            return None;
+        }
+        Some(Self {
+            node_zid,
+            whatami,
+            verb,
+            peer_zid,
+        })
+    }
+}
+
 #[cfg(feature = "session-close-ingress")]
 pub trait SessionCloseAuthority {
-    /// Whether the close command that arrived on `keyexpr` may run.
-    fn admits_close(&self, keyexpr: &str) -> bool;
+    /// Whether the close command this key carries may run.
+    ///
+    /// R2718 — takes the PARSED key, not the raw `&str` it used to. An
+    /// authority's whole job is to answer about a target, and handing it a
+    /// string obliged every binder to re-derive the grammar to find one.
+    fn admits_close(&self, key: &LifecycleKey<'_>) -> bool;
 }
 
 #[cfg(feature = "session-close-ingress")]
 impl<A: SessionCloseAuthority + ?Sized> SessionCloseAuthority for &A {
-    fn admits_close(&self, keyexpr: &str) -> bool {
-        (**self).admits_close(keyexpr)
+    fn admits_close(&self, key: &LifecycleKey<'_>) -> bool {
+        (**self).admits_close(key)
     }
 }
 
@@ -964,7 +1039,19 @@ impl<R: SessionRuntime, T: TimeSource + 'static> crate::switchboard::EventInject
         if <P<R, T> as StatePolicy>::get_event_from_name(event_name) != Some(E::SessionClose) {
             return false;
         }
-        if !self.authority.admits_close(keyexpr) {
+        // R2718 — A KEY THAT IS NOT THIS GRAMMAR IS REFUSED, not passed on. A
+        // row's pattern can be a wildcard, so matching does not make the
+        // arriving key a lifecycle key; and an authority handed one it cannot
+        // parse would be answering about a target it never read.
+        let Some(key) = LifecycleKey::parse(keyexpr) else {
+            log::warn!(
+                "SessionLifecycleInjector: a session-close row matched a key that is \
+                 not `@/<zid>/<whatami>/session/<verb>/<peer-zid>`; refusing, because \
+                 an authority cannot name a target it cannot read."
+            );
+            return false;
+        };
+        if !self.authority.admits_close(&key) {
             return false;
         }
         self.actions.request_close();
@@ -1226,3 +1313,60 @@ pub fn report_outcome_reassembling<R, T, const SLOTS: usize, const CAP: usize, S
 // ingest twin `report_outcome_reassembling`), so housing it in this
 // session-unicast-gated module wrongly coupled the multicast sweep SSOT to
 // `session-unicast`. It now lives next to `ReassemblyDispatcher`.
+
+// R2718 — the lifecycle grammar's own arms. They live beside the parser rather
+// than in the tokio witness because the grammar is `wz-session-core`'s: both
+// profiles read it, and a test that needed a session engine could only ever run
+// on the one that has a tokio runtime.
+#[cfg(all(test, feature = "session-close-ingress"))]
+mod lifecycle_key_tests {
+    use super::LifecycleKey;
+
+    const WELL_FORMED: &str = "@/node-a/peer/session/close/peer-b";
+
+    #[test]
+    fn a_well_formed_key_yields_every_chunk() {
+        let key = LifecycleKey::parse(WELL_FORMED).expect("parses");
+        assert_eq!(key.node_zid, "node-a");
+        assert_eq!(key.whatami, "peer");
+        assert_eq!(key.verb, "close");
+        // The TARGET is the point of the whole grammar: this is the chunk that
+        // makes "may close session X only" expressible.
+        assert_eq!(key.peer_zid, "peer-b");
+    }
+
+    // Each arm changes ONE thing about the well-formed key, so a refusal is
+    // attributable to the chunk it names and not to the shape in general.
+    #[test]
+    fn a_key_that_is_not_this_grammar_is_refused() {
+        for (why, keyexpr) in [
+            ("no leading @", "x/node-a/peer/session/close/peer-b"),
+            ("not the session plane", "@/node-a/peer/config/close/peer-b"),
+            ("one chunk short", "@/node-a/peer/session/close"),
+            ("one chunk long", "@/node-a/peer/session/close/peer-b/extra"),
+            ("empty target", "@/node-a/peer/session/close/"),
+            ("empty node", "@//peer/session/close/peer-b"),
+            ("empty verb", "@/node-a/peer/session//peer-b"),
+        ] {
+            assert!(
+                LifecycleKey::parse(keyexpr).is_none(),
+                "{why}: `{keyexpr}` must not parse as a lifecycle key"
+            );
+        }
+        // ANTI-VACUITY: the key every arm above was derived from DOES parse, so
+        // the refusals are about what each one changed rather than about the
+        // parser refusing everything.
+        assert!(LifecycleKey::parse(WELL_FORMED).is_some());
+    }
+
+    // The verb chunk is READ, not assumed: a sibling verb on the same grammar
+    // parses, which is what lets `open` join `close` on one door.
+    #[test]
+    fn the_verb_is_a_chunk_rather_than_a_constant() {
+        let close = LifecycleKey::parse("@/node-a/peer/session/close/peer-b").expect("close");
+        let open = LifecycleKey::parse("@/node-a/peer/session/open/peer-b").expect("open");
+        assert_eq!(close.verb, "close");
+        assert_eq!(open.verb, "open");
+        assert_eq!(close.peer_zid, open.peer_zid);
+    }
+}

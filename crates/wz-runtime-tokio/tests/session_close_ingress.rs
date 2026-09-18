@@ -52,7 +52,7 @@ use wz_runtime_tokio::session_glue::{
 };
 use wz_runtime_tokio_test_support::{fixture_session_init_params, NoopOutboundDriver};
 use wz_session_core::drive::{
-    check_requested_close, SessionCloseAuthority, SessionLifecycleInjector,
+    check_requested_close, LifecycleKey, SessionCloseAuthority, SessionLifecycleInjector,
 };
 
 /// Admits every close. The ANTI-VACUITY control for every refusing arm below:
@@ -62,7 +62,7 @@ use wz_session_core::drive::{
 struct AdmitAll;
 
 impl SessionCloseAuthority for AdmitAll {
-    fn admits_close(&self, _keyexpr: &str) -> bool {
+    fn admits_close(&self, _key: &LifecycleKey<'_>) -> bool {
         true
     }
 }
@@ -71,28 +71,45 @@ impl SessionCloseAuthority for AdmitAll {
 struct DenyAll;
 
 impl SessionCloseAuthority for DenyAll {
-    fn admits_close(&self, _keyexpr: &str) -> bool {
+    fn admits_close(&self, _key: &LifecycleKey<'_>) -> bool {
         false
     }
 }
 
-/// Admits closes on ONE key and refuses every other. This is the authority that
-/// makes the witness say something the two blanket ones cannot: that the
-/// verdict is taken on the ARRIVING keyexpr rather than on the row's pattern or
-/// the event name, which is the whole reason the grammar puts the target in the
-/// key (`@/<zid>/<whatami>/session/<verb>/<peer-zid>`) instead of the payload.
+/// Admits closes on ONE TARGET and refuses every other. This is the authority
+/// that makes the witness say something the two blanket ones cannot: that the
+/// verdict is taken on the ARRIVING key rather than on the row's pattern or the
+/// event name.
+///
+/// R2718 — it now compares `key.peer_zid`, not the whole keyexpr, which is
+/// strictly stronger: "may close session X only" is a statement about the
+/// TARGET, and an authority that matched the whole string would also be
+/// refusing keys that name the same target through a different node or verb
+/// chunk. Before the grammar was parsed, every authority had to carry its own
+/// copy of it to say this much.
 struct AdmitOnly(&'static str);
 
 impl SessionCloseAuthority for AdmitOnly {
-    fn admits_close(&self, keyexpr: &str) -> bool {
-        keyexpr == self.0
+    fn admits_close(&self, key: &LifecycleKey<'_>) -> bool {
+        key.peer_zid == self.0
     }
 }
 
-/// The admin keyexpr this witness maps to the close verb. It is the TEST's
-/// choice, not a product constant: nothing in the seam knows any particular
-/// keyexpr, which is the property that lets a deployment pick its own.
-const CLOSE_KEYEXPR: &str = "@/wz/session/close";
+/// The admin keyexpr this witness maps to the close verb. WHICH key is the
+/// TEST's choice — a deployment picks its own, which is why wz ships no default
+/// row — but its SHAPE is not: R2718 made
+/// `@/<zid>/<whatami>/session/<verb>/<peer-zid>` a parsed grammar, and the
+/// injector refuses a key that is not one.
+///
+/// ⚠ This constant used to read `@/wz/session/close`, five chunks, which was
+/// never the grammar at all — it matched because the switchboard PATTERN
+/// matched and nothing ever read the key. That it had to change here is the
+/// enforcement working, not a cost of it.
+const CLOSE_KEYEXPR: &str = "@/node-a/peer/session/close/peer-b";
+
+/// The target `CLOSE_KEYEXPR` names, spelled once so an arm can assert on the
+/// authority's view of it rather than on the whole string.
+const CLOSE_TARGET: &str = "peer-b";
 
 /// The event name as the SCXML document spells it. Written here ONCE and
 /// checked against the machine's own mapping by
@@ -213,7 +230,7 @@ fn session_close_ingress_leaves_an_unmapped_message_alone() {
         .switchboard
         .register_command(CLOSE_KEYEXPR, CLOSE_EVENT);
 
-    let outcome = frame_event(put_push("@/wz/session/something-else"));
+    let outcome = frame_event(put_push("@/node-a/peer/session/something-else/peer-b"));
     let admit = AdmitAll;
     let fired = {
         let mut injector = SessionLifecycleInjector::new(&actions, &admit);
@@ -248,7 +265,7 @@ fn session_close_ingress_leaves_an_unmapped_message_alone() {
 fn session_close_ingress_closes_from_a_switchboard_document() {
     use wz_switchboard_schema::{LifecycleBinding, SwitchboardSpec};
 
-    const DECLARED: &str = "@/wz/session/close/peer-a";
+    const DECLARED: &str = "@/node-a/peer/session/close/peer-a";
 
     let (actions, mut engine) = established_session();
     let spec = SwitchboardSpec {
@@ -292,7 +309,7 @@ fn session_close_ingress_closes_from_a_switchboard_document() {
 fn a_documented_row_is_still_refused_by_the_authority() {
     use wz_switchboard_schema::{LifecycleBinding, SwitchboardSpec};
 
-    const DECLARED: &str = "@/wz/session/close/peer-a";
+    const DECLARED: &str = "@/node-a/peer/session/close/peer-a";
 
     let (actions, mut engine) = established_session();
     let spec = SwitchboardSpec {
@@ -328,6 +345,75 @@ fn a_documented_row_is_still_refused_by_the_authority() {
         engine.get_current_state(),
         SessionFsmUnicastState::Established
     );
+}
+
+/// R2718 — A MATCHED ROW IS NOT A LIFECYCLE KEY. A row's pattern can be a
+/// wildcard, so matching says the key is in the row's shape, never that it is in
+/// the GRAMMAR's. An authority handed a key it cannot parse would be answering
+/// about a target it never read, so the injector refuses first.
+///
+/// ⚠ The authority here ADMITS EVERYTHING, which is what makes this arm about
+/// the grammar: with `AdmitAll` bound, the only thing that can stop the close is
+/// the key's shape.
+#[test]
+fn session_close_ingress_refuses_a_key_that_is_not_the_grammar() {
+    let (actions, mut engine) = established_session();
+    let mut observer = ApplicationLayerObserver::new();
+    // A wildcard row wide enough to match keys of any shape under `@`.
+    observer.switchboard.register_command("@/**", CLOSE_EVENT);
+
+    // Five chunks, not six — the shape every test in this file used before the
+    // grammar was parsed, and the shape a deployment could reach for by analogy.
+    let outcome = frame_event(put_push("@/wz/session/close/peer-b"));
+    let admit = AdmitAll;
+    let fired = {
+        let mut injector = SessionLifecycleInjector::new(&actions, &admit);
+        observer.dispatch_switchboard(IterationEvent::Poll(&outcome), &mut injector)
+    };
+
+    assert_eq!(fired, 0, "a key outside the grammar carries out nothing");
+    assert!(!check_requested_close(&actions, &mut engine));
+    assert_eq!(
+        engine.get_current_state(),
+        SessionFsmUnicastState::Established
+    );
+
+    // ANTI-VACUITY: the SAME row and the SAME authority close a session when the
+    // key IS the grammar, so the refusal above is the shape's and not the row's.
+    let (actions, mut engine) = established_session();
+    let outcome = frame_event(put_push(CLOSE_KEYEXPR));
+    let fired = {
+        let mut injector = SessionLifecycleInjector::new(&actions, &admit);
+        observer.dispatch_switchboard(IterationEvent::Poll(&outcome), &mut injector)
+    };
+    assert_eq!(fired, 1);
+    assert!(check_requested_close(&actions, &mut engine));
+    assert_eq!(engine.get_current_state(), SessionFsmUnicastState::Closing);
+}
+
+/// The authority reads the TARGET, and this arm pins that the chunk it reads is
+/// the one the grammar puts it in — `CLOSE_KEYEXPR`'s last chunk, not its whole
+/// text.
+#[test]
+fn session_close_ingress_hands_the_authority_the_parsed_target() {
+    let (actions, mut engine) = established_session();
+    let mut observer = ApplicationLayerObserver::new();
+    observer
+        .switchboard
+        .register_command(CLOSE_KEYEXPR, CLOSE_EVENT);
+
+    let outcome = frame_event(put_push(CLOSE_KEYEXPR));
+    // Scoped to the TARGET chunk alone. An authority still comparing whole
+    // keyexprs would refuse this, because `CLOSE_TARGET` is not `CLOSE_KEYEXPR`.
+    let only = AdmitOnly(CLOSE_TARGET);
+    let fired = {
+        let mut injector = SessionLifecycleInjector::new(&actions, &only);
+        observer.dispatch_switchboard(IterationEvent::Poll(&outcome), &mut injector)
+    };
+
+    assert_eq!(fired, 1, "the target chunk is what the authority was given");
+    assert!(check_requested_close(&actions, &mut engine));
+    assert_eq!(engine.get_current_state(), SessionFsmUnicastState::Closing);
 }
 
 /// R2713 residual (a) — THE JOIN. Both ends were already witnessed: a policy
@@ -408,18 +494,20 @@ fn session_close_ingress_cannot_be_reached_through_the_signal_path() {
 /// name can be what decided.
 #[test]
 fn session_close_ingress_judges_the_arriving_keyexpr_not_the_row() {
-    const TARGET: &str = "@/wz/session/close/peer-a";
-    const SIBLING: &str = "@/wz/session/close/peer-b";
+    const TARGET: &str = "@/node-a/peer/session/close/peer-a";
+    const SIBLING: &str = "@/node-a/peer/session/close/peer-b";
 
     for (keyexpr, expect_closed) in [(TARGET, true), (SIBLING, false)] {
         let (actions, mut engine) = established_session();
         let mut observer = ApplicationLayerObserver::new();
         observer
             .switchboard
-            .register_command("@/wz/session/close/*", CLOSE_EVENT);
+            .register_command("@/node-a/peer/session/close/*", CLOSE_EVENT);
 
         let outcome = frame_event(put_push(keyexpr));
-        let only = AdmitOnly(TARGET);
+        // R2718 — the authority is scoped to the TARGET chunk, so this arm now
+        // says the verdict follows `peer_zid` rather than the whole string.
+        let only = AdmitOnly("peer-a");
         let fired = {
             let mut injector = SessionLifecycleInjector::new(&actions, &only);
             observer.dispatch_switchboard(IterationEvent::Poll(&outcome), &mut injector)
