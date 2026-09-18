@@ -1,8 +1,13 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: AGPL-3.0-or-later OR LicenseRef-watching-zenoh-Commercial
 # SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
-"""R2707 (open-debt item 783) — a buffered subscription's DRAIN is wired, not
+"""R2707 (no register item) — a buffered subscription's DRAIN is wired, not
 dropped.
+
+Answers item 783 of the unregistered register, which lives OUTSIDE this
+repository, so the citation above is the form `gate_provenance_lint` accepts:
+its vocabulary is store ids and `§` sections, and a register this tree does not
+carry has no id it could name.
 
 ## The class
 
