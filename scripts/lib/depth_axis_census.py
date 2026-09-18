@@ -1705,7 +1705,23 @@ PIN_NO_SYMBOL = 2
 # leaves the PARTIAL population (two residuals survive, and they turned out to
 # be one seam), so REACHED and AMBIGUOUS both hold. READ off the census's own
 # FAIL line.
-PIN_WZ_CITATIONS = 112
+# R2713 — 112 -> 116. `session-close-ingress` gains a correction recording
+# residual (a) as BUILT, and building costs citations for the same reason
+# closing does: saying what now stands means naming it. The four are the port
+# and its consumer (`drive::SessionCloseAuthority`,
+# `SessionLifecycleInjector::new`), the row kind that carries a command's key
+# (`SwitchboardRowKind::Command` via `EventInjector::inject_command`), and the
+# AP enforcement the correction has to name in order to explain why the gate
+# could NOT go there (`Session::apply_acl_ingress`, in a crate no MCU profile
+# builds). The atom neither enters nor leaves the PARTIAL population —
+# residuals (b) and (c) survive — so the other two pins in this file hold, and
+# that they held is what says citations moved rather than an atom departing.
+# ⚠ ATTRIBUTED, not assumed: the count is 112 at the code commit and 116 at the
+# reason commit, measured by checking the store file out at each. The measuring
+# change therefore landed one commit before this bump rather than beside it;
+# the cause is named here instead, which is what the pin's contract is for.
+# READ off the census's own FAIL line.
+PIN_WZ_CITATIONS = 116
 # R2626 — 44 -> 42, and this one is worth a sentence because it HELD through
 # every earlier retirement in this run (R2612, R2622). `time-hlc`'s reason is the
 # first retiree carrying AMBIGUOUS citations of its own: its oldest clauses cite
