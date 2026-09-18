@@ -338,6 +338,37 @@
  *
  * @values fields message
  *
+ * R2706 -- AND WHAT THE SESSION MADE OF THE FRAME, at field-document
+ * revision 12.
+ *
+ * Every row now carries `above_transport`, whose `carried_state` is the
+ * session's own verdict on that frame's payload. It exists because two facts
+ * are unreachable by walking the row's bytes a second time, which is all this
+ * document did before:
+ *
+ *   - `reassembled` -- the frame COMPLETED a fragment chain, and the records
+ *     it carried are under `above_transport.carried` with an
+ *     `above_transport.fields` tree beside them. Their bytes were never
+ *     contiguous on the wire, so no second walk over this row could reach
+ *     them, and until this revision a reader could not tell "this traffic
+ *     carried nothing" from "five messages travelled and are not described".
+ *   - `undecompressible` -- the session negotiated compression and could not
+ *     open this body. The walk has no lz4 and halts at whatever record first
+ *     fails, reporting a MID word indistinguishable from one this build's
+ *     wire vintage does not know; this word is what separates them.
+ *
+ * The other four (`batch`, `nothing`, `fragment`,
+ * `fragment_without_resolution`) arrive alone in their object, which is what
+ * makes the key a DISCRIMINANT. A scouting row has no session frame and
+ * carries `"above_transport":null`.
+ *
+ * ⚠ THE SPANS UNDER `reassembled` ARE NOT CAPTURE OFFSETS. They index the
+ * buffer the chain was joined in, which exists only inside the reader, and the
+ * row's own `offset_space` is untouched -- it still says where the FRAGMENT
+ * stands, which stays measured. Do not add the two.
+ *
+ * @values fields carried_state
+ *
  * R2629 -- AND A SCOUTING DATAGRAM IS A ROW, at field-document revision 10.
  *
  * A datagram flow's `messages` now also holds its SCOUT and HELLO datagrams.
@@ -426,7 +457,7 @@
  *
  * Every family in `value_families` now carries a `carries` axis:
  *
- *     {"name":"fields","revision":11,"key":"kind","values":[...],
+ *     {"name":"fields","revision":12,"key":"kind","values":[...],
  *      "carries":[{"word":"bits","shapes":[["end","name","start","value"]]},
  *                 {"word":"opaque","shapes":[["end","name","start"]]}, ...]}
  *
@@ -454,6 +485,7 @@
  * @carries census link passenger
  * @carries census mode passenger
  * @carries census offset_space passenger
+ * @carries fields carried_state discriminant
  * @carries fields direction passenger
  * @carries fields keyexpr_cause passenger
  * @carries fields kind discriminant
@@ -1190,7 +1222,7 @@ int wz_dissect_declarations_diagnose(const char *declarations, char **out);
  *
  * R2175 -- the document is at REVISION 3, and the fourth key is `value_families`:
  *
- *     "value_families":[{"name":"fields","revision":11,"key":"state",
+ *     "value_families":[{"name":"fields","revision":12,"key":"state",
  *                        "values":["decoded","encoding_mismatch",…]}, …]
  *
  * every key in every document whose VALUE this build draws from a closed set,
