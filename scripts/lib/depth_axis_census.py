@@ -1005,7 +1005,13 @@ CITATION = re.compile(r"\b((?:[A-Za-z0-9_.-]+/)*[A-Za-z0-9_.-]+\.(?:rs|c|h))(?::
 # `reached` (its symbols are owned by executing tests, including the two
 # backpressure witnesses this round added), which is why this pin falls while
 # UNREACHED and NO_SYMBOL hold at 3 and 2. READ off the census's own FAIL line.
-PIN_REACHED = 21
+# R2721 — 21 -> 20. `session-close-ingress` RETIRES, which is the R2697 entry
+# above run backwards a second time: residual (c) is built, so the atom grades
+# COMPLETE again and leaves the PARTIAL population. It was in `reached` — the
+# close witness and now the opener's own four arms are executing tests owning
+# its symbols — so this pin falls while UNREACHED and NO_SYMBOL hold at 3 and 2.
+# READ off the census's own FAIL line.
+PIN_REACHED = 20
 PIN_UNREACHED = 3
 PIN_NO_SYMBOL = 2
 # R2534 — 346 -> 347. The atom is `adminspace-metrics` and the citation is the
@@ -1721,7 +1727,14 @@ PIN_NO_SYMBOL = 2
 # change therefore landed one commit before this bump rather than beside it;
 # the cause is named here instead, which is what the pin's contract is for.
 # READ off the census's own FAIL line.
-PIN_WZ_CITATIONS = 116
+# R2721 — 116 -> 109. `session-close-ingress` DEPARTS (COMPLETE, residual (c)
+# built), and it leaves carrying MORE citations than R2713 added: this round's
+# reason append names the four parts the AP binding joins, the binding module
+# itself and the lwip drive, each anchored to a tracked wz file. A departure
+# takes its reason's WHOLE citation set with it, which is why this drop is not
+# the four above run backwards and why the number is read off the census's own
+# FAIL line rather than reasoned out from the previous entry's arithmetic.
+PIN_WZ_CITATIONS = 109
 # R2626 — 44 -> 42, and this one is worth a sentence because it HELD through
 # every earlier retirement in this run (R2612, R2622). `time-hlc`'s reason is the
 # first retiree carrying AMBIGUOUS citations of its own: its oldest clauses cite
@@ -1762,7 +1775,13 @@ PIN_WZ_CITATIONS = 116
 # atom out, not derived from the departure's citation total -- an ambiguous
 # count is a property of citation FORMS and cannot be apportioned arithmetically
 # from the count above it.
-PIN_AMBIGUOUS = 19
+# R2721 -- 19 -> 18. `session-close-ingress` departs (COMPLETE) carrying the ONE
+# ambiguous citation it arrived with at R2697, which is the symmetry that entry
+# predicted and this one confirms. The round's own append adds no ambiguous
+# form: every citation it writes is anchored `path` @ `needle`, so the whole of
+# this move is the atom's arrival being run backwards. READ off the census's own
+# FAIL line, as the three entries above insist.
+PIN_AMBIGUOUS = 18
 
 
 class Fatal(Exception):
