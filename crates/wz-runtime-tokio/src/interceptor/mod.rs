@@ -49,6 +49,13 @@
 pub mod access_control;
 #[cfg(feature = "access-downsampling")]
 pub mod downsampling;
+// Gated on its CONSUMERS, which are the `InterceptorContext` implementations
+// rather than the enforcers: the two forwarders' face contexts (`routing-peer`)
+// and the session's egress context (`access-acl`). A downsampling- or
+// quota-only build compiles an enforcer but no context to run it against, so it
+// resolves no governed keyexpr and this module would be dead code there.
+#[cfg(any(feature = "routing-peer", feature = "access-acl"))]
+pub(crate) mod keyexpr;
 #[cfg(feature = "access-quota")]
 pub mod low_pass;
 

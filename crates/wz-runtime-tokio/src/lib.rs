@@ -1765,6 +1765,15 @@ pub mod routing_forward;
 #[cfg(feature = "routing-peer")]
 pub mod linkstate_forward;
 
+/// R2702 — who is on the other end of a link: the validated routing identity and
+/// the authenticated name, read off the handshake the session ran. Gated on the
+/// UNION of its two consumers rather than on either, because that is what it is:
+/// routing keys its graph on the zid and the §5.16 enforcer reads both as ACL
+/// subject axes, and while the readers lived inside the routing module the
+/// enforcer could not exist without one.
+#[cfg(any(feature = "routing-peer", feature = "access-acl"))]
+pub(crate) mod peer_identity;
+
 /// R311y108 — §5.21 router-hat slice 1a: the DUAL-mesh router forwarder. A 4th
 /// [`FaceForwarder`](accept_loop::FaceForwarder) (`RouterForwarder`) that ports
 /// zenoh `hat/router`'s two link-state graphs — `routers_net` (Router-tier
@@ -1784,12 +1793,28 @@ pub mod router_forward;
 /// zenoh `net/routing/interceptor/{mod.rs,access_control.rs}`. The seam +
 /// adapter reference the codec `NetworkMessage` types, so they live in this
 /// runtime crate and consume the pure `wz_access_control` policy engine (zenoh's
-/// `authorization.rs`), kept message-type-free in its own crate. The SEAM is
-/// gated on `routing-peer` (the forwarder it gates is); each concrete enforcer
-/// is an independent §5.16 knob (`access-acl` / `access-downsampling` /
-/// `access-quota`) so a routing peer composes exactly the admission filters it
-/// needs — none of them is access control disabled.
-#[cfg(feature = "routing-peer")]
+/// `authorization.rs`), kept message-type-free in its own crate. Each concrete
+/// enforcer is an independent §5.16 knob (`access-acl` / `access-downsampling` /
+/// `access-quota`) so a build composes exactly the admission filters it needs —
+/// none of them is access control disabled.
+///
+/// R2702 — the seam compiles for a build that enables ANY of those knobs, where
+/// it used to be gated on `routing-peer` alone. That gate read as "the forwarder
+/// it gates is routing", and it was true of the CONSUMER rather than of the
+/// seam: after [`interceptor::keyexpr`] moved here, nothing under `interceptor/`
+/// names a routing type. Upstream installs its interceptors with no mode branch
+/// — they are a sibling field of the per-mode routing state, not something a
+/// mode selects (`zenoh/src/net/routing/dispatcher/tables.rs` @ `interceptors: interceptor_factories(config)?`)
+/// — and `access-acl`'s residual named this gate as the reason wz could not.
+/// `routing-peer` stays in the list because a routing build installs chains on
+/// its forwarders whether or not it enables a knob: the forwarder fields are
+/// unconditional and name the chain type.
+#[cfg(any(
+    feature = "routing-peer",
+    feature = "access-acl",
+    feature = "access-downsampling",
+    feature = "access-quota"
+))]
 pub mod interceptor;
 
 /// P4 linkstate-peer routing (step c3c-3 atom2) — the peer interest table

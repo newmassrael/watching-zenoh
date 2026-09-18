@@ -3162,8 +3162,14 @@ mod tests {
         );
     }
 
+    // R2702 — `feature = "routing-peer"` DROPPED from this arm. The shape this
+    // pins is decided by the access features alone; routing was named here
+    // because `access-acl` used to imply it, so the condition was free. Once the
+    // implication went, that free condition became the thing excluding the new
+    // ACL-only build — and with every arm excluded, `router_config()` itself was
+    // dead code. A build that can now enforce deserves its admin shape pinned,
+    // which is the same conclusion as removing the stale clause.
     #[cfg(all(
-        feature = "routing-peer",
         feature = "access-acl",
         not(feature = "access-downsampling"),
         not(feature = "access-quota"),

@@ -1465,75 +1465,19 @@ pub(crate) fn charge_interceptor_drop(
 ) {
 }
 
-/// Resolve the GOVERNED keyexpr a §5.16 ACL enforcer gates for `msg`, alias-aware
-/// against `keyexpr_table` — the SSOT both forwarders' `InterceptorContext::full_keyexpr`
-/// delegate to (one governed-kind match, not one per forwarder). Push / Request /
-/// Response carry the keyexpr inline; a Declare resolves through
-/// [`declare_governed_keyexpr`]; an `Interest` carries it in its (mode != Final)
-/// body; any other kind — an alias declaration, the keyless `ResponseFinal`, an
-/// `Oam` — carries no governed keyexpr and answers `None`.
-///
-/// `None` is NOT an admit verdict: an ungoverned kind admits because
-/// [`acl_action`](crate::interceptor::access_control) returns no action for it,
-/// BEFORE the enforcer asks for a keyexpr at all — a governed kind that lands
-/// here on `None` (an undeclared expr-id, or the empty wireexpr of a synthesized
-/// timeout `Err`) is DENIED, as in every governed zenoh arm. The ONE exception is
-/// an INGRESS undeclare, which zenoh deliberately admits when its `ext_wire_expr`
-/// is unset; the enforcer owns that asymmetry, not this resolver, because it
-/// depends on the flow. Adding a new governed kind is a ONE-place edit here.
-pub(crate) fn resolve_governed_keyexpr(
-    msg: &NetworkMessage,
-    keyexpr_table: &hashbrown::HashMap<u64, String>,
-) -> Option<String> {
-    match msg {
-        NetworkMessage::Push(p) => resolve_wireexpr(&p.keyexpr.body, keyexpr_table),
-        NetworkMessage::Request(r) => resolve_wireexpr(&r.keyexpr.body, keyexpr_table),
-        NetworkMessage::Response(r) => resolve_wireexpr(&r.keyexpr.body, keyexpr_table),
-        NetworkMessage::Declare(d) => declare_governed_keyexpr(d, keyexpr_table),
-        // An Interest carries its keyexpr in the body zenoh writes only when the
-        // mode is not Final (`zenoh-codec network/interest.rs:69-73`), so a Final
-        // Interest answers `None` here — and is ungoverned at the action arm, the
-        // same place zenoh leaves it unfiltered.
-        NetworkMessage::Interest(i) => i
-            .body
-            .as_ref()
-            .and_then(|b| b.keyexpr.as_ref())
-            .and_then(|we| resolve_wireexpr(&we.body, keyexpr_table)),
-        _ => None,
-    }
-}
-
-/// The governed keyexpr of a `Declare`, alias-resolved — the Declare half of
-/// [`resolve_governed_keyexpr`], split out because the six governed declaration
-/// bodies carry their keyexpr in TWO different places.
-///
-/// `DeclareSubscriber` / `DeclareQueryable` / `DeclareToken` carry it INLINE. The
-/// three undeclares carry only `{ id }` on the wire, so zenoh puts the keyexpr in
-/// the optional `ext_wire_expr` extension (`UndeclareSubscriber { id,
-/// ext_wire_expr }`) — read here through the same
-/// [`resolve_ext_keyexpr`](wz_session_core::declare_ext_keyexpr::resolve_ext_keyexpr)
-/// SSOT the forwarders' undeclare ingest already uses. An undeclare whose peer
-/// omitted that extension answers `None`, which is not a resolution FAILURE but
-/// an absent field: on ingress the enforcer admits it (zenoh's deliberate
-/// asymmetry, `access_control.rs:472-485`), on egress it denies (`:762-776`).
-fn declare_governed_keyexpr(
-    declare: &DeclareOwned,
-    keyexpr_table: &hashbrown::HashMap<u64, String>,
-) -> Option<String> {
-    if let Some(we) = declare_subscriber_wireexpr(declare)
-        .or_else(|| declare_queryable_wireexpr(declare))
-        .or_else(|| declare_token_wireexpr(declare))
-    {
-        return resolve_wireexpr(&we.body, keyexpr_table);
-    }
-    let exts = match &declare.body {
-        DeclareOwnedVariant::CodecZenohUndeclSubscriber(u) => u.extensions.as_ref(),
-        DeclareOwnedVariant::CodecZenohUndeclQueryable(u) => u.extensions.as_ref(),
-        DeclareOwnedVariant::CodecZenohUndeclToken(u) => u.extensions.as_ref(),
-        _ => return None,
-    };
-    resolve_ext_keyexpr(exts, keyexpr_table)
-}
+/// R2702 — the governed-keyexpr resolver and the three `Declare` keyexpr
+/// readers MOVED to [`crate::interceptor::keyexpr`], and this re-export is how
+/// every caller in this file keeps its unqualified name. They were the only
+/// thing tying the §5.16 seam to a routing build: nothing else under
+/// `interceptor/` names a routing type, but its enforcer's resolver lived HERE,
+/// so `pub mod interceptor` had to be `routing-peer`-gated and the atom's
+/// residual could say wz "gates the whole engine behind a routing build". A
+/// forwarder is a CONSUMER of that seam, so importing from it adds no edge —
+/// the old direction pointed from the seam INTO one of its consumers.
+pub(crate) use crate::interceptor::keyexpr::{
+    declare_queryable_wireexpr, declare_subscriber_wireexpr, declare_token_wireexpr,
+    resolve_governed_keyexpr,
+};
 
 /// The per-message [`InterceptorContext`] for one face — borrows that face's
 /// state so an enforcer can read the subject (the peer's routing zid) and
@@ -6055,45 +5999,13 @@ pub(crate) fn emit_current_interest_replies<V>(
     }
 }
 
-/// This face's remote peer zid as the routing [`Zid`], or `None` if the
-/// handshake did not surface one OR surfaced a non-conformant one — the SINGLE
-/// session(`Vec<u8>`) -> routing(`Zid`) boundary every flood / forward path
-/// reads through. The peer zid is captured verbatim from the peer's INIT body
-/// (`SessionLinkActions::peer_zid`), so it is UNTRUSTED wire data: validate it
-/// with the same `Zid::try_from` the linkstate ingest uses (rejecting an empty /
-/// all-zero zid) rather than the infallible `from_slice`, so a non-conformant
-/// peer cannot enter the graph as a zero-identity node. A face whose zid is
-/// absent / rejected is held WITHOUT a routing identity (it routes nothing),
-/// exactly like a zid-less face. The conversion lives here (the driver), keeping
-/// `SessionLinkActions` (session-core, `#![no_std]`, routing-agnostic) free of
-/// the routing `Zid` type.
-pub(crate) fn peer_zid_routing(actions: &SessionLinkActions) -> Option<Zid> {
-    actions
-        .peer_zid()
-        .and_then(|bytes| Zid::try_from(bytes).ok())
-}
-
-/// R2631 — the name this face's peer AUTHENTICATED as, for an ACL `usernames`
-/// subject: [`peer_zid_routing`]'s twin for the other session-derived identity,
-/// and the one place both forwarders' interceptor contexts read it, so the two
-/// cannot drift.
-///
-/// The bytes-to-name decision is `AuthIdentity::acl_username`'s, not this
-/// function's. Without `session-extauth` no handshake can carry a name, so the
-/// honest answer is `None` rather than a compile error at every caller.
-pub(crate) fn peer_acl_username(actions: &SessionLinkActions) -> Option<String> {
-    #[cfg(feature = "session-extauth")]
-    {
-        actions
-            .peer_auth_id()
-            .and_then(|id| id.acl_username().map(str::to_owned))
-    }
-    #[cfg(not(feature = "session-extauth"))]
-    {
-        let _ = actions;
-        None
-    }
-}
+/// R2702 — the two peer-identity readers MOVED to [`crate::peer_identity`], and
+/// this re-export is how every caller in this file keeps its unqualified name.
+/// Both have two consumers with different lifetimes — routing keys its graph on
+/// the zid, the §5.16 enforcer reads both as subject axes — and while they lived
+/// here the enforcer could only exist in a routing build. See that module for
+/// why the conversion is host-side at all.
+pub(crate) use crate::peer_identity::{peer_acl_username, peer_zid_routing};
 
 /// The neighbour's [`WhatAmI`] role for [`add_link`](LinkstateNetwork::add_link),
 /// derived from the handshake (R311td "F1"). Mirrors [`peer_zid_routing`]: the
@@ -6612,46 +6524,6 @@ pub(crate) fn is_tree_forward_target(
         return false;
     };
     id != inbound && inbound_zid != Some(zid) && is_child(children, zid)
-}
-
-/// The keyexpr `Wireexpr` a `DeclareSubscriber` declares interest in — `None` for
-/// a non-subscriber Declare body. Returns the raw `Wireexpr` (literal OR aliased)
-/// so the caller resolves it against the inbound face's alias table (B1b), rather
-/// than a pre-resolved literal string.
-pub(crate) fn declare_subscriber_wireexpr(declare: &DeclareOwned) -> Option<&WireexprOwned> {
-    match &declare.body {
-        DeclareOwnedVariant::CodecZenohDeclSubscriber(sub) => Some(&sub.keyexpr),
-        _ => None,
-    }
-}
-
-/// The keyexpr `Wireexpr` a `DeclareQueryable` declares interest in — `None` for
-/// a non-queryable Declare body. The query-plane twin of
-/// [`declare_subscriber_wireexpr`]; returns the raw `Wireexpr` (literal OR
-/// aliased) so the caller resolves it against the inbound face's alias table
-/// (B1b), exactly as the subscriber side.
-pub(crate) fn declare_queryable_wireexpr(declare: &DeclareOwned) -> Option<&WireexprOwned> {
-    match &declare.body {
-        DeclareOwnedVariant::CodecZenohDeclQueryable(q) => Some(&q.keyexpr),
-        _ => None,
-    }
-}
-
-/// The keyexpr `Wireexpr` a `DeclareToken` declares a liveliness token for —
-/// `None` for a non-token Declare body. The liveliness-token twin of
-/// [`declare_subscriber_wireexpr`]; the `DeclareToken` carries its keyexpr
-/// inline (like `DeclareSubscriber`), returned raw (literal OR aliased) so the
-/// caller resolves it against the inbound face's alias table (B1b).
-///
-/// R311y458 dropped the `routing-token-tables` gate: [`resolve_governed_keyexpr`]
-/// calls it on every `routing-peer` build, so it is no longer dead code without
-/// that feature and gating it would only cfg the §5.16 liveliness arms out of
-/// builds that do enforce them.
-pub(crate) fn declare_token_wireexpr(declare: &DeclareOwned) -> Option<&WireexprOwned> {
-    match &declare.body {
-        DeclareOwnedVariant::CodecZenohDeclToken(t) => Some(&t.keyexpr),
-        _ => None,
-    }
 }
 
 impl FaceForwarder for LinkstateForwarder {

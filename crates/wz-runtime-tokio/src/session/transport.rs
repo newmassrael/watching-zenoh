@@ -145,6 +145,30 @@ pub trait TransportState<R: SessionRuntime, T: TimeSource>: sealed::Sealed {
         express: bool,
         priority: wz_session_core::qos::Priority,
     ) -> Result<(), SendWireError>;
+
+    /// R2702 — the §5.16 ACL SUBJECT source for this transport, or `None` when
+    /// the transport has no authenticated peer to be a subject.
+    ///
+    /// This is the projection the typestate could not previously make, and its
+    /// absence is why the session's own egress door could not consult a policy:
+    /// [`Session::send_network_message_qos`](super::Session::send_network_message_qos)
+    /// is transport-GENERIC, while every ACL subject axis — the peer zid, the
+    /// link subject, the authenticated username — is reachable only from the
+    /// unicast action bundle. Asking "who is on the other end of this transport"
+    /// is exactly the kind of question this trait exists to answer per
+    /// transport, so the answer belongs here rather than at a `Tp`-specific
+    /// call site that the generic door cannot reach.
+    ///
+    /// UNICAST answers `Some`: the payload IS the per-peer handshake bundle.
+    /// MULTICAST answers `None`, and that is faithful rather than a stub — a wz
+    /// multicast session is handshake-free and has no peer identity at all,
+    /// while every governed multicast face upstream is a PER-PEER face
+    /// (`zenoh/src/net/routing/gateway.rs` @ `pub fn new_peer_multicast`), so
+    /// upstream has no unattributable governed transport of this shape to
+    /// mirror. A `None` here means the session installs no enforcer, not that it
+    /// enforces vacuously.
+    #[cfg(feature = "access-acl")]
+    fn acl_subject_source(payload: &Self::Payload) -> Option<&Arc<SessionLinkActions<R, T>>>;
 }
 
 /// Typestate marker for a UNICAST session: the payload is the per-peer
@@ -168,6 +192,11 @@ impl sealed::Sealed for Multicast {}
 #[cfg(feature = "transport-unicast")]
 impl<R: SessionRuntime, T: TimeSource> TransportState<R, T> for Unicast {
     type Payload = Arc<SessionLinkActions<R, T>>;
+
+    #[cfg(feature = "access-acl")]
+    fn acl_subject_source(payload: &Self::Payload) -> Option<&Arc<SessionLinkActions<R, T>>> {
+        Some(payload)
+    }
 
     fn send_network_message_qos(
         payload: &Self::Payload,
@@ -253,6 +282,14 @@ pub struct MulticastPayload {
 #[cfg(feature = "transport-multicast")]
 impl<R: SessionRuntime, T: TimeSource> TransportState<R, T> for Multicast {
     type Payload = MulticastPayload;
+
+    // A multicast session is handshake-free: there is no peer, hence no subject.
+    // See the trait method's docs for why that is upstream's shape and not a
+    // gap this impl is papering over.
+    #[cfg(feature = "access-acl")]
+    fn acl_subject_source(_payload: &Self::Payload) -> Option<&Arc<SessionLinkActions<R, T>>> {
+        None
+    }
 
     fn send_network_message_qos(
         payload: &Self::Payload,

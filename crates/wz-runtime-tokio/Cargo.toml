@@ -1168,14 +1168,45 @@ router-multicast-faces = [
 # no third-party surface — unlike zenoh, which reaches the same data through
 # `pnet_datalink`.
 link-interfaces = ["dep:libc"]
-access-acl = ["routing-peer", "link-interfaces", "dep:wz-access-control"]
+# R2702 — `routing-peer` DROPPED from this line and the two below it, and the
+# codec knobs the enforcers actually read are named instead. The implication was
+# what made `access-acl`'s residual true: upstream installs its interceptors with
+# no mode branch, and wz could not, because turning the ACL on dragged in a whole
+# routing peer. The enforcers read message BODIES, so what they genuinely need is
+# codecs, and naming them is the difference between a dependency and a bundle.
+# `transport-unicast` is named for the reason upstream installs its enforcer at
+# `new_transport_unicast`: an access-control build with nothing to enforce ON is
+# not a smaller build, it is an engine with no subject. `-D dead-code` says so
+# too — R2702 measured it, and the resolver went unused until a session
+# consulted it.
+access-acl = [
+    "link-interfaces",
+    "transport-unicast",
+    "dep:wz-access-control",
+    "dep:wz-routing-graph",
+    "codec-push",
+    "codec-request",
+    "codec-declare",
+    "codec-response",
+]
 # R311y508 — the version-keyed per-(face, keyexpr) interceptor cache. Depends on
 # `routing-peer` because the cache lives on the linkstate forwarder's INGRESS
 # admit path, which is that feature's code; it does NOT depend on `access-acl`,
 # because the cache is a property of the CHAIN and stays correct (and empty) for
 # a chain built from the downsampling / low-pass interceptors alone.
 routing-interceptor-hotreload = ["routing-peer"]
-access-downsampling = ["routing-peer", "link-interfaces"]
+# `dep:wz-routing-graph` is on all three access knobs, not just the ACL one, and
+# the reason is the SEAM rather than any enforcer: `InterceptorContext::subject`
+# answers a `Zid`, and every interceptor is handed that context. The trait needs
+# the identity type whichever enforcer is compiled in.
+access-downsampling = [
+    "link-interfaces",
+    "dep:wz-routing-graph",
+    "codec-push",
+    "codec-request",
+    "codec-declare",
+    "codec-response",
+]
 # R311y451 — the two session-core reads the low-pass SIZE budget needs, named
 # by the gate rather than inherited by luck. zenoh budgets payload PLUS
 # attachment (`net/routing/interceptor/low_pass.rs:358-361`), and wz carries the
@@ -1185,8 +1216,12 @@ access-downsampling = ["routing-peer", "link-interfaces"]
 # `query.ext_body.payload.len()` (`:265-269`) and wz carries that value as the
 # 0x03 ENC_ZBUF `encoding || payload` ext. Neither rides `routing-peer`.
 access-quota = [
-    "routing-peer",
     "link-interfaces",
+    "dep:wz-routing-graph",
+    "codec-push",
+    "codec-request",
+    "codec-declare",
+    "codec-response",
     "wz-session-core/attachment-bytes",
     "wz-session-core/query-value",
 ]

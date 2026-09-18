@@ -402,7 +402,7 @@ mod tests {
 
     /// A context that hands back a fixed subject and resolves the message keyexpr
     /// through the PRODUCTION SSOT — the same
-    /// [`resolve_governed_keyexpr`](crate::linkstate_forward::resolve_governed_keyexpr)
+    /// [`resolve_governed_keyexpr`](crate::interceptor::keyexpr::resolve_governed_keyexpr)
     /// both forwarders' real `FaceContext::full_keyexpr` delegates to — against
     /// `aliases`, this fixture's stand-in for a face's link-local alias table. It
     /// resolves what production resolves, so an "undeclared expr-id" and a keyless
@@ -466,7 +466,7 @@ mod tests {
             self.subject
         }
         fn full_keyexpr(&self, msg: &NetworkMessage) -> Option<String> {
-            crate::linkstate_forward::resolve_governed_keyexpr(msg, &self.aliases)
+            crate::interceptor::keyexpr::resolve_governed_keyexpr(msg, &self.aliases)
         }
         fn link_subject(&self) -> Option<&LinkSubject> {
             self.link.as_ref()
@@ -769,6 +769,13 @@ mod tests {
         );
     }
 
+    /// R2702 — gated on the codec that gives this test its SUBJECT. The variant
+    /// and its builder are `codec-response-final`'s, and this compiled without
+    /// naming it only because `access-acl` used to imply a whole routing peer.
+    /// Decomposing that made the feature reachable without it, and the honest
+    /// answer is that a build with no end-marker codec has no end-marker to
+    /// admit — not that `access-acl` should drag the codec in to keep one test.
+    #[cfg(feature = "codec-response-final")]
     #[test]
     fn a_response_final_admits_via_the_action_arm_not_the_keyexpr_one() {
         // The end-marker is keyless AND ungoverned, and WHICH branch admits it is

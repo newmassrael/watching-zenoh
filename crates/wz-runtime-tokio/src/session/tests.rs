@@ -12286,3 +12286,102 @@ fn a_weak_session_upgrades_while_a_strong_handle_lives_and_not_after() {
          that has gone"
     );
 }
+
+// ── R2702 §5.16 — a SESSION enforces its own egress ──
+//
+// The `access-acl` atom's residual has said for many rounds that wz "gates the
+// whole engine behind a routing build while zenoh applies it to a client
+// transport too". These two tests are the behavioural half of that clause
+// closing, and the lane that runs them enables NO routing feature at all.
+
+/// A deny rule installed on a session governs the messages that session
+/// ORIGINATES — the client-transport enforcement wz could not express.
+///
+/// ANTI-VACUITY is the second half, not a courtesy: a chain that denied
+/// everything would pass the first assertion alone, and so would a `publish`
+/// that had stopped emitting for an unrelated reason. The ungoverned keyexpr
+/// going out on the SAME session, under the SAME installed policy, is what
+/// separates "the policy was consulted" from "nothing was sent".
+#[cfg(feature = "access-acl")]
+#[test]
+fn session_egress_acl_denies_a_governed_keyexpr() {
+    use crate::interceptor::{InterceptorConfig, InterceptorSink};
+    use wz_access_control::{
+        AclConfig, AclFlow, AclMessage, AclPolicy, AclRule, Permission, SubjectSelector,
+    };
+
+    let (session, driver) = build_session();
+    // The enforcer admits a message it cannot attribute (open-debt item 655), so
+    // a fixture without a conformant peer zid would pass both assertions while
+    // reaching no rule at all. A real handshake is what normally sets this.
+    *session
+        .actions()
+        .remote_peer_zid
+        .lock()
+        .expect("remote_peer_zid poisoned in test fixture") = Some(vec![0x5a; 16]);
+
+    session.set_interceptors(
+        InterceptorConfig::default().with_acl(AclPolicy::new(AclConfig {
+            default_permission: Permission::Allow,
+            rules: vec![AclRule {
+                subject: SubjectSelector::Any,
+                key_exprs: vec!["admin/**".to_owned()],
+                messages: vec![AclMessage::Put],
+                flow: AclFlow::Egress,
+                permission: Permission::Deny,
+                link_protocols: Vec::new(),
+                interfaces: Vec::new(),
+                usernames: Vec::new(),
+                cert_common_names: Vec::new(),
+            }],
+        })),
+    );
+
+    let opts = PublishOptions::put().with_locality(Locality::Remote);
+    session
+        .publish("admin/secret", b"x", opts.clone())
+        .expect("a denied publish is consumed, not errored -- upstream's Mux shape");
+    assert_eq!(
+        driver.frame_count(),
+        0,
+        "the governed keyexpr must not reach the wire"
+    );
+
+    session
+        .publish("demo/data", b"x", opts)
+        .expect("an ungoverned publish still succeeds");
+    assert_eq!(
+        driver.frame_count(),
+        1,
+        "a keyexpr no rule names still goes out -- the chain was consulted, not \
+         a blanket stop"
+    );
+}
+
+/// An UNCONFIGURED session is byte-identical to one built before the egress
+/// chain existed: the empty chain is access control disabled, and the fast path
+/// returns before a context or a keyexpr resolution is built.
+///
+/// This is the control in the direction that matters for a deployment which
+/// installs no policy at all — if this reds, the seam is not inert when it
+/// should be, which is a worse defect than a missed denial.
+#[cfg(feature = "access-acl")]
+#[test]
+fn session_egress_acl_is_inert_with_no_policy_installed() {
+    let (session, driver) = build_session();
+    *session
+        .actions()
+        .remote_peer_zid
+        .lock()
+        .expect("remote_peer_zid poisoned in test fixture") = Some(vec![0x5a; 16]);
+
+    let opts = PublishOptions::put().with_locality(Locality::Remote);
+    session
+        .publish("admin/secret", b"x", opts)
+        .expect("no policy installed");
+    assert_eq!(
+        driver.frame_count(),
+        1,
+        "an empty chain admits -- zenoh's AclConfig.enabled = false"
+    );
+}

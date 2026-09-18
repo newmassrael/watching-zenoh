@@ -6953,6 +6953,16 @@ layer_c1ao_cargo_test_config_mutate_runtime() {
         cargo test -p wz-runtime-tokio --features config-mutate-runtime,access-acl,access-downsampling,access-quota --lib to_admin_json --quiet || return 1
     _runci_guarded_test "C1AO wzconfig_reconfigure_is_inert 1" 1 \
         cargo test -p wz-runtime-tokio --features access-acl --lib wzconfig_reconfigure_is_inert --quiet || return 1
+    # R2702 — the §5.16 CLIENT-TRANSPORT arm, and its feature list is the claim:
+    # `--no-default-features --features access-acl` enables NO routing feature at
+    # all. `access-acl`'s residual said enforcement "needs a routing build while
+    # zenoh applies it to a client transport too"; this line is what makes that
+    # false, and it would stop being a proof the moment a routing feature crept
+    # into it. The two tests are a pair — a governed keyexpr withheld and an
+    # ungoverned one still emitted — so a chain that denied everything reds here
+    # as loudly as one that enforced nothing.
+    _runci_guarded_test "C1AO session egress acl 2" 2 \
+        cargo test -p wz-runtime-tokio --no-default-features --features access-acl --lib session::tests::session_egress_acl --quiet || return 1
     (cd crates \
         && cargo clippy -p wz-runtime-tokio --features config-mutate-runtime,access-acl --quiet -- -D warnings \
         && cargo clippy -p wz-runtime-tokio --no-default-features --features transport-unicast --quiet -- -D warnings)

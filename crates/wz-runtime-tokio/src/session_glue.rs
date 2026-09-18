@@ -529,11 +529,21 @@ pub use wz_session_core::push_build::{
 // crate::session_glue::* paths keep the bare names.
 #[cfg(feature = "codec-declare")]
 pub use wz_session_core::declare_build::{
-    build_declare_final, build_declare_kexpr, build_declare_queryable,
-    build_declare_queryable_nonlocal, build_declare_subscriber, build_declare_subscriber_nonlocal,
-    build_declare_token, build_declare_token_nonlocal, build_undeclare_kexpr,
-    build_undeclare_queryable, build_undeclare_subscriber, build_undeclare_token,
+    build_declare_kexpr, build_declare_queryable, build_declare_queryable_nonlocal,
+    build_declare_subscriber, build_declare_subscriber_nonlocal, build_declare_token,
+    build_declare_token_nonlocal, build_undeclare_kexpr, build_undeclare_queryable,
+    build_undeclare_subscriber, build_undeclare_token,
 };
+// R2702 — `build_declare_final` carries its OWN gate upstream of here
+// (`declare_build.rs` @ `#[cfg(feature = "declare-final")]`) and was being
+// re-exported under `codec-declare` alone. That held only because every build
+// reaching this line happened to enable both: `declare-final` rides
+// `routing-peer`, and until this round `access-acl` did too. Decomposing that
+// implication made `codec-declare`-without-`declare-final` reachable for the
+// first time, and the import stopped resolving — the gap was always here, and
+// the feature combination that shows it is new.
+#[cfg(all(feature = "codec-declare", feature = "declare-final"))]
+pub use wz_session_core::declare_build::build_declare_final;
 
 // build_interest_* moved to wz-session-core::interest_build (shared
 // INTEREST builders for the tokio AP + lwIP MCU profiles; the private
