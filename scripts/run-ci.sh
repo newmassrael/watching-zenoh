@@ -6970,6 +6970,16 @@ layer_c1ao_cargo_test_config_mutate_runtime() {
     # in opposite directions, which is what says the two chains are two slots.
     _runci_guarded_test "C1AO session ingress acl 2" 2 \
         cargo test -p wz-runtime-tokio --no-default-features --features access-acl --lib session::tests::session_ingress_acl --quiet || return 1
+    # R2702 — the JOIN. The two above pin the ends (the decorator drops what the
+    # policy denies; the loop calls whatever decorator it is handed) and say
+    # nothing about the composition. This drives the PRODUCTION loop over a real
+    # encoded frame — captured by publishing it, not hand-rolled — and asserts
+    # the message never reaches the subscriber, with a second test running the
+    # SAME frame under NO policy and requiring that it DOES. That second arm is
+    # load-bearing: it already caught this test passing while the frame was
+    # being dropped for an unrelated reason. Still no routing feature.
+    _runci_guarded_test "C1AO session ingress acl e2e 2" 2 \
+        cargo test -p wz-runtime-tokio --no-default-features --features access-acl,declare-subscriber,pubsub-put --test session_ingress_acl_e2e --quiet || return 1
     (cd crates \
         && cargo clippy -p wz-runtime-tokio --features config-mutate-runtime,access-acl --quiet -- -D warnings \
         && cargo clippy -p wz-runtime-tokio --no-default-features --features transport-unicast --quiet -- -D warnings)
