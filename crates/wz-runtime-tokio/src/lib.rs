@@ -1801,7 +1801,7 @@ pub mod router_forward;
 /// R2702 — the seam compiles for a build that enables ANY of those knobs, where
 /// it used to be gated on `routing-peer` alone. That gate read as "the forwarder
 /// it gates is routing", and it was true of the CONSUMER rather than of the
-/// seam: after [`interceptor::keyexpr`] moved here, nothing under `interceptor/`
+/// seam: after `interceptor::keyexpr` moved here, nothing under `interceptor/`
 /// names a routing type. Upstream installs its interceptors with no mode branch
 /// — they are a sibling field of the per-mode routing state, not something a
 /// mode selects (`zenoh/src/net/routing/dispatcher/tables.rs` @ `interceptors: interceptor_factories(config)?`)

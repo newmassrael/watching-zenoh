@@ -1492,7 +1492,7 @@ impl<R: SessionRuntime, T: TimeSource, Tp: TransportState<R, T>> Session<R, T, T
     }
 
     /// R2702 — apply the §5.16 INGRESS chain to one inbound batch IN PLACE, the
-    /// twin of [`Self::acl_admits_egress`] and the wz counterpart of zenoh's
+    /// twin of `Self::acl_admits_egress` and the wz counterpart of zenoh's
     /// `DeMux`. The drive loop calls this through its ingress-decorator seam,
     /// BEFORE the observer fans the outcome out, because after that the batch is
     /// borrowed and a denial can no longer be expressed.
