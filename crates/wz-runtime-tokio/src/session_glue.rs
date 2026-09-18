@@ -1337,8 +1337,31 @@ where
                         // suspension must cost this session's THROUGHPUT and
                         // not its LIFE, and keepalive is emitted by this same
                         // loop. See that function.
+                        // R2708 (open-debt item 785) — THE SESSION'S OWN WORK
+                        // FIRST, AND WITHOUT BEING ASKED. `actions.core` is the
+                        // kernel this loop already holds, and its
+                        // `iteration_work` is where a buffered subscription
+                        // registers. Before this, the only route to that drain
+                        // was the host's `after_dispatch`, which the entry 289
+                        // of 308 call sites use defaults to a no-op -- so
+                        // delivery under backpressure depended on an embedder
+                        // having wired something, and a hosted lane went red
+                        // over exactly that.
+                        //
+                        // The host's stage still runs, after. It is now an
+                        // EXTRA rather than the only door.
+                        //
+                        // The host's stage is CALLED here and awaited inside,
+                        // rather than called inside: `after_dispatch` is an
+                        // `FnMut` this loop owns for its whole life, and moving
+                        // it into a per-iteration future would move it away.
+                        let session_work = actions.core.iteration_work.clone();
+                        let host_stage = after_dispatch();
                         park_on_drain(
-                            after_dispatch(),
+                            async move {
+                                session_work.drain_all().await;
+                                host_stage.await;
+                            },
                             actions,
                             engine,
                             clock,

@@ -526,6 +526,16 @@ pub struct SessionCore<R: SessionRuntime, T: TimeSource> {
     /// set-once slot here uses the same seam.
     #[cfg(feature = "session-close-ingress")]
     pub requested_close: R::Mutex<bool>,
+    /// R2708 (open-debt item 785) — what this session owes its drive loop every
+    /// iteration, opaque to this crate. See
+    /// [`SessionRuntime::IterationWork`](crate::link::SessionRuntime::IterationWork)
+    /// for why it is an associated type rather than something named here.
+    ///
+    /// Per SESSION and not per link, for the reason
+    /// [`Self::requested_close`] gives one field up: an aggregated session's
+    /// second link must not be able to deliver while the first is stalled, and
+    /// the consumer a buffered subscription feeds belongs to the session.
+    pub iteration_work: R::IterationWork,
     pub params: SessionInitParams,
     /// The largest message this profile can REASSEMBLE, in bytes — the TX
     /// twin of the RX reassembly slot `CAP`. A fragment chain longer than
@@ -1686,6 +1696,11 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                 // only writer and it has not run yet.
                 #[cfg(feature = "session-close-ingress")]
                 requested_close: R::new_mutex(false),
+                // Empty: a session owes its loop nothing until something
+                // registers. What "empty" means is the profile's to decide,
+                // which is why `Default` is this kernel's only interaction
+                // with the value.
+                iteration_work: R::IterationWork::default(),
                 params,
                 // "No cap" until a host declares one — a profile that never
                 // configures its reassembly bound keeps the prior behavior.

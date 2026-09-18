@@ -172,6 +172,19 @@ impl SessionRuntime for TokioRuntime {
     // binds `Rc` instead (single-task, no atomics → M0+).
     type Shared<U> = Arc<U>;
 
+    // R2708 (open-debt item 785) — the AP profile's per-iteration work is the
+    // session's buffered-subscription drains. The loop awaits them every
+    // iteration, which is what makes a slow consumer stop this session reading
+    // its link instead of stopping only the host that remembered to wire a
+    // stage. `wz-session-core` never names this type; it only default-constructs
+    // it, which is why the drain being `async` stays this crate's business.
+    #[cfg(feature = "transport-unicast")]
+    type IterationWork = crate::session::BufferedRegistry;
+    // Without the unicast session there is no subscription to buffer, so the
+    // work is empty BY CONSTRUCTION rather than by a runtime check.
+    #[cfg(not(feature = "transport-unicast"))]
+    type IterationWork = ();
+
     fn share<U>(value: U) -> Self::Shared<U> {
         Arc::new(value)
     }

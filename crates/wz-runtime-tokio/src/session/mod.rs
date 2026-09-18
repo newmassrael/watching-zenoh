@@ -210,6 +210,10 @@ use wz_runtime_core::TimeSource;
 // `Arc<SessionLinkActions<R, T>>`, which now bounds `R: SessionRuntime`
 // (the runtime-tier owner of `R::LinkSink`). `SessionRuntime: Runtime`,
 // so the `<R as Runtime>::Mutex<...>` field types still resolve.
+/// R2708 (item 785) — in scope so a generic `Session<R, ..>` can call the two
+/// synchronous things a profile's per-iteration work offers.
+#[cfg(feature = "transport-unicast")]
+use buffered::BufferedWork as _;
 use wz_session_core::link::SessionRuntime;
 
 use crate::runtime_impl::TokioRuntime;
@@ -426,7 +430,7 @@ mod buffered;
 /// able to name it, and everything else about the staging seam is this crate's
 /// own business.
 #[cfg(feature = "transport-unicast")]
-pub use buffered::BufferedDrainStage;
+pub use buffered::{BufferedDrainStage, BufferedRegistry};
 #[cfg(feature = "transport-unicast")]
 mod decl_listener;
 #[cfg(feature = "transport-unicast")]
@@ -754,17 +758,14 @@ where
     /// forwarders already hold two chains apiece.
     #[cfg(feature = "access-acl")]
     interceptors_ingress: Arc<<R as Runtime>::Mutex<crate::interceptor::InterceptorChain>>,
-    /// R2703 — the buffered subscriptions this session delivers to, and the
-    /// only thing the loop's drain stage needs to reach.
-    ///
-    /// SHARED on clone, like every other registry here: a buffered subscription
-    /// declared through one handle must still be drained when the loop holds
-    /// another. A `std::sync::Mutex` rather than the `R::Mutex` GAT because the
-    /// whole mechanism is std-runtime-only by construction — it owns a tokio
-    /// channel — and pretending otherwise would put an async-shaped thing behind
-    /// a profile-generic lock that no MCU profile can satisfy.
-    #[cfg(feature = "transport-unicast")]
-    buffered: buffered::BufferedRegistry,
+    // R2708 (item 785) — the buffered registry used to live HERE, on the
+    // handle, and that placement was the defect: the drive loop never holds a
+    // `Session`, so the only route from a registration to the loop was a stage
+    // the host had to wire. It now hangs off the kernel
+    // (`SessionLinkActions::core`, as `SessionRuntime::IterationWork`), which is
+    // the one thing the loop already has that means "this session". Sharing on
+    // clone comes free from that: every handle of a session derefs the same
+    // core.
 }
 
 /// R2578 — does THIS build carry `session-matching`?
@@ -996,10 +997,6 @@ where
             interceptors_egress: self.interceptors_egress.clone(),
             #[cfg(feature = "access-acl")]
             interceptors_ingress: self.interceptors_ingress.clone(),
-            // R2703 — shared, not forked: a buffered subscription declared
-            // through one handle must still be drained through another.
-            #[cfg(feature = "transport-unicast")]
-            buffered: self.buffered.clone(),
         }
     }
 }
@@ -2119,10 +2116,6 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Multicast> {
             interceptors_ingress: Arc::new(R::new_mutex(
                 crate::interceptor::InterceptorChain::new(),
             )),
-            // R2703 — empty: a session with no buffered subscription drains
-            // nothing, and the loop's stage costs one empty vector walk.
-            #[cfg(feature = "transport-unicast")]
-            buffered: buffered::BufferedRegistry::default(),
         })
     }
 
@@ -2318,9 +2311,6 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
             interceptors_ingress: Arc::new(R::new_mutex(
                 crate::interceptor::InterceptorChain::new(),
             )),
-            // R2703 — see the twin constructor above.
-            #[cfg(feature = "transport-unicast")]
-            buffered: buffered::BufferedRegistry::default(),
         });
         // Forward the zid into the subscriber registry so wire-arrived
         // self-echo Pushes are dedup'd from session creation onward. The
@@ -4748,9 +4738,18 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
         wz_session_core::session_actions::SessionLinkActions<R, T>: Send + Sync,
         <R as SessionRuntime>::LinkSink: Send + Sync,
         T: 'static,
+        // R2708 (item 785) — the profile must offer the two SYNCHRONOUS things
+        // a generic session needs of its per-iteration work. The awaiting is
+        // the loop's, which knows the concrete type.
+        <R as SessionRuntime>::IterationWork: buffered::BufferedWork,
     {
         let (stage, drain, rx) = buffered::buffered_pair::<I>(capacity);
-        self.buffered.register(&drain);
+        // R2708 (item 785) — REGISTERED ON THE KERNEL, not on this handle. The
+        // drive loop holds `SessionLinkActions` and nothing else that means
+        // "this session", so this is the one place a registration can be made
+        // that the loop can find on its own. Registering on the handle is what
+        // made delivery depend on the host wiring a stage.
+        self.transport.core.iteration_work.register(&drain);
         // The callback STAGES and returns; it never waits, because it is on the
         // drive loop. `drain` is moved in so the subscription owns its drain and
         // the registry's weak handle dies with the subscriber.
@@ -4758,13 +4757,13 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
             let _keepalive = &drain;
             buffered::stage_into(&stage, project(sample));
         })?;
-        // R2707 (item 783) — THE THIRD VALUE IS THE OBLIGATION, and it is
-        // `#[must_use]`. Before it, "this subscription delivers only while the
-        // loop awaits a drain" lived in a `log::error!` that fires after the
-        // fact; a hosted lane went red with that sentence naming the cause
-        // exactly, which is what a diagnostic can do and a mechanism cannot
-        // leave undone.
-        Ok((subscriber, rx, self.buffered.stage()))
+        // R2708 (item 785) — the third value is no longer an OBLIGATION, and
+        // saying so is the point: this session's drains now hang off the kernel
+        // and `drive_session_until_terminal*` awaits them every iteration, so a
+        // host that wires nothing is correct. It stays as a HANDLE for the one
+        // case that remains — an embedder driving through a loop of its own,
+        // which wz's entries are not.
+        Ok((subscriber, rx, self.transport.core.iteration_work.stage()))
     }
 
     /// R2703 — move every buffered subscription's staged samples into its
@@ -4772,8 +4771,21 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
     /// iteration; it is the only place a slow consumer can stop this session.
     ///
     /// A session with no buffered subscription walks an empty vector.
-    pub async fn drain_buffered(&self) {
-        self.buffered.drain_all().await;
+    ///
+    /// R2708 (item 785) — `drive_session_until_terminal*` now awaits this on
+    /// every iteration WITHOUT being asked, because the registry hangs off the
+    /// kernel the loop already holds. It stays public for an embedder driving
+    /// through a loop of its own; calling it from a `LoopStages::after_dispatch`
+    /// on top of one of wz's entries is harmless and redundant — the second
+    /// walk finds an empty registry.
+    pub async fn drain_buffered(&self)
+    where
+        <R as SessionRuntime>::IterationWork: buffered::BufferedWork,
+    {
+        // Through the STAGE rather than the registry's inherent `drain_all`:
+        // that keeps the trait's surface synchronous, so no future has to be
+        // nameable by a profile that has no executor.
+        self.transport.core.iteration_work.stage().drain().await;
     }
 
     pub fn declare_subscriber(

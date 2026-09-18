@@ -790,15 +790,15 @@ round_fed_gates=(
     "hook_gate_boundary_gate.py --check"
     "hook_graded_surface_gate.py --selftest"
     "hook_graded_surface_gate.py --check"
-    # R2707 (open-debt item 783) — a buffered subscription's DRAIN is wired.
-    # The type says so first (`BufferedDrainStage` is `#[must_use]`, which this
-    # workspace's `-D warnings` makes an error); this catches the escape the
-    # type cannot see, which is binding the obligation to `_`. Its own
-    # `--selftest` drives a wired crate, an unwired one, a discarded one, and an
-    # EMPTY population -- that last because a scan finding no caller has lost
-    # its subject rather than passed.
-    "buffered_drain_wiring_gate.py --selftest"
-    "buffered_drain_wiring_gate.py"
+    # R2707's `buffered_drain_wiring_gate.py` STOOD HERE and R2708 removed it,
+    # which is recorded rather than done quietly. It checked that a crate
+    # declaring a buffered subscription also reached a drain, because delivery
+    # depended on the host wiring one. R2708 moved those drains onto the kernel
+    # the drive loop already holds, so the loop awaits them unasked and a caller
+    # that wires nothing is correct -- the gate's subject is gone. It proved so
+    # itself: R2708's own witness, which drives the ordinary entry and discards
+    # the handle on purpose, is exactly the shape that gate refused. A check
+    # that refuses correct code is worse than no check.
     "job_budget_binding.py"
     "unwired_lane_lint.py"
     # R2659 — the link BEFORE `unwired_lane_lint`'s. That one checks lane ->

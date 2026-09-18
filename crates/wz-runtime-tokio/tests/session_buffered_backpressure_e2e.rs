@@ -40,9 +40,10 @@ use wz_runtime_tokio::session_fsm_unicast::{
     SessionFsmUnicastEvent as E, SessionFsmUnicastPolicy, SessionFsmUnicastState as S,
 };
 use wz_runtime_tokio::session_glue::{
-    drive_session_until_terminal_with_extra_deadline, new_session_actions, new_session_engine,
-    BoxedLinkDriver, DriverLoopOutcome, ExtraDeadline, IterationEvent, KeepAliveCheckOutcome,
-    LoopStages, SessionActionsBinding, SessionLinkActions, SessionTimeouts,
+    drive_session_until_terminal, drive_session_until_terminal_with_extra_deadline,
+    new_session_actions, new_session_engine, BoxedLinkDriver, DriverLoopOutcome, ExtraDeadline,
+    IterationEvent, KeepAliveCheckOutcome, LoopStages, SessionActionsBinding, SessionLinkActions,
+    SessionTimeouts,
 };
 use wz_runtime_tokio::{LinkEvent, RxFrame};
 use wz_runtime_tokio_test_support::{
@@ -314,5 +315,94 @@ async fn a_parked_drain_does_not_starve_this_sessions_keepalive() {
          keepalive -- got {count}. Zero means the park starved the session it \
          was applying backpressure for, trading a lost sample for a lost \
          session."
+    );
+}
+
+/// R2708 (open-debt item 785) — THE HOST WIRES NOTHING AND THE BURST STILL
+/// ARRIVES.
+///
+/// # What this is the witness for
+///
+/// `the_drive_loop_waits_for_a_lagging_buffered_consumer` proves the WAIT
+/// happens, through `drive_session_until_terminal_with_extra_deadline` and a
+/// hand-written `LoopStages::after_dispatch`. That is the shape 19 of 308 drive
+/// call sites take. The other 289 use `drive_session_until_terminal`, which had
+/// no stage to give — so a buffered subscription declared by a host that drives
+/// the ordinary way staged its samples and stopped, and the only thing that
+/// said so was a `log::error!` after the fact. R2705 paid a hosted red for
+/// exactly that, and R2707 could only make forgetting LOUD.
+///
+/// This test drives the ordinary way and wires NOTHING. The session's drains
+/// now hang off the kernel the loop already holds, so the loop reaches them
+/// without being asked.
+///
+/// # Why it is a discriminator and not a race
+///
+/// The same mechanism as its sibling: single-threaded, with the reader held
+/// back until the queue must be full. `CAPACITY` samples fill it; the sample
+/// after that can only arrive if the loop WAITED for room. The hold-back is a
+/// sleep rather than a drain-entry count because this host has no stage to
+/// count in — which is the whole point of the test.
+#[tokio::test]
+async fn a_host_that_wires_no_stage_still_delivers_under_backpressure() {
+    let outbound: Arc<dyn BoxedLinkDriver + Send + Sync> = Arc::new(NoopOutboundDriver::default());
+    let actions: Arc<SessionLinkActions> =
+        new_session_actions(outbound, fixture_session_init_params(), TokioTime::new());
+    let mut engine = new_session_engine(&actions);
+    engine.initialize();
+    established(&mut engine);
+
+    let observer = Arc::new(Mutex::new(ApplicationLayerObserver::new()));
+    let session = TokioSession::new(actions.clone(), observer, Arc::new(TokioTime::new()));
+    // ⚠ The third value is DROPPED here, deliberately: this test's whole claim
+    // is that a host which does nothing with it is still correct.
+    let (_subscriber, mut rx, _) = session
+        .declare_subscriber_buffered(
+            "demo/**",
+            SubscribeOptions::default(),
+            CAPACITY,
+            |sample: &dyn wz_session_core::sink::SampleView| sample.payload().to_vec(),
+        )
+        .expect("buffered subscriber declares");
+
+    let reader = tokio::spawn(async move {
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        let mut got: Vec<Vec<u8>> = Vec::new();
+        while got.len() < BURST {
+            match tokio::time::timeout(std::time::Duration::from_secs(5), rx.recv()).await {
+                Ok(Some(item)) => got.push(item),
+                Ok(None) | Err(_) => break,
+            }
+            tokio::task::yield_now().await;
+        }
+        got
+    });
+
+    let events: Vec<LinkEvent> = burst_of_frames()
+        .into_iter()
+        .map(|wire| LinkEvent::Rx(RxFrame::new(wire)))
+        .collect();
+    let mut driver = QueueDriver::with(events);
+    let clock = TokioTime::new();
+    let session_dispatch = session.clone();
+    // THE ORDINARY ENTRY, with no stages argument at all.
+    let _ = drive_session_until_terminal(
+        &mut driver,
+        &actions,
+        &mut engine,
+        Some(BURST),
+        &clock,
+        &SessionTimeouts::spec_defaults(),
+        move |event| session_dispatch.dispatch_iteration_event(event),
+    )
+    .await;
+
+    let got = reader.await.expect("reader task panicked");
+    assert_eq!(
+        got,
+        (0..BURST).map(|i| vec![i as u8]).collect::<Vec<_>>(),
+        "every sample of a {BURST}-sample burst must reach a lagging consumer \
+         even though this host wired no drain stage: the session's own work is \
+         the loop's to do"
     );
 }

@@ -207,37 +207,35 @@ impl<I: Send + 'static> BufferedDrain for BufferedStage<I> {
     }
 }
 
-/// R2707 (open-debt item 783) — THE OBLIGATION A BUFFERED SUBSCRIPTION COMES
-/// WITH, as a value rather than as a sentence in a log.
+/// R2708 (open-debt item 785) — A HANDLE TO THIS SESSION'S DRAIN, for an
+/// embedder that drives a loop of its own.
 ///
-/// # What this is for
+/// # What it is NOT any more
 ///
-/// A buffered subscription delivers straight from the callback while its
-/// consumer keeps up (`BufferedStage::stage`'s fast path — a code span rather
-/// than a link, because that item is private to this module). The moment the
-/// consumer does NOT, the sample is staged, and staged samples move only when
-/// the drive loop awaits a drain. Until this type existed the only thing
-/// holding that invariant was a `log::error!` one level down — and that
-/// sentence named the cause EXACTLY while a hosted lane went red over it, which
-/// is the measurement that says a diagnostic is not a mechanism.
+/// R2707 introduced this as an OBLIGATION: a buffered subscription's samples
+/// moved only while the drive loop awaited it, so the declaration handed the
+/// duty back as a `#[must_use]` value. That was the honest repair available at
+/// the time, because the loop had no way to reach a session's drains — it never
+/// holds a `Session`, and its one route to one (`on_event`) is synchronous.
 ///
-/// So the declaration hands the obligation back. Dropping it is a
-/// `#[must_use]`, which this workspace compiles as an error; ignoring it takes
-/// an explicit `_`, which is the difference between forgetting and deciding.
+/// R2708 removed the reason. The drains now hang off
+/// `SessionRuntime::IterationWork` on the kernel the loop already holds, so
+/// `drive_session_until_terminal*` awaits them unasked. A host that drops this
+/// value is correct.
 ///
-/// # One stage covers the session
+/// # What it is still for
 ///
-/// It drains EVERY buffered subscription of the session that produced it, not
-/// just the one whose declaration returned it: the registry is per-session and
-/// `Session::drain_buffered` walks all of it.
-/// A host with three buffered subscriptions therefore wires one stage, and
-/// wiring the second changes nothing — which is why the gate over this checks
-/// that a caller wires SOMETHING rather than counting.
-#[must_use = "a buffered subscription's samples move only while the drive loop \
-              awaits this stage; wire it as `LoopStages::after_dispatch` (or \
-              call `Session::drain_buffered` there). Dropping it leaves a \
-              subscription that answers healthily and stalls the moment its \
-              consumer falls behind"]
+/// Reaching the same drain WITHOUT holding the session — an embedder driving
+/// through a loop wz does not own, which is the one case the kernel route does
+/// not cover. It drains EVERY buffered subscription of its session, not just
+/// the one whose declaration returned it, so one handle is the whole session.
+// R2708 (item 785) — THE `#[must_use]` IS GONE, and its removal is the point
+// rather than a tidy-up. R2707 put one here saying "drop this and your
+// subscription stalls", which was true then and is FALSE now: the loop awaits
+// this session's drains whether or not anybody holds this value. A lint that
+// states a consequence which no longer follows is worse than no lint — it
+// teaches a reader something untrue about the code it sits on, which is the
+// class this workspace files as a rule with no subject.
 #[derive(Clone)]
 pub struct BufferedDrainStage {
     registry: BufferedRegistry,
@@ -267,27 +265,59 @@ impl core::fmt::Debug for BufferedDrainStage {
 /// unregistering on `Drop` — would make the subscriber handle's teardown depend
 /// on reaching the session, which is exactly the coupling the `Subscriber`
 /// retraction closure was built to avoid.
+/// R2708 (open-debt item 785) — what a profile's
+/// [`SessionRuntime::IterationWork`](wz_session_core::link::SessionRuntime::IterationWork)
+/// must offer a generic-`R` session.
+///
+/// The kernel bounds that associated type by `Default` alone, because creating
+/// an empty one is its whole interaction with it. `Session<R, ..>` is generic
+/// too, so it needs a little more — and exactly a little: REGISTER a drain, and
+/// hand out a stage. Both are SYNCHRONOUS, which is why no future appears in
+/// this trait and none has to cross into a profile that has no executor. The
+/// awaiting is done by the tokio loop, which knows the concrete type and calls
+/// the inherent `drain_all` directly.
+pub trait BufferedWork {
+    /// Take a handle to one subscription's drain.
+    ///
+    /// ⚠ The argument is OPAQUE on purpose. What a drain is — a
+    /// `dyn BufferedDrain` returning a boxed future — is this crate's private
+    /// vocabulary, and a public trait naming it would widen the API to say
+    /// something no consumer can act on. [`RegisteredDrain`] carries it across
+    /// the trait boundary without spelling it.
+    fn register(&self, drain: &RegisteredDrain);
+    /// A handle to this session's drain, for an embedder driving its own loop.
+    fn stage(&self) -> BufferedDrainStage;
+}
+
+/// One buffered subscription's drain, opaque. See [`BufferedWork::register`].
+pub struct RegisteredDrain(Arc<dyn BufferedDrain>);
+
+/// R2708 (item 785) — PUBLIC because it is now this profile's
+/// `SessionRuntime::IterationWork`, which is an associated type on a public
+/// trait. Its methods stay `pub(crate)`: a consumer names the type only where
+/// the trait forces it to, and drives nothing through it.
 #[derive(Clone, Default)]
-pub(crate) struct BufferedRegistry {
+pub struct BufferedRegistry {
     drains: Arc<Mutex<Vec<Weak<dyn BufferedDrain>>>>,
 }
 
-impl BufferedRegistry {
-    /// The obligation this registry's session hands back on every buffered
-    /// declaration. See [`BufferedDrainStage`].
-    pub(crate) fn stage(&self) -> BufferedDrainStage {
+impl BufferedWork for BufferedRegistry {
+    /// A handle to this session's drain. See [`BufferedDrainStage`].
+    fn stage(&self) -> BufferedDrainStage {
         BufferedDrainStage {
             registry: self.clone(),
         }
     }
 
-    pub(crate) fn register(&self, drain: &Arc<dyn BufferedDrain>) {
+    fn register(&self, drain: &RegisteredDrain) {
         self.drains
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .push(Arc::downgrade(drain));
+            .push(Arc::downgrade(&drain.0));
     }
+}
 
+impl BufferedRegistry {
     /// Drain every live buffered subscription, awaiting capacity on each, and
     /// prune the entries whose subscription has been dropped.
     ///
@@ -319,11 +349,7 @@ impl BufferedRegistry {
 /// reach the full-buffer branch without publishing a thousand samples first.
 pub(crate) fn buffered_pair<I: Send + 'static>(
     capacity: usize,
-) -> (
-    Arc<BufferedStage<I>>,
-    Arc<dyn BufferedDrain>,
-    mpsc::Receiver<I>,
-) {
+) -> (Arc<BufferedStage<I>>, RegisteredDrain, mpsc::Receiver<I>) {
     // Fail fast and NAME the contract. `mpsc::channel(0)` panics from inside
     // tokio with a message that mentions nothing in this tree, so a caller who
     // passed a computed capacity would be told about a buffer rather than about
@@ -338,7 +364,7 @@ pub(crate) fn buffered_pair<I: Send + 'static>(
     let (tx, rx) = mpsc::channel(capacity);
     let stage = Arc::new(BufferedStage::new(tx, capacity));
     let drain: Arc<dyn BufferedDrain> = stage.clone();
-    (stage, drain, rx)
+    (stage, RegisteredDrain(drain), rx)
 }
 
 /// Stage one item through a shared handle — the body a subscriber callback

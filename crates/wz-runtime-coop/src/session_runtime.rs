@@ -67,6 +67,13 @@ impl<C: ClockSource> SessionRuntime for CoopRuntime<C> {
     // rsa-AP-only and always N=1, so this is only ever a refcount-1 pointer here.
     type Shared<U> = Rc<U>;
 
+    // R2708 (open-debt item 785) — the MCU profile owes its loop NOTHING each
+    // iteration, and `()` says so at zero cost: no field, no branch, no future
+    // in a profile that has no executor to run one. That is the whole reason
+    // the kernel carries this as an associated type rather than as something it
+    // could name itself.
+    type IterationWork = ();
+
     fn share<U>(value: U) -> Self::Shared<U> {
         Rc::new(value)
     }

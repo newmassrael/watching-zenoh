@@ -94,12 +94,13 @@ pub async fn stream<W: AsyncWriteExt + Unpin>(session: &TokioSession, keyexpr: S
     // discarding — matching what `writer_queue` already says about the TX side
     // ("the peer's backpressure IS the flow control") and what upstream's REST
     // plugin gets from its blocking FIFO handler.
-    // R2707 (item 783) — the third value is the DRAIN OBLIGATION, and this
-    // bridge is a passenger on a loop it does not own: the embedder that drives
-    // the session wires it (or calls `Session::drain_buffered`), which the two
-    // e2e lanes over this path do. Named `_drain_stage` rather than `_` so the
-    // obligation is visible where a reader of this function looks for it.
-    let (_subscriber, mut rx, _drain_stage) = match session.declare_subscriber_buffered(
+    // R2708 (item 785) — the third value is a HANDLE, not an obligation, and
+    // this bridge drops it: the session's drains hang off the kernel and the
+    // drive loop awaits them unasked, so a passenger on somebody else's loop
+    // owes nothing here. R2707 named it `_drain_stage` because it WAS a duty
+    // then; keeping that name would leave a reader looking for a duty that is
+    // no longer theirs.
+    let (_subscriber, mut rx, _) = match session.declare_subscriber_buffered(
         keyexpr,
         SubscribeOptions::default(),
         CHANNEL_CAP,

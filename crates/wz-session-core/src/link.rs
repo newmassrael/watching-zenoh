@@ -634,6 +634,43 @@ pub trait SessionRuntime: Runtime + Sized {
     /// [`add_link`]: crate::session_actions::SessionCore
     type Shared<U>: Clone + core::ops::Deref<Target = U>;
 
+    /// R2708 (open-debt item 785) — WORK THIS SESSION OWES ITS DRIVE LOOP EVERY
+    /// ITERATION, as a per-profile opaque value this kernel never looks inside.
+    ///
+    /// # The defect this closes, and why it lands HERE
+    ///
+    /// A buffered subscription applies backpressure by making the loop WAIT,
+    /// because waiting is what stops the loop reading the link, which is what
+    /// closes the peer's window. Until this existed, the only way to reach that
+    /// await was `LoopStages::after_dispatch`, supplied by the HOST — and
+    /// `drive_session_until_terminal`, the entry 289 of 308 call sites use,
+    /// defaults it to a no-op. So delivery under backpressure depended on
+    /// whether an embedder had wired something, and a hosted lane went red over
+    /// exactly that (R2705).
+    ///
+    /// The repair had to put the knowledge where the DECISION is. The loop
+    /// decides whether to read; the only thing it holds that means "this
+    /// session" is [`SessionLinkActions`], whose `core` is this kernel. So the
+    /// session's per-iteration work hangs here, and the loop reaches it without
+    /// the host's help.
+    ///
+    /// [`SessionLinkActions`]: crate::session_actions::SessionLinkActions
+    ///
+    /// # Why an ASSOCIATED TYPE and not a field this crate can name
+    ///
+    /// Because this crate must not learn what a future is. The work the tokio
+    /// profile owes its loop is an `async` drain; `wz-session-core` is `no_std`
+    /// and carries ZERO boxed futures today, and the lwIP MCU profile — which
+    /// has no executor at all — links it. An associated type keeps the shape
+    /// exactly where it belongs: each profile names its own, this crate names
+    /// none, and the MCU binds `()` and pays nothing (a zero-sized field).
+    ///
+    /// That is not a new idea here; it is the idiom [`LinkSink`](Self::LinkSink)
+    /// and [`Shared`](Self::Shared) already are. `Default` is the only bound
+    /// because the kernel's one interaction with the value is CREATING an empty
+    /// one; everything else is the owning profile's business.
+    type IterationWork: Default;
+
     /// Wrap an owned value in the per-profile [`Shared`](Self::Shared) pointer
     /// (tokio `Arc::new`, lwIP `Rc::new`). Generic-`R` code (the
     /// [`SessionLinkActions`] constructor + the multilink join) shares a
