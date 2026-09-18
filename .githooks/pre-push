@@ -1937,17 +1937,53 @@ fi
 # It reuses `count_guard_lint`'s parser rather than carrying a second one, for
 # the reason gate 4 reuses the lane: two readings of one table drift the day
 # either moves, which is this gate's own subject one level up.
-echo "pre-push: checking the count guards this push's test set moves (gate 4b)"
-if ! BX="${BX:-}" python3 scripts/lib/guarded_count_gate.py \
-    --range "$diff_base..$local_sha"; then
-    echo "" >&2
-    echo "pre-push: [gate 4b] a run-ci count guard disagrees with the tests this push" >&2
-    echo "          leaves behind. Move the constant IN THIS COMMIT, to what" >&2
-    echo "          the command PRINTED — the module's other cases are" >&2
-    echo "          \`#[cfg]\`-gated, so counting the diff has produced the" >&2
-    echo "          wrong number before." >&2
-    echo "          Bypass with \`git push --no-verify\` only for genuine hotfixes." >&2
-    exit 1
+# ⚠⚠ OFF BY DEFAULT SINCE R2709, ON THE OWNER'S DECISION OF 2026-09-18, and the
+# reason is COST rather than a change of mind about the class above.
+#
+# This gate RUNS the guards it selects, and each one is a cargo build at a
+# feature combination the warm target directory does not hold. MEASURED on
+# R2708's own push: 74 guards reached, and the hook sat in this stage for ~25
+# minutes -- an order of magnitude more than everything else it does (gates 5,
+# 6 and 7 are ~1 minute each, gate 3 ~30s, gate 2h ~105s). The selection also
+# grows with the BLAST RADIUS of a change rather than with its size: R2708
+# edited one associated type on a public trait and went 42 -> 74.
+#
+# That is a CI shape inside a hook whose own policy, stated in `CLAUDE.md`,
+# is "FAST local gate, NOT a full CI mirror" with "a red hosted run is the
+# accepted cost of fast pushes".
+#
+# ⚠ WHAT IS AND IS NOT LOST. Hosted CI does not merely duplicate this check --
+# it IS the check: every count guard is an assertion inside a `run-ci.sh` lane,
+# and `.github/workflows/ci.yml` records that hosted "is now the only place the
+# full lane set runs". A wrong count therefore reds the lane that owns it by
+# construction. What this gate bought was EARLINESS: the wrong number is caught
+# at push instead of one hosted run later. That latency is the trade, and it is
+# the same one the hook's policy already makes for the feature matrix, C2
+# clippy, Layers B/B2 and every interop lane.
+#
+# ▶ ON DEMAND, and this is the shape a round that ADDS TESTS should use:
+#     WZ_PREPUSH_COUNT_GUARD=1 git push origin main
+#   or, better, run it while the work is still warm rather than at the push:
+#     python3 scripts/lib/guarded_count_gate.py --range origin/main..HEAD
+if [[ -n "${WZ_PREPUSH_COUNT_GUARD:-}" ]]; then
+    echo "pre-push: checking the count guards this push's test set moves (gate 4b)"
+    if ! BX="${BX:-}" python3 scripts/lib/guarded_count_gate.py \
+        --range "$diff_base..$local_sha"; then
+        echo "" >&2
+        echo "pre-push: [gate 4b] a run-ci count guard disagrees with the tests this push" >&2
+        echo "          leaves behind. Move the constant IN THIS COMMIT, to what" >&2
+        echo "          the command PRINTED — the module's other cases are" >&2
+        echo "          \`#[cfg]\`-gated, so counting the diff has produced the" >&2
+        echo "          wrong number before." >&2
+        echo "          Bypass with \`git push --no-verify\` only for genuine hotfixes." >&2
+        exit 1
+    fi
+else
+    # PRINTED rather than silent: a stage that skips without saying so is
+    # indistinguishable from one that ran, which is the reporting defect this
+    # workspace files against its own gates.
+    echo "pre-push: [gate 4b] count guards DEFERRED to hosted CI (set" \
+        "WZ_PREPUSH_COUNT_GUARD=1 to run them here; ~25min on a wide push)"
 fi
 
 # ─── gate 6 — changed-crate REDUCED FEATURE COMBINATION (R311y821) ──
