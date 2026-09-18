@@ -460,8 +460,26 @@ def outside_code(blob: str) -> str:
     return "".join(parts[i] for i in range(0, len(parts), 2))
 
 
-def item_headers(text: str) -> tuple[dict[int, str], dict[int, str], list[int]]:
-    """`(live headers, archived headers, unbalanced item numbers)`.
+class Item(typing.NamedTuple):
+    """One register item, split at the boundary every axis reader uses.
+
+    `header` is the bold title span; `tail` is the rest of the item, from the
+    line after that span to the line the next item starts on. The split is
+    derived ONCE, here, because a rule that re-derived it would be measuring a
+    different boundary than `axes()` reads -- and "measure with the checker's
+    own instrument" is precisely the defect `stranded_findings` exists to
+    catch.
+    """
+
+    number: int
+    header: str
+    tail: str
+    archived: bool
+    unbalanced: bool
+
+
+def read_items(text: str) -> list[Item]:
+    """Every item in the register, in file order, header split from body.
 
     A header is the item's bold title span, joined into one string. It ends at
     the line where the `**` balance outside inline code first closes; a blank
@@ -485,25 +503,129 @@ def item_headers(text: str) -> tuple[dict[int, str], dict[int, str], list[int]]:
         if "</details>" in line:
             depth = max(0, depth - 1)
 
-    live: dict[int, str] = {}
-    archived: dict[int, str] = {}
-    unbalanced: list[int] = []
-    for i, number, fold in marks:
+    out: list[Item] = []
+    for idx, (i, number, fold) in enumerate(marks):
+        stop = marks[idx + 1][0] if idx + 1 < len(marks) else len(lines)
         got: list[str] = []
         closed = False
+        last = i
         for j in range(i, len(lines)):
             if j > i and (j in starts or not lines[j].strip()):
                 break
             got.append(lines[j].strip())
+            last = j
             if outside_code(" ".join(got)).count("**") >= 2 and (
                 outside_code(" ".join(got)).count("**") % 2 == 0
             ):
                 closed = True
                 break
-        if not closed:
-            unbalanced.append(number)
-        (archived if fold > 0 else live)[number] = " ".join(got)
+        out.append(
+            Item(
+                number=number,
+                header=" ".join(got),
+                tail="\n".join(lines[last + 1 : stop]),
+                archived=fold > 0,
+                unbalanced=not closed,
+            )
+        )
+    return out
+
+
+def item_headers(text: str) -> tuple[dict[int, str], dict[int, str], list[int]]:
+    """`(live headers, archived headers, unbalanced item numbers)`.
+
+    The shape every axis reader here already asks for, over `read_items`.
+    """
+    live: dict[int, str] = {}
+    archived: dict[int, str] = {}
+    unbalanced: list[int] = []
+    for item in read_items(text):
+        (archived if item.archived else live)[item.number] = item.header
+        if item.unbalanced:
+            unbalanced.append(item.number)
     return live, archived, sorted(set(unbalanced))
+
+
+class Headers(typing.NamedTuple):
+    """What the header boundary measured, as the line that prints it needs it."""
+
+    read: int  # items the register parsed to -- the population
+    carried: int  # of those, the ones annotating inside their title span
+    stranded: int  # of those, the ones whose run fell into the body
+
+
+def stranded_findings(text: str) -> tuple[list[str], Headers]:
+    """The runaway header's COMPLEMENT -- and no balance check can see it.
+
+    `item_headers` reports a title span that never closes, because then the
+    body would be read as the annotation run. The other direction closes the
+    span EARLY: a closing verdict written as ``- **N. CLOSED (R) -- ... 원래
+    제목:**`` re-uses the `**` that used to end the title, so the balance
+    stays EVEN while the `@from:` / `@rank:` run the title carried is left
+    below it, in the body, where no axis reader looks.
+
+    MEASURED when this was written: three items closed that way across two
+    rounds -- 783 and 784 (R2707), 785 (R2708) -- and all three were reported
+    by the frontier rule as "carries no `@from:`", a message that names the
+    WRONG repair: every one of them carried its token two lines further down.
+    The instrument said "never annotated" for "annotated, then cut out", and
+    the two want opposite edits.
+
+    It is also the frontier interlock's escape hatch. The rule that no item
+    BELOW `ranked_from` may carry a lineage is what stops a round raising the
+    frontier to dodge -- and it reads HEADERS. An edit that moves a token out
+    of a header without deleting it therefore satisfies that rule while the
+    lineage is still written down, which is the one move the interlock claims
+    the data cannot admit.
+
+    A valued token is the discriminator, as everywhere else here: prose that
+    discusses the axis writes a bare ``@from:``, which `FROM_RE` does not
+    match, so a token with a VALUE in a body is an annotation that lost its
+    home -- or a quotation that must be written the way prose writes it. The
+    finding names both repairs rather than guessing which was meant.
+    """
+    items = read_items(text)
+    findings: list[str] = []
+    carried = 0
+    stranded = 0
+
+    if not items:
+        # Rule (5) / the operator's standing rule: a population of zero must
+        # FAIL. Every rule below this one iterates the items, so a reader that
+        # parsed none of them reports all of them satisfied -- green because it
+        # found nothing to judge, which is the one green that means nothing.
+        findings.append(
+            "the register parsed to ZERO items, so every rule below iterates an "
+            "empty population and reports satisfied. A reader that finds no "
+            "population has not measured the register -- check `ITEM_FORMS` "
+            "against how the file actually numbers its items"
+        )
+
+    for item in items:
+        head_from = FROM_RE.search(item.header)
+        head_rank = RANK_RE.search(outside_code(item.header))
+        if head_from is not None:
+            carried += 1
+        for token, in_header, in_tail in (
+            ("@from:", head_from, FROM_RE.search(item.tail)),
+            ("@rank:", head_rank, RANK_RE.search(outside_code(item.tail))),
+        ):
+            if in_header is not None or in_tail is None:
+                continue
+            stranded += 1
+            findings.append(
+                f"item {item.number}'s title span carries no `{token}` and its BODY "
+                f"carries `{in_tail.group(0)}` -- no axis reader looks there, so the "
+                f"item reads as unannotated while its annotation is written down two "
+                f"lines below. A closing verdict that closes the bold early "
+                f"(`... 원래 제목:**`) cuts the header exactly here and leaves the "
+                f"balance EVEN, which is why the runaway-header rule cannot see it. "
+                f"Move the run back INSIDE the title span -- or, if the body is "
+                f"quoting another item's annotation, write the token bare "
+                f"(`{token}` with no value), which is how prose says it here"
+            )
+
+    return findings, Headers(len(items), carried, stranded)
 
 
 class Axis(typing.NamedTuple):
@@ -723,7 +845,10 @@ def unclosed_folds(text: str) -> list[int]:
 #: parent-only reader gets wrong. 17's stamp is the clock handle: raising it
 #: moves `now` without touching the hold's start, which is what drives the
 #: released / boundary / still-held arms apart.
-SELFTEST_ROSTER = """\
+#: R2712 -- the item block is a FIELD so an arm can empty it. A reader whose
+#: population is zero reports every rule satisfied, and the only fixture that
+#: can execute that arm is one with no items in it.
+SELFTEST_ITEMS = """\
 - **10. an open analyzer item.**
 - **11. another open one.**
 - **12. ✅ CLOSED -- a discharged item.**
@@ -741,7 +866,10 @@ SELFTEST_ROSTER = """\
 - **17. ✅ CLOSED (R{r17}) -- a title quoting `wz_surfaces(char **buf)` in code.**
 - **18. ✅ CLOSED{s18} -- a root at the ranking frontier. `@from: none` · ordinary**
 - **19. a child of 18. `@from: {p19}` · {k19}{r19}**
-- **20. {v20}a grandchild of 19. `@from: 19` · ordinary{d20x}**
+- **20. {v20}a grandchild of 19. `@from: 19` · ordinary{d20x}**"""
+
+SELFTEST_ROSTER = """\
+{items}
 {extra}
 {begin}
 plane:analyzer = 10 11
@@ -879,6 +1007,61 @@ def selftest() -> int:
             {"priority": "", "extra": "- **21. `@from: none` · ordinary, and no closing mark."},
             1,
             "bold title span never closes",
+        ),
+        # R2712 -- and the COMPLEMENT, which the balance rule above cannot see
+        # because closing the span early keeps the balance even. The two arms
+        # are a control pair on one shape: the only difference between them is
+        # the `**` after `원래 제목:`.
+        (
+            "an annotation run left OUTSIDE the header fails",
+            {
+                "priority": "",
+                "extra": (
+                    "- **21. ✅ CLOSED (R2001) -- a verdict written above. 원래 제목:** "
+                    "the wording this item had.\n  `@from: none` · ordinary**"
+                ),
+            },
+            1,
+            "carries no `@from:` and its BODY carries",
+        ),
+        (
+            "the same item with the bold closed at the END passes",
+            {
+                "priority": "",
+                "extra": (
+                    "- **21. ✅ CLOSED (R2001) -- a verdict written above. 원래 제목: "
+                    "the wording this item had.\n  `@from: none` · ordinary**"
+                ),
+            },
+            0,
+            "0 left a run in the body",
+        ),
+        # ...and the direction that makes this structural rather than a better
+        # message. Item 9 sits BELOW the frontier, where a lineage is REFUSED
+        # -- that refusal is what stops a round raising `ranked_from` to dodge.
+        # It reads HEADERS, so cutting the header leaves the lineage written
+        # down and the rule satisfied. MEASURED: this fixture exits 0 under the
+        # reader this arm was added to.
+        (
+            "a lineage hidden in the BODY below the frontier fails",
+            {
+                "priority": "",
+                "extra": (
+                    "- **9. ✅ CLOSED (R2001) -- a verdict written above. 원래 제목:** "
+                    "the wording this item had.\n  `@from: none` · ordinary**"
+                ),
+            },
+            1,
+            "item 9's title span carries no `@from:`",
+        ),
+        # A population of zero must FAIL. Every rule in this reader iterates
+        # the items, so a reader that parses none of them reports all of them
+        # satisfied -- the one green that means nothing was measured.
+        (
+            "a register that parses to ZERO items fails",
+            {"priority": "", "items": ""},
+            1,
+            "parsed to ZERO items",
         ),
         # The lines rules (11) and (14) are told to read. Printed, not exiting:
         # see the module doc on why a ranking must not move the exit code.
@@ -1162,6 +1345,26 @@ def selftest() -> int:
         body = SELFTEST_ROSTER.format(
             begin=BEGIN,
             end=END,
+            # Item 20 is the fixture's DEFERRED grandchild. `v20` turns it into
+            # a CLOSED one so R2314's fix -- both deferral rules are about OPEN
+            # work -- has an arm; `d20x` carries the deferral clause so an arm
+            # can drop it.
+            # Item 19's ranking is a FIELD so an arm can quiet the CRITICAL
+            # line: the RANK claim stands only when every other axis is silent,
+            # and a fixture that always has a critical take can never reach
+            # that state.
+            items=fields.get("items", SELFTEST_ITEMS).format(
+                v20=fields.get("v20", ""),
+                d20x=fields.get(
+                    "d20x", " ·\n  ⚠ **deferred**(사슬 깊이 " + fields.get("d20", "2") + ")"
+                ),
+                p19=fields.get("p19", "18"),
+                k19=fields.get("k19", "critical"),
+                r17=fields.get("r17", "2000"),
+                s18=fields.get("s18", " (R2000)"),
+                r13=fields.get("r13", ""),
+                r19=fields.get("r19", ""),
+            ),
             priority=fields.get("priority", ""),
             swept=fields.get("swept", "30"),
             extra=fields.get("extra", ""),
@@ -1173,25 +1376,6 @@ def selftest() -> int:
             # value every other arm is judged at -- derived from the fixture,
             # not chosen, or the stamp axis would red under all of them.
             unstamped_baseline=fields.get("unstamped_baseline", "3"),
-            p19=fields.get("p19", "18"),
-            # Item 20 is the fixture's DEFERRED grandchild. `v20` turns it into
-            # a CLOSED one so R2314's fix -- both deferral rules are about OPEN
-            # work -- has an arm; `d20x` carries the deferral clause so an arm
-            # can drop it.
-            # Item 19's ranking is a FIELD so an arm can quiet the CRITICAL
-            # line: the RANK claim stands only when every other axis is silent,
-            # and a fixture that always has a critical take can never reach
-            # that state.
-            k19=fields.get("k19", "critical"),
-            v20=fields.get("v20", ""),
-            d20x=fields.get(
-                "d20x", " ·\n  ⚠ **deferred**(사슬 깊이 " + fields.get("d20", "2") + ")"
-            ),
-            d20=fields.get("d20", "2"),
-            r17=fields.get("r17", "2000"),
-            s18=fields.get("s18", " (R2000)"),
-            r13=fields.get("r13", ""),
-            r19=fields.get("r19", ""),
         )
         with tempfile.NamedTemporaryFile("w", suffix=".md", delete=False) as fh:
             fh.write(body)
@@ -1713,7 +1897,17 @@ def main() -> int:
         # the register; both are a predicate re-typed instead of run.
         opened = sorted(n for n, title in found.items() if is_open(title))
         closed = sorted(n for n in found if n not in set(opened))
-        for line in verdict_findings(live):
+        # R2712 -- register DAMAGE belongs in this mode too, for the same
+        # reason the verdict vocabulary does: the `debt-ranking` line below is
+        # derived from headers, so an item whose run was cut out of its header
+        # shifts `unranked` here without anything saying so.
+        strand_lines, heads_seen = stranded_findings(text)
+        print(
+            f"  debt-plane-census: HEADERS -- {heads_seen.read} item(s) read; "
+            f"{heads_seen.carried} annotate inside the title span, "
+            f"{heads_seen.stranded} left a run in the body"
+        )
+        for line in verdict_findings(live) + strand_lines:
             print(f"  debt-plane-census: FAIL -- {line}", file=sys.stderr)
         print(
             f"  debt-register: open = {len(opened)}  closed = {len(closed)}  "
@@ -1736,13 +1930,15 @@ def main() -> int:
             f"{len(hold.held)} held / {len(hold.released)} released"
             f"{' / ' + str(len(heads)) + ' undatable' if heads else ''}"
         )
-        return 1 if verdict_findings(live) else 0
+        return 1 if verdict_findings(live) or strand_lines else 0
 
     rst = roster(text)
     target, owner, swept, priority = rst.target, rst.owner, rst.swept, rst.priority
 
     findings: list[str] = []
     findings.extend(verdict_findings(live))
+    strand_lines, heads_seen = stranded_findings(text)
+    findings.extend(strand_lines)
     axis_lines, rank = axis_findings(text, found, rst)
     findings.extend(axis_lines)
     claim_lines, store_line = claim_findings()
@@ -1810,6 +2006,15 @@ def main() -> int:
                 f"priority item {n} is held for an OWNER DECISION; a queue cannot "
                 f"order a round to take work nobody has decided to do"
             )
+
+    # PRINTED above the verdict, on a red run as well as a green one. The
+    # population is the signal -- an exit code cannot tell "nothing is wrong"
+    # apart from "nothing was read", and this line can.
+    print(
+        f"  debt-plane-census: HEADERS -- {heads_seen.read} item(s) read; "
+        f"{heads_seen.carried} annotate inside the title span, "
+        f"{heads_seen.stranded} left a run in the body"
+    )
 
     if findings:
         print("debt-plane-census: FAIL")
