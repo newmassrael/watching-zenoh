@@ -12385,3 +12385,147 @@ fn session_egress_acl_is_inert_with_no_policy_installed() {
         "an empty chain admits -- zenoh's AclConfig.enabled = false"
     );
 }
+
+/// R2702 — the INGRESS half: a deny rule drops the governed message OUT of the
+/// inbound batch, before the observer fans it out.
+///
+/// The batch is the outcome's own `Vec`, so the drop is a `retain` and nothing
+/// is cloned — which is the whole reason this is expressible at the loop and
+/// nowhere after it.
+///
+/// ANTI-VACUITY, again as a pair: the ungoverned message SURVIVES the same call
+/// under the same policy, so a decorator that emptied every batch fails here.
+#[cfg(feature = "access-acl")]
+#[test]
+fn session_ingress_acl_drops_a_governed_message_from_the_batch() {
+    use crate::interceptor::InterceptorSink;
+
+    let (session, _driver) = build_session();
+    *session
+        .actions()
+        .remote_peer_zid
+        .lock()
+        .expect("remote_peer_zid poisoned in test fixture") = Some(vec![0x5a; 16]);
+    session.set_interceptors(acl_ingress_deny_admin());
+
+    let mut outcome = two_message_inbound_batch();
+    session.apply_acl_ingress(&mut outcome);
+
+    let surviving = batch_keyexprs(&outcome);
+    assert_eq!(
+        surviving,
+        vec!["demo/data".to_owned()],
+        "the governed message is dropped and the ungoverned one survives"
+    );
+}
+
+/// R2702 — an EGRESS rule does NOT govern ingress, which is what says the two
+/// chains are two SLOTS rather than one shared with a label.
+///
+/// This is the discriminator for the design decision, not a restatement of the
+/// test above: `build_chain` binds each ACL enforcer to its flow, so a session
+/// that pointed its ingress decorator at the egress chain would drop the same
+/// message here. Under the identical rule with `flow: Egress`, both messages
+/// must survive.
+#[cfg(feature = "access-acl")]
+#[test]
+fn session_ingress_acl_does_not_apply_an_egress_rule() {
+    use crate::interceptor::{InterceptorConfig, InterceptorSink};
+    use wz_access_control::{
+        AclConfig, AclFlow, AclMessage, AclPolicy, AclRule, Permission, SubjectSelector,
+    };
+
+    let (session, _driver) = build_session();
+    *session
+        .actions()
+        .remote_peer_zid
+        .lock()
+        .expect("remote_peer_zid poisoned in test fixture") = Some(vec![0x5a; 16]);
+    session.set_interceptors(
+        InterceptorConfig::default().with_acl(AclPolicy::new(AclConfig {
+            default_permission: Permission::Allow,
+            rules: vec![AclRule {
+                subject: SubjectSelector::Any,
+                key_exprs: vec!["admin/**".to_owned()],
+                messages: vec![AclMessage::Put],
+                // The ONE difference from the test above.
+                flow: AclFlow::Egress,
+                permission: Permission::Deny,
+                link_protocols: Vec::new(),
+                interfaces: Vec::new(),
+                usernames: Vec::new(),
+                cert_common_names: Vec::new(),
+            }],
+        })),
+    );
+
+    let mut outcome = two_message_inbound_batch();
+    session.apply_acl_ingress(&mut outcome);
+
+    assert_eq!(
+        batch_keyexprs(&outcome),
+        vec!["admin/secret".to_owned(), "demo/data".to_owned()],
+        "an egress-flow rule governs no inbound message"
+    );
+}
+
+/// An INGRESS-flow deny on `admin/**` Put — the fixture the two ingress tests
+/// differ from by exactly one field.
+#[cfg(feature = "access-acl")]
+fn acl_ingress_deny_admin() -> crate::interceptor::InterceptorConfig {
+    use wz_access_control::{
+        AclConfig, AclFlow, AclMessage, AclPolicy, AclRule, Permission, SubjectSelector,
+    };
+    crate::interceptor::InterceptorConfig::default().with_acl(AclPolicy::new(AclConfig {
+        default_permission: Permission::Allow,
+        rules: vec![AclRule {
+            subject: SubjectSelector::Any,
+            key_exprs: vec!["admin/**".to_owned()],
+            messages: vec![AclMessage::Put],
+            flow: AclFlow::Ingress,
+            permission: Permission::Deny,
+            link_protocols: Vec::new(),
+            interfaces: Vec::new(),
+            usernames: Vec::new(),
+            cert_common_names: Vec::new(),
+        }],
+    }))
+}
+
+/// One inbound `FramePayload` carrying a governed and an ungoverned Put, in
+/// that order, with LITERAL keyexprs so the batch needs no alias table.
+#[cfg(feature = "access-acl")]
+fn two_message_inbound_batch() -> wz_session_core::driver_loop::DriverLoopOutcome {
+    let put = |ke: &str| {
+        wz_session_core::network_message::NetworkMessage::Push(Box::new(
+            wz_session_core::push_build::build_push_literal(ke, b"x")
+                .expect("fixture Push is representable"),
+        ))
+    };
+    wz_session_core::driver_loop::DriverLoopOutcome::FramePayload {
+        priority: wz_session_core::qos::Priority::DEFAULT,
+        reliable: true,
+        sn: 0,
+        messages: vec![put("admin/secret"), put("demo/data")],
+        has_ext: false,
+        extensions: Vec::new(),
+    }
+}
+
+/// The keyexprs still in a batch, in order — read through the SAME resolver the
+/// enforcer uses, so the assertion cannot disagree with the verdict about which
+/// message it is looking at.
+#[cfg(feature = "access-acl")]
+fn batch_keyexprs(outcome: &wz_session_core::driver_loop::DriverLoopOutcome) -> Vec<String> {
+    let empty = hashbrown::HashMap::new();
+    match outcome {
+        wz_session_core::driver_loop::DriverLoopOutcome::FramePayload { messages, .. } => messages
+            .iter()
+            .map(|m| {
+                crate::interceptor::keyexpr::resolve_governed_keyexpr(m, &empty)
+                    .expect("fixture keyexprs are literal")
+            })
+            .collect(),
+        _ => panic!("fixture builds a FramePayload"),
+    }
+}

@@ -6963,6 +6963,13 @@ layer_c1ao_cargo_test_config_mutate_runtime() {
     # as loudly as one that enforced nothing.
     _runci_guarded_test "C1AO session egress acl 2" 2 \
         cargo test -p wz-runtime-tokio --no-default-features --features access-acl --lib session::tests::session_egress_acl --quiet || return 1
+    # The INGRESS half, on the same no-routing feature list. Two tests again and
+    # the second is the DISCRIMINATOR rather than a restatement: under an
+    # identical rule whose only difference is `flow: Egress`, nothing is dropped.
+    # Pointing this session's ingress decorator at its egress chain reds BOTH,
+    # in opposite directions, which is what says the two chains are two slots.
+    _runci_guarded_test "C1AO session ingress acl 2" 2 \
+        cargo test -p wz-runtime-tokio --no-default-features --features access-acl --lib session::tests::session_ingress_acl --quiet || return 1
     (cd crates \
         && cargo clippy -p wz-runtime-tokio --features config-mutate-runtime,access-acl --quiet -- -D warnings \
         && cargo clippy -p wz-runtime-tokio --no-default-features --features transport-unicast --quiet -- -D warnings)

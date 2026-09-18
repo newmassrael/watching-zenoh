@@ -728,13 +728,20 @@ where
     /// a `set_interceptors` had already replaced, which is the reconfigure that
     /// silently does nothing for exactly the handle that was already busy.
     ///
-    /// EGRESS only for now, and the asymmetry is named rather than implied: the
-    /// session OWNS an outbound message, so there is no borrow to negotiate,
-    /// while ingress arrives as a borrowed `DriverLoopOutcome` inside the drive
-    /// loop, which holds the actions and not this handle. The interceptor
-    /// module's own header sets that order.
     #[cfg(feature = "access-acl")]
     interceptors_egress: Arc<<R as Runtime>::Mutex<crate::interceptor::InterceptorChain>>,
+    /// R2702 — the §5.16 INGRESS chain, the twin of the field above, consulted
+    /// on the inbound batch before the observer fans it out.
+    ///
+    /// ⛔ A SECOND SLOT, never a reuse of the egress one, and the reason is that
+    /// enforcers are built PER FLOW: `build_chain(flow)` makes an ACL enforcer
+    /// bound to that flow and a downsampling interceptor with its own timers, so
+    /// pointing ingress at the egress chain would enforce egress rules on
+    /// inbound traffic and share one rate limiter between two directions. zenoh
+    /// keeps separate per-flow enforcers for exactly this reason, and both wz
+    /// forwarders already hold two chains apiece.
+    #[cfg(feature = "access-acl")]
+    interceptors_ingress: Arc<<R as Runtime>::Mutex<crate::interceptor::InterceptorChain>>,
 }
 
 /// R2578 — does THIS build carry `session-matching`?
@@ -964,6 +971,8 @@ where
             // policy that `set_interceptors` has already replaced on the other.
             #[cfg(feature = "access-acl")]
             interceptors_egress: self.interceptors_egress.clone(),
+            #[cfg(feature = "access-acl")]
+            interceptors_ingress: self.interceptors_ingress.clone(),
         }
     }
 }
@@ -1029,14 +1038,25 @@ impl<R: SessionRuntime, T: TimeSource, Tp: TransportState<R, T>> crate::intercep
 {
     fn set_interceptors(&self, config: crate::interceptor::InterceptorConfig) {
         // REPLACES, never appends — the seam's contract, and what makes a
-        // re-drive idempotent. The chain is rebuilt at a fresh version so any
+        // re-drive idempotent. Each chain is rebuilt at a fresh version so any
         // keyexpr cache computed against the previous one compares unequal; the
         // session keeps no such cache today, and building at a version rather
         // than at zero is what keeps that true if it ever does.
+        //
+        // BOTH FLOWS, from one config, as the forwarders' twin does. The two
+        // chains hold DIFFERENT enforcer instances — `build_chain` binds the ACL
+        // enforcer to its flow and gives the downsampler its own timers — so
+        // installing one and leaving the other empty is not "half configured",
+        // it is a policy that silently governs one direction.
         R::with_mutex_mut(&self.interceptors_egress, |chain| {
             let version = chain.version().wrapping_add(1);
             *chain =
                 config.build_chain_versioned(crate::interceptor::InterceptorFlow::Egress, version);
+        });
+        R::with_mutex_mut(&self.interceptors_ingress, |chain| {
+            let version = chain.version().wrapping_add(1);
+            *chain =
+                config.build_chain_versioned(crate::interceptor::InterceptorFlow::Ingress, version);
         });
     }
 }
@@ -1464,6 +1484,48 @@ impl<R: SessionRuntime, T: TimeSource, Tp: TransportState<R, T>> Session<R, T, T
     }
 
     /// R2702 — whether the §5.16 egress chain admits `msg` from THIS session.
+    /// The verdict body is shared with the ingress twin; see
+    /// [`Self::acl_admits_on`].
+    #[cfg(feature = "access-acl")]
+    fn acl_admits_egress(&self, msg: &wz_session_core::network_message::NetworkMessage) -> bool {
+        self.acl_admits_on(&self.interceptors_egress, msg)
+    }
+
+    /// R2702 — apply the §5.16 INGRESS chain to one inbound batch IN PLACE, the
+    /// twin of [`Self::acl_admits_egress`] and the wz counterpart of zenoh's
+    /// `DeMux`. The drive loop calls this through its ingress-decorator seam,
+    /// BEFORE the observer fans the outcome out, because after that the batch is
+    /// borrowed and a denial can no longer be expressed.
+    ///
+    /// A denied message is DROPPED from the batch — `retain` on the outcome's
+    /// own `Vec`, so nothing is cloned and batch order is preserved for the
+    /// stateful readers downstream. That is the same shape §5.21's namespace
+    /// ingress uses one line earlier, and it is why this needs no `Clone` on
+    /// `NetworkMessage`: the batch is OWNED at this point in the loop and
+    /// nowhere after it.
+    ///
+    /// A non-`FramePayload` outcome (an FSM advance, a keepalive, a parse
+    /// error, a link loss, an un-reassembled fragment) carries no application
+    /// message and passes through untouched.
+    #[cfg(feature = "access-acl")]
+    pub fn apply_acl_ingress(&self, outcome: &mut wz_session_core::driver_loop::DriverLoopOutcome) {
+        // The fast path is the whole path for a session with no policy: no
+        // batch walk, no context, no keyexpr resolution.
+        let empty = R::with_mutex_mut(&self.interceptors_ingress, |chain| chain.is_empty());
+        if empty {
+            return;
+        }
+        if let wz_session_core::driver_loop::DriverLoopOutcome::FramePayload { messages, .. } =
+            outcome
+        {
+            messages.retain(|msg| self.acl_admits_on(&self.interceptors_ingress, msg));
+        }
+    }
+
+    /// The verdict body BOTH flows share, so the two cannot answer differently
+    /// about the same message for any reason other than the chain they were
+    /// given. The flow lives in the chain — `build_chain` binds each enforcer to
+    /// it — which is why this takes a chain rather than a flow.
     ///
     /// The fast path is first and is the whole path for every build that
     /// configures no policy: an empty chain admits, and nothing below it runs —
@@ -1478,8 +1540,12 @@ impl<R: SessionRuntime, T: TimeSource, Tp: TransportState<R, T>> Session<R, T, T
     /// subscriber callback that re-enters a session API cannot meet a held ACL
     /// lock, and a `set_interceptors` cannot meet a held observer lock.
     #[cfg(feature = "access-acl")]
-    fn acl_admits_egress(&self, msg: &wz_session_core::network_message::NetworkMessage) -> bool {
-        let empty = R::with_mutex_mut(&self.interceptors_egress, |chain| chain.is_empty());
+    fn acl_admits_on(
+        &self,
+        chain_slot: &Arc<<R as Runtime>::Mutex<crate::interceptor::InterceptorChain>>,
+        msg: &wz_session_core::network_message::NetworkMessage,
+    ) -> bool {
+        let empty = R::with_mutex_mut(chain_slot, |chain| chain.is_empty());
         if empty {
             return true;
         }
@@ -1498,9 +1564,7 @@ impl<R: SessionRuntime, T: TimeSource, Tp: TransportState<R, T>> Session<R, T, T
         });
         let ctx = SessionAclContext { actions, keyexpr };
         // SECOND lock: the chain. The context holds no lock of its own.
-        R::with_mutex_mut(&self.interceptors_egress, |chain| {
-            chain.admit(&ctx, msg).is_admitted()
-        })
+        R::with_mutex_mut(chain_slot, |chain| chain.admit(&ctx, msg).is_admitted())
     }
 
     /// Borrow the observer handle. Application code registers
@@ -2024,6 +2088,10 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Multicast> {
             interceptors_egress: Arc::new(
                 R::new_mutex(crate::interceptor::InterceptorChain::new()),
             ),
+            #[cfg(feature = "access-acl")]
+            interceptors_ingress: Arc::new(R::new_mutex(
+                crate::interceptor::InterceptorChain::new(),
+            )),
         })
     }
 
@@ -2209,12 +2277,16 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
                 feature = "adminspace-core"
             ))]
             admin_declarations: Arc::new(R::new_mutex(Vec::new())),
-            // R2702 — empty chain = access control disabled; see the twin
+            // R2702 — empty chains = access control disabled; see the twin
             // constructor above.
             #[cfg(feature = "access-acl")]
             interceptors_egress: Arc::new(
                 R::new_mutex(crate::interceptor::InterceptorChain::new()),
             ),
+            #[cfg(feature = "access-acl")]
+            interceptors_ingress: Arc::new(R::new_mutex(
+                crate::interceptor::InterceptorChain::new(),
+            )),
         });
         // Forward the zid into the subscriber registry so wire-arrived
         // self-echo Pushes are dedup'd from session creation onward. The

@@ -927,6 +927,11 @@ where
             next_ms: || None,
             revised: None,
         },
+        // R2702 — no ingress decorator. A caller that wants one (the §5.16
+        // client-transport enforcement) reaches for the full form, exactly as a
+        // caller wanting an extra deadline does; this entry stays the
+        // inert-source delegation its ~97 call sites were written against.
+        |_: &mut wz_session_core::driver_loop::DriverLoopOutcome| {},
     )
     .await
 }
@@ -1028,8 +1033,21 @@ pub struct ExtraDeadline<'a, G> {
 /// instead. That is not a gap in practice: both capi-pico paths register
 /// their face only after the session is Established, so no query can be
 /// pending during the initial handshake.
+/// R2702 — `ingress` is the loop's INGRESS DECORATOR seam, and it exists
+/// because the loop is the only place an inbound batch is still OWNED. A
+/// `DriverLoopOutcome::FramePayload` carries `Vec<NetworkMessage>`, and this
+/// function hands `on_event` a BORROW of it, so a consumer cannot withhold one
+/// message: by the time anything downstream sees the batch, the decision has
+/// been made. Filtering therefore has to happen here, before dispatch.
+///
+/// The loop reaches the namespace decorator by itself, because it lives on the
+/// `actions` handle the loop already holds. It cannot reach a policy that lives
+/// on the SESSION — the loop has no session — which is exactly the §5.16
+/// client-transport ingress case, so the caller that built the session hands its
+/// decorator in. `|_: &mut DriverLoopOutcome| {}` is the honest no-op and is
+/// what [`drive_session_until_terminal`] passes.
 #[allow(clippy::too_many_arguments)]
-pub async fn drive_session_until_terminal_with_extra_deadline<D, F, T, G>(
+pub async fn drive_session_until_terminal_with_extra_deadline<D, F, T, G, H>(
     driver: &mut D,
     actions: &Arc<SessionLinkActions>,
     engine: &mut Engine<crate::session_fsm_unicast::SessionFsmUnicastPolicy<SessionActionsBinding>>,
@@ -1038,12 +1056,14 @@ pub async fn drive_session_until_terminal_with_extra_deadline<D, F, T, G>(
     timeouts: &SessionTimeouts,
     mut on_event: F,
     extra: ExtraDeadline<'_, G>,
+    mut ingress: H,
 ) -> DriverOutcome
 where
     D: LinkDriver,
     F: FnMut(IterationEvent<'_>),
     T: TimeSource,
     G: FnMut() -> Option<u64>,
+    H: FnMut(&mut wz_session_core::driver_loop::DriverLoopOutcome),
 {
     let ExtraDeadline {
         next_ms: mut next_extra_deadline,
@@ -1143,10 +1163,15 @@ where
                         // a FramePayload, so this is a no-op for it and its
                         // reassembled completion is stripped inside
                         // `report_outcome_reassembling` instead.
-                        #[cfg(feature = "routing-namespace")]
                         let mut outcome = outcome;
                         #[cfg(feature = "routing-namespace")]
                         actions.apply_namespace_ingress(&mut outcome);
+                        // R2702 — then the caller's ingress decorator, in THIS
+                        // order: the namespace is a transport-level rewrite and
+                        // a policy governs the keyexpr that rewrite produced, so
+                        // an enforcer must see the stripped form, which is also
+                        // the form this session's own alias table holds.
+                        ingress(&mut outcome);
                         #[cfg(feature = "reassembly")]
                         report_outcome_reassembling(
                             &outcome,
@@ -1196,10 +1221,11 @@ where
                 // §5.21 routing-namespace — strip the DIRECT decoded FramePayload
                 // before dispatch (the no-deadline arm; same rationale as the
                 // `tokio::select!` poll arm above).
-                #[cfg(feature = "routing-namespace")]
                 let mut outcome = outcome;
                 #[cfg(feature = "routing-namespace")]
                 actions.apply_namespace_ingress(&mut outcome);
+                // R2702 — same order as the select arm; see there.
+                ingress(&mut outcome);
                 #[cfg(feature = "reassembly")]
                 report_outcome_reassembling(
                     &outcome,

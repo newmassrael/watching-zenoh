@@ -325,6 +325,10 @@ async fn drive_dial(endpoint: String, whatami: WhatAmI, tls: CapiTlsConfig, ctx:
                 next_ms: next_deadline,
                 revised: revised.as_deref(),
             },
+            // R2702 — no ingress decorator: the C API drives a session whose
+            // §5.16 policy, if any, is installed by the embedding application
+            // through the session handle, and this loop does not own one.
+            |_| {},
         ) => {}
         _ = local_shared.drive_local_plane() => {}
         _ = shutdown_future(shutdown, stop) => {}
