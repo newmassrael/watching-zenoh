@@ -209,6 +209,17 @@ pub(crate) fn buffered_pair<I: Send + 'static>(
     Arc<dyn BufferedDrain>,
     mpsc::Receiver<I>,
 ) {
+    // Fail fast and NAME the contract. `mpsc::channel(0)` panics from inside
+    // tokio with a message that mentions nothing in this tree, so a caller who
+    // passed a computed capacity would be told about a buffer rather than about
+    // the subscription they declared. Zero is also meaningless here rather than
+    // merely unsupported: a queue that can hold nothing cannot be the thing the
+    // loop waits on, so there is no behaviour to define for it.
+    assert!(
+        capacity > 0,
+        "a buffered subscription needs a capacity of at least 1; \
+         0 would leave the drive loop waiting on a queue nothing can enter"
+    );
     let (tx, rx) = mpsc::channel(capacity);
     let stage = Arc::new(BufferedStage::new(tx, capacity));
     let drain: Arc<dyn BufferedDrain> = stage.clone();

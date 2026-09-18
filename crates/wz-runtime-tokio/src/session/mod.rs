@@ -4716,6 +4716,11 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
     /// must await. A caller that declares a buffered subscriber and never drains
     /// gets a queue that fills and then stops being emptied — the samples stay
     /// staged rather than being lost, but nothing moves.
+    ///
+    /// # Panics
+    ///
+    /// If `capacity` is 0. A queue nothing can enter is not a smaller queue, it
+    /// is a subscription the loop would wait on forever.
     pub fn declare_subscriber_buffered<I, P>(
         &self,
         keyexpr: impl Into<String>,

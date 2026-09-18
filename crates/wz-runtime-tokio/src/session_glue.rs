@@ -1095,6 +1095,25 @@ async fn park_on_drain<T, F>(
     F: FnMut(IterationEvent<'_>),
 {
     tokio::pin!(drain);
+    // THE FAST PATH, and it is a correctness-of-cost matter rather than a micro
+    // optimisation. Almost every iteration has nothing staged, so the drain
+    // completes on its first poll; arming the deadline race for those would
+    // register and cancel a timer on EVERY iteration of EVERY session, doubling
+    // this loop's timer churn on its hot path. `LoopStages::after_dispatch`
+    // promises in its own docs that a caller with nothing to drain costs
+    // nothing per iteration, and parking unconditionally would have broken that
+    // promise for every caller including the ones that pass `ready(())`.
+    //
+    // `biased` is what makes "poll the drain first" a guarantee instead of a
+    // coin flip — `writer_queue.rs`, the module whose wait-don't-drop doctrine
+    // this seam is built on, uses it the same way. Reaching the loop below
+    // therefore MEANS the drain is genuinely pending, which is exactly when a
+    // timer is worth arming.
+    tokio::select! {
+        biased;
+        _ = &mut drain => return,
+        _ = core::future::ready(()) => {}
+    }
     loop {
         let lease_dl = lease_wake_deadline(actions);
         #[cfg(feature = "transport-keepalive")]
