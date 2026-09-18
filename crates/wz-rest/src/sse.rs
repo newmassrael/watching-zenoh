@@ -10,18 +10,22 @@
 //! an SSE event (`event: <PUT|DELETE>\ndata: <json-sample>\n\n`) until the
 //! client disconnects, at which point the [`Subscriber`] handle drops and
 //! undeclares. The subscriber callback fires on the session drive loop and
-//! hands each sample to this task through a BOUNDED channel ([`CHANNEL_CAP`]
+//! hands each sample to this task through a BOUNDED queue ([`CHANNEL_CAP`]
 //! — R311y501 corrects this line, which said "unbounded" and contradicted the
 //! code it documents ever since the bound was added); a periodic SSE
 //! comment (`:\n\n`) keeps an idle stream alive AND detects a vanished client
 //! (the write errors) so the subscriber is torn down promptly.
+//!
+//! R2703 — that queue is the SESSION's now, not this file's, and a full one
+//! makes the drive loop WAIT rather than dropping the newest sample. This file
+//! no longer builds a channel of its own; see [`CHANNEL_CAP`] for what the bound
+//! came to mean.
 //!
 //! [`Subscriber`]: wz_runtime_tokio::session::TokioSession::declare_subscriber
 
 use std::io;
 
 use tokio::io::AsyncWriteExt;
-use tokio::sync::mpsc;
 use tokio::time::{interval, timeout, Duration};
 
 use wz_runtime_tokio::sample::SampleKind;
@@ -36,13 +40,21 @@ use crate::{json, WRITE_TIMEOUT};
 /// intermediaries from closing an idle stream and probes for a vanished client.
 const KEEPALIVE: Duration = Duration::from_secs(15);
 
-/// Bound on the buffered-sample queue between the subscriber callback (which
-/// runs on the drive loop and is never back-pressured) and the socket-writing
-/// task. A slow-but-progressing consumer would grow an UNBOUNDED channel
-/// without limit (its per-write timeout never fires); a bounded channel caps
-/// the server memory a slow reader can pin. On overflow the newest sample is
-/// dropped — SSE is best-effort (a reconnecting `EventSource` has no replay
-/// anyway).
+/// Bound on the buffered-sample queue between the subscriber callback and this
+/// socket-writing task, passed to
+/// [`declare_subscriber_buffered`](wz_runtime_tokio::session::TokioSession::declare_subscriber_buffered)
+/// as the capacity it sizes its queue by. It caps the server memory a slow
+/// reader can pin.
+///
+/// R2703 — WHAT IT NO LONGER MEANS. This bound used to be the point at which
+/// the newest sample was DROPPED, because the callback runs on the drive loop
+/// and could not wait there. It is now the point at which the drive loop WAITS:
+/// a full queue suspends the session's own progress until this task reads,
+/// which is the behaviour upstream's REST plugin gets from its blocking FIFO
+/// handler, and the behaviour `writer_queue` had already chosen for the TX side
+/// on the grounds that cutting a write short is "the same data loss in a
+/// different place". A slow SSE client now slows its source instead of silently
+/// losing events.
 const CHANNEL_CAP: usize = 1024;
 
 /// The SSE response head: `200`, `text/event-stream`, no `Content-Length` (the
@@ -74,29 +86,36 @@ struct SseSample {
 /// Stream `declare_subscriber(keyexpr)` samples to `wr` as SSE events until the
 /// client disconnects. The subscriber is undeclared when this returns.
 pub async fn stream<W: AsyncWriteExt + Unpin>(session: &TokioSession, keyexpr: String, wr: &mut W) {
-    let (tx, mut rx) = mpsc::channel::<SseSample>(CHANNEL_CAP);
-    let _subscriber = match session.declare_subscriber(
+    // R2703 — a BUFFERED subscription, which is where this file stopped owning
+    // its own channel. The projection below is what it always did; what is gone
+    // is the `mpsc::channel` beside it and the `try_send` that dropped the
+    // newest sample when a slow client filled it. The queue now belongs to the
+    // session, and a full one suspends the drive loop at its drain instead of
+    // discarding — matching what `writer_queue` already says about the TX side
+    // ("the peer's backpressure IS the flow control") and what upstream's REST
+    // plugin gets from its blocking FIFO handler.
+    let (_subscriber, mut rx) = match session.declare_subscriber_buffered(
         keyexpr,
         SubscribeOptions::default(),
+        CHANNEL_CAP,
+        // Runs ON the drive loop, so it only copies: `SampleView` is a borrowed
+        // view and wz has no owned Sample, which is why the projection is the
+        // caller's rather than the seam's.
         move |sample: &dyn SampleView| {
             let encoding = json::mime_or_default(sample.encoding());
             let encoding_id = sample.encoding().map(|e| (e.id(), e.schema.is_some()));
             let timestamp = sample.timestamp().cloned();
-            // Non-blocking bounded send: a full queue (slow client) or a closed
-            // receiver (client gone, this task returned) drops the sample — the
-            // callback runs on the drive loop and must not block it, and SSE is
-            // best-effort. The subscriber teardown follows on the closed case.
-            let _ = tx.try_send(SseSample {
+            SseSample {
                 kind: sample.kind(),
                 key: sample.keyexpr().to_string(),
                 payload: sample.payload().to_vec(),
                 encoding,
                 encoding_id,
                 timestamp,
-            });
+            }
         },
     ) {
-        Ok(subscriber) => subscriber,
+        Ok(pair) => pair,
         // R2423 (open-debt item 688) — same as the write path: the typed error
         // travels in the BODY instead of being flattened to a constant. This is
         // the response a consumer sees when the `Declare(DeclSubscriber)` could

@@ -415,6 +415,11 @@ use crate::session_glue::{ConsolidationMode, QueryTarget};
     feature = "adminspace-core"
 ))]
 mod admin_declarations;
+/// R2703 — buffered subscriptions, whose delivery can apply backpressure
+/// instead of dropping. See the module docs for why the waiting happens at a
+/// loop-awaited drain rather than in the callback.
+#[cfg(feature = "transport-unicast")]
+mod buffered;
 #[cfg(feature = "transport-unicast")]
 mod decl_listener;
 #[cfg(feature = "transport-unicast")]
@@ -742,6 +747,17 @@ where
     /// forwarders already hold two chains apiece.
     #[cfg(feature = "access-acl")]
     interceptors_ingress: Arc<<R as Runtime>::Mutex<crate::interceptor::InterceptorChain>>,
+    /// R2703 — the buffered subscriptions this session delivers to, and the
+    /// only thing the loop's drain stage needs to reach.
+    ///
+    /// SHARED on clone, like every other registry here: a buffered subscription
+    /// declared through one handle must still be drained when the loop holds
+    /// another. A `std::sync::Mutex` rather than the `R::Mutex` GAT because the
+    /// whole mechanism is std-runtime-only by construction — it owns a tokio
+    /// channel — and pretending otherwise would put an async-shaped thing behind
+    /// a profile-generic lock that no MCU profile can satisfy.
+    #[cfg(feature = "transport-unicast")]
+    buffered: buffered::BufferedRegistry,
 }
 
 /// R2578 — does THIS build carry `session-matching`?
@@ -973,6 +989,10 @@ where
             interceptors_egress: self.interceptors_egress.clone(),
             #[cfg(feature = "access-acl")]
             interceptors_ingress: self.interceptors_ingress.clone(),
+            // R2703 — shared, not forked: a buffered subscription declared
+            // through one handle must still be drained through another.
+            #[cfg(feature = "transport-unicast")]
+            buffered: self.buffered.clone(),
         }
     }
 }
@@ -2092,6 +2112,10 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Multicast> {
             interceptors_ingress: Arc::new(R::new_mutex(
                 crate::interceptor::InterceptorChain::new(),
             )),
+            // R2703 — empty: a session with no buffered subscription drains
+            // nothing, and the loop's stage costs one empty vector walk.
+            #[cfg(feature = "transport-unicast")]
+            buffered: buffered::BufferedRegistry::default(),
         })
     }
 
@@ -2287,6 +2311,9 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
             interceptors_ingress: Arc::new(R::new_mutex(
                 crate::interceptor::InterceptorChain::new(),
             )),
+            // R2703 — see the twin constructor above.
+            #[cfg(feature = "transport-unicast")]
+            buffered: buffered::BufferedRegistry::default(),
         });
         // Forward the zid into the subscriber registry so wire-arrived
         // self-echo Pushes are dedup'd from session creation onward. The
@@ -4669,6 +4696,61 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
     /// [`SubscriptionId`] (one entity id for the local table key + the
     /// `DeclSubscriber` + the `UndeclSubscriber`), mirroring pico's single
     /// `_z_get_entity_id` — no separate wire-id counter.
+    /// R2703 — declare a subscriber whose delivery applies BACKPRESSURE instead
+    /// of dropping: samples are projected by `project`, queued to `capacity`,
+    /// and handed to the returned receiver, and when that queue is full the
+    /// drive loop WAITS rather than discarding the newest sample.
+    ///
+    /// This is the seam `declare_subscriber` cannot offer. Its callback runs
+    /// inline on the drive loop, so a consumer that needs a queue has to drop on
+    /// overflow — and dropping is what this tree already refused on the TX side
+    /// (`writer_queue`: "the peer's backpressure IS the flow control"). Upstream
+    /// subscribes its own SSE bridge through a blocking FIFO handler for the
+    /// same reason.
+    ///
+    /// `project` runs ON the drive loop and must stay cheap: it exists because
+    /// [`SampleView`] is a borrowed view and wz has no owned `Sample`, so the
+    /// caller says what to keep rather than this seam inventing a type for it.
+    ///
+    /// ⚠ The waiting happens in [`Self::drain_buffered`], which a drive loop
+    /// must await. A caller that declares a buffered subscriber and never drains
+    /// gets a queue that fills and then stops being emptied — the samples stay
+    /// staged rather than being lost, but nothing moves.
+    pub fn declare_subscriber_buffered<I, P>(
+        &self,
+        keyexpr: impl Into<String>,
+        options: SubscribeOptions,
+        capacity: usize,
+        mut project: P,
+    ) -> Result<(Subscriber<R>, tokio::sync::mpsc::Receiver<I>), SubscribeError>
+    where
+        I: Send + 'static,
+        P: FnMut(&dyn SampleView) -> I + Send + 'static,
+        wz_session_core::session_actions::SessionLinkActions<R, T>: Send + Sync,
+        <R as SessionRuntime>::LinkSink: Send + Sync,
+        T: 'static,
+    {
+        let (stage, drain, rx) = buffered::buffered_pair::<I>(capacity);
+        self.buffered.register(&drain);
+        // The callback STAGES and returns; it never waits, because it is on the
+        // drive loop. `drain` is moved in so the subscription owns its drain and
+        // the registry's weak handle dies with the subscriber.
+        let subscriber = self.declare_subscriber(keyexpr, options, move |sample| {
+            let _keepalive = &drain;
+            buffered::stage_into(&stage, project(sample));
+        })?;
+        Ok((subscriber, rx))
+    }
+
+    /// R2703 — move every buffered subscription's staged samples into its
+    /// consumer's queue, AWAITING capacity. The drive loop calls this once per
+    /// iteration; it is the only place a slow consumer can stop this session.
+    ///
+    /// A session with no buffered subscription walks an empty vector.
+    pub async fn drain_buffered(&self) {
+        self.buffered.drain_all().await;
+    }
+
     pub fn declare_subscriber(
         &self,
         keyexpr: impl Into<String>,

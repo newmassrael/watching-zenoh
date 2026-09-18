@@ -325,10 +325,18 @@ async fn drive_dial(endpoint: String, whatami: WhatAmI, tls: CapiTlsConfig, ctx:
                 next_ms: next_deadline,
                 revised: revised.as_deref(),
             },
-            // R2702 — no ingress decorator: the C API drives a session whose
-            // §5.16 policy, if any, is installed by the embedding application
-            // through the session handle, and this loop does not own one.
-            |_| {},
+            // R2702/R2703 — no session-owned stages: the C API drives a session
+            // whose §5.16 policy and whose subscriptions, if any, belong to the
+            // embedding application, and this loop does not own one.
+            wz_runtime_tokio::session_glue::LoopStages {
+                // The parameter type is named rather than inferred: inside the
+                // bundle, `|_| {}` infers a closure that is not general enough
+                // over the outcome's lifetime, and rustc reports it as
+                // "implementation of `FnMut` is not general enough" at the
+                // `select!` rather than at the closure.
+                ingress: |_: &mut wz_runtime_tokio::session_glue::DriverLoopOutcome| {},
+                after_dispatch: || core::future::ready(()),
+            },
         ) => {}
         _ = local_shared.drive_local_plane() => {}
         _ = shutdown_future(shutdown, stop) => {}

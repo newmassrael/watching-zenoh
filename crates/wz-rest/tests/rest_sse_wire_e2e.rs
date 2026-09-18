@@ -31,7 +31,10 @@ use tokio::net::{TcpListener, TcpStream};
 use wz_runtime_tokio::observer::ApplicationLayerObserver;
 use wz_runtime_tokio::runtime_impl::TokioTime;
 use wz_runtime_tokio::session::{PublishOptions, TokioSession};
-use wz_runtime_tokio::session_glue::drive_session_until_terminal;
+use wz_runtime_tokio::session_glue::{
+    drive_session_until_terminal, drive_session_until_terminal_with_extra_deadline, ExtraDeadline,
+    LoopStages,
+};
 use wz_runtime_tokio::session_open::{
     accept_and_open_session, connect_and_open_session, DialConfig, DialedLink, DEFAULT_OPEN_TICK_MS,
 };
@@ -119,7 +122,14 @@ async fn rest_sse_streams_a_remote_publish_as_an_event() {
         vec![0x01; 4],
     ));
     let session_bridge_drive = session_bridge.clone();
-    let drive_bridge = drive_session_until_terminal(
+    // R2703 — the SSE bridge's subscription is BUFFERED, so this loop must await
+    // its drain: that await is where a slow client stalls the session instead of
+    // losing samples. A host that wires `on_event` and forgets this gets a
+    // subscription that answers healthily and delivers nothing — the exact
+    // symptom R2423 spent a round diagnosing — which is why `BufferedStage`
+    // logs when its backlog says nobody is draining.
+    let session_bridge_drain = session_bridge.clone();
+    let drive_bridge = drive_session_until_terminal_with_extra_deadline(
         &mut opened_bridge.inbound,
         &opened_bridge.actions,
         &mut opened_bridge.engine,
@@ -127,6 +137,17 @@ async fn rest_sse_streams_a_remote_publish_as_an_event() {
         &opened_bridge.clock,
         &timeouts,
         move |event| session_bridge_drive.dispatch_iteration_event(event),
+        ExtraDeadline {
+            next_ms: || None,
+            revised: None,
+        },
+        LoopStages {
+            ingress: |_: &mut wz_session_core::driver_loop::DriverLoopOutcome| {},
+            after_dispatch: move || {
+                let session = session_bridge_drain.clone();
+                async move { session.drain_buffered().await }
+            },
+        },
     );
 
     let publisher = session_acc.clone();

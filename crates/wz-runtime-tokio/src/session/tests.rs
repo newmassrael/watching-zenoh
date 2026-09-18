@@ -12529,3 +12529,92 @@ fn batch_keyexprs(outcome: &wz_session_core::driver_loop::DriverLoopOutcome) -> 
         _ => panic!("fixture builds a FramePayload"),
     }
 }
+
+// ── R2703 §5.26 — a buffered subscription WAITS instead of dropping ──
+
+/// The claim: with a consumer slower than the producer and a queue smaller than
+/// the burst, EVERY sample still arrives, in order.
+///
+/// ANTI-VACUITY IS STRUCTURAL HERE, not a courtesy. If the queue never fills,
+/// backpressure and drop-newest are indistinguishable — so the capacity is 2
+/// against a burst of 5, and the reader does not start until every sample has
+/// been staged. Under the old `try_send` shape the 3rd, 4th and 5th are lost;
+/// under the drain's `send().await` the loop waits for the reader.
+///
+/// The ORDER assertion is not decoration either: a drain that emptied the stage
+/// concurrently rather than sequentially could deliver all five out of order,
+/// which for an event stream is a different kind of wrong answer.
+#[cfg(all(
+    feature = "declare-subscriber",
+    feature = "pubsub-put",
+    feature = "codec-push"
+))]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_buffered_subscription_waits_rather_than_dropping_the_newest_sample() {
+    const CAPACITY: usize = 2;
+    const BURST: usize = 5;
+
+    let (session, _driver) = build_session();
+    let (_subscriber, mut rx) = session
+        .declare_subscriber_buffered(
+            "demo/**",
+            SubscribeOptions::default(),
+            CAPACITY,
+            |sample: &dyn wz_session_core::sink::SampleView| sample.payload().to_vec(),
+        )
+        .expect("buffered subscriber declares");
+
+    // Stage the whole burst BEFORE anything reads, so the queue is provably
+    // over capacity when the drain starts.
+    for i in 0..BURST {
+        let outcome = wz_session_core::driver_loop::DriverLoopOutcome::FramePayload {
+            priority: wz_session_core::qos::Priority::DEFAULT,
+            reliable: true,
+            sn: i as u64,
+            messages: vec![wz_session_core::network_message::NetworkMessage::Push(
+                Box::new(
+                    wz_session_core::push_build::build_push_literal("demo/data", &[i as u8])
+                        .expect("fixture Push is representable"),
+                ),
+            )],
+            has_ext: false,
+            extensions: Vec::new(),
+        };
+        session.dispatch_iteration_event(crate::session_glue::IterationEvent::Poll(&outcome));
+    }
+
+    // A reader that lags the drain: it cannot take the whole burst at once, so
+    // the drain must wait for it at least twice.
+    //
+    // ⚠ EVERY `recv` IS BOUNDED, and that is the difference between a control
+    // and a hang. The sender lives as long as the subscription, so a dropped
+    // sample never closes the channel — it just never arrives, and an unbounded
+    // `recv().await` would wait for it forever. Measured: the first draft of
+    // this test hung its own control instead of reddening it. The bound turns
+    // "a sample was lost" into a FAILING assertion, which is what a control has
+    // to be.
+    let reader = tokio::spawn(async move {
+        let mut got: Vec<Vec<u8>> = Vec::new();
+        while got.len() < BURST {
+            match tokio::time::timeout(std::time::Duration::from_secs(5), rx.recv()).await {
+                Ok(Some(item)) => got.push(item),
+                // Channel closed, or nothing arrived within the bound: report
+                // what was received and let the assertion below name the gap.
+                Ok(None) | Err(_) => break,
+            }
+            tokio::task::yield_now().await;
+        }
+        got
+    });
+
+    session.drain_buffered().await;
+    let got = reader.await.expect("reader task panicked");
+
+    assert_eq!(
+        got,
+        (0..BURST).map(|i| vec![i as u8]).collect::<Vec<_>>(),
+        "every staged sample must arrive, in order -- a queue of {CAPACITY} \
+         against a burst of {BURST} is over capacity by construction, so this \
+         reds the moment delivery drops instead of waiting"
+    );
+}

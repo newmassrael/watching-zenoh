@@ -1359,13 +1359,16 @@ async fn drive_face(
             next_ms: || forwarder.next_extra_deadline_ms(face.id),
             revised: revised.as_deref(),
         },
-        // R2702 — no ingress decorator here, and that is a scope statement
-        // rather than an omission: this loop drives a FACE of a routing node,
-        // whose §5.16 ingress admission already happens at the forwarder
-        // (`admit_inbound`, consulted at the top of `forward`). The decorator
-        // seam exists for a client-mode session, which has no forwarder to be
-        // admitted by. Adding one here would run the chain twice.
-        |_: &mut wz_session_core::driver_loop::DriverLoopOutcome| {},
+        // R2702/R2703 — no session-owned stages here, and that is a scope
+        // statement rather than an omission: this loop drives a FACE of a
+        // routing node, whose §5.16 ingress admission already happens at the
+        // forwarder (`admit_inbound`, consulted at the top of `forward`), and
+        // whose samples go to the routing tables rather than to a buffered
+        // subscription. Adding the decorator here would run the chain twice.
+        crate::session_glue::LoopStages {
+            ingress: |_: &mut wz_session_core::driver_loop::DriverLoopOutcome| {},
+            after_dispatch: || core::future::ready(()),
+        },
     )
     .await;
     opened.drain_to_close().await;

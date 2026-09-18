@@ -46,7 +46,8 @@ use wz_runtime_tokio::session_fsm_unicast::{
 };
 use wz_runtime_tokio::session_glue::{
     drive_session_until_terminal_with_extra_deadline, new_session_actions, new_session_engine,
-    BoxedLinkDriver, ExtraDeadline, SessionActionsBinding, SessionLinkActions, SessionTimeouts,
+    BoxedLinkDriver, ExtraDeadline, LoopStages, SessionActionsBinding, SessionLinkActions,
+    SessionTimeouts,
 };
 use wz_runtime_tokio::{LinkEvent, RxFrame};
 use wz_runtime_tokio_test_support::{
@@ -176,17 +177,23 @@ async fn arrivals_and_hits(wire: Vec<u8>, config: Option<InterceptorConfig>) -> 
             next_ms: || None,
             revised: None,
         },
-        // THE SEAM UNDER TEST. Everything else here is production code; the
-        // count is the caller's own bookkeeping, taken BEFORE the decorator so
-        // it reports what the loop delivered rather than what survived.
-        |outcome| {
-            if let wz_session_core::driver_loop::DriverLoopOutcome::FramePayload {
-                messages, ..
-            } = &*outcome
-            {
-                arrived.fetch_add(messages.len(), Ordering::SeqCst);
-            }
-            session.apply_acl_ingress(outcome);
+        LoopStages {
+            // THE SEAM UNDER TEST. Everything else here is production code; the
+            // count is the caller's own bookkeeping, taken BEFORE the decorator
+            // so it reports what the loop delivered rather than what survived.
+            ingress: |outcome: &mut wz_session_core::driver_loop::DriverLoopOutcome| {
+                if let wz_session_core::driver_loop::DriverLoopOutcome::FramePayload {
+                    messages,
+                    ..
+                } = &*outcome
+                {
+                    arrived.fetch_add(messages.len(), Ordering::SeqCst);
+                }
+                session.apply_acl_ingress(outcome);
+            },
+            // This session declares no buffered subscription, so there is
+            // nothing to drain and the loop allocates nothing here.
+            after_dispatch: || core::future::ready(()),
         },
     )
     .await;

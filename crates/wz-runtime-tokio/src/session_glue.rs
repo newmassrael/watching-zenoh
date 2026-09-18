@@ -927,11 +927,15 @@ where
             next_ms: || None,
             revised: None,
         },
-        // R2702 — no ingress decorator. A caller that wants one (the §5.16
-        // client-transport enforcement) reaches for the full form, exactly as a
-        // caller wanting an extra deadline does; this entry stays the
-        // inert-source delegation its ~97 call sites were written against.
-        |_: &mut wz_session_core::driver_loop::DriverLoopOutcome| {},
+        // R2702/R2703 — no session-owned stages. A caller that wants one (the
+        // §5.16 client-transport enforcement, or a buffered subscription's
+        // drain) reaches for the full form, exactly as a caller wanting an extra
+        // deadline does; this entry stays the inert-source delegation its ~97
+        // call sites were written against. `ready(())` allocates nothing.
+        LoopStages {
+            ingress: |_: &mut wz_session_core::driver_loop::DriverLoopOutcome| {},
+            after_dispatch: || core::future::ready(()),
+        },
     )
     .await
 }
@@ -1033,6 +1037,29 @@ pub struct ExtraDeadline<'a, G> {
 /// instead. That is not a gap in practice: both capi-pico paths register
 /// their face only after the session is Established, so no query can be
 /// pending during the initial handshake.
+/// R2703 — the loop's SESSION-OWNED STAGES, bundled.
+///
+/// R2702 added the first of these as a bare parameter and R2703 needed a
+/// second, which is the moment to stop adding them one at a time: a session
+/// declares how its delivery behaves (`Session::with_local_delivery_drain`
+/// states that policy is "a construction-time property of the host"), and a
+/// loop that took one closure per property would make every caller name every
+/// one. Two is where merging is cheap; at three it is a migration.
+pub struct LoopStages<H, P> {
+    /// Runs on the OWNED outcome before dispatch — see the function's docs.
+    pub ingress: H,
+    /// AWAITED after dispatch. This is the only point in the loop where a slow
+    /// consumer can stop this session, which is what makes backpressure
+    /// expressible at all: the callback that stages a sample runs inline and
+    /// must not wait, so the waiting has to happen somewhere the stall costs
+    /// only this session's progress.
+    ///
+    /// The future type is a parameter rather than a boxed trait object, so a
+    /// caller with nothing to drain passes `|| core::future::ready(())` and the
+    /// loop allocates nothing per iteration.
+    pub after_dispatch: P,
+}
+
 /// R2702 — `ingress` is the loop's INGRESS DECORATOR seam, and it exists
 /// because the loop is the only place an inbound batch is still OWNED. A
 /// `DriverLoopOutcome::FramePayload` carries `Vec<NetworkMessage>`, and this
@@ -1047,7 +1074,7 @@ pub struct ExtraDeadline<'a, G> {
 /// decorator in. `|_: &mut DriverLoopOutcome| {}` is the honest no-op and is
 /// what [`drive_session_until_terminal`] passes.
 #[allow(clippy::too_many_arguments)]
-pub async fn drive_session_until_terminal_with_extra_deadline<D, F, T, G, H>(
+pub async fn drive_session_until_terminal_with_extra_deadline<D, F, T, G, H, P, Fut>(
     driver: &mut D,
     actions: &Arc<SessionLinkActions>,
     engine: &mut Engine<crate::session_fsm_unicast::SessionFsmUnicastPolicy<SessionActionsBinding>>,
@@ -1056,7 +1083,7 @@ pub async fn drive_session_until_terminal_with_extra_deadline<D, F, T, G, H>(
     timeouts: &SessionTimeouts,
     mut on_event: F,
     extra: ExtraDeadline<'_, G>,
-    mut ingress: H,
+    stages: LoopStages<H, P>,
 ) -> DriverOutcome
 where
     D: LinkDriver,
@@ -1064,7 +1091,13 @@ where
     T: TimeSource,
     G: FnMut() -> Option<u64>,
     H: FnMut(&mut wz_session_core::driver_loop::DriverLoopOutcome),
+    P: FnMut() -> Fut,
+    Fut: core::future::Future<Output = ()>,
 {
+    let LoopStages {
+        mut ingress,
+        mut after_dispatch,
+    } = stages;
     let ExtraDeadline {
         next_ms: mut next_extra_deadline,
         revised: deadline_revised,
@@ -1182,6 +1215,12 @@ where
                         );
                         #[cfg(not(feature = "reassembly"))]
                         on_event(IterationEvent::Poll(&outcome));
+                        // R2703 — AFTER dispatch, and awaited. A buffered
+                        // subscription whose consumer is behind suspends the
+                        // loop right here instead of dropping the sample. It is
+                        // after `on_event` because a sample must be delivered
+                        // before there is anything staged to drain.
+                        after_dispatch().await;
                     }
                     _ = clock.sleep(remaining_ms) => match kind {
                         // Established lease / keepalive deadline. Both
@@ -1236,6 +1275,8 @@ where
                 );
                 #[cfg(not(feature = "reassembly"))]
                 on_event(IterationEvent::Poll(&outcome));
+                // R2703 — same placement as the select arm; see there.
+                after_dispatch().await;
             }
         }
     }

@@ -1,0 +1,224 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later OR LicenseRef-watching-zenoh-Commercial
+// SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
+
+//! R2703 §5.26 — a subscription whose delivery can say "not now".
+//!
+//! ## The defect this exists for
+//!
+//! A [`declare_subscriber`](super::Session::declare_subscriber) callback runs
+//! INLINE on the drive loop. The R311ky deferred-fire queue moved those
+//! callbacks outside the observer lock, not off the loop, so a callback that
+//! blocks stalls keepalive, lease and every other subscription on the session.
+//! Every consumer that needs a queue therefore drops on overflow —
+//! `wz-rest`'s SSE bridge says so in its own comment — and dropping is the one
+//! thing this tree has already decided against on the TX side:
+//!
+//! > steady state keeps its unbounded await, because there the peer's
+//! > backpressure IS the flow control and cutting a write short would be the
+//! > same data loss in a different place.
+//! > — `crates/wz-runtime-tokio/src/writer_queue.rs`
+//!
+//! So wz contradicts itself: wait-don't-drop outbound, drop-don't-wait inbound.
+//! Upstream does not — its SSE subscribes through a blocking FIFO handler
+//! (`plugins/zenoh-plugin-rest/src/lib.rs` @ `_subscriber: Subscriber<FifoChannelHandler<Sample>>`),
+//! and a slow client applies backpressure all the way into the session.
+//!
+//! ## Why the fix is a STAGE and not a blocking callback
+//!
+//! Upstream blocks its caller too — that is what backpressure IS. The
+//! difference is the RADIUS: upstream stalls one transport's rx task while its
+//! keepalive lives on another, and wz has one drive loop per session. So wz
+//! cannot block where the callback runs; it has to block somewhere the stall
+//! costs only this session's progress, which is the loop itself, at an await.
+//!
+//! ## Two stages, and why the staging half can be unbounded
+//!
+//! The callback stages into [`BufferedStage`] without waiting (it is on the
+//! loop, and must not wait there). A separate drain — awaited BY the loop —
+//! moves staged items into the consumer's bounded channel and waits for
+//! capacity. That queue cannot grow without bound even though nothing caps it:
+//! while the drain is awaiting, the loop is not polling, so no further samples
+//! arrive to stage. Backpressure holds the staging queue down by construction,
+//! which is why putting a bound there would be belt-and-braces that only hides
+//! a stall as a drop.
+//!
+//! ⚠ Nothing here is in the `no_std` core, deliberately. The callback is a
+//! CLOSURE, so it can capture runtime-side state; staging needs no session-core
+//! type and no async reaches a profile that has no executor.
+
+use std::collections::VecDeque;
+use std::future::Future;
+use std::pin::Pin;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex, Weak};
+
+use tokio::sync::mpsc;
+
+/// One buffered subscription's drain, type-erased so a session can hold several
+/// carrying different item types.
+///
+/// A trait rather than a closure because the drain is an `async fn` in all but
+/// name: it must be callable by the loop, own its future's lifetime, and be
+/// `Send + Sync` to sit in shared session state.
+pub(crate) trait BufferedDrain: Send + Sync {
+    /// Move every staged item into the consumer's channel, AWAITING capacity,
+    /// and return when the stage is empty or the consumer has gone away.
+    fn drain(&self) -> Pin<Box<dyn Future<Output = ()> + Send + '_>>;
+}
+
+/// The staging half of a buffered subscription: what the drive-loop callback
+/// pushes into, and what the loop's drain empties.
+pub(crate) struct BufferedStage<I> {
+    staged: Mutex<VecDeque<I>>,
+    tx: mpsc::Sender<I>,
+    /// Capacity the consumer's queue was sized at — the threshold past which a
+    /// staging backlog means nobody is draining. See [`Self::stage`].
+    capacity: usize,
+    /// Whether the "nobody is draining" diagnostic has already been emitted, so
+    /// a wedged deploy logs once rather than per sample.
+    warned: AtomicBool,
+}
+
+impl<I> BufferedStage<I> {
+    fn new(tx: mpsc::Sender<I>, capacity: usize) -> Self {
+        Self {
+            staged: Mutex::new(VecDeque::new()),
+            tx,
+            capacity,
+            warned: AtomicBool::new(false),
+        }
+    }
+
+    /// Stage one item. Called from the subscriber callback, ON the drive loop,
+    /// so it never waits — the waiting is [`BufferedDrain::drain`]'s job.
+    ///
+    /// Poison is absorbed rather than unwrapped, as `dynamic_volume`'s registry
+    /// lock does: a panic elsewhere must not turn sample delivery into a
+    /// data-plane panic.
+    /// ⚠ It also carries the one diagnostic this seam needs. A staging backlog
+    /// past the consumer's own capacity cannot happen while the loop drains —
+    /// the drain empties the stage before the loop polls again — so it means the
+    /// drive loop is NOT awaiting [`BufferedDrain::drain`]: a host wired
+    /// `on_event` to its session and forgot `after_dispatch`. The symptom
+    /// otherwise is a subscription that answers healthily and delivers nothing,
+    /// which is precisely the failure R2423 spent a round diagnosing on this
+    /// same SSE path. Logged ONCE per subscription, not per sample.
+    fn stage(&self, item: I) {
+        let depth = {
+            let mut staged = self
+                .staged
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            staged.push_back(item);
+            staged.len()
+        };
+        if depth > self.capacity && !self.warned.swap(true, Ordering::Relaxed) {
+            log::error!(
+                "buffered subscription has {depth} samples staged with a consumer \
+                 capacity of {}: the drive loop is not awaiting its drain, so this \
+                 subscription will deliver nothing. Drive it with \
+                 `drive_session_until_terminal_with_extra_deadline` and a \
+                 `LoopStages::after_dispatch` that awaits `Session::drain_buffered`.",
+                self.capacity
+            );
+        }
+    }
+}
+
+impl<I: Send + 'static> BufferedDrain for BufferedStage<I> {
+    fn drain(&self) -> Pin<Box<dyn Future<Output = ()> + Send + '_>> {
+        Box::pin(async move {
+            loop {
+                // The lock is taken and RELEASED before the await below. Holding
+                // it across the send would let a slow consumer block the
+                // callback that stages, which is the stall this seam exists to
+                // keep off the loop's critical section.
+                let next = {
+                    let mut staged = self
+                        .staged
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner());
+                    staged.pop_front()
+                };
+                let Some(item) = next else { return };
+                // THE AWAIT THAT IS THE WHOLE POINT. A full channel suspends the
+                // drive loop here rather than dropping the sample.
+                if self.tx.send(item).await.is_err() {
+                    // The consumer is gone; its subscription is being torn down
+                    // and the remaining staged items have nowhere to go.
+                    return;
+                }
+            }
+        })
+    }
+}
+
+/// Every buffered subscription a session is currently delivering to.
+///
+/// WEAK handles: a dropped subscription must not be kept alive by this list,
+/// and a drain that finds its entry dead simply prunes it. The alternative —
+/// unregistering on `Drop` — would make the subscriber handle's teardown depend
+/// on reaching the session, which is exactly the coupling the `Subscriber`
+/// retraction closure was built to avoid.
+#[derive(Clone, Default)]
+pub(crate) struct BufferedRegistry {
+    drains: Arc<Mutex<Vec<Weak<dyn BufferedDrain>>>>,
+}
+
+impl BufferedRegistry {
+    pub(crate) fn register(&self, drain: &Arc<dyn BufferedDrain>) {
+        self.drains
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .push(Arc::downgrade(drain));
+    }
+
+    /// Drain every live buffered subscription, awaiting capacity on each, and
+    /// prune the entries whose subscription has been dropped.
+    ///
+    /// SEQUENTIAL on purpose: a slow consumer delays the others on the same
+    /// session, which is the same radius the session already has for every other
+    /// kind of work the loop does. Draining them concurrently would let one
+    /// subscription's backpressure be hidden by another's idleness.
+    pub(crate) async fn drain_all(&self) {
+        let live: Vec<Arc<dyn BufferedDrain>> = {
+            let mut drains = self
+                .drains
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            drains.retain(|weak| weak.strong_count() > 0);
+            drains.iter().filter_map(Weak::upgrade).collect()
+        };
+        for drain in live {
+            drain.drain().await;
+        }
+    }
+}
+
+/// Build a staging pair for a buffered subscription of `capacity` items.
+///
+/// Returns the stage the callback pushes into, the type-erased drain the
+/// session registers, and the receiver the caller drains. `capacity` is the
+/// CALLER's argument rather than a constant here, and that is load-bearing
+/// twice over: a deploy sizes the memory a slow reader may pin, and a test can
+/// reach the full-buffer branch without publishing a thousand samples first.
+pub(crate) fn buffered_pair<I: Send + 'static>(
+    capacity: usize,
+) -> (
+    Arc<BufferedStage<I>>,
+    Arc<dyn BufferedDrain>,
+    mpsc::Receiver<I>,
+) {
+    let (tx, rx) = mpsc::channel(capacity);
+    let stage = Arc::new(BufferedStage::new(tx, capacity));
+    let drain: Arc<dyn BufferedDrain> = stage.clone();
+    (stage, drain, rx)
+}
+
+/// Stage one item through a shared handle — the body a subscriber callback
+/// runs. Free function rather than a method so the callback captures only an
+/// `Arc`, keeping the closure `Send + 'static` without naming `BufferedStage`
+/// at the call site.
+pub(crate) fn stage_into<I>(stage: &Arc<BufferedStage<I>>, item: I) {
+    stage.stage(item);
+}
