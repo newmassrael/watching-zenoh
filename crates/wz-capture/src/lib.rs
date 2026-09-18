@@ -6766,7 +6766,18 @@ mod datagram_tests {
     /// through [`established_session_capture`]. A control assembled separately
     /// would differ in whatever else drifted, and "the field document names this
     /// record" would stop being a claim about fragmentation.
-    #[cfg(all(feature = "reassembly", feature = "network-codecs"))]
+    ///
+    /// ⚠ Gated on `dissect` as well, which is its CALLERS' condition rather than
+    /// its own: both live in `fields_json`'s tests, and that module exists only
+    /// behind the field walker. The sibling above keeps the narrower gate
+    /// because `agg`'s tests reach it without `dissect`. A helper gated wider
+    /// than what uses it is dead code in exactly the arm no local build
+    /// compiles — gate 2x refused this push for it.
+    #[cfg(all(
+        feature = "reassembly",
+        feature = "network-codecs",
+        feature = "dissect"
+    ))]
     pub(crate) fn contiguous_record_dissection_with_file(record: &[u8]) -> (Dissection, Vec<u8>) {
         let mut wire = alloc::vec![
             wz_session_core::wire_const::T_MID_FRAME | wz_codecs::wire_const::FLAG_T_FRAME_R,
