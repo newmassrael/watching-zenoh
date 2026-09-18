@@ -1,0 +1,219 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later OR LicenseRef-watching-zenoh-Commercial
+// SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
+
+//! R2703 §5.26 — the JOIN: the PRODUCTION drive loop is what waits.
+//!
+//! Two facts were already pinned separately, and together they say nothing.
+//! `session::tests::a_buffered_subscription_waits_rather_than_dropping_the_newest_sample`
+//! shows `Session::drain_buffered` waits for a slow consumer; `wz-rest`'s
+//! `rest_sse_wire_e2e` shows a loop wired with that drain delivers. Neither
+//! shows the LOOP's await providing the backpressure — and a claim true at both
+//! ends and false in the join is a class this tree has paid for eight times now.
+//!
+//! So this drives `drive_session_until_terminal_with_extra_deadline` over a
+//! scripted burst of real encoded frames, with a buffered subscription whose
+//! queue is far smaller than the burst and a consumer that lags, and asserts
+//! that NOTHING is lost. The loop is the only thing that can wait here: the
+//! subscriber callback runs inline on it and must not block.
+//!
+//! ⚠ The assertion is NO LOSS rather than "the loop stalled", deliberately.
+//! Stalling is the mechanism and loss is the consequence, and a timing
+//! assertion on a stall would be the kind of test that passes for scheduling
+//! reasons. Loss is deterministic: a queue of `CAPACITY` against a burst of
+//! `BURST` is over capacity by construction, so drop-newest cannot deliver all
+//! of them however the scheduler runs.
+#![cfg(all(
+    feature = "transport-unicast",
+    feature = "declare-subscriber",
+    feature = "pubsub-put",
+    feature = "codec-push"
+))]
+
+use std::sync::{Arc, Mutex};
+
+use sce_rust_runtime::Engine;
+use wz_runtime_core::TimeSource;
+use wz_runtime_tokio::observer::ApplicationLayerObserver;
+use wz_runtime_tokio::runtime_impl::TokioTime;
+use wz_runtime_tokio::session::{PublishOptions, SubscribeOptions, TokioSession};
+use wz_runtime_tokio::session_fsm_unicast::{
+    SessionFsmUnicastEvent as E, SessionFsmUnicastPolicy, SessionFsmUnicastState as S,
+};
+use wz_runtime_tokio::session_glue::{
+    drive_session_until_terminal_with_extra_deadline, new_session_actions, new_session_engine,
+    BoxedLinkDriver, DriverLoopOutcome, ExtraDeadline, LoopStages, SessionActionsBinding,
+    SessionLinkActions, SessionTimeouts,
+};
+use wz_runtime_tokio::{LinkEvent, RxFrame};
+use wz_runtime_tokio_test_support::{
+    fixture_session_init_params, LifecycleRecordingDriver, NoopOutboundDriver, QueueDriver,
+};
+
+/// Smaller than the burst on purpose — see the module docs.
+const CAPACITY: usize = 2;
+/// One frame per sample, all delivered before the consumer reads any.
+const BURST: usize = 6;
+const KEYEXPR: &str = "demo/data";
+
+fn established(engine: &mut Engine<SessionFsmUnicastPolicy<SessionActionsBinding>>) {
+    engine.process_event(E::OutboundStart);
+    engine.process_event(E::LinkOpened);
+    engine.process_event(E::InitAckReceived);
+    engine.process_event(E::OpenAckReceived);
+    assert_eq!(engine.get_current_state(), S::Established);
+}
+
+/// `BURST` real frames, each carrying a Put with a distinct one-byte payload,
+/// captured from this tree's OWN encoder by publishing them.
+///
+/// Not hand-rolled: a codec change should red this fixture rather than leave it
+/// describing a message nobody sends. The publishing session takes a different
+/// zid because the sender is a peer — with the fixture default on both sides the
+/// receiver reads the replay as its own echo and drops it, which is a way for
+/// this test to pass while proving nothing.
+fn burst_of_frames() -> Vec<Vec<u8>> {
+    let recorder = Arc::new(LifecycleRecordingDriver::default());
+    let outbound: Arc<dyn BoxedLinkDriver + Send + Sync> = recorder.clone();
+    let mut params = fixture_session_init_params();
+    params.zid = vec![0x02; 4];
+    let actions = new_session_actions(outbound, params, TokioTime::new());
+    *actions
+        .link
+        .established_at
+        .lock()
+        .expect("established_at poisoned in fixture") = Some(actions.clock.now_monotonic_ms());
+    let session = TokioSession::new(
+        actions,
+        Arc::new(Mutex::new(ApplicationLayerObserver::new())),
+        Arc::new(TokioTime::new()),
+    );
+    for i in 0..BURST {
+        session
+            .publish(
+                KEYEXPR,
+                &[i as u8],
+                PublishOptions::put().with_locality(wz_runtime_tokio::locality::Locality::Remote),
+            )
+            .expect("the capture publish reaches the wire");
+    }
+    let snap = recorder.snapshot();
+    assert_eq!(
+        snap.sends.len(),
+        BURST,
+        "the capture must be one frame per sample, or the replay below is ambiguous"
+    );
+    snap.sends.into_iter().map(|(bytes, _)| bytes).collect()
+}
+
+/// The claim: every sample of an over-capacity burst reaches a lagging consumer,
+/// because the drive loop waited for it.
+///
+/// ⚠ SINGLE-THREADED on purpose, and that is what makes this a discriminator
+/// rather than a race. Dropping the newest sample has no await in it, so on one
+/// thread the drain that finds a full queue runs to completion before the reader
+/// can be polled at all: the loss is forced, not raced for. Waiting DOES have an
+/// await, so the same drain yields, the reader runs, and delivery continues.
+/// The two implementations are separated by the runtime's own scheduling
+/// guarantee instead of by who happens to win.
+#[tokio::test]
+async fn the_drive_loop_waits_for_a_lagging_buffered_consumer() {
+    let outbound: Arc<dyn BoxedLinkDriver + Send + Sync> = Arc::new(NoopOutboundDriver::default());
+    let actions: Arc<SessionLinkActions> =
+        new_session_actions(outbound, fixture_session_init_params(), TokioTime::new());
+    let mut engine = new_session_engine(&actions);
+    engine.initialize();
+    established(&mut engine);
+
+    let observer = Arc::new(Mutex::new(ApplicationLayerObserver::new()));
+    let session = TokioSession::new(actions.clone(), observer, Arc::new(TokioTime::new()));
+    let (_subscriber, mut rx) = session
+        .declare_subscriber_buffered(
+            "demo/**",
+            SubscribeOptions::default(),
+            CAPACITY,
+            |sample: &dyn wz_session_core::sink::SampleView| sample.payload().to_vec(),
+        )
+        .expect("buffered subscriber declares");
+
+    // ⛔ THE CONSUMER MUST NOT READ BEFORE THE QUEUE IS FULL, and this is the
+    // whole anti-vacuity condition. MEASURED: the first draft let the reader
+    // start at once, and because the loop drains after EVERY frame the queue
+    // never held more than one sample — so the control (drop instead of wait)
+    // PASSED, delivering all six. A witness whose buffer never fills cannot tell
+    // backpressure from dropping, whatever it asserts.
+    //
+    // The release is the drain-ENTRY count, not a sleep: `CAPACITY` drains fill
+    // the queue, so drain number `CAPACITY + 1` is the one whose behaviour the
+    // two implementations disagree about. Releasing the reader there cannot
+    // deadlock — that drain is exactly the one the reader is about to unblock.
+    let drains = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let drains_seen = drains.clone();
+    let reader = tokio::spawn(async move {
+        // Bounded: a loop that never reaches the full-buffer drain must fail the
+        // assertion below rather than hang the suite.
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while drains_seen.load(std::sync::atomic::Ordering::SeqCst) <= CAPACITY {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await;
+        let mut got: Vec<Vec<u8>> = Vec::new();
+        while got.len() < BURST {
+            // Every `recv` is BOUNDED: the sender lives as long as the
+            // subscription, so a lost sample never closes the channel and an
+            // unbounded wait would HANG instead of failing. (Measured: the
+            // sibling unit test's first draft hung its own control this way.)
+            match tokio::time::timeout(std::time::Duration::from_secs(5), rx.recv()).await {
+                Ok(Some(item)) => got.push(item),
+                Ok(None) | Err(_) => break,
+            }
+            tokio::task::yield_now().await;
+        }
+        got
+    });
+
+    let events: Vec<LinkEvent> = burst_of_frames()
+        .into_iter()
+        .map(|wire| LinkEvent::Rx(RxFrame::new(wire)))
+        .collect();
+    let mut driver = QueueDriver::with(events);
+    let clock = TokioTime::new();
+    let session_dispatch = session.clone();
+    let session_drain = session.clone();
+    let _ = drive_session_until_terminal_with_extra_deadline(
+        &mut driver,
+        &actions,
+        &mut engine,
+        Some(BURST),
+        &clock,
+        &SessionTimeouts::spec_defaults(),
+        move |event| session_dispatch.dispatch_iteration_event(event),
+        ExtraDeadline {
+            next_ms: || None,
+            revised: None,
+        },
+        LoopStages {
+            ingress: |_: &mut DriverLoopOutcome| {},
+            // THE SEAM UNDER TEST — everything else here is production code.
+            // The count is the caller's own bookkeeping, taken BEFORE the drain
+            // is polled: on a single-threaded runtime nothing can run between
+            // the two, so the reader cannot have consumed anything by the time
+            // the full-buffer drain makes its choice.
+            after_dispatch: move || {
+                let session = session_drain.clone();
+                drains.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                async move { session.drain_buffered().await }
+            },
+        },
+    )
+    .await;
+
+    let got = reader.await.expect("reader task panicked");
+    assert_eq!(
+        got,
+        (0..BURST).map(|i| vec![i as u8]).collect::<Vec<_>>(),
+        "every sample of a {BURST}-sample burst must reach a lagging consumer \
+         through a queue of {CAPACITY} -- the loop waited for it. Fewer means \
+         the loop dropped what it could not hand over."
+    );
+}
