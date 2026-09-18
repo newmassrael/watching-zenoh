@@ -527,14 +527,18 @@ pub struct SessionCore<R: SessionRuntime, T: TimeSource> {
     #[cfg(feature = "session-close-ingress")]
     pub requested_close: R::Mutex<bool>,
     /// R2708 (open-debt item 785) — what this session owes its drive loop every
-    /// iteration, opaque to this crate. See
-    /// [`SessionRuntime::IterationWork`](crate::link::SessionRuntime::IterationWork)
-    /// for why it is an associated type rather than something named here.
+    /// iteration, opaque to this crate. See `SessionRuntime::IterationWork` for
+    /// why it is an associated type rather than something named here.
     ///
-    /// Per SESSION and not per link, for the reason
-    /// [`Self::requested_close`] gives one field up: an aggregated session's
-    /// second link must not be able to deliver while the first is stalled, and
-    /// the consumer a buffered subscription feeds belongs to the session.
+    /// Per SESSION and not per link, for the reason `requested_close` gives one
+    /// field up: an aggregated session's second link must not be able to
+    /// deliver while the first is stalled, and the consumer a buffered
+    /// subscription feeds belongs to the session.
+    ///
+    /// ⚠ Code spans rather than links, both of them: an associated type does
+    /// not resolve through that path form, and `requested_close` is
+    /// `#[cfg]`-gated, so a link to it breaks in every build without that
+    /// feature. C1bz counted one of them.
     pub iteration_work: R::IterationWork,
     pub params: SessionInitParams,
     /// The largest message this profile can REASSEMBLE, in bytes — the TX
