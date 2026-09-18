@@ -850,7 +850,7 @@ impl InterestCensus {
             let batch = match &frame.carried {
                 Carried::Batch(batch) => batch,
                 #[cfg(feature = "reassembly")]
-                Carried::Reassembled(batch) => batch,
+                Carried::Reassembled { batch, .. } => batch,
                 // Named individually rather than caught, on `agg`'s rule: a new
                 // `Carried` variant must fail to compile here instead of
                 // joining the silent set. None of these carries a batch, so

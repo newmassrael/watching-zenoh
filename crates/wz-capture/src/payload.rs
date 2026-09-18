@@ -1086,7 +1086,7 @@ impl PayloadCensus {
         match &frame.carried {
             Carried::Batch(batch) => self.observe_batch(spaces, frame, batch, filter),
             #[cfg(feature = "reassembly")]
-            Carried::Reassembled(batch) => self.observe_batch(spaces, frame, batch, filter),
+            Carried::Reassembled { batch, .. } => self.observe_batch(spaces, frame, batch, filter),
             // Matched by name for the reason R311y614 matched them by name
             // in the throughput plane: a new `Carried` variant must fail to
             // compile here rather than join the silent set.

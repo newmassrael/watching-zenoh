@@ -708,8 +708,30 @@ pub enum Carried {
     #[cfg(feature = "reassembly")]
     Fragment(IngestOutcome),
     /// A fragment that COMPLETED a chain, and the batch reassembled out of it.
+    ///
+    /// R2706 — WITH THE BUFFER THE PARSE REFERS TO. [`BatchParse::spans`] is
+    /// documented as "(offset, len) within this payload", and for every other
+    /// arm that payload is on the wire, so a consumer holding the capture can
+    /// go and look. A reassembled payload exists only inside this reader and
+    /// was, until this round, dropped the moment the parse came back — so those
+    /// spans named a buffer nobody could hold, which is a coordinate with no
+    /// referent rather than a coordinate into the capture.
+    ///
+    /// Carrying it costs no copy: the joiner already owns the bytes as a
+    /// `Vec<u8>` and handed them to the parser by reference. It is what lets a
+    /// reader dissect a record whose bytes were never contiguous — see
+    /// `wz-capture`'s field document, which had no route to one.
+    ///
+    /// ⚠ These offsets are NOT capture offsets and must never be published as
+    /// such. [`PassiveFrame::batch_offset`] stays `None` here for exactly that
+    /// reason, and its doc states the rule.
     #[cfg(feature = "reassembly")]
-    Reassembled(BatchParse),
+    Reassembled {
+        /// The batch parsed out of the joined payload.
+        batch: BatchParse,
+        /// The joined payload — the buffer `batch.spans` index into.
+        joined: alloc::vec::Vec<u8>,
+    },
     /// A fragment arrived before this observer saw an InitAck, so the
     /// session's SN resolution is unknown and no chain can be tracked.
     ///
@@ -1908,7 +1930,13 @@ impl PassiveSession {
                         Some(b) => {
                             #[cfg(all(feature = "dissect", feature = "codec-declare"))]
                             self.fold_keyexprs(direction, &b);
-                            Carried::Reassembled(b)
+                            // R2706 — the buffer travels WITH the parse. It was
+                            // already owned here and dropped one line later,
+                            // taking the referent of `b.spans` with it.
+                            Carried::Reassembled {
+                                batch: b,
+                                joined: bytes,
+                            }
                         }
                         None => Carried::Undecompressible,
                     },
@@ -2689,9 +2717,18 @@ mod tests {
         s.push(Direction::A, &framed(&fragment_wire(1, false, tail), 2));
         let last = s.next_frame(Direction::A).expect("fragment 2");
         match last.carried {
-            Carried::Reassembled(b) => {
+            Carried::Reassembled { batch: b, joined } => {
                 assert!(b.is_complete(), "reassembled batch halted: {:?}", b.halt);
                 assert_eq!(b.messages.len(), 1);
+                // R2706 — the buffer the spans index into travelled with them,
+                // and it is the JOINED payload rather than either fragment's
+                // slice: without this the assertion above holds over a variant
+                // that kept an empty buffer beside a real parse.
+                assert_eq!(
+                    joined.len(),
+                    b.spans.iter().map(|(_, len)| len).sum::<usize>() + b.unparsed_bytes,
+                    "the joined buffer must account for every parsed byte"
+                );
             }
             other => panic!("expected a reassembled batch, got {other:?}"),
         }

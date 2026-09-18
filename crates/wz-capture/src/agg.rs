@@ -937,7 +937,7 @@ impl KeyexprSpaces {
         let batch = match &frame.carried {
             Carried::Batch(batch) => batch,
             #[cfg(feature = "reassembly")]
-            Carried::Reassembled(batch) => batch,
+            Carried::Reassembled { batch, .. } => batch,
             Carried::Undecompressible => return,
             #[cfg(feature = "reassembly")]
             Carried::FragmentWithoutResolution => return,
@@ -1452,7 +1452,7 @@ impl ThroughputTable {
             match &frame.carried {
                 Carried::Batch(batch) => self.observe_batch(spaces, frame, anchor, batch, filter),
                 #[cfg(feature = "reassembly")]
-                Carried::Reassembled(batch) => {
+                Carried::Reassembled { batch, .. } => {
                     // R2211 (item 565) — a chain ENDED here, and this is the
                     // only arm that can say so: the router reports
                     // `IngestOutcome::Reassembled` by filling the observer's

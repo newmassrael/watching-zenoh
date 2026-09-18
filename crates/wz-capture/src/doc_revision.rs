@@ -891,6 +891,44 @@ pub const DOCUMENT_HISTORY: &[DocumentShape] = &[
         planes: &[],
         carries: FIELDS_R10_CARRIES,
     },
+    // R2706 — THE SESSION'S OWN VERDICT REACHES THIS DOCUMENT.
+    //
+    // Two keys arrive and none retires: every row gains `above_transport`, an
+    // object whose `carried_state` names what the session made of that frame's
+    // payload. It closes two absences a reporting consumer measured, and both
+    // are the same seam — this document reached the bytes and walked them a
+    // second time, and that walk is structurally blind to anything the session
+    // had to RECONSTRUCT:
+    //
+    // 1. a completed fragment chain's records. On the consumer's frozen capture
+    //    85 of 99 rows were `Fragment`s and the 5 `Push`es those chains carried
+    //    had no row at all, while the census counted them under
+    //    `unlocatable_records`. They now arrive under `above_transport.carried`
+    //    with the same `message` / `keyexpr` / `keyexpr_cause` shape every
+    //    walked row's entries carry, plus `above_transport.fields`.
+    // 2. a body the session could not decompress. `dissect_batch` has no lz4,
+    //    so it walked the compressed bytes and halted at whatever record first
+    //    failed, reporting a MID word indistinguishable from one this build's
+    //    wire vintage does not know. The row now says `undecompressible`.
+    //
+    // ⚠ THE SPANS UNDER `reassembled` ARE NOT CAPTURE OFFSETS — they index the
+    // buffer the chain was joined in. The word is what qualifies them, and the
+    // row's own `offset_space` is untouched and still means where the FRAGMENT
+    // stands, which stays measured. `PassiveFrame::batch_offset`, `None` for
+    // exactly these payloads, is where that rule is stated.
+    //
+    // A consumer pinned to 11 that read a `Fragment` row's silence as "this
+    // traffic carried nothing" read it wrong, and that is the notice this
+    // number carries.
+    DocumentShape {
+        document: FIELDS,
+        revision: 12,
+        keys: FIELDS_R12_KEYS,
+        retiring: &[],
+        families: FIELDS_R12_FAMILIES,
+        planes: &[],
+        carries: FIELDS_R12_CARRIES,
+    },
     DocumentShape {
         document: SUMMARY,
         revision: 1,
@@ -3384,6 +3422,100 @@ pub const FIELDS_R11_KEYS: &[&str] = &[
     "wrong",
 ];
 
+/// The field document's keys at revision 12 — revision 11's PLUS
+/// `above_transport` and `carried_state`.
+///
+/// R2706. Two keys for one object: every row gains `above_transport`, whose
+/// `carried_state` is the session's own verdict on what this frame carried
+/// above the transport layer. `fields` and `carried` appear inside it with
+/// their existing meanings and are therefore not additions.
+///
+/// ⚠ `carried_state` rather than reusing `state`, and the reason is mechanical
+/// rather than stylistic: a [`ValueFamily`] is keyed by the KEY NAME alone, so
+/// widening `state`'s family would let `payload_decode.state` legally carry
+/// `reassembled` — two vocabularies under one declaration, which is the drift
+/// every family here exists to prevent.
+pub const FIELDS_R12_KEYS: &[&str] = &[
+    "above_transport",
+    "addr",
+    "caps",
+    "capture_reread",
+    "carried",
+    "carried_state",
+    "datagram_flows",
+    "declaration_checked",
+    "declared",
+    "descriptor_bytes",
+    "despite_encoding",
+    "direction",
+    "document",
+    "dropped_by_limits",
+    "end",
+    "example",
+    "fields",
+    "flow",
+    "flows",
+    "format",
+    "frames",
+    "frames_per_flow",
+    "high",
+    "keyexpr",
+    "keyexpr_cause",
+    "kind",
+    "link",
+    "low",
+    "max_flows_per_table",
+    "max_scout_askers",
+    "message",
+    "message_at",
+    "messages",
+    "name",
+    "note",
+    "offset_space",
+    "omitted",
+    "path",
+    "payload_decode",
+    "payload_mapping",
+    "payload_mapping_counts_exact",
+    "payload_refusals",
+    "port",
+    "revision",
+    "samples",
+    "scout_askers",
+    "scouting",
+    "shown",
+    "skipped",
+    "skipped_packets",
+    "start",
+    "state",
+    "stream_bytes",
+    "stream_bytes_per_direction",
+    "stream_flows",
+    "under",
+    "value",
+    "why",
+    "wrong",
+];
+
+/// What `carried_state` decides at revision 12 — one word per [`Carried`]
+/// variant, and the enum is the population.
+///
+/// R2706. Written out here and derived in `fields_json::carried_state` by an
+/// EXHAUSTIVE match, so a new variant fails to compile there rather than
+/// arriving under a word this table never declared.
+///
+/// ⚠ `reassembled` is the word that qualifies a coordinate: the spans under
+/// that object index the buffer the chain was joined in, which exists only
+/// inside the reader. Every other word carries no spans of its own.
+pub const CARRIED_STATE_R12: &[&str] = &[
+    "batch",
+    "fragment",
+    "fragment_without_resolution",
+    "nothing",
+    "reassembled",
+    "undecompressible",
+];
+
 /// The value families the field document declares at revision 7.
 ///
 /// Round 2447 (open-debt item 696) — revision 6's PLUS `link`, whose words come
@@ -3655,6 +3787,53 @@ pub const FIELDS_R10_FAMILIES: &[ValueFamily] = &[
     },
 ];
 
+/// The value families the field document declares at revision 12 — revision
+/// 10's PLUS `carried_state`.
+///
+/// R2706. See [`CARRIED_STATE_R12`] for why the key is not `state`.
+pub const FIELDS_R12_FAMILIES: &[ValueFamily] = &[
+    ValueFamily {
+        key: "carried_state",
+        values: CARRIED_STATE_R12,
+    },
+    ValueFamily {
+        key: "direction",
+        values: DIRECTION_FIELDS_R2,
+    },
+    ValueFamily {
+        key: "keyexpr_cause",
+        values: UNRESOLVED_CAUSE_R11,
+    },
+    ValueFamily {
+        key: "kind",
+        values: FIELD_VALUE_KIND_R3,
+    },
+    ValueFamily {
+        key: "link",
+        values: LINK_KIND_R7,
+    },
+    ValueFamily {
+        key: "message",
+        values: MESSAGE_R10,
+    },
+    ValueFamily {
+        key: "offset_space",
+        values: ANCHOR_SPACE_FIELDS_R2,
+    },
+    ValueFamily {
+        key: "state",
+        values: PAYLOAD_STATE_R2,
+    },
+    ValueFamily {
+        key: "under",
+        values: REFUSED_UNDER_R2,
+    },
+    ValueFamily {
+        key: "wrong",
+        values: MISBOUND_R2,
+    },
+];
+
 /// What each field-document family's WORD decides at revision 10 — revision
 /// 9's, with `offset_space` read from [`FIELD_OFFSET_SPACE_CARRIES_R10`].
 ///
@@ -3855,6 +4034,146 @@ pub const FIELD_OFFSET_SPACE_CARRIES_R10: &[WordCarries] = &[
                 "payload_decode",
             ],
         ],
+    },
+];
+
+/// Every shape each `offset_space` word's row takes at revision 12 — revision
+/// 10's, each PLUS `above_transport`.
+///
+/// R2706. The key is on EVERY row with a session frame and on a scouting row as
+/// `null`, so it joins every shape rather than splitting any: no word gains a
+/// companion set here, which is what says this addition is uniform. The shapes
+/// are spelled out rather than derived from the table above because a `const`
+/// cannot append to a slice, and because the next round to add a key must SEE
+/// the sets it is joining.
+pub const FIELD_OFFSET_SPACE_CARRIES_R12: &[WordCarries] = &[
+    WordCarries {
+        word: "packet",
+        shapes: &[
+            &[
+                "above_transport",
+                "carried",
+                "direction",
+                "fields",
+                "name",
+                "packet",
+            ],
+            &[
+                "above_transport",
+                "carried",
+                "direction",
+                "fields",
+                "name",
+                "packet",
+                "payload_decode",
+            ],
+        ],
+    },
+    WordCarries {
+        word: "stream_byte",
+        shapes: &[
+            &[
+                "above_transport",
+                "carried",
+                "direction",
+                "fields",
+                "message_at",
+                "name",
+            ],
+            &[
+                "above_transport",
+                "carried",
+                "direction",
+                "fields",
+                "message_at",
+                "name",
+                "payload_decode",
+            ],
+        ],
+    },
+];
+
+/// Every shape each `carried_state` word's object takes at revision 12.
+///
+/// R2706. A DISCRIMINANT rather than a passenger, and that is the whole reason
+/// the key exists: `reassembled` is the one word whose object carries the
+/// records and their tree, and a reader switching on it goes on to read keys no
+/// other word brings. Every other word's object is the word alone.
+/// ⚠ The shapes are the word's COMPANIONS, so five of the six are EMPTY: the
+/// word arrives alone in its object. `reassembled` is the one that brings keys,
+/// which is exactly what a discriminant is.
+pub const CARRIED_STATE_CARRIES_R12: &[WordCarries] = &[
+    WordCarries {
+        word: "batch",
+        shapes: &[&[]],
+    },
+    WordCarries {
+        word: "fragment",
+        shapes: &[&[]],
+    },
+    WordCarries {
+        word: "fragment_without_resolution",
+        shapes: &[&[]],
+    },
+    WordCarries {
+        word: "nothing",
+        shapes: &[&[]],
+    },
+    WordCarries {
+        word: "reassembled",
+        shapes: &[&["carried", "fields"]],
+    },
+    WordCarries {
+        word: "undecompressible",
+        shapes: &[&[]],
+    },
+];
+
+/// What each field-document family's WORD decides at revision 12 — revision
+/// 10's, PLUS `carried_state` and with `offset_space` read from
+/// [`FIELD_OFFSET_SPACE_CARRIES_R12`].
+///
+/// R2706.
+pub const FIELDS_R12_CARRIES: &[KeyCarries] = &[
+    KeyCarries {
+        key: "carried_state",
+        shape: CarriesShape::Discriminant(CARRIED_STATE_CARRIES_R12),
+    },
+    KeyCarries {
+        key: "direction",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "keyexpr_cause",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "kind",
+        shape: CarriesShape::Discriminant(FIELD_VALUE_KIND_CARRIES_R4),
+    },
+    KeyCarries {
+        key: "link",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "message",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "offset_space",
+        shape: CarriesShape::Discriminant(FIELD_OFFSET_SPACE_CARRIES_R12),
+    },
+    KeyCarries {
+        key: "state",
+        shape: CarriesShape::Discriminant(PAYLOAD_STATE_CARRIES_R4),
+    },
+    KeyCarries {
+        key: "under",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "wrong",
+        shape: CarriesShape::Passenger,
     },
 ];
 
@@ -5817,7 +6136,11 @@ mod tests {
             // is the axis; the rows are the notice.
             // R2630 (item 745) — to 11, the census entry's twin: the same
             // `dropped_by_limits` group gained `scouting`.
-            (FIELDS, 11),
+            // R2706 — to 12 when every row gained `above_transport`: the
+            // session's own verdict on what the frame carried, which is the
+            // only route to a record whose bytes were never contiguous and the
+            // only word that tells a compressed body from an unknown MID.
+            (FIELDS, 12),
             // R2121 (open-debt item 460) — the summary moved to 2 when it
             // gained `inert_counters`; R2122 (item 238) to 3 when its
             // `framing` group stopped disagreeing with the capture report's.

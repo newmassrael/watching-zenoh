@@ -400,6 +400,7 @@ fn push_stream_flow(
                 &message_name(frame),
                 spaces,
                 declarations,
+                Some(&frame.carried),
                 out,
             ),
         }
@@ -476,6 +477,7 @@ fn push_datagram_flow(
             &message_name(frame),
             spaces,
             declarations,
+            Some(&frame.carried),
             out,
         );
         out.push('}');
@@ -530,6 +532,9 @@ fn push_datagram_flow(
             &scouting_name(datagram),
             spaces,
             declarations,
+            // A scouting datagram is not a session frame: there is no `Carried`
+            // to report, and `null` says so rather than leaving the key absent.
+            None,
             out,
         );
         out.push('}');
@@ -652,6 +657,10 @@ fn push_walk(
     framed: &str,
     spaces: &crate::agg::KeyexprSpaces,
     declarations: Option<&Declarations<'_>>,
+    // R2706 — what the SESSION made of this frame, for the two facts a second
+    // walk over these bytes structurally cannot reach. `None` for a scouting
+    // row, which has no session frame. See [`push_above_transport`].
+    carried: Option<&wz_session_core::passive::Carried>,
     out: &mut String,
 ) {
     match space.walk(bytes) {
@@ -719,6 +728,12 @@ fn push_walk(
             }
         }
     }
+    // R2706 — AFTER THE MATCH, so every arm carries it. A row whose second walk
+    // was DECLINED still had a session verdict, and that is the case where this
+    // matters most: the reader is being told these bytes could not be walked
+    // here, and `above_transport` is the only thing on the row that can say
+    // whether the session nonetheless read what they carried.
+    push_above_transport(carried, KeyexprAt::new(direction, spaces), out);
 }
 
 fn push_declined(why: &str, out: &mut String) {
@@ -907,6 +922,195 @@ fn batched_records(
         })
         .map(|records| records.iter().filter(|r| r.name != "unparsed").collect())
         .unwrap_or_default()
+}
+
+/// R2706 — WHAT THE SESSION MADE OF THIS FRAME'S PAYLOAD, which this row's own
+/// bytes cannot show.
+///
+/// # The gap this closes
+///
+/// Every other key on a row comes from walking the row's bytes a second time
+/// ([`push_walk`] → `dissect_transport_message`). That walk is complete for a
+/// message whose bytes were contiguous on the wire and it is STRUCTURALLY blind
+/// to two cases the session already decided:
+///
+/// * a `Fragment` that COMPLETED a chain carries records whose bytes were never
+///   contiguous, so no second walk over this row can reach them. A reporting
+///   consumer measured the cost on its own frozen capture: 85 of 99 rows were
+///   `Fragment`s, the census attributed the 5 `Push`es those chains carried, and
+///   this document had no row saying any of them happened. Silence there is not
+///   "nothing travelled" — it is indistinguishable from it.
+/// * a `Frame` whose body the session could not decompress. `dissect_batch` has
+///   no lz4 and never has (`grep -ci decompress` over `dissect.rs` answers 0),
+///   so it walks the compressed bytes and halts wherever a record first fails —
+///   reporting `UnknownMid`, a word that cannot be told apart from a MID this
+///   build's wire vintage genuinely does not know.
+///
+/// Both facts are already on the frame, in [`Carried`], and were already read by
+/// every census plane. This document simply never asked.
+///
+/// # Why the word rather than an absence
+///
+/// Emitted on every row that has a session frame, whatever it says, on the
+/// `keyexpr_cause` rule this document already follows: a consumer cannot tell
+/// "this build stopped emitting it" from "this frame carried nothing" out of an
+/// absence. A scouting row has no session frame and no `Carried` to report, and
+/// answers `null` for the same reason.
+///
+/// # ⚠ The spans under `reassembled` are NOT capture offsets
+///
+/// They index the buffer the chain was joined in, which exists only inside the
+/// reader. `PassiveFrame::batch_offset` states the rule this obeys — "handing
+/// out the buffer's offset is how a fabricated coordinate gets read as a
+/// measured one" — and it is why the coordinate is named by the WORD here
+/// rather than left for a reader to infer from the row's `offset_space`, which
+/// keeps its own meaning: where the FRAGMENT stands in the capture, a fact that
+/// remains true and measured.
+///
+/// Matched exhaustively and by name, on the rule `agg::absorb_frame` states: a
+/// new `Carried` variant must fail to compile here rather than fall into a
+/// catch-all that reports it as something it is not.
+fn carried_state(carried: &wz_session_core::passive::Carried) -> CarriedState {
+    use wz_session_core::passive::Carried;
+    match carried {
+        Carried::Nothing => CarriedState::Nothing,
+        Carried::Batch(_) => CarriedState::Batch,
+        Carried::Undecompressible => CarriedState::Undecompressible,
+        #[cfg(feature = "reassembly")]
+        Carried::Fragment(_) => CarriedState::Fragment,
+        #[cfg(feature = "reassembly")]
+        Carried::Reassembled { .. } => CarriedState::Reassembled,
+        #[cfg(feature = "reassembly")]
+        Carried::FragmentWithoutResolution => CarriedState::FragmentWithoutResolution,
+    }
+}
+
+/// The word `above_transport.carried_state` carries, as a closed type.
+///
+/// A type rather than a `&'static str` return, on `AnchorSpace`'s rule: a
+/// vocabulary a consumer SWITCHES on is declared per revision and that
+/// declaration is joined to a WALK, and a walk needs something to walk. The
+/// chain below visits every word without a written list, so a state added here
+/// fails at `cargo build` rather than at review.
+///
+/// ⚠ NOT `#[cfg]`-gated, while [`carried_state`]'s match arms are. The six
+/// words are what this DOCUMENT can ever report, and a consumer switching on
+/// one must handle all six however the producer was built — a vocabulary that
+/// shrank with the emitter's feature set would make "this build cannot say
+/// `reassembled`" and "this capture had no chains" the same answer, which is
+/// the class this whole object exists to separate.
+#[derive(Clone, Copy)]
+enum CarriedState {
+    Batch,
+    Fragment,
+    FragmentWithoutResolution,
+    Nothing,
+    Reassembled,
+    Undecompressible,
+}
+
+impl CarriedState {
+    const fn name(self) -> &'static str {
+        match self {
+            Self::Batch => "batch",
+            Self::Fragment => "fragment",
+            Self::FragmentWithoutResolution => "fragment_without_resolution",
+            Self::Nothing => "nothing",
+            Self::Reassembled => "reassembled",
+            Self::Undecompressible => "undecompressible",
+        }
+    }
+
+    /// The next state, so the walk visits every arm without a list.
+    ///
+    /// `#[cfg(test)]` with its caller rather than one condition wider: the
+    /// vocabulary gate is the only consumer, and a helper gated more widely
+    /// than what uses it is dead code in exactly the build nobody runs locally.
+    /// `name` above is NOT gated — the emitter calls it.
+    #[cfg(test)]
+    fn next(self) -> Option<Self> {
+        Some(match self {
+            Self::Batch => Self::Fragment,
+            Self::Fragment => Self::FragmentWithoutResolution,
+            Self::FragmentWithoutResolution => Self::Nothing,
+            Self::Nothing => Self::Reassembled,
+            Self::Reassembled => Self::Undecompressible,
+            Self::Undecompressible => return None,
+        })
+    }
+
+    /// Every word [`Self::name`] can return, WALKED rather than written down.
+    #[cfg(test)]
+    pub(crate) fn names() -> Vec<&'static str> {
+        let mut out = Vec::new();
+        let mut cur = Some(Self::Batch);
+        while let Some(v) = cur {
+            out.push(v.name());
+            cur = v.next();
+        }
+        out
+    }
+}
+
+/// Render `above_transport` for one row.
+///
+/// The `reassembled` arm dissects the JOINED buffer with the same
+/// `dissect_batch` every other batch goes through, and resolves each record's
+/// key through the same `subtree_keyexpr_outcome` [`push_carried`] uses. Two
+/// walkers over one shape, or two keyexpr rules, is the drift this document has
+/// paid for elsewhere; there is one of each.
+fn push_above_transport(
+    carried: Option<&wz_session_core::passive::Carried>,
+    at: KeyexprAt<'_>,
+    out: &mut String,
+) {
+    out.push_str(",\"above_transport\":");
+    let Some(carried) = carried else {
+        out.push_str("null");
+        return;
+    };
+    out.push_str("{\"carried_state\":");
+    escape_into(carried_state(carried).name(), out);
+    #[cfg(feature = "reassembly")]
+    if let wz_session_core::passive::Carried::Reassembled { joined, .. } = carried {
+        let walked = wz_session_core::dissect::dissect_batch(joined, 0);
+        out.push_str(",\"fields\":[");
+        for (i, record) in walked.records.iter().enumerate() {
+            if i > 0 {
+                out.push(',');
+            }
+            out.push_str(&to_json(record));
+        }
+        out.push_str("],\"carried\":[");
+        for (i, record) in walked.records.iter().enumerate() {
+            if i > 0 {
+                out.push(',');
+            }
+            let word = joined
+                .get(record.span.start)
+                .and_then(|b| wz_session_core::dissect::MessageName::of_network(b & 0x1F))
+                .map_or(record.name.as_ref(), |m| m.name());
+            out.push_str("{\"message\":");
+            escape_into(word, out);
+            let _ = write!(
+                out,
+                ",\"start\":{},\"end\":{},\"keyexpr\":",
+                record.span.start, record.span.end
+            );
+            match crate::payload_decode::subtree_keyexpr_outcome(record, at) {
+                Some(Ok(keyexpr)) => escape_into(&keyexpr, out),
+                _ => out.push_str("null"),
+            }
+            out.push_str(",\"keyexpr_cause\":");
+            match crate::payload_decode::subtree_keyexpr_outcome(record, at) {
+                Some(Err(cause)) => escape_into(cause.name(), out),
+                _ => out.push_str("null"),
+            }
+            out.push('}');
+        }
+        out.push(']');
+    }
+    out.push('}');
 }
 
 fn note(
@@ -1650,6 +1854,179 @@ mod tests {
     /// The same fixture with no ext chain at all. It must render neither name,
     /// or this test would pass on a document that names every extension it has
     /// ever heard of regardless of what the capture carried.
+    /// R2706 — A COMPLETED CHAIN'S RECORDS REACH THIS DOCUMENT, WITH NO OFFSET.
+    ///
+    /// The reporting consumer measured the gap this closes: 85 of 99 rows in
+    /// its frozen capture were `Fragment`s, the census attributed the 5 `Push`es
+    /// those chains carried (`unlocatable_records = 5`), and the field document
+    /// had no row from which a reader could learn that any of them happened.
+    /// Not an empty answer — an absent one, which a consumer cannot tell from
+    /// "this traffic carried nothing".
+    ///
+    /// # What is asserted, and what deliberately is not
+    ///
+    /// That the record arrives NAMED, with its key, and with its location
+    /// declared absent rather than fabricated. The span is NOT asserted to be
+    /// anything, because there is nothing in the capture for it to be: the
+    /// buffer those bytes were joined in exists only inside the reader, and
+    /// `PassiveFrame::batch_offset`'s own doc gives the rule this follows —
+    /// "handing out the buffer's offset is how a fabricated coordinate gets
+    /// read as a measured one". `a_reassembled_record_declines_the_offset it
+    /// never had` is the same verdict one plane over, where the selector
+    /// answers `undecided`.
+    ///
+    /// # The control
+    ///
+    /// The same record contiguous on the wire. It must name the `Push` too, or
+    /// this test would pass on an emitter that prints the word for every
+    /// capture; and its entry must carry a span, or "the location is absent"
+    /// would be this document's answer everywhere and say nothing here.
+    #[cfg(all(feature = "reassembly", feature = "network-codecs"))]
+    #[test]
+    fn a_completed_chains_records_are_named_in_the_field_document() {
+        use crate::datagram_tests::{push, sender_space};
+        let record = push(sender_space(0, Some("split/across")), &[0u8; 8]);
+        let (d, file) = crate::datagram_tests::reassembled_record_dissection_with_file(&record);
+
+        // ANTI-VACUITY: the chain really completed, measured by the plane that
+        // already answers for it. Without this, a capture whose fragments never
+        // joined would leave the assertion below with no subject.
+        let census = crate::agg::aggregate(&d);
+        assert_eq!(
+            census.records(),
+            1,
+            "the fragment chain must complete, or this fixture is not the subject"
+        );
+
+        // `(message, keyexpr)` off the same `object_scopes` walk `carried_keys`
+        // uses, rather than a `doc.contains`: a substring would be satisfied by
+        // the word appearing anywhere in the document, including inside the
+        // `fields` tree of a row that carried nothing.
+        // `top_level_entries` hands back the RAW value slice, quotes included,
+        // so the words are unquoted here rather than compared against quoted
+        // literals -- which would read as a typo the first time one was wrong.
+        let named = |doc: &str| -> Vec<(String, String)> {
+            let unquote = |v: &str| v.trim_matches('"').to_string();
+            crate::doc_revision::object_scopes(doc)
+                .into_iter()
+                .filter_map(|scope| {
+                    let message = scope.iter().find(|(k, _)| *k == "message")?.1;
+                    let key = scope.iter().find(|(k, _)| *k == "keyexpr")?.1;
+                    Some((unquote(message), unquote(key)))
+                })
+                .collect()
+        };
+
+        let doc = fields_json(&d, &file, None, None);
+        let pairs = named(&doc);
+        assert!(
+            pairs.iter().any(|(m, _)| m == "Push"),
+            "the record a completed chain carried must be NAMED in the field \
+             document; the census attributes it and this document did not \
+             mention it: {doc}"
+        );
+        assert!(
+            pairs
+                .iter()
+                .any(|(m, k)| m == "Push" && k == "split/across"),
+            "and it must carry the key it travelled under: {doc}"
+        );
+
+        // THE CONTROL: the same session and the same record, carried in ONE
+        // frame. It must name the Push under the ORDINARY `carried` of a walked
+        // row -- so the claim above is about a chain rather than about an
+        // emitter that prints the word for every capture -- and its row must
+        // report `carried_state: batch`, which is what makes `reassembled` a
+        // measured verdict rather than this document's only answer.
+        let (contiguous, control_file) =
+            crate::datagram_tests::contiguous_record_dissection_with_file(&record);
+        let control = fields_json(&contiguous, &control_file, None, None);
+        assert!(
+            named(&control).iter().any(|(m, _)| m == "Push"),
+            "the control must name the Push: {control}"
+        );
+        assert!(
+            control.contains("\"carried_state\":\"batch\""),
+            "the control's frame must report the ordinary batch state: {control}"
+        );
+        assert!(
+            !control.contains("\"carried_state\":\"reassembled\""),
+            "and nothing in it was reassembled: {control}"
+        );
+    }
+
+    /// R2706 — A BODY THE SESSION COULD NOT DECOMPRESS SAYS SO.
+    ///
+    /// The reporting consumer asked what this document does with a `Frame` on a
+    /// session that negotiated compression, and said it could not produce such
+    /// a capture to find out. This tree has had one since R311y621; what it did
+    /// not have was this document rendered over it.
+    ///
+    /// The answer WAS: `dissect_batch` carries no lz4 (`grep -ci decompress`
+    /// over `dissect.rs` answers 0), so it walked the compressed bytes and
+    /// halted at whatever record first failed — reporting a MID word that a
+    /// reader cannot tell apart from one this build's wire vintage genuinely
+    /// does not know. The bytes were there and unreadable, and the document
+    /// said something else.
+    ///
+    /// The answer IS `undecompressible`, from the session that negotiated the
+    /// compression and knows.
+    ///
+    /// # The control
+    ///
+    /// The same shape of session WITHOUT the compression offer. Its frame must
+    /// report `batch`, or this test would pass on a document that says
+    /// `undecompressible` about every frame it cannot walk.
+    #[test]
+    fn a_body_the_session_could_not_decompress_says_so_in_the_field_document() {
+        let (d, file) = crate::datagram_tests::compressed_session_dissection_with_file();
+        let doc = fields_json(&d, &file, None, None);
+        assert!(
+            doc.contains("\"carried_state\":\"undecompressible\""),
+            "a frame whose body the session could not open must say so: {doc}"
+        );
+        // AND THE WALK FABRICATED NOTHING, which is the half of the consumer's
+        // question that was about damage rather than absence: "it walks the
+        // compressed bytes and reports whatever records fall out of them" would
+        // be worse than silence. MEASURED on this capture: the payload group
+        // holds one `unparsed` span and no record, and the row's ordinary
+        // `carried` names the `Frame` alone.
+        //
+        // ⚠ SCOPED TO THIS BODY. The fixture's payload is a four-byte marker,
+        // not the output of a real lz4 compressor, so this says the walk halts
+        // on bytes it cannot read — not that no lz4 frame anywhere could begin
+        // with something that decodes. Naming the state is what makes that
+        // residual harmless: a reader is told the bytes were compressed
+        // whatever the walk did with them.
+        assert!(
+            doc.contains("\"name\":\"unparsed\""),
+            "the walk must leave the body unparsed rather than name records in \
+             it: {doc}"
+        );
+        assert!(
+            !doc.contains("\"message\":\"Push\"") && !doc.contains("\"message\":\"Declare\""),
+            "and it must invent no network record out of compressed bytes: {doc}"
+        );
+
+        // THE CONTROL: the same handshake without the offer, carrying a record
+        // this build CAN read.
+        let record = crate::datagram_tests::push(
+            crate::datagram_tests::sender_space(0, Some("plain/text")),
+            &[0u8; 8],
+        );
+        let (plain_d, plain_file) =
+            crate::datagram_tests::contiguous_record_dissection_with_file(&record);
+        let control = fields_json(&plain_d, &plain_file, None, None);
+        assert!(
+            control.contains("\"carried_state\":\"batch\""),
+            "the control's frame must read as an ordinary batch: {control}"
+        );
+        assert!(
+            !control.contains("\"carried_state\":\"undecompressible\""),
+            "and nothing in it was undecompressible: {control}"
+        );
+    }
+
     #[cfg(feature = "reassembly")]
     #[test]
     fn a_fragments_chain_boundary_markers_are_named_in_the_field_document() {
@@ -1929,7 +2306,7 @@ mod tests {
         // against a rename and against each other and against NOTHING a
         // consumer could read.
         let mut failures: Vec<String> = Vec::new();
-        let live: [(&str, &str, Vec<&'static str>); 14] = [
+        let live: [(&str, &str, Vec<&'static str>); 15] = [
             // R2457 (open-debt item 702) — WHY a keyexpr reference did not
             // resolve. A key a consumer switches on precisely because the two
             // words send it to different places: `no_session` says the
@@ -1972,6 +2349,10 @@ mod tests {
                 wz_session_core::dissect::MessageName::names(),
             ),
             (rev::FIELDS, "state", PayloadDecoding::STATES.to_vec()),
+            // R2706 — the session's verdict words. The walk is the successor
+            // chain on `CarriedState`; what holds it to `Carried` itself is
+            // `carried_state`'s exhaustive match, which a new variant breaks.
+            (rev::FIELDS, "carried_state", CarriedState::names()),
             (rev::FIELDS, "under", RefusedUnder::names()),
             (rev::FIELDS, "wrong", Misbound::names()),
             (rev::FIELDS, "offset_space", crate::AnchorSpace::names()),
@@ -2385,9 +2766,47 @@ mod tests {
         // refused at R2457, one document over.
         let (multilink_d, multilink_file) = crate::agg::tests::multilink_session_with_file();
         let multilink_fields = fields_json(&multilink_d, &multilink_file, None, None);
+        // R2706 — the capture that renders `carried_state = reassembled`, and
+        // the same argument the two entries above make: every other document
+        // here carries `batch`, `nothing` and `fragment`, all of which arrive
+        // with an EMPTY companion set, so the family would be judged a
+        // PASSENGER over a population that holds no discriminating word. This
+        // one completes a chain, which is the only shape whose object brings
+        // `carried` and `fields`.
+        #[cfg(all(feature = "reassembly", feature = "network-codecs"))]
+        let (chain_d, chain_file) = crate::datagram_tests::reassembled_record_dissection_with_file(
+            &crate::datagram_tests::push(
+                crate::datagram_tests::sender_space(0, Some("split/across")),
+                &[0u8; 8],
+            ),
+        );
+        #[cfg(all(feature = "reassembly", feature = "network-codecs"))]
+        let chain_fields = fields_json(&chain_d, &chain_file, None, None);
+        // R2706 — and the two states no other fixture reaches. Every word this
+        // family declares must be RENDERED by something here, which is the rule
+        // that found both of these: a shape asserted by nobody is a declaration
+        // a consumer parses by and nothing checks.
+        #[cfg(feature = "reassembly")]
+        let (midsession_d, midsession_file) =
+            crate::datagram_tests::midsession_fragment_dissection_with_file();
+        #[cfg(feature = "reassembly")]
+        let midsession_fields = fields_json(&midsession_d, &midsession_file, None, None);
+        let (compressed_d, compressed_file) =
+            crate::datagram_tests::compressed_session_dissection_with_file();
+        let compressed_fields = fields_json(&compressed_d, &compressed_file, None, None);
 
-        let mut fields_docs: Vec<&String> =
-            alloc::vec![&with, &without, &withl, &dgram, &multilink_fields];
+        let mut fields_docs: Vec<&String> = alloc::vec![
+            &with,
+            &without,
+            &withl,
+            &dgram,
+            &multilink_fields,
+            &compressed_fields
+        ];
+        #[cfg(all(feature = "reassembly", feature = "network-codecs"))]
+        fields_docs.push(&chain_fields);
+        #[cfg(feature = "reassembly")]
+        fields_docs.push(&midsession_fields);
         fields_docs.extend(arms.iter());
         let docs: [(&str, Vec<&String>); 2] = [
             (rev::FIELDS, fields_docs),

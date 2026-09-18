@@ -6666,8 +6666,19 @@ mod datagram_tests {
     /// exchange and payload planes must drive the SAME capture, and a second
     /// handshake builder in each of their test modules is the copy that drifts.
     pub(crate) fn compressed_session_dissection() -> Dissection {
+        compressed_session_dissection_with_file().0
+    }
+
+    /// The same capture, plus the pcap bytes — for the field document, which
+    /// takes the file as well.
+    ///
+    /// R2706. The reporting consumer that asked what this document does with a
+    /// compressed body could not produce such a capture at all; this tree has
+    /// had one since R311y621 and the document had never been rendered over it.
+    pub(crate) fn compressed_session_dissection_with_file() -> (Dissection, Vec<u8>) {
         let offer = compression_offer();
         let mut d = Dissection::new();
+        let mut packets: Vec<(u32, u32, Vec<u8>)> = Vec::new();
         for (i, (from_low, message)) in [
             (true, init_datagram(false, &offer)),
             (false, init_datagram(true, &offer)),
@@ -6684,8 +6695,14 @@ mod datagram_tests {
                 udp_packet([10, 0, 0, 2], 7447, [10, 0, 0, 1], 43210, &message)
             };
             d.push_packet(LINKTYPE_ETHERNET, i, &packet);
+            packets.push((i as u32, 0, packet));
         }
-        d
+        let refs: Vec<(u32, u32, &[u8])> = packets
+            .iter()
+            .map(|(s, u, b)| (*s, *u, b.as_slice()))
+            .collect();
+        let file = crate::pcap::write(LINKTYPE_ETHERNET, &refs);
+        (d, file)
     }
 
     /// R311y645 (§4.38) — a capture whose data arrives as a COMPLETED fragment
@@ -6705,6 +6722,20 @@ mod datagram_tests {
     /// (the R311y644 mistake, caught the same way).
     #[cfg(all(feature = "reassembly", feature = "network-codecs"))]
     pub(crate) fn reassembled_record_dissection(record: &[u8]) -> Dissection {
+        reassembled_record_dissection_with_file(record).0
+    }
+
+    /// The same capture, plus the pcap bytes it was written from.
+    ///
+    /// The field document takes the FILE as well as the dissection
+    /// (`fields_json(&d, &file, ..)`), so a fixture that hands back only the
+    /// dissection can drive every census plane and not that document. This is
+    /// the body and the caller above is the projection, rather than two
+    /// fixtures that agree today: a chain whose two halves drifted would leave
+    /// one surface reading a capture the other never saw, which is the class
+    /// `marked_fragment_dissection_with_file` is already shaped against.
+    #[cfg(all(feature = "reassembly", feature = "network-codecs"))]
+    pub(crate) fn reassembled_record_dissection_with_file(record: &[u8]) -> (Dissection, Vec<u8>) {
         let split = record.len() / 2;
         assert!(split > 0, "the record must be splittable to be fragmented");
         let fragment = |sn: u8, more: bool, piece: &[u8]| {
@@ -6721,26 +6752,64 @@ mod datagram_tests {
             wire.extend_from_slice(piece);
             wire
         };
-        let mut d = Dissection::new();
-        for (i, (from_low, message)) in [
+        established_session_capture(alloc::vec![
+            fragment(0, true, &record[..split]),
+            fragment(1, false, &record[split..]),
+        ])
+    }
+
+    /// R2706 — THE CONTROL for the fixture above: the same session, the same
+    /// record, carried in ONE frame.
+    ///
+    /// The two differ in exactly the fact under test — whether the record's
+    /// bytes were contiguous on the wire — because both build their session
+    /// through [`established_session_capture`]. A control assembled separately
+    /// would differ in whatever else drifted, and "the field document names this
+    /// record" would stop being a claim about fragmentation.
+    #[cfg(all(feature = "reassembly", feature = "network-codecs"))]
+    pub(crate) fn contiguous_record_dissection_with_file(record: &[u8]) -> (Dissection, Vec<u8>) {
+        let mut wire = alloc::vec![
+            wz_session_core::wire_const::T_MID_FRAME | wz_codecs::wire_const::FLAG_T_FRAME_R,
+            0x02,
+        ];
+        wire.extend_from_slice(record);
+        established_session_capture(alloc::vec![wire])
+    }
+
+    /// A two-sided handshake, then `from_a` in order, as a dissection AND the
+    /// pcap it was written from.
+    ///
+    /// The handshake is what gives the session an SN resolution, which is the
+    /// precondition for a chain to be tracked at all — see
+    /// [`reassembled_record_dissection`].
+    #[cfg(all(feature = "reassembly", feature = "network-codecs"))]
+    fn established_session_capture(from_a: Vec<Vec<u8>>) -> (Dissection, Vec<u8>) {
+        let mut messages = alloc::vec![
             (true, init_datagram(false, &[])),
             (false, init_datagram(true, &[])),
             (true, open_datagram(false)),
             (false, open_datagram(true)),
-            (true, fragment(0, true, &record[..split])),
-            (true, fragment(1, false, &record[split..])),
-        ]
-        .into_iter()
-        .enumerate()
-        {
+        ];
+        for message in from_a {
+            messages.push((true, message));
+        }
+        let mut d = Dissection::new();
+        let mut packets: Vec<(u32, u32, Vec<u8>)> = Vec::new();
+        for (i, (from_low, message)) in messages.into_iter().enumerate() {
             let packet = if from_low {
                 udp_packet([10, 0, 0, 1], 43210, [10, 0, 0, 2], 7447, &message)
             } else {
                 udp_packet([10, 0, 0, 2], 7447, [10, 0, 0, 1], 43210, &message)
             };
             d.push_packet(LINKTYPE_ETHERNET, i, &packet);
+            packets.push((i as u32, 0, packet));
         }
-        d
+        let refs: Vec<(u32, u32, &[u8])> = packets
+            .iter()
+            .map(|(s, u, b)| (*s, *u, b.as_slice()))
+            .collect();
+        let file = crate::pcap::write(LINKTYPE_ETHERNET, &refs);
+        (d, file)
     }
 
     /// R2211 (open-debt item 565) — the establishment `0x7 Patch` offer, at a
@@ -6880,6 +6949,16 @@ mod datagram_tests {
     /// planes have to say so rather than report a capture with nothing in it.
     #[cfg(feature = "reassembly")]
     pub(crate) fn midsession_fragment_dissection() -> Dissection {
+        midsession_fragment_dissection_with_file().0
+    }
+
+    /// The same capture, plus the pcap bytes — for the field document.
+    ///
+    /// R2706. NO handshake, deliberately: that absence is the whole fixture,
+    /// and it is what makes this the only shape that renders
+    /// `carried_state = fragment_without_resolution`.
+    #[cfg(feature = "reassembly")]
+    pub(crate) fn midsession_fragment_dissection_with_file() -> (Dissection, Vec<u8>) {
         let mut wire = alloc::vec![
             wz_session_core::wire_const::T_MID_FRAGMENT
                 | wz_codecs::wire_const::FLAG_T_FRAGMENT_R
@@ -6888,12 +6967,10 @@ mod datagram_tests {
         ];
         wire.extend_from_slice(&[0xDE, 0xAD]);
         let mut d = Dissection::new();
-        d.push_packet(
-            LINKTYPE_ETHERNET,
-            0,
-            &udp_packet([10, 0, 0, 1], 43210, [10, 0, 0, 2], 7447, &wire),
-        );
-        d
+        let packet = udp_packet([10, 0, 0, 1], 43210, [10, 0, 0, 2], 7447, &wire);
+        d.push_packet(LINKTYPE_ETHERNET, 0, &packet);
+        let file = crate::pcap::write(LINKTYPE_ETHERNET, &[(0u32, 0u32, packet.as_slice())]);
+        (d, file)
     }
 
     /// The offer above is written by hand at the CHAIN level, so what it writes

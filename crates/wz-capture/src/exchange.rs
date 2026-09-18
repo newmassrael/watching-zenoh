@@ -412,7 +412,7 @@ impl ExchangeTable {
         match &frame.carried {
             Carried::Batch(batch) => self.observe_batch(spaces, open, list, frame, batch, filter),
             #[cfg(feature = "reassembly")]
-            Carried::Reassembled(batch) => {
+            Carried::Reassembled { batch, .. } => {
                 self.observe_batch(spaces, open, list, frame, batch, filter)
             }
             // Matched by name for the reason R311y614 matched them by name
