@@ -394,13 +394,15 @@ fn push_stream_flow(
         match flow.message_bytes(frame) {
             Err(why) => push_declined(&why, out),
             Ok(bytes) => push_walk(
-                bytes,
-                MidSpace::Transport,
-                frame.direction,
-                &message_name(frame),
-                spaces,
-                declarations,
-                Some(&frame.carried),
+                RowWalk {
+                    bytes,
+                    space: MidSpace::Transport,
+                    direction: frame.direction,
+                    framed: &message_name(frame),
+                    spaces,
+                    declarations,
+                    carried: Some(&frame.carried),
+                },
                 out,
             ),
         }
@@ -471,13 +473,15 @@ fn push_datagram_flow(
             crate::anchor_space_of(frame).name()
         );
         push_walk(
-            message,
-            MidSpace::Transport,
-            frame.direction,
-            &message_name(frame),
-            spaces,
-            declarations,
-            Some(&frame.carried),
+            RowWalk {
+                bytes: message,
+                space: MidSpace::Transport,
+                direction: frame.direction,
+                framed: &message_name(frame),
+                spaces,
+                declarations,
+                carried: Some(&frame.carried),
+            },
             out,
         );
         out.push('}');
@@ -526,15 +530,18 @@ fn push_datagram_flow(
             crate::AnchorSpace::PacketIndex.name()
         );
         push_walk(
-            &read.payload,
-            MidSpace::Scouting,
-            datagram.direction,
-            &scouting_name(datagram),
-            spaces,
-            declarations,
-            // A scouting datagram is not a session frame: there is no `Carried`
-            // to report, and `null` says so rather than leaving the key absent.
-            None,
+            RowWalk {
+                bytes: &read.payload,
+                space: MidSpace::Scouting,
+                direction: datagram.direction,
+                framed: &scouting_name(datagram),
+                spaces,
+                declarations,
+                // A scouting datagram is not a session frame: there is no
+                // `Carried` to report, and `null` says so rather than leaving
+                // the key absent.
+                carried: None,
+            },
             out,
         );
         out.push('}');
@@ -650,19 +657,38 @@ fn reread_datagram(
 /// rather than recovered here, because the bytes cannot answer either: `0x01`
 /// is `Init` on a session and `Scout` on the scouting group, and a walker
 /// choosing by byte is the confident wrong answer.
-fn push_walk(
-    bytes: &[u8],
+/// One row's inputs, grouped.
+///
+/// R2706 — a STRUCT rather than an eighth parameter, and the boundary is not
+/// arbitrary: clippy's ceiling is seven and this row needed one more. The
+/// grouping is the whole of what a row is walked FROM, which is why `out` stays
+/// a parameter — it is where the walk goes, not part of its subject.
+struct RowWalk<'a> {
+    /// The message bytes this row was sliced at.
+    bytes: &'a [u8],
+    /// Which MID space to read the first byte in.
     space: MidSpace,
     direction: Direction,
-    framed: &str,
-    spaces: &crate::agg::KeyexprSpaces,
-    declarations: Option<&Declarations<'_>>,
-    // R2706 — what the SESSION made of this frame, for the two facts a second
-    // walk over these bytes structurally cannot reach. `None` for a scouting
-    // row, which has no session frame. See [`push_above_transport`].
-    carried: Option<&wz_session_core::passive::Carried>,
-    out: &mut String,
-) {
+    /// What the SESSION named this message, for the agreement check.
+    framed: &'a str,
+    spaces: &'a crate::agg::KeyexprSpaces,
+    declarations: Option<&'a Declarations<'a>>,
+    /// What the SESSION made of this frame, for the two facts a second walk
+    /// over these bytes structurally cannot reach. `None` for a scouting row,
+    /// which has no session frame. See [`push_above_transport`].
+    carried: Option<&'a wz_session_core::passive::Carried>,
+}
+
+fn push_walk(row: RowWalk<'_>, out: &mut String) {
+    let RowWalk {
+        bytes,
+        space,
+        direction,
+        framed,
+        spaces,
+        declarations,
+        carried,
+    } = row;
     match space.walk(bytes) {
         Err(err) => {
             let mut why = String::from("the field walker refused these bytes: ");
