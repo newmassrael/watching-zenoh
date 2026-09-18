@@ -1979,11 +1979,22 @@ if [[ -n "${WZ_PREPUSH_COUNT_GUARD:-}" ]]; then
         exit 1
     fi
 else
-    # PRINTED rather than silent: a stage that skips without saying so is
-    # indistinguishable from one that ran, which is the reporting defect this
-    # workspace files against its own gates.
+    # PRINTED rather than silent, and SPECIFIC rather than boilerplate.
+    #
+    # R2709's first cut printed one unconditional sentence, which read the same
+    # on a push whose diff cannot move a count and on one that moves seventy --
+    # a skip indistinguishable from a pass, which is the reporting defect this
+    # workspace files against its own gates. `--count-only` runs the gate's OWN
+    # selection (no cargo, no build) and says which of the two this push is, so
+    # a round that added tests sees that it is the second.
+    #
+    # Not a refusal: the selection is cheap but the VERDICT it stands in for is
+    # not, and hosted owns that verdict now. This tells the pusher what they are
+    # deferring.
     echo "pre-push: [gate 4b] count guards DEFERRED to hosted CI (set" \
-        "WZ_PREPUSH_COUNT_GUARD=1 to run them here; ~25min on a wide push)"
+        "WZ_PREPUSH_COUNT_GUARD=1 to run them here)"
+    BX="" python3 scripts/lib/guarded_count_gate.py \
+        --range "$diff_base..$local_sha" --count-only || true
 fi
 
 # ─── gate 6 — changed-crate REDUCED FEATURE COMBINATION (R311y821) ──

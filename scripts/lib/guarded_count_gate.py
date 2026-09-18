@@ -568,6 +568,21 @@ def main():
     # how R2167 established that it would have caught R2166 rather than
     # asserting it. A gate whose enforcement was never measured is a claim.
     ap.add_argument("--run-ci", dest="runci", default=None)
+    # R2709b — SELECT AND STOP, running nothing.
+    #
+    # R2709 moved this gate off the hook's default path because running its
+    # selection costs a cargo build per guard (measured: 74 guards, ~25 minutes
+    # on R2708's push). The deferral message that replaced it said the same
+    # sentence whatever the push contained, so a round that had actually moved a
+    # count read the identical line as one that could not have -- which is the
+    # "a skip that cannot be told from a pass" shape this workspace files
+    # against its own instruments.
+    #
+    # This mode answers only the cheap half of the question: HOW MANY guards
+    # this push reaches. It is the same `select` the full run uses, deliberately
+    # -- a second copy of that rule in the hook would drift from this one the
+    # day either moved, which is this gate's own subject one level up.
+    ap.add_argument("--count-only", action="store_true")
     args = ap.parse_args()
 
     if args.selftest:
@@ -591,6 +606,26 @@ def main():
     files, lines = changed_from_git(args.rng)
     manifest_names = package_manifest_names()
     selected, skipped = select(guards, files, lines, manifest_names, _read_worktree)
+
+    if args.count_only:
+        # ONE LINE, and it says which of the two things happened rather than
+        # leaving a reader to infer it from a number. Exit 0 either way: this
+        # mode reports, it does not judge -- the judging is the full run's, and
+        # hosted CI's.
+        if selected:
+            print(
+                f"guarded-count gate: this push reaches {len(selected)} count "
+                f"guard(s) of {len(guards)} and they were NOT run here. A count "
+                "this push moved will red the hosted lane that owns it; run "
+                "`python3 scripts/lib/guarded_count_gate.py --range "
+                f"{args.rng}` to see it now instead."
+            )
+        else:
+            print(
+                f"guarded-count gate: this push reaches 0 of {len(guards)} count "
+                "guard(s) — its diff cannot move one, so there is nothing to run."
+            )
+        return 0
 
     print(
         f"guarded-count gate: {len(guards)} numeric count guard(s) in "
