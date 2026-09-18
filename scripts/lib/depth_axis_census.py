@@ -994,7 +994,12 @@ CITATION = re.compile(r"\b((?:[A-Za-z0-9_.-]+/)*[A-Za-z0-9_.-]+\.(?:rs|c|h))(?::
 # to that atom, so it arrives already reached, and UNREACHED and NO_SYMBOL hold
 # at 3 and 2. All three pins in this file rise by that one atom's arrival, which
 # is why this is an ADDITION rather than a shift between buckets.
-PIN_REACHED = 23
+# R2702 — 23 -> 22. `access-acl` RETIRES: it graded COMPLETE, so it leaves the
+# PARTIAL population and takes its bucket with it. It was in `reached` (an
+# executing test owned its symbols), which is why this pin falls and UNREACHED /
+# NO_SYMBOL hold — a retirement removes an atom from exactly one bucket, and
+# reporting which one is the whole value of these three numbers being separate.
+PIN_REACHED = 22
 PIN_UNREACHED = 3
 PIN_NO_SYMBOL = 2
 # R2534 — 346 -> 347. The atom is `adminspace-metrics` and the citation is the
@@ -1665,7 +1670,14 @@ PIN_NO_SYMBOL = 2
 # hold, and that is the expected shape here rather than a lucky one: the atom
 # neither entered nor left the PARTIAL population this round, and every added
 # citation is rooted at a tracked file, so neither bucket has a reason to move.
-PIN_WZ_CITATIONS = 132
+# R2702 — 132 -> 119, and the whole drop is one retirement: `access-acl` graded
+# COMPLETE and its reason leaves the PARTIAL population carrying every wz
+# citation it had accumulated, including the four R2701 added and the several
+# this round's correction added. AMBIGUOUS holds at 23, which is the measurement
+# that says the departing citations were all ROOTED — an atom leaving with
+# ambiguous citations of its own would have moved that pin too, as `time-hlc`
+# and `router-hat-router` did above. READ off the census's own FAIL line.
+PIN_WZ_CITATIONS = 119
 # R2626 — 44 -> 42, and this one is worth a sentence because it HELD through
 # every earlier retirement in this run (R2612, R2622). `time-hlc`'s reason is the
 # first retiree carrying AMBIGUOUS citations of its own: its oldest clauses cite
