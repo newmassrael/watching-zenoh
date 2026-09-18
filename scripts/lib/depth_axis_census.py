@@ -999,7 +999,13 @@ CITATION = re.compile(r"\b((?:[A-Za-z0-9_.-]+/)*[A-Za-z0-9_.-]+\.(?:rs|c|h))(?::
 # executing test owned its symbols), which is why this pin falls and UNREACHED /
 # NO_SYMBOL hold — a retirement removes an atom from exactly one bucket, and
 # reporting which one is the whole value of these three numbers being separate.
-PIN_REACHED = 22
+# R2703 — 22 -> 21. `rest-sse-subscribe` RETIRES, the same shape as the entry
+# above: it grades COMPLETE once the slow-consumer divergence is discharged, so
+# it leaves the PARTIAL population and takes its bucket with it. It was in
+# `reached` (its symbols are owned by executing tests, including the two
+# backpressure witnesses this round added), which is why this pin falls while
+# UNREACHED and NO_SYMBOL hold at 3 and 2. READ off the census's own FAIL line.
+PIN_REACHED = 21
 PIN_UNREACHED = 3
 PIN_NO_SYMBOL = 2
 # R2534 — 346 -> 347. The atom is `adminspace-metrics` and the citation is the
@@ -1677,7 +1683,20 @@ PIN_NO_SYMBOL = 2
 # that says the departing citations were all ROOTED — an atom leaving with
 # ambiguous citations of its own would have moved that pin too, as `time-hlc`
 # and `router-hat-router` did above. READ off the census's own FAIL line.
-PIN_WZ_CITATIONS = 119
+# R2703 — 119 -> 109, and the round's two moves on this pin are recorded as the
+# ONE net move they landed as, because they share a commit. First the reason
+# gained a correction WITHDRAWING an already-closed residual, which COSTS
+# citations rather than saving them (proving the nested-JSON clause was already
+# closed means naming the renderer that closes it and the callback whose comment
+# states the remaining gap, where the stale clause named neither): 119 -> 121.
+# Then the atom RETIRED — the slow-consumer divergence is discharged and it
+# grades COMPLETE — so its whole citation set leaves the counted population with
+# it: 121 -> 109. That the retirement takes MORE than the correction added is
+# the expected shape; this reason is one of the most heavily cited in the store.
+# All three pins in this file fall together on that one departure, which is what
+# says a departure rather than a citation moving between buckets. READ off the
+# census's own FAIL line, not computed from the two deltas above.
+PIN_WZ_CITATIONS = 109
 # R2626 — 44 -> 42, and this one is worth a sentence because it HELD through
 # every earlier retirement in this run (R2612, R2622). `time-hlc`'s reason is the
 # first retiree carrying AMBIGUOUS citations of its own: its oldest clauses cite
@@ -1711,7 +1730,14 @@ PIN_WZ_CITATIONS = 119
 # in, exactly as the two entries above insist: the ambiguous count is a property
 # of a reason's citation forms, and a precedent's arithmetic cannot be carried
 # across to a different reason.
-PIN_AMBIGUOUS = 23
+# R2703 -- 23 -> 19. `rest-sse-subscribe` departs (COMPLETE), carrying FOUR
+# ambiguous citations with it: its reason cites `lib.rs`, `json.rs` and `sse.rs`
+# by bare name in several places, and each end-matches many tracked wz files, so
+# none was ever graded against one subject. Measured by this census with the
+# atom out, not derived from the departure's citation total -- an ambiguous
+# count is a property of citation FORMS and cannot be apportioned arithmetically
+# from the count above it.
+PIN_AMBIGUOUS = 19
 
 
 class Fatal(Exception):
