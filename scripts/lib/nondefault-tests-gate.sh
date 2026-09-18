@@ -181,6 +181,19 @@ LEGS=(
     # free, because a module path is structural where a name prefix is a habit.
     # Test names in that file are now free to read however they read best.
     "wz-runtime-tokio|hook|session-close-ingress,switchboard|--test=session_close_ingress"
+    # R2721 — the AP binding for the same grammar's `open` verb. A SECOND row
+    # rather than a widening of the one above, because the two do not share a
+    # build: `--test=` names an integration target and these are LIB unit tests,
+    # so no filter on that row can reach them however it is spelled. The census
+    # is what said so -- it reported all four as `unclaimed` the moment they
+    # landed, which is the whole reason gate 2h2 runs it before a push.
+    #
+    # The feature list is the module's OWN `cfg(all(..))`, copied whole: the
+    # module is a join of four existing parts and compiles to nothing without
+    # any one of them, so a leg naming fewer would build a file that is not
+    # there and report a population of zero as green.
+    "wz-runtime-tokio|hook|session-close-ingress,routing-peer,routing-accept,\
+router-connect-reconcile,transport-link-tcp,transport-unicast|session_lifecycle_open::"
     # The demo's half of the same surface. Its
     # `a_key_that_is_read_while_reaching_nothing_is_not_reported_as_applied` is a
     # ZERO-POPULATION guard over the keys this build drops, which is exactly why
