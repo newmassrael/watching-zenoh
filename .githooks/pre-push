@@ -1589,8 +1589,7 @@ fi
 # while C1bn passes `--all-legs`. The split is the per-leg answer to item 543's
 # "safe AND QUICK on a developer's machine" test, it is decided by measurement
 # per row, and the script PRINTS what it deferred so a leg missing from this gate
-# can never read as a leg nobody runs. `--census` (Layer C1cn) is the thing that
-# refuses a feature-only test claimed by neither scope.
+# can never read as a leg nobody runs.
 if ! bash scripts/lib/nondefault-tests-gate.sh; then
     echo "" >&2
     echo "pre-push: [gate 2h] non-default-feature TESTS FAILED — a check that only a" >&2
@@ -1598,6 +1597,47 @@ if ! bash scripts/lib/nondefault-tests-gate.sh; then
     echo "          test. Gate 7 compiles these; this one runs them." >&2
     echo "          Run \`bash scripts/lib/nondefault-tests-gate.sh\` for the" >&2
     echo "          per-leg breakdown (\`--list\` names the legs)." >&2
+    echo "          Bypass with \`git push --no-verify\` only for genuine hotfixes." >&2
+    exit 1
+fi
+
+# ─── gate 2h2 — is every feature-only test CLAIMED by a leg? ────────
+#
+# Numbered `2h2` rather than `2h-census` because the hook's gate ids are
+# `\d+[a-z0-9]*` — `hook_gate_boundary_gate.py` reads both the section header and
+# the `[gate N]` mark in every refusal with that shape, and a hyphen makes the
+# mark unreadable, which it correctly refused as an unattributed refusal. `2d2`
+# is the precedent: a second question under one gate's number.
+# grades: worktree
+#
+# R2717. The paragraph above used to end by naming `--census` as "the thing that
+# refuses a feature-only test claimed by neither scope" and then leaving it to
+# hosted Layer C1cn. A comment that names the instrument and does not run it is
+# the shape this tree has now paid for three rounds running: R2714 an AP loader
+# that did not exist, R2715 a naming convention asserted as a mechanism, and
+# THIS.
+#
+# MEASURED, which is why it moves rather than staying a deferral: R2714 pushed a
+# test that no leg's filter selected. Gate 2h above was GREEN -- the legs it runs
+# all passed -- and hosted C1cn redded 17 minutes into run 35380050867 with
+# `unclaimed: a_documented_row_is_still_refused_by_the_authority`. The arm that
+# names the defect existed the whole time and ran nowhere a push could feel it.
+#
+# The two calls answer DIFFERENT questions and that is why both are here: the one
+# above asks "do the legs pass", this one asks "does every feature-only test have
+# a leg at all". A test claimed by nothing passes the first by not being run.
+#
+# COST, measured on this tree at HEAD: 18s, wall, warm. It compiles nothing the
+# legs above have not already built -- it reads `cargo test -- --list` per crate
+# -- so it is the cheap half of what C1cn does hosted, and the half that catches
+# the population error rather than a code error.
+if ! bash scripts/lib/nondefault-tests-gate.sh --census; then
+    echo "" >&2
+    echo "pre-push: [gate 2h2] a test only a FEATURE build reaches is claimed by" >&2
+    echo "          no leg, so nothing runs it — it passes every gate by not being" >&2
+    echo "          executed, which is the population-of-zero green this table exists" >&2
+    echo "          to refuse. Widen a leg's features, add a leg, or write a SKIPS row" >&2
+    echo "          saying why not; the line above names the test." >&2
     echo "          Bypass with \`git push --no-verify\` only for genuine hotfixes." >&2
     exit 1
 fi
