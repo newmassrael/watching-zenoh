@@ -19,6 +19,18 @@
 //! request alone would pass with the raiser deleted, which is why the state is
 //! what is asserted.
 //!
+//! R2713 (residual (a)) — AND THE VERB IS NOW GOVERNED, which is a SECOND join
+//! and was missing for the same reason the first one was. Both of ITS ends were
+//! also already true and witnessed apart: `session_ingress_acl_e2e.rs` proves a
+//! policy drops a governed message from a batch, and the arm below proves a
+//! matched row closes a running session. Neither said the close verb is subject
+//! to a policy at all.
+//!
+//! So the refusing arms drive that join, and each is paired with an admitting
+//! authority on the SAME frame through the SAME path — a refusal on this port is
+//! observable only as the absence of an effect, so "nothing happened" has to be
+//! told apart from "nothing arrived".
+//!
 //! Gated at file scope on the two features whose symbols it names.
 
 #![cfg(all(feature = "session-close-ingress", feature = "switchboard"))]
@@ -39,7 +51,43 @@ use wz_runtime_tokio::session_glue::{
     NetworkMessage, SessionActionsBinding, SessionLinkActions,
 };
 use wz_runtime_tokio_test_support::{fixture_session_init_params, NoopOutboundDriver};
-use wz_session_core::drive::{check_requested_close, SessionLifecycleInjector};
+use wz_session_core::drive::{
+    check_requested_close, SessionCloseAuthority, SessionLifecycleInjector,
+};
+
+/// Admits every close. The ANTI-VACUITY control for every refusing arm below:
+/// "the session did not close" proves nothing on its own, because the frame
+/// passes a resolver and a matcher that could each swallow it, so each refusal
+/// is paired with this one running the SAME frame through the SAME path.
+struct AdmitAll;
+
+impl SessionCloseAuthority for AdmitAll {
+    fn admits_close(&self, _keyexpr: &str) -> bool {
+        true
+    }
+}
+
+/// Refuses every close — a host whose policy governs the whole lifecycle rail.
+struct DenyAll;
+
+impl SessionCloseAuthority for DenyAll {
+    fn admits_close(&self, _keyexpr: &str) -> bool {
+        false
+    }
+}
+
+/// Admits closes on ONE key and refuses every other. This is the authority that
+/// makes the witness say something the two blanket ones cannot: that the
+/// verdict is taken on the ARRIVING keyexpr rather than on the row's pattern or
+/// the event name, which is the whole reason the grammar puts the target in the
+/// key (`@/<zid>/<whatami>/session/<verb>/<peer-zid>`) instead of the payload.
+struct AdmitOnly(&'static str);
+
+impl SessionCloseAuthority for AdmitOnly {
+    fn admits_close(&self, keyexpr: &str) -> bool {
+        keyexpr == self.0
+    }
+}
 
 /// The admin keyexpr this witness maps to the close verb. It is the TEST's
 /// choice, not a product constant: nothing in the seam knows any particular
@@ -112,7 +160,9 @@ fn established_session() -> (
 fn session_close_ingress_closes_a_running_session() {
     let (actions, mut engine) = established_session();
     let mut observer = ApplicationLayerObserver::new();
-    observer.switchboard.register(CLOSE_KEYEXPR, CLOSE_EVENT);
+    observer
+        .switchboard
+        .register_command(CLOSE_KEYEXPR, CLOSE_EVENT);
 
     // Nothing has asked yet, and the comparator says so rather than raising.
     assert!(
@@ -127,8 +177,9 @@ fn session_close_ingress_closes_a_running_session() {
     // The rail message arrives. The ingress cannot reach the engine, so all it
     // can do is stage the request.
     let outcome = frame_event(put_push(CLOSE_KEYEXPR));
+    let admit = AdmitAll;
     let fired = {
-        let mut injector = SessionLifecycleInjector::new(&actions);
+        let mut injector = SessionLifecycleInjector::new(&actions, &admit);
         observer.dispatch_switchboard(IterationEvent::Poll(&outcome), &mut injector)
     };
     assert_eq!(fired, 1, "the mapped row matched exactly once");
@@ -158,11 +209,14 @@ fn session_close_ingress_closes_a_running_session() {
 fn session_close_ingress_leaves_an_unmapped_message_alone() {
     let (actions, mut engine) = established_session();
     let mut observer = ApplicationLayerObserver::new();
-    observer.switchboard.register(CLOSE_KEYEXPR, CLOSE_EVENT);
+    observer
+        .switchboard
+        .register_command(CLOSE_KEYEXPR, CLOSE_EVENT);
 
     let outcome = frame_event(put_push("@/wz/session/something-else"));
+    let admit = AdmitAll;
     let fired = {
-        let mut injector = SessionLifecycleInjector::new(&actions);
+        let mut injector = SessionLifecycleInjector::new(&actions, &admit);
         observer.dispatch_switchboard(IterationEvent::Poll(&outcome), &mut injector)
     };
 
@@ -175,6 +229,123 @@ fn session_close_ingress_leaves_an_unmapped_message_alone() {
         SessionFsmUnicastState::Established,
         "a session nobody asked about keeps running"
     );
+}
+
+/// R2713 residual (a) — THE JOIN. Both ends were already witnessed: a policy
+/// drops a governed message from a batch (`session_ingress_acl_e2e.rs`), and a
+/// matched row closes a running session (the arm at the top of this file).
+/// Neither says the verb is GOVERNED, and that is the claim this makes: the
+/// same frame, the same loop, the same row, and an authority that refuses.
+#[test]
+fn session_close_ingress_refuses_a_close_the_authority_denies() {
+    let (actions, mut engine) = established_session();
+    let mut observer = ApplicationLayerObserver::new();
+    observer
+        .switchboard
+        .register_command(CLOSE_KEYEXPR, CLOSE_EVENT);
+
+    let outcome = frame_event(put_push(CLOSE_KEYEXPR));
+    let deny = DenyAll;
+    let fired = {
+        let mut injector = SessionLifecycleInjector::new(&actions, &deny);
+        observer.dispatch_switchboard(IterationEvent::Poll(&outcome), &mut injector)
+    };
+
+    // A refusal is observable ONLY as nothing having happened -- this port
+    // answers nothing by design -- so the count and the state are the two
+    // places it has to show, and both are asserted.
+    assert_eq!(fired, 0, "a refused command is not an injection");
+    assert!(
+        !check_requested_close(&actions, &mut engine),
+        "a refused close must not even STAGE a request"
+    );
+    assert_eq!(
+        engine.get_current_state(),
+        SessionFsmUnicastState::Established,
+        "the session a policy refused to close is still running"
+    );
+}
+
+/// ⛔ THE FAIL-CLOSED ARM. A close registered as a SIGNAL row reaches the
+/// injector through the name-only shape, which carries no keyexpr -- so the
+/// injector cannot know which session is named and cannot ask whether it may be
+/// closed. It must decline, EVEN WITH AN ADMITTING AUTHORITY, because what it
+/// would be admitting is unknown.
+///
+/// This is the arm that names the residual's defect directly: R2678 closed the
+/// session from the signal path, so the verb was reachable through a name
+/// alone. Reverting that one method body turns this arm red.
+#[test]
+fn session_close_ingress_cannot_be_reached_through_the_signal_path() {
+    let (actions, mut engine) = established_session();
+    let mut observer = ApplicationLayerObserver::new();
+    // `register`, not `register_command` -- the misregistration this guards.
+    observer.switchboard.register(CLOSE_KEYEXPR, CLOSE_EVENT);
+
+    let outcome = frame_event(put_push(CLOSE_KEYEXPR));
+    let admit = AdmitAll;
+    let fired = {
+        let mut injector = SessionLifecycleInjector::new(&actions, &admit);
+        observer.dispatch_switchboard(IterationEvent::Poll(&outcome), &mut injector)
+    };
+
+    // The row MATCHED -- a signal row always counts -- so the count is not the
+    // claim here and asserting it alone would pass with the gate removed.
+    assert_eq!(fired, 1, "the row matched; this arm is not about matching");
+    assert!(
+        !check_requested_close(&actions, &mut engine),
+        "a close that could not be authorised must not be carried out"
+    );
+    assert_eq!(
+        engine.get_current_state(),
+        SessionFsmUnicastState::Established,
+        "the state is the claim: nothing closed"
+    );
+}
+
+/// The verdict is taken on the ARRIVING keyexpr, which is why the grammar puts
+/// the target there. One authority, two keys, opposite answers, and the row's
+/// pattern is a wildcard covering both -- so neither the pattern nor the event
+/// name can be what decided.
+#[test]
+fn session_close_ingress_judges_the_arriving_keyexpr_not_the_row() {
+    const TARGET: &str = "@/wz/session/close/peer-a";
+    const SIBLING: &str = "@/wz/session/close/peer-b";
+
+    for (keyexpr, expect_closed) in [(TARGET, true), (SIBLING, false)] {
+        let (actions, mut engine) = established_session();
+        let mut observer = ApplicationLayerObserver::new();
+        observer
+            .switchboard
+            .register_command("@/wz/session/close/*", CLOSE_EVENT);
+
+        let outcome = frame_event(put_push(keyexpr));
+        let only = AdmitOnly(TARGET);
+        let fired = {
+            let mut injector = SessionLifecycleInjector::new(&actions, &only);
+            observer.dispatch_switchboard(IterationEvent::Poll(&outcome), &mut injector)
+        };
+
+        assert_eq!(
+            fired,
+            usize::from(expect_closed),
+            "one wildcard row, two keys: {keyexpr} should fire={expect_closed}"
+        );
+        assert_eq!(
+            check_requested_close(&actions, &mut engine),
+            expect_closed,
+            "the staged request must follow the key, not the row"
+        );
+        assert_eq!(
+            engine.get_current_state(),
+            if expect_closed {
+                SessionFsmUnicastState::Closing
+            } else {
+                SessionFsmUnicastState::Established
+            },
+            "and the STATE is what the claim rests on for {keyexpr}"
+        );
+    }
 }
 
 #[test]

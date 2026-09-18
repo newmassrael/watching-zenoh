@@ -100,6 +100,28 @@ pub trait EventInjector {
     fn inject_value(&mut self, _event_name: &str, _payload: &[u8]) -> bool {
         false
     }
+
+    /// Inject a named external event for a **command** row: one whose arriving
+    /// KEYEXPR is part of the request rather than only its address, so the port
+    /// is handed the resolved keyexpr beside the name. Returns `true` iff the
+    /// command was carried out.
+    ///
+    /// The third shape of the one port, for the reason the second one exists: a
+    /// value row needs the payload, a command row needs the key. It is NOT a
+    /// hole in the Anti-Corruption Layer. The boundary's rule is that the
+    /// STATECHART never sees a keyexpr, and it still does not — an impl that
+    /// reads the key here answers a question about the REQUEST (which session,
+    /// and may it) and injects a domain event, exactly as the value shape reads
+    /// bytes here and injects a typed one.
+    ///
+    /// ⛔ Defaulted to `false`, and the default is the SAFE direction rather
+    /// than a convenience. A command row is how a DESTRUCTIVE verb arrives, so
+    /// an injector that does not implement this shape must decline it rather
+    /// than fall back to the name-only path — a fallback would make every
+    /// command reachable by any caller that never asked whether it may run.
+    fn inject_command(&mut self, _event_name: &str, _keyexpr: &str) -> bool {
+        false
+    }
 }
 
 // Reference transparency: a `&mut` to an injector is still an injector, so
@@ -114,10 +136,14 @@ impl<I: EventInjector + ?Sized> EventInjector for &mut I {
     fn inject_value(&mut self, event_name: &str, payload: &[u8]) -> bool {
         (**self).inject_value(event_name, payload)
     }
+
+    fn inject_command(&mut self, event_name: &str, keyexpr: &str) -> bool {
+        (**self).inject_command(event_name, keyexpr)
+    }
 }
 
 #[cfg(all(feature = "alloc", feature = "switchboard"))]
-pub use alloc_impl::{SwitchboardEntry, SwitchboardRegistry};
+pub use alloc_impl::{SwitchboardEntry, SwitchboardRegistry, SwitchboardRowKind};
 
 #[cfg(all(feature = "alloc", feature = "switchboard"))]
 mod alloc_impl {
@@ -150,13 +176,32 @@ mod alloc_impl {
         /// The SCXML domain event injected when an inbound sample's
         /// resolved keyexpr matches `pattern_chunks`.
         event_name: String,
-        /// Routing kind, mirroring the `wz-switchboard.yaml` `Binding.codec`
-        /// presence: a **value** row decodes the sample payload into a typed
-        /// `_event.data` ([`EventInjector::inject_value`]); a **signal** row
-        /// injects an empty `_event.data` ([`EventInjector::inject`]). The
-        /// registry stores only the *kind* — the codec ↔ event binding lives
-        /// in the generated value injector (ACL boundary), never here.
-        is_value: bool,
+        /// Routing kind. The registry stores only the *kind* — the codec ↔
+        /// event binding lives in the generated value injector (ACL boundary),
+        /// never here, and so does whatever a command row's target means.
+        kind: SwitchboardRowKind,
+    }
+
+    /// Which shape of [`EventInjector`] a row is dispatched through.
+    ///
+    /// An enum rather than a second `bool` beside `is_value`: two booleans
+    /// admit a fourth state nobody means (`is_value && is_command`), and the
+    /// three kinds are exclusive by construction here.
+    #[derive(Clone, Copy, PartialEq, Eq, Debug)]
+    pub enum SwitchboardRowKind {
+        /// Empty `_event.data` — [`EventInjector::inject`]. Always counted:
+        /// the port cannot report a signal injection failing.
+        Signal,
+        /// Payload decoded into a typed `_event.data` —
+        /// [`EventInjector::inject_value`]. Mirrors a `wz-switchboard.yaml`
+        /// `Binding` carrying a `codec`. Counted only on a successful decode.
+        Value,
+        /// The arriving KEYEXPR travels with the name —
+        /// [`EventInjector::inject_command`]. Counted only when the injector
+        /// reports the command carried out, so a REFUSED command reads as
+        /// nothing having happened, which is the only observable a port that
+        /// answers nothing can offer.
+        Command,
     }
 
     /// AP / dynamic switchboard table: `keyexpr-pattern -> domain-event`
@@ -191,7 +236,7 @@ mod alloc_impl {
             keyexpr_pattern: impl Into<String>,
             event_name: impl Into<String>,
         ) {
-            self.push_entry(keyexpr_pattern, event_name, false);
+            self.push_entry(keyexpr_pattern, event_name, SwitchboardRowKind::Signal);
         }
 
         /// Map a keyexpr pattern to a **value** domain event: a matched
@@ -206,16 +251,36 @@ mod alloc_impl {
             keyexpr_pattern: impl Into<String>,
             event_name: impl Into<String>,
         ) {
-            self.push_entry(keyexpr_pattern, event_name, true);
+            self.push_entry(keyexpr_pattern, event_name, SwitchboardRowKind::Value);
+        }
+
+        /// Map a keyexpr pattern to a **command** domain event: the resolved
+        /// keyexpr of a matched sample travels to the port beside the name
+        /// ([`EventInjector::inject_command`]), because a command's keyexpr
+        /// carries WHICH object it acts on and not merely where it was sent.
+        ///
+        /// ⛔ This is the registration a DESTRUCTIVE verb needs, and the
+        /// difference from [`register`](Self::register) is not decoration: a
+        /// command row dispatched through the signal shape reaches an injector
+        /// that was never told which object the request names, and an injector
+        /// that cannot know that cannot refuse. The registry itself stays
+        /// policy-free — it routes by kind and asks nothing — so who may run a
+        /// command is the injector's question, asked with the key in hand.
+        pub fn register_command(
+            &mut self,
+            keyexpr_pattern: impl Into<String>,
+            event_name: impl Into<String>,
+        ) {
+            self.push_entry(keyexpr_pattern, event_name, SwitchboardRowKind::Command);
         }
 
         /// Shared row constructor: canonicalize (raw-fallback with a warn),
-        /// split into chunks, push with the routing `is_value` kind.
+        /// split into chunks, push with the routing kind.
         fn push_entry(
             &mut self,
             keyexpr_pattern: impl Into<String>,
             event_name: impl Into<String>,
-            is_value: bool,
+            kind: SwitchboardRowKind,
         ) {
             let raw = keyexpr_pattern.into();
             // R311gb — `canonize_keyexpr` now returns a `BoundedString`;
@@ -236,7 +301,7 @@ mod alloc_impl {
             self.entries.push(SwitchboardEntry {
                 pattern_chunks,
                 event_name: event_name.into(),
-                is_value,
+                kind,
             });
         }
 
@@ -280,13 +345,24 @@ mod alloc_impl {
                 if !keyexpr_intersects_target(&pattern, &target) {
                     continue;
                 }
-                if entry.is_value {
-                    if injector.inject_value(&entry.event_name, sample.payload()) {
+                match entry.kind {
+                    SwitchboardRowKind::Value => {
+                        if injector.inject_value(&entry.event_name, sample.payload()) {
+                            injected = injected.saturating_add(1);
+                        }
+                    }
+                    // The resolved key, not the pattern: a command acts on the
+                    // object the ARRIVING key names, and the row's pattern may
+                    // be a wildcard that names many.
+                    SwitchboardRowKind::Command => {
+                        if injector.inject_command(&entry.event_name, sample.keyexpr()) {
+                            injected = injected.saturating_add(1);
+                        }
+                    }
+                    SwitchboardRowKind::Signal => {
+                        injector.inject(&entry.event_name, "");
                         injected = injected.saturating_add(1);
                     }
-                } else {
-                    injector.inject(&entry.event_name, "");
-                    injected = injected.saturating_add(1);
                 }
             }
             injected

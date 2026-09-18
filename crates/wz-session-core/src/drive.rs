@@ -849,16 +849,65 @@ pub fn check_requested_close<R: SessionRuntime, T: TimeSource>(
 /// second copy of `"session.close"` here is precisely the defect class that
 /// open-debt item 777 records: a string agreed between two places by hand stays
 /// agreed only until one of them is edited.
+/// R2713 (`session-close-ingress` residual (a)) — who may close a session over
+/// the rail.
+///
+/// A PORT rather than a call into the §5.16 policy kernel, and the direction is
+/// forced rather than chosen: `wz-access-control` DEPENDS ON this crate (it
+/// reads `keyexpr_includes_target` and `link::LinkSubject` from here), so a
+/// call the other way is a cycle. Dependency inversion is the only shape that
+/// leaves the gate where both profiles build it — which is the property this
+/// atom asserts about every other piece of the close machinery, and a gate that
+/// existed only in the AP runtime would withdraw it.
+///
+/// It is judged on the KEYEXPR because that is where the grammar puts the
+/// target (`@/<zid>/<whatami>/session/<verb>/<peer-zid>`): "may close session X
+/// only" is a statement about a key, which is exactly why the target was not
+/// put in the payload. An AP host binds this to its §5.16 policy; an MCU host
+/// binds a static one. Neither answer is reachable from here, and that is the
+/// point.
+///
+/// ⚠ This does NOT replace the §5.16 ingress chain, which sees the face — the
+/// subject zid, the link and the certificate name — and still runs upstream of
+/// the switchboard on an AP host. It is the gate that cannot be FORGOTTEN: the
+/// chain is wired by the host into the drive loop's stages, and a host that
+/// never wires it leaves a destructive verb answered by a node no policy ever
+/// consulted.
+#[cfg(feature = "session-close-ingress")]
+pub trait SessionCloseAuthority {
+    /// Whether the close command that arrived on `keyexpr` may run.
+    fn admits_close(&self, keyexpr: &str) -> bool;
+}
+
+#[cfg(feature = "session-close-ingress")]
+impl<A: SessionCloseAuthority + ?Sized> SessionCloseAuthority for &A {
+    fn admits_close(&self, keyexpr: &str) -> bool {
+        (**self).admits_close(keyexpr)
+    }
+}
+
 #[cfg(feature = "session-close-ingress")]
 pub struct SessionLifecycleInjector<'a, R: SessionRuntime, T: TimeSource> {
     actions: &'a SessionLinkActions<R, T>,
+    authority: &'a dyn SessionCloseAuthority,
 }
 
 #[cfg(feature = "session-close-ingress")]
 impl<'a, R: SessionRuntime, T: TimeSource> SessionLifecycleInjector<'a, R, T> {
-    /// Borrow the session's shared bundle as the lifetime-ingress port.
-    pub fn new(actions: &'a SessionLinkActions<R, T>) -> Self {
-        Self { actions }
+    /// Borrow the session's shared bundle as the lifetime-ingress port, and the
+    /// authority that says whether an arriving close may run.
+    ///
+    /// The authority is a CONSTRUCTOR parameter, not a setter and not an
+    /// `Option`: a host that wires this ingress cannot reach the verb without
+    /// having answered who may use it. That is the same move the §5.16 kernel
+    /// made when it took `Option<&Zid>` by parameter — "moves the question to
+    /// the one place that owns policy, and makes it unskippable at a call
+    /// site" — one layer out.
+    pub fn new(
+        actions: &'a SessionLinkActions<R, T>,
+        authority: &'a dyn SessionCloseAuthority,
+    ) -> Self {
+        Self { actions, authority }
     }
 }
 
@@ -873,18 +922,53 @@ impl<'a, R: SessionRuntime, T: TimeSource> SessionLifecycleInjector<'a, R, T> {
 impl<R: SessionRuntime, T: TimeSource + 'static> crate::switchboard::EventInjector
     for SessionLifecycleInjector<'_, R, T>
 {
-    /// A name the session machine reads as `SessionClose` becomes a close
-    /// request; every other name is ignored, exactly as
-    /// `Engine::raise_external_by_name` graceful-ignores a name outside the
-    /// document's enum. `event_data` is unused because this event carries none
-    /// — the machine declares it as a bare trigger.
+    /// ⛔ THE SIGNAL SHAPE CANNOT CLOSE, and the emptiness is the gate rather
+    /// than an omission. This shape is handed a name and nothing else, so an
+    /// impl reading it cannot know WHICH session the request names and
+    /// therefore cannot ask whether that one may be closed. Closing anyway
+    /// would answer a destructive verb for a request nobody was able to judge.
+    ///
+    /// R2678 closed the session from here. That was the defect this residual
+    /// names: the verb was reachable through the name alone.
+    ///
+    /// A close that arrives this way is a MISREGISTRATION, not a refusal — the
+    /// row was registered with `register` where it needed `register_command` —
+    /// so it is logged. The observable stays "nothing happened", because a
+    /// refusal on this port is observable only as the absence of the effect and
+    /// a second spelling of silence would be a different answer.
     fn inject(&mut self, event_name: &str, _event_data: &str) {
         use crate::session_fsm_unicast::SessionFsmUnicastEvent as E;
         use sce_rust_runtime::StatePolicy;
         type P<R2, T2> = SessionFsmUnicastPolicy<SessionActionsBinding<R2, T2>>;
         if <P<R, T> as StatePolicy>::get_event_from_name(event_name) == Some(E::SessionClose) {
-            self.actions.request_close();
+            log::warn!(
+                "SessionLifecycleInjector: a session-close event arrived on the SIGNAL \
+                 path, which carries no keyexpr and so cannot be authorised; the row is \
+                 ignored. Register it with `SwitchboardRegistry::register_command`."
+            );
         }
+    }
+
+    /// A name the session machine reads as `SessionClose`, on a keyexpr the
+    /// authority admits, becomes a close request. Every other name is ignored,
+    /// exactly as `Engine::raise_external_by_name` graceful-ignores a name
+    /// outside the document's enum.
+    ///
+    /// The return value is the EFFECT, not the arrival: a refused command
+    /// reports `false`, so the dispatch count a caller reads does not rise and
+    /// "nothing happened" is what a refusal looks like from every side.
+    fn inject_command(&mut self, event_name: &str, keyexpr: &str) -> bool {
+        use crate::session_fsm_unicast::SessionFsmUnicastEvent as E;
+        use sce_rust_runtime::StatePolicy;
+        type P<R2, T2> = SessionFsmUnicastPolicy<SessionActionsBinding<R2, T2>>;
+        if <P<R, T> as StatePolicy>::get_event_from_name(event_name) != Some(E::SessionClose) {
+            return false;
+        }
+        if !self.authority.admits_close(keyexpr) {
+            return false;
+        }
+        self.actions.request_close();
+        true
     }
 }
 
