@@ -3497,8 +3497,12 @@ pub const FIELDS_R12_KEYS: &[&str] = &[
     "wrong",
 ];
 
-/// What `carried_state` decides at revision 12 — one word per [`Carried`]
-/// variant, and the enum is the population.
+/// What `carried_state` decides at revision 12 — one word per
+/// `wz_session_core::passive::Carried` variant, and the enum is the population.
+///
+/// A code span rather than an intra-doc link: that type is not in this module's
+/// scope, and a link it cannot resolve is a `-D warnings` failure in a lane
+/// this file's own gates do not run.
 ///
 /// R2706. Written out here and derived in `fields_json::carried_state` by an
 /// EXHAUSTIVE match, so a new variant fails to compile there rather than

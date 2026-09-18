@@ -1533,8 +1533,17 @@ int main(void) {
      * HELLO rows, which no revision rendered, and `carried[].message` gains
      * `Scout` and `Hello`, read in the scouting MID space.
      * R2630 (item 745) -- 11: `dropped_by_limits` gains `scouting`, the same
-     * addition the census row above records. */
-    revisioned[2].revision = 11;
+     * addition the census row above records.
+     * R2706 -- 12: every row gains `above_transport`, carrying the session's
+     * own verdict on what that frame held above the transport layer. It is the
+     * only route to a record whose bytes were never contiguous on the wire --
+     * a completed fragment chain's -- which this document could not reach by
+     * walking the row a second time, and the only word that separates a body
+     * the session could not decompress from a MID this build does not know.
+     * ⚠ The spans under `above_transport.carried` when the word is
+     * `reassembled` index the reader's own joined buffer and are NOT capture
+     * offsets. */
+    revisioned[2].revision = 12;
     revisioned[2].doc = NULL;
     rc = wz_dissect_pcap_fields(pcap, sizeof pcap, 0, &revisioned[2].doc);
     CHECK(rc == WZ_DISSECT_OK, "fields rc=%d", rc);
