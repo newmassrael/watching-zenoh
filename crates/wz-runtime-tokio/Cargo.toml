@@ -2029,8 +2029,8 @@ features = ["reassembly"]
 [dev-dependencies]
 # R2714 — DEV-ONLY, for the witness that a `wz-switchboard.yaml` document
 # actually closes a session. The production side of this crate needs no
-# document model: it is handed an already-populated registry, and the
-# document -> registry mapping lives on the registry itself
+# document model: it receives a registry whose rows are already registered,
+# and the document to registry mapping lives on the registry itself
 # (`SwitchboardRegistry::apply_spec`). A production dep here would say the
 # opposite -- that a host assembles rows -- which is the defect that mapping
 # exists to end.
