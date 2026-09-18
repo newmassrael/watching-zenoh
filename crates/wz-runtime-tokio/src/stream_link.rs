@@ -118,6 +118,7 @@ impl ExpirySignal {
 /// instant. The cap exists because one enormous sleep is the unsound shape, and
 /// because re-reading the wall clock is what lets a machine whose time jumped
 /// forward notice.
+///
 /// The quic arm carries `transport-unicast` because the CONSUMER does.
 /// `quic_pipeline::arm_expiry_close` is gated `all(transport-link-quic,
 /// transport-unicast)`, so a `--no-default-features --features
