@@ -279,6 +279,13 @@ fn repo_relative(root: &Path, p: &Path) -> PathBuf {
         .map_or_else(|_| p.to_path_buf(), Path::to_path_buf)
 }
 
+/// R2716 — the session FSM's stem, under the repo's own `sources/session/`.
+///
+/// Named ONCE here rather than per target: it is not a property of any
+/// switchboard, it is the machine whose lifecycle verbs a sidecar may declare
+/// rows for, and every profile has exactly this one.
+const SESSION_MACHINE: &str = "session_fsm_unicast";
+
 /// One switchboard 2-stage codegen target (R311y22c), mirroring each
 /// switchboard build.rs: stage 1 = sce-codegen `--emit-ast` per source doc
 /// (machine + schemas + codecs); stage 2 = `wz_switchboard_codegen::generate`
@@ -393,9 +400,37 @@ fn regen_switchboards(root: &Path) {
             .collect();
         let spec: SwitchboardSpec =
             serde_yaml_ng::from_str(&read(&sidecar)).expect("parse wz-switchboard.yaml");
+
+        // R2716 — a `lifecycle:` row names an event of the SESSION FSM, not of
+        // this sidecar's `machine:`, so the generator needs that machine's facts
+        // too. Emitted ONLY when the document declares such a row: a sidecar
+        // with none should not compile a machine it does not use, and the
+        // generator refuses a lifecycle section with no facts rather than
+        // dropping it, so the two conditions cannot drift apart.
+        //
+        // ⚠ A DIFFERENT SOURCE ROOT. Every other doc in this stage lives under
+        // the target's own `sources/`; the session machine is wz's own and lives
+        // once, at the repo's `sources/session/`, which is exactly why no
+        // sidecar names it.
+        let session_facts = if spec.lifecycle.is_empty() {
+            None
+        } else {
+            let session_src = repo_relative(root, &root.join("sources/session"));
+            let ast = emit_ast(
+                SESSION_MACHINE,
+                &session_src,
+                &tmp,
+                &sce_codegen,
+                &sce_workspace,
+                sb.no_std,
+            );
+            Some(parse_machine_facts(&read(&ast)).expect("parse session machine facts"))
+        };
+
         let dispatch = generate(&GenInput {
             spec: &spec,
             facts: &facts,
+            session_facts: session_facts.as_ref(),
             schemas: &schemas,
             codecs: &codecs,
             machine_module: sb.machine,

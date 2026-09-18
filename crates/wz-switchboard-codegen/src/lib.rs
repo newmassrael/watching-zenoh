@@ -117,19 +117,21 @@ struct Document {
 /// developer must fix in either the SCXML or the `wz-switchboard.yaml`.
 #[derive(Debug)]
 pub enum CodegenError {
-    /// R2714 — the document carries a `lifecycle` section and this generator
-    /// cannot emit one yet.
+    /// R2716 — the document carries a `lifecycle` section and the caller
+    /// supplied no SESSION machine facts to judge it against.
     ///
-    /// ⛔ REFUSED RATHER THAN IGNORED, and the difference is the whole reason
-    /// this variant exists. `SwitchboardSpec` gained the section for the AP
-    /// side, where `SwitchboardRegistry::apply_spec` registers those rows as
-    /// commands. A generator that simply skipped them would compile a document
-    /// declaring a session-close row into a dispatch that never answers the
-    /// verb — a node silent about a capability its own sidecar declares, which
-    /// is indistinguishable from the capability being absent. Emitting the arm
-    /// is the remaining half of residual (b); until it lands, a build that
-    /// would produce that silence stops instead.
-    LifecycleUnsupported { rows: usize },
+    /// ⛔ REFUSED RATHER THAN SKIPPED, which is what this variant inherited
+    /// from the R2714 one it replaces (`LifecycleUnsupported`, when no
+    /// generator could emit the arm at all). Skipping the section would
+    /// compile a document declaring a session-close row into a dispatch that
+    /// never answers the verb — a node silent about a capability its own
+    /// sidecar declares, which from outside is indistinguishable from the
+    /// capability being absent.
+    ///
+    /// The facts are a SEPARATE input from `GenInput::facts` because a
+    /// lifecycle row names an event of the session FSM, not of the
+    /// application machine this sidecar is paired with.
+    LifecycleFactsMissing { rows: usize },
     /// The forge-ast JSON could not be deserialized.
     Json(serde_json::Error),
     /// The envelope's `v` is not [`SUPPORTED_FORGE_AST_VERSION`].
@@ -212,13 +214,12 @@ pub enum CodegenError {
 impl fmt::Display for CodegenError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            CodegenError::LifecycleUnsupported { rows } => write!(
+            CodegenError::LifecycleFactsMissing { rows } => write!(
                 f,
-                "wz-switchboard.yaml declares {rows} `lifecycle:` row(s) and the MCU \
-                 static generator cannot emit them yet — it would drop them and produce \
-                 a dispatch that never answers a verb the document declares. The AP side \
-                 registers them via `SwitchboardRegistry::apply_spec`; remove the section \
-                 for an MCU build, or land the generator's command arm"
+                "wz-switchboard.yaml declares {rows} `lifecycle:` row(s) and no session \
+                 machine facts were supplied to judge them against. A lifecycle row names \
+                 an event of the SESSION FSM, not of this sidecar's `machine:`, so it needs \
+                 that machine's forge-ast — pass `GenInput::session_facts`"
             ),
             CodegenError::Json(e) => write!(f, "forge-ast.v1 JSON parse failed: {e}"),
             CodegenError::UnsupportedAstVersion(v) => write!(
@@ -591,6 +592,18 @@ pub struct GenInput<'a> {
     pub spec: &'a SwitchboardSpec,
     /// The target machine's forge-ast facts (incl. `typed_inject_events`).
     pub facts: &'a MachineFacts,
+    /// R2716 — the SESSION machine's forge-ast facts, for the `lifecycle`
+    /// section. A SECOND machine rather than a second use of [`Self::facts`]:
+    /// `bindings` name events of the application machine this sidecar is
+    /// paired with, and a lifecycle verb names one of the session FSM's.
+    ///
+    /// `None` is correct for every document that declares no lifecycle row,
+    /// which is why it is an `Option` rather than a required field: a caller
+    /// with no such row should not have to compile a machine it does not use.
+    /// A document that DOES declare one and supplies `None` is refused with
+    /// [`CodegenError::LifecycleFactsMissing`] rather than having its rows
+    /// dropped.
+    pub session_facts: Option<&'a MachineFacts>,
     /// EventSchema facts for the value bindings' events (looked up by
     /// `event_name`). Empty for a signal-only switchboard.
     pub schemas: &'a [EventSchemaFacts],
@@ -637,14 +650,17 @@ pub fn generate(input: &GenInput) -> Result<String, CodegenError> {
             machine: facts.name.clone(),
         });
     }
-    // R2714 — checked FIRST among the per-section rules, before any arm is
+    // R2716 — checked FIRST among the per-section rules, before any arm is
     // emitted: this is the one failure whose alternative is silence rather than
-    // a wrong artifact, so nothing should be built before it is ruled out.
-    if !spec.lifecycle.is_empty() {
-        return Err(CodegenError::LifecycleUnsupported {
+    // a wrong artifact, so nothing should be built before it is ruled out. The
+    // loop below re-reads `session_facts` per row; this makes the refusal
+    // happen before a single binding arm is written.
+    if !spec.lifecycle.is_empty() && input.session_facts.is_none() {
+        return Err(CodegenError::LifecycleFactsMissing {
             rows: spec.lifecycle.len(),
         });
     }
+    let session_facts = input.session_facts;
 
     let has_value = spec.bindings.iter().any(|b| b.codec.is_some());
     let machine_pascal = to_pascal_case(&facts.name);
@@ -854,6 +870,63 @@ pub fn generate(input: &GenInput) -> Result<String, CodegenError> {
                 }
             }
         }
+    }
+
+    // R2716 — the `lifecycle` section, emitted AFTER the bindings so the static
+    // match fires in the same order the AP registry does: `apply_spec` appends
+    // `bindings` then `lifecycle`, and both dispatchers fire every matching row
+    // in registration order. One document, one order, two profiles.
+    for row in &spec.lifecycle {
+        // ⛔ JUDGED AGAINST THE SESSION MACHINE, not `spec.machine`. That is the
+        // whole reason this is a separate section: `bindings` name events of the
+        // application machine this sidecar is paired with, and a lifecycle verb
+        // belongs to the session FSM, which every profile has and no sidecar
+        // names. Validating it against the application machine would reject
+        // every correct row, because `session.close` is not a thermostat event.
+        let session = session_facts.ok_or(CodegenError::LifecycleFactsMissing {
+            rows: spec.lifecycle.len(),
+        })?;
+        let accepted = session
+            .external_ingress_events
+            .iter()
+            .any(|descriptor| event_descriptor_matches(descriptor, &row.event));
+        if !accepted {
+            return Err(CodegenError::UnknownEvent {
+                event: row.event.clone(),
+                machine: session.name.clone(),
+                available: session.external_ingress_events.iter().cloned().collect(),
+            });
+        }
+
+        let canonical =
+            wz_session_core::keyexpr_canon::canonize_keyexpr(&row.keyexpr).map_err(|e| {
+                CodegenError::Keyexpr {
+                    keyexpr: row.keyexpr.clone(),
+                    reason: e.to_string(),
+                }
+            })?;
+        let chunks = canonical
+            .split('/')
+            .map(rust_string_literal)
+            .collect::<Vec<_>>()
+            .join(", ");
+
+        // The ARRIVING key travels with the name, which is what lets the
+        // injector name the session the command acts on -- the same argument
+        // `SwitchboardRegistry::dispatch` passes, and the reason the grammar
+        // puts the target in the key. Counted only when the injector reports
+        // the command CARRIED OUT, so a refusal reads as nothing happening,
+        // exactly as it does on the dynamic side.
+        arms.push_str(&format!(
+            "\n    // {canonical} -> {event} (command)\n    \
+             if wz_session_core::keyexpr_match::keyexpr_pattern_matches(&[{chunks}], target_keyexpr) {{\n        \
+             if injector.inject_command({event_lit}, target_keyexpr) {{\n            \
+             injected += 1;\n        }}\n    }}\n",
+            canonical = canonical,
+            event = row.event,
+            chunks = chunks,
+            event_lit = rust_string_literal(&row.event),
+        ));
     }
 
     if has_value {
@@ -1092,6 +1165,23 @@ mod tests {
         generate(&GenInput {
             spec,
             facts,
+            session_facts: None,
+            schemas: &[],
+            codecs: &[],
+            machine_module: "machine",
+        })
+    }
+
+    /// R2716 — the same, with a SECOND machine standing in for the session FSM.
+    fn gen_with_session(
+        spec: &SwitchboardSpec,
+        facts: &MachineFacts,
+        session: &MachineFacts,
+    ) -> Result<String, CodegenError> {
+        generate(&GenInput {
+            spec,
+            facts,
+            session_facts: Some(session),
             schemas: &[],
             codecs: &[],
             machine_module: "machine",
@@ -1156,12 +1246,14 @@ mod tests {
 
     // ---- generate: validation rejections ----
 
-    // R2714 — a `lifecycle:` section is REFUSED, not skipped. The alternative
-    // to this error is a build that succeeds and emits a dispatch which never
-    // answers a verb the document declares, which reads exactly like the verb
-    // not existing. Silence is the failure mode this arm forbids.
+    // R2716 — a `lifecycle:` section with no session facts is REFUSED, not
+    // skipped. The alternative to this error is a build that succeeds and emits
+    // a dispatch which never answers a verb the document declares, which reads
+    // exactly like the verb not existing. Silence is the failure mode this arm
+    // forbids, and it is the same refusal R2714 filed when no generator could
+    // emit the arm at all -- only its reason has narrowed.
     #[test]
-    fn rejects_a_lifecycle_section_it_cannot_emit() {
+    fn rejects_a_lifecycle_section_with_no_session_facts() {
         use wz_switchboard_schema::LifecycleBinding;
 
         let facts = parse_machine_facts(&facts_json("m", &["go"])).unwrap();
@@ -1172,13 +1264,75 @@ mod tests {
         }];
         assert!(matches!(
             gen_signal(&s, &facts),
-            Err(CodegenError::LifecycleUnsupported { rows: 1 })
+            Err(CodegenError::LifecycleFactsMissing { rows: 1 })
         ));
 
         // ANTI-VACUITY: the SAME spec without the section generates, so the
         // refusal above is the section's and not something else in the input.
         s.lifecycle.clear();
         assert!(gen_signal(&s, &facts).is_ok());
+    }
+
+    // R2716 — THE ARM IS EMITTED, and through `inject_command` carrying the
+    // ARRIVING key. A signal arm here would compile and match and inject
+    // nothing usable: the injector would be handed a name and no keyexpr, so it
+    // could not name the session the command acts on and R2713's fail-closed
+    // rule would refuse it forever. The shape is the claim.
+    #[test]
+    fn emits_a_lifecycle_row_as_a_command_arm() {
+        use wz_switchboard_schema::LifecycleBinding;
+
+        let facts = parse_machine_facts(&facts_json("m", &["go"])).unwrap();
+        // The session machine is a DIFFERENT machine with a DIFFERENT event set
+        // -- `session.close` is not in `m`'s, which is the whole point.
+        let session =
+            parse_machine_facts(&facts_json("session_fsm_unicast", &["session.close"])).unwrap();
+        let mut s = spec("m", vec![binding("a/b", "go")]);
+        s.lifecycle = vec![LifecycleBinding {
+            keyexpr: "@/wz/session/close/*".to_string(),
+            event: "session.close".to_string(),
+        }];
+
+        let out = gen_with_session(&s, &facts, &session).expect("generates");
+        assert!(
+            out.contains(r#"injector.inject_command("session.close", target_keyexpr)"#),
+            "the command shape carries the arriving key; got:\n{out}"
+        );
+        assert!(
+            out.contains(r#"keyexpr_pattern_matches(&["@", "wz", "session", "close", "*"]"#),
+            "the row's pattern is canonicalized into static chunks; got:\n{out}"
+        );
+        // DOCUMENT ORDER, which is what makes the two profiles agree: the
+        // binding arm is written before the lifecycle arm, exactly as
+        // `apply_spec` appends `bindings` before `lifecycle`.
+        let bind_at = out.find("(signal)").expect("the binding arm");
+        let cmd_at = out.find("(command)").expect("the lifecycle arm");
+        assert!(bind_at < cmd_at, "lifecycle rows follow bindings");
+    }
+
+    // The lifecycle row is judged against the SESSION machine and against
+    // nothing else. Both directions are asserted, because either alone would
+    // pass with the machines swapped.
+    #[test]
+    fn a_lifecycle_event_is_judged_against_the_session_machine() {
+        use wz_switchboard_schema::LifecycleBinding;
+
+        let facts = parse_machine_facts(&facts_json("m", &["session.close"])).unwrap();
+        let session = parse_machine_facts(&facts_json("session_fsm_unicast", &["go"])).unwrap();
+        let mut s = spec("m", vec![]);
+        s.lifecycle = vec![LifecycleBinding {
+            keyexpr: "@/wz/session/close/*".to_string(),
+            event: "session.close".to_string(),
+        }];
+
+        // The APPLICATION machine accepts `session.close` here and the session
+        // machine does not -- so a generator reading the wrong one would pass.
+        match gen_with_session(&s, &facts, &session) {
+            Err(CodegenError::UnknownEvent { machine, .. }) => {
+                assert_eq!(machine, "session_fsm_unicast", "judged against the session");
+            }
+            other => panic!("expected UnknownEvent from the session machine, got {other:?}"),
+        }
     }
 
     #[test]
@@ -1379,6 +1533,7 @@ pub fn dispatch_switchboard(
         let out = generate(&GenInput {
             spec: &s,
             facts: &facts,
+            session_facts: None,
             schemas: &[schema],
             codecs: &[codec],
             machine_module: "sensor_monitor",
@@ -1555,6 +1710,7 @@ pub fn dispatch_switchboard(
         generate(&GenInput {
             spec: &s,
             facts: &facts,
+            session_facts: None,
             schemas: &[schema],
             codecs: &[codec],
             machine_module: "sensor_monitor",
@@ -1827,6 +1983,7 @@ pub fn dispatch_switchboard(
         GenInput {
             spec,
             facts,
+            session_facts: None,
             schemas,
             codecs,
             machine_module: "m",
