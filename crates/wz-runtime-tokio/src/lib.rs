@@ -1765,6 +1765,27 @@ pub mod routing_forward;
 #[cfg(feature = "routing-peer")]
 pub mod linkstate_forward;
 
+/// R2721 — the AP binding for the lifecycle grammar's `open` verb: resolve the
+/// key's target through the link-state directory and ask the face loop to dial
+/// what that node advertised.
+///
+/// Gated on the INTERSECTION of the four things it joins, because it has no
+/// parts of its own: the port (`session-close-ingress`), the directory
+/// (`routing-peer`, which pulls `wz-routing-graph`), the connect-set channel
+/// (`routing-accept` for the types and `router-connect-reconcile` for the
+/// `Add` variant), and the locator parse (`transport-link-tcp` +
+/// `transport-unicast`, which gate `session_open`). A build missing any one of
+/// them cannot open by zid and says so through the `None` opener instead.
+#[cfg(all(
+    feature = "session-close-ingress",
+    feature = "routing-peer",
+    feature = "routing-accept",
+    feature = "router-connect-reconcile",
+    feature = "transport-link-tcp",
+    feature = "transport-unicast"
+))]
+pub mod session_lifecycle_open;
+
 /// R2702 — who is on the other end of a link: the validated routing identity and
 /// the authenticated name, read off the handshake the session ran. Gated on the
 /// UNION of its two consumers rather than on either, because that is what it is:
