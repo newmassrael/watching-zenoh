@@ -213,7 +213,8 @@ impl<I: Send + 'static> BufferedDrain for BufferedStage<I> {
 /// # What this is for
 ///
 /// A buffered subscription delivers straight from the callback while its
-/// consumer keeps up ([`BufferedStage::stage`]'s fast path). The moment the
+/// consumer keeps up (`BufferedStage::stage`'s fast path — a code span rather
+/// than a link, because that item is private to this module). The moment the
 /// consumer does NOT, the sample is staged, and staged samples move only when
 /// the drive loop awaits a drain. Until this type existed the only thing
 /// holding that invariant was a `log::error!` one level down — and that
@@ -228,7 +229,7 @@ impl<I: Send + 'static> BufferedDrain for BufferedStage<I> {
 ///
 /// It drains EVERY buffered subscription of the session that produced it, not
 /// just the one whose declaration returned it: the registry is per-session and
-/// [`Session::drain_buffered`](super::Session::drain_buffered) walks all of it.
+/// `Session::drain_buffered` walks all of it.
 /// A host with three buffered subscriptions therefore wires one stage, and
 /// wiring the second changes nothing — which is why the gate over this checks
 /// that a caller wires SOMETHING rather than counting.
