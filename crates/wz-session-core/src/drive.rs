@@ -945,32 +945,90 @@ impl<'a> LifecycleKey<'a> {
 }
 
 #[cfg(feature = "session-close-ingress")]
-pub trait SessionCloseAuthority {
+pub trait SessionLifecycleAuthority {
     /// Whether the close command this key carries may run.
     ///
     /// R2718 — takes the PARSED key, not the raw `&str` it used to. An
     /// authority's whole job is to answer about a target, and handing it a
     /// string obliged every binder to re-derive the grammar to find one.
     fn admits_close(&self, key: &LifecycleKey<'_>) -> bool;
+
+    /// R2720 — whether the OPEN command this key carries may run.
+    ///
+    /// ⛔ DEFAULTED TO `false`, which is the only safe default and not a
+    /// convenience: an authority written before this verb existed answered
+    /// about closing and was never asked about opening, so reading its silence
+    /// as consent would grant a capability nobody considered. Refusing is what
+    /// its silence actually means.
+    ///
+    /// A SECOND METHOD rather than a `verb` parameter, because the two
+    /// questions have different answers for the same target: "this peer's
+    /// session may be torn down" and "this node may dial that peer" are not
+    /// one permission, and a single predicate would make them impossible to
+    /// separate in a policy.
+    fn admits_open(&self, _key: &LifecycleKey<'_>) -> bool {
+        false
+    }
 }
 
 #[cfg(feature = "session-close-ingress")]
-impl<A: SessionCloseAuthority + ?Sized> SessionCloseAuthority for &A {
+impl<A: SessionLifecycleAuthority + ?Sized> SessionLifecycleAuthority for &A {
     fn admits_close(&self, key: &LifecycleKey<'_>) -> bool {
         (**self).admits_close(key)
+    }
+
+    fn admits_open(&self, key: &LifecycleKey<'_>) -> bool {
+        (**self).admits_open(key)
+    }
+}
+
+/// R2720 — who can CREATE a session, for the node-scoped half of the grammar.
+///
+/// ⛔ A SEPARATE PORT FROM THE AUTHORITY AND FROM THE SESSION, and the split is
+/// the finding rather than a layering preference. `close` acts on the session
+/// the injector already holds — `SessionLinkActions` is right there. `open`'s
+/// subject is a session that does not exist, so there is no bundle to ask; and
+/// injecting the machine's own `outbound.start` into a RUNNING session is a
+/// no-op, because that trigger sits only on the transition out of Init. The
+/// collaborator for `open` is therefore node-scoped, and that is why it cannot
+/// be the same object.
+///
+/// MEASURED, which is why this is an `Option` at the injector rather than a
+/// required collaborator: AP has both halves of an open already — resolve the
+/// key's `peer_zid` through `LinkstateNetwork::node_locators` and dial through
+/// `ConnectReconcile::Add` — while no MCU crate depends on `wz-routing-graph`
+/// at all, and `wz-session-lwip`'s `run_session` drives exactly ONE session
+/// whose Acceptor/Initiator role is fixed before the loop starts. A profile
+/// with no session manager has nothing to bind here, and forcing it to bind a
+/// pretend one would be worse than saying so.
+#[cfg(feature = "session-close-ingress")]
+pub trait SessionOpener {
+    /// Ask for a session to the peer this key names. `true` when the request
+    /// was accepted — accepted, not completed: a dial is asynchronous, and this
+    /// port answers about the ASK, exactly as the close half answers about the
+    /// request rather than about the session having gone.
+    fn request_open(&self, key: &LifecycleKey<'_>) -> bool;
+}
+
+#[cfg(feature = "session-close-ingress")]
+impl<O: SessionOpener + ?Sized> SessionOpener for &O {
+    fn request_open(&self, key: &LifecycleKey<'_>) -> bool {
+        (**self).request_open(key)
     }
 }
 
 #[cfg(feature = "session-close-ingress")]
 pub struct SessionLifecycleInjector<'a, R: SessionRuntime, T: TimeSource> {
     actions: &'a SessionLinkActions<R, T>,
-    authority: &'a dyn SessionCloseAuthority,
+    authority: &'a dyn SessionLifecycleAuthority,
+    opener: Option<&'a dyn SessionOpener>,
 }
 
 #[cfg(feature = "session-close-ingress")]
 impl<'a, R: SessionRuntime, T: TimeSource> SessionLifecycleInjector<'a, R, T> {
-    /// Borrow the session's shared bundle as the lifetime-ingress port, and the
-    /// authority that says whether an arriving close may run.
+    /// Borrow the session's shared bundle as the lifetime-ingress port, the
+    /// authority that says whether an arriving command may run, and the opener
+    /// this node can create sessions through.
     ///
     /// The authority is a CONSTRUCTOR parameter, not a setter and not an
     /// `Option`: a host that wires this ingress cannot reach the verb without
@@ -978,11 +1036,24 @@ impl<'a, R: SessionRuntime, T: TimeSource> SessionLifecycleInjector<'a, R, T> {
     /// made when it took `Option<&Zid>` by parameter — "moves the question to
     /// the one place that owns policy, and makes it unskippable at a call
     /// site" — one layer out.
+    ///
+    /// R2720 — `opener` IS an `Option`, and the difference from the authority
+    /// is not inconsistency. An authority is a DECISION every profile must
+    /// make, so leaving it out would be fail-open. An opener is a CAPABILITY a
+    /// profile may genuinely not have — a one-session MCU drive has no session
+    /// manager to bind — and a host with none says `None` here rather than
+    /// binding a pretend one. It is still a parameter, so the answer is stated
+    /// at every call site rather than defaulted into.
     pub fn new(
         actions: &'a SessionLinkActions<R, T>,
-        authority: &'a dyn SessionCloseAuthority,
+        authority: &'a dyn SessionLifecycleAuthority,
+        opener: Option<&'a dyn SessionOpener>,
     ) -> Self {
-        Self { actions, authority }
+        Self {
+            actions,
+            authority,
+            opener,
+        }
     }
 }
 
@@ -1036,7 +1107,10 @@ impl<R: SessionRuntime, T: TimeSource + 'static> crate::switchboard::EventInject
         use crate::session_fsm_unicast::SessionFsmUnicastEvent as E;
         use sce_rust_runtime::StatePolicy;
         type P<R2, T2> = SessionFsmUnicastPolicy<SessionActionsBinding<R2, T2>>;
-        if <P<R, T> as StatePolicy>::get_event_from_name(event_name) != Some(E::SessionClose) {
+        let event = <P<R, T> as StatePolicy>::get_event_from_name(event_name);
+        // The machine's own mapping decides which verb a row carries: neither
+        // name is spelled here, for the reason open-debt item 777 records.
+        if event != Some(E::SessionClose) && event != Some(E::OutboundStart) {
             return false;
         }
         // R2718 — A KEY THAT IS NOT THIS GRAMMAR IS REFUSED, not passed on. A
@@ -1045,17 +1119,43 @@ impl<R: SessionRuntime, T: TimeSource + 'static> crate::switchboard::EventInject
         // parse would be answering about a target it never read.
         let Some(key) = LifecycleKey::parse(keyexpr) else {
             log::warn!(
-                "SessionLifecycleInjector: a session-close row matched a key that is \
+                "SessionLifecycleInjector: a lifecycle row matched a key that is \
                  not `@/<zid>/<whatami>/session/<verb>/<peer-zid>`; refusing, because \
                  an authority cannot name a target it cannot read."
             );
             return false;
         };
-        if !self.authority.admits_close(&key) {
+        if event == Some(E::SessionClose) {
+            if !self.authority.admits_close(&key) {
+                return false;
+            }
+            self.actions.request_close();
+            return true;
+        }
+        // R2720 — THE OPEN HALF, and it goes to a DIFFERENT collaborator. The
+        // session this injector holds is not the one the command is about:
+        // `outbound.start` on THIS machine would be a no-op, because that
+        // trigger sits only on the transition out of Init. The verb means
+        // "bring up a session to the peer this key names", which is the node's
+        // work and not this session's.
+        let Some(opener) = self.opener else {
+            // ⛔ SAID, not silent. A profile with no session manager cannot
+            // answer this verb, and a node that simply did nothing would be
+            // indistinguishable from one that refused it on policy — the
+            // distinction an operator needs and the observable this port
+            // cannot carry.
+            log::warn!(
+                "SessionLifecycleInjector: an open command arrived and this host bound \
+                 no opener, so nothing can create a session here; refusing. A profile \
+                 that drives one session with its role fixed at construction has no \
+                 session manager to bind."
+            );
+            return false;
+        };
+        if !self.authority.admits_open(&key) {
             return false;
         }
-        self.actions.request_close();
-        true
+        opener.request_open(&key)
     }
 }
 
