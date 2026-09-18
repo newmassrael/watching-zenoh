@@ -104,6 +104,38 @@ impl<I> BufferedStage<I> {
     /// which is precisely the failure R2423 spent a round diagnosing on this
     /// same SSE path. Logged ONCE per subscription, not per sample.
     fn stage(&self, item: I) {
+        // R2705 — DELIVER HERE WHEN THE CONSUMER HAS ROOM, and stage only when
+        // it does not. The staging seam was built for the full-channel case,
+        // where the wait has to leave the callback; it made delivery in EVERY
+        // case depend on a host wiring `LoopStages::after_dispatch`, and
+        // `drive_session_until_terminal` defaults that stage to a no-op. So a
+        // subscription declared through the simple entry point answered
+        // healthily and delivered nothing — measured as the hosted Layer Z red
+        // on `wz_rest_sse_renders_the_same_sample_as_the_zenohd_rest_plugin`,
+        // where zenohd's own SSE carried the sample and wz's carried only
+        // heartbeats. The diagnostic below had already named this exact cause;
+        // what was missing was a path that does not need the host to know.
+        //
+        // ORDERING: taken ONLY when nothing is staged and no drain holds a
+        // popped item, so a direct send can never overtake an earlier sample.
+        // The lock is held across `try_send` deliberately — it does not await,
+        // and holding it is what makes "stage is empty" and "sent" one step.
+        let item = {
+            let staged = self
+                .staged
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            if staged.is_empty() {
+                match self.tx.try_send(item) {
+                    Ok(()) => return,
+                    Err(mpsc::error::TrySendError::Full(item)) => item,
+                    // The consumer is gone; its subscription is being torn down.
+                    Err(mpsc::error::TrySendError::Closed(_)) => return,
+                }
+            } else {
+                item
+            }
+        };
         let depth = {
             let mut staged = self
                 .staged
@@ -134,19 +166,41 @@ impl<I: Send + 'static> BufferedDrain for BufferedStage<I> {
                 // callback that stages, which is the stall this seam exists to
                 // keep off the loop's critical section.
                 let next = {
+                    let staged = self
+                        .staged
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner());
+                    staged.is_empty()
+                };
+                if next {
+                    return;
+                }
+                // THE AWAIT THAT IS THE WHOLE POINT. A full channel suspends the
+                // drive loop here rather than dropping the sample.
+                //
+                // R2705 — it awaits a PERMIT and pops only once it holds one, so
+                // two things hold that a pop-then-send did not. Cancellation:
+                // `park_on_drain` races this future in a `select!`, and a future
+                // cancelled while awaiting a permit has taken nothing out of the
+                // stage, where one cancelled between a pop and its send would
+                // have dropped that sample. Ordering: the pop and the permit's
+                // send happen under one hold of the stage lock, and the direct
+                // send in `stage` needs that same lock, so nothing can overtake
+                // an item that is on its way out.
+                let Ok(permit) = self.tx.reserve().await else {
+                    // The consumer is gone; its subscription is being torn down
+                    // and the remaining staged items have nowhere to go.
+                    return;
+                };
+                {
                     let mut staged = self
                         .staged
                         .lock()
                         .unwrap_or_else(|poisoned| poisoned.into_inner());
-                    staged.pop_front()
-                };
-                let Some(item) = next else { return };
-                // THE AWAIT THAT IS THE WHOLE POINT. A full channel suspends the
-                // drive loop here rather than dropping the sample.
-                if self.tx.send(item).await.is_err() {
-                    // The consumer is gone; its subscription is being torn down
-                    // and the remaining staged items have nowhere to go.
-                    return;
+                    match staged.pop_front() {
+                        Some(item) => permit.send(item),
+                        None => return,
+                    }
                 }
             }
         })
