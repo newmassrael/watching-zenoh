@@ -329,6 +329,7 @@ LEGS=(
         routing-routes,\
         scouting-active,\
         scouting-static,\
+        session-close-ingress,\
         session-extauth,\
         session-extcompression,\
         session-extqos,\
