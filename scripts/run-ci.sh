@@ -6951,8 +6951,15 @@ layer_c1ao_cargo_test_config_mutate_runtime() {
         cargo test -p wz-runtime-tokio --features config-mutate-runtime,access-acl --lib to_admin_json --quiet || return 1
     _runci_guarded_test "C1AO to_admin_json 4" 4 \
         cargo test -p wz-runtime-tokio --features config-mutate-runtime,access-acl,access-downsampling,access-quota --lib to_admin_json --quiet || return 1
+    # R2702 — `routing-peer` NAMED here, where it used to arrive for free.
+    # This test lives in `linkstate_forward.rs` and drives a FORWARDER as the
+    # `InterceptorSink`, so it genuinely needs a routing build; it was selected
+    # only because `access-acl` implied one. Decomposing that implication made
+    # this command select ZERO tests, and the count guard caught it. The fix is
+    # to name the real dependency, NOT to move the count to 0 — a guard whose
+    # number follows the coverage away is a guard that reports nothing.
     _runci_guarded_test "C1AO wzconfig_reconfigure_is_inert 1" 1 \
-        cargo test -p wz-runtime-tokio --features access-acl --lib wzconfig_reconfigure_is_inert --quiet || return 1
+        cargo test -p wz-runtime-tokio --features routing-peer,access-acl --lib wzconfig_reconfigure_is_inert --quiet || return 1
     # R2702 — the §5.16 CLIENT-TRANSPORT arm, and its feature list is the claim:
     # `--no-default-features --features access-acl` enables NO routing feature at
     # all. `access-acl`'s residual said enforcement "needs a routing build while
