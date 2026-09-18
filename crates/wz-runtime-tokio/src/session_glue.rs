@@ -1060,6 +1060,99 @@ pub struct LoopStages<H, P> {
     pub after_dispatch: P,
 }
 
+/// R2703 — park the loop on `drain` WITHOUT parking the session.
+///
+/// Backpressure means this loop stops taking inbound work while a consumer is
+/// behind, and THAT part is the point. What must not stop is the session's
+/// liveness. Keepalive TX and lease expiry are emitted BY this loop and there
+/// is no timer task to fall back on — the loop's future is `!Send`, which the
+/// docs above record as a structural bar to spawning one — so awaiting a drain
+/// straight through would let a slow consumer silence keepalive until the peer
+/// dropped the session. That would trade one parity gap for a worse one:
+/// upstream's blocking handler parks a single link's rx task while keepalive
+/// runs on another, so a slow SSE client there costs throughput, never the
+/// session.
+///
+/// So the drain is RACED against the same lease / keepalive wake the loop head
+/// arms, and a deadline that fires runs the same two self-guarded checks in the
+/// same order before going back to waiting. A lease that actually expires ends
+/// the park: the engine has left Established and there is no session left to
+/// deliver into.
+///
+/// ⚠ Deliberately NOT kept running here: the reassembly eviction sweep at the
+/// loop head. It is memory hygiene rather than liveness, it is already only
+/// iteration-granular, and the loop reaches it as soon as the park ends. Naming
+/// it is the point — a park that silently widened its own remit would be the
+/// next round's finding.
+async fn park_on_drain<T, F>(
+    drain: impl core::future::Future<Output = ()>,
+    actions: &Arc<SessionLinkActions>,
+    engine: &mut Engine<crate::session_fsm_unicast::SessionFsmUnicastPolicy<SessionActionsBinding>>,
+    clock: &T,
+    on_event: &mut F,
+) where
+    T: TimeSource,
+    F: FnMut(IterationEvent<'_>),
+{
+    tokio::pin!(drain);
+    loop {
+        let lease_dl = lease_wake_deadline(actions);
+        #[cfg(feature = "transport-keepalive")]
+        let ka_dl = keepalive_wake_deadline(actions);
+        #[cfg(not(feature = "transport-keepalive"))]
+        let ka_dl: Option<u64> = None;
+        let Some(deadline_ms) = [lease_dl, ka_dl].into_iter().flatten().min() else {
+            // Nothing is armed, so there is nothing to starve: this is the
+            // pre-Established shape, where the data plane is not yet running
+            // and the loop head blocks on the link poll for the same reason.
+            (&mut drain).await;
+            return;
+        };
+        let remaining_ms = deadline_ms.saturating_sub(clock.now_monotonic_ms());
+        tokio::select! {
+            _ = &mut drain => return,
+            _ = clock.sleep(remaining_ms) => {
+                // The loop head's own deadline arm, unchanged and in its order
+                // (R311kx — the keepalive emit runs first so an Expired lease
+                // tearing the session down in the same wake cannot starve it).
+                #[cfg(feature = "transport-keepalive")]
+                let ka_dormant = {
+                    let ka_outcome = check_keepalive_deadline(actions, clock.now_monotonic_ms());
+                    on_event(IterationEvent::KeepAlive(ka_outcome));
+                    ka_outcome == KeepAliveCheckOutcome::Inactive
+                };
+                #[cfg(not(feature = "transport-keepalive"))]
+                let ka_dormant = false;
+                let lease_outcome =
+                    check_lease_deadline(actions, engine, clock.now_monotonic_ms());
+                on_event(IterationEvent::Lease(lease_outcome));
+                // THE PARK ENDS WITH THE SESSION, and this is a correctness
+                // condition before it is a termination one. Waiting for a
+                // consumer is only justified while there is a session to
+                // deliver into: once the lease has expired the FSM is in
+                // Closing and the loop's job is to tear down, not to hold a
+                // dead session open on a reader that may never read.
+                //
+                // It is also what keeps this from spinning. `Expired` moves the
+                // FSM to Closing, which is NOT a final state, while
+                // `established_at` still stamps a lease deadline now in the
+                // past -- so re-arming would compute `remaining_ms == 0` and
+                // busy-loop forever. MEASURED: the first draft returned on
+                // `is_in_final_state()` alone and hung exactly there, burning a
+                // ten-minute build. A dormant keepalive emitter says the same
+                // thing one step earlier (the transport is mid-teardown), and
+                // its deadline does not move either.
+                if ka_dormant
+                    || lease_outcome == LeaseCheckOutcome::Expired
+                    || engine.is_in_final_state()
+                {
+                    return;
+                }
+            }
+        }
+    }
+}
+
 /// R2702 — `ingress` is the loop's INGRESS DECORATOR seam, and it exists
 /// because the loop is the only place an inbound batch is still OWNED. A
 /// `DriverLoopOutcome::FramePayload` carries `Vec<NetworkMessage>`, and this
@@ -1220,7 +1313,19 @@ where
                         // loop right here instead of dropping the sample. It is
                         // after `on_event` because a sample must be delivered
                         // before there is anything staged to drain.
-                        after_dispatch().await;
+                        //
+                        // Through `park_on_drain` rather than directly: the
+                        // suspension must cost this session's THROUGHPUT and
+                        // not its LIFE, and keepalive is emitted by this same
+                        // loop. See that function.
+                        park_on_drain(
+                            after_dispatch(),
+                            actions,
+                            engine,
+                            clock,
+                            &mut on_event,
+                        )
+                        .await;
                     }
                     _ = clock.sleep(remaining_ms) => match kind {
                         // Established lease / keepalive deadline. Both
@@ -1275,8 +1380,12 @@ where
                 );
                 #[cfg(not(feature = "reassembly"))]
                 on_event(IterationEvent::Poll(&outcome));
-                // R2703 — same placement as the select arm; see there.
-                after_dispatch().await;
+                // R2703 — same placement and same park as the select arm; see
+                // there. This arm arms no deadline, so the park finds nothing
+                // to keep alive and waits plainly — but it goes through the
+                // same seam, because "which arm the loop happened to take" is
+                // not a reason for delivery to behave differently.
+                park_on_drain(after_dispatch(), actions, engine, clock, &mut on_event).await;
             }
         }
     }

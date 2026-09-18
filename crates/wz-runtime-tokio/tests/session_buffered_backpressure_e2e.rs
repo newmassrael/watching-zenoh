@@ -41,8 +41,8 @@ use wz_runtime_tokio::session_fsm_unicast::{
 };
 use wz_runtime_tokio::session_glue::{
     drive_session_until_terminal_with_extra_deadline, new_session_actions, new_session_engine,
-    BoxedLinkDriver, DriverLoopOutcome, ExtraDeadline, LoopStages, SessionActionsBinding,
-    SessionLinkActions, SessionTimeouts,
+    BoxedLinkDriver, DriverLoopOutcome, ExtraDeadline, IterationEvent, KeepAliveCheckOutcome,
+    LoopStages, SessionActionsBinding, SessionLinkActions, SessionTimeouts,
 };
 use wz_runtime_tokio::{LinkEvent, RxFrame};
 use wz_runtime_tokio_test_support::{
@@ -215,5 +215,104 @@ async fn the_drive_loop_waits_for_a_lagging_buffered_consumer() {
         "every sample of a {BURST}-sample burst must reach a lagging consumer \
          through a queue of {CAPACITY} -- the loop waited for it. Fewer means \
          the loop dropped what it could not hand over."
+    );
+}
+
+/// The other half of the claim, and the one that says the backpressure above is
+/// an improvement rather than a trade: a consumer that never reads must cost
+/// this session its THROUGHPUT, not its LIFE.
+///
+/// Keepalive TX is emitted by this same drive loop — there is no timer task and
+/// the loop's future is `!Send`, so there cannot be one — which means awaiting
+/// the drain straight through would silence keepalive for as long as the
+/// consumer is behind, and the peer would drop a session that is perfectly
+/// healthy. Upstream never faces this: its blocking handler parks one link's rx
+/// task while keepalive runs on another. So wz has to keep the duty running by
+/// hand, and this is the witness that it does.
+///
+/// ⚠ VIRTUAL TIME (`start_paused`), and that is not a convenience. `TokioTime`
+/// reads `tokio::time::Instant`, so both the loop's wake arithmetic and its
+/// sleeps follow the paused clock: the lease periods below cost no wall-clock
+/// and, more to the point, the test cannot pass or fail on how fast the machine
+/// running it happens to be.
+#[tokio::test(start_paused = true)]
+async fn a_parked_drain_does_not_starve_this_sessions_keepalive() {
+    let outbound: Arc<dyn BoxedLinkDriver + Send + Sync> = Arc::new(NoopOutboundDriver::default());
+    let actions: Arc<SessionLinkActions> =
+        new_session_actions(outbound, fixture_session_init_params(), TokioTime::new());
+    let mut engine = new_session_engine(&actions);
+    engine.initialize();
+    established(&mut engine);
+
+    let observer = Arc::new(Mutex::new(ApplicationLayerObserver::new()));
+    let session = TokioSession::new(actions.clone(), observer, Arc::new(TokioTime::new()));
+    // Capacity ONE and a receiver that is never read: the second sample fills
+    // the queue and the loop parks on it for the rest of the test. `_rx` is
+    // HELD rather than dropped — dropping it closes the channel, the drain
+    // returns on the send error, and the loop never parks at all, which is the
+    // vacuous shape this test would otherwise quietly take.
+    let (_subscriber, _rx) = session
+        .declare_subscriber_buffered(
+            "demo/**",
+            SubscribeOptions::default(),
+            1,
+            |sample: &dyn wz_session_core::sink::SampleView| sample.payload().to_vec(),
+        )
+        .expect("buffered subscriber declares");
+
+    let emitted = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let counted = emitted.clone();
+    let events: Vec<LinkEvent> = burst_of_frames()
+        .into_iter()
+        .map(|wire| LinkEvent::Rx(RxFrame::new(wire)))
+        .collect();
+    let mut driver = QueueDriver::with(events);
+    let clock = TokioTime::new();
+    let session_dispatch = session.clone();
+    let session_drain = session.clone();
+    // Bounded in VIRTUAL time. A loop parked with no timer armed leaves the
+    // runtime idle, so tokio advances straight to this deadline and the
+    // assertion below reports zero — a starved keepalive FAILS here, it does
+    // not hang here.
+    let _ = tokio::time::timeout(
+        std::time::Duration::from_secs(120),
+        drive_session_until_terminal_with_extra_deadline(
+            &mut driver,
+            &actions,
+            &mut engine,
+            None,
+            &clock,
+            &SessionTimeouts::spec_defaults(),
+            move |event| {
+                if matches!(
+                    event,
+                    IterationEvent::KeepAlive(KeepAliveCheckOutcome::Emitted)
+                ) {
+                    counted.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                }
+                session_dispatch.dispatch_iteration_event(event)
+            },
+            ExtraDeadline {
+                next_ms: || None,
+                revised: None,
+            },
+            LoopStages {
+                ingress: |_: &mut DriverLoopOutcome| {},
+                after_dispatch: move || {
+                    let session = session_drain.clone();
+                    async move { session.drain_buffered().await }
+                },
+            },
+        ),
+    )
+    .await;
+
+    let count = emitted.load(std::sync::atomic::Ordering::SeqCst);
+    assert!(
+        count >= 2,
+        "a loop parked on a consumer that never reads must keep emitting \
+         keepalive -- got {count}. Zero means the park starved the session it \
+         was applying backpressure for, trading a lost sample for a lost \
+         session."
     );
 }
