@@ -207,6 +207,58 @@ impl<I: Send + 'static> BufferedDrain for BufferedStage<I> {
     }
 }
 
+/// R2707 (open-debt item 783) — THE OBLIGATION A BUFFERED SUBSCRIPTION COMES
+/// WITH, as a value rather than as a sentence in a log.
+///
+/// # What this is for
+///
+/// A buffered subscription delivers straight from the callback while its
+/// consumer keeps up ([`BufferedStage::stage`]'s fast path). The moment the
+/// consumer does NOT, the sample is staged, and staged samples move only when
+/// the drive loop awaits a drain. Until this type existed the only thing
+/// holding that invariant was a `log::error!` one level down — and that
+/// sentence named the cause EXACTLY while a hosted lane went red over it, which
+/// is the measurement that says a diagnostic is not a mechanism.
+///
+/// So the declaration hands the obligation back. Dropping it is a
+/// `#[must_use]`, which this workspace compiles as an error; ignoring it takes
+/// an explicit `_`, which is the difference between forgetting and deciding.
+///
+/// # One stage covers the session
+///
+/// It drains EVERY buffered subscription of the session that produced it, not
+/// just the one whose declaration returned it: the registry is per-session and
+/// [`Session::drain_buffered`](super::Session::drain_buffered) walks all of it.
+/// A host with three buffered subscriptions therefore wires one stage, and
+/// wiring the second changes nothing — which is why the gate over this checks
+/// that a caller wires SOMETHING rather than counting.
+#[must_use = "a buffered subscription's samples move only while the drive loop \
+              awaits this stage; wire it as `LoopStages::after_dispatch` (or \
+              call `Session::drain_buffered` there). Dropping it leaves a \
+              subscription that answers healthily and stalls the moment its \
+              consumer falls behind"]
+#[derive(Clone)]
+pub struct BufferedDrainStage {
+    registry: BufferedRegistry,
+}
+
+impl BufferedDrainStage {
+    /// Move every staged sample into its consumer's queue, awaiting capacity.
+    ///
+    /// The same walk as `Session::drain_buffered`, reachable without holding
+    /// the session — which is what lets a host wire the stage into a loop it
+    /// built before the subscription existed.
+    pub async fn drain(&self) {
+        self.registry.drain_all().await;
+    }
+}
+
+impl core::fmt::Debug for BufferedDrainStage {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str("BufferedDrainStage")
+    }
+}
+
 /// Every buffered subscription a session is currently delivering to.
 ///
 /// WEAK handles: a dropped subscription must not be kept alive by this list,
@@ -220,6 +272,14 @@ pub(crate) struct BufferedRegistry {
 }
 
 impl BufferedRegistry {
+    /// The obligation this registry's session hands back on every buffered
+    /// declaration. See [`BufferedDrainStage`].
+    pub(crate) fn stage(&self) -> BufferedDrainStage {
+        BufferedDrainStage {
+            registry: self.clone(),
+        }
+    }
+
     pub(crate) fn register(&self, drain: &Arc<dyn BufferedDrain>) {
         self.drains
             .lock()

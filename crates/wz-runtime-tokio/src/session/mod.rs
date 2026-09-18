@@ -420,6 +420,13 @@ mod admin_declarations;
 /// loop-awaited drain rather than in the callback.
 #[cfg(feature = "transport-unicast")]
 mod buffered;
+/// R2707 (open-debt item 783) — the drain obligation is PUBLIC while the module
+/// that defines it stays private: it appears in
+/// [`Session::declare_subscriber_buffered`]'s return type, so a caller must be
+/// able to name it, and everything else about the staging seam is this crate's
+/// own business.
+#[cfg(feature = "transport-unicast")]
+pub use buffered::BufferedDrainStage;
 #[cfg(feature = "transport-unicast")]
 mod decl_listener;
 #[cfg(feature = "transport-unicast")]
@@ -4727,7 +4734,14 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
         options: SubscribeOptions,
         capacity: usize,
         mut project: P,
-    ) -> Result<(Subscriber<R>, tokio::sync::mpsc::Receiver<I>), SubscribeError>
+    ) -> Result<
+        (
+            Subscriber<R>,
+            tokio::sync::mpsc::Receiver<I>,
+            buffered::BufferedDrainStage,
+        ),
+        SubscribeError,
+    >
     where
         I: Send + 'static,
         P: FnMut(&dyn SampleView) -> I + Send + 'static,
@@ -4744,7 +4758,13 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
             let _keepalive = &drain;
             buffered::stage_into(&stage, project(sample));
         })?;
-        Ok((subscriber, rx))
+        // R2707 (item 783) — THE THIRD VALUE IS THE OBLIGATION, and it is
+        // `#[must_use]`. Before it, "this subscription delivers only while the
+        // loop awaits a drain" lived in a `log::error!` that fires after the
+        // fact; a hosted lane went red with that sentence naming the cause
+        // exactly, which is what a diagnostic can do and a mechanism cannot
+        // leave undone.
+        Ok((subscriber, rx, self.buffered.stage()))
     }
 
     /// R2703 — move every buffered subscription's staged samples into its

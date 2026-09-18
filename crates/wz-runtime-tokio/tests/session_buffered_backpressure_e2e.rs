@@ -126,7 +126,7 @@ async fn the_drive_loop_waits_for_a_lagging_buffered_consumer() {
 
     let observer = Arc::new(Mutex::new(ApplicationLayerObserver::new()));
     let session = TokioSession::new(actions.clone(), observer, Arc::new(TokioTime::new()));
-    let (_subscriber, mut rx) = session
+    let (_subscriber, mut rx, _drain_stage) = session
         .declare_subscriber_buffered(
             "demo/**",
             SubscribeOptions::default(),
@@ -251,7 +251,7 @@ async fn a_parked_drain_does_not_starve_this_sessions_keepalive() {
     // HELD rather than dropped — dropping it closes the channel, the drain
     // returns on the send error, and the loop never parks at all, which is the
     // vacuous shape this test would otherwise quietly take.
-    let (_subscriber, _rx) = session
+    let (_subscriber, _rx, _drain_stage) = session
         .declare_subscriber_buffered(
             "demo/**",
             SubscribeOptions::default(),
