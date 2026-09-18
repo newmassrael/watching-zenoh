@@ -1696,7 +1696,16 @@ PIN_NO_SYMBOL = 2
 # All three pins in this file fall together on that one departure, which is what
 # says a departure rather than a citation moving between buckets. READ off the
 # census's own FAIL line, not computed from the two deltas above.
-PIN_WZ_CITATIONS = 109
+# R2704 — 109 -> 112. `transport-link-serial` gains a correction that CLOSES
+# three of its four residual clauses and re-scopes the rest, and closing costs
+# citations rather than saving them: naming what was built means naming the
+# struct that carries the three keys, the function that bounds the handshake
+# with `tout`, and the one that answers the interface name -- three tracked wz
+# files where the clauses being closed named none. The atom neither enters nor
+# leaves the PARTIAL population (two residuals survive, and they turned out to
+# be one seam), so REACHED and AMBIGUOUS both hold. READ off the census's own
+# FAIL line.
+PIN_WZ_CITATIONS = 112
 # R2626 — 44 -> 42, and this one is worth a sentence because it HELD through
 # every earlier retirement in this run (R2612, R2622). `time-hlc`'s reason is the
 # first retiree carrying AMBIGUOUS citations of its own: its oldest clauses cite
