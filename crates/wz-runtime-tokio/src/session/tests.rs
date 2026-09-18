@@ -12555,7 +12555,7 @@ async fn a_buffered_subscription_waits_rather_than_dropping_the_newest_sample() 
     const BURST: usize = 5;
 
     let (session, _driver) = build_session();
-    let (_subscriber, mut rx) = session
+    let (_subscriber, mut rx, _drain_stage) = session
         .declare_subscriber_buffered(
             "demo/**",
             SubscribeOptions::default(),
