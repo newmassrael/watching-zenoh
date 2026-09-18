@@ -164,10 +164,23 @@ LEGS=(
     # the registry that matches the keyexpr is `alloc` + `switchboard` gated,
     # so the seam cannot be exercised end to end without it.
     #
-    # The filter is the atom's own name, and every test in the file carries it
-    # as a prefix on purpose -- a test ADDED there is covered without touching
-    # this row, which is the property the config rows above were chosen for.
-    "wz-runtime-tokio|hook|session-close-ingress,switchboard|session_close_ingress"
+    # ⛔ THE FILTER SELECTS THE TEST TARGET, NOT A NAME PREFIX (R2714b), and the
+    # difference is a coverage gap this row actually had. It used to read
+    # `session_close_ingress`, a NAME substring, under a comment claiming "every
+    # test in the file carries it as a prefix on purpose -- a test ADDED there is
+    # covered without touching this row". That property is a CONVENTION, and
+    # nothing enforced it: R2714 added
+    # `a_documented_row_is_still_refused_by_the_authority` to that file and the
+    # leg went on reporting `-> 8 test(s)` while the file held 9. The test ran
+    # nowhere, which is the population-of-zero green this whole table exists to
+    # prevent, and it was caught only by reading the number the gate prints.
+    #
+    # `--test=<name>` names the integration-test TARGET, so every test in
+    # `tests/session_close_ingress.rs` is covered BY CONSTRUCTION -- the same
+    # structural property the `zenoh_config::` / `multicast_glue` rows have for
+    # free, because a module path is structural where a name prefix is a habit.
+    # Test names in that file are now free to read however they read best.
+    "wz-runtime-tokio|hook|session-close-ingress,switchboard|--test=session_close_ingress"
     # The demo's half of the same surface. Its
     # `a_key_that_is_read_while_reaching_nothing_is_not_reported_as_applied` is a
     # ZERO-POPULATION guard over the keys this build drops, which is exactly why
@@ -890,6 +903,39 @@ for leg in "${LEGS[@]}"; do
     if [[ -z "$pkg" || -z "$feats" ]]; then
         echo "nondefault-tests: FAIL -- malformed leg row: '$leg'" >&2
         exit 1
+    fi
+    # R2714b — A FILTER'S COVERAGE MUST BE STRUCTURAL, NOT A HABIT.
+    #
+    # A leg's filter decides which tests the leg runs, so a filter whose
+    # coverage rests on how someone NAMES the next test silently drops that
+    # test: the leg still passes and still prints a count, and only comparing
+    # the count against the file says so. MEASURED: the
+    # `session-close-ingress` row filtered on the bare name
+    # `session_close_ingress`, R2714 added a test to that file whose name did
+    # not carry it, and the leg reported `-> 8 test(s)` over a file of 9. The
+    # test was executed by nothing.
+    #
+    # Three spellings carry their coverage by construction and are the only
+    # ones admitted:
+    #   * `--test=<target>`  -- the whole integration-test binary;
+    #   * a path containing `::` -- a module path, and every test under a
+    #     module has it as a prefix by construction;
+    #   * a bare name that IS a module of the package, for the same reason
+    #     (`multicast_glue` is `src/multicast_glue.rs`, so every test inside
+    #     it has `multicast_glue::` in its path).
+    # A bare name that is NOT a module is a name prefix, and that is the one
+    # this refuses -- by shape, so the next row cannot reintroduce it.
+    if [[ -n "$filter" && "$filter" != --test=* && "$filter" != *"::"* ]]; then
+        if [[ ! -f "$repo/crates/$pkg/src/$filter.rs" \
+              && ! -f "$repo/crates/$pkg/src/$filter/mod.rs" ]]; then
+            echo "nondefault-tests: FAIL -- leg '$pkg' filters on '$filter', which is" >&2
+            echo "  a NAME PREFIX: it covers whatever the next test happens to be" >&2
+            echo "  called, and a test named otherwise is run by nothing while this" >&2
+            echo "  leg still reports a count and still passes." >&2
+            echo "  Use \`--test=$filter\` for an integration-test file, or a module" >&2
+            echo "  path -- both cover their tests by construction." >&2
+            exit 1
+        fi
     fi
     if [[ $want_all -eq 0 && "$scope" != "hook" ]]; then
         deferred+=("$pkg ${filter:-<whole crate>}")
