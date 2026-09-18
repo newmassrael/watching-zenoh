@@ -76,6 +76,7 @@ from __future__ import annotations
 import argparse
 import re
 import sys
+import tempfile
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -171,14 +172,79 @@ def cfg_test_spans(text: str) -> list[tuple[int, int]]:
     return spans
 
 
+CFG_TEST_MOD_RE = re.compile(
+    r"#\[cfg\(test\)\]\s*(?:pub(?:\([^)]*\))?\s+)?mod\s+([A-Za-z_][A-Za-z0-9_]*)\s*;"
+)
+PLAIN_MOD_RE = re.compile(
+    r"^[ \t]*(?:pub(?:\([^)]*\))?[ \t]+)?mod\s+([A-Za-z_][A-Za-z0-9_]*)\s*;", re.M
+)
+
+
+def module_file(declarer: Path, name: str) -> Path | None:
+    """The file a `mod <name>;` in `declarer` resolves to, or None.
+
+    Both Rust spellings, because both occur in this tree: a declaration in
+    `mod.rs` / `lib.rs` / `main.rs` resolves beside it, and one in `foo.rs`
+    resolves under `foo/`.
+    """
+    base = (
+        declarer.parent
+        if declarer.name in {"mod.rs", "lib.rs", "main.rs"}
+        else declarer.with_suffix("")
+    )
+    for cand in (base / f"{name}.rs", base / name / "mod.rs"):
+        if cand.is_file():
+            return cand
+    return None
+
+
+def cfg_test_files(roots: list[Path]) -> set[Path]:
+    """Every source file that exists only under `#[cfg(test)]`.
+
+    R2703 — [`cfg_test_spans`] strips `#[cfg(test)]` blocks that carry their
+    own braces, which is every INLINE test module. A test module in its OWN
+    FILE (`#[cfg(test)] mod tests;`) has no braces at the declaration and no
+    marker at all inside the file it names, so that whole file was read as
+    production. This gate's contract says production is these sources "minus
+    `#[cfg(test)]` blocks" and the span walk alone does not deliver it; an
+    asserted binding is not a binding until something binds it.
+
+    TRANSITIVE, because the property is inherited: a module a test-only file
+    declares is reachable only from a test-only file, so it is test-only too.
+    Stopping at depth one would leave the same hole one level down.
+    """
+    frontier: list[Path] = []
+    for path in roots:
+        text = path.read_text(encoding="utf-8", errors="replace")
+        for m in CFG_TEST_MOD_RE.finditer(text):
+            child = module_file(path, m.group(1))
+            if child is not None:
+                frontier.append(child)
+    seen: set[Path] = set()
+    while frontier:
+        path = frontier.pop()
+        resolved = path.resolve()
+        if resolved in seen:
+            continue
+        seen.add(resolved)
+        if not path.is_file():
+            continue
+        text = path.read_text(encoding="utf-8", errors="replace")
+        for m in PLAIN_MOD_RE.finditer(text):
+            child = module_file(path, m.group(1))
+            if child is not None:
+                frontier.append(child)
+    return seen
+
+
 def production_sources() -> list[Path]:
-    """Every `crates/*/src/**.rs` outside the substrate, sorted."""
-    out = [
-        p
-        for p in sorted(CRATES.glob("*/src/**/*.rs"))
-        if p.resolve() not in {s.resolve() for s in SUBSTRATE}
-    ]
-    return out
+    """Every `crates/*/src/**.rs` outside the substrate, sorted.
+
+    Minus the whole-file `#[cfg(test)]` modules — see [`cfg_test_files`].
+    """
+    all_sources = sorted(CRATES.glob("*/src/**/*.rs"))
+    excluded = {s.resolve() for s in SUBSTRATE} | cfg_test_files(all_sources)
+    return [p for p in all_sources if p.resolve() not in excluded]
 
 
 def scan(text: str, pattern: re.Pattern[str]) -> list[tuple[int, re.Match[str]]]:
@@ -398,6 +464,38 @@ def selftest() -> int:
                 f"got ambient={got_ambient} named={got_named}"
             )
 
+    # R2703 — the FILE-level arm. The cases above are text, and the hole this
+    # gate had was not in its patterns but in its POPULATION: a `#[cfg(test)]`
+    # module in its own file carries no marker inside that file, so every text
+    # case could pass while the walk still read it as production. The
+    # anti-vacuity case is the last one and is not optional -- a
+    # `cfg_test_files` that returned every path would satisfy the other three.
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        (root / "sub" / "inner" / "leaf").mkdir(parents=True)
+        (root / "mod.rs").write_text("#[cfg(test)]\nmod tests;\nmod other;\n")
+        (root / "tests.rs").write_text("fn f() { tokio::spawn(g()); }\n")
+        (root / "other.rs").write_text("fn f() { WzRuntime::Rx.spawn(g()); }\n")
+        # A declaration inside `sub.rs` resolves under `sub/`, not beside it.
+        (root / "sub.rs").write_text("#[cfg(test)]\nmod inner;\n")
+        (root / "sub" / "inner.rs").write_text("mod leaf;\n")
+        (root / "sub" / "inner" / "leaf" / "mod.rs").write_text(
+            "fn f() { tokio::spawn(g()); }\n"
+        )
+        found = cfg_test_files([root / "mod.rs", root / "sub.rs"])
+        for want, label in (
+            (root / "tests.rs", "a whole-file cfg(test) module is excluded"),
+            (root / "sub" / "inner.rs", "the foo.rs/foo/ spelling resolves too"),
+            (root / "sub" / "inner" / "leaf" / "mod.rs", "exclusion is transitive"),
+        ):
+            if want.resolve() not in found:
+                failures.append(f"{label}: {want} was not excluded")
+        if (root / "other.rs").resolve() in found:
+            failures.append(
+                "a plain `mod other;` must stay production -- excluding it would "
+                "make this gate report green by emptying its own population"
+            )
+
     # The constant table must resolve, or the SCREAMING_CASE half of NAMED_RE
     # silently classifies nothing.
     missing = sorted(declared - set(consts.values()))
@@ -412,7 +510,10 @@ def selftest() -> int:
         for line in failures:
             print(f"  - {line}", file=sys.stderr)
         return 1
-    print(f"  subsystem-spawn selftest: {len(cases)} case(s) OK")
+    print(
+        f"  subsystem-spawn selftest: {len(cases)} text case(s) + 4 file-level "
+        "case(s) OK"
+    )
     return 0
 
 
