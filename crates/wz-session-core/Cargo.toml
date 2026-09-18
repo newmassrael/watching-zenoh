@@ -648,7 +648,7 @@ session-multicast = ["dep:sce-rust-runtime"]
 # Push wire codec must be present. The `switchboard::EventInjector` port
 # itself stays UNCONDITIONAL (the MCU generated static match names it
 # without this feature; the AP dynamic registry is what this gates).
-switchboard = ["codec-push"]
+switchboard = ["codec-push", "dep:wz-switchboard-schema"]
 
 # R311qc — the data-plane forwarding kernel (`routing::RouteTable`): a router
 # forwards a Put received on one peer face to every other face that declared a
@@ -1095,6 +1095,13 @@ portable-atomic = { version = "1", default-features = false, features = ["fallba
 # owned codec types they expose are only ever named by session-core under
 # `all(codec-*, alloc)`, where the `alloc` forward re-enables wz-codecs/alloc.
 wz-codecs = { path = "../wz-codecs", default-features = false }
+# R2714 — the `wz-switchboard.yaml` MODEL, so the document -> registry mapping
+# can live beside the registry it fills rather than in each host. OPTIONAL and
+# pulled only by `switchboard`, so the MCU crates that build this one without
+# that feature link nothing new. Both crates are `#![no_std]` and the model
+# carries no format backend (its YAML/JSON reader is each consumer's I/O
+# boundary), so this edge adds no allocator and no parser.
+wz-switchboard-schema = { path = "../wz-switchboard-schema", optional = true }
 # R311di-6 — sce-forge-runtime supplies `CodecError` needed by
 # InboundParseError variants. default-features = false stays MCU-aware;
 # `alloc` is implied via wz-codecs's transitive enable but the dep is

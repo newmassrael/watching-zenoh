@@ -2027,6 +2027,14 @@ default-features = false
 features = ["reassembly"]
 
 [dev-dependencies]
+# R2714 — DEV-ONLY, for the witness that a `wz-switchboard.yaml` document
+# actually closes a session. The production side of this crate needs no
+# document model: it is handed an already-populated registry, and the
+# document -> registry mapping lives on the registry itself
+# (`SwitchboardRegistry::apply_spec`). A production dep here would say the
+# opposite -- that a host assembles rows -- which is the defect that mapping
+# exists to end.
+wz-switchboard-schema = { path = "../wz-switchboard-schema" }
 # R2600 — DEV-ONLY, and the production side deliberately has no `time` dep (see
 # the `x509-parser` note above: `ASN1Time::timestamp` yields Unix seconds, which
 # `std::time` compares). The witness for `close_link_on_expiration` must issue a

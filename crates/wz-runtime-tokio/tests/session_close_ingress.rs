@@ -231,6 +231,105 @@ fn session_close_ingress_leaves_an_unmapped_message_alone() {
     );
 }
 
+/// R2714 residual (b) — THE DOCUMENT REACHES THE EFFECT. One `wz-switchboard.yaml`
+/// model, applied to a registry by the mapping that lives on the registry, and a
+/// wire Push on the declared key closes the session.
+///
+/// This is the join residual (b) is about. `apply_spec` is witnessed in
+/// `wz-session-core` to map a `lifecycle` row to the command shape, and the arms
+/// above witness that a command row closes a session. Neither says a DOCUMENT
+/// closes one — and the acceptance is "no host binds a row by hand", which is a
+/// statement about the whole path or about nothing.
+///
+/// ⚠ The row is NOT registered here. Every keyexpr this test names comes out of
+/// the model, so a mapping that dropped the lifecycle section would fail here
+/// rather than be quietly compensated by a hand registration.
+#[test]
+fn session_close_ingress_closes_from_a_switchboard_document() {
+    use wz_switchboard_schema::{LifecycleBinding, SwitchboardSpec};
+
+    const DECLARED: &str = "@/wz/session/close/peer-a";
+
+    let (actions, mut engine) = established_session();
+    let spec = SwitchboardSpec {
+        machine: "sensor_monitor".to_string(),
+        bindings: Vec::new(),
+        lifecycle: vec![LifecycleBinding {
+            keyexpr: DECLARED.to_string(),
+            event: CLOSE_EVENT.to_string(),
+        }],
+    };
+
+    let mut observer = ApplicationLayerObserver::new();
+    observer.switchboard.apply_spec(&spec);
+    assert_eq!(
+        observer.switchboard.len(),
+        1,
+        "the document's one row is the registry's one row"
+    );
+
+    let outcome = frame_event(put_push(DECLARED));
+    let admit = AdmitAll;
+    let fired = {
+        let mut injector = SessionLifecycleInjector::new(&actions, &admit);
+        observer.dispatch_switchboard(IterationEvent::Poll(&outcome), &mut injector)
+    };
+
+    assert_eq!(fired, 1, "the declared key fired the declared verb");
+    assert!(check_requested_close(&actions, &mut engine));
+    assert_eq!(
+        engine.get_current_state(),
+        SessionFsmUnicastState::Closing,
+        "a document closed a running session -- the effect, not the registration"
+    );
+}
+
+/// And the same document is still subject to the authority. A declaration says
+/// WHICH key the verb answers on; it does not say who may use it, and a round
+/// that let the document imply consent would have undone R2713 through the back
+/// door.
+#[test]
+fn a_documented_row_is_still_refused_by_the_authority() {
+    use wz_switchboard_schema::{LifecycleBinding, SwitchboardSpec};
+
+    const DECLARED: &str = "@/wz/session/close/peer-a";
+
+    let (actions, mut engine) = established_session();
+    let spec = SwitchboardSpec {
+        machine: "sensor_monitor".to_string(),
+        bindings: Vec::new(),
+        lifecycle: vec![LifecycleBinding {
+            keyexpr: DECLARED.to_string(),
+            event: CLOSE_EVENT.to_string(),
+        }],
+    };
+
+    let mut observer = ApplicationLayerObserver::new();
+    observer.switchboard.apply_spec(&spec);
+    // The row IS there. Without this, "nothing happened" would also be what a
+    // mapping that dropped the lifecycle section produces, and this arm would
+    // pass for the opposite of its reason.
+    assert_eq!(
+        observer.switchboard.len(),
+        1,
+        "the document registered its row; the refusal below is the authority's"
+    );
+
+    let outcome = frame_event(put_push(DECLARED));
+    let deny = DenyAll;
+    let fired = {
+        let mut injector = SessionLifecycleInjector::new(&actions, &deny);
+        observer.dispatch_switchboard(IterationEvent::Poll(&outcome), &mut injector)
+    };
+
+    assert_eq!(fired, 0, "declared is not the same as permitted");
+    assert!(!check_requested_close(&actions, &mut engine));
+    assert_eq!(
+        engine.get_current_state(),
+        SessionFsmUnicastState::Established
+    );
+}
+
 /// R2713 residual (a) — THE JOIN. Both ends were already witnessed: a policy
 /// drops a governed message from a batch (`session_ingress_acl_e2e.rs`), and a
 /// matched row closes a running session (the arm at the top of this file).

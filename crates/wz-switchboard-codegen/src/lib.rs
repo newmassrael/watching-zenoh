@@ -117,6 +117,19 @@ struct Document {
 /// developer must fix in either the SCXML or the `wz-switchboard.yaml`.
 #[derive(Debug)]
 pub enum CodegenError {
+    /// R2714 — the document carries a `lifecycle` section and this generator
+    /// cannot emit one yet.
+    ///
+    /// ⛔ REFUSED RATHER THAN IGNORED, and the difference is the whole reason
+    /// this variant exists. `SwitchboardSpec` gained the section for the AP
+    /// side, where `SwitchboardRegistry::apply_spec` registers those rows as
+    /// commands. A generator that simply skipped them would compile a document
+    /// declaring a session-close row into a dispatch that never answers the
+    /// verb — a node silent about a capability its own sidecar declares, which
+    /// is indistinguishable from the capability being absent. Emitting the arm
+    /// is the remaining half of residual (b); until it lands, a build that
+    /// would produce that silence stops instead.
+    LifecycleUnsupported { rows: usize },
     /// The forge-ast JSON could not be deserialized.
     Json(serde_json::Error),
     /// The envelope's `v` is not [`SUPPORTED_FORGE_AST_VERSION`].
@@ -199,6 +212,14 @@ pub enum CodegenError {
 impl fmt::Display for CodegenError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            CodegenError::LifecycleUnsupported { rows } => write!(
+                f,
+                "wz-switchboard.yaml declares {rows} `lifecycle:` row(s) and the MCU \
+                 static generator cannot emit them yet — it would drop them and produce \
+                 a dispatch that never answers a verb the document declares. The AP side \
+                 registers them via `SwitchboardRegistry::apply_spec`; remove the section \
+                 for an MCU build, or land the generator's command arm"
+            ),
             CodegenError::Json(e) => write!(f, "forge-ast.v1 JSON parse failed: {e}"),
             CodegenError::UnsupportedAstVersion(v) => write!(
                 f,
@@ -616,6 +637,14 @@ pub fn generate(input: &GenInput) -> Result<String, CodegenError> {
             machine: facts.name.clone(),
         });
     }
+    // R2714 — checked FIRST among the per-section rules, before any arm is
+    // emitted: this is the one failure whose alternative is silence rather than
+    // a wrong artifact, so nothing should be built before it is ruled out.
+    if !spec.lifecycle.is_empty() {
+        return Err(CodegenError::LifecycleUnsupported {
+            rows: spec.lifecycle.len(),
+        });
+    }
 
     let has_value = spec.bindings.iter().any(|b| b.codec.is_some());
     let machine_pascal = to_pascal_case(&facts.name);
@@ -989,6 +1018,7 @@ mod tests {
         SwitchboardSpec {
             machine: machine.to_string(),
             bindings,
+            lifecycle: Vec::new(),
         }
     }
 
@@ -1125,6 +1155,31 @@ mod tests {
     }
 
     // ---- generate: validation rejections ----
+
+    // R2714 — a `lifecycle:` section is REFUSED, not skipped. The alternative
+    // to this error is a build that succeeds and emits a dispatch which never
+    // answers a verb the document declares, which reads exactly like the verb
+    // not existing. Silence is the failure mode this arm forbids.
+    #[test]
+    fn rejects_a_lifecycle_section_it_cannot_emit() {
+        use wz_switchboard_schema::LifecycleBinding;
+
+        let facts = parse_machine_facts(&facts_json("m", &["go"])).unwrap();
+        let mut s = spec("m", vec![binding("a/b", "go")]);
+        s.lifecycle = vec![LifecycleBinding {
+            keyexpr: "@/wz/session/close/*".to_string(),
+            event: "session.close".to_string(),
+        }];
+        assert!(matches!(
+            gen_signal(&s, &facts),
+            Err(CodegenError::LifecycleUnsupported { rows: 1 })
+        ));
+
+        // ANTI-VACUITY: the SAME spec without the section generates, so the
+        // refusal above is the section's and not something else in the input.
+        s.lifecycle.clear();
+        assert!(gen_signal(&s, &facts).is_ok());
+    }
 
     #[test]
     fn rejects_machine_mismatch() {

@@ -22,9 +22,11 @@
 //!    every [`Binding::event`] cross-checked against the target machine's
 //!    `external_ingress_events` (forge-ast.v1, W3C SCXML 3.12.1
 //!    event-descriptor matching).
-//!  - **AP / dynamic** — a future `wz-runtime-tokio` seam deserializes it
-//!    at startup to populate
-//!    `wz_session_core::switchboard::SwitchboardRegistry`.
+//!  - **AP / dynamic** — a host deserializes it at startup and hands the
+//!    parsed model to `SwitchboardRegistry::apply_spec`, which is where
+//!    the row-kind mapping lives (R2714). Only the DESERIALIZE is the
+//!    host's; the mapping is not, because a host that writes its own
+//!    turns this document back into a suggestion.
 //!
 //! The model derives serde traits but pulls no format backend: the YAML
 //! reader (or, in tests, a JSON round-trip) is selected at each
@@ -61,6 +63,45 @@ pub struct SwitchboardSpec {
     /// `SwitchboardRegistry::dispatch`'s every-matching-row-fires
     /// semantics).
     pub bindings: Vec<Binding>,
+    /// R2714 — rows that address the SESSION's own lifecycle rather than
+    /// [`SwitchboardSpec::machine`].
+    ///
+    /// A SECOND SECTION rather than a third flavour of [`Binding`], because
+    /// what differs is not the payload shape but WHICH MACHINE the row
+    /// targets. Every row under `bindings` is validated against
+    /// `machine`'s `external_ingress_events`; a lifecycle verb belongs to
+    /// the session FSM, which every profile already has and no sidecar
+    /// names. Putting these in `bindings` would ask the generator to
+    /// validate a session event against an application machine, where it
+    /// correctly does not exist.
+    ///
+    /// Defaulted, so every document written before this section existed
+    /// parses unchanged — and `deny_unknown_fields` still rejects a typo.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub lifecycle: Vec<LifecycleBinding>,
+}
+
+/// One keyexpr-pattern -> session-lifecycle-verb row.
+///
+/// A distinct type from [`Binding`] rather than a `Binding` with a
+/// convention about its fields: a lifecycle row has no `codec` and can
+/// never have one, because a command's subject travels in its KEYEXPR
+/// (`@/<zid>/<whatami>/session/<verb>/<peer-zid>`) and not in its payload.
+/// Reusing `Binding` would make `codec: Some(..)` on a lifecycle row
+/// representable and then need a rule forbidding it; two fields make the
+/// state unrepresentable instead.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LifecycleBinding {
+    /// The keyexpr pattern a deployment exposes the verb on. wz ships no
+    /// default row: which key a node answers on is the deployment's
+    /// choice, which is the whole reason this is a document and not a
+    /// constant.
+    pub keyexpr: String,
+    /// The session machine's domain event this row raises (e.g.
+    /// `session.close`). The ARRIVING keyexpr travels with it, so the
+    /// authority that admits or refuses the command can name its subject.
+    pub event: String,
 }
 
 /// One keyexpr-pattern -> domain-event row.
@@ -139,9 +180,47 @@ mod tests {
                     codec: None,
                 },
             ],
+            lifecycle: Vec::new(),
         };
 
         let json = serde_json::to_string(&spec).expect("serialize");
+        let back: SwitchboardSpec = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(spec, back);
+    }
+
+    // R2714 — a document written before the `lifecycle` section existed still
+    // deserializes, and an empty section still serializes away. Both halves are
+    // asserted because both are what keep every sidecar in the tree valid: the
+    // default is what lets the old documents parse, and
+    // `skip_serializing_if` is what keeps them byte-stable when re-emitted.
+    #[test]
+    fn a_document_without_a_lifecycle_section_still_parses_and_stays_byte_stable() {
+        let json =
+            r#"{"machine":"thermostat","bindings":[{"keyexpr":"home/*/reset","event":"reset"}]}"#;
+        let spec: SwitchboardSpec = serde_json::from_str(json).expect("deserialize");
+        assert!(spec.lifecycle.is_empty());
+
+        let back = serde_json::to_string(&spec).expect("serialize");
+        assert_eq!(back, json, "an empty lifecycle section adds no key");
+    }
+
+    // And a lifecycle row round-trips with the two fields it has -- no `codec`
+    // key exists on it at all, which is the unrepresentable state this type
+    // buys over reusing `Binding`.
+    #[test]
+    fn lifecycle_binding_round_trips() {
+        let spec = SwitchboardSpec {
+            machine: "sensor_monitor".to_string(),
+            bindings: Vec::new(),
+            lifecycle: vec![LifecycleBinding {
+                keyexpr: "@/wz/session/close/*".to_string(),
+                event: "session.close".to_string(),
+            }],
+        };
+
+        let json = serde_json::to_string(&spec).expect("serialize");
+        assert!(json.contains(r#""lifecycle":[{"keyexpr":"@/wz/session/close/*""#));
+        assert!(!json.contains("codec"));
         let back: SwitchboardSpec = serde_json::from_str(&json).expect("deserialize");
         assert_eq!(spec, back);
     }
@@ -166,6 +245,7 @@ mod tests {
                     codec: None,
                 },
             ],
+            lifecycle: Vec::new(),
         };
 
         let json = serde_json::to_string(&spec).expect("serialize");

@@ -305,6 +305,50 @@ mod alloc_impl {
             });
         }
 
+        /// R2714 — populate this registry from a parsed `wz-switchboard.yaml`.
+        ///
+        /// THE MAPPING FROM DECLARATION TO REGISTRATION LIVES HERE, and it is
+        /// placed beside the hand-registration methods on purpose: the defect
+        /// it repairs is hosts writing their own rows, so the cure has to sit
+        /// where a host is already looking. MEASURED before it was written —
+        /// `wz-switchboard-example` populated a registry with three literal
+        /// `register*` calls under a comment reading "the SAME routing as
+        /// wz-switchboard.yaml … in production the AP loader fills this by
+        /// parsing the runtime sidecar", and there was no such loader in the
+        /// tree. A comment is not a seam.
+        ///
+        /// The DESERIALIZE stays outside: the model pulls no format backend, so
+        /// each consumer picks YAML or JSON at its own I/O boundary and hands
+        /// the parsed value here. That split is the schema crate's own contract
+        /// and is why this is `no_std`-clean.
+        ///
+        /// Rows are appended in document order — `bindings` first, then
+        /// `lifecycle` — and `dispatch` fires every matching row in
+        /// registration order, so the document's order is the dispatch order.
+        /// The registry is not cleared: a host may apply several documents, and
+        /// silently discarding rows it had already registered would be a
+        /// surprise this method has no reason to spring.
+        pub fn apply_spec(&mut self, spec: &wz_switchboard_schema::SwitchboardSpec) {
+            for binding in &spec.bindings {
+                // The document's kind discriminator, unchanged: a `codec` names
+                // a decoder, its absence means an empty `_event.data`.
+                match &binding.codec {
+                    Some(_) => self.register_value(&*binding.keyexpr, &*binding.event),
+                    None => self.register(&*binding.keyexpr, &*binding.event),
+                }
+            }
+            for row in &spec.lifecycle {
+                // ⛔ A lifecycle row is a COMMAND row, never a signal one. Its
+                // verb acts on the peer its arriving keyexpr names, and the
+                // signal shape carries no keyexpr — so registering one with
+                // `register` would hand the injector a name it cannot
+                // authorise, and R2713's fail-closed rule would (correctly)
+                // refuse it forever. The document says which session may be
+                // closed; this is the line that keeps that sentence true.
+                self.register_command(&*row.keyexpr, &*row.event);
+            }
+        }
+
         /// Number of registered rows (diagnostic / test).
         pub fn len(&self) -> usize {
             self.entries.len()
@@ -471,6 +515,28 @@ mod tests {
         fn inject_value(&mut self, event_name: &str, payload: &[u8]) -> bool {
             self.calls.push((event_name.to_string(), payload.to_vec()));
             self.decode_ok
+        }
+    }
+
+    // R2714 — an injector that records WHICH SHAPE it was called through, which
+    // is the only thing `apply_spec`'s mapping can get wrong. Counting
+    // injections cannot see it: a lifecycle row mis-mapped to the signal shape
+    // still fires and still counts, and only the shape says so.
+    #[derive(Default)]
+    struct ShapeRecordingInjector {
+        signal: Vec<String>,
+        command: Vec<(String, String)>,
+    }
+
+    impl EventInjector for ShapeRecordingInjector {
+        fn inject(&mut self, event_name: &str, _event_data: &str) {
+            self.signal.push(event_name.to_string());
+        }
+
+        fn inject_command(&mut self, event_name: &str, keyexpr: &str) -> bool {
+            self.command
+                .push((event_name.to_string(), keyexpr.to_string()));
+            true
         }
     }
 
@@ -836,5 +902,94 @@ mod tests {
 
         assert_eq!(fired, 0);
         assert!(inj.calls.is_empty());
+    }
+
+    // R2714 — the document's rows reach the registry AS THE KIND THE DOCUMENT
+    // SAYS. The assertion is the SHAPE each row dispatched through, not the
+    // count: a `lifecycle` row mis-mapped to `register` still matches and still
+    // counts, and only the shape tells the two apart.
+    #[test]
+    fn apply_spec_maps_each_section_to_its_row_kind() {
+        use wz_switchboard_schema::{Binding, LifecycleBinding, SwitchboardSpec};
+
+        let spec = SwitchboardSpec {
+            machine: "sensor_monitor".into(),
+            bindings: alloc::vec![
+                Binding {
+                    keyexpr: "home/*/reset".into(),
+                    event: "reset".into(),
+                    codec: None,
+                },
+                Binding {
+                    keyexpr: "home/*/temp".into(),
+                    event: "temp_update".into(),
+                    codec: Some("temp_payload".into()),
+                },
+            ],
+            lifecycle: alloc::vec![LifecycleBinding {
+                keyexpr: "@/wz/session/close/*".into(),
+                event: "session.close".into(),
+            }],
+        };
+
+        let mut board = SwitchboardRegistry::new();
+        board.apply_spec(&spec);
+        assert_eq!(board.len(), 3, "every row in the document is registered");
+
+        let mut inj = ShapeRecordingInjector::default();
+        board.dispatch(&sample("@/wz/session/close/peer-a"), &mut inj);
+
+        // THE CLAIM: the lifecycle row went through the COMMAND shape, carrying
+        // the arriving key -- the only shape whose injector can authorise it.
+        assert_eq!(
+            inj.command,
+            alloc::vec![(
+                "session.close".to_string(),
+                "@/wz/session/close/peer-a".to_string()
+            )]
+        );
+        // ANTI-VACUITY in the other direction: nothing reached the signal shape,
+        // so the assertion above is not passing because both were called.
+        assert!(
+            inj.signal.is_empty(),
+            "a lifecycle row must not arrive on the signal path"
+        );
+
+        // And the ordinary sections still route by `codec` presence: the signal
+        // row fires through `inject`, the value row through `inject_value`.
+        let mut ordinary = ValueRecordingInjector {
+            calls: Vec::new(),
+            decode_ok: true,
+        };
+        board.dispatch(&sample("home/livingroom/temp"), &mut ordinary);
+        assert_eq!(ordinary.calls.len(), 1);
+        assert_eq!(ordinary.calls[0].0, "temp_update");
+    }
+
+    // A document written before the `lifecycle` section existed still parses,
+    // and applying it registers no command row. The default is what keeps every
+    // sidecar in the tree valid, so it is asserted rather than assumed.
+    #[test]
+    fn apply_spec_on_a_document_with_no_lifecycle_section_registers_no_command() {
+        use wz_switchboard_schema::{Binding, SwitchboardSpec};
+
+        let spec = SwitchboardSpec {
+            machine: "thermostat".into(),
+            bindings: alloc::vec![Binding {
+                keyexpr: "home/*/reset".into(),
+                event: "reset".into(),
+                codec: None,
+            }],
+            lifecycle: Vec::new(),
+        };
+
+        let mut board = SwitchboardRegistry::new();
+        board.apply_spec(&spec);
+        assert_eq!(board.len(), 1);
+
+        let mut inj = ShapeRecordingInjector::default();
+        board.dispatch(&sample("home/livingroom/reset"), &mut inj);
+        assert_eq!(inj.signal, alloc::vec!["reset".to_string()]);
+        assert!(inj.command.is_empty());
     }
 }
