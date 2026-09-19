@@ -63,7 +63,15 @@ use wz_integration_tests::common::{
 /// rather than a step that hung silently.
 const SCRIPT_TIMEOUT: Duration = Duration::from_secs(30);
 
-// wz-proves: adminspace-read wz->wz
+// NO cross-impl proof marker here, and its ABSENCE is the correct statement
+// rather than an omission: both ends of this fixture are wz, so the file spawns
+// and links no foreign implementation and Layer A4 refuses it a marker of any
+// kind — including the `none` form, which is for a file that COULD adjudicate
+// and declines to. This one could not. That is the whole shape of the thing:
+// the property is that the permit is re-read per GET, only a client issuing two
+// GETs on ONE session separates that from per-connection, and every foreign
+// client this tree can drive is one-shot. The atom's foreign witnesses are
+// untouched and still carry their own markers in Layers E6g, E6i and E7g.
 #[test]
 #[ignore = "binary-dep e2e (wz-ap-demo --features adminspace-config-hotreload,adminspace-read,adminspace-write + wz-e2e-admin-probe); Layer E6j runs via --ignored"]
 fn wz_storage_host_admin_read_permit_is_resolved_per_get_not_per_connection() {
