@@ -273,6 +273,37 @@ fi
 
 wz_ident_gate_pending 'pre-commit' || exit 1
 
+# ─── Check 6: home-directory paths this commit ADDS (R2729) ────────
+# grades: index
+#
+# The commit-time half of pre-push gate 0b, and it exists because the push
+# half arrives after the only repairable moment. MEASURED: `Round 2725`'s
+# ledger entry spells this author's home directory inside the grep pattern of
+# the bullet reporting that it had CHECKED for home paths. That froze the
+# entry, took the store from 137 to 139 lines, and refused every push for five
+# rounds -- R2723 through R2728 committed and never landed while their stated
+# cause was environmental. `append-changelog-entry` freezes, the ledger's audit
+# half has no setter (`redact-term` reaches the publishable half only, with no
+# per-entry scope), and CLAUDE.md forbids editing the sidecar, so gate 0b could
+# refuse forever and never be satisfiable.
+#
+# A DELTA, not gate 0b's ceiling: 137 such lines are already committed, so an
+# absolute scan of the index would refuse every commit this repo will make.
+# What is preventable is an increase.
+#
+# It grades the INDEX rather than the argv of any one producer, so a direct
+# `mnemosyne-cli append-changelog-entry` -- which CLAUDE.md documents as still
+# working -- is covered by the same check as `scripts/append-round.sh`. The
+# wrapper carries the earlier half (`wz_home_path_files`), which keeps the
+# store clean rather than merely uncommitted.
+# shellcheck disable=SC1091  # constant path, resolved at run time
+if ! source scripts/lib/home-path-scan.sh; then
+    echo "pre-commit: scripts/lib/home-path-scan.sh missing or unreadable." >&2
+    exit 1
+fi
+
+wz_home_path_pending 'pre-commit' || exit 1
+
 # ─── Check 4: Mnemosyne SSOT gate ──────────────────────────────────
 # grades: worktree
 #

@@ -68,17 +68,40 @@ saw_impact=0
 check_only=0
 prev=""
 passthrough=()
+# R2729 — the round's own prose files, collected the same way the impact list
+# is: off THIS invocation's argv, never a list written down here. They are the
+# population of the home-path precondition below.
+prose_files=()
 for arg in "$@"; do
     case "$prev" in
         --impact) impact="$arg"; saw_impact=1 ;;
+        --decision-file|--changes-file|--verification-file|--carry-file)
+            prose_files+=("$arg") ;;
     esac
     case "$arg" in
         --impact=*) impact="${arg#--impact=}"; saw_impact=1 ;;
+        --decision-file=*|--changes-file=*|--verification-file=*|--carry-file=*)
+            prose_files+=("${arg#*=}") ;;
         --check-only) check_only=1; prev="$arg"; continue ;;
     esac
     passthrough+=("$arg")
     prev="$arg"
 done
+
+# R2729 — the home-path precondition, checked BEFORE the section space is even
+# read, because this is the one that cannot be repaired afterwards. An impact
+# ref that misses costs an orphan-ledger row; a home path that freezes costs a
+# push that can never pass (pre-push gate 0b), which is what wedged R2723-R2728.
+# shellcheck disable=SC1091  # constant path, resolved at run time
+if ! source "$repo_root/scripts/lib/home-path-scan.sh"; then
+    echo "append-round: FAIL scripts/lib/home-path-scan.sh missing or unreadable" >&2
+    echo "  A gate that cannot read its input must not report green." >&2
+    exit 1
+fi
+# The `+` expansion is not style: `set -u` is on, and an EMPTY array must reach
+# the function as zero arguments so it can FAIL on an empty population rather
+# than die here with an unbound-variable error that reads like a bug.
+wz_home_path_files 'append-round' ${prose_files[@]+"${prose_files[@]}"} || exit 1
 
 if [[ $saw_impact -eq 0 ]]; then
     echo "append-round: FAIL no --impact given" >&2
