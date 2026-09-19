@@ -11051,6 +11051,24 @@ layer_c1bq_zero_copy_arena() {
         echo "  C1bq FAIL: the zero_copy filter matched no test"; echo "$out"; return 1; }
     tests=$((tests + n))
 
+    # R2742 — the LINK-RX half of the same feature, which this lane's filter did
+    # not reach. `--lib zero_copy::` names the reassembly arena's module and
+    # nothing else, so `link_rx_pool::` (R2739's slot table behind the `RxSlots`
+    # seam) and `link_rx_arena::` (R2742's `FrameArena` over it, and the witness
+    # that a production read half fills a slot) were executed by no named lane at
+    # all -- the shape this lane's own header calls out, one module over.
+    #
+    # A second `cargo test` invocation rather than a widened filter: libtest
+    # takes ONE filter string, and `--lib zero_copy:: link_rx_` would select
+    # neither. The guard below is what makes the addition real, since a filter
+    # that stopped matching would otherwise report `0 passed` and exit 0.
+    out="$(cd crates && cargo test -p wz-runtime-tokio --features runtime-zero-copy \
+        --lib link_rx_ --quiet 2>&1)" || { echo "$out"; return 1; }
+    n="$(_runci_passed_count <<<"$out")"
+    (( n > 0 )) || {
+        echo "  C1bq FAIL: the link_rx filter matched no test"; echo "$out"; return 1; }
+    tests=$((tests + n))
+
     # The DEFAULT arena, which every other Router in the tree runs. The seam
     # moved `reassembly_dispatch`'s staging out from under all of them.
     out="$(cd crates && cargo test -p wz-session-core --features reassembly \
@@ -11069,7 +11087,7 @@ layer_c1bq_zero_copy_arena() {
 
     # The facade arm the preset actually ships.
     (cd crates && cargo build -p wz --features preset-ap-full --quiet) || return 1
-    _runci_lane_did C1bq "$tests" "arena test(s) over 2 suite(s), plus 2 clippy + 1 preset build"
+    _runci_lane_did C1bq "$tests" "arena test(s) over 3 suite(s), plus 2 clippy + 1 preset build"
 }
 
 layer_c1cj_replay_c_abi() {
