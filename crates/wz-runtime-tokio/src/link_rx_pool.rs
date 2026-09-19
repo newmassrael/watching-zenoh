@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
 
 //! R2739 — the AP host's LINK-RX slot table, seen through the shared
-//! [`RxSlots`] seam.
+//! `RxSlots` seam.
 //!
 //! ## Why this is separate from the reassembly arena next door
 //!
@@ -22,7 +22,7 @@
 //!
 //! ## The seam is shared, not copied
 //!
-//! [`RxSlots`] and `impl_rx_slots!` live in `wz-runtime-core`, the
+//! `RxSlots` and `impl_rx_slots!` live in `wz-runtime-core`, the
 //! trait-skeleton tier, precisely so this crate and the lwIP link tier see one
 //! trait rather than two that drift. The impl below is the macro's whole job.
 
@@ -54,7 +54,7 @@ const _: () = {
     );
 };
 
-/// ⛔ DO NOT CALL [`RxSlots::new`] ON THIS POOL — use this instead.
+/// ⛔ DO NOT CALL `RxSlots::new` ON THIS POOL — use this instead.
 ///
 /// The seam's constructor returns `Self` BY VALUE, and this arena is
 /// `SLOT_COUNT * SLOT_SIZE` = ~4.2 MiB of storage. The value exists on the
