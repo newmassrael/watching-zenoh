@@ -1018,7 +1018,15 @@ CITATION = re.compile(r"\b((?:[A-Za-z0-9_.-]+/)*[A-Za-z0-9_.-]+\.(?:rs|c|h))(?::
 # arms to it — so this pin falls while UNREACHED and NO_SYMBOL hold at 3 and 2.
 # READ off the census's own FAIL line, which printed `reached: 19 against a pin
 # of 20`.
-PIN_REACHED = 19
+# R2734 — 19 -> 18. `router-multicast-faces` RETIRES, the same shape one atom
+# later: its last standing clause was the message-kind gap, and the round built
+# the only kind with an upstream effect (a group Query now reaches a local
+# queryable) after measuring that the other four are declined at every entry
+# point. It was in `reached` — `a_group_query_reaches_a_client_hosted_queryable`
+# is an executing test owning its symbols — so this pin falls while UNREACHED
+# and NO_SYMBOL hold at 3 and 2. READ off the census's own FAIL line, which
+# printed `reached: 18 against a pin of 19`.
+PIN_REACHED = 18
 PIN_UNREACHED = 3
 PIN_NO_SYMBOL = 2
 # R2534 — 346 -> 347. The atom is `adminspace-metrics` and the citation is the
@@ -1751,7 +1759,15 @@ PIN_NO_SYMBOL = 2
 # +3 of R2704 run backwards; the number is READ off the census's own FAIL line,
 # `wz citations: 97 against a pin of 109`. AMBIGUOUS holds at 18, which says this
 # atom's citations were all rooted rather than spread across buckets.
-PIN_WZ_CITATIONS = 97
+# R2734 — 97 -> 90, and the same "heaviest departure" reasoning applies again:
+# `router-multicast-faces` leaves, and its reason had accreted FOUR rounds of
+# clause work (R2732's ACL withdrawal, R2733's behaviour re-statement and its
+# same-round resolution, and this round's closing), each naming the tracked wz
+# files it closed against. A departure takes the reason's WHOLE citation set
+# with it, so this is not any one round's addition run backwards. READ off the
+# census's own FAIL line, `wz citations: 90 against a pin of 97`. AMBIGUOUS
+# holds at 18, which says this atom's citations were all rooted.
+PIN_WZ_CITATIONS = 90
 # R2626 — 44 -> 42, and this one is worth a sentence because it HELD through
 # every earlier retirement in this run (R2612, R2622). `time-hlc`'s reason is the
 # first retiree carrying AMBIGUOUS citations of its own: its oldest clauses cite
