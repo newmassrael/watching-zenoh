@@ -6861,7 +6861,12 @@ layer_c1am_cargo_test_adminspace() {
     # fs-parameter test is a FOURTH and is not counted here: it is
     # `storage-backend-filesystem`-gated, which this leg does not name — the
     # same shape as the note above. PRINTED by the command.
-    _runci_guarded_test "C1AM storage_manager_service 9" 9 \
+    # R2743 — 9 -> 11: the Layer E12 repair's witness pair, one test per
+    # direction (a storage survives a declare the wire cannot carry; a storage
+    # the config itself forbids is still refused). Neither is gated on an
+    # adminspace feature and the first one's `session-reconnect` is a default,
+    # so both reach this leg. PRINTED by the command.
+    _runci_guarded_test "C1AM storage_manager_service 11" 11 \
         cargo test -p wz-runtime-tokio --features adminspace-config-hotreload --lib storage_manager_service --quiet || return 1
     # R2693 — the PEER's introspection tests had no running lane IN THIS LAYER.
     # The feature set `routing-peer,adminspace-introspection-handlers` occurs here
@@ -8205,7 +8210,10 @@ layer_c1z_cargo_test_storage_driver() {
     # C1AM sibling moves by three from a different base, and the fs-parameter
     # test is in neither: it is `storage-backend-filesystem`-gated and this leg
     # does not name that feature either. PRINTED by the command.
-    _runci_guarded_test "C1z storage_manager_service" 8 \
+    # R2743 — 8 -> 10: the same witness pair as the C1AM sibling above, moving
+    # by the same two from a different base for the same reason — neither test
+    # names a feature this leg lacks. PRINTED by the command.
+    _runci_guarded_test "C1z storage_manager_service" 10 \
         cargo test -p wz-runtime-tokio --features storage-mgr-multi-storage-host,declare-subscriber,pubsub-allow-loop,storage-mgr-strip-prefix --lib storage_manager_service --quiet || return 1
     _runci_guarded_test "C1z storage_strip_prefix" 6 \
         cargo test -p wz-session-core --features storage-mgr-strip-prefix --lib storage_strip_prefix --quiet || return 1
