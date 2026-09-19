@@ -8201,18 +8201,23 @@ pub(crate) async fn run_storage_host(listen: &str, opts: StorageHostOpts) -> io:
                     // R311y812 — resolved PER GET off the shared config through the
                     // library `admin_read_permit` cfg site, which the declare now
                     // applies for us.
-                    // R311y812 — resolved PER GET off the shared config through the
-                    // library `admin_read_permit` cfg site, which the declare now
-                    // applies for us.
                     //
-                    // ⚠ R2645 measured what this does and does NOT buy. Freezing it
-                    // here — capturing the same value once at declare time — leaves
-                    // all three E6i lanes GREEN, reproducing R2374's control. The
-                    // liveness is real but UNWITNESSED, because every pico `z_get`
-                    // arrives on its own connection, so no lane can tell a per-GET
-                    // read from a per-connection one. Routing this host onto the
-                    // library seam moved that read; it did not make anything
-                    // observe it.
+                    // ⚠ R2645 measured what this does and does NOT buy, and the
+                    // second half of that is no longer true: freezing this —
+                    // capturing the same value once at declare time — leaves all
+                    // three E6i tests GREEN, reproducing R2374's control, so for
+                    // two rounds the liveness was real but UNWITNESSED. Every pico
+                    // `z_get` arrives on its own connection, so no lane could tell
+                    // a per-GET read from a per-connection one.
+                    //
+                    // ✅ R2745 (open-debt item 665) built the lane that can.
+                    // `wz-e2e-admin-probe` holds ONE session and runs GET -> PUT
+                    // -> GET on it, so the revoke lands between two requests on
+                    // the SAME connection; Layer E6j drives it. MEASURED both
+                    // ways in that round: freezing this line reds E6j at
+                    // `replies=4` where it wants 0, and leaves E6i at 3 passed.
+                    // ⛔ So E6i is NOT the control for this line — it never was,
+                    // and that is what the two rounds above discovered.
                     permissions: admin_permissions_of(&get_cfg),
                     plugins,
                     // The `config` leg is rendered from the SAME live instance per
