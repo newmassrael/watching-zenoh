@@ -563,7 +563,7 @@ pub trait FaceForwarder {
     /// No `priority` parameter, deliberately: the frame band is the Push path's
     /// re-injection argument (`route_push` carries it to the mesh and to local
     /// subscribers), while a Query is routed by
-    /// [`RouterForwarder::route_request`]'s own query-route computation, which
+    /// `RouterForwarder::route_request`'s own query-route computation, which
     /// takes no band. Passing one would be a parameter no arm reads.
     /// Default no-op: only a forwarder with a multicast ingress plane implements it.
     #[cfg(feature = "codec-push")]

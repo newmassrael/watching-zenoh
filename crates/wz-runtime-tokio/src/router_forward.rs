@@ -6928,14 +6928,14 @@ impl FaceForwarder for RouterForwarder {
 
     /// R2734 — route a QUERY received on the multicast INGRESS group.
     ///
-    /// The same [`MCAST_INGRESS_FACE`] the Push twin above uses, through the
-    /// same [`route_request`](Self::route_request) the unicast dispatch calls,
+    /// The same `MCAST_INGRESS_FACE` the Push twin above uses, through the
+    /// same `route_request` the unicast dispatch calls,
     /// so a group peer's Query reaches the router's full query-route computation
     /// instead of being dropped at the fold. Client-tier for the same reason the
     /// Push twin is: a group ingress carries no graph and routes no topology.
     ///
     /// THE REPLY IS DISCARDED AND NOTHING HERE HAS TO ARRANGE THAT.
-    /// [`send_to_face`](Self::send_to_face) returns `false` for a face it cannot
+    /// `send_to_face` returns `false` for a face it cannot
     /// find, and the sentinel is deliberately absent from `faces` -- which is
     /// upstream's own arrangement, where the per-peer multicast face is built
     /// with `DummyPrimitives` and the Response dies at
