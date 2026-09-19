@@ -231,8 +231,7 @@ fn step_reply_count(captured: &str, step: usize) -> usize {
     let needle = format!("STEP {step} GET ");
     let line = captured
         .lines()
-        .filter(|l| l.contains(&needle) && l.contains("FINAL replies="))
-        .next_back()
+        .rfind(|l| l.contains(&needle) && l.contains("FINAL replies="))
         .unwrap_or_else(|| {
             panic!("the probe logged no FINAL for step {step}\n--- probe ---\n{captured}")
         });
