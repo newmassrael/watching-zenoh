@@ -171,6 +171,64 @@ impl<T, const N: usize> BoundedVec<T, N> {
     }
 }
 
+/// Byte-specific, because the caller is a FILLER rather than a pusher.
+impl<const N: usize> BoundedVec<u8, N> {
+    /// Shorten to `len`, dropping the tail. No-op when already shorter.
+    ///
+    /// The counterpart to [`Self::grow_for_fill`]: a filler that used less
+    /// than it reserved gives the remainder back through here, so the two
+    /// calls together leave exactly what was written. Both backings spell it
+    /// the same way, so this needs no split.
+    pub fn truncate(&mut self, len: usize) {
+        self.inner.truncate(len);
+    }
+
+    /// Materialise `want` more bytes at the end and hand back exactly those,
+    /// for a writer that fills them IN PLACE -- a socket read, a DMA
+    /// completion -- rather than pushing one byte at a time.
+    ///
+    /// This is the shape [`Self::push`] cannot be. A filler that writes
+    /// through a `&mut [u8]` needs the bytes to EXIST before it runs and
+    /// reports how many it actually used only afterwards, so the sequence is
+    /// grow -> fill -> truncate rather than push-per-byte. It is the same seam
+    /// `wz-link-lwip`'s `RxSlots::buf` opens over a pool slot; this is the
+    /// heap-backed half, so one staging trait can serve both.
+    ///
+    /// TAKES A LENGTH rather than handing back the declared capacity, and that
+    /// is the load-bearing choice: this type's contract is that a live
+    /// collection costs what it actually staged, and returning an `N`-wide
+    /// slice would force zero-filling to `N` and break exactly the property
+    /// that makes the heap backing cheap. The cost here is `want`.
+    ///
+    /// The two backings differ the same way [`Self::push`] documents: `N` is
+    /// advisory on the `alloc` backing (AP may exceed it) and a hard limit on
+    /// the no-alloc one, where passing it returns `CapacityFull` rather than
+    /// growing.
+    #[cfg(feature = "alloc")]
+    pub fn grow_for_fill(&mut self, want: usize) -> Result<&mut [u8], CapacityFull<()>> {
+        let start = self.inner.len();
+        let end = start.checked_add(want).ok_or(CapacityFull(()))?;
+        self.inner.resize(end, 0);
+        Ok(&mut self.inner[start..end])
+    }
+
+    /// Materialise `want` more bytes at the end and hand back exactly those.
+    /// See the `alloc` arm for the contract; this one enforces `N`.
+    #[cfg(not(feature = "alloc"))]
+    pub fn grow_for_fill(&mut self, want: usize) -> Result<&mut [u8], CapacityFull<()>> {
+        let start = self.inner.len();
+        let end = start.checked_add(want).ok_or(CapacityFull(()))?;
+        // Checked here rather than left to `resize`, so the refusal is this
+        // type's declared bound `N` and not whatever the backing happens to
+        // have room for.
+        if end > N {
+            return Err(CapacityFull(()));
+        }
+        self.inner.resize(end, 0).map_err(|()| CapacityFull(()))?;
+        Ok(&mut self.inner[start..end])
+    }
+}
+
 impl<T, const N: usize> Default for BoundedVec<T, N> {
     fn default() -> Self {
         Self::new()

@@ -108,6 +108,53 @@ pub trait ChainStaging<const SLOTS: usize, const CAP: usize> {
     /// The bytes staged into `chain` so far, in arrival order.
     fn bytes<'a>(&'a self, chain: &'a Self::Chain) -> &'a [u8];
 
+    /// Reserve `want` bytes at the end of `chain` and hand back exactly those,
+    /// for a filler that writes them IN PLACE.
+    ///
+    /// The counterpart to [`Self::append`], and the difference is WHERE the
+    /// bytes come from rather than how many. `append` copies from a buffer the
+    /// caller already filled, so on a pooled backing the bytes land twice --
+    /// once wherever the link read them, once into the slot. This hands the
+    /// filler the destination itself, so a socket read or a DMA completion
+    /// writes where the chain already is and nothing is moved afterwards.
+    /// `wz-link-lwip`'s `RxSlots::buf` is the same seam one tier down; this is
+    /// it on the reassembly arena, so both backings can answer it.
+    ///
+    /// TAKES A LENGTH rather than returning the whole remaining capacity. The
+    /// heap backing stores a chain's bytes in the handle and its contract is
+    /// that a live chain costs what it actually staged; a `CAP`-wide slice
+    /// would force it to materialise `CAP` and break that. The pooled backing
+    /// could return the full slot either way, so the length is what keeps the
+    /// two answers the same shape.
+    ///
+    /// The caller is responsible for the length it reports: bytes reserved and
+    /// not filled are staged all the same, which is why a partial fill must be
+    /// followed by the caller staging only what it used rather than reserving
+    /// optimistically.
+    ///
+    /// [`StagingError::ChainCapExceeded`] when the chain's total would exceed
+    /// `CAP`, on the same rule `append` uses.
+    fn buf<'a>(
+        &'a mut self,
+        chain: &'a mut Self::Chain,
+        want: usize,
+    ) -> Result<&'a mut [u8], StagingError>;
+
+    /// Stage `filled` bytes of the reservation [`Self::buf`] handed out, and
+    /// discard the rest of it.
+    ///
+    /// THE PAIR IS THE POINT. A filler reports how much it used only after it
+    /// has run -- a socket read returns fewer bytes than the buffer it was
+    /// given whenever the peer sent fewer, which is the ordinary case -- so a
+    /// `buf` that staged `want` on its own would stage bytes nobody wrote. The
+    /// reservation is therefore provisional until this call resolves it, and
+    /// the chain's staged length does not move in between.
+    ///
+    /// [`StagingError::ChainCapExceeded`] when `filled` exceeds the outstanding
+    /// reservation, which is a caller that reported more than it was lent
+    /// rather than a chain that grew too long.
+    fn commit(&mut self, chain: &mut Self::Chain, filled: usize) -> Result<(), StagingError>;
+
     /// How many chains the arena can still serve. Observability only — the
     /// Router never branches on it.
     ///
@@ -151,6 +198,15 @@ pub struct HeapStaging<const SLOTS: usize, const CAP: usize> {
 /// costs nothing and a live one costs what it actually staged.
 pub struct HeapChain<const CAP: usize> {
     buf: crate::bounded::BoundedVec<u8, CAP>,
+    /// Bytes handed out by the most recent [`ChainStaging::buf`] and not yet
+    /// resolved by [`ChainStaging::commit`].
+    ///
+    /// This backing has to MATERIALISE a reservation to hand out a `&mut [u8]`
+    /// at all, so between the two calls its buffer is longer than what the
+    /// chain has actually staged. Remembering the reservation is what lets
+    /// `commit` put that right for a filler that used less than it asked for --
+    /// a short socket read being the ordinary case, not the exceptional one.
+    reserved: usize,
 }
 
 impl<const SLOTS: usize, const CAP: usize> ChainStaging<SLOTS, CAP> for HeapStaging<SLOTS, CAP> {
@@ -167,6 +223,7 @@ impl<const SLOTS: usize, const CAP: usize> ChainStaging<SLOTS, CAP> for HeapStag
         self.outstanding += 1;
         Some(HeapChain {
             buf: crate::bounded::BoundedVec::new(),
+            reserved: 0,
         })
     }
 
@@ -189,6 +246,39 @@ impl<const SLOTS: usize, const CAP: usize> ChainStaging<SLOTS, CAP> for HeapStag
 
     fn bytes<'a>(&'a self, chain: &'a Self::Chain) -> &'a [u8] {
         &chain.buf
+    }
+
+    fn buf<'a>(
+        &'a mut self,
+        chain: &'a mut Self::Chain,
+        want: usize,
+    ) -> Result<&'a mut [u8], StagingError> {
+        // `CAP` is checked here rather than left to the backing, so this arm
+        // refuses on the Router's bound and not on whatever the heap would
+        // happily grow to -- the same asymmetry `push` carries, where `N` is
+        // advisory on the `alloc` backing.
+        if chain.buf.len().saturating_add(want) > CAP {
+            return Err(StagingError::ChainCapExceeded);
+        }
+        chain.reserved = want;
+        chain
+            .buf
+            .grow_for_fill(want)
+            .map_err(|_| StagingError::ChainCapExceeded)
+    }
+
+    fn commit(&mut self, chain: &mut Self::Chain, filled: usize) -> Result<(), StagingError> {
+        if filled > chain.reserved {
+            return Err(StagingError::ChainCapExceeded);
+        }
+        // This backing had to materialise the whole reservation to lend it out,
+        // so resolving it means giving back what the filler did not use. The
+        // pooled backing never grew, so it advances instead -- opposite
+        // mechanics, identical observable.
+        let unused = chain.reserved - filled;
+        chain.buf.truncate(chain.buf.len() - unused);
+        chain.reserved = 0;
+        Ok(())
     }
 
     fn available(&self) -> usize {

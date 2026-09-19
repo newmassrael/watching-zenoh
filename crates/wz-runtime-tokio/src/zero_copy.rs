@@ -55,6 +55,15 @@ use crate::reassembly_pool_ap::{CpuMut, ReassemblyPoolAp, Slot, SLOT_COUNT, SLOT
 pub struct PooledChain {
     slot: Slot<CpuMut>,
     len: usize,
+    /// Bytes lent out by the most recent [`ChainStaging::buf`] and not yet
+    /// resolved by [`ChainStaging::commit`].
+    ///
+    /// This backing never grows to lend -- the slot is already full width --
+    /// so the reservation is bookkeeping rather than storage. It is here so
+    /// `commit` can refuse a caller that reports more than it was lent, which
+    /// the heap backing refuses by construction, and the two arms answer the
+    /// same.
+    reserved: usize,
 }
 
 impl PooledChain {
@@ -103,9 +112,11 @@ impl<const SLOTS: usize, const CAP: usize> PooledStaging<SLOTS, CAP> {
     /// feature is about.
     #[cfg(feature = "runtime-tokio-uring")]
     pub(crate) fn acquire_raw(&mut self) -> Option<PooledChain> {
-        self.pool
-            .pool_acquire_for_encode()
-            .map(|slot| PooledChain { slot, len: 0 })
+        self.pool.pool_acquire_for_encode().map(|slot| PooledChain {
+            slot,
+            len: 0,
+            reserved: 0,
+        })
     }
 
     /// Counterpart to [`Self::acquire_raw`].
@@ -121,33 +132,17 @@ impl<const SLOTS: usize, const CAP: usize> PooledStaging<SLOTS, CAP> {
         chain.slot.write(&mut self.pool).as_mut_ptr()
     }
 
-    /// R311y589 — record that an EXTERNAL writer put `n` bytes into `chain`'s
-    /// slot, starting where the chain left off.
-    ///
-    /// This is the io_uring completion path and the reason row 3 is zero-copy
-    /// rather than one-copy: the kernel wrote through the registered buffer,
-    /// which IS this slot, so nothing is moved here — only the length advances.
-    /// [`ChainStaging::append`] is the row-2 counterpart and does copy, because
-    /// on that path the bytes arrived somewhere else first.
-    ///
-    /// Refuses past `CAP` on the same rule `append` uses, so a kernel that
-    /// returned more than the caller asked for cannot silently widen the chain.
-    #[cfg(feature = "runtime-tokio-uring")]
-    pub fn commit_external(
-        &mut self,
-        chain: &mut PooledChain,
-        n: usize,
-    ) -> Result<(), StagingError> {
-        let end = chain
-            .len
-            .checked_add(n)
-            .ok_or(StagingError::ChainCapExceeded)?;
-        if end > CAP {
-            return Err(StagingError::ChainCapExceeded);
-        }
-        chain.len = end;
-        Ok(())
-    }
+    // R311y589's `commit_external` STOOD HERE and R2736 removed it, which is
+    // recorded rather than done quietly. It recorded that an external writer
+    // had put `n` bytes into a chain's slot -- the io_uring completion path --
+    // and it was this arena's own method rather than part of the staging seam.
+    //
+    // `ChainStaging::commit` is now that, for both arenas, and the reason to
+    // fold them is not tidiness: a chain's length is one fact, and this type
+    // had two ways to move it. The uring path reached for the private one
+    // because the trait had no answer; now it does, and `buf` hands out the
+    // destination the same call would otherwise have derived by pointer
+    // arithmetic on the slot.
 }
 
 impl<const SLOTS: usize, const CAP: usize> ChainStaging<SLOTS, CAP> for PooledStaging<SLOTS, CAP> {
@@ -171,7 +166,11 @@ impl<const SLOTS: usize, const CAP: usize> ChainStaging<SLOTS, CAP> for PooledSt
     fn acquire(&mut self) -> Option<Self::Chain> {
         let slot = self.pool.pool_acquire_for_encode()?;
         self.outstanding += 1;
-        Some(PooledChain { slot, len: 0 })
+        Some(PooledChain {
+            slot,
+            len: 0,
+            reserved: 0,
+        })
     }
 
     fn release(&mut self, chain: Self::Chain) {
@@ -194,6 +193,48 @@ impl<const SLOTS: usize, const CAP: usize> ChainStaging<SLOTS, CAP> for PooledSt
 
     fn bytes<'a>(&'a self, chain: &'a Self::Chain) -> &'a [u8] {
         &chain.slot.read(&self.pool)[..chain.len]
+    }
+
+    fn buf<'a>(
+        &'a mut self,
+        chain: &'a mut Self::Chain,
+        want: usize,
+    ) -> Result<&'a mut [u8], StagingError> {
+        // THE POINT OF THE WHOLE SEAM: the slot is already `SLOT_SIZE` wide, so
+        // this hands back a window into it and nothing is allocated, zeroed or
+        // moved. A filler writing here writes where the chain already is, which
+        // is what makes `append`'s copy avoidable rather than merely cheaper.
+        let start = chain.len;
+        let end = start
+            .checked_add(want)
+            .ok_or(StagingError::ChainCapExceeded)?;
+        if end > CAP {
+            return Err(StagingError::ChainCapExceeded);
+        }
+        // The chain's length does NOT advance here -- `commit` records what the
+        // filler actually used. Keeping the two apart is why a short read
+        // cannot stage bytes nobody wrote.
+        chain.reserved = want;
+        Ok(&mut chain.slot.write(&mut self.pool)[start..end])
+    }
+
+    fn commit(&mut self, chain: &mut Self::Chain, filled: usize) -> Result<(), StagingError> {
+        if filled > chain.reserved {
+            return Err(StagingError::ChainCapExceeded);
+        }
+        let end = chain
+            .len
+            .checked_add(filled)
+            .ok_or(StagingError::ChainCapExceeded)?;
+        if end > CAP {
+            return Err(StagingError::ChainCapExceeded);
+        }
+        // Nothing is copied or truncated: the bytes are already in the slot and
+        // only the length moves. The heap backing gives its unused tail back
+        // instead -- opposite mechanics, identical observable.
+        chain.len = end;
+        chain.reserved = 0;
+        Ok(())
     }
 
     fn available(&self) -> usize {
@@ -332,6 +373,95 @@ mod tests {
 
         assert_eq!(from_heap.as_deref(), Some(b"hello pooled world".as_slice()));
         assert_eq!(from_pool, from_heap);
+    }
+
+    /// THE PROPERTY `buf` EXISTS FOR: a filler writes where the chain ALREADY
+    /// IS, so the bytes it produces are never moved afterwards.
+    ///
+    /// Asserted by ADDRESS, and that is the whole design of this test. A `buf`
+    /// that handed back a scratch buffer and copied it in on `commit` would
+    /// satisfy every assertion about length and content -- so those assertions
+    /// cannot fail for the defect being ruled out, and a test made of them
+    /// would be green against the implementation this seam exists to replace.
+    /// The address is the one observable the copy cannot reproduce.
+    #[test]
+    fn a_pooled_buf_is_the_chains_own_bytes_rather_than_a_copy() {
+        let mut arena: PooledStaging<SLOTS, CAP> = ChainStaging::new();
+        let mut chain = ChainStaging::<SLOTS, CAP>::acquire(&mut arena).expect("slots");
+
+        let lent = ChainStaging::<SLOTS, CAP>::buf(&mut arena, &mut chain, 8).expect("room for 8");
+        assert_eq!(lent.len(), 8, "buf lends exactly what was asked for");
+        let written_at = lent.as_ptr() as usize;
+        lent.copy_from_slice(b"pooled!!");
+
+        ChainStaging::<SLOTS, CAP>::commit(&mut arena, &mut chain, 8).expect("8 of 8");
+
+        let read = ChainStaging::<SLOTS, CAP>::bytes(&arena, &chain);
+        assert_eq!(read, b"pooled!!", "the bytes the filler wrote are staged");
+        assert_eq!(
+            read.as_ptr() as usize,
+            written_at,
+            "the staged bytes must BE the ones the filler wrote, not a copy of them"
+        );
+
+        ChainStaging::<SLOTS, CAP>::release(&mut arena, chain);
+    }
+
+    /// A SHORT FILL stages what was written and not what was lent.
+    ///
+    /// This is why `buf` and `commit` are two calls rather than one. A socket
+    /// read returns fewer bytes than its buffer whenever the peer sent fewer,
+    /// which is the ordinary case; a seam that staged the reservation itself
+    /// would append whatever the slot happened to hold after the short read.
+    ///
+    /// Run over BOTH arenas in one test, because the two resolve a short fill
+    /// by opposite mechanics -- the pooled one advances a length it never
+    /// moved, the heap one gives back a tail it had to materialise -- and the
+    /// thing being asserted is that those are observationally the same. Two
+    /// separate tests could each pass while the arenas disagreed.
+    #[test]
+    fn a_short_fill_stages_only_what_was_written_on_both_arenas() {
+        let mut pooled: PooledStaging<SLOTS, CAP> = ChainStaging::new();
+        let mut pooled_chain = ChainStaging::<SLOTS, CAP>::acquire(&mut pooled).expect("slots");
+        let lent = ChainStaging::<SLOTS, CAP>::buf(&mut pooled, &mut pooled_chain, 8).expect("8");
+        lent[..3].copy_from_slice(b"abc");
+        ChainStaging::<SLOTS, CAP>::commit(&mut pooled, &mut pooled_chain, 3).expect("3 of 8");
+        let from_pool = ChainStaging::<SLOTS, CAP>::bytes(&pooled, &pooled_chain).to_vec();
+
+        let mut heaped: HeapStaging<SLOTS, CAP> = ChainStaging::new();
+        let mut heap_chain = ChainStaging::<SLOTS, CAP>::acquire(&mut heaped).expect("slots");
+        let lent = ChainStaging::<SLOTS, CAP>::buf(&mut heaped, &mut heap_chain, 8).expect("8");
+        lent[..3].copy_from_slice(b"abc");
+        ChainStaging::<SLOTS, CAP>::commit(&mut heaped, &mut heap_chain, 3).expect("3 of 8");
+        let from_heap = ChainStaging::<SLOTS, CAP>::bytes(&heaped, &heap_chain).to_vec();
+
+        assert_eq!(from_pool, b"abc", "the five unwritten bytes are not staged");
+        assert_eq!(
+            from_heap, from_pool,
+            "both arenas resolve a short fill alike"
+        );
+
+        ChainStaging::<SLOTS, CAP>::release(&mut pooled, pooled_chain);
+        ChainStaging::<SLOTS, CAP>::release(&mut heaped, heap_chain);
+    }
+
+    /// `commit` refuses a caller that reports more than it was lent, on both
+    /// arenas. The heap one would otherwise truncate below where the chain
+    /// started; the pooled one would stage slot bytes nobody wrote.
+    #[test]
+    fn commit_refuses_more_than_was_lent_on_both_arenas() {
+        let mut pooled: PooledStaging<SLOTS, CAP> = ChainStaging::new();
+        let mut pooled_chain = ChainStaging::<SLOTS, CAP>::acquire(&mut pooled).expect("slots");
+        ChainStaging::<SLOTS, CAP>::buf(&mut pooled, &mut pooled_chain, 4).expect("4");
+        assert!(ChainStaging::<SLOTS, CAP>::commit(&mut pooled, &mut pooled_chain, 5).is_err());
+
+        let mut heaped: HeapStaging<SLOTS, CAP> = ChainStaging::new();
+        let mut heap_chain = ChainStaging::<SLOTS, CAP>::acquire(&mut heaped).expect("slots");
+        ChainStaging::<SLOTS, CAP>::buf(&mut heaped, &mut heap_chain, 4).expect("4");
+        assert!(ChainStaging::<SLOTS, CAP>::commit(&mut heaped, &mut heap_chain, 5).is_err());
+
+        ChainStaging::<SLOTS, CAP>::release(&mut pooled, pooled_chain);
+        ChainStaging::<SLOTS, CAP>::release(&mut heaped, heap_chain);
     }
 
     /// The GENERATED FSM is what moved, not just this module's counter.

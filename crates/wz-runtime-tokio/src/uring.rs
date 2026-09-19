@@ -18,7 +18,7 @@
 //!
 //! Row 2 reads into a link buffer and the chain then stages a copy of it. Here
 //! the kernel writes into the pool slot the chain already holds, and completion
-//! only advances a length ([`PooledStaging::commit_external`]). There is no
+//! only advances a length (`ChainStaging::commit`). There is no
 //! intermediate buffer, which is the RFC's own definition of the RX happy path
 //! (`docs/rfc-sce-protocol-synthesis.md` — "DMA fills pool slot → codec parses
 //! in place"), with `io_uring` in the DMA controller's seat.
@@ -45,6 +45,8 @@ use std::io;
 use std::os::fd::RawFd;
 
 use io_uring::{opcode, types, IoUring};
+
+use wz_session_core::chain_staging::ChainStaging;
 
 use crate::reassembly_pool_ap::{SLOT_COUNT, SLOT_SIZE};
 use crate::zero_copy::{PooledChain, PooledStaging};
@@ -173,13 +175,20 @@ impl FixedSlotRing {
         // Never let the kernel write past what the chain may hold: `CAP` is the
         // Router's bound and `SLOT_SIZE` the registration's, and the smaller one
         // wins. Without this the completion could report more than
-        // `commit_external` will accept, and the bytes would already be written.
+        // `commit` will accept, and the bytes would already be written.
         let room = CAP.min(SLOT_SIZE).saturating_sub(offset);
         let len = len.min(room);
         if len == 0 {
             return Ok(0);
         }
-        let dst = unsafe { staging.slot_ptr(chain).add(offset) };
+        // The destination comes from the STAGING SEAM rather than from pointer
+        // arithmetic on the slot. `buf` already answers "where does a filler
+        // write, and is there room" for both arenas, so taking it here leaves
+        // one place that knows -- and `commit` below is then the one way a
+        // chain's length moves, instead of this path having a private second.
+        let dst = ChainStaging::<SLOTS, CAP>::buf(staging, chain, len)
+            .map_err(|_| io::Error::other("the chain has no room for this read"))?
+            .as_mut_ptr();
 
         let entry = opcode::ReadFixed::new(types::Fd(fd), dst, len as u32, buf_index as u16)
             .offset(u64::MAX) // -1: read at the file's current position
@@ -207,8 +216,7 @@ impl FixedSlotRing {
             return Err(io::Error::from_raw_os_error(-res));
         }
         let n = res as usize;
-        staging
-            .commit_external(chain, n)
+        ChainStaging::<SLOTS, CAP>::commit(staging, chain, n)
             .map_err(|_| io::Error::other("the kernel wrote more than the chain may hold"))?;
         Ok(n)
     }
@@ -410,16 +418,23 @@ mod tests {
         );
     }
 
-    /// `commit_external` is bounded by the same rule `append` is, so a kernel
-    /// that returned more than asked cannot silently widen a chain past `CAP`.
+    /// `commit` is bounded by the same rule `append` is, so a kernel that
+    /// returned more than asked cannot silently widen a chain past `CAP`.
+    ///
+    /// Each commit resolves its own reservation, which is why this reserves
+    /// twice: a commit with nothing outstanding is refused on a different rule
+    /// and would pass this test for the wrong reason.
     #[test]
-    fn commit_external_refuses_past_the_cap() {
+    fn commit_refuses_past_the_cap() {
         let mut arena: PooledStaging<4, 64> = ChainStaging::new();
         let mut chain = ChainStaging::<4, 64>::acquire(&mut arena).expect("slots");
-        assert!(arena.commit_external(&mut chain, 64).is_ok());
+
+        ChainStaging::<4, 64>::buf(&mut arena, &mut chain, 64).expect("a full-CAP reservation");
+        assert!(ChainStaging::<4, 64>::commit(&mut arena, &mut chain, 64).is_ok());
+
         assert!(
-            arena.commit_external(&mut chain, 1).is_err(),
-            "one byte past CAP must be refused"
+            ChainStaging::<4, 64>::buf(&mut arena, &mut chain, 1).is_err(),
+            "one byte past CAP must be refused at the reservation"
         );
         ChainStaging::<4, 64>::release(&mut arena, chain);
     }
