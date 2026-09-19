@@ -1,0 +1,82 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later OR LicenseRef-watching-zenoh-Commercial
+# SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
+#
+# wz-e2e-admin-probe — R2745 (open-debt item 665).
+#
+# The first DIALING member of the `wz-e2e-*` family, and it exists for a
+# property the acceptor-only family could not observe: what a wz HOST does
+# across several requests on ONE session.
+#
+# Every foreign client this tree can drive is a one-shot process — a stock
+# zenoh-pico `z_get` takes no repeat flag (`examples/unix/c11/z_get.c`'s getopt
+# admits none) and wz-ap-demo's `--query` task emits exactly one Query — so
+# every request they make arrives on a connection of its own. A host that
+# re-resolves live state PER REQUEST and one that re-resolves it PER CONNECTION
+# are indistinguishable to such a client. R2374 measured that: freezing the
+# `adminspace-read` permit outside the per-request read left all three Layer
+# E6i tests green.
+#
+# This binary holds ONE session and runs an ORDERED script of GETs and PUTs on
+# it, so the two resolves separate.
+
+[package]
+name = "wz-e2e-admin-probe"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "Dialing e2e probe: an ordered GET/PUT script over ONE wz session."
+publish = false
+
+[dependencies]
+# The smallest coherent facade subset that ISSUES gets AND publishes, which is
+# the union of wz-e2e-zget's getter subset and wz-e2e-pubsub's publisher one —
+# and the union is the point rather than an accident: the property under test
+# is "a GET sees what a PUT between it and the previous GET changed", so
+# neither plane alone can express the script. `default-features = false` so no
+# other plane leaks in.
+#
+#   * query-get      — Session::query + the outbound Request(Query) encoder and
+#                      the pending-query reply intake. Implies codec-request
+#                      and codec-response.
+#   * query-reply    — the reply-BODY decode plane. R311fm's finding: without
+#                      it a pure getter type-checks and silently drops every
+#                      reply, which here would read as "the host denied" — the
+#                      exact verdict this probe exists to report, produced by
+#                      the wrong cause.
+#   * codec-response-final — the terminating Final. `query-get` does not imply
+#                      it, and this probe COUNTS replies per step, so it needs
+#                      the clean end-of-chain rather than a local timeout to
+#                      know a step is over.
+#   * codec-push / pubsub-put — the PUT half of the script.
+wz = { path = "../wz", default-features = false, features = [
+    "runtime-tokio",
+    "transport-unicast",
+    "transport-link-tcp",
+    "transport-keepalive",
+    "session-unicast-open",
+    "session-unicast-accept",
+    "codec-frame",
+    "codec-keep-alive",
+    "codec-init-body",
+    "codec-open-body",
+    "codec-close",
+    "keyexpr-literal",
+    "keyexpr-canon",
+    "query-get",
+    "query-reply",
+    "codec-response-final",
+    "codec-push",
+    "pubsub-put",
+] }
+# The shared session scaffolding. This binary uses its DIALING entry point,
+# `run_initiator_e2e`, which R2745 added beside `run_acceptor_e2e`.
+wz-e2e-harness = { path = "../wz-e2e-harness" }
+# tokio::spawn for the background script task is a binary-shaped use; the rest
+# of the runtime/signal scaffolding lives in the harness.
+tokio = { version = "1", features = ["rt", "macros", "sync"] }
+log = "0.4"
+
+[lints]
+workspace = true

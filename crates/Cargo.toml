@@ -160,6 +160,11 @@ members = [
     "wz-e2e-liveliness-token",
     "wz-e2e-declare-observer",
     "wz-e2e-silent-peer",
+    # R2745 — the family's first DIALING member (open-debt item 665): an
+    # ordered GET/PUT script over ONE session, which is what separates a host
+    # that re-resolves live state per REQUEST from one that does so per
+    # CONNECTION. Every other member here is an acceptor.
+    "wz-e2e-admin-probe",
     "wz-runtime-coop",
     "lwip-sys",
     "freertos-sys",
