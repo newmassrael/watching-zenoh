@@ -5,7 +5,16 @@
 //!
 //! ## The structure that existed and had nobody to serve
 //!
-//! R2739 emitted `session_rx_pool_ap` and gave it the [`RxSlots`] seam; R2740
+//! ⚠ THE LINKS BELOW ARE SPELLED IN FULL, and that is forced rather than
+//! verbose. This module is declared in `lib.rs` with a `///` comment of its
+//! own, so rustdoc MERGES that with this `//!` block and resolves the result in
+//! the OUTER scope — `wz_runtime_tokio`, where neither this module's own items
+//! nor its `use` imports are in scope. `frame_arena` records the same finding
+//! beside its own `FrameArena` link; R2742 repeated it anyway and C1bz counted
+//! four unresolved links for it (522 against a budget of 518).
+//!
+//! R2739 emitted `session_rx_pool_ap` and gave it the
+//! [`RxSlots`](wz_runtime_core::rx_slots::RxSlots) seam; R2740
 //! made the framing read take its destination from a
 //! [`FrameArena`](crate::frame_arena::FrameArena) instead of manufacturing a
 //! `Vec`. Between them sat nothing: the only two arenas were the allocator
@@ -36,7 +45,7 @@
 //! `&'static mut [u8]` sliced out of the pinned arena
 //! (`commons/zenoh-uring/src/linux/batch_arena.rs`
 //! @ `unsafe fn index_mut_unchecked(`).
-//! [`LinkRxFrame`] is that shape with wz's nouns: a
+//! [`LinkRxFrame`](crate::link_rx_arena::LinkRxFrame) is that shape with wz's nouns: a
 //! raw pointer into one slot, the slot's own handle, and the table to give it
 //! back to. It is NOT a borrow, for the same reason
 //! [`RecycledBuf`](crate::frame_arena::RecycledBuf) is not one — a lifetime
@@ -55,8 +64,10 @@
 //! holds at most one frame at a time, which is why sixty-four slots serve
 //! sixty-four links rather than one.
 //!
-//! So [`LinkRxArena::node`] is a handle on one process-wide table and
-//! [`LinkRxArena::new`] builds a private one. The second is not a test
+//! So [`LinkRxArena::node`](crate::link_rx_arena::LinkRxArena::node) is a
+//! handle on one process-wide table and
+//! [`LinkRxArena::new`](crate::link_rx_arena::LinkRxArena::new) builds a
+//! private one. The second is not a test
 //! affordance: it is the constructor a later round threads from a node object
 //! once one exists to thread from, and having it means that round changes a
 //! call site rather than this type. Today no such object is reachable from the
