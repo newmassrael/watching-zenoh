@@ -1066,9 +1066,9 @@ impl SerialListener {
 /// mesh-capable [`Self::NonIp`] peer (unixsock / vsock / unixpipe — each a genuine
 /// per-peer stream accept) both become held ZID-keyed faces (Slice B). Since
 /// R311y392 the stream + same-host families are all mesh-capable, and R311y404 makes
-/// quic mesh-capable too (its deferred-handshake split), so the loop's NON-mesh-capable
-/// reject path (see [`AcceptedLink::supports_mesh_multi_peer`]) fires for NO transport
-/// today — every bound listener holds N ZID-keyed faces. A quic listener reaches the
+/// quic mesh-capable too (its deferred-handshake split). R2723 removed the loop's
+/// NON-mesh-capable reject path entirely: a one-peer-at-a-time acceptor feeds the
+/// loop like any other, so there is nothing left to reject. A quic listener reaches the
 /// loop with a threaded cert: the `--router` (R311y405) + `--peer`/`--router-hat`
 /// (R311y406) CLI paths and pico all thread one, as can a direct-API caller; only a
 /// cert-LESS bind hits cert-absence.
@@ -1202,11 +1202,10 @@ impl BoundListener {
     /// Whether this bound listener's acceptor is MESH-CAPABLE — i.e. wz's CURRENT
     /// accept path for it yields multiple DISTINCT per-peer connections, so the
     /// multi-accept [`accept_loop`](crate::accept_loop) can hold N faces off it.
-    /// The BIND-time twin of [`AcceptedLink::supports_mesh_multi_peer`] (the loop's
-    /// RUNTIME backstop, consulted per-accept in `Step::Accepted`): the two match
-    /// the SAME transport to the SAME verdict, and a mesh CALLER (run_router)
-    /// consults THIS one to fail-fast a non-mesh-capable `--listen` at bind rather
-    /// than let the loop reject-throttle each accept forever (0 faces held). Since
+    /// R2723 — this is now the ONLY place the cadence is declared. Its accepted-side
+    /// twin was the loop's runtime backstop and went when the loop stopped asking;
+    /// a mesh CALLER (run_router) consults THIS one to REPORT that a tty listener
+    /// carries one peer at a time, and no longer to refuse the `--listen`. Since
     /// R311y392 the stream + same-host families are all `true`, and R311y404 flips
     /// `Quic` `false -> true` (its deferred-handshake split moves the crypto off the
     /// accept path, so a quic endpoint holds N per-peer faces like the rest). R311y805
