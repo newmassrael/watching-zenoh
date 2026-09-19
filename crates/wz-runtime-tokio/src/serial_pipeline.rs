@@ -531,7 +531,7 @@ impl SerialReadDriver {
     /// Whether this link holds a listener's claim on its device.
     ///
     /// `false` for a DIALLED link, which owns its tty outright and reports to
-    /// nobody. This is the read that keeps [`Self::liveness`] an invariant
+    /// nobody. This is the read that keeps `liveness` an invariant
     /// rather than a field nothing can see.
     pub fn device_is_claimed(&self) -> bool {
         self.liveness.is_some()
