@@ -274,7 +274,12 @@ fi
 wz_ident_gate_pending 'pre-commit' || exit 1
 
 # ─── Check 6: home-directory paths this commit ADDS (R2729) ────────
-# grades: index
+# grades: index-content
+#
+# `index-content` and not `index-paths`, which is the distinction checks 2
+# and 3 already draw: this one reads what the staged blobs SAY
+# (`git show :<path>`), not merely which paths are staged. A path-only read
+# could not see a home path at all.
 #
 # The commit-time half of pre-push gate 0b, and it exists because the push
 # half arrives after the only repairable moment. MEASURED: `Round 2725`'s
@@ -302,7 +307,7 @@ if ! source scripts/lib/home-path-scan.sh; then
     exit 1
 fi
 
-wz_home_path_pending 'pre-commit' || exit 1
+wz_home_path_pending 'pre-commit' ':' || exit 1
 
 # ─── Check 4: Mnemosyne SSOT gate ──────────────────────────────────
 # grades: worktree

@@ -184,11 +184,18 @@ wz_home_path_files() {
 
 # R2729 — refuse a COMMIT that ADDS a line naming this home directory.
 #
-# `$1` is the label to report under. The population is derived from the index
-# (`git diff --cached`), so it covers whatever produced the content; the count
-# scanned is printed so a population of zero is visible rather than silent.
+# `$1` is the label to report under; `$2` is the rev-spec prefix naming the tree
+# to grade, `':'` for the index. It is a PARAMETER rather than a constant for
+# the reason `wz_schema_pin_gate` beside it takes the same argument: the hook
+# says at its own call site which tree its check grades, so the surface is
+# readable where the check is declared instead of one file away.
+#
+# The population is derived from the index (`git diff --cached`), so it covers
+# whatever produced the content; the count scanned is printed so a population of
+# zero is visible rather than silent.
 wz_home_path_pending() {
     local label="${1:-pre-commit}"
+    local spec="${2:-:}"
     local state=0
     wz_home_path_term_state || state=$?
     if (( state == 1 )); then
@@ -213,7 +220,7 @@ wz_home_path_pending() {
     while IFS= read -r f; do
         [[ -n "$f" ]] || continue
         scanned=$((scanned + 1))
-        now="$(git show ":$f" 2>/dev/null | grep -acF "$HOME" || true)"
+        now="$(git show "${spec}$f" 2>/dev/null | grep -acF "$HOME" || true)"
         [[ -n "$now" ]] || now=0
         before=0
         if (( have_head )); then
