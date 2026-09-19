@@ -142,6 +142,16 @@ pub mod zero_copy;
 #[cfg(feature = "runtime-zero-copy")]
 pub mod link_rx_pool;
 
+/// R2742 — the link-RX table above as [`frame_arena::FrameArena`], which is
+/// what makes a production link's bytes land IN a slot.
+///
+/// Both features, spelled literally, because the module needs both halves and a
+/// build may carry either alone: [`link_rx_pool`] is `runtime-zero-copy` (the
+/// pool) and [`frame_arena`] is `transport-link-tcp` (the framing read whose
+/// destination this is).
+#[cfg(all(feature = "runtime-zero-copy", feature = "transport-link-tcp"))]
+pub mod link_rx_arena;
+
 /// R311y589 — `runtime-tokio-uring`: ARCHITECTURE §9.5 row 3. The same §5.E pool
 /// [`zero_copy`] consumes, registered with the kernel as fixed buffers so
 /// `IORING_OP_READ_FIXED` writes a link's bytes straight into a chain's slot.
@@ -1997,7 +2007,7 @@ pub struct TcpDriver {
     /// of `poll_event`, so the next iteration resumes from the
     /// last byte offset rather than re-syncing from a mid-frame
     /// socket cursor. See [`ReadState`] for the state graph.
-    read_state: ReadState<frame_arena::RecycledBuf>,
+    read_state: ReadState<frame_arena::LinkFrame>,
     /// R2740 — this link's RX buffers, upstream's per-link pool.
     ///
     /// A FIELD rather than a temporary at the call, because that is what makes
@@ -2006,7 +2016,13 @@ pub struct TcpDriver {
     /// replaced. Upstream's lives for the whole rx task
     /// (`io/zenoh-transport/src/unicast/universal/link.rs`
     /// @ `async fn rx_task_non_uring(`), which is this driver's own lifetime.
-    arena: frame_arena::RecyclingArena,
+    ///
+    /// R2742 — WHICH arena is [`frame_arena::LinkArena`]'s to say, not this
+    /// driver's. Under `runtime-zero-copy` it is a handle on the node's
+    /// link-RX slot table, so the field is still per link while the STORAGE
+    /// behind it is shared; the paragraph above is about where the handle
+    /// lives, which is unchanged.
+    arena: frame_arena::LinkArena,
 }
 
 /// R265 — cancel-safe partial-read state for [`TcpDriver::poll_event`]
@@ -2352,7 +2368,7 @@ impl TcpDriver {
         Self {
             stream: Some(stream),
             read_state: ReadState::Idle,
-            arena: frame_arena::RecyclingArena::for_link_default(),
+            arena: frame_arena::link_arena(),
         }
     }
 

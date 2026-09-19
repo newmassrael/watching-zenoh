@@ -34,7 +34,7 @@ use tokio::sync::mpsc;
 
 use wz_codecs::stream_envelope::StreamEnvelope;
 
-use crate::frame_arena::{RecycledBuf, RecyclingArena};
+use crate::frame_arena::{link_arena, LinkArena, LinkFrame};
 use crate::writer_queue::OutboundQueue;
 use crate::{poll_framed, LinkDriver, LinkEvent, ReadState, Reliability, TxFrame};
 use wz_session_core::link::BoxedLinkDriver;
@@ -54,11 +54,16 @@ use wz_session_core::link::{LinkDropCause, LinkSendOutcome};
 /// [`crate::tls_pipeline::TlsReadDriver`] are type aliases that pin `R`.
 pub struct StreamReadDriver<R> {
     reader: R,
-    read_state: ReadState<RecycledBuf>,
+    read_state: ReadState<LinkFrame>,
     /// R2740 — this link's RX buffers. See the field of the same name on
     /// [`crate::TcpDriver`]: the arena is per-link because upstream's is, built
     /// inside the read task from that link's own dimensions.
-    arena: RecyclingArena,
+    ///
+    /// R2742 — WHICH arena is [`crate::frame_arena::LinkArena`]'s to say. This
+    /// driver has nine `wire_*` constructors and none of them has an opinion
+    /// about RX buffering, which is the same reason the field is built here
+    /// rather than taken as an argument.
+    arena: LinkArena,
     /// transport-lowlatency — shared with the sibling [`writer_task`] and flipped
     /// true by the lowlatency open helper at Established (only when the session
     /// negotiated lowlatency). While true, the streamed length prefix read is the
@@ -244,17 +249,30 @@ impl<R: AsyncRead + Unpin> StreamReadDriver<R> {
     // threads a shared one; every non-lowlatency stream link passes a fresh
     // always-false flag, keeping the universal u16 prefix).
     pub(crate) fn new(reader: R, lowlatency: Arc<AtomicBool>) -> Self {
+        // R2740 — the arena is built HERE rather than taken as an argument,
+        // mirroring upstream's `rx_task_non_uring`, which constructs its own
+        // pool from the link it was handed. Nine `wire_*` call sites construct
+        // this driver and none of them has an opinion about RX buffering;
+        // making them pass one would put the same default in nine places.
+        Self::with_arena(reader, lowlatency, link_arena())
+    }
+
+    /// R2742 — the same driver over an arena the CALLER owns.
+    ///
+    /// [`Self::new`] is this with [`link_arena`]'s answer, and the split is
+    /// what makes the RX buffering decision reachable from outside: under
+    /// `runtime-zero-copy` the default arena is a handle on the NODE's slot
+    /// table, and a caller that owns a node — or a witness that must observe
+    /// one table without the rest of the process drawing from it — needs a way
+    /// to say which table. Nothing in the tree passes a node handle yet, which
+    /// is why `new` still answers for the nine `wire_*` sites.
+    pub(crate) fn with_arena(reader: R, lowlatency: Arc<AtomicBool>, arena: LinkArena) -> Self {
         Self {
             reader,
             read_state: ReadState::Idle,
             lowlatency,
             expiry: None,
-            // R2740 — built HERE rather than taken as an argument, mirroring
-            // upstream's `rx_task_non_uring`, which constructs its own pool
-            // from the link it was handed. Nine `wire_*` call sites construct
-            // this driver and none of them has an opinion about RX buffering;
-            // making them pass one would put the same default in nine places.
-            arena: RecyclingArena::for_link_default(),
+            arena,
         }
     }
 

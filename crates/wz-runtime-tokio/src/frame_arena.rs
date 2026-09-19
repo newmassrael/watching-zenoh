@@ -340,6 +340,51 @@ impl Drop for RecycledBuf {
     }
 }
 
+/// R2742 — THE ARENA A PRODUCTION STREAM LINK READS THROUGH, chosen once.
+///
+/// Both read halves in this crate name this alias rather than an impl, for the
+/// reason [`RecyclingArena::for_link_default`] exists one level down: a driver
+/// that picks its own arena is a driver that has to be found again when the
+/// answer changes, and there are two of them plus nine `wire_*` sites behind
+/// one of those.
+///
+/// The pooled arm is `runtime-zero-copy`'s, which is what that atom means by
+/// "opt-in determinism": a build that does not ask for pooled receive keeps the
+/// recycling free list and allocates its buffers like upstream's non-uring rx
+/// task does. Selection is by `cfg` and not at runtime because the two arenas
+/// have different `Buf` types, and the state machine that holds a frame across
+/// an `await` is generic over exactly that type.
+#[cfg(not(feature = "runtime-zero-copy"))]
+pub(crate) type LinkArena = RecyclingArena;
+
+/// The pooled arm — see the other arm's docs for why there are two.
+#[cfg(feature = "runtime-zero-copy")]
+pub(crate) type LinkArena = crate::link_rx_arena::LinkRxArena;
+
+/// One production frame's storage, whichever arm [`LinkArena`] selected.
+///
+/// Spelled as an alias so a driver's `ReadState` names a type rather than a
+/// projection: `ReadState<<LinkArena as FrameArena>::Buf>` is the same thing
+/// and reads as machinery.
+pub(crate) type LinkFrame = <LinkArena as FrameArena>::Buf;
+
+/// The [`LinkArena`] a read half is built with.
+///
+/// A function rather than a `Default` impl: the two arms are constructed
+/// differently on purpose — the recycling arm takes its size from upstream's
+/// pinned defaults, and the pooled arm takes a handle on the NODE's table
+/// rather than building a table of its own.
+#[cfg(not(feature = "runtime-zero-copy"))]
+pub(crate) fn link_arena() -> LinkArena {
+    RecyclingArena::for_link_default()
+}
+
+/// The pooled arm — see the other arm's docs.
+#[cfg(feature = "runtime-zero-copy")]
+pub(crate) fn link_arena() -> LinkArena {
+    crate::link_rx_arena::LinkRxArena::node()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
