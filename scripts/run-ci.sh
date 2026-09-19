@@ -10786,7 +10786,7 @@ layer_c1bz_docs_resolve() {
         wz-capi-c:45
         wz-capi-core:7
         wz-capi-pico:44
-        wz-link-lwip:10
+        wz-link-lwip:9
         wz-mcu-session-acceptor:4
         wz-routing-graph:6
         wz-runtime-coop:12
