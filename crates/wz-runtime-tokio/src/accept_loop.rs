@@ -86,6 +86,10 @@ use std::time::Duration;
 // (`routing-accept` without `codec-push`, run-ci Layer C1w) stays minimal.
 #[cfg(feature = "codec-push")]
 use wz_codecs::push::PushOwned;
+// R2734 — the second arm of `McastIngressBody`, gated with the plane it rides
+// (see that enum's own note on why a Query and not all seven kinds).
+#[cfg(feature = "codec-push")]
+use wz_codecs::request::RequestOwned;
 
 use futures_util::stream::FuturesUnordered;
 use futures_util::StreamExt;
@@ -544,6 +548,26 @@ pub trait FaceForwarder {
     /// forwarder with a multicast ingress plane (the router) implements it.
     #[cfg(feature = "codec-push")]
     fn route_mcast_ingress(&self, _priority: Priority, _reliable: bool, _push: &PushOwned) {}
+
+    /// R2734 — a QUERY received on the multicast INGRESS group, the admitting
+    /// twin of [`route_mcast_ingress`](Self::route_mcast_ingress).
+    ///
+    /// A routing forwarder routes it exactly as it routes a unicast Query, from
+    /// the same source-only ingress face; any reply is then discarded, because
+    /// that face has no send seam. THAT IS THE PIN'S BEHAVIOUR AND NOT A
+    /// SHORTCUT: upstream routes a multicast peer's Request through a face built
+    /// with `DummyPrimitives` and drops the Response there, so the querier is
+    /// unreachable in both implementations and what this buys is the local
+    /// queryable actually running.
+    ///
+    /// No `priority` parameter, deliberately: the frame band is the Push path's
+    /// re-injection argument (`route_push` carries it to the mesh and to local
+    /// subscribers), while a Query is routed by
+    /// [`RouterForwarder::route_request`]'s own query-route computation, which
+    /// takes no band. Passing one would be a parameter no arm reads.
+    /// Default no-op: only a forwarder with a multicast ingress plane implements it.
+    #[cfg(feature = "codec-push")]
+    fn route_mcast_ingress_request(&self, _reliable: bool, _request: &RequestOwned) {}
 
     /// The on-group ROUTER member set changed (a JOIN admit / lease evict on the
     /// router's multicast group) — the I3b Designated-Router election candidate
@@ -1708,9 +1732,9 @@ fn dial_decision(faces: &BTreeMap<FaceId, Option<Vec<u8>>>, intent: &DialIntent)
 /// (which provides it), and the struct is inert without `codec-push` — nothing
 /// constructs it (`spawn_router_mcast_ingress` is `codec-push`-gated).
 pub struct McastIngressItem {
-    /// The received Push (owned so it can cross the task boundary).
+    /// What arrived, in the kinds the router ADMITS from a group.
     #[cfg(feature = "codec-push")]
-    pub push: PushOwned,
+    pub body: McastIngressBody,
     /// The frame's reliability, preserved for the routed egress legs.
     pub reliable: bool,
     /// R311y227 — the frame's decoded QoS band, so the router re-injects the
@@ -1718,6 +1742,38 @@ pub struct McastIngressItem {
     /// arrived (DEFAULT on a non-qos group). Paired with `push` (`codec-push`).
     #[cfg(feature = "codec-push")]
     pub priority: Priority,
+}
+
+/// R2734 — what arrived on a multicast INGRESS group, in the kinds the router
+/// admits into its routing core.
+///
+/// A BARE `PushOwned` FIELD UNTIL THIS ROUND, and the widening is the point:
+/// upstream's multicast transport filters NO message kind on the way to the
+/// per-peer face (`io/zenoh-transport/src/multicast/rx.rs` @
+/// `peer.handler.handle_message(msg)`), where wz's fold admitted Push alone.
+///
+/// ⚠ IT IS DELIBERATELY NOT "ALL SEVEN KINDS". R2734 measured what each kind
+/// would reach and found that every other entry point declines a source-only
+/// face for a stated reason -- a group peer's subscriptions already travel by
+/// the MulticastDispatcher, its Interests are answered into a face with no send
+/// seam, and its Responses can match no pending query because no Request was
+/// ever sent to it. Forwarding those would be wiring that dies one call later.
+/// A Query is the one kind with an effect wz was actually missing: it runs a
+/// local queryable. Oam is out of scope here -- it feeds upstream's linkstate
+/// machinery, which is a topology question this plane does not own.
+///
+/// Gated with the plane it rides: `spawn_router_mcast_ingress` is
+/// `codec-push`-gated, so without that feature nothing constructs either arm.
+#[cfg(feature = "codec-push")]
+pub enum McastIngressBody {
+    /// A data Push, routed by [`FaceForwarder::route_mcast_ingress`].
+    Push(PushOwned),
+    /// A Query from a group peer, routed by
+    /// [`FaceForwarder::route_mcast_ingress_request`]. Its reply is discarded,
+    /// which is the pin's behaviour and not a wz shortcut: upstream hands the
+    /// Response to the requesting face's `DummyPrimitives`, and wz's
+    /// `send_to_face` already returns false for a face it cannot find.
+    Request(RequestOwned),
 }
 
 pub struct FaceSources {
@@ -2723,8 +2779,20 @@ where
             // route call is `codec-push`-gated (the trait method takes `PushOwned`);
             // without `codec-push` the channel is always `None` so this is dead.
             Step::McastIngress(_item) => {
+                // R2734 — the fold now carries a Query as well as a Push, so the
+                // kind is decided HERE rather than by the fold dropping everything
+                // that is not a Push. Each arm is a different routing entry point
+                // on the forwarder; both enter through the same source-only
+                // ingress face.
                 #[cfg(feature = "codec-push")]
-                forwarder.route_mcast_ingress(_item.priority, _item.reliable, &_item.push);
+                match &_item.body {
+                    McastIngressBody::Push(push) => {
+                        forwarder.route_mcast_ingress(_item.priority, _item.reliable, push);
+                    }
+                    McastIngressBody::Request(request) => {
+                        forwarder.route_mcast_ingress_request(_item.reliable, request);
+                    }
+                }
             }
 
             // The on-group ROUTER set changed — refresh the forwarder's DR

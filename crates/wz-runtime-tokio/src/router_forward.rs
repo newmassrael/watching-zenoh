@@ -614,11 +614,74 @@ struct McastGroup {
 /// unicast FaceId, which the accept loop assigns densely from 0
 /// (`accept_loop.rs` `next_id`). It is deliberately NOT inserted into
 /// [`faces`](RouterForwarder#structfield.faces): a mcast ingress has no send seam
-/// and no graph link (zenoh's per-peer `DummyPrimitives` ingress face analog,
-/// `router.rs:229`), so [`resolve_inbound_keyexpr`](RouterForwarder::resolve_inbound_keyexpr)
-/// special-cases it against an empty alias table (literal-only).
-#[cfg(feature = "router-multicast-faces")]
+/// and no graph link, which is upstream's shape too -- `new_peer_multicast`
+/// builds its per-peer face with `DummyPrimitives`, whose every send_* is an
+/// empty body, and never inserts it into the faces table either.
+///
+/// R2734 — UNGATED, where it used to carry `#[cfg(router-multicast-faces)]`.
+/// The CONSTANT is now feature-independent so that
+/// [`classify_inbound`] is too: a gated sentinel would make
+/// [`InboundFace::SourceOnly`] unconstructible without the feature, and every
+/// one of the twelve matches on that enum would need a `#[cfg]` arm. That is
+/// the feature-skew argument `driver_loop::IterationEvent` already makes for
+/// its multicast variants -- the variant stays ungated and only the PRODUCER
+/// is gated. Defining one `u64` costs nothing; skewing twelve matches does.
 const MCAST_INGRESS_FACE: FaceId = FaceId(u64::MAX);
+
+/// R2734 — the face a message ARRIVED on, classified for routing.
+///
+/// THREE ANSWERS, AND THE THIRD IS THE ONE THIS ROUTER WAS MISSING. Every
+/// routing entry point needs the attributes of its INBOUND face -- the routing
+/// zid, the link, the per-peer alias table -- and the only way wz had to get
+/// them was `self.faces.get(&inbound)`, which is the DESTINATION table. A face
+/// that can SOURCE a message but can never be sent to has no entry there, and
+/// cannot have one: [`RouterFaceState`] requires `actions:
+/// Arc<SessionLinkActions>`, and that type owns a live `SessionCore` and
+/// `LinkState` with no null constructor. The type refuses a fabricated entry,
+/// which is the design saying these are two different questions.
+///
+/// MEASURED BEFORE THE FIX: twelve sites in this file looked the inbound face
+/// up in `faces`, and exactly ONE of them
+/// ([`resolve_inbound_keyexpr`](RouterForwarder::resolve_inbound_keyexpr))
+/// recognised the multicast sentinel. The other eleven returned silently, so
+/// every message arriving on the group ingress face died at the first lookup
+/// whatever the fold above forwarded. That is why admitting more message kinds
+/// at `multicast_glue`'s fold would have changed nothing: the fold was the
+/// instance, this is the base.
+///
+/// SO THE ENUM EXISTS TO FORCE THE DECISION. An entry point cannot match it
+/// without writing a `SourceOnly` arm, which is the difference between
+/// declining a source-only face deliberately and declining it by accident.
+/// `route_request`'s old bail even said "the inbound face is gone: nothing to
+/// reply to", conflating the two cases this splits.
+enum InboundFace<'a> {
+    /// In the destination table: it can source a message AND be sent to.
+    Held(&'a RouterFaceState),
+    /// It can SOURCE a message and can never be sent to — wz's counterpart of
+    /// upstream's `DummyPrimitives` face. It carries no routing identity and no
+    /// alias table, so a consumer resolves its keyexprs literal-only.
+    ///
+    /// The egress half of this shape ALREADY existed and needed nothing:
+    /// [`send_to_face`](RouterForwarder::send_to_face) returns `false` for a
+    /// face it cannot find, which is exactly what `DummyPrimitives` does.
+    SourceOnly,
+    /// No such face: it closed, or it never existed.
+    Gone,
+}
+
+/// Classify an inbound [`FaceId`] against an already-borrowed face table.
+///
+/// A free function over the borrowed map rather than a `&self` method, so it
+/// drops into the existing scoped-borrow blocks without a second borrow.
+fn classify_inbound(faces: &HashMap<FaceId, RouterFaceState>, inbound: FaceId) -> InboundFace<'_> {
+    if inbound == MCAST_INGRESS_FACE {
+        return InboundFace::SourceOnly;
+    }
+    match faces.get(&inbound) {
+        Some(s) => InboundFace::Held(s),
+        None => InboundFace::Gone,
+    }
+}
 
 /// R2684 — MOVED to [`crate::linkstate_forward`], re-exported here so the
 /// router-hat paths that already name it keep working.
@@ -2521,7 +2584,17 @@ impl RouterForwarder {
                                                // zid / link, in one scoped borrow (an unresolvable alias drops it).
         let (inbound_zid, inbound_link, keyexpr) = {
             let faces = self.faces.borrow();
-            let s = faces.get(&inbound)?;
+            // R2734 — SourceOnly declines here, and the reason is that an
+            // Interest is answered: `respond_to_interest` sends Declares back to
+            // the face that asked, and a group ingress face has no send seam. The
+            // pin does route a multicast peer's Interest, but into a face whose
+            // primitives discard, so registering one here would attract work
+            // whose every reply is thrown away. Declining is the same OUTCOME by
+            // a shorter path, and is now said rather than fallen into.
+            let s = match classify_inbound(&faces, inbound) {
+                InboundFace::Held(s) => s,
+                InboundFace::SourceOnly | InboundFace::Gone => return None,
+            };
             let keyexpr = resolve_wireexpr(&wireexpr.body, &s.keyexpr_table)?;
             (peer_zid_routing(&s.actions), s.link, keyexpr)
         };
@@ -2766,8 +2839,13 @@ impl RouterForwarder {
         // the peer is not left waiting.
         let target: Option<String> = {
             let faces = self.faces.borrow();
-            let Some(s) = faces.get(&inbound) else {
-                return;
+            // R2734 — SourceOnly declines: this function's whole job is to SEND a
+            // Declare back to the asking face, and a group ingress face has no
+            // send seam. `send_to_face` would return false for it anyway, so the
+            // decline is the same outcome stated one step earlier.
+            let s = match classify_inbound(&faces, inbound) {
+                InboundFace::Held(s) => s,
+                InboundFace::SourceOnly | InboundFace::Gone => return,
             };
             if body.r() {
                 match body
@@ -3182,7 +3260,13 @@ impl RouterForwarder {
         let (net, _dirty) = self.plane(tier)?;
         let (inbound_zid, inbound_link, keyexpr) = {
             let faces = self.faces.borrow();
-            let s = faces.get(&inbound)?;
+            // R2734 — SourceOnly declines, as the ingest twin above does: a
+            // withdrawal is only meaningful for an interest this face registered,
+            // and a source-only face never registers one.
+            let s = match classify_inbound(&faces, inbound) {
+                InboundFace::Held(s) => s,
+                InboundFace::SourceOnly | InboundFace::Gone => return None,
+            };
             let keyexpr = resolve_ext_keyexpr(exts, &s.keyexpr_table)?;
             (peer_zid_routing(&s.actions), s.link, keyexpr)
         };
@@ -3701,19 +3785,22 @@ impl RouterForwarder {
     /// there; `resolve_wireexpr` is pure, so the two resolutions are identical.)
     /// `None` = the face is gone or the alias id is unknown (drop the Push).
     fn resolve_inbound_keyexpr(&self, inbound: FaceId, push: &PushOwned) -> Option<String> {
-        // The multicast INGRESS sentinel face carries NO per-peer alias table (I1
-        // single group-ingress face, literal-only): resolve against an EMPTY table
-        // — a literal (id==0) push yields its suffix; an aliased id-only push
-        // yields None and is dropped (per-peer alias tracking is the deferred I3
-        // milestone). The sentinel is not in `faces`, so this branch precedes the
-        // faces lookup below (which would otherwise return None and drop it).
-        #[cfg(feature = "router-multicast-faces")]
-        if inbound == MCAST_INGRESS_FACE {
-            return resolve_wireexpr(&push.keyexpr.body, &hashbrown::HashMap::new());
-        }
         let faces = self.faces.borrow();
-        let s = faces.get(&inbound)?;
-        resolve_wireexpr(&push.keyexpr.body, &s.keyexpr_table)
+        // R2734 — this is the ONE site that recognised the sentinel before the
+        // classifier existed, and it is why Push worked at all while every other
+        // kind died at its lookup. It now asks the same question the other eleven
+        // ask, so the special case is the enum's rather than this function's.
+        match classify_inbound(&faces, inbound) {
+            InboundFace::Held(s) => resolve_wireexpr(&push.keyexpr.body, &s.keyexpr_table),
+            // A source-only face carries no per-peer alias table, so a literal
+            // (id==0) push yields its suffix and an aliased id-only push yields
+            // None and is dropped. wz resolves a group peer's aliases UPSTREAM of
+            // here, per peer by source address, in `apply_declared_aliases`.
+            InboundFace::SourceOnly => {
+                resolve_wireexpr(&push.keyexpr.body, &hashbrown::HashMap::new())
+            }
+            InboundFace::Gone => None,
+        }
     }
 
     /// Whether SELF is the elected route master for `keyexpr` — the zenoh
@@ -3845,8 +3932,17 @@ impl RouterForwarder {
         // zid / link in one scoped borrow (an unresolvable alias drops the Push).
         let (inbound_zid, inbound_link, keyexpr) = {
             let faces = self.faces.borrow();
-            let Some(s) = faces.get(&inbound) else {
-                return;
+            // R2734 — SourceOnly declines, and this one is a REAL routing
+            // decision rather than a formality: the within-tier mesh transit of a
+            // group-ingress Push is NOT this path. It is the DR-gated federation
+            // (`mcast_ingress_may_federate` -> `is_group_dr`), which elects
+            // exactly one on-group router per keyexpr so two group-sharing mesh
+            // peers cannot echo-loop. Letting a source-only face through here
+            // would re-forward the same Push a second time, ungated by that
+            // election.
+            let s = match classify_inbound(&faces, inbound) {
+                InboundFace::Held(s) => s,
+                InboundFace::SourceOnly | InboundFace::Gone => return,
             };
             let Some(keyexpr) = resolve_wireexpr(&push.keyexpr.body, &s.keyexpr_table) else {
                 return;
@@ -4152,8 +4248,15 @@ impl RouterForwarder {
         };
         let keyexpr = {
             let faces = self.faces.borrow();
-            let Some(s) = faces.get(&inbound) else {
-                return;
+            // R2734 — SourceOnly declines. A group peer's subscription is not
+            // absent from wz, it is carried by a DIFFERENT structure: the
+            // MulticastDispatcher tracks `remote_subs` per peer and the union
+            // reaches the mesh through `set_mcast_group_subs`. Registering the
+            // same subscription on a client face too would advertise it twice,
+            // and onto a face that can never be delivered to.
+            let s = match classify_inbound(&faces, inbound) {
+                InboundFace::Held(s) => s,
+                InboundFace::SourceOnly | InboundFace::Gone => return,
             };
             match resolve_wireexpr(&wireexpr.body, &s.keyexpr_table) {
                 Some(k) => k,
@@ -4331,8 +4434,12 @@ impl RouterForwarder {
         };
         let keyexpr = {
             let faces = self.faces.borrow();
-            let Some(s) = faces.get(&inbound) else {
-                return;
+            // R2734 — SourceOnly declines, as its ingest twin does: a group
+            // peer's subscription lives in the MulticastDispatcher, so there is
+            // no client-face registration here for a withdrawal to remove.
+            let s = match classify_inbound(&faces, inbound) {
+                InboundFace::Held(s) => s,
+                InboundFace::SourceOnly | InboundFace::Gone => return,
             };
             match resolve_ext_keyexpr(exts, &s.keyexpr_table) {
                 Some(k) => k,
@@ -4838,8 +4945,15 @@ impl RouterForwarder {
         };
         let keyexpr = {
             let faces = self.faces.borrow();
-            let Some(s) = faces.get(&inbound) else {
-                return;
+            // R2734 — SourceOnly declines, and here the reason is stronger than
+            // "a different structure carries it": the MulticastDispatcher does
+            // NOT track liveliness tokens at all. The pin would register one on
+            // its black-hole face; wz declines, because a token registered on a
+            // face that can never be delivered to advertises liveliness this
+            // router cannot actually serve.
+            let s = match classify_inbound(&faces, inbound) {
+                InboundFace::Held(s) => s,
+                InboundFace::SourceOnly | InboundFace::Gone => return,
             };
             match resolve_wireexpr(&wireexpr.body, &s.keyexpr_table) {
                 Some(k) => k,
@@ -5247,8 +5361,14 @@ impl RouterForwarder {
         };
         let keyexpr = {
             let faces = self.faces.borrow();
-            let Some(s) = faces.get(&inbound) else {
-                return;
+            // R2734 — SourceOnly declines, and this is the arm where copying the
+            // pin would be WORSE than declining. Upstream registers a group
+            // peer's queryable on a face whose primitives discard, so the router
+            // then advertises a queryable it can never reach and attracts queries
+            // no one will answer. wz declines rather than inherit that.
+            let s = match classify_inbound(&faces, inbound) {
+                InboundFace::Held(s) => s,
+                InboundFace::SourceOnly | InboundFace::Gone => return,
             };
             match resolve_wireexpr(&wireexpr.body, &s.keyexpr_table) {
                 Some(k) => k,
@@ -5609,8 +5729,12 @@ impl RouterForwarder {
         };
         let keyexpr = {
             let faces = self.faces.borrow();
-            let Some(s) = faces.get(&inbound) else {
-                return;
+            // R2734 — SourceOnly declines, as its ingest twin does: nothing was
+            // ever registered for a source-only face, so there is nothing here to
+            // withdraw.
+            let s = match classify_inbound(&faces, inbound) {
+                InboundFace::Held(s) => s,
+                InboundFace::SourceOnly | InboundFace::Gone => return,
             };
             match resolve_ext_keyexpr(exts, &s.keyexpr_table) {
                 Some(k) => k,
@@ -5699,11 +5823,34 @@ impl RouterForwarder {
         // borrow (released before any send re-borrows `faces`).
         let resolved = {
             let faces = self.faces.borrow();
-            let Some(s) = faces.get(&inbound) else {
-                return; // the inbound face is gone: nothing to reply to
-            };
-            resolve_wireexpr(&request.keyexpr.body, &s.keyexpr_table)
-                .map(|keyexpr| (peer_zid_routing(&s.actions), s.link, keyexpr))
+            // R2734 — THE ONE SITE THAT PROCEEDS, and the old bail comment is
+            // exactly the conflation `InboundFace` exists to split: "the inbound
+            // face is gone: nothing to reply to" is TRUE of a dead face and FALSE
+            // of a source-only one, which is not gone and never had a reply path.
+            //
+            // A Query from a group peer is ROUTED, so a local queryable runs, and
+            // the answer is then discarded -- which is the pin's behaviour rather
+            // than a wz invention: upstream routes it through the per-peer face
+            // and drops the Response at
+            // `zenoh/src/net/routing/dispatcher/queries.rs` @
+            // `if query.src_face.primitives.send_response(msg) {`, whose
+            // DummyPrimitives returns false. wz needs nothing new for that half:
+            // `send_to_face` already returns false for a face it cannot find.
+            //
+            // The querier is unreachable either way, so what this buys is the one
+            // difference an integrator can observe -- the queryable HANDLER runs,
+            // as it does on a zenoh router.
+            match classify_inbound(&faces, inbound) {
+                InboundFace::Held(s) => resolve_wireexpr(&request.keyexpr.body, &s.keyexpr_table)
+                    .map(|keyexpr| (peer_zid_routing(&s.actions), s.link, keyexpr)),
+                // No routing identity and no alias table: literal-only, exactly as
+                // `resolve_inbound_keyexpr` treats the same face for a Push.
+                InboundFace::SourceOnly => {
+                    resolve_wireexpr(&request.keyexpr.body, &hashbrown::HashMap::new())
+                        .map(|keyexpr| (None, None, keyexpr))
+                }
+                InboundFace::Gone => return,
+            }
         };
         let (inbound_zid, inbound_link, keyexpr) = match resolved {
             Some(t) => t,
@@ -6215,8 +6362,14 @@ impl RouterForwarder {
             None
         } else {
             let faces = self.faces.borrow();
-            let Some(s) = faces.get(&inbound) else {
-                return;
+            // R2734 — SourceOnly declines, and the line below is why it costs
+            // nothing: a Response is matched against `pending` by (inbound, rid),
+            // and no Request was ever SENT to a source-only face, so no pending
+            // entry can be keyed to it. The pin reaches the same dead end by the
+            // same reasoning. Declining here just says so before the lookup.
+            let s = match classify_inbound(&faces, inbound) {
+                InboundFace::Held(s) => s,
+                InboundFace::SourceOnly | InboundFace::Gone => return,
             };
             match resolve_wireexpr(&response.keyexpr.body, &s.keyexpr_table) {
                 Some(k) => Some(k),
@@ -6771,6 +6924,30 @@ impl FaceForwarder for RouterForwarder {
             push,
             true,
         );
+    }
+
+    /// R2734 — route a QUERY received on the multicast INGRESS group.
+    ///
+    /// The same [`MCAST_INGRESS_FACE`] the Push twin above uses, through the
+    /// same [`route_request`](Self::route_request) the unicast dispatch calls,
+    /// so a group peer's Query reaches the router's full query-route computation
+    /// instead of being dropped at the fold. Client-tier for the same reason the
+    /// Push twin is: a group ingress carries no graph and routes no topology.
+    ///
+    /// THE REPLY IS DISCARDED AND NOTHING HERE HAS TO ARRANGE THAT.
+    /// [`send_to_face`](Self::send_to_face) returns `false` for a face it cannot
+    /// find, and the sentinel is deliberately absent from `faces` -- which is
+    /// upstream's own arrangement, where the per-peer multicast face is built
+    /// with `DummyPrimitives` and the Response dies at
+    /// `zenoh/src/net/routing/dispatcher/queries.rs` @
+    /// `if query.src_face.primitives.send_response(msg) {`.
+    ///
+    /// So the querier is unreachable in both implementations, and the difference
+    /// this closes is the one an integrator can see: the local queryable RUNS.
+    #[cfg(feature = "router-multicast-faces")]
+    fn route_mcast_ingress_request(&self, reliable: bool, request: &RequestOwned) {
+        self.queries_seen.set(self.queries_seen.get() + 1);
+        self.route_request(MCAST_INGRESS_FACE, FaceTier::Client, reliable, request);
     }
 
     /// Replace the on-group ROUTER member set (the I3b Designated-Router election
@@ -14184,6 +14361,108 @@ mod tests {
             fwd.pending.borrow().len(),
             1,
             "a pending entry keyed by the client face"
+        );
+    }
+
+    /// R2734 — the three-way discrimination `InboundFace` exists to force.
+    ///
+    /// Asserted on all THREE answers rather than on the new one alone: a
+    /// classifier that returned `SourceOnly` for everything would satisfy a test
+    /// that only checked the sentinel, and the whole point of the enum is that
+    /// "not in the destination table" and "source-only" are different facts.
+    #[test]
+    fn the_inbound_classifier_tells_held_from_source_only_from_gone() {
+        let fwd = RouterForwarder::new(zid(0x01));
+        let (client, _sink) = face(zid(0xAA), WIRE_CLIENT);
+        fwd.register(FaceId(0), &client);
+        let faces = fwd.faces.borrow();
+        assert!(
+            matches!(classify_inbound(&faces, FaceId(0)), InboundFace::Held(_)),
+            "a registered face is Held"
+        );
+        assert!(
+            matches!(
+                classify_inbound(&faces, MCAST_INGRESS_FACE),
+                InboundFace::SourceOnly
+            ),
+            "the multicast ingress sentinel is SourceOnly, not Gone"
+        );
+        assert!(
+            matches!(classify_inbound(&faces, FaceId(7)), InboundFace::Gone),
+            "an unregistered face is Gone, not SourceOnly"
+        );
+    }
+
+    /// R2734 — a QUERY arriving on the multicast group reaches a local
+    /// queryable, which is the one effect the pin had and wz did not.
+    ///
+    /// Upstream routes a multicast peer's Request through its per-peer face and
+    /// then discards the Response at that face's `DummyPrimitives`, so the
+    /// querier is unreachable in BOTH implementations. What is observable, and
+    /// what this asserts, is that the queryable handler runs.
+    ///
+    /// ⚠ CARRIES THE SAME `#[cfg]` AS THE METHOD IT DRIVES, which it did not on
+    /// its first form: `route_mcast_ingress_request` is
+    /// `router-multicast-faces`-gated on the router, so without that feature the
+    /// call resolves to `FaceForwarder`'s no-op DEFAULT and the assertion fails
+    /// against a forwarder that was never asked to route anything. A test whose
+    /// condition is wider than its subject's does not measure the subject.
+    #[cfg(feature = "router-multicast-faces")]
+    #[test]
+    fn a_group_query_reaches_a_client_hosted_queryable() {
+        let fwd = RouterForwarder::new(zid(0x01));
+        let (client, sink_client) = face(zid(0xAA), WIRE_CLIENT);
+        fwd.register(FaceId(0), &client);
+        fwd.tick();
+        forward_one(&fwd, FaceId(0), declare_qabl("demo/q", true));
+        sink_client.reset();
+        let seen_before = fwd.queries_seen.get();
+
+        let NetworkMessage::Request(request) = request_best(9, "demo/q") else {
+            unreachable!("request_best builds a Request")
+        };
+        fwd.route_mcast_ingress_request(true, &request);
+
+        assert_eq!(
+            sink_client.frame_count(),
+            1,
+            "the group Query reached the client-hosted queryable"
+        );
+        assert_eq!(
+            fwd.queries_seen.get(),
+            seen_before + 1,
+            "the group Query is counted on the query-plane witness, as a unicast one is"
+        );
+    }
+
+    /// R2734 — the anti-vacuity half of the arm above: the group querier gets
+    /// NOTHING back, so the test above cannot be passing because wz invented a
+    /// reply path the reference does not have.
+    ///
+    /// The mechanism is already in the tree and needed no new code:
+    /// `send_to_face` returns false for a face absent from `faces`, and the
+    /// sentinel is deliberately absent. This pins that, so a later round that
+    /// inserts a real entry for the sentinel has to come and read this.
+    #[test]
+    fn a_group_query_gets_no_reply_because_its_face_has_no_send_seam() {
+        let fwd = RouterForwarder::new(zid(0x01));
+        let (client, sink_client) = face(zid(0xAA), WIRE_CLIENT);
+        fwd.register(FaceId(0), &client);
+        fwd.tick();
+        forward_one(&fwd, FaceId(0), declare_qabl("demo/q", true));
+        sink_client.reset();
+
+        // An UNRESOLVABLE keyexpr is the case that would emit a ResponseFinal
+        // straight back to the querier on a unicast face, so it is the sharpest
+        // probe for "is there a reply path at all".
+        let NetworkMessage::Request(request) = request_best(11, "demo/q") else {
+            unreachable!("request_best builds a Request")
+        };
+        assert!(
+            !fwd.send_to_face(MCAST_INGRESS_FACE, true, || {
+                NetworkMessage::Request(request.clone())
+            }),
+            "nothing can be sent to the group ingress face -- wz's DummyPrimitives"
         );
     }
 

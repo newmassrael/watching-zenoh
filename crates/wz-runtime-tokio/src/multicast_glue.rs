@@ -1222,7 +1222,7 @@ pub fn spawn_router_mcast_ingress(
     use wz_session_core::network_message::NetworkMessage;
     use wz_session_core::WhatAmI;
 
-    use crate::accept_loop::McastIngressItem;
+    use crate::accept_loop::{McastIngressBody, McastIngressItem};
     use crate::runtime_impl::TokioTime;
     use crate::UdpDriver;
 
@@ -1300,10 +1300,27 @@ pub fn spawn_router_mcast_ingress(
                 },
                 &mut driver,
                 &clock,
-                // Fold each admitted Push to the peer-loop task. A closed receiver (peer
-                // loop gone) drops the item — fire-and-forget, matching the egress
-                // helper's group-sink contract. Declarations + non-Push messages are
-                // ignored (the deferred I3 declaration plane).
+                // Fold each admitted Push — and, since R2734, each admitted Query —
+                // to the peer-loop task. A closed receiver (peer loop gone) drops
+                // the item: fire-and-forget, matching the egress helper's group-sink
+                // contract.
+                //
+                // R2734 — THE QUERY ARM, AND WHY IT IS NOT ALL SEVEN KINDS.
+                // Upstream's multicast transport filters no kind on the way to the
+                // per-peer face, so the count here used to be 2 of 7 against its 7.
+                // But measuring what each kind would REACH showed the router
+                // declines a source-only face at every other entry point, each for
+                // a stated reason: a group peer's subscriptions already travel by
+                // `MulticastDispatcher` (and are advertised through
+                // `set_mcast_group_subs`), its Interests would be answered into a
+                // face with no send seam, and its Responses can match no pending
+                // query because no Request was ever sent to that face. Forwarding
+                // those would be wiring that dies one call later.
+                // A Query is the one kind with an effect wz was missing -- it runs
+                // a local queryable -- and Oam is out of scope, feeding upstream's
+                // linkstate machinery, which this plane does not own.
+                // Declarations are still not folded: they are handled per peer
+                // upstream of here, in the dispatcher.
                 |event: IterationEvent<'_>| {
                     if let IterationEvent::Poll(DriverLoopOutcome::FramePayload {
                         messages,
@@ -1313,12 +1330,25 @@ pub fn spawn_router_mcast_ingress(
                     }) = event
                     {
                         for msg in messages {
-                            if let NetworkMessage::Push(push) = msg {
+                            let body = match msg {
+                                NetworkMessage::Push(push) => {
+                                    Some(McastIngressBody::Push((**push).clone()))
+                                }
+                                NetworkMessage::Request(request) => {
+                                    Some(McastIngressBody::Request((**request).clone()))
+                                }
+                                _ => None,
+                            };
+                            if let Some(body) = body {
                                 // R311y227 — carry the frame's decoded QoS band across
                                 // the fold so the forwarder re-injects at that priority
-                                // (DEFAULT on a non-qos group).
+                                // (DEFAULT on a non-qos group). The Query arm carries it
+                                // too rather than branching the item: the band is a
+                                // property of the FRAME both rode in on, and
+                                // `route_mcast_ingress_request` simply has no argument
+                                // for it, which is that method's own note.
                                 let _ = ingress_tx.send(McastIngressItem {
-                                    push: (**push).clone(),
+                                    body,
                                     reliable: *reliable,
                                     priority: *priority,
                                 });
