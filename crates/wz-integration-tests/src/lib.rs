@@ -526,6 +526,32 @@ pub mod common {
         );
     }
 
+    /// Locate the `wz-e2e-admin-probe` binary — R2745 (open-debt item 665),
+    /// the family's first DIALING member: it holds ONE session and runs an
+    /// ordered GET/PUT script on it, which is what separates a host that
+    /// re-resolves live state per REQUEST from one that does so per
+    /// CONNECTION. Every foreign client this tree can drive is one-shot, so
+    /// that distinction had no instrument before this. Same debug/release
+    /// lookup shape as its siblings; the lane builds it before driving it, so
+    /// a missing binary is a CI-prep error surfaced as a panic, not a
+    /// graceful SKIP.
+    pub fn wz_e2e_admin_probe_binary() -> PathBuf {
+        let crates_dir = project_root().join("crates");
+        let candidates = [
+            crates_dir.join("target/debug/wz-e2e-admin-probe"),
+            crates_dir.join("target/release/wz-e2e-admin-probe"),
+        ];
+        for c in &candidates {
+            if c.is_file() {
+                return c.clone();
+            }
+        }
+        panic!(
+            "wz-e2e-admin-probe binary not found in {candidates:?}; \
+             run `cargo build -p wz-e2e-admin-probe` first"
+        );
+    }
+
     /// Locate the `wz-e2e-zget` binary — the minimal z_get-initiator
     /// ("zget-reply-only") facade-subset e2e consumer (initiator-side
     /// mirror of [`wz_e2e_queryable_binary`]: wz ISSUES the query, the

@@ -17511,6 +17511,43 @@ layer_e6i_storage_host_adminspace_read_deny() {
         --test wz_storage_host_adminspace_read_deny_to_pico_zget -- --ignored --quiet) || return 1
 }
 
+# ─── Layer E6j — the admin read permit is re-read PER GET, on ONE session ───
+#
+# R2745 (open-debt item 665). E6i above is a PER-CONNECTION witness and cannot be
+# more than that: a stock pico `z_get` is a one-shot process, so each of its GETs
+# arrives on its own connection, and a host that resolved the permit once per
+# connection would answer all of them identically. R2374 measured exactly that —
+# freezing the permit beside `get_cfg` leaves all three E6i tests GREEN — and the
+# `adminspace-read` residual has been that gap ever since.
+#
+# ⛔ SO THIS IS NOT AN E6i VARIANT AND MUST NOT BE FOLDED INTO IT. The two lanes
+# differ in the one property that matters: E6i's client is foreign and one-shot,
+# this lane's client holds ONE session across the revoke. Running this test
+# beside E6i's three would make one lane whose failure does not say which
+# property broke.
+#
+# MEASURED in the round that added it, both directions: with the per-GET resolve
+# in place the probe reports `replies=4` then `replies=0`; with it frozen at
+# declare time it reports `replies=4` twice and this lane REDS while E6i stays at
+# 3 passed. That asymmetry is the lane's whole reason to exist.
+#
+# TWO BINARIES, TWO INVOCATIONS, and the separation is deliberate: cargo unifies
+# features across packages built in one command, which is how the R311y338
+# silent-peer fixture was once quietly given a response plane it had pinned OFF.
+# The host needs its three adminspace features; the probe pins its own minimal
+# getter+publisher subset and must not inherit them.
+#
+# No foreign binary, so no `_pico_cli_unavailable` guard: both ends are wz, which
+# is what makes this witness reachable at all on a machine with no pico CLI.
+layer_e6j_admin_permit_per_get_one_session() {
+    (cd crates && cargo build -p wz-ap-demo \
+        --features adminspace-config-hotreload,adminspace-read,adminspace-write --quiet) || return 1
+    (cd crates && cargo build -p wz-e2e-admin-probe --quiet) || return 1
+    (cd crates && cargo test -p wz-integration-tests \
+        --test wz_storage_host_admin_permit_is_read_per_get_on_one_session \
+        -- --ignored --quiet) || return 1
+}
+
 # ─── Layer E7 — router-hat: RouterForwarder driven E2E (P4 §5.21 ACTIVATION) ───
 #
 # The dual-mesh RouterForwarder (the zenoh hat/router port) composed over real
@@ -19112,6 +19149,7 @@ run_layer E6f layer_e6f_adminspace_metrics || overall=1
 run_layer E6g layer_e6g_adminspace_read || overall=1
 run_layer E6h layer_e6h_adminspace_config_hotreload || overall=1
 run_layer E6i layer_e6i_storage_host_adminspace_read_deny || overall=1
+run_layer E6j layer_e6j_admin_permit_per_get_one_session || overall=1
 run_layer E7 layer_e7_router_hat || overall=1
 run_layer E7b layer_e7b_router_connect_reconcile || overall=1
 run_layer E7b2 layer_e7b2_router_connect_add_over_the_wire || overall=1
