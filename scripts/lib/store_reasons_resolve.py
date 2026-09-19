@@ -185,7 +185,24 @@ REASON_FLOOR = 100
 #: is a ratchet that has stopped being one. Re-seated on what the store actually
 #: holds, measured either side of this round's own rewrite -- 138 before, 143
 #: after -- so the next rewrite is graded against the tree it edits.
-ANCHORED_FLOOR = 143
+#: 143 -> 454 (R2732), AND THE DRIFT R2416 NAMED HAD SIMPLY HAPPENED AGAIN.
+#: R2416 re-seated this on the argument that a floor nobody moves stops being a
+#: ratchet while the store grows underneath it; 316 rounds later the live count
+#: was 444 against a floor of 143, so a rewrite could have deleted THREE
+#: HUNDRED AND ONE anchors and still printed OK. The number was doing the same
+#: nothing, for the same reason, and re-seating it once did not fix that.
+#: ⚠ SO THE SHAPE IS THE FINDING, not this value: a floor that must be
+#: hand-advanced decays to the count at the last round that remembered. The
+#: durable form is to DERIVE it from the committed store -- the count in
+#: `git cat-file -p HEAD:<store>` read through this module's own parser, which
+#: is how the two numbers below were taken -- so it cannot lag a growing tree.
+#: That is open-debt item 793 rather than this round, because deriving it needs
+#: a decision about what a gate may read from git that this file does not make
+#: anywhere else.
+#: Measured either side of this round's own rewrite -- 444 before, 454 after --
+#: with `store_reasons` + `adjudicate` from this module, so the two counts are
+#: the same instrument and not two spellings of it.
+ANCHORED_FLOOR = 454
 
 
 class InputError(Exception):
