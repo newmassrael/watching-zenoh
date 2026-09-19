@@ -111,7 +111,8 @@ const SERIAL_CONNECT_THROTTLE: Duration = Duration::from_millis(250);
 ///
 /// R2727 — it also carries the way BACK for the two halves of a link that has
 /// died, which is what makes `release_on_close=false` expressible: see
-/// [`SerialRetainSlot`].
+/// `SerialRetainSlot` (a code span and not a link, because it is private and
+/// this type is not).
 #[derive(Clone, Debug)]
 pub struct SerialLiveness(Arc<SerialLivenessInner>);
 
@@ -281,7 +282,7 @@ impl SerialLiveness {
 /// The half of [`SerialLiveness`] the LINK holds: dropping it tells the listener
 /// the device is free.
 ///
-/// R2727 — it answers exactly ONE question, [`Self::liveness`], and that is not
+/// R2727 — it answers exactly ONE question, `Self::liveness`, and that is not
 /// the branch this doc used to refuse. The refusal was of a guard a caller could
 /// INTERROGATE — "is the device free?", "am I still the holder?" — because the
 /// only correct use of this value is to hold it for as long as the link lives,
@@ -936,13 +937,13 @@ impl BoxedLinkDriver for SerialWriteDriver {
 /// a retained device can be re-accepted (`None` on a dialled link, and a no-op
 /// when the locator left `release_on_close` at its default). It is handed the
 /// half on EVERY path this task can leave by, which is why the draining loop
-/// moved into [`drain_serial_writes`]: a `return` in the middle of that loop is
+/// moved into `drain_serial_writes`: a `return` in the middle of that loop is
 /// how a half gets silently forgotten, and there is now exactly one place to
 /// forget it from.
 ///
 /// The one exit that does NOT come back through here is
 /// [`WriterHandle::abort`](crate::writer_queue::WriterHandle::abort), which
-/// cancels this future where it stands; see [`SerialRetainSlot`] for why
+/// cancels this future where it stands; see `SerialRetainSlot` for why
 /// re-opening is right in that case.
 pub async fn serial_writer_task(
     writer: WriteHalf<SerialStream>,
