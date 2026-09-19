@@ -202,7 +202,11 @@ REASON_FLOOR = 100
 #: Measured either side of this round's own rewrite -- 444 before, 454 after --
 #: with `store_reasons` + `adjudicate` from this module, so the two counts are
 #: the same instrument and not two spellings of it.
-ANCHORED_FLOOR = 454
+#: 454 -> 458 (R2733), same instrument, same round as the four anchors that
+#: moved it. Unremarkable ON PURPOSE: this is what advancing the floor looks
+#: like when it happens in the commit that earns it, and the contrast with the
+#: 143-against-444 drift above is the whole argument of open-debt 793.
+ANCHORED_FLOOR = 458
 
 
 class InputError(Exception):
