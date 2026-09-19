@@ -495,7 +495,7 @@ async fn unixpipe_link_ends_report_mirrored_dedicated_fifo_endpoints() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn serial_link_ends_report_their_own_endpoint_for_both_address_forms() {
     use tokio_serial::SerialStream;
-    use wz_runtime_tokio::serial_pipeline::wire_serial_stream;
+    use wz_runtime_tokio::serial_pipeline::{wire_serial_stream, SerialPort};
     use wz_session_core::link::BoxedLinkDriver;
     use wz_session_core::locator::{SerialEndpoint, SerialOptions, SerialTarget};
 
@@ -511,8 +511,8 @@ async fn serial_link_ends_report_their_own_endpoint_for_both_address_forms() {
     };
 
     let (a, b) = SerialStream::pair().expect("openpty serial pair");
-    let (_a_in, a_out, _a_h) = wire_serial_stream(a, &device_end);
-    let (_b_in, b_out, _b_h) = wire_serial_stream(b, &pins_end);
+    let (_a_in, a_out, _a_h) = wire_serial_stream(SerialPort::dialled(a), &device_end);
+    let (_b_in, b_out, _b_h) = wire_serial_stream(SerialPort::dialled(b), &pins_end);
 
     for (expected, driver, which) in [(&device_end, &a_out, "Device"), (&pins_end, &b_out, "Pins")]
     {

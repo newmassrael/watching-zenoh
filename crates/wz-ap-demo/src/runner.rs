@@ -3793,9 +3793,17 @@ async fn run_router_until(
     // multi-accept loop) is rejected at bind with a clear error instead of
     // "listening" yet holding 0 faces. The BIND-time twin of the loop's runtime
     // backstop (`AcceptedLink::supports_mesh_multi_peer`, the `Step::Accepted`
-    // arm). Since R311y404 EVERY acceptor (quic included, via its deferred-handshake
-    // split) is mesh-capable, so this guard rejects no shipped transport today -- it
-    // stays as defensive code, live only for a future non-mesh acceptor.
+    // arm).
+    //
+    // ⚠ R2722 CORRECTION -- this comment used to end "since R311y404 EVERY
+    // acceptor is mesh-capable, so this guard rejects no shipped transport
+    // today; it stays as defensive code". That stopped being true at R311y805,
+    // which made `Serial` `false`: the guard rejects a SHIPPED transport, and a
+    // `--listen serial/...` on the router path fails here. It is left rejecting
+    // for now rather than quietly widened, because the right answer is not "let
+    // it through" -- a serial listener yields one face AT A TIME, so what the
+    // loop needs is a face budget of one, not an exemption from the check.
+    // Deriving that is the remaining half of this atom's seam.
     if !listener.supports_mesh_multi_peer() {
         return Err(io::Error::new(
             io::ErrorKind::Unsupported,

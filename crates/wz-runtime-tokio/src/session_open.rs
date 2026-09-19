@@ -128,10 +128,9 @@ use tokio::net::UdpSocket;
 // transport-link-serial feature here.
 #[cfg(feature = "transport-link-serial")]
 use crate::serial_pipeline::{
-    dial_serial, drive_serial_handshake, open_serial_device, wire_serial_stream, SerialReadDriver,
+    dial_serial, drive_serial_handshake, open_serial_device, wire_serial_stream, SerialLiveness,
+    SerialPort, SerialReadDriver,
 };
-#[cfg(feature = "transport-link-serial")]
-use tokio_serial::SerialStream;
 #[cfg(feature = "transport-link-serial")]
 use wz_session_core::serial_link::SerialRole;
 
@@ -664,9 +663,15 @@ pub enum DialedLink {
     /// (`SerialStream` exposes no device name), so the endpoint that opened it is
     /// the only object that can name the link — and the adminspace `{src,dst}`
     /// view needs that name.
+    ///
+    /// R2722 — the field is a [`SerialPort`] rather than a bare stream, which is
+    /// the same value plus, on an ACCEPTED link, the listener's claim on the
+    /// device. The field NAME is unchanged on purpose: every construction and
+    /// match site here reads as it did, and the one thing that moved is who
+    /// learns when the link ends.
     #[cfg(feature = "transport-link-serial")]
     Serial {
-        stream: SerialStream,
+        stream: SerialPort,
         endpoint: SerialEndpoint,
     },
     /// A connected + rustls-handshaked TLS-over-TCP stream, split downstream
@@ -1030,9 +1035,10 @@ pub struct SerialListener {
     /// The endpoint parsed out of the `serial/...` locator — the device the
     /// accept opens, and the address [`BoundListener::local_addr_display`] logs.
     endpoint: SerialEndpoint,
-    /// Cleared by the first accept; see the type doc for why a second accept
-    /// parks instead of re-opening the device.
-    armed: bool,
+    /// R2722 — whether a link accepted off this device is still alive. Replaces
+    /// the one-shot `armed: bool` that could not tell "my peer is still here"
+    /// from "my peer is gone" and parked on both; see [`SerialLiveness`].
+    liveness: SerialLiveness,
 }
 
 #[cfg(feature = "transport-link-serial")]
@@ -1572,22 +1578,30 @@ impl BoundListener {
             // which is precisely why the handshake half must not run here: it is
             // the part that waits.
             //
-            // ONE accept per bind (see `SerialListener`): the second and later
-            // accepts PARK rather than re-open a device whose link is still live.
-            // `pending` and not `Err`, for the R311y382 F2 reason -- an `Err` re-arms
-            // the loop's throttle and spins. Reached only by a direct-API caller
-            // today: the mesh loop rejects a serial listen at bind (not mesh-capable),
-            // and the one-shot `accept_bound` consumes the listener after one accept.
+            // ONE LINK AT A TIME, not one ever (R2722): an accept PARKS while a
+            // link accepted off this device is still live and proceeds once that
+            // link has dropped, which is upstream's `while is_connected.load(..)`
+            // spin (`io/zenoh-links/zenoh-link-serial/src/unicast.rs`) expressed
+            // as an await rather than a sleep loop. `pending` and not `Err`, for
+            // the R311y382 F2 reason -- an `Err` re-arms the loop's throttle and
+            // spins.
+            //
+            // The park is UNCONDITIONAL rather than a poll, because there is
+            // nothing to wake it: this seam has no notification channel from the
+            // link, and inventing a sleep-poll here would be a worse answer than
+            // upstream's, which at least owns its own accept task. A caller that
+            // wants the next peer calls `accept_raw` again AFTER dropping the
+            // previous link, which is what the accept loop and `accept_bound`
+            // both do, and what the witnesses assert.
             #[cfg(feature = "transport-link-serial")]
             BoundListener::Serial(l) => {
-                if !l.armed {
+                if l.liveness.is_live() {
                     std::future::pending::<()>().await;
                 }
-                l.armed = false;
                 let stream = open_serial_device(&l.endpoint)?;
                 (
                     AcceptedLink::Serial {
-                        stream,
+                        stream: SerialPort::accepted(stream, l.liveness.claim()),
                         endpoint: l.endpoint.clone(),
                     },
                     AcceptedPeer::NonIp("serial"),
@@ -1708,9 +1722,13 @@ pub enum AcceptedLink {
     /// serial_protocol.c:255-280), so running it in the accept path would block on
     /// a peer that may never come. It also runs BEFORE the zenoh transport, which
     /// no other scheme's does.
+    ///
+    /// R2722 — the [`SerialPort`] here ALWAYS carries a guard, because this
+    /// variant is only ever produced by a listener's accept. That the type
+    /// merely allows the guard to be absent is what lets the dial side share it.
     #[cfg(feature = "transport-link-serial")]
     Serial {
-        stream: SerialStream,
+        stream: SerialPort,
         endpoint: SerialEndpoint,
     },
 }
@@ -1817,7 +1835,7 @@ impl AcceptedLink {
                 mut stream,
                 endpoint,
             } => {
-                drive_serial_handshake(&mut stream, SerialRole::Responder).await?;
+                drive_serial_handshake(stream.stream_mut(), SerialRole::Responder).await?;
                 DialedLink::Serial { stream, endpoint }
             }
         })
@@ -2390,7 +2408,9 @@ pub async fn dial_locator(locator: AnyLocator, cfg: &DialConfig) -> io::Result<D
         // seam; the Responder side comes up via `accept_serial`.
         #[cfg(feature = "transport-link-serial")]
         AnyLocator::Serial(ep) => Ok(DialedLink::Serial {
-            stream: dial_serial(&ep).await?,
+            // A dial owns its device outright: no listener handed it out, so
+            // there is no claim to release (R2722).
+            stream: SerialPort::dialled(dial_serial(&ep).await?),
             endpoint: ep,
         }),
         // R311ny — `AnyLocator::Serial` is an ALWAYS-present variant (the
@@ -3281,11 +3301,38 @@ pub async fn bind_locator(locator: AnyLocator, cfg: &AcceptConfig) -> io::Result
         // `AnyLocator::Serial` is an ALWAYS-present variant (the locator GRAMMAR is
         // ungated in wz-session-core, only the tty BACKEND is gated), so the arm
         // exists in both feature configs, exactly as the dial arm does.
+        //
+        // R2722 — `release_on_close = false` is REFUSED here rather than
+        // ignored, and that is the honest half of this round rather than a
+        // shortfall hidden in a default. The key's whole meaning is what the
+        // re-accept does with the device: upstream re-creates the port when it
+        // is true and RETAINS the open one when it is false
+        // (`io/zenoh-links/zenoh-link-serial/src/unicast.rs` @ `if release_on_close {`,
+        // guarding the `ZSerial::new` its accept task runs). wz's accept seam
+        // MOVES the stream into the link and its writer half is consumed by the
+        // TX subsystem, whose task contract is `Output = ()` across ten
+        // pipelines -- so retaining the port is not a serial-side patch but a
+        // question about who owns a transport resource that outlives its link,
+        // and reshaping that contract for one scheme would be the wrong base.
+        // Refusing a listener that asks for it says so at bind, where an
+        // operator can read it, instead of accepting the string and quietly
+        // re-opening the device anyway. `true` is the default on BOTH sides
+        // (`DEFAULT_RELEASE_ON_CLOSE` upstream, `SerialOptions::default` here),
+        // so this refuses only a listener that asked for the non-default.
         #[cfg(feature = "transport-link-serial")]
-        AnyLocator::Serial(endpoint) => Ok(BoundListener::Serial(SerialListener {
-            endpoint,
-            armed: true,
-        })),
+        AnyLocator::Serial(endpoint) => {
+            if !endpoint.options.release_on_close {
+                return Err(unsupported(
+                    "serial listen with release_on_close=false needs the device to \
+                     outlive its link, which this accept seam cannot yet express; \
+                     drop the key to take the default (re-open per accept)",
+                ));
+            }
+            Ok(BoundListener::Serial(SerialListener {
+                endpoint,
+                liveness: SerialLiveness::default(),
+            }))
+        }
         #[cfg(not(feature = "transport-link-serial"))]
         AnyLocator::Serial(_ep) => Err(unsupported(
             "serial acceptor requires the transport-link-serial feature",

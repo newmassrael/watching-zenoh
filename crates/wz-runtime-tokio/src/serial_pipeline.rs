@@ -55,6 +55,7 @@
 
 use std::collections::VecDeque;
 use std::io;
+use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -83,6 +84,121 @@ const SERIAL_DATA_HEADER: u8 = 0x00;
 /// Initiator back-off between INIT retries when the peer answers RESET
 /// (`SERIAL_CONNECT_THROTTLE_TIME_MS`, serial_protocol.c:37).
 const SERIAL_CONNECT_THROTTLE: Duration = Duration::from_millis(250);
+
+/// R2722 — "a link is live on this tty", shared between the listener that
+/// accepted it and the link itself.
+///
+/// ⛔ THIS IS THE STRUCTURE WZ DID NOT HAVE, and every serial listener defect
+/// above it was a consequence. A tty is point-to-point, so at most one link may
+/// hold the device — but "one at a time" and "one ever" are different rules, and
+/// without feedback from the link a listener cannot tell them apart. wz's
+/// listener carried a one-shot `armed: bool` and parked on both, which made it
+/// unable to serve a second peer and left `release_on_close` with nothing to
+/// express, since that key's entire observable effect is on a re-accept.
+///
+/// Upstream is the same shape and is where this one is read from: an
+/// `is_connected: Arc<AtomicBool>` its accept task spins on before re-opening
+/// (`io/zenoh-links/zenoh-link-serial/src/unicast.rs`
+/// @ `while is_connected.load(Ordering::Acquire) {`), stored `true` once a link
+/// is accepted (@ `is_connected.store(true, Ordering::Release);`) and cleared by
+/// the LINK's own close (@ `self.is_connected.store(false, Ordering::Release);`).
+///
+/// wz clears it from [`SerialLinkGuard`]'s `Drop` rather than from a `close`
+/// method, because wz's accepted link has no close call of its own — it is torn
+/// down by being dropped, and a teardown path that must be REMEMBERED is the
+/// class this workspace files against itself.
+#[derive(Clone, Debug, Default)]
+pub struct SerialLiveness(Arc<AtomicBool>);
+
+impl SerialLiveness {
+    /// Whether a link accepted off this device is still alive.
+    pub fn is_live(&self) -> bool {
+        self.0.load(AtomicOrdering::Acquire)
+    }
+
+    /// Mark the device taken and hand back the guard that releases it.
+    ///
+    /// Returning the guard rather than setting a flag and trusting the caller is
+    /// what makes the release unforgettable: the only way to claim is to hold
+    /// something whose `Drop` un-claims.
+    pub fn claim(&self) -> SerialLinkGuard {
+        self.0.store(true, AtomicOrdering::Release);
+        SerialLinkGuard(self.clone())
+    }
+}
+
+/// The half of [`SerialLiveness`] the LINK holds: dropping it tells the listener
+/// the device is free.
+///
+/// It is deliberately opaque and has no methods. A guard that could be asked
+/// questions would invite a caller to branch on it, and the only correct use of
+/// this value is to hold it for exactly as long as the link lives.
+#[derive(Debug)]
+pub struct SerialLinkGuard(SerialLiveness);
+
+impl Drop for SerialLinkGuard {
+    fn drop(&mut self) {
+        self.0 .0.store(false, AtomicOrdering::Release);
+    }
+}
+
+/// An open tty plus, when a LISTENER handed it out, the guard that tells that
+/// listener when the link is gone.
+///
+/// A newtype rather than a second enum field, so `DialedLink::Serial`'s `stream`
+/// keeps its name and every construction and match site reads as it did. The
+/// guard is `Option` because the two ways to get a serial link are genuinely
+/// different: a DIAL owns the device outright and has no listener to report to,
+/// while an ACCEPT borrows it from a listener that will hand it out again.
+///
+/// ⚠ The guard is held and never read, which is the whole contract — its `Drop`
+/// is the observable. It is not `_`-prefixed and not `#[allow]`-ed: it is READ,
+/// once, by [`Self::into_parts`], because the wiring seam has to move it onto
+/// whatever outlives the split. A guard silently dropped at the split would mark
+/// the device free while the link was still running, which is the same defect as
+/// having no guard at all and harder to see.
+pub struct SerialPort {
+    stream: SerialStream,
+    guard: Option<SerialLinkGuard>,
+}
+
+impl std::fmt::Debug for SerialPort {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SerialPort")
+            .field("accepted", &self.guard.is_some())
+            .finish()
+    }
+}
+
+impl SerialPort {
+    /// A device this process opened for itself — no listener is waiting on it.
+    pub fn dialled(stream: SerialStream) -> Self {
+        Self {
+            stream,
+            guard: None,
+        }
+    }
+
+    /// A device a listener handed out, carrying the guard that frees it.
+    pub fn accepted(stream: SerialStream, guard: SerialLinkGuard) -> Self {
+        Self {
+            stream,
+            guard: Some(guard),
+        }
+    }
+
+    /// The stream, mutably — the serial-link handshake runs over the WHOLE
+    /// device before the split, exactly as it did when this was a bare stream.
+    pub fn stream_mut(&mut self) -> &mut SerialStream {
+        &mut self.stream
+    }
+
+    /// Split into the two things the wiring seam needs to keep apart: the stream
+    /// it consumes, and the guard it must keep alive past the consumption.
+    pub fn into_parts(self) -> (SerialStream, Option<SerialLinkGuard>) {
+        (self.stream, self.guard)
+    }
+}
 
 /// Open the host tty for a [`SerialEndpoint`] — the raw serial-device
 /// open primitive (no handshake yet). Only [`SerialTarget::Device`] paths
@@ -331,11 +447,17 @@ where
 /// address is not readable off the stream the way a socket's is, so the ONE object
 /// that knows it is the endpoint the caller dialled.
 pub fn wire_serial_stream(
-    stream: SerialStream,
+    port: SerialPort,
     endpoint: &SerialEndpoint,
 ) -> (SerialReadDriver, Arc<SerialWriteDriver>, WriterHandle) {
+    // R2722 — the guard moves onto the READ driver, which is the half of the
+    // split that lives exactly as long as the link does: the session holds it
+    // for the link's whole life and drops it at teardown. Dropping the guard
+    // here instead would tell the listener the tty was free the moment the link
+    // started running.
+    let (stream, guard) = port.into_parts();
     let (reader, writer) = split(stream);
-    let inbound = SerialReadDriver::new(reader);
+    let inbound = SerialReadDriver::new(reader, guard);
     let (tx, rx) = mpsc::unbounded_channel::<Vec<u8>>();
     let writer_handle = WriterHandle::spawn(rx, |queue| serial_writer_task(writer, queue));
     // R311y474 — the adminspace `{src,dst}` pair. BOTH ends are this tty's own
@@ -384,15 +506,35 @@ pub struct SerialReadDriver {
     /// complete frame — drained one per `poll_event` call before the next
     /// read, so each call yields exactly one [`LinkEvent`].
     pending: VecDeque<DecodedFrame>,
+    /// R2722 — present only on an ACCEPTED link: the listener's claim on this
+    /// tty, released when this driver drops.
+    ///
+    /// Held and never read, deliberately. Its `Drop` is the whole contract, and
+    /// this driver is where it belongs because this is the half of the split
+    /// whose lifetime IS the link's: the session owns it from wiring to
+    /// teardown. [`SerialReadDriver::device_is_claimed`] exists so the property
+    /// is observable to a test rather than only to the listener it reports to —
+    /// an invariant nothing can look at is one nothing can witness.
+    liveness: Option<SerialLinkGuard>,
 }
 
 impl SerialReadDriver {
-    fn new(reader: ReadHalf<SerialStream>) -> Self {
+    fn new(reader: ReadHalf<SerialStream>, liveness: Option<SerialLinkGuard>) -> Self {
         Self {
             reader,
             framer: SerialFrameReader::new(),
             pending: VecDeque::new(),
+            liveness,
         }
+    }
+
+    /// Whether this link holds a listener's claim on its device.
+    ///
+    /// `false` for a DIALLED link, which owns its tty outright and reports to
+    /// nobody. This is the read that keeps [`Self::liveness`] an invariant
+    /// rather than a field nothing can see.
+    pub fn device_is_claimed(&self) -> bool {
+        self.liveness.is_some()
     }
 }
 
@@ -726,8 +868,9 @@ mod tests {
         ia.expect("initiator connected");
         rb.expect("responder connected");
 
-        let (_a_in, a_out, a_writer) = wire_serial_stream(a, &pty_endpoint());
-        let (mut b_in, _b_out, _b_writer) = wire_serial_stream(b, &pty_endpoint());
+        let (_a_in, a_out, a_writer) = wire_serial_stream(SerialPort::dialled(a), &pty_endpoint());
+        let (mut b_in, _b_out, _b_writer) =
+            wire_serial_stream(SerialPort::dialled(b), &pty_endpoint());
 
         let payload = b"hello-serial-frame";
         assert_eq!(

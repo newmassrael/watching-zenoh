@@ -39,7 +39,7 @@ use tokio_serial::SerialStream;
 
 use wz_runtime_tokio::observer::ApplicationLayerObserver;
 use wz_runtime_tokio::runtime_impl::TokioTime;
-use wz_runtime_tokio::serial_pipeline::drive_serial_handshake;
+use wz_runtime_tokio::serial_pipeline::{drive_serial_handshake, SerialPort};
 use wz_runtime_tokio::session::{PublishOptions, TokioSession};
 use wz_runtime_tokio::session_glue::drive_session_until_terminal;
 use wz_runtime_tokio::session_open::{
@@ -99,7 +99,7 @@ async fn wz_to_wz_over_serial_pty_handshakes_and_delivers_push() {
         params.zid = vec![0x02; 4]; // distinct from the initiator
         accept_and_open_session(
             DialedLink::Serial {
-                stream: end_acc,
+                stream: SerialPort::dialled(end_acc),
                 endpoint: pty_endpoint(),
             },
             params,
@@ -115,7 +115,7 @@ async fn wz_to_wz_over_serial_pty_handshakes_and_delivers_push() {
         params.zid = vec![0x01; 4];
         initiate_and_open_session(
             DialedLink::Serial {
-                stream: end_init,
+                stream: SerialPort::dialled(end_init),
                 endpoint: pty_endpoint(),
             },
             params,
@@ -261,7 +261,7 @@ async fn wz_to_wz_over_serial_pty_fragments_and_reassembles_oversize_put() {
         params.zid = vec![0x02; 4];
         accept_and_open_session(
             DialedLink::Serial {
-                stream: end_acc,
+                stream: SerialPort::dialled(end_acc),
                 endpoint: pty_endpoint(),
             },
             params,
@@ -277,7 +277,7 @@ async fn wz_to_wz_over_serial_pty_fragments_and_reassembles_oversize_put() {
         params.zid = vec![0x01; 4];
         initiate_and_open_session(
             DialedLink::Serial {
-                stream: end_init,
+                stream: SerialPort::dialled(end_init),
                 endpoint: pty_endpoint(),
             },
             params,
@@ -561,7 +561,8 @@ async fn serial_accept_returns_before_the_peer_speaks_and_defers_the_link_handsh
     );
 }
 
-/// A bound tty yields ONE link, then the accept parks forever.
+/// A bound tty yields one link AT A TIME: while that link is LIVE the accept
+/// parks.
 ///
 /// THE DISCRIMINATOR is the second accept's TIMEOUT. Three implementations are
 /// distinguishable here and only one is right: re-opening the device returns
@@ -570,8 +571,106 @@ async fn serial_accept_returns_before_the_peer_speaks_and_defers_the_link_handsh
 /// throttle, which is the R311y382 F2 spin; parking does neither. So the
 /// assertion is that the second accept neither succeeds nor fails — it does not
 /// complete at all.
+///
+/// This is the half of the old `..._yields_one_link_then_parks` that stays true.
+/// The half that did NOT is its sibling below: parking while the link is live is
+/// upstream's behaviour, parking after it has gone was wz having no way to tell
+/// the two apart.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn serial_listener_yields_one_link_then_parks() {
+async fn serial_listener_parks_while_its_link_is_live() {
+    let end = pty_end();
+    let locator = format!("serial/{}#baudrate=115200", end.path);
+    let endpoint = match parse_any_locator(&locator).expect("locator parses") {
+        AnyLocator::Serial(ep) => ep,
+        other => panic!("expected AnyLocator::Serial, got {other:?}"),
+    };
+    let mut listener = bind_locator(AnyLocator::Serial(endpoint), &AcceptConfig::default())
+        .await
+        .expect("serial bind");
+
+    // HELD, deliberately: the link stays alive across the second accept, which
+    // is the whole condition under test.
+    let _first = tokio::time::timeout(Duration::from_secs(5), listener.accept_raw())
+        .await
+        .expect("the first accept completes")
+        .expect("the first accept opens the device");
+
+    let second = tokio::time::timeout(Duration::from_millis(400), listener.accept_raw()).await;
+    assert!(
+        second.is_err(),
+        "the second accept must PARK while the first link is live: an Ok would mean \
+         a second fd on the same tty, an Err would re-arm the accept loop's throttle"
+    );
+}
+
+/// `release_on_close=false` is REFUSED at bind, not accepted and ignored.
+///
+/// The key's whole observable effect is what the re-accept does with the device:
+/// upstream re-creates the port when it is true and RETAINS the open one when it
+/// is false (`io/zenoh-links/zenoh-link-serial/src/unicast.rs` @ `if release_on_close {`).
+/// wz's accept seam MOVES the stream into the link and the writer half is
+/// consumed by the TX subsystem, so retaining the device is not a serial-side
+/// patch but a question about a transport resource outliving its link — and
+/// until that is answered, a listener that ASKED for retention must not be told
+/// it got it. The refusal is the honest half; silently re-opening would be the
+/// dishonest one.
+///
+/// The arm asserts the DEFAULT still binds, so it cannot pass by refusing every
+/// serial listen.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn serial_listen_refuses_release_on_close_false_instead_of_ignoring_it() {
+    let end = pty_end();
+
+    let retained = format!("serial/{}#baudrate=115200;release_on_close=false", end.path);
+    let endpoint = match parse_any_locator(&retained).expect("locator parses") {
+        AnyLocator::Serial(ep) => ep,
+        other => panic!("expected AnyLocator::Serial, got {other:?}"),
+    };
+    assert!(
+        !endpoint.options.release_on_close,
+        "the fixture locator must actually carry the non-default, or this arm is vacuous"
+    );
+    // `BoundListener` is not `Debug` (it holds live sockets), so the Ok arm is
+    // named rather than unwrapped through `expect_err`.
+    match bind_locator(AnyLocator::Serial(endpoint), &AcceptConfig::default()).await {
+        Ok(_) => panic!("a retained-port serial listen must be refused at bind"),
+        Err(err) => assert_eq!(err.kind(), io::ErrorKind::Unsupported),
+    }
+
+    // ANTI-VACUITY: the same device WITHOUT the key binds, so the refusal is
+    // about the key and not about serial listens in general.
+    let default = format!("serial/{}#baudrate=115200", end.path);
+    let endpoint = match parse_any_locator(&default).expect("locator parses") {
+        AnyLocator::Serial(ep) => ep,
+        other => panic!("expected AnyLocator::Serial, got {other:?}"),
+    };
+    assert!(
+        endpoint.options.release_on_close,
+        "release_on_close defaults to true on both sides"
+    );
+    bind_locator(AnyLocator::Serial(endpoint), &AcceptConfig::default())
+        .await
+        .expect("the default serial listen still binds");
+}
+
+/// ⛔ THE LISTENER SURVIVES ITS PEER. Once the accepted link is DROPPED, the same
+/// listener accepts again.
+///
+/// This is the structure wz did not have: upstream's serial listener spins on an
+/// `is_connected` flag its LINK clears on close
+/// (`io/zenoh-links/zenoh-link-serial/src/unicast.rs` @ `while is_connected.load(Ordering::Acquire) {`,
+/// cleared at `self.is_connected.store(false, Ordering::Release);` in the link's
+/// `close`), so a tty listener serves peer after peer, one at a time. wz's
+/// listener had a one-shot `armed` flag and NO feedback from the link at all, so
+/// it could not distinguish "my peer is still here" from "my peer is gone" and
+/// parked on both — which is also why `release_on_close` had nothing to express:
+/// the key's entire observable effect is on the re-accept this test performs.
+///
+/// RED-FIRST: this arm fails before the liveness seam exists (the second accept
+/// times out exactly as its sibling above asserts), and that failure is what says
+/// the sibling was pinning a defect rather than a decision.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn serial_listener_accepts_again_once_its_link_is_dropped() {
     let end = pty_end();
     let locator = format!("serial/{}#baudrate=115200", end.path);
     let endpoint = match parse_any_locator(&locator).expect("locator parses") {
@@ -588,12 +687,11 @@ async fn serial_listener_yields_one_link_then_parks() {
         .expect("the first accept opens the device");
     drop(first);
 
-    let second = tokio::time::timeout(Duration::from_millis(400), listener.accept_raw()).await;
-    assert!(
-        second.is_err(),
-        "the second accept must PARK: an Ok would mean a second fd on the same tty, \
-         an Err would re-arm the accept loop's throttle"
-    );
+    let second = tokio::time::timeout(Duration::from_secs(5), listener.accept_raw())
+        .await
+        .expect("the second accept completes once the first link has dropped")
+        .expect("the second accept yields a link");
+    drop(second);
 }
 
 /// The whole capability, through the shipped `--listen` seam: a wz Acceptor
@@ -653,7 +751,7 @@ async fn wz_acceptor_binds_a_serial_listen_string_and_delivers_a_push() {
         params.zid = vec![0x01; 4];
         initiate_and_open_session(
             DialedLink::Serial {
-                stream: end.master,
+                stream: SerialPort::dialled(end.master),
                 endpoint: pty_endpoint(),
             },
             params,

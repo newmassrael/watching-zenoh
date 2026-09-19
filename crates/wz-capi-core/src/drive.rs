@@ -629,10 +629,15 @@ async fn drive_listen(endpoint: String, tls: CapiTlsConfig, ctx: DriveContext) {
     // (one that could not feed a multi-accept loop) is rejected here -- z_open
     // reports the open failure to the C caller (tx.send(false) -> Z_ERR_GENERIC),
     // the pico twin of run_router's bind-time guard and the BIND-time twin of the
-    // accept loop's runtime `AcceptedLink::supports_mesh_multi_peer` backstop. Since
-    // R311y404 every acceptor (quic incl., via its deferred-handshake split) is
-    // mesh-capable, so this guard rejects no shipped transport; it stays defensive
-    // for a future non-mesh acceptor.
+    // accept loop's runtime `AcceptedLink::supports_mesh_multi_peer` backstop.
+    //
+    // ⚠ R2722 CORRECTION -- this comment used to end "every acceptor is
+    // mesh-capable, so this guard rejects no shipped transport; it stays
+    // defensive". R311y805 made `Serial` `false`, so it rejects a SHIPPED
+    // transport: a pico `z_open(listen="serial/...")` fails here. Left
+    // rejecting rather than quietly widened -- a serial listener yields one
+    // face AT A TIME, so the loop needs a face budget of one rather than an
+    // exemption, which is the remaining half of that atom's seam.
     if !listener.supports_mesh_multi_peer() {
         let _ = tx.send(false);
         return;
