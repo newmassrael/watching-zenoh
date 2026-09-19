@@ -4969,7 +4969,15 @@ layer_c1v_cargo_test_ws() {
     # this same filter under the lane's own feature set reported `running 0
     # tests ... ok` — 408 filtered out and a green lane that had run nothing.
     # That is why the count is pinned rather than the exit status trusted.
-    _runci_guarded_test C1v 9 cargo test -p wz-runtime-tokio --features routing-accept,transport-link-ws --lib accept_loop --quiet \
+    # R2725 — 9 -> 8, the ratchet's DOWNWARD direction: this push REMOVED a test
+    # rather than adding one. R2723 deleted `acceptedlink_tcp_is_mesh_capable`
+    # and `acceptedlink_unixpipe_is_mesh_capable` with the predicate they pinned
+    # (`AcceptedLink::supports_mesh_multi_peer`, whose last consumer went when
+    # the loop stopped asking) and added one,
+    # `accept_loop_holds_a_face_off_a_serial_listener`: net -1. Its C1y twin at
+    # `layer_c1y_cargo_test_routing_peer` moves by the SAME -1, which is the
+    # R311y805 check that no case hid behind the differing feature sets.
+    _runci_guarded_test C1v 8 cargo test -p wz-runtime-tokio --features routing-accept,transport-link-ws --lib accept_loop --quiet \
         || return 1
     (cd crates \
         && cargo clippy -p wz-runtime-tokio --all-targets --features transport-link-ws --quiet -- -D warnings \
@@ -7826,7 +7834,11 @@ layer_c1x_cargo_test_routing_routes() {
 # whole-crate run has no meaningful count to pin.
 layer_c1y_cargo_test_routing_peer() {
     local access="routing-peer,access-acl,access-downsampling,access-quota"
-    _runci_guarded_test "C1y accept_loop" 11 \
+    # R2725 — 11 -> 10, the C1v twin's same -1: R2723 removed the two
+    # `acceptedlink_*_is_mesh_capable` pins with their predicate and added one
+    # serial accept-loop arm. Both counts read off what `guarded_count_gate`
+    # PRINTED when it ran each command, not counted off the diff.
+    _runci_guarded_test "C1y accept_loop" 10 \
         cargo test -p wz-runtime-tokio --features routing-peer --lib accept_loop --quiet || return 1
     # R311y509 — 200 -> 202: the peer's two liveliness-TOKEN tier tests. They land
     # in BOTH linkstate pins because the plane is ungated, so it compiles under bare
