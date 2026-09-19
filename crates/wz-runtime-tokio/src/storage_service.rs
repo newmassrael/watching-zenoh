@@ -124,8 +124,22 @@ pub struct StorageService<R: SessionRuntime, T: TimeSource, B: StorageBackend = 
     state: SharedState<B>,
     // Held for their RAII lifetime: dropping a handle undeclares the
     // subscriber / queryable. The service is the storage's lifetime owner.
-    _subscriber: Subscriber<R>,
-    _queryable: Queryable<R, T>,
+    //
+    // R2743 — `Option`, because UNBOUND is a real state of a hosted storage and
+    // the type has to be able to say so. `rebind`'s own doc already draws the
+    // line — the DATA belongs to the storage, the two handles are a BINDING TO
+    // ONE SESSION — but while these were mandatory the type contradicted it:
+    // a storage whose declaration could not reach the wire could not exist, so
+    // `declare_with_backend` returned `Err` and the caller lost a write it had
+    // already received. That is the Layer E12 red, whose host reads a
+    // `storage-add` off a socket whose TX half is already gone.
+    //
+    // `None` is therefore "hosted, not currently bound", which is exactly the
+    // state `rebind` repairs on the next accepted session — the same repair
+    // R311y496 built for a storage that OUTLIVES its creating session, now also
+    // reachable by one whose creating session was already dead.
+    _subscriber: Option<Subscriber<R>>,
+    _queryable: Option<Queryable<R, T>>,
 }
 
 impl<R, T, B> StorageService<R, T, B>
@@ -182,7 +196,21 @@ where
         #[cfg(not(feature = "storage-mgr-strip-prefix"))]
         let state: SharedState<B> = Arc::new(Mutex::new(StorageState::new(backend)));
 
-        let (subscriber, queryable) = Self::declare_handles(session, config, &state, local_zid)?;
+        // R2743 — a declaration the transport cannot carry leaves the storage
+        // HOSTED AND UNBOUND rather than losing it. Only that one rejection is
+        // tolerated, and it is tolerated because it says so itself: both
+        // `SubscribeError::TransportUnavailable` and its queryable twin
+        // document "the DECLARE was not emitted; re-declare after the session
+        // re-establishes", which is precisely what `rebind` does. Every other
+        // rejection — a keyexpr the pico-safety gate refuses, a capacity
+        // overflow, a disabled feature — is a fact about the CONFIG and stays
+        // an error, so this is not a widened `ok()`.
+        let (subscriber, queryable) =
+            match Self::declare_handles(session, config, &state, local_zid) {
+                Ok((subscriber, queryable)) => (Some(subscriber), Some(queryable)),
+                Err(e) if is_unreachable_transport(&e) => (None, None),
+                Err(e) => return Err(e),
+            };
         Ok(Self {
             state,
             _subscriber: subscriber,
@@ -232,9 +260,21 @@ where
             Self::declare_handles(session, config, &self.state, local_zid)?;
         // Assigned AFTER both declares succeed: a failed rebind leaves the
         // service on its previous binding rather than on none at all.
-        self._subscriber = subscriber;
-        self._queryable = queryable;
+        self._subscriber = Some(subscriber);
+        self._queryable = Some(queryable);
         Ok(())
+    }
+
+    /// Whether this storage currently holds its declaration handles.
+    ///
+    /// R2743 — the observable half of the `Option` above. A hosted storage may
+    /// be UNBOUND, either because the session that created it could not carry
+    /// the declare or because a later `rebind` has not run yet; a caller that
+    /// cannot ask cannot tell "hosting nothing" from "hosting something that
+    /// answers nothing", which is the divergence R311y496 measured against a
+    /// real zenoh-pico.
+    pub fn is_bound(&self) -> bool {
+        self._subscriber.is_some() && self._queryable.is_some()
     }
 
     /// The declaration pair — the capture subscriber and the answering
@@ -342,6 +382,33 @@ where
     ) -> Result<Self, StorageServiceError> {
         Self::declare_with_backend(session, config, local_zid, MemoryStorage::new())
     }
+}
+
+/// R2743 — is this rejection "the wire was not reachable", as opposed to a
+/// fact about the config that re-declaring would hit again?
+///
+/// ⚠ ENUMERATED PER VARIANT AND DELIBERATELY NARROW. Both arms admit exactly
+/// the F2 case, whose own documentation prescribes the repair this enables:
+/// "the DECLARE was not emitted; re-declare after the session re-establishes".
+/// `InvalidKeyexpr`, `ExceedsCapacity` and `FeatureDisabled` are properties of
+/// the storage's own configuration or build and would fail identically on every
+/// later session, so tolerating them would host a storage that can never bind.
+///
+/// ⚠⚠ `FragmentChainAbandoned` IS DELIBERATELY EXCLUDED, and it is the one
+/// worth a sentence because its doc also says "re-declaring once the budget is
+/// refilled is the repair", which makes it look like a member. It is left out
+/// because it is not the same claim: that variant records that fragments MAY
+/// ALREADY BE ON THE WIRE, followed by a stop fragment telling the peer to
+/// discard them, where F2 guarantees nothing was emitted at all. Admitting it
+/// would mean hosting a storage whose peer saw a partial declare, and nothing
+/// here has measured what that peer then believes. Adjudicating it needs that
+/// measurement, not this predicate widening quietly to fit.
+fn is_unreachable_transport(e: &StorageServiceError) -> bool {
+    matches!(
+        e,
+        StorageServiceError::Subscribe(SubscribeError::TransportUnavailable)
+            | StorageServiceError::Queryable(QueryableError::TransportUnavailable)
+    )
 }
 
 /// Why a [`StorageService::declare`] failed: a rejected subscriber or

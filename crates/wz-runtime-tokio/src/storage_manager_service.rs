@@ -671,6 +671,113 @@ mod tests {
         assert!(mgr.is_empty());
     }
 
+    /// R2743 — THE HOSTED E12 RED, made deterministic.
+    ///
+    /// Layer E12 fails when a one-shot pico `z_put` has already closed by the
+    /// time its `storage-add` is applied: the host reads the write off a socket
+    /// whose TX half is gone, and `add_storage`'s queryable declaration then has
+    /// no transport. ⚠ THE E2E TEST CANNOT BE THE CONTROL — it is a race this
+    /// machine wins, measured: the leg passes locally in 0.29s, and forcing a
+    /// 400ms delay between stashing the intent and applying it (which moved the
+    /// run to 1.17s, so the probe was live) STILL passed. Delaying the apply is
+    /// not the mechanism; the TX half being dead BEFORE the intent arrives is,
+    /// which the hosted log shows by ordering `writer_task write failed: Broken
+    /// pipe` ahead of `config-write intent stashed`.
+    ///
+    /// So the control is here, one layer down and deterministic.
+    /// `reset_for_reopen` closes the F2 transport-availability gate — the same
+    /// gate a released link closes — so the declare rejects
+    /// `TransportUnavailable` exactly as it did hosted, with no timing in it.
+    ///
+    /// WHAT IT PINS: a storage whose declaration cannot reach the wire is still
+    /// HOSTED. The data is the `StorageState` over the volume-created backend
+    /// and belongs to the storage; the subscriber and queryable are a binding to
+    /// one session, which `rebind_all` re-establishes on the next accepted one.
+    /// Today `add_storage` conflates the two and registers nothing at all, so a
+    /// write that was received is silently lost.
+    #[cfg(feature = "session-reconnect")]
+    #[tokio::test]
+    async fn a_storage_survives_a_declaration_that_cannot_reach_the_wire() {
+        let (actions, _driver) = crate::test_fixtures::recording_actions();
+        // F2: the transport-availability gate stays closed until Established is
+        // re-entered, which is what a released link leaves behind.
+        actions.reset_for_reopen();
+        let observer = Arc::new(Mutex::new(ApplicationLayerObserver::new()));
+        let clock = Arc::new(TokioTime::new());
+        let dead_tx = TokioSession::new(actions, observer, clock);
+
+        let mut mgr = RuntimeStorageManager::new();
+        mgr.register_volume("mem", Box::new(MemoryVolume));
+        mgr.add_storage(
+            &dead_tx,
+            &StorageConfig::new("demo", "demo/**", "mem"),
+            vec![0x01],
+        )
+        .expect("a received storage-add is not lost because the peer already left");
+
+        assert_eq!(
+            mgr.len(),
+            1,
+            "the storage is HOSTED even though its declaration never reached the wire"
+        );
+        // ⚠ THE COUNT ALONE IS NOT THE WITNESS. `len() == 1` would also hold if
+        // the declaration had quietly SUCCEEDED, which would mean the tolerated
+        // arm never ran and this test proved nothing about it. Asserting the
+        // storage is UNBOUND is what pins that the declare really was refused
+        // and the storage survived it anyway.
+        assert!(
+            !mgr.storage("demo")
+                .expect("hosted under its configured name")
+                .is_bound(),
+            "it is hosted UNBOUND: the declare was refused, and that is the state \
+             this fix exists to make representable"
+        );
+
+        // And the binding is what `rebind_all` is for: on a live session the
+        // storage acquires its subscriber and queryable without losing data.
+        let live = make_session();
+        mgr.rebind_all(&live, vec![0x01])
+            .expect("a hosted-but-unbound storage is exactly what rebind_all repairs");
+        assert!(
+            mgr.storage("demo")
+                .expect("still hosted after rebinding")
+                .is_bound(),
+            "rebind_all attached the handles the dead session could not"
+        );
+    }
+
+    /// R2743 — THE OTHER DIRECTION, without which the tolerance above is only
+    /// a comment. A declaration refused for a reason that is a FACT ABOUT THE
+    /// CONFIG must still error and host nothing: re-declaring it on a later
+    /// session would fail identically, so hosting it would mean carrying a
+    /// storage that can never bind — the permanent version of the very
+    /// divergence this fix exists to remove.
+    ///
+    /// A non-canonical keyexpr is that case: the outbound pico-safety gate
+    /// refuses it at declare time on ANY session, live or dead.
+    #[tokio::test]
+    async fn a_storage_the_config_itself_forbids_is_still_refused() {
+        let session = make_session();
+        let mut mgr = RuntimeStorageManager::new();
+        mgr.register_volume("mem", Box::new(MemoryVolume));
+
+        // `demo/**/` is non-canonical (trailing slash); the keyexpr gate
+        // refuses it, and that refusal is not about any transport.
+        let err = mgr
+            .add_storage(
+                &session,
+                &StorageConfig::new("bad", "demo/**/", "mem"),
+                vec![0x01],
+            )
+            .expect_err("a config the keyexpr gate refuses is not a hostable storage");
+
+        assert!(
+            mgr.is_empty(),
+            "and nothing is hosted: {err:?} is permanent, so an unbound entry \
+             would never become bound"
+        );
+    }
+
     // R2696 — the CASCADE, which is the whole of upstream's `kill_volume`
     // (`plugins/zenoh-plugin-storage-manager/src/lib.rs` @ `fn kill_volume`).
     // Three storages over two volumes, so the assertion can tell "tore down the
