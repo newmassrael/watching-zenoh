@@ -1180,6 +1180,13 @@ pub mod writer_queue;
 #[cfg(feature = "transport-link-tcp")]
 pub mod stream_link;
 
+/// R2740 — the buffer SOURCE `poll_framed` fills, upstream's `recv_batch`
+/// `buff: C` parameter. Gated exactly like its one consumer: the framing state
+/// machine and its `ReadState` are `transport-link-tcp`, and an arena with no
+/// reachable filler is a type nobody selects.
+#[cfg(feature = "transport-link-tcp")]
+pub mod frame_arena;
+
 #[cfg(feature = "transport-link-tcp")]
 pub mod link_pipeline;
 
@@ -1990,7 +1997,16 @@ pub struct TcpDriver {
     /// of `poll_event`, so the next iteration resumes from the
     /// last byte offset rather than re-syncing from a mid-frame
     /// socket cursor. See [`ReadState`] for the state graph.
-    read_state: ReadState,
+    read_state: ReadState<frame_arena::RecycledBuf>,
+    /// R2740 — this link's RX buffers, upstream's per-link pool.
+    ///
+    /// A FIELD rather than a temporary at the call, because that is what makes
+    /// it recycle: an arena built per `poll_event` would hand out a fresh
+    /// allocation every frame and be indistinguishable from the `vec![]` this
+    /// replaced. Upstream's lives for the whole rx task
+    /// (`io/zenoh-transport/src/unicast/universal/link.rs`
+    /// @ `async fn rx_task_non_uring(`), which is this driver's own lifetime.
+    arena: frame_arena::RecyclingArena,
 }
 
 /// R265 — cancel-safe partial-read state for [`TcpDriver::poll_event`]
@@ -2013,13 +2029,17 @@ pub struct TcpDriver {
 /// cancel-safe (no bytes consumed if the future is dropped before
 /// completion), so dropping `poll_event` mid-state leaves the
 /// captured offset / buffer intact for the next invocation.
+///
+/// R2740 — GENERIC OVER THE FRAME BUFFER, because a frame's storage is now the
+/// caller's choice ([`frame_arena::FrameArena`]) rather than a `Vec` the loop
+/// conjures. The default keeps every reader that does not care writing
+/// `ReadState` unchanged; a reader with a recycling arena names
+/// `ReadState<RecycledBuf>` and the state graph below is identical.
 #[cfg(feature = "transport-link-tcp")]
-#[derive(Default)]
-pub(crate) enum ReadState {
+pub(crate) enum ReadState<B = Vec<u8>> {
     /// No partial read in flight. Next `poll_event` enters `Length` and begins
     /// reading the length prefix, whose WIDTH (2-byte u16 universal / 4-byte u32
     /// lowlatency) is fixed from the link's lowlatency flag at that transition.
-    #[default]
     Idle,
     /// Length prefix partially read. `prefix[..offset]` holds the bytes consumed
     /// so far; `offset < width` (`width` is 2 or 4). Once `offset == width`, the
@@ -2038,10 +2058,22 @@ pub(crate) enum ReadState {
     /// frame is complete and the state machine emits a `LinkEvent::Rx` +
     /// transitions back to `Idle` on the next iteration.
     Payload {
-        frame: Vec<u8>,
+        frame: B,
         offset: usize,
         prefix_width: usize,
     },
+}
+
+/// Written out rather than derived: `#[derive(Default)]` on a generic enum
+/// bounds the parameter `B: Default`, and a recycled buffer has no default —
+/// it can only come from the arena that owns it. The default state is `Idle`
+/// for every buffer type, so the bound would buy nothing and cost the one impl
+/// that matters.
+#[cfg(feature = "transport-link-tcp")]
+impl<B> Default for ReadState<B> {
+    fn default() -> Self {
+        ReadState::Idle
+    }
 }
 
 /// R311et — shared cancel-safe framing read used by both [`TcpDriver`]
@@ -2084,14 +2116,25 @@ pub(crate) enum ReadState {
 /// `scripts/lib/framing_refusal_reachability_gate.py` derives the population
 /// from this body rather than from a list -- an unmarked refusal is RED, which
 /// is what item 610 was: an arm nobody could reach and nobody was measuring.
+///
+/// R2740 — THE DESTINATION IS THE CALLER'S, not this loop's. `arena` is
+/// upstream's `recv_batch(buff: C, ..)` parameter
+/// (`io/zenoh-transport/src/unicast/link.rs` @ `pub async fn recv_batch<C, T>(`),
+/// whose four call sites are a
+/// fresh allocation for the handshake and a recycling pool for the production
+/// rx task. Until this parameter existed the loop ran `vec![0u8; ..]` inline,
+/// which is why `runtime-tokio-uring`'s adapter had no route into a production
+/// read: a buffer the kernel has REGISTERED cannot be one this loop invented.
 #[cfg(feature = "transport-link-tcp")]
-pub(crate) async fn poll_framed<S>(
-    read_state: &mut ReadState,
+pub(crate) async fn poll_framed<S, A>(
+    read_state: &mut ReadState<A::Buf>,
     src: &mut S,
     lowlatency: bool,
+    arena: &mut A,
 ) -> LinkEvent
 where
     S: tokio::io::AsyncRead + Unpin,
+    A: frame_arena::FrameArena,
 {
     loop {
         match read_state {
@@ -2147,8 +2190,15 @@ where
                                 cause: LostCause::PeerClosed,
                             };
                         }
-                        let mut frame = vec![0u8; w + payload_len];
-                        frame[..w].copy_from_slice(&prefix[..w]);
+                        // R2740 — the storage comes from the ARENA. A recycled
+                        // buffer arrives holding the PREVIOUS frame's bytes,
+                        // which is sound here and not by luck: `[..w]` is
+                        // overwritten by the prefix on the next line and
+                        // `[w..]` is filled by reads that only complete when
+                        // `offset == frame.len()`, so every byte of the frame
+                        // is written before anything reads it.
+                        let mut frame = arena.take(w + payload_len);
+                        frame.as_mut()[..w].copy_from_slice(&prefix[..w]);
                         *read_state = ReadState::Payload {
                             frame,
                             offset: w,
@@ -2169,12 +2219,15 @@ where
                 offset,
                 prefix_width,
             } => {
-                if *offset == frame.len() {
-                    // Frame complete. Take the buffer out before reading it so
-                    // the state reset is visible on every exit from this arm.
+                if *offset == frame.as_ref().len() {
+                    // Frame complete. R2740 — the buffer is READ IN PLACE and
+                    // the state reset then drops it, which is what sends a
+                    // recycled one home; the pre-R2740 `std::mem::take(frame)`
+                    // is not available because an arena buffer has no default
+                    // to leave behind. The reset still happens on every exit
+                    // from this arm, which is the property that code had.
                     let w = *prefix_width;
-                    let bytes = std::mem::take(frame);
-                    *read_state = ReadState::Idle;
+                    let bytes = frame.as_ref();
                     // R2288 (open-debt item 610) — THE PAYLOAD IS THE FRAME TAIL,
                     // AT BOTH PREFIX WIDTHS. Until this round the 2-byte arm
                     // re-decoded the completed frame through
@@ -2250,12 +2303,24 @@ where
                     // awaited `src.read()`, so an endless stream of empty batches
                     // costs one syscall each and stays cancel-safe -- exactly what
                     // it costs the two implementations above.
-                    if payload.is_empty() {
-                        continue;
+                    //
+                    // R2740 — the event is built BEFORE the state reset
+                    // because `payload` borrows the arena buffer the reset
+                    // drops. The copy out of the buffer is what stops
+                    // `RxFrame` from being pooled storage's owner, and it is
+                    // the residual `docs/runtime-crate-tokio.md` §2.3 names:
+                    // upstream has no counterpart to it, because its `ZSlice`
+                    // is an owned handle over the same allocation rather than
+                    // a second one.
+                    let event = (!payload.is_empty())
+                        .then(|| LinkEvent::Rx(RxFrame::new(payload.to_vec())));
+                    *read_state = ReadState::Idle;
+                    match event {
+                        Some(event) => return event,
+                        None => continue,
                     }
-                    return LinkEvent::Rx(RxFrame::new(payload.to_vec()));
                 }
-                match src.read(&mut frame[*offset..]).await {
+                match src.read(&mut frame.as_mut()[*offset..]).await {
                     Ok(0) => {
                         *read_state = ReadState::Idle;
                         // REACHED-BY: a_frame_truncated_mid_payload_loses_the_link (PeerClosed)
@@ -2287,6 +2352,7 @@ impl TcpDriver {
         Self {
             stream: Some(stream),
             read_state: ReadState::Idle,
+            arena: frame_arena::RecyclingArena::for_link_default(),
         }
     }
 
@@ -2376,7 +2442,13 @@ impl LinkDriver for TcpDriver {
             // TcpDriver is the unified acceptor/adapter driver; the lowlatency
             // open helpers wire via `wire_dialed_link` -> `StreamReadDriver`, not
             // this path, so it always reads the universal 2-byte prefix.
-            Some(stream) => poll_framed(&mut self.read_state, stream, false).await,
+            Some(stream) => {
+                // R2740 — this driver's OWN per-link arena, which is where
+                // upstream keeps one: `rx_task_non_uring` builds its pool from
+                // the link's mtu and the config's rx buffer size, so a read
+                // half owning its buffers is the shape rather than a shortcut.
+                poll_framed(&mut self.read_state, stream, false, &mut self.arena).await
+            }
             None => LinkEvent::Lost {
                 cause: LostCause::PeerClosed,
             },
@@ -2769,6 +2841,81 @@ impl LinkDriver for UdpDriver {
 #[cfg(all(test, feature = "transport-link-tcp"))]
 mod poll_framed_lowlatency_tests {
     use super::*;
+    use crate::frame_arena::{FrameArena, HeapArena, RecycledBuf, RecyclingArena, MAX_FRAME};
+
+    /// R2740 — THE ARENA'S BUFFER IS WHERE THE FRAME LANDS, observed in the
+    /// arena rather than in the payload.
+    ///
+    /// ⚠ THE OBVIOUS FORM OF THIS TEST CANNOT FAIL, and the first draft was
+    /// it. Asserting that one buffer serves two frames — take a probe, compare
+    /// addresses — passes just as well when `poll_framed` ignores its arena
+    /// entirely and allocates: an untouched pool still hands back the same
+    /// buffer every time, so a stable address is evidence of nothing. So is
+    /// the payload: both destinations produce identical bytes, which is why
+    /// every other test in this module is blind to the question.
+    ///
+    /// What discriminates is the ARENA'S OWN STORAGE AFTER THE FRAME. The pool
+    /// is poisoned to `0xFF` before the loop sees it and holds exactly one
+    /// buffer, so once a frame completes and the state reset sends that buffer
+    /// home, taking it back answers whether the loop wrote there:
+    ///
+    ///   * `[..2]` is the LENGTH PREFIX the loop copied in, which nothing else
+    ///     in this test could have written;
+    ///   * `[2..8]` is the payload the reader consumed from the stream;
+    ///   * and the byte just past the frame is still `0xFF`, which says the
+    ///     loop wrote the frame's extent and not a byte more — the property
+    ///     that makes reuse SOUND rather than lucky, since `[..w]` is
+    ///     overwritten by the prefix and `[w..]` by reads that only complete
+    ///     at `offset == frame.len()`.
+    ///
+    /// The second frame is deliberately SHORTER than the first, so a leak of
+    /// the first frame's tail would show up in its payload.
+    #[tokio::test]
+    async fn the_frame_lands_in_the_arenas_own_buffer() {
+        let mut arena = RecyclingArena::new(1, MAX_FRAME);
+        // Poison the population before the loop can touch it: take the single
+        // buffer, fill it, and let the drop send it home.
+        {
+            let mut seed = arena.take(MAX_FRAME);
+            seed.as_mut().fill(0xFF);
+        }
+
+        let mut wire: Vec<u8> = Vec::new();
+        wire.extend_from_slice(&6u16.to_le_bytes());
+        wire.extend_from_slice(b"ABCDEF");
+        wire.extend_from_slice(&2u16.to_le_bytes());
+        wire.extend_from_slice(b"gh");
+        let mut src: &[u8] = &wire;
+
+        let mut st: ReadState<RecycledBuf> = ReadState::Idle;
+
+        let first = poll_framed(&mut st, &mut src, false, &mut arena).await;
+        let LinkEvent::Rx(first) = first else {
+            panic!("the first frame decodes, got {first:?}");
+        };
+        assert_eq!(first.bytes, b"ABCDEF", "the long frame reads back whole");
+
+        {
+            let back = arena.take(MAX_FRAME);
+            let storage = back.as_ref();
+            assert_eq!(
+                &storage[..8],
+                b"\x06\x00ABCDEF",
+                "the arena's own buffer holds the wire bytes -- an allocating \
+                 loop would leave it poisoned"
+            );
+            assert_eq!(storage[8], 0xFF, "and only the frame's extent was written");
+        }
+
+        let second = poll_framed(&mut st, &mut src, false, &mut arena).await;
+        let LinkEvent::Rx(second) = second else {
+            panic!("the second frame decodes, got {second:?}");
+        };
+        assert_eq!(
+            second.bytes, b"gh",
+            "the short frame carries neither the poison nor the long frame's tail"
+        );
+    }
 
     /// transport-lowlatency — a 4-byte u32 length prefix over `u16::MAX` is
     /// rejected (`Lost`) BEFORE allocation, mirroring zenoh's over-max batch
@@ -2781,7 +2928,7 @@ mod poll_framed_lowlatency_tests {
         let bytes = [0x00u8, 0x00, 0x01, 0x00];
         let mut src: &[u8] = &bytes;
         let mut st = ReadState::Idle;
-        let ev = poll_framed(&mut st, &mut src, true).await;
+        let ev = poll_framed(&mut st, &mut src, true, &mut HeapArena).await;
         // R2288 — the CAUSE is asserted, not just the refusal. `Lost { .. }`
         // was what this test checked until the reachability gate derived that
         // nothing tied it to the `PeerClosed` the site actually returns: a
@@ -2830,7 +2977,7 @@ mod poll_framed_lowlatency_tests {
         wire.extend_from_slice(&real);
         let mut src: &[u8] = &wire;
         let mut st = ReadState::Idle;
-        match poll_framed(&mut st, &mut src, false).await {
+        match poll_framed(&mut st, &mut src, false, &mut HeapArena).await {
             LinkEvent::Rx(rx) => assert_eq!(rx.bytes, vec![0x01, 0x02, 0x03]),
             other => panic!("the empty batch must be skipped, not {other:?}"),
         }
@@ -2841,7 +2988,7 @@ mod poll_framed_lowlatency_tests {
         wire.extend_from_slice(&real);
         let mut src: &[u8] = &wire;
         let mut st = ReadState::Idle;
-        match poll_framed(&mut st, &mut src, false).await {
+        match poll_framed(&mut st, &mut src, false, &mut HeapArena).await {
             LinkEvent::Rx(rx) => assert_eq!(rx.bytes, vec![0x01, 0x02, 0x03]),
             other => panic!("two empty batches must both be skipped, not {other:?}"),
         }
@@ -2852,7 +2999,7 @@ mod poll_framed_lowlatency_tests {
         wire.extend_from_slice(&[0x02, 0x00, 0x00, 0x00, 0xAA, 0xBB]);
         let mut src: &[u8] = &wire;
         let mut st = ReadState::Idle;
-        match poll_framed(&mut st, &mut src, true).await {
+        match poll_framed(&mut st, &mut src, true, &mut HeapArena).await {
             LinkEvent::Rx(rx) => assert_eq!(rx.bytes, vec![0xAA, 0xBB]),
             other => panic!("an empty lowlatency batch must be skipped, not {other:?}"),
         }
@@ -2878,7 +3025,7 @@ mod poll_framed_lowlatency_tests {
         let wire = [0x03u8, 0x00, 0xAA];
         let mut src: &[u8] = &wire;
         let mut st = ReadState::Idle;
-        let ev = poll_framed(&mut st, &mut src, false).await;
+        let ev = poll_framed(&mut st, &mut src, false, &mut HeapArena).await;
         assert!(
             matches!(ev, LinkEvent::Lost { .. }),
             "a truncated batch must still lose the link, got {ev:?}"
@@ -2927,7 +3074,7 @@ mod poll_framed_lowlatency_tests {
     async fn a_stream_that_ends_before_the_prefix_loses_the_link() {
         let mut src: &[u8] = &[];
         let mut st = ReadState::Idle;
-        let ev = poll_framed(&mut st, &mut src, false).await;
+        let ev = poll_framed(&mut st, &mut src, false, &mut HeapArena).await;
         assert!(
             matches!(
                 ev,
@@ -2954,7 +3101,7 @@ mod poll_framed_lowlatency_tests {
             failing_after: 0,
         };
         let mut st = ReadState::Idle;
-        let ev = poll_framed(&mut st, &mut src, false).await;
+        let ev = poll_framed(&mut st, &mut src, false, &mut HeapArena).await;
         assert!(
             matches!(
                 ev,
@@ -2975,7 +3122,7 @@ mod poll_framed_lowlatency_tests {
         let wire = [0x04u8, 0x00, 0xAA, 0xBB];
         let mut src: &[u8] = &wire;
         let mut st = ReadState::Idle;
-        let ev = poll_framed(&mut st, &mut src, false).await;
+        let ev = poll_framed(&mut st, &mut src, false, &mut HeapArena).await;
         assert!(
             matches!(
                 ev,
@@ -3002,7 +3149,7 @@ mod poll_framed_lowlatency_tests {
             failing_after: 2,
         };
         let mut st = ReadState::Idle;
-        let ev = poll_framed(&mut st, &mut src, false).await;
+        let ev = poll_framed(&mut st, &mut src, false, &mut HeapArena).await;
         assert!(
             matches!(
                 ev,
@@ -3045,7 +3192,7 @@ mod poll_framed_lowlatency_tests {
             .encode_to_vec();
             let mut src: &[u8] = &wire;
             let mut st = ReadState::Idle;
-            match poll_framed(&mut st, &mut src, false).await {
+            match poll_framed(&mut st, &mut src, false, &mut HeapArena).await {
                 LinkEvent::Rx(rx) => assert_eq!(
                     rx.bytes, payload,
                     "the reader must unframe exactly what the codec framed"

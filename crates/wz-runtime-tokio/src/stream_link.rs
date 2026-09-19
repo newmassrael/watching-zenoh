@@ -34,6 +34,7 @@ use tokio::sync::mpsc;
 
 use wz_codecs::stream_envelope::StreamEnvelope;
 
+use crate::frame_arena::{RecycledBuf, RecyclingArena};
 use crate::writer_queue::OutboundQueue;
 use crate::{poll_framed, LinkDriver, LinkEvent, ReadState, Reliability, TxFrame};
 use wz_session_core::link::BoxedLinkDriver;
@@ -53,7 +54,11 @@ use wz_session_core::link::{LinkDropCause, LinkSendOutcome};
 /// [`crate::tls_pipeline::TlsReadDriver`] are type aliases that pin `R`.
 pub struct StreamReadDriver<R> {
     reader: R,
-    read_state: ReadState,
+    read_state: ReadState<RecycledBuf>,
+    /// R2740 — this link's RX buffers. See the field of the same name on
+    /// [`crate::TcpDriver`]: the arena is per-link because upstream's is, built
+    /// inside the read task from that link's own dimensions.
+    arena: RecyclingArena,
     /// transport-lowlatency — shared with the sibling [`writer_task`] and flipped
     /// true by the lowlatency open helper at Established (only when the session
     /// negotiated lowlatency). While true, the streamed length prefix read is the
@@ -244,6 +249,12 @@ impl<R: AsyncRead + Unpin> StreamReadDriver<R> {
             read_state: ReadState::Idle,
             lowlatency,
             expiry: None,
+            // R2740 — built HERE rather than taken as an argument, mirroring
+            // upstream's `rx_task_non_uring`, which constructs its own pool
+            // from the link it was handed. Nine `wire_*` call sites construct
+            // this driver and none of them has an opinion about RX buffering;
+            // making them pass one would put the same default in nine places.
+            arena: RecyclingArena::for_link_default(),
         }
     }
 
@@ -295,10 +306,11 @@ impl<R: AsyncRead + Unpin> LinkDriver for StreamReadDriver<R> {
             read_state,
             lowlatency,
             expiry,
+            arena,
         } = self;
         let lowlatency = lowlatency.load(Ordering::Acquire);
         let Some(signal) = expiry.as_ref() else {
-            return poll_framed(read_state, reader, lowlatency).await;
+            return poll_framed(read_state, reader, lowlatency, arena).await;
         };
         // Checked BEFORE the race: a signal that fired while this driver was
         // between polls has no waiter to notify, and would otherwise be missed
@@ -309,7 +321,7 @@ impl<R: AsyncRead + Unpin> LinkDriver for StreamReadDriver<R> {
             };
         }
         tokio::select! {
-            event = poll_framed(read_state, reader, lowlatency) => event,
+            event = poll_framed(read_state, reader, lowlatency, arena) => event,
             () = signal.notify.notified() => LinkEvent::Lost {
                 cause: LostCause::CertificateExpired,
             },
