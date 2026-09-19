@@ -1026,8 +1026,26 @@ CITATION = re.compile(r"\b((?:[A-Za-z0-9_.-]+/)*[A-Za-z0-9_.-]+\.(?:rs|c|h))(?::
 # is an executing test owning its symbols — so this pin falls while UNREACHED
 # and NO_SYMBOL hold at 3 and 2. READ off the census's own FAIL line, which
 # printed `reached: 18 against a pin of 19`.
-PIN_REACHED = 18
-PIN_UNREACHED = 3
+# R2742 — 18 -> 19 and UNREACHED 3 -> 2, ONE atom crossing between the two and
+# nothing else moving. The atom is `runtime-zero-copy`. It was "owned but
+# unreached": `crates/wz-runtime-tokio/src/zero_copy.rs` is gated on it, but the
+# tests touching that gate lived under the `zero_copy::` module the C1bq lane
+# filtered for, and none of them reached the symbols `atom_test_graph` resolves
+# for this atom. This round added `crates/wz-runtime-tokio/src/link_rx_arena.rs`
+# with five executing tests, two of which drive the production framing loop and
+# a production read half through the feature-gated arena, so the graph now joins
+# an executing test to the atom's own symbols.
+#
+# ⚠ THE PARTITION IS OVER CODE, NOT OVER THE REASON, which is worth the sentence
+# because the same round also rewrote this atom's reason: `reach_partition`
+# delegates to `atom_test_graph.graph()`, so the crossing is the new tests and
+# the reason edit could not have caused it. MEASURED with this module's own
+# `reach_partition` against the post-change store, which returned
+# `{'reached': ['runtime-zero-copy']}` for the atom alone — the R2354
+# discipline, applied to the half of it this file can grade in isolation.
+# NO_SYMBOL holds at 2 and AMBIGUOUS at 18; the atom was in neither.
+PIN_REACHED = 19
+PIN_UNREACHED = 2
 PIN_NO_SYMBOL = 2
 # R2534 — 346 -> 347. The atom is `adminspace-metrics` and the citation is the
 # one R2533 added to its reason when the owner declined a gzip dependency: the
@@ -1767,7 +1785,18 @@ PIN_NO_SYMBOL = 2
 # with it, so this is not any one round's addition run backwards. READ off the
 # census's own FAIL line, `wz citations: 90 against a pin of 97`. AMBIGUOUS
 # holds at 18, which says this atom's citations were all rooted.
-PIN_WZ_CITATIONS = 90
+# R2742 — 90 -> 91, ONE citation added by ONE atom's reason and nothing else.
+# The atom is `runtime-zero-copy`, whose RX residual this round measured to be
+# half false and corrected in place; the correction names the file that made it
+# false, `crates/wz-runtime-tokio/src/link_rx_arena.rs`, which resolves to
+# exactly one tracked path. PRE-COMPUTED with this module's own
+# `citation_audit` over that atom alone, before and after: (wz 1, ambiguous 0,
+# upstream 0) became (wz 2, ambiguous 0, upstream 0) — so the whole of this
+# move is the one citation, and AMBIGUOUS holding at 18 is that measurement
+# agreeing. The correction also names `docs/runtime-crate-tokio.md`, which does
+# NOT resolve to a tracked path under this classifier and is why the move is
+# one rather than two; that is measured here rather than inferred from a total.
+PIN_WZ_CITATIONS = 91
 # R2626 — 44 -> 42, and this one is worth a sentence because it HELD through
 # every earlier retirement in this run (R2612, R2622). `time-hlc`'s reason is the
 # first retiree carrying AMBIGUOUS citations of its own: its oldest clauses cite
