@@ -206,7 +206,10 @@ REASON_FLOOR = 100
 #: moved it. Unremarkable ON PURPOSE: this is what advancing the floor looks
 #: like when it happens in the commit that earns it, and the contrast with the
 #: 143-against-444 drift above is the whole argument of open-debt 793.
-ANCHORED_FLOOR = 458
+#: 458 -> 460 (R2734), same instrument, same round: the two anchors that close
+#: `router-multicast-faces` -- the per-peer face's `DummyPrimitives` and the OAM
+#: refusal that makes a group Oam impossible upstream by construction.
+ANCHORED_FLOOR = 460
 
 
 class InputError(Exception):
