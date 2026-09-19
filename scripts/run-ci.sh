@@ -4787,8 +4787,24 @@ layer_c1t_cargo_test_serial() {
         && cargo test -p wz-session-core --features transport-link-serial --quiet \
         && cargo test -p wz-session-core --no-default-features --features transport-link-serial --quiet \
         && cargo test -p wz-runtime-tokio --features transport-link-serial --lib serial_pipeline --quiet 2>&1 | grep -qE '^test result: ok\. 5 passed' \
-        && cargo test -p wz-runtime-tokio --features transport-link-serial --test serial_pty_e2e --quiet 2>&1 | grep -qE '^test result: ok\. 5 passed' \
-        && cargo test -p wz-runtime-tokio --features transport-link-serial,transport-fragmentation --test serial_pty_e2e --quiet 2>&1 | grep -qE '^test result: ok\. 6 passed' \
+        `# R2725 — 5 -> 7 and 6 -> 8. R2722 split` \
+        `# serial_listener_yields_one_link_then_parks into a parks-while-live arm` \
+        `# and an accepts-again-once-dropped arm and added the release_on_close` \
+        `# refusal arm: +2 in both feature sets. READ off what the two commands` \
+        `# PRINTED, not counted off the diff.` \
+        `#` \
+        `# ⛔ THE PINS MOVED A ROUND LATE AND THE GATE IS NOT WHY. An earlier` \
+        `# draft of this comment blamed guarded_count_gate's DEFERRED set. That` \
+        `# is false and the logs say so: the gate SELECTED this line and printed` \
+        `# "run-ci.sh:4786: declares 5 passed, the run printed 7" on two separate` \
+        `# runs, exiting 1 both times. It was read as green because the reader` \
+        `# grepped for "^  OK " and "MISMATCH" -- neither is this gate's verdict` \
+        `# token -- and took a task notification's exit 0, which belonged to the` \
+        `# wrapper shell, for the gate's own. Hosted run 35414066328 then redded` \
+        `# Layer C1t and merely confirmed it. A proxy read in place of a verdict` \
+        `# is the defect; the instrument worked.` \
+        && cargo test -p wz-runtime-tokio --features transport-link-serial --test serial_pty_e2e --quiet 2>&1 | grep -qE '^test result: ok\. 7 passed' \
+        && cargo test -p wz-runtime-tokio --features transport-link-serial,transport-fragmentation --test serial_pty_e2e --quiet 2>&1 | grep -qE '^test result: ok\. 8 passed' \
         && cargo test -p wz-runtime-tokio --features transport-link-serial --test link_endpoints_pairing --quiet 2>&1 | grep -qE '^test result: ok\. 2 passed' \
         && cargo clippy -p wz-runtime-tokio --all-targets --features transport-link-serial --quiet -- -D warnings \
         && cargo clippy -p wz-runtime-tokio --all-targets --features transport-link-serial,transport-fragmentation --quiet -- -D warnings)
