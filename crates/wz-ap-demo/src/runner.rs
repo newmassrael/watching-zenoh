@@ -8507,11 +8507,34 @@ pub(crate) async fn run_storage_host(listen: &str, opts: StorageHostOpts) -> io:
                                         // prefix of the new line, so a witness can assert
                                         // WHICH volume a storage landed on without any
                                         // consumer being edited.
-                                        Ok(()) => log::info!(
+                                        // R2743 — the BINDING STATE is appended, because
+                                        // `Ok` no longer implies the storage answers.
+                                        // A declare the transport could not carry now
+                                        // leaves the storage hosted-but-unbound rather
+                                        // than losing the write, and `rebind_all`
+                                        // attaches it on the next accepted session — so
+                                        // a log saying only "spawned live storage" would
+                                        // overclaim for exactly the case this round
+                                        // added. Appended, per the note above: every
+                                        // existing barrier stays a prefix of this line.
+                                        Ok(()) => {
+                                            let bound = manager
+                                                .storage(name)
+                                                .map(|s| s.is_bound())
+                                                .unwrap_or(false);
+                                            log::info!(
                                     "wz-ap-demo storage-host: spawned live storage '{name}' \
-                                     — storage_manager Started (volume '{}')",
-                                    cfg.volume_id
-                                ),
+                                     — storage_manager Started (volume '{}'){}",
+                                    cfg.volume_id,
+                                    if bound {
+                                        ""
+                                    } else {
+                                        " [UNBOUND: the client's transport was already \
+                                          gone; rebind_all attaches it on the next \
+                                          accepted session]"
+                                    }
+                                )
+                                        }
                                         Err(e) => log::warn!(
                                     "wz-ap-demo storage-host: add_storage '{name}' failed: {e}"
                                 ),
