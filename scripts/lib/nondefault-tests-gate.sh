@@ -194,6 +194,35 @@ LEGS=(
     # there and report a population of zero as green.
     "wz-runtime-tokio|hook|session-close-ingress,routing-peer,routing-accept,\
 router-connect-reconcile,transport-link-tcp,transport-unicast|session_lifecycle_open::"
+    # R2743 — the storage MANAGER's lib unit tests, and this row exists for a
+    # reason none of the rows above had: the census DID NOT ASK FOR IT.
+    #
+    # `storage_manager_service` is `#[cfg(feature = "storage-mgr-multi-storage-host")]`
+    # and that feature is not in the crate's default set, so pre-push gate 3
+    # compiles the module to nothing and gate 7 compiles it without running it --
+    # the familiar shape. What is DIFFERENT is that the wide
+    # `wz-runtime-tokio` row further down already names that feature, so
+    # `--census` reports these tests as `run by a leg` and is content. That row
+    # is `lane`, i.e. hosted-only, and the census does not read the scope field
+    # at all: it answers "does SOME leg run this", never "does a leg THIS MACHINE
+    # runs run this". So a test can be claimed by the census and still be
+    # unreachable by every gate a push passes through, which is exactly where the
+    # two tests below sat when they were written.
+    #
+    # They are the ones that pin the Layer E12 repair -- a storage stays HOSTED
+    # when its declaration cannot reach the wire, and a storage the CONFIG
+    # forbids is still refused -- so leaving them to a hosted lane would leave
+    # the repair regressible by any push. MEASURED before adding, on this
+    # machine because that is where the hook runs it: 9 tests, 13s cold and
+    # under 1s warm.
+    #
+    # The filter is a MODULE PATH, so a test added to that module is covered by
+    # construction (the `zenoh_config::` property, not the name-prefix habit
+    # R2714b had to repair). `session-reconnect` is named although it is
+    # currently a default feature: the first test is `cfg`-gated on it, and a
+    # leg that relies on the default set to reach its own subject loses that
+    # subject silently the day the default set moves.
+    "wz-runtime-tokio|hook|storage-mgr-multi-storage-host,session-reconnect|storage_manager_service::"
     # The demo's half of the same surface. Its
     # `a_key_that_is_read_while_reaching_nothing_is_not_reported_as_applied` is a
     # ZERO-POPULATION guard over the keys this build drops, which is exactly why
