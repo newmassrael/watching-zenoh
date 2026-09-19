@@ -1580,9 +1580,10 @@ impl BoundListener {
             //
             // ONE LINK AT A TIME, not one ever (R2722): an accept PARKS while a
             // link accepted off this device is still live and proceeds once that
-            // link has dropped, which is upstream's `while is_connected.load(..)`
-            // spin (`io/zenoh-links/zenoh-link-serial/src/unicast.rs`) expressed
-            // as an await rather than a sleep loop. `pending` and not `Err`, for
+            // link has dropped, which is upstream's accept-task spin
+            // (`io/zenoh-links/zenoh-link-serial/src/unicast.rs`
+            // @ `while is_connected.load(Ordering::Acquire) {`) expressed as an
+            // await rather than a sleep loop. `pending` and not `Err`, for
             // the R311y382 F2 reason -- an `Err` re-arms the loop's throttle and
             // spins.
             //
