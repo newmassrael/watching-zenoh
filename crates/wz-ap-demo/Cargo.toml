@@ -250,6 +250,12 @@ preset-ap-full = [
     "unixsock",
     "vsock",
     "transport-link-unixpipe",
+    # R2723 — the demo key added this round, named here because the rule above
+    # requires it: `wz/preset-ap-full` already carries `transport-link-serial`
+    # and `locator-serial`, so a demo key whose atom the preset claims cannot sit
+    # unreached. Without this line the AP-full binary compiles the tty backend in
+    # and argv cannot reach it, which is the exact state Layer A5 refuses.
+    "transport-link-serial",
     "locator-iface",
     "query-attachment",
     # Round 2442 (open-debt item 675) — see this key's own block below for why
@@ -369,6 +375,16 @@ vsock = ["wz/locator-vsock"]
 # mirror `wz/transport-link-unixpipe` (the accept-transport atom is not
 # dial-shaped, so no `locator-` rename).
 transport-link-unixpipe = ["wz/transport-link-unixpipe"]
+# R2723 — opt-in `serial/` (host tty) ACCEPT transport, and added for EXACTLY the
+# reason the unixpipe line above records: without it the `serial/` scheme parses
+# but `bind_locator` returns a feature-gated `Unsupported` before the router's
+# bind guard is reached, so that guard is DEAD CODE for this transport. R2723
+# changed that guard from a refusal into a cadence report — a tty listener now
+# carries one peer at a time rather than being turned away — and a changed guard
+# nothing can reach is the shape this workspace files against itself.
+# NOT in `default` (preset-ap-client is TCP-only), so the footprint baseline and
+# every other lane build are unchanged.
+transport-link-serial = ["wz/transport-link-serial"]
 # R311y365 — opt-in `tls/` (TLS-over-TCP) DIAL transport, forwarding the wz
 # facade's `locator-tls` (which pulls `transport-link-tls`). The mirror of `ws`
 # / `unixsock`: NOT in `default` (preset-ap-client is TCP-only), so the

@@ -8987,6 +8987,56 @@ mod caller_failfast_tests {
     }
 }
 
+#[cfg(all(test, feature = "routing-router", feature = "transport-link-serial"))]
+mod serial_caller_failfast_tests {
+    use super::{run_router_until, TransportTuning};
+
+    /// ⛔ R2723 — the mesh router ADMITS a `--listen serial/...`, where it used to
+    /// refuse one at bind.
+    ///
+    /// This is the shipped-seam half of the mesh-listen clause: the loop-level
+    /// witness (`accept_loop_holds_a_face_off_a_serial_listener`) proves the loop
+    /// holds the face, and this proves the CLI path a deployment actually uses no
+    /// longer turns the listen away. Its sibling
+    /// `run_router_accepts_a_unixpipe_listen_at_bind` is the same shape for the
+    /// transport that flipped at R311y392, and this arm is deliberately written
+    /// as its twin rather than as something new.
+    ///
+    /// THE DEVICE DELIBERATELY DOES NOT EXIST, and that is the discriminator
+    /// rather than a shortcut: the claim under test is that the BIND is admitted,
+    /// and a serial bind records the endpoint while opening NOTHING (the accept
+    /// opens the device — the same property
+    /// `serial_listen_binds_without_opening_the_device_and_addresses_by_tty`
+    /// pins). Handing this test a real pty would make it depend on the accept
+    /// succeeding, which is a different claim.
+    ///
+    /// ⚠ The accept that follows the bind therefore FAILS (`NotFound`), and that
+    /// is expected and harmless: `Step::Accepted(Err)` emits an `AcceptError`
+    /// event, sleeps `ACCEPT_ERROR_THROTTLE_MS` (100ms) and keeps going, so the
+    /// injected immediately-ready shutdown still ends the loop and the call still
+    /// returns `Ok(())`. An accept error is not a router failure; a REFUSED BIND
+    /// is, which is exactly the difference this arm measures.
+    ///
+    /// RED reproduction, and it is the change this round made: restore the
+    /// rejection in `run_router`'s bind guard -> `run_router_until` returns
+    /// `Err(Unsupported)` -> this `expect` panics.
+    #[tokio::test]
+    async fn run_router_accepts_a_serial_listen_at_bind() {
+        let listen = "serial//dev/wz-no-such-tty-r2723#baudrate=115200".to_string();
+        run_router_until(
+            &listen,
+            &None,
+            &None,
+            &None,
+            &None,
+            TransportTuning::default(),
+            std::future::ready(()),
+        )
+        .await
+        .expect("the mesh router admits a one-peer-at-a-time serial --listen (R2723)");
+    }
+}
+
 /// R311y809 — the mesh `--connect` target resolution BOTH mesh hosts call.
 ///
 /// These sit on `resolve_dial_targets` rather than on `run_peer_until` /
