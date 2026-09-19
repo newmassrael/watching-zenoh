@@ -2298,6 +2298,104 @@ def resolve_mode(
     return False, FORM_ONLY_NOTICE
 
 
+def check_prose(paths: list[str]) -> int:
+    """Grade a round's own prose BEFORE `append-round.sh` freezes it.
+
+    THE LEDGER IS OUTSIDE EVERY OTHER ARM OF THIS GATE, BY DESIGN.
+    `SKIP_PREFIXES` holds `docs/.atomic/`, and that exclusion is deliberate --
+    grading frozen history would demand repairs to entries that must not
+    change, which is why the list is not to be widened. The consequence nobody
+    had drawn: ledger prose is a population carrying upstream claims with NO
+    oracle, exactly the gap `store_reason_citation_gate` was built to close one
+    field over, still open in the field beside it. MEASURED over all 2740
+    entries: 97 anchored citations, ONE of which does not resolve -- Round
+    2723's, which anchors the serial link's unicast module to a needle
+    qualifying `get_port_mut` as `pub(crate)`, where the pin declares it with no
+    such qualifier. One percent, and permanent: nothing can ever catch it.
+
+    So this runs BEFORE the append, which is the only moment the prose is still
+    editable, and it therefore never asks a frozen entry to change -- it does
+    not reopen what `SKIP_PREFIXES` closed.
+
+    ⚠ IT REFUSES UN-ANCHORED FORMS, AND THE REASON IS NOT A BUDGET. Because the
+    store is skipped, a bare citation here costs no ratchet and breaks no push.
+    It costs something quieter: a citation with no needle cannot be checked by
+    anyone, ever, so a false one survives as audit trail. Anchoring is what
+    makes the claim gradable at all. DERIVED rather than imposed -- rounds
+    2702-2741 wrote 8 anchored citations, 0 line-form and 0 bare, so this
+    refuses nothing the tree already does.
+
+    ⚠ `rootless_loc` IS NOT OPTIONAL HERE. Passing `None` selects `scan`'s FORM
+    arm, which counts the absence markers and resolves nothing -- a FALSE
+    `@ REMOVED` (a path the pin still has) then passes at rc=0. Measured: the
+    first draft omitted it and the control for that case came back green while
+    every other control was already red.
+    """
+    if not paths:
+        print("ledger-citation: FAIL -- no prose file given", file=sys.stderr)
+        print(
+            "  A gate that scanned nothing must not report green.",
+            file=sys.stderr,
+        )
+        return 1
+
+    rels, missing = [], []
+    for given in paths:
+        resolved = pathlib.Path(given).resolve()
+        if resolved.is_file():
+            rels.append(str(resolved).lstrip("/"))
+        else:
+            missing.append(given)
+    if missing:
+        for name in missing:
+            print(f"ledger-citation: FAIL -- {name} is not readable", file=sys.stderr)
+        return 1
+
+    ref = upstream_root()
+    if ref is None:
+        print(
+            "ledger-citation: SKIP -- no pinned checkout on this machine, so "
+            "the form arm alone would pass a citation naming nothing",
+            file=sys.stderr,
+        )
+        return 0
+
+    counts, findings = scan(rels, pathlib.Path("/"), ref, rootless_locations(ref))
+    unanchored = (
+        counts["bare"]
+        + counts["line"]
+        + counts["rootless_bare"]
+        + counts["rootless_line"]
+    )
+    print(
+        f"ledger-citation: {len(rels)} prose file(s), {counts['anchored']} "
+        f"anchored, {counts['bare']} bare, {counts['line']} line-form, "
+        f"{counts['rootless_bare']}/{counts['rootless_line']} root-less "
+        f"bare/line, {counts['gone']} @ REMOVED, {counts['absent']} @ ABSENT"
+    )
+
+    rc = 0
+    if unanchored:
+        print(
+            f"ledger-citation: FAIL -- {unanchored} upstream citation(s) in "
+            "this round's prose are not anchored, and a changelog entry FREEZES "
+            "on append.",
+            file=sys.stderr,
+        )
+        print(
+            "  Write it as `path` @ `needle`, BOTH halves backticked and on ONE "
+            "line. The anchor's leader set is // /// //! # #! * and a markdown "
+            "'- ' bullet is not in it, so a citation wrapped across two bullets "
+            "is silently demoted to bare.",
+            file=sys.stderr,
+        )
+        rc = 1
+    for finding in findings:
+        print(f"ledger-citation: FAIL -- {finding}", file=sys.stderr)
+        rc = 1
+    return rc
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(
         prog="upstream_citation_anchor_gate.py",
@@ -2318,9 +2416,19 @@ def main() -> int:
         "ANNOUNCE a form-only run when none is (for a git hook, where the "
         "checkout is a fact about the machine and not about the push)",
     )
+    ap.add_argument(
+        "--prose",
+        nargs="*",
+        metavar="FILE",
+        help="grade a ROUND'S OWN prose files before they are appended to the "
+        "changelog, refusing any upstream citation that is not anchored (see "
+        "`check_prose`)",
+    )
     args = ap.parse_args()
     if args.selftest:
         return selftest()
+    if args.prose is not None:
+        return check_prose(args.prose)
     ref = upstream_root()
     resolve, notice = resolve_mode(args.resolve, args.resolve_if_pinned, ref)
     if notice:

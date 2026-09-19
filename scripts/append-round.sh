@@ -103,6 +103,31 @@ fi
 # than die here with an unbound-variable error that reads like a bug.
 wz_home_path_files 'append-round' ${prose_files[@]+"${prose_files[@]}"} || exit 1
 
+# R2742 — the SECOND precondition on the same population, for the same reason
+# the first one gives: it cannot be repaired afterwards. An upstream citation in
+# ledger prose is graded by NOTHING once the entry freezes -- the anchor gate's
+# `SKIP_PREFIXES` holds `docs/.atomic/` on purpose, because grading frozen
+# history would demand repairs to entries that must not change. So the ledger is
+# a population carrying upstream claims with no oracle, which is exactly what
+# `store_reason_citation_gate` exists for one field over.
+#
+# MEASURED before wiring, over all 2740 entries: 97 anchored citations, ONE of
+# which does not resolve at the pin (Round 2723's, which gives `get_port_mut` a
+# `pub(crate)` the pin does not). One percent, and permanent.
+#
+# This runs BEFORE the append, so it never asks a frozen entry to change and
+# does not reopen what SKIP_PREFIXES closed. Same `${prose_files[@]}` the check
+# above uses -- one population, derived from THIS invocation's argv.
+if ! python3 "$repo_root/scripts/lib/upstream_citation_anchor_gate.py" --prose \
+    ${prose_files[@]+"${prose_files[@]}"}; then
+    echo "" >&2
+    echo "append-round: the entry was NOT appended." >&2
+    echo "  Fix the citation in the prose file and re-run: this is the last" >&2
+    echo "  moment it is editable, which is the whole reason the check is" >&2
+    echo "  here rather than at push time." >&2
+    exit 1
+fi
+
 if [[ $saw_impact -eq 0 ]]; then
     echo "append-round: FAIL no --impact given" >&2
     echo "  An entry with empty impact_refs is nearly always incomplete" >&2
