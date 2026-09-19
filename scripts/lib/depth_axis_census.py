@@ -1044,7 +1044,13 @@ CITATION = re.compile(r"\b((?:[A-Za-z0-9_.-]+/)*[A-Za-z0-9_.-]+\.(?:rs|c|h))(?::
 # `{'reached': ['runtime-zero-copy']}` for the atom alone — the R2354
 # discipline, applied to the half of it this file can grade in isolation.
 # NO_SYMBOL holds at 2 and AMBIGUOUS at 18; the atom was in neither.
-PIN_REACHED = 19
+# R2745 — 19 -> 18. `adminspace-read` RETIRES: its last standing clause was the
+# per-GET/per-connection gap (open-debt item 665), and the round built the
+# instrument that separates them — a DIALING e2e binary holding one session
+# across a permit revoke, driven by Layer E6j. It was in `reached`, so this pin
+# falls while UNREACHED and NO_SYMBOL hold at 2 and 2. READ off the census's own
+# FAIL line, which printed `reached: 18 against a pin of 19`.
+PIN_REACHED = 18
 PIN_UNREACHED = 2
 PIN_NO_SYMBOL = 2
 # R2534 — 346 -> 347. The atom is `adminspace-metrics` and the citation is the
@@ -1796,7 +1802,14 @@ PIN_NO_SYMBOL = 2
 # agreeing. The correction also names `docs/runtime-crate-tokio.md`, which does
 # NOT resolve to a tracked path under this classifier and is why the move is
 # one rather than two; that is measured here rather than inferred from a total.
-PIN_WZ_CITATIONS = 91
+# R2745 — 91 -> 85. Same event as the reached pin above and the same shape as
+# R2541's: `adminspace-read` reaching COMPLETE takes its reason's WHOLE citation
+# set out of the PARTIAL population, six wz-rooted citations among them. This is
+# a DEPARTURE, not any round's additions run backwards — the round's own
+# correction added citations to that reason, and they left with it. READ off the
+# census's own FAIL line, `wz citations: 85 against a pin of 91`. AMBIGUOUS holds
+# at 18, which says this atom's citations were all rooted.
+PIN_WZ_CITATIONS = 85
 # R2626 — 44 -> 42, and this one is worth a sentence because it HELD through
 # every earlier retirement in this run (R2612, R2622). `time-hlc`'s reason is the
 # first retiree carrying AMBIGUOUS citations of its own: its oldest clauses cite
