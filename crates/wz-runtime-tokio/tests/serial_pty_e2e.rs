@@ -35,16 +35,17 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio_serial::SerialStream;
 
 use wz_runtime_tokio::observer::ApplicationLayerObserver;
 use wz_runtime_tokio::runtime_impl::TokioTime;
-use wz_runtime_tokio::serial_pipeline::{drive_serial_handshake, SerialPort};
+use wz_runtime_tokio::serial_pipeline::{drive_serial_handshake, wire_serial_stream, SerialPort};
 use wz_runtime_tokio::session::{PublishOptions, TokioSession};
 use wz_runtime_tokio::session_glue::drive_session_until_terminal;
 use wz_runtime_tokio::session_open::{
     accept_and_open_session, accept_endpoint, bind_locator, initiate_and_open_session,
-    AcceptConfig, AcceptedPeer, BoundListener, DialedLink, DEFAULT_OPEN_TICK_MS,
+    AcceptConfig, AcceptedLink, AcceptedPeer, BoundListener, DialedLink, DEFAULT_OPEN_TICK_MS,
 };
 use wz_runtime_tokio::sync::Mutex;
 use wz_runtime_tokio_test_support::fixture_session_init_params;
@@ -612,54 +613,230 @@ async fn serial_listener_parks_while_its_link_is_live() {
     );
 }
 
-/// `release_on_close=false` is REFUSED at bind, not accepted and ignored.
-///
-/// The key's whole observable effect is what the re-accept does with the device:
-/// upstream re-creates the port when it is true and RETAINS the open one when it
-/// is false (`io/zenoh-links/zenoh-link-serial/src/unicast.rs` @ `if release_on_close {`).
-/// wz's accept seam MOVES the stream into the link and the writer half is
-/// consumed by the TX subsystem, so retaining the device is not a serial-side
-/// patch but a question about a transport resource outliving its link — and
-/// until that is answered, a listener that ASKED for retention must not be told
-/// it got it. The refusal is the honest half; silently re-opening would be the
-/// dishonest one.
-///
-/// The arm asserts the DEFAULT still binds, so it cannot pass by refusing every
-/// serial listen.
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn serial_listen_refuses_release_on_close_false_instead_of_ignoring_it() {
-    let end = pty_end();
-
-    let retained = format!("serial/{}#baudrate=115200;release_on_close=false", end.path);
-    let endpoint = match parse_any_locator(&retained).expect("locator parses") {
+/// Bind a `serial/...` listen STRING through the shipped seam, asserting only
+/// that it classified and bound.
+async fn bind_serial_listen(locator: &str) -> BoundListener {
+    let endpoint = match parse_any_locator(locator).expect("locator parses") {
         AnyLocator::Serial(ep) => ep,
         other => panic!("expected AnyLocator::Serial, got {other:?}"),
     };
-    assert!(
-        !endpoint.options.release_on_close,
-        "the fixture locator must actually carry the non-default, or this arm is vacuous"
-    );
-    // `BoundListener` is not `Debug` (it holds live sockets), so the Ok arm is
-    // named rather than unwrapped through `expect_err`.
-    match bind_locator(AnyLocator::Serial(endpoint), &AcceptConfig::default()).await {
-        Ok(_) => panic!("a retained-port serial listen must be refused at bind"),
-        Err(err) => assert_eq!(err.kind(), io::ErrorKind::Unsupported),
-    }
-
-    // ANTI-VACUITY: the same device WITHOUT the key binds, so the refusal is
-    // about the key and not about serial listens in general.
-    let default = format!("serial/{}#baudrate=115200", end.path);
-    let endpoint = match parse_any_locator(&default).expect("locator parses") {
-        AnyLocator::Serial(ep) => ep,
-        other => panic!("expected AnyLocator::Serial, got {other:?}"),
-    };
-    assert!(
-        endpoint.options.release_on_close,
-        "release_on_close defaults to true on both sides"
-    );
     bind_locator(AnyLocator::Serial(endpoint), &AcceptConfig::default())
         .await
-        .expect("the default serial listen still binds");
+        .expect("a serial listen binds")
+}
+
+/// Whether the listener is holding an OPEN device past the link that used it.
+///
+/// Reached through the VARIANT rather than the concrete listener type: no other
+/// `BoundListener` arm can answer this, because no other scheme's accept is a
+/// local open.
+fn retains_device(listener: &BoundListener) -> bool {
+    match listener {
+        BoundListener::Serial(l) => l.retains_device(),
+        _ => panic!("a serial locator must bind to BoundListener::Serial"),
+    }
+}
+
+/// Accept one link off `listener` and complete its DEFERRED handshake against
+/// `peer` driven as the Initiator, yielding the parts a session would wire.
+async fn accept_and_handshake(
+    listener: &mut BoundListener,
+    peer: &mut SerialStream,
+) -> (SerialPort, SerialEndpoint) {
+    let (accepted, _) = tokio::time::timeout(Duration::from_secs(5), listener.accept_raw())
+        .await
+        .expect("the accept completes")
+        .expect("the accept yields a device");
+    let (_, dialed) = tokio::time::timeout(Duration::from_secs(5), async {
+        tokio::join!(
+            async {
+                drive_serial_handshake(peer, SerialRole::Initiator)
+                    .await
+                    .expect("peer initiator reaches Connected");
+            },
+            async {
+                accepted
+                    .handshake()
+                    .await
+                    .expect("the deferred Responder handshake completes")
+            },
+        )
+    })
+    .await
+    .expect("the deferred handshake completes within 5s");
+    match dialed {
+        DialedLink::Serial { stream, endpoint } => (stream, endpoint),
+        _ => panic!("a serial accept completes into DialedLink::Serial"),
+    }
+}
+
+/// Tear a serial link down the way a CLEAN session teardown does: wire it, drop
+/// the read driver, release the last sender, and drain the writer task to
+/// completion.
+///
+/// ⛔ THE WIRING IS NOT INCIDENTAL. An `AcceptedLink` that is merely dropped
+/// never reaches [`wire_serial_stream`], so the stream is never split and neither
+/// half has anywhere to come back FROM — a retain witness built on that path
+/// would be green for a listener that retains nothing. The three retention arms
+/// below therefore all tear down through here.
+async fn wire_and_tear_down(port: SerialPort, endpoint: &SerialEndpoint) {
+    let (inbound, outbound, handle) = wire_serial_stream(port, endpoint);
+    drop(inbound); // the read half goes home; the guard frees the device
+    drop(outbound); // the last sender goes, which seals the outbound queue
+    handle.drain().await; // the writer task ends, and its half goes home
+}
+
+/// `release_on_close=false` is HONOURED — the listener keeps the OPEN device past
+/// the link that used it — where R2722 refused the key at bind.
+///
+/// THE DISCRIMINATOR is `retains_device()` across the teardown, and it has to be
+/// a property of the LISTENER rather than of the accept's return value: an accept
+/// that quietly re-opened the tty would hand back an indistinguishable link, and
+/// "accepted the string and re-opened anyway" is precisely what R2722 declined to
+/// ship as honouring the key. Upstream is the same read the other way round —
+/// it re-creates the port only `if release_on_close`
+/// (`io/zenoh-links/zenoh-link-serial/src/unicast.rs` @ `if release_on_close {`)
+/// and drops it on close only `if self.release_on_close`
+/// (@ `if self.release_on_close {`) — so the CONDITIONAL half is the re-open.
+///
+/// ANTI-VACUITY: a retained fd that no longer worked would satisfy the flag and
+/// nothing else, so the second half carries a SECOND link over the retained
+/// device and completes its handshake on it. Its sibling below is the control.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn serial_listen_honours_release_on_close_false_by_retaining_the_device() {
+    let mut end = pty_end();
+    let retained = format!("serial/{}#baudrate=115200;release_on_close=false", end.path);
+    assert!(
+        !match parse_any_locator(&retained).expect("locator parses") {
+            AnyLocator::Serial(ep) => ep,
+            other => panic!("expected AnyLocator::Serial, got {other:?}"),
+        }
+        .options
+        .release_on_close,
+        "the fixture locator must actually carry the non-default, or this arm is vacuous"
+    );
+    let mut listener = bind_serial_listen(&retained).await;
+    assert!(
+        !retains_device(&listener),
+        "nothing is retained before a link has lived on the device"
+    );
+
+    let (port, endpoint) = accept_and_handshake(&mut listener, &mut end.master).await;
+    wire_and_tear_down(port, &endpoint).await;
+    assert!(
+        retains_device(&listener),
+        "release_on_close=false must keep the OPEN device past its link: that is \
+         the key's entire observable effect"
+    );
+
+    // The retained device still carries a link, and the accept TAKES it rather
+    // than leaving a copy behind for a second reader to appear on.
+    let (port, endpoint) = accept_and_handshake(&mut listener, &mut end.master).await;
+    assert!(
+        !retains_device(&listener),
+        "the accept must CONSUME the retained device"
+    );
+    wire_and_tear_down(port, &endpoint).await;
+}
+
+/// THE CONTROL for its sibling above: under the DEFAULT `release_on_close=true`
+/// the same teardown retains NOTHING.
+///
+/// Without this arm a listener that retained UNCONDITIONALLY would pass the
+/// sibling, and unconditional retention is the wrong behaviour rather than a
+/// harmless surplus — upstream drops the port on close in exactly this case
+/// (`io/zenoh-links/zenoh-link-serial/src/unicast.rs` @ `if self.release_on_close {`,
+/// guarding `self.unset_port();`), and a device held by a listener nobody is
+/// using is a tty no other process can open.
+///
+/// It then accepts AGAIN, because releasing the device must leave the listener
+/// able to re-open it: that is the R2722 property this round must not have
+/// broken, and a release that merely lost the port would fail here.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn serial_listen_releases_the_device_on_close_by_default() {
+    let mut end = pty_end();
+    let default = format!("serial/{}#baudrate=115200", end.path);
+    assert!(
+        match parse_any_locator(&default).expect("locator parses") {
+            AnyLocator::Serial(ep) => ep,
+            other => panic!("expected AnyLocator::Serial, got {other:?}"),
+        }
+        .options
+        .release_on_close,
+        "release_on_close defaults to true on both sides"
+    );
+    let mut listener = bind_serial_listen(&default).await;
+
+    let (port, endpoint) = accept_and_handshake(&mut listener, &mut end.master).await;
+    wire_and_tear_down(port, &endpoint).await;
+    assert!(
+        !retains_device(&listener),
+        "the default key RELEASES the device on close; retaining it unconditionally \
+         would hold a tty nothing is using"
+    );
+
+    let (port, endpoint) = accept_and_handshake(&mut listener, &mut end.master).await;
+    wire_and_tear_down(port, &endpoint).await;
+}
+
+/// A serial accept CLEARS whatever the previous peer left on the wire.
+///
+/// THE DISCRIMINATOR is a read that must TIME OUT. The stale bytes are asserted
+/// absent BY VALUE rather than by "the next handshake still worked", because
+/// `SerialReadDriver`'s framer logs and resyncs past noise — a
+/// handshake-completes assertion would be green whether or not anything was
+/// cleared, which is the vacuity this file keeps catching in its own arms.
+///
+/// It runs under `release_on_close=false` on purpose: retention is the case where
+/// those bytes can survive at all, because the fd is the same one. Under the
+/// default the device is re-opened and the question does not arise — which is why
+/// wz needed no clear before this round and needs one now. Upstream clears at the
+/// same seam and unconditionally (`z-serial-0.3.1` @ `pub async fn accept(&mut self)`,
+/// whose first act past the status check is `// Clear all buffers` / `self.clear()?`).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_serial_re_accept_clears_what_the_previous_peer_left_on_the_wire() {
+    let mut end = pty_end();
+    let retained = format!("serial/{}#baudrate=115200;release_on_close=false", end.path);
+    let mut listener = bind_serial_listen(&retained).await;
+
+    let (port, endpoint) = accept_and_handshake(&mut listener, &mut end.master).await;
+    wire_and_tear_down(port, &endpoint).await;
+    assert!(
+        retains_device(&listener),
+        "the clear is only a question on a RETAINED fd, so this arm is vacuous \
+         unless the device was kept"
+    );
+
+    // The previous peer's tail: bytes on the wire after its link died, which the
+    // next handshake would otherwise read as its own first bytes.
+    const STALE: &[u8] = b"\x11\x22\x33-left-behind";
+    end.master
+        .write_all(STALE)
+        .await
+        .expect("the departed peer writes its tail");
+    end.master.flush().await.expect("the tail reaches the wire");
+    // A settling margin, not a race this test depends on winning: a pty pair is
+    // immediate, and the assertion below would fail OPEN (timeout = cleared) if
+    // the bytes had not arrived at all, so the margin is generous.
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    let (accepted, _) = tokio::time::timeout(Duration::from_secs(5), listener.accept_raw())
+        .await
+        .expect("the re-accept completes")
+        .expect("the re-accept yields the retained device");
+    let mut port = match accepted {
+        AcceptedLink::Serial { stream, .. } => stream,
+        _ => panic!("a serial accept yields AcceptedLink::Serial"),
+    };
+    let mut buf = [0u8; 64];
+    match tokio::time::timeout(Duration::from_millis(300), port.stream_mut().read(&mut buf)).await {
+        Err(_elapsed) => {} // nothing readable: the accept cleared the queue
+        Ok(Ok(n)) => panic!(
+            "the accept must clear the wire, but it delivered {n} stale byte(s): {:?}",
+            &buf[..n]
+        ),
+        Ok(Err(e)) => panic!("reading the re-accepted device failed: {e}"),
+    }
 }
 
 /// ⛔ THE LISTENER SURVIVES ITS PEER. Once the accepted link is DROPPED, the same

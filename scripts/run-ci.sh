@@ -4803,8 +4803,16 @@ layer_c1t_cargo_test_serial() {
         `# wrapper shell, for the gate's own. Hosted run 35414066328 then redded` \
         `# Layer C1t and merely confirmed it. A proxy read in place of a verdict` \
         `# is the defect; the instrument worked.` \
-        && cargo test -p wz-runtime-tokio --features transport-link-serial --test serial_pty_e2e --quiet 2>&1 | grep -qE '^test result: ok\. 7 passed' \
-        && cargo test -p wz-runtime-tokio --features transport-link-serial,transport-fragmentation --test serial_pty_e2e --quiet 2>&1 | grep -qE '^test result: ok\. 8 passed' \
+        `#` \
+        `# R2727 — 7 -> 9 and 8 -> 10, IN THE SAME COMMIT as the tests, which is` \
+        `# what R2725 did a round late. The retain round replaced the` \
+        `# release_on_close REFUSAL arm with an arm that HONOURS it and added its` \
+        `# control (the default key must retain NOTHING) and the accept-seam` \
+        `# buffer-clear witness: +2 in both feature sets. READ off what the two` \
+        `# commands PRINTED (9 and 10), and the two deltas are EQUAL, which is` \
+        `# R311y805's check that no new case hid behind transport-fragmentation.` \
+        && cargo test -p wz-runtime-tokio --features transport-link-serial --test serial_pty_e2e --quiet 2>&1 | grep -qE '^test result: ok\. 9 passed' \
+        && cargo test -p wz-runtime-tokio --features transport-link-serial,transport-fragmentation --test serial_pty_e2e --quiet 2>&1 | grep -qE '^test result: ok\. 10 passed' \
         && cargo test -p wz-runtime-tokio --features transport-link-serial --test link_endpoints_pairing --quiet 2>&1 | grep -qE '^test result: ok\. 2 passed' \
         && cargo clippy -p wz-runtime-tokio --all-targets --features transport-link-serial --quiet -- -D warnings \
         && cargo clippy -p wz-runtime-tokio --all-targets --features transport-link-serial,transport-fragmentation --quiet -- -D warnings)

@@ -128,8 +128,8 @@ use tokio::net::UdpSocket;
 // transport-link-serial feature here.
 #[cfg(feature = "transport-link-serial")]
 use crate::serial_pipeline::{
-    dial_serial, drive_serial_handshake, open_serial_device, wire_serial_stream, SerialLiveness,
-    SerialPort, SerialReadDriver,
+    clear_serial_buffers, dial_serial, drive_serial_handshake, open_serial_device,
+    wire_serial_stream, SerialLiveness, SerialPort, SerialReadDriver,
 };
 #[cfg(feature = "transport-link-serial")]
 use wz_session_core::serial_link::SerialRole;
@@ -989,9 +989,10 @@ pub enum BoundListener {
     /// A bound `serial/...` endpoint (R311y805) — the LAST scheme whose acceptor
     /// was an unwired extension point, and the only one that binds NOTHING: a tty
     /// has no listen queue, so [`SerialListener`] holds the endpoint and
-    /// [`Self::accept_raw`] opens the device. The one variant whose accept is a
-    /// LOCAL open rather than a peer arrival, which is why it is also the only
-    /// one that can be exhausted (see [`SerialListener`] on the one-shot arming).
+    /// [`Self::accept_raw`] opens the device — or hands out the one it RETAINED,
+    /// when the locator asked for that (R2727). The one variant whose accept is a
+    /// LOCAL open rather than a peer arrival, which is also why it is the only one
+    /// that can PARK on its own previous link (see [`SerialListener`]).
     ///
     /// Its post-accept SERVER handshake is the serial-LINK handshake
     /// (`drive_serial_handshake(.., SerialRole::Responder)`: await `INIT`, reply
@@ -1022,14 +1023,22 @@ pub enum BoundListener {
 ///
 /// A tty is POINT-TO-POINT: one device carries exactly one link. Upstream models
 /// that with an `is_connected` gate its accept task spins on before re-opening
-/// (`unicast.rs:430-433`), i.e. at most one live link at a time. wz's accept seam
-/// carries no link-liveness feedback, so the honest model here is ONE accept per
-/// bind: `armed` is cleared by the first [`BoundListener::accept_raw`] and every
-/// later accept PARKS (`pending`) rather than re-opening the device. Parking, not
-/// `Err`: an `Err` re-arms the accept loop's `Step::Accepted(Err)` throttle, which
-/// is the R311y382 "F2 perpetual-throttle" spin the udp demux exists to kill. And
-/// re-opening would be worse than either — a second fd on a LIVE tty splits the
-/// read stream between two drivers.
+/// (`unicast.rs` @ `while is_connected.load(Ordering::Acquire) {`), i.e. at most
+/// one live link AT A TIME, and R2722 gave wz the same structure: a
+/// [`SerialLiveness`] shared with the link it handed the device to. An accept
+/// PARKS (`pending`) while that link is live and proceeds once it has dropped.
+/// Parking, not `Err`: an `Err` re-arms the accept loop's `Step::Accepted(Err)`
+/// throttle, which is the R311y382 "F2 perpetual-throttle" spin the udp demux
+/// exists to kill. And re-opening while the link is live would be worse than
+/// either — a second fd on a LIVE tty splits the read stream between two
+/// drivers.
+///
+/// ⚠ The paragraph above used to describe a one-shot `armed: bool` that parked
+/// on "my peer is gone" as well as on "my peer is still here", and it outlived
+/// the field by a round: R2722 replaced it and this doc went on asserting it.
+/// A comment naming a component that is not there is the class this workspace
+/// keeps finding in its own docs, so it is recorded here rather than quietly
+/// overwritten.
 #[cfg(feature = "transport-link-serial")]
 pub struct SerialListener {
     /// The endpoint parsed out of the `serial/...` locator — the device the
@@ -1046,6 +1055,17 @@ impl SerialListener {
     /// The endpoint this listener was bound from — the device an accept opens.
     pub fn endpoint(&self) -> &SerialEndpoint {
         &self.endpoint
+    }
+
+    /// R2727 — whether this listener is holding an OPEN device that outlived its
+    /// link, which is what `release_on_close=false` asks for.
+    ///
+    /// The property is otherwise visible only to the accept that consumes it, and
+    /// a listener that had quietly re-opened instead would be indistinguishable
+    /// from one that retained. See
+    /// [`SerialLiveness::retains_device`](crate::serial_pipeline::SerialLiveness::retains_device).
+    pub fn retains_device(&self) -> bool {
+        self.liveness.retains_device()
     }
 }
 
@@ -1593,12 +1613,34 @@ impl BoundListener {
             // wants the next peer calls `accept_raw` again AFTER dropping the
             // previous link, which is what the accept loop and `accept_bound`
             // both do, and what the witnesses assert.
+            // R2727 — and the device may be one this listener RETAINED rather than
+            // one it opens: `release_on_close=false` asks for the tty to outlive
+            // its link, which is upstream's `if release_on_close { ZSerial::new(..) }`
+            // read the other way round (`unicast.rs` @ `if release_on_close {`) --
+            // the re-open is the CONDITIONAL half, not the unconditional one.
+            //
+            // `take_retained` answers `None` whenever nothing is held, which is
+            // every accept under the default key AND the best-effort cases under
+            // the non-default one (see `SerialRetainSlot`), so the re-open stays
+            // the fallback for both rather than being a second policy.
+            //
+            // The buffers are cleared on BOTH paths, unconditionally, because
+            // upstream's accept does: `z-serial-0.3.1` @ `pub async fn accept(&mut self)`
+            // clears before it waits for `INIT`. It matters most on the retained
+            // path -- a re-used fd still holds whatever the previous peer wrote
+            // after its last frame -- and it is cheap and correct on the other.
+            // It happens HERE and not in `AcceptedLink::handshake`, which would
+            // discard an `INIT` that had legitimately arrived in between.
             #[cfg(feature = "transport-link-serial")]
             BoundListener::Serial(l) => {
                 if l.liveness.is_live() {
                     std::future::pending::<()>().await;
                 }
-                let stream = open_serial_device(&l.endpoint)?;
+                let stream = match l.liveness.take_retained() {
+                    Some(retained) => retained,
+                    None => open_serial_device(&l.endpoint)?,
+                };
+                clear_serial_buffers(&stream)?;
                 (
                     AcceptedLink::Serial {
                         stream: SerialPort::accepted(stream, l.liveness.claim()),
@@ -3255,35 +3297,31 @@ pub async fn bind_locator(locator: AnyLocator, cfg: &AcceptConfig) -> io::Result
         // ungated in wz-session-core, only the tty BACKEND is gated), so the arm
         // exists in both feature configs, exactly as the dial arm does.
         //
-        // R2722 — `release_on_close = false` is REFUSED here rather than
-        // ignored, and that is the honest half of this round rather than a
-        // shortfall hidden in a default. The key's whole meaning is what the
-        // re-accept does with the device: upstream re-creates the port when it
-        // is true and RETAINS the open one when it is false
+        // R2727 — `release_on_close` is now HONOURED rather than refused, and the
+        // refusal R2722 put here is gone rather than softened. The key's whole
+        // meaning is what the re-accept does with the device: upstream re-creates
+        // the port when it is true and RETAINS the open one when it is false
         // (`io/zenoh-links/zenoh-link-serial/src/unicast.rs` @ `if release_on_close {`,
-        // guarding the `ZSerial::new` its accept task runs). wz's accept seam
-        // MOVES the stream into the link and its writer half is consumed by the
-        // TX subsystem, whose task contract is `Output = ()` across ten
-        // pipelines -- so retaining the port is not a serial-side patch but a
-        // question about who owns a transport resource that outlives its link,
-        // and reshaping that contract for one scheme would be the wrong base.
-        // Refusing a listener that asks for it says so at bind, where an
-        // operator can read it, instead of accepting the string and quietly
-        // re-opening the device anyway. `true` is the default on BOTH sides
-        // (`DEFAULT_RELEASE_ON_CLOSE` upstream, `SerialOptions::default` here),
-        // so this refuses only a listener that asked for the non-default.
+        // guarding the `ZSerial::new` its accept task runs, and
+        // @ `if self.release_on_close {` in the link's `close`, guarding the
+        // `unset_port()` that drops the port's fd). That is a property of the
+        // LISTENER, so it is the listener's liveness channel that carries it, and
+        // `SerialLiveness::new` takes it as "retain", inverted from the key.
+        //
+        // What R2722 was right about is that a serial-side patch could not
+        // express it: wz's accept MOVES the stream into the link and the split's
+        // write half is owned by a spawned writer task whose contract is
+        // `Output = ()` across ten pipelines. The missing structure was a way
+        // HOME for the two halves, which is what `SerialRetainSlot` is; the
+        // writer task contract is untouched, because the task takes the channel
+        // as an argument and returns the half through it rather than out of its
+        // `Output`.
         #[cfg(feature = "transport-link-serial")]
         AnyLocator::Serial(endpoint) => {
-            if !endpoint.options.release_on_close {
-                return Err(unsupported(
-                    "serial listen with release_on_close=false needs the device to \
-                     outlive its link, which this accept seam cannot yet express; \
-                     drop the key to take the default (re-open per accept)",
-                ));
-            }
+            let retain_device = !endpoint.options.release_on_close;
             Ok(BoundListener::Serial(SerialListener {
                 endpoint,
-                liveness: SerialLiveness::default(),
+                liveness: SerialLiveness::new(retain_device),
             }))
         }
         #[cfg(not(feature = "transport-link-serial"))]

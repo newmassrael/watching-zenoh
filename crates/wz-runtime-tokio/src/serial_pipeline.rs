@@ -64,6 +64,7 @@ use tokio::sync::mpsc;
 use tokio_serial::SerialStream;
 
 use crate::link_interfaces::{addressless_link_endpoints, addressless_link_subject};
+use crate::sync::Mutex;
 use crate::writer_queue::{OutboundQueue, WriterHandle};
 use crate::{LinkDriver, LinkEvent, LostCause, Reliability, RxFrame, TxFrame};
 use wz_session_core::link::BoxedLinkDriver;
@@ -107,13 +108,113 @@ const SERIAL_CONNECT_THROTTLE: Duration = Duration::from_millis(250);
 /// method, because wz's accepted link has no close call of its own — it is torn
 /// down by being dropped, and a teardown path that must be REMEMBERED is the
 /// class this workspace files against itself.
-#[derive(Clone, Debug, Default)]
-pub struct SerialLiveness(Arc<AtomicBool>);
+///
+/// R2727 — it also carries the way BACK for the two halves of a link that has
+/// died, which is what makes `release_on_close=false` expressible: see
+/// [`SerialRetainSlot`].
+#[derive(Clone, Debug)]
+pub struct SerialLiveness(Arc<SerialLivenessInner>);
+
+/// The state a [`SerialLiveness`] shares between a listener and the one link it
+/// handed the device to.
+#[derive(Debug)]
+struct SerialLivenessInner {
+    /// Whether a link accepted off this device is still alive.
+    live: AtomicBool,
+    /// Whether the device is RETAINED past its link instead of re-opened per
+    /// accept — i.e. `release_on_close == false`. Stored inverted from the
+    /// locator key on purpose: the key names what CLOSING does, this names what
+    /// the listener HOLDS, and the listener is the thing this value belongs to.
+    /// Upstream makes the same choice by branching on the key at both ends
+    /// rather than storing it as a mood
+    /// (`io/zenoh-links/zenoh-link-serial/src/unicast.rs`
+    /// @ `if self.release_on_close {` in `close`, @ `if release_on_close {` in
+    /// its accept task).
+    retain_device: bool,
+    /// The halves on their way home, and the re-assembled device once both have
+    /// arrived.
+    returned: Mutex<SerialRetainSlot>,
+}
+
+/// R2727 — where a dying link's two halves meet so the device can outlive it.
+///
+/// ⛔ THE HALVES LIVE IN DIFFERENT PLACES, which is the whole reason this is a
+/// shared slot rather than a field on either of them: the READ half sits in
+/// [`SerialReadDriver`] (dropped by the session at teardown) and the WRITE half
+/// is owned by [`serial_writer_task`] (a spawned task whose contract is
+/// `Output = ()` across ten pipelines). The one object both can already reach is
+/// the [`SerialLiveness`] the listener shares with the link, so the slot goes
+/// there.
+///
+/// A half arriving alone is NOT a retained device — [`tokio::io::split`]'s
+/// `unsplit` needs both, and panics if handed halves that are not a pair. That
+/// gives the rule this round runs on: **both halves back ⇒ retain; one or none
+/// ⇒ the next accept re-opens the device.** It is not a compromise. The one
+/// teardown path that loses a half is [`WriterHandle::abort`](crate::writer_queue::WriterHandle::abort),
+/// whose own docs name its use — "callers tearing down a session whose link is
+/// already gone" — and a tty whose writer was cancelled mid-frame is in an
+/// unknown state, so re-opening it is the RIGHT answer there rather than a
+/// fallback.
+///
+/// ⚠ This is where wz DIVERGES from upstream and the divergence is stated, not
+/// hidden: upstream's port lives inside the link object and its accept task
+/// co-owns that object, so it keeps the port however the link died. wz re-opens
+/// on the abort path, which makes `release_on_close=false` a **best-effort
+/// retain** here.
+#[derive(Default)]
+struct SerialRetainSlot {
+    reader: Option<ReadHalf<SerialStream>>,
+    writer: Option<WriteHalf<SerialStream>>,
+    /// Both halves, re-assembled — the device the next accept reuses.
+    port: Option<SerialStream>,
+}
+
+impl std::fmt::Debug for SerialRetainSlot {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Presence only: the halves are live tty handles, and the same reason
+        // `SerialPort`'s `Debug` prints a bool rather than its stream.
+        f.debug_struct("SerialRetainSlot")
+            .field("reader", &self.reader.is_some())
+            .field("writer", &self.writer.is_some())
+            .field("port", &self.port.is_some())
+            .finish()
+    }
+}
+
+impl SerialRetainSlot {
+    /// Re-assemble once BOTH halves are home.
+    ///
+    /// A port already sitting here is STALE and is dropped (closing its fd): it
+    /// can only be one a previous link handed back after the next accept had
+    /// already given up waiting and re-opened the device, so the pair that just
+    /// arrived is the newer one.
+    fn settle(&mut self) {
+        if self.reader.is_some() && self.writer.is_some() {
+            let reader = self.reader.take().expect("checked immediately above");
+            let writer = self.writer.take().expect("checked immediately above");
+            self.port = Some(reader.unsplit(writer));
+        }
+    }
+}
 
 impl SerialLiveness {
+    /// A listener's liveness channel for one bound tty.
+    ///
+    /// `retain_device` is `!release_on_close`: `true` keeps the open device past
+    /// its link for the next accept to reuse, `false` (the locator default) lets
+    /// it close so the next accept re-opens it, which is upstream's
+    /// `unset_port()` on close.
+    pub fn new(retain_device: bool) -> Self {
+        Self(Arc::new(SerialLivenessInner {
+            live: AtomicBool::new(false),
+            retain_device,
+            returned: Mutex::new(SerialRetainSlot::default()),
+        }))
+    }
+
     /// Whether a link accepted off this device is still alive.
     pub fn is_live(&self) -> bool {
-        self.0.load(AtomicOrdering::Acquire)
+        self.0.live.load(AtomicOrdering::Acquire)
     }
 
     /// Mark the device taken and hand back the guard that releases it.
@@ -122,23 +223,84 @@ impl SerialLiveness {
     /// what makes the release unforgettable: the only way to claim is to hold
     /// something whose `Drop` un-claims.
     pub fn claim(&self) -> SerialLinkGuard {
-        self.0.store(true, AtomicOrdering::Release);
+        self.0.live.store(true, AtomicOrdering::Release);
         SerialLinkGuard(self.clone())
+    }
+
+    /// R2727 — whether an OPEN device is being held for the next accept.
+    ///
+    /// The observable for `release_on_close`. Retention is otherwise visible
+    /// only to the accept that consumes it, and an invariant nothing can look at
+    /// is one nothing can witness — the same reason
+    /// [`SerialReadDriver::device_is_claimed`] exists.
+    pub fn retains_device(&self) -> bool {
+        self.lock_returned().port.is_some()
+    }
+
+    /// Hand the READ half home. Called from [`SerialReadDriver`]'s `Drop`.
+    fn return_reader(&self, reader: ReadHalf<SerialStream>) {
+        if !self.0.retain_device {
+            return; // `release_on_close=true`: let the half close.
+        }
+        let mut slot = self.lock_returned();
+        slot.reader = Some(reader);
+        slot.settle();
+    }
+
+    /// Hand the WRITE half home. Called when [`serial_writer_task`] returns.
+    fn return_writer(&self, writer: WriteHalf<SerialStream>) {
+        if !self.0.retain_device {
+            return; // `release_on_close=true`: let the half close.
+        }
+        let mut slot = self.lock_returned();
+        slot.writer = Some(writer);
+        slot.settle();
+    }
+
+    /// Take the retained device, if one is being held. The accept seam's read.
+    pub(crate) fn take_retained(&self) -> Option<SerialStream> {
+        self.lock_returned().port.take()
+    }
+
+    /// The slot, past a poisoned lock.
+    ///
+    /// A panic while holding this lock can only have come from `unsplit`'s
+    /// pair check, and poisoning would then make every later accept on this
+    /// listener panic too — turning one bad teardown into a dead listener. The
+    /// slot's own invariant does not depend on the panicking section having
+    /// finished (each field is independently `Option`), so the guard is taken
+    /// either way.
+    fn lock_returned(&self) -> std::sync::MutexGuard<'_, SerialRetainSlot> {
+        self.0
+            .returned
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 }
 
 /// The half of [`SerialLiveness`] the LINK holds: dropping it tells the listener
 /// the device is free.
 ///
-/// It is deliberately opaque and has no methods. A guard that could be asked
-/// questions would invite a caller to branch on it, and the only correct use of
-/// this value is to hold it for exactly as long as the link lives.
+/// R2727 — it answers exactly ONE question, [`Self::liveness`], and that is not
+/// the branch this doc used to refuse. The refusal was of a guard a caller could
+/// INTERROGATE — "is the device free?", "am I still the holder?" — because the
+/// only correct use of this value is to hold it for as long as the link lives,
+/// and a readable state invites a caller to act on it instead. Naming the
+/// channel it reports to is a different thing: it hands the WRITE half, which
+/// lives in a spawned task rather than behind this guard, the same way home.
 #[derive(Debug)]
 pub struct SerialLinkGuard(SerialLiveness);
 
+impl SerialLinkGuard {
+    /// The listener channel this guard reports to — for handing a half back.
+    fn liveness(&self) -> SerialLiveness {
+        self.0.clone()
+    }
+}
+
 impl Drop for SerialLinkGuard {
     fn drop(&mut self) {
-        self.0 .0.store(false, AtomicOrdering::Release);
+        self.0 .0.live.store(false, AtomicOrdering::Release);
     }
 }
 
@@ -243,7 +405,34 @@ pub fn open_serial_device(endpoint: &SerialEndpoint) -> io::Result<SerialStream>
     stream
         .set_exclusive(endpoint.options.exclusive)
         .map_err(io::Error::other)?;
+    // R2727 — a freshly opened tty carries whatever the kernel buffered for the
+    // device before this process reached it, and upstream's open clears it:
+    // `z-serial-0.3.1` @ `pub fn new(port: String, baud_rate: u32, exclusive: bool)`
+    // runs `serial.clear(ClearBuffer::All)?` right after its own `set_exclusive`.
+    // Both ends of wz's tty backend reach this function, so both inherit that.
+    clear_serial_buffers(&stream)?;
     Ok(stream)
+}
+
+/// R2727 — discard whatever is buffered on a tty, in BOTH directions.
+///
+/// Upstream clears at two distinct moments and wz needs both: on OPEN
+/// (`z-serial-0.3.1` @ `pub fn new(port: String, baud_rate: u32, exclusive: bool)`,
+/// mirrored in [`open_serial_device`]) and on every ACCEPT, unconditionally
+/// (`z-serial-0.3.1` @ `pub async fn accept(&mut self)`, whose first act past the
+/// status check is `// Clear all buffers` / `self.clear()?`). The accept-side
+/// clear is the one that MATTERS once a device can be retained: a retained fd
+/// re-used for the next peer still holds whatever the previous peer wrote after
+/// its last frame, and those bytes would be read as the first bytes of the next
+/// link handshake. The symptom is intermittent and the framer resyncs past
+/// SOME of it, which is worse than a clean failure.
+///
+/// `ClearBuffer::All` rather than `Input` alone, matching upstream's `clear()`:
+/// an outbound tail the previous link never managed to transmit is no more
+/// wanted by the next peer than an inbound one.
+pub fn clear_serial_buffers(stream: &SerialStream) -> io::Result<()> {
+    tokio_serial::SerialPort::clear(stream, tokio_serial::ClearBuffer::All)
+        .map_err(io::Error::other)
 }
 
 /// R2704 — the `interfaces` an ACL can narrow a serial link by: THIS link's
@@ -456,10 +645,16 @@ pub fn wire_serial_stream(
     // here instead would tell the listener the tty was free the moment the link
     // started running.
     let (stream, guard) = port.into_parts();
+    // R2727 — the WRITE half's way back to the listener, so a device the locator
+    // asked to retain can be re-accepted. `None` on a DIALLED link: there is no
+    // listener waiting for that tty, so its halves have nowhere to go and should
+    // simply close.
+    let retain = guard.as_ref().map(SerialLinkGuard::liveness);
     let (reader, writer) = split(stream);
     let inbound = SerialReadDriver::new(reader, guard);
     let (tx, rx) = mpsc::unbounded_channel::<Vec<u8>>();
-    let writer_handle = WriterHandle::spawn(rx, |queue| serial_writer_task(writer, queue));
+    let writer_handle =
+        WriterHandle::spawn(rx, move |queue| serial_writer_task(writer, queue, retain));
     // R311y474 — the adminspace `{src,dst}` pair. BOTH ends are this tty's own
     // locator, which is upstream's DIAL-side behaviour verbatim: zenoh passes its
     // one `path` as both `src_path` and `dst_path`
@@ -499,7 +694,11 @@ pub fn wire_serial_stream(
 /// its `BiLock` share), and send fails loud (outbound is the sibling
 /// [`SerialWriteDriver`]).
 pub struct SerialReadDriver {
-    reader: ReadHalf<SerialStream>,
+    /// `Option` ONLY so `Drop` can move the half out and hand it back to the
+    /// listener (R2727); it is `Some` for this driver's whole usable life, and
+    /// `None` is reachable only from inside `Drop`, after which nothing can call
+    /// [`Self::poll_event`] again.
+    reader: Option<ReadHalf<SerialStream>>,
     /// Byte accumulator detecting `0x00`-EOP frame boundaries across reads.
     framer: SerialFrameReader,
     /// Frames decoded from a single `read` that returned more than one
@@ -521,7 +720,7 @@ pub struct SerialReadDriver {
 impl SerialReadDriver {
     fn new(reader: ReadHalf<SerialStream>, liveness: Option<SerialLinkGuard>) -> Self {
         Self {
-            reader,
+            reader: Some(reader),
             framer: SerialFrameReader::new(),
             pending: VecDeque::new(),
             liveness,
@@ -535,6 +734,22 @@ impl SerialReadDriver {
     /// rather than a field nothing can see.
     pub fn device_is_claimed(&self) -> bool {
         self.liveness.is_some()
+    }
+}
+
+/// R2727 — the READ half goes home BEFORE the guard below it clears liveness,
+/// because clearing liveness is what unparks the next accept: reversing the two
+/// would let that accept look for a retained device the instant before it
+/// arrives, and fall back to re-opening for no reason.
+///
+/// The ordering is structural rather than written down twice — the `liveness`
+/// guard is a FIELD of this struct, so the compiler drops it immediately after
+/// this body returns.
+impl Drop for SerialReadDriver {
+    fn drop(&mut self) {
+        if let (Some(reader), Some(guard)) = (self.reader.take(), self.liveness.as_ref()) {
+            guard.liveness().return_reader(reader);
+        }
     }
 }
 
@@ -576,7 +791,16 @@ impl LinkDriver for SerialReadDriver {
                 return LinkEvent::Rx(RxFrame::new(frame.payload));
             }
             let mut buf = [0u8; SERIAL_MAX_COBS_BUF];
-            match self.reader.read(&mut buf).await {
+            // The read is bound before the match so the half's borrow ends here
+            // rather than spanning the arms, which re-borrow `self` for the
+            // framer.
+            let read = self
+                .reader
+                .as_mut()
+                .expect("the read half is taken only by `Drop`, past every poll")
+                .read(&mut buf)
+                .await;
+            match read {
                 Ok(0) => {
                     return LinkEvent::Lost {
                         cause: LostCause::PeerClosed,
@@ -708,7 +932,35 @@ impl BoxedLinkDriver for SerialWriteDriver {
 /// (logged + bail) — see [`crate::writer_queue`] for why the seal, and not
 /// sender liveness alone, is the teardown signal. The first two shut the write
 /// half so the peer observes EOF.
-pub async fn serial_writer_task(mut writer: WriteHalf<SerialStream>, mut queue: OutboundQueue) {
+/// R2727 — `retain` is the listener channel the WRITE half goes home through so
+/// a retained device can be re-accepted (`None` on a dialled link, and a no-op
+/// when the locator left `release_on_close` at its default). It is handed the
+/// half on EVERY path this task can leave by, which is why the draining loop
+/// moved into [`drain_serial_writes`]: a `return` in the middle of that loop is
+/// how a half gets silently forgotten, and there is now exactly one place to
+/// forget it from.
+///
+/// The one exit that does NOT come back through here is
+/// [`WriterHandle::abort`](crate::writer_queue::WriterHandle::abort), which
+/// cancels this future where it stands; see [`SerialRetainSlot`] for why
+/// re-opening is right in that case.
+pub async fn serial_writer_task(
+    writer: WriteHalf<SerialStream>,
+    queue: OutboundQueue,
+    retain: Option<SerialLiveness>,
+) {
+    let writer = drain_serial_writes(writer, queue).await;
+    if let Some(liveness) = retain {
+        liveness.return_writer(writer);
+    }
+}
+
+/// The draining loop of [`serial_writer_task`], returning the half it was given
+/// on every path out.
+async fn drain_serial_writes(
+    mut writer: WriteHalf<SerialStream>,
+    mut queue: OutboundQueue,
+) -> WriteHalf<SerialStream> {
     while let Some(payload) = queue.next().await {
         // Defensive: send_blocking already rejects oversize, but a future
         // caller could bypass it. encode_frame rejects > SERIAL_MTU.
@@ -730,7 +982,7 @@ pub async fn serial_writer_task(mut writer: WriteHalf<SerialStream>, mut queue: 
             Some(Ok(())) => {}
             Some(Err(e)) => {
                 log::warn!("wz-runtime-tokio: serial_writer_task write failed: {e}; closing");
-                return;
+                return writer;
             }
             None => {
                 log::warn!(
@@ -738,12 +990,20 @@ pub async fn serial_writer_task(mut writer: WriteHalf<SerialStream>, mut queue: 
                      sealed queue; closing with frames undelivered",
                     crate::writer_queue::WRITER_STALL_MS
                 );
-                return;
+                return writer;
             }
         }
     }
     // Queue finished -> shut the write half cleanly (peer sees EOF).
+    //
+    // R2727 — this stays where it was and does NOT conflict with retaining the
+    // device, which was checked rather than assumed: tokio-serial's unix
+    // `AsyncWrite for SerialStream` implements
+    // `poll_shutdown` as a `poll_flush` and `Ok(())`
+    // (`tokio-serial-5.4.5/src/lib.rs` @ `let _ = self.poll_flush(cx)?;`), so it
+    // never closes the fd. A tty has no half-close to perform.
     let _ = writer.shutdown().await;
+    writer
 }
 
 #[cfg(test)]
