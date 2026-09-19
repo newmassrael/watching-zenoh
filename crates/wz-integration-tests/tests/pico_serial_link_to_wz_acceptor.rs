@@ -104,7 +104,7 @@ use wz_runtime_tokio::runtime_impl::TokioTime;
 use wz_runtime_tokio::session::{SubscribeOptions, TokioSession};
 use wz_runtime_tokio::session_glue::drive_session_until_terminal;
 use wz_runtime_tokio::session_open::{
-    accept_and_open_session, accept_endpoint, AcceptConfig, DialedLink, DEFAULT_OPEN_TICK_MS,
+    accept_and_open_session, bind_endpoint, DialedLink, DEFAULT_OPEN_TICK_MS,
 };
 use wz_runtime_tokio::sync::Mutex;
 use wz_runtime_tokio_test_support::fixture_session_init_params;
@@ -216,13 +216,61 @@ async fn serial_interop_over_metadata_span(metadata: &str) {
         "the baudrate comes off the `#`-delimited config tail, pico's SERIAL_CONFIG_BAUDRATE_KEY"
     );
 
-    // ── Foreign initiator FIRST. `accept_serial` opens the tty AND blocks
-    //    in the Responder half of the serial-link handshake waiting for an
-    //    INIT, so pico has to be running before it is called or the two
-    //    sides deadlock. pico's INIT is not lost by starting early: it goes
-    //    into the wz pty's input queue (which retains it — the keepalive fd
-    //    keeps a slave open) and `_z_connect_serial` blocks on the read
-    //    rather than re-sending, so the byte MUST survive the gap.
+    // ── The wz end of the wire is BOUND AND OPENED FIRST, and R2740 is why
+    //    that ordering is now load-bearing rather than incidental.
+    //
+    //    This file used to spawn pico first, over a comment asserting that
+    //    "pico's INIT is not lost by starting early: it goes into the wz pty's
+    //    input queue (which retains it — the keepalive fd keeps a slave open)
+    //    and `_z_connect_serial` blocks on the read rather than re-sending, so
+    //    the byte MUST survive the gap." R2727 FALSIFIED that sentence and
+    //    nothing re-read it: both the tty open (`open_serial_device`, which
+    //    ends in `clear_serial_buffers`) and the accept itself
+    //    (`BoundListener::accept_raw`'s serial arm, a second unconditional
+    //    clear) now `tcflush(TCIOFLUSH)` the device. An INIT that reached the
+    //    queue before wz opened is therefore DISCARDED, and since pico blocks
+    //    on the read rather than re-sending — the second half of that same
+    //    sentence, which is still true — neither side ever speaks again and
+    //    the link deadlocks until the test's own timeout fires.
+    //
+    //    That is not hypothetical and not a slow machine: measured on
+    //    `accept_endpoint`, this test's own accept costs 0.8-2.2 ms against a
+    //    20 s ceiling, so the hosted failure at that ceiling was a genuine
+    //    stall and not an overrun. Hosted run `35448201406` lost the
+    //    `?metadata` arm to exactly this race while the tree's Layer E inputs
+    //    were byte-identical to the previous green run's. Forcing the
+    //    interleaving (a sleep between the spawn and the accept) reproduces it
+    //    on both arms every time, and removing the two clears makes that same
+    //    forced interleaving pass — which is what identifies the clear rather
+    //    than the ordering as the mechanism.
+    //
+    //    So the acceptor opens the device BEFORE any peer exists to speak into
+    //    it, which is also upstream's deployment order (a listener is up long
+    //    before a peer dials). The SPLIT seam is what makes that expressible in
+    //    a single-threaded test body: `accept_raw` is the "cheap, local,
+    //    unblocked" half — it binds, opens the tty and runs both clears, then
+    //    returns without waiting for the peer — and `handshake` is the half
+    //    that blocks for the INIT. `accept_endpoint` is precisely
+    //    `bind_locator` + `accept_raw` + `handshake` composed
+    //    (`accept_locator` -> `accept_bound_on`), so driving the two halves
+    //    here keeps R311y805's point intact: what this foreign witness
+    //    adjudicates is still the SHIPPED path, observed at the seam the
+    //    multi-peer accept loop itself uses, not a primitive underneath it.
+    //    The parse assertions above stay: the bind re-does the split
+    //    internally from the same string, so a mis-split still opens the wrong
+    //    device here.
+    let mut listener = bind_endpoint(&wz_locator)
+        .await
+        .expect("wz binds its serial listen string");
+    let (accepted, _peer) = listener
+        .accept_raw()
+        .await
+        .expect("wz opens the tty its serial listen string names");
+
+    // ── Foreign initiator SECOND, now that the device is open and flushed.
+    //    The serial-LINK handshake (pico sends INIT, wz answers INIT|ACK) sits
+    //    below the zenoh transport and has no TCP analogue; pico implements
+    //    only its CONNECT half, so wz must already be the Responder waiting.
     //    `-n 1` makes pico publish exactly once then close, so the wz drive
     //    loop reaches a terminal state after the single Put.
     let mut z_pub_child = ChildGuard::wrap(
@@ -244,30 +292,13 @@ async fn serial_interop_over_metadata_span(metadata: &str) {
             .expect("spawn zenoh-pico z_pub"),
     );
 
-    // ── The wz end of the wire, opened FROM THE LISTEN STRING. R311y805 —
-    //    this was `accept_serial(&endpoint)` until the accept SEAM existed:
-    //    `bind_locator`'s `AnyLocator::Serial` arm was a typed `Unsupported`,
-    //    so the only way to a wz serial acceptor was to call the primitive
-    //    with an endpoint the test had parsed for itself. It now goes through
-    //    `accept_endpoint` — bind, accept, deferred Responder handshake — which
-    //    is the entry point the demo's Acceptor role uses, so what this foreign
-    //    witness adjudicates is the SHIPPED path rather than a primitive
-    //    underneath it. The parse assertions above stay: they name the split,
-    //    and `accept_endpoint` re-does it internally from the same string, so a
-    //    mis-split still opens the wrong device here.
-    //
-    //    The serial-LINK handshake (pico sends INIT, wz answers INIT|ACK) sits
-    //    below the zenoh transport and has no TCP analogue. It is why pico must
-    //    already be running: the seam's accept returns as soon as the tty is
-    //    open, but the handshake it defers still blocks until an INIT arrives.
-    let accept_cfg = AcceptConfig::default();
-    let wz_link = tokio::time::timeout(
-        Duration::from_secs(20),
-        accept_endpoint(&wz_locator, &accept_cfg),
-    )
-    .await
-    .expect("the pico serial initiator reaches wz within 20s")
-    .expect("wz binds its serial listen string, opens the tty and answers INIT|ACK");
+    // ── The deferred Responder half: await pico's INIT, answer INIT|ACK.
+    //    The device is already open, so nothing between here and the read can
+    //    discard what pico sends.
+    let wz_link = tokio::time::timeout(Duration::from_secs(20), accepted.handshake())
+        .await
+        .expect("the pico serial initiator reaches wz within 20s")
+        .expect("wz answers INIT|ACK over the tty it opened");
     assert!(
         matches!(wz_link, DialedLink::Serial { .. }),
         "a `serial/...` listen string must accept into the serial link variant"
