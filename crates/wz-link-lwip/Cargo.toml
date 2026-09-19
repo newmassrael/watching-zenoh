@@ -58,6 +58,13 @@ lwip-sys = { path = "../lwip-sys" }
 # x86_64-linux + cross-targets that have atomic ptr the default impl
 # applies).
 heapless = "0.8"
+# R2737 — the `RxSlots` seam and its `impl_rx_slots` macro, which this crate
+# used to define. The AP profile is growing a link-RX pool of its own and a
+# second copy of the trait would be a variant set split across a crate
+# boundary. This dependency is the trait-skeleton tier and carries NO
+# dependencies itself, which is why it can be added here without inverting the
+# layering that keeps this crate down to lwip-sys + heapless.
+wz-runtime-core = { path = "../wz-runtime-core" }
 
 # R311y22b — no [build-dependencies]: the scout/session rx buffer-pool codegen
 # moved to the committed out/wz-link-lwip/*.rs via the `xtask` codegen SSOT.

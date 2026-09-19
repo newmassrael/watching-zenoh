@@ -2771,6 +2771,7 @@ version = "0.1.0"
 dependencies = [
  "heapless",
  "lwip-sys",
+ "wz-runtime-core",
 ]
 
 [[package]]

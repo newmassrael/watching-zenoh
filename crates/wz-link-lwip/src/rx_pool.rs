@@ -68,103 +68,25 @@ use lwip_sys::{
 
 use crate::{LinkError, LwipLink};
 
-/// A pool of fixed-size receive slots with a borrow-then-return discipline.
-///
-/// Implemented over each SCE-generated `sce:kind="buffer-pool"` emit by
-/// [`impl_rx_slots`]. The associated [`Slot`](RxSlots::Slot) is the emit's own
-/// phantom-typed handle, so the lifecycle rules the generator encodes —
-/// `pool_return` on a slot the peripheral owns is a type error, not a runtime
-/// check — survive being seen through this trait.
-pub trait RxSlots {
-    /// Slots in the pool. From the buffer-pool SSOT, not chosen here.
-    const SLOT_COUNT: usize;
-    /// Bytes per slot. From the same SSOT.
-    const SLOT_SIZE: usize;
+// R2737 — `RxSlots` and `impl_rx_slots` MOVED to `wz-runtime-core`, and the
+// re-export below keeps every caller in this crate spelling them the same way.
+//
+// They were defined here because this was the only tier with a link-RX pool to
+// see through them. The AP profile is getting one, and a second copy of the
+// trait there would be a variant set split across a crate boundary — the shape
+// where neither copy's tests can see the other drift. The destination is the
+// trait-skeleton crate rather than `wz-session-core`, which would have made
+// this crate depend on the protocol: the two dependencies here (`lwip-sys`,
+// `heapless`) are a property worth keeping, and `wz-runtime-core` has none of
+// its own.
+use wz_runtime_core::impl_rx_slots;
+pub use wz_runtime_core::rx_slots::RxSlots;
 
-    /// A reserved slot. Opaque: the reader holds it and gives it back.
-    type Slot;
-
-    /// A pool with every slot on the freelist.
-    fn new() -> Self;
-
-    /// Take a slot off the freelist, or `None` when every slot is out.
-    ///
-    /// `None` is back-pressure, not an error: the caller drops the datagram
-    /// and counts it, which is what a bounded receive path must do.
-    fn reserve(&mut self) -> Option<Self::Slot>;
-
-    /// Writable bytes of a reserved slot — where a CPU filler copies to, and
-    /// the full [`SLOT_SIZE`](RxSlots::SLOT_SIZE) width regardless of how much
-    /// the filler will use.
-    fn buf<'a>(&'a mut self, slot: &'a mut Self::Slot) -> &'a mut [u8];
-
-    /// Readable bytes of a slot, full width. The caller pairs this with the
-    /// length it recorded at fill time; the pool does not track lengths,
-    /// because a length belongs to a datagram and a slot outlives none.
-    fn bytes<'a>(&'a self, slot: &'a Self::Slot) -> &'a [u8];
-
-    /// Return a slot to the freelist. Consumes the handle, so a reader cannot
-    /// keep reading bytes it has released.
-    fn release(&mut self, slot: Self::Slot);
-
-    /// Slots currently on the freelist. The accounting gate — see the module
-    /// docs.
-    fn free_count(&self) -> usize;
-
-    /// Pool index of a held slot, for tracing and for the tests that assert on
-    /// the emit's own `slot_state` rather than on this trait's bookkeeping.
-    fn slot_idx(slot: &Self::Slot) -> usize;
-}
-
-/// Implement [`RxSlots`] over one SCE-generated buffer-pool emit.
-///
-/// Every emit has the same shape (`pool_acquire_for_encode` / `write` /
-/// `read` / `pool_return` / `free_count`), so the impl is mechanical — but it
-/// is written out per pool rather than made generic because the emitted
-/// `Slot<CpuMut>` types are DISTINCT per pool by construction: a slot from the
-/// scout pool must not be returnable to the session pool, and keeping the
-/// types apart is what makes that a compile error.
-macro_rules! impl_rx_slots {
-    ($pool_mod:ident, $pool_ty:ident) => {
-        impl RxSlots for crate::$pool_mod::$pool_ty {
-            const SLOT_COUNT: usize = crate::$pool_mod::SLOT_COUNT;
-            const SLOT_SIZE: usize = crate::$pool_mod::SLOT_SIZE;
-
-            type Slot = crate::$pool_mod::Slot<crate::$pool_mod::CpuMut>;
-
-            fn new() -> Self {
-                <crate::$pool_mod::$pool_ty>::new()
-            }
-
-            fn reserve(&mut self) -> Option<Self::Slot> {
-                self.pool_acquire_for_encode()
-            }
-
-            fn buf<'a>(&'a mut self, slot: &'a mut Self::Slot) -> &'a mut [u8] {
-                &mut slot.write(self)[..]
-            }
-
-            fn bytes<'a>(&'a self, slot: &'a Self::Slot) -> &'a [u8] {
-                &slot.read(self)[..]
-            }
-
-            fn release(&mut self, slot: Self::Slot) {
-                slot.pool_return(self);
-            }
-
-            fn free_count(&self) -> usize {
-                <crate::$pool_mod::$pool_ty>::free_count(self)
-            }
-
-            fn slot_idx(slot: &Self::Slot) -> usize {
-                slot.idx()
-            }
-        }
-    };
-}
-
-impl_rx_slots!(scout_rx_pool_mcu, ScoutRxPoolMcu);
-impl_rx_slots!(session_rx_pool_mcu_multicast, SessionRxPoolMcuMulticast);
+impl_rx_slots!(crate::scout_rx_pool_mcu, ScoutRxPoolMcu);
+impl_rx_slots!(
+    crate::session_rx_pool_mcu_multicast,
+    SessionRxPoolMcuMulticast
+);
 
 // The unicast session pool is ONE module under two names: the default emit or
 // the slim one, never both (`lib.rs:116,136`). The impl carries the same gate
@@ -172,9 +94,9 @@ impl_rx_slots!(session_rx_pool_mcu_multicast, SessionRxPoolMcuMulticast);
 // calls is the G7 shape, and here it is the emit that is gated, so the impl
 // must be too.
 #[cfg(not(feature = "buffer-pool-session-rx-slim"))]
-impl_rx_slots!(session_rx_pool_mcu, SessionRxPoolMcu);
+impl_rx_slots!(crate::session_rx_pool_mcu, SessionRxPoolMcu);
 #[cfg(feature = "buffer-pool-session-rx-slim")]
-impl_rx_slots!(session_rx_pool_mcu_minimal, SessionRxPoolMcuMinimal);
+impl_rx_slots!(crate::session_rx_pool_mcu_minimal, SessionRxPoolMcuMinimal);
 
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 // The CPU-fill adapter: an lwIP UDP socket whose received bytes land in

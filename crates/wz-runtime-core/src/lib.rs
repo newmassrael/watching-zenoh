@@ -105,9 +105,11 @@ extern crate alloc;
 pub mod allocator;
 pub mod error;
 pub mod runtime;
+pub mod rx_slots;
 pub mod time;
 
 pub use allocator::Allocator;
 pub use error::RuntimeError;
 pub use runtime::Runtime;
+pub use rx_slots::RxSlots;
 pub use time::{TimeSource, TimeoutElapsed};
