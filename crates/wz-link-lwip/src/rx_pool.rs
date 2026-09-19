@@ -74,11 +74,13 @@ use crate::{LinkError, LwipLink};
 // They were defined here because this was the only tier with a link-RX pool to
 // see through them. The AP profile is getting one, and a second copy of the
 // trait there would be a variant set split across a crate boundary — the shape
-// where neither copy's tests can see the other drift. The destination is the
-// trait-skeleton crate rather than `wz-session-core`, which would have made
-// this crate depend on the protocol: the two dependencies here (`lwip-sys`,
-// `heapless`) are a property worth keeping, and `wz-runtime-core` has none of
-// its own.
+// where neither copy's tests can see the other drift.
+//
+// The destination is the trait-skeleton tier, not the protocol tier. The
+// dependency list here is two entries long on purpose, and the protocol tier
+// sits ABOVE the link tier, so sharing a trait through it would have run the
+// layering backwards. `wz-runtime-core` declares nothing of its own, which is
+// what makes it reachable from here at all.
 use wz_runtime_core::impl_rx_slots;
 pub use wz_runtime_core::rx_slots::RxSlots;
 

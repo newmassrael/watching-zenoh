@@ -11,13 +11,12 @@
 //! boundary is the shape that hides, because neither copy's tests can see the
 //! other drifting.
 //!
-//! The move was NOT to the obvious crate. `wz-session-core` holds the protocol
-//! and would have made the link tier depend on it — `wz-link-lwip` carries
-//! exactly two dependencies (`lwip-sys`, `heapless`) on purpose, and inverting
-//! that layering to share a trait would cost more than the duplication it
-//! avoids. This crate is the runtime-services-tier TRAIT SKELETON with no
-//! dependencies of its own, which is what lets both the link tier and the tokio
-//! host reach it without either reaching the other.
+//! The move was NOT to the obvious crate. The protocol tier would have run the
+//! layering backwards, because the link tier sits below it and keeps a
+//! two-entry dependency list on purpose. This crate is the
+//! runtime-services-tier TRAIT SKELETON that declares nothing of its own,
+//! which is what lets both the link tier and the tokio host reach it without
+//! either reaching the other.
 //!
 //! ## What the seam deliberately hides
 //!
