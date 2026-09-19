@@ -1011,7 +1011,14 @@ CITATION = re.compile(r"\b((?:[A-Za-z0-9_.-]+/)*[A-Za-z0-9_.-]+\.(?:rs|c|h))(?::
 # close witness and now the opener's own four arms are executing tests owning
 # its symbols — so this pin falls while UNREACHED and NO_SYMBOL hold at 3 and 2.
 # READ off the census's own FAIL line.
-PIN_REACHED = 20
+# R2727 — 20 -> 19. `transport-link-serial` RETIRES: `release_on_close` was its
+# last residual clause, so it grades COMPLETE and leaves the PARTIAL population,
+# taking its bucket with it. It was in `reached` — `serial_pty_e2e` is an
+# executing integration test owning its symbols, and this round added three more
+# arms to it — so this pin falls while UNREACHED and NO_SYMBOL hold at 3 and 2.
+# READ off the census's own FAIL line, which printed `reached: 19 against a pin
+# of 20`.
+PIN_REACHED = 19
 PIN_UNREACHED = 3
 PIN_NO_SYMBOL = 2
 # R2534 — 346 -> 347. The atom is `adminspace-metrics` and the citation is the
@@ -1734,7 +1741,17 @@ PIN_NO_SYMBOL = 2
 # takes its reason's WHOLE citation set with it, which is why this drop is not
 # the four above run backwards and why the number is read off the census's own
 # FAIL line rather than reasoned out from the previous entry's arithmetic.
-PIN_WZ_CITATIONS = 109
+# R2727 — 109 -> 97. `transport-link-serial` DEPARTS (COMPLETE, `release_on_close`
+# built), and it is the heaviest departure this pin has recorded because its
+# reason had accreted five rounds of clause-closing prose, each of which had to
+# name the tracked wz file it closed against — R2704 alone added three, and this
+# round's own append names the retain slot, the writer-task channel, the clear
+# helper, the bind site whose verb R2723 changed and the writer handle's abort.
+# A departure takes the reason's WHOLE citation set with it, so this is not the
+# +3 of R2704 run backwards; the number is READ off the census's own FAIL line,
+# `wz citations: 97 against a pin of 109`. AMBIGUOUS holds at 18, which says this
+# atom's citations were all rooted rather than spread across buckets.
+PIN_WZ_CITATIONS = 97
 # R2626 — 44 -> 42, and this one is worth a sentence because it HELD through
 # every earlier retirement in this run (R2612, R2622). `time-hlc`'s reason is the
 # first retiree carrying AMBIGUOUS citations of its own: its oldest clauses cite
