@@ -1842,69 +1842,22 @@ impl AcceptedLink {
         })
     }
 
-    /// Whether this accepted link's transport is a MESH-CAPABLE acceptor — i.e.
-    /// wz's CURRENT accept path for it yields multiple DISTINCT per-peer accepted
-    /// connections, so the multi-accept [`accept_loop`](crate::accept_loop) can
-    /// hold N faces off one listener. Since R311y392 the stream + same-host families
-    /// are `true`, and R311y404 flips `Quic` to `true` (its deferred-handshake split;
-    /// see the loop-safety note below) — every accepted-link variant is now
-    /// mesh-capable.
-    ///
-    /// `Unixpipe` flipped `false -> true` at R311y392 when the multi-client acceptor
-    /// landed: unixpipe's invitation handshake + per-connection dedicated sub-pipe
-    /// pair (the zenoh `UnicastPipeListener` protocol) now yields N distinct
-    /// per-peer links from one listener, wired the udp-demux way (a spawned acceptor
-    /// task feeds completed links over a channel; `accept_raw` blocks on `recv`).
-    /// The old R311y380 `accept_unixpipe_on` was a single-connection non-blocking
-    /// open — the only non-mesh transport, and the reason the reject-throttle
-    /// existed; both are retired.
-    ///
-    /// This is the loop's RUNTIME backstop (consulted in the `Step::Accepted` arm of
-    /// [`accept_loop`](crate::accept_loop)); its BIND-time twin on [`BoundListener`]
-    /// fail-fasts a non-mesh `--listen` at the mesh caller. R311y404 flips `Quic`
-    /// `false -> true`: its deferred-handshake split (the crypto runs in
-    /// [`Self::handshake`], off the accept path) makes a quic accept loop-safe, so the
-    /// backstop no longer rejects it. A quic listener reaches the loop with a threaded
-    /// cert: the `--router` (R311y405) + `--peer`/`--router-hat` (R311y406) CLI paths
-    /// and pico all thread one, as can a direct-API caller; only a cert-LESS bind is
-    /// rejected at cert-absence first. This match is wildcard-free so a new
-    /// `AcceptedLink` variant forces an explicit mesh decision here.
-    pub fn supports_mesh_multi_peer(&self) -> bool {
-        match self {
-            AcceptedLink::Tcp(_) => true,
-            #[cfg(feature = "transport-link-ws")]
-            AcceptedLink::Ws(_) => true,
-            #[cfg(feature = "transport-link-tls")]
-            AcceptedLink::Tls(..) => true,
-            #[cfg(feature = "transport-link-unixsock")]
-            AcceptedLink::Unixsock(_) => true,
-            #[cfg(all(feature = "transport-link-vsock", target_os = "linux"))]
-            AcceptedLink::Vsock(_) => true,
-            // R311y392: the multi-client acceptor makes unixpipe mesh-capable, so
-            // this flipped `false -> true` (its `BoundListener` twin too).
-            #[cfg(all(feature = "transport-link-unixpipe", target_os = "linux"))]
-            AcceptedLink::Unixpipe(_) => true,
-            #[cfg(feature = "transport-link-udp")]
-            AcceptedLink::UdpDemuxed { .. } => true,
-            // R311y404 — quic joins the mesh-capable family (`false -> true`, its
-            // BoundListener twin too): the deferred-handshake split runs the crypto in
-            // `handshake` (off the accept loop), so a quic accept is loop-safe and the
-            // multi-peer loop holds N quic faces like tls.
-            #[cfg(feature = "transport-link-quic")]
-            AcceptedLink::Quic { .. } => true,
-            // Mesh-capable for the SAME reason as `Quic` (deferred crypto handshake).
-            #[cfg(feature = "transport-link-quic-datagram")]
-            AcceptedLink::QuicDatagram { .. } => true,
-            // R311y805 — `false`, matching its `BoundListener` twin: a tty is
-            // point-to-point, so this acceptor yields exactly ONE peer and there is
-            // no N for the loop to hold. This is the FIRST subject the loop's
-            // reject arm has had since R311y404 emptied it -- though the bind-time
-            // twin fail-fasts a mesh `--listen serial/...` first, so the reject
-            // arm is reached only by a caller that skipped the bind-time check.
-            #[cfg(feature = "transport-link-serial")]
-            AcceptedLink::Serial { .. } => false,
-        }
-    }
+    // ⛔ R2723 — `AcceptedLink::supports_mesh_multi_peer` IS GONE, and it went
+    // because its only consumer went with it. It was the accept loop's runtime
+    // backstop: the loop dropped any link whose acceptor could not yield N
+    // CONCURRENT peers. R2722 gave the serial listener link-liveness feedback, so
+    // a one-at-a-time acceptor feeds the loop like any other and the loop stopped
+    // asking. What remained was a `pub` predicate whose only callers were the two
+    // tests asserting it — a rule with no subject, which this tree strikes rather
+    // than keeps (R311y794 did the same to the SPDX `runtime/**` clause).
+    //
+    // The FACT it stated is not lost and is not duplicated either: its BIND-time
+    // twin `BoundListener::supports_mesh_multi_peer` still carries it, still has
+    // a wildcard-free match forcing a new transport to declare its cadence, and
+    // now REPORTS that cadence to an operator instead of refusing the listen.
+    // Every `AcceptedLink` comes from a `BoundListener` accept, so one
+    // declaration is the whole truth and two was the duplication that let three
+    // comments about this predicate go stale together.
 
     /// The one-shot [`accept_bound`]'s "accepted peer {peer}{note}" log suffix —
     /// `""` for tcp, `"; ws server upgrade"` / `"; tls server handshake"` for the

@@ -2815,36 +2815,27 @@ where
                 // keyed by its handshake zid, so an IP peer AND a mesh-capable
                 // non-IP peer (unixsock / vsock / unixpipe — each a genuine per-peer
                 // stream accept) are all held as faces; `peer` (an `AcceptedPeer`)
-                // is threaded straight into the open future as a log/event tag. A
-                // NON-mesh-capable acceptor is rejected here. Since R311y404 quic is
-                // mesh-capable too (its deferred-handshake split moved the crypto off
-                // this accept path), so `AcceptedLink::supports_mesh_multi_peer` is
-                // `true` for EVERY transport and this reject arm fires for none. It
-                // stays the runtime backstop for a future non-mesh acceptor (the
-                // wildcard-free match forces the decision); its `BoundListener` twin is
-                // the bind-time first line.
-                if !accepted.supports_mesh_multi_peer() {
-                    on_event(&AcceptEvent::AcceptError(io::Error::new(
-                        io::ErrorKind::Unsupported,
-                        format!(
-                            "the mesh accept loop cannot hold a {peer} face: its acceptor is \
-                             single-connection, not multi-peer — dropping (the one-shot \
-                             `accept_bound` path serves it)"
-                        ),
-                    )));
-                    drop(accepted);
-                    // Throttle before re-arming, the same guard the
-                    // `Step::Accepted(Err)` arm applies: a hypothetical future
-                    // non-mesh acceptor that returned immediately (as the retired
-                    // R311y380 non-blocking unixpipe accept did) would otherwise
-                    // reject-and-re-arm at CPU speed without this sleep. Bounds the
-                    // mis-config to one reject per throttle interval, matching
-                    // zenoh's accept_task parity. (Reached today only by a direct-API
-                    // quic caller; the shipped `--router quic/` path is rejected at
-                    // bind cert-absence first — kept as the runtime backstop.)
-                    clock.sleep(ACCEPT_ERROR_THROTTLE_MS).await;
-                    continue;
-                }
+                // is threaded straight into the open future as a log/event tag.
+                //
+                // ⛔ R2723 — THE NON-MESH REJECT ARM IS GONE, and it is the CADENCE
+                // of an acceptor that made it obsolete rather than a decision to be
+                // more permissive. It dropped any link whose acceptor could not
+                // yield N CONCURRENT peers, and the only such acceptor is serial: a
+                // tty is point-to-point. But "N at once" and "N over time" are
+                // different questions, and the loop only ever needed the second.
+                // R2722 gave the serial listener link-liveness feedback, so its
+                // `accept_raw` parks while a link is live and yields the next peer
+                // once that one has dropped — and `accept_any` rebuilds its future
+                // set every iteration, so a listener that serves peers ONE AT A TIME
+                // feeds this loop exactly as a multi-peer one does. The budget is
+                // enforced by the listener, not by an admission test here.
+                //
+                // Widening the predicate instead would have been the wrong repair
+                // twice over: it is a TRUE statement about concurrency that must
+                // keep answering `false` for a tty, and a widened version would
+                // admit every variant, leaving this arm a check that can never fire.
+                // The surviving consumer is the BIND-time one, which now reports the
+                // cadence to an operator rather than refusing the listen.
                 let id = FaceId(next_id);
                 next_id += 1;
                 summary.accepted += 1;
@@ -4479,71 +4470,120 @@ mod tests {
         );
     }
 
-    /// Slice B — pins the loop's mesh-capability BACKSTOP predicate
-    /// ([`AcceptedLink::supports_mesh_multi_peer`], consulted in the
-    /// `Step::Accepted` arm) at the TRUE polarity: tcp is mesh-capable. The match
-    /// is wildcard-free, so a NEW `AcceptedLink` variant forces a decision at
-    /// compile time; this pins the value for tcp (a representative `true`). Since
-    /// R311y392 the stream + same-host families are mesh-capable (and R311y404's quic
-    /// too, via its deferred-handshake split; its BIND twin is pinned by
-    /// `boundlistener_quic_is_mesh_capable`, and this AcceptedLink polarity is
-    /// compiler-forced by the wildcard-free match) — `acceptedlink_unixpipe_is_mesh_capable`
-    /// pins the once-`false` unixpipe arm at its new `true` polarity.
-    #[tokio::test]
-    async fn acceptedlink_tcp_is_mesh_capable() {
-        use crate::session_open::AcceptedLink;
-        let listener = bind_tcp(
-            "127.0.0.1:0".parse().expect("loopback addr"),
-            &crate::link_socket::LinkSocket::NONE,
+    // ⛔ R2723 — `acceptedlink_tcp_is_mesh_capable` and
+    // `acceptedlink_unixpipe_is_mesh_capable` are GONE with the predicate they
+    // pinned. They were the ONLY callers `AcceptedLink::supports_mesh_multi_peer`
+    // had left once the loop stopped consulting it, and a test whose subject has
+    // been deleted is not coverage. The BIND-time twin keeps its own pins
+    // (`boundlistener_*_is_mesh_capable` in `session_open`), which is where the
+    // cadence is now declared and reported.
+    /// ⛔ R2723 — THE MESH LOOP HOLDS A FACE OFF A TTY, which it could not do
+    /// before this round however the listener behaved.
+    ///
+    /// The `Step::Accepted` arm used to drop any link whose acceptor could not
+    /// yield N CONCURRENT peers, and serial is the only such acceptor, so a
+    /// `serial/...` listener reached the loop and had its link thrown away with an
+    /// `AcceptError`. That was the right call while a wz serial listener yielded
+    /// ONE link EVER; R2722 gave it link-liveness feedback, so it serves peers one
+    /// AT A TIME and `accept_any` — which rebuilds its future set every iteration
+    /// — feeds the loop from it like any other listener.
+    ///
+    /// THE DISCRIMINATOR IS `summary.accepted`. Restoring the reject arm makes
+    /// this arm report 0 accepted and 0 established while everything else about
+    /// the test still runs, so it fails on the admission decision specifically
+    /// rather than on the transport working at all.
+    #[cfg(feature = "transport-link-serial")]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn accept_loop_holds_a_face_off_a_serial_listener() {
+        use crate::serial_pipeline::{drive_serial_handshake, SerialPort};
+        use crate::session_open::{bind_locator, AcceptConfig};
+        use tokio_serial::SerialStream;
+        use wz_session_core::locator::{parse_any_locator, AnyLocator};
+        use wz_session_core::serial_link::SerialRole;
+
+        let (mut master, slave) = SerialStream::pair().expect("openpty serial pair");
+        let path = tokio_serial::SerialPort::name(&slave).expect("pty slave has a device path");
+        // The slave handle stays open for the test's life: the listener opens the
+        // same device by PATH, and letting this one close first would tear the pty
+        // down under it.
+        let _slave_keepalive = slave;
+
+        let locator = format!("serial/{path}#baudrate=115200");
+        let endpoint = match parse_any_locator(&locator).expect("locator parses") {
+            AnyLocator::Serial(ep) => ep,
+            other => panic!("expected AnyLocator::Serial, got {other:?}"),
+        };
+        let listener = bind_locator(
+            AnyLocator::Serial(endpoint.clone()),
+            &AcceptConfig::default(),
         )
         .await
-        .expect("bind tcp");
-        let addr = listener.local_addr().expect("local addr");
-        // A loopback accept yields a real TcpStream for the AcceptedLink::Tcp arm.
-        let (accepted_stream, _client) = tokio::join!(
-            async { listener.accept().await.expect("accept").0 },
-            async { TcpStream::connect(addr).await.expect("connect") },
-        );
-        let accepted = AcceptedLink::Tcp(accepted_stream);
-        assert!(
-            accepted.supports_mesh_multi_peer(),
-            "tcp accept is mesh-capable"
-        );
-    }
+        .expect("a serial listen binds");
 
-    /// R311y392 — the once-`false` unixpipe arm now pins at `true`: an accepted
-    /// unixpipe link (produced by the multi-client acceptor task after a client's
-    /// invitation handshake) IS mesh-capable, so the `Step::Accepted` backstop no
-    /// longer rejects it. Replaces the retired `acceptedlink_unixpipe_is_not_mesh_capable`.
-    /// Drives one real client through `dial_unixpipe` so the acceptor yields a
-    /// genuine `AcceptedLink::Unixpipe` (there is no standalone open any more — the
-    /// link only exists after a handshake).
-    #[cfg(all(feature = "transport-link-unixpipe", target_os = "linux"))]
-    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-    async fn acceptedlink_unixpipe_is_mesh_capable() {
-        use crate::session_open::AcceptedLink;
-        use crate::unixpipe_pipeline::{bind_unixpipe, dial_unixpipe};
-        let base = std::env::temp_dir()
-            .join(format!("wz-unixpipe-cap-{}", std::process::id()))
-            .to_string_lossy()
-            .into_owned();
-        let mut acc = bind_unixpipe(&base, None)
-            .await
-            .expect("bind the unixpipe acceptor");
-        // Drive one client through the invitation handshake; the acceptor task
-        // yields the accepted listener-side link.
-        let dialer = tokio::spawn({
-            let base = base.clone();
-            async move { dial_unixpipe(&base, None).await }
-        });
-        let link = acc.recv_new_link().await.expect("accept one client");
-        let _client = dialer.await.unwrap().expect("dial completes");
-        let accepted = AcceptedLink::Unixpipe(link);
-        assert!(
-            accepted.supports_mesh_multi_peer(),
-            "unixpipe accept is mesh-capable (multi-client acceptor, R311y392)"
+        let (go_tx, go_rx) = watch::channel(false);
+        let on_event = {
+            let go_tx = go_tx.clone();
+            move |event: &AcceptEvent| {
+                if let AcceptEvent::FaceUp(_) = event {
+                    let _ = go_tx.send(true);
+                }
+            }
+        };
+        let acceptor = accept_loop(
+            listener,
+            acceptor_params(),
+            TokioTime::new(),
+            DEFAULT_OPEN_TICK_MS,
+            shutdown_on(go_rx.clone()),
+            on_event,
+            &NoOpForwarder,
         );
-        drop(acc);
+        let initiator = async {
+            drive_serial_handshake(&mut master, SerialRole::Initiator)
+                .await
+                .expect("the peer's serial-link handshake reaches Connected");
+            let mut params = fixture_session_init_params();
+            params.zid = vec![0x01; 4];
+            let mut opened = initiate_and_open_session(
+                DialedLink::Serial {
+                    stream: SerialPort::dialled(master),
+                    endpoint,
+                },
+                params,
+                TokioTime::new(),
+                Some(10_000),
+                DEFAULT_OPEN_TICK_MS,
+            )
+            .await
+            .expect("the tty peer reaches Established against the loop");
+
+            let timeouts = SessionTimeouts::spec_defaults();
+            let mut go = go_rx.clone();
+            tokio::select! {
+                _ = go.wait_for(|&v| v) => {}
+                _ = drive_session_until_terminal(
+                    &mut opened.inbound, &opened.actions, &mut opened.engine,
+                    None, &opened.clock, &timeouts, |_e| {},
+                ) => {}
+            }
+            opened.drain_to_close().await;
+        };
+
+        let summary = tokio::time::timeout(Duration::from_secs(20), async {
+            let (summary, ()) = tokio::join!(acceptor, initiator);
+            summary
+        })
+        .await
+        .expect("the serial face comes up within 20s");
+
+        assert_eq!(
+            summary.accepted, 1,
+            "the loop ACCEPTED the tty link instead of dropping it as non-mesh"
+        );
+        assert_eq!(
+            summary.established, 1,
+            "and carried it to Established, so the admission was not merely a count"
+        );
     }
 
     /// A peer that connects then closes WITHOUT handshaking surfaces as

@@ -3795,25 +3795,27 @@ async fn run_router_until(
     // backstop (`AcceptedLink::supports_mesh_multi_peer`, the `Step::Accepted`
     // arm).
     //
-    // ⚠ R2722 CORRECTION -- this comment used to end "since R311y404 EVERY
-    // acceptor is mesh-capable, so this guard rejects no shipped transport
-    // today; it stays as defensive code". That stopped being true at R311y805,
-    // which made `Serial` `false`: the guard rejects a SHIPPED transport, and a
-    // `--listen serial/...` on the router path fails here. It is left rejecting
-    // for now rather than quietly widened, because the right answer is not "let
-    // it through" -- a serial listener yields one face AT A TIME, so what the
-    // loop needs is a face budget of one, not an exemption from the check.
-    // Deriving that is the remaining half of this atom's seam.
+    // ⛔ R2723 -- THIS NO LONGER REFUSES. It used to reject any listener that
+    // could not yield N CONCURRENT peers, which since R311y805 has meant serial
+    // and only serial, so a `--listen serial/...` router could not be started at
+    // all. That was right while a wz serial listener yielded ONE link EVER;
+    // R2722 gave it link-liveness feedback, so it now serves peers one AT A TIME
+    // and feeds the accept loop like any other listener (`accept_any` rebuilds
+    // its future set each iteration, and the listener parks while its link is
+    // live). A gateway bridging a tty peer into a mesh is a real deployment and
+    // upstream serves it, so refusing was a parity gap rather than a guard.
+    //
+    // The predicate is still TRUE and still worth telling an operator: a router
+    // listening on a tty holds one face at a time off it, which is not what
+    // "listening" implies for every other transport. So the verb changes from
+    // refuse to REPORT -- the fact reaches the log, and the bind proceeds.
     if !listener.supports_mesh_multi_peer() {
-        return Err(io::Error::new(
-            io::ErrorKind::Unsupported,
-            format!(
-                "wz-ap-demo router: --listen {listen:?} bound a {} listener whose acceptor is \
-                 single-connection (not multi-peer) — the mesh router cannot hold faces on it; \
-                 use a stream/datagram transport (tcp/ws/tls/unixsock/vsock/udp)",
-                listener.transport_name()
-            ),
-        ));
+        log::info!(
+            "wz-ap-demo router: --listen {listen:?} is a {} listener, which carries ONE peer at \
+             a time — the router holds a single face off it and accepts the next once that peer \
+             has gone (every other transport holds N concurrently)",
+            listener.transport_name()
+        );
     }
     let local = listener.local_addr_display()?;
     #[cfg(feature = "routing-routes")]

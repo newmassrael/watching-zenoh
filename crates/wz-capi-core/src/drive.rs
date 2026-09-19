@@ -631,17 +631,18 @@ async fn drive_listen(endpoint: String, tls: CapiTlsConfig, ctx: DriveContext) {
     // the pico twin of run_router's bind-time guard and the BIND-time twin of the
     // accept loop's runtime `AcceptedLink::supports_mesh_multi_peer` backstop.
     //
-    // ⚠ R2722 CORRECTION -- this comment used to end "every acceptor is
-    // mesh-capable, so this guard rejects no shipped transport; it stays
-    // defensive". R311y805 made `Serial` `false`, so it rejects a SHIPPED
-    // transport: a pico `z_open(listen="serial/...")` fails here. Left
-    // rejecting rather than quietly widened -- a serial listener yields one
-    // face AT A TIME, so the loop needs a face budget of one rather than an
-    // exemption, which is the remaining half of that atom's seam.
-    if !listener.supports_mesh_multi_peer() {
-        let _ = tx.send(false);
-        return;
-    }
+    // ⛔ R2723 -- THIS NO LONGER REFUSES, for the reason its `run_router` twin
+    // records: the guard rejected any acceptor that could not yield N CONCURRENT
+    // peers, which since R311y805 has meant serial alone, so a
+    // `z_open(listen="serial/...")` returned `Z_ERR_GENERIC`. R2722 gave the
+    // serial listener link-liveness feedback, so it serves peers one AT A TIME
+    // and feeds the accept loop like any other listener. The predicate is still
+    // true, and its `run_router` twin REPORTS it; this crate does not, because it
+    // has no logging dependency and adding one so a C-ABI core can emit a single
+    // advisory line would be a heavier trade than the line is worth. Its only
+    // channel to a caller is `tx.send(bool)`, which says opened-or-not and has no
+    // room for an advisory -- so the guard is gone rather than turned into an
+    // empty block dressed as one.
     // R311y820 — drawn HERE, above the `tx.send(true)` below, and the placement
     // is the point: after that send the C caller has already been told the open
     // succeeded, so an entropy failure could only be reported as "no peer ever

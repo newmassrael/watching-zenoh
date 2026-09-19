@@ -474,10 +474,17 @@ async fn serial_listen_binds_without_opening_the_device_and_addresses_by_tty() {
         io::ErrorKind::Unsupported,
         "the IP accessor is a typed Unsupported, as for the other non-IP families"
     );
+    // R2723 — still `false`, and that is a STATEMENT now rather than a refusal.
+    // One tty carries one peer AT A TIME, so a mesh caller holds a single face
+    // off it and accepts the next once that peer has gone; the bind sites REPORT
+    // the cadence instead of rejecting the listen, and the accept loop no longer
+    // has an admission test at all. The value must stay `false` for exactly the
+    // reason it always did — a widened predicate would answer `true` for every
+    // variant and say nothing.
     assert!(
         !listener.supports_mesh_multi_peer(),
-        "one tty carries one peer: a serial listener is NOT mesh-capable, so a \
-         mesh `--listen` fail-fasts at bind instead of holding a face it cannot keep"
+        "one tty carries one peer at a time: a serial listener is NOT mesh-capable, \
+         and a mesh caller is told so rather than refused"
     );
 
     // The advertised string must survive wz's OWN parser and land back on the
@@ -533,10 +540,12 @@ async fn serial_accept_returns_before_the_peer_speaks_and_defers_the_link_handsh
         AcceptedPeer::NonIp("serial"),
         "a tty open names no peer"
     );
-    assert!(
-        !accepted.supports_mesh_multi_peer(),
-        "the runtime backstop agrees with the bind-time twin: serial is single-connection"
-    );
+    // R2723 — the accepted-side mesh predicate is GONE, and this assertion went
+    // with it rather than being reworded: the loop no longer asks an accepted
+    // link whether its acceptor is multi-peer, because a one-at-a-time acceptor
+    // now feeds it like any other. The cadence is declared ONCE, at bind, and
+    // `serial_listen_binds_without_opening_the_device_and_addresses_by_tty` is
+    // where it is pinned.
 
     // Now let the peer speak, and run the DEFERRED half on that same link.
     let peer_side = async {
