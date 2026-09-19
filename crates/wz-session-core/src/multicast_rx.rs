@@ -30,14 +30,16 @@ use core::net::SocketAddr;
 
 use crate::driver_loop::{DriverLoopOutcome, IterationEvent};
 use crate::inbound::{parse_inbound, InboundFrame};
-use crate::multicast_dispatch::{FrameIngest, MulticastDispatcher};
+use crate::multicast_dispatch::{FrameIngest, JoinOutcome, MulticastDispatcher};
 #[cfg(feature = "transport-qos")]
 use crate::multicast_join::decode_join_qos;
 use crate::multicast_join::{decode_join, validate_join};
 use crate::multicast_params::MulticastParams;
-use crate::multicast_peer_lost::MulticastPeerLostReason;
+use crate::multicast_peer_arrived::MulticastPeerArrived;
+use crate::multicast_peer_lost::{MulticastPeerId, MulticastPeerLostReason};
 use crate::network_message::parse_frame_payload;
 use crate::wire_const;
+use wz_codecs::whatami::WhatAmI;
 // R311mh — the reassembly-divergent tail SSOT (dispatch_multicast_inbound_reassembling
 // below): the Fragment / FrameOutOfOrder / Close handlers a reassembly-capable
 // loop layers onto the classify. Gated like ingest_multicast_fragment.
@@ -176,23 +178,62 @@ where
                         // seeds its single DEFAULT conduit. `decode_join_qos` parses
                         // the JOIN `ext_qos` (`None` = a non-qos peer), and the
                         // per-priority next-SNs seed each of the peer's conduits.
+                        // R2728 (§5.21 `router-multicast-faces`) — KEEP the
+                        // admission outcome. The dispatcher has always computed
+                        // the `Admitted` / `Refreshed` split and both call sites
+                        // here discarded it, so the one fact that separates a new
+                        // peer from a live peer's periodic beacon was free and
+                        // thrown away. `None` is the QoS-refused case below,
+                        // where no admission is attempted at all.
                         #[cfg(feature = "transport-qos")]
-                        {
+                        let admission = {
                             let qos_next_sns = decode_join_qos(bytes);
                             // Admit unless the peer is qos AND this node is not
                             // (the ONE refused case): `peer_non_qos || local_qos`.
                             if qos_next_sns.is_none() || params.is_qos {
-                                dispatcher.ingest_join_qos(
+                                Some(dispatcher.ingest_join_qos(
                                     join.zid,
                                     src,
                                     baseline,
                                     qos_next_sns,
                                     now_ms,
-                                );
+                                ))
+                            } else {
+                                None
                             }
-                        }
+                        };
                         #[cfg(not(feature = "transport-qos"))]
-                        dispatcher.ingest_join(join.zid, src, baseline, now_ms);
+                        let admission =
+                            Some(dispatcher.ingest_join(join.zid, src, baseline, now_ms));
+                        // R2728 — announce the ARRIVAL, the half this surface
+                        // lacked: the departure event has existed since R311y784
+                        // and nothing ever said a peer had COME. Fired only on
+                        // `Admitted`, which is the branch that allocated the slot
+                        // — the same call site both references announce from
+                        // (`zenoh/src/net/routing/gateway.rs` @
+                        // `pub fn new_peer_multicast`, which is where zenoh mints
+                        // that peer's FACE, and
+                        // `vendor/zenoh-pico/src/transport/multicast/rx.c` @
+                        // `_z_connectivity_peer_connected(`). A `Refreshed`
+                        // beacon must NOT re-announce: a consumer that builds
+                        // per-peer state on arrival would rebuild it every join
+                        // interval.
+                        if matches!(admission, Some(JoinOutcome::Admitted)) {
+                            on_event(IterationEvent::MulticastPeerArrived(MulticastPeerArrived {
+                                peer: MulticastPeerId::from_wire(join.zid),
+                                // The role is read off the BEACON, not off
+                                // `JoinBaseline::whatami` — that field is
+                                // `multicast-declarations`-gated because the
+                                // Designated-Router election is what added
+                                // it, and this announcement is owed on every
+                                // build that has a multicast ingress. Same
+                                // projection either way
+                                // (`WhatAmI::from_wire` on the 2-bit JOIN
+                                // field, `None` for a code this node does not
+                                // recognize), taken one step nearer the wire.
+                                whatami: WhatAmI::from_wire(join.whatami()),
+                            }));
+                        }
                         // R2417 — negotiate this peer's protocol PATCH level off
                         // the SAME beacon, after the admission above: the level
                         // is the sole gate on reading its fragment chains under
@@ -768,5 +809,133 @@ mod batch_walk_tests {
         assert!(matches!(next, MulticastRxNext::Done), "{next:?}");
         assert!(d.peer_index_by_src(PEER).is_some(), "the JOIN still landed");
         assert_eq!(polls, 0, "and nothing was invented from the tail");
+    }
+
+    /// A beacon from a peer announcing `whatami`, through the REAL encoder so
+    /// the fixture cannot drift from what wz emits. The role is the field the
+    /// arrival event carries, so it has to be chooseable.
+    fn peer_join_as(zid: &[u8], whatami: WhatAmI) -> Vec<u8> {
+        let mut p = params(zid);
+        p.whatami = whatami;
+        encode_join(
+            &p,
+            &MulticastTxConduits::new(sn::mask_from_res(p.seq_num_res)),
+        )
+    }
+
+    /// Collect every arrival a datagram produces, so a test can assert the
+    /// COUNT as well as the contents — the count is the half that separates an
+    /// admission from a refresh.
+    fn arrivals_of<const N: usize>(
+        d: &mut MulticastDispatcher<N>,
+        local: &MulticastParams,
+        unit: &[u8],
+        now_ms: u64,
+    ) -> Vec<crate::multicast_peer_arrived::MulticastPeerArrived> {
+        let mut seen = Vec::new();
+        dispatch_multicast_inbound(d, local, unit, PEER, now_ms, &mut |event| {
+            if let IterationEvent::MulticastPeerArrived(a) = event {
+                seen.push(a);
+            }
+        });
+        seen
+    }
+
+    /// R2728 (§5.21 `router-multicast-faces`) — an admitted peer is ANNOUNCED,
+    /// carrying the identity and the role its JOIN declared.
+    ///
+    /// The departure half has existed since R311y784 and this half did not, so
+    /// the first observable fact about any group peer was its removal. Both
+    /// references announce from the branch that allocates the peer its entry:
+    /// zenoh mints that peer's FACE there
+    /// (`zenoh/src/net/routing/gateway.rs` @ `pub fn new_peer_multicast`) and
+    /// pico fires its connectivity callback there
+    /// (`vendor/zenoh-pico/src/transport/multicast/rx.c` @
+    /// `_z_connectivity_peer_connected(`).
+    ///
+    /// The ROLE is asserted, not just the zid: it is what upstream's
+    /// face-builder classifies the new face by, and a Router-announcing peer is
+    /// the case the Designated-Router election turns on.
+    #[test]
+    fn an_admitted_multicast_peer_is_announced_with_its_zid_and_role() {
+        let mut d = running::<4>();
+        let local = params(&[0x11; 4]);
+        let unit = peer_join_as(&[0x22; 4], WhatAmI::Router);
+
+        let seen = arrivals_of(&mut d, &local, &unit, 1_000);
+
+        assert!(d.peer_index_by_src(PEER).is_some(), "the JOIN was admitted");
+        assert_eq!(seen.len(), 1, "exactly one arrival for one admission");
+        assert_eq!(
+            seen[0].peer.as_slice(),
+            &[0x22; 4],
+            "the arrival names the peer that joined",
+        );
+        assert_eq!(
+            seen[0].whatami,
+            Some(WhatAmI::Router),
+            "and the role it announced, which is what a face is classified by",
+        );
+    }
+
+    /// R2728 — a live peer's periodic beacon is a REFRESH and announces
+    /// nothing.
+    ///
+    /// This is the assertion the event exists to satisfy rather than a corner
+    /// case: a JOIN beacon repeats every `join_interval_ms` for as long as the
+    /// peer is on the group, so a consumer that built per-peer state on every
+    /// arrival would rebuild it forever. The dispatcher has always separated
+    /// `Admitted` from `Refreshed`; until this round both call sites discarded
+    /// that outcome, which is exactly why announcing was not possible without
+    /// announcing wrongly.
+    #[test]
+    fn a_live_peers_repeat_beacon_refreshes_and_announces_nothing() {
+        let mut d = running::<4>();
+        let local = params(&[0x11; 4]);
+        let unit = peer_join_as(&[0x22; 4], WhatAmI::Peer);
+
+        let first = arrivals_of(&mut d, &local, &unit, 1_000);
+        assert_eq!(first.len(), 1, "the admitting beacon announces");
+
+        // The SAME peer beacons again, inside its lease. Two further beacons,
+        // so a fixture that happened to hold on one repeat cannot pass.
+        let second = arrivals_of(&mut d, &local, &unit, 1_500);
+        let third = arrivals_of(&mut d, &local, &unit, 2_000);
+
+        assert!(
+            d.peer_index_by_src(PEER).is_some(),
+            "the peer is still admitted — the beacons were not refusals",
+        );
+        assert_eq!(
+            (second.len(), third.len()),
+            (0, 0),
+            "a refresh is not an arrival",
+        );
+    }
+
+    /// R2728 — a peer that LEFT and comes back is announced again.
+    ///
+    /// The anti-vacuity arm of the refresh test above: a producer that fired
+    /// only on the very first JOIN this node ever saw would also pass that
+    /// test, and would be wrong. The event tracks ADMISSION, so the readmission
+    /// after a departure is a second arrival — and the two answers are only
+    /// distinguishable because this fixture makes the peer actually leave.
+    #[test]
+    fn a_peer_that_left_and_rejoined_is_announced_again() {
+        let mut d = running::<4>();
+        let local = params(&[0x11; 4]);
+        let unit = peer_join_as(&[0x22; 4], WhatAmI::Peer);
+
+        assert_eq!(arrivals_of(&mut d, &local, &unit, 1_000).len(), 1);
+
+        // Announced departure: the peer multicasts a Close, which frees its
+        // slot (the `Closed` reason, not an inferred lease expiry).
+        let mut lost = 0usize;
+        d.close_by_src_with(PEER, |_| lost += 1);
+        assert_eq!(lost, 1, "the peer really left before it came back");
+        assert!(d.peer_index_by_src(PEER).is_none(), "its slot was freed");
+
+        let again = arrivals_of(&mut d, &local, &unit, 3_000);
+        assert_eq!(again.len(), 1, "a readmission is an arrival, not a refresh");
     }
 }

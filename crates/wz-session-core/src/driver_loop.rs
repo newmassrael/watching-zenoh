@@ -351,6 +351,25 @@ pub enum IterationEvent<'a> {
     /// consumer's match — stays feature-independent; only the producers (the
     /// two drive loops) are `session-multicast`-gated. `Copy`.
     MulticastPeerLost(MulticastPeerLost),
+    /// R2728 — a multicast group peer was ADMITTED, by the JOIN that allocated
+    /// it a slot. Fired ONCE per admission, never on the refresh a live peer's
+    /// periodic beacon takes — the `JoinOutcome::Admitted` / `Refreshed` split
+    /// the dispatcher already computes and, until this round, discarded.
+    ///
+    /// The admitting twin of [`MulticastPeerLost`], and it closes the asymmetry
+    /// that variant's own doc left standing: wz told an application a peer had
+    /// gone and never told it one had come, so the first observable fact about
+    /// any group peer was its removal. Both references announce the admission
+    /// from the new-entry branch — zenoh builds the peer's FACE there
+    /// (`zenoh/src/net/routing/gateway.rs` @ `pub fn new_peer_multicast`), pico
+    /// fires its connectivity callback there
+    /// (`vendor/zenoh-pico/src/transport/multicast/rx.c` @
+    /// `_z_connectivity_peer_connected(`).
+    ///
+    /// Carries an ungated [`MulticastPeerArrived`] so this variant — and every
+    /// consumer's match — stays feature-independent; only the producer (the
+    /// shared RX dispatch SSOT) is `session-multicast`-gated. `Copy`.
+    MulticastPeerArrived(MulticastPeerArrived),
 }
 
 /// Build the [`DriverLoopOutcome`] a completed reassembly chain re-enters
@@ -436,6 +455,15 @@ pub enum ReassemblyDropReason {
 pub use crate::multicast_peer_lost::{
     MulticastPeerId, MulticastPeerLost, MulticastPeerLostReason, OBSERVER_ZID_MAX,
 };
+
+/// R2728 — the multicast ARRIVAL observer surface, re-exported from
+/// [`crate::multicast_peer_arrived`] where it is DEFINED, on the same terms and
+/// for the same reason as the departure re-export above: the type is
+/// allocation-free and its producer compiles on the no-alloc MCU profile, while
+/// this module is `alloc`-gated. The path stays because
+/// [`IterationEvent::MulticastPeerArrived`] carries the value and the alloc-side
+/// consumers name it here.
+pub use crate::multicast_peer_arrived::MulticastPeerArrived;
 
 #[cfg(feature = "reassembly")]
 impl ReassemblyDropReason {

@@ -663,6 +663,17 @@ pub mod driver_loop;
 /// Layer C1bz measures.)
 pub mod multicast_peer_lost;
 
+/// R2728 (§5.21 `router-multicast-faces`) — the multicast ARRIVAL observer
+/// surface (`MulticastPeerArrived`), the admitting twin of
+/// [`multicast_peer_lost`]. Ungated and allocation-free for the same reason
+/// that one is: its producer is the multicast Router, which compiles on the
+/// no-alloc MCU profile where `driver_loop` does not exist.
+///
+/// (`multicast_dispatch` is a code span, not an intra-doc link: it is
+/// `session-multicast`-gated and absent from the default-feature rustdoc run
+/// Layer C1bz measures.)
+pub mod multicast_peer_arrived;
+
 /// Inbound transport-frame decode SSOT (`parse_inbound` + `InboundFrame`
 /// + `decode_ext_chain`) and the FSM-event projection
 /// (`inbound_to_fsm_event`). Hoisted from `wz-runtime-tokio::session_glue`

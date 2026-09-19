@@ -9550,9 +9550,20 @@ layer_c1l_reassembly() {
 # `guarded_count_gate.py --range` named both, and it named the SECOND one only
 # in a line a truncated read of its own output had cut off.
 layer_c1p_multicast() {
-    _runci_guarded_test C1p 41 cargo test -p wz-session-core --features session-multicast --lib multicast --quiet \
+    # R2728 — 41 -> 44 and 59 -> 62, and the two move by the SAME delta because
+    # they gain the SAME cases: `multicast_peer_arrived` is UNGATED (its
+    # producer is the no-alloc multicast Router, the argument its departure twin
+    # `multicast_peer_lost` already makes), so every arm selecting `--lib
+    # multicast` compiles its three value tests. That lockstep is the R311y805
+    # check and it is the one that applies here; the third arm below moves by
+    # three as well, but from a DIFFERENT population -- its filter is
+    # `multicast_rx`, which does not match `multicast_peer_arrived`, and its
+    # three are the RX witnesses. Equal magnitude, unequal subject: said here so
+    # a later reader does not read one cross-check where there are two facts.
+    # Both numbers are what the commands PRINTED.
+    _runci_guarded_test C1p 44 cargo test -p wz-session-core --features session-multicast --lib multicast --quiet \
         || return 1
-    _runci_guarded_test C1p 59 cargo test -p wz-session-core --features session-multicast,reassembly,codec-push,codec-join --lib multicast --quiet \
+    _runci_guarded_test C1p 62 cargo test -p wz-session-core --features session-multicast,reassembly,codec-push,codec-join --lib multicast --quiet \
         || return 1
     # R311y633 (§17.6 / §11.2) — the arm that BUILDS `multicast_rx` and RUNS it.
     # The two arms above omit `codec-close`, and `pub mod multicast_rx` is gated
@@ -9562,7 +9573,16 @@ layer_c1p_multicast() {
     # all four filters on `--lib namespace`, which compiles these tests and runs
     # none of them. Without this arm the batch walk over a multicast datagram
     # is gated by clippy alone.
-    _runci_guarded_test C1p 2 cargo test -p wz-session-core \
+    # R2728 — 2 -> 5. The group now ANNOUNCES an admission, the half this
+    # surface lacked: the departure event has existed since R311y784 and nothing
+    # ever said a peer had come, so the first observable fact about any group
+    # peer was its removal. The three cases are the admission (zid AND announced
+    # role, which is what upstream's face-builder classifies a new face by), the
+    # refusal to re-announce a live peer's periodic beacon, and the readmission
+    # after a real departure -- that last one is the anti-vacuity arm, since a
+    # producer firing only on the first JOIN this node ever saw would pass the
+    # refresh case and be wrong. The number is what the command PRINTED.
+    _runci_guarded_test C1p 5 cargo test -p wz-session-core \
         --features session-multicast,codec-join,codec-frame,codec-close,reassembly \
         --lib multicast_rx --quiet \
         || return 1
