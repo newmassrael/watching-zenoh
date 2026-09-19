@@ -30,11 +30,13 @@
 //! }
 //! impl Drop for RxBuffer { fn drop(&mut self) { self.arena.recycle_batch(self.buf_id); } }
 //! ```
-//! (`commons/zenoh-uring/src/linux/api/reader/rx_buffer.rs`), whose `data`
+//! (`commons/zenoh-uring/src/linux/api/reader/rx_buffer.rs`
+//! @ `pub struct RxBuffer {`), whose `data`
 //! comes from `BatchArena::index_mut_unchecked`, an `unsafe fn` returning
 //! `&'static mut [u8]` sliced out of the pinned arena
-//! (`commons/zenoh-uring/src/linux/batch_arena.rs` @ `pub(crate) unsafe fn
-//! index_mut_unchecked(`). [`LinkRxFrame`] is that shape with wz's nouns: a
+//! (`commons/zenoh-uring/src/linux/batch_arena.rs`
+//! @ `unsafe fn index_mut_unchecked(`).
+//! [`LinkRxFrame`] is that shape with wz's nouns: a
 //! raw pointer into one slot, the slot's own handle, and the table to give it
 //! back to. It is NOT a borrow, for the same reason
 //! [`RecycledBuf`](crate::frame_arena::RecycledBuf) is not one — a lifetime
