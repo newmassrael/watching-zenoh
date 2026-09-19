@@ -193,7 +193,7 @@ fn regen_codecs(root: &Path) {
 /// directory per consuming crate, mirroring each build.rs's emits:
 ///   wz-session-core  : reassembly_slot, scouting, session_fsm_unicast,
 ///                      session_fsm_multicast, multicast_peer (statecharts)
-///   wz-runtime-tokio : reassembly_pool_ap (buffer-pool)
+///   wz-runtime-tokio : reassembly_pool_ap, session_rx_pool_ap (buffer-pools)
 ///   wz-runtime-coop  : reassembly_pool_mcu (buffer-pool)
 ///   wz-link-lwip     : scout_rx_pool_mcu, session_rx_pool_mcu,
 ///                      session_rx_pool_mcu_minimal,
@@ -224,6 +224,7 @@ fn regen_statecharts_and_pools(root: &Path) {
     // Buffer-pools — (stem, consuming-crate). All sourced from sources/network.
     let pools: &[(&str, &str)] = &[
         ("reassembly_pool_ap", "wz-runtime-tokio"),
+        ("session_rx_pool_ap", "wz-runtime-tokio"),
         ("reassembly_pool_mcu", "wz-runtime-coop"),
         ("scout_rx_pool_mcu", "wz-link-lwip"),
         ("session_rx_pool_mcu", "wz-link-lwip"),

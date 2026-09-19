@@ -2,7 +2,7 @@
 // source-hash: 3e6969bb437aba1e59622624dc80787e90e92fb6138116bc4f7dd7e30074e352
 // template-hash: 26e5b2b0aec9ad85a8375690dfa8db213377e6dd6bcde53d334d893cb6b448b2
 // generated-at: 0
-// SCE-MAP: session_rx_pool_mcu_minimal.scxml:67 :: _forge_body
+// SCE-MAP: session_rx_pool_ap.scxml:62 :: _forge_body
 
 // SCE Forge: Auto-generated from Extended SCXML (sce:kind="buffer-pool")
 // Runtime: self-contained on (rust, std) — no SCE-side helper crate.
@@ -27,17 +27,17 @@
 // sidecar via the parser's auto-inject hook so deploy reviewers
 // see the dependency surface in one place.
 //
-// Generated from document `session_rx_pool_mcu_minimal` with section `sram1`,
-// alignment `32`, cache-policy `none`.
+// Generated from document `session_rx_pool_ap` with section `heap`,
+// alignment `64`, cache-policy `none`.
 
 
 use core::marker::PhantomData;
 
 /// Number of slots in the pool (`<sce:slot-count>`).
-pub const SLOT_COUNT: usize = 4;
+pub const SLOT_COUNT: usize = 64;
 
 /// Bytes per slot (`<sce:slot-size>`).
-pub const SLOT_SIZE: usize = 256;
+pub const SLOT_SIZE: usize = 65600;
 
 /// SRAM region name (`<sce:section>`), round-tripped so downstream
 /// tooling can read it without re-parsing the SCXML.
@@ -57,14 +57,14 @@ pub const SLOT_SIZE: usize = 256;
 /// names (§synth-5-E codegen contract), and it is a different author
 /// API from this one — not something a consumer can bolt on with
 /// `#[link_section]`.
-pub const SECTION: &'static str = "sram1";
+pub const SECTION: &'static str = "heap";
 
 /// DMA alignment in bytes (`<sce:alignment>`). Carried into the slot
 /// type's `#[repr(align)]` below, so it is the alignment of every
 /// slot rather than a number the pool merely reports. Non-powers of
 /// two and a `slot-size` that is not a multiple of this are rejected
 /// at parse time.
-pub const ALIGNMENT: u32 = 32;
+pub const ALIGNMENT: u32 = 64;
 
 /// DMA channel binding (`<sce:dma-channel>`). Empty when the pool is
 /// purely CPU-managed.
@@ -178,7 +178,7 @@ impl<S> Slot<S> {
 /// below say so where the compiler can check it rather than leaving
 /// the reader to trust it.
 #[derive(Clone, Copy)]
-#[repr(C, align(32))]
+#[repr(C, align(64))]
 struct SlotBytes([u8; SLOT_SIZE]);
 
 const _: () = assert!(
@@ -198,7 +198,7 @@ const _: () = assert!(
 /// `pool_return` on a `Slot<DmaArmedRx>` is a type error caught by
 /// rustc rather than a runtime check.
 #[repr(C)]
-pub struct SessionRxPoolMcuMinimal {
+pub struct SessionRxPoolAp {
     /// Slot storage. Each slot is `SLOT_SIZE` bytes on the declared
     /// DMA boundary.
     storage: [SlotBytes; SLOT_COUNT],
@@ -207,13 +207,13 @@ pub struct SessionRxPoolMcuMinimal {
     slot_states: [SlotState; SLOT_COUNT],
 }
 
-impl Default for SessionRxPoolMcuMinimal {
+impl Default for SessionRxPoolAp {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl SessionRxPoolMcuMinimal {
+impl SessionRxPoolAp {
     /// Construct an empty pool — every slot starts on the freelist.
     pub fn new() -> Self {
         Self {
@@ -337,7 +337,7 @@ impl Slot<CpuMut> {
     /// emits `sce_dcache_clean_by_addr` before the state transition
     /// (spec lines 1186-1188) so the DMA controller reads the
     /// latest CPU writes from main memory.
-    pub fn link_arm_tx(self, pool: &mut SessionRxPoolMcuMinimal) {
+    pub fn link_arm_tx(self, pool: &mut SessionRxPoolAp) {
         pool.slot_states[self.idx] = SlotState::DmaArmedTx;
     }
 
@@ -345,17 +345,17 @@ impl Slot<CpuMut> {
     /// `cpu-mut → free` ("abort encode" error path) and the
     /// `cpu-mut|cpu-ref → free` author-visible API on lines
     /// 1232-1237. Consumes the handle.
-    pub fn pool_return(self, pool: &mut SessionRxPoolMcuMinimal) {
+    pub fn pool_return(self, pool: &mut SessionRxPoolAp) {
         pool.slot_states[self.idx] = SlotState::Free;
     }
 
     /// Read-only borrow of the slot's bytes.
-    pub fn read<'a>(&'a self, pool: &'a SessionRxPoolMcuMinimal) -> &'a [u8; SLOT_SIZE] {
+    pub fn read<'a>(&'a self, pool: &'a SessionRxPoolAp) -> &'a [u8; SLOT_SIZE] {
         &pool.storage[self.idx].0
     }
 
     /// Mutable borrow of the slot's bytes.
-    pub fn write<'a>(&'a mut self, pool: &'a mut SessionRxPoolMcuMinimal) -> &'a mut [u8; SLOT_SIZE] {
+    pub fn write<'a>(&'a mut self, pool: &'a mut SessionRxPoolAp) -> &'a mut [u8; SLOT_SIZE] {
         &mut pool.storage[self.idx].0
     }
 }
@@ -372,13 +372,13 @@ impl Slot<CpuRef> {
     /// Return the slot to the freelist. Spec §synth-5-E line 1152:
     /// `cpu-ref → free` ("handler complete; pool_return(slot)").
     /// Consumes the handle.
-    pub fn pool_return(self, pool: &mut SessionRxPoolMcuMinimal) {
+    pub fn pool_return(self, pool: &mut SessionRxPoolAp) {
         pool.slot_states[self.idx] = SlotState::Free;
     }
 
     /// Read-only borrow of the slot's bytes — `cpu-ref` is a shared
     /// CPU-read state per spec line 1135.
-    pub fn read<'a>(&'a self, pool: &'a SessionRxPoolMcuMinimal) -> &'a [u8; SLOT_SIZE] {
+    pub fn read<'a>(&'a self, pool: &'a SessionRxPoolAp) -> &'a [u8; SLOT_SIZE] {
         &pool.storage[self.idx].0
     }
 }
@@ -415,9 +415,9 @@ impl Slot<DmaArmedRx> {
     /// and the CPU must not read through it before the completion
     /// edge.
     ///
-    /// Takes `&mut SessionRxPoolMcuMinimal` because a pointer valid for writes
+    /// Takes `&mut SessionRxPoolAp` because a pointer valid for writes
     /// has to be derived from a mutable borrow.
-    pub fn dma_armed_rx_ptr(&self, pool: &mut SessionRxPoolMcuMinimal) -> *mut u8 {
+    pub fn dma_armed_rx_ptr(&self, pool: &mut SessionRxPoolAp) -> *mut u8 {
         pool.storage[self.idx].0.as_mut_ptr()
     }
 }
@@ -451,7 +451,7 @@ impl Slot<DmaArmedRx> {
 // hands out a view of memory the peripheral is still writing.
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-impl SessionRxPoolMcuMinimal {
+impl SessionRxPoolAp {
     /// `dma-armed-tx → dma-busy-tx` — DMA controller signal.
     /// Spec §synth-5-E line 1144.
     ///
@@ -548,7 +548,7 @@ impl Slot<DmaArmedRx> {
     /// # Safety
     /// The caller must have observed peripheral start for this slot.
     /// Calling it early publishes memory the peripheral still owns.
-    pub unsafe fn dma_start_rx(self, pool: &mut SessionRxPoolMcuMinimal) {
+    pub unsafe fn dma_start_rx(self, pool: &mut SessionRxPoolAp) {
         pool.slot_states[self.idx] = SlotState::DmaBusyRx;
     }
 }
@@ -563,7 +563,7 @@ impl Slot<CpuRef> {
     /// # Safety
     /// The caller must have observed in-place mutate for this slot.
     /// Calling it early publishes memory the peripheral still owns.
-    pub unsafe fn mutate_in_place(self, pool: &mut SessionRxPoolMcuMinimal) -> Slot<CpuMut> {
+    pub unsafe fn mutate_in_place(self, pool: &mut SessionRxPoolAp) -> Slot<CpuMut> {
         pool.slot_states[self.idx] = SlotState::CpuMut;
         Slot { idx: self.idx, _state: PhantomData }
     }

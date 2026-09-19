@@ -221,7 +221,13 @@ machines:
 
     buffer_pools:
       scout_rx_pool:    { slot_count: 32, slot_size:  512, section: heap, alignment: 64, dma_channel: ~, cache_policy: none }
-      session_rx_pool:  { slot_count: 64, slot_size: 4096, section: heap, alignment: 64, dma_channel: ~, cache_policy: none }
+      # R2739 — dims live ONLY in `sources/network/session_rx_pool_ap.scxml`
+      # now, the same move the MCU pools made above. The inline block said
+      # `slot_size: 4096` while this node declares `qos.batch_size: 65536`, so a
+      # slot could not hold one batch; the SSOT derives 65600 from the receive
+      # path's own bound (prefix width 4 + `u16::MAX` payload = 65539, rounded
+      # to this node's 64-byte alignment). slot_count 64 carries over unchanged.
+      session_rx_pool:  { ref: session_rx_pool_ap }
       session_tx_pool:  { slot_count: 64, slot_size: 4096, section: heap, alignment: 64, dma_channel: ~, cache_policy: none }
       # R311in — reassembly_pool's def lives ONLY in
       # `sources/network/reassembly_pool_ap.scxml` (sce:kind=buffer-pool),

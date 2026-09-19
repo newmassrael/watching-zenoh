@@ -94,6 +94,29 @@ pub mod reassembly_pool_ap {
     ));
 }
 
+/// R2739 — `sources/network/session_rx_pool_ap.scxml`, the AP host's LINK-RX
+/// slot table, emitted beside the reassembly pool above and included the same
+/// way.
+///
+/// The two are different granularities and that is the point of having both.
+/// A reassembly chain accumulates a FRAGMENT PAYLOAD keyed by peer and SN,
+/// which is knowable only after a frame has been decoded; a link read lands a
+/// FRAME, a batch whose chain is not yet known. The MCU tier has had that
+/// separation since its own pools were emitted (`session_rx_pool_mcu` beside
+/// `reassembly_pool_mcu`); on the AP tier the link-RX half existed only as an
+/// inline `deploy/ap_mcu_pair.yaml` declaration nothing could consume.
+#[allow(dead_code)]
+#[allow(unused_variables)]
+#[allow(unused_mut)]
+#[allow(clippy::all)]
+pub mod session_rx_pool_ap {
+    include!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../out/wz-runtime-tokio",
+        "/session_rx_pool_ap.rs"
+    ));
+}
+
 /// R311mk — shared AP reassembly-pool wiring: the [`reassembly::TokioReassembly`]
 /// Router type + [`reassembly::reassembly_config`], hoisted out of
 /// [`session_glue`] (the unicast handshake driver) so a `transport-multicast`-only
@@ -109,6 +132,15 @@ pub mod reassembly;
 /// beside it have been read since R311in; the `Slot<S>` API had zero callers).
 #[cfg(feature = "runtime-zero-copy")]
 pub mod zero_copy;
+
+/// R2739 — the AP LINK-RX slot table behind the shared `RxSlots` seam.
+///
+/// Gated on the same feature as [`zero_copy`] deliberately: both are consumers
+/// of an `sce:kind="buffer-pool"` emit's lifecycle FSM, and a build that wants
+/// pooled receive wants them together. A narrower gate of its own would be a
+/// feature nothing selects.
+#[cfg(feature = "runtime-zero-copy")]
+pub mod link_rx_pool;
 
 /// R311y589 — `runtime-tokio-uring`: ARCHITECTURE §9.5 row 3. The same §5.E pool
 /// [`zero_copy`] consumes, registered with the kernel as fixed buffers so

@@ -1,0 +1,70 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  SPDX-License-Identifier: AGPL-3.0-or-later OR LicenseRef-watching-zenoh-Commercial
+  SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
+-->
+<!--
+  AP session-rx buffer-pool config — the SSOT for the tokio (AP / Linux)
+  host's session-link RECEIVE slot-pool dimensions.
+
+  R2739. This is a MIGRATION AND A CORRECTION, not a new pool. The AP node
+  already declared one, inline, at `deploy/ap_mcu_pair.yaml`
+  `ap_node.buffer_pools.session_rx_pool` — with no scxml SSOT and no emit, so
+  nothing could consume it and nothing graded its values. That file's own note
+  above the MCU block says why the MCU pools moved out: dims "live ONLY in their
+  scxml SSOTs ... values NOT duplicated". The AP one was the same migration,
+  still pending. The deploy entry is now `{ ref: session_rx_pool_ap }`.
+
+  ## slot-size 65600 is DERIVED, and the old 4096 could not hold one batch
+
+  The inline declaration said `slot_size: 4096` while the SAME node declares
+  `qos.batch_size: 65536` — a slot sixteen times too small for one negotiated
+  batch. That is the defect `reassembly_pool_ap.scxml` records in its own
+  comment, in the other direction: a pool dimension taken from something that is
+  not what the link delivers. There it was the 1472-byte AP link mtu, which left
+  the TCP reassembly window one byte wide and made `transport-fragmentation`
+  unobservable end to end.
+
+  So this value is read off the RECEIVE PATH rather than off a deploy number.
+  `wz-runtime-tokio`'s stream reader decodes the length prefix, refuses
+  `payload_len > u16::MAX`, and then sizes its frame buffer `w + payload_len`
+  where `w` is the prefix width — 2 on the universal path, 4 under
+  `transport-lowlatency`. The largest frame a peer can therefore present is
+  4 + 65535 = 65539 bytes, prefix included, because the reader keeps the prefix
+  in the frame so the codec sees the wire bytes verbatim.
+
+  65536 would be THREE BYTES SHORT on the lowlatency arm — the same one-byte
+  window in a different disguise — so the figure is rounded up to the next
+  multiple of this node's 64-byte alignment: 65600.
+
+  ## slot-count 64 is the declared value and stays
+
+  Carried from the inline block unchanged, and that is a judgement rather than
+  an omission: a slot count here is NOT a correctness bound. `RxSlots::reserve`
+  returns `None` when every slot is out, and its contract calls that
+  back-pressure rather than an error — "the caller drops the datagram and counts
+  it, which is what a bounded receive path must do". So the count trades
+  throughput against residency, it does not decide whether a frame can be
+  received, and the declared figure needs no re-derivation to be correct.
+
+  At 64 x 65600 the arena is ~4.2 MiB resident. Unlike
+  `reassembly_pool_ap.scxml` — whose raise "adds no static footprint" because
+  the AP host never instantiates that emit's pool struct — this one IS
+  instantiated: it is the link tier's receive slot table, which is the whole
+  reason it exists.
+
+  ## section / alignment / cache-policy
+
+  `heap` / 64 / `none`, matching `reassembly_pool_ap.scxml` and the inline AP
+  declaration. An AP host has no `sram1` and no DMA cache maintenance to
+  perform; the MCU pools' `sram1` / 32 / `maintain` shape does not transfer.
+-->
+<scxml xmlns="http://www.w3.org/2005/07/scxml"
+       xmlns:sce="http://sce.dev/ext"
+       sce:kind="buffer-pool" name="session_rx_pool_ap" version="1.0">
+  <sce:slot-count>64</sce:slot-count>
+  <sce:slot-size>65600</sce:slot-size>
+  <sce:section>heap</sce:section>
+  <sce:alignment>64</sce:alignment>
+  <sce:cache-policy>none</sce:cache-policy>
+</scxml>
