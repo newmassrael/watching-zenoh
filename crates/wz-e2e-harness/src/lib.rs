@@ -1,18 +1,25 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later OR LicenseRef-watching-zenoh-Commercial
 // SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
 
-//! Shared acceptor scaffolding for the single-purpose `wz-e2e-*`
+//! Shared session scaffolding for the single-purpose `wz-e2e-*`
 //! facade-subset e2e binaries.
 //!
-//! Every `wz-e2e-*` binary is an ACCEPTOR that runs the same five-step
-//! flow — bind + accept one peer, open the session to Established,
-//! perform a plane-specific setup, drive the session FSM until a
-//! terminal state or SIGTERM, tear down — differing ONLY in the setup
-//! step (a publish burst, or a `declare_*` registration). This module
-//! provides that flow as [`run_acceptor_e2e`] plus the
+//! A `wz-e2e-*` binary runs the same five-step flow — get a connected
+//! transport, open the session to Established, perform a plane-specific
+//! setup, drive the session FSM until a terminal state or SIGTERM, tear
+//! down — differing ONLY in the setup step (a publish burst, or a
+//! `declare_*` registration). This module provides that flow in both
+//! directions, [`run_acceptor_e2e`] and [`run_initiator_e2e`], plus the
 //! env_logger + tokio-runtime `main` wrapper [`run_main`], so each
 //! binary carries just its CLI parsing + its plane-specific setup
 //! closure.
+//!
+//! R2745 added the second direction. The family was acceptor-only, which
+//! put wz on the listening side of every e2e and left one class of
+//! property unobservable: what a wz HOST does across several requests on
+//! ONE session, since the foreign clients this tree can drive are
+//! one-shot processes. [`run_initiator_e2e`] carries that argument in
+//! full.
 //!
 //! See this crate's `Cargo.toml` for why the shared scaffolding does not
 //! break the per-binary subset pinning.
@@ -21,7 +28,7 @@ use std::future::Future;
 use std::process::ExitCode;
 use std::sync::Arc;
 
-use wz::runtime_tokio::link_pipeline::{accept_tcp, bind_tcp_host};
+use wz::runtime_tokio::link_pipeline::{accept_tcp, bind_tcp_host, dial_tcp_host};
 use wz::runtime_tokio::link_socket::LinkSocket;
 use wz::runtime_tokio::observer::ApplicationLayerObserver;
 use wz::runtime_tokio::runtime_impl::TokioTime;
@@ -30,7 +37,8 @@ use wz::runtime_tokio::session_glue::{
     drive_session_until_terminal, IterationEvent, SessionInitParams, SessionTimeouts, WhatAmI,
 };
 use wz::runtime_tokio::session_open::{
-    accept_and_open_session, DialedLink, OpenedSessionParts, DEFAULT_OPEN_TICK_MS,
+    accept_and_open_session, initiate_and_open_session, DialedLink, OpenedSessionParts,
+    DEFAULT_OPEN_TICK_MS,
 };
 use wz::runtime_tokio::sync::Mutex;
 
@@ -216,6 +224,111 @@ pub async fn run_acceptor_e2e<H>(
     // R311y519 — SEAL + await to completion. The wall-clock tail window this
     // replaces could cut a writer that was still making progress; the seal makes
     // the queue finite and the per-write bound covers a wedged peer.
+    writer_handle.drain().await;
+    Ok(())
+}
+
+/// R2745 — the DIALING twin of [`run_acceptor_e2e`], and it exists because a
+/// whole class of property was unobservable without it.
+///
+/// Every `wz-e2e-*` binary until now was an ACCEPTOR, so every e2e in this
+/// family put wz on the listening side and a foreign client on the dialing
+/// side. That is the right shape for wire-parity witnesses, and it is the
+/// wrong shape for witnessing what a wz HOST does across several requests on
+/// ONE session: the foreign clients this tree can drive are one-shot processes
+/// (a stock zenoh-pico `z_get` takes no repeat flag), so every request they
+/// make arrives on a connection of its own. A host that re-resolves some piece
+/// of live state PER REQUEST and one that re-resolves it PER CONNECTION answer
+/// such a client identically, and the difference between them is the whole
+/// property — open-debt item 665, which R2374 measured by freezing the
+/// `adminspace-read` permit and watching all three Layer E6i tests stay green.
+///
+/// So this is the side the family was missing rather than a second spelling of
+/// the one it had. A binary built on it DIALS a host, holds ONE session, and
+/// its setup closure may issue as many requests as it likes with anything it
+/// likes in between.
+///
+/// The five steps are [`run_acceptor_e2e`]'s, and only the first two differ:
+/// dial instead of bind-and-accept, and [`initiate_and_open_session`] instead
+/// of `accept_and_open_session`. Steps 3-5 — setup, the dispatching drive
+/// loop, and the drop-ordered teardown that lets a wire-emitting `Drop` reach
+/// the writer before it seals — are the same code shape for the same reasons,
+/// and any change to them belongs in both.
+///
+/// `binary_name` tags the log lines the same way; the line an integration test
+/// gates on here is `connected to`, the dialing counterpart of the acceptor's
+/// `listening on`.
+pub async fn run_initiator_e2e<H>(
+    binary_name: &'static str,
+    connect: String,
+    setup: impl FnOnce(&OpenedE2e) -> std::io::Result<H>,
+) -> std::io::Result<()> {
+    // ── Step 1: dial. `dial_tcp_host` is the library primitive wz-ap-demo's
+    //    `establish_link` uses, paired here with `bind_tcp_host` above so the
+    //    two directions of this harness resolve a host:port the same way.
+    //    No locator `#iface=`, so no interface bind is threaded (`None`) —
+    //    R311y236's reason, unchanged on this side.
+    let stream = dial_tcp_host(&connect, &LinkSocket::NONE).await?;
+    log::info!("{binary_name}: connected to {connect}");
+
+    // ── Step 2: open the session to Established, in the INITIATOR role.
+    //    TokioTime is Copy, so one epoch is shared across the open helper,
+    //    Session, and the drive loop.
+    let clock = TokioTime::new();
+    // R2455 — an `OpenedSession` is taken apart ONLY through `into_parts`.
+    let OpenedSessionParts {
+        mut engine,
+        actions,
+        inbound,
+        writer_handle,
+        clock: _,
+    } = initiate_and_open_session(
+        DialedLink::Tcp(stream),
+        session_init_params(),
+        clock,
+        None,
+        DEFAULT_OPEN_TICK_MS,
+    )
+    .await
+    .map_err(|e| std::io::Error::other(format!("session open failed: {e:?}")))?
+    .into_parts();
+    log::info!("{binary_name}: session Established; entering steady state");
+
+    // ── Step 3: plane-specific setup.
+    let observer = Arc::new(Mutex::new(ApplicationLayerObserver::new()));
+    let session = TokioSession::new(actions.clone(), observer.clone(), Arc::new(clock));
+    let opened = OpenedE2e { session, clock };
+    let hold = setup(&opened)?;
+
+    // ── Step 4: drive the FSM until terminal or SIGTERM.
+    let mut driver = inbound;
+    let actions_for_loop = actions.clone();
+    let session_for_dispatch = opened.session.clone();
+    let session_timeouts = SessionTimeouts::spec_defaults();
+    let outcome = tokio::select! {
+        o = drive_session_until_terminal(
+            &mut driver,
+            &actions_for_loop,
+            &mut engine,
+            Some(DRIVE_MAX_ITERS),
+            &clock,
+            &session_timeouts,
+            |event: IterationEvent<'_>| {
+                session_for_dispatch.dispatch_iteration_event(event);
+            },
+        ) => Some(o),
+        _ = shutdown_signal() => None,
+    };
+    match &outcome {
+        Some(o) => log::info!("{binary_name}: session ended: {o:?}"),
+        None => log::info!("{binary_name}: shutdown signal received; draining writer"),
+    }
+
+    // ── Step 5: teardown, hold first.
+    drop(hold);
+    drop(opened);
+    drop(actions_for_loop);
+    drop(actions);
     writer_handle.drain().await;
     Ok(())
 }
