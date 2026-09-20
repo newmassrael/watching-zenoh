@@ -166,6 +166,18 @@ pub mod link_rx_arena;
 #[cfg(all(feature = "runtime-tokio-uring", feature = "transport-link-tcp"))]
 pub mod uring;
 
+// R2748 — the TASK that drives [`uring`]'s fixed-buffer read, and the node
+// scope its ring lives at. Gated exactly like the adapter it drives: the
+// reactor registers [`link_rx_arena`]'s table and hands out `LinkEvent`s, so it
+// needs everything that module needs and nothing more.
+//
+// ⚠ NO `///` HERE, DELIBERATELY — see [`link_rx_window`]'s declaration for the
+// finding: rustdoc merges a declaration doc with the module's `//!` block and
+// resolves the result in the OUTER scope, where the module's own items are not
+// in scope, and the doc-link budget counts every link that then fails.
+#[cfg(all(feature = "runtime-tokio-uring", feature = "transport-link-tcp"))]
+pub mod uring_reactor;
+
 // Crate-local fixtures for this crate's OWN unit tests (recording driver
 // + actions builders). Kept in-crate — NOT in the test-support sibling —
 // so unit tests receive this crate's version of `SessionLinkActions`

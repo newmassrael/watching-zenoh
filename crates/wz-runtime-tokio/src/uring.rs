@@ -108,6 +108,22 @@ pub struct FixedSlotRing {
     registered: usize,
 }
 
+/// One completion the kernel has finished with: the `user_data` its
+/// submission carried, and the kernel's own result.
+///
+/// R2748 — a PAIR and not a length, because a ring serving several links
+/// cannot assume the completion it just reaped is the one it is waiting for.
+/// `result` is kept RAW (negative is `-errno`) so the routing layer decides
+/// what an error means for the link it belongs to; turning it into an
+/// `io::Error` here would lose the key it has to be routed by.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Completion {
+    /// The `user_data` the submission was pushed under.
+    pub key: u64,
+    /// The kernel's result: bytes written, `0` for EOF, or `-errno`.
+    pub result: i32,
+}
+
 impl FixedSlotRing {
     /// Build a ring and register every slot of the LINK-RX table as a fixed
     /// buffer, PLACED AT ITS OWN SLOT INDEX — so a slot index IS its
@@ -231,6 +247,184 @@ impl FixedSlotRing {
         self.registered
     }
 
+    /// The first `user_data` a caller may spend on something that is NOT a
+    /// registered slot.
+    ///
+    /// R2748 — the `user_data` space is what a reactor demultiplexes
+    /// completions by, so the rule that keeps two callers apart has to be
+    /// written down once rather than assumed at each. Slot keys are
+    /// `0..SLOT_COUNT`, because [`Self::submit_read_fixed`] keys a read by the
+    /// `buf_index` it reads into and a slot is held exclusively while its read
+    /// is in flight; everything else starts above the table.
+    pub const FIRST_FREE_KEY: u64 = SLOT_COUNT as u64;
+
+    /// `user_data` for a cancellation's OWN completion.
+    ///
+    /// Reserved rather than left to the caller: a cancellation completes like
+    /// any other submission and a reactor that mistook it for a read would
+    /// look up a key nothing submitted.
+    pub const CANCEL_KEY: u64 = u64::MAX - 1;
+
+    /// PUSH one `IORING_OP_READ_FIXED` for `frame`'s slot without waiting for
+    /// it. Returns `(bytes asked for, the `user_data` it was pushed under)`;
+    /// a `0` first element means nothing was pushed because the frame had no
+    /// room.
+    ///
+    /// R2748 — the SUBMISSION half of [`Self::read_fixed_into`], extracted
+    /// because a reactor cannot use the two halves together. The one-shot form
+    /// submits and then blocks for its own completion, which is only sound
+    /// while ONE read exists; a ring serving several links has to submit here
+    /// and reap in [`Self::submit_and_reap`], where a completion is routed by
+    /// the key rather than assumed to be the caller's.
+    ///
+    /// The key is the `buf_index`, which is also the destination slot. That is
+    /// not a convenience: it makes "which read completed" and "which slot the
+    /// kernel wrote into" one fact, so a reactor cannot pair a completion with
+    /// the wrong frame. See [`Self::FIRST_FREE_KEY`] for what that costs a
+    /// caller with keys of its own.
+    ///
+    /// Every refusal [`Self::read_fixed_into`] documented is HERE, because
+    /// every one of them is about the submission: a spilled frame is not in
+    /// the registration, an address the table does not recognise is a
+    /// contradiction, and an index past the registration names someone else's
+    /// slot.
+    pub fn submit_read_fixed(
+        &mut self,
+        fd: RawFd,
+        arena: &LinkRxArena,
+        frame: &mut LinkRxFrame,
+        len: usize,
+    ) -> io::Result<(usize, u64)> {
+        if !frame.is_pooled() {
+            return Err(io::Error::other(
+                "a spilled frame is not in the registration; read it the ordinary way",
+            ));
+        }
+        let dst = frame.as_mut().as_mut_ptr();
+        let buf_index = arena
+            .slot_of(dst)
+            .ok_or_else(|| io::Error::other("this frame's slot is not in the arena's table"))?;
+        if buf_index >= self.registered {
+            return Err(io::Error::other(format!(
+                "buf_index {buf_index} is not a registered slot ({} registered)",
+                self.registered
+            )));
+        }
+        // Never let the kernel write past the frame's own width: `take(want)`
+        // reserved `want` bytes and the accessors read exactly that many, so a
+        // completion larger than it would leave bytes nobody can see.
+        let len = len.min(frame.as_ref().len());
+        if len == 0 {
+            return Ok((0, buf_index as u64));
+        }
+
+        let entry = opcode::ReadFixed::new(types::Fd(fd), dst, len as u32, buf_index as u16)
+            .offset(u64::MAX) // -1: read at the file's current position
+            .build()
+            .user_data(buf_index as u64);
+
+        // SAFETY: `dst` is the first byte of the registered region named by
+        // `buf_index`, with `len` bytes of room proven above; the fd is the
+        // caller's and the queue is not shared, so nothing else is mid-push.
+        unsafe {
+            self.ring
+                .submission()
+                .push(&entry)
+                .map_err(|_| io::Error::new(io::ErrorKind::WouldBlock, "io_uring SQ full"))?;
+        }
+        Ok((len, buf_index as u64))
+    }
+
+    /// PUSH one ORDINARY `IORING_OP_READ` into `buf` under `key`.
+    ///
+    /// R2748 — the arm a registered read cannot serve. Two callers need it and
+    /// neither is a shortcut past the registration: a WAKER fd reads into
+    /// eight bytes that are nobody's pool slot, and a link whose table ran dry
+    /// holds a SPILLED frame, which is an allocation the kernel was never
+    /// handed. `crate::link_rx_arena`'s own dry arm takes the same answer —
+    /// "the frame costs an allocation and the steady state keeps its slots" —
+    /// and refusing to read at all would turn a transient shortage into a lost
+    /// link.
+    ///
+    /// # Safety
+    ///
+    /// `buf` must stay allocated, unmoved and untouched by anyone else until
+    /// the completion carrying `key` has been reaped. `key` must not collide
+    /// with a live slot key (see [`Self::FIRST_FREE_KEY`]) or with
+    /// [`Self::CANCEL_KEY`].
+    pub unsafe fn submit_read(
+        &mut self,
+        fd: RawFd,
+        buf: *mut u8,
+        len: u32,
+        key: u64,
+    ) -> io::Result<()> {
+        let entry = opcode::Read::new(types::Fd(fd), buf, len)
+            .offset(u64::MAX) // -1: read at the file's current position
+            .build()
+            .user_data(key);
+        // SAFETY: the caller's contract above is exactly `push`'s, and the
+        // queue is not shared so nothing else is mid-push.
+        unsafe {
+            self.ring
+                .submission()
+                .push(&entry)
+                .map_err(|_| io::Error::new(io::ErrorKind::WouldBlock, "io_uring SQ full"))
+        }
+    }
+
+    /// PUSH an `IORING_OP_ASYNC_CANCEL` for the submission carrying `target`.
+    ///
+    /// R2748 — what makes SHUTDOWN sound rather than hopeful. A read in flight
+    /// names a buffer the kernel may still write into, so dropping the ring
+    /// while one is outstanding drops memory the kernel holds a reference to.
+    /// A read on a quiet socket never completes on its own, so waiting it out
+    /// is not an option either; cancelling it completes it with `-ECANCELED`,
+    /// which is a completion like any other and reaps through the same path.
+    ///
+    /// `ENOENT` back on the cancellation means the read had already completed,
+    /// which is not an error here: the completion is on its way and the caller
+    /// is draining until nothing is outstanding.
+    pub fn submit_cancel(&mut self, target: u64) -> io::Result<()> {
+        let entry = opcode::AsyncCancel::new(target)
+            .build()
+            .user_data(Self::CANCEL_KEY);
+        // SAFETY: a cancellation borrows nothing — its operand is the target's
+        // `user_data`, a value — and the queue is not shared.
+        unsafe {
+            self.ring
+                .submission()
+                .push(&entry)
+                .map_err(|_| io::Error::new(io::ErrorKind::WouldBlock, "io_uring SQ full"))
+        }
+    }
+
+    /// Submit everything queued, BLOCK until at least one completion, then
+    /// drain every completion the kernel has ready into `out`.
+    ///
+    /// R2748 — this is where the blocking lives now, and moving it here is the
+    /// point rather than a side effect. [`Self::read_fixed_into`] blocks in the
+    /// CALLER, which is why nothing could drive it from a `tokio` task; a
+    /// reactor calls this on a thread of its own and the links it serves get
+    /// their completions routed to them.
+    ///
+    /// Draining ALL ready completions rather than one: `submit_and_wait(1)`
+    /// returns when at least one is ready and several links can complete in the
+    /// same wakeup. Taking one and parking again would leave the rest sitting
+    /// in the completion queue behind a wait that has no reason to return.
+    pub fn submit_and_reap(&mut self, out: &mut Vec<Completion>) -> io::Result<()> {
+        self.ring.submit_and_wait(1)?;
+        let mut cq = self.ring.completion();
+        cq.sync();
+        for cqe in &mut cq {
+            out.push(Completion {
+                key: cqe.user_data(),
+                result: cqe.result(),
+            });
+        }
+        Ok(())
+    }
+
     /// `IORING_OP_READ_FIXED` from `fd` straight into `frame`'s LINK-RX slot,
     /// at most `len` bytes and never past the slot. Returns what the kernel
     /// wrote and NARROWS the frame to it.
@@ -256,10 +450,17 @@ impl FixedSlotRing {
     /// happens to hold. The caller's fallback is the ordinary read path, which
     /// is what `is_pooled` is for.
     ///
-    /// Blocking on the completion rather than returning a future: this is the
-    /// adapter, and how a session's link drives it alongside the tokio reactor
-    /// is the residual the module docs name. A future here would imply an
-    /// integration that does not exist.
+    /// ⚠ R2748 — THIS PARAGRAPH USED TO ARGUE THAT THE BLOCKING WAS FINE
+    /// BECAUSE NOTHING COULD DRIVE IT OTHERWISE, and the second half of that
+    /// is no longer true. It read: "Blocking on the completion rather than
+    /// returning a future: this is the adapter, and how a session's link
+    /// drives it alongside the tokio reactor is the residual the module docs
+    /// name. A future here would imply an integration that does not exist."
+    /// `crate::uring_reactor` is that integration, and it does NOT call this
+    /// function: it submits with [`Self::submit_read_fixed`] and reaps with
+    /// [`Self::submit_and_reap`] on a thread of its own, which is where a
+    /// blocking wait belongs. This form survives as the ONE-READ form — what
+    /// this module's own tests drive, and what [`Self::read_framed`] is.
     pub fn read_fixed_into(
         &mut self,
         fd: RawFd,
@@ -267,42 +468,9 @@ impl FixedSlotRing {
         frame: &mut LinkRxFrame,
         len: usize,
     ) -> io::Result<usize> {
-        if !frame.is_pooled() {
-            return Err(io::Error::other(
-                "a spilled frame is not in the registration; read it the ordinary way",
-            ));
-        }
-        let dst = frame.as_mut().as_mut_ptr();
-        let buf_index = arena
-            .slot_of(dst)
-            .ok_or_else(|| io::Error::other("this frame's slot is not in the arena's table"))?;
-        if buf_index >= self.registered {
-            return Err(io::Error::other(format!(
-                "buf_index {buf_index} is not a registered slot ({} registered)",
-                self.registered
-            )));
-        }
-        // Never let the kernel write past the frame's own width: `take(want)`
-        // reserved `want` bytes and the accessors read exactly that many, so a
-        // completion larger than it would leave bytes nobody can see.
-        let len = len.min(frame.as_ref().len());
+        let (len, _key) = self.submit_read_fixed(fd, arena, frame, len)?;
         if len == 0 {
             return Ok(0);
-        }
-
-        let entry = opcode::ReadFixed::new(types::Fd(fd), dst, len as u32, buf_index as u16)
-            .offset(u64::MAX) // -1: read at the file's current position
-            .build()
-            .user_data(buf_index as u64);
-
-        // SAFETY: `dst` is the first byte of the registered region named by
-        // `buf_index`, with `len` bytes of room proven above; the fd is the
-        // caller's and the queue is not shared, so nothing else is mid-push.
-        unsafe {
-            self.ring
-                .submission()
-                .push(&entry)
-                .map_err(|_| io::Error::new(io::ErrorKind::WouldBlock, "io_uring SQ full"))?;
         }
         self.ring.submit_and_wait(1)?;
 
