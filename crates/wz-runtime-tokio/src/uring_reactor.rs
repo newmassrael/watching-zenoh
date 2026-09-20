@@ -8,7 +8,7 @@
 //!
 //! `runtime-tokio-uring`'s first residual has read "nothing selects this path
 //! for a production link" since R311y589. R2746 aimed it at the right table and
-//! R2747 built [`RxWindow`](crate::link_rx_window::RxWindow), the frame
+//! R2747 built [`RxWindow`], the frame
 //! boundaries a reader that does not size its reads needs. What was still
 //! missing was not a call site: `crate::uring::FixedSlotRing::read_framed`
 //! SUBMITS ITS READ AND THEN BLOCKS FOR ITS OWN COMPLETION, and nothing in a
