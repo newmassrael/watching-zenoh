@@ -205,8 +205,8 @@ uring_memlock_provision() {
     # lane does not have, which is exactly what hosted run 35488108252 printed
     # ("io_uring can register 64x65600 locked bytes") in the same job whose
     # registering tests then failed with ENOMEM. The second pass is preceded by
-    # `IORING_UNREGISTER_BUFFERS` and a close, mirroring `impl Drop for
-    # FixedSlotRing`: the property being measured is that the ceiling is whole
+    # the probe's own `UNREGISTER_BUFFERS` opcode and a close, mirroring
+    # `impl Drop for FixedSlotRing`: the property being measured is that the ceiling is whole
     # again before the next registration begins, which is the adapter's promise
     # and not the kernel's.
     #
