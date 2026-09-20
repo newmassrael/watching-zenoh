@@ -5100,8 +5100,17 @@ layer_c1ab_cargo_test_vsock() {
         echo "  job that provisions the module)"
         return 0
     fi
+    # R2751 — `runtime-tokio-uring` JOINS THIS LEG's features, and the reason is
+    # the one R2748 paid for: a test the lane does not COMPILE is run by
+    # nothing while the lane keeps passing. `a_wired_vsock_half_names_its_
+    # descriptor` asserts that vsock hands the ring the socket's own fd — the
+    # parity `runtime-tokio-uring` closed against upstream's vsock link — and it
+    # is gated on that feature, which this leg did not carry. It needs no ring
+    # and no memlock (it asks the HALF, not a reactor), so the only cost is
+    # compiling the uring modules on a host that already has /dev/vsock.
     _runci_guarded_test "Layer C1ab vsock dial/accept round-trip" 2 \
-        cargo test -p wz-runtime-tokio --features transport-link-vsock \
+        cargo test -p wz-runtime-tokio \
+        --features transport-link-vsock,runtime-tokio-uring \
         --lib vsock_pipeline -- --ignored || return 1
     _runci_guarded_test "Layer C1ab vsock wz<->wz e2e" 2 \
         cargo test -p wz-runtime-tokio --features transport-link-vsock \

@@ -71,6 +71,14 @@ use wz_session_core::link::InterceptorLink;
 /// owns the half and the ring body together.
 pub struct VsockReadHalf {
     inner: ReadHalf<VsockStream>,
+    /// ⚠ CONDITIONAL ON ITS ONE READER, not on this type. `ring_fd` is the only
+    /// thing that reads this, and it carries the ring's gate; a field held in
+    /// every build would be dead code wherever the ring is off, which
+    /// `-D warnings` reds — C1ab's two `transport-link-vsock` clippy legs are
+    /// exactly that build, and they caught it. The capture in
+    /// [`wire_vsock_stream`] carries the same gate, literally, so the field and
+    /// the statement that fills it move together.
+    #[cfg(all(feature = "runtime-tokio-uring", feature = "transport-link-tcp"))]
     fd: std::os::fd::RawFd,
 }
 
@@ -175,13 +183,18 @@ pub fn wire_vsock_stream(
     // R2751 — the descriptor is read BEFORE the split, because that is the last
     // moment the stream is reachable: `split` consumes it into an `Arc` neither
     // half publishes. See `VsockReadHalf` for why it is sound to carry.
+    #[cfg(all(feature = "runtime-tokio-uring", feature = "transport-link-tcp"))]
     let fd = {
         use std::os::fd::AsRawFd;
         stream.as_raw_fd()
     };
     let (reader, writer) = split(stream);
     let inbound = StreamReadDriver::new(
-        VsockReadHalf { inner: reader, fd },
+        VsockReadHalf {
+            inner: reader,
+            #[cfg(all(feature = "runtime-tokio-uring", feature = "transport-link-tcp"))]
+            fd,
+        },
         Arc::new(std::sync::atomic::AtomicBool::new(false)),
     );
     let (tx, rx) = mpsc::unbounded_channel::<Vec<u8>>();
