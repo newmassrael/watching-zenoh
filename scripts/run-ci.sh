@@ -7885,7 +7885,14 @@ layer_c1y_cargo_test_routing_peer() {
     # `acceptedlink_*_is_mesh_capable` pins with their predicate and added one
     # serial accept-loop arm. Both counts read off what `guarded_count_gate`
     # PRINTED when it ran each command, not counted off the diff.
-    _runci_guarded_test "C1y accept_loop" 10 \
+    # R2761 — 10 -> 11: R2758's `max_sessions_refuses_the_peer_past_the_bound`.
+    # The C1v twin does NOT move and stays 8: the witness is
+    # `#[cfg(feature = "routing-peer")]` and C1v compiles
+    # `routing-accept,transport-link-ws`, so it is not selected there. Read off
+    # what the command PRINTED (`11 passed; 690 filtered out`), which is also
+    # the number run 35515719160 reported against the old pin -- this red was
+    # the pin, not the test.
+    _runci_guarded_test "C1y accept_loop" 11 \
         cargo test -p wz-runtime-tokio --features routing-peer --lib accept_loop --quiet || return 1
     # R311y509 — 200 -> 202: the peer's two liveliness-TOKEN tier tests. They land
     # in BOTH linkstate pins because the plane is ungated, so it compiles under bare
