@@ -417,8 +417,8 @@ struct LinkCtx {
     ///
     /// Carried rather than recomputed per push because a prefix that is
     /// already half-read must not widen underneath the window:
-    /// [`Self::frame_width`] re-derives this only when the window says it is
-    /// between frames.
+    /// [`deliver_completion`] re-derives it only when
+    /// [`RxWindow::between_frames`] says the window is between frames.
     width: usize,
     /// The frame boundaries ACROSS completions. This is the state that makes a
     /// reader which does not size its reads possible at all, and it lives here
