@@ -215,10 +215,12 @@ impl FixedSlotRing {
         // SAFETY: each iovec points at one `[u8; SLOT_SIZE]` inside the table's
         // boxed storage, which outlives this call and — per the type-level
         // contract above — the ring.
-        let result = unsafe { ring.submitter().register_buffers(&iovecs) };
+        // SAFETY (each attempt): as above. The retry re-submits the SAME
+        // iovecs, which still name the same slots — `held` is not released
+        // until every attempt is done.
+        let result = register_awaiting_reclaim(&ring, &iovecs, Self::required_locked_bytes());
         drop(held);
-        result
-            .map_err(|e| registration_error(e, Self::required_locked_bytes(), memlock_limit()))?;
+        result?;
 
         Ok(Self { ring, registered })
     }
@@ -594,6 +596,17 @@ fn memlock_limit() -> Option<(u64, u64)> {
 /// Any errno OTHER than `ENOMEM` passes through untouched. This maps one
 /// specific confusion; dressing an `EINVAL` up as a memlock problem would
 /// manufacture a second one.
+///
+/// ⚠ R2749 — ONE ERRNO, TWO FACTS, AND THIS TOLD THE READER THE WRONG ONE.
+/// Until this round every `ENOMEM` ended "raise RLIMIT_MEMLOCK ... to at least
+/// {needed} bytes", which is advice only when the limit is BELOW `needed`.
+/// Hosted run 35488108252 printed it with `soft=8388608` against
+/// `needed=4198400` — telling a reader to raise a limit already at twice the
+/// requirement, which is an instruction to do nothing. It stood for two
+/// rounds. The remedy is now DERIVED from the comparison the function can
+/// already make instead of asserted, so the two facts reach different
+/// readers: [`MemlockVerdict::TooSmall`] is a provisioning fact, and
+/// [`MemlockVerdict::Contended`] is a transient one.
 fn registration_error(err: io::Error, needed: usize, limit: Option<(u64, u64)>) -> io::Error {
     if err.raw_os_error() != Some(libc::ENOMEM) {
         return err;
@@ -602,16 +615,120 @@ fn registration_error(err: io::Error, needed: usize, limit: Option<(u64, u64)>) 
         Some((soft, hard)) => format!("RLIMIT_MEMLOCK is soft={soft} hard={hard} bytes"),
         None => String::from("RLIMIT_MEMLOCK could not be read"),
     };
+    let remedy = match memlock_verdict(needed, limit) {
+        MemlockVerdict::TooSmall => format!(
+            "This is a limit, not heap exhaustion: raise RLIMIT_MEMLOCK \
+             (ulimit -l, or LimitMEMLOCK= under systemd) to at least {needed} \
+             bytes."
+        ),
+        MemlockVerdict::Contended => String::from(
+            "The limit already ADMITS this registration, so raising it is not \
+             the remedy: something else holds the locked memory right now. In \
+             one process that is usually a ring whose fd has closed but whose \
+             pinned pages the kernel has not released yet — io_uring tears a \
+             ring down asynchronously, so a registration can outrun its \
+             predecessor's reclaim.",
+        ),
+        MemlockVerdict::Unknown => String::from(
+            "The limit could not be read, so whether it admits this \
+             registration is unknown; check `ulimit -l` before assuming \
+             either.",
+        ),
+    };
     io::Error::new(
         io::ErrorKind::OutOfMemory,
         format!(
             "io_uring fixed-buffer registration needs {needed} bytes of LOCKABLE \
              memory ({SLOT_COUNT} pool slots x {SLOT_SIZE} bytes, pinned at \
-             registration) and the kernel refused with ENOMEM; {measured}. This \
-             is a limit, not heap exhaustion: raise RLIMIT_MEMLOCK (ulimit -l, \
-             or LimitMEMLOCK= under systemd) to at least {needed} bytes."
+             registration) and the kernel refused with ENOMEM; {measured}. \
+             {remedy}"
         ),
     )
+}
+
+/// What an `ENOMEM` from `register_buffers` MEANS, given the limit.
+///
+/// R2749 — the distinction the single errno hides. `ENOMEM` is the kernel
+/// saying "not now"; whether that is permanent or transient is decided by a
+/// comparison this code can make and did not.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MemlockVerdict {
+    /// The limit is below what one registration needs. Permanent until a
+    /// human raises it; retrying is a spin.
+    TooSmall,
+    /// The limit admits one registration, so the refusal is somebody else's
+    /// locked memory and it can go away on its own.
+    Contended,
+    /// The limit could not be read, so neither can be claimed.
+    Unknown,
+}
+
+/// Read one `ENOMEM` against the limit. Pure, so the two arms are testable
+/// without a syscall and without mutating a process-global limit.
+fn memlock_verdict(needed: usize, limit: Option<(u64, u64)>) -> MemlockVerdict {
+    match limit {
+        None => MemlockVerdict::Unknown,
+        Some((soft, _hard)) if (soft as u128) < needed as u128 => MemlockVerdict::TooSmall,
+        Some(_) => MemlockVerdict::Contended,
+    }
+}
+
+/// How long a registration will wait out a predecessor's reclaim, in total.
+///
+/// Small, because the thing being waited for is a kernel workqueue item and
+/// not I/O: the measured gap is one test's duration. Bounded, because a wait
+/// with no ceiling turns a permanent shortfall into a hang — and the verdict
+/// above already keeps a permanent one from reaching here at all.
+const RECLAIM_WAIT: std::time::Duration = std::time::Duration::from_millis(500);
+
+/// One attempt every this long. Ten attempts inside [`RECLAIM_WAIT`].
+const RECLAIM_POLL: std::time::Duration = std::time::Duration::from_millis(50);
+
+/// `register_buffers`, waiting out a refusal this code can PROVE is transient.
+///
+/// R2749 — what hosted run 35488108252 was actually failing on, in both of its
+/// red jobs. `io_uring` releases a ring's context — and the pages it pinned —
+/// asynchronously after the ring fd closes, so a process that registers, drops
+/// and registers again can outrun the kernel's reclaim and be refused for
+/// memory that is already on its way back. MEASURED at `soft=hard=8 MiB`
+/// against a `needed` of 4198400: ONE registration alone succeeds, and TWO
+/// SEQUENTIALLY in one process — the first dropped before the second begins —
+/// give `ok` then `ENOMEM`.
+///
+/// ⚠ THAT REFUTES THE MODEL THE LANE WAS BUILT ON. Layer C1br serializes these
+/// tests because "two of them in PARALLEL ask for twice the pool"; serialized
+/// is exactly how they were running when this red. `--test-threads=1` cannot
+/// serialize a resource the kernel frees on its own schedule.
+///
+/// This is NOT a blanket retry, which would spin for half a second on every
+/// host whose limit is genuinely too small and then report the same failure
+/// later. It retries ONLY on [`MemlockVerdict::Contended`] — the limit admits
+/// this registration, so the memory is someone else's and can come back. A
+/// [`MemlockVerdict::TooSmall`] or [`MemlockVerdict::Unknown`] returns at once,
+/// which is what a provisioning fact deserves.
+fn register_awaiting_reclaim(
+    ring: &IoUring,
+    iovecs: &[libc::iovec],
+    needed: usize,
+) -> io::Result<()> {
+    let deadline = std::time::Instant::now() + RECLAIM_WAIT;
+    loop {
+        // SAFETY: the caller holds every slot these iovecs name for the whole
+        // of this call, so each attempt submits the same live, unmoved regions.
+        match unsafe { ring.submitter().register_buffers(iovecs) } {
+            Ok(()) => return Ok(()),
+            Err(e) => {
+                let limit = memlock_limit();
+                if e.raw_os_error() != Some(libc::ENOMEM)
+                    || memlock_verdict(needed, limit) != MemlockVerdict::Contended
+                    || std::time::Instant::now() >= deadline
+                {
+                    return Err(registration_error(e, needed, limit));
+                }
+                std::thread::sleep(RECLAIM_POLL);
+            }
+        }
+    }
 }
 
 /// R311y593 — ⚠ the registering tests below want `--test-threads=1`.
@@ -624,6 +741,18 @@ fn registration_error(err: io::Error, needed: usize, limit: Option<(u64, u64)>) 
 /// `cargo test -p wz-runtime-tokio --features runtime-tokio-uring` on a
 /// tightly-limited box can fail here without anything being wrong with the
 /// adapter.
+///
+/// ⚠ R2749 — SERIALIZING THEM IS NOT SUFFICIENT, AND THE PARAGRAPH ABOVE SAYS
+/// IT IS. `--test-threads=1` was exactly how these were running when hosted
+/// run 35488108252 redded them. MEASURED at `soft=hard=8 MiB` against a
+/// `needed` of 4198400: one registration ALONE succeeds; two SEQUENTIALLY in
+/// one process — the first dropped before the second begins — give `ok` then
+/// `ENOMEM`; the whole lane gives 5 passed / 15 failed. The kernel releases a
+/// ring's pinned pages asynchronously after its fd closes, so a test process
+/// outruns its own predecessor's reclaim and no thread count can serialize
+/// that. [`register_awaiting_reclaim`] is what makes the lane deterministic;
+/// the serialization above is kept because it bounds how much can overlap,
+/// not because it prevents overlap.
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -802,12 +931,20 @@ mod tests {
     /// requirement beside the measured limit runs `ulimit -l`. Asserting the
     /// three numbers rather than the prose keeps this from passing on a message
     /// that was reworded into saying nothing.
+    ///
+    /// ⚠ R2749 — THE FIXTURE MOVED ONTO THE OTHER ARM AND HAD TO BE PUT BACK.
+    /// It passed `Some((8 MiB, 8 MiB))` against a `needed` of 4198400, which
+    /// is a limit at TWICE the requirement — the CONTENDED case, not a
+    /// shortfall. It read as a shortfall test only because the message had one
+    /// arm then. Now that it has two, a shortfall fixture has to be a limit
+    /// genuinely below the need, or this test witnesses the wrong sentence
+    /// while keeping the name of the right one.
     #[test]
     fn a_memlock_shortfall_is_reported_as_a_limit_not_as_heap_exhaustion() {
         let mapped = registration_error(
             io::Error::from_raw_os_error(libc::ENOMEM),
             FixedSlotRing::required_locked_bytes(),
-            Some((8 * 1024 * 1024, 8 * 1024 * 1024)),
+            Some((1024 * 1024, 1024 * 1024)),
         );
         let text = mapped.to_string();
         assert!(
@@ -815,13 +952,65 @@ mod tests {
             "the requirement must be named: {text}"
         );
         assert!(
-            text.contains("8388608"),
+            text.contains("1048576"),
             "the MEASURED limit must be named: {text}"
         );
         assert!(
             text.contains("RLIMIT_MEMLOCK"),
             "the knob to turn must be named: {text}"
         );
+        assert!(
+            text.contains("raise RLIMIT_MEMLOCK"),
+            "a limit below the need must be told to RAISE it: {text}"
+        );
+    }
+
+    /// R2749 — A LIMIT THAT ALREADY ADMITS THE REGISTRATION MUST NOT BE TOLD
+    /// TO RAISE ITSELF.
+    ///
+    /// This is the sentence hosted run 35488108252 printed with
+    /// `soft=8388608` against a `needed` of 4198400: "raise RLIMIT_MEMLOCK ...
+    /// to at least 4198400 bytes", which is an instruction to do nothing. One
+    /// errno carried two facts and the message asserted the wrong one for two
+    /// rounds. The assertion is on the ABSENCE of the raise remedy as well as
+    /// the presence of the contention one, because a message that said both
+    /// would send a reader to the same wrong place.
+    #[test]
+    fn a_limit_that_admits_the_registration_is_not_told_to_raise_itself() {
+        let mapped = registration_error(
+            io::Error::from_raw_os_error(libc::ENOMEM),
+            FixedSlotRing::required_locked_bytes(),
+            Some((8 * 1024 * 1024, 8 * 1024 * 1024)),
+        );
+        let text = mapped.to_string();
+        assert!(
+            !text.contains("raise RLIMIT_MEMLOCK"),
+            "the limit is already twice the need; raising it is not the remedy: {text}"
+        );
+        assert!(
+            text.contains("already ADMITS"),
+            "the reader must be told the memory is somebody else's: {text}"
+        );
+    }
+
+    /// The verdict is a COMPARISON, and both sides of it are pinned.
+    ///
+    /// Read directly rather than through the message, so a rewording cannot
+    /// quietly move which arm a given `(needed, limit)` lands on — that is the
+    /// defect this pair exists for, one layer down from the prose.
+    #[test]
+    fn the_verdict_reads_the_limit_against_the_need() {
+        let need = FixedSlotRing::required_locked_bytes();
+        assert_eq!(
+            memlock_verdict(need, Some((need as u64 - 1, need as u64 - 1))),
+            MemlockVerdict::TooSmall
+        );
+        assert_eq!(
+            memlock_verdict(need, Some((need as u64, need as u64))),
+            MemlockVerdict::Contended,
+            "a limit EQUAL to the need admits exactly one registration"
+        );
+        assert_eq!(memlock_verdict(need, None), MemlockVerdict::Unknown);
     }
 
     /// The negative arm: mapping ENOMEM must not swallow every other errno.
