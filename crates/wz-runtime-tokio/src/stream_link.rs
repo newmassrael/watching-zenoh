@@ -35,6 +35,7 @@ use tokio::sync::mpsc;
 use wz_codecs::stream_envelope::StreamEnvelope;
 
 use crate::frame_arena::{link_arena, LinkArena, LinkFrame};
+use crate::link_ring_fd::RingReadable;
 use crate::writer_queue::OutboundQueue;
 use crate::{poll_framed, LinkDriver, LinkEvent, ReadState, Reliability, TxFrame};
 use wz_session_core::link::BoxedLinkDriver;
@@ -90,6 +91,46 @@ pub struct StreamReadDriver<R> {
     /// waiting. The quic comment saying wz "already carries the signal" is true
     /// of quic and only of quic.
     expiry: Option<Arc<ExpirySignal>>,
+    /// R2750 — WHICH READ BODY this link uses, decided once, lazily.
+    ///
+    /// Upstream dispatches at rx-task start
+    /// (`io/zenoh-transport/src/unicast/universal/link.rs` @
+    /// `if transport.manager.state.uring.is_some() && link.link.get_fd().is_ok() {`)
+    /// and never revisits it; this is the same decision at the same moment, the
+    /// moment a link first asks to read.
+    ///
+    /// WHY NOT IN THE CONSTRUCTOR: the ring is attached with a FIXED prefix
+    /// width ([`crate::uring_reactor::UringReactor::attach`]), and `lowlatency`
+    /// is flipped by the open helper at Established — AFTER every `wire_*` has
+    /// built its driver. Deciding at construction would pin the universal
+    /// 2-byte width onto a link that goes on to negotiate the 4-byte one. First
+    /// poll is the earliest moment the width is knowable and the latest moment
+    /// it is still unambiguous, which is `crate::poll_framed`'s own rule for
+    /// reading that flag once per frame rather than per byte.
+    #[cfg(all(feature = "runtime-tokio-uring", feature = "transport-link-tcp"))]
+    ring: RingChoice,
+    /// R2750 — WHOSE reactor [`Self::choose_ring`] consults. `None` is the
+    /// node's. See that method for why a caller may need to own one.
+    #[cfg(all(feature = "runtime-tokio-uring", feature = "transport-link-tcp"))]
+    reactor: Option<Arc<crate::uring_reactor::UringReactor>>,
+}
+
+/// R2750 — the read body [`StreamReadDriver`] dispatched to, or the fact that it
+/// has not asked yet.
+///
+/// Three states rather than an `Option<UringRx>`, because "not asked" and
+/// "asked, and the answer was no" must not collapse: the question costs a
+/// channel send and an `attach`, and a link that declined must not re-ask on
+/// every frame.
+#[cfg(all(feature = "runtime-tokio-uring", feature = "transport-link-tcp"))]
+enum RingChoice {
+    /// Not asked yet — see the field's doc for why the question waits.
+    Undecided,
+    /// Asked and answered no. This link reads through [`poll_framed`], which is
+    /// what every link did before this round and what most still do.
+    Framed,
+    /// This link's bytes come off the ring.
+    Ring(Box<crate::uring_reactor::UringRx>),
 }
 
 /// R2608 — the one-shot "this link's certificate chain has expired" signal,
@@ -242,7 +283,13 @@ pub(crate) fn peer_chain_common_name(
     Some(common_name.to_string())
 }
 
-impl<R: AsyncRead + Unpin> StreamReadDriver<R> {
+// R2750 — `RingReadable` is bounded HERE, on the constructors, not only on the
+// `LinkDriver` impl that consumes it: the discipline is that a stream link
+// cannot be BUILT without stating whether a ring can read it, which is the
+// force upstream gets from `get_fd` being a required trait method. It is the
+// same reason `StreamWriteDriver` takes its `subject` through the constructor —
+// a new stream pipeline must state what only it can know, to compile.
+impl<R: AsyncRead + Unpin + RingReadable> StreamReadDriver<R> {
     // `pub(crate)` so each transport's `wire_*` constructs it over its own split
     // read half; the type is transport-neutral. `lowlatency` is the flag the
     // lowlatency open helper flips at Established (the TCP dial/accept path
@@ -273,7 +320,44 @@ impl<R: AsyncRead + Unpin> StreamReadDriver<R> {
             lowlatency,
             expiry: None,
             arena,
+            #[cfg(all(feature = "runtime-tokio-uring", feature = "transport-link-tcp"))]
+            ring: RingChoice::Undecided,
+            #[cfg(all(feature = "runtime-tokio-uring", feature = "transport-link-tcp"))]
+            reactor: None,
         }
+    }
+
+    /// R2750 — the same driver over a reactor the CALLER owns, for the reason
+    /// [`Self::with_arena`] exists over an arena the caller owns.
+    ///
+    /// Must be called BEFORE the first [`poll_event`](LinkDriver::poll_event):
+    /// the choice is made once, at first read, and this is what it consults.
+    ///
+    /// ⚠ `test` IS IN THE GATE, and narrowing it is the point rather than a
+    /// concession. Nothing in the tree owns a node yet — production links take
+    /// the node's reactor through the `None` arm — so ungated this is dead code
+    /// in every build, which `-D warnings` reds. Same reasoning, same shape, as
+    /// [`Self::set_expiry`] being gated on its one consumer's feature. When a
+    /// node object exists, this loses the `test` and gains a caller in the same
+    /// change.
+    #[cfg(all(test, feature = "runtime-tokio-uring", feature = "transport-link-tcp"))]
+    pub(crate) fn on_reactor(mut self, reactor: Arc<crate::uring_reactor::UringReactor>) -> Self {
+        self.reactor = Some(reactor);
+        self
+    }
+
+    /// R2750 — which body this link settled on.
+    ///
+    /// The decision is otherwise invisible: both bodies answer the same
+    /// [`LinkEvent`]s, which is precisely what makes them two bodies rather than
+    /// two behaviours, so a witness cannot tell them apart from the frames. It
+    /// reports state and changes none, so it is not a knob: the same link reads
+    /// the same way whether or not anybody asks.
+    ///
+    /// Gated with its consumers for the reason [`Self::on_reactor`] is.
+    #[cfg(all(test, feature = "runtime-tokio-uring", feature = "transport-link-tcp"))]
+    pub(crate) fn reads_through_ring(&self) -> bool {
+        matches!(self.ring, RingChoice::Ring(_))
     }
 
     /// R2608 — arm `close_link_on_expiration` on this read half. Called by the
@@ -291,9 +375,71 @@ impl<R: AsyncRead + Unpin> StreamReadDriver<R> {
     pub(crate) fn set_expiry(&mut self, signal: Arc<ExpirySignal>) {
         self.expiry = Some(signal);
     }
+
+    /// R2750 — THE SELECTION POINT. Which read body this link gets, asked once.
+    ///
+    /// Upstream's two conjuncts, in upstream's order
+    /// (`io/zenoh-transport/src/unicast/universal/link.rs` @
+    /// `if transport.manager.state.uring.is_some() && link.link.get_fd().is_ok() {`):
+    /// a ring at node scope, and a link that can name a descriptor. Everything
+    /// else reads the way it always has.
+    ///
+    /// ⚠ THE CONJUNCTS ARE ASKED IN THE OPPOSITE ORDER TO UPSTREAM'S, and that
+    /// is derived rather than stylistic. Upstream's `uring.is_some()` READS a
+    /// manager field that configuration already built, so asking it first costs
+    /// nothing. [`UringReactor::node`](crate::uring_reactor::UringReactor::node)
+    /// BUILDS one on first call — it registers the node table and spawns a
+    /// worker. Asking it first would mean a process whose links are all TLS, or
+    /// a test framing over an in-memory duplex, pins ~4.2 MB and spawns a thread
+    /// for a ring no link can use. The descriptor question is local, free and
+    /// decides the same thing, so it goes first and the reactor is built only
+    /// for a link that can actually be put on it.
+    #[cfg(all(feature = "runtime-tokio-uring", feature = "transport-link-tcp"))]
+    fn choose_ring(&self) -> RingChoice {
+        let Some(fd) = self.reader.ring_fd() else {
+            return RingChoice::Framed;
+        };
+        // A THIRD CONJUNCT WZ NEEDS AND UPSTREAM DOES NOT, declared rather than
+        // discovered later: a link that armed `close_link_on_expiration` has
+        // its read RACED against that signal (see the `expiry` field), and the
+        // ring body has no such arm — its `poll_event` awaits a delivery and
+        // nothing else. Putting an expiring link on the ring would silently
+        // lose the expiry, so it keeps the framed body instead. No link can
+        // reach both arms today (only a `tls/...` locator arms expiry, and
+        // `ReadHalf<T>` answers `None` above), which is exactly why this is
+        // written down: the guard is what keeps that true if either side moves.
+        if self.expiry.is_some() {
+            return RingChoice::Framed;
+        }
+        // WHOSE ring: the node's, or one this caller owns. Same pair and same
+        // argument as `with_arena` beside `new` — "a caller that owns a node, or
+        // a witness that must observe one reactor without the rest of the
+        // process drawing from it, needs a way to say which". For a witness that
+        // is not a convenience: the node's reactor is a `OnceLock` that never
+        // drops, so a test triggering it would pin a second pool's worth of
+        // locked memory for the whole test process and put a hosted runner's
+        // 8 MiB ceiling permanently out of reach — which is the exact shape of
+        // the red R2749 paid for.
+        let reactor = match self.reactor.as_deref() {
+            Some(owned) => owned,
+            None => match crate::uring_reactor::UringReactor::node() {
+                Some(node) => node,
+                None => return RingChoice::Framed,
+            },
+        };
+        let width = crate::prefix_width(self.lowlatency.load(Ordering::Acquire));
+        match reactor.attach(fd, width) {
+            Ok(rx) => RingChoice::Ring(Box::new(rx)),
+            // A reactor whose worker has stopped is not this link's failure to
+            // report — the framed body reads the same socket correctly. Falling
+            // back is the honest answer; failing the link would turn a lost
+            // optimisation into a lost session.
+            Err(_) => RingChoice::Framed,
+        }
+    }
 }
 
-impl<R: AsyncRead + Unpin> LinkDriver for StreamReadDriver<R> {
+impl<R: AsyncRead + Unpin + RingReadable> LinkDriver for StreamReadDriver<R> {
     async fn open(&mut self) -> io::Result<()> {
         // The stream is already connected (split from a live stream); open is
         // unconditionally Ok.
@@ -317,6 +463,17 @@ impl<R: AsyncRead + Unpin> LinkDriver for StreamReadDriver<R> {
     }
 
     async fn poll_event(&mut self) -> LinkEvent {
+        // R2750 — the dispatch, at the moment upstream dispatches: the first
+        // time this link asks to read. See `RingChoice` and the `ring` field.
+        #[cfg(all(feature = "runtime-tokio-uring", feature = "transport-link-tcp"))]
+        {
+            if matches!(self.ring, RingChoice::Undecided) {
+                self.ring = self.choose_ring();
+            }
+            if let RingChoice::Ring(rx) = &mut self.ring {
+                return rx.poll_event().await;
+            }
+        }
         // Destructured so the read future and the signal borrow disjoint
         // fields; `select!` over `&mut self` twice would not compile.
         let Self {
@@ -325,6 +482,7 @@ impl<R: AsyncRead + Unpin> LinkDriver for StreamReadDriver<R> {
             lowlatency,
             expiry,
             arena,
+            ..
         } = self;
         let lowlatency = lowlatency.load(Ordering::Acquire);
         let Some(signal) = expiry.as_ref() else {
@@ -657,6 +815,162 @@ mod tests {
         assert!(
             parked.is_err(),
             "an unarmed driver over a silent peer must stay parked, not report loss"
+        );
+    }
+}
+
+/// R2750 — THE SELECTION POINT's own witnesses.
+///
+/// A module of their own, not arms of `tests` above, because Layer C1br selects
+/// what it runs BY MODULE PATH and R2748 paid for the lesson that a sibling is
+/// not a child: `uring::` does not match `uring_reactor::`, and neither reaches
+/// `stream_link::`. Naming this module lets the lane run exactly these and not
+/// the whole of `stream_link`'s framing suite, which has no ring in it.
+#[cfg(all(test, feature = "runtime-tokio-uring", feature = "transport-link-tcp"))]
+mod ring_selection {
+    use super::*;
+    use crate::link_rx_arena::LinkRxArena;
+    use crate::uring_reactor::UringReactor;
+
+    fn framed(payload: &[u8]) -> Vec<u8> {
+        let mut wire = (payload.len() as u16).to_le_bytes().to_vec();
+        wire.extend_from_slice(payload);
+        wire
+    }
+
+    fn payload_of(event: LinkEvent) -> Vec<u8> {
+        match event {
+            LinkEvent::Rx(frame) => frame.bytes,
+            other => panic!("expected a frame, got {other:?}"),
+        }
+    }
+
+    /// Bounded so a defect reds instead of hanging the lane.
+    async fn within<F: std::future::Future>(f: F) -> F::Output {
+        tokio::time::timeout(std::time::Duration::from_secs(10), f)
+            .await
+            .expect("the link must answer")
+    }
+
+    /// A connected TCP pair, as two owned halves plus the peer end.
+    async fn tcp_pair() -> (tokio::net::tcp::OwnedReadHalf, tokio::net::TcpStream) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        let dialed = tokio::net::TcpStream::connect(addr).await.expect("connect");
+        let (accepted, _) = listener.accept().await.expect("accept");
+        let (read, _write) = accepted.into_split();
+        // `_write` is dropped: this witness only reads, and TCP keeps the read
+        // half usable after the local write half shuts down.
+        (read, dialed)
+    }
+
+    /// A REACTOR THIS TEST OWNS, never the node's.
+    ///
+    /// The node's is a `OnceLock` that never drops, so triggering it would pin a
+    /// second pool's worth of locked memory for the REST of the test process —
+    /// on a host provisioned to exactly one registration (which is what hosted
+    /// CI is) every later registering test would then fail permanently, with
+    /// nothing transient for `FixedSlotRing::register` to wait out. That is the
+    /// red R2749 paid for, and this is how it stays paid.
+    fn own_reactor() -> Arc<UringReactor> {
+        Arc::new(UringReactor::start(LinkRxArena::new()).expect("a reactor"))
+    }
+
+    /// THE CLAIM OF THIS ROUND: a production stream half that can name a
+    /// descriptor is READ THROUGH THE RING, and the frames are the same frames.
+    ///
+    /// Both halves of that matter. `reads_through_ring` alone would pass on a
+    /// link that chose the ring and then delivered nothing; the payload alone
+    /// would pass on a link that quietly stayed framed — which is exactly the
+    /// state the tree was in before this round, so the payload assertion on its
+    /// own is the test that could not fail.
+    ///
+    /// CONTROL: make `ring_fd` answer `None` for TCP, or delete the dispatch
+    /// from `poll_event`, and the `reads_through_ring` assertion reds while the
+    /// payload one still passes — which is the pair saying the two assertions
+    /// are not measuring one thing twice.
+    #[tokio::test]
+    async fn a_descriptor_bearing_half_is_read_through_the_ring() {
+        let (read, mut peer) = tcp_pair().await;
+        let mut driver =
+            StreamReadDriver::new(read, Arc::new(AtomicBool::new(false))).on_reactor(own_reactor());
+
+        peer.write_all(&framed(b"alpha")).await.expect("write");
+        assert_eq!(payload_of(within(driver.poll_event()).await), b"alpha");
+        assert!(
+            driver.reads_through_ring(),
+            "a TCP half names a descriptor and a reactor was supplied, so this \
+             link must have been put on the ring"
+        );
+    }
+
+    /// A half with NO descriptor keeps the framed body — and still delivers.
+    ///
+    /// The negative arm of the same question, and the reason the trait's
+    /// `None` is a real answer rather than a gap: an in-memory duplex is not a
+    /// socket, so there is nothing to register, and the link must go on working
+    /// exactly as it did.
+    #[tokio::test]
+    async fn a_half_with_no_descriptor_keeps_the_framed_body() {
+        let (near, mut far) = tokio::io::duplex(64);
+        let mut driver =
+            StreamReadDriver::new(near, Arc::new(AtomicBool::new(false))).on_reactor(own_reactor());
+
+        far.write_all(&framed(b"beta")).await.expect("write");
+        assert_eq!(payload_of(within(driver.poll_event()).await), b"beta");
+        assert!(
+            !driver.reads_through_ring(),
+            "a duplex half has no descriptor, so it must not have been put on \
+             the ring even though a reactor was available"
+        );
+    }
+
+    /// WITHOUT A REACTOR there is no ring to choose, and the link still reads.
+    ///
+    /// This is the arm that says the node lookup is genuinely consulted rather
+    /// than the choice being made by the descriptor alone: same TCP half as the
+    /// first witness, same bytes, and the only difference is that no reactor was
+    /// supplied. It relies on the node's `OnceLock` being unbuilt in this
+    /// process, which the ORDER in `choose_ring` is what guarantees — the
+    /// descriptor question is asked first, so no earlier test in this lane can
+    /// have built one behind this test's back.
+    #[tokio::test]
+    async fn a_descriptor_alone_does_not_put_a_link_on_a_ring() {
+        let (read, mut peer) = tcp_pair().await;
+        let mut driver = StreamReadDriver::new(read, Arc::new(AtomicBool::new(false)));
+
+        peer.write_all(&framed(b"gamma")).await.expect("write");
+        assert_eq!(payload_of(within(driver.poll_event()).await), b"gamma");
+    }
+
+    /// AN EXPIRING LINK KEEPS THE FRAMED BODY, which is the third conjunct
+    /// `choose_ring` adds to upstream's two.
+    ///
+    /// The ring body awaits a delivery and nothing else, so a link put on it
+    /// would never observe its expiry signal. No link reaches both arms today —
+    /// only a `tls/...` locator arms expiry and `ReadHalf<T>` answers `None` —
+    /// so this witness is built on a TCP half with the signal armed by hand:
+    /// the combination the guard exists to refuse, which the tree cannot
+    /// otherwise produce.
+    ///
+    /// CONTROL: drop the `expiry.is_some()` arm from `choose_ring` and this
+    /// reds, alone.
+    #[cfg(feature = "transport-link-tls")]
+    #[tokio::test]
+    async fn an_expiring_link_keeps_the_framed_body() {
+        let (read, mut peer) = tcp_pair().await;
+        let mut driver =
+            StreamReadDriver::new(read, Arc::new(AtomicBool::new(false))).on_reactor(own_reactor());
+        driver.set_expiry(Arc::new(ExpirySignal::default()));
+
+        peer.write_all(&framed(b"delta")).await.expect("write");
+        assert_eq!(payload_of(within(driver.poll_event()).await), b"delta");
+        assert!(
+            !driver.reads_through_ring(),
+            "a link whose read is raced against an expiry signal must keep the \
+             body that has that race"
         );
     }
 }

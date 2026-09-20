@@ -10197,6 +10197,15 @@ layer_c1br_uring_fixed_buffers() {
     # therefore one registration's worth rather than "one per test at a time".
     # The serialization stays because it bounds how much can overlap.
     #
+    # ⚠ R2750 — A THIRD FILTER, and it is a THIRD MODULE rather than a third
+    # uring one: `stream_link::ring_selection::` holds the SELECTION POINT's
+    # witnesses — which body a link is given. They live under `stream_link`
+    # because that is the type that chooses, and they are a module of their own
+    # so this filter names them without dragging in `stream_link`'s framing
+    # suite, which has no ring in it. The paragraph below predicted exactly this
+    # ("adding a third uring module means adding a third filter"); the only
+    # thing it did not predict is that the third one would not be named `uring`.
+    #
     # ⚠ R2748 — TWO FILTERS, because `uring::` DOES NOT MATCH `uring_reactor::`.
     # A module-path filter covers everything under its module by construction,
     # which is why `nondefault-tests-gate.sh` admits that spelling and refuses a
@@ -10207,7 +10216,8 @@ layer_c1br_uring_fixed_buffers() {
     # was written against. Both paths are named, so adding a third uring module
     # means adding a third filter rather than hoping a prefix reaches it.
     out="$(cd crates && cargo test -p wz-runtime-tokio --features runtime-tokio-uring \
-        --lib --quiet -- --test-threads=1 uring:: uring_reactor:: 2>&1)" \
+        --lib --quiet -- --test-threads=1 uring:: uring_reactor:: \
+        stream_link::ring_selection:: 2>&1)" \
         || { echo "$out"; return 1; }
     local tests
     tests="$(_runci_passed_count <<<"$out")"
