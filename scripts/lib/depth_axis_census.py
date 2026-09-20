@@ -1818,7 +1818,19 @@ PIN_NO_SYMBOL = 2
 # turns it from a parity gap a later round would "find" into a design position a
 # reader can check. AMBIGUOUS holds at 18, so the new citation is rooted. READ
 # off the census's own FAIL line, `wz citations: 86 against a pin of 85`.
-PIN_WZ_CITATIONS = 86
+#
+# R2747 — 86 -> 88, RISING again and by the same atom. `runtime-tokio-uring`'s
+# correction records that the first residual's base was a missing STRUCTURE
+# rather than a missing wire, and names the two wz files that settle it: the
+# new `crates/wz-runtime-tokio/src/link_rx_window.rs` and
+# `crates/wz-runtime-tokio/src/uring.rs`, where the framed read now lives.
+# PRE-COMPUTED with this module's own `citation_audit` over that atom alone,
+# before and after: (wz 2, ambiguous 0, upstream 3) became (wz 4, ambiguous 0,
+# upstream 6) — so the whole of this move is those two citations, and the three
+# new upstream ones are anchored and land in the unjudged bucket as always.
+# AMBIGUOUS holds at 18, which says both new citations are rooted. READ off the
+# census's own FAIL line, `wz citations: 88 against a pin of 86`.
+PIN_WZ_CITATIONS = 88
 # R2626 — 44 -> 42, and this one is worth a sentence because it HELD through
 # every earlier retirement in this run (R2612, R2622). `time-hlc`'s reason is the
 # first retiree carrying AMBIGUOUS citations of its own: its oldest clauses cite
