@@ -2188,9 +2188,9 @@ impl<B> Default for ReadState<B> {
 /// R2750 — THE LENGTH-PREFIX WIDTH A STREAM LINK FRAMES WITH, in one place.
 ///
 /// A negotiated + Established `transport-lowlatency` link frames with a 4-byte
-/// LE u32 prefix (zenoh `unicast/lowlatency/link.rs`); every other frame — the
-/// universal path and the handshake of a lowlatency link alike — keeps the
-/// 2-byte u16 prefix.
+/// LE u32 prefix (zenoh `io/zenoh-transport/src/unicast/lowlatency/link.rs`
+/// @ `u32::from_le_bytes(length)`); every other frame — the universal path and
+/// the handshake of a lowlatency link alike — keeps the 2-byte u16 prefix.
 ///
 /// Extracted because it now has TWO callers and had been a literal in one of
 /// them: [`poll_framed`] fixes the width at frame start, and the ring body's
