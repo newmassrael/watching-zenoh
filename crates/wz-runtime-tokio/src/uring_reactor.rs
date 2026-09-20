@@ -81,7 +81,6 @@ use tokio::sync::mpsc as frame_chan;
 
 use wz_session_core::link::{LinkEvent, LostCause, RxFrame};
 
-use crate::frame_arena::FrameArena;
 use crate::link_rx_arena::{LinkRxArena, LinkRxFrame};
 use crate::link_rx_window::RxWindow;
 use crate::session_rx_pool_ap::SLOT_SIZE;
@@ -231,7 +230,7 @@ impl UringReactor {
         // where a dedicated pool exists to make it in.
         let handle = std::thread::Builder::new()
             .name("wz-uring-rx".to_owned())
-            .spawn(move || run_worker(ring, arena, worker_wake, rx))?;
+            .spawn(move || run_worker(ring, worker_wake, rx))?;
         Ok(Self {
             cmds: tx,
             wake,
@@ -408,12 +407,14 @@ struct InFlight {
 }
 
 /// The worker: one ring, one thread, and every completion routed by its key.
-fn run_worker(
-    mut ring: FixedSlotRing,
-    mut arena: LinkRxArena,
-    wake: Arc<WakeFd>,
-    cmds: cmd_chan::Receiver<Cmd>,
-) {
+///
+/// R2750 — NO ARENA PARAMETER. The ring carries the table it registered, so
+/// there is no second handle to pass down and none to get wrong; `start`'s own
+/// `arena` argument is free to be dropped the moment registration is done, and
+/// the pinned storage still outlives the ring because the ring holds a refcount
+/// on it. That is the residual "the lifetime contract is upheld by scoping"
+/// closing, visible here as an argument that no longer needs to exist.
+fn run_worker(mut ring: FixedSlotRing, wake: Arc<WakeFd>, cmds: cmd_chan::Receiver<Cmd>) {
     // The waker's destination. Declared before the loop and never moved, which
     // is what makes the always-armed read into it sound.
     let mut wake_buf = [0u8; 8];
@@ -456,14 +457,9 @@ fn run_worker(
                 }
                 Cmd::Read { id } => {
                     if let Some(ctx) = links.get(&id) {
-                        if let Err(cause) = arm_read(
-                            &mut ring,
-                            &mut arena,
-                            &mut inflight,
-                            &mut next_ticket,
-                            id,
-                            ctx.fd,
-                        ) {
+                        if let Err(cause) =
+                            arm_read(&mut ring, &mut inflight, &mut next_ticket, id, ctx.fd)
+                        {
                             let _ = ctx.deliver.send(Delivery::Lost(cause));
                         }
                     }
@@ -565,20 +561,22 @@ fn arm_wake(ring: &mut FixedSlotRing, wake: &WakeFd, buf: &mut [u8; 8]) -> io::R
 /// Take a destination and give the kernel one read for `link`.
 fn arm_read(
     ring: &mut FixedSlotRing,
-    arena: &mut LinkRxArena,
     inflight: &mut HashMap<u64, InFlight>,
     next_ticket: &mut u64,
     link: u64,
     fd: RawFd,
 ) -> Result<(), LostCause> {
-    let mut frame = arena.take(SLOT_SIZE);
+    // R2750 — from the RING's table, because it is the one the ring registered.
+    // This used to take an `arena` argument the caller had to keep in step with
+    // the registration; there is no second table to get wrong now.
+    let mut frame = ring.take_slot();
     // MOVING the frame after the submission is sound, and that is why the
     // insert below may follow the push rather than having to precede it: the
     // kernel was given the address of a SLOT (storage the table owns, behind an
     // `Arc` the frame only points at) or of a `Vec`'s heap buffer. Neither
     // moves when the `LinkRxFrame` header does.
     let key = if frame.is_pooled() {
-        match ring.submit_read_fixed(fd, &*arena, &mut frame, SLOT_SIZE) {
+        match ring.submit_read_fixed(fd, &mut frame, SLOT_SIZE) {
             // A frame with no room is a contradiction here — `take(SLOT_SIZE)`
             // asked for a whole slot — so it is the ring refusing, not an EOF.
             Ok((0, _)) | Err(_) => return Err(LostCause::OsError),
@@ -678,6 +676,10 @@ fn deliver_completion(
 #[cfg(test)]
 mod tests {
     use super::*;
+    // R2750 — the worker no longer takes slots itself (the ring does), so this
+    // trait is a TEST import now: the dry-table witness drains the table by
+    // hand. At module scope it would be an unused import under `-D warnings`.
+    use crate::frame_arena::FrameArena;
     use std::io::Write;
     use std::os::fd::AsRawFd;
     use std::time::Duration;

@@ -106,6 +106,27 @@ use crate::session_rx_pool_ap::{SLOT_COUNT, SLOT_SIZE};
 pub struct FixedSlotRing {
     ring: IoUring,
     registered: usize,
+    /// R2750 — THE TABLE THIS RING REGISTERED, held rather than remembered.
+    ///
+    /// `IORING_REGISTER_BUFFERS` pins addresses inside the table's storage, so
+    /// that storage must outlive the ring. Until this field existed that was a
+    /// CONTRACT IN A DOC COMMENT — `register` borrowed the arena for the call
+    /// and returned a ring with no lifetime tie, so dropping the table while the
+    /// ring lived compiled, and the kernel would then write into freed pages.
+    ///
+    /// Upstream does not rely on a comment for this either: its own registered
+    /// region is reached through an owning handle
+    /// (`commons/zenoh-uring/src/linux/reader/buffer_group.rs` @
+    /// `arena: Rc<GroupedArenaInner>`, with a `Drop` beside it).
+    /// [`LinkRxArena`] is already that shape one refcount up — a `Clone` handle
+    /// over an `Arc<NodeTable>` — so holding one here makes the lifetime a fact
+    /// of the type instead of a rule a caller has to know.
+    ///
+    /// It also deletes an invariant nothing checked: every read used to take an
+    /// arena as an ARGUMENT, which the caller had to ensure was the same table
+    /// the ring registered. Passing a different one produced a `buf_index` from
+    /// the wrong table. There is now no second table to pass.
+    arena: LinkRxArena,
 }
 
 /// One completion the kernel has finished with: the `user_data` its
@@ -222,7 +243,23 @@ impl FixedSlotRing {
         drop(held);
         result?;
 
-        Ok(Self { ring, registered })
+        Ok(Self {
+            ring,
+            registered,
+            // The handle, not a copy: `LinkRxArena` is an `Arc<NodeTable>`, so
+            // this is the refcount that keeps the pinned storage alive for as
+            // long as the kernel holds its addresses.
+            arena: arena.clone(),
+        })
+    }
+
+    /// R2750 — a destination from THIS RING's own table.
+    ///
+    /// The only way a caller should reach a slot to read into: taking one from
+    /// some other arena is what the `arena` parameters used to permit, and a
+    /// frame from a table this ring did not register has no `buf_index` here.
+    pub fn take_slot(&mut self) -> LinkRxFrame {
+        self.arena.take(SLOT_SIZE)
     }
 
     /// Bytes [`Self::register`] asks the kernel to PIN: every pool slot, whole.
@@ -293,7 +330,6 @@ impl FixedSlotRing {
     pub fn submit_read_fixed(
         &mut self,
         fd: RawFd,
-        arena: &LinkRxArena,
         frame: &mut LinkRxFrame,
         len: usize,
     ) -> io::Result<(usize, u64)> {
@@ -303,7 +339,9 @@ impl FixedSlotRing {
             ));
         }
         let dst = frame.as_mut().as_mut_ptr();
-        let buf_index = arena
+        // R2750 — the ring's OWN table answers this, not one the caller chose.
+        let buf_index = self
+            .arena
             .slot_of(dst)
             .ok_or_else(|| io::Error::other("this frame's slot is not in the arena's table"))?;
         if buf_index >= self.registered {
@@ -466,11 +504,10 @@ impl FixedSlotRing {
     pub fn read_fixed_into(
         &mut self,
         fd: RawFd,
-        arena: &LinkRxArena,
         frame: &mut LinkRxFrame,
         len: usize,
     ) -> io::Result<usize> {
-        let (len, _key) = self.submit_read_fixed(fd, arena, frame, len)?;
+        let (len, _key) = self.submit_read_fixed(fd, frame, len)?;
         if len == 0 {
             return Ok(0);
         }
@@ -540,7 +577,6 @@ impl FixedSlotRing {
     pub fn read_framed<F>(
         &mut self,
         fd: RawFd,
-        arena: &mut LinkRxArena,
         window: &mut RxWindow,
         width: usize,
         on_frame: &mut F,
@@ -548,8 +584,8 @@ impl FixedSlotRing {
     where
         F: FnMut(&[u8]),
     {
-        let mut frame = arena.take(SLOT_SIZE);
-        let n = self.read_fixed_into(fd, arena, &mut frame, SLOT_SIZE)?;
+        let mut frame = self.take_slot();
+        let n = self.read_fixed_into(fd, &mut frame, SLOT_SIZE)?;
         if n == 0 {
             return Ok(0);
         }
@@ -785,6 +821,59 @@ mod tests {
     /// so the only way the payload is readable through it is if
     /// `IORING_OP_READ_FIXED` landed in the registered region that IS that
     /// slot. Nothing in this test copies.
+    /// R2750 — THE RING ALONE SUFFICES: the caller's arena handle is dropped
+    /// before a byte is read, and the registered table is still there.
+    ///
+    /// The registration pins addresses inside the table's storage, so that
+    /// storage has to outlive the ring. This is the claim that it is now the
+    /// RING that keeps it alive: nothing but the ring holds a handle past the
+    /// `drop` below, the destination comes from `take_slot` (the ring's own
+    /// table, the only one it has), and the payload still arrives.
+    ///
+    /// ⚠ WHAT ITS CONTROL CAN AND CANNOT SAY, recorded rather than implied.
+    /// Reverting this fix — dropping the `arena` field and taking the table
+    /// back as an argument — does NOT reliably red this test, and that is a
+    /// property of the defect, not a weakness in the witness: the old shape
+    /// made dropping the table while the ring lived LEGAL, and reading through
+    /// it afterwards is undefined behaviour, which an allocator that has not
+    /// yet reused the pages performs as if nothing were wrong. The control for
+    /// this residual is therefore the COMPILE-TIME one: before, `register`
+    /// borrowed the arena for the call and returned a ring with no lifetime
+    /// tie, so this test's `drop(arena)` compiled and left the kernel writing
+    /// into freed pages; now the same `drop` compiles and is sound, because the
+    /// refcount the ring holds is what the pages belong to. Stated here so a
+    /// later round grades this against a compile-time claim and does not go
+    /// looking for a runtime red that cannot exist.
+    #[test]
+    fn the_registered_table_outlives_the_callers_handle() {
+        let mut arena = LinkRxArena::new();
+        let mut ring = FixedSlotRing::register(&mut arena, 8).expect("io_uring registration");
+
+        // THE POINT OF THE TEST: the caller is done with the table, and says so.
+        drop(arena);
+
+        let payload = b"the ring still owns its registration";
+        let mut frame = ring.take_slot();
+        assert!(
+            frame.is_pooled(),
+            "the ring's own table must still serve a slot"
+        );
+
+        let (rd, mut wr) = std::io::pipe().expect("pipe");
+        wr.write_all(payload).expect("write");
+        drop(wr);
+
+        let n = ring
+            .read_fixed_into(rd.as_raw_fd(), &mut frame, payload.len())
+            .expect("READ_FIXED");
+        assert_eq!(n, payload.len());
+        assert_eq!(
+            &frame.as_ref()[..n],
+            payload,
+            "the kernel wrote into a slot the ring kept alive by itself"
+        );
+    }
+
     #[test]
     fn the_kernel_writes_into_the_frames_own_link_rx_slot() {
         let mut arena = LinkRxArena::new();
@@ -802,7 +891,7 @@ mod tests {
         drop(wr);
 
         let n = ring
-            .read_fixed_into(rd.as_raw_fd(), &arena, &mut frame, payload.len())
+            .read_fixed_into(rd.as_raw_fd(), &mut frame, payload.len())
             .expect("READ_FIXED");
         assert_eq!(n, payload.len());
         assert_eq!(
@@ -883,7 +972,7 @@ mod tests {
         drop(wr);
 
         let n = ring
-            .read_fixed_into(rd.as_raw_fd(), &arena, &mut frame, room)
+            .read_fixed_into(rd.as_raw_fd(), &mut frame, room)
             .expect("READ_FIXED");
         assert_eq!(n, payload.len());
         assert_eq!(
@@ -915,7 +1004,7 @@ mod tests {
         drop(wr);
 
         let err = ring
-            .read_fixed_into(rd.as_raw_fd(), &arena, &mut frame, 1)
+            .read_fixed_into(rd.as_raw_fd(), &mut frame, 1)
             .expect_err("a spilled frame has no registered slot");
         assert!(
             err.to_string().contains("spilled"),
@@ -1087,16 +1176,10 @@ mod tests {
         let mut window = RxWindow::new();
         let mut seen: Vec<(Vec<u8>, bool)> = Vec::new();
         let n = ring
-            .read_framed(
-                rd.as_raw_fd(),
-                &mut arena,
-                &mut window,
-                2,
-                &mut |frame: &[u8]| {
-                    let ptr = frame.as_ptr();
-                    seen.push((frame.to_vec(), extents.iter().any(|r| r.contains(&ptr))))
-                },
-            )
+            .read_framed(rd.as_raw_fd(), &mut window, 2, &mut |frame: &[u8]| {
+                let ptr = frame.as_ptr();
+                seen.push((frame.to_vec(), extents.iter().any(|r| r.contains(&ptr))))
+            })
             .expect("READ_FIXED + framing");
 
         assert_eq!(n, wire.len(), "one completion carried the whole wire");
@@ -1139,16 +1222,10 @@ mod tests {
         let mut window = RxWindow::new();
         let mut seen: Vec<(Vec<u8>, bool)> = Vec::new();
         let first = ring
-            .read_framed(
-                rd.as_raw_fd(),
-                &mut arena,
-                &mut window,
-                2,
-                &mut |frame: &[u8]| {
-                    let ptr = frame.as_ptr();
-                    seen.push((frame.to_vec(), extents.iter().any(|r| r.contains(&ptr))))
-                },
-            )
+            .read_framed(rd.as_raw_fd(), &mut window, 2, &mut |frame: &[u8]| {
+                let ptr = frame.as_ptr();
+                seen.push((frame.to_vec(), extents.iter().any(|r| r.contains(&ptr))))
+            })
             .expect("READ_FIXED + framing");
         assert_eq!(first, head.len());
         assert!(seen.is_empty(), "half a frame is not a frame");
@@ -1161,16 +1238,10 @@ mod tests {
         wr.write_all(b"cde").expect("write tail");
         drop(wr);
         let second = ring
-            .read_framed(
-                rd.as_raw_fd(),
-                &mut arena,
-                &mut window,
-                2,
-                &mut |frame: &[u8]| {
-                    let ptr = frame.as_ptr();
-                    seen.push((frame.to_vec(), extents.iter().any(|r| r.contains(&ptr))))
-                },
-            )
+            .read_framed(rd.as_raw_fd(), &mut window, 2, &mut |frame: &[u8]| {
+                let ptr = frame.as_ptr();
+                seen.push((frame.to_vec(), extents.iter().any(|r| r.contains(&ptr))))
+            })
             .expect("READ_FIXED + framing");
         assert_eq!(second, 3);
         assert_eq!(
@@ -1202,13 +1273,9 @@ mod tests {
 
         let mut window = RxWindow::new();
         let n = ring
-            .read_framed(
-                rd.as_raw_fd(),
-                &mut arena,
-                &mut window,
-                2,
-                &mut |_: &[u8]| unreachable!("EOF carries no frame"),
-            )
+            .read_framed(rd.as_raw_fd(), &mut window, 2, &mut |_: &[u8]| {
+                unreachable!("EOF carries no frame")
+            })
             .expect("READ_FIXED at EOF");
         assert_eq!(n, 0, "EOF is a zero-byte completion");
         assert!(
