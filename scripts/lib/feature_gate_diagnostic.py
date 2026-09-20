@@ -343,6 +343,27 @@ DEFERRED: dict[str, dict[str, str]] = {
             for f in (
                 "live-capture",
                 "plugin-dynamic-loading",
+                # R2746 — JOINED this list, and the round that made the claim
+                # true is the one that typed it. `pub mod uring` was gated on
+                # this feature ALONE until R2746 repointed the adapter at the
+                # link-RX table, which lives behind `transport-link-tcp`; the
+                # module's cfg became `all(runtime-tokio-uring,
+                # transport-link-tcp)` and the census flagged the feature on the
+                # first run after the change — the ratchet this file's header
+                # promises, doing exactly that.
+                #
+                # ⚠ The implication was deliberately NOT put on the feature
+                # instead, which would have kept a simple cfg and left this list
+                # alone: Layer C1br's `--no-default-features --features
+                # runtime-tokio-uring` build is the tree's only
+                # `reassembly`-without-transport build, and giving the feature a
+                # link would have taken that coverage away. A `@defer` row is
+                # the cheaper of the two, and the coverage is not.
+                #
+                # MEASURED, because the reason above says EVERY public item it
+                # gates is compound: the feature has exactly ONE `#[cfg]` site
+                # in this package, and it is that module's.
+                "runtime-tokio-uring",
                 "storage-mgr-dynamic-volume-loading",
                 "time-hlc",
                 "transport-link-raweth",
