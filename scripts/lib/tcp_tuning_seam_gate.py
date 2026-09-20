@@ -137,6 +137,22 @@ TUNING_CALL = "set_nodelay("
 # switch, and this tree has paid for that shape before.
 EXEMPT = "TCP-TUNING-NOT-A-LINK"
 
+# R2750 — the marker must be CLAIMED, not merely MENTIONED, and a claim is a
+# comment line that OPENS with it. The first form was `EXEMPT in scope`, a bare
+# substring over the item's comment block plus body, and R2750 tripped it by
+# writing a doc comment that explained why the hatch did NOT apply: naming it
+# was enough to take it. A gate that a sentence about the gate can satisfy is
+# the class this tree keeps paying for -- an asserted binding is not a binding.
+#
+# The shape here is the one the FAIL text already prescribes ("say so in the
+# body with the `TCP-TUNING-NOT-A-LINK` marker", written as
+# `// TCP-TUNING-NOT-A-LINK: <why>`), so this narrows the check to the form the
+# gate was always telling people to use rather than inventing a new one.
+EXEMPT_CLAIM = re.compile(
+    r"^\s*(?://[/!]?|\*)\s*" + re.escape(EXEMPT) + r"\b",
+    re.MULTILINE,
+)
+
 # Below this the scan resolved the wrong root or read the wrong crate. A run
 # that found nothing to look at must not report OK -- the "a population of zero
 # reports green" trap this tree has paid for more than once.
@@ -341,12 +357,20 @@ def producers(root: Path) -> tuple[list[dict], list[dict], list[dict], int]:
         if TCP in f["args"]:
             continue
         entry = {"file": f["file"], "fn": f["fn"], "line": f["line"]}
-        if EXEMPT in f["scope"]:
-            # Scoped to THIS item's own comment block + body, so a marker on a
-            # sibling probe cannot quietly exempt the producer next to it.
-            exempted.append(entry)
-        elif f["fn"] in reaching:
+        # R2750 — REACHING IS ASKED FIRST, and the order is the point. A
+        # producer that actually routes through the tuning SSOT is SATISFIED
+        # whatever its comments say: an escape hatch must never be able to
+        # downgrade a function that is already doing the right thing. The old
+        # order reported such a function as `skip`, which threw away the one
+        # fact the gate exists to establish and made "excused" and "correct"
+        # print the same.
+        if f["fn"] in reaching:
             satisfied.append(entry)
+        elif EXEMPT_CLAIM.search(f["scope"]):
+            # Scoped to THIS item's own comment block + body, so a marker on a
+            # sibling probe cannot quietly exempt the producer next to it; and
+            # CLAIMED rather than mentioned -- see EXEMPT_CLAIM.
+            exempted.append(entry)
         else:
             offenders.append(entry)
     return offenders, satisfied, exempted, scanned
@@ -553,6 +577,43 @@ def selftest() -> int:
             0,
             1,
             1,
+        ),
+        (
+            # R2750's FIRST discriminator. Before this round the check was
+            # `EXEMPT in scope`, so a comment DISCUSSING the hatch took it --
+            # which is exactly how this was found: a doc comment saying the
+            # hatch did not apply here silently claimed it. A claim opens a
+            # comment line; a mention sits inside a sentence.
+            "naming the marker mid-sentence does not claim it",
+            TUNE
+            + PRIM_OK
+            + "// The TCP-TUNING-NOT-A-LINK hatch would be a false statement\n"
+            "// here, so this socket is tuned rather than excused.\n"
+            "async fn probe(addr: SocketAddr) -> io::Result<TcpStream> {\n"
+            "    TcpStream::connect(addr).await\n}\n",
+            # OFFENDS: it does not reach the SSOT and it did not claim the
+            # hatch. Under the old substring check this was 0/1/1.
+            1,
+            1,
+            0,
+        ),
+        (
+            # R2750's SECOND discriminator, and it is about the ORDER rather
+            # than the form. A producer that DOES route through the tuning is
+            # satisfied whatever its comments say -- an escape hatch must never
+            # downgrade a function that is already correct. The old order
+            # reported this as exempt, printing "excused" for something the
+            # gate had in fact verified.
+            "a reaching producer is satisfied even when it claims the hatch",
+            TUNE
+            + PRIM_OK
+            + "// TCP-TUNING-NOT-A-LINK: stale claim left on a tuned dial.\n"
+            "pub async fn dial_tuned(addr: SocketAddr) -> io::Result<TcpStream> {\n"
+            "    connect_tcp_bound(addr).await\n}\n",
+            # SATISFIED (2: the primitive and this one), never exempt.
+            0,
+            2,
+            0,
         ),
         (
             "the marker does NOT reach the offender beside it",
