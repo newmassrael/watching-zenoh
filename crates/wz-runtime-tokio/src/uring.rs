@@ -9,17 +9,24 @@
 //! `IORING_OP_READ_FIXED`. Until this module the table had one incarnation, so
 //! the claim was an assertion about code that did not exist.
 //!
-//! [`crate::zero_copy`] built row 2's pool consumer. This is row 3's, over the
-//! SAME pool: the buffers registered with the kernel here are literally
-//! `reassembly_pool_ap`'s slots, which is why `runtime-tokio-uring` implies
-//! `runtime-zero-copy` rather than sitting beside it.
+//! [`crate::zero_copy`] built row 2's pool consumer. This is row 3's, and the
+//! buffers registered with the kernel here are literally a generated pool's
+//! slots rather than buffers of this module's own — which is why
+//! `runtime-tokio-uring` implies `runtime-zero-copy` rather than sitting beside
+//! it.
+//!
+//! ⚠ WHICH pool changed in R2746, and this paragraph used to name
+//! `reassembly_pool_ap`. It is `session_rx_pool_ap`, the LINK-RX table; the
+//! section at the end of this header carries the argument. The implication on
+//! `runtime-zero-copy` is unaffected, because the seam that makes a generated
+//! pool reachable at all is still that feature's.
 //!
 //! ## What "zero-copy" means on this path, precisely
 //!
 //! Row 2 reads into a link buffer and the chain then stages a copy of it. Here
-//! the kernel writes into the pool slot the chain already holds, and completion
-//! only advances a length (`ChainStaging::commit`). There is no
-//! intermediate buffer, which is the RFC's own definition of the RX happy path
+//! the kernel writes into the pool slot the FRAME already holds, and completion
+//! only narrows the frame to what was written. There is no intermediate buffer,
+//! which is the RFC's own definition of the RX happy path
 //! (`docs/rfc-sce-protocol-synthesis.md` — "DMA fills pool slot → codec parses
 //! in place"), with `io_uring` in the DMA controller's seat.
 //!
