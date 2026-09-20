@@ -360,6 +360,33 @@ impl<R: AsyncRead + Unpin + RingReadable> StreamReadDriver<R> {
         matches!(self.ring, RingChoice::Ring(_))
     }
 
+    /// R2751 — what THIS driver's own half answers to `RingReadable::ring_fd`,
+    /// for a witness that must check the answer WITHOUT a reactor.
+    ///
+    /// The distinction from [`Self::reads_through_ring`] is the point: that one
+    /// reports a DECISION, which needs a ring to have been available; this one
+    /// reports the HALF'S ANSWER, which a host with no `io_uring` can still be
+    /// asked. vsock's witness needs exactly that — AF_VSOCK loopback and
+    /// `io_uring` are separate host capabilities, and demanding both would make
+    /// the test unrunnable in strictly more places than demanding one.
+    ///
+    /// ⚠ `transport-link-vsock` IS IN THE GATE, and narrowly on purpose: this
+    /// accessor's only consumer is that pipeline's witness, and Layer C1br
+    /// builds `runtime-tokio-uring` WITHOUT vsock — where an ungated helper is
+    /// dead code that `-D warnings` reds. Same rule, same shape, as
+    /// [`Self::set_expiry`] being gated on its one consumer's feature. A second
+    /// transport wanting this widens the gate in the change that adds the
+    /// caller, not before.
+    #[cfg(all(
+        test,
+        feature = "runtime-tokio-uring",
+        feature = "transport-link-tcp",
+        feature = "transport-link-vsock"
+    ))]
+    pub(crate) fn reader_ring_fd(&self) -> Option<std::os::fd::RawFd> {
+        self.reader.ring_fd()
+    }
+
     /// R2608 — arm `close_link_on_expiration` on this read half. Called by the
     /// pipeline that knows the peer's chain, which is the only place that can:
     /// the certificate is readable from the rustls connection BEFORE the stream

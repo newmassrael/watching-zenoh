@@ -47,14 +47,67 @@ use crate::stream_link::{writer_task, StreamReadDriver, StreamWriteDriver};
 use crate::writer_queue::WriterHandle;
 use wz_session_core::link::InterceptorLink;
 
+/// R2751 — vsock's read half, which REMEMBERS ITS DESCRIPTOR.
+///
+/// A `tokio::io::ReadHalf<VsockStream>` cannot answer "do my bytes have a raw
+/// fd": it keeps the stream behind a shared lock and publishes no accessor. The
+/// socket HAS one — `VsockStream: AsRawFd` — so the descriptor is unreachable
+/// through the half, not absent. This type is the half that reaches it: the fd
+/// is read off the stream BEFORE [`tokio::io::split`] consumes it, and carried
+/// beside the half that keeps it open.
+///
+/// Upstream's vsock link answers `Ok` for exactly this reason — it keeps the
+/// socket itself and reads `as_raw_fd()` off it
+/// (`io/zenoh-links/zenoh-link-vsock/src/unicast.rs` @ `fn get_fd`). Before this
+/// type, wz's answer was `None`, and the whole of `runtime-tokio-uring`'s
+/// remaining divergence from upstream was that one wrong answer.
+///
+/// LIFETIME, which is what makes carrying a raw fd sound here rather than a
+/// dangling-pointer waiting to happen: [`tokio::io::split`] gives both halves an
+/// `Arc` on the stream, so the socket — and its descriptor — lives exactly as
+/// long as this half does. That is the same contract
+/// [`crate::uring_reactor::UringReactor::attach`] documents ("the caller's
+/// reader half keeps it open"), upheld the same way TCP upholds it: the driver
+/// owns the half and the ring body together.
+pub struct VsockReadHalf {
+    inner: ReadHalf<VsockStream>,
+    fd: std::os::fd::RawFd,
+}
+
+impl tokio::io::AsyncRead for VsockReadHalf {
+    fn poll_read(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buf: &mut tokio::io::ReadBuf<'_>,
+    ) -> std::task::Poll<io::Result<()>> {
+        std::pin::Pin::new(&mut self.inner).poll_read(cx, buf)
+    }
+}
+
+/// vsock's answer: `Some`, from the descriptor captured before the split.
+impl crate::link_ring_fd::RingReadable for VsockReadHalf {
+    #[cfg(all(feature = "runtime-tokio-uring", feature = "transport-link-tcp"))]
+    fn ring_fd(&self) -> Option<std::os::fd::RawFd> {
+        // Upstream refuses a negative fd rather than trusting the accessor
+        // (`fd if fd < 0 => bail!("FD unavailable")`); the same guard is kept.
+        (self.fd >= 0).then_some(self.fd)
+    }
+}
+
 /// Inbound read driver of a split [`VsockStream`] — the vsock instantiation of
 /// the shared [`StreamReadDriver`]. The framing / [`crate::LinkDriver`] impl
 /// lives once in [`crate::stream_link`] (a vsock link frames identically to TCP
 /// — same StreamEnvelope, same `poll_framed`); this alias pins the stream half
-/// to the [`tokio::io::split`] read half of a `VsockStream` (no owned-half
-/// split exists, so — like [`crate::tls_pipeline::TlsReadDriver`] — it rides
-/// `ReadHalf`, not TCP's `OwnedReadHalf`).
-pub type VsockReadDriver = StreamReadDriver<ReadHalf<VsockStream>>;
+/// to [`VsockReadHalf`].
+///
+/// ⚠ R2751 — THE REASON THIS MODULE USED TO GIVE FOR RIDING `ReadHalf` WAS
+/// FALSE, and it is corrected rather than quietly dropped: it said "no
+/// owned-half split exists". `tokio_vsock` 0.5.0 HAS `VsockStream::into_split`.
+/// The CHOICE still stands, because that crate's own `OwnedReadHalf` holds the
+/// stream behind a `tokio::sync::Mutex` and so yields a descriptor no more
+/// readily than `tokio::io::split` does — but the choice now rests on what was
+/// measured instead of on a capability that exists.
+pub type VsockReadDriver = StreamReadDriver<VsockReadHalf>;
 
 /// Dial an outbound AF_VSOCK connection to `(cid, port)` — the raw-dial
 /// primitive the mode-agnostic `dial_locator(AnyLocator::Vsock)` dispatcher
@@ -119,9 +172,18 @@ pub fn wire_vsock_stream(
         )),
         _ => None,
     };
+    // R2751 — the descriptor is read BEFORE the split, because that is the last
+    // moment the stream is reachable: `split` consumes it into an `Arc` neither
+    // half publishes. See `VsockReadHalf` for why it is sound to carry.
+    let fd = {
+        use std::os::fd::AsRawFd;
+        stream.as_raw_fd()
+    };
     let (reader, writer) = split(stream);
-    let inbound =
-        StreamReadDriver::new(reader, Arc::new(std::sync::atomic::AtomicBool::new(false)));
+    let inbound = StreamReadDriver::new(
+        VsockReadHalf { inner: reader, fd },
+        Arc::new(std::sync::atomic::AtomicBool::new(false)),
+    );
     let (tx, rx) = mpsc::unbounded_channel::<Vec<u8>>();
     let writer_handle = WriterHandle::spawn(rx, |queue| writer_task(writer, queue));
     // transport-lowlatency is a TCP-path negotiation; other stream links keep the
@@ -172,6 +234,49 @@ mod tests {
             .await
             .expect("accept one peer");
         let _client_stream = client.await.expect("client task").expect("client connect");
+    }
+
+    /// R2751 — a WIRED vsock link can name its descriptor, so the ring can read
+    /// it. Upstream's vsock answers `Ok` and wz's answered `None`; this is the
+    /// assertion that they now agree.
+    ///
+    /// The fd is asserted to be the SOCKET's, not merely non-negative: a
+    /// capture that read the wrong thing (the listener, a stale dup) would pass
+    /// a `>= 0` check and fail this one. `dial_vsock`'s own stream is the
+    /// ground truth, taken before `wire_vsock_stream` consumes it.
+    ///
+    /// ⚠ `#[ignore]` FOR THE SAME REASON AS ITS TWO SIBLINGS ABOVE, and the
+    /// consequence is stated rather than glossed: AF_VSOCK loopback needs the
+    /// `vsock_loopback` module, so NO lane in the default sandbox runs this and
+    /// this round's vsock claim is NOT witnessed by an executing test here. It
+    /// runs on a vsock-capable host (`--ignored`, Layer C1ab). What guards the
+    /// claim in the meantime is a COMPILE-TIME fact rather than this test:
+    /// R2751 deleted the blanket `impl<T> RingReadable for ReadHalf<T>`, so
+    /// vsock's half has no answer unless one is written for it, and reverting
+    /// [`VsockReadHalf`] fails the build instead of silently answering `None`
+    /// again — which is exactly how the gap arose.
+    #[cfg(all(feature = "runtime-tokio-uring", feature = "transport-link-tcp"))]
+    #[tokio::test]
+    #[ignore = "needs AF_VSOCK loopback (vsock_loopback kernel module); run with --ignored on a vsock-capable host"]
+    async fn a_wired_vsock_half_names_its_descriptor() {
+        use std::os::fd::AsRawFd;
+
+        let mut listener =
+            bind_vsock(VMADDR_CID_LOCAL, VMADDR_PORT_ANY).expect("bind vsock loopback listener");
+        let port = listener.local_addr().expect("bound local addr").port();
+        let client = tokio::spawn(async move { dial_vsock(VMADDR_CID_LOCAL, port).await });
+        let server = accept_vsock_on(&mut listener)
+            .await
+            .expect("accept one peer");
+        let _client_stream = client.await.expect("client task").expect("client connect");
+
+        let expected = server.as_raw_fd();
+        let (inbound, _outbound, _writer) = wire_vsock_stream(server);
+        assert_eq!(
+            inbound.reader_ring_fd(),
+            Some(expected),
+            "a vsock half must hand the ring the socket's own descriptor"
+        );
     }
 
     /// R2548 — a WIRED vsock link names the pseudo-interface upstream names.
