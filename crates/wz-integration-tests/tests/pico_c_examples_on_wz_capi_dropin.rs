@@ -2262,14 +2262,29 @@ fn hello_lines_for_port(printed: &str, port: u16) -> impl Iterator<Item = &str> 
 ///   never gave to either scout, so no build that merely parsed a flag can
 ///   print it.
 ///
-/// It also pins ONE LINE PER PEER, which the line comparison does not imply.
+/// It also pins PER-PEER COUNT PARITY, which the line comparison does not imply.
 /// When this leg was written wz drove discovery in repeated CYCLES — the
 /// scouting FSM left `AwaitingHello` on the first Hello, so a single window
 /// could report one peer — and a live responder answered every cycle, which is
 /// why delivery had to be keyed on the zid. The FSM carries pico's
 /// `exit_on_first == false` survey arm now (`src/session/scout.c:121-123`), so
-/// wz emits ONE Scout for the whole budget and this count is upstream's own
-/// arithmetic rather than a de-duplication of wz's own re-asking.
+/// the re-asking that motivated the zid keying is gone.
+///
+/// ⚠ R2753 — THAT COUNT IS THE ORACLE'S, NOT A LITERAL, and the change is a
+/// repair. This asserted `== 1` on the strength of a sentence that stood right
+/// here: "wz emits ONE Scout for the whole budget". It was TRUE when written
+/// (`f6527d10`, 2026-08-15) and was made false by `6cd00b58` (2026-09-14), which
+/// asks on every multicast-capable interface because both references do. On a
+/// multi-homed host the responder answers each ask, so N Hellos is correct and
+/// the literal had become the defect. Nothing here could have caught it: a
+/// value-pin gate asks whether the VALUE still matches, never whether the
+/// sentence that justified the value is still true.
+///
+/// ⚠ And a one-interface CI runner cannot see it either — N is 1 there, so the
+/// literal keeps holding. The scouting fan-out module states the same blindness
+/// about its own tests ("a test whose population is 'this machine's interfaces'
+/// reports green by emptiness on exactly the runner CI uses"), which is why this
+/// arrived as a CONSUMER's red rather than as one of ours.
 ///
 /// The name carries `zenohd` deliberately: Layer E's sweep skips that token
 /// because it provisions no router, so this leg is registered by exact name in
@@ -2353,14 +2368,32 @@ fn pico_zscout_source_on_wz_capi_matches_the_real_pico_against_a_zenohd() {
          --- z_scout.c on wz stdout ---\n{wz_printed}\n\
          --- oracle stdout ---\n{oracle_printed}"
     );
-    // Not implied by the line comparison: the oracle prints ONE line per peer,
-    // and a wz that re-reported the peer every cycle would still match on the
-    // first line while flooding the callback.
+    // Not implied by the line comparison: a wz that re-reported the peer every
+    // cycle would still match on the first line while flooding the callback.
+    //
+    // R2753 — this compares against THE ORACLE'S OWN COUNT rather than a literal,
+    // and the literal it replaces was not wrong when it was written. The doc above
+    // recorded why `1` held (`f6527d10`, 2026-08-15: wz emitted one Scout for the
+    // whole budget). `6cd00b58` (2026-09-14) then made wz ask on every
+    // multicast-capable interface — deliberately, after both references do the
+    // same — so on a multi-homed host the responder answers each ask and N Hellos
+    // is CORRECT. The assertion did not follow the code, and a consuming lane hit
+    // it as a red. A literal cannot notice that the sentence justifying it
+    // expired; the oracle can, because it is the same question put to the other
+    // implementation, on the same host, against the same router, in the same
+    // window.
+    //
+    // Both counts are >= 1 by the time we get here: the two `unwrap_or_else`
+    // above panic when either side found no Hello for this port, so this cannot
+    // pass by both sides being empty.
     let wz_hits = hello_lines_for_port(&wz_printed, port).count();
+    let oracle_hits = hello_lines_for_port(&oracle_printed, port).count();
     assert_eq!(
-        wz_hits, 1,
-        "wz reported the same peer {wz_hits} times; the real zenoh-pico reports it \
-         once per scout.\n--- z_scout.c on wz stdout ---\n{wz_printed}"
+        wz_hits, oracle_hits,
+        "wz reported the peer {wz_hits} time(s) and the REAL zenoh-pico reported it \
+         {oracle_hits} time(s) — same zenohd, same window, same interfaces.\n\
+         --- z_scout.c on wz stdout ---\n{wz_printed}\n\
+         --- oracle stdout ---\n{oracle_printed}"
     );
     // The closure's `drop` is the program's own completion signal, and it must
     // run AFTER the callbacks — a scout that emitted it early would reorder
@@ -2462,11 +2495,24 @@ fn pico_zscout_source_on_wz_capi_reports_every_zenohd_on_the_group() {
              --- z_scout.c on wz stdout ---\n{wz_printed}\n\
              --- oracle stdout ---\n{oracle_printed}"
         );
+        // R2753 — the ORACLE's count for this port, not a literal, and for the
+        // reason its sibling leg now records in full: "one Scout draws one answer
+        // per peer" was true when written and `6cd00b58` (2026-09-14) made wz ask
+        // once per multicast-capable interface, so on a multi-homed host each
+        // router answers each ask and N is correct. This leg carries the same
+        // expiry as the sibling because it inherited the same sentence.
+        //
+        // Both counts are >= 1 here: the two lookups above already panicked if
+        // either side missed this port, so this cannot pass by both being empty.
         let hits = hello_lines_for_port(&wz_printed, port).count();
+        let oracle_hits = hello_lines_for_port(&oracle_printed, port).count();
         assert_eq!(
-            hits, 1,
-            "wz reported the router on port {port} {hits} times; one Scout \
-             draws one answer per peer.\n--- z_scout.c on wz stdout ---\n{wz_printed}"
+            hits, oracle_hits,
+            "wz reported the router on port {port} {hits} time(s) and the REAL \
+             zenoh-pico reported it {oracle_hits} time(s) — same group, same \
+             window, same interfaces.\n\
+             --- z_scout.c on wz stdout ---\n{wz_printed}\n\
+             --- oracle stdout ---\n{oracle_printed}"
         );
     }
 }
