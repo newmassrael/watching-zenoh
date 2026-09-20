@@ -51,7 +51,17 @@
 
 # The requirement is READ from the generated pool, never written down here. The
 # same fact reached by two paths always drifts (R311y589's own lesson), and this
-# one moves whenever `sources/network/reassembly_pool_ap.scxml` does.
+# one moves whenever `sources/network/session_rx_pool_ap.scxml` does.
+#
+# R2746 — the pool this reads MOVED, from `reassembly_pool_ap` to
+# `session_rx_pool_ap`, because the adapter's registration did. This file's own
+# rule is why the edit is required rather than optional: it reads the dims from
+# the generated pool precisely so the number cannot drift from what gets
+# registered, and after the repoint it was reading a pool the adapter no longer
+# touches — the drift it exists to prevent, in its own subject.
+# MEASURED, and the direction matters for a host near its limit: the requirement
+# FALLS from 32 x 1 MiB to 64 x 65600, about 33.5 MB to about 4.2 MB. A box that
+# was told it could not run this lane may now be able to.
 #
 # `$1` is the repo root, because the two callers stand in different directories.
 uring_memlock_dims() {
@@ -59,7 +69,7 @@ uring_memlock_dims() {
     python3 - "$root" <<'PY'
 import re, sys
 root = sys.argv[1]
-path = "%s/out/wz-runtime-tokio/reassembly_pool_ap.rs" % root
+path = "%s/out/wz-runtime-tokio/session_rx_pool_ap.rs" % root
 try:
     src = open(path, encoding="utf-8").read()
 except OSError as e:

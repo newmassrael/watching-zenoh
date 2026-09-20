@@ -10126,9 +10126,13 @@ layer_c1bf_cargo_clippy_all_features() {
 # ─── R311y593 — the probe measured the WRONG capability ──────────────────────
 #
 # `io_uring_setup` succeeding does not mean the lane can run. Registering fixed
-# buffers PINS them, and pinned pages are charged to RLIMIT_MEMLOCK; the pool is
-# 32 x 1 MiB, so the lane needs 32 MiB of lockable memory that `io_uring_setup`
-# never asks for. Hosted run 31193705276 failed exactly there — ENOMEM out of
+# buffers PINS them, and pinned pages are charged to RLIMIT_MEMLOCK; the pool was
+# 32 x 1 MiB, so the lane needed 32 MiB of lockable memory that `io_uring_setup`
+# never asks for. (R2746: the adapter now registers the LINK-RX table instead —
+# 64 x 65600, about 4.2 MB — so the requirement FELL by roughly eight times. The
+# shape of the problem is unchanged and the number is still never written down
+# here; `uring-memlock.sh` reads it from the generated pool.)
+# Hosted run 31193705276 failed exactly there — ENOMEM out of
 # `register_buffers` — while every local run passed on a workstation whose limit
 # is 3.9 GiB. A machine-dependent baseline that only hosted could see.
 #
