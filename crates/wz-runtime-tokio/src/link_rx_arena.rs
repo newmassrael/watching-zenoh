@@ -274,6 +274,33 @@ impl LinkRxFrame {
     pub fn is_pooled(&self) -> bool {
         matches!(self.storage, Storage::Slot { .. })
     }
+
+    /// R2746 — narrow this frame to the `n` bytes that were actually filled.
+    ///
+    /// SHRINK ONLY, and the asymmetry is the safety argument rather than a
+    /// convenience. `take(want)` reserves `want` bytes of a slot and every
+    /// accessor reads `len` bytes off the slot pointer, so growing `len` would
+    /// hand out a slice over bytes this frame never reserved — sound only by
+    /// accident of a slot being wider. Shrinking can only ever expose less than
+    /// was already exposed, so it needs no new argument.
+    ///
+    /// The caller is a filler that learned the true width late: `READ_FIXED`
+    /// takes a destination and a maximum and reports what the kernel wrote, and
+    /// a short read is a frame narrower than the room it was given. Without
+    /// this the frame would report `want` and the reader downstream would see
+    /// trailing bytes of whatever the slot held before.
+    ///
+    /// `n` above the current width is IGNORED rather than refused: this is the
+    /// "the fill was smaller than the room" seam, and a caller asking to grow
+    /// is not making a smaller claim, so there is nothing to honour.
+    pub fn truncate(&mut self, n: usize) {
+        if n < self.len {
+            self.len = n;
+            if let Storage::Spilled(bytes) = &mut self.storage {
+                bytes.truncate(n);
+            }
+        }
+    }
 }
 
 impl AsRef<[u8]> for LinkRxFrame {

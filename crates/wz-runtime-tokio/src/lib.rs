@@ -152,10 +152,18 @@ pub mod link_rx_pool;
 #[cfg(all(feature = "runtime-zero-copy", feature = "transport-link-tcp"))]
 pub mod link_rx_arena;
 
-/// R311y589 — `runtime-tokio-uring`: ARCHITECTURE §9.5 row 3. The same §5.E pool
-/// [`zero_copy`] consumes, registered with the kernel as fixed buffers so
-/// `IORING_OP_READ_FIXED` writes a link's bytes straight into a chain's slot.
-#[cfg(feature = "runtime-tokio-uring")]
+/// R311y589 — `runtime-tokio-uring`: ARCHITECTURE §9.5 row 3. A pool registered
+/// with the kernel as fixed buffers so `IORING_OP_READ_FIXED` writes a link's
+/// bytes straight into a slot.
+///
+/// R2746 — that pool is now the LINK-RX table rather than the reassembly one,
+/// which is why this gate gained `transport-link-tcp`: the table it registers
+/// is [`link_rx_arena`]'s, and a frame is what a socket read lands. The
+/// implication was deliberately NOT put on the feature itself — Layer C1br's
+/// `--no-default-features --features runtime-tokio-uring` build is the tree's
+/// only `reassembly`-without-transport build, and giving the feature a link
+/// would have taken that away.
+#[cfg(all(feature = "runtime-tokio-uring", feature = "transport-link-tcp"))]
 pub mod uring;
 
 // Crate-local fixtures for this crate's OWN unit tests (recording driver

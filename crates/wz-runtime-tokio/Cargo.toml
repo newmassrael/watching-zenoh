@@ -708,6 +708,15 @@ runtime-zero-copy = ["reassembly"]
 # `dep:libc` is NOT incidental: `register_buffers` takes `&[libc::iovec]`. It
 # built without naming it because another default feature happened to pull libc
 # in, which is precisely the coupling that reds a feature-subset lane later.
+# R2746 — `transport-link-tcp` is NOT added here, and the near-miss is worth
+# recording. The adapter now reads into the LINK-RX table, which lives behind
+# `transport-link-tcp`, so the obvious move was to imply it. That would have
+# destroyed the coverage Layer C1br exists partly to hold: its
+# `--no-default-features --features runtime-tokio-uring` build is the only thing
+# in the tree that selects `reassembly` WITHOUT a transport, and R311y589 found
+# a real dead-code hole there. Implying the link would have made that build have
+# one. The module carries the `all(..)` gate instead, so the transportless build
+# keeps its subject and the adapter appears exactly where it has one.
 runtime-tokio-uring = ["runtime-zero-copy", "dep:io-uring", "dep:libc"]
 
 # transport-fragmentation (R311jm) — forwards the session-core TX
