@@ -90,8 +90,11 @@ pub struct AcceptCookieState {
     /// The anti-amplification nonce this cookie is bound to — the same role it
     /// has in the tag-only form.
     pub nonce: u64,
-    /// The negotiated extension OUTCOMES, in the order
-    /// [`AcceptCookieState::flags`] packs them.
+    /// The negotiated extension OUTCOMES, in the order the private `flags`
+    /// helper packs them: lowlatency, qos, compression, shm, one bit each.
+    ///
+    /// A code span rather than an intra-doc link: `flags` is private and these
+    /// fields are public, which Layer C1bz counts as a broken link.
     pub lowlatency: bool,
     pub qos: bool,
     pub compression: bool,
