@@ -258,16 +258,24 @@ mod tests {
     /// a `>= 0` check and fail this one. `dial_vsock`'s own stream is the
     /// ground truth, taken before `wire_vsock_stream` consumes it.
     ///
-    /// ⚠ `#[ignore]` FOR THE SAME REASON AS ITS TWO SIBLINGS ABOVE, and the
-    /// consequence is stated rather than glossed: AF_VSOCK loopback needs the
-    /// `vsock_loopback` module, so NO lane in the default sandbox runs this and
-    /// this round's vsock claim is NOT witnessed by an executing test here. It
-    /// runs on a vsock-capable host (`--ignored`, Layer C1ab). What guards the
-    /// claim in the meantime is a COMPILE-TIME fact rather than this test:
-    /// R2751 deleted the blanket `impl<T> RingReadable for ReadHalf<T>`, so
-    /// vsock's half has no answer unless one is written for it, and reverting
-    /// [`VsockReadHalf`] fails the build instead of silently answering `None`
-    /// again — which is exactly how the gap arose.
+    /// `#[ignore]` for the same reason as its two siblings: AF_VSOCK loopback
+    /// needs the `vsock_loopback` module, which not every host has. Layer C1ab
+    /// runs it with `--ignored` wherever `/dev/vsock` exists.
+    ///
+    /// ⚠⚠ R2751 NEARLY SHIPPED A FALSE CLAIM ABOUT THIS TEST, and the mistake is
+    /// recorded because it is the reusable part. The first draft of this comment
+    /// said the witness "is NOT witnessed by an executing test here" and the
+    /// round's ledger said it had "executed NOWHERE observable" — both written
+    /// WITHOUT ever looking, inherited from the sibling ignore-reason's phrase
+    /// "absent in the default dev/CI sandbox". Measured instead of assumed, this
+    /// host HAS `/dev/vsock` and `vsock_loopback` loaded, and the test RUNS and
+    /// PASSES. Its control — making [`VsockReadHalf::ring_fd`] answer `None` —
+    /// reds it alone (`left: None, right: Some(25)`) while both siblings stay
+    /// green, so the assertion discriminates.
+    ///
+    /// An absence is a fact to ESTABLISH, not one to inherit from a neighbouring
+    /// comment, and an `#[ignore]` says "this host may lack it", never "this
+    /// host lacks it".
     #[cfg(all(feature = "runtime-tokio-uring", feature = "transport-link-tcp"))]
     #[tokio::test]
     #[ignore = "needs AF_VSOCK loopback (vsock_loopback kernel module); run with --ignored on a vsock-capable host"]

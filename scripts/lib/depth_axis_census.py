@@ -1050,7 +1050,16 @@ CITATION = re.compile(r"\b((?:[A-Za-z0-9_.-]+/)*[A-Za-z0-9_.-]+\.(?:rs|c|h))(?::
 # across a permit revoke, driven by Layer E6j. It was in `reached`, so this pin
 # falls while UNREACHED and NO_SYMBOL hold at 2 and 2. READ off the census's own
 # FAIL line, which printed `reached: 18 against a pin of 19`.
-PIN_REACHED = 18
+#
+# R2752 — 18 -> 17. `runtime-tokio-uring` RETIRES to COMPLETE: its last measured
+# divergence from upstream was vsock, whose half could not name a descriptor
+# because a blanket `impl<T> RingReadable for ReadHalf<T>` answered for it. The
+# blanket is gone, vsock's own half carries the fd captured before the split, and
+# the witness RAN on a real AF_VSOCK loopback socket with a control that reds it
+# alone. It was in `reached` (the C1br suite names its gated code), so this pin
+# falls while UNREACHED and NO_SYMBOL hold at 2 and 2. READ off the census's own
+# FAIL line, `reached: 17 against a pin of 18`.
+PIN_REACHED = 17
 PIN_UNREACHED = 2
 PIN_NO_SYMBOL = 2
 # R2534 — 346 -> 347. The atom is `adminspace-metrics` and the citation is the
@@ -1851,7 +1860,14 @@ PIN_NO_SYMBOL = 2
 # `uring_reactor.rs` were already cited by this entry, so re-citing them moves
 # nothing. AMBIGUOUS holds at 18, so the new one is rooted. READ off the
 # census's own FAIL line, `wz citations: 91 against a pin of 90`.
-PIN_WZ_CITATIONS = 91
+#
+# R2752 — 91 -> 84, and DOWNWARD for the same reason `PIN_REACHED` fell: this
+# census counts citations in PARTIAL atoms' reasons, and `runtime-tokio-uring`
+# retired to COMPLETE, taking its seven tracked wz citations out of the
+# population. The pin is bidirectional on purpose — an atom leaving is as much a
+# measurement change as one arriving — so this is not a budget being relaxed.
+# READ off the census's own FAIL line, `wz citations: 84 against a pin of 91`.
+PIN_WZ_CITATIONS = 84
 # R2626 — 44 -> 42, and this one is worth a sentence because it HELD through
 # every earlier retirement in this run (R2612, R2622). `time-hlc`'s reason is the
 # first retiree carrying AMBIGUOUS citations of its own: its oldest clauses cite
