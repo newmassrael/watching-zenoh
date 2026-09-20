@@ -3159,6 +3159,54 @@ mod tests {
         );
     }
 
+    /// R2755 (open debt 789) — THE EXTENSION'S DECODED VALUE REACHES THE
+    /// CONSUMED SURFACE, and not merely its name.
+    ///
+    /// The sibling above pins the NAME. A document that named `qos` and then
+    /// dropped what its z64 body says would satisfy that test while telling a
+    /// reader nothing about the message's priority — and a consumer reported
+    /// exactly that absence, on a claim this witness is what refutes.
+    ///
+    /// ⚠ THE DECODE HAD NO WITNESS AT THIS CARRIER, which is why the claim
+    /// stood. `walk_ext_z64_body`'s `(Frame | Fragment | TransportOam, "qos")`
+    /// arm reaches `read_transport_qos_z64`, and the two tests that did assert
+    /// on a decoded qos both sit at OTHER carriers (a `Join`'s per-priority sn
+    /// table, a `Push`'s priority/congestion/express). Nothing ran the transport
+    /// arm, so "the document does not carry priority" could not be contradicted
+    /// by anything but a reading.
+    ///
+    /// BOTH HALVES ARE PINNED BECAUSE THE SPAN IS THE CLAIM: the label ALIASES
+    /// the `value` field's own span rather than replacing it, which is
+    /// `walk_ext_entry`'s stated rule for a Z64 body (R311y898). A reading that
+    /// consumed the span would leave the raw number invisible, and a test that
+    /// checked only the label would not notice.
+    #[test]
+    fn a_frames_qos_extension_carries_its_decoded_priority_into_the_document() {
+        let packet = tcp_packet(1000, &framed_frame_with_qos());
+        let mut d = Dissection::new();
+        d.push_packet(LINKTYPE_ETHERNET, 0, &packet);
+        d.finish();
+
+        let file = crate::pcap::write(1, &[(0, 0, packet.as_slice())]);
+        let json = fields_json(&d, &file, None, None);
+
+        assert!(
+            json.contains(
+                "\"name\":\"value\",\"start\":3,\"end\":4,\
+                 \"kind\":\"uint\",\"value\":3"
+            ),
+            "the z64 body must stay visible as the number it is: {json}"
+        );
+        assert!(
+            json.contains(
+                "\"name\":\"priority\",\"start\":3,\"end\":4,\
+                 \"kind\":\"label\",\"value\":\"InteractiveLow\""
+            ),
+            "and its decoding must reach the reader, aliasing that same \
+             span: {json}"
+        );
+    }
+
     /// R311y855 — THE BOUND HOLDS BACK ROWS AND SAYS HOW MANY.
     ///
     /// An unbounded listing over a session-sized capture is the shape the
