@@ -1841,7 +1841,17 @@ PIN_NO_SYMBOL = 2
 # dispatch, the `spawn_blocking` ring worker, and `get_fd` as a required trait
 # method) and land in the unjudged bucket as always. READ off the census's own
 # FAIL line, `wz citations: 90 against a pin of 88`.
-PIN_WZ_CITATIONS = 90
+#
+# R2750 — 90 -> 91. `runtime-tokio-uring`'s correction names ONE new tracked wz
+# file, `crates/wz-runtime-tokio/src/link_ring_fd.rs`, the trait every stream
+# read half answers so a link can be selected onto the ring. Its other new
+# citations are upstream anchors (the `get_fd` gate, the vsock link's own
+# answer, and `Rc<GroupedArenaInner>` for the registered region's lifetime) and
+# land in the unjudged bucket as always; `stream_link.rs`, `uring.rs` and
+# `uring_reactor.rs` were already cited by this entry, so re-citing them moves
+# nothing. AMBIGUOUS holds at 18, so the new one is rooted. READ off the
+# census's own FAIL line, `wz citations: 91 against a pin of 90`.
+PIN_WZ_CITATIONS = 91
 # R2626 — 44 -> 42, and this one is worth a sentence because it HELD through
 # every earlier retirement in this run (R2612, R2622). `time-hlc`'s reason is the
 # first retiree carrying AMBIGUOUS citations of its own: its oldest clauses cite
