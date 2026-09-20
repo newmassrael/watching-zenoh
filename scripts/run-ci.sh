@@ -10183,8 +10183,19 @@ layer_c1br_uring_fixed_buffers() {
     # twice the pool and the second gets ENOMEM. Invisible on a box whose limit
     # is gigabytes; it is what the lane hit the moment the limit was provisioned
     # to exactly what one registration needs.
+    #
+    # ⚠ R2748 — TWO FILTERS, because `uring::` DOES NOT MATCH `uring_reactor::`.
+    # A module-path filter covers everything under its module by construction,
+    # which is why `nondefault-tests-gate.sh` admits that spelling and refuses a
+    # bare name prefix — but `uring_reactor` is a SIBLING module, not a child,
+    # and the prefix `uring::` excludes it exactly as it should. R2748 added
+    # that module and its ten tests would have been run by nothing while this
+    # lane kept passing and kept printing a count, which is the shape that gate
+    # was written against. Both paths are named, so adding a third uring module
+    # means adding a third filter rather than hoping a prefix reaches it.
     out="$(cd crates && cargo test -p wz-runtime-tokio --features runtime-tokio-uring \
-        --lib uring:: --quiet -- --test-threads=1 2>&1)" || { echo "$out"; return 1; }
+        --lib --quiet -- --test-threads=1 uring:: uring_reactor:: 2>&1)" \
+        || { echo "$out"; return 1; }
     local tests
     tests="$(_runci_passed_count <<<"$out")"
     (( tests > 0 )) || {
