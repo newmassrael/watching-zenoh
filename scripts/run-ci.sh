@@ -10174,6 +10174,16 @@ source "$(dirname "${BASH_SOURCE[0]}")/lib/uring-memlock.sh"
 layer_c1br_uring_fixed_buffers() {
     local out rc why
 
+    # R2755 — THE SELFTEST RUNS FIRST, and before the SKIP below, because it is
+    # the part of this lane that needs no io_uring. `uring_raise_memlock`'s
+    # privileged branch is reachable only where passwordless sudo exists, so on
+    # every box here it is dead code that no run grades; its guard was wrong for
+    # two rounds under that cover and hosted run 35488108252 is what it cost.
+    # The selftest drives the branch against a stub `sudo`, so the DECISION is
+    # graded wherever this lane is invoked — including on a host that SKIPs
+    # everything after this line.
+    bash scripts/lib/uring-memlock.sh --selftest || return 1
+
     # ⚠ Provision in THIS shell: `ulimit` is a property of the process and its
     # children, so the cargo runs below inherit it only because they are started
     # from here.
@@ -10214,6 +10224,18 @@ layer_c1br_uring_fixed_buffers() {
     # (the limit admits the registration), and the ceiling this lane needs is
     # therefore one registration's worth rather than "one per test at a time".
     # The serialization stays because it bounds how much can overlap.
+    #
+    # ⚠ R2755 — AND THE WAIT IS NOT WHAT FIXED IT EITHER; the release was
+    # missing. "The kernel releases a ring's pinned pages asynchronously after
+    # its fd closes" describes the only release `FixedSlotRing` had, because the
+    # type that took the charge never gave it back. `impl Drop for
+    # FixedSlotRing` unregisters inside the drop, so the second registration in
+    # a sequence is not waiting for anything. MEASURED both ways under a ceiling
+    # of exactly one registration: with the impl the witness passes, with its
+    # body removed it fails with the same ENOMEM this lane redded on. The
+    # serialization and the wait are both kept, and both are now about a ceiling
+    # contended by ANOTHER process — which is what they always said and could
+    # not reach.
     #
     # ⚠ R2750 — A THIRD FILTER, and it is a THIRD MODULE rather than a third
     # uring one: `stream_link::ring_selection::` holds the SELECTION POINT's
