@@ -662,7 +662,7 @@ impl FixedSlotRing {
 /// both red jobs are registrations refused with ENOMEM, under
 /// `--test-threads=1` in one of them. The compensations that stood before this
 /// impl each address a symptom of the missing release: Layer C1br serializes
-/// the registering tests, [`register_awaiting_reclaim`] sleeps for the
+/// the registering tests, `register_awaiting_reclaim` sleeps for the
 /// kernel, and `scripts/lib/uring-memlock.sh` raises the ceiling out of the
 /// way. They are kept — a ceiling can be contended by another PROCESS, which
 /// no `Drop` of ours reaches — but they are no longer what makes the sequence
