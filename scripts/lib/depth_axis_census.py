@@ -1809,7 +1809,16 @@ PIN_NO_SYMBOL = 2
 # correction added citations to that reason, and they left with it. READ off the
 # census's own FAIL line, `wz citations: 85 against a pin of 91`. AMBIGUOUS holds
 # at 18, which says this atom's citations were all rooted.
-PIN_WZ_CITATIONS = 85
+#
+# R2746b — 85 -> 86, and this one RISES, which is the ratchet doing what it
+# exists for rather than an atom leaving. ONE citation, added by ONE atom's
+# reason: `runtime-tokio-uring`'s correction records that wz's io_uring row uses
+# fixed buffers where the pinned upstream uses provided buffer groups, and names
+# `ARCHITECTURE.md` as the place that DECLARES that divergence — which is what
+# turns it from a parity gap a later round would "find" into a design position a
+# reader can check. AMBIGUOUS holds at 18, so the new citation is rooted. READ
+# off the census's own FAIL line, `wz citations: 86 against a pin of 85`.
+PIN_WZ_CITATIONS = 86
 # R2626 — 44 -> 42, and this one is worth a sentence because it HELD through
 # every earlier retirement in this run (R2612, R2622). `time-hlc`'s reason is the
 # first retiree carrying AMBIGUOUS citations of its own: its oldest clauses cite
