@@ -1888,7 +1888,32 @@ PIN_NO_SYMBOL = 2
 # `extshm.rs`, `extmultilink.rs` -- which are the three upstream cookie fields
 # no carrier here can reach. READ off the census's own FAIL line,
 # `wz citations: 96 against a pin of 84`.
-PIN_WZ_CITATIONS = 96
+#
+# R2763 — 96 -> 106, the SAME atom a third time, and the same mechanism: the
+# third of R2480's four clauses was measured false and struck, so the reason
+# now has to SHOW the code that refutes it. The clause said wz draws its
+# cookie nonce once per BUNDLE where upstream draws per HANDSHAKE; it does
+# not any more.
+#
+# The +10 was ATTRIBUTED rather than inferred, because a derived population
+# can be pushed over a ratchet by a commit that is itself correct and the
+# offending tokens can sit in files that commit never opened (R2757). The
+# probe imports this module and runs `citation_audit` over the PARTIAL-atom
+# reasons of `origin/main` and of HEAD, per atom: `session-unicast-accept`
+# moves 20 -> 30 and NO OTHER ATOM MOVES, which is the whole delta. The
+# instrument's own control holds too — the tree that set 96 still reports 96
+# through it, which is what says the number is being measured and not
+# recomputed by a different rule.
+#
+# The ten: the struck clause cites `session_actions.rs` four times (the draw
+# at the mint, the source slot, the install, and `draw_cookie_nonce` itself),
+# `session_glue.rs` and `session_runtime.rs` for the two production seams
+# that install it, `extshm.rs` for the boxed-port precedent the slot follows,
+# the coop test that pins the fail-closed arm, and `accept_state.rs` twice
+# for the per-extension accept-state type this round lands toward the ONE
+# clause still standing. READ off the census's own FAIL line,
+# `wz citations: 106 against a pin of 96`.
+PIN_WZ_CITATIONS = 106
 # R2626 — 44 -> 42, and this one is worth a sentence because it HELD through
 # every earlier retirement in this run (R2612, R2622). `time-hlc`'s reason is the
 # first retiree carrying AMBIGUOUS citations of its own: its oldest clauses cite
