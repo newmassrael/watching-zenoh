@@ -1867,7 +1867,28 @@ PIN_NO_SYMBOL = 2
 # population. The pin is bidirectional on purpose — an atom leaving is as much a
 # measurement change as one arriving — so this is not a budget being relaxed.
 # READ off the census's own FAIL line, `wz citations: 84 against a pin of 91`.
-PIN_WZ_CITATIONS = 84
+#
+# R2762 — 84 -> 96, and the atom is `session-unicast-accept`. Two of the four
+# residual clauses R2480 re-declared were measured FALSE at this commit and
+# struck by name in that atom's reason: max_sessions, which this session's own
+# R2758 had built without recording, and initial_sn, which had been derived
+# since 2026-08-15 and was re-asserted twenty-five days later because the
+# re-declaration re-measured the UPSTREAM half of the divergence and carried
+# the LOCAL half forward. Striking a clause costs citations rather than saving
+# them: a struck clause has to SHOW the code that refutes it, where the clause
+# it replaces only asserted an absence.
+#
+# The +12 is accounted for exactly, six per correction, which is the whole
+# reason this is a pin move and not a budget being raised: max_sessions cites
+# `accept_loop.rs` twice (the live-count comparison and the refusal counter),
+# then `config.rs`, `zenoh_config.rs`, `args.rs` and `session_glue.rs`;
+# initial_sn cites `initial_sn.rs`, `session_actions.rs` twice (the derivation
+# seam and the ring re-seed), then the three holders that FUSE per-handshake
+# state into a node-local capability object -- `extauth_usrpwd.rs`,
+# `extshm.rs`, `extmultilink.rs` -- which are the three upstream cookie fields
+# no carrier here can reach. READ off the census's own FAIL line,
+# `wz citations: 96 against a pin of 84`.
+PIN_WZ_CITATIONS = 96
 # R2626 — 44 -> 42, and this one is worth a sentence because it HELD through
 # every earlier retirement in this run (R2612, R2622). `time-hlc`'s reason is the
 # first retiree carrying AMBIGUOUS citations of its own: its oldest clauses cite
