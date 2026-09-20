@@ -1306,6 +1306,18 @@ impl WzConfig {
         self
     }
 
+    /// R2758 — the bound on how many peers this node holds at once (zenoh
+    /// `unicast.max_sessions`), consumed by the accept loop.
+    ///
+    /// The builder twin of [`Self::with_max_links`], and ungated for the same
+    /// reason the field is: aggregation is a capability, a peer bound is a
+    /// property of every build.
+    #[must_use]
+    pub fn with_max_sessions(mut self, max_sessions: usize) -> Self {
+        self.max_sessions = max_sessions;
+        self
+    }
+
     /// R311y216 (transport-qos) — offer the QoS transport toward this node's
     /// peers (zenoh `unicast.is_qos`), consumed at setup. The builder twin of the
     /// `pub qos` field, mirroring [`Self::with_max_links`]: a caller reads this to

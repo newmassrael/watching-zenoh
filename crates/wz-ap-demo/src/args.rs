@@ -444,6 +444,41 @@ pub(crate) fn parse_repeated(args: &[String], flag: &str) -> Vec<String> {
         .collect()
 }
 
+/// R2758 — `--max-sessions <N>`, read the same way by every run-mode.
+///
+/// A FREE FUNCTION rather than a local in one branch, because two run-modes
+/// take the flag (`--peer` and `--router-hat`) and a flag parsed twice is a
+/// flag that can come to mean two things. Measured: the first version parsed
+/// it inside the peer arm and the router-hat could not see the binding.
+///
+/// A malformed or zero value WARNS and falls back to upstream's default rather
+/// than aborting — `--max-links`'s rule, and `--max-payload`'s before it. Zero
+/// is refused by name: a node that admits no peer at all is never what an
+/// operator meant, and silently honouring it would read as the bound working.
+///
+/// ⚠ GATED ON ITS TWO CONSUMERS' FEATURES, not left open. `--peer` sits behind
+/// `routing-peer` and `--router-hat` behind `router-hat-router`; a build with
+/// neither parses no run-mode that takes the flag, and an ungated helper is
+/// then dead code that `-D warnings` refuses. Measured: the ungated form
+/// compiled at the wide feature set and failed the one-feature leg.
+#[cfg(any(feature = "routing-peer", feature = "router-hat-router"))]
+pub(crate) fn parse_max_sessions(args: &[String]) -> usize {
+    let default = wz::runtime_tokio::config::DEFAULT_MAX_SESSIONS;
+    parse_pair(args, "--max-sessions")
+        .map(|s| match s.trim().parse::<usize>() {
+            Ok(n) if n >= 1 => n,
+            Ok(_) => {
+                eprintln!("wz-ap-demo: --max-sessions must be >= 1; using {default}");
+                default
+            }
+            Err(_) => {
+                eprintln!("wz-ap-demo: --max-sessions '{s}' is not a number; using {default}");
+                default
+            }
+        })
+        .unwrap_or(default)
+}
+
 pub(crate) fn parse_pair(args: &[String], flag: &str) -> Option<String> {
     let mut it = args.iter();
     while let Some(a) = it.next() {
@@ -884,6 +919,19 @@ pub(crate) fn expand_stock_zenoh_config_for_build(
             "transport/unicast/max_links",
             "--max-links",
             cfg.max_links.to_string(),
+            None,
+        );
+    }
+    // R2758 — without this the key was read by the config layer and REACHED
+    // NOTHING in the demo: the runner builds its `WzConfig` from
+    // `from_init_params`, not from the document, so a value that never becomes
+    // argv never becomes behaviour. `every_key_the_reader_calls_honoured_
+    // reaches_the_demo_or_is_named_as_dropped` is what said so.
+    if named("transport/unicast/max_sessions") {
+        exp.pair(
+            "transport/unicast/max_sessions",
+            "--max-sessions",
+            cfg.max_sessions.to_string(),
             None,
         );
     }
@@ -2596,6 +2644,22 @@ pub(crate) const ARGV_ONLY_KIND_LEDGER: &[(&str, &str, &str)] = &[
          `connect/timeout_ms`: a local deadline on binding, visible as whether \
          the socket came up in time.",
     ),
+    // R2758 — OFF-WIRE and not leg-judged, and the distinction is the point.
+    // The bound IS judged by a leg, but that leg lives in the runtime crate
+    // (`accept_loop.rs`, `max_sessions_refuses_the_peer_past_the_bound`), while
+    // this ledger classes what a FRAME can show. Nothing a peer receives
+    // differs: it is admitted, or its link closes, and a link closing is what
+    // every other refusal looks like too.
+    (
+        "transport/unicast/max_sessions",
+        KIND_OFF_WIRE,
+        "reaches both `FaceSources` sites off the live `WzConfig` (runner.rs, \
+         the `--peer` mesh loop and the router-hat). A local admission policy: \
+         the accept loop compares it against its own faces table and drops the \
+         face past it, witnessed by `max_sessions_refuses_the_peer_past_the_ \
+         bound` in accept_loop.rs. A refused peer sees its link close, which \
+         no frame field distinguishes from any other close.",
+    ),
     (
         "listen/retry",
         KIND_OFF_WIRE,
@@ -3978,6 +4042,15 @@ mod stock_config_tests {
                 LISTEN_ONLY,
                 r#"{ listen: { endpoints: ["tcp/0.0.0.0:7447"] },
                      transport: { unicast: { max_links: 9 } } }"#,
+            ),
+            // R2758 — 5, away from the 1000 default, so the fixture proves the
+            // document reached the demo rather than that both ends happened to
+            // agree on a default.
+            (
+                "transport/unicast/max_sessions",
+                LISTEN_ONLY,
+                r#"{ listen: { endpoints: ["tcp/0.0.0.0:7447"] },
+                     transport: { unicast: { max_sessions: 5 } } }"#,
             ),
             // `qos` RESOLVES to true in stock zenoh, so a document that names
             // only `lowlatency` describes a node that cannot start. Both sides

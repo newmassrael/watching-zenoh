@@ -4129,6 +4129,11 @@ pub(crate) struct PeerOpts {
     /// `FaceSources.max_links`.
     #[cfg(feature = "transport-multilink")]
     pub max_links: usize,
+    /// R2758 — `--max-sessions`, the bound on how many peers this node holds
+    /// (zenoh `unicast.max_sessions`). Routed through
+    /// [`WzConfig::with_max_sessions`] into `FaceSources.max_sessions`, so the
+    /// loop and the admin GET report the same number.
+    pub max_sessions: usize,
     /// R311y218 (transport-qos) — offer the QoS transport on this peer's aggregated
     /// links (`--qos`). Routed through [`WzConfig::with_qos`] into `FaceSources.qos`.
     #[cfg(feature = "transport-qos")]
@@ -4753,6 +4758,11 @@ async fn run_peer_until(
     // warnings=deny.
     #[cfg(feature = "transport-multilink")]
     let cfg = cfg.with_max_links(max_links);
+    // R2758 — the same routing, for the same reason the comment above gives:
+    // the ONE shared instance feeds both `FaceSources.max_sessions` and the
+    // admin GET, so the bound a node runs and the bound it reports cannot
+    // diverge. Ungated, because every build has the bound.
+    let cfg = cfg.with_max_sessions(opts.max_sessions);
     #[cfg(feature = "transport-qos")]
     let cfg = cfg.with_qos(qos);
     // R311y506 (session-extqos) — a declared band also turns the QoS offer ON
@@ -5875,6 +5885,11 @@ async fn run_peer_until(
 #[cfg(feature = "router-hat-router")]
 #[derive(Default)]
 pub(crate) struct RouterHatOpts {
+    /// R2758 — `--max-sessions`, the bound on how many peers this router-hat
+    /// holds. Its own field rather than a read of [`PeerOpts`], because the two
+    /// run-modes carry separate opts and a router-hat is the node most likely
+    /// to reach the limit.
+    pub max_sessions: usize,
     /// R311y232 (transport-qos ACTIVATION) — offer the per-priority multicast QoS
     /// conduit on the router's data-plane group (`--multicast-qos`). Consumed only
     /// by the `router-multicast-faces` spawns; a build without that face has no
@@ -6241,7 +6256,10 @@ async fn run_router_hat_until(
         let cfg = wz::runtime_tokio::config::WzConfig::from_init_params(&params)
             // R311y786 — the SAME policy the face loop is handed, so the config
             // GET reports the cadence actually in force rather than the default.
-            .with_connect_retry(opts.connect_retry);
+            .with_connect_retry(opts.connect_retry)
+            // R2758 — and the same for the session bound, so this host's loop
+            // and its admin GET read one number.
+            .with_max_sessions(opts.max_sessions);
         // Gated on the DEMO's admin feature (this crate has no `adminspace-core`
         // of its own; that is the wz-side name the permit type lives behind), so
         // the arm is present exactly where the admin host below is.
@@ -9413,6 +9431,9 @@ mod peer_quic_cert_tests {
             zid_override: None,
             #[cfg(feature = "transport-multilink")]
             max_links: 1,
+            // R2758 — upstream's default; these fixtures do not exercise the
+            // bound and must not acquire it.
+            max_sessions: wz::runtime_tokio::config::DEFAULT_MAX_SESSIONS,
             #[cfg(feature = "transport-qos")]
             qos: false,
             #[cfg(feature = "session-extqos")]
@@ -9549,6 +9570,9 @@ mod peer_failfast_tests {
             zid_override: None,
             #[cfg(feature = "transport-multilink")]
             max_links: 1,
+            // R2758 — upstream's default; these fixtures do not exercise the
+            // bound and must not acquire it.
+            max_sessions: wz::runtime_tokio::config::DEFAULT_MAX_SESSIONS,
             #[cfg(feature = "transport-qos")]
             qos: false,
             #[cfg(feature = "session-extqos")]

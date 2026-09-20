@@ -6635,6 +6635,13 @@ mod tests {
                 "transport/unicast/max_links",
                 r#"{ "transport": { "unicast": { "max_links": 7 } } }"#,
             ),
+            // R2758 — 9, NOT the 1000 default, per the R2063 rule above: a
+            // fixture naming the default reports the key honoured while
+            // proving only that the reader did not crash. The ingest must MOVE.
+            (
+                "transport/unicast/max_sessions",
+                r#"{ "transport": { "unicast": { "max_sessions": 9 } } }"#,
+            ),
             (
                 "transport/unicast/lowlatency",
                 r#"{ "transport": { "unicast": { "lowlatency": true } } }"#,

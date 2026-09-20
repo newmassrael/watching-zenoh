@@ -200,6 +200,10 @@ pub(crate) fn print_usage() {
     eprintln!("    --listen-retry <i,m,f>   zenoh listen.retry — what paces the bind retries when");
     eprintln!("                             --listen-timeout allows any. Same triple as");
     eprintln!("                             --connect-retry; default 1000,4000,2.");
+    eprintln!("    --max-sessions <N>       zenoh transport.unicast.max_sessions — how many peers");
+    eprintln!("                             this node holds at once. A peer arriving at the bound");
+    eprintln!("                             is refused before it enters the table; default 1000,");
+    eprintln!("                             which is zenoh's own.");
     eprintln!("    --router-link-weight <zid>=<weight>");
     eprintln!(
         "                             zenoh routing.router.linkstate.transport_weights — the"

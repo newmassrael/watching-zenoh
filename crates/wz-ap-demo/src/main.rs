@@ -552,6 +552,12 @@ fn main() -> ExitCode {
                     }
                 })
                 .unwrap_or(1);
+            // R2758 — `--max-sessions <N>` bounds how many peers this node
+            // holds at once (zenoh `unicast.max_sessions`). UNGATED, unlike
+            // `--max-links` above: aggregation is a `transport-multilink`
+            // capability, a bound on peers is a property of every build. The
+            // parse is `args::parse_max_sessions`, shared with `--router-hat`.
+            let max_sessions: usize = crate::args::parse_max_sessions(rest);
             // R311y218 (transport-qos) — `--qos` (presence bool) offers the QoS
             // transport on this peer's aggregated links (the WzConfig.qos knob),
             // threaded through the multilink open path (option-b). Priority
@@ -818,6 +824,7 @@ fn main() -> ExitCode {
                     zid_override,
                     #[cfg(feature = "transport-multilink")]
                     max_links,
+                    max_sessions,
                     #[cfg(feature = "transport-qos")]
                     qos,
                     #[cfg(feature = "session-extqos")]
@@ -1063,6 +1070,9 @@ fn main() -> ExitCode {
                     quic_key: parse_pair(rest, "--quic-key"),
                 },
                 crate::runner::RouterHatOpts {
+                    // R2758 — the same parse the peer mesh mode uses; one flag,
+                    // one meaning, both run-modes.
+                    max_sessions: crate::args::parse_max_sessions(rest),
                     // R2233 (open-debt item 585) — the DIAL mirror of the
                     // `AcceptCertPaths` above: a `--connect quic/...` federation
                     // link from this router-hat verifies the far router's server
