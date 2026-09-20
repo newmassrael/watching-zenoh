@@ -99,14 +99,21 @@ pub struct StreamReadDriver<R> {
     /// and never revisits it; this is the same decision at the same moment, the
     /// moment a link first asks to read.
     ///
-    /// WHY NOT IN THE CONSTRUCTOR: the ring is attached with a FIXED prefix
-    /// width ([`crate::uring_reactor::UringReactor::attach`]), and `lowlatency`
-    /// is flipped by the open helper at Established — AFTER every `wire_*` has
-    /// built its driver. Deciding at construction would pin the universal
-    /// 2-byte width onto a link that goes on to negotiate the 4-byte one. First
-    /// poll is the earliest moment the width is knowable and the latest moment
-    /// it is still unambiguous, which is `crate::poll_framed`'s own rule for
-    /// reading that flag once per frame rather than per byte.
+    /// WHY NOT IN THE CONSTRUCTOR: the question costs an `attach` and a
+    /// channel, and a driver that is built and never read should not pay it.
+    ///
+    /// ⚠ R2755 — THIS PARAGRAPH USED TO GIVE A DIFFERENT REASON AND THE REASON
+    /// WAS A FALSE JOIN. It said the ring is attached with a FIXED prefix
+    /// width, that `lowlatency` is flipped at Established after every `wire_*`
+    /// has built its driver, and therefore that "first poll is the earliest
+    /// moment the width is knowable". The two premises are true and the
+    /// conclusion does not follow: a link's FIRST POLL IS ITS HANDSHAKE, which
+    /// happens before Established, so first poll pinned exactly the universal
+    /// width onto a lowlatency link that the paragraph said it was avoiding.
+    /// `lowlatency_e2e` over real TCP measured it. The repair is in
+    /// [`crate::uring_reactor::UringReactor::attach`], which no longer takes a
+    /// width at all — so this moment no longer has to be the one the width is
+    /// knowable at, and the only thing left to justify is the cost.
     #[cfg(all(feature = "runtime-tokio-uring", feature = "transport-link-tcp"))]
     ring: RingChoice,
     /// R2750 — WHOSE reactor [`Self::choose_ring`] consults. `None` is the
@@ -454,8 +461,12 @@ impl<R: AsyncRead + Unpin + RingReadable> StreamReadDriver<R> {
                 None => return RingChoice::Framed,
             },
         };
-        let width = crate::prefix_width(self.lowlatency.load(Ordering::Acquire));
-        match reactor.attach(fd, width) {
+        // R2755 — THE FLAG, NOT A WIDTH READ OFF IT NOW. Handing over a width
+        // computed here pinned whatever the flag said at this instant, and this
+        // instant is inside the handshake: see [`UringReactor::attach`] for the
+        // measurement. The reactor re-derives the width at each frame boundary,
+        // which is the same rule `poll_framed` follows on the arm below.
+        match reactor.attach(fd, Arc::clone(&self.lowlatency)) {
             Ok(rx) => RingChoice::Ring(Box::new(rx)),
             // A reactor whose worker has stopped is not this link's failure to
             // report — the framed body reads the same socket correctly. Falling

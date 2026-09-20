@@ -74,6 +74,7 @@ use std::collections::HashMap;
 use std::collections::VecDeque;
 use std::io;
 use std::os::fd::RawFd;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc as cmd_chan;
 use std::sync::Arc;
 
@@ -111,12 +112,12 @@ enum Delivery {
 
 /// What a link asks the worker to do.
 enum Cmd {
-    /// Take this link on: remember its fd and prefix width, and where to
-    /// deliver.
+    /// Take this link on: remember its fd and its prefix-width SOURCE, and
+    /// where to deliver.
     Attach {
         id: u64,
         fd: RawFd,
-        width: usize,
+        lowlatency: Arc<AtomicBool>,
         deliver: frame_chan::UnboundedSender<Delivery>,
     },
     /// Arm ONE read for this link.
@@ -241,18 +242,39 @@ impl UringReactor {
 
     /// Take `fd` on and hand back the read body for it.
     ///
-    /// Upstream's `setup_read(link.link.get_fd()?, ring_cb)`. `width` is the
-    /// length-prefix width the link frames with — 2 on the universal path and
-    /// 4 under `transport-lowlatency` — fixed here rather than re-read per
-    /// completion, which is `crate::poll_framed`'s own rule for the same
-    /// reason: a flag flip between frames must not widen a prefix that is
-    /// already half-read.
+    /// Upstream's `setup_read(link.link.get_fd()?, ring_cb)`. `lowlatency` is
+    /// the link's own negotiated-transport flag; the prefix width follows from
+    /// it — 2 on the universal path and 4 under `transport-lowlatency`.
+    ///
+    /// ⚠ R2755 — IT IS THE FLAG AND NOT A WIDTH, and the previous signature
+    /// (`attach(fd, width: usize)`) is what this round is repairing. Freezing
+    /// the width at attach was justified as `crate::poll_framed`'s own rule,
+    /// which it is not: that rule fixes the width AT FRAME START, once per
+    /// frame, and this froze it once per LINK. Both statements behind the
+    /// generalisation are true — the flag flips at Established, and a link's
+    /// first read happens before that — and the conclusion drawn from them was
+    /// false, because a link's first read is its HANDSHAKE and the flip comes
+    /// after it. So a TCP link that negotiated lowlatency kept a 2-byte prefix
+    /// on a 4-byte wire and every frame after Established was cut in the wrong
+    /// place.
+    ///
+    /// MEASURED: `wz-runtime-tokio`'s `lowlatency_e2e` over real TCP, with the
+    /// wide feature leg's 80 features, fails at
+    /// "subscriber did not fire within the ~3s budget"; the same leg with
+    /// `runtime-tokio-uring` removed — the only difference being whether this
+    /// reactor is selected at all — passes. It reached origin unseen because
+    /// hosted Layer C1bn stops at the `--lib` target and that target was red
+    /// for an unrelated reason.
+    ///
+    /// The width is now re-derived where [`crate::link_rx_window::RxWindow`]
+    /// already admits one, at a frame boundary, which is `poll_framed`'s rule
+    /// stated for a reader whose reads the kernel sizes.
     ///
     /// The fd is BORROWED, not owned: the caller's reader half keeps it open,
     /// and the returned [`UringRx`] must not outlive it. That is the same
     /// contract `crate::uring::FixedSlotRing::read_framed` has and it is
     /// upheld the same way — by the driver owning both.
-    pub fn attach(&self, fd: RawFd, width: usize) -> io::Result<UringRx> {
+    pub fn attach(&self, fd: RawFd, lowlatency: Arc<AtomicBool>) -> io::Result<UringRx> {
         let id = self
             .next_id
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -260,7 +282,7 @@ impl UringReactor {
         self.send(Cmd::Attach {
             id,
             fd,
-            width,
+            lowlatency,
             deliver,
         })?;
         Ok(UringRx {
@@ -388,6 +410,15 @@ impl Drop for UringRx {
 /// One attached link, as the worker sees it.
 struct LinkCtx {
     fd: RawFd,
+    /// R2755 — the prefix width's SOURCE, not the width. See
+    /// [`UringReactor::attach`] for what freezing it cost.
+    lowlatency: Arc<AtomicBool>,
+    /// The width in force for the frame currently being assembled.
+    ///
+    /// Carried rather than recomputed per push because a prefix that is
+    /// already half-read must not widen underneath the window:
+    /// [`Self::frame_width`] re-derives this only when the window says it is
+    /// between frames.
     width: usize,
     /// The frame boundaries ACROSS completions. This is the state that makes a
     /// reader which does not size its reads possible at all, and it lives here
@@ -442,13 +473,15 @@ fn run_worker(mut ring: FixedSlotRing, wake: Arc<WakeFd>, cmds: cmd_chan::Receiv
                 Cmd::Attach {
                     id,
                     fd,
-                    width,
+                    lowlatency,
                     deliver,
                 } => {
+                    let width = crate::prefix_width(lowlatency.load(Ordering::Acquire));
                     links.insert(
                         id,
                         LinkCtx {
                             fd,
+                            lowlatency,
                             width,
                             window: RxWindow::new(),
                             deliver,
@@ -652,6 +685,22 @@ fn deliver_completion(
     // makes it. See the module header: this is not where the zero-copy claim
     // lives or dies.
     let mut collect = |payload: &[u8]| frames.push(payload.to_vec());
+    // R2755 — RE-DERIVE THE WIDTH AT A FRAME BOUNDARY, and only there. This is
+    // `crate::poll_framed`'s rule ("the width is fixed HERE, at frame start, so
+    // a flag flip cannot widen a prefix that is already half-read") stated for
+    // a reader whose reads the kernel sizes: `between_frames` is the window's
+    // own answer to "could the stream end here without truncating a frame",
+    // which is the same instant.
+    //
+    // ⚠ A completion can carry the LAST universal frame and the FIRST lean one
+    // together, and this reads the flag once for the whole push. That window is
+    // the handshake's final frame and the session's first data frame arriving
+    // in one read, which needs the peer to have written both before either was
+    // reaped; upstream avoids it by dispatching to the ring only after the
+    // transport is established. Recorded rather than claimed closed.
+    if ctx.window.between_frames() {
+        ctx.width = crate::prefix_width(ctx.lowlatency.load(Ordering::Acquire));
+    }
     match ctx.window.push(frame.as_ref(), ctx.width, &mut collect) {
         Ok(()) => {
             let _ = ctx.deliver.send(Delivery::Frames(frames));
@@ -683,6 +732,17 @@ mod tests {
     use std::io::Write;
     use std::os::fd::AsRawFd;
     use std::time::Duration;
+
+    /// A link flag that never flips: the universal 2-byte prefix.
+    ///
+    /// R2755 — [`UringReactor::attach`] takes the link's own `lowlatency` flag
+    /// rather than a width, so a test that wants a width states it as the flag
+    /// that produces it. Every witness below reads a universal wire except
+    /// [`a_lowlatency_link_reads_the_four_byte_prefix`], which passes `true`,
+    /// and [`a_width_flip_at_a_frame_boundary_is_honoured`], which flips one.
+    fn universal() -> Arc<AtomicBool> {
+        Arc::new(AtomicBool::new(false))
+    }
 
     /// The universal streamed envelope: a 2-byte LE length, then the payload.
     ///
@@ -727,7 +787,7 @@ mod tests {
         wr.write_all(&framed(b"alpha")).expect("write");
         wr.write_all(&framed(b"beta")).expect("write");
 
-        let mut rx = reactor.attach(rd.as_raw_fd(), 2).expect("attach");
+        let mut rx = reactor.attach(rd.as_raw_fd(), universal()).expect("attach");
         assert_eq!(payload_of(within(rx.poll_event()).await), b"alpha");
         assert_eq!(payload_of(within(rx.poll_event()).await), b"beta");
 
@@ -750,8 +810,12 @@ mod tests {
 
         let (rd_a, mut wr_a) = std::io::pipe().expect("pipe");
         let (rd_b, mut wr_b) = std::io::pipe().expect("pipe");
-        let mut a = reactor.attach(rd_a.as_raw_fd(), 2).expect("attach a");
-        let mut b = reactor.attach(rd_b.as_raw_fd(), 2).expect("attach b");
+        let mut a = reactor
+            .attach(rd_a.as_raw_fd(), universal())
+            .expect("attach a");
+        let mut b = reactor
+            .attach(rd_b.as_raw_fd(), universal())
+            .expect("attach b");
 
         // B is written FIRST, so a body answering in attach order rather than
         // by key would hand A's poll B's bytes.
@@ -780,7 +844,9 @@ mod tests {
         let reactor = UringReactor::start(arena.clone()).expect("a reactor");
 
         let (rd_quiet, wr_quiet) = std::io::pipe().expect("pipe");
-        let mut quiet = reactor.attach(rd_quiet.as_raw_fd(), 2).expect("attach");
+        let mut quiet = reactor
+            .attach(rd_quiet.as_raw_fd(), universal())
+            .expect("attach");
         // Parks the quiet link INSIDE the ring: its command is delivered, a
         // read is armed, and nothing will ever complete it.
         let parked = tokio::spawn(async move { quiet.poll_event().await });
@@ -790,7 +856,7 @@ mod tests {
 
         let (rd, mut wr) = std::io::pipe().expect("pipe");
         wr.write_all(&framed(b"served anyway")).expect("write");
-        let mut live = reactor.attach(rd.as_raw_fd(), 2).expect("attach");
+        let mut live = reactor.attach(rd.as_raw_fd(), universal()).expect("attach");
         assert_eq!(
             payload_of(within(live.poll_event()).await),
             b"served anyway"
@@ -817,7 +883,7 @@ mod tests {
         let (head, tail) = wire.split_at(4);
         wr.write_all(head).expect("write head");
 
-        let mut rx = reactor.attach(rd.as_raw_fd(), 2).expect("attach");
+        let mut rx = reactor.attach(rd.as_raw_fd(), universal()).expect("attach");
         let waiting = tokio::spawn(async move {
             let event = rx.poll_event().await;
             (rx, event)
@@ -848,7 +914,7 @@ mod tests {
         let reactor = UringReactor::start(arena.clone()).expect("a reactor");
 
         let (rd, mut wr) = std::io::pipe().expect("pipe");
-        let mut rx = reactor.attach(rd.as_raw_fd(), 2).expect("attach");
+        let mut rx = reactor.attach(rd.as_raw_fd(), universal()).expect("attach");
 
         // Nothing is written yet, so this cannot resolve; dropping the future
         // is exactly what a lost `select!` race does.
@@ -877,6 +943,60 @@ mod tests {
         drop((wr, rd));
     }
 
+    /// A WIDTH FLIP AT A FRAME BOUNDARY IS HONOURED.
+    ///
+    /// R2755 — the witness for the defect [`UringReactor::attach`] records.
+    /// This is a link's real shape: it reads its handshake on the universal
+    /// 2-byte prefix, negotiates lowlatency, its open helper flips the shared
+    /// flag at Established, and every frame after that is on the 4-byte one.
+    /// The reactor used to take a WIDTH at attach, which froze whatever the
+    /// flag said during the handshake, so the second frame here was cut at the
+    /// wrong offset and no payload ever arrived.
+    ///
+    /// ⚠ THE TWO FRAMES ARE IN SEPARATE COMPLETIONS BY CONSTRUCTION — the
+    /// first is read before the second is written — because the flip is only
+    /// honoured at a frame boundary and a single completion carrying both
+    /// would be read at one width. That is the residual `attach`'s doc states;
+    /// this test is deliberately NOT written to hide it.
+    ///
+    /// CONTROL: take the width at attach again (or drop the `between_frames`
+    /// re-read in the worker) and the second `poll_event` never yields
+    /// `b"lean"` — the 2-byte prefix reads the lean frame's low half as a
+    /// length.
+    #[tokio::test]
+    async fn a_width_flip_at_a_frame_boundary_is_honoured() {
+        let arena = LinkRxArena::new();
+        let reactor = UringReactor::start(arena.clone()).expect("a reactor");
+
+        // The flag the link and its open helper share. False for the
+        // handshake, flipped at Established — exactly as `stream_link` passes
+        // it.
+        let lowlatency = universal();
+
+        let (rd, mut wr) = std::io::pipe().expect("pipe");
+        wr.write_all(&framed(b"handshake")).expect("write");
+        let mut rx = reactor
+            .attach(rd.as_raw_fd(), Arc::clone(&lowlatency))
+            .expect("attach");
+        assert_eq!(payload_of(within(rx.poll_event()).await), b"handshake");
+
+        // Established: the session is lean from the next frame on.
+        lowlatency.store(true, Ordering::Release);
+
+        let lean = b"lean";
+        let mut wire = (lean.len() as u32).to_le_bytes().to_vec();
+        wire.extend_from_slice(lean);
+        wr.write_all(&wire).expect("write");
+        assert_eq!(
+            payload_of(within(rx.poll_event()).await),
+            lean,
+            "the width must follow the flag at a frame boundary"
+        );
+
+        drop(rx);
+        drop((wr, rd));
+    }
+
     /// EOF loses the link, and it STAYS lost.
     ///
     /// `crate::poll_framed` answers a stream that ends with
@@ -891,7 +1011,7 @@ mod tests {
 
         let (rd, wr) = std::io::pipe().expect("pipe");
         drop(wr);
-        let mut rx = reactor.attach(rd.as_raw_fd(), 2).expect("attach");
+        let mut rx = reactor.attach(rd.as_raw_fd(), universal()).expect("attach");
 
         for _ in 0..2 {
             match within(rx.poll_event()).await {
@@ -923,7 +1043,9 @@ mod tests {
         wr.write_all(&(u16::MAX as u32 + 1).to_le_bytes())
             .expect("write");
 
-        let mut rx = reactor.attach(rd.as_raw_fd(), 4).expect("attach");
+        let mut rx = reactor
+            .attach(rd.as_raw_fd(), Arc::new(AtomicBool::new(true)))
+            .expect("attach");
         match within(rx.poll_event()).await {
             LinkEvent::Lost {
                 cause: LostCause::PeerClosed,
@@ -962,7 +1084,7 @@ mod tests {
         let (rd, mut wr) = std::io::pipe().expect("pipe");
         wr.write_all(&framed(b"spilled but delivered"))
             .expect("write");
-        let mut rx = reactor.attach(rd.as_raw_fd(), 2).expect("attach");
+        let mut rx = reactor.attach(rd.as_raw_fd(), universal()).expect("attach");
         assert_eq!(
             payload_of(within(rx.poll_event()).await),
             b"spilled but delivered"
@@ -986,7 +1108,7 @@ mod tests {
         let reactor = UringReactor::start(arena.clone()).expect("a reactor");
 
         let (rd, wr) = std::io::pipe().expect("pipe");
-        let mut rx = reactor.attach(rd.as_raw_fd(), 2).expect("attach");
+        let mut rx = reactor.attach(rd.as_raw_fd(), universal()).expect("attach");
         let parked = tokio::spawn(async move { rx.poll_event().await });
         // Long enough for the read to be ARMED rather than merely queued.
         tokio::time::sleep(Duration::from_millis(200)).await;
@@ -1021,12 +1143,16 @@ mod tests {
 
         let (rd_ok, mut wr_ok) = std::io::pipe().expect("pipe");
         wr_ok.write_all(&framed(b"delivered")).expect("write");
-        let mut ok = reactor.attach(rd_ok.as_raw_fd(), 2).expect("attach");
+        let mut ok = reactor
+            .attach(rd_ok.as_raw_fd(), universal())
+            .expect("attach");
         assert_eq!(payload_of(within(ok.poll_event()).await), b"delivered");
 
         let (rd_eof, wr_eof) = std::io::pipe().expect("pipe");
         drop(wr_eof);
-        let mut eof = reactor.attach(rd_eof.as_raw_fd(), 2).expect("attach");
+        let mut eof = reactor
+            .attach(rd_eof.as_raw_fd(), universal())
+            .expect("attach");
         assert!(matches!(
             within(eof.poll_event()).await,
             LinkEvent::Lost { .. }
