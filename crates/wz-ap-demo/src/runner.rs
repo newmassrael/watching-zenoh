@@ -4131,8 +4131,12 @@ pub(crate) struct PeerOpts {
     pub max_links: usize,
     /// R2758 — `--max-sessions`, the bound on how many peers this node holds
     /// (zenoh `unicast.max_sessions`). Routed through
-    /// [`WzConfig::with_max_sessions`] into `FaceSources.max_sessions`, so the
+    /// `WzConfig::with_max_sessions` into `FaceSources.max_sessions`, so the
     /// loop and the admin GET report the same number.
+    ///
+    /// A code span and not an intra-doc link: `WzConfig` lives in
+    /// `wz-runtime-tokio` and is not in this crate's scope, which Layer C1bz
+    /// counts as a broken link rather than as a reference.
     pub max_sessions: usize,
     /// R311y218 (transport-qos) — offer the QoS transport on this peer's aggregated
     /// links (`--qos`). Routed through [`WzConfig::with_qos`] into `FaceSources.qos`.
