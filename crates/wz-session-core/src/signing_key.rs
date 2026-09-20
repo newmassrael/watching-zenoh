@@ -225,6 +225,39 @@ pub fn generate_cookie_hmac_sha256(
     full[..16].to_vec()
 }
 
+/// R2760 — authenticate an arbitrary cookie payload, truncated to 16 bytes.
+///
+/// ⚠ AN OPERATION AND NOT AN ACCESSOR, which is the whole reason it is here
+/// rather than a `pub(crate) as_slice`. [`SigningKey`]'s own doc states the
+/// boundary — "only this module's `generate_cookie_hmac_sha256` can read
+/// them" — so the state-carrying cookie in [`crate::accept_cookie`] is given
+/// the MAC it needs instead of the key. Widening `as_slice` to the crate
+/// would have been the smaller edit and the weaker type.
+///
+/// The truncation matches [`generate_cookie_hmac_sha256`]'s rather than
+/// introducing a second width; see `accept_cookie::COOKIE_TAG_BYTES`.
+pub fn cookie_payload_tag(key: &SigningKey, payload: &[u8]) -> [u8; 16] {
+    let full = compute_hmac_sha256_full(key.as_slice(), payload);
+    let mut out = [0u8; 16];
+    out.copy_from_slice(&full[..16]);
+    out
+}
+
+/// R2760 — the verifying twin of [`cookie_payload_tag`], in constant time.
+///
+/// `verify_truncated_left` is the `hmac` crate's own comparison over the
+/// leading bytes of the full tag, which is exactly the truncation above. A
+/// slice `==` would short-circuit and leak the expected tag a byte at a time
+/// to a peer willing to retry — the cookie is handed to an unauthenticated
+/// peer by construction, so that is a reachable attack rather than a
+/// theoretical one.
+pub fn cookie_payload_tag_verify(key: &SigningKey, payload: &[u8], tag: &[u8]) -> bool {
+    let mut mac = <Hmac<Sha256> as Mac>::new_from_slice(key.as_slice())
+        .expect("HMAC-SHA256 accepts any non-zero key length");
+    mac.update(payload);
+    mac.verify_truncated_left(tag).is_ok()
+}
+
 /// Pure HMAC-SHA256 primitive — used by the cookie generator and
 /// directly by the RFC 4231 test-vector cross-check. Returns the
 /// untruncated 32-byte MAC; the cookie wire-shape truncation is

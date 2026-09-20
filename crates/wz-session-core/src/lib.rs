@@ -396,6 +396,14 @@ pub mod peer_init_caps;
 #[cfg(feature = "alloc")]
 pub mod signing_key;
 
+/// R2760 — the accept cookie that CARRIES the acceptor's state, so the
+/// acceptor need not remember it between InitAck and OpenSyn.
+///
+/// Gated with [`signing_key`] and for its reason: the cookie is a `Vec<u8>`
+/// authenticated by that module's `SigningKey`, so the two share a footing.
+#[cfg(feature = "alloc")]
+pub mod accept_cookie;
+
 /// R311ej — per-deploy session handshake parameters (`SessionInitParams`:
 /// version / whatami / zid / resolutions / lease / cookie + signing
 /// key). Pure owned value type; alloc-gated (Vec zid/cookie + SigningKey).
