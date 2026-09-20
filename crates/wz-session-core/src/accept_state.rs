@@ -22,7 +22,15 @@
 //!
 //! ## Fixed sinks, because the profile that needs this most has no allocator
 //!
-//! [`AcceptState`] is written against `SceSink` and `SceCursor` rather than
+//! (Crate-ABSOLUTE below, and so is the `PatchAcceptState` reference, for the
+//! reason `crate::entropy`'s own note records as `debt-carry-N13`: this module
+//! carries BOTH an outer `///` on its `pub mod` line in `lib.rs` and this
+//! inner `//!`, rustdoc MERGES the two, and it resolves the result in the
+//! PARENT scope — where a bare `AcceptState` is not in scope. Layer C1bz is
+//! the only gate that reaches this class, and it caught both.)
+//!
+//! [`crate::accept_state::AcceptState`] is written against `SceSink` and
+//! `SceCursor` rather than
 //! against `Vec<u8>`, and this module is NOT `alloc`-gated. Those are the same
 //! decision. A fixed sink raises `CodecError::BufferOverflow` where a growable
 //! one returns `Ok` — `backends/rust/forge-runtime/src/codec.rs` @ `fn write_bytes`
@@ -38,7 +46,8 @@
 //! echoes them back, so nothing off this node parses them. Upstream is
 //! therefore the oracle for WHICH state has to survive the boundary and not
 //! for how it is written, and copying its byte layout would lose information
-//! wz keeps. [`PatchAcceptState`] is the first instance — see its own note.
+//! wz keeps. [`crate::accept_state::PatchAcceptState`] is the first instance
+//! — see its own note.
 //!
 //! What this module does NOT do: nothing here is wired into the cookie yet,
 //! and no extension's state has been moved out of the object that currently
