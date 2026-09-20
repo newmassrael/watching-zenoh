@@ -130,9 +130,9 @@ const DEMO_ESTABLISHED: &str = "session Established";
 /// JSON wz's own emitter happens to produce.
 ///
 /// Every value is chosen AWAY from zenoh's default (batch_size 4096 vs 65535,
-/// lease 8000 vs 10000, max_links 3 vs 1, qos off vs on, compression on vs
-/// off, timestamping on vs off, adminspace write on vs off), so the two
-/// implementations cannot agree by both landing on a default.
+/// lease 8000 vs 10000, max_links 3 vs 1, max_sessions 7 vs 1000, qos off vs
+/// on, compression on vs off, timestamping on vs off, adminspace write on vs
+/// off), so the two implementations cannot agree by both landing on a default.
 fn operator_config(port: u16) -> String {
     format!(
         r#"/// The deployment's own zenoh config, as it sits on disk.
@@ -165,6 +165,8 @@ fn operator_config(port: u16) -> String {
   transport: {{
     unicast: {{
       max_links: 3,
+      // R2758 — 7, away from upstream's 1000, per this fixture's own rule.
+      max_sessions: 7,
       lowlatency: false,
       qos: {{ enabled: false }},
       compression: {{ enabled: true }},
@@ -364,6 +366,10 @@ fn wz_reads_the_same_values_out_of_a_config_that_zenohd_does() {
         ),
         ("timestamping/enabled", wz.timestamping.to_string()),
         ("transport/unicast/max_links", wz.max_links.to_string()),
+        (
+            "transport/unicast/max_sessions",
+            wz.max_sessions.to_string(),
+        ),
         ("transport/unicast/lowlatency", wz.lowlatency.to_string()),
         ("transport/unicast/qos/enabled", wz.qos.to_string()),
         (
@@ -744,6 +750,10 @@ fn the_defaults_each_implementation_falls_back_to_are_pinned_against_a_real_zeno
             quoted(&wz.access_control.default_permission),
         ),
         ("transport/unicast/max_links", wz.max_links.to_string()),
+        (
+            "transport/unicast/max_sessions",
+            wz.max_sessions.to_string(),
+        ),
         ("transport/unicast/lowlatency", wz.lowlatency.to_string()),
         ("transport/unicast/qos/enabled", wz.qos.to_string()),
         (
@@ -3356,6 +3366,12 @@ fn a_wz_node_configured_only_by_a_stock_zenoh_config_reaches_a_real_zenohd() {
   transport: {{
     unicast: {{
       max_links: 2,
+      // R2758 — the session bound. Named here because this fixture is what a
+      // connecting client actually hands wz, and the leg asserts it names every
+      // honoured key: a key wz reads but no fixture carries is a key no run
+      // exercises. NON-DEFAULT on purpose (upstream's is 1000), so a wz that
+      // ignored the document and kept its own default would differ.
+      max_sessions: 7,
       lowlatency: false,
       qos: {{ enabled: true }},
       compression: {{ enabled: true }},

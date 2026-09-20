@@ -1761,6 +1761,11 @@ pub const HONOURED_CONFIG_KEYS: &[&str] = &[
     // unreachable is exactly the drift it exists to catch.
     "timestamping/drop_future_timestamp",
     "transport/unicast/max_links",
+    // R2758 — the bound on how many peers a node holds. Enforced in
+    // `accept_loop` against its own `faces` table, at the moment upstream
+    // enforces it: after the dedup-by-zid rule and before the insert
+    // (`io/zenoh-transport/src/unicast/manager.rs` @ `max_sessions`).
+    "transport/unicast/max_sessions",
     "transport/unicast/lowlatency",
     "transport/unicast/qos/enabled",
     "transport/unicast/compression/enabled",
@@ -2209,7 +2214,11 @@ pub const UNHONOURED_UPSTREAM_CONFIG_KEYS: &[&str] = &[
     "transport/shared_memory/transport_optimization/pool_size",
     "transport/unicast/accept_pending",
     "transport/unicast/accept_timeout",
-    "transport/unicast/max_sessions",
+    // R2758 — `transport/unicast/max_sessions` LEFT this list: wz honours it.
+    // It never resembled the neighbours it sat between — `accept_pending` and
+    // the two timeouts quantify over a half-open accept pipeline wz does not
+    // model, while this one is a comparison against a table the accept loop
+    // already kept. See `HONOURED_CONFIG_KEYS`.
     "transport/unicast/open_timeout",
 ];
 
@@ -2419,7 +2428,12 @@ pub const UNHONOURED_BEYOND_WZ: &[&str] = &[
     "transport/shared_memory/transport_optimization/pool_size",
     "transport/unicast/accept_pending",
     "transport/unicast/accept_timeout",
-    "transport/unicast/max_sessions",
+    // R2758 — `transport/unicast/max_sessions` LEFT this list too, and this is
+    // the one whose classification was actually wrong. "Beyond wz" is the claim
+    // that the key needs a capability wz has not got; the capability here is a
+    // session table, and the accept loop has held one since it existed. What
+    // was missing was a bound on it, which is a comparison rather than a
+    // subsystem.
     "transport/unicast/open_timeout",
 ];
 
@@ -2644,7 +2658,17 @@ pub const UNHONOURED_BEYOND_GROUPS: &[(&str, &str, &[&str])] = &[
             "transport/shared_memory/mode",
             "transport/unicast/accept_pending",
             "transport/unicast/accept_timeout",
-            "transport/unicast/max_sessions",
+            // R2758 — `transport/unicast/max_sessions` LEFT this group, and the
+            // group's own name is why it had to: "a configurable session table"
+            // is two things, and wz had the table all along. `accept_loop`'s
+            // `faces` IS the session table; what it lacked was the
+            // configurable bound, which this round built. The remaining members
+            // still need the half wz has not got — a half-open accept pipeline
+            // (`accept_pending`, the two timeouts) and a multicast peer table.
+            //
+            // This is the outcome the R2159 note below describes, in its own
+            // words: the day wz grows a capability, its group reds rather than
+            // going quietly stale. It redded, and this is the entry moving out.
             "transport/unicast/open_timeout",
         ],
     ),
