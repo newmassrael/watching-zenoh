@@ -48,8 +48,11 @@
 //!   prefix mid-read — so [`RxWindow::push`] takes the width and captures it
 //!   into the prefix state, which is that same rule written for a reader that
 //!   does not own its reads. The decode itself is not rewritten here:
-//!   [`decode_prefix`] is what `crate::poll_framed` calls too, so the two
-//!   bodies cannot read one number two ways.
+//!   `decode_prefix` is what `crate::poll_framed` calls too, so the two
+//!   bodies cannot read one number two ways. (A code span and not a link,
+//!   because that function is `pub(crate)` and this module is `pub`: rustdoc
+//!   refuses a public item's doc linking to a private one, which is exactly
+//!   what the doc-link budget counts.)
 //! * A ZERO-LENGTH BATCH IS SKIPPED, not emitted. Upstream emits an empty
 //!   batch whose read loop then runs zero times. `crate::poll_framed` skips it
 //!   instead (R2271, open-debt item 577: passing an empty payload up made
