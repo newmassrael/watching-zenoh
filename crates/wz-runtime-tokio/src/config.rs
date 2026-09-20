@@ -640,6 +640,27 @@ impl core::fmt::Debug for ConfigSinks<'_> {
     }
 }
 
+/// R2758 — zenoh's shipped `transport/unicast/max_sessions`.
+///
+/// ONE literal for the whole tree: the same number is needed by [`WzConfig`]'s
+/// default, by the zenoh-config ingest's default, and by `accept_loop`'s
+/// accept-only entry, and a value reached by three paths drifts (this repo's
+/// own R311y589 lesson). Read off a running zenohd's resolved config —
+/// `zenoh_config_emit_zenohd_interop.rs` captures
+/// `"unicast":{...,"max_sessions":1000,...}` — rather than off prose.
+///
+/// ⚠ DECLARED HERE rather than beside its consumer, and that was MEASURED
+/// rather than preferred: it was written in `accept_loop` first, and the
+/// unconditional `config.rs` could not name it, because that module is
+/// feature-gated and this default is not. A constant that disappears with a
+/// feature cannot be a config layer's default.
+///
+/// ⚠⚠ AND ABOVE [`WzConfig`]'S DOC BLOCK, not between it and the struct. Put
+/// there, this constant silently ADOPTS that block — Layer C1bz caught it as
+/// an unresolved `Self::reconfigure_interceptors`, because `Self` had become a
+/// `usize`.
+pub const DEFAULT_MAX_SESSIONS: usize = 1_000;
+
 /// The typed wz runtime config SSOT — see the module doc. The read-at-open
 /// fields are `pub` (introspection-readable); the live `interceptors`
 /// field is private so every mutation routes through
@@ -648,24 +669,6 @@ impl core::fmt::Debug for ConfigSinks<'_> {
 ///
 /// The private slices that can change while the node runs are declared once in
 /// [`RUNTIME_MUTABLE_CONFIG_KEYS`]; do not count them in prose.
-//
-// R2758 — zenoh's shipped `transport/unicast/max_sessions`, declared here
-// because it is the config layer's default.
-//
-// ONE literal for the whole tree: the same number is needed by this config's
-// default, by the zenoh-config ingest's default, and by `accept_loop`'s
-// accept-only entry, and a value reached by three paths drifts (this repo's own
-// R311y589 lesson). Read off a running zenohd's resolved config —
-// `zenoh_config_emit_zenohd_interop.rs` captures
-// `"unicast":{...,"max_sessions":1000,...}` — rather than off prose.
-//
-// ⚠ HERE rather than beside its consumer, and that was MEASURED rather than
-// preferred: it was written in `accept_loop` first, and `config.rs` could not
-// name it, because that module is feature-gated and this default is not. A
-// constant that disappears with a feature cannot be a config layer's default.
-#[allow(clippy::doc_markdown)]
-pub const DEFAULT_MAX_SESSIONS: usize = 1_000;
-
 #[derive(Debug, Clone)]
 #[non_exhaustive]
 pub struct WzConfig {

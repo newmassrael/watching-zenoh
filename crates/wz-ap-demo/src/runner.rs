@@ -3701,6 +3701,20 @@ fn log_face_event(node_label: &str, event: &wz::runtime_tokio::accept_loop::Acce
         AcceptEvent::AcceptError(e) => {
             log::warn!("wz-ap-demo {node_label}: accept error (continuing): {e}")
         }
+        // R2758 — the session bound turned a peer away. WARN rather than info:
+        // the node is refusing work it was asked to do, and unlike an accept
+        // error this one will not clear by itself — it persists until a face
+        // leaves or the operator raises `transport/unicast/max_sessions`. The
+        // held count is logged because the limit is not in this scope and a
+        // reader needs the number the decision was made against.
+        AcceptEvent::FaceRefused { id, peer_zid, held } => {
+            log::warn!(
+                "wz-ap-demo {node_label}: face {} REFUSED (zid {}) — holding {held} \
+                 at the max_sessions bound",
+                id.0,
+                zid_hex(peer_zid.as_deref())
+            )
+        }
         // R311y213 (transport-multilink) — a second+ physical link aggregated onto
         // an existing session (the demo-owned witness that N-link aggregation
         // actually happened; a joined link never fires FaceUp, so this is the only
