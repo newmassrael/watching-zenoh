@@ -1877,8 +1877,30 @@ for pkg in "${pkgs[@]}"; do
     else
         pkg_run=(cargo test -p "$pkg" --quiet)
     fi
-    if ! (cd crates && "${pkg_run[@]}"); then
-        echo "pre-push:   $pkg tests FAILED" >&2
+    _pkg_rc=0
+    (cd crates && "${pkg_run[@]}") || _pkg_rc=$?
+    # R2761 — exit 2 means THE TESTS NEVER RAN, and saying "tests FAILED" for it
+    # sends the reader to the wrong layer. `bx`'s `die()` exits 2 for every one
+    # of its own refusals (its line 121-125) and passes the wrapped command's
+    # code through otherwise, so 2 here is the RUNNER declining, not a red suite
+    # — cargo reds at 101. The bare-cargo branch keeps the same reading: a 2
+    # there is a usage error, which also means no test ran.
+    #
+    # MEASURED, and it cost a whole push cycle: a stale two-byte `.push-*.rc`
+    # left in the worktree made `bx` refuse to send ("these files are untracked,
+    # so `git ls-files` never sent them"), and this gate printed
+    # "wz-session-core tests FAILED" over a suite that was never invoked. The
+    # refusal names its own cause on the line above the verdict; the verdict
+    # then contradicted it. A gate that did not reach its subject must not
+    # describe the subject.
+    if [[ $_pkg_rc -eq 2 ]]; then
+        echo "pre-push:   $pkg tests DID NOT RUN — the runner declined (rc=2)." >&2
+        echo "            Read the runner's own lines above this one for the" >&2
+        echo "            cause; an untracked file in the worktree is the" >&2
+        echo "            common one (\`git status --porcelain\`)." >&2
+        fail=1
+    elif [[ $_pkg_rc -ne 0 ]]; then
+        echo "pre-push:   $pkg tests FAILED (rc=$_pkg_rc)" >&2
         fail=1
     fi
 done
