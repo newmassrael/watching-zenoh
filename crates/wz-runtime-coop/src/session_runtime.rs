@@ -209,24 +209,34 @@ pub fn install_own_mapping_space<C, T, S>(
 /// still returned because an INITIATOR-role bundle never reads the slot and
 /// must not be denied a session over it.
 #[cfg(feature = "session-unicast")]
+/// ## R2763 — the source is handed OVER, not lent
+///
+/// This seam took `&mut E` while the nonce was drawn exactly once, at
+/// construction. A nonce drawn once is per BUNDLE, so an acceptor's second
+/// handshake re-minted the first one's cookie; the bundle now re-draws on
+/// every InitAck, which needs a source that lives as long as it does. Hence
+/// ownership. A board passes its TRNG type by value here instead of a borrow
+/// that ends when this function returns.
 pub fn new_session_actions<C, E>(
     driver: Rc<dyn BoxedLinkDriver>,
     params: wz_session_core::session_init_params::SessionInitParams,
     clock: CoopTime<C>,
-    entropy: &mut E,
+    entropy: E,
 ) -> Rc<SessionLinkActions<CoopRuntime<C>, CoopTime<C>>>
 where
     C: ClockSource,
-    E: wz_session_core::entropy::EntropySource + ?Sized,
+    E: wz_session_core::entropy::EntropySource + Send + 'static,
 {
     let actions =
         SessionLinkActions::<CoopRuntime<C>, CoopTime<C>>::new_generic(driver, params, clock);
-    // The draw, and the whole point of the seam. `Err` is dropped rather than
-    // surfaced: the slot's own `None` is the report (see the fail-closed note
-    // above), and there is no no_std channel to log through.
-    if let Ok(nonce) = entropy.try_next_u64() {
-        actions.refresh_cookie_nonce(nonce);
-    }
+    // The install, and the whole point of the seam: what a board supplies is a
+    // TYPE, and every handshake this bundle accepts draws through it.
+    actions.install_cookie_entropy(alloc::boxed::Box::new(entropy));
+    // The construction-time draw is KEPT. A failure here is the board's TRNG
+    // not being ready, and a no_std profile has no channel to log through, so
+    // the slot's own `None` is the report (see the fail-closed note above) --
+    // observable at construction rather than at the first handshake.
+    let _ = actions.draw_cookie_nonce();
     actions
 }
 
@@ -318,8 +328,8 @@ mod cookie_nonce_draw_tests {
         }
     }
 
-    fn build<E: EntropySource>(
-        entropy: &mut E,
+    fn build<E: EntropySource + Send + 'static>(
+        entropy: E,
     ) -> Rc<SessionLinkActions<CoopRuntime<StoppedClock>, CoopTime<StoppedClock>>> {
         let runtime = CoopRuntime::new(StoppedClock);
         let clock = CoopTime::new(&runtime);
@@ -332,25 +342,31 @@ mod cookie_nonce_draw_tests {
         // The headline. Before R311y819 the MCU profile called `new_generic`
         // directly, which leaves the slot at `None`, and every deploy had to
         // remember to install one itself.
-        let mut src = Counting(0);
-        let actions = build(&mut src);
         assert!(
-            actions.cookie_nonce().is_some(),
+            build(Counting(0)).cookie_nonce().is_some(),
             "the construction seam must draw the nonce, so a deploy cannot forget it",
         );
     }
 
+    /// R2763 — REPLACES `two_bundles_take_two_nonces`, and the replacement is
+    /// strictly stronger rather than a weakening to fit the new signature.
+    ///
+    /// That test drove TWO bundles off ONE borrowed source and asserted their
+    /// nonces differed. It could only observe the source advancing, never the
+    /// bundle re-drawing, so a board whose every handshake re-minted the same
+    /// cookie passed it — which is the clause this round closes. The seam now
+    /// OWNS its source, so the property moves onto one bundle, where the
+    /// replay actually lives: the acceptor re-draws per handshake, and this is
+    /// the MCU-profile statement of it.
     #[test]
-    fn two_bundles_take_two_nonces() {
-        // The replay property, and the one a constant defeats: a board built
-        // from the pre-R311y819 MCU shape answered every handshake of its
-        // service life with one cookie per zid.
-        let mut src = Counting(0);
-        let (a, b) = (build(&mut src), build(&mut src));
+    fn two_draws_on_one_bundle_take_two_nonces() {
+        let actions = build(Counting(0));
+        let first = actions.cookie_nonce();
+        assert!(actions.draw_cookie_nonce(), "a live source must draw");
         assert_ne!(
-            a.cookie_nonce(),
-            b.cookie_nonce(),
-            "two bundles off one source must not share a cookie nonce",
+            first,
+            actions.cookie_nonce(),
+            "a second handshake on one bundle must not reuse the first's nonce",
         );
     }
 
@@ -361,8 +377,7 @@ mod cookie_nonce_draw_tests {
         // both assertions above.
         let mut probe = Counting(0);
         let expected = probe.try_next_u64().unwrap();
-        let mut src = Counting(0);
-        assert_eq!(build(&mut src).cookie_nonce(), Some(expected));
+        assert_eq!(build(Counting(0)).cookie_nonce(), Some(expected));
     }
 
     #[test]
@@ -370,11 +385,45 @@ mod cookie_nonce_draw_tests {
         // Not "no binding" but "admit no OpenSyn". A fallback to a constant
         // here would be indistinguishable from a working binding, which is
         // exactly the state this round found the MCU profile in.
-        let mut src = Dry;
         assert_eq!(
-            build(&mut src).cookie_nonce(),
+            build(Dry).cookie_nonce(),
             None,
             "an entropy failure must leave the acceptor refusing, never guessing",
+        );
+    }
+
+    /// R2763 — the fail-closed arm that only a per-handshake draw can have: a
+    /// source that WORKED and then stops must not leave the previous
+    /// handshake's nonce standing, because that is the binding the refresh
+    /// exists to replace.
+    #[test]
+    fn a_source_that_dries_up_clears_the_nonce_it_had_drawn() {
+        /// Live for the construction draw, dry for every draw after it.
+        struct DriesUp(bool);
+
+        impl EntropySource for DriesUp {
+            fn try_fill_bytes(&mut self, buf: &mut [u8]) -> Result<(), EntropyUnavailable> {
+                if self.0 {
+                    self.0 = false;
+                    buf.fill(0x5A);
+                    Ok(())
+                } else {
+                    Err(EntropyUnavailable)
+                }
+            }
+        }
+
+        let actions = build(DriesUp(true));
+        assert!(
+            actions.cookie_nonce().is_some(),
+            "the first draw must have landed, else the clearing below is vacuous",
+        );
+        assert!(!actions.draw_cookie_nonce(), "the second draw must fail");
+        assert_eq!(
+            actions.cookie_nonce(),
+            None,
+            "a failed refresh must CLEAR, never leave the previous handshake's \
+             nonce in place for this one to re-mint",
         );
     }
 }

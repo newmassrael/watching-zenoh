@@ -402,12 +402,18 @@ pub fn new_session_actions<T: TimeSource>(
     // SOURCE and in nothing else. The bytes are identical — `OsEntropy` is
     // `getrandom` and the trait fixes the same little-endian decode
     // `nonce_from_os_entropy` performs.
-    match wz_session_core::entropy::EntropySource::try_next_u64(&mut OsEntropy) {
-        Ok(nonce) => actions.refresh_cookie_nonce(nonce),
-        Err(e) => log::error!(
-            "wz-session: no OS entropy for the anti-amplification cookie nonce ({e}); \
+    // R2763 — the source is INSTALLED, and the draw below goes through it. The
+    // bundle re-draws on every InitAck it mints, which is what makes the
+    // binding per-HANDSHAKE rather than per-bundle; this call is what gives it
+    // something to re-draw from. The construction-time draw is kept so an
+    // unusable source is reported HERE, at the seam that owns the deploy fault,
+    // instead of silently at the first handshake.
+    actions.install_cookie_entropy(Box::new(OsEntropy));
+    if !actions.draw_cookie_nonce() {
+        log::error!(
+            "wz-session: no OS entropy for the anti-amplification cookie nonce; \
              this bundle will refuse every inbound OpenSyn"
-        ),
+        );
     }
     // Declare this profile's reassembly budget to the TX side, so an
     // oversize send is refused where the caller can see it instead of being

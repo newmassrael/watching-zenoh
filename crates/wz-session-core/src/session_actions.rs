@@ -20,6 +20,7 @@
 //! action bodies stay gated on their codec / handshake-role feature —
 //! cfg-off is a documented no-emit no-op, not a build error.
 
+use alloc::boxed::Box;
 use alloc::string::{String, ToString};
 use alloc::vec;
 use alloc::vec::Vec;
@@ -42,6 +43,11 @@ use portable_atomic::{AtomicU32, AtomicU64, Ordering};
 // (the `FrameTxConduits` non-qos variant ignores it — no cfg-skew on the
 // mint/dispatch signatures).
 use crate::qos::Priority;
+
+// R2763 — the §2.5 entropy port, held by the bundle so the acceptor can draw a
+// fresh cookie nonce per handshake. Unconditional, like the `cookie_nonce`
+// slot it refreshes: every build that carries the accept path carries it.
+use crate::entropy::EntropySource;
 
 // CodecError is the return type of `encode_init_with_role` /
 // `encode_open_with_role` only; gate it on those encoders' codecs so a
@@ -712,6 +718,45 @@ pub struct SessionCore<R: SessionRuntime, T: TimeSource> {
     /// [`Self::refresh_cookie_nonce`] for what an acceptor-role re-handshake
     /// owes.
     pub cookie_nonce: R::Mutex<Option<u64>>,
+    /// R2763 — the entropy SOURCE the acceptor re-draws `cookie_nonce` from on
+    /// every InitAck it mints.
+    ///
+    /// (Code spans, not links, for that slot throughout this note: the name is
+    /// carried by BOTH the field above and its accessor, which is the
+    /// ambiguity `refresh_cookie_nonce`'s own doc already declines to write as
+    /// a link.)
+    ///
+    /// ## Why a source and not the value beside it
+    ///
+    /// R311y813 gave this bundle a nonce and R311y819 gave both profiles a
+    /// construction seam that draws one. Both are about a value, and a value
+    /// drawn once is per BUNDLE: two handshakes on one bundle mint the same
+    /// sixteen cookie bytes, so an initiator that echoed the first handshake's
+    /// cookie passes the second's [`Self::cookie_valid`]. Upstream has no such
+    /// window because it draws INSIDE the InitAck path —
+    /// `io/zenoh-transport/src/unicast/establishment/accept.rs` @ `let nonce: u64 = prng.gen();`
+    /// — and rejects a mismatched echo at
+    /// `io/zenoh-transport/src/unicast/establishment/accept.rs` @ `if input.cookie_nonce != cookie.nonce {`.
+    /// (Both citations carry the root rather than saying "the same file": an
+    /// unrooted one cannot be graded, and it hides a path that moved.)
+    ///
+    /// A per-handshake draw needs a source that lives as long as the bundle,
+    /// which is why this is an owned slot rather than the borrow the two
+    /// construction seams took. `Box<dyn ..>` follows
+    /// `crate::extshm::ShmAuthDispatch`'s installed-authenticator slot rather
+    /// than adding a type parameter every `SessionLinkActions` mention would
+    /// have to carry.
+    ///
+    /// ## `None` does not deny by itself
+    ///
+    /// An absent source leaves `cookie_nonce` exactly as some host put
+    /// it, because [`Self::refresh_cookie_nonce`] is a documented out-of-band
+    /// install and the MCU e2e fixture uses it. What is fail-closed is a source
+    /// that FAILS: [`Self::draw_cookie_nonce`] then clears the nonce, so the
+    /// acceptor mints no HMAC cookie and admits no OpenSyn rather than reusing
+    /// the previous handshake's binding. Both production construction seams
+    /// install one, so no shipped acceptor keeps the per-bundle behaviour.
+    cookie_entropy: R::Mutex<Option<Box<dyn EntropySource + Send>>>,
     /// R68b — per-role ext chain slots. Indexed by `ExtChainRole`
     /// via `ext_chain_for`. Each slot lives behind its own `Mutex`
     /// so a setter can swap one chain without blocking the others
@@ -1725,6 +1770,9 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                 // R311y813 — fail-closed until a host with an entropy source
                 // installs one; this crate has none to draw from.
                 cookie_nonce: R::new_mutex(None::<u64>),
+                // R2763 — no source until a profile's construction seam
+                // installs one; the core names no entropy source (§2.5).
+                cookie_entropy: R::new_mutex(None::<Box<dyn EntropySource + Send>>),
                 // R121f1 — default ext chains seed both Init roles with the
                 // patch-extension entry that zenoh-pico's accept-side
                 // size-negotiation requires. See
@@ -2545,8 +2593,76 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// bundle per attempt), so nothing reaches it today; a host that later
     /// reopens as acceptor should call this again, exactly as the auth seam
     /// documents for its own nonce.
+    /// R2763 — the same sentence, corrected by the round that gave this bundle
+    /// a source: "before the FSM reaches `SentInitAck`" is what an out-of-band
+    /// install still owes, and a profile that installs a source through
+    /// [`Self::install_cookie_entropy`] owes nothing, because the mint draws.
     pub fn refresh_cookie_nonce(&self, nonce: u64) {
         R::with_mutex_mut(&self.cookie_nonce, |slot| *slot = Some(nonce));
+    }
+
+    /// R2763 — install the entropy source this bundle re-draws its cookie
+    /// nonce from, once per handshake.
+    ///
+    /// The §2.5 plugin-tier counterpart of `install_auth_dispatch` (a code
+    /// span, not a link: that sibling is `session-extauth`-gated and this
+    /// method is not, so the link would dangle in every subset without it): the
+    /// no_std core names no source, so the profile hands it one and every
+    /// accept path built on this bundle is bound by default. Both production
+    /// construction seams call this — `wz_runtime_tokio::session_glue` with
+    /// `getrandom` and `wz_runtime_coop::session_runtime` with the board's —
+    /// which is what keeps a new accept entry point from having to remember
+    /// anything, the property R311y813 chose the construction seam for.
+    ///
+    /// Installing a source does NOT draw one; call [`Self::draw_cookie_nonce`]
+    /// if the bundle should be able to mint before its first InitAck (both
+    /// seams do, so an unusable source is visible at construction rather than
+    /// at the first handshake).
+    pub fn install_cookie_entropy(&self, source: Box<dyn EntropySource + Send>) {
+        R::with_mutex_mut(&self.cookie_entropy, |slot| *slot = Some(source));
+    }
+
+    /// R2763 — draw a FRESH cookie nonce through the installed source,
+    /// reporting whether this acceptor can now mint.
+    ///
+    /// This is the per-handshake half of the binding, and
+    /// `SessionActionsBinding::send_init_ack_with_cookie` calls it on every
+    /// InitAck, which is where zenoh draws too
+    /// (`io/zenoh-transport/src/unicast/establishment/accept.rs` @ `let nonce: u64 = prng.gen();`).
+    ///
+    /// Three outcomes, and the middle one is the one worth naming:
+    ///
+    /// - no source installed — `false`, and the nonce is LEFT ALONE. A host
+    ///   using [`Self::refresh_cookie_nonce`] out of band keeps what it put
+    ///   there; this is not a failure and the caller does not report it.
+    /// - the source failed — `false`, and the nonce is CLEARED. Reusing the
+    ///   previous handshake's value would be a silent fallback to exactly the
+    ///   binding this draw exists to refresh, so the acceptor is made to refuse
+    ///   instead (`cookie_valid` denies on an absent nonce).
+    /// - the source produced bytes — `true`, and the nonce is replaced.
+    ///
+    /// The two mutexes are taken SEQUENTIALLY, never nested: the MCU profile's
+    /// lock is non-reentrant (the 2b-① discipline the mint's own comment
+    /// records).
+    pub fn draw_cookie_nonce(&self) -> bool {
+        // `Option<Option<u64>>`: the outer arm is "was a source installed",
+        // the inner one "did it produce bytes". Collapsing them would make an
+        // absent source indistinguishable from a dry one, and those two want
+        // opposite treatment of the existing nonce.
+        let drawn: Option<Option<u64>> = R::with_mutex_mut(&self.cookie_entropy, |slot| {
+            slot.as_mut().map(|src| src.try_next_u64().ok())
+        });
+        match drawn {
+            None => false,
+            Some(Some(nonce)) => {
+                R::with_mutex_mut(&self.cookie_nonce, |slot| *slot = Some(nonce));
+                true
+            }
+            Some(None) => {
+                R::with_mutex_mut(&self.cookie_nonce, |slot| *slot = None);
+                false
+            }
+        }
     }
 
     /// R311y813 — the installed per-handshake cookie nonce, or `None` when no
@@ -8168,6 +8284,19 @@ impl<R: SessionRuntime, T: TimeSource> SessionFsmUnicastActionsTrait
             // not silently emit the replayable derivation, and `cookie_valid`
             // denies for the same reason, so the two halves fail together
             // rather than one of them degrading.
+            //
+            // R2763 — the nonce is DRAWN HERE, not read out of whatever the
+            // bundle was constructed with. This is the line that makes the
+            // binding per-HANDSHAKE: zenoh draws inside its own InitAck path
+            // (`io/zenoh-transport/src/unicast/establishment/accept.rs` @ `let nonce: u64 = prng.gen();`),
+            // and a bundle that drew once at construction handed its second
+            // handshake the first one's sixteen cookie bytes. The return value
+            // is deliberately ignored: `draw_cookie_nonce` has already put the
+            // slot into the state the read below must see -- refreshed, left
+            // alone (no source installed), or cleared (the source failed) --
+            // and the `None` arm of that read is the single fail-closed exit
+            // for all three.
+            a.draw_cookie_nonce();
             let nonce: Option<u64> = R::with_mutex_mut(&a.cookie_nonce, |slot| *slot);
             let peer_zid: Option<Vec<u8>> =
                 R::with_mutex_mut(&a.inbound_peer_zid, |slot| slot.clone());

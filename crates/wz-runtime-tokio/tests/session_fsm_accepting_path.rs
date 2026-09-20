@@ -367,6 +367,14 @@ async fn r86_send_init_ack_with_cookie_binds_to_inbound_peer_zid() {
 /// The nonces are INSTALLED rather than drawn so the outcome is decided by the
 /// binding and not by entropy luck (that `new_session_actions` really draws
 /// distinct ones is a separate assertion, in `session_glue`'s unit tests).
+///
+/// R2763 — and installing them now means building through `new_generic`. The
+/// AP seam installs an entropy SOURCE, and a bundle that has one re-draws on
+/// every InitAck, so a hand-installed nonce would be overwritten before it was
+/// used. That ordering is deliberate — a configured source is the live answer
+/// and `refresh_cookie_nonce` is the affordance for a bundle without one — and
+/// this test is the FSM-level witness of the other arm: no source installed
+/// leaves the nonce exactly as a host put it.
 /// Both halves of the pair are asserted: the stale cookie is refused AND the
 /// second acceptor's OWN cookie is admitted, so a refusal cannot come from the
 /// second bundle simply being broken.
@@ -380,10 +388,15 @@ async fn a_cookie_from_an_earlier_handshake_is_refused_by_the_next() {
         Arc<SessionLinkActions>,
         Engine<SessionFsmUnicastPolicy<SessionActionsBinding>>,
     ) {
+        use wz_runtime_tokio::runtime_impl::TokioRuntime;
+
         let outbound: Arc<dyn BoxedLinkDriver + Send + Sync> =
             Arc::new(NoopOutboundDriver::default());
-        let actions =
-            new_session_actions(outbound, fixture_session_init_params(), TokioTime::new());
+        let actions = SessionLinkActions::<TokioRuntime, TokioTime>::new_generic(
+            outbound,
+            fixture_session_init_params(),
+            TokioTime::new(),
+        );
         actions.refresh_cookie_nonce(nonce);
         let mut engine = new_session_engine(&actions);
         engine.initialize();
@@ -448,6 +461,78 @@ async fn a_cookie_from_an_earlier_handshake_is_refused_by_the_next() {
         S::Established,
         "this handshake's OWN cookie must still be admitted -- otherwise the \
          refusal above is just a broken acceptor"
+    );
+}
+
+/// R2763 THE SAME-BUNDLE DISCRIMINATOR. One acceptor, two handshakes: the
+/// cookie minted for the first must not open the second.
+///
+/// The sibling above proves the BINDING works by installing two nonces by
+/// hand on two bundles. That leaves the question this test asks, which is the
+/// one `session-unicast-accept`'s standing clause is about: does the acceptor
+/// draw a fresh nonce PER HANDSHAKE, the way
+/// `io/zenoh-transport/src/unicast/establishment/accept.rs` @ `let nonce: u64 = prng.gen();`
+/// does inside its InitAck path? A draw at bundle CONSTRUCTION satisfies every
+/// two-bundle test and still hands two handshakes on one bundle the same 16
+/// bytes.
+///
+/// Nothing is installed here. The nonce is whatever the AP construction seam
+/// arranges, which is the point — this test is about the seam, not about the
+/// MAC.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn one_bundle_mints_a_different_cookie_for_each_handshake() {
+    /// Drive `actions` from `Init` to `SentInitAck` with the shared crafted
+    /// InitSyn, and hand back the cookie that handshake minted.
+    ///
+    /// Read out of `cookie_nonce()` rather than off the wire because
+    /// `NoopOutboundDriver` keeps no bytes; the slot is the acceptor's own
+    /// answer to "which handshake am I in", which is exactly the subject.
+    async fn handshake_to_sent_init_ack(
+        actions: &Arc<SessionLinkActions>,
+        engine: &mut Engine<SessionFsmUnicastPolicy<SessionActionsBinding>>,
+    ) -> Vec<u8> {
+        engine.process_event(E::InboundStart);
+        let mut driver = QueueDriver::with(vec![LinkEvent::Rx(RxFrame::new(craft_initsyn_wire()))]);
+        let _ = poll_and_dispatch_one(&mut driver, actions, engine).await;
+        assert_eq!(engine.get_current_state(), S::SentInitAck);
+        let nonce = actions
+            .cookie_nonce()
+            .expect("the AP seam must leave this acceptor able to mint");
+        wz_runtime_tokio::session_glue::generate_cookie_hmac_sha256(
+            &fixture_session_init_params().cookie_signing_key,
+            &FIXTURE_PEER_ZID,
+            nonce,
+        )
+    }
+
+    let (actions, mut engine) = fresh_setup();
+    let first = handshake_to_sent_init_ack(&actions, &mut engine).await;
+
+    // The acceptor-role re-handshake the `cookie_nonce` slot's own note names:
+    // the slot survives this reset on purpose, so an un-refreshed bundle
+    // re-mints its previous handshake's cookie.
+    actions.reset_for_reopen();
+    engine.initialize();
+    let second = handshake_to_sent_init_ack(&actions, &mut engine).await;
+
+    assert_ne!(
+        first, second,
+        "one bundle's two handshakes must not share a cookie -- an initiator \
+         that echoed the first handshake's 16 bytes would pass the second's \
+         cookie_valid, which is the replay a per-handshake draw closes"
+    );
+
+    // ANTI-VACUITY: the second handshake still admits the cookie IT minted, so
+    // the difference above cannot come from a bundle that simply stopped
+    // minting.
+    let mut driver = QueueDriver::with(vec![LinkEvent::Rx(RxFrame::new(craft_opensyn_wire(
+        &second,
+    )))]);
+    let _ = poll_and_dispatch_one(&mut driver, &actions, &mut engine).await;
+    assert_eq!(
+        engine.get_current_state(),
+        S::Established,
+        "this handshake's OWN cookie must still be admitted"
     );
 }
 

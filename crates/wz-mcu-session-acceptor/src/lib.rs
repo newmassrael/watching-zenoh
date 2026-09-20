@@ -362,7 +362,7 @@ pub fn run_acceptor_e2e<C: ClockSource, H: FnMut()>(
         driver_sink,
         acceptor_params(),
         clock.clone(),
-        &mut FixtureEntropy,
+        FixtureEntropy,
     );
     let timeouts = SessionTimeouts::spec_defaults();
 
