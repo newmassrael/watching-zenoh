@@ -852,14 +852,30 @@ mod ring_selection {
             .expect("the link must answer")
     }
 
-    /// A connected TCP pair, as two owned halves plus the peer end.
+    /// A connected TCP pair, as an owned read half plus the peer end.
+    ///
+    /// Built through the PRODUCTION constructors — `dial_tcp` and
+    /// `accept_tcp_on` — rather than `TcpStream::connect` and
+    /// `listener.accept()`. `scripts/lib/tcp_tuning_seam_gate.py` caught the
+    /// first draft doing the latter and it was right to: a socket that backs a
+    /// wz link driver must be tuned the way a wz link is, and a witness whose
+    /// half was built differently from a production half is measuring a
+    /// different object than the one it claims to. That gate's not-a-link
+    /// escape hatch would have been a false statement here — this socket is
+    /// driven by a real [`StreamReadDriver`] — so the sockets are tuned rather
+    /// than excused. (Writing that hatch's marker into this very comment is how
+    /// R2750 found that the gate read it as a CLAIM; see its own header.)
     async fn tcp_pair() -> (tokio::net::tcp::OwnedReadHalf, tokio::net::TcpStream) {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
             .expect("bind");
         let addr = listener.local_addr().expect("addr");
-        let dialed = tokio::net::TcpStream::connect(addr).await.expect("connect");
-        let (accepted, _) = listener.accept().await.expect("accept");
+        let dialed = crate::link_pipeline::dial_tcp(addr, &crate::link_socket::LinkSocket::NONE)
+            .await
+            .expect("dial");
+        let (accepted, _) = crate::link_pipeline::accept_tcp_on(&listener)
+            .await
+            .expect("accept");
         let (read, _write) = accepted.into_split();
         // `_write` is dropped: this witness only reads, and TCP keeps the read
         // half usable after the local write half shuts down.
