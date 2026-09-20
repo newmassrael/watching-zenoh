@@ -738,6 +738,7 @@ round_fed_gates=(
     "capi_c_config_verdict_population.py"
     "dissect_name_census.py"
     "layer_e_oracle_scope_gate.py"
+    "differential_literal_gate.py --check"
     "own_space_witness_lint.py"
     "unsequenced_probe_lint.py"
     "datagram_half_lint.py"

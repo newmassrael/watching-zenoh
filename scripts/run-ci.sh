@@ -3525,6 +3525,15 @@ layer_c0_test_discipline() {
     # naming exactly the three that failed hosted, and nothing else.
     python3 scripts/lib/layer_e_oracle_scope_gate.py --selftest || return 1
     python3 scripts/lib/layer_e_oracle_scope_gate.py || return 1
+    # R2753 — a differential leg must not grade a side against an INTEGER
+    # LITERAL while the other side stands in the same fn. HERE for the same
+    # reason as the gate above: it is answered by reading the test crate, with
+    # no binary and no router. MEASURED both ways — against the tree as it stood
+    # before this round's repair it names exactly the two legs that were wrong
+    # and nothing else, and against the repaired tree it names none over 190
+    # differential fns.
+    python3 scripts/lib/differential_literal_gate.py --selftest || return 1
+    python3 scripts/lib/differential_literal_gate.py --check || return 1
     # R2260 (open-debt item 593's residue) — wz's per-protocol `is_streamed` /
     # `is_reliable`, which answer zenoh-c's `z_link_is_streamed` /
     # `z_link_reliability` and are therefore UPSTREAM'S values rather than wz's
