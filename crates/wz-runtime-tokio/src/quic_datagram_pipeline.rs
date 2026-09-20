@@ -377,8 +377,10 @@ pub fn wire_quic_datagram(
     // bare `quic/` spelling would name the reliable sibling transport (R311y470).
     //
     // The SRC is a deliberate SUPERSET of upstream. zenoh publishes
-    // `quic_endpoint.local_addr()` verbatim (`zenoh-link-quic_datagram/src/unicast.rs`
-    // :292, after the same UNSPECIFIED:0 client bind at :255-263), so a zenoh
+    // `quic_endpoint.local_addr()` verbatim
+    // (`io/zenoh-link-commons/src/quic/unicast.rs` @ `.local_addr()`, after the
+    // same UNSPECIFIED:0 client bind —
+    // `io/zenoh-link-commons/src/quic/socket.rs` @ `Ipv4Addr::UNSPECIFIED`), so a zenoh
     // client's own src reads `quic/0.0.0.0:<port>?rel=0` — a string nothing can dial
     // and not the address its peer sees. quinn already knows the concrete one for
     // THIS connection (`Connection::local_ip`, whose own doc names the wildcard-bind

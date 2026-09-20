@@ -9547,7 +9547,8 @@ mod quic_pass_tests {
     /// length-prefixed batch framing inside the STREAM frames. Two messages
     /// from the client and one back, on QUIC stream 0 — which is the stream
     /// zenoh's link actually uses, since it opens exactly one bidirectional
-    /// stream per link (`zenoh-link-quic/src/unicast.rs:330`) and a
+    /// stream per link (`io/zenoh-link-commons/src/quic/unicast.rs` @
+    /// `.open_bi()`) and a
     /// client-initiated bidi stream is id 0.
     ///
     /// Returned as (capture, key log text, messages the fixture sent).
@@ -10446,8 +10447,10 @@ mod quic_pass_tests {
     ///
     /// zenoh has TWO QUIC links and they are different transports, read out of
     /// the reference rather than inferred: `transport-link-quic` is streamed
-    /// (`zenoh-link-quic/src/unicast.rs:184`) and `transport-link-quic-datagram`
-    /// is not (`zenoh-link-quic_datagram/src/unicast.rs:164`). The first needs a
+    /// (`io/zenoh-links/zenoh-link-quic/src/unicast.rs` @ `fn is_streamed`) and
+    /// `transport-link-quic-datagram`
+    /// is not (`io/zenoh-links/zenoh-link-quic_datagram/src/unicast.rs` @
+    /// `fn is_streamed`). The first needs a
     /// framer with memory across offers; the second sends one whole batch per
     /// RFC 9221 frame, unordered and never retransmitted, which is why the
     /// opener does not reassemble those and why they take the datagram path

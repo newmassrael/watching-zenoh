@@ -536,7 +536,20 @@ ROOTLESS_STALE_LINE_BUDGET = 1
 #: the claim, and this is ONE measured instance of 288, not a survey of them.
 # 658 -> 657 (R2687), the same repair seen from the residue axis: the citation
 # that gained a root left the ungraded-candidate bucket with it.
-ROOTLESS_UNDECLARED_BUDGET = 657
+# 657 -> 656 (R2755). ⚠ THE ROUND THAT PAID THIS DID NOT WRITE THE CITATIONS IT
+# PAID FOR, and that is a property of this axis rather than an accident. The
+# candidate set is DERIVED from the directory components of the tree's rooted
+# citations, so writing ONE correctly-rooted citation in a directory nothing had
+# cited with its root before teaches this axis a new segment — and every
+# pre-existing root-less token under that segment becomes visible at once.
+# MEASURED: R2750's `b5716558` added `io/zenoh-links/zenoh-link-quic/src/
+# unicast.rs` @ `fn get_fd`, in the exact anchored form this gate asks for, and
+# the residue rose by 15 in files that commit never opened. Rooting the
+# `zenoh-link-quic` occurrences then made `zenoh-link-quic_datagram` a candidate
+# the same way, for 5 more. The gate's refusal says "This commit ADDED one ...
+# give it its root", which is true of neither the commit nor the text; open
+# debt 799 holds what that costs a reader.
+ROOTLESS_UNDECLARED_BUDGET = 656
 #: EVERY root-less occurrence, graded or not: `rootless_line + rootless_bare +
 #: residue`. One ratchet over the union of the three above, and it exists
 #: because those three CANNOT express the invariant that matters.
@@ -590,7 +603,13 @@ ROOTLESS_UNDECLARED_BUDGET = 657
 # a root-less citation of its own. The total is the axis that cannot be moved by
 # declaring a segment, so a fall here is always a citation genuinely rooted or
 # marked @ REMOVED; these were rooted.
-ROOTLESS_TOTAL_BUDGET = 785
+# 785 -> 784 (R2755): twenty citations gained their root, and two of those were
+# RE-POINTED rather than merely prefixed — `get_quic_addr` / `get_quic_host` and
+# the QUIC endpoint internals live under `io/zenoh-link-commons/src/quic/` at
+# this pin, not under `zenoh-link-quic/src/`, so the old paths named a file the
+# pin does not have. ⚠ A root-less citation hides that: nothing resolves it, so
+# a path that has MOVED reads exactly like one that has not.
+ROOTLESS_TOTAL_BUDGET = 784
 
 #: A LIVE invocation of the RESOLUTION arm. R2242 split this gate in two and,
 #: in doing so, made `--resolve` a flag someone can simply stop passing: delete

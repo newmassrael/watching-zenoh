@@ -29,7 +29,7 @@
 //!    `UNSPECIFIED:0` and quinn's `Connection::local_ip` answers `None` on the
 //!    initiating side, so the client's own `src` can only be its wildcard bind —
 //!    which is verbatim what zenoh publishes there
-//!    (`zenoh-link-quic_datagram/src/unicast.rs:255-292`). That leg asserts the half
+//!    (`io/zenoh-link-commons/src/quic/unicast.rs` @ `.local_addr()`). That leg asserts the half
 //!    that does mirror plus a PORT-level cross-check on the half that cannot, and a
 //!    second leg proves the `local_ip` preference is load-bearing where quinn DOES
 //!    know the answer.
@@ -282,7 +282,7 @@ async fn quic_datagram_link_pair(
 /// The full mirror is NOT asserted, and the module header says why: quinn's
 /// `Connection::local_ip` is `None` on the initiating side, so a client's own `src`
 /// can only be its `UNSPECIFIED:0` bind — verbatim what zenoh publishes there
-/// (`zenoh-link-quic_datagram/src/unicast.rs:255-292`). What IS asserted is the half
+/// (`io/zenoh-link-commons/src/quic/unicast.rs` @ `.local_addr()`). What IS asserted is the half
 /// that mirrors exactly, plus the PORT of the half that cannot: the acceptor learned
 /// that port from the QUIC handshake and the dialer from its own endpoint, so the two
 /// are still independently resolved.
@@ -335,7 +335,7 @@ async fn quic_datagram_link_ends_agree_on_the_link_and_carry_rel0() {
 ///
 /// This is the leg that discriminates the branch. zenoh has no counterpart — it
 /// publishes `quic_endpoint.local_addr()` unconditionally
-/// (`zenoh-link-quic_datagram/src/unicast.rs:292`), so a wildcard-listening zenoh
+/// (`io/zenoh-link-commons/src/quic/unicast.rs` @ `.local_addr()`), so a wildcard-listening zenoh
 /// router reports `quic/0.0.0.0:<port>?rel=0` as its own src. A wildcard listen is
 /// the ordinary router deploy, not a corner, which is why wz diverges upward here
 /// rather than reproducing it.

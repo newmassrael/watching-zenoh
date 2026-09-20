@@ -10,8 +10,8 @@
 //! bind-device hook, so `bind_quic` took no iface at all and said so in a comment
 //! (`session_open.rs`, pre-R311y454). `quic_server_endpoint` now pre-binds the
 //! socket, applies `SO_BINDTODEVICE`, and hands it to `quinn::Endpoint::new` —
-//! the same route zenoh takes (`zenoh-link-quic/src/unicast.rs:408-427`, via
-//! `Endpoint::new_with_abstract_socket`).
+//! the same route zenoh takes
+//! (`io/zenoh-link-commons/src/quic/unicast.rs` @ `new_with_abstract_socket`).
 //!
 //! ## Why this is an A/B on the SAME dial, not a feature-presence test
 //!

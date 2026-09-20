@@ -10,7 +10,8 @@
 //!   link's safe-default 1.2 + 1.3 (`quinn::crypto::rustls::QuicClientConfig::
 //!   try_from` rejects a non-1.3 config), and
 //! - **ALPN = `hq-29`** — the application-layer protocol id zenoh-link-quic
-//!   advertises (`alpn_protocols = [b"hq-29"]`, `zenoh-link-quic/src/unicast.rs`),
+//!   advertises (`io/zenoh-link-commons/src/quic/unicast.rs` @
+//!   `alpn_protocols`),
 //!   so a wz QUIC peer negotiates the same token a zenohd QUIC peer expects.
 //!
 //! Everything else is shared with the TLS link: the PEM → DER loaders
@@ -43,7 +44,7 @@ use crate::tls_config::resolve_optional_pem;
 use wz_session_core::locator::LinkTlsMaterial;
 
 /// The ALPN protocol id zenoh-link-quic advertises on every QUIC connection
-/// (`zenoh-link-quic/src/unicast.rs`: `alpn_protocols = [b"hq-29"]`). Both wz
+/// (`io/zenoh-link-commons/src/quic/unicast.rs` @ `alpn_protocols`). Both wz
 /// peers MUST advertise the same token for ALPN negotiation to succeed, and it
 /// must match zenohd's for a future cross-impl QUIC leg.
 pub const QUIC_ALPN: &[u8] = b"hq-29";

@@ -1189,11 +1189,13 @@ fn parse_mcast_join(config: &str) -> Vec<String> {
 /// merely annotating one: on the `quic` scheme, `rel=0` (BestEffort) picks
 /// zenoh's QUIC DATAGRAM link and anything else picks the QUIC stream link
 /// (`io/zenoh-link/src/lib.rs:165-171`, via `QuicLocatorInspector::is_reliable`,
-/// `zenoh-link-quic/src/lib.rs:59-70`).
+/// `io/zenoh-links/zenoh-link-quic/src/lib.rs` @ `fn is_reliable`).
 ///
 /// zenoh gives both links the SAME locator scheme — `QUIC_LOCATOR_PREFIX` and
 /// `QUIC_DATAGRAM_LOCATOR_PREFIX` are both `"quic"`
-/// (`zenoh-link-quic/src/lib.rs:42`, `zenoh-link-quic_datagram/src/lib.rs:35`)
+/// (`io/zenoh-links/zenoh-link-quic/src/lib.rs` @ `pub const QUIC_LOCATOR_PREFIX`,
+/// `io/zenoh-links/zenoh-link-quic_datagram/src/lib.rs` @
+/// `pub const QUIC_DATAGRAM_LOCATOR_PREFIX`)
 /// — so `rel` is the ONLY thing separating them on the wire-visible string. wz
 /// additionally exposes the distinct `quic-datagram` scheme (see
 /// [`Proto::QuicDatagram`]); that wz-only spelling states the choice outright
@@ -3336,7 +3338,8 @@ mod tests {
     #[test]
     fn quic_with_rel_zero_selects_the_datagram_link() {
         // zenoh gives the QUIC stream and QUIC datagram links the SAME `"quic"`
-        // scheme (zenoh-link-quic/src/lib.rs:42, quic_datagram/src/lib.rs:35)
+        // scheme (`io/zenoh-links/zenoh-link-quic/src/lib.rs` @
+        // `pub const QUIC_LOCATOR_PREFIX`, quic_datagram/src/lib.rs:35)
         // and separates them by `rel` alone (zenoh-link/src/lib.rs:165-171).
         // Ignoring the key would dial a STREAM where zenoh dials a DATAGRAM.
         let p = parse_locator("quic/1.2.3.4:7447?rel=0").expect("quic locator");

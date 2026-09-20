@@ -639,8 +639,9 @@ pub struct DatagramDissection {
     /// # Why one session per stream id
     ///
     /// zenoh's QUIC link is STREAMED (`is_streamed()` is `true`,
-    /// `zenoh-link-quic/src/unicast.rs:184`) and opens ONE bidirectional stream
-    /// per link (`open_bi()`, `:330`; the acceptor's `accept_bi()`, `:524`), so
+    /// `io/zenoh-links/zenoh-link-quic/src/unicast.rs` @ `fn is_streamed`) and
+    /// opens ONE bidirectional stream per link
+    /// (`io/zenoh-link-commons/src/quic/unicast.rs` @ `.open_bi()`), so
     /// the bytes inside it are the ordinary length-prefixed batch stream this
     /// crate already frames. Both halves of a bidi stream share one id, which is
     /// why the id keys a whole [`PassiveSession`] rather than one direction of
@@ -2510,7 +2511,8 @@ impl DissectionLimits {
             // smaller than a single flow's frame list.
             max_scout_askers: Some(1_024),
             // zenoh opens ONE bidirectional stream per QUIC link
-            // (`zenoh-link-quic/src/unicast.rs:330`), so 16 is an order above
+            // (`io/zenoh-link-commons/src/quic/unicast.rs` @ `.open_bi()`),
+            // so 16 is an order above
             // what the traffic this tool watches produces, and each entry costs
             // a `PassiveSession` plus its frame list — the same order as a flow.
             // Set well above the expected one rather than at it, because the
@@ -4525,7 +4527,7 @@ impl Dissection {
     /// this crate may not carry, so the caller owns the loop and hands the
     /// RESULT back. What the caller cannot own is the framing: the bytes inside
     /// zenoh's QUIC link are the ordinary length-prefixed batch stream
-    /// (`is_streamed()` is `true`, `zenoh-link-quic/src/unicast.rs:184`), and a
+    /// (`io/zenoh-links/zenoh-link-quic/src/unicast.rs` @ `fn is_streamed`), and a
     /// second framer for them would be a second implementation of the one thing
     /// this crate exists to do.
     ///
@@ -4779,8 +4781,9 @@ impl Dissection {
         // HANDSHAKE PRESENT, read out of the reference implementation rather
         // than inferred from the word "datagram": zenoh's
         // `transport-link-quic-datagram` is a UNICAST link
-        // (`zenoh-link-quic_datagram/src/unicast.rs`, and `is_streamed()` is
-        // `false` at :164, which is why these bytes arrive here and not through
+        // (`io/zenoh-links/zenoh-link-quic_datagram/src/unicast.rs` @
+        // `fn is_streamed`, which answers
+        // `false`, which is why these bytes arrive here and not through
         // `feed_quic_stream`). A unicast zenoh link establishes its session
         // with INIT and OPEN, so those messages are meaningful on this path.
         // `Absent` is the multicast-capability answer -- UDP multicast and

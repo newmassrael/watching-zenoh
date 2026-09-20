@@ -7,7 +7,8 @@
 //! batch over ONE bidirectional QUIC stream per connection (unidirectional
 //! streams rejected, `max_concurrent_bidi_streams = 1`), with the SAME
 //! StreamEnvelope length-prefix framing as TCP/TLS (`is_streamed() = true`, MTU
-//! `BatchSize::MAX`, `zenoh-link-quic/src/unicast.rs`). So the read/write
+//! `BatchSize::MAX`, `io/zenoh-links/zenoh-link-quic/src/unicast.rs` @
+//! `fn is_streamed`). So the read/write
 //! drivers in [`crate::stream_link`] are reused UNCHANGED: a
 //! [`quinn::RecvStream`] is `AsyncRead`, a [`quinn::SendStream`] is
 //! `AsyncWrite`, and they are ALREADY a split pair (`open_bi`/`accept_bi`
@@ -321,7 +322,8 @@ pub(crate) async fn connect_quic_client(
 /// mirror of the dial-side [`connect_quic_client`] arm, and of zenoh's own
 /// listener, which binds a UDP socket, calls `set_bind_to_device_udp_socket`, and
 /// passes it to `Endpoint::new_with_abstract_socket`
-/// (`zenoh-link-quic/src/unicast.rs:408-427`); `Endpoint::new` IS that call plus
+/// (`io/zenoh-link-commons/src/quic/unicast.rs` @
+/// `new_with_abstract_socket`); `Endpoint::new` IS that call plus
 /// `wrap_udp_socket`.
 ///
 /// R2590 — the socket is pre-built for EVERY listener now, not only a

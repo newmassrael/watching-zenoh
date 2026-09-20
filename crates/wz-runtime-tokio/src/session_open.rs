@@ -2197,7 +2197,8 @@ pub async fn dial_locator(locator: AnyLocator, cfg: &DialConfig) -> io::Result<D
         // EVERY link family, not just tcp — `get_tls_addr`
         // (`io/zenoh-links/zenoh-link-tls/src/utils.rs:590`), `get_ws_addr`
         // (`zenoh-link-ws/src/lib.rs:79`) and `get_quic_addr`
-        // (`zenoh-link-quic/src/utils.rs:502`) are the same `lookup_host` call
+        // (`io/zenoh-link-commons/src/quic/utils.rs` @ `pub async fn get_quic_addr`)
+        // are the same `lookup_host` call
         // three times — so refusing one was a parity gap, not a narrowing. The
         // backend primitives take a `SocketAddr`, so each arm resolves through
         // the [`resolve_locator_addrs`] SSOT and walks the candidates with
@@ -2341,7 +2342,8 @@ pub async fn dial_locator(locator: AnyLocator, cfg: &DialConfig) -> io::Result<D
             // A `quic/NAME:port` dial. The SNI follows the same rule as `tls`
             // above — the locator's name wins over `cfg.quic.server_name` —
             // which is also zenoh's (`get_quic_host` feeds the SNI,
-            // `zenoh-link-quic/src/utils.rs:509`). quinn takes the SNI as a
+            // `io/zenoh-link-commons/src/quic/utils.rs` @
+            // `pub fn get_quic_host`). quinn takes the SNI as a
             // `&str`, so there is no `ServerName` parse to fail here.
             #[cfg(feature = "transport-link-quic")]
             Proto::Quic => {
