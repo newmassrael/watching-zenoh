@@ -43,10 +43,22 @@
 //!
 //! This is the ADAPTER the inventory atom names (`F=io_uring fixed-buf
 //! adapter`), not a reactor swap. `TcpDriver`'s framing state machine still
-//! reads through `tokio::io`; nothing selects this path for a production link
-//! yet, and doing so needs the length-prefix sniff to become fixed-buffer aware.
-//! The atom's status records that residual rather than leaving it to be
-//! discovered.
+//! reads through `tokio::io` and nothing selects this path for a production
+//! link yet. The atom's status records that residual rather than leaving it to
+//! be discovered.
+//!
+//! ⚠ R2747 — THIS PARAGRAPH USED TO PRESCRIBE THE REPAIR, AND THE
+//! PRESCRIPTION WAS WRONG. It said selecting the path "needs the length-prefix
+//! sniff to become fixed-buffer aware", which describes a shape the pin does
+//! not have: upstream dispatches at task start
+//! (`io/zenoh-transport/src/unicast/universal/link.rs` @ `async fn rx_task_uring(`)
+//! to a SECOND read body and leaves its framing loop untouched. A loop that
+//! sizes its own reads cannot be handed a registered buffer at all, because
+//! `READ_FIXED` needs a destination before the prefix that would size it has
+//! been read. [`crate::uring::FixedSlotRing::read_framed`] is that second
+//! body's read and `crate::link_rx_window` is where the frames inside one
+//! completion are found; what is still missing is the TASK that drives the
+//! read beside the tokio reactor, and the read still blocks on its completion.
 //!
 //! ## R2746 — the registration moved to the LINK-RX table, and that was a
 //! ## GRANULARITY error rather than a preference
@@ -81,6 +93,7 @@ use io_uring::{opcode, types, IoUring};
 
 use crate::frame_arena::FrameArena;
 use crate::link_rx_arena::{LinkRxArena, LinkRxFrame};
+use crate::link_rx_window::RxWindow;
 use crate::session_rx_pool_ap::{SLOT_COUNT, SLOT_SIZE};
 
 /// An `io_uring` instance whose registered fixed buffers ARE a pool's slots.
@@ -316,6 +329,63 @@ impl FixedSlotRing {
         // room; without this the reader downstream would see whatever the slot
         // held before, inside a frame claiming to be `want` wide.
         frame.truncate(n);
+        Ok(n)
+    }
+
+    /// ONE batch-sized `IORING_OP_READ_FIXED` into one registered slot, FRAMED
+    /// IN PLACE. Returns what the kernel wrote; `0` is EOF.
+    ///
+    /// R2747 — the read of the SECOND body, and it is a second body rather
+    /// than a change to the first because that is the shape the pin has.
+    /// `crate::poll_framed` cannot be handed a registered buffer without
+    /// ceasing to be what it is: it SIZES its reads, asking the stream for
+    /// exactly the prefix and then for exactly the payload, and `READ_FIXED`
+    /// cannot be asked for a payload whose length has not been read yet.
+    /// Upstream does not resolve that ordering — it steps around it,
+    /// dispatching at task start
+    /// (`io/zenoh-transport/src/unicast/universal/link.rs` @ `async fn rx_task_uring(`)
+    /// to a body that reads a BATCH into a registered buffer and finds the
+    /// frame boundaries afterwards. [`crate::link_rx_window::RxWindow`] is
+    /// where those boundaries are found; this is the read that feeds it.
+    ///
+    /// A FRESH SLOT PER READ, deliberately. [`LinkRxFrame::truncate`] is
+    /// shrink-only — a frame narrowed to a short completion can never be
+    /// widened back to the room it started with — so re-reading into the same
+    /// frame would ratchet it down to nothing. Taking a slot per read also
+    /// puts the release where the window's contract wants it: whatever the
+    /// callback was lent has been consumed or copied by the time this returns,
+    /// and the slot goes home on the way out.
+    ///
+    /// A DRY table is refused rather than read into, by
+    /// [`Self::read_fixed_into`]'s own spill arm: a spilled frame's bytes are
+    /// an allocation the kernel was never handed. The caller's fallback is the
+    /// ordinary read path, which is what that refusal names.
+    ///
+    /// ⚠ STILL BLOCKING on the completion, which is the atom's SECOND residual
+    /// and downstream of the first by that atom's own argument. What this adds
+    /// is that a fixed-buffer read now produces FRAMES rather than a filled
+    /// buffer nobody could cut up; what it does not add is a task driving it
+    /// beside the tokio reactor, so nothing yet selects this for a production
+    /// link.
+    pub fn read_framed<F>(
+        &mut self,
+        fd: RawFd,
+        arena: &mut LinkRxArena,
+        window: &mut RxWindow,
+        width: usize,
+        on_frame: &mut F,
+    ) -> io::Result<usize>
+    where
+        F: FnMut(&[u8]),
+    {
+        let mut frame = arena.take(SLOT_SIZE);
+        let n = self.read_fixed_into(fd, arena, &mut frame, SLOT_SIZE)?;
+        if n == 0 {
+            return Ok(0);
+        }
+        window
+            .push(frame.as_ref(), width, on_frame)
+            .map_err(io::Error::other)?;
         Ok(n)
     }
 }
@@ -600,6 +670,196 @@ mod tests {
             !mapped.to_string().contains("RLIMIT_MEMLOCK"),
             "an EINVAL must not be dressed up as a memlock shortfall: {mapped}"
         );
+    }
+
+    /// The extent of every slot in the table, AS THE TABLE HANDS IT OUT.
+    ///
+    /// R2747 — the oracle a framed payload needs, and it is NOT
+    /// [`LinkRxArena::slot_of`]. That one answers "is this address a slot
+    /// BASE": the emit's `slot_index_of_ptr` returns `None` unless the offset
+    /// from the table's storage divides by the stride, which is right for its
+    /// callers — `register` and `read_fixed_into` both hold a frame's first
+    /// byte — and wrong for a frame FRAMED OUT of a slot, whose payload starts
+    /// past a length prefix. The first draft of the tests below asked `slot_of`
+    /// about an interior pointer and read its `None` as "this was copied"; it
+    /// means "this is not a base".
+    ///
+    /// The extents are collected through `take`, the same seam
+    /// [`FixedSlotRing::register`] uses to reach slot addresses, rather than
+    /// computed here from a base and a stride. A test that did that arithmetic
+    /// would agree with a copy that happened to land where the test predicted.
+    fn slot_extents(arena: &mut LinkRxArena) -> Vec<std::ops::Range<*const u8>> {
+        let held: Vec<LinkRxFrame> = (0..SLOT_COUNT).map(|_| arena.take(SLOT_SIZE)).collect();
+        let extents = held.iter().map(|f| f.as_ref().as_ptr_range()).collect();
+        drop(held);
+        extents
+    }
+
+    /// Two frames delivered by ONE completion come out as two, and each one is
+    /// read straight out of the registered slot.
+    ///
+    /// This is the row-3 claim carried through FRAMING rather than stopping at
+    /// the buffer. `the_kernel_writes_into_the_frames_own_link_rx_slot` proves
+    /// the kernel wrote into the slot; what it cannot say is that anything can
+    /// find the frames inside it — a completion is not a frame, and until
+    /// [`crate::link_rx_window::RxWindow`] there was nothing here that could
+    /// cut one up. The witness is again the ADDRESS: the payload the callback
+    /// is handed lies INSIDE one of the extents [`slot_extents`] collected
+    /// from the table. A body that copied the completion out before framing it
+    /// would deliver the same bytes and fail this.
+    ///
+    /// TWO frames and not one, because one proves nothing about boundaries: a
+    /// reader that handed the whole completion up as a single frame would pass
+    /// a one-frame test.
+    #[test]
+    fn one_completion_carrying_two_frames_is_framed_inside_the_slot() {
+        let mut arena = LinkRxArena::new();
+        let extents = slot_extents(&mut arena);
+        let mut ring = FixedSlotRing::register(&mut arena, 8).expect("io_uring registration");
+
+        let mut wire = Vec::new();
+        wire.extend_from_slice(&3u16.to_le_bytes());
+        wire.extend_from_slice(b"one");
+        wire.extend_from_slice(&5u16.to_le_bytes());
+        wire.extend_from_slice(b"three");
+
+        let (rd, mut wr) = std::io::pipe().expect("pipe");
+        wr.write_all(&wire).expect("write");
+        drop(wr);
+
+        let mut window = RxWindow::new();
+        let mut seen: Vec<(Vec<u8>, bool)> = Vec::new();
+        let n = ring
+            .read_framed(
+                rd.as_raw_fd(),
+                &mut arena,
+                &mut window,
+                2,
+                &mut |frame: &[u8]| {
+                    let ptr = frame.as_ptr();
+                    seen.push((frame.to_vec(), extents.iter().any(|r| r.contains(&ptr))))
+                },
+            )
+            .expect("READ_FIXED + framing");
+
+        assert_eq!(n, wire.len(), "one completion carried the whole wire");
+        assert_eq!(
+            seen,
+            vec![(b"one".to_vec(), true), (b"three".to_vec(), true)],
+            "both frames come out, and both are read out of the registered slot"
+        );
+        assert!(window.between_frames(), "the wire ended on a boundary");
+        assert_eq!(
+            arena.free_slots(),
+            SLOT_COUNT,
+            "the slot goes home when the read returns"
+        );
+        drop(rd);
+    }
+
+    /// A frame SPLIT across two completions comes out once, on the second.
+    ///
+    /// The case a read-sizing loop never meets and this body always can: the
+    /// kernel decides how much it wrote, so a frame can end in the next slot.
+    /// The first read must yield nothing and say the stream is mid-frame; the
+    /// second must yield the whole frame, assembled — which is also why its
+    /// payload is NOT in a slot, and that asymmetry is asserted rather than
+    /// left to be inferred from the test above.
+    #[test]
+    fn a_frame_split_across_two_completions_is_assembled_on_the_second() {
+        let mut arena = LinkRxArena::new();
+        let extents = slot_extents(&mut arena);
+        let mut ring = FixedSlotRing::register(&mut arena, 8).expect("io_uring registration");
+
+        let (rd, mut wr) = std::io::pipe().expect("pipe");
+
+        // Prefix plus two of five payload bytes.
+        let mut head = Vec::new();
+        head.extend_from_slice(&5u16.to_le_bytes());
+        head.extend_from_slice(b"ab");
+        wr.write_all(&head).expect("write head");
+
+        let mut window = RxWindow::new();
+        let mut seen: Vec<(Vec<u8>, bool)> = Vec::new();
+        let first = ring
+            .read_framed(
+                rd.as_raw_fd(),
+                &mut arena,
+                &mut window,
+                2,
+                &mut |frame: &[u8]| {
+                    let ptr = frame.as_ptr();
+                    seen.push((frame.to_vec(), extents.iter().any(|r| r.contains(&ptr))))
+                },
+            )
+            .expect("READ_FIXED + framing");
+        assert_eq!(first, head.len());
+        assert!(seen.is_empty(), "half a frame is not a frame");
+        assert!(
+            !window.between_frames(),
+            "the window is mid-frame, which is how a reader tells a truncated \
+             stream from a clean end"
+        );
+
+        wr.write_all(b"cde").expect("write tail");
+        drop(wr);
+        let second = ring
+            .read_framed(
+                rd.as_raw_fd(),
+                &mut arena,
+                &mut window,
+                2,
+                &mut |frame: &[u8]| {
+                    let ptr = frame.as_ptr();
+                    seen.push((frame.to_vec(), extents.iter().any(|r| r.contains(&ptr))))
+                },
+            )
+            .expect("READ_FIXED + framing");
+        assert_eq!(second, 3);
+        assert_eq!(
+            seen,
+            vec![(b"abcde".to_vec(), false)],
+            "the frame is assembled from the window's carry, so it is in no \
+             slot -- the price of a frame that spans completions"
+        );
+        assert!(window.between_frames());
+        assert_eq!(arena.free_slots(), SLOT_COUNT);
+        drop(rd);
+    }
+
+    /// EOF reports `0` and is not framed as anything.
+    ///
+    /// The one completion a framing body must not mistake for data: a
+    /// zero-byte read is the peer closing, and `crate::poll_framed` answers it
+    /// with `Lost`. This body cannot — it has no `LinkEvent` to return — so it
+    /// reports the count and leaves the verdict to the caller, who asks
+    /// [`crate::link_rx_window::RxWindow::between_frames`] whether the end was
+    /// clean.
+    #[test]
+    fn an_empty_completion_is_reported_as_eof_and_frames_nothing() {
+        let mut arena = LinkRxArena::new();
+        let mut ring = FixedSlotRing::register(&mut arena, 8).expect("io_uring registration");
+
+        let (rd, wr) = std::io::pipe().expect("pipe");
+        drop(wr);
+
+        let mut window = RxWindow::new();
+        let n = ring
+            .read_framed(
+                rd.as_raw_fd(),
+                &mut arena,
+                &mut window,
+                2,
+                &mut |_: &[u8]| unreachable!("EOF carries no frame"),
+            )
+            .expect("READ_FIXED at EOF");
+        assert_eq!(n, 0, "EOF is a zero-byte completion");
+        assert!(
+            window.between_frames(),
+            "and this one ended cleanly, with nothing carried"
+        );
+        assert_eq!(arena.free_slots(), SLOT_COUNT);
+        drop(rd);
     }
 
     /// The requirement is DERIVED from the pool the SCXML declares, so a round
