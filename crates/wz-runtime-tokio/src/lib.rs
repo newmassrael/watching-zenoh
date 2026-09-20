@@ -1205,6 +1205,19 @@ pub mod stream_link;
 #[cfg(feature = "transport-link-tcp")]
 pub mod frame_arena;
 
+// R2747 — frame boundaries over bytes a reader did NOT size, which is the one
+// thing `poll_framed` cannot express and the one thing a registered-slot read
+// needs. Gated like the framing loop it is the counterpart to.
+//
+// ⚠ NO `///` HERE, DELIBERATELY. rustdoc MERGES a module's declaration doc
+// with its `//!` block and resolves the result in the OUTER scope, where the
+// module's own items are not in scope — `frame_arena` and `link_rx_arena` each
+// carry that finding, and each pays for it by spelling every link in full. A
+// declaration with no doc leaves the `//!` resolving in its own scope, so the
+// module documents itself in one place with short links.
+#[cfg(feature = "transport-link-tcp")]
+pub mod link_rx_window;
+
 #[cfg(feature = "transport-link-tcp")]
 pub mod link_pipeline;
 
@@ -2192,12 +2205,13 @@ where
                     *offset += n;
                     if *offset == *width {
                         let w = *width;
-                        let payload_len = if w == 4 {
-                            u32::from_le_bytes([prefix[0], prefix[1], prefix[2], prefix[3]])
-                                as usize
-                        } else {
-                            u16::from_le_bytes([prefix[0], prefix[1]]) as usize
-                        };
+                        // R2747 — the decode is [`link_rx_window::decode_prefix`],
+                        // shared with the fixed-buffer read body rather than
+                        // written twice. Two readers that decoded this number in
+                        // two places would be two places for a width or an
+                        // endianness to drift, and a link would then mean
+                        // different things depending on which body read it.
+                        let payload_len = link_rx_window::decode_prefix(prefix, w);
                         // transport-lowlatency — the 4-byte prefix is an untrusted
                         // u32; bound it before allocating, exactly as zenoh's
                         // read_with_link rejects an over-max batch ("Batch len is
