@@ -16,9 +16,23 @@ typed by hand in the round that added them and confirmed by a test written in
 the same round from the same reading -- which is not an adjudicator, it is the
 same author twice.
 
-One label already had one: `crate::qos::Priority::name()` is held against
-`vendor/zenoh-pico`'s eight-band constants by `qos.rs`'s own test. So the shape
-was proven and applied to exactly one of the labels.
+One label was believed to already have one: `crate::qos::Priority::name()`,
+"held against `vendor/zenoh-pico`'s eight-band constants by `qos.rs`'s own
+test". THAT SENTENCE WAS FALSE, and it is the reason this file exempted the
+very label it cited as its proven precedent.
+
+`qos.rs`'s test is `priority_and_congestion_wire_values_match_zenoh_pico_
+constants`, and it pins `wire_byte()` -- the numbers 0..7. It does not mention
+`name()`, and no other test in the tree does either: the only `.name()` in
+`qos.rs` or `dissect.rs` is the CALL at the `label(` site. So the eight strings
+a reader of a capture is shown were, until this paragraph was rewritten, the
+one label vocabulary with no adjudicator at all -- while the table below
+exempted them by naming one.
+
+The byte axis and the vocabulary axis are different questions about the same
+enum, and citing an adjudicator for one as cover for the other is what this
+whole census exists to stop. The repair is below: the eight strings are now
+held to pico's `Z_PRIORITY_*` in BOTH directions, by this file, on every clone.
 
 ## Why zenoh-pico and not the Rust upstream
 
@@ -58,6 +72,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
 DISSECT = ROOT / "crates" / "wz-session-core" / "src" / "dissect.rs"
+QOS = ROOT / "crates" / "wz-session-core" / "src" / "qos.rs"
 PICO_CONSTANTS = ROOT / "vendor" / "zenoh-pico" / "include" / "zenoh-pico" / "api" / "constants.h"
 
 # ── What decides each label site's value ─────────────────────────────────────
@@ -67,16 +82,11 @@ PICO_CONSTANTS = ROOT / "vendor" / "zenoh-pico" / "include" / "zenoh-pico" / "ap
 # is not a key here is a FAIL: the point of the table is that adding a label
 # forces a decision about where its value comes from.
 DECIDED_BY_FUNCTION = {
-    # The ONE label that already had an adjudicator, and the pattern the rest
-    # of this file generalises: `qos.rs`'s test holds the eight names against
-    # pico's `Z_PRIORITY_*` constants.
-    # BOTH spellings of the same call, listed rather than normalised: the table
-    # is keyed on what a reader sees at the site, and collapsing the two would
-    # hide that this workspace writes it two ways.
-    "priority.name()": "crate::qos::Priority::name(), pinned to pico's Z_PRIORITY_* by qos.rs",
-    "crate::qos::Priority::from_wire(priority as u8).name()": (
-        "the same Priority::name(), spelled in full where no local binding exists"
-    ),
+    # NOTE: the two `Priority::name()` spellings used to sit HERE, exempted by
+    # a prose reason naming `qos.rs`'s test. That reason was false -- see the
+    # header -- so they moved to `DECIDED_BY_METHOD`, which adjudicates them
+    # rather than describing an adjudicator.
+    #
     # The ext-name vocabulary, decided one level up by the field-name census.
     "name": "crate::ext_name::ext_name(), decided by dissect_name_census.py",
     # R2272 (paying R2270's hosted red) — the two `sn_res` resolutions.
@@ -138,6 +148,39 @@ DECIDED_BY_PICO = {
     },
 }
 
+# Label values a walker does NOT spell: the site calls a method and the
+# vocabulary is that method's match arms, in ANOTHER file.
+#
+# `DECIDED_BY_PICO` cannot see these -- it reads literals inside the walker,
+# and `read_transport_qos_z64` contains none: it writes
+# `label("priority", span, priority.name())`. That structural blind spot is
+# exactly how the eight priority strings stayed unadjudicated while this file
+# claimed they were the one label that was not.
+#
+# Checked in BOTH directions, which is stronger than `DECIDED_BY_PICO`'s
+# one-way check, and the difference is justified rather than incidental: a
+# walker may legitimately emit only some of an enum's values, but a total
+# `enum -> &'static str` function has one arm per variant BY CONSTRUCTION. So
+# a missing arm is a band no reader can be told about and an extra arm is a
+# word this workspace invented -- both are findings, and only set equality
+# sees both.
+DECIDED_BY_METHOD = {
+    "priority": {
+        "source": QOS,
+        "type": "Priority",
+        "method": "name",
+        "prefix": "Z_PRIORITY_",
+        # BOTH spellings of the same call, listed rather than normalised: the
+        # table is keyed on what a reader sees at the site, and collapsing the
+        # two would hide that this workspace writes it two ways.
+        "sites": (
+            "priority.name()",
+            "crate::qos::Priority::from_wire(priority as u8).name()",
+        ),
+        "extra": {},
+    },
+}
+
 
 def label_sites(src: str) -> list[str]:
     """The value expression of every `label(` call, as written.
@@ -195,16 +238,62 @@ def function_literals(src: str, name: str) -> set[str] | None:
     return set(re.findall(r'"([A-Z][A-Za-z0-9]*)"', body))
 
 
+def impl_method_literals(src: str, type_name: str, method: str) -> set[str] | None:
+    """Every CamelCase string literal inside `impl <type_name> { fn <method> }`.
+
+    `None` when the impl block or the method is absent, which is a FAIL rather
+    than an empty set, for the reason `function_literals` gives: a table entry
+    naming code this tree no longer has is the stale shape invariant 3 exists
+    for, and an empty set would report green over it.
+
+    Why this is not `function_literals`: that one anchors on `\\nfn ` and ends
+    at the first lone `}` in column 0, which is right for a free function in
+    `dissect.rs` and WRONG for a method. `Priority::name` is written
+    `    pub const fn name(self)`, so the anchor misses it, and the first
+    column-0 `}` after it closes the whole `impl` -- which would silently widen
+    the set to every sibling method's literals. Brace matching is what makes
+    the scope the METHOD rather than whatever happens to share its block.
+    """
+    block = re.search(r"\bimpl\s+" + re.escape(type_name) + r"\s*\{", src)
+    if block is None:
+        return None
+    start = re.search(
+        r"\bfn\s+" + re.escape(method) + r"\s*\(", src[block.end() :]
+    )
+    if start is None:
+        return None
+    i = src.index("{", block.end() + start.end())
+    depth = 0
+    for j in range(i, len(src)):
+        if src[j] == "{":
+            depth += 1
+        elif src[j] == "}":
+            depth -= 1
+            if depth == 0:
+                return set(re.findall(r'"([A-Z][A-Za-z0-9]*)"', src[i : j + 1]))
+    return None
+
+
 def pico_members(header: str, prefix: str) -> set[str]:
     """The CamelCase spelling of every NUMBERED member of one pico enum.
 
     Numbered only, on purpose: pico's `*_DEFAULT` members are assigned another
     member rather than a literal, so they are aliases and not values. Counting
     one would demand a `Default` label no wire byte produces.
+
+    The optional leading `_` is pico's own mark for a member it does not
+    export, and admitting it is a measurement rather than a loosening: the
+    whole header carries exactly ONE such numbered member,
+    `_Z_PRIORITY_CONTROL = 0`, and neither `Z_CONGESTION_CONTROL_*` nor
+    `Z_QUERY_TARGET_*` has one. So this admits the member that needs it and
+    moves no existing set by a single name. Refusing it would have forced
+    `Control` into an `extra` entry -- declaring that pico does not spell a
+    word pico spells, which is the stale exemption invariant 3 exists to
+    reject.
     """
     out: set[str] = set()
     for m in re.finditer(
-        r"^\s*" + re.escape(prefix) + r"([A-Z0-9_]+)\s*=\s*\d+\s*,?\s*$",
+        r"^\s*_?" + re.escape(prefix) + r"([A-Z0-9_]+)\s*=\s*\d+\s*,?\s*$",
         header,
         re.M,
     ):
@@ -219,6 +308,8 @@ def main() -> int:
 
     # Invariant 1 — every label site's value expression is decided.
     decided = set(DECIDED_BY_FUNCTION)
+    for spec in DECIDED_BY_METHOD.values():
+        decided |= set(spec["sites"])
     literal_walkers = {v["walker"] for v in DECIDED_BY_PICO.values()}
     sites = label_sites(src)
     if not sites:
@@ -267,6 +358,46 @@ def main() -> int:
             )
         checked += len(lits)
 
+    # Invariants 2 and 3 again, for the vocabularies that live in a METHOD's
+    # arms rather than in the walker -- and in both directions, per the table's
+    # own note.
+    for field, spec in sorted(DECIDED_BY_METHOD.items()):
+        arms = impl_method_literals(
+            spec["source"].read_text(encoding="utf-8"), spec["type"], spec["method"]
+        )
+        if arms is None:
+            failures.append(
+                f"DECIDED_BY_METHOD names `{spec['type']}::{spec['method']}` for "
+                f"`{field}`, and {spec['source'].name} has no such method -- the "
+                "table is stale"
+            )
+            continue
+        allowed = pico_members(header, spec["prefix"])
+        if not allowed:
+            failures.append(
+                f"pico's `{spec['prefix']}*` enum yielded NO numbered member, so "
+                f"the check on `{field}` would be green over an empty set"
+            )
+            continue
+        for value in sorted(arms - allowed - set(spec["extra"])):
+            failures.append(
+                f"`{spec['type']}::{spec['method']}` can emit {value!r}, which "
+                f"pico's {spec['prefix']}* does not spell and which is not "
+                "declared in `extra` with a reason"
+            )
+        for value in sorted(allowed - arms - set(spec["extra"])):
+            failures.append(
+                f"pico spells {value!r} in {spec['prefix']}* and "
+                f"`{spec['type']}::{spec['method']}` names no such band -- a "
+                "reader of that wire byte would be told a word this tree chose"
+            )
+        for value in sorted(set(spec["extra"]) & allowed):
+            failures.append(
+                f"`{field}`'s {value!r} is declared as having no pico counterpart, "
+                "but pico now spells it -- delete the `extra` entry"
+            )
+        checked += len(arms)
+
     if failures:
         print("dissect-label-census FAIL:", file=sys.stderr)
         for f in failures:
@@ -274,10 +405,12 @@ def main() -> int:
         return 1
     print(
         f"dissect-label-census: {len(set(sites))} label site(s), "
-        f"{len(DECIDED_BY_PICO)} value set(s) adjudicated against vendored "
-        f"zenoh-pico, {checked} literal(s) checked, "
-        f"{sum(len(v['extra']) for v in DECIDED_BY_PICO.values())} declared "
-        "without a pico counterpart"
+        f"{len(DECIDED_BY_PICO) + len(DECIDED_BY_METHOD)} value set(s) "
+        f"adjudicated against vendored zenoh-pico "
+        f"({len(DECIDED_BY_METHOD)} of them bidirectionally), "
+        f"{checked} literal(s) checked, "
+        f"{sum(len(v['extra']) for v in DECIDED_BY_PICO.values()) + sum(len(v['extra']) for v in DECIDED_BY_METHOD.values())} "
+        "declared without a pico counterpart"
     )
     return 0
 
