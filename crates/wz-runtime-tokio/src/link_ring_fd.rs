@@ -30,27 +30,38 @@
 //! and the REASON for each `None` belongs where a reader will meet it, which is
 //! the doc comment on the impl.
 //!
-//! ## What answers what, and where it diverges from upstream
+//! ## What answers what, against upstream's own link
 //!
 //! | reader half | here | upstream's link |
 //! |---|---|---|
 //! | `tokio::net::tcp::OwnedReadHalf` | `Some` | tcp `Ok` |
 //! | `tokio::net::unix::OwnedReadHalf` | `Some` | unixsock_stream `Ok` |
 //! | [`crate::unixpipe_pipeline::FifoReadEnd`] | `Some` | unixpipe `Ok` |
+//! | [`crate::vsock_pipeline::VsockReadHalf`] | `Some` | vsock `Ok` |
 //! | `quinn::RecvStream` | `None` | quic `bail!` |
-//! | `tokio::io::ReadHalf<T>` (tls, vsock) | `None` | tls `bail!`, vsock `Ok` |
+//! | `ReadHalf<TlsStream<TcpStream>>` | `None` | tls `bail!` |
 //!
-//! ⚠ ONE ROW DIVERGES AND IT IS DECLARED HERE RATHER THAN FOUND LATER: vsock.
-//! Upstream answers `Ok` for it because its link owns the socket and reads
-//! through a `UnsafeCell`, so a split never hides the descriptor. wz splits
-//! vsock with `tokio::io::split`, whose [`tokio::io::ReadHalf`] holds the
-//! stream behind a shared mutex and exposes no accessor at all — the fd is not
-//! withheld by policy here, it is unreachable by construction. That is a
-//! property of the SPLIT, not of vsock, which is why the impl is written over
-//! `ReadHalf<T>` for every `T` rather than over the two instantiations that
-//! exist today: a future stream link that splits the same way inherits the same
-//! true answer instead of a stale one. Making vsock answer `Some` is a change
-//! to how vsock is split, and belongs to whatever round wants vsock on the ring.
+//! Every row agrees with upstream. ⚠ R2751 CORRECTED THE VSOCK ROW, and the
+//! correction is kept visible because the reasoning that produced the wrong one
+//! is the reusable part: this table used to read
+//! `tokio::io::ReadHalf<T> (tls, vsock) | None`, justified as "the fd is
+//! unreachable by construction, a property of the SPLIT and not of vsock". The
+//! premise was true and the conclusion was still wrong — a vsock socket HAS a
+//! descriptor, and answering for it from a rule written over `ReadHalf<T>` is
+//! what hid that. See the note above the tls impl.
+//!
+//! ⚠⚠ UDP IS ABSENT FROM THIS TABLE AND THAT IS NOT AN OVERSIGHT. Upstream's
+//! udp unicast link answers `Ok` (`io/zenoh-links/zenoh-link-udp/src/unicast.rs`
+//! @ `fn get_fd`), so upstream can ring-read one and wz cannot. It is not a row
+//! here because wz's udp is not a stream link at all: this trait bounds
+//! [`crate::stream_link::StreamReadDriver`], and udp carries its own
+//! boundary-as-frame drivers. The ring body this selects reads LENGTH-PREFIXED
+//! bytes through [`crate::link_rx_window::RxWindow`]; a datagram has no length
+//! prefix to frame by, so putting udp on it would be wrong rather than missing.
+//! Reaching udp needs the multishot/provided-buffer shape upstream's uring
+//! reader actually uses, which `ARCHITECTURE.md` line 994 deliberately does not
+//! choose for this row — so it is a DIFFERENT atom's work, declared here so a
+//! later round grades this one against the right population.
 
 #[cfg(all(feature = "runtime-tokio-uring", feature = "transport-link-tcp"))]
 use std::os::fd::AsRawFd;
@@ -96,13 +107,32 @@ impl RingReadable for tokio::net::tcp::OwnedReadHalf {
     }
 }
 
-/// Anything split with [`tokio::io::split`] — `None`, by construction.
+/// ⛔ R2751 — THERE IS NO BLANKET `impl<T> RingReadable for ReadHalf<T>` HERE
+/// ANY MORE, and its removal is the point rather than a tidy-up.
 ///
-/// [`tokio::io::ReadHalf`] keeps the stream behind a shared lock and publishes
-/// no accessor, so there is no descriptor to hand out whatever `T` is. Written
-/// over every `T` on purpose: see this module's divergence note. tls and vsock
-/// are today's instantiations.
-impl<T> RingReadable for tokio::io::ReadHalf<T> {
+/// R2750 wrote one, reasoning that `tokio::io::ReadHalf` publishes no accessor
+/// so the answer is `None` whatever `T` is. That reasoning is true about
+/// `ReadHalf` and FALSE as an answer about the LINK: it made the blanket a
+/// default body in everything but name — the very thing [`RingReadable`]'s own
+/// doc says must not exist, three paragraphs up — and vsock is the proof. A
+/// vsock socket HAS a descriptor (`tokio_vsock::VsockStream: AsRawFd`); it was
+/// reported as having none because this impl answered on its behalf, and the
+/// atom's parity gap with upstream's vsock link followed from that and not from
+/// anything about vsock.
+///
+/// A half that cannot reach its descriptor is free to say so — `None` is a real
+/// answer. What it may not do is have that said FOR it by a rule written over a
+/// type constructor, because the next `ReadHalf<T>` link is then answered before
+/// anyone looks at it. Each instantiation states its own answer below.
+///
+/// TLS — `None`, and not merely because `ReadHalf` hides the socket: reading the
+/// raw descriptor would take the bytes BENEATH the TLS record layer, which is
+/// ciphertext and not this link's frames. Upstream reaches the same answer for
+/// the same reason (`io/zenoh-links/zenoh-link-tls/src/unicast.rs` @ `fn get_fd`
+/// is `bail!("Correct FD unavailable for TLS extension")`). So this one would be
+/// `None` even if the accessor existed, which is exactly why it is written out.
+#[cfg(feature = "transport-link-tls")]
+impl RingReadable for tokio::io::ReadHalf<tokio_rustls::TlsStream<tokio::net::TcpStream>> {
     #[cfg(all(feature = "runtime-tokio-uring", feature = "transport-link-tcp"))]
     fn ring_fd(&self) -> Option<RawFd> {
         None
