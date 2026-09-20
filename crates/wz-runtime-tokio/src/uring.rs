@@ -178,12 +178,42 @@ impl FixedSlotRing {
     /// [`Self::read_fixed_into`] cannot check and the tests below therefore
     /// state explicitly by scoping both together.
     pub fn register(arena: &mut LinkRxArena, entries: u32) -> io::Result<Self> {
-        let ring = IoUring::new(entries)?;
+        Self::register_within(arena, entries, RECLAIM_WAIT)
+    }
 
-        // Take every slot, record each one AT ITS INDEX, then drop the frames
-        // so the table is whole again. `take` is the arena's only way to reach
-        // a slot, which is the point: the addresses come from the same seam a
-        // production read uses rather than from the pool's private storage.
+    /// [`Self::register`] with NO tolerance for a predecessor's reclaim.
+    ///
+    /// R2755 — the witness's instrument, and the reason it is a parameter
+    /// rather than a constant. [`Drop`] below claims the locked-memory charge
+    /// is back BEFORE the next registration begins; a call that waits half a
+    /// second for the kernel cannot tell that claim apart from its negation,
+    /// so the test that grades it has to ask once and take the answer.
+    #[cfg(test)]
+    fn register_now(arena: &mut LinkRxArena, entries: u32) -> io::Result<Self> {
+        Self::register_within(arena, entries, std::time::Duration::ZERO)
+    }
+
+    /// EVERY SLOT OF `arena`'S TABLE AS AN IOVEC, PLACED AT ITS OWN INDEX,
+    /// together with the frames that hold them.
+    ///
+    /// The frames come back with the iovecs rather than being released here:
+    /// the addresses are the table's either way, but holding them across the
+    /// registration is what makes "every slot, at its index" true rather than
+    /// a race with another taker. The caller drops them once it is done.
+    ///
+    /// R2755 — extracted so the witness's PROBE can register the same shape
+    /// without going through [`Self::register`]. An instrument built out of
+    /// the thing it measures inherits its defect: the first draft searched for
+    /// its ceiling with `FixedSlotRing` itself, which under the control — this
+    /// type with its [`Drop`] body removed — leaked a registration per probe
+    /// and measured a ceiling loose enough for the control to pass. A control
+    /// that comes back green is a finding, and that one was.
+    fn slot_iovecs(arena: &mut LinkRxArena) -> io::Result<(Vec<libc::iovec>, Vec<LinkRxFrame>)> {
+        // Take every slot, record each one AT ITS INDEX, then hand the frames
+        // back so the table is whole again. `take` is the arena's only way to
+        // reach a slot, which is the point: the addresses come from the same
+        // seam a production read uses rather than from the pool's private
+        // storage.
         let mut iovecs: Vec<libc::iovec> = vec![
             libc::iovec {
                 iov_base: std::ptr::null_mut(),
@@ -227,6 +257,17 @@ impl FixedSlotRing {
                  a partial registration binds buf_index to the wrong slot"
             )));
         }
+        Ok((iovecs, held))
+    }
+
+    fn register_within(
+        arena: &mut LinkRxArena,
+        entries: u32,
+        reclaim_wait: std::time::Duration,
+    ) -> io::Result<Self> {
+        let ring = IoUring::new(entries)?;
+        let (iovecs, held) = Self::slot_iovecs(arena)?;
+        let registered = iovecs.len();
 
         // Register BEFORE returning the slots: the pointers are valid either
         // way (the storage belongs to the table, not to the frame), but holding
@@ -239,7 +280,8 @@ impl FixedSlotRing {
         // SAFETY (each attempt): as above. The retry re-submits the SAME
         // iovecs, which still name the same slots — `held` is not released
         // until every attempt is done.
-        let result = register_awaiting_reclaim(&ring, &iovecs, Self::required_locked_bytes());
+        let result =
+            register_awaiting_reclaim(&ring, &iovecs, Self::required_locked_bytes(), reclaim_wait);
         drop(held);
         result?;
 
@@ -596,6 +638,47 @@ impl FixedSlotRing {
     }
 }
 
+/// R2755 — GIVE THE LOCKED-MEMORY CHARGE BACK ON THE SCHEDULE IT WAS TAKEN.
+///
+/// [`FixedSlotRing::register`] pins [`FixedSlotRing::required_locked_bytes`]
+/// against `RLIMIT_MEMLOCK`, which is a per-PROCESS ceiling. Until this impl
+/// existed nothing here released it: the charge came back when the kernel
+/// finished tearing the ring's context down after its fd closed, which
+/// `io_uring` does on a workqueue — so a process that dropped one ring and
+/// built the next could be refused memory that was already on its way back.
+///
+/// ⚠ THE `io-uring` CRATE'S OWN DOC IS WHAT ARGUES AGAINST THIS IMPL, and it
+/// is right about the half it is talking about: "You do not need to explicitly
+/// call this before dropping the `IoUring`, as it will be cleaned up by the
+/// kernel automatically" (`io-uring-0.7.13/src/submit.rs` @
+/// `pub fn unregister_buffers`). That is a statement about CORRECTNESS — no
+/// page stays pinned forever — and this impl does not dispute it. It is not a
+/// statement about WHEN, and "when" is the entire content of a ceiling.
+/// `IORING_UNREGISTER_BUFFERS` unaccounts inside the syscall; closing the fd
+/// schedules the same work for later.
+///
+/// MEASURED, hosted run 35488108252: `RLIMIT_MEMLOCK` soft=hard=8388608
+/// against a `needed` of 4198400 — a ceiling at twice the requirement — and
+/// both red jobs are registrations refused with ENOMEM, under
+/// `--test-threads=1` in one of them. The compensations that stood before this
+/// impl each address a symptom of the missing release: Layer C1br serializes
+/// the registering tests, [`register_awaiting_reclaim`] sleeps for the
+/// kernel, and `scripts/lib/uring-memlock.sh` raises the ceiling out of the
+/// way. They are kept — a ceiling can be contended by another PROCESS, which
+/// no `Drop` of ours reaches — but they are no longer what makes the sequence
+/// work.
+///
+/// Best-effort by construction: `drop` cannot report, and there is no failure
+/// mode to report. A ring whose buffers the kernel has already released
+/// answers `EINVAL` (nothing to unregister) and the fd close behind it frees
+/// the context either way, so the only thing an error here could do is
+/// panic in a destructor.
+impl Drop for FixedSlotRing {
+    fn drop(&mut self) {
+        let _ = self.ring.submitter().unregister_buffers();
+    }
+}
+
 /// The process's `RLIMIT_MEMLOCK` as `(soft, hard)`.
 ///
 /// `None` when the query itself failed — reported as an absence rather than as
@@ -742,12 +825,24 @@ const RECLAIM_POLL: std::time::Duration = std::time::Duration::from_millis(50);
 /// this registration, so the memory is someone else's and can come back. A
 /// [`MemlockVerdict::TooSmall`] or [`MemlockVerdict::Unknown`] returns at once,
 /// which is what a provisioning fact deserves.
+///
+/// ⚠ R2755 — AND THIS IS NOT WHAT MAKES THE SEQUENCE WORK, which the paragraph
+/// above claimed. "The memory is someone else's" was true of the case this
+/// round found and the owner was THIS PROCESS: the ring it had just dropped
+/// had never released its own registration, so the predecessor being waited
+/// out was the caller itself. `impl Drop for FixedSlotRing` gives the charge
+/// back inside the syscall that drops the ring, so a same-process sequence
+/// never reaches here at all. What is left for this function is the case its
+/// name always described and could not reach — a ceiling contended by ANOTHER
+/// process — which is why it stays and why `reclaim_wait` became a parameter:
+/// a witness for the `Drop` has to be able to ask once.
 fn register_awaiting_reclaim(
     ring: &IoUring,
     iovecs: &[libc::iovec],
     needed: usize,
+    reclaim_wait: std::time::Duration,
 ) -> io::Result<()> {
-    let deadline = std::time::Instant::now() + RECLAIM_WAIT;
+    let deadline = std::time::Instant::now() + reclaim_wait;
     loop {
         // SAFETY: the caller holds every slot these iovecs name for the whole
         // of this call, so each attempt submits the same live, unmoved regions.
@@ -789,11 +884,211 @@ fn register_awaiting_reclaim(
 /// that. [`register_awaiting_reclaim`] is what makes the lane deterministic;
 /// the serialization above is kept because it bounds how much can overlap,
 /// not because it prevents overlap.
+///
+/// ⚠ R2755 — THE ASYMMETRY BOTH PARAGRAPHS ABOVE DESCRIBE AS THE KERNEL'S WAS
+/// THIS MODULE'S. "The kernel releases a ring's pinned pages asynchronously
+/// after its fd closes" is true and is not the whole sentence: the fd close
+/// was the ONLY release, because the type that took the charge never gave it
+/// back. `impl Drop for FixedSlotRing` does, inside the drop, and
+/// [`tests::a_dropped_ring_returns_its_locked_pages_before_the_next_registration`]
+/// is the witness — which is why it provisions its own ceiling in a child
+/// process rather than trusting the lane's, since the lane's answer to this
+/// defect was to raise the ceiling until the leak did not matter.
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::io::Write;
     use std::os::fd::AsRawFd;
+
+    /// The env var that puts a re-exec of this test binary in CHILD mode.
+    const RECLAIM_CHILD: &str = "WZ_URING_RECLAIM_CHILD";
+
+    /// Set this process's `RLIMIT_MEMLOCK` soft ceiling, keeping `hard`.
+    fn set_memlock_soft(soft: u64, hard: u64) -> bool {
+        let lim = libc::rlimit {
+            rlim_cur: soft,
+            rlim_max: hard,
+        };
+        // SAFETY: `setrlimit` reads the struct it is handed, which is fully
+        // initialised above and lives for the call.
+        unsafe { libc::setrlimit(libc::RLIMIT_MEMLOCK, &lim) == 0 }
+    }
+
+    /// Can ONE registration of this pool's shape be made right now, at ceiling
+    /// `soft`?
+    ///
+    /// ⚠ NOT THROUGH [`FixedSlotRing`], and that is the whole point. This is
+    /// the search's instrument and the type is the search's SUBJECT; probing
+    /// with the subject is how the first draft of this witness let its own
+    /// control pass. The registration here is the same shape — the same
+    /// `SLOT_COUNT` iovecs at the same addresses, from
+    /// [`FixedSlotRing::slot_iovecs`], so the charge is equal and not merely
+    /// similar — but the release is UNCONDITIONAL and belongs to this
+    /// function, so a probe leaves nothing behind however the subject behaves.
+    fn registers_at(soft: u64, hard: u64, arena: &mut LinkRxArena) -> bool {
+        if !set_memlock_soft(soft, hard) {
+            return false;
+        }
+        let Ok(ring) = IoUring::new(8) else {
+            return false;
+        };
+        let Ok((iovecs, held)) = FixedSlotRing::slot_iovecs(arena) else {
+            return false;
+        };
+        // SAFETY: each iovec names one `[u8; SLOT_SIZE]` inside the table's
+        // boxed storage, which `held` keeps reserved for the whole call.
+        let ok = unsafe { ring.submitter().register_buffers(&iovecs) }.is_ok();
+        if ok {
+            let _ = ring.submitter().unregister_buffers();
+        }
+        drop(held);
+        ok
+    }
+
+    /// THE SMALLEST CEILING THIS PROCESS IS ADMITTED ONE REGISTRATION AT,
+    /// MEASURED RATHER THAN COMPUTED.
+    ///
+    /// ⚠ R2755 — A CEILING DERIVED FROM `SLOT_COUNT * SLOT_SIZE` IS NOT AN
+    /// INSTRUMENT HERE, and that was established the expensive way. `io_uring`
+    /// charges pinned pages to `user->locked_vm`, a counter shared by every
+    /// process of this UID, and compares the total against the CALLING
+    /// process's `RLIMIT_MEMLOCK`. So what one registration needs is not a
+    /// property of the pool: it is the pool plus whatever the rest of the
+    /// machine is holding at that instant. MEASURED, same tree and same host
+    /// minutes apart: a ceiling of 4464640 admitted the registration in a
+    /// standalone run and was refused inside Layer C1br; widening it to the
+    /// per-slot worst case of 4718592 was refused there too. The formula was
+    /// not too small — it was answering a question about the pool while the
+    /// kernel was asking one about the machine.
+    ///
+    /// Binary search closes that gap by asking the kernel instead. What the
+    /// result is good for is the property the witness needs and a formula
+    /// cannot give: at the SMALLEST admitting ceiling the slack above the
+    /// current charge is under one probe step, so a SECOND live registration —
+    /// which costs at least `SLOT_COUNT * ceil(SLOT_SIZE / page)` pages more —
+    /// cannot fit. That is the scarcity, and it is now relative to the machine
+    /// rather than asserted about it.
+    ///
+    /// `upper` bounds the search, so a pathologically contended host fails
+    /// loudly instead of pinning its way up to the hard limit.
+    fn smallest_admitting_ceiling(hard: u64, upper: u64, arena: &mut LinkRxArena) -> Option<u64> {
+        if !registers_at(upper, hard, arena) {
+            return None;
+        }
+        // SAFETY: `sysconf` reads a constant and writes nothing.
+        let page = unsafe { libc::sysconf(libc::_SC_PAGESIZE) }.max(4096) as u64;
+        let (mut lo, mut hi) = (0u64, upper);
+        while hi - lo > page {
+            let mid = lo + (hi - lo) / 2;
+            if registers_at(mid, hard, arena) {
+                hi = mid;
+            } else {
+                lo = mid;
+            }
+        }
+        Some(hi)
+    }
+
+    /// A generous bound for that search: sixteen registrations' worth.
+    ///
+    /// Bounded rather than open so a host whose shared charge is already past
+    /// what this pool needs says so, instead of climbing to the hard limit and
+    /// reporting a ceiling at which nothing is scarce.
+    fn search_upper_bound() -> u64 {
+        // SAFETY: `sysconf` reads a constant and writes nothing.
+        let page = unsafe { libc::sysconf(libc::_SC_PAGESIZE) }.max(4096) as u64;
+        let pages_per_slot = (SLOT_SIZE as u64).div_ceil(page) + 1;
+        16 * SLOT_COUNT as u64 * pages_per_slot * page
+    }
+
+    /// A DROPPED RING HAS ALREADY RETURNED ITS LOCKED PAGES.
+    ///
+    /// R2755, and the claim is about WHEN rather than whether. Registration
+    /// pins [`FixedSlotRing::required_locked_bytes`] against the process's
+    /// `RLIMIT_MEMLOCK`; if the only release is the kernel's deferred teardown
+    /// of the ring's context, a process that drops one ring and builds the
+    /// next is refused its own memory. That is hosted run 35488108252, in both
+    /// of its red jobs.
+    ///
+    /// ⚠ WHY A CHILD PROCESS, stated because the obvious shape is wrong here.
+    /// The defect is only observable against a SCARCE ceiling, and every lane
+    /// that runs these tests raises the ceiling first — Layer C1br and
+    /// `nondefault-tests-gate.sh` both call `uring_memlock_provision`, which
+    /// since this round asks for `unlimited`. A witness that used the lane's
+    /// ceiling would therefore come back green with the `Drop` reverted, which
+    /// under this tree's rule is a finding and not a pass. So the witness
+    /// provisions its OWN ceiling, and it has to do that in a child because
+    /// `setrlimit` is per-process and would otherwise race every other test in
+    /// this binary.
+    ///
+    /// ⚠ AND WHY THE CEILING IS MEASURED: see
+    /// [`smallest_admitting_ceiling`]. Two computed ceilings were tried first
+    /// and both were refused inside Layer C1br after passing standalone,
+    /// because the counter a registration is charged to is shared across every
+    /// process of this UID. The witness asks the kernel what it may have
+    /// instead of telling it what the pool costs.
+    ///
+    /// ⚠ AND WHY [`FixedSlotRing::register_now`]: the second registration asks
+    /// ONCE. [`register_awaiting_reclaim`] would sleep up to half a second
+    /// waiting for exactly the release this test exists to assert has already
+    /// happened, and a witness that tolerates the defect cannot grade the fix.
+    #[test]
+    fn a_dropped_ring_returns_its_locked_pages_before_the_next_registration() {
+        if std::env::var_os(RECLAIM_CHILD).is_some() {
+            reclaim_child_body();
+            return;
+        }
+        let exe = std::env::current_exe().expect("this test binary's own path");
+        let status = std::process::Command::new(exe)
+            .args([
+                "--exact",
+                "--nocapture",
+                "--test-threads=1",
+                "uring::tests::a_dropped_ring_returns_its_locked_pages_before_the_next_registration",
+            ])
+            .env(RECLAIM_CHILD, "1")
+            .status()
+            .expect("re-exec this test binary in child mode");
+        assert!(
+            status.success(),
+            "the child ran under a ceiling of one registration and could not \
+             register twice in a row: a dropped FixedSlotRing did not return \
+             its locked pages ({status})"
+        );
+    }
+
+    /// The child half of the test above: measure the tightest ceiling that
+    /// still admits one registration, then register twice with a drop between.
+    fn reclaim_child_body() {
+        let (soft, hard) = memlock_limit().expect("RLIMIT_MEMLOCK must be readable");
+        let upper = search_upper_bound().min(soft);
+        let mut arena = LinkRxArena::new();
+
+        let ceiling = smallest_admitting_ceiling(hard, upper, &mut arena).unwrap_or_else(|| {
+            panic!(
+                "no registration fits even at {upper} bytes (this process's \
+                 ceiling is {soft}): the shared locked-memory charge is \
+                 already past what this pool needs, so nothing here is \
+                 measurable"
+            )
+        });
+        assert!(
+            set_memlock_soft(ceiling, hard),
+            "pinning the ceiling at the measured {ceiling} must succeed"
+        );
+
+        // AT THIS CEILING THE SLACK IS UNDER ONE PAGE, so a second LIVE
+        // registration cannot fit — which is what makes the assertion below an
+        // assertion about the release and not about the host's generosity.
+        let first = FixedSlotRing::register(&mut arena, 8)
+            .expect("one registration must fit the ceiling just measured for one");
+        assert_eq!(first.registered(), SLOT_COUNT);
+        drop(first);
+
+        let second = FixedSlotRing::register_now(&mut arena, 8)
+            .expect("a dropped ring must have returned its locked pages at once");
+        assert_eq!(second.registered(), SLOT_COUNT);
+    }
 
     /// Every LINK-RX slot is registered, and at its own index.
     ///
