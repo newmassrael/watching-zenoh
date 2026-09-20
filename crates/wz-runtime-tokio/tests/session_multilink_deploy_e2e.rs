@@ -274,6 +274,9 @@ async fn deploy_active_two_links_aggregate_segregate_reject_survive() {
             // than the new schedule; the growth has its own witnesses.
             retry: RetryPolicy::constant(1000),
             max_links: 2,
+            // R2758 — unbounded: this test's subject is link aggregation, and
+            // an aggregated peer is ONE session however many links it brings.
+            max_sessions: usize::MAX,
         },
         fixture_params_with_zid(0x0B),
         TokioTime::new(),
@@ -491,6 +494,9 @@ async fn deploy_active_dial_side_aggregates_through_the_loop() {
             // than the new schedule; the growth has its own witnesses.
             retry: RetryPolicy::constant(1000),
             max_links: 2,
+            // R2758 — unbounded: this test's subject is link aggregation, and
+            // an aggregated peer is ONE session however many links it brings.
+            max_sessions: usize::MAX,
         },
         fixture_params_with_zid(0x0B),
         TokioTime::new(),
@@ -525,6 +531,9 @@ async fn deploy_active_dial_side_aggregates_through_the_loop() {
             // than the new schedule; the growth has its own witnesses.
             retry: RetryPolicy::constant(1000),
             max_links: 2,
+            // R2758 — unbounded: this test's subject is link aggregation, and
+            // an aggregated peer is ONE session however many links it brings.
+            max_sessions: usize::MAX,
         },
         fixture_params_with_zid(0x0A),
         TokioTime::new(),
@@ -633,6 +642,9 @@ async fn deploy_active_qos_priority_segregates_across_links() {
             // than the new schedule; the growth has its own witnesses.
             retry: RetryPolicy::constant(1000),
             max_links: 2,
+            // R2758 — unbounded: this test's subject is link aggregation, and
+            // an aggregated peer is ONE session however many links it brings.
+            max_sessions: usize::MAX,
         },
         fixture_params_with_zid(0x0B),
         TokioTime::new(),

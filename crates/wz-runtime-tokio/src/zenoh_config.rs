@@ -938,6 +938,20 @@ pub struct ZenohNodeConfig {
     pub lease_ms: u64,
     /// `transport/unicast/max_links`.
     pub max_links: usize,
+    /// `transport/unicast/max_sessions` — how many unicast sessions a node
+    /// admits at once.
+    ///
+    /// R2758. Upstream enforces this in the transport manager, under the
+    /// session-table guard and immediately after its connection-to-self check
+    /// (`io/zenoh-transport/src/unicast/manager.rs` @ `max_sessions`): a peer
+    /// arriving at the limit is denied with `close::reason::INVALID` rather
+    /// than admitted and torn down later. wz's accept loop holds the same
+    /// table, so the bound is the same comparison against its length.
+    ///
+    /// ⚠ NOT a tuning knob — it is the only bound on how many half-open peers
+    /// a node will carry, which is why upstream checks it before it builds
+    /// anything for the arrival.
+    pub max_sessions: usize,
     /// `transport/unicast/qos/enabled`.
     pub qos: bool,
     /// `transport/unicast/lowlatency`.
@@ -1207,6 +1221,7 @@ impl Default for ZenohNodeConfig {
             batch_size: 65_535,
             lease_ms: 10_000,
             max_links: 1,
+            max_sessions: crate::config::DEFAULT_MAX_SESSIONS,
             qos: true,
             lowlatency: false,
             compression: false,
@@ -1329,6 +1344,8 @@ impl ZenohNodeConfig {
         {
             out.max_links = cfg.max_links;
         }
+        // R2758 — ungated, because the bound is not a multilink capability.
+        out.max_sessions = cfg.max_sessions;
         #[cfg(feature = "transport-qos")]
         {
             out.qos = cfg.qos;
@@ -1600,6 +1617,7 @@ impl ZenohNodeConfig {
         );
         out.push_str(" },\n  \"transport\": {\n    \"unicast\": {\n");
         let _ = writeln!(out, "      \"max_links\": {},", self.max_links);
+        let _ = writeln!(out, "      \"max_sessions\": {},", self.max_sessions);
         let _ = writeln!(out, "      \"lowlatency\": {},", self.lowlatency);
         let _ = writeln!(out, "      \"qos\": {{ \"enabled\": {} }},", self.qos);
         let _ = writeln!(
@@ -5559,6 +5577,13 @@ impl ZenohNodeConfig {
                 value: v.to_string(),
             })?;
             named.push("transport/unicast/max_links");
+        }
+        if let Some(v) = want_u64(&doc, "transport/unicast/max_sessions")? {
+            out.max_sessions = usize::try_from(v).map_err(|_| ConfigIngestError::OutOfRange {
+                path: "transport/unicast/max_sessions",
+                value: v.to_string(),
+            })?;
+            named.push("transport/unicast/max_sessions");
         }
         if let Some(v) = want_bool(&doc, "transport/unicast/lowlatency")? {
             out.lowlatency = v;

@@ -5225,6 +5225,10 @@ async fn run_peer_until(
             // that many physical links to a peer zid into ONE logical session.
             #[cfg(feature = "transport-multilink")]
             max_links: wz_config.borrow().max_links,
+            // R2758 — the session bound, off the SAME shared WzConfig the admin
+            // GET renders, so the loop and the config surface cannot disagree
+            // about how many peers this node will hold.
+            max_sessions: wz_config.borrow().max_sessions,
             // R2095 (open-debt item 513) — the capability offer every face this
             // peer opens carries, dialed and accepted alike (upstream builds
             // `StateOpen` and `StateAccept` from the same manager config; see
@@ -7020,6 +7024,12 @@ async fn run_router_hat_until(
             // multilink demo path is the --peer mesh mode, run_peer).
             #[cfg(feature = "transport-multilink")]
             max_links: 1,
+            // R2758 — the session bound, off the ONE live `WzConfig` this host
+            // runs on (`host_cfg`, R2634) exactly as the `--peer` mesh loop
+            // takes it off its own: a router-hat holds faces in the same table
+            // and is the node most likely to reach the limit. "One source, not
+            // two", which is the rule the `host_cfg` comment states.
+            max_sessions: host_cfg.borrow().max_sessions,
             // R2095 (open-debt item 513) — the capability offer every face this
             // router-hat opens carries, built by `mesh_offer` from the SAME argv
             // words the `--peer` mesh mode reads. The item named both run-modes

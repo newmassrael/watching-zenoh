@@ -248,6 +248,8 @@ async fn readd_dialed_link_auto_reconnects_onto_surviving_session() {
             // means the del_link always lands first". The growth has its own witnesses.
             retry: RetryPolicy::constant(1000),
             max_links: 2,
+            // R2758 — unbounded: this test's subject is per-link re-add.
+            max_sessions: usize::MAX,
         },
         fixture_params_with_zid(0x0A),
         TokioTime::new(),

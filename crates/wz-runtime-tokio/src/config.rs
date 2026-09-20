@@ -648,6 +648,24 @@ impl core::fmt::Debug for ConfigSinks<'_> {
 ///
 /// The private slices that can change while the node runs are declared once in
 /// [`RUNTIME_MUTABLE_CONFIG_KEYS`]; do not count them in prose.
+//
+// R2758 — zenoh's shipped `transport/unicast/max_sessions`, declared here
+// because it is the config layer's default.
+//
+// ONE literal for the whole tree: the same number is needed by this config's
+// default, by the zenoh-config ingest's default, and by `accept_loop`'s
+// accept-only entry, and a value reached by three paths drifts (this repo's own
+// R311y589 lesson). Read off a running zenohd's resolved config —
+// `zenoh_config_emit_zenohd_interop.rs` captures
+// `"unicast":{...,"max_sessions":1000,...}` — rather than off prose.
+//
+// ⚠ HERE rather than beside its consumer, and that was MEASURED rather than
+// preferred: it was written in `accept_loop` first, and `config.rs` could not
+// name it, because that module is feature-gated and this default is not. A
+// constant that disappears with a feature cannot be a config layer's default.
+#[allow(clippy::doc_markdown)]
+pub const DEFAULT_MAX_SESSIONS: usize = 1_000;
+
 #[derive(Debug, Clone)]
 #[non_exhaustive]
 pub struct WzConfig {
@@ -800,6 +818,16 @@ pub struct WzConfig {
     /// mapping runner reachable.)
     #[cfg(feature = "transport-multilink")]
     pub max_links: usize,
+    /// R2758 — how many unicast sessions the accept loop admits at once
+    /// (zenoh `unicast.max_sessions`, enforced in its transport manager under
+    /// the session-table guard).
+    ///
+    /// ⚠ UNGATED, unlike [`Self::max_links`] beside it, and that is the point
+    /// rather than an oversight: aggregation is a `transport-multilink`
+    /// capability, but the bound on how many peers a node carries is a property
+    /// of every build. A default loop that could be filled without limit is the
+    /// shape the bound exists to refuse.
+    pub max_sessions: usize,
     /// R311y216 (transport-qos) — the EMBEDDER-facing "this deploy offers the QoS
     /// transport toward its peers" knob (zenoh `unicast.is_qos`,
     /// `commons/zenoh-config` `TransportUnicastConf`, read into the establishment
@@ -913,6 +941,7 @@ impl Default for WzConfig {
             connect_endpoints: Vec::new(),
             #[cfg(feature = "transport-multilink")]
             max_links: 1,
+            max_sessions: DEFAULT_MAX_SESSIONS,
             #[cfg(feature = "transport-qos")]
             qos: false,
             #[cfg(feature = "session-extqos")]

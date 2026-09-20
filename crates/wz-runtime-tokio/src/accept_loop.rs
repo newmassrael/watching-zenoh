@@ -488,6 +488,26 @@ pub enum AcceptEvent {
         peer: AcceptedPeer,
         cause: OpenError,
     },
+    /// R2758 — a face that REACHED Established and was refused anyway, because
+    /// [`FaceSources::max_sessions`] was already met.
+    ///
+    /// ⚠ ITS OWN VARIANT, and the two it is not are the argument.
+    /// [`Self::FaceUp`] is false — the face never entered the table.
+    /// [`Self::FaceFailed`] is false too, and more interestingly: that variant
+    /// means "never reached Established", while this face completed the whole
+    /// 4-way handshake and was turned away after it. Folding this into either
+    /// would make a caller's count of successful opens or of handshake
+    /// failures wrong, and an outcome a caller cannot name is one nobody can
+    /// act on — which for "this node is turning peers away" is the reading
+    /// that matters most.
+    ///
+    /// `held` is the table size at the moment of refusal, so a log line can
+    /// say what the limit was without the caller holding the config.
+    FaceRefused {
+        id: FaceId,
+        peer_zid: Option<Vec<u8>>,
+        held: usize,
+    },
     /// `accept()` itself returned a (typically transient) error; the loop logs
     /// it (via this event), throttles ([`ACCEPT_ERROR_THROTTLE_MS`]), then keeps
     /// accepting — zenoh's `accept_task` parity (log + `TCP_ACCEPT_THROTTLE_TIME`
@@ -725,6 +745,15 @@ pub struct AcceptLoopSummary {
     /// High-water mark of the live faces table — the "held N peers at once"
     /// witness that distinguishes this from the one-shot accept path.
     pub peak_concurrent: usize,
+    /// R2758 — faces refused because
+    /// [`FaceSources::max_sessions`] was already reached.
+    ///
+    /// A SEPARATE counter rather than a reading of
+    /// [`accepted`](Self::accepted) minus [`established`](Self::established),
+    /// for the reason the gossip counter below states: that difference is
+    /// bumped by the dedup-by-zid rule and by open failures too, so asserting
+    /// on it would pass on a node the bound never refused.
+    pub refused_over_max_sessions: usize,
     /// R311y423 — of [`dialed`](Self::dialed), the subset dialed because the
     /// GOSSIP-autoconnect policy admitted a discovered peer (the [`Step::Dial`]
     /// arm), as opposed to a configured `--connect` target or a reconcile add.
@@ -1914,6 +1943,21 @@ pub struct FaceSources {
     /// so the struct — and every non-multilink caller — is unchanged without it.
     #[cfg(feature = "transport-multilink")]
     pub max_links: usize,
+    /// R2758 — how many faces this loop will hold at once
+    /// (zenoh `unicast.max_sessions`).
+    ///
+    /// Upstream denies at the manager, under the session-table guard and right
+    /// after its connection-to-self check
+    /// (`io/zenoh-transport/src/unicast/manager.rs` @ `max_sessions`):
+    /// `if guard.len() >= self.config.unicast.max_sessions` returns
+    /// `close::reason::INVALID`. This loop holds that table as `faces`, so the
+    /// bound is the same comparison at the same moment — after the
+    /// dedup-by-zid rule, before the face is inserted.
+    ///
+    /// ⚠ UNGATED and carried even by a loop that never fills it, because a
+    /// bound whose absence is invisible is the one that is discovered by a
+    /// peer rather than by a reader.
+    pub max_sessions: usize,
     /// R2095 (open-debt item 513) — the capability SET every face this loop
     /// opens OFFERS at its handshake, dialed and accepted alike.
     ///
@@ -1999,6 +2043,7 @@ where
         mut reconcile,
         #[cfg(feature = "transport-multilink")]
         max_links,
+        max_sessions,
         offer,
         retry,
     } = sources;
@@ -2417,6 +2462,38 @@ where
                                     continue;
                                 }
                             }
+                        }
+                        // R2758 — THE SESSION BOUND, at upstream's moment.
+                        //
+                        // `io/zenoh-transport/src/unicast/manager.rs` @
+                        // `max_sessions` denies under the session-table guard,
+                        // immediately after the connection-to-self check:
+                        // `if guard.len() >= self.config.unicast.max_sessions`
+                        // returns `close::reason::INVALID`. The dedup-by-zid
+                        // rule above is this loop's analogue of that self/dup
+                        // check, so the bound belongs directly under it — and
+                        // BEFORE `faces.insert`, because a bound applied after
+                        // admission is not a bound.
+                        //
+                        // A rejected face is dropped exactly the way a
+                        // redundant one is: it never enters `faces`, and its
+                        // dial index is released so a later reconcile does not
+                        // read the abandoned id as a live dial.
+                        if faces.len() >= max_sessions {
+                            log::debug!(
+                                "refusing face {} — max_sessions {} reached",
+                                id.0,
+                                max_sessions
+                            );
+                            #[cfg(feature = "router-connect-reconcile")]
+                            dialed_targets.remove(&id);
+                            summary.refused_over_max_sessions += 1;
+                            on_event(&AcceptEvent::FaceRefused {
+                                id,
+                                peer_zid: face.peer_zid.clone(),
+                                held: faces.len(),
+                            });
+                            continue;
                         }
                         faces.insert(id, face.peer_zid.clone());
                         summary.established += 1;
@@ -3019,6 +3096,15 @@ where
             // the full mesh entry that carries `max_links`); byte-identical to today.
             #[cfg(feature = "transport-multilink")]
             max_links: 1,
+            // R2758 — UPSTREAM'S DEFAULT, not "unbounded".
+            //
+            // This entry carries no configuration of its own (see the offer
+            // below), and the honest reading of that is upstream's shipped
+            // value rather than the absence of a bound: zenoh has no unbounded
+            // mode — `unicast.max_sessions` defaults to 1000 and the manager
+            // always compares against it. A caller that needs a different bound
+            // reaches `peer_loop`, which takes the configured `FaceSources`.
+            max_sessions: crate::config::DEFAULT_MAX_SESSIONS,
             // accept-only: the zero offer. `accept_loop` is the entry for a node
             // that carries no capability configuration of its own — a mesh node
             // that does reaches `peer_loop`, which is where R2095 threads the
@@ -3969,6 +4055,118 @@ mod tests {
         assert_eq!(
             summary.peak_concurrent, N,
             "held all N faces simultaneously (high-water mark)"
+        );
+    }
+
+    /// R2758 — THE SESSION BOUND REFUSES THE PEER PAST IT.
+    ///
+    /// zenoh denies at the manager under the session-table guard
+    /// (`io/zenoh-transport/src/unicast/manager.rs` @ `max_sessions`:
+    /// `if guard.len() >= self.config.unicast.max_sessions` ->
+    /// `close::reason::INVALID`). This is that comparison against the table
+    /// this loop keeps: two peers dial a node whose bound is ONE, and exactly
+    /// one is held.
+    ///
+    /// ⚠ NON-FLAKY BY OBSERVATION, NOT BY TIMER. Shutdown flips when BOTH a
+    /// `FaceUp` and a `FaceRefused` have been seen, so the loop cannot end
+    /// before the refusal it is asserting on. A version that slept instead
+    /// would pass on a node that simply had not accepted the second peer yet —
+    /// the hollow-witness shape this module's own R311y140 note records.
+    /// [[feedback-no-flaky-ever]]
+    ///
+    /// ⚠ WHICH peer is refused is deliberately NOT asserted: both dial the
+    /// same loopback listener and the accept order is the kernel's. The claim
+    /// is about the COUNT the table admits, which is what the bound governs.
+    ///
+    /// CONTROL, and the FORM of its red was measured rather than predicted —
+    /// the first version of this sentence guessed wrong. Disabling the
+    /// `faces.len() >= max_sessions` guard reds this test by the 20s TIMEOUT,
+    /// not by the `established` assertion: with no refusal there is no
+    /// `FaceRefused`, so the shutdown predicate below can never be satisfied
+    /// and the loop runs until the timeout kills it. That is a consequence of
+    /// the witness being observation-driven, and it is a STRONGER coupling than
+    /// an assertion — the test cannot even finish without the behaviour it is
+    /// asserting on — but it is a different red from the one a reader would
+    /// assume, so it is written down.
+    ///
+    /// ⚠ GATED ON `routing-peer` because it drives [`peer_loop`], which is the
+    /// entry that takes a configurable [`FaceSources::max_sessions`].
+    /// [`accept_loop`] carries the bound too but fixes it at
+    /// [`crate::config::DEFAULT_MAX_SESSIONS`], and a witness that had to open
+    /// a thousand faces to reach it would be a benchmark, not a test.
+    #[cfg(feature = "routing-peer")]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn max_sessions_refuses_the_peer_past_the_bound() {
+        let (listener, addr) = bind_loopback().await;
+
+        let (go_tx, go_rx) = watch::channel(false);
+        let up = Arc::new(AtomicUsize::new(0));
+        let refused = Arc::new(AtomicUsize::new(0));
+        let on_event = {
+            let up = up.clone();
+            let refused = refused.clone();
+            let go_tx = go_tx.clone();
+            move |event: &AcceptEvent| {
+                match event {
+                    AcceptEvent::FaceUp(_) => {
+                        up.fetch_add(1, SeqCst);
+                    }
+                    AcceptEvent::FaceRefused { .. } => {
+                        refused.fetch_add(1, SeqCst);
+                    }
+                    _ => {}
+                }
+                // Both outcomes observed — the bound has done its work.
+                if up.load(SeqCst) >= 1 && refused.load(SeqCst) >= 1 {
+                    let _ = go_tx.send(true);
+                }
+            }
+        };
+
+        let node = peer_loop(
+            FaceSources {
+                listeners: vec![listener],
+                dial_targets: vec![],
+                dial_config: Arc::new(DialConfig::default()),
+                dial_intents: None,
+                mcast_ingress: None,
+                mcast_members: None,
+                mcast_group_subs: None,
+                reconcile: None,
+                #[cfg(feature = "transport-multilink")]
+                max_links: 1,
+                // THE SUBJECT.
+                max_sessions: 1,
+                offer: SessionOffer::universal(),
+                retry: RetryPolicy::ZENOH_DEFAULT,
+            },
+            acceptor_params(),
+            TokioTime::new(),
+            DEFAULT_OPEN_TICK_MS,
+            shutdown_on(go_rx.clone()),
+            on_event,
+            &NoOpForwarder,
+        );
+        let initiators = (0..2u8).map(|i| idle_initiator(addr, i + 1, go_rx.clone()));
+
+        let summary = tokio::time::timeout(Duration::from_secs(20), async {
+            let (summary, _) = tokio::join!(node, join_all(initiators));
+            summary
+        })
+        .await
+        .expect("the bounded node completes within 20s");
+
+        assert_eq!(
+            summary.established, 1,
+            "a bound of one admits exactly one peer"
+        );
+        assert_eq!(
+            summary.peak_concurrent, 1,
+            "the table never held more than the bound"
+        );
+        assert_eq!(
+            summary.refused_over_max_sessions, 1,
+            "the second peer was refused BY THE BOUND, not by a handshake failure"
         );
     }
 
@@ -4948,6 +5146,8 @@ mod tests {
                 retry: RetryPolicy::constant(1000),
                 #[cfg(feature = "transport-multilink")]
                 max_links: 1,
+                // R2758 — unbounded, so these fixtures keep the subject they had.
+                max_sessions: usize::MAX,
             },
             peer_params(),
             TokioTime::new(),
@@ -5079,6 +5279,8 @@ mod tests {
                 retry: RetryPolicy::constant(1000),
                 #[cfg(feature = "transport-multilink")]
                 max_links: 1,
+                // R2758 — unbounded, so these fixtures keep the subject they had.
+                max_sessions: usize::MAX,
             },
             peer_params(),
             TokioTime::new(),
@@ -5178,6 +5380,8 @@ mod tests {
                 retry: RetryPolicy::constant(1000),
                 #[cfg(feature = "transport-multilink")]
                 max_links: 1,
+                // R2758 — unbounded, so these fixtures keep the subject they had.
+                max_sessions: usize::MAX,
             },
             peer_params(),
             TokioTime::new(),
@@ -5277,6 +5481,8 @@ mod tests {
                 retry: RetryPolicy::constant(1000),
                 #[cfg(feature = "transport-multilink")]
                 max_links: 1,
+                // R2758 — unbounded, so these fixtures keep the subject they had.
+                max_sessions: usize::MAX,
             },
             peer_params(),
             TokioTime::new(),

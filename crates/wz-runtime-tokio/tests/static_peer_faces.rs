@@ -93,6 +93,10 @@ fn sources(
         reconcile: None,
         #[cfg(feature = "transport-multilink")]
         max_links: 1,
+        // R2758 — unbounded, which is what this fixture meant before the bound
+        // existed. A test that does not exercise `max_sessions` must not
+        // acquire it by default, or its subject changes silently.
+        max_sessions: usize::MAX,
         offer: SessionOffer::universal(),
         retry: RetryPolicy::ZENOH_DEFAULT,
     }

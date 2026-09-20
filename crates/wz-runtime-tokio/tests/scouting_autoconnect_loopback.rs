@@ -260,6 +260,8 @@ async fn leg(port: u16, matcher: WhatAmIMatcher) -> AcceptLoopSummary {
             retry: RetryPolicy::constant(1000),
             #[cfg(feature = "transport-multilink")]
             max_links: 1,
+            // R2758 — unbounded: this test's subject is gossip autoconnect.
+            max_sessions: usize::MAX,
         },
         peer_params,
         TokioTime::new(),
