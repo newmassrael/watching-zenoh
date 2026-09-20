@@ -13,12 +13,18 @@
 //! it lands a FRAME, which is a batch that may carry several messages, and at
 //! the moment the kernel needs a destination no chain has been chosen yet.
 //!
-//! That ordering is why the two cannot share a pool, and it is the reason
-//! `crate::uring`'s `read_fixed_into` reads into a chain slot today: there was
-//! no link-RX pool on this profile to read into. The MCU tier has had the
+//! That ordering is why the two cannot share a pool, and it WAS the reason
+//! `crate::uring`'s `read_fixed_into` read into a chain slot: there was no
+//! link-RX pool on this profile to read into. The MCU tier has had the
 //! separation since its own pools were emitted — `session_rx_pool_mcu` sits
 //! beside `reassembly_pool_mcu` in `out/wz-link-lwip` — and the AP tier
 //! declared one inline in `deploy/ap_mcu_pair.yaml` that nothing could consume.
+//!
+//! ✅ R2746 acted on that sentence: this pool now IS what the ring registers
+//! and what `read_fixed_into` writes into, so the adapter reads at the
+//! granularity a socket actually delivers. The paragraph is kept in the past
+//! tense rather than deleted because it is the argument for WHY the two pools
+//! are separate, which has not changed — only the adapter's aim has.
 //!
 //! ## The seam is shared, not copied
 //!

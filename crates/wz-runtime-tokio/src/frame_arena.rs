@@ -66,14 +66,24 @@
 //!
 //! ## What is NOT here, stated so a later round does not misread it
 //!
-//! The REGISTERED-SLOT arm. `crate::uring`'s `read_fixed_into` writes into a
-//! pool slot the kernel has pinned, and an arena over
-//! [`crate::session_rx_pool_ap`] is the impl that would let `poll_framed`'s
-//! destination be one. It is not built here because it brings the registration
-//! lifetime with it (buffers must outlive the ring) and because upstream does
-//! NOT run its uring reads through the same framing loop — `rx_task_uring` is a
-//! separate task fed by ring completions. Deciding wz's shape for that is its
-//! own round; this module is what makes either shape expressible.
+//! The REGISTERED-SLOT arm, and R2746 moved HALF of it in. `crate::uring`'s
+//! `read_fixed_into` writes into a pool slot the kernel has pinned, and since
+//! R2746 that slot is one of `crate::link_rx_arena`'s: the ring registers that
+//! table and the read takes a `LinkRxFrame`, so the adapter and this module's
+//! production arm now share a destination type rather than aiming at different
+//! pools.
+//!
+//! (Plain backticks rather than an intra-doc link, deliberately: that module is
+//! `runtime-zero-copy`-gated and this one is only `transport-link-tcp`-gated,
+//! so a link would dangle in a tcp-without-zero-copy build.)
+//!
+//! What is STILL not here is the JOIN: `poll_framed` does not select the
+//! registered-slot arm. It brings the registration lifetime with it (buffers
+//! must outlive the ring) and upstream does NOT run its uring reads through the
+//! same framing loop — `rx_task_uring` is a separate task fed by ring
+//! completions. Deciding wz's shape for that is its own round, and it is
+//! `runtime-tokio-uring`'s first residual; this module is what makes either
+//! shape expressible.
 //!
 //! Upstream's RX BUFFER-SIZE KEY is likewise still on [`crate::zenoh_config`]'s
 //! upstream-inert list: the arena below takes the count as an argument, but its
