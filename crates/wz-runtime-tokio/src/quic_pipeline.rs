@@ -199,6 +199,22 @@ pub struct QuicLink {
 /// to the inner stream driver; the framing / StreamEnvelope logic lives once in
 /// [`crate::stream_link`]. The QUIC analogue of [`crate::ws_pipeline`]'s bespoke
 /// `WsReadDriver`.
+/// R2750 — QUIC's inbound half answers [`crate::link_ring_fd::RingReadable`]
+/// with `None`.
+///
+/// A [`RecvStream`] is one stream MULTIPLEXED over a connection that quinn
+/// drives on a UDP socket it owns; there is no descriptor whose bytes are this
+/// stream's, so the question has no affirmative answer here rather than one
+/// being withheld. Upstream reaches the same answer and says so in the same
+/// terms — `io/zenoh-links/zenoh-link-quic/src/unicast.rs` @ `fn get_fd` is
+/// `//TODO: expose FD for quinn??? bail!("Not supported")`.
+impl crate::link_ring_fd::RingReadable for RecvStream {
+    #[cfg(all(feature = "runtime-tokio-uring", feature = "transport-link-tcp"))]
+    fn ring_fd(&self) -> Option<std::os::fd::RawFd> {
+        None
+    }
+}
+
 pub struct QuicReadDriver {
     inner: StreamReadDriver<RecvStream>,
     // Keep-alive: dropping either before the link closes would tear it down

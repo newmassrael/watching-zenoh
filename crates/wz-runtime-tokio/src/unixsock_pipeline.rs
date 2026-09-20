@@ -84,6 +84,27 @@ use wz_session_core::link::InterceptorLink;
 /// `tokio::net::tcp::OwnedReadHalf`.
 pub type UnixsockReadDriver = StreamReadDriver<OwnedReadHalf>;
 
+/// R2750 — this half's answer to [`crate::link_ring_fd::RingReadable`]: `Some`.
+///
+/// `UnixStream::into_split` hands both halves an `Arc<UnixStream>` and publishes
+/// it as `AsRef`, so the descriptor survives the split exactly as TCP's does.
+/// Upstream's unixsock_stream link answers `Ok` from its own socket
+/// (`io/zenoh-links/zenoh-link-unixsock_stream/src/unicast.rs` @ `fn get_fd`).
+///
+/// A DISTINCT type from TCP's despite the identical name — this is
+/// `tokio::net::unix::OwnedReadHalf` — which is why the answer is written here
+/// rather than shared with [`crate::link_pipeline`]'s.
+impl crate::link_ring_fd::RingReadable for OwnedReadHalf {
+    #[cfg(all(feature = "runtime-tokio-uring", feature = "transport-link-tcp"))]
+    fn ring_fd(&self) -> Option<std::os::fd::RawFd> {
+        use std::os::fd::AsRawFd;
+        // Upstream refuses a negative fd rather than trusting the accessor
+        // (`fd if fd < 0 => bail!("FD unavailable")`); the same guard is kept.
+        let fd = self.as_ref().as_raw_fd();
+        (fd >= 0).then_some(fd)
+    }
+}
+
 /// Dial an outbound unix-domain-socket connection to `path` — the raw-dial
 /// primitive the mode-agnostic `dial_locator(AnyLocator::Unixsock)` dispatcher
 /// (R311xi) routes a parsed socket path to. Returns the connected [`UnixStream`]

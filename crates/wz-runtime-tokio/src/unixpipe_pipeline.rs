@@ -356,6 +356,21 @@ impl Drop for FifoReadEnd {
 /// identically to a TCP stream); this alias pins the read half to the FIFO end.
 pub type UnixpipeReadDriver = StreamReadDriver<FifoReadEnd>;
 
+/// R2750 — this half's answer to [`crate::link_ring_fd::RingReadable`]: `Some`.
+///
+/// A FIFO end is a real descriptor this type owns outright — there is no split
+/// to hide it behind, so the answer is read straight off the receiver. Upstream's
+/// unixpipe link answers `Ok` the same way, from `self.get_r_mut().pipe`
+/// (`io/zenoh-links/zenoh-link-unixpipe/src/unix/unicast.rs` @ `fn get_fd`).
+impl crate::link_ring_fd::RingReadable for FifoReadEnd {
+    #[cfg(all(feature = "runtime-tokio-uring", feature = "transport-link-tcp"))]
+    fn ring_fd(&self) -> Option<std::os::fd::RawFd> {
+        use std::os::fd::AsRawFd;
+        let fd = self.receiver.as_raw_fd();
+        (fd >= 0).then_some(fd)
+    }
+}
+
 /// A connected unixpipe link: the inbound [`FifoReadEnd`] + the outbound
 /// [`Sender`]. Produced by [`dial_unixpipe`] (client) or the acceptor task
 /// (listener) and consumed by [`wire_unixpipe_stream`]. The read + write halves

@@ -1210,6 +1210,17 @@ pub mod writer_queue;
 #[cfg(feature = "transport-link-tcp")]
 pub mod stream_link;
 
+// R2750 — the question `stream_link` bounds its reader parameter on: "can a
+// ring read my bytes, and through which descriptor". Gated exactly like that
+// one consumer, which is also the module that makes the answer load-bearing.
+//
+// ⚠ NO `///` HERE, DELIBERATELY — see [`link_rx_window`]'s declaration for the
+// finding: rustdoc merges a declaration doc with the module's `//!` block and
+// resolves the result in the OUTER scope, where the module's own items are not
+// in scope, and the doc-link budget counts every link that then fails.
+#[cfg(feature = "transport-link-tcp")]
+pub mod link_ring_fd;
+
 /// R2740 — the buffer SOURCE `poll_framed` fills, upstream's `recv_batch`
 /// `buff: C` parameter. Gated exactly like its one consumer: the framing state
 /// machine and its `ReadState` are `transport-link-tcp`, and an arena with no
@@ -2174,6 +2185,30 @@ impl<B> Default for ReadState<B> {
 /// rx task. Until this parameter existed the loop ran `vec![0u8; ..]` inline,
 /// which is why `runtime-tokio-uring`'s adapter had no route into a production
 /// read: a buffer the kernel has REGISTERED cannot be one this loop invented.
+/// R2750 — THE LENGTH-PREFIX WIDTH A STREAM LINK FRAMES WITH, in one place.
+///
+/// A negotiated + Established `transport-lowlatency` link frames with a 4-byte
+/// LE u32 prefix (zenoh `unicast/lowlatency/link.rs`); every other frame — the
+/// universal path and the handshake of a lowlatency link alike — keeps the
+/// 2-byte u16 prefix.
+///
+/// Extracted because it now has TWO callers and had been a literal in one of
+/// them: [`poll_framed`] fixes the width at frame start, and the ring body's
+/// dispatch fixes it at `attach` (`crate::uring_reactor::UringReactor::attach`
+/// takes the width once and does not re-read the flag per completion). Two
+/// bodies that disagreed about how wide a prefix is would make a link mean
+/// different things depending on which read it was given — the same reason
+/// R2747 made the prefix DECODE one function rather than two copies of an
+/// endianness rule.
+#[cfg(feature = "transport-link-tcp")]
+pub(crate) fn prefix_width(lowlatency: bool) -> usize {
+    if lowlatency {
+        4
+    } else {
+        2
+    }
+}
+
 #[cfg(feature = "transport-link-tcp")]
 pub(crate) async fn poll_framed<S, A>(
     read_state: &mut ReadState<A::Buf>,
@@ -2188,13 +2223,10 @@ where
     loop {
         match read_state {
             ReadState::Idle => {
-                // transport-lowlatency — a negotiated + Established lowlatency link
-                // frames with a 4-byte LE u32 prefix (zenoh
-                // `unicast/lowlatency/link.rs`); every other frame (universal + the
-                // handshake) keeps the 2-byte u16 prefix. The width is fixed here,
-                // at frame start, so a flag flip between frames never splits a
-                // prefix mid-read.
-                let width = if lowlatency { 4 } else { 2 };
+                // The width is fixed HERE, at frame start, so a flag flip
+                // between frames never splits a prefix mid-read. Which width
+                // that is, is `prefix_width`'s to say.
+                let width = prefix_width(lowlatency);
                 *read_state = ReadState::Length {
                     prefix: [0u8; 4],
                     offset: 0,
