@@ -2383,11 +2383,20 @@ fn pico_zscout_source_on_wz_capi_matches_the_real_pico_against_a_zenohd() {
     // implementation, on the same host, against the same router, in the same
     // window.
     //
-    // Both counts are >= 1 by the time we get here: the two `unwrap_or_else`
-    // above panic when either side found no Hello for this port, so this cannot
-    // pass by both sides being empty.
     let wz_hits = hello_lines_for_port(&wz_printed, port).count();
     let oracle_hits = hello_lines_for_port(&oracle_printed, port).count();
+    // NON-VACUITY IS ASSERTED, not inherited. The two `unwrap_or_else` above do
+    // panic when either side found no Hello, so today this cannot be reached at
+    // zero — but that is a property of a NEIGHBOURING construct, and resting on
+    // it is the exact shape this round came here to repair: a claim whose
+    // justification lives somewhere else and expires without anything noticing.
+    // An edit that made those lookups non-panicking would leave `0 == 0`
+    // passing in silence.
+    assert!(
+        oracle_hits >= 1,
+        "the REAL zenoh-pico reported the peer {oracle_hits} time(s), so the \
+         comparison below would be vacuous.\n--- oracle stdout ---\n{oracle_printed}"
+    );
     assert_eq!(
         wz_hits, oracle_hits,
         "wz reported the peer {wz_hits} time(s) and the REAL zenoh-pico reported it \
@@ -2502,10 +2511,17 @@ fn pico_zscout_source_on_wz_capi_reports_every_zenohd_on_the_group() {
         // router answers each ask and N is correct. This leg carries the same
         // expiry as the sibling because it inherited the same sentence.
         //
-        // Both counts are >= 1 here: the two lookups above already panicked if
-        // either side missed this port, so this cannot pass by both being empty.
         let hits = hello_lines_for_port(&wz_printed, port).count();
         let oracle_hits = hello_lines_for_port(&oracle_printed, port).count();
+        // Asserted, not inherited — same reason as the sibling leg: the two
+        // lookups above do panic on a missing port today, but resting the
+        // non-vacuity of THIS comparison on that is the shape being repaired.
+        assert!(
+            oracle_hits >= 1,
+            "the REAL zenoh-pico reported the router on port {port} \
+             {oracle_hits} time(s), so the comparison below would be \
+             vacuous.\n--- oracle stdout ---\n{oracle_printed}"
+        );
         assert_eq!(
             hits, oracle_hits,
             "wz reported the router on port {port} {hits} time(s) and the REAL \
