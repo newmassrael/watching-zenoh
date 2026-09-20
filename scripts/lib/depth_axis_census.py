@@ -1830,7 +1830,18 @@ PIN_NO_SYMBOL = 2
 # new upstream ones are anchored and land in the unjudged bucket as always.
 # AMBIGUOUS holds at 18, which says both new citations are rooted. READ off the
 # census's own FAIL line, `wz citations: 88 against a pin of 86`.
-PIN_WZ_CITATIONS = 88
+#
+# R2748 — 88 -> 90, RISING a third time and by the same atom, which is what a
+# multi-round build looks like from here. `runtime-tokio-uring`'s correction
+# names the two wz files the TASK is built in: the new
+# `crates/wz-runtime-tokio/src/uring_reactor.rs`, and
+# `crates/wz-runtime-tokio/src/uring.rs` again for the submit/reap split that
+# made a reactor expressible. AMBIGUOUS holds at 18, so both are rooted; the
+# correction's other new citations are upstream anchors (the manager-scope
+# dispatch, the `spawn_blocking` ring worker, and `get_fd` as a required trait
+# method) and land in the unjudged bucket as always. READ off the census's own
+# FAIL line, `wz citations: 90 against a pin of 88`.
+PIN_WZ_CITATIONS = 90
 # R2626 — 44 -> 42, and this one is worth a sentence because it HELD through
 # every earlier retirement in this run (R2612, R2622). `time-hlc`'s reason is the
 # first retiree carrying AMBIGUOUS citations of its own: its oldest clauses cite
