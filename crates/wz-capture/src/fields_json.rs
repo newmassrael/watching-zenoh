@@ -3159,7 +3159,7 @@ mod tests {
         );
     }
 
-    /// R2755 (open debt 789) — THE EXTENSION'S DECODED VALUE REACHES THE
+    /// R2756 (open debt 789) — THE EXTENSION'S DECODED VALUE REACHES THE
     /// CONSUMED SURFACE, and not merely its name.
     ///
     /// The sibling above pins the NAME. A document that named `qos` and then

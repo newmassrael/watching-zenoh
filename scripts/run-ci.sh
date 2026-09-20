@@ -11824,6 +11824,7 @@ layer_c1bn_passive_dissection_features() {
         fields_json::tests::an_shm_record_names_itself_to_a_reader_that_declared_no_format \
         fields_json::tests::a_completed_chains_records_are_named_in_the_field_document \
         fields_json::tests::a_body_the_session_could_not_decompress_says_so_in_the_field_document \
+        fields_json::tests::a_frames_qos_extension_carries_its_decoded_priority_into_the_document \
         payload_decode::tests::a_declaration_that_binds_nothing_is_still_reported \
         payload_decode::tests::a_sample_whose_declared_encoding_contradicts_the_rule_is_not_decoded \
         payload_decode::tests::the_claim_the_rule_agrees_with_and_the_silence_that_is_no_claim_both_decode \
