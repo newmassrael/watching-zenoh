@@ -10184,6 +10184,19 @@ layer_c1br_uring_fixed_buffers() {
     # is gigabytes; it is what the lane hit the moment the limit was provisioned
     # to exactly what one registration needs.
     #
+    # ⚠ R2749 — AND SERIALIZING IS NOT SUFFICIENT, which this lane's own red
+    # proved. Hosted run 35488108252 failed HERE, under this `--test-threads=1`,
+    # with `soft=hard=8388608` against a `needed` of 4198400 — a limit at twice
+    # the requirement. MEASURED locally at that same ceiling: one registration
+    # alone passes, two SEQUENTIALLY in one process give `ok` then `ENOMEM`,
+    # and the whole lane gives 5 passed / 15 failed. The kernel releases a
+    # ring's pinned pages asynchronously after its fd closes, so the process
+    # outruns its own predecessor's reclaim; no thread count serializes that.
+    # `FixedSlotRing::register` now waits out a refusal it can PROVE transient
+    # (the limit admits the registration), and the ceiling this lane needs is
+    # therefore one registration's worth rather than "one per test at a time".
+    # The serialization stays because it bounds how much can overlap.
+    #
     # ⚠ R2748 — TWO FILTERS, because `uring::` DOES NOT MATCH `uring_reactor::`.
     # A module-path filter covers everything under its module by construction,
     # which is why `nondefault-tests-gate.sh` admits that spelling and refuses a
