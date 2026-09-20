@@ -102,35 +102,24 @@ impl<const SLOTS: usize, const CAP: usize> PooledStaging<SLOTS, CAP> {
         &self.pool
     }
 
-    /// R311y589 — take a slot WITHOUT the arena's chain accounting.
-    ///
-    /// For [`crate::uring::FixedSlotRing::register`], which needs every slot's
-    /// address at once and is not starting chains. It goes through the
-    /// generated `pool_acquire_for_encode` like everything else — a registration
-    /// that reached into the pool's storage would be reading a private field and
-    /// would stop being a consumer of the FSM, which is the property the whole
-    /// feature is about.
-    #[cfg(feature = "runtime-tokio-uring")]
-    pub(crate) fn acquire_raw(&mut self) -> Option<PooledChain> {
-        self.pool.pool_acquire_for_encode().map(|slot| PooledChain {
-            slot,
-            len: 0,
-            reserved: 0,
-        })
-    }
-
-    /// Counterpart to [`Self::acquire_raw`].
-    #[cfg(feature = "runtime-tokio-uring")]
-    pub(crate) fn release_raw(&mut self, chain: PooledChain) {
-        chain.slot.pool_return(&mut self.pool);
-    }
-
-    /// The address of a held slot's bytes, for handing to the kernel as a
-    /// registered `iovec`.
-    #[cfg(feature = "runtime-tokio-uring")]
-    pub(crate) fn slot_ptr(&mut self, chain: &mut PooledChain) -> *mut u8 {
-        chain.slot.write(&mut self.pool).as_mut_ptr()
-    }
+    // R311y589's `acquire_raw`, `release_raw` and `slot_ptr` STOOD HERE and
+    // R2746 removed them, recorded rather than done quietly — the same way
+    // R2736 recorded `commit_external` below, and for a reason one step
+    // further on.
+    //
+    // All three existed for ONE caller, `crate::uring::FixedSlotRing::register`,
+    // which needed every slot's address at once without starting chains. R2746
+    // repointed that registration at the LINK-RX table: what `READ_FIXED` reads
+    // off a socket is a FRAME, and a reassembly chain is one decode step later
+    // and one granularity finer, so the adapter had been registering the wrong
+    // pool. With the caller gone these are three `pub(crate)` methods nothing
+    // can reach, and `-D dead-code` said so on the first build of the repoint.
+    //
+    // ⚠ Removing them is NOT a claim that reaching a slot's address is wrong.
+    // It is that this arena is no longer where that is done: `LinkRxArena`
+    // hands out a frame whose bytes are a slot, and `slot_of` maps an address
+    // back to its index, so the address seam moved WITH the registration
+    // instead of being left behind here.
 
     // R311y589's `commit_external` STOOD HERE and R2736 removed it, which is
     // recorded rather than done quietly. It recorded that an external writer
@@ -462,6 +451,35 @@ mod tests {
 
         ChainStaging::<SLOTS, CAP>::release(&mut pooled, pooled_chain);
         ChainStaging::<SLOTS, CAP>::release(&mut heaped, heap_chain);
+    }
+
+    /// The RESERVATION is bounded by `CAP` too, which is the other direction
+    /// from the test above: that one refuses a commit LARGER than what was
+    /// lent, this one refuses lending past the chain's ceiling at all.
+    ///
+    /// R2746 moved this here from `crate::uring`, where it had been the bound
+    /// on a `READ_FIXED` destination. That module now reads into a LINK-RX
+    /// frame and touches no chain, so the test had outlived its module while
+    /// remaining true about this one — and its twin above is the reason this is
+    /// where a reader looks for it.
+    ///
+    /// Each commit resolves its own reservation, which is why this reserves
+    /// first: a `buf` call with nothing outstanding is refused on a different
+    /// rule and would pass for the wrong reason.
+    #[test]
+    fn a_reservation_past_the_cap_is_refused() {
+        let mut pooled: PooledStaging<SLOTS, CAP> = ChainStaging::new();
+        let mut chain = ChainStaging::<SLOTS, CAP>::acquire(&mut pooled).expect("slots");
+
+        ChainStaging::<SLOTS, CAP>::buf(&mut pooled, &mut chain, CAP)
+            .expect("a full-CAP reservation");
+        assert!(ChainStaging::<SLOTS, CAP>::commit(&mut pooled, &mut chain, CAP).is_ok());
+
+        assert!(
+            ChainStaging::<SLOTS, CAP>::buf(&mut pooled, &mut chain, 1).is_err(),
+            "one byte past CAP must be refused at the reservation"
+        );
+        ChainStaging::<SLOTS, CAP>::release(&mut pooled, chain);
     }
 
     /// The GENERATED FSM is what moved, not just this module's counter.
