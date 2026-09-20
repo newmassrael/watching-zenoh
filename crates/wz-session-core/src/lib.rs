@@ -404,6 +404,15 @@ pub mod signing_key;
 #[cfg(feature = "alloc")]
 pub mod accept_cookie;
 
+/// R2762 — the per-extension ACCEPT STATE seam the cookie is meant to carry.
+///
+/// Deliberately NOT gated with [`accept_cookie`] above, and the difference is
+/// the point: that module authenticates a `Vec<u8>` and needs an allocator,
+/// while this one writes through `SceSink` and reads through `SceCursor`, so
+/// it is expressible on the no-alloc Inline profile — the profile where the
+/// cookie's declared capacity is hard rather than advisory.
+pub mod accept_state;
+
 /// R311ej — per-deploy session handshake parameters (`SessionInitParams`:
 /// version / whatami / zid / resolutions / lease / cookie + signing
 /// key). Pure owned value type; alloc-gated (Vec zid/cookie + SigningKey).
