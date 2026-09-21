@@ -206,7 +206,7 @@ macro_rules! flag_accept_state {
                 // write before any of this runs, so a byte outside {0, 1}
                 // cannot arrive, and upstream's own bool decode is total too
                 // (`io/zenoh-transport/src/unicast/establishment/ext/lowlatency.rs`
-                // @ `is_lowlatency: is_lowlatency == 1`).
+                // @ `let is_lowlatency = is_lowlatency == 1`).
                 Ok(Self(set))
             }
         }
