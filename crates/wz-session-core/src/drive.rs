@@ -328,11 +328,12 @@ fn dispatch_unit<R: SessionRuntime, T: TimeSource>(
                 //
                 // ⛔ IT BELONGS HERE AND NOT IN `cookie_valid`, which is the
                 // admission predicate the match above calls BEFORE the event
-                // is injected. Upstream splits it the same way: the nonce
-                // compare is in `recv_open_syn` and so is
-                // `// Rebuild the state from the cookie`
-                // (`io/zenoh-transport/src/unicast/establishment/accept.rs`),
-                // both in the HANDLER. Installing state from a guard would put
+                // is injected. Upstream splits it the same way, both halves in
+                // the HANDLER rather than in a check:
+                // `io/zenoh-transport/src/unicast/establishment/accept.rs` @
+                // `// Rebuild the state from the cookie`, and the nonce
+                // compare a few lines above it in the same function.
+                // Installing state from a guard would put
                 // a write inside a question.
                 //
                 // Placed with the other post-admission merges below, and
