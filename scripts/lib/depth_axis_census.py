@@ -1936,7 +1936,17 @@ PIN_NO_SYMBOL = 2
 # atom, `session-unicast-accept` moves 32 -> 36 and no other atom moves; the
 # control holds, the pushed tree still reports 108. READ off the census's own
 # FAIL line, `wz citations: 112 against a pin of 108`.
-PIN_WZ_CITATIONS = 112
+#
+# R2779 — 112 -> 115, `session-unicast-accept` a sixth time: its CORRECTION
+# closes the auth states and open-debt item 803 together, citing the carried
+# state (`accept_state.rs` @ `pub struct AuthAcceptState {`), the per-method
+# draw that replaced the fan-out (`auth_dispatch.rs` @ `pub fn
+# set_drawn_challenges`) and the InitAck site that feeds it
+# (`session_actions.rs` @ `fn draw_auth_challenges`). ATTRIBUTED by the same
+# probe: `session-unicast-accept` moves 36 -> 39 and no other atom moves; the
+# pushed tree still reports 112. READ off the census's own FAIL line, `wz
+# citations: 115 against a pin of 112`.
+PIN_WZ_CITATIONS = 115
 # R2626 — 44 -> 42, and this one is worth a sentence because it HELD through
 # every earlier retirement in this run (R2612, R2622). `time-hlc`'s reason is the
 # first retiree carrying AMBIGUOUS citations of its own: its oldest clauses cite
