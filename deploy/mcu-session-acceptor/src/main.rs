@@ -117,6 +117,15 @@ const DATA_MODE: DataMode = DataMode::FragmentChain;
 
 #[entry]
 fn main() -> ! {
+    // R2776 — paint the stack region FIRST, so the verdict below measures
+    // everything the e2e does (open-debt item 805). On the microbit the region
+    // is the one memory-microbit.x declares; on mps2 it is cortex-m-rt's
+    // default, the RAM above .bss.
+    let stack = wz_mcu_stack::linker_region();
+    // SAFETY: first statement of `main`; nothing below the guard under the
+    // current stack pointer is in use yet.
+    unsafe { stack.paint(cortex_m::register::msp::read() as usize) };
+
     init_heap();
     GLOBAL_CLOCK.init();
     hprintln!("Stage5: MCU acceptor session e2e starting");
@@ -124,7 +133,20 @@ fn main() -> ! {
     // No-op fragment hook: the on-target clock is the real SysTick (never
     // artificially advanced); the advancing-clock seam is host-test-only.
     let report = run_acceptor_e2e(SystickClockRef, DATA_MODE, || {});
+    // Read before anything else runs, so printing the verdict is not part of
+    // what it measures.
+    let verdict = stack.verdict();
+    hprintln!("stack: peak {} of {} bytes", verdict.peak, verdict.budget);
     match report.outcome {
+        AcceptorE2eOutcome::EstablishedAndDispatched if !verdict.fits() => {
+            hprintln!(
+                "Stage5 FAIL: stack peak {} leaves less than {} of its {}-byte budget",
+                verdict.peak,
+                wz_mcu_stack::MARGIN_BYTES,
+                verdict.budget,
+            );
+            debug::exit(debug::EXIT_FAILURE);
+        }
         AcceptorE2eOutcome::EstablishedAndDispatched => {
             hprintln!(
                 "Stage5 PASS: Established + Frame dispatched (advanced_fsm={} cookie_len={})",

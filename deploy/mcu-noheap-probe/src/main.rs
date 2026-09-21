@@ -255,6 +255,15 @@ fn require(stage: &str, ok: bool) {
 
 #[entry]
 fn main() -> ! {
+    // R2776 — paint the stack region FIRST, so the verdict before PASS
+    // measures every stage (open-debt item 805). This probe keeps its whole
+    // working set on the stack, which is why its stack is the one worth
+    // measuring. On the microbit the region is the one memory-microbit.x
+    // declares; on mps2 it is cortex-m-rt's default, the RAM above .bss.
+    // SAFETY: first statement of `main`; nothing below the guard under the
+    // current stack pointer is in use yet.
+    unsafe { wz_mcu_stack::linker_region().paint(cortex_m::register::msp::read() as usize) };
+
     // Each stage is scoped in its own block so its registry (a
     // `BoundedVec` over `BoundedString<MAX_KEYEXPR_BYTES>` backings — a
     // few KB each) is dropped before the next stage allocates, bounding
@@ -574,6 +583,20 @@ fn main() -> ! {
         "switchboard inject tally",
         INJECT_HITS.load(Ordering::SeqCst) == 1,
     );
+
+    // R2776 — the stack verdict, read before PASS is reported and before
+    // printing it adds a frame of its own.
+    let verdict = wz_mcu_stack::linker_region().verdict();
+    hprintln!("stack: peak {} of {} bytes", verdict.peak, verdict.budget);
+    if !verdict.fits() {
+        hprintln!(
+            "R311ho FAIL: stack peak {} leaves less than {} of its {}-byte budget",
+            verdict.peak,
+            wz_mcu_stack::MARGIN_BYTES,
+            verdict.budget,
+        );
+        debug::exit(debug::EXIT_FAILURE);
+    }
 
     // The PASS banner reflects what actually ran on this target: the mps2
     // cores add the stage-7 switchboard inject proof; the M0 keeps the

@@ -198,6 +198,10 @@ members = [
     # onto the workspace and needs no C1/C2 --exclude — it builds + host-
     # tests (the monotonic-floor regression) in the default workspace lanes.
     "wz-mcu-clock",
+    # R2776 — the stack budget check the microbit deploy bins share (no_std
+    # lib, open-debt item 805). Dependency-free for the same reason as the
+    # clock above, so its painting and reading host-test in the default lanes.
+    "wz-mcu-stack",
     # Stage 5 (R311it) — the no_std SSOT for synthetic session handshake
     # wire bytes (craft_initsyn/opensyn/initack/frame). De-duplicates the
     # copies that were in the three wz-runtime-tokio session-FSM test files

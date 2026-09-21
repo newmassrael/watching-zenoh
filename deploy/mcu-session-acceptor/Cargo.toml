@@ -79,6 +79,11 @@ portable-atomic = { version = "1", default-features = false, features = ["fallba
 # only the static + #[exception] + sys_now + the ClockSource impl around it.
 wz-mcu-clock = { path = "../../crates/wz-mcu-clock" }
 
+# R2776 — the stack budget check (open-debt item 805): this bin paints its
+# stack region before the e2e and refuses PASS unless the measured peak stays
+# `wz_mcu_stack::MARGIN_BYTES` under the budget its linker script declares.
+wz-mcu-stack = { path = "../../crates/wz-mcu-stack" }
+
 # The MCU acceptor e2e SSOT (the wz-facing upstream dep). Re-exports the
 # `ClockSource` trait this bin impls (SysTick) so the bin never names the
 # wz facade or wz-session-core directly — the lib is the composition

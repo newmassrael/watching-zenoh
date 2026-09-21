@@ -51,11 +51,74 @@
 //! is a predicate a dissector can CHECK against a real zenoh peer's announced
 //! origin, and that only exists if wz spells the derivation the same way.
 //! Hence the transcription rather than a reuse of the already-linked `sha2`.
+//!
+//! ## Why the sponge is spelled here rather than taken from `sha3`
+//!
+//! R2776 — for its STACK, measured on the Cortex-M0 acceptor, whose 16 KB of
+//! SRAM holds `.bss` and the stack together. `sha3::Shake128` wraps the
+//! Keccak state in a block buffer and hands `finalize_xof` a reader that owns
+//! another copy of both, so this one call took a 1192-byte frame, and the
+//! permutation's own 368 on top of it, to hash at most 32 bytes into 8. It
+//! sat on the deepest path the acceptor has (the OpenAck emit, inside the
+//! receive callback), which is where open-debt item 805 found that
+//! acceptor's stack overflowing into `.bss`.
+//!
+//! The function is unchanged: SHAKE128 as FIPS 202 defines it, over the SAME
+//! permutation `sha3` calls (`keccak::f1600`), absorbed at SHAKE128's rate,
+//! padded with its `0x1F .. 0x80` domain bits, squeezed from the first
+//! lane. What is gone is the buffering, not the construction, and
+//! `shake128_is_the_reference_shake128` keeps it that way by comparing it
+//! with `sha3::Shake128` — the crate zenoh's `compute_sn` uses — across
+//! every length pair the wire allows and past the rate.
 
-use sha3::{
-    digest::{ExtendableOutput, Update, XofReader},
-    Shake128,
-};
+/// SHAKE128's rate in bytes: 1600 state bits minus twice the 128-bit
+/// capacity, FIPS 202 §6.2.
+const SHAKE128_RATE: usize = 168;
+
+/// SHAKE128 as a bare sponge over `keccak::f1600`, reading the first eight
+/// output bytes — all this module squeezes.
+struct Shake128 {
+    state: [u64; 25],
+    /// Bytes absorbed into the current block.
+    pos: usize,
+}
+
+impl Shake128 {
+    fn new() -> Self {
+        Self {
+            state: [0; 25],
+            pos: 0,
+        }
+    }
+
+    /// XOR one byte into the state at byte offset `at`, little-endian within
+    /// its lane — the byte order FIPS 202 fixes for the state.
+    fn xor_byte(&mut self, at: usize, byte: u8) {
+        self.state[at / 8] ^= u64::from(byte) << (8 * (at % 8));
+    }
+
+    fn absorb(&mut self, data: &[u8]) {
+        for &byte in data {
+            self.xor_byte(self.pos, byte);
+            self.pos += 1;
+            if self.pos == SHAKE128_RATE {
+                keccak::f1600(&mut self.state);
+                self.pos = 0;
+            }
+        }
+    }
+
+    /// Pad and squeeze eight bytes. SHAKE's domain suffix `1111` and the
+    /// first bit of `pad10*1` share the byte after the message (`0x1F`); the
+    /// last bit of the pad closes the block (`0x80`). Eight bytes are within
+    /// one rate, so one permutation serves the whole squeeze.
+    fn squeeze_u64(mut self) -> [u8; 8] {
+        self.xor_byte(self.pos, 0x1F);
+        self.xor_byte(SHAKE128_RATE - 1, 0x80);
+        keccak::f1600(&mut self.state);
+        self.state[0].to_le_bytes()
+    }
+}
 
 /// The Open-body `initial_sn` for a session between `own_zid` and
 /// `peer_zid`, projected onto the ring of `sn_mask`
@@ -86,12 +149,10 @@ use sha3::{
 /// bit-identical to what zenoh computes. `the_low_half_is_what_zenoh_reads`
 /// pins that.
 pub fn derive_initial_sn(own_zid: &[u8], peer_zid: &[u8], sn_mask: u64) -> u64 {
-    let mut hasher = Shake128::default();
-    hasher.update(own_zid);
-    hasher.update(peer_zid);
-    let mut bytes = 0u64.to_le_bytes();
-    hasher.finalize_xof().read(&mut bytes);
-    u64::from_le_bytes(bytes) & sn_mask
+    let mut hasher = Shake128::new();
+    hasher.absorb(own_zid);
+    hasher.absorb(peer_zid);
+    u64::from_le_bytes(hasher.squeeze_u64()) & sn_mask
 }
 
 #[cfg(test)]
@@ -198,15 +259,80 @@ mod tests {
     /// bytes — the same number zenoh's `compute_sn` returns.
     #[test]
     fn the_low_half_is_what_zenoh_reads() {
-        let mut hasher = Shake128::default();
-        hasher.update(A);
-        hasher.update(B);
         let mut four = [0u8; 4];
-        hasher.finalize_xof().read(&mut four);
+        reference_shake128(A, B, &mut four);
         let zenoh_value = u32::from_le_bytes(four) as u64;
 
         // res 2 masks to 28 bits, so compare on the full u32 ring the way
         // zenoh's own `RES_U64` cap does.
         assert_eq!(derive_initial_sn(A, B, u32::MAX as u64), zenoh_value);
+    }
+
+    /// The XOF zenoh's `compute_sn` calls, from the crate it calls it from.
+    fn reference_shake128(first: &[u8], second: &[u8], out: &mut [u8]) {
+        use sha3::digest::{ExtendableOutput, Update, XofReader};
+        let mut hasher = sha3::Shake128::default();
+        hasher.update(first);
+        hasher.update(second);
+        hasher.finalize_xof().read(out);
+    }
+
+    /// R2776 — the sponge written here IS SHAKE128, checked against the
+    /// reference over the whole space the wire can hand it and past it.
+    ///
+    /// A zid is 1..=16 wire bytes, so every pair of lengths in 0..=16 is
+    /// covered, each with content that differs per position so a byte
+    /// dropped, doubled or misplaced within a lane changes the answer.
+    /// Lengths that reach and cross the 168-byte rate are covered as well,
+    /// because the block boundary is the one branch no zid pair can reach,
+    /// and a sponge that only ever absorbs one block would pass everything
+    /// else. The last arm feeds exactly one rate of input, which is where the
+    /// padding lands at offset 0 of a fresh block.
+    ///
+    /// The inputs are slices of two fixed buffers rather than vectors: this
+    /// module is compiled by the no-alloc Open-body build too, and its tests
+    /// run there (a Layer C count guard selects them with `alloc` off).
+    #[test]
+    fn shake128_is_the_reference_shake128() {
+        /// The longest input any arm below feeds.
+        const LONGEST: usize = 336;
+        let pattern = |seed: u8| -> [u8; LONGEST] {
+            core::array::from_fn(|i| (i as u8).wrapping_mul(31).wrapping_add(seed))
+        };
+        let (own_short, peer_short) = (pattern(0x11), pattern(0x5a));
+        let (own_long, peer_long) = (pattern(0x23), pattern(0x77));
+        let mut compared = 0usize;
+        let mut check = |own: &[u8], peer: &[u8]| {
+            let mut want = [0u8; 8];
+            reference_shake128(own, peer, &mut want);
+            assert_eq!(
+                derive_initial_sn(own, peer, u64::MAX),
+                u64::from_le_bytes(want),
+                "SHAKE128 differs from sha3 at lengths ({}, {})",
+                own.len(),
+                peer.len()
+            );
+            compared += 1;
+        };
+        for own_len in 0..=16 {
+            for peer_len in 0..=16 {
+                check(&own_short[..own_len], &peer_short[..peer_len]);
+            }
+        }
+        for (own_len, peer_len) in [
+            (160, 7),
+            (167, 0),
+            (168, 0),
+            (0, 168),
+            (100, 100),
+            (LONGEST, 1),
+        ] {
+            check(&own_long[..own_len], &peer_long[..peer_len]);
+        }
+        assert_eq!(
+            compared,
+            17 * 17 + 6,
+            "ANTI-VACUITY: every length pair must have been compared"
+        );
     }
 }

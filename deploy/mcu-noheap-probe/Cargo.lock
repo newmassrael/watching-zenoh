@@ -327,6 +327,7 @@ dependencies = [
  "sce-forge-runtime",
  "sce-rust-runtime",
  "wz-codecs",
+ "wz-mcu-stack",
  "wz-session-core",
 ]
 
@@ -730,6 +731,10 @@ dependencies = [
  "sce-forge-runtime",
  "sce-portable-bytes",
 ]
+
+[[package]]
+name = "wz-mcu-stack"
+version = "0.1.0"
 
 [[package]]
 name = "wz-runtime-core"

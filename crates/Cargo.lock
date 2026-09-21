@@ -2815,6 +2815,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "wz-mcu-stack"
+version = "0.1.0"
+
+[[package]]
 name = "wz-packet-fixtures"
 version = "0.1.0"
 
@@ -2985,6 +2989,7 @@ dependencies = [
  "hashbrown 0.15.5",
  "heapless",
  "hmac",
+ "keccak",
  "log",
  "lz4_flex",
  "portable-atomic",

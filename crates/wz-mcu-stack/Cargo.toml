@@ -1,0 +1,39 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later OR LicenseRef-watching-zenoh-Commercial
+# SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
+#
+# wz-mcu-stack — R2776, the bare-metal deploy binaries' STACK BUDGET check.
+#
+# A `#![no_std]` library owning ONE thing: paint a stack region, read back how
+# deep the program went, and judge that against the budget the linker script
+# declares. It exists because open-debt item 805 found the microbit acceptor's
+# stack running 208 bytes past what its 16 KB layout left above `.bss`, for
+# as long as nobody measured it, and a Layer Q PASS that was luck: the
+# overflow landed on `.bss` nothing on that path read. The three deploys that
+# boot on the microbit carry the same undeclared budget, so the check is ONE
+# crate rather than three pasted copies (the R311y21 reason `wz-mcu-clock`
+# exists).
+#
+# Deliberately depends on NOTHING, and reads the stack pointer from its
+# caller rather than from `cortex-m`: that keeps it a plain host-buildable
+# workspace member whose painting and reading are unit-tested on the host
+# over an ordinary buffer. Only `linker_region` is bare-metal, because only
+# there do cortex-m-rt's `_stack_start` / `_stack_end` symbols exist.
+
+[package]
+name = "wz-mcu-stack"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+readme.workspace = true
+publish = false
+description = "Stack budget check shared by the bare-metal deploy binaries: paint the stack region, read the deepest use back, and judge it against the linker-declared budget."
+
+[lib]
+name = "wz_mcu_stack"
+path = "src/lib.rs"
+
+[lints]
+workspace = true

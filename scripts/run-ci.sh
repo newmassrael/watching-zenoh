@@ -869,9 +869,19 @@ _runci_guarded_test() {
 # R311q1 an386 SYS_EXIT hiccup) left ZERO forensic trace and could only be
 # chased by re-running — this helper records everything the first time.
 # The PASS/FAIL line itself is echoed here (label + " PASS"/" FAIL (why)"), so
-# callers only branch on the return code. Args: 1=label 2=cpu 3=machine 4=elf.
+# callers only branch on the return code. Args: 1=label 2=cpu 3=machine 4=elf,
+# and an optional 5=`stack` for a binary that measures its stack.
+#
+# R2776 — the `stack` argument (open-debt item 805). The three deploys that
+# boot on the microbit paint their stack region and print
+# `stack: peak N of M bytes` before PASS, refusing PASS themselves when the
+# peak leaves less than `wz_mcu_stack::MARGIN_BYTES` of the budget their
+# linker script declares. This helper keeps that line on PASS, so every run
+# shows the margin rather than only a failing one, and for a case passed
+# `stack` it turns a PASS WITHOUT the line into a FAIL: a binary that stopped
+# measuring would otherwise read exactly like one that measured and fit.
 run_qemu_case() {
-    local label="$1" cpu="$2" machine="$3" kernel="$4"
+    local label="$1" cpu="$2" machine="$3" kernel="$4" expect="${5:-}"
     local qlog rc
     qlog="$(mktemp)"
     # Wall-clock bound on the qemu run — a backstop against a GENUINE
@@ -896,7 +906,15 @@ run_qemu_case() {
         -cpu "$cpu" -machine "$machine" \
         -nographic -semihosting-config enable=on,target=native \
         -kernel "$kernel" >"$qlog" 2>&1; then
-        echo "  ${label} PASS"
+        local stack_line
+        stack_line="$(grep -m1 '^stack: peak ' "$qlog" || true)"
+        if [[ "$expect" == "stack" && -z "$stack_line" ]]; then
+            echo "  ${label} FAIL (exited 0 without its \`stack: peak N of M bytes\` verdict — the binary no longer measures its stack)" >&2
+            sed 's/^/    | /' "$qlog" >&2
+            rm -f "$qlog"
+            return 1
+        fi
+        echo "  ${label} PASS${stack_line:+ (${stack_line})}"
         rm -f "$qlog"
         return 0
     else
@@ -9069,10 +9087,15 @@ layer_c1h_arbitrary_subset_matrix() {
 #
 # The session-core arm is deliberately `--no-default-features --features
 # codec-open-body`, the BARE subset: it proves the derivation carries its own
-# `sha3` dependency through that one feature, so a build that can emit an Open
-# frame can always derive its origin.
+# hash dependency through that one feature, so a build that can emit an Open
+# frame can always derive its origin. R2776 — that dependency is `keccak`, the
+# permutation, since the sponge is spelled in `initial_sn.rs` for its stack
+# (open-debt item 805); `sha3::Shake128` is the test oracle now, and 8 -> 9 is
+# `shake128_is_the_reference_shake128`, the differential test against it. The
+# bare subset has no `alloc`, which is why that test feeds fixed buffers and
+# is the reason this arm caught the first draft of it.
 layer_c1ca_cargo_test_derived_initial_sn() {
-    _runci_guarded_test C1ca 8 \
+    _runci_guarded_test C1ca 9 \
         cargo test -p wz-session-core --no-default-features --features codec-open-body \
         --lib initial_sn --quiet || return 1
     _runci_guarded_test C1ca 6 \
@@ -14205,7 +14228,7 @@ layer_q_qemu_mcu_e2e() {
         pbin="deploy/mcu-noheap-probe/target/${ptarget}/release/mcu-noheap-probe"
         if ! run_qemu_case \
             "Q.0.${pmachine} run mcu-noheap-probe via qemu-system-arm ${pmachine}" \
-            "$pcpu" "$pmachine" "$pbin"; then
+            "$pcpu" "$pmachine" "$pbin" stack; then
             fail=1
         fi
     done
@@ -14313,7 +14336,7 @@ install qemu-system-arm" || fail=1
             # indefinitely.
             if ! run_qemu_case \
                 "Q.2.${machine} run mcu-qemu-demo via qemu-system-arm ${machine}" \
-                "$cpu" "$machine" "$bin"; then
+                "$cpu" "$machine" "$bin" stack; then
                 fail=1
             fi
         fi
@@ -14432,7 +14455,7 @@ install qemu-system-arm" || fail=1
             abin="deploy/mcu-session-acceptor/target/${atarget}/release/mcu-session-acceptor"
             if ! run_qemu_case \
                 "Q.4.${amachine}.${alabel} run mcu-session-acceptor via qemu-system-arm ${amachine}" \
-                "$acpu" "$amachine" "$abin"; then
+                "$acpu" "$amachine" "$abin" stack; then
                 fail=1
             fi
         done
@@ -14464,7 +14487,8 @@ install qemu-system-arm" || fail=1
             elif ! run_qemu_case \
                 "Q.4.microbit.slim run mcu-session-acceptor via qemu-system-arm microbit" \
                 cortex-m0 microbit \
-                "deploy/mcu-session-acceptor/target/thumbv6m-none-eabi/release/mcu-session-acceptor"; then
+                "deploy/mcu-session-acceptor/target/thumbv6m-none-eabi/release/mcu-session-acceptor" \
+                stack; then
                 fail=1
             fi
         else

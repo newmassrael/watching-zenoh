@@ -128,6 +128,11 @@ portable-atomic = { version = "1", default-features = false, features = ["fallba
 # only the static + #[exception] + sys_now + the ClockSource impl around it.
 wz-mcu-clock = { path = "../../crates/wz-mcu-clock" }
 
+# R2776 — the stack budget check (open-debt item 805): this bin paints its
+# stack region before the demo and refuses PASS unless the measured peak stays
+# `wz_mcu_stack::MARGIN_BYTES` under the budget its linker script declares.
+wz-mcu-stack = { path = "../../crates/wz-mcu-stack" }
+
 # wz facade — the composable-framework entry point. `runtime-coop`
 # feature pulls wz-runtime-coop + wz-link-lwip. Cross-workspace
 # path dep into `crates/wz`; cargo resolves wz's workspace

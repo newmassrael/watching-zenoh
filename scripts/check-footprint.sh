@@ -114,10 +114,24 @@ declare -A BASELINE_TEXT=(
     # the hosted runner (R311y268 read them back from the first green Layer Q).
     # Was: 19772 / 25352 / 25420 / 26200 (R311y21, path-polluted local-only
     # figures).
-    ["thumbv6m-none-eabi"]=19780
-    ["thumbv7m-none-eabi"]=25296
-    ["thumbv7em-none-eabihf"]=25360
-    ["thumbv8m.main-none-eabi"]=26148
+    #
+    # R2776 — +368 / +476 / +468 / +476 for the stack budget check (open-debt
+    # item 805): the demo now paints its stack region at entry and, before
+    # PASS, reads the peak back through `wz_mcu_stack` and prints it. That is
+    # the whole delta, measured as a DIFFERENCE on one host with one toolchain:
+    # Layer Q at e03eb9e7 read 19772 / 25292 / 25324 / 26132 and with this
+    # change 20140 / 25768 / 25792 / 26608, and each difference is added to the
+    # hosted baseline above rather than the local absolute copied in. ⚠ The
+    # host this was measured on carries arm-none-eabi-gcc 13.2.1 where the
+    # hosted runner carries 10.3.1, so R311y267's "byte-identical gcc" no longer
+    # holds for it: the local absolutes sit a few bytes off the hosted ones
+    # (-8 / -4 / -36 / -16 at e03eb9e7), which is exactly why only the delta
+    # transfers. bss did not move (+0 on every target). Was: 19780 / 25296 /
+    # 25360 / 26148 (R311y267).
+    ["thumbv6m-none-eabi"]=20148
+    ["thumbv7m-none-eabi"]=25772
+    ["thumbv7em-none-eabihf"]=25828
+    ["thumbv8m.main-none-eabi"]=26624
 )
 # shellcheck disable=SC2034  # resolved through the `declare -n _bt/_bd/_bb`
                             # namerefs in the `case "$artifact"` dispatch below; shellcheck

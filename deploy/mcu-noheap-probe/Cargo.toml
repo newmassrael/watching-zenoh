@@ -65,6 +65,13 @@ panic-semihosting = { version = "0.6", features = ["exit"] }
 # pattern) and native LDREX/STREX on ARMv7-M+.
 portable-atomic = { version = "1", default-features = false, features = ["fallback", "critical-section"] }
 
+# R2776 — the stack budget check (open-debt item 805). This probe keeps its
+# whole working set on the stack, so it is the deploy whose stack matters
+# most: it paints its region before the fire paths and refuses PASS unless
+# the measured peak stays `wz_mcu_stack::MARGIN_BYTES` under the budget its
+# linker script declares. Allocation-free, like everything else here.
+wz-mcu-stack = { path = "../../crates/wz-mcu-stack" }
+
 # The unit under test. `default-features = false` => no `alloc` =>
 # heapless bounded backing. `liveliness-token` (R311ho) adds the
 # declarer-side `LocalTokenRegistry` no-heap surface; it implies

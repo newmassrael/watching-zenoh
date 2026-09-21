@@ -405,7 +405,12 @@ codec-init-body = ["wz-codecs/codec-init-body"]
 # alternative (an own feature) would make a build that emits Open bodies
 # WITHOUT a derivation representable, and a session that falls back to the
 # literal 0 origin is indistinguishable from the defect this closes.
-codec-open-body = ["wz-codecs/codec-open-body", "dep:sha3"]
+# R2776 — the dependency it rides is now `keccak`, the permutation, rather
+# than `sha3`: `src/initial_sn.rs` spells the SHAKE128 sponge over it because
+# `sha3`'s buffered wrapper took a 1.5 KB stack frame on the Cortex-M0
+# acceptor's deepest path. The construction is unchanged and is checked
+# against `sha3::Shake128` (a dev-dependency below) in that module's tests.
+codec-open-body = ["wz-codecs/codec-open-body", "dep:keccak"]
 codec-keep-alive = ["wz-codecs/codec-keep-alive"]
 codec-close = ["wz-codecs/codec-close"]
 # R311kt — codec-join forwards the wz-codecs JOIN body codec. Gates the
@@ -1142,12 +1147,15 @@ sha2 = { version = "0.10", default-features = false }
 # `zenoh_crypto::hmac::sign` is `Hmac::<Sha3_256>` (commons/zenoh-crypto/src/
 # hmac.rs:19), so usrpwd interop with zenohd requires SHA3 (the cookie path's
 # sha2 is a different hash). Optional; default-features = false keeps it no_std.
-# R311y816 — TWO consumers now, and the second is NOT AP-only: `codec-open-body`
-# pulls the same crate for `Shake128`, the XOF zenoh's `compute_sn` derives an
-# Open body's `initial_sn` with (src/initial_sn.rs). The MCU unicast acceptor
-# reaches that path, so the no_std flags above are load-bearing rather than
-# defensive. The former "usrpwd ONLY / AP-only" clause is retired here.
+# R311y816 made `codec-open-body` a second consumer, for the `Shake128` zenoh's
+# `compute_sn` derives an Open body's `initial_sn` with. R2776 moved that one to
+# `keccak` below, so usrpwd is this crate's only runtime consumer again; the
+# XOF survives here as the TEST oracle (the `sha3` dev-dependency).
 sha3 = { version = "0.10", default-features = false, optional = true }
+# R2776 — the Keccak-f[1600] permutation `sha3` itself calls, for the SHAKE128
+# sponge `src/initial_sn.rs` spells over it (see the note on `codec-open-body`).
+# The MCU unicast acceptor reaches that path, so no_std is load-bearing.
+keccak = { version = "0.1", default-features = false, optional = true }
 # transport-compression — the per-batch lz4 codec, the SAME crate zenoh uses
 # (io/zenoh-transport lz4_flex 0.11), so a compression-negotiated wz<->zenohd
 # session is byte-compatible. no_std + alloc via the safe-* pure-Rust block impls
@@ -1198,6 +1206,9 @@ serde = { version = "1", features = ["derive"] }
 # concrete serde format to round-trip THROUGH; `serde::Serialize` alone proves
 # only that the derive compiled. Inert in the production artifact.
 serde_json = "1"
+# R2776 — TEST-ONLY oracle: the `Shake128` zenoh's `compute_sn` calls, against
+# which `src/initial_sn.rs` checks the sponge it spells over `keccak`.
+sha3 = { version = "0.10", default-features = false }
 
 [lints]
 workspace = true

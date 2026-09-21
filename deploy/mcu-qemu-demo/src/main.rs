@@ -202,10 +202,35 @@ const POLL_BUDGET: u32 = 100;
 
 #[entry]
 fn main() -> ! {
+    // R2776 — paint the stack region FIRST, so the verdict at PASS measures
+    // everything the demo does (open-debt item 805). On the microbit the
+    // region is the one memory-microbit.x declares; on mps2 it is
+    // cortex-m-rt's default, the RAM above .bss.
+    // SAFETY: first statement of `main`; nothing below the guard under the
+    // current stack pointer is in use yet.
+    unsafe { wz_mcu_stack::linker_region().paint(cortex_m::register::msp::read() as usize) };
     init_heap();
     GLOBAL_CLOCK.init();
     let link = LwipLink::init();
     run(link)
+}
+
+/// R2776 — the stack verdict, taken at a PASS site before PASS is reported:
+/// prints the measured peak, and exits with FAILURE instead when the peak
+/// leaves less than `wz_mcu_stack::MARGIN_BYTES` of the declared budget.
+fn check_stack(tag: &str) {
+    let verdict = wz_mcu_stack::linker_region().verdict();
+    hprintln!("stack: peak {} of {} bytes", verdict.peak, verdict.budget);
+    if !verdict.fits() {
+        hprintln!(
+            "{} FAIL: stack peak {} leaves less than {} of its {}-byte budget",
+            tag,
+            verdict.peak,
+            wz_mcu_stack::MARGIN_BYTES,
+            verdict.budget,
+        );
+        debug::exit(debug::EXIT_FAILURE);
+    }
 }
 
 /// Async main path — mps2 family (Cortex-M3/M4/M7/M33). Constructs
@@ -303,6 +328,7 @@ fn run(link: LwipLink) -> ! {
                 && dg.src_port == ECHO_PORT
                 && dg.src_addr == ipv4_addr_loopback()
             {
+                check_stack("R311bq");
                 hprintln!("R311bq PASS");
                 debug::exit(debug::EXIT_SUCCESS);
             }
@@ -337,6 +363,7 @@ async fn echo_task(mut sock: LwipUdpSocket, time: CoopTime<SystickClockRef>) {
                 && dg.src_port == ECHO_PORT
                 && dg.src_addr == ipv4_addr_loopback()
             {
+                check_stack("R311bi");
                 hprintln!("R311bi PASS");
                 debug::exit(debug::EXIT_SUCCESS);
             }

@@ -11,28 +11,35 @@
  *
  *   - 0x00000000 - 0x0003FFFF   FLASH (256 KB; QEMU loads `-kernel`
  *                               here)
- *   - 0x20000000 - 0x20003FFF   SRAM (16 KB; .data + .bss + stack
- *                               + cortex-m-rt's HEAP region all
- *                               share this budget)
+ *   - 0x20000000 - 0x20003FFF   SRAM (16 KB; .data + .bss + the
+ *                               stack all share this budget)
  *
  * 16 KB total RAM is the binding constraint for R311bm-m0. The
  * demo's HEAP_SIZE drops to 4 KB on this target (vs 256 KB on
- * the mps2 family) and the wz facade composition still has to
- * fit lwIP MEM_SIZE + cortex-m-rt's stack + .data + .bss inside
- * the remaining 12 KB. If that does not fit, the link step
- * surfaces an overflow region error — honest catalog feedback
- * that the current composable-framework preset surface is too
- * heavy for nrf51-class devices and a slim-only-runtime-coop
- * preset is needed.
+ * the mps2 family), and the heap is a static inside .bss.
  *
- * cortex-m-rt's bundled `link.x` INCLUDEs this file; the
- * MEMORY region names FLASH + RAM are required by the default
- * section layout. Stack grows down from the top of RAM
- * (cortex-m-rt's `_stack_start = ORIGIN(RAM) + LENGTH(RAM)`).
+ * ## The stack is DECLARED, and it sits BELOW .data/.bss (R2776)
+ *
+ * The same structure, for the same reason, as
+ * `deploy/mcu-session-acceptor/memory-microbit.x`, which records the
+ * overflow that made it necessary (open-debt item 805): a stack that
+ * outgrows STACK faults below SRAM at the push that does it instead of
+ * writing over .bss, a .bss that outgrows RAM fails the link, and the
+ * binary checks its measured peak against STACK with `wz_mcu_stack`
+ * before it reports PASS.
+ *
+ * Measured in R2776: .data + .bss 12076 bytes, stack peak 852 bytes.
+ * RAM = 13K leaves .bss 1236 bytes to grow; STACK = 3K leaves the stack
+ * far more than `wz_mcu_stack::MARGIN_BYTES`. The boot prints the peak
+ * every run — read it there, not here.
  */
 
 MEMORY
 {
   FLASH : ORIGIN = 0x00000000, LENGTH = 256K
-  RAM   : ORIGIN = 0x20000000, LENGTH = 16K
+  STACK : ORIGIN = 0x20000000, LENGTH = 3K
+  RAM   : ORIGIN = 0x20000C00, LENGTH = 13K
 }
+
+_stack_start = ORIGIN(STACK) + LENGTH(STACK);
+_stack_end = ORIGIN(STACK);

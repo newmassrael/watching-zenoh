@@ -8301,15 +8301,32 @@ impl<R: SessionRuntime, T: TimeSource> SessionActionsBinding<R, T> {
 /// the host handshake deadline-sweep (see `drive_session_until_terminal`)
 /// turns the resulting no-emit into an honest `*.timeout -> Closing`
 /// rather than an indefinite hang.
+///
+/// # Why every method is `#[inline(never)]`
+///
+/// R2776 — a STACK property, not a speed one. The generated engine calls
+/// these from one dispatch function, and inlined there their bodies share
+/// that function's single frame, sized for the largest set of locals ANY
+/// action holds and carried on EVERY action's path. So an action's cost
+/// stopped being its own: R2774 added locals to the InitAck mint alone and
+/// the OpenAck path's peak rose by the same amount, through
+/// `Engine::execute_on_entry_with_path` (608 -> 744 bytes on the Cortex-M0
+/// acceptor). That was the push which took the microbit acceptor, whose
+/// 16 KB of SRAM had already been 208 bytes short, into a fault. Out of
+/// line, an action's locals are on the stack only while that action runs,
+/// and that acceptor's measured peak fell from 7920 to 7264 bytes.
+/// Open-debt item 805.
 impl<R: SessionRuntime, T: TimeSource> SessionFsmUnicastActionsTrait
     for SessionActionsBinding<R, T>
 {
+    #[inline(never)]
     fn link_driver_open(&mut self) {
         let a = &self.inner;
         R::with_mutex_mut(&a.trace, |t| t.link_driver_open += 1);
         a.link_driver().open_blocking();
     }
 
+    #[inline(never)]
     fn send_init_syn(&mut self) {
         // R311cd — session-unicast-open gates the open-side (Initiator)
         // wire emit. cfg-off: no-op (acceptor-only deploy cannot
@@ -8398,6 +8415,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionFsmUnicastActionsTrait
         }
     }
 
+    #[inline(never)]
     fn send_open_syn(&mut self) {
         #[cfg(all(feature = "codec-open-body", feature = "session-unicast-open"))]
         {
@@ -8437,6 +8455,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionFsmUnicastActionsTrait
         }
     }
 
+    #[inline(never)]
     fn send_init_ack_with_cookie(&mut self) {
         // R311cd — session-unicast-accept gates the accept-side (Acceptor)
         // wire emit. cfg-off: no-op (initiator-only deploy cannot listen).
@@ -8601,6 +8620,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionFsmUnicastActionsTrait
         }
     }
 
+    #[inline(never)]
     fn send_open_ack(&mut self) {
         #[cfg(all(feature = "codec-open-body", feature = "session-unicast-accept"))]
         {
@@ -8634,6 +8654,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionFsmUnicastActionsTrait
         }
     }
 
+    #[inline(never)]
     fn send_close_frame_with_reason(&mut self) {
         #[cfg(feature = "codec-close")]
         {
@@ -8656,6 +8677,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionFsmUnicastActionsTrait
         }
     }
 
+    #[inline(never)]
     fn release_link(&mut self) {
         let a = &self.inner;
         R::with_mutex_mut(&a.trace, |t| t.release_link += 1);
@@ -8674,10 +8696,12 @@ impl<R: SessionRuntime, T: TimeSource> SessionFsmUnicastActionsTrait
         a.link_driver().close_blocking();
     }
 
+    #[inline(never)]
     fn enable_rx_tx_regions(&mut self) {
         R::with_mutex_mut(&self.inner.trace, |t| t.enable_rx_tx_regions += 1);
     }
 
+    #[inline(never)]
     fn record_established_at(&mut self) {
         let a = &self.inner;
         R::with_mutex_mut(&a.trace, |t| t.record_established_at += 1);
@@ -8693,14 +8717,17 @@ impl<R: SessionRuntime, T: TimeSource> SessionFsmUnicastActionsTrait
         R::with_mutex_mut(&self.link().transport_available, |g| *g = true);
     }
 
+    #[inline(never)]
     fn start_lease_monitor(&mut self) {
         R::with_mutex_mut(&self.inner.trace, |t| t.start_lease_monitor += 1);
     }
 
+    #[inline(never)]
     fn stop_lease_monitor(&mut self) {
         R::with_mutex_mut(&self.inner.trace, |t| t.stop_lease_monitor += 1);
     }
 
+    #[inline(never)]
     fn start_keepalive_worker(&mut self) {
         // R311cb — transport-keepalive gates the keepalive worker. cfg-off:
         // no-op (the FSM cannot enter the lease-monitored Established
@@ -8712,6 +8739,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionFsmUnicastActionsTrait
         }
     }
 
+    #[inline(never)]
     fn stop_keepalive_worker(&mut self) {
         #[cfg(feature = "transport-keepalive")]
         {
@@ -8719,10 +8747,12 @@ impl<R: SessionRuntime, T: TimeSource> SessionFsmUnicastActionsTrait
         }
     }
 
+    #[inline(never)]
     fn free_pool_slots(&mut self) {
         R::with_mutex_mut(&self.inner.trace, |t| t.free_pool_slots += 1);
     }
 
+    #[inline(never)]
     fn set_close_reason_generic(&mut self) {
         R::with_mutex_mut(&self.inner.trace, |trace| {
             trace.set_close_reason_count += 1;
@@ -8730,6 +8760,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionFsmUnicastActionsTrait
         });
     }
 
+    #[inline(never)]
     fn set_close_reason_invalid(&mut self) {
         R::with_mutex_mut(&self.inner.trace, |trace| {
             trace.set_close_reason_count += 1;
@@ -8737,6 +8768,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionFsmUnicastActionsTrait
         });
     }
 
+    #[inline(never)]
     fn set_close_reason_expired(&mut self) {
         R::with_mutex_mut(&self.inner.trace, |trace| {
             trace.set_close_reason_count += 1;
@@ -8744,6 +8776,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionFsmUnicastActionsTrait
         });
     }
 
+    #[inline(never)]
     fn set_close_reason_unresponsive(&mut self) {
         R::with_mutex_mut(&self.inner.trace, |trace| {
             trace.set_close_reason_count += 1;
