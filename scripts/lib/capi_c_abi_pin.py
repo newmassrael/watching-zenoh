@@ -293,7 +293,14 @@ def run(cdylibs: list[pathlib.Path]) -> int:
 
     # The SOURCE corner, from the gate that already derives it. Imported, never
     # reimplemented -- see the header.
-    from_source = door_gate.exported(PREFIX)
+    # R2773 -- the src is DERIVED by the same gate, never spelled here. R2766
+    # widened `exported` to take it and this call kept the old arity, so this
+    # line raised TypeError on hosted run 35558290992 and Layer C1ch graded
+    # nothing at all. Asking `door_gate` for both halves is what stops the
+    # next widening from splitting them again.
+    from_source = door_gate.exported(
+        PREFIX, door_gate.src_of(door_gate.surface_for(PREFIX))
+    )
     if not from_source:
         findings.append(
             "the source derivation returned no door, so its agreement with the "

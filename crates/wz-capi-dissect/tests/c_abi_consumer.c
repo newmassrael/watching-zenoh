@@ -974,8 +974,20 @@ int main(void) {
      * so a census door without the second could not give the answer the
      * container doors give for the same bytes. Neither the memory rule nor the
      * record layout moved: both act on the handle wz_dissect_live_open made,
-     * and the one allocation is a string wz_dissect_string_free releases. */
-    CHECK(wz_dissect_abi_version() == 16, "abi version is %d, expected 16",
+     * and the one allocation is a string wz_dissect_string_free releases.
+     * R2766 -- 17 since wz_dissect_pcap_fields_where_limited joined it: the
+     * field document a SELECTOR narrows, which is the row-level answer the
+     * census doors could only count. ONE symbol, and neither the memory rule
+     * nor the record layout moved.
+     * R2773 -- and this line is WHY that revision cost a second hosted round.
+     * The commit that moved the library to 17 moved the GATE's pin with it and
+     * left this one, the consumer's own assertion, still reading 16. So the
+     * exact discipline the header presses on a consumer -- pin the revision,
+     * it moves when a symbol does -- was broken by the tree that publishes it,
+     * in the same commit that published the move. No local lane sees this
+     * file: it is C, compiled by Layer C1bo, which is hosted-only, so the push
+     * that moved the number had nothing that could tell it. */
+    CHECK(wz_dissect_abi_version() == 17, "abi version is %d, expected 17",
           wz_dissect_abi_version());
 
     /* A KeepAlive: one header byte, the smallest complete transport message,

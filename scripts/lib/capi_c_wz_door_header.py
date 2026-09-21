@@ -118,6 +118,42 @@ def prefix_of(header_text: str, where: str = "the header") -> str:
     return m.group(1).lower() + "_"
 
 
+def src_of(header: pathlib.Path) -> str:
+    """The tracked source tree whose doors that header declares.
+
+    The crate is the header's own grandparent -- `<crate>/include/<h>.h` -- so
+    a SURFACES row states one path and this derives the rest from it.
+
+    R2773 (open debt, hosted red 35558290992) -- extracted so that it has ONE
+    definition. R2766 widened `exported` from `(prefix)` to `(prefix, src)` and
+    computed this inline at the single call site it could see; `capi_c_abi_pin`
+    imports `exported` from here and was still calling it with one argument, so
+    Layer C1ch died in a TypeError rather than grading. A second caller needs a
+    second copy of this line or a name to call, and a second copy is how the
+    two drift apart again.
+    """
+    return str((header.parent.parent / "src").relative_to(ROOT))
+
+
+def surface_for(prefix: str) -> pathlib.Path:
+    """The SURFACES row that owns `prefix`, by each header's own guard.
+
+    Fatal when none matches rather than returning None: a caller that asked
+    for a prefix this tree does not publish has asked the wrong question, and
+    an empty answer downstream reads as agreement.
+    """
+    for header in SURFACES:
+        if not header.is_file():
+            continue
+        if prefix_of(header.read_text(errors="replace"), str(header)) == prefix:
+            return header
+    raise Fatal(
+        f"no C surface in SURFACES owns the prefix `{prefix}`. Either the row "
+        "is missing or the header's include guard was renamed; both leave the "
+        "caller grading nothing."
+    )
+
+
 def exported(prefix: str, src: str) -> set[str]:
     """Every wz-own symbol the crate publishes.
 
@@ -190,11 +226,7 @@ def run_one(HEADER: pathlib.Path) -> int:
 
     header_text = HEADER.read_text(errors="replace")
     prefix = prefix_of(header_text, str(HEADER.relative_to(ROOT)))
-    # The crate is the header's own grandparent -- `<crate>/include/<h>.h` --
-    # so a row states one path and the source tree is derived from it rather
-    # than repeated beside it.
-    src = str((HEADER.parent.parent / "src").relative_to(ROOT))
-    have = exported(prefix, src)
+    have = exported(prefix, src_of(HEADER))
     said = declared(header_text, prefix)
 
     findings: list[str] = []
