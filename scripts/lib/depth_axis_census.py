@@ -1963,7 +1963,15 @@ PIN_NO_SYMBOL = 2
 # admit_open_syn(...)`). ATTRIBUTED by the same probe: `session-unicast-accept`
 # moves 41 -> 43 and no other atom moves. READ off the census's own FAIL
 # line, `wz citations: 119 against a pin of 117`.
-PIN_WZ_CITATIONS = 119
+#
+# R2783 — 119 -> 121, `session-unicast-accept` a ninth time: its CORRECTION
+# closes the multilink state, citing the cookie's variable member
+# (`accept_cookie.rs` @ `pub struct MultilinkAcceptState(...)`) and the
+# InitAck draw that replaced the AP seam's (`session_actions.rs` @ `fn
+# draw_multilink_challenge(&self) {`). ATTRIBUTED by the same probe:
+# `session-unicast-accept` moves 43 -> 45 and no other atom moves. READ off
+# the census's own FAIL line, `wz citations: 121 against a pin of 119`.
+PIN_WZ_CITATIONS = 121
 # R2626 — 44 -> 42, and this one is worth a sentence because it HELD through
 # every earlier retirement in this run (R2612, R2622). `time-hlc`'s reason is the
 # first retiree carrying AMBIGUOUS citations of its own: its oldest clauses cite
