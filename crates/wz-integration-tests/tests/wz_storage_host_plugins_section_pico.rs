@@ -45,8 +45,8 @@ use std::process::{Command, Stdio};
 use std::time::Duration;
 
 use wz_integration_tests::common::{
-    read_captured, wait_for_substring, wz_ap_demo_binary, zenoh_pico_cli_binary, ChildGuard,
-    PortReservation,
+    assert_demo_binary_newer_than_sources, read_captured, wait_for_substring, wz_ap_demo_binary,
+    zenoh_pico_cli_binary, ChildGuard, PortReservation,
 };
 
 /// A one-shot pico `z_get` on `keyexpr`, captured up to its terminating Final.
@@ -126,6 +126,10 @@ fn host_says(host: &mut ChildGuard, log: &mut std::fs::File, line: &str, step: &
 #[ignore = "binary-dep e2e (wz-ap-demo --features adminspace-config-hotreload,zenoh-config + zenoh-pico z_get/z_put CLIs); Layer E6h runs via --ignored"]
 fn wz_storage_host_plugins_section_drives_the_storage_manager_via_pico() {
     let demo = wz_ap_demo_binary();
+    // The host must be the binary this lane just built with `zenoh-config`: a
+    // stale one would refuse every `plugins/...` write as a key it cannot
+    // apply, and the refusal would read as the step's failure.
+    assert_demo_binary_newer_than_sources(&demo);
     let z_get = zenoh_pico_cli_binary("z_get");
     let z_put = zenoh_pico_cli_binary("z_put");
     let port_res = PortReservation::pick();
