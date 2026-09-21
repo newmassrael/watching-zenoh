@@ -587,48 +587,61 @@ async fn one_bundle_mints_a_different_cookie_for_each_handshake() {
     // The acceptor-role re-handshake the `cookie_nonce` slot's own note names:
     // the slot survives this reset on purpose, so an un-refreshed bundle
     // re-mints its previous handshake's cookie.
+    //
+    // ⛔ R2771 — A NEW ENGINE, and `engine.initialize()` is NOT a substitute.
+    // That is what this test used to do, and it made the whole second half
+    // VACUOUS from R2763 until here: `Engine::initialize` does not reset
+    // `current_state`, it builds the entry chain FROM it
+    // (`vendor/sce/backends/rust/runtime/src/engine.rs` @
+    // `build_entry_chain::<P>(self.current_state)`). So it re-fired
+    // `SentInitAck.onentry` on an engine already there, and the "second
+    // handshake" that followed hit a state with exactly one outgoing
+    // transition — `sources/session/session_fsm_unicast.scxml` gives
+    // `SentInitAck` only `open_syn.received` — so an InitSyn caused no
+    // transition, no entry, no onentry and no frame. `get_current_state()`
+    // still read `SentInitAck` because the FSM had never LEFT it, and the
+    // assertion passed on that. `Engine::new` is what starts at
+    // `P::initial_state()`.
     actions.reset_for_reopen();
+    let mut engine = new_session_engine(&actions);
     engine.initialize();
-    let (second_frames, _second) =
+    assert_eq!(
+        engine.get_current_state(),
+        S::Init,
+        "a fresh engine must start at Init -- if it does not, the second \
+         handshake below is the same non-event the old fixture measured"
+    );
+    let (second_frames, second) =
         handshake_to_sent_init_ack(&actions, &mut engine, &recording).await;
+    assert!(
+        second_frames > 0,
+        "the second handshake must reach the wire; 0 frames is the vacuity \
+         open-debt 801 recorded"
+    );
+    let second = second.expect("the second handshake's InitAck carries a cookie");
     let second_nonce = actions.cookie_nonce().expect("a nonce was drawn");
 
-    // THE SUBJECT, and it is slot-observable because the DRAW is what R2763
-    // moved: one bundle's two handshakes must not share a nonce, or the
-    // cookies they mint are identical bytes whatever carries them.
+    // THE SUBJECT, now asked of the WIRE and not of a slot: one bundle's two
+    // handshakes must not mint the same cookie. The nonce is asserted beside
+    // it because the draw is what R2763 moved, and a cookie difference that
+    // did not come from the nonce would be a different claim.
     assert_ne!(
-        first_nonce, second_nonce,
-        "one bundle's two handshakes must not share a cookie nonce -- an \
-         initiator that echoed the first handshake's cookie would pass the \
+        first, second,
+        "one bundle's two handshakes must not mint the same cookie -- an \
+         initiator that echoed the first handshake's bytes would pass the \
          second's cookie_valid, which is the replay a per-handshake draw \
          closes"
     );
-
-    // ⛔ A KNOWN GAP, PINNED RATHER THAN HIDDEN — open-debt item 801.
-    //
-    // The re-handshake reaches `SentInitAck` and its action FIRES, and no
-    // frame reaches the link: measured here as 0. A real peer would therefore
-    // never see the InitAck and could never send the OpenSyn the rest of this
-    // test crafts by hand, so "the second handshake works" was never true on
-    // the wire.
-    //
-    // It predates this round by construction: R2769 changed what the cookie
-    // CARRIES and how it is verified, and touched no send path. What it
-    // changed is that the witness now reads the artifact — the old one
-    // rebuilt the cookie from `cookie_nonce()`, which agrees with the slot
-    // whether or not anything was ever transmitted.
-    //
-    // Pinned as an equality so that FIXING it reds this line and the fixer is
-    // sent to the item, rather than the gap quietly re-closing unremarked.
-    assert_eq!(
-        second_frames, 0,
-        "item 801: the re-handshake emits no InitAck. If this is now non-zero \
-         the gap is closed -- restore the wire-cookie arms below and close \
-         the item rather than moving this number"
+    assert_ne!(
+        first_nonce, second_nonce,
+        "and the difference must come from the per-handshake nonce draw"
     );
 
-    // ANTI-VACUITY within what IS observable: the first handshake's cookie
-    // must be REFUSED by the second, which is the replay claim itself.
+    // THE REPLAY CLAIM ITSELF: the first handshake's cookie must be REFUSED
+    // by the second. This is the assertion the whole test exists for, and
+    // until R2771 it ran against a "second handshake" that had never
+    // happened, so a refusal proved nothing — an acceptor that had not moved
+    // refuses on the nonce it still holds.
     let mut driver = QueueDriver::with(vec![LinkEvent::Rx(RxFrame::new(craft_opensyn_wire(
         &first,
     )))]);
@@ -637,6 +650,21 @@ async fn one_bundle_mints_a_different_cookie_for_each_handshake() {
         engine.get_current_state(),
         S::SentInitAck,
         "the FIRST handshake's cookie must not open the second"
+    );
+
+    // ANTI-VACUITY, and it is restored rather than new: the second handshake
+    // must still admit the cookie IT minted, read off its own InitAck. Without
+    // this arm the refusal above is satisfied by an acceptor that admits
+    // nothing at all, which is the shape a broken second handshake has.
+    let mut driver = QueueDriver::with(vec![LinkEvent::Rx(RxFrame::new(craft_opensyn_wire(
+        &second,
+    )))]);
+    let _ = poll_and_dispatch_one(&mut driver, &actions, &mut engine).await;
+    assert_eq!(
+        engine.get_current_state(),
+        S::Established,
+        "this handshake's OWN cookie must still be admitted -- otherwise the \
+         refusal above is just a broken acceptor"
     );
 }
 

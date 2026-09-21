@@ -124,7 +124,7 @@ impl PeerInitCaps {
     /// Re-pack the two resolutions into the INIT-body `sn_res` byte.
     ///
     /// R2769 — the inverse of the `& 0x03` / `>> 2` pair in
-    /// [`decode_wire_caps`], and it lives HERE for the reason that function's
+    /// `decode_wire_caps`, and it lives HERE for the reason that function's
     /// own note gives about being ONE wire decoder: a caller that needed the
     /// packed byte back would otherwise spell the layout a second time, and a
     /// second spelling of a wire layout is the defect rather than the
