@@ -962,10 +962,129 @@ pub struct Contradiction {
     pub reason: Mismatch,
 }
 
+/// R2765 (open debt 788) — WHICH message row a record sat in, as the three
+/// facts the field document already puts on that row.
+///
+/// # Why these three and not a coordinate of their own
+///
+/// Both walks see the same `PassiveFrame`, so nothing has to be translated:
+/// the renderer writes `direction` and `message_at` straight off the frame,
+/// and the list index is what its caller already resolves for the keyexpr
+/// owner. Inventing a join coordinate would have been the failure
+/// [`wz_session_core::passive::PassiveFrame::batch_offset`] names — a
+/// fabricated number read as a measured one.
+///
+/// ⛔ THE LIST INDEX IS LOAD-BEARING and a flow key would not do. A TCP flow
+/// and a UDP flow may carry the identical 5-tuple, which
+/// [`crate::node::ObservedLink::list`] records as the reason a grouping keyed
+/// by flow hands one session's rows to the other.
+///
+/// ⚠ `message_at` IS NOT ALWAYS A BYTE OFFSET. For a datagram row it is built
+/// from a packet index, which is why the document carries `offset_space`
+/// beside it. As a KEY that does not matter — it only has to be unique within
+/// a list and direction, which it is either way — but a reader must not add it
+/// to anything.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub struct RowKey {
+    list: usize,
+    direction: usize,
+    message_at: usize,
+}
+
+#[cfg(feature = "network-codecs")]
+impl RowKey {
+    /// The row one frame's records belong to.
+    ///
+    /// ⚠ IT TAKES THE LIST INDEX AND NOT A [`crate::node::ListContext`], even
+    /// though the producing walk holds one. A context also carries node
+    /// identity, which a row key has no use for, and the consuming side has no
+    /// context at all — it would have had to build an `unattributed` one just
+    /// to pass a number, and that constructor MEANS "this caller knows no
+    /// node". A signature that demands what it does not use teaches the wrong
+    /// thing at every call site.
+    pub fn of(list: usize, frame: &wz_session_core::passive::PassiveFrame) -> Self {
+        Self {
+            list,
+            direction: crate::agg::dir_index(frame.direction),
+            message_at: crate::FlowDissection::message_at(frame),
+        }
+    }
+}
+
+/// R2765 (open debt 788) — the selector's answers for one row's records, and
+/// the row's own answer folded out of them.
+///
+/// # The fold, and whose decision it is
+///
+/// Any `Yes` makes the row yes, all `No` makes it no, anything else is
+/// undecided. That is the CONSUMER's rule and not a convenience: a row may
+/// carry several records, and the reassembled coordinates of a record exist
+/// only inside a reader, so a row-per-record rendering would have to invent a
+/// coordinate for every one of them.
+///
+/// # Two absences, kept apart
+///
+/// [`Self::folded`] answers `None` when this row had NO record to judge, and
+/// `Some(Truth::Unknown)` when records were judged and the capture could not
+/// decide. Those are different facts — "nothing was asked here" against "we
+/// asked and could not tell" — and a renderer that folded both into one null
+/// would let a reader read a gap as a measured exclusion.
+#[derive(Debug, Clone, Default)]
+pub struct RowVerdict {
+    records: Vec<crate::filter::Truth>,
+}
+
+#[cfg(feature = "network-codecs")]
+impl RowVerdict {
+    /// Every record's answer, in walk order.
+    ///
+    /// The consumer asked for this beside the folded verdict, so a detail pane
+    /// can say WHICH record matched. It is not extra work: it is what the fold
+    /// is computed from.
+    pub fn records(&self) -> &[crate::filter::Truth] {
+        &self.records
+    }
+
+    /// The row's answer, or `None` when no record on it was judged.
+    pub fn folded(&self) -> Option<crate::filter::Truth> {
+        use crate::filter::Truth;
+        if self.records.is_empty() {
+            return None;
+        }
+        if self.records.contains(&Truth::Yes) {
+            return Some(Truth::Yes);
+        }
+        if self.records.iter().all(|t| *t == Truth::No) {
+            return Some(Truth::No);
+        }
+        Some(Truth::Unknown)
+    }
+}
+
 /// Every payload in a capture, judged against its own declaration.
 #[cfg(feature = "network-codecs")]
 #[derive(Debug, Default, Clone)]
 pub struct PayloadCensus {
+    /// R2765 (open debt 788) — the selector's answer for each message ROW this
+    /// walk reached, so a document renderer can say WHICH rows were picked and
+    /// not only how many records were.
+    ///
+    /// # Why it is collected here and not by a walk of its own
+    ///
+    /// [`Self::observe_message`] already computes `filter.matches(..)` over a
+    /// `RecordView` it built to this plane's rules. A second walk that judged
+    /// rows for the renderer would build a second `RecordView`, and two
+    /// spellings of one record's verdict is precisely the failure the consumer
+    /// asked us to avoid on its side of the wire. Keeping the value that is
+    /// already in hand costs one map insert per record.
+    ///
+    /// # Why every census caller carries it
+    ///
+    /// Named rather than hidden: a caller that wants totals and no document
+    /// pays for this map. The alternatives were worse — a mode flag gives one
+    /// type two behaviours a reader has to know about, and a separate walk is
+    /// the second spelling above.
+    row_verdicts: alloc::collections::BTreeMap<RowKey, RowVerdict>,
     rows: alloc::collections::BTreeMap<String, EncodingRow>,
     contradictions: Vec<Contradiction>,
     payloads: usize,
@@ -1012,6 +1131,17 @@ impl PayloadCensus {
     /// Payloads whose declared id is not in this build's table.
     pub fn unknown_ids(&self) -> usize {
         self.unknown_ids
+    }
+
+    /// R2765 (open debt 788) — the selector's answer for one message row, or
+    /// `None` for a row this walk never reached.
+    ///
+    /// ⚠ THAT `None` IS A THIRD ABSENCE, beneath the two
+    /// [`RowVerdict::folded`] already separates. A row the walk never reached
+    /// carried nothing this plane judges at all — a handshake, a keepalive —
+    /// and saying "undecided" about it would claim a question was asked.
+    pub fn row_verdict(&self, key: &RowKey) -> Option<&RowVerdict> {
+        self.row_verdicts.get(key)
     }
 
     /// R311y622 (§1.1o) — payloads whose slot held an SHM DESCRIPTOR, so the
@@ -1180,6 +1310,17 @@ impl PayloadCensus {
             outcome: None,
         });
         self.selection.record(truth);
+        // R2765 (open debt 788) — recorded BESIDE the selection tally and
+        // ABOVE the early return, which is the whole of the correctness here.
+        // Below it only `Yes` records would ever be seen, so every row would
+        // fold to `Yes` and a verdict that says yes to everything is not a
+        // selection. The counter one line up is kept on the same side of that
+        // return for the same reason.
+        self.row_verdicts
+            .entry(RowKey::of(ctx.list(), frame))
+            .or_default()
+            .records
+            .push(truth);
         if truth != crate::filter::Truth::Yes {
             return;
         }

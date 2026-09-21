@@ -100,6 +100,50 @@ pub fn fields_json(
     )
 }
 
+/// R2765 (open debt 788) — the same document, with each row told whether a
+/// SELECTOR picked it.
+///
+/// # What was missing, in the consumer's words
+///
+/// There is a census door that takes a selector and a field door that does
+/// not, so a reader wanting "the messages matching this" could only take the
+/// rows and apply the selector again on its own side. That is a second
+/// implementation of one language, and the verdicts of two implementations
+/// disagree eventually — which is the cost this door removes.
+///
+/// # Where the answer comes from
+///
+/// NOT from here. [`crate::payload`] walks the records, builds each
+/// `RecordView` to its own plane's rules, and asks the filter once; this
+/// function renders what that walk already decided. Evaluating the selector
+/// again at render time would build a second `RecordView` from a different
+/// walk, which is the same defect one layer down.
+///
+/// # The verdict is per ROW
+///
+/// A row may carry several records. Any match makes the row a match, all
+/// misses make it a miss, and anything else is undecided — the consumer's
+/// rule, adopted because a record's reassembled coordinates live only inside
+/// a reader, so a row per record would have to invent one for each.
+pub fn fields_json_where(
+    d: &crate::Dissection,
+    capture: &[u8],
+    max_messages_shown_per_flow: Option<usize>,
+    declarations: Option<&Declarations<'_>>,
+    filter: &crate::filter::Filter,
+) -> String {
+    let grouping = crate::node::session_grouping(d);
+    let verdicts = crate::payload::payloads_grouped(d, filter, &grouping);
+    fields_json_selected(
+        d,
+        capture,
+        max_messages_shown_per_flow,
+        declarations,
+        &grouping,
+        Some(&verdicts),
+    )
+}
+
 /// R2458 (open-debt item 703) — the same document, against a grouping the
 /// caller already has.
 ///
@@ -117,6 +161,30 @@ pub fn fields_json_grouped(
     max_messages_shown_per_flow: Option<usize>,
     declarations: Option<&Declarations<'_>>,
     grouping: &crate::node::SessionGrouping,
+) -> String {
+    fields_json_selected(
+        d,
+        capture,
+        max_messages_shown_per_flow,
+        declarations,
+        grouping,
+        None,
+    )
+}
+
+/// R2765 (open debt 788) — ONE implementation under both doors.
+///
+/// A document with no selector is the `None` case of a document with one, not
+/// a separate renderer: two copies of this walk would be two chances for the
+/// unselected document to drift from the selected one, and a reader comparing
+/// them would be comparing two programs.
+fn fields_json_selected(
+    d: &crate::Dissection,
+    capture: &[u8],
+    max_messages_shown_per_flow: Option<usize>,
+    declarations: Option<&Declarations<'_>>,
+    grouping: &crate::node::SessionGrouping,
+    verdicts: Option<&crate::payload::PayloadCensus>,
 ) -> String {
     // A map with no rules answers `NoRules` for every message, so it renders
     // nothing either way -- folded here so the row renderers ask one question
@@ -155,6 +223,12 @@ pub fn fields_json_grouped(
             spaces,
             max_messages_shown_per_flow,
             declarations,
+            // R2765 (open debt 788) — the LIST index, not the flow. The
+            // caller already resolved it one line up for the keyexpr owner,
+            // and it is what the verdict map is keyed by: a TCP flow and a UDP
+            // flow may carry the identical 5-tuple, so a flow key would read
+            // one list's verdicts onto the other's rows.
+            RowSelection::of(verdicts, lists.stream.get(i).copied()),
             &mut out,
         );
     }
@@ -177,6 +251,11 @@ pub fn fields_json_grouped(
             reread.as_ref(),
             max_messages_shown_per_flow,
             declarations,
+            // R2765 (open debt 788) — this flow's CLEARTEXT list, which is the
+            // one whose rows this producer renders. The sub-lists folded after
+            // this call are the ones the header says the document does not
+            // show, so they have no rows here to carry a verdict.
+            RowSelection::of(verdicts, lists.datagram.get(i).copied()),
             &mut out,
         );
         // R2460 (open-debt item 705) — the flow's QUIC sub-lists, folded after
@@ -334,6 +413,7 @@ fn push_stream_flow(
     spaces: &mut crate::agg::KeyexprSpaces,
     cap: Option<usize>,
     declarations: Option<&Declarations<'_>>,
+    selection: Option<RowSelection<'_>>,
     out: &mut String,
 ) {
     out.push_str("{\"flow\":");
@@ -391,6 +471,7 @@ fn push_stream_flow(
             dir_name(frame.direction),
             crate::anchor_space_of(frame).name()
         );
+        push_selected(selection, frame, out);
         match flow.message_bytes(frame) {
             Err(why) => push_declined(&why, out),
             Ok(bytes) => push_walk(
@@ -417,6 +498,7 @@ fn push_datagram_flow(
     reread: Option<&Reread>,
     cap: Option<usize>,
     declarations: Option<&Declarations<'_>>,
+    selection: Option<RowSelection<'_>>,
     out: &mut String,
 ) {
     out.push_str("{\"flow\":");
@@ -472,6 +554,7 @@ fn push_datagram_flow(
             dir_name(frame.direction),
             crate::anchor_space_of(frame).name()
         );
+        push_selected(selection, frame, out);
         push_walk(
             RowWalk {
                 bytes: message,
@@ -529,6 +612,16 @@ fn push_datagram_flow(
             dir_name(datagram.direction),
             crate::AnchorSpace::PacketIndex.name()
         );
+        // R2765 (open debt 788) — a SCOUTING row is unjudged BY CONSTRUCTION,
+        // and it says so directly rather than through a lookup. The payload
+        // plane never sees these: the comment above this loop's cap says a
+        // scouting message carries no payload, so a key built here would miss
+        // the map and answer `unjudged` by accident. Writing the word is the
+        // same answer with its reason attached, and it cannot become wrong if
+        // the map's keying changes.
+        if selection.is_some() {
+            out.push_str("\"selected\":\"unjudged\",");
+        }
         push_walk(
             RowWalk {
                 bytes: &read.payload,
@@ -1165,6 +1258,89 @@ fn message_at(frame: &PassiveFrame) -> usize {
     crate::FlowDissection::message_at(frame)
 }
 
+/// R2765 (open debt 788) — what a row producer needs to report selection: the
+/// list it is rendering, and the walk that judged it.
+///
+/// # Why one value and not two arguments
+///
+/// They are one fact. A verdict map without a list index cannot be looked up
+/// in, and a list index without a map has nothing to look up — but as two
+/// `Option`s those impossible pairs are representable, and the renderer had to
+/// check for them at a point where the only honest response was to say
+/// nothing. As one `Option` the impossible pairs do not exist, and the absence
+/// means the one thing it should: no selector was given.
+///
+/// ⚠ AND IT KEPT AN ARITY HONEST. Splitting this into two arguments pushed
+/// `push_datagram_flow` past clippy's bound, and the reflex there is an
+/// `#[allow]`. The bound was right: the two arguments that broke it were the
+/// two that should never have been separate.
+#[derive(Clone, Copy)]
+struct RowSelection<'a> {
+    list: usize,
+    census: &'a crate::payload::PayloadCensus,
+}
+
+impl<'a> RowSelection<'a> {
+    /// Both halves, or neither.
+    ///
+    /// The list is an `Option` at the CALLER because a flow this document
+    /// renders may have no list index to resolve — the header's own note on
+    /// which lists it shows. Such a flow's rows cannot be looked up, so the
+    /// honest answer is the same one a document with no selector gives, and
+    /// this is the one place that decision is made.
+    fn of(census: Option<&'a crate::payload::PayloadCensus>, list: Option<usize>) -> Option<Self> {
+        Some(Self {
+            list: list?,
+            census: census?,
+        })
+    }
+}
+
+/// R2765 (open debt 788) — what a selector said about ONE row, or nothing at
+/// all on a document that was not given one.
+///
+/// # Four answers, and none of them is a nullable version of another
+///
+/// The consumer's own rule for its half-rows is that "we could not tell" and
+/// "there is nothing to tell" must not render alike, and the same rule applies
+/// coming the other way. So:
+///
+/// - **absent key** — no selector was given. The document says nothing about
+///   selection and a reader must not infer a verdict from silence.
+/// - **`"yes"` / `"no"`** — the fold decided, from records that were judged.
+/// - **`"undecided"`** — records were judged and the capture does not carry
+///   what deciding needs.
+/// - **`"unjudged"`** — this row carried nothing the record plane judges: a
+///   handshake, a keepalive, a frame whose batch it could not read. Rendering
+///   that as `"undecided"` would claim a question was asked here.
+///
+/// ⚠ THE LAST TWO ARE THE POINT. Folding them into one null is what lets a
+/// reader mistake a gap in the capture for a measured exclusion, which is the
+/// failure this axis was asked for in the first place.
+#[cfg(feature = "network-codecs")]
+fn push_selected(selection: Option<RowSelection<'_>>, frame: &PassiveFrame, out: &mut String) {
+    use crate::filter::Truth;
+    let Some(RowSelection { list, census }) = selection else {
+        return;
+    };
+    let key = crate::payload::RowKey::of(list, frame);
+    let word = match census.row_verdict(&key).and_then(|v| v.folded()) {
+        Some(Truth::Yes) => "yes",
+        Some(Truth::No) => "no",
+        Some(Truth::Unknown) => "undecided",
+        None => "unjudged",
+    };
+    let _ = write!(out, "\"selected\":\"{word}\",");
+}
+
+/// The same, where the record plane is not compiled in at all.
+///
+/// A build without `network-codecs` has no `RecordView` to judge, so it has no
+/// verdict to report and says nothing rather than saying "unjudged" about
+/// every row — which would be this document claiming a walk it never made.
+#[cfg(not(feature = "network-codecs"))]
+fn push_selected(_selection: Option<RowSelection<'_>>, _frame: &PassiveFrame, _out: &mut String) {}
+
 fn message_name(frame: &PassiveFrame) -> String {
     framed_name(frame.frame.as_ref().map(|f| f.kind_name()))
 }
@@ -1609,6 +1785,206 @@ mod tests {
     ///    id) or `no_session` (this flow showed no handshake, so the
     ///    declaration may be one link over).
     ///
+    /// R2765 (open debt 788) — A SELECTOR REACHES THE ROWS, and the document
+    /// says which rows it picked rather than only how many.
+    ///
+    /// The consumer has a census door that takes a selector and a field door
+    /// that does not, so the only way it could show "the messages matching
+    /// this" was to re-implement the selector over the rows it got back. That
+    /// is a second reading of one language, which is the failure both sides
+    /// named independently.
+    ///
+    /// ⚠ THE VERDICT IS FOLDED PER ROW, NOT PER RECORD, and that is the
+    /// consumer's decision rather than a convenience: a row may carry several
+    /// records, and their reassembled coordinates exist only inside a reader,
+    /// so a row-per-record rendering would have to invent a coordinate for
+    /// each. Any Yes makes the row Yes; all No makes it No; anything else is
+    /// the third value.
+    ///
+    /// ⚠ AND THE THIRD VALUE IS NOT `null`-FOR-EVERYTHING. "The capture did
+    /// not carry what deciding needs" and "no record on this row could be
+    /// judged at all" are different facts, and a reader that cannot separate
+    /// them reads a silent gap as a measured exclusion.
+    #[cfg(feature = "network-codecs")]
+    #[test]
+    fn a_selector_picks_rows_in_the_field_document_and_says_which() {
+        let (d, file) = crate::agg::tests::multilink_session_with_file();
+
+        let unfiltered = fields_json(&d, &file, None, None);
+        assert!(
+            !carried_keys(&unfiltered).is_empty(),
+            "anti-vacuity: the fixture must render carried rows at all, or \
+             every count below is 0 and proves nothing: {unfiltered}"
+        );
+
+        // ⚠ THE AXIS IS PAYLOAD SIZE AND NOT THE KEYEXPR, measured rather than
+        // chosen for taste. This fixture carries exactly one keyexpr that
+        // resolves, so `key == ..` cannot produce a miss: every row is either
+        // that key or undecided, and the arm below would fail for a reason
+        // about the fixture rather than about the join. Its payloads are 3, 5
+        // and 11 bytes, so a size question divides them — and it divides them
+        // on an axis that does not depend on resolution, which keeps this test
+        // about selection rather than about keyexpr binding.
+        let picky = crate::filter::Filter::parse("bytes > 6")
+            .expect("the fixture's own payload sizes must parse as a selector");
+        let doc = fields_json_where(&d, &file, None, None, &picky);
+
+        let yes = doc.matches("\"selected\":\"yes\"").count();
+        let no = doc.matches("\"selected\":\"no\"").count();
+        assert!(
+            yes > 0,
+            "the selector must pick something in a capture that carries it: {doc}"
+        );
+        assert!(
+            no > 0,
+            "and it must DIVIDE the rows -- a verdict that says yes to every \
+             row is not a selection: {doc}"
+        );
+    }
+
+    /// R2765 (open debt 788) — THE FOUR ANSWERS ARE FOUR, and the two that
+    /// look alike are the reason this test exists.
+    ///
+    /// `undecided` and `unjudged` both mean "no verdict", and a renderer that
+    /// folded them into one null would be defensible right up until a reader
+    /// acted on it. They are different facts: one says the selector was
+    /// applied and the capture does not carry what deciding needs, the other
+    /// says this row carries nothing the record plane judges at all — a
+    /// handshake, a declaration. A reader chasing "why did my filter miss
+    /// this" needs to know which, because only the first is about the filter.
+    ///
+    /// ⚠ THE FIXTURE PRODUCES ALL FOUR WITHOUT BEING ASKED TO, which is what
+    /// makes this gradeable rather than staged: its Inits and its Declare are
+    /// unjudged, its Pushes with an unresolved keyexpr are undecided under a
+    /// `key` selector, and its three payload sizes split yes from no under a
+    /// `bytes` one.
+    #[cfg(feature = "network-codecs")]
+    #[test]
+    fn the_field_documents_selection_words_do_not_collapse_into_one_absence() {
+        let (d, file) = crate::agg::tests::multilink_session_with_file();
+        let count = |doc: &str, word: &str| {
+            doc.matches(&alloc::format!("\"selected\":\"{word}\""))
+                .count()
+        };
+
+        // A `key` selector: the resolved row answers, the unresolved ones
+        // cannot, and the transport-only rows were never asked.
+        let by_key = fields_json_where(
+            &d,
+            &file,
+            None,
+            None,
+            &crate::filter::Filter::parse("key == demo/temp").expect("parses"),
+        );
+        assert!(
+            count(&by_key, "yes") > 0,
+            "the resolved row must answer: {by_key}"
+        );
+        assert!(
+            count(&by_key, "undecided") > 0,
+            "a row whose keyexpr never bound was ASKED and could not answer: \
+             {by_key}"
+        );
+        assert!(
+            count(&by_key, "unjudged") > 0,
+            "and a row the record plane never walked was not asked at all -- \
+             folding this into `undecided` is the collapse this test forbids: \
+             {by_key}"
+        );
+
+        // A `bytes` selector reaches the same rows on an axis that does not
+        // depend on resolution, so the misses here are misses and not gaps.
+        let by_size = fields_json_where(
+            &d,
+            &file,
+            None,
+            None,
+            &crate::filter::Filter::parse("bytes > 6").expect("parses"),
+        );
+        assert!(
+            count(&by_size, "no") > 0,
+            "a row that was asked and did not match: {by_size}"
+        );
+
+        // AND THE ABSENT KEY IS THE FOURTH ANSWER. A document rendered with no
+        // selector must not say `unjudged` about every row -- that would be a
+        // verdict where none was sought.
+        let plain = fields_json(&d, &file, None, None);
+        assert_eq!(
+            count(&plain, "yes")
+                + count(&plain, "no")
+                + count(&plain, "undecided")
+                + count(&plain, "unjudged"),
+            0,
+            "a document given no selector says NOTHING about selection: {plain}"
+        );
+    }
+
+    /// R2765 (open debt 788) — TWO STREAM FLOWS, WHOSE FIRST MESSAGES SIT AT
+    /// THE SAME OFFSET, get their OWN verdicts.
+    ///
+    /// # Why this fixture exists, and it is a finding rather than a flourish
+    ///
+    /// The round's first damage probe on this axis CAME BACK GREEN: removing
+    /// the list index from the join key reddened nothing. The reason is
+    /// structural and was invisible until it was measured — the other fixture
+    /// is all datagram, and a datagram row's anchor is built from a PACKET
+    /// INDEX, which is unique across the whole capture. The list index adds
+    /// nothing there, so no datagram capture can grade it.
+    ///
+    /// A STREAM anchor is a byte offset within its own direction's stream, so
+    /// the first message of flow one and the first message of flow two both
+    /// sit at zero. That collision is the whole hazard, and it takes two
+    /// stream flows to build.
+    ///
+    /// ⚠ THE TWO PAYLOADS DIFFER IN SIZE ON PURPOSE. Same-size payloads would
+    /// make both rows answer alike, and a key that merged them would be
+    /// indistinguishable from one that did not.
+    #[cfg(feature = "network-codecs")]
+    #[test]
+    fn two_stream_flows_at_the_same_offset_do_not_share_a_verdict() {
+        use crate::census_json::fed_tests::framed_frame;
+        use crate::datagram_tests::{push, sender_space, tcp_packet_on};
+
+        let small = push(sender_space(1, Some("demo/a")), b"xx");
+        let big = push(sender_space(1, Some("demo/b")), b"xxxxxxxxxxxx");
+
+        let mut d = Dissection::new();
+        // Two flows, each carrying ONE message, each at stream offset 0 of
+        // direction A. Different source ports make them two flows; the
+        // identical offset is what the key has to survive.
+        d.push_packet(
+            LINKTYPE_ETHERNET,
+            0,
+            &tcp_packet_on(40001, 0, &framed_frame(0, &small)),
+        );
+        d.push_packet(
+            LINKTYPE_ETHERNET,
+            1,
+            &tcp_packet_on(40002, 0, &framed_frame(0, &big)),
+        );
+        d.finish();
+        let file = crate::pcap::write(LINKTYPE_ETHERNET, &[]);
+
+        let doc = fields_json_where(
+            &d,
+            &file,
+            None,
+            None,
+            &crate::filter::Filter::parse("bytes > 6").expect("parses"),
+        );
+
+        let yes = doc.matches("\"selected\":\"yes\"").count();
+        let no = doc.matches("\"selected\":\"no\"").count();
+        assert_eq!(
+            (yes, no),
+            (1, 1),
+            "one flow's message is over the bound and the other's is under, so \
+             the two rows must answer DIFFERENTLY -- a key that merged them \
+             would give both the same word: {doc}"
+        );
+    }
+
     /// Folded into one `"keyexpr":null`, a reader cannot tell a capture that
     /// started late from a genuine gap and searches the wrong thing. That is
     /// the consumer's own sentence, and it is why the second half is asserted

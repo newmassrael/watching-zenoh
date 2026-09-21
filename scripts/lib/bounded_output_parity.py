@@ -113,6 +113,15 @@ DOORS = {
         "plane that walks every message in the capture was the last one with "
         "no ceiling at all, and its emitter had nothing to say one with.",
     ),
+    "wz_dissect_pcap_fields_where_limited": (
+        CAPI,
+        "a_narrowed_field_document_can_be_bounded_and_says_what_the_bound_cost",
+        "emits the FIELD document NARROWED by a selector. It is the join of "
+        "the two doors above it — the census one takes a selector, the fields "
+        "one emits rows — and it inherits the obligation from both: a reader "
+        "asking which rows matched must not be handed a truncated answer that "
+        "looks complete.",
+    ),
     "--bounded": (
         CLI,
         "a_bound_is_never_silent_even_without_the_health_flag",
@@ -134,7 +143,16 @@ EMITTERS = {
     # at the wrapper would grade a function that emits no key at all. The gate
     # caught its own subject being renamed out from under it, which is what an
     # emitter table is for.
-    CAPTURE_FIELDS: ("fields_json_grouped", "the field document"),
+    #
+    # R2765 (open debt 788) — AND IT CAUGHT IT A SECOND TIME, by the same
+    # mechanism and for the same reason. `fields_json_grouped` became a
+    # delegating wrapper in its turn when a selector-taking door arrived: both
+    # doors render through one body so the unselected document cannot drift
+    # from the selected one, and that body is `fields_json_selected`. The
+    # lesson the note above draws is now measured twice — a renderer this table
+    # names by function name WILL be refactored out from under it, and the gate
+    # failing is the mechanism working rather than a false alarm.
+    CAPTURE_FIELDS: ("fields_json_selected", "the field document"),
 }
 
 

@@ -6263,8 +6263,25 @@ mod datagram_tests {
 
     /// Ethernet + IPv4 + TCP carrying `payload` at `seq`, from low to high.
     pub(crate) fn tcp_packet(seq: u32, payload: &[u8]) -> Vec<u8> {
+        tcp_packet_on(1111, seq, payload)
+    }
+
+    /// R2765 (open debt 788) — the same packet on a CHOSEN source port, so a
+    /// test can build two stream flows instead of one.
+    ///
+    /// The port is the only thing that differs, so it is the only thing this
+    /// takes: a second copy of the packet builder would be a second place for
+    /// the checksums to be right, and this file already paid once for a
+    /// builder whose checksum was present-and-wrong (see below).
+    ///
+    /// ⚠ TWO STREAM FLOWS ARE NOT A COSMETIC VARIATION. A stream frame's
+    /// anchor is a byte offset within ITS OWN direction's stream, so the first
+    /// message of every stream list sits at the same number. Anything keying a
+    /// row by that offset alone reads one list's answer onto another's, and a
+    /// capture with one stream flow cannot show it.
+    pub(crate) fn tcp_packet_on(sport: u16, seq: u32, payload: &[u8]) -> Vec<u8> {
         let mut tcp = Vec::new();
-        tcp.extend_from_slice(&1111u16.to_be_bytes()); // sport (low)
+        tcp.extend_from_slice(&sport.to_be_bytes()); // sport (low)
         tcp.extend_from_slice(&7447u16.to_be_bytes()); // dport
         tcp.extend_from_slice(&seq.to_be_bytes());
         tcp.extend_from_slice(&0u32.to_be_bytes()); // ack

@@ -1143,6 +1143,97 @@ pub unsafe extern "C" fn wz_dissect_pcap_fields_limited(
     )
 }
 
+/// R2765 (open debt 788) — the field document over the messages a SELECTOR
+/// picks, with each row saying which way it went.
+///
+/// # The door this closes
+///
+/// Until now the selector reached the census doors and the rows reached the
+/// field doors, and nothing reached both. A consumer wanting "show me the
+/// messages this selector matches" had one option: take every row and apply
+/// the selector again on its own side. That is a second implementation of this
+/// library's selector language living in the caller, and two implementations
+/// of one language disagree eventually — which is a defect neither side can
+/// debug from its own half.
+///
+/// # What lands on each row
+///
+/// A `"selected"` key with one of four words, and they are four because two of
+/// them would otherwise be one:
+///
+/// * `"yes"` / `"no"` — the row's records were judged and folded. Any match
+///   makes the row a match; all misses make it a miss.
+/// * `"undecided"` — records were judged and this capture does not carry what
+///   deciding needs (an unresolved keyexpr, an absent clock).
+/// * `"unjudged"` — the row carries nothing the record plane judges at all: a
+///   handshake, a keepalive, a declaration.
+///
+/// A caller chasing "why did my selector miss this" must be able to tell the
+/// last two apart, because only `"undecided"` is about the selector.
+///
+/// # Safety
+/// `bytes` must point to at least `len` readable bytes, `selector` and
+/// `declarations` must be NUL-terminated C strings, and `out` must be a
+/// writable pointer to a `*mut c_char`. None may be null.
+#[no_mangle]
+pub unsafe extern "C" fn wz_dissect_pcap_fields_where_limited(
+    bytes: *const u8,
+    len: usize,
+    max_messages_shown_per_flow: usize,
+    selector: *const c_char,
+    declarations: *const c_char,
+    limits: c_int,
+    out: *mut *mut c_char,
+) -> c_int {
+    if bytes.is_null() || selector.is_null() || declarations.is_null() || out.is_null() {
+        return WZ_DISSECT_ERR_INVALID_ARG;
+    }
+    let preset = match limits {
+        WZ_DISSECT_LIMITS_NONE => wz_capture::DissectionLimits::default(),
+        WZ_DISSECT_LIMITS_LIVE_TAP => wz_capture::DissectionLimits::for_live_tap(),
+        // Refused rather than defaulted, exactly as the two doors this one
+        // joins refuse: the failure mode of the other choice is a consumer
+        // that believes its memory is bounded.
+        _ => return WZ_DISSECT_ERR_INVALID_ARG,
+    };
+    // SAFETY: caller contract above.
+    let expr = match unsafe { std::ffi::CStr::from_ptr(selector) }.to_str() {
+        Ok(s) => s,
+        Err(_) => return WZ_DISSECT_ERR_INVALID_ARG,
+    };
+    let filter = match wz_capture::filter::Filter::parse(expr) {
+        Ok(f) => f,
+        Err(_) => return WZ_DISSECT_ERR_SELECTOR,
+    };
+    // SAFETY: caller contract above.
+    let text = match unsafe { std::ffi::CStr::from_ptr(declarations) }.to_str() {
+        Ok(s) => s,
+        Err(_) => return WZ_DISSECT_ERR_INVALID_ARG,
+    };
+    let mut map = wz_capture::payload::formats::FormatMap::new();
+    if map.declare_all(text).is_err() {
+        return WZ_DISSECT_ERR_DECLARATION;
+    }
+    // SAFETY: caller contract above.
+    let input = unsafe { core::slice::from_raw_parts(bytes, len) };
+    let dissection = match Dissection::from_capture_bounded(input, preset) {
+        Ok(d) => d,
+        Err(_) => return WZ_DISSECT_ERR_BAD_CAPTURE,
+    };
+    let cap = (max_messages_shown_per_flow > 0).then_some(max_messages_shown_per_flow);
+    let declared = wz_capture::payload_decode::Declarations::new(&map);
+    write_string(
+        wz_capture::fields_json::fields_json_where(
+            &dissection,
+            input,
+            cap,
+            Some(&declared),
+            &filter,
+        ),
+        out,
+    )
+}
+
 /// R311y856 — read a declaration text and say what is wrong with it, WITHOUT a
 /// capture.
 ///
@@ -4074,6 +4165,46 @@ mod tests {
     }
 
     /// Drive the LIMITED field door the way C does.
+    /// R2765 (open debt 788) — the same call for the selector-taking door.
+    ///
+    /// A separate helper rather than an `Option<&str>` on the one below: the
+    /// two doors have different arities and different refusals, and a helper
+    /// that hid which door it called would make a test's failure ambiguous
+    /// about which contract broke.
+    fn call_fields_where_limited(
+        bytes: &[u8],
+        cap: usize,
+        selector: &str,
+        declarations: &str,
+        limits: c_int,
+    ) -> Result<String, c_int> {
+        let expr = std::ffi::CString::new(selector).expect("no interior NUL");
+        let text = std::ffi::CString::new(declarations).expect("no interior NUL");
+        let mut out: *mut c_char = core::ptr::null_mut();
+        let rc = unsafe {
+            wz_dissect_pcap_fields_where_limited(
+                bytes.as_ptr(),
+                bytes.len(),
+                cap,
+                expr.as_ptr(),
+                text.as_ptr(),
+                limits,
+                &mut out,
+            )
+        };
+        if rc != WZ_DISSECT_OK {
+            assert!(out.is_null(), "an error must hand back no string");
+            return Err(rc);
+        }
+        assert!(!out.is_null(), "OK must come with a string");
+        let s = unsafe { std::ffi::CStr::from_ptr(out) }
+            .to_str()
+            .expect("the document is UTF-8")
+            .to_string();
+        unsafe { wz_dissect_string_free(out) };
+        Ok(s)
+    }
+
     fn call_fields_limited(
         bytes: &[u8],
         cap: usize,
@@ -4138,6 +4269,43 @@ mod tests {
         assert_ne!(
             bounded, unbounded,
             "two doors that answer identically would mean the preset never reached the walk"
+        );
+    }
+
+    /// R2765 (open debt 788) — THE NARROWED FIELD DOCUMENT INHERITS THE
+    /// OBLIGATION FROM BOTH DOORS IT JOINS.
+    ///
+    /// The census door that takes a selector must say what a ceiling cost, and
+    /// so must the fields door that emits rows. A door that does both has MORE
+    /// reason to, not less: a reader asking "which rows matched" and handed a
+    /// truncated answer reads the truncation as a measurement about the
+    /// capture. "Three matched" and "three matched of the ones you were shown"
+    /// are different sentences, and only one of them is true here.
+    #[test]
+    fn a_narrowed_field_document_can_be_bounded_and_says_what_the_bound_cost() {
+        let file = capture_one_flow_past_the_tap_cap();
+
+        let unbounded =
+            call_fields_where_limited(&file, 0, "bytes > 0", "", WZ_DISSECT_LIMITS_NONE)
+                .expect("the capture reads");
+        assert!(
+            unbounded.contains(NO_CAPS_NO_BITE),
+            "the unbounded narrowed document must carry the group and report \
+             no bite: {unbounded}"
+        );
+
+        let bounded =
+            call_fields_where_limited(&file, 0, "bytes > 0", "", WZ_DISSECT_LIMITS_LIVE_TAP)
+                .expect("the capture reads");
+        assert!(
+            bounded.contains(LIVE_TAP_ONE_FLOW_BIT),
+            "the live-tap flow cap must bite and the narrowed document must \
+             say so: {bounded}"
+        );
+        assert_ne!(
+            bounded, unbounded,
+            "two doors that answer identically would mean the preset never \
+             reached the walk"
         );
     }
 

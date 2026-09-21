@@ -1482,7 +1482,13 @@ pub(crate) mod fed_tests {
 
     /// One `T_MID_FRAME` at `sn` carrying `records`, length-prefixed for a
     /// stream link.
-    fn framed_frame(sn: u8, records: &[u8]) -> Vec<u8> {
+    ///
+    /// R2765 (open debt 788) — `pub(crate)` now, for `crate::fields_json`'s
+    /// two-stream-flow fixture. Widened rather than copied: this crate already
+    /// spells the frame wrapper three ways (one with a fixed body, one with a
+    /// pseudo-random one, this one), and a fourth would be a fourth place for
+    /// the length prefix to be got wrong.
+    pub(crate) fn framed_frame(sn: u8, records: &[u8]) -> Vec<u8> {
         let mut wire = vec![
             wz_session_core::wire_const::T_MID_FRAME | wz_session_core::wire_const::FLAG_T_FRAME_R,
             sn,
