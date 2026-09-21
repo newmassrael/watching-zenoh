@@ -794,6 +794,13 @@ async fn named_locator_reconnects_after_link_loss() {
 /// replays the declaration cache (caller-paced retry beyond the policy
 /// cap). Also pins the F2 contract inside the abandoned window: a send
 /// over the surviving bundle rejects typed instead of silently vanishing.
+///
+/// R2782 — unix only: the endpoint goes away and comes back on ONE held
+/// number through `RefusingPort::listen`, which exists only where the number
+/// can be shared (see `refusing_port`). No hosted leg builds this file on a
+/// non-unix host today; the gate makes that a stated limit rather than a
+/// compile error waiting for the first one that does.
+#[cfg(unix)]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn gave_up_supervisor_resumes_on_re_drive() {
     use wz_runtime_tokio_test_support::refusing_port;

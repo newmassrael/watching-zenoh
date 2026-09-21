@@ -635,9 +635,20 @@ pub fn free_port() -> u16 {
 /// second socket to a port only when both did), so the reservation above is
 /// unchanged; and a `bind(:0)` never picks a port another socket holds, with
 /// or without the option, so nothing else on the host can be handed it.
+///
+/// R2782 — UNIX ONLY, that option and the `listen` it enables. `SO_REUSEPORT`
+/// is a unix socket option and socket2 has no setter for it elsewhere; hosted
+/// run 35620636972's Windows portability leg failed to COMPILE this crate on
+/// exactly that call. Windows has a different sharing model (`SO_REUSEADDR`
+/// there lets a second socket take a port another holds, and
+/// `SO_EXCLUSIVEADDRUSE` forbids it), and no leg in this tree can run a
+/// Windows implementation, so none is written: on a non-unix host this is the
+/// R2778 guard exactly -- bound, never listening, refusing -- and `listen`
+/// does not exist, which is a compile error rather than an untested guess.
 pub fn refusing_port() -> RefusingPort {
     let socket = socket2::Socket::new(socket2::Domain::IPV4, socket2::Type::STREAM, None)
         .expect("a TCP socket");
+    #[cfg(unix)]
     socket
         .set_reuse_port(true)
         .expect("SO_REUSEPORT, so a listener can share the held number");
@@ -680,6 +691,9 @@ impl RefusingPort {
     ///
     /// The listener is NON-BLOCKING, ready for tokio's `from_std`, because
     /// every caller in this tree drives it from a tokio test.
+    ///
+    /// Unix only, for the reason [`refusing_port`] gives.
+    #[cfg(unix)]
     pub fn listen(&self) -> std::net::TcpListener {
         let socket = socket2::Socket::new(socket2::Domain::IPV4, socket2::Type::STREAM, None)
             .expect("a TCP socket");
@@ -966,6 +980,7 @@ mod port_tests {
     /// guard without the shared option cannot be joined at all, and `listen`
     /// panics. A guard that let go of the number while a listener held it
     /// would leave nothing refusing after the drop.
+    #[cfg(unix)]
     #[test]
     fn a_refusing_port_listens_and_refuses_again_on_the_same_number() {
         use std::net::{TcpListener, TcpStream};
