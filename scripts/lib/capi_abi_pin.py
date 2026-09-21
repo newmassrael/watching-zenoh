@@ -171,11 +171,29 @@ EXPECTED_SYMBOLS = {
     # two existing field doors, which would have made four.
     "wz_dissect_pcap_fields_limited",
     # R2766 (open debt 788, ABI 17) — the field document a selector narrows.
-    # ⚠ THIS GATE DID NOT CATCH ITS ABSENCE, and that is worth the line: it
-    # reads `nm` over `crates/target/release/libwz_capi_dissect.so` and has no
-    # freshness check, so an artifact built before the symbol existed answers
-    # "set unchanged" and the gate reports green over source it never saw. A
-    # consumer reported the missing header declaration; no lane did.
+    # ⚠ R2770 CORRECTS THE SENTENCE THAT STOOD HERE. It said this gate did not
+    # catch the absence and that no lane did. THE LANE DID: hosted run
+    # 35553888278 reddened Layer C1bo with this gate's own refusal, "exported
+    # but not pinned". The sentence was written while that run was still in
+    # flight, and read a PENDING verdict as NO verdict — which is the reusable
+    # half: a run that has not finished is not a lane that did not look.
+    #
+    # What is true is narrower, and more useful. This gate has no freshness
+    # check because it DELEGATES one. `run-ci.sh` places the call where the
+    # release cdylib has just been built, and says why: it reads the artifact
+    # "rather than out of the source an author just edited", so that an
+    # uncompiled edit cannot pass. That is a REASON, not an oversight — and it
+    # is a premise about the CALLER. On the lane it holds. Run straight from a
+    # dev box it evaporates, and the gate then grades whatever `.so` happens to
+    # be lying in `crates/target/release/`: the local run that missed this
+    # symbol read one built before the symbol existed.
+    #
+    # So the defect was the caller's, not this file's, and the rule it broke is
+    # already written down in this tree — grade with the LANE, never with flags
+    # you chose yourself, because your own flags are always the more generous.
+    # ⚠ The standing hole is still real and still unpaid: presence is checked
+    # (`CDYLIB.is_file()` below FAILs, correctly), provenance is not. A gate
+    # that fails closed on ABSENCE can still be fooled by PRESENCE.
     "wz_dissect_pcap_fields_where_limited",
     "wz_dissect_declarations_diagnose",
     # R311y851 — the four analysis planes' door. Both halves moved together,
