@@ -1059,7 +1059,16 @@ CITATION = re.compile(r"\b((?:[A-Za-z0-9_.-]+/)*[A-Za-z0-9_.-]+\.(?:rs|c|h))(?::
 # alone. It was in `reached` (the C1br suite names its gated code), so this pin
 # falls while UNREACHED and NO_SYMBOL hold at 2 and 2. READ off the census's own
 # FAIL line, `reached: 17 against a pin of 18`.
-PIN_REACHED = 17
+#
+# R2784 — 17 -> 16. `session-unicast-accept` RETIRES to COMPLETE: the last of
+# its residuals, the stateless clause, closed over R2769..R2783 as every state
+# upstream's cookie struct names came to ride the cookie, and
+# `cookie_carrier_gate.py` now derives that population from the struct. It was
+# in `reached` (this module's `reach_partition` on its HEAD reason returned
+# `{'reached': ['session-unicast-accept']}`), so this pin falls while UNREACHED
+# and NO_SYMBOL hold at 2 and 2. READ off the census's own FAIL line,
+# `reached: 16 against a pin of 17`.
+PIN_REACHED = 16
 PIN_UNREACHED = 2
 PIN_NO_SYMBOL = 2
 # R2534 — 346 -> 347. The atom is `adminspace-metrics` and the citation is the
@@ -1971,7 +1980,14 @@ PIN_NO_SYMBOL = 2
 # draw_multilink_challenge(&self) {`). ATTRIBUTED by the same probe:
 # `session-unicast-accept` moves 43 -> 45 and no other atom moves. READ off
 # the census's own FAIL line, `wz citations: 121 against a pin of 119`.
-PIN_WZ_CITATIONS = 121
+#
+# R2784 — 121 -> 76, DOWNWARD and by the whole of one atom: `session-unicast-
+# accept` is promoted to COMPLETE and leaves the PARTIAL population this
+# census reads, taking its 45 resolving citations with it (measured on its HEAD
+# reason with `citation_audit`, not subtracted), and the promotion's addendum
+# lands in a reason the census no longer reads. No other atom moves. READ off
+# the census's own FAIL line, `wz citations: 76 against a pin of 121`.
+PIN_WZ_CITATIONS = 76
 # R2626 — 44 -> 42, and this one is worth a sentence because it HELD through
 # every earlier retirement in this run (R2612, R2622). `time-hlc`'s reason is the
 # first retiree carrying AMBIGUOUS citations of its own: its oldest clauses cite
@@ -2018,7 +2034,12 @@ PIN_WZ_CITATIONS = 121
 # form: every citation it writes is anchored `path` @ `needle`, so the whole of
 # this move is the atom's arrival being run backwards. READ off the census's own
 # FAIL line, as the three entries above insist.
-PIN_AMBIGUOUS = 18
+# R2784 -- 18 -> 17. `session-unicast-accept` departs (COMPLETE) carrying ONE
+# ambiguous citation, measured on its own HEAD reason with `citation_audit`
+# (wz 45, ambiguous 1) rather than apportioned; the promotion's own addendum
+# writes every citation anchored. READ off the census's own FAIL line,
+# `ambiguous citations: 17 against a pin of 18`.
+PIN_AMBIGUOUS = 17
 
 
 class Fatal(Exception):
