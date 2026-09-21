@@ -1865,7 +1865,7 @@ mod tests {
         }
     }
 
-    /// R2773 — a REOPENED session negotiates from this node's OFFER, not from
+    /// R2774 — a REOPENED session negotiates from this node's OFFER, not from
     /// the outcome its previous link negotiated.
     ///
     /// Each negotiated capability is seeded from the offer and then merged
@@ -1995,6 +1995,50 @@ mod tests {
             q.negotiate_qos_link_against_peer(true, &[encode_qos_ext_for(&second)])
                 .expect("a reopened initiator is unconfigured again, so it takes this band too");
             assert_eq!(q.qos_link_metadata(), second, "the second acceptor's band");
+        }
+    }
+
+    /// R2774 — the peer's region belongs to ONE peer: an Init without the
+    /// entry announces "none", and a reopen forgets the last peer's.
+    ///
+    /// The same population as the reopen witness above — handshake-scoped
+    /// state `reset_for_reopen` left standing — found by enumerating every
+    /// session slot that reset does not touch, not by noticing this one. It
+    /// differs in kind: this is what the PEER announced, and its extension
+    /// is optional, so unlike the lease no later handshake is certain to
+    /// overwrite it.
+    #[test]
+    fn a_peer_region_is_the_announcing_peers_alone() {
+        use wz_session_core::extregion::{encode_region_name_ext, RegionName};
+
+        let params = wz_runtime_tokio_test_support::fixture_session_init_params();
+        let (actions, _driver) = crate::test_fixtures::recording_actions_with_params(params);
+        let south = RegionName::new("south-1").expect("a valid region name");
+        let announcing = [encode_region_name_ext(&south).expect("encodes")];
+
+        assert!(actions.admit_peer_region(&announcing));
+        assert_eq!(
+            actions.peer_region(),
+            Some(south.clone()),
+            "ANTI-VACUITY: the slot must hold a region for either arm to clear"
+        );
+        assert!(actions.admit_peer_region(&[]), "an absent entry is benign");
+        assert_eq!(
+            actions.peer_region(),
+            None,
+            "an Init without the entry announces NO region -- upstream assigns"
+        );
+
+        #[cfg(feature = "session-reconnect")]
+        {
+            assert!(actions.admit_peer_region(&announcing));
+            assert_eq!(actions.peer_region(), Some(south));
+            actions.reset_for_reopen();
+            assert_eq!(
+                actions.peer_region(),
+                None,
+                "a reopened session has heard from no peer yet"
+            );
         }
     }
 

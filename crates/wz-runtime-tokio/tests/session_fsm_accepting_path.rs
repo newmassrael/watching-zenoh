@@ -703,7 +703,7 @@ async fn the_open_syn_rebuilds_the_negotiated_state_from_the_cookie() {
     assert_eq!(engine.get_current_state(), S::SentInitAck);
 
     // The cookie is read off the wire, so what is asserted is what a peer
-    // would echo rather than what this test believes was minted. R2773 made
+    // would echo rather than what this test believes was minted. R2774 made
     // it the ONLY place the level can be read here: the acceptor lets go of
     // its slots once the InitAck is out.
     let cookie = minted_cookie(&recording.sent.lock().unwrap().clone());
@@ -723,7 +723,7 @@ async fn the_open_syn_rebuilds_the_negotiated_state_from_the_cookie() {
 
     // DAMAGE the slot. `min()` can only lower, which is exactly why this is a
     // safe way to disturb it: nothing in the session can undo it except a
-    // write from outside the merge. Since R2773 the slot starts EMPTY here,
+    // write from outside the merge. Since R2774 the slot starts EMPTY here,
     // and the damage is still what keeps the restore honest — from `None`
     // the `min()` merge would rise to the carried level on its own, so a
     // rebuild routed through the merge would pass without the damage.
@@ -748,7 +748,7 @@ async fn the_open_syn_rebuilds_the_negotiated_state_from_the_cookie() {
     );
 }
 
-/// R2773 — THE RELEASE. Between InitAck and OpenSyn the acceptor holds none
+/// R2774 — THE RELEASE. Between InitAck and OpenSyn the acceptor holds none
 /// of the negotiated state its cookie carries, and the OpenSyn rebuild is
 /// what puts it back.
 ///

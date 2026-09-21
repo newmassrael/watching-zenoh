@@ -807,7 +807,7 @@ pub struct SessionCore<R: SessionRuntime, T: TimeSource> {
     /// zenoh's `auth_shm` is `None` unless the manager was configured with SHM.
     #[cfg(feature = "session-extshm")]
     pub shm_auth: R::Mutex<crate::extshm::ShmAuthDispatch>,
-    /// R2773 — what THIS node offers, kept APART from what was negotiated.
+    /// R2774 — what THIS node offers, kept APART from what was negotiated.
     ///
     /// Each negotiated capability below (`is_lowlatency`, `is_qos`,
     /// `qos_link`, `is_compression`, `is_shm`) is seeded from an offer and
@@ -1814,7 +1814,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                 // says so. `None` is the pre-handshake truth, not a placeholder.
                 #[cfg(feature = "session-extauth")]
                 peer_auth_id: R::new_mutex(None),
-                // R2773 — nothing offered until the AP layer stages it; the
+                // R2774 — nothing offered until the AP layer stages it; the
                 // slots below start equal to this, which is what makes it
                 // their starting point rather than a second copy.
                 offer: R::new_mutex(crate::transport_mode::SessionOffer::universal()),
@@ -2730,7 +2730,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         }
     }
 
-    /// R2773 — READ the negotiated slots the cookie carries, as one value.
+    /// R2774 — READ the negotiated slots the cookie carries, as one value.
     ///
     /// ⚠ EVERY MEMBER IS UNCONDITIONAL AND ONLY THE VALUE IS GATED, which is
     /// deliberate and is the shape this tree was bitten into adopting: a
@@ -2772,7 +2772,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         }
     }
 
-    /// R2773 — the negotiated slots as they stand BEFORE any peer is heard:
+    /// R2774 — the negotiated slots as they stand BEFORE any peer is heard:
     /// each capability at this node's offer, and no patch level agreed.
     ///
     /// The patch member is `None` rather than wz's own level because a patch
@@ -2799,7 +2799,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         }
     }
 
-    /// R2773 — WRITE the negotiated slots the cookie carries, from one value.
+    /// R2774 — WRITE the negotiated slots the cookie carries, from one value.
     ///
     /// The single writer for that set, whether the value came off the wire
     /// (the OpenSyn rebuild) or out of this node's offer (the return to it
@@ -2842,7 +2842,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         R::with_mutex_mut(&self.negotiated_patch, |s| *s = n.patch.0);
     }
 
-    /// R2773 — return EVERY negotiated slot to this node's offer: the state a
+    /// R2774 — return EVERY negotiated slot to this node's offer: the state a
     /// handshake starts from.
     ///
     /// The five the cookie carries go through `install_negotiated`; the QoS
@@ -2874,7 +2874,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// value here has already been through it, so re-applying the policy would
     /// apply the rule twice — and because qos and lowlatency exclude each
     /// other, restoring both through them is not expressible in EITHER order.
-    /// `install_negotiated` is the direct writer, and R2773 made it the only
+    /// `install_negotiated` is the direct writer, and R2774 made it the only
     /// one for this set.
     ///
     /// Returns `false` when there is no cookie to read or it does not verify —
@@ -3455,7 +3455,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// `false`); the `*_with_lowlatency` entrypoints stage only lowlatency on
     /// fresh actions, so the guard never fires there.
     ///
-    /// R2773 — the guard reads the OFFER, not `is_qos()`. The two agree before
+    /// R2774 — the guard reads the OFFER, not `is_qos()`. The two agree before
     /// a handshake; after one, `is_qos()` is the outcome, and a QoS offer the
     /// peer declined would have let this lowlatency offer through beside it.
     /// The incompatibility is between OPTIONS, as upstream's check is.
@@ -3582,17 +3582,23 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// which upstream refuses: both receive arms are
     /// `ext.map(ext_to_name).transpose()?`, and `ext_to_name` runs
     /// `String::from_utf8` then `RegionName::try_from`, so a non-UTF-8, empty
-    /// or over-long value propagates an error out of the FSM. An ABSENT entry
-    /// is the benign case and leaves the field as it was.
+    /// or over-long value propagates an error out of the FSM.
+    ///
+    /// R2774 — an ABSENT entry is benign and it ASSIGNS "none"; it used to
+    /// leave the field as it was. Upstream's receive arm is an assignment,
+    /// `io/zenoh-transport/src/unicast/establishment/ext/region_name.rs` @ `state.0.other_region_name = ext.map(ext_to_name).transpose()?;`,
+    /// so a peer that announces no region is a peer WITH no region, whatever
+    /// the slot held before. Leaving it was equivalent only while the slot was
+    /// empty on arrival, and a reopened session is where it was not: the
+    /// last peer's region survived into a link whose peer named none.
     ///
     /// Called on every admitted Init, so the acceptor reads the InitSyn's and
     /// the initiator the InitAck's — the both-sides shape
     /// [`Self::negotiate_patch_against_peer`] has.
     pub fn admit_peer_region(&self, extensions: &[ExtEntryOwned]) -> bool {
         match crate::extregion::peer_region(extensions) {
-            Ok(None) => true,
-            Ok(Some(name)) => {
-                R::with_mutex_mut(&self.peer_region, |s| *s = Some(name));
+            Ok(region) => {
+                R::with_mutex_mut(&self.peer_region, |s| *s = region);
                 true
             }
             Err(_) => false,
@@ -3767,7 +3773,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// offer gracefully rather than panicking (an AP config validator can
     /// escalate). Returns `true` iff the offer was applied.
     ///
-    /// R2773 — reads the OFFER, not `is_lowlatency()`, for the reason
+    /// R2774 — reads the OFFER, not `is_lowlatency()`, for the reason
     /// `set_lowlatency_offer` gives.
     #[cfg(feature = "transport-qos")]
     pub fn set_qos_offer(&self, offer: bool) -> bool {
@@ -3819,7 +3825,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// condition, so a metadata-without-offer misconfiguration emits nothing
     /// rather than a `QoSLink` on a NoQoS link.
     ///
-    /// R2773 — this is an OFFER, so it is recorded as one. The merge below no
+    /// R2774 — this is an OFFER, so it is recorded as one. The merge below no
     /// longer comes through here: it writes the negotiated band into the slot
     /// alone, which is what keeps the configured band recoverable after a link
     /// has narrowed it.
@@ -7970,6 +7976,11 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             R::with_mutex_mut(&self.inbound_peer_zid, |slot| *slot = None);
             R::with_mutex_mut(&self.remote_peer_zid, |slot| *slot = None);
             R::with_mutex_mut(&self.peer_whatami, |slot| *slot = None);
+            // R2774 — the peer's region is the PEER's, as `peer_whatami` is:
+            // upstream builds its region state `None` on every link. Without
+            // this the reconnect window reported the previous peer's region
+            // until the next Init replaced it.
+            R::with_mutex_mut(&self.peer_region, |slot| *slot = None);
             // R2566 — the authenticated principal is HANDSHAKE-scoped and must
             // not survive into the re-dial window. The `auth` dispatch itself
             // persists here (its methods keep their configured credentials), so
@@ -7979,7 +7990,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             #[cfg(feature = "session-extauth")]
             R::with_mutex_mut(&self.peer_auth_id, |slot| *slot = None);
             R::with_mutex_mut(&self.inbound_peer_init_caps, |slot| *slot = None);
-            // R2773 — the negotiated capabilities are handshake-scoped too,
+            // R2774 — the negotiated capabilities are handshake-scoped too,
             // and they were the ones left standing: every merge on them moves
             // one way, so the last link's outcome became the next link's
             // offer and each reconnect could only lose capability. The next
@@ -8571,7 +8582,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionFsmUnicastActionsTrait
                 )
                 .expect("the widest accept cookie is 51 bytes, within the codec's 128 cap");
             a.send_wire(&bytes, Reliability::Reliable, Priority::DEFAULT);
-            // R2773 — LET GO of what the cookie now carries. Upstream's
+            // R2774 — LET GO of what the cookie now carries. Upstream's
             // acceptor keeps nothing negotiated between InitAck and OpenSyn:
             // `send_init_ack` takes its `State` by value and `recv_open_syn`
             // builds a new one from the cookie. The slots return to this

@@ -697,7 +697,7 @@ async fn r311y817_acceptor_does_not_refuse_an_init_syn_announcing_a_future_patch
         !engine.is_in_final_state(),
         "the acceptor session survives an initiator announcing a future patch"
     );
-    // R2773 — read from the COOKIE, not the slot. Between InitAck and OpenSyn
+    // R2774 — read from the COOKIE, not the slot. Between InitAck and OpenSyn
     // the acceptor no longer holds what it negotiated; it carries it in the
     // cookie this InitAck handed the peer, so that is where the level is.
     let cookie = recorder

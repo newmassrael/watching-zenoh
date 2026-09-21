@@ -114,7 +114,7 @@ async fn acceptor_answers(init_syn_wire: Vec<u8>) -> (u8, u8) {
         } => (extensions, body.cookie.clone()),
         other => panic!("the acceptor's reply is not an InitAck: {other:?}"),
     };
-    // R2773 — the internal level is read from the COOKIE this InitAck carries.
+    // R2774 — the internal level is read from the COOKIE this InitAck carries.
     // Between InitAck and OpenSyn the acceptor no longer holds what it
     // negotiated, so the slot would report nothing; the cookie is where that
     // level now lives until the OpenSyn rebuilds it.

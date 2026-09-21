@@ -48,7 +48,7 @@
 //! profile and HARD on the no-alloc Inline one. The outcome form is at most
 //! 35 bytes of payload plus a 16-byte tag.
 //!
-//! ## Where it is used (R2769, R2772, R2773)
+//! ## Where it is used (R2769, R2772, R2774)
 //!
 //! The acceptor mints this at InitAck, verifies and REBUILDS its negotiated
 //! slots from it at OpenSyn, and in between returns those slots to its own
@@ -83,7 +83,7 @@ const COOKIE_HEAD_BYTES: usize = 13;
 /// down.
 ///
 /// R2765 — a literal here would be a second copy of a fact the states already
-/// own. R2773 moved the sum into the group itself, whose `WIDTH` adds its
+/// own. R2774 moved the sum into the group itself, whose `WIDTH` adds its
 /// members', so adding a member is one change in one place and the length
 /// check cannot be left behind.
 /// `crates/wz-session-core/src/accept_state.rs` @ `fn the_declared_width_is_what_each_state_writes`
@@ -113,7 +113,7 @@ pub struct AcceptCookieState {
     ///
     /// R2765 replaced a private four-bit `flags` byte with per-extension
     /// states, because a bitset can hold an outcome bool and cannot hold
-    /// `PatchAcceptState`'s `Option<u8>`. R2773 made them one group, so the
+    /// `PatchAcceptState`'s `Option<u8>`. R2774 made them one group, so the
     /// session writes all of them from one value on the way back in.
     ///
     /// THE ORDER IS wz's OWN. The payload is private — an initiator receives

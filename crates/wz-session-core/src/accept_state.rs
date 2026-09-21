@@ -49,7 +49,7 @@
 //! wz keeps. [`crate::accept_state::PatchAcceptState`] is the first instance
 //! — see its own note.
 //!
-//! ## What the cookie carries, and what it still does not (R2773)
+//! ## What the cookie carries, and what it still does not (R2774)
 //!
 //! The five states `NegotiatedExtensions` groups ride the cookie, and the
 //! acceptor rebuilds them at OpenSyn and does not hold them in between.
@@ -226,7 +226,7 @@ flag_accept_state! {
     /// @ `pub(crate) struct StateAccept`, which wraps a richer `State` because
     /// its qos extension also negotiates link-level priorities.
     ///
-    /// ⚠ R2773 — this bool is NARROWER than what wz negotiates, not equal to
+    /// ⚠ R2774 — this bool is NARROWER than what wz negotiates, not equal to
     /// it. Under `session-extqos` wz merges the priority band and reliability
     /// too, into `qos_link`, and this state does not carry them. So an
     /// acceptor built with that feature still holds its merged band between
@@ -237,7 +237,7 @@ flag_accept_state! {
 flag_accept_state! {
     /// Whether this session negotiated shared memory.
     ///
-    /// R2773 corrected what this note used to say on BOTH counts. Upstream's
+    /// R2774 corrected what this note used to say on BOTH counts. Upstream's
     /// shm accept state carries no challenge — it is the empty `StateOpen`,
     /// `io/zenoh-transport/src/unicast/establishment/ext/shm/auth.rs` @ `pub(crate) type StateAccept = StateOpen;`
     /// — and wz's shm DOES authenticate, by the challenge exchange
@@ -268,7 +268,7 @@ flag_accept_state! {
 /// Every extension state the acceptor's cookie carries, as ONE value in the
 /// codec's order.
 ///
-/// R2773 — before this was a type, the set was spelled four times: the mint
+/// R2774 — before this was a type, the set was spelled four times: the mint
 /// read five slots, the codec wrote five states and read them back, and the
 /// rebuild wrote five slots. Four spellings of one set drift one member at a
 /// time, and in the direction nothing reports: a state minted and never

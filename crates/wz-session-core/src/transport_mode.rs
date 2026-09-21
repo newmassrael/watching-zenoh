@@ -176,7 +176,7 @@ impl SessionOffer {
         self
     }
 
-    /// R2773 — the STAGING form of `with_mode`, for the granular
+    /// R2774 — the STAGING form of `with_mode`, for the granular
     /// `set_qos_offer` / `set_lowlatency_offer` setters: it refuses to
     /// displace the other exclusive mode, where `with_mode` replaces it.
     ///
