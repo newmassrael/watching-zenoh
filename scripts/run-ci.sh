@@ -11334,6 +11334,12 @@ layer_c1bo_dissect_c_abi() {
     command -v nm >/dev/null 2>&1 || {
         echo "  C1bo FAIL: nm is absent, so the ABI symbol set cannot be read"; return 1; }
     python3 scripts/lib/capi_abi_pin.py || return 1
+    # R2775 (open debt 804) -- the gate now reads WZ_DISSECT_ABI_REVISION out
+    # of the header as well, and the header names that macro in prose several
+    # times. The selftest holds the reader to the DEFINE, so a prose mention
+    # can never answer for it; run here beside the gate it guards, the way
+    # capi_c_abi_pin's selftest runs beside its own.
+    python3 scripts/lib/capi_abi_pin.py --selftest >/dev/null || return 1
 
     # R2116 (open-debt item 466) — and what the HEADER says about those same
     # symbols, held against what the library answers.

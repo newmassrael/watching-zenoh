@@ -220,6 +220,46 @@ EXPECTED_SYMBOLS = {
 
 CDYLIB = pathlib.Path("crates/target/release/libwz_capi_dissect.so")
 
+# R2775 (open debt 804) — the header this revision is published in. Until this
+# round it published NO revision: the number existed only in the running
+# library, so a consumer could ask what it was RUNNING against and never what
+# it COMPILED against. `capi_c_abi_pin.py` holds the sibling of this pair for
+# `wz_capi_c.h`, and reads it the same way.
+HEADER = pathlib.Path("crates/wz-capi-dissect/include/wz_dissect.h")
+
+
+def header_revision(text: str) -> int | None:
+    """`WZ_DISSECT_ABI_REVISION` as the C preprocessor would see it, or None.
+
+    Anchored to a `#define` line rather than found anywhere, because the header
+    explains the macro at length and names it while doing so — its own usage
+    example compares the function against it. A search for the token would be
+    answered by the prose; the selftest below holds that case red.
+    """
+    m = re.search(r"^#define\s+WZ_DISSECT_ABI_REVISION\s+(-?\d+)\s*$", text, re.M)
+    return int(m.group(1)) if m else None
+
+
+def selftest() -> int:
+    """The define is read; a prose mention with a number after it is NOT."""
+    cases = [
+        ("#define WZ_DISSECT_ABI_REVISION 7\n", 7),
+        (" * compare it against WZ_DISSECT_ABI_REVISION 3 before reading\n", None),
+        ("/* no revision here */\n", None),
+        (" * WZ_DISSECT_ABI_REVISION 4\n#define WZ_DISSECT_ABI_REVISION 9\n", 9),
+    ]
+    for text, want in cases:
+        got = header_revision(text)
+        if got != want:
+            print(
+                f"capi-abi-pin: selftest FAIL -- {text!r} read as {got}, "
+                f"expected {want}",
+                file=sys.stderr,
+            )
+            return 1
+    print("capi-abi-pin: selftest OK")
+    return 0
+
 
 def exported(cdylib: pathlib.Path) -> set[str]:
     """The `wz_dissect_*` symbols the artifact DEFINES, read from itself."""
@@ -288,6 +328,32 @@ def main() -> int:
         return 1
 
     version = revision(CDYLIB)
+
+    # R2775 — the header half of the pair. Read before any other arm so a
+    # missing define is named on its own rather than hidden behind a symbol
+    # finding.
+    header_text = HEADER.read_text(errors="replace") if HEADER.is_file() else ""
+    compiled = header_revision(header_text)
+    if compiled is None:
+        print(
+            f"capi-abi-pin: FAIL -- {HEADER} defines no WZ_DISSECT_ABI_REVISION. "
+            f"A consumer can then ask only what it is RUNNING against, never "
+            f"what it COMPILED against, and has to keep its own copy of the "
+            f"number to compare with -- the copy that goes stale with no signal.",
+            file=sys.stderr,
+        )
+        return 1
+    if compiled != version:
+        print(
+            f"capi-abi-pin: FAIL -- the header says WZ_DISSECT_ABI_REVISION is "
+            f"{compiled} and the built library answers {version}. A consumer "
+            f"that compares the two, as the header tells it to, would refuse a "
+            f"correct build; one that does not would read this library through "
+            f"a header describing another. They move together or not at all.",
+            file=sys.stderr,
+        )
+        return 1
+
     shape = layout(CDYLIB)
     if not shape:
         print(
@@ -358,10 +424,18 @@ def main() -> int:
         f"  capi-abi-pin: ABI {version}, {len(symbols)} exported symbol(s), "
         f"set unchanged; record is {shape[0]} byte(s) / align {shape[1]} with "
         f"{len(shape) - 2} field offset(s), read from the artifact and pinned "
-        f"beside the revision"
+        f"beside the revision; the header's WZ_DISSECT_ABI_REVISION agrees"
     )
     return 0
 
 
 if __name__ == "__main__":
+    if sys.argv[1:] == ["--selftest"]:
+        sys.exit(selftest())
+    if sys.argv[1:]:
+        print(
+            f"usage: {pathlib.Path(__file__).name} [--selftest]",
+            file=sys.stderr,
+        )
+        sys.exit(2)
     sys.exit(main())

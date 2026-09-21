@@ -762,7 +762,37 @@ extern "C" {
 #define WZ_DISSECT_LIMITS_NONE 0
 #define WZ_DISSECT_LIMITS_LIVE_TAP 1
 
-/* Symbol/memory-contract revision. Not a JSON-shape revision. */
+/* R2775 (open debt 804) -- THE REVISION AS A MACRO, beside the function that
+ * reports it. wz_capi_c.h has carried this pair since R2301; this header did
+ * not, so a consumer of these doors had one shape available and it was the
+ * wrong one.
+ *
+ * HOW TO USE THE PAIR. The macro is what you COMPILED against; the function is
+ * what you are RUNNING against. They differ only when a build is linked to a
+ * library it was not compiled for -- a prebuilt library handed in from
+ * elsewhere, with this header taken from a different checkout -- which is the
+ * one failure a header cannot detect on its own:
+ *
+ *     if (wz_dissect_abi_version() != WZ_DISSECT_ABI_REVISION) { ... }
+ *
+ * Without the macro a consumer can only keep its OWN copy of the number. That
+ * copy answers "is this the revision I adopted" and never "is this the library
+ * my header describes", and it goes stale with no signal when the library
+ * moves. A consumer reported exactly that: its hand-held constant was the only
+ * shape this header allowed, and a stale literal was the failure twice in one
+ * day -- once in that consumer's tree, once in this crate's own C test.
+ *
+ * Adding the macro does NOT move the revision. A define is compiled in, not
+ * linked, and the revision moves for a SYMBOL or for the memory rule. It moves
+ * WITH the function and never on its own: capi_abi_pin.py reads this define,
+ * calls the function, and refuses when the two disagree.
+ *
+ * @unknown ABI not-an-enumeration */
+#define WZ_DISSECT_ABI_REVISION 17
+
+/* Symbol/memory-contract revision. Not a JSON-shape revision. This is the
+ * revision the LOADED library reports; the block above says why it exists
+ * beside a macro that carries the same number. */
 int wz_dissect_abi_version(void);
 
 /* Release a string this library returned. Null is a no-op. */

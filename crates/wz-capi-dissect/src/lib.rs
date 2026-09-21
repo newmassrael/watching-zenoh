@@ -303,8 +303,24 @@ pub extern "C" fn wz_dissect_abi_version() -> c_int {
     // The header's own rule is that this moves when a SYMBOL changes, and a
     // consumer pinned to 16 meeting 17 learns exactly that there is a door it
     // does not know about.
-    17
+    WZ_DISSECT_ABI_REVISION
 }
+
+/// R2775 (open debt 804) — the revision as a CONSTANT, which is what
+/// `wz_dissect.h`'s `WZ_DISSECT_ABI_REVISION` is held equal to.
+///
+/// [`wz_dissect_abi_version`] returned a bare literal until now, and the header
+/// had no macro at all, so the number existed in exactly one place a consumer
+/// could reach: the running library. A consumer could ask what it was RUNNING
+/// against and never what it COMPILED against, and had to keep its own copy to
+/// compare with — the copy that went stale. `wz_capi_c` has had this pair
+/// since R2301 (`WZ_CAPI_C_ABI_REVISION`); the dissect surface was the half
+/// that did not.
+///
+/// It lives AFTER the function rather than above it on purpose: an item placed
+/// between a doc comment and the item it documents takes that doc, which is
+/// the doc-ownership defect the C1bz budget records.
+pub const WZ_DISSECT_ABI_REVISION: c_int = 17;
 
 /// R2108 (open-debt item 525) — THE RECORD'S LAYOUT, reported by the artifact.
 ///

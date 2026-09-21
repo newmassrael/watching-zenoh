@@ -986,9 +986,23 @@ int main(void) {
      * it moves when a symbol does -- was broken by the tree that publishes it,
      * in the same commit that published the move. No local lane sees this
      * file: it is C, compiled by Layer C1bo, which is hosted-only, so the push
-     * that moved the number had nothing that could tell it. */
-    CHECK(wz_dissect_abi_version() == 17, "abi version is %d, expected 17",
-          wz_dissect_abi_version());
+     * that moved the number had nothing that could tell it.
+     * R2775 (open debt 804) -- and so this line no longer holds a number at
+     * all. The header now carries WZ_DISSECT_ABI_REVISION beside the function,
+     * and a C consumer's job is the comparison that header recommends: what
+     * it COMPILED against, against what it is RUNNING against. The literal
+     * this replaced was a fourth place the same fact had to be moved by hand
+     * -- the Rust constant, the header macro and the pin gate's
+     * EXPECTED_VERSION are the other three -- and the redundancy bought
+     * nothing: every way the number could be moved wrongly is already refused
+     * by the gate, which reads the define and calls the function. What it DID
+     * buy was a stale copy, and a hosted round spent finding it. The
+     * deliberate-bump forcing function stays where it belongs, in the gate's
+     * pin; this comment keeps its paragraphs as the record of why each
+     * revision moved. */
+    CHECK(wz_dissect_abi_version() == WZ_DISSECT_ABI_REVISION,
+          "abi version is %d but this build was compiled against %d",
+          wz_dissect_abi_version(), WZ_DISSECT_ABI_REVISION);
 
     /* A KeepAlive: one header byte, the smallest complete transport message,
      * so what is under test is the boundary and not a codec. */
