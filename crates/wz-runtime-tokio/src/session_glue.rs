@@ -129,6 +129,7 @@ pub use wz_session_core::entropy::{EntropySource, EntropyUnavailable};
 // key-separation tests still measure the primitive itself.
 pub use wz_session_core::accept_cookie::{
     decode_accept_cookie, encode_accept_cookie, AcceptCookieState, CookieError,
+    MultilinkAcceptState,
 };
 // The per-extension states the cookie is made of. Exported with it because a
 // caller that builds an `AcceptCookieState` cannot name its members without
@@ -193,6 +194,11 @@ pub fn signing_key_from_os_entropy() -> Result<SigningKey, getrandom::Error> {
 ///
 /// The fallible surface returns `getrandom::Error` for the same
 /// sandbox-without-entropy reason as the signing-key draw.
+///
+/// R2783 — the last in-tree caller, the multilink accept seam's one draw per
+/// bundle, is gone: the session draws that challenge at InitAck through the
+/// installed [`OsEntropy`] port too. This stays as the public one-shot draw a
+/// host can still call; nothing in this tree does.
 pub fn nonce_from_os_entropy() -> Result<u64, getrandom::Error> {
     let mut buf = [0u8; 8];
     getrandom::getrandom(&mut buf)?;

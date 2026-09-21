@@ -2647,6 +2647,48 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         }
     }
 
+    /// R2783 — the 0x4 multilink method's challenge, drawn here for the same
+    /// reason and from the same source as [`Self::draw_auth_challenges`]'s:
+    /// at InitAck, per handshake. It used to be drawn once by the AP accept
+    /// seam when the dispatch was installed, which a release after InitAck
+    /// would leave empty for any second handshake on the bundle.
+    ///
+    /// No source installed leaves the method as it is (the out-of-band path);
+    /// a source that FAILS releases the method's challenge -- and with it the
+    /// captured key -- so the InitAck carries no 0x4 and the handshake falls
+    /// back to single-link, rather than issuing a stale challenge.
+    #[cfg(all(
+        feature = "transport-multilink",
+        feature = "codec-init-body",
+        feature = "session-unicast-accept"
+    ))]
+    fn draw_multilink_challenge(&self) {
+        let drawn: Option<Option<u64>> = R::with_mutex_mut(&self.cookie_entropy, |slot| {
+            slot.as_mut().map(|src| src.try_next_u64().ok())
+        });
+        if let Some(draw) = drawn {
+            R::with_mutex_mut(&self.multilink, |slot| {
+                if let Some(d) = slot.as_mut() {
+                    d.set_drawn_challenge(draw);
+                }
+            });
+        }
+    }
+
+    /// R2783 — this handshake's multilink accept state for the cookie, or
+    /// `None` when no dispatch is installed or multilink is off for it.
+    #[cfg(all(feature = "codec-init-body", feature = "session-unicast-accept"))]
+    fn multilink_accept_state(&self) -> crate::accept_cookie::MultilinkAcceptState {
+        #[cfg(feature = "transport-multilink")]
+        {
+            crate::accept_cookie::MultilinkAcceptState(R::with_mutex_mut(&self.multilink, |slot| {
+                slot.as_ref().and_then(|d| d.accept_state())
+            }))
+        }
+        #[cfg(not(feature = "transport-multilink"))]
+        crate::accept_cookie::MultilinkAcceptState(None)
+    }
+
     /// R311y813 — install the per-handshake cookie nonce, the term that binds
     /// the Accepting side's anti-amplification cookie to ONE handshake (the
     /// `cookie_nonce` slot). Supplied for the reason every per-handshake secret
@@ -2783,6 +2825,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             batch_size: caps.map(|c| c.batch_size).unwrap_or(0),
             nonce,
             negotiated: self.negotiated_extensions(),
+            multilink: self.multilink_accept_state(),
         }
     }
 
@@ -3010,6 +3053,10 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         // follows the restore reads.
         self.install_accept_head(Some(&carried));
         self.install_negotiated(carried.negotiated);
+        // R2783 — and the multilink state, outside the group because it is
+        // the cookie's one variable-width member.
+        #[cfg(feature = "transport-multilink")]
+        self.restore_multilink_accept_state(&carried.multilink);
         true
     }
 
@@ -3125,18 +3172,11 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         R::with_mutex_mut(&self.multilink, |slot| *slot = Some(dispatch));
     }
 
-    /// Refresh the responder challenge nonce on the installed multilink dispatch —
-    /// a FRESH cryptographically-random `nonce` per accepted handshake (the pubkey
-    /// responder replay-defense contract, [`Self::refresh_auth_challenge_nonce`]
-    /// for the 0x4 ext). No-op when no dispatch is installed (max_links=1).
-    #[cfg(feature = "transport-multilink")]
-    pub fn refresh_multilink_challenge_nonce(&self, nonce: u64) {
-        R::with_mutex_mut(&self.multilink, |slot| {
-            if let Some(d) = slot.as_mut() {
-                d.set_challenge_nonce(nonce);
-            }
-        });
-    }
+    // R2783 — `refresh_multilink_challenge_nonce`, the out-of-band install the
+    // AP accept seam used to call once per bundle, is gone: the 0x4 method's
+    // challenge is drawn at InitAck (`draw_multilink_challenge`), as the auth
+    // methods' have been since R2779, because the release after InitAck now
+    // drops it and a once-per-bundle draw would leave a second handshake none.
 
     /// Run `f` against the installed multilink dispatch (the recv-stage driver at
     /// [`crate::drive::dispatch_link_event`] feeds a parsed handshake frame's ext
@@ -3165,6 +3205,44 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         if let Some(bytes) = captured {
             R::with_mutex_mut(&self.multilink_pubkey, |slot| *slot = Some(bytes));
         }
+    }
+
+    /// R2783 — let go of this handshake's multilink state after InitAck: the
+    /// dispatch's challenge and captured key (the cookie carries them now),
+    /// and the key already latched for the aggregation join, which the
+    /// OpenSyn stage latches again from the restored key.
+    #[cfg(all(
+        feature = "transport-multilink",
+        feature = "codec-init-body",
+        feature = "session-unicast-accept"
+    ))]
+    fn release_multilink_accept_state(&self) {
+        R::with_mutex_mut(&self.multilink, |slot| {
+            if let Some(d) = slot.as_mut() {
+                d.release_accept_state();
+            }
+        });
+        R::with_mutex_mut(&self.multilink_pubkey, |slot| *slot = None);
+    }
+
+    /// R2783 — put back the multilink state the echoed cookie carried, before
+    /// the OpenSyn's 0x4 stage checks against it. A key that does not read
+    /// back leaves no challenge outstanding, so that stage refuses the
+    /// handshake rather than skipping the check.
+    #[cfg(all(
+        feature = "transport-multilink",
+        feature = "codec-open-body",
+        feature = "session-unicast-accept"
+    ))]
+    fn restore_multilink_accept_state(&self, carried: &crate::accept_cookie::MultilinkAcceptState) {
+        R::with_mutex_mut(&self.multilink, |slot| {
+            if let Some(d) = slot.as_mut() {
+                let carried = carried.0.as_ref().map(|(c, k)| (*c, k.as_slice()));
+                // The refusal is the OpenSyn stage's to report: a failed
+                // restore leaves no challenge, and that stage says so.
+                let _ = d.restore_accept_state(carried);
+            }
+        });
     }
 
     /// The peer's captured ephemeral multilink pubkey (encoded ZPublicKey bytes),
@@ -8684,8 +8762,10 @@ impl<R: SessionRuntime, T: TimeSource> SessionFsmUnicastActionsTrait
             a.stage_auth_send(ExtChainRole::InitAck, |d| d.accept_init_ack());
             // R311y205 (transport-multilink IMPL-2b-ii) — the responder's 0x4
             // InitAck (its ephemeral pubkey + the encrypted challenge), staged iff
-            // multilink is negotiated. The AP accept path refreshes the nonce
-            // before this fires.
+            // multilink is negotiated. R2783 — its challenge is drawn HERE, as
+            // the auth methods' are, not once by the AP seam.
+            #[cfg(feature = "transport-multilink")]
+            a.draw_multilink_challenge();
             #[cfg(feature = "transport-multilink")]
             a.stage_multilink_send(ExtChainRole::InitAck, |d| d.accept_init_ack());
             // transport-lowlatency / -compression / -shm — the acceptor REFLECTS
@@ -8836,6 +8916,10 @@ impl<R: SessionRuntime, T: TimeSource> SessionFsmUnicastActionsTrait
                 // R2782 — and the HEAD: the peer's zid, role and sizing caps
                 // ride the cookie's head, so they go too.
                 a.install_accept_head(None);
+                // R2783 — and the multilink state: the dispatch's challenge and
+                // captured key, and the key already latched for the join.
+                #[cfg(feature = "transport-multilink")]
+                a.release_multilink_accept_state();
             }
         }
     }

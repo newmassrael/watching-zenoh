@@ -36,9 +36,9 @@ use wz_runtime_tokio::session_fsm_unicast::{
 use wz_runtime_tokio::session_glue::{
     decode_accept_cookie, encode_accept_cookie, new_session_actions, new_session_engine,
     poll_and_dispatch_one, AcceptCookieState, AuthAcceptState, BoxedLinkDriver,
-    CompressionAcceptState, LinkSendOutcome, LowlatencyAcceptState, NegotiatedExtensions,
-    PatchAcceptState, PeerInitCaps, QosAcceptState, RegionAcceptState, SessionActionsBinding,
-    SessionLinkActions, ShmAcceptState,
+    CompressionAcceptState, LinkSendOutcome, LowlatencyAcceptState, MultilinkAcceptState,
+    NegotiatedExtensions, PatchAcceptState, PeerInitCaps, QosAcceptState, RegionAcceptState,
+    SessionActionsBinding, SessionLinkActions, ShmAcceptState,
 };
 // R311fr — DriverLoopOutcome is referenced only by the
 // transport-keepalive-gated r78 handshake test; gate the import to match
@@ -1239,6 +1239,7 @@ async fn without_a_cookie_nonce_the_acceptor_admits_no_open_syn() {
                 patch: PatchAcceptState(None),
                 region: RegionAcceptState::default(),
             },
+            multilink: MultilinkAcceptState::default(),
         },
     )
     .expect("a 4-byte zid encodes");

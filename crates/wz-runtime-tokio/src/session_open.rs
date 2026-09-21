@@ -4063,15 +4063,13 @@ pub enum OpenError {
     /// mounted, permissions). A hard error rather than a silent downgrade.
     #[cfg(feature = "session-extshm")]
     ShmAuthSegment(std::io::Error),
-    /// R4a — an accept seam could not draw a fresh per-handshake challenge
-    /// nonce from OS entropy (a sandbox without `/dev/urandom`). The handshake
-    /// is aborted rather than reused with a stale nonce (the pubkey responder
-    /// replay-defense contract); a near-impossible failure on a normal host,
-    /// surfaced typed rather than panicked. Since R2779 only the multilink
-    /// seam draws here: the auth challenges are drawn by the session at
-    /// InitAck, where a failed draw refuses that handshake instead.
-    #[cfg(feature = "session-extauth")]
-    AuthEntropy(getrandom::Error),
+    // R2783 — `AuthEntropy` (R4a), the error an accept seam returned when it
+    // could not draw a challenge from OS entropy, is gone with the last seam
+    // that drew one. R2779 moved the auth challenges and R2783 the multilink
+    // one into the session's InitAck, where a failed draw refuses (auth) or
+    // withholds (multilink) that handshake's challenge instead of aborting the
+    // open; no seam here draws a challenge any more, so nothing constructed
+    // this variant.
     /// The bounded iteration budget elapsed before Established (test guard;
     /// production passes `None`).
     IterationLimit,
@@ -5184,12 +5182,12 @@ pub async fn accept_and_open_session_with_multilink(
             actions.install_multilink_dispatch(crate::multilink::accept_multilink_dispatch());
             actions.set_link_reliability_pref(reliability_pref);
             stage_link_priority_band(actions, &offer, band);
-            // Fresh challenge nonce per accepted handshake (the pubkey responder
-            // replay defense) — drawn from AP OS entropy here because the no_std
-            // core cannot.
-            let nonce =
-                crate::session_glue::nonce_from_os_entropy().map_err(OpenError::AuthEntropy)?;
-            actions.refresh_multilink_challenge_nonce(nonce);
+            // R2783 — no challenge is drawn here any more. The session draws
+            // the 0x4 method's challenge at InitAck from the entropy source
+            // the bundle was built with, per handshake, as it has drawn the
+            // auth methods' since R2779; a draw made here, once, would leave a
+            // second handshake on this bundle with none, now that the release
+            // after InitAck drops it.
             Ok(())
         },
         clock,

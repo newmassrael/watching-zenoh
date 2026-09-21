@@ -299,6 +299,22 @@ pub trait AuthMethod: Send {
     fn captured_peer_key_bytes(&self) -> Option<Vec<u8>> {
         None
     }
+
+    /// R2783 — put back the peer key [`Self::captured_peer_key_bytes`] gave
+    /// out, from the cookie at OpenSyn; `None` drops it. Default: the key is
+    /// not state this method carries, so there is nothing to restore -- and
+    /// `Ok`, because refusing would fail a handshake over a member the method
+    /// never had.
+    ///
+    /// Called by the 0x4 multilink plane ONLY. Upstream's multilink accept
+    /// state carries the initiator's key beside the challenge
+    /// (`io/zenoh-transport/src/unicast/establishment/ext/multilink.rs` @ `pubkey: Option<(pubkey::StateAccept, ZPublicKey)>,`),
+    /// because the link is bound to its session by that key after OpenSyn;
+    /// its auth-plane pubkey state carries the challenge alone, so the auth
+    /// dispatch never calls this.
+    fn restore_accept_peer_key(&mut self, _key: Option<&[u8]>) -> Result<(), AuthError> {
+        Ok(())
+    }
 }
 
 /// The composable auth dispatch — holds the negotiated methods and mux/demuxes

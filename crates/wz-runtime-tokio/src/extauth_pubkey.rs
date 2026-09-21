@@ -484,6 +484,26 @@ impl AuthMethod for PubKeyMethod {
             .or(self.resp_pubkey.as_ref())
             .map(encode_pubkey)
     }
+
+    /// R2783 — the multilink plane's other half of the carry: the initiator's
+    /// key comes back from the bytes [`Self::captured_peer_key_bytes`] gave
+    /// out, through the same reader the InitSyn went through, and the whole
+    /// buffer must be that key -- a trailing byte is a mint this reader does
+    /// not agree with, and it refuses rather than guessing.
+    fn restore_accept_peer_key(&mut self, key: Option<&[u8]>) -> Result<(), AuthError> {
+        self.peer_pubkey = match key {
+            None => None,
+            Some(bytes) => {
+                let mut cursor = SceCursor::new(bytes);
+                let peer = read_pubkey(&mut cursor)?;
+                if cursor.remaining() != 0 {
+                    return Err(AuthError::Decode);
+                }
+                Some(peer)
+            }
+        };
+        Ok(())
+    }
 }
 
 #[cfg(test)]

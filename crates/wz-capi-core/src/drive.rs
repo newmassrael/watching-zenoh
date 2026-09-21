@@ -149,10 +149,14 @@ const ZID_LENGTH: usize = 16;
 /// Honouring the `Z_CONFIG_SESSION_ZID_KEY` override is follow-up surface; this
 /// is pico's default path.
 ///
-/// `None` on OS-entropy failure, which fails the open — the same choice
-/// wz-runtime-tokio already makes for signing-key entropy (`OpenError::
-/// AuthEntropy`, `session_open.rs:1241-1246`). Handing back a fixed id instead
+/// `None` on OS-entropy failure, which fails the open — the choice the session
+/// makes for every per-handshake value it draws: a source that fails leaves no
+/// value to use rather than a reused one (`draw_cookie_nonce` in
+/// wz-session-core's `session_actions.rs`). Handing back a fixed id instead
 /// would reintroduce exactly the peer-collision this exists to prevent.
+///
+/// (R2783 re-pointed this: it cited `OpenError::AuthEntropy` by line, a
+/// variant that no longer exists because no open seam draws a challenge now.)
 fn fresh_zid() -> Option<[u8; ZID_LENGTH]> {
     let mut zid = [0u8; ZID_LENGTH];
     getrandom::getrandom(&mut zid).ok()?;

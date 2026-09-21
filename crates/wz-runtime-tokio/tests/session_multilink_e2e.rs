@@ -654,3 +654,115 @@ async fn multilink_link_negotiates_qos_when_both_offer() {
         "qos=false leaves the acceptor non-qos"
     );
 }
+
+/// R2783 — the multilink accept state rides the cookie: the challenge the
+/// acceptor issued and the initiator's ephemeral key. Between InitAck and
+/// OpenSyn the acceptor holds neither -- not in the dispatch, not in the key
+/// it latches for the join -- and the admitted OpenSyn verifies against the
+/// restored challenge and latches the restored key.
+///
+/// Every value is read off an artifact: the key off the initiator's own
+/// InitSyn 0x4 body, the carried state off the cookie in the InitAck the
+/// acceptor sent. The handshake is two real wz bundles over recording
+/// drivers, each with the production dispatch its role installs.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_multilink_state_rides_the_cookie_between_init_ack_and_open_syn() {
+    use wz_runtime_tokio::multilink::{accept_multilink_dispatch, open_multilink_dispatch};
+    use wz_runtime_tokio::session_fsm_unicast::{
+        SessionFsmUnicastEvent as E, SessionFsmUnicastState as S,
+    };
+    use wz_runtime_tokio::session_glue::{
+        decode_accept_cookie, new_session_actions, new_session_engine, parse_inbound,
+        poll_and_dispatch_one, BoxedLinkDriver, InboundFrame,
+    };
+    use wz_runtime_tokio::{LinkEvent, RxFrame};
+    use wz_runtime_tokio_test_support::{
+        fixture_session_init_params, LifecycleRecordingDriver, QueueDriver,
+    };
+    use wz_session_core::auth_dispatch::AuthSubExt;
+    use wz_session_core::extmultilink::decode_multilink_ext;
+
+    let bundle = |zid: u8, driver: &Arc<LifecycleRecordingDriver>| {
+        let outbound: Arc<dyn BoxedLinkDriver + Send + Sync> = driver.clone();
+        new_session_actions(outbound, fixture_params_with_zid(zid), TokioTime::new())
+    };
+    let last_send =
+        |d: &LifecycleRecordingDriver| d.snapshot().sends.last().expect("a send").0.clone();
+    let init_driver = Arc::new(LifecycleRecordingDriver::default());
+    let resp_driver = Arc::new(LifecycleRecordingDriver::default());
+    let init = bundle(0x01, &init_driver);
+    let resp = bundle(0x02, &resp_driver);
+    init.install_multilink_dispatch(open_multilink_dispatch());
+    resp.install_multilink_dispatch(accept_multilink_dispatch());
+    let mut init_engine = new_session_engine(&init);
+    init_engine.initialize();
+    let mut resp_engine = new_session_engine(&resp);
+    resp_engine.initialize();
+
+    resp_engine.process_event(E::InboundStart);
+    init_engine.process_event(E::OutboundStart);
+    init_engine.process_event(E::LinkOpened);
+    let init_syn = last_send(&init_driver);
+    let initiator_key = match parse_inbound(&init_syn).expect("the InitSyn parses") {
+        InboundFrame::Init {
+            is_ack: false,
+            extensions,
+            ..
+        } => match decode_multilink_ext(&extensions) {
+            Some(AuthSubExt::Zbuf(key)) => key,
+            other => panic!("the initiator's InitSyn offers its key on 0x4, got {other:?}"),
+        },
+        _ => panic!("the initiator's first frame is an InitSyn"),
+    };
+
+    let mut q = QueueDriver::with(vec![LinkEvent::Rx(RxFrame::new(init_syn))]);
+    poll_and_dispatch_one(&mut q, &resp, &mut resp_engine).await;
+    assert_eq!(resp_engine.get_current_state(), S::SentInitAck);
+    let init_ack = last_send(&resp_driver);
+    let cookie = match parse_inbound(&init_ack).expect("the InitAck parses") {
+        InboundFrame::Init {
+            is_ack: true, body, ..
+        } => body.cookie.expect("the InitAck carries a cookie").to_vec(),
+        _ => panic!("the acceptor's answer is an InitAck"),
+    };
+    let carried = decode_accept_cookie(&fixture_session_init_params().cookie_signing_key, &cookie)
+        .expect("the acceptor's own cookie verifies")
+        .multilink
+        .0
+        .expect("a multilink handshake carries its state");
+    assert_eq!(
+        carried.1, initiator_key,
+        "the cookie carries the key the initiator offered"
+    );
+    assert_eq!(
+        resp.with_multilink(|d| d.accept_state()),
+        Some(None),
+        "after the InitAck the dispatch holds no challenge and no key"
+    );
+    assert_eq!(
+        resp.multilink_pubkey(),
+        None,
+        "nor is a key latched for the join"
+    );
+
+    let mut q = QueueDriver::with(vec![LinkEvent::Rx(RxFrame::new(init_ack))]);
+    poll_and_dispatch_one(&mut q, &init, &mut init_engine).await;
+    let open_syn = last_send(&init_driver);
+    let mut q = QueueDriver::with(vec![LinkEvent::Rx(RxFrame::new(open_syn))]);
+    let outcome = poll_and_dispatch_one(&mut q, &resp, &mut resp_engine).await;
+    assert_eq!(
+        resp_engine.get_current_state(),
+        S::Established,
+        "the OpenSyn verifies against the restored challenge; got {outcome:?}"
+    );
+    assert_eq!(
+        resp.multilink_pubkey(),
+        Some(initiator_key),
+        "and the restored key is the one latched for the join"
+    );
+
+    let open_ack = last_send(&resp_driver);
+    let mut q = QueueDriver::with(vec![LinkEvent::Rx(RxFrame::new(open_ack))]);
+    poll_and_dispatch_one(&mut q, &init, &mut init_engine).await;
+    assert_eq!(init_engine.get_current_state(), S::Established);
+}

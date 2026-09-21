@@ -106,11 +106,80 @@ impl MultiLinkDispatch {
     /// Refresh the method's per-handshake challenge nonce (responder side) — the
     /// single-method counterpart of
     /// [`AuthDispatch::set_drawn_challenges`](crate::auth_dispatch::AuthDispatch::set_drawn_challenges).
-    /// The AP accept seam draws a fresh cryptographically-random nonce per
-    /// accepted handshake; a method without a challenge (an initiator-only
-    /// method) ignores it (the trait default no-op).
+    /// A method without a challenge (an initiator-only method) ignores it (the
+    /// trait default no-op).
+    ///
+    /// R2783 — drawn at InitAck from the bundle's installed entropy source, as
+    /// the auth methods' are since R2779, rather than once by the AP seam when
+    /// the dispatch was installed. The release after InitAck now drops the
+    /// challenge, so a draw made once per bundle would leave a second handshake
+    /// on that bundle with none to issue.
     pub fn set_challenge_nonce(&mut self, nonce: u64) {
         self.method.set_challenge_nonce(nonce);
+    }
+
+    /// R2783 — install one InitAck draw: `Some` is the challenge, `None` (the
+    /// source failed) releases the method's challenge and the key with it, so
+    /// the InitAck contributes no 0x4 rather than a stale challenge -- the
+    /// single-method mirror of `AuthDispatch::set_drawn_challenges`' `None`.
+    pub fn set_drawn_challenge(&mut self, draw: Option<u64>) {
+        match draw {
+            Some(nonce) => self.method.set_challenge_nonce(nonce),
+            None => self.method.restore_accept_challenge(None),
+        }
+    }
+
+    /// R2783 — this handshake's multilink accept state, for the cookie to
+    /// carry: the challenge the method issued and the initiator's key it
+    /// captured, or `None` when multilink is off for this handshake -- the
+    /// peer's InitSyn carried no 0x4 (the dispatch disabled itself), or there
+    /// is no challenge and key to carry.
+    ///
+    /// Upstream's is exactly that pair behind an `Option`, and its `None` is
+    /// the same "multilink not negotiated" --
+    /// `io/zenoh-transport/src/unicast/establishment/ext/multilink.rs` @ `pubkey: Option<(pubkey::StateAccept, ZPublicKey)>,`.
+    pub fn accept_state(&self) -> Option<(u64, alloc::vec::Vec<u8>)> {
+        if self.disabled {
+            return None;
+        }
+        Some((
+            self.method.accept_challenge()?,
+            self.method.captured_peer_key_bytes()?,
+        ))
+    }
+
+    /// R2783 — let go of this handshake's multilink state after InitAck: the
+    /// dispatch returns to what it offered, not disabled and holding no
+    /// challenge and no key, because the cookie carries them now.
+    pub fn release_accept_state(&mut self) {
+        self.disabled = false;
+        self.method.restore_accept_challenge(None);
+    }
+
+    /// R2783 — put back what the cookie carried, at OpenSyn and before the
+    /// OpenSyn stage runs. `None` means this handshake did not negotiate
+    /// multilink, so the dispatch disables itself again and the OpenSyn's 0x4,
+    /// if any, is ignored, as it was before the release. `Some` restores the
+    /// key and then the challenge; a key that does not read back refuses, and
+    /// leaves no challenge outstanding, so the OpenSyn stage refuses too
+    /// rather than skipping a check it cannot make.
+    pub fn restore_accept_state(&mut self, carried: Option<(u64, &[u8])>) -> Result<(), AuthError> {
+        match carried {
+            None => {
+                self.disabled = true;
+                self.method.restore_accept_challenge(None);
+                Ok(())
+            }
+            Some((challenge, key)) => {
+                self.disabled = false;
+                if let Err(e) = self.method.restore_accept_peer_key(Some(key)) {
+                    self.method.restore_accept_challenge(None);
+                    return Err(e);
+                }
+                self.method.restore_accept_challenge(Some(challenge));
+                Ok(())
+            }
+        }
     }
 
     /// The single send-stage driver: run `f` over the held method; if it

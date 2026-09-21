@@ -128,6 +128,73 @@ pub struct AcceptCookieState {
     /// challenges after shm, and R2780 the region name last, for exactly that
     /// reason.
     pub negotiated: NegotiatedExtensions,
+    /// R2783 — the multilink accept state, AFTER the group rather than inside
+    /// it at upstream's position (between qos and shm).
+    ///
+    /// The group is fixed-width by contract (`AcceptState::WIDTH`), which is
+    /// what lets the no-alloc Inline profile bound the cookie, and this state
+    /// cannot be: it holds the initiator's public key, whose encoding is
+    /// variable. So it is the cookie's one self-delimiting member, and the
+    /// order note above yields to that -- the order was wz's own to choose
+    /// and was followed only while nothing forced it. One byte when
+    /// multilink is off, which is the only arm a build without
+    /// `transport-multilink` can mint, so an Inline acceptor's cookie grows by
+    /// that one byte and no more.
+    pub multilink: MultilinkAcceptState,
+}
+
+/// R2783 — the multilink accept state: the challenge the acceptor issued and
+/// the initiator's ephemeral public key (its encoded ZPublicKey bytes), or
+/// `None` when multilink is off for the handshake.
+///
+/// Upstream's `ext::multilink::StateAccept` is the same pair behind the same
+/// `Option` --
+/// `io/zenoh-transport/src/unicast/establishment/ext/multilink.rs` @ `pubkey: Option<(pubkey::StateAccept, ZPublicKey)>,`
+/// -- and it keeps the key where the auth plane's pubkey state does not
+/// because a multilink link is bound to its session by that key AFTER
+/// OpenSyn.
+///
+/// Wire form: `0` alone for `None`; `1 ‖ challenge(8, LE) ‖ key_len(2, LE) ‖
+/// key(key_len)` for `Some`.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct MultilinkAcceptState(pub Option<(u64, Vec<u8>)>);
+
+impl MultilinkAcceptState {
+    fn encode(&self, out: &mut Vec<u8>) -> Option<()> {
+        match &self.0 {
+            None => out.push(0),
+            Some((challenge, key)) => {
+                let len = u16::try_from(key.len()).ok()?;
+                out.push(1);
+                out.extend_from_slice(&challenge.to_le_bytes());
+                out.extend_from_slice(&len.to_le_bytes());
+                out.extend_from_slice(key);
+            }
+        }
+        Some(())
+    }
+
+    /// Read the member from `tail`, which must be EXACTLY the member: it is
+    /// the cookie's last one, so anything left over is a mint this reader
+    /// disagrees with.
+    fn decode(tail: &[u8]) -> Result<Self, CookieError> {
+        match tail.split_first() {
+            Some((0, [])) => Ok(Self(None)),
+            Some((1, rest)) if rest.len() >= 10 => {
+                let challenge =
+                    u64::from_le_bytes(rest[0..8].try_into().map_err(|_| CookieError::Malformed)?);
+                let len =
+                    u16::from_le_bytes(rest[8..10].try_into().map_err(|_| CookieError::Malformed)?)
+                        as usize;
+                let key = &rest[10..];
+                if key.len() != len {
+                    return Err(CookieError::Malformed);
+                }
+                Ok(Self(Some((challenge, key.to_vec()))))
+            }
+            _ => Err(CookieError::Malformed),
+        }
+    }
 }
 
 /// Why a cookie did not decode.
@@ -148,7 +215,8 @@ pub enum CookieError {
 /// Serialise the acceptor's state and authenticate it.
 ///
 /// Layout: `nonce(8) ‖ whatami(1) ‖ sn_res(1) ‖ batch_size(2) ‖
-/// zid_len(1) ‖ zid(zid_len) ‖ extensions(COOKIE_EXT_BYTES) ‖ tag(16)`.
+/// zid_len(1) ‖ zid(zid_len) ‖ extensions(COOKIE_EXT_BYTES) ‖
+/// multilink(1 or 11 + key_len) ‖ tag(16)`.
 /// Little-endian throughout, matching every other wz wire integer.
 ///
 /// The TAG COVERS THE WHOLE PAYLOAD, not just the zid as the tag-only form
@@ -179,6 +247,7 @@ pub fn encode_accept_cookie(key: &SigningKey, state: &AcceptCookieState) -> Opti
         let mut sink = VecSink::new(&mut out);
         state.negotiated.encode(&mut sink).ok()?;
     }
+    state.multilink.encode(&mut out)?;
     let t = cookie_payload_tag(key, &out);
     out.extend_from_slice(&t);
     Some(out)
@@ -224,23 +293,28 @@ pub fn decode_accept_cookie(
             .map_err(|_| CookieError::Malformed)?,
     );
     let zid_len = payload[12] as usize;
+    // R2783 — the multilink member makes the tail variable, so the length is
+    // a floor here (at least its one-byte `None`) and the member's own decode
+    // holds the rest to exactly what it wrote.
     if zid_len == 0
         || zid_len > MAX_ZID_BYTES
-        || payload.len() != COOKIE_HEAD_BYTES + zid_len + COOKIE_EXT_BYTES
+        || payload.len() < COOKIE_HEAD_BYTES + zid_len + COOKIE_EXT_BYTES + 1
     {
         return Err(CookieError::Malformed);
     }
     let ext_at = COOKIE_HEAD_BYTES + zid_len;
-    let mut cursor = SceCursor::new(&payload[ext_at..]);
+    let tail_at = ext_at + COOKIE_EXT_BYTES;
+    let mut cursor = SceCursor::new(&payload[ext_at..tail_at]);
     let negotiated =
         NegotiatedExtensions::decode(&mut cursor).map_err(|_| CookieError::Malformed)?;
-    // The length check above already fixes the extension region's size, so
-    // this can only fire when a state's `WIDTH` disagrees with what its
-    // `decode` consumes — the one direction the round trip cannot see,
-    // because both sides would then be wrong by the same number.
+    // The slice above already fixes the extension region's size, so this can
+    // only fire when a state's `WIDTH` disagrees with what its `decode`
+    // consumes — the one direction the round trip cannot see, because both
+    // sides would then be wrong by the same number.
     if cursor.remaining() != 0 {
         return Err(CookieError::Malformed);
     }
+    let multilink = MultilinkAcceptState::decode(&payload[tail_at..])?;
     Ok(AcceptCookieState {
         peer_zid: payload[COOKIE_HEAD_BYTES..ext_at].to_vec(),
         peer_whatami,
@@ -248,6 +322,7 @@ pub fn decode_accept_cookie(
         batch_size,
         nonce,
         negotiated,
+        multilink,
     })
 }
 
@@ -307,6 +382,10 @@ mod tests {
                     &RegionName::new("eu-west").expect("a valid region name"),
                 )),
             },
+            // A challenge and a key the length of an encoded RSA-512 public
+            // key, the size wz's multilink identity uses, so the variable
+            // member is exercised at the width it really has.
+            multilink: MultilinkAcceptState(Some((0x9999_AAAA_BBBB_CCCC, vec![0x5A; 69]))),
         }
     }
 
@@ -329,18 +408,27 @@ mod tests {
     ///
     /// `InitBody`'s generated `cookie` is `Option<S::Bytes<128>>`, a cap that
     /// is ADVISORY on the Heap profile and HARD on the no-alloc Inline one —
-    /// so a cookie that fit only on AP would strand the MCU acceptor. The
-    /// widest zid the protocol admits is the worst case and is what this
-    /// measures.
+    /// so a cookie that fit only on AP would strand an Inline peer. The widest
+    /// zid the protocol admits is the worst case and is what this measures.
+    ///
+    /// R2783 — with the multilink member OFF, and that is not a convenience.
+    /// Only a peer that offers multilink can be handed a cookie carrying it,
+    /// and offering it takes `transport-multilink`, which implies
+    /// `session-extauth`, which implies `alloc` (wz-session-core's own
+    /// Cargo.toml) -- the profile on which the carrier is unbounded. So every
+    /// cookie an Inline peer can receive has the one-byte `None`, and that is
+    /// the cookie this bounds. The `Some` arm's size is the round trip's to
+    /// check, and it is.
     #[test]
     fn the_widest_cookie_fits_the_generated_field() {
         let k = key();
         let mut s = state();
         s.peer_zid = vec![0xFF; MAX_ZID_BYTES];
+        s.multilink = MultilinkAcceptState(None);
         let wire = encode_accept_cookie(&k, &s).expect("a 16-byte zid encodes");
         assert_eq!(
             wire.len(),
-            COOKIE_HEAD_BYTES + MAX_ZID_BYTES + COOKIE_EXT_BYTES + COOKIE_TAG_BYTES
+            COOKIE_HEAD_BYTES + MAX_ZID_BYTES + COOKIE_EXT_BYTES + 1 + COOKIE_TAG_BYTES
         );
         assert!(
             wire.len() <= 128,
@@ -511,6 +599,14 @@ mod tests {
                 },
                 ..state()
             },
+            AcceptCookieState {
+                multilink: MultilinkAcceptState(None),
+                ..state()
+            },
+            AcceptCookieState {
+                multilink: MultilinkAcceptState(Some((0x9999_AAAA_BBBB_CCCC, vec![0xA5; 69]))),
+                ..state()
+            },
         ] {
             let wire = encode_accept_cookie(&k, &flipped).expect("encodes");
             let back = decode_accept_cookie(&k, &wire).expect("verifies");
@@ -547,5 +643,53 @@ mod tests {
                 "a {len}-byte payload under a valid tag must be Malformed"
             );
         }
+    }
+
+    /// R2783 — the multilink member's reader refuses every tail it did not
+    /// write, each under a VALID tag so only the member's own decode can say
+    /// no: an unknown presence byte, a `Some` cut short of its length field,
+    /// and a key length that disagrees with the bytes after it. And the
+    /// CONTROL: the two tails it did write read back.
+    #[test]
+    fn the_multilink_member_refuses_a_tail_it_did_not_write() {
+        let k = key();
+        let mut none = state();
+        none.multilink = MultilinkAcceptState(None);
+        let wire = encode_accept_cookie(&k, &none).expect("encodes");
+        let head = &wire[..wire.len() - COOKIE_TAG_BYTES - 1];
+        let signed = |tail: &[u8]| {
+            let mut p = head.to_vec();
+            p.extend_from_slice(tail);
+            let t = cookie_payload_tag(&k, &p);
+            p.extend_from_slice(&t);
+            p
+        };
+        let mut long_key = vec![1u8];
+        long_key.extend_from_slice(&7u64.to_le_bytes());
+        long_key.extend_from_slice(&3u16.to_le_bytes());
+        long_key.extend_from_slice(&[9, 9, 9, 9]);
+        for (name, tail) in [
+            ("an unknown presence byte", vec![2u8]),
+            ("a Some with no length field", vec![1u8, 0, 0, 0]),
+            ("a key longer than its length", long_key),
+        ] {
+            assert_eq!(
+                decode_accept_cookie(&k, &signed(&tail)),
+                Err(CookieError::Malformed),
+                "{name} must be Malformed"
+            );
+        }
+        assert_eq!(
+            decode_accept_cookie(&k, &signed(&[0])).map(|s| s.multilink),
+            Ok(MultilinkAcceptState(None))
+        );
+        let mut some = vec![1u8];
+        some.extend_from_slice(&7u64.to_le_bytes());
+        some.extend_from_slice(&2u16.to_le_bytes());
+        some.extend_from_slice(&[4, 5]);
+        assert_eq!(
+            decode_accept_cookie(&k, &signed(&some)).map(|s| s.multilink),
+            Ok(MultilinkAcceptState(Some((7, vec![4, 5]))))
+        );
     }
 }

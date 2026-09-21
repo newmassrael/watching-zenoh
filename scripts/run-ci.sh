@@ -6749,13 +6749,20 @@ layer_c1ba_cargo_clippy_transport_multilink() {
     # — review disproved that: splitting the chain into guarded calls plus
     # clippy-only subshells is exactly what C1bb/C1bc did, and it also gives
     # each step a labelled FAIL diagnostic naming WHICH of the nine missed.
-    _runci_guarded_test C1ba 5 cargo test -p wz-runtime-tokio --no-default-features --features "$ML_FEATURES" --test session_multilink_e2e --quiet \
+    #
+    # R2783 — 5 -> 6 here and 6 -> 7 below: one case in BOTH builds,
+    # `the_multilink_state_rides_the_cookie_between_init_ack_and_open_syn`
+    # (the multilink accept state carried, not held). MEASURED on each
+    # command, since the count gate DEFERS these two -- the shell assembles
+    # their features -- and a moved number no local run checks is the number
+    # that reds hosted: 6 passed without transport-qos, 7 with it.
+    _runci_guarded_test C1ba 6 cargo test -p wz-runtime-tokio --no-default-features --features "$ML_FEATURES" --test session_multilink_e2e --quiet \
         || return 1
     # R311y218 — qos x multilink composition: the qos-gated e2e proves the
     # _with_multilink entrypoints negotiate is_qos over the 0x4 handshake
     # (both-offer -> is_qos true; qos=false control -> false). The 5 -> 6 count
     # step IS that proof: the qos build activates one more case.
-    _runci_guarded_test C1ba 6 cargo test -p wz-runtime-tokio --no-default-features --features "$ML_FEATURES,transport-qos" --test session_multilink_e2e --quiet \
+    _runci_guarded_test C1ba 7 cargo test -p wz-runtime-tokio --no-default-features --features "$ML_FEATURES,transport-qos" --test session_multilink_e2e --quiet \
         || return 1
     _runci_guarded_test C1ba 2 cargo test -p wz-runtime-tokio --no-default-features --features "$ML_DEPLOY_FEATURES" --test session_multilink_deploy_e2e --quiet \
         || return 1
@@ -10974,6 +10981,13 @@ layer_c1bz_docs_resolve() {
 # rewrite first added (to `admit_open_syn` / `admit_open_ack` from two field
 # docs and one `pub` fn) failed for the same two reasons and are code spans.
 # MEASURED on this lane's own command: 536 with the four, 532 without.
+#
+# R2783 — 532 -> 531, DOWNWARD again and again by a removal: the doc of
+# `refresh_multilink_challenge_nonce` linked `[`Self::refresh_auth_challenge_
+# nonce`]`, a method R2779 deleted, so that link had been broken for four
+# rounds; the function itself went this round (the 0x4 challenge is drawn at
+# InitAck now) and its dead link with it. The lane's own FAIL line said it:
+# "531 broken doc link(s) but the budget still says 532".
 # storage_config.rs now carries a non-doc `//` note above its `use` block
     # recording WHY every link in its `//!` is a full path, so the next author
     # does not re-earn the upward arm.
@@ -10988,7 +11002,7 @@ layer_c1bz_docs_resolve() {
         wz-routing-graph:6
         wz-runtime-coop:12
         wz-runtime-tokio:518
-        wz-session-core:532
+        wz-session-core:531
         wz-session-lwip:4
         wz-switchboard-codegen:8
         zenoh-pico-sys:3
