@@ -37,7 +37,9 @@ use std::sync::Arc;
 
 use wz_codecs::wire_const::T_MID_CLOSE;
 use wz_runtime_tokio::runtime_impl::TokioTime;
-use wz_runtime_tokio::session_fsm_unicast::SessionFsmUnicastEvent as E;
+use wz_runtime_tokio::session_fsm_unicast::{
+    SessionFsmUnicastEvent as E, SessionFsmUnicastState as S,
+};
 use wz_runtime_tokio::session_glue::CloseReason;
 use wz_runtime_tokio::session_glue::{
     new_session_actions, new_session_engine, poll_and_dispatch_one, BoxedLinkDriver,
@@ -48,14 +50,26 @@ use wz_runtime_tokio_test_support::{
 };
 use wz_session_core::extregion::{peer_region, RegionName, MAX_REGION_NAME_LEN};
 use wz_session_core::inbound::{parse_inbound, InboundFrame};
-use wz_session_wire_fixtures::{craft_initsyn_wire, craft_initsyn_wire_with_region};
+use wz_session_wire_fixtures::{
+    craft_initsyn_wire, craft_initsyn_wire_with_region, craft_opensyn_wire,
+};
 
-/// Drive an acceptor through ONE InitSyn and return `(the region name it wrote
-/// on the InitAck wire, the peer identity it recorded)`.
+/// Drive an acceptor through ONE InitSyn — and, when it answered with an
+/// InitAck, through the OpenSyn echoing that InitAck's cookie — and return
+/// `(the region name it wrote on the InitAck wire, the peer identity it
+/// recorded, the Close reason if it refused)`.
 ///
 /// Both are returned together on purpose: the emit and the read are the two
 /// halves this file pins, and a test that saw only one could not tell a node
 /// that announces its identity from one that merely stores the peer's.
+///
+/// R2780 — the peer identity is read once the OpenSyn is admitted, not at
+/// the InitAck. Between the two the acceptor holds none: the name rides its
+/// cookie, as upstream's does (`ext_region_name` in
+/// `io/zenoh-transport/src/unicast/establishment/cookie.rs` @ `pub(crate) struct Cookie {`),
+/// and upstream surfaces it only at the end of the handshake. A read at the
+/// InitAck would now pin the old hold, which is the state this round
+/// removed.
 async fn acceptor_answers(
     local: Option<&str>,
     init_syn_wire: Vec<u8>,
@@ -83,6 +97,7 @@ async fn acceptor_answers(
     let sent = driver.snapshot().sends;
     let mut announced = None;
     let mut close_reason = None;
+    let mut cookie = None;
     for (bytes, ..) in &sent {
         if bytes.first().map(|h| h & 0x1f) == Some(T_MID_CLOSE) {
             assert_eq!(bytes.len(), 2, "Close is a header plus one reason byte");
@@ -92,11 +107,24 @@ async fn acceptor_answers(
         if let Ok(InboundFrame::Init {
             is_ack: true,
             extensions,
+            body,
             ..
         }) = parse_inbound(bytes)
         {
             announced = peer_region(&extensions).expect("wz's own emit is a valid region");
+            cookie = body.cookie.map(|c| c.to_vec());
         }
+    }
+    if let Some(cookie) = cookie {
+        let mut queue = QueueDriver::with(vec![LinkEvent::Rx(RxFrame::new(craft_opensyn_wire(
+            &cookie,
+        )))]);
+        poll_and_dispatch_one(&mut queue, &actions, &mut engine).await;
+        assert_eq!(
+            engine.get_current_state(),
+            S::Established,
+            "the OpenSyn echoing the acceptor's own cookie is admitted"
+        );
     }
     (announced, actions.peer_region(), close_reason)
 }

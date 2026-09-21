@@ -37,8 +37,8 @@ use wz_runtime_tokio::session_glue::{
     decode_accept_cookie, encode_accept_cookie, new_session_actions, new_session_engine,
     poll_and_dispatch_one, AcceptCookieState, AuthAcceptState, BoxedLinkDriver,
     CompressionAcceptState, LinkSendOutcome, LowlatencyAcceptState, NegotiatedExtensions,
-    PatchAcceptState, PeerInitCaps, QosAcceptState, SessionActionsBinding, SessionLinkActions,
-    ShmAcceptState,
+    PatchAcceptState, PeerInitCaps, QosAcceptState, RegionAcceptState, SessionActionsBinding,
+    SessionLinkActions, ShmAcceptState,
 };
 // R311fr — DriverLoopOutcome is referenced only by the
 // transport-keepalive-gated r78 handshake test; gate the import to match
@@ -822,6 +822,63 @@ async fn the_acceptor_holds_no_negotiated_state_between_init_ack_and_open_syn() 
     );
 }
 
+/// R2780 — the peer's REGION NAME rides the cookie: between InitAck and
+/// OpenSyn the acceptor holds none, and the admitted OpenSyn puts back the
+/// name the InitSyn announced.
+///
+/// The InitSyn is a real wz initiator's, off its recording driver, with a
+/// region identity set, so the entry on the wire is wz's own encoder's. The
+/// carried name is decoded out of the cookie in the InitAck the acceptor
+/// actually sent.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_peer_region_rides_the_cookie_between_init_ack_and_open_syn() {
+    use wz_session_core::extregion::RegionName;
+
+    let region = RegionName::new("eu-west").expect("a valid region name");
+    let (initiator, mut initiator_engine, initiator_wire) = fresh_setup_recording();
+    initiator.set_local_region(Some(region.clone()));
+    initiator_engine.process_event(E::OutboundStart);
+    initiator_engine.process_event(E::LinkOpened);
+    let init_syn = initiator_wire
+        .sent
+        .lock()
+        .unwrap()
+        .first()
+        .cloned()
+        .expect("the initiator sent its InitSyn");
+
+    let (actions, mut engine, recording) = fresh_setup_recording();
+    engine.process_event(E::InboundStart);
+    let mut driver = QueueDriver::with(vec![LinkEvent::Rx(RxFrame::new(init_syn))]);
+    let _ = poll_and_dispatch_one(&mut driver, &actions, &mut engine).await;
+    assert_eq!(engine.get_current_state(), S::SentInitAck);
+
+    let cookie = minted_cookie(&recording.sent.lock().unwrap().clone());
+    let carried = decode_accept_cookie(&fixture_session_init_params().cookie_signing_key, &cookie)
+        .expect("the acceptor's own cookie verifies");
+    assert_eq!(
+        carried.negotiated.region.name(),
+        Some(region.clone()),
+        "the cookie carries the region the InitSyn announced"
+    );
+    assert_eq!(
+        actions.peer_region(),
+        None,
+        "after the InitAck the acceptor holds no peer region -- it is in the cookie"
+    );
+
+    let mut driver = QueueDriver::with(vec![LinkEvent::Rx(RxFrame::new(craft_opensyn_wire(
+        &cookie,
+    )))]);
+    let _ = poll_and_dispatch_one(&mut driver, &actions, &mut engine).await;
+    assert_eq!(engine.get_current_state(), S::Established);
+    assert_eq!(
+        actions.peer_region(),
+        Some(region),
+        "the admitted OpenSyn puts back the region the cookie carried"
+    );
+}
+
 /// R2777 — the QoS BAND rides the cookie: between InitAck and OpenSyn the
 /// acceptor holds the band it OFFERED, and the admitted OpenSyn puts back the
 /// band the handshake MERGED.
@@ -963,6 +1020,7 @@ async fn without_a_cookie_nonce_the_acceptor_admits_no_open_syn() {
                 lowlatency: LowlatencyAcceptState(false),
                 compression: CompressionAcceptState(false),
                 patch: PatchAcceptState(None),
+                region: RegionAcceptState::default(),
             },
         },
     )

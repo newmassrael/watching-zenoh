@@ -123,9 +123,10 @@ pub struct AcceptCookieState {
     /// opaque bytes and echoes them back — so nothing off this node parses it,
     /// and upstream is the oracle for WHICH state must survive, not for the
     /// sequence. Upstream's relative order is followed anyway, so that the
-    /// insertion point for the states wz does not yet carry (multilink, the
-    /// region name) is unambiguous rather than a choice made twice — R2779
-    /// put the auth challenges after shm for exactly that reason.
+    /// insertion point for the state wz does not yet carry (multilink) is
+    /// unambiguous rather than a choice made twice — R2779 put the auth
+    /// challenges after shm, and R2780 the region name last, for exactly that
+    /// reason.
     pub negotiated: NegotiatedExtensions,
 }
 
@@ -255,8 +256,9 @@ mod tests {
     use super::*;
     use crate::accept_state::{
         AuthAcceptState, CompressionAcceptState, LowlatencyAcceptState, PatchAcceptState,
-        QosAcceptState, ShmAcceptState,
+        QosAcceptState, RegionAcceptState, ShmAcceptState,
     };
+    use crate::extregion::RegionName;
     use crate::qos::Priority;
     use crate::reliability::Reliability;
     use alloc::vec;
@@ -301,6 +303,9 @@ mod tests {
                 // keep apart, so the fixture uses a third value and
                 // `the_patch_level_is_not_a_flag` drives that pair directly.
                 patch: PatchAcceptState(Some(3)),
+                region: RegionAcceptState::new(Some(
+                    &RegionName::new("eu-west").expect("a valid region name"),
+                )),
             },
         }
     }
@@ -495,6 +500,13 @@ mod tests {
             AcceptCookieState {
                 negotiated: NegotiatedExtensions {
                     patch: PatchAcceptState(None),
+                    ..base.negotiated
+                },
+                ..state()
+            },
+            AcceptCookieState {
+                negotiated: NegotiatedExtensions {
+                    region: RegionAcceptState::default(),
                     ..base.negotiated
                 },
                 ..state()

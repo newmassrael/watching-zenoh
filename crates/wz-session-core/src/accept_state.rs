@@ -59,18 +59,19 @@
 //! of extensions, because the list R2774 wrote from a walk of the extensions
 //! missed one —
 //! `io/zenoh-transport/src/unicast/establishment/cookie.rs` @ `pub(crate) struct Cookie {`.
-//! Against that struct four things remained, and R2779 closed the auth
-//! states: the usrpwd nonce and the pubkey challenge ride
-//! `AuthAcceptState`. Three remain, held by the objects that own them: the
-//! multilink public key with its challenge, the peer's announced region
-//! name, and the cookie's head fields, which ride the cookie but are also
-//! still kept in their slots. Upstream's shm accept state is EMPTY, so shm
-//! is not among them —
+//! Against that struct four things remained. R2779 closed the auth states
+//! (the usrpwd nonce and the pubkey challenge ride `AuthAcceptState`) and
+//! R2780 the peer's announced region name (`RegionAcceptState`). Two
+//! remain, held by the objects that own them: the multilink public key with
+//! its challenge, and the cookie's head fields, which ride the cookie but
+//! are also still kept in their slots. Upstream's shm accept state is EMPTY,
+//! so shm is not among them —
 //! `io/zenoh-transport/src/unicast/establishment/ext/shm/auth.rs` @ `pub(crate) type StateAccept = StateOpen;`
 //! and its codec writes nothing.
 
 use sce_forge_runtime::codec::{CodecError, SceCursor, SceSink};
 
+use crate::extregion::{RegionName, MAX_REGION_NAME_LEN};
 use crate::qos::Priority;
 use crate::reliability::Reliability;
 
@@ -446,6 +447,95 @@ impl AcceptState for AuthAcceptState {
     }
 }
 
+/// The region name the PEER announced on its InitSyn, or none.
+///
+/// R2780 — upstream carries it in its cookie as the region extension's
+/// accept state,
+/// `io/zenoh-transport/src/unicast/establishment/ext/region_name.rs` @ `pub(crate) struct StateAccept(State);`,
+/// whose one field is `other_region_name`, and hands it out after OpenSyn.
+/// wz admitted it off the InitSyn into `peer_region` and held it there
+/// across InitAck.
+///
+/// Held as the name's BYTES — a length and a fixed array — rather than as a
+/// `RegionName`, because the group is `Copy + Eq` and `RegionName` is
+/// neither: its no-alloc carrier implements no `Eq`, which that type's own
+/// note records. A constructed value only ever holds a name `RegionName`
+/// admitted, so the way back to one cannot fail.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct RegionAcceptState {
+    /// The name's length; zero when there is none. Region names are
+    /// non-empty by upstream's own rule, so zero is not a length a name can
+    /// have, and upstream's codec uses the empty string for "none" too.
+    len: u8,
+    /// The name's bytes, zero past `len`.
+    bytes: [u8; MAX_REGION_NAME_LEN],
+}
+
+impl RegionAcceptState {
+    /// The state for a peer that announced `name`, or none.
+    pub fn new(name: Option<&RegionName>) -> Self {
+        let mut state = Self::default();
+        if let Some(name) = name {
+            let raw = name.as_str().as_bytes();
+            state.len = raw.len() as u8;
+            state.bytes[..raw.len()].copy_from_slice(raw);
+        }
+        state
+    }
+
+    /// The announced name, or none.
+    pub fn name(&self) -> Option<RegionName> {
+        if self.len == 0 {
+            return None;
+        }
+        // Only `new` and `decode` construct a present state, and both admit
+        // exactly what `RegionName::new` admits, so neither arm below is
+        // reachable; `ok()` rather than a panic keeps a future constructor
+        // that forgot the rule a refusal.
+        core::str::from_utf8(&self.bytes[..self.len as usize])
+            .ok()
+            .and_then(|s| RegionName::new(s).ok())
+    }
+}
+
+impl AcceptState for RegionAcceptState {
+    /// A length byte, then the name padded to the longest one upstream
+    /// admits, so the width does not depend on the name.
+    const WIDTH: usize = 1 + MAX_REGION_NAME_LEN;
+
+    fn encode<S: SceSink>(&self, sink: &mut S) -> Result<(), CodecError> {
+        sink.write_u8(self.len)?;
+        for b in self.bytes {
+            sink.write_u8(b)?;
+        }
+        Ok(())
+    }
+
+    fn decode(cursor: &mut SceCursor<'_>) -> Result<Self, CodecError> {
+        let raw = cursor.peek_slice(Self::WIDTH)?;
+        let len = raw[0] as usize;
+        // Checked here rather than trusted, although the MAC has already
+        // refused any payload this node did not write: `name` promises that
+        // a present state is a name, and that promise is kept at the one
+        // place a state is built from bytes.
+        if len > MAX_REGION_NAME_LEN {
+            return Err(CodecError::TooManyElements);
+        }
+        if len > 0 {
+            let text =
+                core::str::from_utf8(&raw[1..1 + len]).map_err(|_| CodecError::InvalidUtf8)?;
+            RegionName::new(text).map_err(|_| CodecError::InvalidUtf8)?;
+        }
+        let mut bytes = [0u8; MAX_REGION_NAME_LEN];
+        bytes[..len].copy_from_slice(&raw[1..1 + len]);
+        cursor.advance(Self::WIDTH)?;
+        Ok(Self {
+            len: len as u8,
+            bytes,
+        })
+    }
+}
+
 /// Every extension state the acceptor's cookie carries, as ONE value in the
 /// codec's order.
 ///
@@ -482,6 +572,11 @@ pub struct NegotiatedExtensions {
     pub compression: CompressionAcceptState,
     /// The negotiated protocol-patch level, or its absence.
     pub patch: PatchAcceptState,
+    /// The region name the peer announced (R2780). Like `auth`, not an
+    /// outcome of a negotiation and in the group anyway, for the same
+    /// reason: same boundary, same one writer, and upstream's cookie holds
+    /// it among its extension states, last.
+    pub region: RegionAcceptState,
 }
 
 impl AcceptState for NegotiatedExtensions {
@@ -490,7 +585,8 @@ impl AcceptState for NegotiatedExtensions {
         + AuthAcceptState::WIDTH
         + LowlatencyAcceptState::WIDTH
         + CompressionAcceptState::WIDTH
-        + PatchAcceptState::WIDTH;
+        + PatchAcceptState::WIDTH
+        + RegionAcceptState::WIDTH;
 
     fn encode<S: SceSink>(&self, sink: &mut S) -> Result<(), CodecError> {
         self.qos.encode(sink)?;
@@ -498,7 +594,8 @@ impl AcceptState for NegotiatedExtensions {
         self.auth.encode(sink)?;
         self.lowlatency.encode(sink)?;
         self.compression.encode(sink)?;
-        self.patch.encode(sink)
+        self.patch.encode(sink)?;
+        self.region.encode(sink)
     }
 
     // A struct expression evaluates its fields in the order they are
@@ -511,6 +608,7 @@ impl AcceptState for NegotiatedExtensions {
             lowlatency: LowlatencyAcceptState::decode(cursor)?,
             compression: CompressionAcceptState::decode(cursor)?,
             patch: PatchAcceptState::decode(cursor)?,
+            region: RegionAcceptState::decode(cursor)?,
         })
     }
 }
@@ -662,6 +760,9 @@ mod tests {
         for arm in auth_arms() {
             assert_eq!(width_check(arm), AuthAcceptState::WIDTH);
         }
+        for arm in region_arms() {
+            assert_eq!(width_check(arm), RegionAcceptState::WIDTH);
+        }
         assert_eq!(
             width_check(LowlatencyAcceptState(true)),
             LowlatencyAcceptState::WIDTH
@@ -722,6 +823,10 @@ mod tests {
             },
             NegotiatedExtensions {
                 patch: PatchAcceptState(Some(1)),
+                ..base
+            },
+            NegotiatedExtensions {
+                region: RegionAcceptState::new(Some(&RegionName::new("eu").unwrap())),
                 ..base
             },
         ];
@@ -866,6 +971,59 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// No region, the shortest name, a name of a different length, and the
+    /// longest name upstream admits.
+    fn region_arms() -> [RegionAcceptState; 4] {
+        [
+            RegionAcceptState::default(),
+            RegionAcceptState::new(Some(&RegionName::new("a").unwrap())),
+            RegionAcceptState::new(Some(&RegionName::new("eu-west").unwrap())),
+            RegionAcceptState::new(Some(
+                &RegionName::new(&"z".repeat(MAX_REGION_NAME_LEN)).unwrap(),
+            )),
+        ]
+    }
+
+    /// R2780 — every region arm survives as the SAME NAME, and no two share
+    /// an encoding.
+    ///
+    /// The round trip in `width_check` compares the states; this compares the
+    /// names they give back, which is what the rebuilt acceptor reads.
+    #[test]
+    fn every_region_arm_survives_as_the_same_name() {
+        let names = [None, Some("a"), Some("eu-west")];
+        for (arm, name) in region_arms().into_iter().zip(names) {
+            assert_eq!(width_check(arm), RegionAcceptState::WIDTH);
+            assert_eq!(arm.name().as_ref().map(RegionName::as_str), name);
+        }
+        let longest = region_arms()[3].name().expect("the longest name is a name");
+        assert_eq!(longest.as_str().len(), MAX_REGION_NAME_LEN);
+
+        let mut seen = [[0u8; RegionAcceptState::WIDTH]; 4];
+        for (i, arm) in region_arms().into_iter().enumerate() {
+            let mut sink = SliceSink::new(&mut seen[i]);
+            arm.encode(&mut sink).expect("fits");
+        }
+        for i in 0..seen.len() {
+            for j in (i + 1)..seen.len() {
+                assert_ne!(
+                    seen[i], seen[j],
+                    "region arms {i} and {j} share an encoding"
+                );
+            }
+        }
+    }
+
+    /// A length byte past the longest name is refused rather than read past
+    /// the name's array.
+    #[test]
+    fn a_region_length_past_the_longest_name_is_refused() {
+        let mut raw = [0u8; RegionAcceptState::WIDTH];
+        raw[0] = (MAX_REGION_NAME_LEN + 1) as u8;
+        let mut cursor = SceCursor::new(&raw);
+        assert!(RegionAcceptState::decode(&mut cursor).is_err());
     }
 
     /// A flag state's cursor runs out rather than reading past its end.

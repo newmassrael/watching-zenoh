@@ -135,7 +135,7 @@ pub use wz_session_core::accept_cookie::{
 // them, which is the two-crate-paths problem the note above already refuses.
 pub use wz_session_core::accept_state::{
     AcceptState, AuthAcceptState, CompressionAcceptState, LowlatencyAcceptState,
-    NegotiatedExtensions, PatchAcceptState, QosAcceptState, ShmAcceptState,
+    NegotiatedExtensions, PatchAcceptState, QosAcceptState, RegionAcceptState, ShmAcceptState,
 };
 
 /// R69 / R311ei — construct a `SigningKey` from OS-backed cryptographic

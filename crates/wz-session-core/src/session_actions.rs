@@ -2777,7 +2777,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         use crate::accept_state::AuthAcceptState;
         use crate::accept_state::{
             CompressionAcceptState, LowlatencyAcceptState, NegotiatedExtensions, PatchAcceptState,
-            QosAcceptState, ShmAcceptState,
+            QosAcceptState, RegionAcceptState, ShmAcceptState,
         };
         NegotiatedExtensions {
             // R2777 — the band rides with the capability, from the slot the
@@ -2816,6 +2816,11 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             #[cfg(not(feature = "transport-compression"))]
             compression: CompressionAcceptState(false),
             patch: PatchAcceptState(R::with_mutex_mut(&self.negotiated_patch, |s| *s)),
+            // R2780 — the region the peer announced on this InitSyn, admitted
+            // (and validated) before the InitAck is minted.
+            region: RegionAcceptState::new(
+                R::with_mutex_mut(&self.peer_region, |s| s.clone()).as_ref(),
+            ),
         }
     }
 
@@ -2833,7 +2838,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     fn offered_extensions(&self) -> crate::accept_state::NegotiatedExtensions {
         use crate::accept_state::{
             AuthAcceptState, CompressionAcceptState, LowlatencyAcceptState, NegotiatedExtensions,
-            PatchAcceptState, QosAcceptState, ShmAcceptState,
+            PatchAcceptState, QosAcceptState, RegionAcceptState, ShmAcceptState,
         };
         use crate::transport_mode::TransportMode;
         let offer = R::with_mutex_mut(&self.offer, |o| *o);
@@ -2861,6 +2866,10 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             lowlatency: LowlatencyAcceptState(offer.mode == TransportMode::LowLatency),
             compression: CompressionAcceptState(offer.compression),
             patch: PatchAcceptState(None),
+            // R2780 — none: the region is the PEER's announcement, never this
+            // node's offer, and before a peer is heard there is none. So the
+            // InitAck return-to-offer releases it.
+            region: RegionAcceptState::default(),
         }
     }
 
@@ -2913,6 +2922,10 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         // ungated field carrying `Option<u8>`, so it is the only member of the
         // five that a default build can observe at all.
         R::with_mutex_mut(&self.negotiated_patch, |s| *s = n.patch.0);
+        // R2780 — UNGATED too, and a second member a default build observes:
+        // `peer_region` is an ungated slot. It is not one of the five above,
+        // which are outcomes of a negotiation; it is what the peer announced.
+        R::with_mutex_mut(&self.peer_region, |s| *s = n.region.name());
     }
 
     /// R2774 — return EVERY negotiated slot to this node's offer: the state a
@@ -8045,9 +8058,11 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             R::with_mutex_mut(&self.peer_whatami, |slot| *slot = None);
             // R2774 — the peer's region is the PEER's, as `peer_whatami` is:
             // upstream builds its region state `None` on every link. Without
-            // this the reconnect window reported the previous peer's region
-            // until the next Init replaced it.
-            R::with_mutex_mut(&self.peer_region, |slot| *slot = None);
+            // a clear the reconnect window reported the previous peer's region
+            // until the next Init replaced it. R2780 — that clear is now
+            // `return_to_offer` below: the region joined the cookie's group,
+            // whose one writer puts back the offer, and the offer holds no
+            // peer's region. A second write here would be a second writer.
             // R2566 — the authenticated principal is HANDSHAKE-scoped and must
             // not survive into the re-dial window. The `auth` dispatch itself
             // persists here (its methods keep their configured credentials), so
