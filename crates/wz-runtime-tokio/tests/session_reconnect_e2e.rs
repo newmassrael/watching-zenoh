@@ -796,10 +796,18 @@ async fn named_locator_reconnects_after_link_loss() {
 /// over the surviving bundle rejects typed instead of silently vanishing.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn gave_up_supervisor_resumes_on_re_drive() {
+    use wz_runtime_tokio_test_support::refusing_port;
     use wz_session_core::send_declare_error::SendDeclareError;
 
-    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
-    let addr = listener.local_addr().expect("local_addr");
+    // R2781 (open-debt item 810) — the endpoint goes AWAY and comes BACK on
+    // the same address, and the number is held by `port` the whole time.
+    // This test used to drop its listener to make the address dead and bind a
+    // new one to revive it; the drop freed the number, so a test beside it
+    // could take it -- answering the dials that must be refused, or making
+    // the rebind fail. Each listener here shares the held number instead.
+    let port = refusing_port();
+    let addr = port.addr();
+    let listener = TcpListener::from_std(port.listen()).expect("the first listener");
     let locator = ReconnectLocator::Ip(
         parse_locator(&format!("tcp/{addr}")).expect("parse loopback locator"),
     );
@@ -835,7 +843,8 @@ async fn gave_up_supervisor_resumes_on_re_drive() {
     );
 
     // Kill the endpoint entirely: drop the live connection AND the
-    // listener, so every reopen attempt dials a dead address.
+    // listener, so every reopen attempt dials a dead address -- one `port`
+    // still holds, so it refuses rather than belonging to nobody.
     drop(server_conn1);
     drop(listener);
 
@@ -857,7 +866,7 @@ async fn gave_up_supervisor_resumes_on_re_drive() {
 
     // The endpoint returns on the SAME address; re-driving the surviving
     // supervisor resumes the reopen loop and replays the cache.
-    let listener = TcpListener::bind(addr).await.expect("rebind same addr");
+    let listener = TcpListener::from_std(port.listen()).expect("the same number, listening again");
     let stop_for_server = stop;
     let (drive_outcome, declares_conn2) = tokio::join!(
         client.drive(&timeouts, &stop_for_server, Some(ITER_CAP), |_| {}),

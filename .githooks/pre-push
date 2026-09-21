@@ -855,6 +855,16 @@ round_fed_gates=(
     # sources, so a file added tomorrow is inside its population already.
     # MEASURED: 1.7-2.1s over three warm runs, a parse with no build.
     "literal_key_gate.py"
+    # R2781 (unregistered open-debt item 810) — a socket's number that
+    # OUTLIVES the socket. The class reded hosted runs twice (806, 810), and
+    # the second time at a site the first repair's sweep missed because the
+    # sweep was a search. Round-fed: it derives its population from TRACKED
+    # `crates/**.rs`, so a test written tomorrow is inside it already, and a
+    # release it cannot classify fails here rather than as a flaky hosted run.
+    # The selftest rides beside it: its fixtures are the only place the
+    # verdict's refusal arms run.
+    "released_port_gate.py --selftest"
+    "released_port_gate.py"
 )
 # ⚠ The module and its ARGUMENTS are expanded separately, and that too is
 # forced rather than chosen: `scripts/lib/"${cmd[@]}"` attaches the prefix to

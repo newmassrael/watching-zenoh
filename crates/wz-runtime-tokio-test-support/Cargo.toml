@@ -74,7 +74,12 @@ sce-rust-runtime = { path = "../../vendor/sce/backends/rust/runtime" }
 # listens). Already in the lock at this version through tokio, and already a
 # direct dependency of wz-runtime-tokio and wz-integration-tests for the two
 # local copies of the same helper this one replaces.
-socket2 = "0.6"
+#
+# R2781 (open-debt item 810) — `all`, for `set_reuse_port`: a listener can
+# then share the number the guard holds (`RefusingPort::listen`), so a test
+# whose peer goes away and comes back never frees it in between.
+# wz-runtime-tokio already builds socket2 with `all` for multicast.
+socket2 = { version = "0.6", features = ["all"] }
 # R311of — the loopback TLS cert fixture (loopback_tls_configs) is the SSOT
 # for the three wz-runtime-tokio TLS e2e tests (tls_e2e, scouting round3_tls,
 # session_reconnect_e2e tls_reconnect); the 26-line cert-generation block was

@@ -116,13 +116,28 @@ def _at_token_start(text: str, i: int) -> bool:
     return i == 0 or not _IDENT_CHAR.match(text[i - 1])
 
 
-def strip_comments(text: str) -> str:
+def _blank(s: str) -> str:
+    """`s` with every character but a newline turned into a space."""
+    return "".join("\n" if ch == "\n" else " " for ch in s)
+
+
+def strip_comments(text: str, blank_literals: bool = False) -> str:
     """`text` with comment bodies blanked, and every line still in place.
 
     Lines are PRESERVED, not deleted: callers report `file:line`, and a stripper
     that dropped lines would move every number it reports afterwards. What is
     removed is replaced by nothing, so the line survives and its content does
     not.
+
+    R2781 (unregistered open-debt item 810) — `blank_literals` also turns the
+    BODY of every string and character literal into spaces, quotes and line
+    breaks kept. A caller that counts braces or brackets to find a scope needs
+    it: `format!("{addr}")` and `'{'` are data, and a brace inside them read as
+    code moves every scope boundary after it. It is a knob on this scanner and
+    not a second one, because deciding where a literal ends is exactly what this
+    scan already does, and a second scanner is a second place to get raw
+    strings and `'` wrong. Off by default: the callers that search literals for
+    a needle need the literal's text.
     """
     out: list[str] = []
     i, n = 0, len(text)
@@ -160,7 +175,11 @@ def strip_comments(text: str) -> str:
                 body, term = opened
                 end = text.find(term, body)
                 end = n if end < 0 else end + len(term)
-                out.append(text[i:end])
+                if blank_literals:
+                    close = end - len(term) if text.endswith(term, body, end) else end
+                    out.append(text[i:body] + _blank(text[body:close]) + text[close:end])
+                else:
+                    out.append(text[i:end])
                 i = end
                 continue
 
@@ -171,13 +190,16 @@ def strip_comments(text: str) -> str:
             i += 1
             while i < n:
                 if text[i] == "\\":
-                    out.append(text[i : i + 2])
+                    pair = text[i : i + 2]
+                    out.append(_blank(pair) if blank_literals else pair)
                     i += 2
                     continue
                 out.append(text[i])
                 i += 1
                 if text[i - 1] == '"':
                     break
+                if blank_literals:
+                    out[-1] = _blank(out[-1])
             continue
 
         # `'` is a character literal or a lifetime, decided by shape. Only the
@@ -196,7 +218,10 @@ def strip_comments(text: str) -> str:
                         j += 1
                         break
                     j += 1
-                out.append(text[i:j])
+                if blank_literals and j - i >= 2:
+                    out.append("'" + _blank(text[i + 1 : j - 1]) + "'")
+                else:
+                    out.append(text[i:j])
                 i = j
                 continue
 
@@ -292,6 +317,32 @@ def selftest() -> int:
         "fn f<'a>(y: &'a str) -> &'a str {\n    // hidden by a lifetime\n    y\n}\n"
     ):
         bad.append("lifetime: `'a` was read as a character literal")
+    # R2781 — `blank_literals`: every brace a scope-counting caller must NOT
+    # see sits inside a literal, and every brace it must see sits outside one.
+    # Written as a brace BALANCE because that is the caller's question: the
+    # fixtures open nothing outside their literals, so any surviving literal
+    # brace unbalances the count.
+    literal_src = (
+        'let a = format!("{addr} }}");\n'
+        "let b = '{';\n"
+        'let c = r#"}"{"#;\n'
+        'let d = "line one {\n  line two";\n'
+        "fn real() { inner() }\n"
+    )
+    blanked = strip_comments(literal_src, blank_literals=True)
+    if blanked.count("{") != 1 or blanked.count("}") != 1:
+        bad.append(
+            "blank_literals: a brace inside a literal survived, or the one pair "
+            f"outside was taken ({blanked.count('{')} open, {blanked.count('}')} "
+            "close, want 1 and 1)"
+        )
+    if "fn real() { inner() }" not in blanked:
+        bad.append("blank_literals: code outside every literal was changed")
+    if blanked.count("\n") != literal_src.count("\n"):
+        bad.append("blank_literals: blanking moved the line numbering")
+    # And the default keeps what a literal holds: the needle callers rely on it.
+    if "{addr}" not in strip_comments(literal_src):
+        bad.append("default: a literal's text was blanked without being asked")
     for line in bad:
         print(f"  rust-comments FAIL -- {line}")
     if bad:

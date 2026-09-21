@@ -40,6 +40,7 @@ use wz::runtime_tokio::session_glue::{
 use wz::runtime_tokio::session_open::{
     accept_and_open_session, DialedLink, OpenedSessionParts, DEFAULT_OPEN_TICK_MS,
 };
+use wz_runtime_tokio_test_support::refusing_port;
 
 /// Bound on the acceptor's inbound poll, so a handshake regression fails fast
 /// instead of hanging the suite.
@@ -376,15 +377,17 @@ async fn an_alert_fans_to_every_destination_and_retries_the_one_that_is_down() {
 
     let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
     let live_addr = listener.local_addr().expect("local_addr");
-    // A port nothing listens on: bound to learn a free one, then RELEASED. The
-    // alternative -- a hard-coded port -- is the flaky one, because a port this
-    // suite does not own may well have something on it.
-    let dead_addr = {
-        let doomed = TcpListener::bind("127.0.0.1:0").await.expect("bind");
-        let addr = doomed.local_addr().expect("local_addr");
-        drop(doomed);
-        addr
-    };
+    // A port nothing listens on, HELD so it refuses for the whole test.
+    //
+    // R2781 (open-debt item 810) — this used to bind a port to learn a free
+    // number and then RELEASE it, and hosted run 35606210194 paid for that:
+    // the kernel handed the released number to the quiet listener of
+    // `the_alert_reaches_a_peer_and_a_clean_capture_sends_it_nothing`, running
+    // beside this test in the same binary, and the retries aimed here were
+    // accepted there. A held, never-listening socket gives the number to
+    // nobody. `released_port_gate.py` now refuses the old shape tree-wide.
+    let dead = refusing_port();
+    let dead_addr = dead.addr();
 
     let heard: Heard = Arc::new(Mutex::new(Vec::new()));
     let recorder = heard.clone();

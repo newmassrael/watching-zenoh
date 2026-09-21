@@ -627,9 +627,20 @@ pub fn free_port() -> u16 {
 /// for themselves (`wz-integration-tests`' `closed_port`, whose own
 /// discriminating test moved here with it, and `static_scout_open.rs`'
 /// `refused_locator`) and five had written the other way.
+///
+/// R2781 (open-debt item 810) — the socket also sets `SO_REUSEPORT`, which
+/// is what lets [`RefusingPort::listen`] put a LISTENER on the same number
+/// while this socket keeps holding it. A plain bind still fails (std's
+/// `TcpListener::bind` does not set the option, and the kernel admits a
+/// second socket to a port only when both did), so the reservation above is
+/// unchanged; and a `bind(:0)` never picks a port another socket holds, with
+/// or without the option, so nothing else on the host can be handed it.
 pub fn refusing_port() -> RefusingPort {
     let socket = socket2::Socket::new(socket2::Domain::IPV4, socket2::Type::STREAM, None)
         .expect("a TCP socket");
+    socket
+        .set_reuse_port(true)
+        .expect("SO_REUSEPORT, so a listener can share the held number");
     let bind: std::net::SocketAddr = "127.0.0.1:0".parse().expect("a loopback address");
     socket.bind(&bind.into()).expect("bind without listen");
     let addr = socket
@@ -655,6 +666,34 @@ impl RefusingPort {
     /// The address that refuses, for as long as `self` lives.
     pub fn addr(&self) -> std::net::SocketAddr {
         self.addr
+    }
+
+    /// A LISTENER on this same number, for as long as it is held; dropping it
+    /// returns the number to refusing, and it is never free in between.
+    ///
+    /// R2781 (open-debt item 810) — for a test whose peer must go AWAY and,
+    /// in some tests, come back on the same address. The shape this replaces
+    /// dropped a listener to make the address dead and bound a new one to
+    /// bring it back; the drop freed the number, so another test's `bind(:0)`
+    /// could take it -- answering the dial that was meant to be refused, or
+    /// making the rebind fail. Here the number stays with `self` throughout.
+    ///
+    /// The listener is NON-BLOCKING, ready for tokio's `from_std`, because
+    /// every caller in this tree drives it from a tokio test.
+    pub fn listen(&self) -> std::net::TcpListener {
+        let socket = socket2::Socket::new(socket2::Domain::IPV4, socket2::Type::STREAM, None)
+            .expect("a TCP socket");
+        socket
+            .set_reuse_port(true)
+            .expect("SO_REUSEPORT, to share the number the guard holds");
+        socket
+            .bind(&self.addr.into())
+            .expect("bind the held number beside its guard");
+        socket.listen(128).expect("listen on the held number");
+        socket
+            .set_nonblocking(true)
+            .expect("non-blocking, for tokio's from_std");
+        socket.into()
     }
 }
 
@@ -915,6 +954,47 @@ mod port_tests {
             TcpStream::connect(dead.addr()).is_err(),
             "a bound-not-listening port must refuse connects (ECONNREFUSED)"
         );
+    }
+
+    /// R2781 — the discriminator for `RefusingPort::listen`: the held number
+    /// ANSWERS while a listener is held on it, REFUSES again once that
+    /// listener is dropped, answers again on a second listen, and a plain
+    /// bind fails in every one of those phases.
+    ///
+    /// Each phase catches a different wrong helper. A `listen` that bound a
+    /// fresh port answers somewhere else, and the first connect is refused. A
+    /// guard without the shared option cannot be joined at all, and `listen`
+    /// panics. A guard that let go of the number while a listener held it
+    /// would leave nothing refusing after the drop.
+    #[test]
+    fn a_refusing_port_listens_and_refuses_again_on_the_same_number() {
+        use std::net::{TcpListener, TcpStream};
+        let port = refusing_port();
+        for phase in ["first", "second"] {
+            let listener = port.listen();
+            assert_eq!(
+                listener.local_addr().expect("the listener's address"),
+                port.addr(),
+                "the {phase} listener is on the held number"
+            );
+            assert!(
+                TcpStream::connect(port.addr()).is_ok(),
+                "the held number must answer while the {phase} listener is held"
+            );
+            assert!(
+                TcpListener::bind(port.addr()).is_err(),
+                "a plain bind must still fail while the {phase} listener is held"
+            );
+            drop(listener);
+            assert!(
+                TcpStream::connect(port.addr()).is_err(),
+                "the number must refuse again once the {phase} listener is dropped"
+            );
+            assert!(
+                TcpListener::bind(port.addr()).is_err(),
+                "and stay reserved after the {phase} listener is dropped"
+            );
+        }
     }
 
     /// The old three-line helper: bind, read, drop. Reproduced here so the

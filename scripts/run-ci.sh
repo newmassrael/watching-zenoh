@@ -3271,6 +3271,16 @@ layer_c0_test_discipline() {
     # the failure branches are exercised.
     python3 scripts/lib/literal_key_gate.py --selftest || return 1
     python3 scripts/lib/literal_key_gate.py || return 1
+    # R2781 (unregistered open-debt item 810) — the RELEASED PORT gate: a
+    # socket's number read and then let go while the test still uses it. The
+    # kernel hands a released number to the next `bind(:0)`, including a
+    # listener in the test running beside it, which reded hosted C1 twice
+    # (806's exit arm, 810's quiet replay listener). R2778 repaid the first
+    # with one shared helper and a sweep that was a search; the search missed
+    # the second. This derives the population from the tree and FAILs on an
+    # empty one, a release no row classifies, and a row with no release.
+    python3 scripts/lib/released_port_gate.py --selftest || return 1
+    python3 scripts/lib/released_port_gate.py || return 1
     # R2150 (unregistered open-debt item 539) — the KIND of unhonoured. R2148
     # split `UNHONOURED_UPSTREAM_CONFIG_KEYS` into "wz cannot" and "the reader
     # was never told", and the test guarding that split makes it total,
