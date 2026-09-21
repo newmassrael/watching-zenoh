@@ -1913,7 +1913,18 @@ PIN_NO_SYMBOL = 2
 # for the per-extension accept-state type this round lands toward the ONE
 # clause still standing. READ off the census's own FAIL line,
 # `wz citations: 106 against a pin of 96`.
-PIN_WZ_CITATIONS = 106
+#
+# R2774 — 106 -> 108, `session-unicast-accept` a fourth time, and this time
+# the clause is NARROWED rather than struck: its CORRECTION says which of the
+# stateless clause's states now ride the cookie and are released after
+# InitAck, and it shows the two structures that made that expressible --
+# `accept_state.rs` @ `pub struct NegotiatedExtensions` and the offer slot in
+# `session_actions.rs`. ATTRIBUTED by the same probe as R2763: over
+# `origin/main` and over this tree, per atom, `session-unicast-accept` moves
+# 30 -> 32 and no other atom moves; the control holds, the pushed tree still
+# reports 106. READ off the census's own FAIL line,
+# `wz citations: 108 against a pin of 106`.
+PIN_WZ_CITATIONS = 108
 # R2626 — 44 -> 42, and this one is worth a sentence because it HELD through
 # every earlier retirement in this run (R2612, R2622). `time-hlc`'s reason is the
 # first retiree carrying AMBIGUOUS citations of its own: its oldest clauses cite
