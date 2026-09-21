@@ -546,7 +546,18 @@ pub struct UnresolvedAlias {
     pub cause: UnresolvedCause,
 }
 
-fn dir_index(d: Direction) -> usize {
+/// Which slot of a per-direction pair a [`Direction`] reads.
+///
+/// R2757 (open debt 790) — ONE spelling, and it is `pub(crate)` for that
+/// reason rather than for a caller's convenience. `crate::filter` carried a
+/// byte-for-byte copy of this function until this round, which made the
+/// convention two facts that happened to agree. What they index is every
+/// per-direction pair this crate builds — [`SpaceOwner`] pairs,
+/// [`crate::node::SessionGrouping`]'s zids, a row's `per_direction` — and
+/// `SessionGrouping::of` already names what a disagreement would do: resolve
+/// every reference against the PEER's table. A rule with that consequence
+/// should not be written down twice.
+pub(crate) fn dir_index(d: Direction) -> usize {
     match d {
         Direction::A => 0,
         Direction::B => 1,
@@ -1397,15 +1408,21 @@ impl ThroughputTable {
     /// than built here. It used to be `KeyexprSpaces::new()` on this line, which
     /// is what made the id space per-flow; the driver now owns one instance and
     /// calls `KeyexprSpaces::enter_flow` before each list. See [`SpaceOwner`].
+    /// R2757 (open debt 790) — the list arrives as a
+    /// [`crate::node::ListContext`], for the reason
+    /// [`Self::observe_frame_where`] gives. A caller holding one list and no
+    /// node census builds it with `ListContext::unattributed`, and every
+    /// record it folds answers `None` for its node — which is what a walk with
+    /// no handshake in front of it actually knows.
     pub fn observe_flow_where(
         &mut self,
         frames: &[PassiveFrame],
         filter: &Filter,
-        list: usize,
+        ctx: crate::node::ListContext<'_>,
         spaces: &mut KeyexprSpaces,
     ) {
         for frame in frames {
-            self.observe_frame_where(frame, filter, list, spaces);
+            self.observe_frame_where(frame, filter, ctx, spaces);
         }
     }
 
@@ -1420,18 +1437,24 @@ impl ThroughputTable {
     /// [`crate::Dissection::message_frames_in_capture_order`], which is what
     /// [`aggregate_grouped`] now walks.
     ///
-    /// `list` stays an argument for the reason it always was — it is half the
-    /// anchor token, and a caller that passed one number for two stream lists
-    /// would make two coordinate systems look like one.
+    /// The list stays an argument for the reason it always was — it is half
+    /// the anchor token, and a caller that passed one number for two stream
+    /// lists would make two coordinate systems look like one.
+    ///
+    /// R2757 (open debt 790) — it arrives inside a
+    /// [`crate::node::ListContext`] now, beside the identity of the nodes on
+    /// that list. Two loose facts about one list became one named value
+    /// because a third was arriving: see that type for why the three
+    /// frame-level doors take the same thing.
     pub fn observe_frame_where(
         &mut self,
         frame: &PassiveFrame,
         filter: &Filter,
-        list: usize,
+        ctx: crate::node::ListContext<'_>,
         spaces: &mut KeyexprSpaces,
     ) {
         {
-            let anchor = frame.stream_offset;
+            let list = ctx.list();
             // R2206 (open-debt item 561) — the space comes off the FRAME now.
             // It arrived as an argument, decided by a match over the message
             // lists one crate layer up, and that second opinion is what item
@@ -1450,7 +1473,7 @@ impl ThroughputTable {
             // reader can act on.
             self.anchor_kind = anchors;
             match &frame.carried {
-                Carried::Batch(batch) => self.observe_batch(spaces, frame, anchor, batch, filter),
+                Carried::Batch(batch) => self.observe_batch(spaces, frame, batch, filter, ctx),
                 #[cfg(feature = "reassembly")]
                 Carried::Reassembled { batch, .. } => {
                     // R2211 (item 565) — a chain ENDED here, and this is the
@@ -1459,7 +1482,7 @@ impl ThroughputTable {
                     // deliver buffer, which is what turns the frame into this
                     // variant rather than `Fragment`.
                     self.chains.completed += 1;
-                    self.observe_batch(spaces, frame, anchor, batch, filter)
+                    self.observe_batch(spaces, frame, batch, filter, ctx)
                 }
                 // R311y614 (§1.4i) — the arms that carry traffic this table
                 // cannot read are COUNTED. Matched by name rather than left to a
@@ -1488,9 +1511,9 @@ impl ThroughputTable {
         &mut self,
         spaces: &mut KeyexprSpaces,
         frame: &PassiveFrame,
-        anchor: usize,
         batch: &BatchParse,
         filter: &Filter,
+        ctx: crate::node::ListContext<'_>,
     ) {
         if batch.halt.is_some() {
             self.gaps.halted_batches += 1;
@@ -1499,7 +1522,7 @@ impl ThroughputTable {
         // R311y641 (§1.1n) — paired with the bytes each record came from, so
         // this plane can say WHERE a record was and not only that it was.
         for (message, span) in batch.records() {
-            self.observe_message(spaces, frame, anchor, message, span, filter);
+            self.observe_message(spaces, frame, message, span, filter, ctx);
         }
     }
 
@@ -1507,11 +1530,19 @@ impl ThroughputTable {
         &mut self,
         spaces: &mut KeyexprSpaces,
         frame: &PassiveFrame,
-        anchor: usize,
         message: &NetworkMessage,
         span: Option<(usize, usize)>,
         filter: &Filter,
+        ctx: crate::node::ListContext<'_>,
     ) {
+        // R2757 (open debt 790) — read from the FRAME rather than handed down.
+        // It used to travel as a parameter, bound once in
+        // `observe_frame_where` to exactly this expression and forwarded
+        // unchanged through two calls — a second spelling of one field, and
+        // the argument that pushed this function past the arity clippy will
+        // name. Reading it here makes the frame the only place a record's
+        // anchor comes from, which is what the space beside it already does.
+        let anchor = frame.stream_offset;
         let direction = frame.direction;
         // A DECLARE is absorbed and not counted: it declares a keyexpr, it does
         // not carry traffic under one, and counting it would put a row on every
@@ -1582,6 +1613,9 @@ impl ThroughputTable {
             payload_bytes: sized_payload(&counts),
             unit_offset: record_unit_offset(frame, span),
             source_delay_ms: delay,
+            // R2757 (open debt 790) — the node plane's answer for THIS
+            // direction of this list, not a reading taken here.
+            zid: ctx.zid(direction),
             observed_at_ms: frame.observed_at_ms,
             elapsed_ms: elapsed_since(self.capture_origin_ms, frame.observed_at_ms),
             // R311y636 (§1.1v) — this plane folds RECORDS, so it has no
@@ -2402,7 +2436,7 @@ pub fn aggregate_grouped(
         // the readers that do need it, rather than leaving two rules in one
         // resolver.
         spaces.at_packet(packet);
-        table.observe_frame_where(frame, filter, list, &mut spaces);
+        table.observe_frame_where(frame, filter, grouping.context(list), &mut spaces);
     }
     table
 }
@@ -3529,7 +3563,12 @@ pub(crate) mod tests {
         // keeps this test about the elapsed term.
         let mut spaces = KeyexprSpaces::new();
         for (list, flow) in d.datagram_flows().iter().enumerate() {
-            by_hand.observe_flow_where(&flow.frames, &filter, list, &mut spaces);
+            by_hand.observe_flow_where(
+                &flow.frames,
+                &filter,
+                crate::node::ListContext::unattributed(list),
+                &mut spaces,
+            );
         }
         assert_eq!(by_hand.selection().undecided, 1);
         assert_eq!(by_hand.rows().len(), 0);
@@ -5642,6 +5681,60 @@ pub(crate) mod tests {
             table.rows().iter().any(|r| r.keyexpr == "orphan/topic"),
             "and the row is there: {:?}",
             table.rows().iter().map(|r| &r.keyexpr).collect::<Vec<_>>()
+        );
+    }
+
+    /// R2757 (open debt 790) — A SELECTOR CAN NAME THE NODE A RECORD CAME
+    /// FROM, and the answer is the node plane's rather than a second reading.
+    ///
+    /// The consumer asked for a `zid` term. The term is the visible half; the
+    /// half that decides whether it can mean anything is that a `RecordView`
+    /// reaches the predicate with an identity on it at all — before this round
+    /// the struct carried nine fields and none of them named a node, so adding
+    /// the word would have given the grammar a term with nothing to evaluate.
+    ///
+    /// THE FIXTURE IS CHOSEN FOR ITS SECOND HALF. `multilink_session` is the
+    /// only capture in this crate holding a named session AND an
+    /// unattributable flow at once, so it grades both answers: records whose
+    /// list carries an [`crate::node::ObservedLink`] have a zid, and records on
+    /// the orphan flow have NONE. A fixture with only the first half would let
+    /// "every record matches" pass as selection.
+    ///
+    /// ⚠ THE `picked < all` ARM IS THE ONE THAT CANNOT BE FAKED. A predicate
+    /// that ignored its operand and answered `Yes` would satisfy `picked > 0`
+    /// and the parse; only a strict inequality says the term DIVIDED the
+    /// records. `all > 0` is the anti-vacuity arm underneath both: over an
+    /// empty capture every count is 0 and every claim here is empty.
+    #[test]
+    fn a_selector_can_name_the_node_a_record_came_from() {
+        let d = multilink_session();
+
+        let all = aggregate(&d).records();
+        assert!(
+            all > 0,
+            "anti-vacuity: this fixture must carry records at all, or every \
+             count below is 0 and proves nothing"
+        );
+
+        let from_a = Filter::parse("zid == a1a1a1a1")
+            .expect("the selector language must name the node axis");
+        let picked = aggregate_where(&d, &from_a).records();
+
+        assert!(
+            picked > 0,
+            "the session's own node must select its records: {picked} of {all}"
+        );
+        assert!(
+            picked < all,
+            "and it must DIVIDE them -- the orphan flow has no link, so no zid \
+             names its records: {picked} of {all}"
+        );
+
+        let nobody = Filter::parse("zid == deadbeef").expect("parses");
+        assert_eq!(
+            aggregate_where(&d, &nobody).records(),
+            0,
+            "a zid no node in this capture announced selects nothing"
         );
     }
 

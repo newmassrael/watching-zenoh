@@ -200,6 +200,57 @@ pub struct ObservedNode {
     pub locators: Vec<String>,
 }
 
+/// R2757 (open debt 790) — what a frame-level walk needs to know about the
+/// MESSAGE LIST it is being handed a frame from.
+///
+/// # Why a type and not two more parameters
+///
+/// The three frame-level doors did not agree before this: `crate::agg` and
+/// `crate::exchange` took a `list`, `crate::payload` did not, and all three are
+/// `pub` for the live-tap consumer [`crate::agg::KeyexprSpaces`] names. Adding
+/// a zid beside the `list` would have deepened that disagreement — two of the
+/// three would carry two loose facts about the list and the third one fact —
+/// so the facts are named together instead. A door that takes this takes the
+/// same thing as the other two, which is what makes the three comparable.
+///
+/// # The absence is a value, not a missing argument
+///
+/// A live tap holding no [`NodeCensus`] builds one with
+/// [`Self::unattributed`], and every record it walks answers `None` for its
+/// node. That is the honest reading — a capture whose handshake nobody saw
+/// carries no announced identity — and it is the same absence
+/// [`crate::filter::RecordView::keyexpr`] already spells. The alternative,
+/// making the parameter optional, would let a caller that simply forgot to
+/// pass it look identical to a capture that genuinely had no session.
+#[derive(Debug, Clone, Copy)]
+pub struct ListContext<'a> {
+    list: usize,
+    zids: Option<&'a [alloc::vec::Vec<u8>; 2]>,
+}
+
+impl<'a> ListContext<'a> {
+    /// The list index, which is what `Dissection::message_lists` is keyed by.
+    pub fn list(self) -> usize {
+        self.list
+    }
+
+    /// The zid the given direction announced, or `None` where this capture
+    /// never saw the handshake that would have named it.
+    pub fn zid(self, direction: wz_session_core::passive::Direction) -> Option<&'a [u8]> {
+        self.zids
+            .map(|z| z[crate::agg::dir_index(direction)].as_slice())
+    }
+
+    /// A list this walk can say nothing about beyond its index.
+    ///
+    /// For a caller with no [`SessionGrouping`] — a live tap, a replay — and
+    /// NOT a fallback for one that has a grouping: see [`SessionGrouping::context`],
+    /// which answers this for a list the grouping could not attribute.
+    pub fn unattributed(list: usize) -> Self {
+        Self { list, zids: None }
+    }
+}
+
 /// Two nodes that named themselves to each other on one flow.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ObservedLink {
@@ -756,6 +807,35 @@ pub struct SessionGrouping {
     /// Per list index, the owner of each direction. Absent for a list this
     /// capture could not attribute to a session.
     by_list: alloc::collections::BTreeMap<usize, [crate::agg::SpaceOwner; 2]>,
+    /// R2757 (open debt 790) — per list index, the ZID each direction
+    /// announced, in the same `[A, B]` order as [`Self::by_list`].
+    ///
+    /// # Why this is kept rather than re-derived
+    ///
+    /// [`Self::of`] already holds the census the zids live in, and until this
+    /// round it DROPPED it: `session_grouping` is
+    /// `SessionGrouping::of(&nodes(d))`, so the identity was in hand at
+    /// derivation and thrown away. Anything downstream that then wanted a node
+    /// had to walk the capture a second time and would have been a second
+    /// spelling — the failure `crate::payload`'s `kind` comment names, one
+    /// plane over.
+    ///
+    /// # Why owned bytes
+    ///
+    /// The census is a local of [`session_grouping`] and does not outlive it,
+    /// so a borrow here could not name a lifetime. Owning the four-to-sixteen
+    /// bytes of a zid per attributed list is the smaller price, and it makes
+    /// this type self-contained: a caller holding a `SessionGrouping` needs
+    /// nothing else to answer "which node".
+    ///
+    /// # Why the same map cannot carry it
+    ///
+    /// [`crate::agg::SpaceOwner::Session`] interns `(session, node)` into one
+    /// token, and the token is not invertible — two different nodes of two
+    /// different sessions are two tokens with nothing in them to recover a
+    /// node from. The owner answers "which id space"; this answers "whose", and
+    /// they are different questions that happen to be keyed alike.
+    zids_by_list: alloc::collections::BTreeMap<usize, [alloc::vec::Vec<u8>; 2]>,
     /// How many distinct sessions the links named.
     sessions: usize,
 }
@@ -779,6 +859,7 @@ impl SessionGrouping {
         let mut sessions: BTreeMap<(usize, usize), usize> = BTreeMap::new();
         let mut sides: BTreeMap<(usize, usize), usize> = BTreeMap::new();
         let mut by_list = BTreeMap::new();
+        let mut zids_by_list = BTreeMap::new();
         for link in census.links() {
             let pair = (link.a.min(link.b), link.a.max(link.b));
             let next = sessions.len();
@@ -793,10 +874,21 @@ impl SessionGrouping {
             // every reference against the peer's table, which is the failure
             // `KeyexprSpaces::resolve` documents as never happening.
             by_list.insert(link.list, [token(link.a), token(link.b)]);
+            // R2757 (open debt 790) — the zids, in the SAME order and from the
+            // SAME `link.a` / `link.b`, so the two maps cannot drift: whatever
+            // the comment above settles about Direction settles this too.
+            zids_by_list.insert(
+                link.list,
+                [
+                    census.nodes()[link.a].zid.clone(),
+                    census.nodes()[link.b].zid.clone(),
+                ],
+            );
         }
         Self {
             sessions: sessions.len(),
             by_list,
+            zids_by_list,
         }
     }
 
@@ -810,6 +902,40 @@ impl SessionGrouping {
             crate::agg::SpaceOwner::Flow { list, side: 0 },
             crate::agg::SpaceOwner::Flow { list, side: 1 },
         ])
+    }
+
+    /// R2757 (open debt 790) — the two ZIDs for one message list, `[A, B]`.
+    ///
+    /// `None` for a list this capture could not attribute, and that is a
+    /// DIFFERENT shape from [`Self::owners`] on purpose. An owner has a
+    /// meaningful fallback — an unattributed flow still has its own id space,
+    /// so [`crate::agg::SpaceOwner::Flow`] is an answer. A node does not: a
+    /// flow whose handshake this capture never saw announced no zid to anyone,
+    /// and inventing a stand-in would report an identity nobody sent. The
+    /// absence is the honest answer, and it is the same absence
+    /// [`crate::filter::RecordView::keyexpr`] already spells.
+    ///
+    /// Both ends are present or neither is: [`ObservedLink`] exists only where
+    /// both named themselves, which is what makes an array rather than two
+    /// options the truthful type here.
+    pub fn zids(&self, list: usize) -> Option<&[alloc::vec::Vec<u8>; 2]> {
+        self.zids_by_list.get(&list)
+    }
+
+    /// R2757 (open debt 790) — everything a frame-level walk needs about one
+    /// list, as the single value those doors take.
+    ///
+    /// A list this grouping could not attribute answers exactly as
+    /// [`ListContext::unattributed`] does, and that is not a coincidence to be
+    /// tidied away: "this capture never saw the handshake" and "this caller
+    /// holds no census" are the same fact about what is KNOWN, even though they
+    /// are different facts about why. The record-level vocabulary
+    /// ([`crate::filter::RecordView::zid`]) has one absence, so this has one too.
+    pub fn context(&self, list: usize) -> ListContext<'_> {
+        ListContext {
+            list,
+            zids: self.zids(list),
+        }
     }
 
     /// How many distinct sessions the links named.

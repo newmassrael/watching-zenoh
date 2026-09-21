@@ -1059,10 +1059,11 @@ impl PayloadCensus {
         &mut self,
         frames: &[wz_session_core::passive::PassiveFrame],
         filter: &crate::filter::Filter,
+        ctx: crate::node::ListContext<'_>,
         spaces: &mut crate::agg::KeyexprSpaces,
     ) {
         for frame in frames {
-            self.observe_frame_where(frame, filter, spaces);
+            self.observe_frame_where(frame, filter, ctx, spaces);
         }
     }
 
@@ -1075,18 +1076,25 @@ impl PayloadCensus {
     /// plane resolves a keyexpr per payload, so list order cost it the same
     /// thing: a publisher whose id was declared on the session's OTHER link had
     /// its topic left blank on a finding against it.
+    /// R2757 (open debt 790) — `ctx` is NEW HERE, and the asymmetry it ends is
+    /// older than this round: `crate::agg` and `crate::exchange` took a list
+    /// index at this door and this one did not, so the three frame-level doors
+    /// disagreed about what a caller must know. They take the same value now.
     pub fn observe_frame_where(
         &mut self,
         frame: &wz_session_core::passive::PassiveFrame,
         filter: &crate::filter::Filter,
+        ctx: crate::node::ListContext<'_>,
         spaces: &mut crate::agg::KeyexprSpaces,
     ) {
         use wz_session_core::passive::Carried;
 
         match &frame.carried {
-            Carried::Batch(batch) => self.observe_batch(spaces, frame, batch, filter),
+            Carried::Batch(batch) => self.observe_batch(spaces, frame, batch, filter, ctx),
             #[cfg(feature = "reassembly")]
-            Carried::Reassembled { batch, .. } => self.observe_batch(spaces, frame, batch, filter),
+            Carried::Reassembled { batch, .. } => {
+                self.observe_batch(spaces, frame, batch, filter, ctx)
+            }
             // Matched by name for the reason R311y614 matched them by name
             // in the throughput plane: a new `Carried` variant must fail to
             // compile here rather than join the silent set.
@@ -1105,6 +1113,7 @@ impl PayloadCensus {
         frame: &wz_session_core::passive::PassiveFrame,
         batch: &wz_session_core::network_message::BatchParse,
         filter: &crate::filter::Filter,
+        ctx: crate::node::ListContext<'_>,
     ) {
         if batch.halt.is_some() {
             self.gaps.halted_batches += 1;
@@ -1113,7 +1122,7 @@ impl PayloadCensus {
         // R311y641 (§1.1n) — paired with the bytes each record came from, so
         // this plane can say WHERE a record was and not only that it was.
         for (message, span) in batch.records() {
-            self.observe_message(spaces, frame, message, span, filter);
+            self.observe_message(spaces, frame, message, span, filter, ctx);
         }
     }
 
@@ -1124,6 +1133,7 @@ impl PayloadCensus {
         message: &wz_session_core::network_message::NetworkMessage,
         span: Option<(usize, usize)>,
         filter: &crate::filter::Filter,
+        ctx: crate::node::ListContext<'_>,
     ) {
         use wz_session_core::network_message::NetworkMessage;
 
@@ -1150,6 +1160,9 @@ impl PayloadCensus {
             keyexpr: keyexpr.as_deref(),
             kind,
             payload_bytes,
+            // R2757 (open debt 790) — the node plane's answer, asked with the
+            // same `direction` this record already carries.
+            zid: ctx.zid(direction),
             unit_offset: crate::agg::record_unit_offset(frame, span),
             // R311y644 (§1.1p) — the census of clock-offset witnesses belongs
             // to the throughput plane, so this one reads the axis and does not
@@ -1382,7 +1395,7 @@ pub fn payloads_grouped(
         spaces.enter_flow(grouping.owners(list));
         // R2513 — see `crate::agg::KeyexprSpaces::at_packet`.
         spaces.at_packet(packet);
-        census.observe_frame_where(frame, filter, &mut spaces);
+        census.observe_frame_where(frame, filter, grouping.context(list), &mut spaces);
     }
     census
 }

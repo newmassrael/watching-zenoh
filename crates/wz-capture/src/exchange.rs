@@ -260,6 +260,18 @@ pub struct OpenExchange {
     keyexpr: Option<String>,
     /// The direction that minted the rid, for a `dir` term at close.
     direction: Direction,
+    /// R2757 (open debt 790) — the ZID that minted the rid, for a `zid` term
+    /// at close, and OWNED for the same reason the fields around it are: an
+    /// exchange outlives the frame that opened it, so nothing borrowed from
+    /// that frame's [`crate::node::ListContext`] could still be alive when
+    /// [`ExchangeTable::finish`] judges it.
+    ///
+    /// The REQUESTER's, not the replier's, on the rule `direction` above
+    /// already states: an exchange is a pair of records and only one of them
+    /// can anchor an axis, and every other term here already anchors on the
+    /// request. A `zid` that meant the replier on a row whose `dir` meant the
+    /// requester would be two ends of one exchange wearing one row.
+    zid: Option<alloc::vec::Vec<u8>>,
     /// The request's kind and payload size, from the throughput plane's
     /// classifier, for `kind` and `bytes` terms at close.
     kind: crate::filter::RecordKind,
@@ -366,11 +378,17 @@ impl ExchangeTable {
         &mut self,
         frames: &[PassiveFrame],
         filter: &Filter,
+        ctx: crate::node::ListContext<'_>,
         spaces: &mut KeyexprSpaces,
     ) {
         let mut open: OpenExchanges = BTreeMap::new();
         for frame in frames {
-            self.observe_frame_where(frame, filter, 0, &mut open, spaces);
+            // R2757 (open debt 790) — the list this door used to hardcode as
+            // `0` now arrives inside `ctx`, which is what lets a caller that
+            // HAS a census say so. One with none passes
+            // `ListContext::unattributed(0)` and gets the old behaviour
+            // exactly, with the difference that the absence is now stated.
+            self.observe_frame_where(frame, filter, ctx, &mut open, spaces);
         }
         // Whatever is still open when the flow's frames run out was never
         // closed on the wire this observer saw. It is judged here — an unclosed
@@ -405,15 +423,15 @@ impl ExchangeTable {
         &mut self,
         frame: &PassiveFrame,
         filter: &Filter,
-        list: usize,
+        ctx: crate::node::ListContext<'_>,
         open: &mut OpenExchanges,
         spaces: &mut KeyexprSpaces,
     ) {
         match &frame.carried {
-            Carried::Batch(batch) => self.observe_batch(spaces, open, list, frame, batch, filter),
+            Carried::Batch(batch) => self.observe_batch(spaces, open, ctx, frame, batch, filter),
             #[cfg(feature = "reassembly")]
             Carried::Reassembled { batch, .. } => {
-                self.observe_batch(spaces, open, list, frame, batch, filter)
+                self.observe_batch(spaces, open, ctx, frame, batch, filter)
             }
             // Matched by name for the reason R311y614 matched them by name
             // in the throughput plane: a new `Carried` variant must fail to
@@ -449,7 +467,7 @@ impl ExchangeTable {
         &mut self,
         spaces: &mut KeyexprSpaces,
         open: &mut OpenExchanges,
-        list: usize,
+        ctx: crate::node::ListContext<'_>,
         frame: &PassiveFrame,
         batch: &BatchParse,
         filter: &Filter,
@@ -461,7 +479,7 @@ impl ExchangeTable {
         // R311y641 (§1.1n) — paired with the bytes each record came from, so
         // this plane can say WHERE a record was and not only that it was.
         for (message, span) in batch.records() {
-            self.observe_message(spaces, open, list, frame, message, span, filter);
+            self.observe_message(spaces, open, ctx, frame, message, span, filter);
         }
     }
 
@@ -476,12 +494,13 @@ impl ExchangeTable {
         &mut self,
         spaces: &mut KeyexprSpaces,
         open: &mut OpenExchanges,
-        list: usize,
+        ctx: crate::node::ListContext<'_>,
         frame: &PassiveFrame,
         message: &NetworkMessage,
         span: Option<(usize, usize)>,
         filter: &Filter,
     ) {
+        let list = ctx.list();
         let direction = frame.direction;
         let at = frame.observed_at_ms;
         match message {
@@ -506,6 +525,7 @@ impl ExchangeTable {
                 let entry = OpenExchange {
                     keyexpr: resolved.ok(),
                     direction,
+                    zid: ctx.zid(direction).map(<[u8]>::to_vec),
                     kind,
                     payload_bytes,
                     requested_at: at,
@@ -618,6 +638,9 @@ impl ExchangeTable {
 
         let view = RecordView {
             direction: entry.direction,
+            // R2757 (open debt 790) — the requester's, kept since the rid was
+            // minted; see `OpenExchange::zid` for why it is that end.
+            zid: entry.zid.as_deref(),
             keyexpr: entry.keyexpr.as_deref(),
             kind: entry.kind,
             payload_bytes: entry.payload_bytes,
@@ -872,7 +895,13 @@ pub fn exchanges_grouped(
         spaces.enter_flow(grouping.owners(list));
         // R2513 — see `crate::agg::KeyexprSpaces::at_packet`.
         spaces.at_packet(packet);
-        table.observe_frame_where(frame, filter, list, &mut open, &mut spaces);
+        table.observe_frame_where(
+            frame,
+            filter,
+            grouping.context(list),
+            &mut open,
+            &mut spaces,
+        );
     }
     table.drain_open(&mut open, filter);
     table

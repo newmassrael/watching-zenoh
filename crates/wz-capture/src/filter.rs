@@ -281,6 +281,29 @@ pub struct RecordView<'a> {
     /// throughput plane has not decided that this record's exchange had no
     /// replies, it has decided nothing at all about exchanges.
     pub outcome: Option<OutcomeView>,
+    /// R2757 (open debt 790) — the ZID the node that SENT this record
+    /// announced, or `None` where this capture never learned one.
+    ///
+    /// The answer comes from the node plane
+    /// ([`crate::node::SessionGrouping`]), carried to the walk as a
+    /// [`crate::node::ListContext`]. It is NOT re-derived here, and that is
+    /// the same rule `crate::payload` states for `kind`: a second reading is a
+    /// second spelling, and two spellings of one record's identity is how the
+    /// planes come to disagree about who sent it.
+    ///
+    /// # What `None` means, and the one thing it does NOT mean
+    ///
+    /// A [`crate::node::ObservedLink`] exists only where BOTH ends named
+    /// themselves with an INIT on one flow, so a capture that began
+    /// mid-session has no link for its lists and every record on them answers
+    /// `None` here. That is an honest absence — nobody announced an identity
+    /// this capture could read — and it is the absence [`Self::keyexpr`]
+    /// already spells.
+    ///
+    /// It does NOT mean "this record had no sender". Reporting a stand-in for
+    /// one would put an identity on the wire that nobody sent, which is the
+    /// line the consumer's own half-row rule draws from the other side.
+    pub zid: Option<&'a [u8]>,
 }
 
 /// A three-valued answer.
@@ -361,6 +384,17 @@ enum Term {
         chunks: Vec<String>,
         negated: bool,
     },
+    /// R2757 (open debt 790) — the ZID a record's sender announced.
+    ///
+    /// The wanted value is held as BYTES rather than as the hex the selector
+    /// was written in, so evaluation does no parsing and — more to the point —
+    /// so `a1a1a1a1` and `A1A1A1A1` are one term rather than two that never
+    /// match each other. The record side is bytes already; making the written
+    /// side bytes too is what puts the two on one axis.
+    Zid {
+        want: Vec<u8>,
+        negated: bool,
+    },
     Dir {
         want: Direction,
         negated: bool,
@@ -432,6 +466,26 @@ impl Term {
                     let refs: Vec<&str> = chunks.iter().map(|c| c.as_str()).collect();
                     Truth::of(keyexpr_pattern_matches(&refs, target) != *negated)
                 }
+            },
+            // R2757 (open debt 790) — `None` is UNDECIDABLE and not `no`, for
+            // the reason the `Key` arm above gives and one more that is this
+            // axis's own.
+            //
+            // A record whose list carried no handshake HAS a sender; this
+            // capture just never saw it name itself. Answering `no` would put
+            // "we could not tell" and "it was somebody else" in one bucket,
+            // and a reader asking `zid == x` would read a silent drop as a
+            // measured exclusion. The consumer draws the same line from its
+            // side: a half-row is a row whose value was not observed, not a
+            // row whose value is absent.
+            //
+            // ⚠ AND `not zid == x` IS UNDECIDABLE TOO, which is why the
+            // negation rides inside rather than wrapping the answer. Negating
+            // an unknown gives an unknown: a record whose sender we cannot name
+            // cannot be shown to be someone else either.
+            Self::Zid { want, negated } => match record.zid {
+                None => Truth::Unknown,
+                Some(seen) => Truth::of((seen == want.as_slice()) != *negated),
             },
             Self::Dir { want, negated } => {
                 Truth::of((dir_index(record.direction) == dir_index(*want)) != *negated)
@@ -508,11 +562,52 @@ impl Term {
     }
 }
 
-fn dir_index(d: Direction) -> usize {
-    match d {
-        Direction::A => 0,
-        Direction::B => 1,
+// R2757 (open debt 790) — `dir_index` used to be spelled here TOO, identically.
+// It now lives once, in `crate::agg`, which is where the per-direction pairs it
+// indexes are defined; see that function's doc for why a duplicate of a rule
+// with this consequence is worth removing rather than keeping in sync.
+use crate::agg::dir_index;
+
+/// R2757 (open debt 790) — a ZID as written in a selector, as the bytes a
+/// record carries.
+///
+/// Bare lowercase-or-uppercase hex, an even number of digits, no prefix and no
+/// separators. The three refusals are separate on purpose rather than folded
+/// into one "malformed": a reader who typed an odd number of digits has
+/// truncated a byte and a reader who typed `0x` has brought a convention from
+/// somewhere else, and telling them apart is the difference between a message
+/// they can act on and one they have to guess at.
+///
+/// ⚠ THE EMPTY GUARD IS UNREACHABLE FROM THE PARSER, and it is kept anyway —
+/// with the reason stated rather than left to look like a live arm. `zid ==`
+/// with nothing after it is refused one level up, by the tokenizer, as
+/// `UnexpectedEnd`; measured, not assumed. What the guard buys is that this
+/// function is correct on its OWN terms for a second caller that does not come
+/// through the grammar: without it, `""` passes the even-length check (`0 % 2`
+/// is `0`) and `chunks(2)` yields nothing, compiling to a term that matches a
+/// zero-length zid no node announces — a selector that selects nothing while
+/// looking like a measurement.
+fn parse_zid(value: &str, at: usize) -> Result<Vec<u8>, FilterError> {
+    let refuse = || FilterError {
+        at,
+        kind: FilterErrorKind::UnknownValue {
+            field: "zid",
+            value: value.to_string(),
+        },
+    };
+    if value.is_empty() || !value.len().is_multiple_of(2) {
+        return Err(refuse());
     }
+    let bytes: Option<Vec<u8>> = value
+        .as_bytes()
+        .chunks(2)
+        .map(|pair| {
+            let hi = (pair[0] as char).to_digit(16)?;
+            let lo = (pair[1] as char).to_digit(16)?;
+            Some((hi * 16 + lo) as u8)
+        })
+        .collect();
+    bytes.ok_or_else(refuse)
 }
 
 /// The parsed expression tree.
@@ -1084,6 +1179,22 @@ impl<'a> Parser<'a> {
                     negated,
                 }
             }
+            // R2757 (open debt 790) — the node axis the consumer asked for.
+            //
+            // The notation is BARE HEX with no prefix and no separators, and
+            // that is a measurement rather than a preference: the consuming
+            // viewer already renders a short `Bytes` field as exactly these
+            // characters, so a reader can lift a zid off a row and drop it
+            // into a selector without re-typing it. A `0x` prefix or a
+            // colon-separated form would have made the two surfaces disagree
+            // about one value.
+            "zid" => {
+                let negated = equality_negation(op, "zid", op_at)?;
+                Term::Zid {
+                    want: parse_zid(&value, value_at)?,
+                    negated,
+                }
+            }
             "dir" => {
                 let negated = equality_negation(op, "dir", op_at)?;
                 let want = match value.as_str() {
@@ -1236,6 +1347,8 @@ fn describe_token(kind: &TokenKind) -> String {
 fn static_field_name(field: &str) -> Option<&'static str> {
     Some(match field {
         "key" => "key",
+        // R2757 (open debt 790) — the node axis.
+        "zid" => "zid",
         "dir" => "dir",
         "kind" => "kind",
         "bytes" => "bytes",
@@ -1269,6 +1382,13 @@ mod tests {
             kind,
             payload_bytes: Some(payload_bytes),
             observed_at_ms,
+            // R2757 (open debt 790) — `None`, on the same rule the line below
+            // states for the capture origin: a helper's default should put a
+            // new axis in its UNDECIDABLE state, so a pre-existing test that
+            // says nothing about nodes keeps saying nothing. A test that means
+            // to drive this axis writes `RecordView { zid: Some(..), ..view(..) }`
+            // and is visibly the one that cares.
+            zid: None,
             // The default is a plane that was never told the capture origin,
             // so every pre-existing test below drives the undecidable arm.
             elapsed_ms: None,
@@ -1318,6 +1438,123 @@ mod tests {
         assert_eq!(sel.undecided, 1);
         assert_eq!(sel.seen(), 3);
         assert!(!sel.is_decisive());
+    }
+
+    /// R2757 (open debt 790) — THE SAME RULE ON THE NODE AXIS, and it is the
+    /// arm the integration witness in `crate::agg` cannot reach.
+    ///
+    /// That witness grades SELECTION over a real capture, so it sees the `Yes`
+    /// and the absence of a match. It cannot tell `No` from `Unknown`, because
+    /// both leave a record out of the count — which is exactly the confusion
+    /// this arm exists to prevent, so it has to be graded here where the three
+    /// answers are three values rather than one number.
+    #[test]
+    fn a_record_whose_node_never_named_itself_is_undecided_rather_than_rejected() {
+        let f = Filter::parse("zid == a1a1a1a1").expect("parses");
+        let with = |zid: Option<&'static [u8]>| RecordView {
+            zid,
+            ..put(Some("demo/a"))
+        };
+
+        assert_eq!(f.matches(&with(Some(&[0xA1; 4]))), Truth::Yes);
+        assert_eq!(f.matches(&with(Some(&[0xB2; 4]))), Truth::No);
+        // The record HAS a sender. This capture never saw it name itself.
+        assert_eq!(f.matches(&with(None)), Truth::Unknown);
+
+        let mut sel = Selection::default();
+        sel.record(f.matches(&with(Some(&[0xA1; 4]))));
+        sel.record(f.matches(&with(Some(&[0xB2; 4]))));
+        sel.record(f.matches(&with(None)));
+        assert_eq!(sel.matched, 1);
+        assert_eq!(sel.rejected, 1);
+        assert_eq!(sel.undecided, 1, "an unnamed node is not a rejected one");
+        assert!(!sel.is_decisive());
+    }
+
+    /// R2757 — NEGATING AN UNKNOWN IS STILL UNKNOWN, which is the arm a
+    /// negation applied OUTSIDE the term would get wrong.
+    ///
+    /// `not zid == x` asks "was this somebody else". A record whose sender this
+    /// capture never saw cannot be shown to be somebody else any more than it
+    /// can be shown to be `x`, so the honest answer is the same one. Had the
+    /// negation wrapped the term's verdict instead of riding inside it, this
+    /// record would have answered `Yes` — reporting every unidentified record
+    /// as positively not the node asked about.
+    #[test]
+    fn negating_the_node_term_does_not_turn_an_unknown_into_an_answer() {
+        let f = Filter::parse("not zid == a1a1a1a1").expect("parses");
+        let with = |zid: Option<&'static [u8]>| RecordView {
+            zid,
+            ..put(Some("demo/a"))
+        };
+
+        assert_eq!(f.matches(&with(Some(&[0xB2; 4]))), Truth::Yes);
+        assert_eq!(f.matches(&with(Some(&[0xA1; 4]))), Truth::No);
+        assert_eq!(
+            f.matches(&with(None)),
+            Truth::Unknown,
+            "an unnamed sender is not evidence of being a different sender"
+        );
+    }
+
+    /// R2757 — THE WRITTEN FORM IS BYTES, so the two spellings of one zid are
+    /// ONE term rather than two that never match each other.
+    ///
+    /// A selector holding the hex as a STRING would compare `a1a1a1a1` against
+    /// a record's bytes by first rendering them, and every such rendering picks
+    /// a case. Whichever it picked, the other spelling would silently select
+    /// nothing — which reads as a measurement about the capture rather than
+    /// about the notation.
+    #[test]
+    fn a_node_is_the_same_node_in_either_case_of_hex() {
+        let lower = Filter::parse("zid == a1a1a1a1").expect("parses");
+        let upper = Filter::parse("zid == A1A1A1A1").expect("parses");
+        let record = RecordView {
+            zid: Some(&[0xA1; 4]),
+            ..put(Some("demo/a"))
+        };
+        assert_eq!(lower.matches(&record), Truth::Yes);
+        assert_eq!(upper.matches(&record), Truth::Yes);
+    }
+
+    /// R2757 — WHAT THE NOTATION REFUSES, each for its own reason.
+    ///
+    /// Separate cases rather than one "malformed" assertion, because they are
+    /// different mistakes: an odd digit count has truncated a byte, a `0x` or a
+    /// colon form has brought a convention from another tool, and a non-hex
+    /// digit is a typo. Each is refused BY NAME so the message says which term
+    /// was wrong rather than only that something was.
+    ///
+    /// ⚠ EMPTY IS NOT IN THIS LIST, and finding out why corrected this term's
+    /// own documentation. `zid ==` with nothing after it never reaches
+    /// `parse_zid`: the TOKENIZER refuses it first, as `UnexpectedEnd`. That is
+    /// a correct refusal from the right layer, so it is asserted below as the
+    /// different thing it is rather than folded in here — and `parse_zid`'s
+    /// empty guard is documented as unreachable-from-the-grammar instead of
+    /// being presented as the arm that catches this.
+    #[test]
+    fn the_node_notation_refuses_what_it_cannot_read() {
+        for bad in ["a1a1a1a", "0xa1a1a1a1", "a1a1a1ag", "a1:a1:a1:a1"] {
+            let parsed = Filter::parse(&alloc::format!("zid == {bad}"));
+            assert!(parsed.is_err(), "this notation must not parse: {bad:?}");
+            let err = parsed.unwrap_err();
+            assert!(
+                matches!(err.kind, FilterErrorKind::UnknownValue { field: "zid", .. }),
+                "and it must be refused BY NAME so a reader knows which term \
+                 it was: {bad:?} gave {err:?}"
+            );
+        }
+    }
+
+    /// R2757 — and the empty value is refused ONE LAYER UP, which is where it
+    /// belongs: a term with no value at all is a grammar error, not a bad zid.
+    #[test]
+    fn a_node_term_with_no_value_is_a_grammar_error_and_not_a_bad_node() {
+        let err = Filter::parse("zid ==").expect_err("an empty value must not parse");
+        assert!(
+            matches!(err.kind, FilterErrorKind::UnexpectedEnd),
+            "the tokenizer refuses it before the zid notation is consulted: {err:?}"
+        );
     }
 
     /// A capture with no clock cannot answer a `time` question, and says so.
