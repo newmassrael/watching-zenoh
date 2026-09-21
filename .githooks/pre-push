@@ -865,6 +865,12 @@ round_fed_gates=(
     # verdict's refusal arms run.
     "released_port_gate.py --selftest"
     "released_port_gate.py"
+    # R2784 — the accept cookie's CARRIER against upstream's `Cookie` struct,
+    # field by field and both ways. It is what session-unicast-accept's
+    # COMPLETE grade stands on: the count of carried states was taken by hand
+    # and was short twice. Grades against the pinned checkout where one is
+    # reachable and DEFERS loudly where not; Layer Z runs it `--require`.
+    "cookie_carrier_gate.py"
 )
 # ⚠ The module and its ARGUMENTS are expanded separately, and that too is
 # forced rather than chosen: `scripts/lib/"${cmd[@]}"` attaches the prefix to

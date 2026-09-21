@@ -3281,6 +3281,10 @@ layer_c0_test_discipline() {
     # empty one, a release no row classifies, and a row with no release.
     python3 scripts/lib/released_port_gate.py --selftest || return 1
     python3 scripts/lib/released_port_gate.py || return 1
+    # R2784 — the accept cookie carrier gate's refusal arms, which need no
+    # checkout; the grading itself runs `--require` in Layer Z, the lane that
+    # provisions the pinned upstream tree.
+    python3 scripts/lib/cookie_carrier_gate.py --selftest || return 1
     # R2150 (unregistered open-debt item 539) — the KIND of unhonoured. R2148
     # split `UNHONOURED_UPSTREAM_CONFIG_KEYS` into "wz cannot" and "the reader
     # was never told", and the test guarding that split makes it total,
@@ -15357,6 +15361,13 @@ layer_z_zenohd_interop() {
     # is stale and this is what says so instead of a paragraph quietly aging.
     if ! python3 scripts/lib/token_plane_parity_gate.py --check --require; then
         echo "  Layer Z FAIL: the token-plane diff behind routing-token-tables is stale" >&2
+        return 1
+    fi
+    # R2784 — the same shape for `session-unicast-accept`: its COMPLETE grade
+    # says the acceptor's cookie carries every state upstream's `Cookie`
+    # struct names, and this is the lane that can read that struct.
+    if ! python3 scripts/lib/cookie_carrier_gate.py --check --require; then
+        echo "  Layer Z FAIL: the accept cookie no longer carries every upstream Cookie field" >&2
         return 1
     fi
     # R2080 (open-debt item 503) — the COMPLETENESS audit of the acceptance
