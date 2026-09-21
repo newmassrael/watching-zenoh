@@ -6951,7 +6951,14 @@ layer_c1am_cargo_test_adminspace() {
     # the config itself forbids is still refused). Neither is gated on an
     # adminspace feature and the first one's `session-reconnect` is a default,
     # so both reach this leg. PRINTED by the command.
-    _runci_guarded_test "C1AM storage_manager_service 11" 11 \
+    # R2787 — 11 -> 16: the storage manager as a running PLUGIN. Its start
+    # (the `memory` volume and the document's own), a start that reports a
+    # failed step and runs the rest, an update that stops at its first failing
+    # step, a stop that takes the plugin's own and leaves the intent verbs', and
+    # the manager as a `plugins` sink (validator + notification plane). All five
+    # are `adminspace-config-hotreload`-gated, which this leg names. PRINTED by
+    # the command.
+    _runci_guarded_test "C1AM storage_manager_service 16" 16 \
         cargo test -p wz-runtime-tokio --features adminspace-config-hotreload --lib storage_manager_service --quiet || return 1
     # R2786 — the `plugins` section: upstream's merging insert and walking
     # remove, the validator asked before a change lands and the notification
@@ -17707,6 +17714,15 @@ layer_e6h_adminspace_config_hotreload() {
     fi
     (cd crates && cargo test -p wz-integration-tests \
         --test wz_storage_host_config_hotreload_pico -- --ignored --quiet --test-threads=1) || return 1
+    # R2787 — the storage manager's DECLARATIVE document, written by a pico client
+    # below `@/<zid>/peer/config/plugins/storage_manager/`. A SECOND build, and it
+    # must come after the test above: the storage host applies a config-key write
+    # only with `zenoh-config`, and cargo uplifts every feature variant of the demo
+    # to one path, so building it first would run the test above against it.
+    (cd crates && cargo build -p wz-ap-demo --features adminspace-config-hotreload,zenoh-config --quiet) || return 1
+    (cd crates && cargo clippy -p wz-ap-demo --features adminspace-config-hotreload,zenoh-config -- -D warnings) || return 1
+    (cd crates && cargo test -p wz-integration-tests \
+        --test wz_storage_host_plugins_section_pico -- --ignored --quiet --test-threads=1) || return 1
 }
 
 # ─── Layer E6i — adminspace-read GET gate on the STORAGE-HOST tier (vs pico) ────

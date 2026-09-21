@@ -60,6 +60,18 @@ use wz_session_core::storage_volume::Volume;
 use crate::session::{Session, Unicast};
 use crate::session_glue::SessionLinkActions;
 use crate::storage_service::{StorageService, StorageServiceError};
+#[cfg(feature = "adminspace-config-hotreload")]
+use wz_session_core::json5::Json5Value;
+#[cfg(feature = "adminspace-config-hotreload")]
+use wz_session_core::storage_plugin_config::{
+    diffs, ConfigDiff, StoragePluginConfig, VolumeDecl, STORAGE_MANAGER_PLUGIN,
+};
+
+/// R2787 — the volume a started storage-manager plugin always has, upstream's
+/// `MEMORY_BACKEND_NAME` volume: "The "memory" volume is always available",
+/// in upstream's own reference config.
+#[cfg(feature = "adminspace-config-hotreload")]
+const PLUGIN_MEMORY_VOLUME: &str = "memory";
 
 /// A storage hosted by [`RuntimeStorageManager`]: a live [`StorageService`]
 /// over a volume-created backend. The backend is `Box<dyn StorageBackend +
@@ -183,7 +195,10 @@ pub fn build_volume(
     }
 
     match backend {
-        "mem" => {
+        // R2787 — `memory` is upstream's name for the same backend
+        // (`plugins/zenoh-plugin-storage-manager/src/lib.rs` @ `const MEMORY_BACKEND_NAME: &str = "memory";`),
+        // and a stock document names it: `volumes: { v: { backend: "memory" } }`.
+        "mem" | "memory" => {
             let unknown = unknown_keys(volume_cfg, &[]);
             if !unknown.is_empty() {
                 return Err(VolumeBuildError::UnknownParameters {
@@ -251,6 +266,131 @@ impl core::fmt::Display for RuntimeStorageManagerError {
     }
 }
 
+/// R2787 — why one step of the storage manager's document could not be applied.
+///
+/// The `Display` texts are upstream's own log lines where it has one
+/// ("Cannot spawn volume", "Cannot find volume … to stop it"), because an
+/// operator moving a deployment reads the same log for the same failure.
+#[cfg(feature = "adminspace-config-hotreload")]
+#[derive(Debug)]
+pub enum PluginApplyError {
+    /// A `DeleteVolume` named a volume this manager does not have.
+    UnknownVolume(String),
+    /// A declared volume could not be built from this build's backends.
+    Volume {
+        /// The volume.
+        volume: String,
+        /// Why.
+        error: VolumeBuildError,
+    },
+    /// A declared volume names libraries (`__path__`) and none could serve it.
+    DynamicVolume {
+        /// The volume.
+        volume: String,
+        /// Why.
+        reason: String,
+    },
+    /// A declared storage could not be hosted.
+    Storage {
+        /// The storage.
+        storage: String,
+        /// Why.
+        error: RuntimeStorageManagerError,
+    },
+}
+
+#[cfg(feature = "adminspace-config-hotreload")]
+impl core::fmt::Display for PluginApplyError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            PluginApplyError::UnknownVolume(v) => write!(f, "Cannot find volume '{v}' to stop it"),
+            PluginApplyError::Volume { volume, error } => {
+                write!(f, "Cannot spawn volume '{volume}': {error}")
+            }
+            PluginApplyError::DynamicVolume { volume, reason } => {
+                write!(f, "Cannot spawn volume '{volume}': {reason}")
+            }
+            PluginApplyError::Storage { storage, error } => {
+                write!(f, "Cannot spawn storage '{storage}': {error}")
+            }
+        }
+    }
+}
+
+/// R2787 — build the volume a DOCUMENT declared, the declarative twin of
+/// [`build_volume`].
+///
+/// A volume with no `__path__` is one of this build's backends, named by its
+/// `backend` or by its own name (upstream's `VolumeConfig::backend`); its
+/// parameters are its `rest` minus `backend`, which names the backend and is no
+/// parameter of it. A value that is not a string reaches the backend as its
+/// JSON text.
+///
+/// A volume WITH `__path__` is loaded from the first path that loads, which is
+/// upstream's rule for a plugin declared by paths, and is handed its whole
+/// `rest` as its configuration, as upstream hands its `VolumeConfig` to the
+/// library. A build without dynamic volume loading refuses it by name.
+#[cfg(feature = "adminspace-config-hotreload")]
+fn build_declared_volume(volume: &VolumeDecl) -> Result<Box<dyn Volume>, PluginApplyError> {
+    let Some(paths) = &volume.paths else {
+        let params: Vec<(String, String)> = volume
+            .rest
+            .iter()
+            .filter(|(key, _)| key != "backend")
+            .map(|(key, value)| {
+                let text = match value {
+                    Json5Value::String(s) => s.clone(),
+                    other => other.to_json5_text(),
+                };
+                (key.clone(), text)
+            })
+            .collect();
+        return build_volume(volume.backend(), &params).map_err(|error| PluginApplyError::Volume {
+            volume: volume.name.clone(),
+            error,
+        });
+    };
+    #[cfg(all(unix, feature = "storage-mgr-dynamic-volume-loading"))]
+    {
+        let config = (!volume.rest.is_empty())
+            .then(|| Json5Value::Object(volume.rest.clone()).to_json5_text());
+        let mut failures = Vec::with_capacity(paths.len());
+        for path in paths {
+            match crate::dynamic_volume::DynamicVolume::load(path) {
+                Ok(loaded) => {
+                    return match loaded.configure(config.as_deref()) {
+                        Ok(()) => Ok(Box::new(loaded)),
+                        Err(e) => Err(PluginApplyError::DynamicVolume {
+                            volume: volume.name.clone(),
+                            reason: format!("{path} refused its configuration: {e}"),
+                        }),
+                    };
+                }
+                Err(e) => failures.push(format!("{path}: {e}")),
+            }
+        }
+        Err(PluginApplyError::DynamicVolume {
+            volume: volume.name.clone(),
+            reason: if failures.is_empty() {
+                String::from("`__path__` names no library")
+            } else {
+                failures.join("; ")
+            },
+        })
+    }
+    #[cfg(not(all(unix, feature = "storage-mgr-dynamic-volume-loading")))]
+    {
+        let _ = paths;
+        Err(PluginApplyError::DynamicVolume {
+            volume: volume.name.clone(),
+            reason: String::from(
+                "this build loads no volume from a library path (it lacks \
+                 `storage-mgr-dynamic-volume-loading`)",
+            ),
+        })
+    }
+}
+
 /// Hosts N live [`StorageService`]s over a volume registry — the AP runtime
 /// counterpart of the sync kernel [`StorageManager`]. Empty by default;
 /// register volumes, then add storages from their [`StorageConfig`]s.
@@ -261,6 +401,14 @@ pub struct RuntimeStorageManager<R: SessionRuntime, T: TimeSource> {
     /// The live services and their configs, keyed by storage name (sorted,
     /// BTreeMap order).
     services: BTreeMap<String, HostedEntry<R, T>>,
+    /// R2787 — the document the storage-manager PLUGIN is running with, or
+    /// `None` when it is not running. Upstream's plugin is a thing that is
+    /// started and stopped as its `plugins/storage_manager` document appears
+    /// and goes; this is that state, held here because this is the manager it
+    /// drives. The storages and volumes a client adds through the intent verbs
+    /// are not the plugin's and are not recorded in it.
+    #[cfg(feature = "adminspace-config-hotreload")]
+    plugin: Option<StoragePluginConfig>,
 }
 
 impl<R: SessionRuntime, T: TimeSource> RuntimeStorageManager<R, T> {
@@ -269,7 +417,36 @@ impl<R: SessionRuntime, T: TimeSource> RuntimeStorageManager<R, T> {
         Self {
             registry: VolumeRegistry::new(),
             services: BTreeMap::new(),
+            #[cfg(feature = "adminspace-config-hotreload")]
+            plugin: None,
         }
+    }
+
+    /// R2787 — whether the storage-manager plugin is running.
+    #[cfg(feature = "adminspace-config-hotreload")]
+    pub fn plugin_running(&self) -> bool {
+        self.plugin.is_some()
+    }
+
+    /// R2787 — stop the storage-manager plugin: every storage and volume its
+    /// document declared, then the `memory` volume its start registered. A
+    /// plugin that is not running is left alone.
+    ///
+    /// Upstream stops a plugin by dropping it, and with it everything it
+    /// spawned; this is the same set, named, because here the plugin shares its
+    /// manager with the intent verbs and must not take their storages with it.
+    #[cfg(feature = "adminspace-config-hotreload")]
+    pub fn stop_plugin(&mut self) {
+        let Some(config) = self.plugin.take() else {
+            return;
+        };
+        for storage in &config.storages {
+            self.remove_storage(&storage.name);
+        }
+        for volume in &config.volumes {
+            self.remove_volume(&volume.name);
+        }
+        self.remove_volume(PLUGIN_MEMORY_VOLUME);
     }
 
     /// Register `volume` under `volume_id` so a [`StorageConfig`] naming it can
@@ -540,6 +717,231 @@ where
                 .map_err(RuntimeStorageManagerError::Service)?;
         }
         Ok(())
+    }
+
+    /// R2787 — start the storage-manager plugin with `config`, as upstream's
+    /// `plugins/zenoh-plugin-storage-manager/src/lib.rs` @ `fn new(runtime: DynamicRuntime, config: PluginConfig) -> ZResult<Self> {`
+    /// does: the `memory` volume, then every declared volume, then every
+    /// declared storage. A step that fails is RETURNED and the rest still run —
+    /// upstream's own words for it are "Failure of loading of one volume or
+    /// storage should not affect others" — so the plugin is running afterwards
+    /// whatever the list says, exactly as upstream's is.
+    ///
+    /// ⚠ UPSTREAM ALSO REFUSES TO START WITHOUT `timestamping`, and wz does not:
+    /// the refusal exists because a stored sample must carry a timestamp and
+    /// upstream's session can only mint one with an HLC. A wz storage stamps an
+    /// unstamped sample itself (the `local_zid` it is given here is that
+    /// stamp's identity), so the precondition holds by construction.
+    #[cfg(feature = "adminspace-config-hotreload")]
+    pub fn start_plugin(
+        &mut self,
+        session: &Session<R, T, Unicast>,
+        config: StoragePluginConfig,
+        local_zid: &[u8],
+    ) -> Vec<PluginApplyError>
+    where
+        R: 'static,
+        T: Send + Sync,
+        Session<R, T, Unicast>: Clone + Send + 'static,
+    {
+        self.register_volume(
+            PLUGIN_MEMORY_VOLUME,
+            Box::new(wz_session_core::storage_volume::MemoryVolume),
+        );
+        let mut failures = Vec::new();
+        let steps = config
+            .volumes
+            .iter()
+            .cloned()
+            .map(ConfigDiff::AddVolume)
+            .chain(config.storages.iter().cloned().map(ConfigDiff::AddStorage));
+        for step in steps {
+            if let Err(e) = self.apply_plugin_step(session, &step, local_zid) {
+                failures.push(e);
+            }
+        }
+        self.plugin = Some(config);
+        failures
+    }
+
+    /// R2787 — move the running plugin from `old` to `new`, as upstream's
+    /// `plugins/zenoh-plugin-storage-manager/src/lib.rs` @ `fn update<I: IntoIterator<Item = ConfigDiff>>(&mut self, diffs: I) -> ZResult<()> {`
+    /// does: the `diffs` in their order, STOPPING at the first that fails.
+    ///
+    /// ⚠ WHAT WAS APPLIED BEFORE THE FAILURE STAYS APPLIED, and that is
+    /// upstream's shape, not an oversight here: its loop returns at the first
+    /// `?`. A rollback would have to re-create a torn-down memory storage WITH
+    /// its data, which nothing can, so offering one would be a pretence. The
+    /// caller refuses the config write, so the section keeps `old`, and the
+    /// next write is diffed against it — which re-attempts what did not land.
+    ///
+    /// ⚠ A CHANGED VOLUME TAKES ITS STORAGES WITH IT, also upstream's: the
+    /// volume's delete is upstream's `kill_volume`, which stops every storage on
+    /// it, and a storage whose OWN declaration did not change earns no add in
+    /// the diff, so it is not re-created.
+    #[cfg(feature = "adminspace-config-hotreload")]
+    pub fn update_plugin(
+        &mut self,
+        session: &Session<R, T, Unicast>,
+        old: &StoragePluginConfig,
+        new: StoragePluginConfig,
+        local_zid: &[u8],
+    ) -> Result<(), PluginApplyError>
+    where
+        R: 'static,
+        T: Send + Sync,
+        Session<R, T, Unicast>: Clone + Send + 'static,
+    {
+        for step in diffs(old, &new) {
+            self.apply_plugin_step(session, &step, local_zid)?;
+        }
+        self.plugin = Some(new);
+        Ok(())
+    }
+
+    /// One step of the plugin's document applied to this manager — upstream's
+    /// `update` arms, each on the operation this manager already has.
+    #[cfg(feature = "adminspace-config-hotreload")]
+    fn apply_plugin_step(
+        &mut self,
+        session: &Session<R, T, Unicast>,
+        step: &ConfigDiff,
+        local_zid: &[u8],
+    ) -> Result<(), PluginApplyError>
+    where
+        R: 'static,
+        T: Send + Sync,
+        Session<R, T, Unicast>: Clone + Send + 'static,
+    {
+        match step {
+            ConfigDiff::DeleteVolume(volume) => self
+                .remove_volume(&volume.name)
+                .map(|_| ())
+                .ok_or_else(|| PluginApplyError::UnknownVolume(volume.name.clone())),
+            ConfigDiff::AddVolume(volume) => {
+                let built = build_declared_volume(volume)?;
+                self.register_volume(volume.name.clone(), built);
+                Ok(())
+            }
+            // Upstream's `kill_storage` stops a storage it finds and says
+            // nothing about one it does not.
+            ConfigDiff::DeleteStorage(storage) => {
+                self.remove_storage(&storage.name);
+                Ok(())
+            }
+            ConfigDiff::AddStorage(storage) => self
+                .add_storage(session, &storage.to_storage_config(), local_zid.to_vec())
+                .map_err(|error| PluginApplyError::Storage {
+                    storage: storage.name.clone(),
+                    error,
+                }),
+        }
+    }
+}
+
+/// R2787 — the storage manager as a running plugin: the validator and the
+/// notification plane a `plugins/storage_manager` write reaches
+/// ([`crate::plugins_config::PluginsSink`]).
+///
+/// Built per write around the manager a host holds, because the manager is
+/// task-local (the `Volume` trait carries no `Send`) and a sink only BORROWS
+/// it for the one call. What a start could not do is not an error of the write
+/// that triggered it — upstream logs it — so it is kept for the host to log
+/// ([`Self::take_reports`]).
+///
+/// * Validator: a plugin other than `storage_manager` is not this host's to
+///   check, and a storage manager that is not running has nothing to check —
+///   both accept, as upstream accepts for a plugin it has not started. A
+///   running one parses the old and the new document and applies the
+///   difference; a document it cannot read, or a step it cannot apply,
+///   refuses the write.
+/// * Notification plane: the document appearing starts the plugin, and its
+///   going stops it.
+#[cfg(feature = "adminspace-config-hotreload")]
+pub struct StorageManagerSink<'a, R: SessionRuntime, T: TimeSource> {
+    manager: core::cell::RefCell<&'a mut RuntimeStorageManager<R, T>>,
+    session: &'a Session<R, T, Unicast>,
+    local_zid: &'a [u8],
+    reports: core::cell::RefCell<Vec<String>>,
+}
+
+#[cfg(feature = "adminspace-config-hotreload")]
+impl<'a, R: SessionRuntime, T: TimeSource> StorageManagerSink<'a, R, T> {
+    /// A sink over `manager`, hosting storages on `session` with `local_zid`
+    /// as their stamping identity.
+    pub fn new(
+        manager: &'a mut RuntimeStorageManager<R, T>,
+        session: &'a Session<R, T, Unicast>,
+        local_zid: &'a [u8],
+    ) -> Self {
+        Self {
+            manager: core::cell::RefCell::new(manager),
+            session,
+            local_zid,
+            reports: core::cell::RefCell::new(Vec::new()),
+        }
+    }
+
+    /// What happened that the host should log and that refused nothing: a
+    /// start's failed steps, or a document a start could not read.
+    pub fn take_reports(&self) -> Vec<String> {
+        core::mem::take(&mut *self.reports.borrow_mut())
+    }
+}
+
+#[cfg(feature = "adminspace-config-hotreload")]
+impl<R, T> crate::plugins_config::PluginsSink for StorageManagerSink<'_, R, T>
+where
+    R: SessionRuntime + 'static,
+    T: TimeSource + Send + Sync + 'static,
+    <R as SessionRuntime>::LinkSink: Send + Sync,
+    SessionLinkActions<R, T>: Send + Sync + 'static,
+    Session<R, T, Unicast>: Clone + Send + 'static,
+{
+    fn check_config(
+        &self,
+        plugin: &str,
+        _path: &str,
+        current: &Json5Value,
+        new: &Json5Value,
+    ) -> Result<Option<Json5Value>, String> {
+        if plugin != STORAGE_MANAGER_PLUGIN {
+            return Ok(None);
+        }
+        let mut manager = self.manager.borrow_mut();
+        if !manager.plugin_running() {
+            return Ok(None);
+        }
+        let old = StoragePluginConfig::from_json5(plugin, current).map_err(|e| e.to_string())?;
+        let new = StoragePluginConfig::from_json5(plugin, new).map_err(|e| e.to_string())?;
+        manager
+            .update_plugin(self.session, &old, new, self.local_zid)
+            .map_err(|e| e.to_string())?;
+        Ok(None)
+    }
+
+    fn plugins_changed(&self, plugins: &crate::plugins_config::PluginsConfig) {
+        let mut manager = self.manager.borrow_mut();
+        match (
+            plugins.plugin(STORAGE_MANAGER_PLUGIN),
+            manager.plugin_running(),
+        ) {
+            (Some(doc), false) => {
+                match StoragePluginConfig::from_json5(STORAGE_MANAGER_PLUGIN, doc) {
+                    Ok(config) => {
+                        let failures = manager.start_plugin(self.session, config, self.local_zid);
+                        self.reports
+                            .borrow_mut()
+                            .extend(failures.iter().map(ToString::to_string));
+                    }
+                    Err(e) => self.reports.borrow_mut().push(format!(
+                        "Failed to load plugin `{STORAGE_MANAGER_PLUGIN}`: {e}"
+                    )),
+                }
+            }
+            (None, true) => manager.stop_plugin(),
+            _ => {}
+        }
     }
 }
 
@@ -870,6 +1272,243 @@ mod tests {
             vec![0x01],
         )
         .expect("'mem' is still registered after a refused removal");
+    }
+
+    /// R2787 — a storage-manager document, read the way the plugin reads it.
+    #[cfg(feature = "adminspace-config-hotreload")]
+    fn plugin_doc(text: &str) -> StoragePluginConfig {
+        StoragePluginConfig::from_json5(
+            STORAGE_MANAGER_PLUGIN,
+            &wz_session_core::json5::parse(text).expect("json5"),
+        )
+        .expect("a document the plugin reads")
+    }
+
+    /// R2787 — the admin body of the storage named `name`, which is the one
+    /// place the manager shows a hosted storage's config from outside.
+    #[cfg(feature = "adminspace-config-hotreload")]
+    fn hosted_body<R: SessionRuntime, T: TimeSource>(
+        mgr: &RuntimeStorageManager<R, T>,
+        name: &str,
+    ) -> Option<String> {
+        let suffix = format!("storages/{name}");
+        mgr.admin_status_leaves("v")
+            .into_iter()
+            .find(|leaf| leaf.suffix == suffix)
+            .map(|leaf| leaf.json_body)
+    }
+
+    /// R2787 — upstream's start: the `memory` volume, then every declared
+    /// volume, then every declared storage, each on the volume it names.
+    #[cfg(feature = "adminspace-config-hotreload")]
+    #[tokio::test]
+    async fn a_started_plugin_hosts_its_document_on_the_memory_volume_and_its_own() {
+        let session = make_session();
+        let mut mgr = RuntimeStorageManager::new();
+        assert!(!mgr.plugin_running());
+        let failures = mgr.start_plugin(
+            &session,
+            plugin_doc(
+                r#"{ volumes: { extra: { backend: "memory" } },
+                     storages: { a: { key_expr: "a/**", volume: "memory" },
+                                 b: { key_expr: "b/**", volume: "extra" } } }"#,
+            ),
+            &[0x01],
+        );
+        assert!(failures.is_empty(), "{failures:?}");
+        assert!(mgr.plugin_running());
+        assert_eq!(mgr.storage_names().collect::<Vec<_>>(), vec!["a", "b"]);
+        assert_eq!(
+            hosted_body(&mgr, "b").as_deref(),
+            Some(r#"{"key_expr":"b/**","volume":"extra"}"#),
+            "b is hosted on the volume its document declared"
+        );
+    }
+
+    /// R2787 — upstream's start does not stop at a failing step: "Failure of
+    /// loading of one volume or storage should not affect others".
+    #[cfg(feature = "adminspace-config-hotreload")]
+    #[tokio::test]
+    async fn a_start_reports_the_step_that_failed_and_still_runs_the_rest() {
+        let session = make_session();
+        let mut mgr = RuntimeStorageManager::new();
+        let failures = mgr.start_plugin(
+            &session,
+            plugin_doc(
+                r#"{ volumes: { odd: { backend: "no-such-backend" } },
+                     storages: { bad: { key_expr: "x/**", volume: "nope" },
+                                 good: { key_expr: "g/**", volume: "memory" } } }"#,
+            ),
+            &[0x01],
+        );
+        let said: Vec<String> = failures.iter().map(ToString::to_string).collect();
+        assert_eq!(said.len(), 2, "{said:?}");
+        assert!(said[0].starts_with("Cannot spawn volume 'odd'"), "{said:?}");
+        assert!(
+            said[1].starts_with("Cannot spawn storage 'bad'"),
+            "{said:?}"
+        );
+        assert_eq!(mgr.storage_names().collect::<Vec<_>>(), vec!["good"]);
+        assert!(
+            mgr.plugin_running(),
+            "the plugin runs whatever its steps said"
+        );
+    }
+
+    /// R2787 — upstream's update: the diff in its order, stopping at the first
+    /// failing step, what went before it staying applied, and the plugin still
+    /// running the OLD document (the caller refuses the write).
+    #[cfg(feature = "adminspace-config-hotreload")]
+    #[tokio::test]
+    async fn an_update_applies_the_diff_and_stops_at_the_first_failing_step() {
+        let session = make_session();
+        let mut mgr = RuntimeStorageManager::new();
+        let old = plugin_doc(r#"{ storages: { a: { key_expr: "a/**", volume: "memory" } } }"#);
+        assert!(mgr.start_plugin(&session, old.clone(), &[0x01]).is_empty());
+
+        let moved = plugin_doc(r#"{ storages: { a: { key_expr: "a/x/**", volume: "memory" } } }"#);
+        mgr.update_plugin(&session, &old, moved.clone(), &[0x01])
+            .expect("a changed storage is its delete and its add");
+        assert_eq!(
+            hosted_body(&mgr, "a").as_deref(),
+            Some(r#"{"key_expr":"a/x/**","volume":"memory"}"#)
+        );
+
+        let failing = plugin_doc(
+            r#"{ storages: { a: { key_expr: "a/y/**", volume: "memory" },
+                             z: { key_expr: "z/**", volume: "nope" } } }"#,
+        );
+        let err = mgr
+            .update_plugin(&session, &moved, failing, &[0x01])
+            .expect_err("z names a volume nobody declared");
+        assert!(
+            matches!(&err, PluginApplyError::Storage { storage, .. } if storage == "z"),
+            "{err}"
+        );
+        assert_eq!(
+            hosted_body(&mgr, "a").as_deref(),
+            Some(r#"{"key_expr":"a/y/**","volume":"memory"}"#),
+            "the step before the failure stays applied, as upstream's does"
+        );
+        assert!(mgr.storage("z").is_none());
+    }
+
+    /// R2787 — stopping the plugin takes what ITS document declared and the
+    /// `memory` volume its start registered, and nothing a client added through
+    /// the intent verbs.
+    #[cfg(feature = "adminspace-config-hotreload")]
+    #[tokio::test]
+    async fn stopping_the_plugin_takes_its_own_and_leaves_the_intents() {
+        let session = make_session();
+        let mut mgr = RuntimeStorageManager::new();
+        mgr.register_volume("mem", Box::new(MemoryVolume));
+        mgr.add_storage(
+            &session,
+            &StorageConfig::new("intent", "i/**", "mem"),
+            vec![0x01],
+        )
+        .expect("an intent storage");
+        assert!(mgr
+            .start_plugin(
+                &session,
+                plugin_doc(
+                    r#"{ volumes: { v: { backend: "mem" } },
+                         storages: { p: { key_expr: "p/**", volume: "v" },
+                                     q: { key_expr: "q/**", volume: "memory" } } }"#,
+                ),
+                &[0x01],
+            )
+            .is_empty());
+        mgr.stop_plugin();
+        assert!(!mgr.plugin_running());
+        assert_eq!(mgr.storage_names().collect::<Vec<_>>(), vec!["intent"]);
+        let leaves: Vec<String> = mgr
+            .admin_status_leaves("v")
+            .into_iter()
+            .map(|leaf| leaf.suffix)
+            .filter(|suffix| suffix.starts_with("volumes/") && !suffix.ends_with("__path__"))
+            .collect();
+        assert_eq!(
+            leaves,
+            vec![String::from("volumes/mem")],
+            "only the host's own volume is left"
+        );
+    }
+
+    /// R2787 — the manager as a `plugins` sink: what it validates, what it
+    /// leaves alone, and the notification plane starting and stopping it.
+    #[cfg(feature = "adminspace-config-hotreload")]
+    #[tokio::test]
+    async fn the_sink_validates_only_a_running_storage_manager_and_follows_its_document() {
+        use crate::plugins_config::{PluginsConfig, PluginsSink};
+        let doc = |text: &str| wz_session_core::json5::parse(text).expect("json5");
+        let session = make_session();
+        let mut mgr = RuntimeStorageManager::new();
+        {
+            let sink = StorageManagerSink::new(&mut mgr, &session, &[0x01]);
+            // Another plugin, and a storage manager that is not running: both
+            // are accepted unchecked, as upstream accepts them.
+            assert_eq!(
+                sink.check_config("rest", "", &doc("{}"), &doc("{ http_port: 8000 }")),
+                Ok(None)
+            );
+            assert_eq!(
+                sink.check_config(
+                    STORAGE_MANAGER_PLUGIN,
+                    "",
+                    &doc("{}"),
+                    &doc("{ storages: 1 }")
+                ),
+                Ok(None)
+            );
+            // The document appearing starts the plugin.
+            let section = PluginsConfig::from_section(&doc(
+                r#"{ storage_manager: { storages: { s: { key_expr: "s/**", volume: "memory" } } } }"#,
+            ))
+            .unwrap();
+            sink.plugins_changed(&section);
+            assert!(sink.take_reports().is_empty());
+        }
+        assert!(mgr.plugin_running());
+        assert_eq!(mgr.storage_names().collect::<Vec<_>>(), vec!["s"]);
+        {
+            let sink = StorageManagerSink::new(&mut mgr, &session, &[0x01]);
+            let current = doc(r#"{ storages: { s: { key_expr: "s/**", volume: "memory" } } }"#);
+            // Running now: a document it cannot read is refused, and so is a
+            // step it cannot apply.
+            assert!(sink
+                .check_config(
+                    STORAGE_MANAGER_PLUGIN,
+                    "",
+                    &current,
+                    &doc("{ storages: 1 }")
+                )
+                .is_err());
+            assert!(sink
+                .check_config(
+                    STORAGE_MANAGER_PLUGIN,
+                    "storages/t",
+                    &current,
+                    &doc(r#"{ storages: { s: { key_expr: "s/**", volume: "memory" },
+                                          t: { key_expr: "t/**", volume: "nope" } } }"#),
+                )
+                .is_err());
+            // A readable, applicable change is applied.
+            assert_eq!(
+                sink.check_config(
+                    STORAGE_MANAGER_PLUGIN,
+                    "storages/u",
+                    &current,
+                    &doc(r#"{ storages: { s: { key_expr: "s/**", volume: "memory" },
+                                          u: { key_expr: "u/**", volume: "memory" } } }"#),
+                ),
+                Ok(None)
+            );
+            // The document going stops the plugin.
+            sink.plugins_changed(&PluginsConfig::new());
+        }
+        assert!(!mgr.plugin_running());
+        assert!(mgr.is_empty(), "the plugin's storages went with it");
     }
 
     // R2696 — the wire's backend name resolves against what THIS BUILD carries,

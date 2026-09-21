@@ -2935,8 +2935,13 @@ impl WzConfig {
 /// R2786 — whether a runtime write key belongs to the `plugins` section: the
 /// section itself or a key below it, and not a member-form key (`=`), which
 /// keeps the member route's own refusal.
+///
+/// R2787 — `pub`, because a HOST needs the same answer before it writes: the
+/// running plugins it must hand in as the sink may live somewhere other than
+/// where the write arrives (the storage host's manager is task-local), and a
+/// second spelling of "is this a plugins key" there would be a second answer.
 #[cfg(all(feature = "zenoh-config", feature = "adminspace-config-hotreload"))]
-fn is_plugins_key(key: &str) -> bool {
+pub fn is_plugins_key(key: &str) -> bool {
     matches!(classify_write_key(key), WriteKeyForm::Whole)
         && (key == "plugins" || key.starts_with("plugins/"))
 }

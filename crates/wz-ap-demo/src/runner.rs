@@ -8352,8 +8352,17 @@ pub(crate) async fn run_storage_host(listen: &str, opts: StorageHostOpts) -> io:
                     // compile. The demo's combination space has no instrument
                     // (open-debt item 374), so this is robust by construction
                     // rather than by having enumerated the combinations.
+                    //
+                    // R2787 — EXCEPT a `plugins/...` key, which is guarded out here
+                    // and falls to the stash arm below. Its validator is the
+                    // storage manager, and the manager is task-local to the dispatch
+                    // closure (the `Volume` trait carries no `Send`), so this
+                    // `Send + 'static` handler cannot hand it in; applied here, the
+                    // write would answer `NeedsSink` on a host that HAS the plugin.
                     #[cfg(feature = "zenoh-config")]
-                    AdminConfigWriteOutcome::Apply(AdminConfigWrite::SetKey { key, value }) => {
+                    AdminConfigWriteOutcome::Apply(AdminConfigWrite::SetKey { key, value })
+                        if !wz::runtime_tokio::config::is_plugins_key(&key) =>
+                    {
                         match sub_cfg.lock() {
                             Ok(mut c) => match c.set_by_key(&key, &value) {
                                 Ok(()) => log::info!(
@@ -8378,8 +8387,12 @@ pub(crate) async fn run_storage_host(listen: &str, opts: StorageHostOpts) -> io:
                     // `remove_by_key` answers with the same error type for the same
                     // reasons — an operator deleting a key wz ignores needs the same
                     // sentence as one writing it.
+                    // R2787 — and its `plugins/...` keys go to the stash for the
+                    // reason the set half gives.
                     #[cfg(feature = "zenoh-config")]
-                    AdminConfigWriteOutcome::Apply(AdminConfigWrite::RemoveKey { key }) => {
+                    AdminConfigWriteOutcome::Apply(AdminConfigWrite::RemoveKey { key })
+                        if !wz::runtime_tokio::config::is_plugins_key(&key) =>
+                    {
                         match sub_cfg.lock() {
                             Ok(mut c) => match c.remove_by_key(&key) {
                                 Ok(()) => log::info!(
@@ -8489,6 +8502,10 @@ pub(crate) async fn run_storage_host(listen: &str, opts: StorageHostOpts) -> io:
         let dispatch_zid = node_zid.clone();
         // The operator-chosen host volume every AddStorage is mapped onto (Copy).
         let dispatch_volume_id = hosted_volume_id;
+        // R2787 — the live config, for the `plugins/...` writes the subscriber
+        // stashes: they are applied HERE, with the manager as their sink.
+        #[cfg(feature = "zenoh-config")]
+        let dispatch_cfg = admin_cfg.clone();
         let mut dispatch =
             |event: IterationEvent<'_>| {
                 // Fires the admin GET queryable + config-write subscriber; the config-write
@@ -8692,6 +8709,39 @@ pub(crate) async fn run_storage_host(listen: &str, opts: StorageHostOpts) -> io:
                         // it was granted. The arm exists so the match stays exhaustive
                         // and so an intent that DID arrive here is reported.
                         // R2646 — the delete twin, never queued for the same reason.
+                        //
+                        // R2787 — EXCEPT the `plugins/...` keys, which the subscriber
+                        // stashes ON PURPOSE: their validator is the storage manager,
+                        // and this is the one place that holds it. Applied through
+                        // the config's own write gate with the manager as the sink, so
+                        // the merge, the validator and the notification are the
+                        // config's rather than a second copy of them here.
+                        #[cfg(feature = "zenoh-config")]
+                        AdminConfigWrite::SetKey { key, value }
+                            if wz::runtime_tokio::config::is_plugins_key(key) =>
+                        {
+                            apply_storage_plugin_write(
+                                &dispatch_cfg,
+                                &mut manager,
+                                &session_for_dispatch,
+                                &dispatch_zid,
+                                key,
+                                Some(value.as_str()),
+                            )
+                        }
+                        #[cfg(feature = "zenoh-config")]
+                        AdminConfigWrite::RemoveKey { key }
+                            if wz::runtime_tokio::config::is_plugins_key(key) =>
+                        {
+                            apply_storage_plugin_write(
+                                &dispatch_cfg,
+                                &mut manager,
+                                &session_for_dispatch,
+                                &dispatch_zid,
+                                key,
+                                None,
+                            )
+                        }
                         AdminConfigWrite::RemoveKey { key } => log::warn!(
                             "wz-ap-demo storage-host: config key {key} delete reached \
                          the dispatch queue; it is applied in the subscriber and \
@@ -8778,6 +8828,75 @@ pub(crate) async fn run_storage_host(listen: &str, opts: StorageHostOpts) -> io:
         // HOISTED manager (and any storage it holds) survives — the NAMED zombie bound.
     }
     Ok(())
+}
+
+/// R2787 (§5.23 `adminspace-config-hotreload`) — one `plugins/...` config write
+/// on the storage host, applied through the live config's own write gate with
+/// the storage manager as the running plugin.
+///
+/// What the log says is load-bearing: a start's failed steps and a document a
+/// start could not read refuse NOTHING (upstream logs them and runs on), so they
+/// are logged as the plugin's reports; a refused write is logged as refused and
+/// changed nothing; a landed write names the plugin's state after it, which is
+/// what the wire witness waits on.
+#[cfg(all(feature = "adminspace-config-hotreload", feature = "zenoh-config"))]
+fn apply_storage_plugin_write(
+    cfg: &std::sync::Mutex<wz::runtime_tokio::config::WzConfig>,
+    manager: &mut wz::runtime_tokio::storage_manager_service::RuntimeStorageManager<
+        wz::runtime_tokio::runtime_impl::TokioRuntime,
+        TokioTime,
+    >,
+    session: &TokioSession,
+    local_zid: &[u8],
+    key: &str,
+    value: Option<&str>,
+) {
+    use wz::runtime_tokio::config::ConfigSinks;
+    use wz::runtime_tokio::storage_manager_service::StorageManagerSink;
+
+    let (outcome, reports) = {
+        let sink = StorageManagerSink::new(manager, session, local_zid);
+        let outcome = match cfg.lock() {
+            Ok(mut c) => {
+                let sinks = ConfigSinks::none().with_plugins(&sink);
+                match value {
+                    Some(value) => c.set_by_key_with(key, value, &sinks),
+                    None => c.remove_by_key_with(key, &sinks),
+                }
+            }
+            Err(_) => {
+                log::warn!(
+                    "wz-ap-demo storage-host: config key {key} ignored; the config lock is \
+                     poisoned"
+                );
+                return;
+            }
+        };
+        (outcome, sink.take_reports())
+    };
+    for report in reports {
+        log::warn!("wz-ap-demo storage-host: storage_manager: {report}");
+    }
+    match outcome {
+        Ok(()) => log::info!(
+            "wz-ap-demo storage-host: plugins config key {key} {} over the wire — \
+             storage_manager plugin {}",
+            if value.is_some() {
+                "written"
+            } else {
+                "deleted"
+            },
+            if manager.plugin_running() {
+                "running"
+            } else {
+                "not running"
+            }
+        ),
+        Err(err) => log::warn!(
+            "wz-ap-demo storage-host: plugins config key {key} refused, nothing changed: \
+             {err:?}"
+        ),
+    }
 }
 
 /// R2088 — the refusal inside [`initiator_offer`] itself, which nothing reached.
