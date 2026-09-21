@@ -61,7 +61,6 @@
 //! would be a library signature bent to a test.
 
 use std::io::{BufRead, BufReader};
-use std::net::TcpListener;
 use std::process::{Command, Stdio};
 use std::sync::mpsc::{self, RecvTimeoutError};
 use std::time::{Duration, Instant};
@@ -84,17 +83,18 @@ const CONFIGURED: &str = "RECONNECT SCHEDULE init=250ms max=9000ms factor=1.5 so
 /// which SHARES its first wait with this — hence the whole line, not the init.
 const PICO_DEFAULT: &str = "RECONNECT SCHEDULE init=1000ms max=0ms factor=1 source=pico-default";
 
-/// A TCP port with nothing on it: bound to learn the number, then released.
+/// A TCP port that refuses, and the held socket that keeps it refusing.
 ///
-/// The window between the release and the demo's dial is not a correctness
-/// risk here — a dial that unexpectedly SUCCEEDED would still have announced
-/// the schedule first, which is the only thing read.
-fn dead_port() -> u16 {
-    let listener = TcpListener::bind("127.0.0.1:0").expect("a loopback port to learn and release");
-    listener
-        .local_addr()
-        .expect("the bound address is readable")
-        .port()
+/// R2778 (open-debt item 806) — this used to bind, read the number and release
+/// it, with a note that a dial which unexpectedly SUCCEEDED would still have
+/// announced the schedule first. That holds for these arms, and the sibling
+/// file's copy carried the same kind of argument and was red for it: a
+/// released number reached the node's own listener and its exit arm never
+/// fired. The shared `refusing_port` holds the number, so no arm in either
+/// file needs an argument about what a stolen port would do. The module note
+/// above calls a REFUSED dial the right shape; this makes the dial refused.
+fn dead_port() -> wz_runtime_tokio_test_support::RefusingPort {
+    wz_runtime_tokio_test_support::refusing_port()
 }
 
 /// A directory of this test's own, removed on the way out.
@@ -229,7 +229,8 @@ fn argv(items: &[&str]) -> Vec<String> {
 /// only by a hosted lane.
 #[test]
 fn a_typed_schedule_reaches_the_reconnect_supervisor() {
-    let target = format!("tcp/127.0.0.1:{}", dead_port());
+    let dead = dead_port();
+    let target = format!("tcp/{}", dead.addr());
     assert_announced(
         "typed --connect-retry",
         &argv(&["--connect", &target, "--reconnect", "--connect-retry", SPEC]),
@@ -243,7 +244,8 @@ fn a_typed_schedule_reaches_the_reconnect_supervisor() {
 /// would break first.
 #[test]
 fn an_untyped_schedule_leaves_the_supervisor_on_picos_constant() {
-    let target = format!("tcp/127.0.0.1:{}", dead_port());
+    let dead = dead_port();
+    let target = format!("tcp/{}", dead.addr());
     assert_announced(
         "no --connect-retry",
         &argv(&["--connect", &target, "--reconnect"]),
@@ -262,14 +264,15 @@ fn an_untyped_schedule_leaves_the_supervisor_on_picos_constant() {
 #[test]
 fn a_config_file_schedule_reaches_the_reconnect_supervisor() {
     let fixture = Fixture::new("configured");
+    let dead = dead_port();
     let path = fixture.write(
         "z.json5",
         &format!(
             r#"{{ mode: "client",
-                  connect: {{ endpoints: ["tcp/127.0.0.1:{}"],
+                  connect: {{ endpoints: ["tcp/{}"],
                              retry: {{ period_init_ms: 250, period_max_ms: 9000,
                                       period_increase_factor: 1.5 }} }} }}"#,
-            dead_port()
+            dead.addr()
         ),
     );
     assert_announced(
@@ -290,12 +293,13 @@ fn a_config_file_schedule_reaches_the_reconnect_supervisor() {
 #[test]
 fn a_config_file_without_the_block_leaves_picos_constant() {
     let fixture = Fixture::new("default");
+    let dead = dead_port();
     let path = fixture.write(
         "z.json5",
         &format!(
             r#"{{ mode: "client",
-                  connect: {{ endpoints: ["tcp/127.0.0.1:{}"] }} }}"#,
-            dead_port()
+                  connect: {{ endpoints: ["tcp/{}"] }} }}"#,
+            dead.addr()
         ),
     );
     assert_announced(

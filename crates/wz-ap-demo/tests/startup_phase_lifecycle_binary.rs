@@ -91,26 +91,28 @@ fn give_up_code() -> i32 {
         .unwrap_or_else(|e| panic!("STARTUP_PHASE_EXIT_CODE is not a number ({e}): {digits:?}"))
 }
 
-/// A TCP port to DIAL that nothing is listening on: bound to learn the number,
-/// then released.
+/// A TCP address to DIAL that refuses: the held port, and its locator.
 ///
 /// ⚠ R2178 (open-debt item 553) — THIS IS A DIAL TARGET AND NEVER A LISTEN
-/// ADDRESS, and the split is the repair rather than a naming preference. A
-/// released number belongs to nobody: between this call and the demo's own
-/// syscall the kernel may hand it to anyone. It did — R2175's push was refused
-/// because BOTH listen endpoints of one arm came back `Address already in use
-/// (os error 98)`, and the second of those was this port.
+/// ADDRESS. [`listen_arg`] is where that distinction is enforced instead of
+/// remembered.
 ///
-/// A dial target survives that window and a listen address cannot, which is
-/// why one helper could not serve both. The worst a stolen number does to a
-/// dial is let the connection SUCCEED, and no arm here reads that; for a
-/// listen address, binding IS the assertion. [`listen_arg`] is where the
-/// distinction is enforced instead of remembered.
-fn dial_target_port() -> u16 {
-    let listener = TcpListener::bind("127.0.0.1:0").expect("a loopback port to learn and release");
-    let port = listener.local_addr().expect("a readable address").port();
-    drop(listener);
-    port
+/// ⚠⚠ R2778 (open-debt item 806) — the target is HELD now, and the sentence
+/// that justified releasing it was false. This used to bind a port, learn
+/// the number and drop the listener, and its note said "the worst a stolen
+/// number does to a dial is let the connection SUCCEED, and no arm here reads
+/// that". The exit arms read exactly that: in hosted run `35579977073` the
+/// kernel gave the released number to the node's own `tcp/127.0.0.1:0`
+/// listener, the node dialled ITSELF, reported its connect phase satisfied,
+/// and `a_config_file_that_says_exit_on_failure_produces_a_node_that_exits`
+/// was killed 20.8s later. A bound-but-never-listening socket, held by this
+/// test for the arm's duration, refuses every connect and cannot be handed
+/// to anyone — the shared `refusing_port`, which the other copies of this
+/// helper in the tree now use too.
+fn dial_target() -> (wz_runtime_tokio_test_support::RefusingPort, String) {
+    let dead = wz_runtime_tokio_test_support::refusing_port();
+    let locator = format!("tcp/{}", dead.addr());
+    (dead, locator)
 }
 
 /// A port that is OCCUPIED for as long as the returned listener is held.
@@ -257,7 +259,7 @@ const APP: [&str; 2] = ["--subscribe", "demo/**"];
 /// wrote is the bound the node ran.
 #[test]
 fn a_bounded_connect_phase_gives_up_and_exits() {
-    let target = format!("tcp/127.0.0.1:{}", dial_target_port());
+    let (_dead, target) = dial_target();
     let listen = listen_arg(&[ListenSpec::KernelAssigned]);
     let (code, elapsed, seen) = assert_exits(
         "bounded connect phase",
@@ -303,7 +305,7 @@ fn a_bounded_connect_phase_gives_up_and_exits() {
 /// words the operator did or did not write.
 #[test]
 fn an_unbounded_connect_phase_keeps_the_node_running() {
-    let target = format!("tcp/127.0.0.1:{}", dial_target_port());
+    let (_dead, target) = dial_target();
     let listen = listen_arg(&[ListenSpec::KernelAssigned]);
     let seen = assert_still_running(
         "default connect phase",
@@ -436,18 +438,20 @@ fn a_bounded_listen_phase_re_binds_before_it_gives_up() {
 #[test]
 fn a_config_file_that_says_exit_on_failure_produces_a_node_that_exits() {
     let fixture = Fixture::new("configured");
+    // R2778 — HELD for the whole arm: this is the arm hosted run
+    // `35579977073` lost to a released number the node's own listener took.
+    let (_dead, target) = dial_target();
     let path = fixture.write(
         "z.json5",
         &format!(
             r#"{{ mode: "peer",
                   listen: {{ endpoints: ["tcp/127.0.0.1:0"] }},
-                  connect: {{ endpoints: ["tcp/127.0.0.1:{}"],
+                  connect: {{ endpoints: ["{target}"],
                              timeout_ms: 800,
                              exit_on_failure: true,
                              retry: {{ period_init_ms: 200, period_max_ms: 200,
                                       period_increase_factor: 1 }} }},
-                  scouting: {{ multicast: {{ enabled: false }} }} }}"#,
-            dial_target_port()
+                  scouting: {{ multicast: {{ enabled: false }} }} }}"#
         ),
     );
     let (code, elapsed, seen) = assert_exits(
@@ -488,14 +492,14 @@ fn a_config_file_that_says_exit_on_failure_produces_a_node_that_exits() {
 #[test]
 fn a_config_file_without_the_clause_leaves_the_node_running() {
     let fixture = Fixture::new("default");
+    let (_dead, target) = dial_target();
     let path = fixture.write(
         "z.json5",
         &format!(
             r#"{{ mode: "peer",
                   listen: {{ endpoints: ["tcp/127.0.0.1:0"] }},
-                  connect: {{ endpoints: ["tcp/127.0.0.1:{}"] }},
-                  scouting: {{ multicast: {{ enabled: false }} }} }}"#,
-            dial_target_port()
+                  connect: {{ endpoints: ["{target}"] }},
+                  scouting: {{ multicast: {{ enabled: false }} }} }}"#
         ),
     );
     let seen = assert_still_running(
@@ -552,8 +556,10 @@ impl Drop for Fixture {
 ///
 /// # Why this reads source instead of running the arms
 ///
-/// The defect it guards is a RACE. [`dial_target_port`] hands back a number the
-/// kernel may give to anyone before the demo binds it, so the arm that used one
+/// The defect it guards is a RACE. A port learned and released — what
+/// `dial_target_port` handed out until R2778 replaced it with a held,
+/// refusing [`dial_target`] — is a number the kernel may give to anyone
+/// before the demo binds it, so the arm that used one
 /// as a listen address failed only sometimes: R2175's push was refused by it,
 /// and re-running the same commit passed 7 of 7. A test that merely runs the
 /// arms therefore reports green on a tree that still carries the defect —
@@ -567,8 +573,8 @@ impl Drop for Fixture {
 /// # Three rules, because any two of them leave a route back in
 ///
 /// Rule 1 alone accepts `&listen` by name, so a `let listen = format!(..)` would
-/// pass it. Rules 1 and 2 together still accept
-/// `ListenSpec::Held(dial_target_port())`, which is the defect exactly. Each is
+/// pass it. Rules 1 and 2 together still accept `ListenSpec::Held` of a
+/// learned-and-released number, which is the defect exactly. Each is
 /// therefore checked and reported separately rather than folded into one sweep.
 #[test]
 fn no_listen_address_is_built_from_a_released_port() {

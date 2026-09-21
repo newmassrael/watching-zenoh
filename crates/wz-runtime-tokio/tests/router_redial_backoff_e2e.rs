@@ -35,7 +35,7 @@
 //! each other. `>= 2x` against a schedule whose gaps rise 60 -> 120 -> 240 -> 480
 //! leaves a wide margin above the fixed-delay answer of `1x`.
 
-use std::net::{IpAddr, Ipv4Addr, SocketAddr, TcpListener as StdTcpListener};
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::{Arc, Mutex as StdMutex};
 use std::time::{Duration, Instant};
 
@@ -62,15 +62,18 @@ fn tcp_dial(addr: SocketAddr) -> AnyLocator {
     parse_any_locator(&format!("tcp/{addr}")).expect("tcp/<addr> locator")
 }
 
-/// A loopback address with NOTHING listening: bind it, read the port, drop the
-/// listener. A connect there is REFUSED immediately rather than timing out, which
-/// is what keeps the observed interval equal to the backoff instead of to a
-/// TCP handshake timeout.
-fn closed_port() -> SocketAddr {
-    let l = StdTcpListener::bind((Ipv4Addr::LOCALHOST, 0)).expect("bind ephemeral");
-    let addr = l.local_addr().expect("local_addr");
-    drop(l);
-    SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), addr.port())
+/// A loopback address that REFUSES, for as long as the returned guard lives. A
+/// connect there is refused immediately rather than timing out, which is what
+/// keeps the observed interval equal to the backoff instead of to a TCP
+/// handshake timeout.
+///
+/// R2778 (open-debt item 806) — this used to bind, read the port and drop the
+/// listener, and both callers then bind the router's OWN listener on `:0`: the
+/// exact order in which hosted run `35579977073` handed a released number to
+/// the node under test, which then dialled itself. Held, the number is
+/// nobody's to hand out.
+fn closed_port() -> wz_runtime_tokio_test_support::RefusingPort {
+    wz_runtime_tokio_test_support::refusing_port()
 }
 
 async fn shutdown_on(mut rx: watch::Receiver<bool>) {
@@ -85,7 +88,8 @@ async fn shutdown_on(mut rx: watch::Receiver<bool>) {
 /// while re-dialing one unreachable desired peer, and return the gaps between
 /// consecutive attempts in milliseconds.
 async fn observed_gaps_ms(retry: RetryPolicy, want: usize) -> Vec<u128> {
-    let target = closed_port();
+    let refusing = closed_port();
+    let target = refusing.addr();
     let listener = BoundListener::Tcp(
         bind_tcp(
             SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0),
@@ -205,7 +209,8 @@ async fn an_unreachable_desired_peer_is_redialed_with_a_growing_wait() {
 /// from being a wall-clock coin flip on a loaded runner.
 #[tokio::test(flavor = "current_thread")]
 async fn a_peer_removed_and_re_added_starts_over_at_the_initial_wait() {
-    let target = closed_port();
+    let refusing = closed_port();
+    let target = refusing.addr();
     let listener = BoundListener::Tcp(
         bind_tcp(
             SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0),

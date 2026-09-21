@@ -6783,59 +6783,29 @@ mod tests {
              bytes reversed"
         );
     }
-    use socket2::{Domain, Socket, Type};
-    use std::net::{SocketAddr, TcpListener};
+    use std::net::TcpListener;
     use std::process::Command;
     use std::sync::{Arc, Mutex};
     use std::thread;
     use std::time::{Duration, Instant};
 
     /// Reserve an ephemeral TCP port that STAYS closed (a `connect` gets
-    /// `ECONNREFUSED`) for as long as the returned [`Socket`] guard is held. The
-    /// socket is bound but NEVER `listen()`ed — std's `TcpListener::bind` always
-    /// `listen()`s, so a bound std listener would ACCEPT the connect against the
-    /// kernel backlog. The prior `bind`-then-`drop` leaked the port straight back
-    /// to the OS, which under a loaded CI run recycles it to an unrelated LIVE
-    /// listener — a TOCTOU race that flaked `wait_alive_fails_fast_...` (a
-    /// third party binds the "closed" port, so `wait_for_tcp_accept_alive`
-    /// connects and returns `Ok` before it observes the child exit). This is the
-    /// exact race the crate's `socket2` dep was ADDED to fix (but never wired
-    /// until now), mirroring the `refused_locator` helper in wz-runtime-tokio's
-    /// `static_scout_open.rs`. The caller MUST hold the guard for the whole test.
-    fn closed_port() -> (Socket, u16) {
-        let socket = Socket::new(Domain::IPV4, Type::STREAM, None).expect("socket");
-        let bind: SocketAddr = "127.0.0.1:0".parse().expect("parse bind addr");
-        socket.bind(&bind.into()).expect("bind without listen");
-        let port = socket
-            .local_addr()
-            .expect("local_addr")
-            .as_socket()
-            .expect("ipv4 socket addr")
-            .port();
-        (socket, port)
-    }
-
-    /// R311y383 — the discriminator for the `closed_port` TOCTOU fix: the guard
-    /// RESERVES the port (a concurrent bind to it fails) AND keeps it CLOSED (a
-    /// connect is refused), for as long as the guard is held. Under the prior
-    /// bind-then-drop helper the port was NOT reserved — a parallel CI process
-    /// could rebind the "closed" port into a live listener, so
-    /// `wait_for_tcp_accept_alive` would connect and report the exited child as
-    /// ready (the `wait_alive_fails_fast` flake). The concurrent-bind-fails
-    /// assertion goes RED against that old helper (its dropped listener left the
-    /// port free to rebind).
-    #[test]
-    fn closed_port_reserves_the_port_and_refuses_connect() {
-        use std::net::TcpStream;
-        let (_guard, port) = closed_port();
-        assert!(
-            TcpListener::bind(("127.0.0.1", port)).is_err(),
-            "closed_port's guard must reserve the port against a concurrent bind"
-        );
-        assert!(
-            TcpStream::connect(("127.0.0.1", port)).is_err(),
-            "a bound-not-listening port must refuse connects (ECONNREFUSED)"
-        );
+    /// `ECONNREFUSED`) for as long as the returned guard is held — the prior
+    /// `bind`-then-`drop` leaked the port straight back to the OS, which under a
+    /// loaded CI run recycled it to an unrelated LIVE listener and flaked
+    /// `wait_alive_fails_fast_...` (R311y383).
+    ///
+    /// R2778 (open-debt item 806) — this file had that shape right and five
+    /// other tests in the tree had it wrong, one of them red on hosted CI for
+    /// it. The socket is now the SHARED
+    /// `wz_runtime_tokio_test_support::refusing_port`, and the discriminating
+    /// test that guarded this copy — reserved against a concurrent bind AND
+    /// refusing a connect — moved there with it, where it guards every user.
+    /// The caller MUST hold the guard for the whole test.
+    fn closed_port() -> (wz_runtime_tokio_test_support::RefusingPort, u16) {
+        let held = wz_runtime_tokio_test_support::refusing_port();
+        let port = held.addr().port();
+        (held, port)
     }
 
     /// `kill -0 <pid>` portable liveness probe. Returns `true` when

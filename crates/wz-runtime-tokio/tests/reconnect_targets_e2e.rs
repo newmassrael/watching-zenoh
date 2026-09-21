@@ -107,15 +107,17 @@ fn locator(addr: &str) -> ReconnectLocator {
         .expect("tcp locator is reconnectable")
 }
 
-/// An address nothing is listening on: bind, read the port the OS chose, drop
-/// the listener. Loopback refuses a connect to a closed port immediately, so
-/// this is a FAST failure rather than a timeout — the test's runtime does not
-/// depend on any dial deadline.
-async fn dead_address() -> String {
-    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
-    let addr = listener.local_addr().expect("local addr").to_string();
-    drop(listener);
-    addr
+/// An address that refuses, held for as long as the returned guard lives.
+/// Loopback refuses a connect to it immediately, so this is a FAST failure
+/// rather than a timeout — the test's runtime does not depend on any dial
+/// deadline.
+///
+/// R2778 (open-debt item 806) — this used to bind, read the port and DROP the
+/// listener. A dropped number is free for the next `bind(:0)`, and this very
+/// test binds one for its live candidate, so the "dead" candidate could come
+/// back live — a supervisor that never falls over would then pass.
+fn dead_address() -> wz_runtime_tokio_test_support::RefusingPort {
+    wz_runtime_tokio_test_support::refusing_port()
 }
 
 /// How long the acceptor half waits for a reopen to arrive before calling the
@@ -200,9 +202,10 @@ async fn open_supervised(
 /// attempt cap instead of `Stopped`.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_reopen_falls_over_to_the_next_candidate() {
+    let refusing = dead_address();
     let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
     let live = locator(&listener.local_addr().expect("local addr").to_string());
-    let dead = locator(&dead_address().await);
+    let dead = locator(&refusing.addr().to_string());
 
     let policy = ReconnectPolicy {
         retry_delay_ms: 25, // test cadence; production default is pico's 1s

@@ -2068,11 +2068,13 @@ wz-capture = { path = "../wz-capture", default-features = false, features = [
 # tests reach (their "write" is `future::pending`, not I/O). Dev-only, and
 # enabling it changes no behaviour unless a test asks for `start_paused`.
 tokio = { version = "1", features = ["full", "test-util"] }
-# R311gg — tests/static_scout_open.rs holds a bound-but-not-listening
-# loopback socket to synthesize a deterministically connection-refused
-# locator. std's TcpListener always `listen()`s; socket2 is the portable
-# way to bind without listening (already in the tree transitively via
-# tokio). Dev-only: never compiled into the lib or the no_std targets.
+# R311gg — dev-only, never compiled into the lib or the no_std targets.
+# R2778 — its first use has MOVED: the bound-but-not-listening socket
+# tests/static_scout_open.rs held for a refused locator is now the shared
+# `wz_runtime_tokio_test_support::refusing_port`. What still reaches socket2
+# directly is `link_pipeline`'s unit test, which reads SO_REUSEADDR back off
+# a bound listener at default features, where the optional lib dependency
+# above is not selected.
 socket2 = "0.6"
 # R2413 (open-debt item 676) — TEST-ONLY. The adminspace SURFACE document is a
 # contract a foreign consumer parses with a real JSON reader, so the test that

@@ -431,17 +431,16 @@ mod tests {
     use super::*;
 
     /// `dial_tcp` surfaces a connect error rather than panicking when the
-    /// target refuses (nothing listening on a freed loopback port).
+    /// target refuses.
+    ///
+    /// R2778 (open-debt item 806) — the target is HELD refusing. It used to be
+    /// a port bound and dropped, and a freed number is one any concurrent test
+    /// in this binary can bind next, at which point this dial succeeds.
     #[tokio::test]
     async fn dial_tcp_surfaces_connect_error() {
-        // Bind then drop to obtain a port with no listener.
-        let probe = tokio::net::TcpListener::bind("127.0.0.1:0")
-            .await
-            .expect("probe bind");
-        let dead = probe.local_addr().expect("probe addr");
-        drop(probe);
+        let dead = wz_runtime_tokio_test_support::refusing_port();
         assert!(
-            dial_tcp(dead, &LinkSocket::NONE).await.is_err(),
+            dial_tcp(dead.addr(), &LinkSocket::NONE).await.is_err(),
             "dial to closed port errors"
         );
     }

@@ -3091,6 +3091,15 @@ jobs:
     # NOTE the cost is newly VISIBLE, not newly INCURRED: before R2163 this
     # job died early on C1bn's two uring tests (ENOMEM), so every percentage
     # measured before that ran is of a job that stopped partway.
+    #
+    # R2778 (open-debt item 807) — THE SECOND OPTION ABOVE, TAKEN, because the
+    # job grew back. Run 35579977073 put it at 2431s of 2700 (90%) with every
+    # lane green, after 1385s and 2009s on the two runs before it: the margin
+    # step fired, which is what it is for. C1bn is gone, so the next move is
+    # the one R2165 priced second — the four heaviest lanes, C1j + C1z + C1bl +
+    # C1bi, 780s on that run — and they now run in `feature-gates-peel`, which
+    # lands this job near 1650s (61%). Not `timeout-minutes`, for the reason
+    # that script states and R2165 quoted.
     timeout-minutes: 45
     steps:
       - name: Budget stamp — start this job's own clock
@@ -3181,9 +3190,8 @@ jobs:
       # hosted reports success by silence. Both were proven by FALSIFICATION
       # locally (neuter the gate -> the lane goes red), so hosting them converts
       # a real proof into a continuously enforced one.
-      - name: Layer C1bi — pubsub-qos merged gate (R311y307)
-        run: bash scripts/run-ci.sh --layer C1bi
-
+      # (R2778 — C1bi, the first of the two, runs in `feature-gates-peel` now,
+      # one of the four lanes peeled for this job's budget; see that job.)
       - name: Layer C1bj — Push loopback metadata gates (R311y308)
         run: bash scripts/run-ci.sh --layer C1bj
 
@@ -3198,32 +3206,10 @@ jobs:
       - name: Layer C1bk — Query pub-field gates (R311y317)
         run: bash scripts/run-ci.sh --layer C1bk
 
-      # Hosted R311y332, and it is this job's own doctrine finally applied to
-      # the lane that needed it most. C1j is the BEHAVIOURAL half of the
-      # runtime-crate subset guard (`cargo test -p wz-runtime-tokio` over the
-      # `_wz_consumer_plane_subsets` SSOT rows); it is the ONLY lane anywhere
-      # that RUNS wz-runtime-tokio's tests with a consumer plane compiled OUT.
-      #
-      # Why now: R311y330 and R311y331 each wrote feature-OFF NEG proofs that
-      # land ONLY here — declare_queryable{,_aliased} and
-      # query{,_aliased,_aliased_auto} rejecting typed and emitting nothing —
-      # and both rounds shipped them into a lane no hosted job ran. Two rounds
-      # of "proven by falsification locally" is exactly the silence this job
-      # exists to break; leaving them unhosted would make the proofs decorative.
-      #
-      # Cost, measured not guessed: C1j's worst recorded local wall time is
-      # 193s (typical 54-87s) across 214 run-ci logs. This job's three existing
-      # lanes total ~24s warm, so the 30-minute budget absorbs it with room. It
-      # shares the `_wz_consumer_plane_subsets` feature sets with C4c/C4d, so
-      # its distinct-artifact cost is the rows themselves, once.
-      #
-      # NOT hosted here, deliberately, and still carried: C4c (the BUILD half),
-      # C4d (the clippy half) and C4e (transport axis). They are real gaps —
-      # they guard `deny(warnings)` dead-code regressions per subset — but they
-      # are a separate cost decision, not a side-effect of unblocking two
-      # rounds' NEG proofs.
-      - name: Layer C1j — runtime-tokio subset BEHAVIOUR (R311y330/y331 NEGs)
-        run: bash scripts/run-ci.sh --layer C1j
+      # (R2778 — C1j, the BEHAVIOURAL half of the runtime-crate subset guard,
+      # hosted here since R311y332, runs in `feature-gates-peel` now: at 222s
+      # on run 35579977073 it was this job's heaviest lane. Its rationale moved
+      # with it.)
 
       # Hosted R311y409 — C1w (routing-accept multi-peer accept_loop + the off-default
       # quic / quic-datagram MESH pins) was defined in scripts/run-ci.sh but never in
@@ -3307,8 +3293,8 @@ jobs:
         run: bash scripts/run-ci.sh --layer C1ab
       - name: Layer C1t — serial (PTY) link e2e (R311y413)
         run: bash scripts/run-ci.sh --layer C1t
-      - name: Layer C1bl — demo-router unixpipe/quic --listen admit (R311y413)
-        run: bash scripts/run-ci.sh --layer C1bl
+      # (R2778 — C1bl, the demo-router half of this pair, runs in
+      # `feature-gates-peel` now; C1bm, the pico half, stays.)
       - name: Layer C1bm — pico unixpipe/quic --listen admit (R311y413)
         run: bash scripts/run-ci.sh --layer C1bm
 
@@ -3412,8 +3398,8 @@ jobs:
       # routing's ~17.5 min p90 would put this job over its own ceiling. They
       # need their own runner, and now for a TIME reason that is measured rather
       # than the disk one R311y424 disproved.
-      - name: Layer C1z — storage driver (backend/history/aligner) (R311y426)
-        run: bash scripts/run-ci.sh --layer C1z
+      # (R2778 — C1z, the storage driver, runs in `feature-gates-peel` now;
+      # C1bg stays.)
       - name: Layer C1bg — filesystem storage backend + manager restart (R311y426)
         run: bash scripts/run-ci.sh --layer C1bg
 
@@ -3563,6 +3549,120 @@ jobs:
         # under the low end of that, so it would have fired on runner variance
         # and taught the reader to ignore it. 20% (540s) clears the band; the
         # 90% alarm (2430s) clears the high end by nearly as much.
+        if: always()
+        run: bash scripts/lib/job-budget-margin.sh "$RUNNER_TEMP/wz_job_start" 2700 90 20 '${{ job.status }}'
+
+  # ─────────────────────────────────────────────────────────────────
+  # R2778 (open-debt item 807) — the FEATURE-GATES PEEL. Four lanes taken off
+  # `feature-gates`, whose margin step fired on run 35579977073 at 2431s of
+  # its 2700s budget (90%), every lane green.
+  #
+  # WHY THESE FOUR, and it IS "the heaviest", unlike `routing-adminspace`
+  # below, which peeled a theme. R2165 re-derived that job from its own log
+  # and found a dominant step (C1bn, 688s), peeled it, and priced this as the
+  # second option: "the next four (C1j + C1z + C1bl + C1bi = 745s)". On run
+  # 35579977073 they are 222 + 214 + 190 + 154 = 780s, still the top four of
+  # its 37 lanes, and nothing dominates any more, so the heaviest set is the
+  # move with the most margin per lane moved. Each is self-contained: none
+  # needs another lane's artifacts, and none reaches `zenoh-pico-sys` or
+  # `wz-integration-tests`, so this job needs no `cmake` (the census in
+  # `scripts/lib/apt_package_census.py` derives that rather than trusting it).
+  #
+  # BUDGET 45 for the reason `routing-adminspace` states: this key is new, so
+  # the FIRST run builds these feature sets cold. 780s is the warm number; the
+  # margin step below reports where it lands, and its floor is what will ask
+  # for the budget back once the cache is warm.
+  feature-gates-peel:
+    name: feature-gate NEG lanes, the four heaviest (peeled for budget)
+    runs-on: ubuntu-22.04
+    timeout-minutes: 45
+    steps:
+      - name: Budget stamp — start this job's own clock
+        run: date +%s > "$RUNNER_TEMP/wz_job_start"
+
+      - name: Checkout (with submodules)
+        # `recursive`: these lanes compile wz-session-core, which resolves
+        # sce_forge_runtime out of vendor/sce.
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Restore apt archives (R311y882 — keep the mirror off the path)
+        # See the `feature-gates` copy for why this cache exists and why its
+        # RESTORE and SAVE are split.
+        id: apt-archives
+        uses: actions/cache/restore@v4
+        with:
+          path: ~/.cache/wz-apt
+          key: apt-${{ runner.os }}-${{ github.job }}-${{ hashFiles('.github/workflows/ci.yml') }}
+          restore-keys: |
+            apt-${{ runner.os }}-${{ github.job }}-
+
+      - name: Install system dependencies
+        # No `cmake`, for the reason in the header above.
+        run: |
+          bash scripts/lib/apt-install.sh libclang-dev libxml2-dev clang perl pkg-config
+
+      - name: Save apt archives
+        # See the `feature-gates` copy for why `always()` and why the dirty gate.
+        if: always() && env.WZ_APT_CACHE_DIRTY == 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: ~/.cache/wz-apt
+          key: ${{ steps.apt-archives.outputs.cache-primary-key }}-${{ github.run_id }}
+
+      - name: Install Rust toolchain (pinned by rust-toolchain.toml)
+        run: rustup show
+
+      - name: Cache Cargo registry + build artifacts
+        # Its OWN key: parallel jobs must not race one cache save, the same
+        # reason footprint, interop, verdict-legs and routing-adminspace each
+        # carry one.
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            crates -> target
+            vendor/sce -> target
+          key: feature-gates-peel
+
+      # Hosted R311y332, and it is the parent job's doctrine applied to the
+      # lane that needed it most. C1j is the BEHAVIOURAL half of the
+      # runtime-crate subset guard (`cargo test -p wz-runtime-tokio` over the
+      # `_wz_consumer_plane_subsets` SSOT rows); it is the ONLY lane anywhere
+      # that RUNS wz-runtime-tokio's tests with a consumer plane compiled OUT.
+      #
+      # Why it was hosted: R311y330 and R311y331 each wrote feature-OFF NEG
+      # proofs that land ONLY here — declare_queryable{,_aliased} and
+      # query{,_aliased,_aliased_auto} rejecting typed and emitting nothing —
+      # and both rounds shipped them into a lane no hosted job ran.
+      #
+      # NOT hosted anywhere, deliberately, and still carried: C4c (the BUILD
+      # half), C4d (the clippy half) and C4e (transport axis). They are real
+      # gaps — they guard `deny(warnings)` dead-code regressions per subset —
+      # but they are a separate cost decision.
+      #
+      # (Moved here from `feature-gates` by R2778, with this rationale; its
+      # original cost note — "the 30-minute budget absorbs it with room" — was
+      # about a job of three ~24s lanes and is not restated.)
+      - name: Layer C1j — runtime-tokio subset BEHAVIOUR (R311y330/y331 NEGs)
+        run: bash scripts/run-ci.sh --layer C1j
+      - name: Layer C1z — storage driver (backend/history/aligner) (R311y426)
+        run: bash scripts/run-ci.sh --layer C1z
+      - name: Layer C1bl — demo-router unixpipe/quic --listen admit (R311y413)
+        run: bash scripts/run-ci.sh --layer C1bl
+      - name: Layer C1bi — pubsub-qos merged gate (R311y307)
+        run: bash scripts/run-ci.sh --layer C1bi
+
+      - name: Disk headroom after the lanes (measurement, not a gate)
+        if: always()
+        run: df -h /
+
+      - name: Budget margin — this job may not approach its timeout in silence
+        # 2700 is `timeout-minutes: 45` in seconds; the two are one fact and
+        # `scripts/lib/job_budget_binding.py` holds them together. 90 / 20 are
+        # the parent job's alarm and floor, and for its reason: a threshold
+        # tuned to sit above this job's first measurement would be the raise
+        # this split exists instead of.
         if: always()
         run: bash scripts/lib/job-budget-margin.sh "$RUNNER_TEMP/wz_job_start" 2700 90 20 '${{ job.status }}'
 

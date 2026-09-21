@@ -64,8 +64,6 @@ use std::net::SocketAddr;
 use std::process::{Command, Stdio};
 use std::time::Duration;
 
-use socket2::{Domain, Socket, Type};
-
 use wz_integration_tests::common::{
     read_captured, wait_for_substring, zenoh_pico_cli_binary, ChildGuard, PortReservation,
 };
@@ -95,16 +93,14 @@ fn initiator_params() -> SessionInitParams {
 /// unrelated live listener under concurrent CI load. socket2 binds WITHOUT
 /// listening: the reservation stands while the guard lives, and a connect to it
 /// gets RST -> ECONNREFUSED.
-fn refused_locator() -> (Socket, SocketAddr) {
-    let socket = Socket::new(Domain::IPV4, Type::STREAM, None).expect("socket");
-    let bind: SocketAddr = "127.0.0.1:0".parse().expect("parse bind addr");
-    socket.bind(&bind.into()).expect("bind without listen");
-    let addr = socket
-        .local_addr()
-        .expect("local_addr")
-        .as_socket()
-        .expect("ipv4 socket addr");
-    (socket, addr)
+///
+/// R2778 (open-debt item 806) — no longer LIFTED: a copy per file is how five
+/// tests came to write the other shape, one of them red on hosted CI for it.
+/// It is the shared `wz_runtime_tokio_test_support::refusing_port`.
+fn refused_locator() -> (wz_runtime_tokio_test_support::RefusingPort, SocketAddr) {
+    let held = wz_runtime_tokio_test_support::refusing_port();
+    let addr = held.addr();
+    (held, addr)
 }
 
 // wz-proves: scouting-static wz->pico

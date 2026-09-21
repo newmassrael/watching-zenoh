@@ -44,11 +44,6 @@
 #[cfg(feature = "scouting-static")]
 use std::net::SocketAddr;
 
-// R311if — only the static-mode tests (via `refused_locator`) need the
-// raw non-listening socket; gate the import with their feature.
-#[cfg(feature = "scouting-static")]
-use socket2::{Domain, Socket, Type};
-
 use tokio::net::TcpListener;
 #[cfg(feature = "transport-link-udp")]
 use tokio::net::UdpSocket;
@@ -105,18 +100,18 @@ fn initiator_params() -> SessionInitParams {
 /// `std::net::TcpListener::bind` always calls `listen()`, so socket2 is used to
 /// bind without listening.
 ///
+/// R2778 (open-debt item 806) — the socket is now the SHARED
+/// `refusing_port`'s. This file had the right shape already, and so did
+/// `wz-integration-tests`; five other tests had written the other one, and one
+/// of them reddened hosted CI. A shape each file re-derives is a shape some
+/// file gets wrong, so there is now one.
+///
 /// R311if — used only by the static-mode exhaustion tests; gated with them.
 #[cfg(feature = "scouting-static")]
-fn refused_locator() -> (Socket, SocketAddr) {
-    let socket = Socket::new(Domain::IPV4, Type::STREAM, None).expect("socket");
-    let bind: SocketAddr = "127.0.0.1:0".parse().expect("parse bind addr");
-    socket.bind(&bind.into()).expect("bind without listen");
-    let addr = socket
-        .local_addr()
-        .expect("local_addr")
-        .as_socket()
-        .expect("ipv4 socket addr");
-    (socket, addr)
+fn refused_locator() -> (wz_runtime_tokio_test_support::RefusingPort, SocketAddr) {
+    let held = wz_runtime_tokio_test_support::refusing_port();
+    let addr = held.addr();
+    (held, addr)
 }
 
 /// Inline wz acceptor: accept -> wire -> InboundStart -> drive to Established.

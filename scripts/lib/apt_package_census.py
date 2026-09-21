@@ -171,6 +171,10 @@ _add(
         "cross-mcu",
         "zephyr-mcu",
         "feature-gates",
+        # R2778 — four lanes peeled off `feature-gates` for its budget (C1j,
+        # C1z, C1bl, C1bi), none reaching `zenoh-pico-sys` or
+        # `wz-integration-tests`, so it takes this row's package and not cmake.
+        "feature-gates-peel",
         "routing-adminspace",
         "transport-modes",
         "isolated-crates",
@@ -205,6 +209,10 @@ _add(
         "cross-mcu",
         "zephyr-mcu",
         "feature-gates",
+        # R2778 — four lanes peeled off `feature-gates` for its budget (C1j,
+        # C1z, C1bl, C1bi), none reaching `zenoh-pico-sys` or
+        # `wz-integration-tests`, so it takes this row's package and not cmake.
+        "feature-gates-peel",
         "routing-adminspace",
         "transport-modes",
         "isolated-crates",
@@ -239,6 +247,10 @@ _add(
         "defaults-off",
         "footprint",
         "feature-gates",
+        # R2778 — four lanes peeled off `feature-gates` for its budget (C1j,
+        # C1z, C1bl, C1bi), none reaching `zenoh-pico-sys` or
+        # `wz-integration-tests`, so it takes this row's package and not cmake.
+        "feature-gates-peel",
         "routing-adminspace",
         "transport-modes",
         "isolated-crates",
@@ -368,6 +380,10 @@ _add(
         "cross-mcu",
         "zephyr-mcu",
         "feature-gates",
+        # R2778 — four lanes peeled off `feature-gates` for its budget (C1j,
+        # C1z, C1bl, C1bi), none reaching `zenoh-pico-sys` or
+        # `wz-integration-tests`, so it takes this row's package and not cmake.
+        "feature-gates-peel",
         "routing-adminspace",
         "transport-modes",
         "isolated-crates",
@@ -411,6 +427,10 @@ _add(
         "cross-mcu",
         "zephyr-mcu",
         "feature-gates",
+        # R2778 — four lanes peeled off `feature-gates` for its budget (C1j,
+        # C1z, C1bl, C1bi), none reaching `zenoh-pico-sys` or
+        # `wz-integration-tests`, so it takes this row's package and not cmake.
+        "feature-gates-peel",
         "routing-adminspace",
         "transport-modes",
         "isolated-crates",

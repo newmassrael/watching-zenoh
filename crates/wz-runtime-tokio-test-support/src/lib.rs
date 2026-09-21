@@ -595,6 +595,69 @@ pub fn free_port() -> u16 {
     );
 }
 
+/// A loopback TCP address that REFUSES connections for as long as the
+/// returned socket is held.
+///
+/// R2778 (open-debt item 806) — the socket is BOUND and never `listen()`ed.
+/// While it is held the kernel answers a connect to that port with a reset
+/// (`ECONNREFUSED`), and no other bind on the host can take the number, so a
+/// dial that is meant to fail cannot be answered by anyone.
+///
+/// ⚠ WHY NOT BIND AND RELEASE, which is what five tests in this tree did and
+/// what one of them was red for. A released number belongs to nobody, and the
+/// kernel hands it to the next `bind(:0)` it sees — the listener of the node
+/// under test included. Hosted run `35579977073` shows the cost exactly: a
+/// node told to exit when its one peer was unreachable was given, as that
+/// peer, the number its own `tcp/127.0.0.1:0` listener then received, so it
+/// connected to ITSELF, reported its connect phase satisfied and never
+/// exited. The helper that picked the number said in its own doc that a
+/// stolen number could only make the dial succeed "and no arm here reads
+/// that"; the exit arms read exactly that.
+///
+/// And why not a held std listener: `TcpListener::bind` always `listen()`s,
+/// so a held listener ACCEPTS the connect into its backlog — the dial
+/// succeeds and the failure arm under test never runs.
+///
+/// The guard is the value the caller keeps: the address is read OFF it, so
+/// the natural use — `let dead = refusing_port();` then `dead.addr()` where
+/// it is needed — holds the socket for the whole scope. Dropping it returns
+/// the number to the pool and reopens the window this closes.
+///
+/// The one shared form of a shape two files had already written correctly
+/// for themselves (`wz-integration-tests`' `closed_port`, whose own
+/// discriminating test moved here with it, and `static_scout_open.rs`'
+/// `refused_locator`) and five had written the other way.
+pub fn refusing_port() -> RefusingPort {
+    let socket = socket2::Socket::new(socket2::Domain::IPV4, socket2::Type::STREAM, None)
+        .expect("a TCP socket");
+    let bind: std::net::SocketAddr = "127.0.0.1:0".parse().expect("a loopback address");
+    socket.bind(&bind.into()).expect("bind without listen");
+    let addr = socket
+        .local_addr()
+        .expect("the bound address is readable")
+        .as_socket()
+        .expect("an IPv4 socket address");
+    RefusingPort {
+        _socket: socket,
+        addr,
+    }
+}
+
+/// A held, refusing loopback port — see [`refusing_port`].
+#[must_use = "the port refuses only while this is held; dropping it frees the number"]
+pub struct RefusingPort {
+    /// Held, never read: its whole job is to keep the number bound.
+    _socket: socket2::Socket,
+    addr: std::net::SocketAddr,
+}
+
+impl RefusingPort {
+    /// The address that refuses, for as long as `self` lives.
+    pub fn addr(&self) -> std::net::SocketAddr {
+        self.addr
+    }
+}
+
 /// R311of — the loopback TLS config pair: one self-signed `localhost` cert the
 /// server presents and the client trusts (added to a fresh root store). The
 /// SSOT for every wz-runtime-tokio TLS e2e — `tls_e2e`, the scouting
@@ -827,8 +890,32 @@ pub async fn establish_capability_pair(
 
 #[cfg(test)]
 mod port_tests {
-    use super::free_port;
+    use super::{free_port, refusing_port};
     use std::collections::BTreeSet;
+
+    /// R2778 — the discriminator for `refusing_port`, moved here with the
+    /// helper from `wz-integration-tests`, where it guarded that crate's local
+    /// copy (R311y383): the socket RESERVES the port (a concurrent bind to it
+    /// fails) AND keeps it CLOSED (a connect is refused), for as long as it is
+    /// held.
+    ///
+    /// Both halves, because each catches a different wrong helper. A helper
+    /// that binds and releases reds the first — the number is free to rebind,
+    /// which is item 806's defect. A helper that holds a LISTENING socket reds
+    /// the second — the connect is accepted into the backlog.
+    #[test]
+    fn a_refusing_port_is_reserved_and_refuses_connect() {
+        use std::net::{TcpListener, TcpStream};
+        let dead = refusing_port();
+        assert!(
+            TcpListener::bind(dead.addr()).is_err(),
+            "the held socket must reserve the port against a concurrent bind"
+        );
+        assert!(
+            TcpStream::connect(dead.addr()).is_err(),
+            "a bound-not-listening port must refuse connects (ECONNREFUSED)"
+        );
+    }
 
     /// The old three-line helper: bind, read, drop. Reproduced here so the
     /// control below is a COMPARISON rather than an assertion about the new one
