@@ -9914,7 +9914,22 @@ layer_c1n_mcu_session_acceptor() {
     # C1l, which does not arm `session-unicast` and therefore compiles these
     # tests out), and every one of the 50 guarded `wz-session-core` lanes
     # carries a module filter that excludes `entropy::`.
-    _runci_guarded_test "C1n coop cookie-nonce draw" 4 \
+    #
+    # 4 -> 5 (R2767). R2763 gave the bundle an entropy SOURCE instead of a
+    # drawn value, so the acceptor draws per handshake rather than per bundle;
+    # that round added `two_draws_on_one_bundle_take_two_nonces` and
+    # `a_source_that_dries_up_clears_the_nonce_it_had_drawn`, and moved the one
+    # pre-existing test that built a deterministic nonce out of this module —
+    # a net +1 it did not pay here. Attributed with `git log -S` per test:
+    # three are `5bc0e63c`'s, two are `a279c411`'s.
+    #
+    # ⚠ WHY IT REACHED HOSTED AT ALL, since this round ran the count guards:
+    # `guarded_count_gate.py` DEFERS the guards whose command the shell
+    # assembles, and this is one of them — its own output says so ("ONLY the
+    # hosted lane that owns them measures these"). A green count-guard pre-run
+    # does not cover this leg, and the honest local check is running the
+    # command in the guard verbatim, which reports 5.
+    _runci_guarded_test "C1n coop cookie-nonce draw" 5 \
         cargo test -p wz-runtime-coop --features session-unicast \
         --lib cookie_nonce_draw_tests:: --quiet || return 1
     _runci_guarded_test "C1n entropy port" 3 \
