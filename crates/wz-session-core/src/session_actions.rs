@@ -2752,10 +2752,23 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             QosAcceptState, ShmAcceptState,
         };
         NegotiatedExtensions {
-            #[cfg(feature = "transport-qos")]
-            qos: QosAcceptState(self.is_qos()),
+            // R2777 — the band rides with the capability, from the slot the
+            // band merge writes; without `session-extqos` there is no band to
+            // carry and QoS is the bare arm.
+            #[cfg(feature = "session-extqos")]
+            qos: if self.is_qos() {
+                self.qos_link_metadata().qos_accept_state()
+            } else {
+                QosAcceptState::NoQos
+            },
+            #[cfg(all(feature = "transport-qos", not(feature = "session-extqos")))]
+            qos: if self.is_qos() {
+                QosAcceptState::BARE
+            } else {
+                QosAcceptState::NoQos
+            },
             #[cfg(not(feature = "transport-qos"))]
-            qos: QosAcceptState(false),
+            qos: QosAcceptState::NoQos,
             #[cfg(feature = "transport-shm")]
             shm: ShmAcceptState(self.is_shm()),
             #[cfg(not(feature = "transport-shm"))]
@@ -2791,7 +2804,21 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         use crate::transport_mode::TransportMode;
         let offer = R::with_mutex_mut(&self.offer, |o| *o);
         NegotiatedExtensions {
-            qos: QosAcceptState(offer.mode == TransportMode::Qos),
+            // R2777 — a QoS offer carries the band it offers; the band is
+            // meaningful only beside a QoS offer, as the emit seam already
+            // holds, so any other mode offers none.
+            #[cfg(feature = "session-extqos")]
+            qos: if offer.mode == TransportMode::Qos {
+                offer.qos_link.unwrap_or_default().qos_accept_state()
+            } else {
+                QosAcceptState::NoQos
+            },
+            #[cfg(not(feature = "session-extqos"))]
+            qos: if offer.mode == TransportMode::Qos {
+                QosAcceptState::BARE
+            } else {
+                QosAcceptState::NoQos
+            },
             shm: ShmAcceptState(offer.shm),
             lowlatency: LowlatencyAcceptState(offer.mode == TransportMode::LowLatency),
             compression: CompressionAcceptState(offer.compression),
@@ -2829,7 +2856,12 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     ))]
     fn install_negotiated(&self, n: crate::accept_state::NegotiatedExtensions) {
         #[cfg(feature = "transport-qos")]
-        R::with_mutex_mut(&self.is_qos, |s| *s = n.qos.0);
+        R::with_mutex_mut(&self.is_qos, |s| *s = n.qos.negotiated());
+        // R2777 — the band, from the same QoS state: one member, two slots.
+        #[cfg(feature = "session-extqos")]
+        R::with_mutex_mut(&self.qos_link, |s| {
+            *s = crate::extqos::QosLinkState::from_qos_accept_state(n.qos)
+        });
         #[cfg(feature = "transport-shm")]
         R::with_mutex_mut(&self.is_shm, |s| *s = n.shm.0);
         #[cfg(feature = "transport-lowlatency")]
@@ -2845,20 +2877,14 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// R2774 — return EVERY negotiated slot to this node's offer: the state a
     /// handshake starts from.
     ///
-    /// The five the cookie carries go through `install_negotiated`; the QoS
-    /// band is the one member outside that set, because the cookie's QoS
-    /// state is a bool where the band is a range (see
-    /// `crate::accept_state::QosAcceptState`'s own note). It still has to be
-    /// returned HERE, on reopen, or a band the last acceptor narrowed would
-    /// refuse the next one.
+    /// R2777 — this is now `install_negotiated` of the offer and nothing
+    /// else. It used to return the QoS band separately, because the cookie's
+    /// QoS state was a bool and the band sat outside the carried set; with the
+    /// band inside `QosAcceptState`, "every negotiated slot" and "every slot
+    /// the cookie carries" are the same set, and one writer serves both.
     #[cfg(feature = "session-reconnect")]
     fn return_to_offer(&self) {
         self.install_negotiated(self.offered_extensions());
-        #[cfg(feature = "session-extqos")]
-        {
-            let band = R::with_mutex_mut(&self.offer, |o| o.qos_link).unwrap_or_default();
-            R::with_mutex_mut(&self.qos_link, |s| *s = band);
-        }
     }
 
     /// R2772 — REBUILD this acceptor's negotiated state from the cookie the
@@ -8599,7 +8625,10 @@ impl<R: SessionRuntime, T: TimeSource> SessionFsmUnicastActionsTrait
                     cookie_bytes.as_deref(),
                     ExtChainRole::InitAck,
                 )
-                .expect("the widest accept cookie is 51 bytes, within the codec's 128 cap");
+                .expect(
+                    "the widest accept cookie is held under the codec's 128 cap by \
+                     accept_cookie::the_widest_cookie_fits_the_generated_field",
+                );
             a.send_wire(&bytes, Reliability::Reliable, Priority::DEFAULT);
             // R2774 — LET GO of what the cookie now carries. Upstream's
             // acceptor keeps nothing negotiated between InitAck and OpenSyn:

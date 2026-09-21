@@ -794,7 +794,7 @@ async fn the_acceptor_holds_no_negotiated_state_between_init_ack_and_open_syn() 
     #[cfg(feature = "transport-qos")]
     {
         assert!(
-            !carried.negotiated.qos.0,
+            !carried.negotiated.qos.negotiated(),
             "ANTI-VACUITY: the peer offered no QoS, so the outcome must differ \
              from this node's offer"
         );
@@ -818,6 +818,84 @@ async fn the_acceptor_holds_no_negotiated_state_between_init_ack_and_open_syn() 
     assert!(
         !actions.is_qos(),
         "the admitted OpenSyn puts back the OUTCOME, not the offer"
+    );
+}
+
+/// R2777 — the QoS BAND rides the cookie: between InitAck and OpenSyn the
+/// acceptor holds the band it OFFERED, and the admitted OpenSyn puts back the
+/// band the handshake MERGED.
+///
+/// The input is a real wz initiator's InitSyn, taken off its recording
+/// driver, so the band on the wire is what wz's own encoder writes rather
+/// than what a fixture believes it writes. The acceptor offers a WIDER band
+/// than the initiator, and the acceptor's merge keeps the initiator's band
+/// when its own contains it — so the merged band differs from the offer,
+/// and only a release followed by a rebuild shows the offer in the middle
+/// and the merged band at the end.
+#[cfg(feature = "session-extqos")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_qos_band_rides_the_cookie_between_init_ack_and_open_syn() {
+    use wz_session_core::extqos::QosLinkState;
+    use wz_session_core::qos::Priority;
+    use wz_session_core::session_actions::LinkPriorityRange;
+
+    let band = |a, b| QosLinkState {
+        priorities: Some(LinkPriorityRange::new(a, b)),
+        reliability: None,
+    };
+    let wide = band(Priority::RealTime, Priority::Background);
+    let narrow = band(Priority::InteractiveHigh, Priority::Data);
+    assert_ne!(
+        wide, narrow,
+        "ANTI-VACUITY: offer and merged band must differ"
+    );
+
+    // The initiator's InitSyn, from wz's own encoder.
+    let (initiator, mut initiator_engine, initiator_wire) = fresh_setup_recording();
+    assert!(initiator.set_qos_offer(true), "qos offer applies");
+    initiator.set_qos_link_metadata(narrow);
+    initiator_engine.process_event(E::OutboundStart);
+    initiator_engine.process_event(E::LinkOpened);
+    let init_syn = initiator_wire
+        .sent
+        .lock()
+        .unwrap()
+        .first()
+        .cloned()
+        .expect("the initiator sent its InitSyn");
+
+    let (actions, mut engine, recording) = fresh_setup_recording();
+    assert!(actions.set_qos_offer(true), "qos offer applies");
+    actions.set_qos_link_metadata(wide);
+    engine.process_event(E::InboundStart);
+    let mut driver = QueueDriver::with(vec![LinkEvent::Rx(RxFrame::new(init_syn))]);
+    let _ = poll_and_dispatch_one(&mut driver, &actions, &mut engine).await;
+    assert_eq!(engine.get_current_state(), S::SentInitAck);
+
+    let cookie = minted_cookie(&recording.sent.lock().unwrap().clone());
+    let carried = decode_accept_cookie(&fixture_session_init_params().cookie_signing_key, &cookie)
+        .expect("the acceptor's own cookie verifies");
+    assert_eq!(
+        carried.negotiated.qos,
+        narrow.qos_accept_state(),
+        "the cookie carries the MERGED band"
+    );
+    assert_eq!(
+        actions.qos_link_metadata(),
+        wide,
+        "after the InitAck the acceptor holds the band it OFFERED -- the \
+         merged one is in the cookie"
+    );
+
+    let mut driver = QueueDriver::with(vec![LinkEvent::Rx(RxFrame::new(craft_opensyn_wire(
+        &cookie,
+    )))]);
+    let _ = poll_and_dispatch_one(&mut driver, &actions, &mut engine).await;
+    assert_eq!(engine.get_current_state(), S::Established);
+    assert_eq!(
+        actions.qos_link_metadata(),
+        narrow,
+        "the admitted OpenSyn puts back the merged band the cookie carried"
     );
 }
 
@@ -878,7 +956,7 @@ async fn without_a_cookie_nonce_the_acceptor_admits_no_open_syn() {
             batch_size: 0,
             nonce: 0,
             negotiated: NegotiatedExtensions {
-                qos: QosAcceptState(false),
+                qos: QosAcceptState::NoQos,
                 shm: ShmAcceptState(false),
                 lowlatency: LowlatencyAcceptState(false),
                 compression: CompressionAcceptState(false),

@@ -143,6 +143,40 @@ pub struct QosLinkState {
     pub reliability: Option<crate::reliability::Reliability>,
 }
 
+/// R2777 — the two directions between this band and the accept state the
+/// cookie carries. They live HERE, beside the gated type, so that the
+/// accept-state module stays ungated: it names the band with the ungated
+/// `Priority` pair, and only this side knows it is a `LinkPriorityRange`.
+#[cfg(feature = "session-extqos")]
+impl QosLinkState {
+    /// This band as the QoS arm of the accept state — the state of a session
+    /// that negotiated QoS with this band and class.
+    pub fn qos_accept_state(&self) -> crate::accept_state::QosAcceptState {
+        crate::accept_state::QosAcceptState::Qos {
+            priorities: self.priorities.map(|r| (r.start(), r.end())),
+            reliability: self.reliability,
+        }
+    }
+
+    /// The band an accept state carries. `NoQos` carries NONE, which is
+    /// upstream's own reading: its `State::NoQoS` has no band at all, so a
+    /// session that did not negotiate QoS reports no metadata rather than the
+    /// band it offered.
+    pub fn from_qos_accept_state(state: crate::accept_state::QosAcceptState) -> Self {
+        match state {
+            crate::accept_state::QosAcceptState::NoQos => Self::default(),
+            crate::accept_state::QosAcceptState::Qos {
+                priorities,
+                reliability,
+            } => Self {
+                priorities: priorities
+                    .map(|(a, b)| crate::session_actions::LinkPriorityRange::new(a, b)),
+                reliability,
+            },
+        }
+    }
+}
+
 /// What an inbound Init ext chain says about the peer's QoS establishment state
 /// — the wz mirror of zenoh's `State` enum, returned by
 /// [`peer_qos_ext_state`].

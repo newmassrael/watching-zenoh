@@ -53,15 +53,25 @@
 //!
 //! The five states `NegotiatedExtensions` groups ride the cookie, and the
 //! acceptor rebuilds them at OpenSyn and does not hold them in between.
-//! Measured against the pin, upstream's cookie carries three things more:
-//! the QoS priority band and reliability (`session-extqos` negotiates them,
-//! `QosAcceptState` is a bool), the usrpwd challenge nonce, and the multilink
-//! public key with its challenge. Those three stay held by the objects that
-//! own them. Upstream's shm accept state is EMPTY, so shm is not a fourth —
+//! R2777 closed one more: the QoS priority band and reliability now ride
+//! inside `QosAcceptState`. What upstream's cookie carries and this acceptor
+//! still holds is read off upstream's cookie STRUCT rather than off a list
+//! of extensions, because the list R2774 wrote from a walk of the extensions
+//! missed one —
+//! `io/zenoh-transport/src/unicast/establishment/cookie.rs` @ `pub(crate) struct Cookie {`.
+//! Against that struct four things remain, held by the objects that own
+//! them: the auth states (the usrpwd nonce and the pubkey challenge), the
+//! multilink public key with its challenge, the peer's announced region
+//! name, and the cookie's head fields, which ride the cookie but are also
+//! still kept in their slots. Upstream's shm accept state is EMPTY, so shm
+//! is not among them —
 //! `io/zenoh-transport/src/unicast/establishment/ext/shm/auth.rs` @ `pub(crate) type StateAccept = StateOpen;`
 //! and its codec writes nothing.
 
 use sce_forge_runtime::codec::{CodecError, SceCursor, SceSink};
+
+use crate::qos::Priority;
+use crate::reliability::Reliability;
 
 /// One extension's accept state, in the form the acceptor's cookie carries.
 ///
@@ -180,8 +190,8 @@ impl AcceptState for PatchAcceptState {
 /// Declare one extension's accept state for a capability whose whole
 /// negotiated state is a single bool.
 ///
-/// FOUR DISTINCT TYPES rather than one reused flag type, and a macro rather
-/// than four hand-written copies — both halves are the structure upstream
+/// DISTINCT TYPES rather than one reused flag type, and a macro rather than
+/// hand-written copies — both halves are the structure upstream
 /// has. `io/zenoh-transport/src/unicast/establishment/ext/lowlatency.rs` @
 /// `pub(crate) struct StateAccept` and its compression sibling are separate
 /// one-bool types with separate codecs, and
@@ -219,19 +229,117 @@ macro_rules! flag_accept_state {
     };
 }
 
-flag_accept_state! {
-    /// Whether this session negotiated QoS.
-    ///
-    /// Upstream's is `io/zenoh-transport/src/unicast/establishment/ext/qos.rs`
-    /// @ `pub(crate) struct StateAccept`, which wraps a richer `State` because
-    /// its qos extension also negotiates link-level priorities.
-    ///
-    /// ⚠ R2774 — this bool is NARROWER than what wz negotiates, not equal to
-    /// it. Under `session-extqos` wz merges the priority band and reliability
-    /// too, into `qos_link`, and this state does not carry them. So an
-    /// acceptor built with that feature still holds its merged band between
-    /// InitAck and OpenSyn, where upstream's rides the cookie.
-    QosAcceptState
+/// What this session negotiated for QoS: nothing, or QoS together with the
+/// priority band and reliability class it settled on.
+///
+/// R2777 — this was a bool, and a bool is NARROWER than what wz negotiates.
+/// Under `session-extqos` the band and the reliability are merged too, and
+/// the acceptor reads the merged band after establishment, so a cookie that
+/// carried only the bool left the band held between InitAck and OpenSyn.
+/// The shape is now upstream's own:
+/// `io/zenoh-transport/src/unicast/establishment/ext/qos.rs` @ `enum State {`
+/// is `NoQoS | QoS { reliability, priorities }`, one state with two arms,
+/// and it is what upstream's cookie carries for this extension.
+///
+/// The band is held as a `Priority` PAIR and the class as a `Reliability`,
+/// not as `LinkPriorityRange` or `QosLinkState`: those are gated on
+/// `transport-qos` and `session-extqos`, and this module is ungated by
+/// design so that its members are unconditional and only their values are.
+/// A build without the feature writes `NoQos`, which is what it negotiated.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum QosAcceptState {
+    /// QoS was not negotiated.
+    #[default]
+    NoQos,
+    /// QoS was negotiated, with the band and class the merge settled on.
+    Qos {
+        /// The negotiated priority band, lowest priority value first, or
+        /// none when neither side declared one.
+        priorities: Option<(Priority, Priority)>,
+        /// The negotiated reliability class, or none when neither side
+        /// declared one.
+        reliability: Option<Reliability>,
+    },
+}
+
+impl QosAcceptState {
+    /// The tag byte for `NoQos`.
+    const NO_QOS: u8 = 0;
+    /// The tag byte for `Qos`.
+    const QOS: u8 = 1;
+
+    /// QoS negotiated with neither a band nor a class declared — the whole
+    /// state of a build that negotiates the capability without
+    /// `session-extqos`.
+    pub const BARE: Self = Self::Qos {
+        priorities: None,
+        reliability: None,
+    };
+
+    /// Whether QoS was negotiated at all.
+    pub fn negotiated(&self) -> bool {
+        matches!(self, Self::Qos { .. })
+    }
+}
+
+impl AcceptState for QosAcceptState {
+    /// Tag, band presence, band start, band end, class presence, class.
+    const WIDTH: usize = 6;
+
+    fn encode<S: SceSink>(&self, sink: &mut S) -> Result<(), CodecError> {
+        // Every byte is written whatever the arm, so the width does not
+        // depend on the content -- the rule `PatchAcceptState::encode` states.
+        let (tag, priorities, reliability) = match *self {
+            Self::NoQos => (Self::NO_QOS, None, None),
+            Self::Qos {
+                priorities,
+                reliability,
+            } => (Self::QOS, priorities, reliability),
+        };
+        sink.write_u8(tag)?;
+        match priorities {
+            Some((start, end)) => {
+                sink.write_u8(1)?;
+                sink.write_u8(start.wire_byte())?;
+                sink.write_u8(end.wire_byte())?;
+            }
+            None => {
+                sink.write_u8(0)?;
+                sink.write_u8(0)?;
+                sink.write_u8(0)?;
+            }
+        }
+        match reliability {
+            Some(class) => {
+                sink.write_u8(1)?;
+                sink.write_u8(class as u8)
+            }
+            None => {
+                sink.write_u8(0)?;
+                sink.write_u8(0)
+            }
+        }
+    }
+
+    fn decode(cursor: &mut SceCursor<'_>) -> Result<Self, CodecError> {
+        let raw = cursor.peek_slice(Self::WIDTH)?;
+        let (tag, band_present, start, end, class_present, class) =
+            (raw[0], raw[1], raw[2], raw[3], raw[4], raw[5]);
+        cursor.advance(Self::WIDTH)?;
+        // TOTAL on every byte, for the reason `PatchAcceptState::decode` gives
+        // at length: the MAC refuses a payload this node did not write before
+        // any of this runs. `Priority::from_wire` and the class mapping are
+        // total already, so no byte needs an error this codec cannot name.
+        if tag == Self::NO_QOS {
+            return Ok(Self::NoQos);
+        }
+        Ok(Self::Qos {
+            priorities: (band_present != 0)
+                .then(|| (Priority::from_wire(start), Priority::from_wire(end))),
+            reliability: (class_present != 0)
+                .then(|| Reliability::from_reliable_bool(class == Reliability::Reliable as u8)),
+        })
+    }
 }
 
 flag_accept_state! {
@@ -428,12 +536,14 @@ mod tests {
     /// decode consumes exactly that, and the value survives. A per-type copy
     /// would let a new implementor be added with none of it checked.
     fn width_check<T: AcceptState + PartialEq + core::fmt::Debug>(state: T) -> usize {
-        let mut buf = [0u8; 8];
+        // Sized from the widest implementor rather than written down, so a
+        // member added to the group cannot outgrow the check silently.
+        let mut buf = [0u8; NegotiatedExtensions::WIDTH];
         let written = {
             let mut sink = SliceSink::new(&mut buf);
             state
                 .encode(&mut sink)
-                .expect("8 bytes fits every state here");
+                .expect("the group's width fits every state here");
             sink.position()
         };
         let mut cursor = SceCursor::new(&buf[..written]);
@@ -463,8 +573,9 @@ mod tests {
             width_check(PatchAcceptState(Some(0xFF))),
             PatchAcceptState::WIDTH
         );
-        assert_eq!(width_check(QosAcceptState(true)), QosAcceptState::WIDTH);
-        assert_eq!(width_check(QosAcceptState(false)), QosAcceptState::WIDTH);
+        for arm in qos_arms() {
+            assert_eq!(width_check(arm), QosAcceptState::WIDTH);
+        }
         assert_eq!(width_check(ShmAcceptState(true)), ShmAcceptState::WIDTH);
         assert_eq!(width_check(ShmAcceptState(false)), ShmAcceptState::WIDTH);
         assert_eq!(
@@ -500,7 +611,10 @@ mod tests {
         let base = NegotiatedExtensions::default();
         let cases = [
             NegotiatedExtensions {
-                qos: QosAcceptState(true),
+                qos: QosAcceptState::Qos {
+                    priorities: None,
+                    reliability: None,
+                },
                 ..base
             },
             NegotiatedExtensions {
@@ -532,8 +646,8 @@ mod tests {
     /// would satisfy every `width_check` call and carry nothing.
     ///
     /// ⚠ THE OTHER HALF OF THIS CLAIM IS COMPILE-TIME AND CANNOT BE A TEST:
-    /// that the four flag states are four TYPES, so a carrier cannot read one
-    /// into another's field. Substituting `QosAcceptState` for
+    /// that the flag states are distinct TYPES, so a carrier cannot read one
+    /// into another's field. Substituting `LowlatencyAcceptState` for
     /// `ShmAcceptState` does not compile, and a test asserting that would have
     /// to not compile either.
     #[test]
@@ -542,9 +656,9 @@ mod tests {
         let mut clear = [0u8; 4];
         let (s_len, c_len) = {
             let mut s = SliceSink::new(&mut set);
-            QosAcceptState(true).encode(&mut s).unwrap();
+            ShmAcceptState(true).encode(&mut s).unwrap();
             let mut c = SliceSink::new(&mut clear);
-            QosAcceptState(false).encode(&mut c).unwrap();
+            ShmAcceptState(false).encode(&mut c).unwrap();
             (s.position(), c.position())
         };
         assert_ne!(
@@ -552,6 +666,60 @@ mod tests {
             clear[..c_len],
             "a negotiated flag and a refused one must not share an encoding"
         );
+    }
+
+    /// Every distinguishable QoS outcome, including the two pairs a lossy
+    /// encoding would merge: QoS WITHOUT a band against no QoS at all, and a
+    /// declared best-effort class against no declared class.
+    fn qos_arms() -> [QosAcceptState; 6] {
+        [
+            QosAcceptState::NoQos,
+            QosAcceptState::Qos {
+                priorities: None,
+                reliability: None,
+            },
+            QosAcceptState::Qos {
+                priorities: Some((Priority::RealTime, Priority::Data)),
+                reliability: None,
+            },
+            QosAcceptState::Qos {
+                priorities: None,
+                reliability: Some(Reliability::BestEffort),
+            },
+            QosAcceptState::Qos {
+                priorities: None,
+                reliability: Some(Reliability::Reliable),
+            },
+            QosAcceptState::Qos {
+                priorities: Some((Priority::Control, Priority::Background)),
+                reliability: Some(Reliability::Reliable),
+            },
+        ]
+    }
+
+    /// R2777 — every QoS arm survives, and no two share an encoding.
+    ///
+    /// The pairwise check is what the round trip alone cannot give: an
+    /// encoding that wrote `Qos { None, None }` as the `NoQos` bytes would
+    /// round-trip each arm to ITSELF only if decode guessed right, and the
+    /// two are exactly the outcomes a bool used to fold together.
+    #[test]
+    fn every_qos_arm_survives_and_no_two_share_an_encoding() {
+        let mut seen: [[u8; QosAcceptState::WIDTH]; 6] = [[0; QosAcceptState::WIDTH]; 6];
+        for (i, arm) in qos_arms().into_iter().enumerate() {
+            assert_eq!(width_check(arm), QosAcceptState::WIDTH);
+            let mut sink = SliceSink::new(&mut seen[i]);
+            arm.encode(&mut sink).expect("fits");
+        }
+        for i in 0..seen.len() {
+            for j in (i + 1)..seen.len() {
+                assert_ne!(
+                    seen[i], seen[j],
+                    "QoS arms {i} and {j} share an encoding -- a rebuilt \
+                     acceptor could not tell them apart"
+                );
+            }
+        }
     }
 
     /// A flag state's cursor runs out rather than reading past its end.

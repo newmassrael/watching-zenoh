@@ -45,8 +45,11 @@
 //! own `MAX_ENCODED_BYTES` is 42 and a wz InitSyn may carry six extensions,
 //! against a cookie field the generated codec caps at
 //! `Option<S::Bytes<128>>` — a cap that is advisory on the Heap storage
-//! profile and HARD on the no-alloc Inline one. The outcome form is at most
-//! 35 bytes of payload plus a 16-byte tag.
+//! profile and HARD on the no-alloc Inline one. The outcome form's width is
+//! summed from its members, and `the_widest_cookie_fits_the_generated_field`
+//! holds the widest one under that cap — the number is measured there rather
+//! than written here, because a number written here went stale the first
+//! time a member widened (R2777).
 //!
 //! ## Where it is used (R2769, R2772, R2774)
 //!
@@ -253,6 +256,8 @@ mod tests {
         CompressionAcceptState, LowlatencyAcceptState, PatchAcceptState, QosAcceptState,
         ShmAcceptState,
     };
+    use crate::qos::Priority;
+    use crate::reliability::Reliability;
     use alloc::vec;
 
     fn key() -> SigningKey {
@@ -274,7 +279,12 @@ mod tests {
                 // transposition — both sides swapped — is a pure relabelling
                 // of a payload nothing off this node parses, and is correctly
                 // unobservable.)
-                qos: QosAcceptState(true),
+                // QoS carries a band AND a class here, so the widest QoS
+                // state is the one the round trip and the size check see.
+                qos: QosAcceptState::Qos {
+                    priorities: Some((Priority::RealTime, Priority::Data)),
+                    reliability: Some(Reliability::BestEffort),
+                },
                 shm: ShmAcceptState(false),
                 lowlatency: LowlatencyAcceptState(true),
                 compression: CompressionAcceptState(false),
@@ -436,7 +446,9 @@ mod tests {
         for flipped in [
             AcceptCookieState {
                 negotiated: NegotiatedExtensions {
-                    qos: QosAcceptState(!base.negotiated.qos.0),
+                    // The fixture negotiates QoS with a band, so the flip is
+                    // to no QoS at all.
+                    qos: QosAcceptState::NoQos,
                     ..base.negotiated
                 },
                 ..state()
