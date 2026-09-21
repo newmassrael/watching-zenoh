@@ -1229,6 +1229,14 @@ pub mod storage_volume;
 #[cfg(feature = "storage-backend")]
 pub mod storage_config;
 
+/// R2785 — the §5.23 `adminspace-config-hotreload` DECLARATIVE input: the
+/// storage manager's `plugins.storage_manager` document read the way upstream's
+/// `PluginConfig` reader reads it, and upstream's `ConfigDiff` between two of
+/// them. The base a startup config and a runtime config write share; the host
+/// holding the storage manager applies the diffs.
+#[cfg(feature = "adminspace-config-hotreload")]
+pub mod storage_plugin_config;
+
 /// R311y57 — the §5.24 `storage-mgr-multi-storage-host` atom: the
 /// [`storage_manager::StorageManager`] that hosts N named storages over a registry
 /// of named [`storage_volume::Volume`]s, creating each backend from its
