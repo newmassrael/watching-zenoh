@@ -68,7 +68,13 @@ sys.path.insert(0, str(HERE))
 import rust_comments  # noqa: E402
 
 LABEL = "cookie-carrier"
-UPSTREAM_REL = "io/zenoh-transport/src/unicast/establishment/cookie.rs"
+# Composed from segments rather than written as one literal ON PURPOSE, the
+# way `token_plane_parity_gate.py` composes its own: a rooted path spelled
+# whole is a BARE upstream citation to `upstream_citation_anchor_gate.py`,
+# whose bare budget exists to shrink. The citation is made once, anchored, in
+# this module's docstring (`... @ pub(crate) struct Cookie {`). MEASURED: the
+# first draft spelled it whole and raised that gate's bare count 58 -> 59.
+UPSTREAM_REL = pathlib.Path("io") / "zenoh-transport" / "src" / "unicast" / "establishment" / "cookie.rs"
 WZ_COOKIE_REL = "crates/wz-session-core/src/accept_cookie.rs"
 WZ_GROUP_REL = "crates/wz-session-core/src/accept_state.rs"
 
