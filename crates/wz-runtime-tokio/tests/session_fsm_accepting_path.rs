@@ -354,11 +354,10 @@ async fn r86_send_init_ack_with_cookie_binds_to_inbound_peer_zid() {
         QueueDriver::with(vec![LinkEvent::Rx(RxFrame::new(craft_initsyn_wire()))]);
     let _ = poll_and_dispatch_one(&mut queue_driver, &actions, &mut engine).await;
     assert_eq!(engine.get_current_state(), S::SentInitAck);
-    assert_eq!(
-        actions.inbound_peer_zid.lock().unwrap().as_deref(),
-        Some(&FIXTURE_PEER_ZID[..]),
-        "InitSyn dispatch must capture peer_zid before SentInitAck.onentry fires"
-    );
+    // R2782 — "the InitSyn dispatch captured the zid before the mint" is
+    // asserted on the COOKIE below (`carried.peer_zid`), not on the slot: the
+    // slot is released once the InitAck is out, as the rest of the cookie's
+    // head is, so reading it here would pin the hold that round removed.
 
     // The InitAck wire was just sent through the recording driver.
     let sends = recording_driver.sent.lock().unwrap().clone();
@@ -876,6 +875,224 @@ async fn the_peer_region_rides_the_cookie_between_init_ack_and_open_syn() {
         actions.peer_region(),
         Some(region),
         "the admitted OpenSyn puts back the region the cookie carried"
+    );
+}
+
+/// R2782 — the cookie's HEAD rides it: the peer's zid, its role and its
+/// sizing caps. Between InitAck and OpenSyn the acceptor holds none of the
+/// four slots they live in, and the admitted OpenSyn puts back exactly what
+/// the InitSyn announced -- read off the InitSyn's own bytes, not restated.
+///
+/// The two sides announce DIFFERENT rings on purpose, the acceptor 32-bit and
+/// the initiator 8-bit, so the negotiated ring is the peer's. The RX SN seed
+/// reads that ring, and one run before the restore would read the acceptor's
+/// own advertisement instead and leave a different baseline -- which is what
+/// the last assertion tells apart.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_cookie_head_rides_between_init_ack_and_open_syn() {
+    use wz_runtime_tokio::session_glue::{parse_inbound, InboundFrame, WhatAmI};
+    use wz_session_core::sn::{mask_from_res, RxConduits};
+
+    // A real wz initiator's InitSyn, with an identity, a role and caps that
+    // are all unlike the acceptor's.
+    let initiator_wire = Arc::new(RecordingOutboundDriver::default());
+    let initiator_out: Arc<dyn BoxedLinkDriver + Send + Sync> = initiator_wire.clone();
+    let mut initiator_params = fixture_session_init_params();
+    initiator_params.zid = vec![0x5A; 4];
+    initiator_params.whatami = WhatAmI::Client;
+    initiator_params.seq_num_res = 0;
+    initiator_params.req_id_res = 1;
+    initiator_params.batch_size = 2048;
+    let initiator = new_session_actions(initiator_out, initiator_params, TokioTime::new());
+    let mut initiator_engine = new_session_engine(&initiator);
+    initiator_engine.initialize();
+    initiator_engine.process_event(E::OutboundStart);
+    initiator_engine.process_event(E::LinkOpened);
+    let init_syn = initiator_wire
+        .sent
+        .lock()
+        .unwrap()
+        .first()
+        .cloned()
+        .expect("the initiator sent its InitSyn");
+    let announced = match parse_inbound(&init_syn).expect("the InitSyn parses") {
+        InboundFrame::Init {
+            is_ack: false,
+            body,
+            ..
+        } => body,
+        _ => panic!("the initiator's first frame is an InitSyn"),
+    };
+
+    // The acceptor, on a WIDER ring than the initiator announces.
+    let recording = Arc::new(RecordingOutboundDriver::default());
+    let outbound: Arc<dyn BoxedLinkDriver + Send + Sync> = recording.clone();
+    let mut params = fixture_session_init_params();
+    params.seq_num_res = 2;
+    let actions = new_session_actions(outbound, params, TokioTime::new());
+    let mut engine = new_session_engine(&actions);
+    engine.initialize();
+    engine.process_event(E::InboundStart);
+    let mut driver = QueueDriver::with(vec![LinkEvent::Rx(RxFrame::new(init_syn))]);
+    let _ = poll_and_dispatch_one(&mut driver, &actions, &mut engine).await;
+    assert_eq!(engine.get_current_state(), S::SentInitAck);
+
+    let cookie = minted_cookie(&recording.sent.lock().unwrap().clone());
+    let carried = decode_accept_cookie(&fixture_session_init_params().cookie_signing_key, &cookie)
+        .expect("the acceptor's own cookie verifies");
+    assert_eq!(
+        carried.peer_zid,
+        announced.zid.as_slice(),
+        "the head carries the zid"
+    );
+    assert_eq!(carried.peer_whatami, announced.whatami(), "and the role");
+    assert_eq!(
+        PeerInitCaps::from_init_body(Some(carried.sn_res), Some(carried.batch_size)),
+        PeerInitCaps::from_init_body(announced.sn_res, announced.batch_size),
+        "and the sizing caps the InitSyn announced"
+    );
+
+    assert_eq!(
+        actions.peer_zid(),
+        None,
+        "after the InitAck: no routing zid"
+    );
+    assert!(
+        actions.inbound_peer_zid.lock().unwrap().is_none(),
+        "no accept-side zid"
+    );
+    assert_eq!(actions.peer_whatami_wire(), None, "no role");
+    assert!(
+        actions.inbound_peer_init_caps.lock().unwrap().is_none(),
+        "no caps -- all four are in the cookie"
+    );
+
+    let mut driver = QueueDriver::with(vec![LinkEvent::Rx(RxFrame::new(craft_opensyn_wire(
+        &cookie,
+    )))]);
+    let _ = poll_and_dispatch_one(&mut driver, &actions, &mut engine).await;
+    assert_eq!(engine.get_current_state(), S::Established);
+
+    let zid = announced.zid.as_slice().to_vec();
+    assert_eq!(
+        actions.peer_zid(),
+        Some(zid.clone()),
+        "the routing zid is back"
+    );
+    assert_eq!(
+        *actions.inbound_peer_zid.lock().unwrap(),
+        Some(zid),
+        "the accept-side zid is back"
+    );
+    assert_eq!(
+        actions.peer_whatami_wire(),
+        Some(announced.whatami()),
+        "the role is back"
+    );
+    assert_eq!(
+        *actions.inbound_peer_init_caps.lock().unwrap(),
+        Some(PeerInitCaps::from_init_body(
+            announced.sn_res,
+            announced.batch_size
+        )),
+        "the caps are back"
+    );
+
+    // The seed read the RESTORED ring. `craft_opensyn_wire` announces
+    // initial_sn 0.
+    let negotiated = actions.negotiated_sn_mask();
+    assert_ne!(
+        negotiated,
+        mask_from_res(2),
+        "ANTI-VACUITY: the negotiated ring must differ from the acceptor's own, \
+         or a seed that read the wrong one would pass"
+    );
+    let mut expected = RxConduits::default();
+    expected.seed(negotiated, 0);
+    assert_eq!(
+        *actions.rx_sn.lock().unwrap(),
+        expected,
+        "the RX baseline is one before initial_sn on the NEGOTIATED ring"
+    );
+}
+
+/// R2782 — the OpenSyn that admitted a session admits NOTHING after it.
+///
+/// MEASURED before the fix, through this same drive: a replay of the
+/// admitting OpenSyn after `Established` passed `cookie_valid` (the nonce
+/// was still in its slot), reset the RX SN baseline, and a frame the session
+/// had already delivered was delivered again. The parse step also took the
+/// replay's lease. Upstream's nonce lives on one call's stack, so its second
+/// OpenSyn has nothing to match; the nonce is now spent by the OpenSyn it
+/// admits, and the seed and the lease wait for admission.
+///
+/// The replay carries a DIFFERENT lease from the admitted one, so "the lease
+/// did not move" is a claim about the replay and not about two equal values.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_replayed_open_syn_after_established_is_not_admitted() {
+    use wz_codecs::wire_const::T_MID_OPEN;
+    use wz_runtime_tokio::session_glue::DriverLoopOutcome;
+    use wz_session_wire_fixtures::craft_frame_wire;
+
+    let (actions, mut engine, recording) = fresh_setup_recording();
+    engine.process_event(E::InboundStart);
+    let mut driver = QueueDriver::with(vec![LinkEvent::Rx(RxFrame::new(craft_initsyn_wire()))]);
+    let _ = poll_and_dispatch_one(&mut driver, &actions, &mut engine).await;
+    let cookie = minted_cookie(&recording.sent.lock().unwrap().clone());
+    let mut driver = QueueDriver::with(vec![LinkEvent::Rx(RxFrame::new(craft_opensyn_wire(
+        &cookie,
+    )))]);
+    let _ = poll_and_dispatch_one(&mut driver, &actions, &mut engine).await;
+    assert_eq!(engine.get_current_state(), S::Established);
+
+    for sn in [0u64, 1] {
+        let mut driver = QueueDriver::with(vec![LinkEvent::Rx(RxFrame::new(craft_frame_wire(
+            sn, true,
+        )))]);
+        let outcome = poll_and_dispatch_one(&mut driver, &actions, &mut engine).await;
+        assert!(
+            matches!(outcome, DriverLoopOutcome::FramePayload { .. }),
+            "frame {sn} is delivered; got {outcome:?}"
+        );
+    }
+    let rx_before = actions.rx_sn.lock().unwrap().clone();
+    let lease_before = *actions.peer_open_lease_ms.lock().unwrap();
+
+    // The same cookie, a different lease (VLE 5, where the admitted one
+    // announced 0).
+    let mut replay = vec![T_MID_OPEN, 0x05, 0x00, cookie.len() as u8];
+    replay.extend_from_slice(&cookie);
+    let mut driver = QueueDriver::with(vec![LinkEvent::Rx(RxFrame::new(replay))]);
+    let outcome = poll_and_dispatch_one(&mut driver, &actions, &mut engine).await;
+    assert!(
+        matches!(outcome, DriverLoopOutcome::SideEffectOnly),
+        "the replay is dropped at admission; got {outcome:?}"
+    );
+    assert_eq!(engine.get_current_state(), S::Established);
+
+    // Behaviour first, the state that explains it after: an assertion on a
+    // slot placed first would red a control before the consequence is seen.
+    let mut driver =
+        QueueDriver::with(vec![LinkEvent::Rx(RxFrame::new(craft_frame_wire(1, true)))]);
+    let outcome = poll_and_dispatch_one(&mut driver, &actions, &mut engine).await;
+    assert!(
+        matches!(outcome, DriverLoopOutcome::RxSnRejected { .. }),
+        "the already-delivered frame 1 is a duplicate and stays one; got {outcome:?}"
+    );
+    assert_eq!(
+        *actions.rx_sn.lock().unwrap(),
+        rx_before,
+        "the replay did not move the RX baseline"
+    );
+    assert_eq!(
+        *actions.peer_open_lease_ms.lock().unwrap(),
+        lease_before,
+        "nor the peer lease"
+    );
+    assert_eq!(
+        actions.cookie_nonce(),
+        None,
+        "because the admitting OpenSyn spent the nonce"
     );
 }
 

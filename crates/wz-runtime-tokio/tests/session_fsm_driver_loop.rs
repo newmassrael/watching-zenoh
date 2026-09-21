@@ -1138,3 +1138,71 @@ async fn r2389_an_established_session_still_closes_session_scoped() {
          and this round does not move it",
     );
 }
+
+/// R2782 — the initiator's twin of the acceptor's spent nonce: the OpenAck
+/// that completed a handshake admits NOTHING after it.
+///
+/// MEASURED before the fix, through this same drive: a replay of the
+/// OpenAck after `Established` reset the RX SN baseline -- the parse step
+/// applied every OpenAck's `initial_sn` -- and a frame the session had
+/// already delivered was delivered again. An OpenAck is now admitted only
+/// while one is awaited, from the OpenSyn send to the OpenAck it asks for.
+///
+/// The replay announces a different `initial_sn`, so "the baseline did not
+/// move" is a claim about the replay and not about two equal seeds.
+#[cfg(all(feature = "session-unicast-open", feature = "codec-open-body"))]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_replayed_open_ack_after_established_is_not_admitted() {
+    use wz_session_wire_fixtures::{craft_frame_wire, craft_openack_wire};
+
+    let (actions, mut engine) = fresh_setup();
+    drive_to_sent_init_syn(&mut engine);
+    let mut driver = QueueDriver::with(vec![LinkEvent::Rx(RxFrame::new(craft_initack_wire(
+        &[0x11; 8],
+    )))]);
+    let _ = poll_and_dispatch_one(&mut driver, &actions, &mut engine).await;
+    assert!(
+        actions.open_ack_awaited(),
+        "the OpenSyn is out, so an OpenAck is awaited"
+    );
+    let mut driver = QueueDriver::with(vec![LinkEvent::Rx(RxFrame::new(craft_openack_wire(0)))]);
+    let _ = poll_and_dispatch_one(&mut driver, &actions, &mut engine).await;
+    assert_eq!(engine.get_current_state(), S::Established);
+
+    for sn in [0u64, 1] {
+        let mut driver = QueueDriver::with(vec![LinkEvent::Rx(RxFrame::new(craft_frame_wire(
+            sn, true,
+        )))]);
+        let outcome = poll_and_dispatch_one(&mut driver, &actions, &mut engine).await;
+        assert!(
+            matches!(outcome, DriverLoopOutcome::FramePayload { .. }),
+            "frame {sn} is delivered; got {outcome:?}"
+        );
+    }
+    let rx_before = actions.rx_sn.lock().unwrap().clone();
+
+    let mut driver = QueueDriver::with(vec![LinkEvent::Rx(RxFrame::new(craft_openack_wire(1)))]);
+    let outcome = poll_and_dispatch_one(&mut driver, &actions, &mut engine).await;
+    assert!(
+        matches!(outcome, DriverLoopOutcome::SideEffectOnly),
+        "the replay is dropped at admission; got {outcome:?}"
+    );
+    assert_eq!(engine.get_current_state(), S::Established);
+
+    let mut driver =
+        QueueDriver::with(vec![LinkEvent::Rx(RxFrame::new(craft_frame_wire(1, true)))]);
+    let outcome = poll_and_dispatch_one(&mut driver, &actions, &mut engine).await;
+    assert!(
+        matches!(outcome, DriverLoopOutcome::RxSnRejected { .. }),
+        "the already-delivered frame 1 is a duplicate and stays one; got {outcome:?}"
+    );
+    assert_eq!(
+        *actions.rx_sn.lock().unwrap(),
+        rx_before,
+        "the replay did not move the RX baseline"
+    );
+    assert!(
+        !actions.open_ack_awaited(),
+        "because the admitted OpenAck ended the wait"
+    );
+}

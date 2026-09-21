@@ -1040,25 +1040,44 @@ fn r311td_peer_whatami_captures_the_remote_role_both_directions() {
     );
 }
 
-/// R311kv — handle_inbound captures the peer's OPEN-advertised lease
-/// into `peer_open_lease_ms` (pico adopts it at the same arrival
-/// points, unicast/transport.c:193/269). The wire rides the R311ku
-/// compact seconds form (7000ms -> T=1 + VLE 7), so this also pins the
-/// full chain: encode compacts -> parse projects back -> capture is ms.
-#[test]
-fn inbound_openack_captures_peer_advertised_lease_ms() {
+/// R311kv — the peer's OPEN-advertised lease lands in `peer_open_lease_ms`
+/// (pico adopts it at the same arrival points, unicast/transport.c:193/269).
+/// The wire rides the R311ku compact seconds form (7000ms -> T=1 + VLE 7),
+/// so this also pins the full chain: encode compacts -> parse projects back
+/// -> capture is ms.
+///
+/// R2782 — driven through the initiator's handshake. The capture is the
+/// ADMITTED OpenAck's, and an OpenAck is admitted only while one is awaited:
+/// a parse alone takes nothing, which is what stops a replayed OpenAck after
+/// `Established` from rewriting the lease.
+#[cfg(all(feature = "session-unicast-open", feature = "codec-open-body"))]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn inbound_openack_captures_peer_advertised_lease_ms() {
+    use wz_runtime_tokio::session_glue::poll_and_dispatch_one;
+    use wz_runtime_tokio::{LinkEvent, RxFrame};
+    use wz_runtime_tokio_test_support::QueueDriver;
+
     let driver: Arc<dyn BoxedLinkDriver + Send + Sync> = Arc::new(NoopDriver::default());
     let actions = new_session_actions(driver, fixture_session_init_params(), TokioTime::new());
+    let mut engine = new_session_engine(&actions);
+    engine.initialize();
+    engine.process_event(SessionFsmUnicastEvent::OutboundStart);
+    engine.process_event(SessionFsmUnicastEvent::LinkOpened);
     assert_eq!(*actions.peer_open_lease_ms.lock().unwrap(), None);
 
     let mut peer_params = fixture_session_init_params();
     peer_params.lease_ms = 7_000;
-    let wire = wz_session_core::handshake_encode::encode_open(&peer_params, true, None, &[])
+    let open_ack = wz_session_core::handshake_encode::encode_open(&peer_params, true, None, &[])
         .expect("synthetic OpenAck encodes");
 
-    actions
-        .handle_inbound(&wire)
-        .expect("handle_inbound on synthetic OpenAck");
+    for wire in [craft_initack_wire(&[0x11; 8]), open_ack] {
+        let mut queue = QueueDriver::with(vec![LinkEvent::Rx(RxFrame::new(wire))]);
+        let _ = poll_and_dispatch_one(&mut queue, &actions, &mut engine).await;
+    }
+    assert_eq!(
+        engine.get_current_state(),
+        SessionFsmUnicastState::Established
+    );
     assert_eq!(
         *actions.peer_open_lease_ms.lock().unwrap(),
         Some(7_000),

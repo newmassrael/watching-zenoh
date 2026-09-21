@@ -3375,13 +3375,40 @@ mod rx_sn_gate_tests {
     use wz_runtime_tokio_test_support::fixture_session_init_params;
     use wz_session_wire_fixtures::craft_openack_wire;
 
+    /// R2782 — driven through the initiator's own handshake, not a bare
+    /// parse. The seed is the ADMITTED OpenAck's (`admit_open_ack`), and an
+    /// OpenAck is admitted only while the initiator awaits one -- after its
+    /// OpenSyn is out -- so a parse alone no longer seeds anything, which is
+    /// the fix: a replayed OpenAck after `Established` used to.
+    ///
+    /// Through the synchronous dispatch core `poll_and_dispatch_one` wraps,
+    /// because inside this crate's own tests the test-support driver
+    /// implements the OTHER copy of `LinkDriver` (the support crate depends
+    /// on this one, so the graph holds two); the core takes the event itself.
+    #[cfg(all(feature = "session-unicast-open", feature = "codec-init-body"))]
     #[test]
     fn openack_initial_sn_seeds_rx_gate() {
+        use crate::session_fsm_unicast::SessionFsmUnicastEvent as E;
+        use wz_session_wire_fixtures::craft_initack_wire;
+
         let (actions, _driver) =
             crate::test_fixtures::recording_actions_with_params(fixture_session_init_params());
-        actions
-            .handle_inbound(&craft_openack_wire(5))
-            .expect("parse OpenAck");
+        let mut engine = super::new_session_engine(&actions);
+        engine.initialize();
+        engine.process_event(E::OutboundStart);
+        engine.process_event(E::LinkOpened);
+        for wire in [craft_initack_wire(&[0x11; 8]), craft_openack_wire(5)] {
+            let _ = super::dispatch_link_event(
+                crate::LinkEvent::Rx(crate::RxFrame::new(wire)),
+                &actions,
+                &mut engine,
+            );
+        }
+        assert_eq!(
+            engine.get_current_state(),
+            crate::session_fsm_unicast::SessionFsmUnicastState::Established,
+            "the handshake completed, so the OpenAck was the admitted one"
+        );
         assert!(
             !actions.admit_rx_frame_sn(wz_session_core::qos::Priority::DEFAULT, true, 4),
             "a frame BEFORE the announced initial_sn is stale"

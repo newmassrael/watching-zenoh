@@ -61,11 +61,12 @@
 //! `io/zenoh-transport/src/unicast/establishment/cookie.rs` @ `pub(crate) struct Cookie {`.
 //! Against that struct four things remained. R2779 closed the auth states
 //! (the usrpwd nonce and the pubkey challenge ride `AuthAcceptState`) and
-//! R2780 the peer's announced region name (`RegionAcceptState`). Two
-//! remain, held by the objects that own them: the multilink public key with
-//! its challenge, and the cookie's head fields, which ride the cookie but
-//! are also still kept in their slots. Upstream's shm accept state is EMPTY,
-//! so shm is not among them —
+//! R2780 the peer's announced region name (`RegionAcceptState`), and R2782
+//! the cookie's head -- the peer's zid, role and sizing caps, which rode the
+//! cookie already and are now let go after InitAck as well. One remains,
+//! held by the object that owns it: the multilink public key with its
+//! challenge. Upstream's shm accept state is EMPTY, so shm is not among
+//! them —
 //! `io/zenoh-transport/src/unicast/establishment/ext/shm/auth.rs` @ `pub(crate) type StateAccept = StateOpen;`
 //! and its codec writes nothing.
 

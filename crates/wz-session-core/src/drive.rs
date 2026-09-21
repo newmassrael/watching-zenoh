@@ -315,6 +315,10 @@ fn dispatch_unit<R: SessionRuntime, T: TimeSource>(
                         actions.half_open_cap_available() && actions.accept_rate_token()
                     }
                     E::OpenSynReceived => actions.cookie_valid(),
+                    // R2782 — the initiator's twin: an OpenAck is admitted
+                    // only while one is awaited. A replay after
+                    // `Established` was measured to reset the RX baseline.
+                    E::OpenAckReceived => actions.open_ack_awaited(),
                     _ => true,
                 };
                 if !admit {
@@ -341,9 +345,30 @@ fn dispatch_unit<R: SessionRuntime, T: TimeSource>(
                 // Init frame, while this restores an OUTCOME already
                 // negotiated in this handshake. A restore that ran after a
                 // merge would be overwriting the newer answer with the older.
-                #[cfg(all(feature = "codec-open-body", feature = "session-unicast-accept"))]
-                if let InboundFrame::Open { is_ack: false, .. } = &frame {
-                    actions.restore_accept_state_from_cookie();
+                //
+                // R2782 — and everything else an admitted OpenSyn does, in
+                // one call and upstream's order: the restore, spending the
+                // nonce that admitted it, then the RX SN seed and the peer
+                // lease on the rebuilt state. The seed and the lease used to
+                // run at PARSE time, on any OpenSyn -- before the caps they
+                // read were back (they ride the cookie's head now), and on
+                // frames never admitted; and an unspent nonce let a replay of
+                // this very OpenSyn be admitted again after `Established`.
+                #[cfg(feature = "codec-open-body")]
+                if let InboundFrame::Open {
+                    is_ack: false,
+                    body,
+                    ..
+                } = &frame
+                {
+                    actions.admit_open_syn(body.lease, body.initial_sn);
+                }
+                #[cfg(feature = "codec-open-body")]
+                if let InboundFrame::Open {
+                    is_ack: true, body, ..
+                } = &frame
+                {
+                    actions.admit_open_ack(body.lease, body.initial_sn);
                 }
                 // R311y578 — take the `min(local, peer)` protocol PATCH
                 // level off every admitted Init frame (zenoh-pico

@@ -620,8 +620,8 @@ pub struct SessionCore<R: SessionRuntime, T: TimeSource> {
     pub inbound_cookie: R::Mutex<Option<Vec<u8>>>,
     /// R311kv — the lease window the peer advertised in its OPEN body
     /// (milliseconds; `parse_inbound` already projected the wire T-flag
-    /// seconds form back, R311ku). Captured by [`Self::handle_inbound`]
-    /// from BOTH OpenSyn (accepting side) and OpenAck (initiating side)
+    /// seconds form back, R311ku). Captured from BOTH OpenSyn (accepting
+    /// side) and OpenAck (initiating side)
     /// — zenoh-pico adopts `min(advertised, Z_TRANSPORT_LEASE)` at the
     /// same two arrival points (unicast/transport.c:193/269) and expires
     /// the session by it (unicast/lease.c:147). wz stores the raw
@@ -630,7 +630,24 @@ pub struct SessionCore<R: SessionRuntime, T: TimeSource> {
     /// params.lease_ms)`) — the same store-raw / cap-at-check split as
     /// the multicast per-peer sweep (R311ks). `None` pre-OPEN: the local
     /// window governs alone.
+    ///
+    /// R2782 — captured once the Open frame is ADMITTED
+    /// (`SessionLinkActions::admit_open_syn` / `admit_open_ack`; code spans,
+    /// because a field doc's `Self` is this struct, which has neither), no
+    /// longer at parse time: a replayed Open frame after `Established` used
+    /// to rewrite it.
     pub peer_open_lease_ms: R::Mutex<Option<u64>>,
+    /// R2782 — whether this initiator has sent its OpenSyn and not yet taken
+    /// an OpenAck: the one window in which an OpenAck means anything.
+    ///
+    /// The initiator's twin of the acceptor's spent cookie nonce. Upstream's
+    /// opener awaits exactly one OpenAck after its OpenSyn, inside one call,
+    /// and a second has no reader. wz's parse step used to apply every
+    /// OpenAck's `initial_sn` and lease, so a replay after `Established`
+    /// was MEASURED to reset the RX SN baseline and re-deliver a frame the
+    /// session had already delivered. Set by the OpenSyn send, read by the
+    /// admission predicate, cleared by the admission it grants.
+    pub awaiting_open_ack: R::Mutex<bool>,
     /// R294 — monotonic clock shared with the surrounding
     /// drive_session loop. `TokioTime` is `Copy + Clone` (R263), so
     /// every field that needs a `now_monotonic_ms()` read holds a
@@ -721,6 +738,13 @@ pub struct SessionCore<R: SessionRuntime, T: TimeSource> {
     /// host that supplied it is the one positioned to refresh it. See
     /// [`Self::refresh_cookie_nonce`] for what an acceptor-role re-handshake
     /// owes.
+    ///
+    /// R2782 — and it is SPENT by the OpenSyn it admits
+    /// (`SessionLinkActions::admit_open_syn`), so it binds exactly one:
+    /// upstream's is a value its accept path carries from `send_init_ack` into
+    /// `recv_open_syn` and then drops. A nonce that stayed let a replay of
+    /// the admitting OpenSyn be admitted again after `Established`. The next
+    /// handshake draws its own at InitAck, or has it refreshed out of band.
     pub cookie_nonce: R::Mutex<Option<u64>>,
     /// R2763 — the entropy SOURCE the acceptor re-draws `cookie_nonce` from on
     /// every InitAck it mints.
@@ -1785,6 +1809,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                 trace: R::new_mutex(ActionTrace::default()),
                 inbound_cookie: R::new_mutex(None::<Vec<u8>>),
                 peer_open_lease_ms: R::new_mutex(None::<u64>),
+                awaiting_open_ack: R::new_mutex(false),
                 clock,
                 inbound_peer_zid: R::new_mutex(None::<Vec<u8>>),
                 remote_peer_zid: R::new_mutex(None::<Vec<u8>>),
@@ -2270,6 +2295,11 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// advertisement applies — handshake frames carry no SN, so every data
     /// mint and reassembly compare runs after the slot is populated; the
     /// fallback only keeps the accessor total.
+    ///
+    /// R2782 — on the accepting side the slot is EMPTY again between InitAck
+    /// and OpenSyn (the caps ride the cookie's head), so the fallback is what
+    /// this returns in that window. Nothing that needs the negotiated ring
+    /// runs there: the acceptor's RX SN seed waits for the restore.
     pub fn negotiated_sn_mask(&self) -> u64 {
         let peer = R::with_mutex_mut(&self.inbound_peer_init_caps, |slot| *slot);
         let res = match peer {
@@ -2975,8 +3005,46 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             Ok(c) => c,
             Err(_) => return false,
         };
+        // R2782 — the HEAD first, then the extensions: both are this
+        // handshake's outcome, and the head is what the RX SN seed that
+        // follows the restore reads.
+        self.install_accept_head(Some(&carried));
         self.install_negotiated(carried.negotiated);
         true
+    }
+
+    /// R2782 — write the cookie HEAD's slots, all of them, from one value:
+    /// `None` releases them after InitAck, `Some` puts back what the echoed
+    /// cookie carried at OpenSyn.
+    ///
+    /// Upstream's cookie head is `zid`, `whatami`, `resolution` and
+    /// `batch_size` —
+    /// `io/zenoh-transport/src/unicast/establishment/cookie.rs` @ `pub(crate) zid: ZenohIdProto,`
+    /// — and its acceptor holds none of them between InitAck and OpenSyn: the
+    /// state `send_init_ack` consumed is gone, and `recv_open_syn` rebuilds
+    /// from the cookie. wz keeps those four facts in four slots, one of them
+    /// twice: the peer's zid is both the accept-side `inbound_peer_zid` and
+    /// the role-agnostic routing `remote_peer_zid`, and both are the same
+    /// value off the same InitSyn, so both go and both come back.
+    ///
+    /// The caps come back through the same decoder the InitSyn went through:
+    /// the cookie holds the peer's advertisement as the byte it sent
+    /// (`sn_res_byte`) and its batch size, and `from_init_body` on those is
+    /// the value the slot held. The reopen reset clears these slots too, for
+    /// every role; this writer is the accept boundary's alone, which is why
+    /// it is gated as that boundary is.
+    #[cfg(all(
+        feature = "session-unicast-accept",
+        any(feature = "codec-init-body", feature = "codec-open-body")
+    ))]
+    fn install_accept_head(&self, head: Option<&crate::accept_cookie::AcceptCookieState>) {
+        let zid = head.map(|h| h.peer_zid.clone());
+        R::with_mutex_mut(&self.inbound_peer_zid, |s| *s = zid.clone());
+        R::with_mutex_mut(&self.remote_peer_zid, |s| *s = zid);
+        R::with_mutex_mut(&self.peer_whatami, |s| *s = head.map(|h| h.peer_whatami));
+        R::with_mutex_mut(&self.inbound_peer_init_caps, |s| {
+            *s = head.map(|h| PeerInitCaps::from_init_body(Some(h.sn_res), Some(h.batch_size)))
+        });
     }
 
     /// R3b — run `f` against the auth dispatch under its mutex. The recv-stage
@@ -4592,6 +4660,79 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         self.handle_inbound_consuming(bytes).map(|(frame, _)| frame)
     }
 
+    /// R311ke — seed the RX SN gate baselines from the peer's announced
+    /// `initial_sn` (peer.c:212-214: both channels one before, so the first
+    /// frame at `initial_sn` passes), on the ring the negotiated caps give.
+    /// Sequential mutex scopes (`negotiated_sn_mask` takes
+    /// `inbound_peer_init_caps`), never nested.
+    ///
+    /// R2782 — called by the two admissions, [`Self::admit_open_syn`] and
+    /// [`Self::admit_open_ack`], and by nothing at parse time.
+    #[cfg(feature = "codec-open-body")]
+    pub(crate) fn seed_rx_sn(&self, initial_sn: u64) {
+        let mask = self.negotiated_sn_mask();
+        R::with_mutex_mut(&self.rx_sn, |s| s.seed(mask, initial_sn));
+    }
+
+    /// R2782 — everything an ADMITTED OpenSyn does to the acceptor, in one
+    /// place and in upstream's order: rebuild the handshake's state from the
+    /// cookie, spend the nonce that admitted it, then take the peer's
+    /// `initial_sn` and lease on the rebuilt state.
+    ///
+    /// Upstream's `recv_open_syn` checks the cookie's nonce against the one
+    /// its driver carried out of `send_init_ack`, rebuilds from the cookie,
+    /// and only then reads the OpenSyn's lease and `initial_sn` —
+    /// `io/zenoh-transport/src/unicast/establishment/accept.rs` @ `// Rebuild the state from the cookie`.
+    /// Its nonce is a value on that one call's stack, so a second OpenSyn has
+    /// nothing to match. wz's lives in a slot, and MEASURED at R2782: a
+    /// replay of the admitting OpenSyn after `Established` was admitted
+    /// again, reset the RX SN baseline, and a frame the session had already
+    /// delivered was delivered a second time. Spending the nonce here is
+    /// what makes the slot behave like the stack value -- the next handshake
+    /// draws its own at InitAck ([`Self::draw_cookie_nonce`]).
+    #[cfg(feature = "codec-open-body")]
+    pub(crate) fn admit_open_syn(&self, lease: u64, initial_sn: u64) {
+        #[cfg(feature = "session-unicast-accept")]
+        {
+            self.restore_accept_state_from_cookie();
+            R::with_mutex_mut(&self.cookie_nonce, |slot| *slot = None);
+        }
+        // R311ke — the peer's announced initial_sn seeds the RX gate on the
+        // ring the restored caps give (peer.c:212-214).
+        self.seed_rx_sn(initial_sn);
+        // R311kv — the peer's advertised lease (ms, R311ku boundary
+        // projection) for the deadline comparator's min(); pico adopts it at
+        // OpenSyn arrival (unicast/transport.c:269), which on its accept path
+        // is after the cookie is judged.
+        R::with_mutex_mut(&self.peer_open_lease_ms, |slot| *slot = Some(lease));
+    }
+
+    /// R2782 — the initiator's admission predicate for an OpenAck: one is
+    /// awaited only between sending the OpenSyn and taking an OpenAck. A
+    /// question, so it only reads; `admit_open_ack` (crate-private, so a
+    /// code span rather than a link) is the answer's side effect.
+    pub fn open_ack_awaited(&self) -> bool {
+        R::with_mutex_mut(&self.awaiting_open_ack, |s| *s)
+    }
+
+    /// R2782 — everything an ADMITTED OpenAck does to the initiator: stop
+    /// awaiting one, then take the acceptor's `initial_sn` and lease. The
+    /// mirror of [`Self::admit_open_syn`], and applied for the same reason:
+    /// at parse time these ran on every OpenAck, and a replay after
+    /// `Established` reset the RX SN baseline (MEASURED at R2782). The
+    /// initiator's caps come off the InitAck and are held, so its seed has
+    /// nothing to wait for but admission.
+    #[cfg(feature = "codec-open-body")]
+    pub(crate) fn admit_open_ack(&self, lease: u64, initial_sn: u64) {
+        R::with_mutex_mut(&self.awaiting_open_ack, |s| *s = false);
+        // R311ke — pico captures `_initial_sn_rx` from either Open body
+        // (transport.c:196/270).
+        self.seed_rx_sn(initial_sn);
+        // R311kv — the OpenAck mirror of the OpenSyn lease capture (pico
+        // unicast/transport.c:193).
+        R::with_mutex_mut(&self.peer_open_lease_ms, |slot| *slot = Some(lease));
+    }
+
     /// R311y632 (§17) — the same, told how many bytes the message occupied.
     ///
     /// The length is what lets a caller walk to the NEXT message of a batch,
@@ -4701,37 +4842,18 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                         *slot = Some(cookie.as_slice().to_vec());
                     });
                 }
-                // R311ke — the peer's announced initial_sn seeds the RX
-                // SN gate baselines (peer.c:212-214: both channels one
-                // before, so the first frame at initial_sn passes).
-                // Sequential mutex scopes (negotiated_sn_mask takes
-                // inbound_peer_init_caps), never nested.
-                let mask = self.negotiated_sn_mask();
-                R::with_mutex_mut(&self.rx_sn, |s| s.seed(mask, body.initial_sn));
-                // R311kv — capture the peer's advertised lease (ms,
-                // R311ku boundary projection) for the deadline
-                // comparator's min(); pico adopts it at this same
-                // OpenSyn arrival (unicast/transport.c:269).
-                R::with_mutex_mut(&self.peer_open_lease_ms, |slot| {
-                    *slot = Some(body.lease);
-                });
+                // R2782 — the cookie is the ONLY thing taken off an OpenSyn
+                // here, because the admission predicate needs it. The RX SN
+                // seed and the lease capture that stood here are applied
+                // once the frame is ADMITTED, by [`Self::admit_open_syn`]:
+                // both were writes on a frame nobody had judged yet, and a
+                // replayed or stray OpenSyn used them to move the RX
+                // baseline and the peer lease of a session already running.
             }
-            #[cfg(feature = "codec-open-body")]
-            InboundFrame::Open {
-                is_ack: true, body, ..
-            } => {
-                // R311ke — Initiator-side OpenAck arrival: the acceptor's
-                // initial_sn seeds the RX gate exactly as the OpenSyn
-                // seeds it on the accepting side (pico captures
-                // `_initial_sn_rx` from either body, transport.c:196/270).
-                let mask = self.negotiated_sn_mask();
-                R::with_mutex_mut(&self.rx_sn, |s| s.seed(mask, body.initial_sn));
-                // R311kv — OpenAck mirror of the OpenSyn lease capture
-                // (pico unicast/transport.c:193).
-                R::with_mutex_mut(&self.peer_open_lease_ms, |slot| {
-                    *slot = Some(body.lease);
-                });
-            }
+            // R2782 — an OpenAck takes nothing at parse time. Its RX SN seed
+            // and lease used to be applied here, on every OpenAck; they are
+            // now [`Self::admit_open_ack`]'s, applied only to the one OpenAck
+            // the initiator is awaiting.
             _ => {}
         }
         // R311la — RX-activity stamp, the zenoh-pico `_received` parity
@@ -8047,6 +8169,10 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             R::with_mutex_mut(&self.link.transport_available, |g| *g = false);
             R::with_mutex_mut(&self.inbound_cookie, |slot| *slot = None);
             R::with_mutex_mut(&self.inbound_opensyn_cookie, |slot| *slot = None);
+            // R2782 — a reopen awaits no OpenAck until its own OpenSyn is out;
+            // one left standing would admit a stray OpenAck into the new
+            // handshake.
+            R::with_mutex_mut(&self.awaiting_open_ack, |slot| *slot = false);
             R::with_mutex_mut(&self.link.last_inbound_at, |slot| *slot = None);
             R::with_mutex_mut(&self.link.established_at, |slot| *slot = None);
             // R311kw — the outbound stamp is per-transport: the replacement
@@ -8534,6 +8660,8 @@ impl<R: SessionRuntime, T: TimeSource> SessionFsmUnicastActionsTrait
                 )
                 .expect("OpenSyn cookie echo is decode-bounded (peer InitAck cookie <= codec cap)");
             a.send_wire(&bytes, Reliability::Reliable, Priority::DEFAULT);
+            // R2782 — the one OpenAck this OpenSyn asks for is now awaited.
+            R::with_mutex_mut(&a.awaiting_open_ack, |s| *s = true);
         }
     }
 
@@ -8705,6 +8833,9 @@ impl<R: SessionRuntime, T: TimeSource> SessionFsmUnicastActionsTrait
             // InitAck — the reflections staged above and the mint — is done.
             if cookie_bytes.is_some() {
                 a.install_negotiated(a.offered_extensions());
+                // R2782 — and the HEAD: the peer's zid, role and sizing caps
+                // ride the cookie's head, so they go too.
+                a.install_accept_head(None);
             }
         }
     }
@@ -8905,15 +9036,15 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     }
 
     /// R89 — the inbound half of R86's outbound cookie binding. The
-    /// Accepting side stored `peer_zid` on InitSyn arrival
-    /// (`inbound_peer_zid` slot) and minted a cookie via
-    /// HMAC-SHA256(cookie_signing_key, nonce || peer_zid)[..16] on InitAck
-    /// send (`send_init_ack_with_cookie`). The Initiator echoes that cookie
-    /// verbatim on OpenSyn; here we re-compute the expected HMAC and
-    /// compare against the captured inbound OpenSyn cookie
-    /// (`inbound_opensyn_cookie` slot). Mismatch -> `false` -> the
-    /// dispatcher drops the `OpenSynReceived` event so the FSM stays at
-    /// SentInitAck instead of advancing to SentOpenAck.
+    /// Initiator echoes the InitAck's cookie verbatim on OpenSyn, captured
+    /// into `inbound_opensyn_cookie`; this admits it only if this node
+    /// minted it (the MAC) in THIS handshake (the nonce). Mismatch ->
+    /// `false` -> the dispatcher drops the `OpenSynReceived` event so the FSM
+    /// stays at SentInitAck instead of advancing to SentOpenAck.
+    ///
+    /// R2782 — the peer's zid is no longer an input. R86 bound the cookie to
+    /// the zid held from the InitSyn; since R2769 the zid rides INSIDE the
+    /// MAC'd payload, and since R2782 nothing holds it across the boundary.
     ///
     /// R311y813 — the expected value is re-derived from the SAME
     /// `cookie_nonce` slot the mint read, which is what makes
@@ -8932,10 +9063,12 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         // Defensive: any missing material rejects. A well-formed handshake
         // populates every slot before this guard runs. Each slot is read in
         // its own with_mutex_mut (sequential, no nesting).
-        let peer_zid = match R::with_mutex_mut(&self.inbound_peer_zid, |s| s.clone()) {
-            Some(z) => z,
-            None => return false,
-        };
+        //
+        // R2782 — the peer's zid is NOT among them any more. It rides the
+        // cookie's head and the acceptor lets go of it after InitAck, so at
+        // this point there is no held copy to require, which is upstream's
+        // position exactly: its OpenSyn check has only the cookie and the
+        // nonce its driver carried.
         let echoed = match R::with_mutex_mut(&self.inbound_opensyn_cookie, |s| s.clone()) {
             Some(c) => c,
             None => return false,
@@ -8966,15 +9099,11 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         // pair, against a `u64` its own driver carries forward from
         // `SendInitAckOut`. wz's `cookie_nonce` slot is that carry, so
         // holding it is parity rather than the state this clause is about.
-        if carried.nonce != nonce {
-            return false;
-        }
-        // ⚠ TRANSITIONAL, and named as such. Upstream does not compare the
-        // zid because it has none to compare against — it rebuilds its state
-        // from the cookie and the held copy is gone. wz still holds
-        // `inbound_peer_zid`, so while BOTH exist this asks them to agree,
-        // which is the witness that the carrier is faithful. It becomes
-        // unnecessary, not merely redundant, the round the held slots go.
-        carried.peer_zid == peer_zid
+        // R2782 — and nothing else. The zid comparison that stood here was
+        // TRANSITIONAL by its own note: it asked the carried zid to agree with
+        // the held one while both existed, and "the round the held slots go"
+        // is this one. The carrier's faithfulness is now witnessed where it
+        // is used -- the rebuilt head IS what the session runs on.
+        carried.nonce == nonce
     }
 }

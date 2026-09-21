@@ -9179,8 +9179,13 @@ layer_c1ca_cargo_test_derived_initial_sn() {
 # the link set alone and answered "session" for a phase that has none. Two
 # reason families that must AGREE on the scope, plus the established-phase
 # control that keeps the fix from reading as "always clear".
+# R2782 — 25 -> 26. An admission rule of the same kind, on the other Open
+# frame: the initiator admits only the one OpenAck its OpenSyn awaits, and
+# `a_replayed_open_ack_after_established_is_not_admitted` is its witness (a
+# replay after Established used to reset the RX SN baseline). READ off the
+# count gate's own line, "declares 25 passed, the run printed 26".
 layer_c1cb_cargo_test_init_ack_admission() {
-    _runci_guarded_test C1cb 25 \
+    _runci_guarded_test C1cb 26 \
         cargo test -p wz-runtime-tokio --test session_fsm_driver_loop --quiet || return 1
 }
 
@@ -10961,7 +10966,15 @@ layer_c1bz_docs_resolve() {
     # MEASURED both ways on this lane's own command (`cargo doc -p
     # wz-session-core --no-deps --all-features`), error sets sorted and diffed:
     # 539 before, 533 after, exactly those six lines removed and none added.
-    # storage_config.rs now carries a non-doc `//` note above its `use` block
+    # R2782 — wz-session-core 533 -> 532, DOWNWARD, and by a link this round's
+# own edit removed: `peer_open_lease_ms`'s field doc said "Captured by
+# [`Self::handle_inbound`]", and a field doc's `Self` is the struct that holds
+# the field (`SessionCore`), which has no such method. That sentence was
+# rewritten because the capture moved to admission; the four links the
+# rewrite first added (to `admit_open_syn` / `admit_open_ack` from two field
+# docs and one `pub` fn) failed for the same two reasons and are code spans.
+# MEASURED on this lane's own command: 536 with the four, 532 without.
+# storage_config.rs now carries a non-doc `//` note above its `use` block
     # recording WHY every link in its `//!` is a full path, so the next author
     # does not re-earn the upward arm.
     budget="
@@ -10975,7 +10988,7 @@ layer_c1bz_docs_resolve() {
         wz-routing-graph:6
         wz-runtime-coop:12
         wz-runtime-tokio:518
-        wz-session-core:533
+        wz-session-core:532
         wz-session-lwip:4
         wz-switchboard-codegen:8
         zenoh-pico-sys:3
