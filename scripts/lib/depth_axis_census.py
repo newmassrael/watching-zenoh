@@ -1924,7 +1924,19 @@ PIN_NO_SYMBOL = 2
 # 30 -> 32 and no other atom moves; the control holds, the pushed tree still
 # reports 106. READ off the census's own FAIL line,
 # `wz citations: 108 against a pin of 106`.
-PIN_WZ_CITATIONS = 108
+#
+# R2777 — 108 -> 112, `session-unicast-accept` a fifth time. Its CORRECTION
+# closes the QoS band (`accept_state.rs` @ `pub enum QosAcceptState {`) and
+# then COUNTS what is left against upstream's cookie struct instead of the
+# R2774 list, which was short: the peer's region name is admitted at
+# `drive.rs` into the `peer_region` slot of `session_actions.rs` and held
+# across InitAck, and the head slots are held beside their carried copy
+# (`session_actions.rs` @ `carried.peer_zid == peer_zid`). Those are the four.
+# ATTRIBUTED by the same probe: over `origin/main` and over this tree, per
+# atom, `session-unicast-accept` moves 32 -> 36 and no other atom moves; the
+# control holds, the pushed tree still reports 108. READ off the census's own
+# FAIL line, `wz citations: 112 against a pin of 108`.
+PIN_WZ_CITATIONS = 112
 # R2626 — 44 -> 42, and this one is worth a sentence because it HELD through
 # every earlier retirement in this run (R2612, R2622). `time-hlc`'s reason is the
 # first retiree carrying AMBIGUOUS citations of its own: its oldest clauses cite
