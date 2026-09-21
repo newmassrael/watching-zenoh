@@ -1889,10 +1889,16 @@ mod tests {
         let params = wz_runtime_tokio_test_support::fixture_session_init_params();
         let (actions, _driver) = crate::test_fixtures::recording_actions_with_params(params);
 
-        assert!(
-            CURRENT_PATCH > NO_PATCH,
-            "ANTI-VACUITY: the patch arm needs a level above NO_PATCH to fall from"
-        );
+        // A relation between two CONSTANTS is a compile-time fact, so it is
+        // checked at compile time: a runtime assert on constants is folded
+        // away, and a build in which the patch arm has no level to fall from
+        // should fail to compile rather than pass a vacuous arm.
+        const {
+            assert!(
+                CURRENT_PATCH > NO_PATCH,
+                "ANTI-VACUITY: the patch arm needs a level above NO_PATCH to fall from"
+            )
+        };
         actions.negotiate_patch_against_peer(NO_PATCH);
         assert_eq!(
             actions.negotiated_patch(),
