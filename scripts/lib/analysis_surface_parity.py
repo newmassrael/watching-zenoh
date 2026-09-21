@@ -342,6 +342,32 @@ ONLY_CLI = {
 
 # Reachable ONLY from the C ABI.
 ONLY_CAPI = {
+    # R2766 (open debt 788) — NOT DELIBERATE, and it is written as a debt
+    # rather than dressed as a decision, which is what this table says an
+    # entry whose reason is "not done yet" is for.
+    #
+    # The command line HAS both halves already: `--fields` renders the
+    # document and `--select` compiles a selector. What it does not have is
+    # the combination — `--select` narrows the CENSUS planes, and asking for
+    # it beside `--fields` alone is REFUSED today by `SelectWithoutPlane`,
+    # because no census plane was asked for. That refusal is correct for the
+    # surface as it stood; it stops being correct the moment a fields door
+    # takes a selector, which is this round.
+    #
+    # Wiring the flag is its own round: the refusal has a test that asserts
+    # it, the fields path would have to take the verdict walk the C door now
+    # takes, and a partial job would leave the two surfaces disagreeing about
+    # what `--select` means. Named here so the disagreement is visible until
+    # then.
+    "rows a selector picked": (
+        "wz_dissect_pcap_fields_where_limited",
+        "DEBT, not a decision. Asking the command line for a field document "
+        "and a selector together is refused today, because a selector narrowed "
+        "only the census planes; that premise is what this door changed. "
+        "Wiring the flag is a round of its own, and this row is the standing "
+        "note that the two surfaces disagree until it happens.",
+        (),
+    ),
     "a bounded read": (
         "wz_dissect_pcap_summary_bounded",
         "DELIBERATE. A cap is a statement about the CALLER's memory, and the "
