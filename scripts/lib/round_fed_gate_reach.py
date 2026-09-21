@@ -166,6 +166,19 @@ DEFERRED: dict[str, str] = {
         "already been resolved and an interrupt would leave the damage "
         "behind. Hosted Layer C0 owns it."
     ),
+    "capi_abi_pin.py": (
+        "R2775 -- it JOINED this population in that round, which is why it "
+        "has a row now: it used to read only the BUILT "
+        "`libwz_capi_dissect.so`, and R2775 made it read the tracked header "
+        "too, for the `WZ_DISSECT_ABI_REVISION` define it holds equal to the "
+        "library. Its subject is still the pair, and one half of the pair is "
+        "the release cdylib, which it refuses to grade without. The hook "
+        "builds no cdylib, so wiring it here would either red every push or "
+        "grade whatever stale artifact `crates/target` happened to hold -- "
+        "the reason its sibling `capi_c_abi_pin.py` is deferred below, and "
+        "the failure `binary_freshness_lint.py` exists to count. Hosted Layer "
+        "C1bo owns it, and builds the cdylib immediately before calling it."
+    ),
     "capi_c_abi_pin.py": (
         "its subject is the BUILT `libwz_capi_c.so`, one per cargo profile, "
         "and it refuses to grade without them (0.04s to say so). The hook "
