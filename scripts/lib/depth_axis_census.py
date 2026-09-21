@@ -1955,7 +1955,15 @@ PIN_NO_SYMBOL = 2
 # the committed store against the working one: `session-unicast-accept` moves
 # 39 -> 41 and no other atom moves. READ off the census's own FAIL line, `wz
 # citations: 117 against a pin of 115`.
-PIN_WZ_CITATIONS = 117
+#
+# R2782 — 117 -> 119, `session-unicast-accept` an eighth time: its CORRECTION
+# closes the cookie's head, citing the one writer of the head slots
+# (`session_actions.rs` @ `fn install_accept_head(...)`) and the admitted
+# OpenSyn's single entry point (`session_actions.rs` @ `pub(crate) fn
+# admit_open_syn(...)`). ATTRIBUTED by the same probe: `session-unicast-accept`
+# moves 41 -> 43 and no other atom moves. READ off the census's own FAIL
+# line, `wz citations: 119 against a pin of 117`.
+PIN_WZ_CITATIONS = 119
 # R2626 — 44 -> 42, and this one is worth a sentence because it HELD through
 # every earlier retirement in this run (R2612, R2622). `time-hlc`'s reason is the
 # first retiree carrying AMBIGUOUS citations of its own: its oldest clauses cite
