@@ -1946,7 +1946,16 @@ PIN_NO_SYMBOL = 2
 # probe: `session-unicast-accept` moves 36 -> 39 and no other atom moves; the
 # pushed tree still reports 112. READ off the census's own FAIL line, `wz
 # citations: 115 against a pin of 112`.
-PIN_WZ_CITATIONS = 115
+#
+# R2780 — 115 -> 117, `session-unicast-accept` a seventh time: its CORRECTION
+# closes the peer's region name, citing the carried state (`accept_state.rs`
+# @ `pub struct RegionAcceptState {`) and the group writer's put-back
+# (`session_actions.rs` @ `R::with_mutex_mut(&self.peer_region, |s| *s =
+# n.region.name());`). ATTRIBUTED by the same probe, the per-atom count over
+# the committed store against the working one: `session-unicast-accept` moves
+# 39 -> 41 and no other atom moves. READ off the census's own FAIL line, `wz
+# citations: 117 against a pin of 115`.
+PIN_WZ_CITATIONS = 117
 # R2626 — 44 -> 42, and this one is worth a sentence because it HELD through
 # every earlier retirement in this run (R2612, R2622). `time-hlc`'s reason is the
 # first retiree carrying AMBIGUOUS citations of its own: its oldest clauses cite
