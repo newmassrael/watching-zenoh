@@ -848,6 +848,13 @@ pub mod query;
 /// subset, re-applied to the forwarder under `config-mutate-runtime`.
 pub mod config;
 
+/// R2786 — the `plugins` section of a node's config and upstream's two runtime
+/// writes to it (a merging insert and a walking remove), each checked by the
+/// running plugin's validator and announced to the notification plane through
+/// [`plugins_config::PluginsSink`].
+#[cfg(feature = "adminspace-config-hotreload")]
+pub mod plugins_config;
+
 /// R311y786 — the connection-retry SCHEDULE (zenoh's `ConnectionRetryPeriod`):
 /// one transcription of the grow-then-clamp arithmetic, shared by the client
 /// reconnect supervisor and the router peer auto-reconnect so the two cannot

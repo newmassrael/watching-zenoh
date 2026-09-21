@@ -79,8 +79,21 @@ MIN_SLICES = 3
 #: decide what to re-dial.
 #: ⚠ `listen/endpoints` did NOT pass and is deliberately absent despite the
 #: symmetric name — it is read only in the start path.
+#:
+#: R2786 — `plugins` joins, and it passes the same predicate for upstream's own
+#: reason: a write below `plugins/` is handed to the RUNNING plugin's validator
+#: before it lands and announced to the notification plane after, so the change
+#: is observable the moment it is made (a storage manager's storages follow its
+#: document). The slice is the section document, held because upstream's is a
+#: document and only the plugin knows what its JSON means.
 PINNED_SLICES = frozenset(
-    {"interceptors", "admin_permissions", "router_link_weights", "connect_endpoints"}
+    {
+        "interceptors",
+        "admin_permissions",
+        "router_link_weights",
+        "connect_endpoints",
+        "plugins",
+    }
 )
 
 

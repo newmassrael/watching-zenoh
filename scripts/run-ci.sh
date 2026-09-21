@@ -6953,6 +6953,16 @@ layer_c1am_cargo_test_adminspace() {
     # so both reach this leg. PRINTED by the command.
     _runci_guarded_test "C1AM storage_manager_service 11" 11 \
         cargo test -p wz-runtime-tokio --features adminspace-config-hotreload --lib storage_manager_service --quiet || return 1
+    # R2786 — the `plugins` section: upstream's merging insert and walking
+    # remove, the validator asked before a change lands and the notification
+    # plane told after. 8 on the section itself (no `zenoh-config` needed), 2 on
+    # the config write gate that routes `plugins/...` keys to it, which needs
+    # `zenoh-config` — the combination this round made compile. PRINTED by the
+    # command.
+    _runci_guarded_test "C1AM plugins_config 8" 8 \
+        cargo test -p wz-runtime-tokio --features adminspace-config-hotreload --lib plugins_config --quiet || return 1
+    _runci_guarded_test "C1AM config plugins_section 2" 2 \
+        cargo test -p wz-runtime-tokio --features zenoh-config,adminspace-config-hotreload --lib plugins_section --quiet || return 1
     # R2693 — the PEER's introspection tests had no running lane IN THIS LAYER.
     # The feature set `routing-peer,adminspace-introspection-handlers` occurs here
     # only inside the clippy block below, which COMPILES a test and never runs it,
@@ -7000,6 +7010,7 @@ layer_c1am_cargo_test_adminspace() {
         && cargo clippy -p wz-runtime-tokio --all-targets --features routing-peer,adminspace-plugins-handlers --quiet -- -D warnings \
         && cargo clippy -p wz-ap-demo --all-targets --features router-hat-router,adminspace-plugins-handlers,storage-backend --quiet -- -D warnings \
         && cargo clippy -p wz-runtime-tokio --all-targets --features adminspace-config-hotreload --quiet -- -D warnings \
+        && cargo clippy -p wz-runtime-tokio --all-targets --features zenoh-config,adminspace-config-hotreload --quiet -- -D warnings \
         && cargo clippy -p wz-ap-demo --all-targets --features routing-peer,adminspace-write,adminspace-config-hotreload --quiet -- -D warnings)
 }
 

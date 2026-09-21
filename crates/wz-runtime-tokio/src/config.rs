@@ -197,6 +197,18 @@ pub const RUNTIME_MUTABLE_CONFIG_KEYS: &[RuntimeMutableKey] = &[
         discipline: MutationDiscipline::Push,
         feature: "router-connect-reconcile",
     },
+    // R2786 — the `plugins` section. PUSH, and for upstream's reason: the
+    // consumers are RUNNING plugins, which hold state built from their documents
+    // (a storage manager's live storages), so a write reaches them through
+    // their validator before it may land and through the notification plane
+    // after. Unhonoured at startup for now, the shape `interceptors` had before
+    // R2650: the reader does not read this key, and a write can change it.
+    RuntimeMutableKey {
+        key: "plugins",
+        slice: "plugins",
+        discipline: MutationDiscipline::Push,
+        feature: "adminspace-config-hotreload",
+    },
 ];
 
 /// Why a runtime key write was refused — see [`WzConfig::set_by_key`] and
@@ -301,6 +313,16 @@ pub enum ConfigKeyWriteError {
         key: String,
         /// The field the key addressed it by.
         field: String,
+    },
+    /// R2786 — a write to the `plugins` section was refused: by the section
+    /// itself (a path naming nothing, a plugin document that would not be an
+    /// object) or by the running plugin's validator, whose reason is carried.
+    #[cfg(feature = "adminspace-config-hotreload")]
+    Plugins {
+        /// The config key as written.
+        key: String,
+        /// Why.
+        error: crate::plugins_config::PluginsConfigError,
     },
 }
 
@@ -412,9 +434,26 @@ pub fn accepts_config_key(key: &str) -> bool {
 /// element has no such field — which is upstream's `map.get(field_name)` on a
 /// JSON object, and is why a field the type does not carry matches nothing
 /// rather than erroring.
+///
+/// R2786 — gated as the UNION of `splice_into`'s arms, not as the write gate:
+/// a `zenoh-config` build with an admin hat and no routing feature compiles the
+/// gate and NO arm, so a wider gate left this function unused there, and the
+/// workspace denies that. Measured on `zenoh-config,adminspace-config-hotreload`,
+/// the build the storage host's config writes need.
 #[cfg(all(
     feature = "zenoh-config",
-    any(feature = "adminspace-core", feature = "routing-router-hat")
+    any(feature = "adminspace-core", feature = "routing-router-hat"),
+    any(
+        feature = "routing-router-hat",
+        all(
+            feature = "routing-peer",
+            any(
+                feature = "access-acl",
+                feature = "access-downsampling",
+                feature = "access-quota"
+            )
+        )
+    )
 ))]
 fn splice_members<T: Clone>(
     current: &[T],
@@ -568,6 +607,10 @@ pub struct ConfigSinks<'a> {
     /// has to reach. R2667.
     #[cfg(feature = "router-connect-reconcile")]
     connect_endpoints: Option<&'a dyn crate::accept_loop::ConnectEndpointsSink>,
+    /// The running plugins — the validator and the notification plane every
+    /// `plugins/...` write has to reach. R2786.
+    #[cfg(feature = "adminspace-config-hotreload")]
+    plugins: Option<&'a dyn crate::plugins_config::PluginsSink>,
     /// Holds `'a` on a build that compiles NEITHER sink field, where the
     /// lifetime would otherwise be unused and the type would not compile. Such
     /// a build has no push-discipline slice to reach, so the type is still
@@ -613,6 +656,14 @@ impl<'a> ConfigSinks<'a> {
         self.connect_endpoints = Some(sink);
         self
     }
+
+    /// Name the running plugins (R2786).
+    #[cfg(feature = "adminspace-config-hotreload")]
+    #[must_use]
+    pub fn with_plugins(mut self, sink: &'a dyn crate::plugins_config::PluginsSink) -> Self {
+        self.plugins = Some(sink);
+        self
+    }
 }
 
 #[cfg(all(
@@ -623,6 +674,18 @@ impl core::fmt::Debug for ConfigSinks<'_> {
     /// Says WHICH consumers are present, never what they are: a sink is a live
     /// forwarder and its `Debug` would print a routing table into a log line.
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        // R2786 — a build compiling NO sink field pushes nothing, and the
+        // workspace denies the then-needless `mut`; the allowance is scoped to
+        // exactly that build, the complement of the fields' own features.
+        #[cfg_attr(
+            not(any(
+                feature = "routing-peer",
+                feature = "routing-router-hat",
+                feature = "router-connect-reconcile",
+                feature = "adminspace-config-hotreload"
+            )),
+            allow(unused_mut)
+        )]
         let mut named: Vec<&'static str> = Vec::new();
         #[cfg(feature = "routing-peer")]
         if self.interceptors.is_some() {
@@ -635,6 +698,10 @@ impl core::fmt::Debug for ConfigSinks<'_> {
         #[cfg(feature = "router-connect-reconcile")]
         if self.connect_endpoints.is_some() {
             named.push("connect_endpoints");
+        }
+        #[cfg(feature = "adminspace-config-hotreload")]
+        if self.plugins.is_some() {
+            named.push("plugins");
         }
         write!(f, "ConfigSinks{named:?}")
     }
@@ -787,6 +854,21 @@ pub struct WzConfig {
     /// holds without anyone maintaining a list.
     #[cfg(feature = "router-connect-reconcile")]
     connect_endpoints: Vec<String>,
+    /// R2786 (§5.23 `adminspace-config-hotreload`) — the `plugins` section, each
+    /// plugin's own document.
+    ///
+    /// It is a DOCUMENT rather than typed fields because upstream's is one: a
+    /// write below `plugins/` edits a plugin's JSON, and only the plugin knows
+    /// what its JSON means. What this struct owns is the section and upstream's
+    /// two edits of it; what the edits MEAN is decided by the running plugin,
+    /// through [`crate::plugins_config::PluginsSink`].
+    ///
+    /// Private, like every slice before it: mutate via
+    /// [`Self::reconfigure_plugins`], which validates before it stores and
+    /// notifies after, so no path can land a plugin document its plugin never
+    /// saw.
+    #[cfg(feature = "adminspace-config-hotreload")]
+    plugins: crate::plugins_config::PluginsConfig,
     /// R311y205 (transport-multilink) — the EMBEDDER-facing max number of physical
     /// links this node aggregates into ONE logical unicast session (zenoh
     /// `TransportManager` `unicast.max_links`). Default `1` = single-link,
@@ -942,6 +1024,10 @@ impl Default for WzConfig {
             // document at startup, exactly as it seeds the loop's dial targets.
             #[cfg(feature = "router-connect-reconcile")]
             connect_endpoints: Vec::new(),
+            // No plugin configured, which is what a config with no `plugins`
+            // section means to a stock zenohd.
+            #[cfg(feature = "adminspace-config-hotreload")]
+            plugins: crate::plugins_config::PluginsConfig::new(),
             #[cfg(feature = "transport-multilink")]
             max_links: 1,
             max_sessions: DEFAULT_MAX_SESSIONS,
@@ -1687,6 +1773,20 @@ impl WzConfig {
         value: &str,
         sinks: &ConfigSinks<'_>,
     ) -> Result<(), ConfigKeyWriteError> {
+        // R2786 — the `plugins` section is a DOCUMENT, so its keys never reach
+        // the typed reader below: they are merged into the section and judged
+        // by the running plugin. Without that plugin there is no validator, and
+        // a write no validator saw is refused rather than stored — the rule
+        // `ConfigSinks` states for every push slice.
+        #[cfg(feature = "adminspace-config-hotreload")]
+        if is_plugins_key(key) {
+            let sink = sinks
+                .plugins
+                .ok_or_else(|| ConfigKeyWriteError::NeedsSink {
+                    key: String::from(key),
+                })?;
+            return self.reconfigure_plugins(key, Some(value), sink);
+        }
         let (key, ingest) = match self.member_write(key, Some(value)) {
             Some(resolved) => resolved?,
             None => (String::from(key), Self::ingest_for_key(key, value)?),
@@ -1887,9 +1987,36 @@ impl WzConfig {
         mode: MemberWrite,
         ingest: &mut crate::zenoh_config::ZenohConfigIngest,
     ) -> Result<(), ConfigKeyWriteError> {
+        // R2786 — on a build that compiles NO arm below, every parameter but the
+        // key is read by nothing; consumed here, under the complement of the
+        // arms' union, so that build compiles and still answers
+        // `NotMemberAddressable`.
+        #[cfg(not(any(
+            feature = "routing-router-hat",
+            all(
+                feature = "routing-peer",
+                any(
+                    feature = "access-acl",
+                    feature = "access-downsampling",
+                    feature = "access-quota"
+                )
+            )
+        )))]
+        let _ = (field, field_value, mode, ingest);
         // The filter check upstream makes before it touches the list: an insert
         // whose value does not carry `field = "<field_value>"` is refused rather
         // than appended under a name it does not answer to.
+        #[cfg(any(
+            feature = "routing-router-hat",
+            all(
+                feature = "routing-peer",
+                any(
+                    feature = "access-acl",
+                    feature = "access-downsampling",
+                    feature = "access-quota"
+                )
+            )
+        ))]
         macro_rules! splice_arm {
             ($list:expr, $target:expr, $identity:expr) => {{
                 let incoming = $target.first().cloned();
@@ -1978,6 +2105,14 @@ impl WzConfig {
         any(feature = "adminspace-core", feature = "routing-router-hat")
     ))]
     fn push_slice_would_reach(slice: &str, sinks: &ConfigSinks<'_>) -> Option<()> {
+        // R2786 — no arm below on a build without any of their features; see
+        // `splice_into`.
+        #[cfg(not(any(
+            feature = "routing-peer",
+            feature = "routing-router-hat",
+            feature = "router-connect-reconcile"
+        )))]
+        let _ = sinks;
         match slice {
             #[cfg(feature = "routing-peer")]
             "interceptors" => sinks.interceptors.map(|_| ()),
@@ -2009,6 +2144,13 @@ impl WzConfig {
         sinks: &ConfigSinks<'_>,
         key: &str,
     ) -> Result<(), ConfigKeyWriteError> {
+        // R2786 — as in `push_slice_would_reach`.
+        #[cfg(not(any(
+            feature = "routing-peer",
+            feature = "routing-router-hat",
+            feature = "router-connect-reconcile"
+        )))]
+        let _ = sinks;
         match slice {
             #[cfg(feature = "routing-peer")]
             "interceptors" => {
@@ -2225,6 +2367,19 @@ impl WzConfig {
         key: &str,
         sinks: &ConfigSinks<'_>,
     ) -> Result<(), ConfigKeyWriteError> {
+        // R2786 — the `plugins` section's delete, for the reason the set half
+        // gives. It goes first because a `plugins` key is never a member key
+        // (`is_plugins_key` says so), so the member route below has nothing to
+        // try on it.
+        #[cfg(feature = "adminspace-config-hotreload")]
+        if is_plugins_key(key) {
+            let sink = sinks
+                .plugins
+                .ok_or_else(|| ConfigKeyWriteError::NeedsSink {
+                    key: String::from(key),
+                })?;
+            return self.reconfigure_plugins(key, None, sink);
+        }
         // R2657 — the MEMBER half of the delete, tried FIRST and falling through
         // when the key carries no `=`, which is the order upstream's admin
         // handler takes (`try_remove_json5_array_item` and only then `remove`).
@@ -2710,6 +2865,80 @@ impl WzConfig {
             Ok(false)
         }
     }
+
+    /// R2786 — the `plugins` section as it stands.
+    #[cfg(feature = "adminspace-config-hotreload")]
+    pub fn plugins(&self) -> &crate::plugins_config::PluginsConfig {
+        &self.plugins
+    }
+
+    /// R2786 — write (`Some`) or delete (`None`) one key of the `plugins`
+    /// section, through the running plugins in `sink`.
+    ///
+    /// `key` is the whole config key: `plugins` itself, or a key below it. The
+    /// edit is upstream's (see `crate::plugins_config`): the plugin's validator
+    /// is asked FIRST and may refuse, in which case nothing — the section, the
+    /// running plugins — changes; and only a change that landed is announced to
+    /// the notification plane, once.
+    ///
+    /// A delete of the whole section is refused, as upstream refuses it. A
+    /// write of the whole section asks every plugin whose document changes.
+    #[cfg(all(feature = "zenoh-config", feature = "adminspace-config-hotreload"))]
+    pub fn reconfigure_plugins(
+        &mut self,
+        key: &str,
+        value: Option<&str>,
+        sink: &dyn crate::plugins_config::PluginsSink,
+    ) -> Result<(), ConfigKeyWriteError> {
+        use crate::plugins_config::PluginsConfigError;
+
+        let refused = |error: PluginsConfigError| ConfigKeyWriteError::Plugins {
+            key: String::from(key),
+            error,
+        };
+        let below = match key.strip_prefix("plugins") {
+            Some("") => None,
+            Some(rest) => match rest.strip_prefix('/') {
+                Some(below) => Some(below),
+                None => {
+                    return Err(ConfigKeyWriteError::MalformedKey {
+                        key: String::from(key),
+                    })
+                }
+            },
+            None => {
+                return Err(ConfigKeyWriteError::MalformedKey {
+                    key: String::from(key),
+                })
+            }
+        };
+        let value = match value {
+            Some(text) => Some(wz_session_core::json5::parse(text).map_err(|_| {
+                ConfigKeyWriteError::MalformedValue {
+                    key: String::from(key),
+                }
+            })?),
+            None => None,
+        };
+        match (below, value) {
+            (None, Some(section)) => self.plugins.replace(&section, sink),
+            (None, None) => Err(PluginsConfigError::SectionNotRemovable),
+            (Some(below), Some(doc)) => self.plugins.insert(below, doc, sink),
+            (Some(below), None) => self.plugins.remove(below, sink),
+        }
+        .map_err(refused)?;
+        sink.plugins_changed(&self.plugins);
+        Ok(())
+    }
+}
+
+/// R2786 — whether a runtime write key belongs to the `plugins` section: the
+/// section itself or a key below it, and not a member-form key (`=`), which
+/// keeps the member route's own refusal.
+#[cfg(all(feature = "zenoh-config", feature = "adminspace-config-hotreload"))]
+fn is_plugins_key(key: &str) -> bool {
+    matches!(classify_write_key(key), WriteKeyForm::Whole)
+        && (key == "plugins" || key.starts_with("plugins/"))
 }
 
 #[cfg(test)]
@@ -3034,6 +3263,15 @@ mod tests {
     /// hook. The day `plugins` becomes honoured, this test reds — which is the
     /// point of pinning it here rather than writing it down.
     ///
+    /// ✅ R2786 — THAT DAY CAME for runtime writes, under
+    /// `adminspace-config-hotreload`: the section is now held and edited, and
+    /// the hook exists as `crate::plugins_config::PluginsSink`. The PROPERTY
+    /// this test is named for still holds and still has to: `set_by_key` hands
+    /// in no sinks, so there is no validator to ask, and the write is refused as
+    /// `NeedsSink` rather than stored. Only the refusal's NAME moved — which is
+    /// why the expected value is chosen by the build, and why neither arm may
+    /// ever become an `Ok`.
+    ///
     /// Gated exactly as its SUBJECT is: `set_by_key` / `remove_by_key` live
     /// behind this cfg, so a test naming them without it does not compile on a
     /// build that elides them. Gate 2h found this by running a leg that does.
@@ -3044,25 +3282,167 @@ mod tests {
     #[test]
     fn a_plugin_config_write_is_refused_rather_than_applied_unvalidated() {
         let key = "plugins/rest/http_port";
+        let refusal = || {
+            #[cfg(feature = "adminspace-config-hotreload")]
+            {
+                ConfigKeyWriteError::NeedsSink {
+                    key: String::from(key),
+                }
+            }
+            #[cfg(not(feature = "adminspace-config-hotreload"))]
+            {
+                ConfigKeyWriteError::NotHonoured {
+                    key: String::from(key),
+                }
+            }
+        };
         assert_eq!(
             WzConfig::new()
                 .set_by_key(key, "8000")
-                .expect_err("wz does not honour plugin config"),
-            ConfigKeyWriteError::NotHonoured {
-                key: String::from(key)
-            },
-            "a plugin config WRITE is refused by name, not applied unvalidated"
+                .expect_err("no validator, no write"),
+            refusal(),
+            "a plugin config WRITE is refused, not applied unvalidated"
         );
         assert_eq!(
             WzConfig::new()
                 .remove_by_key(key)
                 .expect_err("nor can it be deleted"),
-            ConfigKeyWriteError::NotHonoured {
-                key: String::from(key)
-            },
+            refusal(),
             "and so is the DELETE — upstream's validator covers its remove path \
              too, so a delete that slipped through would be the same gap"
         );
+    }
+
+    /// R2786 — a validator that records what it is asked and answers from a
+    /// script, for the `plugins` section's write path.
+    #[cfg(all(feature = "zenoh-config", feature = "adminspace-config-hotreload"))]
+    #[derive(Default)]
+    struct ScriptedPlugins {
+        asked: std::cell::RefCell<Vec<(String, String)>>,
+        refuse: std::cell::Cell<bool>,
+        notified: std::cell::RefCell<Vec<String>>,
+    }
+
+    #[cfg(all(feature = "zenoh-config", feature = "adminspace-config-hotreload"))]
+    impl crate::plugins_config::PluginsSink for ScriptedPlugins {
+        fn check_config(
+            &self,
+            plugin: &str,
+            path: &str,
+            _current: &wz_session_core::json5::Json5Value,
+            _new: &wz_session_core::json5::Json5Value,
+        ) -> Result<Option<wz_session_core::json5::Json5Value>, String> {
+            self.asked
+                .borrow_mut()
+                .push((String::from(plugin), String::from(path)));
+            if self.refuse.get() {
+                Err(String::from("refused by the plugin"))
+            } else {
+                Ok(None)
+            }
+        }
+
+        fn plugins_changed(&self, plugins: &crate::plugins_config::PluginsConfig) {
+            self.notified
+                .borrow_mut()
+                .push(plugins.section().to_json5_text());
+        }
+    }
+
+    /// R2786 — a `plugins/...` write reaches the running plugins through BOTH of
+    /// upstream's seams, in order: the validator before the store, the
+    /// notification plane after it, once.
+    #[cfg(all(feature = "zenoh-config", feature = "adminspace-config-hotreload"))]
+    #[test]
+    fn plugins_section_writes_pass_the_validator_then_notify_once() {
+        let plugins = ScriptedPlugins::default();
+        let sinks = ConfigSinks::none().with_plugins(&plugins);
+        let mut cfg = WzConfig::new();
+        cfg.set_by_key_with(
+            "plugins/storage_manager/storages/demo",
+            r#"{ key_expr: "demo/**", volume: "memory" }"#,
+            &sinks,
+        )
+        .expect("the validator accepted it");
+        assert_eq!(
+            plugins.asked.borrow().as_slice(),
+            &[(
+                String::from("storage_manager"),
+                String::from("storages/demo")
+            )]
+        );
+        assert_eq!(plugins.notified.borrow().len(), 1);
+        assert!(cfg
+            .plugins()
+            .plugin("storage_manager")
+            .is_some_and(|doc| doc.get("storages/demo/key_expr").is_some()));
+
+        // The delete of that storage: validated, stored, announced.
+        cfg.remove_by_key_with("plugins/storage_manager/storages/demo", &sinks)
+            .expect("the validator accepted the delete");
+        assert_eq!(plugins.asked.borrow().len(), 2);
+        assert_eq!(plugins.notified.borrow().len(), 2);
+        assert!(cfg
+            .plugins()
+            .plugin("storage_manager")
+            .is_some_and(|doc| doc.get("storages/demo").is_none()));
+
+        // A WHOLE plugin goes without a validator, and is announced.
+        cfg.remove_by_key_with("plugins/storage_manager", &sinks)
+            .expect("a whole plugin is removable");
+        assert_eq!(plugins.asked.borrow().len(), 2, "no validator for it");
+        assert_eq!(plugins.notified.borrow().len(), 3);
+        assert_eq!(cfg.plugins().plugin_names().count(), 0);
+    }
+
+    /// R2786 — ⭐ the refusal half: a write the running plugin refuses changes
+    /// NOTHING and announces NOTHING, and the whole section cannot be deleted.
+    #[cfg(all(feature = "zenoh-config", feature = "adminspace-config-hotreload"))]
+    #[test]
+    fn plugins_section_refusals_change_and_announce_nothing() {
+        let plugins = ScriptedPlugins::default();
+        let sinks = ConfigSinks::none().with_plugins(&plugins);
+        let mut cfg = WzConfig::new();
+        cfg.set_by_key_with("plugins/storage_manager", "{ volumes: {} }", &sinks)
+            .expect("accepted");
+        let before = cfg.plugins().clone();
+        let announced = plugins.notified.borrow().len();
+
+        plugins.refuse.set(true);
+        let key = "plugins/storage_manager/storages/demo";
+        let refused = cfg
+            .set_by_key_with(key, r#"{ key_expr: "d/**", volume: "memory" }"#, &sinks)
+            .expect_err("the plugin refused it");
+        assert!(
+            matches!(
+                &refused,
+                ConfigKeyWriteError::Plugins {
+                    error: crate::plugins_config::PluginsConfigError::Refused { .. },
+                    ..
+                }
+            ),
+            "{refused:?}"
+        );
+        assert_eq!(cfg.plugins(), &before, "the section is as it was");
+        assert_eq!(
+            plugins.notified.borrow().len(),
+            announced,
+            "and nothing was announced"
+        );
+
+        plugins.refuse.set(false);
+        assert!(matches!(
+            cfg.remove_by_key_with("plugins", &sinks),
+            Err(ConfigKeyWriteError::Plugins {
+                error: crate::plugins_config::PluginsConfigError::SectionNotRemovable,
+                ..
+            })
+        ));
+        assert!(matches!(
+            cfg.set_by_key_with(key, "{ not json5", &sinks),
+            Err(ConfigKeyWriteError::MalformedValue { .. })
+        ));
+        assert_eq!(cfg.plugins(), &before);
     }
 
     /// R2646 — the delete half refuses exactly what the set half refuses, and
