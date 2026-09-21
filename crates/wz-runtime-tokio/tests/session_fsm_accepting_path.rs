@@ -49,7 +49,9 @@ use wz_runtime_tokio_test_support::{fixture_session_init_params, NoopOutboundDri
 // R311it — craft_initsyn/opensyn_wire + FIXTURE_PEER_ZID come from the
 // shared no_std SSOT (was copy-pasted here and in the sibling session_fsm_*
 // test files + re-rolled in wz-mcu-session-acceptor).
-use wz_session_wire_fixtures::{craft_initsyn_wire, craft_opensyn_wire, FIXTURE_PEER_ZID};
+use wz_session_wire_fixtures::{
+    craft_initsyn_wire, craft_initsyn_wire_with_patch, craft_opensyn_wire, FIXTURE_PEER_ZID,
+};
 
 /// R2769 — the setup KEEPS the bytes the acceptor sends.
 ///
@@ -665,6 +667,81 @@ async fn one_bundle_mints_a_different_cookie_for_each_handshake() {
         S::Established,
         "this handshake's OWN cookie must still be admitted -- otherwise the \
          refusal above is just a broken acceptor"
+    );
+}
+
+/// R2773 — THE REBUILD. After an admitted OpenSyn the acceptor's negotiated
+/// state comes from the COOKIE, not from whatever it happened to still hold.
+///
+/// ## Why this is asked of `patch` and of nothing else
+///
+/// The cookie carries five accept states, and four of them are UNOBSERVABLE
+/// in this build: `transport-qos`, `-lowlatency`, `-compression` and `-shm`
+/// are absent from `wz-runtime-tokio`'s default feature set, so those slots
+/// do not exist and both the cookie and the acceptor read `false`. A witness
+/// over them would be the "population of zero reports green" trap — the
+/// rebuild could be deleted and nothing would move. `negotiated_patch` is an
+/// ungated field carrying `Option<u8>`, so it is the one member a default
+/// build can see, and it is the member a flag bit could never have held.
+///
+/// ## What makes the assertion impossible to satisfy by accident
+///
+/// `negotiate_patch_against_peer` is a `min()` — monotonically
+/// non-increasing, which its own note states. So the test LOWERS the held
+/// level by hand and then requires it to come back UP. A rise cannot come
+/// from the merge in any circumstance; the cookie is the only other source.
+/// That is what separates "the rebuild ran" from "the value was already
+/// right", which is the way a rebuild witness usually goes vacuous.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_open_syn_rebuilds_the_negotiated_state_from_the_cookie() {
+    let (actions, mut engine, recording) = fresh_setup_recording();
+    engine.process_event(E::InboundStart);
+    let mut driver = QueueDriver::with(vec![LinkEvent::Rx(RxFrame::new(
+        craft_initsyn_wire_with_patch(2),
+    ))]);
+    let _ = poll_and_dispatch_one(&mut driver, &actions, &mut engine).await;
+    assert_eq!(engine.get_current_state(), S::SentInitAck);
+
+    let negotiated = actions.negotiated_patch();
+    assert!(
+        negotiated >= 1,
+        "ANTI-VACUITY: this handshake must negotiate a level the test can \
+         LOWER, or the damage below is a no-op and the restore proves \
+         nothing; got {negotiated}"
+    );
+
+    // The cookie is read off the wire, so what is asserted is what a peer
+    // would echo rather than what this test believes was minted.
+    let cookie = minted_cookie(&recording.sent.lock().unwrap().clone());
+    let carried = decode_accept_cookie(&fixture_session_init_params().cookie_signing_key, &cookie)
+        .expect("the acceptor's own cookie verifies");
+    assert_eq!(
+        carried.patch,
+        PatchAcceptState(Some(negotiated)),
+        "the cookie must carry the level this handshake negotiated"
+    );
+
+    // DAMAGE the held copy. `min()` can only lower, which is exactly why this
+    // is a safe way to disturb it: nothing in the session can undo it except
+    // a write from outside the merge.
+    actions.negotiate_patch_against_peer(negotiated - 1);
+    assert_eq!(
+        actions.negotiated_patch(),
+        negotiated - 1,
+        "the min() merge must have lowered the held level"
+    );
+
+    let mut driver = QueueDriver::with(vec![LinkEvent::Rx(RxFrame::new(craft_opensyn_wire(
+        &cookie,
+    )))]);
+    let _ = poll_and_dispatch_one(&mut driver, &actions, &mut engine).await;
+    assert_eq!(engine.get_current_state(), S::Established);
+    assert_eq!(
+        actions.negotiated_patch(),
+        negotiated,
+        "the admitted OpenSyn must RESTORE the level the cookie carried -- a \
+         RISE is impossible from the min() merge, so the cookie is the only \
+         place it can have come from"
     );
 }
 

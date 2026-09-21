@@ -2746,6 +2746,65 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         }
     }
 
+    /// R2773 — REBUILD this acceptor's negotiated state from the cookie the
+    /// peer echoed on OpenSyn, which is what makes the cookie a carrier
+    /// rather than a receipt.
+    ///
+    /// The mirror of [`Self::accept_cookie_state`], and upstream's
+    /// `io/zenoh-transport/src/unicast/establishment/accept.rs` @
+    /// `// Rebuild the state from the cookie`.
+    ///
+    /// ⛔ WHY IT WRITES THE SLOTS DIRECTLY AND NOT THROUGH THE `set_*_offer`
+    /// SETTERS, measured over all four rather than generalised from one:
+    /// `set_lowlatency_offer` and `set_qos_offer` each REFUSE while the other
+    /// is on (returning `false`), while `set_compression_offer` and
+    /// `set_shm_offer` are plain writes. So a setter-based rebuild would be
+    /// silently wrong for exactly two of the four — the shape that passes any
+    /// witness touching only the other two. Worse, because that pair is
+    /// mutually exclusive, restoring both through the setters is not
+    /// expressible in EITHER order: whichever lands first refuses the second.
+    ///
+    /// ⚠ RESTORING AN OUTCOME IS NOT STAGING AN OFFER. Those setters carry
+    /// staging policy because they run BEFORE negotiation; the value here has
+    /// already been through it, so re-applying the policy would apply the rule
+    /// twice. The two are different operations that happen to share a slot.
+    ///
+    /// Returns `false` when there is no cookie to read or it does not verify —
+    /// the caller runs only on an ADMITTED OpenSyn, so
+    /// [`crate::session_actions::SessionLinkActions::cookie_valid`] has already
+    /// accepted these bytes and a failure here would be this code disagreeing
+    /// with itself.
+    #[cfg(all(feature = "codec-open-body", feature = "session-unicast-accept"))]
+    pub(crate) fn restore_accept_state_from_cookie(&self) -> bool {
+        let echoed = match R::with_mutex_mut(&self.inbound_opensyn_cookie, |s| s.clone()) {
+            Some(c) => c,
+            None => return false,
+        };
+        let carried = match crate::accept_cookie::decode_accept_cookie(
+            &self.params.cookie_signing_key,
+            &echoed,
+        ) {
+            Ok(c) => c,
+            Err(_) => return false,
+        };
+        // Each write is gated with the SAME cfg as the slot it targets, which
+        // is the rule this tree arrived at the hard way: a helper widened past
+        // its consumers becomes dead code in the builds that lack them.
+        #[cfg(feature = "transport-qos")]
+        R::with_mutex_mut(&self.is_qos, |s| *s = carried.qos.0);
+        #[cfg(feature = "transport-shm")]
+        R::with_mutex_mut(&self.is_shm, |s| *s = carried.shm.0);
+        #[cfg(feature = "transport-lowlatency")]
+        R::with_mutex_mut(&self.is_lowlatency, |s| *s = carried.lowlatency.0);
+        #[cfg(feature = "transport-compression")]
+        R::with_mutex_mut(&self.is_compression, |s| *s = carried.compression.0);
+        // UNGATED, and it is the one with content: `negotiated_patch` is an
+        // ungated field carrying `Option<u8>`, so it is the only member of the
+        // five that a default build can observe at all.
+        R::with_mutex_mut(&self.negotiated_patch, |s| *s = carried.patch.0);
+        true
+    }
+
     /// R3b — run `f` against the auth dispatch under its mutex. The recv-stage
     /// driver ([`crate::drive::dispatch_link_event`]) calls this to feed a
     /// parsed handshake frame's ext chain into the matching demux stage; the

@@ -320,6 +320,30 @@ fn dispatch_unit<R: SessionRuntime, T: TimeSource>(
                 if !admit {
                     return DriverLoopOutcome::SideEffectOnly;
                 }
+                // R2773 — REBUILD the acceptor's negotiated state from the
+                // cookie the peer just echoed. This is the half that makes the
+                // cookie a CARRIER: R2769 gave it the state and taught the
+                // guard to decode it, and the guard then threw the decoded
+                // copy away because a predicate must not have side effects.
+                //
+                // ⛔ IT BELONGS HERE AND NOT IN `cookie_valid`, which is the
+                // admission predicate the match above calls BEFORE the event
+                // is injected. Upstream splits it the same way: the nonce
+                // compare is in `recv_open_syn` and so is
+                // `// Rebuild the state from the cookie`
+                // (`io/zenoh-transport/src/unicast/establishment/accept.rs`),
+                // both in the HANDLER. Installing state from a guard would put
+                // a write inside a question.
+                //
+                // Placed with the other post-admission merges below, and
+                // BEFORE them deliberately: those merge a peer's OFFER off an
+                // Init frame, while this restores an OUTCOME already
+                // negotiated in this handshake. A restore that ran after a
+                // merge would be overwriting the newer answer with the older.
+                #[cfg(all(feature = "codec-open-body", feature = "session-unicast-accept"))]
+                if let InboundFrame::Open { is_ack: false, .. } = &frame {
+                    actions.restore_accept_state_from_cookie();
+                }
                 // R311y578 — take the `min(local, peer)` protocol PATCH
                 // level off every admitted Init frame (zenoh-pico
                 // `transport.c:237-241` runs the same cap on both sides).
