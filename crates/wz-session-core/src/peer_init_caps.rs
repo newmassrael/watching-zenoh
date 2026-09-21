@@ -120,6 +120,28 @@ impl PeerInitCaps {
             batch_size,
         }
     }
+
+    /// Re-pack the two resolutions into the INIT-body `sn_res` byte.
+    ///
+    /// R2769 — the inverse of the `& 0x03` / `>> 2` pair in
+    /// [`decode_wire_caps`], and it lives HERE for the reason that function's
+    /// own note gives about being ONE wire decoder: a caller that needed the
+    /// packed byte back would otherwise spell the layout a second time, and a
+    /// second spelling of a wire layout is the defect rather than the
+    /// convenience. The accept cookie is the first caller — it carries the
+    /// peer's advertisement as the byte the peer sent, not as two fields wz
+    /// happens to store.
+    ///
+    /// ⚠ NOT A ROUND TRIP THROUGH [`PeerInitCaps::from_init_body`] IN
+    /// GENERAL, and saying so is the point: that constructor normalizes a
+    /// wire `batch_size` of 0 to 65535 on purpose, and it substitutes the
+    /// S-clear defaults for an ABSENT byte. This re-packs only what the two
+    /// resolution fields hold, which for any byte the wire actually carried
+    /// is that byte back — `the_packed_byte_round_trips_every_wire_value`
+    /// drives all 256.
+    pub fn sn_res_byte(&self) -> u8 {
+        (self.seq_num_res & 0x03) | ((self.req_id_res & 0x03) << 2)
+    }
 }
 
 // ── R311kc init-ack params validation truth table (feature-independent:
@@ -231,5 +253,39 @@ mod tests {
         // non-conforming wire 0 must not become a zero TX budget.
         let caps = PeerInitCaps::from_init_body(Some(0x09), Some(0));
         assert_eq!(caps.batch_size, 65535, "wire 0 = unset, not a 0 budget");
+    }
+
+    /// R2769 — every byte the wire can carry survives decode and re-pack.
+    ///
+    /// The POPULATION IS ALL 256, not a sample: the packing is two masks and
+    /// a shift, and the only way a hand-written inverse is wrong is at a bit
+    /// pattern nobody thought to try. Driving the whole domain costs nothing
+    /// and removes the question.
+    ///
+    /// ⚠ The top four bits are NOT carried, and that is the wire's rule
+    /// rather than a loss here: `decode_wire_caps` reads bits 0-1 and 2-3 and
+    /// the rest are unassigned, so the re-pack answers with them cleared.
+    /// That is asserted rather than glossed.
+    #[test]
+    fn the_packed_byte_round_trips_every_wire_value() {
+        for b in 0u8..=255 {
+            let caps = PeerInitCaps::from_init_body(Some(b), Some(1024));
+            assert_eq!(
+                caps.sn_res_byte(),
+                b & 0x0F,
+                "byte {b:#04x} did not survive decode and re-pack"
+            );
+        }
+    }
+
+    /// An ABSENT byte re-packs as the S-clear defaults, not as zero.
+    ///
+    /// Anti-vacuity for the test above, which only ever hands the decoder a
+    /// `Some`: the defaults are `(2, 2)`, so the byte is `0b1010`. A re-pack
+    /// that returned 0 for the absent case would pass every arm up there.
+    #[test]
+    fn an_absent_byte_repacks_as_the_declared_defaults() {
+        let caps = PeerInitCaps::from_init_body(None, None);
+        assert_eq!(caps.sn_res_byte(), 0b1010, "S-clear defaults are (2, 2)");
     }
 }

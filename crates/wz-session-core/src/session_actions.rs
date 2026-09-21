@@ -119,7 +119,11 @@ use crate::send_declare_error::SendDeclareError;
 use crate::send_wire_error::SendWireError;
 use crate::session_fsm_unicast::SessionFsmUnicastActions as SessionFsmUnicastActionsTrait;
 use crate::session_init_params::SessionInitParams;
-use crate::signing_key::generate_cookie_hmac_sha256;
+// R2769 — the accept cookie replaced the bare tag at both ends, so the mint
+// reaches for the carrier's encoder here and the verify names
+// `decode_accept_cookie` at its own site.
+#[cfg(all(feature = "codec-init-body", feature = "session-unicast-accept"))]
+use crate::accept_cookie::encode_accept_cookie;
 use crate::wireexpr_resolve::OwnMappingSpace;
 
 // inbound parse (handle_inbound)
@@ -2675,6 +2679,71 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// it here rather than assuming the derivation is nonce-free.
     pub fn cookie_nonce(&self) -> Option<u64> {
         R::with_mutex_mut(&self.cookie_nonce, |slot| *slot)
+    }
+
+    /// R2769 — the acceptor's InitSyn-derived state, in the form the cookie
+    /// carries it.
+    ///
+    /// Gathered HERE rather than inline at the mint so the set has one
+    /// spelling: the same state has to be reconstructed by anything that
+    /// checks the cookie, and a second gathering would be a second answer to
+    /// "what did this handshake negotiate".
+    ///
+    /// ⚠ EVERY FIELD IS UNCONDITIONAL AND ONLY THE VALUE IS GATED, which is
+    /// deliberate and is the shape this tree was bitten into adopting: a
+    /// cfg-gated public field breaks whichever construction site is compiled
+    /// without the feature, and upstream binds the same absences from the
+    /// other side (it writes `false` without `shared-memory` rather than
+    /// dropping the member). A capability wz was not built with is a
+    /// capability this handshake did not negotiate, so `false` is the honest
+    /// value and not a placeholder.
+    ///
+    /// ⚠⚠ `patch` is the one that is NOT a bool. `negotiated_patch()` folds
+    /// an absent negotiation into `NO_PATCH`, and
+    /// [`Self::patch_was_negotiated`] is what separates the two, so the pair
+    /// is recomposed here into the `Option<u8>` the cookie's own state type
+    /// keeps — the difference a flag bit could not carry.
+    #[cfg(all(feature = "codec-init-body", feature = "session-unicast-accept"))]
+    pub(crate) fn accept_cookie_state(
+        &self,
+        peer_zid: Vec<u8>,
+        nonce: u64,
+    ) -> crate::accept_cookie::AcceptCookieState {
+        use crate::accept_state::{
+            CompressionAcceptState, LowlatencyAcceptState, PatchAcceptState, QosAcceptState,
+            ShmAcceptState,
+        };
+        let caps = R::with_mutex_mut(&self.inbound_peer_init_caps, |slot| *slot);
+        crate::accept_cookie::AcceptCookieState {
+            peer_zid,
+            peer_whatami: self.peer_whatami_wire().unwrap_or(0),
+            // The peer's advertisement as the BYTE the peer sent, re-packed by
+            // the module that decoded it rather than re-spelled here.
+            sn_res: caps.map(|c| c.sn_res_byte()).unwrap_or(0),
+            batch_size: caps.map(|c| c.batch_size).unwrap_or(0),
+            nonce,
+            #[cfg(feature = "transport-qos")]
+            qos: QosAcceptState(self.is_qos()),
+            #[cfg(not(feature = "transport-qos"))]
+            qos: QosAcceptState(false),
+            #[cfg(feature = "transport-shm")]
+            shm: ShmAcceptState(self.is_shm()),
+            #[cfg(not(feature = "transport-shm"))]
+            shm: ShmAcceptState(false),
+            #[cfg(feature = "transport-lowlatency")]
+            lowlatency: LowlatencyAcceptState(self.is_lowlatency()),
+            #[cfg(not(feature = "transport-lowlatency"))]
+            lowlatency: LowlatencyAcceptState(false),
+            #[cfg(feature = "transport-compression")]
+            compression: CompressionAcceptState(self.is_compression()),
+            #[cfg(not(feature = "transport-compression"))]
+            compression: CompressionAcceptState(false),
+            patch: PatchAcceptState(if self.patch_was_negotiated() {
+                Some(self.negotiated_patch())
+            } else {
+                None
+            }),
+        }
     }
 
     /// R3b — run `f` against the auth dispatch under its mutex. The recv-stage
@@ -8296,25 +8365,35 @@ impl<R: SessionRuntime, T: TimeSource> SessionFsmUnicastActionsTrait
             // alone (no source installed), or cleared (the source failed) --
             // and the `None` arm of that read is the single fail-closed exit
             // for all three.
+            //
+            // R2769 — the cookie now CARRIES the acceptor's state instead of
+            // being a bare tag over (nonce, zid). This is the seam the atom's
+            // surviving clause names: zenoh's acceptor holds nothing between
+            // InitAck and OpenSyn because its cookie carries what it
+            // negotiated, and it rebuilds from that at OpenSyn
+            // (`io/zenoh-transport/src/unicast/establishment/accept.rs` @
+            // `// Rebuild the state from the cookie`). Every input is already
+            // final HERE, which is what makes this the right site and not an
+            // earlier one: each capability above is staged from the
+            // post-InitSyn merge, and the comments on those lines say so.
             a.draw_cookie_nonce();
             let nonce: Option<u64> = R::with_mutex_mut(&a.cookie_nonce, |slot| *slot);
             let peer_zid: Option<Vec<u8>> =
                 R::with_mutex_mut(&a.inbound_peer_zid, |slot| slot.clone());
-            let cookie_hmac: Option<Vec<u8>> = match (peer_zid, nonce) {
-                (Some(zid), Some(n)) => Some(generate_cookie_hmac_sha256(
+            let cookie_bytes: Option<Vec<u8>> = match (peer_zid, nonce) {
+                (Some(zid), Some(n)) => encode_accept_cookie(
                     &a.params.cookie_signing_key,
-                    &zid,
-                    n,
-                )),
+                    &a.accept_cookie_state(zid, n),
+                ),
                 _ => None,
             };
             let bytes = a
                 .encode_init_with_role(
                     /*is_ack=*/ true,
-                    cookie_hmac.as_deref(),
+                    cookie_bytes.as_deref(),
                     ExtChainRole::InitAck,
                 )
-                .expect("InitAck cookie is HMAC-SHA256[..16] (16 bytes, within codec cap)");
+                .expect("the widest accept cookie is 51 bytes, within the codec's 128 cap");
             a.send_wire(&bytes, Reliability::Reliable, Priority::DEFAULT);
         }
     }
@@ -8540,12 +8619,37 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             Some(n) => n,
             None => return false,
         };
-        let expected =
-            generate_cookie_hmac_sha256(&self.params.cookie_signing_key, &peer_zid, nonce);
-        // Byte-equality compare. Constant-time compare is overkill for a
-        // single-peer test fixture path; if the HMAC verdict ever drives a
-        // security-critical timing oracle on prod hardware, swap to
-        // `subtle::ConstantTimeEq` here.
-        echoed == expected
+        // R2769 — DECODE the cookie the peer handed back rather than
+        // re-deriving a tag from what this acceptor still holds. The
+        // difference is the atom's clause: a re-derivation reads the
+        // acceptor's own memory and can therefore never stop depending on it,
+        // while a decode takes the state OFF the wire. `decode_accept_cookie`
+        // verifies the MAC over the whole payload before it parses a field,
+        // so anything past this point is bytes this node minted.
+        let carried = match crate::accept_cookie::decode_accept_cookie(
+            &self.params.cookie_signing_key,
+            &echoed,
+        ) {
+            Ok(c) => c,
+            Err(_) => return false,
+        };
+        // Upstream's rule, and the reason ONE value still crosses the
+        // InitAck/OpenSyn boundary in memory: the MAC says "this node minted
+        // it", the nonce says "in THIS handshake".
+        // `io/zenoh-transport/src/unicast/establishment/accept.rs` @
+        // `if input.cookie_nonce != cookie.nonce {` compares exactly this
+        // pair, against a `u64` its own driver carries forward from
+        // `SendInitAckOut`. wz's `cookie_nonce` slot is that carry, so
+        // holding it is parity rather than the state this clause is about.
+        if carried.nonce != nonce {
+            return false;
+        }
+        // ⚠ TRANSITIONAL, and named as such. Upstream does not compare the
+        // zid because it has none to compare against — it rebuilds its state
+        // from the cookie and the held copy is gone. wz still holds
+        // `inbound_peer_zid`, so while BOTH exist this asks them to agree,
+        // which is the witness that the carrier is faithful. It becomes
+        // unnecessary, not merely redundant, the round the held slots go.
+        carried.peer_zid == peer_zid
     }
 }

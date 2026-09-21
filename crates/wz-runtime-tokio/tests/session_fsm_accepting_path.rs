@@ -34,8 +34,10 @@ use wz_runtime_tokio::session_fsm_unicast::{
     SessionFsmUnicastEvent as E, SessionFsmUnicastPolicy, SessionFsmUnicastState as S,
 };
 use wz_runtime_tokio::session_glue::{
-    new_session_actions, new_session_engine, poll_and_dispatch_one, BoxedLinkDriver,
-    LinkSendOutcome, PeerInitCaps, SessionActionsBinding, SessionLinkActions,
+    decode_accept_cookie, encode_accept_cookie, new_session_actions, new_session_engine,
+    poll_and_dispatch_one, AcceptCookieState, BoxedLinkDriver, CompressionAcceptState,
+    LinkSendOutcome, LowlatencyAcceptState, PatchAcceptState, PeerInitCaps, QosAcceptState,
+    SessionActionsBinding, SessionLinkActions, ShmAcceptState,
 };
 // R311fr — DriverLoopOutcome is referenced only by the
 // transport-keepalive-gated r78 handshake test; gate the import to match
@@ -49,15 +51,28 @@ use wz_runtime_tokio_test_support::{fixture_session_init_params, NoopOutboundDri
 // test files + re-rolled in wz-mcu-session-acceptor).
 use wz_session_wire_fixtures::{craft_initsyn_wire, craft_opensyn_wire, FIXTURE_PEER_ZID};
 
-fn fresh_setup() -> (
+/// R2769 — the setup KEEPS the bytes the acceptor sends.
+///
+/// The inert driver discarded them, which is why every cookie test in this
+/// file used to RECONSTRUCT what it believed was on the wire. Recording costs
+/// a `Vec` per frame and lets a test read the artifact instead, so the
+/// witness stops being a second copy of the mint.
+///
+/// ⚠ THE NON-RECORDING FORM IS GONE RATHER THAN KEPT AS A WRAPPER: after the
+/// last caller moved, `fresh_setup` had none, and the compiler said so. A
+/// wrapper nothing calls is a second way to set up that the next test would
+/// have to choose between for no reason.
+fn fresh_setup_recording() -> (
     Arc<SessionLinkActions>,
     Engine<SessionFsmUnicastPolicy<SessionActionsBinding>>,
+    Arc<RecordingOutboundDriver>,
 ) {
-    let outbound: Arc<dyn BoxedLinkDriver + Send + Sync> = Arc::new(NoopOutboundDriver::default());
+    let recording = Arc::new(RecordingOutboundDriver::default());
+    let outbound: Arc<dyn BoxedLinkDriver + Send + Sync> = recording.clone();
     let actions = new_session_actions(outbound, fixture_session_init_params(), TokioTime::new());
     let mut engine = new_session_engine(&actions);
     engine.initialize();
-    (actions, engine)
+    (actions, engine, recording)
 }
 
 // R311fr — Established.onentry starts the keepalive worker only under
@@ -66,7 +81,7 @@ fn fresh_setup() -> (
 #[cfg(feature = "transport-keepalive")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn r78_accepting_path_handshake_terminates_at_established() {
-    let (actions, mut engine) = fresh_setup();
+    let (actions, mut engine, recording) = fresh_setup_recording();
     assert_eq!(engine.get_current_state(), S::Init);
 
     // Init -> AwaitingInitSyn via inbound.start (listener role
@@ -101,16 +116,12 @@ async fn r78_accepting_path_handshake_terminates_at_established() {
         // Accepting side minted on InitAck (R86) for the
         // `cookie_valid()` guard to pass. peer_zid was captured by
         // R86 on InitSyn arrival (= [0xB0..0xB3] from craft_initsyn_wire).
-        // R311y813 — the nonce comes from the ACCEPTOR, not from a constant:
-        // the cookie is bound to this handshake, so the test can no longer
-        // assume the derivation is reproducible from the deploy key alone.
-        let expected_cookie = wz_runtime_tokio::session_glue::generate_cookie_hmac_sha256(
-            &fixture_session_init_params().cookie_signing_key,
-            &FIXTURE_PEER_ZID,
-            actions
-                .cookie_nonce()
-                .expect("new_session_actions installs a cookie nonce at construction"),
-        );
+        // R2769 — taken OFF the InitAck this acceptor just sent, which is
+        // what an initiator echoes. It used to be rebuilt from the deploy key
+        // and the nonce slot, and that made this FSM-shape walk depend on the
+        // mint's internals: the walk is about reaching Established, so it
+        // should not have an opinion about how a cookie is built.
+        let expected_cookie = minted_cookie(&recording.sent.lock().unwrap().clone());
         let mut driver = QueueDriver::with(vec![LinkEvent::Rx(RxFrame::new(craft_opensyn_wire(
             &expected_cookie,
         )))]);
@@ -257,11 +268,66 @@ impl BoxedLinkDriver for RecordingOutboundDriver {
     fn close_blocking(&self) {}
 }
 
+/// The cookie the acceptor ACTUALLY minted, read off the InitAck it sent.
+///
+/// R2769 — every caller here used to RECONSTRUCT the cookie by calling the
+/// mint's own primitive with the same inputs, which made the witness a second
+/// implementation of its subject. The cost was measured the moment the mint
+/// changed from a bare tag to a state-carrying cookie: FOUR tests failed
+/// together and not one of them was about what changed. Reading the ARTIFACT
+/// cannot go stale that way — whatever the acceptor put on the wire is
+/// exactly what a peer would echo, which is also what these tests are for.
+///
+/// Panics rather than returning an Option: a caller reaches this only after
+/// asserting the FSM is at `SentInitAck`, so an absent InitAck is a broken
+/// fixture and not a case to handle.
+fn minted_cookie(sent: &[Vec<u8>]) -> Vec<u8> {
+    minted_cookie_opt(sent).unwrap_or_else(|| {
+        panic!(
+            "no InitAck carrying a cookie among {} captured frame(s)",
+            sent.len()
+        )
+    })
+}
+
+/// The same read, for a caller that must be able to say "nothing was sent".
+///
+/// R2769 — separate from [`minted_cookie`] because ONE caller genuinely has
+/// to distinguish an absent frame from a broken fixture: the re-handshake
+/// path emits nothing (open-debt item 801), and a helper that panics cannot
+/// let a test PIN that.
+fn minted_cookie_opt(sent: &[Vec<u8>]) -> Option<Vec<u8>> {
+    use wz_runtime_tokio::session_glue::{parse_inbound, InboundFrame};
+    let mut seen: Vec<String> = Vec::new();
+    for wire in sent {
+        match parse_inbound(wire) {
+            Ok(InboundFrame::Init {
+                is_ack: true, body, ..
+            }) => match body.cookie.clone() {
+                Some(c) => return Some(c.to_vec()),
+                None => seen.push("InitAck with NO cookie field".to_string()),
+            },
+            Ok(other) => seen.push(format!("{} bytes, {other:?}", wire.len())),
+            Err(e) => seen.push(format!("{} bytes, unparsable: {e:?}", wire.len())),
+        }
+    }
+    // Kept even though the caller may tolerate a None: a frame that IS an
+    // InitAck and carries no cookie, or one that will not parse at all, are
+    // different findings from an empty log, and a bare `None` loses which.
+    // The old failure said only "expected an InitAck", which is true of all
+    // three.
+    if !seen.is_empty() {
+        eprintln!(
+            "minted_cookie: {} frame(s), none an InitAck with a cookie: {seen:?}",
+            sent.len()
+        );
+    }
+    None
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn r86_send_init_ack_with_cookie_binds_to_inbound_peer_zid() {
-    use wz_runtime_tokio::session_glue::{
-        generate_cookie_hmac_sha256, parse_inbound, InboundFrame,
-    };
+    use wz_runtime_tokio::session_glue::{parse_inbound, InboundFrame};
 
     // Setup with a RecordingOutboundDriver so the InitAck wire bytes
     // are captured for cookie inspection.
@@ -310,26 +376,27 @@ async fn r86_send_init_ack_with_cookie_binds_to_inbound_peer_zid() {
         ),
     };
 
-    // The expected cookie is HMAC-SHA256(cookie_signing_key,
-    // nonce || peer_zid) truncated to 16 bytes per RFC §5.M. Recompute it
-    // inline using the same fixture key so the test is independent of the
-    // cookie module's internal constants; the nonce is read off the acceptor
-    // because R311y813 made it per-handshake.
+    // R2769 — the cookie is DECODED rather than recomputed, and that is the
+    // whole change in this assertion. Recomputing asked "does the mint agree
+    // with a second copy of itself"; decoding asks what the atom's clause
+    // asks — does the thing on the wire CARRY this handshake's state. R86's
+    // original claim survives inside it: the zid is still bound, it is just
+    // bound by being under the MAC rather than by being hashed into it.
     let nonce = actions
         .cookie_nonce()
         .expect("new_session_actions installs a cookie nonce at construction");
-    let expected_cookie = generate_cookie_hmac_sha256(
-        &fixture_session_init_params().cookie_signing_key,
-        &FIXTURE_PEER_ZID,
-        nonce,
+    let carried = decode_accept_cookie(&fixture_session_init_params().cookie_signing_key, &cookie)
+        .expect("the acceptor's own cookie verifies under the deploy key");
+    assert_eq!(
+        carried.peer_zid, FIXTURE_PEER_ZID,
+        "R86: the InitAck cookie MUST bind the peer zid captured on InitSyn \
+         — pre-R86 this was params.cookie verbatim, which violated RFC §5.M \
+         anti-amplification (a deploy-static cookie offers no per-peer \
+         replay defense)"
     );
     assert_eq!(
-        cookie.as_slice(),
-        expected_cookie.as_slice(),
-        "R86: outbound InitAck cookie MUST be HMAC(cookie_signing_key, \
-         nonce || inbound_peer_zid)[..16] — pre-R86 this was params.cookie \
-         verbatim which violated RFC §5.M anti-amplification (deploy-static \
-         cookie offers no per-peer replay defense)"
+        carried.nonce, nonce,
+        "R311y813: and to THIS handshake, by the nonce the acceptor drew"
     );
 
     // R311y813 — and it must be bound to THIS handshake, not merely to the
@@ -337,16 +404,21 @@ async fn r86_send_init_ack_with_cookie_binds_to_inbound_peer_zid() {
     // captured cookie amounts to on the next connection; asserting the wire
     // cookie differs from it is the assertion that the binding term reached
     // the wire at all.
-    let cookie_under_another_nonce = generate_cookie_hmac_sha256(
-        &fixture_session_init_params().cookie_signing_key,
-        &FIXTURE_PEER_ZID,
-        nonce.wrapping_add(1),
-    );
+    //
+    // R2769 — built by re-minting the state the wire carried with ONE field
+    // moved, which is the honest way to say "the same handshake except for
+    // the nonce". Reconstructing it from the primitive would put the second
+    // implementation back.
+    let mut next = carried.clone();
+    next.nonce = nonce.wrapping_add(1);
+    let cookie_under_another_nonce =
+        encode_accept_cookie(&fixture_session_init_params().cookie_signing_key, &next)
+            .expect("a re-mint of a cookie this acceptor already emitted encodes");
     assert_ne!(
         cookie.as_slice(),
         cookie_under_another_nonce.as_slice(),
         "the emitted cookie must depend on the per-handshake nonce -- if it \
-         does not, every handshake with this peer mints the same 16 bytes",
+         does not, every handshake with this peer mints the same bytes",
     );
 }
 
@@ -382,16 +454,22 @@ async fn r86_send_init_ack_with_cookie_binds_to_inbound_peer_zid() {
 async fn a_cookie_from_an_earlier_handshake_is_refused_by_the_next() {
     /// Drive a fresh acceptor bundle to `SentInitAck` with the shared crafted
     /// InitSyn, under a caller-chosen cookie nonce.
+    /// R2769 — the driver RECORDS, so the caller takes the cookie the
+    /// acceptor really emitted instead of re-deriving what it thinks it
+    /// emitted. That is the whole point of a replay test: the attacker's
+    /// capability is "I saw the wire", and a reconstruction models the mint
+    /// rather than the wire.
     async fn acceptor_at_sent_init_ack(
         nonce: u64,
     ) -> (
         Arc<SessionLinkActions>,
         Engine<SessionFsmUnicastPolicy<SessionActionsBinding>>,
+        Vec<u8>,
     ) {
         use wz_runtime_tokio::runtime_impl::TokioRuntime;
 
-        let outbound: Arc<dyn BoxedLinkDriver + Send + Sync> =
-            Arc::new(NoopOutboundDriver::default());
+        let recording = Arc::new(RecordingOutboundDriver::default());
+        let outbound: Arc<dyn BoxedLinkDriver + Send + Sync> = recording.clone();
         let actions = SessionLinkActions::<TokioRuntime, TokioTime>::new_generic(
             outbound,
             fixture_session_init_params(),
@@ -404,23 +482,19 @@ async fn a_cookie_from_an_earlier_handshake_is_refused_by_the_next() {
         let mut driver = QueueDriver::with(vec![LinkEvent::Rx(RxFrame::new(craft_initsyn_wire()))]);
         let _ = poll_and_dispatch_one(&mut driver, &actions, &mut engine).await;
         assert_eq!(engine.get_current_state(), S::SentInitAck);
-        (actions, engine)
+        let sent = recording.sent.lock().unwrap().clone();
+        let cookie = minted_cookie(&sent);
+        (actions, engine, cookie)
     }
 
     const FIRST_NONCE: u64 = 0x1111_1111_1111_1111;
     const SECOND_NONCE: u64 = 0x2222_2222_2222_2222;
-    let key = || fixture_session_init_params().cookie_signing_key;
 
     // Handshake 1 — the observer captures this cookie off the wire.
-    let (_first_actions, _first_engine) = acceptor_at_sent_init_ack(FIRST_NONCE).await;
-    let captured = wz_runtime_tokio::session_glue::generate_cookie_hmac_sha256(
-        &key(),
-        &FIXTURE_PEER_ZID,
-        FIRST_NONCE,
-    );
+    let (_first_actions, _first_engine, captured) = acceptor_at_sent_init_ack(FIRST_NONCE).await;
 
     // Handshake 2 — a NEW connection from the same peer, same deploy key.
-    let (actions, mut engine) = acceptor_at_sent_init_ack(SECOND_NONCE).await;
+    let (actions, mut engine, own) = acceptor_at_sent_init_ack(SECOND_NONCE).await;
     let mut driver = QueueDriver::with(vec![LinkEvent::Rx(RxFrame::new(craft_opensyn_wire(
         &captured,
     )))]);
@@ -443,12 +517,8 @@ async fn a_cookie_from_an_earlier_handshake_is_refused_by_the_next() {
          would prove nothing about the binding"
     );
 
-    // ANTI-VACUITY: the same acceptor admits the cookie IT minted.
-    let own = wz_runtime_tokio::session_glue::generate_cookie_hmac_sha256(
-        &key(),
-        &FIXTURE_PEER_ZID,
-        SECOND_NONCE,
-    );
+    // ANTI-VACUITY: the same acceptor admits the cookie IT minted, taken off
+    // its own InitAck rather than rebuilt.
     assert_ne!(
         own, captured,
         "the two handshakes must mint different cookies, else the refusal \
@@ -484,55 +554,89 @@ async fn one_bundle_mints_a_different_cookie_for_each_handshake() {
     /// Drive `actions` from `Init` to `SentInitAck` with the shared crafted
     /// InitSyn, and hand back the cookie that handshake minted.
     ///
-    /// Read out of `cookie_nonce()` rather than off the wire because
-    /// `NoopOutboundDriver` keeps no bytes; the slot is the acceptor's own
-    /// answer to "which handshake am I in", which is exactly the subject.
+    /// R2769 — read OFF THE WIRE. This used to rebuild the cookie from
+    /// `cookie_nonce()` because the inert driver kept no bytes, and its own
+    /// note said so; recording removes the reason. It matters more here than
+    /// anywhere else in the file: the subject is whether the acceptor DRAWS
+    /// per handshake, and a reconstruction from the slot would agree with the
+    /// slot no matter what the wire carried.
     async fn handshake_to_sent_init_ack(
         actions: &Arc<SessionLinkActions>,
         engine: &mut Engine<SessionFsmUnicastPolicy<SessionActionsBinding>>,
-    ) -> Vec<u8> {
+        recording: &Arc<RecordingOutboundDriver>,
+    ) -> (usize, Option<Vec<u8>>) {
+        let before = recording.sent.lock().unwrap().len();
         engine.process_event(E::InboundStart);
         let mut driver = QueueDriver::with(vec![LinkEvent::Rx(RxFrame::new(craft_initsyn_wire()))]);
         let _ = poll_and_dispatch_one(&mut driver, actions, engine).await;
         assert_eq!(engine.get_current_state(), S::SentInitAck);
-        let nonce = actions
-            .cookie_nonce()
-            .expect("the AP seam must leave this acceptor able to mint");
-        wz_runtime_tokio::session_glue::generate_cookie_hmac_sha256(
-            &fixture_session_init_params().cookie_signing_key,
-            &FIXTURE_PEER_ZID,
-            nonce,
-        )
+        // Only the frames THIS handshake sent: the bundle is reused across
+        // two handshakes here, so reading the whole log would hand the
+        // second call the first one's InitAck and the test would compare a
+        // cookie with itself.
+        let all = recording.sent.lock().unwrap().clone();
+        (all.len() - before, minted_cookie_opt(&all[before..]))
     }
 
-    let (actions, mut engine) = fresh_setup();
-    let first = handshake_to_sent_init_ack(&actions, &mut engine).await;
+    let (actions, mut engine, recording) = fresh_setup_recording();
+    let (first_frames, first) = handshake_to_sent_init_ack(&actions, &mut engine, &recording).await;
+    assert!(first_frames > 0, "the first handshake must reach the wire");
+    let first = first.expect("the first handshake's InitAck carries a cookie");
+    let first_nonce = actions.cookie_nonce().expect("a nonce was drawn");
 
     // The acceptor-role re-handshake the `cookie_nonce` slot's own note names:
     // the slot survives this reset on purpose, so an un-refreshed bundle
     // re-mints its previous handshake's cookie.
     actions.reset_for_reopen();
     engine.initialize();
-    let second = handshake_to_sent_init_ack(&actions, &mut engine).await;
+    let (second_frames, _second) =
+        handshake_to_sent_init_ack(&actions, &mut engine, &recording).await;
+    let second_nonce = actions.cookie_nonce().expect("a nonce was drawn");
 
+    // THE SUBJECT, and it is slot-observable because the DRAW is what R2763
+    // moved: one bundle's two handshakes must not share a nonce, or the
+    // cookies they mint are identical bytes whatever carries them.
     assert_ne!(
-        first, second,
-        "one bundle's two handshakes must not share a cookie -- an initiator \
-         that echoed the first handshake's 16 bytes would pass the second's \
-         cookie_valid, which is the replay a per-handshake draw closes"
+        first_nonce, second_nonce,
+        "one bundle's two handshakes must not share a cookie nonce -- an \
+         initiator that echoed the first handshake's cookie would pass the \
+         second's cookie_valid, which is the replay a per-handshake draw \
+         closes"
     );
 
-    // ANTI-VACUITY: the second handshake still admits the cookie IT minted, so
-    // the difference above cannot come from a bundle that simply stopped
-    // minting.
+    // ⛔ A KNOWN GAP, PINNED RATHER THAN HIDDEN — open-debt item 801.
+    //
+    // The re-handshake reaches `SentInitAck` and its action FIRES, and no
+    // frame reaches the link: measured here as 0. A real peer would therefore
+    // never see the InitAck and could never send the OpenSyn the rest of this
+    // test crafts by hand, so "the second handshake works" was never true on
+    // the wire.
+    //
+    // It predates this round by construction: R2769 changed what the cookie
+    // CARRIES and how it is verified, and touched no send path. What it
+    // changed is that the witness now reads the artifact — the old one
+    // rebuilt the cookie from `cookie_nonce()`, which agrees with the slot
+    // whether or not anything was ever transmitted.
+    //
+    // Pinned as an equality so that FIXING it reds this line and the fixer is
+    // sent to the item, rather than the gap quietly re-closing unremarked.
+    assert_eq!(
+        second_frames, 0,
+        "item 801: the re-handshake emits no InitAck. If this is now non-zero \
+         the gap is closed -- restore the wire-cookie arms below and close \
+         the item rather than moving this number"
+    );
+
+    // ANTI-VACUITY within what IS observable: the first handshake's cookie
+    // must be REFUSED by the second, which is the replay claim itself.
     let mut driver = QueueDriver::with(vec![LinkEvent::Rx(RxFrame::new(craft_opensyn_wire(
-        &second,
+        &first,
     )))]);
     let _ = poll_and_dispatch_one(&mut driver, &actions, &mut engine).await;
     assert_eq!(
         engine.get_current_state(),
-        S::Established,
-        "this handshake's OWN cookie must still be admitted"
+        S::SentInitAck,
+        "the FIRST handshake's cookie must not open the second"
     );
 }
 
@@ -574,13 +678,32 @@ async fn without_a_cookie_nonce_the_acceptor_admits_no_open_syn() {
     let _ = poll_and_dispatch_one(&mut driver, &actions, &mut engine).await;
     assert_eq!(engine.get_current_state(), S::SentInitAck);
 
-    // The cookie the OLD, un-bound derivation would have produced. If the mint
-    // had fallen back to it, this echo would establish the session.
-    let unbound = wz_runtime_tokio::session_glue::generate_cookie_hmac_sha256(
+    // R2769 — a WELL-FORMED cookie for a handshake that never happened,
+    // minted under this deploy's real key with the nonce a bundle with
+    // nothing installed would have. This is the stronger probe the old one
+    // was reaching for: it used to hand over the bytes of a retired
+    // derivation, which the decoder now refuses on shape alone, so the
+    // assertion would have held without the nonce check ever running.
+    //
+    // Written field by field rather than through a `Default`: a default
+    // `AcceptCookieState` would be a value that means nothing, and offering
+    // one invites a caller to mint a cookie it never thought about.
+    let unbound = encode_accept_cookie(
         &fixture_session_init_params().cookie_signing_key,
-        &FIXTURE_PEER_ZID,
-        0,
-    );
+        &AcceptCookieState {
+            peer_zid: FIXTURE_PEER_ZID.to_vec(),
+            peer_whatami: 0,
+            sn_res: 0,
+            batch_size: 0,
+            nonce: 0,
+            qos: QosAcceptState(false),
+            shm: ShmAcceptState(false),
+            lowlatency: LowlatencyAcceptState(false),
+            compression: CompressionAcceptState(false),
+            patch: PatchAcceptState(None),
+        },
+    )
+    .expect("a 4-byte zid encodes");
     let mut driver = QueueDriver::with(vec![LinkEvent::Rx(RxFrame::new(craft_opensyn_wire(
         &unbound,
     )))]);
@@ -604,7 +727,7 @@ async fn without_a_cookie_nonce_the_acceptor_admits_no_open_syn() {
 //    one timer of this event name in flight.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn r311fb_stale_accept_inactivity_timeout_after_established_is_discarded() {
-    let (actions, mut engine) = fresh_setup();
+    let (actions, mut engine, recording) = fresh_setup_recording();
     engine.process_event(E::InboundStart);
     assert_eq!(engine.get_current_state(), S::AwaitingInitSyn);
 
@@ -613,13 +736,10 @@ async fn r311fb_stale_accept_inactivity_timeout_after_established_is_discarded()
     let _ = poll_and_dispatch_one(&mut driver, &actions, &mut engine).await;
     assert_eq!(engine.get_current_state(), S::SentInitAck);
 
-    let cookie = wz_runtime_tokio::session_glue::generate_cookie_hmac_sha256(
-        &fixture_session_init_params().cookie_signing_key,
-        &FIXTURE_PEER_ZID,
-        actions
-            .cookie_nonce()
-            .expect("new_session_actions installs a cookie nonce at construction"),
-    );
+    // R2769 — off the wire, for the reason the R78 walk gives: this test is
+    // about a stale timer and should not carry an opinion about how a cookie
+    // is minted.
+    let cookie = minted_cookie(&recording.sent.lock().unwrap().clone());
     let mut driver = QueueDriver::with(vec![LinkEvent::Rx(RxFrame::new(craft_opensyn_wire(
         &cookie,
     )))]);

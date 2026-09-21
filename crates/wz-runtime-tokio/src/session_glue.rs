@@ -120,6 +120,23 @@ pub use wz_session_core::signing_key::{
 // module for `SessionInitParams`, and a caller forced onto two crate paths for
 // one construction is how the AP demo ended up writing a literal instead.
 pub use wz_session_core::entropy::{EntropySource, EntropyUnavailable};
+// R2769 — the accept COOKIE travels with the key that authenticates it, for
+// the reason the note above gives about two crate paths for one
+// construction. A consumer that reads an InitAck's cookie needs the decoder
+// to get anything out of it, and the accepting-path tests are the first such
+// consumer; `generate_cookie_hmac_sha256` above is no longer what the
+// acceptor mints, though it stays exported because the initiator-side and
+// key-separation tests still measure the primitive itself.
+pub use wz_session_core::accept_cookie::{
+    decode_accept_cookie, encode_accept_cookie, AcceptCookieState, CookieError,
+};
+// The per-extension states the cookie is made of. Exported with it because a
+// caller that builds an `AcceptCookieState` cannot name its members without
+// them, which is the two-crate-paths problem the note above already refuses.
+pub use wz_session_core::accept_state::{
+    AcceptState, CompressionAcceptState, LowlatencyAcceptState, PatchAcceptState, QosAcceptState,
+    ShmAcceptState,
+};
 
 /// R69 / R311ei — construct a `SigningKey` from OS-backed cryptographic
 /// entropy. Pulls 32 bytes from `getrandom::getrandom` (Linux
