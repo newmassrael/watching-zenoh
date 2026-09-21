@@ -62,7 +62,10 @@ else
     esac
     url="https://github.com/eclipse-zenoh/zenoh-c/releases/download/${ZENOH_C_VERSION}/zenoh-c-${ZENOH_C_VERSION}-${target}-standalone.zip"
     say "fetching $url"
-    if ! curl -fsSL "$url" -o "$tmp/zenoh-c.zip"; then
+    # R2781 — retried, as every other release fetch here is; the mbedtls
+    # installer's unretried twin lost hosted run 35614359072 to one 504.
+    if ! curl -sSLf --retry 3 --retry-all-errors --retry-delay 2 \
+        --connect-timeout 10 --max-time 180 -o "$tmp/zenoh-c.zip" "$url"; then
         say "FAIL: could not fetch the zenoh-c ${ZENOH_C_VERSION} release archive"
         exit 1
     fi

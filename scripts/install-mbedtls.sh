@@ -107,7 +107,14 @@ trap 'rm -rf "$tmp"' EXIT
 
 url="https://github.com/Mbed-TLS/mbedtls/releases/download/mbedtls-${MBEDTLS_VERSION}/mbedtls-${MBEDTLS_VERSION}.tar.bz2"
 say "fetching $url"
-if ! curl -fsSL "$url" -o "$tmp/mbedtls.tar.bz2"; then
+# R2781 — RETRIED, with the flags every other release fetch in this tree
+# already uses (install-shellcheck.sh, and the workflow's own curl steps).
+# Hosted run 35614359072 lost its whole Layer E job to ONE `504` from the
+# release host here; a transient server error is exactly what `--retry
+# --retry-all-errors` answers, and the checksum below still judges whatever
+# arrives.
+if ! curl -sSLf --retry 3 --retry-all-errors --retry-delay 2 \
+    --connect-timeout 10 --max-time 180 -o "$tmp/mbedtls.tar.bz2" "$url"; then
     say "FAIL: could not fetch the Mbed TLS ${MBEDTLS_VERSION} release archive"
     exit 1
 fi
