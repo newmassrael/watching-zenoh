@@ -984,6 +984,13 @@ pub struct Contradiction {
 /// beside it. As a KEY that does not matter — it only has to be unique within
 /// a list and direction, which it is either way — but a reader must not add it
 /// to anything.
+// R2766 (open debt 788) — GATED AS ITS CONSUMERS ARE, and gate 2h taught this
+// file the rule twice in one round. Every reader of these types is behind
+// `network-codecs`: the impl below, the census that holds them, and
+// `fields_json`'s `push_selected`. A type left ungated compiles in
+// combinations where nothing can reach it, and `-D dead-code` is right to
+// refuse a field no build can read.
+#[cfg(feature = "network-codecs")]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub struct RowKey {
     list: usize,
@@ -1029,9 +1036,16 @@ impl RowKey {
 /// decide. Those are different facts — "nothing was asked here" against "we
 /// asked and could not tell" — and a renderer that folded both into one null
 /// would let a reader read a gap as a measured exclusion.
+#[cfg(feature = "network-codecs")]
 #[derive(Debug, Clone, Default)]
 pub struct RowVerdict {
-    records: Vec<crate::filter::Truth>,
+    // R2766 (open debt 788) — FULLY QUALIFIED, and the neighbours below that
+    // write a bare `Vec` are not a precedent: they sit inside the
+    // `network-codecs` block where the import reaches. This struct carries no
+    // cfg of its own, so it compiles in every combination — including the ones
+    // that never bring `Vec` into scope. Gate 2h is what said so; the default
+    // lane compiles this file with the import present and sees nothing.
+    records: alloc::vec::Vec<crate::filter::Truth>,
 }
 
 #[cfg(feature = "network-codecs")]
