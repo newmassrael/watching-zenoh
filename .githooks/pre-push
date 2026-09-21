@@ -843,6 +843,18 @@ round_fed_gates=(
     # hook's own standard (gate 2h runs 12 legs at 34s). It builds throwaway
     # probe crates, which is the cost.
     "feature_gate_diagnostic.py --check"
+    # R2764 — the literal cookie signing key. Its shell predecessor was not a
+    # member and could not have been: the array's runner is `python3`, and the
+    # reach gate reads modules. The cost of that gap is measured — the gate
+    # redded hosted Layer C0 for three runs on a test key added to a new file,
+    # because it compared a per-file COUNT against a hand-written allowance and
+    # a new file has no row. The replacement classifies each SITE by its cfg
+    # predicate, so what reaches this hook is the real question: did a literal
+    # land where no `test` gates it.
+    # Round-fed: it enumerates TRACKED `crates/**/src` and `deploy/**/src`
+    # sources, so a file added tomorrow is inside its population already.
+    # MEASURED: 1.7-2.1s over three warm runs, a parse with no build.
+    "literal_key_gate.py"
 )
 # ⚠ The module and its ARGUMENTS are expanded separately, and that too is
 # forced rather than chosen: `scripts/lib/"${cmd[@]}"` attaches the prefix to

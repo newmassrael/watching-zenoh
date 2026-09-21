@@ -3241,7 +3241,18 @@ layer_c0_test_discipline() {
     # watches leaked at FOUR production sites (the AP demo, the C ABI drive, the
     # replay live path, the MCU acceptor) while the OS-entropy constructor that
     # should have been called sat unused since R69.
-    bash scripts/lib/literal-key-gate.sh . || return 1
+    #
+    # R2764 replaced the shell form. That one compared a per-file COUNT against
+    # a hand-written allowance whose own header claimed every row was a
+    # `#[cfg(test)]` block — a property nothing checked, so a literal MOVED out
+    # of a test module kept the count and reported green (MEASURED both ways
+    # this round), while a test added to a new file reded hosted C0 three times
+    # for want of a row. The replacement classifies each SITE by its cfg
+    # predicate, so a test is no longer a gate edit and a move is no longer
+    # invisible. The selftest runs FIRST: its refusal arms are the only place
+    # the failure branches are exercised.
+    python3 scripts/lib/literal_key_gate.py --selftest || return 1
+    python3 scripts/lib/literal_key_gate.py || return 1
     # R2150 (unregistered open-debt item 539) — the KIND of unhonoured. R2148
     # split `UNHONOURED_UPSTREAM_CONFIG_KEYS` into "wz cannot" and "the reader
     # was never told", and the test guarding that split makes it total,
