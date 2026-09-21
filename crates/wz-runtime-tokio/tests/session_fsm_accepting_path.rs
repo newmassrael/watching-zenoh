@@ -36,8 +36,8 @@ use wz_runtime_tokio::session_fsm_unicast::{
 use wz_runtime_tokio::session_glue::{
     decode_accept_cookie, encode_accept_cookie, new_session_actions, new_session_engine,
     poll_and_dispatch_one, AcceptCookieState, BoxedLinkDriver, CompressionAcceptState,
-    LinkSendOutcome, LowlatencyAcceptState, PatchAcceptState, PeerInitCaps, QosAcceptState,
-    SessionActionsBinding, SessionLinkActions, ShmAcceptState,
+    LinkSendOutcome, LowlatencyAcceptState, NegotiatedExtensions, PatchAcceptState, PeerInitCaps,
+    QosAcceptState, SessionActionsBinding, SessionLinkActions, ShmAcceptState,
 };
 // R311fr — DriverLoopOutcome is referenced only by the
 // transport-keepalive-gated r78 handshake test; gate the import to match
@@ -670,7 +670,7 @@ async fn one_bundle_mints_a_different_cookie_for_each_handshake() {
     );
 }
 
-/// R2773 — THE REBUILD. After an admitted OpenSyn the acceptor's negotiated
+/// R2772 — THE REBUILD. After an admitted OpenSyn the acceptor's negotiated
 /// state comes from the COOKIE, not from whatever it happened to still hold.
 ///
 /// ## Why this is asked of `patch` and of nothing else
@@ -702,7 +702,18 @@ async fn the_open_syn_rebuilds_the_negotiated_state_from_the_cookie() {
     let _ = poll_and_dispatch_one(&mut driver, &actions, &mut engine).await;
     assert_eq!(engine.get_current_state(), S::SentInitAck);
 
-    let negotiated = actions.negotiated_patch();
+    // The cookie is read off the wire, so what is asserted is what a peer
+    // would echo rather than what this test believes was minted. R2773 made
+    // it the ONLY place the level can be read here: the acceptor lets go of
+    // its slots once the InitAck is out.
+    let cookie = minted_cookie(&recording.sent.lock().unwrap().clone());
+    let carried = decode_accept_cookie(&fixture_session_init_params().cookie_signing_key, &cookie)
+        .expect("the acceptor's own cookie verifies");
+    let negotiated = carried
+        .negotiated
+        .patch
+        .0
+        .expect("an admitted InitSyn agrees a level, and the cookie carries it");
     assert!(
         negotiated >= 1,
         "ANTI-VACUITY: this handshake must negotiate a level the test can \
@@ -710,20 +721,12 @@ async fn the_open_syn_rebuilds_the_negotiated_state_from_the_cookie() {
          nothing; got {negotiated}"
     );
 
-    // The cookie is read off the wire, so what is asserted is what a peer
-    // would echo rather than what this test believes was minted.
-    let cookie = minted_cookie(&recording.sent.lock().unwrap().clone());
-    let carried = decode_accept_cookie(&fixture_session_init_params().cookie_signing_key, &cookie)
-        .expect("the acceptor's own cookie verifies");
-    assert_eq!(
-        carried.patch,
-        PatchAcceptState(Some(negotiated)),
-        "the cookie must carry the level this handshake negotiated"
-    );
-
-    // DAMAGE the held copy. `min()` can only lower, which is exactly why this
-    // is a safe way to disturb it: nothing in the session can undo it except
-    // a write from outside the merge.
+    // DAMAGE the slot. `min()` can only lower, which is exactly why this is a
+    // safe way to disturb it: nothing in the session can undo it except a
+    // write from outside the merge. Since R2773 the slot starts EMPTY here,
+    // and the damage is still what keeps the restore honest — from `None`
+    // the `min()` merge would rise to the carried level on its own, so a
+    // rebuild routed through the merge would pass without the damage.
     actions.negotiate_patch_against_peer(negotiated - 1);
     assert_eq!(
         actions.negotiated_patch(),
@@ -742,6 +745,79 @@ async fn the_open_syn_rebuilds_the_negotiated_state_from_the_cookie() {
         "the admitted OpenSyn must RESTORE the level the cookie carried -- a \
          RISE is impossible from the min() merge, so the cookie is the only \
          place it can have come from"
+    );
+}
+
+/// R2773 — THE RELEASE. Between InitAck and OpenSyn the acceptor holds none
+/// of the negotiated state its cookie carries, and the OpenSyn rebuild is
+/// what puts it back.
+///
+/// Upstream's acceptor holds nothing there because `send_init_ack` takes its
+/// `State` by value —
+/// `io/zenoh-transport/src/unicast/establishment/accept.rs` @ `type SendInitAckIn = (State, SendInitAckIn);`
+/// — and `recv_open_syn` builds a new one from the cookie.
+///
+/// `patch` carries the witness in a default build, for the reason the rebuild
+/// test gives. It is read through `patch_was_negotiated()`, which separates
+/// "nothing agreed" from "agreed 0", so an acceptor that kept the level cannot
+/// pass the middle assertion by happening to hold a zero.
+///
+/// The QoS arm is the stronger discriminator where it compiles: the offer and
+/// the outcome DIFFER there — this node offers QoS and the peer does not — so
+/// the slot reads the offer after InitAck and the outcome after OpenSyn, and
+/// only a release followed by a rebuild produces that pair.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_acceptor_holds_no_negotiated_state_between_init_ack_and_open_syn() {
+    let (actions, mut engine, recording) = fresh_setup_recording();
+    #[cfg(feature = "transport-qos")]
+    assert!(actions.set_qos_offer(true), "qos offer applies");
+    engine.process_event(E::InboundStart);
+    let mut driver = QueueDriver::with(vec![LinkEvent::Rx(RxFrame::new(
+        craft_initsyn_wire_with_patch(2),
+    ))]);
+    let _ = poll_and_dispatch_one(&mut driver, &actions, &mut engine).await;
+    assert_eq!(engine.get_current_state(), S::SentInitAck);
+
+    let cookie = minted_cookie(&recording.sent.lock().unwrap().clone());
+    let carried = decode_accept_cookie(&fixture_session_init_params().cookie_signing_key, &cookie)
+        .expect("the acceptor's own cookie verifies");
+    let agreed = carried
+        .negotiated
+        .patch
+        .0
+        .expect("ANTI-VACUITY: the handshake must agree a level for the release to let go of");
+    assert!(
+        !actions.patch_was_negotiated(),
+        "after the InitAck the acceptor must hold no agreed level -- the \
+         cookie carries it"
+    );
+    #[cfg(feature = "transport-qos")]
+    {
+        assert!(
+            !carried.negotiated.qos.0,
+            "ANTI-VACUITY: the peer offered no QoS, so the outcome must differ \
+             from this node's offer"
+        );
+        assert!(
+            actions.is_qos(),
+            "after the InitAck the QoS slot is back at this node's OFFER"
+        );
+    }
+
+    let mut driver = QueueDriver::with(vec![LinkEvent::Rx(RxFrame::new(craft_opensyn_wire(
+        &cookie,
+    )))]);
+    let _ = poll_and_dispatch_one(&mut driver, &actions, &mut engine).await;
+    assert_eq!(engine.get_current_state(), S::Established);
+    assert_eq!(
+        (actions.patch_was_negotiated(), actions.negotiated_patch()),
+        (true, agreed),
+        "the admitted OpenSyn puts back the level the cookie carried"
+    );
+    #[cfg(feature = "transport-qos")]
+    assert!(
+        !actions.is_qos(),
+        "the admitted OpenSyn puts back the OUTCOME, not the offer"
     );
 }
 
@@ -801,11 +877,13 @@ async fn without_a_cookie_nonce_the_acceptor_admits_no_open_syn() {
             sn_res: 0,
             batch_size: 0,
             nonce: 0,
-            qos: QosAcceptState(false),
-            shm: ShmAcceptState(false),
-            lowlatency: LowlatencyAcceptState(false),
-            compression: CompressionAcceptState(false),
-            patch: PatchAcceptState(None),
+            negotiated: NegotiatedExtensions {
+                qos: QosAcceptState(false),
+                shm: ShmAcceptState(false),
+                lowlatency: LowlatencyAcceptState(false),
+                compression: CompressionAcceptState(false),
+                patch: PatchAcceptState(None),
+            },
         },
     )
     .expect("a 4-byte zid encodes");

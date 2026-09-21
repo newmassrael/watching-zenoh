@@ -320,7 +320,7 @@ fn dispatch_unit<R: SessionRuntime, T: TimeSource>(
                 if !admit {
                     return DriverLoopOutcome::SideEffectOnly;
                 }
-                // R2773 — REBUILD the acceptor's negotiated state from the
+                // R2772 — REBUILD the acceptor's negotiated state from the
                 // cookie the peer just echoed. This is the half that makes the
                 // cookie a CARRIER: R2769 gave it the state and taught the
                 // guard to decode it, and the guard then threw the decoded

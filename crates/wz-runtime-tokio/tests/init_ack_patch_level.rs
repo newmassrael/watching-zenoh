@@ -77,6 +77,7 @@ use wz_runtime_tokio::{LinkEvent, RxFrame};
 use wz_runtime_tokio_test_support::{
     fixture_session_init_params, LifecycleRecordingDriver, QueueDriver,
 };
+use wz_session_core::accept_cookie::decode_accept_cookie;
 use wz_session_core::extpatch::peer_patch;
 use wz_session_core::inbound::{parse_inbound, InboundFrame};
 use wz_session_wire_fixtures::{craft_initsyn_wire, craft_initsyn_wire_with_patch};
@@ -104,15 +105,30 @@ async fn acceptor_answers(init_syn_wire: Vec<u8>) -> (u8, u8) {
         .expect("the acceptor emits an InitAck for an admitted InitSyn")
         .0
         .clone();
-    let extensions = match parse_inbound(&init_ack).expect("wz parses its own InitAck") {
+    let (extensions, cookie) = match parse_inbound(&init_ack).expect("wz parses its own InitAck") {
         InboundFrame::Init {
             is_ack: true,
             extensions,
+            body,
             ..
-        } => extensions,
+        } => (extensions, body.cookie.clone()),
         other => panic!("the acceptor's reply is not an InitAck: {other:?}"),
     };
-    (peer_patch(&extensions), actions.negotiated_patch())
+    // R2773 — the internal level is read from the COOKIE this InitAck carries.
+    // Between InitAck and OpenSyn the acceptor no longer holds what it
+    // negotiated, so the slot would report nothing; the cookie is where that
+    // level now lives until the OpenSyn rebuilds it.
+    let cookie = cookie
+        .expect("the acceptor mints a carrying cookie")
+        .to_vec();
+    let carried = decode_accept_cookie(&fixture_session_init_params().cookie_signing_key, &cookie)
+        .expect("the acceptor's own cookie verifies");
+    let negotiated = carried
+        .negotiated
+        .patch
+        .0
+        .expect("an admitted InitSyn always agrees a level");
+    (peer_patch(&extensions), negotiated)
 }
 
 /// THE DEFECT, on the wire: a peer announcing PATCH 0 must be answered 0.

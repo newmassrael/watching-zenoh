@@ -49,11 +49,17 @@
 //! wz keeps. [`crate::accept_state::PatchAcceptState`] is the first instance
 //! — see its own note.
 //!
-//! What this module does NOT do: nothing here is wired into the cookie yet,
-//! and no extension's state has been moved out of the object that currently
-//! owns it. Three of them keep per-handshake state fused into a holder that
-//! also carries node-local capability, and separating those is the work this
-//! seam exists to receive.
+//! ## What the cookie carries, and what it still does not (R2773)
+//!
+//! The five states `NegotiatedExtensions` groups ride the cookie, and the
+//! acceptor rebuilds them at OpenSyn and does not hold them in between.
+//! Measured against the pin, upstream's cookie carries three things more:
+//! the QoS priority band and reliability (`session-extqos` negotiates them,
+//! `QosAcceptState` is a bool), the usrpwd challenge nonce, and the multilink
+//! public key with its challenge. Those three stay held by the objects that
+//! own them. Upstream's shm accept state is EMPTY, so shm is not a fourth —
+//! `io/zenoh-transport/src/unicast/establishment/ext/shm/auth.rs` @ `pub(crate) type StateAccept = StateOpen;`
+//! and its codec writes nothing.
 
 use sce_forge_runtime::codec::{CodecError, SceCursor, SceSink};
 
@@ -218,20 +224,27 @@ flag_accept_state! {
     ///
     /// Upstream's is `io/zenoh-transport/src/unicast/establishment/ext/qos.rs`
     /// @ `pub(crate) struct StateAccept`, which wraps a richer `State` because
-    /// its qos extension also negotiates link-level priorities. wz negotiates
-    /// the capability alone, so the state is the outcome bool
-    /// `SessionActions::is_qos` already holds.
+    /// its qos extension also negotiates link-level priorities.
+    ///
+    /// ⚠ R2773 — this bool is NARROWER than what wz negotiates, not equal to
+    /// it. Under `session-extqos` wz merges the priority band and reliability
+    /// too, into `qos_link`, and this state does not carry them. So an
+    /// acceptor built with that feature still holds its merged band between
+    /// InitAck and OpenSyn, where upstream's rides the cookie.
     QosAcceptState
 }
 
 flag_accept_state! {
     /// Whether this session negotiated shared memory.
     ///
-    /// ⚠ NOT upstream's `ext::shm::auth::StateAccept`, which carries an
-    /// authentication challenge. wz's shm extension negotiates a capability
-    /// and authenticates nothing, so this state is the outcome its own
-    /// establishment reaches — naming the upstream type here would claim a
-    /// challenge that does not exist on this side.
+    /// R2773 corrected what this note used to say on BOTH counts. Upstream's
+    /// shm accept state carries no challenge — it is the empty `StateOpen`,
+    /// `io/zenoh-transport/src/unicast/establishment/ext/shm/auth.rs` @ `pub(crate) type StateAccept = StateOpen;`
+    /// — and wz's shm DOES authenticate, by the challenge exchange
+    /// `crate::extshm::ShmAuthDispatch` runs. Neither side needs the
+    /// challenge in the cookie: the acceptor answers the initiator's at
+    /// InitAck and checks its own at OpenSyn against a node-local value.
+    /// So the one thing that must survive the boundary is the outcome.
     ShmAcceptState
 }
 
@@ -250,6 +263,67 @@ flag_accept_state! {
     /// `io/zenoh-transport/src/unicast/establishment/ext/compression.rs` @
     /// `pub(crate) struct StateAccept` is the same one-bool shape.
     CompressionAcceptState
+}
+
+/// Every extension state the acceptor's cookie carries, as ONE value in the
+/// codec's order.
+///
+/// R2773 — before this was a type, the set was spelled four times: the mint
+/// read five slots, the codec wrote five states and read them back, and the
+/// rebuild wrote five slots. Four spellings of one set drift one member at a
+/// time, and in the direction nothing reports: a state minted and never
+/// rebuilt, or rebuilt and never released, passes every witness that does
+/// not happen to touch that member. Now the codec belongs to this type, and
+/// the session writes its slots from one value whether that value came off
+/// the wire or out of this node's offer.
+///
+/// Upstream's `Cookie` holds the same states flat
+/// (`io/zenoh-transport/src/unicast/establishment/cookie.rs` @ `pub(crate) struct Cookie`)
+/// and has no need to name the group, because its acceptor drops the whole
+/// `State` at InitAck —
+/// `io/zenoh-transport/src/unicast/establishment/accept.rs` @ `type SendInitAckIn = (State, SendInitAckIn);`
+/// takes it by value. wz's slots outlive the handshake, so wz has a second
+/// writer upstream does not: the one that returns them to the offer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct NegotiatedExtensions {
+    /// Whether QoS was negotiated.
+    pub qos: QosAcceptState,
+    /// Whether shared memory was negotiated.
+    pub shm: ShmAcceptState,
+    /// Whether the lowlatency transport shape was negotiated.
+    pub lowlatency: LowlatencyAcceptState,
+    /// Whether payload compression was negotiated.
+    pub compression: CompressionAcceptState,
+    /// The negotiated protocol-patch level, or its absence.
+    pub patch: PatchAcceptState,
+}
+
+impl AcceptState for NegotiatedExtensions {
+    const WIDTH: usize = QosAcceptState::WIDTH
+        + ShmAcceptState::WIDTH
+        + LowlatencyAcceptState::WIDTH
+        + CompressionAcceptState::WIDTH
+        + PatchAcceptState::WIDTH;
+
+    fn encode<S: SceSink>(&self, sink: &mut S) -> Result<(), CodecError> {
+        self.qos.encode(sink)?;
+        self.shm.encode(sink)?;
+        self.lowlatency.encode(sink)?;
+        self.compression.encode(sink)?;
+        self.patch.encode(sink)
+    }
+
+    // A struct expression evaluates its fields in the order they are
+    // written, so this reads in exactly the order `encode` wrote.
+    fn decode(cursor: &mut SceCursor<'_>) -> Result<Self, CodecError> {
+        Ok(Self {
+            qos: QosAcceptState::decode(cursor)?,
+            shm: ShmAcceptState::decode(cursor)?,
+            lowlatency: LowlatencyAcceptState::decode(cursor)?,
+            compression: CompressionAcceptState::decode(cursor)?,
+            patch: PatchAcceptState::decode(cursor)?,
+        })
+    }
 }
 
 #[cfg(test)]
@@ -409,6 +483,47 @@ mod tests {
             width_check(CompressionAcceptState(false)),
             CompressionAcceptState::WIDTH
         );
+        assert_eq!(
+            width_check(NegotiatedExtensions::default()),
+            NegotiatedExtensions::WIDTH
+        );
+    }
+
+    /// Each member of the group survives ALONE.
+    ///
+    /// One case per member, each setting only that member away from its
+    /// default. A fixture that set every member the same way could not see a
+    /// decode that read them in a different order than `encode` wrote them —
+    /// the swap would hand every field back a value of the same shape.
+    #[test]
+    fn each_negotiated_member_survives_on_its_own() {
+        let base = NegotiatedExtensions::default();
+        let cases = [
+            NegotiatedExtensions {
+                qos: QosAcceptState(true),
+                ..base
+            },
+            NegotiatedExtensions {
+                shm: ShmAcceptState(true),
+                ..base
+            },
+            NegotiatedExtensions {
+                lowlatency: LowlatencyAcceptState(true),
+                ..base
+            },
+            NegotiatedExtensions {
+                compression: CompressionAcceptState(true),
+                ..base
+            },
+            NegotiatedExtensions {
+                patch: PatchAcceptState(Some(1)),
+                ..base
+            },
+        ];
+        for case in cases {
+            assert_ne!(case, base, "ANTI-VACUITY: each case moves one member");
+            assert_eq!(width_check(case), NegotiatedExtensions::WIDTH);
+        }
     }
 
     /// A flag state carries BOTH answers distinguishably.

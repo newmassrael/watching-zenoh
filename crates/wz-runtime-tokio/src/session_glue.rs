@@ -134,8 +134,8 @@ pub use wz_session_core::accept_cookie::{
 // caller that builds an `AcceptCookieState` cannot name its members without
 // them, which is the two-crate-paths problem the note above already refuses.
 pub use wz_session_core::accept_state::{
-    AcceptState, CompressionAcceptState, LowlatencyAcceptState, PatchAcceptState, QosAcceptState,
-    ShmAcceptState,
+    AcceptState, CompressionAcceptState, LowlatencyAcceptState, NegotiatedExtensions,
+    PatchAcceptState, QosAcceptState, ShmAcceptState,
 };
 
 /// R69 / R311ei — construct a `SigningKey` from OS-backed cryptographic
@@ -1862,6 +1862,133 @@ mod tests {
                 "the refused lowlatency offer left is_lowlatency false"
             );
             assert!(a3.is_qos(), "the QoS offer (staged first) wins");
+        }
+    }
+
+    /// R2773 — a REOPENED session negotiates from this node's OFFER, not from
+    /// the outcome its previous link negotiated.
+    ///
+    /// Each negotiated capability is seeded from the offer and then merged
+    /// against the peer IN THE SAME SLOT: `&=` for the flags, `min()` for the
+    /// patch, a range merge for the QoS band. `reset_for_reopen` left all of
+    /// them standing, so the last link's outcome became the next link's
+    /// starting point, and every one of those merges moves only one way. A
+    /// flag once cleared stayed cleared, a patch once lowered stayed lowered,
+    /// and a band once narrowed REFUSED any later peer outside it. Upstream
+    /// builds each link's state fresh from the manager's config
+    /// (`io/zenoh-transport/src/unicast/establishment/open.rs` @ `ext::qos::StateOpen::new(manager.config.unicast.is_qos`).
+    ///
+    /// Every arm first drives its slot AWAY from the offer and asserts that it
+    /// moved, because a slot the first link never moved passes the reopen
+    /// assertion whether or not anything was reset.
+    #[cfg(feature = "session-reconnect")]
+    #[test]
+    fn a_reopened_session_negotiates_from_the_offer_not_the_last_outcome() {
+        use wz_session_core::extpatch::{CURRENT_PATCH, NO_PATCH};
+
+        let params = wz_runtime_tokio_test_support::fixture_session_init_params();
+        let (actions, _driver) = crate::test_fixtures::recording_actions_with_params(params);
+
+        assert!(
+            CURRENT_PATCH > NO_PATCH,
+            "ANTI-VACUITY: the patch arm needs a level above NO_PATCH to fall from"
+        );
+        actions.negotiate_patch_against_peer(NO_PATCH);
+        assert_eq!(
+            actions.negotiated_patch(),
+            NO_PATCH,
+            "the first link met a peer at NO_PATCH"
+        );
+        #[cfg(feature = "transport-qos")]
+        {
+            assert!(actions.set_qos_offer(true), "qos offer applies");
+            actions.negotiate_qos_against_peer(false);
+            assert!(!actions.is_qos(), "the first link's peer offered no QoS");
+        }
+        #[cfg(feature = "session-extcompression")]
+        {
+            actions.set_compression_offer(true);
+            actions.negotiate_compression_against_peer(false);
+            assert!(
+                !actions.is_compression(),
+                "the first link's peer offered no compression"
+            );
+        }
+        #[cfg(feature = "session-extshm")]
+        {
+            actions.set_shm_offer(true);
+            actions.negotiate_shm_against_peer(false);
+            assert!(!actions.is_shm(), "the first link's peer offered no SHM");
+        }
+
+        actions.reset_for_reopen();
+
+        assert!(
+            !actions.patch_was_negotiated(),
+            "a reopened session has agreed no patch level yet"
+        );
+        actions.negotiate_patch_against_peer(CURRENT_PATCH);
+        assert_eq!(
+            actions.negotiated_patch(),
+            CURRENT_PATCH,
+            "the second link's peer is at our level, so that is the agreed level"
+        );
+        #[cfg(feature = "transport-qos")]
+        assert!(actions.is_qos(), "the offer, not the first link's NoQoS");
+        #[cfg(feature = "session-extcompression")]
+        assert!(
+            actions.is_compression(),
+            "the offer, not the first link's refusal"
+        );
+        #[cfg(feature = "session-extshm")]
+        assert!(actions.is_shm(), "the offer, not the first link's refusal");
+
+        // Lowlatency excludes QoS, so it needs a bundle of its own.
+        #[cfg(feature = "transport-lowlatency")]
+        {
+            let p = wz_runtime_tokio_test_support::fixture_session_init_params();
+            let (l, _d) = crate::test_fixtures::recording_actions_with_params(p);
+            assert!(l.set_lowlatency_offer(true), "lowlatency offer applies");
+            l.negotiate_lowlatency_against_peer(false);
+            assert!(
+                !l.is_lowlatency(),
+                "the first link's peer offered no lowlatency"
+            );
+            l.reset_for_reopen();
+            assert!(l.is_lowlatency(), "the offer, not the first link's refusal");
+        }
+
+        // The QoS band is the one whose stale value REFUSES rather than
+        // degrades: the initiator's merge keeps its own band only while the
+        // acceptor's covers it, so a band left over from the first link fails
+        // a second acceptor that answers with a band elsewhere.
+        #[cfg(all(feature = "session-extqos", feature = "codec-init-body"))]
+        {
+            use wz_session_core::extqos::{encode_qos_ext_for, QosLinkState};
+            use wz_session_core::qos::Priority;
+            use wz_session_core::session_actions::LinkPriorityRange;
+
+            let band = |a, b| QosLinkState {
+                priorities: Some(LinkPriorityRange::new(a, b)),
+                reliability: None,
+            };
+            let first = band(Priority::InteractiveHigh, Priority::InteractiveLow);
+            let second = band(Priority::DataHigh, Priority::Data);
+
+            let p = wz_runtime_tokio_test_support::fixture_session_init_params();
+            let (q, _d) = crate::test_fixtures::recording_actions_with_params(p);
+            assert!(q.set_qos_offer(true), "qos offer applies");
+            q.negotiate_qos_link_against_peer(true, &[encode_qos_ext_for(&first)])
+                .expect("an unconfigured initiator takes the acceptor's band");
+            assert_eq!(
+                q.qos_link_metadata(),
+                first,
+                "the first link settled on the first acceptor's band"
+            );
+            q.reset_for_reopen();
+            q.negotiate_qos_link_against_peer(true, &[encode_qos_ext_for(&second)])
+                .expect("a reopened initiator is unconfigured again, so it takes this band too");
+            assert_eq!(q.qos_link_metadata(), second, "the second acceptor's band");
         }
     }
 

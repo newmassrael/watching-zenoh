@@ -36,34 +36,32 @@
 //! and five `stage_*` writers), and `init_syn_ext` is initialised to a local
 //! `default_init_patch_ext_entry()`. A peer's offers reach the acceptor only
 //! as OUTCOMES, through `negotiate_lowlatency_against_peer(peer_offered:
-//! bool)` and its qos / compression / shm siblings. So the extension half of
-//! the state is a handful of bools — upstream's `StateAccept` shape, arrived
-//! at from wz's own code.
+//! bool)` and its qos / compression / shm siblings, plus the `min()`-capped
+//! patch level. So the extension half of the state is four bools and one
+//! optional level — upstream's `StateAccept` shape, arrived at from wz's own
+//! code.
 //!
 //! That matters for size. A raw extension chain would not fit: `ExtEntry`'s
 //! own `MAX_ENCODED_BYTES` is 42 and a wz InitSyn may carry six extensions,
 //! against a cookie field the generated codec caps at
 //! `Option<S::Bytes<128>>` — a cap that is advisory on the Heap storage
-//! profile and HARD on the no-alloc Inline one. The outcome form is 30 bytes
-//! of payload plus a 16-byte tag.
+//! profile and HARD on the no-alloc Inline one. The outcome form is at most
+//! 35 bytes of payload plus a 16-byte tag.
 //!
-//! ## What it does NOT do
+//! ## Where it is used (R2769, R2772, R2773)
 //!
-//! This module is the cookie alone. Nothing here stages the handshake or
-//! replays an InitSyn; `accept_and_open_session` is still one atomic call, so
-//! the acceptor still holds its engine across the handshake. Building the
-//! carrier first is deliberate — the staging cannot be written until there is
-//! something for the peer to hand back — and it is why this lands without
-//! changing any wire behaviour.
+//! The acceptor mints this at InitAck, verifies and REBUILDS its negotiated
+//! slots from it at OpenSyn, and in between returns those slots to its own
+//! offer — so the negotiated half is carried rather than held. The session
+//! object itself still lives across the handshake, as upstream's accept task
+//! does; what upstream does not keep across that boundary is the negotiated
+//! `State`, and that is the part this cookie now carries for wz too.
 
 use alloc::vec::Vec;
 
-use sce_forge_runtime::codec::{CodecError, SceCursor, SceSink, VecSink};
+use sce_forge_runtime::codec::{SceCursor, VecSink};
 
-use crate::accept_state::{
-    AcceptState, CompressionAcceptState, LowlatencyAcceptState, PatchAcceptState, QosAcceptState,
-    ShmAcceptState,
-};
+use crate::accept_state::{AcceptState, NegotiatedExtensions};
 use crate::signing_key::{cookie_payload_tag, cookie_payload_tag_verify, SigningKey};
 
 /// Bytes of HMAC-SHA256 kept as the authentication tag.
@@ -81,20 +79,16 @@ const MAX_ZID_BYTES: usize = 16;
 /// zid_len(1)`. Everything after it is the zid, then the extension states.
 const COOKIE_HEAD_BYTES: usize = 13;
 
-/// The extension half's width, SUMMED from the members rather than written
+/// The extension half's width, taken from the group rather than written
 /// down.
 ///
 /// R2765 — a literal here would be a second copy of a fact the states already
-/// own, and the sum is what makes adding a member a one-line change that
-/// cannot leave the length check behind. Each term is that state's own
-/// `WIDTH`, which
+/// own. R2773 moved the sum into the group itself, whose `WIDTH` adds its
+/// members', so adding a member is one change in one place and the length
+/// check cannot be left behind.
 /// `crates/wz-session-core/src/accept_state.rs` @ `fn the_declared_width_is_what_each_state_writes`
-/// holds to what its `encode` actually appends.
-const COOKIE_EXT_BYTES: usize = QosAcceptState::WIDTH
-    + ShmAcceptState::WIDTH
-    + LowlatencyAcceptState::WIDTH
-    + CompressionAcceptState::WIDTH
-    + PatchAcceptState::WIDTH;
+/// holds each of those widths to what its `encode` actually appends.
+const COOKIE_EXT_BYTES: usize = NegotiatedExtensions::WIDTH;
 
 /// The acceptor's InitSyn-derived state, as the cookie carries it.
 ///
@@ -115,38 +109,20 @@ pub struct AcceptCookieState {
     /// The anti-amplification nonce this cookie is bound to — the same role it
     /// has in the tag-only form.
     pub nonce: u64,
-
-    // ── Extensions, each its own accept state, in the order the codec
-    // writes them. R2765 replaced a private four-bit `flags` byte with these,
-    // and the reason is not width: a bitset can hold an outcome bool and
-    // cannot hold `PatchAcceptState`'s `Option<u8>`, so the first extension
-    // whose state is not one bit had nowhere to go. Upstream's shape is the
-    // same and for the same reason —
-    // `io/zenoh-transport/src/unicast/establishment/cookie.rs` @
-    // `pub(crate) struct Cookie` holds a `StateAccept` per extension and its
-    // codec delegates to each.
-    //
-    // THE ORDER IS wz's OWN. The payload is private — an initiator receives
-    // opaque bytes and echoes them back — so nothing off this node parses it
-    // and upstream is the oracle for WHICH state must survive, not for the
-    // sequence. Upstream's relative order is followed anyway, so that the
-    // insertion point for the extensions wz cannot yet reach (multilink,
-    // usrpwd, the auth mux) is unambiguous rather than a choice made twice.
-    /// Whether QoS was negotiated.
-    pub qos: QosAcceptState,
-    /// Whether shared memory was negotiated.
-    pub shm: ShmAcceptState,
-    /// Whether the lowlatency transport shape was negotiated.
-    pub lowlatency: LowlatencyAcceptState,
-    /// Whether payload compression was negotiated.
-    pub compression: CompressionAcceptState,
-    /// The negotiated protocol-patch level, or its absence.
+    /// Every extension state, each its own type, as one group.
     ///
-    /// ⚠ THIS IS THE MEMBER THE BITSET COULD NOT HOLD, and it is why this
-    /// extension was joined first: `crates/wz-session-core/src/session_actions.rs`
-    /// @ `pub fn patch_was_negotiated` separates "the peer announced patch 0"
-    /// from "no Init has been seen", and a bit cannot carry that difference.
-    pub patch: PatchAcceptState,
+    /// R2765 replaced a private four-bit `flags` byte with per-extension
+    /// states, because a bitset can hold an outcome bool and cannot hold
+    /// `PatchAcceptState`'s `Option<u8>`. R2773 made them one group, so the
+    /// session writes all of them from one value on the way back in.
+    ///
+    /// THE ORDER IS wz's OWN. The payload is private — an initiator receives
+    /// opaque bytes and echoes them back — so nothing off this node parses it,
+    /// and upstream is the oracle for WHICH state must survive, not for the
+    /// sequence. Upstream's relative order is followed anyway, so that the
+    /// insertion point for the states wz does not yet carry (multilink,
+    /// usrpwd, the QoS band) is unambiguous rather than a choice made twice.
+    pub negotiated: NegotiatedExtensions,
 }
 
 /// Why a cookie did not decode.
@@ -164,57 +140,11 @@ pub enum CookieError {
     Malformed,
 }
 
-impl AcceptCookieState {
-    /// Append every extension state, in the codec's fixed order.
-    ///
-    /// Generic over the sink rather than written against `Vec`, so the Inline
-    /// storage profile — the one where the cookie's declared capacity is hard
-    /// rather than advisory — reaches the same body. On a `VecSink` the error
-    /// arm is unreachable because that sink grows; on a `SliceSink` it is the
-    /// overflow a caller assembling a cookie has to be able to see.
-    ///
-    /// ONE PLACE, not two: `read_extensions` below reads the same sequence in
-    /// the same order, and a member added to one and not the other reds
-    /// `every_field_survives_the_round_trip` rather than shipping a cookie
-    /// whose two halves disagree.
-    fn write_extensions<S: SceSink>(&self, sink: &mut S) -> Result<(), CodecError> {
-        self.qos.encode(sink)?;
-        self.shm.encode(sink)?;
-        self.lowlatency.encode(sink)?;
-        self.compression.encode(sink)?;
-        self.patch.encode(sink)
-    }
-
-    /// Read every extension state back, in that same order.
-    ///
-    /// Returns them rather than a half-built `Self`: the head fields are the
-    /// caller's and a partially populated state would be a value that reads
-    /// like a whole one. The tuple's own types say which is which.
-    fn read_extensions(cursor: &mut SceCursor<'_>) -> Result<CookieExtensions, CodecError> {
-        let qos = QosAcceptState::decode(cursor)?;
-        let shm = ShmAcceptState::decode(cursor)?;
-        let lowlatency = LowlatencyAcceptState::decode(cursor)?;
-        let compression = CompressionAcceptState::decode(cursor)?;
-        let patch = PatchAcceptState::decode(cursor)?;
-        Ok((qos, shm, lowlatency, compression, patch))
-    }
-}
-
-/// The extension half, in the codec's order. Named so the two sites that
-/// spell it cannot drift apart silently.
-type CookieExtensions = (
-    QosAcceptState,
-    ShmAcceptState,
-    LowlatencyAcceptState,
-    CompressionAcceptState,
-    PatchAcceptState,
-);
-
 /// Serialise the acceptor's state and authenticate it.
 ///
-/// Layout: `nonce(8) ‖ whatami(1) ‖ sn_res(1) ‖ batch_size(2) ‖ flags(1) ‖
-/// zid_len(1) ‖ zid(zid_len) ‖ tag(16)`. Little-endian throughout, matching
-/// every other wz wire integer.
+/// Layout: `nonce(8) ‖ whatami(1) ‖ sn_res(1) ‖ batch_size(2) ‖
+/// zid_len(1) ‖ zid(zid_len) ‖ extensions(COOKIE_EXT_BYTES) ‖ tag(16)`.
+/// Little-endian throughout, matching every other wz wire integer.
 ///
 /// The TAG COVERS THE WHOLE PAYLOAD, not just the zid as the tag-only form
 /// did. That is the difference between a cookie a peer may echo and a cookie a
@@ -238,11 +168,11 @@ pub fn encode_accept_cookie(key: &SigningKey, state: &AcceptCookieState) -> Opti
     out.push(zid_len as u8);
     out.extend_from_slice(&state.peer_zid);
     // `VecSink` grows, so this arm cannot be taken here; it is written rather
-    // than unwrapped because `write_extensions` is the same body the bounded
-    // Inline sink runs, where it can be.
+    // than unwrapped because the group's `encode` is the same body the
+    // bounded Inline sink runs, where it can be.
     {
         let mut sink = VecSink::new(&mut out);
-        state.write_extensions(&mut sink).ok()?;
+        state.negotiated.encode(&mut sink).ok()?;
     }
     let t = cookie_payload_tag(key, &out);
     out.extend_from_slice(&t);
@@ -297,8 +227,8 @@ pub fn decode_accept_cookie(
     }
     let ext_at = COOKIE_HEAD_BYTES + zid_len;
     let mut cursor = SceCursor::new(&payload[ext_at..]);
-    let (qos, shm, lowlatency, compression, patch) =
-        AcceptCookieState::read_extensions(&mut cursor).map_err(|_| CookieError::Malformed)?;
+    let negotiated =
+        NegotiatedExtensions::decode(&mut cursor).map_err(|_| CookieError::Malformed)?;
     // The length check above already fixes the extension region's size, so
     // this can only fire when a state's `WIDTH` disagrees with what its
     // `decode` consumes — the one direction the round trip cannot see,
@@ -312,17 +242,17 @@ pub fn decode_accept_cookie(
         sn_res,
         batch_size,
         nonce,
-        qos,
-        shm,
-        lowlatency,
-        compression,
-        patch,
+        negotiated,
     })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::accept_state::{
+        CompressionAcceptState, LowlatencyAcceptState, PatchAcceptState, QosAcceptState,
+        ShmAcceptState,
+    };
     use alloc::vec;
 
     fn key() -> SigningKey {
@@ -336,21 +266,24 @@ mod tests {
             sn_res: 2,
             batch_size: 65_535,
             nonce: 0x0123_4567_89AB_CDEF,
-            // ALTERNATING on purpose. Every adjacent pair differs, so a codec
-            // that transposed two NEIGHBOURING members shows up; the first
-            // fixture had the four as false, false, true, true, where both
-            // adjacent swaps were invisible. (A symmetric transposition —
-            // both sides swapped — is a pure relabelling of a payload nothing
-            // off this node parses, and is correctly unobservable.)
-            qos: QosAcceptState(true),
-            shm: ShmAcceptState(false),
-            lowlatency: LowlatencyAcceptState(true),
-            compression: CompressionAcceptState(false),
-            // A level the bitset could not have carried, and NOT zero:
-            // `Some(0)` and `None` are the pair the patch state exists to
-            // keep apart, so the fixture uses a third value and
-            // `the_patch_level_is_not_a_flag` drives that pair directly.
-            patch: PatchAcceptState(Some(3)),
+            negotiated: NegotiatedExtensions {
+                // ALTERNATING on purpose. Every adjacent pair differs, so a
+                // codec that transposed two NEIGHBOURING members shows up; the
+                // first fixture had the four as false, false, true, true,
+                // where both adjacent swaps were invisible. (A symmetric
+                // transposition — both sides swapped — is a pure relabelling
+                // of a payload nothing off this node parses, and is correctly
+                // unobservable.)
+                qos: QosAcceptState(true),
+                shm: ShmAcceptState(false),
+                lowlatency: LowlatencyAcceptState(true),
+                compression: CompressionAcceptState(false),
+                // A level the bitset could not have carried, and NOT zero:
+                // `Some(0)` and `None` are the pair the patch state exists to
+                // keep apart, so the fixture uses a third value and
+                // `the_patch_level_is_not_a_flag` drives that pair directly.
+                patch: PatchAcceptState(Some(3)),
+            },
         }
     }
 
@@ -459,9 +392,9 @@ mod tests {
     fn the_patch_level_is_not_a_flag() {
         let k = key();
         let mut absent = state();
-        absent.patch = PatchAcceptState(None);
+        absent.negotiated.patch = PatchAcceptState(None);
         let mut zero = state();
-        zero.patch = PatchAcceptState(Some(0));
+        zero.negotiated.patch = PatchAcceptState(Some(0));
 
         let wire_absent = encode_accept_cookie(&k, &absent).expect("encodes");
         let wire_zero = encode_accept_cookie(&k, &zero).expect("encodes");
@@ -475,12 +408,14 @@ mod tests {
         assert_eq!(
             decode_accept_cookie(&k, &wire_absent)
                 .expect("verifies")
+                .negotiated
                 .patch,
             PatchAcceptState(None)
         );
         assert_eq!(
             decode_accept_cookie(&k, &wire_zero)
                 .expect("verifies")
+                .negotiated
                 .patch,
             PatchAcceptState(Some(0))
         );
@@ -500,23 +435,38 @@ mod tests {
         let mut seen = alloc::vec::Vec::new();
         for flipped in [
             AcceptCookieState {
-                qos: QosAcceptState(!base.qos.0),
+                negotiated: NegotiatedExtensions {
+                    qos: QosAcceptState(!base.negotiated.qos.0),
+                    ..base.negotiated
+                },
                 ..state()
             },
             AcceptCookieState {
-                shm: ShmAcceptState(!base.shm.0),
+                negotiated: NegotiatedExtensions {
+                    shm: ShmAcceptState(!base.negotiated.shm.0),
+                    ..base.negotiated
+                },
                 ..state()
             },
             AcceptCookieState {
-                lowlatency: LowlatencyAcceptState(!base.lowlatency.0),
+                negotiated: NegotiatedExtensions {
+                    lowlatency: LowlatencyAcceptState(!base.negotiated.lowlatency.0),
+                    ..base.negotiated
+                },
                 ..state()
             },
             AcceptCookieState {
-                compression: CompressionAcceptState(!base.compression.0),
+                negotiated: NegotiatedExtensions {
+                    compression: CompressionAcceptState(!base.negotiated.compression.0),
+                    ..base.negotiated
+                },
                 ..state()
             },
             AcceptCookieState {
-                patch: PatchAcceptState(None),
+                negotiated: NegotiatedExtensions {
+                    patch: PatchAcceptState(None),
+                    ..base.negotiated
+                },
                 ..state()
             },
         ] {

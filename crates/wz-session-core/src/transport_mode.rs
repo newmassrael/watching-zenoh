@@ -176,6 +176,31 @@ impl SessionOffer {
         self
     }
 
+    /// R2773 — the STAGING form of `with_mode`, for the granular
+    /// `set_qos_offer` / `set_lowlatency_offer` setters: it refuses to
+    /// displace the other exclusive mode, where `with_mode` replaces it.
+    ///
+    /// The two serve different callers. `with_mode` is one selection, so the
+    /// last word is the caller's intent. The setters stage one capability at
+    /// a time and their contract since R311y216 is first-staged wins, which
+    /// they used to enforce by reading the NEGOTIATED slot — a value that
+    /// stops meaning "what was offered" as soon as a link has negotiated.
+    ///
+    /// Returns whether the request was applied. Withdrawing a mode that is
+    /// not the one selected changes nothing and is not a refusal.
+    #[cfg(any(feature = "transport-qos", feature = "transport-lowlatency"))]
+    pub(crate) fn stage_mode(&mut self, mode: TransportMode, offered: bool) -> bool {
+        if offered {
+            if self.mode != TransportMode::Universal && self.mode != mode {
+                return false;
+            }
+            self.mode = mode;
+        } else if self.mode == mode {
+            self.mode = TransportMode::Universal;
+        }
+        true
+    }
+
     /// Offer the lz4 batch compression ext.
     #[must_use]
     pub const fn with_compression(mut self, compression: bool) -> Self {
@@ -226,6 +251,37 @@ mod tests {
             .with_mode(TransportMode::LowLatency)
             .with_mode(TransportMode::Qos);
         assert_eq!(offer.mode, TransportMode::Qos);
+    }
+
+    /// Staging refuses what selecting replaces: the exclusive mode staged
+    /// first holds, and withdrawing it is what frees the slot.
+    #[cfg(any(feature = "transport-qos", feature = "transport-lowlatency"))]
+    #[test]
+    fn staging_a_mode_refuses_to_displace_the_other() {
+        let mut offer = SessionOffer::universal();
+        assert!(offer.stage_mode(TransportMode::Qos, true));
+        assert_eq!(offer.mode, TransportMode::Qos);
+        assert!(
+            !offer.stage_mode(TransportMode::LowLatency, true),
+            "the other exclusive mode must not displace a staged one"
+        );
+        assert_eq!(
+            offer.mode,
+            TransportMode::Qos,
+            "the refusal changed nothing"
+        );
+        assert!(
+            offer.stage_mode(TransportMode::LowLatency, false),
+            "withdrawing a mode that is not selected is not a refusal"
+        );
+        assert_eq!(offer.mode, TransportMode::Qos);
+        assert!(offer.stage_mode(TransportMode::Qos, false));
+        assert_eq!(offer.mode, TransportMode::Universal);
+        assert!(
+            offer.stage_mode(TransportMode::LowLatency, true),
+            "withdrawn, the slot is free again"
+        );
+        assert_eq!(offer.mode, TransportMode::LowLatency);
     }
 
     /// The orthogonal capabilities compose with EVERY mode — the audit result

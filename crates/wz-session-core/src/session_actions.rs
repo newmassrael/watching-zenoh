@@ -807,6 +807,25 @@ pub struct SessionCore<R: SessionRuntime, T: TimeSource> {
     /// zenoh's `auth_shm` is `None` unless the manager was configured with SHM.
     #[cfg(feature = "session-extshm")]
     pub shm_auth: R::Mutex<crate::extshm::ShmAuthDispatch>,
+    /// R2773 — what THIS node offers, kept APART from what was negotiated.
+    ///
+    /// Each negotiated capability below (`is_lowlatency`, `is_qos`,
+    /// `qos_link`, `is_compression`, `is_shm`) is seeded from an offer and
+    /// then merged against the peer IN ITS OWN SLOT, so once a link has
+    /// negotiated, the slot can no longer say what was offered. Every merge
+    /// moves one way — `&=`, `min()`, a band that only narrows — so a slot
+    /// reused as the next handshake's starting point decays with each link.
+    /// This is where the offer survives the merge, and `return_to_offer` is
+    /// what reads it back at a handshake boundary.
+    ///
+    /// Upstream never needed the split: its node config is the manager's, and
+    /// each link builds its establishment state from it and drops that state
+    /// when the link is done
+    /// (`io/zenoh-transport/src/unicast/establishment/open.rs` @ `ext::qos::StateOpen::new(manager.config.unicast.is_qos`).
+    ///
+    /// Written only by the `set_*_offer` setters (and `apply_offer`, through
+    /// them) and `set_qos_link_metadata`; never by a merge.
+    pub offer: R::Mutex<crate::transport_mode::SessionOffer>,
     /// transport-lowlatency — the negotiated lowlatency capability for THIS
     /// session (zenoh `TransportConfigUnicast::is_lowlatency`). Seeded with the
     /// local offer ([`Self::set_lowlatency_offer`]) at bring-up, then ANDed
@@ -1795,6 +1814,10 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                 // says so. `None` is the pre-handshake truth, not a placeholder.
                 #[cfg(feature = "session-extauth")]
                 peer_auth_id: R::new_mutex(None),
+                // R2773 — nothing offered until the AP layer stages it; the
+                // slots below start equal to this, which is what makes it
+                // their starting point rather than a second copy.
+                offer: R::new_mutex(crate::transport_mode::SessionOffer::universal()),
                 // transport-lowlatency — false until the AP layer offers it
                 // (`set_lowlatency_offer`) and the peer's offer is ANDed in.
                 #[cfg(feature = "transport-lowlatency")]
@@ -2688,31 +2711,12 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// spelling: the same state has to be reconstructed by anything that
     /// checks the cookie, and a second gathering would be a second answer to
     /// "what did this handshake negotiate".
-    ///
-    /// ⚠ EVERY FIELD IS UNCONDITIONAL AND ONLY THE VALUE IS GATED, which is
-    /// deliberate and is the shape this tree was bitten into adopting: a
-    /// cfg-gated public field breaks whichever construction site is compiled
-    /// without the feature, and upstream binds the same absences from the
-    /// other side (it writes `false` without `shared-memory` rather than
-    /// dropping the member). A capability wz was not built with is a
-    /// capability this handshake did not negotiate, so `false` is the honest
-    /// value and not a placeholder.
-    ///
-    /// ⚠⚠ `patch` is the one that is NOT a bool. `negotiated_patch()` folds
-    /// an absent negotiation into `NO_PATCH`, and
-    /// [`Self::patch_was_negotiated`] is what separates the two, so the pair
-    /// is recomposed here into the `Option<u8>` the cookie's own state type
-    /// keeps — the difference a flag bit could not carry.
     #[cfg(all(feature = "codec-init-body", feature = "session-unicast-accept"))]
     pub(crate) fn accept_cookie_state(
         &self,
         peer_zid: Vec<u8>,
         nonce: u64,
     ) -> crate::accept_cookie::AcceptCookieState {
-        use crate::accept_state::{
-            CompressionAcceptState, LowlatencyAcceptState, PatchAcceptState, QosAcceptState,
-            ShmAcceptState,
-        };
         let caps = R::with_mutex_mut(&self.inbound_peer_init_caps, |slot| *slot);
         crate::accept_cookie::AcceptCookieState {
             peer_zid,
@@ -2722,6 +2726,32 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             sn_res: caps.map(|c| c.sn_res_byte()).unwrap_or(0),
             batch_size: caps.map(|c| c.batch_size).unwrap_or(0),
             nonce,
+            negotiated: self.negotiated_extensions(),
+        }
+    }
+
+    /// R2773 — READ the negotiated slots the cookie carries, as one value.
+    ///
+    /// ⚠ EVERY MEMBER IS UNCONDITIONAL AND ONLY THE VALUE IS GATED, which is
+    /// deliberate and is the shape this tree was bitten into adopting: a
+    /// cfg-gated public field breaks whichever construction site is compiled
+    /// without the feature, and upstream binds the same absences from the
+    /// other side (it writes `false` without `shared-memory` rather than
+    /// dropping the member). A capability wz was not built with is a
+    /// capability this handshake did not negotiate, so `false` is the honest
+    /// value and not a placeholder.
+    ///
+    /// ⚠⚠ `patch` is the one that is NOT a bool, and it is read from the SLOT
+    /// rather than through `negotiated_patch()`, which folds an absent
+    /// negotiation into `NO_PATCH` — the difference a flag bit could not
+    /// carry, and the reason the state type keeps an `Option<u8>`.
+    #[cfg(all(feature = "codec-init-body", feature = "session-unicast-accept"))]
+    fn negotiated_extensions(&self) -> crate::accept_state::NegotiatedExtensions {
+        use crate::accept_state::{
+            CompressionAcceptState, LowlatencyAcceptState, NegotiatedExtensions, PatchAcceptState,
+            QosAcceptState, ShmAcceptState,
+        };
+        NegotiatedExtensions {
             #[cfg(feature = "transport-qos")]
             qos: QosAcceptState(self.is_qos()),
             #[cfg(not(feature = "transport-qos"))]
@@ -2738,15 +2768,100 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             compression: CompressionAcceptState(self.is_compression()),
             #[cfg(not(feature = "transport-compression"))]
             compression: CompressionAcceptState(false),
-            patch: PatchAcceptState(if self.patch_was_negotiated() {
-                Some(self.negotiated_patch())
-            } else {
-                None
-            }),
+            patch: PatchAcceptState(R::with_mutex_mut(&self.negotiated_patch, |s| *s)),
         }
     }
 
-    /// R2773 — REBUILD this acceptor's negotiated state from the cookie the
+    /// R2773 — the negotiated slots as they stand BEFORE any peer is heard:
+    /// each capability at this node's offer, and no patch level agreed.
+    ///
+    /// The patch member is `None` rather than wz's own level because a patch
+    /// is ANNOUNCED, not offered: the first admitted Init seeds the agreement
+    /// from `CURRENT_PATCH` and caps it at the peer's, and until then there is
+    /// none — the state a fresh session is constructed in.
+    #[cfg(any(
+        feature = "session-reconnect",
+        all(feature = "codec-init-body", feature = "session-unicast-accept")
+    ))]
+    fn offered_extensions(&self) -> crate::accept_state::NegotiatedExtensions {
+        use crate::accept_state::{
+            CompressionAcceptState, LowlatencyAcceptState, NegotiatedExtensions, PatchAcceptState,
+            QosAcceptState, ShmAcceptState,
+        };
+        use crate::transport_mode::TransportMode;
+        let offer = R::with_mutex_mut(&self.offer, |o| *o);
+        NegotiatedExtensions {
+            qos: QosAcceptState(offer.mode == TransportMode::Qos),
+            shm: ShmAcceptState(offer.shm),
+            lowlatency: LowlatencyAcceptState(offer.mode == TransportMode::LowLatency),
+            compression: CompressionAcceptState(offer.compression),
+            patch: PatchAcceptState(None),
+        }
+    }
+
+    /// R2773 — WRITE the negotiated slots the cookie carries, from one value.
+    ///
+    /// The single writer for that set, whether the value came off the wire
+    /// (the OpenSyn rebuild) or out of this node's offer (the return to it
+    /// after InitAck, and on reopen). One writer is what keeps "what the
+    /// cookie carries" and "what the acceptor lets go of" the same set: a
+    /// member released and never rebuilt would be lost from every handshake,
+    /// and a member rebuilt and never released would be held after all.
+    ///
+    /// ⛔ IT WRITES THE SLOTS DIRECTLY AND NOT THROUGH THE `set_*_offer`
+    /// SETTERS, measured over all four rather than generalised from one:
+    /// `set_lowlatency_offer` and `set_qos_offer` each REFUSE while the other
+    /// is staged, while `set_compression_offer` and `set_shm_offer` are plain
+    /// writes. So a setter-based install would be silently wrong for exactly
+    /// two of the four — the shape that passes any witness touching only the
+    /// other two. And the setters RECORD AN OFFER: an outcome written through
+    /// them would become this node's configuration.
+    ///
+    /// Each write is gated with the SAME cfg as the slot it targets, which is
+    /// the rule this tree arrived at the hard way: a helper widened past its
+    /// consumers becomes dead code in the builds that lack them.
+    #[cfg(any(
+        feature = "session-reconnect",
+        all(
+            feature = "session-unicast-accept",
+            any(feature = "codec-init-body", feature = "codec-open-body")
+        )
+    ))]
+    fn install_negotiated(&self, n: crate::accept_state::NegotiatedExtensions) {
+        #[cfg(feature = "transport-qos")]
+        R::with_mutex_mut(&self.is_qos, |s| *s = n.qos.0);
+        #[cfg(feature = "transport-shm")]
+        R::with_mutex_mut(&self.is_shm, |s| *s = n.shm.0);
+        #[cfg(feature = "transport-lowlatency")]
+        R::with_mutex_mut(&self.is_lowlatency, |s| *s = n.lowlatency.0);
+        #[cfg(feature = "transport-compression")]
+        R::with_mutex_mut(&self.is_compression, |s| *s = n.compression.0);
+        // UNGATED, and it is the one with content: `negotiated_patch` is an
+        // ungated field carrying `Option<u8>`, so it is the only member of the
+        // five that a default build can observe at all.
+        R::with_mutex_mut(&self.negotiated_patch, |s| *s = n.patch.0);
+    }
+
+    /// R2773 — return EVERY negotiated slot to this node's offer: the state a
+    /// handshake starts from.
+    ///
+    /// The five the cookie carries go through `install_negotiated`; the QoS
+    /// band is the one member outside that set, because the cookie's QoS
+    /// state is a bool where the band is a range (see
+    /// `crate::accept_state::QosAcceptState`'s own note). It still has to be
+    /// returned HERE, on reopen, or a band the last acceptor narrowed would
+    /// refuse the next one.
+    #[cfg(feature = "session-reconnect")]
+    fn return_to_offer(&self) {
+        self.install_negotiated(self.offered_extensions());
+        #[cfg(feature = "session-extqos")]
+        {
+            let band = R::with_mutex_mut(&self.offer, |o| o.qos_link).unwrap_or_default();
+            R::with_mutex_mut(&self.qos_link, |s| *s = band);
+        }
+    }
+
+    /// R2772 — REBUILD this acceptor's negotiated state from the cookie the
     /// peer echoed on OpenSyn, which is what makes the cookie a carrier
     /// rather than a receipt.
     ///
@@ -2754,20 +2869,13 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// `io/zenoh-transport/src/unicast/establishment/accept.rs` @
     /// `// Rebuild the state from the cookie`.
     ///
-    /// ⛔ WHY IT WRITES THE SLOTS DIRECTLY AND NOT THROUGH THE `set_*_offer`
-    /// SETTERS, measured over all four rather than generalised from one:
-    /// `set_lowlatency_offer` and `set_qos_offer` each REFUSE while the other
-    /// is on (returning `false`), while `set_compression_offer` and
-    /// `set_shm_offer` are plain writes. So a setter-based rebuild would be
-    /// silently wrong for exactly two of the four — the shape that passes any
-    /// witness touching only the other two. Worse, because that pair is
-    /// mutually exclusive, restoring both through the setters is not
-    /// expressible in EITHER order: whichever lands first refuses the second.
-    ///
-    /// ⚠ RESTORING AN OUTCOME IS NOT STAGING AN OFFER. Those setters carry
-    /// staging policy because they run BEFORE negotiation; the value here has
-    /// already been through it, so re-applying the policy would apply the rule
-    /// twice. The two are different operations that happen to share a slot.
+    /// ⚠ RESTORING AN OUTCOME IS NOT STAGING AN OFFER. The `set_*_offer`
+    /// setters carry staging policy because they run BEFORE negotiation; the
+    /// value here has already been through it, so re-applying the policy would
+    /// apply the rule twice — and because qos and lowlatency exclude each
+    /// other, restoring both through them is not expressible in EITHER order.
+    /// `install_negotiated` is the direct writer, and R2773 made it the only
+    /// one for this set.
     ///
     /// Returns `false` when there is no cookie to read or it does not verify —
     /// the caller runs only on an ADMITTED OpenSyn, so
@@ -2787,21 +2895,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             Ok(c) => c,
             Err(_) => return false,
         };
-        // Each write is gated with the SAME cfg as the slot it targets, which
-        // is the rule this tree arrived at the hard way: a helper widened past
-        // its consumers becomes dead code in the builds that lack them.
-        #[cfg(feature = "transport-qos")]
-        R::with_mutex_mut(&self.is_qos, |s| *s = carried.qos.0);
-        #[cfg(feature = "transport-shm")]
-        R::with_mutex_mut(&self.is_shm, |s| *s = carried.shm.0);
-        #[cfg(feature = "transport-lowlatency")]
-        R::with_mutex_mut(&self.is_lowlatency, |s| *s = carried.lowlatency.0);
-        #[cfg(feature = "transport-compression")]
-        R::with_mutex_mut(&self.is_compression, |s| *s = carried.compression.0);
-        // UNGATED, and it is the one with content: `negotiated_patch` is an
-        // ungated field carrying `Option<u8>`, so it is the only member of the
-        // five that a default build can observe at all.
-        R::with_mutex_mut(&self.negotiated_patch, |s| *s = carried.patch.0);
+        self.install_negotiated(carried.negotiated);
         true
     }
 
@@ -3360,10 +3454,17 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// `true` iff the offer was applied (a config validator can escalate on
     /// `false`); the `*_with_lowlatency` entrypoints stage only lowlatency on
     /// fresh actions, so the guard never fires there.
+    ///
+    /// R2773 — the guard reads the OFFER, not `is_qos()`. The two agree before
+    /// a handshake; after one, `is_qos()` is the outcome, and a QoS offer the
+    /// peer declined would have let this lowlatency offer through beside it.
+    /// The incompatibility is between OPTIONS, as upstream's check is.
     #[cfg(feature = "transport-lowlatency")]
     pub fn set_lowlatency_offer(&self, offer: bool) -> bool {
-        #[cfg(feature = "transport-qos")]
-        if offer && self.is_qos() {
+        use crate::transport_mode::TransportMode;
+        if !R::with_mutex_mut(&self.offer, |o| {
+            o.stage_mode(TransportMode::LowLatency, offer)
+        }) {
             return false;
         }
         R::with_mutex_mut(&self.is_lowlatency, |s| *s = offer);
@@ -3665,10 +3766,13 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// codec. A deploy that sets both is misconfigured; wz refuses the QoS
     /// offer gracefully rather than panicking (an AP config validator can
     /// escalate). Returns `true` iff the offer was applied.
+    ///
+    /// R2773 — reads the OFFER, not `is_lowlatency()`, for the reason
+    /// `set_lowlatency_offer` gives.
     #[cfg(feature = "transport-qos")]
     pub fn set_qos_offer(&self, offer: bool) -> bool {
-        #[cfg(feature = "transport-lowlatency")]
-        if offer && self.is_lowlatency() {
+        use crate::transport_mode::TransportMode;
+        if !R::with_mutex_mut(&self.offer, |o| o.stage_mode(TransportMode::Qos, offer)) {
             return false;
         }
         R::with_mutex_mut(&self.is_qos, |s| *s = offer);
@@ -3714,8 +3818,14 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// `is_qos` arm of `State::new`, and the stage seam honours the same
     /// condition, so a metadata-without-offer misconfiguration emits nothing
     /// rather than a `QoSLink` on a NoQoS link.
+    ///
+    /// R2773 — this is an OFFER, so it is recorded as one. The merge below no
+    /// longer comes through here: it writes the negotiated band into the slot
+    /// alone, which is what keeps the configured band recoverable after a link
+    /// has narrowed it.
     #[cfg(feature = "session-extqos")]
     pub fn set_qos_link_metadata(&self, state: crate::extqos::QosLinkState) {
+        R::with_mutex_mut(&self.offer, |o| o.qos_link = Some(state));
         R::with_mutex_mut(&self.qos_link, |s| *s = state);
     }
 
@@ -3763,7 +3873,10 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         } else {
             crate::extqos::merge_qos_link_init_syn(&mine, &peer_state)?
         };
-        self.set_qos_link_metadata(merged);
+        // The OUTCOME, into the slot only — `set_qos_link_metadata` records an
+        // offer, and routing the merge through it would make the narrowed band
+        // this node's configuration.
+        R::with_mutex_mut(&self.qos_link, |s| *s = merged);
         self.apply_negotiated_qos_to_link(&merged);
         Ok(())
     }
@@ -4204,6 +4317,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// [`Self::negotiate_compression_against_peer`].
     #[cfg(feature = "session-extcompression")]
     pub fn set_compression_offer(&self, offer: bool) {
+        R::with_mutex_mut(&self.offer, |o| o.compression = offer);
         R::with_mutex_mut(&self.is_compression, |s| *s = offer);
     }
 
@@ -4224,6 +4338,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// [`Self::negotiate_shm_against_peer`].
     #[cfg(feature = "session-extshm")]
     pub fn set_shm_offer(&self, offer: bool) {
+        R::with_mutex_mut(&self.offer, |o| o.shm = offer);
         R::with_mutex_mut(&self.is_shm, |s| *s = offer);
     }
 
@@ -7864,6 +7979,12 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             #[cfg(feature = "session-extauth")]
             R::with_mutex_mut(&self.peer_auth_id, |slot| *slot = None);
             R::with_mutex_mut(&self.inbound_peer_init_caps, |slot| *slot = None);
+            // R2773 — the negotiated capabilities are handshake-scoped too,
+            // and they were the ones left standing: every merge on them moves
+            // one way, so the last link's outcome became the next link's
+            // offer and each reconnect could only lose capability. The next
+            // handshake starts from what this node OFFERS.
+            self.return_to_offer();
             // R311ke — the RX SN gate is handshake-scoped: the reopen
             // handshake's OpenSyn/OpenAck re-seeds both channels.
             R::with_mutex_mut(&self.rx_sn, |s| *s = crate::sn::RxConduits::default());
@@ -8361,10 +8482,6 @@ impl<R: SessionRuntime, T: TimeSource> SessionFsmUnicastActionsTrait
             // challenge echoed back beside our segment id (the InitSyn demux ran
             // before this send, so the echo is already known), else the UNIT
             // reflect when no authenticator is installed.
-            // session-extshm — the ACCEPTOR's answer: the initiator's own
-            // challenge echoed back beside our segment id (the InitSyn demux ran
-            // before this send, so the echo is already known), else the UNIT
-            // reflect when no authenticator is installed.
             #[cfg(feature = "session-extshm")]
             if a.shm_auth_installed() {
                 a.stage_shm_challenge(ExtChainRole::InitAck, |a| a.shm_send_init_ack());
@@ -8454,6 +8571,22 @@ impl<R: SessionRuntime, T: TimeSource> SessionFsmUnicastActionsTrait
                 )
                 .expect("the widest accept cookie is 51 bytes, within the codec's 128 cap");
             a.send_wire(&bytes, Reliability::Reliable, Priority::DEFAULT);
+            // R2773 — LET GO of what the cookie now carries. Upstream's
+            // acceptor keeps nothing negotiated between InitAck and OpenSyn:
+            // `send_init_ack` takes its `State` by value and `recv_open_syn`
+            // builds a new one from the cookie. The slots return to this
+            // node's offer, and the OpenSyn rebuild is what puts the outcome
+            // back.
+            //
+            // ONLY WHEN A CARRYING COOKIE WENT OUT. Releasing on the other
+            // arm would drop state nothing can return; that arm is also the
+            // one `cookie_valid` refuses, so the handshake ends there anyway,
+            // but the release is justified by the carriage and by nothing
+            // else. Last, after the send: every read of these slots for this
+            // InitAck — the reflections staged above and the mint — is done.
+            if cookie_bytes.is_some() {
+                a.install_negotiated(a.offered_extensions());
+            }
         }
     }
 

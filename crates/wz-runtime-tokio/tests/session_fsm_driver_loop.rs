@@ -677,9 +677,11 @@ async fn r311y817_rx_init_ack_without_a_patch_ext_is_admitted() {
 //    pico caps with the same `min` (`unicast/transport.c:237-241`).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn r311y817_acceptor_does_not_refuse_an_init_syn_announcing_a_future_patch() {
+    use wz_session_core::accept_cookie::decode_accept_cookie;
+    use wz_session_core::inbound::{parse_inbound, InboundFrame};
     use wz_session_wire_fixtures::craft_initsyn_wire_with_patch;
 
-    let (actions, mut engine) = fresh_setup();
+    let (recorder, actions, mut engine) = fresh_recording_setup();
     // Accepting role: InboundStart -> AwaitingInitSyn.
     engine.process_event(E::InboundStart);
 
@@ -695,9 +697,25 @@ async fn r311y817_acceptor_does_not_refuse_an_init_syn_announcing_a_future_patch
         !engine.is_in_final_state(),
         "the acceptor session survives an initiator announcing a future patch"
     );
+    // R2773 — read from the COOKIE, not the slot. Between InitAck and OpenSyn
+    // the acceptor no longer holds what it negotiated; it carries it in the
+    // cookie this InitAck handed the peer, so that is where the level is.
+    let cookie = recorder
+        .snapshot()
+        .sends
+        .iter()
+        .find_map(|(bytes, _)| match parse_inbound(bytes) {
+            Ok(InboundFrame::Init {
+                is_ack: true, body, ..
+            }) => body.cookie.clone().map(|c| c.to_vec()),
+            _ => None,
+        })
+        .expect("the acceptor answered with an InitAck carrying a cookie");
+    let carried = decode_accept_cookie(&fixture_session_init_params().cookie_signing_key, &cookie)
+        .expect("the acceptor's own cookie verifies");
     assert_eq!(
-        actions.negotiated_patch(),
-        1,
+        carried.negotiated.patch.0,
+        Some(1),
         "the future level is capped at ours by the min(), not refused"
     );
 }
