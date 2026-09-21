@@ -68,6 +68,18 @@ use sce_forge_runtime::codec::{CodecError, SceCursor, SceSink};
 /// wrote and in what order, exactly as zenoh's `Cookie` codec delegates to
 /// each extension in a fixed order rather than discovering them on the wire.
 pub trait AcceptState: Sized {
+    /// The exact number of bytes [`AcceptState::encode`] appends, whatever
+    /// this state carries.
+    ///
+    /// R2765 — the sentence above said "a FIXED number of bytes" and nothing
+    /// could read it. A carrier that delegates to several of these has to
+    /// know its own length before it parses anything, so the width has to be
+    /// a value rather than a promise; as a promise it was also the kind of
+    /// claim this tree has been bitten by, an asserted binding with no
+    /// binding. `the_declared_width_is_what_each_state_writes` holds every
+    /// implementor to it.
+    const WIDTH: usize;
+
     /// Append this state to `sink`.
     ///
     /// A fixed-capacity sink reports `CodecError::BufferOverflow` here rather
@@ -118,6 +130,8 @@ impl PatchAcceptState {
 }
 
 impl AcceptState for PatchAcceptState {
+    const WIDTH: usize = 2;
+
     fn encode<S: SceSink>(&self, sink: &mut S) -> Result<(), CodecError> {
         match self.0 {
             Some(level) => {
@@ -155,6 +169,87 @@ impl AcceptState for PatchAcceptState {
             Ok(Self(Some(level)))
         }
     }
+}
+
+/// Declare one extension's accept state for a capability whose whole
+/// negotiated state is a single bool.
+///
+/// FOUR DISTINCT TYPES rather than one reused flag type, and a macro rather
+/// than four hand-written copies — both halves are the structure upstream
+/// has. `io/zenoh-transport/src/unicast/establishment/ext/lowlatency.rs` @
+/// `pub(crate) struct StateAccept` and its compression sibling are separate
+/// one-bool types with separate codecs, and
+/// `io/zenoh-transport/src/unicast/establishment/cookie.rs` @
+/// `pub(crate) struct Cookie` names each by its own field. One shared type
+/// would put the carrier back in charge of deciding which POSITION means
+/// which extension, which is the coupling this seam exists to remove — it is
+/// the bitset the cookie had, spelled differently.
+macro_rules! flag_accept_state {
+    ($(#[$meta:meta])* $name:ident) => {
+        $(#[$meta])*
+        #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+        pub struct $name(pub bool);
+
+        impl AcceptState for $name {
+            const WIDTH: usize = 1;
+
+            fn encode<S: SceSink>(&self, sink: &mut S) -> Result<(), CodecError> {
+                sink.write_u8(u8::from(self.0))
+            }
+
+            fn decode(cursor: &mut SceCursor<'_>) -> Result<Self, CodecError> {
+                let raw = cursor.peek_slice(1)?;
+                let set = raw[0] != 0;
+                cursor.advance(1)?;
+                // TOTAL on the byte, for the reason `PatchAcceptState::decode`
+                // gives at length: the MAC refuses a payload this node did not
+                // write before any of this runs, so a byte outside {0, 1}
+                // cannot arrive, and upstream's own bool decode is total too
+                // (`io/zenoh-transport/src/unicast/establishment/ext/lowlatency.rs`
+                // @ `is_lowlatency: is_lowlatency == 1`).
+                Ok(Self(set))
+            }
+        }
+    };
+}
+
+flag_accept_state! {
+    /// Whether this session negotiated QoS.
+    ///
+    /// Upstream's is `io/zenoh-transport/src/unicast/establishment/ext/qos.rs`
+    /// @ `pub(crate) struct StateAccept`, which wraps a richer `State` because
+    /// its qos extension also negotiates link-level priorities. wz negotiates
+    /// the capability alone, so the state is the outcome bool
+    /// `SessionActions::is_qos` already holds.
+    QosAcceptState
+}
+
+flag_accept_state! {
+    /// Whether this session negotiated shared memory.
+    ///
+    /// ⚠ NOT upstream's `ext::shm::auth::StateAccept`, which carries an
+    /// authentication challenge. wz's shm extension negotiates a capability
+    /// and authenticates nothing, so this state is the outcome its own
+    /// establishment reaches — naming the upstream type here would claim a
+    /// challenge that does not exist on this side.
+    ShmAcceptState
+}
+
+flag_accept_state! {
+    /// Whether this session negotiated the lowlatency transport shape.
+    ///
+    /// The one-bool shape is upstream's too:
+    /// `io/zenoh-transport/src/unicast/establishment/ext/lowlatency.rs` @
+    /// `pub(crate) struct StateAccept`.
+    LowlatencyAcceptState
+}
+
+flag_accept_state! {
+    /// Whether this session negotiated payload compression.
+    ///
+    /// `io/zenoh-transport/src/unicast/establishment/ext/compression.rs` @
+    /// `pub(crate) struct StateAccept` is the same one-bool shape.
+    CompressionAcceptState
 }
 
 #[cfg(test)]
@@ -250,5 +345,105 @@ mod tests {
         let bytes = [PatchAcceptState::PRESENT];
         let mut cursor = SceCursor::new(&bytes);
         assert!(PatchAcceptState::decode(&mut cursor).is_err());
+    }
+
+    /// Round-trip one state through a bounded sink and report what it wrote.
+    ///
+    /// Generic over the trait rather than written per type, because what is
+    /// being checked is the TRAIT's contract: encode appends a fixed width,
+    /// decode consumes exactly that, and the value survives. A per-type copy
+    /// would let a new implementor be added with none of it checked.
+    fn width_check<T: AcceptState + PartialEq + core::fmt::Debug>(state: T) -> usize {
+        let mut buf = [0u8; 8];
+        let written = {
+            let mut sink = SliceSink::new(&mut buf);
+            state
+                .encode(&mut sink)
+                .expect("8 bytes fits every state here");
+            sink.position()
+        };
+        let mut cursor = SceCursor::new(&buf[..written]);
+        let back = T::decode(&mut cursor).expect("what we just wrote decodes");
+        assert_eq!(back, state, "the round trip must return what it was given");
+        assert_eq!(
+            cursor.remaining(),
+            0,
+            "decode must consume exactly what encode wrote"
+        );
+        written
+    }
+
+    /// WHAT BINDS `AcceptState::WIDTH` TO THE CODE. The constant is what a
+    /// carrier sizes itself from before it parses anything, so a value that
+    /// disagreed with `encode` would make the carrier's own length check
+    /// consistent and wrong together — the round trip could not catch it,
+    /// because both sides would use the same wrong number.
+    ///
+    /// Every implementor appears here, and the two-valued ones appear twice:
+    /// a width that depended on content is exactly what the fixed-order,
+    /// no-length-prefix layout cannot survive.
+    #[test]
+    fn the_declared_width_is_what_each_state_writes() {
+        assert_eq!(width_check(PatchAcceptState(None)), PatchAcceptState::WIDTH);
+        assert_eq!(
+            width_check(PatchAcceptState(Some(0xFF))),
+            PatchAcceptState::WIDTH
+        );
+        assert_eq!(width_check(QosAcceptState(true)), QosAcceptState::WIDTH);
+        assert_eq!(width_check(QosAcceptState(false)), QosAcceptState::WIDTH);
+        assert_eq!(width_check(ShmAcceptState(true)), ShmAcceptState::WIDTH);
+        assert_eq!(width_check(ShmAcceptState(false)), ShmAcceptState::WIDTH);
+        assert_eq!(
+            width_check(LowlatencyAcceptState(true)),
+            LowlatencyAcceptState::WIDTH
+        );
+        assert_eq!(
+            width_check(LowlatencyAcceptState(false)),
+            LowlatencyAcceptState::WIDTH
+        );
+        assert_eq!(
+            width_check(CompressionAcceptState(true)),
+            CompressionAcceptState::WIDTH
+        );
+        assert_eq!(
+            width_check(CompressionAcceptState(false)),
+            CompressionAcceptState::WIDTH
+        );
+    }
+
+    /// A flag state carries BOTH answers distinguishably.
+    ///
+    /// Anti-vacuity for the round trip above: a state that encoded a constant
+    /// would satisfy every `width_check` call and carry nothing.
+    ///
+    /// ⚠ THE OTHER HALF OF THIS CLAIM IS COMPILE-TIME AND CANNOT BE A TEST:
+    /// that the four flag states are four TYPES, so a carrier cannot read one
+    /// into another's field. Substituting `QosAcceptState` for
+    /// `ShmAcceptState` does not compile, and a test asserting that would have
+    /// to not compile either.
+    #[test]
+    fn a_flag_state_carries_both_answers() {
+        let mut set = [0u8; 4];
+        let mut clear = [0u8; 4];
+        let (s_len, c_len) = {
+            let mut s = SliceSink::new(&mut set);
+            QosAcceptState(true).encode(&mut s).unwrap();
+            let mut c = SliceSink::new(&mut clear);
+            QosAcceptState(false).encode(&mut c).unwrap();
+            (s.position(), c.position())
+        };
+        assert_ne!(
+            set[..s_len],
+            clear[..c_len],
+            "a negotiated flag and a refused one must not share an encoding"
+        );
+    }
+
+    /// A flag state's cursor runs out rather than reading past its end.
+    #[test]
+    fn a_short_cursor_refuses_a_flag_state_too() {
+        let empty: [u8; 0] = [];
+        let mut cursor = SceCursor::new(&empty);
+        assert!(LowlatencyAcceptState::decode(&mut cursor).is_err());
     }
 }
