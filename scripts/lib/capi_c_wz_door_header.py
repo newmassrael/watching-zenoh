@@ -63,8 +63,25 @@ import subprocess
 import sys
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
-CRATE = ROOT / "crates" / "wz-capi-c"
-HEADER = CRATE / "include" / "wz_capi_c.h"
+
+# R2766 (open debt 788) — EVERY C SURFACE, not one.
+#
+# This gate was written for `wz-capi-c` and its crate and header were
+# CONSTANTS, so the identical question went unasked of the other C surface
+# this repository publishes. It went unanswered too: a door was added to
+# `wz-capi-dissect`, its `extern "C"` compiled, its symbol linked, every lane
+# passed, and the header never declared it. A CONSUMER reported that, which
+# is the reading that matters -- the predicate existed one crate over and
+# nothing applied it here.
+#
+# A table rather than a second copy of this file: a new C surface is a row,
+# and the cost of forgetting the row is that its doors are ungraded, which is
+# the same failure one level up. The prefix is DERIVED from each header's
+# include guard (see `prefix_of`), so a row states only where to look.
+SURFACES = (
+    ROOT / "crates" / "wz-capi-c" / "include" / "wz_capi_c.h",
+    ROOT / "crates" / "wz-capi-dissect" / "include" / "wz_dissect.h",
+)
 
 
 class Fatal(Exception):
@@ -84,7 +101,7 @@ def tracked(*globs: str) -> list[pathlib.Path]:
     return [ROOT / p for p in out.split("\0") if p]
 
 
-def prefix_of(header_text: str) -> str:
+def prefix_of(header_text: str, where: str = "the header") -> str:
     """The symbol prefix this header owns, read from its own include guard.
 
     `WZ_CAPI_C_H` gives `wz_capi_c_`. Taken from the file rather than written
@@ -94,25 +111,29 @@ def prefix_of(header_text: str) -> str:
     m = re.search(r"^#ifndef\s+([A-Z0-9_]+)_H\s*$", header_text, re.M)
     if m is None:
         raise Fatal(
-            f"{HEADER.relative_to(ROOT)} has no `#ifndef <NAME>_H` guard, so the "
+            f"{where} has no `#ifndef <NAME>_H` guard, so the "
             "prefix this gate compares on cannot be derived. A hardcoded prefix "
             "would match nothing after a rename and report agreement."
         )
     return m.group(1).lower() + "_"
 
 
-def exported(prefix: str) -> set[str]:
+def exported(prefix: str, src: str) -> set[str]:
     """Every wz-own symbol the crate publishes.
 
     `#[no_mangle]` is required on the same item, because that is what makes the
     Rust name the EXPORTED name; a `pub extern "C" fn` without it is mangled and
     no C caller can reach it under this spelling.
+
+    R2766 (open debt 788) — `src` is a PARAMETER now. It was the one crate this
+    gate was written for, spelled as a constant, and that constant is why the
+    other C surface went ungraded while its header lost a door.
     """
     names: set[str] = set()
     # A DIRECTORY pathspec, which `git ls-files` recurses. A `**/*.rs` glob is
     # NOT the same thing here -- git's pathspec matching left it empty, and an
     # empty file list is what the non-empty check below exists to catch.
-    for path in tracked("crates/wz-capi-c/src"):
+    for path in tracked(src):
         if path.suffix != ".rs":
             continue
         text = path.read_text(errors="replace")
@@ -147,6 +168,17 @@ def declared(header_text: str, prefix: str) -> set[str]:
 
 
 def run() -> int:
+    rc = 0
+    graded = 0
+    for header in SURFACES:
+        rc |= run_one(header)
+        graded += 1
+    if rc == 0:
+        print(f"capi-c-wz-door-header: {graded} C surface(s) graded, both ways")
+    return rc
+
+
+def run_one(HEADER: pathlib.Path) -> int:
     if not HEADER.is_file():
         print(
             f"capi-c-wz-door-header: FAIL -- {HEADER.relative_to(ROOT)} is "
@@ -157,8 +189,12 @@ def run() -> int:
         return 1
 
     header_text = HEADER.read_text(errors="replace")
-    prefix = prefix_of(header_text)
-    have = exported(prefix)
+    prefix = prefix_of(header_text, str(HEADER.relative_to(ROOT)))
+    # The crate is the header's own grandparent -- `<crate>/include/<h>.h` --
+    # so a row states one path and the source tree is derived from it rather
+    # than repeated beside it.
+    src = str((HEADER.parent.parent / "src").relative_to(ROOT))
+    have = exported(prefix, src)
     said = declared(header_text, prefix)
 
     findings: list[str] = []

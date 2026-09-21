@@ -299,7 +299,11 @@ pub const WZ_DISSECT_NO_TIMESTAMP: u64 = live::NO_TIMESTAMP;
 /// None; takes no arguments and touches no memory.
 #[no_mangle]
 pub extern "C" fn wz_dissect_abi_version() -> c_int {
-    16
+    // R2766 (open debt 788) — 17, for `wz_dissect_pcap_fields_where_limited`.
+    // The header's own rule is that this moves when a SYMBOL changes, and a
+    // consumer pinned to 16 meeting 17 learns exactly that there is a door it
+    // does not know about.
+    17
 }
 
 /// R2108 (open-debt item 525) — THE RECORD'S LAYOUT, reported by the artifact.
@@ -508,6 +512,8 @@ enum Door {
     Fields,
     FieldsWithPayloads,
     FieldsLimited,
+    /// R2766 (open debt 788) — the field document a SELECTOR narrows.
+    FieldsWhereLimited,
     /// R2171 (open-debt item 547) — the one pcap door that hands back a HANDLE
     /// rather than a document, so a frozen capture reaches the record family.
     ///
@@ -536,6 +542,7 @@ impl Door {
             Door::Fields => "wz_dissect_pcap_fields",
             Door::FieldsWithPayloads => "wz_dissect_pcap_fields_with_payloads",
             Door::FieldsLimited => "wz_dissect_pcap_fields_limited",
+            Door::FieldsWhereLimited => "wz_dissect_pcap_fields_where_limited",
             Door::Replay => "wz_dissect_pcap_replay",
         }
     }
@@ -551,16 +558,31 @@ impl Door {
             Door::Census | Door::CensusBounded | Door::CensusWhere => {
                 Some(Door::CensusWhereLimited)
             }
-            Door::Fields | Door::FieldsWithPayloads => Some(Door::FieldsLimited),
+            // R2766 (open debt 788) — the field family's current shape moved.
+            // `FieldsWhereLimited` takes the SELECTOR as an argument beside
+            // everything `FieldsLimited` takes, so it answers that door's
+            // question and one more — the same reading the census family
+            // already records for `CensusWhereLimited`. The older doors are
+            // kept, not withdrawn: a published symbol is one a consumer
+            // already links.
+            Door::Fields | Door::FieldsWithPayloads | Door::FieldsLimited => {
+                Some(Door::FieldsWhereLimited)
+            }
             // `Replay` answers `None` and joins nothing: it emits no document
             // at all, so it is not the newer shape of a door that does. The
             // count assertion beside this match is what keeps that honest --
             // item 451 counted five subsumed doors, and a tenth door arriving
             // as a sixth would have to be argued for there.
+            // R2766 (open debt 788) — `FieldsLimited` LEFT this arm: it is now
+            // subsumed, and `FieldsWhereLimited` takes its place as a current
+            // shape. The count the comment above pins moves with it, from five
+            // subsumed to six, and that is the argument the comment asks for:
+            // a selector-taking field door answers what the limited one does
+            // and says which rows matched as well.
             Door::Summary
             | Door::SummaryBounded
             | Door::CensusWhereLimited
-            | Door::FieldsLimited
+            | Door::FieldsWhereLimited
             | Door::Replay => None,
         }
     }
@@ -576,7 +598,8 @@ impl Door {
             Door::CensusWhereLimited => Some(Door::Fields),
             Door::Fields => Some(Door::FieldsWithPayloads),
             Door::FieldsWithPayloads => Some(Door::FieldsLimited),
-            Door::FieldsLimited => Some(Door::Replay),
+            Door::FieldsLimited => Some(Door::FieldsWhereLimited),
+            Door::FieldsWhereLimited => Some(Door::Replay),
             Door::Replay => None,
         }
     }
@@ -4841,7 +4864,8 @@ mod tests {
         // capture that stops on an unfilled gap reads 32 walked records before
         // the feed is declared over and 94 after, because the bytes BEHIND a
         // hole decode only once the hole is given up on.
-        assert_eq!(wz_dissect_abi_version(), 16);
+        // R2766 (open debt 788) — 17, for `wz_dissect_pcap_fields_where_limited`.
+        assert_eq!(wz_dissect_abi_version(), 17);
     }
 
     /// R311y913 (unregistered item 435) — THE LINKED SURFACE CAN SAY WHAT IT
@@ -5015,9 +5039,17 @@ mod tests {
             "the walk and the header's pcap doors disagree -- a door added to \
              one and not the other is exactly what this pins"
         );
+        // R2766 (open debt 788) — SIX, and the sixth is argued rather than
+        // absorbed: `wz_dissect_pcap_fields_limited` became a subsumed door
+        // when `wz_dissect_pcap_fields_where_limited` arrived taking a
+        // SELECTOR beside everything it takes. That is the same reading item
+        // 451 made of the census family, one family over. The count moved
+        // because the ABI moved (16 -> 17), which is what this assertion asks
+        // a reader to check rather than to update quietly.
         assert_eq!(
-            subsumed, 5,
-            "item 451 counted five subsumed doors; a different number means \
+            subsumed, 6,
+            "item 451 counted five subsumed doors and R2766 made it six; a \
+             different number again means \
              the ABI moved and this comment is what should be re-read"
         );
     }

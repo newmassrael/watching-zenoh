@@ -973,9 +973,11 @@ int wz_dissect_selector_diagnose(const char *selector, char **out);
  * ended. `capture_reread` reports whether the datagram half could read the
  * file a second time, which it must do to reach a datagram message's bytes.
  *
- * SUBSUMED BY wz_dissect_pcap_fields_limited -- that door takes the DISSECTION
- * ceiling as an argument, which this one has no way to state: the bound here
- * trims the listing after the whole walk is already built. Kept and still
+ * SUBSUMED BY wz_dissect_pcap_fields_where_limited -- R2766 moved this line,
+ * because a door has ONE current shape and the field family's moved on. That
+ * door takes the DISSECTION ceiling this one has no way to state (the bound
+ * here trims the listing after the whole walk is already built) AND a
+ * selector, so it answers this question and two more. Kept and still
  * linkable. (R2116, item 466.)
  *
  * @bound max_messages_shown_per_flow trims-output -- the whole walk is paid
@@ -1145,9 +1147,11 @@ int wz_dissect_pcap_fields(const unsigned char *bytes, size_t len,
  * walk: `payload_mapping_counts_exact` covers BOTH tallies, because being a
  * floor is a property of the walk rather than of either finding.
  *
- * SUBSUMED BY wz_dissect_pcap_fields_limited -- that door takes the same
- * declarations text AND the dissection ceiling, so it is this call with the
- * one thing it cannot say. Kept and still linkable. (R2116, item 466.)
+ * SUBSUMED BY wz_dissect_pcap_fields_where_limited -- R2766 moved this line
+ * for the reason the one above it moved: the family has one current shape.
+ * That door takes the same declarations text, the dissection ceiling, and a
+ * selector, so it is this call with the things it cannot say. Kept and still
+ * linkable. (R2116, item 466; R2766, open debt 788.)
  *
  * @bound max_messages_shown_per_flow trims-output -- as above: the walk is
  * paid for in full and `shown`/`omitted` report what the document left
@@ -1188,11 +1192,70 @@ int wz_dissect_pcap_fields_with_payloads(const unsigned char *bytes, size_t len,
  * @bound max_messages_shown_per_flow trims-output -- the DOCUMENT is
  * shortened after the walk; `shown`/`omitted` report it.
  * @bound limits work-ceiling -- the WALK is bounded; dropped_by_limits
- * reports it. */
+ * reports it.
+ *
+ * SUBSUMED BY wz_dissect_pcap_fields_where_limited -- that door takes a
+ * SELECTOR beside everything this one takes, so it answers this question and
+ * one more: which of the rows a reader asked for actually matched. This
+ * symbol is kept, not withdrawn: a published symbol is one a consumer
+ * already links. New code should reach for the current shape.
+ * (R2766, open debt 788 -- checked against the library's own `doors` axis,
+ * so this line cannot go stale unnoticed.) */
 int wz_dissect_pcap_fields_limited(const unsigned char *bytes, size_t len,
                                    size_t max_messages_shown_per_flow,
                                    const char *declarations, int limits,
                                    char **out);
+
+/* R2766 (ABI 17) — THE FIELD DOCUMENT OVER THE MESSAGES A SELECTOR PICKS,
+ * with each row saying which way it went.
+ *
+ * The join of the two doors above it. The census doors took a selector and
+ * answered with COUNTS; the field doors emitted rows and took none. A
+ * consumer wanting "show me the messages this selector matches" had one
+ * option left, which was to take every row back and apply the selector again
+ * on its own side — a second implementation of this library's selector
+ * language, living in the caller, disagreeing with this one eventually.
+ *
+ * Each message object gains a "selected" key with ONE OF FOUR WORDS, and
+ * they are four because two of them would otherwise be one:
+ *
+ *   "yes" / "no"  the row's records were judged and folded. Any match makes
+ *                 the row a match; all misses make it a miss.
+ *   "undecided"   records were judged and this capture does not carry what
+ *                 deciding needs -- a keyexpr that never bound, an absent
+ *                 clock.
+ *   "unjudged"    the row carries nothing the record plane judges at all: a
+ *                 handshake, a keepalive, a declaration.
+ *
+ * A caller asking "why did my selector miss this" must be able to tell the
+ * last two apart, because only "undecided" is about the selector. A document
+ * asked for WITHOUT a selector carries no "selected" key at all -- absence
+ * of the key is the fourth answer, and it is not the same as "unjudged".
+ *
+ * The verdict is per ROW and not per record: a row may carry several
+ * records, and a reassembled record's span exists only inside this library,
+ * so a row per record would have to invent a coordinate for each.
+ *
+ * `selector` is the same language wz_dissect_pcap_census_where_limited
+ * takes, and it is refused the same way -- WZ_DISSECT_ERR_SELECTOR, with
+ * wz_dissect_selector_diagnose available to say where. `declarations` and
+ * `limits` behave exactly as they do for the door above.
+ *
+ * @bound max_messages_shown_per_flow trims-output -- the DOCUMENT is
+ * shortened and the walk is not: every message is still dissected and still
+ * judged by the selector, so the verdict counts a reader could derive from
+ * the rows shown are a floor. Ask the census door for the totals.
+ *
+ * @bound limits work-ceiling -- the WALK is bounded, and what it cost is in
+ * dropped_by_limits. ⚠ A ceiling that bit under a selector is the case this
+ * door most needs a reader to notice: rows the walk never reached are absent
+ * rather than unmatched, and "three matched" is not "three matched of what
+ * you were shown". */
+int wz_dissect_pcap_fields_where_limited(const unsigned char *bytes, size_t len,
+                                         size_t max_messages_shown_per_flow,
+                                         const char *selector,
+                                         const char *declarations, int limits,
+                                         char **out);
 
 /* R311y856 (ABI 6) — compile a declaration text and say what is wrong with
  * it, WITHOUT a capture.

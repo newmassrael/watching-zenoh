@@ -50,7 +50,7 @@ import subprocess
 import sys
 
 # The pinned pair. Edit BOTH halves deliberately -- see the module doc.
-EXPECTED_VERSION = 16
+EXPECTED_VERSION = 17
 
 # R2108 (open-debt item 525) -- THE RECORD'S LAYOUT, pinned HERE and read from
 # the artifact through `wz_dissect_record_layout`.
@@ -170,6 +170,13 @@ EXPECTED_SYMBOLS = {
     # symbol on R311y887's pattern rather than a `_bounded` twin for each of the
     # two existing field doors, which would have made four.
     "wz_dissect_pcap_fields_limited",
+    # R2766 (open debt 788, ABI 17) — the field document a selector narrows.
+    # ⚠ THIS GATE DID NOT CATCH ITS ABSENCE, and that is worth the line: it
+    # reads `nm` over `crates/target/release/libwz_capi_dissect.so` and has no
+    # freshness check, so an artifact built before the symbol existed answers
+    # "set unchanged" and the gate reports green over source it never saw. A
+    # consumer reported the missing header declaration; no lane did.
+    "wz_dissect_pcap_fields_where_limited",
     "wz_dissect_declarations_diagnose",
     # R311y851 — the four analysis planes' door. Both halves moved together,
     # which is the whole of what this gate asks.
