@@ -104,10 +104,11 @@ impl MultiLinkDispatch {
     }
 
     /// Refresh the method's per-handshake challenge nonce (responder side) — the
-    /// wz mirror of [`AuthDispatch::set_challenge_nonce`](crate::auth_dispatch::AuthDispatch::set_challenge_nonce),
-    /// for the single held method. The AP accept seam draws a fresh
-    /// cryptographically-random nonce per accepted handshake; a method without a
-    /// challenge (an initiator-only method) ignores it (the trait default no-op).
+    /// single-method counterpart of
+    /// [`AuthDispatch::set_drawn_challenges`](crate::auth_dispatch::AuthDispatch::set_drawn_challenges).
+    /// The AP accept seam draws a fresh cryptographically-random nonce per
+    /// accepted handshake; a method without a challenge (an initiator-only
+    /// method) ignores it (the trait default no-op).
     pub fn set_challenge_nonce(&mut self, nonce: u64) {
         self.method.set_challenge_nonce(nonce);
     }

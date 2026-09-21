@@ -251,15 +251,38 @@ pub trait AuthMethod: Send {
         Ok(None)
     }
 
-    /// Refresh this method's per-handshake challenge nonce (responder side).
-    /// The no_std core draws no entropy (`getrandom` has no bare-metal
-    /// backend), so the AP layer supplies a FRESH cryptographically-random
-    /// `nonce` per accepted handshake — the wz mirror of zenoh drawing
-    /// `prng.gen()` in `StateAccept::new` (usrpwd.rs:169-174). Default no-op
-    /// (a method without a challenge — e.g. an initiator-only or
-    /// nonce-free method — ignores it). See the [`UsrPwdMethod::responder`]
-    /// security contract: a fixed / reused nonce is a replay hole.
+    /// Set this method's per-handshake challenge (responder side).
+    ///
+    /// R2779 — the dispatch calls this with a value drawn for THIS method
+    /// alone, at InitAck, from the bundle's installed entropy source
+    /// ([`AuthDispatch::set_drawn_challenges`]); the wz mirror of zenoh drawing
+    /// `prng.gen()` per method per handshake. It used to be handed one value
+    /// fanned out to every method, which is open-debt item 803. Default no-op
+    /// (a method without a challenge — e.g. an initiator-only or nonce-free
+    /// method — ignores it). See the [`UsrPwdMethod::responder`] security
+    /// contract: a fixed / reused nonce is a replay hole.
     fn set_challenge_nonce(&mut self, _nonce: u64) {}
+
+    /// R2779 — the challenge this method issued in the current handshake, for
+    /// the acceptor's cookie to carry across InitAck/OpenSyn; `None` when it
+    /// issued none. Default `None`: a method with no challenge has nothing to
+    /// carry.
+    ///
+    /// Upstream's acceptor holds nothing between the two messages because its
+    /// cookie carries each method's accept state
+    /// (`io/zenoh-transport/src/unicast/establishment/cookie.rs` @ `pub(crate) ext_auth: ext::auth::StateAccept,`);
+    /// this and [`Self::restore_accept_challenge`] are the two halves of that
+    /// for a method whose state lives in `&mut self`.
+    fn accept_challenge(&self) -> Option<u64> {
+        None
+    }
+
+    /// R2779 — replace this method's per-handshake accept state with what the
+    /// cookie carries: `None` releases it after InitAck, together with
+    /// anything else the method kept only for this handshake, and `Some` puts
+    /// the issued challenge back at OpenSyn, before the OpenSyn stage checks
+    /// against it. Default no-op, the pair of [`Self::accept_challenge`]'s.
+    fn restore_accept_challenge(&mut self, _challenge: Option<u64>) {}
 
     /// R311y205 (transport-multilink IMPL-2b-ii) — the peer's captured ephemeral
     /// public key, in its canonical encoded ZPublicKey byte form, or `None` if
@@ -313,15 +336,70 @@ impl AuthDispatch {
         self.methods.is_empty()
     }
 
-    /// Refresh every method's per-handshake challenge nonce (responder side).
-    /// The AP layer draws a FRESH cryptographically-random `nonce` per accepted
-    /// handshake (OS entropy — the no_std core cannot) and fans it out here, so
-    /// the responder's InitAck challenge is never reused across handshakes (the
-    /// [`UsrPwdMethod::responder`] replay-defense contract). A method without a
-    /// challenge ignores it (the trait default no-op).
-    pub fn set_challenge_nonce(&mut self, nonce: u64) {
+    /// How many methods this dispatch drives — how many independent challenges
+    /// a responder draws for one InitAck.
+    pub fn method_count(&self) -> usize {
+        self.methods.len()
+    }
+
+    /// R2779 (open-debt item 803) — hand each method its OWN challenge.
+    ///
+    /// `draws[i]` belongs to the i-th method and was drawn separately, so no
+    /// two methods share a value. That is what this replaced: the dispatch
+    /// used to fan ONE value out to every method, while usrpwd sends its
+    /// challenge in the clear and pubkey keeps its own behind the initiator's
+    /// key — with both on one responder, the plaintext one WAS the secret one.
+    /// Upstream draws them apart,
+    /// `io/zenoh-transport/src/unicast/establishment/ext/auth/pubkey.rs` @ `state.challenge = prng.gen();`.
+    ///
+    /// A `None` draw is a source that FAILED, and it releases that method's
+    /// accept state instead of leaving the last handshake's challenge in
+    /// place, because reusing it is the replay the draw exists to stop. The
+    /// method then issues nothing at InitAck and admits no OpenSyn.
+    pub fn set_drawn_challenges(&mut self, draws: &[Option<u64>]) {
+        debug_assert_eq!(
+            draws.len(),
+            self.methods.len(),
+            "one draw per method, sized from `method_count`"
+        );
+        for (m, draw) in self.methods.iter_mut().zip(draws) {
+            match *draw {
+                Some(challenge) => m.set_challenge_nonce(challenge),
+                None => m.restore_accept_challenge(None),
+            }
+        }
+    }
+
+    /// R2779 — the challenges this handshake issued, as the cookie carries
+    /// them. A method whose id is neither of upstream's two contributes
+    /// nothing; see [`crate::accept_state::AuthAcceptState`].
+    pub fn accept_state(&self) -> crate::accept_state::AuthAcceptState {
+        let mut state = crate::accept_state::AuthAcceptState::default();
+        for m in self.methods.iter() {
+            match m.id() {
+                id::PUBKEY => state.pubkey = m.accept_challenge(),
+                id::USRPWD => state.usrpwd = m.accept_challenge(),
+                _ => {}
+            }
+        }
+        state
+    }
+
+    /// R2779 — write carried challenges back into the methods: all `None`
+    /// after InitAck (the release, since the cookie now holds them) and the
+    /// cookie's values at OpenSyn (the rebuild).
+    ///
+    /// ONLY the two carried methods are written. A method the cookie has no
+    /// member for keeps its own state, because releasing it would drop a
+    /// challenge nothing can return and fail its OpenSyn; it stays stateful,
+    /// which is what every method was before this existed.
+    pub fn restore_accept_state(&mut self, state: crate::accept_state::AuthAcceptState) {
         for m in self.methods.iter_mut() {
-            m.set_challenge_nonce(nonce);
+            match m.id() {
+                id::PUBKEY => m.restore_accept_challenge(state.pubkey),
+                id::USRPWD => m.restore_accept_challenge(state.usrpwd),
+                _ => {}
+            }
         }
     }
 
@@ -767,5 +845,95 @@ mod tests {
             AuthIdentity([0x61, 0xFF, 0x62].to_vec()).acl_username(),
             None
         );
+    }
+
+    /// A method whose whole accept state is one challenge, reporting it back
+    /// through the R2779 pair.
+    struct Challenged {
+        id: u8,
+        challenge: Option<u64>,
+    }
+
+    impl AuthMethod for Challenged {
+        fn id(&self) -> u8 {
+            self.id
+        }
+        fn set_challenge_nonce(&mut self, nonce: u64) {
+            self.challenge = Some(nonce);
+        }
+        fn accept_challenge(&self) -> Option<u64> {
+            self.challenge
+        }
+        fn restore_accept_challenge(&mut self, challenge: Option<u64>) {
+            self.challenge = challenge;
+        }
+    }
+
+    fn challenged(ids: &[u8]) -> AuthDispatch {
+        AuthDispatch::new(
+            ids.iter()
+                .map(|&id| {
+                    Box::new(Challenged {
+                        id,
+                        challenge: None,
+                    }) as Box<dyn AuthMethod>
+                })
+                .collect(),
+        )
+    }
+
+    /// R2779 (open-debt item 803) — each method keeps the draw it was handed,
+    /// and a failed draw releases that method alone.
+    ///
+    /// The draws are handed out in METHOD order and read back by method id,
+    /// with the methods installed usrpwd FIRST, so a dispatch that wrote the
+    /// i-th draw to the wrong method would hand the value upstream's cookie
+    /// keeps for pubkey to usrpwd.
+    #[test]
+    fn each_method_keeps_its_own_draw_and_a_failed_draw_releases_it() {
+        let mut d = challenged(&[id::USRPWD, id::PUBKEY]);
+        assert_eq!(d.method_count(), 2);
+        d.set_drawn_challenges(&[Some(0x11), Some(0x22)]);
+        let state = d.accept_state();
+        assert_eq!(state.usrpwd, Some(0x11));
+        assert_eq!(state.pubkey, Some(0x22));
+
+        d.set_drawn_challenges(&[None, Some(0x33)]);
+        let state = d.accept_state();
+        assert_eq!(
+            state.usrpwd, None,
+            "a failed draw must release the method, not keep the last challenge"
+        );
+        assert_eq!(state.pubkey, Some(0x33));
+    }
+
+    /// R2779 — the release and the rebuild write exactly the two methods the
+    /// cookie carries, and a third method keeps what it holds, because nothing
+    /// could return it.
+    #[test]
+    fn the_restore_writes_the_carried_methods_and_no_other() {
+        const OTHER: u8 = 0x5;
+        let mut d = challenged(&[id::PUBKEY, OTHER, id::USRPWD]);
+        d.set_drawn_challenges(&[Some(1), Some(2), Some(3)]);
+
+        d.restore_accept_state(crate::accept_state::AuthAcceptState::default());
+        assert_eq!(
+            d.accept_state(),
+            crate::accept_state::AuthAcceptState::default(),
+            "after the release neither carried method holds a challenge"
+        );
+        let other_still = d.methods[1].accept_challenge();
+        assert_eq!(
+            other_still,
+            Some(2),
+            "a method the cookie cannot carry keeps its own state"
+        );
+
+        d.restore_accept_state(crate::accept_state::AuthAcceptState {
+            pubkey: Some(10),
+            usrpwd: Some(30),
+        });
+        assert_eq!(d.methods[0].accept_challenge(), Some(10));
+        assert_eq!(d.methods[2].accept_challenge(), Some(30));
     }
 }

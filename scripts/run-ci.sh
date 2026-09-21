@@ -5146,7 +5146,16 @@ layer_c1ab_cargo_test_vsock() {
     # is gated on that feature, which this leg did not carry. It needs no ring
     # and no memlock (it asks the HALF, not a reactor), so the only cost is
     # compiling the uring modules on a host that already has /dev/vsock.
-    _runci_guarded_test "Layer C1ab vsock dial/accept round-trip" 2 \
+    # R2779 — 2 -> 3, and the count is R2751's own consequence, left unmoved:
+    # carrying `runtime-tokio-uring` is what COMPILES that third ignored test
+    # into this leg, so `--ignored` now runs three (the round trip, the named
+    # descriptor, the pseudo-interface subject). READ off the count-guard gate
+    # on R2779's range, which reached this guard because the change touches
+    # wz-runtime-tokio; it printed 3. It never went red because the hosted job
+    # that runs C1ab has no /dev/vsock and takes the SKIP above (run
+    # 35579977073: "Layer C1ab SKIP (no /dev/vsock ...)"), so the guarded legs
+    # only ever run on a host that loads the module.
+    _runci_guarded_test "Layer C1ab vsock dial/accept round-trip" 3 \
         cargo test -p wz-runtime-tokio \
         --features transport-link-vsock,runtime-tokio-uring \
         --lib vsock_pipeline -- --ignored || return 1
@@ -5310,7 +5319,15 @@ layer_c1bb_cargo_test_qos() {
     # pushing rather than by a red run — and the measurement caught more than a
     # count, because the same command refused to COMPILE first (`ext_nodeid`
     # was gated on its callers, and the new Interest arm has none of them).
-    _runci_guarded_test C1bb 25 cargo test -p wz-session-core --features transport-qos,transport-fragmentation,transport-batching,reassembly,session-multicast --lib qos --quiet \
+    #
+    # R2779 — 25 -> 26, the same substring shape a third time, and this one was
+    # LEFT BEHIND by the round that caused it. R2777 added
+    # `accept_state::tests::every_qos_arm_survives_and_no_two_share_an_encoding`
+    # (the accept cookie's QoS state, ungated), whose name carries `qos`; the
+    # count-guard gate did not reach this guard on R2777's range and did on
+    # R2779's, which is where it was measured. READ off the command, which
+    # printed 26.
+    _runci_guarded_test C1bb 26 cargo test -p wz-session-core --features transport-qos,transport-fragmentation,transport-batching,reassembly,session-multicast --lib qos --quiet \
         || return 1
     (cd crates \
         && cargo clippy -p wz-session-core --all-targets --features transport-qos,transport-fragmentation,transport-batching,reassembly,session-multicast --quiet -- -D warnings \
@@ -8099,7 +8116,13 @@ layer_c1y_cargo_test_routing_peer() {
     # 3 -> 5 is the pair of e2e witnesses driving a REAL wire handshake, one user
     # added after the method was built and one removed at runtime.
     # Each number is what the command PRINTED, not what the diff suggests.
-    _runci_guarded_test "C1y extauth" 17 \
+    # R2779 — the same three move again, for the auth challenges riding the
+    # accept cookie and open-debt item 803: 17 -> 18 is
+    # `a_released_challenge_verifies_only_once_it_is_restored`, 7 -> 9 is the
+    # dispatch's per-method draw and its carried-methods-only restore, and
+    # 5 -> 6 is the e2e that decodes the carried challenge off the InitAck.
+    # READ off the count-guard gate on R2779's range, which printed 18 / 9 / 6.
+    _runci_guarded_test "C1y extauth" 18 \
         cargo test -p wz-session-core --features access-extauth-usrpwd --lib extauth --quiet || return 1
     # R2631 — 6 -> 7: `an_identity_is_an_acl_username_only_when_it_is_utf8`, the
     # witness for `AuthIdentity::acl_username`, the one bytes-to-name step the
@@ -8107,9 +8130,9 @@ layer_c1y_cargo_test_routing_peer() {
     # ⚠ The pre-push count-guard gate did NOT select this guard on the push that
     # moved it: the filter `auth_dispatch` is the MODULE PATH of the changed file,
     # which that file's text never spells. The gate now derives that path too.
-    _runci_guarded_test "C1y auth_dispatch" 7 \
+    _runci_guarded_test "C1y auth_dispatch" 9 \
         cargo test -p wz-session-core --features access-extauth-usrpwd --lib auth_dispatch --quiet || return 1
-    _runci_guarded_test "C1y usrpwd e2e" 5 \
+    _runci_guarded_test "C1y usrpwd e2e" 6 \
         cargo test -p wz-runtime-tokio --features access-extauth-usrpwd \
         --test usrpwd_handshake_e2e --quiet || return 1
     # R311y581 — 7 -> 11: R311y576 added the four initiator-gate tests and left
@@ -8132,6 +8155,15 @@ layer_c1y_cargo_test_routing_peer() {
         cargo test -p wz-runtime-tokio --features access-extauth-pubkey --lib extauth_pubkey_store:: --quiet || return 1
     _runci_guarded_test "C1y pubkey e2e" 1 \
         cargo test -p wz-runtime-tokio --features access-extauth-pubkey \
+        --test pubkey_handshake_e2e --quiet || return 1
+    # R2779 (open-debt item 803) — the witness that each auth method draws its
+    # OWN challenge needs usrpwd AND pubkey on one responder, so it compiles
+    # only with both features: the leg above builds pubkey alone and still
+    # counts 1. It was red on the tree before the fix (the two challenges
+    # byte-identical), so this is the leg that keeps the fan-out from coming
+    # back. 2 = that witness + the pubkey-only test the file already had.
+    _runci_guarded_test "C1y pubkey+usrpwd e2e" 2 \
+        cargo test -p wz-runtime-tokio --features access-extauth-pubkey,access-extauth-usrpwd \
         --test pubkey_handshake_e2e --quiet || return 1
     (cd crates \
         && cargo test -p wz-routing-graph --quiet \

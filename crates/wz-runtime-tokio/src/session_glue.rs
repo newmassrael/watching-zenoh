@@ -134,8 +134,8 @@ pub use wz_session_core::accept_cookie::{
 // caller that builds an `AcceptCookieState` cannot name its members without
 // them, which is the two-crate-paths problem the note above already refuses.
 pub use wz_session_core::accept_state::{
-    AcceptState, CompressionAcceptState, LowlatencyAcceptState, NegotiatedExtensions,
-    PatchAcceptState, QosAcceptState, ShmAcceptState,
+    AcceptState, AuthAcceptState, CompressionAcceptState, LowlatencyAcceptState,
+    NegotiatedExtensions, PatchAcceptState, QosAcceptState, ShmAcceptState,
 };
 
 /// R69 / R311ei — construct a `SigningKey` from OS-backed cryptographic
@@ -175,12 +175,14 @@ pub fn signing_key_from_os_entropy() -> Result<SigningKey, getrandom::Error> {
 ///
 /// The no_std session core cannot draw entropy (`getrandom` has no bare-metal
 /// backend), so the AP layer draws here and supplies the value to whichever
-/// core-side slot needs it. Two consume it today, for the same replay reason on
-/// two different secrets:
+/// core-side slot needs it. It consumed two, for the same replay reason on two
+/// different secrets:
 ///
-/// - `SessionLinkActions::refresh_auth_challenge_nonce` — the usrpwd / pubkey
-///   responder challenge. A reused nonce lets a captured OpenSyn `{user, hmac}`
-///   replay against the responder.
+/// - the usrpwd / pubkey responder challenge, where a reused nonce lets a
+///   captured OpenSyn `{user, hmac}` replay against the responder. Since R2779
+///   the session draws those itself, one per method at every InitAck, through
+///   the installed [`OsEntropy`] port — the seam's single draw was one value
+///   shared by every method (open-debt item 803).
 /// - `SessionLinkActions::refresh_cookie_nonce` — the anti-amplification cookie
 ///   (R311y813). A reused nonce lets a captured OpenSyn cookie echo replay.
 ///

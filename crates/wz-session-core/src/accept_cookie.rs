@@ -123,8 +123,9 @@ pub struct AcceptCookieState {
     /// opaque bytes and echoes them back — so nothing off this node parses it,
     /// and upstream is the oracle for WHICH state must survive, not for the
     /// sequence. Upstream's relative order is followed anyway, so that the
-    /// insertion point for the states wz does not yet carry (multilink,
-    /// usrpwd, the QoS band) is unambiguous rather than a choice made twice.
+    /// insertion point for the states wz does not yet carry (multilink, the
+    /// region name) is unambiguous rather than a choice made twice — R2779
+    /// put the auth challenges after shm for exactly that reason.
     pub negotiated: NegotiatedExtensions,
 }
 
@@ -253,8 +254,8 @@ pub fn decode_accept_cookie(
 mod tests {
     use super::*;
     use crate::accept_state::{
-        CompressionAcceptState, LowlatencyAcceptState, PatchAcceptState, QosAcceptState,
-        ShmAcceptState,
+        AuthAcceptState, CompressionAcceptState, LowlatencyAcceptState, PatchAcceptState,
+        QosAcceptState, ShmAcceptState,
     };
     use crate::qos::Priority;
     use crate::reliability::Reliability;
@@ -286,6 +287,13 @@ mod tests {
                     reliability: Some(Reliability::BestEffort),
                 },
                 shm: ShmAcceptState(false),
+                // Both methods issued a challenge, so the auth state is at its
+                // widest, and the two values differ, so a codec that swapped
+                // the slots would not round-trip.
+                auth: AuthAcceptState {
+                    pubkey: Some(0x1111_2222_3333_4444),
+                    usrpwd: Some(0x5555_6666_7777_8888),
+                },
                 lowlatency: LowlatencyAcceptState(true),
                 compression: CompressionAcceptState(false),
                 // A level the bitset could not have carried, and NOT zero:
@@ -456,6 +464,16 @@ mod tests {
             AcceptCookieState {
                 negotiated: NegotiatedExtensions {
                     shm: ShmAcceptState(!base.negotiated.shm.0),
+                    ..base.negotiated
+                },
+                ..state()
+            },
+            AcceptCookieState {
+                negotiated: NegotiatedExtensions {
+                    auth: AuthAcceptState {
+                        usrpwd: None,
+                        ..base.negotiated.auth
+                    },
                     ..base.negotiated
                 },
                 ..state()

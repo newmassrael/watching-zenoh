@@ -34,12 +34,14 @@
 //!
 //! # Challenge nonce source
 //!
-//! The responder's `u64` challenge is the per-handshake nonce injected by the
-//! accept seam ([`accept_and_open_session_with_auth`](crate::session_open) via
-//! [`refresh_auth_challenge_nonce`](wz_session_core::session_actions::SessionLinkActions::refresh_auth_challenge_nonce)
-//! -> [`AuthMethod::set_challenge_nonce`]) — the SAME OS-entropy draw usrpwd
-//! uses, so both methods share one replay-defense nonce path. The RSA padding +
-//! blinding randomness is drawn separately from `OsRng`.
+//! The responder's `u64` challenge is drawn per handshake, at InitAck, from the
+//! session's installed entropy source, and handed to THIS method alone
+//! ([`AuthDispatch::set_drawn_challenges`](wz_session_core::auth_dispatch::AuthDispatch::set_drawn_challenges)
+//! -> [`AuthMethod::set_challenge_nonce`]). R2779 made it this method's own:
+//! it used to be the one value the accept seam fanned out to every method, so
+//! a responder also running usrpwd sent it in the clear on the same InitAck
+//! (open-debt item 803). The RSA padding + blinding randomness is drawn
+//! separately from `OsRng`.
 //!
 //! # SECURITY (RUSTSEC-2023-0071)
 //!
@@ -184,10 +186,17 @@ pub struct PubKeyMethod {
     /// are unchanged and now live on the store, where they are read.
     lookup: PubKeyLookup,
     /// Responder side: the per-handshake `u64` challenge, injected via
-    /// [`AuthMethod::set_challenge_nonce`] (the accept seam's OS-entropy draw --
-    /// the SAME shared nonce path usrpwd uses; only the RSA padding/blinding
-    /// randomness is drawn locally from `OsRng`, never a second challenge source).
-    challenge: u64,
+    /// [`AuthMethod::set_challenge_nonce`]. Only the RSA padding/blinding
+    /// randomness is drawn locally from `OsRng`.
+    ///
+    /// R2779 — drawn for THIS method alone. It used to be the value the accept
+    /// seam fanned out to every method, so beside usrpwd — which sends its own
+    /// in the clear — this secret was readable off the same InitAck (open-debt
+    /// item 803). And it is an `Option` because the acceptor now lets go of it
+    /// between InitAck and OpenSyn: the cookie carries it back, as upstream's
+    /// carries `StateAccept::challenge`, and "none outstanding" had to be
+    /// sayable.
+    challenge: Option<u64>,
     /// Responder side: the initiator's public key captured on InitSyn.
     peer_pubkey: Option<RsaPublicKey>,
     /// Initiator side: the responder's public key captured on InitAck.
@@ -242,8 +251,8 @@ impl PubKeyMethod {
     /// policy: `None` accepts any key (zenoh `disable_lookup`); `Some(set)`
     /// requires membership — a `Some(empty)` rejects ALL (zenoh-faithful). The
     /// per-handshake challenge is injected via
-    /// [`AuthMethod::set_challenge_nonce`] (the accept seam draws a fresh one from
-    /// OS entropy) — a fixed / reused challenge is a replay hole.
+    /// [`AuthMethod::set_challenge_nonce`] (the session draws a fresh one for this
+    /// method at every InitAck) — a fixed / reused challenge is a replay hole.
     pub fn responder(private_key: RsaPrivateKey, lookup: Option<Vec<RsaPublicKey>>) -> Self {
         Self::responder_with_store(private_key, PubKeyLookup::from_option(lookup))
     }
@@ -265,7 +274,7 @@ impl PubKeyMethod {
             private_key,
             public_key,
             lookup,
-            challenge: 0,
+            challenge: None,
             peer_pubkey: None,
             resp_pubkey: None,
             decrypted_challenge: None,
@@ -310,7 +319,28 @@ impl AuthMethod for PubKeyMethod {
     }
 
     fn set_challenge_nonce(&mut self, nonce: u64) {
-        self.challenge = nonce;
+        self.challenge = Some(nonce);
+    }
+
+    /// R2779 — upstream's pubkey accept state crosses the boundary as this
+    /// challenge and nothing else: its codec writes `x.challenge` and reads a
+    /// fresh `StateAccept` around it
+    /// (`io/zenoh-transport/src/unicast/establishment/ext/auth/pubkey.rs` @ `let challenge: u64 = self.read(&mut *reader)?;`).
+    /// Issued only once an initiator's key was admitted, which is the only
+    /// case in which `accept_init_ack` encrypts one.
+    fn accept_challenge(&self) -> Option<u64> {
+        self.peer_pubkey.as_ref().and(self.challenge)
+    }
+
+    /// R2779 — the release drops the initiator's key as well as the
+    /// challenge: upstream carries no key in its auth state, because OpenSyn
+    /// is checked with this node's PRIVATE key alone. The restore puts only
+    /// the challenge back, which is all that check reads.
+    fn restore_accept_challenge(&mut self, challenge: Option<u64>) {
+        self.challenge = challenge;
+        if challenge.is_none() {
+            self.peer_pubkey = None;
+        }
     }
 
     // ── Open (initiator) side ────────────────────────────────────────────
@@ -386,9 +416,14 @@ impl AuthMethod for PubKeyMethod {
         let Some(peer) = self.peer_pubkey.as_ref() else {
             return Ok(None);
         };
+        // R2779 — no challenge, no InitAck contribution: the arm a failed draw
+        // leaves, where sending a stale value would be the replay.
+        let Some(challenge) = self.challenge else {
+            return Err(AuthError::Rejected("pubkey: no challenge to issue"));
+        };
         // Challenge = the injected per-handshake nonce, encrypted under the
         // initiator's key (only the holder of its private key can decrypt it).
-        let challenge_ct = encrypt(peer, &self.challenge.to_le_bytes())?;
+        let challenge_ct = encrypt(peer, &challenge.to_le_bytes())?;
         Ok(Some(AuthSubExt::Zbuf(encode_init_ack(
             &self.public_key,
             &challenge_ct,
@@ -399,9 +434,14 @@ impl AuthMethod for PubKeyMethod {
         &mut self,
         sub: Option<AuthSubExt>,
     ) -> Result<Option<AuthIdentity>, AuthError> {
-        if self.peer_pubkey.is_none() {
-            return Ok(None);
-        }
+        // R2779 — what this stage checks against is the challenge the cookie
+        // brought back, and its ABSENCE refuses. The test used to be "no
+        // initiator key was captured -> contribute nothing", which the
+        // release would have turned into a skip of the whole verification:
+        // the key is gone by OpenSyn by design, as upstream's is.
+        let Some(challenge) = self.challenge else {
+            return Err(AuthError::Rejected("pubkey: no challenge outstanding"));
+        };
         let Some(AuthSubExt::Zbuf(body)) = sub else {
             return Err(AuthError::Rejected("pubkey: missing OpenSyn"));
         };
@@ -409,7 +449,7 @@ impl AuthMethod for PubKeyMethod {
         // Decrypt the re-encrypted challenge with OUR private key; it must equal
         // the challenge we issued (zenoh-exact `u64.to_le_bytes()` compare).
         let recovered = decrypt_blinded(&self.private_key, &reenc)?;
-        if recovered != self.challenge.to_le_bytes() {
+        if recovered != challenge.to_le_bytes() {
             return Err(AuthError::Rejected("pubkey: invalid nonce"));
         }
         // R2566 — `None`, and it is a statement rather than a placeholder:
@@ -422,7 +462,9 @@ impl AuthMethod for PubKeyMethod {
     }
 
     fn accept_open_ack(&mut self) -> Result<Option<AuthSubExt>, AuthError> {
-        if self.peer_pubkey.is_none() {
+        // R2779 — keyed on the challenge for the reason the OpenSyn stage is:
+        // the initiator's key is released at InitAck.
+        if self.challenge.is_none() {
             return Ok(None);
         }
         Ok(Some(AuthSubExt::Unit))
@@ -463,7 +505,8 @@ mod tests {
     /// Drive the full four-message mutual pubkey exchange through two dispatches
     /// (so it exercises the real mux/demux + ext-chain codec, not just the method
     /// methods) and return the responder's verdict. The responder challenge is
-    /// injected via the dispatch (the accept-seam path).
+    /// injected through the dispatch's per-method draw, the path the session's
+    /// InitAck takes.
     fn run_handshake(
         initiator: PubKeyMethod,
         responder: PubKeyMethod,
@@ -471,7 +514,7 @@ mod tests {
     ) -> Result<(), AuthError> {
         let mut open = AuthDispatch::new(vec![Box::new(initiator) as _]);
         let mut accept = AuthDispatch::new(vec![Box::new(responder) as _]);
-        accept.set_challenge_nonce(challenge);
+        accept.set_drawn_challenges(&[Some(challenge)]);
 
         let init_syn = open.open_init_syn().unwrap();
         accept.accept_recv_init_syn(&into_exts(init_syn))?;

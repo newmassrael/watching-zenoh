@@ -19,9 +19,9 @@
 //!     `CloseReason::Generic` — R311y823) surfaced as
 //!     `DriverLoopOutcome::AuthRejected`.
 //!
-//! The responder challenge nonce is drawn fresh from OS entropy via
-//! `nonce_from_os_entropy` (the AP-layer injection the no_std core cannot do),
-//! exercising the real per-handshake nonce path. This is the wz<->wz down
+//! The responder challenge nonce is drawn fresh from OS entropy by the
+//! responder's own session at InitAck (R2779; it was injected here by hand
+//! before), exercising the real per-handshake nonce path. This is the wz<->wz down
 //! payment on the wz<->zenohd cross-impl interop e2e (the next atom), mirroring
 //! storage A11 (wz<->wz) before A10/A12 (cross-impl).
 
@@ -36,9 +36,8 @@ use wz_runtime_tokio::session_fsm_unicast::{
     SessionFsmUnicastEvent as E, SessionFsmUnicastState as S,
 };
 use wz_runtime_tokio::session_glue::{
-    new_session_actions, new_session_engine, nonce_from_os_entropy, parse_inbound,
-    poll_and_dispatch_one, BoxedLinkDriver, CloseReason, DriverLoopOutcome, InboundFrame,
-    SessionLinkActions,
+    new_session_actions, new_session_engine, parse_inbound, poll_and_dispatch_one, BoxedLinkDriver,
+    CloseReason, DriverLoopOutcome, InboundFrame, SessionLinkActions,
 };
 use wz_runtime_tokio::session_open::{
     accept_and_open_session_with_auth, connect_and_open_session_with_auth, DialConfig, DialedLink,
@@ -110,11 +109,6 @@ async fn drive_handshake_with_responder(
     initiator_password: &[u8],
     responder_method: UsrPwdMethod,
 ) -> HandshakeOutcome {
-    // Fresh per-handshake challenge nonce from OS entropy (the AP-layer
-    // injection — the no_std core draws none).
-    let challenge_nonce =
-        nonce_from_os_entropy().expect("OS entropy for the usrpwd challenge nonce");
-
     let init_driver = Arc::new(LifecycleRecordingDriver::default());
     let resp_driver = Arc::new(LifecycleRecordingDriver::default());
 
@@ -122,16 +116,16 @@ async fn drive_handshake_with_responder(
         USER.to_vec(),
         initiator_password.to_vec(),
     )) as _]);
-    // R4a — the responder is built with a SENTINEL nonce (0); the live
-    // per-handshake nonce is injected via `refresh_auth_challenge_nonce` below,
-    // exercising the SAME path the production accept seam
-    // (`accept_and_open_session_with_auth`) drives — not the constructor. This
-    // keeps the responder replay-defense an exercised contract, not a dead API.
+    // R4a — the responder is built with a SENTINEL nonce (0).
+    // R2779 — the live per-handshake nonce is drawn by the responder's OWN
+    // session at InitAck, from the OS-entropy source `new_session_actions`
+    // installs, which is the path every production accept takes; this test
+    // used to inject one by hand, the way the accept seam did before the draw
+    // moved into the session (open-debt item 803).
     let responder_dispatch = AuthDispatch::new(vec![Box::new(responder_method) as _]);
 
     let init_actions = side(&init_driver, initiator_dispatch);
     let resp_actions = side(&resp_driver, responder_dispatch);
-    resp_actions.refresh_auth_challenge_nonce(challenge_nonce);
 
     let mut init_engine = new_session_engine(&init_actions);
     init_engine.initialize();
@@ -253,6 +247,92 @@ async fn usrpwd_matching_credentials_reach_established_on_both_sides() {
     );
 }
 
+/// R2779 — the usrpwd challenge RIDES THE COOKIE: the acceptor holds no
+/// challenge between InitAck and OpenSyn, and the OpenSyn is verified against
+/// the one the cookie brings back.
+///
+/// Read off the artifact, not the acceptor's belief about it: the carried
+/// challenge is decoded out of the cookie in the InitAck the responder
+/// actually sent. And the binding between that value and what the initiator
+/// answered is the real one, not an equality this test asserts: the OpenSyn
+/// carries an HMAC keyed by the challenge the initiator RECEIVED, and it only
+/// verifies against the challenge the acceptor RESTORED if the two are equal.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_usrpwd_challenge_rides_the_cookie_between_init_ack_and_open_syn() {
+    use wz_runtime_tokio::session_glue::decode_accept_cookie;
+    use wz_session_core::accept_state::AuthAcceptState;
+
+    let init_driver = Arc::new(LifecycleRecordingDriver::default());
+    let resp_driver = Arc::new(LifecycleRecordingDriver::default());
+    let init_actions = side(
+        &init_driver,
+        AuthDispatch::new(vec![
+            Box::new(UsrPwdMethod::initiator(USER.to_vec(), PASSWORD.to_vec())) as _,
+        ]),
+    );
+    let resp_actions = side(
+        &resp_driver,
+        AuthDispatch::new(vec![Box::new(UsrPwdMethod::responder(
+            vec![(USER.to_vec(), PASSWORD.to_vec())],
+            0,
+        )) as _]),
+    );
+    let mut init_engine = new_session_engine(&init_actions);
+    init_engine.initialize();
+    let mut resp_engine = new_session_engine(&resp_actions);
+    resp_engine.initialize();
+
+    resp_engine.process_event(E::InboundStart);
+    init_engine.process_event(E::OutboundStart);
+    init_engine.process_event(E::LinkOpened);
+    let mut d = QueueDriver::with(vec![LinkEvent::Rx(RxFrame::new(last_send(&init_driver)))]);
+    poll_and_dispatch_one(&mut d, &resp_actions, &mut resp_engine).await;
+    assert_eq!(resp_engine.get_current_state(), S::SentInitAck);
+    let init_ack_wire = last_send(&resp_driver);
+
+    let cookie = match parse_inbound(&init_ack_wire) {
+        Ok(InboundFrame::Init {
+            is_ack: true, body, ..
+        }) => body
+            .cookie
+            .clone()
+            .expect("the InitAck carries a cookie")
+            .to_vec(),
+        other => panic!("the responder's last send is an InitAck, got {other:?}"),
+    };
+    let carried = decode_accept_cookie(&fixture_session_init_params().cookie_signing_key, &cookie)
+        .expect("the acceptor's own cookie verifies");
+    let issued = carried
+        .negotiated
+        .auth
+        .usrpwd
+        .expect("the cookie carries the usrpwd challenge the InitAck issued");
+    assert_eq!(
+        carried.negotiated.auth.pubkey, None,
+        "no pubkey method ran, so the cookie carries no pubkey challenge"
+    );
+    assert_eq!(
+        resp_actions.with_auth(|d| d.accept_state()),
+        AuthAcceptState::default(),
+        "after the InitAck the acceptor holds no challenge -- it is in the cookie"
+    );
+
+    let mut d = QueueDriver::with(vec![LinkEvent::Rx(RxFrame::new(init_ack_wire))]);
+    poll_and_dispatch_one(&mut d, &init_actions, &mut init_engine).await;
+    let mut d = QueueDriver::with(vec![LinkEvent::Rx(RxFrame::new(last_send(&init_driver)))]);
+    poll_and_dispatch_one(&mut d, &resp_actions, &mut resp_engine).await;
+    assert_eq!(
+        resp_engine.get_current_state(),
+        S::Established,
+        "the OpenSyn verifies against the challenge the cookie brought back"
+    );
+    assert_eq!(
+        resp_actions.with_auth(|d| d.accept_state()).usrpwd,
+        Some(issued),
+        "the rebuild put back exactly the carried challenge"
+    );
+}
+
 /// R2567 — a user added AT RUNTIME authenticates on a LATER handshake.
 ///
 /// This is the property the shared store exists for, and the one wz could not
@@ -306,6 +386,19 @@ async fn a_user_removed_at_runtime_stops_authenticating() {
         S::Closing,
         "a revoked credential must be refused"
     );
+    // R2779 — refused BECAUSE the user is unknown, not for any reason: an
+    // acceptor that lost its challenge also ends in Closing, and this test
+    // could not tell the two apart until it named the reason.
+    assert!(
+        matches!(
+            h.responder_open_syn_outcome,
+            DriverLoopOutcome::AuthRejected(wz_session_core::auth_dispatch::AuthError::Rejected(
+                "usrpwd: unknown user"
+            ))
+        ),
+        "a revoked user must be refused as unknown; got {:?}",
+        h.responder_open_syn_outcome
+    );
     assert_eq!(
         h.responder_actions.peer_auth_id(),
         None,
@@ -319,12 +412,19 @@ async fn usrpwd_bad_password_rejects_and_tears_down_the_responder() {
 
     // The reject must surface as the typed AuthRejected outcome (the wz mirror
     // of zenoh's establishment FSM propagating the usrpwd verify error).
+    // R2779 — and for THIS reason. The test used to accept any rejection, so
+    // an acceptor that lost its challenge refused the handshake for a
+    // different reason and this test stayed green through it; the control
+    // that disabled the OpenSyn restore is what showed it.
     assert!(
         matches!(
             h.responder_open_syn_outcome,
-            DriverLoopOutcome::AuthRejected(_)
+            DriverLoopOutcome::AuthRejected(wz_session_core::auth_dispatch::AuthError::Rejected(
+                "usrpwd: bad password"
+            ))
         ),
-        "a bad password must surface DriverLoopOutcome::AuthRejected; got {:?}",
+        "a bad password must surface DriverLoopOutcome::AuthRejected for the \
+         password; got {:?}",
         h.responder_open_syn_outcome
     );
     // establishment.ext_rejected tears the Accepting session down to

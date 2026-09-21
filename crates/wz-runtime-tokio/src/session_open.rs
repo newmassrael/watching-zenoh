@@ -4063,11 +4063,13 @@ pub enum OpenError {
     /// mounted, permissions). A hard error rather than a silent downgrade.
     #[cfg(feature = "session-extshm")]
     ShmAuthSegment(std::io::Error),
-    /// R4a — the accept-side auth seam could not draw a fresh per-handshake
-    /// challenge nonce from OS entropy (a sandbox without `/dev/urandom`). The
-    /// handshake is aborted rather than reused with a stale nonce (the usrpwd /
-    /// pubkey responder replay-defense contract); a near-impossible failure on a
-    /// normal host, surfaced typed rather than panicked.
+    /// R4a — an accept seam could not draw a fresh per-handshake challenge
+    /// nonce from OS entropy (a sandbox without `/dev/urandom`). The handshake
+    /// is aborted rather than reused with a stale nonce (the pubkey responder
+    /// replay-defense contract); a near-impossible failure on a normal host,
+    /// surfaced typed rather than panicked. Since R2779 only the multilink
+    /// seam draws here: the auth challenges are drawn by the session at
+    /// InitAck, where a failed draw refuses that handshake instead.
     #[cfg(feature = "session-extauth")]
     AuthEntropy(getrandom::Error),
     /// The bounded iteration budget elapsed before Established (test guard;
@@ -4603,7 +4605,7 @@ pub async fn initiate_and_open_session(
 /// callers keep the unauthenticated signature, while an auth deploy (or the
 /// wz<->zenohd usrpwd interop e2e) calls this. Initiator side only — the
 /// responder challenge nonce arrives on the peer InitAck, so there is no nonce
-/// draw here (that is the accept path's `refresh_auth_challenge_nonce`).
+/// draw here (the responder's session draws its own at InitAck, per method).
 #[cfg(feature = "session-extauth")]
 pub async fn initiate_and_open_session_with_auth(
     connected: DialedLink,
@@ -5105,16 +5107,19 @@ pub async fn accept_and_open_session(
     .await
 }
 
-/// R4a — [`accept_and_open_session`] with a Z_EXT_AUTH dispatch installed AND a
-/// fresh per-handshake challenge nonce drawn here from OS entropy: the
-/// accept-side counterpart of [`connect_and_open_session_with_auth`]. The SEAM
-/// (not the caller) draws the nonce, so the per-accepted-handshake freshness the
-/// usrpwd / pubkey responder replay-defense requires is enforced by
-/// construction — a caller cannot forget it and reuse a stale challenge. The
+/// R4a — [`accept_and_open_session`] with a Z_EXT_AUTH dispatch installed: the
+/// accept-side counterpart of [`connect_and_open_session_with_auth`]. The
 /// caller builds the dispatch with the responder method(s) (the credential
-/// lookup / accepted-key set); this injects the live nonce before the FSM fires
-/// the InitAck challenge. zenoh draws `prng.gen()` per `StateAccept`; this is
-/// the wz equivalent at the accept seam.
+/// lookup / accepted-key set).
+///
+/// R2779 — this seam no longer draws the challenge. It drew ONE value here and
+/// fanned it out to every method, so a responder running usrpwd and pubkey
+/// sent pubkey's secret challenge in the clear as usrpwd's nonce (open-debt
+/// item 803). The session now draws one per method at every InitAck, from the
+/// OS-entropy source [`new_session_actions`] installs, which is where zenoh
+/// draws too — `prng.gen()` per method, inside
+/// its accept path. The freshness is still enforced by construction: a caller
+/// cannot reach an InitAck without passing the draw.
 #[cfg(feature = "session-extauth")]
 pub async fn accept_and_open_session_with_auth(
     accepted: DialedLink,
@@ -5127,10 +5132,6 @@ pub async fn accept_and_open_session_with_auth(
     let (inbound, outbound, writer_handle) = wire_dialed_link(accepted);
     let (actions, mut engine) = wire_session_engine(outbound, params, clock);
     actions.install_auth_dispatch(auth);
-    // Fresh challenge nonce per accepted handshake (the replay defense) — drawn
-    // from AP OS entropy here because the no_std session core cannot.
-    let nonce = crate::session_glue::nonce_from_os_entropy().map_err(OpenError::AuthEntropy)?;
-    actions.refresh_auth_challenge_nonce(nonce);
 
     engine.process_event(E::InboundStart);
     drive_open_loop(

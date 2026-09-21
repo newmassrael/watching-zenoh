@@ -214,9 +214,16 @@ pub struct UsrPwdMethod {
     /// unconfigured responder silently inverts into one that rejects everybody;
     /// upstream agrees, its `from_config` returns `None` in exactly that case.
     source: Option<Box<dyn CredentialSource>>,
-    /// Responder side: the challenge nonce sent on InitAck, INJECTED at
-    /// construction (no RNG in the no_std core).
-    nonce: u64,
+    /// Responder side: the challenge nonce sent on InitAck, INJECTED (no RNG
+    /// in the no_std core) — at construction, and then per handshake by the
+    /// dispatch's draw.
+    ///
+    /// R2779 — an `Option` because the acceptor now LETS GO of it between
+    /// InitAck and OpenSyn: the cookie carries it and puts it back
+    /// (`AuthMethod::restore_accept_challenge`). A `u64` had no way to say
+    /// "no challenge is outstanding", so a responder with none would have
+    /// verified against whatever value was last in the slot.
+    nonce: Option<u64>,
     /// Initiator side: the nonce received from the peer's InitAck.
     recv_nonce: Option<u64>,
 }
@@ -227,7 +234,7 @@ impl UsrPwdMethod {
         Self {
             credentials: Some((user, password)),
             source: None,
-            nonce: 0,
+            nonce: None,
             recv_nonce: None,
         }
     }
@@ -256,7 +263,7 @@ impl UsrPwdMethod {
             true => Self {
                 credentials: None,
                 source: None,
-                nonce,
+                nonce: Some(nonce),
                 recv_nonce: None,
             },
             false => Self::responder_with_source(Box::new(InMemoryCredentials::new(lookup)), nonce),
@@ -274,7 +281,7 @@ impl UsrPwdMethod {
         Self {
             credentials: None,
             source: Some(source),
-            nonce,
+            nonce: Some(nonce),
             recv_nonce: None,
         }
     }
@@ -341,7 +348,13 @@ impl AuthMethod for UsrPwdMethod {
         if self.source.is_none() {
             return Ok(None);
         }
-        Ok(Some(AuthSubExt::Z64(self.nonce)))
+        // R2779 — a responder with no challenge issues none. That is the arm
+        // a failed draw leaves, and sending the last handshake's value instead
+        // would be the replay the draw exists to stop.
+        let Some(nonce) = self.nonce else {
+            return Err(AuthError::Rejected("usrpwd: no challenge to issue"));
+        };
+        Ok(Some(AuthSubExt::Z64(nonce)))
     }
 
     fn accept_recv_open_syn(
@@ -352,11 +365,17 @@ impl AuthMethod for UsrPwdMethod {
             // An initiator-role method authenticates nobody on this side.
             return Ok(None);
         }
+        // R2779 — the challenge this OpenSyn answers is the one the cookie
+        // brought back. With none outstanding there is nothing to verify
+        // against, and that refuses rather than verifying against a stale one.
+        let Some(nonce) = self.nonce else {
+            return Err(AuthError::Rejected("usrpwd: no challenge outstanding"));
+        };
         let Some(AuthSubExt::Zbuf(body)) = sub else {
             return Err(AuthError::Rejected("usrpwd: missing OpenSyn"));
         };
         let (user, hmac) = decode_open_syn(&body)?;
-        let key = self.nonce.to_le_bytes();
+        let key = nonce.to_le_bytes();
         // R3b timing-oracle close (the hardening the R311wy security contract
         // deferred to this live atom): on an UNKNOWN user, run a dummy HMAC
         // over a fixed secret before rejecting, so the reject path costs the
@@ -409,11 +428,23 @@ impl AuthMethod for UsrPwdMethod {
 
     fn set_challenge_nonce(&mut self, nonce: u64) {
         // Responder side: this is the InitAck challenge + the OpenSyn-verify
-        // key. The live handshake wiring calls this with a FRESH OS-entropy
-        // nonce per accepted handshake (the replay-defense contract on
+        // key. The dispatch calls this with a FRESH draw for this method per
+        // accepted handshake (the replay-defense contract on
         // [`Self::responder`]). Harmless on an initiator-only method — the
         // initiator reads `recv_nonce`, never this slot.
-        self.nonce = nonce;
+        self.nonce = Some(nonce);
+    }
+
+    /// R2779 — upstream's usrpwd accept state is exactly this nonce
+    /// (`io/zenoh-transport/src/unicast/establishment/ext/auth/usrpwd.rs` @ `pub(crate) struct StateAccept {`),
+    /// and it exists only for a method configured as a responder, which is
+    /// why an initiator-only method carries nothing.
+    fn accept_challenge(&self) -> Option<u64> {
+        self.source.as_ref().and(self.nonce)
+    }
+
+    fn restore_accept_challenge(&mut self, challenge: Option<u64>) {
+        self.nonce = challenge;
     }
 }
 
@@ -657,6 +688,48 @@ mod tests {
         // An initiator-role method (empty lookup) does not require the offer.
         let mut init = UsrPwdMethod::initiator(b"bob".to_vec(), b"pw".to_vec());
         assert_eq!(init.accept_recv_init_syn(None), Ok(()));
+    }
+
+    /// R2779 — the challenge a responder issued can be let go of after InitAck
+    /// and handed back at OpenSyn, and an OpenSyn that arrives with NONE handed
+    /// back is refused rather than checked against a stale value.
+    ///
+    /// Driven at the method, with the initiator's real OpenSyn, so the verify
+    /// that runs is the production HMAC over the restored key.
+    #[test]
+    fn a_released_challenge_verifies_only_once_it_is_restored() {
+        let mut open = UsrPwdMethod::initiator(b"alice".to_vec(), b"pw".to_vec());
+        let mut accept = UsrPwdMethod::responder(
+            alloc::vec![(b"alice".to_vec(), b"pw".to_vec())],
+            0x5151_5151,
+        );
+        assert_eq!(
+            open.accept_challenge(),
+            None,
+            "an initiator-only method issues no challenge to carry"
+        );
+        accept
+            .accept_recv_init_syn(open.open_init_syn().unwrap())
+            .unwrap();
+        let init_ack = accept.accept_init_ack().unwrap();
+        let issued = accept.accept_challenge();
+        assert_eq!(issued, Some(0x5151_5151));
+        open.open_recv_init_ack(init_ack).unwrap();
+        let open_syn = open.open_open_syn().unwrap();
+
+        accept.restore_accept_challenge(None);
+        assert_eq!(accept.accept_challenge(), None, "released");
+        assert_eq!(
+            accept.accept_recv_open_syn(open_syn.clone()),
+            Err(AuthError::Rejected("usrpwd: no challenge outstanding"))
+        );
+
+        accept.restore_accept_challenge(issued);
+        assert_eq!(
+            accept.accept_recv_open_syn(open_syn),
+            Ok(Some(AuthIdentity(b"alice".to_vec()))),
+            "the restored challenge is the one the initiator answered"
+        );
     }
 
     #[test]

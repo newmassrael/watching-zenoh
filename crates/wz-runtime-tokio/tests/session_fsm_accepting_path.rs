@@ -35,9 +35,10 @@ use wz_runtime_tokio::session_fsm_unicast::{
 };
 use wz_runtime_tokio::session_glue::{
     decode_accept_cookie, encode_accept_cookie, new_session_actions, new_session_engine,
-    poll_and_dispatch_one, AcceptCookieState, BoxedLinkDriver, CompressionAcceptState,
-    LinkSendOutcome, LowlatencyAcceptState, NegotiatedExtensions, PatchAcceptState, PeerInitCaps,
-    QosAcceptState, SessionActionsBinding, SessionLinkActions, ShmAcceptState,
+    poll_and_dispatch_one, AcceptCookieState, AuthAcceptState, BoxedLinkDriver,
+    CompressionAcceptState, LinkSendOutcome, LowlatencyAcceptState, NegotiatedExtensions,
+    PatchAcceptState, PeerInitCaps, QosAcceptState, SessionActionsBinding, SessionLinkActions,
+    ShmAcceptState,
 };
 // R311fr — DriverLoopOutcome is referenced only by the
 // transport-keepalive-gated r78 handshake test; gate the import to match
@@ -958,6 +959,7 @@ async fn without_a_cookie_nonce_the_acceptor_admits_no_open_syn() {
             negotiated: NegotiatedExtensions {
                 qos: QosAcceptState::NoQos,
                 shm: ShmAcceptState(false),
+                auth: AuthAcceptState::default(),
                 lowlatency: LowlatencyAcceptState(false),
                 compression: CompressionAcceptState(false),
                 patch: PatchAcceptState(None),

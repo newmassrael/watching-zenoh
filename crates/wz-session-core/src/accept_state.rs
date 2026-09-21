@@ -59,8 +59,9 @@
 //! of extensions, because the list R2774 wrote from a walk of the extensions
 //! missed one —
 //! `io/zenoh-transport/src/unicast/establishment/cookie.rs` @ `pub(crate) struct Cookie {`.
-//! Against that struct four things remain, held by the objects that own
-//! them: the auth states (the usrpwd nonce and the pubkey challenge), the
+//! Against that struct four things remained, and R2779 closed the auth
+//! states: the usrpwd nonce and the pubkey challenge ride
+//! `AuthAcceptState`. Three remain, held by the objects that own them: the
 //! multilink public key with its challenge, the peer's announced region
 //! name, and the cookie's head fields, which ride the cookie but are also
 //! still kept in their slots. Upstream's shm accept state is EMPTY, so shm
@@ -373,6 +374,78 @@ flag_accept_state! {
     CompressionAcceptState
 }
 
+/// The per-handshake challenges the auth methods issued at InitAck and must
+/// check at OpenSyn: one per method upstream's auth mux knows.
+///
+/// R2779 — upstream's is one state per configured method,
+/// `io/zenoh-transport/src/unicast/establishment/ext/auth/mod.rs` @ `pub(crate) struct StateAccept {`,
+/// and each carries exactly one `u64` across the boundary: usrpwd its nonce,
+/// `io/zenoh-transport/src/unicast/establishment/ext/auth/usrpwd.rs` @ `pub(crate) struct StateAccept {`,
+/// and pubkey its challenge, the only field its codec writes. So this is two
+/// optional `u64`s, and absence is the fact upstream's `Option` states: that
+/// method issued no challenge in this handshake.
+///
+/// KEYED BY METHOD, not by position in the dispatch. The dispatch is an open
+/// list and upstream's mux is not, so a method outside the two has no member
+/// here; `crate::auth_dispatch::AuthDispatch` leaves such a method holding its
+/// own state rather than dropping what nothing could return.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct AuthAcceptState {
+    /// The pubkey method's challenge, or none.
+    pub pubkey: Option<u64>,
+    /// The usrpwd method's nonce, or none.
+    pub usrpwd: Option<u64>,
+}
+
+impl AuthAcceptState {
+    /// One slot's width: a presence byte, then the value.
+    const SLOT: usize = 9;
+
+    /// Presence byte then eight little-endian bytes, the shape
+    /// `PatchAcceptState` has and for its reason: every `u64` is a possible
+    /// challenge, so no value is left over to mean "none".
+    fn encode_slot<S: SceSink>(slot: Option<u64>, sink: &mut S) -> Result<(), CodecError> {
+        let (present, value) = match slot {
+            Some(v) => (1u8, v),
+            None => (0u8, 0),
+        };
+        sink.write_u8(present)?;
+        for b in value.to_le_bytes() {
+            sink.write_u8(b)?;
+        }
+        Ok(())
+    }
+
+    /// The inverse, over exactly `Self::SLOT` bytes. Total, for the reason
+    /// `PatchAcceptState::decode` gives: the MAC has refused anything this
+    /// node did not write before a byte here is read.
+    fn decode_slot(raw: &[u8]) -> Option<u64> {
+        let mut value = [0u8; 8];
+        value.copy_from_slice(&raw[1..Self::SLOT]);
+        (raw[0] != 0).then(|| u64::from_le_bytes(value))
+    }
+}
+
+impl AcceptState for AuthAcceptState {
+    /// Two slots of a presence byte and a `u64`.
+    const WIDTH: usize = 2 * Self::SLOT;
+
+    fn encode<S: SceSink>(&self, sink: &mut S) -> Result<(), CodecError> {
+        Self::encode_slot(self.pubkey, sink)?;
+        Self::encode_slot(self.usrpwd, sink)
+    }
+
+    fn decode(cursor: &mut SceCursor<'_>) -> Result<Self, CodecError> {
+        let raw = cursor.peek_slice(Self::WIDTH)?;
+        let state = Self {
+            pubkey: Self::decode_slot(&raw[..Self::SLOT]),
+            usrpwd: Self::decode_slot(&raw[Self::SLOT..]),
+        };
+        cursor.advance(Self::WIDTH)?;
+        Ok(state)
+    }
+}
+
 /// Every extension state the acceptor's cookie carries, as ONE value in the
 /// codec's order.
 ///
@@ -398,6 +471,11 @@ pub struct NegotiatedExtensions {
     pub qos: QosAcceptState,
     /// Whether shared memory was negotiated.
     pub shm: ShmAcceptState,
+    /// The challenges the auth methods issued (R2779). Not an outcome, and
+    /// in the group anyway: it crosses the same boundary, is released after
+    /// InitAck and rebuilt at OpenSyn by the same one writer, and upstream's
+    /// cookie holds it among the extension states, after shm.
+    pub auth: AuthAcceptState,
     /// Whether the lowlatency transport shape was negotiated.
     pub lowlatency: LowlatencyAcceptState,
     /// Whether payload compression was negotiated.
@@ -409,6 +487,7 @@ pub struct NegotiatedExtensions {
 impl AcceptState for NegotiatedExtensions {
     const WIDTH: usize = QosAcceptState::WIDTH
         + ShmAcceptState::WIDTH
+        + AuthAcceptState::WIDTH
         + LowlatencyAcceptState::WIDTH
         + CompressionAcceptState::WIDTH
         + PatchAcceptState::WIDTH;
@@ -416,6 +495,7 @@ impl AcceptState for NegotiatedExtensions {
     fn encode<S: SceSink>(&self, sink: &mut S) -> Result<(), CodecError> {
         self.qos.encode(sink)?;
         self.shm.encode(sink)?;
+        self.auth.encode(sink)?;
         self.lowlatency.encode(sink)?;
         self.compression.encode(sink)?;
         self.patch.encode(sink)
@@ -427,6 +507,7 @@ impl AcceptState for NegotiatedExtensions {
         Ok(Self {
             qos: QosAcceptState::decode(cursor)?,
             shm: ShmAcceptState::decode(cursor)?,
+            auth: AuthAcceptState::decode(cursor)?,
             lowlatency: LowlatencyAcceptState::decode(cursor)?,
             compression: CompressionAcceptState::decode(cursor)?,
             patch: PatchAcceptState::decode(cursor)?,
@@ -578,6 +659,9 @@ mod tests {
         }
         assert_eq!(width_check(ShmAcceptState(true)), ShmAcceptState::WIDTH);
         assert_eq!(width_check(ShmAcceptState(false)), ShmAcceptState::WIDTH);
+        for arm in auth_arms() {
+            assert_eq!(width_check(arm), AuthAcceptState::WIDTH);
+        }
         assert_eq!(
             width_check(LowlatencyAcceptState(true)),
             LowlatencyAcceptState::WIDTH
@@ -619,6 +703,13 @@ mod tests {
             },
             NegotiatedExtensions {
                 shm: ShmAcceptState(true),
+                ..base
+            },
+            NegotiatedExtensions {
+                auth: AuthAcceptState {
+                    pubkey: Some(7),
+                    usrpwd: None,
+                },
                 ..base
             },
             NegotiatedExtensions {
@@ -716,6 +807,61 @@ mod tests {
                 assert_ne!(
                     seen[i], seen[j],
                     "QoS arms {i} and {j} share an encoding -- a rebuilt \
+                     acceptor could not tell them apart"
+                );
+            }
+        }
+    }
+
+    /// Every auth state that must stay distinguishable, and none of them
+    /// SYMMETRIC: a fixture that put one value in both slots could not see a
+    /// decode that read them back swapped.
+    fn auth_arms() -> [AuthAcceptState; 6] {
+        [
+            AuthAcceptState::default(),
+            AuthAcceptState {
+                pubkey: Some(0),
+                usrpwd: None,
+            },
+            AuthAcceptState {
+                pubkey: None,
+                usrpwd: Some(0),
+            },
+            AuthAcceptState {
+                pubkey: Some(0x0102_0304_0506_0708),
+                usrpwd: None,
+            },
+            AuthAcceptState {
+                pubkey: None,
+                usrpwd: Some(0x0102_0304_0506_0708),
+            },
+            AuthAcceptState {
+                pubkey: Some(u64::MAX),
+                usrpwd: Some(1),
+            },
+        ]
+    }
+
+    /// R2779 — every auth arm survives, and no two share an encoding.
+    ///
+    /// The pairs that matter are the ones a lossy encoding would merge: a
+    /// challenge of ZERO against no challenge (zero is a value a source can
+    /// draw, so it cannot mean "absent"), and the same challenge in the pubkey
+    /// slot against the usrpwd slot (a rebuilt acceptor would hand it to the
+    /// wrong method, which then refuses a correct OpenSyn).
+    #[test]
+    fn every_auth_arm_survives_and_no_two_share_an_encoding() {
+        let mut seen = [[0u8; AuthAcceptState::WIDTH]; 6];
+        for (i, arm) in auth_arms().into_iter().enumerate() {
+            assert_eq!(width_check(arm), AuthAcceptState::WIDTH);
+            let mut sink = SliceSink::new(&mut seen[i]);
+            arm.encode(&mut sink).expect("fits");
+        }
+        for i in 0..seen.len() {
+            for j in (i + 1)..seen.len() {
+                assert_ne!(
+                    seen[i], seen[j],
+                    "auth arms {i} and {j} share an encoding -- a rebuilt \
                      acceptor could not tell them apart"
                 );
             }

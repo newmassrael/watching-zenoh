@@ -2581,25 +2581,51 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         R::with_mutex_mut(&self.auth, |slot| *slot = dispatch);
     }
 
-    /// R3b — refresh the responder challenge nonce: a FRESH cryptographically
-    /// random `nonce` per accepted handshake (the [`crate::extauth_usrpwd`]
-    /// replay-defense contract). The no_std core draws no entropy, so the AP
-    /// accept path supplies it before the InitAck stage — and again on a
-    /// re-handshake, since the ext slots (and thus a stale auth ext) survive
-    /// [`Self::reset_for_reopen`].
-    #[cfg(feature = "session-extauth")]
-    pub fn refresh_auth_challenge_nonce(&self, nonce: u64) {
-        R::with_mutex_mut(&self.auth, |d| d.set_challenge_nonce(nonce));
+    /// R2779 — draw every auth method's per-handshake challenge, ONE DRAW PER
+    /// METHOD, from the installed entropy source, at InitAck.
+    ///
+    /// This replaced `refresh_auth_challenge_nonce`, which took ONE value and
+    /// handed it to every method: with usrpwd and pubkey on one responder, the
+    /// nonce usrpwd sends in the clear was the secret pubkey encrypts to the
+    /// initiator, so a peer holding usrpwd credentials and knowing one trusted
+    /// public key could answer pubkey without the private key (open-debt item
+    /// 803, reproduced through the production seams before this change).
+    /// Upstream draws each method's own
+    /// (`io/zenoh-transport/src/unicast/establishment/ext/auth/usrpwd.rs` @ `impl StateAccept {`,
+    /// `io/zenoh-transport/src/unicast/establishment/ext/auth/pubkey.rs` @ `state.challenge = prng.gen();`),
+    /// and in its InitAck path, which is where this is called — the same move
+    /// R2763 made for the cookie nonce, and from the same source.
+    ///
+    /// The three arms are the cookie nonce's: no source installed leaves each
+    /// method as it is (a host that supplied challenges itself keeps them); a
+    /// draw that fails releases THAT method, which then issues nothing and
+    /// admits no OpenSyn; a draw that succeeds replaces it. The two mutexes are
+    /// taken in sequence and never nested, the rule `draw_cookie_nonce` states.
+    #[cfg(all(
+        feature = "session-extauth",
+        feature = "codec-init-body",
+        feature = "session-unicast-accept"
+    ))]
+    fn draw_auth_challenges(&self) {
+        let count = R::with_mutex_mut(&self.auth, |d| d.method_count());
+        let drawn: Option<Vec<Option<u64>>> = R::with_mutex_mut(&self.cookie_entropy, |slot| {
+            slot.as_mut()
+                .map(|src| (0..count).map(|_| src.try_next_u64().ok()).collect())
+        });
+        if let Some(draws) = drawn {
+            R::with_mutex_mut(&self.auth, |d| d.set_drawn_challenges(&draws));
+        }
     }
 
     /// R311y813 — install the per-handshake cookie nonce, the term that binds
     /// the Accepting side's anti-amplification cookie to ONE handshake (the
-    /// `cookie_nonce` slot). Sibling of `refresh_auth_challenge_nonce` and
-    /// supplied the same way and for the same reason: the no_std core draws no
-    /// entropy, so the host that has a source installs it. Both siblings are
-    /// named as code spans rather than links — one is `session-extauth`-gated
-    /// and the other shares its name with a field, so a link would resolve in
-    /// some feature subsets and ambiguously in the rest.
+    /// `cookie_nonce` slot). Supplied for the reason every per-handshake secret
+    /// here is: the no_std core draws no entropy, so the host that has a source
+    /// installs it. (Its auth sibling, `refresh_auth_challenge_nonce`, is gone
+    /// since R2779 — the auth challenges are drawn at InitAck, per method, by
+    /// `draw_auth_challenges`. Both are code spans rather than links, because
+    /// the auth one is `session-extauth`-gated and this one shares its name
+    /// with a field.)
     ///
     /// **Ungated, unlike the auth nonce.** The cookie is not an optional
     /// extension — every acceptor mints one on InitAck — so a build that
@@ -2747,6 +2773,8 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// carry, and the reason the state type keeps an `Option<u8>`.
     #[cfg(all(feature = "codec-init-body", feature = "session-unicast-accept"))]
     fn negotiated_extensions(&self) -> crate::accept_state::NegotiatedExtensions {
+        #[cfg(not(feature = "session-extauth"))]
+        use crate::accept_state::AuthAcceptState;
         use crate::accept_state::{
             CompressionAcceptState, LowlatencyAcceptState, NegotiatedExtensions, PatchAcceptState,
             QosAcceptState, ShmAcceptState,
@@ -2773,6 +2801,12 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             shm: ShmAcceptState(self.is_shm()),
             #[cfg(not(feature = "transport-shm"))]
             shm: ShmAcceptState(false),
+            // R2779 — the challenges the auth methods issued for this InitAck,
+            // read after `draw_auth_challenges` and the auth stage have run.
+            #[cfg(feature = "session-extauth")]
+            auth: R::with_mutex_mut(&self.auth, |d| d.accept_state()),
+            #[cfg(not(feature = "session-extauth"))]
+            auth: AuthAcceptState::default(),
             #[cfg(feature = "transport-lowlatency")]
             lowlatency: LowlatencyAcceptState(self.is_lowlatency()),
             #[cfg(not(feature = "transport-lowlatency"))]
@@ -2798,8 +2832,8 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     ))]
     fn offered_extensions(&self) -> crate::accept_state::NegotiatedExtensions {
         use crate::accept_state::{
-            CompressionAcceptState, LowlatencyAcceptState, NegotiatedExtensions, PatchAcceptState,
-            QosAcceptState, ShmAcceptState,
+            AuthAcceptState, CompressionAcceptState, LowlatencyAcceptState, NegotiatedExtensions,
+            PatchAcceptState, QosAcceptState, ShmAcceptState,
         };
         use crate::transport_mode::TransportMode;
         let offer = R::with_mutex_mut(&self.offer, |o| *o);
@@ -2820,6 +2854,10 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                 QosAcceptState::NoQos
             },
             shm: ShmAcceptState(offer.shm),
+            // R2779 — nothing: a challenge is drawn per handshake, never
+            // offered, so the state a handshake starts from holds none. This
+            // is what makes the InitAck return-to-offer a RELEASE of them.
+            auth: AuthAcceptState::default(),
             lowlatency: LowlatencyAcceptState(offer.mode == TransportMode::LowLatency),
             compression: CompressionAcceptState(offer.compression),
             patch: PatchAcceptState(None),
@@ -2864,6 +2902,9 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         });
         #[cfg(feature = "transport-shm")]
         R::with_mutex_mut(&self.is_shm, |s| *s = n.shm.0);
+        // R2779 — the auth challenges, into the methods that issued them.
+        #[cfg(feature = "session-extauth")]
+        R::with_mutex_mut(&self.auth, |d| d.restore_accept_state(n.auth));
         #[cfg(feature = "transport-lowlatency")]
         R::with_mutex_mut(&self.is_lowlatency, |s| *s = n.lowlatency.0);
         #[cfg(feature = "transport-compression")]
@@ -8490,8 +8531,12 @@ impl<R: SessionRuntime, T: TimeSource> SessionFsmUnicastActionsTrait
             let a = &self.inner;
             R::with_mutex_mut(&a.trace, |t| t.send_init_ack_with_cookie += 1);
             // R3b — responder usrpwd challenge (Z64 nonce) staged into the
-            // InitAck chain. The AP accept path refreshes the nonce per
-            // handshake before this fires (replay defense).
+            // InitAck chain.
+            // R2779 — each method's challenge is drawn HERE, one per method,
+            // immediately before the stage that issues it (open-debt item 803;
+            // it used to be one value set by the AP seam at bring-up).
+            #[cfg(feature = "session-extauth")]
+            a.draw_auth_challenges();
             #[cfg(feature = "session-extauth")]
             a.stage_auth_send(ExtChainRole::InitAck, |d| d.accept_init_ack());
             // R311y205 (transport-multilink IMPL-2b-ii) — the responder's 0x4
