@@ -2001,7 +2001,7 @@ PIN_NO_SYMBOL = 2
 # arithmetic: 76 + 3 = 79, the census's own FAIL line, so no other atom moves
 # and AMBIGUOUS correctly holds.
 #
-# R2797 — 79 -> 83, RISING: `transport-link-udp` stays PARTIAL and gains four
+# R2798 — 79 -> 83, RISING: `transport-link-udp` stays PARTIAL and gains four
 # wz citations in an addendum recording that the base R2796 named is built.
 # The four are the wrapped session (`quic_plaintext.rs` @ `struct
 # PlainTextSession(Box<dyn crypto::Session>);`), the seam that now takes

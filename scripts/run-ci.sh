@@ -6566,7 +6566,7 @@ layer_c1aj_cargo_test_quic_datagram() {
 
 # ─── Layer C1ci — reliable UDP: the plaintext QUIC session, read off the wire ─
 #
-# R2797: `transport-link-udp-reliable` (OFF in the default set, IMPLIES
+# R2798: `transport-link-udp-reliable` (OFF in the default set, IMPLIES
 # `transport-link-quic` and `transport-link-udp`) is upstream's `udp/...?rel=1`
 # variant — the QUIC stream link under a PLAINTEXT session (`quic_plaintext`:
 # the TLS 1.3 handshake runs, then every packet and header key is a no-op).

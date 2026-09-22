@@ -990,7 +990,7 @@ transport-link-quic = ["transport-link-tcp", "dep:quinn", "dep:tokio-rustls", "d
 # here. Cert threaded via `DialConfig.quic` (same cert as `quic`). NOT default —
 # zenoh-default upstream, but an opt-in unreliable transport in wz.
 transport-link-quic-datagram = ["transport-link-quic", "dep:bytes"]
-# R2797 — host RELIABLE UDP (`udp/...?rel=1`), upstream's
+# R2798 — host RELIABLE UDP (`udp/...?rel=1`), upstream's
 # `LinkUnicastUdpVariant::Reliable`: the QUIC stream link run as PLAINTEXT QUIC.
 # The TLS 1.3 handshake still runs (a per-process self-signed server
 # certificate, a client that skips the chain) but only to negotiate; every
@@ -1860,14 +1860,14 @@ quinn = { version = "0.11", default-features = false, features = ["ring", "rustl
 # (semver-stable at 1.x), so it unifies to one version. Pulled only by
 # `transport-link-quic-datagram`.
 bytes = { version = "1", optional = true }
-# R2797 — the plaintext QUIC session (`quic_plaintext`) implements quinn's
+# R2798 — the plaintext QUIC session (`quic_plaintext`) implements quinn's
 # crypto traits, and two of their signatures name types quinn does not
 # re-export: `transport_parameters::TransportParameters` and `TransportError`.
 # Upstream declares the same direct dependency for the same file. It is the
 # crate quinn already locks, so the build compiles nothing new;
 # `default-features = false` lets quinn's own selection (ring + rustls) decide.
 quinn-proto = { version = "0.11", default-features = false, optional = true }
-# R2797 — the reliable UDP variant's self-signed server certificate, generated
+# R2798 — the reliable UDP variant's self-signed server certificate, generated
 # once per process at run time because its clients trust any certificate.
 # Upstream generates it with the same crate, and it was already locked here as
 # a dev-dependency. `ring` only: the provider every other wz rustls config uses.
@@ -2111,7 +2111,7 @@ serde_json = "1"
 # (tests/tls_e2e.rs): the acceptor's rustls ServerConfig needs a cert chain +
 # private key, and the dialer's ClientConfig must trust that cert (added to a
 # fresh root store, server name "localhost"). Production cert material for the
-# encrypted links comes from the app. R2797 — the ONE exception is the reliable
+# encrypted links comes from the app. R2798 — the ONE exception is the reliable
 # UDP variant, whose certificate identifies nobody and is generated at run time;
 # that is the optional `rcgen` dependency above, not this one.
 rcgen = "0.13"

@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later OR LicenseRef-watching-zenoh-Commercial
 // SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
 
-//! R2797 — PLAINTEXT QUIC: the crypto session under reliable UDP.
+//! R2798 — PLAINTEXT QUIC: the crypto session under reliable UDP.
 //!
 //! Upstream's `udp/...?rel=1` is not a UDP protocol of its own. It is the QUIC
 //! stream link with its security switched off

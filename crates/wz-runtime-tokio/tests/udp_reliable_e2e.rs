@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
 #![cfg(feature = "transport-link-udp-reliable")]
 
-//! R2797 — reliable UDP (`udp/...?rel=1`) puts its bytes on the wire IN THE
+//! R2798 — reliable UDP (`udp/...?rel=1`) puts its bytes on the wire IN THE
 //! CLEAR, which is what upstream's variant does and what makes it reachable
 //! from upstream at all.
 //!

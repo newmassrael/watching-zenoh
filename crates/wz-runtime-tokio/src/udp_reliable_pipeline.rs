@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later OR LicenseRef-watching-zenoh-Commercial
 // SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
 
-//! R2797 — reliable UDP (`udp/...?rel=1`): the QUIC stream link under a
+//! R2798 — reliable UDP (`udp/...?rel=1`): the QUIC stream link under a
 //! plaintext session.
 //!
 //! Upstream builds the variant from the same client and server builders as its

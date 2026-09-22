@@ -253,7 +253,7 @@ where
     io::Error::other(err)
 }
 
-/// R2797 — a rustls client config as quinn's crypto: the SECURE arm of the
+/// R2798 — a rustls client config as quinn's crypto: the SECURE arm of the
 /// choice upstream makes where it hands quinn its crypto
 /// (`io/zenoh-link-commons/src/quic/unicast.rs` @ `Arc::new(PlainTextClientConfig::new(quic_config.into()))`,
 /// the `else` of `if is_secure`). The plaintext arm is
@@ -268,7 +268,7 @@ pub(crate) fn tls_client_crypto(
     ))
 }
 
-/// R2797 — the server twin of [`tls_client_crypto`].
+/// R2798 — the server twin of [`tls_client_crypto`].
 pub(crate) fn tls_server_crypto(
     server_config: Arc<RustlsServerConfig>,
 ) -> io::Result<Arc<dyn quinn::crypto::ServerConfig>> {
@@ -280,7 +280,7 @@ pub(crate) fn tls_server_crypto(
 /// Build a client [`Endpoint`] bound to a local socket (the locator's `#bind=`,
 /// else an ephemeral one of `addr`'s family), install the QUIC `crypto` —
 /// the TLS-1.3 + ALPN-`hq-29` rustls config via [`tls_client_crypto`], or
-/// R2797's plaintext session — and connect
+/// R2798's plaintext session — and connect
 /// to `addr` (SNI = `server_name`) — the shared QUIC client-handshake SSOT for
 /// BOTH the stream backend ([`dial_quic`]) and the datagram backend
 /// ([`crate::quic_datagram_pipeline::dial_quic_datagram`]). Returns the endpoint
@@ -329,7 +329,7 @@ pub(crate) async fn connect_quic_client(
 }
 
 /// Build a server [`Endpoint`] at `addr` presenting the QUIC `crypto` — the
-/// TLS-1.3 + ALPN-`hq-29` rustls config via [`tls_server_crypto`], or R2797's
+/// TLS-1.3 + ALPN-`hq-29` rustls config via [`tls_server_crypto`], or R2798's
 /// plaintext session — capping application streams at `max_bidi`
 /// bidirectional + 0 unidirectional — the shared QUIC server-endpoint SSOT for
 /// BOTH the stream backend ([`bind_quic`], `max_bidi = 1` = exactly one
@@ -434,7 +434,7 @@ pub async fn dial_quic(
     .await
 }
 
-/// R2797 — the crypto-agnostic body of [`dial_quic`]: the shared
+/// R2798 — the crypto-agnostic body of [`dial_quic`]: the shared
 /// [`connect_quic_client`] handshake, then `open_bi`. Split out so the
 /// reliable UDP variant, which is this same stream link under a plaintext
 /// session, dials through it instead of repeating it.
