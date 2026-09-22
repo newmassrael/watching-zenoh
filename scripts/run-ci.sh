@@ -9825,7 +9825,12 @@ layer_c1q_multicast_glue() {
     # gated on `locator-iface`, which this leg did not build — so without the
     # feature it would have run in nobody's lane, the same trap as above. The
     # number is what the command printed, not a diff count.
-    _runci_guarded_test C1q 7 cargo test -p wz-runtime-tokio --features transport-multicast,transport-link-udp,locator-iface --lib udp_multicast_config --quiet \
+    # R2791: 7 -> 9, the two witnesses for the commons socket keys (`bind` /
+    # `dscp`) on the multicast constructors. The number is what the command
+    # printed, not a diff count. One of the two reads the TOS byte back from the
+    # kernel and is `#[cfg(target_os = "linux")]`, so this pin describes a Linux
+    # host -- which is every lane that runs it -- and would read 8 elsewhere.
+    _runci_guarded_test C1q 9 cargo test -p wz-runtime-tokio --features transport-multicast,transport-link-udp,locator-iface --lib udp_multicast_config --quiet \
         || return 1
 }
 
