@@ -73,8 +73,9 @@
 //!   served the directory as it stood when the storage OPENED, never as it
 //!   stands now. Owned values remove the reason for the copy; the error
 //!   channel lets a read that the medium refused be told apart from a key that
-//!   is absent, which an `Option` had to merge. [`StorageBackend::get_newest`]
-//!   is the derived single-value read a `History::Latest` caller wants.
+//!   is absent, which an `Option` had to merge.
+//!   [`get_newest`](crate::storage_backend::StorageBackend::get_newest) is the
+//!   derived single-value read a `History::Latest` caller wants.
 //! - **`StoredData.encoding` is `Option<EncodingHint>`, not a concrete
 //!   `Encoding`**: zenoh's `StoredData.encoding` is a non-optional
 //!   `Encoding` (it defaults to `Encoding::default()`); wz models an absent
