@@ -2761,8 +2761,10 @@ mod tests {
     /// Upstream's lowlatency link carries `TransportBodyLowLatency`, which is
     /// `Close | KeepAlive | Network(NetworkMessage)` — the data-carrying arm is
     /// a NETWORK message DIRECTLY, with no `Frame` wrapper and no sequence
-    /// number (`commons/zenoh-protocol/src/transport/mod.rs`). This reader
-    /// models the UNIVERSAL set only, so that third arm decodes as nothing.
+    /// number. This reader models the UNIVERSAL set only, so that third arm
+    /// decodes as nothing.
+    ///
+    /// `commons/zenoh-protocol/src/transport/mod.rs` @ `pub enum TransportBodyLowLatency {`
     ///
     /// The bytes below are the shape measured off a real lowlatency capture:
     /// the same network message the universal path carries INSIDE a `Frame`,
