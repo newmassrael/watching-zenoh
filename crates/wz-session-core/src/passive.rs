@@ -1396,6 +1396,10 @@ impl PassiveSession {
             return Ok(frame);
         }
         let width = self.context.prefix_width(direction);
+        // R2803 — WHICH MESSAGE SET may begin here. Read beside `width` and for
+        // the same reason: both are facts about the LINK, and the borrow below
+        // is of one direction's buffer.
+        let lean = self.context.lowlatency_active(direction);
         let depth = self.resync_depth;
         let stream = self.stream_mut(direction);
 
@@ -1430,7 +1434,16 @@ impl PassiveSession {
             return Err(PassiveStall::NeedMoreBytes);
         }
         let header = stream.buf[width];
-        if !wz_codecs::wire_const::is_credible_transport_header(header) {
+        // R2803 — a lean link carries `Close | KeepAlive | Network(..)`, so the
+        // transport-only question refuses every data frame on one. Measured: a
+        // real capture desynchronised on its first Declare (`header 0x9e`) and
+        // abandoned 20 KiB behind it, with the handshake before it read clean.
+        let credible = if lean {
+            wz_codecs::wire_const::is_credible_lowlatency_header(header)
+        } else {
+            wz_codecs::wire_const::is_credible_transport_header(header)
+        };
+        if !credible {
             return Err(stream.desynchronise(DesyncReason::ImplausibleHeader { header }));
         }
         if stream.buf.len() < width + payload_len {
@@ -2595,6 +2608,227 @@ mod tests {
             "B went lean at its OWN Open, not at A's"
         );
         assert!(fb.frame.is_ok(), "B body decodes: {:?}", fb.frame);
+    }
+
+    /// R2800 — the SAME shape as a consumer's failing capture, end to end:
+    /// 15 frames on the wire, 4 handshake and 11 lean, both directions.
+    ///
+    /// The sibling witness above proves the width moves per direction, but it
+    /// feeds exactly ONE lean frame each way, so it cannot distinguish "the
+    /// first lean frame reads" from "the lean RUN reads". A consumer reported
+    /// a 15-frame lean capture yielding only 3 messages at their layer, which
+    /// is the shape a desync one frame into the run would produce and which
+    /// the sibling test would pass through unnoticed.
+    ///
+    /// The COUNT is the whole point. If this reader stops early the number
+    /// here drops and the defect is in this module; if it reads all 15 then a
+    /// same-shaped capture is read whole here and the loss is on the far side
+    /// of whatever boundary the consumer calls through. That is the cheap
+    /// split, and it is cheap only on this side.
+    #[test]
+    fn a_lean_run_is_read_whole_and_not_just_its_first_frame() {
+        let ll = || vec![unit_ext(est_ext::LOWLATENCY)];
+        let mut s = PassiveSession::new();
+
+        // 4 handshake frames, 2-byte framed on both sides.
+        s.push(Direction::A, &framed(&init_wire(false, ll()), 2));
+        s.push(Direction::B, &framed(&init_wire(true, ll()), 2));
+        s.push(Direction::A, &framed(&open_wire(false), 2));
+        s.push(Direction::B, &framed(&open_wire(true), 2));
+
+        // 11 lean frames, 4-byte framed, split across the two directions.
+        let ka = vec![wz_codecs::wire_const::T_MID_KEEP_ALIVE];
+        for i in 0..11 {
+            let d = if i % 2 == 0 {
+                Direction::A
+            } else {
+                Direction::B
+            };
+            s.push(d, &framed(&ka, 4));
+        }
+
+        // Drain both directions until neither yields anything more.
+        let mut read = 0usize;
+        let mut decoded = 0usize;
+        loop {
+            let mut progressed = false;
+            for d in [Direction::A, Direction::B] {
+                // `next_frame` answers `Err(PassiveStall)` when the direction
+                // has no complete frame left; every byte is already pushed, so
+                // a stall here means "that direction is drained".
+                while let Ok(f) = s.next_frame(d) {
+                    read += 1;
+                    if f.frame.is_ok() {
+                        decoded += 1;
+                    }
+                    progressed = true;
+                }
+            }
+            if !progressed {
+                break;
+            }
+        }
+
+        assert_eq!(read, 15, "every frame on the wire is framed off");
+        assert_eq!(
+            decoded, 15,
+            "and every one of them decodes -- a lean RUN, not just its first frame"
+        );
+    }
+
+    /// R2803 — the same run again, but fed and drained THE WAY THE CAPTURE
+    /// PATH DOES IT: one packet pushed at a time, both directions drained
+    /// after each push.
+    ///
+    /// The sibling above pushes every byte first and drains once, which is a
+    /// shape no capture produces. `wz_capture::…::feed_stream` pushes ONE
+    /// direction's packet and then drains A and B in a loop, so the state a
+    /// width decision reads is the state that packet ordering produced. A
+    /// capture measured through the pcap door reads 4 messages out of 15 while
+    /// the sibling reads 15, so the difference is somewhere between these two
+    /// drive orders -- and this test is the half of that gap which lives in
+    /// THIS module. If it passes, the fault is in the driver, not here.
+    ///
+    /// The ORDER is the measured one: the opener is the HIGH port, which this
+    /// module labels `B`, so `B` carries the non-ack Init and the Open, and
+    /// `A` answers with the ack and the OpenAck.
+    #[test]
+    fn a_lean_run_survives_the_capture_paths_drive_order() {
+        let ll = || vec![unit_ext(est_ext::LOWLATENCY)];
+        let mut s = PassiveSession::new();
+        let mut read = 0usize;
+
+        // Mirrors `feed_stream`: push one packet, then drain both directions
+        // until neither yields, breaking on either stall exactly as it does.
+        let drain = |s: &mut PassiveSession, read: &mut usize| loop {
+            let mut progressed = false;
+            for dir in [Direction::A, Direction::B] {
+                loop {
+                    match s.next_frame(dir) {
+                        Ok(_) => {
+                            *read += 1;
+                            progressed = true;
+                        }
+                        Err(PassiveStall::NeedMoreBytes) => break,
+                        Err(PassiveStall::Desynchronised { .. }) => break,
+                    }
+                }
+            }
+            if !progressed {
+                return;
+            }
+        };
+
+        s.push(Direction::B, &framed(&init_wire(false, ll()), 2));
+        drain(&mut s, &mut read);
+        s.push(Direction::A, &framed(&init_wire(true, ll()), 2));
+        drain(&mut s, &mut read);
+        s.push(Direction::B, &framed(&open_wire(false), 2));
+        drain(&mut s, &mut read);
+        s.push(Direction::A, &framed(&open_wire(true), 2));
+        drain(&mut s, &mut read);
+        assert_eq!(read, 4, "the handshake reads, which is the part that works");
+
+        // The lean run, one packet at a time, the way the capture carried it.
+        let ka = vec![wz_codecs::wire_const::T_MID_KEEP_ALIVE];
+        for i in 0..11 {
+            let d = if i % 2 == 0 {
+                Direction::B
+            } else {
+                Direction::A
+            };
+            s.push(d, &framed(&ka, 4));
+            drain(&mut s, &mut read);
+        }
+
+        assert_eq!(
+            read, 15,
+            "the lean run reads under the driver's order too -- a shortfall here \
+             is this module's, and a shortfall only through the pcap door is the \
+             driver's"
+        );
+    }
+
+    /// R2803 — A LEAN LINK'S NETWORK MESSAGE REACHES THE DECODER instead of
+    /// killing the stream.
+    ///
+    /// RED FIRST, measured before the repair: this exact input returned
+    /// `Desynchronised { reason: ImplausibleHeader { header: 158 } }` — 158 is
+    /// `0x9e`, a Declare. The framing was never at fault; the credible-header
+    /// gate asked the UNIVERSAL question on a link that does not carry the
+    /// universal set, and a desync abandons every byte behind it.
+    ///
+    /// Upstream's lowlatency link carries `TransportBodyLowLatency`, which is
+    /// `Close | KeepAlive | Network(NetworkMessage)` — the data-carrying arm is
+    /// a NETWORK message DIRECTLY, with no `Frame` wrapper and no sequence
+    /// number (`commons/zenoh-protocol/src/transport/mod.rs`). This reader
+    /// models the UNIVERSAL set only, so that third arm decodes as nothing.
+    ///
+    /// The bytes below are the shape measured off a real lowlatency capture:
+    /// the same network message the universal path carries INSIDE a `Frame`,
+    /// with the frame header and SN removed.
+    ///
+    /// ⚠ The sibling lean-run tests pass because they feed `KeepAlive`, which
+    /// IS one of the three arms. Picking the one message type that works is
+    /// how a control built from the subject stays green over a real gap.
+    #[test]
+    fn a_lean_links_network_message_is_not_read_and_says_so() {
+        let ll = || vec![unit_ext(est_ext::LOWLATENCY)];
+        let mut s = PassiveSession::new();
+        s.push(Direction::A, &framed(&init_wire(false, ll()), 2));
+        s.push(Direction::B, &framed(&init_wire(true, ll()), 2));
+        s.push(Direction::A, &framed(&open_wire(false), 2));
+        s.push(Direction::B, &framed(&open_wire(true), 2));
+        for dir in [Direction::A, Direction::B, Direction::A, Direction::B] {
+            s.next_frame(dir).expect("the handshake reads");
+        }
+        assert_eq!(
+            s.context().prefix_width(Direction::A),
+            PREFIX_WIDTH_LOWLATENCY,
+            "A carried its Open, so A is lean -- the framing is not the gap"
+        );
+
+        // A bare network message, 4-byte framed, exactly as a lean link sends
+        // it. `0x9e` is a network header, not a transport MID.
+        let network: Vec<u8> = vec![
+            0x9e, 0x21, 0x08, 0x62, 0x01, 0x00, 0x12, b'd', b'e', b'm', b'o', b'/', b'x',
+        ];
+        s.push(Direction::A, &framed(&network, 4));
+
+        let got = s.next_frame(Direction::A);
+        match got {
+            // Framed off at the right width and handed to the decoder, which
+            // LOCATES AND NAMES it by its MID. The body is not modelled yet --
+            // a bare `NetworkMessage` has no arm here -- but "a Declare sat at
+            // this offset" is a fact a consumer can act on, and it is the fact
+            // a desync destroyed.
+            Ok(f) => match &f.frame {
+                Ok(InboundFrame::Unknown { mid }) => assert_eq!(
+                    *mid,
+                    wz_codecs::wire_const::N_MID_DECLARE,
+                    "the network message is reported by its own MID"
+                ),
+                other => panic!(
+                    "expected the lean body to be reported by MID; if this is a \
+                     decoded Declare then the lowlatency model landed and this \
+                     test should assert the message: {other:?}"
+                ),
+            },
+            Err(stall) => panic!(
+                "the lean body must reach the decoder -- a stall here is the \
+                 R2803 defect returning: {stall:?}"
+            ),
+        }
+
+        // THE PART THAT MATTERS: the stream is still alive. A desync abandons
+        // everything behind it, which is how one unreadable Declare cost a real
+        // capture 20 KiB. A KeepAlive after it must still read.
+        let ka = vec![wz_codecs::wire_const::T_MID_KEEP_ALIVE];
+        s.push(Direction::A, &framed(&ka, 4));
+        let after = s
+            .next_frame(Direction::A)
+            .expect("the frame AFTER an undecodable one still reads");
+        assert!(after.frame.is_ok(), "and it decodes: {:?}", after.frame);
     }
 
     /// The negative arm: without the `0x5` offer on BOTH sides the width never

@@ -973,6 +973,60 @@ pub mod wire_const {
         }
     }
 
+    /// R2803 — may a framing unit on a LOWLATENCY link begin with this byte?
+    ///
+    /// A lowlatency link does not carry the universal message set. Upstream's
+    /// `TransportBodyLowLatency` is `Close | KeepAlive | Network(NetworkMessage)`
+    /// (`commons/zenoh-protocol/src/transport/mod.rs` @ `pub enum TransportBodyLowLatency {`),
+    /// so its DATA-carrying frames are network messages with no `Frame` wrapper
+    /// and no sequence number. Every one of them fails
+    /// [`is_credible_transport_header`], because a network MID is `0x19..=0x1F`
+    /// and no transport MID is — the two spaces do not overlap, which is what
+    /// makes one predicate able to admit both without becoming ambiguous.
+    ///
+    /// Measured cost of not having this: a real lowlatency capture desynchronised
+    /// on its FIRST data frame (`ImplausibleHeader { header: 0x9e }`, a Declare)
+    /// and every later byte of a 20 KiB stream was abandoned, while the handshake
+    /// before it read cleanly.
+    ///
+    /// ⚠ DELIBERATELY WEAKER ON THE FLAG BITS than its transport sibling, on
+    /// that predicate's own argument: strictness is the right test for a SCAN
+    /// over bytes whose framing is unknown, and the wrong one at a boundary the
+    /// reader is already synchronised to. This is asked only just past a length
+    /// prefix already read, so the question is "is this a MID this link may
+    /// carry", not "is every flag bit defined". A network header with undefined
+    /// flags reaches the decoder and is reported there, which is the direction
+    /// this project prefers: confidently wrong beats silent.
+    pub const fn is_credible_lowlatency_header(header: u8) -> bool {
+        if is_credible_transport_header(header) {
+            return true;
+        }
+        // THE SPACE, not this build's subset of it, and the difference is
+        // load-bearing twice over.
+        //
+        // ⛔ The `N_MID_*` constants are FEATURE-GATED — `N_MID_DECLARE` is
+        // behind `codec-declare`. Naming them in a `matches!` pattern compiles
+        // only where every one of them exists; where one does not, the bare
+        // path stops being a constant and becomes a BINDING that matches
+        // everything. `feature_gate_diagnostic` caught exactly that, on a
+        // build this round never ran by hand.
+        //
+        // ⚠ And the semantic answer is the same one: this predicate asks
+        // "which MID space is this byte in", which is a fact about the WIRE.
+        // "Does this build decode a Declare" is a different question, and
+        // answering it here would make a build without `codec-declare` call a
+        // real Declare implausible and desynchronise — the very defect this
+        // function exists to repair.
+        //
+        // The range is closed and contiguous upstream, where the block's own
+        // comment says the remaining ids are the transport space's:
+        // `commons/zenoh-protocol/src/network/mod.rs` @ `pub const INTEREST: u8 = 0x19;`
+        const NETWORK_MID_FIRST: u8 = 0x19; // INTEREST
+        const NETWORK_MID_LAST: u8 = 0x1F; // OAM
+        let mid = header & 0x1F;
+        mid >= NETWORK_MID_FIRST && mid <= NETWORK_MID_LAST
+    }
+
     /// R311y611 — the flag bits `header` sets that its own MID does not define,
     /// or `None` when the MID is not a transport MID at all.
     ///
