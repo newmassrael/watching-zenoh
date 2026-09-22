@@ -3289,6 +3289,10 @@ jobs:
         run: bash scripts/run-ci.sh --layer C1ac
       - name: Layer C1aj — quic-datagram link e2e (R311y413)
         run: bash scripts/run-ci.sh --layer C1aj
+      # R2797 — reliable UDP (`udp/...?rel=1`), the QUIC stream link under a
+      # plaintext session. Pure cargo on loopback, like C1ac beside it.
+      - name: Layer C1ci — reliable udp plaintext QUIC on the wire (R2797)
+        run: bash scripts/run-ci.sh --layer C1ci
       - name: Layer C1ab — vsock backend compile + clippy (R311y413)
         run: bash scripts/run-ci.sh --layer C1ab
       - name: Layer C1t — serial (PTY) link e2e (R311y413)

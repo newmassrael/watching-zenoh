@@ -6564,6 +6564,38 @@ layer_c1aj_cargo_test_quic_datagram() {
         && cargo clippy -p wz-runtime-tokio --no-default-features --features transport-link-quic-datagram --quiet -- -D warnings)
 }
 
+# ─── Layer C1ci — reliable UDP: the plaintext QUIC session, read off the wire ─
+#
+# R2797: `transport-link-udp-reliable` (OFF in the default set, IMPLIES
+# `transport-link-quic` and `transport-link-udp`) is upstream's `udp/...?rel=1`
+# variant — the QUIC stream link under a PLAINTEXT session (`quic_plaintext`:
+# the TLS 1.3 handshake runs, then every packet and header key is a no-op).
+# A handshake that completes proves nothing about that, since an encrypted
+# session completes too, so this lane:
+#   1. runs `udp_reliable_e2e`: a recording relay between the two ends finds
+#      the application's bytes IN THE CLEAR in both directions; the SAME relay
+#      over wz's encrypted QUIC link must NOT find them — the control that makes
+#      the first result a statement about the wire; and a plaintext client
+#      cannot reach an encrypted QUIC server that IS accepting;
+#   2. clippy-gates the feature (`--all-targets`), and the LIB alone under
+#      `--no-default-features`, where `quic_plaintext` has only its own
+#      implications to compose with.
+#
+# The count is what this exact command PRINTED (`test result: ok. 3 passed`).
+# MEASURED red before the lane existed: with the no-op keys delegating to the
+# real ones, cases one and three red (the relay saw 6 datagrams to the server
+# and none carried the bytes; the plaintext client reached the encrypted
+# server); with ONLY the server config's Initial keys left unwrapped, case one
+# times out, because the server cannot read the first packet.
+layer_c1ci_cargo_test_udp_reliable() {
+    _runci_guarded_test C1ci 3 \
+        cargo test -p wz-runtime-tokio --features transport-link-udp-reliable --test udp_reliable_e2e --quiet \
+        || return 1
+    (cd crates \
+        && cargo clippy -p wz-runtime-tokio --all-targets --features transport-link-udp-reliable --quiet -- -D warnings \
+        && cargo clippy -p wz-runtime-tokio --no-default-features --features transport-link-udp-reliable --quiet -- -D warnings)
+}
+
 # ─── Layer C1ak — transport-stats: per-session byte/msg counters ─
 #
 # R311y9: `transport-stats` (OFF in the default set) adds per-session
@@ -19317,6 +19349,7 @@ run_layer C1ag layer_c1ag_cargo_test_transport_compose || overall=1
 run_layer C1ah layer_c1ah_cargo_test_time_hlc || overall=1
 run_layer C1ai layer_c1ai_cargo_test_liveliness_history || overall=1
 run_layer C1aj layer_c1aj_cargo_test_quic_datagram || overall=1
+run_layer C1ci layer_c1ci_cargo_test_udp_reliable || overall=1
 run_layer C1ak layer_c1ak_cargo_test_transport_stats || overall=1
 run_layer C1al layer_c1al_cargo_test_unixpipe || overall=1
 run_layer C1am layer_c1am_cargo_test_adminspace || overall=1

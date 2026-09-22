@@ -253,9 +253,34 @@ where
     io::Error::other(err)
 }
 
+/// R2797 — a rustls client config as quinn's crypto: the SECURE arm of the
+/// choice upstream makes where it hands quinn its crypto
+/// (`io/zenoh-link-commons/src/quic/unicast.rs` @ `Arc::new(PlainTextClientConfig::new(quic_config.into()))`,
+/// the `else` of `if is_secure`). The plaintext arm is
+/// `crate::quic_plaintext`, and both reach [`connect_quic_client`] through the
+/// same parameter, which is why that function takes quinn's trait object rather
+/// than a rustls config: a rustls config can only ever be the encrypted arm.
+pub(crate) fn tls_client_crypto(
+    client_config: Arc<RustlsClientConfig>,
+) -> io::Result<Arc<dyn quinn::crypto::ClientConfig>> {
+    Ok(Arc::new(
+        QuicClientConfig::try_from(client_config).map_err(io_other)?,
+    ))
+}
+
+/// R2797 — the server twin of [`tls_client_crypto`].
+pub(crate) fn tls_server_crypto(
+    server_config: Arc<RustlsServerConfig>,
+) -> io::Result<Arc<dyn quinn::crypto::ServerConfig>> {
+    Ok(Arc::new(
+        QuicServerConfig::try_from(server_config).map_err(io_other)?,
+    ))
+}
+
 /// Build a client [`Endpoint`] bound to a local socket (the locator's `#bind=`,
-/// else an ephemeral one of `addr`'s family), install the TLS-1.3 + ALPN-`hq-29`
-/// rustls `client_config`, and connect
+/// else an ephemeral one of `addr`'s family), install the QUIC `crypto` —
+/// the TLS-1.3 + ALPN-`hq-29` rustls config via [`tls_client_crypto`], or
+/// R2797's plaintext session — and connect
 /// to `addr` (SNI = `server_name`) — the shared QUIC client-handshake SSOT for
 /// BOTH the stream backend ([`dial_quic`]) and the datagram backend
 /// ([`crate::quic_datagram_pipeline::dial_quic_datagram`]). Returns the endpoint
@@ -273,7 +298,7 @@ where
 /// convenience ones, and two paths where upstream has one.
 pub(crate) async fn connect_quic_client(
     addr: SocketAddr,
-    client_config: Arc<RustlsClientConfig>,
+    crypto: Arc<dyn quinn::crypto::ClientConfig>,
     server_name: &str,
     link_socket: &LinkSocket<'_>,
 ) -> io::Result<(Endpoint, Connection)> {
@@ -286,8 +311,7 @@ pub(crate) async fn connect_quic_client(
         sock.into_std()?,
         Arc::new(quinn::TokioRuntime),
     )?;
-    let quic_crypto = QuicClientConfig::try_from(client_config).map_err(io_other)?;
-    let mut quinn_client = QuinnClientConfig::new(Arc::new(quic_crypto));
+    let mut quinn_client = QuinnClientConfig::new(crypto);
     // R2598 — the dial half of the locator's quinn transport keys. Before this
     // round the dial set NO `TransportConfig` at all, so no locator config key
     // could reach quinn's transport on this side however it was spelled: the
@@ -304,8 +328,9 @@ pub(crate) async fn connect_quic_client(
     Ok((endpoint, connection))
 }
 
-/// Build a server [`Endpoint`] at `addr` presenting the TLS-1.3 + ALPN-`hq-29`
-/// rustls `server_config`, capping application streams at `max_bidi`
+/// Build a server [`Endpoint`] at `addr` presenting the QUIC `crypto` — the
+/// TLS-1.3 + ALPN-`hq-29` rustls config via [`tls_server_crypto`], or R2797's
+/// plaintext session — capping application streams at `max_bidi`
 /// bidirectional + 0 unidirectional — the shared QUIC server-endpoint SSOT for
 /// BOTH the stream backend ([`bind_quic`], `max_bidi = 1` = exactly one
 /// StreamEnvelope stream) and the datagram backend
@@ -348,12 +373,11 @@ pub(crate) async fn connect_quic_client(
 /// re-open.
 pub(crate) async fn quic_server_endpoint(
     addr: SocketAddr,
-    server_config: Arc<RustlsServerConfig>,
+    crypto: Arc<dyn quinn::crypto::ServerConfig>,
     max_bidi: u8,
     link_socket: &LinkSocket<'_>,
 ) -> io::Result<Endpoint> {
-    let quic_crypto = QuicServerConfig::try_from(server_config).map_err(io_other)?;
-    let mut sc = QuinnServerConfig::with_crypto(Arc::new(quic_crypto));
+    let mut sc = QuinnServerConfig::with_crypto(crypto);
     let mut transport = TransportConfig::default();
     transport.max_concurrent_uni_streams(0u8.into());
     transport.max_concurrent_bidi_streams(max_bidi.into());
@@ -401,8 +425,27 @@ pub async fn dial_quic(
     server_name: &str,
     link_socket: &LinkSocket<'_>,
 ) -> io::Result<QuicLink> {
+    open_quic_stream(
+        addr,
+        tls_client_crypto(client_config)?,
+        server_name,
+        link_socket,
+    )
+    .await
+}
+
+/// R2797 — the crypto-agnostic body of [`dial_quic`]: the shared
+/// [`connect_quic_client`] handshake, then `open_bi`. Split out so the
+/// reliable UDP variant, which is this same stream link under a plaintext
+/// session, dials through it instead of repeating it.
+pub(crate) async fn open_quic_stream(
+    addr: SocketAddr,
+    crypto: Arc<dyn quinn::crypto::ClientConfig>,
+    server_name: &str,
+    link_socket: &LinkSocket<'_>,
+) -> io::Result<QuicLink> {
     let (endpoint, connection) =
-        connect_quic_client(addr, client_config, server_name, link_socket).await?;
+        connect_quic_client(addr, crypto, server_name, link_socket).await?;
     // The initiator opens the one bidirectional stream; the responder
     // `accept_bi`s it (zenoh: open_bi on dial, accept_bi on listen).
     let (send, recv) = connection.open_bi().await.map_err(io_other)?;
@@ -430,7 +473,7 @@ pub async fn bind_quic(
     server_config: Arc<RustlsServerConfig>,
     link_socket: &LinkSocket<'_>,
 ) -> io::Result<Endpoint> {
-    quic_server_endpoint(addr, server_config, 1, link_socket).await
+    quic_server_endpoint(addr, tls_server_crypto(server_config)?, 1, link_socket).await
 }
 
 /// Accept the ARRIVAL of one inbound QUIC connection attempt from a *borrowed*

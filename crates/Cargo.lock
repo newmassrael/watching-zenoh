@@ -2917,6 +2917,7 @@ dependencies = [
  "memmap2",
  "portable-atomic",
  "quinn",
+ "quinn-proto",
  "rand 0.8.6",
  "rcgen",
  "rsa",

@@ -555,6 +555,7 @@ router-connect-reconcile,transport-link-tcp,transport-unicast|session_lifecycle_
         transport-link-serial,\
         transport-link-tls,\
         transport-link-tls-keylog,\
+        transport-link-udp-reliable,\
         transport-link-unixpipe,\
         transport-link-unixsock,\
         transport-link-vsock,\

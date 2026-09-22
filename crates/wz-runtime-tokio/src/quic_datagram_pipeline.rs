@@ -60,7 +60,10 @@ use tokio_rustls::rustls::{
 // is shared from quic_pipeline; this module owns only the datagram-vs-stream
 // delta (no open_bi/accept_bi, max_bidi=0, the datagram read/write drivers).
 use crate::link_interfaces::{ip_link_endpoints, ip_link_subject};
-use crate::quic_pipeline::{accept_quic_connection, connect_quic_client, quic_server_endpoint};
+use crate::quic_pipeline::{
+    accept_quic_connection, connect_quic_client, quic_server_endpoint, tls_client_crypto,
+    tls_server_crypto,
+};
 use crate::writer_queue::{OutboundQueue, WriterHandle};
 use crate::{LinkDriver, LinkEvent, LostCause, Reliability, RxFrame, TxFrame};
 use wz_session_core::link::BoxedLinkDriver;
@@ -249,8 +252,13 @@ pub async fn dial_quic_datagram(
     server_name: &str,
     link_socket: &crate::link_socket::LinkSocket<'_>,
 ) -> io::Result<QuicDatagramLink> {
-    let (endpoint, connection) =
-        connect_quic_client(addr, client_config, server_name, link_socket).await?;
+    let (endpoint, connection) = connect_quic_client(
+        addr,
+        tls_client_crypto(client_config)?,
+        server_name,
+        link_socket,
+    )
+    .await?;
     Ok(QuicDatagramLink {
         endpoint,
         connection,
@@ -280,7 +288,7 @@ pub async fn bind_quic_datagram(
     // so it completes; datagrams are on by default (TransportConfig default sets
     // datagram_receive_buffer_size = Some). The datagram mirror of bind_quic's
     // max_bidi = 1.
-    quic_server_endpoint(addr, server_config, 0, link_socket).await
+    quic_server_endpoint(addr, tls_server_crypto(server_config)?, 0, link_socket).await
 }
 
 /// Accept ONE inbound QUIC datagram connection from a *borrowed* server

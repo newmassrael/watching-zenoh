@@ -990,6 +990,18 @@ transport-link-quic = ["transport-link-tcp", "dep:quinn", "dep:tokio-rustls", "d
 # here. Cert threaded via `DialConfig.quic` (same cert as `quic`). NOT default —
 # zenoh-default upstream, but an opt-in unreliable transport in wz.
 transport-link-quic-datagram = ["transport-link-quic", "dep:bytes"]
+# R2797 — host RELIABLE UDP (`udp/...?rel=1`), upstream's
+# `LinkUnicastUdpVariant::Reliable`: the QUIC stream link run as PLAINTEXT QUIC.
+# The TLS 1.3 handshake still runs (a per-process self-signed server
+# certificate, a client that skips the chain) but only to negotiate; every
+# level of packet protection is then replaced by no-op keys (`quic_plaintext`).
+# IMPLIES `transport-link-quic` (the same quinn stream pipeline and rustls
+# stack) and `transport-link-udp` (the scheme it answers to). Pulls
+# `quinn-proto` for the two crypto-trait types quinn does not re-export,
+# `bytes` for the `PacketKey::decrypt` buffer, and `rcgen` for the self-signed
+# certificate. NOT default: upstream always compiles the variant, but here it
+# would put quinn under every udp build, including the lean ones.
+transport-link-udp-reliable = ["transport-link-quic", "transport-link-udp", "dep:quinn-proto", "dep:bytes", "dep:rcgen"]
 # R311qa — multi-peer accept-and-hold capability (the `routing-router` /
 # future `routing-peer` foundation). Gates `pub mod accept_loop` (lib.rs) and
 # pulls its prerequisites: the TCP listen path (`transport-link-tcp`), the
@@ -1848,6 +1860,18 @@ quinn = { version = "0.11", default-features = false, features = ["ring", "rustl
 # (semver-stable at 1.x), so it unifies to one version. Pulled only by
 # `transport-link-quic-datagram`.
 bytes = { version = "1", optional = true }
+# R2797 — the plaintext QUIC session (`quic_plaintext`) implements quinn's
+# crypto traits, and two of their signatures name types quinn does not
+# re-export: `transport_parameters::TransportParameters` and `TransportError`.
+# Upstream declares the same direct dependency for the same file. It is the
+# crate quinn already locks, so the build compiles nothing new;
+# `default-features = false` lets quinn's own selection (ring + rustls) decide.
+quinn-proto = { version = "0.11", default-features = false, optional = true }
+# R2797 — the reliable UDP variant's self-signed server certificate, generated
+# once per process at run time because its clients trust any certificate.
+# Upstream generates it with the same crate, and it was already locked here as
+# a dev-dependency. `ring` only: the provider every other wz rustls config uses.
+rcgen = { version = "0.13", default-features = false, features = ["ring"], optional = true }
 # R311ob — host WebSocket link backend, behind the optional `transport-link-ws`
 # feature. tokio-tungstenite is the async RFC6455 protocol layer: `client_async`
 # / `accept_async` run the HTTP-Upgrade handshake over a `TcpStream`, then the
@@ -2086,8 +2110,10 @@ serde_json = "1"
 # R311oa — generate a self-signed cert + key pair for the TLS loopback e2e
 # (tests/tls_e2e.rs): the acceptor's rustls ServerConfig needs a cert chain +
 # private key, and the dialer's ClientConfig must trust that cert (added to a
-# fresh root store, server name "localhost"). Dev-only — never compiled into
-# the lib or the no_std targets; production cert material comes from the app.
+# fresh root store, server name "localhost"). Production cert material for the
+# encrypted links comes from the app. R2797 — the ONE exception is the reliable
+# UDP variant, whose certificate identifies nobody and is generated at run time;
+# that is the optional `rcgen` dependency above, not this one.
 rcgen = "0.13"
 # R311oh — the `tls_pem_mtls_e2e` file-source test writes fixture PEM to a temp
 # dir and reads it back through `tls_config::read_pem_file`, proving the

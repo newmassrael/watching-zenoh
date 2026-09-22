@@ -1649,6 +1649,22 @@ pub mod quic_pipeline;
 #[cfg(feature = "transport-link-quic-datagram")]
 pub mod quic_datagram_pipeline;
 
+/// R2797 — the plaintext QUIC session under reliable UDP: the rustls session
+/// with every packet and header key replaced by a no-op, so the handshake
+/// negotiates and the wire carries the bytes as written. PRIVATE to the crate,
+/// and reachable only through [`udp_reliable_pipeline`], so no encrypted link
+/// can be configured into it. Gated `transport-link-udp-reliable`.
+#[cfg(feature = "transport-link-udp-reliable")]
+mod quic_plaintext;
+
+/// R2797 — reliable UDP (`udp/...?rel=1`): upstream's
+/// `LinkUnicastUdpVariant::Reliable`, which is the QUIC stream link under the
+/// crate-private `quic_plaintext` session. It adds dial and listen primitives that hand
+/// [`quic_pipeline`]'s seams the plaintext crypto; accept and the stream
+/// drivers are the QUIC link's. Gated `transport-link-udp-reliable`.
+#[cfg(feature = "transport-link-udp-reliable")]
+pub mod udp_reliable_pipeline;
+
 /// R311eu — mode-agnostic session-open orchestration over the R311et
 /// [`link_pipeline`]. `dial_locator` dispatches an `AnyLocator`'s scheme
 /// to a raw transport (R311nv: TCP/UDP/serial); `connect_and_open_session`
