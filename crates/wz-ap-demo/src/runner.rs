@@ -6416,10 +6416,16 @@ async fn run_router_hat_until(
                 Ok(p) => (
                     p.addr.ip(),
                     p.addr.port(),
+                    // R2791 — `p.socket` carries every socket key the locator
+                    // named, and this literal used to read ONE of them. `bind`
+                    // and `dscp` were parsed, dropped here, and the multicast
+                    // sockets then had no field to receive them from.
                     McastGroupOptions {
-                        iface: p.socket.and_then(|socket| socket.iface),
+                        iface: p.socket.as_ref().and_then(|s| s.iface.clone()),
                         ttl: p.mcast_ttl,
                         joins: p.mcast_join,
+                        bind: p.socket.as_ref().and_then(|s| s.bind.clone()),
+                        dscp: p.socket.as_ref().and_then(|s| s.dscp),
                     },
                 ),
                 Err(e) => {

@@ -2709,6 +2709,15 @@ impl UdpDriver {
             plan.set_hop_limit(&raw, ttl)?;
         }
         let socket = UdpSocket::from_std(raw.into())?;
+        // R2791 — `#dscp=`. This socket SENDS as well as receives, which is the
+        // same reason the hop limit is set on it just above: upstream marks
+        // whichever socket carries its egress, and here that is this one. The
+        // `#bind=` half is deliberately NOT read -- a socket bound to a unicast
+        // address cannot receive the group, so the wildcard bind above is
+        // load-bearing, exactly as it is for upstream's `mcast_sock`.
+        if let Some(dscp) = cfg.dscp {
+            crate::link_socket::apply_dscp(&socket, plan.peer(port), dscp)?;
+        }
         Ok(Self {
             socket: Some(socket),
             peer: Some(plan.peer(port)),
@@ -2754,7 +2763,9 @@ impl UdpDriver {
         let raw = Socket::new(plan.domain(), Type::DGRAM, Some(Protocol::UDP))?;
         raw.set_nonblocking(true)?;
         plan.pin_egress(&raw)?;
-        raw.bind(&plan.wildcard(0).into())?;
+        // R2791 — `#bind=`. This is the socket upstream binds to it, and the
+        // fallback is the wildcard this line used to pass unconditionally.
+        raw.bind(&plan.egress_local_addr(cfg.bind, port)?.into())?;
         // R311y832 — this is the SEND-only half, so the hop limit belongs here
         // most directly; it is zenoh's `ucast_sock`, the socket
         // `multicast.rs:363` sets the TTL on.
@@ -2762,6 +2773,12 @@ impl UdpDriver {
             plan.set_hop_limit(&raw, ttl)?;
         }
         let socket = UdpSocket::from_std(raw.into())?;
+        // R2791 — `#dscp=`, on the SEND-only half, which is the half upstream
+        // marks. Applied after adoption because the option is settable at any
+        // time, unlike the pre-bind `SO_REUSE*` above.
+        if let Some(dscp) = cfg.dscp {
+            crate::link_socket::apply_dscp(&socket, plan.peer(port), dscp)?;
+        }
         Ok(Self {
             socket: Some(socket),
             peer: Some(plan.peer(port)),
@@ -3302,6 +3319,17 @@ mod poll_framed_lowlatency_tests {
 /// argument — the R311y808 shape, where folding two parameters into one value
 /// shortened the signature instead of lengthening it.
 ///
+/// ⚠ R2791 — "them" was THREE keys and is five. The citation above names the
+/// keys the udp crate DECLARES, which is not the set its multicast link READS:
+/// that link also reads `bind` and `dscp`, declared a crate away in
+/// `zenoh-link-commons`
+/// (`io/zenoh-link-commons/src/lib.rs` @ `pub const BIND_SOCKET: &str = "bind";`)
+/// and pulled off the endpoint config beside the three above
+/// (`io/zenoh-links/zenoh-link-udp/src/multicast.rs` @ `let bind_socket = config.get(BIND_SOCKET);`).
+/// Deriving this surface from the declared list ALONE is what left wz's
+/// multicast sockets applying neither key — the gap had no field to sit in, so
+/// no caller could pass one and no reader could miss it.
+///
 /// `Default` is the pre-R311y832 behaviour byte for byte: no interface pin, no
 /// extra groups, and the OS hop limit.
 #[derive(Debug, Default, Clone, Copy)]
@@ -3319,6 +3347,16 @@ pub struct McastSocketConfig<'a> {
     pub ttl: Option<u32>,
     /// `#join=<group>` values, joined in addition to the locator's own group.
     pub extra_joins: &'a [String],
+    /// R2791 — `#bind=<host:port>` (zenoh `BIND_SOCKET`): the LOCAL address the
+    /// SENDING socket binds. Read by the egress constructor only; the joined
+    /// socket binds its family's wildcard or it cannot receive the group at
+    /// all, which is the split upstream makes between the `ucast_sock` it binds
+    /// here and the `mcast_sock` it does not.
+    pub bind: Option<&'a str>,
+    /// R2791 — `#dscp=<value>` (zenoh `DSCP`): written to `IP_TOS` /
+    /// `IPV6_TCLASS` on whichever socket SENDS, keyed to the group's family as
+    /// upstream keys it.
+    pub dscp: Option<u32>,
 }
 
 #[cfg(any(
@@ -3484,6 +3522,53 @@ impl McastPlan {
         }
     }
 
+    /// R2791 — the local address the SENDING socket binds: `#bind=` when given,
+    /// else the family wildcard on an EPHEMERAL port, which is both what this
+    /// constructor bound before there was a key to read and what upstream falls
+    /// back to. `group_port` names the group for the family check and the
+    /// refusal only; it is never the local port.
+    ///
+    /// Upstream's counterpart is the `local_addr` its multicast manager derives
+    /// for the `ucast_sock`
+    /// (`io/zenoh-links/zenoh-link-udp/src/multicast.rs` @ `let bind_addr = SocketAddr::from_str(bind_socket)?;`),
+    /// and two of its properties are deliberate rather than incidental:
+    ///
+    /// - The value is parsed as a LITERAL `host:port`, never resolved. Upstream
+    ///   uses `SocketAddr::from_str` here while the unicast dial path resolves
+    ///   the same key through a name lookup, so mirroring the dial path's
+    ///   resolver would accept hostnames zenoh refuses on this one.
+    /// - A `bind` of the other family is REFUSED rather than ignored, in
+    ///   upstream's own words. Binding IPv4 and joining IPv6 cannot work, and
+    ///   silently falling back to the wildcard would egress from an address the
+    ///   operator did not ask for -- the same posture as the group parse.
+    ///
+    /// What is NOT mirrored: upstream then fills an UNSPECIFIED `local_addr`
+    /// from the interface address. wz pins egress by interface INDEX through
+    /// `pin_egress` instead, so there is no unspecified address left to fill.
+    fn egress_local_addr(&self, bind: Option<&str>, group_port: u16) -> io::Result<SocketAddr> {
+        let Some(bind) = bind else {
+            return Ok(self.wildcard(0));
+        };
+        let bind_addr: SocketAddr = bind.parse().map_err(|_| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("Couldn't parse UDP multicast bind address: {bind}"),
+            )
+        })?;
+        let group = self.peer(group_port);
+        match (bind_addr, group) {
+            (SocketAddr::V6(local), SocketAddr::V4(dest)) => Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("Protocols must match: Cannot bind to IPv6 {local} and join IPv4 {dest}"),
+            )),
+            (SocketAddr::V4(local), SocketAddr::V6(dest)) => Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("Protocols must match: Cannot bind to IPv4 {local} and join IPv6 {dest}"),
+            )),
+            _ => Ok(bind_addr),
+        }
+    }
+
     /// Where `LinkDriver::send` writes: the group itself.
     fn peer(&self, port: u16) -> SocketAddr {
         match self {
@@ -3555,9 +3640,10 @@ impl McastPlan {
 }
 
 /// R311y832 — the owned form of [`McastSocketConfig`], for the seams that cross
-/// a `tokio::spawn` and so cannot borrow. Same three keys, same meaning; the
+/// a `tokio::spawn` and so cannot borrow. Same keys, same meaning; the
 /// borrowed view is taken back with [`as_socket_config`](Self::as_socket_config)
-/// at the socket.
+/// at the socket. R2791 carried `bind` and `dscp` across with the rest — an
+/// owned form that dropped them would put the gap back one seam later.
 #[derive(Debug, Default, Clone)]
 #[cfg(any(
     feature = "scouting-active",
@@ -3571,6 +3657,10 @@ pub struct McastGroupOptions {
     pub ttl: Option<u32>,
     /// `#join=<group>` values.
     pub joins: Vec<String>,
+    /// R2791 — `#bind=<host:port>`, the sending socket's local address.
+    pub bind: Option<String>,
+    /// R2791 — `#dscp=<value>`, the sending socket's traffic class.
+    pub dscp: Option<u32>,
 }
 
 #[cfg(any(
@@ -3585,6 +3675,8 @@ impl McastGroupOptions {
             iface: self.iface.as_deref(),
             ttl: self.ttl,
             extra_joins: &self.joins,
+            bind: self.bind.as_deref(),
+            dscp: self.dscp,
         }
     }
 }
@@ -3654,6 +3746,127 @@ mod udp_multicast_config_tests {
         .expect("bind a sender");
         let sock = d.socket.as_ref().expect("bound");
         assert_eq!(sock.multicast_ttl_v4().expect("read ttl"), 5);
+    }
+
+    /// R2791 — the two keys a multicast link reads from `zenoh-link-commons`
+    /// rather than from the udp crate's own `pub mod config`: `bind` on the
+    /// sending socket, `dscp` on whichever socket sends
+    /// (`io/zenoh-links/zenoh-link-udp/src/multicast.rs` @ `let bind_socket = config.get(BIND_SOCKET);`).
+    ///
+    /// Both properties are read back FROM THE KERNEL, and both are asserted in
+    /// two arms: the value the socket carries when nothing asks, and the value
+    /// it carries when something does. The unasked arm is what stops a key
+    /// wired to a constant from passing; the asked arm is what reds when the
+    /// wiring is removed. Reading the socket rather than the config is what
+    /// makes this a witness at all -- the config round-trips whether or not it
+    /// ever reaches a setsockopt, which is the state this round found.
+    #[tokio::test]
+    #[cfg(target_os = "linux")]
+    async fn the_commons_socket_keys_reach_the_multicast_sockets() {
+        let d = UdpDriver::bind_multicast_tx(GROUP, 7446, McastSocketConfig::default())
+            .await
+            .expect("bind a sender");
+        let unasked = d
+            .socket
+            .as_ref()
+            .expect("bound")
+            .local_addr()
+            .expect("addr");
+        assert!(
+            unasked.ip().is_unspecified(),
+            "the fallback is the family wildcard, so a pinned address cannot pass for it"
+        );
+
+        let d = UdpDriver::bind_multicast_tx(
+            GROUP,
+            7446,
+            McastSocketConfig {
+                bind: Some("127.0.0.1:0"),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("bind a sender on a named local address");
+        let asked = d
+            .socket
+            .as_ref()
+            .expect("bound")
+            .local_addr()
+            .expect("addr");
+        assert_eq!(
+            asked.ip(),
+            std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST),
+            "a requested bind must reach the socket, or the config key is decoration"
+        );
+
+        // Both constructors, because both SEND: the send-only half is the
+        // router egress and the bidirectional half is the one the hop limit is
+        // set on for the same reason. A witness over one of them would leave
+        // the other free to drop the mark.
+        for marked in [false, true] {
+            let cfg = McastSocketConfig {
+                dscp: marked.then_some(0x28),
+                ..Default::default()
+            };
+            let want = if marked { 0x28 } else { 0 };
+            let tx = UdpDriver::bind_multicast_tx(GROUP, 7446, cfg)
+                .await
+                .expect("bind a sender");
+            let tos = tx
+                .socket
+                .as_ref()
+                .expect("bound")
+                .tos_v4()
+                .expect("read tos");
+            assert_eq!(tos, want, "send-only half, marked={marked}");
+            let both = UdpDriver::bind_multicast(GROUP, 0, cfg)
+                .await
+                .expect("bind the group");
+            let tos = both
+                .socket
+                .as_ref()
+                .expect("bound")
+                .tos_v4()
+                .expect("read tos");
+            assert_eq!(tos, want, "bidirectional half, marked={marked}");
+        }
+    }
+
+    /// R2791 — a `#bind=` of the other family is REFUSED, in upstream's own
+    /// words
+    /// (`io/zenoh-links/zenoh-link-udp/src/multicast.rs` @ `Protocols must match: Cannot bind to IPv6 {local} and join IPv4 {dest}`).
+    ///
+    /// The assertion is on the REASON, not on the refusal, and R2791 MEASURED
+    /// why that is load-bearing rather than assuming it: with the family check
+    /// deleted this constructor STILL fails, because the kernel refuses the
+    /// mismatched bind itself with `Address family not supported by protocol
+    /// (os error 97)`. A test reading only "it errored" would therefore have
+    /// stayed GREEN over a deleted check. What the check buys is not the
+    /// refusal but WHICH refusal: upstream's sentence names both addresses, so
+    /// an operator is told which of the two to change, and it is raised before
+    /// a socket is created rather than partway through building one.
+    #[tokio::test]
+    async fn a_bind_of_the_other_family_is_refused_by_name() {
+        // `match` rather than `expect_err`: `UdpDriver` carries no `Debug`, and
+        // deriving one on a production type to shorten a test is the tail
+        // wagging the dog. The neighbouring refusal tests read the same way.
+        let e = match UdpDriver::bind_multicast_tx(
+            GROUP,
+            7446,
+            McastSocketConfig {
+                bind: Some("[::1]:0"),
+                ..Default::default()
+            },
+        )
+        .await
+        {
+            Ok(_) => panic!("an IPv6 bind cannot join an IPv4 group"),
+            Err(e) => e,
+        };
+        assert!(
+            e.to_string().contains("Protocols must match"),
+            "refused for the family, not for something else: {e}"
+        );
     }
 
     /// R2584 — an IPv6 group, for which no constructor existed: its sending

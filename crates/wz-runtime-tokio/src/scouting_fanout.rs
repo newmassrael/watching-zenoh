@@ -126,10 +126,19 @@ pub async fn bind_scout_sockets(
         // `#iface=` takes an address literal as well as a name (upstream's own
         // first arm), so an enumerated address needs no lookup to become a pin.
         let pinned = local.to_string();
+        // R2791 — `bind` and `dscp` are `None` by JUDGEMENT, not by default.
+        // These sockets are not built from a link locator: they come from an
+        // enumerated interface list, so there is no endpoint config to carry
+        // either key, and upstream's counterpart reads none either -- its
+        // scouting sockets are the runtime orchestrator's, not a udp link's.
+        // `bind` would also be the wrong knob here even if one arrived: this
+        // loop pins each socket by address already, through `iface`.
         let cfg = McastSocketConfig {
             iface: Some(&pinned),
             ttl,
             extra_joins: &[],
+            bind: None,
+            dscp: None,
         };
         match UdpDriver::bind_multicast_tx(group, port, cfg).await {
             Ok(driver) => bound.push(driver),

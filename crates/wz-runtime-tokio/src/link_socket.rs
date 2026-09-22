@@ -457,10 +457,7 @@ impl<'a> LinkSocket<'a> {
             socket.bind_device(iface)?;
         }
         if let Some(dscp) = self.dscp {
-            match family {
-                SocketAddr::V4(_) => socket.set_dscp_v4(dscp)?,
-                SocketAddr::V6(_) => socket.set_dscp_v6(dscp)?,
-            }
+            apply_dscp(socket, family, dscp)?;
         }
         Ok(())
     }
@@ -476,6 +473,27 @@ impl<'a> LinkSocket<'a> {
             SocketAddr::V4(_) => (Ipv4Addr::UNSPECIFIED, 0).into(),
             SocketAddr::V6(_) => (Ipv6Addr::UNSPECIFIED, 0).into(),
         })
+    }
+}
+
+/// R2791 — write `dscp` to `socket`, on the option of `family`'s address family.
+///
+/// The ONE place a DSCP reaches a socket. `LinkSocket::configure` calls it for
+/// the dial and listen paths, and the UDP multicast constructors call it for
+/// their egress socket, which is a path `LinkSocket` cannot answer for: its
+/// `LinkSide` is `Dial` or `Listen`, and a multicast link's sending half is
+/// neither. Upstream marks exactly that half
+/// (`io/zenoh-links/zenoh-link-udp/src/multicast.rs` @ `set_dscp(&ucast_sock, *mcast_addr, dscp)?;`),
+/// keying the option off the GROUP address rather than the local one, which is
+/// why `family` is the caller's choice and not read back off the socket.
+pub(crate) fn apply_dscp<S: SocketOptionTarget>(
+    socket: &S,
+    family: SocketAddr,
+    dscp: u32,
+) -> io::Result<()> {
+    match family {
+        SocketAddr::V4(_) => socket.set_dscp_v4(dscp),
+        SocketAddr::V6(_) => socket.set_dscp_v6(dscp),
     }
 }
 
