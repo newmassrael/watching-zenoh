@@ -2392,6 +2392,16 @@ jobs:
         # --connect-after leaves the same binary forwarding `0 data push(es)`.
         run: bash scripts/run-ci.sh --layer E15
 
+      - name: Layer E16 — the filesystem backend against upstream's, one directory
+        # R2803 — `storage-backend-filesystem`'s cross-implementation witness.
+        # `oracles/fs-backend` links zenoh-backend-filesystem 1.10.1 and drives
+        # upstream's own Storage impl over the directory wz's backend reads and
+        # writes: each side must serve what the other wrote, payload, encoding
+        # and timestamp. HERE rather than beside C1bg in `feature-gates` because
+        # the oracle links zenoh and RocksDB and only this job caches
+        # `oracles/target` (the cache step's R2625 note).
+        run: bash scripts/run-ci.sh --layer E16
+
       - name: Layer C1bp — §5.22 dynamic plugin loading, end to end
         # R311y495 — MOVED here from `validate + verify + test`, where R311y492
         # first wired it and where it SKIP-passed on its very first hosted run:

@@ -1,0 +1,47 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later OR LicenseRef-watching-zenoh-Commercial
+# SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
+#
+# R2803 — upstream's FILESYSTEM BACKEND, driven directly, as the foreign party
+# for `storage-backend-filesystem`.
+#
+# That atom claims a directory is shared with zenohd: a value either
+# implementation wrote is served by the other with its encoding and timestamp,
+# because wz keeps them in upstream's own `.zenoh_datainfo` RocksDB rows. Until
+# this oracle the claim rested on bytes DERIVED from upstream's source. Nothing
+# in the tree had read a row upstream wrote, or had upstream read one wz wrote.
+#
+# ⚠ WHY A LIBRARY CALLER AND NOT zenohd + the backend plugin. zenohd loads a
+# backend as a `dlopen`ed plugin, and the storage manager refuses one whose
+# `StructVersion` -- zenoh's GIT_VERSION and its enabled FEATURES -- differs
+# from its own, so that route needs the backend built with exactly the feature
+# set the router was built with. What this atom's claim is ABOUT is the
+# directory, and the directory is written and read by the backend's `Storage`
+# impl whatever loads it. Calling that impl in-process exercises every line the
+# claim depends on (`files_mgt`, `data_info_mgt`, the property reads in
+# `create_storage`) and none of the plugin plumbing it does not.
+#
+# ⛔ NOT A MEMBER OF wz's WORKSPACE, like every oracle here (see ../Cargo.toml):
+# upstream never enters `crates/`'s dependency graph.
+[package]
+name = "wz-oracle-fs-backend"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+# PINNED BY TAG, the same pin the reference clone the atom is graded against
+# sits on. `default-features = false` drops `dynamic_plugin`, the feature that
+# exports the plugin entry points -- a library caller has no use for them.
+zenoh-backend-filesystem = { git = "https://github.com/eclipse-zenoh/zenoh-backend-filesystem", tag = "1.10.1", default-features = false }
+# The backend's own public surface is its `Plugin` impl; everything it takes and
+# returns is typed by these. `internal` is for `Encoding::new`, the constructor
+# the backend itself rebuilds an encoding with from a row.
+zenoh = { git = "https://github.com/eclipse-zenoh/zenoh", tag = "1.10.1", features = [
+    "internal",
+    "unstable",
+    "plugins",
+] }
+zenoh_backend_traits = { git = "https://github.com/eclipse-zenoh/zenoh", tag = "1.10.1" }
+zenoh-plugin-trait = { git = "https://github.com/eclipse-zenoh/zenoh", tag = "1.10.1" }
+serde_json = "1"
+tokio = { version = "1", features = ["rt-multi-thread", "macros"] }

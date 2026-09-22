@@ -13662,10 +13662,19 @@ layer_e_ap_demo_round_trip() {
     # removes exactly those three -- zero over-reach (no other selected test
     # matches it, including the pico `..._serves_pico_zget` sibling this lane
     # SHOULD run) and zero under-reach.
+    # R2803 — `fs_shared_dir`, for the family R2358's gate now CATCHES rather than
+    # trusts: `wz_fs_backend_shares_a_directory_with_upstream.rs` drives
+    # `oracles/fs-backend`, a wz-authored oracle linking upstream, which this job
+    # never builds. The gate's helper list had named only the two upstream
+    # example families, so `wz_zenoh_oracle_binary` reached this sweep unseen and
+    # E8t's `future-stamp` legs were kept out by their `wz_router` token alone --
+    # by name, not by the gate. The helper joined the list in the same round, and
+    # every fn in the new file carries this token; Layer E16 owns them.
     (cd crates && cargo test -p wz-integration-tests --quiet -- --ignored \
         --skip wz_e2e_ --skip multicast --skip zenohd --skip wz_router --skip wz_peer \
         --skip wz_storage_host --skip zenoh_ext --skip inert --skip apfull \
-        --skip wz_plugin --skip capi_c --skip analyzer --skip zenoh_zget)
+        --skip wz_plugin --skip capi_c --skip analyzer --skip zenoh_zget \
+        --skip fs_shared_dir)
 }
 
 # ─── Layer E2 — facade-subset behavioural e2e vs zenoh-pico ──────────
@@ -19223,6 +19232,39 @@ layer_e15_apfull_reconcile_federation_pico() {
     done
 }
 
+# ─── Layer E16 — the filesystem backend against upstream's, one directory ───
+#
+# R2803 — `storage-backend-filesystem` claims a directory is SHARED with zenohd:
+# each implementation serves what the other wrote, payload, encoding and
+# timestamp, because wz keeps upstream's own `.zenoh_datainfo` RocksDB rows.
+# Layer C1bg proves wz agrees with bytes DERIVED from upstream's source; only a
+# run of upstream's code can say whether upstream agrees. `oracles/fs-backend`
+# is that run: `zenoh-backend-filesystem` 1.10.1 as a library, driven through
+# its own `Plugin::start` / `create_storage` / `Storage` impl, with the storage
+# configured through upstream's own config parser.
+#
+# In the `interop` job and not beside C1bg in `feature-gates`, because the
+# oracle links zenoh and RocksDB and only `interop` caches `oracles/target` --
+# the reason E8t's `future-stamp` lives there too (R2625's cache note).
+#
+# Named `--exact`, one leg per invocation, as E9..E15: a renamed or silently
+# dropped leg fails the lane instead of shrinking it. Every leg carries the
+# `fs_shared_dir` token that keeps Layer E's sweep off them.
+layer_e16_fs_backend_shares_a_directory_with_upstream() {
+    (cd oracles && cargo build -p wz-oracle-fs-backend --release --quiet) || return 1
+    for leg in \
+        fs_shared_dir_a_value_upstream_wrote_is_served_by_wz_with_its_encoding_and_timestamp \
+        fs_shared_dir_a_value_wz_wrote_is_served_by_upstream_with_its_encoding_and_timestamp \
+        fs_shared_dir_a_prefix_conflict_laid_down_by_one_side_is_read_by_the_other \
+        fs_shared_dir_a_file_nobody_put_reads_the_same_through_both \
+        fs_shared_dir_a_delete_by_wz_is_seen_by_upstream; do
+        _runci_guarded_test "Layer E16 ($leg)" 1 \
+            cargo test -p wz-integration-tests \
+            --test wz_fs_backend_shares_a_directory_with_upstream -- --ignored --quiet \
+            --test-threads=1 --exact "$leg" || return 1
+    done
+}
+
 # ─── Layer Qz — Zephyr cooperative profile west build + QEMU boot e2e ───
 #
 # The REAL Zephyr link + boot proof (R311y31 / Z2). UNLIKE the FreeRTOS lane
@@ -19511,6 +19553,7 @@ run_layer E12 layer_e12_apfull_adminspace_pico || overall=1
 run_layer E13 layer_e13_apfull_storage_plane_pico || overall=1
 run_layer E14 layer_e14_apfull_dynamic_volume_pico || overall=1
 run_layer E15 layer_e15_apfull_reconcile_federation_pico || overall=1
+run_layer E16 layer_e16_fs_backend_shares_a_directory_with_upstream || overall=1
 run_layer F layer_f_codec_footprint || overall=1
 run_layer G layer_g_cross_compile_cortex_m || overall=1
 run_layer Q layer_q_qemu_mcu_e2e || overall=1
