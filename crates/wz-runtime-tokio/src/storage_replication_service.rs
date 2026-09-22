@@ -397,7 +397,7 @@ mod tests {
 
     fn put_state(now: u64) -> Arc<Mutex<StorageState<MemoryStorage>>> {
         use wz_session_core::sample::TimestampHint;
-        let mut st = StorageState::new(MemoryStorage::new());
+        let mut st = StorageState::new(MemoryStorage::new()).unwrap();
         st.process_put(
             Some("demo/a"),
             vec![1, 2, 3],
@@ -413,7 +413,7 @@ mod tests {
 
     fn state_with(keys: &[&str], now: u64) -> StorageState<MemoryStorage> {
         use wz_session_core::sample::TimestampHint;
-        let mut st = StorageState::new(MemoryStorage::new());
+        let mut st = StorageState::new(MemoryStorage::new()).unwrap();
         for (i, key) in keys.iter().enumerate() {
             st.process_put(
                 Some(key),

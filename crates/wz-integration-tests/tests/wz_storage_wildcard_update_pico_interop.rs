@@ -257,7 +257,7 @@ async fn wz_storage_applies_a_pico_wildcard_update_over_the_wire() {
         // value, exercising `apply_one_with_override` (the "-update" semantics, not
         // just registration).
         assert_eq!(
-            st.get(Some(SEED_KEY)).map(|d| d.payload.clone()),
+            st.get_newest(Some(SEED_KEY)).unwrap().map(|d| d.payload),
             Some(WILDCARD_VALUE.as_bytes().to_vec()),
             "the pico wildcard PUT did not override the pre-seeded concrete key — \
              `demo/k1` should hold the wildcard value after materialization"

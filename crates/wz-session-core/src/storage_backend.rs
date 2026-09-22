@@ -60,11 +60,21 @@
 //!   semantically identical (a key->value store does not depend on iteration
 //!   order — [`MemoryStorage::get_all_entries`] simply yields keys sorted,
 //!   with the `None` key — if present — ordering first).
-//! - **`get` returns `Option`, not `Vec`**: zenoh's `get` returns
-//!   `Vec<StoredData>` because History::All (lib.rs:164-168) may hold
-//!   several versions per key; the History::Latest in-memory backend holds
-//!   at most one, so wz returns `Option`. The `Vec` (version-history) form
-//!   arrives with the `storage-history` atom.
+//! - **`get` returns an OWNED `Vec` and can fail — which is upstream's
+//!   shape, and the divergence that used to sit here is retired (R2800).**
+//!   zenoh's `get` answers `ZResult<Vec<StoredData>>`
+//!   (`plugins/zenoh-backend-traits/src/lib.rs` @ `) -> ZResult<Vec<StoredData>>;`):
+//!   every version under the key, handed out BY VALUE, or an error from the
+//!   medium. wz used to answer `Option<&StoredData>` plus a separate
+//!   `get_versions`, and the borrow was not a detail — a backend could only
+//!   hand out a reference to something it OWNED, so a store whose bytes live
+//!   on disk had to keep a full in-memory copy of them. The filesystem
+//!   backend said exactly that in its own module doc, and the copy meant it
+//!   served the directory as it stood when the storage OPENED, never as it
+//!   stands now. Owned values remove the reason for the copy; the error
+//!   channel lets a read that the medium refused be told apart from a key that
+//!   is absent, which an `Option` had to merge. [`StorageBackend::get_newest`]
+//!   is the derived single-value read a `History::Latest` caller wants.
 //! - **`StoredData.encoding` is `Option<EncodingHint>`, not a concrete
 //!   `Encoding`**: zenoh's `StoredData.encoding` is a non-optional
 //!   `Encoding` (it defaults to `Encoding::default()`); wz models an absent
@@ -147,6 +157,30 @@ impl core::fmt::Display for StorageWriteError {
 /// not commit it. zenoh `ZResult<StorageInsertionResult>`
 /// (`zenoh-backend-traits/src/lib.rs:219-260`).
 pub type StorageWriteResult = Result<StorageInsertionResult, StorageWriteError>;
+
+/// A read the backend could not serve from its medium — zenoh's `get` and
+/// `get_all_entries` both answer `ZResult`
+/// (`plugins/zenoh-backend-traits/src/lib.rs` @ `async fn get_all_entries(&self) -> ZResult<Vec<(Option<OwnedKeyExpr>, Timestamp)>>;`).
+///
+/// It is NOT "the key is absent": an absent key is an `Ok` with no versions.
+/// The two used to be one answer (`get` returned an `Option`), which is
+/// harmless for a map and wrong for a disk — an unreadable file would have
+/// read back as a key nobody ever stored, and a query would have been told
+/// "nothing here" when the truth was "something here I cannot read".
+///
+/// Payload-free for the reasons [`StorageWriteError`] gives: the kernel is
+/// `no_std`, every caller takes the same branch (log it and serve what it can,
+/// which is what upstream's storage service does at
+/// `plugins/zenoh-plugin-storage-manager/src/storages_mgt/service.rs` @ `raised an error on query`),
+/// and the backend that owns the medium has the concrete error and logs it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct StorageReadError;
+
+impl core::fmt::Display for StorageReadError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str("the storage backend could not read its medium")
+    }
+}
 
 /// How many values a backend keeps per key. zenoh `History`
 /// (`zenoh-backend-traits/src/lib.rs:164-168`).
@@ -251,22 +285,41 @@ pub trait StorageBackend {
     /// key was NOT removed as far as anything above this seam is concerned.
     fn delete(&mut self, key: Option<&str>, timestamp: TimestampHint) -> StorageWriteResult;
 
-    /// Retrieve the value stored under an exact `key`, if any. zenoh `get`
-    /// (`zenoh-backend-traits/src/lib.rs:250-254`) returns
-    /// `Vec<StoredData>` for History::All; the History::Latest in-memory
-    /// backend holds at most one value per key, so wz returns `Option`
-    /// (the `Vec` form arrives with `storage-history`). `key` is `None` for
-    /// the exact-prefix-match slot.
-    fn get(&self, key: Option<&str>) -> Option<&StoredData>;
+    /// Every version stored under an exact `key`, NEWEST LAST, handed out by
+    /// value — or [`StorageReadError`] when the medium refused the read. An
+    /// absent key is `Ok` with no versions. zenoh `get`
+    /// (`plugins/zenoh-backend-traits/src/lib.rs` @ `) -> ZResult<Vec<StoredData>>;`).
+    ///
+    /// A [`History::Latest`] backend answers at most one version; a
+    /// [`History::All`] backend answers its live timeline. `key` is `None`
+    /// for the exact-prefix-match slot.
+    ///
+    /// R2800 — this is ONE method where there used to be two (`get` answering
+    /// `Option<&StoredData>` and `get_versions` answering the borrowed list),
+    /// and it hands out values rather than references, because a reference
+    /// can only point at something the backend OWNS. See the module note.
+    fn get(&self, key: Option<&str>) -> Result<Vec<StoredData>, StorageReadError>;
+
+    /// The newest version under `key`, if any — the single value a
+    /// [`History::Latest`] caller reads. Derived from [`get`](StorageBackend::get),
+    /// so a backend implements one method and the two cannot disagree; a
+    /// backend that can find the newest version more cheaply than all of them
+    /// may override it.
+    fn get_newest(&self, key: Option<&str>) -> Result<Option<StoredData>, StorageReadError> {
+        Ok(self.get(key)?.pop())
+    }
 
     /// List every stored `(key, timestamp)` pair — the input the query
-    /// path resolves a wildcard query against. zenoh `get_all_entries`
-    /// (`zenoh-backend-traits/src/lib.rs:256-259`). The key is `Option<String>`
-    /// (`None` = the exact-prefix-match slot); the query path restores the
-    /// configured prefix to each key before matching. For a multi-version
-    /// (`History::All`) backend this lists each key once with its NEWEST
-    /// timestamp (the wildcard-match scan only needs the key set).
-    fn get_all_entries(&self) -> Vec<(Option<String>, TimestampHint)>;
+    /// path resolves a wildcard query against, and what a storage is
+    /// hydrated from when it opens over a medium that already holds data.
+    /// zenoh `get_all_entries`
+    /// (`plugins/zenoh-backend-traits/src/lib.rs` @ `async fn get_all_entries(&self) -> ZResult<Vec<(Option<OwnedKeyExpr>, Timestamp)>>;`).
+    /// The key is `Option<String>` (`None` = the exact-prefix-match slot);
+    /// the query path restores the configured prefix to each key before
+    /// matching. For a multi-version (`History::All`) backend this lists
+    /// each key once with its NEWEST timestamp (the wildcard-match scan only
+    /// needs the key set).
+    fn get_all_entries(&self) -> Result<Vec<(Option<String>, TimestampHint)>, StorageReadError>;
 
     /// This backend's history capability — how many values it keeps per
     /// key. zenoh `Capability::history` (`zenoh-backend-traits/src/lib.rs:145`).
@@ -275,17 +328,6 @@ pub trait StorageBackend {
     /// every version instead of dropping outdated ones.
     fn history(&self) -> History {
         History::Latest
-    }
-
-    /// All stored versions for an exact `key`, newest last — the
-    /// multi-version form of [`get`](StorageBackend::get). zenoh `get`
-    /// returns `Vec<StoredData>` for exactly this reason
-    /// (`zenoh-backend-traits/src/lib.rs:250-254`). The default returns the
-    /// single latest value (0 or 1), so a [`History::Latest`] backend needs
-    /// no override; a [`History::All`] backend returns its full version
-    /// list.
-    fn get_versions(&self, key: Option<&str>) -> Vec<&StoredData> {
-        self.get(key).into_iter().collect()
     }
 }
 
@@ -351,15 +393,29 @@ impl StorageBackend for MemoryStorage {
         Ok(StorageInsertionResult::Deleted)
     }
 
-    fn get(&self, key: Option<&str>) -> Option<&StoredData> {
-        self.map.get(&key.map(String::from))
+    fn get(&self, key: Option<&str>) -> Result<Vec<StoredData>, StorageReadError> {
+        // A copy, as upstream's memory backend hands out
+        // (`plugins/zenoh-plugin-storage-manager/src/memory_backend/mod.rs` @ `Some(v) => Ok(vec![v.clone()]),`).
+        // Always `Ok`: a map has no medium that can refuse the read. An absent
+        // key is `Ok` with nothing in it -- upstream's memory backend answers
+        // `Err` there instead while its filesystem backend answers the empty
+        // `Ok`, and its storage service treats the two alike (it logs the one
+        // and replies nothing for either), so wz takes the answer that does not
+        // call an absence a failure.
+        Ok(self
+            .map
+            .get(&key.map(String::from))
+            .cloned()
+            .into_iter()
+            .collect())
     }
 
-    fn get_all_entries(&self) -> Vec<(Option<String>, TimestampHint)> {
-        self.map
+    fn get_all_entries(&self) -> Result<Vec<(Option<String>, TimestampHint)>, StorageReadError> {
+        Ok(self
+            .map
             .iter()
             .map(|(k, v)| (k.clone(), v.timestamp.clone()))
-            .collect()
+            .collect())
     }
 }
 
@@ -369,9 +425,10 @@ impl StorageBackend for MemoryStorage {
 /// (`StorageService<.., B>`) without the caller naming the concrete backend
 /// type. `?Sized` covers the `dyn` trait-object case. Every method — including
 /// the defaulted [`history`](StorageBackend::history) /
-/// [`get_versions`](StorageBackend::get_versions) — is forwarded explicitly,
-/// so a boxed `History::All` backend keeps its version behaviour (the default
-/// `get_versions` would otherwise collapse to the single `get`).
+/// [`get_newest`](StorageBackend::get_newest) — is forwarded explicitly, so a
+/// boxed backend keeps its own answers (the defaults would otherwise replace a
+/// `History::All` backend's declared history with `Latest`, and an overridden
+/// newest-version read with the derived one).
 impl<B: StorageBackend + ?Sized> StorageBackend for Box<B> {
     fn put(
         &mut self,
@@ -387,20 +444,20 @@ impl<B: StorageBackend + ?Sized> StorageBackend for Box<B> {
         (**self).delete(key, timestamp)
     }
 
-    fn get(&self, key: Option<&str>) -> Option<&StoredData> {
+    fn get(&self, key: Option<&str>) -> Result<Vec<StoredData>, StorageReadError> {
         (**self).get(key)
     }
 
-    fn get_all_entries(&self) -> Vec<(Option<String>, TimestampHint)> {
+    fn get_newest(&self, key: Option<&str>) -> Result<Option<StoredData>, StorageReadError> {
+        (**self).get_newest(key)
+    }
+
+    fn get_all_entries(&self) -> Result<Vec<(Option<String>, TimestampHint)>, StorageReadError> {
         (**self).get_all_entries()
     }
 
     fn history(&self) -> History {
         (**self).history()
-    }
-
-    fn get_versions(&self, key: Option<&str>) -> Vec<&StoredData> {
-        (**self).get_versions(key)
     }
 }
 
@@ -426,9 +483,31 @@ mod tests {
         let r = s.put(Some("demo/a"), vec![1, 2, 3], enc(), ts(10)).unwrap();
         assert_eq!(r, StorageInsertionResult::Inserted);
         assert_eq!(s.len(), 1);
-        let stored = s.get(Some("demo/a")).expect("key present after put");
+        let stored = s
+            .get_newest(Some("demo/a"))
+            .unwrap()
+            .expect("key present after put");
         assert_eq!(stored.payload, vec![1, 2, 3]);
         assert_eq!(stored.timestamp, ts(10));
+    }
+
+    #[test]
+    fn get_answers_every_version_and_an_absent_key_answers_none() {
+        // R2800 — the seam's two answers that an `Option` used to merge: an
+        // absent key is `Ok` with nothing in it, never an error, and a present
+        // key comes back BY VALUE, so a later write cannot change what the
+        // caller already holds.
+        let mut s = MemoryStorage::new();
+        assert_eq!(s.get(Some("demo/a")), Ok(vec![]));
+        s.put(Some("demo/a"), vec![1], enc(), ts(10)).unwrap();
+        let held = s.get(Some("demo/a")).unwrap();
+        s.put(Some("demo/a"), vec![2], enc(), ts(20)).unwrap();
+        assert_eq!(held.len(), 1, "a Latest backend holds one version");
+        assert_eq!(held[0].payload, vec![1], "a value, not a view of the map");
+        assert_eq!(
+            s.get_newest(Some("demo/a")).unwrap().unwrap().payload,
+            vec![2]
+        );
     }
 
     #[test]
@@ -441,7 +520,10 @@ mod tests {
         let r = s.put(Some("demo/a"), vec![2], enc(), ts(20)).unwrap();
         assert_eq!(r, StorageInsertionResult::Replaced);
         assert_eq!(s.len(), 1, "replace does not grow the key set");
-        assert_eq!(s.get(Some("demo/a")).unwrap().payload, vec![2]);
+        assert_eq!(
+            s.get_newest(Some("demo/a")).unwrap().unwrap().payload,
+            vec![2]
+        );
     }
 
     #[test]
@@ -456,14 +538,17 @@ mod tests {
             StorageInsertionResult::Inserted
         );
         assert_eq!(
-            s.get(None).expect("mount-root value present").payload,
+            s.get_newest(None)
+                .unwrap()
+                .expect("mount-root value present")
+                .payload,
             vec![7]
         );
         // The `None` slot is independent of any `Some` key.
         s.put(Some("a"), vec![1], enc(), ts(10)).unwrap();
         assert_eq!(s.len(), 2);
-        assert_eq!(s.get(None).unwrap().payload, vec![7]);
-        assert_eq!(s.get(Some("a")).unwrap().payload, vec![1]);
+        assert_eq!(s.get_newest(None).unwrap().unwrap().payload, vec![7]);
+        assert_eq!(s.get_newest(Some("a")).unwrap().unwrap().payload, vec![1]);
     }
 
     #[test]
@@ -472,7 +557,10 @@ mod tests {
         s.put(Some("demo/a"), vec![1], enc(), ts(10)).unwrap();
         let r = s.delete(Some("demo/a"), ts(20)).unwrap();
         assert_eq!(r, StorageInsertionResult::Deleted);
-        assert!(s.get(Some("demo/a")).is_none(), "key gone after delete");
+        assert!(
+            s.get_newest(Some("demo/a")).unwrap().is_none(),
+            "key gone after delete"
+        );
         assert!(s.is_empty());
     }
 
@@ -493,7 +581,7 @@ mod tests {
         let mut s = MemoryStorage::new();
         s.put(Some("demo/a"), vec![1], enc(), ts(10)).unwrap();
         s.put(Some("demo/b"), vec![2], enc(), ts(20)).unwrap();
-        let mut entries = s.get_all_entries();
+        let mut entries = s.get_all_entries().unwrap();
         entries.sort_by(|a, b| a.0.cmp(&b.0));
         assert_eq!(
             entries,
@@ -511,7 +599,7 @@ mod tests {
         let mut s = MemoryStorage::new();
         s.put(Some("demo/a"), vec![1], enc(), ts(10)).unwrap();
         s.put(None, vec![9], enc(), ts(20)).unwrap();
-        let entries = s.get_all_entries();
+        let entries = s.get_all_entries().unwrap();
         assert_eq!(
             entries,
             vec![(None, ts(20)), (Some(String::from("demo/a")), ts(10)),]
@@ -529,7 +617,7 @@ mod tests {
         let r = s.put(Some("demo/a"), vec![1], enc(), ts(1)).unwrap();
         assert_eq!(r, StorageInsertionResult::Replaced);
         assert_eq!(
-            s.get(Some("demo/a")).unwrap().payload,
+            s.get_newest(Some("demo/a")).unwrap().unwrap().payload,
             vec![1],
             "bare backend overwrites verbatim, ignoring the older timestamp"
         );

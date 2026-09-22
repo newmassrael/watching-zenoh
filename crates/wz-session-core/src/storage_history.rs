@@ -48,10 +48,8 @@
 //!   mirrored by `crate::storage_state::StorageState::latest_mode`), the ordering
 //!   guarantee has to live *here*: a Put that lands at a timestamp at or
 //!   below the newest tombstone is stored as history but is not live, so
-//!   [`get`](crate::storage_backend::StorageBackend::get) and
-//!   [`get_versions`](crate::storage_backend::StorageBackend::get_versions)
-//!   do not serve it. A Put ABOVE the tombstone is live, which is how a
-//!   key comes back.
+//!   [`get`](crate::storage_backend::StorageBackend::get) does not serve
+//!   it. A Put ABOVE the tombstone is live, which is how a key comes back.
 //!
 //! Because the timeline is kept sorted by timestamp, "after the newest
 //! tombstone" is a SUFFIX, not a filter — see `HistoryStorage::live`.
@@ -104,7 +102,8 @@ use alloc::vec::Vec;
 
 use crate::sample::{EncodingHint, TimestampHint};
 use crate::storage_backend::{
-    History, StorageBackend, StorageInsertionResult, StorageWriteResult, StoredData,
+    History, StorageBackend, StorageInsertionResult, StorageReadError, StorageWriteResult,
+    StoredData,
 };
 
 use crate::sample::timestamp_order_key;
@@ -270,55 +269,47 @@ impl StorageBackend for HistoryStorage {
         Ok(StorageInsertionResult::Deleted)
     }
 
-    fn get(&self, key: Option<&str>) -> Option<&StoredData> {
-        // The newest LIVE version (the timeline is sorted newest-last, and
-        // `live` drops everything the newest tombstone shadows).
-        self.map.get(&key.map(String::from)).and_then(|timeline| {
-            match Self::live(timeline).last() {
-                Some(Version::Put(data)) => Some(data),
-                // Unreachable by construction (`live` yields only Puts);
-                // written as a match rather than an unwrap so a future
-                // Version variant is a compile error, not a panic.
-                Some(Version::Tombstone(_)) | None => None,
-            }
-        })
-    }
-
-    fn get_all_entries(&self) -> Vec<(Option<String>, TimestampHint)> {
-        // One row per LIVE key, carrying its newest live timestamp. A
-        // deleted key is omitted, which is the contract every caller of
-        // this seam already relies on ("get_all_entries drops deleted
-        // keys", `crate::storage_state`): the wildcard-override scan and
-        // `matching_entries` both treat a returned key as present.
-        self.map
-            .iter()
-            .filter_map(|(k, timeline)| match Self::live(timeline).last() {
-                Some(Version::Put(newest)) => Some((k.clone(), newest.timestamp.clone())),
-                Some(Version::Tombstone(_)) | None => None,
-            })
-            .collect()
-    }
-
-    fn history(&self) -> History {
-        History::All
-    }
-
-    fn get_versions(&self, key: Option<&str>) -> Vec<&StoredData> {
-        // The LIVE versions — the query reply set. Shadowed history is
-        // retained in the timeline but is not served: replying a version a
-        // newer tombstone deleted would tell a querier the key is alive.
-        self.map
+    fn get(&self, key: Option<&str>) -> Result<Vec<StoredData>, StorageReadError> {
+        // The LIVE versions, newest last — the query reply set. Shadowed
+        // history is retained in the timeline but is not served: replying a
+        // version a newer tombstone deleted would tell a querier the key is
+        // alive. Always `Ok`: an in-memory timeline cannot refuse a read.
+        Ok(self
+            .map
             .get(&key.map(String::from))
             .map(|timeline| {
                 Self::live(timeline)
                     .iter()
                     .filter_map(|v| match v {
-                        Version::Put(data) => Some(data),
+                        Version::Put(data) => Some(data.clone()),
+                        // Unreachable by construction (`live` yields only
+                        // Puts); matched rather than unwrapped so a future
+                        // Version variant is a compile error, not a panic.
                         Version::Tombstone(_) => None,
                     })
                     .collect()
             })
-            .unwrap_or_default()
+            .unwrap_or_default())
+    }
+
+    fn get_all_entries(&self) -> Result<Vec<(Option<String>, TimestampHint)>, StorageReadError> {
+        // One row per LIVE key, carrying its newest live timestamp. A
+        // deleted key is omitted, which is the contract every caller of
+        // this seam already relies on ("get_all_entries drops deleted
+        // keys", `crate::storage_state`): the wildcard-override scan and
+        // `matching_entries` both treat a returned key as present.
+        Ok(self
+            .map
+            .iter()
+            .filter_map(|(k, timeline)| match Self::live(timeline).last() {
+                Some(Version::Put(newest)) => Some((k.clone(), newest.timestamp.clone())),
+                Some(Version::Tombstone(_)) | None => None,
+            })
+            .collect())
+    }
+
+    fn history(&self) -> History {
+        History::All
     }
 }
 
@@ -351,12 +342,15 @@ mod tests {
             StorageInsertionResult::Replaced
         );
         assert_eq!(s.version_count(Some("demo/a")), 2, "both versions retained");
-        let versions = s.get_versions(Some("demo/a"));
+        let versions = s.get(Some("demo/a")).unwrap();
         assert_eq!(versions.len(), 2);
         assert_eq!(versions[0].payload, vec![1]);
         assert_eq!(versions[1].payload, vec![2]);
-        // get() returns the newest.
-        assert_eq!(s.get(Some("demo/a")).unwrap().payload, vec![2]);
+        // get_newest() returns the newest.
+        assert_eq!(
+            s.get_newest(Some("demo/a")).unwrap().unwrap().payload,
+            vec![2]
+        );
     }
 
     #[test]
@@ -365,7 +359,7 @@ mod tests {
         s.put(Some("demo/a"), vec![3], None, ts(30, 1)).unwrap();
         s.put(Some("demo/a"), vec![1], None, ts(10, 1)).unwrap(); // older, later
         s.put(Some("demo/a"), vec![2], None, ts(20, 1)).unwrap();
-        let versions = s.get_versions(Some("demo/a"));
+        let versions = s.get(Some("demo/a")).unwrap();
         let payloads: Vec<&Vec<u8>> = versions.iter().map(|d| &d.payload).collect();
         assert_eq!(
             payloads,
@@ -373,7 +367,7 @@ mod tests {
             "versions sorted ascending by timestamp regardless of arrival order"
         );
         assert_eq!(
-            s.get(Some("demo/a")).unwrap().payload,
+            s.get_newest(Some("demo/a")).unwrap().unwrap().payload,
             vec![3],
             "newest by timestamp, not by arrival"
         );
@@ -389,7 +383,10 @@ mod tests {
             1,
             "an identical timestamp is the same version, replaced not appended"
         );
-        assert_eq!(s.get(Some("demo/a")).unwrap().payload, vec![9]);
+        assert_eq!(
+            s.get_newest(Some("demo/a")).unwrap().unwrap().payload,
+            vec![9]
+        );
     }
 
     #[test]
@@ -405,13 +402,16 @@ mod tests {
         );
         // The LIVE view: gone.
         assert_eq!(s.version_count(Some("demo/a")), 0, "no live version");
-        assert!(s.get(Some("demo/a")).is_none(), "reads as deleted");
         assert!(
-            s.get_versions(Some("demo/a")).is_empty(),
+            s.get_newest(Some("demo/a")).unwrap().is_none(),
+            "reads as deleted"
+        );
+        assert!(
+            s.get(Some("demo/a")).unwrap().is_empty(),
             "a query replies nothing for a deleted key"
         );
         assert!(
-            s.get_all_entries().is_empty(),
+            s.get_all_entries().unwrap().is_empty(),
             "the deleted key is dropped from the entry scan, the contract \
              `matching_entries` / the wildcard-override scan rely on"
         );
@@ -442,10 +442,10 @@ mod tests {
             "the key was absent, so the write is an insert, not a replace"
         );
         assert!(
-            s.get(Some("demo/a")).is_none(),
+            s.get_newest(Some("demo/a")).unwrap().is_none(),
             "a put stamped BELOW the tombstone must not resurrect the key"
         );
-        assert!(s.get_versions(Some("demo/a")).is_empty());
+        assert!(s.get(Some("demo/a")).unwrap().is_empty());
         assert_eq!(
             s.history_len(Some("demo/a")),
             3,
@@ -463,7 +463,10 @@ mod tests {
         s.put(Some("demo/a"), vec![3], None, ts(30, 1)).unwrap();
         s.delete(Some("demo/a"), ts(40, 1)).unwrap();
         s.put(Some("demo/a"), vec![5], None, ts(50, 1)).unwrap();
-        assert_eq!(s.get(Some("demo/a")).unwrap().payload, vec![5]);
+        assert_eq!(
+            s.get_newest(Some("demo/a")).unwrap().unwrap().payload,
+            vec![5]
+        );
         assert_eq!(
             s.version_count(Some("demo/a")),
             1,
@@ -471,7 +474,7 @@ mod tests {
         );
         assert!(!s.is_deleted(Some("demo/a")));
         assert_eq!(
-            s.get_all_entries(),
+            s.get_all_entries().unwrap(),
             vec![(Some(String::from("demo/a")), ts(50, 1))],
             "the revived key is back in the entry scan at its live timestamp"
         );
@@ -487,7 +490,7 @@ mod tests {
         s.put(Some("demo/a"), vec![5], None, ts(50, 1)).unwrap();
         s.delete(Some("demo/a"), ts(30, 1)).unwrap();
         assert_eq!(
-            s.get(Some("demo/a")).unwrap().payload,
+            s.get_newest(Some("demo/a")).unwrap().unwrap().payload,
             vec![5],
             "the t=30 delete is older than the t=50 value it cannot delete"
         );
@@ -507,7 +510,7 @@ mod tests {
         );
         s.put(Some("demo/a"), vec![2], None, ts(20, 1)).unwrap();
         assert!(
-            s.get(Some("demo/a")).is_none(),
+            s.get_newest(Some("demo/a")).unwrap().is_none(),
             "the recorded tombstone still shadows the older put"
         );
         assert_eq!(s.history_len(Some("demo/a")), 2);
@@ -531,7 +534,7 @@ mod tests {
         s.put(Some("demo/a"), vec![1], None, ts(10, 1)).unwrap();
         assert_eq!(s.history_len(Some("demo/a")), 1);
         assert_eq!(
-            s.get(Some("demo/a")).unwrap().payload,
+            s.get_newest(Some("demo/a")).unwrap().unwrap().payload,
             vec![1],
             "the put arrived later"
         );
@@ -543,7 +546,7 @@ mod tests {
         s.put(Some("demo/a"), vec![1], None, ts(10, 1)).unwrap();
         s.put(Some("demo/a"), vec![2], None, ts(20, 1)).unwrap();
         s.put(Some("demo/b"), vec![3], None, ts(15, 1)).unwrap();
-        let mut entries = s.get_all_entries();
+        let mut entries = s.get_all_entries().unwrap();
         entries.sort_by(|a, b| a.0.cmp(&b.0));
         assert_eq!(
             entries,
@@ -558,14 +561,12 @@ mod tests {
     #[test]
     fn boxed_history_storage_keeps_all_through_the_blanket_impl() {
         // The `Box<B>` blanket impl (storage_backend.rs) forwards
-        // `history` / `get_versions` EXPLICITLY rather than letting them
-        // fall back to the trait defaults (which would collapse
-        // `get_versions` to the single `get`). Drive a `History::All`
+        // `history` EXPLICITLY rather than letting it fall back to the trait
+        // default (which would answer `Latest`). Drive a `History::All`
         // HistoryStorage entirely through a `Box<dyn StorageBackend + Send>`
         // — the boxed form a `Volume::create_storage` result is — and assert
         // the multi-version behaviour survives: the capability stays
-        // `History::All` and `get_versions` returns both versions, not the
-        // default-collapsed single one.
+        // `History::All` and `get` returns both versions.
         let mut b: alloc::boxed::Box<dyn StorageBackend + Send> =
             alloc::boxed::Box::new(HistoryStorage::new());
         assert_eq!(
@@ -581,11 +582,11 @@ mod tests {
             History::All,
             "the boxed backend keeps its All capability (not the Latest default)"
         );
-        let versions = b.get_versions(Some("a"));
+        let versions = b.get(Some("a")).unwrap();
         assert_eq!(
             versions.len(),
             2,
-            "get_versions forwards to the All backend, not the default get-collapse"
+            "get forwards to the All backend and answers its whole live timeline"
         );
         assert_eq!(versions[0].payload, vec![1]);
         assert_eq!(versions[1].payload, vec![2]);

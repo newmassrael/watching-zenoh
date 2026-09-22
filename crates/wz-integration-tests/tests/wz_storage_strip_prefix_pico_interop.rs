@@ -183,7 +183,9 @@ async fn wz_storage_strips_the_mount_prefix_from_a_pico_put() {
     storage.with_state(|st| {
         // Assert #1: the sample was captured AND stored under the STRIPPED key.
         assert_eq!(
-            st.get(Some(STRIPPED_KEY)).map(|d| d.payload.clone()),
+            st.get_newest(Some(STRIPPED_KEY))
+                .unwrap()
+                .map(|d| d.payload),
             Some(PUT_VALUE.as_bytes().to_vec()),
             "the pico put `{PUT_KEY}` was not stored under the stripped key \
              `{STRIPPED_KEY}` — the capture strip did not map the mount prefix \
@@ -193,7 +195,7 @@ async fn wz_storage_strips_the_mount_prefix_from_a_pico_put() {
         // the strip actually stripped — a plain storage-backend capture (no
         // strip) would store here and fail assert #1.
         assert!(
-            st.get(Some(PUT_KEY)).is_none(),
+            st.get_newest(Some(PUT_KEY)).unwrap().is_none(),
             "the full published key `{PUT_KEY}` must NOT be stored verbatim under \
              a strip_prefix mount — the strip did not apply on the capture path"
         );

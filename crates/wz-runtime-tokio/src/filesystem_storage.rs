@@ -17,12 +17,15 @@
 //!
 //! ## Model: in-memory mirror + write-through to disk
 //!
-//! [`StorageBackend::get`] returns `Option<&StoredData>` — a *reference* — so
-//! a backend must own the value it hands back; a pure-disk store (that
-//! deserialized into a local on each `get`) could not satisfy the borrow.
-//! The durable backend therefore keeps an in-memory mirror (identical
-//! in-process semantics to [`MemoryStorage`]) and *write-through*-persists
-//! every mutation:
+//! [`StorageBackend::get`] used to return `Option<&StoredData>` — a
+//! *reference* — so a backend had to own the value it handed back; a
+//! pure-disk store (that deserialized into a local on each `get`) could not
+//! satisfy the borrow. The durable backend therefore keeps an in-memory mirror
+//! (identical in-process semantics to [`MemoryStorage`]) and
+//! *write-through*-persists every mutation. R2800 made the seam hand out
+//! values, so the mirror is no longer REQUIRED; this module still keeps it
+//! until the directory-tree layout lands and reads can go to the directory
+//! itself, which is what upstream's backend does:
 //!
 //! - **load-on-open**: [`FilesystemStorage::open`] rebuilds the mirror from
 //!   the on-disk files (this is what makes the store survive a restart).
@@ -88,8 +91,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use wz_session_core::sample::{EncodingHint, TimestampHint};
 use wz_session_core::storage_backend::{
-    History, StorageBackend, StorageInsertionResult, StorageWriteError, StorageWriteResult,
-    StoredData,
+    History, StorageBackend, StorageInsertionResult, StorageReadError, StorageWriteError,
+    StorageWriteResult, StoredData,
 };
 use wz_session_core::storage_config::StorageConfig;
 use wz_session_core::storage_volume::{Capability, Persistence, Volume, VolumeError};
@@ -525,15 +528,25 @@ impl StorageBackend for FilesystemStorage {
         }
     }
 
-    fn get(&self, key: Option<&str>) -> Option<&StoredData> {
-        self.map.get(&key.map(String::from)).map(|e| &e.data)
+    fn get(&self, key: Option<&str>) -> Result<Vec<StoredData>, StorageReadError> {
+        // R2800 — still answered from the mirror. The seam no longer requires
+        // one (it hands out values), so reading the directory itself is now
+        // expressible; that rewire is the redesign this module's
+        // `filesystem_keypath` sibling was built for, and it is its own round.
+        Ok(self
+            .map
+            .get(&key.map(String::from))
+            .map(|e| e.data.clone())
+            .into_iter()
+            .collect())
     }
 
-    fn get_all_entries(&self) -> Vec<(Option<String>, TimestampHint)> {
-        self.map
+    fn get_all_entries(&self) -> Result<Vec<(Option<String>, TimestampHint)>, StorageReadError> {
+        Ok(self
+            .map
             .iter()
             .map(|(k, e)| (k.clone(), e.data.timestamp.clone()))
-            .collect()
+            .collect())
     }
     // history() defaults to History::Latest — a single-version durable store;
     // History::All is the separate `storage-history` atom.
@@ -810,7 +823,9 @@ mod tests {
             "an unconfirmed directory entry is not a committed put; got {outcome:?}"
         );
         assert_eq!(
-            s.get(Some("demo/a")).map(|e| e.payload.clone()),
+            s.get_newest(Some("demo/a"))
+                .unwrap()
+                .map(|e| e.payload.clone()),
             Some(vec![1, 2, 3]),
             "the rename LANDED, so a reopen would show this value and the mirror \
              must show it too -- the mirror tracks the disk, not the caller's verdict",
@@ -843,12 +858,18 @@ mod tests {
             s.put(Some("demo/a"), vec![1, 2, 3], None, ts(10)).unwrap(),
             StorageInsertionResult::Inserted
         );
-        assert_eq!(s.get(Some("demo/a")).unwrap().payload, vec![1, 2, 3]);
+        assert_eq!(
+            s.get_newest(Some("demo/a")).unwrap().unwrap().payload,
+            vec![1, 2, 3]
+        );
         assert_eq!(
             s.put(Some("demo/a"), vec![4], None, ts(20)).unwrap(),
             StorageInsertionResult::Replaced
         );
-        assert_eq!(s.get(Some("demo/a")).unwrap().payload, vec![4]);
+        assert_eq!(
+            s.get_newest(Some("demo/a")).unwrap().unwrap().payload,
+            vec![4]
+        );
     }
 
     #[test]
@@ -860,7 +881,7 @@ mod tests {
             s.delete(Some("demo/a"), ts(20)).unwrap(),
             StorageInsertionResult::Deleted
         );
-        assert!(s.get(Some("demo/a")).is_none());
+        assert!(s.get_newest(Some("demo/a")).unwrap().is_none());
         assert_eq!(
             s.delete(Some("demo/missing"), ts(1)).unwrap(),
             StorageInsertionResult::Deleted
@@ -876,8 +897,8 @@ mod tests {
             StorageInsertionResult::Inserted
         );
         s.put(Some("a"), vec![1], None, ts(10)).unwrap();
-        assert_eq!(s.get(None).unwrap().payload, vec![7]);
-        assert_eq!(s.get(Some("a")).unwrap().payload, vec![1]);
+        assert_eq!(s.get_newest(None).unwrap().unwrap().payload, vec![7]);
+        assert_eq!(s.get_newest(Some("a")).unwrap().unwrap().payload, vec![1]);
     }
 
     #[test]
@@ -886,7 +907,7 @@ mod tests {
         let mut s = FilesystemStorage::open(dir.path().to_path_buf()).unwrap();
         s.put(Some("demo/a"), vec![1], None, ts(10)).unwrap();
         s.put(None, vec![9], None, ts(20)).unwrap();
-        let entries = s.get_all_entries();
+        let entries = s.get_all_entries().unwrap();
         assert_eq!(
             entries,
             vec![(None, ts(20)), (Some("demo/a".to_string()), ts(10))]
@@ -908,12 +929,27 @@ mod tests {
             s.delete(Some("to/delete"), ts(14)).unwrap();
         } // drop -> a fresh instance must see only the on-disk state
         let s = FilesystemStorage::open(root).unwrap();
-        assert_eq!(s.get(Some("demo/a")).unwrap().payload, vec![1, 2, 3]);
-        assert_eq!(s.get(Some("demo/a")).unwrap().encoding, enc());
-        assert_eq!(s.get(Some("demo/a")).unwrap().timestamp, ts(10));
-        assert_eq!(s.get(Some("wild/*/x")).unwrap().payload, vec![9]);
-        assert_eq!(s.get(None).unwrap().payload, vec![0xff]);
-        assert!(s.get(Some("to/delete")).is_none(), "delete must persist");
+        assert_eq!(
+            s.get_newest(Some("demo/a")).unwrap().unwrap().payload,
+            vec![1, 2, 3]
+        );
+        assert_eq!(
+            s.get_newest(Some("demo/a")).unwrap().unwrap().encoding,
+            enc()
+        );
+        assert_eq!(
+            s.get_newest(Some("demo/a")).unwrap().unwrap().timestamp,
+            ts(10)
+        );
+        assert_eq!(
+            s.get_newest(Some("wild/*/x")).unwrap().unwrap().payload,
+            vec![9]
+        );
+        assert_eq!(s.get_newest(None).unwrap().unwrap().payload, vec![0xff]);
+        assert!(
+            s.get_newest(Some("to/delete")).unwrap().is_none(),
+            "delete must persist"
+        );
     }
 
     #[test]
@@ -929,11 +965,11 @@ mod tests {
         }
         let s = FilesystemStorage::open(root.clone()).unwrap();
         assert_eq!(
-            s.get(Some("k/1")).unwrap().payload,
+            s.get_newest(Some("k/1")).unwrap().unwrap().payload,
             vec![2],
             "reopen sees v2"
         );
-        assert_eq!(s.get(Some("k/1")).unwrap().encoding, enc());
+        assert_eq!(s.get_newest(Some("k/1")).unwrap().unwrap().encoding, enc());
         // Exactly one of our data files exists (no orphaned v1 file).
         let data_files = fs::read_dir(&root)
             .unwrap()
@@ -965,7 +1001,7 @@ mod tests {
             );
         }
         let s = FilesystemStorage::open(root).unwrap();
-        assert_eq!(s.get(Some(&key)).unwrap().payload, vec![42]);
+        assert_eq!(s.get_newest(Some(&key)).unwrap().unwrap().payload, vec![42]);
     }
 
     // ---- write failure: what a store that could not persist may claim ----
@@ -989,7 +1025,9 @@ mod tests {
             "a put that could not be persisted must be reported to the caller"
         );
         assert_eq!(
-            s.get(Some("demo/a")).map(|d| d.payload.clone()),
+            s.get_newest(Some("demo/a"))
+                .unwrap()
+                .map(|d| d.payload.clone()),
             Some(vec![1]),
             "a Durable store must keep serving the last value it actually \
              persisted, not one it failed to write"
@@ -1004,7 +1042,7 @@ mod tests {
         break_persistence(&root);
         assert!(s.put(Some("demo/a"), vec![1], None, ts(10)).is_err());
         assert!(
-            s.get(Some("demo/a")).is_none(),
+            s.get_newest(Some("demo/a")).unwrap().is_none(),
             "a key that never reached the disk must not be readable"
         );
     }
@@ -1030,7 +1068,7 @@ mod tests {
             "a delete that could not remove the record must be reported"
         );
         assert!(
-            s.get(Some("demo/a")).is_some(),
+            s.get_newest(Some("demo/a")).unwrap().is_some(),
             "a key whose on-disk record the store could not remove is not deleted"
         );
     }
@@ -1122,7 +1160,10 @@ mod tests {
 
         let s = FilesystemStorage::open(root.clone()).unwrap();
         // The good key survived; the whole store was not bricked.
-        assert_eq!(s.get(Some("good/key")).unwrap().payload, vec![7]);
+        assert_eq!(
+            s.get_newest(Some("good/key")).unwrap().unwrap().payload,
+            vec![7]
+        );
         // The corrupt file was quarantined; the foreign file was left as-is.
         assert!(root
             .join(quarantine_name(&format!("k{}", "0".repeat(16))))
@@ -1150,11 +1191,14 @@ mod tests {
 
         let s = FilesystemStorage::open(root).unwrap();
         assert_eq!(
-            s.get(Some("a")).unwrap().payload,
+            s.get_newest(Some("a")).unwrap().unwrap().payload,
             vec![1],
             "sibling survives"
         );
-        assert!(s.get(Some("b")).is_none(), "corrupt key quarantined");
+        assert!(
+            s.get_newest(Some("b")).unwrap().is_none(),
+            "corrupt key quarantined"
+        );
     }
 
     // ---- Volume ----
@@ -1186,7 +1230,7 @@ mod tests {
         } // drop the backend, then re-create over the same name -> durable
         let s = vol.create_storage(&cfg).unwrap();
         assert_eq!(
-            s.get(Some("demo/a")).unwrap().payload,
+            s.get_newest(Some("demo/a")).unwrap().unwrap().payload,
             vec![1, 2, 3],
             "a storage re-created over the same name reloads its data"
         );
@@ -1194,7 +1238,7 @@ mod tests {
         let other = vol
             .create_storage(&StorageConfig::new("other", "o/**", "fs"))
             .unwrap();
-        assert!(other.get(Some("demo/a")).is_none());
+        assert!(other.get_newest(Some("demo/a")).unwrap().is_none());
     }
 
     #[test]

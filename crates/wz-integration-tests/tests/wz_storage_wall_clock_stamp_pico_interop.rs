@@ -218,7 +218,7 @@ async fn wz_storage_stamps_an_untimestamped_pico_put_with_the_wall_clock() {
     let end_secs = unix_now_secs();
 
     storage.with_state(|st| {
-        let stored = st.get(Some(PUT_KEY)).unwrap_or_else(|| {
+        let stored = st.get_newest(Some(PUT_KEY)).unwrap().unwrap_or_else(|| {
             panic!(
                 "the pico un-timestamped PUT `{PUT_KEY}` was not captured — the Push \
                  either did not cross the wire to the storage subscriber, or the \

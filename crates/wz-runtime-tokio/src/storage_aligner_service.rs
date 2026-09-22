@@ -709,7 +709,7 @@ mod tests {
         payload: Vec<u8>,
         now: u64,
     ) -> Arc<Mutex<StorageState<MemoryStorage>>> {
-        let mut st = StorageState::new(MemoryStorage::new());
+        let mut st = StorageState::new(MemoryStorage::new()).unwrap();
         st.process_put(
             Some(key),
             payload,
@@ -869,7 +869,7 @@ mod tests {
         let session = TokioSession::new(actions, observer, clock);
 
         let config = cfg();
-        let state = Arc::new(Mutex::new(StorageState::new(MemoryStorage::new())));
+        let state = Arc::new(Mutex::new(StorageState::new(MemoryStorage::new()).unwrap()));
         let aligner = AlignerService::declare(&session, state, config, vec![0x01]);
         assert!(
             aligner.is_ok(),
@@ -1104,7 +1104,7 @@ mod tests {
 
         // The destination starts empty and pulls each reply through the ASK
         // path: decode_reply (driver) -> process_alignment_reply (kernel).
-        let mut dest = StorageState::new(MemoryStorage::new());
+        let mut dest = StorageState::new(MemoryStorage::new()).unwrap();
         for response in &responses {
             let attachment = encode_alignment_reply(&response.reply);
             let (payload, put_encoding): (&[u8], Option<(u32, Option<&str>)>) =
@@ -1186,7 +1186,7 @@ mod tests {
         let session = TokioSession::new(actions, observer, clock);
 
         let config = cfg();
-        let state = Arc::new(Mutex::new(StorageState::new(MemoryStorage::new())));
+        let state = Arc::new(Mutex::new(StorageState::new(MemoryStorage::new()).unwrap()));
         // Wiring declares the digest subscriber; the on_diff -> pull spawn fires
         // only on a received divergent digest (a two-replica e2e, A11).
         let sub = spawn_digest_aligner(&session, state, config);

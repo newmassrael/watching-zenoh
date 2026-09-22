@@ -151,7 +151,9 @@ async fn two_replicas_converge_via_digest_driven_alignment() {
     //    timestamp (so it lands in a live era), then declare the aligner answer
     //    queryable + spawn the periodic digest publisher. The service handles
     //    are held for the whole test (RAII: dropping undeclares / aborts).
-    let state_a: SharedState = Arc::new(StdMutex::new(StorageState::new(MemoryStorage::new())));
+    let state_a: SharedState = Arc::new(StdMutex::new(
+        StorageState::new(MemoryStorage::new()).unwrap(),
+    ));
     state_a
         .lock()
         .unwrap()
@@ -190,7 +192,9 @@ async fn two_replicas_converge_via_digest_driven_alignment() {
     // ── Replica B (dest): starts EMPTY; wire the digest->aligner handoff
     //    (declares the Remote peer-digest subscriber whose on_diff auto-spawns
     //    the Diff pull against the diverging peer).
-    let state_b: SharedState = Arc::new(StdMutex::new(StorageState::new(MemoryStorage::new())));
+    let state_b: SharedState = Arc::new(StdMutex::new(
+        StorageState::new(MemoryStorage::new()).unwrap(),
+    ));
     let observer_b = Arc::new(Mutex::new(ApplicationLayerObserver::new()));
     let session_b = TokioSession::new(
         opened_b.actions.clone(),
@@ -218,7 +222,8 @@ async fn two_replicas_converge_via_digest_driven_alignment() {
             for _ in 0..400 {
                 {
                     let guard = state_b.lock().unwrap();
-                    if guard.get(Some(DATA_KEY)).map(|s| s.payload.as_slice()) == Some(DATA_VALUE) {
+                    let held = guard.get_newest(Some(DATA_KEY)).unwrap();
+                    if held.as_ref().map(|s| s.payload.as_slice()) == Some(DATA_VALUE) {
                         return;
                     }
                 }
@@ -240,7 +245,8 @@ async fn two_replicas_converge_via_digest_driven_alignment() {
     {
         let gb = state_b.lock().unwrap();
         let stored = gb
-            .get(Some(DATA_KEY))
+            .get_newest(Some(DATA_KEY))
+            .unwrap()
             .expect("B converged: the aligned entry is present in B's store");
         assert_eq!(
             stored.payload, DATA_VALUE,

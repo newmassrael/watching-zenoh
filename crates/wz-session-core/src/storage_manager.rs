@@ -321,7 +321,8 @@ mod tests {
         assert_eq!(
             m.storage("s1")
                 .unwrap()
-                .get(Some("demo/a"))
+                .get_newest(Some("demo/a"))
+                .unwrap()
                 .unwrap()
                 .payload,
             vec![1]
@@ -405,7 +406,12 @@ mod tests {
             .put(Some("a/x"), vec![1], None, ts(1))
             .unwrap();
         // s2 is a separate store from one MemoryVolume: it does not see s1's key.
-        assert!(m.storage("s2").unwrap().get(Some("a/x")).is_none());
+        assert!(m
+            .storage("s2")
+            .unwrap()
+            .get_newest(Some("a/x"))
+            .unwrap()
+            .is_none());
         let names: Vec<&str> = m.storage_names().collect();
         assert_eq!(names, vec!["s1", "s2"]);
     }

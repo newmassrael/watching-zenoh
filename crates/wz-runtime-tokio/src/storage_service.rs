@@ -78,7 +78,7 @@ use wz_session_core::query_sink::{QueryView, ReplyOut};
 #[cfg(test)]
 use wz_session_core::sample::TimestampHint;
 use wz_session_core::sink::SampleView;
-use wz_session_core::storage_backend::{MemoryStorage, StorageBackend};
+use wz_session_core::storage_backend::{MemoryStorage, StorageBackend, StorageReadError};
 use wz_session_core::storage_config::StorageConfig;
 use wz_session_core::storage_state::StorageState;
 
@@ -188,13 +188,17 @@ where
         // is held RELATIVE to the mount point, and restored to its full keyexpr
         // on a query reply. Without the `storage-mgr-strip-prefix` feature the
         // prefix is ignored and keys are stored verbatim.
+        //
+        // R2800 — the gate hydrates from the backend's listing, and a backend
+        // that cannot list refuses the storage rather than hosting it over an
+        // empty record, as upstream's `create_and_start_storage` bails.
         #[cfg(feature = "storage-mgr-strip-prefix")]
-        let state: SharedState<B> = Arc::new(Mutex::new(StorageState::with_strip_prefix(
-            backend,
-            config.strip_prefix.clone(),
-        )));
+        let state = StorageState::with_strip_prefix(backend, config.strip_prefix.clone());
         #[cfg(not(feature = "storage-mgr-strip-prefix"))]
-        let state: SharedState<B> = Arc::new(Mutex::new(StorageState::new(backend)));
+        let state = StorageState::new(backend);
+        let state: SharedState<B> = Arc::new(Mutex::new(
+            state.map_err(StorageServiceError::BackendUnreadable)?,
+        ));
 
         // R2743 — a declaration the transport cannot carry leaves the storage
         // HOSTED AND UNBOUND rather than losing it. Only that one rejection is
@@ -425,6 +429,11 @@ pub enum StorageServiceError {
     /// `local_zid` was empty (the fallback timestamp needs a non-empty
     /// identity for its newer-wins zid tiebreak).
     InvalidZid,
+    /// R2800 — the backend could not list what it holds when the storage
+    /// opened, so the newer-wins record could not be hydrated and nothing is
+    /// hosted. Upstream refuses the storage at the same point
+    /// (`plugins/zenoh-plugin-storage-manager/src/storages_mgt/mod.rs` @ `failed with: {e:?}`).
+    BackendUnreadable(StorageReadError),
 }
 
 impl From<SubscribeError> for StorageServiceError {
@@ -454,7 +463,7 @@ mod tests {
     }
 
     fn fresh() -> StorageState<MemoryStorage> {
-        StorageState::new(MemoryStorage::new())
+        StorageState::new(MemoryStorage::new()).unwrap()
     }
 
     #[test]
@@ -547,7 +556,10 @@ mod tests {
         state.apply_sample(&sample, || {
             panic!("fallback must not run for a stamped sample")
         });
-        let stored = state.get(Some("demo/a")).expect("stored after put");
+        let stored = state
+            .get_newest(Some("demo/a"))
+            .unwrap()
+            .expect("stored after put");
         assert_eq!(stored.payload, vec![1, 2, 3]);
         assert_eq!(stored.timestamp, ts(10, 1));
     }
@@ -557,7 +569,10 @@ mod tests {
         let mut state = fresh();
         let sample = Sample::new_put("demo/a", vec![9]);
         state.apply_sample(&sample, || ts(7, 9));
-        let stored = state.get(Some("demo/a")).expect("stored after put");
+        let stored = state
+            .get_newest(Some("demo/a"))
+            .unwrap()
+            .expect("stored after put");
         assert_eq!(
             stored.timestamp,
             ts(7, 9),
@@ -576,7 +591,10 @@ mod tests {
             &Sample::new_del("demo/a").with_timestamp(ts(20, 1)),
             || unreachable!(),
         );
-        assert!(state.get(Some("demo/a")).is_none(), "del removed the value");
+        assert!(
+            state.get_newest(Some("demo/a")).unwrap().is_none(),
+            "del removed the value"
+        );
     }
 
     #[test]
@@ -593,12 +611,12 @@ mod tests {
             || unreachable!(),
         );
         assert_eq!(
-            state.get(Some("demo/a")).unwrap().payload,
+            state.get_newest(Some("demo/a")).unwrap().unwrap().payload,
             vec![9],
             "outdated put dropped"
         );
         assert_eq!(
-            state.get(Some("demo/a")).unwrap().timestamp,
+            state.get_newest(Some("demo/a")).unwrap().unwrap().timestamp,
             ts(100, 1),
             "newer value retained"
         );
@@ -697,7 +715,9 @@ mod tests {
 
         storage.with_state(|st| {
             assert_eq!(
-                st.get(Some("demo/a")).map(|d| d.payload.clone()),
+                st.get_newest(Some("demo/a"))
+                    .unwrap()
+                    .map(|d| d.payload.clone()),
                 Some(b"v1".to_vec()),
                 "the declared storage captured the loopback publish into the store"
             );
@@ -758,12 +778,12 @@ mod tests {
         // key on the live path, never under the full keyexpr.
         storage.with_state(|st| {
             assert_eq!(
-                st.get(Some("temp")).map(|d| d.payload.clone()),
+                st.get_newest(Some("temp")).unwrap().map(|d| d.payload),
                 Some(b"v1".to_vec()),
                 "the live capture stored the key RELATIVE to the mount"
             );
             assert!(
-                st.get(Some("home/kitchen/temp")).is_none(),
+                st.get_newest(Some("home/kitchen/temp")).unwrap().is_none(),
                 "the full keyexpr is not a stored key under strip"
             );
         });
@@ -806,7 +826,7 @@ mod tests {
 
         #[test]
         fn answer_query_replies_every_version_of_a_history_all_key() {
-            let mut state = StorageState::new(HistoryStorage::new());
+            let mut state = StorageState::new(HistoryStorage::new()).unwrap();
             // Three versions of one key (an older one arrives out of order).
             state.apply_sample(
                 &Sample::new_put("demo/a", vec![3]).with_timestamp(ts(30, 1)),
@@ -842,7 +862,7 @@ mod tests {
             // `reply_keyed_stamped`), which is what a foreign querier
             // actually receives. The three sibling tests here assert the
             // versions that ARE replied; this one pins the set that is not.
-            let mut state = StorageState::new(HistoryStorage::new());
+            let mut state = StorageState::new(HistoryStorage::new()).unwrap();
             state.apply_sample(
                 &Sample::new_put("demo/a", vec![3]).with_timestamp(ts(30, 1)),
                 || unreachable!(),
@@ -875,7 +895,7 @@ mod tests {
             // shadows what it deleted. Without this the previous test would
             // also pass on a backend that simply dropped every key it ever
             // saw a delete for.
-            let mut state = StorageState::new(HistoryStorage::new());
+            let mut state = StorageState::new(HistoryStorage::new()).unwrap();
             state.apply_sample(
                 &Sample::new_put("demo/a", vec![3]).with_timestamp(ts(30, 1)),
                 || unreachable!(),
@@ -904,7 +924,7 @@ mod tests {
             // Each version reply carries the timestamp that orders it AND the
             // stored value's encoding, so a querier gets the value back
             // exactly as published (zenoh .encoding(..).timestamp(..)).
-            let mut state = StorageState::new(HistoryStorage::new());
+            let mut state = StorageState::new(HistoryStorage::new()).unwrap();
             state.apply_sample(
                 &Sample::new_put("demo/a", vec![1])
                     .with_timestamp(ts(10, 1))

@@ -337,8 +337,9 @@ async fn wz_replica_converges_to_zenohd_storage_manager() {
     // ── The wz REPLICA store: a separate, empty StorageState. The wz session has
     //    NO capture subscriber on the storage keyexpr, so it gains the seeded
     //    entry only by pulling it back from zenohd through the aligner.
-    let replica: Arc<StdMutex<StorageState<MemoryStorage>>> =
-        Arc::new(StdMutex::new(StorageState::new(MemoryStorage::new())));
+    let replica: Arc<StdMutex<StorageState<MemoryStorage>>> = Arc::new(StdMutex::new(
+        StorageState::new(MemoryStorage::new()).unwrap(),
+    ));
 
     let observer = Arc::new(Mutex::new(ApplicationLayerObserver::new()));
     let session = TokioSession::new(opened.actions.clone(), observer, Arc::new(opened.clock));
@@ -370,9 +371,8 @@ async fn wz_replica_converges_to_zenohd_storage_manager() {
             // generous budget over zenohd's 1s digest interval.
             for _ in 0..400 {
                 {
-                    let guard = replica.lock().unwrap();
-                    if guard
-                        .get(Some(DATA_KEY))
+                    let held = replica.lock().unwrap().get_newest(Some(DATA_KEY)).unwrap();
+                    if held
                         .is_some_and(|s| String::from_utf8_lossy(&s.payload).contains(SEED_VALUE))
                     {
                         return;
@@ -393,7 +393,8 @@ async fn wz_replica_converges_to_zenohd_storage_manager() {
     //    the real zenoh replication aligner protocol.
     let guard = replica.lock().unwrap();
     let stored = guard
-        .get(Some(DATA_KEY))
+        .get_newest(Some(DATA_KEY))
+        .unwrap()
         .expect("wz replica converged: zenohd's entry is present");
     let got = String::from_utf8_lossy(&stored.payload);
     assert!(
@@ -478,8 +479,9 @@ async fn wz_replica_registers_wildcard_event_from_zenohd_storage_manager() {
     // ── The wz REPLICA store: a separate, empty StorageState with no capture
     //    subscriber, so it can only gain the wildcard update by pulling it off
     //    zenohd's aligner.
-    let replica: Arc<StdMutex<StorageState<MemoryStorage>>> =
-        Arc::new(StdMutex::new(StorageState::new(MemoryStorage::new())));
+    let replica: Arc<StdMutex<StorageState<MemoryStorage>>> = Arc::new(StdMutex::new(
+        StorageState::new(MemoryStorage::new()).unwrap(),
+    ));
 
     let observer = Arc::new(Mutex::new(ApplicationLayerObserver::new()));
     let session = TokioSession::new(opened.actions.clone(), observer, Arc::new(opened.clock));
@@ -659,8 +661,9 @@ async fn zenohd_converges_to_wz_replica() {
     // ── The wz SOURCE replica: a StorageState holding the entry zenohd lacks,
     //    stamped with a wall-clock NTP64 timestamp so it lands in a live era (a
     //    zenoh storage requires a timestamp).
-    let replica: Arc<StdMutex<StorageState<MemoryStorage>>> =
-        Arc::new(StdMutex::new(StorageState::new(MemoryStorage::new())));
+    let replica: Arc<StdMutex<StorageState<MemoryStorage>>> = Arc::new(StdMutex::new(
+        StorageState::new(MemoryStorage::new()).unwrap(),
+    ));
     replica
         .lock()
         .unwrap()
@@ -727,7 +730,8 @@ async fn zenohd_converges_to_wz_replica() {
     //    unchanged by answering an alignment query).
     let guard = replica.lock().unwrap();
     let stored = guard
-        .get(Some(WZ_DATA_KEY))
+        .get_newest(Some(WZ_DATA_KEY))
+        .unwrap()
         .expect("wz still holds its source entry after answering zenohd's alignment");
     assert_eq!(
         stored.payload,

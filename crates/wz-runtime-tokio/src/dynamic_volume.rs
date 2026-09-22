@@ -65,8 +65,8 @@ use std::sync::Arc;
 
 use wz_session_core::sample::{EncodingHint, TimestampHint};
 use wz_session_core::storage_backend::{
-    History, StorageBackend, StorageInsertionResult, StorageWriteError, StorageWriteResult,
-    StoredData,
+    History, StorageBackend, StorageInsertionResult, StorageReadError, StorageWriteError,
+    StorageWriteResult, StoredData,
 };
 use wz_session_core::storage_config::StorageConfig;
 use wz_session_core::storage_volume::{Capability, Persistence, Volume, VolumeError};
@@ -736,15 +736,26 @@ impl StorageBackend for DynamicStore {
         Ok(StorageInsertionResult::Deleted)
     }
 
-    fn get(&self, key: Option<&str>) -> Option<&StoredData> {
-        self.mirror.get(&key.map(String::from))
+    fn get(&self, key: Option<&str>) -> Result<Vec<StoredData>, StorageReadError> {
+        // R2800 — still served from the mirror, and that is this ABI's shape
+        // rather than the seam's: the volume vtable has a bulk `store_entries`
+        // and no per-key read, so the mirror is the only place a value can be
+        // read from. The seam hands out values now, so nothing ELSE requires
+        // one.
+        Ok(self
+            .mirror
+            .get(&key.map(String::from))
+            .cloned()
+            .into_iter()
+            .collect())
     }
 
-    fn get_all_entries(&self) -> Vec<(Option<String>, TimestampHint)> {
-        self.mirror
+    fn get_all_entries(&self) -> Result<Vec<(Option<String>, TimestampHint)>, StorageReadError> {
+        Ok(self
+            .mirror
             .iter()
             .map(|(k, v)| (k.clone(), v.timestamp.clone()))
-            .collect()
+            .collect())
     }
 
     fn history(&self) -> History {
@@ -980,14 +991,14 @@ mod tests {
                 StorageInsertionResult::Inserted
             );
             assert_eq!(
-                store.get(Some("a")).map(|d| d.payload.clone()),
+                store.get_newest(Some("a")).unwrap().map(|d| d.payload),
                 Some(b"v2".to_vec())
             );
             // Through the SEAM (`get_all_entries`) rather than the inherent
             // `len`, because `create_storage` hands back a
             // `Box<dyn StorageBackend + Send>` — which is also what the storage
             // service holds, so this is the count the service would see.
-            assert_eq!(store.get_all_entries().len(), 2);
+            assert_eq!(store.get_all_entries().unwrap().len(), 2);
         } // dropped: store_drop crosses the ABI, the files remain
 
         // A SECOND store over the same configured volume sees what the first
@@ -995,24 +1006,28 @@ mod tests {
         // dropped, and the mirror is rebuilt from `store_entries` alone.
         let store2 = vol.create_storage(&cfg).expect("re-create the store");
         assert_eq!(
-            store2.get(Some("a")).map(|d| d.payload.clone()),
+            store2.get_newest(Some("a")).unwrap().map(|d| d.payload),
             Some(b"v2".to_vec()),
             "the value crossed the ABI to disk and back through store_entries"
         );
         assert_eq!(
-            store2.get(None).map(|d| d.payload.clone()),
+            store2.get_newest(None).unwrap().map(|d| d.payload),
             Some(b"root".to_vec()),
             "the mount-root (None) slot round-trips as the null key, distinctly \
              from the empty-string key"
         );
         let keys: Vec<Option<String>> = store2
             .get_all_entries()
+            .unwrap()
             .into_iter()
             .map(|(k, _)| k)
             .collect();
         assert_eq!(keys, vec![None, Some(String::from("a"))]);
         assert_eq!(
-            store2.get(Some("a")).map(|d| d.timestamp.time),
+            store2
+                .get_newest(Some("a"))
+                .unwrap()
+                .map(|d| d.timestamp.time),
             Some(11),
             "the version timestamp round-trips, not just the payload"
         );
@@ -1047,7 +1062,10 @@ mod tests {
                 .unwrap();
         }
         let store2 = vol.create_storage(&cfg).expect("re-create");
-        let d = store2.get(Some("k")).expect("present after reload");
+        let d = store2
+            .get_newest(Some("k"))
+            .unwrap()
+            .expect("present after reload");
         assert_eq!(d.payload, b"body".to_vec());
         assert_eq!(d.timestamp.time, 0xDEAD_BEEF);
         assert_eq!(
@@ -1090,11 +1108,11 @@ mod tests {
         // would reappear here.
         let store2 = vol.create_storage(&cfg).expect("re-create");
         assert!(
-            store2.get(Some("a")).is_none(),
+            store2.get_newest(Some("a")).unwrap().is_none(),
             "the deleted key came back after a reload, so the delete never crossed \
              the ABI"
         );
-        assert!(store2.get_all_entries().is_empty());
+        assert!(store2.get_all_entries().unwrap().is_empty());
     }
 
     /// R311y831 — a volume that REFUSES a write. The claim is the seam's new
@@ -1127,7 +1145,7 @@ mod tests {
             "a write the volume rejected must be reported to the caller"
         );
         assert_eq!(
-            store.get(Some("a")).map(|d| d.payload.clone()),
+            store.get_newest(Some("a")).unwrap().map(|d| d.payload),
             Some(b"v1".to_vec()),
             "the store must keep serving what the volume actually holds"
         );
@@ -1136,7 +1154,7 @@ mod tests {
             "a refused new key is refused too"
         );
         assert!(
-            store.get(Some("b")).is_none(),
+            store.get_newest(Some("b")).unwrap().is_none(),
             "a key the volume never took must not be readable"
         );
     }

@@ -260,7 +260,10 @@ mod tests {
             StorageInsertionResult::Inserted
         );
         assert_eq!(
-            s1.get(Some("demo/a")).expect("present after put").payload,
+            s1.get_newest(Some("demo/a"))
+                .unwrap()
+                .expect("present after put")
+                .payload,
             vec![1, 2, 3]
         );
 
@@ -268,7 +271,7 @@ mod tests {
             .create_storage(&cfg)
             .expect("in-memory create never fails");
         assert!(
-            s2.get(Some("demo/a")).is_none(),
+            s2.get_newest(Some("demo/a")).unwrap().is_none(),
             "a second storage from the same volume is an independent instance"
         );
     }

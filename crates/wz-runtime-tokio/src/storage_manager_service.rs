@@ -1846,7 +1846,7 @@ mod tests {
         // CAPTURE leg (kept): kitchen stored the key RELATIVE to its mount.
         mgr.storage("kitchen").unwrap().with_state(|st| {
             assert_eq!(
-                st.get(Some("temp")).map(|d| d.payload.clone()),
+                st.get_newest(Some("temp")).unwrap().map(|d| d.payload),
                 Some(b"k".to_vec()),
                 "kitchen stored the key relative to its mount"
             );

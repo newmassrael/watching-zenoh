@@ -549,7 +549,10 @@ ROOTLESS_STALE_LINE_BUDGET = 1
 # the same way, for 5 more. The gate's refusal says "This commit ADDED one ...
 # give it its root", which is true of neither the commit nor the text; open
 # debt 799 holds what that costs a reader.
-ROOTLESS_UNDECLARED_BUDGET = 656
+# 656 -> 653 (R2800): three line-form citations of the backend-traits `get` /
+# `get_all_entries` signatures, re-anchored with their root on the lines that
+# declare them when the read seam took upstream's owned, fallible shape.
+ROOTLESS_UNDECLARED_BUDGET = 653
 #: EVERY root-less occurrence, graded or not: `rootless_line + rootless_bare +
 #: residue`. One ratchet over the union of the three above, and it exists
 #: because those three CANNOT express the invariant that matters.
@@ -609,7 +612,9 @@ ROOTLESS_UNDECLARED_BUDGET = 656
 # this pin, not under `zenoh-link-quic/src/`, so the old paths named a file the
 # pin does not have. ⚠ A root-less citation hides that: nothing resolves it, so
 # a path that has MOVED reads exactly like one that has not.
-ROOTLESS_TOTAL_BUDGET = 784
+# 784 -> 781 (R2800): the same three occurrences as the budget above, rooted
+# rather than retired, so they left the root-less population entirely.
+ROOTLESS_TOTAL_BUDGET = 781
 
 #: A LIVE invocation of the RESOLUTION arm. R2242 split this gate in two and,
 #: in doing so, made `--resolve` a flag someone can simply stop passing: delete
