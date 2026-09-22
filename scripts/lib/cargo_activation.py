@@ -1,7 +1,11 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: AGPL-3.0-or-later OR LicenseRef-watching-zenoh-Commercial
 # SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
-"""R2801 — which dependencies a build ACTIVATES, read off `cargo metadata`.
+"""R2801 (no register item) — which dependencies a build ACTIVATES, read off
+`cargo metadata`.
+
+The citation is `no register item` because the defect was found and closed in
+the same round, by the dependency that exposed it; no store row ever named it.
 
 ## The defect this exists for, measured
 
