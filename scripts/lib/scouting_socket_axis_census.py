@@ -115,6 +115,33 @@ VERDICTS: dict[str, tuple[str, str | None, str]] = {
         "because nothing else on the host holds <g> -- otherwise IP_MULTICAST_ALL, not "
         "the join, would deliver it.",
     ),
+    # R2792 — the two keys R2791 added to `McastSocketConfig`. They are derived
+    # here because this census reads every `pub` field, and it is right to stop
+    # on them: a field is a claim until judged. The judgement is that on the
+    # SCOUTING socket they are not movable at all, and the verdict says so rather
+    # than borrowing a kind it has not earned. `"one"` is not available: that kind
+    # is real DELIVERY or a WIRE observation (see `iface` and `ttl` above), and the
+    # nearest witness here reads socket state back from the kernel on one socket.
+    "bind": (
+        "none",
+        "the_commons_socket_keys_reach_the_multicast_sockets",
+        "R2792: NOT MOVABLE ON THE SCOUTING PLANE. Every scouting construction passes "
+        "`None` by judgement (`ScoutSocketArgs::as_socket_config`, `scouting_fanout`), "
+        "because upstream's scouting sockets belong to the orchestrator and read no "
+        "link locator; `bind` arrives only on the data-plane multicast socket, from "
+        "`--multicast-locator`. There its witness reads the bound local address back "
+        "from the kernel on ONE socket -- proof the bind happened, not an exchange "
+        "between two ends, so no end-to-end claim is made.",
+    ),
+    "dscp": (
+        "none",
+        "the_commons_socket_keys_reach_the_multicast_sockets",
+        "R2792: NOT MOVABLE ON THE SCOUTING PLANE, for the reason `bind` gives. On the "
+        "data-plane multicast sockets its witness reads `IP_TOS` back from the kernel "
+        "on BOTH constructors, asked and unasked -- proof the mark is set, but no "
+        "datagram carrying it is observed on the wire, which is what a one-ended "
+        "verdict would need (compare `ttl`'s IP_RECVTTL reader).",
+    ),
 }
 
 COVERED = {"both"}
