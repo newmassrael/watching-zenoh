@@ -708,14 +708,38 @@ mod admin_write_vocabulary_tests {
         // IGNORES still decodes as a config write, so the runtime answers
         // `NotHonoured` for it BY NAME. A predicate narrowed to "honoured"
         // would collapse this into "never heard of it" a crate earlier.
-        assert!(!crate::zenoh_config::honours_config_key("plugins"));
-        assert_eq!(
-            decode("plugins"),
-            AdminConfigWriteOutcome::Apply(AdminConfigWrite::SetKey {
-                key: String::from("plugins"),
-                value: String::from("x"),
-            })
+        //
+        // R2795 — held over the WHOLE set rather than one named member. This
+        // used to assert the case with the literal `plugins`, which was a member
+        // of that set when it was written. R2788 honoured `plugins` and moved it
+        // OUT, so the literal went on asserting "unhonoured" about a key that no
+        // longer was, and hosted Layer C1bn redded on it (runs 35689782333,
+        // 35691370231). The subject was never `plugins`; it was the set. Reading
+        // the set means honouring a key moves it out of this test's population
+        // instead of breaking it, and an EMPTY set fails here rather than
+        // leaving the middle case unwitnessed.
+        let unhonoured = crate::zenoh_config::UNHONOURED_UPSTREAM_CONFIG_KEYS;
+        assert!(
+            !unhonoured.is_empty(),
+            "the middle case needs at least one upstream key wz ignores; an empty \
+             set would leave it asserted about nothing"
         );
+        for &key in unhonoured {
+            assert!(
+                !crate::zenoh_config::honours_config_key(key),
+                "`{key}` is listed as unhonoured but wz honours it -- honouring a \
+                 key is a MOVE out of `UNHONOURED_UPSTREAM_CONFIG_KEYS`"
+            );
+            assert_eq!(
+                decode(key),
+                AdminConfigWriteOutcome::Apply(AdminConfigWrite::SetKey {
+                    key: String::from(key),
+                    value: String::from("x"),
+                }),
+                "`{key}` is carried upstream and ignored here, so a write to it must \
+                 decode as a config write the runtime can refuse by name"
+            );
+        }
 
         // (B) A TYPO of one of wz's verbs is in NEITHER vocabulary and keeps the
         // diagnosis R2644 pinned it for.
