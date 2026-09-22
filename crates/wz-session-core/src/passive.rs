@@ -131,9 +131,26 @@ pub enum SessionPhase {
 pub struct FlowContext {
     /// How far the session has progressed.
     pub phase: SessionPhase,
-    /// `LowLatency` (`0x5`) offered by BOTH sides. Once
-    /// [`SessionPhase::Established`], the stream prefix is 4 bytes.
+    /// `LowLatency` (`0x5`) offered by BOTH sides. Once a direction has
+    /// carried its own `Open`, THAT direction's stream prefix is 4 bytes —
+    /// see [`Self::open_seen`] for why the answer is not session-wide.
     pub lowlatency: bool,
+    /// Which directions have carried their own `Open`, indexed the way
+    /// `init_seen` is (`A` = 0, `B` = 1).
+    ///
+    /// R2789 (open debt 812) — the reframing is PER DIRECTION and this is the
+    /// field that makes it askable. Each side switches what it SENDS once it
+    /// has sent its own `Open`, so between `OpenSyn` and `OpenAck` the two
+    /// directions are on DIFFERENT widths. Taking the width from
+    /// [`Self::phase`] alone made the first `Open` widen both, and the peer's
+    /// still-narrow `OpenAck` was then read as a 4-byte length: a consumer
+    /// reported a 15-payload lean capture whose field document held 3, and the
+    /// witness reproduces it as `OversizeLength { claimed_len: 2418147332 }`.
+    ///
+    /// It lives on the CONTEXT rather than beside `init_seen` on the session
+    /// because it is not only a fold guard: it is state a reader of a frame
+    /// needs in order to ask the width question at all.
+    pub open_seen: [bool; 2],
     /// `Compression` (`0x6`) offered by BOTH sides. Once established, frame
     /// bodies are lz4-wrapped batches.
     pub compression: bool,
@@ -185,6 +202,10 @@ impl Default for FlowContext {
             // The `phase` guard below is what keeps an un-negotiated `true`
             // from ever being READ as a negotiated one.
             lowlatency: true,
+            // NOT the `true`-then-AND-down shape above: a direction has
+            // carried an Open or it has not, and nothing observed later can
+            // make that false.
+            open_seen: [false; 2],
             compression: true,
             qos: true,
             patch: None,
@@ -206,17 +227,28 @@ impl FlowContext {
     /// Established"). A handshake frame on a lowlatency-bound session is still
     /// 2-byte-prefixed, so an observer that flipped at Init would mis-frame
     /// the Open exchange.
-    pub fn prefix_width(&self) -> usize {
-        if self.lowlatency_active() {
+    /// The stream prefix width to read `direction` at, right now.
+    ///
+    /// R2789 (open debt 812) — takes a direction because the answer differs
+    /// between them for the whole `OpenSyn`..`OpenAck` window.
+    pub fn prefix_width(&self, direction: Direction) -> usize {
+        if self.lowlatency_active(direction) {
             PREFIX_WIDTH_LOWLATENCY
         } else {
             PREFIX_WIDTH_UNIVERSAL
         }
     }
 
-    /// Lowlatency is NEGOTIATED and IN FORCE.
-    pub fn lowlatency_active(&self) -> bool {
-        self.negotiated() && self.lowlatency && self.phase == SessionPhase::Established
+    /// Lowlatency is NEGOTIATED and IN FORCE **for `direction`**.
+    ///
+    /// The first three terms are the session's; the fourth is why this takes
+    /// an argument at all ([`Self::open_seen`]). A direction reads lean once
+    /// it has carried its OWN `Open`, not once the session has seen one.
+    pub fn lowlatency_active(&self, direction: Direction) -> bool {
+        self.negotiated()
+            && self.lowlatency
+            && self.phase == SessionPhase::Established
+            && self.open_seen[usize::from(direction == Direction::B)]
     }
 
     /// Compression is NEGOTIATED and IN FORCE — frame bodies are wrapped.
@@ -1363,7 +1395,7 @@ impl PassiveSession {
         if let Some(frame) = self.pending[usize::from(direction == Direction::B)].pop_front() {
             return Ok(frame);
         }
-        let width = self.context.prefix_width();
+        let width = self.context.prefix_width(direction);
         let depth = self.resync_depth;
         let stream = self.stream_mut(direction);
 
@@ -2035,6 +2067,11 @@ impl PassiveSession {
                 };
             }
             InboundFrame::Open { .. } => {
+                // R2789 (open debt 812) — the DIRECTION's own transition. The
+                // phase below is the session's and still moves on the first
+                // Open; the width does not, because the peer is still narrow
+                // until it carries its own.
+                self.context.open_seen[usize::from(direction == Direction::B)] = true;
                 if self.context.phase == SessionPhase::InitComplete {
                     self.context.phase = SessionPhase::Established;
                 }
@@ -2433,6 +2470,12 @@ mod tests {
     /// and the post-Open frame at width 4 without being told. An observer that
     /// flipped at Init would mis-frame the Open; one that never flipped would
     /// mis-frame everything after it.
+    ///
+    /// ⚠ R2789 (open debt 812) — this test feeds ONE direction past the Open,
+    /// so on its own it cannot tell a per-direction flip from a session-wide
+    /// one, and it stayed green for months while the session-wide one was
+    /// wrong. The sibling below feeds the `OpenAck` and is the one that grades
+    /// that; the `Direction::B` line added here is this test's own half.
     #[test]
     fn a_lowlatency_session_reframes_at_established_and_not_before() {
         let ll = || vec![unit_ext(est_ext::LOWLATENCY)];
@@ -2452,10 +2495,10 @@ mod tests {
         assert_eq!(f.context.phase, SessionPhase::InitComplete);
         assert!(f.context.lowlatency, "both sides offered 0x5");
         assert!(
-            !f.context.lowlatency_active(),
+            !f.context.lowlatency_active(Direction::A),
             "negotiated is not yet IN FORCE — the Open still rides the 2-byte prefix"
         );
-        assert_eq!(f.context.prefix_width(), PREFIX_WIDTH_UNIVERSAL);
+        assert_eq!(f.context.prefix_width(Direction::A), PREFIX_WIDTH_UNIVERSAL);
 
         let f = s.next_frame(Direction::A).expect("OpenSyn");
         assert_eq!(
@@ -2463,7 +2506,17 @@ mod tests {
             "the Open itself was framed under the OLD width"
         );
         assert_eq!(f.context.phase, SessionPhase::Established);
-        assert!(f.context.lowlatency_active(), "in force from here");
+        assert!(
+            f.context.lowlatency_active(Direction::A),
+            "in force from here — for A, which just carried its Open"
+        );
+        // R2789 (open debt 812) — and NOT for B, which has not. The sibling
+        // test below feeds B's `OpenAck` and reads past it; this line is the
+        // half of that fact this test can hold on its own.
+        assert!(
+            !f.context.lowlatency_active(Direction::B),
+            "B has not carried its own Open, so B is still narrow"
+        );
 
         // From here the wire is 4-byte prefixed. A KeepAlive is the smallest
         // post-establishment frame that decodes.
@@ -2477,6 +2530,71 @@ mod tests {
             "the observer followed the reframing with no caller involvement"
         );
         assert!(f.frame.is_ok(), "and the body still decodes: {:?}", f.frame);
+    }
+
+    /// The sibling above feeds ONE direction past the Open, so it cannot see
+    /// the half this one is about: the reframing is PER DIRECTION, and the
+    /// peer's `OpenAck` is still narrow when the first `Open` has already
+    /// gone by.
+    ///
+    /// A consumer reported it from the wire: a negotiated lean capture carries
+    /// 15 TCP payloads — 4 handshake at a 2-byte prefix, then 11 lean at 4 —
+    /// and the field document stopped at 3. Each side switches what it SENDS
+    /// after it has sent its own `Open`, so an observer that takes the width
+    /// from one session-wide phase reads the other direction's `OpenAck`,
+    /// which is still 2-byte framed, as if it were 4.
+    #[test]
+    fn a_lean_link_reframes_per_direction_so_the_openack_is_still_narrow() {
+        let ll = || vec![unit_ext(est_ext::LOWLATENCY)];
+        let mut s = PassiveSession::new();
+
+        // The whole handshake is 2-byte framed on BOTH sides — including the
+        // `OpenAck`, which is the frame the sibling test never feeds.
+        s.push(Direction::A, &framed(&init_wire(false, ll()), 2));
+        s.push(Direction::B, &framed(&init_wire(true, ll()), 2));
+        s.push(Direction::A, &framed(&open_wire(false), 2));
+        s.push(Direction::B, &framed(&open_wire(true), 2));
+
+        let _ = s.next_frame(Direction::A).expect("InitSyn");
+        let _ = s.next_frame(Direction::B).expect("InitAck");
+
+        let f = s.next_frame(Direction::A).expect("OpenSyn");
+        assert_eq!(
+            f.prefix_width, PREFIX_WIDTH_UNIVERSAL,
+            "the Open itself rides the old width"
+        );
+
+        // THE CASE. A has carried its own Open; B has not. B's bytes are still
+        // narrow, and an observer that flipped the whole session at A's Open
+        // reads this length field four bytes wide.
+        let f = s
+            .next_frame(Direction::B)
+            .expect("OpenAck — still 2-byte framed because B has not opened yet");
+        assert_eq!(
+            f.prefix_width, PREFIX_WIDTH_UNIVERSAL,
+            "B had not carried its own Open, so B is still narrow"
+        );
+        assert!(
+            matches!(f.frame, Ok(InboundFrame::Open { .. })),
+            "and it decodes as the Open it is: {:?}",
+            f.frame
+        );
+
+        // From here BOTH directions are lean, each on its own account.
+        let ka = vec![wz_codecs::wire_const::T_MID_KEEP_ALIVE];
+        s.push(Direction::A, &framed(&ka, 4));
+        s.push(Direction::B, &framed(&ka, 4));
+
+        let fa = s.next_frame(Direction::A).expect("A lean");
+        assert_eq!(fa.prefix_width, PREFIX_WIDTH_LOWLATENCY);
+        assert!(fa.frame.is_ok(), "A body decodes: {:?}", fa.frame);
+
+        let fb = s.next_frame(Direction::B).expect("B lean");
+        assert_eq!(
+            fb.prefix_width, PREFIX_WIDTH_LOWLATENCY,
+            "B went lean at its OWN Open, not at A's"
+        );
+        assert!(fb.frame.is_ok(), "B body decodes: {:?}", fb.frame);
     }
 
     /// The negative arm: without the `0x5` offer on BOTH sides the width never
@@ -2499,7 +2617,7 @@ mod tests {
             let ctx = s.context();
             assert_eq!(ctx.phase, SessionPhase::Established);
             assert!(!ctx.lowlatency, "an AND over a missing offer is false");
-            assert_eq!(ctx.prefix_width(), PREFIX_WIDTH_UNIVERSAL);
+            assert_eq!(ctx.prefix_width(Direction::A), PREFIX_WIDTH_UNIVERSAL);
         }
     }
 
@@ -2565,7 +2683,11 @@ mod tests {
         for dir in [Direction::A, Direction::B, Direction::A] {
             s.next_frame(dir).expect("handshake decodes");
         }
-        assert_eq!(s.context().prefix_width(), PREFIX_WIDTH_LOWLATENCY);
+        assert_eq!(
+            s.context().prefix_width(Direction::A),
+            PREFIX_WIDTH_LOWLATENCY,
+            "A carried the Open, so A is the direction that went lean"
+        );
 
         // 0x00FF_FFFF = 16 MiB, well past the batch ceiling.
         s.push(Direction::A, &[0xFF, 0xFF, 0xFF, 0x00]);
@@ -2604,9 +2726,15 @@ mod tests {
             "and it is counted once"
         );
         // ...and the OTHER direction is untouched: desync is per-stream.
+        //
+        // R2789 (open debt 812) — framed at 2, not 4. Only A carried an Open
+        // above, so only A went lean; B is still narrow. This fixture said 4
+        // because the width used to come from one session-wide phase, and the
+        // old premise was baked in HERE as much as in the code — which is why
+        // repairing the code turned this line red.
         s.push(
             Direction::B,
-            &framed(&[wz_codecs::wire_const::T_MID_KEEP_ALIVE], 4),
+            &framed(&[wz_codecs::wire_const::T_MID_KEEP_ALIVE], 2),
         );
         assert!(
             s.next_frame(Direction::B).is_ok(),
