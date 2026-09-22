@@ -18,8 +18,10 @@
 //! payload bytes -- and the two things a raw file cannot carry, the value's
 //! encoding and the timestamp that versioned it, live in the `.zenoh_datainfo`
 //! sidecar ([`crate::filesystem_datainfo`]). Every read goes to the directory:
-//! [`get`](StorageBackend::get) opens the key's file, and
-//! [`get_all_entries`](StorageBackend::get_all_entries) walks the tree. That is
+//! [`get`](wz_session_core::storage_backend::StorageBackend::get) opens the
+//! key's file, and
+//! [`get_all_entries`](wz_session_core::storage_backend::StorageBackend::get_all_entries)
+//! walks the tree. That is
 //! upstream's backend, and it makes the directory a mirror of the key space in
 //! BOTH directions: a file an operator drops into the tree is a value this
 //! storage serves (encoding guessed from its extension, timestamp from its
@@ -44,7 +46,8 @@
 //! Upstream creates the key's file in place and writes into it; its create
 //! truncates first, so a crash mid-write loses the previous value, and nothing
 //! in that repository fsyncs. wz writes the payload to a file in its staging
-//! directory ([`STAGING_DIR`]), `fsync`s it, `rename`s it over the key's path,
+//! directory ([`STAGING_DIR`](crate::filesystem_keypath::STAGING_DIR)), `fsync`s
+//! it, `rename`s it over the key's path,
 //! and `fsync`s the directory that now names it -- so the key's path only ever
 //! names a complete value, and a committed mutation survives a power loss. The
 //! sidecar's rows are written with `sync` for the same reason. A directory this

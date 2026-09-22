@@ -11080,6 +11080,18 @@ layer_c1bz_docs_resolve() {
 # storage_config.rs now carries a non-doc `//` note above its `use` block
     # recording WHY every link in its `//!` is a full path, so the next author
     # does not re-earn the upward arm.
+    # R2801 — wz-runtime-tokio 518 -> 507, and the COUNT alone would have hidden
+    # half of it. The fs backend's rewrite retired ten broken links with the
+    # code they described (`CORRUPT_SUFFIX`, `Unpersisted`, the old seam's
+    # `put`/`delete`, ...) and ADDED five in the new `//!` docs -- `ROOT_KEY`,
+    # `STAGING_DIR` twice, `is_listable_key`, `StorageBackend::get_all_entries`,
+    # each unresolved because a module's inner doc resolves from the crate
+    # root, R2800's lesson. The lane read 513 against 518 and asked only for a
+    # lower budget; the sorted error SETS of `cargo doc -p wz-runtime-tokio
+    # --no-deps --all-features` at 6eef774d and at this tip showed the five
+    # additions, which are fixed with full paths, together with the one older
+    # `StorageBackend::get` link in the same sentence. Diffed again after the
+    # fix: eleven removals, zero additions, 507.
     budget="
         wz:2
         wz-ap-demo:26
@@ -11090,7 +11102,7 @@ layer_c1bz_docs_resolve() {
         wz-mcu-session-acceptor:4
         wz-routing-graph:6
         wz-runtime-coop:12
-        wz-runtime-tokio:518
+        wz-runtime-tokio:507
         wz-session-core:531
         wz-session-lwip:4
         wz-switchboard-codegen:8

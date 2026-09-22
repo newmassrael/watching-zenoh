@@ -47,10 +47,13 @@
 //! `commons/zenoh-keyexpr/src/key_expr/borrowed.rs` @ `impl<'a> TryFrom<&'a str> for &'a keyexpr {`
 //! -- AND that key intersects `**`. The second test is not a formality: `**`
 //! never reaches a chunk that begins with `@` (a VERBATIM chunk), which is what
-//! keeps [`ROOT_KEY`] out of the listing, and what lets this backend keep its
-//! own staging area ([`STAGING_DIR`]) inside the tree without either
-//! implementation reading it back as data. [`is_listable_key`] is the two
-//! tests together.
+//! keeps [`ROOT_KEY`](crate::filesystem_keypath::ROOT_KEY) out of the listing,
+//! and what lets this backend keep its own staging area
+//! ([`STAGING_DIR`](crate::filesystem_keypath::STAGING_DIR)) inside the tree
+//! without either implementation reading it back as data.
+//! [`is_listable_key`](crate::filesystem_keypath::is_listable_key) is the two
+//! tests together. (Full paths because a `//!` link resolves from the crate
+//! root, where none of the three is in scope -- R2800's lesson, paid again.)
 
 use std::borrow::Cow;
 
