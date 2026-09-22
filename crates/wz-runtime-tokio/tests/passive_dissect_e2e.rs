@@ -244,8 +244,8 @@ async fn a_tapped_handshake_replays_through_the_passive_tracker() {
         "patch 1 arms the Fragment chain-boundary rules for anything reading this flow"
     );
     assert!(
-        !ctx.lowlatency_active(),
-        "neither fixture offers lowlatency, so the stream never reframes"
+        !ctx.lowlatency_active(Direction::A) && !ctx.lowlatency_active(Direction::B),
+        "neither fixture offers lowlatency, so NEITHER direction ever reframes"
     );
     assert!(!ctx.compression_active());
 }
@@ -333,7 +333,9 @@ async fn a_one_sided_capture_does_not_claim_a_negotiation() {
         "the capabilities must not read as negotiated off one side"
     );
     assert!(
-        !ctx.lowlatency_active() && !ctx.compression_active(),
+        !ctx.lowlatency_active(Direction::A)
+            && !ctx.lowlatency_active(Direction::B)
+            && !ctx.compression_active(),
         "an un-negotiated capability is never IN FORCE, whatever the fold holds"
     );
     // The patch level IS readable from one side — it is an announcement, and
