@@ -7319,6 +7319,40 @@ impl ScoutSocketArgs {
             None => (default_group, default_port),
         }
     }
+
+    /// R2791 — this struct as the socket-facing config, so the scouting plane
+    /// converts in ONE place instead of four hand-written literals.
+    ///
+    /// The four `runner.rs` callers each spelled the same three fields inline.
+    /// That is the shape this round repaired one seam away: a hand conversion
+    /// is free to read some of its source's fields and drop the rest, and the
+    /// dropped ones look like keys nobody asked for. Consolidating removes the
+    /// chance rather than documenting it.
+    ///
+    /// `bind` and `dscp` are `None` by JUDGEMENT, and spelled out rather than
+    /// left to `..Default::default()`. A scouting socket is not built from a
+    /// link locator, so no endpoint config carries either key, and upstream's
+    /// counterpart reads neither -- its scouting sockets are the runtime
+    /// orchestrator's rather than a udp link's. Writing them means the next key
+    /// added to `McastSocketConfig` must be judged HERE, where a `..Default`
+    /// would have it arrive silently as `None`.
+    ///
+    /// Gated on the UNION of its four consumers, derived from their own
+    /// attributes (`scouting-active`, `scouting-responder`, and an
+    /// `all(scouting-active, routing-peer)` that the first already covers)
+    /// rather than copied from `group_and_port` above: that one also carries an
+    /// `all(test, zenoh-config)` arm, for a test this method has no counterpart
+    /// to, and matching it would leave this dead code in exactly that build.
+    #[cfg(any(feature = "scouting-active", feature = "scouting-responder"))]
+    pub(crate) fn as_socket_config(&self) -> wz::runtime_tokio::McastSocketConfig<'_> {
+        wz::runtime_tokio::McastSocketConfig {
+            iface: self.interface.as_deref(),
+            ttl: self.ttl,
+            extra_joins: &[],
+            bind: None,
+            dscp: None,
+        }
+    }
 }
 
 /// Parse the three `--scout-*` socket flags.

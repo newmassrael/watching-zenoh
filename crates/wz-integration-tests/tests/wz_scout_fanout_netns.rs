@@ -84,10 +84,15 @@ async fn the_fan_out_reaches_an_interface_the_default_route_does_not() {
     let mut rx = UdpDriver::bind_multicast(
         GROUP,
         PORT,
+        // R2791 — `bind` and `dscp` are `None` deliberately: this receiver is
+        // pinned by interface, and the two keys belong to a link locator that
+        // no scouting socket is built from.
         McastSocketConfig {
             iface: Some(HOST_ADDR),
             ttl: None,
             extra_joins: &[],
+            bind: None,
+            dscp: None,
         },
     )
     .await

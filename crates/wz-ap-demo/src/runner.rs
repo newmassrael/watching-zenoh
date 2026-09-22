@@ -953,22 +953,16 @@ pub(crate) async fn scout_for_peer_locator(
     // segment was beaconing wherever the routing table chose, with no way to
     // say otherwise. `--multicast-locator` still narrows the DATA-plane group;
     // this narrows the DISCOVERY one.
-    let mut driver = UdpDriver::bind_multicast(
-        group,
-        port,
-        wz::runtime_tokio::McastSocketConfig {
-            iface: socket.interface.as_deref(),
-            ttl: socket.ttl,
-            extra_joins: &[],
-        },
-    )
-    .await
-    .map_err(|e| {
-        io::Error::new(
-            e.kind(),
-            format!("wz-ap-demo: --scout could not join the scouting group {group}:{port}: {e}"),
-        )
-    })?;
+    let mut driver = UdpDriver::bind_multicast(group, port, socket.as_socket_config())
+        .await
+        .map_err(|e| {
+            io::Error::new(
+                e.kind(),
+                format!(
+                    "wz-ap-demo: --scout could not join the scouting group {group}:{port}: {e}"
+                ),
+            )
+        })?;
     // The Scout announces the identity this node will open its session with, so
     // a responder logging the scouter sees the same zid the InitSyn then
     // carries. `--zid` therefore reaches here, not only the session params.
@@ -1112,25 +1106,17 @@ pub(crate) async fn spawn_scouting_responder(
     use wz::runtime_tokio::UdpDriver;
 
     let (group, port) = socket.group_and_port(SCOUT_GROUP, SCOUT_PORT);
-    let driver = UdpDriver::bind_multicast(
-        group,
-        port,
-        wz::runtime_tokio::McastSocketConfig {
-            iface: socket.interface.as_deref(),
-            ttl: socket.ttl,
-            extra_joins: &[],
-        },
-    )
-    .await
-    .map_err(|e| {
-        io::Error::new(
-            e.kind(),
-            format!(
-                "wz-ap-demo: --scout-listen could not join the scouting group \
+    let driver = UdpDriver::bind_multicast(group, port, socket.as_socket_config())
+        .await
+        .map_err(|e| {
+            io::Error::new(
+                e.kind(),
+                format!(
+                    "wz-ap-demo: --scout-listen could not join the scouting group \
                  {group}:{port}: {e}"
-            ),
-        )
-    })?;
+                ),
+            )
+        })?;
     let identity =
         ResponderIdentity::try_new(DEMO_PROTO_VERSION, whatami, zid.to_vec(), locators.clone())
             .map_err(|e| {
@@ -1283,25 +1269,17 @@ async fn spawn_scouting_autoconnect(
     use wz::runtime_tokio::UdpDriver;
 
     let (group, port) = args.socket.group_and_port(SCOUT_GROUP, SCOUT_PORT);
-    let mut driver = UdpDriver::bind_multicast_tx(
-        group,
-        port,
-        wz::runtime_tokio::McastSocketConfig {
-            iface: args.socket.interface.as_deref(),
-            ttl: args.socket.ttl,
-            extra_joins: &[],
-        },
-    )
-    .await
-    .map_err(|e| {
-        io::Error::new(
-            e.kind(),
-            format!(
-                "wz-ap-demo: --scout-autoconnect could not open a scouting sender \
+    let mut driver = UdpDriver::bind_multicast_tx(group, port, args.socket.as_socket_config())
+        .await
+        .map_err(|e| {
+            io::Error::new(
+                e.kind(),
+                format!(
+                    "wz-ap-demo: --scout-autoconnect could not open a scouting sender \
                  for {group}:{port}: {e}"
-            ),
-        )
-    })?;
+                ),
+            )
+        })?;
 
     let policy = AutoConnect::with_strategies(Zid::from_slice(zid), args.matcher, args.strategy);
     let actions = ScoutingActions::new(ScoutParams {
@@ -2751,25 +2729,18 @@ async fn install_rescout_plan(
         return Ok(());
     };
     let (group, port) = plan.socket.group_and_port(SCOUT_GROUP, SCOUT_PORT);
-    let driver = wz::runtime_tokio::UdpDriver::bind_multicast(
-        group,
-        port,
-        wz::runtime_tokio::McastSocketConfig {
-            iface: plan.socket.interface.as_deref(),
-            ttl: plan.socket.ttl,
-            extra_joins: &[],
-        },
-    )
-    .await
-    .map_err(|e| {
-        io::Error::new(
-            e.kind(),
-            format!(
-                "wz-ap-demo: --scout --reconnect could not hold the scouting \
+    let driver =
+        wz::runtime_tokio::UdpDriver::bind_multicast(group, port, plan.socket.as_socket_config())
+            .await
+            .map_err(|e| {
+                io::Error::new(
+                    e.kind(),
+                    format!(
+                        "wz-ap-demo: --scout --reconnect could not hold the scouting \
                  group {group}:{port} for re-scouting: {e}"
-            ),
-        )
-    })?;
+                    ),
+                )
+            })?;
     recon.set_targets(std::sync::Arc::new(ScoutedGroup::new(
         driver,
         ScoutParams {
