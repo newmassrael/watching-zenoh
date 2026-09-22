@@ -1409,6 +1409,13 @@ pub extern "C" fn wz_capi_c_abi_version() -> i32 {
 /// R2797 moves it to 2: [`wz_capi_c_config_disposition`] is a new door, and a
 /// new door under the old revision is a library whose version cannot answer
 /// the only question a new door raises.
+///
+/// ⚠ R2799 — AND IT STILL DOES NOT ANSWER "IS DOOR X HERE". A consumer read
+/// the header's pair check as a feature probe, which it is not: `== N` refuses
+/// a later library that still has the door, `>= N` survives a removal, and
+/// neither observes anything. A single door is tested by RESOLVING ITS SYMBOL;
+/// this number is what EXPLAINS an absence afterwards. The header block carries
+/// the full argument, because the caller who needs it is reading C.
 pub const WZ_CAPI_C_ABI_REVISION: i32 = 2;
 
 /// Report this build's footprints — the drop-in's half of the layout gate.

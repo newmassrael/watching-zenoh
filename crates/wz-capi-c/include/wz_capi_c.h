@@ -75,9 +75,33 @@ extern "C" {
  * Starts at 1: this door set had no revision before R2301, so there is
  * no earlier number to be compatible with.
  *
- * `capi_c_abi_pin.py` is what keeps it honest. It reads the symbol set
- * out of the BUILT library and the number by CALLING it, so a symbol
- * added without moving this number is red rather than shipped.
+ * ⚠ THIS PAIR IS NOT A FEATURE PROBE, and the check above is the wrong
+ * shape for "does this library have door X". A consumer asked exactly
+ * that (R2799), reasonably, because nothing here said otherwise.
+ *
+ * To test for ONE door, RESOLVE THE SYMBOL -- dlsym, or a weak
+ * reference -- and branch on that. It observes the artifact; a number
+ * only DECLARES something about it, and the two come apart:
+ *
+ *   - `== N` refuses a later library that still has the door, because
+ *     the revision moves on any symbol-set change;
+ *   - `>= N` is not a guarantee either, since a REMOVAL is an ABI event
+ *     too and leaves the number above N;
+ *   - neither actually asks the question.
+ *
+ * Use the revision to EXPLAIN an absence, not to predict a presence:
+ * on a failed lookup, report the number so the message reads "library
+ * reports revision 1; that door arrives at 2" instead of a bare missing
+ * symbol. Resolve wz_capi_c_abi_version itself before calling it on
+ * that path -- a library old enough to lack a door may predate the
+ * version door as well, and a probe that crashes while diagnosing is
+ * worse than the gap it was diagnosing.
+ *
+ * `capi_c_abi_pin.py` is what keeps it honest, and it is the worked
+ * example of the paragraph above: it reads the symbol SET out of the
+ * BUILT library and the number by CALLING it, holding the two against
+ * each other rather than inferring one from the other. A symbol added
+ * without moving this number is red rather than shipped.
  * ------------------------------------------------------------------ */
 
 #define WZ_CAPI_C_ABI_REVISION 2
