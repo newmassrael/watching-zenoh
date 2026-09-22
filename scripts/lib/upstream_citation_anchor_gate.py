@@ -552,7 +552,10 @@ ROOTLESS_STALE_LINE_BUDGET = 1
 # 656 -> 653 (R2800): three line-form citations of the backend-traits `get` /
 # `get_all_entries` signatures, re-anchored with their root on the lines that
 # declare them when the read seam took upstream's owned, fallible shape.
-ROOTLESS_UNDECLARED_BUDGET = 653
+# 653 -> 652 (R2801): the old filesystem backend's module doc cited the storage
+# manager's service module by a root-less line range; the doc went with the
+# backend it described, and the rewrite states that fact by symbol instead.
+ROOTLESS_UNDECLARED_BUDGET = 652
 #: EVERY root-less occurrence, graded or not: `rootless_line + rootless_bare +
 #: residue`. One ratchet over the union of the three above, and it exists
 #: because those three CANNOT express the invariant that matters.
@@ -614,7 +617,9 @@ ROOTLESS_UNDECLARED_BUDGET = 653
 # a path that has MOVED reads exactly like one that has not.
 # 784 -> 781 (R2800): the same three occurrences as the budget above, rooted
 # rather than retired, so they left the root-less population entirely.
-ROOTLESS_TOTAL_BUDGET = 781
+# 781 -> 780 (R2801): the same single occurrence as the budget above, retired
+# with the doc that carried it.
+ROOTLESS_TOTAL_BUDGET = 780
 
 #: A LIVE invocation of the RESOLUTION arm. R2242 split this gate in two and,
 #: in doing so, made `--resolve` a flag someone can simply stop passing: delete
