@@ -2023,7 +2023,20 @@ PIN_NO_SYMBOL = 2
 # DERIVED with this module's own `citation_audit` over that atom alone, before
 # and after: (wz 5, ambiguous 0) -> (wz 8, ambiguous 0). ATTRIBUTED by the
 # arithmetic: 83 + 3 = 86, the census's own FAIL line, so no other atom moves.
-PIN_WZ_CITATIONS = 86
+#
+# R2801 — 86 -> 90, RISING: `storage-backend-filesystem` stays PARTIAL and
+# gains four wz citations in the clause recording that the backend IS the
+# directory tree now: the key's path (`filesystem_storage.rs` @ `fn
+# key_path(&self, key: Option<&str>) -> Option<PathBuf> {`), the listing's
+# admission rule (`filesystem_keypath.rs` @ `pub fn is_listable_key(zkey:
+# &str) -> bool {`), upstream's row (`filesystem_datainfo.rs` @ `pub fn
+# encode(info: &DataInfo) -> Result<Vec<u8>, DataInfoError> {`) and the weak
+# hold (`storage_gc_service.rs` @ `let storage = Arc::downgrade(&state);`).
+# DERIVED with this module's own `citation_audit` over that atom alone, before
+# and after: (wz 8, ambiguous 0) -> (wz 12, ambiguous 0). ATTRIBUTED by the
+# arithmetic: 86 + 4 = 90, the census's own FAIL line, so no other atom moves.
+# Caught by pre-push gate 2z on the first push of R2801, which landed nothing.
+PIN_WZ_CITATIONS = 90
 # R2626 — 44 -> 42, and this one is worth a sentence because it HELD through
 # every earlier retirement in this run (R2612, R2622). `time-hlc`'s reason is the
 # first retiree carrying AMBIGUOUS citations of its own: its oldest clauses cite
