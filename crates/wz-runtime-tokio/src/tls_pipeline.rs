@@ -50,7 +50,7 @@ use crate::stream_link::{
     StreamWriteDriver,
 };
 use crate::writer_queue::WriterHandle;
-use wz_session_core::link::InterceptorLink;
+use wz_session_core::link::LinkKind;
 
 /// Inbound read driver of a split [`TlsStream`] — the TLS instantiation of the
 /// shared [`StreamReadDriver`]. The framing / [`crate::LinkDriver`] impl lives
@@ -147,14 +147,14 @@ pub fn wire_tls_stream(
     // UNCONDITIONALLY, unlike the expiry, because no config key gates whether a
     // rule may name a peer — the deadline is opt-in behaviour, the identity is
     // just what the link knows about itself.
-    let subject = ip_link_subject(InterceptorLink::Tls, stream.get_ref().0.local_addr().ok())
+    let subject = ip_link_subject(LinkKind::Tls, stream.get_ref().0.local_addr().ok())
         .with_cert_common_name(crate::stream_link::peer_chain_common_name(
             stream.get_ref().1.peer_certificates(),
         ));
     // R311y473 — the adminspace `{src,dst}` pair, read off the same wrapped TCP
     // socket and in the same before-the-split window as the subject above.
     let endpoints = crate::link_interfaces::ip_link_endpoints(
-        InterceptorLink::Tls,
+        LinkKind::Tls,
         stream.get_ref().0.local_addr().ok(),
         stream.get_ref().0.peer_addr().ok(),
     );

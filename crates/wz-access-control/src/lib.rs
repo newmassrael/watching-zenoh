@@ -1143,7 +1143,7 @@ mod tests {
     /// a decision made through it is decided by that axis alone.
     fn link_named(cert_common_name: Option<&str>) -> LinkSubject {
         LinkSubject {
-            protocol: None,
+            kind: None,
             interfaces: None,
             cert_common_name: cert_common_name.map(str::to_string),
         }

@@ -64,8 +64,8 @@ use crate::quic_pipeline::{accept_quic_connection, connect_quic_client, quic_ser
 use crate::writer_queue::{OutboundQueue, WriterHandle};
 use crate::{LinkDriver, LinkEvent, LostCause, Reliability, RxFrame, TxFrame};
 use wz_session_core::link::BoxedLinkDriver;
-use wz_session_core::link::{InterceptorLink, LinkEndpoints, LinkSubject};
 use wz_session_core::link::{LinkDropCause, LinkSendOutcome};
+use wz_session_core::link::{LinkEndpoints, LinkKind, LinkSubject};
 
 /// Conservative per-datagram MTU floor used when the connection has not yet
 /// reported a negotiated `max_datagram_size` (the QUIC initial datagram budget
@@ -368,12 +368,12 @@ pub fn wire_quic_datagram(
     // path and end-of-file, never for whether the line supports the claim), not
     // a side effect this round should smuggle in. Measured both ways: the
     // residue is 657 without this spelling and 664 with it.
-    let subject = ip_link_subject(InterceptorLink::QuicDatagram, endpoint.local_addr().ok())
+    let subject = ip_link_subject(LinkKind::QuicDatagram, endpoint.local_addr().ok())
         .with_cert_common_name(crate::quic_pipeline::peer_chain_common_name(&connection));
     // R311y474 — the adminspace `{src,dst}` pair. `Connection::remote_address` is
     // infallible (a completed handshake HAS a peer), so the only `None` arm is a
     // failed `local_addr`. The scheme carries the `?rel=0` datagram marker via
-    // `InterceptorLink::locator_for`, which is what makes the string DIALABLE — the
+    // `LinkKind::locator_for`, which is what makes the string DIALABLE — the
     // bare `quic/` spelling would name the reliable sibling transport (R311y470).
     //
     // The SRC is a deliberate SUPERSET of upstream. zenoh publishes
@@ -395,7 +395,7 @@ pub fn wire_quic_datagram(
             None => bound,
         });
     let endpoints = ip_link_endpoints(
-        InterceptorLink::QuicDatagram,
+        LinkKind::QuicDatagram,
         local,
         Some(connection.remote_address()),
     );

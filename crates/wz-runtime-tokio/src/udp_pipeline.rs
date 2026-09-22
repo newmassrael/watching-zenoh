@@ -96,8 +96,8 @@ use crate::link_interfaces::{ip_link_endpoints, ip_link_subject};
 use crate::link_socket::LinkSocket;
 use crate::{LinkDriver, LinkEvent, LostCause, Reliability, RxFrame, TxFrame};
 use wz_session_core::link::BoxedLinkDriver;
-use wz_session_core::link::{InterceptorLink, LinkEndpoints, LinkSubject};
 use wz_session_core::link::{LinkDropCause, LinkSendOutcome};
+use wz_session_core::link::{LinkEndpoints, LinkKind, LinkSubject};
 
 /// Maximum UDP payload (65535 IP datagram - 20 IPv4 header - 8 UDP header).
 /// A larger frame is a wz-side encoder bug; the driver drops it loud rather
@@ -458,12 +458,12 @@ pub fn wire_udp_socket(
 ) -> (UdpReadDriver, Arc<UdpWriteDriver>, WriterHandle) {
     let socket = Arc::new(socket);
     // R311y453 — the §5.16 subject, off the socket this face owns.
-    let subject = ip_link_subject(InterceptorLink::Udp, socket.local_addr().ok());
+    let subject = ip_link_subject(LinkKind::Udp, socket.local_addr().ok());
     // R311y474 — the adminspace `{src,dst}` pair. `peer` is the unicast target
     // every outbound datagram is addressed to, so the DST is known exactly; the
     // SRC is this face's own socket. Both ends known means no `None` arm here
     // beyond a failed `local_addr` syscall.
-    let endpoints = ip_link_endpoints(InterceptorLink::Udp, socket.local_addr().ok(), Some(peer));
+    let endpoints = ip_link_endpoints(LinkKind::Udp, socket.local_addr().ok(), Some(peer));
     let inbound = UdpReadDriver::from_socket(socket.clone());
     let (tx, rx) = mpsc::unbounded_channel::<Vec<u8>>();
     let writer_handle = WriterHandle::spawn(rx, |queue| udp_writer_task(socket, peer, queue));
@@ -491,15 +491,11 @@ pub fn wire_udp_demuxed(
     } = inputs;
     // R311y453 — the §5.16 subject: an accept-demux face shares the listener's
     // send socket, so the local address is that socket's.
-    let subject = ip_link_subject(InterceptorLink::Udp, send_socket.local_addr().ok());
+    let subject = ip_link_subject(LinkKind::Udp, send_socket.local_addr().ok());
     // R311y474 — the adminspace `{src,dst}` pair. The SRC is the SHARED listener
     // socket's address (every demux face reports the same one, which is the truth:
     // they are one socket), and the DST is this face's own demultiplexed peer.
-    let endpoints = ip_link_endpoints(
-        InterceptorLink::Udp,
-        send_socket.local_addr().ok(),
-        Some(peer),
-    );
+    let endpoints = ip_link_endpoints(LinkKind::Udp, send_socket.local_addr().ok(), Some(peer));
     let inbound = UdpReadDriver::from_demux(inbound_rx, peer, pump);
     let (tx, rx) = mpsc::unbounded_channel::<Vec<u8>>();
     let writer_handle = WriterHandle::spawn(rx, |queue| udp_writer_task(send_socket, peer, queue));

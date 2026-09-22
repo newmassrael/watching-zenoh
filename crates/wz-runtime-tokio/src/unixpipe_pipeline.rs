@@ -85,7 +85,7 @@ use crate::runtime_impl::TokioJoinHandle;
 use crate::runtime_pool::PartitionedRuntime;
 use crate::stream_link::{writer_task, StreamReadDriver, StreamWriteDriver};
 use crate::writer_queue::WriterHandle;
-use wz_session_core::link::InterceptorLink;
+use wz_session_core::link::LinkKind;
 
 /// The dialer-writes / acceptor-reads FIFO suffix (zenoh `_uplink` parity).
 const UPLINK_SUFFIX: &str = "_uplink";
@@ -775,7 +775,7 @@ pub fn wire_unixpipe_stream(
     // this reads it rather than asserting on it.
     let endpoints = read
         .node_path()
-        .map(|src| addressless_link_endpoints(InterceptorLink::Unixpipe, src, write_node.as_str()));
+        .map(|src| addressless_link_endpoints(LinkKind::Unixpipe, src, write_node.as_str()));
     let inbound = StreamReadDriver::new(read, Arc::new(std::sync::atomic::AtomicBool::new(false)));
     let (tx, rx) = mpsc::unbounded_channel::<Vec<u8>>();
     let writer_handle = WriterHandle::spawn(rx, |queue| writer_task(sender, queue));
@@ -787,7 +787,7 @@ pub fn wire_unixpipe_stream(
         // R2548 — EMPTY, matching upstream:
         // `io/zenoh-links/zenoh-link-unixpipe/src/unix/unicast.rs` @ `vec![]`,
         // whose `get_interface_names` logs "not supported" and returns none.
-        addressless_link_subject(InterceptorLink::Unixpipe, Vec::new()),
+        addressless_link_subject(LinkKind::Unixpipe, Vec::new()),
         endpoints,
     ));
     (inbound, outbound, writer_handle)

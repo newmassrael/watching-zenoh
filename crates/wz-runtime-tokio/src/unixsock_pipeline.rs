@@ -73,7 +73,7 @@ use tokio::sync::mpsc;
 use crate::link_interfaces::{addressless_link_endpoints, addressless_link_subject};
 use crate::stream_link::{writer_task, StreamReadDriver, StreamWriteDriver};
 use crate::writer_queue::WriterHandle;
-use wz_session_core::link::InterceptorLink;
+use wz_session_core::link::LinkKind;
 
 /// Inbound read driver of a split [`UnixStream`] — the unixsock instantiation
 /// of the shared [`StreamReadDriver`]. The framing / [`crate::LinkDriver`]
@@ -326,7 +326,7 @@ pub fn wire_unixsock_stream(
             .and_then(|a| a.as_pathname().map(|p| p.to_string_lossy().into_owned())),
     ) {
         (Some(local), Some(peer)) => Some(addressless_link_endpoints(
-            InterceptorLink::UnixsockStream,
+            LinkKind::UnixsockStream,
             &local,
             &peer,
         )),
@@ -345,7 +345,7 @@ pub fn wire_unixsock_stream(
         // R2548 — EMPTY, matching upstream, which says so in its own words:
         // `io/zenoh-links/zenoh-link-unixsock_stream/src/unicast.rs` @ `vec![]`, under
         // a "not supported for now" debug line.
-        addressless_link_subject(InterceptorLink::UnixsockStream, Vec::new()),
+        addressless_link_subject(LinkKind::UnixsockStream, Vec::new()),
         endpoints,
     ));
     (inbound, outbound, writer_handle)

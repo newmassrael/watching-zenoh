@@ -54,7 +54,7 @@ use crate::link_socket::LinkSocket;
 use crate::stream_link::{writer_task, StreamReadDriver, StreamWriteDriver};
 use crate::writer_queue::WriterHandle;
 use crate::{LinkDriver, LinkEvent, Reliability, TxFrame};
-use wz_session_core::link::InterceptorLink;
+use wz_session_core::link::LinkKind;
 
 /// R2600 — the EARLIEST `not_after` in the peer's certificate chain, as Unix
 /// seconds, or `None` when the peer presented no chain.
@@ -508,12 +508,12 @@ pub fn wire_quic_stream(link: QuicLink) -> (QuicReadDriver, Arc<StreamWriteDrive
     // axis. Unlike the TLS twin there is no split to race here: `connection`
     // outlives the wiring, so this is placed beside the subject for symmetry
     // rather than out of necessity.
-    let subject = ip_link_subject(InterceptorLink::Quic, endpoint.local_addr().ok())
+    let subject = ip_link_subject(LinkKind::Quic, endpoint.local_addr().ok())
         .with_cert_common_name(peer_chain_common_name(&connection));
     // R311y473 — the adminspace `{src,dst}` pair: the endpoint's bound address is
     // this end, quinn's `Connection::remote_address` the peer's.
     let endpoints = crate::link_interfaces::ip_link_endpoints(
-        InterceptorLink::Quic,
+        LinkKind::Quic,
         endpoint.local_addr().ok(),
         Some(connection.remote_address()),
     );

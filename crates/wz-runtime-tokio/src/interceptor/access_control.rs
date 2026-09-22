@@ -395,7 +395,7 @@ mod tests {
     use wz_session_core::interest_build::{
         build_interest_final, build_interest_liveliness_get, build_interest_liveliness_subscriber,
     };
-    use wz_session_core::link::{InterceptorLink, LinkSubject};
+    use wz_session_core::link::{InterceptorLink, LinkKind, LinkSubject};
     use wz_session_core::push_build::{
         build_push_aliased, build_push_del_literal, build_push_literal,
     };
@@ -436,15 +436,18 @@ mod tests {
             }
         }
 
-        /// The same context, reporting a RESOLVED link protocol — the one input
-        /// shape that can tell "the link axis was evaluated" from "the link axis
-        /// was skipped".
-        fn with_link_protocol(subject: Option<Zid>, protocol: InterceptorLink) -> Self {
+        /// The same context, reporting a RESOLVED link — the one input shape that
+        /// can tell "the link axis was evaluated" from "the link axis was
+        /// skipped".
+        ///
+        /// R2794 — it takes the link's KIND, as a real driver reports it; the
+        /// protocol a rule sees is derived from that, never supplied beside it.
+        fn with_link_protocol(subject: Option<Zid>, kind: LinkKind) -> Self {
             Self {
                 subject,
                 aliases: HashMap::new(),
                 link: Some(LinkSubject {
-                    protocol: Some(protocol),
+                    kind: Some(kind),
                     interfaces: None,
                     cert_common_name: None,
                 }),
@@ -633,7 +636,7 @@ mod tests {
             )
         };
         // The face speaks TCP and has NO resolved subject.
-        let ctx = MockCtx::with_link_protocol(None, InterceptorLink::Tcp);
+        let ctx = MockCtx::with_link_protocol(None, LinkKind::Tcp);
         let put = || {
             NetworkMessage::Push(Box::new(
                 build_push_literal("admin/secret", b"x").expect("build"),
@@ -650,6 +653,61 @@ mod tests {
              the allow default -- so the deny above is the link axis deciding, \
              not the keyexpr and action matching on their own"
         );
+    }
+
+    /// R2794 (open-debt item 814) — a DENY narrowed to upstream's `quic`
+    /// denies a QUIC-datagram face, through the enforcer, as zenoh's does.
+    ///
+    /// This is the bypass itself, asserted at the layer that enforces it rather
+    /// than at `matches_protocols`. Upstream files its datagram link under
+    /// `quic` (the link carries `LinkAuthId::Quic`), so an operator who denies
+    /// `quic` has denied both QUIC links; wz's datagram face used to report a
+    /// protocol of its own, so the same deny let its traffic through.
+    ///
+    /// The stream sibling is asserted beside it, because the two kinds share the
+    /// protocol and a test over one could not tell "both are `quic`" from "the
+    /// rule matches everything". The `udp` arm is the other half of that: a
+    /// deny for a protocol neither face is must leave both to the allow default.
+    #[test]
+    fn a_deny_narrowed_to_quic_denies_the_datagram_face_as_it_denies_the_stream_one() {
+        let deny_over = |protocol: InterceptorLink| {
+            AclInterceptor::new(
+                AclPolicy::new(AclConfig {
+                    default_permission: Permission::Allow,
+                    rules: vec![AclRule {
+                        subject: SubjectSelector::Any,
+                        key_exprs: vec!["admin/**".to_owned()],
+                        messages: vec![AclMessage::Put],
+                        flow: AclFlow::Ingress,
+                        permission: Permission::Deny,
+                        link_protocols: vec![protocol],
+                        interfaces: Vec::new(),
+                        usernames: Vec::new(),
+                        cert_common_names: Vec::new(),
+                    }],
+                }),
+                AclFlow::Ingress,
+            )
+        };
+        let put = || {
+            NetworkMessage::Push(Box::new(
+                build_push_literal("admin/secret", b"x").expect("build"),
+            ))
+        };
+        for kind in [LinkKind::QuicDatagram, LinkKind::Quic] {
+            let ctx = MockCtx::with_link_protocol(None, kind);
+            assert!(
+                !deny_over(InterceptorLink::Quic).intercept(&ctx, &put()),
+                "a deny narrowed to `quic` must deny a {kind:?} face, as upstream's \
+                 does for both of its QUIC links"
+            );
+            assert!(
+                deny_over(InterceptorLink::Udp).intercept(&ctx, &put()),
+                "a deny narrowed to `udp` must leave a {kind:?} face to the allow \
+                 default -- otherwise the arm above holds for a rule that matches \
+                 everything"
+            );
+        }
     }
 
     /// A Put aliased to `mapping_id`, with the fixed `/data` suffix — the one

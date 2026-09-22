@@ -68,8 +68,8 @@ use crate::sync::Mutex;
 use crate::writer_queue::{OutboundQueue, WriterHandle};
 use crate::{LinkDriver, LinkEvent, LostCause, Reliability, RxFrame, TxFrame};
 use wz_session_core::link::BoxedLinkDriver;
-use wz_session_core::link::{InterceptorLink, LinkEndpoints, LinkSubject};
 use wz_session_core::link::{LinkDropCause, LinkSendOutcome};
+use wz_session_core::link::{LinkEndpoints, LinkKind, LinkSubject};
 use wz_session_core::locator::{SerialEndpoint, SerialTarget};
 use wz_session_core::serial_link::{
     encode_frame, DecodedFrame, HandshakeStep, SerialFrameReader, SerialHandshake, SerialRole,
@@ -677,9 +677,9 @@ pub fn wire_serial_stream(
         // An ACL narrowed by `interfaces` can now target a serial link here as
         // it can upstream. See [`serial_interface_names`] for why this is the
         // link's device rather than the whole system's port list.
-        addressless_link_subject(InterceptorLink::Serial, serial_interface_names(endpoint)),
+        addressless_link_subject(LinkKind::Serial, serial_interface_names(endpoint)),
         Some(addressless_link_endpoints(
-            InterceptorLink::Serial,
+            LinkKind::Serial,
             &locator,
             &locator,
         )),

@@ -40,7 +40,7 @@
 
 use std::net::{IpAddr, SocketAddr};
 
-use wz_session_core::link::{InterceptorLink, LinkEndpoints, LinkSubject};
+use wz_session_core::link::{LinkEndpoints, LinkKind, LinkSubject};
 
 /// R311y473 — the `{src,dst}` LOCATOR PAIR of an IP-addressed link, for the
 /// adminspace's per-link view (zenoh `link_to_json`,
@@ -51,17 +51,22 @@ use wz_session_core::link::{InterceptorLink, LinkEndpoints, LinkSubject};
 /// interface set. A half-known pair rendered as a locator would be a string an
 /// admin client cannot dial and cannot tell apart from one it can.
 ///
-/// The scheme comes from [`InterceptorLink::locator_for`] — the single table
+/// The scheme comes from [`LinkKind::locator_for`] — the single table
 /// `BoundListener::advertised_locator` also delegates to — so this emitter cannot
 /// repeat the R311y470 defect of shipping a log word where a scheme belongs.
+///
+/// R2794 (open-debt item 814) — takes the link's KIND, the same value
+/// [`ip_link_subject`] takes. Every pipeline used to hand one `InterceptorLink`
+/// to both, which is where the two axes were fused: this function wants the
+/// kind's advertised form, the subject wants what a rule sees.
 pub fn ip_link_endpoints(
-    protocol: InterceptorLink,
+    kind: LinkKind,
     local: Option<SocketAddr>,
     peer: Option<SocketAddr>,
 ) -> Option<LinkEndpoints> {
     Some(LinkEndpoints::new(
-        protocol.locator_for(&local?.to_string()),
-        protocol.locator_for(&peer?.to_string()),
+        kind.locator_for(&local?.to_string()),
+        kind.locator_for(&peer?.to_string()),
     ))
 }
 
@@ -69,12 +74,8 @@ pub fn ip_link_endpoints(
 /// IP socket: a unix-socket path, a vsock `cid:port`, a named pipe, a serial
 /// device. The caller renders each end's ADDRESS; the scheme is applied here from
 /// the same single table [`ip_link_endpoints`] uses.
-pub fn addressless_link_endpoints(
-    protocol: InterceptorLink,
-    local: &str,
-    peer: &str,
-) -> LinkEndpoints {
-    LinkEndpoints::new(protocol.locator_for(local), protocol.locator_for(peer))
+pub fn addressless_link_endpoints(kind: LinkKind, local: &str, peer: &str) -> LinkEndpoints {
+    LinkEndpoints::new(kind.locator_for(local), kind.locator_for(peer))
 }
 
 /// The §5.16 subject of an IP-addressed link: its protocol, plus the NICs its
@@ -84,9 +85,9 @@ pub fn addressless_link_endpoints(
 /// it, which propagates as an INDETERMINATE interface set (`None`) rather than an
 /// empty one — the caller could not determine the NICs, which is not the same
 /// statement as "there are none".
-pub fn ip_link_subject(protocol: InterceptorLink, local: Option<SocketAddr>) -> LinkSubject {
+pub fn ip_link_subject(kind: LinkKind, local: Option<SocketAddr>) -> LinkSubject {
     LinkSubject {
-        protocol: Some(protocol),
+        kind: Some(kind),
         interfaces: local.and_then(|addr| interface_names_for(addr.ip())),
         // R2698 — no certificate is reachable from an address alone. A link
         // that HAS one fills this in afterwards with
@@ -125,9 +126,9 @@ pub fn ip_link_subject(protocol: InterceptorLink, local: Option<SocketAddr>) -> 
 /// which is why the vsock divergence could not be fixed at its own call site
 /// without fixing this. Each caller now STATES its answer and can be read
 /// against the upstream link it mirrors.
-pub fn addressless_link_subject(protocol: InterceptorLink, interfaces: Vec<String>) -> LinkSubject {
+pub fn addressless_link_subject(kind: LinkKind, interfaces: Vec<String>) -> LinkSubject {
     LinkSubject {
-        protocol: Some(protocol),
+        kind: Some(kind),
         interfaces: Some(interfaces),
         // R2698 — none of the four addressless links presents a peer
         // certificate, so this is a definite absence rather than an unfilled

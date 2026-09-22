@@ -36,7 +36,7 @@ use wz_runtime_core::TimeSource;
 use wz_session_core::keyexpr_prefix::OwnedNonWildKeyExpr;
 // R311y473 — the single dialable-locator scheme table `advertised_locator`
 // delegates to (and the adminspace per-link emitter shares).
-use wz_session_core::link::InterceptorLink;
+use wz_session_core::link::LinkKind;
 #[cfg(feature = "transport-link-serial")]
 use wz_session_core::locator::SerialEndpoint;
 use wz_session_core::locator::{
@@ -1182,40 +1182,45 @@ impl BoundListener {
     /// explicitly rather than inherit a log word that may not be one. That
     /// inheritance is exactly what produced both divergences above.
     /// R311y473 — the scheme table itself moved to
-    /// [`InterceptorLink::locator_for`], which is now the ONE copy. This site
+    /// [`LinkKind::locator_for`], which is now the ONE copy. This site
     /// keeps its own wildcard-free match because the thing it must state is which
-    /// PROTOCOL a bound listener speaks; the scheme for that protocol is then not
+    /// KIND of link a bound listener serves; the scheme for that kind is then not
     /// its business. The adminspace per-link `{src,dst}` emitter (R311y473) reads
     /// the same table, so the two cannot diverge the way a second copy would.
     pub fn advertised_locator(&self, address: &str) -> String {
-        self.interceptor_link().locator_for(address)
+        self.link_kind().locator_for(address)
     }
 
-    /// R311y473 — which §5.16 link protocol this bound listener speaks. Extracted
-    /// so [`Self::advertised_locator`] can delegate its scheme to the single
-    /// [`InterceptorLink::locator_for`] table. Wildcard-free: a new
-    /// `BoundListener` variant must name its protocol.
-    pub fn interceptor_link(&self) -> InterceptorLink {
+    /// R311y473 — which KIND of link this bound listener serves. Extracted so
+    /// [`Self::advertised_locator`] can delegate its scheme to the single
+    /// [`LinkKind::locator_for`] table. Wildcard-free: a new `BoundListener`
+    /// variant must name its kind.
+    ///
+    /// R2794 (open-debt item 814) — renamed from `interceptor_link`, because what
+    /// it answers is the listener's kind and not what a rule sees: the datagram
+    /// listener is `quic` to a rule and advertises `quic/…?rel=0`, and only the
+    /// kind can say the second.
+    pub fn link_kind(&self) -> LinkKind {
         match self {
-            BoundListener::Tcp(_) => InterceptorLink::Tcp,
+            BoundListener::Tcp(_) => LinkKind::Tcp,
             #[cfg(feature = "transport-link-ws")]
-            BoundListener::Ws(_) => InterceptorLink::Ws,
+            BoundListener::Ws(_) => LinkKind::Ws,
             #[cfg(feature = "transport-link-tls")]
-            BoundListener::Tls(..) => InterceptorLink::Tls,
+            BoundListener::Tls(..) => LinkKind::Tls,
             #[cfg(feature = "transport-link-unixsock")]
-            BoundListener::Unixsock(_) => InterceptorLink::UnixsockStream,
+            BoundListener::Unixsock(_) => LinkKind::UnixsockStream,
             #[cfg(all(feature = "transport-link-vsock", target_os = "linux"))]
-            BoundListener::Vsock(_) => InterceptorLink::Vsock,
+            BoundListener::Vsock(_) => LinkKind::Vsock,
             #[cfg(all(feature = "transport-link-unixpipe", target_os = "linux"))]
-            BoundListener::Unixpipe(_) => InterceptorLink::Unixpipe,
+            BoundListener::Unixpipe(_) => LinkKind::Unixpipe,
             #[cfg(feature = "transport-link-udp")]
-            BoundListener::Udp(_) => InterceptorLink::Udp,
+            BoundListener::Udp(_) => LinkKind::Udp,
             #[cfg(feature = "transport-link-quic")]
-            BoundListener::Quic(_, _) => InterceptorLink::Quic,
+            BoundListener::Quic(_, _) => LinkKind::Quic,
             #[cfg(feature = "transport-link-quic-datagram")]
-            BoundListener::QuicDatagram(_, _) => InterceptorLink::QuicDatagram,
+            BoundListener::QuicDatagram(_, _) => LinkKind::QuicDatagram,
             #[cfg(feature = "transport-link-serial")]
-            BoundListener::Serial(_) => InterceptorLink::Serial,
+            BoundListener::Serial(_) => LinkKind::Serial,
         }
     }
 

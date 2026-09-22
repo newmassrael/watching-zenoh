@@ -280,7 +280,9 @@ pub use wz_session_core::link::{LinkDropCause, LinkSendOutcome};
 // re-exports `InterceptorLink`, but it is a ROUTING module and a consumer that
 // needs the link's protocol has no business depending on the routing tier; the
 // pair belongs where `BoxedLinkDriver::link_endpoints` is named.
-pub use wz_session_core::link::{InterceptorLink, LinkEndpoints, LinkSubject};
+// R2794 — plus `LinkKind`, which is what the C plane actually reads: its
+// streamed and reliability answers are the link's own, not the rule protocol.
+pub use wz_session_core::link::{InterceptorLink, LinkEndpoints, LinkKind, LinkSubject};
 // chunk-5 — `SessionRuntime` (the runtime-tier extension owning `R::LinkSink`)
 // is named only by the `SessionLinkActions` impls, which moved to
 // wz-session-core::session_actions; the import left session_glue with them.

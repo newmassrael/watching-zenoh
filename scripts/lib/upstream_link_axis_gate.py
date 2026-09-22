@@ -71,8 +71,14 @@ ROOT = pathlib.Path(__file__).resolve().parents[2]
 #: wz's link module, whose two functions and doc table this grades.
 WZ_LINK = "crates/wz-session-core/src/link.rs"
 
-#: wz `InterceptorLink` variant -> the config spelling `as_str` gives it, which
-#: is also (with `-` for `_`) upstream's link-crate directory suffix.
+#: wz `LinkKind` variant -> upstream's link-crate directory suffix (with `-` for
+#: `_`), which is what each row of the doc table is named after.
+#:
+#: R2794 (open-debt item 814) -- these two axes moved from `InterceptorLink` to
+#: `LinkKind`. They are the LINK's own answers, and the rule-facing enum no longer
+#: carries a datagram value (upstream files that link under `quic`). The kind
+#: still does, and it has to: `quic-datagram` answers unstreamed and unreliable,
+#: which `quic` does not.
 VARIANTS: dict[str, str] = {
     "Tcp": "tcp",
     "Udp": "udp",
@@ -116,7 +122,18 @@ def wz_axes(text: str) -> tuple[dict[str, bool], dict[str, bool], list[str]]:
     findings: list[str] = []
     axes: dict[str, dict[str, bool]] = {}
     for name, body in MATCHES.findall(text):
-        negated = set(re.findall(r"InterceptorLink::([A-Za-z]+)", body))
+        negated = set(re.findall(r"LinkKind::([A-Za-z]+)", body))
+        # R2794 -- a body read as naming NO variant is a failure, not an answer.
+        # Every link would then grade streamed and reliable, which is how an
+        # extractor whose pattern stopped matching the enum's name reports: the
+        # R2794 rename did exactly that to this line before it was updated. No
+        # real body is empty, so zero names can only mean the reading failed.
+        if not negated:
+            findings.append(
+                f"`{name}`'s `!matches!` body names no `LinkKind` variant -- the "
+                f"reading found nothing to grade, which is not the same as every "
+                f"link being streamed and reliable"
+            )
         unknown = negated - set(VARIANTS)
         if unknown:
             findings.append(
@@ -329,7 +346,7 @@ def check(require: bool) -> int:
         return 1
     where = "code and table agree" if root is None else f"graded against {root}"
     print(
-        f"  upstream-link-axis: wz's {len(VARIANTS)} link protocol(s) carry a "
+        f"  upstream-link-axis: wz's {len(VARIANTS)} link kind(s) carry a "
         f"streamed / reliable answer each, {where}; "
         f"{len(CONDITIONAL)} declared conditional"
     )
@@ -338,7 +355,7 @@ def check(require: bool) -> int:
 
 def _fixture(streamed: str, reliable: str, table: str) -> str:
     return (
-        "impl InterceptorLink {\n"
+        "impl LinkKind {\n"
         f"{table}"
         "    pub fn is_streamed(&self) -> bool {\n"
         f"        !matches!(self, {streamed})\n"
@@ -370,10 +387,10 @@ TRUTH = {
     "ws": (False, True),
 }
 GOOD_S = (
-    "InterceptorLink::Udp | InterceptorLink::QuicDatagram | "
-    "InterceptorLink::Serial | InterceptorLink::Ws"
+    "LinkKind::Udp | LinkKind::QuicDatagram | "
+    "LinkKind::Serial | LinkKind::Ws"
 )
-GOOD_R = "InterceptorLink::Udp | InterceptorLink::QuicDatagram | InterceptorLink::Serial"
+GOOD_R = "LinkKind::Udp | LinkKind::QuicDatagram | LinkKind::Serial"
 
 
 def _upstream_tree(tmp: pathlib.Path, ws_streamed: str = "false") -> pathlib.Path:
@@ -426,12 +443,29 @@ def selftest() -> int:
             GOOD_S, GOOD_R, _table({k: v for k, v in TRUTH.items() if k != "vsock"})
         ),
         "unknown-variant": _fixture(
-            GOOD_S + " | InterceptorLink::Carrier", GOOD_R, _table(TRUTH)
+            GOOD_S + " | LinkKind::Carrier", GOOD_R, _table(TRUTH)
         ),
         "not-a-matches": (
-            "impl InterceptorLink {\n"
+            "impl LinkKind {\n"
             "    pub fn is_streamed(&self) -> bool { true }\n"
             "    pub fn is_reliable(&self) -> bool { true }\n}\n"
+        ),
+        # R2794 -- the bodies are well-formed but name a DIFFERENT enum, which
+        # is what this file saw the moment the axes moved to `LinkKind` and the
+        # extractor still said `InterceptorLink`. It must be refused, not read
+        # as "no link is unstreamed".
+        #
+        # ⚠ The table is ALL-TRUE on purpose, and the case is worthless without
+        # that. With the real table, the empty reading disagrees with it (the
+        # table says udp is unstreamed) and the TABLE arm refuses the fixture
+        # whether or not the empty-read guard exists -- measured: deleting the
+        # guard left that version refused. An all-true table AGREES with an
+        # empty reading, so only the guard can object, which makes this case
+        # the guard's control rather than a second test of the table arm.
+        "names-another-enum": _fixture(
+            GOOD_S.replace("LinkKind::", "InterceptorLink::"),
+            GOOD_R.replace("LinkKind::", "InterceptorLink::"),
+            _table({link: (True, True) for link in TRUTH}),
         ),
     }
     for name, body in cases.items():
@@ -451,8 +485,8 @@ def selftest() -> int:
             return 1
         # R2259's ACTUAL defect, as the fixture: wz calls ws streamed.
         r2259 = _fixture(
-            "InterceptorLink::Udp | InterceptorLink::QuicDatagram",
-            "InterceptorLink::Udp | InterceptorLink::QuicDatagram",
+            "LinkKind::Udp | LinkKind::QuicDatagram",
+            "LinkKind::Udp | LinkKind::QuicDatagram",
             _table({**TRUTH, "serial": (True, True), "ws": (True, True)}),
         )
         got = oracle_findings(r2259, root)

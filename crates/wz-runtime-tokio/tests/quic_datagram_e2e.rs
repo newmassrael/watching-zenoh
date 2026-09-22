@@ -497,3 +497,93 @@ async fn initial_mtu_on_the_locator_moves_each_sides_link_mtu_independently() {
          longer detect a missing listen-side apply"
     );
 }
+
+/// R2794 (open-debt item 814) — a rule narrowed to upstream's `quic` protocol
+/// GOVERNS the QUIC-datagram link, on both ends, as it does in zenoh.
+///
+/// Upstream files this link under `quic`: its protocol axis is read off the
+/// link's auth id, and the datagram link carries the same `LinkAuthId::Quic`
+/// the stream link does, so one `link_protocols: [quic]` rule covers both. wz
+/// filed it under a separate `QuicDatagram` value and matches by exact
+/// equality, so the same rule silently stopped governing the same peer over
+/// datagrams -- for a deny rule, a bypass. The comment on the datagram
+/// pipeline's own subject already states the intent this test holds it to.
+///
+/// Read off the REAL subject each end's pipeline builds, never a rebuilt one.
+///
+/// ⚠ THE NEGATIVE ARM IS WHAT MAKES THE POSITIVE ONE MEAN SOMETHING.
+/// `matches_protocols` is fail-closed: a subject with NO protocol matches every
+/// rule. So "a `quic` rule governs it" would also pass for a link that lost its
+/// protocol entirely. A rule for a protocol the link is NOT must therefore not
+/// govern it -- that is the arm a vacuous subject fails.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_rule_narrowed_to_quic_governs_the_datagram_link_on_both_ends() {
+    use wz_runtime_tokio::link_socket::LinkSide;
+    use wz_runtime_tokio::quic_datagram_pipeline::{dial_quic_datagram, wire_quic_datagram};
+    use wz_session_core::link::{BoxedLinkDriver, InterceptorLink, LinkSubject};
+    use wz_session_core::locator::{LinkSocketOptions, Proto};
+
+    let issued = rcgen::generate_simple_self_signed(vec!["localhost".to_string()])
+        .expect("generate self-signed localhost cert");
+    let cert_pem = issued.cert.pem();
+    let key_pem = issued.key_pair.serialize_pem();
+    let server_config = quic_server_config_from_pem(cert_pem.as_bytes(), key_pem.as_bytes(), None)
+        .expect("build quic server config");
+    let client_config =
+        quic_client_config_from_pem(Some(cert_pem.as_bytes()), None).expect("build quic client");
+
+    let listen_sock = LinkSocket::resolve(
+        &LinkSocketOptions::NONE,
+        &LinkSocketOptions::NONE,
+        Proto::QuicDatagram,
+        LinkSide::Listen,
+    )
+    .await
+    .expect("resolve listen socket");
+    let endpoint = bind_quic_datagram(
+        "127.0.0.1:0".parse().expect("loopback addr"),
+        server_config,
+        &listen_sock,
+    )
+    .await
+    .expect("bind quic datagram endpoint");
+    let addr = endpoint.local_addr().expect("endpoint local addr");
+
+    let acc = async {
+        let link = accept_quic_datagram_on(&endpoint)
+            .await
+            .expect("accept quic datagram peer");
+        let (_r, w, _h) = wire_quic_datagram(link);
+        w.link_subject().cloned()
+    };
+    let dial = async {
+        let dial_sock = LinkSocket::resolve(
+            &LinkSocketOptions::NONE,
+            &LinkSocketOptions::NONE,
+            Proto::QuicDatagram,
+            LinkSide::Dial,
+        )
+        .await
+        .expect("resolve dial socket");
+        let link = dial_quic_datagram(addr, client_config, "localhost", &dial_sock)
+            .await
+            .expect("dial quic datagram");
+        let (_r, w, _h) = wire_quic_datagram(link);
+        w.link_subject().cloned()
+    };
+    let (acc, dial): (Option<LinkSubject>, Option<LinkSubject>) = tokio::join!(acc, dial);
+
+    for (side, subject) in [("acceptor", acc), ("dialer", dial)] {
+        let subject = subject.unwrap_or_else(|| panic!("the {side}'s datagram link names itself"));
+        assert!(
+            subject.matches_protocols(&[InterceptorLink::Quic]),
+            "a rule narrowed to upstream's `quic` must govern the {side}'s datagram link, \
+             as zenoh's does; got {subject:?}"
+        );
+        assert!(
+            !subject.matches_protocols(&[InterceptorLink::Tcp]),
+            "a rule for a protocol this link is NOT must not govern it -- otherwise the \
+             arm above holds for a subject that names no protocol at all; got {subject:?}"
+        );
+    }
+}

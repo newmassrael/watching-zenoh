@@ -45,7 +45,7 @@ use tokio_vsock::{VsockAddr, VsockListener, VsockStream};
 use crate::link_interfaces::{addressless_link_endpoints, addressless_link_subject};
 use crate::stream_link::{writer_task, StreamReadDriver, StreamWriteDriver};
 use crate::writer_queue::WriterHandle;
-use wz_session_core::link::InterceptorLink;
+use wz_session_core::link::LinkKind;
 
 /// R2751 — vsock's read half, which REMEMBERS ITS DESCRIPTOR.
 ///
@@ -174,7 +174,7 @@ pub fn wire_vsock_stream(
     // a string it could dial, not a Debug rendering of the address struct.
     let endpoints = match (stream.local_addr().ok(), stream.peer_addr().ok()) {
         (Some(local), Some(peer)) => Some(addressless_link_endpoints(
-            InterceptorLink::Vsock,
+            LinkKind::Vsock,
             &format!("{}:{}", local.cid(), local.port()),
             &format!("{}:{}", peer.cid(), peer.port()),
         )),
@@ -205,7 +205,7 @@ pub fn wire_vsock_stream(
         tx,
         Arc::new(std::sync::atomic::AtomicBool::new(false)),
         // R2548 — the pseudo-interface upstream names for this link, as a
-        // LITERAL rather than as `InterceptorLink::Vsock`'s scheme string: the
+        // LITERAL rather than as `LinkKind::Vsock`'s scheme string: the
         // two happen to coincide, and deriving one from the other would assert
         // a coupling upstream does not have (its sibling addressless links name
         // no interface at all).
@@ -213,7 +213,7 @@ pub fn wire_vsock_stream(
         // Without it an ACL narrowed by
         // `interfaces` -- the spelling a zenoh-authored config uses to target a
         // vsock link -- matches nothing here.
-        addressless_link_subject(InterceptorLink::Vsock, vec!["vsock".to_string()]),
+        addressless_link_subject(LinkKind::Vsock, vec!["vsock".to_string()]),
         endpoints,
     ));
     (inbound, outbound, writer_handle)
@@ -311,7 +311,7 @@ mod tests {
     /// narrowed by `interfaces` — the spelling a zenoh-authored config uses to
     /// target a vsock link — matched nothing here while matching there.
     ///
-    /// The expectation is a LITERAL, not `InterceptorLink::Vsock`'s scheme
+    /// The expectation is a LITERAL, not `LinkKind::Vsock`'s scheme
     /// string: comparing the emitted name against the constant the producer
     /// reads would hold for every value it could take, which is the tautology
     /// R2470 had to repair on the attachment ext's Del id.
@@ -336,7 +336,7 @@ mod tests {
         let subject = outbound
             .link_subject()
             .expect("the vsock pipeline states a §5.16 subject");
-        assert_eq!(subject.protocol, Some(InterceptorLink::Vsock));
+        assert_eq!(subject.kind, Some(LinkKind::Vsock));
         assert_eq!(
             subject.interfaces.as_deref(),
             Some(&["vsock".to_string()][..]),

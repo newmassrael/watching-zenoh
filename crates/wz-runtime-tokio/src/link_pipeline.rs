@@ -19,7 +19,7 @@
 //! - [`dial_tcp`] / [`dial_tcp_host`] — the TCP raw-dial primitives: a NUMERIC
 //!   `SocketAddr` and a DNS-capable `host:port` STRING respectively, both ->
 //!   connected [`TcpStream`]. The mode-agnostic `dial_locator(AnyLocator)`
-//!   dispatcher (R311eu) routes a numeric `InterceptorLink::Tcp` endpoint to `dial_tcp`
+//!   dispatcher (R311eu) routes a numeric `LinkKind::Tcp` endpoint to `dial_tcp`
 //!   and an `AnyLocator::Named` tcp endpoint to `dial_tcp_host` (R311ps).
 //! - [`wire_tcp_stream`] — splits a connected stream into the cooperating
 //!   `(TcpReadDriver, Arc<`[`StreamWriteDriver`]`>, writer-task handle)`
@@ -41,7 +41,7 @@ use crate::link_interfaces::{ip_link_endpoints, ip_link_subject};
 use crate::link_socket::LinkSocket;
 use crate::stream_link::{writer_task, StreamReadDriver, StreamWriteDriver};
 use crate::writer_queue::WriterHandle;
-use wz_session_core::link::InterceptorLink;
+use wz_session_core::link::LinkKind;
 
 /// Inbound read driver of a split `TcpStream` — the TCP instantiation of the
 /// shared [`StreamReadDriver`]. The framing / [`crate::LinkDriver`] impl lives
@@ -51,7 +51,7 @@ use wz_session_core::link::InterceptorLink;
 pub type TcpReadDriver = StreamReadDriver<OwnedReadHalf>;
 
 /// Dial an outbound TCP connection to a NUMERIC endpoint — the raw-dial
-/// primitive the mode-agnostic `dial_locator(InterceptorLink::Tcp)` dispatcher (R311eu)
+/// primitive the mode-agnostic `dial_locator(LinkKind::Tcp)` dispatcher (R311eu)
 /// routes a parsed [`SocketAddr`] to. Returns the connected [`TcpStream`]
 /// unwrapped so the caller can choose its consumption shape: the session-open
 /// path splits it via [`wire_tcp_stream`], while [`crate::TcpDriver::connect`]
@@ -409,12 +409,12 @@ pub fn wire_tcp_stream_with_lowlatency(
 ) -> (TcpReadDriver, Arc<StreamWriteDriver>, WriterHandle) {
     // R311y453 — the §5.16 subject is resolved BEFORE the split, while the
     // stream still owns its socket and can report its local address.
-    let subject = ip_link_subject(InterceptorLink::Tcp, stream.local_addr().ok());
+    let subject = ip_link_subject(LinkKind::Tcp, stream.local_addr().ok());
     // R311y473 — the adminspace `{src,dst}` pair, resolved in the same
     // before-the-split window and for the same reason: after `into_split` neither
     // half is the socket any more.
     let endpoints = ip_link_endpoints(
-        InterceptorLink::Tcp,
+        LinkKind::Tcp,
         stream.local_addr().ok(),
         stream.peer_addr().ok(),
     );

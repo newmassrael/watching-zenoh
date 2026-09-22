@@ -6548,10 +6548,17 @@ layer_c1ai_cargo_test_liveliness_history() {
 # (`test result: ok. 3 passed`), not what the diff suggests — the count guard
 # lives outside the function body because the `&&` chain below is one
 # backslash-continued command, which admits no comment line between its steps.
+#
+# R2794 (open-debt item 814) — that guard moves 3 -> 4. The new case is
+# `a_rule_narrowed_to_quic_governs_the_datagram_link_on_both_ends`, which reads
+# the subject each end's real datagram pipeline builds and asserts a rule
+# narrowed to upstream's `quic` governs it. It was RED before the fix, on the
+# assertion, and it is what this commit's control reds again. The number is
+# what this exact command PRINTED (`test result: ok. 4 passed`).
 layer_c1aj_cargo_test_quic_datagram() {
     (cd crates \
         && cargo test -p wz-session-core --features alloc --lib locator --quiet \
-        && cargo test -p wz-runtime-tokio --features transport-link-quic-datagram --test quic_datagram_e2e --quiet 2>&1 | grep -qE '^test result: ok\. 3 passed' \
+        && cargo test -p wz-runtime-tokio --features transport-link-quic-datagram --test quic_datagram_e2e --quiet 2>&1 | grep -qE '^test result: ok\. 4 passed' \
         && cargo test -p wz-runtime-tokio --features transport-link-quic-datagram --test link_endpoints_pairing --quiet 2>&1 | grep -qE '^test result: ok\. 3 passed' \
         && cargo clippy -p wz-runtime-tokio --all-targets --features transport-link-quic-datagram --quiet -- -D warnings \
         && cargo clippy -p wz-runtime-tokio --no-default-features --features transport-link-quic-datagram --quiet -- -D warnings)
@@ -8117,7 +8124,11 @@ layer_c1y_cargo_test_routing_peer() {
     # bound reds only the first (E0277 at the spawn), and reverting the timer to
     # a `Cell` reds the whole impl. READ off this command's own printout, which
     # said 43 — the gate CAN run this guard now and named the number itself.
-    _runci_guarded_test "C1y interceptor" 43 \
+    # R2794 (open-debt item 814) — 43 -> 44:
+    # `a_deny_narrowed_to_quic_denies_the_datagram_face_as_it_denies_the_stream_one`,
+    # the ACL bypass asserted at the enforcer rather than at `matches_protocols`.
+    # READ off this command with `$access` expanded, which printed 44.
+    _runci_guarded_test "C1y interceptor" 44 \
         cargo test -p wz-runtime-tokio --features "$access" --lib interceptor --quiet || return 1
     # R311y509 — 211 -> 213: the peer's CURRENT liveliness-TOKEN dump, in its two
     # tiers. Each test is bound by a damage that reds it ALONE: disabling the client

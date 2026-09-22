@@ -51,8 +51,8 @@ use crate::link_interfaces::ip_link_subject;
 use crate::writer_queue::{OutboundQueue, WriterHandle};
 use crate::{LinkDriver, LinkEvent, LostCause, Reliability, RxFrame, TxFrame};
 use wz_session_core::link::BoxedLinkDriver;
-use wz_session_core::link::{InterceptorLink, LinkSubject};
 use wz_session_core::link::{LinkDropCause, LinkSendOutcome};
+use wz_session_core::link::{LinkKind, LinkSubject};
 
 /// Dial a WebSocket-over-TCP connection — TCP-connect to `addr`, then run the
 /// RFC6455 client handshake ([`client_async`]) over it, returning the
@@ -95,11 +95,11 @@ pub fn wire_ws_stream(
 ) -> (WsReadDriver, Arc<WsWriteDriver>, WriterHandle) {
     // R311y453 — the §5.16 subject, off the TCP socket the WebSocket wraps,
     // read BEFORE the split takes ownership of the halves.
-    let subject = ip_link_subject(InterceptorLink::Ws, ws.get_ref().local_addr().ok());
+    let subject = ip_link_subject(LinkKind::Ws, ws.get_ref().local_addr().ok());
     // R311y473 — the adminspace `{src,dst}` pair, off the same wrapped TCP socket
     // and in the same before-the-split window.
     let endpoints = crate::link_interfaces::ip_link_endpoints(
-        InterceptorLink::Ws,
+        LinkKind::Ws,
         ws.get_ref().local_addr().ok(),
         ws.get_ref().peer_addr().ok(),
     );

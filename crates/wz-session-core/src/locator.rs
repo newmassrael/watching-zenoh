@@ -1306,7 +1306,7 @@ pub struct SerialEndpoint {
 impl SerialEndpoint {
     /// R311y474 — the ADDRESS span of this endpoint's locator, PLUS the `#config`
     /// tail it needs to parse back: the argument
-    /// [`crate::link::InterceptorLink::locator_for`] prefixes with the scheme to
+    /// [`crate::link::LinkKind::locator_for`] prefixes with the scheme to
     /// form a full, DIALABLE `serial/...` locator.
     ///
     /// Lives beside [`parse_serial_locator`] deliberately. An emitter that spells
@@ -2062,7 +2062,7 @@ mod tests {
     /// R311y474 — the serial RENDERER and PARSER must be exact inverses, for BOTH
     /// address forms of the grammar. This is the pin that keeps the two adjacent
     /// functions from drifting: the adminspace emitter composes
-    /// `locator_address_with_config` through `InterceptorLink::locator_for`, and a
+    /// `locator_address_with_config` through `LinkKind::locator_for`, and a
     /// string that does not parse back is a locator an admin client cannot dial
     /// (the R311y470 defect class).
     #[test]
@@ -2093,8 +2093,8 @@ mod tests {
                 },
             },
         ] {
-            let locator = crate::link::InterceptorLink::Serial
-                .locator_for(&endpoint.locator_address_with_config());
+            let locator =
+                crate::link::LinkKind::Serial.locator_for(&endpoint.locator_address_with_config());
             let parsed = parse_serial_locator(&locator).unwrap_or_else(|e| {
                 panic!("the rendered locator {locator:?} must parse back, got {e:?}")
             });

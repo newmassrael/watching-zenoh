@@ -457,6 +457,10 @@ impl DownsamplingInterceptor {
 #[cfg(test)]
 mod tests {
     use super::*;
+    // R2794 — a SUBJECT is built from the link's kind, while a RULE below still
+    // names an `InterceptorLink`. Imported here, not above: production code in
+    // this module never builds a subject, so a top-level import would be unused.
+    use wz_session_core::link::LinkKind;
 
     /// A rule governing every kind on both flows — what the deploy knob builds.
     fn rule(key_exprs: &[&str], min_interval: Duration) -> DownsamplingRule {
@@ -770,9 +774,9 @@ mod tests {
     }
 
     /// R311y453 — a subject for a link that resolved cleanly to one NIC.
-    fn on(protocol: InterceptorLink, nic: &str) -> LinkSubject {
+    fn on(kind: LinkKind, nic: &str) -> LinkSubject {
         LinkSubject {
-            protocol: Some(protocol),
+            kind: Some(kind),
             interfaces: Some(vec![nic.to_owned()]),
             cert_common_name: None,
         }
@@ -787,8 +791,8 @@ mod tests {
             ..rule(&["demo/**"], Duration::from_millis(100))
         }]);
         let t0 = Instant::now();
-        let tcp = on(InterceptorLink::Tcp, "lo");
-        let vsock = on(InterceptorLink::Vsock, "lo");
+        let tcp = on(LinkKind::Tcp, "lo");
+        let vsock = on(LinkKind::Vsock, "lo");
 
         assert!(tcp_only.admit_one(t0, DownsamplingMessage::Put, "demo/x", Some(&tcp)));
         assert!(
@@ -818,7 +822,7 @@ mod tests {
             ..rule(&["demo/**"], Duration::from_millis(100))
         }]);
         let nic_only = LinkSubject {
-            protocol: None,
+            kind: None,
             interfaces: Some(vec!["eth0".to_owned()]),
             cert_common_name: None,
         };
@@ -860,7 +864,7 @@ mod tests {
         // On the named NIC: governed.
         {
             let ds = eth0_rule();
-            let eth0 = on(InterceptorLink::Tcp, "eth0");
+            let eth0 = on(LinkKind::Tcp, "eth0");
             assert!(ds.admit_one(t0, DownsamplingMessage::Put, "demo/x", Some(&eth0)));
             assert!(
                 !ds.admit_one(
@@ -878,11 +882,11 @@ mod tests {
         // The second is the case zenoh conflates with a failed lookup, because it
         // maps both to `vec![]`.
         for (label, subject) in [
-            ("a different NIC", on(InterceptorLink::Tcp, "lo")),
+            ("a different NIC", on(LinkKind::Tcp, "lo")),
             (
                 "no NIC at all",
                 LinkSubject {
-                    protocol: Some(InterceptorLink::UnixsockStream),
+                    kind: Some(LinkKind::UnixsockStream),
                     interfaces: Some(Vec::new()),
                     cert_common_name: None,
                 },

@@ -85,7 +85,7 @@ use wz_runtime_tokio::session::{
     TokioSession,
 };
 use wz_runtime_tokio::session_glue::{
-    new_session_actions, BoxedLinkDriver, InterceptorLink, IterationEvent, LinkSendOutcome,
+    new_session_actions, BoxedLinkDriver, IterationEvent, LinkKind, LinkSendOutcome,
     SessionLinkActions,
 };
 use wz_runtime_tokio::sink::SampleView;
@@ -709,9 +709,15 @@ pub struct LinkSnapshot {
     pub src: String,
     /// The peer end's locator (`z_link_dst`).
     pub dst: String,
-    /// The link protocol, or `None` when the driver cannot say (`z_link_is_streamed`,
+    /// The KIND of link, or `None` when the driver cannot say (`z_link_is_streamed`,
     /// `z_link_reliability`).
-    pub protocol: Option<InterceptorLink>,
+    ///
+    /// R2794 (open-debt item 814) — the kind, not the protocol a rule sees. This
+    /// was `protocol: Option<InterceptorLink>` copied off the ACL subject, and the
+    /// two accessors above were answered from it. That was right only while one
+    /// enum held both answers: the datagram link is `quic` to a rule and still
+    /// unstreamed and best-effort to zenoh-c, and only its kind can say so.
+    pub kind: Option<LinkKind>,
     /// The NICs this link's local address sits on (`z_link_interfaces`), with
     /// `None` meaning "could not be determined" — see `LinkSubject`.
     pub interfaces: Option<Vec<String>>,
@@ -780,7 +786,7 @@ impl FaceSnapshot {
             .map(|e| LinkSnapshot {
                 src: e.src,
                 dst: e.dst,
-                protocol: subject.as_ref().and_then(|s| s.protocol),
+                kind: subject.as_ref().and_then(|s| s.kind),
                 interfaces: subject.as_ref().and_then(|s| s.interfaces.clone()),
                 mtu,
             })

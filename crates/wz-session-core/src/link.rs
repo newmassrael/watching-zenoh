@@ -28,42 +28,30 @@ use core::ops::Deref;
 #[cfg(all(feature = "alloc", feature = "session-unicast"))]
 use wz_runtime_core::TimeSource;
 
-/// Synchronous outbound link-write seam the session FSM action layer
-/// drives. The FSM's link sink (`R::LinkSink`, resolved through
-/// [`SessionRuntime::link_driver`]) decouples the runtime-agnostic
-/// `SessionLinkActions` from the concrete transport: the tokio AP
-/// profile wraps an async `LinkDriver` behind a blocking-enqueue
-/// adapter (`TokioLinkDriverAdapter` / `UdpWriteDriver` /
-/// `TcpWriteDriver`); the lwIP MCU profile wraps a synchronous
-/// `LwipUdpSocket::send_to`.
-///
-/// The trait is deliberately *pure* — it carries no `Send + Sync`
-/// supertrait. Auto-trait requirements are a per-profile *storage*
-/// decision, not a contract of the write seam itself: the tokio
-/// profile shares the driver across worker threads so it binds
-/// [`SessionRuntime::LinkSink`] to `Arc<dyn BoxedLinkDriver + Send +
-/// Sync>`, while the single-task lwIP MCU profile shares the same
-/// `udp_pcb` between its sync drive loop and its driver, so it binds
-/// `LinkSink` to a `Rc<dyn BoxedLinkDriver>` that is intentionally
-/// `!Send` (the MCU socket holds raw `*mut udp_pcb` pointers that
-/// cannot satisfy `Send` without an `unsafe impl`). Baking `Send +
-/// Sync` onto the trait would force that `unsafe` hack onto the MCU
-/// impl; keeping the trait pure lets each profile's `LinkSink` carry
-/// the auto-traits its concurrency model actually needs.
-/// R311y453 — which LINK PROTOCOL a transport speaks: the wz mirror of zenoh's
-/// `InterceptorLink` (`zenoh-config/src/lib.rs:317-327`), and the vocabulary of
-/// the §5.16 `link_protocols` subject axis.
+/// R311y453 — which LINK PROTOCOL a transport speaks, as a RULE sees it: the wz
+/// mirror of zenoh's `InterceptorLink` (`zenoh-config/src/lib.rs:317-327`), and
+/// the vocabulary of the §5.16 `link_protocols` subject axis.
 ///
 /// Deliberately NOT [`crate::locator::Proto`], which was the first thing tried
-/// and does not fit: `Proto` is the IP-locator scheme set (Tcp / Udp / Tls / Ws /
-/// Quic / QuicDatagram), because serial, unixsock, unixpipe and vsock locators
-/// are not `SocketAddr`-based and carry their own parsed types. The subject axis
-/// has to name every link a face can arrive on, so it needs the wider set.
+/// and does not fit: `Proto` is the IP-locator scheme set, because serial,
+/// unixsock, unixpipe and vsock locators are not `SocketAddr`-based and carry
+/// their own parsed types.
 ///
-/// SUPERSET of upstream, in one place and on purpose: zenoh has no
-/// [`QuicDatagram`](Self::QuicDatagram) because it has no such transport; wz does
-/// (`transport-link-quic-datagram`), and a subject axis that could not name a
-/// link wz can actually accept would be a hole, not fidelity.
+/// R2794 (open-debt item 814) — EXACTLY UPSTREAM'S NINE, and no longer a
+/// superset. This enum used to carry a tenth value, `QuicDatagram`, on the stated
+/// ground that "zenoh has no such transport". It has one
+/// (`io/zenoh-links/zenoh-link-quic_datagram`, locator prefix `"quic"`), and it
+/// files it under `Quic` on this axis, because upstream reads the axis off the
+/// link's auth id and the datagram link carries the same `LinkAuthId::Quic` the
+/// stream link does. So one rule narrowed to `quic` governs both there, while
+/// here the same rule silently missed the datagram link -- for a deny rule, a
+/// bypass -- and wz accepted a `quic-datagram` rule zenohd refuses as unknown.
+///
+/// The extra value existed because ONE enum was answering two questions: which
+/// protocol a rule matches, and what KIND of link this is (streamed, reliable,
+/// how it advertises itself). Those have different answers for the same link,
+/// so they are now two types. The kind is [`LinkKind`]; a link STORES its kind
+/// and derives this protocol from it, so the two cannot disagree.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InterceptorLink {
     /// `tcp/...` — the TCP stream link.
@@ -72,11 +60,9 @@ pub enum InterceptorLink {
     Udp,
     /// `tls/...` — TLS over TCP.
     Tls,
-    /// `quic/...` — QUIC, batch over one bidirectional stream.
+    /// `quic/...` — QUIC, over a stream OR over datagrams: upstream files both of
+    /// its QUIC links under this one protocol, and so does wz.
     Quic,
-    /// `quic-datagram/...` — QUIC unreliable datagrams (RFC9221). wz-only; zenoh's
-    /// `InterceptorLink` has no counterpart.
-    QuicDatagram,
     /// `serial/...` — the COBS-framed tty link.
     Serial,
     /// `unixpipe/...` — the named-FIFO link.
@@ -102,7 +88,6 @@ impl InterceptorLink {
             InterceptorLink::Udp => "udp",
             InterceptorLink::Tls => "tls",
             InterceptorLink::Quic => "quic",
-            InterceptorLink::QuicDatagram => "quic-datagram",
             InterceptorLink::Serial => "serial",
             InterceptorLink::Unixpipe => "unixpipe",
             InterceptorLink::UnixsockStream => "unixsock-stream",
@@ -128,7 +113,6 @@ impl InterceptorLink {
         InterceptorLink::Udp,
         InterceptorLink::Tls,
         InterceptorLink::Quic,
-        InterceptorLink::QuicDatagram,
         InterceptorLink::Serial,
         InterceptorLink::Unixpipe,
         InterceptorLink::UnixsockStream,
@@ -148,6 +132,99 @@ impl InterceptorLink {
             .find(|link| link.as_str() == text)
     }
 
+    /// Parse a config spelling back, or `None` for an unknown name. Every config
+    /// surface (the demo knobs today, a `deploy.yaml` loader later) parses
+    /// through this one function rather than growing its own table.
+    ///
+    /// R2794 — this used to carry its OWN hand-written list of the values,
+    /// beside the `ALL` that [`Self::from_upstream_str`] searches: a second copy
+    /// of one vocabulary, free to disagree with the first. It now IS that search.
+    /// The config spelling and upstream's are the same words on this axis (see
+    /// [`Self::as_str`]), so there was never a second vocabulary to keep.
+    pub fn from_config_str(s: &str) -> Option<Self> {
+        Self::from_upstream_str(s)
+    }
+}
+
+/// R2794 (open-debt item 814) — the KIND of link a transport is: what the
+/// link itself answers, as opposed to which protocol a rule sees it as
+/// ([`InterceptorLink`]).
+///
+/// The two differ for real links, which is why they are two types. Upstream's
+/// QUIC datagram link is protocol `quic` to every rule, yet it is not streamed
+/// and not reliable, and it advertises itself as `quic/…?rel=0`; its reliable
+/// UDP link is protocol `udp` to every rule, yet it IS streamed and reliable.
+/// One enum answering both questions had to either give a rule a protocol
+/// upstream does not have, or give a link the wrong answers for itself -- and
+/// wz had done the first.
+///
+/// A link STORES its kind (see [`LinkSubject`]) and DERIVES its protocol
+/// through [`Self::interceptor_protocol`], so there is one fact and the two
+/// answers cannot drift apart.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LinkKind {
+    /// `tcp/...` — the TCP stream link.
+    Tcp,
+    /// `udp/...` — the UDP datagram link.
+    Udp,
+    /// `tls/...` — TLS over TCP.
+    Tls,
+    /// `quic/...` — QUIC, batch over one bidirectional stream.
+    Quic,
+    /// `quic/...?rel=0` — QUIC unreliable datagrams (RFC9221). A distinct KIND,
+    /// and the SAME protocol as [`Self::Quic`] to a rule.
+    QuicDatagram,
+    /// `serial/...` — the COBS-framed tty link.
+    Serial,
+    /// `unixpipe/...` — the named-FIFO link.
+    Unixpipe,
+    /// `unixsock-stream/...` — the Unix-domain stream socket link.
+    UnixsockStream,
+    /// `vsock/...` — the AF_VSOCK host/guest link.
+    Vsock,
+    /// `ws/...` — WebSocket over TCP, one batch per BINARY message.
+    Ws,
+}
+
+impl LinkKind {
+    /// Every kind. Its completeness is held by
+    /// `every_link_kind_is_listed_in_all`, whose exhaustive `match` stops
+    /// compiling when a kind is added -- the same device `InterceptorLink::ALL`
+    /// uses, for the same reason.
+    pub const ALL: &'static [LinkKind] = &[
+        LinkKind::Tcp,
+        LinkKind::Udp,
+        LinkKind::Tls,
+        LinkKind::Quic,
+        LinkKind::QuicDatagram,
+        LinkKind::Serial,
+        LinkKind::Unixpipe,
+        LinkKind::UnixsockStream,
+        LinkKind::Vsock,
+        LinkKind::Ws,
+    ];
+
+    /// The protocol a RULE sees this link as -- upstream's reading of the axis,
+    /// which it takes from the link's auth id
+    /// (`zenoh/src/net/routing/interceptor/mod.rs` @ `LinkAuthId::Quic(_) => Self(InterceptorLink::Quic),`).
+    ///
+    /// Wildcard-free: a new kind must state which protocol it is to a rule, which
+    /// is exactly the decision the old single enum let a new link skip.
+    pub fn interceptor_protocol(self) -> InterceptorLink {
+        match self {
+            LinkKind::Tcp => InterceptorLink::Tcp,
+            LinkKind::Udp => InterceptorLink::Udp,
+            LinkKind::Tls => InterceptorLink::Tls,
+            // Both QUIC kinds are `quic` to a rule, as upstream files them.
+            LinkKind::Quic | LinkKind::QuicDatagram => InterceptorLink::Quic,
+            LinkKind::Serial => InterceptorLink::Serial,
+            LinkKind::Unixpipe => InterceptorLink::Unixpipe,
+            LinkKind::UnixsockStream => InterceptorLink::UnixsockStream,
+            LinkKind::Vsock => InterceptorLink::Vsock,
+            LinkKind::Ws => InterceptorLink::Ws,
+        }
+    }
+
     /// R2259 (open-debt item 593) — whether this protocol carries a BYTE STREAM
     /// rather than framed datagrams, which is what zenoh-c's `z_link_is_streamed`
     /// reports.
@@ -161,10 +238,12 @@ impl InterceptorLink {
     /// derivation from wz's framing is not a second opinion — it is a bug.
     ///
     /// The table below is TRANSCRIBED from each link's own `LinkUnicastTrait`
-    /// impl at the pin and is held to it by
-    /// `upstream_link_axes_match` in
-    /// `crates/wz-integration-tests/tests/upstream_link_axis_oracle.rs`, so it
-    /// cannot drift back into prose:
+    /// impl at the pin and is held to it by `scripts/lib/upstream_link_axis_gate.py`,
+    /// which reads these two `matches!` bodies and this table and grades both
+    /// against the pinned upstream links, so it cannot drift back into prose.
+    /// (R2794: this line used to name a test,
+    /// `crates/wz-integration-tests/tests/upstream_link_axis_oracle.rs`, that does
+    /// not exist in the tree -- the gate is the only thing holding the table.)
     ///
     /// | link             | streamed | reliable |
     /// |------------------|----------|----------|
@@ -186,10 +265,7 @@ impl InterceptorLink {
     pub fn is_streamed(&self) -> bool {
         !matches!(
             self,
-            InterceptorLink::Udp
-                | InterceptorLink::QuicDatagram
-                | InterceptorLink::Serial
-                | InterceptorLink::Ws
+            LinkKind::Udp | LinkKind::QuicDatagram | LinkKind::Serial | LinkKind::Ws
         )
     }
 
@@ -212,19 +288,19 @@ impl InterceptorLink {
     pub fn is_reliable(&self) -> bool {
         !matches!(
             self,
-            InterceptorLink::Udp | InterceptorLink::QuicDatagram | InterceptorLink::Serial
+            LinkKind::Udp | LinkKind::QuicDatagram | LinkKind::Serial
         )
     }
 
     /// R311y473 — the DIALABLE LOCATOR for this protocol at `address`: the string
     /// a foreign peer has to be able to parse and connect to.
     ///
-    /// Deliberately NOT [`as_str`](Self::as_str). That is a CONFIG spelling, and
-    /// two of these ten differ between the two roles — `quic-datagram` is a
-    /// wz-only word (zenoh gives both its QUIC links the `quic` scheme and selects
-    /// with the `rel` metadata key, `io/zenoh-link/src/lib.rs:165-171`), and
-    /// `unixsock-stream` happens to coincide only because the config spelling was
-    /// already written as the scheme. R311y470 shipped a round fixing exactly this
+    /// Deliberately NOT [`InterceptorLink::as_str`]. That is a CONFIG spelling,
+    /// and the two roles differ -- zenoh gives both its QUIC links the `quic`
+    /// scheme and selects with the `rel` metadata key
+    /// (`io/zenoh-link/src/lib.rs:165-171`), so the datagram kind advertises
+    /// `?rel=0`; and `unixsock-stream` coincides only because the config spelling
+    /// was already written as the scheme. R311y470 shipped a round fixing exactly this
     /// confusion at the listener-advertise sites, where a log word had been reused
     /// as a scheme and produced two locators no zenoh peer could dial.
     ///
@@ -236,38 +312,17 @@ impl InterceptorLink {
     pub fn locator_for(&self, address: &str) -> String {
         use alloc::format;
         match self {
-            InterceptorLink::Tcp => format!("tcp/{address}"),
-            InterceptorLink::Udp => format!("udp/{address}"),
-            InterceptorLink::Tls => format!("tls/{address}"),
-            InterceptorLink::Quic => format!("quic/{address}"),
-            InterceptorLink::QuicDatagram => format!("quic/{address}?rel=0"),
-            InterceptorLink::Serial => format!("serial/{address}"),
-            InterceptorLink::Unixpipe => format!("unixpipe/{address}"),
-            InterceptorLink::UnixsockStream => format!("unixsock-stream/{address}"),
-            InterceptorLink::Vsock => format!("vsock/{address}"),
-            InterceptorLink::Ws => format!("ws/{address}"),
+            LinkKind::Tcp => format!("tcp/{address}"),
+            LinkKind::Udp => format!("udp/{address}"),
+            LinkKind::Tls => format!("tls/{address}"),
+            LinkKind::Quic => format!("quic/{address}"),
+            LinkKind::QuicDatagram => format!("quic/{address}?rel=0"),
+            LinkKind::Serial => format!("serial/{address}"),
+            LinkKind::Unixpipe => format!("unixpipe/{address}"),
+            LinkKind::UnixsockStream => format!("unixsock-stream/{address}"),
+            LinkKind::Vsock => format!("vsock/{address}"),
+            LinkKind::Ws => format!("ws/{address}"),
         }
-    }
-
-    /// Parse a config spelling back, or `None` for an unknown name. The inverse of
-    /// [`as_str`](Self::as_str), kept beside it so the two cannot drift; every
-    /// config surface (the demo knobs today, a `deploy.yaml` loader later) parses
-    /// through this one function rather than growing its own table.
-    pub fn from_config_str(s: &str) -> Option<Self> {
-        [
-            InterceptorLink::Tcp,
-            InterceptorLink::Udp,
-            InterceptorLink::Tls,
-            InterceptorLink::Quic,
-            InterceptorLink::QuicDatagram,
-            InterceptorLink::Serial,
-            InterceptorLink::Unixpipe,
-            InterceptorLink::UnixsockStream,
-            InterceptorLink::Vsock,
-            InterceptorLink::Ws,
-        ]
-        .into_iter()
-        .find(|link| link.as_str() == s)
     }
 }
 
@@ -339,6 +394,33 @@ pub enum LinkDropCause {
     WriterGone,
 }
 
+/// Synchronous outbound link-write seam the session FSM action layer
+/// drives. The FSM's link sink (`R::LinkSink`, resolved through
+/// [`SessionRuntime::link_driver`]) decouples the runtime-agnostic
+/// `SessionLinkActions` from the concrete transport: the tokio AP
+/// profile wraps an async `LinkDriver` behind a blocking-enqueue
+/// adapter (`TokioLinkDriverAdapter` / `UdpWriteDriver` /
+/// `TcpWriteDriver`); the lwIP MCU profile wraps a synchronous
+/// `LwipUdpSocket::send_to`.
+///
+/// The trait is deliberately *pure* — it carries no `Send + Sync`
+/// supertrait. Auto-trait requirements are a per-profile *storage*
+/// decision, not a contract of the write seam itself: the tokio
+/// profile shares the driver across worker threads so it binds
+/// [`SessionRuntime::LinkSink`] to `Arc<dyn BoxedLinkDriver + Send +
+/// Sync>`, while the single-task lwIP MCU profile shares the same
+/// `udp_pcb` between its sync drive loop and its driver, so it binds
+/// `LinkSink` to a `Rc<dyn BoxedLinkDriver>` that is intentionally
+/// `!Send` (the MCU socket holds raw `*mut udp_pcb` pointers that
+/// cannot satisfy `Send` without an `unsafe impl`). Baking `Send +
+/// Sync` onto the trait would force that `unsafe` hack onto the MCU
+/// impl; keeping the trait pure lets each profile's `LinkSink` carry
+/// the auto-traits its concurrency model actually needs.
+///
+/// R2794 — this text sat at the top of the file, left behind when the
+/// "hoist frame encoders + BoxedLinkDriver" refactor moved this trait down, and
+/// so it documented [`InterceptorLink`] instead of the seam it describes. It is
+/// back on the trait it is about.
 pub trait BoxedLinkDriver {
     /// Hand `bytes` to the link, reporting whether they were accepted.
     ///
@@ -453,10 +535,18 @@ impl LinkEndpoints {
 /// [`interfaces`](Self::interfaces).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct LinkSubject {
-    /// Which link protocol the transport speaks, or `None` when the driver
-    /// cannot say (a test double). A rule narrowed by `link_protocols` treats
-    /// `None` as MATCHING — see the fail-closed note below.
-    pub protocol: Option<InterceptorLink>,
+    /// What KIND of link the transport is, or `None` when the driver cannot say
+    /// (a test double). A rule narrowed by `link_protocols` treats `None` as
+    /// MATCHING — see the fail-closed note below.
+    ///
+    /// R2794 (open-debt item 814) — this used to be `protocol:
+    /// Option<InterceptorLink>`, one value read by two consumers who needed
+    /// different things from it: a rule wanted the protocol, zenoh-c's
+    /// `z_link_is_streamed` / `z_link_reliability` wanted the link's own
+    /// answers. The kind is the fact; [`Self::protocol`] derives what a rule
+    /// sees, so the datagram link is `quic` to a rule while still reporting
+    /// itself as unstreamed and best-effort.
+    pub kind: Option<LinkKind>,
     /// The names of the NICs this link's local address sits on:
     ///
     /// - `Some(names)` — resolved. An EMPTY set is a DEFINITE answer, "this link
@@ -497,10 +587,16 @@ impl LinkSubject {
     /// driver with no transport identity reports, and the value a
     /// [`BoxedLinkDriver::link_subject`] of `None` is equivalent to.
     pub const UNKNOWN: Self = Self {
-        protocol: None,
+        kind: None,
         interfaces: None,
         cert_common_name: None,
     };
+
+    /// R2794 — the protocol a RULE sees this link as, derived from its
+    /// [`kind`](Self::kind) and never stored beside it.
+    pub fn protocol(&self) -> Option<InterceptorLink> {
+        self.kind.map(LinkKind::interceptor_protocol)
+    }
 
     /// R2698 — this subject with its peer's leaf-certificate common name filled
     /// in, consuming and returning so a link's `wire_*` can add it to the
@@ -534,7 +630,7 @@ impl LinkSubject {
     /// `transport.get_auth_ids()` fails, installing NOTHING (permissive)
     /// — `downsampling.rs:90-116`. wz applies one policy to both.
     pub fn matches_protocols(&self, protocols: &[InterceptorLink]) -> bool {
-        match self.protocol {
+        match self.protocol() {
             Some(p) => protocols.contains(&p),
             None => true,
         }
@@ -822,7 +918,6 @@ mod tests {
                 | InterceptorLink::Udp
                 | InterceptorLink::Tls
                 | InterceptorLink::Quic
-                | InterceptorLink::QuicDatagram
                 | InterceptorLink::Serial
                 | InterceptorLink::Unixpipe
                 | InterceptorLink::UnixsockStream
@@ -830,9 +925,10 @@ mod tests {
                 | InterceptorLink::Ws => {}
             }
         }
+        // R2794 — 10 -> 9: exactly upstream's set, which has no `QuicDatagram`.
         assert_eq!(
             InterceptorLink::ALL.len(),
-            10,
+            9,
             "a variant was added: list it in ALL and move this count"
         );
 
@@ -853,5 +949,93 @@ mod tests {
             InterceptorLink::from_upstream_str("unixsock-stream"),
             Some(InterceptorLink::UnixsockStream)
         );
+        // R2794 — and `quic-datagram` is one of the things upstream refuses: its
+        // enum has no such value, so a rule naming it does not parse there. wz
+        // accepted it while it carried the value, which let a config through
+        // that zenohd rejects. `from_config_str` is the same search, so it must
+        // refuse it too.
+        assert_eq!(InterceptorLink::from_upstream_str("quic-datagram"), None);
+        assert_eq!(InterceptorLink::from_config_str("quic-datagram"), None);
+    }
+
+    /// R2794 (open-debt item 814) — [`LinkKind::ALL`] is complete, every kind
+    /// names a protocol a rule can write, and the one kind that differs from its
+    /// protocol keeps its OWN answers.
+    ///
+    /// The last property is the one the split exists for. The datagram kind is
+    /// `quic` to a rule, so a `quic` rule governs it, and yet it must still
+    /// report itself unstreamed and best-effort to zenoh-c. A single value
+    /// could not hold both, which is why a one-line fix that set the datagram
+    /// link's protocol to `Quic` would have closed the ACL bypass and opened a
+    /// C-ABI regression in the same stroke.
+    #[test]
+    fn every_link_kind_is_listed_in_all_and_maps_to_a_rule_protocol() {
+        fn _adding_a_kind_must_not_compile_until_all_is_updated(kind: LinkKind) {
+            match kind {
+                LinkKind::Tcp
+                | LinkKind::Udp
+                | LinkKind::Tls
+                | LinkKind::Quic
+                | LinkKind::QuicDatagram
+                | LinkKind::Serial
+                | LinkKind::Unixpipe
+                | LinkKind::UnixsockStream
+                | LinkKind::Vsock
+                | LinkKind::Ws => {}
+            }
+        }
+        assert_eq!(
+            LinkKind::ALL.len(),
+            10,
+            "a kind was added: list it in ALL and move this count"
+        );
+
+        // Every kind's protocol is a value a rule can actually name.
+        for kind in LinkKind::ALL {
+            assert!(
+                InterceptorLink::ALL.contains(&kind.interceptor_protocol()),
+                "{kind:?} maps to a protocol outside the rule vocabulary"
+            );
+        }
+        // And every protocol a rule can name reaches at least one kind -- a
+        // protocol no link could ever present would be a rule that can only
+        // ever match a subject that names nothing.
+        for protocol in InterceptorLink::ALL {
+            assert!(
+                LinkKind::ALL
+                    .iter()
+                    .any(|k| k.interceptor_protocol() == *protocol),
+                "no link kind presents `{}` to a rule",
+                protocol.as_str()
+            );
+        }
+
+        // THE PAIR: `quic` to a rule, datagram to itself.
+        assert_eq!(
+            LinkKind::QuicDatagram.interceptor_protocol(),
+            InterceptorLink::Quic,
+            "upstream files its QUIC datagram link under `quic`"
+        );
+        assert!(!LinkKind::QuicDatagram.is_streamed());
+        assert!(!LinkKind::QuicDatagram.is_reliable());
+        assert_eq!(
+            LinkKind::QuicDatagram.locator_for("127.0.0.1:7447"),
+            "quic/127.0.0.1:7447?rel=0",
+            "the datagram kind advertises the `rel=0` marker a foreign peer dials"
+        );
+        // Its sibling shares the protocol and NOT the kind answers, which is
+        // exactly what one enum could not say.
+        assert_eq!(LinkKind::Quic.interceptor_protocol(), InterceptorLink::Quic);
+        assert!(LinkKind::Quic.is_streamed());
+        assert!(LinkKind::Quic.is_reliable());
+
+        // And a subject derives its protocol from its kind, never alongside it.
+        let subject = LinkSubject {
+            kind: Some(LinkKind::QuicDatagram),
+            ..LinkSubject::UNKNOWN
+        };
+        assert_eq!(subject.protocol(), Some(InterceptorLink::Quic));
+        assert!(subject.matches_protocols(&[InterceptorLink::Quic]));
+        assert!(!subject.matches_protocols(&[InterceptorLink::Udp]));
     }
 }

@@ -47,8 +47,11 @@
 //!   wz distinguishes them internally, and this ABI has to flatten the two
 //!   because the C type has no third state. It flattens toward the EMPTY array
 //!   upstream also produces, so a C program sees no shape upstream does not.
-//! - `is_streamed` / `reliability` are derived from the link PROTOCOL, which is
-//!   where the property lives; see [`InterceptorLink::is_streamed`].
+//! - `is_streamed` / `reliability` are derived from the link's KIND, which is
+//!   where the property lives; see
+//!   [`LinkKind::is_streamed`](wz_runtime_tokio::session_glue::LinkKind::is_streamed).
+//!   R2794 — not from the protocol a rule sees: the datagram link is `quic` to a
+//!   rule and still unstreamed, and this line used to name the rule enum.
 //! - `mtu` is the negotiated batch budget, the same value the fragmenter sizes
 //!   against.
 //!
@@ -303,9 +306,11 @@ impl LinkState {
             // A driver that cannot name its protocol cannot be called streamed;
             // upstream's `z_link_is_streamed` has no third answer, and `false`
             // is the one that does not claim framing wz cannot show.
-            is_streamed: link.protocol.map(|p| p.is_streamed()).unwrap_or(false),
-            reliability: link.protocol.map(|p| {
-                if p.is_reliable() {
+            // R2794 — read off the link's KIND. The rule protocol cannot answer
+            // this: the datagram link is `quic` to a rule and still unstreamed.
+            is_streamed: link.kind.map(|k| k.is_streamed()).unwrap_or(false),
+            reliability: link.kind.map(|k| {
+                if k.is_reliable() {
                     Z_RELIABILITY_RELIABLE
                 } else {
                     Z_RELIABILITY_BEST_EFFORT
@@ -2535,9 +2540,7 @@ mod tests {
         let snapshot = LinkSnapshot {
             src: "tcp/127.0.0.1:7447".to_owned(),
             dst: "tcp/127.0.0.1:35000".to_owned(),
-            protocol: Some(
-                wz_runtime_tokio::session_glue::InterceptorLink::from_config_str("udp").unwrap(),
-            ),
+            kind: Some(wz_runtime_tokio::session_glue::LinkKind::Udp),
             interfaces: Some(vec!["lo".to_owned()]),
             mtu: 65535,
         };
@@ -2572,6 +2575,48 @@ mod tests {
         unsafe { z_link_drop(&mut moved) };
     }
 
+    /// R2794 (open-debt item 814) — zenoh-c's `z_link_is_streamed` and
+    /// `z_link_reliability` answer from the link's KIND, so the QUIC-datagram
+    /// link still reports itself unstreamed and best-effort after it became
+    /// `quic` to every rule.
+    ///
+    /// This is the regression a one-line fix for the ACL bypass would have
+    /// caused: this snapshot used to take its value off the ACL subject, so
+    /// setting the datagram subject to `Quic` would have made zenoh-c call a
+    /// datagram link streamed and reliable. The stream sibling is asserted
+    /// beside it -- the two share a rule protocol and must NOT share these
+    /// answers, and only a test holding both can see a snapshot that read the
+    /// protocol instead of the kind.
+    #[test]
+    fn the_datagram_link_reports_its_own_axes_to_c_not_its_rule_protocol() {
+        use wz_capi_core::faces::LinkSnapshot;
+        use wz_runtime_tokio::session_glue::LinkKind;
+        for (kind, streamed, want) in [
+            (LinkKind::QuicDatagram, false, Z_RELIABILITY_BEST_EFFORT),
+            (LinkKind::Quic, true, Z_RELIABILITY_RELIABLE),
+        ] {
+            let snapshot = LinkSnapshot {
+                src: "quic/127.0.0.1:7447".to_owned(),
+                dst: "quic/127.0.0.1:35000".to_owned(),
+                kind: Some(kind),
+                interfaces: None,
+                mtu: 1200,
+            };
+            let owned = owned_link(LinkState::from_snapshot(&snapshot, [3u8; 16]));
+            let loaned = unsafe { z_link_loan(&owned) };
+            assert_eq!(
+                unsafe { z_link_is_streamed(loaned) },
+                streamed,
+                "{kind:?}: z_link_is_streamed"
+            );
+            let mut reliability = 0;
+            assert!(unsafe { z_link_reliability(loaned, &mut reliability) });
+            assert_eq!(reliability, want, "{kind:?}: z_link_reliability");
+            let mut moved = z_moved_link_t { _this: owned };
+            unsafe { z_link_drop(&mut moved) };
+        }
+    }
+
     /// A link event lends the link it is about, and freeing the event frees that
     /// link with it.
     #[test]
@@ -2580,7 +2625,7 @@ mod tests {
         let snapshot = LinkSnapshot {
             src: "tcp/a".to_owned(),
             dst: "tcp/b".to_owned(),
-            protocol: None,
+            kind: None,
             interfaces: None,
             mtu: 1024,
         };
