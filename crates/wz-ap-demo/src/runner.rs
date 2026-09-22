@@ -7759,6 +7759,10 @@ pub(crate) struct StorageHostOpts {
     /// admin `send_push` handler -- the same divergence the read gate's own
     /// frozen-permit clause named, on the write side.
     pub config_write_permit: bool,
+    /// R2788 — `--plugins <section>`: the config's `plugins` section as JSON5
+    /// text, which this host runs its storage manager from. A `--config` file
+    /// naming `plugins` expands to it.
+    pub plugins: Option<String>,
     /// `--batch-size` / `--lease-ms`.
     pub tuning: TransportTuning,
 }
@@ -7776,8 +7780,22 @@ pub(crate) async fn run_storage_host(listen: &str, opts: StorageHostOpts) -> io:
         storage_gc,
         no_admin_read,
         config_write_permit,
+        plugins: startup_plugins,
         tuning,
     } = opts;
+    // R2788 — the section is applied ONCE, at the first accepted session: a
+    // storage is declared on a session, and before one exists there is nothing
+    // to host it on and no client that could reach it. A build without
+    // `zenoh-config` has no write gate to apply it through, and says so.
+    #[cfg(feature = "zenoh-config")]
+    let mut startup_plugins = startup_plugins;
+    #[cfg(not(feature = "zenoh-config"))]
+    if let Some(section) = startup_plugins {
+        log::warn!(
+            "wz-ap-demo storage-host: --plugins {section} given but this binary lacks the \
+             `zenoh-config` feature — INERT, no plugin was started"
+        );
+    }
     let plugin_paths: &[String] = &plugin_paths;
     let dynamic_volume = dynamic_volume.as_ref();
 
@@ -8482,6 +8500,30 @@ pub(crate) async fn run_storage_host(listen: &str, opts: StorageHostOpts) -> io:
             );
         }
 
+        // ── R2788: the config file's `plugins` section, on the FIRST session ──
+        // Through the same write gate a wire write takes, as a write of the whole
+        // section: the storage manager is not running yet, so its validator has
+        // nothing to check, the section is stored, and the notification starts
+        // the plugin. The two admin views are refreshed here rather than left to
+        // the dispatch closure, which would refresh them only AFTER the first
+        // event's handlers had already answered from the stale ones.
+        #[cfg(feature = "zenoh-config")]
+        if let Some(section) = startup_plugins.take() {
+            apply_storage_plugin_write(
+                &admin_cfg,
+                &mut manager,
+                &session,
+                &node_zid,
+                "plugins",
+                Some(&section),
+                "from --plugins",
+            );
+            storage_started.store(!manager.is_empty(), Relaxed);
+            *storage_leaves
+                .lock()
+                .expect("storage admin leaves poisoned") = manager.admin_status_leaves(&version);
+        }
+
         // ── the per-iteration dispatch closure ──
         // Fires the session's handlers, THEN drains + applies the stashed storage
         // intents. add_storage / remove_storage run AFTER
@@ -8727,6 +8769,7 @@ pub(crate) async fn run_storage_host(listen: &str, opts: StorageHostOpts) -> io:
                                 &dispatch_zid,
                                 key,
                                 Some(value.as_str()),
+                                "over the wire",
                             )
                         }
                         #[cfg(feature = "zenoh-config")]
@@ -8740,6 +8783,7 @@ pub(crate) async fn run_storage_host(listen: &str, opts: StorageHostOpts) -> io:
                                 &dispatch_zid,
                                 key,
                                 None,
+                                "over the wire",
                             )
                         }
                         AdminConfigWrite::RemoveKey { key } => log::warn!(
@@ -8850,6 +8894,7 @@ fn apply_storage_plugin_write(
     local_zid: &[u8],
     key: &str,
     value: Option<&str>,
+    origin: &str,
 ) {
     use wz::runtime_tokio::config::ConfigSinks;
     use wz::runtime_tokio::storage_manager_service::StorageManagerSink;
@@ -8879,7 +8924,7 @@ fn apply_storage_plugin_write(
     }
     match outcome {
         Ok(()) => log::info!(
-            "wz-ap-demo storage-host: plugins config key {key} {} over the wire — \
+            "wz-ap-demo storage-host: plugins config key {key} {} {origin} — \
              storage_manager plugin {}",
             if value.is_some() {
                 "written"

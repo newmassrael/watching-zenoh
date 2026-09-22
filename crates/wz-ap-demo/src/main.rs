@@ -1225,6 +1225,9 @@ fn main() -> ExitCode {
                     // `PermissionsConf` default; this host granted unconditionally
                     // until this round.
                     config_write_permit: rest.iter().any(|a| a == "--config-write-permit"),
+                    // R2788 — the `plugins` section as JSON5 text, which a
+                    // `--config` file's `plugins` key expands to.
+                    plugins: parse_pair(rest, "--plugins"),
                     tuning,
                 },
             )

@@ -1771,6 +1771,33 @@ pub(crate) fn expand_stock_zenoh_config_for_build(
     if named("scouting/multicast/enabled") {
         exp.record("scouting/multicast/enabled", KeyEffect::AlreadyTheBehaviour);
     }
+    // R2788 — `plugins`, onto `--plugins <section>`: the WHOLE section as its
+    // JSON5 text, which the storage host runs its storage manager from.
+    //
+    // ⚠ NOT dropped the way `low_pass_filter` and `access_control/*` are, and
+    // the difference is what an argv can state. Those keys are documents the
+    // demo's flags could only approximate (one global cap, one deny list), so
+    // expanding them would start a node enforcing part of what the file says.
+    // This flag takes the section verbatim, so nothing is approximated: the
+    // storage host reads it with the same reader a config write goes through.
+    //
+    // Only `--storage-host` runs a storage manager, and a file cannot select
+    // that run-mode (`mode` never maps to it), so the run must have been TYPED;
+    // any other run is told the section was withheld from it, by name, rather
+    // than handed a flag it would reject.
+    if named("plugins") {
+        let blocked = no_sink("plugins").or_else(|| {
+            (typed_role.map(|(flag, _)| flag) != Some("--storage-host")).then_some(
+                KeyEffect::WithheldFromThisRun("a storage manager (only --storage-host runs one)"),
+            )
+        });
+        let section = cfg
+            .plugins
+            .as_ref()
+            .map(|section| section.to_json5_text())
+            .unwrap_or_default();
+        exp.pair("plugins", "--plugins", section, blocked);
+    }
     // The adminspace block, whose three upstream keys expand to four wz flags.
     // Keyed on the BLOCK rather than on `adminspace/enabled`, because a
     // document that names only a permission still describes an admin space —
@@ -3010,6 +3037,19 @@ pub(crate) const ARGV_ONLY_KIND_LEDGER: &[(&str, &str, &str)] = &[
          apfull_adminspace_write_applied_and_observed_by_a_real_pico and \
          apfull_adminspace_write_gate_refuses_an_unpermitted_pico_put.",
     ),
+    // R2788 — `plugins`. The storages a section declares DO put frames on the
+    // wire (a capture subscriber and a queryable per storage), but those frames
+    // are the storage's, not the key's: what the key does is make a storage
+    // SERVE, and that is observed end to end rather than read off a field.
+    (
+        "plugins",
+        KIND_LEG_JUDGED,
+        "expands to `--plugins <section>` on a `--storage-host` run; \
+         wz_storage_host_plugins_section_from_a_config_file_serves_via_pico, in \
+         wz-integration-tests/tests/wz_storage_host_plugins_section_pico.rs, \
+         starts the host on a FILE naming one storage and requires a REAL pico \
+         client to read the storage's status and then its own put back.",
+    ),
 ];
 
 #[cfg(feature = "zenoh-config")]
@@ -3172,6 +3212,12 @@ pub(crate) fn config_keys_the_demo_drops() -> Vec<&'static str> {
     // rather than expand into a refusal.
     if !cfg!(feature = "scouting-responder") {
         out.push("scouting/multicast/listen");
+    }
+    // R2788 — `plugins`' sink is the storage host, which runs the storage
+    // manager from the section, and only an `adminspace-config-hotreload` build
+    // compiles that run-mode at all: `--storage-host` exits(2) without it.
+    if !cfg!(feature = "adminspace-config-hotreload") {
+        out.push("plugins");
     }
     // R2633 — `--router-link-weight` is parsed by the `--router-hat` arm alone,
     // and the types it builds come from an OPTIONAL dependency the same feature
@@ -3659,16 +3705,23 @@ mod stock_config_tests {
     /// are what this test is about now.
     #[test]
     fn the_keys_wz_does_not_honour_are_carried_out_to_be_reported() {
+        // R2788 — `plugins: {}` became a NAMED key when the reader started
+        // carrying the section, so the fixture now names a plugin wz does not
+        // run: the section is named, and its member's leaf is still carried out
+        // to be reported.
         let out = expand(
             &["--config", "z.json5"],
             r#"{ mode: "client",
                  connect: { endpoints: ["tcp/r:7447"] },
                  transport: { link: { tx: { threads: 8 } } },
-                 plugins: {} }"#,
+                 plugins: { rest: { http_port: 8000 } } }"#,
         )
         .unwrap();
-        assert_eq!(out.ignored, vec!["plugins", "transport/link/tx/threads"]);
-        assert_eq!(out.named, vec!["mode", "connect/endpoints"]);
+        assert_eq!(
+            out.ignored,
+            vec!["plugins/rest/http_port", "transport/link/tx/threads"]
+        );
+        assert_eq!(out.named, vec!["mode", "connect/endpoints", "plugins"]);
     }
 
     /// R2124 (open-debt item 504) — EVERY AXIS THE READER HANDS OVER REACHES A
@@ -3983,6 +4036,11 @@ mod stock_config_tests {
             | "listen/retry"
             | "listen/timeout_ms"
             | "listen/exit_on_failure" => &["--config", "z.json5", "--peer", "tcp/127.0.0.1:0"],
+            // R2788 — `plugins`' precondition is the one run-mode that runs a
+            // storage manager. A file cannot select it (`mode` never maps to
+            // it), so the row types it, and the role-parity sweep below skips
+            // this row by MEASURING that the file supplies a different role.
+            "plugins" => &["--config", "z.json5", "--storage-host", "tcp/127.0.0.1:0"],
             _ => &["--config", "z.json5"],
         }
     }
@@ -4473,6 +4531,14 @@ mod stock_config_tests {
                 r#"{ mode: "router", listen: { endpoints: ["tcp/127.0.0.1:0"] },
                      routing: { router: { linkstate: { transport_weights:
                        [ { dst_zid: "b1b2c3d4", weight: 200 } ] } } } }"#,
+            ),
+            // R2788 — the section, one storage in it; see `cli_for` for the
+            // run-mode it reaches.
+            (
+                "plugins",
+                r#"{ mode: "peer" }"#,
+                r#"{ mode: "peer", plugins: { storage_manager: { storages:
+                     { demo: { key_expr: "demo/**", volume: "memory" } } } } }"#,
             ),
         ]
     }
@@ -5266,6 +5332,11 @@ mod stock_config_tests {
             "namespace",
             "no-admin-read",
             "plugin",
+            // R2788 — the storage host's `plugins` section, undocumented with
+            // the rest of that run-mode's flags (`storage-host` itself is): it
+            // is what a `--config` file's `plugins` key expands to, and prints
+            // when that run-mode's flags do.
+            "plugins",
             "publish-after-ms",
             "put-key",
             "put-payload",

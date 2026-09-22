@@ -201,8 +201,8 @@ pub const RUNTIME_MUTABLE_CONFIG_KEYS: &[RuntimeMutableKey] = &[
     // consumers are RUNNING plugins, which hold state built from their documents
     // (a storage manager's live storages), so a write reaches them through
     // their validator before it may land and through the notification plane
-    // after. Unhonoured at startup for now, the shape `interceptors` had before
-    // R2650: the reader does not read this key, and a write can change it.
+    // after. R2788 made it honoured at startup too: the reader carries the
+    // section and `apply_one_key` stores it before any plugin runs.
     RuntimeMutableKey {
         key: "plugins",
         slice: "plugins",
@@ -2524,6 +2524,28 @@ impl WzConfig {
                 self.connect_endpoints = match source {
                     Some(ingest) => ingest.config.connect.clone(),
                     None => Self::default().connect_endpoints,
+                };
+                true
+            }
+            // R2788 — the `plugins` section, STORED: this is the startup half,
+            // before any plugin runs, so there is no validator to ask and no
+            // notification to send — the host starts the plugins from what is
+            // stored here once it has something to run them on. A runtime write
+            // never reaches this arm; `set_by_key_with` routes `plugins` keys to
+            // `reconfigure_plugins` first. The reader has already refused a
+            // section that is not an object of objects, so `from_section` cannot
+            // fail here; answering `false` keeps that an assertion about the
+            // reader rather than a panic in a node.
+            #[cfg(feature = "adminspace-config-hotreload")]
+            "plugins" => {
+                self.plugins = match source.and_then(|ingest| ingest.config.plugins.as_ref()) {
+                    Some(section) => {
+                        match crate::plugins_config::PluginsConfig::from_section(section) {
+                            Ok(plugins) => plugins,
+                            Err(_) => return false,
+                        }
+                    }
+                    None => crate::plugins_config::PluginsConfig::new(),
                 };
                 true
             }

@@ -321,6 +321,10 @@ fn render_resolved(value: &Json5Value) -> String {
                 .collect();
             format!("[{}]", joined.join(","))
         }
+        // R2788 — an object, which the `plugins` claim is the first row to
+        // compare: rendered as its JSON text, so an empty section reads `{}`
+        // rather than the `Object([])` a Debug rendering would give.
+        Json5Value::Object(_) => value.to_json5_text(),
         other => format!("{other:?}"),
     }
 }
@@ -770,8 +774,20 @@ fn the_defaults_each_implementation_falls_back_to_are_pinned_against_a_real_zeno
             "transport/shared_memory/enabled",
             wz.shared_memory.to_string(),
         ),
+        // R2788 — `plugins`: a silent file resolves it to an EMPTY SECTION, not
+        // to null (MEASURED against the local zenohd v1.10.0 on a silent peer
+        // config: `"plugins":{}`), so the tree answers and the key is
+        // comparable. wz's struct records the silence as `None`, and a node
+        // holding `None` runs no plugin — the empty section's meaning — which is
+        // asserted below rather than rendered here, for the literal-in-a-row
+        // reason the weights row gives.
+        ("plugins", String::from("{}")),
     ];
     assert!(wz.connect.is_empty(), "the fixture states no connect list");
+    assert!(
+        wz.plugins.is_none(),
+        "the fixture states no plugins section, so wz runs no plugin"
+    );
     // R2633 — the claim above is the literal `[]`, so the value it stands for is
     // asserted here rather than formatted into the row: the gate that keeps this
     // table honest reads the row's KEY with a regex, and an expression holding a
@@ -3570,12 +3586,19 @@ fn a_wz_node_configured_only_by_a_stock_zenoh_config_reaches_a_real_zenohd() {
     // own exception list", which is the gate refusing to carry its own copy.
     // Open-debt 722 carries the redraw: two exceptions now share one reason, so
     // the predicate wants to be a ROLE question and cannot ask one.
+    // R2788 — `plugins` is the THIRD, and for that same kind of reason: in wz
+    // only `--storage-host` runs a storage manager, so a connecting client's run
+    // is told the section was withheld from it rather than handed a flag (see
+    // the demo's `plugins` site). A client whose file names a section therefore
+    // carries nothing this leg could ask the binary to accept. Item 722's
+    // redraw now has three members sharing one reason.
     let mut every_honoured: Vec<&str> = HONOURED_CONFIG_KEYS
         .iter()
         .chain(WZ_EXTENSION_HONOURED_KEYS)
         .copied()
         .filter(|k| *k != "listen/endpoints")
         .filter(|k| *k != "transport/auth/usrpwd/dictionary_file")
+        .filter(|k| *k != "plugins")
         .collect();
     fixture_names.sort_unstable();
     every_honoured.sort_unstable();

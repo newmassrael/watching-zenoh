@@ -1185,6 +1185,20 @@ pub struct ZenohNodeConfig {
     /// be inverted, so the inputs are kept and the compiled form is derived from
     /// them. See [`AclConfigInputs`].
     pub access_control: AclConfigInputs,
+    /// R2788 (§5.23 `adminspace-config-hotreload`) — `plugins`, the section as
+    /// the document stated it: each member a plugin's own document.
+    ///
+    /// Kept as a DOCUMENT because upstream keeps it as one
+    /// (`commons/zenoh-config/src/lib.rs` @ `pub struct PluginsConfig {`) and
+    /// because only a plugin knows what its document means: the storage
+    /// manager's is read by `wz_session_core::storage_plugin_config`, applied by
+    /// the storage host, and nothing here needs a second reading of it. The
+    /// reader checks the one shape upstream's loader demands — an object whose
+    /// members are objects — and refuses anything else, as a zenohd does.
+    ///
+    /// `None` = the document named no section, which a running zenohd resolves
+    /// to an empty one; a present-but-empty section is `Some({})`.
+    pub plugins: Option<Json5Value>,
 }
 
 impl Default for ZenohNodeConfig {
@@ -1294,6 +1308,7 @@ impl Default for ZenohNodeConfig {
             low_pass_filter: Vec::new(),
             downsampling: Vec::new(),
             access_control: AclConfigInputs::default(),
+            plugins: None,
         }
     }
 }
@@ -1901,6 +1916,15 @@ pub const HONOURED_CONFIG_KEYS: &[&str] = &[
     "listen/exit_on_failure",
     "listen/retry",
     "listen/timeout_ms",
+    // R2788 (§5.23 `adminspace-config-hotreload`) — the `plugins` section,
+    // MOVED here from `UNHONOURED_UPSTREAM_CONFIG_KEYS`, so the surface total is
+    // unchanged. The reader carries it, the storage host runs the storage
+    // manager from it at startup, and a runtime write below it reaches that
+    // plugin's validator. What one SURFACE leaf cannot say is carried by
+    // `plugins_leaf_is_honoured`: an operator's document is reported ignored
+    // leaf by leaf wherever it names something no plugin of wz reads — another
+    // plugin entirely, or a storage manager field wz does not act on.
+    "plugins",
 ];
 
 /// R311y849 — the leaves that live INSIDE a honoured key which is a subtree
@@ -2117,7 +2141,10 @@ pub const UNHONOURED_UPSTREAM_CONFIG_KEYS: &[&str] = &[
     "metadata",
     "open/return_conditions/connect_scouted",
     "open/return_conditions/declares",
-    "plugins",
+    // R2788 — `plugins` LEFT this list for `HONOURED_CONFIG_KEYS`: the reader
+    // carries the section and the storage host runs the storage manager from
+    // it. Its two `plugins_loading/*` siblings stay: they govern how a zenohd
+    // DISCOVERS plugin libraries, which is a different capability.
     "plugins_loading/enabled",
     "plugins_loading/search_dirs",
     "qos/network",
@@ -2466,10 +2493,11 @@ pub const UNHONOURED_BEYOND_WZ: &[&str] = &[
 /// * `low_pass_filter` — `LowPassRule` on the same chain, driven by
 ///   `--max-payload`. R2150 moved both: the group sentence that held them
 ///   claimed wz needed an interceptor chain, and wz has one.
-/// * `plugins`, `plugins_loading/enabled` — `PluginRegistry`, which loads,
-///   starts, stops and admin-reports `DynamicPlugin`s, driven today by the
-///   demo's repeated `--plugin`. `plugins_loading/search_dirs` stays in
+/// * `plugins_loading/enabled` — `PluginRegistry`, which loads, starts, stops
+///   and admin-reports `DynamicPlugin`s, driven today by the demo's repeated
+///   `--plugin`. `plugins_loading/search_dirs` stays in
 ///   [`UNHONOURED_BEYOND_WZ`]: wz loads by explicit path and has no discovery.
+///   (R2788: `plugins` itself left this list — the reader carries the section.)
 /// * `transport/link/tls/{connect_certificate,connect_private_key,enable_mtls,
 ///   verify_name_on_connect}` — `tls_config.rs`. `ClientAuthPem` carries the
 ///   client `cert_chain_pem` + `private_key_pem` an mTLS dial presents, and
@@ -2505,7 +2533,7 @@ pub const UNHONOURED_READER_GAP: &[&str] = &[
     // that seam: the retention structure their lossy
     // rules-x-subjects-x-policies join demanded is `WzConfig::acl_inputs`, and
     // with it built, none of the seven interceptor keys is a reader gap.
-    "plugins",
+    // R2788 — `plugins` LEFT this list: the reader now carries the section.
     "plugins_loading/enabled",
     // R2539 — ARRIVED here from [`UNHONOURED_BEYOND_WZ`] the round wz grew the
     // capability. `SessionLinkActions::set_local_region` gives a session its
@@ -2868,7 +2896,8 @@ pub const UNHONOURED_CITATION_LEDGER: &[(&str, &str, &str)] = &[
     // for UNHONOURED keys, and `unhonoured_kind_evidence_gate` reds on a row whose
     // key the reader now honours.
     ("metadata", "not-this-key", "AdminLocalData"),
-    ("plugins", "wz-has-it", "PluginRegistry"),
+    // R2788 — `plugins`' row is GONE: the reader honours the key now, and this
+    // ledger carries evidence for unhonoured keys only.
     ("plugins_loading/enabled", "wz-has-it", "PluginRegistry"),
     // The citing site is `PluginRegistry`'s doc, drawing the line at this key:
     // the host is wz's, the DISCOVERY is not. A citation that says "not this
@@ -3327,6 +3356,80 @@ pub fn honours_config_key(path: &str) -> bool {
         // wz's to honour, so reporting them as unhonoured would contradict the
         // resolution that just happened.
         || inside_a_mode_table(path)
+        // R2788 — the leaves inside a SECTION that a plugin of wz reads.
+        || (HONOURED_SECTIONS.iter().any(|section| path.starts_with(section))
+            && plugins_leaf_is_honoured(path))
+}
+
+/// R2788 — the honoured keys whose deeper leaves are claimed by a reader of
+/// their OWN: a SECTION, whose members are documents only their owner can read.
+///
+/// The fourth way a denominator-shifting key's leaves are claimed, beside a
+/// mode table, named subtree fields ([`HONOURED_SUBTREE_LEAVES`]) and opacity —
+/// and it is not one of those three, because it splits: some leaves below
+/// `plugins` are ones a plugin of wz acts on and the rest are reported, and
+/// which is which is `plugins_leaf_is_honoured`'s answer, not a fixed list.
+const HONOURED_SECTIONS: &[&str] = &["plugins"];
+
+/// R2788 — whether a leaf INSIDE the `plugins` section is one wz acts on.
+///
+/// The surface has one leaf there (`plugins`), and an operator's document has
+/// as many as it writes; this is what keeps the `ignored` report exact under
+/// that one honoured key, the job [`HONOURED_SUBTREE_LEAVES`] does for
+/// `connect/retry`. Exact rather than a prefix rule, for the reason that list
+/// gives: a prefix would swallow a typo, and a real zenohd starts on a document
+/// whose plugin fields are misspelled, so reporting them is the only signal the
+/// operator gets.
+///
+/// wz runs ONE plugin from this section, the storage manager (the plugin name
+/// is `wz_session_core::storage_plugin_config`'s `STORAGE_MANAGER_PLUGIN`,
+/// spelled here because this reader does not depend on that feature). Of its
+/// document wz acts on:
+///
+/// * each volume's `backend`, its library `__path__`, and every other field,
+///   which is a parameter of the backend (a backend refuses one it does not
+///   read, by name, when the volume is built);
+/// * each storage's `key_expr`, `complete`, `strip_prefix`, `volume` (a string
+///   or an object whose members are the storage's volume parameters) and
+///   `garbage_collection`'s `period` and `lifespan`.
+///
+/// It does NOT act on the plugin's `__required__` (wz logs a failed start and
+/// does not abort), `backend_search_dirs` (wz loads no backend by search), its
+/// `__path__`/`__plugin__`/`__config__` (the storage manager is compiled in, and
+/// an included file is not resolved), a volume's `__required__`, a storage's
+/// `replication` (wz's replication is its own track) or any other storage
+/// field (upstream ignores those too) — all reported. Every leaf of any OTHER
+/// plugin is reported: wz does not run it.
+fn plugins_leaf_is_honoured(path: &str) -> bool {
+    let Some(rest) = path.strip_prefix("plugins") else {
+        return false;
+    };
+    // The section itself, written empty.
+    if rest.is_empty() {
+        return true;
+    }
+    let Some(inside) = rest.strip_prefix('/') else {
+        return false;
+    };
+    let steps: Vec<&str> = inside.split('/').collect();
+    match steps.as_slice() {
+        // The storage manager's document, written empty.
+        ["storage_manager"] => true,
+        ["storage_manager", "volumes"] | ["storage_manager", "storages"] => true,
+        ["storage_manager", "volumes", _volume, rest @ ..] => {
+            !matches!(rest.first(), Some(&"__required__"))
+        }
+        ["storage_manager", "storages", _storage] => true,
+        ["storage_manager", "storages", _storage, field, rest @ ..] => match *field {
+            "key_expr" | "complete" | "strip_prefix" => rest.is_empty(),
+            "volume" => true,
+            "garbage_collection" => {
+                matches!(rest, [] | ["period"] | ["lifespan"])
+            }
+            _ => false,
+        },
+        _ => false,
+    }
 }
 
 /// R2658 — WIDENED TO `pub(crate)`, because it is the root of the config-key
@@ -5711,6 +5814,25 @@ impl ZenohNodeConfig {
             out.access_control.policies = acl_policies_of(value, "access_control/policies")?;
             named.push("access_control/policies");
         }
+        // R2788 — the `plugins` section, kept whole: each member is a plugin's
+        // own document and only the plugin knows what it means, so the reader
+        // checks the one shape upstream's loader checks and hands the rest on.
+        if let Some(value) = honoured(&doc, "plugins") {
+            let is_a_section = match value {
+                Json5Value::Object(members) => members
+                    .iter()
+                    .all(|(_, doc)| matches!(doc, Json5Value::Object(_))),
+                _ => false,
+            };
+            if !is_a_section {
+                return Err(ConfigIngestError::WrongType {
+                    path: "plugins",
+                    expected: "an object whose members are objects",
+                });
+            }
+            out.plugins = Some(value.clone());
+            named.push("plugins");
+        }
         if let Some(v) = want_u64(&doc, "scouting/timeout")? {
             out.scouting_timeout_ms = Some(v);
             named.push("scouting/timeout");
@@ -6887,6 +7009,14 @@ mod tests {
             // ingest to MOVE. A fixture naming the default would report the key
             // honoured while proving only that the reader did not crash.
             //
+            // R2788 — one storage in the storage manager's document, every leaf
+            // of which is one the partition calls honoured, so `ignored` stays
+            // empty; a leaf it did not would fail this row by name.
+            (
+                "plugins",
+                r#"{ "plugins": { "storage_manager": { "storages": { "demo":
+                     { "key_expr": "demo/**", "volume": "memory" } } } } }"#,
+            ),
             // R2230 (items 579 / 582) — this row MOVED to the tail of the table
             // when the key left `HONOURED_CONFIG_KEYS` for
             // `WZ_EXTENSION_HONOURED_KEYS`. It is still driven, and driven the
@@ -6928,6 +7058,72 @@ mod tests {
                 ingest.config,
                 ZenohNodeConfig::default(),
                 "{key} parsed but changed nothing"
+            );
+        }
+    }
+
+    /// R2788 — the `plugins` section is read WHOLE, refused in the one shape
+    /// upstream's loader refuses, and reported leaf by leaf wherever it names
+    /// something no plugin of wz acts on.
+    #[test]
+    fn the_plugins_section_is_read_whole_and_reported_leaf_by_leaf() {
+        let doc = r#"{ "plugins": {
+            "rest": { "http_port": 8000 },
+            "storage_manager": {
+                "__required__": true,
+                "backend_search_dirs": ["/lib"],
+                "volumes": { "v": { "backend": "mem", "__required__": false, "root": "/x" } },
+                "storages": { "s": {
+                    "key_expr": "s/**", "strip_prefix": "s", "complete": true,
+                    "volume": { "id": "v", "dir": "d" },
+                    "garbage_collection": { "period": 5, "lifespan": 60 },
+                    "replication": { "interval": 10 },
+                    "typo_field": 1
+                } }
+            }
+        } }"#;
+        let ingest = ZenohNodeConfig::from_json5(doc).expect("a section of objects is read");
+        assert!(ingest.named.contains(&"plugins"));
+        assert_eq!(
+            ingest
+                .config
+                .plugins
+                .as_ref()
+                .map(Json5Value::to_json5_text),
+            Some(
+                wz_session_core::json5::parse(doc)
+                    .unwrap()
+                    .get("plugins")
+                    .unwrap()
+                    .to_json5_text()
+            ),
+            "the section reaches the config whole, exactly as written"
+        );
+        assert_eq!(
+            ingest.ignored,
+            vec![
+                "plugins/rest/http_port",
+                "plugins/storage_manager/__required__",
+                "plugins/storage_manager/backend_search_dirs",
+                "plugins/storage_manager/storages/s/replication/interval",
+                "plugins/storage_manager/storages/s/typo_field",
+                "plugins/storage_manager/volumes/v/__required__",
+            ],
+            "exactly the leaves no plugin of wz acts on, and no other"
+        );
+
+        let empty = ZenohNodeConfig::from_json5(r#"{ "plugins": {} }"#).unwrap();
+        assert_eq!(empty.config.plugins, Some(Json5Value::Object(Vec::new())));
+        assert!(empty.ignored.is_empty() && empty.named.contains(&"plugins"));
+
+        for bad in [r#"{ "plugins": 5 }"#, r#"{ "plugins": { "rest": 5 } }"#] {
+            assert_eq!(
+                ZenohNodeConfig::from_json5(bad),
+                Err(ConfigIngestError::WrongType {
+                    path: "plugins",
+                    expected: "an object whose members are objects",
+                }),
+                "{bad}"
             );
         }
     }
@@ -7006,10 +7202,12 @@ mod tests {
         // the reader had not been taught, so they are honoured now and the
         // document's remaining two (`plugins`, `transport/link/tx/threads`)
         // carry the property this test is about.
-        assert_eq!(
-            ingest.ignored,
-            vec!["plugins", "transport/link/tx/threads",]
-        );
+        //
+        // R2788 — and `plugins` left it the same way: the reader carries the
+        // section now, and an EMPTY one names nothing any plugin could ignore.
+        // The fixture is unchanged again; `transport/link/tx/threads` still
+        // carries the property on its own.
+        assert_eq!(ingest.ignored, vec!["transport/link/tx/threads"]);
     }
 
     /// R311y849 — `connect/retry` is ONE census leaf holding THREE numbers, so
@@ -9117,6 +9315,7 @@ mod tests {
 
         let mut mode = Vec::new();
         let mut subtree = Vec::new();
+        let mut section = Vec::new();
         let mut opaque = Vec::new();
         for key in DEEPENABLE_UPSTREAM_KEYS {
             let honoured = HONOURED_CONFIG_KEYS.contains(key);
@@ -9124,23 +9323,32 @@ mod tests {
             let claimed_by_fields = HONOURED_SUBTREE_LEAVES
                 .iter()
                 .any(|leaf| strictly_below(leaf, key));
+            // R2788 — the fourth claim: a section whose members' leaves are
+            // judged by their owner's reader.
+            let claimed_by_section = HONOURED_SECTIONS.contains(key);
             assert!(
-                !(claimed_by_table && claimed_by_fields),
-                "{key} is claimed twice: a mode table and named subtree fields \
-                 are two different readings of the same leaves"
+                [claimed_by_table, claimed_by_fields, claimed_by_section]
+                    .iter()
+                    .filter(|claimed| **claimed)
+                    .count()
+                    <= 1,
+                "{key} is claimed twice: a mode table, named subtree fields and a \
+                 section's own reader are different readings of the same leaves"
             );
 
             if claimed_by_table {
                 mode.push(*key);
             } else if claimed_by_fields {
                 subtree.push(*key);
+            } else if claimed_by_section {
+                section.push(*key);
             } else {
                 opaque.push(*key);
             }
 
             if honoured {
                 assert!(
-                    claimed_by_table || claimed_by_fields,
+                    claimed_by_table || claimed_by_fields || claimed_by_section,
                     "{key} is HONOURED and its deeper leaves are claimed by \
                      nothing, so a file that fills the block gets it applied and \
                      its own fields reported as unhonoured. Add the fields to \
@@ -9150,12 +9358,20 @@ mod tests {
                 );
             } else {
                 assert!(
-                    !claimed_by_fields,
-                    "{key} is NOT honoured yet has entries in \
-                     HONOURED_SUBTREE_LEAVES — claiming leaves under a key wz \
-                     does not apply hides them from the operator"
+                    !claimed_by_fields && !claimed_by_section,
+                    "{key} is NOT honoured yet has its leaves claimed — claiming \
+                     leaves under a key wz does not apply hides them from the \
+                     operator"
                 );
             }
+        }
+        // Every declared section is a member of the population: one that is
+        // not would claim leaves below a key no zenohd lets a file deepen.
+        for key in HONOURED_SECTIONS {
+            assert!(
+                DEEPENABLE_UPSTREAM_KEYS.contains(key),
+                "{key} is declared a section but is not denominator-shifting"
+            );
         }
 
         // The breakdown, not the total: a floor on the sum would be met by one
@@ -9163,14 +9379,17 @@ mod tests {
         // that stopped being exercised.
         println!(
             "denominator-shifting keys: {} total — {} mode-table {mode:?}, \
-             {} named-subtree {subtree:?}, {} opaque {opaque:?}",
+             {} named-subtree {subtree:?}, {} section {section:?}, {} opaque \
+             {opaque:?}",
             DEEPENABLE_UPSTREAM_KEYS.len(),
             mode.len(),
             subtree.len(),
+            section.len(),
             opaque.len()
         );
         assert!(!mode.is_empty(), "the mode-table bucket emptied");
         assert!(!subtree.is_empty(), "the named-subtree bucket emptied");
+        assert!(!section.is_empty(), "the section bucket emptied");
         assert!(!opaque.is_empty(), "the opaque bucket emptied");
     }
 
@@ -9276,7 +9495,7 @@ mod tests {
     /// * the opaque probe's value is never read by anything.
     #[test]
     fn every_denominator_shifting_key_puts_its_deeper_leaves_in_the_right_partition() {
-        let (mut mode_n, mut subtree_n, mut opaque_n) = (0usize, 0usize, 0usize);
+        let (mut mode_n, mut subtree_n, mut section_n, mut opaque_n) = (0usize, 0, 0, 0);
 
         for key in DEEPENABLE_UPSTREAM_KEYS {
             let fields: Vec<&&str> = HONOURED_SUBTREE_LEAVES
@@ -9284,7 +9503,33 @@ mod tests {
                 .filter(|leaf| strictly_below(leaf, key))
                 .collect();
 
-            if MODE_DEPENDENT_CONFIG_KEYS.contains(key) {
+            if HONOURED_SECTIONS.contains(key) {
+                // R2788 — a SECTION: a leaf its owner's reader honours is
+                // named and not reported, and a leaf of a member nothing in wz
+                // reads is reported. Both probes put an OBJECT at member depth,
+                // because a section's members must be objects — a real zenohd
+                // refuses a scalar there ("must be object"), and so does wz.
+                let honoured = format!("{key}/storage_manager/storages/s/key_expr");
+                let doc = nested(&honoured, r#""s/**""#);
+                let ingest = ZenohNodeConfig::from_json5(&doc)
+                    .unwrap_or_else(|e| panic!("{honoured}: refused: {e:?}\n{doc}"));
+                assert!(
+                    !ingest.ignored.contains(&honoured) && ingest.named.contains(key),
+                    "{key}: `{honoured}` is a leaf the section's owner reads\n{:?}",
+                    ingest.ignored
+                );
+                let stray = format!("{key}/zzz_probe_member/leaf");
+                let doc = nested(&stray, "1");
+                let ingest = ZenohNodeConfig::from_json5(&doc)
+                    .unwrap_or_else(|e| panic!("{stray}: refused: {e:?}\n{doc}"));
+                assert!(
+                    ingest.ignored.contains(&stray),
+                    "{key}: `{stray}` belongs to a member nothing in wz reads and \
+                     was swallowed silently\n{:?}",
+                    ingest.ignored
+                );
+                section_n += 1;
+            } else if MODE_DEPENDENT_CONFIG_KEYS.contains(key) {
                 let doc = nested(key, "{ router: 1 }");
                 let ingest = ZenohNodeConfig::from_json5(&doc)
                     .unwrap_or_else(|e| panic!("{key}: a mode table was refused: {e:?}\n{doc}"));
@@ -9359,15 +9604,15 @@ mod tests {
 
         println!(
             "deeper-leaf partitions driven: {mode_n} mode-table, {subtree_n} \
-             named-subtree, {opaque_n} opaque"
+             named-subtree, {section_n} section, {opaque_n} opaque"
         );
         assert_eq!(
-            mode_n + subtree_n + opaque_n,
+            mode_n + subtree_n + section_n + opaque_n,
             DEEPENABLE_UPSTREAM_KEYS.len(),
             "a member of the population was driven through no probe at all"
         );
         // Per-bucket floors. A total floor would let the opaque bucket carry a
         // shrinking mode bucket, and the mode arm is the one R2141 grew.
-        assert!(mode_n > 0 && subtree_n > 0 && opaque_n > 0);
+        assert!(mode_n > 0 && subtree_n > 0 && section_n > 0 && opaque_n > 0);
     }
 }

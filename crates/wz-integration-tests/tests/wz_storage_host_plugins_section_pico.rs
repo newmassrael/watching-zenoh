@@ -285,3 +285,106 @@ fn wz_storage_host_plugins_section_drives_the_storage_manager_via_pico() {
     let _ = host.child_mut().wait();
     let _ = read_captured(&mut h_reader);
 }
+
+/// R2788 — the STARTUP half: an operator's config file names a storage in its
+/// `plugins` section, the storage host is started on that file with
+/// `--config`, and a pico client finds the storage serving without having
+/// written anything to the config at all.
+///
+/// The file's section reaches the host as `--plugins <section>` (the demo's
+/// `--config` expansion) and is applied at the first accepted session, since a
+/// storage is declared on a session; the pico client's own session is that
+/// first one.
+// wz-proves: adminspace-config-hotreload wz->pico
+#[test]
+#[ignore = "binary-dep e2e (wz-ap-demo --features adminspace-config-hotreload,zenoh-config + zenoh-pico z_get/z_put CLIs); Layer E6h runs via --ignored"]
+fn wz_storage_host_plugins_section_from_a_config_file_serves_via_pico() {
+    use std::io::Write as _;
+
+    let demo = wz_ap_demo_binary();
+    assert_demo_binary_newer_than_sources(&demo);
+    let z_get = zenoh_pico_cli_binary("z_get");
+    let z_put = zenoh_pico_cli_binary("z_put");
+    let port_res = PortReservation::pick();
+    let addr = format!("127.0.0.1:{}", port_res.port());
+
+    // An operator's file, as a zenohd would be given it. `.json5` because the
+    // demo dispatches on the extension the way zenohd does.
+    let mut file = tempfile::Builder::new()
+        .suffix(".json5")
+        .tempfile()
+        .expect("config tempfile");
+    file.write_all(
+        br#"{ plugins: { storage_manager: { storages: {
+                boot: { key_expr: "boot/**", volume: "memory" } } } } }"#,
+    )
+    .expect("write config");
+    file.flush().expect("flush config");
+
+    let h_stderr = tempfile::tempfile().expect("tempfile for storage-host stderr");
+    let h_writer = h_stderr
+        .try_clone()
+        .expect("dup storage-host stderr handle");
+    let mut h_reader = h_stderr;
+    let mut host = ChildGuard::wrap(
+        "wz-ap-demo --config <file> --storage-host",
+        Command::new(&demo)
+            .arg("--config")
+            .arg(file.path())
+            .arg("--storage-host")
+            .arg(&addr)
+            .env("RUST_LOG", "info")
+            .stdout(Stdio::null())
+            .stderr(Stdio::from(h_writer))
+            .spawn()
+            .expect("spawn wz-ap-demo storage host"),
+    );
+    let ready = match wait_for_substring(
+        &mut h_reader,
+        "adminspace config GET at ",
+        Duration::from_secs(5),
+    ) {
+        Ok(c) => c,
+        Err(c) => {
+            let _ = host.child_mut().kill();
+            let _ = host.child_mut().wait();
+            panic!("storage host never became ready within 5s\n--- host ---\n{c}");
+        }
+    };
+    let root = ready
+        .lines()
+        .find_map(|l| {
+            l.split_once("adminspace config GET at ")
+                .map(|(_, r)| r.trim().to_string())
+        })
+        .and_then(|k| k.strip_suffix("/config").map(str::to_string))
+        .expect("storage host logged its admin config keyexpr");
+    drop(port_res);
+
+    // The first session is this put's: the section is applied on it, and the
+    // storage it starts captures the put that session carries.
+    pico_put(&z_put, "boot/a", "stored-at-boot", &addr);
+    host_says(
+        &mut host,
+        &mut h_reader,
+        "plugins config key plugins written from --plugins — storage_manager plugin running",
+        "startup",
+    );
+    let status = format!("{root}/status/plugins/storage_manager");
+    let out = pico_get_output(&z_get, &format!("{status}/**"), &addr);
+    assert_eq!(
+        pico_body_at(&out, &format!("{status}/storages/boot")).as_deref(),
+        Some(r#"{"key_expr":"boot/**","volume":"memory"}"#),
+        "the file's storage is hosted as the file declared it\n--- z_get ---\n{out}"
+    );
+    let data = pico_get_output(&z_get, "boot/**", &addr);
+    assert_eq!(
+        pico_body_at(&data, "boot/a").as_deref(),
+        Some("stored-at-boot"),
+        "and it serves: the put the first session carried is read back\n--- z_get ---\n{data}"
+    );
+
+    let _ = host.child_mut().kill();
+    let _ = host.child_mut().wait();
+    let _ = read_captured(&mut h_reader);
+}
