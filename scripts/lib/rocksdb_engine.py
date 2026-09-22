@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: AGPL-3.0-or-later OR LicenseRef-watching-zenoh-Commercial
 # SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
-"""R2805: provision the locked RocksDB source once, outside Cargo feature units.
+"""R2805 (no register item): provision RocksDB outside Cargo feature units.
 
 Only Linux native CI opts in. Normal developer and cross builds keep the crate's
 own build. Cache identity includes the source checksum, recipe, host and compiler;
