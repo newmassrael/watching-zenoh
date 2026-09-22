@@ -2000,7 +2000,19 @@ PIN_NO_SYMBOL = 2
 # and after: (wz 5, ambiguous 0) -> (wz 8, ambiguous 0). ATTRIBUTED by the
 # arithmetic: 76 + 3 = 79, the census's own FAIL line, so no other atom moves
 # and AMBIGUOUS correctly holds.
-PIN_WZ_CITATIONS = 79
+#
+# R2797 — 79 -> 83, RISING: `transport-link-udp` stays PARTIAL and gains four
+# wz citations in an addendum recording that the base R2796 named is built.
+# The four are the wrapped session (`quic_plaintext.rs` @ `struct
+# PlainTextSession(Box<dyn crypto::Session>);`), the seam that now takes
+# quinn's crypto (`quic_pipeline.rs` @ `pub(crate) fn tls_client_crypto(`),
+# the variant's dial (`udp_reliable_pipeline.rs` @ `pub async fn
+# dial_udp_reliable(`) and the on-the-wire witness (`udp_reliable_e2e.rs` @
+# `async fn reliable_udp_carries_the_stream_bytes_in_the_clear_both_ways()`).
+# DERIVED with this module's own `citation_audit` over that atom alone, before
+# and after: (wz 8, ambiguous 0) -> (wz 12, ambiguous 0). ATTRIBUTED by the
+# arithmetic: 79 + 4 = 83, the census's own FAIL line, so no other atom moves.
+PIN_WZ_CITATIONS = 83
 # R2626 — 44 -> 42, and this one is worth a sentence because it HELD through
 # every earlier retirement in this run (R2612, R2622). `time-hlc`'s reason is the
 # first retiree carrying AMBIGUOUS citations of its own: its oldest clauses cite
