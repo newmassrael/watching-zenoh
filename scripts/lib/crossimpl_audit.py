@@ -686,7 +686,24 @@ HOST_GATED_CI_TARGETS: dict[str, str] = {
 # dialing. Two tests each claim `session-extauth` and `access-extauth-usrpwd`,
 # and a link is a distinct (atom, test) pair, so the first test's two
 # `session-extauth` directions count once: 2 tests x 2 atoms = 4.
-FOREIGN_ADJUDICATOR_LINKS = 923
+# R2790 — 923 -> 925, RISING because two rounds gave
+# `adminspace-config-hotreload` foreign adjudication of its DECLARATIVE half,
+# one link each and in opposite directions. R2787's
+# `wz_storage_host_plugins_section_drives_the_storage_manager_via_pico` is
+# `pico->wz`: a stock pico client WRITES the storage manager's document, key by
+# key, and the host's verdict for each write is what the leg waits on. R2788's
+# `wz_storage_host_plugins_section_from_a_config_file_serves_via_pico` is
+# `wz->pico`: the host is started on a config FILE and the pico client reads the
+# storage back, so what is adjudicated is what wz SERVES rather than what it
+# accepted. Both name one atom, and a link is a distinct (atom, test) pair.
+#
+# ⚠ The first of the two was pushed WITHOUT this constant moving, and hosted
+# Layer A4 redded for it (run 35672309641). That is this ratchet's own class —
+# a hosted-only gate is invisible to the commit that moves it — and the cost is
+# recorded here rather than in prose: the round that adds a `wz-proves` line
+# measures this number with `bash scripts/audit-crossimpl-proof.sh` before it
+# pushes.
+FOREIGN_ADJUDICATOR_LINKS = 925
 
 # ── Execution disclosure ────────────────────────────────────────────────────────
 #
