@@ -1921,7 +1921,7 @@ pub const HONOURED_CONFIG_KEYS: &[&str] = &[
     // unchanged. The reader carries it, the storage host runs the storage
     // manager from it at startup, and a runtime write below it reaches that
     // plugin's validator. What one SURFACE leaf cannot say is carried by
-    // `plugins_leaf_is_honoured`: an operator's document is reported ignored
+    // `plugins_leaf_disposition`: an operator's document is reported ignored
     // leaf by leaf wherever it names something no plugin of wz reads — another
     // plugin entirely, or a storage manager field wz does not act on.
     "plugins",
@@ -3358,7 +3358,72 @@ pub fn honours_config_key(path: &str) -> bool {
         || inside_a_mode_table(path)
         // R2788 — the leaves inside a SECTION that a plugin of wz reads.
         || (HONOURED_SECTIONS.iter().any(|section| path.starts_with(section))
-            && plugins_leaf_is_honoured(path))
+            && plugins_leaf_disposition(path) == ConfigKeyDisposition::Honoured)
+}
+
+/// R2797 — what this build can SAY about one upstream
+/// config key. The answer [`honours_config_key`]'s `bool` cannot carry.
+///
+/// A `bool` merges two facts that a consumer CLASSIFYING an upstream document
+/// has to keep apart, because `false` is returned for both of:
+///
+/// * a key this build has looked at and deliberately does not act on — writing
+///   it is a supported deployment whose author will not be surprised;
+/// * a key nobody here has ever classified — a misspelling, or surface upstream
+///   grew after this build was cut. Writing that one is a document whose author
+///   believes something this build never promised.
+///
+/// `plugins_leaf_disposition` already draws exactly this line one level down
+/// and for the same reason it gives there: *a prefix would swallow a typo*. The
+/// public surface just could not express it, so every caller outside this
+/// module had to merge the two back together — which is the loss the consumer
+/// refused to take on their own side and then found here.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConfigKeyDisposition {
+    /// Writing this key changes what this build does.
+    Honoured,
+    /// This build reads a document containing this key and applies nothing from
+    /// it — and says so ON PURPOSE. Either [`UNHONOURED_UPSTREAM_CONFIG_KEYS`]
+    /// names it, or it is one of the plugin leaves
+    /// `plugins_leaf_disposition` declares.
+    DeclaredUnhonoured,
+    /// Neither list claims this key and no rule reaches it. This build has NO
+    /// STATEMENT about it — which is not the same as a statement that it is
+    /// ignored, and the difference is the one this enum exists for.
+    Unknown,
+}
+
+/// R2797 — [`honours_config_key`] widened from a
+/// `bool` to the three words [`ConfigKeyDisposition`] names.
+///
+/// This is the SAME predicate, not a second one: the honoured arm is
+/// `honours_config_key` itself, so a sixth organ added to that chain is
+/// answered here the day it lands rather than the day somebody remembers this
+/// function. Two spellings of "does wz honour this key" is precisely the drift
+/// `honours_config_key`'s own doc was written to stop, and a three-valued
+/// version that re-derived the honoured half would be exactly that.
+///
+/// Order matters and is honoured-first. That is only unambiguous because the
+/// honoured lists and [`UNHONOURED_UPSTREAM_CONFIG_KEYS`] are DISJOINT;
+/// `a_key_is_never_both_honoured_and_declared_unhonoured` holds the invariant
+/// this order silently depends on.
+pub fn config_key_disposition(path: &str) -> ConfigKeyDisposition {
+    if honours_config_key(path) {
+        return ConfigKeyDisposition::Honoured;
+    }
+    if UNHONOURED_UPSTREAM_CONFIG_KEYS.contains(&path) {
+        return ConfigKeyDisposition::DeclaredUnhonoured;
+    }
+    // A section's leaves are its owner's to classify, and `Unknown` below a
+    // section wz DOES read would report a deliberate decision as an absence of
+    // one — in the one subtree the consumer asks about most.
+    if HONOURED_SECTIONS
+        .iter()
+        .any(|section| path.starts_with(section))
+    {
+        return plugins_leaf_disposition(path);
+    }
+    ConfigKeyDisposition::Unknown
 }
 
 /// R2788 — the honoured keys whose deeper leaves are claimed by a reader of
@@ -3368,10 +3433,10 @@ pub fn honours_config_key(path: &str) -> bool {
 /// mode table, named subtree fields ([`HONOURED_SUBTREE_LEAVES`]) and opacity —
 /// and it is not one of those three, because it splits: some leaves below
 /// `plugins` are ones a plugin of wz acts on and the rest are reported, and
-/// which is which is `plugins_leaf_is_honoured`'s answer, not a fixed list.
+/// which is which is `plugins_leaf_disposition`'s answer, not a fixed list.
 const HONOURED_SECTIONS: &[&str] = &["plugins"];
 
-/// R2788 — whether a leaf INSIDE the `plugins` section is one wz acts on.
+/// R2788 — what a leaf INSIDE the `plugins` section is to wz.
 ///
 /// The surface has one leaf there (`plugins`), and an operator's document has
 /// as many as it writes; this is what keeps the `ignored` report exact under
@@ -3400,35 +3465,97 @@ const HONOURED_SECTIONS: &[&str] = &["plugins"];
 /// `replication` (wz's replication is its own track) or any other storage
 /// field (upstream ignores those too) — all reported. Every leaf of any OTHER
 /// plugin is reported: wz does not run it.
-fn plugins_leaf_is_honoured(path: &str) -> bool {
+/// R2797 — WIDENED from `plugins_leaf_is_honoured` to three words,
+/// and the widening is the change. The `false` this used to return covered both
+/// halves of the paragraph above — the leaves wz deliberately does not act on
+/// AND a leaf nobody named — so the caller could not tell an operator who wrote
+/// `replication` (a real upstream field, deliberately not wz's) from one who
+/// wrote `strip_prefx`. Both halves were already DERIVED here; only the return
+/// type merged them, and it merged them in the one subtree a consumer
+/// classifying a document asks about most.
+///
+/// The `DeclaredUnhonoured` population is upstream's, read at the pinned
+/// revision rather than asserted: `PluginConfig` / `VolumeConfig` /
+/// `StorageConfig` each read their document BY NAME and keep what is left in a
+/// `rest` map nothing consults, so a field upstream does not name is not
+/// surface at all — it is a typo, and `Unknown` is the only honest answer for
+/// it.
+///
+/// `plugins/zenoh-backend-traits/src/config.rs` @ `!["__required__", "backend_search_dirs", "volumes", "storages"]`
+/// `plugins/zenoh-backend-traits/src/config.rs` @ `let key_expr = match config.get("key_expr").and_then(|x| x.as_str()) {`
+fn plugins_leaf_disposition(path: &str) -> ConfigKeyDisposition {
+    use ConfigKeyDisposition::{DeclaredUnhonoured, Honoured, Unknown};
+
     let Some(rest) = path.strip_prefix("plugins") else {
-        return false;
+        return Unknown;
     };
     // The section itself, written empty.
     if rest.is_empty() {
-        return true;
+        return Honoured;
     }
     let Some(inside) = rest.strip_prefix('/') else {
-        return false;
+        return Unknown;
     };
+    if inside.is_empty() {
+        return Unknown;
+    }
     let steps: Vec<&str> = inside.split('/').collect();
     match steps.as_slice() {
         // The storage manager's document, written empty.
-        ["storage_manager"] => true,
-        ["storage_manager", "volumes"] | ["storage_manager", "storages"] => true,
-        ["storage_manager", "volumes", _volume, rest @ ..] => {
-            !matches!(rest.first(), Some(&"__required__"))
+        ["storage_manager"] => Honoured,
+        ["storage_manager", "volumes"] | ["storage_manager", "storages"] => Honoured,
+        // Upstream's `PluginConfig`: the two fields it names beside `volumes` /
+        // `storages`, and the three the plugin LOADER reads. wz acts on none of
+        // them and has said why for each.
+        //
+        // A PREFIX rule, unlike the honoured arms below, and the asymmetry is
+        // the point: swallowing a typo is only a lie when the answer is
+        // `Honoured`, because that is the answer an operator acts on. Under a
+        // field wz has declared it does not read, "wz does not act on this" is
+        // true of the misspellings too.
+        ["storage_manager", field, ..]
+            if matches!(
+                *field,
+                "__required__" | "backend_search_dirs" | "__path__" | "__plugin__" | "__config__"
+            ) =>
+        {
+            DeclaredUnhonoured
         }
-        ["storage_manager", "storages", _storage] => true,
-        ["storage_manager", "storages", _storage, field, rest @ ..] => match *field {
-            "key_expr" | "complete" | "strip_prefix" => rest.is_empty(),
-            "volume" => true,
-            "garbage_collection" => {
-                matches!(rest, [] | ["period"] | ["lifespan"])
-            }
-            _ => false,
+        ["storage_manager", "volumes", _volume, rest @ ..] => match rest {
+            // Upstream's `VolumeConfig::required`.
+            ["__required__", ..] => DeclaredUnhonoured,
+            _ => Honoured,
         },
-        _ => false,
+        ["storage_manager", "storages", _storage] => Honoured,
+        ["storage_manager", "storages", _storage, field, rest @ ..] => match *field {
+            "key_expr" | "complete" | "strip_prefix" => {
+                if rest.is_empty() {
+                    Honoured
+                } else {
+                    Unknown
+                }
+            }
+            "volume" => Honoured,
+            "garbage_collection" => match rest {
+                [] | ["period"] | ["lifespan"] => Honoured,
+                _ => Unknown,
+            },
+            // wz's replication is its own track. Upstream's `ReplicaConfig`
+            // and everything under it, by the prefix argument above, so an
+            // operator who wrote one hears "not this build" rather than "never
+            // heard of it".
+            "replication" => DeclaredUnhonoured,
+            _ => Unknown,
+        },
+        // Anything else under the storage manager. Upstream reads its document
+        // BY NAME and leaves the remainder in a `rest` map nothing consults, so
+        // a field it does not name is not surface — it is a misspelling, and
+        // this build has no statement about it.
+        ["storage_manager", ..] => Unknown,
+        // Every leaf of every OTHER plugin. wz runs exactly one plugin from
+        // this section, so this statement is exact WITHOUT reading the leaf —
+        // which is why it is a declaration and not an absence of one.
+        _ => DeclaredUnhonoured,
     }
 }
 
@@ -9614,5 +9741,134 @@ mod tests {
         // Per-bucket floors. A total floor would let the opaque bucket carry a
         // shrinking mode bucket, and the mode arm is the one R2141 grew.
         assert!(mode_n > 0 && subtree_n > 0 && section_n > 0 && opaque_n > 0);
+    }
+
+    /// R2797 — the invariant `config_key_disposition`'s
+    /// honoured-first order silently depends on. If a key were in both, the
+    /// answer would be whichever arm ran first, and the door would report a
+    /// preference as a fact.
+    #[test]
+    fn a_key_is_never_both_honoured_and_declared_unhonoured() {
+        let unhonoured: std::collections::BTreeSet<&str> =
+            UNHONOURED_UPSTREAM_CONFIG_KEYS.iter().copied().collect();
+        assert!(!unhonoured.is_empty(), "an empty list agrees with anything");
+
+        let mut checked = 0usize;
+        for (list, name) in [
+            (HONOURED_CONFIG_KEYS, "HONOURED_CONFIG_KEYS"),
+            (HONOURED_SUBTREE_LEAVES, "HONOURED_SUBTREE_LEAVES"),
+            (WZ_EXTENSION_HONOURED_KEYS, "WZ_EXTENSION_HONOURED_KEYS"),
+        ] {
+            assert!(!list.is_empty(), "{name} is empty and proves nothing");
+            for key in list {
+                assert!(
+                    !unhonoured.contains(key),
+                    "{key} is in {name} AND in UNHONOURED_UPSTREAM_CONFIG_KEYS; \
+                     honouring a key is a MOVE between the two lists, not an addition"
+                );
+                assert_eq!(
+                    config_key_disposition(key),
+                    ConfigKeyDisposition::Honoured,
+                    "{key} is in {name} and the disposition disagrees"
+                );
+                checked += 1;
+            }
+        }
+        for key in UNHONOURED_UPSTREAM_CONFIG_KEYS {
+            assert_eq!(
+                config_key_disposition(key),
+                ConfigKeyDisposition::DeclaredUnhonoured,
+                "{key} is declared unhonoured and the disposition disagrees"
+            );
+            checked += 1;
+        }
+        assert!(checked > 100, "only {checked} keys carried the comparison");
+    }
+
+    /// R2797 — why the C door cannot be an ENUMERATION.
+    ///
+    /// The consumer walked `wz_capi_c_config_honoured` to the end and could not
+    /// classify a `plugins` leaf, because the honoured set is INFINITE: a
+    /// storage's name is the operator's to choose, so every name yields another
+    /// honoured path. No finite list holds it, and a list that looks complete
+    /// is worse than one that says it is not — this is the witness that keeps
+    /// the enumeration from being re-read as the whole answer.
+    #[test]
+    fn the_honoured_enumeration_cannot_be_the_whole_answer() {
+        let enumerated: std::collections::BTreeSet<&str> =
+            HONOURED_CONFIG_KEYS.iter().copied().collect();
+        for storage in ["demo", "another", "a-third-name-nobody-listed"] {
+            let path = format!("plugins/storage_manager/storages/{storage}/key_expr");
+            assert_eq!(
+                config_key_disposition(&path),
+                ConfigKeyDisposition::Honoured,
+                "{path} is honoured"
+            );
+            assert!(
+                !enumerated.contains(path.as_str()),
+                "{path} is honoured AND enumerated, which would make this witness vacuous"
+            );
+        }
+    }
+
+    /// R2797 — the six leaves `ignored` reports for the document in
+    /// `the_plugins_section_is_read_whole_and_reported_leaf_by_leaf` are not
+    /// one kind of thing, and the report cannot say so.
+    ///
+    /// Five are decisions this build made and wrote down; the sixth is a
+    /// misspelling. An operator shown the same word for both has to guess which
+    /// of their keys is a mistake, which is exactly the loss a consumer
+    /// reported from the other side of the door.
+    #[test]
+    fn an_ignored_leaf_is_either_declared_or_a_typo_and_the_report_merges_them() {
+        for declared in [
+            // Another plugin entirely; wz runs one, so the answer does not
+            // depend on the leaf.
+            "plugins/rest/http_port",
+            // Upstream's `PluginConfig`, and the plugin loader's fields.
+            "plugins/storage_manager/__required__",
+            "plugins/storage_manager/backend_search_dirs",
+            "plugins/storage_manager/__path__",
+            // Upstream's `VolumeConfig::required`.
+            "plugins/storage_manager/volumes/v/__required__",
+            // Upstream's `ReplicaConfig`; wz's replication is its own track.
+            "plugins/storage_manager/storages/s/replication",
+            "plugins/storage_manager/storages/s/replication/interval",
+        ] {
+            assert_eq!(
+                config_key_disposition(declared),
+                ConfigKeyDisposition::DeclaredUnhonoured,
+                "{declared} is a decision this build wrote down"
+            );
+        }
+        for typo in [
+            // Upstream reads a storage BY NAME and drops the rest, so this is
+            // not surface anywhere -- nobody has a statement about it.
+            "plugins/storage_manager/storages/s/typo_field",
+            "plugins/storage_manager/storagez",
+            "plugins/storage_manager/storages/s/key_expr/deeper",
+            "plugins/storage_manager/storages/s/garbage_collection/lifespam",
+        ] {
+            assert_eq!(
+                config_key_disposition(typo),
+                ConfigKeyDisposition::Unknown,
+                "{typo} is a misspelling, and claiming it was deliberately \
+                 ignored would be a confident wrong answer"
+            );
+        }
+        // And the honoured half of the same document is unmoved by the
+        // widening -- the bool this replaced still answers what it answered.
+        for honoured in [
+            "plugins",
+            "plugins/storage_manager/volumes/v/backend",
+            "plugins/storage_manager/storages/s/volume/dir",
+            "plugins/storage_manager/storages/s/garbage_collection/lifespan",
+        ] {
+            assert!(honours_config_key(honoured), "{honoured} is honoured");
+            assert_eq!(
+                config_key_disposition(honoured),
+                ConfigKeyDisposition::Honoured
+            );
+        }
     }
 }

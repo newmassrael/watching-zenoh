@@ -139,7 +139,7 @@ HEADER = ROOT / "crates" / "wz-capi-c" / "include" / "wz_capi_c.h"
 # in `wz_capi_c.h` can change on its own -- and still has to be a deliberate
 # edit here, because a revision that moves for a reason nobody wrote down is a
 # revision nobody can reason about.
-EXPECTED_REVISION = 1
+EXPECTED_REVISION = 2
 EXPECTED_SYMBOLS = {
     # R2301 (item 634) — the revision door itself.
     "wz_capi_c_abi_version",
@@ -149,6 +149,10 @@ EXPECTED_SYMBOLS = {
     # R2172 (item 548) — which config keys wz's JSON5 reader honours.
     "wz_capi_c_config_honoured",
     "wz_capi_c_config_honoured_count",
+    # R2797 — the same question asked BY NAME, in
+    # three words. The two doors above enumerate, and the honoured set is
+    # infinite, so an enumeration could never be the whole answer.
+    "wz_capi_c_config_disposition",
     # R2300 (item 631) — emitting a stock-zenoh config and judging one.
     "wz_capi_c_config_to_json5",
     "wz_capi_c_config_validate",

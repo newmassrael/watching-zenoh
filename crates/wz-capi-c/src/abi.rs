@@ -1405,7 +1405,11 @@ pub extern "C" fn wz_capi_c_abi_version() -> i32 {
 /// this number by CALLING the built library rather than by finding this
 /// literal — a gate that read this line would be pinning the text an author had
 /// just edited.
-pub const WZ_CAPI_C_ABI_REVISION: i32 = 1;
+///
+/// R2797 moves it to 2: [`wz_capi_c_config_disposition`] is a new door, and a
+/// new door under the old revision is a library whose version cannot answer
+/// the only question a new door raises.
+pub const WZ_CAPI_C_ABI_REVISION: i32 = 2;
 
 /// Report this build's footprints — the drop-in's half of the layout gate.
 ///
@@ -1428,6 +1432,22 @@ pub unsafe extern "C" fn wz_capi_c_layout(out: *mut usize, cap: usize) -> usize 
 }
 
 /// R2172 (open-debt item 548) — HOW MANY CONFIG KEYS WZ'S JSON5 READER HONOURS.
+///
+/// # ⚠ THIS IS THE EXACTLY-NAMED FINITE PART, NOT THE WHOLE ANSWER (R2797)
+///
+/// Walking this list to the end does NOT tell a caller which keys wz honours.
+/// `HONOURED_CONFIG_KEYS` is one of five organs
+/// [`wz_runtime_tokio::zenoh_config::honours_config_key`] ORs together, and the
+/// honoured set it describes is INFINITE — `plugins/storage_manager/storages/
+/// <any name the operator chose>/key_expr` is honoured, and no finite list
+/// holds every name. A consumer classifying an upstream document with this
+/// list alone gets `plugins` and nothing below it, which is the position a
+/// consumer of this door reported arriving in.
+///
+/// [`wz_capi_c_config_disposition`] is the door that answers; this one stays
+/// because a finite list is still the right shape for the flat surface and
+/// because the gates that COMPARE two builds' surfaces need a set, not a
+/// predicate. Ask this one what wz names; ask that one what wz does.
 ///
 /// # ⚠ WHOSE SURFACE THIS IS, because two live in this crate and they differ
 ///
@@ -1513,6 +1533,201 @@ pub unsafe extern "C" fn wz_capi_c_config_honoured(index: usize) -> *const std::
     table
         .get(index)
         .map_or(std::ptr::null(), |key| key.as_ptr())
+}
+
+/// The three answers [`wz_capi_c_config_disposition`] writes through `out`.
+///
+/// The numbers are ABI: they are what a consumer in another language compares
+/// against, so adding a fourth is a `WZ_CAPI_C_ABI_REVISION` event and
+/// renumbering these three is a breaking one.
+pub const WZ_CAPI_C_CONFIG_HONOURED: i32 = 0;
+/// See [`WZ_CAPI_C_CONFIG_HONOURED`]. This build does not act on the key AND
+/// SAYS SO ON PURPOSE.
+pub const WZ_CAPI_C_CONFIG_DECLARED_UNHONOURED: i32 = 1;
+/// See [`WZ_CAPI_C_CONFIG_HONOURED`]. This build has NO STATEMENT about the
+/// key — a misspelling, or surface upstream grew after this build was cut.
+pub const WZ_CAPI_C_CONFIG_UNKNOWN: i32 = 2;
+
+/// R2797 — WHAT THIS BUILD SAYS ABOUT ONE CONFIG KEY, ASKED BY NAME.
+///
+/// # Why a predicate and not a longer list
+///
+/// [`wz_capi_c_config_honoured`] enumerates, and an enumeration cannot answer
+/// this question — not because the list is short but because the honoured set
+/// is INFINITE. `plugins/storage_manager/storages/<name>/key_expr` is honoured
+/// for every `<name>` an operator writes, so a consumer walking that list to
+/// NULL sees `plugins` and has to guess at everything below it. The report that
+/// produced this round is that guess being refused, correctly, on the
+/// consumer's side.
+///
+/// So this door CALLS
+/// [`wz_runtime_tokio::zenoh_config::config_key_disposition`] rather than
+/// spelling anything. That is the same argument
+/// [`wz_capi_c_config_honoured`]'s doc makes for indexing the constant instead
+/// of copying it, carried one step further: the in-tree SSOT is already a
+/// predicate over five organs, and a door that mirrored one organ was always
+/// going to answer for a fifth of it.
+///
+/// # Why three answers
+///
+/// A bool would merge "wz has looked at this key and does not read it" with
+/// "nobody here has ever classified this", and those are opposite advice to the
+/// operator who wrote the key: the first is a supported deployment, the second
+/// is a typo. Merging them is the loss the consumer refused to take, which is
+/// why handing them a bool would only have moved it back across the door.
+///
+/// # The key's spelling
+///
+/// `path` is a NUL-terminated key path with `/` SEPARATORS —
+/// `transport/unicast/max_sessions`, not a dotted or JSON-pointer spelling.
+/// Nothing is normalised on the way in, deliberately: a separator this door
+/// silently accepted would make a misspelling look like a key, which is the one
+/// direction [`WZ_CAPI_C_CONFIG_UNKNOWN`] exists to keep visible.
+///
+/// Returns `Z_ENULL` for a null argument, `Z_EPARSE` for a path that is not
+/// UTF-8, and `Z_OK` otherwise. `*out` is set to
+/// [`WZ_CAPI_C_CONFIG_UNKNOWN`] before anything else, so a caller that ignores
+/// the return reads "no statement" rather than stack contents — the direction
+/// of that mistake worth having.
+///
+/// # Safety
+/// `path` must be null or a valid NUL-terminated string; `out` must be null or
+/// valid and writable.
+#[no_mangle]
+pub unsafe extern "C" fn wz_capi_c_config_disposition(
+    path: *const std::ffi::c_char,
+    out: *mut i32,
+) -> crate::result::ZResult {
+    use crate::result::{Z_ENULL, Z_EPARSE, Z_OK};
+    use wz_runtime_tokio::zenoh_config::ConfigKeyDisposition as D;
+
+    crate::ffi::guarded(|| {
+        if out.is_null() {
+            return Z_ENULL;
+        }
+        // SAFETY: checked non-null immediately above.
+        unsafe { *out = WZ_CAPI_C_CONFIG_UNKNOWN };
+        if path.is_null() {
+            return Z_ENULL;
+        }
+        // SAFETY: the caller's contract — a NUL-terminated string.
+        let Ok(path) = (unsafe { std::ffi::CStr::from_ptr(path) }).to_str() else {
+            return Z_EPARSE;
+        };
+        let answer = match wz_runtime_tokio::zenoh_config::config_key_disposition(path) {
+            D::Honoured => WZ_CAPI_C_CONFIG_HONOURED,
+            D::DeclaredUnhonoured => WZ_CAPI_C_CONFIG_DECLARED_UNHONOURED,
+            D::Unknown => WZ_CAPI_C_CONFIG_UNKNOWN,
+        };
+        // SAFETY: checked non-null above.
+        unsafe { *out = answer };
+        Z_OK
+    })
+}
+
+#[cfg(test)]
+mod config_disposition_tests {
+    use super::*;
+    use crate::result::{Z_ENULL, Z_EPARSE, Z_OK};
+
+    fn ask(path: &str) -> (crate::result::ZResult, i32) {
+        let c = std::ffi::CString::new(path).unwrap();
+        let mut out = i32::MIN;
+        // SAFETY: both pointers are valid for the call.
+        let rc = unsafe { wz_capi_c_config_disposition(c.as_ptr(), &mut out) };
+        (rc, out)
+    }
+
+    /// The door must agree with the predicate it calls, over a corpus that
+    /// reaches every organ — including the one no index of
+    /// `wz_capi_c_config_honoured` can reach.
+    #[test]
+    fn the_door_answers_for_a_plugins_leaf_no_index_of_the_enumeration_reaches() {
+        let leaf = "plugins/storage_manager/storages/demo/key_expr";
+        assert_eq!(ask(leaf), (Z_OK, WZ_CAPI_C_CONFIG_HONOURED));
+
+        // Red-first, kept: the enumeration door cannot produce this string at
+        // any index, which is why the predicate door exists.
+        let mut found = false;
+        for index in 0.. {
+            // SAFETY: the door is documented to return NULL past the end.
+            let p = unsafe { wz_capi_c_config_honoured(index) };
+            if p.is_null() {
+                break;
+            }
+            // SAFETY: a non-NULL return is a 'static NUL-terminated string.
+            if unsafe { std::ffi::CStr::from_ptr(p) }.to_str() == Ok(leaf) {
+                found = true;
+                break;
+            }
+        }
+        assert!(
+            !found,
+            "the enumeration now carries {leaf}, so this witness proves nothing"
+        );
+    }
+
+    #[test]
+    fn the_door_separates_a_declared_decision_from_a_typo() {
+        assert_eq!(
+            ask("plugins/storage_manager/storages/demo/replication"),
+            (Z_OK, WZ_CAPI_C_CONFIG_DECLARED_UNHONOURED)
+        );
+        assert_eq!(
+            ask("plugins/storage_manager/storages/demo/typo_field"),
+            (Z_OK, WZ_CAPI_C_CONFIG_UNKNOWN)
+        );
+        assert_eq!(ask("mode"), (Z_OK, WZ_CAPI_C_CONFIG_HONOURED));
+    }
+
+    /// Every key the enumeration door reports must come back `Honoured` from
+    /// the predicate door. The two doors are one answer asked twice; a
+    /// disagreement means the finite half has drifted out of the chain.
+    #[test]
+    fn the_enumeration_is_a_subset_of_what_the_predicate_honours() {
+        let mut checked = 0usize;
+        for index in 0.. {
+            // SAFETY: the door is documented to return NULL past the end.
+            let p = unsafe { wz_capi_c_config_honoured(index) };
+            if p.is_null() {
+                break;
+            }
+            // SAFETY: a non-NULL return is a 'static NUL-terminated string.
+            let key = unsafe { std::ffi::CStr::from_ptr(p) }.to_str().unwrap();
+            assert_eq!(
+                ask(key),
+                (Z_OK, WZ_CAPI_C_CONFIG_HONOURED),
+                "{key} is enumerated as honoured and the predicate disagrees"
+            );
+            checked += 1;
+        }
+        assert!(checked > 50, "only {checked} keys carried the comparison");
+    }
+
+    #[test]
+    fn a_refused_argument_is_not_a_fourth_disposition() {
+        let mut out = i32::MIN;
+        // SAFETY: a null path with a valid `out` is the documented case.
+        let rc = unsafe { wz_capi_c_config_disposition(std::ptr::null(), &mut out) };
+        assert_eq!(rc, Z_ENULL);
+        assert_eq!(
+            out, WZ_CAPI_C_CONFIG_UNKNOWN,
+            "a caller ignoring the return must not read stack contents"
+        );
+
+        // SAFETY: a null `out` is the documented case; nothing is written.
+        let rc = unsafe { wz_capi_c_config_disposition(c"mode".as_ptr(), std::ptr::null_mut()) };
+        assert_eq!(rc, Z_ENULL);
+
+        // Not UTF-8, so not a key path any document could carry.
+        let bad = [0xffu8, 0x00];
+        // SAFETY: `bad` is NUL-terminated and `out` is valid.
+        let rc = unsafe {
+            wz_capi_c_config_disposition(bad.as_ptr().cast::<std::ffi::c_char>(), &mut out)
+        };
+        assert_eq!(rc, Z_EPARSE);
+        assert_eq!(out, WZ_CAPI_C_CONFIG_UNKNOWN);
+    }
 }
 
 #[cfg(test)]

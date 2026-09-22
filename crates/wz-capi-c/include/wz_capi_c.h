@@ -80,7 +80,7 @@ extern "C" {
  * added without moving this number is red rather than shipped.
  * ------------------------------------------------------------------ */
 
-#define WZ_CAPI_C_ABI_REVISION 1
+#define WZ_CAPI_C_ABI_REVISION 2
 
 /* The revision the LOADED library reports. See the block above for why
  * this exists beside the macro. */
@@ -100,6 +100,18 @@ const char *wz_capi_c_layout_name(size_t index);
 
 /* ------------------------------------------------------------------ *
  * The honoured config keys — which keys wz's JSON5 reader applies.
+ *
+ * TWO DOORS, AND THE FIRST IS NOT A COMPLETE ANSWER. The list below is
+ * the exactly-named FINITE part of the surface. The honoured set itself
+ * is INFINITE: `plugins/storage_manager/storages/<name>/key_expr` is
+ * honoured for every <name> an operator writes, and no list holds every
+ * name. Walking the list therefore yields `plugins` and nothing beneath
+ * it.
+ *
+ * To classify a key — which is what a tool reading somebody's config
+ * document is doing — ASK wz_capi_c_config_disposition. Use the list
+ * when you want the set wz NAMES, for instance to diff two builds'
+ * surfaces; use the predicate when you have a key and want the answer.
  * ------------------------------------------------------------------ */
 
 /* How many config keys wz honours when reading a stock zenoh config. */
@@ -108,6 +120,37 @@ size_t wz_capi_c_config_honoured_count(void);
 /* The name of honoured key `index`, or NULL past the end. Walk it until
  * NULL rather than trusting the count. */
 const char *wz_capi_c_config_honoured(size_t index);
+
+/* The three answers wz_capi_c_config_disposition writes. The numbers
+ * are ABI; a fourth would move WZ_CAPI_C_ABI_REVISION.
+ *
+ * HONOURED             writing this key changes what this build does.
+ * DECLARED_UNHONOURED  this build reads a document carrying the key,
+ *                      applies nothing from it, AND SAYS SO ON PURPOSE.
+ * UNKNOWN              this build has NO STATEMENT about the key: a
+ *                      misspelling, or surface upstream grew later.
+ *
+ * The last two are the pair a boolean would merge, and they are
+ * opposite advice to whoever wrote the key — one is a supported
+ * deployment, the other is a mistake in their file. */
+#define WZ_CAPI_C_CONFIG_HONOURED 0
+#define WZ_CAPI_C_CONFIG_DECLARED_UNHONOURED 1
+#define WZ_CAPI_C_CONFIG_UNKNOWN 2
+
+/* What this build says about the config key `path`, written through
+ * `out` as one of the three above.
+ *
+ * `path` is NUL-terminated and uses `/` SEPARATORS --
+ * "transport/unicast/max_sessions", not a dotted or JSON-pointer
+ * spelling. Nothing is normalised on the way in: a separator this door
+ * silently accepted would make a misspelling look like a key, which is
+ * the one thing WZ_CAPI_C_CONFIG_UNKNOWN exists to keep visible.
+ *
+ * Z_OK, or Z_ENULL for a null argument and Z_EPARSE for a path that is
+ * not UTF-8. `*out` is set to WZ_CAPI_C_CONFIG_UNKNOWN before anything
+ * else, so a caller that ignores the return reads "no statement" rather
+ * than whatever was on its stack. */
+z_result_t wz_capi_c_config_disposition(const char *path, int32_t *out);
 
 /* ------------------------------------------------------------------ *
  * Emitting and judging a config (R2300, open-debt item 631).
