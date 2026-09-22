@@ -114,6 +114,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+import cargo_activation
+
 ROOT = Path(__file__).resolve().parents[2]
 CI_YML = ROOT / ".github/workflows/ci.yml"
 RUN_CI = ROOT / "scripts/run-ci.sh"
@@ -785,9 +787,19 @@ def _metadata() -> dict:
 
 
 def probed_modules() -> dict[str, set[str]]:
-    """pkg-config module -> the crates whose build scripts ask for it."""
+    """pkg-config module -> the crates whose build scripts ask for it.
+
+    R2801 — only crates a build ACTIVATES. `cargo metadata`'s package list and
+    resolve graph also carry an optional dependency that a weak `dep?/feat`
+    merely mentions, and whose build script therefore never runs;
+    `cargo_activation` is where that rule lives and why.
+    """
+    meta = _metadata()
+    active = cargo_activation.activated_packages(meta)
     out: dict[str, set[str]] = {}
-    for pkg in _metadata()["packages"]:
+    for pkg in meta["packages"]:
+        if pkg["id"] not in active:
+            continue
         for target in pkg["targets"]:
             if "custom-build" not in target["kind"]:
                 continue
@@ -815,9 +827,10 @@ def members_reaching(crates: set[str]) -> set[str]:
     meta = _metadata()
     by_id = {p["id"]: p for p in meta["packages"]}
     rev: dict[str, set[str]] = {}
-    for node in meta["resolve"]["nodes"]:
-        for dep in node["deps"]:
-            rev.setdefault(dep["pkg"], set()).add(node["id"])
+    # R2801 — over ACTIVE edges only, for the reason `probed_modules` gives.
+    for parent, deps in cargo_activation.activated_edges(meta).items():
+        for dep in deps:
+            rev.setdefault(dep, set()).add(parent)
 
     seen = {i for i in by_id if by_id[i]["name"] in crates}
     stack = list(seen)

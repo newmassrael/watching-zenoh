@@ -111,6 +111,8 @@ import subprocess
 import sys
 import tempfile
 
+import cargo_activation
+
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 CRATES = ROOT / "crates"
 
@@ -479,8 +481,21 @@ def owner_resolver(table: list[tuple[str, str]], root: pathlib.Path):
     return owner_of
 
 
+def active_only(meta: dict) -> dict:
+    """`meta` with its package list cut to the packages a build ACTIVATES.
+
+    R2801 — the metadata also lists an optional dependency that a weak
+    `dep?/feat` merely mentions. Its build script never runs and its `links`
+    library is never linked, so it is not in any build closure this gate
+    adjudicates; left in, `libz-sys`'s `links = "z"` turned `z_id_to_string` in
+    a doc comment into a claim about libz. `cargo_activation` holds the rule.
+    """
+    active = cargo_activation.activated_packages(meta)
+    return {**meta, "packages": [p for p in meta["packages"] if p["id"] in active]}
+
+
 def check() -> int:
-    meta = metadata()
+    meta = active_only(metadata())
     edges = build_edges(meta)
     scripted = has_build_script(meta)
     vocab = build_time_vocabulary(meta)
