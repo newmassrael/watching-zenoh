@@ -612,9 +612,12 @@ impl<R: SessionRuntime, T: TimeSource> RuntimeStorageManager<R, T> {
                 format!("volumes/{id}/__path__"),
                 path_json,
             ));
+            // R2804 — the volume's OWN body: the capability by default, and
+            // what upstream's counterpart reports where the volume carries it
+            // (`Volume::admin_status`).
             leaves.push(AdminPluginStatusLeaf::new(
                 format!("volumes/{id}"),
-                volume.capability().to_admin_json(),
+                volume.admin_status(version),
             ));
         }
         for (name, entry) in &self.services {
@@ -2027,6 +2030,54 @@ mod tests {
             &mut want,
         );
         assert!(body.contains(&want), "want {want} in {body}");
+    }
+
+    // R2804 — the fs VOLUME's own admin body is what upstream's fs volume
+    // reports, its canonical root and the version, where every other wz volume
+    // answers with its capability. The memory volume beside it keeps that
+    // capability body, so the leaf is per volume rather than per manager.
+    #[cfg(all(
+        feature = "storage-backend-filesystem",
+        feature = "adminspace-plugins-handlers"
+    ))]
+    #[test]
+    fn the_fs_volume_reports_upstreams_root_and_version() {
+        use crate::filesystem_storage::FilesystemVolume;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        // Spelled through a `..` over a directory that exists, so the body must
+        // carry the canonical root rather than the host's spelling.
+        std::fs::create_dir(dir.path().join("x")).expect("mkdir");
+        let mut mgr = RuntimeStorageManager::<
+            crate::runtime_impl::TokioRuntime,
+            crate::runtime_impl::TokioTime,
+        >::new();
+        mgr.register_volume(
+            "fs",
+            Box::new(FilesystemVolume::new(dir.path().join("x").join(".."))),
+        );
+        mgr.register_volume("mem", Box::new(MemoryVolume));
+        let leaves = mgr.admin_status_leaves("v");
+        let body_at = |suffix: &str| {
+            leaves
+                .iter()
+                .find(|leaf| leaf.suffix == suffix)
+                .map(|leaf| leaf.json_body.clone())
+                .unwrap_or_else(|| panic!("no admin leaf at {suffix}"))
+        };
+        let mut want = String::from("{\"root\":");
+        wz_session_core::json::escape_into(
+            &dunce::canonicalize(dir.path())
+                .expect("canonical tempdir")
+                .to_string_lossy(),
+            &mut want,
+        );
+        want.push_str(",\"version\":\"v\"}");
+        assert_eq!(body_at("volumes/fs"), want);
+        assert_eq!(
+            body_at("volumes/mem"),
+            r#"{"capability":{"history":"Latest","persistence":"Volatile"}}"#
+        );
     }
 
     // The DISCRIMINATOR for the durability proof above: the identical flow on a

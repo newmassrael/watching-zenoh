@@ -1126,6 +1126,22 @@ impl Volume for FilesystemVolume {
         }
     }
 
+    /// Upstream's fs volume status (R2804): `{"root": …, "version": …}`, the two
+    /// parameters its plugin `start` records, keys alphabetical as its
+    /// `serde_json` map orders them. The root is the CANONICAL one every storage
+    /// of this volume is created under; a host-given root that does not exist
+    /// yet has no canonical form, and is reported as given until a storage
+    /// creates it.
+    fn admin_status(&self, version: &str) -> String {
+        let root = canonical(&self.root).unwrap_or_else(|_| self.root.clone());
+        let mut out = String::from("{\"root\":");
+        wz_session_core::json::escape_into(&root.to_string_lossy(), &mut out);
+        out.push_str(",\"version\":");
+        wz_session_core::json::escape_into(version, &mut out);
+        out.push('}');
+        out
+    }
+
     /// Upstream's `create_storage`, check for check: the properties off
     /// `volume_cfg` (see [`read_properties`]), the directory `root/<dir>`
     /// (see [`check_base_dir`]), then `dir_full_path` INSERTED into the config
@@ -1206,8 +1222,20 @@ fn file_time_timestamp(file: &Path) -> Result<TimestampHint, ReadFailure> {
 /// `fsync` a directory so an entry created, renamed or removed in it is
 /// persisted (on Linux, opening the directory read-only and `sync_all`-ing its
 /// fd flushes the directory entry).
+#[cfg(unix)]
 fn fsync_dir(dir: &Path) -> io::Result<()> {
     fs::File::open(dir)?.sync_all()
+}
+
+/// Off unix there is no directory `fsync` through `std`: windows refuses to
+/// open a directory as a file without a flag `std` does not set, so the unix
+/// arm above would fail EVERY write there (R2804, found reading this module
+/// for portability, not by running it). What remains is upstream's own
+/// guarantee on every platform -- it syncs nothing -- so this is never weaker
+/// than the implementation it mirrors. ⚠ No lane here builds or runs this arm.
+#[cfg(not(unix))]
+fn fsync_dir(_dir: &Path) -> io::Result<()> {
+    Ok(())
 }
 
 #[cfg(test)]
@@ -1959,5 +1987,23 @@ mod tests {
             .join(DEFAULT_ROOT_DIR);
         assert!(want.is_dir(), "the root was created");
         assert_eq!(vol.root, want, "and held in its canonical spelling");
+    }
+
+    /// R2804 — the volume's admin body is upstream's fs volume status: the
+    /// canonical root and the version, keys in `serde_json`'s map order. The
+    /// root is given through a `..` over a directory that exists, so a body
+    /// that echoed the host's spelling could not pass.
+    #[test]
+    fn the_volume_reports_upstreams_root_and_version() {
+        let root = tempdir().unwrap();
+        fs::create_dir(root.path().join("x")).unwrap();
+        let vol = FilesystemVolume::new(root.path().join("x").join(".."));
+        let mut want = String::from("{\"root\":");
+        wz_session_core::json::escape_into(
+            &dunce::canonicalize(root.path()).unwrap().to_string_lossy(),
+            &mut want,
+        );
+        want.push_str(",\"version\":\"1.2.3\"}");
+        assert_eq!(vol.admin_status("1.2.3"), want);
     }
 }

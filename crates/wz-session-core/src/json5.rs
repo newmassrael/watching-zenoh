@@ -194,16 +194,36 @@ impl Json5Value {
     /// would not have to invent one.
     pub fn to_json5_text(&self) -> String {
         let mut out = String::new();
-        self.write_json5(&mut out);
+        self.write(&mut out, Numbers::Source);
         out
     }
 
-    fn write_json5(&self, out: &mut String) {
+    /// This value as STRICT JSON (R2804): [`to_json5_text`](Self::to_json5_text)
+    /// with every number respelled the way JSON spells it.
+    ///
+    /// The two differ only in numbers, and only for the spellings JSON5 admits
+    /// and JSON does not -- a leading `+`, a hex literal, a bare leading or
+    /// trailing `.`, a leading zero. Carried verbatim into a document a JSON
+    /// reader parses, one of those makes the whole document unreadable; the
+    /// admin plane's storage bodies are such documents, and upstream renders
+    /// the same config through `serde_json`, which only ever writes decimal.
+    /// So a JSON body takes this, and a caller that hands a value back as JSON5
+    /// keeps the source spelling.
+    pub fn to_json_text(&self) -> String {
+        let mut out = String::new();
+        self.write(&mut out, Numbers::Json);
+        out
+    }
+
+    fn write(&self, out: &mut String, numbers: Numbers) {
         match self {
             Json5Value::Null => out.push_str("null"),
             Json5Value::Bool(true) => out.push_str("true"),
             Json5Value::Bool(false) => out.push_str("false"),
-            Json5Value::Number(text) => out.push_str(text),
+            Json5Value::Number(text) => match numbers {
+                Numbers::Source => out.push_str(text),
+                Numbers::Json => write_json_number(text, out),
+            },
             Json5Value::String(text) => crate::json::escape_into(text, out),
             Json5Value::Array(items) => {
                 out.push('[');
@@ -211,7 +231,7 @@ impl Json5Value {
                     if i > 0 {
                         out.push(',');
                     }
-                    item.write_json5(out);
+                    item.write(out, numbers);
                 }
                 out.push(']');
             }
@@ -223,12 +243,64 @@ impl Json5Value {
                     }
                     crate::json::escape_into(key, out);
                     out.push(':');
-                    value.write_json5(out);
+                    value.write(out, numbers);
                 }
                 out.push('}');
             }
         }
     }
+}
+
+/// How [`Json5Value::write`] spells a number: as the document wrote it, or as
+/// JSON requires.
+#[derive(Clone, Copy)]
+enum Numbers {
+    Source,
+    Json,
+}
+
+/// A number the parser accepted, respelled as JSON: no `+`, hex as decimal, a
+/// `0` before a bare leading `.` and after a bare trailing one, no leading
+/// zeros. The value is unchanged in every case -- this moves spelling, never
+/// magnitude. A hex literal too wide for 128 bits has no exact JSON integer
+/// here, and is written as the JSON STRING of its source text rather than as a
+/// number rounded on the way.
+fn write_json_number(text: &str, out: &mut String) {
+    let (negative, body) = match text.as_bytes().first() {
+        Some(b'-') => (true, &text[1..]),
+        Some(b'+') => (false, &text[1..]),
+        _ => (false, text),
+    };
+    if let Some(hex) = body.strip_prefix("0x").or_else(|| body.strip_prefix("0X")) {
+        match u128::from_str_radix(hex, 16) {
+            Ok(n) => {
+                if negative && n != 0 {
+                    out.push('-');
+                }
+                out.push_str(&n.to_string());
+            }
+            Err(_) => crate::json::escape_into(text, out),
+        }
+        return;
+    }
+    let (mantissa, exponent) = match body.find(['e', 'E']) {
+        Some(at) => body.split_at(at),
+        None => (body, ""),
+    };
+    let (int, frac) = match mantissa.split_once('.') {
+        Some((int, frac)) => (int, Some(frac)),
+        None => (mantissa, None),
+    };
+    let int = int.trim_start_matches('0');
+    if negative {
+        out.push('-');
+    }
+    out.push_str(if int.is_empty() { "0" } else { int });
+    if let Some(frac) = frac {
+        out.push('.');
+        out.push_str(if frac.is_empty() { "0" } else { frac });
+    }
+    out.push_str(exponent);
 }
 
 /// Read a JSON5 document.
@@ -792,5 +864,41 @@ mod tests {
     fn to_json5_text_escapes_a_string_rather_than_pasting_it() {
         let v = Json5Value::String(String::from("a\"b\\c\nd"));
         assert_eq!(v.to_json5_text(), "\"a\\\"b\\\\c\\nd\"");
+    }
+
+    /// R2804 — every number spelling this parser admits and JSON does not is
+    /// respelled, value unchanged, and one JSON already allows is left alone.
+    /// The inputs are PARSED, not constructed, so each is a spelling this
+    /// reader really accepts; the JSON5 emitter keeps every one as written.
+    #[test]
+    fn to_json_text_respells_json5_only_numbers_as_json() {
+        for (json5, json) in [
+            ("+1", "1"),
+            ("0x1f", "31"),
+            ("-0X10", "-16"),
+            ("-0x0", "0"),
+            (".5", "0.5"),
+            ("5.", "5.0"),
+            ("007", "7"),
+            ("-007.50", "-7.50"),
+            ("1.e5", "1.0e5"),
+            ("+.5E-3", "0.5E-3"),
+            ("0", "0"),
+            ("-0", "-0"),
+            ("12.25e+2", "12.25e+2"),
+        ] {
+            let v = parse(json5).unwrap_or_else(|e| panic!("{json5}: {e}"));
+            assert_eq!(v.to_json_text(), json, "{json5}");
+            assert_eq!(v.to_json5_text(), json5, "the JSON5 spelling survives");
+        }
+        // Inside structure too, and nothing but numbers moves.
+        let v = parse("{ a: [0x10, 'x', +2], b: null }").unwrap();
+        assert_eq!(v.to_json_text(), r#"{"a":[16,"x",2],"b":null}"#);
+        // A hex literal no 128-bit integer holds is kept exact, as a string.
+        let wide = alloc::format!("0x1{}", "0".repeat(32));
+        assert_eq!(
+            parse(&wide).unwrap().to_json_text(),
+            alloc::format!("\"{wide}\"")
+        );
     }
 }

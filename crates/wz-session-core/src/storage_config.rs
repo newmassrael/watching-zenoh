@@ -237,11 +237,14 @@ impl StorageConfig {
             // R2802 — each value is rendered AS the JSON value it is, so a
             // boolean reads back as `true` and not `"true"`, which is what
             // upstream's `serde_json` body shows for the same payload.
+            // R2804 — as STRICT JSON: R2802 wrote the JSON5 source spelling,
+            // and a config's `0x10` or `+1` then made this whole body
+            // unparseable by the JSON readers the admin plane serves.
             out.push('{');
             for (key, value) in &self.volume_cfg {
                 crate::json::escape_into(key, &mut out);
                 out.push(':');
-                out.push_str(&value.to_json5_text());
+                out.push_str(&value.to_json_text());
                 out.push(',');
             }
             out.push_str("\"id\":");
@@ -311,6 +314,29 @@ mod tests {
         let body = c.to_admin_json();
         assert!(
             body.contains(r#""volume":{"read_only":true,"label":"true","id":"fs"}"#),
+            "got {body}"
+        );
+    }
+
+    /// R2804 — a number the config spelled the JSON5 way reaches the body the
+    /// JSON way, so the body stays a document a JSON reader can parse. R2802
+    /// wrote the source spelling, and `0x10` made the whole body unreadable.
+    #[test]
+    fn admin_volume_payload_numbers_are_json_numbers() {
+        let mut c = StorageConfig::new("demo", "demo/**", "fs");
+        c.volume_cfg = alloc::vec![
+            (
+                String::from("size"),
+                Json5Value::Number(String::from("0x10"))
+            ),
+            (
+                String::from("ratio"),
+                Json5Value::Number(String::from("+.5"))
+            ),
+        ];
+        let body = c.to_admin_json();
+        assert!(
+            body.contains(r#""volume":{"size":16,"ratio":0.5,"id":"fs"}"#),
             "got {body}"
         );
     }

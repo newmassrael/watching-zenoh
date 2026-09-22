@@ -92,6 +92,11 @@ impl Capability {
     /// upstream's config object. The variant strings are zenoh's serde names
     /// (`Volatile`/`Durable`, `Latest`/`All`), and the keys are alphabetical to
     /// match `serde_json`'s `Map` ordering everywhere else on this plane.
+    ///
+    /// R2804 — since then this is the DEFAULT of [`Volume::admin_status`], not
+    /// the rule: the premise "no config to echo" stopped holding for the
+    /// filesystem volume once it derived its root as upstream's does, and that
+    /// volume reports what upstream's reports instead.
     pub fn to_admin_json(&self) -> String {
         let history = match self.history {
             History::Latest => "Latest",
@@ -191,6 +196,23 @@ pub trait Volume {
     /// say so.
     fn admin_path(&self) -> Option<String> {
         None
+    }
+
+    /// R2804 — this volume's own admin `status/plugins/storage_manager/volumes/<id>`
+    /// body, the `get_admin_status` of upstream's volume trait
+    /// (`plugins/zenoh-backend-traits/src/lib.rs` @ `pub trait Volume: Send + Sync {`),
+    /// already serialized. `version` is the storage manager's own, which is what
+    /// a statically composed wz volume has in place of a plugin version.
+    ///
+    /// The DEFAULT is the capability body R311y828 chose, for the reason
+    /// [`Capability::to_admin_json`] gives: a volume that is a registered Rust
+    /// object has no configuration to echo. A volume that DOES carry what its
+    /// upstream counterpart reports overrides this -- the filesystem volume has
+    /// a root, derived as upstream's is, and upstream's fs volume reports exactly
+    /// that root and its version.
+    fn admin_status(&self, version: &str) -> String {
+        let _ = version;
+        self.capability().to_admin_json()
     }
 }
 
