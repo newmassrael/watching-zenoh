@@ -11092,8 +11092,9 @@ layer_c1bz_docs_resolve() {
     # does not re-earn the upward arm.
     # R2801 — wz-runtime-tokio 518 -> 507, and the COUNT alone would have hidden
     # half of it. The fs backend's rewrite retired ten broken links with the
-    # code they described (`CORRUPT_SUFFIX`, `Unpersisted`, the old seam's
-    # `put`/`delete`, ...) and ADDED five in the new `//!` docs -- `ROOT_KEY`,
+    # code they described (the old store's corrupt-file suffix and its
+    # unpersisted-write split, the old seam's put and delete, ...) and ADDED
+    # five in the new `//!` docs -- `ROOT_KEY`,
     # `STAGING_DIR` twice, `is_listable_key`, `StorageBackend::get_all_entries`,
     # each unresolved because a module's inner doc resolves from the crate
     # root, R2800's lesson. The lane read 513 against 518 and asked only for a
