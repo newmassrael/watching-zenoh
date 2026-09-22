@@ -166,7 +166,7 @@ pub trait Volume {
     ///
     /// Upstream's `create_storage` takes the config BY VALUE and may change it
     /// before the storage keeps it
-    /// (`plugins/zenoh-backend-traits/src/lib.rs` @ `async fn create_storage(&self, config: StorageConfig) -> ZResult<Box<dyn Storage>>;`),
+    /// (`plugins/zenoh-backend-traits/src/lib.rs` @ `async fn create_storage(&self, props: StorageConfig) -> ZResult<Box<dyn Storage>>;`),
     /// and the kept config is what that storage's admin status reports. The
     /// filesystem backend uses that: it resolves the directory the storage will
     /// live in and inserts it into `volume_cfg` as `dir_full_path`, so the admin
