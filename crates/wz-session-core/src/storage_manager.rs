@@ -84,7 +84,7 @@ impl VolumeRegistry {
     /// ([`VolumeCreate`](VolumeRegistryError::VolumeCreate)).
     ///
     /// `config` is `&mut` because the volume may amend it (R2802, see
-    /// [`Volume::create_storage`](crate::storage_volume::Volume::create_storage));
+    /// [`Volume::create_storage`]);
     /// a caller that keeps the storage's config keeps the amended one.
     pub fn create_backend(
         &self,

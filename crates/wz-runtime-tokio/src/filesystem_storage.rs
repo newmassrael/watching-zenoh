@@ -1143,8 +1143,8 @@ impl Volume for FilesystemVolume {
     }
 
     /// Upstream's `create_storage`, check for check: the properties off
-    /// `volume_cfg` (see [`read_properties`]), the directory `root/<dir>`
-    /// (see [`check_base_dir`]), then `dir_full_path` INSERTED into the config
+    /// `volume_cfg` (see `read_properties`), the directory `root/<dir>`
+    /// (see `check_base_dir`), then `dir_full_path` INSERTED into the config
     /// the storage keeps -- which is why the config is `&mut`.
     fn create_storage(
         &self,
