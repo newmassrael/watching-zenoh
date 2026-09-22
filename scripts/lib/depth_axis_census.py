@@ -1987,7 +1987,20 @@ PIN_NO_SYMBOL = 2
 # reason with `citation_audit`, not subtracted), and the promotion's addendum
 # lands in a reason the census no longer reads. No other atom moves. READ off
 # the census's own FAIL line, `wz citations: 76 against a pin of 121`.
-PIN_WZ_CITATIONS = 76
+#
+# R2791 — 76 -> 79, RISING: `transport-link-udp` stays PARTIAL and gains three
+# wz citations in an appended CORRECTION that re-measures its residuals as one
+# base plus two consequences. The three are the reader that withholds the QUIC
+# mtu keys from udp (`link_socket.rs` @ `reads_quic_mtu: bool,`), the selection
+# point that declares the udp `rel` arm unclaimed
+# (`locator.rs` @ `fn reliability_adjusted_proto`), and the verifier that keeps
+# chain-to-root
+# (`tls_config.rs` @ `impl ServerCertVerifier for AnyServerNameVerifier {`).
+# DERIVED with this module's own `citation_audit` over that atom alone, before
+# and after: (wz 5, ambiguous 0) -> (wz 8, ambiguous 0). ATTRIBUTED by the
+# arithmetic: 76 + 3 = 79, the census's own FAIL line, so no other atom moves
+# and AMBIGUOUS correctly holds.
+PIN_WZ_CITATIONS = 79
 # R2626 — 44 -> 42, and this one is worth a sentence because it HELD through
 # every earlier retirement in this run (R2612, R2622). `time-hlc`'s reason is the
 # first retiree carrying AMBIGUOUS citations of its own: its oldest clauses cite
