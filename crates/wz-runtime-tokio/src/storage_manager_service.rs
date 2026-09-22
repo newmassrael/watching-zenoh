@@ -118,12 +118,19 @@ pub enum VolumeBuildError {
     /// that wz has no such backend: `fs` reads this way without
     /// `storage-backend-filesystem`.
     UnknownBackend(String),
-    /// The backend needs a parameter the client did not send.
-    MissingParameter {
-        /// The backend that needs it.
+    /// The backend was named and asked correctly, and could not be built — the
+    /// filesystem volume cannot create or canonicalize its root.
+    ///
+    /// R2802 replaced `MissingParameter`, whose one producer was `fs` without a
+    /// `root`. That refusal rested on "a volume with no root would be rooted
+    /// wherever the process stands", and upstream roots it somewhere definite:
+    /// `ZENOH_BACKEND_FS_ROOT`, else under the zenoh home. A stock
+    /// `volumes: { fs: { backend: "fs" } }` names no root and must build.
+    Unavailable {
+        /// The backend that was asked for.
         backend: String,
-        /// The `?<key>=` the payload was missing.
-        key: &'static str,
+        /// Why it could not be built.
+        reason: String,
     },
     /// The client sent parameters this backend does not read. Refused rather
     /// than ignored: a volume silently built from a config it did not honour is
@@ -143,8 +150,11 @@ impl core::fmt::Display for VolumeBuildError {
             VolumeBuildError::UnknownBackend(b) => {
                 write!(f, "no storage backend '{b}' is compiled into this build")
             }
-            VolumeBuildError::MissingParameter { backend, key } => {
-                write!(f, "storage backend '{backend}' needs '?{key}=<value>'")
+            VolumeBuildError::Unavailable { backend, reason } => {
+                write!(
+                    f,
+                    "storage backend '{backend}' could not be built: {reason}"
+                )
             }
             VolumeBuildError::UnknownParameters { backend, keys } => {
                 write!(
@@ -169,9 +179,11 @@ impl core::fmt::Display for VolumeBuildError {
 /// The parameter vocabulary is each backend's own, and it is derived from the
 /// constructor rather than invented: `fs` takes `root` because
 /// [`FilesystemVolume::new`](crate::filesystem_storage::FilesystemVolume::new)
-/// takes a `root`. There is no upstream anchor for these names — zenoh's
-/// filesystem backend lives in a separate repository this tree does not pin — so
-/// they are stated here as wz's, not mirrored.
+/// takes a `root`. That name is wz's, not mirrored -- upstream's fs volume reads
+/// no parameter at all and takes its root from the environment -- so it is
+/// OPTIONAL (R2802): without it the volume is rooted exactly where upstream's
+/// is (`FilesystemVolume::from_env`, which exists only in a build carrying the
+/// backend).
 ///
 /// ⚠ `mem` takes NO parameters and says so rather than ignoring them, for the
 /// reason [`UnknownParameters`](VolumeBuildError::UnknownParameters) carries.
@@ -217,14 +229,20 @@ pub fn build_volume(
                     keys: unknown,
                 });
             }
-            let root = volume_cfg
+            // R2802 — `root` is wz's, and optional: without it the volume is
+            // rooted where upstream's plugin roots it (see `from_env`).
+            let Some(root) = volume_cfg
                 .iter()
                 .find(|(k, _)| k == "root")
                 .map(|(_, v)| v.as_str())
-                .ok_or(VolumeBuildError::MissingParameter {
-                    backend: String::from(backend),
-                    key: "root",
-                })?;
+            else {
+                return crate::filesystem_storage::FilesystemVolume::from_env()
+                    .map(|v| Box::new(v) as Box<dyn Volume>)
+                    .map_err(|e| VolumeBuildError::Unavailable {
+                        backend: String::from(backend),
+                        reason: e.to_string(),
+                    });
+            };
             Ok(Box::new(crate::filesystem_storage::FilesystemVolume::new(
                 root,
             )))
@@ -657,11 +675,17 @@ where
         }
         // Resolve + create via the shared volume registry (the SSOT); the
         // backend is NOT held there — the live service owns it.
+        //
+        // R2802 — on a COPY the volume may amend, and it is the amended copy this
+        // entry keeps: upstream's storage keeps the config its volume handed
+        // back, and that is what its admin status reports (the fs backend's
+        // `dir_full_path`).
+        let mut config = config.clone();
         let backend = self
             .registry
-            .create_backend(config)
+            .create_backend(&mut config)
             .map_err(RuntimeStorageManagerError::Volume)?;
-        let service = StorageService::declare_with_backend(session, config, local_zid, backend)
+        let service = StorageService::declare_with_backend(session, &config, local_zid, backend)
             .map_err(RuntimeStorageManagerError::Service)?;
         // The storage's periodic GC, started WITH the storage and torn down with
         // it (the handle lives in the entry). zenoh does this inside the storage's
@@ -678,7 +702,7 @@ where
         self.services.insert(
             config.name.clone(),
             HostedEntry {
-                config: config.clone(),
+                config,
                 service,
                 #[cfg(feature = "storage-mgr-garbage-collection")]
                 _gc: gc,
@@ -1544,17 +1568,17 @@ mod tests {
     // R2696 — the filesystem backend's parameter contract, on the build that
     // carries it. The cfg is the CALLER's: without the feature there is no `fs`
     // arm to test and the catch-all's answer is already pinned above.
+    //
+    // R2802 — this test used to assert that `fs` with no `root` is refused, on
+    // the premise that such a volume "would be rooted wherever the process
+    // stands". Upstream roots it somewhere definite (`ZENOH_BACKEND_FS_ROOT`,
+    // else under the zenoh home), so the no-root arm now builds that volume, and
+    // its rule is witnessed where it lives without touching this process's
+    // environment: `filesystem_storage::tests::the_root_is_derived_as_upstreams_plugin_derives_it`
+    // and `..._creates_and_canonicalizes_the_derived_root`.
     #[cfg(feature = "storage-backend-filesystem")]
     #[test]
-    fn build_volume_fs_needs_its_root_and_reads_nothing_else() {
-        assert_eq!(
-            build_volume("fs", &[]).err(),
-            Some(VolumeBuildError::MissingParameter {
-                backend: String::from("fs"),
-                key: "root",
-            }),
-            "a filesystem volume with no root would be rooted wherever the process stands"
-        );
+    fn build_volume_fs_takes_an_optional_root_and_reads_nothing_else() {
         assert!(build_volume("fs", &[(String::from("root"), String::from("/srv/wz"))]).is_ok());
         assert_eq!(
             build_volume(
@@ -1914,7 +1938,12 @@ mod tests {
         use wz_session_core::locality::Locality;
 
         let dir = tempfile::tempdir().expect("tempdir");
-        let cfg = StorageConfig::new("durable", "demo/**", "fs");
+        // R2802 — an fs storage names its directory, as upstream's must.
+        let mut cfg = StorageConfig::new("durable", "demo/**", "fs");
+        cfg.volume_cfg.push((
+            String::from("dir"),
+            wz_session_core::json5::Json5Value::String(String::from("durable")),
+        ));
 
         // Session 1: host an fs-backed storage, capture a Put over the live path.
         {
@@ -1954,6 +1983,50 @@ mod tests {
                 "the fs-backed storage served the pre-restart value -- durable through the live driver"
             );
         }
+    }
+
+    // R2802 — the config a hosted storage KEEPS is the one its volume handed
+    // back. Upstream's fs volume inserts `dir_full_path` into the config its
+    // storage keeps and the admin plane reports that config; a manager hosting
+    // its own pre-create copy would report a storage with no word of where its
+    // data is. The root is given through a `..` so the reported path must also
+    // be the CANONICAL one the sidecar keys its rows by.
+    #[cfg(all(
+        feature = "storage-backend-filesystem",
+        feature = "adminspace-plugins-handlers"
+    ))]
+    #[tokio::test]
+    async fn a_hosted_fs_storage_reports_the_directory_its_volume_resolved() {
+        use crate::filesystem_storage::FilesystemVolume;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let spelled = dir.path().join("x").join("..");
+        let mut cfg = StorageConfig::new("reported", "demo/**", "fs");
+        cfg.volume_cfg.push((
+            String::from("dir"),
+            wz_session_core::json5::Json5Value::String(String::from("d")),
+        ));
+        let session = make_session();
+        let mut mgr = RuntimeStorageManager::new();
+        mgr.register_volume("fs", Box::new(FilesystemVolume::new(spelled)));
+        mgr.add_storage(&session, &cfg, vec![0x01])
+            .expect("host an fs-backed storage");
+
+        let body = mgr
+            .admin_status_leaves("v")
+            .into_iter()
+            .find(|leaf| leaf.suffix == "storages/reported")
+            .map(|leaf| leaf.json_body)
+            .expect("the hosted storage reports");
+        let mut want = String::from("\"dir_full_path\":");
+        wz_session_core::json::escape_into(
+            &dunce::canonicalize(dir.path())
+                .expect("canonical tempdir")
+                .join("d")
+                .to_string_lossy(),
+            &mut want,
+        );
+        assert!(body.contains(&want), "want {want} in {body}");
     }
 
     // The DISCRIMINATOR for the durability proof above: the identical flow on a

@@ -82,9 +82,13 @@ impl VolumeRegistry {
     /// ([`VolumeNotFound`](VolumeRegistryError::VolumeNotFound)) or the volume
     /// fails to create the backend
     /// ([`VolumeCreate`](VolumeRegistryError::VolumeCreate)).
+    ///
+    /// `config` is `&mut` because the volume may amend it (R2802, see
+    /// [`Volume::create_storage`](crate::storage_volume::Volume::create_storage));
+    /// a caller that keeps the storage's config keeps the amended one.
     pub fn create_backend(
         &self,
-        config: &StorageConfig,
+        config: &mut StorageConfig,
     ) -> Result<Box<dyn StorageBackend + Send>, VolumeRegistryError> {
         let volume = self
             .volumes
@@ -200,10 +204,16 @@ impl StorageManager {
         if self.storages.contains_key(&config.name) {
             return Err(StorageManagerError::DuplicateStorage(config.name.clone()));
         }
-        let backend = self.registry.create_backend(config).map_err(|e| match e {
-            VolumeRegistryError::VolumeNotFound(s) => StorageManagerError::VolumeNotFound(s),
-            VolumeRegistryError::VolumeCreate(v) => StorageManagerError::VolumeCreate(v),
-        })?;
+        // This manager holds backends, not configs, so a volume's amendment
+        // (R2802) has no reader here and the copy is dropped with it.
+        let mut config = config.clone();
+        let backend = self
+            .registry
+            .create_backend(&mut config)
+            .map_err(|e| match e {
+                VolumeRegistryError::VolumeNotFound(s) => StorageManagerError::VolumeNotFound(s),
+                VolumeRegistryError::VolumeCreate(v) => StorageManagerError::VolumeCreate(v),
+            })?;
         self.storages.insert(config.name.clone(), backend);
         Ok(())
     }
@@ -281,7 +291,7 @@ mod tests {
         }
         fn create_storage(
             &self,
-            _config: &StorageConfig,
+            _config: &mut StorageConfig,
         ) -> Result<Box<dyn StorageBackend + Send>, VolumeError> {
             Err(VolumeError::CreateFailed(alloc::string::String::from(
                 "test backend open failed",
@@ -348,7 +358,7 @@ mod tests {
         // (the R311y62 live-service owner / the StorageManager holds the result).
         let r = registry_with_mem();
         let mut backend = r
-            .create_backend(&StorageConfig::new("s1", "demo/**", "mem"))
+            .create_backend(&mut StorageConfig::new("s1", "demo/**", "mem"))
             .expect("the mem volume creates a backend");
         assert_eq!(
             backend.put(Some("demo/a"), vec![1], None, ts(10)).unwrap(),
@@ -360,7 +370,7 @@ mod tests {
     fn create_backend_unknown_volume_errs() {
         let r = VolumeRegistry::new();
         assert_eq!(
-            r.create_backend(&StorageConfig::new("s1", "demo/**", "nope"))
+            r.create_backend(&mut StorageConfig::new("s1", "demo/**", "nope"))
                 .err(),
             Some(VolumeRegistryError::VolumeNotFound("nope".into()))
         );

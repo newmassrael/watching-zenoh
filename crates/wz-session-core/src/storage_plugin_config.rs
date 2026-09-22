@@ -65,9 +65,10 @@
 //! * Refusals name the storage where upstream's garbage-collection and
 //!   replication messages name the plugin — those texts reach an operator's
 //!   log and nothing on the wire.
-//! * `volume_cfg` reaches wz's `StorageConfig` as string pairs
-//!   ([`StorageDecl::to_storage_config`](crate::storage_plugin_config::StorageDecl::to_storage_config));
-//!   an object payload with no keys
+//! * `volume_cfg` reaches wz's `StorageConfig` as `(key, value)` pairs
+//!   ([`StorageDecl::to_storage_config`](crate::storage_plugin_config::StorageDecl::to_storage_config)),
+//!   each value the JSON value the document holds (R2802); an object payload
+//!   with no keys
 //!   besides `id` therefore renders there as the bare-string form. The DIFF is
 //!   unaffected: it compares the declaration, which keeps upstream's
 //!   distinction between a bare `volume: "x"` and `volume: { id: "x" }`.
@@ -210,9 +211,10 @@ impl PartialEq for StorageDecl {
 impl StorageDecl {
     /// The wz [`StorageConfig`] the storage manager is driven by.
     ///
-    /// Every field wz models is carried. `volume_cfg` becomes string pairs: a
-    /// string value is itself, any other value its JSON text, so a backend
-    /// reading `dir` gets the path and one reading a number gets its digits.
+    /// Every field wz models is carried. `volume_cfg` is carried AS WRITTEN --
+    /// each value the JSON value the document holds, so a backend reading
+    /// `read_only` can tell `true` from `"true"` exactly as upstream's can (R2802;
+    /// until then a non-string value reached the backend as its JSON text).
     /// `replication` has no field there and is not dropped silently by
     /// accident — see this type's doc.
     pub fn to_storage_config(&self) -> StorageConfig {
@@ -220,18 +222,7 @@ impl StorageDecl {
         config.complete = self.complete;
         config.strip_prefix = self.strip_prefix.clone();
         config.garbage_collection = self.garbage_collection.clone();
-        config.volume_cfg = self
-            .volume_cfg
-            .iter()
-            .flatten()
-            .map(|(key, value)| {
-                let text = match value {
-                    Json5Value::String(s) => s.clone(),
-                    other => other.to_json5_text(),
-                };
-                (key.clone(), text)
-            })
-            .collect();
+        config.volume_cfg = self.volume_cfg.iter().flatten().cloned().collect();
         config
     }
 }
@@ -1319,7 +1310,7 @@ mod tests {
     fn a_declaration_becomes_the_storage_config_wz_drives() {
         let s = storage(
             r#"{ key_expr: "demo/x/**", strip_prefix: "demo/x", complete: true,
-                 volume: { id: "fs", dir: "sub", size: 3 },
+                 volume: { id: "fs", dir: "sub", size: 3, read_only: true, label: "true" },
                  garbage_collection: { period: 5, lifespan: 60 } }"#,
         )
         .unwrap();
@@ -1332,11 +1323,17 @@ mod tests {
         assert_eq!(c.strip_prefix.as_deref(), Some("demo/x"));
         assert_eq!(c.garbage_collection.period, Duration::from_secs(5));
         assert_eq!(c.garbage_collection.lifespan, Duration::from_secs(60));
+        // R2802 — each value arrives as the JSON value the document wrote: the
+        // number stays a number, and a boolean and a string reading "true" stay
+        // two different things, which is the distinction upstream's fs backend
+        // refuses on.
         assert_eq!(
             c.volume_cfg,
             vec![
-                (String::from("dir"), String::from("sub")),
-                (String::from("size"), String::from("3"))
+                (String::from("dir"), Json5Value::String("sub".into())),
+                (String::from("label"), Json5Value::String("true".into())),
+                (String::from("read_only"), Json5Value::Bool(true)),
+                (String::from("size"), Json5Value::Number("3".into())),
             ]
         );
     }

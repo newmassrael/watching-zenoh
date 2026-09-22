@@ -8561,6 +8561,21 @@ pub(crate) async fn run_storage_host(listen: &str, opts: StorageHostOpts) -> io:
                                     // a durable-looking storage volatile.
                                     if named_volume.is_none() {
                                         cfg.volume_id = dispatch_volume_id.to_string();
+                                        // R2802 — upstream's fs volume REQUIRES a
+                                        // per-storage `dir`. A storage this host maps
+                                        // onto its own volume named no volume at all,
+                                        // so the host names the directory too: the
+                                        // storage's own name, which is the layout
+                                        // `--storage-host-dir` has always produced
+                                        // (`<dir>/<name>`).
+                                        if cfg.volume_id == "fs" && cfg.volume_cfg.is_empty() {
+                                            cfg.volume_cfg.push((
+                                                String::from("dir"),
+                                                wz::runtime_tokio::json5::Json5Value::String(
+                                                    name.clone(),
+                                                ),
+                                            ));
+                                        }
                                     }
                                     // R311y503 — the HOST's garbage-collection
                                     // policy, applied to every storage it spawns.

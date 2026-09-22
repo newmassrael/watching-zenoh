@@ -156,9 +156,21 @@ pub trait Volume {
     /// `storage_strip_prefix::tests` as witnesses. A stale "not wired" note is
     /// the same hazard as a missing one pointed the other way: it reopens
     /// finished work.
+    ///
+    /// # Why `config` is `&mut` (R2802)
+    ///
+    /// Upstream's `create_storage` takes the config BY VALUE and may change it
+    /// before the storage keeps it
+    /// (`plugins/zenoh-backend-traits/src/lib.rs` @ `async fn create_storage(&self, config: StorageConfig) -> ZResult<Box<dyn Storage>>;`),
+    /// and the kept config is what that storage's admin status reports. The
+    /// filesystem backend uses that: it resolves the directory the storage will
+    /// live in and inserts it into `volume_cfg` as `dir_full_path`, so the admin
+    /// plane shows where the data actually is. With a shared reference a wz
+    /// backend could compute that path and had nowhere to put it. The caller
+    /// keeps whatever the volume leaves here as the storage's config.
     fn create_storage(
         &self,
-        config: &StorageConfig,
+        config: &mut StorageConfig,
     ) -> Result<Box<dyn StorageBackend + Send>, VolumeError>;
 
     /// R311y828 — where this volume's IMPLEMENTATION came from, for the admin
@@ -201,7 +213,7 @@ impl Volume for MemoryVolume {
 
     fn create_storage(
         &self,
-        _config: &StorageConfig,
+        _config: &mut StorageConfig,
     ) -> Result<Box<dyn StorageBackend + Send>, VolumeError> {
         // Always succeeds: a fresh in-memory store, config-agnostic. zenoh's
         // MemoryBackend likewise just makes a store (it retains the config only for
@@ -251,9 +263,9 @@ mod tests {
         // round-trip), and two create_storage() calls are INDEPENDENT stores
         // (the manager hosts each named storage separately).
         let vol = MemoryVolume;
-        let cfg = StorageConfig::new("demo", "demo/**", "mem");
+        let mut cfg = StorageConfig::new("demo", "demo/**", "mem");
         let mut s1 = vol
-            .create_storage(&cfg)
+            .create_storage(&mut cfg)
             .expect("in-memory create never fails");
         assert_eq!(
             s1.put(Some("demo/a"), vec![1, 2, 3], None, ts(10)).unwrap(),
@@ -268,7 +280,7 @@ mod tests {
         );
 
         let s2 = vol
-            .create_storage(&cfg)
+            .create_storage(&mut cfg)
             .expect("in-memory create never fails");
         assert!(
             s2.get_newest(Some("demo/a")).unwrap().is_none(),

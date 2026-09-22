@@ -528,15 +528,17 @@ storage-history = ["storage-backend", "wz-session-core/storage-history"]
 # the owner's full-parity decision (R2573), and full parity reaches the ON-DISK
 # FORMAT: zenoh's filesystem backend keeps each value's encoding and timestamp in
 # a RocksDB sidecar beside the files, so a directory either implementation wrote
-# must be one the other can serve without losing them. The four optional deps
-# are upstream's own at the versions its 1.10.1 manifest pins (see the
-# dependency block and `filesystem_datainfo`), so they are derived, not chosen.
+# must be one the other can serve without losing them. The optional deps are
+# upstream's own at the versions its 1.10.1 manifest pins (see the dependency
+# block and `filesystem_datainfo`), so they are derived, not chosen; R2802 added
+# the fifth, `dunce`, with the volume root upstream derives.
 storage-backend-filesystem = [
     "wz-session-core/storage-backend",
     "dep:rocksdb",
     "dep:librocksdb-sys",
     "dep:mime_guess",
     "dep:walkdir",
+    "dep:dunce",
 ]
 # Round 311vm — storage-replication (§5.11 storage, replication driver). The
 # digest publisher/subscriber DRIVER (`storage_replication_service`). Forwards
@@ -2020,6 +2022,45 @@ portable-atomic = "1"
 # which serves a bind-without-listen test shim; Cargo unifies the two.
 socket2 = { version = "0.6", features = ["all"], optional = true }
 
+# R2801 — the filesystem storage backend's dependencies, pulled ONLY by
+# `storage-backend-filesystem`, each at the version zenoh-backend-filesystem
+# 1.10.1 declares. `rocksdb` is the `.zenoh_datainfo` sidecar that holds every
+# value's encoding and timestamp.
+#
+# ONE codec, snappy, and the reason is what upstream WRITES rather than what it
+# compiles. Upstream builds rocksdb with its five default codecs, but opens the
+# sidecar with `DB::open_default`, which leaves RocksDB's default `compression`
+# -- snappy when snappy is compiled in (the `ColumnFamilyOptions` constructor in
+# the RocksDB source librocksdb-sys 0.17.1 vendors) -- and configures nothing
+# else, so snappy is the one codec a sidecar zenohd wrote can hold. R2801's
+# first cut kept all five "so a reader can open whatever upstream compiled in";
+# that confused compiled with used, and the other four brought three
+# system-library probes (zlib, bzip2, zstd, via pkg-config) for blocks upstream
+# never writes. `bindgen-runtime` is the other default upstream builds with.
+#
+# `librocksdb-sys` is named only to hold the engine at upstream's exact
+# `=0.17.1` (RocksDB 9.9.3) -- `rocksdb 0.23` alone would float to a newer
+# engine whose files the older one is not promised to read. `mime_guess` is
+# the extension-to-MIME guess behind `keep_mime_types`, and `walkdir` is the
+# directory walk behind `follow_links`; both are upstream's rather than
+# re-implemented, because their tables and link semantics ARE the behaviour.
+# `dunce` (R2802) canonicalizes the volume root as upstream's plugin does; on
+# unix it is `std::fs::canonicalize`, on windows it drops the verbatim `\\?\`
+# prefix where the path allows, and the root's spelling is part of the format
+# because the sidecar keys each row by the file's full path.
+#
+# In THIS table, not a target one (R2802 moved them): R2801 had placed them in
+# the `cfg(unix)` table beside `libloading`, which made the backend unbuildable
+# off unix although its code names no unix-only API outside its tests --
+# upstream's backend is portable, and `filesystem_keypath` carries its windows
+# separator rule for exactly that reason. (Whether it RUNS correctly off unix is
+# a different question and an open one: nothing here builds or runs it there.)
+rocksdb = { version = "0.23.0", optional = true, default-features = false, features = ["snappy", "bindgen-runtime"] }
+librocksdb-sys = { version = "=0.17.1", optional = true, default-features = false }
+mime_guess = { version = "2.0.5", optional = true }
+walkdir = { version = "2.5.0", optional = true }
+dunce = { version = "1.0.3", optional = true }
+
 # R311xj — AF_VSOCK link backend dep. Linux-only (the same platform gate
 # zenoh-link-vsock uses, `[target.'cfg(target_os="linux")']`): `tokio-vsock`
 # wraps the Linux-only AF_VSOCK socket family, so it is target-gated AND
@@ -2053,33 +2094,6 @@ wz-packet-socket = { path = "../wz-packet-socket", optional = true }
 # `no_std` profile can carry a runtime loader at all. Optional, pulled ONLY by
 # `plugin-dynamic-loading`, so every other build is byte-identical.
 libloading = { version = "0.8", optional = true }
-
-# R2801 — the filesystem storage backend's dependencies, pulled ONLY by
-# `storage-backend-filesystem`, each at the version zenoh-backend-filesystem
-# 1.10.1 declares. `rocksdb` is the `.zenoh_datainfo` sidecar that holds every
-# value's encoding and timestamp.
-#
-# ONE codec, snappy, and the reason is what upstream WRITES rather than what it
-# compiles. Upstream builds rocksdb with its five default codecs, but opens the
-# sidecar with `DB::open_default`, which leaves RocksDB's default `compression`
-# -- snappy when snappy is compiled in (the `ColumnFamilyOptions` constructor in
-# the RocksDB source librocksdb-sys 0.17.1 vendors) -- and configures nothing
-# else, so snappy is the one codec a sidecar zenohd wrote can hold. R2801's
-# first cut kept all five "so a reader can open whatever upstream compiled in";
-# that confused compiled with used, and the other four brought three
-# system-library probes (zlib, bzip2, zstd, via pkg-config) for blocks upstream
-# never writes. `bindgen-runtime` is the other default upstream builds with.
-#
-# `librocksdb-sys` is named only to hold the engine at upstream's exact
-# `=0.17.1` (RocksDB 9.9.3) -- `rocksdb 0.23` alone would float to a newer
-# engine whose files the older one is not promised to read. `mime_guess` is
-# the extension-to-MIME guess behind `keep_mime_types`, and `walkdir` is the
-# directory walk behind `follow_links`; both are upstream's rather than
-# re-implemented, because their tables and link semantics ARE the behaviour.
-rocksdb = { version = "0.23.0", optional = true, default-features = false, features = ["snappy", "bindgen-runtime"] }
-librocksdb-sys = { version = "=0.17.1", optional = true, default-features = false }
-mime_guess = { version = "2.0.5", optional = true }
-walkdir = { version = "2.5.0", optional = true }
 
 # R311y594 (B1) — the capture front end the live tap feeds. Optional and pulled
 # only by `live-capture`; it stays a dev-dependency as well, because the pcap

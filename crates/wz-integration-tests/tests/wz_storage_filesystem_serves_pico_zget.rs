@@ -11,7 +11,8 @@
 //!
 //! `storage-backend-filesystem` (active, PARTIAL) is the durable
 //! Volume/StorageBackend: `FilesystemVolume` opens a `FilesystemStorage` rooted
-//! at `root/<name>`, whose directory tree mirrors the key space (R2801: each
+//! at `root/<dir>` (R2802: the storage's `dir` property, which this test sets to
+//! the storage's name), whose directory tree mirrors the key space (R2801: each
 //! value a raw file at its key's path, written durably, read from disk on every
 //! get). This test declares a storage over a `FilesystemVolume` at a tempdir
 //! (volume_id `fs`, via `StorageService::declare_with_backend`), seeds a value,
@@ -64,6 +65,7 @@ use wz_runtime_tokio::session_open::{accept_and_open_session, DialedLink, DEFAUL
 use wz_runtime_tokio::storage_service::StorageService;
 use wz_runtime_tokio::sync::Mutex;
 use wz_runtime_tokio_test_support::fixture_session_init_params;
+use wz_session_core::json5::Json5Value;
 use wz_session_core::sample::TimestampHint;
 use wz_session_core::session_timeouts::SessionTimeouts;
 use wz_session_core::storage_config::StorageConfig;
@@ -72,7 +74,8 @@ use wz_session_core::storage_volume::Volume;
 const ITER_CAP: usize = 4096;
 /// The storage keyexpr the wz `StorageService` captures + answers on.
 const STORAGE_KEYEXPR: &str = "demo/**";
-/// The storage NAME — FilesystemVolume roots this storage at `<tempdir>/<name>`.
+/// The storage NAME, and also its `dir` — FilesystemVolume roots this storage at
+/// `<tempdir>/<dir>` (R2802), so the key's file sits at `<tempdir>/demo/<key>`.
 const STORAGE_NAME: &str = "demo";
 /// The concrete key pico `z_get`s (matched by `demo/**`).
 const QUERY_KEY: &str = "demo/k1";
@@ -161,9 +164,16 @@ async fn wz_filesystem_storage_serves_a_durable_value_to_a_pico_zget() {
     // Declare a storage over a FilesystemVolume rooted at the tempdir (volume_id
     // `fs`) and seed a value BEFORE the drive runs. The write-through is fsync'd
     // before process_put returns, so the on-disk file is present immediately.
-    let config = StorageConfig::new(STORAGE_NAME, STORAGE_KEYEXPR, "fs");
+    // R2802 — the storage names its directory (`dir`), as upstream's fs volume
+    // requires; it is the storage name, so the key's file stays where the
+    // assertion below reads it.
+    let mut config = StorageConfig::new(STORAGE_NAME, STORAGE_KEYEXPR, "fs");
+    config.volume_cfg.push((
+        String::from("dir"),
+        Json5Value::String(String::from(STORAGE_NAME)),
+    ));
     let backend = FilesystemVolume::new(tmp.path().to_path_buf())
-        .create_storage(&config)
+        .create_storage(&mut config)
         .expect("filesystem volume creates the backend at the tempdir");
     let observer = Arc::new(Mutex::new(ApplicationLayerObserver::new()));
     let session = TokioSession::new(opened.actions.clone(), observer, Arc::new(opened.clock));

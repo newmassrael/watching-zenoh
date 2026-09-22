@@ -84,6 +84,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use wz_session_core::encoding::encoding_from_mime;
+use wz_session_core::json5::Json5Value;
 use wz_session_core::ntp64::Ntp64;
 use wz_session_core::sample::{EncodingHint, TimestampHint};
 use wz_session_core::storage_backend::{
@@ -107,27 +108,55 @@ static STAGING_COUNTER: AtomicU64 = AtomicU64::new(0);
 /// `TimestampId::try_from([1])`, whose significant bytes are the one `0x01`.
 const FILE_TIME_ZID: [u8; 1] = [0x01];
 
-/// Whether `name` is a single safe path component (no separators, not `.` /
-/// `..`, non-empty, no NUL) — a [`StorageConfig::name`] is free-form, so it
-/// is validated before being joined onto the volume root (path-traversal
-/// guard).
-fn is_safe_component(name: &str) -> bool {
-    !name.is_empty()
-        && name != "."
-        && name != ".."
-        && !name.contains('/')
-        && !name.contains('\\')
-        && !name.contains('\0')
+/// The environment variable that names the root of every storage this volume
+/// creates — byte for byte upstream's `SCOPE_ENV_VAR`.
+pub const SCOPE_ENV_VAR: &str = "ZENOH_BACKEND_FS_ROOT";
+
+/// The root under the zenoh home directory when [`SCOPE_ENV_VAR`] is unset —
+/// upstream's `DEFAULT_ROOT_DIR`.
+pub const DEFAULT_ROOT_DIR: &str = "zenoh_backend_fs";
+
+/// The environment variable naming the zenoh home directory, and the directory
+/// used under the user's home when it is unset — upstream's `zenoh_home()`
+/// (`commons/zenoh-util/src/lib.rs` @ `pub fn zenoh_home() -> &'static std::path::Path {`).
+pub const ZENOH_HOME_ENV_VAR: &str = "ZENOH_HOME";
+/// See [`ZENOH_HOME_ENV_VAR`].
+pub const DEFAULT_ZENOH_HOME_DIRNAME: &str = ".zenoh";
+
+/// The per-storage properties, by upstream's names (its `PROP_STORAGE_*`).
+pub const PROP_STORAGE_READ_ONLY: &str = "read_only";
+/// See [`PROP_STORAGE_READ_ONLY`].
+pub const PROP_STORAGE_DIR: &str = "dir";
+/// See [`PROP_STORAGE_READ_ONLY`].
+pub const PROP_STORAGE_ON_CLOSURE: &str = "on_closure";
+/// See [`PROP_STORAGE_READ_ONLY`].
+pub const PROP_STORAGE_FOLLOW_LINK: &str = "follow_links";
+/// See [`PROP_STORAGE_READ_ONLY`].
+pub const PROP_STORAGE_KEEP_MIME: &str = "keep_mime_types";
+/// The key upstream inserts into a storage's `volume_cfg` naming the directory
+/// it resolved, so the admin plane shows where the data is.
+pub const DIR_FULL_PATH: &str = "dir_full_path";
+
+/// What a storage does to its directory when it closes — upstream's
+/// `OnClosure`, read from `on_closure` (`"do_nothing"` by default).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum OnClosure {
+    /// Leave the directory, its files and its sidecar as they are.
+    #[default]
+    DoNothing,
+    /// Remove the whole directory, sidecar included, once the storage is gone.
+    DeleteAll,
 }
 
-/// The two storage properties that decide how a read treats the directory,
-/// named and defaulted as upstream's fs volume names and defaults them
-/// (`follow_links` false, `keep_mime_types` true).
+/// A storage's properties, named and defaulted as upstream's fs volume names
+/// and defaults them (`follow_links` false, `keep_mime_types` true,
+/// `read_only` false, `on_closure` do-nothing).
 ///
-/// They are here because the directory-tree layout is what gives them anything
-/// to decide -- with the old hashed layout there was no link to follow and no
-/// extension to read. Nothing maps a storage's configuration onto them yet: that
-/// is the next round, together with `read_only`, `dir` and `on_closure`.
+/// `follow_links` and `keep_mime_types` are here because the directory-tree
+/// layout gives them something to decide -- with the old hashed layout there
+/// was no link to follow and no extension to read. [`FilesystemVolume`] reads
+/// all four off a storage's `volume_cfg` (R2802); `dir`, the fifth property,
+/// is not an option of a store but the choice of which directory it is.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct FilesystemOptions {
     /// Serve, list and write paths reached through a symbolic link inside the
@@ -138,6 +167,10 @@ pub struct FilesystemOptions {
     /// For a file that has no sidecar row, guess its encoding from its
     /// extension. Off, such a file is served as `application/octet-stream`.
     pub keep_mime_types: bool,
+    /// Refuse every put and delete; the directory is served as it is.
+    pub read_only: bool,
+    /// What happens to the directory when the store is dropped.
+    pub on_closure: OnClosure,
 }
 
 impl Default for FilesystemOptions {
@@ -145,6 +178,34 @@ impl Default for FilesystemOptions {
         Self {
             follow_links: false,
             keep_mime_types: true,
+            read_only: false,
+            on_closure: OnClosure::DoNothing,
+        }
+    }
+}
+
+/// Removes a store's directory when the store is dropped, if its
+/// [`OnClosure`] says so.
+///
+/// A FIELD rather than `FilesystemStorage`'s own `Drop`, and the last one: Rust
+/// drops fields in declaration order, so the sidecar has closed -- and released
+/// its lock -- before this runs. Upstream closes its data-info database first
+/// for the same reason.
+#[derive(Debug)]
+struct ClosureGuard {
+    base_dir: PathBuf,
+    on_closure: OnClosure,
+}
+
+impl Drop for ClosureGuard {
+    fn drop(&mut self) {
+        if self.on_closure == OnClosure::DeleteAll {
+            if let Err(e) = fs::remove_dir_all(&self.base_dir) {
+                log::warn!(
+                    "wz-fs-storage: failed to clean up {} on closure ({e})",
+                    self.base_dir.display()
+                );
+            }
         }
     }
 }
@@ -168,6 +229,9 @@ pub struct FilesystemStorage {
     /// injected at the one call that performs it.
     #[cfg(test)]
     fail_unlink: bool,
+    /// LAST, so it runs after the sidecar has closed (see [`ClosureGuard`]).
+    /// Held only for its `Drop`, which is what the leading underscore says.
+    _closure: ClosureGuard,
 }
 
 impl FilesystemStorage {
@@ -204,6 +268,10 @@ impl FilesystemStorage {
             ))
         })?;
         Ok(Self {
+            _closure: ClosureGuard {
+                base_dir: dir.clone(),
+                on_closure: options.on_closure,
+            },
             base_dir: dir,
             data_info,
             options,
@@ -704,6 +772,14 @@ impl StorageBackend for FilesystemStorage {
         encoding: Option<EncodingHint>,
         timestamp: TimestampHint,
     ) -> StorageWriteResult {
+        // Upstream's `read_only` arm: a warning and a refusal, nothing touched.
+        if self.options.read_only {
+            log::warn!(
+                "wz-fs-storage: PUT of {key:?} refused: the storage on {} is read-only",
+                self.base_dir.display()
+            );
+            return Err(StorageWriteError);
+        }
         let Some(target) = self.key_path(key) else {
             log::error!("wz-fs-storage: refusing to place key {key:?} (see `key_path`)");
             return Err(StorageWriteError);
@@ -742,6 +818,13 @@ impl StorageBackend for FilesystemStorage {
     }
 
     fn delete(&mut self, key: Option<&str>, _timestamp: TimestampHint) -> StorageWriteResult {
+        if self.options.read_only {
+            log::warn!(
+                "wz-fs-storage: DELETE of {key:?} refused: the storage on {} is read-only",
+                self.base_dir.display()
+            );
+            return Err(StorageWriteError);
+        }
         // A key that cannot be placed holds nothing, and an absent-key delete is
         // `Deleted` -- the seam contract, and upstream's `if file.exists()`.
         let Some(target) = self.key_path(key) else {
@@ -800,20 +883,239 @@ impl StorageBackend for FilesystemStorage {
     // `History::Latest` too; History::All is the separate `storage-history` atom.
 }
 
-/// A durable [`Volume`] that creates one [`FilesystemStorage`] per named
-/// storage, each rooted at `root/<config.name>`. The wz counterpart of
-/// zenoh's `zenoh-backend-filesystem` volume; [`capability`](Volume::capability)
-/// advertises `{ Durable, Latest }`.
+/// A durable [`Volume`] that creates one [`FilesystemStorage`] per storage,
+/// each in the directory its `dir` property names under the volume's root. The
+/// wz counterpart of zenoh's `zenoh-backend-filesystem` volume;
+/// [`capability`](Volume::capability) advertises `{ Durable, Latest }`.
+///
+/// # The root, and why it is canonical
+///
+/// [`FilesystemVolume::from_env`] derives the root as upstream's plugin does:
+/// [`SCOPE_ENV_VAR`] when set, else [`DEFAULT_ROOT_DIR`] under the zenoh home
+/// ([`ZENOH_HOME_ENV_VAR`], else [`DEFAULT_ZENOH_HOME_DIRNAME`] under the user's
+/// home), created and then CANONICALIZED. [`FilesystemVolume::new`] takes a
+/// root from the host instead, a wz extension, and canonicalizes it the same
+/// way when a storage is created. The canonical form is not cosmetic: the
+/// sidecar keys each row by the file's full path, so a directory is served
+/// with its metadata by wz and by zenohd alike only when both spell its path
+/// the same way.
 #[derive(Debug, Clone)]
 pub struct FilesystemVolume {
     root: PathBuf,
 }
 
 impl FilesystemVolume {
-    /// A filesystem volume whose per-storage directories live under `root`.
+    /// A filesystem volume whose storages live under `root`, which the host
+    /// chose.
     pub fn new(root: impl Into<PathBuf>) -> Self {
         Self { root: root.into() }
     }
+
+    /// A filesystem volume rooted where upstream's plugin roots it (see the
+    /// type's doc), or the reason that root cannot be made.
+    pub fn from_env() -> io::Result<Self> {
+        Self::from_inputs(
+            std::env::var_os(SCOPE_ENV_VAR),
+            std::env::var_os(ZENOH_HOME_ENV_VAR),
+            home_dir(),
+        )
+    }
+
+    /// [`from_env`](Self::from_env) with its three inputs given rather than
+    /// read, so the whole of it -- derivation, creation, canonical form -- is
+    /// testable without touching the process environment.
+    fn from_inputs(
+        scope: Option<std::ffi::OsString>,
+        zenoh_home: Option<std::ffi::OsString>,
+        user_home: Option<PathBuf>,
+    ) -> io::Result<Self> {
+        let root = derive_root(scope, zenoh_home, user_home);
+        fs::create_dir_all(&root).map_err(|e| {
+            io::Error::new(
+                e.kind(),
+                format!("cannot create ${SCOPE_ENV_VAR}={}: {e}", root.display()),
+            )
+        })?;
+        Ok(Self {
+            root: canonical(&root)?,
+        })
+    }
+}
+
+/// Upstream's root rule as a pure function of its three inputs, so it can be
+/// tested without touching the process environment: [`SCOPE_ENV_VAR`] wins;
+/// otherwise [`DEFAULT_ROOT_DIR`] under the zenoh home, which is
+/// [`ZENOH_HOME_ENV_VAR`] or [`DEFAULT_ZENOH_HOME_DIRNAME`] under the user's
+/// home -- or, with no user home at all, that directory name relative to the
+/// working directory, exactly as upstream's `zenoh_home()` falls back.
+fn derive_root(
+    scope: Option<std::ffi::OsString>,
+    zenoh_home: Option<std::ffi::OsString>,
+    user_home: Option<PathBuf>,
+) -> PathBuf {
+    if let Some(dir) = scope {
+        return PathBuf::from(dir);
+    }
+    let mut home = match (zenoh_home, user_home) {
+        (Some(dir), _) => PathBuf::from(dir),
+        (None, Some(mut dir)) => {
+            dir.push(DEFAULT_ZENOH_HOME_DIRNAME);
+            dir
+        }
+        (None, None) => PathBuf::from(DEFAULT_ZENOH_HOME_DIRNAME),
+    };
+    home.push(DEFAULT_ROOT_DIR);
+    home
+}
+
+/// The user's home directory, as upstream's `zenoh_home()` finds it through
+/// `home::home_dir()` -- which on unix IS `std::env::home_dir()`: `HOME` when
+/// set (an empty value included, which upstream then treats as a relative
+/// directory), else the account's passwd entry. On windows the pinned compiler's
+/// `std::env::home_dir()` reads the profile directory, as that crate's own
+/// windows arm does. Calling the same function is what makes the fallback the
+/// same, where reading `HOME` by hand would miss the passwd arm.
+///
+/// The `allow`: the call is deprecated at this workspace's MSRV and
+/// un-deprecated by the pinned compiler; the `home` crate carries the same
+/// allow on the same call.
+#[allow(deprecated)]
+fn home_dir() -> Option<PathBuf> {
+    std::env::home_dir()
+}
+
+/// `path` canonicalized as upstream canonicalizes its root (`dunce`: on
+/// windows the verbatim `\\?\` prefix is dropped where the path allows it, so
+/// the spelling matches what an operator and zenohd write).
+fn canonical(path: &Path) -> io::Result<PathBuf> {
+    dunce::canonicalize(path).map_err(|e| {
+        io::Error::new(
+            e.kind(),
+            format!("invalid path for the volume root {}: {e}", path.display()),
+        )
+    })
+}
+
+/// Why a storage's properties could not be read. The message is upstream's
+/// wording where upstream has one.
+fn property_error(message: String) -> VolumeError {
+    VolumeError::CreateFailed(message)
+}
+
+/// Upstream's `extract_bool`: absent is the default, a JSON boolean is itself,
+/// anything else -- the STRING `"true"` included -- is refused.
+fn extract_bool(
+    cfg: &[(String, Json5Value)],
+    key: &str,
+    default: bool,
+) -> Result<bool, VolumeError> {
+    match cfg.iter().find(|(k, _)| k == key).map(|(_, v)| v) {
+        None => Ok(default),
+        Some(Json5Value::Bool(b)) => Ok(*b),
+        Some(_) => Err(property_error(format!(
+            "Invalid value for File System Storage configuration: `{key}` must be a boolean"
+        ))),
+    }
+}
+
+/// Read a storage's properties off its `volume_cfg`, rule for rule as
+/// upstream's `create_storage` reads them. Returns the options and the `dir`
+/// the storage asked for, not yet joined onto a root.
+fn read_properties(
+    cfg: &[(String, Json5Value)],
+) -> Result<(FilesystemOptions, PathBuf), VolumeError> {
+    // Upstream's first check: the payload must be an OBJECT. An empty list is
+    // wz's spelling of upstream's `Value::Null`, the bare volume id.
+    if cfg.is_empty() {
+        return Err(property_error(String::from(
+            "fs backed volumes require volume-specific configuration",
+        )));
+    }
+    let read_only = extract_bool(cfg, PROP_STORAGE_READ_ONLY, false)?;
+    let follow_links = extract_bool(cfg, PROP_STORAGE_FOLLOW_LINK, false)?;
+    let keep_mime_types = extract_bool(cfg, PROP_STORAGE_KEEP_MIME, true)?;
+    let on_closure = match cfg.iter().find(|(k, _)| k == PROP_STORAGE_ON_CLOSURE) {
+        None => OnClosure::DoNothing,
+        Some((_, Json5Value::String(s))) if s == "delete_all" => OnClosure::DeleteAll,
+        Some((_, Json5Value::String(s))) if s == "do_nothing" => OnClosure::DoNothing,
+        Some((_, other)) => {
+            return Err(property_error(format!(
+                "Unsupported value {} for `{PROP_STORAGE_ON_CLOSURE}` property: must be either \
+                 \"delete_all\" or \"do_nothing\". Default is \"do_nothing\"",
+                other.to_json5_text()
+            )))
+        }
+    };
+    let dir = match cfg.iter().find(|(k, _)| k == PROP_STORAGE_DIR) {
+        Some((_, Json5Value::String(dir))) => dir,
+        _ => {
+            return Err(property_error(format!(
+                "Missing required property for File System Storage: \"{PROP_STORAGE_DIR}\""
+            )))
+        }
+    };
+    let dir_path = PathBuf::from(dir);
+    if dir_path.is_absolute() {
+        return Err(property_error(format!(
+            "Invalid property \"{PROP_STORAGE_DIR}\"=\"{dir}\": the path must be relative"
+        )));
+    }
+    if dir_path
+        .components()
+        .any(|c| c == std::path::Component::ParentDir)
+    {
+        return Err(property_error(format!(
+            "Invalid property \"{PROP_STORAGE_DIR}\"=\"{dir}\": the path must not contain any '..'"
+        )));
+    }
+    Ok((
+        FilesystemOptions {
+            follow_links,
+            keep_mime_types,
+            read_only,
+            on_closure,
+        },
+        dir_path,
+    ))
+}
+
+/// Upstream's checks on the directory a storage resolved to: created when
+/// absent; refused when it is not a directory or cannot be listed; and, unless
+/// the storage is read-only, refused when a file cannot be written in it.
+fn check_base_dir(base_dir: &Path, read_only: bool) -> Result<(), VolumeError> {
+    let refuse = |why: String| {
+        property_error(format!(
+            "Cannot create File System Storage on \"dir\"={base_dir:?} : {why}"
+        ))
+    };
+    if !base_dir.exists() {
+        fs::create_dir_all(base_dir).map_err(|e| refuse(e.to_string()))?;
+    } else if !base_dir.is_dir() {
+        return Err(refuse(String::from("this is not a directory")));
+    } else {
+        fs::read_dir(base_dir).map_err(|e| refuse(e.to_string()))?;
+    }
+    if !read_only {
+        // Upstream writes an anonymous temporary file here, and only into a
+        // directory that already existed. This writes and removes a named one
+        // in the store's own staging area, which `open` clears anyway, so a
+        // probe that crashes halfway leaves nothing a listing reads -- and does
+        // it for a directory it just created too, since creating one is not
+        // the same as being able to write a file into it.
+        let staging = base_dir.join(STAGING_DIR);
+        let probe = staging.join(format!("probe.{}", std::process::id()));
+        let write = || -> io::Result<()> {
+            fs::create_dir_all(&staging)?;
+            fs::File::create(&probe)?.write_all(b"test\n")?;
+            fs::remove_file(&probe)
+        };
+        write().map_err(|e| {
+            property_error(format!(
+                "Cannot create writeable File System Storage on \"dir\"={base_dir:?} : {e}"
+            ))
+        })?;
+    }
+    Ok(())
 }
 
 impl Volume for FilesystemVolume {
@@ -824,23 +1126,34 @@ impl Volume for FilesystemVolume {
         }
     }
 
+    /// Upstream's `create_storage`, check for check: the properties off
+    /// `volume_cfg` (see [`read_properties`]), the directory `root/<dir>`
+    /// (see [`check_base_dir`]), then `dir_full_path` INSERTED into the config
+    /// the storage keeps -- which is why the config is `&mut`.
     fn create_storage(
         &self,
-        config: &StorageConfig,
+        config: &mut StorageConfig,
     ) -> Result<Box<dyn StorageBackend + Send>, VolumeError> {
-        // The storage's directory is `root/<name>`; `name` is free-form, so
-        // reject anything that is not a single safe path component before the
-        // join (a `..` / absolute / separator name would escape `root`).
-        if !is_safe_component(&config.name) {
-            return Err(VolumeError::CreateFailed(format!(
-                "invalid storage name {:?}: must be a single path component (no '/', '\\', '.', '..')",
-                config.name
-            )));
+        let (options, dir) = read_properties(&config.volume_cfg)?;
+        fs::create_dir_all(&self.root).map_err(|e| VolumeError::CreateFailed(e.to_string()))?;
+        let root = canonical(&self.root).map_err(|e| VolumeError::CreateFailed(e.to_string()))?;
+        let base_dir = root.join(dir);
+        check_base_dir(&base_dir, options.read_only)?;
+        let full = Json5Value::String(base_dir.to_string_lossy().into_owned());
+        match config
+            .volume_cfg
+            .iter_mut()
+            .find(|(k, _)| k == DIR_FULL_PATH)
+        {
+            Some((_, value)) => *value = full,
+            None => config.volume_cfg.push((String::from(DIR_FULL_PATH), full)),
         }
-        // Config-agnostic beyond `name` until the next round maps upstream's
-        // per-storage properties (`dir`, `read_only`, `on_closure`,
-        // `follow_links`, `keep_mime_types`) off `volume_cfg`.
-        FilesystemStorage::open(self.root.join(&config.name))
+        log::debug!(
+            "wz-fs-storage: storage on {} will store files in {}",
+            config.key_expr,
+            base_dir.display()
+        );
+        FilesystemStorage::open_with(base_dir, options)
             .map(|s| Box::new(s) as Box<dyn StorageBackend + Send>)
             .map_err(|e| VolumeError::CreateFailed(e.to_string()))
     }
@@ -1373,40 +1686,278 @@ mod tests {
         );
     }
 
+    /// A storage config naming its directory, with optional extra properties.
+    fn fs_cfg(name: &str, dir: &str, extra: &[(&str, Json5Value)]) -> StorageConfig {
+        let mut cfg = StorageConfig::new(name, "demo/**", "fs");
+        cfg.volume_cfg.push((
+            String::from(PROP_STORAGE_DIR),
+            Json5Value::String(dir.into()),
+        ));
+        for (k, v) in extra {
+            cfg.volume_cfg.push((String::from(*k), v.clone()));
+        }
+        cfg
+    }
+
+    fn refusal(vol: &FilesystemVolume, mut cfg: StorageConfig) -> String {
+        match vol.create_storage(&mut cfg) {
+            Err(VolumeError::CreateFailed(why)) => why,
+            Ok(_) => panic!("a storage was created from {:?}", cfg.volume_cfg),
+        }
+    }
+
     #[test]
-    fn volume_creates_durable_independent_storage() {
-        let dir = tempdir().unwrap();
-        let vol = FilesystemVolume::new(dir.path());
-        let cfg = StorageConfig::new("demo", "demo/**", "fs");
+    fn volume_creates_durable_independent_storage_in_its_dir() {
+        let root = tempdir().unwrap();
+        let vol = FilesystemVolume::new(root.path());
+        let mut cfg = fs_cfg("demo", "sub/demo", &[]);
         {
-            let mut s = vol.create_storage(&cfg).unwrap();
+            let mut s = vol.create_storage(&mut cfg.clone()).unwrap();
             assert_eq!(
                 s.put(Some("demo/a"), vec![1, 2, 3], None, ts(10)).unwrap(),
                 StorageInsertionResult::Inserted
             );
-        } // drop the backend, then re-create over the same name -> durable
-        let s = vol.create_storage(&cfg).unwrap();
+        } // drop the backend, then re-create over the same dir -> durable
+        assert_eq!(
+            fs::read(root.path().join("sub/demo/demo/a")).unwrap(),
+            vec![1, 2, 3],
+            "the storage lives at root/<dir>, not root/<name>"
+        );
+        let s = vol.create_storage(&mut cfg).unwrap();
         assert_eq!(
             s.get_newest(Some("demo/a")).unwrap().unwrap().payload,
             vec![1, 2, 3],
-            "a storage re-created over the same name reloads its data"
+            "a storage re-created over the same dir reloads its data"
         );
         let other = vol
-            .create_storage(&StorageConfig::new("other", "o/**", "fs"))
+            .create_storage(&mut fs_cfg("other", "elsewhere", &[]))
             .unwrap();
         assert!(other.get_newest(Some("demo/a")).unwrap().is_none());
     }
 
+    /// Upstream inserts the resolved directory into the config its storage
+    /// keeps, and that is what the admin plane reports. The root is canonical,
+    /// so the path is the one the sidecar keys its rows by.
     #[test]
-    fn volume_rejects_unsafe_storage_name() {
-        let dir = tempdir().unwrap();
-        let vol = FilesystemVolume::new(dir.path());
-        for bad in ["../evil", "/etc/passwd", "a/b", "..", "."] {
-            let cfg = StorageConfig::new(bad, "k/**", "fs");
-            assert!(
-                matches!(vol.create_storage(&cfg), Err(VolumeError::CreateFailed(_))),
-                "name {bad:?} must be rejected"
+    fn create_storage_inserts_dir_full_path_into_the_kept_config() {
+        let root = tempdir().unwrap();
+        // Spelled through a `..`: the path the config reports -- and the sidecar
+        // keys rows by -- must be the canonical one, not the host's spelling.
+        let vol = FilesystemVolume::new(root.path().join("x").join(".."));
+        let mut cfg = fs_cfg("demo", "d", &[]);
+        let _s = vol.create_storage(&mut cfg).unwrap();
+        let want = dunce::canonicalize(root.path()).unwrap().join("d");
+        assert_eq!(
+            cfg.volume_cfg
+                .iter()
+                .find(|(k, _)| k == DIR_FULL_PATH)
+                .map(|(_, v)| v.clone()),
+            Some(Json5Value::String(want.to_string_lossy().into_owned()))
+        );
+        assert!(
+            cfg.to_admin_json().contains(r#""dir_full_path":"#),
+            "{}",
+            cfg.to_admin_json()
+        );
+    }
+
+    #[test]
+    fn a_storage_without_its_payload_or_its_dir_is_refused_as_upstream_refuses() {
+        let root = tempdir().unwrap();
+        let vol = FilesystemVolume::new(root.path());
+        assert!(refusal(&vol, StorageConfig::new("s", "k/**", "fs"))
+            .contains("fs backed volumes require volume-specific configuration"));
+        let mut no_dir = StorageConfig::new("s", "k/**", "fs");
+        no_dir.volume_cfg.push((
+            String::from(PROP_STORAGE_READ_ONLY),
+            Json5Value::Bool(false),
+        ));
+        assert!(refusal(&vol, no_dir).contains("Missing required property"));
+        let mut dir_not_a_string = StorageConfig::new("s", "k/**", "fs");
+        dir_not_a_string.volume_cfg.push((
+            String::from(PROP_STORAGE_DIR),
+            Json5Value::Number("3".into()),
+        ));
+        assert!(refusal(&vol, dir_not_a_string).contains("Missing required property"));
+    }
+
+    #[test]
+    fn a_dir_that_would_leave_the_root_is_refused() {
+        let root = tempdir().unwrap();
+        let vol = FilesystemVolume::new(root.path());
+        assert!(refusal(&vol, fs_cfg("s", "/etc", &[])).contains("must be relative"));
+        assert!(refusal(&vol, fs_cfg("s", "a/../../x", &[])).contains("must not contain any '..'"));
+        assert!(!root.path().parent().unwrap().join("x").exists());
+    }
+
+    /// The reason `volume_cfg` became typed (R2802): upstream refuses a string
+    /// where it takes a boolean, and the string `"true"` is the case text could
+    /// not tell apart.
+    #[test]
+    fn a_boolean_property_given_as_a_string_is_refused() {
+        let root = tempdir().unwrap();
+        let vol = FilesystemVolume::new(root.path());
+        for key in [
+            PROP_STORAGE_READ_ONLY,
+            PROP_STORAGE_FOLLOW_LINK,
+            PROP_STORAGE_KEEP_MIME,
+        ] {
+            let why = refusal(
+                &vol,
+                fs_cfg("s", "d", &[(key, Json5Value::String("true".into()))]),
             );
+            assert!(why.contains(&format!("`{key}` must be a boolean")), "{why}");
         }
+    }
+
+    #[test]
+    fn on_closure_takes_upstreams_two_values_and_refuses_any_other() {
+        let root = tempdir().unwrap();
+        let vol = FilesystemVolume::new(root.path());
+        for ok in ["delete_all", "do_nothing"] {
+            let mut cfg = fs_cfg(
+                ok,
+                ok,
+                &[(PROP_STORAGE_ON_CLOSURE, Json5Value::String(ok.into()))],
+            );
+            assert!(vol.create_storage(&mut cfg).is_ok(), "{ok}");
+        }
+        assert!(refusal(
+            &vol,
+            fs_cfg(
+                "s",
+                "d",
+                &[(PROP_STORAGE_ON_CLOSURE, Json5Value::String("purge".into()))]
+            )
+        )
+        .contains("Unsupported value"));
+    }
+
+    #[test]
+    fn on_closure_delete_all_removes_the_directory_when_the_storage_closes() {
+        let root = tempdir().unwrap();
+        let vol = FilesystemVolume::new(root.path());
+        {
+            let mut s = vol
+                .create_storage(&mut fs_cfg(
+                    "s",
+                    "gone",
+                    &[(
+                        PROP_STORAGE_ON_CLOSURE,
+                        Json5Value::String("delete_all".into()),
+                    )],
+                ))
+                .unwrap();
+            s.put(Some("k"), vec![1], None, ts(1)).unwrap();
+            assert!(root.path().join("gone/k").is_file());
+        }
+        assert!(
+            !root.path().join("gone").exists(),
+            "closure removed the directory"
+        );
+        // ... and the default keeps it.
+        {
+            let mut s = vol.create_storage(&mut fs_cfg("s", "kept", &[])).unwrap();
+            s.put(Some("k"), vec![1], None, ts(1)).unwrap();
+        }
+        assert!(root.path().join("kept/k").is_file());
+    }
+
+    #[test]
+    fn a_read_only_storage_serves_its_directory_and_refuses_every_write() {
+        let root = tempdir().unwrap();
+        fs::create_dir_all(root.path().join("ro")).unwrap();
+        fs::write(root.path().join("ro/k"), b"there").unwrap();
+        let vol = FilesystemVolume::new(root.path());
+        let mut s = vol
+            .create_storage(&mut fs_cfg(
+                "s",
+                "ro",
+                &[(PROP_STORAGE_READ_ONLY, Json5Value::Bool(true))],
+            ))
+            .unwrap();
+        assert_eq!(s.get_newest(Some("k")).unwrap().unwrap().payload, b"there");
+        assert!(s.put(Some("k"), b"new".to_vec(), None, ts(1)).is_err());
+        assert!(s.put(Some("fresh"), b"new".to_vec(), None, ts(1)).is_err());
+        assert!(s.delete(Some("k"), ts(2)).is_err());
+        assert_eq!(fs::read(root.path().join("ro/k")).unwrap(), b"there");
+        assert!(!root.path().join("ro/fresh").exists());
+    }
+
+    #[test]
+    fn follow_links_and_keep_mime_types_reach_the_store() {
+        let root = tempdir().unwrap();
+        fs::create_dir_all(root.path().join("m")).unwrap();
+        fs::write(root.path().join("m/page.json"), b"{}").unwrap();
+        let vol = FilesystemVolume::new(root.path());
+        let s = vol
+            .create_storage(&mut fs_cfg(
+                "s",
+                "m",
+                &[(PROP_STORAGE_KEEP_MIME, Json5Value::Bool(false))],
+            ))
+            .unwrap();
+        assert_eq!(
+            s.get_newest(Some("page.json")).unwrap().unwrap().encoding,
+            Some(EncodingHint::APPLICATION_OCTET_STREAM),
+            "keep_mime_types false reached the store"
+        );
+        drop(s);
+        let s = vol.create_storage(&mut fs_cfg("s", "m", &[])).unwrap();
+        assert_eq!(
+            s.get_newest(Some("page.json")).unwrap().unwrap().encoding,
+            Some(EncodingHint::APPLICATION_JSON),
+            "and its default is upstream's true"
+        );
+    }
+
+    #[test]
+    fn the_root_is_derived_as_upstreams_plugin_derives_it() {
+        use std::ffi::OsString;
+        let home = PathBuf::from("/home/u");
+        // The scope variable wins over everything.
+        assert_eq!(
+            derive_root(
+                Some(OsString::from("/srv/fs")),
+                Some(OsString::from("/z")),
+                Some(home.clone())
+            ),
+            PathBuf::from("/srv/fs")
+        );
+        // Else the zenoh home, then the default directory under it.
+        assert_eq!(
+            derive_root(None, Some(OsString::from("/z")), Some(home.clone())),
+            PathBuf::from("/z/zenoh_backend_fs")
+        );
+        assert_eq!(
+            derive_root(None, None, Some(home)),
+            PathBuf::from("/home/u/.zenoh/zenoh_backend_fs")
+        );
+        // No user home at all: the zenoh home is relative, as upstream's is.
+        assert_eq!(
+            derive_root(None, None, None),
+            PathBuf::from(".zenoh/zenoh_backend_fs")
+        );
+    }
+
+    /// The derived root is CREATED and CANONICALIZED, as upstream's plugin does
+    /// before it hands the root to any storage -- the sidecar keys its rows by
+    /// full path, so the spelling is part of the format.
+    #[test]
+    fn from_env_creates_and_canonicalizes_the_derived_root() {
+        let home = tempdir().unwrap();
+        let spelled = home.path().join("x/../z");
+        let vol = FilesystemVolume::from_inputs(
+            None,
+            Some(spelled.into_os_string()),
+            Some(PathBuf::from("/nonexistent")),
+        )
+        .unwrap();
+        let want = dunce::canonicalize(home.path())
+            .unwrap()
+            .join("z")
+            .join(DEFAULT_ROOT_DIR);
+        assert!(want.is_dir(), "the root was created");
+        assert_eq!(vol.root, want, "and held in its canonical spelling");
     }
 }

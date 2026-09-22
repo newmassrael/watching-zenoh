@@ -33,9 +33,11 @@
 //! ⚠ R2571 — THE `volume_cfg` OMISSION ABOVE IS NO LONGER TRUE, and the open
 //! question it left ("what a per-storage payload should BE here") is answered.
 //! [`StorageConfig::volume_cfg`](crate::storage_config::StorageConfig::volume_cfg)
-//! carries it as a `Vec<(String, String)>`: wz types the SHAPE and reads none of
-//! the contents, which keeps the typed-by-construction stance while giving a
-//! backend exactly what upstream gives it. The answer was FORCED rather than
+//! carries it as a list of `(key, value)` pairs: wz types the SHAPE and reads
+//! none of the contents, which keeps the typed-by-construction stance while
+//! giving a backend exactly what upstream gives it. (R2571 made each value a
+//! `String`; R2802 made it the JSON value it is, for the reason the field's own
+//! doc gives.) The answer was FORCED rather than
 //! chosen — [`StorageConfig::to_admin_json`](crate::storage_config::StorageConfig::to_admin_json)
 //! has to reproduce upstream's bare-string AND object renderings, and an opaque
 //! blob cannot produce the second without parsing itself apart.
@@ -43,8 +45,9 @@
 //! The two halves that made it reachable: the wire gained upstream's object form
 //! (`<name>@<volume_id>?<k>=<v>&…`, the `adminspace` module's
 //! `parse_storage_add_payload`), and [`crate::storage_volume::Volume`]'s
-//! `create_storage` already took `&StorageConfig`, so every backend can read it
-//! with no trait change. The LOAD-time `--storage-volume-config <text>` is a
+//! `create_storage` already took the config, so every backend can read it (since
+//! R2802 it takes it `&mut`, so a backend can also amend what its storage keeps,
+//! as upstream's fs backend inserts `dir_full_path`). The LOAD-time `--storage-volume-config <text>` is a
 //! different axis and is unchanged: it configures a VOLUME by name, once; this
 //! configures a STORAGE's use of one.
 //!
@@ -68,6 +71,8 @@
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::time::Duration;
+
+use crate::json5::Json5Value;
 
 /// Garbage-collection schedule for a storage's stale metadata — zenoh
 /// `GarbageCollectionConfig` (`backend-traits/config.rs:155`). The
@@ -153,7 +158,20 @@ pub struct StorageConfig {
     /// upstream hands `volume_cfg` through `create_storage` untouched — so the
     /// typed-by-construction stance holds: this module types the SHAPE and reads
     /// none of the contents.
-    pub volume_cfg: Vec<(String, String)>,
+    ///
+    /// # Why each value is a JSON value and not its text (R2802)
+    ///
+    /// R2571 carried the values as `String`s, and the first backend to READ them
+    /// showed what that lost. zenoh's filesystem backend takes `read_only`,
+    /// `follow_links` and `keep_mime_types` as JSON booleans and REFUSES any
+    /// other type ("`read_only` must be a boolean"), and takes `dir` only as a
+    /// JSON string. As text, `read_only: true` and `read_only: "true"` arrived as
+    /// the same `"true"`, so no backend could give the second the refusal
+    /// upstream gives it; and every value an operator wrote in a config file had
+    /// already been rendered back to text before the backend saw it. The value
+    /// is a [`Json5Value`] now -- the type this crate already parses configs
+    /// into -- so a backend receives what upstream's receives.
+    pub volume_cfg: Vec<(String, Json5Value)>,
 }
 
 impl StorageConfig {
@@ -216,11 +234,14 @@ impl StorageConfig {
             // upstream's `serde_json::Map` (a `BTreeMap`, alphabetical); JSON
             // object order is not semantic and every other body in this module
             // is hand-rolled for the same no-`serde_json` reason.
+            // R2802 — each value is rendered AS the JSON value it is, so a
+            // boolean reads back as `true` and not `"true"`, which is what
+            // upstream's `serde_json` body shows for the same payload.
             out.push('{');
             for (key, value) in &self.volume_cfg {
                 crate::json::escape_into(key, &mut out);
                 out.push(':');
-                crate::json::escape_into(value, &mut out);
+                out.push_str(&value.to_json5_text());
                 out.push(',');
             }
             out.push_str("\"id\":");
@@ -260,12 +281,36 @@ mod tests {
     fn admin_volume_is_an_object_carrying_id_when_a_payload_is_present() {
         let mut c = StorageConfig::new("demo", "demo/**", "fs");
         c.volume_cfg = alloc::vec![
-            (String::from("dir"), String::from("/tmp/wz")),
-            (String::from("mode"), String::from("rw")),
+            (
+                String::from("dir"),
+                Json5Value::String(String::from("/tmp/wz"))
+            ),
+            (String::from("mode"), Json5Value::String(String::from("rw"))),
         ];
         let body = c.to_admin_json();
         assert!(
             body.contains(r#""volume":{"dir":"/tmp/wz","mode":"rw","id":"fs"}"#),
+            "got {body}"
+        );
+    }
+
+    /// R2802 — a value keeps its JSON TYPE all the way to the body: a boolean is
+    /// rendered `true`, not `"true"`, and a string that happens to read `true`
+    /// stays a string. As text the two were one value, which is the loss this
+    /// field's type was changed to end.
+    #[test]
+    fn admin_volume_payload_keeps_each_values_json_type() {
+        let mut c = StorageConfig::new("demo", "demo/**", "fs");
+        c.volume_cfg = alloc::vec![
+            (String::from("read_only"), Json5Value::Bool(true)),
+            (
+                String::from("label"),
+                Json5Value::String(String::from("true"))
+            ),
+        ];
+        let body = c.to_admin_json();
+        assert!(
+            body.contains(r#""volume":{"read_only":true,"label":"true","id":"fs"}"#),
             "got {body}"
         );
     }
@@ -276,7 +321,10 @@ mod tests {
     #[test]
     fn admin_volume_payload_is_escaped() {
         let mut c = StorageConfig::new("demo", "demo/**", "fs");
-        c.volume_cfg = alloc::vec![(String::from("dir"), String::from("a\"b"))];
+        c.volume_cfg = alloc::vec![(
+            String::from("dir"),
+            Json5Value::String(String::from("a\"b"))
+        )];
         assert!(
             c.to_admin_json().contains(r#""dir":"a\"b""#),
             "{}",

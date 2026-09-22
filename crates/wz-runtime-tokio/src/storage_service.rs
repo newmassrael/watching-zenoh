@@ -759,7 +759,7 @@ mod tests {
         // The backend comes from a Volume (create_storage), wiring the §5.24
         // factory into the live service.
         let backend = MemoryVolume
-            .create_storage(&config)
+            .create_storage(&mut config)
             .expect("in-memory volume create");
         let storage = StorageService::declare_with_backend(&session, &config, vec![0x01], backend)
             .expect("strip-configured storage declares against the test link");

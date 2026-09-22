@@ -54,7 +54,12 @@ use alloc::vec::Vec;
 /// reference, and a duplicate key is a defect this type can still represent
 /// (and [`Json5Value::get`] resolves last-wins, which is what every JSON
 /// reader does).
-#[derive(Debug, Clone, PartialEq)]
+///
+/// `Eq` as well as `PartialEq` (R2802): every variant holds text, a bool or
+/// more of itself -- `Number` keeps its SOURCE TEXT, not a float -- so the
+/// derived equality is already total, and a config type that carries a value
+/// (`StorageConfig::volume_cfg`) keeps the `Eq` it had.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Json5Value {
     /// `null`.
     Null,

@@ -377,7 +377,7 @@ impl Volume for DynamicVolume {
 
     fn create_storage(
         &self,
-        config: &StorageConfig,
+        config: &mut StorageConfig,
     ) -> Result<Box<dyn StorageBackend + Send>, VolumeError> {
         // Every string crossing the boundary is built here so it outlives the
         // call; an interior NUL is a refusal rather than a truncation, since a
@@ -927,7 +927,7 @@ mod tests {
         );
         // `let Err(..) else` rather than `expect_err`: the Ok type is
         // `Box<dyn StorageBackend + Send>`, which is not `Debug`.
-        let Err(err) = vol.create_storage(&StorageConfig::new("s", "demo/**", "wzvol_example"))
+        let Err(err) = vol.create_storage(&mut StorageConfig::new("s", "demo/**", "wzvol_example"))
         else {
             panic!("an unconfigured volume must refuse to create a store");
         };
@@ -973,9 +973,9 @@ mod tests {
             "a configured file volume declares itself durable"
         );
 
-        let cfg = StorageConfig::new("dyn", "demo/**", "wzvol_example");
+        let mut cfg = StorageConfig::new("dyn", "demo/**", "wzvol_example");
         {
-            let mut store = vol.create_storage(&cfg).expect("create a store");
+            let mut store = vol.create_storage(&mut cfg).expect("create a store");
             assert_eq!(
                 store.put(Some("a"), b"v1".to_vec(), None, ts(10)).unwrap(),
                 StorageInsertionResult::Inserted
@@ -1005,7 +1005,7 @@ mod tests {
         // A SECOND store over the same configured volume sees what the first
         // wrote. Nothing in this process is carrying it: the first store is
         // dropped, and the mirror is rebuilt from `store_entries` alone.
-        let store2 = vol.create_storage(&cfg).expect("re-create the store");
+        let store2 = vol.create_storage(&mut cfg).expect("re-create the store");
         assert_eq!(
             store2.get_newest(Some("a")).unwrap().map(|d| d.payload),
             Some(b"v2".to_vec()),
@@ -1044,9 +1044,9 @@ mod tests {
         let vol = DynamicVolume::load(&so).expect("loads");
         vol.configure(Some(dir.path().to_str().expect("utf-8 tempdir")))
             .expect("configure");
-        let cfg = StorageConfig::new("enc", "demo/**", "wzvol_example");
+        let mut cfg = StorageConfig::new("enc", "demo/**", "wzvol_example");
         {
-            let mut store = vol.create_storage(&cfg).expect("create");
+            let mut store = vol.create_storage(&mut cfg).expect("create");
             store
                 .put(
                     Some("k"),
@@ -1062,7 +1062,7 @@ mod tests {
                 )
                 .unwrap();
         }
-        let store2 = vol.create_storage(&cfg).expect("re-create");
+        let store2 = vol.create_storage(&mut cfg).expect("re-create");
         let d = store2
             .get_newest(Some("k"))
             .unwrap()
@@ -1090,9 +1090,9 @@ mod tests {
         let vol = DynamicVolume::load(&so).expect("loads");
         vol.configure(Some(dir.path().to_str().expect("utf-8 tempdir")))
             .expect("configure");
-        let cfg = StorageConfig::new("del", "demo/**", "wzvol_example");
+        let mut cfg = StorageConfig::new("del", "demo/**", "wzvol_example");
         {
-            let mut store = vol.create_storage(&cfg).expect("create");
+            let mut store = vol.create_storage(&mut cfg).expect("create");
             store.put(Some("a"), b"v".to_vec(), None, ts(1)).unwrap();
             assert_eq!(
                 store.delete(Some("a"), ts(2)).unwrap(),
@@ -1107,7 +1107,7 @@ mod tests {
         // The delete has to have reached the VOLUME, not only the mirror: a fresh
         // store rebuilds from `store_entries`, so a key the volume still held
         // would reappear here.
-        let store2 = vol.create_storage(&cfg).expect("re-create");
+        let store2 = vol.create_storage(&mut cfg).expect("re-create");
         assert!(
             store2.get_newest(Some("a")).unwrap().is_none(),
             "the deleted key came back after a reload, so the delete never crossed \
@@ -1136,8 +1136,8 @@ mod tests {
         let vol = DynamicVolume::load(&so).expect("loads");
         vol.configure(Some(dir.path().to_str().expect("utf-8 tempdir")))
             .expect("configure");
-        let cfg = StorageConfig::new("refuse", "demo/**", "wzvol_example");
-        let mut store = vol.create_storage(&cfg).expect("create");
+        let mut cfg = StorageConfig::new("refuse", "demo/**", "wzvol_example");
+        let mut store = vol.create_storage(&mut cfg).expect("create");
         store.put(Some("a"), b"v1".to_vec(), None, ts(1)).unwrap();
 
         std::fs::remove_dir_all(dir.path()).expect("break the volume's medium");
@@ -1192,8 +1192,8 @@ mod tests {
 
         // SAFETY: both are the resolved getters; they read a static atomic.
         let (puts_before, creates_before) = unsafe { (puts(), creates()) };
-        let cfg = StorageConfig::new("count", "demo/**", "wzvol_example");
-        let mut store = vol.create_storage(&cfg).expect("create");
+        let mut cfg = StorageConfig::new("count", "demo/**", "wzvol_example");
+        let mut store = vol.create_storage(&mut cfg).expect("create");
         store.put(Some("a"), b"v".to_vec(), None, ts(1)).unwrap();
         store.put(Some("b"), b"v".to_vec(), None, ts(2)).unwrap();
         // SAFETY: as above.

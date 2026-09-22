@@ -1975,7 +1975,14 @@ pub enum AdminConfigWrite {
         /// form; `@<volume_id>?<k>=<v>&…` is the object form, and the mandatory
         /// `id` is structural here rather than checked — it is the `@` field
         /// itself, which was already refused when empty.
-        volume_cfg: Vec<(String, String)>,
+        ///
+        /// R2802 — each value is the JSON value its text spells, for the reason
+        /// [`StorageConfig::volume_cfg`](crate::storage_config::StorageConfig::volume_cfg)
+        /// gives: `?read_only=true` is the boolean, `?read_only="true"` the
+        /// string, and text that is no JSON5 value at all (`?dir=/srv/a`) is
+        /// carried as the string it is. Upstream's admin plane is written in JSON
+        /// and so never loses the type; this text form now keeps it too.
+        volume_cfg: Vec<(String, crate::json5::Json5Value)>,
     },
     /// `.../config/storage-del <name>` — live-despawn the storage named `name`
     /// (RAII undeclare of its capture-sub + queryable). R311y239.
@@ -2610,14 +2617,19 @@ pub const DEFAULT_STORAGE_VOLUME_ID: &str = "mem";
 // understated the change.
 fn parse_storage_add_payload(
     text: &str,
-) -> Option<(String, String, Option<String>, Vec<(String, String)>)> {
+) -> Option<(
+    String,
+    String,
+    Option<String>,
+    Vec<(String, crate::json5::Json5Value)>,
+)> {
     let (head, key_expr) = text.split_once(':')?;
     let head = head.trim();
     let key_expr = key_expr.trim();
     if key_expr.is_empty() {
         return None;
     }
-    let mut volume_cfg: Vec<(String, String)> = Vec::new();
+    let mut volume_cfg: Vec<(String, crate::json5::Json5Value)> = Vec::new();
     let (name, volume_id) = match head.rsplit_once('@') {
         Some((n, v)) => {
             let (n, v) = (n.trim(), v.trim());
@@ -2635,7 +2647,10 @@ fn parse_storage_add_payload(
                 return None;
             }
             if let Some(cfg) = cfg_text {
-                volume_cfg = parse_volume_cfg_pairs(cfg)?;
+                volume_cfg = parse_volume_cfg_pairs(cfg)?
+                    .into_iter()
+                    .map(|(key, text)| (key, typed_volume_value(&text)))
+                    .collect();
             }
             (n, Some(String::from(v)))
         }
@@ -2677,6 +2692,25 @@ fn parse_volume_cfg_pairs(cfg: &str) -> Option<Vec<(String, String)>> {
         pairs.push((String::from(key), String::from(value.trim())));
     }
     Some(pairs)
+}
+
+/// R2802 — the JSON value a storage payload's value TEXT spells: `true` is the
+/// boolean, `3` the number, `"x"` the string, and text that is no JSON5 value
+/// at all -- a bare path like `/srv/a`, which is how every pre-R2802 client
+/// wrote one -- is the string it reads as. A storage payload's values are
+/// typed because the backends that read them are (see
+/// [`StorageConfig::volume_cfg`](crate::storage_config::StorageConfig::volume_cfg));
+/// a VOLUME's `?k=v` stays text, since the one backend that reads those takes
+/// only a path.
+///
+/// The consequence a client must know: text that IS a JSON5 value is read as
+/// that value, so a directory named `123` is written `?dir="123"` -- as bare
+/// `?dir=123` it is the number, which the filesystem backend refuses for `dir`
+/// exactly as upstream's refuses a number there.
+#[cfg(feature = "adminspace-config-hotreload")]
+fn typed_volume_value(text: &str) -> crate::json5::Json5Value {
+    crate::json5::parse(text)
+        .unwrap_or_else(|_| crate::json5::Json5Value::String(String::from(text)))
 }
 
 /// R2696 — decode `volume-add`'s payload: `<id>[@<backend>][?<k>=<v>&…]`.
@@ -3873,6 +3907,7 @@ mod tests {
     #[cfg(feature = "adminspace-config-hotreload")]
     mod config_hotreload {
         use super::*;
+        use crate::json5::Json5Value;
 
         #[test]
         fn storage_add_decodes_name_keyexpr_and_names_no_volume() {
@@ -4019,10 +4054,47 @@ mod tests {
             assert_eq!(
                 config.volume_cfg,
                 alloc::vec![
-                    (String::from("dir"), String::from("/tmp/wz")),
-                    (String::from("mode"), String::from("rw")),
+                    (
+                        String::from("dir"),
+                        Json5Value::String(String::from("/tmp/wz"))
+                    ),
+                    (String::from("mode"), Json5Value::String(String::from("rw"))),
                 ],
                 "the payload reaches the config in wire order"
+            );
+        }
+
+        /// R2802 — a value keeps the JSON type its text spells, so a backend that
+        /// takes a boolean can refuse the string exactly as upstream's does.
+        /// Text that is no JSON5 value at all is the string it reads as, which is
+        /// what keeps every pre-R2802 payload (`?dir=/tmp/wz`) meaning what it
+        /// meant.
+        #[test]
+        fn storage_add_payload_values_keep_their_json_type() {
+            let out = parse_admin_config_write(
+                &write_space(),
+                "@/a1b2/peer/config/storage-add",
+                AdminConfigWriteBody::Put(
+                    br#"demo@fs?dir=sub&read_only=true&keep_mime_types="true"&size=3:demo/**"#,
+                ),
+                true,
+                &stub_config_key,
+            );
+            let AdminConfigWriteOutcome::Apply(intent) = out else {
+                panic!("expected Apply, got {out:?}")
+            };
+            let config = intent.to_storage_config().expect("AddStorage -> config");
+            assert_eq!(
+                config.volume_cfg,
+                alloc::vec![
+                    (String::from("dir"), Json5Value::String(String::from("sub"))),
+                    (String::from("read_only"), Json5Value::Bool(true)),
+                    (
+                        String::from("keep_mime_types"),
+                        Json5Value::String(String::from("true"))
+                    ),
+                    (String::from("size"), Json5Value::Number(String::from("3"))),
+                ]
             );
         }
 
