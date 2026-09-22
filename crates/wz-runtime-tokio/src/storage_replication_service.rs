@@ -227,6 +227,14 @@ impl DigestPublisher {
     {
         let session = session.clone();
         let clock = Arc::clone(session.clock());
+        // R2801 — held WEAKLY, for the reason the garbage collector gives
+        // ([`GarbageCollector::spawn`](crate::storage_gc_service::GarbageCollector::spawn)):
+        // a loop that never ends on its own must not co-own the storage it
+        // reads, or the backend outlives its owner until the runtime processes
+        // this handle's `abort`. Each cycle borrows the storage for the one read
+        // that builds the digest, and a cycle that finds it gone ends the task.
+        let storage = Arc::downgrade(&state);
+        drop(state);
         let task = handle.spawn(async move {
             // Align to the interval boundaries the whole fleet shares, rather
             // than to whenever this process happened to start (zenoh
@@ -251,8 +259,12 @@ impl DigestPublisher {
                 // configuration fingerprint that gates digest exchange.
                 clock.sleep(config.propagation_delay_ms()).await;
 
+                let Some(state) = storage.upgrade() else {
+                    return;
+                };
                 let (keyexpr, bytes) =
                     digest_frame(&state, &config, &local_zid, wall_clock_ntp64());
+                drop(state);
 
                 // The JITTER sits between the build and the put, as upstream's
                 // does (core.rs:234-243): it de-correlates when the fleet
@@ -673,7 +685,9 @@ mod tests {
             )
             .expect("digest keyexpr subscriber declares");
 
-        let publisher = DigestPublisher::spawn(&session, state, config.clone(), zid);
+        // A CLONE, and `state` stays alive in this scope: the publisher holds
+        // the storage weakly (R2801), so the test plays the storage's owner.
+        let publisher = DigestPublisher::spawn(&session, Arc::clone(&state), config.clone(), zid);
 
         // Wait (generously, vs the 20ms interval) for the first digest.
         let bytes = tokio::time::timeout(Duration::from_secs(5), async {
@@ -691,6 +705,43 @@ mod tests {
         assert_eq!(digest.configuration_fingerprint(), config.fingerprint());
 
         drop(publisher); // RAII abort the loop.
+    }
+
+    /// R2801 — the publisher must not co-own the storage it digests, for the
+    /// reason the garbage collector's twin test gives: a backend can hold its
+    /// medium exclusively, and dropping the storage's owner has to release it
+    /// THEN. The storage is handed over and no other handle is kept, so the
+    /// publisher is the only thing that could be keeping it; the second half
+    /// proves the loop then ends by itself instead of publishing forever for a
+    /// storage that is gone.
+    #[tokio::test]
+    async fn a_live_publisher_does_not_keep_its_storage_alive() {
+        use crate::observer::ApplicationLayerObserver;
+        use crate::runtime_impl::TokioTime;
+        use crate::session::TokioSession;
+        use std::time::Duration;
+
+        let (actions, _driver) = crate::test_fixtures::recording_actions();
+        let observer = Arc::new(Mutex::new(ApplicationLayerObserver::new()));
+        let clock = Arc::new(TokioTime::new());
+        let session = TokioSession::new(actions, observer, clock);
+
+        let state = put_state(wall_clock_ntp64());
+        let observed = Arc::downgrade(&state);
+        let publisher = DigestPublisher::spawn(&session, state, cfg(), vec![0x01]);
+        assert!(
+            observed.upgrade().is_none(),
+            "the storage outlived its owner: the live publisher is holding it"
+        );
+
+        let handle = publisher.task.abort_handle();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while !handle.is_finished() {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("the publisher kept running for a storage that no longer exists");
     }
 
     /// Records, in the publisher's own virtual clock, the millisecond offset
@@ -746,10 +797,12 @@ mod tests {
         // the paused clock, which is per-runtime, so a publisher on the
         // application subsystem would be pacing itself by real wall-clock while
         // the reader believes it advanced 600 virtual seconds.
+        // A clone: the publisher holds the storage weakly (R2801), so `state`
+        // stays alive here as the storage's owner would.
         let publisher = DigestPublisher::spawn_on(
             tokio::runtime::Handle::current(),
             &session,
-            state,
+            Arc::clone(&state),
             config.clone(),
             zid,
         );

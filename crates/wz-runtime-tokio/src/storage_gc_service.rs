@@ -42,7 +42,8 @@
 //! ## Mutex-poison policy
 //!
 //! A poisoned state mutex makes this sweep a no-op for the tick and retries on
-//! the next one (`if let Ok(mut g) = state.lock()`), matching the loop's
+//! the next one (`let Ok(mut guard) = state.lock() else { continue }`),
+//! matching the loop's
 //! best-effort philosophy — a missed sweep only defers memory reclamation, and
 //! `retain` is safe from any consistent state. This DIFFERS deliberately from
 //! `DigestPublisher`'s `.expect("… poisoned")`: a dropped digest is a
@@ -122,10 +123,25 @@ impl GarbageCollector {
         // (`zenoh-ext/src/advanced_subscriber.rs`
         // @ `ZRuntime::Application.spawn(gc_task(`), which is this same
         // shape — a periodic sweep over retained state.
+        // R2801 — the task holds the storage WEAKLY. It observes the storage;
+        // it does not own it. Holding the `Arc` made the task a co-owner of the
+        // backend, and dropping this handle only ASKS the runtime to cancel the
+        // task (`abort` is processed on the runtime's own thread, later), so the
+        // backend outlived the storage's owner by an unbounded moment. Harmless
+        // for a map; wrong for a backend that holds its medium exclusively --
+        // the filesystem backend's sidecar lock refused the reopen that follows
+        // a storage's removal. Now the storage's owner is the only owner, a
+        // sweep borrows it for the length of one sweep, and a tick that finds it
+        // gone ends the task on its own.
+        let storage = Arc::downgrade(&state);
+        drop(state);
         let task = crate::runtime_pool::WzRuntime::Application.spawn(async move {
             loop {
                 // PERIOD: monotonic ms sleep (interval, held OUTSIDE the lock).
                 clock.sleep(period_ms).await;
+                let Some(state) = storage.upgrade() else {
+                    return;
+                };
                 // CUTOFF: wall-clock NTP64 now (the entries' stamp basis). A
                 // poisoned mutex defers this sweep to the next tick.
                 //
@@ -137,19 +153,24 @@ impl GarbageCollector {
                 // sweep and a line is emitted only when entries were actually
                 // REMOVED -- never per tick, which would fire on an idle storage
                 // and witness the timer rather than the collection.
-                if let Ok(mut guard) = state.lock() {
-                    let (puts_before, dels_before) = guard.wildcard_registry_lens();
-                    guard.collect_garbage(wall_clock_ntp64(), lifespan);
-                    let (puts_after, dels_after) = guard.wildcard_registry_lens();
-                    let swept = (puts_before - puts_after) + (dels_before - dels_after);
-                    if swept > 0 {
-                        log::info!(
-                            "wz storage '{label}': garbage collected {swept} stale \
-                             wildcard-update entr{} (puts {puts_before}->{puts_after}, \
-                             deletes {dels_before}->{dels_after})",
-                            if swept == 1 { "y" } else { "ies" }
-                        );
-                    }
+                //
+                // The guard is a LOCAL declared after `state`, so it is dropped
+                // first; a guard held as an `if let` scrutinee's temporary would
+                // outlive the upgraded `state` it borrows.
+                let Ok(mut guard) = state.lock() else {
+                    continue;
+                };
+                let (puts_before, dels_before) = guard.wildcard_registry_lens();
+                guard.collect_garbage(wall_clock_ntp64(), lifespan);
+                let (puts_after, dels_after) = guard.wildcard_registry_lens();
+                let swept = (puts_before - puts_after) + (dels_before - dels_after);
+                if swept > 0 {
+                    log::info!(
+                        "wz storage '{label}': garbage collected {swept} stale \
+                         wildcard-update entr{} (puts {puts_before}->{puts_after}, \
+                         deletes {dels_before}->{dels_after})",
+                        if swept == 1 { "y" } else { "ies" }
+                    );
                 }
             }
         });
@@ -291,5 +312,48 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(2)).await;
         }
         panic!("dropping the collector did not abort the sweep task");
+    }
+
+    /// R2801 — the collector must not co-own the storage it sweeps.
+    ///
+    /// Dropping the storage's owner has to release the backend THEN, not when a
+    /// runtime gets round to cancelling a task, because a backend can hold its
+    /// medium exclusively (the filesystem backend's sidecar lock). The storage is
+    /// dropped while the collector is still alive, so nothing but the collector
+    /// could be keeping it -- and the second half proves the task then ends by
+    /// itself, rather than sleeping on forever over a storage that is gone.
+    #[tokio::test]
+    async fn a_live_collector_does_not_keep_its_storage_alive() {
+        let session = session();
+        let storage = StorageService::declare(
+            &session,
+            &StorageConfig::new("demo", "demo/**", "mem"),
+            vec![0x01],
+        )
+        .expect("storage declares");
+        let state = storage.shared_state();
+        let observed = Arc::downgrade(&state);
+        // The first tick is a whole period away, so no sweep can be borrowing
+        // the storage when it is dropped: the assertion below sees only what the
+        // collector holds while it sleeps.
+        let gc = GarbageCollectionConfig {
+            period: Duration::from_millis(50),
+            lifespan: Duration::from_secs(0),
+        };
+        let collector = GarbageCollector::spawn(&session, state, gc, "test");
+
+        drop(storage);
+        assert!(
+            observed.upgrade().is_none(),
+            "the storage outlived its owner: the live collector is holding it"
+        );
+        let handle = collector.task.abort_handle();
+        for _ in 0..100 {
+            if handle.is_finished() {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        panic!("the collector kept running over a storage that no longer exists");
     }
 }

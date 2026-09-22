@@ -8490,7 +8490,9 @@ layer_c1z_cargo_test_storage_driver() {
     # gain the fifth.
     _runci_guarded_test "C1z storage" 59 \
         cargo test -p wz-session-core --features storage-mgr-garbage-collection --lib storage --quiet || return 1
-    _runci_guarded_test "C1z storage_gc_service" 3 \
+    # R2801 3 -> 4: the collector holds its storage WEAKLY, so dropping the
+    # storage's owner releases the backend while the collector still lives.
+    _runci_guarded_test "C1z storage_gc_service" 4 \
         cargo test -p wz-runtime-tokio --features storage-mgr-garbage-collection --lib storage_gc_service --quiet || return 1
     # R311y829 38 -> 40: the two publication-schedule driver tests. This is
     # the lane that WATCHES them — `storage-aligner` is the only guarded
