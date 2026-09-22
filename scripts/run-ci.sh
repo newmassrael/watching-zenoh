@@ -6968,7 +6968,12 @@ layer_c1am_cargo_test_adminspace() {
     # command.
     _runci_guarded_test "C1AM plugins_config 8" 8 \
         cargo test -p wz-runtime-tokio --features adminspace-config-hotreload --lib plugins_config --quiet || return 1
-    _runci_guarded_test "C1AM config plugins_section 2" 2 \
+    # R2788 — 2 -> 3: the reader's own `the_plugins_section_is_read_whole_and_
+    # reported_leaf_by_leaf` carries the same words in its name and so joins
+    # this filter, which is the honest place for it — the write gate and the
+    # reader are the two halves of what a `plugins` key means. PRINTED by the
+    # command, not counted off the diff.
+    _runci_guarded_test "C1AM config plugins_section 3" 3 \
         cargo test -p wz-runtime-tokio --features zenoh-config,adminspace-config-hotreload --lib plugins_section --quiet || return 1
     # R2693 — the PEER's introspection tests had no running lane IN THIS LAYER.
     # The feature set `routing-peer,adminspace-introspection-handlers` occurs here
