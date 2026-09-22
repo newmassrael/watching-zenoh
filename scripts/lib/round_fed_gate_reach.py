@@ -157,6 +157,16 @@ SUBPROCESS_CALLS = frozenset(
 #: row whose module has left the population is a finding, and so is a row the
 #: hook turns out to run.
 DEFERRED: dict[str, str] = {
+    "rocksdb_engine.py": (
+        "R2806 -- verifies a provisioned native Linux engine. Measured "
+        "--verify at 2.79s warm; an absent cache fails, while provisioning "
+        "downloads checksum-pinned source and builds C++ with system codec "
+        "libraries (minutes cold). The normal hook requires neither that "
+        "Linux artifact nor its CMake/codec packages. The rocksdb-engine "
+        "composite action owns it: every use checks the digest, version and "
+        "five-codec flush/reopen probe before exporting the link path, even "
+        "on a cache hit."
+    ),
     "verdict_leg_mutation.py": (
         "565.63s, more than SEVEN TIMES what the hook's whole 62-member block "
         "costs (68.4-74.8s over six runs), and it MUTATES the working tree -- "
