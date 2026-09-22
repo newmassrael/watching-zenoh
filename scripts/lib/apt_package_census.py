@@ -134,6 +134,17 @@ def _add(pkg: str, why: str, jobs: list[str]) -> None:
         ADJUDICATED[f"{job}::{pkg}"] = why
 
 
+# R2805: the native engine is built outside Cargo and shared by the wz and
+# upstream-oracle feature sets. These packages serve its CMake build and its
+# shared library at runtime, including on a cache hit.
+for _codec_package in ("libsnappy-dev", "liblz4-dev", "libzstd-dev", "zlib1g-dev", "libbz2-dev"):
+    _add(_codec_package, "The cached RocksDB engine's five compression codecs.",
+         ["ci", "nondefault", "dissect", "interop", "feature-gates",
+          "transport-modes", "capi-c-arms", "e2e-demo"])
+_add("cmake", "Builds the cached native RocksDB engine via the local composite action.",
+     ["nondefault"])
+
+
 # bindgen, via `sce-forge-runtime`'s BUILD SCRIPT: it build-depends on
 # `sce-build` -> `libxml` -> `bindgen`, so every crate that uses the SCE forge
 # runtime -- which is every wz crate carrying a generated codec -- compiles a
@@ -157,14 +168,13 @@ _add(
         "verdict-legs",
         # R2163 — Layer C1cn's own job, peeled off `ci` for its budget. It
         # compiles EVERY member at its non-default features, so every reason on
-        # this row that reaches a member reaches it. No `cmake`: that one is
-        # DERIVED below, and this lane names members individually rather than
-        # running a `--workspace` command, so it never reaches zenoh-pico-sys.
+        # this row that reaches a member reaches it. Its Rust lanes do not reach
+        # zenoh-pico-sys; R2805 independently adds cmake for the native engine.
         "nondefault",
         # R2525 — Layer C0 + C1cf's own job, peeled off `ci` for item 590's
         # budget. C1cf builds EVERY workspace member with default features OFF,
         # so every reason on this row that reaches a member reaches it. ⚠ It
-        # DOES take `cmake`, unlike `nondefault` one line up: that lane iterates
+        # DOES reach the Rust cmake dependency: the nondefault lane iterates
         # the 20 crates carrying a non-default feature, this one iterates all 53
         # members, and `crates/zenoh-pico-sys` is one of them.
         "defaults-off",
@@ -195,14 +205,13 @@ _add(
         "verdict-legs",
         # R2163 — Layer C1cn's own job, peeled off `ci` for its budget. It
         # compiles EVERY member at its non-default features, so every reason on
-        # this row that reaches a member reaches it. No `cmake`: that one is
-        # DERIVED below, and this lane names members individually rather than
-        # running a `--workspace` command, so it never reaches zenoh-pico-sys.
+        # this row that reaches a member reaches it. Its Rust lanes do not reach
+        # zenoh-pico-sys; R2805 independently adds cmake for the native engine.
         "nondefault",
         # R2525 — Layer C0 + C1cf's own job, peeled off `ci` for item 590's
         # budget. C1cf builds EVERY workspace member with default features OFF,
         # so every reason on this row that reaches a member reaches it. ⚠ It
-        # DOES take `cmake`, unlike `nondefault` one line up: that lane iterates
+        # DOES reach the Rust cmake dependency: the nondefault lane iterates
         # the 20 crates carrying a non-default feature, this one iterates all 53
         # members, and `crates/zenoh-pico-sys` is one of them.
         "defaults-off",
@@ -236,14 +245,13 @@ _add(
         "verdict-legs",
         # R2163 — Layer C1cn's own job, peeled off `ci` for its budget. It
         # compiles EVERY member at its non-default features, so every reason on
-        # this row that reaches a member reaches it. No `cmake`: that one is
-        # DERIVED below, and this lane names members individually rather than
-        # running a `--workspace` command, so it never reaches zenoh-pico-sys.
+        # this row that reaches a member reaches it. Its Rust lanes do not reach
+        # zenoh-pico-sys; R2805 independently adds cmake for the native engine.
         "nondefault",
         # R2525 — Layer C0 + C1cf's own job, peeled off `ci` for item 590's
         # budget. C1cf builds EVERY workspace member with default features OFF,
         # so every reason on this row that reaches a member reaches it. ⚠ It
-        # DOES take `cmake`, unlike `nondefault` one line up: that lane iterates
+        # DOES reach the Rust cmake dependency: the nondefault lane iterates
         # the 20 crates carrying a non-default feature, this one iterates all 53
         # members, and `crates/zenoh-pico-sys` is one of them.
         "defaults-off",
@@ -320,7 +328,7 @@ _add(
     # exception to it: Layer C1cf iterates EVERY workspace member, and
     # `crates/zenoh-pico-sys` is a member, so the lane reaches the one `cmake`
     # consumer by naming it. That is the same test the row already applies, and
-    # it is why `nondefault` is absent here while present on the rows above.
+    # nondefault gets a separate native-engine row above (R2805).
     ["ci", "validate-codegen", "interop", "feature-gates", "transport-modes",
      "isolated-crates", "capi-c-arms", "e2e-demo", "dissect", "defaults-off"],
 )
@@ -366,14 +374,13 @@ _add(
         "verdict-legs",
         # R2163 — Layer C1cn's own job, peeled off `ci` for its budget. It
         # compiles EVERY member at its non-default features, so every reason on
-        # this row that reaches a member reaches it. No `cmake`: that one is
-        # DERIVED below, and this lane names members individually rather than
-        # running a `--workspace` command, so it never reaches zenoh-pico-sys.
+        # this row that reaches a member reaches it. Its Rust lanes do not reach
+        # zenoh-pico-sys; R2805 independently adds cmake for the native engine.
         "nondefault",
         # R2525 — Layer C0 + C1cf's own job, peeled off `ci` for item 590's
         # budget. C1cf builds EVERY workspace member with default features OFF,
         # so every reason on this row that reaches a member reaches it. ⚠ It
-        # DOES take `cmake`, unlike `nondefault` one line up: that lane iterates
+        # DOES reach the Rust cmake dependency: the nondefault lane iterates
         # the 20 crates carrying a non-default feature, this one iterates all 53
         # members, and `crates/zenoh-pico-sys` is one of them.
         "defaults-off",
@@ -413,14 +420,13 @@ _add(
         "verdict-legs",
         # R2163 — Layer C1cn's own job, peeled off `ci` for its budget. It
         # compiles EVERY member at its non-default features, so every reason on
-        # this row that reaches a member reaches it. No `cmake`: that one is
-        # DERIVED below, and this lane names members individually rather than
-        # running a `--workspace` command, so it never reaches zenoh-pico-sys.
+        # this row that reaches a member reaches it. Its Rust lanes do not reach
+        # zenoh-pico-sys; R2805 independently adds cmake for the native engine.
         "nondefault",
         # R2525 — Layer C0 + C1cf's own job, peeled off `ci` for item 590's
         # budget. C1cf builds EVERY workspace member with default features OFF,
         # so every reason on this row that reaches a member reaches it. ⚠ It
-        # DOES take `cmake`, unlike `nondefault` one line up: that lane iterates
+        # DOES reach the Rust cmake dependency: the nondefault lane iterates
         # the 20 crates carrying a non-default feature, this one iterates all 53
         # members, and `crates/zenoh-pico-sys` is one of them.
         "defaults-off",
@@ -498,6 +504,7 @@ def ci_sites() -> dict[str, set[str]]:
 # the derived arm would answer yes to everything — a check that cannot say no.
 CMAKE_INVOCATION = re.compile(
     r"command -v cmake|cmake\s+(?:-S|--build|\.\.)|for tool in [^\n]*\bcmake\b"
+    r'|run\("cmake",\s*"(?:-S|--build)"'
 )
 
 
@@ -670,6 +677,23 @@ def job_reachable_text(path: Path = CI_YML) -> dict[str, str]:
     for j, lines in raw.items():
         text = code_only("\n".join(lines))
         parts = [text]
+        # Local composite actions are executable workflow steps too. Follow
+        # their scripts exactly as direct run: blocks, including Python drivers.
+        actions = re.findall(r"uses:\s*\./([A-Za-z0-9_./-]+)", text)
+        seen_actions = set()
+        while actions:
+            action = actions.pop()
+            if action in seen_actions:
+                continue
+            seen_actions.add(action)
+            folder = ROOT / action
+            manifest = next((folder / name for name in ("action.yml", "action.yaml")
+                             if (folder / name).is_file()), None)
+            if manifest is None:
+                raise RuntimeError(f"local action {action} has no manifest")
+            body = code_only(manifest.read_text())
+            parts.append(body)
+            actions.extend(re.findall(r"uses:\s*\./([A-Za-z0-9_./-]+)", body))
         for name in re.findall(r"--layer ([A-Za-z0-9]+)", text):
             body = with_helpers(dispatch.get(name, ""))
             parts.append(body)
@@ -684,7 +708,7 @@ def job_reachable_text(path: Path = CI_YML) -> dict[str, str]:
         # R2585 — from the LAYER BODIES too, not only the job's own `run:`
         # lines. Layer C1cf's whole body is one `bash scripts/lib/…` call, and
         # reading scripts from the job text alone never opened it.
-        pending = list(re.findall(r"scripts/([A-Za-z0-9_./-]+\.sh)", "\n".join(parts)))
+        pending = list(re.findall(r"scripts/([A-Za-z0-9_./-]+\.(?:sh|py))", "\n".join(parts)))
         while pending:
             rel = pending.pop()
             if rel in seen:
@@ -696,7 +720,7 @@ def job_reachable_text(path: Path = CI_YML) -> dict[str, str]:
             body = code_only(path.read_text())
             parts.append(body)
             parts.append(resolved_members(body, rel))
-            pending.extend(re.findall(r"scripts/([A-Za-z0-9_./-]+\.sh)", body))
+            pending.extend(re.findall(r"scripts/([A-Za-z0-9_./-]+\.(?:sh|py))", body))
         out[j] = "\n".join(parts)
     return out
 

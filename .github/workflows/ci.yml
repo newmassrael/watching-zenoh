@@ -281,7 +281,8 @@ jobs:
         # the requirement from the resolved build graph and reds on a job that
         # reaches the crate without installing them.
         run: |
-          bash scripts/lib/apt-install.sh cmake libclang-dev libxml2-dev clang perl pkg-config
+          bash scripts/lib/apt-install.sh libsnappy-dev liblz4-dev libzstd-dev zlib1g-dev libbz2-dev \
+            cmake libclang-dev libxml2-dev clang perl pkg-config
 
       - name: Install shellcheck (pinned + checksum-verified)
         # Same contract as the actionlint step below, and for the same reason:
@@ -364,6 +365,9 @@ jobs:
       # delegation: .githooks/pre-push runs validate-workspace plus a
       # changed-crate `cargo test -p` and never calls run-ci.sh. Hosted CI
       # is now the only place the full lane set runs.
+
+      - name: Reuse the RocksDB native engine across feature sets
+        uses: ./.github/actions/rocksdb-engine
 
       - name: Install actionlint (pinned + checksum-verified)
         # R311y416 — Layer 0's actionlint half had never once executed:
@@ -1272,7 +1276,8 @@ jobs:
 
       - name: Install system dependencies
         run: |
-          bash scripts/lib/apt-install.sh libclang-dev libxml2-dev clang perl pkg-config
+          bash scripts/lib/apt-install.sh libsnappy-dev liblz4-dev libzstd-dev zlib1g-dev libbz2-dev \
+            cmake libclang-dev libxml2-dev clang perl pkg-config
 
       - name: Save apt archives
         if: always() && env.WZ_APT_CACHE_DIRTY == 'true'
@@ -1291,6 +1296,9 @@ jobs:
         with:
           workspaces: crates -> target
           key: nondefault
+
+      - name: Reuse the RocksDB native engine across feature sets
+        uses: ./.github/actions/rocksdb-engine
 
       - name: Layer C1cn — every crate compiles its non-default code
         # R2133 — C1cf's mirror. That lane asks whether a crate survives its
@@ -1573,7 +1581,8 @@ jobs:
           # Priority: important and so already on the image; named anyway,
           # because "the image happens to carry it" is not a thing this file
           # states and the leg arms on its absence.
-          bash scripts/lib/apt-install.sh cmake libclang-dev libxml2-dev clang perl pkg-config tcpdump \
+          bash scripts/lib/apt-install.sh libsnappy-dev liblz4-dev libzstd-dev zlib1g-dev libbz2-dev \
+            cmake libclang-dev libxml2-dev clang perl pkg-config tcpdump \
             libpcap-dev netbase
 
       - name: Save apt archives
@@ -1593,6 +1602,9 @@ jobs:
         with:
           workspaces: crates -> target
           key: dissect
+
+      - name: Reuse the RocksDB native engine across feature sets
+        uses: ./.github/actions/rocksdb-engine
 
       - name: Layer C1bn — passive-dissection feature set, RUN (R311y579)
         # Created by R311y579, the round that closed the "no lane at all" debt
@@ -1860,7 +1872,8 @@ jobs:
         # wz-integration-tests dev-dep pulls in even for the spawn-class lanes.
         # libxml2-dev + pkg-config: the libxml probe (item 522).
         run: |
-          bash scripts/lib/apt-install.sh cmake libclang-dev libxml2-dev clang pkg-config
+          bash scripts/lib/apt-install.sh libsnappy-dev liblz4-dev libzstd-dev zlib1g-dev libbz2-dev \
+            cmake libclang-dev libxml2-dev clang pkg-config
 
       - name: Save apt archives
         # See the `feature-gates` copy for why `always()` and why the dirty gate.
@@ -1914,6 +1927,9 @@ jobs:
             crates -> target
             oracles -> target
           key: interop
+
+      - name: Reuse the RocksDB native engine across feature sets
+        uses: ./.github/actions/rocksdb-engine
 
       - name: Cache the zenohd binary (pinned version)
         # zenohd 1.10.1 is a FIXED external release, so the built binary is a pure
@@ -3163,7 +3179,8 @@ jobs:
         # being left behind for a lane that no longer runs here. Their reasons
         # travelled too, and are stated in full on that job's own install step.
         run: |
-          bash scripts/lib/apt-install.sh cmake libclang-dev libxml2-dev clang perl pkg-config
+          bash scripts/lib/apt-install.sh libsnappy-dev liblz4-dev libzstd-dev zlib1g-dev libbz2-dev \
+            cmake libclang-dev libxml2-dev clang perl pkg-config
 
       - name: Save apt archives
         # `always()`: the job this exists for is the one a slow mirror REDS, and
@@ -3202,6 +3219,9 @@ jobs:
       # a real proof into a continuously enforced one.
       # (R2778 — C1bi, the first of the two, runs in `feature-gates-peel` now,
       # one of the four lanes peeled for this job's budget; see that job.)
+      - name: Reuse the RocksDB native engine across feature sets
+        uses: ./.github/actions/rocksdb-engine
+
       - name: Layer C1bj — Push loopback metadata gates (R311y308)
         run: bash scripts/run-ci.sh --layer C1bj
 
@@ -4009,7 +4029,8 @@ jobs:
         # cmake + clang/libclang are for those two C builds (bindgen included);
         # perl matches the sibling job's set.
         run: |
-          bash scripts/lib/apt-install.sh cmake libclang-dev libxml2-dev clang perl pkg-config
+          bash scripts/lib/apt-install.sh libsnappy-dev liblz4-dev libzstd-dev zlib1g-dev libbz2-dev \
+            cmake libclang-dev libxml2-dev clang perl pkg-config
 
       - name: Save apt archives
         # `always()`: the job this exists for is the one a slow mirror REDS, and
@@ -4040,6 +4061,9 @@ jobs:
             vendor/sce -> target
 
       # ─── the single-mode lanes ───────────────────────────────────────────
+      - name: Reuse the RocksDB native engine across feature sets
+        uses: ./.github/actions/rocksdb-engine
+
       - name: Layer C1ad — transport-lowlatency ext + lean tx/rx + e2e (R311y414)
         run: bash scripts/run-ci.sh --layer C1ad
       - name: Layer C1ae — transport-compression lz4 wrap + ext 0x6 + e2e (R311y414)
@@ -4382,7 +4406,8 @@ jobs:
         # while this job only ran C1ce and the arms gate; it stopped being right
         # the moment a cargo lane arrived.
         run: |
-          bash scripts/lib/apt-install.sh cmake libclang-dev libxml2-dev clang perl pkg-config
+          bash scripts/lib/apt-install.sh libsnappy-dev liblz4-dev libzstd-dev zlib1g-dev libbz2-dev \
+            cmake libclang-dev libxml2-dev clang perl pkg-config
 
       - name: Save apt archives
         # See the `feature-gates` copy for why `always()` and why the dirty gate.
@@ -4476,6 +4501,9 @@ jobs:
         with:
           workspaces: |
             crates -> target
+
+      - name: Reuse the RocksDB native engine across feature sets
+        uses: ./.github/actions/rocksdb-engine
 
       - name: api-compat-c — all four ABI arms against upstream's own size table
         # WZ_CAPI_C_ARMS_REQUIRE=1 because THIS job provisions what the script
@@ -4657,7 +4685,8 @@ jobs:
 
       - name: Install system dependencies
         run: |
-          bash scripts/lib/apt-install.sh cmake libclang-dev libxml2-dev clang perl pkg-config
+          bash scripts/lib/apt-install.sh libsnappy-dev liblz4-dev libzstd-dev zlib1g-dev libbz2-dev \
+            cmake libclang-dev libxml2-dev clang perl pkg-config
 
       - name: Save apt archives
         # See the `feature-gates` copy for why `always()` and why the dirty gate.
@@ -4680,6 +4709,9 @@ jobs:
           workspaces: |
             crates -> target
           key: e2e-demo
+
+      - name: Reuse the RocksDB native engine across feature sets
+        uses: ./.github/actions/rocksdb-engine
 
       - name: Build zenoh-pico CLI binaries (Layer E dep)
         # Layer E spawns target/zenoh-pico-cli/z_put against the wz-ap-demo

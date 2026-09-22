@@ -1,0 +1,27 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later OR LicenseRef-watching-zenoh-Commercial
+# SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
+name: RocksDB engine
+description: Reuse the locked native engine across Cargo feature combinations
+runs:
+  using: composite
+  steps:
+    - name: Identify the source, recipe and native compiler
+      id: key
+      shell: bash
+      run: echo "key=$(bash scripts/build-rocksdb-engine.sh --key)" >> "$GITHUB_OUTPUT"
+    - name: Restore the native engine
+      id: restore
+      uses: actions/cache/restore@v4
+      with:
+        path: target/rocksdb-engine
+        key: rocksdb-engine-${{ steps.key.outputs.key }}
+    - name: Build or verify the engine, then export its link path
+      shell: bash
+      run: bash scripts/build-rocksdb-engine.sh
+    # Save before the test lanes: a later timeout must not discard the engine.
+    - name: Save the native engine
+      if: steps.restore.outputs.cache-hit != 'true'
+      uses: actions/cache/save@v4
+      with:
+        path: target/rocksdb-engine
+        key: ${{ steps.restore.outputs.cache-primary-key }}
