@@ -2057,17 +2057,27 @@ libloading = { version = "0.8", optional = true }
 # R2801 — the filesystem storage backend's dependencies, pulled ONLY by
 # `storage-backend-filesystem`, each at the version zenoh-backend-filesystem
 # 1.10.1 declares. `rocksdb` is the `.zenoh_datainfo` sidecar that holds every
-# value's encoding and timestamp, and it keeps upstream's DEFAULT features on
-# purpose: an existing sidecar's blocks are compressed with whatever codec
-# upstream's defaults compiled in, and a reader lacking that codec cannot open
-# it. `librocksdb-sys` is named only to hold the engine at upstream's exact
+# value's encoding and timestamp.
+#
+# ONE codec, snappy, and the reason is what upstream WRITES rather than what it
+# compiles. Upstream builds rocksdb with its five default codecs, but opens the
+# sidecar with `DB::open_default`, which leaves RocksDB's default `compression`
+# -- snappy when snappy is compiled in (the `ColumnFamilyOptions` constructor in
+# the RocksDB source librocksdb-sys 0.17.1 vendors) -- and configures nothing
+# else, so snappy is the one codec a sidecar zenohd wrote can hold. R2801's
+# first cut kept all five "so a reader can open whatever upstream compiled in";
+# that confused compiled with used, and the other four brought three
+# system-library probes (zlib, bzip2, zstd, via pkg-config) for blocks upstream
+# never writes. `bindgen-runtime` is the other default upstream builds with.
+#
+# `librocksdb-sys` is named only to hold the engine at upstream's exact
 # `=0.17.1` (RocksDB 9.9.3) -- `rocksdb 0.23` alone would float to a newer
 # engine whose files the older one is not promised to read. `mime_guess` is
 # the extension-to-MIME guess behind `keep_mime_types`, and `walkdir` is the
 # directory walk behind `follow_links`; both are upstream's rather than
 # re-implemented, because their tables and link semantics ARE the behaviour.
-rocksdb = { version = "0.23.0", optional = true }
-librocksdb-sys = { version = "=0.17.1", optional = true }
+rocksdb = { version = "0.23.0", optional = true, default-features = false, features = ["snappy", "bindgen-runtime"] }
+librocksdb-sys = { version = "=0.17.1", optional = true, default-features = false }
 mime_guess = { version = "2.0.5", optional = true }
 walkdir = { version = "2.5.0", optional = true }
 
