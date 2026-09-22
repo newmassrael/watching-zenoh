@@ -11,12 +11,13 @@
 //!
 //! `storage-backend-filesystem` (active, PARTIAL) is the durable
 //! Volume/StorageBackend: `FilesystemVolume` opens a `FilesystemStorage` rooted
-//! at `root/<name>`, an in-memory mirror kept write-through-consistent (atomic
-//! tmp+rename, fsync file+dir before returning). This test declares a storage
-//! over a `FilesystemVolume` at a tempdir (volume_id `fs`, via
-//! `StorageService::declare_with_backend`), seeds a value, and asserts BOTH:
-//!  1. the seed wrote a file under `tempdir/demo/` — the write-through to disk
-//!     that a MemoryStorage would NOT produce (the fs discriminator; separable
+//! at `root/<name>`, whose directory tree mirrors the key space (R2801: each
+//! value a raw file at its key's path, written durably, read from disk on every
+//! get). This test declares a storage over a `FilesystemVolume` at a tempdir
+//! (volume_id `fs`, via `StorageService::declare_with_backend`), seeds a value,
+//! and asserts BOTH:
+//!  1. the seed's bytes are the file at the key's path, `tempdir/demo/demo/k1`
+//!     — what a MemoryStorage would NOT produce (the fs discriminator; separable
 //!     from `storage-backend-memory-volume`, which y359 serves with no file), and
 //!  2. a foreign pico `z_get demo/k1` gets the value back (`>> Received PUT
 //!     ('demo/k1': '<value>')`) — the SERVE from the fs-backed storage.
@@ -182,18 +183,21 @@ async fn wz_filesystem_storage_serves_a_durable_value_to_a_pico_zget() {
             },
         );
 
-    // Assert #1 (the fs discriminator, in-process): the write-through created a
-    // file under <tempdir>/demo/. A MemoryStorage backend produces no file, so
-    // this separates the claim from storage-backend-memory-volume (y359).
-    let storage_dir = tmp.path().join(STORAGE_NAME);
-    let on_disk = std::fs::read_dir(&storage_dir)
-        .map(|rd| rd.count())
-        .unwrap_or(0);
-    assert!(
-        on_disk > 0,
-        "the seed did not write a file under {storage_dir:?} — the filesystem \
-         backend's write-through did not persist to disk (a memory backend would \
-         leave this empty)"
+    // Assert #1 (the fs discriminator, in-process): the seed's bytes ARE the file
+    // at the key's path. A MemoryStorage backend produces no file, so this
+    // separates the claim from storage-backend-memory-volume (y359).
+    //
+    // R2801 — this used to count the storage directory's entries and require one.
+    // Since the store keeps its `.zenoh_datainfo` sidecar in that directory from
+    // the moment it OPENS, the count is non-zero before any put, so the old
+    // assertion would have passed with the seed never written. It reads the
+    // key's own file instead.
+    let value_file = tmp.path().join(STORAGE_NAME).join(QUERY_KEY);
+    assert_eq!(
+        std::fs::read(&value_file).ok().as_deref(),
+        Some(STORED_VALUE.as_bytes()),
+        "the seed is not the file at {value_file:?} — the filesystem backend did \
+         not persist it (a memory backend would leave no file)"
     );
 
     let timeouts = SessionTimeouts::spec_defaults();

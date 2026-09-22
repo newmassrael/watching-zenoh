@@ -523,9 +523,21 @@ storage-history = ["storage-backend", "wz-session-core/storage-history"]
 # storage seam, so it forwards ONLY the wz-session-core kernel seam
 # (`StorageBackend`/`Volume`/`StorageConfig`/`StoredData`), NOT the runtime
 # `storage-backend` driver (the StorageService + its query/pubsub/transport deps
-# a bare backend never touches). std-only; no new third-party dep (uses `log` +
-# the dev-only `tempfile` already in the tree).
-storage-backend-filesystem = ["wz-session-core/storage-backend"]
+# a bare backend never touches).
+# R2801 — the backend mirrors the key space onto a real directory tree, which is
+# the owner's full-parity decision (R2573), and full parity reaches the ON-DISK
+# FORMAT: zenoh's filesystem backend keeps each value's encoding and timestamp in
+# a RocksDB sidecar beside the files, so a directory either implementation wrote
+# must be one the other can serve without losing them. The four optional deps
+# are upstream's own at the versions its 1.10.1 manifest pins (see the
+# dependency block and `filesystem_datainfo`), so they are derived, not chosen.
+storage-backend-filesystem = [
+    "wz-session-core/storage-backend",
+    "dep:rocksdb",
+    "dep:librocksdb-sys",
+    "dep:mime_guess",
+    "dep:walkdir",
+]
 # Round 311vm — storage-replication (§5.11 storage, replication driver). The
 # digest publisher/subscriber DRIVER (`storage_replication_service`). Forwards
 # the no_std kernel digest stack (wz-session-core/storage-replication =
@@ -2041,6 +2053,23 @@ wz-packet-socket = { path = "../wz-packet-socket", optional = true }
 # `no_std` profile can carry a runtime loader at all. Optional, pulled ONLY by
 # `plugin-dynamic-loading`, so every other build is byte-identical.
 libloading = { version = "0.8", optional = true }
+
+# R2801 — the filesystem storage backend's dependencies, pulled ONLY by
+# `storage-backend-filesystem`, each at the version zenoh-backend-filesystem
+# 1.10.1 declares. `rocksdb` is the `.zenoh_datainfo` sidecar that holds every
+# value's encoding and timestamp, and it keeps upstream's DEFAULT features on
+# purpose: an existing sidecar's blocks are compressed with whatever codec
+# upstream's defaults compiled in, and a reader lacking that codec cannot open
+# it. `librocksdb-sys` is named only to hold the engine at upstream's exact
+# `=0.17.1` (RocksDB 9.9.3) -- `rocksdb 0.23` alone would float to a newer
+# engine whose files the older one is not promised to read. `mime_guess` is
+# the extension-to-MIME guess behind `keep_mime_types`, and `walkdir` is the
+# directory walk behind `follow_links`; both are upstream's rather than
+# re-implemented, because their tables and link semantics ARE the behaviour.
+rocksdb = { version = "0.23.0", optional = true }
+librocksdb-sys = { version = "=0.17.1", optional = true }
+mime_guess = { version = "2.0.5", optional = true }
+walkdir = { version = "2.5.0", optional = true }
 
 # R311y594 (B1) — the capture front end the live tap feeds. Optional and pulled
 # only by `live-capture`; it stays a dev-dependency as well, because the pcap

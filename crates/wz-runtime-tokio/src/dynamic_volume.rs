@@ -28,12 +28,15 @@
 //!
 //! ## The read mirror, and what it means for what this proves
 //!
+//! [`DynamicStore`] keeps an in-memory mirror for reads and writes THROUGH to the
+//! volume. It was written when
 //! [`StorageBackend::get`](wz_session_core::storage_backend::StorageBackend::get)
-//! returns a BORROWED [`StoredData`], so a backend must own the value it hands
-//! back. A store that deserialised across the ABI on every read could not satisfy
-//! that borrow. [`DynamicStore`] therefore does exactly what
-//! [`FilesystemStorage`](crate::filesystem_storage::FilesystemStorage) does: it
-//! keeps an in-memory mirror for reads and writes THROUGH to the volume.
+//! returned a BORROWED [`StoredData`], which only a value the backend owned could
+//! satisfy, and the filesystem backend kept a mirror for the same reason. R2800
+//! made the seam hand out values, and R2801 took the filesystem backend's mirror
+//! away; this one stays because the volume ABI still gives it nothing else to
+//! read from -- [`VolumeVTable`](wz_volume_abi::VolumeVTable) reports stored
+//! values only as a whole-store listing, and has no read by key.
 //!
 //! The honest consequence, stated because it bounds every claim made about this
 //! atom: within one process, a read is answered by the mirror, so a read alone
@@ -441,10 +444,8 @@ pub struct DynamicStore {
     handle: StoreHandle,
     vtable: *const VolumeVTable,
     /// The read path. Kept write-through-consistent with the volume; rebuilt from
-    /// it at creation. Identical in role to
-    /// [`FilesystemStorage`](crate::filesystem_storage::FilesystemStorage)'s
-    /// mirror, and identical in its consequence for what a same-process read can
-    /// prove (see the module doc).
+    /// it at creation, because the ABI has no read by key (see the module doc,
+    /// which also bounds what a same-process read can prove).
     mirror: BTreeMap<Option<String>, StoredData>,
     history: History,
     /// Held, never read: it keeps the mapping the `vtable` and `handle` point into

@@ -1747,20 +1747,27 @@ pub mod storage_service;
 /// [`filesystem_storage::FilesystemStorage`] — the wz counterpart of zenoh's
 /// `zenoh-backend-filesystem`. It implements the no_std storage seam
 /// ([`wz_session_core::storage_backend`] / [`wz_session_core::storage_volume`])
-/// with an in-memory mirror kept write-through-consistent (fsync'd) with one
-/// file per key, so the store survives a restart. std-only; lives here (not the
-/// no_std kernel) because it uses [`std::fs`]. Opt-in — never in `default`.
+/// over a directory tree that mirrors the key space (R2801): each value a raw
+/// file at its key's path, read from the directory on every get, written
+/// durably (fsync'd) so the store survives a restart and a power loss. std-only;
+/// lives here (not the no_std kernel) because it uses [`std::fs`]. Opt-in —
+/// never in `default`.
 #[cfg(feature = "storage-backend-filesystem")]
 pub mod filesystem_storage;
 
-/// R2573 — the key <-> relative-path translation the §5.11 fs storage will be
-/// rebuilt onto, per the owner's decision that wz's fs backend should MIRROR a
-/// user's directory tree rather than stay the hashed flat store
-/// [`filesystem_storage`] is today. Pure translation, no IO, and nothing calls
-/// it yet: the rules are pinned by test first so the rewire has a fixed
-/// contract to move onto instead of acquiring one as it goes.
+/// R2573 — the key <-> relative-path translation the §5.11 fs storage places
+/// every value by, per the owner's decision that wz's fs backend should MIRROR a
+/// user's directory tree. Pure translation, no IO; pinned by test before R2801
+/// rewired [`filesystem_storage`] onto it, so the rewire moved onto a fixed
+/// contract instead of acquiring one as it went.
 #[cfg(feature = "storage-backend-filesystem")]
 pub mod filesystem_keypath;
+
+/// R2801 — the `.zenoh_datainfo` sidecar of the §5.24 fs storage: the RocksDB
+/// database, byte-compatible with zenoh's filesystem backend, that holds each
+/// value's encoding and timestamp beside the raw file.
+#[cfg(feature = "storage-backend-filesystem")]
+pub mod filesystem_datainfo;
 
 /// R311y497 — the `storage-mgr-dynamic-volume-loading` atom (§5.24): a `dlopen`ed
 /// storage [`Volume`](wz_session_core::storage_volume::Volume), the storage-side

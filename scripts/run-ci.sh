@@ -12280,9 +12280,26 @@ layer_c1bg_cargo_test_storage_backend_filesystem() {
     # arm R311y831 shipped and recorded as unwitnessed -- the injected-dir-fsync
     # failure and its no-injection anti-vacuity twin. The label carries the
     # count a second time and moves with it.
-    _runci_guarded_test "C1bg filesystem_storage" 19 \
+    # R2801: 19 -> 26. The store became a directory tree mirroring the key
+    # space, read from disk on every get, so the suite was rewritten around the
+    # new shape rather than grown: the hashed-record, corrupt-file and
+    # quarantine cases left with the format they tested, and the tree's own
+    # cases arrived -- a key IS a file, an operator's file IS a value, prefix
+    # conflicts both ways, the delete that removes every holder, links, and the
+    # payload-before-row order the injected fsync failure now proves.
+    _runci_guarded_test "C1bg filesystem_storage" 26 \
         cargo test -p wz-runtime-tokio \
         --features storage-backend-filesystem --lib filesystem_storage --quiet || return 1
+    # R2801 — the two modules the store now stands on, which no named lane ran:
+    # the `.zenoh_datainfo` sidecar (upstream's row, byte for byte, and the
+    # lock that refuses a second store) and the key <-> path rules (R2573's six
+    # plus the walk's admission: upstream's `keyexpr::new`, ported unbounded).
+    _runci_guarded_test "C1bg filesystem_datainfo" 9 \
+        cargo test -p wz-runtime-tokio \
+        --features storage-backend-filesystem --lib filesystem_datainfo --quiet || return 1
+    _runci_guarded_test "C1bg filesystem_keypath" 9 \
+        cargo test -p wz-runtime-tokio \
+        --features storage-backend-filesystem --lib filesystem_keypath --quiet || return 1
     # R311y280 — the live-driver composition + durability proof (+ its discriminator).
     _runci_guarded_test "C1bg manager_restart" 2 \
         cargo test -p wz-runtime-tokio \

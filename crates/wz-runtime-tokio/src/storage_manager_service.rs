@@ -1940,7 +1940,8 @@ mod tests {
 
         // Session 2: a FRESH manager + fs volume on the SAME dir serves the value
         // persisted before the restart -- with NO new put it can only come from
-        // disk (load-on-open), through a freshly-declared queryable.
+        // disk (R2801: every read goes to the directory), through a
+        // freshly-declared queryable.
         {
             let session = make_session();
             let mut mgr = RuntimeStorageManager::new();

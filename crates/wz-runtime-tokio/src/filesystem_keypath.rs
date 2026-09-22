@@ -4,20 +4,19 @@
 //! §5.11 filesystem storage — the key <-> relative-path translation.
 //!
 //! R2573, and it is the FIRST leg of a redesign the owner chose rather than a
-//! knob round. wz's filesystem storage stores every key as a hashed flat file
-//! (`filesystem_storage.rs` @ `fn allocate_filename`, which returns
-//! `k<hex16(fnv1a64(key))>`), so a stored key has no path, no extension and no
-//! directory structure. Upstream's fs backend is the opposite artifact: it
-//! mirrors the key space onto a real directory tree, which is what gives its
-//! `follow_links` and `keep_mime_types` properties anything to act on. Those
-//! two are not unimplemented knobs here -- they are consequences of a SHAPE,
-//! and this module is the first piece of that shape.
+//! knob round. wz's filesystem storage stored every key as a hashed flat file
+//! (the R311y279 layout: one `k<hex16(fnv1a64(key))>` record per key in one
+//! directory), so a stored key had no path, no extension and no directory
+//! structure. Upstream's fs backend is the opposite artifact: it mirrors the key
+//! space onto a real directory tree, which is what gives its `follow_links` and
+//! `keep_mime_types` properties anything to act on. Those two are not
+//! unimplemented knobs -- they are consequences of a SHAPE, and this module is
+//! the first piece of that shape.
 //!
-//! It is deliberately pure: string and path translation with no IO, so the
-//! rules can be pinned by test before any storage is rewired to them. Nothing
-//! calls it yet, and that is stated rather than hidden -- the storage switches
-//! over in a later round, and doing both at once would mean the mapping's
-//! first exercise was also its first regression surface.
+//! It is deliberately pure: string and path translation with no IO. R2573 built
+//! and pinned it before anything called it, so the storage's switch-over would
+//! move onto a fixed contract; R2801 is that switch-over, and
+//! [`crate::filesystem_storage`] now places every value by these rules.
 //!
 //! ## The contract, read from the counterparty at the matching version
 //!
@@ -37,15 +36,49 @@
 //! `path` @ `needle` citations that would sit in no budget and be graded by
 //! nothing. The symbols are `zpath_to_fspath`, `fspath_to_zpath`,
 //! `CONFLICT_SUFFIX`, `get_conflict_resolved_keyexpr` and
-//! `get_trimmed_keyexpr`, all in that crate's files-management module.
+//! `get_trimmed_keyexpr`, all in that crate's files-management module, and
+//! `ROOT_KEY` in its library root.
+//!
+//! ## What a directory walk may read as a key (R2801)
+//!
+//! Upstream lists a storage by walking its directory and keeping a file only
+//! when its relative path, trimmed, is a key expression -- `keyexpr::new`, whose
+//! rules are read at the zenoh pin in
+//! `commons/zenoh-keyexpr/src/key_expr/borrowed.rs` @ `impl<'a> TryFrom<&'a str> for &'a keyexpr {`
+//! -- AND that key intersects `**`. The second test is not a formality: `**`
+//! never reaches a chunk that begins with `@` (a VERBATIM chunk), which is what
+//! keeps [`ROOT_KEY`] out of the listing, and what lets this backend keep its
+//! own staging area ([`STAGING_DIR`]) inside the tree without either
+//! implementation reading it back as data. [`is_listable_key`] is the two
+//! tests together.
 
 use std::borrow::Cow;
+
+use wz_session_core::keyexpr_match::keyexpr_intersect_patterns;
+
+/// The file that holds the `None` key -- the value a strip-configured storage
+/// keeps AT its mount point. Byte-for-byte upstream's `ROOT_KEY`, and a
+/// verbatim chunk on purpose: a walk's `**` never lists it, so it is read back
+/// by name and never as an ordinary key.
+pub const ROOT_KEY: &str = "@root";
+
+/// The directory, directly under a storage's base directory, where this
+/// backend writes a value before renaming it into place.
+///
+/// ⚠ wz's, not upstream's: upstream writes a file in place, which truncates the
+/// previous value first, so a crash mid-write loses it. wz writes here, fsyncs,
+/// and renames, so the key's path only ever names a complete value. The name is
+/// a verbatim chunk for the reason [`ROOT_KEY`] is -- zenohd walks straight
+/// into it (it skips only the data-info directory by name) and still never
+/// lists what a crash left behind, because `**` does not reach it.
+pub const STAGING_DIR: &str = "@wz_staging";
 
 /// The suffix a key takes when its own name is also a directory.
 ///
 /// Byte-for-byte upstream's `CONFLICT_SUFFIX`. It is deliberately not a
 /// "nice" extension: it has to be a string no real key ends with, because a
-/// key that genuinely ended in it would round-trip to the wrong key.
+/// key that genuinely ended in it would round-trip to the wrong key -- and it
+/// is one, because `#` may not appear in a key expression at all ([`is_keyexpr`]).
 pub const CONFLICT_SUFFIX: &str = ".##z";
 
 /// Translate a zenoh key into the relative path that holds it.
@@ -120,9 +153,135 @@ pub fn is_confinable(zkey: &str) -> bool {
         .any(|chunk| chunk.is_empty() || chunk == ".." || chunk == ".")
 }
 
+/// Whether `value` is a key expression by zenoh's own test — a port of
+/// `keyexpr::new`, rule for rule, from the pin (see the module note).
+///
+/// A port rather than wz's canonizer, because the two answer different
+/// questions: `keyexpr_canon` bounds its output at 256 bytes for the MCU
+/// profiles, and a file several directories deep is a longer key than that
+/// with nothing wrong with it. Upstream's walk admits it, so this does.
+pub fn is_keyexpr(value: &str) -> bool {
+    // Emptiness and a trailing slash are not caught by the scan below.
+    if value.is_empty() || value.ends_with('/') {
+        return false;
+    }
+    let bytes = value.as_bytes();
+    let mut chunk_start = 0;
+    let mut i = 0;
+    while i < bytes.len() {
+        match bytes[i] {
+            // Every special character sorts at or below '/', except '?'.
+            c if c > b'/' && c != b'?' => i += 1,
+            b'/' if i == chunk_start => return false,
+            b'/' => {
+                i += 1;
+                chunk_start = i;
+            }
+            // A '*' must open its chunk, and be `*` or `**` alone in it.
+            b'*' if i != chunk_start => return false,
+            b'*' => match bytes.get(i + 1) {
+                None => break,
+                Some(&b'/') => {
+                    i += 2;
+                    chunk_start = i;
+                }
+                Some(&b'*') => match bytes.get(i + 2) {
+                    None => break,
+                    // `**` may not be followed by `*` or `**`.
+                    Some(&b'/') if matches!(bytes.get(i + 3), Some(&b'*')) => return false,
+                    Some(&b'/') => {
+                        i += 3;
+                        chunk_start = i;
+                    }
+                    _ => return false,
+                },
+                _ => return false,
+            },
+            // A '$' must be `$*`, not followed by another '$', and not alone.
+            b'$' if bytes.get(i + 1) != Some(&b'*') => return false,
+            b'$' => match bytes.get(i + 2) {
+                Some(&b'$') => return false,
+                Some(&b'/') | None if i == chunk_start => return false,
+                None => break,
+                _ => i += 2,
+            },
+            b'#' | b'?' => return false,
+            _ => i += 1,
+        }
+    }
+    true
+}
+
+/// Whether a directory walk reads `zkey` back as a stored key: it must be a
+/// key expression AND intersect `**`, which is upstream's listing filter (see
+/// the module note). The intersection is wz's own
+/// [`keyexpr_intersect_patterns`], so "`**` does not reach a verbatim chunk" is
+/// answered by the rule the query path uses rather than restated here.
+pub fn is_listable_key(zkey: &str) -> bool {
+    if !is_keyexpr(zkey) {
+        return false;
+    }
+    let chunks: Vec<&str> = zkey.split('/').collect();
+    keyexpr_intersect_patterns(&["**"], &chunks)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn is_keyexpr_takes_upstreams_rules_one_by_one() {
+        for ok in [
+            "a", "a/b/c", "a/*/c", "a/**/c", "**", "a/$*b", "a/b$*", "@root", "..", "a..b",
+        ] {
+            assert!(is_keyexpr(ok), "{ok:?} is a key expression");
+        }
+        for bad in [
+            // A conflict-suffixed name: the suffix is built from `#`, which no
+            // key may contain. See the last test in this module.
+            "a/b.##z",
+            "",
+            "a/",
+            "/a",
+            "a//b",
+            "a*",
+            "a/b*c",
+            "**/**",
+            "a/**/*",
+            "a/**/**/b",
+            "$*",
+            "a/$*",
+            "a/$*/b",
+            "a$",
+            "a$b",
+            "a$*$*b",
+            "a#b",
+            "a?b",
+        ] {
+            assert!(!is_keyexpr(bad), "{bad:?} is not a key expression");
+        }
+    }
+
+    #[test]
+    fn is_keyexpr_has_no_length_bound() {
+        // The reason this is a port and not wz's 256-byte canonizer.
+        let deep = "segment/".repeat(64) + "leaf";
+        assert!(deep.len() > 256);
+        assert!(is_keyexpr(&deep));
+    }
+
+    #[test]
+    fn a_walk_lists_keys_and_never_a_verbatim_chunk() {
+        assert!(is_listable_key("demo/a"));
+        assert!(is_listable_key("wild/*/x"));
+        // The root slot and the staging area are the reason the rule exists.
+        assert!(!is_listable_key(ROOT_KEY));
+        assert!(!is_listable_key(&format!("{STAGING_DIR}/tmp.1.0")));
+        // A verbatim chunk anywhere, not only first.
+        assert!(!is_listable_key("a/@b/c"));
+        // And a path that is no key at all.
+        assert!(!is_listable_key("a#b"));
+    }
 
     #[test]
     fn a_key_is_its_own_relative_path_and_round_trips() {
@@ -174,13 +333,24 @@ mod tests {
         assert!(is_confinable("demo/example/x"));
     }
 
+    /// R2573 wrote this test as "the shape the suffix cannot survive": a real
+    /// key ending in the suffix would trim to a DIFFERENT key, and it recorded
+    /// that as a property upstream shares.
+    ///
+    /// R2801 REFUTES the premise, found by porting `keyexpr::new`: the suffix is
+    /// `.##z`, `#` is one of the two characters a key expression may never
+    /// contain, so no key ends in it. That is WHY upstream trims before it
+    /// validates -- a conflict-suffixed path is not a key until the suffix is
+    /// gone -- and it is what makes the trim unambiguous for every real key.
+    /// The residue lives one layer up and is closed there: wz's backend takes
+    /// `Option<&str>` rather than a validated key, so
+    /// `FilesystemStorage::key_path` refuses a key that is not a key expression,
+    /// and this string can no longer be placed at all.
     #[test]
-    fn a_key_ending_in_the_suffix_is_the_shape_the_suffix_cannot_survive() {
-        // Recorded rather than fixed, because upstream has the same property:
-        // the trim cannot tell a real key ending in the suffix from a stored
-        // conflict form. The test pins the CONSEQUENCE so a later round that
-        // changes the suffix sees what it is trading.
+    fn no_key_can_end_in_the_suffix_so_the_trim_is_unambiguous() {
         let awkward = "demo/example.##z";
+        assert!(!is_keyexpr(awkward), "`#` is forbidden in a key expression");
+        assert!(is_keyexpr(trimmed_key(awkward)));
         assert_eq!(trimmed_key(awkward), "demo/example");
     }
 }
