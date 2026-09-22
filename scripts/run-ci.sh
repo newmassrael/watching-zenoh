@@ -6973,7 +6973,10 @@ layer_c1am_cargo_test_adminspace() {
     # because on a build that compiles the arms the literal match answers before
     # `ADMIN_CONFIG_WRITE_ACTIONS` is read. That property belongs to the C1z-tier
     # legs, where the const is the only answerer. PRINTED by the command.
-    _runci_guarded_test "C1AM adminspace 59" 59 \
+    # R2802 — 59 -> 60: `storage_add_payload_values_keep_their_json_type`, the
+    # `?k=v` payload reading each value as the JSON5 scalar it spells. PRINTED
+    # by `guarded_count_gate.py --range 69a8d5da..715e936a`.
+    _runci_guarded_test "C1AM adminspace 60" 60 \
         cargo test -p wz-session-core --features adminspace-config-hotreload --lib adminspace --quiet || return 1
     # R311y828 5 -> 6: the live manager's admin sub-tree render. It is gated on
     # `adminspace-plugins-handlers`, so the C1z sibling guard over the SAME module
@@ -8385,9 +8388,16 @@ layer_c1z_cargo_test_storage_driver() {
     # what `guarded_count_gate.py --range d0c2c300..1212ec5b` PRINTED; R2800
     # pushed with the hook's count gate deferred and its first hosted C1z run
     # read 42 against 36 on the first leg and stopped.
-    _runci_guarded_test "C1z storage" 42 \
+    # R2802 + R2804 — +2 on EVERY `-p wz-session-core --lib storage` subset
+    # below, uniformly, because both cases live in `storage_config::tests`
+    # ungated and the filter is a module prefix: the value keeping its JSON type
+    # in the admin body (R2802) and a JSON5-only number reaching it as a JSON
+    # number (R2804). PRINTED by `guarded_count_gate.py --range
+    # 69a8d5da..715e936a`, which moved all eight and no `-p wz-runtime-tokio`
+    # storage leg.
+    _runci_guarded_test "C1z storage" 44 \
         cargo test -p wz-session-core --features storage-backend --lib storage --quiet || return 1
-    _runci_guarded_test "C1z storage" 50 \
+    _runci_guarded_test "C1z storage" 52 \
         cargo test -p wz-session-core --features storage-mgr-multi-storage-host --lib storage --quiet || return 1
     # R2696 — 5 -> 8: the volume lifecycle's manager half reaches this leg too,
     # because none of the three (cascade, refusal, `build_volume`'s backend
@@ -8402,7 +8412,7 @@ layer_c1z_cargo_test_storage_driver() {
         cargo test -p wz-runtime-tokio --features storage-mgr-multi-storage-host,declare-subscriber,pubsub-allow-loop,storage-mgr-strip-prefix --lib storage_manager_service --quiet || return 1
     _runci_guarded_test "C1z storage_strip_prefix" 6 \
         cargo test -p wz-session-core --features storage-mgr-strip-prefix --lib storage_strip_prefix --quiet || return 1
-    _runci_guarded_test "C1z storage" 55 \
+    _runci_guarded_test "C1z storage" 57 \
         cargo test -p wz-session-core --features storage-backend,storage-mgr-strip-prefix --lib storage --quiet || return 1
     # R2350 56 -> 62: the `storage-history` atom closed its named residual, so
     # its module gained five cases (a delete is now a versioned tombstone: the
@@ -8417,7 +8427,7 @@ layer_c1z_cargo_test_storage_driver() {
     # unify it in. The lane then re-measured the other seven at their old counts
     # (16 of 16 legs reached, all green) rather than assume them unaffected.
     # CONTROL: put 56 back and this leg alone reds — measured, not claimed.
-    _runci_guarded_test "C1z storage" 71 \
+    _runci_guarded_test "C1z storage" 73 \
         cargo test -p wz-session-core --features storage-history,storage-mgr-strip-prefix --lib storage --quiet || return 1
     # R2352 45 -> 49 / 59 -> 63: the `storage-mgr-wildcard-updates` atom closed
     # its named residual (dispatch-on-override-kind), and the new
@@ -8434,9 +8444,9 @@ layer_c1z_cargo_test_storage_driver() {
     # re-measured at their old counts in the same run rather than assumed
     # unaffected, and the two `-p wz-runtime-tokio` gc/aligner guards do not
     # move because every new case lives in wz-session-core's storage_state.rs.
-    _runci_guarded_test "C1z storage" 59 \
+    _runci_guarded_test "C1z storage" 61 \
         cargo test -p wz-session-core --features storage-mgr-wildcard-updates --lib storage --quiet || return 1
-    _runci_guarded_test "C1z storage" 73 \
+    _runci_guarded_test "C1z storage" 75 \
         cargo test -p wz-session-core --features storage-mgr-wildcard-updates,storage-mgr-strip-prefix --lib storage --quiet || return 1
     # R311y829 128 -> 132: the four publication-schedule tests. This is the
     # ONLY `-p wz-session-core --lib storage` subset that moved — the schedule
@@ -8490,7 +8500,7 @@ layer_c1z_cargo_test_storage_driver() {
     # `storage-aligner,storage-mgr-garbage-collection`, which is not a guard
     # here. The two `-p wz-runtime-tokio` aligner guards do NOT move (40 and 1,
     # re-measured, not assumed): every new case lives in wz-session-core.
-    _runci_guarded_test "C1z storage" 174 \
+    _runci_guarded_test "C1z storage" 176 \
         cargo test -p wz-session-core --features storage-aligner,storage-mgr-wildcard-updates --lib storage --quiet || return 1
     _runci_guarded_test "C1z storage_service" 9 \
         cargo test -p wz-runtime-tokio --features storage-mgr-complete-flag --lib storage_service --quiet || return 1
@@ -8500,7 +8510,7 @@ layer_c1z_cargo_test_storage_driver() {
     # requires the wildcard registries it sweeps, so this subset compiles the
     # four `override_dispatch` cases too. It carries no aligner, so it does NOT
     # gain the fifth.
-    _runci_guarded_test "C1z storage" 66 \
+    _runci_guarded_test "C1z storage" 68 \
         cargo test -p wz-session-core --features storage-mgr-garbage-collection --lib storage --quiet || return 1
     # R2801 3 -> 4: the collector holds its storage WEAKLY, so dropping the
     # storage's owner releases the backend while the collector still lives.
@@ -12311,7 +12321,14 @@ layer_c1bg_cargo_test_storage_backend_filesystem() {
     # cases arrived -- a key IS a file, an operator's file IS a value, prefix
     # conflicts both ways, the delete that removes every holder, links, and the
     # payload-before-row order the injected fsync failure now proves.
-    _runci_guarded_test "C1bg filesystem_storage" 26 \
+    # R2802: 26 -> 35, the five properties and the root: ten cases (payload and
+    # `dir` required, `dir` confined, a string flag refused, `on_closure`'s two
+    # values and its refusal, `delete_all`, `read_only`, the two flags reaching
+    # the store, `dir_full_path`, the root's derivation and its canonical form)
+    # and one retired with the name-based rooting it tested.
+    # R2804: 35 -> 36, the volume's own status (`{"root", "version"}`).
+    # PRINTED by `guarded_count_gate.py --range 69a8d5da..715e936a`.
+    _runci_guarded_test "C1bg filesystem_storage" 36 \
         cargo test -p wz-runtime-tokio \
         --features storage-backend-filesystem --lib filesystem_storage --quiet || return 1
     # R2801 — the two modules the store now stands on, which no named lane ran:
