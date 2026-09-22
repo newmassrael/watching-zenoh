@@ -72,6 +72,10 @@ import re
 import sys
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+import rust_comments  # noqa: E402  -- after the path insert that finds it
+
 REPO = Path(__file__).resolve().parents[2]
 
 LINK_RS = REPO / "crates/wz-session-core/src/link.rs"
@@ -85,19 +89,36 @@ DISPOSE_ANCHOR = "let dispose = |outcome: crate::link::LinkSendOutcome|"
 
 
 def strip_comments(text: str) -> str:
-    """Drop `//`-comments (doc comments included) and attributes.
+    """Blank comment bodies and drop attribute lines.
 
     A variant's rationale routinely names its SIBLING (`Oversize`'s doc explains
     why it is not `WriterGone`), so a reader that keeps comments would count
     prose as membership -- the class R2083 fixed in the config-key gate when a
     regex counted quoted phrases inside an array's own rationales as entries.
+
+    R2794 -- the comment half is DELEGATED to `rust_comments.strip_comments`,
+    which scans character-wise and knows string and raw-string literals. What
+    stood here split each line at its first `//`, so a marker inside a STRING
+    truncated the line and took the rest of it out of this gate's view:
+    measured, `let u = "tcp://h"; Oversize => dispose(x),` came back as
+    `let u = "tcp:` -- a variant and its arm, gone, with nothing said.
+    ⚠ It was LATENT, not live: at the time of this change none of the three
+    files below carries a `//` inside a literal. That is a fact about today's
+    corpus and not about the reader, and the corpus is three constants in this
+    file — the next line added to any of them decides it, and no gate would
+    report the loss. A consumer reported the same class in its own tree, where
+    it hid 7,645 lines across 32 files from a gate; a third project reported it
+    the same week. Three trees grew it separately because each wrote its own
+    scanner, which is the argument for using the shared one here.
+
+    The attribute half stays: `#[...]` is not a comment, and dropping those
+    lines is what keeps a `cfg` token out of a variant count.
     """
     out = []
-    for line in text.splitlines():
-        stripped = line.strip()
-        if stripped.startswith("//") or stripped.startswith("#["):
+    for line in rust_comments.strip_comments(text).splitlines():
+        if line.strip().startswith("#["):
             continue
-        out.append(line.split("//", 1)[0])
+        out.append(line)
     return "\n".join(out)
 
 
@@ -360,6 +381,29 @@ def selftest() -> int:
             failures.append(
                 f"witness reader: a doc-only mention must not witness, got "
                 f"{seen['WriterGone']}"
+            )
+
+        # R2794 — a marker INSIDE a string literal is not a comment opener.
+        # The line-splitting stripper this replaced returned `let u = "tcp:`
+        # here, taking the variant and its arm out of view with nothing said.
+        # Held at the stripper rather than through a fixture because that is
+        # where the defect was, and a fixture would only reach it by accident.
+        checks += 1
+        line = 'let u = "tcp://h"; Oversize => dispose(x),'
+        if strip_comments(line) != line:
+            failures.append(
+                f"stripper: a `//` inside a literal truncated the line -- "
+                f"{strip_comments(line)!r}"
+            )
+        # ...and a REAL trailing comment is still removed, so the repair did
+        # not buy the first half by giving up the second.
+        checks += 1
+        if strip_comments('Oversize => x, // WriterGone is the sibling').strip() != (
+            "Oversize => x,"
+        ):
+            failures.append(
+                f"stripper: a trailing comment survived -- "
+                f"{strip_comments('Oversize => x, // WriterGone is the sibling')!r}"
             )
 
     if failures:
