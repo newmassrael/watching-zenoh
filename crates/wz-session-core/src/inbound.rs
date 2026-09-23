@@ -257,6 +257,12 @@ pub enum InboundFrame {
         has_ext: bool,
         extensions: Vec<ExtEntryOwned>,
     },
+    /// A network body on a negotiated lowlatency link, without a Frame or SN.
+    /// Only the passive observer constructs this envelope; the universal
+    /// participant decoder does not accept it. The carried network decoder
+    /// judges the complete body separately, as it does a Frame's payload.
+    #[cfg(feature = "codec-frame")]
+    Network { payload: Vec<u8> },
     /// MID outside the handshake/close/keepalive set.
     Unknown { mid: u8 },
 }
@@ -326,6 +332,8 @@ impl InboundFrame {
                 crate::ext_admit::ExtCarrier::Transport(wire_const::T_MID_OAM),
                 extensions.iter().map(|e| e.header),
             ),
+            #[cfg(feature = "codec-frame")]
+            InboundFrame::Network { .. } => ExtAdmission::Unjudged,
             InboundFrame::Unknown { .. } => ExtAdmission::Unjudged,
         }
     }
@@ -373,6 +381,8 @@ impl InboundFrame {
             // variant's name like every other arm, and the MID a reader needs is
             // on the variant for whoever wants it. A name that folded the byte
             // in would make two frames with different MIDs two different kinds.
+            #[cfg(feature = "codec-frame")]
+            InboundFrame::Network { .. } => "Network",
             InboundFrame::Unknown { .. } => "Unknown",
         }
     }
@@ -429,6 +439,8 @@ impl InboundFrame {
             // MID is not the ninth kind, it is the absence of a kind, and
             // leaving the low numbers contiguous is what lets a tenth arm be
             // added without a consumer's switch falling through to this one.
+            #[cfg(feature = "codec-frame")]
+            InboundFrame::Network { .. } => 9,
             InboundFrame::Unknown { .. } => 255,
         }
     }
@@ -811,6 +823,9 @@ pub fn inbound_to_fsm_event(
         // through to `Unknown`. What changed is the OBSERVER's reach, which is
         // where the defect was.
         InboundFrame::Oam { .. } => Some(E::FramingError),
+        // This observer envelope does not extend the participant's protocol.
+        #[cfg(feature = "codec-frame")]
+        InboundFrame::Network { .. } => Some(E::FramingError),
         InboundFrame::Unknown { .. } => Some(E::FramingError),
     }
 }

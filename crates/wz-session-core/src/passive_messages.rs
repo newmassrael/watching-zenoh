@@ -306,6 +306,7 @@ pub struct DroppedFrameCensus {
     fragment: usize,
     join: usize,
     oam: usize,
+    network: usize,
     unknown: usize,
     undecodable: usize,
 }
@@ -332,6 +333,7 @@ impl DroppedFrameCensus {
             #[cfg(feature = "codec-keep-alive")]
             Ok(crate::inbound::InboundFrame::KeepAlive { .. }) => self.keep_alive += 1,
             Ok(crate::inbound::InboundFrame::Frame { .. }) => self.frame += 1,
+            Ok(crate::inbound::InboundFrame::Network { .. }) => self.network += 1,
             // The VARIANT is gated on `reassembly`, and the ACCESSOR below is
             // not: a reader of this census must not have to know which features
             // this binary carries (R311y655). Without the feature a `0x06`
@@ -396,6 +398,11 @@ impl DroppedFrameCensus {
         self.oam
     }
 
+    /// Bare network bodies on negotiated lowlatency links, without a Frame.
+    pub fn network(&self) -> usize {
+        self.network
+    }
+
     /// Messages whose MID this reader does not know. Not an error: an unknown
     /// message is a fact about the wire, and a bound discarding one is worth
     /// telling apart from a bound discarding a keepalive.
@@ -422,6 +429,7 @@ impl DroppedFrameCensus {
             + self.fragment
             + self.join
             + self.oam
+            + self.network
             + self.unknown
             + self.undecodable
     }

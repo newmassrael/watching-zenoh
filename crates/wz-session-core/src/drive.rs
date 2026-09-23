@@ -754,6 +754,10 @@ fn dispatch_unit<R: SessionRuntime, T: TimeSource>(
                 InboundFrame::Oam { .. } => {
                     unreachable!("inbound_to_fsm_event None branch is Frame/KeepAlive only")
                 }
+                #[cfg(feature = "codec-frame")]
+                InboundFrame::Network { .. } => {
+                    unreachable!("observer network envelope projects to FramingError")
+                }
                 InboundFrame::Unknown { .. } => {
                     // inbound_to_fsm_event projects these to Some(event),
                     // so the outer Some arm handled them — this branch

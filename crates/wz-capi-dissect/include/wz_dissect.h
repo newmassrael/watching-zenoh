@@ -1414,6 +1414,8 @@ typedef struct wz_dissect_live wz_dissect_live;
 #define WZ_DISSECT_KIND_FRAGMENT 6
 #define WZ_DISSECT_KIND_JOIN 7
 #define WZ_DISSECT_KIND_OAM 8
+/* Bare network envelope on a negotiated lowlatency link; no Frame or SN. */
+#define WZ_DISSECT_KIND_NETWORK 9
 #define WZ_DISSECT_KIND_UNKNOWN 255
 
 /* wz_dissect_record.origin — which of a flow's message lists this came

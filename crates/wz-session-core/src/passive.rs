@@ -53,7 +53,9 @@ use crate::chain_loss::ChainLoss;
 use crate::ext_header::{establishment_ext_id as est_ext, ext_eid};
 use crate::inbound::{parse_inbound_consuming, InboundFrame};
 #[cfg(feature = "codec-frame")]
-use crate::network_message::{parse_frame_payload_best_effort, BatchParse};
+use crate::network_message::{
+    parse_frame_payload_best_effort, parse_lowlatency_payload_best_effort, BatchParse,
+};
 use crate::parse_error::InboundParseError;
 use crate::peer_init_caps::PeerInitCaps;
 #[cfg(feature = "reassembly")]
@@ -463,14 +465,15 @@ pub struct PassiveFrame {
     ///
     /// Message-relative and not unit-relative, so that each of these two fields
     /// states ONE measured fact rather than a sum: this is the width of the
-    /// header, the sn and the ext chain ahead of the payload, and
+    /// header, the sn and the ext chain ahead of the payload (zero for a
+    /// bare lowlatency network body), and
     /// [`Self::unit_offset`] is where the message itself stands. A consumer
     /// wanting a record's place in the unit adds them (`wz-capture`'s
     /// `agg::record_unit_offset` is that one door).
     ///
     /// `None` is not "this frame carried no batch". It is the honest answer for
     /// the three cases where a wire coordinate does not survive: a message that
-    /// is not a `Frame` at all, a batch decompressed out of an lz4 body, and a
+    /// carries no network body, a batch decompressed out of an lz4 body, and a
     /// batch REASSEMBLED from the payloads of several fragments. The last two
     /// produce a buffer that exists only inside this reader, so a record within
     /// it has an offset into that buffer and NO offset into the capture —
@@ -1550,14 +1553,34 @@ impl PassiveSession {
             // message. Read off THIS message's header, so a batch's second
             // message is judged as well as its first — the stream path's
             // credible-header gate gets to see only the first.
+            let lean_network = self.context.lowlatency_active(direction)
+                && !matches!(
+                    rest[0] & 0x1f,
+                    wz_codecs::wire_const::T_MID_CLOSE | wz_codecs::wire_const::T_MID_KEEP_ALIVE
+                );
+            // Transport flags have no meaning on a bare network header.
             let reserved = rest
                 .first()
+                .filter(|_| !lean_network)
                 .and_then(|h| wz_codecs::wire_const::reserved_transport_flags(*h))
                 .unwrap_or(0);
             if reserved != 0 {
                 self.reserved_headers[usize::from(direction == Direction::B)] += 1;
             }
-            let (frame, consumed) = match parse_inbound_consuming(rest) {
+            #[cfg(feature = "codec-frame")]
+            let parsed = if lean_network {
+                Ok((
+                    InboundFrame::Network {
+                        payload: rest.to_vec(),
+                    },
+                    rest.len(),
+                ))
+            } else {
+                parse_inbound_consuming(rest)
+            };
+            #[cfg(not(feature = "codec-frame"))]
+            let parsed = parse_inbound_consuming(rest);
+            let (frame, consumed) = match parsed {
                 Ok((f, n)) => (Ok(f), n),
                 Err(e) => (Err(e), 0),
             };
@@ -1921,6 +1944,12 @@ impl PassiveSession {
             return Carried::Nothing;
         };
         match f {
+            InboundFrame::Network { payload } => {
+                let b = parse_lowlatency_payload_best_effort(payload);
+                #[cfg(all(feature = "dissect", feature = "codec-declare"))]
+                self.fold_keyexprs(direction, &b);
+                Carried::Batch(b)
+            }
             InboundFrame::Frame { payload, .. } => match self.batch_of(payload) {
                 Some(b) => {
                     #[cfg(all(feature = "dissect", feature = "codec-declare"))]
@@ -2012,6 +2041,9 @@ impl PassiveSession {
         frame: &Result<InboundFrame, InboundParseError>,
         consumed: usize,
     ) -> Option<usize> {
+        if matches!(frame, Ok(InboundFrame::Network { .. })) {
+            return Some(0);
+        }
         let Ok(InboundFrame::Frame { payload, .. }) = frame else {
             return None;
         };
@@ -2749,32 +2781,11 @@ mod tests {
         );
     }
 
-    /// R2803 — A LEAN LINK'S NETWORK MESSAGE REACHES THE DECODER instead of
-    /// killing the stream.
-    ///
-    /// RED FIRST, measured before the repair: this exact input returned
-    /// `Desynchronised { reason: ImplausibleHeader { header: 158 } }` — 158 is
-    /// `0x9e`, a Declare. The framing was never at fault; the credible-header
-    /// gate asked the UNIVERSAL question on a link that does not carry the
-    /// universal set, and a desync abandons every byte behind it.
-    ///
-    /// Upstream's lowlatency link carries `TransportBodyLowLatency`, which is
-    /// `Close | KeepAlive | Network(NetworkMessage)` — the data-carrying arm is
-    /// a NETWORK message DIRECTLY, with no `Frame` wrapper and no sequence
-    /// number. This reader models the UNIVERSAL set only, so that third arm
-    /// decodes as nothing.
-    ///
-    /// `commons/zenoh-protocol/src/transport/mod.rs` @ `pub enum TransportBodyLowLatency {`
-    ///
-    /// The bytes below are the shape measured off a real lowlatency capture:
-    /// the same network message the universal path carries INSIDE a `Frame`,
-    /// with the frame header and SN removed.
-    ///
-    /// ⚠ The sibling lean-run tests pass because they feed `KeepAlive`, which
-    /// IS one of the three arms. Picking the one message type that works is
-    /// how a control built from the subject stays green over a real gap.
+    /// A negotiated lean link carries a real network body with no Frame/SN.
+    /// Keep the following KeepAlive readable as well as decoding the data.
     #[test]
-    fn a_lean_links_network_message_is_not_read_and_says_so() {
+    #[cfg(feature = "codec-declare")]
+    fn a_lean_links_network_message_decodes_without_a_frame() {
         let ll = || vec![unit_ext(est_ext::LOWLATENCY)];
         let mut s = PassiveSession::new();
         s.push(Direction::A, &framed(&init_wire(false, ll()), 2));
@@ -2791,36 +2802,28 @@ mod tests {
         );
 
         // A bare network message, 4-byte framed, exactly as a lean link sends
-        // it. `0x9e` is a network header, not a transport MID.
+        // it. `0x9e` is a network header, not a transport MID. The suffix
+        // length is six; the former framing-only fixture declared eighteen
+        // and proved only framing, not body decoding.
         let network: Vec<u8> = vec![
-            0x9e, 0x21, 0x08, 0x62, 0x01, 0x00, 0x12, b'd', b'e', b'm', b'o', b'/', b'x',
+            0x9e, 0x21, 0x08, 0x62, 0x01, 0x00, 0x06, b'd', b'e', b'm', b'o', b'/', b'x',
         ];
         s.push(Direction::A, &framed(&network, 4));
 
-        let got = s.next_frame(Direction::A);
-        match got {
-            // Framed off at the right width and handed to the decoder, which
-            // LOCATES AND NAMES it by its MID. The body is not modelled yet --
-            // a bare `NetworkMessage` has no arm here -- but "a Declare sat at
-            // this offset" is a fact a consumer can act on, and it is the fact
-            // a desync destroyed.
-            Ok(f) => match &f.frame {
-                Ok(InboundFrame::Unknown { mid }) => assert_eq!(
-                    *mid,
-                    wz_codecs::wire_const::N_MID_DECLARE,
-                    "the network message is reported by its own MID"
-                ),
-                other => panic!(
-                    "expected the lean body to be reported by MID; if this is a \
-                     decoded Declare then the lowlatency model landed and this \
-                     test should assert the message: {other:?}"
-                ),
-            },
-            Err(stall) => panic!(
-                "the lean body must reach the decoder -- a stall here is the \
-                 R2803 defect returning: {stall:?}"
-            ),
-        }
+        let got = s.next_frame(Direction::A).expect("the lean body is framed");
+        assert!(matches!(got.frame, Ok(InboundFrame::Network { .. })));
+        assert_eq!(got.batch_offset, Some(0));
+        assert_eq!(got.sn_verdict, None);
+        assert_eq!(got.reserved_header_bits, 0);
+        let Carried::Batch(batch) = got.carried else {
+            panic!("network body absent")
+        };
+        assert!(batch.is_complete(), "{batch:?}");
+        assert_eq!(batch.spans, [(0, network.len())]);
+        assert!(matches!(
+            batch.messages.as_slice(),
+            [crate::network_message::NetworkMessage::Declare(_)]
+        ));
 
         // THE PART THAT MATTERS: the stream is still alive. A desync abandons
         // everything behind it, which is how one unreadable Declare cost a real
@@ -2831,6 +2834,72 @@ mod tests {
             .next_frame(Direction::A)
             .expect("the frame AFTER an undecodable one still reads");
         assert!(after.frame.is_ok(), "and it decodes: {:?}", after.frame);
+    }
+
+    #[test]
+    fn discarding_a_lean_network_body_counts_its_own_kind() {
+        let mut s = established(vec![unit_ext(est_ext::LOWLATENCY)]);
+        s.push(Direction::A, &framed(&oam_record(7), 4));
+        let mut list = crate::passive_messages::MessageList::new();
+        list.push(s.next_frame(Direction::A).expect("network body"));
+        let mut census = crate::passive_messages::DroppedFrameCensus::default();
+        census.absorb(list.discard_oldest().expect("one body held"));
+        assert_eq!(census.total(), 1);
+        assert_eq!(census.network(), 1);
+        assert_eq!(census.frame(), 0);
+        assert_eq!(census.unknown(), 0);
+    }
+
+    #[test]
+    fn universal_links_still_require_a_frame_for_network_data() {
+        let record = oam_record(7);
+        let mut bare = established(vec![]);
+        bare.push(Direction::A, &framed(&record, 2));
+        assert!(bare.next_frame(Direction::A).is_err());
+        let mut wrapped = established(vec![]);
+        wrapped.push(Direction::A, &framed(&frame_wire(0, &record), 2));
+        let got = wrapped.next_frame(Direction::A).expect("universal Frame");
+        assert!(matches!(got.frame, Ok(InboundFrame::Frame { .. })));
+        let Carried::Batch(batch) = got.carried else {
+            panic!("missing batch")
+        };
+        assert!(batch.is_complete());
+        assert_eq!(batch.messages.len(), 1);
+    }
+
+    #[test]
+    fn lean_network_is_single_and_truncation_does_not_kill_the_stream() {
+        let mut s = established(vec![unit_ext(est_ext::LOWLATENCY)]);
+        let valid = oam_record(7);
+        let mut extra = valid.clone();
+        extra.extend_from_slice(&oam_record(8));
+        for body in [&valid[..1], extra.as_slice(), valid.as_slice()] {
+            s.push(Direction::A, &framed(body, 4));
+        }
+        let truncated = s
+            .next_frame(Direction::A)
+            .expect("truncated body stays framed");
+        let Carried::Batch(batch) = truncated.carried else {
+            panic!("missing parse")
+        };
+        assert!(!batch.is_complete());
+        assert_eq!(batch.unparsed_bytes, 1);
+        let extra = s
+            .next_frame(Direction::A)
+            .expect("extra record stays framed");
+        let Carried::Batch(batch) = extra.carried else {
+            panic!("missing parse")
+        };
+        assert_eq!(batch.messages.len(), 1);
+        assert!(!batch.is_complete());
+        assert_eq!(batch.unparsed_bytes, valid.len());
+        let after = s.next_frame(Direction::A).expect("the next unit reads");
+        let Carried::Batch(batch) = after.carried else {
+            panic!("missing parse")
+        };
+        assert!(batch.is_complete());
+        assert_eq!(batch.messages.len(), 1);
+        assert_eq!(s.reserved_headers(Direction::A), 0);
     }
 
     /// The negative arm: without the `0x5` offer on BOTH sides the width never
