@@ -2081,7 +2081,17 @@ PIN_NO_SYMBOL = 2
 # DERIVED with `citation_audit` over that atom's reason at the commit before
 # the grade, which returned (wz 6, ambiguous 5); ATTRIBUTED by the arithmetic,
 # 66 - 6 = 60, the census's own FAIL line, so no other atom moves.
-PIN_WZ_CITATIONS = 60
+#
+# R2817 — 60 -> 62, RISING, and it was hosted-red before it was pinned: run
+# 35871782802 (fc020c5b, R2814) failed Layer C0 here. R2814 appended a
+# CORRECTION to `ext-pubsub-advanced-subscriber`'s reason carrying two anchored
+# wz citations -- `advanced_subscriber.rs` @ its `sample_miss_listener` and
+# `listeners.rs` @ `pub struct ListenerSet<C> {` -- and did not run this census
+# after the store write. DERIVED with `citation_audit` over that atom's reason
+# at c7b70d42 and at R2816's tip: (wz 7, ambiguous 0) -> (wz 9, ambiguous 0);
+# R2815's and R2816's corrections cite upstream only. ATTRIBUTED by the
+# arithmetic, 60 + 2 = 62, the census's own FAIL line, so no other atom moves.
+PIN_WZ_CITATIONS = 62
 # R2626 — 44 -> 42, and this one is worth a sentence because it HELD through
 # every earlier retirement in this run (R2612, R2622). `time-hlc`'s reason is the
 # first retiree carrying AMBIGUOUS citations of its own: its oldest clauses cite
