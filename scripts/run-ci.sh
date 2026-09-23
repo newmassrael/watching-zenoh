@@ -870,7 +870,8 @@ _runci_guarded_test() {
 # chased by re-running — this helper records everything the first time.
 # The PASS/FAIL line itself is echoed here (label + " PASS"/" FAIL (why)"), so
 # callers only branch on the return code. Args: 1=label 2=cpu 3=machine 4=elf,
-# and an optional 5=`stack` for a binary that measures its stack.
+# an optional 5=`stack` for a binary that measures its stack, and an optional
+# 6=icount shift for an interrupt-scheduling regression probe.
 #
 # R2776 — the `stack` argument (open-debt item 805). The three deploys that
 # boot on the microbit paint their stack region and print
@@ -882,6 +883,8 @@ _runci_guarded_test() {
 # measuring would otherwise read exactly like one that measured and fit.
 run_qemu_case() {
     local label="$1" cpu="$2" machine="$3" kernel="$4" expect="${5:-}"
+    local icount_args=()
+    [[ -n "${6:-}" ]] && icount_args=(-icount "shift=$6,align=off,sleep=off")
     local qlog rc
     qlog="$(mktemp)"
     # Wall-clock bound on the qemu run — a backstop against a GENUINE
@@ -905,7 +908,7 @@ run_qemu_case() {
     if timeout "$timeout_s" qemu-system-arm \
         -cpu "$cpu" -machine "$machine" \
         -nographic -semihosting-config enable=on,target=native \
-        -kernel "$kernel" >"$qlog" 2>&1; then
+        -kernel "$kernel" "${icount_args[@]}" >"$qlog" 2>&1; then
         local stack_line
         stack_line="$(grep -m1 '^stack: peak ' "$qlog" || true)"
         if [[ "$expect" == "stack" && -z "$stack_line" ]]; then
@@ -14634,7 +14637,7 @@ install qemu-system-arm" || fail=1
     # boot per mode (lwIP NO_SYS is process-global single-init), built to the
     # same ELF path in sequence. The `reasm` mode is the on-target mirror of
     # the host C1n `--features reassembly` lane.
-    local amachine acpu atarget abin alabel amode
+    local amachine acpu atarget abin alabel amode clock_shift
     local afeat_args
     for lane in "${acceptor_lanes[@]}"; do
         IFS=':' read -r amachine acpu atarget <<< "$lane"
@@ -14673,6 +14676,34 @@ install qemu-system-arm" || fail=1
                 fail=1
             fi
         done
+
+        # R2808 (open-debt item 815): preempt repeated clock reads with
+        # SysTick. The old AtomicU64 fallback spins inside the handler on a
+        # lock held by the interrupted thread; this probe fails before the
+        # fix under deterministic instruction-count scheduling. It is a
+        # separate verdict, not a retry of a failed session boot.
+        if WZ_LWIP_PORT="$lwip_port" cargo build --release \
+            --manifest-path deploy/mcu-session-acceptor/Cargo.toml \
+            --target "$atarget" --bin clock-interrupt-probe \
+            --features reassembly --quiet; then
+            if [[ "$has_qemu" -ne 1 ]]; then
+                _q_unavailable "Q.4.${amachine}.clock" \
+                    "qemu-system-arm not on PATH" || fail=1
+            else
+                for clock_shift in 2 5 9; do
+                    if ! run_qemu_case \
+                        "Q.4.${amachine}.clock.${clock_shift} interrupt progress" \
+                        "$acpu" "$amachine" \
+                        "deploy/mcu-session-acceptor/target/${atarget}/release/clock-interrupt-probe" \
+                        "" "$clock_shift"; then
+                        fail=1
+                    fi
+                done
+            fi
+        else
+            echo "  Q.4.${amachine}.clock build FAIL" >&2
+            fail=1
+        fi
     done
 
     # ── Q.4 microbit (Cortex-M0) acceptor BOOT — the slim buffer-pool profile.

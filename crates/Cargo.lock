@@ -2942,7 +2942,6 @@ name = "wz-mcu-clock"
 version = "0.1.0"
 dependencies = [
  "critical-section",
- "portable-atomic",
 ]
 
 [[package]]

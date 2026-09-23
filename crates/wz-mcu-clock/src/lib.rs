@@ -67,21 +67,24 @@
 //! monotonic floor — doing exactly its job — clamps and STAYS clamped
 //! forever, freezing the clock. A `u64` reload counter pushes the
 //! overflow horizon past 5e8 years, so the floor never has to defend
-//! against a wrapped counter. The widening costs a critical-section
-//! `AtomicU64` (no native 64-bit atomic on ARMv7-M) on the M-class
-//! sub-lanes; that footprint cost is the honest price of a clock that
-//! survives a real multi-week deploy.
+//! against a wrapped counter.
+//!
+//! ## Interrupt-safe storage (R2808, open-debt item 815)
+//!
+//! Both values use explicit critical sections. On Cortex-M3/M4/M7,
+//! `portable_atomic::AtomicU64` uses a shared hashed spinlock table even
+//! with its `critical-section` feature enabled: these cores have native
+//! pointer CAS, but no native 64-bit atomics. SysTick can interrupt a
+//! thread holding the same lock for an UNRELATED atomic, then wait forever
+//! for the thread it interrupted. This was captured during the acceptor's
+//! OpenAck construction. A critical-section-protected cell has no such
+//! lock: the deploy's single-core implementation masks interrupts while
+//! the cell is accessed. The host tests supply the std implementation.
 
 #![cfg_attr(not(test), no_std)]
 
-// portable-atomic so `AtomicU64` compiles on ARMv6-M (Cortex-M0/M0+),
-// which has no native 64-bit (nor any) atomic CAS: the `fallback` +
-// `critical-section` features select the critical-section-single-core
-// impl there and native LDREX/STREX on ARMv7-M+. On ARMv7-M (M3/M4/M7)
-// `AtomicU64` itself still routes through critical-section (the 64-bit
-// atomic is not in the base ISA), matching the existing `last_us`
-// AtomicU64 the R311y15 floor already paid for.
-use portable_atomic::{AtomicU64, Ordering};
+use core::cell::Cell;
+use critical_section::Mutex;
 
 // SysTick MMIO registers (System Control Space; identical offsets on
 // every M-class core, ARMv6-M base spec onward).
@@ -111,12 +114,12 @@ pub struct SystickClock<const CYCLES_PER_US: u64> {
     /// Reload (wraparound) counter — advanced once per `SYST_PERIOD`
     /// cycles (1 ms) by the `SysTick` exception via [`on_tick`](Self::on_tick).
     /// `u64` so it does not overflow at 49.7 days (see crate docs).
-    wraps: AtomicU64,
+    wraps: Mutex<Cell<u64>>,
     /// Monotonic floor: the maximum value any prior [`now_us`](Self::now_us)
     /// call returned. `now_us` clamps its raw reading up to this so a
     /// transient backward step (delayed SysTick ISR) can never make the
     /// clock go non-monotonic.
-    last_us: AtomicU64,
+    last_us: Mutex<Cell<u64>>,
 }
 
 impl<const CYCLES_PER_US: u64> SystickClock<CYCLES_PER_US> {
@@ -132,8 +135,8 @@ impl<const CYCLES_PER_US: u64> SystickClock<CYCLES_PER_US> {
     /// Construct a zeroed clock. `const` so it can back a `static`.
     pub const fn new() -> Self {
         Self {
-            wraps: AtomicU64::new(0),
-            last_us: AtomicU64::new(0),
+            wraps: Mutex::new(Cell::new(0)),
+            last_us: Mutex::new(Cell::new(0)),
         }
     }
 
@@ -156,11 +159,14 @@ impl<const CYCLES_PER_US: u64> SystickClock<CYCLES_PER_US> {
 
     /// Advance the reload counter by one. The deploy's
     /// `#[exception] fn SysTick()` handler calls exactly this and nothing
-    /// else, so the ISR stays short (no allocation, no locks beyond the
-    /// single `AtomicU64` increment).
+    /// else, so the ISR stays short (one interrupt-masked cell update,
+    /// no allocation or spinlock).
     #[inline]
     pub fn on_tick(&self) {
-        self.wraps.fetch_add(1, Ordering::Release);
+        critical_section::with(|cs| {
+            let wraps = self.wraps.borrow(cs);
+            wraps.set(wraps.get() + 1);
+        });
     }
 
     /// Current monotonic time in microseconds since boot.
@@ -172,20 +178,20 @@ impl<const CYCLES_PER_US: u64> SystickClock<CYCLES_PER_US> {
     ///    decrements in parallel, so the two can disagree if the ISR
     ///    fires mid-read. The double-snap (`wraps` before and after the
     ///    `CVR` read) retries until `wraps` is stable across the read,
-    ///    the standard ISR-vs-thread lock-free pattern.
+    ///    a retry-until-stable snapshot.
     /// 2. **Monotonic floor** — clamp the raw reading up to the maximum
     ///    previously returned (see crate docs for why a delayed ISR makes
     ///    the raw reading step backward, and why the floor is provably
     ///    safe).
     pub fn now_us(&self) -> u64 {
         let raw = loop {
-            let w1 = self.wraps.load(Ordering::Acquire);
+            let w1 = critical_section::with(|cs| self.wraps.borrow(cs).get());
             // SAFETY: SYST_CVR is a read-only MMIO current-value register
             // in the System Control Space; a volatile read has no side
             // effects beyond clearing COUNTFLAG (which this clock does
             // not consult).
             let cvr = unsafe { SYST_CVR.read_volatile() } & Self::SYST_RELOAD;
-            let w2 = self.wraps.load(Ordering::Acquire);
+            let w2 = critical_section::with(|cs| self.wraps.borrow(cs).get());
             if w1 == w2 {
                 let total_cycles = w1 * Self::SYST_PERIOD + (Self::SYST_RELOAD - cvr) as u64;
                 break total_cycles / CYCLES_PER_US;
@@ -198,27 +204,16 @@ impl<const CYCLES_PER_US: u64> SystickClock<CYCLES_PER_US> {
     /// publish the new maximum. Split out from [`now_us`](Self::now_us)
     /// so it is unit-testable on the host without touching MMIO.
     ///
-    /// `last_us` is only ever written here (thread mode, never the ISR)
-    /// on a single core, so the `compare_exchange` loop only spins under
-    /// genuine re-entrancy of `now_us` itself; a relaxed ordering
-    /// suffices because the value carries no other state.
+    /// Reading and publishing the floor share one critical section, so
+    /// re-entrant callers cannot replace it with an older value.
     #[inline]
     fn apply_floor(&self, raw: u64) -> u64 {
-        let mut last = self.last_us.load(Ordering::Relaxed);
-        loop {
-            if raw <= last {
-                return last;
-            }
-            match self.last_us.compare_exchange_weak(
-                last,
-                raw,
-                Ordering::Relaxed,
-                Ordering::Relaxed,
-            ) {
-                Ok(_) => return raw,
-                Err(observed) => last = observed,
-            }
-        }
+        critical_section::with(|cs| {
+            let floor = self.last_us.borrow(cs);
+            let now = raw.max(floor.get());
+            floor.set(now);
+            now
+        })
     }
 }
 
@@ -240,6 +235,18 @@ mod tests {
         // 16 MHz (microbit / nrf51) -> 16000 cycles, RELOAD = 15999.
         assert_eq!(SystickClock::<16>::SYST_RELOAD, 15_999);
         assert_eq!(SystickClock::<16>::SYST_PERIOD, 16_000);
+    }
+
+    #[test]
+    fn tick_counter_keeps_progressing_past_the_u32_boundary() {
+        let clk = SystickClock::<25>::new();
+        critical_section::with(|cs| clk.wraps.borrow(cs).set(u32::MAX as u64));
+        clk.on_tick();
+        clk.on_tick();
+        assert_eq!(
+            critical_section::with(|cs| clk.wraps.borrow(cs).get()),
+            u32::MAX as u64 + 2,
+        );
     }
 
     #[test]

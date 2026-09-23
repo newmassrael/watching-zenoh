@@ -23,7 +23,7 @@
 //! time comes from SysTick: `TICKINT` fires the `SysTick` exception every 1 ms
 //! (RELOAD = CYCLES_PER_US * 1000 - 1: 24999 at the mps2 25 MHz, 15999 at the
 //! microbit 16 MHz), the handler advances a reload counter, and `now_us` snaps
-//! it either side of the CVR read (the standard ISR-vs-thread lock-free
+//! it either side of the CVR read (the ISR-vs-thread stable-snapshot
 //! pattern) then applies a monotonic floor. The clock algorithm lives once in
 //! `wz-mcu-clock` (R311y21); this bin only wires the `static`, the
 //! `#[exception]` handler, the `sys_now()` symbol, and the `ClockSource` impl.

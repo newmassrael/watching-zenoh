@@ -112,15 +112,9 @@ panic-semihosting = { version = "0.6", features = ["exit"] }
 # BSS region the binary initialises in main).
 embedded-alloc = "0.6"
 
-# R311bm-m0 — portable-atomic polyfill, kept for atomic-backend feature
-# unification across wz-runtime-coop + wz-mcu-clock on Cortex-M0+
-# (thumbv6m-none-eabi) where native LDREX/STREX are absent (R311y21 moved
-# the SystickClock itself into wz-mcu-clock, whose AtomicU64 reload
-# counter + monotonic floor route through this same `fallback` +
-# `critical-section` feature set). Mirrors the R311bb wz-runtime-coop
-# adoption pattern: portable-atomic uses the cortex-m crate's
-# `critical-section-single-core` impl on no-CAS targets and native
-# intrinsics on M3/M4/M7.
+# Portable atomics for the cooperative runtime on Cortex-M0 and the session
+# stack. The SysTick clock uses explicit critical-section cells (R2808):
+# 64-bit fallback atomics on M3/M4/M7 may share a spinlock with thread code.
 portable-atomic = { version = "1", default-features = false, features = ["fallback", "critical-section"] }
 
 # R311y21 — the Cortex-M SysTick monotonic clock SSOT. SystickClock<25>

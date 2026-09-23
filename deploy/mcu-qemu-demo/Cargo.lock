@@ -553,7 +553,7 @@ dependencies = [
 name = "wz-mcu-clock"
 version = "0.1.0"
 dependencies = [
- "portable-atomic",
+ "critical-section",
 ]
 
 [[package]]

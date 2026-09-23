@@ -51,11 +51,11 @@
 //!
 //! Reload value: 1 ms at 25 MHz (RELOAD = 24999 cycles per tick).
 //! Picked so the demo's 1 ms sleep budget surfaces one ISR per
-//! sleep iteration; the `wraps` counter (an AtomicU64 since R311y21,
+//! sleep iteration; the `wraps` counter (64-bit since R311y21,
 //! widened from u32 to avoid the 49.7-day overflow-freeze) represents milliseconds
 //! since boot, and `now_us` snaps `wraps` either side of the CVR
 //! read to detect ISR firing during the sample (re-loops on
-//! mismatch — the standard ISR-vs-thread lock-free read pattern
+//! mismatch — the ISR-vs-thread stable-snapshot read pattern
 //! for an interrupt-incremented counter + a hardware counter
 //! that decrements in parallel).
 //!

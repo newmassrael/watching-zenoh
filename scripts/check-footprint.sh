@@ -128,10 +128,16 @@ declare -A BASELINE_TEXT=(
     # (-8 / -4 / -36 / -16 at e03eb9e7), which is exactly why only the delta
     # transfers. bss did not move (+0 on every target). Was: 19780 / 25296 /
     # 25360 / 26148 (R311y267).
-    ["thumbv6m-none-eabi"]=20148
-    ["thumbv7m-none-eabi"]=25772
-    ["thumbv7em-none-eabihf"]=25828
-    ["thumbv8m.main-none-eabi"]=26624
+    # R2808 — explicit critical-section clock cells remove the interrupt
+    # deadlock (item 815). Same-toolchain before/after text deltas are
+    # -84 / -896 / -904 / -816 B. Apply those deltas to the hosted baseline;
+    # the local gcc 13.2.1 absolute remains 8 / 4 / 36 / 16 B below it.
+    # On M3/M4/M33 the now-unused atomic fallback support removes 2156 B
+    # of bss. The +/-256 B ROM tolerance is unchanged.
+    ["thumbv6m-none-eabi"]=20064
+    ["thumbv7m-none-eabi"]=24876
+    ["thumbv7em-none-eabihf"]=24924
+    ["thumbv8m.main-none-eabi"]=25808
 )
 # shellcheck disable=SC2034  # resolved through the `declare -n _bt/_bd/_bb`
                             # namerefs in the `case "$artifact"` dispatch below; shellcheck
@@ -161,9 +167,9 @@ declare -A BASELINE_BSS=(
     # R311y21 — thumbv6m +4 (12060 -> 12064): the reload counter widened to
     # AtomicU64 in the wz-mcu-clock SSOT (4 extra static bytes). mps2 flat.
     ["thumbv6m-none-eabi"]=12064
-    ["thumbv7m-none-eabi"]=272268
-    ["thumbv7em-none-eabihf"]=272268
-    ["thumbv8m.main-none-eabi"]=272268
+    ["thumbv7m-none-eabi"]=270112
+    ["thumbv7em-none-eabihf"]=270112
+    ["thumbv8m.main-none-eabi"]=270112
 )
 
 # ─── multicast-e2e baseline ─────────────────────────────────────────
@@ -699,8 +705,11 @@ declare -A BASELINE_MC_TEXT=(
     # spread is +12 / +36 hosted-over-local: the same magnitude the Round 2047
     # note records, and still not a constant to subtract.
     # Old: 55620/55604 (Round 2047).
-    ["thumbv7m-none-eabi"]=56528
-    ["thumbv7em-none-eabihf"]=56620
+    # R2808 — IRQ-safe clock cells: same-toolchain text deltas -880 / -888 B,
+    # transferred to the hosted baseline (local gcc sits +36 / +8 B).
+    # The unused fallback support also removes 2156 B of bss on both targets.
+    ["thumbv7m-none-eabi"]=55648
+    ["thumbv7em-none-eabihf"]=55732
 )
 # shellcheck disable=SC2034  # resolved through the `declare -n _bt/_bd/_bb`
                             # namerefs in the `case "$artifact"` dispatch below; shellcheck
@@ -717,8 +726,8 @@ declare -A BASELINE_MC_BSS=(
     # R311y21 — rebased 270100 -> 272268 (accumulated lwIP/pool drift, matching
     # the §6.7 mps2 bss the R311y20 demo rebase recorded; +4 of it is the
     # wz-mcu-clock AtomicU64 reload counter). INFO axis; co-maintenance rule.
-    ["thumbv7m-none-eabi"]=272268
-    ["thumbv7em-none-eabihf"]=272268
+    ["thumbv7m-none-eabi"]=270112
+    ["thumbv7em-none-eabihf"]=270112
 )
 
 # Per-axis tolerance in bytes. Matches the north-star atomic-feature
