@@ -446,13 +446,15 @@ def check() -> int:
         _budget_report(
             "exempt-route fixtures that carry the check anyway",
             len(t.exempt_route_checked), EXEMPT_ROUTE_CHECKED,
-            "  Another probe-route fixture took R2200's side of the split. Raise this\n"
-            "  number and say why the probe misleads there -- or, if the split is being\n"
-            "  SETTLED, settle it for all 24 and retire this budget with the reason.",
-            "  A probe-route fixture dropped the check, taking R311y839's side. Lower\n"
-            "  this number and say why the probe cannot mislead there. Silently is the\n"
-            "  one way this must not happen: 8 fixtures already read the same route the\n"
-            "  other way.",
+            "  Another exempt-route fixture took R2200's side of the split: it checks a\n"
+            "  binary its own route says cannot silently mislead it. Raise this number\n"
+            "  and say why staleness reaches it there -- or, if the split is being\n"
+            "  SETTLED, settle it for the whole class and retire this budget with the\n"
+            "  reason. Half of a class each way is not an answer.",
+            "  An exempt-route fixture dropped the check, taking R311y839's side. Lower\n"
+            "  this number and say why staleness cannot reach it there. Silently is the\n"
+            "  one way this must not happen: the same route is read the other way by\n"
+            "  the fixtures still in this budget.",
         )
         for label in sorted(t.exempt_route_checked):
             print(f"    - {label}", file=sys.stderr)
