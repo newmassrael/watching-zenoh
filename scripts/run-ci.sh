@@ -16845,6 +16845,16 @@ layer_z_zenohd_interop() {
             cargo test -p wz-integration-tests \
             --test reply_qos_zenohd_differential \
             -- --ignored --quiet --test-threads=1 || return 1
+        # The `reply ⊆ query` contract read by a stock zenoh `z_get`: a wz
+        # queryable answering under an in-query and an out-of-query key. A default
+        # get must see only the first AND leave no zenoh "didn't match query" drop
+        # behind (wz's responder refused, not zenoh's requester); a `?_anyke` get
+        # must see both. Same core-example oracle as the leg above.
+        _runci_guarded_test Z 2 env WZ_ZENOHD_BIN="$zenohd" \
+            WZ_ZENOH_CORE_EXAMPLES_DIR="$reply_qos_examples_dir" \
+            cargo test -p wz-integration-tests \
+            --test reply_keyexpr_contract_zenoh_zget \
+            -- --ignored --quiet --test-threads=1 || return 1
     fi
     # R311y407 — wz MESH QUIC acceptor cross-impl (transport-link-quic x mesh accept
     # loop x zenohd->wz): a real zenohd DIALS a wz `--peer quic/...` / `--router-hat

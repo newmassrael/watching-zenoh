@@ -1922,9 +1922,25 @@ fn install_session_handles(
                 // fired and the Reply did not decode" — the two failures a single
                 // missing witness line otherwise conflates.
                 let arm = match &reply_mode {
-                    QueryableReply::Ok(text) => {
+                    QueryableReply::Ok { text, keyexprs } if keyexprs.is_empty() => {
                         responder.reply(text.as_bytes());
                         format!("reply='{text}'")
+                    }
+                    // `--reply-keyexpr`: one reply per named key, each verdict
+                    // logged on its own line so a fixture reads WHICH key the
+                    // responder refused, not merely how many replies arrived.
+                    QueryableReply::Ok { text, keyexprs } => {
+                        for key in keyexprs {
+                            match responder.reply_keyed(key, text.as_bytes()) {
+                                Ok(()) => log::info!(
+                                    "wz-ap-demo: QUERYABLE REPLY ADMITTED keyexpr='{key}'"
+                                ),
+                                Err(e) => log::info!(
+                                    "wz-ap-demo: QUERYABLE REPLY REFUSED keyexpr='{key}': {e}"
+                                ),
+                            }
+                        }
+                        format!("reply='{text}' under {} key(s)", keyexprs.len())
                     }
                     QueryableReply::Err(text) => {
                         responder.reply_err(

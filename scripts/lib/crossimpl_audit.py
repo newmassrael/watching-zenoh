@@ -724,7 +724,11 @@ HOST_GATED_CI_TARGETS: dict[str, str] = {
 # across a wz gossip peer and a stock zenohd peer, one test per direction, both
 # `routing-peer`: 2 tests x 1 atom = 2. Measured by `audit-crossimpl-proof.sh`
 # before the commit (`measured 934, declared 932`).
-FOREIGN_ADJUDICATOR_LINKS = 934
+# 934 -> 936: `reply_keyexpr_contract_zenoh_zget.rs`, a stock zenoh `z_get`
+# reading wz's responder-side `reply ⊆ query` refusal (default get) and its
+# `_anyke` opt-out: 2 tests x 1 atom (`query-get`) = 2. Measured by
+# `audit-crossimpl-proof.sh` before the commit (`measured 936, declared 934`).
+FOREIGN_ADJUDICATOR_LINKS = 936
 
 # ── Execution disclosure ────────────────────────────────────────────────────────
 #

@@ -2043,6 +2043,20 @@ fn main() -> ExitCode {
         print_usage();
         return ExitCode::from(2);
     }
+    // `--reply-keyexpr` names the key an OK reply is staged under, so it has no
+    // meaning without `--reply`: an ERR reply carries no keyexpr, and with no
+    // queryable there is no reply at all. Rejected rather than dropped, for the
+    // reason the pair-checks above give.
+    let reply_keyexprs = parse_pairs(rest, "--reply-keyexpr");
+    if !reply_keyexprs.is_empty() && reply_opt.is_none() {
+        eprintln!(
+            "wz-ap-demo: --reply-keyexpr decorates --reply (an ERR reply carries no \
+             keyexpr); pass --queryable <keyexpr> --reply <text>",
+        );
+        eprintln!();
+        print_usage();
+        return ExitCode::from(2);
+    }
     if (on_query_reply_log || on_query_final_log) && query_opt.is_none() {
         eprintln!(
             "wz-ap-demo: --on-query-reply-log / --on-query-final-log require --query \
@@ -2158,7 +2172,10 @@ fn main() -> ExitCode {
     let queryable_spec: Option<QueryableSpec> = match (queryable_opt, reply_opt, reply_err_opt) {
         (Some(keyexpr), Some(text), None) => Some(QueryableSpec {
             keyexpr,
-            reply: QueryableReply::Ok(text),
+            reply: QueryableReply::Ok {
+                text,
+                keyexprs: reply_keyexprs,
+            },
             complete: queryable_complete,
         }),
         (Some(keyexpr), None, Some(text)) => Some(QueryableSpec {
@@ -2353,7 +2370,12 @@ fn main() -> ExitCode {
     {
         log::info!("queryable = {keyexpr} (complete = {complete})");
         match reply {
-            QueryableReply::Ok(text) => log::info!("reply     = {text}"),
+            QueryableReply::Ok { text, keyexprs } if keyexprs.is_empty() => {
+                log::info!("reply     = {text}")
+            }
+            QueryableReply::Ok { text, keyexprs } => {
+                log::info!("reply     = {text} under {keyexprs:?}")
+            }
             QueryableReply::Err(text) => {
                 log::info!("reply-err = {text} (ERR-form Reply, not a Put-form one)")
             }
@@ -2420,6 +2442,13 @@ fn main() -> ExitCode {
     // outbound wire. The remaining receive-side keyexprs (--query,
     // --liveliness-subscribe) are still NOT gated: their patterns match INBOUND
     // peer keyexprs, never emitted by wz.
+    //
+    // `--reply-keyexpr` joins as a list: each one is the wire keyexpr of a
+    // Response wz emits, so it is outbound exactly as the queryable's own is.
+    let reply_keyexprs_outbound: &[String] = match queryable_spec.as_ref().map(|q| &q.reply) {
+        Some(QueryableReply::Ok { keyexprs, .. }) => keyexprs,
+        _ => &[],
+    };
     for (flag, keyexpr_opt) in [
         ("--key", key_opt.as_deref()),
         (
@@ -2435,7 +2464,13 @@ fn main() -> ExitCode {
         // The advanced publisher emits Puts on this literal AND declares its cache
         // queryable + `@adv` liveliness token under it, so it is outbound twice over.
         ("--advanced-publish", advanced_publish_opt.as_deref()),
-    ] {
+    ]
+    .into_iter()
+    .chain(
+        reply_keyexprs_outbound
+            .iter()
+            .map(|k| ("--reply-keyexpr", Some(k.as_str()))),
+    ) {
         if let Some(keyexpr) = keyexpr_opt {
             if let Err(e) = check_outbound_keyexpr_pico_safe(keyexpr) {
                 eprintln!(

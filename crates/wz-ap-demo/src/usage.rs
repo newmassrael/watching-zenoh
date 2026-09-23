@@ -63,6 +63,7 @@ pub(crate) fn print_usage() {
     eprintln!("               [--publish <keyexpr> --value <text>]");
     eprintln!("               [--delete <keyexpr>]");
     eprintln!("               [--queryable <keyexpr> --reply <text> | --reply-err <text>]");
+    eprintln!("                                  [--reply-keyexpr <keyexpr>]...");
     eprintln!("               [--query <keyexpr> [--query-params <params>]");
     eprintln!("                                  [--query-attachment <k>=<v>[,<k>=<v>...]]");
     eprintln!("                                  [--query-after-ms <ms>]]");
@@ -262,6 +263,11 @@ pub(crate) fn print_usage() {
     eprintln!("                             filters on). Default false, as zenoh and pico do");
     eprintln!("    --reply <text>           OK Put-form reply payload for the queryable");
     eprintln!("                             (--queryable requires this or --reply-err)");
+    eprintln!("    --reply-keyexpr <ke>     repeatable; reply once per <ke>, under <ke>,");
+    eprintln!("                             instead of under the query's keyexpr. A key");
+    eprintln!("                             outside the query is refused unless the query");
+    eprintln!("                             carries _anyke; each verdict is logged. Needs");
+    eprintln!("                             --reply");
     eprintln!("    --reply-err <text>       answer with an ERR-form Reply carrying <text>");
     eprintln!("                             instead of --reply's OK one; the two are");
     eprintln!("                             mutually exclusive. Needs query-reply-err:");

@@ -8410,8 +8410,23 @@ pub(crate) struct QueryableSpec {
 /// (`feedback_unrepresentable_over_test`).
 pub(crate) enum QueryableReply {
     /// `--reply <text>` — a Put-form Reply carrying `text` as the payload. The
-    /// R121j-5c-e2e shape, unchanged.
-    Ok(String),
+    /// R121j-5c-e2e shape, unchanged when `keyexprs` is empty: one reply under
+    /// the query's own keyexpr.
+    Ok {
+        text: String,
+        /// `--reply-keyexpr <keyexpr>`, repeatable: answer once per key, under
+        /// that key, instead of once under the query's.
+        ///
+        /// It exists to put the `reply ⊆ query` contract on a wire a FOREIGN
+        /// querier reads. A key outside the query is refused by wz's responder
+        /// (`ReplyOut::reply_keyed` returns the refusal) unless the query
+        /// carried `_anyke`, and the demo logs each key's verdict — which is
+        /// what lets a zenoh `z_get` fixture tell "wz refused it" from "zenoh
+        /// dropped it", since the latter leaves zenoh's own `didn't match
+        /// query` warning behind. It lives on this arm alone because an
+        /// ERR-form reply carries no keyexpr at all.
+        keyexprs: Vec<String>,
+    },
     /// `--reply-err <text>` — an ERR-form Reply carrying `text` as the error
     /// payload, via [`wz_session_core::query_sink::ReplyOut::reply_err`].
     ///
