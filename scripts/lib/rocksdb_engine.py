@@ -111,6 +111,17 @@ def valid(out: Path, expected: dict) -> bool:
         return False
 
 
+def check_member(member: tarfile.TarInfo) -> None:
+    path = Path(member.name)
+    if path.is_absolute() or not (member.isfile() or member.isdir()):
+        raise ValueError("unexpected archive member")
+    # Archive names are relative to their extraction root. Preserve '..' until
+    # the component check; resolving it first would hide a traversal attempt.
+    relative = path.relative_to(".")
+    if ".." in relative.parts:
+        raise ValueError("unexpected archive member")
+
+
 def build(out: Path, expected: dict, jobs: int) -> None:
     # Build in a sibling staging directory: an interrupted compile cannot leave
     # a cache entry that appears complete. Source is authenticated before unpack.
@@ -126,9 +137,7 @@ def build(out: Path, expected: dict, jobs: int) -> None:
             raise ValueError("librocksdb-sys archive does not match Cargo.lock")
         with tarfile.open(archive) as tar:
             for member in tar.getmembers():
-                if (Path(member.name).is_absolute() or ".." in Path(member.name).parts
-                        or not (member.isfile() or member.isdir())):
-                    raise ValueError("unexpected archive member")
+                check_member(member)
             tar.extractall(work)
         src = work / f"librocksdb-sys-{version}" / "rocksdb"
         obj, stage = work / "build", work / "install"
