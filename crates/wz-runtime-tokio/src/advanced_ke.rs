@@ -130,9 +130,13 @@ pub(crate) fn history_get_ke(base: &str) -> String {
 /// R2816 — `AdvancedSubscriber::detect_publishers`, upstream's
 /// `zenoh-ext/src/advanced_subscriber.rs` @ `.declare_subscriber(self.subscriber.key_expr() / KE_ADV_PREFIX / KE_PUB / KE_STARSTAR)`.
 ///
-/// R2816 — renamed from `publisher_detection_ke` and UNGATED. The old name was one
-/// consumer's, and the recovery gate was that consumer's; the third consumer
-/// exists in every advanced-subscriber build, as upstream's does.
+/// R2816 — renamed from `heartbeat_sub_ke`, and gated on the SUBSCRIBER rather
+/// than on recovery. The old name was one consumer's, and the recovery gate was
+/// that consumer's; the third consumer exists in every advanced-subscriber
+/// build, as upstream's does. Not ungated: every consumer is subscriber-side,
+/// and a publisher-only build compiles this module — C1aq caught the ungated
+/// first draft as dead code under `-D warnings`.
+#[cfg(feature = "ext-pubsub-advanced-subscriber")]
 pub(crate) fn publisher_detection_ke(base: &str) -> String {
     format!("{base}/{KE_ADV_PREFIX}/{KE_ADV_PUB}/**")
 }
