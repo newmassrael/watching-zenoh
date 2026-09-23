@@ -7338,7 +7338,12 @@ layer_c1ar_cargo_test_ext_pubsub_advanced_sub() {
     # ungated, so every advanced_subscriber lane moves by one.
     # R2817 — 9 -> 10: a_background_advanced_subscriber_keeps_ordering_after_
     # its_handle_is_gone, ungated. Its history-gated sibling moves C1av only.
-    _runci_guarded_test "C1ar advanced_subscriber" 10 \
+    # R2819 — 10 -> 16. The four subscriber-detection witnesses lose their
+    # recovery gate with the options type (so the R311y826 note above, "counted
+    # by C1at", now holds for C1at AND here), plus two ungated witnesses:
+    # declare_with_options_honours_the_allowed_origin and
+    # a_buffered_advanced_subscriber_waits_and_keeps_its_ordering.
+    _runci_guarded_test "C1ar advanced_subscriber" 16 \
         cargo test -p wz-runtime-tokio --features ext-pubsub-advanced-subscriber,ext-pubsub-advanced-publisher,pubsub-allow-loop \
         --lib advanced_subscriber --quiet || return 1
     (cd crates \
@@ -7442,7 +7447,9 @@ layer_c1at_cargo_test_ext_pubsub_advanced_recovery() {
     # R2814 — 23 -> 25, the two ungated miss-listener witnesses (see C1ar).
     # R2816 — 25 -> 26, the ungated detect_publishers witness (see C1ar).
     # R2817 — 26 -> 27, the ungated background witness (see C1ar).
-    _runci_guarded_test "C1at advanced_subscriber" 27 \
+    # R2819 — 27 -> 29, the two ungated witnesses (see C1ar); the detection
+    # witnesses were already counted here.
+    _runci_guarded_test "C1at advanced_subscriber" 29 \
         cargo test -p wz-runtime-tokio --features ext-pubsub-advanced-recovery,ext-pubsub-advanced-publisher,pubsub-allow-loop \
         --lib advanced_subscriber --quiet || return 1
     # R311y836 — the SAME 22 cases again, with `query-consolidation` composed on
@@ -7468,7 +7475,8 @@ layer_c1at_cargo_test_ext_pubsub_advanced_recovery() {
     # R2814 — 23 -> 25, the two miss-listener witnesses, as above.
     # R2816 — 25 -> 26, the detect_publishers witness, as above.
     # R2817 — 26 -> 27, the background witness, as above.
-    _runci_guarded_test "C1at advanced_subscriber (query-consolidation)" 27 \
+    # R2819 — 27 -> 29, the two ungated witnesses, as above.
+    _runci_guarded_test "C1at advanced_subscriber (query-consolidation)" 29 \
         cargo test -p wz-runtime-tokio --features ext-pubsub-advanced-recovery,ext-pubsub-advanced-publisher,pubsub-allow-loop,query-consolidation \
         --lib advanced_subscriber --quiet || return 1
     (cd crates \
@@ -7609,7 +7617,10 @@ layer_c1av_cargo_test_ext_pubsub_advanced_history() {
     # a_fully_configured_background_subscriber_holds_no_session_and_retracts_
     # nothing, history-gated because it declares the late-publisher
     # subscription. Measured: this command printed 52.
-    _runci_guarded_test "C1av advanced_subscriber" 52 \
+    # R2819 — 52 -> 55: the two ungated witnesses (see C1ar) and
+    # a_buffered_advanced_subscriber_queues_its_recovered_history, gated on
+    # history and the cache, both of which this command compiles.
+    _runci_guarded_test "C1av advanced_subscriber" 55 \
         cargo test -p wz-runtime-tokio --features ext-pubsub-advanced-history,ext-pubsub-advanced-publisher,pubsub-allow-loop \
         --lib advanced_subscriber --quiet || return 1
     (cd crates \

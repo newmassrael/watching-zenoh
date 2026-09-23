@@ -210,10 +210,6 @@ use wz_runtime_core::TimeSource;
 // `Arc<SessionLinkActions<R, T>>`, which now bounds `R: SessionRuntime`
 // (the runtime-tier owner of `R::LinkSink`). `SessionRuntime: Runtime`,
 // so the `<R as Runtime>::Mutex<...>` field types still resolve.
-/// R2708 (item 785) — in scope so a generic `Session<R, ..>` can call the two
-/// synchronous things a profile's per-iteration work offers.
-#[cfg(feature = "transport-unicast")]
-use buffered::BufferedWork as _;
 use wz_session_core::link::SessionRuntime;
 
 use crate::runtime_impl::TokioRuntime;
@@ -431,6 +427,14 @@ mod buffered;
 /// own business.
 #[cfg(feature = "transport-unicast")]
 pub use buffered::{BufferedDrainStage, BufferedRegistry};
+// R2708 (item 785) — in scope so a generic `Session<R, ..>` can call the two
+// synchronous things a profile's per-iteration work offers.
+// R2819 — and crate-visible, because it is also the bound
+// `Session::buffered_delivery` carries, which the advanced subscriber's
+// buffered forms must carry too. That made the anonymous `as _` import this
+// replaces redundant.
+#[cfg(feature = "transport-unicast")]
+pub(crate) use buffered::BufferedWork;
 #[cfg(feature = "transport-unicast")]
 mod decl_listener;
 #[cfg(feature = "transport-unicast")]
@@ -4763,6 +4767,39 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
         // the loop's, which knows the concrete type.
         <R as SessionRuntime>::IterationWork: buffered::BufferedWork,
     {
+        let (mut deliver, rx, drain_stage) = self.buffered_delivery::<I>(capacity);
+        let subscriber =
+            self.declare_subscriber(keyexpr, options, move |sample| deliver(project(sample)))?;
+        Ok((subscriber, rx, drain_stage))
+    }
+
+    /// R2819 — the staged delivery [`Self::declare_subscriber_buffered`] is
+    /// built on, for a subscriber whose samples do not all come out of ONE
+    /// plain subscription callback. The advanced subscriber is that case: it
+    /// delivers from its live callback, from recovery and history replies and
+    /// from a buffer flush, all through one `on_sample`, so the stage has to be
+    /// a value that `on_sample` can be rather than a wrapper around a callback.
+    ///
+    /// Returns the deliverer, the consumer's receiver and the drain handle,
+    /// the last two exactly as `declare_subscriber_buffered` returns them. The
+    /// deliverer owns the drain, so the registry's weak handle dies with
+    /// whatever owns the deliverer.
+    ///
+    /// # Panics
+    ///
+    /// If `capacity` is 0, for the reason `declare_subscriber_buffered` gives.
+    pub(crate) fn buffered_delivery<I>(
+        &self,
+        capacity: usize,
+    ) -> (
+        impl FnMut(I) + Send + 'static,
+        tokio::sync::mpsc::Receiver<I>,
+        buffered::BufferedDrainStage,
+    )
+    where
+        I: Send + 'static,
+        <R as SessionRuntime>::IterationWork: buffered::BufferedWork,
+    {
         let (stage, drain, rx) = buffered::buffered_pair::<I>(capacity);
         // R2708 (item 785) — REGISTERED ON THE KERNEL, not on this handle. The
         // drive loop holds `SessionLinkActions` and nothing else that means
@@ -4770,20 +4807,20 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
         // that the loop can find on its own. Registering on the handle is what
         // made delivery depend on the host wiring a stage.
         self.transport.core.iteration_work.register(&drain);
-        // The callback STAGES and returns; it never waits, because it is on the
-        // drive loop. `drain` is moved in so the subscription owns its drain and
-        // the registry's weak handle dies with the subscriber.
-        let subscriber = self.declare_subscriber(keyexpr, options, move |sample| {
+        // The deliverer STAGES and returns; it never waits, because it runs on
+        // the drive loop. `drain` is moved in so its owner owns the drain and
+        // the registry's weak handle dies with it.
+        let deliver = move |item: I| {
             let _keepalive = &drain;
-            buffered::stage_into(&stage, project(sample));
-        })?;
+            buffered::stage_into(&stage, item);
+        };
         // R2708 (item 785) — the third value is no longer an OBLIGATION, and
         // saying so is the point: this session's drains now hang off the kernel
         // and `drive_session_until_terminal*` awaits them every iteration, so a
         // host that wires nothing is correct. It stays as a HANDLE for the one
         // case that remains — an embedder driving through a loop of its own,
         // which wz's entries are not.
-        Ok((subscriber, rx, self.transport.core.iteration_work.stage()))
+        (deliver, rx, self.transport.core.iteration_work.stage())
     }
 
     /// R2703 — move every buffered subscription's staged samples into its

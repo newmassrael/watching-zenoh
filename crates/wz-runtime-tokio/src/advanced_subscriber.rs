@@ -109,7 +109,6 @@ use std::time::Duration;
 // R2621 — the retention surface's clock; scoped like the surface itself.
 #[cfg(feature = "ext-pubsub-advanced-recovery")]
 use std::time::Instant;
-#[cfg(feature = "ext-pubsub-advanced-recovery")]
 use wz_session_core::locality::Locality;
 #[cfg(feature = "ext-pubsub-advanced-recovery")]
 use wz_session_core::reply_sink::{ReplyKind, ReplyView};
@@ -120,7 +119,8 @@ use wz_session_core::sample_kind::SampleKind;
 #[cfg(feature = "ext-pubsub-advanced-recovery")]
 use wz_session_core::serde_codec::z_deserialize;
 #[cfg(feature = "ext-pubsub-advanced-recovery")]
-use wz_session_core::zid_hex::{zenoh_hex_to_zid, zid_to_zenoh_hex};
+use wz_session_core::zid_hex::zenoh_hex_to_zid;
+use wz_session_core::zid_hex::zid_to_zenoh_hex;
 
 #[cfg(feature = "ext-pubsub-advanced-recovery")]
 use crate::session::QueryOptions;
@@ -518,7 +518,8 @@ pub enum AdvancedSubscribeError {
     /// [`AdvancedSubscriberOptions::subscriber_detection`]). A REFUSAL, not a
     /// degradation: the caller asked to be detectable, and a subscriber that
     /// silently is not is the failure mode nobody can see from the outside.
-    #[cfg(feature = "ext-pubsub-advanced-recovery")]
+    ///
+    /// R2819 — in every build, with the detection option it answers for.
     DetectionToken(crate::session::LivelinessAliasError),
     /// R2550 — a [`HistoryConfig`] bound was set to ZERO, which upstream
     /// refuses at construction rather than honouring:
@@ -558,7 +559,6 @@ impl From<LivelinessSubscriberAliasError> for AdvancedSubscribeError {
     }
 }
 
-#[cfg(feature = "ext-pubsub-advanced-recovery")]
 impl From<crate::session::LivelinessAliasError> for AdvancedSubscribeError {
     fn from(e: crate::session::LivelinessAliasError) -> Self {
         AdvancedSubscribeError::DetectionToken(e)
@@ -727,7 +727,17 @@ impl RecoveryConfig<false> {
 ///
 /// R311y826 — no longer `Copy`: [`Self::subscriber_detection_metadata`] is a
 /// caller-supplied key expression and so owns a `String`. `Clone` stays.
-#[cfg(feature = "ext-pubsub-advanced-recovery")]
+///
+/// R2819 — IN EVERY ADVANCED-SUBSCRIBER BUILD, not behind
+/// `ext-pubsub-advanced-recovery`. Upstream's builder offers
+/// `zenoh-ext/src/advanced_subscriber.rs` @ `pub fn subscriber_detection(mut self) -> Self {`
+/// and @ `pub fn allowed_origin(mut self, origin: Locality) -> Self {` on every
+/// advanced subscriber, independent of @ `pub fn recovery(mut self, conf: RecoveryConfig) -> Self {`;
+/// here both were reachable only with recovery compiled in, because the whole
+/// options type was. Now the type and those two knobs are unconditional, and
+/// each remaining field carries the gate of the machinery that reads it:
+/// `recovery`, `get_locality` and `query_timeout` configure GETs, which only a
+/// recovery build issues; `history` configures the history GET.
 #[derive(Clone, Debug)]
 #[non_exhaustive]
 pub struct AdvancedSubscriberOptions {
@@ -736,6 +746,7 @@ pub struct AdvancedSubscriberOptions {
     /// buffer + the sample-driven `_sn`-range recovery GET (+ the periodic /
     /// heartbeat triggers the [`RecoveryConfig`] selects). Mirror of zenoh
     /// `.recovery()`.
+    #[cfg(feature = "ext-pubsub-advanced-recovery")]
     pub recovery: Option<RecoveryConfig>,
     /// Startup history query. `None` (default) = no history. `Some` issues a
     /// `<key_expr>/@adv/**` GET on declare so a LATE JOINER recovers the publishers'
@@ -777,6 +788,7 @@ pub struct AdvancedSubscriberOptions {
     /// `zenoh-ext/src/advanced_subscriber.rs` @ `pub(crate) query_target: QueryTarget,`
     /// and @ `query_target: QueryTarget::All,` — anchored, because a corrected
     /// number rots again at the next pin bump.
+    #[cfg(feature = "ext-pubsub-advanced-recovery")]
     pub get_locality: Locality,
     /// Timeout applied to BOTH the recovery + history GETs (zenoh's builder
     /// `query_timeout`, shared by history + retransmission; default 10s). A
@@ -785,6 +797,7 @@ pub struct AdvancedSubscriberOptions {
     /// deadline sweep ([`crate::reply::ReplyRegistry::sweep_timed_out`]) fire the
     /// synthetic `Final` so [`State::finish_recovery`] / [`State::finish_history`]
     /// run (R311y89, review C3). Converted by [`recovery_query_timeout_ms`].
+    #[cfg(feature = "ext-pubsub-advanced-recovery")]
     pub query_timeout: Duration,
     /// Make this subscriber DETECTABLE: declare a liveliness token on
     /// `<key_expr>/@adv/sub/<zid>/<eid>/[meta|_]` so a third party can see the
@@ -809,7 +822,8 @@ pub struct AdvancedSubscriberOptions {
 /// because wz's `Session` had no zid getter, so a detection token could be
 /// named with a zid other than its session's. The token is now named with the
 /// subscriber's own [`AdvancedSubscriber::id`], which reads [`Session::zid`].
-#[cfg(feature = "ext-pubsub-advanced-recovery")]
+///
+/// R2819 — in every advanced-subscriber build; see [`AdvancedSubscriberOptions`].
 #[derive(Clone, Debug, Default)]
 pub struct SubscriberDetection {
     /// A key expression appended to the detection token's key expression to
@@ -823,7 +837,6 @@ pub struct SubscriberDetection {
     pub metadata: Option<String>,
 }
 
-#[cfg(feature = "ext-pubsub-advanced-recovery")]
 impl SubscriberDetection {
     /// Detectable, with no metadata chunk.
     pub fn new() -> Self {
@@ -837,22 +850,23 @@ impl SubscriberDetection {
     }
 }
 
-#[cfg(feature = "ext-pubsub-advanced-recovery")]
 impl Default for AdvancedSubscriberOptions {
     fn default() -> Self {
         Self {
+            #[cfg(feature = "ext-pubsub-advanced-recovery")]
             recovery: None,
             #[cfg(feature = "ext-pubsub-advanced-history")]
             history: None,
             allowed_origin: Locality::Any,
+            #[cfg(feature = "ext-pubsub-advanced-recovery")]
             get_locality: Locality::Any,
+            #[cfg(feature = "ext-pubsub-advanced-recovery")]
             query_timeout: Duration::from_secs(10),
             subscriber_detection: None,
         }
     }
 }
 
-#[cfg(feature = "ext-pubsub-advanced-recovery")]
 impl AdvancedSubscriberOptions {
     /// Default options: no recovery, no history, `Any` sub origin + GET locality,
     /// 10s GET timeout.
@@ -871,6 +885,7 @@ impl AdvancedSubscriberOptions {
 
     /// Enable retransmission (gap recovery) with the given [`RecoveryConfig`]
     /// (zenoh `.recovery()`).
+    #[cfg(feature = "ext-pubsub-advanced-recovery")]
     pub fn with_recovery(mut self, recovery: RecoveryConfig) -> Self {
         self.recovery = Some(recovery);
         self
@@ -893,6 +908,7 @@ impl AdvancedSubscriberOptions {
 
     /// Pin the recovery + history GET destination locality (e.g. `SessionLocal` for
     /// a single-host loopback composition; `Any` is the zenoh-faithful default).
+    #[cfg(feature = "ext-pubsub-advanced-recovery")]
     pub fn with_get_locality(mut self, locality: Locality) -> Self {
         self.get_locality = locality;
         self
@@ -904,6 +920,7 @@ impl AdvancedSubscriberOptions {
     /// now resolves to the platform default, not never-expire); it pins that a
     /// recovery GET carries ITS configured timeout rather than silently inheriting
     /// the 10s default. See [`recovery_query_timeout_ms`].
+    #[cfg(feature = "ext-pubsub-advanced-recovery")]
     pub fn with_query_timeout(mut self, query_timeout: Duration) -> Self {
         self.query_timeout = query_timeout;
         self
@@ -3289,6 +3306,88 @@ impl<R: SessionRuntime, T: TimeSource> AdvancedSubscriber<R, T> {
         });
         (listener, rx)
     }
+
+    /// R2819 — [`Self::declare`] with the samples handed to a queue instead of
+    /// a callback: upstream's handler form, `zenoh-ext/src/advanced_subscriber.rs`
+    /// @ `pub fn with<Handler>(self, handler: Handler) -> AdvancedSubscriberBuilder<'a, 'b, 'c, Handler>`,
+    /// whose default resolves to a FIFO the caller receives from, through
+    /// @ `pub fn handler(&self) -> &Handler {`.
+    ///
+    /// BOUNDED, AND IT WAITS RATHER THAN DROPS. Upstream's FIFO blocks its
+    /// sender when full; this is the crate's same answer for a plain
+    /// subscription, [`Session::declare_subscriber_buffered`]: a delivery
+    /// stages and returns, and the drive loop awaits capacity at its drain. So
+    /// a slow reader slows this session instead of losing samples, and it is
+    /// safe that the advanced subscriber delivers under its state lock —
+    /// staging never waits. `capacity` sizes the memory a slow reader may pin,
+    /// as for the plain form.
+    ///
+    /// The receiver and drain handle are returned beside the subscriber, as
+    /// [`Self::detect_publishers_with_channel`] and the plain form return
+    /// theirs; upstream reaches its handler through the subscriber instead.
+    ///
+    /// # Panics
+    ///
+    /// If `capacity` is 0: a queue nothing can enter is a subscription the
+    /// loop would wait on forever.
+    #[allow(clippy::type_complexity)]
+    pub fn declare_buffered(
+        session: &Session<R, T, Unicast>,
+        keyexpr: impl Into<String>,
+        capacity: usize,
+    ) -> Result<
+        (
+            Self,
+            tokio::sync::mpsc::Receiver<Sample>,
+            crate::session::BufferedDrainStage,
+        ),
+        AdvancedSubscribeError,
+    >
+    where
+        T: TimeSource + 'static,
+        <R as SessionRuntime>::LinkSink: Send + Sync,
+        SessionLinkActions<R, T>: Send + Sync + 'static,
+        <R as SessionRuntime>::IterationWork: crate::session::BufferedWork,
+    {
+        let (deliver, rx, drain_stage) = session.buffered_delivery::<Sample>(capacity);
+        let subscriber = Self::declare(session, keyexpr, deliver)?;
+        Ok((subscriber, rx, drain_stage))
+    }
+
+    /// R2819 — [`Self::declare_with_options`] with the samples on a queue; see
+    /// [`Self::declare_buffered`]. Every delivery path the options arm — live,
+    /// recovered, history, and a flushed reorder buffer — reaches the queue,
+    /// because all of them deliver through the one `on_sample` this stages.
+    ///
+    /// # Panics
+    ///
+    /// If `capacity` is 0, as [`Self::declare_buffered`].
+    #[allow(clippy::type_complexity)]
+    pub fn declare_with_options_buffered(
+        session: &Session<R, T, Unicast>,
+        keyexpr: impl Into<String>,
+        options: AdvancedSubscriberOptions,
+        capacity: usize,
+    ) -> Result<
+        (
+            Self,
+            tokio::sync::mpsc::Receiver<Sample>,
+            crate::session::BufferedDrainStage,
+        ),
+        AdvancedSubscribeError,
+    >
+    where
+        R: 'static,
+        T: TimeSource + Send + Sync + 'static,
+        <R as SessionRuntime>::LinkSink: Send + Sync,
+        SessionLinkActions<R, T>: Send + Sync + 'static,
+        Session<R, T, Unicast>: Send + 'static,
+        <R as SessionRuntime>::IterationWork: crate::session::BufferedWork,
+    {
+        let (deliver, rx, drain_stage) = session.buffered_delivery::<Sample>(capacity);
+        let subscriber = Self::declare_with_options(session, keyexpr, options, deliver)?;
+        Ok((subscriber, rx, drain_stage))
+    }
 }
 
 #[cfg(not(feature = "ext-pubsub-advanced-recovery"))]
@@ -3308,6 +3407,55 @@ impl<R: SessionRuntime, T: TimeSource> AdvancedSubscriber<R, T> {
         SessionLinkActions<R, T>: Send + Sync + 'static,
         OnSample: FnMut(Sample) + Send + 'static,
     {
+        Self::declare_ordering(session, keyexpr, Locality::Any, on_sample)
+    }
+
+    /// R2819 — declare an advanced subscriber from [`AdvancedSubscriberOptions`]
+    /// in a build without recovery, where the options that exist are the two
+    /// upstream offers on every advanced subscriber: the live subscription's
+    /// origin and subscriber detection.
+    ///
+    /// Its bounds are the recovery build's `declare_with_options` bounds, not
+    /// this build's lighter [`Self::declare`] ones, so compiling recovery in
+    /// cannot tighten the signature under a caller (the invariant R311y88
+    /// states for `declare`).
+    pub fn declare_with_options<OnSample>(
+        session: &Session<R, T, Unicast>,
+        keyexpr: impl Into<String>,
+        options: AdvancedSubscriberOptions,
+        on_sample: OnSample,
+    ) -> Result<Self, AdvancedSubscribeError>
+    where
+        R: 'static,
+        T: TimeSource + Send + Sync + 'static,
+        <R as SessionRuntime>::LinkSink: Send + Sync,
+        SessionLinkActions<R, T>: Send + Sync + 'static,
+        Session<R, T, Unicast>: Send + 'static,
+        OnSample: FnMut(Sample) + Send + 'static,
+    {
+        let mut declared =
+            Self::declare_ordering(session, keyexpr, options.allowed_origin, on_sample)?;
+        // Declared last, as the recovery build declares it: a token that
+        // outraces its own subscription tells an observer something untrue.
+        // A refusal drops `declared`, which retracts the subscription.
+        declared._detection_token =
+            declare_detection_token(session, declared.keyexpr(), &options, declared.id)?;
+        Ok(declared)
+    }
+
+    /// The ordering subscriber both declare forms of this build share.
+    fn declare_ordering<OnSample>(
+        session: &Session<R, T, Unicast>,
+        keyexpr: impl Into<String>,
+        allowed_origin: Locality,
+        on_sample: OnSample,
+    ) -> Result<Self, AdvancedSubscribeError>
+    where
+        T: TimeSource + 'static,
+        <R as SessionRuntime>::LinkSink: Send + Sync,
+        SessionLinkActions<R, T>: Send + Sync + 'static,
+        OnSample: FnMut(Sample) + Send + 'static,
+    {
         require_session_zid(session.zid())?;
         let state = Arc::new(Mutex::new(State {
             sequenced: HashMap::new(),
@@ -3318,7 +3466,7 @@ impl<R: SessionRuntime, T: TimeSource> AdvancedSubscriber<R, T> {
         let cb_state = Arc::clone(&state);
         let subscriber = session.declare_subscriber(
             keyexpr,
-            SubscribeOptions::default(),
+            SubscribeOptions::default().with_allowed_origin(allowed_origin),
             move |view: &dyn SampleView| {
                 cb_state
                     .lock()
@@ -3897,7 +4045,8 @@ impl<R: SessionRuntime, T: TimeSource> AdvancedSubscriber<R, T> {
 /// Split out of `declare_with_options` so the KE construction and the
 /// opt-in test have one home rather than being inlined into an already long
 /// constructor.
-#[cfg(feature = "ext-pubsub-advanced-recovery")]
+///
+/// R2819 — in every build: both builds' `declare_with_options` call it.
 fn declare_detection_token<R, T>(
     session: &Session<R, T, Unicast>,
     keyexpr: &str,
@@ -6973,7 +7122,6 @@ mod tests {
     /// builder default (`liveliness: false`, advanced_subscriber.rs:164). The
     /// publisher control is present for the same reason as above.
     #[cfg(all(
-        feature = "ext-pubsub-advanced-recovery",
         feature = "ext-pubsub-advanced-publisher",
         feature = "pubsub-allow-loop"
     ))]
@@ -6997,7 +7145,6 @@ mod tests {
     /// comment calls out, and an observer's wildcard-tailed query stops
     /// matching if it is dropped.
     #[cfg(all(
-        feature = "ext-pubsub-advanced-recovery",
         feature = "ext-pubsub-advanced-publisher",
         feature = "pubsub-allow-loop"
     ))]
@@ -7049,7 +7196,6 @@ mod tests {
     /// Metadata SUBSTITUTES for the `_` chunk rather than being appended after
     /// it — zenoh picks one or the other (advanced_subscriber.rs:1156-1160).
     #[cfg(all(
-        feature = "ext-pubsub-advanced-recovery",
         feature = "ext-pubsub-advanced-publisher",
         feature = "pubsub-allow-loop"
     ))]
@@ -7084,7 +7230,6 @@ mod tests {
     /// path, which is how the tail is delimited from whatever the frame
     /// encodes next.
     #[cfg(all(
-        feature = "ext-pubsub-advanced-recovery",
         feature = "ext-pubsub-advanced-publisher",
         feature = "pubsub-allow-loop"
     ))]
@@ -7175,7 +7320,6 @@ mod tests {
     /// only a token can add is one MORE frame than the same teardown without
     /// one.
     #[cfg(all(
-        feature = "ext-pubsub-advanced-recovery",
         feature = "ext-pubsub-advanced-publisher",
         feature = "pubsub-allow-loop"
     ))]
@@ -7202,7 +7346,6 @@ mod tests {
     /// Declare a publisher (the liveliness CONTROL) plus an advanced
     /// subscriber carrying `detection`, over one recording session.
     #[cfg(all(
-        feature = "ext-pubsub-advanced-recovery",
         feature = "ext-pubsub-advanced-publisher",
         feature = "pubsub-allow-loop"
     ))]
@@ -7262,7 +7405,6 @@ mod tests {
     /// What [`declare_with_detection`] hands back: the subscriber under test
     /// plus the control publisher, kept alive alongside it.
     #[cfg(all(
-        feature = "ext-pubsub-advanced-recovery",
         feature = "ext-pubsub-advanced-publisher",
         feature = "pubsub-allow-loop"
     ))]
@@ -7427,6 +7569,173 @@ mod tests {
             vec![0, 1, 2],
             "after background() the subscriber still delivers in order and still \
              drops the duplicate"
+        );
+    }
+
+    /// R2819 — `declare_with_options` honours `allowed_origin` in EVERY build,
+    /// with or without recovery: upstream's `allowed_origin` is a knob of every
+    /// advanced subscriber, and until R2819 a recovery-off build had no options
+    /// form to set it through.
+    ///
+    /// The samples are SessionLocal loopback, so a `Remote`-only subscriber
+    /// must deliver none. The default options are the CONTROL on the same
+    /// fixture: they deliver both, so "nothing arrived" is a fact about the
+    /// origin knob rather than about a publish that never loops back.
+    #[test]
+    fn declare_with_options_honours_the_allowed_origin() {
+        let delivered_with = |origin: Option<Locality>| {
+            let (actions, _driver) = crate::test_fixtures::recording_actions();
+            let observer = Arc::new(Mutex::new(ApplicationLayerObserver::new()));
+            let clock = Arc::new(TokioTime::new());
+            let session = TokioSession::new(actions, observer, clock);
+            let mut options = AdvancedSubscriberOptions::new();
+            if let Some(origin) = origin {
+                options = options.with_allowed_origin(origin);
+            }
+            let delivered = Arc::new(Mutex::new(Vec::<u8>::new()));
+            let d = Arc::clone(&delivered);
+            let _sub = AdvancedSubscriber::declare_with_options(
+                &session,
+                "demo/data",
+                options,
+                move |sample: Sample| d.lock().unwrap().push(sample.payload[0]),
+            )
+            .expect("advanced subscriber declares");
+            put_sequenced(&session, 0);
+            put_sequenced(&session, 1);
+            let out = delivered.lock().unwrap().clone();
+            out
+        };
+
+        assert_eq!(
+            delivered_with(None),
+            vec![0, 1],
+            "CONTROL: the default origin (Any) delivers loopback samples"
+        );
+        assert_eq!(
+            delivered_with(Some(Locality::Remote)),
+            Vec::<u8>::new(),
+            "a Remote-only subscriber must not deliver SessionLocal samples"
+        );
+    }
+
+    /// Drain `session`'s buffered stages while a reader collects the first
+    /// payload byte of up to `want` samples from `rx`.
+    ///
+    /// Every `recv` is BOUNDED: the sender lives as long as the subscriber, so
+    /// a lost sample never closes the channel, and an unbounded wait would turn
+    /// a control into a hang (the plain buffered test measured exactly that).
+    async fn drain_payloads(
+        session: &TokioSession,
+        mut rx: tokio::sync::mpsc::Receiver<Sample>,
+        want: usize,
+    ) -> Vec<u8> {
+        let reader = tokio::spawn(async move {
+            let mut got = Vec::new();
+            while got.len() < want {
+                match tokio::time::timeout(std::time::Duration::from_secs(5), rx.recv()).await {
+                    Ok(Some(sample)) => got.push(sample.payload[0]),
+                    Ok(None) | Err(_) => break,
+                }
+                tokio::task::yield_now().await;
+            }
+            got
+        });
+        session.drain_buffered().await;
+        reader.await.expect("reader task panicked")
+    }
+
+    /// R2819 — the buffered form delivers every sample, in order and
+    /// de-duplicated, through a queue SMALLER than the burst.
+    ///
+    /// Anti-vacuity is the plain buffered test's: capacity 2 against five
+    /// distinct samples, all staged before anything reads, so a delivery that
+    /// dropped on a full queue instead of waiting loses the tail. The repeated
+    /// `1` is what shows the samples went through the advanced subscriber's
+    /// ORDERING state rather than around it.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_buffered_advanced_subscriber_waits_and_keeps_its_ordering() {
+        const CAPACITY: usize = 2;
+        let (actions, _driver) = crate::test_fixtures::recording_actions();
+        let observer = Arc::new(Mutex::new(ApplicationLayerObserver::new()));
+        let clock = Arc::new(TokioTime::new());
+        let session = TokioSession::new(actions, observer, clock);
+
+        let (_sub, rx, _drain_stage) =
+            AdvancedSubscriber::declare_buffered(&session, "demo/data", CAPACITY)
+                .expect("buffered advanced subscriber declares");
+        for sn in [0, 1, 1, 2, 3, 4] {
+            put_sequenced(&session, sn);
+        }
+
+        assert_eq!(
+            drain_payloads(&session, rx, 5).await,
+            vec![0, 1, 2, 3, 4],
+            "every sample must reach the queue once and in order -- a queue of \
+             {CAPACITY} against five samples is over capacity by construction"
+        );
+    }
+
+    /// R2819 — the options form's queue receives what the HISTORY GET
+    /// recovers, not only live samples: history is delivered by a reply
+    /// flush, a different path from the live callback, and both must stage.
+    ///
+    /// The history completes synchronously inside the declare (loopback), so
+    /// all three samples are staged before the reader starts; capacity 1
+    /// makes the drain wait twice.
+    #[cfg(all(
+        feature = "ext-pubsub-advanced-history",
+        feature = "ext-pubsub-advanced-cache"
+    ))]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_buffered_advanced_subscriber_queues_its_recovered_history() {
+        use crate::advanced_cache::{AdvancedCache, CacheConfig, CachedSample};
+        use wz_session_core::sample::TimestampHint;
+
+        let (actions, _driver) = crate::test_fixtures::recording_actions();
+        let observer = Arc::new(Mutex::new(ApplicationLayerObserver::new()));
+        let clock = Arc::new(TokioTime::new());
+        let session = TokioSession::new(actions, observer, clock);
+
+        let pub_zid = vec![0x09u8];
+        let pub_eid = 4u32;
+        let zid_hex = zid_to_zenoh_hex(&pub_zid);
+        let cache = AdvancedCache::declare(
+            &session,
+            format!("demo/data/@adv/pub/{zid_hex}/{pub_eid}/_"),
+            CacheConfig {
+                max_samples: 8,
+                ..CacheConfig::default()
+            },
+        )
+        .expect("advanced cache declares");
+        for sn in 0u8..3 {
+            cache.cache_sample(CachedSample::new(
+                "demo/data",
+                vec![sn],
+                Some(SourceInfo::new(&pub_zid, pub_eid, sn as u32)),
+                TimestampHint {
+                    time: 100 + sn as u64,
+                    zid: pub_zid.clone(),
+                },
+                crate::sample::SampleKind::Put,
+            ));
+        }
+
+        let (_sub, rx, _drain_stage) = AdvancedSubscriber::declare_with_options_buffered(
+            &session,
+            "demo/data",
+            AdvancedSubscriberOptions::new()
+                .with_history(HistoryConfig::new())
+                .with_get_locality(Locality::SessionLocal),
+            1,
+        )
+        .expect("buffered advanced subscriber with history declares");
+
+        assert_eq!(
+            drain_payloads(&session, rx, 3).await,
+            vec![0, 1, 2],
+            "the recovered history must reach the queue, oldest first"
         );
     }
 

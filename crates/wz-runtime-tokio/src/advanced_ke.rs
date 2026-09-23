@@ -44,13 +44,14 @@ pub(crate) const KE_ADV_UHLC: &str = "uhlc";
 /// detection publishes a liveliness token here so a third party can see it,
 /// exactly as a publisher does under `pub`.
 ///
-/// Gated on `-recovery`, not on `-subscriber`, because that is where its only
-/// consumer lives: `AdvancedSubscriberOptions` (and so the detection option)
-/// is behind the recovery gate today. A recovery-OFF build caught this as
-/// dead code under `-D warnings` — the R311y809 / R311y811 reduced-feature
-/// class. If the options type is ever lifted to the `-subscriber` level, this
-/// gate moves with it.
-#[cfg(feature = "ext-pubsub-advanced-recovery")]
+/// Gated on `-subscriber`, where its only consumer lives: the detection
+/// option on `AdvancedSubscriberOptions`.
+///
+/// R2819 — it was gated on `-recovery`, because the options type was, and this
+/// note said the gate would move when the options type was lifted to the
+/// `-subscriber` level. R2819 lifted it: upstream keeps
+/// `.subscriber_detection()` independent of `.recovery()`.
+#[cfg(feature = "ext-pubsub-advanced-subscriber")]
 pub(crate) const KE_ADV_SUB: &str = "sub";
 
 /// The trailing empty meta chunk zenoh appends to the `@adv` suffix
@@ -58,9 +59,12 @@ pub(crate) const KE_ADV_SUB: &str = "sub";
 /// (advanced_publisher.rs:328-329): the wildcard-tailed detection / recovery queries
 /// (`.../@adv/*/<zid>/<eid>/**`) stay matchable through a zenoh router thanks to the
 /// concrete `_` chunk. wz mirrors it so the `@adv` namespace is byte-identical.
+///
+/// R2819 — `-subscriber` rather than `-recovery` on the reading side, with
+/// `subscriber_adv_ke`, its subscriber-side reader.
 #[cfg(any(
     feature = "ext-pubsub-advanced-publisher",
-    feature = "ext-pubsub-advanced-recovery"
+    feature = "ext-pubsub-advanced-subscriber"
 ))]
 pub(crate) const KE_EMPTY: &str = "_";
 
@@ -108,7 +112,7 @@ pub(crate) fn publisher_adv_ke(
 /// `meta` is a caller-supplied key expression appended to convey application
 /// metadata; it may itself be multi-chunk, which is why it substitutes for the
 /// single `_` chunk rather than being appended after it.
-#[cfg(feature = "ext-pubsub-advanced-recovery")]
+#[cfg(feature = "ext-pubsub-advanced-subscriber")]
 pub(crate) fn subscriber_adv_ke(base: &str, zid_hex: &str, eid: u32, meta: Option<&str>) -> String {
     let tail = meta.unwrap_or(KE_EMPTY);
     format!("{base}/{KE_ADV_PREFIX}/{KE_ADV_SUB}/{zid_hex}/{eid}/{tail}")
