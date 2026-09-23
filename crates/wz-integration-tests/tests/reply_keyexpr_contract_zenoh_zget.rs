@@ -179,7 +179,7 @@ fn run_get(zenohd_port: u16, selector: &str) -> String {
 // wz-proves: query-get wz->zenoh
 #[test]
 #[ignore = "binary-dep e2e (zenohd + zenoh z_get + wz-ap-demo); Layer Z runs via --ignored"]
-fn a_default_zenoh_get_never_sees_a_wz_reply_outside_its_query() {
+fn a_default_zenoh_zget_never_sees_a_wz_reply_outside_its_query() {
     let (_zenohd, port) = spawn_zenohd_on_ephemeral_tcp(tempfile);
     let (_wz, mut wz_out) = spawn_wz_queryable(port);
 
@@ -211,7 +211,7 @@ fn a_default_zenoh_get_never_sees_a_wz_reply_outside_its_query() {
 // wz-proves: query-get wz->zenoh
 #[test]
 #[ignore = "binary-dep e2e (zenohd + zenoh z_get + wz-ap-demo); Layer Z runs via --ignored"]
-fn an_anyke_zenoh_get_receives_a_wz_reply_outside_its_query() {
+fn an_anyke_zenoh_zget_receives_a_wz_reply_outside_its_query() {
     let (_zenohd, port) = spawn_zenohd_on_ephemeral_tcp(tempfile);
     let (_wz, mut wz_out) = spawn_wz_queryable(port);
 
