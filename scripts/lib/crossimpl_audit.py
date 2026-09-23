@@ -703,7 +703,18 @@ HOST_GATED_CI_TARGETS: dict[str, str] = {
 # recorded here rather than in prose: the round that adds a `wz-proves` line
 # measures this number with `bash scripts/audit-crossimpl-proof.sh` before it
 # pushes.
-FOREIGN_ADJUDICATOR_LINKS = 925
+# R2804 — 925 -> 930, RISING because `storage-backend-filesystem` gained its
+# first foreign adjudicator: the stock `zenoh-backend-filesystem` 1.10.1,
+# driven in-process by `oracles/fs-backend`, shares one directory with wz's fs
+# backend (`wz_fs_backend_shares_a_directory_with_upstream.rs`). Five tests,
+# one atom, both directions; a link is a distinct (atom, test) pair, so the
+# prefix-conflict test's two directions count once: 5 tests x 1 atom = 5.
+#
+# ⚠ It was pushed WITHOUT this constant moving (4190d455), the same class as
+# R2790 above, and hosted Layer A4 redded on every main run after it (first
+# 35806887276). Measured at 4190d455^ = 925 and at 4190d455 = 930, so the
+# whole rise is that one commit.
+FOREIGN_ADJUDICATOR_LINKS = 930
 
 # ── Execution disclosure ────────────────────────────────────────────────────────
 #
