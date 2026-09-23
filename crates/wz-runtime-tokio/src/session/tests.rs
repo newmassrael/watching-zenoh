@@ -11390,24 +11390,28 @@ fn query_with_latest_consolidation_delivers_one_reply_per_keyexpr() {
         .unwrap()
         .queryables
         .register("hist/key", |_q, responder| {
-            responder.reply_keyed_stamped(
-                "hist/key",
-                b"old",
-                None,
-                &TimestampHint {
-                    time: 10,
-                    zid: vec![0x01],
-                },
-            );
-            responder.reply_keyed_stamped(
-                "hist/key",
-                b"new",
-                None,
-                &TimestampHint {
-                    time: 20,
-                    zid: vec![0x01],
-                },
-            );
+            responder
+                .reply_keyed_stamped(
+                    "hist/key",
+                    b"old",
+                    None,
+                    &TimestampHint {
+                        time: 10,
+                        zid: vec![0x01],
+                    },
+                )
+                .unwrap();
+            responder
+                .reply_keyed_stamped(
+                    "hist/key",
+                    b"new",
+                    None,
+                    &TimestampHint {
+                        time: 20,
+                        zid: vec![0x01],
+                    },
+                )
+                .unwrap();
         });
 
     session
@@ -11464,24 +11468,28 @@ fn query_with_explicit_none_consolidation_still_delivers_every_reply() {
         .unwrap()
         .queryables
         .register("hist/key", |_q, responder| {
-            responder.reply_keyed_stamped(
-                "hist/key",
-                b"old",
-                None,
-                &TimestampHint {
-                    time: 10,
-                    zid: vec![0x01],
-                },
-            );
-            responder.reply_keyed_stamped(
-                "hist/key",
-                b"new",
-                None,
-                &TimestampHint {
-                    time: 20,
-                    zid: vec![0x01],
-                },
-            );
+            responder
+                .reply_keyed_stamped(
+                    "hist/key",
+                    b"old",
+                    None,
+                    &TimestampHint {
+                        time: 10,
+                        zid: vec![0x01],
+                    },
+                )
+                .unwrap();
+            responder
+                .reply_keyed_stamped(
+                    "hist/key",
+                    b"new",
+                    None,
+                    &TimestampHint {
+                        time: 20,
+                        zid: vec![0x01],
+                    },
+                )
+                .unwrap();
         });
 
     session
@@ -11530,24 +11538,28 @@ fn a_default_get_does_not_consolidate_without_the_query_consolidation_feature() 
         .unwrap()
         .queryables
         .register("hist/key", |_q, responder| {
-            responder.reply_keyed_stamped(
-                "hist/key",
-                b"old",
-                None,
-                &TimestampHint {
-                    time: 10,
-                    zid: vec![0x01],
-                },
-            );
-            responder.reply_keyed_stamped(
-                "hist/key",
-                b"new",
-                None,
-                &TimestampHint {
-                    time: 20,
-                    zid: vec![0x01],
-                },
-            );
+            responder
+                .reply_keyed_stamped(
+                    "hist/key",
+                    b"old",
+                    None,
+                    &TimestampHint {
+                        time: 10,
+                        zid: vec![0x01],
+                    },
+                )
+                .unwrap();
+            responder
+                .reply_keyed_stamped(
+                    "hist/key",
+                    b"new",
+                    None,
+                    &TimestampHint {
+                        time: 20,
+                        zid: vec![0x01],
+                    },
+                )
+                .unwrap();
         });
 
     session
@@ -11598,24 +11610,28 @@ fn a_default_get_consolidates_to_the_latest_reply_like_zenoh() {
         .unwrap()
         .queryables
         .register("hist/key", |_q, responder| {
-            responder.reply_keyed_stamped(
-                "hist/key",
-                b"old",
-                None,
-                &TimestampHint {
-                    time: 10,
-                    zid: vec![0x01],
-                },
-            );
-            responder.reply_keyed_stamped(
-                "hist/key",
-                b"new",
-                None,
-                &TimestampHint {
-                    time: 20,
-                    zid: vec![0x01],
-                },
-            );
+            responder
+                .reply_keyed_stamped(
+                    "hist/key",
+                    b"old",
+                    None,
+                    &TimestampHint {
+                        time: 10,
+                        zid: vec![0x01],
+                    },
+                )
+                .unwrap();
+            responder
+                .reply_keyed_stamped(
+                    "hist/key",
+                    b"new",
+                    None,
+                    &TimestampHint {
+                        time: 20,
+                        zid: vec![0x01],
+                    },
+                )
+                .unwrap();
         });
 
     session
@@ -11676,24 +11692,28 @@ fn a_default_get_with_a_time_range_selector_does_not_consolidate() {
         .unwrap()
         .queryables
         .register("hist/key", |_q, responder| {
-            responder.reply_keyed_stamped(
-                "hist/key",
-                b"old",
-                None,
-                &TimestampHint {
-                    time: 10,
-                    zid: vec![0x01],
-                },
-            );
-            responder.reply_keyed_stamped(
-                "hist/key",
-                b"new",
-                None,
-                &TimestampHint {
-                    time: 20,
-                    zid: vec![0x01],
-                },
-            );
+            responder
+                .reply_keyed_stamped(
+                    "hist/key",
+                    b"old",
+                    None,
+                    &TimestampHint {
+                        time: 10,
+                        zid: vec![0x01],
+                    },
+                )
+                .unwrap();
+            responder
+                .reply_keyed_stamped(
+                    "hist/key",
+                    b"new",
+                    None,
+                    &TimestampHint {
+                        time: 20,
+                        zid: vec![0x01],
+                    },
+                )
+                .unwrap();
         });
 
     session
@@ -11752,8 +11772,12 @@ fn a_default_get_refuses_a_reply_keyed_outside_the_query() {
         .unwrap()
         .queryables
         .register("demo/inside", |_q, responder| {
-            responder.reply_keyed("demo/inside", b"in");
-            responder.reply_keyed("other/outside", b"out");
+            responder.reply_keyed("demo/inside", b"in").unwrap();
+            assert_eq!(
+                responder.reply_keyed("other/outside", b"out"),
+                Err(wz_session_core::query_sink::ReplyError::KeyExprNotMatch),
+                "the queryable is told its outside reply was refused"
+            );
         });
 
     session
@@ -11801,8 +11825,12 @@ fn a_wildcard_get_refuses_a_reply_outside_the_pattern() {
         .unwrap()
         .queryables
         .register("demo/**", |_q, responder| {
-            responder.reply_keyed("demo/inside", b"in");
-            responder.reply_keyed("other/outside", b"out");
+            responder.reply_keyed("demo/inside", b"in").unwrap();
+            assert_eq!(
+                responder.reply_keyed("other/outside", b"out"),
+                Err(wz_session_core::query_sink::ReplyError::KeyExprNotMatch),
+                "the queryable is told its outside reply was refused"
+            );
         });
 
     session
@@ -11842,8 +11870,10 @@ fn accept_replies_any_reinstates_a_reply_keyed_outside_the_query() {
         .unwrap()
         .queryables
         .register("demo/inside", |_q, responder| {
-            responder.reply_keyed("demo/inside", b"in");
-            responder.reply_keyed("other/outside", b"out");
+            responder.reply_keyed("demo/inside", b"in").unwrap();
+            responder
+                .reply_keyed("other/outside", b"out")
+                .expect("`_anyke` waives the responder gate too");
         });
 
     session

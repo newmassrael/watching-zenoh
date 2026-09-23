@@ -247,7 +247,11 @@ fn answer_alignment_into<B: StorageBackend>(
 
     for response in responses {
         let attachment = encode_alignment_reply(&response.reply);
-        match &response.value {
+        // Replies under the query's own keyexpr, so a refusal is unreachable
+        // here; upstream logs one anyway rather than asserting it away
+        // (`plugins/zenoh-plugin-storage-manager/src/replication/core/aligner_query.rs`
+        // @ `Failed to reply to Query`).
+        let staged = match &response.value {
             // A Put Retrieval: the stored value rides the payload (+ encoding),
             // the AlignmentReply rides the attachment.
             Some(value) => out.reply_keyed_attached(
@@ -260,6 +264,9 @@ fn answer_alignment_into<B: StorageBackend>(
             // EventsMetadata / a Delete Retrieval): an empty-payload Put
             // carrying only the AlignmentReply attachment.
             None => out.reply_keyed_attached(view.keyexpr(), &[], None, &attachment),
+        };
+        if let Err(e) = staged {
+            log::error!("Failed to reply to Query: {e:?}");
         }
     }
 }
@@ -675,13 +682,14 @@ mod tests {
             payload: &[u8],
             encoding: Option<&EncodingHint>,
             attachment: &[u8],
-        ) {
+        ) -> Result<(), wz_session_core::query_sink::ReplyError> {
             self.keyed_attached.push((
                 keyexpr.to_string(),
                 payload.to_vec(),
                 encoding.map(|e| e.packed_id),
                 attachment.to_vec(),
             ));
+            Ok(())
         }
         fn with_responder(&mut self, _zid: &[u8], _eid: u32) {}
         fn clear_responder(&mut self) {}

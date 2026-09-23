@@ -405,7 +405,7 @@ fn answer_from_ring(
             .with_timestamp(Some(&s.timestamp))
             .with_source_info(s.source_info.as_ref())
             .with_qos(Some(replies_config.qos()));
-        match s.kind {
+        let staged = match s.kind {
             SampleKind::Put => out.reply_keyed_meta(
                 &s.keyexpr,
                 &s.payload,
@@ -413,6 +413,12 @@ fn answer_from_ring(
                     .with_attachment(s.attachment.as_deref()),
             ),
             SampleKind::Del => out.reply_keyed_del_meta(&s.keyexpr, meta),
+        };
+        // A refused sample is warned about and the replay goes on to the
+        // next, as upstream's does (`zenoh-ext/src/advanced_cache.rs`
+        // @ `Error replying to query`).
+        if let Err(e) = staged {
+            log::warn!("AdvancedCache{{}} Error replying to query: {}", e);
         }
     }
 }
@@ -598,6 +604,7 @@ fn parse_duration_secs(s: &str) -> Option<f64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use wz_session_core::query_sink::ReplyError;
 
     /// Shared `ReplyOut` recorder for the `answer_from_ring` integration
     /// tests: captures each reply's `(keyexpr, payload)` and its source
@@ -646,26 +653,33 @@ mod tests {
             _encoding: Option<&EncodingHint>,
             _timestamp: &TimestampHint,
             source_info: Option<&SourceInfo>,
-        ) {
+        ) -> Result<(), ReplyError> {
             self.keyed.push((keyexpr.to_string(), payload.to_vec()));
             self.sourced
                 .push(source_info.map(|si| (si.zid_prefix().to_vec(), si.eid, si.sn)));
             self.arms.push("put");
+            Ok(())
         }
         fn reply_keyed_del_sourced(
             &mut self,
             keyexpr: &str,
             timestamp: &TimestampHint,
             source_info: Option<&SourceInfo>,
-        ) {
+        ) -> Result<(), ReplyError> {
             self.dels.push((
                 keyexpr.to_string(),
                 timestamp.time,
                 source_info.map(|si| (si.zid_prefix().to_vec(), si.eid, si.sn)),
             ));
             self.arms.push("del");
+            Ok(())
         }
-        fn reply_keyed_meta(&mut self, keyexpr: &str, payload: &[u8], meta: ReplyMeta<'_>) {
+        fn reply_keyed_meta(
+            &mut self,
+            keyexpr: &str,
+            payload: &[u8],
+            meta: ReplyMeta<'_>,
+        ) -> Result<(), ReplyError> {
             self.metas.push((
                 meta.encoding.map(|e| (e.packed_id, e.schema.clone())),
                 meta.attachment.map(<[u8]>::to_vec),
@@ -679,9 +693,13 @@ mod tests {
                 meta.encoding,
                 meta.timestamp.expect("the cache always stamps a timestamp"),
                 meta.source_info,
-            );
+            )
         }
-        fn reply_keyed_del_meta(&mut self, keyexpr: &str, meta: ReplyMeta<'_>) {
+        fn reply_keyed_del_meta(
+            &mut self,
+            keyexpr: &str,
+            meta: ReplyMeta<'_>,
+        ) -> Result<(), ReplyError> {
             self.metas.push((
                 meta.encoding.map(|e| (e.packed_id, e.schema.clone())),
                 meta.attachment.map(<[u8]>::to_vec),
@@ -690,7 +708,7 @@ mod tests {
                 keyexpr,
                 meta.timestamp.expect("the cache always stamps a timestamp"),
                 meta.source_info,
-            );
+            )
         }
         fn reply_del(&mut self) {
             self.arms.push("bare-del");

@@ -204,7 +204,8 @@ async fn rest_bridge_put_get_delete_traverse_the_wire() {
                         time: REPLY_TS_TIME,
                         zid: REPLY_TS_ZID.to_vec(),
                     },
-                );
+                )
+                .unwrap();
             },
         )
         .expect("acceptor declares the queryable");

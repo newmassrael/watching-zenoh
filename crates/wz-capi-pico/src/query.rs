@@ -355,17 +355,38 @@ fn flush_one(out: &mut &mut dyn ReplyOut, reply: PendingReply) {
             payload,
             attachment,
             meta,
-        } => out.reply_keyed_meta(
+        } => admitted_at_the_abi(out.reply_keyed_meta(
             &keyexpr,
             &payload,
             meta.view(attachment.as_ref().map(|a| a.as_slice())),
-        ),
+        )),
         // The Del arm passes no attachment: a Del body encodes none
         // (`has_attachment = _is_put && ..`, `message.c:263`), which is why
         // `z_query_reply_del` takes-and-drops the caller's — as pico does.
-        PendingReply::Del { keyexpr, meta } => out.reply_keyed_del_meta(&keyexpr, meta.view(None)),
+        PendingReply::Del { keyexpr, meta } => {
+            admitted_at_the_abi(out.reply_keyed_del_meta(&keyexpr, meta.view(None)))
+        }
         PendingReply::Err { payload } => out.reply_err(None, None, &payload),
     }
+}
+
+/// The core responder's verdict on a reply this ABI already ADMITTED.
+///
+/// `z_query_reply` / `z_query_reply_del` apply [`reply_keyexpr_is_covered`]
+/// before a reply is queued and return `_Z_ERR_KEYEXPR_NOT_MATCH` to the C
+/// program there, as pico's `_z_send_reply` does. The core responder applies
+/// the intersection again at flush, reading `_anyke` in zenoh's dialect where
+/// this ABI reads it in pico's ([`parameters_has_anyke`]). Every `_anyke` pico
+/// finds is a whole `;`-bounded segment, which zenoh's split also reads as the
+/// key, so an admission here is an admission there; a refusal at flush means
+/// the two gates disagree, a wz defect with no C caller left to tell — so a
+/// debug build stops on it rather than dropping the reply unseen.
+fn admitted_at_the_abi(staged: Result<(), wz_runtime_tokio::query_sink::ReplyError>) {
+    debug_assert_eq!(
+        staged,
+        Ok(()),
+        "the core reply gate refused a reply z_query_reply had admitted"
+    );
 }
 
 /// The owned marshal behind a borrowed `z_loaned_query_t` during one callback.

@@ -1501,6 +1501,26 @@ pub struct AdminAnswerCtx<'a> {
     pub stats: Option<crate::stats::TransportStatsReport>,
 }
 
+/// Stage one admin-space reply, logging a refusal the way upstream logs it.
+///
+/// Every admin reply goes through `ReplyOut::reply_keyed_encoded`, which can
+/// refuse a key the query does not cover. The handlers below only reply under a
+/// key they have already matched against the query, so a refusal here is a
+/// handler defect rather than a caller's choice — and upstream treats it the
+/// same way: `zenoh/src/net/runtime/adminspace.rs`
+/// @ `tracing::error!("Error sending AdminSpace reply: {:?}", e);`. One helper
+/// keeps the eleven replies from each owning a copy of that wording.
+fn reply_admin(
+    out: &mut dyn crate::query_sink::ReplyOut,
+    key: &str,
+    body: &[u8],
+    encoding: Option<&crate::sample::EncodingHint>,
+) {
+    if let Err(e) = out.reply_keyed_encoded(key, body, encoding) {
+        log::error!("Error sending AdminSpace reply: {:?}", e);
+    }
+}
+
 /// R311y45 (§5.23 Phase 2b) — the Session-INDEPENDENT admin-query answerer: the
 /// match+reply SSOT BOTH the Session-level adminspace queryable AND the
 /// forwarder-hosted routing-peer admin call, so both emit byte-identical replies.
@@ -1553,7 +1573,8 @@ pub fn answer_admin_query(
             // emits `null` when `adminspace-plugins-handlers` is off.
             plugins: plugins.to_vec(),
         };
-        out.reply_keyed_encoded(
+        reply_admin(
+            out,
             &root_key,
             data.to_json().as_bytes(),
             Some(&crate::sample::EncodingHint::APPLICATION_JSON),
@@ -1610,7 +1631,8 @@ pub fn answer_admin_query(
             // ends at `# EOF`; emitting it inside `metrics_text` would bury the
             // stats block behind the end of the document.
             body.push_str(metrics_eof());
-            out.reply_keyed_encoded(
+            reply_admin(
+                out,
                 &metrics_key,
                 body.as_bytes(),
                 Some(&crate::encoding::encoding_from_mime(METRICS_ENCODING)),
@@ -1623,7 +1645,8 @@ pub fn answer_admin_query(
     let config_key = admin_config_key(ctx.zid_hex, ctx.whatami);
     let config_chunks: Vec<&str> = config_key.split('/').collect();
     if crate::keyexpr_match::keyexpr_intersects_target(ke, &config_chunks) {
-        out.reply_keyed_encoded(
+        reply_admin(
+            out,
             &config_key,
             config_json.as_bytes(),
             Some(&crate::sample::EncodingHint::APPLICATION_JSON),
@@ -1645,7 +1668,8 @@ pub fn answer_admin_query(
         if crate::keyexpr_match::keyexpr_intersects_target(ke, &entity_chunks) {
             // Body = the entity's `Sources` (`{routers,peers,clients}`) — the SAME
             // struct zenoh serializes for BOTH subscriber and queryable admin replies.
-            out.reply_keyed_encoded(
+            reply_admin(
+                out,
                 &entity_key,
                 decl.sources.to_json().as_bytes(),
                 Some(&crate::sample::EncodingHint::APPLICATION_JSON),
@@ -1669,7 +1693,8 @@ pub fn answer_admin_query(
             let key = admin_plugin_key(ctx.zid_hex, ctx.whatami, &p.id);
             let chunks: Vec<&str> = key.split('/').collect();
             if crate::keyexpr_match::keyexpr_intersects_target(ke, &chunks) {
-                out.reply_keyed_encoded(
+                reply_admin(
+                    out,
                     &key,
                     p.to_status_json().as_bytes(),
                     Some(&crate::sample::EncodingHint::APPLICATION_JSON),
@@ -1693,7 +1718,8 @@ pub fn answer_admin_query(
             let key = admin_plugin_status_path_key(ctx.zid_hex, ctx.whatami, &p.id);
             let chunks: Vec<&str> = key.split('/').collect();
             if crate::keyexpr_match::keyexpr_intersects_target(ke, &chunks) {
-                out.reply_keyed_encoded(
+                reply_admin(
+                    out,
                     &key,
                     p.path.as_bytes(),
                     Some(&crate::sample::EncodingHint::TEXT_PLAIN),
@@ -1709,7 +1735,8 @@ pub fn answer_admin_query(
                 leaf_key.push_str(&leaf.suffix);
                 let leaf_chunks: Vec<&str> = leaf_key.split('/').collect();
                 if crate::keyexpr_match::keyexpr_intersects_target(ke, &leaf_chunks) {
-                    out.reply_keyed_encoded(
+                    reply_admin(
+                        out,
                         &leaf_key,
                         leaf.json_body.as_bytes(),
                         Some(&crate::sample::EncodingHint::APPLICATION_JSON),
@@ -1730,7 +1757,8 @@ pub fn answer_admin_query(
     let surface_key = admin_surface_key(ctx.zid_hex, ctx.whatami);
     let surface_chunks: Vec<&str> = surface_key.split('/').collect();
     if crate::keyexpr_match::keyexpr_intersects_target(ke, &surface_chunks) {
-        out.reply_keyed_encoded(
+        reply_admin(
+            out,
             &surface_key,
             admin_surface_json(ctx.zid_hex, ctx.whatami).as_bytes(),
             Some(&crate::sample::EncodingHint::APPLICATION_JSON),
@@ -1846,7 +1874,8 @@ pub fn answer_router_admin_query(
             let key = admin_linkstate_routers_key(ctx.zid_hex, ctx.whatami);
             let chunks: Vec<&str> = key.split('/').collect();
             if crate::keyexpr_match::keyexpr_intersects_target(ke, &chunks) {
-                out.reply_keyed_encoded(
+                reply_admin(
+                    out,
                     &key,
                     dot.as_bytes(),
                     Some(&crate::sample::EncodingHint::TEXT_PLAIN),
@@ -1859,7 +1888,8 @@ pub fn answer_router_admin_query(
             let key = admin_linkstate_peers_key(ctx.zid_hex, ctx.whatami);
             let chunks: Vec<&str> = key.split('/').collect();
             if crate::keyexpr_match::keyexpr_intersects_target(ke, &chunks) {
-                out.reply_keyed_encoded(
+                reply_admin(
+                    out,
                     &key,
                     dot.as_bytes(),
                     Some(&crate::sample::EncodingHint::TEXT_PLAIN),
@@ -1876,7 +1906,8 @@ pub fn answer_router_admin_query(
             if crate::keyexpr_match::keyexpr_intersects_target(ke, &chunks) {
                 let mut body = String::new();
                 crate::json::escape_into(successor_hex, &mut body);
-                out.reply_keyed_encoded(
+                reply_admin(
+                    out,
                     &key,
                     body.as_bytes(),
                     Some(&crate::sample::EncodingHint::APPLICATION_JSON),
@@ -4997,18 +5028,24 @@ mod tests {
             self.replies.push((String::new(), payload.to_vec()));
             self.encodings.push(None);
         }
-        fn reply_keyed(&mut self, keyexpr: &str, payload: &[u8]) {
+        fn reply_keyed(
+            &mut self,
+            keyexpr: &str,
+            payload: &[u8],
+        ) -> Result<(), crate::query_sink::ReplyError> {
             self.replies.push((keyexpr.to_string(), payload.to_vec()));
             self.encodings.push(None);
+            Ok(())
         }
         fn reply_keyed_encoded(
             &mut self,
             keyexpr: &str,
             payload: &[u8],
             encoding: Option<&crate::sample::EncodingHint>,
-        ) {
+        ) -> Result<(), crate::query_sink::ReplyError> {
             self.replies.push((keyexpr.to_string(), payload.to_vec()));
             self.encodings.push(encoding.cloned());
+            Ok(())
         }
         fn reply_del(&mut self) {}
         fn reply_err(&mut self, _: Option<u32>, _: Option<&str>, _: &[u8]) {}

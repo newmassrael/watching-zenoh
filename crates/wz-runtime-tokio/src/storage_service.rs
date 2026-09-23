@@ -505,8 +505,13 @@ mod tests {
         fn reply(&mut self, payload: &[u8]) {
             self.keyed.push((String::new(), payload.to_vec()));
         }
-        fn reply_keyed(&mut self, keyexpr: &str, payload: &[u8]) {
+        fn reply_keyed(
+            &mut self,
+            keyexpr: &str,
+            payload: &[u8],
+        ) -> Result<(), wz_session_core::query_sink::ReplyError> {
             self.keyed.push((keyexpr.to_string(), payload.to_vec()));
+            Ok(())
         }
         fn reply_keyed_stamped(
             &mut self,
@@ -514,7 +519,7 @@ mod tests {
             payload: &[u8],
             encoding: Option<&wz_session_core::sample::EncodingHint>,
             timestamp: &TimestampHint,
-        ) {
+        ) -> Result<(), wz_session_core::query_sink::ReplyError> {
             // Keep `keyed` populated (per-key fan assertions) AND record the
             // full metadata separately (per-version encoding + timestamp).
             self.keyed.push((keyexpr.to_string(), payload.to_vec()));
@@ -524,6 +529,7 @@ mod tests {
                 timestamp.time,
                 payload.to_vec(),
             ));
+            Ok(())
         }
         fn reply_del(&mut self) {}
         fn reply_err(&mut self, _encoding_id: Option<u32>, _schema: Option<&str>, _payload: &[u8]) {

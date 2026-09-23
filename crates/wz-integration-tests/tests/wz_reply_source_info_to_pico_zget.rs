@@ -183,13 +183,15 @@ async fn wz_reply_source_info_decoded_by_pico_z_get() {
             QABL_KEYEXPR,
             QueryableOptions::default(),
             move |query, responder| {
-                responder.reply_keyed_sourced(
-                    query.keyexpr(),
-                    REPLY_PAYLOAD.as_bytes(),
-                    None,
-                    &reply_timestamp,
-                    Some(&reply_source_info),
-                );
+                responder
+                    .reply_keyed_sourced(
+                        query.keyexpr(),
+                        REPLY_PAYLOAD.as_bytes(),
+                        None,
+                        &reply_timestamp,
+                        Some(&reply_source_info),
+                    )
+                    .unwrap();
             },
         )
         .expect("declare_queryable installs the source_info-stamping reply handler");

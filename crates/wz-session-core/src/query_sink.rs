@@ -235,6 +235,43 @@ impl<'a> ReplyMeta<'a> {
     }
 }
 
+/// Why a reply staged through [`ReplyOut`] was REFUSED rather than staged.
+///
+/// Returned by every `ReplyOut` method that takes an explicit reply keyexpr,
+/// because those are the only ones that can answer outside the query. Both
+/// references tell the CALLER synchronously: zenoh's `Query::_reply_sample`
+/// `bail!`s (`zenoh/src/api/queryable.rs` @ `which does not intersect with
+/// query`), so `reply(..).wait()` is an `Err`; pico's `_z_send_reply` returns
+/// `_Z_ERR_KEYEXPR_NOT_MATCH` (`vendor/zenoh-pico/src/net/primitives.c`
+/// @ `_Z_ERR_KEYEXPR_NOT_MATCH`), which `z_query_reply` hands back as its
+/// result. A void seam could only count the refusal on the responder, where
+/// the handler that made the mistake never looked.
+///
+/// The bound-keyexpr methods ([`ReplyOut::reply`], [`ReplyOut::reply_del`],
+/// [`ReplyOut::reply_del_sourced`]) and [`ReplyOut::reply_err`] stay `()`:
+/// they stage under the query's own keyexpr, or under none, so no refusal is
+/// representable there and a `Result` would claim a failure mode they do not
+/// have.
+///
+/// Carries no strings, so it is the same type on the no-`alloc` MCU profile.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReplyError {
+    /// The reply keyexpr does not intersect the query's, and the query did
+    /// not opt out with the `_anyke` selector parameter.
+    KeyExprNotMatch,
+}
+
+impl core::fmt::Display for ReplyError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::KeyExprNotMatch => f.write_str(
+                "reply keyexpr does not intersect the query's, \
+                 and the query only accepts replies on matching key expressions",
+            ),
+        }
+    }
+}
+
 /// Outbound emit contract a [`QuerySink`] writes replies through. The
 /// output half of the §3-a queryable seam, injected as `&mut dyn
 /// ReplyOut` so the no-`alloc` MCU handler stays decoupled from the
@@ -257,16 +294,21 @@ pub trait ReplyOut {
     /// faithful shape for a queryable that answers a WILDCARD query with
     /// several concrete stored keys (a storage's wildcard get): each reply
     /// must carry its OWN key, not the wildcard the querier asked under.
-    /// The caller must pass a keyexpr the querier's query covers (the
-    /// `reply ⊆ query` zenoh contract); the seam does not re-check it.
+    /// The reply keyexpr must intersect the query's unless the query opted
+    /// out with `_anyke` — the `reply ⊆ query` contract both references
+    /// enforce at the responder. An impl that enforces it returns
+    /// [`ReplyError::KeyExprNotMatch`] and stages nothing, and every keyed
+    /// method below carries the same `Result` for the same reason.
     ///
     /// Default impl falls back to [`Self::reply`] (the responder's bound
     /// keyexpr), so impls that predate per-key replies stay valid and a
     /// single-key (exact) reply is unaffected — the override matters only
-    /// when the reply keyexpr differs from the query keyexpr.
-    fn reply_keyed(&mut self, keyexpr: &str, payload: &[u8]) {
+    /// when the reply keyexpr differs from the query keyexpr. It refuses
+    /// nothing, because it never stages under `keyexpr`.
+    fn reply_keyed(&mut self, keyexpr: &str, payload: &[u8]) -> Result<(), ReplyError> {
         let _ = keyexpr;
         self.reply(payload);
+        Ok(())
     }
     /// Emit a Put-form reply carrying the FULL stored-value metadata: an
     /// explicit concrete `keyexpr`, the value `payload`, its `encoding` (the
@@ -291,9 +333,9 @@ pub trait ReplyOut {
         payload: &[u8],
         encoding: Option<&crate::sample::EncodingHint>,
         timestamp: &crate::sample::TimestampHint,
-    ) {
+    ) -> Result<(), ReplyError> {
         let _ = (encoding, timestamp);
-        self.reply_keyed(keyexpr, payload);
+        self.reply_keyed(keyexpr, payload)
     }
     /// Emit a Put-form reply under an explicit concrete `keyexpr` carrying a
     /// value `encoding` (the inner `MsgPut` E-flag) but NO timestamp and NO
@@ -314,9 +356,9 @@ pub trait ReplyOut {
         keyexpr: &str,
         payload: &[u8],
         encoding: Option<&crate::sample::EncodingHint>,
-    ) {
+    ) -> Result<(), ReplyError> {
         let _ = encoding;
-        self.reply_keyed(keyexpr, payload);
+        self.reply_keyed(keyexpr, payload)
     }
     /// Emit a Put-form reply carrying an opaque `attachment` side-band (and
     /// an optional value `encoding`) under an explicit concrete `keyexpr`.
@@ -343,9 +385,9 @@ pub trait ReplyOut {
         payload: &[u8],
         encoding: Option<&crate::sample::EncodingHint>,
         attachment: &[u8],
-    ) {
+    ) -> Result<(), ReplyError> {
         let _ = (encoding, attachment);
-        self.reply_keyed(keyexpr, payload);
+        self.reply_keyed(keyexpr, payload)
     }
     /// Emit a Put-form reply carrying the full recovery metadata: an
     /// explicit concrete `keyexpr`, the value `payload`, an optional value
@@ -371,9 +413,9 @@ pub trait ReplyOut {
         encoding: Option<&crate::sample::EncodingHint>,
         timestamp: &crate::sample::TimestampHint,
         source_info: Option<&crate::sample::SourceInfo>,
-    ) {
+    ) -> Result<(), ReplyError> {
         let _ = source_info;
-        self.reply_keyed_stamped(keyexpr, payload, encoding, timestamp);
+        self.reply_keyed_stamped(keyexpr, payload, encoding, timestamp)
     }
     /// Emit a Del-form reply carrying the sample's `source_info` (the
     /// inner-body source_info ext id 0x01) — the Del-arm mirror of
@@ -426,9 +468,9 @@ pub trait ReplyOut {
         keyexpr: &str,
         timestamp: &crate::sample::TimestampHint,
         source_info: Option<&crate::sample::SourceInfo>,
-    ) {
+    ) -> Result<(), ReplyError> {
         let _ = (timestamp, source_info);
-        self.reply_keyed_del(keyexpr);
+        self.reply_keyed_del(keyexpr)
     }
     /// R311y562 — emit a Put-form reply under an explicit concrete `keyexpr`
     /// carrying WHATEVER metadata [`ReplyMeta`] holds: encoding, timestamp,
@@ -454,7 +496,12 @@ pub trait ReplyOut {
     /// than applied. `QueryResponder` overrides this method and honours it;
     /// an impl that does not must not advertise the override to its callers.
     #[cfg(feature = "alloc")]
-    fn reply_keyed_meta(&mut self, keyexpr: &str, payload: &[u8], meta: ReplyMeta<'_>) {
+    fn reply_keyed_meta(
+        &mut self,
+        keyexpr: &str,
+        payload: &[u8],
+        meta: ReplyMeta<'_>,
+    ) -> Result<(), ReplyError> {
         match (meta.timestamp, meta.attachment) {
             (Some(ts), _) => {
                 self.reply_keyed_sourced(keyexpr, payload, meta.encoding, ts, meta.source_info)
@@ -503,7 +550,11 @@ pub trait ReplyOut {
     /// QUERY's. `QueryResponder` overrides this method and honours the
     /// override; the Del arm of an advanced cache's reply depends on it.
     #[cfg(feature = "alloc")]
-    fn reply_keyed_del_meta(&mut self, keyexpr: &str, meta: ReplyMeta<'_>) {
+    fn reply_keyed_del_meta(
+        &mut self,
+        keyexpr: &str,
+        meta: ReplyMeta<'_>,
+    ) -> Result<(), ReplyError> {
         match meta.timestamp {
             Some(ts) => self.reply_keyed_del_sourced(keyexpr, ts, meta.source_info),
             None => self.reply_keyed_del(keyexpr),
@@ -523,9 +574,10 @@ pub trait ReplyOut {
     /// unaffected — the override matters only when the reply keyexpr differs
     /// from the query keyexpr. Ungated, mirroring [`Self::reply_keyed`]: it adds
     /// no wire arm the Del path did not already have.
-    fn reply_keyed_del(&mut self, keyexpr: &str) {
+    fn reply_keyed_del(&mut self, keyexpr: &str) -> Result<(), ReplyError> {
         let _ = keyexpr;
         self.reply_del();
+        Ok(())
     }
     /// Emit an Err-form reply carrying an optional encoding id + schema.
     fn reply_err(&mut self, encoding_id: Option<u32>, schema: Option<&str>, payload: &[u8]);
@@ -766,8 +818,10 @@ mod tests {
         // CountingReplyOut does NOT override reply_keyed, so the trait
         // default must route it to reply() (the responder's bound keyexpr).
         // An impl that predates per-key replies keeps working unchanged.
+        // The fallback stages under the bound keyexpr, so it has nothing to
+        // refuse: it answers Ok.
         let mut out = CountingReplyOut::default();
-        out.reply_keyed("demo/a", b"value");
+        assert_eq!(out.reply_keyed("demo/a", b"value"), Ok(()));
         assert_eq!(out.replies, 1, "default reply_keyed routes to reply()");
         assert_eq!(out.last_len, 5);
     }

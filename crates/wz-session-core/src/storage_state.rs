@@ -1246,12 +1246,22 @@ impl<B: StorageBackend> StorageState<B> {
     pub fn answer_into(&self, view: &dyn QueryView, out: &mut dyn ReplyOut) {
         for (key, versions) in self.reply_set(view.keyexpr()) {
             for data in &versions {
-                out.reply_keyed_stamped(
+                // Upstream warns and carries on with the next key
+                // (`plugins/zenoh-plugin-storage-manager/src/storages_mgt/service.rs`
+                // @ `raised an error replying a query`); one refused version
+                // must not cost the querier the rest of the set.
+                if let Err(e) = out.reply_keyed_stamped(
                     &key,
                     &data.payload,
                     data.encoding.as_ref(),
                     &data.timestamp,
-                );
+                ) {
+                    log::warn!(
+                        "Storage raised an error replying a query on '{}': {}",
+                        key,
+                        e
+                    );
+                }
             }
         }
     }

@@ -217,14 +217,16 @@ fn flush_one(out: &mut &mut dyn ReplyOut, reply: PendingReply) {
             attachment,
             timestamp,
             source_info,
-        } => out.reply_keyed_meta(
-            &keyexpr,
-            &payload,
-            ReplyMeta::new()
-                .with_encoding(encoding.as_ref())
-                .with_timestamp(timestamp.as_ref())
-                .with_source_info(source_info.as_ref())
-                .with_attachment(attachment.as_deref()),
+        } => admitted_at_the_abi(
+            out.reply_keyed_meta(
+                &keyexpr,
+                &payload,
+                ReplyMeta::new()
+                    .with_encoding(encoding.as_ref())
+                    .with_timestamp(timestamp.as_ref())
+                    .with_source_info(source_info.as_ref())
+                    .with_attachment(attachment.as_deref()),
+            ),
         ),
         // The SAME `ReplyMeta` seam, minus the payload and the encoding — so a
         // Del reply and a Put reply cannot drift on how a timestamp or a
@@ -234,12 +236,14 @@ fn flush_one(out: &mut &mut dyn ReplyOut, reply: PendingReply) {
             attachment,
             timestamp,
             source_info,
-        } => out.reply_keyed_del_meta(
-            &keyexpr,
-            ReplyMeta::new()
-                .with_timestamp(timestamp.as_ref())
-                .with_source_info(source_info.as_ref())
-                .with_attachment(attachment.as_deref()),
+        } => admitted_at_the_abi(
+            out.reply_keyed_del_meta(
+                &keyexpr,
+                ReplyMeta::new()
+                    .with_timestamp(timestamp.as_ref())
+                    .with_source_info(source_info.as_ref())
+                    .with_attachment(attachment.as_deref()),
+            ),
         ),
         // R311y568 — the ERROR arm. A separate seam method rather than a
         // `ReplyMeta` variant because the wire body differs in KIND, not in
@@ -261,6 +265,23 @@ fn flush_one(out: &mut &mut dyn ReplyOut, reply: PendingReply) {
             out.reply_err(id, schema, &payload);
         }
     }
+}
+
+/// The core responder's verdict on a reply this ABI already ADMITTED.
+///
+/// `z_query_reply` / `z_query_reply_del` apply [`reply_keyexpr_is_covered`]
+/// before a reply is ever queued, and return the refusal to the C program
+/// there — that is the caller-facing report, as zenoh-c gives it. The core
+/// responder applies the same rule again at flush, from the same `_anyke`
+/// reading ([`parameters_has_anyke`] delegates to it), so a refusal here means
+/// the two gates disagree. That is a wz defect with no C caller left to tell,
+/// so a debug build stops on it rather than dropping the reply unseen.
+fn admitted_at_the_abi(staged: Result<(), wz_runtime_tokio::query_sink::ReplyError>) {
+    debug_assert_eq!(
+        staged,
+        Ok(()),
+        "the core reply gate refused a reply z_query_reply had admitted"
+    );
 }
 
 /// Whether `reply` is covered by the query — zenoh's `reply ⊆ query` contract.

@@ -470,7 +470,13 @@ where
                 &member_keyexpr,
                 QueryableOptions::default().with_complete(true),
                 move |_view: &dyn QueryView, out: &mut dyn ReplyOut| {
-                    out.reply_keyed(&reply_keyexpr, &reply_buf);
+                    // The queryable is declared on `reply_keyexpr` itself, so
+                    // every query that reaches it intersects the reply key and
+                    // a refusal cannot happen. Upstream unwraps on that same
+                    // invariant (`zenoh-ext/src/group.rs`
+                    // @ `query.reply(qres.clone(), buf.clone()).await.unwrap();`).
+                    out.reply_keyed(&reply_keyexpr, &reply_buf)
+                        .expect("a member replies under its own queryable's key");
                 },
             )
             .map_err(GroupError::Queryable)?;
@@ -966,7 +972,8 @@ mod tests {
                                 time,
                                 zid: vec![0x7Au8],
                             },
-                        );
+                        )
+                        .unwrap();
                     }
                 },
             )

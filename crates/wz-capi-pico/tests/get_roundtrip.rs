@@ -364,7 +364,7 @@ fn native_peer(endpoint: String, behaviour: PeerBehaviour, ready_tx: mpsc::Sende
                 KEYEXPR.to_owned(),
                 QueryableOptions::new().with_complete(true),
                 move |view: &dyn QueryView, out: &mut dyn ReplyOut| {
-                    out.reply_keyed(view.keyexpr(), &reply_bytes);
+                    out.reply_keyed(view.keyexpr(), &reply_bytes).unwrap();
                 },
             )
             .expect("declare the native queryable");

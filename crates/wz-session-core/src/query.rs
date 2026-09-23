@@ -177,6 +177,10 @@ use crate::query_sink::BoxedQuerySink;
 // the one that block itself carries — rather than the unconditional trio's.
 #[cfg(all(feature = "codec-request", feature = "alloc"))]
 use crate::query_sink::ReplyMeta;
+// `ReplyError` is what `QueryResponder`'s keyed staging methods return, so it
+// carries their gate for the same reason `ReplyMeta` does.
+#[cfg(all(feature = "codec-request", feature = "alloc"))]
+use crate::query_sink::ReplyError;
 use crate::query_sink::{QuerySink, QueryView, ReplyOut};
 #[cfg(all(feature = "codec-response", feature = "alloc"))]
 // R311y315 — `ResponseErrBuilder` is deliberately NOT imported here.
@@ -658,14 +662,6 @@ pub struct QueryResponder<'a> {
     /// `keyexpr_literal` itself, which always intersects itself, so they are
     /// deliberately not routed through the gate.
     accept: ReplyKeyExpr,
-    /// R311y834 — how many replies the gate refused. Upstream tells the CALLER
-    /// (zenoh `bail!`s out of `Query::_reply_sample`,
-    /// `zenoh/src/api/queryable.rs:284-286`; pico returns
-    /// `_Z_ERR_KEYEXPR_NOT_MATCH`, `vendor/zenoh-pico/src/net/primitives.c:438`)
-    /// and wz's void `ReplyOut` seam cannot, so the count is kept here and read
-    /// back through [`Self::refused_replies`] by whoever owns the responder.
-    /// The divergence is named rather than hidden — see that accessor.
-    refused: u32,
     /// R2594 — the QUERY's QoS, stamped onto every reply this responder
     /// stages. Upstream seeds `reply`, `reply_del` and `reply_err` alike from
     /// it (`zenoh/src/api/builders/reply.rs` @ `qos: query.inner.qos.into(),`),
@@ -710,46 +706,31 @@ impl<'a> QueryResponder<'a> {
             replies,
             responder: None,
             accept,
-            refused: 0,
             qos,
         }
     }
 
-    /// How many replies this responder REFUSED because their keyexpr did not
-    /// intersect the query's, i.e. how many times the handler tried to answer
-    /// outside what it was asked.
-    ///
-    /// NAMED DIVERGENCE. Upstream reports this to the caller synchronously and
-    /// wz does not: zenoh's `Query::_reply_sample` returns `Err`
-    /// (`zenoh/src/api/queryable.rs:284-286`) and pico's `_z_send_reply`
-    /// returns `_Z_ERR_KEYEXPR_NOT_MATCH`
-    /// (`vendor/zenoh-pico/src/net/primitives.c:438`), while every `ReplyOut`
-    /// method here returns `()`. Making them fallible is a 61-callsite API
-    /// change across the whole responder seam INCLUDING the no_std MCU sinks,
-    /// and it is a separate decision from having the gate at all. Until it is
-    /// taken, the refusal is not silent — it is counted here, and the owner of
-    /// the responder (the dispatcher, or wz-runtime-tokio's deferred queryable
-    /// job) can read it.
-    pub fn refused_replies(&self) -> u32 {
-        self.refused
-    }
-
-    /// Whether a reply keyed `keyexpr` may be staged for this query, counting
-    /// the refusal when it may not.
+    /// Whether a reply keyed `keyexpr` may be staged for this query.
     ///
     /// The rule and its source are the requester side's
     /// ([`crate::reply_acceptance`]), which is the whole reason this gate needed
     /// no new mechanism: `_anyke` is one token read by both ends, and the
     /// intersection is one SSOT.
-    fn admit(&mut self, keyexpr: &str) -> bool {
-        if self.accept == ReplyKeyExpr::Any {
-            return true;
+    ///
+    /// The refusal goes back to the CALLER, as both references return it:
+    /// zenoh's `Query::_reply_sample` `bail!`s (`zenoh/src/api/queryable.rs`
+    /// @ `which does not intersect with query`) and pico's `_z_send_reply`
+    /// returns `_Z_ERR_KEYEXPR_NOT_MATCH` (`vendor/zenoh-pico/src/net/primitives.c`
+    /// @ `_Z_ERR_KEYEXPR_NOT_MATCH`). R311y834 kept a count on the responder
+    /// instead, because the `ReplyOut` seam was `()`-returning; nothing read
+    /// that count, and the handler that made the mistake could not.
+    fn admit(&self, keyexpr: &str) -> Result<(), ReplyError> {
+        if self.accept == ReplyKeyExpr::Any
+            || crate::reply_acceptance::reply_keyexpr_intersects(&self.keyexpr_literal, keyexpr)
+        {
+            return Ok(());
         }
-        if crate::reply_acceptance::reply_keyexpr_intersects(&self.keyexpr_literal, keyexpr) {
-            return true;
-        }
-        self.refused = self.refused.saturating_add(1);
-        false
+        Err(ReplyError::KeyExprNotMatch)
     }
 
     /// Emit a Put-form data reply with the given payload bytes.
@@ -780,12 +761,11 @@ impl<'a> QueryResponder<'a> {
     /// [`QueryReply::into_response`]
     /// (`ResponseReplyBuilder::new(rid, 0, Some(keyexpr), payload)`), so
     /// this just stages the override literal rather than the bound one.
-    /// The caller must pass a keyexpr the inbound query covers
-    /// (`reply ⊆ query`); not re-checked here.
-    pub fn send_reply_keyed(&mut self, keyexpr: &str, payload: &[u8]) {
-        if !self.admit(keyexpr) {
-            return;
-        }
+    /// A keyexpr the inbound query does not cover (`reply ⊆ query`) is
+    /// refused with [`ReplyError::KeyExprNotMatch`] unless the query carried
+    /// `_anyke`, and nothing is staged — as for every keyed method here.
+    pub fn send_reply_keyed(&mut self, keyexpr: &str, payload: &[u8]) -> Result<(), ReplyError> {
+        self.admit(keyexpr)?;
         self.replies.push(QueryReply::Reply {
             rid: self.rid,
             keyexpr_literal: keyexpr.to_string(),
@@ -797,6 +777,7 @@ impl<'a> QueryResponder<'a> {
             attachment: None,
             source_info: None,
         });
+        Ok(())
     }
 
     /// Emit a Put-form reply carrying the full stored-value metadata: an
@@ -815,10 +796,8 @@ impl<'a> QueryResponder<'a> {
         payload: &[u8],
         encoding: Option<&EncodingHint>,
         timestamp: &TimestampHint,
-    ) {
-        if !self.admit(keyexpr) {
-            return;
-        }
+    ) -> Result<(), ReplyError> {
+        self.admit(keyexpr)?;
         self.replies.push(QueryReply::Reply {
             rid: self.rid,
             keyexpr_literal: keyexpr.to_string(),
@@ -830,6 +809,7 @@ impl<'a> QueryResponder<'a> {
             attachment: None,
             source_info: None,
         });
+        Ok(())
     }
 
     /// R311y75 — emit a Put-form recovery reply carrying the full recovery
@@ -851,10 +831,8 @@ impl<'a> QueryResponder<'a> {
         encoding: Option<&EncodingHint>,
         timestamp: &TimestampHint,
         source_info: Option<&SourceInfo>,
-    ) {
-        if !self.admit(keyexpr) {
-            return;
-        }
+    ) -> Result<(), ReplyError> {
+        self.admit(keyexpr)?;
         self.replies.push(QueryReply::Reply {
             rid: self.rid,
             keyexpr_literal: keyexpr.to_string(),
@@ -866,6 +844,7 @@ impl<'a> QueryResponder<'a> {
             attachment: None,
             source_info: source_info.cloned(),
         });
+        Ok(())
     }
 
     /// Emit a Put-form reply carrying an opaque `attachment` side-band (and
@@ -889,10 +868,8 @@ impl<'a> QueryResponder<'a> {
         payload: &[u8],
         encoding: Option<&EncodingHint>,
         attachment: &[u8],
-    ) {
-        if !self.admit(keyexpr) {
-            return;
-        }
+    ) -> Result<(), ReplyError> {
+        self.admit(keyexpr)?;
         self.replies.push(QueryReply::Reply {
             rid: self.rid,
             keyexpr_literal: keyexpr.to_string(),
@@ -904,6 +881,7 @@ impl<'a> QueryResponder<'a> {
             attachment: Some(attachment.to_vec()),
             source_info: None,
         });
+        Ok(())
     }
 
     /// Emit a Put-form reply under an explicit `keyexpr` carrying a value
@@ -920,10 +898,8 @@ impl<'a> QueryResponder<'a> {
         keyexpr: &str,
         payload: &[u8],
         encoding: Option<&EncodingHint>,
-    ) {
-        if !self.admit(keyexpr) {
-            return;
-        }
+    ) -> Result<(), ReplyError> {
+        self.admit(keyexpr)?;
         self.replies.push(QueryReply::Reply {
             rid: self.rid,
             keyexpr_literal: keyexpr.to_string(),
@@ -935,6 +911,7 @@ impl<'a> QueryResponder<'a> {
             attachment: None,
             source_info: None,
         });
+        Ok(())
     }
 
     /// Emit a Del-form reply — the queryable signals that the value
@@ -969,17 +946,16 @@ impl<'a> QueryResponder<'a> {
     ///
     /// No codec work is involved: the `into_response` Del arm already encodes
     /// under whatever `keyexpr_literal` the record carries, so this is that same
-    /// record with the caller's key. As with the Put arm, the caller must pass a
-    /// keyexpr the querier's query covers (the `reply ⊆ query` zenoh contract);
-    /// the seam does not re-check it.
+    /// record with the caller's key. As with the Put arm, a keyexpr the
+    /// querier's query does not cover (the `reply ⊆ query` zenoh contract) is
+    /// refused with [`ReplyError::KeyExprNotMatch`] unless the query carried
+    /// `_anyke`.
     ///
     /// First consumer: `wz-capi-pico`'s `z_query_reply_del`, whose pico
     /// counterpart takes an arbitrary keyexpr
     /// (`~/zenoh-pico/include/zenoh-pico/api/primitives.h:2846`).
-    pub fn send_reply_keyed_del(&mut self, keyexpr: &str) {
-        if !self.admit(keyexpr) {
-            return;
-        }
+    pub fn send_reply_keyed_del(&mut self, keyexpr: &str) -> Result<(), ReplyError> {
+        self.admit(keyexpr)?;
         self.replies.push(QueryReply::Reply {
             rid: self.rid,
             keyexpr_literal: keyexpr.into(),
@@ -991,6 +967,7 @@ impl<'a> QueryResponder<'a> {
             attachment: None,
             source_info: None,
         });
+        Ok(())
     }
 
     /// R311y247 — the Del-arm mirror of [`Self::send_reply_keyed_sourced`]:
@@ -1034,17 +1011,16 @@ impl<'a> QueryResponder<'a> {
     /// staging call that sets all three at once, which is precisely the record
     /// an `ext-pubsub-advanced-cache` recovery reply for a cached DELETE needs.
     ///
-    /// As on the Put arm the caller must pass a keyexpr the querier's query
-    /// covers (the `reply ⊆ query` contract); the seam does not re-check it.
+    /// As on the Put arm, a keyexpr the querier's query does not cover (the
+    /// `reply ⊆ query` contract) is refused with
+    /// [`ReplyError::KeyExprNotMatch`] unless the query carried `_anyke`.
     pub fn send_reply_keyed_del_sourced(
         &mut self,
         keyexpr: &str,
         timestamp: &TimestampHint,
         source_info: Option<&SourceInfo>,
-    ) {
-        if !self.admit(keyexpr) {
-            return;
-        }
+    ) -> Result<(), ReplyError> {
+        self.admit(keyexpr)?;
         self.replies.push(QueryReply::Reply {
             rid: self.rid,
             keyexpr_literal: keyexpr.to_string(),
@@ -1056,6 +1032,7 @@ impl<'a> QueryResponder<'a> {
             attachment: None,
             source_info: source_info.cloned(),
         });
+        Ok(())
     }
 
     /// R311y562 — stage a Put-form reply under an explicit `keyexpr` carrying
@@ -1071,10 +1048,13 @@ impl<'a> QueryResponder<'a> {
     /// gate (`pubsub-encoding` / `pubsub-timestamp` / `pubsub-attachment` /
     /// `reply-source-info`) — this seam adds no wire arm, it only stops
     /// dropping the ones already built.
-    pub fn send_reply_keyed_meta(&mut self, keyexpr: &str, payload: &[u8], meta: ReplyMeta<'_>) {
-        if !self.admit(keyexpr) {
-            return;
-        }
+    pub fn send_reply_keyed_meta(
+        &mut self,
+        keyexpr: &str,
+        payload: &[u8],
+        meta: ReplyMeta<'_>,
+    ) -> Result<(), ReplyError> {
+        self.admit(keyexpr)?;
         self.replies.push(QueryReply::Reply {
             rid: self.rid,
             keyexpr_literal: keyexpr.to_string(),
@@ -1088,6 +1068,7 @@ impl<'a> QueryResponder<'a> {
             attachment: meta.attachment.map(<[u8]>::to_vec),
             source_info: meta.source_info.cloned(),
         });
+        Ok(())
     }
 
     /// R311y562 — the Del-arm mirror of [`Self::send_reply_keyed_meta`].
@@ -1114,10 +1095,12 @@ impl<'a> QueryResponder<'a> {
     /// `QueryReply::into_response` threads it into the builder for both arms —
     /// so a C caller's attachment travelled the whole way and died on this one
     /// hardcoded `None`.
-    pub fn send_reply_keyed_del_meta(&mut self, keyexpr: &str, meta: ReplyMeta<'_>) {
-        if !self.admit(keyexpr) {
-            return;
-        }
+    pub fn send_reply_keyed_del_meta(
+        &mut self,
+        keyexpr: &str,
+        meta: ReplyMeta<'_>,
+    ) -> Result<(), ReplyError> {
+        self.admit(keyexpr)?;
         self.replies.push(QueryReply::Reply {
             rid: self.rid,
             keyexpr_literal: keyexpr.to_string(),
@@ -1131,6 +1114,7 @@ impl<'a> QueryResponder<'a> {
             attachment: meta.attachment.map(<[u8]>::to_vec),
             source_info: meta.source_info.cloned(),
         });
+        Ok(())
     }
 
     /// Emit an Err reply. `encoding_id` (with optional `schema`)
@@ -1271,11 +1255,11 @@ impl ReplyOut for QueryResponder<'_> {
     fn reply(&mut self, payload: &[u8]) {
         self.send_reply(payload);
     }
-    fn reply_keyed(&mut self, keyexpr: &str, payload: &[u8]) {
-        self.send_reply_keyed(keyexpr, payload);
+    fn reply_keyed(&mut self, keyexpr: &str, payload: &[u8]) -> Result<(), ReplyError> {
+        self.send_reply_keyed(keyexpr, payload)
     }
-    fn reply_keyed_del(&mut self, keyexpr: &str) {
-        self.send_reply_keyed_del(keyexpr);
+    fn reply_keyed_del(&mut self, keyexpr: &str) -> Result<(), ReplyError> {
+        self.send_reply_keyed_del(keyexpr)
     }
     fn reply_keyed_stamped(
         &mut self,
@@ -1283,16 +1267,16 @@ impl ReplyOut for QueryResponder<'_> {
         payload: &[u8],
         encoding: Option<&EncodingHint>,
         timestamp: &TimestampHint,
-    ) {
-        self.send_reply_keyed_stamped(keyexpr, payload, encoding, timestamp);
+    ) -> Result<(), ReplyError> {
+        self.send_reply_keyed_stamped(keyexpr, payload, encoding, timestamp)
     }
     fn reply_keyed_encoded(
         &mut self,
         keyexpr: &str,
         payload: &[u8],
         encoding: Option<&EncodingHint>,
-    ) {
-        self.send_reply_keyed_encoded(keyexpr, payload, encoding);
+    ) -> Result<(), ReplyError> {
+        self.send_reply_keyed_encoded(keyexpr, payload, encoding)
     }
     fn reply_keyed_attached(
         &mut self,
@@ -1300,8 +1284,8 @@ impl ReplyOut for QueryResponder<'_> {
         payload: &[u8],
         encoding: Option<&EncodingHint>,
         attachment: &[u8],
-    ) {
-        self.send_reply_keyed_attached(keyexpr, payload, encoding, attachment);
+    ) -> Result<(), ReplyError> {
+        self.send_reply_keyed_attached(keyexpr, payload, encoding, attachment)
     }
     fn reply_keyed_sourced(
         &mut self,
@@ -1310,8 +1294,8 @@ impl ReplyOut for QueryResponder<'_> {
         encoding: Option<&EncodingHint>,
         timestamp: &TimestampHint,
         source_info: Option<&SourceInfo>,
-    ) {
-        self.send_reply_keyed_sourced(keyexpr, payload, encoding, timestamp, source_info);
+    ) -> Result<(), ReplyError> {
+        self.send_reply_keyed_sourced(keyexpr, payload, encoding, timestamp, source_info)
     }
     fn reply_del(&mut self) {
         self.send_reply_del();
@@ -1324,14 +1308,23 @@ impl ReplyOut for QueryResponder<'_> {
         keyexpr: &str,
         timestamp: &TimestampHint,
         source_info: Option<&SourceInfo>,
-    ) {
-        self.send_reply_keyed_del_sourced(keyexpr, timestamp, source_info);
+    ) -> Result<(), ReplyError> {
+        self.send_reply_keyed_del_sourced(keyexpr, timestamp, source_info)
     }
-    fn reply_keyed_meta(&mut self, keyexpr: &str, payload: &[u8], meta: ReplyMeta<'_>) {
-        self.send_reply_keyed_meta(keyexpr, payload, meta);
+    fn reply_keyed_meta(
+        &mut self,
+        keyexpr: &str,
+        payload: &[u8],
+        meta: ReplyMeta<'_>,
+    ) -> Result<(), ReplyError> {
+        self.send_reply_keyed_meta(keyexpr, payload, meta)
     }
-    fn reply_keyed_del_meta(&mut self, keyexpr: &str, meta: ReplyMeta<'_>) {
-        self.send_reply_keyed_del_meta(keyexpr, meta);
+    fn reply_keyed_del_meta(
+        &mut self,
+        keyexpr: &str,
+        meta: ReplyMeta<'_>,
+    ) -> Result<(), ReplyError> {
+        self.send_reply_keyed_del_meta(keyexpr, meta)
     }
     fn reply_err(&mut self, encoding_id: Option<u32>, schema: Option<&str>, payload: &[u8]) {
         #[cfg(feature = "query-reply-err")]
@@ -1932,7 +1925,6 @@ impl<C: QuerySink> QueryableRegistry<C> {
                     replies,
                     responder: None,
                     accept: accept_mode,
-                    refused: 0,
                     qos,
                 };
                 // R311gb-3b-cleanup — dispatch through the QuerySink seam
@@ -2861,8 +2853,8 @@ mod tests {
         // wildcard-get reply shape.
         let mut reg = QueryableRegistry::new();
         reg.register("demo/**", |_q, responder| {
-            responder.reply_keyed("demo/a", b"v1");
-            responder.reply_keyed("demo/b", b"v2");
+            responder.reply_keyed("demo/a", b"v1").unwrap();
+            responder.reply_keyed("demo/b", b"v2").unwrap();
         });
 
         let mut replies = Vec::new();
@@ -2905,7 +2897,9 @@ mod tests {
                 packed_id: 13,
                 schema: None,
             };
-            responder.reply_keyed_stamped("demo/a", b"v1", Some(&enc), &ts);
+            responder
+                .reply_keyed_stamped("demo/a", b"v1", Some(&enc), &ts)
+                .unwrap();
         });
 
         let mut replies = Vec::new();
@@ -2966,12 +2960,9 @@ mod tests {
             // intersect `@zid/aligner` — and so asserted a staging neither
             // upstream nor wz's own aligner performs. The responder gate is what
             // surfaced it; the fixture was what was wrong.
-            responder.reply_keyed_attached(
-                "@zid/aligner",
-                b"stored-value",
-                Some(&enc),
-                b"align-reply",
-            );
+            responder
+                .reply_keyed_attached("@zid/aligner", b"stored-value", Some(&enc), b"align-reply")
+                .unwrap();
         });
 
         let mut replies = Vec::new();
@@ -3353,7 +3344,9 @@ mod tests {
         let ts_cb = ts.clone();
         let mut reg = QueryableRegistry::new();
         reg.register("demo/data", move |_q, responder| {
-            responder.reply_keyed_sourced("demo/data", b"v", None, &ts_cb, Some(&si_cb));
+            responder
+                .reply_keyed_sourced("demo/data", b"v", None, &ts_cb, Some(&si_cb))
+                .unwrap();
         });
         let mut replies = Vec::new();
         reg.dispatch_request(
@@ -3452,10 +3445,12 @@ mod tests {
 
         let mut reg = QueryableRegistry::new();
         reg.register("demo/**", move |_q, responder| {
-            responder.reply_keyed_del_meta(
-                "demo/data",
-                ReplyMeta::new().with_attachment(Some(&b"tombstone-meta"[..])),
-            );
+            responder
+                .reply_keyed_del_meta(
+                    "demo/data",
+                    ReplyMeta::new().with_attachment(Some(&b"tombstone-meta"[..])),
+                )
+                .unwrap();
         });
         let mut replies = Vec::new();
         reg.dispatch_request(
@@ -3525,7 +3520,9 @@ mod tests {
         // Bound to the WILDCARD; the reply must carry the concrete key.
         let mut reg = QueryableRegistry::new();
         reg.register("demo/**", move |_q, responder| {
-            responder.reply_keyed_del_sourced("demo/data", &ts_cb, Some(&si_cb));
+            responder
+                .reply_keyed_del_sourced("demo/data", &ts_cb, Some(&si_cb))
+                .unwrap();
         });
         let mut replies = Vec::new();
         reg.dispatch_request(
@@ -3929,19 +3926,28 @@ mod tests {
     ///
     /// The CONTROL is in the same test: `demo/inside` intersects the query and
     /// must still be staged, so an implementation that simply stopped staging
-    /// cannot pass. And the refusal is COUNTED, not swallowed — that count is
-    /// what stands in for the `Err` upstream returns.
+    /// cannot pass. And the refusal reaches the HANDLER as an `Err`, as
+    /// upstream's `reply(..).wait()` does — read here through the dispatcher,
+    /// which is the only way a registered queryable ever sees the seam.
     #[test]
     fn a_reply_staged_outside_the_query_is_refused() {
+        let outcomes = Arc::new(Mutex::new(Vec::new()));
+        let seen = outcomes.clone();
         let mut reg = QueryableRegistry::new();
         reg.register("demo/**", move |_q, responder| {
-            responder.reply_keyed("demo/inside", b"in");
-            responder.reply_keyed("other/outside", b"out");
+            let mut seen = seen.lock().unwrap();
+            seen.push(responder.reply_keyed("demo/inside", b"in"));
+            seen.push(responder.reply_keyed("other/outside", b"out"));
         });
 
         let mut replies = Vec::new();
         let query = Query::default().try_into_owned().unwrap();
         reg.local_query(7, "demo/**", &query, None, QosLevel::DEFAULT, &mut replies);
+        assert_eq!(
+            *outcomes.lock().unwrap(),
+            vec![Ok(()), Err(ReplyError::KeyExprNotMatch)],
+            "the handler is told which reply was refused"
+        );
 
         let staged: Vec<&str> = replies
             .iter()
@@ -3959,12 +3965,35 @@ mod tests {
         );
     }
 
-    /// The responder counts what it refused, which is how wz keeps the refusal
-    /// from being silent while its `ReplyOut` seam stays `()`-returning. Driven
-    /// at the responder directly, because the count lives on the responder and
-    /// the dispatcher drops it per matched queryable.
+    /// Every keyed staging method of the `ReplyOut` seam, driven once with the
+    /// key given — the population the refusal has to cover, since each of them
+    /// can name a key outside the query and each one reaches the wire.
+    fn stage_every_keyed_arm(out: &mut dyn ReplyOut, key: &str) -> Vec<Result<(), ReplyError>> {
+        let ts = TimestampHint {
+            time: 1,
+            zid: vec![0x0a],
+        };
+        vec![
+            out.reply_keyed(key, b"p"),
+            out.reply_keyed_stamped(key, b"p", None, &ts),
+            out.reply_keyed_encoded(key, b"p", None),
+            out.reply_keyed_attached(key, b"p", None, b"a"),
+            out.reply_keyed_sourced(key, b"p", None, &ts, None),
+            out.reply_keyed_meta(key, b"p", ReplyMeta::new()),
+            out.reply_keyed_del(key),
+            out.reply_keyed_del_sourced(key, &ts, None),
+            out.reply_keyed_del_meta(key, ReplyMeta::new()),
+        ]
+    }
+
+    /// R311y834 kept a COUNT of refusals on the responder, because the seam
+    /// was `()`-returning and could not tell the handler. Upstream tells the
+    /// handler: every keyed arm, Put and Del alike, reaches `_reply_sample`
+    /// (`zenoh/src/api/queryable.rs` @ `which does not intersect with query`),
+    /// so every one returns the `Err` there. This drives all nine through the
+    /// trait object a handler holds, outside the query and inside it.
     #[test]
-    fn the_responder_counts_what_it_refused() {
+    fn every_keyed_reply_arm_returns_its_refusal_to_the_caller() {
         let mut replies: Vec<QueryReply> = Vec::new();
         let mut responder = QueryResponder::new(
             7,
@@ -3973,19 +4002,22 @@ mod tests {
             QosLevel::DEFAULT,
             &mut replies,
         );
-        assert_eq!(responder.refused_replies(), 0, "nothing refused yet");
 
-        responder.send_reply_keyed("demo/inside", b"in");
-        assert_eq!(responder.refused_replies(), 0, "an intersecting reply");
-
-        responder.send_reply_keyed("other/outside", b"out");
-        responder.send_reply_keyed_del("other/gone");
-        assert_eq!(
-            responder.refused_replies(),
-            2,
-            "both the Put and the Del arms refuse, and both are counted"
+        let outside = stage_every_keyed_arm(&mut responder, "other/outside");
+        assert_eq!(outside.len(), 9, "the population is the nine keyed arms");
+        assert!(
+            outside
+                .iter()
+                .all(|r| *r == Err(ReplyError::KeyExprNotMatch)),
+            "every arm refuses a key outside the query: {outside:?}"
         );
-        assert_eq!(replies.len(), 1, "only the intersecting reply was staged");
+
+        let inside = stage_every_keyed_arm(&mut responder, "demo/inside");
+        assert!(
+            inside.iter().all(Result::is_ok),
+            "every arm admits a key inside the query: {inside:?}"
+        );
+        assert_eq!(replies.len(), 9, "only the admitted nine were staged");
     }
 
     /// The opt-out, on the responder side, and it is the SAME `_anyke` token the
@@ -3998,8 +4030,10 @@ mod tests {
     fn an_anyke_query_lets_a_queryable_reply_anywhere() {
         let mut reg = QueryableRegistry::new();
         reg.register("demo/**", move |_q, responder| {
-            responder.reply_keyed("demo/inside", b"in");
-            responder.reply_keyed("other/outside", b"out");
+            responder.reply_keyed("demo/inside", b"in").unwrap();
+            responder
+                .reply_keyed("other/outside", b"out")
+                .expect("`_anyke` waives the gate, so nothing is refused");
         });
 
         let mut replies = Vec::new();
@@ -4466,7 +4500,6 @@ mod tests {
             replies: &mut replies,
             responder: None,
             accept: ReplyKeyExpr::MatchingQuery,
-            refused: 0,
             qos: QosLevel::DEFAULT,
         };
         let fired = reg.dispatch_borrowed(

@@ -15687,6 +15687,7 @@ mod tests {
                     b"{\"k\":1}",
                     Some(&EncodingHint::APPLICATION_JSON),
                 )
+                .unwrap();
             }),
         )
         .expect("register local queryable");
