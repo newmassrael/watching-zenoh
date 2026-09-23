@@ -45,9 +45,10 @@
 use std::time::Duration;
 
 use wz_integration_tests::common::{
-    graceful_terminate, read_captured, spawn_answering_zqueryable, spawn_on_ephemeral_port,
-    spawn_querying_zquerier, spawn_zenohd_dialer_on_ephemeral_tcp_with_cfgs, wait_for_substring,
-    wz_ap_demo_binary, zenoh_pico_cli_binary, zenohd_binary, ChildGuard,
+    assert_demo_binary_newer_than_sources, graceful_terminate, read_captured,
+    spawn_answering_zqueryable, spawn_on_ephemeral_port, spawn_querying_zquerier,
+    spawn_zenohd_dialer_on_ephemeral_tcp_with_cfgs, wait_for_substring, wz_ap_demo_binary,
+    zenoh_pico_cli_binary, zenohd_binary, ChildGuard,
 };
 
 const QUERY_KEY: &str = "demo/key";
@@ -63,6 +64,10 @@ fn tempfile() -> std::fs::File {
 /// actually emits.
 fn spawn_gossip_pair(leg: &str) -> (ChildGuard, std::fs::File, u16, ChildGuard, u16) {
     let demo = wz_ap_demo_binary();
+    // Both legs spawn through here, and both read their verdict from the
+    // demo's routing: a demo older than its sources answers from yesterday's
+    // graph rule, which is how a control reverting the gossip arm reads green.
+    assert_demo_binary_newer_than_sources(&demo);
     let (wz, mut wz_reader, wz_port) = spawn_on_ephemeral_port(
         &demo,
         &["--peer", "127.0.0.1:0", "--peer-mode", "peer-to-peer"],

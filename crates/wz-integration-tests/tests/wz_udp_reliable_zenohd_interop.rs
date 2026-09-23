@@ -44,11 +44,23 @@
 use std::process::{Command, Stdio};
 use std::time::Duration;
 
+use std::path::PathBuf;
+
 use wz_integration_tests::common::{
-    read_captured, spawn_on_ephemeral_port, spawn_publishing_zpub, spawn_subscribed_zsub,
-    spawn_zenohd_dialer_on_ephemeral_tcp, spawn_zenohd_listeners, wait_for_substring,
-    wz_ap_demo_binary, zenoh_pico_cli_binary, zenohd_binary, ChildGuard, PortReservation,
+    assert_demo_binary_newer_than_sources, read_captured, spawn_on_ephemeral_port,
+    spawn_publishing_zpub, spawn_subscribed_zsub, spawn_zenohd_dialer_on_ephemeral_tcp,
+    spawn_zenohd_listeners, wait_for_substring, wz_ap_demo_binary, zenoh_pico_cli_binary,
+    zenohd_binary, ChildGuard, PortReservation,
 };
+
+/// The demo both legs run, checked newer than its sources. Both legs read
+/// their verdict from a foreign process fed by the demo's reliable udp link,
+/// so a stale demo would answer for a link the tree no longer builds.
+fn demo_binary() -> PathBuf {
+    let demo = wz_ap_demo_binary();
+    assert_demo_binary_newer_than_sources(&demo);
+    demo
+}
 
 /// Leg 1 — a real zenohd DIALS wz's reliable udp listener, and a pico Put routes
 /// across that link into wz's subscriber.
@@ -60,7 +72,7 @@ fn wz_udp_reliable_acceptor_receives_pico_put_via_zenohd() {
     const PUBLISH_KEY: &str = "demo/udprel/acc";
     const PUBLISH_VALUE: &str = "hello-udp-reliable-acceptor-via-zenohd";
 
-    let demo = wz_ap_demo_binary();
+    let demo = demo_binary();
     let z_pub = zenoh_pico_cli_binary("z_pub");
 
     // The `(udp-reliable)` suffix follows the port digits on the listen line, so
@@ -155,7 +167,7 @@ fn wz_udp_reliable_acceptor_receives_pico_put_via_zenohd() {
 #[test]
 #[ignore = "binary-dep e2e: needs zenohd (stock) + zenoh-pico z_sub; runs via --ignored"]
 fn wz_publish_routes_through_zenohd_to_pico_zsub_over_udp_reliable() {
-    let demo = wz_ap_demo_binary();
+    let demo = demo_binary();
     let z_sub = zenoh_pico_cli_binary("z_sub");
     let (tcp_res, udp_port) = PortReservation::pick_pair();
     let tcp_port = tcp_res.port();
