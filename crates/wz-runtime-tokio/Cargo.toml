@@ -345,11 +345,18 @@ ext-pubsub-advanced-publisher = [
 # `@adv/pub` token ext-pubsub-advanced-publisher already pulls `liveliness-token`
 # for. Gating the option behind a second feature instead would make the builder
 # method appear and disappear, which is a worse API than one more implied atom.
+# R2816 — `liveliness-subscriber` joins for the same reason, from the other
+# side: `AdvancedSubscriber::detect_publishers` is a liveliness subscriber on
+# `<ke>/@adv/pub/**`, upstream exposes it on every advanced subscriber
+# (zenoh-ext `detect_publishers`), and without the feature the declare it
+# delegates to compiles but refuses at run time — a method that exists and
+# cannot work.
 ext-pubsub-advanced-subscriber = [
     "declare-subscriber",
     "pubsub-source-info",
     "pubsub-timestamp",
     "liveliness-token",
+    "liveliness-subscriber",
 ]
 # R311y82 — ext-pubsub-advanced-subscriber + the gap-recovery query plane:
 # turns the advanced subscriber's forward-gap handling from "miss + deliver"

@@ -7334,7 +7334,9 @@ layer_c1ar_cargo_test_ext_pubsub_advanced_sub() {
     # R2815 — 7 -> 8: a_session_without_a_zid_gives_no_subscriber_an_identity,
     # ungated. It REPLACES detection_refuses_a_zid_that_is_not_a_zid, which was
     # recovery-gated, so C1at and C1av trade one for one and stay put.
-    _runci_guarded_test "C1ar advanced_subscriber" 8 \
+    # R2816 — 8 -> 9: detect_publishers_hears_this_keyexprs_publishers_only,
+    # ungated, so every advanced_subscriber lane moves by one.
+    _runci_guarded_test "C1ar advanced_subscriber" 9 \
         cargo test -p wz-runtime-tokio --features ext-pubsub-advanced-subscriber,ext-pubsub-advanced-publisher,pubsub-allow-loop \
         --lib advanced_subscriber --quiet || return 1
     (cd crates \
@@ -7436,7 +7438,8 @@ layer_c1at_cargo_test_ext_pubsub_advanced_recovery() {
     # token_calls_live. UNGATED (the sweep is the subscriber surface's, not
     # history's), so it lands in every advanced_subscriber lane.
     # R2814 — 23 -> 25, the two ungated miss-listener witnesses (see C1ar).
-    _runci_guarded_test "C1at advanced_subscriber" 25 \
+    # R2816 — 25 -> 26, the ungated detect_publishers witness (see C1ar).
+    _runci_guarded_test "C1at advanced_subscriber" 26 \
         cargo test -p wz-runtime-tokio --features ext-pubsub-advanced-recovery,ext-pubsub-advanced-publisher,pubsub-allow-loop \
         --lib advanced_subscriber --quiet || return 1
     # R311y836 — the SAME 22 cases again, with `query-consolidation` composed on
@@ -7460,7 +7463,8 @@ layer_c1at_cargo_test_ext_pubsub_advanced_recovery() {
     # it silently. Here it is named.
     # R2621 — 22 -> 23, the same ungated retention witness as the leg above.
     # R2814 — 23 -> 25, the two miss-listener witnesses, as above.
-    _runci_guarded_test "C1at advanced_subscriber (query-consolidation)" 25 \
+    # R2816 — 25 -> 26, the detect_publishers witness, as above.
+    _runci_guarded_test "C1at advanced_subscriber (query-consolidation)" 26 \
         cargo test -p wz-runtime-tokio --features ext-pubsub-advanced-recovery,ext-pubsub-advanced-publisher,pubsub-allow-loop,query-consolidation \
         --lib advanced_subscriber --quiet || return 1
     (cd crates \
@@ -7596,7 +7600,8 @@ layer_c1av_cargo_test_ext_pubsub_advanced_history() {
     # R2621 — 46 -> 47, the retention-sweep witness. It is recovery-gated, and
     # this lane carries recovery through the history feature's own composition.
     # R2814 — 47 -> 49, the two ungated miss-listener witnesses (see C1ar).
-    _runci_guarded_test "C1av advanced_subscriber" 49 \
+    # R2816 — 49 -> 50, the ungated detect_publishers witness (see C1ar).
+    _runci_guarded_test "C1av advanced_subscriber" 50 \
         cargo test -p wz-runtime-tokio --features ext-pubsub-advanced-history,ext-pubsub-advanced-publisher,pubsub-allow-loop \
         --lib advanced_subscriber --quiet || return 1
     (cd crates \

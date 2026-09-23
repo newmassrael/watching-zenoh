@@ -2811,21 +2811,21 @@ impl PendingGets {
 /// RAII teardown for the subscriber's in-flight recovery / history GETs: on
 /// drop, unregister every one that has not reached its terminal Final.
 ///
-/// The cancel action is a boxed closure rather than a stored `Session` because
-/// [`AdvancedSubscriber`] is generic over `R` alone while a session is
-/// `(R, T, Unicast)` — the same type-erasure [`LivelinessSubGuard`] applies to
-/// the late-publisher subscriber, for the same reason.
+/// R2816 — it holds the session. It held a boxed cancel closure because
+/// [`AdvancedSubscriber`] was generic over `R` alone; the subscriber is
+/// `(R, T)` now, and `Session::cancel_pending_query` needs no bound a `Drop`
+/// impl could not carry.
 #[cfg(feature = "ext-pubsub-advanced-recovery")]
-struct RecoveryCancel {
+struct RecoveryCancel<R: SessionRuntime, T: TimeSource> {
     pending: Arc<PendingGets>,
-    cancel: Box<dyn Fn(u64) + Send>,
+    session: Session<R, T, Unicast>,
 }
 
 #[cfg(feature = "ext-pubsub-advanced-recovery")]
-impl Drop for RecoveryCancel {
+impl<R: SessionRuntime, T: TimeSource> Drop for RecoveryCancel<R, T> {
     fn drop(&mut self) {
         for rid in self.pending.cancel() {
-            (self.cancel)(rid);
+            self.session.cancel_pending_query(rid);
         }
     }
 }
@@ -2931,8 +2931,20 @@ fn parse_heartbeat_source(keyexpr: &str) -> Option<AdvPublisherSource> {
 /// A live advanced subscriber bound to a [`Session`]: owns the wrapped
 /// plain [`Subscriber`] (RAII: dropping it undeclares) whose callback runs
 /// the per-source ordering / de-duplication state machine.
-pub struct AdvancedSubscriber<R: SessionRuntime = crate::runtime_impl::TokioRuntime> {
+///
+/// R2816 — GENERIC OVER THE SESSION'S `T` AND HOLDING THE SESSION, the shape
+/// `AdvancedPublisher<R, T>` has had all along and upstream's has too (its
+/// `detect_publishers` reaches the session through the wrapped subscriber).
+/// It was `R`-only, and three members of this struct had to be type-erased to
+/// `Box<dyn Send>` or a boxed closure for exactly that reason; `detect_publishers`
+/// could not be written at all, because nothing on the handle could declare.
+pub struct AdvancedSubscriber<
+    R: SessionRuntime = crate::runtime_impl::TokioRuntime,
+    T: TimeSource = crate::runtime_impl::TokioTime,
+> {
     _subscriber: Subscriber<R>,
+    /// R2816 — the session this subscriber was declared on; see the type doc.
+    session: Session<R, T, Unicast>,
     /// R2815 — the global identity [`Self::id`] reports; see [`global_id_of`].
     id: EntityGlobalId,
     /// The shared ordering state — upstream's `statesref`, and for the same
@@ -2959,16 +2971,16 @@ pub struct AdvancedSubscriber<R: SessionRuntime = crate::runtime_impl::TokioRunt
     /// this is what stops it ANSWERING — the two are separate teardowns because
     /// a GET already on the wire outlives the timer that started it.
     #[cfg(feature = "ext-pubsub-advanced-recovery")]
-    _recovery_cancel: Option<RecoveryCancel>,
+    _recovery_cancel: Option<RecoveryCancel<R, T>>,
     /// R311y84 — the heartbeat subscriber on `<ke>/@adv/pub/**` (RAII
     /// undeclare-on-drop), `Some` only when `RecoveryConfig::heartbeat` was set.
     #[cfg(feature = "ext-pubsub-advanced-recovery")]
     _heartbeat_sub: Option<Subscriber<R>>,
     /// R311y100 — the late-publisher-detection LIVELINESS subscriber on
     /// `<ke>/@adv/pub/**` (RAII undeclare-on-drop), `Some` only when
-    /// `HistoryConfig::detect_late_publishers` was set. See [`LivelinessSubGuard`].
+    /// `HistoryConfig::detect_late_publishers` was set.
     #[cfg(feature = "ext-pubsub-advanced-history")]
-    _liveliness_sub: Option<LivelinessSubGuard>,
+    _liveliness_sub: Option<crate::session::LivelinessSubscriber<R, T>>,
     /// R311y826 — the `@adv/sub` DETECTION liveliness token (RAII
     /// undeclare-on-drop), `Some` only when
     /// [`AdvancedSubscriberOptions::subscriber_detection`] was set.
@@ -2976,29 +2988,14 @@ pub struct AdvancedSubscriber<R: SessionRuntime = crate::runtime_impl::TokioRunt
     /// The sibling of the publisher's `@adv/pub` token: this is what makes the
     /// subscriber visible to a third party, and dropping the subscriber must
     /// retract it, or an observer keeps seeing a subscriber that is gone.
-    _detection_token: Option<DetectionTokenGuard>,
+    ///
+    /// R2816 — the token itself rather than R311y826's `DetectionTokenGuard`,
+    /// a `Box<dyn Send>` that existed only because this struct had no `T`.
+    _detection_token: Option<crate::session::LivelinessToken<R, T>>,
 }
 
-/// R311y826 — a named RAII keep-alive for the `@adv/sub` detection token, for
-/// the same reason [`LivelinessSubGuard`] exists:
-/// [`LivelinessToken`](crate::session::LivelinessToken) is generic over
-/// `(R, T)` while [`AdvancedSubscriber`] is `R`-only, so the handle is
-/// type-erased to `Box<dyn Send>`. Its only job is to undeclare on drop,
-/// through the boxed handle's `Drop` via the vtable.
-struct DetectionTokenGuard(#[allow(dead_code)] Box<dyn Send>);
-
-/// R311y102 (review LOW) — a named RAII keep-alive for the late-publisher
-/// liveliness subscriber. [`LivelinessSubscriber`](crate::session::LivelinessSubscriber)
-/// is generic over `(R, T)` while [`AdvancedSubscriber`] is `R`-only, so the
-/// handle is type-erased to `Box<dyn Send>` to drop the `T` parameter; this
-/// newtype names the intent (its only job is to undeclare on drop, via the
-/// boxed handle's `Drop` through the vtable) so the field is not an opaque
-/// `Box<dyn Send>` a maintainer must reverse-engineer.
-#[cfg(feature = "ext-pubsub-advanced-history")]
-struct LivelinessSubGuard(#[allow(dead_code)] Box<dyn Send>);
-
 #[cfg(feature = "ext-pubsub-advanced-recovery")]
-impl<R: SessionRuntime> AdvancedSubscriber<R> {
+impl<R: SessionRuntime, T: TimeSource> AdvancedSubscriber<R, T> {
     /// Whether the heartbeat-driven retransmission channel is actually LIVE.
     ///
     /// R311y544. `RecoveryConfig::heartbeat` is a REQUEST; this is the
@@ -3076,7 +3073,7 @@ fn global_id_of<R: SessionRuntime>(
 
 /// R2814 — the surface every build has, whatever the recovery feature says:
 /// the handle's own accessors and the miss-listener declarations.
-impl<R: SessionRuntime> AdvancedSubscriber<R> {
+impl<R: SessionRuntime, T: TimeSource> AdvancedSubscriber<R, T> {
     /// R2815 — this subscriber's global identity, upstream's
     /// `zenoh-ext/src/advanced_subscriber.rs` @ `pub fn id(&self) -> EntityGlobalId {`.
     ///
@@ -3107,6 +3104,52 @@ impl<R: SessionRuntime> AdvancedSubscriber<R> {
     /// caller says WHEN, at a point after which the handle no longer exists.
     pub fn undeclare(self) {
         drop(self);
+    }
+
+    /// R2816 — watch the advanced PUBLISHERS of this subscriber's key
+    /// expression come and go, upstream's
+    /// `zenoh-ext/src/advanced_subscriber.rs` @ `pub fn detect_publishers(&self) -> LivelinessSubscriberBuilder<'_, '_, DefaultHandler> {`.
+    ///
+    /// A liveliness subscriber on `<keyexpr>/@adv/pub/**`, which is where a
+    /// publisher that opts into detection declares its token; `callback` sees
+    /// each one appear (`Put`) and go (`Delete`). Upstream returns the plain
+    /// liveliness builder, so the caller picks history and handler there;
+    /// here `options` carries the same choice, and the returned handle is the
+    /// plain one, undeclared on drop.
+    pub fn detect_publishers(
+        &self,
+        options: crate::session::LivelinessSubscriberOptions,
+        callback: impl FnMut(crate::declare::LivelinessSample<'_>) + Send + 'static,
+    ) -> Result<
+        crate::session::LivelinessSubscriber<R, T>,
+        crate::session::LivelinessSubscriberAliasError,
+    > {
+        self.session.declare_liveliness_subscriber(
+            crate::advanced_ke::publisher_detection_ke(self.keyexpr()),
+            options,
+            callback,
+        )
+    }
+
+    /// R2816 — [`Self::detect_publishers`] with the samples on a channel,
+    /// upstream's default-handler form; the counterpart of
+    /// `Session::declare_liveliness_subscriber_with_channel`, which it
+    /// delegates to.
+    #[allow(clippy::type_complexity)]
+    pub fn detect_publishers_with_channel(
+        &self,
+        options: crate::session::LivelinessSubscriberOptions,
+    ) -> Result<
+        (
+            crate::session::LivelinessSubscriber<R, T>,
+            tokio::sync::mpsc::UnboundedReceiver<crate::session::OwnedLivelinessSample>,
+        ),
+        crate::session::LivelinessSubscriberAliasError,
+    > {
+        self.session.declare_liveliness_subscriber_with_channel(
+            crate::advanced_ke::publisher_detection_ke(self.keyexpr()),
+            options,
+        )
     }
 
     /// Declare a sample-miss listener: `callback` receives a [`Miss`] for every
@@ -3162,12 +3205,12 @@ impl<R: SessionRuntime> AdvancedSubscriber<R> {
 }
 
 #[cfg(not(feature = "ext-pubsub-advanced-recovery"))]
-impl<R: SessionRuntime> AdvancedSubscriber<R> {
+impl<R: SessionRuntime, T: TimeSource> AdvancedSubscriber<R, T> {
     /// Declare an advanced subscriber on `keyexpr`. `on_sample` receives
     /// each in-order / de-duplicated [`Sample`]; a detected forward gap on a
     /// sequenced source is reported to the listeners declared through
     /// [`Self::sample_miss_listener`].
-    pub fn declare<T, OnSample>(
+    pub fn declare<OnSample>(
         session: &Session<R, T, Unicast>,
         keyexpr: impl Into<String>,
         on_sample: OnSample,
@@ -3199,6 +3242,7 @@ impl<R: SessionRuntime> AdvancedSubscriber<R> {
         let id = global_id_of(session.zid(), &subscriber)?;
         Ok(Self {
             _subscriber: subscriber,
+            session: session.clone(),
             id,
             statesref: state,
             // The option-free `declare()` cannot ask for detection.
@@ -3208,7 +3252,7 @@ impl<R: SessionRuntime> AdvancedSubscriber<R> {
 }
 
 #[cfg(feature = "ext-pubsub-advanced-recovery")]
-impl<R: SessionRuntime> AdvancedSubscriber<R> {
+impl<R: SessionRuntime, T: TimeSource> AdvancedSubscriber<R, T> {
     /// Declare a plain advanced subscriber (no recovery): a forward gap is
     /// reported to the declared miss listeners and delivers past the hole. See
     /// [`Self::declare_with_options`] for the gap-recovering form.
@@ -3220,7 +3264,7 @@ impl<R: SessionRuntime> AdvancedSubscriber<R> {
     /// `ext-pubsub-advanced-recovery` (an additive feature) cannot tighten this
     /// signature and break a downstream `declare` caller (the signature-stability
     /// invariant). The spawn-requiring bounds live only on `declare_with_options`.
-    pub fn declare<T, OnSample>(
+    pub fn declare<OnSample>(
         session: &Session<R, T, Unicast>,
         keyexpr: impl Into<String>,
         on_sample: OnSample,
@@ -3261,6 +3305,7 @@ impl<R: SessionRuntime> AdvancedSubscriber<R> {
         let id = global_id_of(session.zid(), &subscriber)?;
         Ok(Self {
             _subscriber: subscriber,
+            session: session.clone(),
             id,
             statesref: state,
             _periodic: None,
@@ -3289,7 +3334,7 @@ impl<R: SessionRuntime> AdvancedSubscriber<R> {
     /// NOT fill. With recovery off, a forward gap reports a [`Miss`] and delivers
     /// past the hole. Misses go to the listeners declared through
     /// [`Self::sample_miss_listener`].
-    pub fn declare_with_options<T, OnSample>(
+    pub fn declare_with_options<OnSample>(
         session: &Session<R, T, Unicast>,
         keyexpr: impl Into<String>,
         options: AdvancedSubscriberOptions,
@@ -3330,7 +3375,7 @@ impl<R: SessionRuntime> AdvancedSubscriber<R> {
     /// registry before the subscriber exists closes that window rather than
     /// narrowing it. Every other listener is declared on the handle, as
     /// upstream's are.
-    pub fn declare_with_options_and_miss_listener<T, OnSample, OnMiss>(
+    pub fn declare_with_options_and_miss_listener<OnSample, OnMiss>(
         session: &Session<R, T, Unicast>,
         keyexpr: impl Into<String>,
         options: AdvancedSubscriberOptions,
@@ -3351,7 +3396,7 @@ impl<R: SessionRuntime> AdvancedSubscriber<R> {
         Self::declare_impl(session, keyexpr, on_sample, miss_handlers, options)
     }
 
-    fn declare_impl<T, OnSample>(
+    fn declare_impl<OnSample>(
         session: &Session<R, T, Unicast>,
         keyexpr: impl Into<String>,
         on_sample: OnSample,
@@ -3569,14 +3614,14 @@ impl<R: SessionRuntime> AdvancedSubscriber<R> {
         // `heartbeat_channel_is_live` reports the outcome so a caller can tell a
         // live channel from an amputated one.
         let heartbeat_sub = if heartbeat
-            && crate::advanced_ke::adv_ke_is_outbound_safe(&crate::advanced_ke::heartbeat_sub_ke(
-                &base_keyexpr,
-            )) {
+            && crate::advanced_ke::adv_ke_is_outbound_safe(
+                &crate::advanced_ke::publisher_detection_ke(&base_keyexpr),
+            ) {
             let hb_state = Arc::clone(&state);
             let hb_pending = Arc::clone(&pending);
             let hb_session = session.clone();
             let hb_base = base_keyexpr.clone();
-            let hb_keyexpr = crate::advanced_ke::heartbeat_sub_ke(&base_keyexpr);
+            let hb_keyexpr = crate::advanced_ke::publisher_detection_ke(&base_keyexpr);
             Some(session.declare_subscriber(
                 hb_keyexpr,
                 // R311y96 — the heartbeat sub shares the live sub's origin knob.
@@ -3628,7 +3673,7 @@ impl<R: SessionRuntime> AdvancedSubscriber<R> {
                      pico-safety gate, so the channel is DEGRADED — the live \
                      subscription is unaffected, heartbeat-driven retransmission is not \
                      available",
-                    crate::advanced_ke::heartbeat_sub_ke(&base_keyexpr),
+                    crate::advanced_ke::publisher_detection_ke(&base_keyexpr),
                 );
             }
             None
@@ -3671,13 +3716,13 @@ impl<R: SessionRuntime> AdvancedSubscriber<R> {
         // closure is thin glue over [`on_late_publisher_detected`]. `HistoryConfig`
         // is `Copy`, so `history` is readable after the `if let`.
         #[cfg(feature = "ext-pubsub-advanced-history")]
-        let liveliness_sub: Option<LivelinessSubGuard> =
+        let liveliness_sub: Option<crate::session::LivelinessSubscriber<R, T>> =
             if history.is_some_and(|h| h.detect_late_publishers) {
                 let lp_state = Arc::clone(&state);
                 let lp_pending = Arc::clone(&pending);
                 let lp_session = session.clone();
                 let lp_base = base_keyexpr.clone();
-                let lp_keyexpr = crate::advanced_ke::heartbeat_sub_ke(&base_keyexpr);
+                let lp_keyexpr = crate::advanced_ke::publisher_detection_ke(&base_keyexpr);
                 let (lp_depth, lp_age) = history
                     .map(|h| (h.sample_depth, h.max_age))
                     .unwrap_or((None, None));
@@ -3699,21 +3744,15 @@ impl<R: SessionRuntime> AdvancedSubscriber<R> {
                         );
                     },
                 )?;
-                Some(LivelinessSubGuard(Box::new(sub)))
+                Some(sub)
             } else {
                 None
             };
 
-        // R311y592 — the teardown that stops the subscriber ANSWERING. The
-        // session is captured by the boxed closure rather than stored, because
-        // `AdvancedSubscriber` is `R`-only while a session is `(R, T, Unicast)`
-        // — the type erasure `LivelinessSubGuard` applies for the same reason.
-        let c_session = session.clone();
+        // R311y592 — the teardown that stops the subscriber ANSWERING.
         let recovery_cancel = Some(RecoveryCancel {
             pending: Arc::clone(&pending),
-            cancel: Box::new(move |rid| {
-                c_session.cancel_pending_query(rid);
-            }),
+            session: session.clone(),
         });
 
         // R311y826 — the `@adv/sub` detection token. Declared LAST, after the
@@ -3725,6 +3764,7 @@ impl<R: SessionRuntime> AdvancedSubscriber<R> {
 
         Ok(Self {
             _subscriber: subscriber,
+            session: session.clone(),
             id,
             statesref: state,
             _periodic: periodic_task,
@@ -3744,14 +3784,14 @@ impl<R: SessionRuntime> AdvancedSubscriber<R> {
 ///
 /// Split out of `declare_with_options` so the KE construction and the
 /// opt-in test have one home rather than being inlined into an already long
-/// constructor, and so the guard's type erasure happens once.
+/// constructor.
 #[cfg(feature = "ext-pubsub-advanced-recovery")]
 fn declare_detection_token<R, T>(
     session: &Session<R, T, Unicast>,
     keyexpr: &str,
     options: &AdvancedSubscriberOptions,
     id: EntityGlobalId,
-) -> Result<Option<DetectionTokenGuard>, AdvancedSubscribeError>
+) -> Result<Option<crate::session::LivelinessToken<R, T>>, AdvancedSubscribeError>
 where
     R: SessionRuntime + 'static,
     T: TimeSource + 'static,
@@ -3775,7 +3815,7 @@ where
         detection.metadata.as_deref(),
     );
     let token = session.declare_token(ke, crate::session::LivelinessOptions::default())?;
-    Ok(Some(DetectionTokenGuard(Box::new(token))))
+    Ok(Some(token))
 }
 
 #[cfg(test)]
@@ -3794,6 +3834,78 @@ mod tests {
             source: EntityGlobalId::new(zid, eid).expect("a 1..=16-byte test zid"),
             nb,
         }
+    }
+
+    /// An inbound `DeclToken` for `ke`, as a peer's liveliness token arrives.
+    /// R2816 hoisted it from the two tests that each carried a nested copy.
+    fn make_decl_token(id: u64, ke: &str) -> wz_codecs::declare::DeclareOwnedVariant {
+        use wz_codecs::decl_token::DeclToken;
+        use wz_codecs::wireexpr::{Wireexpr, WireexprVariant};
+        use wz_codecs::wireexpr_local::WireexprLocal;
+        let keyexpr = Wireexpr {
+            body: WireexprVariant::WireexprLocal(WireexprLocal {
+                id: 0,
+                suffix_len: Some(ke.len() as u64),
+                suffix: Some(ke),
+            }),
+        };
+        wz_codecs::declare::DeclareVariant::CodecZenohDeclToken(DeclToken {
+            id,
+            keyexpr,
+            ..DeclToken::default()
+        })
+        .try_into_owned()
+        .unwrap()
+    }
+
+    /// R2816 — `detect_publishers` sees an advanced publisher's token arrive
+    /// on this subscriber's key expression, and only there.
+    ///
+    /// Two tokens are injected: one under `demo/data/@adv/pub/...` (a
+    /// publisher of THIS key expression) and one under `demo/other/@adv/pub/...`
+    /// (a publisher of another). The first must reach the callback and the
+    /// second must not, so a detector declared on the wrong key expression — or
+    /// on `**` — cannot pass, and one that hears nothing cannot either.
+    ///
+    /// Control: declaring the detector on the subscriber's bare key expression
+    /// instead of `publisher_detection_ke` reds the first assertion.
+    #[test]
+    fn detect_publishers_hears_this_keyexprs_publishers_only() {
+        let (actions, _driver) = crate::test_fixtures::recording_actions();
+        let observer = Arc::new(Mutex::new(ApplicationLayerObserver::new()));
+        let clock = Arc::new(TokioTime::new());
+        let session = TokioSession::new(actions, observer, clock);
+        let sub = AdvancedSubscriber::declare(&session, "demo/data", |_s: Sample| {})
+            .expect("advanced subscriber declares");
+
+        let heard = Arc::new(Mutex::new(Vec::<String>::new()));
+        let h = Arc::clone(&heard);
+        let _detector = sub
+            .detect_publishers(
+                crate::session::LivelinessSubscriberOptions::new(),
+                move |sample: crate::declare::LivelinessSample<'_>| {
+                    h.lock().unwrap().push(sample.keyexpr.to_string());
+                },
+            )
+            .expect("the detector declares");
+
+        let ours = "demo/data/@adv/pub/b0a/7/_";
+        let theirs = "demo/other/@adv/pub/b0a/8/_";
+        for (id, ke) in [(41u64, ours), (42u64, theirs)] {
+            session
+                .observer()
+                .lock()
+                .unwrap()
+                .liveliness_subscribers
+                .dispatch_declare(&make_decl_token(id, ke), &hashbrown::HashMap::new());
+        }
+        session.drain_deferred_fires();
+
+        assert_eq!(
+            *heard.lock().unwrap(),
+            vec![ours.to_owned()],
+            "the detector hears this key expression's publisher and no other"
+        );
     }
 
     /// A registry holding ONE listener that records into `sink` — the shape
@@ -5328,26 +5440,6 @@ mod tests {
         use crate::advanced_cache::{AdvancedCache, CacheConfig, CachedSample};
         use wz_session_core::sample::TimestampHint;
 
-        fn make_decl_token(id: u64, ke: &str) -> wz_codecs::declare::DeclareOwnedVariant {
-            use wz_codecs::decl_token::DeclToken;
-            use wz_codecs::wireexpr::{Wireexpr, WireexprVariant};
-            use wz_codecs::wireexpr_local::WireexprLocal;
-            let keyexpr = Wireexpr {
-                body: WireexprVariant::WireexprLocal(WireexprLocal {
-                    id: 0,
-                    suffix_len: Some(ke.len() as u64),
-                    suffix: Some(ke),
-                }),
-            };
-            wz_codecs::declare::DeclareVariant::CodecZenohDeclToken(DeclToken {
-                id,
-                keyexpr,
-                ..DeclToken::default()
-            })
-            .try_into_owned()
-            .unwrap()
-        }
-
         let (actions, _driver) = crate::test_fixtures::recording_actions();
         let observer = Arc::new(Mutex::new(ApplicationLayerObserver::new()));
         let clock = Arc::new(TokioTime::new());
@@ -6216,25 +6308,6 @@ mod tests {
         // Replicas of the session-test liveliness injection helpers (session/
         // tests.rs:5874): build an inbound Decl/Undecl token wire frame whose
         // inline-literal keyexpr resolves with no peer table.
-        fn make_decl_token(id: u64, ke: &str) -> wz_codecs::declare::DeclareOwnedVariant {
-            use wz_codecs::decl_token::DeclToken;
-            use wz_codecs::wireexpr::{Wireexpr, WireexprVariant};
-            use wz_codecs::wireexpr_local::WireexprLocal;
-            let keyexpr = Wireexpr {
-                body: WireexprVariant::WireexprLocal(WireexprLocal {
-                    id: 0,
-                    suffix_len: Some(ke.len() as u64),
-                    suffix: Some(ke),
-                }),
-            };
-            wz_codecs::declare::DeclareVariant::CodecZenohDeclToken(DeclToken {
-                id,
-                keyexpr,
-                ..DeclToken::default()
-            })
-            .try_into_owned()
-            .unwrap()
-        }
         fn make_undecl_token(id: u64) -> wz_codecs::declare::DeclareOwnedVariant {
             use wz_codecs::undecl_token::UndeclToken;
             wz_codecs::declare::DeclareVariant::CodecZenohUndeclToken(UndeclToken {
@@ -6370,26 +6443,6 @@ mod tests {
 
         use crate::advanced_cache::{AdvancedCache, CacheConfig, CachedSample};
         use wz_session_core::sample::TimestampHint;
-
-        fn make_decl_token(id: u64, ke: &str) -> wz_codecs::declare::DeclareOwnedVariant {
-            use wz_codecs::decl_token::DeclToken;
-            use wz_codecs::wireexpr::{Wireexpr, WireexprVariant};
-            use wz_codecs::wireexpr_local::WireexprLocal;
-            let keyexpr = Wireexpr {
-                body: WireexprVariant::WireexprLocal(WireexprLocal {
-                    id: 0,
-                    suffix_len: Some(ke.len() as u64),
-                    suffix: Some(ke),
-                }),
-            };
-            wz_codecs::declare::DeclareVariant::CodecZenohDeclToken(DeclToken {
-                id,
-                keyexpr,
-                ..DeclToken::default()
-            })
-            .try_into_owned()
-            .unwrap()
-        }
 
         let (actions, _driver) = crate::test_fixtures::recording_actions();
         let observer = Arc::new(Mutex::new(ApplicationLayerObserver::new()));

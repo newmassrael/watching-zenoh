@@ -59,7 +59,7 @@ pub(crate) const KE_EMPTY: &str = "_";
 /// The publisher's own `@adv` KE: `<base>/@adv/pub/<zid_hex>/<discriminator>/_`
 /// (the cache queryable + liveliness token + heartbeat-beacon KE). `discriminator`
 /// is the `<eid>` (SequenceNumber sequencing) or `uhlc` (timestamp / none) chunk.
-/// The subscriber's [`recovery_get_ke`] + [`heartbeat_sub_ke`] are the matching
+/// The subscriber's [`recovery_get_ke`] + [`publisher_detection_ke`] are the matching
 /// wildcards (zenoh advanced_publisher.rs:317-329).
 /// R2619 — `meta` is the caller's publisher-detection metadata, upstream's
 /// `zenoh-ext/src/advanced_publisher.rs` @ `pub fn publisher_detection_metadata<TryIntoKeyExpr>(mut self, meta: TryIntoKeyExpr) -> Self`.
@@ -124,11 +124,16 @@ pub(crate) fn history_get_ke(base: &str) -> String {
 
 /// The publisher-detection subscriber KE: `<base>/@adv/pub/**` (the `@adv/pub`
 /// namespace covering every publisher). The single SSOT for this KE across its
-/// TWO consumers (R311y102 review): the heartbeat-beacon DATA subscriber (which
-/// decodes each publisher's last-sn beacon) and the late-publisher LIVELINESS
-/// subscriber (which fires on each publisher's `@adv` token Put/Delete).
-#[cfg(feature = "ext-pubsub-advanced-recovery")]
-pub(crate) fn heartbeat_sub_ke(base: &str) -> String {
+/// consumers (R311y102 review): the heartbeat-beacon DATA subscriber (which
+/// decodes each publisher's last-sn beacon), the late-publisher LIVELINESS
+/// subscriber (which fires on each publisher's `@adv` token Put/Delete), and —
+/// R2816 — `AdvancedSubscriber::detect_publishers`, upstream's
+/// `zenoh-ext/src/advanced_subscriber.rs` @ `.declare_subscriber(self.subscriber.key_expr() / KE_ADV_PREFIX / KE_PUB / KE_STARSTAR)`.
+///
+/// R2816 — renamed from `publisher_detection_ke` and UNGATED. The old name was one
+/// consumer's, and the recovery gate was that consumer's; the third consumer
+/// exists in every advanced-subscriber build, as upstream's does.
+pub(crate) fn publisher_detection_ke(base: &str) -> String {
     format!("{base}/{KE_ADV_PREFIX}/{KE_ADV_PUB}/**")
 }
 
@@ -175,9 +180,9 @@ mod tests {
     #[cfg(feature = "ext-pubsub-advanced-recovery")]
     #[test]
     fn a_double_star_base_derives_adv_keyexprs_the_outbound_gate_accepts() {
-        use super::{adv_ke_is_outbound_safe, heartbeat_sub_ke};
+        use super::{adv_ke_is_outbound_safe, publisher_detection_ke};
         assert!(adv_ke_is_outbound_safe("demo/example/**"));
-        let derived = heartbeat_sub_ke("demo/example/**");
+        let derived = publisher_detection_ke("demo/example/**");
         assert_eq!(derived, "demo/example/**/@adv/pub/**");
         assert!(
             adv_ke_is_outbound_safe(&derived),
@@ -202,7 +207,7 @@ mod tests {
         use super::history_get_ke;
         #[cfg(feature = "ext-pubsub-advanced-recovery")]
         use super::recovery_get_ke;
-        use super::{adv_ke_is_outbound_safe, heartbeat_sub_ke};
+        use super::{adv_ke_is_outbound_safe, publisher_detection_ke};
 
         for base in [
             "demo/example/**",
@@ -219,7 +224,7 @@ mod tests {
                 "fixture base `{base}` must itself be accepted"
             );
             assert!(
-                adv_ke_is_outbound_safe(&heartbeat_sub_ke(base)),
+                adv_ke_is_outbound_safe(&publisher_detection_ke(base)),
                 "heartbeat channel refused for base `{base}`"
             );
             #[cfg(feature = "ext-pubsub-advanced-history")]
@@ -240,8 +245,8 @@ mod tests {
     #[cfg(feature = "ext-pubsub-advanced-recovery")]
     #[test]
     fn an_exact_base_derives_a_heartbeat_ke_the_outbound_gate_accepts() {
-        use super::{adv_ke_is_outbound_safe, heartbeat_sub_ke};
-        let derived = heartbeat_sub_ke("demo/example/thing");
+        use super::{adv_ke_is_outbound_safe, publisher_detection_ke};
+        let derived = publisher_detection_ke("demo/example/thing");
         assert_eq!(derived, "demo/example/thing/@adv/pub/**");
         assert!(adv_ke_is_outbound_safe(&derived));
     }
