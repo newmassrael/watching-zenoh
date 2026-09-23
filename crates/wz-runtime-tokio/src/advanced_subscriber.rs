@@ -3148,7 +3148,7 @@ impl<R: SessionRuntime, T: TimeSource> AdvancedSubscriber<R, T> {
     ///
     /// Nothing left behind holds the session strongly, which is what makes
     /// "until the session is dropped" true rather than "forever": each
-    /// callback and task downgrades it (see [`AbortOnDropTask`]).
+    /// callback and task downgrades it (see the private `AbortOnDropTask`).
     ///
     /// A method on the handle rather than a declare flag, as
     /// [`SampleMissListener::background`] and the plain subscriber's are in

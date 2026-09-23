@@ -210,10 +210,10 @@ impl<R: SessionRuntime> Subscriber<R> {
     /// until the session is dropped, and no handle is returned to retract it.
     ///
     /// Upstream's form, `zenoh/src/api/builders/subscriber.rs` @ `pub fn background(self) -> SubscriberBuilder<'a, 'b, Callback<Sample>, true> {`,
-    /// and the plain-subscriber twin of
-    /// [`LivelinessSubscriber::background`](crate::session::LivelinessSubscriber::background):
-    /// the RAII disarm and nothing else. Clearing `armed` suppresses every
-    /// part of [`Self::teardown`] — the cell kill, the wire
+    /// and the plain-subscriber twin of `LivelinessSubscriber::background`
+    /// (named, not linked: that type is behind `liveliness-subscriber`): the
+    /// RAII disarm and nothing else. Clearing `armed` suppresses every
+    /// part of the private `teardown` — the cell kill, the wire
     /// `Declare(UndeclSubscriber)`, the registry unregister — so the
     /// subscription stays declared on both sides of the wire.
     ///
