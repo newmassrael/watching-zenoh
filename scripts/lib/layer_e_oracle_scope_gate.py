@@ -59,7 +59,7 @@ RUN_CI = pathlib.Path("scripts/run-ci.sh")
 #: not a file: the zenohd-provisioning lane builds these from the pinned
 #: checkout, and this job builds only the pico CLI and wz-ap-demo.
 #:
-#: R2803 — `wz_zenoh_oracle_binary` joins: a wz-AUTHORED oracle under `oracles/`,
+#: R2804 — `wz_zenoh_oracle_binary` joins: a wz-AUTHORED oracle under `oracles/`,
 #: linking upstream, which this job builds no more than it builds zenohd. It was
 #: absent because the list was written from the two families that had bitten,
 #: and E8t's `future-stamp` legs stayed out of the sweep only because their

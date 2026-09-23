@@ -2409,7 +2409,7 @@ jobs:
         run: bash scripts/run-ci.sh --layer E15
 
       - name: Layer E16 — the filesystem backend against upstream's, one directory
-        # R2803 — `storage-backend-filesystem`'s cross-implementation witness.
+        # R2804 — `storage-backend-filesystem`'s cross-implementation witness.
         # `oracles/fs-backend` links zenoh-backend-filesystem 1.10.1 and drives
         # upstream's own Storage impl over the directory wz's backend reads and
         # writes: each side must serve what the other wrote, payload, encoding

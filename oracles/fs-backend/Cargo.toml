@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later OR LicenseRef-watching-zenoh-Commercial
 # SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
 #
-# R2803 — upstream's FILESYSTEM BACKEND, driven directly, as the foreign party
+# R2804 — upstream's FILESYSTEM BACKEND, driven directly, as the foreign party
 # for `storage-backend-filesystem`.
 #
 # That atom claims a directory is shared with zenohd: a value either

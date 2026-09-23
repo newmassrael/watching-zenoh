@@ -34,7 +34,7 @@
 resolver = "2"
 members = ["future-stamp", "fs-backend"]
 
-# R2803 — ONE zenoh in this workspace, and it is the pinned tag.
+# R2804 — ONE zenoh in this workspace, and it is the pinned tag.
 #
 # `fs-backend` links `zenoh-backend-filesystem`, a separate repository whose
 # manifest asks for zenoh's crates by crates.io VERSION (`1.10.1`), while every

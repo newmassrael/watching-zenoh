@@ -13683,7 +13683,7 @@ layer_e_ap_demo_round_trip() {
     # removes exactly those three -- zero over-reach (no other selected test
     # matches it, including the pico `..._serves_pico_zget` sibling this lane
     # SHOULD run) and zero under-reach.
-    # R2803 — `fs_shared_dir`, for the family R2358's gate now CATCHES rather than
+    # R2804 — `fs_shared_dir`, for the family R2358's gate now CATCHES rather than
     # trusts: `wz_fs_backend_shares_a_directory_with_upstream.rs` drives
     # `oracles/fs-backend`, a wz-authored oracle linking upstream, which this job
     # never builds. The gate's helper list had named only the two upstream
@@ -19283,7 +19283,7 @@ layer_e15_apfull_reconcile_federation_pico() {
 
 # ─── Layer E16 — the filesystem backend against upstream's, one directory ───
 #
-# R2803 — `storage-backend-filesystem` claims a directory is SHARED with zenohd:
+# R2804 — `storage-backend-filesystem` claims a directory is SHARED with zenohd:
 # each implementation serves what the other wrote, payload, encoding and
 # timestamp, because wz keeps upstream's own `.zenoh_datainfo` RocksDB rows.
 # Layer C1bg proves wz agrees with bytes DERIVED from upstream's source; only a

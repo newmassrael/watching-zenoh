@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later OR LicenseRef-watching-zenoh-Commercial
 // SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
 
-//! R2803 — one operation on a storage of upstream's filesystem backend, with
+//! R2804 — one operation on a storage of upstream's filesystem backend, with
 //! its result printed in a form a fixture can compare field by field.
 //!
 //! ## What makes it a FOREIGN witness

@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later OR LicenseRef-watching-zenoh-Commercial
 // SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
 
-//! R2803 — ONE DIRECTORY, TWO IMPLEMENTATIONS: wz's filesystem backend and
+//! R2804 — ONE DIRECTORY, TWO IMPLEMENTATIONS: wz's filesystem backend and
 //! upstream's (`zenoh-backend-filesystem` 1.10.1, driven through
 //! `oracles/fs-backend`) read and write the same tree, and each must serve
 //! what the other wrote with its payload, encoding and timestamp.
