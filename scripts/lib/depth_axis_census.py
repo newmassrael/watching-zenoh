@@ -1068,7 +1068,16 @@ CITATION = re.compile(r"\b((?:[A-Za-z0-9_.-]+/)*[A-Za-z0-9_.-]+\.(?:rs|c|h))(?::
 # `{'reached': ['session-unicast-accept']}`), so this pin falls while UNREACHED
 # and NO_SYMBOL hold at 2 and 2. READ off the census's own FAIL line,
 # `reached: 16 against a pin of 17`.
-PIN_REACHED = 16
+#
+# R2804 — 16 -> 15. `storage-backend-filesystem` RETIRES to COMPLETE: the
+# directory IS upstream's layout with upstream's sidecar rows (R2801), a
+# storage's configuration reaches the five properties and the root upstream
+# derives (R2802), and the shared-directory claim is witnessed against
+# upstream's own backend in both directions (Layer E16). It was in `reached`
+# -- C1bg and E16 both name its gated code -- so this pin falls while UNREACHED
+# and NO_SYMBOL hold at 2 and 2. READ off the census's own FAIL line,
+# `reached: 15 against a pin of 16`.
+PIN_REACHED = 15
 PIN_UNREACHED = 2
 PIN_NO_SYMBOL = 2
 # R2534 — 346 -> 347. The atom is `adminspace-metrics` and the citation is the
@@ -2036,7 +2045,17 @@ PIN_NO_SYMBOL = 2
 # and after: (wz 8, ambiguous 0) -> (wz 12, ambiguous 0). ATTRIBUTED by the
 # arithmetic: 86 + 4 = 90, the census's own FAIL line, so no other atom moves.
 # Caught by pre-push gate 2z on the first push of R2801, which landed nothing.
-PIN_WZ_CITATIONS = 90
+#
+# R2804 — 90 -> 78, FALLING, and by the whole of one atom rather than by an
+# edit: `storage-backend-filesystem` is COMPLETE, so its reason leaves the
+# PARTIAL population this pin counts. Its twelve wz citations go with it --
+# the eight it carried through R2801 plus the four this round's own clauses
+# add (the typed payload, the property reader, the volume's status body and
+# the strict-JSON number emitter). DERIVED with this module's own
+# `citation_audit` over that atom alone, which returned (wz 12, ambiguous 0)
+# before the grade; ATTRIBUTED by the arithmetic, 90 - 12 = 78, the census's
+# own FAIL line, so no other atom moves.
+PIN_WZ_CITATIONS = 78
 # R2626 — 44 -> 42, and this one is worth a sentence because it HELD through
 # every earlier retirement in this run (R2612, R2622). `time-hlc`'s reason is the
 # first retiree carrying AMBIGUOUS citations of its own: its oldest clauses cite
