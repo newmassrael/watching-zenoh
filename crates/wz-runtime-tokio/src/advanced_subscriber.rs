@@ -96,7 +96,7 @@ use std::sync::{Arc, Mutex};
 
 use wz_runtime_core::TimeSource;
 use wz_session_core::link::SessionRuntime;
-use wz_session_core::sample::Sample;
+use wz_session_core::sample::{EntityGlobalId, Sample};
 use wz_session_core::sink::SampleView;
 
 use crate::session::{Session, SubscribeError, SubscribeOptions, Subscriber, Unicast};
@@ -132,17 +132,147 @@ use crate::declare::{LivelinessSample, LivelinessSampleKind};
 use crate::session::{LivelinessSubscriberAliasError, LivelinessSubscriberOptions};
 
 /// A detected gap in a sequenced source's stream: `nb` samples between the
-/// last in-order delivery and the just-received `sn` were missed. Mirror
-/// of zenoh-ext `Miss` (advanced_subscriber.rs:1409-1427); `source` is
-/// split into the `(zid, eid)` the wz `SourceInfo` carries.
-#[derive(Clone, Debug, PartialEq, Eq)]
+/// last in-order delivery and the just-received `sn` were missed. Mirror of
+/// `zenoh-ext/src/advanced_subscriber.rs` @ `pub struct Miss {`, field for
+/// field and accessor for accessor.
+///
+/// R2814 — the source is ONE [`EntityGlobalId`], as upstream's is. It used to
+/// be two public fields, `source_zid: Vec<u8>` and `source_eid: u32`: the same
+/// information, split, so a caller that wanted to key on "which publisher"
+/// had to rebuild the pair itself, and the zid cost an allocation per miss.
+/// The fields are private because upstream's are; a `Miss` is something this
+/// module reports, not something a caller constructs.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Miss {
-    /// The missing source's zenoh id (the meaningful `zid_prefix` bytes).
-    pub source_zid: Vec<u8>,
-    /// The missing source's entity id.
-    pub source_eid: u32,
+    source: EntityGlobalId,
+    nb: u32,
+}
+
+impl Miss {
+    /// The source whose samples were missed.
+    pub fn source(&self) -> EntityGlobalId {
+        self.source
+    }
+
     /// How many samples were skipped (`sn - last_delivered - 1`).
-    pub nb: u32,
+    pub fn nb(&self) -> u32 {
+        self.nb
+    }
+}
+
+/// R2814 — THE MISS-LISTENER REGISTRY, upstream's
+/// `zenoh-ext/src/advanced_subscriber.rs` @ `miss_handlers: HashMap<usize, Callback<Miss>>,`
+/// with its `register_miss_callback` / `unregister_miss_callback` pair.
+///
+/// # Why a registry and not the one `on_miss` closure this module took before
+///
+/// Upstream declares a subscriber with NO miss callback at all; listeners are
+/// declared afterwards, any number of them, each retractable on its own
+/// (`sample_miss_listener()`). wz fixed exactly one closure at declare time, and
+/// that one fact generated a defect in each C ABI that mirrors the upstream
+/// call order: both kept a single slot that a listener "installs into", so a
+/// second listener REPLACED the first, and dropping the first then cleared the
+/// slot out from under the second. Nothing in either ABI was wrong locally —
+/// the shape they were adapting to could not say "two listeners".
+///
+/// # Order
+///
+/// A `BTreeMap` keyed by registration id rather than upstream's `HashMap`, so
+/// listeners fire in the order they were declared. Upstream promises no order;
+/// registration order is one of the orders it permits, and a deterministic one
+/// is what a test (or a C program) can reason about.
+#[derive(Default)]
+struct MissHandlers {
+    next_id: usize,
+    handlers: std::collections::BTreeMap<usize, Box<dyn FnMut(Miss) + Send>>,
+}
+
+impl MissHandlers {
+    fn register(&mut self, handler: Box<dyn FnMut(Miss) + Send>) -> usize {
+        let id = self.next_id;
+        self.next_id += 1;
+        self.handlers.insert(id, handler);
+        id
+    }
+
+    fn unregister(&mut self, id: usize) {
+        self.handlers.remove(&id);
+    }
+
+    /// Report one miss to every registered listener. A miss with no listener
+    /// is dropped, which is upstream's behaviour: the sample stream never
+    /// depends on anyone listening for its holes.
+    fn fire(&mut self, miss: Miss) {
+        for handler in self.handlers.values_mut() {
+            handler(miss);
+        }
+    }
+}
+
+/// R2814 — a declared sample-miss listener: upstream's
+/// `zenoh-ext/src/advanced_subscriber.rs` @ `pub struct SampleMissListener<Handler> {`.
+///
+/// Dropping it retracts the listener, as upstream's `Drop` does; [`Self::undeclare`]
+/// says when explicitly, and [`Self::background`] keeps it registered for the
+/// life of the subscriber (upstream's `.background()` builder form).
+///
+/// It holds the subscriber's state WEAKLY. A listener that outlives its
+/// subscriber has nothing left to hear from, and must not keep the
+/// subscriber's callbacks alive by existing; retracting it afterwards is then
+/// a no-op rather than an error.
+///
+/// ⚠ Listeners run while the subscriber's state is locked, exactly as
+/// upstream's run under its `zlock!` — so a listener must not declare or
+/// undeclare a listener on the same subscriber from inside its own callback.
+pub struct SampleMissListener {
+    id: usize,
+    statesref: std::sync::Weak<Mutex<State>>,
+    undeclare_on_drop: bool,
+}
+
+impl SampleMissListener {
+    /// Retract this listener now. Upstream's `undeclare`; consuming, so a
+    /// retracted listener cannot be retracted twice.
+    pub fn undeclare(mut self) {
+        self.undeclare_impl();
+    }
+
+    /// Keep this listener registered until the subscriber itself goes away,
+    /// without holding a handle — upstream's `.background()`, which declares
+    /// a listener nobody can retract.
+    pub fn background(mut self) {
+        self.undeclare_on_drop = false;
+    }
+
+    fn undeclare_impl(&mut self) {
+        // Cleared first, as upstream does, so a panic in here cannot make the
+        // `Drop` below try again.
+        self.undeclare_on_drop = false;
+        if let Some(state) = self.statesref.upgrade() {
+            state
+                .lock()
+                .expect("advanced subscriber state mutex poisoned")
+                .miss_handlers
+                .unregister(self.id);
+        }
+    }
+}
+
+impl Drop for SampleMissListener {
+    fn drop(&mut self) {
+        if self.undeclare_on_drop {
+            self.undeclare_impl();
+        }
+    }
+}
+
+impl std::fmt::Debug for SampleMissListener {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SampleMissListener")
+            .field("id", &self.id)
+            .field("undeclare_on_drop", &self.undeclare_on_drop)
+            .finish()
+    }
 }
 
 /// Per-source ordering state. Tracks the last in-order delivered sequence
@@ -851,7 +981,7 @@ struct RecoveryRequest {
 /// Behind an `Arc<Mutex>` because the session may fire the subscriber
 /// callback from different worker threads (the storage-service idiom).
 ///
-/// R311y95 (review L1) — the `on_sample` / `on_miss` callbacks are invoked
+/// R311y95 (review L1) — the `on_sample` / miss-listener callbacks are invoked
 /// WHILE this `State` mutex is held (`deliver_and_flush` / `flush_sequenced` /
 /// the ingest path all call them under the guard). This matches zenoh holding
 /// the `zlock` across `callback.call` (advanced_subscriber.rs): a callback that
@@ -916,7 +1046,8 @@ struct State {
     /// while grading nothing.
     timestamped: HashMap<Vec<u8>, TimestampedState>,
     on_sample: Box<dyn FnMut(Sample) + Send>,
-    on_miss: Box<dyn FnMut(Miss) + Send>,
+    /// R2814 — every declared sample-miss listener; see [`MissHandlers`].
+    miss_handlers: MissHandlers,
     /// R311y82 — whether forward gaps BUFFER + trigger a recovery GET (true,
     /// [`AdvancedSubscriber::declare_with_options`]) or report a [`Miss`] and
     /// deliver past the gap (false, the plain [`AdvancedSubscriber::declare`]).
@@ -1072,12 +1203,20 @@ impl State {
     /// `ingest_sequenced(key, sn, sample, ..)` let a caller pass a key that
     /// DISAGREED with the sample's own `source_info`. Every test did pass them
     /// redundantly; production could not, but nothing said so.
-    fn route_sample(
-        &mut self,
-        sample: Sample,
-    ) -> Option<(wz_session_core::sample::SourceInfo, Sample)> {
-        match sample.source_info.clone() {
-            Some(source) => Some((source, sample)),
+    ///
+    /// R2814 — the identity comes back as an [`EntityGlobalId`] plus the
+    /// sequence number, and a record whose zid is outside `1..=16` bytes takes
+    /// the unsequenced arm. That is [`wz_session_core::sample::SourceInfo`]'s
+    /// own contract ("any value outside `1..=16` should be treated by consumers
+    /// as an absence-of-source"), and it is now decided here, once, instead of
+    /// every sequenced arm keying on an empty zid.
+    fn route_sample(&mut self, sample: Sample) -> Option<(EntityGlobalId, u32, Sample)> {
+        let sequenced = sample
+            .source_info
+            .as_ref()
+            .and_then(|info| info.source_id().map(|id| (id, info.sn)));
+        match sequenced {
+            Some((source, sn)) => Some((source, sn, sample)),
             None => {
                 self.deliver_unsequenced(sample);
                 None
@@ -1139,20 +1278,18 @@ impl State {
     /// in a build with no retransmission reports a [`Miss`] and advances past
     /// it, where the recovery build buffers and asks.
     fn handle(&mut self, view: &dyn SampleView) {
-        let Some((source, sample)) = self.route_sample(Sample::from_view(view)) else {
+        let Some((source, sn, sample)) = self.route_sample(Sample::from_view(view)) else {
             return;
         };
-        let key = (source.zid_prefix().to_vec(), source.eid);
-        let sn = source.sn;
+        let key = (source.zid().to_vec(), source.eid());
         let State {
             sequenced,
             on_sample,
-            on_miss,
+            miss_handlers,
             ..
         } = self;
         let on_sample: &mut dyn FnMut(Sample) = &mut **on_sample;
-        let on_miss: &mut dyn FnMut(Miss) = &mut **on_miss;
-        let state = sequenced.entry(key.clone()).or_default();
+        let state = sequenced.entry(key).or_default();
         // R2621 — see the timestamped twin: delivery is activity.
         #[cfg(feature = "ext-pubsub-advanced-recovery")]
         state.retention.touch();
@@ -1170,9 +1307,8 @@ impl State {
             // Forward gap (no retransmission): report the miss, deliver,
             // advance past it (zenoh advanced_subscriber.rs:521-535).
             Some(last) if sn > last => {
-                on_miss(Miss {
-                    source_zid: key.0.clone(),
-                    source_eid: key.1,
+                miss_handlers.fire(Miss {
+                    source,
                     nb: sn - last - 1,
                 });
                 on_sample(sample);
@@ -1204,8 +1340,8 @@ impl State {
     /// recovered sample must not, because the GET that produced it is the one
     /// already in flight.
     fn ingest(&mut self, sample: Sample, live: bool) -> Option<RecoveryRequest> {
-        let (source, sample) = self.route_sample(sample)?;
-        self.ingest_sequenced(source, sample, live)
+        let (source, sn, sample) = self.route_sample(sample)?;
+        self.ingest_sequenced(source, sn, sample, live)
     }
 
     /// The sequenced-ordering arm (zenoh `handle_sample`
@@ -1216,12 +1352,12 @@ impl State {
     /// let a caller state an identity the sample contradicted.
     fn ingest_sequenced(
         &mut self,
-        source: wz_session_core::sample::SourceInfo,
+        source: EntityGlobalId,
+        sn: u32,
         sample: Sample,
         live: bool,
     ) -> Option<RecoveryRequest> {
-        let key = (source.zid_prefix().to_vec(), source.eid);
-        let sn = source.sn;
+        let key = (source.zid().to_vec(), source.eid());
         let retransmission = self.retransmission;
         #[cfg(feature = "ext-pubsub-advanced-history")]
         let history_pending = self.global_pending_queries != 0;
@@ -1230,11 +1366,10 @@ impl State {
         let State {
             sequenced,
             on_sample,
-            on_miss,
+            miss_handlers,
             ..
         } = self;
         let on_sample: &mut dyn FnMut(Sample) = &mut **on_sample;
-        let on_miss: &mut dyn FnMut(Miss) = &mut **on_miss;
         let state = sequenced.entry(key.clone()).or_default();
         // R2621 — delivery is activity, as on the two paths above.
         #[cfg(feature = "ext-pubsub-advanced-recovery")]
@@ -1299,9 +1434,8 @@ impl State {
                     }
                 } else {
                     // No retransmission: report the miss, deliver, advance.
-                    on_miss(Miss {
-                        source_zid: key.0.clone(),
-                        source_eid: key.1,
+                    miss_handlers.fire(Miss {
+                        source,
                         nb: sn - last - 1,
                     });
                     on_sample(sample);
@@ -1348,18 +1482,17 @@ impl State {
         let State {
             sequenced,
             on_sample,
-            on_miss,
+            miss_handlers,
             ..
         } = self;
         let on_sample: &mut dyn FnMut(Sample) = &mut **on_sample;
-        let on_miss: &mut dyn FnMut(Miss) = &mut **on_miss;
         if let Some(state) = sequenced.get_mut(key) {
             state.pending_queries = state.pending_queries.saturating_sub(1);
             let may_flush = state.pending_queries == 0;
             #[cfg(feature = "ext-pubsub-advanced-history")]
             let may_flush = may_flush && !history_pending;
             if may_flush {
-                flush_sequenced(state, &key.0, key.1, on_sample, on_miss);
+                flush_sequenced(state, &key.0, key.1, on_sample, miss_handlers);
             }
         }
     }
@@ -1398,14 +1531,13 @@ impl State {
             sequenced,
             timestamped,
             on_sample,
-            on_miss,
+            miss_handlers,
             ..
         } = self;
         let on_sample: &mut dyn FnMut(Sample) = &mut **on_sample;
-        let on_miss: &mut dyn FnMut(Miss) = &mut **on_miss;
         for (key, state) in sequenced.iter_mut() {
             if state.pending_queries == 0 {
-                flush_sequenced(state, &key.0, key.1, on_sample, on_miss);
+                flush_sequenced(state, &key.0, key.1, on_sample, miss_handlers);
             }
         }
         for (zid, state) in timestamped.iter_mut() {
@@ -1727,11 +1859,17 @@ fn flush_sequenced(
     zid: &[u8],
     eid: u32,
     on_sample: &mut dyn FnMut(Sample),
-    on_miss: &mut dyn FnMut(Miss),
+    miss_handlers: &mut MissHandlers,
 ) {
     if state.pending_samples.is_empty() {
         return;
     }
+    // Every key of the sequenced map is built from a valid identity — by
+    // `State::route_sample` from an `EntityGlobalId`, or from a heartbeat /
+    // liveliness token whose zid `zenoh_hex_to_zid` decoded, which yields
+    // 1..=16 bytes or nothing — so this cannot fail on a key the map holds.
+    let source = EntityGlobalId::new(zid, eid)
+        .expect("sequenced-source keys are built from valid 1..=16-byte zids");
     let pending = core::mem::take(&mut state.pending_samples);
     for (sn, sample) in pending {
         match state.last_delivered {
@@ -1744,9 +1882,8 @@ fn flush_sequenced(
                 on_sample(sample);
             }
             Some(last) if sn > last => {
-                on_miss(Miss {
-                    source_zid: zid.to_vec(),
-                    source_eid: eid,
+                miss_handlers.fire(Miss {
+                    source,
                     nb: sn - last - 1,
                 });
                 state.last_delivered = Some(sn);
@@ -2785,14 +2922,16 @@ fn parse_heartbeat_source(keyexpr: &str) -> Option<AdvPublisherSource> {
 /// the per-source ordering / de-duplication state machine.
 pub struct AdvancedSubscriber<R: SessionRuntime = crate::runtime_impl::TokioRuntime> {
     _subscriber: Subscriber<R>,
-    /// R311y83 — the shared ordering state; retained ONLY so a test can drive a
-    /// recovery tick over the live source map ([`run_periodic_tick`]). The
-    /// background task + the callback capture their own clones (which keep the
-    /// `State` alive), so prod never reads this field. R311y95 (review L2) —
-    /// gated `cfg(test)` (was `cfg(advanced-recovery)`): the test-only retention
-    /// no longer occupies a field in production builds.
-    #[cfg(all(test, feature = "ext-pubsub-advanced-recovery"))]
-    _statesref: Arc<Mutex<State>>,
+    /// The shared ordering state — upstream's `statesref`, and for the same
+    /// reason upstream keeps it on the handle: a sample-miss listener is
+    /// declared on the SUBSCRIBER after it exists, so the handle must be able
+    /// to reach the registry the callbacks fire into.
+    ///
+    /// R2814 — unconditional. R311y83 kept it only so a test could drive a
+    /// recovery tick, and R311y95 then gated it `cfg(test)` because production
+    /// never read it; [`Self::sample_miss_listener`] is the production reader
+    /// that makes it a real field in every build.
+    statesref: Arc<Mutex<State>>,
     /// R311y83 — the periodic recovery task (RAII abort-on-drop), `Some` only
     /// when `RecoveryConfig::periodic_queries` was set.
     #[cfg(feature = "ext-pubsub-advanced-recovery")]
@@ -2867,7 +3006,7 @@ impl<R: SessionRuntime> AdvancedSubscriber<R> {
 
     /// R311y592 — this subscriber's in-flight recovery / history GET registry.
     ///
-    /// Test-only, and the companion of the `cfg(test)` `_statesref` field: a
+    /// Test-only, and the companion of the `statesref` field: a
     /// test that drives [`run_periodic_tick`] directly must hand it the SAME
     /// registry the subscriber's own callbacks use, or the tick's GETs land
     /// outside the teardown this type exists to guarantee.
@@ -2895,29 +3034,83 @@ impl<R: SessionRuntime> AdvancedSubscriber<R> {
     }
 }
 
+/// R2814 — the surface every build has, whatever the recovery feature says:
+/// the handle's own accessors and the miss-listener declarations.
+impl<R: SessionRuntime> AdvancedSubscriber<R> {
+    /// Declare a sample-miss listener: `callback` receives a [`Miss`] for every
+    /// forward gap this subscriber detects on a sequenced source from now on.
+    /// Upstream's `zenoh-ext/src/advanced_subscriber.rs` @ `pub fn sample_miss_listener(&self) -> SampleMissListenerBuilder<'_, DefaultHandler> {`
+    /// in its `.callback(..)` form.
+    ///
+    /// Any number may be declared, and each is retracted on its own — by
+    /// dropping the returned handle or calling [`SampleMissListener::undeclare`];
+    /// [`SampleMissListener::background`] keeps one for the subscriber's life.
+    ///
+    /// A listener hears only misses detected AFTER it is declared, as
+    /// upstream's does: a hole already reported to nobody is not replayed.
+    pub fn sample_miss_listener<F>(&self, callback: F) -> SampleMissListener
+    where
+        F: FnMut(Miss) + Send + 'static,
+    {
+        let id = self
+            .statesref
+            .lock()
+            .expect("advanced subscriber state mutex poisoned")
+            .miss_handlers
+            .register(Box::new(callback));
+        SampleMissListener {
+            id,
+            statesref: Arc::downgrade(&self.statesref),
+            undeclare_on_drop: true,
+        }
+    }
+
+    /// Declare a sample-miss listener whose misses arrive on a channel —
+    /// upstream's DEFAULT form, `sample_miss_listener()` resolved with its
+    /// `DefaultHandler`, a FIFO the caller receives from.
+    ///
+    /// Unbounded, as `LivelinessSubscriber`'s channel form is in this crate:
+    /// a miss is reported under the subscriber's state lock, so a bounded
+    /// channel that blocked on a slow reader would stall sample delivery for
+    /// every source — the opposite of what reporting a gap is for.
+    pub fn sample_miss_listener_with_channel(
+        &self,
+    ) -> (
+        SampleMissListener,
+        tokio::sync::mpsc::UnboundedReceiver<Miss>,
+    ) {
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        let listener = self.sample_miss_listener(move |miss| {
+            // A receiver that has gone away is a listener nobody reads; the
+            // miss is dropped exactly as it is with no listener at all.
+            let _ = tx.send(miss);
+        });
+        (listener, rx)
+    }
+}
+
 #[cfg(not(feature = "ext-pubsub-advanced-recovery"))]
 impl<R: SessionRuntime> AdvancedSubscriber<R> {
     /// Declare an advanced subscriber on `keyexpr`. `on_sample` receives
-    /// each in-order / de-duplicated [`Sample`]; `on_miss` receives a
-    /// [`Miss`] for every detected forward gap on a sequenced source.
-    pub fn declare<T, OnSample, OnMiss>(
+    /// each in-order / de-duplicated [`Sample`]; a detected forward gap on a
+    /// sequenced source is reported to the listeners declared through
+    /// [`Self::sample_miss_listener`].
+    pub fn declare<T, OnSample>(
         session: &Session<R, T, Unicast>,
         keyexpr: impl Into<String>,
         on_sample: OnSample,
-        on_miss: OnMiss,
     ) -> Result<Self, SubscribeError>
     where
         T: TimeSource + 'static,
         <R as SessionRuntime>::LinkSink: Send + Sync,
         SessionLinkActions<R, T>: Send + Sync + 'static,
         OnSample: FnMut(Sample) + Send + 'static,
-        OnMiss: FnMut(Miss) + Send + 'static,
     {
         let state = Arc::new(Mutex::new(State {
             sequenced: HashMap::new(),
             timestamped: HashMap::new(),
             on_sample: Box::new(on_sample),
-            on_miss: Box::new(on_miss),
+            miss_handlers: MissHandlers::default(),
         }));
         let cb_state = Arc::clone(&state);
         let subscriber = session.declare_subscriber(
@@ -2932,6 +3125,7 @@ impl<R: SessionRuntime> AdvancedSubscriber<R> {
         )?;
         Ok(Self {
             _subscriber: subscriber,
+            statesref: state,
             // The option-free `declare()` cannot ask for detection.
             _detection_token: None,
         })
@@ -2940,9 +3134,9 @@ impl<R: SessionRuntime> AdvancedSubscriber<R> {
 
 #[cfg(feature = "ext-pubsub-advanced-recovery")]
 impl<R: SessionRuntime> AdvancedSubscriber<R> {
-    /// Declare a plain advanced subscriber (no recovery): a forward gap fires
-    /// a [`Miss`] and delivers past the hole. See [`Self::declare_with_options`]
-    /// for the gap-recovering form.
+    /// Declare a plain advanced subscriber (no recovery): a forward gap is
+    /// reported to the declared miss listeners and delivers past the hole. See
+    /// [`Self::declare_with_options`] for the gap-recovering form.
     ///
     /// R311y88 (review H1) — this form does NOT route through `declare_impl`
     /// (which `tokio::spawn`s + whose callback captures the session): it builds
@@ -2951,24 +3145,22 @@ impl<R: SessionRuntime> AdvancedSubscriber<R> {
     /// `ext-pubsub-advanced-recovery` (an additive feature) cannot tighten this
     /// signature and break a downstream `declare` caller (the signature-stability
     /// invariant). The spawn-requiring bounds live only on `declare_with_options`.
-    pub fn declare<T, OnSample, OnMiss>(
+    pub fn declare<T, OnSample>(
         session: &Session<R, T, Unicast>,
         keyexpr: impl Into<String>,
         on_sample: OnSample,
-        on_miss: OnMiss,
     ) -> Result<Self, SubscribeError>
     where
         T: TimeSource + 'static,
         <R as SessionRuntime>::LinkSink: Send + Sync,
         SessionLinkActions<R, T>: Send + Sync + 'static,
         OnSample: FnMut(Sample) + Send + 'static,
-        OnMiss: FnMut(Miss) + Send + 'static,
     {
         let state = Arc::new(Mutex::new(State {
             sequenced: HashMap::new(),
             timestamped: HashMap::new(),
             on_sample: Box::new(on_sample),
-            on_miss: Box::new(on_miss),
+            miss_handlers: MissHandlers::default(),
             retransmission: false,
             #[cfg(feature = "ext-pubsub-advanced-history")]
             global_pending_queries: 0,
@@ -2992,8 +3184,7 @@ impl<R: SessionRuntime> AdvancedSubscriber<R> {
         )?;
         Ok(Self {
             _subscriber: subscriber,
-            #[cfg(test)]
-            _statesref: state,
+            statesref: state,
             _periodic: None,
             #[cfg(feature = "ext-pubsub-advanced-recovery")]
             _retention: None,
@@ -3016,10 +3207,52 @@ impl<R: SessionRuntime> AdvancedSubscriber<R> {
     /// (zenoh `.recovery()` / `.history()`): `options` with only `history` set is a
     /// history-without-retransmission subscriber. With recovery on, a forward gap is
     /// buffered and a sample-driven `_sn`-range recovery GET refills it from the
-    /// publisher's `@adv` cache; `on_miss` fires only for a hole recovery does NOT
-    /// fill. With recovery off, a forward gap reports a [`Miss`] and delivers past
-    /// the hole.
-    pub fn declare_with_options<T, OnSample, OnMiss>(
+    /// publisher's `@adv` cache; a miss listener hears only a hole recovery does
+    /// NOT fill. With recovery off, a forward gap reports a [`Miss`] and delivers
+    /// past the hole. Misses go to the listeners declared through
+    /// [`Self::sample_miss_listener`].
+    pub fn declare_with_options<T, OnSample>(
+        session: &Session<R, T, Unicast>,
+        keyexpr: impl Into<String>,
+        options: AdvancedSubscriberOptions,
+        on_sample: OnSample,
+    ) -> Result<Self, AdvancedSubscribeError>
+    where
+        R: 'static,
+        T: TimeSource + Send + Sync + 'static,
+        <R as SessionRuntime>::LinkSink: Send + Sync,
+        SessionLinkActions<R, T>: Send + Sync + 'static,
+        Session<R, T, Unicast>: Send + 'static,
+        OnSample: FnMut(Sample) + Send + 'static,
+    {
+        Self::declare_impl(
+            session,
+            keyexpr,
+            on_sample,
+            MissHandlers::default(),
+            options,
+        )
+    }
+
+    /// R2814 — [`Self::declare_with_options`] with ONE miss listener registered
+    /// BEFORE the subscriber can detect anything, kept for the subscriber's
+    /// life (the [`SampleMissListener::background`] form).
+    ///
+    /// # Why this exists beside the upstream-shaped pair
+    ///
+    /// `declare_with_options` issues its startup history GET inside the call,
+    /// and those replies can complete — and flush their holes — before a
+    /// listener declared afterwards is registered; in loopback they complete
+    /// synchronously, so the window is not theoretical. Upstream has the same
+    /// window and its callers live with it. Two kinds of wz host cannot: one
+    /// that re-declares ONE logical subscriber on each connection it opens (the
+    /// C ABIs' per-face replay, where the C program's listener already exists
+    /// when the wz subscriber is made), and one whose reports are graded (the
+    /// demo's `ADVANCED MISS` line, which the history legs read). Seeding the
+    /// registry before the subscriber exists closes that window rather than
+    /// narrowing it. Every other listener is declared on the handle, as
+    /// upstream's are.
+    pub fn declare_with_options_and_miss_listener<T, OnSample, OnMiss>(
         session: &Session<R, T, Unicast>,
         keyexpr: impl Into<String>,
         options: AdvancedSubscriberOptions,
@@ -3035,14 +3268,16 @@ impl<R: SessionRuntime> AdvancedSubscriber<R> {
         OnSample: FnMut(Sample) + Send + 'static,
         OnMiss: FnMut(Miss) + Send + 'static,
     {
-        Self::declare_impl(session, keyexpr, on_sample, on_miss, options)
+        let mut miss_handlers = MissHandlers::default();
+        miss_handlers.register(Box::new(on_miss));
+        Self::declare_impl(session, keyexpr, on_sample, miss_handlers, options)
     }
 
-    fn declare_impl<T, OnSample, OnMiss>(
+    fn declare_impl<T, OnSample>(
         session: &Session<R, T, Unicast>,
         keyexpr: impl Into<String>,
         on_sample: OnSample,
-        on_miss: OnMiss,
+        miss_handlers: MissHandlers,
         options: AdvancedSubscriberOptions,
     ) -> Result<Self, AdvancedSubscribeError>
     where
@@ -3052,7 +3287,6 @@ impl<R: SessionRuntime> AdvancedSubscriber<R> {
         SessionLinkActions<R, T>: Send + Sync + 'static,
         Session<R, T, Unicast>: Send + 'static,
         OnSample: FnMut(Sample) + Send + 'static,
-        OnMiss: FnMut(Miss) + Send + 'static,
     {
         // R2550 — CHECK CONFIG FIRST, which is both upstream's order and the
         // only order that means anything:
@@ -3112,7 +3346,7 @@ impl<R: SessionRuntime> AdvancedSubscriber<R> {
             sequenced: HashMap::new(),
             timestamped: HashMap::new(),
             on_sample: Box::new(on_sample),
-            on_miss: Box::new(on_miss),
+            miss_handlers,
             retransmission,
             #[cfg(feature = "ext-pubsub-advanced-history")]
             global_pending_queries: usize::from(history.is_some()),
@@ -3406,8 +3640,7 @@ impl<R: SessionRuntime> AdvancedSubscriber<R> {
 
         Ok(Self {
             _subscriber: subscriber,
-            #[cfg(test)]
-            _statesref: state,
+            statesref: state,
             _periodic: periodic_task,
             #[cfg(feature = "ext-pubsub-advanced-recovery")]
             _retention: retention_task,
@@ -3475,6 +3708,128 @@ mod tests {
     use crate::session::{PublishOptions, TokioSession};
     use wz_session_core::locality::Locality;
     use wz_session_core::sample::SourceInfo;
+
+    /// The [`Miss`] a source of `zid`/`eid` reports for `nb` skipped samples.
+    fn miss_of(zid: &[u8], eid: u32, nb: u32) -> Miss {
+        Miss {
+            source: EntityGlobalId::new(zid, eid).expect("a 1..=16-byte test zid"),
+            nb,
+        }
+    }
+
+    /// A registry holding ONE listener that records into `sink` — the shape
+    /// the state-machine tests below drive [`State`] with directly.
+    #[cfg(feature = "ext-pubsub-advanced-recovery")]
+    fn recording_miss_handlers(sink: Arc<Mutex<Vec<Miss>>>) -> MissHandlers {
+        let mut handlers = MissHandlers::default();
+        handlers.register(Box::new(move |miss| sink.lock().unwrap().push(miss)));
+        handlers
+    }
+
+    /// R2814 — THE REGISTRY'S CLAIM, graded on the declared surface: two
+    /// listeners on one subscriber each hear every miss, and retracting one
+    /// leaves the other hearing.
+    ///
+    /// # Why this fixture and not "one listener fires"
+    ///
+    /// One listener firing is what the single `on_miss` closure this replaced
+    /// already did, so it grades nothing about a registry. The defect the old
+    /// shape generated — in both C ABIs, which adapted to it with one slot —
+    /// was that a second listener REPLACED the first and dropping the first
+    /// then silenced the second. Each half of that is an arm here: after the
+    /// first gap BOTH must have heard it, and after `first` is retracted the
+    /// second gap must reach `second` and NOT `first`.
+    ///
+    /// # Control
+    ///
+    /// Making [`MissHandlers::register`] clear the map before inserting (a
+    /// one-slot registry) reds the first arm — `first` hears nothing — and
+    /// making [`MissHandlers::unregister`] clear the whole map reds the last,
+    /// `second` going deaf when `first` leaves.
+    #[test]
+    fn two_miss_listeners_each_hear_and_retract_independently() {
+        let (actions, _driver) = crate::test_fixtures::recording_actions();
+        let observer = Arc::new(Mutex::new(ApplicationLayerObserver::new()));
+        let clock = Arc::new(TokioTime::new());
+        let session = TokioSession::new(actions, observer, clock);
+
+        let sub = AdvancedSubscriber::declare(&session, "demo/data", |_s: Sample| {})
+            .expect("advanced subscriber declares against the test link");
+        let heard_first = Arc::new(Mutex::new(Vec::<Miss>::new()));
+        let heard_second = Arc::new(Mutex::new(Vec::<Miss>::new()));
+        let (f, s) = (Arc::clone(&heard_first), Arc::clone(&heard_second));
+        let first = sub.sample_miss_listener(move |miss| f.lock().unwrap().push(miss));
+        let _second = sub.sample_miss_listener(move |miss| s.lock().unwrap().push(miss));
+
+        put_sequenced(&session, 0);
+        put_sequenced(&session, 2); // skips 1
+        assert_eq!(
+            (
+                heard_first.lock().unwrap().clone(),
+                heard_second.lock().unwrap().clone()
+            ),
+            (vec![miss_of(&[0x02], 7, 1)], vec![miss_of(&[0x02], 7, 1)]),
+            "both declared listeners hear the one gap"
+        );
+
+        first.undeclare();
+        put_sequenced(&session, 5); // skips 3 and 4
+        assert_eq!(
+            heard_first.lock().unwrap().clone(),
+            vec![miss_of(&[0x02], 7, 1)],
+            "a retracted listener hears nothing more"
+        );
+        assert_eq!(
+            heard_second.lock().unwrap().clone(),
+            vec![miss_of(&[0x02], 7, 1), miss_of(&[0x02], 7, 2)],
+            "retracting one listener leaves the other hearing"
+        );
+    }
+
+    /// R2814 — the two ways a listener outlives its handle or its subscriber,
+    /// each of which the registry must answer without surprise.
+    ///
+    /// * [`SampleMissListener::background`] keeps the listener registered with
+    ///   no handle left to retract it — upstream's `.background()`.
+    /// * A listener handle dropped AFTER its subscriber is a no-op: it holds
+    ///   the state weakly, so there is nothing to unregister from and nothing
+    ///   it kept alive.
+    ///
+    /// Control: making `background` leave `undeclare_on_drop` set reds the
+    /// first arm, because the handle's own drop then retracts it.
+    #[test]
+    fn a_background_listener_stays_and_a_late_drop_is_harmless() {
+        let (actions, _driver) = crate::test_fixtures::recording_actions();
+        let observer = Arc::new(Mutex::new(ApplicationLayerObserver::new()));
+        let clock = Arc::new(TokioTime::new());
+        let session = TokioSession::new(actions, observer, clock);
+
+        let sub = AdvancedSubscriber::declare(&session, "demo/data", |_s: Sample| {})
+            .expect("advanced subscriber declares against the test link");
+        let heard = Arc::new(Mutex::new(0u32));
+        let h = Arc::clone(&heard);
+        sub.sample_miss_listener(move |miss| *h.lock().unwrap() += miss.nb())
+            .background();
+        let (late, mut rx) = sub.sample_miss_listener_with_channel();
+
+        put_sequenced(&session, 0);
+        put_sequenced(&session, 3); // skips 1 and 2
+        assert_eq!(
+            *heard.lock().unwrap(),
+            2,
+            "the background listener is still registered after its handle is gone"
+        );
+        assert_eq!(
+            rx.try_recv().ok(),
+            Some(miss_of(&[0x02], 7, 2)),
+            "the channel form delivers the same miss"
+        );
+
+        drop(sub);
+        // The subscriber, and with it the registry, is gone; retracting now
+        // must neither panic nor find anything to hold.
+        late.undeclare();
+    }
 
     /// Drive the subscriber with one controlled sequence number under a
     /// fixed synthetic source identity. These are STATE-MACHINE unit tests:
@@ -3569,12 +3924,9 @@ mod tests {
 
         let delivered = Arc::new(Mutex::new(Vec::<Vec<u8>>::new()));
         let d = Arc::clone(&delivered);
-        let _sub = AdvancedSubscriber::declare(
-            &session,
-            "demo/data",
-            move |sample: Sample| d.lock().unwrap().push(sample.payload.clone()),
-            |_miss: Miss| {},
-        )
+        let _sub = AdvancedSubscriber::declare(&session, "demo/data", move |sample: Sample| {
+            d.lock().unwrap().push(sample.payload.clone())
+        })
         .expect("advanced subscriber declares against the test link");
 
         let source = &[0xC3u8, 0xC3];
@@ -3625,13 +3977,11 @@ mod tests {
         let misses = Arc::new(Mutex::new(Vec::<Miss>::new()));
         let d = Arc::clone(&delivered);
         let m = Arc::clone(&misses);
-        let _sub = AdvancedSubscriber::declare(
-            &session,
-            "demo/data",
-            move |sample: Sample| d.lock().unwrap().push(sample.payload.clone()),
-            move |miss: Miss| m.lock().unwrap().push(miss),
-        )
+        let sub = AdvancedSubscriber::declare(&session, "demo/data", move |sample: Sample| {
+            d.lock().unwrap().push(sample.payload.clone())
+        })
         .expect("advanced subscriber declares against the test link");
+        let _listener = sub.sample_miss_listener(move |miss: Miss| m.lock().unwrap().push(miss));
 
         put_sequenced(&session, 0);
         put_sequenced(&session, 1);
@@ -3646,11 +3996,7 @@ mod tests {
         let got_misses = misses.lock().unwrap().clone();
         assert_eq!(
             got_misses,
-            vec![Miss {
-                source_zid: vec![0x02],
-                source_eid: 7,
-                nb: 1,
-            }],
+            vec![miss_of(&[0x02], 7, 1)],
             "one miss reported for the single skipped sample (sn 2)"
         );
     }
@@ -3666,15 +4012,10 @@ mod tests {
 
         let delivered = Arc::new(Mutex::new(Vec::<(u32, u8)>::new()));
         let d = Arc::clone(&delivered);
-        let _sub = AdvancedSubscriber::declare(
-            &session,
-            "demo/data",
-            move |sample: Sample| {
-                let eid = sample.source_info.as_ref().map(|s| s.eid).unwrap_or(0);
-                d.lock().unwrap().push((eid, sample.payload[0]));
-            },
-            |_miss: Miss| {},
-        )
+        let _sub = AdvancedSubscriber::declare(&session, "demo/data", move |sample: Sample| {
+            let eid = sample.source_info.as_ref().map(|s| s.eid).unwrap_or(0);
+            d.lock().unwrap().push((eid, sample.payload[0]));
+        })
         .expect("advanced subscriber declares");
 
         // Source eid=7 sends sn 0; source eid=8 sends sn 5 (its first — no
@@ -3730,13 +4071,11 @@ mod tests {
         let misses = Arc::new(Mutex::new(0usize));
         let d = Arc::clone(&delivered);
         let m = Arc::clone(&misses);
-        let _sub = AdvancedSubscriber::declare(
-            &session,
-            "demo/data",
-            move |sample: Sample| d.lock().unwrap().push(sample.payload[0]),
-            move |_miss: Miss| *m.lock().unwrap() += 1,
-        )
+        let sub = AdvancedSubscriber::declare(&session, "demo/data", move |sample: Sample| {
+            d.lock().unwrap().push(sample.payload[0])
+        })
         .expect("advanced subscriber declares");
+        let _listener = sub.sample_miss_listener(move |_miss: Miss| *m.lock().unwrap() += 1);
 
         // A REAL publisher with its OWN zid (its genuine identity) +
         // SequenceNumber sequencing; default Locality::Any -> the loopback
@@ -3792,7 +4131,7 @@ mod tests {
             sequenced: HashMap::new(),
             timestamped: HashMap::new(),
             on_sample: Box::new(move |s: Sample| d.lock().unwrap().push(s.payload[0])),
-            on_miss: Box::new(move |miss: Miss| m.lock().unwrap().push(miss)),
+            miss_handlers: recording_miss_handlers(m),
             retransmission: true,
             #[cfg(feature = "ext-pubsub-advanced-history")]
             global_pending_queries: 0,
@@ -3853,7 +4192,7 @@ mod tests {
             sequenced: HashMap::new(),
             timestamped: HashMap::new(),
             on_sample: Box::new(move |s: Sample| d.lock().unwrap().push(s.payload[0])),
-            on_miss: Box::new(move |miss: Miss| m.lock().unwrap().push(miss)),
+            miss_handlers: recording_miss_handlers(m),
             retransmission: true,
             #[cfg(feature = "ext-pubsub-advanced-history")]
             global_pending_queries: 0,
@@ -3882,11 +4221,7 @@ mod tests {
         );
         assert_eq!(
             misses.lock().unwrap().clone(),
-            vec![Miss {
-                source_zid: vec![0x02],
-                source_eid: 7,
-                nb: 1,
-            }],
+            vec![miss_of(&[0x02], 7, 1)],
             "the unfilled hole surfaces one Miss(nb=1) at flush"
         );
     }
@@ -3934,7 +4269,6 @@ mod tests {
                 "demo/data",
                 AdvancedSubscriberOptions::new().with_history(history),
                 |_s: Sample| {},
-                |_m: Miss| {},
             )
             .map(|_| ())
         };
@@ -4019,7 +4353,7 @@ mod tests {
         let misses = Arc::new(Mutex::new(0usize));
         let d = Arc::clone(&delivered);
         let m = Arc::clone(&misses);
-        let _sub = AdvancedSubscriber::declare_with_options(
+        let _sub = AdvancedSubscriber::declare_with_options_and_miss_listener(
             &session,
             "demo/data",
             AdvancedSubscriberOptions::new()
@@ -4145,7 +4479,7 @@ mod tests {
         let d = Arc::clone(&delivered);
         let ts = Arc::clone(&stamps);
         let m = Arc::clone(&misses);
-        let _sub = AdvancedSubscriber::declare_with_options(
+        let _sub = AdvancedSubscriber::declare_with_options_and_miss_listener(
             &session,
             "demo/data",
             AdvancedSubscriberOptions::new()
@@ -4216,7 +4550,7 @@ mod tests {
             sequenced: HashMap::new(),
             timestamped: HashMap::new(),
             on_sample: Box::new(|_| {}),
-            on_miss: Box::new(|_| {}),
+            miss_handlers: MissHandlers::default(),
             retransmission: true,
             #[cfg(feature = "ext-pubsub-advanced-history")]
             global_pending_queries: 0,
@@ -4261,7 +4595,7 @@ mod tests {
             sequenced: HashMap::new(),
             timestamped: HashMap::new(),
             on_sample: Box::new(|_| {}),
-            on_miss: Box::new(|_| {}),
+            miss_handlers: MissHandlers::default(),
             retransmission: false,
             #[cfg(feature = "ext-pubsub-advanced-history")]
             global_pending_queries: 0,
@@ -4333,7 +4667,7 @@ mod tests {
         let misses = Arc::new(Mutex::new(0usize));
         let d = Arc::clone(&delivered);
         let m = Arc::clone(&misses);
-        let sub = AdvancedSubscriber::declare_with_options(
+        let sub = AdvancedSubscriber::declare_with_options_and_miss_listener(
             &session,
             "demo/data",
             AdvancedSubscriberOptions::new()
@@ -4367,7 +4701,7 @@ mod tests {
         // One periodic tick re-asks _sn=2.. -> the cache refills sn 2.
         run_periodic_tick(
             &session,
-            &sub._statesref,
+            &sub.statesref,
             // The subscriber's OWN registry, not a throwaway: driving the tick
             // through a second one would exercise a code path production never
             // takes and would leave the real registry unobserved.
@@ -4492,7 +4826,7 @@ mod tests {
             sequenced: HashMap::new(),
             timestamped: HashMap::new(),
             on_sample: Box::new(|_| {}),
-            on_miss: Box::new(|_| {}),
+            miss_handlers: MissHandlers::default(),
             retransmission: true,
             #[cfg(feature = "ext-pubsub-advanced-history")]
             global_pending_queries: 0,
@@ -4523,7 +4857,7 @@ mod tests {
             sequenced: HashMap::new(),
             timestamped: HashMap::new(),
             on_sample: Box::new(|_| {}),
-            on_miss: Box::new(|_| {}),
+            miss_handlers: MissHandlers::default(),
             retransmission: false,
             #[cfg(feature = "ext-pubsub-advanced-history")]
             global_pending_queries: 0,
@@ -4571,7 +4905,7 @@ mod tests {
             sequenced: HashMap::new(),
             timestamped: HashMap::new(),
             on_sample: Box::new(|_| {}),
-            on_miss: Box::new(|_| {}),
+            miss_handlers: MissHandlers::default(),
             retransmission: true,
             #[cfg(feature = "ext-pubsub-advanced-history")]
             global_pending_queries: 0,
@@ -4636,7 +4970,7 @@ mod tests {
             sequenced: HashMap::new(),
             timestamped: HashMap::new(),
             on_sample: Box::new(|_| {}),
-            on_miss: Box::new(|_| {}),
+            miss_handlers: MissHandlers::default(),
             retransmission: true,
             global_pending_queries: global,
             max_history_depth: usize::MAX,
@@ -4735,7 +5069,7 @@ mod tests {
         let misses = Arc::new(Mutex::new(0usize));
         let d = Arc::clone(&delivered);
         let m = Arc::clone(&misses);
-        let _sub = AdvancedSubscriber::declare_with_options(
+        let _sub = AdvancedSubscriber::declare_with_options_and_miss_listener(
             &session,
             "demo/data",
             AdvancedSubscriberOptions::new()
@@ -4795,7 +5129,7 @@ mod tests {
             sequenced: HashMap::new(),
             timestamped: HashMap::new(),
             on_sample: Box::new(move |s: Sample| d.lock().unwrap().push(s.payload[0])),
-            on_miss: Box::new(|_| {}),
+            miss_handlers: MissHandlers::default(),
             retransmission: true,
             global_pending_queries: 1,
             max_history_depth: usize::MAX,
@@ -4851,7 +5185,7 @@ mod tests {
             sequenced: HashMap::new(),
             timestamped: HashMap::new(),
             on_sample: Box::new(move |s: Sample| d.lock().unwrap().push(s.payload[0])),
-            on_miss: Box::new(|_| {}),
+            miss_handlers: MissHandlers::default(),
             retransmission: true,
             global_pending_queries: 1,
             max_history_depth: usize::MAX,
@@ -4961,7 +5295,6 @@ mod tests {
                 .with_history(HistoryConfig::new().detect_late_publishers())
                 .with_get_locality(Locality::SessionLocal),
             move |sample: Sample| d.lock().unwrap().push(sample.payload[0]),
-            |_miss: Miss| {},
         )
         .expect("late-publisher-detecting subscriber declares");
         assert!(delivered.lock().unwrap().is_empty());
@@ -5020,7 +5353,7 @@ mod tests {
             sequenced: HashMap::new(),
             timestamped: HashMap::new(),
             on_sample: Box::new(move |s: Sample| d.lock().unwrap().push(s.payload[0])),
-            on_miss: Box::new(|_| {}),
+            miss_handlers: MissHandlers::default(),
             retransmission: true,
             // The startup GET, exactly as `declare_impl` sets it.
             global_pending_queries: 1,
@@ -5087,7 +5420,7 @@ mod tests {
                 sequenced: HashMap::new(),
                 timestamped: HashMap::new(),
                 on_sample: Box::new(move |s: Sample| d.lock().unwrap().push(s.payload[0])),
-                on_miss: Box::new(|_| {}),
+                miss_handlers: MissHandlers::default(),
                 retransmission: true,
                 global_pending_queries: 1,
                 max_history_depth: depth,
@@ -5148,7 +5481,7 @@ mod tests {
                 sequenced: HashMap::new(),
                 timestamped: HashMap::new(),
                 on_sample: Box::new(move |s: Sample| d.lock().unwrap().push(s.payload[0])),
-                on_miss: Box::new(|_| {}),
+                miss_handlers: MissHandlers::default(),
                 retransmission: true,
                 global_pending_queries: 1,
                 max_history_depth: depth,
@@ -5200,7 +5533,7 @@ mod tests {
                 sequenced: HashMap::new(),
                 timestamped: HashMap::new(),
                 on_sample: Box::new(move |s: Sample| d.lock().unwrap().push(s.payload[0])),
-                on_miss: Box::new(|_| {}),
+                miss_handlers: MissHandlers::default(),
                 retransmission: true,
                 // NOT the history arm: this exercises the `if retransmission`
                 // insert, which compiles with the history feature off.
@@ -5286,7 +5619,6 @@ mod tests {
                 .with_history(HistoryConfig::new())
                 .with_get_locality(Locality::SessionLocal),
             move |sample: Sample| d.lock().unwrap().push(sample.payload[0]),
-            |_miss: Miss| {},
         )
         .expect("history-enabled advanced subscriber declares");
 
@@ -5312,7 +5644,7 @@ mod tests {
             sequenced: HashMap::new(),
             timestamped: HashMap::new(),
             on_sample: Box::new(move |s: Sample| d.lock().unwrap().push(s.payload[0])),
-            on_miss: Box::new(|_| {}),
+            miss_handlers: MissHandlers::default(),
             retransmission: true,
             global_pending_queries: 1,
             max_history_depth: usize::MAX,
@@ -5409,7 +5741,6 @@ mod tests {
                 .with_get_locality(Locality::Any)
                 .with_query_timeout(timeout),
             move |sample: Sample| d.lock().unwrap().push(sample.payload[0]),
-            |_miss: Miss| {},
         )
         .expect("history-enabled advanced subscriber declares");
 
@@ -5469,7 +5800,6 @@ mod tests {
                 RecoveryConfig::new().with_periodic_queries(Duration::from_millis(100)),
             ),
             |_sample: Sample| {},
-            |_miss: Miss| {},
         );
         assert!(
             matches!(result, Err(AdvancedSubscribeError::NoRuntime)),
@@ -5531,7 +5861,6 @@ mod tests {
                 .with_history(HistoryConfig::new())
                 .with_get_locality(Locality::SessionLocal),
             move |sample: Sample| d.lock().unwrap().push(sample.payload[0]),
-            |_miss: Miss| {},
         )
         .expect("history-only (no recovery) advanced subscriber declares");
 
@@ -5596,7 +5925,6 @@ mod tests {
                 .with_history(HistoryConfig::new().max_samples(2))
                 .with_get_locality(Locality::SessionLocal),
             move |sample: Sample| d.lock().unwrap().push(sample.payload[0]),
-            |_miss: Miss| {},
         )
         .expect("capped-history advanced subscriber declares");
 
@@ -5697,7 +6025,6 @@ mod tests {
                 .with_history(HistoryConfig::new().max_age(3600.0))
                 .with_get_locality(Locality::SessionLocal),
             move |sample: Sample| d.lock().unwrap().push(sample.payload[0]),
-            |_miss: Miss| {},
         )
         .expect("age-bounded history advanced subscriber declares");
 
@@ -5718,7 +6045,7 @@ mod tests {
             sequenced: HashMap::new(),
             timestamped: HashMap::new(),
             on_sample: Box::new(|_| {}),
-            on_miss: Box::new(|_| {}),
+            miss_handlers: MissHandlers::default(),
             retransmission: false, // late-pub detection is NOT a retransmission concern
             global_pending_queries: 0,
             #[cfg(feature = "ext-pubsub-advanced-history")]
@@ -5751,7 +6078,7 @@ mod tests {
             sequenced: HashMap::new(),
             timestamped: HashMap::new(),
             on_sample: Box::new(|_| {}),
-            on_miss: Box::new(|_| {}),
+            miss_handlers: MissHandlers::default(),
             retransmission: false,
             global_pending_queries: 0,
             max_history_depth: usize::MAX,
@@ -5869,7 +6196,6 @@ mod tests {
                 .with_history(HistoryConfig::new().detect_late_publishers())
                 .with_get_locality(Locality::SessionLocal),
             move |sample: Sample| d.lock().unwrap().push(sample.payload[0]),
-            |_miss: Miss| {},
         )
         .expect("late-publisher-detecting subscriber declares");
         assert!(
@@ -6022,7 +6348,6 @@ mod tests {
                 .with_history(HistoryConfig::new().detect_late_publishers())
                 .with_get_locality(Locality::SessionLocal),
             move |sample: Sample| d.lock().unwrap().push(sample.payload[0]),
-            |_miss: Miss| {},
         )
         .expect("late-publisher-detecting subscriber declares");
         assert!(
@@ -6216,7 +6541,6 @@ mod tests {
                 .with_history(HistoryConfig::new())
                 .with_get_locality(Locality::SessionLocal),
             move |sample: Sample| d.lock().unwrap().push(sample.payload[0]),
-            |_miss: Miss| {},
         )
         .expect("history-enabled advanced subscriber declares");
 
@@ -6276,7 +6600,6 @@ mod tests {
                 .with_get_locality(Locality::Remote)
                 .with_query_timeout(Duration::from_secs(3600)),
             move |sample: Sample| d.lock().unwrap().push(sample.payload[0]),
-            |_miss: Miss| {},
         )
         .expect("history-enabled advanced subscriber declares");
         (delivered, session, sub, probe + 1)
@@ -6374,13 +6697,8 @@ mod tests {
         )
         .expect("advanced publisher declares");
 
-        let _sub = AdvancedSubscriber::declare(
-            &session,
-            "demo/data",
-            |_sample: Sample| {},
-            |_miss: Miss| {},
-        )
-        .expect("advanced subscriber declares");
+        let _sub = AdvancedSubscriber::declare(&session, "demo/data", |_sample: Sample| {})
+            .expect("advanced subscriber declares");
 
         assert!(
             frames_carrying(&driver, "demo/data/@adv/pub/") > 0,
@@ -6546,7 +6864,6 @@ mod tests {
                 AdvancedSubscriberOptions::new()
                     .with_subscriber_detection(SubscriberDetection::new(bad)),
                 |_s: Sample| {},
-                |_m: Miss| {},
             ) else {
                 panic!("a non-zid must be refused, not accepted");
             };
@@ -6630,7 +6947,6 @@ mod tests {
             "demo/data",
             options,
             |_s: Sample| {},
-            |_m: Miss| {},
         )
         .expect("advanced subscriber declares");
         (
@@ -6739,7 +7055,6 @@ mod tests {
                 // registry directly drop their driver.
                 .with_get_locality(Locality::Remote),
             |_s: Sample| {},
-            |_m: Miss| {},
         )
         .expect("history-enabled advanced subscriber declares");
 

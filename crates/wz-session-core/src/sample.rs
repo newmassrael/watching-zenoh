@@ -417,6 +417,96 @@ impl SourceInfo {
             &[]
         }
     }
+
+    /// The `(zid, eid)` half of this record as ONE value — upstream's
+    /// `zenoh/src/api/sample.rs` @ `pub fn source_id(&self) -> &EntityGlobalId {`,
+    /// the identity the sequence number is attached to.
+    ///
+    /// `None` for the `Default` sentinel (and any record whose `zid_len` is
+    /// outside `1..=16`), because [`EntityGlobalId`] cannot represent an
+    /// absent source: a zero-length zid is "no source info" here, not an
+    /// identity to key on.
+    pub fn source_id(&self) -> Option<EntityGlobalId> {
+        EntityGlobalId::new(self.zid_prefix(), self.eid)
+    }
+}
+
+/// The global identity of one zenoh entity: its session's zid plus the
+/// entity id that session allocated.
+///
+/// Mirror of zenoh's `EntityGlobalId` (`commons/zenoh-config/src/wrappers.rs`
+/// @ `pub struct EntityGlobalId(EntityGlobalIdProto);`) and of zenoh-pico's
+/// `_z_entity_global_id_t`: the pair a sample's `SourceInfo` names its source
+/// by, and the key upstream's advanced subscriber orders each source under.
+///
+/// ONE VALUE RATHER THAN TWO FIELDS, which is the point of the type. Upstream
+/// hands its consumers the source as a single opaque, hashable key
+/// (`Miss::source()`, `AdvancedPublisher::id()`); a consumer given the zid and
+/// the eid separately has to rebuild that key itself, and two consumers that
+/// rebuild it differently (one keeping the padded buffer, one the prefix) then
+/// disagree about whether two sources are the same.
+///
+/// Stored like [`SourceInfo`] stores it — a 16-byte right-zero-padded buffer
+/// plus the effective length — so it is `Copy` and allocation-free, and
+/// equality and hashing read only the meaningful prefix: a 4-byte zid and an
+/// 8-byte zid that happen to share a prefix are different identities.
+#[derive(Clone, Copy)]
+pub struct EntityGlobalId {
+    zid: [u8; 16],
+    zid_len: u8,
+    eid: u32,
+}
+
+impl EntityGlobalId {
+    /// Build an identity from a zid prefix and an entity id. `None` when the
+    /// zid is outside `1..=16` bytes, the range every zid on the wire has
+    /// (zenoh-pico `_Z_ID_LENGTH`, and the `(zidlen - 1)` header nibble).
+    pub fn new(zid: &[u8], eid: u32) -> Option<Self> {
+        if !(1..=16).contains(&zid.len()) {
+            return None;
+        }
+        let mut padded = [0u8; 16];
+        padded[..zid.len()].copy_from_slice(zid);
+        Some(Self {
+            zid: padded,
+            zid_len: zid.len() as u8,
+            eid,
+        })
+    }
+
+    /// The entity's session zid — the meaningful prefix only.
+    pub fn zid(&self) -> &[u8] {
+        &self.zid[..self.zid_len as usize]
+    }
+
+    /// The entity id within that session.
+    pub fn eid(&self) -> u32 {
+        self.eid
+    }
+}
+
+impl PartialEq for EntityGlobalId {
+    fn eq(&self, other: &Self) -> bool {
+        self.zid() == other.zid() && self.eid == other.eid
+    }
+}
+
+impl Eq for EntityGlobalId {}
+
+impl core::hash::Hash for EntityGlobalId {
+    fn hash<H: core::hash::Hasher>(&self, state: &mut H) {
+        self.zid().hash(state);
+        self.eid.hash(state);
+    }
+}
+
+impl core::fmt::Debug for EntityGlobalId {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("EntityGlobalId")
+            .field("zid", &self.zid())
+            .field("eid", &self.eid)
+            .finish()
+    }
 }
 
 // R226 — Reliability was hoisted to the crate root so the outbound

@@ -2188,7 +2188,9 @@ fn install_session_handles(
             };
             options = options.with_recovery(recovery);
         }
-        let declared = AdvancedSubscriber::declare_with_options(
+        // R2814 — the seeded form: the startup history GET can flush a hole
+        // inside the declare, and the `ADVANCED MISS` line must report it.
+        let declared = AdvancedSubscriber::declare_with_options_and_miss_listener(
             session,
             owned_filter,
             options,
@@ -2206,7 +2208,7 @@ fn install_session_handles(
             move |miss| {
                 log::info!(
                     "wz-ap-demo: ADVANCED MISS filter='{key_for_miss}' missed={}",
-                    miss.nb,
+                    miss.nb(),
                 );
             },
         );

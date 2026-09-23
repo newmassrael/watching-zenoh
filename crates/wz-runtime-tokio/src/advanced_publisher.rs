@@ -1631,7 +1631,7 @@ mod tests {
         let misses = Arc::new(Mutex::new(0usize));
         let d = Arc::clone(&delivered);
         let m = Arc::clone(&misses);
-        let _sub = AdvancedSubscriber::declare_with_options(
+        let _sub = AdvancedSubscriber::declare_with_options_and_miss_listener(
             &session,
             "demo/data",
             AdvancedSubscriberOptions::new()

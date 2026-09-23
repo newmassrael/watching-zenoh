@@ -43,17 +43,22 @@
 //! reason the layout gate can measure them against a C compiler instead of
 //! against a transcription.
 //!
-//! ## The miss listener is installed AFTER the subscriber
+//! ## The miss listeners are declared AFTER the subscriber
 //!
 //! Upstream's `z_advanced_sub.c` declares the subscriber first and
-//! `ze_advanced_subscriber_declare_background_sample_miss_listener` second, but
-//! wz's `AdvancedSubscriber` takes both callbacks up front. So the subscriber is
-//! declared with an `on_miss` that reads a shared slot and the listener fills
-//! that slot. The slot is the mechanism that makes upstream's ordering work; it
-//! is not a placeholder.
+//! `ze_advanced_subscriber_declare_background_sample_miss_listener` second, and
+//! any number of listeners may follow. The C subscriber is one wz subscriber PER
+//! FACE, so each face's wz subscriber reports into one [`ListenerSet`] that
+//! belongs to the C handle, and each C listener is one entry in it.
+//!
+//! R2814 — that set replaced a single slot a listener "installed into": a
+//! second listener replaced the first, and dropping the first then silenced the
+//! second. The slot existed because the wz subscriber took exactly one miss
+//! callback at declare; wz's subscriber now has a registry of its own, and this
+//! ABI's fan-in is a set for the same reason.
 
 use std::ffi::c_void;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::Duration;
 
 use wz_runtime_tokio::advanced_cache::{CacheConfig, RepliesConfig};
@@ -80,6 +85,7 @@ use crate::sub::{subscriber_state_handle, z_subscriber_options_t, CClosure};
 use crate::zid::{z_id_t, Z_ID_SIZE};
 
 use wz_capi_core::faces::{AdvPubId, AdvSubId, SharedSession};
+use wz_capi_core::listeners::ListenerSet;
 
 /// `true` when this build targets a zenoh-c compiled WITH
 /// `Z_FEATURE_SHARED_MEMORY`. The advanced PUBLISHER is one of the types that
@@ -1194,19 +1200,16 @@ impl ze_owned_advanced_subscriber_t {
     }
 }
 
-/// The slot a miss listener installs into, shared with every face's `on_miss`.
-///
-/// Behind a `Mutex` rather than an atomic cell because installation and removal
-/// are rare and the read is on the miss path, which only runs when a gap is
-/// actually detected.
-type MissSlot = Arc<Mutex<Option<Arc<CMissClosure>>>>;
+/// The C miss listeners declared on one C advanced subscriber, shared with
+/// every face's wz subscriber, which reports into it. See the module note.
+type MissSlot = Arc<ListenerSet<CMissClosure>>;
 
 /// Behind a `ze_owned_advanced_subscriber_t` handle.
 struct AdvSubState {
     shared: Arc<SharedSession>,
     id: AdvSubId,
-    /// The miss closure the C side may install AFTER declaring — see the module
-    /// note on ordering.
+    /// The miss listeners the C side declares AFTER declaring this — see the
+    /// module note on ordering.
     miss: MissSlot,
     /// R311y568 — the keyexpr this subscriber was declared under, so
     /// [`ze_advanced_subscriber_keyexpr`] can answer.
@@ -1293,38 +1296,37 @@ unsafe fn advanced_subscriber_options(
     out
 }
 
-/// Deliver one wz [`Miss`] to whatever C miss closure is installed.
+/// Deliver one wz [`Miss`] to every declared C miss listener.
 ///
 /// A miss with no listener is silently dropped, which is upstream's behaviour
 /// too: the listener is optional and the sample stream is unaffected by its
 /// absence.
 fn fire_miss(slot: &MissSlot, miss: &Miss) {
-    let Ok(guard) = slot.lock() else {
-        return;
-    };
-    let Some(closure) = guard.as_ref() else {
-        return;
-    };
-    let Some(call) = closure.call else {
-        return;
-    };
+    let source = miss.source();
     let mut zid = [0u8; Z_ID_SIZE];
-    let n = miss.source_zid.len().min(zid.len());
-    zid[..n].copy_from_slice(&miss.source_zid[..n]);
+    let n = source.zid().len().min(zid.len());
+    zid[..n].copy_from_slice(&source.zid()[..n]);
     let value = ze_miss_t {
         source: z_entity_global_id_t {
             zid: z_id_t { id: zid },
-            eid: miss.source_eid,
+            eid: source.eid(),
         },
-        nb: miss.nb,
+        nb: miss.nb(),
     };
-    let ctx = closure.context.0;
-    // SAFETY: `call` is the C callback and `value` is valid for exactly this
-    // call. An unwind out of it across `extern "C"` is UB and would tear down the
-    // drive thread, so it is caught here.
-    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| unsafe {
-        call(&value as *const ze_miss_t, ctx);
-    }));
+    // Called with the set UNLOCKED (`snapshot`), so a listener that undeclares
+    // itself from inside its own callback does not deadlock.
+    for closure in slot.snapshot() {
+        let Some(call) = closure.call else {
+            continue;
+        };
+        let ctx = closure.context.0;
+        // SAFETY: `call` is the C callback and `value` is valid for exactly
+        // this call. An unwind out of it across `extern "C"` is UB and would
+        // tear down the drive thread, so it is caught here.
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| unsafe {
+            call(&value as *const ze_miss_t, ctx);
+        }));
+    }
 }
 
 /// Declare an advanced subscriber the C side never holds (zenoh-c
@@ -1396,7 +1398,7 @@ pub unsafe extern "C" fn ze_declare_advanced_subscriber(
         if wz_runtime_tokio::keyexpr_canon::check_outbound_keyexpr_pico_safe(&ke).is_err() {
             return Z_EINVAL;
         }
-        let miss: MissSlot = Arc::new(Mutex::new(None));
+        let miss: MissSlot = Arc::new(ListenerSet::new());
         // SAFETY: the caller's contract.
         let opts = unsafe { advanced_subscriber_options(options) };
         let declared = ke.clone();
@@ -1624,37 +1626,26 @@ impl ze_owned_sample_miss_listener_t {
     }
 }
 
-/// Behind a `ze_owned_sample_miss_listener_t` handle: the slot to clear.
+/// Behind a `ze_owned_sample_miss_listener_t` handle: this listener's own entry
+/// in its subscriber's set.
 ///
-/// Clearing on drop is what makes `z_drop(z_move(listener))` stop the
+/// Removing it on drop is what makes `z_drop(z_move(listener))` stop the
 /// notifications, and it is also what releases the last `Arc<CMissClosure>` —
-/// running the C `drop(context)`.
+/// running the C `drop(context)`. It removes ONLY its own entry, so the other
+/// listeners on the same subscriber keep hearing.
 struct MissListenerState {
     slot: MissSlot,
+    id: u64,
 }
 
 impl Drop for MissListenerState {
     fn drop(&mut self) {
-        // Take the closure OUT under the lock and release it AFTER, so the C
-        // `drop(context)` never runs while the slot is held: a drop that
-        // re-entered the subscriber would otherwise deadlock on this mutex.
-        let taken = self.slot.lock().ok().and_then(|mut guard| guard.take());
+        // `remove` hands the closure back rather than dropping it under the
+        // set's lock, so the C `drop(context)` runs unlocked: a drop that
+        // re-entered the subscriber would otherwise deadlock.
+        let taken = self.slot.remove(self.id);
         drop(taken);
     }
-}
-
-/// Install the miss closure into `state`'s slot, replacing any previous one.
-///
-/// Shared by the owned and background forms so the two cannot diverge on what
-/// installation means. The previous closure is released OUTSIDE the lock, for
-/// the reason [`MissListenerState::drop`] states.
-fn install_miss(state: &AdvSubState, closure: Arc<CMissClosure>) -> bool {
-    let previous = match state.miss.lock() {
-        Ok(mut guard) => guard.replace(closure),
-        Err(poisoned) => poisoned.into_inner().replace(closure),
-    };
-    drop(previous);
-    true
 }
 
 /// Install a sample-miss listener (zenoh-c
@@ -1689,9 +1680,10 @@ pub unsafe extern "C" fn ze_advanced_subscriber_declare_sample_miss_listener(
         let Some(state) = (unsafe { adv_sub_state(subscriber) }) else {
             return Z_ENULL;
         };
-        install_miss(state, cclosure);
+        let id = state.miss.insert(cclosure);
         let boxed = Box::new(MissListenerState {
             slot: state.miss.clone(),
+            id,
         });
         // SAFETY: `listener` was checked non-null above.
         unsafe { (*listener).handle = Box::into_raw(boxed) as Handle };
@@ -1733,7 +1725,9 @@ pub unsafe extern "C" fn ze_advanced_subscriber_declare_background_sample_miss_l
         let Some(state) = (unsafe { adv_sub_state(subscriber) }) else {
             return Z_ENULL;
         };
-        install_miss(state, cclosure);
+        // The id is not kept: no handle exists to remove it, which is what
+        // "background" means.
+        let _ = state.miss.insert(cclosure);
         Z_OK
     })
 }
@@ -1793,7 +1787,7 @@ pub unsafe extern "C" fn ze_undeclare_sample_miss_listener(
         let handle = unsafe { (*this_)._this.handle };
         if !handle.is_null() {
             // SAFETY: a live `Box<MissListenerState>` this crate leaked; its
-            // `Drop` clears the slot and releases the C closure.
+            // `Drop` removes this listener's entry and releases the C closure.
             drop(unsafe { Box::from_raw(handle as *mut MissListenerState) });
             // SAFETY: the caller's contract.
             unsafe { (*this_)._this = ze_owned_sample_miss_listener_t::null_value() };
@@ -1914,6 +1908,104 @@ const _: () = {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A miss closure that does nothing — only its MEMBERSHIP in the set is
+    /// graded below, never a call.
+    unsafe extern "C" fn ignore_miss(_miss: *const ze_miss_t, _ctx: *mut c_void) {}
+
+    fn moved_miss_closure() -> ze_moved_closure_miss_t {
+        ze_moved_closure_miss_t {
+            _this: ze_owned_closure_miss_t {
+                context: std::ptr::null_mut(),
+                call: Some(ignore_miss),
+                drop: None,
+            },
+        }
+    }
+
+    /// R2814 — both listener forms land in the subscriber's set, and a
+    /// retracted owned listener removes only itself. The zenoh-pico twin of
+    /// this test grades the same set through pico's entry points; this ABI
+    /// had the same one-slot adapter, so it carries the same witness.
+    ///
+    /// # Control
+    ///
+    /// Making `ListenerSet::insert` clear the map first (the one-slot shape
+    /// this replaced) reds the count after the second owned listener.
+    #[test]
+    fn miss_listeners_join_the_set_and_leave_it_one_at_a_time() {
+        let shared = Arc::new(
+            SharedSession::new(
+                wz_runtime_tokio::runtime_impl::TokioTime::new(),
+                vec![0x11; 16],
+            )
+            .expect("test host entropy"),
+        );
+        let mut state = Box::new(AdvSubState {
+            shared,
+            id: 0,
+            miss: Arc::new(ListenerSet::new()),
+            keyexpr: crate::keyexpr::DeclaredKeyexpr::new("demo/data".to_owned()),
+        });
+        state.keyexpr.bind();
+        let miss = state.miss.clone();
+        let mut owned = ze_owned_advanced_subscriber_t::null_value();
+        owned.handle = Box::into_raw(state) as Handle;
+        let loaned = &owned as *const ze_owned_advanced_subscriber_t
+            as *const ze_loaned_advanced_subscriber_t;
+
+        let mut background = moved_miss_closure();
+        // SAFETY: `loaned` points at a live subscriber on this frame and the
+        // closure is a valid moved closure.
+        let rc = unsafe {
+            ze_advanced_subscriber_declare_background_sample_miss_listener(loaned, &mut background)
+        };
+        assert_eq!((rc, miss.snapshot().len()), (Z_OK, 1));
+
+        let mut first = ze_owned_sample_miss_listener_t::null_value();
+        let mut second = ze_owned_sample_miss_listener_t::null_value();
+        let (mut c1, mut c2) = (moved_miss_closure(), moved_miss_closure());
+        // SAFETY: as above; both listener slots are writable locals.
+        unsafe {
+            assert_eq!(
+                ze_advanced_subscriber_declare_sample_miss_listener(loaned, &mut first, &mut c1),
+                Z_OK
+            );
+            assert_eq!(
+                ze_advanced_subscriber_declare_sample_miss_listener(loaned, &mut second, &mut c2),
+                Z_OK
+            );
+        }
+        assert_eq!(
+            miss.snapshot().len(),
+            3,
+            "a second owned listener joins the first rather than replacing it"
+        );
+
+        // SAFETY: `first` holds a live listener handle.
+        let rc = unsafe {
+            ze_undeclare_sample_miss_listener(
+                &mut first as *mut ze_owned_sample_miss_listener_t
+                    as *mut ze_moved_sample_miss_listener_t,
+            )
+        };
+        assert_eq!(rc, Z_OK);
+        assert_eq!(
+            miss.snapshot().len(),
+            2,
+            "retracting one listener removes only its own entry"
+        );
+
+        // SAFETY: both handles are live; the subscriber is reclaimed last.
+        unsafe {
+            ze_undeclare_sample_miss_listener(
+                &mut second as *mut ze_owned_sample_miss_listener_t
+                    as *mut ze_moved_sample_miss_listener_t,
+            );
+            let mut moved = ze_moved_advanced_subscriber_t { _this: owned };
+            ze_undeclare_advanced_subscriber(&mut moved);
+        }
+    }
 
     /// R2596 — the cache's three reply-QoS fields REACH the config.
     ///

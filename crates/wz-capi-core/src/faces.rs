@@ -1271,7 +1271,10 @@ impl SharedSession {
         let mut adv_subs = BTreeMap::new();
         for entry in &guard.adv_subs {
             let (on_sample, on_miss) = (entry.sink)();
-            if let Ok(sub) = AdvancedSubscriber::declare_with_options(
+            // R2814 — the seeded form: this is a replay of a subscriber the C
+            // program already holds, so its miss listener exists before the
+            // face's startup history GET can report anything.
+            if let Ok(sub) = AdvancedSubscriber::declare_with_options_and_miss_listener(
                 &session,
                 entry.keyexpr.clone(),
                 // R311y826 — cloned, not moved: `AdvancedSubscriberOptions`
@@ -2522,7 +2525,8 @@ impl SharedSession {
             // R2366, that task names the `app` subsystem, so this guard is the
             // same defence-in-depth the publisher's now is.
             let _guard = face.runtime.as_ref().map(|rt| rt.enter());
-            if let Ok(sub) = AdvancedSubscriber::declare_with_options(
+            // R2814 — seeded for the same reason as the replay in `face_up`.
+            if let Ok(sub) = AdvancedSubscriber::declare_with_options_and_miss_listener(
                 &face.session,
                 keyexpr.clone(),
                 // Cloned per face: the loop declares one subscriber on each,
