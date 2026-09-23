@@ -189,96 +189,29 @@ git config core.hooksPath .githooks
 - **commit-msg** — enforces `COMMIT_FORMAT.md` (subject and body
   ≤72 bytes per line, no multi-line bullet wraps, no
   Co-Authored-By / "Generated with Claude Code" / emoji).
-- **pre-push** — FAST local gate (R311y386), NOT a full CI mirror.
-  Runs only (1) the **schema pin against every pushed commit**
-  (R311y418) — `git commit` is not the only route to origin, and
-  cherry-pick / rebase / merge / `--no-verify` all skip pre-commit
-  entirely; (2) `mnemosyne-cli validate-workspace` — the SSOT
-  integrity gate (seconds; catches a bypassed typed-mutate / new T1
-  orphan / frozen-ledger violation before origin; re-run past
-  pre-commit because amends / rebases change post-commit state; an
-  absent `mnemosyne-cli` is a hard FAIL since R311y418, not the SKIP
-  it was) — (3) `cargo test -p <crate>` for ONLY the crates the
-  push's diff changes (default features; crate DIR → package name via
-  its Cargo.toml) — and (4) **Layer C1bz over those same crates**
-  (R311y792), the doc-link budget, via `WZ_C1BZ_ONLY`. A doc comment
-  is the one edit `cargo test` structurally cannot fail on, and the
-  class was paid for twice (R311y787, R311y790) before it got a gate;
-  a count ABOVE budget is a link the push added (fix the link, never
-  the budget), a count BELOW it is one the push removed (lower the
-  budget in that same commit). R2138 adds (5) **the config-key /
-  fixture gate** (`scripts/lib/config_key_fixture_gate.py`, open-debt
-  item 224) — honouring an upstream config key means editing a JSON5
-  fixture in a DIFFERENT crate, behind `#[ignore]`, so gate (3) can
-  never see it: the crate that moved is not the crate that fails.
-  ~1s, unconditional, and Layer C0 runs the same script hosted.
-  ⚠ The word "only" above is a policy statement, not an inventory:
-  this hook also carries gates 0 / 0b / 0c (confidential vocabulary,
-  home-directory paths, published identities), 2b (the cross-impl
-  proof audit, scoped to pushes that move a claim), 2c (the
-  PREVIOUS push's hosted verdict) and the static 2d–2h family, of
-  which 2h is the one that RUNS tests rather than reading files.
-  Read `.githooks/pre-push` for the
-  list; this paragraph is about the POLICY — fast, not a mirror.
-  The FULL validation surface — the feature-subset
-  matrix, C2 clippy, Layers B/B2 codegen, F/G/Q/Z footprint /
-  cross-compile / interop, every non-default combo — is the HOSTED
-  CI's job: it runs on every push to main and is the single full
-  gate. This REVERSES the R64..R311pt "mirror all of CI locally"
-  policy (~50s host floor, minutes with ARM / qemu / zenohd
-  present). The trade is explicit: local no longer catches
-  everything before push; a red hosted run is the accepted cost of
-  fast pushes — with ONE named exception since R2153, on the owner's
-  decision of 2026-08-27. Gate 2h
-  (`scripts/lib/nondefault-tests-gate.sh`) RUNS the tests only a
-  non-default feature build can reach, for the legs its own table
-  marks `hook`. R2156 (item 543) widened that table from ONE leg to
-  THIRTEEN across eleven crates and gave every row a `hook`/`lane`
-  scope — the per-leg answer to item 543's "safe AND QUICK on a
-  developer's machine". This hook runs the twelve `hook` rows, Layer
-  C1bn runs all thirteen via `--all-legs`, and the script PRINTS the
-  ones it deferred, so an omission can never read as coverage. Gate
-  7 already COMPILED these (`cargo clippy --all-features`, `cargo
-  check` until R2243) and compiling is not running, which is what
-  let four measured red-first probes pass this hook while dying at
-  exit 101. R2243 widened gate 7's VERB, not its population: it
-  now judges those crates with the same `-D warnings` hosted uses,
-  because five of eight red jobs in run 33468082489 were two clippy
-  lines in code only a non-default feature compiles. Compiling is
-  still not running, so 2h keeps its subject.
-  ⛔ A leg NAMES its features, one per source line, and
-  `--all-features` is refused BY NAME. The `--census` population is
-  DEFINED as "what all-features lists minus what default lists", so
-  an all-features leg would cover that set by construction and the
-  check could never fail again — the "a population of zero reports
-  green" trap, with the population supplied by the check's own
-  definition. `wz-ap-demo` is the proof this is not theoretical: at
-  `--all-features` it is RED, and correctly so, because a
-  zero-population guard there loses its subject.
-  MEASURED — the GATE's own cost, warm, and NOT a whole-hook delta
-  (R2154's lesson): 12 hook legs 34s; all 13 legs 68s; `--census`
-  19s. The 77.2 / 92.3 / 73.9s whole-hook figures R2153 recorded
-  were taken when this table held ONE leg and no longer describe
-  this hook; re-measure before quoting a hook total.
-  STILL NOT covered locally (all on hosted CI): feature
-  COMBINATIONS (open-debt item 374, still without an instrument);
-  the `wz` facade, which gate 7 excludes from all-features
-  entirely; the single `lane`-scoped leg; and the three tests named
-  in that table's SKIPS, each carrying its measured reason — one of
-  them is open-debt item 544, an intermittent hang that this
-  widening FOUND by running a test no gate had ever run — plus
-  changes outside `crates/` (sources/, out/, deploy/,
-  ci.yml), fmt / footprint, and the clippy the changed-crate
-  gate 7 does NOT reach — the named per-feature legs (C1af, C1y,
-  C1bl, M and the transport-link family each clippy a NAMED
-  subset, which `--all-features` covers as a superset but not as
-  the same build) and every crate the push did not touch.
-  (`runtime/` used to be listed
-  here and was struck by R2153: there is no such directory and no
-  tracked file under it, the same finding R311y794 made about the
-  SPDX list.) For the old full sweep
-  on demand, run `bash scripts/run-ci.sh` by hand. Bypass the hook
-  entirely with `git push --no-verify` for genuine hotfixes.
+- **pre-push** — fast publication and SSOT checks by default. The owner's
+  2026-09-23 instruction supersedes the accumulated local-sweep requirements:
+  **slow checks belong in hosted CI**, even when they only parse source files.
+  One push spent over 16 minutes in static checks; the previous full hook took
+  about 90 minutes. Historical warm timings are not a current runtime budget.
+
+  Mandatory gates remain: confidential vocabulary, home paths and identities
+  (0/0b/0c), schema and tool pins (1), workspace SSOT validation (2), the
+  claim-scoped proof audit (2b), and the previous hosted verdict (2c, without
+  waiting for a running job). The default hook exits after these checks.
+
+  The remaining static gates, feature tests/census, Layer 0, changed-crate
+  tests and documentation checks, reduced-feature checks, clippy and workspace
+  builds are **deferred to hosted CI**. Deferral is printed and is not a local
+  passing result. Verify the change's focused behavior during development;
+  do not repeat a broad CI sweep just because a push is about to happen.
+
+  To explicitly request the preserved extended local sweep, use
+  `WZ_PREPUSH_EXTENDED=1 git push origin main`. This does not bypass mandatory
+  checks. Count-guard builds remain separately opt-in with
+  `WZ_PREPUSH_COUNT_GUARD=1` inside that extended sweep. The scripts and hosted
+  lane assertions are unchanged; hosted failures are diagnosed next round.
+  Run `bash scripts/run-ci.sh` manually when a full local CI run is wanted.
 
 `pre-commit` and `pre-push` require `mnemosyne-cli` on `PATH`
 (install via

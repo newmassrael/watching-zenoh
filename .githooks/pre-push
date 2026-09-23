@@ -1,48 +1,22 @@
 #!/usr/bin/env bash
-# pre-push hook — FAST local gate: SSOT integrity + changed-crate tests only.
+# pre-push hook — mandatory publication and SSOT checks; CI owns the sweep.
 #
-# POLICY (R311y386): the local push gate is DELIBERATELY NOT a full CI mirror.
-# Local push runs only:
-#   1. schema pin vs the pushed commits   — R311y418; the one failure class
-#                                           gate 2 structurally cannot see.
-#   2. mnemosyne-cli validate-workspace   — the SSOT integrity gate (seconds).
-#   3. cargo test -p <crate>              — for ONLY the crates this push
-#                                           changes (default features).
-#   4. Layer C1bz over those crates AND    — R311y792/y793; the doc-link
-#      the crates whose docs link into       budget. A doc comment is the one
-#      them                                  thing `cargo test` cannot fail on,
-#                                            and the class cost two rounds.
-#   5. Layer 0 when the push touches       — R311y793/y794; rustfmt +
-#      .github/workflows, scripts/,          actionlint + shellcheck. Those
-#      .githooks/ or deploy/                 paths had no local gate at all.
-# The FULL validation surface — the feature-subset matrix, clippy, codegen
-# (Layers B/B2), footprint (F), cross-compile (G), QEMU (Q), interop (Z),
-# every non-default feature combo — is the HOSTED CI's job. It runs on every
-# push to main and gates there. A red hosted run is the accepted cost of a
-# fast local push.
+# Owner decision, 2026-09-23: slow checks belong in hosted CI. This supersedes
+# the later additions to R311y386's fast-hook policy, including unconditional
+# changed-crate builds. The previous push spent over 16 minutes in static
+# checks alone; a prior push took about 90 minutes across the whole hook.
 #
-# This REVERSES the R64..R311pt policy where this hook mirrored CI's whole
-# gate-set locally (~50s host-only floor, several minutes with the ARM / qemu
-# / zenohd toolchains present). That made every push slow and duplicated work
-# the ephemeral hosted runners re-do anyway. The trade is explicit: local no
-# longer "catches everything before push"; it catches SSOT drift + the changed
-# crates' own default-feature tests, and hosted CI is the single full gate.
+# Default: gates 0/0b/0c (publication), 1 (schema and tool pin), 2 (SSOT),
+# 2b (claim-scoped proof audit), and 2c (previous hosted verdict, no waiting).
+# Everything after 2c is an OPTIONAL extended local sweep. Hosted run-ci lanes
+# continue to own static analysis, tests, docs, formatting and build matrices.
+# A deferred check is not a local pass. Run the change's focused verification
+# during development; do not automatically repeat the broad sweep at push.
 #
-# Coverage the changed-crate test does NOT give (all covered by hosted CI):
-#   - feature-gated lanes (a change behind a non-default cfg is not run here);
-#   - changes outside crates/ (sources/, out/, runtime/, deploy/, ci.yml);
-#   - fmt / footprint / cross-compile / interop, and the clippy gate 7 below
-#     does not reach: the NAMED per-feature legs (C1af, C1y, C1bl, M and the
-#     transport-link family each lint a named subset, which --all-features
-#     covers as a superset but not as the same build) and every crate this
-#     push did not change. Since R2243 gate 7 DOES clippy the changed crates
-#     at --all-features, so this line no longer says "no clippy at all".
-# If you want the old full sweep locally, run `bash scripts/run-ci.sh` by hand.
-#
-# The empty-ref / delete-only short-circuit (R224a) is kept. The R224b flock
-# and the R250 HEAD-re-source are gone: they existed for the multi-lane
-# run-ci race (sce-codegen rebuild + crates/target thrash); a single
-# `cargo test -p <crate>` is serialized by cargo's own target-dir lock.
+# To request the previous local sweep: WZ_PREPUSH_EXTENDED=1 git push origin main
+# The separately expensive count-guard check still needs its own opt-in.
+# Neither option bypasses the mandatory gates above. Hosted failures are read
+# on the next round, not waited for here.
 #
 # Install via `git config core.hooksPath .githooks` (one-time per clone).
 # Bypass with `git push --no-verify` only for genuine hotfixes.
@@ -337,6 +311,18 @@ if ! wz_previous_run_gate "$prev_sha" 'pre-push'; then
     echo "pre-push: bypass with \`git push --no-verify\` only for genuine hotfixes." >&2
     exit 1
 fi
+
+# ─── local sweep policy — owner decision, 2026-09-23 ──────────────
+# This boundary is AFTER every mandatory integrity/publication check and
+# BEFORE any corpus-wide static sweep or cargo build. Exact opt-in only.
+if [[ "${WZ_PREPUSH_EXTENDED:-0}" != "1" ]]; then
+    echo "pre-push: mandatory publication, pin and SSOT checks passed."
+    echo "pre-push: DEFERRED to hosted CI: corpus static gates, feature tests,"
+    echo "          formatting, changed-crate tests/docs and workspace builds."
+    echo "pre-push: optional local sweep: WZ_PREPUSH_EXTENDED=1 git push origin main"
+    exit 0
+fi
+echo "pre-push: extended local sweep explicitly requested; this may take many minutes."
 
 # ─── gate 2d — the config key set vs the fixtures that owe it ───────
 # grades: worktree

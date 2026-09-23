@@ -112,6 +112,14 @@ Layers B/B2 codegen, F/G/Q/Z footprint / cross-compile / interop and every
 non-default combination. Not one of those is a static read of files the push
 has already written, which is all this block does.
 
+## Execution policy, owner decision 2026-09-23
+
+The hook's corpus sweep is now opt-in with WZ_PREPUSH_EXTENDED=1. This gate
+checks reachability in that EXTENDED sweep, not execution on an ordinary push.
+Its invocation inventory includes conditional commands; it is not evidence
+that default pre-push ran them. Hosted lanes keep the full checks. The default
+hook reports the entire sweep as deferred after its mandatory integrity gates.
+
 ## What DEFERRED costs, and why it is not an exemption list
 
 A row must carry a MEASURED reason, and every row is PRINTED on every run, so a
