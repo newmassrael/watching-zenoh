@@ -86,6 +86,7 @@ fn example_plugin_so() -> PathBuf {
 /// once its admin surface is up, with the admin root and the capture.
 fn spawn_plugin_host(
     plugins: &[PathBuf],
+    extra_args: &[&str],
     role: &str,
 ) -> (ChildGuard, std::fs::File, String, String) {
     let port_res = PortReservation::pick();
@@ -100,6 +101,7 @@ fn spawn_plugin_host(
     for p in plugins {
         cmd.arg("--plugin").arg(p);
     }
+    cmd.args(extra_args);
     cmd.env("RUST_LOG", "info")
         .stdout(Stdio::null())
         .stderr(Stdio::from(writer));
@@ -238,7 +240,7 @@ fn wz_plugin_dlopened_is_read_by_a_real_pico_beside_the_static_one() {
     );
 
     let (mut host, mut host_log, root, addr) =
-        spawn_plugin_host(std::slice::from_ref(&so), "with-plugin");
+        spawn_plugin_host(std::slice::from_ref(&so), &[], "with-plugin");
 
     // The host's own load edge — a barrier, so the GET below cannot race startup.
     if let Err(c) = wait_for_substring(
@@ -313,7 +315,7 @@ fn wz_plugin_non_plugin_shared_object_is_refused_and_the_node_survives() {
     let not_a_plugin = PathBuf::from("libc.so.6");
 
     let (mut host, mut host_log, root, addr) =
-        spawn_plugin_host(&[not_a_plugin], "with-non-plugin");
+        spawn_plugin_host(&[not_a_plugin], &[], "with-non-plugin");
 
     if let Err(c) = wait_for_substring(&mut host_log, "plugin load failed", Duration::from_secs(15))
     {
@@ -367,4 +369,142 @@ fn wz_plugin_non_plugin_shared_object_is_refused_and_the_node_survives() {
             "a non-plugin must never reach {reached}\n  got: {refused_rec}"
         );
     }
+}
+
+/// A one-shot pico `z_put` of `value` at `key`: pico ENCODES the config write,
+/// the host's config-write subscriber decodes it.
+fn pico_put(key: &str, value: &str, addr: &str) {
+    let mut child = ChildGuard::wrap(
+        "z_put client (zenoh-pico)",
+        Command::new(zenoh_pico_cli_binary("z_put"))
+            .args([
+                "-k",
+                key,
+                "-v",
+                value,
+                "-e",
+                &format!("tcp/{addr}"),
+                "-m",
+                "client",
+            ])
+            .stdout(Stdio::null())
+            .stderr(Stdio::inherit())
+            .spawn()
+            .expect("spawn z_put"),
+    );
+    let _ = child.child_mut().wait();
+}
+
+/// Wait for the host's own verdict line, or fail with the host log.
+fn host_says(host: &mut ChildGuard, log: &mut std::fs::File, line: &str, step: &str) {
+    if let Err(c) = wait_for_substring(log, line, Duration::from_secs(15)) {
+        let _ = host.child_mut().kill();
+        let _ = host.child_mut().wait();
+        panic!("{step}: the host never said `{line}` within 15s\n--- host ---\n{c}");
+    }
+}
+
+/// The record pico decoded at `<root>/plugins/<id>`, if any.
+fn record<'a>(out: &'a str, root: &str, id: &str) -> Option<&'a str> {
+    out.lines()
+        .find(|l| l.contains(&format!("('{root}/plugins/{id}':")))
+}
+
+// R2820 (§5.23 `adminspace-config-hotreload`) — the notification plane for a
+// LIBRARY plugin, driven over the wire the way an operator drives a zenohd's:
+// config writes below `@/<zid>/peer/config/plugins/`.
+//
+// 1. Before any write the section names no library, so no `wz_example` record
+//    exists while `storage_manager` does — the CONTROL that the GET reaches
+//    the plugins leg at all.
+// 2. A PUT of `wz_example/__path__` STARTS the plugin from that path: the
+//    record pico decodes carries the exact path and `Started`.
+// 3. A PUT BELOW the running plugin is refused with upstream's default
+//    checker's words, and the plugin stays `Started`.
+// 4. A PUT of the section without it STOPS it: `Loaded`, not gone, because a
+//    library is never unloaded.
+//
+// pico encodes every write (pico->wz) and decodes every record (wz->pico).
+// wz-proves: adminspace-config-hotreload pico->wz
+#[test]
+#[ignore = "binary-dep e2e (wz-ap-demo --features preset-ap-full,zenoh-config + wz-plugin-example cdylib + zenoh-pico z_get/z_put CLIs); Layer C1bp runs via --ignored"]
+fn wz_plugin_config_write_starts_and_stops_a_library_plugin_via_pico() {
+    let so = example_plugin_so();
+    assert!(
+        so.exists(),
+        "the example plugin `.so` is not built: {}. Run \
+         `cargo build -p wz-plugin-example` (Layer C1bp does).",
+        so.display()
+    );
+    let (mut host, mut host_log, root, addr) =
+        spawn_plugin_host(&[], &["--config-write-permit"], "plugins-section");
+    let get = |host_log: &mut std::fs::File| {
+        pico_get_plugins(&root, &addr).unwrap_or_else(|c| {
+            let h = read_captured(host_log);
+            panic!(
+                "pico z_get never saw the terminating Final\n--- z_get ---\n{c}\n--- host ---\n{h}"
+            )
+        })
+    };
+
+    // (1) nothing named yet; the static subsystem is the control.
+    let before = get(&mut host_log);
+    assert!(
+        record(&before, &root, "storage_manager").is_some(),
+        "CONTROL: the GET reaches the plugins leg\n--- z_get ---\n{before}"
+    );
+    assert!(
+        record(&before, &root, "wz_example").is_none(),
+        "no library is running before the section names one\n--- z_get ---\n{before}"
+    );
+
+    // (2) the section names it: the plane starts it.
+    let plugin = format!("{root}/config/plugins/wz_example");
+    pico_put(
+        &format!("{plugin}/__path__"),
+        &format!("\"{}\"", so.display()),
+        &addr,
+    );
+    host_says(
+        &mut host,
+        &mut host_log,
+        r#"Running plugins: ["wz_example"]"#,
+        "start",
+    );
+    let started = get(&mut host_log);
+    let rec = record(&started, &root, "wz_example").unwrap_or_else(|| {
+        panic!("no record for the plugin the section started\n--- z_get ---\n{started}")
+    });
+    assert!(
+        rec.contains(&format!(r#""path":"{}""#, so.display()))
+            && rec.contains(r#""state":"Started""#),
+        "started from the path the write named\n  got: {rec}"
+    );
+
+    // (3) an edit in place is refused by the running plugin.
+    pico_put(&format!("{plugin}/refuse"), "true", &addr);
+    host_says(
+        &mut host,
+        &mut host_log,
+        "Runtime configuration change not supported",
+        "edit in place",
+    );
+    let refused = get(&mut host_log);
+    assert!(
+        record(&refused, &root, "wz_example").is_some_and(|r| r.contains(r#""state":"Started""#)),
+        "a refused write changes nothing\n--- z_get ---\n{refused}"
+    );
+
+    // (4) the section drops it: the plane stops it.
+    pico_put(&format!("{root}/config/plugins"), "{}", &addr);
+    host_says(&mut host, &mut host_log, "Running plugins: []", "stop");
+    let stopped = get(&mut host_log);
+    let _ = host.child_mut().kill();
+    let _ = host.child_mut().wait();
+    let rec = record(&stopped, &root, "wz_example")
+        .unwrap_or_else(|| panic!("a stopped library stays visible\n--- z_get ---\n{stopped}"));
+    assert!(
+        rec.contains(r#""state":"Loaded""#),
+        "stopped, and still loaded — a library is never unloaded\n  got: {rec}"
+    );
 }

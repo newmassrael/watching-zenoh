@@ -7822,9 +7822,19 @@ pub(crate) async fn run_storage_host(listen: &str, opts: StorageHostOpts) -> io:
     // process may still hold pointers into (see wz-runtime-tokio's plugin module
     // doc). Holding it to the end of the run-mode is the lifetime that is
     // actually correct.
+    //
+    // R2820 — the registry is now the notification PLANE's, which is what lets
+    // a `plugins/<id>` config write start, stop and restart a library plugin
+    // after startup. The `--plugin` paths below load into the same registry,
+    // OUTSIDE the section: no config write stops them, and one that fails
+    // leaves the node running, which is this flag's contract and not zenohd's
+    // (zenohd's `--plugin` writes a `__required__` section entry). The plane
+    // lives as long as this run-mode, which is the library lifetime the
+    // leak below used to state.
     #[cfg(all(unix, feature = "plugin-dynamic-loading"))]
-    let plugin_records: Vec<wz::runtime_tokio::adminspace::AdminPlugin> = {
-        let mut registry = wz::runtime_tokio::plugin::PluginRegistry::new();
+    let library_plane = {
+        let mut plane = wz::runtime_tokio::plugin_plane::DynamicPluginPlane::new();
+        let registry = plane.registry_mut();
         for path in plugin_paths {
             // R2673 — DECLARE before loading, so a load that fails leaves a
             // record instead of vanishing. The declared NAME is the file stem:
@@ -7885,25 +7895,26 @@ pub(crate) async fn run_storage_host(listen: &str, opts: StorageHostOpts) -> io:
                 ),
             }
         }
-        let records = registry.admin_records();
-        // Leak the registry rather than drop it at the end of this block: its
-        // Library handles must outlive every reply that names them, and this
-        // run-mode ends only when the process does. `Box::leak` states that
-        // outright instead of parking it in a binding whose drop order is a
-        // reader's problem.
-        Box::leak(Box::new(registry));
-        records
+        plane
     };
     #[cfg(not(all(unix, feature = "plugin-dynamic-loading")))]
-    let plugin_records: Vec<wz::runtime_tokio::adminspace::AdminPlugin> = {
+    let library_plane = {
         if !plugin_paths.is_empty() {
             log::warn!(
                 "wz-ap-demo storage-host: --plugin given but this binary lacks the \
                  `plugin-dynamic-loading` feature — INERT, nothing was loaded"
             );
         }
-        Vec::new()
+        NoLibraryPlane
     };
+    // R2820 — LIVE, where it was a snapshot taken once at startup: a config
+    // write can now start or stop a library plugin, and the admin plane must
+    // report the state it left. Refreshed after every write the plane serves.
+    let plugin_records = std::sync::Arc::new(std::sync::Mutex::new(library_plane.admin_records()));
+    // Written to only through the `plugins` write path, which needs
+    // `zenoh-config` — the `startup_plugins` idiom above.
+    #[cfg(feature = "zenoh-config")]
+    let mut library_plane = library_plane;
     use wz::runtime_tokio::zid_hex::zid_to_zenoh_hex;
 
     use crate::args::NodeKind;
@@ -8207,7 +8218,8 @@ pub(crate) async fn run_storage_host(listen: &str, opts: StorageHostOpts) -> io:
         // library's, and it derives the zid from the session's own params.
         let get_version = version.clone();
         // Cloned per-declare like `get_version`: the closure is `Send + 'static`,
-        // so it owns its copy of the records rather than borrowing the outer Vec.
+        // so it owns a handle rather than borrowing. R2820 — a handle to the
+        // LIVE records, re-read per GET, since a config write changes them.
         let get_plugin_records = plugin_records.clone();
         let get_locators = locators.clone();
         // R311y812 — the shared LIVE config, not a rendered snapshot. `Arc` rather
@@ -8255,7 +8267,13 @@ pub(crate) async fn run_storage_host(listen: &str, opts: StorageHostOpts) -> io:
                 // statically composed subsystems, which is the whole point: one
                 // admin surface, and the only difference visible on the wire is
                 // the `path` field (a real `.so` vs `"__static__"`).
-                plugins.extend(get_plugin_records.iter().cloned());
+                plugins.extend(
+                    get_plugin_records
+                        .lock()
+                        .expect("plugin admin records poisoned")
+                        .iter()
+                        .cloned(),
+                );
                 wz::runtime_tokio::adminspace::AdminLiveInputs {
                     // R311y812 — resolved PER GET off the shared config through the
                     // library `admin_read_permit` cfg site, which the declare now
@@ -8507,6 +8525,8 @@ pub(crate) async fn run_storage_host(listen: &str, opts: StorageHostOpts) -> io:
             apply_storage_plugin_write(
                 &admin_cfg,
                 &mut manager,
+                &mut library_plane,
+                &plugin_records,
                 &session,
                 &node_zid,
                 "plugins",
@@ -8775,6 +8795,8 @@ pub(crate) async fn run_storage_host(listen: &str, opts: StorageHostOpts) -> io:
                             apply_storage_plugin_write(
                                 &dispatch_cfg,
                                 &mut manager,
+                                &mut library_plane,
+                                &plugin_records,
                                 &session_for_dispatch,
                                 &dispatch_zid,
                                 key,
@@ -8789,6 +8811,8 @@ pub(crate) async fn run_storage_host(listen: &str, opts: StorageHostOpts) -> io:
                             apply_storage_plugin_write(
                                 &dispatch_cfg,
                                 &mut manager,
+                                &mut library_plane,
+                                &plugin_records,
                                 &session_for_dispatch,
                                 &dispatch_zid,
                                 key,
@@ -8884,22 +8908,64 @@ pub(crate) async fn run_storage_host(listen: &str, opts: StorageHostOpts) -> io:
     Ok(())
 }
 
+/// R2820 — the library plugin plane of a build without dynamic loading: it
+/// runs nothing and reports nothing, so the storage host needs no second shape.
+///
+/// Gated like the storage host, its only user.
+#[cfg(all(
+    feature = "adminspace-config-hotreload",
+    not(all(unix, feature = "plugin-dynamic-loading"))
+))]
+struct NoLibraryPlane;
+
+#[cfg(all(
+    feature = "adminspace-config-hotreload",
+    not(all(unix, feature = "plugin-dynamic-loading"))
+))]
+impl NoLibraryPlane {
+    fn admin_records(&self) -> Vec<wz::runtime_tokio::adminspace::AdminPlugin> {
+        Vec::new()
+    }
+}
+
+// Gated like `apply_storage_plugin_write`, its only user.
+#[cfg(all(
+    feature = "adminspace-config-hotreload",
+    feature = "zenoh-config",
+    all(unix, feature = "plugin-dynamic-loading")
+))]
+type LibraryPlane = wz::runtime_tokio::plugin_plane::DynamicPluginPlane;
+#[cfg(all(
+    feature = "adminspace-config-hotreload",
+    feature = "zenoh-config",
+    not(all(unix, feature = "plugin-dynamic-loading"))
+))]
+type LibraryPlane = NoLibraryPlane;
+
 /// R2787 (§5.23 `adminspace-config-hotreload`) — one `plugins/...` config write
 /// on the storage host, applied through the live config's own write gate with
 /// the storage manager as the running plugin.
+///
+/// R2820 — and with the LIBRARY plugin plane beside it: the write's validator
+/// and notification reach both, and `records` is refreshed from the plane after
+/// it, so the admin plane reports the state the write left.
 ///
 /// What the log says is load-bearing: a start's failed steps and a document a
 /// start could not read refuse NOTHING (upstream logs them and runs on), so they
 /// are logged as the plugin's reports; a refused write is logged as refused and
 /// changed nothing; a landed write names the plugin's state after it, which is
-/// what the wire witness waits on.
+/// what the wire witness waits on. A library plugin's report is an error when
+/// the plugin is `__required__` — upstream's plane panics there.
 #[cfg(all(feature = "adminspace-config-hotreload", feature = "zenoh-config"))]
+#[allow(clippy::too_many_arguments)]
 fn apply_storage_plugin_write(
     cfg: &std::sync::Mutex<wz::runtime_tokio::config::WzConfig>,
     manager: &mut wz::runtime_tokio::storage_manager_service::RuntimeStorageManager<
         wz::runtime_tokio::runtime_impl::TokioRuntime,
         TokioTime,
     >,
+    library_plane: &mut LibraryPlane,
+    records: &std::sync::Mutex<Vec<wz::runtime_tokio::adminspace::AdminPlugin>>,
     session: &TokioSession,
     local_zid: &[u8],
     key: &str,
@@ -8911,9 +8977,19 @@ fn apply_storage_plugin_write(
 
     let (outcome, reports) = {
         let sink = StorageManagerSink::new(manager, session, local_zid);
+        #[cfg(all(unix, feature = "plugin-dynamic-loading"))]
+        let library = wz::runtime_tokio::plugin_plane::DynamicPluginSink::new(library_plane);
+        #[cfg(all(unix, feature = "plugin-dynamic-loading"))]
+        let both: [&dyn wz::runtime_tokio::plugins_config::PluginsSink; 2] = [&sink, &library];
+        #[cfg(all(unix, feature = "plugin-dynamic-loading"))]
+        let chained = wz::runtime_tokio::plugin_plane::PluginsSinks(&both);
+        #[cfg(all(unix, feature = "plugin-dynamic-loading"))]
+        let plugins_sink: &dyn wz::runtime_tokio::plugins_config::PluginsSink = &chained;
+        #[cfg(not(all(unix, feature = "plugin-dynamic-loading")))]
+        let plugins_sink: &dyn wz::runtime_tokio::plugins_config::PluginsSink = &sink;
         let outcome = match cfg.lock() {
             Ok(mut c) => {
-                let sinks = ConfigSinks::none().with_plugins(&sink);
+                let sinks = ConfigSinks::none().with_plugins(plugins_sink);
                 match value {
                     Some(value) => c.set_by_key_with(key, value, &sinks),
                     None => c.remove_by_key_with(key, &sinks),
@@ -8927,10 +9003,36 @@ fn apply_storage_plugin_write(
                 return;
             }
         };
+        #[cfg(all(unix, feature = "plugin-dynamic-loading"))]
+        for report in library.take_reports() {
+            if report.required {
+                log::error!(
+                    "wz-ap-demo storage-host: REQUIRED plugin {}: {}",
+                    report.plugin,
+                    report.message
+                );
+            } else {
+                log::warn!(
+                    "wz-ap-demo storage-host: plugin {}: {}",
+                    report.plugin,
+                    report.message
+                );
+            }
+        }
         (outcome, sink.take_reports())
     };
+    *records.lock().expect("plugin admin records poisoned") = library_plane.admin_records();
     for report in reports {
         log::warn!("wz-ap-demo storage-host: storage_manager: {report}");
+    }
+    // R2820 — upstream's `Running plugins: {..}` line, after every landed
+    // write: the library plugins the section has this node running.
+    #[cfg(all(unix, feature = "plugin-dynamic-loading"))]
+    if outcome.is_ok() {
+        log::info!(
+            "wz-ap-demo storage-host: Running plugins: {:?}",
+            library_plane.running().collect::<Vec<_>>()
+        );
     }
     match outcome {
         Ok(()) => log::info!(

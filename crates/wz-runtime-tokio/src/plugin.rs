@@ -84,6 +84,12 @@ pub enum PluginError {
     StopRefused { id: String, code: i32 },
     /// No plugin with that id is loaded.
     NotLoaded { id: String },
+    /// R2820 — none of the paths a plugin was declared by loaded; each
+    /// attempt's refusal, in the order tried.
+    NotFoundInPaths {
+        paths: Vec<PathBuf>,
+        failures: Vec<String>,
+    },
 }
 
 impl std::fmt::Display for PluginError {
@@ -124,6 +130,13 @@ impl std::fmt::Display for PluginError {
                 write!(f, "plugin `{id}` refused to stop (code {code})")
             }
             Self::NotLoaded { id } => write!(f, "no plugin `{id}` is loaded"),
+            Self::NotFoundInPaths { paths, failures } => {
+                write!(f, "Plugin not found in {paths:?}")?;
+                for failure in failures {
+                    write!(f, "; {failure}")?;
+                }
+                Ok(())
+            }
         }
     }
 }
@@ -519,6 +532,58 @@ impl PluginRegistry {
         }
     }
 
+    /// R2820 — declare `name` and load it from the FIRST of `paths` that
+    /// loads, upstream's `ByPaths` source
+    /// (`plugins/zenoh-plugin-trait/src/manager/dynamic_plugin.rs` @ `DynamicPluginSource::ByPaths(paths) => {`):
+    /// each path is tried in order, a failure moves on to the next, and none
+    /// loading is one error naming them all.
+    ///
+    /// A name already declared and still `Declared` is tried again from
+    /// `paths`; a name already `Live` is left as it is and its id returned,
+    /// upstream's "already loaded" — a library is never swapped in process
+    /// (see the module doc). On failure the slot stays `Declared` at the first
+    /// path with the refusal, exactly as [`Self::load_declared`] leaves one.
+    pub fn load_first(&mut self, name: &str, paths: &[PathBuf]) -> Result<&str, PluginError> {
+        if !matches!(self.plugins.get(name), Some(Slot::Live(_))) {
+            let mut failures = Vec::new();
+            let mut loaded = None;
+            for path in paths {
+                match DynamicPlugin::load(path) {
+                    Ok(plugin) => {
+                        loaded = Some(plugin);
+                        break;
+                    }
+                    Err(e) => failures.push(e.to_string()),
+                }
+            }
+            match loaded {
+                Some(plugin) => {
+                    self.plugins.insert(name.to_string(), Slot::Live(plugin));
+                }
+                None => {
+                    let error = PluginError::NotFoundInPaths {
+                        paths: paths.to_vec(),
+                        failures,
+                    };
+                    self.plugins.insert(
+                        name.to_string(),
+                        Slot::Declared {
+                            path: paths.first().cloned().unwrap_or_default(),
+                            failure: Some(error.to_string()),
+                        },
+                    );
+                    return Err(error);
+                }
+            }
+        }
+        match self.plugins.get(name) {
+            Some(Slot::Live(p)) => Ok(&p.id),
+            // Unreachable: the slot was Live, or the arm above made it Live or
+            // returned.
+            _ => Err(PluginError::NotLoaded { id: name.into() }),
+        }
+    }
+
     /// `Loaded -> Started` for one plugin. A slot still `Declared` has nothing
     /// to start and says so by name.
     pub fn start(&mut self, id: &str, config: Option<&str>) -> Result<(), PluginError> {
@@ -547,6 +612,16 @@ impl PluginRegistry {
         self.plugins.get(id).map(|s| match s {
             Slot::Declared { .. } => AdminPluginState::Declared,
             Slot::Live(p) => p.state(),
+        })
+    }
+
+    /// R2820 — the path a name was declared at, or the loaded library's path
+    /// once it is live: the path the plugin RUNS from, which is what the
+    /// notification plane compares a changed `__path__` against.
+    pub fn path(&self, id: &str) -> Option<&Path> {
+        self.plugins.get(id).map(|s| match s {
+            Slot::Declared { path, .. } => path.as_path(),
+            Slot::Live(p) => p.path(),
         })
     }
 

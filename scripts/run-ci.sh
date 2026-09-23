@@ -7018,7 +7018,10 @@ layer_c1am_cargo_test_adminspace() {
     # the config write gate that routes `plugins/...` keys to it, which needs
     # `zenoh-config` — the combination this round made compile. PRINTED by the
     # command.
-    _runci_guarded_test "C1AM plugins_config 8" 8 \
+    # R2820 — 8 -> 9: a_load_request_reads_the_three_reserved_members_as_
+    # upstream_does, upstream's `load_requests` reading, which the library
+    # plugin plane diffs against.
+    _runci_guarded_test "C1AM plugins_config 9" 9 \
         cargo test -p wz-runtime-tokio --features adminspace-config-hotreload --lib plugins_config --quiet || return 1
     # R2788 — 2 -> 3: the reader's own `the_plugins_section_is_read_whole_and_
     # reported_leaf_by_leaf` carries the same words in its name and so joins
@@ -13036,6 +13039,20 @@ layer_c1bp_plugin_dynamic_loading() {
         | grep -qE '^test result: ok\. [0-9]+ passed') || return 1
     (cd crates && cargo clippy -p wz-runtime-tokio --features plugin-dynamic-loading \
         --all-targets -- -D warnings) || return 1
+    # R2820 — the plane's own witnesses. `plugin_plane` compiles only beside
+    # the `plugins` section (`adminspace-config-hotreload`), which the leg
+    # above does not turn on, and three of the four load the example library
+    # built at the top of this lane (they return early, loudly, without it —
+    # plugin.rs's convention — so it is that build, not this pin, that makes
+    # them mean something). Pinned so a filter that selects a different set,
+    # or none, reds rather than exits 0.
+    _runci_guarded_test "C1bp plugin_plane" 4 \
+        cargo test -p wz-runtime-tokio \
+        --features plugin-dynamic-loading,adminspace-config-hotreload \
+        --lib plugin_plane --quiet || return 1
+    (cd crates && cargo clippy -p wz-runtime-tokio \
+        --features plugin-dynamic-loading,adminspace-config-hotreload \
+        --all-targets -- -D warnings) || return 1
     # The AP-full binary for the pico e2e. `preset-ap-full` carries the plugin
     # host since R311y492, so no extra key here — and the e2e asserts the demo's
     # own BUILD FEATURES line rather than trusting this invocation.
@@ -13053,6 +13070,19 @@ layer_c1bp_plugin_dynamic_loading() {
             --exact "$leg" 2>&1 \
             | tee /dev/stderr | grep -qE '^test result: ok\. 1 passed') || return 1
     done
+    # R2820 — the library plugin NOTIFICATION PLANE (§5.23
+    # `adminspace-config-hotreload`). The binary above cannot drive it: the
+    # storage host applies a `plugins/...` config write only with the demo's
+    # `zenoh-config`, which `preset-ap-full` does not turn on. So a second
+    # build, and its leg straight after it — cargo uplifts every feature
+    # variant of `wz-ap-demo` to one path. The leg's own control is its first
+    # GET (storage_manager present, the library absent).
+    (cd crates && cargo build -p wz-ap-demo --no-default-features \
+        --features preset-ap-full,zenoh-config --quiet) || return 1
+    (cd crates && cargo test -p wz-integration-tests \
+        --test wz_plugin_dynamic_loading_pico -- --ignored --quiet --test-threads=1 \
+        --exact wz_plugin_config_write_starts_and_stops_a_library_plugin_via_pico 2>&1 \
+        | tee /dev/stderr | grep -qE '^test result: ok\. 1 passed') || return 1
 }
 
 # ─── Layer L — every committed Cargo.lock agrees with its manifests ────

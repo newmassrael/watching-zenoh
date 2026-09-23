@@ -879,6 +879,17 @@ pub mod config;
 #[cfg(feature = "adminspace-config-hotreload")]
 pub mod plugins_config;
 
+/// R2820 (§5.23 `adminspace-config-hotreload`) — the notification plane for
+/// library plugins: a change to the `plugins` section starts, stops and
+/// restarts the plugins this node loads with `dlopen`. Needs both the section
+/// and the loader.
+#[cfg(all(
+    unix,
+    feature = "plugin-dynamic-loading",
+    feature = "adminspace-config-hotreload"
+))]
+pub mod plugin_plane;
+
 /// R311y786 — the connection-retry SCHEDULE (zenoh's `ConnectionRetryPeriod`):
 /// one transcription of the grow-then-clamp arithmetic, shared by the client
 /// reconnect supervisor and the router peer auto-reconnect so the two cannot

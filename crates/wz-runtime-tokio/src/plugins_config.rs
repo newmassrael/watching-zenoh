@@ -304,6 +304,82 @@ impl PluginsConfig {
     }
 }
 
+/// R2820 — one plugin the section asks this node to RUN, upstream's
+/// `commons/zenoh-config/src/lib.rs` @ `pub struct PluginLoad {`: what the
+/// notification plane diffs against the plugins it is running.
+///
+/// Read from the three reserved members of a plugin's document, as upstream's
+/// `commons/zenoh-config/src/lib.rs` @ `pub fn load_requests(&'_ self) -> impl Iterator<Item = PluginLoad> + '_ {`
+/// reads them: `__required__` (a bool, default `false`), `__plugin__` (the
+/// library name, default the id) and `__path__` (a string or an array of
+/// strings; absent means "search for it").
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PluginLoadRequest {
+    /// The plugin's key in the section.
+    pub id: String,
+    /// The library name: `__plugin__`, else the id.
+    pub name: String,
+    /// `__path__`, in the order given; `None` when the document names none.
+    pub paths: Option<Vec<String>>,
+    /// `__required__`.
+    pub required: bool,
+}
+
+impl PluginLoadRequest {
+    /// Read `id`'s request from its document.
+    ///
+    /// ONE DEPARTURE: upstream PANICS on a `__required__` that is not a bool
+    /// or a `__path__` that is not a string or an array of strings, inside the
+    /// task that runs its notification plane. Here the malformed property is an
+    /// `Err` naming it, so a validator can refuse the write that would carry it
+    /// rather than let it land and take the plane down.
+    pub fn from_document(id: &str, document: &Json5Value) -> Result<Self, String> {
+        let Json5Value::Object(_) = document else {
+            return Err(format!("Plugin '{id}' configuration must be an object"));
+        };
+        let required = match document.get("__required__") {
+            None => false,
+            Some(Json5Value::Bool(b)) => *b,
+            Some(_) => {
+                return Err(format!(
+                    "Plugin '{id}' has an invalid '__required__' configuration property \
+                     (must be a boolean)"
+                ))
+            }
+        };
+        let name = match document.get("__plugin__") {
+            Some(Json5Value::String(name)) => name.clone(),
+            _ => String::from(id),
+        };
+        let invalid_path = || {
+            format!(
+                "Plugin '{id}' has an invalid '__path__' configuration property \
+                 (must be either string or array of strings)"
+            )
+        };
+        let paths = match document.get("__path__") {
+            None => None,
+            Some(Json5Value::String(path)) => Some(vec![path.clone()]),
+            Some(Json5Value::Array(items)) => Some(
+                items
+                    .iter()
+                    .map(|item| match item {
+                        Json5Value::String(path) => Ok(path.clone()),
+                        _ => Err(invalid_path()),
+                    })
+                    .collect::<Result<Vec<_>, _>>()?,
+            ),
+            Some(_) => return Err(invalid_path()),
+        };
+        Ok(Self {
+            id: String::from(id),
+            name,
+            paths,
+            required,
+        })
+    }
+}
+
 /// `value` with every object sorted by key and a repeated key keeping its last
 /// value — upstream's `BTreeMap`, applied all the way down.
 fn normalise(value: Json5Value) -> Json5Value {
@@ -624,6 +700,46 @@ mod tests {
             p.replace(&doc("[]"), &v),
             Err(PluginsConfigError::NotASection)
         );
+    }
+
+    /// R2820 — upstream's `load_requests` reading, and its two panics as
+    /// refusals that name the property.
+    #[test]
+    fn a_load_request_reads_the_three_reserved_members_as_upstream_does() {
+        let bare = PluginLoadRequest::from_document("rest", &doc("{ http_port: 8000 }")).unwrap();
+        assert_eq!(
+            bare,
+            PluginLoadRequest {
+                id: String::from("rest"),
+                name: String::from("rest"),
+                paths: None,
+                required: false,
+            },
+            "no reserved member: named by its id, searched for, not required"
+        );
+        let full = PluginLoadRequest::from_document(
+            "mine",
+            &doc(r#"{ __plugin__: "example", __path__: "/a.so", __required__: true }"#),
+        )
+        .unwrap();
+        assert_eq!(full.name, "example");
+        assert_eq!(full.paths, Some(vec![String::from("/a.so")]));
+        assert!(full.required);
+        let listed =
+            PluginLoadRequest::from_document("x", &doc(r#"{ __path__: ["/a.so", "/b.so"] }"#))
+                .unwrap();
+        assert_eq!(
+            listed.paths,
+            Some(vec![String::from("/a.so"), String::from("/b.so")])
+        );
+        for (bad, property) in [
+            (r#"{ __required__: "yes" }"#, "__required__"),
+            ("{ __path__: 5 }", "__path__"),
+            (r#"{ __path__: ["/a.so", 5] }"#, "__path__"),
+        ] {
+            let err = PluginLoadRequest::from_document("x", &doc(bad)).unwrap_err();
+            assert!(err.contains(property), "{bad}: {err}");
+        }
     }
 
     /// The stored section is upstream's shape: sorted, the last of a repeated
