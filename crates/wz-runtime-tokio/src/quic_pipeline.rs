@@ -540,26 +540,43 @@ pub async fn accept_quic_on(endpoint: &Endpoint) -> io::Result<QuicLink> {
 /// the link keep-alive (module doc). StreamEnvelope framing + write driver are
 /// the SAME shared [`crate::stream_link`] code as TCP/TLS.
 pub fn wire_quic_stream(link: QuicLink) -> (QuicReadDriver, Arc<StreamWriteDriver>, WriterHandle) {
+    // R311y453 — the §5.16 subject: quinn reports the endpoint's bound address.
+    // R2698 — with the peer's certificate common name, the ACL's fifth subject
+    // axis. Unlike the TLS twin there is no split to race here: `connection`
+    // outlives the wiring, so this is placed beside the subject for symmetry
+    // rather than out of necessity.
+    let subject = ip_link_subject(LinkKind::Quic, link.endpoint.local_addr().ok())
+        .with_cert_common_name(peer_chain_common_name(&link.connection));
+    // R311y473 — the adminspace `{src,dst}` pair: the endpoint's bound address is
+    // this end, quinn's `Connection::remote_address` the peer's.
+    let endpoints = crate::link_interfaces::ip_link_endpoints(
+        LinkKind::Quic,
+        link.endpoint.local_addr().ok(),
+        Some(link.connection.remote_address()),
+    );
+    wire_stream_over_quic(link, subject, endpoints)
+}
+
+/// R2810 — the part of [`wire_quic_stream`] that does not depend on WHICH link
+/// the QUIC stream is: the StreamEnvelope drivers over the one bidirectional
+/// stream, with the endpoint and connection riding along as the keep-alive.
+///
+/// Split out because upstream's reliable UDP link IS this link under another
+/// name, and the name is exactly what the caller must supply: its subject
+/// (what a rule and the adminspace see it as) and its `{src,dst}` pair. Letting
+/// it borrow `quic`'s would have filed a `udp` link under `quic` for every ACL
+/// rule, which is the defect open-debt 814 separated the two axes to end.
+pub(crate) fn wire_stream_over_quic(
+    link: QuicLink,
+    subject: wz_session_core::link::LinkSubject,
+    endpoints: Option<wz_session_core::link::LinkEndpoints>,
+) -> (QuicReadDriver, Arc<StreamWriteDriver>, WriterHandle) {
     let QuicLink {
         endpoint,
         connection,
         send,
         recv,
     } = link;
-    // R311y453 — the §5.16 subject: quinn reports the endpoint's bound address.
-    // R2698 — with the peer's certificate common name, the ACL's fifth subject
-    // axis. Unlike the TLS twin there is no split to race here: `connection`
-    // outlives the wiring, so this is placed beside the subject for symmetry
-    // rather than out of necessity.
-    let subject = ip_link_subject(LinkKind::Quic, endpoint.local_addr().ok())
-        .with_cert_common_name(peer_chain_common_name(&connection));
-    // R311y473 — the adminspace `{src,dst}` pair: the endpoint's bound address is
-    // this end, quinn's `Connection::remote_address` the peer's.
-    let endpoints = crate::link_interfaces::ip_link_endpoints(
-        LinkKind::Quic,
-        endpoint.local_addr().ok(),
-        Some(connection.remote_address()),
-    );
     let (tx, rx) = mpsc::unbounded_channel::<Vec<u8>>();
     let writer_handle = WriterHandle::spawn(rx, |queue| writer_task(send, queue));
     // transport-lowlatency is a TCP-path negotiation; QUIC keeps the universal

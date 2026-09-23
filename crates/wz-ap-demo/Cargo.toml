@@ -246,6 +246,9 @@ preset-ap-full = [
     "tls",
     "quic",
     "quic-datagram",
+    # R2810 — the demo key for `wz/transport-link-udp-reliable`, which the facade
+    # preset now carries; without it argv could not reach a `rel=1` locator.
+    "udp-reliable",
     "ws",
     "unixsock",
     "vsock",
@@ -413,6 +416,13 @@ quic = ["wz/locator-quic"]
 # builds wz-ap-demo with it so a `--listen quic-datagram/` acceptor can accept a
 # real zenohd-quic-datagram dialer (`-e quic/<wz>?rel=0`) -- the cross-impl proof.
 quic-datagram = ["quic", "wz/transport-link-quic-datagram"]
+# R2810 — opt-in RELIABLE UDP (`udp/...?rel=1`, the plaintext QUIC stream link),
+# forwarding the wz facade's `transport-link-udp-reliable`. Unlike `quic` it needs
+# no cert plumbing: the listener makes its own throwaway certificate and the
+# dialer trusts any, so a bare `--listen`/`--connect udp/...?rel=1` is the whole
+# configuration. NOT in `default`; run-ci Layer Z builds the demo with it so a
+# real zenohd can dial and be dialed over the variant -- the cross-impl proof.
+udp-reliable = ["wz/transport-link-udp-reliable"]
 # R311y369 — opt-in namespace prefixing (`--namespace <prefix>`), forwarding the
 # wz facade's `routing-namespace`. The mirror of `ws`/`tls`/`quic`: NOT in
 # `default` (preset-ap-client omits it), so the footprint baseline and every

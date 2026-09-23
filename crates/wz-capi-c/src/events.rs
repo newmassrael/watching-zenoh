@@ -2594,6 +2594,11 @@ mod tests {
         for (kind, streamed, want) in [
             (LinkKind::QuicDatagram, false, Z_RELIABILITY_BEST_EFFORT),
             (LinkKind::Quic, true, Z_RELIABILITY_RELIABLE),
+            // R2810 — the mirror pair: both `udp` to a rule, and upstream's udp
+            // link answers these two per variant, so the reliable kind must reach
+            // C as a reliable stream and the datagram kind as neither.
+            (LinkKind::UdpReliable, true, Z_RELIABILITY_RELIABLE),
+            (LinkKind::Udp, false, Z_RELIABILITY_BEST_EFFORT),
         ] {
             let snapshot = LinkSnapshot {
                 src: "quic/127.0.0.1:7447".to_owned(),

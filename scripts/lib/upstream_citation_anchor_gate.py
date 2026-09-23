@@ -555,7 +555,11 @@ ROOTLESS_STALE_LINE_BUDGET = 1
 # 653 -> 652 (R2801): the old filesystem backend's module doc cited the storage
 # manager's service module by a root-less line range; the doc went with the
 # backend it described, and the rewrite states that fact by symbol instead.
-ROOTLESS_UNDECLARED_BUDGET = 652
+# 652 -> 651 (R2810): the `rel=0` constant's doc cited `Reliability`'s
+# discriminants by a root-less line range; the constant went when the locator
+# learned to parse `rel` as upstream does, and its replacement cites
+# `impl FromStr for Reliability {` with its root.
+ROOTLESS_UNDECLARED_BUDGET = 651
 #: EVERY root-less occurrence, graded or not: `rootless_line + rootless_bare +
 #: residue`. One ratchet over the union of the three above, and it exists
 #: because those three CANNOT express the invariant that matters.
@@ -619,7 +623,9 @@ ROOTLESS_UNDECLARED_BUDGET = 652
 # rather than retired, so they left the root-less population entirely.
 # 781 -> 780 (R2801): the same single occurrence as the budget above, retired
 # with the doc that carried it.
-ROOTLESS_TOTAL_BUDGET = 780
+# 780 -> 779 (R2810): the same single occurrence as the budget above, retired
+# with the constant whose doc carried it.
+ROOTLESS_TOTAL_BUDGET = 779
 
 #: A LIVE invocation of the RESOLUTION arm. R2242 split this gate in two and,
 #: in doing so, made `--resolve` a flag someone can simply stop passing: delete

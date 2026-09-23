@@ -48,14 +48,36 @@ wearing a rationale. This gate is what makes that checkable instead of stated.
     report green, so `--require` turns that skip into a FAIL and the lane that
     has a checkout passes it.
 
-## `udp` is upstream's one conditional, and it is DECLARED
+## R2810 — the population is the ENUM, and a `match` is graded per arm
 
-Upstream's udp link does not answer a constant: it matches on a variant and says
-`true` only for the reliable-UDP form. wz has no such link, so `false` is the
-row that describes what wz can be. That is declared in `CONDITIONAL` below and
-held in BOTH directions -- a link declared conditional whose upstream impl turns
-out to be a constant is a FINDING too, so the declaration cannot quietly become
-a way to stop grading a link.
+Until R2810 the set of kinds this gate graded was a dict written in this file,
+ten entries long. R2810 added an eleventh kind to `LinkKind`, and the gate went
+on printing "wz's 10 link kind(s) ... graded" and passing: the new kind named no
+variant in either `!matches!` body (it is streamed AND reliable), so nothing the
+gate read mentioned it, and a hand-written population cannot notice what it was
+never told. The population is now READ off `pub enum LinkKind`, and the mapping
+below must cover it exactly — an enum variant the mapping does not name is a
+finding, as is a mapping entry the enum does not have, and an enum that cannot
+be read (population zero) is a finding rather than a clean grade.
+
+The same round retired the `CONDITIONAL` escape. Upstream's udp link answers
+both accessors with a `match` on its variant, and this gate used to DECLARE it
+conditional and stop grading it, on the ground that "wz has no reliable-UDP
+link". wz now has one, so the declaration had become a way to leave a link
+ungraded. Instead each wz kind names the upstream ARM(S) it stands for, and the
+oracle reads the arms out of upstream's `match` and grades each kind against
+its own: `Udp` against `Connected` and `Unconnected`, `UdpReliable` against
+`Reliable`. Held in every direction: a kind mapped to arms of a link that
+answers with a constant is a finding, a link that answers with a `match` while
+its kind names no arm is a finding, and an upstream arm no wz kind stands for
+is a finding — that last one is the parity statement the old declaration was
+quietly waiving.
+
+Upstream's `is_reliable` for most links is `super::IS_RELIABLE`, the crate's
+constant; for udp's two datagram arms it is that constant too, inside the
+`match`. So the oracle resolves the constant wherever it appears rather than
+reading it in place of the function, which is what the pre-R2810 reader did —
+and for udp that constant is the answer of two arms out of three.
 """
 
 from __future__ import annotations
@@ -71,37 +93,35 @@ ROOT = pathlib.Path(__file__).resolve().parents[2]
 #: wz's link module, whose two functions and doc table this grades.
 WZ_LINK = "crates/wz-session-core/src/link.rs"
 
-#: wz `LinkKind` variant -> upstream's link-crate directory suffix (with `-` for
-#: `_`), which is what each row of the doc table is named after.
+#: The upstream answer a wz kind stands for: which link crate (its directory
+#: suffix, with `-` for `_`) and, where that crate answers with a `match` on its
+#: variant, WHICH arms. `None` means the crate answers with a constant.
+#:
+#: This mapping is knowledge — nothing in either tree says which upstream crate a
+#: wz kind mirrors — but it is not the POPULATION. The population is read off
+#: `pub enum LinkKind` (see `wz_kinds`), and this dict must cover it exactly.
+#: The first element is the kind's ROW in wz's doc table.
 #:
 #: R2794 (open-debt item 814) -- these two axes moved from `InterceptorLink` to
 #: `LinkKind`. They are the LINK's own answers, and the rule-facing enum no longer
 #: carries a datagram value (upstream files that link under `quic`). The kind
 #: still does, and it has to: `quic-datagram` answers unstreamed and unreliable,
 #: which `quic` does not.
-VARIANTS: dict[str, str] = {
-    "Tcp": "tcp",
-    "Udp": "udp",
-    "Tls": "tls",
-    "Quic": "quic",
-    "QuicDatagram": "quic-datagram",
-    "Serial": "serial",
-    "Unixpipe": "unixpipe",
-    "UnixsockStream": "unixsock-stream",
-    "Vsock": "vsock",
-    "Ws": "ws",
+KINDS: dict[str, tuple[str, str, tuple[str, ...] | None]] = {
+    "Tcp": ("tcp", "tcp", None),
+    "Udp": ("udp", "udp", ("Connected", "Unconnected")),
+    "UdpReliable": ("udp-reliable", "udp", ("Reliable",)),
+    "Tls": ("tls", "tls", None),
+    "Quic": ("quic", "quic", None),
+    "QuicDatagram": ("quic-datagram", "quic-datagram", None),
+    "Serial": ("serial", "serial", None),
+    "Unixpipe": ("unixpipe", "unixpipe", None),
+    "UnixsockStream": ("unixsock-stream", "unixsock-stream", None),
+    "Vsock": ("vsock", "vsock", None),
+    "Ws": ("ws", "ws", None),
 }
 
-#: Links whose upstream impl is a MATCH on a variant rather than a constant, and
-#: what wz answers instead, with why. Held both ways -- see the module docstring.
-CONDITIONAL: dict[str, str] = {
-    "udp": (
-        "upstream matches on `LinkUnicastUdpVariant` and answers `true` only for "
-        "the reliable-UDP form; wz has no reliable-UDP link, so the connected / "
-        "unconnected answer is the one that describes what wz can be"
-    ),
-}
-
+ENUM = re.compile(r"pub enum LinkKind \{(.*?)\n\}", re.S)
 MATCHES = re.compile(
     r"pub fn (is_streamed|is_reliable)\(&self\) -> bool \{\s*!matches!\((.*?)\)\s*\}",
     re.S,
@@ -112,14 +132,53 @@ ROW = re.compile(
 )
 
 
-def wz_axes(text: str) -> tuple[dict[str, bool], dict[str, bool], list[str]]:
-    """(streamed, reliable) per config spelling, from wz's two `matches!` bodies.
+def wz_kinds(text: str) -> list[str]:
+    """The variants of `pub enum LinkKind`, in declaration order.
+
+    Doc comments and attributes are stripped first, so a variant NAMED in prose
+    (this enum's docs name several) is not counted twice or invented.
+    """
+    m = ENUM.search(text)
+    if not m:
+        return []
+    body = re.sub(r"^\s*(///|//|#\[).*$", "", m.group(1), flags=re.M)
+    return re.findall(r"^\s*([A-Z][A-Za-z0-9]*)\s*,", body, re.M)
+
+
+def population_findings(
+    kinds: list[str], mapping: dict[str, tuple[str, str, tuple[str, ...] | None]]
+) -> list[str]:
+    """The mapping must cover the enum exactly, and the enum must be read."""
+    if not kinds:
+        return [
+            f"no `pub enum LinkKind` variant was read in {WZ_LINK}, so the gate's "
+            f"population is ZERO -- that is a failed reading, not a clean grade"
+        ]
+    findings: list[str] = []
+    unmapped = [k for k in kinds if k not in mapping]
+    if unmapped:
+        findings.append(
+            f"`LinkKind` has {unmapped}, which `KINDS` does not map -- say which "
+            f"upstream link (and, where it answers with a `match`, which arm) each "
+            f"one stands for, or it is graded against nothing"
+        )
+    stale = [k for k in mapping if k not in kinds]
+    if stale:
+        findings.append(f"`KINDS` maps {stale}, which `LinkKind` does not have")
+    return findings
+
+
+def wz_axes(
+    text: str, mapping: dict[str, tuple[str, str, tuple[str, ...] | None]]
+) -> tuple[dict[str, bool], dict[str, bool], list[str]]:
+    """(streamed, reliable) per KIND, from wz's two `matches!` bodies.
 
     Read from the CODE, never from the table: the table is the other half this
     gate compares against, and deriving both from one of them is the shape that
-    can never fail.
+    can never fail. Keyed by the enum's own variant names.
     """
-    findings: list[str] = []
+    kinds = wz_kinds(text)
+    findings = population_findings(kinds, mapping)
     axes: dict[str, dict[str, bool]] = {}
     for name, body in MATCHES.findall(text):
         negated = set(re.findall(r"LinkKind::([A-Za-z]+)", body))
@@ -134,16 +193,13 @@ def wz_axes(text: str) -> tuple[dict[str, bool], dict[str, bool], list[str]]:
                 f"reading found nothing to grade, which is not the same as every "
                 f"link being streamed and reliable"
             )
-        unknown = negated - set(VARIANTS)
+        unknown = negated - set(kinds)
         if unknown:
             findings.append(
-                f"`{name}` names {sorted(unknown)}, which `VARIANTS` does not "
-                f"know -- a variant added to the enum has to be added here too, "
-                f"or it is graded against nothing"
+                f"`{name}` names {sorted(unknown)}, which `LinkKind` does not "
+                f"declare -- the body and the enum disagree about what exists"
             )
-        axes[name] = {
-            spelling: variant not in negated for variant, spelling in VARIANTS.items()
-        }
+        axes[name] = {kind: kind not in negated for kind in kinds}
     for want in ("is_streamed", "is_reliable"):
         if want not in axes:
             findings.append(
@@ -154,7 +210,7 @@ def wz_axes(text: str) -> tuple[dict[str, bool], dict[str, bool], list[str]]:
 
 
 def wz_table(text: str) -> dict[str, tuple[bool, bool]]:
-    """The doc TABLE, as its own reading of the same fact."""
+    """The doc TABLE, as its own reading of the same fact, keyed by row label."""
     out: dict[str, tuple[bool, bool]] = {}
     for link, streamed, reliable in ROW.findall(text):
         if link in ("link", "-"):
@@ -163,9 +219,11 @@ def wz_table(text: str) -> dict[str, tuple[bool, bool]]:
     return out
 
 
-def agreement_findings(text: str) -> list[str]:
-    """wz's code and wz's table must say the same thing."""
-    streamed, reliable, findings = wz_axes(text)
+def agreement_findings(
+    text: str, mapping: dict[str, tuple[str, str, tuple[str, ...] | None]] = KINDS
+) -> list[str]:
+    """wz's code and wz's table must say the same thing, for every kind."""
+    streamed, reliable, findings = wz_axes(text, mapping)
     if findings:
         return findings
     table = wz_table(text)
@@ -174,26 +232,28 @@ def agreement_findings(text: str) -> list[str]:
             f"no `| link | streamed | reliable |` table was found in {WZ_LINK}, so "
             f"the agreement arm graded nothing while reporting clean"
         ]
-    missing = set(VARIANTS.values()) - set(table)
+    rows = {mapping[k][0]: k for k in streamed}
+    missing = set(rows) - set(table)
     if missing:
         findings.append(
-            f"the doc table does not list {sorted(missing)}; every link the enum "
+            f"the doc table does not list {sorted(missing)}; every kind the enum "
             f"has must have a row, or a wrong arm can hide in the gap"
         )
-    extra = set(table) - set(VARIANTS.values())
+    extra = set(table) - set(rows)
     if extra:
         findings.append(f"the doc table lists {sorted(extra)}, which the enum has not")
-    for link, (want_s, want_r) in sorted(table.items()):
-        if link not in streamed:
+    for row, (want_s, want_r) in sorted(table.items()):
+        kind = rows.get(row)
+        if kind is None:
             continue
-        if streamed[link] != want_s:
+        if streamed[kind] != want_s:
             findings.append(
-                f"`{link}`: the code says streamed={streamed[link]} and the doc "
+                f"`{row}`: the code says streamed={streamed[kind]} and the doc "
                 f"table says {want_s}"
             )
-        if reliable[link] != want_r:
+        if reliable[kind] != want_r:
             findings.append(
-                f"`{link}`: the code says reliable={reliable[link]} and the doc "
+                f"`{row}`: the code says reliable={reliable[kind]} and the doc "
                 f"table says {want_r}"
             )
     return findings
@@ -222,38 +282,86 @@ def upstream_root() -> pathlib.Path | None:
     return None
 
 
-def upstream_axes(root: pathlib.Path) -> tuple[dict[str, tuple[bool | None, bool | None]], list[str]]:
-    """Each upstream link crate's own answer, or `None` where it is a match."""
+def _fn_body(src: str, name: str) -> str | None:
+    """The body of `fn <name>(&self) -> bool { ... }`, braces balanced."""
+    m = re.search(rf"fn {name}\(&self\) -> bool \{{", src)
+    if not m:
+        return None
+    depth, i = 1, m.end()
+    while i < len(src) and depth:
+        depth += {"{": 1, "}": -1}.get(src[i], 0)
+        i += 1
+    return src[m.end() : i - 1] if depth == 0 else None
+
+
+#: One answer: a constant, or a map from upstream variant name to its answer.
+Answer = bool | dict[str, bool] | None
+
+
+def _resolve(expr: str, is_reliable_const: bool | None) -> bool | None:
+    expr = expr.strip().strip("{}").strip().rstrip(",").strip()
+    if expr in ("true", "false"):
+        return expr == "true"
+    if re.fullmatch(r"(super::|crate::)?IS_RELIABLE", expr):
+        return is_reliable_const
+    return None
+
+
+def _answer(body: str | None, is_reliable_const: bool | None) -> Answer:
+    """A literal, the crate's constant, or a `match` read arm by arm."""
+    if body is None:
+        return None
+    if "match" not in body:
+        return _resolve(body, is_reliable_const)
+    arms: dict[str, bool] = {}
+    for pattern, value in re.findall(
+        r"((?:[A-Za-z_][A-Za-z0-9_]*::)*[A-Za-z_][A-Za-z0-9_]*\(_\)"
+        r"(?:\s*\|\s*(?:[A-Za-z_][A-Za-z0-9_]*::)*[A-Za-z_][A-Za-z0-9_]*\(_\))*)"
+        r"\s*=>\s*(\{[^{}]*\}|[^,\n]+)",
+        body,
+    ):
+        resolved = _resolve(value, is_reliable_const)
+        if resolved is None:
+            return None
+        for variant in re.findall(r"([A-Za-z_][A-Za-z0-9_]*)\(_\)", pattern):
+            arms[variant] = resolved
+    return arms or None
+
+
+def upstream_axes(root: pathlib.Path) -> tuple[dict[str, tuple[Answer, Answer]], list[str]]:
+    """Each upstream link crate's own two answers, per crate spelling."""
     findings: list[str] = []
-    out: dict[str, tuple[bool | None, bool | None]] = {}
+    out: dict[str, tuple[Answer, Answer]] = {}
     links = root / "io" / "zenoh-links"
     for d in sorted(links.iterdir()):
         if not d.is_dir() or not d.name.startswith("zenoh-link-"):
             continue
         spelling = d.name[len("zenoh-link-") :].replace("_", "-")
-        unicast = [p for p in d.rglob("unicast.rs")]
+        unicast = list(d.rglob("unicast.rs"))
         if not unicast:
             continue
-        streamed: bool | None = None
-        for path in unicast:
-            body = path.read_text(encoding="utf-8", errors="replace")
-            m = re.search(r"fn is_streamed\(&self\) -> bool \{\s*\n(.*?)\n", body)
-            if not m:
-                continue
-            line = m.group(1).strip()
-            if line in ("true", "false"):
-                streamed = line == "true"
-            else:
-                streamed = None  # a match arm: conditional
-            break
-        reliable: bool | None = None
-        libs = list(d.rglob("lib.rs")) + list(d.rglob("mod.rs"))
-        for path in libs:
-            body = path.read_text(encoding="utf-8", errors="replace")
-            m = re.search(r"IS_RELIABLE\s*:\s*bool\s*=\s*(true|false)\s*;", body)
+        const: bool | None = None
+        for path in list(d.rglob("lib.rs")) + list(d.rglob("mod.rs")):
+            m = re.search(
+                r"IS_RELIABLE\s*:\s*bool\s*=\s*(true|false)\s*;",
+                path.read_text(encoding="utf-8", errors="replace"),
+            )
             if m:
-                reliable = m.group(1) == "true"
+                const = m.group(1) == "true"
                 break
+        streamed: Answer = None
+        reliable: Answer = None
+        for path in unicast:
+            src = path.read_text(encoding="utf-8", errors="replace")
+            if streamed is None:
+                streamed = _answer(_fn_body(src, "is_streamed"), const)
+            if reliable is None:
+                reliable = _answer(_fn_body(src, "is_reliable"), const)
+        # A crate whose unicast impl defines no `is_reliable` answers with its
+        # constant through the trait default, which is where the pre-R2810
+        # reader looked first; keep that as the fallback, not the rule.
+        if reliable is None:
+            reliable = const
         out[spelling] = (streamed, reliable)
     if not out:
         findings.append(
@@ -263,59 +371,100 @@ def upstream_axes(root: pathlib.Path) -> tuple[dict[str, tuple[bool | None, bool
     return out, findings
 
 
-def oracle_findings(text: str, root: pathlib.Path) -> list[str]:
-    streamed, reliable, findings = wz_axes(text)
+def oracle_findings(
+    text: str,
+    root: pathlib.Path,
+    mapping: dict[str, tuple[str, str, tuple[str, ...] | None]] = KINDS,
+) -> list[str]:
+    streamed, reliable, findings = wz_axes(text, mapping)
     if findings:
         return findings
     up, findings = upstream_axes(root)
     if findings:
         return findings
     graded = 0
-    for link in sorted(VARIANTS.values()):
-        if link not in up:
+    covered: dict[str, set[str]] = {}
+    for kind in sorted(streamed):
+        row, crate, arms = mapping[kind]
+        if crate not in up:
             findings.append(
-                f"`{link}` has no upstream link crate at this checkout, so wz's "
-                f"answer for it is graded against nothing"
+                f"`{row}` stands for upstream `{crate}`, which has no link crate at "
+                f"this checkout, so wz's answer is graded against nothing"
             )
             continue
-        up_s, up_r = up[link]
-        conditional = link in CONDITIONAL
-        if conditional and up_s is not None and up_r is not None:
+        up_s, up_r = up[crate]
+        matched = isinstance(up_s, dict) or isinstance(up_r, dict)
+        if up_s is None or up_r is None:
             findings.append(
-                f"`{link}` is declared CONDITIONAL, but upstream answers it with "
-                f"constants (streamed={up_s}, reliable={up_r}). Remove the "
-                f"declaration and grade it, or the declaration is a way to stop "
-                f"grading a link"
+                f"`{crate}`'s upstream answer could not be read (streamed={up_s}, "
+                f"reliable={up_r}); an unreadable answer grades nothing"
             )
             continue
-        if not conditional and (up_s is None or up_r is None):
+        if arms is not None and not matched:
             findings.append(
-                f"`{link}` answers upstream with a match rather than a constant "
-                f"and is not declared in `CONDITIONAL`; say which arm wz is and "
-                f"why"
+                f"`{row}` names upstream arm(s) {list(arms)}, but upstream `{crate}` "
+                f"answers with constants (streamed={up_s}, reliable={up_r}). Map it "
+                f"to the crate, or the arm names stop grading a link for free"
             )
             continue
-        if conditional:
-            continue
-        graded += 1
-        if streamed.get(link) != up_s:
+        if arms is None and matched:
             findings.append(
-                f"`{link}`: wz says streamed={streamed.get(link)} and upstream "
-                f"says {up_s}. `z_link_is_streamed` is upstream's accessor, so "
-                f"upstream is the specification"
+                f"upstream `{crate}` answers with a `match` on its variant and "
+                f"`{row}` names no arm; say which arm(s) wz's kind stands for"
             )
-        if reliable.get(link) != up_r:
+            continue
+        pairs = (
+            [(crate, up_s, up_r)]
+            if arms is None
+            else [
+                (f"{crate}::{arm}", _arm(up_s, arm), _arm(up_r, arm)) for arm in arms
+            ]
+        )
+        for where, want_s, want_r in pairs:
+            if want_s is None or want_r is None:
+                findings.append(
+                    f"`{row}` stands for `{where}`, which upstream's `match` does "
+                    f"not have"
+                )
+                continue
+            graded += 1
+            if streamed[kind] != want_s:
+                findings.append(
+                    f"`{row}`: wz says streamed={streamed[kind]} and upstream "
+                    f"`{where}` says {want_s}. `z_link_is_streamed` is upstream's "
+                    f"accessor, so upstream is the specification"
+                )
+            if reliable[kind] != want_r:
+                findings.append(
+                    f"`{row}`: wz says reliable={reliable[kind]} and upstream "
+                    f"`{where}` says {want_r}. `z_link_reliability` is upstream's "
+                    f"accessor, so upstream is the specification"
+                )
+        if arms is not None:
+            covered.setdefault(crate, set()).update(arms)
+    # Every arm of a crate wz mirrors must be stood for by some kind: an arm no
+    # kind covers is an upstream variant wz does not have, which is the parity
+    # gap the pre-R2810 `CONDITIONAL` declaration used to waive.
+    for crate, arms in sorted(covered.items()):
+        up_arms = set()
+        for answer in up[crate]:
+            if isinstance(answer, dict):
+                up_arms |= set(answer)
+        if up_arms - arms:
             findings.append(
-                f"`{link}`: wz says reliable={reliable.get(link)} and upstream "
-                f"says {up_r}. `z_link_reliability` is upstream's accessor, so "
-                f"upstream is the specification"
+                f"upstream `{crate}` has variant arm(s) {sorted(up_arms - arms)} that "
+                f"no wz `LinkKind` stands for"
             )
     if graded == 0:
         findings.append(
-            "the oracle arm graded ZERO links -- every one was conditional or "
-            "absent, which is a population that could never disagree"
+            "the oracle arm graded ZERO answers -- a population that could never "
+            "disagree"
         )
     return findings
+
+
+def _arm(answer: Answer, arm: str) -> bool | None:
+    return answer.get(arm) if isinstance(answer, dict) else None
 
 
 def check(require: bool) -> int:
@@ -344,18 +493,48 @@ def check(require: bool) -> int:
         for f in findings:
             print(f"  {f}")
         return 1
+    kinds = wz_kinds(text)
+    by_arm = sum(1 for k in kinds if KINDS[k][2] is not None)
     where = "code and table agree" if root is None else f"graded against {root}"
     print(
-        f"  upstream-link-axis: wz's {len(VARIANTS)} link kind(s) carry a "
-        f"streamed / reliable answer each, {where}; "
-        f"{len(CONDITIONAL)} declared conditional"
+        f"  upstream-link-axis: wz's {len(kinds)} link kind(s), read off "
+        f"`pub enum LinkKind`, carry a streamed / reliable answer each, {where}; "
+        f"{by_arm} graded per upstream `match` arm"
     )
     return 0
 
 
-def _fixture(streamed: str, reliable: str, table: str) -> str:
+# ─── selftest ────────────────────────────────────────────────────────────────
+
+TRUTH = {
+    "tcp": (True, True),
+    "udp": (False, False),
+    "udp-reliable": (True, True),
+    "tls": (True, True),
+    "quic": (True, True),
+    "quic-datagram": (False, False),
+    "serial": (False, False),
+    "unixpipe": (True, True),
+    "unixsock-stream": (True, True),
+    "vsock": (True, True),
+    "ws": (False, True),
+}
+GOOD_S = (
+    "LinkKind::Udp | LinkKind::QuicDatagram | "
+    "LinkKind::Serial | LinkKind::Ws"
+)
+GOOD_R = "LinkKind::Udp | LinkKind::QuicDatagram | LinkKind::Serial"
+
+
+def _enum(kinds: list[str]) -> str:
+    lines = "".join(f"    /// the {k} kind\n    {k},\n" for k in kinds)
+    return f"pub enum LinkKind {{\n{lines}}}\n"
+
+
+def _fixture(streamed: str, reliable: str, table: str, kinds: list[str] | None = None) -> str:
     return (
-        "impl LinkKind {\n"
+        _enum(list(KINDS) if kinds is None else kinds)
+        + "impl LinkKind {\n"
         f"{table}"
         "    pub fn is_streamed(&self) -> bool {\n"
         f"        !matches!(self, {streamed})\n"
@@ -374,30 +553,29 @@ def _table(rows: dict[str, tuple[bool, bool]]) -> str:
     return out
 
 
-TRUTH = {
-    "tcp": (True, True),
-    "udp": (False, False),
-    "tls": (True, True),
-    "quic": (True, True),
-    "quic-datagram": (False, False),
-    "serial": (False, False),
-    "unixpipe": (True, True),
-    "unixsock-stream": (True, True),
-    "vsock": (True, True),
-    "ws": (False, True),
-}
-GOOD_S = (
-    "LinkKind::Udp | LinkKind::QuicDatagram | "
-    "LinkKind::Serial | LinkKind::Ws"
+UDP_MATCH = (
+    "fn is_reliable(&self) -> bool {\n"
+    "    match &self.variant {\n"
+    "        V::Reliable(_) => true,\n"
+    "        V::Connected(_) | V::Unconnected(_) => {\n"
+    "            super::IS_RELIABLE\n"
+    "        }\n"
+    "    }\n"
+    "}\n"
+    "fn is_streamed(&self) -> bool {\n"
+    "    match &self.variant {\n"
+    "        V::Reliable(_) => true,\n"
+    "        V::Connected(_) | V::Unconnected(_) => false,\n"
+    "    }\n"
+    "}\n"
 )
-GOOD_R = "LinkKind::Udp | LinkKind::QuicDatagram | LinkKind::Serial"
 
 
 def _upstream_tree(tmp: pathlib.Path, ws_streamed: str = "false") -> pathlib.Path:
-    """A miniature `io/zenoh-links` answering the real values."""
+    """A miniature `io/zenoh-links` answering the real values in the real shapes."""
     consts = {
         "tcp": ("true", "true"),
-        "udp": (None, None),
+        "udp": (None, "false"),
         "tls": ("true", "true"),
         "quic": ("true", "true"),
         "quic_datagram": ("false", "false"),
@@ -412,17 +590,22 @@ def _upstream_tree(tmp: pathlib.Path, ws_streamed: str = "false") -> pathlib.Pat
         d = links / f"zenoh-link-{name}" / "src"
         d.mkdir(parents=True, exist_ok=True)
         if s is None:
-            body = (
-                "fn is_streamed(&self) -> bool {\n"
-                "    match &self.variant {\n        Reliable(_) => true,\n    }\n}\n"
-            )
-            lib = "// no constant: this one matches\n"
+            body = UDP_MATCH
         else:
-            body = f"fn is_streamed(&self) -> bool {{\n    {s}\n}}\n"
-            lib = f"pub const IS_RELIABLE: bool = {r};\n"
+            body = (
+                "fn is_reliable(&self) -> bool {\n    super::IS_RELIABLE\n}\n"
+                f"fn is_streamed(&self) -> bool {{\n    {s}\n}}\n"
+            )
         (d / "unicast.rs").write_text(body, encoding="utf-8")
-        (d / "lib.rs").write_text(lib, encoding="utf-8")
+        (d / "lib.rs").write_text(f"const IS_RELIABLE: bool = {r};\n", encoding="utf-8")
     return tmp
+
+
+def _refused(label: str, got: list[str], needle: str) -> bool:
+    if any(needle in f for f in got):
+        return True
+    print(f"upstream-link-axis: SELFTEST FAIL -- `{label}` must be refused ({needle!r}); got {got}")
+    return False
 
 
 def selftest() -> int:
@@ -433,47 +616,58 @@ def selftest() -> int:
             f"reported {agreement_findings(good)}"
         )
         return 1
-    # The agreement arm, driven through each way it refuses.
     drifted = dict(TRUTH)
     drifted["ws"] = (True, True)
     cases = {
-        "table-drift": _fixture(GOOD_S, GOOD_R, _table(drifted)),
-        "no-table": _fixture(GOOD_S, GOOD_R, ""),
-        "missing-row": _fixture(
-            GOOD_S, GOOD_R, _table({k: v for k, v in TRUTH.items() if k != "vsock"})
+        "table-drift": (_fixture(GOOD_S, GOOD_R, _table(drifted)), "doc table says"),
+        "no-table": (_fixture(GOOD_S, GOOD_R, ""), "no `| link"),
+        "missing-row": (
+            _fixture(GOOD_S, GOOD_R, _table({k: v for k, v in TRUTH.items() if k != "vsock"})),
+            "does not list",
         ),
-        "unknown-variant": _fixture(
-            GOOD_S + " | LinkKind::Carrier", GOOD_R, _table(TRUTH)
+        "unknown-variant": (
+            _fixture(GOOD_S + " | LinkKind::Carrier", GOOD_R, _table(TRUTH)),
+            "does not declare",
         ),
         "not-a-matches": (
-            "impl LinkKind {\n"
+            _enum(list(KINDS))
+            + "impl LinkKind {\n"
             "    pub fn is_streamed(&self) -> bool { true }\n"
-            "    pub fn is_reliable(&self) -> bool { true }\n}\n"
+            "    pub fn is_reliable(&self) -> bool { true }\n}\n",
+            "was not found as a `!matches!` body",
         ),
-        # R2794 -- the bodies are well-formed but name a DIFFERENT enum, which
-        # is what this file saw the moment the axes moved to `LinkKind` and the
-        # extractor still said `InterceptorLink`. It must be refused, not read
-        # as "no link is unstreamed".
-        #
-        # ⚠ The table is ALL-TRUE on purpose, and the case is worthless without
-        # that. With the real table, the empty reading disagrees with it (the
-        # table says udp is unstreamed) and the TABLE arm refuses the fixture
-        # whether or not the empty-read guard exists -- measured: deleting the
-        # guard left that version refused. An all-true table AGREES with an
-        # empty reading, so only the guard can object, which makes this case
-        # the guard's control rather than a second test of the table arm.
-        "names-another-enum": _fixture(
-            GOOD_S.replace("LinkKind::", "InterceptorLink::"),
-            GOOD_R.replace("LinkKind::", "InterceptorLink::"),
-            _table({link: (True, True) for link in TRUTH}),
+        # R2794 -- well-formed bodies naming a DIFFERENT enum; the all-true table
+        # makes only the empty-read guard able to object (see the history of
+        # this case: with the real table the table arm refused it regardless).
+        "names-another-enum": (
+            _fixture(
+                GOOD_S.replace("LinkKind::", "InterceptorLink::"),
+                GOOD_R.replace("LinkKind::", "InterceptorLink::"),
+                _table({link: (True, True) for link in TRUTH}),
+            ),
+            "names no `LinkKind` variant",
+        ),
+        # R2810 -- THE DEFECT THIS ROUND FOUND: a kind the enum has and the
+        # mapping does not. It names no variant in either body, so every reading
+        # the pre-R2810 gate made passed over it. The table even carries a row
+        # for it, so nothing but the population check can object.
+        "enum-grew-past-the-mapping": (
+            _fixture(
+                GOOD_S,
+                GOOD_R,
+                _table({**TRUTH, "carrier": (True, True)}),
+                kinds=list(KINDS) + ["Carrier"],
+            ),
+            "which `KINDS` does not map",
+        ),
+        # R2810 -- population zero is a failed reading, not a clean grade.
+        "no-enum": (
+            _fixture(GOOD_S, GOOD_R, _table(TRUTH)).replace("pub enum LinkKind", "enum Other"),
+            "population is ZERO",
         ),
     }
-    for name, body in cases.items():
-        if not agreement_findings(body):
-            print(
-                f"upstream-link-axis: SELFTEST FAIL -- `{name}` must be refused "
-                f"by the agreement arm and it passed"
-            )
+    for name, (body, needle) in cases.items():
+        if not _refused(name, agreement_findings(body), needle):
             return 1
     with tempfile.TemporaryDirectory() as tmp:
         root = _upstream_tree(pathlib.Path(tmp))
@@ -483,77 +677,83 @@ def selftest() -> int:
                 f"pass and it reported {oracle_findings(good, root)}"
             )
             return 1
-        # R2259's ACTUAL defect, as the fixture: wz calls ws streamed.
+        # R2259's ACTUAL defect, as the fixture: wz calls ws and serial streamed.
         r2259 = _fixture(
             "LinkKind::Udp | LinkKind::QuicDatagram",
             "LinkKind::Udp | LinkKind::QuicDatagram",
             _table({**TRUTH, "serial": (True, True), "ws": (True, True)}),
         )
         got = oracle_findings(r2259, root)
-        if not any("`ws`" in f and "streamed" in f for f in got):
-            print(
-                f"upstream-link-axis: SELFTEST FAIL -- the oracle arm must catch "
-                f"R2259's own defect (wz calling `ws` streamed) and it reported "
-                f"{got}"
-            )
+        if not (_refused("r2259-ws", got, "`ws`: wz says streamed") and _refused("r2259-serial", got, "`serial`")):
             return 1
-        if not any("`serial`" in f for f in got):
-            print(
-                f"upstream-link-axis: SELFTEST FAIL -- the oracle arm must catch "
-                f"`serial` too; it reported {got}"
-            )
+        # R2810 -- a reliable-udp kind answering like the DATAGRAM arm. Graded
+        # against upstream's `Reliable(_)` arm, it must be refused; the old
+        # gate skipped the whole udp crate as conditional and could not.
+        wrong_arm = _fixture(
+            GOOD_S + " | LinkKind::UdpReliable",
+            GOOD_R + " | LinkKind::UdpReliable",
+            _table({**TRUTH, "udp-reliable": (False, False)}),
+        )
+        if not _refused("reliable-udp-graded-per-arm", oracle_findings(wrong_arm, root), "udp::Reliable"):
             return 1
-    # An undeclared conditional, and a declared one that is not.
+        # R2810 -- the inverse: a plain-udp kind answering like the reliable arm.
+        # `is_reliable` for the datagram arms is `super::IS_RELIABLE` INSIDE the
+        # match, so this is also the control that the constant is resolved there.
+        wrong_datagram = _fixture(
+            "LinkKind::QuicDatagram | LinkKind::Serial | LinkKind::Ws",
+            "LinkKind::QuicDatagram | LinkKind::Serial",
+            _table({**TRUTH, "udp": (True, True)}),
+        )
+        got = oracle_findings(wrong_datagram, root)
+        if not (_refused("udp-connected", got, "udp::Connected") and _refused("udp-unconnected", got, "udp::Unconnected")):
+            return 1
+    # A link that answers with a `match` while its kind names no arm.
     with tempfile.TemporaryDirectory() as tmp:
         root = _upstream_tree(pathlib.Path(tmp))
         d = root / "io" / "zenoh-links" / "zenoh-link-ws" / "src"
         d.joinpath("unicast.rs").write_text(
-            "fn is_streamed(&self) -> bool {\n    match x {\n        _ => true,\n    }\n}\n",
+            "fn is_streamed(&self) -> bool {\n    match &self.v {\n        V::A(_) => false,\n    }\n}\n",
             encoding="utf-8",
         )
-        d.joinpath("lib.rs").write_text("// matched\n", encoding="utf-8")
-        got = oracle_findings(good, root)
-        if not any("not declared in `CONDITIONAL`" in f for f in got):
-            print(
-                f"upstream-link-axis: SELFTEST FAIL -- a link that answers with a "
-                f"match and is not declared must be refused; got {got}"
-            )
+        if not _refused("undeclared-match", oracle_findings(good, root), "names no arm"):
             return 1
+    # Kinds naming arms of a link that answers with constants.
     with tempfile.TemporaryDirectory() as tmp:
         root = _upstream_tree(pathlib.Path(tmp))
         d = root / "io" / "zenoh-links" / "zenoh-link-udp" / "src"
         d.joinpath("unicast.rs").write_text(
             "fn is_streamed(&self) -> bool {\n    false\n}\n", encoding="utf-8"
         )
-        d.joinpath("lib.rs").write_text(
-            "pub const IS_RELIABLE: bool = false;\n", encoding="utf-8"
+        if not _refused("arms-of-a-constant", oracle_findings(good, root), "answers with constants"):
+            return 1
+    # An upstream arm no wz kind stands for (the old `CONDITIONAL` waiver).
+    with tempfile.TemporaryDirectory() as tmp:
+        root = _upstream_tree(pathlib.Path(tmp))
+        d = root / "io" / "zenoh-links" / "zenoh-link-udp" / "src"
+        d.joinpath("unicast.rs").write_text(
+            UDP_MATCH.replace(
+                "V::Reliable(_) => true,\n        V::Connected",
+                "V::Reliable(_) => true,\n        V::Multicast(_) => false,\n        V::Connected",
+            ),
+            encoding="utf-8",
         )
-        got = oracle_findings(good, root)
-        if not any("declared CONDITIONAL, but upstream answers it with" in f for f in got):
-            print(
-                f"upstream-link-axis: SELFTEST FAIL -- a DECLARED conditional that "
-                f"upstream answers with constants must be refused, or the "
-                f"declaration stops grading a link for free; got {got}"
-            )
+        if not _refused("uncovered-arm", oracle_findings(good, root), "no wz `LinkKind` stands for"):
             return 1
     # An empty upstream tree grades nothing and must say so.
     with tempfile.TemporaryDirectory() as tmp:
         empty = pathlib.Path(tmp)
         (empty / "io" / "zenoh-links").mkdir(parents=True)
-        if not any("graded\nnothing" in f or "graded nothing" in f for f in oracle_findings(good, empty)):
-            print(
-                "upstream-link-axis: SELFTEST FAIL -- an upstream tree with no "
-                "link crate must FAIL rather than report clean"
-            )
+        if not _refused("empty-upstream", oracle_findings(good, empty), "graded nothing"):
             return 1
     print(
         "upstream-link-axis: selftest OK -- the agreement arm refuses a table "
-        "that drifts from the code, a missing table, a missing row, a variant "
-        "`VARIANTS` does not know and a body that is not a `matches!`; the "
-        "oracle arm reproduces R2259's own defect on BOTH links it got wrong, "
-        "refuses an undeclared conditional, refuses a DECLARED conditional that "
-        "upstream answers with constants, and refuses an empty upstream tree -- "
-        "past two clean controls"
+        "that drifts from the code, a missing table, a missing row, a body naming "
+        "a variant the enum lacks, a body that is not a `matches!`, a body naming "
+        "another enum, an enum grown past the mapping, and an unreadable enum; the "
+        "oracle arm reproduces R2259's defect on both links, grades each udp kind "
+        "against its own upstream arm in both directions, refuses an undeclared "
+        "match, arms named on a constant, an upstream arm no kind stands for, and "
+        "an empty upstream tree -- past two clean controls"
     )
     return 0
 

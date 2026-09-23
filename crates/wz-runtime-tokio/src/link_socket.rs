@@ -21,7 +21,7 @@
 //! | tls | listen | accepted | same, then ignored | no | yes | yes | no |
 //! | udp | dial | refused | first, else an error | yes | yes | no | no |
 //! | udp | listen | accepted | not read | no | yes | no | no |
-//! | quic, quic-datagram | both | refused | first, else an error | dial only | yes | no | yes |
+//! | quic, quic-datagram, udp `rel=1` | both | refused | first, else an error | dial only | yes | no | yes |
 //! | ws | both | accepted | not read | no | no | no | no |
 //!
 //! R2598 added the last column, and it is the first one that is NOT a socket
@@ -254,7 +254,13 @@ impl SchemeReader {
                 reads_buffers: false,
                 reads_quic_mtu: false,
             },
-            Proto::Quic | Proto::QuicDatagram => SchemeReader {
+            // R2810 — reliable UDP is in this row because it is built by the same
+            // QUIC builders, which read the endpoint through the same
+            // `QuicSocketConfig::new`
+            // (`io/zenoh-links/zenoh-link-udp/src/reliability.rs` @ `} = QuicClientBuilder::new(endpoint).security(false).await?;`).
+            // That is also the ONLY route by which a `udp/` locator reaches the
+            // two quinn transport keys: the udp crate itself never names them.
+            Proto::Quic | Proto::QuicDatagram | Proto::UdpReliable => SchemeReader {
                 refuses_iface_with_bind: true,
                 bind: BindLookup::FirstOrError("QUIC"),
                 reads_dscp: true,
@@ -699,14 +705,37 @@ mod tests {
         );
     }
 
-    const ALL: [Proto; 6] = [
+    const ALL: [Proto; 7] = [
         Proto::Tcp,
         Proto::Tls,
         Proto::Udp,
         Proto::Quic,
         Proto::QuicDatagram,
+        Proto::UdpReliable,
         Proto::Ws,
     ];
+
+    /// R2810 — `ALL` is every `Proto`, held by an exhaustive `match`: the
+    /// sweeps below claim to cover every scheme, and a hand-written array
+    /// only does so until the enum grows. It grew by one this round, and the
+    /// array would have gone on sweeping six.
+    #[test]
+    fn all_is_every_proto() {
+        fn _adding_a_proto_must_not_compile_until_all_is_updated(proto: Proto) {
+            match proto {
+                Proto::Tcp
+                | Proto::Tls
+                | Proto::Udp
+                | Proto::Quic
+                | Proto::QuicDatagram
+                | Proto::UdpReliable
+                | Proto::Ws => {}
+            }
+        }
+        for (i, proto) in ALL.iter().enumerate() {
+            assert!(!ALL[..i].contains(proto), "{proto:?} listed twice");
+        }
+    }
 
     /// The `iface` + `bind` refusal lands exactly on upstream's five rows:
     /// every unicast dial except ws, and the quic listeners.
@@ -718,7 +747,7 @@ mod tests {
                 let refused = resolve_alone(&both, proto, side).await.is_err();
                 let expected = match (proto, side) {
                     (Proto::Ws, _) => false,
-                    (Proto::Quic | Proto::QuicDatagram, _) => true,
+                    (Proto::Quic | Proto::QuicDatagram | Proto::UdpReliable, _) => true,
                     (_, LinkSide::Dial) => true,
                     (_, LinkSide::Listen) => false,
                 };
@@ -790,7 +819,10 @@ mod tests {
         for proto in ALL {
             for side in [LinkSide::Dial, LinkSide::Listen] {
                 let socket = resolve_alone(&opts, proto, side).await.unwrap();
-                let quic = matches!(proto, Proto::Quic | Proto::QuicDatagram);
+                let quic = matches!(
+                    proto,
+                    Proto::Quic | Proto::QuicDatagram | Proto::UdpReliable
+                );
                 assert_eq!(
                     socket.initial_mtu(),
                     quic.then_some(1400),
@@ -820,7 +852,7 @@ mod tests {
             mtu_discovery_interval_secs: Some(7),
             ..LinkSocketOptions::NONE
         };
-        for proto in [Proto::Quic, Proto::QuicDatagram] {
+        for proto in [Proto::Quic, Proto::QuicDatagram, Proto::UdpReliable] {
             let socket =
                 LinkSocket::resolve(&LinkSocketOptions::NONE, &planted, proto, LinkSide::Dial)
                     .await

@@ -178,6 +178,13 @@ use crate::quic_pipeline::{
 #[cfg(feature = "transport-link-quic")]
 use quinn::{Endpoint, Incoming};
 
+// R2810 — the RELIABLE UDP arm: upstream's `udp/...?rel=1`, which is the QUIC
+// stream link under a plaintext session. It reuses the QUIC accept halves and
+// read driver unchanged; only the crypto (at dial and bind) and the name the
+// wired link carries (`wire_udp_reliable`) are its own.
+#[cfg(feature = "transport-link-udp-reliable")]
+use crate::udp_reliable_pipeline::{bind_udp_reliable, dial_udp_reliable, wire_udp_reliable};
+
 // R311y8 — the QUIC DATAGRAM arm, like udp/ws, rides this tcp+unicast-gated
 // module as an additive DATAGRAM transport. Reuses `DialConfig.quic` (same
 // cert as the stream backend); `transport-link-quic-datagram` implies
@@ -756,6 +763,15 @@ pub enum DialedLink {
     /// the stream backend).
     #[cfg(feature = "transport-link-quic-datagram")]
     QuicDatagram(Box<QuicDatagramLink>),
+    /// R2810 — a connected RELIABLE UDP link (`udp/...?rel=1`): the same
+    /// [`QuicLink`] a `quic/...` dial yields, made under a plaintext session,
+    /// and wired by [`wire_udp_reliable`] so that it carries its own kind.
+    /// A variant of its own rather than [`Self::Quic`] because the link's NAME
+    /// is part of the link: a rule must see `udp`, the adminspace must see
+    /// `udp/...`, and a `quic` rule must not reach it. Produced by
+    /// [`dial_locator`] from the locator alone — it needs no cert config.
+    #[cfg(feature = "transport-link-udp-reliable")]
+    UdpReliable(Box<QuicLink>),
 }
 
 impl DialedLink {
@@ -791,6 +807,10 @@ impl DialedLink {
             DialedLink::Quic(_) => "quic",
             #[cfg(feature = "transport-link-quic-datagram")]
             DialedLink::QuicDatagram(_) => "quic-datagram",
+            // A log word, not a scheme (the scheme is `udp`): it has to tell a
+            // witness which of the two udp links was dialed.
+            #[cfg(feature = "transport-link-udp-reliable")]
+            DialedLink::UdpReliable(_) => "udp-reliable",
         }
     }
 }
@@ -986,6 +1006,15 @@ pub enum BoundListener {
     /// `quinn::Connection` too, so an expired peer identity is no more
     /// acceptable here than under streams.
     QuicDatagram(Endpoint, bool),
+    /// R2810 — a bound RELIABLE UDP server [`Endpoint`] (`udp/...?rel=1`): a
+    /// QUIC endpoint whose baked-in crypto is the plaintext session, so it
+    /// accepts exactly as [`Self::Quic`] does — the cheap arrival in
+    /// [`Self::accept_raw`], the handshake and first stream deferred to
+    /// [`AcceptedLink::handshake`] — and is mesh-capable for the same reason.
+    /// No expiry flag: the peer's certificate is a throwaway nothing verified,
+    /// so there is no identity whose expiry could close the link.
+    #[cfg(feature = "transport-link-udp-reliable")]
+    UdpReliable(Endpoint),
     /// A bound `serial/...` endpoint (R311y805) — the LAST scheme whose acceptor
     /// was an unwired extension point, and the only one that binds NOTHING: a tty
     /// has no listen queue, so [`SerialListener`] holds the endpoint and
@@ -1147,6 +1176,8 @@ impl BoundListener {
             BoundListener::Quic(_, _) => "quic",
             #[cfg(feature = "transport-link-quic-datagram")]
             BoundListener::QuicDatagram(_, _) => "quic-datagram",
+            #[cfg(feature = "transport-link-udp-reliable")]
+            BoundListener::UdpReliable(_) => "udp-reliable",
             #[cfg(feature = "transport-link-serial")]
             BoundListener::Serial(_) => "serial",
         }
@@ -1219,6 +1250,10 @@ impl BoundListener {
             BoundListener::Quic(_, _) => LinkKind::Quic,
             #[cfg(feature = "transport-link-quic-datagram")]
             BoundListener::QuicDatagram(_, _) => LinkKind::QuicDatagram,
+            // Advertises `udp/...?rel=1`: without the marker a peer dials the
+            // datagram link, which this listener cannot read.
+            #[cfg(feature = "transport-link-udp-reliable")]
+            BoundListener::UdpReliable(_) => LinkKind::UdpReliable,
             #[cfg(feature = "transport-link-serial")]
             BoundListener::Serial(_) => LinkKind::Serial,
         }
@@ -1276,6 +1311,9 @@ impl BoundListener {
             // Mesh-capable for the SAME reason as `Quic` (deferred crypto handshake).
             #[cfg(feature = "transport-link-quic-datagram")]
             BoundListener::QuicDatagram(_, _) => true,
+            // Mesh-capable for the SAME reason as `Quic`: it is that endpoint.
+            #[cfg(feature = "transport-link-udp-reliable")]
+            BoundListener::UdpReliable(_) => true,
             // R311y805 — `false`, and not for a deferral reason: a tty is
             // POINT-TO-POINT, so one bound serial endpoint can only ever produce
             // ONE peer. Upstream's serial listener is the same shape (it re-opens
@@ -1357,6 +1395,8 @@ impl BoundListener {
             BoundListener::Quic(ep, _) => ep.local_addr()?.to_string(),
             #[cfg(feature = "transport-link-quic-datagram")]
             BoundListener::QuicDatagram(ep, _) => ep.local_addr()?.to_string(),
+            #[cfg(feature = "transport-link-udp-reliable")]
+            BoundListener::UdpReliable(ep) => ep.local_addr()?.to_string(),
             // A serial endpoint's address is the DEVICE (or the pin pair),
             // rendered with the `#baudrate=` tail that makes it parse back --
             // `locator_address_with_config` is the same renderer the per-link
@@ -1422,6 +1462,8 @@ impl BoundListener {
             BoundListener::Quic(ep, _) => ep.local_addr(),
             #[cfg(feature = "transport-link-quic-datagram")]
             BoundListener::QuicDatagram(ep, _) => ep.local_addr(),
+            #[cfg(feature = "transport-link-udp-reliable")]
+            BoundListener::UdpReliable(ep) => ep.local_addr(),
             // A tty has no IP address at all (not even a same-host path the way
             // unixsock does); its address is a device node. Same typed error as the
             // other non-IP families -- a zid-from-port caller never binds serial.
@@ -1594,6 +1636,21 @@ impl BoundListener {
                     AcceptedPeer::Ip(peer),
                 )
             }
+            // R2810 — the reliable UDP arrival, the `Quic` arm's exactly: the
+            // plaintext crypto is baked into the endpoint, so the arrival and the
+            // deferred completion are the stream backend's own halves.
+            #[cfg(feature = "transport-link-udp-reliable")]
+            BoundListener::UdpReliable(ep) => {
+                let incoming = accept_quic_incoming(ep).await?;
+                let peer = incoming.remote_address();
+                (
+                    AcceptedLink::UdpReliable {
+                        incoming: Box::new(incoming),
+                        endpoint: ep.clone(),
+                    },
+                    AcceptedPeer::Ip(peer),
+                )
+            }
             // R311y805 — the serial accept: the CHEAP half is a local tty open
             // (`open_serial_device`), and the peer-controlled serial-LINK handshake
             // (await `INIT`, reply `INIT|ACK`) DEFERS to `AcceptedLink::handshake`,
@@ -1756,6 +1813,15 @@ pub enum AcceptedLink {
         /// R2600 — the datagram twin of [`Self::Quic`]'s field, same journey.
         closes_on_expiration: bool,
     },
+    /// R2810 — a pending RELIABLE UDP connection arrival awaiting its deferred
+    /// handshake: [`Self::Quic`]'s shape without the expiry flag (see
+    /// [`BoundListener::UdpReliable`]). [`Self::handshake`] completes it into
+    /// [`DialedLink::UdpReliable`].
+    #[cfg(feature = "transport-link-udp-reliable")]
+    UdpReliable {
+        incoming: Box<Incoming>,
+        endpoint: Endpoint,
+    },
     /// An OPEN tty awaiting its DEFERRED serial-LINK handshake (R311y805) — the
     /// `SerialStream` [`BoundListener::accept_raw`] opened WITHOUT waiting for the
     /// peer, plus the [`SerialEndpoint`] it was opened from (a `SerialStream`
@@ -1868,6 +1934,13 @@ impl AcceptedLink {
                 }
                 DialedLink::QuicDatagram(Box::new(link))
             }
+            // R2810 — the deferred reliable UDP handshake: the QUIC stream
+            // completion (`incoming.await`, then `accept_bi`) under the plaintext
+            // session the endpoint carries.
+            #[cfg(feature = "transport-link-udp-reliable")]
+            AcceptedLink::UdpReliable { incoming, endpoint } => {
+                DialedLink::UdpReliable(Box::new(complete_quic_accept(*incoming, endpoint).await?))
+            }
             // R311y805 — the DEFERRED serial-LINK handshake, the Responder half of
             // the exchange `dial_serial` drives as Initiator: await `INIT`, reply
             // `INIT|ACK`, and leave the stream positioned exactly at the first
@@ -1937,6 +2010,8 @@ impl AcceptedLink {
             // it earns the same completion-witness note (datagram-tagged).
             #[cfg(feature = "transport-link-quic-datagram")]
             AcceptedLink::QuicDatagram { .. } => "; quic-datagram server handshake",
+            #[cfg(feature = "transport-link-udp-reliable")]
+            AcceptedLink::UdpReliable { .. } => "; udp-reliable server handshake",
             // R311y805 — serial defers a handshake too, but a LINK-level one (the
             // `INIT` / `INIT|ACK` exchange that precedes the zenoh transport), so
             // the note says which layer it completed rather than borrowing the
@@ -2188,6 +2263,27 @@ pub async fn dial_locator(locator: AnyLocator, cfg: &DialConfig) -> io::Result<D
                 io::ErrorKind::Unsupported,
                 "quic-datagram session-open requires the transport-link-quic-datagram feature",
             )),
+            // R2810 — `udp/...?rel=1` dials upstream's reliable UDP link, from
+            // the locator alone: the plaintext session needs no certificate on
+            // either side, which is why this arm reads no `cfg.quic`. The TLS
+            // name is the address, as upstream's is (`get_quic_host`); nothing
+            // checks it. With the backend off this is `Unsupported`, NEVER a
+            // fall back to plain UDP: the peer is listening on QUIC and would
+            // read a datagram as a malformed packet.
+            #[cfg(feature = "transport-link-udp-reliable")]
+            Proto::UdpReliable => Ok(DialedLink::UdpReliable(Box::new(
+                dial_udp_reliable(
+                    ip.addr,
+                    &ip.addr.ip().to_string(),
+                    &cfg.link_socket(ip.socket(), ip.proto).await?,
+                )
+                .await?,
+            ))),
+            #[cfg(not(feature = "transport-link-udp-reliable"))]
+            Proto::UdpReliable => Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                "reliable udp (rel=1) session-open requires the transport-link-udp-reliable feature",
+            )),
         },
         // R311ps — a DNS-named IP-family endpoint (`tcp/example.org:7447`). The
         // no_std parser classified the address token as a NAME; resolution is a
@@ -2400,6 +2496,25 @@ pub async fn dial_locator(locator: AnyLocator, cfg: &DialConfig) -> io::Result<D
             Proto::QuicDatagram => Err(io::Error::new(
                 io::ErrorKind::Unsupported,
                 "quic-datagram session-open requires the transport-link-quic-datagram feature",
+            )),
+            // R2810 — a `udp/NAME:port?rel=1` dial: resolve, then the numeric
+            // arm per candidate, with the NAME as the TLS server name, which is
+            // what upstream hands its builder for any quic-family host.
+            #[cfg(feature = "transport-link-udp-reliable")]
+            Proto::UdpReliable => {
+                let addrs = resolve_locator_addrs(&host, port).await?;
+                let link_socket = &cfg.link_socket(named_options(&socket), proto).await?;
+                Ok(DialedLink::UdpReliable(Box::new(
+                    first_reachable(addrs, &format!("udp/{host}:{port}?rel=1"), |addr| {
+                        dial_udp_reliable(addr, &host, link_socket)
+                    })
+                    .await?,
+                )))
+            }
+            #[cfg(not(feature = "transport-link-udp-reliable"))]
+            Proto::UdpReliable => Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                "reliable udp (rel=1) session-open requires the transport-link-udp-reliable feature",
             )),
         },
         // R311nv — a `serial/...` endpoint dials through the tty backend:
@@ -2687,6 +2802,8 @@ pub fn locator_scheme(locator: &AnyLocator) -> &'static str {
             Proto::Ws => "ws",
             Proto::Quic => "quic",
             Proto::QuicDatagram => "quic-datagram",
+            // Upstream's scheme: the reliable variant has no string of its own.
+            Proto::UdpReliable => "udp",
         }
     }
     match locator {
@@ -3148,6 +3265,18 @@ pub async fn bind_locator(locator: AnyLocator, cfg: &AcceptConfig) -> io::Result
             Proto::QuicDatagram => Err(unsupported(
                 "quic-datagram acceptor requires the transport-link-quic-datagram feature",
             )),
+            // R2810 — a `udp/...?rel=1` acceptor binds a QUIC server endpoint
+            // carrying the plaintext session: upstream's reliable UDP listener
+            // (`LinkUnicastQuicUnsecure::listen`). It needs no `cfg.quic` — the
+            // certificate is one the process makes for itself.
+            #[cfg(feature = "transport-link-udp-reliable")]
+            Proto::UdpReliable => Ok(BoundListener::UdpReliable(
+                bind_udp_reliable(ip.addr, &cfg.link_socket(ip.socket(), ip.proto).await?).await?,
+            )),
+            #[cfg(not(feature = "transport-link-udp-reliable"))]
+            Proto::UdpReliable => Err(unsupported(
+                "reliable udp (rel=1) acceptor requires the transport-link-udp-reliable feature",
+            )),
             // R311y408 — the `Proto` match is EXHAUSTIVE: all 6 IP-family variants
             // carry a feature + not(feature) arm, mirroring dial_locator. No
             // catch-all — a NEW `Proto` variant forces a compile-time decision here
@@ -3278,6 +3407,21 @@ pub async fn bind_locator(locator: AnyLocator, cfg: &AcceptConfig) -> io::Result
             #[cfg(not(feature = "transport-link-quic-datagram"))]
             Proto::QuicDatagram => Err(unsupported(
                 "quic-datagram acceptor requires the transport-link-quic-datagram feature",
+            )),
+            #[cfg(feature = "transport-link-udp-reliable")]
+            Proto::UdpReliable => {
+                let addrs = resolve_locator_addrs(&host, port).await?;
+                let link_socket = &cfg.link_socket(named_options(&socket), proto).await?;
+                Ok(BoundListener::UdpReliable(
+                    first_reachable(addrs, &format!("udp/{host}:{port}?rel=1"), |addr| {
+                        bind_udp_reliable(addr, link_socket)
+                    })
+                    .await?,
+                ))
+            }
+            #[cfg(not(feature = "transport-link-udp-reliable"))]
+            Proto::UdpReliable => Err(unsupported(
+                "reliable udp (rel=1) acceptor requires the transport-link-udp-reliable feature",
             )),
             // With the ws / tls BACKEND off their arms above vanish, so the
             // `Proto` match is exhaustive only through these twins — the same
@@ -3748,6 +3892,14 @@ pub fn wire_dialed_link_with_lowlatency(
         DialedLink::QuicDatagram(link) => {
             let (inbound, outbound, handle) = wire_quic_datagram(*link);
             (InboundLink::QuicDatagram(inbound), outbound, handle)
+        }
+        // R2810 — the inbound half IS the QUIC stream's read driver; the kind
+        // the link reports lives on the outbound driver `wire_udp_reliable`
+        // builds, so no inbound variant of its own is needed.
+        #[cfg(feature = "transport-link-udp-reliable")]
+        DialedLink::UdpReliable(link) => {
+            let (inbound, outbound, handle) = wire_udp_reliable(*link);
+            (InboundLink::Quic(inbound), outbound, handle)
         }
     }
 }

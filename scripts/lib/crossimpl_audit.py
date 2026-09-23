@@ -714,7 +714,13 @@ HOST_GATED_CI_TARGETS: dict[str, str] = {
 # R2790 above, and hosted Layer A4 redded on every main run after it (first
 # 35806887276). Measured at 4190d455^ = 925 and at 4190d455 = 930, so the
 # whole rise is that one commit.
-FOREIGN_ADJUDICATOR_LINKS = 930
+# R2810 — 930 -> 932, RISING because `transport-link-udp`'s RELIABLE variant
+# (`udp/...?rel=1`, the plaintext QUIC stream link) gained its first foreign
+# adjudicator: `wz_udp_reliable_zenohd_interop.rs`, stock zenohd dialing wz's
+# reliable listener and being dialed by wz. Two tests, one atom, one direction
+# each: 2 tests x 1 atom = 2. Measured by `run-ci.sh --layer A4` before the
+# commit, which is the rule R2790 wrote down.
+FOREIGN_ADJUDICATOR_LINKS = 932
 
 # ── Execution disclosure ────────────────────────────────────────────────────────
 #

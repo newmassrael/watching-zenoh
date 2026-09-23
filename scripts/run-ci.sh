@@ -6579,19 +6579,26 @@ layer_c1aj_cargo_test_quic_datagram() {
 #      the application's bytes IN THE CLEAR in both directions; the SAME relay
 #      over wz's encrypted QUIC link must NOT find them — the control that makes
 #      the first result a statement about the wire; and a plaintext client
-#      cannot reach an encrypted QUIC server that IS accepting;
+#      cannot reach an encrypted QUIC server that IS accepting; and (R2810) a
+#      `udp/...?rel=1` LOCATOR reaches the variant on both ends through the
+#      session-open seam with no certificate configured, the link naming itself
+#      `udp` to a rule and plain `udp/<addr>` at its ends, and a Put crosses it;
 #   2. clippy-gates the feature (`--all-targets`), and the LIB alone under
 #      `--no-default-features`, where `quic_plaintext` has only its own
 #      implications to compose with.
 #
-# The count is what this exact command PRINTED (`test result: ok. 3 passed`).
+# The count is what this exact command PRINTED (`test result: ok. 4 passed`;
+# 3 until R2810 added the seam case).
+# R2810 controls for the seam case, measured: wiring the link with the `quic`
+# kind reds it at the subject assertion (`Some(Quic)` for `Some(UdpReliable)`),
+# and a locator parser that ignores `rel=1` reds it at the listener's kind.
 # MEASURED red before the lane existed: with the no-op keys delegating to the
 # real ones, cases one and three red (the relay saw 6 datagrams to the server
 # and none carried the bytes; the plaintext client reached the encrypted
 # server); with ONLY the server config's Initial keys left unwrapped, case one
 # times out, because the server cannot read the first packet.
 layer_c1ci_cargo_test_udp_reliable() {
-    _runci_guarded_test C1ci 3 \
+    _runci_guarded_test C1ci 4 \
         cargo test -p wz-runtime-tokio --features transport-link-udp-reliable --test udp_reliable_e2e --quiet \
         || return 1
     (cd crates \
@@ -16015,7 +16022,7 @@ layer_z_zenohd_interop() {
     # `config_keys_the_demo_drops` behind the same cfg. Additive:
     # `--timestamping` is in no other leg's argv, and a build that carries the
     # feature stamps only where a document asks. Both restatements carry it.
-    (cd crates && cargo build -p wz-ap-demo --features ws,unixsock,tls,quic,quic-datagram,routing-router,router-hat-router,router-connect-reconcile,router-multicast-faces,routing-token-tables,namespace,transport-qos,time-hlc,transport-lowlatency,session-extcompression,session-extshm,transport-link-unixpipe,vsock,advanced,group,locator-iface,routing-peer,transport-multilink,zenoh-config --quiet) || return 1
+    (cd crates && cargo build -p wz-ap-demo --features ws,unixsock,tls,quic,quic-datagram,udp-reliable,routing-router,router-hat-router,router-connect-reconcile,router-multicast-faces,routing-token-tables,namespace,transport-qos,time-hlc,transport-lowlatency,session-extcompression,session-extshm,transport-link-unixpipe,vsock,advanced,group,locator-iface,routing-peer,transport-multilink,zenoh-config --quiet) || return 1
     # R311y442 review (REVIEWER 3, finding 3) added a clippy of the demo's
     # `advanced` arm right here, closing the `-D warnings` hole R311y433 closed
     # for transport-lowlatency and session-extcompression. R311y443-review
@@ -16135,7 +16142,7 @@ layer_z_zenohd_interop() {
     # RELAYED Put's `T` flag, and without the feature `NodeHlc::is_stamping` is
     # false unconditionally so both documents answer `bare`. Both restatements
     # carry it.
-    (cd crates && cargo build -p wz-ap-demo --features ws,unixsock,tls,quic,quic-datagram,routing-router,router-hat-router,router-connect-reconcile,router-multicast-faces,routing-token-tables,namespace,transport-qos,time-hlc,transport-lowlatency,session-extcompression,session-extshm,transport-link-unixpipe,vsock,advanced,group,locator-iface,routing-peer,transport-multilink,zenoh-config --quiet) || return 1
+    (cd crates && cargo build -p wz-ap-demo --features ws,unixsock,tls,quic,quic-datagram,udp-reliable,routing-router,router-hat-router,router-connect-reconcile,router-multicast-faces,routing-token-tables,namespace,transport-qos,time-hlc,transport-lowlatency,session-extcompression,session-extshm,transport-link-unixpipe,vsock,advanced,group,locator-iface,routing-peer,transport-multilink,zenoh-config --quiet) || return 1
     # R311y435 — wz COMPOSED lowlatency x compression cross-impl: the measurement
     # R311y434 explicitly did NOT claim ("no leg dials zenohd with both modes,
     # because the demo cannot stage both offers"). The offer-SET widening of
@@ -16757,6 +16764,20 @@ layer_z_zenohd_interop() {
     # --test-threads=1 per-zenohd isolation.
     (cd crates && WZ_ZENOHD_BIN="$zenohd" cargo test -p wz-integration-tests \
         --test wz_udp_acceptor_zenohd_interop -- --ignored --quiet --test-threads=1) || return 1
+    # R2810 — wz RELIABLE UDP cross-impl (`udp/...?rel=1`, transport-link-udp-reliable),
+    # BOTH directions: zenohd dials wz's reliable listener and a pico z_pub crosses
+    # into wz; wz dials zenohd's reliable listener and its Put crosses out to a pico
+    # z_sub. The variant is upstream's QUIC stream link under a PLAINTEXT session, and
+    # a wz<->wz pair could agree on a mistake both ends share, so zenohd is the only
+    # adjudicator of the plaintext session wz built in R2798. STOCK zenohd (its udp
+    # crate carries the variant unconditionally) + the demo's `udp-reliable` feature
+    # (on both build lines of this lane). Controls measured before wiring: a demo
+    # whose locator parser ignored `rel=1` bound plain udp and never established
+    # (leg 1), and its Put never reached z_sub (leg 2). GUARDED
+    # (`_runci_guarded_test`, 2 = one leg per direction), not a `| grep -q` stage:
+    # that races SIGPIPE under this script's pipefail (see the helper's header).
+    _runci_guarded_test Z 2 env WZ_ZENOHD_BIN="$zenohd" cargo test -p wz-integration-tests \
+        --test wz_udp_reliable_zenohd_interop -- --ignored --quiet --test-threads=1 || return 1
     # R311y401 — wz QUIC ACCEPTOR cross-impl (transport-link-quic zenohd->wz): the
     # cert-transport sibling of the tls acceptor leg above. A real zenohd DIALS the wz
     # `--listen quic/...` acceptor (BoundListener::Quic / bind_quic + accept_quic_on,

@@ -167,6 +167,12 @@ pub enum LinkKind {
     Tcp,
     /// `udp/...` — the UDP datagram link.
     Udp,
+    /// `udp/...?rel=1` — upstream's RELIABLE UDP link (R2810): QUIC under a
+    /// plaintext session, one bidirectional stream. A distinct KIND, and the
+    /// SAME protocol as [`Self::Udp`] to a rule, because upstream gives every
+    /// variant of its udp link one auth id
+    /// (`io/zenoh-links/zenoh-link-udp/src/unicast.rs` @ `&LinkAuthId::Udp`).
+    UdpReliable,
     /// `tls/...` — TLS over TCP.
     Tls,
     /// `quic/...` — QUIC, batch over one bidirectional stream.
@@ -194,6 +200,7 @@ impl LinkKind {
     pub const ALL: &'static [LinkKind] = &[
         LinkKind::Tcp,
         LinkKind::Udp,
+        LinkKind::UdpReliable,
         LinkKind::Tls,
         LinkKind::Quic,
         LinkKind::QuicDatagram,
@@ -213,7 +220,8 @@ impl LinkKind {
     pub fn interceptor_protocol(self) -> InterceptorLink {
         match self {
             LinkKind::Tcp => InterceptorLink::Tcp,
-            LinkKind::Udp => InterceptorLink::Udp,
+            // Both UDP kinds are `udp` to a rule, as upstream files them.
+            LinkKind::Udp | LinkKind::UdpReliable => InterceptorLink::Udp,
             LinkKind::Tls => InterceptorLink::Tls,
             // Both QUIC kinds are `quic` to a rule, as upstream files them.
             LinkKind::Quic | LinkKind::QuicDatagram => InterceptorLink::Quic,
@@ -249,6 +257,7 @@ impl LinkKind {
     /// |------------------|----------|----------|
     /// | tcp              | true     | true     |
     /// | udp              | false    | false    |
+    /// | udp-reliable     | true     | true     |
     /// | tls              | true     | true     |
     /// | quic             | true     | true     |
     /// | quic-datagram    | false    | false    |
@@ -260,8 +269,10 @@ impl LinkKind {
     ///
     /// ⚠ `udp` is upstream's one CONDITIONAL: its impl matches on a variant and
     /// answers `true` only for the reliable-UDP one, `false` for the connected
-    /// and unconnected forms. wz has no reliable-UDP link, so `false` is the
-    /// row that describes what wz can actually be.
+    /// and unconnected forms. R2810 gave wz that variant as its own kind,
+    /// [`LinkKind::UdpReliable`] (row `udp-reliable`), so the conditional is two
+    /// rows here and the gate grades each against the upstream ARM it stands
+    /// for rather than skipping the link.
     pub fn is_streamed(&self) -> bool {
         !matches!(
             self,
@@ -314,6 +325,12 @@ impl LinkKind {
         match self {
             LinkKind::Tcp => format!("tcp/{address}"),
             LinkKind::Udp => format!("udp/{address}"),
+            // The `rel=1` is what makes it DIALABLE as this kind: a peer reading
+            // `udp/{address}` alone dials the datagram link, which cannot talk to
+            // a reliable listener. Upstream's listener keeps its endpoint's
+            // metadata on the locator it returns for the same reason
+            // (`io/zenoh-link-commons/src/quic/unicast.rs` @ `endpoint.metadata(),`).
+            LinkKind::UdpReliable => format!("udp/{address}?rel=1"),
             LinkKind::Tls => format!("tls/{address}"),
             LinkKind::Quic => format!("quic/{address}"),
             LinkKind::QuicDatagram => format!("quic/{address}?rel=0"),
@@ -974,6 +991,7 @@ mod tests {
             match kind {
                 LinkKind::Tcp
                 | LinkKind::Udp
+                | LinkKind::UdpReliable
                 | LinkKind::Tls
                 | LinkKind::Quic
                 | LinkKind::QuicDatagram
@@ -986,7 +1004,7 @@ mod tests {
         }
         assert_eq!(
             LinkKind::ALL.len(),
-            10,
+            11,
             "a kind was added: list it in ALL and move this count"
         );
 
@@ -1028,6 +1046,31 @@ mod tests {
         assert_eq!(LinkKind::Quic.interceptor_protocol(), InterceptorLink::Quic);
         assert!(LinkKind::Quic.is_streamed());
         assert!(LinkKind::Quic.is_reliable());
+
+        // R2810 — THE SECOND PAIR, the mirror image of the first: `udp` to a
+        // rule, and streamed AND reliable to itself -- the one upstream link
+        // whose streamed answer depends on its variant. A `udp` deny rule must
+        // govern it, and zenoh-c must still be told it is a reliable stream.
+        assert_eq!(
+            LinkKind::UdpReliable.interceptor_protocol(),
+            InterceptorLink::Udp,
+            "upstream files every variant of its udp link under `udp`"
+        );
+        assert!(LinkKind::UdpReliable.is_streamed());
+        assert!(LinkKind::UdpReliable.is_reliable());
+        assert_eq!(
+            LinkKind::UdpReliable.locator_for("127.0.0.1:7447"),
+            "udp/127.0.0.1:7447?rel=1",
+            "without `rel=1` a foreign peer dials the datagram link"
+        );
+        assert!(!LinkKind::Udp.is_streamed());
+        assert!(!LinkKind::Udp.is_reliable());
+        let reliable_udp = LinkSubject {
+            kind: Some(LinkKind::UdpReliable),
+            ..LinkSubject::UNKNOWN
+        };
+        assert!(reliable_udp.matches_protocols(&[InterceptorLink::Udp]));
+        assert!(!reliable_udp.matches_protocols(&[InterceptorLink::Quic]));
 
         // And a subject derives its protocol from its kind, never alongside it.
         let subject = LinkSubject {

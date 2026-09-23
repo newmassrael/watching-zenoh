@@ -78,8 +78,9 @@
 //! Of the metadata vocabulary only `rel` is HONOURED, and only where it changes
 //! which link is dialed: on the `quic` scheme `rel=0` selects the QUIC DATAGRAM
 //! link, because zenoh gives both QUIC links the same `"quic"` scheme string and
-//! separates them by that key alone (`io/zenoh-link/src/lib.rs:165-171`). See
-//! [`reliability_adjusted_proto`]. `prio` (priority-range link selection) and
+//! separates them by that key alone (`io/zenoh-link/src/lib.rs:165-171`); on the
+//! `udp` scheme `rel=1` selects the RELIABLE UDP link for the same reason (R2810).
+//! See [`reliability_adjusted_proto`]. `prio` (priority-range link selection) and
 //! `rel` on the other schemes are parsed and NOT honoured — they belong to the
 //! `transport-multilink` and reliability axes, and are not claimed here.
 //!
@@ -144,6 +145,19 @@ pub enum Proto {
     /// config the locator alone cannot carry, so it dials only when the threaded
     /// `DialConfig.quic` supplies it; otherwise a typed `Unsupported`.
     QuicDatagram,
+    /// `udp/...?rel=1` — upstream's RELIABLE UDP link (R2810): QUIC under a
+    /// plaintext session, one bidirectional stream carrying the StreamEnvelope,
+    /// exactly the `quic` link's shape with no packet protection. Upstream keeps
+    /// the `udp` scheme and selects this variant with the `rel` metadata key
+    /// (`io/zenoh-links/zenoh-link-udp/src/unicast.rs` @ `LinkUnicastQuicUnsecure::connect(&endpoint).await`),
+    /// so there is no scheme string of its own: only the private
+    /// `reliability_adjusted_proto` produces it. UNLIKE `quic` it needs no cert config — the server presents
+    /// a throwaway self-signed certificate and the client trusts any — so it
+    /// dials from the locator alone. The BACKEND is gated
+    /// (`transport-link-udp-reliable`); without it the dial answers a typed
+    /// `Unsupported`, never plain UDP, since a peer listening on the reliable
+    /// variant cannot read plain datagrams.
+    UdpReliable,
 }
 
 /// A locator parsed into its transport protocol and numeric endpoint.
@@ -556,6 +570,14 @@ pub enum LocatorParseError {
     /// ignored, not rejected, which is the forward-compat rule `lookup_param`
     /// states (a private helper, so named in a code span rather than linked).
     BadConfigValue { key: &'static str, value: String },
+    /// R2810 — a METADATA value this parser must read to choose a link and that
+    /// does not parse: today only `?rel=<n>` on the schemes where it selects the
+    /// link (`udp`, `quic`), which upstream parses with `Reliability::from_str`
+    /// and refuses unless it is `0` or `1`
+    /// (`commons/zenoh-protocol/src/core/mod.rs` @ `impl FromStr for Reliability {`).
+    /// A separate variant from [`Self::BadConfigValue`] because the two spans
+    /// are distinct namespaces and the message has to say which one was wrong.
+    BadMetadataValue { key: &'static str, value: String },
 }
 
 /// Parse a zenoh locator `proto/addr:port` into a [`ParsedLocator`].
@@ -589,7 +611,11 @@ pub fn parse_locator(locator: &str) -> Result<ParsedLocator, LocatorParseError> 
     // reject of `1.2.3.4:7447?prio=1-3`, each of which failed
     // `SocketAddr::from_str` as `BadAddress` with the tail still attached.
     let parts = split_locator_parts(addr_str);
-    let proto = reliability_adjusted_proto(proto, parts.metadata);
+    // R2810 — BEFORE the address parse, so an unreadable `rel` is reported as
+    // what it is on a DNS-named locator too: a `BadAddress` here is what routes
+    // a name to `classify_named_ip`, which would otherwise meet the bad value
+    // with no channel to report it on.
+    let proto = reliability_adjusted_proto(proto, parts.metadata)?;
     let addr = SocketAddr::from_str(parts.address)
         .map_err(|_| LocatorParseError::BadAddress(parts.address.to_string()))?;
     Ok(ParsedLocator {
@@ -733,9 +759,34 @@ const LOCATOR_RETRY_PERIOD_INCREASE_FACTOR_KEY: &str = "retry_period_increase_fa
 /// (`zenoh-protocol/src/core/endpoint.rs:196`).
 const LOCATOR_RELIABILITY_KEY: &str = "rel";
 
-/// `rel=0` = `Reliability::BestEffort` (`zenoh-protocol/src/core/mod.rs:460-463`;
-/// the default when the key is absent is `Reliable`).
-const LOCATOR_RELIABILITY_BEST_EFFORT: &str = "0";
+/// The two values upstream's `Reliability::from_str` accepts: it parses a `u8`
+/// and compares it with the enum's discriminants, `BestEffort = 0` and
+/// `Reliable = 1` (`commons/zenoh-protocol/src/core/mod.rs` @ `impl FromStr for Reliability {`).
+/// So `01` is `Reliable` there too, and anything that is not a `u8` equal to
+/// one of the two is an error, never a default.
+///
+/// R2810 — this used to be the single string `"0"`, compared byte-for-byte, so
+/// `rel=1` and `rel=garbage` both fell through to the scheme's default and a
+/// value upstream refuses was dialed.
+fn parse_locator_reliability(value: &str) -> Result<LocatorReliability, LocatorParseError> {
+    match value.parse::<u8>() {
+        Ok(0) => Ok(LocatorReliability::BestEffort),
+        Ok(1) => Ok(LocatorReliability::Reliable),
+        _ => Err(LocatorParseError::BadMetadataValue {
+            key: LOCATOR_RELIABILITY_KEY,
+            value: value.to_string(),
+        }),
+    }
+}
+
+/// The `rel` metadata value, as the link-selecting schemes read it. Private:
+/// it exists only to be turned into a [`Proto`] by [`reliability_adjusted_proto`],
+/// and the session-level reliability type lives elsewhere.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum LocatorReliability {
+    BestEffort,
+    Reliable,
+}
 
 /// R311y469 — the three spans of a locator BODY (everything after the
 /// `<proto>/` separator) under zenoh's canon form
@@ -1203,17 +1254,37 @@ fn parse_mcast_join(config: &str) -> Vec<String> {
 /// zenoh-canonical spelling instead of dialing a stream where zenoh dials a
 /// datagram.
 ///
+/// R2810 — and on the `udp` scheme, `rel=1` picks upstream's RELIABLE UDP link
+/// ([`Proto::UdpReliable`]) and `rel=0` or no key the datagram link. The two
+/// schemes have OPPOSITE defaults, because each link crate answers the absent
+/// key with its own `IS_RELIABLE` constant: `true` for quic, `false` for udp
+/// (`io/zenoh-links/zenoh-link-udp/src/lib.rs` @ `fn is_reliable(&self, locator: &Locator) -> ZResult<bool> {`).
+///
+/// On these two schemes an unreadable value is an ERROR, as it is upstream,
+/// where the link manager reads it with `?` before choosing
+/// (`io/zenoh-links/zenoh-link-udp/src/unicast.rs` @ `let is_reliable = crate::UdpLocatorInspector`).
+/// Defaulting it instead would dial a link the operator did not name.
+///
 /// Every OTHER metadata key is parsed and not honoured — `prio` (link selection
 /// by priority range, endpoint.rs:464-470) belongs to `transport-multilink`, and
-/// `rel` on the non-`quic` schemes to the reliability axis; neither is claimed
-/// here.
-fn reliability_adjusted_proto(proto: Proto, metadata: &str) -> Proto {
-    if proto == Proto::Quic
-        && lookup_param(metadata, LOCATOR_RELIABILITY_KEY) == Some(LOCATOR_RELIABILITY_BEST_EFFORT)
-    {
-        return Proto::QuicDatagram;
-    }
-    proto
+/// `rel` on the schemes where it selects no link to the reliability axis;
+/// neither is claimed here.
+fn reliability_adjusted_proto(proto: Proto, metadata: &str) -> Result<Proto, LocatorParseError> {
+    let reliability = match proto {
+        Proto::Quic | Proto::Udp => lookup_param(metadata, LOCATOR_RELIABILITY_KEY)
+            .map(parse_locator_reliability)
+            .transpose()?,
+        // Wildcard-free: a scheme added to `Proto` has to say whether `rel`
+        // selects its link.
+        Proto::Tcp | Proto::Tls | Proto::Ws | Proto::QuicDatagram | Proto::UdpReliable => {
+            return Ok(proto)
+        }
+    };
+    Ok(match (proto, reliability) {
+        (Proto::Quic, Some(LocatorReliability::BestEffort)) => Proto::QuicDatagram,
+        (Proto::Udp, Some(LocatorReliability::Reliable)) => Proto::UdpReliable,
+        _ => proto,
+    })
 }
 
 // ─── serial locator leaf ───
@@ -2033,7 +2104,10 @@ fn classify_named_ip(locator: &str) -> Option<(Proto, String, u16, &str)> {
     // leaf (else `example.org:7447#iface=eth0` would look malformed and
     // reject). The shared `split_locator_parts` keeps the two agreeing.
     let parts = split_locator_parts(addr);
-    let proto = reliability_adjusted_proto(proto, parts.metadata);
+    // R2810 — `parse_locator` has already refused an unreadable `rel` before
+    // routing a name here, so the error arm is unreachable from
+    // `parse_any_locator`; mapping it to `None` keeps this a pure shape test.
+    let proto = reliability_adjusted_proto(proto, parts.metadata).ok()?;
     let (addr, config) = (parts.address, parts.config);
     // A bracketed address is an IPv6 literal; if it did not parse as a
     // SocketAddr above, it is malformed, not a name.
@@ -3364,10 +3438,11 @@ mod tests {
     }
 
     #[test]
-    fn rel_zero_does_not_touch_a_non_quic_scheme() {
-        // DISCRIMINATOR: only the `quic` scheme has two link kinds behind one
-        // scheme string, so only there does `rel` select. `rel` elsewhere is
-        // the reliability axis, which this parser does not claim.
+    fn rel_zero_does_not_touch_a_scheme_without_a_datagram_twin() {
+        // DISCRIMINATOR: `rel` selects only where one scheme string names two
+        // links. `tcp` names one, so `rel` there is the reliability axis, which
+        // this parser does not claim; and on `udp` a best-effort value names the
+        // datagram link that the scheme already defaults to.
         assert_eq!(
             parse_locator("tcp/1.2.3.4:7447?rel=0")
                 .expect("tcp locator")
@@ -3379,6 +3454,75 @@ mod tests {
                 .expect("udp locator")
                 .proto,
             Proto::Udp
+        );
+    }
+
+    #[test]
+    fn udp_with_rel_one_selects_the_reliable_link() {
+        // R2810 — the mirror of the quic case, with the OPPOSITE default:
+        // upstream's udp inspector answers an absent key with `IS_RELIABLE =
+        // false` (`io/zenoh-links/zenoh-link-udp/src/lib.rs` @ `Ok(IS_RELIABLE)`),
+        // so plain `udp/` stays the datagram link and only `rel=1` reaches the
+        // reliable one. `01` is accepted because upstream parses a `u8`.
+        for text in ["udp/1.2.3.4:7447?rel=1", "udp/1.2.3.4:7447?rel=01"] {
+            assert_eq!(
+                parse_locator(text).expect("udp locator").proto,
+                Proto::UdpReliable,
+                "{text}"
+            );
+        }
+        assert_eq!(
+            parse_locator("udp/1.2.3.4:7447")
+                .expect("udp locator")
+                .proto,
+            Proto::Udp
+        );
+        // Named twin: the classifier shares the mapping with the numeric leaf.
+        assert_eq!(
+            parse_any_locator("udp/example.org:7447?rel=1"),
+            Ok(AnyLocator::Named {
+                proto: Proto::UdpReliable,
+                host: "example.org".to_string(),
+                port: 7447,
+                socket: None,
+                retry: None,
+                tls: None,
+            })
+        );
+    }
+
+    #[test]
+    fn an_unreadable_rel_is_refused_where_it_selects_a_link() {
+        // R2810 — upstream reads `rel` with `Reliability::from_str` and a `?`
+        // before choosing the link, so anything but `0`/`1` refuses the endpoint.
+        // wz used to compare against the string "0" and dial the scheme's
+        // default for every other value, which put a link on the wire that the
+        // operator had not named. Numeric AND named, on both selecting schemes.
+        for text in [
+            "udp/1.2.3.4:7447?rel=2",
+            "udp/1.2.3.4:7447?rel=yes",
+            "udp/1.2.3.4:7447?rel=",
+            "quic/1.2.3.4:7447?rel=2",
+            "udp/example.org:7447?rel=true",
+            "quic/example.org:7447?rel=-1",
+        ] {
+            let value = text.rsplit_once("rel=").expect("fixture carries rel").1;
+            assert_eq!(
+                parse_any_locator(text),
+                Err(AnyLocatorError::Ip(LocatorParseError::BadMetadataValue {
+                    key: "rel",
+                    value: value.to_string(),
+                })),
+                "{text}"
+            );
+        }
+        // And the refusal is scoped to the selecting schemes: `rel` on `tcp` is
+        // not read here at all, so it cannot be malformed here either.
+        assert_eq!(
+            parse_locator("tcp/1.2.3.4:7447?rel=yes")
+                .expect("tcp does not read rel")
+                .proto,
+            Proto::Tcp
         );
     }
 
