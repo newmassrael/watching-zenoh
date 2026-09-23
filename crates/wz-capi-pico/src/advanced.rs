@@ -53,7 +53,7 @@ use wz_runtime_tokio::advanced_publisher::{
     AdvancedPublisherOptions, MissDetectionConfig, Sequencing,
 };
 use wz_runtime_tokio::advanced_subscriber::{
-    AdvancedSubscriberOptions, HistoryConfig, Miss, RecoveryConfig,
+    AdvancedSubscriberOptions, HistoryConfig, Miss, RecoveryConfig, SubscriberDetection,
 };
 use wz_runtime_tokio::sample::Sample;
 use wz_runtime_tokio::sink::SampleView;
@@ -935,6 +935,15 @@ unsafe fn advanced_subscriber_options(
     }
     if (*options).query_timeout_ms > 0 {
         out.query_timeout = Duration::from_millis((*options).query_timeout_ms);
+    }
+    // R2815 — honoured; see the zenoh-c twin. The fields were declared and
+    // read by nothing, so `subscriber_detection = true` declared no token.
+    if (*options).subscriber_detection {
+        let mut detection = SubscriberDetection::new();
+        if let Some(meta) = keyexpr_str((*options).subscriber_detection_metadata) {
+            detection = detection.with_metadata(meta);
+        }
+        out.subscriber_detection = Some(detection);
     }
     out
 }
@@ -1833,6 +1842,37 @@ mod tests {
             let mut moved = ze_moved_advanced_subscriber_t { _this: owned };
             ze_undeclare_advanced_subscriber(&mut moved);
         }
+    }
+
+    /// R2815 — `subscriber_detection` and its metadata REACH the wz options.
+    /// Both were declared and read by nothing, so a C program asking to be
+    /// detectable got no token. The default fill is the control: it leaves
+    /// detection off, and the mapping must say so too.
+    ///
+    /// Control: deleting the mapping block reds the second assertion.
+    #[test]
+    fn subscriber_detection_options_reach_the_wz_options() {
+        // SAFETY: a zeroed struct is a valid writable target for the fill.
+        let mut options: ze_advanced_subscriber_options_t = unsafe { std::mem::zeroed() };
+        // SAFETY: a live, writable struct on this frame.
+        unsafe { ze_advanced_subscriber_options_default(&mut options) };
+        // SAFETY: `options` is live and fully initialised on this frame.
+        let off = unsafe { advanced_subscriber_options(&options) };
+        assert!(
+            off.subscriber_detection.is_none(),
+            "the default asks for no detection"
+        );
+
+        let meta = "room/kitchen";
+        let loaned = crate::abi::z_loaned_keyexpr_t::borrowed(meta.as_ptr(), meta.len());
+        options.subscriber_detection = true;
+        options.subscriber_detection_metadata = &loaned;
+        // SAFETY: as above; `loaned` borrows `meta`, which outlives the call.
+        let on = unsafe { advanced_subscriber_options(&options) };
+        let detection = on
+            .subscriber_detection
+            .expect("subscriber_detection = true maps to a detection config");
+        assert_eq!(detection.metadata.as_deref(), Some("room/kitchen"));
     }
 
     /// The DEFAULT a pico caller gets is pico's own — `Drop`, from

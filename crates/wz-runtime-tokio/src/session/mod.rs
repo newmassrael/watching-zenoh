@@ -2392,6 +2392,26 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
         &self.transport
     }
 
+    /// R2815 — this session's own zenoh id, upstream's `session.zid()`
+    /// (`zenoh/src/api/session.rs` @ `pub fn zid(&self) -> ZenohId {`).
+    ///
+    /// The value the handshake already sends: [`SessionInitParams::zid`]. It
+    /// was reachable only by spelling that path, so the advanced entities that
+    /// need their own session's id took it BY HAND instead — a subscriber's
+    /// detection token was named with a zid the caller supplied, which could
+    /// disagree with the session it rode on. An entity that asks the session
+    /// cannot.
+    ///
+    /// ⚠ A slice, not a validated id: `SessionInitParams::zid` documents
+    /// `1..=16` bytes and nothing enforces it, so a caller that needs a GLOBAL
+    /// identity builds an [`wz_session_core::sample::EntityGlobalId`] from this
+    /// and handles the refusal.
+    ///
+    /// [`SessionInitParams::zid`]: wz_session_core::session_init_params::SessionInitParams::zid
+    pub fn zid(&self) -> &[u8] {
+        &self.transport.params.zid
+    }
+
     /// R311y531 — take over the `ResponseFinal` this dispatch owes for `rid`.
     ///
     /// For a queryable handler that lets its query ESCAPE the dispatch (the

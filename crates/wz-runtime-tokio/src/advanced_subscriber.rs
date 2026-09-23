@@ -468,16 +468,44 @@ struct TimestampedState {
 /// and break a base-subscriber caller's exhaustive match (the H1
 /// signature-stability invariant); mirrors the publisher's dedicated
 /// [`crate::advanced_publisher::AdvancedPublisherError`].
-#[cfg(feature = "ext-pubsub-advanced-recovery")]
+///
+/// R2815 — in EVERY build, and both `declare` forms return it. It was
+/// recovery-gated because only `declare_with_options` could fail in an
+/// advanced way; since a subscriber carries a global identity, the plain form
+/// can too ([`Self::SessionZid`], [`Self::EntityIdOutOfRange`]). Returning the
+/// same type from both builds keeps the signature-stability invariant the
+/// plain `declare` documents.
 #[derive(Debug)]
 #[non_exhaustive]
 pub enum AdvancedSubscribeError {
     /// The base / recovery / heartbeat subscriber declaration was rejected.
     Subscribe(SubscribeError),
+    /// R2815 — the session's own zid is not 1..=16 bytes, so this subscriber
+    /// has no global identity to report through [`AdvancedSubscriber::id`] or
+    /// to name its detection token with. `SessionInitParams::zid` documents
+    /// that range and nothing enforces it; refused here, before anything is
+    /// declared, rather than handed out as an identity no reference parses.
+    ///
+    /// Replaces R311y826's `DetectionZid`, which refused a zid the CALLER
+    /// supplied for the token. The caller no longer supplies one.
+    SessionZid {
+        /// The session zid's length.
+        len: usize,
+    },
+    /// R2815 — the subscription's declaration id does not fit the 32-bit
+    /// entity id upstream's identity carries
+    /// (`commons/zenoh-protocol/src/core/mod.rs` @ `pub type EntityId = u32;`).
+    /// wz allocates it from a 64-bit counter; the plain declaration already
+    /// sent it on the wire, and it is retracted with this refusal.
+    EntityIdOutOfRange {
+        /// The declaration id that did not fit.
+        id: u64,
+    },
     /// The periodic-recovery task could not be spawned: no tokio runtime was
     /// active. `declare_with_options` with `periodic_queries` set must be called
     /// from within a tokio runtime context. Fail-clear instead of the
     /// `tokio::spawn` panic.
+    #[cfg(feature = "ext-pubsub-advanced-recovery")]
     NoRuntime,
     /// R311y100 — the late-publisher-detection liveliness subscriber
     /// declaration was rejected (only reachable with
@@ -490,15 +518,8 @@ pub enum AdvancedSubscribeError {
     /// [`AdvancedSubscriberOptions::subscriber_detection`]). A REFUSAL, not a
     /// degradation: the caller asked to be detectable, and a subscriber that
     /// silently is not is the failure mode nobody can see from the outside.
+    #[cfg(feature = "ext-pubsub-advanced-recovery")]
     DetectionToken(crate::session::LivelinessAliasError),
-    /// R311y826 — [`SubscriberDetection::local_zid`] was empty or longer than
-    /// 16 bytes, so no token key expression could name this node. Refused for
-    /// the same reason `AdvancedPublisher::declare` refuses it: a hex
-    /// rendering of a non-zid is not something either reference parses back.
-    DetectionZid {
-        /// The rejected length.
-        len: usize,
-    },
     /// R2550 — a [`HistoryConfig`] bound was set to ZERO, which upstream
     /// refuses at construction rather than honouring:
     /// `zenoh-ext/src/advanced_subscriber.rs` @ `bail!("max_samples must not be zero")`
@@ -524,7 +545,6 @@ pub enum AdvancedSubscribeError {
     },
 }
 
-#[cfg(feature = "ext-pubsub-advanced-recovery")]
 impl From<SubscribeError> for AdvancedSubscribeError {
     fn from(e: SubscribeError) -> Self {
         AdvancedSubscribeError::Subscribe(e)
@@ -785,19 +805,13 @@ pub struct AdvancedSubscriberOptions {
 
 /// Detection configuration ([`AdvancedSubscriberOptions::with_subscriber_detection`]).
 ///
-/// The local zid lives HERE, not on the options struct, because the token's
-/// key expression cannot be built without it: making detection an `Option` of
-/// a type that owns the zid means "detectable but nobody knows as whom" is not
-/// a representable state. wz's `Session` exposes no zid getter (`set_own_zid`
-/// has no counterpart), so the caller supplies it — the same shape
-/// `AdvancedPublisher::declare` already uses for its `local_zid` argument.
+/// R2815 — it carries no zid any more. It held the caller's `local_zid`
+/// because wz's `Session` had no zid getter, so a detection token could be
+/// named with a zid other than its session's. The token is now named with the
+/// subscriber's own [`AdvancedSubscriber::id`], which reads [`Session::zid`].
 #[cfg(feature = "ext-pubsub-advanced-recovery")]
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default)]
 pub struct SubscriberDetection {
-    /// This node's zid, 1..=16 bytes. Rendered into the token key expression
-    /// as zenoh's lowercase little-endian hex, the same rendering the
-    /// publisher's `@adv/pub` KE uses.
-    pub local_zid: Vec<u8>,
     /// A key expression appended to the detection token's key expression to
     /// convey application metadata (zenoh
     /// `.subscriber_detection_metadata()`, advanced_subscriber.rs:299-309).
@@ -811,12 +825,9 @@ pub struct SubscriberDetection {
 
 #[cfg(feature = "ext-pubsub-advanced-recovery")]
 impl SubscriberDetection {
-    /// Detectable as `local_zid`, with no metadata chunk.
-    pub fn new(local_zid: Vec<u8>) -> Self {
-        Self {
-            local_zid,
-            metadata: None,
-        }
+    /// Detectable, with no metadata chunk.
+    pub fn new() -> Self {
+        Self::default()
     }
 
     /// Append a metadata key expression to the token's key expression.
@@ -2922,6 +2933,8 @@ fn parse_heartbeat_source(keyexpr: &str) -> Option<AdvPublisherSource> {
 /// the per-source ordering / de-duplication state machine.
 pub struct AdvancedSubscriber<R: SessionRuntime = crate::runtime_impl::TokioRuntime> {
     _subscriber: Subscriber<R>,
+    /// R2815 — the global identity [`Self::id`] reports; see [`global_id_of`].
+    id: EntityGlobalId,
     /// The shared ordering state — upstream's `statesref`, and for the same
     /// reason upstream keeps it on the handle: a sample-miss listener is
     /// declared on the SUBSCRIBER after it exists, so the handle must be able
@@ -3034,9 +3047,68 @@ impl<R: SessionRuntime> AdvancedSubscriber<R> {
     }
 }
 
+/// R2815 — refuse a session whose own zid cannot be an identity, BEFORE
+/// anything is declared. See [`AdvancedSubscribeError::SessionZid`].
+fn require_session_zid(zid: &[u8]) -> Result<(), AdvancedSubscribeError> {
+    if (1..=16).contains(&zid.len()) {
+        Ok(())
+    } else {
+        Err(AdvancedSubscribeError::SessionZid { len: zid.len() })
+    }
+}
+
+/// R2815 — the subscriber's global identity: its session's zid and the id its
+/// declaration carries on the wire, which is upstream's
+/// `zenoh-ext/src/advanced_subscriber.rs` @ `pub fn id(&self) -> EntityGlobalId {`
+/// delegating to the plain subscriber's own id.
+///
+/// The eid is the plain subscription's id because that IS what the
+/// declaration sends (`announce_subscriber`: "the wire subscriber id IS the
+/// local SubscriptionId"). `zid` has passed [`require_session_zid`].
+fn global_id_of<R: SessionRuntime>(
+    zid: &[u8],
+    subscriber: &Subscriber<R>,
+) -> Result<EntityGlobalId, AdvancedSubscribeError> {
+    let id = subscriber.id().as_u64();
+    let eid = u32::try_from(id).map_err(|_| AdvancedSubscribeError::EntityIdOutOfRange { id })?;
+    EntityGlobalId::new(zid, eid).ok_or(AdvancedSubscribeError::SessionZid { len: zid.len() })
+}
+
 /// R2814 — the surface every build has, whatever the recovery feature says:
 /// the handle's own accessors and the miss-listener declarations.
 impl<R: SessionRuntime> AdvancedSubscriber<R> {
+    /// R2815 — this subscriber's global identity, upstream's
+    /// `zenoh-ext/src/advanced_subscriber.rs` @ `pub fn id(&self) -> EntityGlobalId {`.
+    ///
+    /// The same pair its `@adv/sub` detection token is named with, by
+    /// construction: both are read from here.
+    pub fn id(&self) -> EntityGlobalId {
+        self.id
+    }
+
+    /// R2815 — the key expression this subscriber subscribes to, upstream's
+    /// `zenoh-ext/src/advanced_subscriber.rs` @ `pub fn key_expr(&self) -> &KeyExpr<'static> {`.
+    ///
+    /// Spelled `keyexpr` like the plain [`Subscriber::keyexpr`] and
+    /// `AdvancedPublisher::keyexpr` (R2619): one concept, one spelling in this
+    /// crate.
+    pub fn keyexpr(&self) -> &str {
+        self._subscriber.keyexpr()
+    }
+
+    /// R2815 — undeclare this subscriber, upstream's
+    /// `zenoh-ext/src/advanced_subscriber.rs` @ `pub fn undeclare(self) -> SubscriberUndeclaration<()> {`.
+    ///
+    /// Consuming and infallible, the shape R2619 gave the advanced publisher
+    /// for the same reason: every piece of this subscriber's wire and task
+    /// state retracts on drop — the plain subscription, the heartbeat and
+    /// late-publisher subscribers, the detection token, the recovery and
+    /// retention tasks and the in-flight GETs. What the method adds is that the
+    /// caller says WHEN, at a point after which the handle no longer exists.
+    pub fn undeclare(self) {
+        drop(self);
+    }
+
     /// Declare a sample-miss listener: `callback` receives a [`Miss`] for every
     /// forward gap this subscriber detects on a sequenced source from now on.
     /// Upstream's `zenoh-ext/src/advanced_subscriber.rs` @ `pub fn sample_miss_listener(&self) -> SampleMissListenerBuilder<'_, DefaultHandler> {`
@@ -3099,13 +3171,14 @@ impl<R: SessionRuntime> AdvancedSubscriber<R> {
         session: &Session<R, T, Unicast>,
         keyexpr: impl Into<String>,
         on_sample: OnSample,
-    ) -> Result<Self, SubscribeError>
+    ) -> Result<Self, AdvancedSubscribeError>
     where
         T: TimeSource + 'static,
         <R as SessionRuntime>::LinkSink: Send + Sync,
         SessionLinkActions<R, T>: Send + Sync + 'static,
         OnSample: FnMut(Sample) + Send + 'static,
     {
+        require_session_zid(session.zid())?;
         let state = Arc::new(Mutex::new(State {
             sequenced: HashMap::new(),
             timestamped: HashMap::new(),
@@ -3123,8 +3196,10 @@ impl<R: SessionRuntime> AdvancedSubscriber<R> {
                     .handle(view);
             },
         )?;
+        let id = global_id_of(session.zid(), &subscriber)?;
         Ok(Self {
             _subscriber: subscriber,
+            id,
             statesref: state,
             // The option-free `declare()` cannot ask for detection.
             _detection_token: None,
@@ -3149,13 +3224,14 @@ impl<R: SessionRuntime> AdvancedSubscriber<R> {
         session: &Session<R, T, Unicast>,
         keyexpr: impl Into<String>,
         on_sample: OnSample,
-    ) -> Result<Self, SubscribeError>
+    ) -> Result<Self, AdvancedSubscribeError>
     where
         T: TimeSource + 'static,
         <R as SessionRuntime>::LinkSink: Send + Sync,
         SessionLinkActions<R, T>: Send + Sync + 'static,
         OnSample: FnMut(Sample) + Send + 'static,
     {
+        require_session_zid(session.zid())?;
         let state = Arc::new(Mutex::new(State {
             sequenced: HashMap::new(),
             timestamped: HashMap::new(),
@@ -3182,8 +3258,10 @@ impl<R: SessionRuntime> AdvancedSubscriber<R> {
                     .handle_live(view);
             },
         )?;
+        let id = global_id_of(session.zid(), &subscriber)?;
         Ok(Self {
             _subscriber: subscriber,
+            id,
             statesref: state,
             _periodic: None,
             #[cfg(feature = "ext-pubsub-advanced-recovery")]
@@ -3310,6 +3388,10 @@ impl<R: SessionRuntime> AdvancedSubscriber<R> {
                 return Err(AdvancedSubscribeError::HistoryBoundZero { knob: "max_age" });
             }
         }
+        // R2815 — after upstream's own config check, before anything is
+        // declared: a session with no valid zid gives this subscriber no
+        // identity, and every refusal below this line has something to retract.
+        require_session_zid(session.zid())?;
         // R311y91 (review M1) — recovery + history are INDEPENDENT (zenoh keeps
         // `.recovery()` / `.history()` separate): `retransmission` is driven by
         // `options.recovery`, `history_pending` by `options.history` — a
@@ -3392,6 +3474,9 @@ impl<R: SessionRuntime> AdvancedSubscriber<R> {
                 }
             },
         )?;
+        // R2815 — read off the plain subscription just declared; the detection
+        // token below is named with the same pair.
+        let id = global_id_of(session.zid(), &subscriber)?;
 
         // R311y83 — the periodic recovery trigger: a background loop that
         // re-asks every known source `_sn=last+1..` every `period`. Spawned
@@ -3636,10 +3721,11 @@ impl<R: SessionRuntime> AdvancedSubscriber<R> {
         // advertises itself once it is actually able to receive: a token that
         // outraces its own subscription tells an observer something untrue for
         // the width of the gap.
-        let detection_token = declare_detection_token(session, &base_keyexpr, &options)?;
+        let detection_token = declare_detection_token(session, &base_keyexpr, &options, id)?;
 
         Ok(Self {
             _subscriber: subscriber,
+            id,
             statesref: state,
             _periodic: periodic_task,
             #[cfg(feature = "ext-pubsub-advanced-recovery")]
@@ -3664,6 +3750,7 @@ fn declare_detection_token<R, T>(
     session: &Session<R, T, Unicast>,
     keyexpr: &str,
     options: &AdvancedSubscriberOptions,
+    id: EntityGlobalId,
 ) -> Result<Option<DetectionTokenGuard>, AdvancedSubscribeError>
 where
     R: SessionRuntime + 'static,
@@ -3675,24 +3762,16 @@ where
         return Ok(None);
     };
 
-    // Same bound the advanced publisher enforces on its `local_zid`: a zid is
-    // 1..=16 bytes, and a hex rendering of anything else is not a zid any
-    // reference would parse back.
-    if detection.local_zid.is_empty() || detection.local_zid.len() > 16 {
-        return Err(AdvancedSubscribeError::DetectionZid {
-            len: detection.local_zid.len(),
-        });
-    }
-
-    // The subscriber's OWN entity id, from the same per-purpose counter the
-    // advanced publisher draws its `<eid>` discriminator from. zenoh reads
-    // `subscriber.id().eid()` here (advanced_subscriber.rs:1154); wz keeps no
-    // eid on the Subscriber handle, so it mints one for the token.
-    let eid = session.actions().alloc_next_entity_id();
+    // R2815 — named with the subscriber's OWN identity, which is what upstream
+    // reads here: `zenoh-ext/src/advanced_subscriber.rs` @ `/ &subscriber.id().zid().into_keyexpr()`.
+    // Until R2815 the zid was one the CALLER supplied on `SubscriberDetection`
+    // and the eid was minted from `alloc_next_entity_id`, so the token named a
+    // pair that matched no other id of the same subscriber — and could name a
+    // zid that was not this session's at all.
     let ke = crate::advanced_ke::subscriber_adv_ke(
         keyexpr,
-        &zid_to_zenoh_hex(&detection.local_zid),
-        eid,
+        &zid_to_zenoh_hex(id.zid()),
+        id.eid(),
         detection.metadata.as_deref(),
     );
     let token = session.declare_token(ke, crate::session::LivelinessOptions::default())?;
@@ -6649,7 +6728,6 @@ mod tests {
     /// keyexpr travels the wire as its literal string, so a substring scan
     /// over the recorded frames answers "did this key expression go out"
     /// without decoding every frame shape.
-    #[cfg(feature = "ext-pubsub-advanced-publisher")]
     fn frames_carrying(driver: &crate::test_fixtures::RecordingLinkDriver, needle: &str) -> usize {
         let n = needle.as_bytes();
         (0..driver.frame_count())
@@ -6747,18 +6825,27 @@ mod tests {
     ))]
     #[test]
     fn subscriber_detection_declares_the_adv_sub_token() {
-        let zid = vec![0x0a, 0x0b];
-        let (driver, _declared) =
-            declare_with_detection(Some(SubscriberDetection::new(zid.clone())));
+        let (driver, declared) = declare_with_detection(Some(SubscriberDetection::new()));
         // The hex RENDERING is `zid_hex`'s contract and is tested there; this
-        // test asserts the KE is keyed by THIS zid, so it renders through the
-        // same SSOT rather than restating a spelling. (It is little-endian:
-        // 0a 0b renders "b0a", which an inline literal got wrong.)
-        let prefix = format!("demo/data/@adv/sub/{}/", zid_to_zenoh_hex(&zid));
+        // test asserts the KE is keyed by THIS subscriber's identity, so it
+        // renders through the same SSOT rather than restating a spelling.
+        let id = declared.subscriber.id();
+        let prefix = format!("demo/data/@adv/sub/{}/", zid_to_zenoh_hex(id.zid()));
         assert_eq!(
             frames_carrying(&driver, &prefix),
             1,
             "exactly one detection token, keyed by this node's zid ({prefix})"
+        );
+        // R2815 — and by this subscriber's OWN eid: the token names the same
+        // pair `id()` reports, which is upstream's `subscriber.id()` read at
+        // the same place. Control: minting the eid from the session's entity
+        // counter again (the pre-R2815 shape) reds this, because that counter
+        // is not the one the subscription's declaration id comes from.
+        let exact = format!("{prefix}{}/_", id.eid());
+        assert_eq!(
+            frames_carrying(&driver, &exact),
+            1,
+            "the token's eid is the subscriber's own ({exact})"
         );
         let ke_tail_present = (0..driver.frame_count()).any(|i| {
             let bytes = driver.frame_bytes(i);
@@ -6790,11 +6877,13 @@ mod tests {
     ))]
     #[test]
     fn detection_metadata_replaces_the_empty_chunk() {
-        let zid = vec![0x0a, 0x0b];
-        let (driver, _declared) = declare_with_detection(Some(
-            SubscriberDetection::new(zid.clone()).with_metadata("room/kitchen"),
+        let (driver, declared) = declare_with_detection(Some(
+            SubscriberDetection::new().with_metadata("room/kitchen"),
         ));
-        let prefix = format!("demo/data/@adv/sub/{}/", zid_to_zenoh_hex(&zid));
+        let prefix = format!(
+            "demo/data/@adv/sub/{}/",
+            zid_to_zenoh_hex(declared.subscriber.id().zid())
+        );
         assert_eq!(frames_carrying(&driver, &prefix), 1, "one detection token");
 
         // Read the chunk that FOLLOWS `<eid>/` rather than searching the whole
@@ -6843,33 +6932,56 @@ mod tests {
         })
     }
 
-    /// A zid that is not 1..=16 bytes is REFUSED, not rendered — the same
-    /// bound `AdvancedPublisher::declare` enforces.
-    #[cfg(all(
-        feature = "ext-pubsub-advanced-recovery",
-        feature = "pubsub-allow-loop"
-    ))]
+    /// R2815 — a SESSION whose zid is not 1..=16 bytes gives its subscribers no
+    /// identity, so both declare forms REFUSE before declaring anything. This
+    /// replaces R311y826's test of a caller-supplied detection zid: the caller
+    /// no longer supplies one, and the zid that matters is the session's.
+    ///
+    /// The refusal must leave nothing on the wire. The recorder is read for
+    /// that, with a CONTROL session holding a valid zid on the same fixture, so
+    /// "nothing on the wire" cannot be satisfied by a recorder that never sees
+    /// a declaration at all.
     #[test]
-    fn detection_refuses_a_zid_that_is_not_a_zid() {
-        for bad in [vec![], vec![0u8; 17]] {
-            let len = bad.len();
-            let (actions, _driver) = crate::test_fixtures::recording_actions();
+    fn a_session_without_a_zid_gives_no_subscriber_an_identity() {
+        let session_with = |zid: Vec<u8>| {
+            let mut params = wz_runtime_tokio_test_support::fixture_session_init_params();
+            params.zid = zid;
+            let (actions, driver) = crate::test_fixtures::recording_actions_with_params(params);
             let observer = Arc::new(Mutex::new(ApplicationLayerObserver::new()));
             let clock = Arc::new(TokioTime::new());
-            let session = TokioSession::new(actions, observer, clock);
+            (TokioSession::new(actions, observer, clock), driver)
+        };
+
+        let (control, control_driver) = session_with(vec![0x0a, 0x0b]);
+        let declared = AdvancedSubscriber::declare(&control, "demo/data", |_s: Sample| {})
+            .expect("CONTROL: a session with a valid zid declares");
+        assert_eq!(
+            declared.id().zid(),
+            &[0x0a, 0x0b],
+            "id() reads the session's zid"
+        );
+        assert_eq!(declared.keyexpr(), "demo/data");
+        assert!(
+            frames_carrying(&control_driver, "demo/data") > 0,
+            "CONTROL: a declaration reaches this recorder"
+        );
+
+        for bad in [vec![], vec![0u8; 17]] {
+            let len = bad.len();
+            let (session, driver) = session_with(bad);
             // `expect_err` would need AdvancedSubscriber: Debug; match instead.
-            let Err(err) = AdvancedSubscriber::declare_with_options(
-                &session,
-                "demo/data",
-                AdvancedSubscriberOptions::new()
-                    .with_subscriber_detection(SubscriberDetection::new(bad)),
-                |_s: Sample| {},
-            ) else {
-                panic!("a non-zid must be refused, not accepted");
+            let Err(err) = AdvancedSubscriber::declare(&session, "demo/data", |_s: Sample| {})
+            else {
+                panic!("a session without a zid must be refused, not accepted");
             };
             assert!(
-                matches!(err, AdvancedSubscribeError::DetectionZid { len: got } if got == len),
-                "refusal names the rejected length, got {err:?}"
+                matches!(err, AdvancedSubscribeError::SessionZid { len: got } if got == len),
+                "refusal names the session zid's length, got {err:?}"
+            );
+            assert_eq!(
+                frames_carrying(&driver, "demo/data"),
+                0,
+                "a refused declare leaves nothing on the wire"
             );
         }
     }
@@ -6899,7 +7011,7 @@ mod tests {
         };
 
         let plain = teardown_frames(None);
-        let detectable = teardown_frames(Some(SubscriberDetection::new(vec![0x0a, 0x0b])));
+        let detectable = teardown_frames(Some(SubscriberDetection::new()));
         assert_eq!(
             detectable,
             plain + 1,
@@ -6938,6 +7050,16 @@ mod tests {
         )
         .expect("advanced publisher declares");
 
+        // R2815 — an UNRELATED plain subscription first, kept alive. It moves
+        // the subscription-id counter and not the session's entity counter, so
+        // the subscriber under test gets an id the entity counter would NOT
+        // hand out next. Without it the two counters agreed on this fixture
+        // and a token named with a freshly minted eid passed the "own eid"
+        // assertion — the control for that claim came back green.
+        let unrelated = session
+            .declare_subscriber("demo/unrelated", SubscribeOptions::default(), |_| {})
+            .expect("unrelated plain subscriber declares");
+
         let mut options = AdvancedSubscriberOptions::new();
         if let Some(detection) = detection {
             options = options.with_subscriber_detection(detection);
@@ -6954,6 +7076,7 @@ mod tests {
             Declared {
                 subscriber: sub,
                 _publisher: publisher,
+                _unrelated: unrelated,
             },
         )
     }
@@ -6971,6 +7094,7 @@ mod tests {
             crate::runtime_impl::TokioRuntime,
             TokioTime,
         >,
+        _unrelated: crate::session::Subscriber,
     }
 
     /// The `QueryTarget` every recorded outbound Request carries, read back with

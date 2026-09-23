@@ -66,7 +66,7 @@ use wz_runtime_tokio::advanced_publisher::{
     AdvancedPublisherOptions, MissDetectionConfig, Sequencing,
 };
 use wz_runtime_tokio::advanced_subscriber::{
-    AdvancedSubscriberOptions, HistoryConfig, Miss, RecoveryConfig,
+    AdvancedSubscriberOptions, HistoryConfig, Miss, RecoveryConfig, SubscriberDetection,
 };
 use wz_runtime_tokio::sample::Sample;
 use wz_runtime_tokio::sink::SampleView;
@@ -1292,6 +1292,20 @@ unsafe fn advanced_subscriber_options(
         if (*options).query_timeout_ms > 0 {
             out.query_timeout = Duration::from_millis((*options).query_timeout_ms);
         }
+        // R2815 — honoured. The two fields were declared (upstream declares
+        // them) and read by nothing, so a C program asking to be detectable
+        // got a subscriber that declared no token. It could not be mapped
+        // while wz's detection needed a caller-supplied zid; it names the
+        // token from the subscriber's own identity now.
+        if (*options).subscriber_detection {
+            let mut detection = SubscriberDetection::new();
+            if let Some(meta) =
+                crate::keyexpr::keyexpr_str((*options).subscriber_detection_metadata)
+            {
+                detection = detection.with_metadata(meta);
+            }
+            out.subscriber_detection = Some(detection);
+        }
     }
     out
 }
@@ -2005,6 +2019,37 @@ mod tests {
             let mut moved = ze_moved_advanced_subscriber_t { _this: owned };
             ze_undeclare_advanced_subscriber(&mut moved);
         }
+    }
+
+    /// R2815 — `subscriber_detection` REACHES the wz options; the zenoh-pico
+    /// twin of this test also grades the metadata arm. Both fields were
+    /// declared and read by nothing.
+    ///
+    /// Control: deleting the mapping block reds the second assertion.
+    #[test]
+    fn subscriber_detection_reaches_the_wz_options() {
+        // SAFETY: a zeroed struct is a valid writable target for the default
+        // fill, which overwrites every field before any read.
+        let mut options: ze_advanced_subscriber_options_t = unsafe { std::mem::zeroed() };
+        // SAFETY: a live, writable struct on this frame.
+        unsafe { ze_advanced_subscriber_options_default(&mut options) };
+        // SAFETY: `options` is live and fully initialised on this frame.
+        let off = unsafe { advanced_subscriber_options(&options) };
+        assert!(
+            off.subscriber_detection.is_none(),
+            "the default asks for no detection"
+        );
+
+        options.subscriber_detection = true;
+        // SAFETY: as above.
+        let on = unsafe { advanced_subscriber_options(&options) };
+        let detection = on
+            .subscriber_detection
+            .expect("subscriber_detection = true maps to a detection config");
+        assert!(
+            detection.metadata.is_none(),
+            "a null metadata keyexpr maps to none"
+        );
     }
 
     /// R2596 — the cache's three reply-QoS fields REACH the config.
