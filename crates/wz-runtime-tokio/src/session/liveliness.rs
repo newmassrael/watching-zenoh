@@ -258,6 +258,26 @@ impl<R: SessionRuntime, T: TimeSource> LivelinessToken<R, T> {
         self.teardown()
     }
 
+    /// R2817 — keep this token declared until its session is dropped, with no
+    /// handle left to retract it: the disarm, as in
+    /// [`LivelinessSubscriber::background`].
+    ///
+    /// Crate-internal on purpose. Upstream's `LivelinessToken` has no
+    /// background form; its one token that outlives its handle is the
+    /// advanced subscriber's detection token, which upstream keeps in the
+    /// subscriber's shared state (`zenoh-ext/src/advanced_subscriber.rs` @ `token: Option<LivelinessToken>,`)
+    /// and so lives exactly as long as the subscriber's callbacks — until the
+    /// session closes. A backgrounded [`crate::advanced_subscriber::AdvancedSubscriber`]
+    /// reaches that same lifetime through this, and nothing else needs it.
+    ///
+    /// The registration stays, so an inbound liveliness Interest still
+    /// replays the token; the handle keeps only a weak session, so the token
+    /// does not hold its session alive.
+    #[cfg(feature = "ext-pubsub-advanced-subscriber")]
+    pub(crate) fn background(mut self) {
+        self.armed = false;
+    }
+
     /// R311lo — shared teardown for [`Self::undeclare`] + [`Drop`], the
     /// single source of the emit-then-unregister discipline (R248/R283
     /// previously kept the two bodies in lock-step by hand). Idempotent

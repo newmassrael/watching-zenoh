@@ -1578,7 +1578,7 @@ impl State {
     /// none of. Returns how many entries were dropped, across BOTH maps.
     ///
     /// This is the deterministic core; the background task is thin timer glue
-    /// over it, the same split [`PeriodicTask`] uses over
+    /// over it, the same split the periodic [`AbortOnDropTask`] uses over
     /// [`Self::periodic_requests`]. Written that way so the policy is unit
     /// tested at an instant the test chooses rather than through a sleep.
     ///
@@ -2611,7 +2611,7 @@ fn on_late_publisher_detected<R, T>(
 /// R311y83 — run ONE periodic recovery tick: collect each source's
 /// `_sn=last+1..` request under the state lock, then issue the GETs OUTSIDE the
 /// lock (same re-entrancy discipline as the sample-driven path). The background
-/// [`PeriodicTask`] loop calls this every period; a test drives it directly so
+/// [`AbortOnDropTask`] loop calls this every period; a test drives it directly so
 /// the recovery path is exercised deterministically (no timer wait).
 #[cfg(feature = "ext-pubsub-advanced-recovery")]
 fn run_periodic_tick<R, T>(
@@ -2646,41 +2646,51 @@ fn run_periodic_tick<R, T>(
     }
 }
 
-/// RAII handle for the periodic recovery background task: dropping it aborts the
-/// loop so a torn-down subscriber stops re-asking (the [`crate::storage_replication_service::DigestPublisher`]
-/// teardown shape). The spawn loop is thin timer glue over the deterministically
-/// tested [`run_periodic_tick`] / [`State::periodic_requests`].
-/// R2621 — RAII handle for the retention sweep, the same shape [`PeriodicTask`]
-/// has and for the same reason: the loop is thin timer glue over the
-/// deterministically tested [`State::reclaim_expired_sources`], and dropping the
-/// subscriber must stop it.
+/// RAII handle for the subscriber's two timer tasks — the periodic recovery
+/// loop (thin glue over [`run_periodic_tick`] / [`State::periodic_requests`])
+/// and the R2621 retention sweep (thin glue over
+/// [`State::reclaim_expired_sources`]). Dropping it aborts the loop, so an
+/// undeclared subscriber stops re-asking and stops sweeping at once (the
+/// [`crate::storage_replication_service::DigestPublisher`] teardown shape).
 ///
-/// Upstream's counterpart is `zenoh-ext/src/advanced_subscriber.rs`
-/// @ `async fn gc_task(statesref: Weak<Mutex<State>>, retention_period: Duration) {`,
-/// which holds a WEAK reference so the task cannot keep the state alive. wz
-/// aborts on drop instead, which reaches the same end through this tree's
-/// existing teardown primitive rather than adding a second one.
+/// R2817 — ONE type for both, as upstream holds both in one
+/// (`zenoh-ext/src/advanced_subscriber.rs` @ `_gc_task: AbortOnDropHandle<()>,`
+/// and `periodic_task: Option<AbortOnDropHandle<()>>,`), and DETACHABLE,
+/// because a backgrounded subscriber has no handle left to hold it. What ends
+/// a detached loop is the loop itself: each task holds only WEAK references to
+/// the state and the session, which is upstream's own shape
+/// (`zenoh-ext/src/advanced_subscriber.rs` @ `async fn gc_task(statesref: Weak<Mutex<State>>, retention_period: Duration) {`),
+/// and returns on the first tick either is gone. Until R2817 the tasks held
+/// both strongly and relied on this abort alone — which is also why a
+/// backgrounded subscriber could not be built on them: a detached task
+/// holding its session strongly keeps that session alive forever.
 #[cfg(feature = "ext-pubsub-advanced-recovery")]
-struct RetentionTask {
-    handle: tokio::task::JoinHandle<()>,
+struct AbortOnDropTask {
+    /// `Some` until [`Self::detach`] takes it.
+    handle: Option<tokio::task::JoinHandle<()>>,
 }
 
 #[cfg(feature = "ext-pubsub-advanced-recovery")]
-impl Drop for RetentionTask {
-    fn drop(&mut self) {
-        self.handle.abort();
+impl AbortOnDropTask {
+    fn new(handle: tokio::task::JoinHandle<()>) -> Self {
+        Self {
+            handle: Some(handle),
+        }
+    }
+
+    /// Let the task run on without this handle; it ends when its weak
+    /// references stop upgrading.
+    fn detach(mut self) {
+        self.handle.take();
     }
 }
 
 #[cfg(feature = "ext-pubsub-advanced-recovery")]
-struct PeriodicTask {
-    handle: tokio::task::JoinHandle<()>,
-}
-
-#[cfg(feature = "ext-pubsub-advanced-recovery")]
-impl Drop for PeriodicTask {
+impl Drop for AbortOnDropTask {
     fn drop(&mut self) {
-        self.handle.abort();
+        if let Some(handle) = self.handle.take() {
+            handle.abort();
+        }
     }
 }
 
@@ -2815,15 +2825,32 @@ impl PendingGets {
 /// [`AdvancedSubscriber`] was generic over `R` alone; the subscriber is
 /// `(R, T)` now, and `Session::cancel_pending_query` needs no bound a `Drop`
 /// impl could not carry.
+///
+/// R2817 — and it can be DISARMED, for [`AdvancedSubscriber::background`]: a
+/// backgrounded subscriber is still running, so the GETs it has in flight are
+/// still its own and must complete rather than be cancelled. They end with
+/// the session, whose reply registry holds them.
 #[cfg(feature = "ext-pubsub-advanced-recovery")]
 struct RecoveryCancel<R: SessionRuntime, T: TimeSource> {
     pending: Arc<PendingGets>,
     session: Session<R, T, Unicast>,
+    /// `true` until [`Self::disarm`]; the `Drop` cancels only while armed.
+    armed: bool,
+}
+
+#[cfg(feature = "ext-pubsub-advanced-recovery")]
+impl<R: SessionRuntime, T: TimeSource> RecoveryCancel<R, T> {
+    fn disarm(mut self) {
+        self.armed = false;
+    }
 }
 
 #[cfg(feature = "ext-pubsub-advanced-recovery")]
 impl<R: SessionRuntime, T: TimeSource> Drop for RecoveryCancel<R, T> {
     fn drop(&mut self) {
+        if !self.armed {
+            return;
+        }
         for rid in self.pending.cancel() {
             self.session.cancel_pending_query(rid);
         }
@@ -2960,11 +2987,11 @@ pub struct AdvancedSubscriber<
     /// R311y83 — the periodic recovery task (RAII abort-on-drop), `Some` only
     /// when `RecoveryConfig::periodic_queries` was set.
     #[cfg(feature = "ext-pubsub-advanced-recovery")]
-    _periodic: Option<PeriodicTask>,
+    _periodic: Option<AbortOnDropTask>,
     /// R2621 — the retention sweep's RAII handle. Held so a dropped subscriber
-    /// stops sweeping; see [`RetentionTask`].
+    /// stops sweeping; see [`AbortOnDropTask`].
     #[cfg(feature = "ext-pubsub-advanced-recovery")]
-    _retention: Option<RetentionTask>,
+    _retention: Option<AbortOnDropTask>,
     /// R311y592 — the in-flight recovery / history GET cancellation (RAII
     /// cancel-on-drop), `None` only for the plain [`Self::declare`] form, which
     /// issues no GET at all. Aborting `_periodic` stops the subscriber ASKING;
@@ -3104,6 +3131,66 @@ impl<R: SessionRuntime, T: TimeSource> AdvancedSubscriber<R, T> {
     /// caller says WHEN, at a point after which the handle no longer exists.
     pub fn undeclare(self) {
         drop(self);
+    }
+
+    /// R2817 — run this subscriber in the BACKGROUND until its session is
+    /// dropped, with no handle left to retract it: upstream's
+    /// `zenoh-ext/src/advanced_subscriber.rs` @ `pub fn background(self) -> AdvancedSubscriberBuilder<'a, 'b, 'c, Callback<Sample>, true> {`.
+    ///
+    /// Upstream resolves that builder by setting its plain subscribers to the
+    /// background (`zenoh-ext/src/advanced_subscriber.rs` @ `fn set_background_impl(&mut self, background: bool) {`)
+    /// and keeps everything else in the state their callbacks share, so the
+    /// whole subscriber lives exactly as long as those callbacks — until the
+    /// session closes. Every piece here reaches that same lifetime: the live,
+    /// heartbeat and late-publisher subscriptions stay declared, the detection
+    /// token stays asserted, the GETs in flight run to their Final, and the
+    /// timer tasks run on until their weak references stop upgrading.
+    ///
+    /// Nothing left behind holds the session strongly, which is what makes
+    /// "until the session is dropped" true rather than "forever": each
+    /// callback and task downgrades it (see [`AbortOnDropTask`]).
+    ///
+    /// A method on the handle rather than a declare flag, as
+    /// [`SampleMissListener::background`] and the plain subscriber's are in
+    /// this crate; upstream offers it on the builder, which wz does not have.
+    pub fn background(self) {
+        let Self {
+            _subscriber,
+            session: _,
+            id: _,
+            statesref: _,
+            #[cfg(feature = "ext-pubsub-advanced-recovery")]
+            _periodic,
+            #[cfg(feature = "ext-pubsub-advanced-recovery")]
+            _retention,
+            #[cfg(feature = "ext-pubsub-advanced-recovery")]
+            _recovery_cancel,
+            #[cfg(feature = "ext-pubsub-advanced-recovery")]
+            _heartbeat_sub,
+            #[cfg(feature = "ext-pubsub-advanced-history")]
+            _liveliness_sub,
+            _detection_token,
+        } = self;
+        _subscriber.background();
+        #[cfg(feature = "ext-pubsub-advanced-recovery")]
+        {
+            for task in [_periodic, _retention].into_iter().flatten() {
+                task.detach();
+            }
+            if let Some(cancel) = _recovery_cancel {
+                cancel.disarm();
+            }
+            if let Some(heartbeat) = _heartbeat_sub {
+                heartbeat.background();
+            }
+        }
+        #[cfg(feature = "ext-pubsub-advanced-history")]
+        if let Some(late_publishers) = _liveliness_sub {
+            late_publishers.background();
+        }
+        if let Some(token) = _detection_token {
+            token.background();
+        }
     }
 
     /// R2816 — watch the advanced PUBLISHERS of this subscriber's key
@@ -3489,7 +3576,12 @@ impl<R: SessionRuntime, T: TimeSource> AdvancedSubscriber<R, T> {
         let pending = Arc::new(PendingGets::new());
         let cb_state = Arc::clone(&state);
         let cb_pending = Arc::clone(&pending);
-        let q_session = session.clone();
+        // R2817 — every callback and task below holds its session WEAKLY,
+        // upstream's `conf.session.downgrade()` at each of them. They live in
+        // the session's own registries, so a strong clone there is a cycle:
+        // harmless while the handle's teardown unregisters them, a session
+        // kept alive forever once `background` leaves them registered.
+        let q_session = session.downgrade();
         let q_base = base_keyexpr.clone();
         let subscriber = session.declare_subscriber(
             base_keyexpr.clone(),
@@ -3506,16 +3598,20 @@ impl<R: SessionRuntime, T: TimeSource> AdvancedSubscriber<R, T> {
                 // re-enters the session (the loopback fan drains the cache's
                 // replies, which lock `cb_state` again). R311lh deferred-fire
                 // makes this re-entrant call safe.
+                // Upgraded only when there is a GET to issue; a `None` means
+                // the session has gone and there is no one to ask.
                 if let Some(request) = request {
-                    issue_recovery_query(
-                        &q_session,
-                        &cb_state,
-                        &cb_pending,
-                        &q_base,
-                        request,
-                        dest,
-                        timeout_ms,
-                    );
+                    if let Some(q_session) = q_session.upgrade() {
+                        issue_recovery_query(
+                            &q_session,
+                            &cb_state,
+                            &cb_pending,
+                            &q_base,
+                            request,
+                            dest,
+                            timeout_ms,
+                        );
+                    }
                 }
             },
         )?;
@@ -3532,49 +3628,59 @@ impl<R: SessionRuntime, T: TimeSource> AdvancedSubscriber<R, T> {
         // R2621 — the retention sweep. Same glue shape as the periodic task
         // below, and the same clamp: a sub-ms period would truncate to a
         // zero-delay spin.
+        //
+        // R2817 — both loops hold the state and the session WEAKLY and return
+        // on the first tick either is gone; see [`AbortOnDropTask`].
         let retention_task = retention.map(|period| {
-            let r_state = Arc::clone(&state);
+            let r_state = Arc::downgrade(&state);
             let clock = Arc::clone(session.clock());
             let period_ms = (period.as_millis() as u64).max(1);
-            RetentionTask {
-                handle: crate::runtime_pool::WzRuntime::Application.spawn(async move {
+            AbortOnDropTask::new(
+                crate::runtime_pool::WzRuntime::Application.spawn(async move {
                     loop {
                         clock.sleep(period_ms).await;
+                        let Some(r_state) = r_state.upgrade() else {
+                            return;
+                        };
                         r_state
                             .lock()
                             .expect("advanced subscriber state mutex poisoned")
                             .reclaim_expired_sources(Instant::now(), period);
                     }
                 }),
-            }
+            )
         });
 
         let periodic_task = periodic.map(|period| {
-            let p_session = session.clone();
-            let p_state = Arc::clone(&state);
+            let p_session = session.downgrade();
+            let p_state = Arc::downgrade(&state);
             let p_pending = Arc::clone(&pending);
             let p_base = base_keyexpr.clone();
             let clock = Arc::clone(session.clock());
             // R311y87 (review C4) — clamp to >=1ms: a sub-ms Duration truncates
             // to 0, turning the loop into a zero-delay GET storm / busy spin.
             let period_ms = (period.as_millis() as u64).max(1);
-            PeriodicTask {
-                // The APPLICATION subsystem — upstream's own choice for the
-                // same task: `ZRuntime::Application.spawn` wraps
-                // `spawn_periodic_queries`
-                // (`zenoh-ext/src/advanced_subscriber.rs`
-                // @ `AbortOnDropHandle::new(ZRuntime::Application.spawn(`). It issues GETs
-                // on the consumer's behalf, so it is application work even
-                // though nothing awaits it.
-                handle: crate::runtime_pool::WzRuntime::Application.spawn(async move {
+            // The APPLICATION subsystem — upstream's own choice for the same
+            // task: `ZRuntime::Application.spawn` wraps `spawn_periodic_queries`
+            // (`zenoh-ext/src/advanced_subscriber.rs`
+            // @ `AbortOnDropHandle::new(ZRuntime::Application.spawn(`). It issues GETs
+            // on the consumer's behalf, so it is application work even though
+            // nothing awaits it.
+            AbortOnDropTask::new(
+                crate::runtime_pool::WzRuntime::Application.spawn(async move {
                     loop {
                         clock.sleep(period_ms).await;
+                        let (Some(p_session), Some(p_state)) =
+                            (p_session.upgrade(), p_state.upgrade())
+                        else {
+                            return;
+                        };
                         run_periodic_tick(
                             &p_session, &p_state, &p_pending, &p_base, dest, timeout_ms,
                         );
                     }
                 }),
-            }
+            )
         });
 
         // R311y84 — the heartbeat subscriber: on each `<ke>/@adv/pub/**` beacon,
@@ -3619,7 +3725,7 @@ impl<R: SessionRuntime, T: TimeSource> AdvancedSubscriber<R, T> {
             ) {
             let hb_state = Arc::clone(&state);
             let hb_pending = Arc::clone(&pending);
-            let hb_session = session.clone();
+            let hb_session = session.downgrade();
             let hb_base = base_keyexpr.clone();
             let hb_keyexpr = crate::advanced_ke::publisher_detection_ke(&base_keyexpr);
             Some(session.declare_subscriber(
@@ -3648,15 +3754,17 @@ impl<R: SessionRuntime, T: TimeSource> AdvancedSubscriber<R, T> {
                         .expect("advanced subscriber state mutex poisoned")
                         .handle_heartbeat(zid, eid, hb_sn);
                     if let Some(request) = request {
-                        issue_recovery_query(
-                            &hb_session,
-                            &hb_state,
-                            &hb_pending,
-                            &hb_base,
-                            request,
-                            dest,
-                            timeout_ms,
-                        );
+                        if let Some(hb_session) = hb_session.upgrade() {
+                            issue_recovery_query(
+                                &hb_session,
+                                &hb_state,
+                                &hb_pending,
+                                &hb_base,
+                                request,
+                                dest,
+                                timeout_ms,
+                            );
+                        }
                     }
                 },
             )?)
@@ -3720,7 +3828,7 @@ impl<R: SessionRuntime, T: TimeSource> AdvancedSubscriber<R, T> {
             if history.is_some_and(|h| h.detect_late_publishers) {
                 let lp_state = Arc::clone(&state);
                 let lp_pending = Arc::clone(&pending);
-                let lp_session = session.clone();
+                let lp_session = session.downgrade();
                 let lp_base = base_keyexpr.clone();
                 let lp_keyexpr = crate::advanced_ke::publisher_detection_ke(&base_keyexpr);
                 let (lp_depth, lp_age) = history
@@ -3730,6 +3838,9 @@ impl<R: SessionRuntime, T: TimeSource> AdvancedSubscriber<R, T> {
                     lp_keyexpr,
                     LivelinessSubscriberOptions::new().with_history(true),
                     move |sample: LivelinessSample<'_>| {
+                        let Some(lp_session) = lp_session.upgrade() else {
+                            return;
+                        };
                         on_late_publisher_detected(
                             &lp_session,
                             &lp_state,
@@ -3753,6 +3864,7 @@ impl<R: SessionRuntime, T: TimeSource> AdvancedSubscriber<R, T> {
         let recovery_cancel = Some(RecoveryCancel {
             pending: Arc::clone(&pending),
             session: session.clone(),
+            armed: true,
         });
 
         // R311y826 — the `@adv/sub` detection token. Declared LAST, after the
@@ -7243,6 +7355,137 @@ mod tests {
              queryable -- a history GET answered by one queryable returns a \
              strictly smaller history, so this is a delivery difference and not \
              a cosmetic one"
+        );
+    }
+
+    /// R2817 — `background()` on the option-free form: the subscriber keeps
+    /// ORDERING and DELIVERING after its handle is gone, emits no retraction,
+    /// and leaves nothing behind that holds its session.
+    ///
+    /// Delivery is the discriminator, as for the plain liveliness form: a
+    /// `background` that dropped the handle without disarming it would
+    /// unregister the subscription and this log would stop at the two samples
+    /// sent before it. The duplicate `1` after the handle is gone is what
+    /// shows the ORDERING state survived too, not just a bare subscription.
+    ///
+    /// Controls: making [`Subscriber::background`] a plain drop reds the
+    /// frame and delivery assertions; the strong count is the CONTROL for
+    /// the leak claim, and it is asserted to have MOVED at declare so that
+    /// "back to base" cannot be a count that never rose.
+    #[test]
+    fn a_background_advanced_subscriber_keeps_ordering_after_its_handle_is_gone() {
+        let (actions, driver) = crate::test_fixtures::recording_actions();
+        let observer = Arc::new(Mutex::new(ApplicationLayerObserver::new()));
+        let clock = Arc::new(TokioTime::new());
+        let session = TokioSession::new(actions, observer, clock);
+        let base = session.strong_count();
+
+        let delivered = Arc::new(Mutex::new(Vec::<u8>::new()));
+        let d = Arc::clone(&delivered);
+        let sub = AdvancedSubscriber::declare(&session, "demo/data", move |sample: Sample| {
+            d.lock().unwrap().push(sample.payload[0])
+        })
+        .expect("advanced subscriber declares");
+        put_sequenced(&session, 0);
+        put_sequenced(&session, 1);
+        assert!(
+            session.strong_count() > base,
+            "CONTROL: the live handle holds its session, so the count must have \
+             risen at declare or the assertion below measures nothing"
+        );
+
+        let frames = driver.frame_count();
+        sub.background();
+        assert_eq!(
+            driver.frame_count(),
+            frames,
+            "background() must emit no retraction"
+        );
+        assert_eq!(
+            session.strong_count(),
+            base,
+            "nothing a backgrounded subscriber leaves behind may hold its session"
+        );
+
+        put_sequenced(&session, 1); // duplicate: the ordering state must drop it
+        put_sequenced(&session, 2);
+        assert_eq!(
+            *delivered.lock().unwrap(),
+            vec![0, 1, 2],
+            "after background() the subscriber still delivers in order and still \
+             drops the duplicate"
+        );
+    }
+
+    /// R2817 — `background()` on the fully configured form, where every piece
+    /// `declare_with_options` can build is present: heartbeat and
+    /// late-publisher subscriptions, the retention task, the recovery GET
+    /// registry and the detection token.
+    ///
+    /// The strong count is the claim this adds over the option-free test. Each
+    /// of those callbacks and tasks used to hold a STRONG session clone; left
+    /// registered by `background`, any one of them keeps the session alive
+    /// for good. Control, run: restoring ONE strong capture — in the live
+    /// callback alone — reds this with `left: 2` / `right: 1`, so the count
+    /// sees a single leaked clone, not only the sum of all of them. The frame
+    /// count covers the retractions a
+    /// plain drop would emit here — `UndeclSubscriber` ×2, the liveliness
+    /// `Interest(Final)` and the token's `UndeclToken`.
+    #[cfg(feature = "ext-pubsub-advanced-history")]
+    #[test]
+    fn a_fully_configured_background_subscriber_holds_no_session_and_retracts_nothing() {
+        let (actions, driver) = crate::test_fixtures::recording_actions();
+        let observer = Arc::new(Mutex::new(ApplicationLayerObserver::new()));
+        let clock = Arc::new(TokioTime::new());
+        let session = TokioSession::new(actions, observer, clock);
+        let base = session.strong_count();
+
+        let delivered = Arc::new(Mutex::new(Vec::<u8>::new()));
+        let d = Arc::clone(&delivered);
+        let sub = AdvancedSubscriber::declare_with_options(
+            &session,
+            "demo/data",
+            AdvancedSubscriberOptions::new()
+                .with_recovery(RecoveryConfig::new().with_heartbeat())
+                .with_history(HistoryConfig::new().detect_late_publishers())
+                .with_subscriber_detection(SubscriberDetection::new())
+                .with_get_locality(Locality::SessionLocal),
+            move |sample: Sample| d.lock().unwrap().push(sample.payload[0]),
+        )
+        .expect("fully configured advanced subscriber declares");
+        assert!(
+            sub.heartbeat_channel_is_live(),
+            "CONTROL: the heartbeat subscription exists, so its callback is in \
+             the population this test grades"
+        );
+        let token_prefix = format!("demo/data/@adv/sub/{}/", zid_to_zenoh_hex(sub.id().zid()));
+        assert_eq!(
+            frames_carrying(&driver, &token_prefix),
+            1,
+            "CONTROL: the detection token was declared"
+        );
+
+        let frames = driver.frame_count();
+        sub.background();
+        assert_eq!(
+            driver.frame_count(),
+            frames,
+            "background() must emit no retraction: no UndeclSubscriber, no \
+             liveliness Interest(Final), no UndeclToken"
+        );
+        assert_eq!(
+            session.strong_count(),
+            base,
+            "every callback and task a backgrounded subscriber leaves registered \
+             must hold its session weakly"
+        );
+
+        put_sequenced(&session, 0);
+        put_sequenced(&session, 1);
+        assert_eq!(
+            *delivered.lock().unwrap(),
+            vec![0, 1],
+            "the backgrounded subscriber still delivers"
         );
     }
 }

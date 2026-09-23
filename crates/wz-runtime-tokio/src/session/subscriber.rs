@@ -206,6 +206,25 @@ impl<R: SessionRuntime> Subscriber<R> {
         self.teardown()
     }
 
+    /// R2817 — run this subscriber in the BACKGROUND: it keeps delivering
+    /// until the session is dropped, and no handle is returned to retract it.
+    ///
+    /// Upstream's form, `zenoh/src/api/builders/subscriber.rs` @ `pub fn background(self) -> SubscriberBuilder<'a, 'b, Callback<Sample>, true> {`,
+    /// and the plain-subscriber twin of
+    /// [`LivelinessSubscriber::background`](crate::session::LivelinessSubscriber::background):
+    /// the RAII disarm and nothing else. Clearing `armed` suppresses every
+    /// part of [`Self::teardown`] — the cell kill, the wire
+    /// `Declare(UndeclSubscriber)`, the registry unregister — so the
+    /// subscription stays declared on both sides of the wire.
+    ///
+    /// Dropping the handle afterwards frees its owned fields, the retraction
+    /// closure included, without running it; the registry's staging sink
+    /// holds its own clone of the cell, so delivery does not depend on the
+    /// handle.
+    pub fn background(mut self) {
+        self.armed = false;
+    }
+
     /// R311lo — shared teardown for [`Self::undeclare`] + [`Drop`], the
     /// single source of the kill-then-unregister discipline (R311lh
     /// previously had to keep the `undeclare` and `Drop` bodies in
