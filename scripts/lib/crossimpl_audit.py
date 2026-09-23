@@ -720,7 +720,11 @@ HOST_GATED_CI_TARGETS: dict[str, str] = {
 # reliable listener and being dialed by wz. Two tests, one atom, one direction
 # each: 2 tests x 1 atom = 2. Measured by `run-ci.sh --layer A4` before the
 # commit, which is the rule R2790 wrote down.
-FOREIGN_ADJUDICATOR_LINKS = 932
+# R2811 — 932 -> 934: `wz_peer_gossip_query_zenohd_interop.rs`, the query plane
+# across a wz gossip peer and a stock zenohd peer, one test per direction, both
+# `routing-peer`: 2 tests x 1 atom = 2. Measured by `audit-crossimpl-proof.sh`
+# before the commit (`measured 934, declared 932`).
+FOREIGN_ADJUDICATOR_LINKS = 934
 
 # ── Execution disclosure ────────────────────────────────────────────────────────
 #

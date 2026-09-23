@@ -16968,6 +16968,14 @@ layer_z_zenohd_interop() {
     # routing-peer for --peer). Same --test-threads=1 per-zenohd isolation.
     (cd crates && WZ_ZENOHD_BIN="$zenohd" cargo test -p wz-integration-tests \
         --test wz_peer_zenohd_interop -- --ignored --quiet --test-threads=1) || return 1
+    # R2811 — the QUERY plane across a wz `--peer-mode peer-to-peer` peer and a
+    # STOCK gossip zenohd peer, both directions. Leg 1 (a client of wz queries a
+    # queryable behind zenohd) got zero replies until the topology graph learned
+    # to answer gossip-mode route queries itself; leg 2 (the reverse) passed
+    # throughout and is the control that leg 1's failure was route selection.
+    # GUARDED (`_runci_guarded_test`, 2 = one leg per direction).
+    _runci_guarded_test Z 2 env WZ_ZENOHD_BIN="$zenohd" cargo test -p wz-integration-tests \
+        --test wz_peer_gossip_query_zenohd_interop -- --ignored --quiet --test-threads=1 || return 1
     # R311y430 — `scouting-autoconnect`, the last unproven scouting atom, on a
     # THREE-node topology the peer-tier leg above cannot host: a zenohd ROUTER, a
     # THIRD-PARTY zenohd PEER listening beside it, and a wz `--peer --autoconnect`

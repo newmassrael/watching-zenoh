@@ -6181,20 +6181,13 @@ pub(crate) fn compute_self_publish_forward(
     if interested.is_empty() {
         return Ok(None);
     }
-    // R2236 (open-debt item 588) — the data-plane half of the same seam.
-    // `directions_toward` asks the topology graph for a next hop, and a gossip
-    // subsystem has no edges, so every self-originated Push resolved to zero
-    // directions and returned `Ok(None)` — indistinguishable from "no remote
-    // subscriber". In `peer_to_peer` there is no transit: every node that can
-    // be interested is a DIRECT neighbour, so the interested set IS the
-    // direction set. It is self-filtering, because the caller only uses this
-    // list to match live faces by zid — an interested node with no face is
-    // simply not sent to.
-    let children = if net.full_linkstate() {
-        net.directions_toward(&self_zid, &interested)
-    } else {
-        interested
-    };
+    // R2236 (open-debt item 588) found that a gossip subsystem's edgeless graph
+    // gave every self-originated Push zero directions, and answered it HERE.
+    // R2811 moved that answer into the graph (`LinkstateNetwork::next_hop`),
+    // because the query plane asked the same graph and kept the defect: in
+    // gossip mode a direct neighbour is self's own next hop, so this is now the
+    // one call for both modes.
+    let children = net.directions_toward(&self_zid, &interested);
     if children.is_empty() {
         return Ok(None);
     }

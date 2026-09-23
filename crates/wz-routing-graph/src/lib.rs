@@ -2054,9 +2054,33 @@ impl LinkstateNetwork {
         }
     }
 
+    /// Whether `zid` is a DIRECT neighbour: this node holds a link to it.
+    fn is_direct_neighbour(&self, zid: &Zid) -> bool {
+        self.links.values().any(|link| link.zid == *zid)
+    }
+
     /// The first hop from this peer toward `dest` along `source`'s tree
     /// (the unicast next-hop), if a path exists.
+    ///
+    /// R2811 — in GOSSIP mode ([`full_linkstate`](Self::full_linkstate) off)
+    /// there is no tree: a gossip announcement carries no links, so the graph
+    /// has no edges and every tree query here used to answer "no path". That
+    /// was right for nothing. Upstream's single peer HAT routes over its OWN
+    /// faces rather than a graph, and only for traffic that did not arrive
+    /// from its peer region (`zenoh/src/net/routing/hat/peer/pubsub.rs` @
+    /// `if ctx.subs.is_some() && self.region() != *src_region {`, and the
+    /// query twin in `zenoh/src/net/routing/hat/peer/queries.rs` @
+    /// `if self.region() != *src_region {`).
+    /// So the answer is decided HERE, once, for every caller: from SELF, a
+    /// direct neighbour is its own next hop; from any other source there is
+    /// none, because a gossip peer never relays one peer's traffic to another.
+    /// R2236 had patched that rule into one data-plane call site; the query
+    /// plane asked this method, got the edgeless answer, and a client of a wz
+    /// peer could not reach a queryable behind a stock zenohd peer.
     pub fn next_hop(&self, source: &Zid, dest: &Zid) -> Option<Zid> {
+        if !self.full_linkstate {
+            return (source == self.self_zid() && self.is_direct_neighbour(dest)).then_some(*dest);
+        }
         let root = self.get_idx(source)?;
         let dest_idx = self.get_idx(dest)?;
         let tree = self.trees.get(root.index())?;
@@ -2117,7 +2141,20 @@ impl LinkstateNetwork {
 
     /// Shortest-path distance from this peer to `dest`, if reachable
     /// (`None` for an unreachable node — Bellman-Ford infinity).
+    ///
+    /// R2811 — in GOSSIP mode a direct neighbour is one hop away and nothing
+    /// else is reachable, for the reason [`next_hop`](Self::next_hop) gives.
+    /// Every candidate a gossip peer can route to is therefore at the same
+    /// distance, which is upstream's shape too: its peer HAT ranks peer
+    /// queryables by their DECLARED distance, never by a graph.
     pub fn distance_to(&self, dest: &Zid) -> Option<f64> {
+        if !self.full_linkstate {
+            return if dest == self.self_zid() {
+                Some(0.0)
+            } else {
+                self.is_direct_neighbour(dest).then_some(1.0)
+            };
+        }
         let dest_idx = self.get_idx(dest)?;
         self.distances
             .get(dest_idx.index())
@@ -2952,6 +2989,45 @@ mod tests {
         multihop.set_gossip_multihop(true);
         multihop.add_link(zid(0xAA), WhatAmI::Peer);
         assert!(multihop.update_link_weights(weights(&[(0xAA, 300)])));
+    }
+
+    /// R2811 — the route queries answer upstream's peer-HAT rule in GOSSIP mode:
+    /// from self a direct neighbour is its own next hop at one hop, and from any
+    /// other source nothing is, since a gossip peer relays no peer's traffic to
+    /// another. The same topology in LINKSTATE mode, with no trees computed yet,
+    /// keeps answering "no path" — the rule is scoped to the mode, not global.
+    #[test]
+    fn gossip_mode_routes_to_direct_neighbours_from_self_only() {
+        let (me, near, other_near, far) = (zid(0x01), zid(0xAA), zid(0xBB), zid(0xCC));
+        let mut gossip = LinkstateNetwork::new(me, WhatAmI::Peer);
+        gossip.set_full_linkstate(false);
+        gossip.add_link(near, WhatAmI::Peer);
+        gossip.add_link(other_near, WhatAmI::Peer);
+        gossip.ensure_node(far);
+
+        assert_eq!(gossip.next_hop(&me, &near), Some(near));
+        assert_eq!(gossip.next_hop(&me, &far), None, "not a neighbour");
+        assert_eq!(
+            gossip.next_hop(&near, &other_near),
+            None,
+            "a neighbour's traffic is never relayed to another neighbour"
+        );
+        assert_eq!(
+            gossip.directions_toward(&me, &[near, far, other_near, near]),
+            vec![near, other_near]
+        );
+        assert_eq!(
+            gossip.directions_toward(&near, &[other_near]),
+            Vec::<Zid>::new()
+        );
+        assert_eq!(gossip.distance_to(&me), Some(0.0));
+        assert_eq!(gossip.distance_to(&near), Some(1.0));
+        assert_eq!(gossip.distance_to(&far), None);
+
+        let mut linkstate = LinkstateNetwork::new(me, WhatAmI::Peer);
+        linkstate.add_link(near, WhatAmI::Peer);
+        assert_eq!(linkstate.next_hop(&me, &near), None);
+        assert_eq!(linkstate.distance_to(&near), None);
     }
 
     /// R2635 — the report names WHICH END said what, and the two ends are given
