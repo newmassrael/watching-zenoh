@@ -477,7 +477,7 @@ fn push_stream_flow(
             Ok(bytes) => push_walk(
                 RowWalk {
                     bytes,
-                    space: MidSpace::Transport,
+                    space: MidSpace::of_frame(frame),
                     direction: frame.direction,
                     framed: &message_name(frame),
                     spaces,
@@ -993,7 +993,13 @@ fn push_carried(
         }
         out.push('}');
     };
-    let records = batched_records(field);
+    // The first listing entry is the row itself; subsequent entries are its
+    // network records. A lean row and its sole record share the same span.
+    let records = if matches!(space, MidSpace::Network) {
+        alloc::vec![field]
+    } else {
+        batched_records(field)
+    };
     if let Some(message) = bytes.first().and_then(|b| space.head(b & 0x1F)) {
         let keyexpr = if records.is_empty() {
             crate::payload_decode::subtree_keyexpr_outcome(field, at)
@@ -1342,6 +1348,13 @@ fn push_selected(selection: Option<RowSelection<'_>>, frame: &PassiveFrame, out:
 fn push_selected(_selection: Option<RowSelection<'_>>, _frame: &PassiveFrame, _out: &mut String) {}
 
 fn message_name(frame: &PassiveFrame) -> String {
+    if let Ok(wz_session_core::inbound::InboundFrame::Network { payload }) = &frame.frame {
+        return payload
+            .first()
+            .and_then(|b| MidSpace::Network.head(b & 0x1f))
+            .map_or("Unknown", |m| m.name())
+            .to_string();
+    }
     framed_name(frame.frame.as_ref().map(|f| f.kind_name()))
 }
 
@@ -1378,12 +1391,25 @@ enum MidSpace {
     /// A session message: walked by `dissect_transport_message`, named through
     /// `MessageName::of_transport`.
     Transport,
+    /// A bare network message on a negotiated lowlatency session.
+    Network,
     /// A scouting datagram: walked by `dissect_scouting_message`, named through
     /// `MessageName::of_scouting`.
     Scouting,
 }
 
 impl MidSpace {
+    fn of_frame(frame: &PassiveFrame) -> Self {
+        if matches!(
+            frame.frame,
+            Ok(wz_session_core::inbound::InboundFrame::Network { .. })
+        ) {
+            Self::Network
+        } else {
+            Self::Transport
+        }
+    }
+
     /// Walk `bytes` at base 0 in this space.
     ///
     /// `Ok(None)` is the scouting walker's "not a MID of mine"; the transport
@@ -1401,6 +1427,15 @@ impl MidSpace {
             Self::Transport => wz_session_core::dissect::dissect_transport_message(bytes, 0)
                 .map(Some)
                 .map_err(rendered),
+            Self::Network => {
+                let mut cursor = wz_session_core::dissect::SpanCursor::new(bytes);
+                let field =
+                    wz_session_core::dissect::walk_network_record(&mut cursor).map_err(rendered)?;
+                if field.is_some() && cursor.remaining() != 0 {
+                    return Err("trailing bytes after a lowlatency network message".to_string());
+                }
+                Ok(field)
+            }
             Self::Scouting => {
                 wz_session_core::dissect::dissect_scouting_message(bytes, 0).map_err(rendered)
             }
@@ -1412,6 +1447,7 @@ impl MidSpace {
         use wz_session_core::dissect::MessageName;
         match self {
             Self::Transport => MessageName::of_transport(mid),
+            Self::Network => MessageName::of_network(mid),
             Self::Scouting => MessageName::of_scouting(mid),
         }
     }

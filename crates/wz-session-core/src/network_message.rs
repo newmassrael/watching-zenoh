@@ -320,6 +320,18 @@ impl BatchParse {
 /// — a valid empty batch, exactly as in the strict parse.
 #[cfg(feature = "codec-frame")]
 pub fn parse_frame_payload_best_effort(bytes: &[u8]) -> BatchParse {
+    parse_payload_best_effort(bytes, usize::MAX)
+}
+
+/// Decode the single network record carried by a lowlatency framing unit.
+/// Trailing bytes are reported, never treated as another batched message.
+#[cfg(feature = "codec-frame")]
+pub fn parse_lowlatency_payload_best_effort(bytes: &[u8]) -> BatchParse {
+    parse_payload_best_effort(bytes, 1)
+}
+
+#[cfg(feature = "codec-frame")]
+fn parse_payload_best_effort(bytes: &[u8], max_records: usize) -> BatchParse {
     let total = bytes.len();
     let mut messages = Vec::new();
     let mut spans: Vec<(usize, usize)> = Vec::new();
@@ -329,6 +341,13 @@ pub fn parse_frame_payload_best_effort(bytes: &[u8]) -> BatchParse {
         // The offset is recomputed per record rather than tracked, so it
         // cannot drift from the cursor the decoders actually advance.
         let offset = total - cursor.remaining();
+        if messages.len() == max_records {
+            halt = Some(BatchHalt::CodecError {
+                offset,
+                error: CodecError::TooManyElements,
+            });
+            break;
+        }
         // R311y641 — how many records this step appends is the decoder's
         // business, not this loop's, so the spans are filled by DELTA rather
         // than by assuming one. A step that pushed two would otherwise leave the

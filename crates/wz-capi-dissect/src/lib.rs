@@ -4179,6 +4179,86 @@ mod tests {
         Ok(s)
     }
 
+    #[test]
+    fn lean_network_data_crosses_the_fields_and_census_doors() {
+        fn framed(body: &[u8], width: usize) -> Vec<u8> {
+            let mut wire = (body.len() as u32).to_le_bytes()[..width].to_vec();
+            wire.extend_from_slice(body);
+            wire
+        }
+        // Independent wire handshake: both Inits offer LowLatency (unit 5).
+        // Each direction changes prefix width only after its own Open.
+        let declare =
+            wz_session_core::declare_build::build_declare_subscriber(1, 0, Some("demo/**"))
+                .expect("subscriber")
+                .try_as_borrowed()
+                .expect("borrow")
+                .encode_to_vec();
+        let push = wz_codecs::push::Push {
+            header: wz_codecs::push::Push::default().header | wz_codecs::wire_const::FLAG_N_N,
+            keyexpr: literal("demo/temp"),
+            body: wz_codecs::push::PushVariant::CodecZenohMsgPut(wz_codecs::msg_put::MsgPut {
+                payload_len: 5,
+                payload: b"hello",
+                ..Default::default()
+            }),
+            ..Default::default()
+        }
+        .encode_to_vec();
+        let units = [
+            (false, framed(&[0x81, 9, 2, 1, 5], 2)),
+            (true, framed(&[0xa1, 9, 2, 2, 0, 5], 2)),
+            (false, framed(&[0x02, 10, 0, 0], 2)),
+            (true, framed(&[0x22, 10, 0], 2)),
+            (false, framed(&declare, 4)),
+            (true, framed(&push, 4)),
+            (false, framed(&[0x04], 4)),
+        ];
+        let mut seq = [1000u32, 2000u32];
+        let packets: Vec<_> = units
+            .into_iter()
+            .map(|(reverse, body)| {
+                let index = usize::from(reverse);
+                let packet = if reverse {
+                    tcp_packet_reverse(seq[index], &body)
+                } else {
+                    tcp_packet(seq[index], &body)
+                };
+                seq[index] += body.len() as u32;
+                packet
+            })
+            .collect();
+        let rows: Vec<_> = packets
+            .iter()
+            .enumerate()
+            .map(|(i, packet)| (0, i as u32, packet.as_slice()))
+            .collect();
+        let file = wz_capture::pcap::write(1, &rows);
+        let fields = call_fields(&file, 0).expect("fields");
+        assert_eq!(fields.matches("\"message_at\":").count(), 7, "{fields}");
+        for word in ["Declare", "Push"] {
+            assert_eq!(
+                fields.matches(&format!("\"message\":\"{word}\"")).count(),
+                2,
+                "row and its network record must both be listed: {fields}"
+            );
+        }
+        assert!(fields.contains("\"keyexpr\":\"demo/temp\""), "{fields}");
+        assert!(!fields.contains("\"name\":\"Unknown\""), "{fields}");
+        assert!(!fields.contains("\"declined\":"), "{fields}");
+        for word in ["Frame", "Fragment"] {
+            assert!(
+                !fields.contains(&format!("\"message\":\"{word}\"")),
+                "{fields}"
+            );
+        }
+        let census = call_census(&file).expect("census");
+        assert!(
+            census.contains("demo/temp"),
+            "the data key must reach aggregation: {census}"
+        );
+    }
+
     /// R311y917 (open-debt item 366) — THE FIELD DOCUMENT CARRIES THE GROUP A
     /// CEILING WOULD SPEAK THROUGH.
     ///
