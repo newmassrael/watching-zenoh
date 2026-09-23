@@ -1090,7 +1090,14 @@ CITATION = re.compile(r"\b((?:[A-Za-z0-9_.-]+/)*[A-Za-z0-9_.-]+\.(?:rs|c|h))(?::
 # responder-side refusal and its `_anyke` opt-out (Layer Z). It was in
 # `reached`, so this pin falls while UNREACHED and NO_SYMBOL hold at 2 and 2.
 # READ off the census's own FAIL line, `reached: 13 against a pin of 14`.
-PIN_REACHED = 13
+#
+# R2819 — 13 -> 12. `ext-pubsub-advanced-subscriber` RETIRES to COMPLETE: its
+# two last residuals are built -- subscriber detection outside the recovery
+# gate, and the sample-handler channel form. It was in `reached` (C1ar, C1at
+# and C1av name its gated code), so this pin falls while UNREACHED and
+# NO_SYMBOL hold at 2 and 2. READ off the census's own FAIL line,
+# `reached: 12 against a pin of 13`.
+PIN_REACHED = 12
 PIN_UNREACHED = 2
 PIN_NO_SYMBOL = 2
 # R2534 — 346 -> 347. The atom is `adminspace-metrics` and the citation is the
@@ -2091,7 +2098,14 @@ PIN_NO_SYMBOL = 2
 # at c7b70d42 and at R2816's tip: (wz 7, ambiguous 0) -> (wz 9, ambiguous 0);
 # R2815's and R2816's corrections cite upstream only. ATTRIBUTED by the
 # arithmetic, 60 + 2 = 62, the census's own FAIL line, so no other atom moves.
-PIN_WZ_CITATIONS = 62
+#
+# R2819 — 62 -> 53, FALLING by the whole of one atom:
+# `ext-pubsub-advanced-subscriber` is COMPLETE. Its reason carried (wz 9,
+# ambiguous 0) by the R2817 derivation above, and its R2819 correction was
+# appended with the grade, so none of its citations is counted here any more.
+# ATTRIBUTED by the arithmetic, 62 - 9 = 53, the census's own FAIL line, and
+# PIN_AMBIGUOUS holds at 12, so no other atom moves.
+PIN_WZ_CITATIONS = 53
 # R2626 — 44 -> 42, and this one is worth a sentence because it HELD through
 # every earlier retirement in this run (R2612, R2622). `time-hlc`'s reason is the
 # first retiree carrying AMBIGUOUS citations of its own: its oldest clauses cite
