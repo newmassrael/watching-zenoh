@@ -1084,7 +1084,13 @@ CITATION = re.compile(r"\b((?:[A-Za-z0-9_.-]+/)*[A-Za-z0-9_.-]+\.(?:rs|c|h))(?::
 # both directions. It was in `reached` (C1ci and the udp lanes name its gated
 # code), so this pin falls while UNREACHED and NO_SYMBOL hold at 2 and 2. READ
 # off the census's own FAIL line, `reached: 14 against a pin of 15`.
-PIN_REACHED = 14
+#
+# R2812 — 14 -> 13. `query-get` RETIRES to COMPLETE: the reply-keyexpr refusal
+# returns to the caller as a `Result`, and a stock zenoh `z_get` reads wz's
+# responder-side refusal and its `_anyke` opt-out (Layer Z). It was in
+# `reached`, so this pin falls while UNREACHED and NO_SYMBOL hold at 2 and 2.
+# READ off the census's own FAIL line, `reached: 13 against a pin of 14`.
+PIN_REACHED = 13
 PIN_UNREACHED = 2
 PIN_NO_SYMBOL = 2
 # R2534 — 346 -> 347. The atom is `adminspace-metrics` and the citation is the
@@ -2070,7 +2076,12 @@ PIN_NO_SYMBOL = 2
 # 66, the census's own FAIL line, so no other atom moves. The grading clause's
 # own new wz citations do not count here for the same reason the old ones stop
 # counting: the reason is no longer PARTIAL.
-PIN_WZ_CITATIONS = 66
+#
+# R2812 — 66 -> 60, FALLING by the whole of one atom: `query-get` is COMPLETE.
+# DERIVED with `citation_audit` over that atom's reason at the commit before
+# the grade, which returned (wz 6, ambiguous 5); ATTRIBUTED by the arithmetic,
+# 66 - 6 = 60, the census's own FAIL line, so no other atom moves.
+PIN_WZ_CITATIONS = 60
 # R2626 — 44 -> 42, and this one is worth a sentence because it HELD through
 # every earlier retirement in this run (R2612, R2622). `time-hlc`'s reason is the
 # first retiree carrying AMBIGUOUS citations of its own: its oldest clauses cite
@@ -2122,7 +2133,13 @@ PIN_WZ_CITATIONS = 66
 # (wz 45, ambiguous 1) rather than apportioned; the promotion's own addendum
 # writes every citation anchored. READ off the census's own FAIL line,
 # `ambiguous citations: 17 against a pin of 18`.
-PIN_AMBIGUOUS = 17
+# R2812 -- 17 -> 12. `query-get` departs (COMPLETE) carrying FIVE ambiguous
+# citations, measured on its own pre-grade reason with `citation_audit`
+# (wz 6, ambiguous 5) rather than apportioned -- its older clauses cite
+# `get.rs`, `session.rs` and `query.rs` by bare name. The promotion's addendum
+# writes every citation anchored. READ off the census's own FAIL line,
+# `ambiguous citations: 12 against a pin of 17`.
+PIN_AMBIGUOUS = 12
 
 
 class Fatal(Exception):

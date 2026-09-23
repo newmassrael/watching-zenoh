@@ -240,8 +240,9 @@ impl<'a> ReplyMeta<'a> {
 /// Returned by every `ReplyOut` method that takes an explicit reply keyexpr,
 /// because those are the only ones that can answer outside the query. Both
 /// references tell the CALLER synchronously: zenoh's `Query::_reply_sample`
-/// `bail!`s (`zenoh/src/api/queryable.rs` @ `which does not intersect with
-/// query`), so `reply(..).wait()` is an `Err`; pico's `_z_send_reply` returns
+/// `bail!`s, so `reply(..).wait()` is an `Err`
+/// (`zenoh/src/api/queryable.rs` @ `which does not intersect with query`);
+/// pico's `_z_send_reply` returns
 /// `_Z_ERR_KEYEXPR_NOT_MATCH` (`vendor/zenoh-pico/src/net/primitives.c`
 /// @ `_Z_ERR_KEYEXPR_NOT_MATCH`), which `z_query_reply` hands back as its
 /// result. A void seam could only count the refusal on the responder, where

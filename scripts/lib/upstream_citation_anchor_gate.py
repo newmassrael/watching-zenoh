@@ -421,7 +421,11 @@ _ANY_TOKEN = re.compile(r"(?<![\w/.-])(\w[\w-]*)/[\w/.-]+\.rs")
 #: very comment pushed the root-less residue up by two the moment it typed two of
 #: them out. The warning three hundred lines below said so; writing it here as
 #: well is what a second firing earns.
-LINE_BUDGET = 288
+#: 288 -> 286 (R2812). The reply-keyexpr refusal became a `Result` the caller
+#: reads, and the two doc paragraphs that justified the old responder-side
+#: COUNT went with it. Both cited the upstream queryable module and the pico
+#: primitives file by line; their replacements say the same thing as needles.
+LINE_BUDGET = 286
 BARE_BUDGET = 58
 #: The root-less axis, after R2317 repaired the 49 citations that named a file
 #: gone at the pin. Same two-directional ratchet as LINE and BARE.
