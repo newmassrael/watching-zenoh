@@ -1077,7 +1077,14 @@ CITATION = re.compile(r"\b((?:[A-Za-z0-9_.-]+/)*[A-Za-z0-9_.-]+\.(?:rs|c|h))(?::
 # -- C1bg and E16 both name its gated code -- so this pin falls while UNREACHED
 # and NO_SYMBOL hold at 2 and 2. READ off the census's own FAIL line,
 # `reached: 15 against a pin of 16`.
-PIN_REACHED = 15
+#
+# R2810 — 15 -> 14. `transport-link-udp` RETIRES to COMPLETE: its last residual,
+# upstream's reliable variant (`udp/...?rel=1`), is reached from a locator on
+# both the dial and the listen side and witnessed against a stock zenohd in
+# both directions. It was in `reached` (C1ci and the udp lanes name its gated
+# code), so this pin falls while UNREACHED and NO_SYMBOL hold at 2 and 2. READ
+# off the census's own FAIL line, `reached: 14 against a pin of 15`.
+PIN_REACHED = 14
 PIN_UNREACHED = 2
 PIN_NO_SYMBOL = 2
 # R2534 — 346 -> 347. The atom is `adminspace-metrics` and the citation is the
@@ -2055,7 +2062,15 @@ PIN_NO_SYMBOL = 2
 # `citation_audit` over that atom alone, which returned (wz 12, ambiguous 0)
 # before the grade; ATTRIBUTED by the arithmetic, 90 - 12 = 78, the census's
 # own FAIL line, so no other atom moves.
-PIN_WZ_CITATIONS = 78
+#
+# R2810 — 78 -> 66, FALLING by the whole of one atom again: `transport-link-udp`
+# is COMPLETE, so its reason leaves the PARTIAL population. DERIVED with
+# `citation_audit` over that atom's reason at the commit before the grade,
+# which returned (wz 12, ambiguous 0); ATTRIBUTED by the arithmetic, 78 - 12 =
+# 66, the census's own FAIL line, so no other atom moves. The grading clause's
+# own new wz citations do not count here for the same reason the old ones stop
+# counting: the reason is no longer PARTIAL.
+PIN_WZ_CITATIONS = 66
 # R2626 — 44 -> 42, and this one is worth a sentence because it HELD through
 # every earlier retirement in this run (R2612, R2622). `time-hlc`'s reason is the
 # first retiree carrying AMBIGUOUS citations of its own: its oldest clauses cite
