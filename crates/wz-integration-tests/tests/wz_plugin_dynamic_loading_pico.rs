@@ -67,8 +67,8 @@ use std::process::{Command, Stdio};
 use std::time::Duration;
 
 use wz_integration_tests::common::{
-    project_root, read_captured, wait_for_substring, wz_ap_demo_binary, zenoh_pico_cli_binary,
-    ChildGuard, PortReservation,
+    assert_demo_binary_newer_than_sources, project_root, read_captured, wait_for_substring,
+    wz_ap_demo_binary, zenoh_pico_cli_binary, ChildGuard, PortReservation,
 };
 
 /// The example plugin `.so` the demo is asked to load.
@@ -96,7 +96,13 @@ fn spawn_plugin_host(
     let writer = stderr.try_clone().expect("dup host stderr handle");
     let mut reader = stderr;
 
-    let mut cmd = Command::new(wz_ap_demo_binary());
+    // R2820 — every leg of this file spawns the demo through here, so the
+    // freshness check sits where the binary is resolved (R2686's placement):
+    // a demo older than its sources fails here, naming it, instead of on a
+    // wire barrier. WHICH feature build it is stays the banner check's job.
+    let demo = wz_ap_demo_binary();
+    assert_demo_binary_newer_than_sources(&demo);
+    let mut cmd = Command::new(&demo);
     cmd.arg("--storage-host").arg(&addr);
     for p in plugins {
         cmd.arg("--plugin").arg(p);

@@ -171,7 +171,8 @@ impl AdminPluginState {
 /// The wz-native `"__static__"` plugin path marker — the honest superset over
 /// zenoh's dylib path (`PluginStatus::path`, `plugin.rs:83`). zenoh reports a
 /// loaded plugin's `.so` filesystem path (or `"__not_loaded__"` when unloaded,
-/// `manager/dynamic_plugin.rs:149-155`); wz subsystems are STATICALLY linked
+/// `plugins/zenoh-plugin-trait/src/manager/dynamic_plugin.rs` @ `"__not_loaded__"`);
+/// wz subsystems are STATICALLY linked
 /// (composed at build time, no dlopen — cf. `wz-rest`'s "compile-time-composed
 /// superset of zenoh's zenoh-plugin-rest"), so there is no dylib path. The marker
 /// mirrors the form of zenoh's `"__not_loaded__"` sentinel.

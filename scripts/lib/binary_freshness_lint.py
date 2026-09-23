@@ -212,7 +212,12 @@ REFUSAL_TOKENS = frozenset({"code", "success"})
 # control that reds for the wrong reason is a dead probe wearing a pass's
 # clothes -- it would have been read as "reverting the fix reds the gate", which
 # is exactly the sentence the control exists to earn.
-CARRIED_SUBJECT = 220
+# 221 -> 218 (R2820), the R2686 placement again. R2820 added a third leg to
+# `wz_plugin_dynamic_loading_pico.rs` and this number went 220 -> 221; the
+# call went into `spawn_plugin_host`, where every leg of that file resolves the
+# demo, so the new leg and the file's two older ones left the carried bucket
+# at once. 221 measured, 218 after.
+CARRIED_SUBJECT = 218
 PROBE_ROUTE = 24
 REFUSAL_ONLY = 8
 
