@@ -29,6 +29,14 @@ pub(crate) const KE_ADV_PUB: &str = "pub";
 /// `@adv` SSOT precisely so the emit and the parse cannot disagree, and the
 /// chunk that decides WHICH SHAPE a token names is the last one that should
 /// have been left to two independent string literals.
+///
+/// R2818 — gated on its readers: the publisher's emit and the recovery-side
+/// parser. The module now compiles in a `-subscriber` build without recovery,
+/// where neither exists.
+#[cfg(any(
+    feature = "ext-pubsub-advanced-publisher",
+    feature = "ext-pubsub-advanced-recovery"
+))]
 pub(crate) const KE_ADV_UHLC: &str = "uhlc";
 
 /// The subscriber kind chunk under `@adv` (zenoh `KE_SUB`, admin.rs:56):

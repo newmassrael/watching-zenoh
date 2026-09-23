@@ -6096,7 +6096,14 @@ mod tests {
     /// off) still recovers a late joiner's cached history on declare. Before the
     /// split, history rode `RecoveryConfig`, so `retransmission = recovery.is_some()`
     /// was forced ON whenever history was set -- this config was unrepresentable.
-    #[cfg(feature = "ext-pubsub-advanced-history")]
+    ///
+    /// R2818 — gated on the cache too: this and the two `history_max_*` tests
+    /// below stand up an `AdvancedCache` as the answerer, which history does not
+    /// imply, so a `-history` build without the cache failed to compile them.
+    #[cfg(all(
+        feature = "ext-pubsub-advanced-history",
+        feature = "ext-pubsub-advanced-cache"
+    ))]
     #[test]
     fn history_only_without_recovery_recovers_late_joiner_cache() {
         use crate::advanced_cache::{AdvancedCache, CacheConfig, CachedSample};
@@ -6160,7 +6167,10 @@ mod tests {
     /// exercises the R311y94 loopback-selector fix: the SessionLocal GET now carries
     /// `_max=2` to the cache's `answer_from_ring` (before the fix the loopback Query
     /// dropped the selector and the cache over-returned 0..5).
-    #[cfg(feature = "ext-pubsub-advanced-history")]
+    #[cfg(all(
+        feature = "ext-pubsub-advanced-history",
+        feature = "ext-pubsub-advanced-cache"
+    ))]
     #[test]
     fn history_max_samples_caps_to_newest_n() {
         use crate::advanced_cache::{AdvancedCache, CacheConfig, CachedSample};
@@ -6256,7 +6266,10 @@ mod tests {
     /// a 2-hour-old sample falls outside the 1-hour window while two ~now
     /// samples pass — deterministic because the 1-hour window dwarfs the test's
     /// runtime.
-    #[cfg(feature = "ext-pubsub-advanced-history")]
+    #[cfg(all(
+        feature = "ext-pubsub-advanced-history",
+        feature = "ext-pubsub-advanced-cache"
+    ))]
     #[test]
     fn history_max_age_drops_samples_older_than_the_window() {
         use crate::advanced_cache::{AdvancedCache, CacheConfig, CachedSample};
