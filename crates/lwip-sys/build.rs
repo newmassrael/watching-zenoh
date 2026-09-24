@@ -303,6 +303,10 @@ fn main() {
         // literal spelled on the Rust side with nothing to catch its drift.
         .allowlist_function("wz_lwip_any_link_up")
         .allowlist_function("wz_lwip_set_all_links")
+        // R2835 — the Ethernet netif seam (`shim.c`): the netif's fields and
+        // lwIP's `ethernetif` template are C, the MAC driver is Rust.
+        .allowlist_function("wz_ethif_add")
+        .allowlist_function("wz_ethif_input")
         // Loopback poll (NO_SYS + LWIP_NETIF_LOOPBACK_MULTITHREADING=0
         // requires explicit poll to drain the loop_netif output queue
         // into ip_input).

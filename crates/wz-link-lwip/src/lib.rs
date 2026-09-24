@@ -187,6 +187,10 @@ pub mod rx_pool;
 /// `62794d8c4b`.
 pub mod rx_ring;
 
+/// R2835 — an Ethernet netif whose MAC is a Rust driver: the interface a
+/// node reaches anything outside its own process through.
+pub mod ethernet;
+
 // R311lu — also under `test-support` so the exposed `lwip_test_link` harness
 // (which uses `std::sync` for its Once / Mutex) compiles for sibling crates'
 // tests, not only this crate's own `#[cfg(test)]` build.

@@ -30,3 +30,11 @@
  */
 int wz_lwip_any_link_up(void);
 void wz_lwip_set_all_links(int up);
+
+/* R2835 — the Ethernet netif seam, defined in `shim.c`: a netif whose MAC is
+ * a Rust driver behind `tx`, and the input path for the frames it receives.
+ */
+typedef int (*wz_ethif_tx_fn)(void *ctx, const u8_t *frame, u16_t len);
+struct netif *wz_ethif_add(const u8_t *mac, u32_t ip, u32_t mask, u32_t gw,
+                           wz_ethif_tx_fn tx, void *ctx);
+int wz_ethif_input(struct netif *n, const u8_t *frame, u16_t len);
