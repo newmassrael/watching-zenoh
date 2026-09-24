@@ -10059,7 +10059,9 @@ layer_c1m_session_lwip() {
     # number this command PRINTED.
     # R2830 3 -> 6: `connect_manager`'s three (dial on write, the per-outage
     # retry schedule, hang-up and refusal), PRINTED by the command.
-    _runci_guarded_test "C1m adminspace-write" 6 \
+    # R2831 6 -> 9: the exhausted-dial wait, and `lwip_dialer`'s two (what is
+    # dialable, and a dial that completes a real loopback handshake).
+    _runci_guarded_test "C1m adminspace-write" 9 \
         cargo test -p wz-session-lwip --features adminspace-write --quiet || return 1
     # R2829 — the node ANSWERS upstream's admin GET (`admin_status`) through
     # the shared `answer_admin_query`. Alone: 2 + the lwIP GET test = 3. With
@@ -10069,7 +10071,8 @@ layer_c1m_session_lwip() {
     _runci_guarded_test "C1m adminspace-core" 3 \
         cargo test -p wz-session-lwip --features adminspace-core --quiet || return 1
     # R2830 6 -> 9: the same three `connect_manager` tests.
-    _runci_guarded_test "C1m adminspace read+write" 9 \
+    # R2831 9 -> 12: the same three R2831 tests.
+    _runci_guarded_test "C1m adminspace read+write" 12 \
         cargo test -p wz-session-lwip --features adminspace-core,adminspace-write --quiet || return 1
     # R2390 (transport-multicast) — each `transport-multicast` leg moved by TWO:
     # the MCU loop's link-loss arm brought a witness test and an ordering test,

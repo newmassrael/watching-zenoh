@@ -58,6 +58,10 @@ pub mod admin_host;
 // re-dials on upstream's retry schedule; the dialling is behind a trait.
 #[cfg(feature = "adminspace-write")]
 pub mod connect_manager;
+// R2831 — the lwIP dialer: a written `udp/<ipv4>:<port>` becomes an initiator
+// session on the firmware's task set.
+#[cfg(feature = "adminspace-write")]
+pub mod lwip_dialer;
 // R2829 (§5.23 `adminspace-core`) — the node answers upstream's admin GET
 // through the shared answerer, on the same application layer.
 #[cfg(feature = "adminspace-core")]

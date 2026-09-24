@@ -64,10 +64,22 @@ pub enum SessionRole {
 }
 
 impl SessionRole {
-    fn start_event(self) -> SessionFsmUnicastEvent {
+    /// The events that activate the FSM in this role, in order.
+    ///
+    /// R2831 — the initiator takes TWO, as the AP's `initiator_open` does:
+    /// `OutboundStart` enters LinkOpening and `LinkOpened` moves to
+    /// SentInitSyn, whose entry sends the InitSyn. The UDP link is open by
+    /// the time a pump exists (the driver's socket is already bound), so
+    /// both are raised at once. Raising only the first left an MCU initiator
+    /// in LinkOpening forever, silent on the wire; nothing drove one until
+    /// the dialer did.
+    fn activation(self) -> &'static [SessionFsmUnicastEvent] {
         match self {
-            SessionRole::Acceptor => SessionFsmUnicastEvent::InboundStart,
-            SessionRole::Initiator => SessionFsmUnicastEvent::OutboundStart,
+            SessionRole::Acceptor => &[SessionFsmUnicastEvent::InboundStart],
+            SessionRole::Initiator => &[
+                SessionFsmUnicastEvent::OutboundStart,
+                SessionFsmUnicastEvent::LinkOpened,
+            ],
         }
     }
 }
@@ -217,7 +229,7 @@ impl<C: ClockSource, L: Deref<Target = LwipLink>> SessionPump<C, L> {
         let mut engine = new_session_engine(&actions);
         // `new_session_engine` returns an un-initialized engine (the AP
         // convention — the caller runs the SCXML initial transition into the
-        // `Init` state). Without this the `role.start_event()` below lands on
+        // `Init` state). Without this the `role.activation()` below lands on
         // an engine that never entered `Init`, so `inbound.start` /
         // `outbound.start` does not transition into `AwaitingInitSyn` /
         // `LinkOpening` and the whole handshake stalls. The Stage 4b smoke
@@ -225,7 +237,9 @@ impl<C: ClockSource, L: Deref<Target = LwipLink>> SessionPump<C, L> {
         // `max_iters` regardless of FSM state); the Stage 5 real-handshake
         // e2e is what exercises it.
         engine.initialize();
-        engine.process_event(role.start_event());
+        for event in role.activation() {
+            engine.process_event(*event);
+        }
 
         Self {
             runtime,

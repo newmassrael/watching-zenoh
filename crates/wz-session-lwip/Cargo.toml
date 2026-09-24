@@ -149,10 +149,19 @@ pubsub-put = ["wz-session-core/pubsub-put"]
 # R2828 (§5.23) — the node hosts upstream's `connect/endpoints` config write
 # (`admin_host`). A write arrives as a PUT and a removal as a DEL, so both
 # sample kinds must reach the subscriber: pubsub-put and pubsub-delete.
+#
+# R2831 — and a node that accepts an endpoint list must be able to DIAL it
+# (`lwip_dialer`), so the initiator half of the handshake rides here: the
+# InitSyn / OpenSyn emitters are compiled only under session-unicast-open with
+# the Init and Open body codecs. Without them the dialer would spawn sessions
+# that never put a byte on the wire.
 adminspace-write = [
     "wz-session-core/adminspace-write",
     "pubsub-put",
     "wz-session-core/pubsub-delete",
+    "wz-session-core/session-unicast-open",
+    "wz-session-core/codec-init-body",
+    "wz-session-core/codec-open-body",
 ]
 # R2829 (§5.23) — the node answers upstream's admin GET (`admin_status`)
 # through `wz_session_core::adminspace::answer_admin_query`, the AP's own
@@ -202,6 +211,12 @@ wz-codecs = { path = "../wz-codecs", default-features = false }
 # setup. Dev-only: the production lib build (which already deps wz-link-lwip
 # above without this feature) never pulls the harness.
 wz-link-lwip = { path = "../wz-link-lwip", features = ["test-support"] }
+# R2831 — the ACCEPTOR half, for `lwip_dialer`'s test only: a dialled session
+# completes a real handshake against an acceptor on the same lwIP loopback.
+# The library never accepts a dialled peer, so this stays a dev feature.
+wz-session-core = { path = "../wz-session-core", default-features = false, features = [
+    "session-unicast-accept",
+] }
 
 [lints]
 workspace = true

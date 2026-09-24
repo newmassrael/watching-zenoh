@@ -46,6 +46,17 @@ pub enum DialRefused {
     BadAddress,
 }
 
+/// Why a dial did not start a session.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DialFailed {
+    /// This endpoint can never be dialled by this build; not retried.
+    Refused(DialRefused),
+    /// The node could not afford a session right now (no socket, no
+    /// buffer). Counted as a failed attempt of the same outage, so the
+    /// endpoint waits its next period, as a dial that never answered would.
+    Exhausted,
+}
+
 /// How a session that was dialled has ended.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Ended {
@@ -61,7 +72,7 @@ pub trait Dialer {
     type Session;
 
     /// Start a session towards `endpoint`.
-    fn dial(&mut self, endpoint: &str) -> Result<Self::Session, DialRefused>;
+    fn dial(&mut self, endpoint: &str) -> Result<Self::Session, DialFailed>;
 
     /// `Some` once the session has ended, saying how.
     fn ended(&mut self, session: &mut Self::Session) -> Option<Ended>;
@@ -181,7 +192,15 @@ impl<D: Dialer> ConnectManager<D> {
                             session,
                             period: *period,
                         },
-                        Err(why) => State::Refused(why),
+                        Err(DialFailed::Refused(why)) => State::Refused(why),
+                        Err(DialFailed::Exhausted) => {
+                            let mut period = *period;
+                            let wait = period.next_ms();
+                            State::Waiting {
+                                at_ms: now_ms.saturating_add(wait),
+                                period,
+                            }
+                        }
                     })
                 }
                 _ => None,
@@ -245,14 +264,19 @@ mod tests {
         hang_ups: Vec<String>,
         /// Sessions to end on the next `ended` call, and how.
         endings: Vec<(String, Ended)>,
+        /// Answer every dial with `Exhausted`.
+        exhausted: bool,
     }
 
     impl Dialer for FakeDialer {
         type Session = String;
 
-        fn dial(&mut self, endpoint: &str) -> Result<String, DialRefused> {
+        fn dial(&mut self, endpoint: &str) -> Result<String, DialFailed> {
             if endpoint.starts_with("serial/") {
-                return Err(DialRefused::Unsupported);
+                return Err(DialFailed::Refused(DialRefused::Unsupported));
+            }
+            if self.exhausted {
+                return Err(DialFailed::Exhausted);
             }
             self.dials.borrow_mut().push(String::from(endpoint));
             Ok(String::from(endpoint))
@@ -344,6 +368,36 @@ mod tests {
             SlotState::Waiting { at_ms: 10000 },
             "a new outage starts from 1 s again"
         );
+    }
+
+    /// A node that cannot afford a session right now is not refused: the
+    /// endpoint waits its period like a dial nobody answered, and is dialled
+    /// once the node can.
+    #[test]
+    fn an_exhausted_dial_waits_its_period_and_is_not_refused() {
+        static CONTROL: ConnectControl = ConnectControl::new(true);
+        let mut m = ConnectManager::new(
+            &CONTROL,
+            FakeDialer {
+                exhausted: true,
+                ..FakeDialer::default()
+            },
+        );
+        write(&CONTROL, &["udp/10.0.0.1:7447"]);
+        m.tick(0);
+        std::assert_eq!(
+            m.states().next().unwrap().1,
+            SlotState::Waiting { at_ms: 1000 }
+        );
+        m.tick(1000);
+        std::assert_eq!(
+            m.states().next().unwrap().1,
+            SlotState::Waiting { at_ms: 3000 },
+            "still the same outage: the wait grew"
+        );
+        m.dialer().exhausted = false;
+        m.tick(3000);
+        std::assert_eq!(dials(&mut m), ["udp/10.0.0.1:7447"]);
     }
 
     #[test]
