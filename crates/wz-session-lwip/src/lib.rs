@@ -54,6 +54,10 @@ pub mod app_layer;
 // `connect/endpoints` config write on that application layer.
 #[cfg(feature = "adminspace-write")]
 pub mod admin_host;
+// R2829 (§5.23 `adminspace-core`) — the node answers upstream's admin GET
+// through the shared answerer, on the same application layer.
+#[cfg(feature = "adminspace-core")]
+pub mod admin_status;
 pub mod driver;
 // R311lt — the MCU multicast drive loop (no_std mirror of the AP
 // wz-runtime-tokio multicast_glue), gated on the transport-multicast capability.

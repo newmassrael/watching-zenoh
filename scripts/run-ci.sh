@@ -10054,6 +10054,15 @@ layer_c1m_session_lwip() {
     # number this command PRINTED.
     _runci_guarded_test "C1m adminspace-write" 3 \
         cargo test -p wz-session-lwip --features adminspace-write --quiet || return 1
+    # R2829 — the node ANSWERS upstream's admin GET (`admin_status`) through
+    # the shared `answer_admin_query`. Alone: 2 + the lwIP GET test = 3. With
+    # the write surface too: + `app_layer`'s test (the write feature pulls
+    # pubsub-put) + `admin_host`'s two, one of which reads the control back
+    # as the `config` leg's view = 6. Both numbers PRINTED by the command.
+    _runci_guarded_test "C1m adminspace-core" 3 \
+        cargo test -p wz-session-lwip --features adminspace-core --quiet || return 1
+    _runci_guarded_test "C1m adminspace read+write" 6 \
+        cargo test -p wz-session-lwip --features adminspace-core,adminspace-write --quiet || return 1
     # R2390 (transport-multicast) — each `transport-multicast` leg moved by TWO:
     # the MCU loop's link-loss arm brought a witness test and an ordering test,
     # both in `multicast_drive`, which is gated on that feature ALONE. So the
@@ -10096,6 +10105,9 @@ layer_c1m_session_lwip() {
             --features query-queryable,codec-response,codec-response-final,pubsub-put \
             --quiet -- -D warnings \
         && cargo clippy -p wz-session-lwip --all-targets --features adminspace-write --quiet -- -D warnings \
+        && cargo clippy -p wz-session-lwip --all-targets --features adminspace-core --quiet -- -D warnings \
+        && cargo clippy -p wz-session-lwip --all-targets \
+            --features adminspace-core,adminspace-write --quiet -- -D warnings \
         && cargo clippy -p wz-session-lwip --all-targets --features transport-multicast --quiet -- -D warnings \
         && cargo clippy -p wz-session-lwip --all-targets --features transport-multicast,codec-push --quiet -- -D warnings \
         && cargo clippy -p wz-session-lwip --all-targets --features transport-multicast,liveliness-token --quiet -- -D warnings \

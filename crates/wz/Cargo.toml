@@ -418,7 +418,9 @@ pubsub-express = ["pubsub-qos", "wz-runtime-tokio?/pubsub-express"]
 # `pubsub-priority` is the PUBSUB-message priority field, `session-extqos` is the
 # TRANSPORT establishment band. A deploy that wants both names them both.
 pubsub-priority = ["pubsub-qos", "wz-runtime-tokio?/pubsub-priority"]
-pubsub-put = ["wz-runtime-tokio?/pubsub-put"]
+# R2829 — weak-forwards to wz-session-lwip, whose unicast application layer
+# (`app_layer`) delivers a Push to a subscriber only under this arm.
+pubsub-put = ["wz-runtime-tokio?/pubsub-put", "wz-session-lwip?/pubsub-put"]
 pubsub-qos = ["wz-runtime-tokio?/pubsub-qos"]
 pubsub-sample = []
 pubsub-source-info = ["wz-runtime-tokio?/pubsub-source-info"]
@@ -953,7 +955,13 @@ adminspace-config-hotreload = [
 # Session::declare_adminspace). The facade forward must light up the runtime
 # cfg site, not stay a no-op `= []` (the [[feedback-facade-forward-separate-edit]]
 # dead-stub trap); mirrors the liveliness-history R311xy treatment above.
-adminspace-core = ["wz-runtime-tokio?/adminspace-core"]
+# R2829 — and weak-forwards to wz-session-lwip, where an MCU node answers the
+# same admin GET through the same answerer (`admin_status`). The `?` keeps the
+# AP facade from dragging the lwIP crate in.
+adminspace-core = [
+    "wz-runtime-tokio?/adminspace-core",
+    "wz-session-lwip?/adminspace-core",
+]
 # R311y203 — adminspace-introspection-handlers active flip: the per-entity
 # subscriber/queryable admin introspection (`@/<zid>/<whatami>/subscriber|queryable/**`).
 adminspace-introspection-handlers = ["wz-runtime-tokio?/adminspace-introspection-handlers"]
@@ -990,7 +998,12 @@ adminspace-read = ["wz-runtime-tokio?/adminspace-read"]
 # wz-runtime-tokio `admin_write_permit` resolver (R311y52) — not a no-op `= []` (the
 # [[feedback-facade-forward-separate-edit]] dead-stub trap). The config-write HOST
 # wiring lives in wz-ap-demo run_peer; the GATE selection it calls is in the lib.
-adminspace-write = ["wz-runtime-tokio?/adminspace-write"]
+# R2829 — weak-forwards to wz-session-lwip too, where an MCU node hosts
+# upstream's `connect/endpoints` write (`admin_host`); ZA-2898's surface.
+adminspace-write = [
+    "wz-runtime-tokio?/adminspace-write",
+    "wz-session-lwip?/adminspace-write",
+]
 config-change-notifier = []
 config-json-pointer-access = []
 config-mutate-runtime = ["wz-runtime-tokio?/config-mutate-runtime"]

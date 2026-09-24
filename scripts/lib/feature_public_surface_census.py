@@ -349,9 +349,17 @@ OFF_AXIS: dict[str, tuple[str, frozenset[str]]] = {
     # a consumer who types `wz_session_core::…`. A reason that sounds structural
     # can still be a guess, and this table is where such a guess goes to live
     # for months.
+    # R2829 — no longer "one feature": R2828 added `adminspace-write` (the
+    # node's config-write host, `admin_host`) and R2829 `adminspace-core` (its
+    # admin GET answerer, `admin_status`), each gating a `pub mod`. The row
+    # stays off the axis for the reason the rest of the sentence gave, restated
+    # so it is still true: the crate's consumers are MCU firmware images and
+    # deploy probes that compile it with a fixed feature set, not a library a
+    # Rust caller adds and then reaches into.
     "wz-session-lwip": (
-        "one feature, on the lwip session glue; consumers are deploy probes",
-        frozenset({"transport-multicast"}),
+        "the lwip session glue; its consumers are MCU firmware images and "
+        "deploy probes built with a fixed feature set",
+        frozenset({"adminspace-core", "adminspace-write", "transport-multicast"}),
     ),
     "wz-tls-record": (
         "`publish = false`, and the only workspace edge that turns `fixtures` "
@@ -601,7 +609,12 @@ FACADE_ONLY: dict[str, frozenset[str]] = {
     # caller names is `wz::rest::..` and the consumer-facing surface is the
     # facade's.
     "wz-rest": frozenset({"adminspace-plugins-handlers"}),
-    "wz-session-lwip": frozenset({"transport-multicast"}),
+    # R2829 — the two admin features join, and the row is whole again: the
+    # facade's `adminspace-core` / `adminspace-write` now weak-forward to this
+    # crate, so they are reached through the facade exactly as
+    # `transport-multicast` is. Without that forward a predicate covering part
+    # of the row would have left the rest excused by prose.
+    "wz-session-lwip": frozenset({"adminspace-core", "adminspace-write", "transport-multicast"}),
 }
 
 # R2297 (open-debt item 606) — the AXIS-REACH form, and the fifth kind of claim.

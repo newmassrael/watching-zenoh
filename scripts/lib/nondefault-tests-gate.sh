@@ -405,6 +405,7 @@ router-connect-reconcile,transport-link-tcp,transport-unicast|session_lifecycle_
         transport-stats\
         |"
     "wz-session-lwip|hook|\
+        adminspace-core,\
         adminspace-write,\
         buffer-pool-session-rx-slim,\
         codec-push,\

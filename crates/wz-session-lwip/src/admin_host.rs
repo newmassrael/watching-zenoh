@@ -121,6 +121,25 @@ impl ConnectControl {
     }
 }
 
+/// R2829 — the control IS the config the `config` leg of the admin GET
+/// reports, so a host that wrote `connect/endpoints` can read it back at
+/// `@/<zid>/<whatami>/config`. Keys are spelled as upstream's config document
+/// spells them; only the part this node holds is present.
+#[cfg(feature = "adminspace-core")]
+impl crate::admin_status::ConfigView for ConnectControl {
+    fn write_config_json(&self, out: &mut String) {
+        let (permit_write, list) = critical_section::with(|cs| {
+            let s = self.state.borrow(cs).borrow();
+            (s.permit_write, s.live.clone())
+        });
+        out.push_str(r#"{"connect":{"endpoints":"#);
+        wz_session_core::json::push_str_array(list.iter().map(|e| e.as_str()), out);
+        out.push_str(r#"},"adminspace":{"permissions":{"write":"#);
+        out.push_str(if permit_write { "true" } else { "false" });
+        out.push_str("}}}");
+    }
+}
+
 /// Subscribe `observer` to the config space of the node `zid_hex` /
 /// `whatami` and apply every write it receives to `control`.
 ///
@@ -239,5 +258,32 @@ mod tests {
             CONTROL.last_outcome(),
             Some(ConnectWriteOutcome::Malformed(_))
         ));
+    }
+
+    /// R2829 — what the admin GET's `config` leg reads back is the list the
+    /// control holds, in upstream's key spelling, and it follows a write.
+    #[cfg(feature = "adminspace-core")]
+    #[test]
+    fn the_config_leg_reads_back_the_written_list() {
+        use crate::admin_status::ConfigView;
+
+        static CONTROL: ConnectControl = ConnectControl::new(true);
+        let mut observer = ApplicationLayerObserver::new();
+        host_connect_writes(&mut observer, ZID, "peer", &CONTROL);
+
+        let read = || {
+            let mut out = String::new();
+            CONTROL.write_config_json(&mut out);
+            out
+        };
+        std::assert_eq!(
+            read(),
+            r#"{"connect":{"endpoints":[]},"adminspace":{"permissions":{"write":true}}}"#
+        );
+        deliver(&mut observer, put(KEY, br#"["tcp/10.0.0.9:7447"]"#));
+        std::assert_eq!(
+            read(),
+            r#"{"connect":{"endpoints":["tcp/10.0.0.9:7447"]},"adminspace":{"permissions":{"write":true}}}"#
+        );
     }
 }

@@ -154,6 +154,15 @@ adminspace-write = [
     "pubsub-put",
     "wz-session-core/pubsub-delete",
 ]
+# R2829 (§5.23) — the node answers upstream's admin GET (`admin_status`)
+# through `wz_session_core::adminspace::answer_admin_query`, the AP's own
+# answerer. It needs a queryable and the full reply chain.
+adminspace-core = [
+    "wz-session-core/adminspace-core",
+    "query-queryable",
+    "codec-response",
+    "codec-response-final",
+]
 
 [dependencies]
 # §5.P runtime tier: CoopRuntime<C> + CoopTime<C> + the Runtime /
