@@ -227,6 +227,42 @@ fn s5() -> StatsRegistry {
     registry
 }
 
+/// S6's events, recorded the way the multicast transport records them
+/// (R2847): through [`MulticastMetrics`] ONLY, then registered as a group and
+/// its one peer. What this pins is the attribution — which partition and
+/// which link each count lands on — against the pin's own multicast code.
+fn s6() -> StatsRegistry {
+    let group = "udp/224.0.0.224:7446";
+    let put = |len| {
+        crate::stats::NetworkStatsClass::net(
+            MessageLabel::Put,
+            crate::stats::StatMessage::Put,
+            StatSpace::User,
+            len,
+        )
+    };
+    let mut multicast = MulticastMetrics::new("udp/10.0.0.1:7446", group);
+    multicast.sent(20, 1);
+    multicast.sent_network_message(Priority::Data, &put(4));
+    multicast.received(30, 2);
+    // zenoh's rendering of the one-byte zid `[0xaa]` is "aa", the pin's peer.
+    multicast.peer_joined(&[0xaa], WhatAmI::Peer);
+    multicast.received_network_message(&[0xaa], Priority::Data, &put(6));
+
+    let mut registry = StatsRegistry::new("a1b2", WhatAmI::Peer, "v1");
+    let transport = registry.open_multicast_transport(multicast.group());
+    registry.set_transport_metrics(transport, multicast.transport().clone());
+    for (zid, peer) in multicast.peers() {
+        let id = registry.open_multicast_peer(
+            &crate::zid_hex::zid_to_zenoh_hex(zid),
+            peer.whatami,
+            multicast.group(),
+        );
+        registry.set_transport_metrics(id, peer.metrics().clone());
+    }
+    registry
+}
+
 /// The wz twin of each generator scenario, by the title's leading word.
 fn twin(title: &str) -> StatsRegistry {
     match title.split(' ').next().expect("a title has a first word") {
@@ -236,6 +272,7 @@ fn twin(title: &str) -> StatsRegistry {
         "S3" => s3(),
         "S4" => s4(),
         "S5" => s5(),
+        "S6" => s6(),
         other => panic!("golden scenario {other} has no wz twin: add one beside the generator's"),
     }
 }
@@ -250,9 +287,10 @@ fn twin(title: &str) -> StatsRegistry {
 #[test]
 fn every_golden_scenario_is_written_as_the_pin_writes_it() {
     let scenarios = golden_scenarios();
+    // R2847 — 7 -> 8: S6, the multicast transport's attribution.
     assert_eq!(
         scenarios.len(),
-        7,
+        8,
         "the golden's scenario count moved; a new scenario needs a wz twin and this pin moves with it"
     );
     let mut divergent_lines = 0;

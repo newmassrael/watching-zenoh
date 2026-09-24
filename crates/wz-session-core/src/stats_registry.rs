@@ -901,6 +901,196 @@ impl TransportMetrics {
     }
 }
 
+/// R2847 — the counters of ONE multicast transport: the group's own partition
+/// and one partition per peer seen on the group.
+///
+/// Upstream's attribution, which this copies rather than restates:
+///
+/// - the transport is registered under its GROUP locator with one link
+///   (`io/zenoh-transport/src/multicast/transport.rs` @ `.multicast_transport_stats(config.link.link.get_dst().to_string());`);
+/// - bytes and transport messages, both directions, and the network messages
+///   SENT, count on that link
+///   (`io/zenoh-transport/src/multicast/link.rs` @ `transport.link_stats.inc_bytes(zenoh_stats::Rx, batch.len() as u64);`);
+/// - every network message RECEIVED counts in a partition of the PEER that
+///   sent it, whose link carries the group's labels
+///   (`io/zenoh-transport/src/multicast/transport.rs` @ `.peer_link_stats(peer.zid, peer.whatami, &self.link_stats),`).
+///
+/// - every PAYLOAD, both directions, is observed on the GROUP's partition:
+///   upstream observes payloads per routing face, and a multicast peer's face
+///   is built with the group transport's stats, not the peer's
+///   (`zenoh/src/net/routing/gateway.rs` @ `pub fn new_peer_multicast(`, whose
+///   `stats` is `transport.get_stats()`).
+///
+/// A peer's partition is opened when it joins and handed back, with its link
+/// closed, when it leaves, so the caller can mark it disconnected in its
+/// registry.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MulticastMetrics {
+    group: String,
+    link: LinkLabels,
+    transport: TransportMetrics,
+    slot: LinkSlot,
+    peers: BTreeMap<Vec<u8>, MulticastPeerMetrics>,
+}
+
+/// One peer's partition on a multicast transport.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MulticastPeerMetrics {
+    /// The role the peer's JOIN announced.
+    pub whatami: WhatAmI,
+    metrics: TransportMetrics,
+    slot: LinkSlot,
+}
+
+impl MulticastPeerMetrics {
+    /// This peer's partition.
+    pub fn metrics(&self) -> &TransportMetrics {
+        &self.metrics
+    }
+}
+
+impl MulticastMetrics {
+    /// A transport on the group `group` (its locator, as upstream labels the
+    /// transport), received through the local endpoint `src`: its one link is
+    /// open, at zero, from here.
+    pub fn new(src: &str, group: &str) -> Self {
+        let link = LinkLabels::new(src, group);
+        let mut transport = TransportMetrics::default();
+        let slot = transport.open_link(link.clone());
+        MulticastMetrics {
+            group: String::from(group),
+            link,
+            transport,
+            slot,
+            peers: BTreeMap::new(),
+        }
+    }
+
+    /// The group locator this transport is registered under.
+    pub fn group(&self) -> &str {
+        &self.group
+    }
+
+    /// The group's own partition.
+    pub fn transport(&self) -> &TransportMetrics {
+        &self.transport
+    }
+
+    /// The peers on the group now, by zid.
+    pub fn peers(&self) -> impl Iterator<Item = (&[u8], &MulticastPeerMetrics)> {
+        self.peers.iter().map(|(zid, peer)| (zid.as_slice(), peer))
+    }
+
+    /// A datagram of `bytes` went out, carrying `transport_messages`.
+    pub fn sent(&mut self, bytes: u64, transport_messages: u64) {
+        let tx = StatsDirection::Tx;
+        self.transport.inc_bytes(tx, self.slot, bytes);
+        self.transport
+            .inc_transport_message(tx, self.slot, transport_messages);
+    }
+
+    /// A datagram of `bytes` came in, carrying `transport_messages`.
+    pub fn received(&mut self, bytes: u64, transport_messages: u64) {
+        let rx = StatsDirection::Rx;
+        self.transport.inc_bytes(rx, self.slot, bytes);
+        self.transport
+            .inc_transport_message(rx, self.slot, transport_messages);
+    }
+
+    /// A network message of `class` went out at `priority`: counted on the
+    /// group's link, its payload observed on the group's partition.
+    pub fn sent_network_message(
+        &mut self,
+        priority: Priority,
+        class: &crate::stats::NetworkStatsClass,
+    ) {
+        let tx = StatsDirection::Tx;
+        count_network_message(&mut self.transport, self.slot, tx, priority, class);
+        observe_payload(&mut self.transport, tx, priority, class);
+    }
+
+    /// A network message of `class` came in at `priority` from the peer `zid`:
+    /// COUNTED in that peer's partition, its payload OBSERVED on the group's.
+    /// A message from a peer that has not joined is neither, as upstream
+    /// dispatches only what arrives through a known peer.
+    pub fn received_network_message(
+        &mut self,
+        zid: &[u8],
+        priority: Priority,
+        class: &crate::stats::NetworkStatsClass,
+    ) {
+        let rx = StatsDirection::Rx;
+        let Some(peer) = self.peers.get_mut(zid) else {
+            return;
+        };
+        count_network_message(&mut peer.metrics, peer.slot, rx, priority, class);
+        observe_payload(&mut self.transport, rx, priority, class);
+    }
+
+    /// The peer `zid` joined in role `whatami`: its partition opens, with a
+    /// link carrying the group's labels. A peer that is already here keeps
+    /// the partition it has.
+    pub fn peer_joined(&mut self, zid: &[u8], whatami: WhatAmI) {
+        let link = self.link.clone();
+        self.peers.entry(zid.to_vec()).or_insert_with(|| {
+            let mut metrics = TransportMetrics::default();
+            let slot = metrics.open_link(link);
+            MulticastPeerMetrics {
+                whatami,
+                metrics,
+                slot,
+            }
+        });
+    }
+
+    /// The peer `zid` left: its partition comes back with its link closed, so
+    /// the counts sit in its transport-level cells, as a dropped link's do.
+    pub fn peer_left(&mut self, zid: &[u8]) -> Option<MulticastPeerMetrics> {
+        let mut peer = self.peers.remove(zid)?;
+        peer.metrics.close_link(peer.slot);
+        Some(peer)
+    }
+}
+
+/// Count one network message of `class` on the link in `slot` — the cell the
+/// unicast session counts at its own seam.
+fn count_network_message(
+    metrics: &mut TransportMetrics,
+    slot: LinkSlot,
+    direction: StatsDirection,
+    priority: Priority,
+    class: &crate::stats::NetworkStatsClass,
+) {
+    let Some(kind) = class.kind else {
+        return;
+    };
+    let shm = class.medium == crate::stats::StatMedium::Shm;
+    metrics.inc_network_message(direction, slot, priority, kind, shm);
+}
+
+/// Observe the payload of one network message of `class` in `metrics`; a
+/// control message has none.
+fn observe_payload(
+    metrics: &mut TransportMetrics,
+    direction: StatsDirection,
+    priority: Priority,
+    class: &crate::stats::NetworkStatsClass,
+) {
+    let (Some(kind), Some(payload)) = (class.kind, class.payload) else {
+        return;
+    };
+    let shm = class.medium == crate::stats::StatMedium::Shm;
+    metrics.observe_network_message_payload(
+        direction,
+        payload.space,
+        priority,
+        kind,
+        shm,
+        payload.pl_bytes as u64,
+        [],
+    );
+}
+
 /// A transport's identity in a [`StatsRegistry`]. Stable for the transport's
 /// whole life, including the minute it spends disconnected.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]

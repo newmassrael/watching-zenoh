@@ -124,6 +124,46 @@ fn main() {
     peer_link.inc_bytes(Rx, 13);
     dump("S4 mcast", &registry, true, true, false, false);
 
+    // S6 — a multicast group as upstream's multicast TRANSPORT records one
+    // (R2847): bytes and transport messages both ways on the group link, the
+    // sent Put counted there too, the received Put counted in the sending
+    // peer's partition, and BOTH payloads observed on the group, because every
+    // multicast face is built with the group transport's stats. S4 above
+    // exercises the registry's API; this exercises the attribution.
+    let registry = StatsRegistry::new(local, WhatAmI::Peer, "v1");
+    let group = registry.multicast_transport_stats("udp/224.0.0.224:7446".into());
+    let group_link = group.link_stats(
+        &locator("udp/10.0.0.1:7446"),
+        &locator("udp/224.0.0.224:7446"),
+    );
+    let none = StatsKeys::default();
+    group_link.inc_bytes(Tx, 20);
+    group_link.inc_transport_message(Tx, 1);
+    group_link.inc_network_message(Tx, &put(Priority::Data, 4));
+    group.observe_network_message_payload(
+        Tx,
+        MessageLabel::Put,
+        Priority::Data,
+        4,
+        SpaceLabel::User,
+        &none,
+        false,
+    );
+    group_link.inc_bytes(Rx, 30);
+    group_link.inc_transport_message(Rx, 2);
+    let peer_link = group.peer_link_stats(zid("aa"), WhatAmI::Peer, &group_link);
+    peer_link.inc_network_message(Rx, &put(Priority::Data, 6));
+    group.observe_network_message_payload(
+        Rx,
+        MessageLabel::Put,
+        Priority::Data,
+        6,
+        SpaceLabel::User,
+        &none,
+        false,
+    );
+    dump("S6 mcast-flow", &registry, true, true, false, false);
+
     // S5 — per-key payloads: one payload matched by two configured keys.
     let registry = StatsRegistry::new(local, WhatAmI::Router, "v1");
     let mut tree = StatsKeysTree::default();
