@@ -942,7 +942,12 @@ plugin-static-registration = []
 # (storage-add/del config-write intents + the dynamic plugin registry). Forwards the
 # runtime cfg site (which self-pulls the storage-manager + declare-subscriber deps);
 # was a no-op `= []` facade.
-adminspace-config-hotreload = ["wz-runtime-tokio?/adminspace-config-hotreload"]
+# R2822 — a hot reload is a config write, so the facade names the write surface
+# too; the runtime crate's own feature already pulls it in.
+adminspace-config-hotreload = [
+    "adminspace-write",
+    "wz-runtime-tokio?/adminspace-config-hotreload",
+]
 # R311y34 — adminspace-core is now a real cfg gate (the built-in
 # @/<zid>/<whatami>/** admin queryable + local_data JSON, via
 # Session::declare_adminspace). The facade forward must light up the runtime

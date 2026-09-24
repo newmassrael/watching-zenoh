@@ -274,6 +274,9 @@ rest-http-bridge = []
 # + storage-backend (the RuntimeStorageManager + StorageConfig) + the wz-session-core
 # decoder. The wz-native superset of zenoh's config-hotreload (dlopen plugin start/stop).
 adminspace-config-hotreload = [
+    # R2822 — a hot reload IS a config write (storage-add/del arrive as a PUT
+    # under `config/**`), so it rides the write surface and its permit.
+    "adminspace-write",
     "adminspace-plugins-handlers",
     "storage-mgr-multi-storage-host",
     "declare-subscriber",
@@ -476,8 +479,12 @@ adminspace-read = ["adminspace-core"]
 # `if !permissions().write { error; return }` (adminspace.rs:396) and the write-side
 # twin of the adminspace-read GET gate. The AdminSpacePermissions.write field + the
 # parse_admin_config_write gate/decoder SSOT are adminspace-core (always present for
-# signature stability); THIS feature is the cfg that flips admin_write_permit between
-# `permissions.write` (gated) and `true` (elided), so it composes only adminspace-core.
+# signature stability). R2822: this feature is the WRITE SURFACE itself, not a
+# switch on it — `admin_write_permit` exists only under it and always returns
+# `permissions.write`. There was a second arm returning `true`, which made every
+# build that hosted a config-write subscriber without this feature apply all
+# remote writes; upstream has no such build. Features that need a config-write
+# host (adminspace-config-hotreload below) now require this one.
 adminspace-write = ["adminspace-core"]
 query-reply = ["codec-request", "codec-response", "wz-session-core/query-reply"]
 query-target = ["query-get"]

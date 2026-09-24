@@ -657,11 +657,12 @@ transport-qos = ["routing-peer", "wz/transport-qos"]
 # listen endpoint carries `?prio=`.
 session-extqos = ["transport-qos", "wz/session-extqos"]
 # R311y51 (§5.23 adminspace-write) — the permissions.write GATE on the config-write
-# host. SEPARATE from routing-peer (a distinct toggle) so both gate arms stay
-# compiled: `--features routing-peer,adminspace-write` = gate ON (run_peer consults
-# --config-write-permit, default-deny), `--features routing-peer` = gate OFF (every
-# write applies, the pre-y51 path). The run_peer config-write handler holds the
-# cfg(feature="adminspace-write") site. Layer E6 builds the gate-ON binary.
+# host. SEPARATE from routing-peer (a distinct toggle). R2822: there is no longer
+# a gate-OFF arm. `--features routing-peer,adminspace-write` hosts the write
+# subscriber and consults --config-write-permit (default-deny); `--features
+# routing-peer` hosts NO write subscriber and warns that `--config-writable` is
+# inert. The old second arm applied every write unpermitted, which upstream never
+# does. Layer E6 builds the binary with this feature.
 adminspace-write = ["wz/adminspace-write"]
 # R311y508 — forwards the version-keyed per-(face, keyexpr) interceptor cache.
 # Implies `routing-peer` because the cache lives on the peer forwarder's ingress
@@ -700,7 +701,8 @@ adminspace-plugins-handlers = ["wz/adminspace-plugins-handlers"]
 # a documented follow-up (net-new demo mode; run_peer is forwarder-based, no single
 # Session for RuntimeStorageManager); the mechanism is proven by the wz-runtime-tokio
 # composed integration test. This forward keeps the facade->demo chain complete.
-adminspace-config-hotreload = ["wz/adminspace-config-hotreload"]
+# R2822 — a hot reload arrives as a config write, so it needs the write surface.
+adminspace-config-hotreload = ["wz/adminspace-config-hotreload", "adminspace-write"]
 # R311y237 — opt-in: compile the storage_manager subsystem into the demo binary so
 # `compiled_plugins` reports it (state=Loaded) over the plugins admin legs. The wz
 # mirror of zenoh's canonical `zenoh-plugin-storage-manager`; forwards the facade
@@ -815,7 +817,14 @@ router-connect-reconcile = ["router-hat-router", "wz/router-connect-reconcile"]
 # feature that enabled the ARM without the function it calls would compile only in
 # whatever wider set happened to supply it, which is the drift a leg naming its own
 # features exists to prevent — and the build caught exactly that here.
-router-config-mutate = ["router-hat-router", "zenoh-config", "wz/config-mutate-runtime"]
+# R2822 — and `adminspace-write`: the keys this arm applies arrive only as a
+# config write, and the write subscriber is hosted only under that gate.
+router-config-mutate = [
+    "router-hat-router",
+    "zenoh-config",
+    "wz/config-mutate-runtime",
+    "adminspace-write",
+]
 # R2655 — `--del-key <keyexpr>`, the wire driver for a config-write DELETE and
 # the twin of the `--put-key` / `--put-payload` pair.
 #

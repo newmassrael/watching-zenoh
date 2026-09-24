@@ -5009,6 +5009,21 @@ async fn run_peer_until(
     // y44 self-query dispatch the config GET uses. The handler does wire->intent
     // ONLY (parse + stash the deny keyexpr into `pending_acl_deny`); the app-tick
     // loop applies it (intent->reconfigure), where `&forwarder` is reachable.
+    //
+    // R2822 — hosted only where the write GATE is compiled. A build without
+    // `adminspace-write` used to host this subscriber anyway and resolve every
+    // permit to `true`, so `--config-writable` on the default binary applied any
+    // remote write regardless of `--config-write-permit`. Upstream has no build
+    // like that. Here the flag is inert and says why, the same lockstep
+    // `--connect-after` keeps with `router-connect-reconcile`.
+    #[cfg(not(feature = "adminspace-write"))]
+    if config_writable {
+        log::warn!(
+            "wz-ap-demo peer: --config-writable requires the `adminspace-write` feature; \
+             no config-write subscriber is hosted"
+        );
+    }
+    #[cfg(feature = "adminspace-write")]
     if config_writable {
         use wz::runtime_tokio::admin_write_permit;
         use wz::runtime_tokio::adminspace::{
@@ -6834,7 +6849,16 @@ async fn run_router_hat_until(
     // On the FORWARDER (`register_local_subscriber`, R2393) rather than a Session
     // declare: this host is forwarder-based with no single Session, which is why
     // `run_storage_host` exists as a separate per-client-Session mode at all.
-    #[cfg(any(feature = "router-connect-reconcile", feature = "router-config-mutate"))]
+    //
+    // R2822 — and only under `adminspace-write`, the gate this handler consults.
+    // `router-config-mutate` requires that feature; `router-connect-reconcile`
+    // does not, because `--connect-after` still drives its channel without a
+    // wire write. A reconcile-only build therefore hosts no write subscriber,
+    // where it used to host one that applied every write unpermitted.
+    #[cfg(all(
+        feature = "adminspace-write",
+        any(feature = "router-connect-reconcile", feature = "router-config-mutate")
+    ))]
     {
         use wz::runtime_tokio::adminspace::{
             parse_admin_config_write, AdminConfigWrite, AdminConfigWriteBody,

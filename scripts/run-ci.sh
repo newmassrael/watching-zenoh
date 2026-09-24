@@ -17517,8 +17517,9 @@ layer_e6_peer_mesh() {
     # R311y51 — the E6 binary is built with `adminspace-write` so the §5.23
     # config-write GATE (permissions.write) is compiled in: the config-write e2es
     # grant it with `--config-write-permit`, and the deny e2e omits it to witness
-    # the gate rejecting a write. The gate-OFF arm stays covered by C1y clippy
-    # (`--features routing-peer`, no adminspace-write).
+    # the gate rejecting a write. R2822: there is no gate-OFF arm any more. A
+    # `--features routing-peer` build hosts no write subscriber at all, and C1y
+    # clippy still compiles that build.
     # R311y508 — `routing-interceptor-hotreload` joins the SAME binary so the
     # config-write legs below exercise the VERSION-KEYED per-(face, keyexpr)
     # interceptor cache rather than the uncached path. It is additive: the cache
@@ -17565,9 +17566,10 @@ layer_e6_peer_mesh() {
     # first §5.23 leg where pico is the ENCODER (y270/y271 had pico decoding wz's admin
     # replies). A pico z_put reconfigures A's live forwarder when the write permission is
     # GRANTED, and is REJECTED by the permissions.write gate when it is not — both arms
-    # deterministic POSITIVE edges, never a wait-for-absence. The gate IS the atom: with
-    # adminspace-write compiled out, the apply arm still passes (the write plumbing is
-    # unguarded) while the deny arm fails, which is why the claim rests on the deny arm.
+    # deterministic POSITIVE edges, never a wait-for-absence. The gate IS the atom, and
+    # the claim rests on the deny arm. (Until R2822, compiling adminspace-write out
+    # left the write plumbing in place and unguarded, so the apply arm passed without
+    # it. Now that build hosts no write subscriber, and both arms fail without it.)
     # Guarded on the FOREIGN binary only (R311y265); WZ_PICO_REQUIRE escalates the skip.
     # R311y503 — `z_pub` joins the guard because the config-mutate-runtime leg
     # added to this file drives a LIVE foreign publisher (the verdict has to flip

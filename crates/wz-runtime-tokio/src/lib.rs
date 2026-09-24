@@ -560,25 +560,25 @@ pub use wz_session_core::serde_codec;
 /// from the embedder's [`adminspace::AdminSpacePermissions`]. This is the
 /// library-resident write-side mirror of the `adminspace-read` GET gate's per-call
 /// `let read = permissions.read` idiom (`Session::declare_adminspace_with_permissions`,
-/// `session/mod.rs`). Under the `adminspace-write` cfg it returns
-/// `permissions.write` (default `false` — zenoh's `PermissionsConf` asymmetry,
-/// lib.rs:893); with the gate compiled out it returns `true` (the gate elided —
-/// the pre-y51 apply-all behavior). This is THE `adminspace-write` cfg site, so the
-/// `wz` / `wz-runtime-tokio` facade chain gates real library code: a config-write
-/// host calls this, then feeds the resolved bool to
-/// [`adminspace::parse_admin_config_write`] (the feature-independent gate+decode
-/// SSOT — "the gate is the value, not a cfg" once past this resolver).
-#[cfg(feature = "adminspace-core")]
+/// `session/mod.rs`). It returns `permissions.write` (default `false` — zenoh's
+/// `PermissionsConf` asymmetry, lib.rs:893), and a config-write host feeds that
+/// bool to [`adminspace::parse_admin_config_write`] (the feature-independent
+/// gate+decode SSOT).
+///
+/// R2822 — THE GATE IS THE VALUE IN EVERY BUILD, NOT A CFG. Until this round the
+/// function also existed with `adminspace-write` compiled out and then returned
+/// `true`, so any build that hosted a config-write subscriber without the feature
+/// — `--storage-host` in every build, the router host under
+/// `router-connect-reconcile` / `router-config-mutate`, and Layer E6h's
+/// `adminspace-config-hotreload` binary — applied every remote config write
+/// whatever `adminspace/permissions/write` said. Upstream has no such build: its
+/// `send_push` reads `permissions().write` unconditionally (adminspace.rs:400).
+/// So the cfg now decides whether the WRITE SURFACE exists, and this function
+/// exists only where it does: a host that subscribes to `config/**` is compiled
+/// under `adminspace-write`, and every feature that needs one requires it.
+#[cfg(feature = "adminspace-write")]
 pub fn admin_write_permit(permissions: &adminspace::AdminSpacePermissions) -> bool {
-    #[cfg(feature = "adminspace-write")]
-    {
-        permissions.write
-    }
-    #[cfg(not(feature = "adminspace-write"))]
-    {
-        let _ = permissions;
-        true
-    }
+    permissions.write
 }
 
 /// R2658 (§5.23 `adminspace-write`) — resolve the config-key VOCABULARY the
@@ -615,7 +615,7 @@ pub fn admin_write_knows_config_key(path: &str) -> bool {
     }
 }
 
-#[cfg(all(test, feature = "adminspace-core"))]
+#[cfg(all(test, feature = "adminspace-write"))]
 mod admin_write_permit_tests {
     use super::admin_write_permit;
     use super::adminspace::AdminSpacePermissions;
@@ -630,18 +630,13 @@ mod admin_write_permit_tests {
             read: true,
             write: false,
         };
-        #[cfg(feature = "adminspace-write")]
-        {
-            // Gated: the resolver reads permissions.write (default-deny).
-            assert!(admin_write_permit(&granted));
-            assert!(!admin_write_permit(&denied));
-        }
-        #[cfg(not(feature = "adminspace-write"))]
-        {
-            // Gate elided (pre-y51 apply-all): the value is ignored, always permit.
-            assert!(admin_write_permit(&granted));
-            assert!(admin_write_permit(&denied));
-        }
+        // The resolver reads permissions.write, and nothing else decides it.
+        assert!(admin_write_permit(&granted));
+        assert!(!admin_write_permit(&denied));
+        // R2822 — and an embedder that says nothing is refused: the default is
+        // upstream's `PermissionsConf`, `write: false`. This is the case the
+        // compiled-out `true` used to answer the other way.
+        assert!(!admin_write_permit(&AdminSpacePermissions::default()));
     }
 }
 
