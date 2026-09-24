@@ -31,7 +31,7 @@
 
 use alloc::vec::Vec;
 
-use wz_session_core::admin_connect::{ConnectEndpoints, EndpointText};
+use wz_session_core::admin_connect::{group_len, ConnectEndpoints, ConnectEntry};
 use wz_session_core::retry_period::{RetryPeriod, RetryPolicy};
 
 use crate::admin_host::ConnectControl;
@@ -44,6 +44,10 @@ pub enum DialRefused {
     Unsupported,
     /// The address could not be read as one this link can reach.
     BadAddress,
+    /// R2841 — one locator of a `{ strategy, locators }` group of several:
+    /// one session over several links, which this node's session cannot
+    /// hold. Decided by the manager from the list, before any dial.
+    MultiLinkGroup,
 }
 
 /// Why a dial did not start a session.
@@ -110,7 +114,7 @@ enum State<S> {
 }
 
 struct Slot<S> {
-    endpoint: EndpointText,
+    entry: ConnectEntry,
     state: State<S>,
 }
 
@@ -154,7 +158,7 @@ impl<D: Dialer> ConnectManager<D> {
                 State::Waiting { at_ms, .. } => SlotState::Waiting { at_ms },
                 State::Refused(why) => SlotState::Refused(why),
             };
-            (slot.endpoint.as_str(), state)
+            (slot.entry.as_str(), state)
         })
     }
 
@@ -164,7 +168,7 @@ impl<D: Dialer> ConnectManager<D> {
     /// caller that reports sessions asks each one whether it is established.
     pub fn sessions(&self) -> impl Iterator<Item = (&str, &D::Session)> + '_ {
         self.slots.iter().filter_map(|slot| match &slot.state {
-            State::Live { session, .. } => Some((slot.endpoint.as_str(), session)),
+            State::Live { session, .. } => Some((slot.entry.as_str(), session)),
             _ => None,
         })
     }
@@ -198,7 +202,7 @@ impl<D: Dialer> ConnectManager<D> {
                     }
                 },
                 State::Waiting { at_ms, period } if now_ms >= *at_ms => {
-                    Some(match self.dialer.dial(&slot.endpoint) {
+                    Some(match self.dialer.dial(slot.entry.as_str()) {
                         Ok(session) => State::Live {
                             session,
                             period: *period,
@@ -223,10 +227,12 @@ impl<D: Dialer> ConnectManager<D> {
     }
 
     fn reconcile(&mut self, list: &ConnectEndpoints, now_ms: u64) {
+        // An empty group names nothing to dial.
+        let dialable = |e: &ConnectEntry| !e.endpoint.is_empty();
         // Hang up what the list no longer names.
         let mut kept = Vec::with_capacity(self.slots.len());
         for slot in self.slots.drain(..) {
-            if list.contains(&slot.endpoint) {
+            if list.iter().any(|e| dialable(e) && *e == slot.entry) {
                 kept.push(slot);
             } else if let State::Live { session, .. } = slot.state {
                 self.dialer.hang_up(session);
@@ -235,22 +241,40 @@ impl<D: Dialer> ConnectManager<D> {
         // Keep the list's order; a new endpoint is due now, and a refused one
         // is given another chance, since a rewrite is what could change it.
         let mut slots = Vec::with_capacity(list.len());
-        for endpoint in list.iter() {
-            match kept.iter().position(|s| s.endpoint == *endpoint) {
+        for entry in list.iter().filter(|e| dialable(e)) {
+            let fresh = self.first_state(list, entry, now_ms);
+            match kept.iter().position(|s| s.entry == *entry) {
                 Some(i) => {
                     let mut slot = kept.swap_remove(i);
                     if let State::Refused(_) = slot.state {
-                        slot.state = self.due_now(now_ms);
+                        slot.state = fresh;
                     }
                     slots.push(slot);
                 }
                 None => slots.push(Slot {
-                    endpoint: endpoint.clone(),
-                    state: self.due_now(now_ms),
+                    entry: entry.clone(),
+                    state: fresh,
                 }),
             }
         }
         self.slots = slots;
+    }
+
+    /// Where a newly written entry starts: due now, unless it is one locator
+    /// of a group of several. R2841 — upstream opens such a group as ONE
+    /// transport over all its locators (`allOf`, the only strategy its runtime
+    /// implements); an MCU session holds one link, so that is refused by name
+    /// rather than dialled as separate sessions to what is one peer.
+    fn first_state(
+        &self,
+        list: &ConnectEndpoints,
+        entry: &ConnectEntry,
+        now_ms: u64,
+    ) -> State<D::Session> {
+        match entry.group {
+            Some(g) if group_len(list, g.index) > 1 => State::Refused(DialRefused::MultiLinkGroup),
+            _ => self.due_now(now_ms),
+        }
     }
 
     fn due_now(&self, now_ms: u64) -> State<D::Session> {
@@ -418,6 +442,38 @@ mod tests {
         m.dialer().exhausted = false;
         m.tick(3000);
         std::assert_eq!(dials(&mut m), ["udp/10.0.0.1:7447"]);
+    }
+
+    /// R2841 — upstream's group element: a group of one locator is dialled
+    /// like a bare endpoint; a group of several is one session over several
+    /// links, refused by name and never dialled; an empty group names nothing.
+    #[test]
+    fn a_group_of_one_is_dialled_and_a_group_of_several_is_refused() {
+        static CONTROL: ConnectControl = ConnectControl::new(true);
+        let mut m = ConnectManager::new(&CONTROL, FakeDialer::default());
+        CONTROL.apply_for_test(
+            br#"[{ strategy: "allOf", locators: ["udp/10.0.0.1:1", "udp/10.0.0.2:1"] },
+                 { strategy: "allOf", locators: ["udp/10.0.0.3:1"] },
+                 { strategy: "oneOf", locators: [] }]"#,
+        );
+        m.tick(0);
+        std::assert_eq!(dials(&mut m), ["udp/10.0.0.3:1"]);
+        let states: Vec<(String, SlotState)> =
+            m.states().map(|(e, s)| (String::from(e), s)).collect();
+        std::assert_eq!(
+            states,
+            [
+                (
+                    String::from("udp/10.0.0.1:1"),
+                    SlotState::Refused(DialRefused::MultiLinkGroup)
+                ),
+                (
+                    String::from("udp/10.0.0.2:1"),
+                    SlotState::Refused(DialRefused::MultiLinkGroup)
+                ),
+                (String::from("udp/10.0.0.3:1"), SlotState::Live),
+            ]
+        );
     }
 
     #[test]

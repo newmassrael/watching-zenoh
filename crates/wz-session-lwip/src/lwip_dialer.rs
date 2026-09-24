@@ -405,6 +405,20 @@ mod tests {
             );
             std::assert_eq!(entry.whatami.as_deref(), Some("peer"));
             std::assert_eq!(entry.links.len(), 1, "one UDP link");
+            // R2841 — the link's ends, as upstream renders them: the dialled
+            // side's dst is the endpoint it was given; its src is the routed
+            // address and the port lwIP chose.
+            std::assert_eq!(entry.links[0].dst, "udp/127.0.0.1:7494");
+            std::assert!(
+                entry.links[0].src.starts_with("udp/127.0.0.1:")
+                    && !entry.links[0].src.ends_with(":0"),
+                "src {:?}",
+                entry.links[0].src
+            );
+            // ... and the accepting side names the same link from its end.
+            let accepted = admin_session_of(&acceptor_actions).expect("established");
+            std::assert_eq!(accepted.links[0].src, "udp/127.0.0.1:7494");
+            std::assert_eq!(accepted.links[0].dst, entry.links[0].src);
         }
 
         session.handle.abort();

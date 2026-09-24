@@ -75,9 +75,82 @@ pub const CONNECT_ENDPOINTS_SUBKEY: &str = "connect/endpoints";
 /// must not depend on which allocator the node was built with.
 pub type EndpointText = heapless::String<MAX_LOCATOR_LEN>;
 
-/// The endpoint list a write carries. `heapless` for the same reason as
-/// [`EndpointText`]: `BoundedVec::push` never refuses under `alloc`.
-pub type ConnectEndpoints = heapless::Vec<EndpointText, MAX_STATIC_CONNECT>;
+/// R2841 — how a group of locators is to be used: upstream's
+/// `LocatorsStrategy`, spelled `allOf` / `oneOf` on the wire:
+/// `commons/zenoh-protocol/src/core/endpoint.rs` @ `pub enum LocatorsStrategy {`
+/// Upstream's runtime implements only `AllOf` (open links to all locators of
+/// the group) and reserves `OneOf`; both are accepted, as upstream accepts
+/// both.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LocatorsStrategy {
+    /// `allOf`.
+    AllOf,
+    /// `oneOf`.
+    OneOf,
+}
+
+impl LocatorsStrategy {
+    /// The wire spelling.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            LocatorsStrategy::AllOf => "allOf",
+            LocatorsStrategy::OneOf => "oneOf",
+        }
+    }
+}
+
+/// R2841 — the group an entry came from, when the list element was
+/// upstream's object form `{ strategy, locators: [...] }` rather than a
+/// string. `index` numbers the groups of one list from 0, so consecutive
+/// entries with the same index are one group.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct EndpointGroup {
+    /// Which group of the list.
+    pub index: u8,
+    /// How the group's locators are to be used.
+    pub strategy: LocatorsStrategy,
+}
+
+/// R2841 — one element of the written list, flattened: an endpoint, and the
+/// group it was written in, if any. An EMPTY group (`locators: []`, which
+/// upstream accepts) is one entry with an empty endpoint, so the list reads
+/// back as it was written; it names nothing to dial.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConnectEntry {
+    /// The endpoint text, `<proto>/<address>[?..][#..]`; empty only for an
+    /// empty group.
+    pub endpoint: EndpointText,
+    /// The group this entry was written in; `None` for a bare string.
+    pub group: Option<EndpointGroup>,
+}
+
+impl ConnectEntry {
+    /// A bare endpoint, not in a group.
+    pub fn single(endpoint: EndpointText) -> Self {
+        Self {
+            endpoint,
+            group: None,
+        }
+    }
+
+    /// The endpoint text.
+    pub fn as_str(&self) -> &str {
+        &self.endpoint
+    }
+}
+
+/// The endpoint list a write carries, groups flattened into their entries.
+/// `heapless` for the same reason as [`EndpointText`]: `BoundedVec::push`
+/// never refuses under `alloc`. The capacity counts entries, so a group of
+/// three takes three.
+pub type ConnectEndpoints = heapless::Vec<ConnectEntry, MAX_STATIC_CONNECT>;
+
+/// R2841 — how many entries of `list` belong to group `index`.
+pub fn group_len(list: &[ConnectEntry], index: u8) -> usize {
+    list.iter()
+        .filter(|e| e.group.map(|g| g.index) == Some(index) && !e.endpoint.is_empty())
+        .count()
+}
 
 /// A config write as it arrived: a PUT with its payload, or a DEL.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -286,15 +359,18 @@ fn per_mode(lex: &mut Lexer<'_>, whatami: &str, out: &mut ConnectEndpoints) -> R
     }
 }
 
-/// `[ "proto/addr", ... ]`, each element a string. With `out`, the endpoints
-/// are pushed there; without it they are checked against the same limits and
-/// dropped.
+/// `[ element, ... ]`, each element an endpoint string or, R2841, upstream's
+/// group object `{ strategy, locators: [...] }` (its `EndPoints` is
+/// `untagged`: a string is `Single`, a map is `Locators`). With `out`, the
+/// entries are pushed there; without it they are checked against the same
+/// limits and dropped.
 fn endpoint_array(
     lex: &mut Lexer<'_>,
     mut out: Option<&mut ConnectEndpoints>,
 ) -> Result<(), Refusal> {
     lex.bump(); // '['
     let mut count = 0usize;
+    let mut groups = 0usize;
     loop {
         lex.skip_trivia()?;
         match lex.peek() {
@@ -303,26 +379,18 @@ fn endpoint_array(
                 return Ok(());
             }
             None => return Err(lex.err("] closing an array").into()),
-            _ => {}
-        }
-        if !lex.at_string() {
-            return Err(lex.err("an endpoint string").into());
-        }
-        let s = lex.string()?;
-        let mut text = EndpointText::new();
-        if s.decode_into(&mut text).is_err() {
-            return Err(Refusal::EndpointTooLong);
-        }
-        if !endpoint_shape_ok(&text) {
-            return Err(Refusal::NotAnEndpoint);
-        }
-        count += 1;
-        if count > MAX_STATIC_CONNECT {
-            return Err(Refusal::TooMany);
-        }
-        if let Some(list) = out.as_deref_mut() {
-            // Cannot fail: `count` was checked against the same capacity.
-            let _ = list.push(text);
+            Some(b'{') => {
+                let index = u8::try_from(groups).map_err(|_| Refusal::TooMany)?;
+                groups += 1;
+                endpoint_group(lex, index, &mut count, out.as_deref_mut())?;
+            }
+            _ => {
+                if !lex.at_string() {
+                    return Err(lex.err("an endpoint string or a locators object").into());
+                }
+                let text = endpoint_string(lex)?;
+                push_entry(ConnectEntry::single(text), &mut count, out.as_deref_mut())?;
+            }
         }
         lex.skip_trivia()?;
         match lex.peek() {
@@ -331,6 +399,169 @@ fn endpoint_array(
             _ => return Err(lex.err(", or ] after an element").into()),
         }
     }
+}
+
+/// One endpoint string, decoded and shape-checked.
+fn endpoint_string(lex: &mut Lexer<'_>) -> Result<EndpointText, Refusal> {
+    let s = lex.string()?;
+    let mut text = EndpointText::new();
+    if s.decode_into(&mut text).is_err() {
+        return Err(Refusal::EndpointTooLong);
+    }
+    if !endpoint_shape_ok(&text) {
+        return Err(Refusal::NotAnEndpoint);
+    }
+    Ok(text)
+}
+
+fn push_entry(
+    entry: ConnectEntry,
+    count: &mut usize,
+    out: Option<&mut ConnectEndpoints>,
+) -> Result<(), Refusal> {
+    *count += 1;
+    if *count > MAX_STATIC_CONNECT {
+        return Err(Refusal::TooMany);
+    }
+    if let Some(list) = out {
+        // Cannot fail: `count` was checked against the same capacity.
+        let _ = list.push(entry);
+    }
+    Ok(())
+}
+
+/// R2841 — `{ strategy: "allOf" | "oneOf", locators: [ "...", ... ] }`, the
+/// way upstream's `EndPoints` visitor reads a map: both members required,
+/// each at most once, and any OTHER member skipped, since its helper struct
+/// does not deny unknown fields (read at
+/// `commons/zenoh-protocol/src/core/endpoint.rs` @ `struct LocatorsHelper {`).
+/// The locators are pushed as entries of group `index`; an empty group is one
+/// entry with no endpoint, so it reads back as written.
+fn endpoint_group(
+    lex: &mut Lexer<'_>,
+    index: u8,
+    count: &mut usize,
+    mut out: Option<&mut ConnectEndpoints>,
+) -> Result<(), Refusal> {
+    let open_at = lex.pos();
+    lex.bump(); // '{'
+    let mut strategy: Option<LocatorsStrategy> = None;
+    // The locators are held until the strategy is known, as they may come
+    // first. Room for the whole list: a group cannot be larger than it.
+    let mut locators: heapless::Vec<EndpointText, MAX_STATIC_CONNECT> = heapless::Vec::new();
+    let mut saw_locators = false;
+    loop {
+        lex.skip_trivia()?;
+        match lex.peek() {
+            Some(b'}') => {
+                lex.bump();
+                break;
+            }
+            None => return Err(lex.err("} closing a locators object").into()),
+            _ => {}
+        }
+        let name_at = lex.pos();
+        let name = lex.member_name()?;
+        lex.skip_trivia()?;
+        lex.expect(b':', ": after a member name")?;
+        lex.skip_trivia()?;
+        if name.eq_str("strategy") {
+            if strategy.is_some() {
+                return Err(duplicate(name_at));
+            }
+            if !lex.at_string() {
+                return Err(lex.err("\"allOf\" or \"oneOf\"").into());
+            }
+            let at = lex.pos();
+            let s = lex.string()?;
+            strategy = Some(if s.eq_str("allOf") {
+                LocatorsStrategy::AllOf
+            } else if s.eq_str("oneOf") {
+                LocatorsStrategy::OneOf
+            } else {
+                return Err(Json5Error {
+                    offset: at,
+                    expected: "\"allOf\" or \"oneOf\"",
+                }
+                .into());
+            });
+        } else if name.eq_str("locators") {
+            if saw_locators {
+                return Err(duplicate(name_at));
+            }
+            saw_locators = true;
+            lex.expect(b'[', "a locators array")?;
+            loop {
+                lex.skip_trivia()?;
+                match lex.peek() {
+                    Some(b']') => {
+                        lex.bump();
+                        break;
+                    }
+                    None => return Err(lex.err("] closing an array").into()),
+                    _ => {}
+                }
+                if !lex.at_string() {
+                    return Err(lex.err("an endpoint string").into());
+                }
+                let text = endpoint_string(lex)?;
+                if locators.push(text).is_err() {
+                    return Err(Refusal::TooMany);
+                }
+                lex.skip_trivia()?;
+                match lex.peek() {
+                    Some(b',') => lex.bump(),
+                    Some(b']') => {}
+                    _ => return Err(lex.err(", or ] after an element").into()),
+                }
+            }
+        } else {
+            lex.skip_value(SKIP_DEPTH)?;
+        }
+        lex.skip_trivia()?;
+        match lex.peek() {
+            Some(b',') => lex.bump(),
+            Some(b'}') => {}
+            _ => return Err(lex.err(", or } after a member").into()),
+        }
+    }
+    let Some(strategy) = strategy else {
+        return Err(Json5Error {
+            offset: open_at,
+            expected: "a strategy member",
+        }
+        .into());
+    };
+    if !saw_locators {
+        return Err(Json5Error {
+            offset: open_at,
+            expected: "a locators member",
+        }
+        .into());
+    }
+    let group = Some(EndpointGroup { index, strategy });
+    if locators.is_empty() {
+        return push_entry(
+            ConnectEntry {
+                endpoint: EndpointText::new(),
+                group,
+            },
+            count,
+            out,
+        );
+    }
+    for endpoint in locators {
+        push_entry(ConnectEntry { endpoint, group }, count, out.as_deref_mut())?;
+    }
+    Ok(())
+}
+
+fn duplicate(at: usize) -> Refusal {
+    Json5Error {
+        offset: at,
+        expected: "each member at most once",
+    }
+    .into()
 }
 
 /// The shape every endpoint shares: a protocol, a `/`, an address.
@@ -356,19 +587,88 @@ mod tests {
         key: &str,
         body: ConfigWriteBody<'_>,
         permit: bool,
-    ) -> (ConnectWriteOutcome, Vec<EndpointText>) {
+    ) -> (ConnectWriteOutcome, Vec<ConnectEntry>) {
         let mut list = ConnectEndpoints::new();
-        let _ = list.push(EndpointText::try_from("tcp/stale:1").unwrap());
+        let _ = list.push(ConnectEntry::single(
+            EndpointText::try_from("tcp/stale:1").unwrap(),
+        ));
         let out = parse_connect_endpoints_write(ZID, "peer", key, body, permit, &mut list);
         (out, list.iter().cloned().collect())
     }
 
-    fn put(payload: &str, permit: bool) -> (ConnectWriteOutcome, Vec<EndpointText>) {
+    fn put(payload: &str, permit: bool) -> (ConnectWriteOutcome, Vec<ConnectEntry>) {
         write(KEY, ConfigWriteBody::Put(payload.as_bytes()), permit)
     }
 
-    fn texts(list: &[EndpointText]) -> Vec<&str> {
+    fn texts(list: &[ConnectEntry]) -> Vec<&str> {
         list.iter().map(|e| e.as_str()).collect()
+    }
+
+    /// R2841 — upstream's object element, read as upstream's `EndPoints`
+    /// visitor reads it: the locators flattened in order, each carrying its
+    /// group's index and strategy, strings and groups mixed in one list.
+    #[test]
+    fn a_locators_object_is_a_group_of_entries() {
+        let (out, list) = put(
+            r#"["tcp/a:1", { strategy: "allOf", locators: ["tcp/b:1", "tcp/b:2"] },
+               { locators: ["udp/c:1"], strategy: 'oneOf' }]"#,
+            true,
+        );
+        assert_eq!(out, ConnectWriteOutcome::Replace);
+        assert_eq!(texts(&list), ["tcp/a:1", "tcp/b:1", "tcp/b:2", "udp/c:1"]);
+        assert_eq!(list[0].group, None);
+        let all_of = Some(EndpointGroup {
+            index: 0,
+            strategy: LocatorsStrategy::AllOf,
+        });
+        assert_eq!((list[1].group, list[2].group), (all_of, all_of));
+        assert_eq!(
+            list[3].group,
+            Some(EndpointGroup {
+                index: 1,
+                strategy: LocatorsStrategy::OneOf,
+            })
+        );
+        assert_eq!(group_len(&list, 0), 2);
+        assert_eq!(group_len(&list, 1), 1);
+    }
+
+    /// An empty group is kept, as one entry with no endpoint, so it reads
+    /// back; it counts no locator. Unknown members are skipped, as upstream's
+    /// helper struct skips them.
+    #[test]
+    fn an_empty_group_and_an_unknown_member_are_upstreams() {
+        let (out, list) = put(
+            r#"[{ strategy: "allOf", locators: [], note: {x: 1} }]"#,
+            true,
+        );
+        assert_eq!(out, ConnectWriteOutcome::Replace);
+        assert_eq!(list.len(), 1);
+        assert!(list[0].endpoint.is_empty());
+        assert_eq!(group_len(&list, 0), 0);
+    }
+
+    /// What upstream's visitor refuses: a missing or repeated member, a
+    /// strategy it does not name, a locator that is not a string.
+    #[test]
+    fn a_locators_object_upstream_refuses_is_refused() {
+        for doc in [
+            r#"[{ locators: ["tcp/a:1"] }]"#,
+            r#"[{ strategy: "allOf" }]"#,
+            r#"[{ strategy: "allOf", strategy: "oneOf", locators: [] }]"#,
+            r#"[{ strategy: "anyOf", locators: ["tcp/a:1"] }]"#,
+            r#"[{ strategy: "allOf", locators: [1] }]"#,
+            r#"[{ strategy: "allOf", locators: "tcp/a:1" }]"#,
+        ] {
+            assert!(
+                matches!(put(doc, true).0, ConnectWriteOutcome::Malformed(_)),
+                "{doc}"
+            );
+        }
+        assert_eq!(
+            put(r#"[{ strategy: "allOf", locators: ["tcp"] }]"#, true).0,
+            ConnectWriteOutcome::NotAnEndpoint
+        );
     }
 
     #[test]

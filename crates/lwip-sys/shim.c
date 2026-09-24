@@ -85,6 +85,34 @@ void wz_lwip_set_all_links(int up) {
  * Ports with no Ethernet/ARP compile the entry points as refusals, so the
  * symbol set bindgen sees does not depend on the port.
  */
+/* R2841 — a link's two ends, as upstream's admin space reports them.
+ *
+ * A UDP pcb bound to any address has no local IP of its own: the address a
+ * datagram leaves from is the one of the netif lwIP routes it through. So the
+ * source of a link to `dst` is `ip4_route(dst)`'s address, and its port is the
+ * pcb's. `netif_ip4_addr` is a macro and `udp_pcb`'s fields are opaque in some
+ * ports, which is why both are read here.
+ */
+#include "lwip/ip4.h"
+#include "lwip/udp.h"
+
+/* The address a datagram to `dst` (lwIP-native word) leaves from, or 0 when
+ * no interface routes it. */
+u32_t wz_lwip_route_src(u32_t dst) {
+    ip4_addr_t d;
+    ip4_addr_set_u32(&d, dst);
+    struct netif *n = ip4_route(&d);
+    if (n == NULL) {
+        return 0;
+    }
+    return ip4_addr_get_u32(netif_ip4_addr(n));
+}
+
+/* The local port `pcb` is bound to (host order), 0 for no pcb. */
+u16_t wz_lwip_udp_local_port(const struct udp_pcb *pcb) {
+    return pcb == NULL ? 0 : pcb->local_port;
+}
+
 #include <string.h> /* MEMCPY expands to memcpy */
 
 #include "lwip/pbuf.h"

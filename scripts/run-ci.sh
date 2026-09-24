@@ -6962,7 +6962,9 @@ layer_c1am_cargo_test_adminspace() {
     # `adminspace-write` alone. No other leg reaches either — every other
     # session-core leg here composes `adminspace-core`, which pulls `alloc` in,
     # and the default feature set does not name `adminspace-write`.
-    _runci_guarded_test "C1AM admin_connect no-alloc 9" 9 \
+    # R2841 9 -> 12: upstream's locators-object element (a group, an empty
+    # group with an unknown member, and what upstream's visitor refuses).
+    _runci_guarded_test "C1AM admin_connect no-alloc 12" 12 \
         cargo test -p wz-session-core --no-default-features --features adminspace-write --lib admin_connect --quiet || return 1
     _runci_guarded_test "C1AM json5_lex no-alloc 2" 2 \
         cargo test -p wz-session-core --no-default-features --features adminspace-write --lib json5_lex --quiet || return 1
@@ -10067,7 +10069,8 @@ layer_c1m_session_lwip() {
     # retry schedule, hang-up and refusal), PRINTED by the command.
     # R2831 6 -> 9: the exhausted-dial wait, and `lwip_dialer`'s two (what is
     # dialable, and a dial that completes a real loopback handshake).
-    _runci_guarded_test "C1m adminspace-write" 9 \
+    # R2841 9 -> 10: a group of one is dialled, a group of several refused.
+    _runci_guarded_test "C1m adminspace-write" 10 \
         cargo test -p wz-session-lwip --features adminspace-write --quiet || return 1
     # R2829 — the node ANSWERS upstream's admin GET (`admin_status`) through
     # the shared `answer_admin_query`. Alone: 2 + the lwIP GET test = 3. With
@@ -10079,7 +10082,8 @@ layer_c1m_session_lwip() {
     # R2830 6 -> 9: the same three `connect_manager` tests.
     # R2831 9 -> 12: the same three R2831 tests.
     # R2837 12 -> 13: `admin_node`'s end-to-end test, which needs both.
-    _runci_guarded_test "C1m adminspace read+write" 13 \
+    # R2841 13 -> 14: the same group test.
+    _runci_guarded_test "C1m adminspace read+write" 14 \
         cargo test -p wz-session-lwip --features adminspace-core,adminspace-write --quiet || return 1
     # R2390 (transport-multicast) — each `transport-multicast` leg moved by TWO:
     # the MCU loop's link-loss arm brought a witness test and an ordering test,
@@ -19637,6 +19641,26 @@ print(" ".join(peers))'
             echo "  Qa.3 GET config names the written list — OK"
         else
             echo "  Qa.3 GET config FAIL: the written endpoint is not in it" >&2
+            fail=1
+        fi
+        # R2841 — every session names its link's two ends as upstream does,
+        # and the one A reached is the node's listener as the node sees it.
+        local links
+        links="$(curl -s -m 5 "$rest" | python3 -c '
+import json, sys
+bad, accepted = [], None
+for r in json.load(sys.stdin):
+    for s in r["value"].get("sessions", []):
+        for link in s.get("links", []):
+            if not link.get("src", "").startswith("udp/") or not link.get("dst", "").startswith("udp/"):
+                bad.append((s["peer"], link))
+            if s["peer"] == "aaaaaaaaaaaaaaaa":
+                accepted = link.get("src")
+print("ok" if not bad and accepted == "udp/10.0.2.15:7447" else f"bad={bad} accepted_src={accepted}")' 2>&1)"
+        if [[ "$links" == "ok" ]]; then
+            echo "  Qa.4 every session names its link src/dst; A reached udp/10.0.2.15:7447 — OK"
+        else
+            echo "  Qa.4 link src/dst FAIL: $links" >&2
             fail=1
         fi
     fi

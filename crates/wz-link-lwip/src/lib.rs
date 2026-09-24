@@ -652,6 +652,13 @@ impl<const N: usize, const Q: usize> LwipUdpSocket<N, Q> {
     /// as already in network byte order (matching lwIP's
     /// `ip4_addr_t::addr` shape). For convenience constructors see
     /// [`ipv4_addr_loopback`] and [`ipv4_addr_from_octets`].
+    /// R2841 — the port this socket is bound to. For a socket bound to port
+    /// 0 this is the port lwIP chose, which is what a peer sees it send from.
+    pub fn local_port(&self) -> u16 {
+        // SAFETY: the pcb is valid for the socket's life (removed in Drop).
+        unsafe { lwip_sys::wz_lwip_udp_local_port(self.inner.pcb.as_ptr()) }
+    }
+
     pub fn send_to(
         &mut self,
         dst_addr: u32,
@@ -728,6 +735,26 @@ pub fn ipv4_addr_from_octets(octets: [u8; 4]) -> u32 {
 #[inline]
 pub fn ipv4_addr_loopback() -> u32 {
     ipv4_addr_from_octets([127, 0, 0, 1])
+}
+
+/// The dotted quad of a lwIP-native u32 word; the inverse of
+/// [`ipv4_addr_from_octets`].
+#[inline]
+pub fn ipv4_octets(addr: u32) -> [u8; 4] {
+    addr.to_le_bytes()
+}
+
+/// R2841 — the address a datagram to `dst` leaves from: the address of the
+/// interface lwIP routes it through, or `None` when none does. A socket bound
+/// to any address has no source of its own until it sends; this is it.
+///
+/// No link witness: before `lwip_init` there are no interfaces, the route
+/// lookup finds none, and the answer is `None`, which is true.
+pub fn route_source(dst: u32) -> Option<u32> {
+    // SAFETY: a read of lwIP's routing table under the NO_SYS single-thread
+    // contract every caller of this crate is already bound by.
+    let src = unsafe { lwip_sys::wz_lwip_route_src(dst) };
+    (src != 0).then_some(src)
 }
 
 #[cfg(test)]

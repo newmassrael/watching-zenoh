@@ -36,7 +36,8 @@ use core::cell::RefCell;
 use critical_section::Mutex;
 use wz_session_core::admin_config_space::write_config_space_pattern;
 use wz_session_core::admin_connect::{
-    parse_connect_endpoints_write, ConfigWriteBody, ConnectEndpoints, ConnectWriteOutcome,
+    parse_connect_endpoints_write, ConfigWriteBody, ConnectEndpoints, ConnectEntry,
+    ConnectWriteOutcome,
 };
 use wz_session_core::observer::ApplicationLayerObserver;
 use wz_session_core::sample_kind::SampleKind;
@@ -145,11 +146,51 @@ impl crate::admin_status::ConfigView for ConnectControl {
             (s.permit_write, s.live.clone())
         });
         out.push_str(r#"{"connect":{"endpoints":"#);
-        wz_session_core::json::push_str_array(list.iter().map(|e| e.as_str()), out);
+        push_connect_endpoints(&list, out);
         out.push_str(r#"},"adminspace":{"permissions":{"write":"#);
         out.push_str(if permit_write { "true" } else { "false" });
         out.push_str("}}}");
     }
+}
+
+/// R2841 — the endpoint list as upstream serializes its `EndPoints`: a bare
+/// entry as a string, a group as `{"strategy":…,"locators":[…]}` (the derive on
+/// its `Locators`, strategy in camelCase), so what was written reads back in
+/// the form it was written, an empty group included.
+#[cfg(feature = "adminspace-core")]
+fn push_connect_endpoints(list: &[ConnectEntry], out: &mut String) {
+    use wz_session_core::json::{escape_into, push_str_array};
+    out.push('[');
+    let mut i = 0;
+    while i < list.len() {
+        if i > 0 {
+            out.push(',');
+        }
+        match list[i].group {
+            None => {
+                escape_into(list[i].as_str(), out);
+                i += 1;
+            }
+            Some(group) => {
+                out.push_str(r#"{"strategy":"#);
+                escape_into(group.strategy.as_str(), out);
+                out.push_str(r#","locators":"#);
+                let start = i;
+                while i < list.len() && list[i].group.map(|g| g.index) == Some(group.index) {
+                    i += 1;
+                }
+                push_str_array(
+                    list[start..i]
+                        .iter()
+                        .map(|e| e.as_str())
+                        .filter(|s| !s.is_empty()),
+                    out,
+                );
+                out.push('}');
+            }
+        }
+    }
+    out.push(']');
 }
 
 /// Subscribe `observer` to the config space of the node `zid_hex` /
@@ -296,6 +337,20 @@ mod tests {
         std::assert_eq!(
             read(),
             r#"{"connect":{"endpoints":["tcp/10.0.0.9:7447"]},"adminspace":{"permissions":{"write":true}}}"#
+        );
+
+        // R2841 — groups read back in upstream's object form, empty ones too.
+        deliver(
+            &mut observer,
+            put(
+                KEY,
+                br#"["tcp/a:1", { strategy: "allOf", locators: ["tcp/b:1", "tcp/b:2"] },
+                    { strategy: "oneOf", locators: [] }]"#,
+            ),
+        );
+        std::assert_eq!(
+            read(),
+            r#"{"connect":{"endpoints":["tcp/a:1",{"strategy":"allOf","locators":["tcp/b:1","tcp/b:2"]},{"strategy":"oneOf","locators":[]}]},"adminspace":{"permissions":{"write":true}}}"#
         );
     }
 }
