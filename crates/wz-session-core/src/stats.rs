@@ -29,13 +29,16 @@
 //! ([`StatMedium`](crate::stats::StatMedium),
 //! [`StatSpace`](crate::stats::StatSpace),
 //! [`StatMessage`](crate::stats::StatMessage)) rather than as four dozen
-//! hand-written fields, so the renderer WALKS the axes instead of naming them.
-//! Adding a variant to an axis changes the rendered surface with no edit to the
-//! renderer at all, which is what keeps the population derived rather than
-//! transcribed:
-//! [`openmetrics_text`](crate::stats::TransportStatsReport::openmetrics_text)
-//! cannot silently omit a combination, because it was never told the
-//! combinations.
+//! hand-written fields, so the counter arrays are SIZED by the axes instead of
+//! naming every product. Adding a variant to an axis changes the report with no
+//! edit to its fields, which is what keeps the population derived rather than
+//! transcribed.
+//!
+//! R2843 — this report no longer has an OpenMetrics rendering. It had one, the
+//! flat `tx_bytes` / `tx_n_msgs{medium=…}` block the metrics leg appended after
+//! its build info, which was the 1.5.0 shape; the pin writes its metrics only
+//! from its registry, and so does wz now (the `stats_registry` module). The
+//! report stays as the per-session snapshot `OpenedSession::stats()` hands out.
 //!
 //! (Every intra-doc link in THIS module header is fully qualified on purpose:
 //! the outer `///` on `pub mod stats;` in `lib.rs` merges with it and the pair
@@ -118,18 +121,14 @@
 //! discipline the `wz_*_batches` decision applied, reaching the opposite answer
 //! because this time the quantity does match.
 //!
-//! # The adminspace consumer is BUILT (R2371)
+//! # The adminspace consumer is the REGISTRY, not this report (R2843)
 //!
-//! This module's prose used to say the adminspace `stats` queryable "stays
-//! P4-deferred". Re-measured, it is not deferred: the `adminspace` module's
-//! metrics body appends this report's
-//! [`openmetrics_text`](crate::stats::TransportStatsReport::openmetrics_text)
-//! to the
-//! `@/<zid>/.../metrics` reply, `AdminAnswerCtx` carries the report, and the leg
-//! is covered end to end by `declare_adminspace_metrics_get_returns_openmetrics_text`
-//! and cross-impl against a real zenoh-pico `z_get` by
-//! `wz_peer_adminspace_metrics_to_pico_zget.rs`. The clause described the state
-//! at R311y9 and outlived it.
+//! R2371 recorded that the metrics leg appended this report's OpenMetrics
+//! rendering. R2843 replaced that consumer: `AdminAnswerCtx` now carries a
+//! `stats_registry::StatsRegistry`, a one-session host builds it with
+//! `SessionLinkActions::session_stats_registry`, and the leg's body is that
+//! registry's document. Covered end to end by
+//! `declare_adminspace_metrics_get_returns_openmetrics_text`.
 //!
 //! AP-only: `transport-stats` is never enabled on an MCU lane, so the
 //! [`core::sync::atomic`] counters here never reach a target without 64-bit /
@@ -747,197 +746,6 @@ impl TransportStats {
     }
 }
 
-#[cfg(feature = "alloc")]
-impl TransportStatsReport {
-    /// Render this snapshot as OpenMetrics text — the block zenoh's adminspace
-    /// appends to the `zenoh_build` gauge under its `stats` feature.
-    ///
-    /// The LINE FORMAT is upstream's exactly — `# HELP <name> <text>`,
-    /// `# TYPE <name> <type>`, then `<name> <value>`, each newline-terminated,
-    /// which is the shape upstream's admin space writes at
-    /// `zenoh/src/net/runtime/adminspace.rs` @ `# HELP zenoh_build`.
-    ///
-    /// ⚠ R2241: this citation used to name a transport-side stats module and its
-    /// `stats_struct!` macro. NEITHER exists at 1.10.0 —
-    /// `io/zenoh-transport/src/common/stats.rs` @ REMOVED — and the only place
-    /// upstream still emits this format is the admin space's build info. The
-    /// line-format claim is therefore anchored on what upstream still writes.
-    ///
-    /// # The SPLIT counters carry LABELS, which is what upstream's registry is
-    ///
-    /// A counter on a split axis renders one sample per axis value —
-    /// `tx_n_msgs{medium="net"}`, `tx_z_put_msgs{space="user"}` — rather than a
-    /// flattened name per combination. That is the closer mirror of upstream,
-    /// whose 1.10.0 rewrite made these a LABEL-INDEXED registry
-    /// (`commons/zenoh-stats/src/labels.rs` @ `pub enum MessageLabel`)
-    /// rather than a flat struct, and it is what lets the renderer walk the axis
-    /// enums instead of naming every product.
-    ///
-    /// # Every counter here means what upstream's counter of that name means
-    ///
-    /// R2371 removed the two `wz_*_batches` names this method used to export.
-    /// They existed because the counters behind them were believed to hold a
-    /// batch count where upstream holds a transport-message count; re-measured
-    /// against this tree's emit path, they hold the same quantity, so they carry
-    /// upstream's `t_msgs` name. The module docs record that measurement, and
-    /// `t_msgs_counts_one_per_wire_write` is the test that pins it.
-    ///
-    /// The one surviving divergence is `n_dropped`'s REASON, which is documented
-    /// on [`StatDrop::Transport`] and does not change the quantity.
-    pub fn openmetrics_text(&self) -> alloc::string::String {
-        let mut out = alloc::string::String::new();
-        for (dir, verb, rep) in [("tx", "sent", &self.tx), ("rx", "received", &self.rx)] {
-            let name = |suffix: &str| alloc::format!("{dir}_{suffix}");
-
-            push_counter(
-                &mut out,
-                &name("bytes"),
-                &alloc::format!("Counter of {verb} bytes."),
-                rep.bytes,
-            );
-            push_counter(
-                &mut out,
-                &name("t_msgs"),
-                &alloc::format!("Counter of {verb} transport messages."),
-                rep.t_msgs,
-            );
-            push_labeled_counter(
-                &mut out,
-                &name("n_msgs"),
-                &alloc::format!("Counter of {verb} network messages."),
-                "medium",
-                StatMedium::ALL
-                    .into_iter()
-                    .map(|m| (m.label(), rep.n_msgs_on(m))),
-            );
-            push_counter(
-                &mut out,
-                &name("n_dropped"),
-                &alloc::format!("Counter of {verb} transport messages dropped."),
-                rep.n_dropped,
-            );
-            for message in StatMessage::ALL {
-                let kind = message.label();
-                push_labeled_counter(
-                    &mut out,
-                    &name(&alloc::format!("z_{kind}_msgs")),
-                    &alloc::format!("Counter of {verb} {kind} messages."),
-                    "space",
-                    StatSpace::ALL
-                        .into_iter()
-                        .map(|s| (s.label(), rep.payload_of(message, s).msgs)),
-                );
-                push_labeled_counter(
-                    &mut out,
-                    &name(&alloc::format!("z_{kind}_pl_bytes")),
-                    &alloc::format!("Counter of {verb} {kind} payload bytes."),
-                    "space",
-                    StatSpace::ALL
-                        .into_iter()
-                        .map(|s| (s.label(), rep.payload_of(message, s).pl_bytes)),
-                );
-            }
-            push_counter(
-                &mut out,
-                &name("downsampler_dropped_msgs"),
-                &alloc::format!("Counter of {verb} messages dropped by downsampling."),
-                rep.downsampler_dropped_msgs,
-            );
-            push_counter(
-                &mut out,
-                &name("low_pass_dropped_msgs"),
-                &alloc::format!("Counter of {verb} messages dropped by the low-pass filter."),
-                rep.low_pass_dropped_msgs,
-            );
-            push_counter(
-                &mut out,
-                &name("low_pass_dropped_bytes"),
-                &alloc::format!("Counter of {verb} bytes dropped by the low-pass filter."),
-                rep.low_pass_dropped_bytes,
-            );
-        }
-        out
-    }
-
-    /// Every counter NAME this report renders, in render order — the exported
-    /// surface as a list, without the values.
-    ///
-    /// This exists so a gate can compare wz's surface against upstream's
-    /// declared field set without parsing OpenMetrics text, and so the
-    /// in-tree test that checks the render covers every axis product has a
-    /// population DERIVED from the same walk the renderer performs rather than
-    /// from a second hand-written list (which is the shape that cannot fail).
-    pub fn counter_names() -> alloc::vec::Vec<alloc::string::String> {
-        let mut names = alloc::vec::Vec::new();
-        for dir in ["tx", "rx"] {
-            names.push(alloc::format!("{dir}_bytes"));
-            names.push(alloc::format!("{dir}_t_msgs"));
-            names.push(alloc::format!("{dir}_n_msgs"));
-            names.push(alloc::format!("{dir}_n_dropped"));
-            for message in StatMessage::ALL {
-                let kind = message.label();
-                names.push(alloc::format!("{dir}_z_{kind}_msgs"));
-                names.push(alloc::format!("{dir}_z_{kind}_pl_bytes"));
-            }
-            names.push(alloc::format!("{dir}_downsampler_dropped_msgs"));
-            names.push(alloc::format!("{dir}_low_pass_dropped_msgs"));
-            names.push(alloc::format!("{dir}_low_pass_dropped_bytes"));
-        }
-        names
-    }
-}
-
-/// One `# HELP` / `# TYPE` / value triple in upstream's plain-field shape.
-///
-/// Every counter this module exports is a monotonic `counter`, so the type is
-/// not a parameter: a gauge would need a different upstream arm anyway.
-#[cfg(feature = "alloc")]
-fn push_counter(out: &mut alloc::string::String, name: &str, help: &str, value: usize) {
-    use core::fmt::Write as _;
-    push_header(out, name, help);
-    out.push_str(name);
-    out.push(' ');
-    // `write!` into a String cannot fail; the result is consumed to keep the
-    // no-panic posture this crate holds elsewhere.
-    let _ = write!(out, "{value}");
-    out.push('\n');
-}
-
-/// One `# HELP` / `# TYPE` header followed by ONE SAMPLE PER AXIS VALUE, each
-/// carrying the axis as an OpenMetrics label.
-///
-/// `samples` is an iterator rather than a slice so the caller can hand it the
-/// axis enum's own `ALL` walk without materialising a vector — which is what
-/// keeps the rendered population derived from the enum.
-#[cfg(feature = "alloc")]
-fn push_labeled_counter(
-    out: &mut alloc::string::String,
-    name: &str,
-    help: &str,
-    label: &str,
-    samples: impl Iterator<Item = (&'static str, usize)>,
-) {
-    use core::fmt::Write as _;
-    push_header(out, name, help);
-    for (value_label, value) in samples {
-        out.push_str(name);
-        let _ = write!(out, "{{{label}=\"{value_label}\"}} {value}");
-        out.push('\n');
-    }
-}
-
-/// The two metadata lines every counter above shares.
-#[cfg(feature = "alloc")]
-fn push_header(out: &mut alloc::string::String, name: &str, help: &str) {
-    out.push_str("# HELP ");
-    out.push_str(name);
-    out.push(' ');
-    out.push_str(help);
-    out.push_str("\n# TYPE ");
-    out.push_str(name);
-    out.push_str(" counter\n");
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -945,8 +753,9 @@ mod tests {
     /// R311y811 — the report type is NAMEABLE AND CONSTRUCTIBLE WITH NO FEATURES
     /// AT ALL, which is the whole reason R311y810 un-gated this module: a
     /// consumer holds one in an UNGATED struct field (`AdminAnswerCtx`'s
-    /// `stats`), so a build with neither `alloc` nor `transport-stats` must still
-    /// be able to name the type, copy it, and compare it.
+    /// `stats` did until R2843 moved it to the registry), so a build with neither
+    /// `alloc` nor `transport-stats` must still be able to name the type, copy
+    /// it, and compare it.
     ///
     /// This test is UNCONDITIONAL on purpose. Every other test in this module is
     /// gated on one of the two features, so in the bare configuration the module
@@ -987,7 +796,7 @@ mod tests {
         );
 
         // `Copy` + `PartialEq` + `Default` are the bounds a holder of an ungated
-        // field actually leans on (`AdminAnswerCtx` takes one by value).
+        // field actually leans on.
         let copied = r;
         assert_eq!(copied, r);
         assert_ne!(r, TransportStatsReport::default());
@@ -1157,118 +966,6 @@ mod tests {
                 if reason == StatDrop::LowPass { 500 } else { 0 },
                 "only LowPass carries bytes ({reason:?})"
             );
-        }
-    }
-
-    /// R2371 — the RENDER covers the WHOLE derived surface: every name
-    /// [`TransportStatsReport::counter_names`] lists appears as a `# TYPE` line,
-    /// and every split counter emits one sample per axis value.
-    ///
-    /// The population is derived on BOTH sides — the names from the axis enums,
-    /// the rendered text from the same enums — so this cannot pass by both sides
-    /// being wrong in the same way; what it pins is that the two walks agree and
-    /// that the count is not zero. A render that dropped an axis silently would
-    /// emit fewer samples than the axis has variants, which the per-name sample
-    /// count catches.
-    #[cfg(feature = "alloc")]
-    #[test]
-    fn the_render_covers_every_derived_counter_and_axis_value() {
-        let text = TransportStatsReport::default().openmetrics_text();
-        let names = TransportStatsReport::counter_names();
-
-        // A population of zero would make every assertion below vacuous.
-        assert_eq!(
-            names.len(),
-            2 * (4 + 2 * StatMessage::COUNT + 3),
-            "the derived name list must be the axis product, not a hand list"
-        );
-
-        for name in &names {
-            assert!(
-                text.contains(&alloc::format!("\n# TYPE {name} counter\n"))
-                    || text.starts_with(&alloc::format!("# TYPE {name} counter\n"))
-                    || text.contains(&alloc::format!("# TYPE {name} counter\n")),
-                "{name} is not rendered\n{text}"
-            );
-        }
-
-        // The split counters render one LABELLED sample per axis value.
-        for (name, axis_len) in [
-            ("tx_n_msgs", StatMedium::COUNT),
-            ("rx_n_msgs", StatMedium::COUNT),
-            ("tx_z_put_msgs", StatSpace::COUNT),
-            ("rx_z_reply_pl_bytes", StatSpace::COUNT),
-        ] {
-            let samples = text
-                .lines()
-                .filter(|l| l.starts_with(&alloc::format!("{name}{{")))
-                .count();
-            assert_eq!(samples, axis_len, "{name} rendered {samples} sample(s)");
-        }
-
-        // Every rendered sample line belongs to a name the walk produced: a
-        // stray counter no `counter_names` entry covers would escape the gate.
-        for line in text.lines() {
-            if line.starts_with('#') {
-                continue;
-            }
-            let head = line.split(['{', ' ']).next().unwrap_or_default();
-            assert!(
-                names.iter().any(|n| n == head),
-                "{head} is rendered but not in the derived name list\n{text}"
-            );
-        }
-    }
-
-    /// The LINE FORMAT is upstream's plain-field shape, pinned as a whole string
-    /// rather than by substring for the counters that are NOT split: `# HELP`,
-    /// `# TYPE ... counter`, then `<name> <value>`, newline-terminated. A
-    /// renderer that emitted the right names in the wrong shape would pass a
-    /// `contains` assertion and fail a scraper.
-    #[cfg(feature = "alloc")]
-    #[test]
-    fn openmetrics_text_is_upstreams_plain_field_shape() {
-        let mut r = TransportStatsReport::default();
-        r.tx.bytes = 140;
-        r.tx.t_msgs = 2;
-        let text = r.openmetrics_text();
-        assert!(
-            text.starts_with(
-                "# HELP tx_bytes Counter of sent bytes.\n\
-                 # TYPE tx_bytes counter\n\
-                 tx_bytes 140\n\
-                 # HELP tx_t_msgs Counter of sent transport messages.\n\
-                 # TYPE tx_t_msgs counter\n\
-                 tx_t_msgs 2\n\
-                 # HELP tx_n_msgs Counter of sent network messages.\n\
-                 # TYPE tx_n_msgs counter\n\
-                 tx_n_msgs{medium=\"net\"} 0\n\
-                 tx_n_msgs{medium=\"shm\"} 0\n"
-            ),
-            "{text}"
-        );
-    }
-
-    /// R2371 — the `wz_*_batches` names are GONE, and must not come back.
-    ///
-    /// They were introduced to refuse upstream's `t_msgs` name on a premise the
-    /// module docs now record as refuted by measurement. This is the twin of the
-    /// test that used to sit here: that one refused upstream's name, this one
-    /// refuses the wz-local name, and both exist so the decision is pinned
-    /// somewhere a later edit has to read.
-    #[cfg(feature = "alloc")]
-    #[test]
-    fn the_wz_local_batch_names_are_not_exported() {
-        let text = TransportStatsReport::default().openmetrics_text();
-        for retired in ["wz_tx_batches", "wz_rx_batches"] {
-            assert!(
-                !text.contains(retired),
-                "{retired} was retired at R2371; the counter carries upstream's \
-                 t_msgs name because it holds upstream's quantity\n{text}"
-            );
-        }
-        for adopted in ["tx_t_msgs", "rx_t_msgs"] {
-            assert!(text.contains(&alloc::format!("\n{adopted} ")), "{text}");
         }
     }
 

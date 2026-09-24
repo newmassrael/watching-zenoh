@@ -3154,6 +3154,21 @@ fn declare_adminspace_metrics_get_returns_openmetrics_text() {
     let whatami = session.actions().params.whatami.to_str();
     let metrics_ke = format!("@/{zid_hex}/{whatami}/metrics");
 
+    // R2843 — a known peer, so the node's registry has its one transport to
+    // report. The production path fills both from the INIT exchange; a unit test
+    // stamps the fields directly, as the `sessions[]` tests above do.
+    *session
+        .actions()
+        .remote_peer_zid
+        .lock()
+        .expect("remote_peer_zid poisoned in test fixture") = Some(vec![0xc3, 0xd4]);
+    *session
+        .actions()
+        .peer_whatami
+        .lock()
+        .expect("peer_whatami poisoned in test fixture") =
+        Some(wz_codecs::whatami::WhatAmI::Router.to_wire());
+
     let _admin = session
         .declare_adminspace("0.9.9", Vec::new())
         .expect("adminspace-core ON in this build");
@@ -3187,10 +3202,11 @@ fn declare_adminspace_metrics_get_returns_openmetrics_text() {
          zenoh_build_info{{local_id=\"{zid_hex}\",local_whatami=\"{whatami}\",version=\"0.9.9\"}} 1\n"
     );
 
-    // R2371 — this leg serves the build-info block FIRST and, when the node has
-    // counters, the `transport-stats` block after it (`adminspace` @
-    // `fn answer_admin_query`, whose own test pins the composition byte for
-    // byte). Which of the two shapes this build produces is decided by the
+    // R2371 — this leg serves the build-info block FIRST in every build.
+    // R2843 — with `transport-stats` the whole body is the node's registry
+    // document (`adminspace` @ `fn answer_admin_query`, whose own test pins it
+    // byte for byte against the registry); without it, the build-info block
+    // alone. Which of the two shapes this build produces is decided by the
     // feature, so the assertion is too.
     assert!(
         got.starts_with(&build_info),
@@ -3198,11 +3214,17 @@ fn declare_adminspace_metrics_get_returns_openmetrics_text() {
     );
     #[cfg(feature = "transport-stats")]
     {
-        // The session has emitted the query itself, so the block is present and
-        // its counters are live rather than all-zero.
+        // The registry's own gauge, counting the session's ONE transport, and
+        // that transport labelled with the peer the handshake named — the
+        // pieces a per-session report never had.
+        let head = format!("local_id=\"{zid_hex}\",local_whatami=\"{whatami}\"");
         assert!(
-            got.contains("\n# TYPE tx_bytes counter\n"),
-            "the counter block follows the build-info block\n{got}"
+            got.contains(&format!("\nzenoh_transports_opened{{{head}}} 1\n")),
+            "the node's registry counts its one transport\n{got}"
+        );
+        assert!(
+            !got.contains("\n# TYPE tx_bytes counter\n"),
+            "the flat per-session block is not served any more\n{got}"
         );
     }
     #[cfg(not(feature = "transport-stats"))]

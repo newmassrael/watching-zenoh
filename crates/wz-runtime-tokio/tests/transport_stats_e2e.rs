@@ -217,8 +217,7 @@ async fn a_publish_moves_the_network_and_payload_counters() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[cfg(feature = "codec-push")]
 async fn a_publish_is_recorded_in_the_registry_on_its_link() {
-    use wz_session_core::stats_registry::{MetricsQuery, StatsRegistry};
-    use wz_session_core::WhatAmI;
+    use wz_session_core::stats_registry::MetricsQuery;
 
     let listener = TcpListener::bind("127.0.0.1:0")
         .await
@@ -262,13 +261,28 @@ async fn a_publish_is_recorded_in_the_registry_on_its_link() {
         .send_push_literal("demo/example/stats", b"twelve bytes", true)
         .expect("the publish reaches the transport");
 
-    let mut registry = StatsRegistry::new("01010101", WhatAmI::Peer, "v1");
-    let transport = registry.open_unicast_transport("02020202", WhatAmI::Peer, None);
-    registry.set_transport_metrics(transport, opened_init.stats_metrics());
+    // R2843 — the registry the session builds for itself, which is what its
+    // adminspace serves. The zids are zenoh's rendering of `[1; 4]` / `[2; 4]`:
+    // little-endian read as a `u128`, one leading zero stripped.
+    let registry = opened_init.actions.session_stats_registry("v1");
     let mut doc = String::new();
     registry.encode_metrics(&mut doc, MetricsQuery::default());
 
-    let head = r#"local_id="01010101",local_whatami="peer""#;
+    let head = r#"local_id="1010101",local_whatami="peer""#;
+    // The transport carries the labels the HANDSHAKE learned — the peer's zid
+    // and role — and no common name, because a tcp link has no certificate.
+    let transport = r#"remote_zid="2020202",remote_whatami="peer",remote_group="",remote_cn="",disconnected="false""#;
+    assert!(
+        doc.contains(&format!("zenoh_transports_opened{{{head}}} 1\n")),
+        "the session is the node's one transport:\n{doc}"
+    );
+    assert!(
+        doc.lines().any(
+            |line| line.starts_with("zenoh_tx_per_transport_bytes_total{")
+                && line.contains(transport)
+        ),
+        "the per-transport series carries the handshake's labels:\n{doc}"
+    );
     let sent = format!(
         "zenoh_tx_network_message_total{{{head},priority=\"data\",message=\"put\",shm=\"false\",protocol=\"tcp\"}} 1\n"
     );

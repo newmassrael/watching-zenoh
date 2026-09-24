@@ -6635,7 +6635,9 @@ layer_c1ak_cargo_test_transport_stats() {
     # SUBSTRING, so `stats` also selected R2821's `stats_registry::tests::*` and
     # the pinned 10 read 17 on the first run after that module landed. The
     # registry has its own guard below, where its number can move alone.
-    _runci_guarded_test C1ak 10 cargo test -p wz-session-core --features transport-stats --lib stats:: --quiet \
+    # R2843 — 10 -> 7. The report's OpenMetrics renderer is gone (the metrics
+    # leg serves the registry), and with it its three `alloc` tests.
+    _runci_guarded_test C1ak 7 cargo test -p wz-session-core --features transport-stats --lib stats:: --quiet \
         || return 1
     _runci_guarded_test C1ak 8 cargo test -p wz-session-core --lib stats_registry:: --quiet \
         || return 1
@@ -6654,7 +6656,8 @@ layer_c1ak_cargo_test_transport_stats() {
     # to name and render a report, because a consumer carries one in a struct
     # field in every feature combination.
     # R2372 — 3 -> 6, the same R2371 arithmetic on the alloc-only arm.
-    _runci_guarded_test C1ak 6 cargo test -p wz-session-core --no-default-features --features alloc --lib stats:: --quiet \
+    # R2843 — 6 -> 3: the three renderer tests were all this arm's `alloc` ones.
+    _runci_guarded_test C1ak 3 cargo test -p wz-session-core --no-default-features --features alloc --lib stats:: --quiet \
         || return 1
     # R311y811 — the BARE arm: no `alloc`, no `transport-stats`. R311y810 un-gated
     # this module precisely so its report type could be named in EVERY feature
@@ -6698,7 +6701,12 @@ layer_c1ak_cargo_test_transport_stats() {
     # are R2646's delete half: the sub-key decode, the write-permission refusal,
     # and the `of_sample` join. All are ungated, so every `--lib adminspace`
     # count moves by the same three.
-    _runci_guarded_test C1ak 46 cargo test -p wz-session-core --features adminspace-metrics,transport-stats --lib adminspace --quiet \
+    # R2843 — 46 -> 47, with its C1AM twin. The metrics leg serves the node's
+    # stats registry: the flat-block composition test became
+    # `metrics_reply_is_the_registry_document`, and
+    # `metrics_parameters_reach_the_registry` is new. Both are gated on
+    # `adminspace-metrics`, so only the arms that turn it on move.
+    _runci_guarded_test C1ak 47 cargo test -p wz-session-core --features adminspace-metrics,transport-stats --lib adminspace --quiet \
         || return 1
     (cd crates \
         && cargo clippy -p wz-runtime-tokio --all-targets --features transport-stats --quiet -- -D warnings \
@@ -6925,7 +6933,8 @@ layer_c1ba_cargo_clippy_transport_multilink() {
 # two self-sufficiency fixes that the slim build surfaced (the session/mod.rs
 # unused-ResponseSink import + the test-module dead-code re-gating).
 layer_c1am_cargo_test_adminspace() {
-    _runci_guarded_test "C1AM adminspace 46" 46 \
+    # R2843 — 46 -> 47, the C1ak twin's arithmetic (see that guard).
+    _runci_guarded_test "C1AM adminspace 47" 47 \
         cargo test -p wz-session-core --features adminspace-metrics --lib adminspace --quiet || return 1
     # R2633 — 3 -> 5. `zenoh_hex_to_zid` grew the two refusals a conforming node
     # makes, needed because the router link-weight rows name neighbours by the

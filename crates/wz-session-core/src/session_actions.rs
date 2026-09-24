@@ -2049,6 +2049,47 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         R::with_mutex_mut(&self.metrics, |metrics| metrics.clone())
     }
 
+    /// R2843 — the stats registry of a node that IS this session: this node's
+    /// identity, and this session as its one unicast transport, holding the
+    /// counters recorded so far. What a one-session adminspace host serves its
+    /// metrics leg from.
+    ///
+    /// The transport carries the labels upstream's transport manager gives it
+    /// when it registers a unicast transport — the peer's zid and role from the
+    /// handshake and the common name on its link's certificate
+    /// (`io/zenoh-transport/src/unicast/manager.rs` @ `let stats = self.stats.unicast_transport_stats(`).
+    /// Before the handshake has named the peer there is no transport to
+    /// register: the registry holds this node alone, as upstream's does before
+    /// its first transport opens.
+    ///
+    /// A SNAPSHOT, built per call. For this host that is the registry itself
+    /// rather than an approximation of one: the transport opens before the
+    /// adminspace can be declared and closes with it, so the registry never
+    /// holds a disconnected transport for [`crate::stats_registry::StatsRegistry::collect_garbage`]
+    /// to retire. A host with more than one transport keeps a registry of its
+    /// own instead.
+    #[cfg(feature = "transport-stats")]
+    pub fn session_stats_registry(
+        &self,
+        build_version: &str,
+    ) -> crate::stats_registry::StatsRegistry {
+        use crate::zid_hex::zid_to_zenoh_hex;
+        let mut registry = crate::stats_registry::StatsRegistry::new(
+            &zid_to_zenoh_hex(&self.params.zid),
+            self.params.whatami,
+            build_version,
+        );
+        let peer_whatami = self.peer_whatami_wire().and_then(crate::WhatAmI::from_wire);
+        if let (Some(zid), Some(whatami)) = (self.peer_zid(), peer_whatami) {
+            let cn = self
+                .link_subject()
+                .and_then(|subject| subject.cert_common_name.as_deref());
+            let transport = registry.open_unicast_transport(&zid_to_zenoh_hex(&zid), whatami, cn);
+            registry.set_transport_metrics(transport, self.stats_metrics());
+        }
+        registry
+    }
+
     /// R2825 — close every link of this session's partition: a transport's
     /// teardown drops its links, which is what folds their counts into the
     /// transport and takes them out of `zenoh_links_opened` upstream. A host

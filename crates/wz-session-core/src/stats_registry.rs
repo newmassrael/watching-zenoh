@@ -556,7 +556,7 @@ impl StatsMetric for PerKeyHistogram {
 pub struct LinkSlot(usize);
 
 /// One direction of one open link: the three link-scoped families.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 struct LinkDirection {
     bytes: u64,
     transport_message: u64,
@@ -564,7 +564,7 @@ struct LinkDirection {
     network_message: BTreeMap<(Priority, MessageLabel, bool), u64>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 struct LinkMetrics {
     labels: LinkLabels,
     /// [`LinkLabels::protocol`], computed once at open.
@@ -580,7 +580,7 @@ struct LinkMetrics {
 /// (`commons/zenoh-stats/src/family.rs` @ `links: HashMap<Option<LinkLabels>, HashMap<S, M>>,`).
 /// The link-scoped families land here only when a link closes, which is why
 /// they are keyed by their full label set, protocol included.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 struct TransportDirection {
     bytes: BTreeMap<BytesLabels, u64>,
     transport_message: BTreeMap<TransportMessageLabels, u64>,
@@ -712,7 +712,7 @@ fn payload_per_key_cells(
 /// Recording on a link goes through the [`LinkSlot`] its open returned, and
 /// every recording call is allocation-free once its series exists — the hot
 /// path is an index and a `Copy`-keyed map lookup.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct TransportMetrics {
     links: Vec<LinkMetrics>,
     directions: [TransportDirection; 2],
@@ -906,7 +906,7 @@ impl TransportMetrics {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct StatsTransportId(u64);
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 struct RegisteredTransport {
     labels: TransportLabels,
     /// When the transport closed, on the caller's monotonic millisecond clock.
@@ -963,7 +963,7 @@ impl MetricsQuery {
 /// gauges that are not per transport and does the collection when a metrics
 /// query is answered. Time is the caller's: every method that needs it takes a
 /// monotonic millisecond reading, so the registry stays `no_std`.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StatsRegistry {
     local_zid: String,
     local_whatami: WhatAmI,

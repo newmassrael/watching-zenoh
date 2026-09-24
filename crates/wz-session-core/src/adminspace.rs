@@ -444,17 +444,19 @@ pub struct AdminLiveInputs {
     /// the wire must render this per GET, or two answers in one reply could come
     /// from different moments.
     pub config_json: alloc::string::String,
-    /// The transport-stats report to serve, or `None` to serve none.
+    /// The node's stats registry to serve the metrics leg from, or `None` to
+    /// serve the build-info block alone.
     ///
     /// ⚠ THE CALLER OWNS THIS CHOICE, and that is the whole reason it is here
     /// rather than resolved inside the declare. A pure-Session host holds ONE
-    /// session, so its own report IS the node's. A MESH host holds N faces and
-    /// wz's counters are per-session, so there is no single report to serve —
-    /// `None` states that rather than serving one face's numbers as if they were
-    /// the node's (R311y810). A seam that picked for the caller would force the
+    /// session, so a registry holding that one transport IS the node's
+    /// (`SessionLinkActions::session_stats_registry`). A MESH host holds N faces
+    /// and must hand in one registry across all of them; until it does, `None`
+    /// states that rather than serving one face's numbers as if they were the
+    /// node's (R311y810). A seam that picked for the caller would force the
     /// second kind of host to re-implement the answerer, which is exactly the
     /// duplication this type exists to end.
-    pub stats: Option<crate::stats::TransportStatsReport>,
+    pub stats: Option<crate::stats_registry::StatsRegistry>,
 }
 
 /// The outcome of an admin-query answer — whether the `read` gate served the GET
@@ -1440,18 +1442,26 @@ pub struct AdminAnswerCtx<'a> {
     /// so the answerer stays feature-toggle-independent (the gate is the value,
     /// not a cfg).
     pub read: bool,
-    /// R311y810 (`transport-stats`) — this node's live counter snapshot, or
-    /// `None` when it has none to report.
+    /// R2843 (`transport-stats`) — this node's stats registry, or `None` when it
+    /// has none to report.
     ///
-    /// The metrics leg appends its OpenMetrics rendering after the `zenoh_build`
-    /// gauge, which is where zenoh appends
-    /// `manager().get_stats().report().openmetrics_text()` under its own `stats`
-    /// feature (`zenoh/src/net/runtime/adminspace.rs` @ `.stats()`). Carried on
-    /// the CONTEXT
-    /// rather than read inside the answerer because the answerer is
-    /// session-independent by contract: a Session passes its own report, while a
-    /// mesh host has no equivalent to upstream's transport-MANAGER aggregate and
-    /// passes `None` — a residual named at the call site, not hidden by one.
+    /// With a registry the metrics leg's body IS the registry's document, build
+    /// info included, which is what upstream serves under its own `stats`
+    /// feature: `zenoh/src/net/runtime/adminspace.rs` @ `.encode_metrics(`, with
+    /// the build-info block alone in the `not(feature = "stats")` arm. Before
+    /// R2843 this field held a per-session `TransportStatsReport` whose render
+    /// was APPENDED after the build info — the flat 1.5.0 counter block, a shape
+    /// the pin no longer writes anywhere.
+    ///
+    /// The registry carries its own `local_id` / `local_whatami` / version, and
+    /// the host builds it from the same node identity it puts in this context;
+    /// the answerer does not re-label it.
+    ///
+    /// Carried on the CONTEXT rather than read inside the answerer because the
+    /// answerer is session-independent by contract: a Session passes a registry
+    /// of its one transport, while a mesh host has no registry across its faces
+    /// yet and passes `None` — a residual named at the call site, not hidden by
+    /// one.
     ///
     /// UNGATED, and deliberately: a `#[cfg]` here would be a cfg-gated pub
     /// struct field, so every one of the five construction sites would need a
@@ -1459,7 +1469,7 @@ pub struct AdminAnswerCtx<'a> {
     /// feature of its own and would therefore break the moment feature
     /// unification turned the flag on in `wz-session-core`. The field costs one
     /// `Option` in a build that never fills it.
-    pub stats: Option<crate::stats::TransportStatsReport>,
+    pub stats: Option<&'a crate::stats_registry::StatsRegistry>,
 }
 
 /// Stage one admin-space reply, logging a refusal the way upstream logs it.
@@ -1550,48 +1560,56 @@ pub fn answer_admin_query(
         let metrics_key = admin_metrics_key(ctx.zid_hex, ctx.whatami);
         let metrics_chunks: Vec<&str> = metrics_key.split('/').collect();
         if crate::keyexpr_match::keyexpr_intersects_target(ke, &metrics_chunks) {
-            let mut body = metrics_text(ctx.zid_hex, ctx.whatami, ctx.version);
-            // R311y810 — the transport-stats composition, appended AFTER the
-            // build-info block exactly as upstream appends its own stats block
-            // (adminspace.rs:722-730). A node without counters (or a build
-            // without the feature) emits the build-info block alone. No `#[cfg]`:
-            // the gate is the VALUE being `None`, the same shape `ctx.read` uses.
-            if let Some(stats) = ctx.stats {
-                body.push_str(&stats.openmetrics_text());
-            }
-            // R2494 (open-debt item 677) — upstream's `descriptors` parameter,
-            // the ONE of its six metrics parameters that is honourable against
-            // this body. Upstream's own arm drops the `# HELP` / `# TYPE` lines
-            // and keeps the samples:
+            let parameters = view.parameters();
+            let param = |key: &str| crate::selector_params::param_value_bytes(parameters, key);
+            // R2843 — the two bodies upstream serves, chosen by the VALUE the
+            // host passed, not by a `#[cfg]` (the same shape `ctx.read` uses).
+            // With a registry the body IS its document, build info first and
+            // `# EOF` last, under the four partition parameters upstream reads
+            // (`zenoh/src/net/runtime/adminspace.rs` @ `.encode_metrics(`).
+            // Without one it is the build-info block alone, upstream's
+            // `not(feature = "stats")` arm. Both are whole documents, so the
+            // terminator is part of each rather than appended after it.
+            let mut body = match ctx.stats {
+                Some(registry) => {
+                    let mut doc = String::new();
+                    registry.encode_metrics(
+                        &mut doc,
+                        crate::stats_registry::MetricsQuery::from_parameters(param),
+                    );
+                    doc
+                }
+                None => {
+                    let mut doc = metrics_text(ctx.zid_hex, ctx.whatami, ctx.version);
+                    doc.push_str(metrics_eof());
+                    doc
+                }
+            };
+            // R2494 (open-debt item 677) — upstream's `descriptors` parameter.
+            // Upstream's own arm drops every `#` line and re-appends the
+            // terminator it dropped with them:
             // `zenoh/src/net/runtime/adminspace.rs` @ `if query.parameters().get("descriptors") == Some("false") {`
             //
-            // EQUALITY against `"false"`, not a presence test, and the
-            // difference is load-bearing here for the first time:
+            // EQUALITY against `"false"`, not a presence test:
             // [`crate::selector_params::param_value`] documents that a VALUELESS
             // key yields `Some("")` (zenoh's own `get` semantics), so a bare
             // `?descriptors` must leave the descriptors ON. Upstream's `==
             // Some("false")` says the same; `is_some()` would not.
             //
-            // ⚠ THE TERMINATOR IS NOT A DESCRIPTOR. Upstream strips every `#`
-            // line and re-appends `# EOF` with `.chain(["# EOF\n"])` because its
-            // terminator sits INSIDE the filtered text. wz appends
-            // `metrics_eof()` AFTER this filter's subject, so that re-append is
-            // a step this assembly already gives for free -- copying it would be
-            // cargo-culting upstream's workaround for a shape wz does not have.
-            if crate::selector_params::param_value_bytes(view.parameters(), "descriptors")
-                == Some("false")
-            {
-                let kept: alloc::string::String = body
+            // ⚠ R2843: the re-append is now upstream's step for upstream's
+            // reason. Until this round wz appended `metrics_eof()` AFTER the
+            // filter and could skip it; both bodies above are now whole
+            // documents with the terminator inside the filtered text, which is
+            // the shape upstream's `.chain(["# EOF\n"])` exists for.
+            if param("descriptors") == Some("false") {
+                let mut kept: alloc::string::String = body
                     .lines()
                     .filter(|l| !l.starts_with('#'))
                     .map(|l| alloc::format!("{l}\n"))
                     .collect();
+                kept.push_str(metrics_eof());
                 body = kept;
             }
-            // R2414 — and the terminator LAST, after any counters. OpenMetrics
-            // ends at `# EOF`; emitting it inside `metrics_text` would bury the
-            // stats block behind the end of the document.
-            body.push_str(metrics_eof());
             reply_admin(
                 out,
                 &metrics_key,
@@ -4437,10 +4455,11 @@ mod tests {
     fn metrics_encoding_never_claims_a_content_encoding() {
         let mut out = RecordingReply::default();
         let view = admin_view("@/a1b2/peer/metrics");
+        let registry = registry_with_traffic();
         let _ = answer_admin_query(
             &view,
             &mut out,
-            &admin_ctx_with_stats(crate::stats::TransportStatsReport::default()),
+            &admin_ctx_with_stats(&registry),
             &[],
             &[],
             &[],
@@ -4473,87 +4492,129 @@ mod tests {
     #[cfg(feature = "adminspace-metrics")]
     #[test]
     fn metrics_descriptors_false_strips_help_and_type_but_not_eof() {
-        let mut out = RecordingReply::default();
-        let view = admin_view_with_params("@/a1b2/peer/metrics", "descriptors=false");
-        let mut stats = crate::stats::TransportStatsReport::default();
-        stats.tx.bytes = 140;
-        let _ = answer_admin_query(
-            &view,
-            &mut out,
-            &admin_ctx_with_stats(stats),
-            &[],
-            &[],
-            &[],
-            "{}",
-        );
-        let body = out
-            .replies
-            .iter()
-            .find(|(k, _)| k == "@/a1b2/peer/metrics")
-            .map(|(_, p)| String::from_utf8_lossy(p).into_owned())
-            .expect("the metrics leg replied");
+        let body = metrics_body(&registry_with_traffic(), Some("descriptors=false"));
         assert!(
             !body.contains("# HELP") && !body.contains("# TYPE"),
             "descriptors=false strips HELP/TYPE; got:\n{body}"
         );
+        // R2843 — ONCE, and last. The registry's document carries its own
+        // terminator, so the strip removes it with the descriptors and the
+        // re-append puts back exactly one.
         assert!(
-            body.ends_with("# EOF\n"),
-            "the terminator survives the descriptor strip; got:\n{body}"
+            body.ends_with("# EOF\n") && body.matches("# EOF").count() == 1,
+            "the terminator survives the descriptor strip, once; got:\n{body}"
         );
         assert!(
-            body.contains("tx_bytes 140"),
+            body.contains("zenoh_tx_bytes_total{") && body.contains("} 140\n"),
             "the SAMPLES survive -- only their descriptors go; got:\n{body}"
         );
     }
 
-    /// renderer: the renderer's own shape is pinned in `stats.rs`, and what this
-    /// adds is that the composition happens at all and in that order.
+    /// R2843 — with a registry the body IS the registry's document, byte for
+    /// byte: build info first (the registry writes it), counters, terminator.
+    /// Before this round the leg appended the flat per-session counter block
+    /// after its own build-info block, a shape the pin no longer writes.
     #[cfg(feature = "adminspace-metrics")]
     #[test]
-    fn metrics_reply_appends_the_transport_stats_block() {
-        let mut out = RecordingReply::default();
-        let view = admin_view("@/a1b2/peer/metrics");
-        let mut stats = crate::stats::TransportStatsReport::default();
-        stats.tx.bytes = 140;
-        stats.tx.t_msgs = 2;
-        stats.rx.bytes = 12;
-        stats.rx.t_msgs = 1;
-        let _ = answer_admin_query(
-            &view,
-            &mut out,
-            &admin_ctx_with_stats(stats),
-            &[],
-            &[],
-            &[],
-            "{}",
+    fn metrics_reply_is_the_registry_document() {
+        let registry = registry_with_traffic();
+        let body = metrics_body(&registry, None);
+        let mut expected = String::new();
+        registry.encode_metrics(
+            &mut expected,
+            crate::stats_registry::MetricsQuery::default(),
         );
-        let body = out
-            .replies
-            .iter()
-            .find(|(k, _)| k == "@/a1b2/peer/metrics")
-            .map(|(_, p)| String::from_utf8_lossy(p).into_owned())
-            .expect("the metrics leg replied");
-        assert_eq!(
-            body,
-            metrics_text("a1b2", "peer", "0.1.0") + &stats.openmetrics_text() + metrics_eof(),
-            "build-info, then the counter block, then the terminator — in that \
-             order. R2414: the terminator moving above the counters would bury \
-             them behind the end of the document."
+        assert_eq!(body, expected);
+        // Stated separately from the equality, which would also hold if the
+        // registry itself had lost its counters or its descriptors.
+        assert!(
+            body.starts_with(&metrics_text("a1b2", "peer", "0.1.0")),
+            "the build-info block opens the document:\n{body}"
         );
-        // R2494 — the ANTI-VACUITY partner of the descriptors test below: with
-        // no parameter given, the `#` descriptor lines MUST still be there. A
-        // suppression test alone would pass against a build that never emitted
-        // them.
         assert!(
             body.contains("# HELP") && body.contains("# TYPE"),
             "the default reply carries its descriptors; got:\n{body}"
         );
-        // Stated separately from the equality above, because that equality would
-        // still hold if BOTH sides put EOF in the wrong place.
         assert!(
-            body.ends_with("# EOF\n"),
-            "the document ends at its terminator:\n{body}"
+            body.contains("remote_zid=\"c3d4\"") && body.contains("} 140\n"),
+            "the transport's counters are in it:\n{body}"
         );
+        assert!(
+            body.ends_with("# EOF\n") && body.matches("# EOF").count() == 1,
+            "the document ends at its one terminator:\n{body}"
+        );
+    }
+
+    /// R2843 — the four partition parameters reach the registry, each with
+    /// upstream's polarity: `per_transport`, `per_link` and `per_key` are ON
+    /// unless `=false`, `disconnected` is OFF unless `=true`. Each arm is
+    /// compared against the registry answering that query directly, and each
+    /// must DIFFER from the default body — otherwise a parameter the answerer
+    /// dropped would pass by the default document happening to match.
+    #[cfg(feature = "adminspace-metrics")]
+    #[test]
+    fn metrics_parameters_reach_the_registry() {
+        use crate::stats_registry::MetricsQuery;
+        let mut registry = registry_with_traffic();
+        // A disconnected transport WITH counts, so `disconnected=true` has a
+        // series to list — one without any writes nothing either way, which is
+        // what the first run of this test measured.
+        let gone = registry.open_unicast_transport("e5f6", crate::WhatAmI::Client, None);
+        let slot = registry
+            .open_link(
+                gone,
+                crate::stats_registry::LinkLabels::new("tcp/127.0.0.1:7447", "tcp/127.0.0.1:50001"),
+            )
+            .expect("the transport was just registered");
+        registry
+            .transport_mut(gone)
+            .expect("the transport was just registered")
+            .inc_bytes(crate::stats_registry::StatsDirection::Rx, slot, 7);
+        registry.close_link(gone, slot);
+        registry.close_transport(gone, 0);
+        let default_body = metrics_body(&registry, None);
+        let arms = [
+            (
+                "per_transport=false",
+                MetricsQuery {
+                    per_transport: false,
+                    ..MetricsQuery::default()
+                },
+            ),
+            (
+                "per_link=false",
+                MetricsQuery {
+                    per_link: false,
+                    ..MetricsQuery::default()
+                },
+            ),
+            (
+                "disconnected=true",
+                MetricsQuery {
+                    disconnected: true,
+                    ..MetricsQuery::default()
+                },
+            ),
+            (
+                "per_key=false",
+                MetricsQuery {
+                    per_key: false,
+                    ..MetricsQuery::default()
+                },
+            ),
+        ];
+        for (parameters, query) in arms {
+            let mut expected = String::new();
+            registry.encode_metrics(&mut expected, query);
+            let body = metrics_body(&registry, Some(parameters));
+            assert_eq!(body, expected, "`{parameters}` answered differently");
+            assert_ne!(
+                body, default_body,
+                "`{parameters}` must change the document, or this arm proves nothing"
+            );
+        }
+        // A bare key is not `=false`: the partition stays on.
+        assert_eq!(metrics_body(&registry, Some("per_link")), default_body);
     }
 
     /// The same leg with NO report serves the build-info block ALONE — byte-
@@ -5010,15 +5071,72 @@ mod tests {
         }
     }
 
-    /// R311y810 — the same context carrying a counter snapshot, for the tests
-    /// that pin the metrics composition. Separate from [`admin_ctx`] so every
-    /// OTHER admin test keeps asserting the no-stats body unchanged.
+    /// R311y810 — the same context carrying a stats registry, for the tests
+    /// that pin the metrics body. Separate from [`admin_ctx`] so every OTHER
+    /// admin test keeps asserting the no-stats body unchanged.
     #[cfg(feature = "adminspace-metrics")]
-    fn admin_ctx_with_stats<'a>(stats: crate::stats::TransportStatsReport) -> AdminAnswerCtx<'a> {
+    fn admin_ctx_with_stats(stats: &crate::stats_registry::StatsRegistry) -> AdminAnswerCtx<'_> {
         AdminAnswerCtx {
             stats: Some(stats),
             ..admin_ctx(true)
         }
+    }
+
+    /// R2843 — a registry for the node [`admin_ctx`] names, holding one
+    /// transport with one open tcp link that has sent 140 bytes, so every
+    /// partition a metrics parameter can switch off has a series in it.
+    #[cfg(feature = "adminspace-metrics")]
+    fn registry_with_traffic() -> crate::stats_registry::StatsRegistry {
+        use crate::stats_registry::{LinkLabels, StatsDirection, StatsRegistry};
+        let mut registry = StatsRegistry::new("a1b2", crate::WhatAmI::Peer, "0.1.0");
+        let transport = registry.open_unicast_transport("c3d4", crate::WhatAmI::Router, None);
+        let slot = registry
+            .open_link(
+                transport,
+                LinkLabels::new("tcp/127.0.0.1:7447", "tcp/127.0.0.1:50000"),
+            )
+            .expect("the transport was just registered");
+        let metrics = registry
+            .transport_mut(transport)
+            .expect("the transport was just registered");
+        metrics.inc_bytes(StatsDirection::Tx, slot, 140);
+        metrics.observe_network_message_payload(
+            StatsDirection::Tx,
+            crate::stats::StatSpace::User,
+            crate::qos::Priority::DEFAULT,
+            crate::stats_registry::MessageLabel::Put,
+            false,
+            12,
+            ["demo/**"],
+        );
+        registry
+    }
+
+    /// The metrics leg's body for `parameters`, answered against `registry`.
+    #[cfg(feature = "adminspace-metrics")]
+    fn metrics_body(
+        registry: &crate::stats_registry::StatsRegistry,
+        parameters: Option<&str>,
+    ) -> String {
+        let mut out = RecordingReply::default();
+        let view = match parameters {
+            Some(p) => admin_view_with_params("@/a1b2/peer/metrics", p),
+            None => admin_view("@/a1b2/peer/metrics"),
+        };
+        let _ = answer_admin_query(
+            &view,
+            &mut out,
+            &admin_ctx_with_stats(registry),
+            &[],
+            &[],
+            &[],
+            "{}",
+        );
+        out.replies
+            .iter()
+            .find(|(k, _)| k == "@/a1b2/peer/metrics")
+            .map(|(_, p)| String::from_utf8_lossy(p).into_owned())
+            .expect("the metrics leg replied")
     }
 
     fn admin_view(keyexpr: &str) -> crate::query_sink::BorrowedQuery<'_> {

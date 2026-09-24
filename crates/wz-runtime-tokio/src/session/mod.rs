@@ -4309,13 +4309,16 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
         // R2637 paid for this distinction once already.
         #[cfg(feature = "transport-stats")]
         let stats_actions = self.actions().clone();
+        #[cfg(feature = "transport-stats")]
+        let stats_version = version.clone();
         self.declare_adminspace_with_live_inputs(version, locators, move || {
             wz_session_core::adminspace::AdminLiveInputs {
                 permissions: permissions(),
-                // The one-session host's own report IS the node's, which is what
-                // this method resolved inline before the live seam existed.
+                // R2843 — the one-session host's registry: this node and its one
+                // transport, read per GET so a scrape reflects the traffic up to
+                // the moment it was served.
                 #[cfg(feature = "transport-stats")]
-                stats: Some(stats_actions.stats_report()),
+                stats: Some(stats_actions.session_stats_registry(&stats_version)),
                 #[cfg(not(feature = "transport-stats"))]
                 stats: None,
                 // ⚠ CLONED per GET where the old shape borrowed a captured value.
@@ -4438,25 +4441,21 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
             // The match+reply SSOT (root local_data / metrics / config + the read
             // gate) — the SAME answerer the §5.23 routing-peer forwarder host calls
             // (R311y45), so both emit byte-identical admin replies.
-            // R311y810 — THIS session's live counters, which is exactly the scope
-            // `transport-stats` documents (per-session). Read here per query
-            // rather than snapshotted at open, so a scrape reflects the traffic up
-            // to the moment it was served. The cfg is on the VALUE, not on the
-            // struct field: gating the field would force a matching `#[cfg]` on
-            // every construction site, including crates that carry no such
-            // feature of their own.
+            // R311y810 — the cfg is on the VALUE, not on the struct field: gating
+            // the field would force a matching `#[cfg]` on every construction
+            // site, including crates that carry no such feature of their own.
             // R2645 — the CALLER decides, through the live source. A one-session
-            // host serves its own report; a mesh host serves none, because wz's
-            // counters are per-session and it holds N faces (R311y810). Resolving
-            // it here would force the second kind to re-implement the answerer.
-            let stats = live.stats;
+            // host serves the registry of its one transport (R2843); a mesh host
+            // serves none until it keeps one registry across its N faces.
+            // Resolving it here would force the second kind to re-implement the
+            // answerer.
             let ctx = AdminAnswerCtx {
                 zid_hex: &zid_hex,
                 whatami,
                 version: &version,
                 locators: &locators,
                 read,
-                stats,
+                stats: live.stats.as_ref(),
             };
             // R2645 — the registry now comes from the LIVE source with the permit
             // and the config, rather than being rebuilt here from a compiled list.
