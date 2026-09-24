@@ -205,6 +205,89 @@ impl Json5Value {
         out
     }
 
+    /// This value as the bytes upstream writes for it when it holds the same
+    /// document as a `serde_json::Value` — a config subtree it keeps opaque and
+    /// later serves back, such as `metadata` in the adminspace's `local_data`.
+    ///
+    /// ## Why a third rendering
+    ///
+    /// [`to_json_text`](Self::to_json_text) keeps the document's KEY ORDER and
+    /// the digits it wrote. Upstream keeps neither, because the value passes
+    /// through two crates on the way. The pin reads a config with `json5`
+    /// (`commons/zenoh-config/src/lib.rs` @ `json5::Deserializer::from_str(`)
+    /// into a field typed `serde_json::Value` (@ `metadata: Value,`), and
+    /// writes it back with `serde_json`, which the pin builds WITHOUT
+    /// `preserve_order`. So:
+    ///
+    /// * an object's keys come out SORTED (its map is a `BTreeMap`), and a
+    ///   duplicate key keeps its LAST value;
+    /// * a number is whatever `json5` turned it into. `json5` 0.4.1's
+    ///   `deserialize_any` reads a literal with no `.` and no exponent (or any
+    ///   hex literal) as an `i64` — hex through a `u32` parse — and everything
+    ///   else as an `f64`, which `serde_json` then writes through `zmij`: `1.50`
+    ///   comes back as `1.5` and `1e3` as `1000.0`.
+    ///
+    /// Two documents that differ only in those respects are the same value to
+    /// upstream and must produce the same bytes here, or a consumer comparing a
+    /// wz node against a zenoh node reads a difference that is not there.
+    ///
+    /// ## Why it can fail
+    ///
+    /// Three number spellings that this crate's parser accepts, `json5`
+    /// refuses: a hex literal wider than `u32`, an integer outside `i64`, and
+    /// a finite-looking literal that overflows `f64` (`1e400`). A zenoh node
+    /// refuses the whole config for any of them, so a caller honouring the key
+    /// has to refuse it too, rather than serve a value the reference node
+    /// never started with. The error names the literal.
+    ///
+    /// ⚠ One spelling goes the OTHER way and is not handled here: `json5`
+    /// reads `NaN` and `Infinity` (which then serialise as `null`), and this
+    /// crate's parser refuses them outright. That strictness is the parser's
+    /// standing policy for every key, not a property of this rendering.
+    pub fn to_upstream_value_json_text(&self) -> Result<String, UpstreamNumberError> {
+        let mut out = String::new();
+        self.write_upstream_value(&mut out)?;
+        Ok(out)
+    }
+
+    fn write_upstream_value(&self, out: &mut String) -> Result<(), UpstreamNumberError> {
+        match self {
+            Json5Value::Number(text) => write_upstream_number(text, out)?,
+            Json5Value::Array(items) => {
+                out.push('[');
+                for (i, item) in items.iter().enumerate() {
+                    if i > 0 {
+                        out.push(',');
+                    }
+                    item.write_upstream_value(out)?;
+                }
+                out.push(']');
+            }
+            Json5Value::Object(entries) => {
+                // Insert in document order: a later duplicate replaces the
+                // earlier one, which is what `serde_json`'s map visitor does.
+                let mut members = alloc::collections::BTreeMap::new();
+                for (key, value) in entries {
+                    members.insert(key.as_str(), value);
+                }
+                out.push('{');
+                for (i, (key, value)) in members.into_iter().enumerate() {
+                    if i > 0 {
+                        out.push(',');
+                    }
+                    crate::json::escape_into(key, out);
+                    out.push(':');
+                    value.write_upstream_value(out)?;
+                }
+                out.push('}');
+            }
+            Json5Value::Null | Json5Value::Bool(_) | Json5Value::String(_) => {
+                self.write(out, Numbers::Json)
+            }
+        }
+        Ok(())
+    }
+
     fn write(&self, out: &mut String, numbers: Numbers) {
         match self {
             Json5Value::Null => out.push_str("null"),
@@ -291,6 +374,144 @@ fn write_json_number(text: &str, out: &mut String) {
         out.push_str(if frac.is_empty() { "0" } else { frac });
     }
     out.push_str(exponent);
+}
+
+/// A number literal upstream's config parser refuses, so a document holding it
+/// is one a zenoh node does not start on. See
+/// [`Json5Value::to_upstream_value_json_text`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum UpstreamNumberError {
+    /// A hex literal wider than `u32`: `json5` parses hex through
+    /// `u32::from_str_radix`.
+    HexWiderThanU32(String),
+    /// An integer literal outside `i64`, or one spelled in a way `i64`'s parser
+    /// refuses (a sign before a hex prefix).
+    NotAnI64(String),
+    /// A fractional or exponent literal that overflows `f64`, which `json5`
+    /// refuses as "too large" rather than reading as infinity.
+    OverflowsF64(String),
+}
+
+impl core::fmt::Display for UpstreamNumberError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            UpstreamNumberError::HexWiderThanU32(text) => {
+                write!(f, "hex literal `{text}` is wider than 32 bits")
+            }
+            UpstreamNumberError::NotAnI64(text) => {
+                write!(f, "integer literal `{text}` is not a 64-bit signed integer")
+            }
+            UpstreamNumberError::OverflowsF64(text) => {
+                write!(f, "number literal `{text}` is too large for a 64-bit float")
+            }
+        }
+    }
+}
+
+/// One number the way `json5` 0.4.1 reads it and `serde_json` writes it.
+///
+/// The split is `json5`'s own `is_int`: no `.`, and no exponent unless the
+/// literal is hex (where `e` is a digit), reads as an `i64`; everything else
+/// reads as an `f64`. A literal starting `0x`/`0X` is hex — only unsigned,
+/// because the test is on the literal's first two bytes, so `-0x1` falls to
+/// `i64`'s parser, which refuses it.
+fn write_upstream_number(text: &str, out: &mut String) -> Result<(), UpstreamNumberError> {
+    // `json5` reads these four as a non-finite `f64`, and `serde_json`'s value
+    // visitor turns a non-finite float into `null`. This crate's parser never
+    // yields them; a value built by hand can.
+    if matches!(text, "Infinity" | "-Infinity" | "NaN" | "-NaN") {
+        out.push_str("null");
+        return Ok(());
+    }
+    let hex = text.len() > 2 && matches!(&text[..2], "0x" | "0X");
+    let integral = !text.contains('.') && (hex || !text.contains(['e', 'E']));
+    if integral {
+        let value = if hex {
+            match u32::from_str_radix(&text[2..], 16) {
+                Ok(n) => i64::from(n),
+                Err(_) => return Err(UpstreamNumberError::HexWiderThanU32(text.into())),
+            }
+        } else {
+            match text.parse::<i64>() {
+                Ok(n) => n,
+                Err(_) => return Err(UpstreamNumberError::NotAnI64(text.into())),
+            }
+        };
+        out.push_str(&value.to_string());
+        return Ok(());
+    }
+    match text.parse::<f64>() {
+        Ok(value) if value.is_finite() => {
+            write_zmij_f64(value, out);
+            Ok(())
+        }
+        _ => Err(UpstreamNumberError::OverflowsF64(text.into())),
+    }
+}
+
+/// A finite `f64` laid out the way `serde_json` writes one at the pin.
+///
+/// The pin's `serde_json` (1.0.151) formats a float with `zmij` 1.0.23
+/// (`serde_json` `src/ser.rs` @ `let mut buffer = zmij::Buffer::new();`), and
+/// NOT with `ryu`, which older `serde_json` used. The two agree on the digits
+/// and differ in the layout: `zmij` writes a positive exponent with its sign
+/// (`1e+30`, where `ryu` writes `1e30`). That difference was found by this
+/// function's own oracle test, which is why the layout below is `zmij`'s.
+///
+/// The DIGITS come from `core`'s shortest round-trip formatting (`{:e}`):
+/// `zmij`, like `core`, writes the shortest decimal that reads back to the same
+/// bits. The LAYOUT is `zmij`'s `write`, branch for branch, keyed on `exp`, the
+/// exponent of the scientific form (`d.ddd × 10^exp`):
+///
+/// * `exp` in `-5..=15` (`FIXED_DEC_EXP` for `f64`) is written in fixed
+///   notation — `12340000000.0`, `12.34` or `0.001234`;
+/// * anything else as `d.ddd` (just `d` for a single digit), then `e`, the
+///   exponent's sign, and its digits without padding — `1.234e+33`, `1e-7`.
+fn write_zmij_f64(value: f64, out: &mut String) {
+    if value.is_sign_negative() {
+        out.push('-');
+    }
+    if value == 0.0 {
+        out.push_str("0.0");
+        return;
+    }
+    let sci = alloc::format!("{:e}", value.abs());
+    let (mantissa, exponent) = sci.split_once('e').unwrap_or((sci.as_str(), "0"));
+    let digits: String = mantissa.chars().filter(|c| *c != '.').collect();
+    let length = digits.len() as isize;
+    let exp = exponent.parse::<isize>().unwrap_or(0);
+    if (-5..=15).contains(&exp) {
+        if length - 1 <= exp {
+            // 1234e7 -> 12340000000.0
+            out.push_str(&digits);
+            for _ in length..=exp {
+                out.push('0');
+            }
+            out.push_str(".0");
+        } else if 0 <= exp {
+            // 1234e-2 -> 12.34
+            let point = (exp + 1) as usize;
+            out.push_str(&digits[..point]);
+            out.push('.');
+            out.push_str(&digits[point..]);
+        } else {
+            // 1234e-6 -> 0.001234
+            out.push_str("0.");
+            for _ in exp + 1..0 {
+                out.push('0');
+            }
+            out.push_str(&digits);
+        }
+        return;
+    }
+    // 1234e30 -> 1.234e+33
+    out.push_str(&digits[..1]);
+    if length > 1 {
+        out.push('.');
+        out.push_str(&digits[1..]);
+    }
+    out.push_str(if exp >= 0 { "e+" } else { "e-" });
+    out.push_str(&exp.unsigned_abs().to_string());
 }
 
 /// Read a JSON5 document.
@@ -667,5 +888,69 @@ mod tests {
             parse(&wide).unwrap().to_json_text(),
             alloc::format!("\"{wide}\"")
         );
+    }
+
+    /// §5.23 `adminspace-core` — the upstream-value rendering, graded against
+    /// upstream's OWN pipeline rather than against expectations written here:
+    /// each document is read by `json5` 0.4.1 into a `serde_json::Value` and
+    /// written by `serde_json`, exactly as the pin reads and serves `metadata`.
+    ///
+    /// The corpus is built to reach every branch the claim has: key sorting,
+    /// a duplicate key, each float layout, both signed zeros,
+    /// the `i64` / hex split, and each of the three refusals.
+    #[test]
+    fn the_upstream_value_rendering_is_upstreams_own_bytes() {
+        let corpus = [
+            // Object keys: sorted by bytes, last duplicate wins, nested too.
+            r#"{ zeta: 1, alpha: { y: 2, b: 3 }, "Upper": 4, "é": 5, alpha: { k: 6 } }"#,
+            r#"{ name: 'strawberry', location: "Penny Lane", tags: [3, 'b', null, true] }"#,
+            // Integers: decimal, signed, extremes, hex (with `e`).
+            "[0, -0, +7, 9223372036854775807, -9223372036854775808]",
+            "[0x0, 0xE, 0Xff, 0xFFFFFFFF]",
+            // Floats, one per layout: 1234e7, 1234e-2, 1234e-6, 1e+30, 1.234e+33.
+            "[12340000000.0, 1e3, 1.50, 12.34, .5, 5., 0.001234, 1e-4]",
+            "[1e30, 1e-7, 1.234e33, 1.5e-10, 1e16, 1e17, 123456789012345680000.0]",
+            // The fixed range's two edges, each side of each edge.
+            "[1e15, 9.5e15, 1.5e15, 1e-5, 1.25e-5, 1e-6, 1.25e-6, 1e100, 1e-100]",
+            "[0.0, -0.0, -1.5, 2.5e-5, 0.1, 1.7976931348623157e308, 5e-324]",
+            // Strings: every escape the writer knows, a control byte, non-ASCII.
+            "[\"a\\\"b\\\\c\\nd\\te\\u0001f\\u00e9/\"]",
+            // Scalars at the root.
+            "null",
+            "'x'",
+            "42",
+        ];
+        for doc in corpus {
+            let theirs: serde_json::Value = json5::from_str(doc).expect(doc);
+            let theirs = serde_json::to_string(&theirs).unwrap();
+            let ours = parse(doc).expect(doc).to_upstream_value_json_text();
+            assert_eq!(ours.as_deref(), Ok(theirs.as_str()), "document: {doc}");
+        }
+
+        // The three literals upstream refuses, refused here too — and a
+        // document upstream REFUSES must not be one this rendering serves.
+        let refused = [
+            (
+                "[0x100000000]",
+                UpstreamNumberError::HexWiderThanU32("0x100000000".into()),
+            ),
+            (
+                "[9223372036854775808]",
+                UpstreamNumberError::NotAnI64("9223372036854775808".into()),
+            ),
+            ("[-0x1]", UpstreamNumberError::NotAnI64("-0x1".into())),
+            ("[1e400]", UpstreamNumberError::OverflowsF64("1e400".into())),
+        ];
+        for (doc, error) in refused {
+            assert!(
+                json5::from_str::<serde_json::Value>(doc).is_err(),
+                "the oracle accepts {doc}, so this row is not a refusal"
+            );
+            assert_eq!(
+                parse(doc).expect(doc).to_upstream_value_json_text(),
+                Err(error),
+                "document: {doc}"
+            );
+        }
     }
 }

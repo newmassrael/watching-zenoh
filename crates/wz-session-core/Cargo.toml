@@ -1223,6 +1223,20 @@ serde = { version = "1", features = ["derive"] }
 # concrete serde format to round-trip THROUGH; `serde::Serialize` alone proves
 # only that the derive compiled. Inert in the production artifact.
 serde_json = "1"
+# §5.23 adminspace-core — TEST-ONLY oracle: the config parser the pin itself
+# reads a node's config with (zenoh `Cargo.lock` @ `name = "json5"`, 0.4.1).
+# `Json5Value::to_upstream_value_json_text` claims the bytes this crate plus
+# `serde_json` produce for a value; exact-pinned so the oracle cannot drift
+# from the version the claim is about.
+json5 = "=0.4.1"
+# ... and the float formatter the pin's `serde_json` writes with (zenoh
+# `Cargo.lock` @ `name = "zmij"`, 1.0.23). `serde_json` above resolves zmij
+# through a caret requirement, so without this pin the oracle would grade
+# against whichever 1.0.x the lockfile last picked (it was 1.0.21, whose
+# decimal-conversion internals differ from the pin's). Exact-pinning it here
+# unifies the lockfile onto the pin's version. `serde_json` itself is 1.0.149
+# here and 1.0.151 at the pin; its `write_f64` is the same in both.
+zmij = "=1.0.23"
 # R2776 — TEST-ONLY oracle: the `Shake128` zenoh's `compute_sn` calls, against
 # which `src/initial_sn.rs` checks the sponge it spells over `keccak`.
 sha3 = { version = "0.10", default-features = false }
