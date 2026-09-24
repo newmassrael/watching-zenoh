@@ -65,7 +65,7 @@
 //! - The ORDER of samples inside a block is deterministic here (label order,
 //!   then registration order), where upstream's is hash order.
 
-use alloc::collections::BTreeMap;
+use alloc::collections::{BTreeMap, BTreeSet};
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::fmt::Write as _;
@@ -121,49 +121,9 @@ impl StatsDirection {
     }
 }
 
-/// The network message kind a sample counts
-/// (`commons/zenoh-stats/src/labels.rs` @ `pub enum MessageLabel`).
-///
-/// Not [`crate::stats::StatMessage`]: that axis is the JSON `_stats` schema's
-/// four payload kinds, while this one is every network body — nine of them.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub enum MessageLabel {
-    /// A `Push` carrying a `Put`.
-    Put,
-    /// A `Push` carrying a `Del`.
-    Del,
-    /// A `Request`.
-    Query,
-    /// A `Response` carrying a `Reply`.
-    Reply,
-    /// A `Response` carrying an `Err`.
-    ReplyErr,
-    /// A `ResponseFinal`.
-    ResponseFinal,
-    /// An `Interest`.
-    Interest,
-    /// A `Declare`.
-    Declare,
-    /// An `OAM`.
-    Oam,
-}
-
-impl MessageLabel {
-    /// Upstream's label value.
-    pub const fn label(self) -> &'static str {
-        match self {
-            MessageLabel::Put => "put",
-            MessageLabel::Del => "delete",
-            MessageLabel::Query => "query",
-            MessageLabel::Reply => "reply",
-            MessageLabel::ReplyErr => "reply-err",
-            MessageLabel::ResponseFinal => "response-final",
-            MessageLabel::Interest => "interest",
-            MessageLabel::Declare => "declare",
-            MessageLabel::Oam => "oam",
-        }
-    }
-}
+/// The network message kind a sample counts. It lives beside the counters'
+/// classification in [`crate::stats`], because every sender names one.
+pub use crate::stats::MessageLabel;
 
 /// Why a message was dropped
 /// (`commons/zenoh-stats/src/labels.rs` @ `pub enum ReasonLabel`).
@@ -584,185 +544,280 @@ impl StatsMetric for PerKeyHistogram {
     }
 }
 
-/// One family's cells within one transport, keyed by link (`None` for a cell
-/// that belongs to the transport rather than to one of its links) and label set
-/// (`commons/zenoh-stats/src/family.rs` @ `struct TransportState<S, M> {`).
-#[derive(Debug, Clone)]
-pub struct FamilyCells<L, M> {
-    cells: BTreeMap<(Option<LinkLabels>, L), M>,
-}
+/// A link of one transport, as its [`TransportMetrics`] numbers it — handed
+/// out by [`TransportMetrics::open_link`] and held by whoever records on that
+/// link, so recording is an index, never a string compare or an allocation.
+///
+/// Upstream gets the same property a different way: each link's stats handle
+/// holds its own counters, created once
+/// (`commons/zenoh-stats/src/link.rs` @ `pub struct LinkStats(Arc<LinkStatsInner>);`).
+/// A slot is never reused, so a stale one cannot count on a newer link.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct LinkSlot(usize);
 
-impl<L, M> Default for FamilyCells<L, M> {
-    fn default() -> Self {
-        FamilyCells {
-            cells: BTreeMap::new(),
-        }
-    }
-}
-
-impl<L: StatsLabelSet, M: StatsMetric> FamilyCells<L, M> {
-    /// The cell for `labels` on `link`, created empty on first use — upstream
-    /// creates its series the same way, so a series appears the first time it
-    /// is touched and never before.
-    pub fn cell(&mut self, link: Option<&LinkLabels>, labels: L) -> &mut M {
-        self.cells.entry((link.cloned(), labels)).or_default()
-    }
-
-    /// Fold every cell of `link` into the transport-level cells, as upstream
-    /// does when a link closes (`commons/zenoh-stats/src/family.rs` @ `pub(crate) fn remove_link(`).
-    fn fold_link(&mut self, link: &LinkLabels) {
-        let moved: Vec<(L, M)> = self
-            .cells
-            .iter()
-            .filter(|((cell_link, _), _)| cell_link.as_ref() == Some(link))
-            .map(|((_, labels), metric)| (labels.clone(), metric.clone()))
-            .collect();
-        self.cells
-            .retain(|(cell_link, _), _| cell_link.as_ref() != Some(link));
-        for (labels, metric) in moved {
-            self.cell(None, labels).merge_from(&metric);
-        }
-    }
-
-    /// Fold the transport-level cells of `other` into `self`'s transport-level
-    /// cells. Link-scoped cells are NOT carried: upstream's garbage collection
-    /// drains only the `None` link bucket
-    /// (`commons/zenoh-stats/src/family.rs` @ `.get_mut(&None)`), so a count
-    /// still held under a link when its transport is collected is lost there too.
-    fn retire_from(&mut self, other: &Self) {
-        for ((link, labels), metric) in &other.cells {
-            if link.is_none() {
-                self.cell(None, labels.clone()).merge_from(metric);
-            }
-        }
-    }
-}
-
-/// Every family of one direction.
+/// One direction of one open link: the three link-scoped families.
 #[derive(Debug, Clone, Default)]
-pub struct DirectionMetrics {
-    /// Wire bytes, per link.
-    pub bytes: FamilyCells<BytesLabels, u64>,
-    /// Transport messages, per link.
-    pub transport_message: FamilyCells<TransportMessageLabels, u64>,
-    /// Network messages, per link.
-    pub network_message: FamilyCells<NetworkMessageLabels, u64>,
-    /// Network payload sizes, per transport.
-    pub network_message_payload: FamilyCells<NetworkMessagePayloadLabels, PayloadHistogram>,
-    /// Dropped network payload sizes, per transport.
-    pub network_message_dropped_payload:
-        FamilyCells<NetworkMessageDroppedPayloadLabels, PayloadHistogram>,
-    /// Network payload sizes per configured key, per transport.
-    pub network_message_payload_per_key: FamilyCells<NetworkMessagePayloadLabels, PerKeyHistogram>,
+struct LinkDirection {
+    bytes: u64,
+    transport_message: u64,
+    /// Keyed by `Copy` labels only; the link's protocol is the link's.
+    network_message: BTreeMap<(Priority, MessageLabel, bool), u64>,
 }
 
-impl DirectionMetrics {
-    fn fold_link(&mut self, link: &LinkLabels) {
-        self.bytes.fold_link(link);
-        self.transport_message.fold_link(link);
-        self.network_message.fold_link(link);
-        self.network_message_payload.fold_link(link);
-        self.network_message_dropped_payload.fold_link(link);
-        self.network_message_payload_per_key.fold_link(link);
-    }
+#[derive(Debug, Clone)]
+struct LinkMetrics {
+    labels: LinkLabels,
+    /// [`LinkLabels::protocol`], computed once at open.
+    protocol: String,
+    /// `false` once closed: its counts have folded into the transport and it
+    /// stays only so the protocol it carried is still known.
+    open: bool,
+    directions: [LinkDirection; 2],
+}
 
-    fn retire_from(&mut self, other: &Self) {
-        self.bytes.retire_from(&other.bytes);
-        self.transport_message.retire_from(&other.transport_message);
-        self.network_message.retire_from(&other.network_message);
-        self.network_message_payload
-            .retire_from(&other.network_message_payload);
-        self.network_message_dropped_payload
-            .retire_from(&other.network_message_dropped_payload);
-        self.network_message_payload_per_key
-            .retire_from(&other.network_message_payload_per_key);
+/// One direction of the cells that belong to the transport rather than to
+/// one of its open links — upstream's `None` link bucket
+/// (`commons/zenoh-stats/src/family.rs` @ `links: HashMap<Option<LinkLabels>, HashMap<S, M>>,`).
+/// The link-scoped families land here only when a link closes, which is why
+/// they are keyed by their full label set, protocol included.
+#[derive(Debug, Clone, Default)]
+struct TransportDirection {
+    bytes: BTreeMap<BytesLabels, u64>,
+    transport_message: BTreeMap<TransportMessageLabels, u64>,
+    network_message: BTreeMap<NetworkMessageLabels, u64>,
+    network_message_payload: BTreeMap<NetworkMessagePayloadLabels, PayloadHistogram>,
+    network_message_dropped_payload: BTreeMap<NetworkMessageDroppedPayloadLabels, PayloadHistogram>,
+    network_message_payload_per_key: BTreeMap<NetworkMessagePayloadLabels, PerKeyHistogram>,
+}
+
+fn merge_into<L: Ord + Clone, M: StatsMetric>(into: &mut BTreeMap<L, M>, from: &BTreeMap<L, M>) {
+    for (labels, metric) in from {
+        into.entry(labels.clone()).or_default().merge_from(metric);
     }
+}
+
+impl TransportDirection {
+    fn merge_from(&mut self, other: &Self) {
+        merge_into(&mut self.bytes, &other.bytes);
+        merge_into(&mut self.transport_message, &other.transport_message);
+        merge_into(&mut self.network_message, &other.network_message);
+        merge_into(
+            &mut self.network_message_payload,
+            &other.network_message_payload,
+        );
+        merge_into(
+            &mut self.network_message_dropped_payload,
+            &other.network_message_dropped_payload,
+        );
+        merge_into(
+            &mut self.network_message_payload_per_key,
+            &other.network_message_payload_per_key,
+        );
+    }
+}
+
+/// One family's cells in one direction of one transport, as the encoder reads
+/// them: the link a cell belongs to (`None` for the transport's own), its
+/// labels, and its value.
+type Cells<'a, L, M> = Vec<(Option<&'a LinkLabels>, L, M)>;
+
+/// Where each family's cells come from — one function per family, so the
+/// encoder walks a family without knowing how it is stored.
+type FamilySelect<L, M> = for<'a> fn(&'a TransportMetrics, StatsDirection) -> Cells<'a, L, M>;
+
+fn bytes_cells(m: &TransportMetrics, d: StatsDirection) -> Cells<'_, BytesLabels, u64> {
+    let mut cells: Cells<'_, BytesLabels, u64> = m
+        .open_links()
+        .map(|link| {
+            let labels = BytesLabels {
+                protocol: link.protocol.clone(),
+            };
+            (Some(&link.labels), labels, link.directions[d.index()].bytes)
+        })
+        .collect();
+    let own = &m.directions[d.index()].bytes;
+    cells.extend(own.iter().map(|(l, v)| (None, l.clone(), *v)));
+    cells
+}
+
+fn transport_message_cells(
+    m: &TransportMetrics,
+    d: StatsDirection,
+) -> Cells<'_, TransportMessageLabels, u64> {
+    let mut cells: Cells<'_, TransportMessageLabels, u64> = m
+        .open_links()
+        .map(|link| {
+            let labels = TransportMessageLabels {
+                protocol: link.protocol.clone(),
+            };
+            let value = link.directions[d.index()].transport_message;
+            (Some(&link.labels), labels, value)
+        })
+        .collect();
+    let own = &m.directions[d.index()].transport_message;
+    cells.extend(own.iter().map(|(l, v)| (None, l.clone(), *v)));
+    cells
+}
+
+fn network_message_cells(
+    m: &TransportMetrics,
+    d: StatsDirection,
+) -> Cells<'_, NetworkMessageLabels, u64> {
+    let mut cells = Vec::new();
+    for link in m.open_links() {
+        for ((priority, message, shm), value) in &link.directions[d.index()].network_message {
+            let labels = NetworkMessageLabels {
+                priority: *priority,
+                message: *message,
+                shm: *shm,
+                protocol: link.protocol.clone(),
+            };
+            cells.push((Some(&link.labels), labels, *value));
+        }
+    }
+    let own = &m.directions[d.index()].network_message;
+    cells.extend(own.iter().map(|(l, v)| (None, l.clone(), *v)));
+    cells
+}
+
+fn own_cells<'a, L: Clone, M: Clone>(map: &'a BTreeMap<L, M>) -> Cells<'a, L, M> {
+    map.iter()
+        .map(|(l, v)| (None, l.clone(), v.clone()))
+        .collect()
+}
+
+fn payload_cells(
+    m: &TransportMetrics,
+    d: StatsDirection,
+) -> Cells<'_, NetworkMessagePayloadLabels, PayloadHistogram> {
+    own_cells(&m.directions[d.index()].network_message_payload)
+}
+
+fn dropped_payload_cells(
+    m: &TransportMetrics,
+    d: StatsDirection,
+) -> Cells<'_, NetworkMessageDroppedPayloadLabels, PayloadHistogram> {
+    own_cells(&m.directions[d.index()].network_message_dropped_payload)
+}
+
+fn payload_per_key_cells(
+    m: &TransportMetrics,
+    d: StatsDirection,
+) -> Cells<'_, NetworkMessagePayloadLabels, PerKeyHistogram> {
+    own_cells(&m.directions[d.index()].network_message_payload_per_key)
 }
 
 /// One transport's counters in both directions: what a session records into.
+///
+/// Recording on a link goes through the [`LinkSlot`] its open returned, and
+/// every recording call is allocation-free once its series exists — the hot
+/// path is an index and a `Copy`-keyed map lookup.
 #[derive(Debug, Clone, Default)]
 pub struct TransportMetrics {
-    directions: [DirectionMetrics; 2],
+    links: Vec<LinkMetrics>,
+    directions: [TransportDirection; 2],
 }
 
 impl TransportMetrics {
-    /// The families of one direction.
-    pub fn direction(&self, direction: StatsDirection) -> &DirectionMetrics {
-        &self.directions[direction.index()]
+    fn open_links(&self) -> impl Iterator<Item = &LinkMetrics> {
+        self.links.iter().filter(|link| link.open)
     }
 
-    /// The families of one direction, for recording.
-    pub fn direction_mut(&mut self, direction: StatsDirection) -> &mut DirectionMetrics {
-        &mut self.directions[direction.index()]
+    fn link_mut(&mut self, slot: LinkSlot) -> Option<&mut LinkMetrics> {
+        self.links.get_mut(slot.0).filter(|link| link.open)
     }
 
-    /// Create `link`'s byte and transport-message series in both directions,
-    /// at zero — upstream creates them when the link's stats handle is made
+    /// Open `link`: its byte and transport-message series exist from here, at
+    /// zero — upstream creates them when the link's stats handle is made
     /// (`commons/zenoh-stats/src/link.rs` @ `pub(crate) fn new(transport_stats: TransportStats, link: LinkLabels) -> Self {`),
     /// which is why a freshly opened link reports `0` rather than nothing.
-    fn open_link(&mut self, link: &LinkLabels) {
-        let protocol = link.protocol();
-        for direction in &mut self.directions {
-            direction.bytes.cell(
-                Some(link),
-                BytesLabels {
+    pub fn open_link(&mut self, link: LinkLabels) -> LinkSlot {
+        let slot = LinkSlot(self.links.len());
+        self.links.push(LinkMetrics {
+            protocol: link.protocol(),
+            labels: link,
+            open: true,
+            directions: Default::default(),
+        });
+        slot
+    }
+
+    /// Close the link in `slot`: its counts fold into the transport's own
+    /// cells, which keep them in the aggregate and the per-transport partition
+    /// and drop them from the per-link one — upstream's `remove_link`
+    /// (`commons/zenoh-stats/src/family.rs` @ `pub(crate) fn remove_link(`). A
+    /// folded series is created even at zero, as upstream's `drain_into`
+    /// creates its target.
+    pub fn close_link(&mut self, slot: LinkSlot) {
+        let Some(link) = self.link_mut(slot) else {
+            return;
+        };
+        link.open = false;
+        let protocol = link.protocol.clone();
+        let drained = core::mem::take(&mut link.directions);
+        for (own, link_side) in self.directions.iter_mut().zip(drained.iter()) {
+            *own.bytes
+                .entry(BytesLabels {
                     protocol: protocol.clone(),
-                },
-            );
-            direction.transport_message.cell(
-                Some(link),
-                TransportMessageLabels {
+                })
+                .or_default() += link_side.bytes;
+            *own.transport_message
+                .entry(TransportMessageLabels {
                     protocol: protocol.clone(),
-                },
-            );
+                })
+                .or_default() += link_side.transport_message;
+            for ((priority, message, shm), value) in &link_side.network_message {
+                *own.network_message
+                    .entry(NetworkMessageLabels {
+                        priority: *priority,
+                        message: *message,
+                        shm: *shm,
+                        protocol: protocol.clone(),
+                    })
+                    .or_default() += value;
+            }
         }
     }
 
-    /// Count `bytes` wire bytes on `link`.
-    pub fn inc_bytes(&mut self, direction: StatsDirection, link: &LinkLabels, bytes: u64) {
-        let protocol = link.protocol();
-        self.direction_mut(direction)
-            .bytes
-            .cell(Some(link), BytesLabels { protocol })
-            .merge_from(&bytes);
+    /// Close every open link, as a transport's teardown drops them all.
+    pub fn close_all_links(&mut self) {
+        for slot in 0..self.links.len() {
+            self.close_link(LinkSlot(slot));
+        }
     }
 
-    /// Count `count` transport messages on `link`.
-    pub fn inc_transport_message(
-        &mut self,
-        direction: StatsDirection,
-        link: &LinkLabels,
-        count: u64,
-    ) {
-        let protocol = link.protocol();
-        self.direction_mut(direction)
-            .transport_message
-            .cell(Some(link), TransportMessageLabels { protocol })
-            .merge_from(&count);
+    /// Count `bytes` wire bytes on the link in `slot`.
+    pub fn inc_bytes(&mut self, direction: StatsDirection, slot: LinkSlot, bytes: u64) {
+        if let Some(link) = self.link_mut(slot) {
+            let cell = &mut link.directions[direction.index()].bytes;
+            *cell = cell.wrapping_add(bytes);
+        }
     }
 
-    /// Count one network message on `link`.
+    /// Count `count` transport messages on the link in `slot`.
+    pub fn inc_transport_message(&mut self, direction: StatsDirection, slot: LinkSlot, count: u64) {
+        if let Some(link) = self.link_mut(slot) {
+            let cell = &mut link.directions[direction.index()].transport_message;
+            *cell = cell.wrapping_add(count);
+        }
+    }
+
+    /// Count one network message on the link in `slot`.
     pub fn inc_network_message(
         &mut self,
         direction: StatsDirection,
-        link: &LinkLabels,
+        slot: LinkSlot,
         priority: Priority,
         message: MessageLabel,
         shm: bool,
     ) {
-        let protocol = link.protocol();
-        self.direction_mut(direction)
-            .network_message
-            .cell(
-                Some(link),
-                NetworkMessageLabels {
-                    priority,
-                    message,
-                    shm,
-                    protocol,
-                },
-            )
-            .merge_from(&1);
+        if let Some(link) = self.link_mut(slot) {
+            let cell = link.directions[direction.index()]
+                .network_message
+                .entry((priority, message, shm))
+                .or_default();
+            *cell = cell.wrapping_add(1);
+        }
     }
 
     /// Count one network payload of `size` bytes, and count it again under
@@ -786,53 +841,63 @@ impl TransportMetrics {
             message,
             shm,
         };
-        let families = self.direction_mut(direction);
-        families
-            .network_message_payload
-            .cell(None, labels.clone())
+        let own = &mut self.directions[direction.index()];
+        own.network_message_payload
+            .entry(labels.clone())
+            .or_default()
             .observe(size);
-        families
-            .network_message_payload_per_key
-            .cell(None, labels)
+        own.network_message_payload_per_key
+            .entry(labels)
+            .or_default()
             .observe(keys, size);
     }
 
-    /// Count one dropped network payload of `size` bytes. `protocol` is the
-    /// link's protocol when the drop was a link's, as upstream's congestion drop
-    /// is, and `None` for a transport-level drop.
+    /// Count one dropped network payload of `size` bytes. `link` names the link
+    /// whose protocol the drop carries, as upstream's congestion drop does; a
+    /// transport-level drop passes `None` and is written with an empty
+    /// protocol. The series belongs to the transport either way
+    /// (`commons/zenoh-stats/src/transport.rs` @ `.get_or_create_owned(&self.0.transport, None, &labels)`).
     pub fn observe_network_message_dropped_payload(
         &mut self,
         direction: StatsDirection,
         priority: Priority,
         message: MessageLabel,
-        protocol: Option<&str>,
+        link: Option<LinkSlot>,
         reason: ReasonLabel,
         size: u64,
     ) {
-        self.direction_mut(direction)
+        let protocol = link
+            .and_then(|slot| self.links.get(slot.0))
+            .map(|link| link.protocol.clone());
+        self.directions[direction.index()]
             .network_message_dropped_payload
-            .cell(
-                None,
-                NetworkMessageDroppedPayloadLabels {
-                    priority,
-                    message,
-                    protocol: protocol.map(String::from),
-                    reason,
-                },
-            )
+            .entry(NetworkMessageDroppedPayloadLabels {
+                priority,
+                message,
+                protocol,
+                reason,
+            })
+            .or_default()
             .observe(size);
     }
 
-    fn fold_link(&mut self, link: &LinkLabels) {
-        for direction in &mut self.directions {
-            direction.fold_link(link);
+    /// Fold `other`'s transport-level cells into `self`'s. Cells still held by
+    /// an OPEN link of `other` are not carried: upstream's garbage collection
+    /// drains only the `None` link bucket
+    /// (`commons/zenoh-stats/src/family.rs` @ `.get_mut(&None)`), so a count
+    /// still under a link when its transport is collected is lost there too.
+    fn retire_from(&mut self, other: &Self) {
+        for (mine, theirs) in self.directions.iter_mut().zip(other.directions.iter()) {
+            mine.merge_from(theirs);
         }
     }
 
-    fn retire_from(&mut self, other: &Self) {
-        for (mine, theirs) in self.directions.iter_mut().zip(other.directions.iter()) {
-            mine.retire_from(theirs);
-        }
+    /// Every protocol a link of this transport has carried, and whether that
+    /// link is still open — what `zenoh_links_opened` is counted from.
+    fn link_protocols(&self) -> impl Iterator<Item = (&str, bool)> {
+        self.links
+            .iter()
+            .map(|link| (link.protocol.as_str(), link.open))
     }
 }
 
@@ -904,9 +969,11 @@ pub struct StatsRegistry {
     local_whatami: WhatAmI,
     build_version: String,
     transports_opened: i64,
-    links_opened: BTreeMap<String, i64>,
     resources_declared: BTreeMap<(ResourceLabel, LocalityLabel), i64>,
     retired: TransportMetrics,
+    /// Protocols of links whose transport has been retired: their gauge series
+    /// stays, at zero, as upstream's does.
+    retired_protocols: BTreeSet<String>,
     transports: BTreeMap<StatsTransportId, RegisteredTransport>,
     next_id: u64,
 }
@@ -919,9 +986,9 @@ impl StatsRegistry {
             local_whatami: whatami,
             build_version: String::from(build_version),
             transports_opened: 0,
-            links_opened: BTreeMap::new(),
             resources_declared: BTreeMap::new(),
             retired: TransportMetrics::default(),
+            retired_protocols: BTreeSet::new(),
             transports: BTreeMap::new(),
             next_id: 0,
         }
@@ -971,27 +1038,61 @@ impl StatsRegistry {
         self.register(TransportLabels::multicast_peer(zid, whatami, group))
     }
 
-    /// Register `link` on `transport`. A multicast peer's link is the group's
-    /// link seen again, so it does not count as a newly opened link.
-    pub fn open_link(&mut self, transport: StatsTransportId, link: &LinkLabels) {
-        let Some(entry) = self.transports.get_mut(&transport) else {
-            return;
-        };
-        if entry.labels.owns_its_links() {
-            *self.links_opened.entry(link.protocol()).or_insert(0) += 1;
-        }
-        entry.metrics.open_link(link);
+    /// Open `link` on `transport` — [`TransportMetrics::open_link`] on that
+    /// transport's partition.
+    pub fn open_link(&mut self, transport: StatsTransportId, link: LinkLabels) -> Option<LinkSlot> {
+        self.transport_mut(transport)
+            .map(|metrics| metrics.open_link(link))
     }
 
-    /// `link` of `transport` closed: its cells fold into the transport's own.
-    pub fn close_link(&mut self, transport: StatsTransportId, link: &LinkLabels) {
-        let Some(entry) = self.transports.get_mut(&transport) else {
-            return;
-        };
-        entry.metrics.fold_link(link);
-        if entry.labels.owns_its_links() {
-            *self.links_opened.entry(link.protocol()).or_insert(0) -= 1;
+    /// Close `slot` of `transport` — [`TransportMetrics::close_link`].
+    pub fn close_link(&mut self, transport: StatsTransportId, slot: LinkSlot) {
+        if let Some(metrics) = self.transport_mut(transport) {
+            metrics.close_link(slot);
         }
+    }
+
+    /// Replace `transport`'s partition with `metrics`, the counters a session
+    /// recorded on its own. A host that keeps each session's counters beside
+    /// the session hands them in here before it answers a query and once more
+    /// when the session closes, so recording never takes a node-wide lock.
+    pub fn set_transport_metrics(
+        &mut self,
+        transport: StatsTransportId,
+        metrics: TransportMetrics,
+    ) {
+        if let Some(own) = self.transport_mut(transport) {
+            *own = metrics;
+        }
+    }
+
+    /// `zenoh_links_opened`, per protocol: the open links of every transport
+    /// that owns its links, with a zero series for every protocol a link has
+    /// ever carried.
+    ///
+    /// DERIVED rather than counted. Upstream increments on a link's open and
+    /// decrements on its close
+    /// (`commons/zenoh-stats/src/registry.rs` @ `pub(crate) fn add_link(&self, link: &LinkLabels) {`),
+    /// which is exactly the number of open links, and the series it created
+    /// never goes away. Deriving it keeps the number true for a partition that
+    /// arrives by [`Self::set_transport_metrics`], where no open or close event
+    /// passes through the registry. A multicast peer's link is the group's link
+    /// seen again and counts for neither.
+    fn links_opened(&self) -> BTreeMap<&str, i64> {
+        let mut gauge: BTreeMap<&str, i64> = self
+            .retired_protocols
+            .iter()
+            .map(|protocol| (protocol.as_str(), 0))
+            .collect();
+        for entry in self.transports.values() {
+            if !entry.labels.owns_its_links() {
+                continue;
+            }
+            for (protocol, open) in entry.metrics.link_protocols() {
+                *gauge.entry(protocol).or_insert(0) += i64::from(open);
+            }
+        }
+        gauge
     }
 
     /// `transport` closed at `now_ms`. It keeps its partition, marked
@@ -1029,6 +1130,14 @@ impl StatsRegistry {
         for id in expired {
             if let Some(entry) = self.transports.remove(&id) {
                 self.retired.retire_from(&entry.metrics);
+                if entry.labels.owns_its_links() {
+                    self.retired_protocols.extend(
+                        entry
+                            .metrics
+                            .link_protocols()
+                            .map(|(protocol, _)| String::from(protocol)),
+                    );
+                }
             }
         }
     }
@@ -1088,10 +1197,11 @@ impl StatsRegistry {
         // (`prometheus-client` skips an empty one), and a series that fell back
         // to zero stays. Upstream's help text for this gauge says "transports";
         // it is upstream's, and a consumer matching on it would read it so.
-        if !self.links_opened.is_empty() {
+        let links_opened = self.links_opened();
+        if !links_opened.is_empty() {
             out.push_str("# HELP zenoh_links_opened Count of transports currently opened.\n");
             out.push_str("# TYPE zenoh_links_opened gauge\n");
-            for (protocol, count) in &self.links_opened {
+            for (protocol, count) in &links_opened {
                 let mut labels = String::new();
                 LabelWriter { out: &mut labels }.label("protocol", protocol);
                 let _ = writeln!(out, "zenoh_links_opened{{{head}{labels}}} {count}");
@@ -1125,7 +1235,7 @@ impl StatsRegistry {
             ctx.family(
                 out,
                 direction,
-                |d| &d.bytes,
+                bytes_cells,
                 FamilyName {
                     name: dir.into(),
                     help: alloc::format!("Count of transport messages bytes {action}"),
@@ -1135,7 +1245,7 @@ impl StatsRegistry {
             ctx.family(
                 out,
                 direction,
-                |d| &d.transport_message,
+                transport_message_cells,
                 FamilyName {
                     name: alloc::format!("{dir}_transport_message"),
                     help: alloc::format!("Count of transport messages {action}"),
@@ -1145,7 +1255,7 @@ impl StatsRegistry {
             ctx.family(
                 out,
                 direction,
-                |d| &d.network_message,
+                network_message_cells,
                 FamilyName {
                     name: alloc::format!("{dir}_network_message"),
                     help: alloc::format!("Count of network messages {action}"),
@@ -1155,7 +1265,7 @@ impl StatsRegistry {
             ctx.family(
                 out,
                 direction,
-                |d| &d.network_message_payload,
+                payload_cells,
                 FamilyName {
                     name: alloc::format!("{dir}_network_message_payload"),
                     help: alloc::format!("Histogram of network messages payload {action}"),
@@ -1165,7 +1275,7 @@ impl StatsRegistry {
             ctx.family(
                 out,
                 direction,
-                |d| &d.network_message_dropped_payload,
+                dropped_payload_cells,
                 FamilyName {
                     name: alloc::format!("{dir}_network_message_dropped_payload"),
                     help: alloc::format!(
@@ -1181,7 +1291,7 @@ impl StatsRegistry {
                 ctx.family(
                     out,
                     direction,
-                    |d| &d.network_message_payload_per_key,
+                    payload_per_key_cells,
                     FamilyName {
                         name: alloc::format!("{dir}_network_message_payload_per_key"),
                         help: alloc::format!(
@@ -1228,10 +1338,10 @@ impl<'a> EncodeCtx<'a> {
     fn collect<L: StatsLabelSet + 'a, M: StatsMetric + 'a>(
         &self,
         direction: StatsDirection,
-        select: fn(&DirectionMetrics) -> &FamilyCells<L, M>,
-    ) -> BTreeMap<&'a L, Collected<'a, M>> {
-        let mut results: BTreeMap<&'a L, Collected<'a, M>> = BTreeMap::new();
-        for ((_, labels), metric) in &select(self.retired.direction(direction)).cells {
+        select: FamilySelect<L, M>,
+    ) -> BTreeMap<L, Collected<'a, M>> {
+        let mut results: BTreeMap<L, Collected<'a, M>> = BTreeMap::new();
+        for (_, labels, metric) in select(self.retired, direction) {
             results
                 .entry(labels)
                 .or_insert_with(|| Collected {
@@ -1239,19 +1349,19 @@ impl<'a> EncodeCtx<'a> {
                     transports: Vec::new(),
                 })
                 .total
-                .merge_from(metric);
+                .merge_from(&metric);
         }
         for entry in self.transports.values() {
             let disconnected = entry.disconnected_at.is_some();
             if disconnected && !self.query.disconnected {
                 continue;
             }
-            for ((link, labels), metric) in &select(entry.metrics.direction(direction)).cells {
+            for (link, labels, metric) in select(&entry.metrics, direction) {
                 let collected = results.entry(labels).or_insert_with(|| Collected {
                     total: M::default(),
                     transports: Vec::new(),
                 });
-                collected.total.merge_from(metric);
+                collected.total.merge_from(&metric);
                 let share = match collected.transports.last_mut() {
                     Some(share) if *share.labels == entry.labels => share,
                     _ => {
@@ -1267,9 +1377,9 @@ impl<'a> EncodeCtx<'a> {
                             .expect("a share was pushed on the line above")
                     }
                 };
-                share.total.merge_from(metric);
+                share.total.merge_from(&metric);
                 if let Some(link) = link {
-                    share.links.push((link, metric.clone()));
+                    share.links.push((link, metric));
                 }
             }
         }
@@ -1283,7 +1393,7 @@ impl<'a> EncodeCtx<'a> {
         &self,
         out: &mut String,
         direction: StatsDirection,
-        select: fn(&DirectionMetrics) -> &FamilyCells<L, M>,
+        select: FamilySelect<L, M>,
         name: FamilyName,
     ) {
         let collected = self.collect(direction, select);

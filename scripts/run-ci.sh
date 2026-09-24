@@ -6626,7 +6626,13 @@ layer_c1ak_cargo_test_transport_stats() {
     # e2e, and moved neither constant; its push died at gate 4 (C1bz), which is
     # BEFORE gate 4b, so nothing local ever read these. Both numbers are what the
     # commands PRINTED, not what the diff counts.
-    _runci_guarded_test C1ak 10 cargo test -p wz-session-core --features transport-stats --lib stats --quiet \
+    # R2822 — the filter is `stats::`, not `stats`. A libtest filter is a
+    # SUBSTRING, so `stats` also selected R2821's `stats_registry::tests::*` and
+    # the pinned 10 read 17 on the first run after that module landed. The
+    # registry has its own guard below, where its number can move alone.
+    _runci_guarded_test C1ak 10 cargo test -p wz-session-core --features transport-stats --lib stats:: --quiet \
+        || return 1
+    _runci_guarded_test C1ak 8 cargo test -p wz-session-core --lib stats_registry:: --quiet \
         || return 1
     _runci_guarded_test C1ak 2 cargo test -p wz-runtime-tokio --features transport-stats --test transport_stats_e2e --quiet \
         || return 1
@@ -6636,7 +6642,7 @@ layer_c1ak_cargo_test_transport_stats() {
     # to name and render a report, because a consumer carries one in a struct
     # field in every feature combination.
     # R2372 — 3 -> 6, the same R2371 arithmetic on the alloc-only arm.
-    _runci_guarded_test C1ak 6 cargo test -p wz-session-core --no-default-features --features alloc --lib stats --quiet \
+    _runci_guarded_test C1ak 6 cargo test -p wz-session-core --no-default-features --features alloc --lib stats:: --quiet \
         || return 1
     # R311y811 — the BARE arm: no `alloc`, no `transport-stats`. R311y810 un-gated
     # this module precisely so its report type could be named in EVERY feature

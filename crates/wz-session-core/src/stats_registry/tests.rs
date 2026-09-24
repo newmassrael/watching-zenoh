@@ -108,19 +108,20 @@ fn udp_link() -> LinkLabels {
 }
 
 /// S2's events: one unicast transport over one tcp link, every family touched.
-fn s2() -> (StatsRegistry, StatsTransportId) {
+fn s2() -> (StatsRegistry, StatsTransportId, LinkSlot) {
     let mut registry = StatsRegistry::new("a1b2", WhatAmI::Router, "v1");
     let transport = registry.open_unicast_transport("c3d4", WhatAmI::Peer, None);
-    let link = tcp_link();
-    registry.open_link(transport, &link);
+    let link = registry
+        .open_link(transport, tcp_link())
+        .expect("just opened");
     let metrics = registry.transport_mut(transport).expect("just opened");
-    metrics.inc_bytes(StatsDirection::Tx, &link, 100);
-    metrics.inc_bytes(StatsDirection::Rx, &link, 50);
-    metrics.inc_transport_message(StatsDirection::Tx, &link, 2);
+    metrics.inc_bytes(StatsDirection::Tx, link, 100);
+    metrics.inc_bytes(StatsDirection::Rx, link, 50);
+    metrics.inc_transport_message(StatsDirection::Tx, link, 2);
     for _ in 0..2 {
         metrics.inc_network_message(
             StatsDirection::Tx,
-            &link,
+            link,
             Priority::Data,
             MessageLabel::Put,
             false,
@@ -128,7 +129,7 @@ fn s2() -> (StatsRegistry, StatsTransportId) {
     }
     metrics.inc_network_message(
         StatsDirection::Rx,
-        &link,
+        link,
         Priority::RealTime,
         MessageLabel::Put,
         false,
@@ -158,31 +159,30 @@ fn s2() -> (StatsRegistry, StatsTransportId) {
         StatsDirection::Tx,
         Priority::Background,
         MessageLabel::Put,
-        Some("tcp"),
+        Some(link),
         ReasonLabel::Congestion,
         9,
     );
     registry.inc_resource_declared(ResourceLabel::Subscriber, LocalityLabel::Local);
-    (registry, transport)
+    (registry, transport, link)
 }
 
 /// S3's events, continuing S2: a second transport over udp, then the first
 /// one's link and the transport close.
 fn s3() -> StatsRegistry {
-    let (mut registry, first) = s2();
+    let (mut registry, first, first_link) = s2();
     let second = registry.open_unicast_transport("e5f6", WhatAmI::Client, Some("cn1"));
-    let link = udp_link();
-    registry.open_link(second, &link);
+    let link = registry.open_link(second, udp_link()).expect("just opened");
     let metrics = registry.transport_mut(second).expect("just opened");
-    metrics.inc_bytes(StatsDirection::Tx, &link, 7);
+    metrics.inc_bytes(StatsDirection::Tx, link, 7);
     metrics.inc_network_message(
         StatsDirection::Tx,
-        &link,
+        link,
         Priority::Data,
         MessageLabel::Put,
         false,
     );
-    registry.close_link(first, &tcp_link());
+    registry.close_link(first, first_link);
     registry.close_transport(first, 0);
     registry
 }
@@ -191,18 +191,20 @@ fn s3() -> StatsRegistry {
 fn s4() -> StatsRegistry {
     let mut registry = StatsRegistry::new("a1b2", WhatAmI::Peer, "v1");
     let group = registry.open_multicast_transport("udp/224.0.0.224:7446");
-    let link = LinkLabels::new("udp/10.0.0.1:7446", "udp/224.0.0.224:7446");
-    registry.open_link(group, &link);
+    let labels = LinkLabels::new("udp/10.0.0.1:7446", "udp/224.0.0.224:7446");
+    let link = registry
+        .open_link(group, labels.clone())
+        .expect("just opened");
     registry
         .transport_mut(group)
         .expect("just opened")
-        .inc_bytes(StatsDirection::Tx, &link, 11);
+        .inc_bytes(StatsDirection::Tx, link, 11);
     let peer = registry.open_multicast_peer("aa", WhatAmI::Peer, "udp/224.0.0.224:7446");
-    registry.open_link(peer, &link);
+    let peer_link = registry.open_link(peer, labels).expect("just opened");
     registry
         .transport_mut(peer)
         .expect("just opened")
-        .inc_bytes(StatsDirection::Rx, &link, 13);
+        .inc_bytes(StatsDirection::Rx, peer_link, 13);
     registry
 }
 
@@ -230,6 +232,7 @@ fn twin(title: &str) -> StatsRegistry {
     match title.split(' ').next().expect("a title has a first word") {
         "S1" => StatsRegistry::new("a1b2", WhatAmI::Router, "v1"),
         "S2" => s2().0,
+        // S3 continues S2's registry; the pair is one event sequence.
         "S3" => s3(),
         "S4" => s4(),
         "S5" => s5(),
@@ -289,10 +292,11 @@ fn every_golden_scenario_is_written_as_the_pin_writes_it() {
 fn a_retired_transport_keeps_its_transport_counts_and_loses_its_link_counts() {
     let mut registry = StatsRegistry::new("a1b2", WhatAmI::Router, "v1");
     let transport = registry.open_unicast_transport("c3d4", WhatAmI::Peer, None);
-    let link = tcp_link();
-    registry.open_link(transport, &link);
+    let link = registry
+        .open_link(transport, tcp_link())
+        .expect("just opened");
     let metrics = registry.transport_mut(transport).expect("just opened");
-    metrics.inc_bytes(StatsDirection::Tx, &link, 100);
+    metrics.inc_bytes(StatsDirection::Tx, link, 100);
     metrics.observe_network_message_payload(
         StatsDirection::Tx,
         StatSpace::User,
@@ -418,6 +422,46 @@ fn label_values_are_escaped_only_where_the_format_requires() {
     assert_eq!(out, "a\\\"b\\\\c\\nd");
 }
 
+/// A partition a session recorded on its own, handed in by
+/// [`StatsRegistry::set_transport_metrics`], answers exactly as one recorded
+/// through the registry: the link gauge is derived from what the partition
+/// holds, so it follows an open and a close no registry call saw, and its
+/// zero series survives the transport's retirement.
+#[test]
+fn a_partition_handed_in_counts_its_links_without_registry_events() {
+    let mut registry = StatsRegistry::new("a1b2", WhatAmI::Router, "v1");
+    let transport = registry.open_unicast_transport("c3d4", WhatAmI::Peer, None);
+
+    let mut session_side = TransportMetrics::default();
+    let link = session_side.open_link(tcp_link());
+    session_side.inc_bytes(StatsDirection::Tx, link, 100);
+    registry.set_transport_metrics(transport, session_side.clone());
+
+    let gauge = |registry: &StatsRegistry| {
+        let mut doc = String::new();
+        registry.encode_metrics(&mut doc, MetricsQuery::default());
+        doc.lines()
+            .find(|line| line.starts_with("zenoh_links_opened{"))
+            .map(String::from)
+    };
+    let open = "zenoh_links_opened{local_id=\"a1b2\",local_whatami=\"router\",protocol=\"tcp\"} 1";
+    let closed =
+        "zenoh_links_opened{local_id=\"a1b2\",local_whatami=\"router\",protocol=\"tcp\"} 0";
+    assert_eq!(gauge(&registry).as_deref(), Some(open));
+
+    session_side.close_all_links();
+    registry.set_transport_metrics(transport, session_side);
+    registry.close_transport(transport, 0);
+    assert_eq!(gauge(&registry).as_deref(), Some(closed));
+
+    registry.collect_garbage(GARBAGE_COLLECTION_DELAY_MS + 1);
+    assert_eq!(
+        gauge(&registry).as_deref(),
+        Some(closed),
+        "the series outlives the transport it was counted from"
+    );
+}
+
 /// Closing a link folds its counts into the transport: the per-link block
 /// loses the link while the aggregate and the per-transport partition keep the
 /// count — S3's first transport shows the same with the transport closed too.
@@ -425,13 +469,14 @@ fn label_values_are_escaped_only_where_the_format_requires() {
 fn closing_a_link_moves_its_counts_to_the_transport() {
     let mut registry = StatsRegistry::new("a1b2", WhatAmI::Router, "v1");
     let transport = registry.open_unicast_transport("c3d4", WhatAmI::Peer, None);
-    let link = tcp_link();
-    registry.open_link(transport, &link);
+    let link = registry
+        .open_link(transport, tcp_link())
+        .expect("just opened");
     registry
         .transport_mut(transport)
         .expect("just opened")
-        .inc_bytes(StatsDirection::Tx, &link, 100);
-    registry.close_link(transport, &link);
+        .inc_bytes(StatsDirection::Tx, link, 100);
+    registry.close_link(transport, link);
 
     let mut doc = String::new();
     registry.encode_metrics(&mut doc, MetricsQuery::default());

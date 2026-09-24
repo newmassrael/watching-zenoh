@@ -5727,7 +5727,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         }
         #[cfg(not(feature = "transport-stats"))]
         {
-            crate::stats::NetworkStatsClass::control()
+            crate::stats::NetworkStatsClass::unread()
         }
     }
 
@@ -5745,7 +5745,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         }
         #[cfg(not(feature = "transport-stats"))]
         {
-            crate::stats::NetworkStatsClass::control()
+            crate::stats::NetworkStatsClass::unread()
         }
     }
 
@@ -5763,7 +5763,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         }
         #[cfg(not(feature = "transport-stats"))]
         {
-            crate::stats::NetworkStatsClass::control()
+            crate::stats::NetworkStatsClass::unread()
         }
     }
 
@@ -6033,7 +6033,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             wz_codecs::declare::Declare::MAX_ENCODED_BYTES,
             // Control plane: `n_msgs` only, no payload cell (upstream's payload
             // labels cover the four data kinds).
-            crate::stats::NetworkStatsClass::control(),
+            crate::stats::NetworkStatsClass::control(crate::stats::MessageLabel::Declare),
             crate::frame_encode::declare_body(&declare),
         )
     }
@@ -6061,7 +6061,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             Priority::Control,
             reliable,
             wz_codecs::oam::Oam::MAX_ENCODED_BYTES,
-            crate::stats::NetworkStatsClass::control(),
+            crate::stats::NetworkStatsClass::control(crate::stats::MessageLabel::Oam),
             crate::frame_encode::oam_body(&oam),
         )
     }
@@ -6138,7 +6138,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             wz_codecs::response_final::ResponseFinal::MAX_ENCODED_BYTES,
             // A pure correlation marker — no key expression and no payload, so
             // it is control plane even though it closes a data-plane exchange.
-            crate::stats::NetworkStatsClass::control(),
+            crate::stats::NetworkStatsClass::control(crate::stats::MessageLabel::ResponseFinal),
             crate::frame_encode::response_final_body(&response_final),
         )
     }
@@ -6162,7 +6162,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             Priority::Control,
             reliable,
             wz_codecs::interest::Interest::MAX_ENCODED_BYTES,
-            crate::stats::NetworkStatsClass::control(),
+            crate::stats::NetworkStatsClass::control(crate::stats::MessageLabel::Interest),
             crate::frame_encode::interest_body(&interest),
         )
     }

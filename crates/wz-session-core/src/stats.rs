@@ -342,6 +342,53 @@ pub struct PayloadClass {
     pub pl_bytes: usize,
 }
 
+/// The network message kind a registry sample counts
+/// (`commons/zenoh-stats/src/labels.rs` @ `pub enum MessageLabel`).
+///
+/// Not [`StatMessage`]: that axis is the JSON `_stats` schema's four payload
+/// kinds, which folds an `Err` reply onto `Reply` and has no kind at all for a
+/// control-plane message, while this one names every network body — nine of
+/// them, `reply-err` apart from `reply`
+/// (`commons/zenoh-stats/src/labels.rs` @ `ResponseBody::Err(_) => MessageLabel::ReplyErr,`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum MessageLabel {
+    /// A `Push` carrying a `Put`.
+    Put,
+    /// A `Push` carrying a `Del`.
+    Del,
+    /// A `Request`.
+    Query,
+    /// A `Response` carrying a `Reply`.
+    Reply,
+    /// A `Response` carrying an `Err`.
+    ReplyErr,
+    /// A `ResponseFinal`.
+    ResponseFinal,
+    /// An `Interest`.
+    Interest,
+    /// A `Declare`.
+    Declare,
+    /// An `OAM`.
+    Oam,
+}
+
+impl MessageLabel {
+    /// Upstream's label value.
+    pub const fn label(self) -> &'static str {
+        match self {
+            MessageLabel::Put => "put",
+            MessageLabel::Del => "delete",
+            MessageLabel::Query => "query",
+            MessageLabel::Reply => "reply",
+            MessageLabel::ReplyErr => "reply-err",
+            MessageLabel::ResponseFinal => "response-final",
+            MessageLabel::Interest => "interest",
+            MessageLabel::Declare => "declare",
+            MessageLabel::Oam => "oam",
+        }
+    }
+}
+
 /// How one network message counts — the parameter every TX sender hands the
 /// `dispatch_network_message` chokepoint, and the RX walk hands
 /// [`TransportStats::inc_rx_network`].
@@ -350,8 +397,17 @@ pub struct PayloadClass {
 /// payload class: upstream's payload counters cover only the four data kinds,
 /// so those messages count toward `n_msgs` and nothing else. That is
 /// [`NetworkStatsClass::control`].
+///
+/// R2822 — every class also names its [`MessageLabel`], the registry's nine-way
+/// kind. It is a constructor PARAMETER rather than something derived later, so
+/// a sender cannot build a class without saying what it sends: the compiler
+/// asks each of the typed senders, which is the population, and a new sender
+/// cannot fall through. Only [`Self::undecoded`] can leave it unnamed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct NetworkStatsClass {
+    /// The registry's message kind; `None` only for a received body this build
+    /// could not decode and whose MID does not settle the kind.
+    pub kind: Option<MessageLabel>,
     /// Which medium carried the bytes.
     pub medium: StatMedium,
     /// The payload classification, or `None` for a control-plane message.
@@ -359,18 +415,55 @@ pub struct NetworkStatsClass {
 }
 
 impl NetworkStatsClass {
-    /// A control-plane network message: counts toward `n_msgs` on the `net`
-    /// medium and toward no payload counter.
-    pub const fn control() -> NetworkStatsClass {
+    /// A control-plane network message of `kind`: counts toward `n_msgs` on
+    /// the `net` medium and toward no payload counter.
+    pub const fn control(kind: MessageLabel) -> NetworkStatsClass {
         NetworkStatsClass {
+            kind: Some(kind),
             medium: StatMedium::Net,
             payload: None,
         }
     }
 
-    /// A data-plane network message whose payload rode the LINK.
-    pub const fn net(message: StatMessage, space: StatSpace, pl_bytes: usize) -> NetworkStatsClass {
+    /// A received network message whose body this build has no codec for.
+    ///
+    /// It still counts toward `n_msgs`, and it carries NO registry kind: the
+    /// registry leaves it out rather than file it under a kind it may not be.
+    /// Such a message exists only in a build that compiles out the matching
+    /// codec — upstream always decodes — and in exactly that build the wire
+    /// constant that would name its MID is compiled out too
+    /// (`wz_codecs::wire_const` gates each network MID on its codec), so a
+    /// kind read off the MID would need a second, ungated copy of the wire
+    /// table for a case no full build reaches.
+    pub const fn undecoded() -> NetworkStatsClass {
         NetworkStatsClass {
+            kind: None,
+            medium: StatMedium::Net,
+            payload: None,
+        }
+    }
+
+    /// The class a sender hands the chokepoint in a build WITHOUT
+    /// `transport-stats`, where nothing reads it. Named so that building one
+    /// does not mean inventing a kind or resolving a key expression for a
+    /// counter that is not compiled.
+    pub const fn unread() -> NetworkStatsClass {
+        NetworkStatsClass {
+            kind: None,
+            medium: StatMedium::Net,
+            payload: None,
+        }
+    }
+
+    /// A data-plane network message of `kind` whose payload rode the LINK.
+    pub const fn net(
+        kind: MessageLabel,
+        message: StatMessage,
+        space: StatSpace,
+        pl_bytes: usize,
+    ) -> NetworkStatsClass {
+        NetworkStatsClass {
+            kind: Some(kind),
             medium: StatMedium::Net,
             payload: Some(PayloadClass {
                 message,
@@ -380,10 +473,17 @@ impl NetworkStatsClass {
         }
     }
 
-    /// A data-plane network message whose payload rode SHARED MEMORY — the
-    /// message carried a descriptor, so `n_msgs` counts on the `shm` medium.
-    pub const fn shm(message: StatMessage, space: StatSpace, pl_bytes: usize) -> NetworkStatsClass {
+    /// A data-plane network message of `kind` whose payload rode SHARED MEMORY
+    /// — the message carried a descriptor, so `n_msgs` counts on the `shm`
+    /// medium.
+    pub const fn shm(
+        kind: MessageLabel,
+        message: StatMessage,
+        space: StatSpace,
+        pl_bytes: usize,
+    ) -> NetworkStatsClass {
         NetworkStatsClass {
+            kind: Some(kind),
             medium: StatMedium::Shm,
             payload: Some(PayloadClass {
                 message,
@@ -967,17 +1067,20 @@ mod tests {
     fn the_network_seam_splits_by_medium_kind_and_space() {
         let s = TransportStats::default();
         s.inc_tx_network(&NetworkStatsClass::net(
+            MessageLabel::Put,
             StatMessage::Put,
             StatSpace::User,
             30,
         ));
         s.inc_tx_network(&NetworkStatsClass::shm(
+            MessageLabel::Put,
             StatMessage::Put,
             StatSpace::User,
             12,
         ));
-        s.inc_tx_network(&NetworkStatsClass::control());
+        s.inc_tx_network(&NetworkStatsClass::control(MessageLabel::Declare));
         s.inc_rx_network(&NetworkStatsClass::net(
+            MessageLabel::Reply,
             StatMessage::Reply,
             StatSpace::Admin,
             7,

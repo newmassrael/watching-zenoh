@@ -635,7 +635,7 @@ pub fn stats_class<F>(msg: &NetworkMessage, resolve_alias: F) -> crate::stats::N
 where
     F: Fn(u64) -> Option<alloc::string::String>,
 {
-    use crate::stats::NetworkStatsClass;
+    use crate::stats::{MessageLabel, NetworkStatsClass};
     // The three arms below are `resolve_alias`'s ONLY consumers and each is
     // cfg-gated, so a build with all three off leaves the parameter genuinely
     // unused and this crate's `-D warnings` refuses to compile. That build is
@@ -661,12 +661,13 @@ where
         // Control plane: `n_msgs` and nothing else. Listed rather than caught by
         // a wildcard so a NEW network MID has to be classified here on purpose.
         #[cfg(feature = "codec-response-final")]
-        NetworkMessage::ResponseFinal(_) => NetworkStatsClass::control(),
+        NetworkMessage::ResponseFinal(_) => NetworkStatsClass::control(MessageLabel::ResponseFinal),
         #[cfg(feature = "codec-declare")]
-        NetworkMessage::Declare(_) => NetworkStatsClass::control(),
-        NetworkMessage::Oam(_) => NetworkStatsClass::control(),
-        NetworkMessage::Interest(_) => NetworkStatsClass::control(),
-        NetworkMessage::Unknown { .. } => NetworkStatsClass::control(),
+        NetworkMessage::Declare(_) => NetworkStatsClass::control(MessageLabel::Declare),
+        NetworkMessage::Oam(_) => NetworkStatsClass::control(MessageLabel::Oam),
+        NetworkMessage::Interest(_) => NetworkStatsClass::control(MessageLabel::Interest),
+        // A body this build has no codec for; see `NetworkStatsClass::undecoded`.
+        NetworkMessage::Unknown { .. } => NetworkStatsClass::undecoded(),
     }
 }
 
@@ -714,12 +715,13 @@ where
     )
 ))]
 fn stats_data_class(
+    kind: crate::stats::MessageLabel,
     message: crate::stats::StatMessage,
     space: crate::stats::StatSpace,
     pl_bytes: usize,
     _extensions: Option<&[wz_codecs::ext_entry::ExtEntryOwned]>,
 ) -> crate::stats::NetworkStatsClass {
-    let class = crate::stats::NetworkStatsClass::net(message, space, pl_bytes);
+    let class = crate::stats::NetworkStatsClass::net(kind, message, space, pl_bytes);
     #[cfg(feature = "transport-shm")]
     if _extensions.is_some_and(crate::extshm::body_has_shm_marker) {
         return class.on_shm();
@@ -737,19 +739,24 @@ pub fn push_stats_class<F>(
 where
     F: Fn(u64) -> Option<alloc::string::String>,
 {
-    use crate::stats::StatMessage;
+    use crate::stats::{MessageLabel, StatMessage};
     use wz_codecs::push::PushOwnedVariant as V;
     let space = stats_space_of(&push.keyexpr, &resolve_alias);
     match &push.body {
         V::CodecZenohMsgPut(b) | V::Default { body: b, .. } => stats_data_class(
+            MessageLabel::Put,
             StatMessage::Put,
             space,
             b.payload_len as usize,
             b.extensions.as_deref(),
         ),
-        V::CodecZenohMsgDel(b) => {
-            stats_data_class(StatMessage::Del, space, 0, b.extensions.as_deref())
-        }
+        V::CodecZenohMsgDel(b) => stats_data_class(
+            MessageLabel::Del,
+            StatMessage::Del,
+            space,
+            0,
+            b.extensions.as_deref(),
+        ),
     }
 }
 
@@ -762,20 +769,29 @@ pub fn request_stats_class<F>(
 where
     F: Fn(u64) -> Option<alloc::string::String>,
 {
-    use crate::stats::StatMessage;
+    use crate::stats::{MessageLabel, StatMessage};
     use wz_codecs::request::RequestOwnedVariant as V;
     let space = stats_space_of(&request.keyexpr, &resolve_alias);
+    // Every Request is a `query` to the registry whatever its body: upstream
+    // labels by the network message, and its `Request` arm names one kind
+    // (`commons/zenoh-stats/src/labels.rs` @ `NetworkBodyRef::Request(_) => MessageLabel::Query,`).
     match &request.body {
         V::CodecZenohMsgPut(b) => stats_data_class(
+            MessageLabel::Query,
             StatMessage::Put,
             space,
             b.payload_len as usize,
             b.extensions.as_deref(),
         ),
-        V::CodecZenohMsgDel(b) => {
-            stats_data_class(StatMessage::Del, space, 0, b.extensions.as_deref())
-        }
+        V::CodecZenohMsgDel(b) => stats_data_class(
+            MessageLabel::Query,
+            StatMessage::Del,
+            space,
+            0,
+            b.extensions.as_deref(),
+        ),
         V::CodecZenohQuery(b) | V::Default { body: b, .. } => stats_data_class(
+            MessageLabel::Query,
             StatMessage::Query,
             space,
             b.parameters_len.unwrap_or(0) as usize,
@@ -795,7 +811,7 @@ pub fn response_stats_class<F>(
 where
     F: Fn(u64) -> Option<alloc::string::String>,
 {
-    use crate::stats::StatMessage;
+    use crate::stats::{MessageLabel, StatMessage};
     use wz_codecs::response::ResponseOwnedVariant as V;
     let space = stats_space_of(&response.keyexpr, &resolve_alias);
     match &response.body {
@@ -803,17 +819,24 @@ where
             use wz_codecs::reply::ReplyOwnedVariant as RV;
             match &b.body {
                 RV::CodecZenohMsgPut(p) | RV::Default { body: p, .. } => stats_data_class(
+                    MessageLabel::Reply,
                     StatMessage::Reply,
                     space,
                     p.payload_len as usize,
                     p.extensions.as_deref(),
                 ),
-                RV::CodecZenohMsgDel(d) => {
-                    stats_data_class(StatMessage::Reply, space, 0, d.extensions.as_deref())
-                }
+                RV::CodecZenohMsgDel(d) => stats_data_class(
+                    MessageLabel::Reply,
+                    StatMessage::Reply,
+                    space,
+                    0,
+                    d.extensions.as_deref(),
+                ),
             }
         }
+        // The JSON schema folds an Err onto `reply`; the registry does not.
         V::CodecZenohErr(b) => stats_data_class(
+            MessageLabel::ReplyErr,
             StatMessage::Reply,
             space,
             b.payload_len as usize,
