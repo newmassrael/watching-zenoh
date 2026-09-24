@@ -258,6 +258,7 @@ async fn leg(port: u16, matcher: WhatAmIMatcher) -> AcceptLoopSummary {
             reconcile: None,
             offer: SessionOffer::universal(),
             retry: RetryPolicy::constant(1000),
+            stats: None,
             #[cfg(feature = "transport-multilink")]
             max_links: 1,
             // R2758 — unbounded: this test's subject is gossip autoconnect.

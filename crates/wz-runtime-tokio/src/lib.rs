@@ -1907,6 +1907,12 @@ pub mod storage_gc_service;
 #[cfg(feature = "routing-accept")]
 pub mod accept_loop;
 
+/// R2844 — the stats registry of a node, recorded by whatever drives its
+/// sessions (the face loop, the storage host) where a transport opens and
+/// closes. Gated as the session actions it records from are.
+#[cfg(feature = "transport-unicast")]
+pub mod node_stats;
+
 /// R311qc — the data-plane forwarding atom: the [`routing_forward::RoutingForwarder`]
 /// that backs the [`accept_loop`]'s `FaceForwarder` seam with the
 /// [`wz_session_core::routing::RouteTable`] kernel, turning a held face into a

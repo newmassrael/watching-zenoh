@@ -5676,6 +5676,7 @@ impl RouterForwarder {
         }
         let view = LocalQueryView {
             keyexpr,
+            parameters: wz_session_core::query::request_query_parameters(request),
             rid: request.rid,
             qos: wz_session_core::declare_ext_qos::read_request_qos(request),
         };

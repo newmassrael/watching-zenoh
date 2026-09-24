@@ -450,10 +450,11 @@ pub struct AdminLiveInputs {
     /// ⚠ THE CALLER OWNS THIS CHOICE, and that is the whole reason it is here
     /// rather than resolved inside the declare. A pure-Session host holds ONE
     /// session, so a registry holding that one transport IS the node's
-    /// (`SessionLinkActions::session_stats_registry`). A MESH host holds N faces
-    /// and must hand in one registry across all of them; until it does, `None`
-    /// states that rather than serving one face's numbers as if they were the
-    /// node's (R311y810). A seam that picked for the caller would force the
+    /// (`SessionLinkActions::session_stats_registry`). A node that holds N faces,
+    /// or serves sessions in turn, hands in ONE registry across all of them,
+    /// recorded by whatever drives those sessions (R2844, the runtime's
+    /// `node_stats`) — never one face's numbers as if they were the node's
+    /// (R311y810). A seam that picked for the caller would force the
     /// second kind of host to re-implement the answerer, which is exactly the
     /// duplication this type exists to end.
     pub stats: Option<crate::stats_registry::StatsRegistry>,
@@ -1459,9 +1460,8 @@ pub struct AdminAnswerCtx<'a> {
     ///
     /// Carried on the CONTEXT rather than read inside the answerer because the
     /// answerer is session-independent by contract: a Session passes a registry
-    /// of its one transport, while a mesh host has no registry across its faces
-    /// yet and passes `None` — a residual named at the call site, not hidden by
-    /// one.
+    /// of its one transport, and a mesh or storage host passes the registry its
+    /// session driver recorded across every transport it held (R2844).
     ///
     /// UNGATED, and deliberately: a `#[cfg]` here would be a cfg-gated pub
     /// struct field, so every one of the five construction sites would need a

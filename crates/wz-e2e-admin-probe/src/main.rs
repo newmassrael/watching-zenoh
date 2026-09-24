@@ -151,15 +151,41 @@ async fn run_get(
     let final_tx = std::sync::Mutex::new(Some(final_tx));
 
     let replies_cb = replies.clone();
+    // R2844 — a selector is a key expression and, after the first `?`, its
+    // parameters, which travel on the Query body rather than in the key. The
+    // whole string used to be sent as the key: `metrics?per_link=false`
+    // matched nothing and the host appeared to answer nothing.
+    let (keyexpr, options) = match selector.split_once('?') {
+        Some((keyexpr, parameters)) => (
+            keyexpr,
+            QueryOptions::get().with_parameters(parameters.as_bytes().to_vec()),
+        ),
+        None => (selector, QueryOptions::get()),
+    };
     let query = session.query(
-        selector,
-        QueryOptions::get(),
+        keyexpr,
+        options,
         move |reply| {
             let seen = replies_cb.fetch_add(1, Ordering::SeqCst) + 1;
             log::info!(
                 "{BINARY}: STEP {n} GET reply #{seen} keyexpr='{}'",
                 reply.keyexpr()
             );
+            // R2844 — and what the reply SAID, one log line per body line, so a
+            // fixture can read a host's answer and not only count it. A text
+            // body is every admin leg this tree serves; a binary one is logged
+            // by length alone rather than guessed at.
+            match std::str::from_utf8(reply.payload()) {
+                Ok(text) => {
+                    for line in text.lines() {
+                        log::info!("{BINARY}: STEP {n} BODY #{seen} {line}");
+                    }
+                }
+                Err(_) => log::info!(
+                    "{BINARY}: STEP {n} BODY #{seen} <binary, {} bytes>",
+                    reply.payload().len()
+                ),
+            }
         },
         move |rid| {
             log::info!("{BINARY}: STEP {n} GET final rid={rid}");

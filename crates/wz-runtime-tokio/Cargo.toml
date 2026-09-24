@@ -237,7 +237,13 @@ adminspace-core = ["query-queryable", "wz-session-core/adminspace-core"]
 # dispatch branch in declare_adminspace's handler replying the OpenMetrics
 # build-info body (text/plain). Composes adminspace-core (the dispatch + the
 # metrics_text builder).
-adminspace-metrics = ["adminspace-core", "wz-session-core/adminspace-metrics"]
+# R2844 — plus the selector-parameters projection the leg reads; see the
+# session-core feature of the same name.
+adminspace-metrics = [
+    "adminspace-core",
+    "wz-session-core/adminspace-metrics",
+    "query-selector-parameters",
+]
 # adminspace-introspection-handlers (§5.23) — the per-entity subscriber/queryable
 # admin introspection. Composes adminspace-core (the reply machinery) + the
 # wz-session-core reply legs, and the caller-side live materialization: the

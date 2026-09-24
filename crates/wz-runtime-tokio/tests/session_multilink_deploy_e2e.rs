@@ -273,6 +273,7 @@ async fn deploy_active_two_links_aggregate_segregate_reject_survive() {
             // suite keeps measuring the aggregation path it was written for rather
             // than the new schedule; the growth has its own witnesses.
             retry: RetryPolicy::constant(1000),
+            stats: None,
             max_links: 2,
             // R2758 — unbounded: this test's subject is link aggregation, and
             // an aggregated peer is ONE session however many links it brings.
@@ -493,6 +494,7 @@ async fn deploy_active_dial_side_aggregates_through_the_loop() {
             // suite keeps measuring the aggregation path it was written for rather
             // than the new schedule; the growth has its own witnesses.
             retry: RetryPolicy::constant(1000),
+            stats: None,
             max_links: 2,
             // R2758 — unbounded: this test's subject is link aggregation, and
             // an aggregated peer is ONE session however many links it brings.
@@ -530,6 +532,7 @@ async fn deploy_active_dial_side_aggregates_through_the_loop() {
             // suite keeps measuring the aggregation path it was written for rather
             // than the new schedule; the growth has its own witnesses.
             retry: RetryPolicy::constant(1000),
+            stats: None,
             max_links: 2,
             // R2758 — unbounded: this test's subject is link aggregation, and
             // an aggregated peer is ONE session however many links it brings.
@@ -641,6 +644,7 @@ async fn deploy_active_qos_priority_segregates_across_links() {
             // suite keeps measuring the aggregation path it was written for rather
             // than the new schedule; the growth has its own witnesses.
             retry: RetryPolicy::constant(1000),
+            stats: None,
             max_links: 2,
             // R2758 — unbounded: this test's subject is link aggregation, and
             // an aggregated peer is ONE session however many links it brings.

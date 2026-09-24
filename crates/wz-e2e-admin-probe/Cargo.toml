@@ -50,6 +50,12 @@ publish = false
 #                      the clean end-of-chain rather than a local timeout to
 #                      know a step is over.
 #   * codec-push / pubsub-put — the PUT half of the script.
+#   * query-selector-parameters — R2844: a `--get` is a SELECTOR, and its part
+#                      after `?` travels as the Query's parameters, as
+#                      upstream's `z_get(keyexpr, parameters, ..)` carries
+#                      them. Without it `metrics?per_link=false` went out as
+#                      a key expression, matched nothing, and read as a host
+#                      that answered nothing.
 wz = { path = "../wz", default-features = false, features = [
     "runtime-tokio",
     "transport-unicast",
@@ -66,6 +72,7 @@ wz = { path = "../wz", default-features = false, features = [
     "keyexpr-canon",
     "query-get",
     "query-reply",
+    "query-selector-parameters",
     "codec-response-final",
     "codec-push",
     "pubsub-put",

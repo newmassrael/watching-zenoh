@@ -99,6 +99,7 @@ fn sources(
         max_sessions: usize::MAX,
         offer: SessionOffer::universal(),
         retry: RetryPolicy::ZENOH_DEFAULT,
+        stats: None,
     }
 }
 

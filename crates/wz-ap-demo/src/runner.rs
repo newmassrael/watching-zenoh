@@ -4868,6 +4868,15 @@ async fn run_peer_until(
     // SSOT (the SAME answerer `Session::declare_adminspace` uses). The reply unwinds
     // to the querier. `sessions[]` is empty — the live forwarder-faces enumeration
     // is a documented deferral; the config GET (the §5.23 headline) does not need it.
+    //
+    // R2844 — the node's stats registry: the face loop records every face into
+    // it, and the metrics leg below serves a snapshot of it. `None` in a build
+    // without `transport-stats`, which the library decides.
+    let node_stats = wz::runtime_tokio::node_stats::NodeStats::for_node(
+        &wz::runtime_tokio::zid_hex::zid_to_zenoh_hex(&params.zid),
+        params.whatami,
+        env!("CARGO_PKG_VERSION"),
+    );
     if config_queryable {
         use wz::runtime_tokio::adminspace::{
             admin_config_key, admin_queryable_key, answer_admin_query, AdminAnswerCtx,
@@ -4922,22 +4931,25 @@ async fn run_peer_until(
         // is what wz did not do: the leg existed only on the router host.
         #[cfg(feature = "adminspace-router-linkstate")]
         let peers_view = forwarder.net_view();
+        let node_stats_h = node_stats.clone();
         let handler = move |view: &dyn QueryView, out: &mut dyn ReplyOut| {
             let admin_read =
                 wz::runtime_tokio::admin_read_permit(&shared.borrow().admin_permissions());
             let config_json = shared.borrow().to_admin_json();
+            // R2844 — the NODE's registry, which the face loop fills with every
+            // face this peer holds. This was `None` since R311y810: wz's counters
+            // are per-session and this node holds N faces, and there was no
+            // counterpart to upstream's one registry to serve instead.
+            let stats = node_stats_h
+                .as_ref()
+                .map(wz::runtime_tokio::node_stats::NodeStats::snapshot);
             let ctx = AdminAnswerCtx {
                 zid_hex: &zid_hex,
                 whatami: whatami_str,
                 version: &version,
                 locators: &locators,
                 read: admin_read,
-                // R311y810 — a MESH host has no counterpart to upstream's
-                // transport-MANAGER aggregate: wz's counters are per-session and
-                // this node holds N faces, so there is no single report to serve.
-                // `None` states that rather than serving one face's numbers as if
-                // they were the node's.
-                stats: None,
+                stats: stats.as_ref(),
             };
             // R311y237 — the node's compiled-in plugin registry (wz-native subsystem
             // set; e.g. storage_manager under `storage-backend`). Empty without the
@@ -5288,6 +5300,8 @@ async fn run_peer_until(
             // below carries the same one so the admin GET still renders the
             // cadence actually in force.
             retry: opts.connect_retry,
+            // R2844 — the same registry the metrics leg above serves.
+            stats: node_stats,
         },
         params,
         TokioTime::new(),
@@ -6630,6 +6644,14 @@ async fn run_router_hat_until(
     // and the introspection legs are built below. A comment that names a
     // deferral the code beneath it has already closed reads as the current
     // contract, which is how this atom's reason kept re-counting residuals.
+    //
+    // R2844 — the node's stats registry, as on the peer host: the face loop
+    // records every face into it and the metrics leg serves a snapshot of it.
+    let node_stats = wz::runtime_tokio::node_stats::NodeStats::for_node(
+        &wz::runtime_tokio::zid_hex::zid_to_zenoh_hex(&params.zid),
+        params.whatami,
+        env!("CARGO_PKG_VERSION"),
+    );
     #[cfg(feature = "adminspace-router-linkstate")]
     {
         use wz::runtime_tokio::adminspace::{
@@ -6676,6 +6698,7 @@ async fn run_router_hat_until(
             "wz-ap-demo router-hat: adminspace read permit = {}",
             wz::runtime_tokio::admin_read_permit(&admin_cfg.borrow().admin_permissions())
         );
+        let node_stats_h = node_stats.clone();
         let handler = move |view: &dyn QueryView, out: &mut dyn ReplyOut| {
             // Resolved per GET off the shared config, exactly as the peer host does —
             // zenoh re-reads the live config inside its admin handler
@@ -6693,14 +6716,17 @@ async fn run_router_hat_until(
             // code beneath it has already paid is worse than no comment -- it is
             // read as the current contract, which is how this atom's reason kept
             // re-counting a residual R2636 had closed.
+            let stats = node_stats_h
+                .as_ref()
+                .map(wz::runtime_tokio::node_stats::NodeStats::snapshot);
             let ctx = AdminAnswerCtx {
                 zid_hex: &zid_hex,
                 whatami: whatami_str,
                 version: &version,
                 locators: &locators,
                 read: admin_read,
-                // R311y810 — the mesh-host `None`; see the peer host above.
-                stats: None,
+                // R2844 — the node's registry; see the peer host above.
+                stats: stats.as_ref(),
             };
             // R311y237 — the router node's compiled-in plugin registry.
             #[cfg(feature = "adminspace-plugins-handlers")]
@@ -7104,6 +7130,8 @@ async fn run_router_hat_until(
             // same value seeds the admin config below, so the cadence the loop runs
             // and the cadence the config GET reports cannot disagree.
             retry: opts.connect_retry,
+            // R2844 — the same registry the metrics leg serves.
+            stats: node_stats,
         },
         params,
         TokioTime::new(),
@@ -8186,6 +8214,14 @@ pub(crate) async fn run_storage_host(listen: &str, opts: StorageHostOpts) -> io:
     // The accept loop serves until the process is killed (the witness SIGKILLs the
     // host via ChildGuard) or a graceful-shutdown signal arrives (Ctrl-C / SIGTERM),
     // handled via the same `race_against_shutdown` SSOT the one-shot demo uses.
+    //
+    // R2844 — ONE registry across every client session this host serves, in
+    // turn, as upstream keeps one per runtime: a session is a transport that
+    // opens when it is Established and closes when its drive ends, and its
+    // counts outlive it in the registry's totals. Numbered in accept order.
+    let node_stats =
+        wz::runtime_tokio::node_stats::NodeStats::for_node(&zid_hex, params.whatami, &version);
+    let mut next_transport: u64 = 0;
     loop {
         let dialed = match race_against_shutdown(
             accept_bound_on(&mut listener),
@@ -8225,6 +8261,11 @@ pub(crate) async fn run_storage_host(listen: &str, opts: StorageHostOpts) -> io:
         log::info!("wz-ap-demo storage-host: client session Established");
 
         let actions = opened.actions.clone();
+        let transport_key = next_transport;
+        next_transport += 1;
+        if let Some(stats) = &node_stats {
+            stats.transport_opened(transport_key, &actions);
+        }
         let session = TokioSession::new(
             actions.clone(),
             Arc::new(Mutex::new(ApplicationLayerObserver::new())),
@@ -8267,6 +8308,7 @@ pub(crate) async fn run_storage_host(listen: &str, opts: StorageHostOpts) -> io:
         // ⚠ The key is unchanged: the seam derives `admin_queryable_key(zid, whatami)`,
         // which is the same function that built `queryable_key` above.
         let get_version_arg = get_version.clone();
+        let get_stats = node_stats.clone();
         let _admin_queryable: Option<Queryable> = match session.declare_adminspace_with_live_inputs(
             get_version_arg,
             get_locators.clone(),
@@ -8325,12 +8367,15 @@ pub(crate) async fn run_storage_host(listen: &str, opts: StorageHostOpts) -> io:
                     // GET, so the two things this reply reports about the config
                     // cannot come from different moments.
                     config_json: admin_config_json_of(&get_cfg),
-                    // R311y810 — the mesh-host `None`, KEPT: wz's counters are
-                    // per-session and this node holds N faces, so there is no single
-                    // report to serve. The seam takes this from the caller precisely
-                    // so a mesh host does not have to re-implement the answerer to
-                    // say so.
-                    stats: None,
+                    // R2844 — the host's registry across every client session it
+                    // has served. This was `None` since R311y810 on the premise that
+                    // this node holds N faces; re-measured, it holds ONE session at
+                    // a time, in sequence, and the one-session registry would drop
+                    // every earlier session's counts, which upstream keeps in its
+                    // totals. The seam still takes this from the caller.
+                    stats: get_stats
+                        .as_ref()
+                        .map(wz::runtime_tokio::node_stats::NodeStats::snapshot),
                 }
             },
         ) {
@@ -8918,6 +8963,9 @@ pub(crate) async fn run_storage_host(listen: &str, opts: StorageHostOpts) -> io:
         // actions; now every hosted storage does, until the next accepted client
         // rebinds them off it.
         writer_handle.abort();
+        if let Some(stats) = &node_stats {
+            stats.transport_closed(transport_key);
+        }
         match outcome {
             Some(o) => log::info!("wz-ap-demo storage-host: client session ended: {o:?}"),
             None => {

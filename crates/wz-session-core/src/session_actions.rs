@@ -2079,15 +2079,37 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             self.params.whatami,
             build_version,
         );
-        let peer_whatami = self.peer_whatami_wire().and_then(crate::WhatAmI::from_wire);
-        if let (Some(zid), Some(whatami)) = (self.peer_zid(), peer_whatami) {
-            let cn = self
-                .link_subject()
-                .and_then(|subject| subject.cert_common_name.as_deref());
-            let transport = registry.open_unicast_transport(&zid_to_zenoh_hex(&zid), whatami, cn);
+        if let Some(transport) = self.open_stats_transport(&mut registry) {
             registry.set_transport_metrics(transport, self.stats_metrics());
         }
         registry
+    }
+
+    /// R2844 — register this session in `registry` as the unicast transport
+    /// upstream's transport manager would register for it, and return its id:
+    /// the peer's zid and role from the handshake and the common name on its
+    /// link's certificate
+    /// (`io/zenoh-transport/src/unicast/manager.rs` @ `let stats = self.stats.unicast_transport_stats(`).
+    /// `None` before the handshake has named the peer — there is no transport
+    /// to register yet.
+    ///
+    /// The ONE place a session's transport labels are derived, so the
+    /// one-session registry ([`Self::session_stats_registry`]) and a mesh
+    /// node's registry, which opens one of these per face, cannot label the
+    /// same session two ways.
+    #[cfg(feature = "alloc")]
+    pub fn open_stats_transport(
+        &self,
+        registry: &mut crate::stats_registry::StatsRegistry,
+    ) -> Option<crate::stats_registry::StatsTransportId> {
+        let zid = self.peer_zid()?;
+        let whatami = self
+            .peer_whatami_wire()
+            .and_then(crate::WhatAmI::from_wire)?;
+        let cn = self
+            .link_subject()
+            .and_then(|subject| subject.cert_common_name.as_deref());
+        Some(registry.open_unicast_transport(&crate::zid_hex::zid_to_zenoh_hex(&zid), whatami, cn))
     }
 
     /// R2825 — close every link of this session's partition: a transport's

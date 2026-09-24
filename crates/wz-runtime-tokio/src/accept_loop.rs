@@ -2004,6 +2004,17 @@ pub struct FaceSources {
     /// site would then repeat and every new site would be a place to forget. A
     /// build with neither re-dial substrate simply never reads it.
     pub retry: RetryPolicy,
+    /// R2844 — the node's stats registry, or `None` for a node that keeps none.
+    ///
+    /// This loop is the mesh node's transport manager: every face enters the
+    /// held set at one site and leaves it at one of two, which is where
+    /// upstream's transport manager registers a transport's stats and drops
+    /// them (`io/zenoh-transport/src/unicast/manager.rs` @ `let stats = self.stats.unicast_transport_stats(`).
+    /// Recording here means no host re-learns the face lifecycle to report it.
+    ///
+    /// UNCONDITIONAL, like [`Self::offer`]: the handle type exists in every
+    /// build, and a node built without `transport-stats` passes `None`.
+    pub stats: Option<crate::node_stats::NodeStats>,
 }
 
 /// Bind-once, hold-N: the shared multi-face drive core behind both
@@ -2046,6 +2057,7 @@ where
         max_sessions,
         offer,
         retry,
+        stats,
     } = sources;
     tokio::pin!(shutdown);
 
@@ -2502,6 +2514,9 @@ where
                         // into the drive future, so a forwarder can route TO
                         // this face from the moment it is held.
                         forwarder.register(id, &opened.actions);
+                        if let Some(stats) = &stats {
+                            stats.transport_opened(id.0, &opened.actions);
+                        }
                         // `Face` is no longer `Copy` (it owns the zid), so clone
                         // it for the borrowed FaceUp event; the original moves
                         // into the drive future.
@@ -2622,6 +2637,9 @@ where
                                 #[cfg(feature = "router-connect-reconcile")]
                                 dialed_targets.remove(&primary_id);
                                 forwarder.deregister(primary_id);
+                                if let Some(stats) = &stats {
+                                    stats.transport_closed(primary_id.0);
+                                }
                                 on_event(&AcceptEvent::FaceDown(primary_face, outcome));
                             }
                         } else if let Some((target, pref, band)) = dead {
@@ -2705,6 +2723,9 @@ where
                     );
                 }
                 forwarder.deregister(face.id);
+                if let Some(stats) = &stats {
+                    stats.transport_closed(face.id.0);
+                }
                 on_event(&AcceptEvent::FaceDown(face, outcome));
             }
 
@@ -3114,6 +3135,9 @@ where
             // re-dial either. Carried because the field is unconditional; never
             // read on this path.
             retry: RetryPolicy::ZENOH_DEFAULT,
+            // accept-only: this entry carries no configuration of its own, and a
+            // node that keeps a stats registry reaches `peer_loop`.
+            stats: None,
         },
         params,
         clock,
@@ -4139,6 +4163,7 @@ mod tests {
                 max_sessions: 1,
                 offer: SessionOffer::universal(),
                 retry: RetryPolicy::ZENOH_DEFAULT,
+                stats: None,
             },
             acceptor_params(),
             TokioTime::new(),
@@ -4167,6 +4192,112 @@ mod tests {
         assert_eq!(
             summary.refused_over_max_sessions, 1,
             "the second peer was refused BY THE BOUND, not by a handshake failure"
+        );
+    }
+
+    /// R2844 — the face loop is the node's transport manager, so the node's
+    /// stats registry is filled HERE: a face that comes up is counted, labelled
+    /// with the peer the handshake named, and a face that goes down is counted
+    /// out and still listed as disconnected. Each snapshot is taken inside the
+    /// loop's own FaceUp / FaceDown event, so it reads the registry exactly as
+    /// the loop left it at that step.
+    #[cfg(feature = "transport-stats")]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn the_face_loop_records_each_face_into_the_node_registry() {
+        use crate::node_stats::NodeStats;
+        use wz_session_core::stats_registry::MetricsQuery;
+        use wz_session_core::WhatAmI;
+
+        fn document(stats: &NodeStats, query: MetricsQuery) -> String {
+            let mut doc = String::new();
+            stats.snapshot().encode_metrics(&mut doc, query);
+            doc
+        }
+        const OPENED: &str = r#"zenoh_transports_opened{local_id="a1b2",local_whatami="router"} "#;
+        // zenoh's rendering of the initiator's `[1; 4]` zid.
+        const PEER: &str = r#"remote_zid="1010101",remote_whatami="peer""#;
+        let with_disconnected = MetricsQuery {
+            disconnected: true,
+            ..MetricsQuery::default()
+        };
+
+        let (listener, addr) = bind_loopback().await;
+        let stats = NodeStats::new("a1b2", WhatAmI::Router, "v1");
+        let (leave_tx, leave_rx) = watch::channel(false);
+        let (stop_tx, stop_rx) = watch::channel(false);
+        let seen: Arc<std::sync::Mutex<Vec<(&'static str, String)>>> = Arc::default();
+        let on_event = {
+            let stats = stats.clone();
+            let seen = seen.clone();
+            move |event: &AcceptEvent| {
+                let step = match event {
+                    AcceptEvent::FaceUp(_) => "up",
+                    AcceptEvent::FaceDown(..) => "down",
+                    _ => return,
+                };
+                let doc = document(&stats, with_disconnected);
+                seen.lock().expect("seen poisoned").push((step, doc));
+                let _ = if step == "up" {
+                    leave_tx.send(true)
+                } else {
+                    stop_tx.send(true)
+                };
+            }
+        };
+
+        let node = peer_loop(
+            FaceSources {
+                listeners: vec![listener],
+                dial_targets: vec![],
+                dial_config: Arc::new(DialConfig::default()),
+                dial_intents: None,
+                mcast_ingress: None,
+                mcast_members: None,
+                mcast_group_subs: None,
+                reconcile: None,
+                #[cfg(feature = "transport-multilink")]
+                max_links: 1,
+                max_sessions: crate::config::DEFAULT_MAX_SESSIONS,
+                offer: SessionOffer::universal(),
+                retry: RetryPolicy::ZENOH_DEFAULT,
+                // THE SUBJECT.
+                stats: Some(stats.clone()),
+            },
+            acceptor_params(),
+            TokioTime::new(),
+            DEFAULT_OPEN_TICK_MS,
+            shutdown_on(stop_rx),
+            on_event,
+            &NoOpForwarder,
+        );
+        tokio::time::timeout(Duration::from_secs(20), async {
+            tokio::join!(node, idle_initiator(addr, 1, leave_rx));
+        })
+        .await
+        .expect("the face comes up and goes down within 20s");
+
+        let seen = seen.lock().expect("seen poisoned");
+        let steps: Vec<&str> = seen.iter().map(|(step, _)| *step).collect();
+        assert_eq!(steps, ["up", "down"], "one face, up then down");
+        let (_, up) = &seen[0];
+        let (_, down) = &seen[1];
+        assert!(
+            up.contains(&format!("\n{OPENED}1\n")),
+            "counted while held:\n{up}"
+        );
+        assert!(
+            up.lines()
+                .any(|l| l.contains(PEER) && l.contains(r#"disconnected="false""#)),
+            "its series carry the peer the handshake named:\n{up}"
+        );
+        assert!(
+            down.contains(&format!("\n{OPENED}0\n")),
+            "counted out:\n{down}"
+        );
+        assert!(
+            down.lines()
+                .any(|l| l.contains(PEER) && l.contains(r#"disconnected="true""#)),
+            "still listed, as disconnected, until the collection delay:\n{down}"
         );
     }
 
@@ -5144,6 +5275,7 @@ mod tests {
                 // R311y786 — the PRE-y786 cadence (fixed 1 s), so these suites keep
                 // measuring what they were written for; the growth has its own.
                 retry: RetryPolicy::constant(1000),
+                stats: None,
                 #[cfg(feature = "transport-multilink")]
                 max_links: 1,
                 // R2758 — unbounded, so these fixtures keep the subject they had.
@@ -5277,6 +5409,7 @@ mod tests {
                 reconcile: None,
                 offer: SessionOffer::universal(),
                 retry: RetryPolicy::constant(1000),
+                stats: None,
                 #[cfg(feature = "transport-multilink")]
                 max_links: 1,
                 // R2758 — unbounded, so these fixtures keep the subject they had.
@@ -5378,6 +5511,7 @@ mod tests {
                 // R311y786 — the PRE-y786 cadence (fixed 1 s), so these suites keep
                 // measuring what they were written for; the growth has its own.
                 retry: RetryPolicy::constant(1000),
+                stats: None,
                 #[cfg(feature = "transport-multilink")]
                 max_links: 1,
                 // R2758 — unbounded, so these fixtures keep the subject they had.
@@ -5479,6 +5613,7 @@ mod tests {
                 // R311y786 — the PRE-y786 cadence (fixed 1 s), so these suites keep
                 // measuring what they were written for; the growth has its own.
                 retry: RetryPolicy::constant(1000),
+                stats: None,
                 #[cfg(feature = "transport-multilink")]
                 max_links: 1,
                 // R2758 — unbounded, so these fixtures keep the subject they had.

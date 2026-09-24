@@ -226,6 +226,39 @@ fn extract_query_attachment(query: &QueryOwned) -> Option<&[u8]> {
     }
 }
 
+/// R2844 — the selector parameters of an inbound Query, as a queryable is
+/// allowed to see them: the wire slice under `query-selector-parameters`, and
+/// `None` without it (R311cj's gate).
+///
+/// ONE projection for every place a Query is answered. The Session dispatch
+/// used this gate inline, and the forwarder's own local-queryable view did
+/// not project parameters at all — so a node-hosted admin leg that honours
+/// `descriptors` or the four stats partitions answered every GET as if none
+/// had been given. Upstream's admin handler reads `query.parameters()` on the
+/// query it was routed (`zenoh/src/net/runtime/adminspace.rs` @ `query.parameters().get("per_transport") != Some("false"),`).
+#[cfg(all(feature = "codec-request", feature = "alloc"))]
+pub fn query_parameters(query: &QueryOwned) -> Option<&[u8]> {
+    #[cfg(feature = "query-selector-parameters")]
+    {
+        query.parameters.as_deref()
+    }
+    #[cfg(not(feature = "query-selector-parameters"))]
+    {
+        let _ = query;
+        None
+    }
+}
+
+/// [`query_parameters`] of a routed Request: `None` for a body that is not a
+/// Query (a Put or a Del carries no selector).
+#[cfg(all(feature = "codec-request", feature = "alloc"))]
+pub fn request_query_parameters(request: &RequestOwned) -> Option<&[u8]> {
+    match &request.body {
+        RequestOwnedVariant::CodecZenohQuery(query) => query_parameters(query),
+        _ => None,
+    }
+}
+
 // R311 — project the querier's source-info ext into a typed
 // `SourceInfo`. The Query body source-info ext is `ENC_ZBUF | 0x01`
 // (zenoh-pico message.c:438-444 `_z_query_encode`) — the SAME ext id +
@@ -1880,10 +1913,8 @@ impl<C: QuerySink> QueryableRegistry<C> {
         // (`extract_query_attachment`).
         // R311cj — query-selector-parameters gates the parameters
         // slice projection. cfg-off: callback always observes None.
-        #[cfg(feature = "query-selector-parameters")]
-        let parameters_view = query.parameters.as_deref();
-        #[cfg(not(feature = "query-selector-parameters"))]
-        let parameters_view: Option<&[u8]> = None;
+        // R2844 — through the one projection the forwarder uses too.
+        let parameters_view = query_parameters(query);
         let attachment_view = extract_query_attachment(query);
         // R311 — querier source-info, decoded once per inbound query into
         // this local; each matched queryable's `BorrowedQuery` lends it

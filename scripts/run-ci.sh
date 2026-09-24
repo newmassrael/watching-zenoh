@@ -6650,6 +6650,12 @@ layer_c1ak_cargo_test_transport_stats() {
     # R2825 — 2 -> 3: `a_publish_is_recorded_in_the_registry_on_its_link`.
     _runci_guarded_test C1ak 3 cargo test -p wz-runtime-tokio --features transport-stats --test transport_stats_e2e --quiet \
         || return 1
+    # R2844 — the NODE registry: its lifecycle (open, closed, retired after the
+    # collection delay) and the face loop recording into it. Needs the loop,
+    # so `routing-peer`, which no other leg here composes with the counters.
+    _runci_guarded_test C1ak 3 cargo test -p wz-runtime-tokio --features transport-stats,routing-peer --lib --quiet \
+        -- node_stats:: the_face_loop_records_each_face_into_the_node_registry \
+        || return 1
     # R311y810 — the OpenMetrics renderer with the counting half OFF. The report
     # type and its rendering are unconditional (only the atomics are gated), and
     # this is what holds that apart: a build that never counts must still be able
@@ -17998,14 +18004,29 @@ layer_e6e_adminspace_plugins() {
 # SKIPs on the FOREIGN binary only (the pico CLI a machine may legitimately lack),
 # never on a wz one — the R311y265 rule; WZ_PICO_REQUIRE escalates that skip to a
 # FAIL wherever the job provisions pico.
+#
+# R2844 — a SECOND leg, after the pico one: the same peer built WITH
+# `wz/transport-stats` serves its NODE registry (the face loop's), read by the
+# wz admin probe over one session. Not by pico: the registry's document
+# (5142 bytes for a one-transport node) exceeds pico's default reassembly bound
+# of 4096, pico's `z_get` sends no parameters to narrow it, and wz does not
+# gzip the body as upstream does (item 677). The pico leg keeps the build it
+# was written for, so it runs FIRST; the second build replaces that binary.
+# The wz leg needs no foreign binary, so it runs whether or not pico is here.
 layer_e6f_adminspace_metrics() {
     (cd crates && cargo build -p wz-ap-demo --features routing-peer,adminspace-metrics --quiet) || return 1
-    if [[ ! -x target/zenoh-pico-cli/z_get ]]; then
+    if [[ -x target/zenoh-pico-cli/z_get ]]; then
+        (cd crates && cargo test -p wz-integration-tests \
+            --test wz_peer_adminspace_metrics_to_pico_zget -- --ignored --quiet) || return 1
+    else
         _pico_cli_unavailable "Layer E6f (pico adminspace metrics z_get)" || return 1
-        return 0
     fi
-    (cd crates && cargo test -p wz-integration-tests \
-        --test wz_peer_adminspace_metrics_to_pico_zget -- --ignored --quiet) || return 1
+    (cd crates \
+        && cargo build -p wz-ap-demo --features routing-peer,adminspace-metrics,wz/transport-stats --quiet \
+        && cargo build -p wz-e2e-admin-probe --quiet) || return 1
+    _runci_guarded_test "Layer E6f (the peer's node registry)" 1 \
+        cargo test -p wz-integration-tests --test wz_peer_serves_its_node_stats_registry \
+        -- --ignored --quiet || return 1
 }
 
 # ─── Layer E6g — §5.23 adminspace-read GET-gate E2E (vs zenoh-pico) ─────────────

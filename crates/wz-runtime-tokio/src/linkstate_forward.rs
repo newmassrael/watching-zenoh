@@ -864,6 +864,9 @@ struct DeferredQuery {
     handlers: Vec<Rc<RefCell<LocalQueryHandler>>>,
     rid: u64,
     keyexpr: String,
+    /// R2844 — the query's projected selector parameters, held so the
+    /// redelivered answer reads the same query the immediate one would have.
+    parameters: Option<Vec<u8>>,
     inbound: FaceId,
     reliable: bool,
     /// R2594 — the query's QoS, held so the redelivered answer inherits it as
@@ -896,12 +899,18 @@ pub(crate) struct LocalSubscriber {
 }
 
 /// A minimal [`QueryView`] over a routed Request's resolved fields, for
-/// dispatching to a local queryable handler. Parameters / attachment are not
-/// threaded in Phase 2a (the §5.23 admin handler reads only the keyexpr); a
-/// future handler that needs them adds the plumbing. `is_local` / `source_info`
-/// fall through to the trait defaults (wire origin, no source info).
+/// dispatching to a local queryable handler. The attachment is not threaded;
+/// `is_local` / `source_info` fall through to the trait defaults (wire origin,
+/// no source info).
 pub(crate) struct LocalQueryView<'a> {
     pub(crate) keyexpr: &'a str,
+    /// R2844 — the Query's selector parameters, through the SAME projection a
+    /// Session queryable sees (`wz_session_core::query::query_parameters`).
+    /// Until R2844 this view answered `None` on the premise that "the §5.23
+    /// admin handler reads only the keyexpr"; it had read `descriptors` since
+    /// R2494 and reads the four stats partitions since R2843, so every
+    /// forwarder-hosted admin leg answered those as if no parameter was given.
+    pub(crate) parameters: Option<&'a [u8]>,
     pub(crate) rid: u64,
     /// R2594 — the routed Request's `ext_qos`. Unlike parameters and
     /// attachment this one IS threaded, because it is not read by the handler
@@ -914,7 +923,7 @@ impl QueryView for LocalQueryView<'_> {
         self.keyexpr
     }
     fn parameters(&self) -> Option<&[u8]> {
-        None
+        self.parameters
     }
     fn attachment(&self) -> Option<&[u8]> {
         None
@@ -3486,6 +3495,7 @@ impl LinkstateForwarder {
         let query_chunks: Vec<&str> = keyexpr.split('/').collect();
         let view = LocalQueryView {
             keyexpr,
+            parameters: wz_session_core::query::request_query_parameters(request),
             rid: request.rid,
             qos: wz_session_core::declare_ext_qos::read_request_qos(request),
         };
@@ -3558,6 +3568,7 @@ impl LinkstateForwarder {
                 handlers: deferred,
                 rid: request.rid,
                 keyexpr: keyexpr.to_string(),
+                parameters: view.parameters.map(<[u8]>::to_vec),
                 inbound,
                 reliable,
                 qos: view.qos,
@@ -3655,6 +3666,7 @@ impl LinkstateForwarder {
             budget -= 1;
             let view = LocalQueryView {
                 keyexpr: &dq.keyexpr,
+                parameters: dq.parameters.as_deref(),
                 rid: dq.rid,
                 qos: dq.qos,
             };

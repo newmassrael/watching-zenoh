@@ -132,7 +132,11 @@ adminspace-write = [
 # composition is a documented follow-up). Pure data-view (the metrics_text
 # builder + the metrics keyexpr helper); composes adminspace-core. The wiring
 # (the metrics dispatch branch) lives in wz-runtime-tokio's adminspace-metrics.
-adminspace-metrics = ["adminspace-core"]
+# R2844 — and the leg READS its query's selector parameters (`descriptors`, and
+# the four stats partitions), so the parameters projection comes with it:
+# without `query-selector-parameters` every queryable sees `None`, and the leg
+# answered every GET as if no parameter had been given.
+adminspace-metrics = ["adminspace-core", "query-selector-parameters"]
 # adminspace-introspection-handlers (§5.23) — the per-entity admin introspection
 # reply legs (`@/<zid>/<whatami>/{subscriber,queryable}/<keyexpr>`) inside
 # `answer_admin_query` + the `admin_entity_key` helper. The wz analogue of zenoh's
