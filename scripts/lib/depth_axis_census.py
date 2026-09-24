@@ -1115,7 +1115,14 @@ CITATION = re.compile(r"\b((?:[A-Za-z0-9_.-]+/)*[A-Za-z0-9_.-]+\.(?:rs|c|h))(?::
 # join), and the router host hands it its registry. It was in `reached`, so this
 # pin falls while UNREACHED and NO_SYMBOL hold at 2 and 2.
 # READ off the census's own FAIL line, `reached: 11 against a pin of 12`.
-PIN_REACHED = 11
+#
+# R2854 — 11 -> 10. `adminspace-metrics` RETIRES to COMPLETE: a router process
+# serves its multicast group on its metrics leg (the join, witnessed in Layer
+# M), and the feature-gate clause is refuted against the sibling legs of the
+# same upstream handler block. It was in `reached`, so this pin falls while
+# UNREACHED and NO_SYMBOL hold at 2 and 2.
+# READ off the census's own FAIL line, `reached: 10 against a pin of 11`.
+PIN_REACHED = 10
 PIN_UNREACHED = 2
 PIN_NO_SYMBOL = 2
 # R2534 — 346 -> 347. The atom is `adminspace-metrics` and the citation is the
@@ -2139,7 +2146,11 @@ PIN_NO_SYMBOL = 2
 # R2852 — 46 -> 44, FALLING by the whole of the same atom: `transport-stats` is
 # COMPLETE again, so the two wz citations R2845 brought in leave with it:
 # 46 - 44 = 2, the census's own FAIL line, with PIN_AMBIGUOUS holding at 12.
-PIN_WZ_CITATIONS = 44
+#
+# R2854 — 44 -> 43, FALLING by the whole of one atom: `adminspace-metrics` is
+# COMPLETE, and its reason carried one wz citation: 44 - 43 = 1, the census's
+# own FAIL line, with PIN_AMBIGUOUS holding at 12.
+PIN_WZ_CITATIONS = 43
 # R2626 — 44 -> 42, and this one is worth a sentence because it HELD through
 # every earlier retirement in this run (R2612, R2622). `time-hlc`'s reason is the
 # first retiree carrying AMBIGUOUS citations of its own: its oldest clauses cite
