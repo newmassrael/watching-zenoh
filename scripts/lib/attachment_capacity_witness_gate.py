@@ -79,6 +79,8 @@ REPO = Path(__file__).resolve().parents[2]
 
 SCXML = "sources/codecs/ext_zbuf.scxml"
 ATTACHMENT_SSOT = "crates/wz-session-core/src/attachment.rs"
+# R2840 — where the ids those carriers name are written as numbers.
+EXT_HEADER = "crates/wz-session-core/src/ext_header.rs"
 QUERY_CAP_CONST_FILE = "crates/wz-session-core/src/request_build.rs"
 QUERY_CAP_CONST = "QUERY_EXT_ZBUF_MAX_LEN"
 
@@ -113,15 +115,61 @@ def declared_capacity(scxml_text: str) -> int:
     return int(cap.group(1))
 
 
-def carrier_ids(attachment_text: str) -> dict[str, int]:
-    """`{const name: ext id}` for every attachment carrier the SSOT declares."""
-    found = {
+_LITERAL = re.compile(r"0x[0-9a-fA-F]+|\d+")
+_BODY_EXT_ID_PATH = re.compile(r"crate::ext_header::body_ext_id::([A-Z_][A-Z0-9_]*)")
+
+
+def body_ext_ids(ext_header_text: str) -> dict[str, int]:
+    """`{name: id}` for the literals in `ext_header.rs`'s `body_ext_id` module.
+
+    R2840 — the attachment ids stopped being literals in 8d9c59c4: they now
+    NAME the per-body ext id table (`ATTACHMENT_EXT_ID_PUSH =
+    crate::ext_header::body_ext_id::PUT_ATTACHMENT`), which is where the three
+    bodies' ids sit side by side. The gate follows the name to the one place
+    the number is written instead of asking the SSOT to repeat it.
+    """
+    module = re.search(r"pub mod body_ext_id\s*\{(.*?)\n\}", ext_header_text, re.S)
+    if module is None:
+        return {}
+    return {
         m.group(1): int(m.group(2), 0)
         for m in re.finditer(
-            r"pub const (ATTACHMENT_EXT_ID_[A-Z_]+)\s*:\s*u8\s*=\s*(0x[0-9a-fA-F]+|\d+)\s*;",
-            attachment_text,
+            r"pub const ([A-Z_][A-Z0-9_]*)\s*:\s*u8\s*=\s*(0x[0-9a-fA-F]+|\d+)\s*;",
+            module.group(1),
         )
     }
+
+
+def carrier_ids(attachment_text: str, ext_header_text: str = "") -> dict[str, int]:
+    """`{const name: ext id}` for every attachment carrier the SSOT declares.
+
+    A carrier's value is either a literal or a path into `body_ext_id`
+    (resolved through `ext_header_text`). Any other right-hand side is a
+    GateError that names it: a value this gate cannot read is not a value it
+    may skip, or the carrier would drop out of the population unseen.
+    """
+    table = body_ext_ids(ext_header_text)
+    found: dict[str, int] = {}
+    for m in re.finditer(
+        r"pub const (ATTACHMENT_EXT_ID_[A-Z_]+)\s*:\s*u8\s*=\s*([^;]+);",
+        attachment_text,
+    ):
+        name, value = m.group(1), m.group(2).strip()
+        if _LITERAL.fullmatch(value):
+            found[name] = int(value, 0)
+            continue
+        path = _BODY_EXT_ID_PATH.fullmatch(value)
+        if path is None:
+            raise GateError(
+                f"{ATTACHMENT_SSOT}: `{name}` = `{value}` is neither a literal nor "
+                "a `crate::ext_header::body_ext_id::*` path; the gate cannot read it"
+            )
+        if path.group(1) not in table:
+            raise GateError(
+                f"{ATTACHMENT_SSOT}: `{name}` names `body_ext_id::{path.group(1)}`, "
+                f"which {EXT_HEADER} does not declare as a literal"
+            )
+        found[name] = table[path.group(1)]
     if not found:
         raise GateError(
             f"{ATTACHMENT_SSOT}: no `pub const ATTACHMENT_EXT_ID_*` — the "
@@ -289,7 +337,11 @@ def witnesses(root: Path, carriers: dict[str, int], cap: int) -> dict[str, list[
 def grade(root: Path) -> list[str]:
     """`[]` when every carrier is witnessed and the mirror is bound."""
     cap = declared_capacity((root / SCXML).read_text(encoding="utf-8"))
-    carriers = carrier_ids((root / ATTACHMENT_SSOT).read_text(encoding="utf-8"))
+    ext_header = root / EXT_HEADER
+    carriers = carrier_ids(
+        (root / ATTACHMENT_SSOT).read_text(encoding="utf-8"),
+        ext_header.read_text(encoding="utf-8") if ext_header.exists() else "",
+    )
     mirror = rust_const_usize(
         (root / QUERY_CAP_CONST_FILE).read_text(encoding="utf-8"),
         QUERY_CAP_CONST,
@@ -395,6 +447,47 @@ def _selftest() -> int:
             ok = False
         except GateError:
             pass
+
+        # R2840 — Arm 5: the carriers NAME `body_ext_id` entries (the form
+        # 8d9c59c4 moved the tree to). Resolved, the green arm stays green.
+        root = build(tmp / "e", cap=32, mirror=32, witness_ids=[0x03, 0x02])
+        (root / ATTACHMENT_SSOT).write_text(
+            "pub const ATTACHMENT_EXT_ID_PUSH: u8 = crate::ext_header::body_ext_id::PUT_ATTACHMENT;\n"
+            "pub const ATTACHMENT_EXT_ID_DEL: u8 = crate::ext_header::body_ext_id::DEL_ATTACHMENT;\n"
+        )
+        (root / EXT_HEADER).write_text(
+            "pub mod body_ext_id {\n"
+            "    pub const PUT_ATTACHMENT: u8 = 0x03;\n"
+            "    pub const DEL_ATTACHMENT: u8 = 0x02;\n"
+            "}\n"
+        )
+        fails = grade(root)
+        if fails:
+            print(f"SELFTEST FAIL: the path-form green arm reported {fails}")
+            ok = False
+        # ... and still discriminates: drop the Del witness, Del is named.
+        root = build(tmp / "f", cap=32, mirror=32, witness_ids=[0x03])
+        (root / ATTACHMENT_SSOT).write_text((tmp / "e/tree" / ATTACHMENT_SSOT).read_text())
+        (root / EXT_HEADER).write_text((tmp / "e/tree" / EXT_HEADER).read_text())
+        fails = grade(root)
+        if not any("ATTACHMENT_EXT_ID_DEL" in f for f in fails):
+            print(f"SELFTEST FAIL: a path-form carrier went unwitnessed silently: {fails}")
+            ok = False
+
+        # Arm 6 — a path naming an entry `body_ext_id` does not declare, and a
+        # right-hand side that is neither form: both refuse, never skip.
+        for rhs in ("crate::ext_header::body_ext_id::NOWHERE", "some_fn()"):
+            root = build(tmp / f"g{len(rhs)}", cap=32, mirror=32, witness_ids=[0x03])
+            (root / ATTACHMENT_SSOT).write_text(
+                f"pub const ATTACHMENT_EXT_ID_PUSH: u8 = {rhs};\n"
+            )
+            (root / EXT_HEADER).write_text((tmp / "e/tree" / EXT_HEADER).read_text())
+            try:
+                grade(root)
+                print(f"SELFTEST FAIL: `{rhs}` was read as a carrier value")
+                ok = False
+            except GateError:
+                pass
 
     print("attachment capacity witness gate selftest: " + ("OK" if ok else "FAILED"))
     return 0 if ok else 1
