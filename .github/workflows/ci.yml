@@ -2652,6 +2652,14 @@ jobs:
     name: cross-compile + QEMU (Layer G + Q + Qa)
     runs-on: ubuntu-22.04
     timeout-minutes: 45
+    # R2842 — AFTER `interop`, because Layer Qa restores the zenohd that job
+    # caches and the cache is written when that job ENDS. Run in parallel, the
+    # first hosted Qa (run 35973841111) restored at 10:34 an entry the interop
+    # job saved at 11:02, found nothing under the prefix either, and red.
+    # `!cancelled()` rather than the default `success()`: Layers G and Q do not
+    # depend on interop, so an interop red must not take them down with it.
+    needs: [interop]
+    if: ${{ !cancelled() }}
     steps:
       - name: Checkout (with submodules)
         uses: actions/checkout@v4
@@ -2764,10 +2772,11 @@ jobs:
         #
         # RESTORE ONLY, and the path list is the interop step's own, character
         # for character: actions/cache folds the paths into the entry's version,
-        # so a different list restores nothing. `restore-keys` takes the newest
-        # entry of the same version when this run's exact key has not been saved
-        # yet (the interop job saves at its end); what that entry IS is then
-        # read, not trusted, by the pin gate in the next step.
+        # so a different list restores nothing. This job `needs: [interop]`, so
+        # the entry that job saves at its end exists before this restore runs;
+        # `restore-keys` still takes the newest entry of the same version for a
+        # run whose interop could not save (a red interop saves nothing). What
+        # the restored entry IS is read, not trusted, by the pin gate next.
         id: zenohd-cache
         uses: actions/cache/restore@v4
         with:

@@ -19611,8 +19611,8 @@ print(" ".join(peers))'
     }
     # Poll until `want` is what the node reports, or 60 s pass.
     _qa_await() {
-        local want="$1" got="" i
-        for i in $(seq 1 60); do
+        local want="$1" got="" _
+        for _ in $(seq 1 60); do
             got="$(_qa_sessions)"
             [[ "$got" == "$want" ]] && { echo "$got"; return 0; }
             sleep 1
