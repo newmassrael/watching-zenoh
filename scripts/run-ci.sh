@@ -6941,6 +6941,15 @@ layer_c1am_cargo_test_adminspace() {
         cargo test -p wz-runtime-tokio --features adminspace-read,adminspace-metrics,query-get --lib declare_adminspace --quiet || return 1
     _runci_guarded_test "C1AM admin_write_permit 1" 1 \
         cargo test -p wz-runtime-tokio --features adminspace-write,query-get --lib admin_write_permit --quiet || return 1
+    # R2824 — the MCU's config-write surface for `connect/endpoints` and the
+    # JSON5 lexer it reads with, built the way an MCU builds them: NO `alloc`,
+    # `adminspace-write` alone. No other leg reaches either — every other
+    # session-core leg here composes `adminspace-core`, which pulls `alloc` in,
+    # and the default feature set does not name `adminspace-write`.
+    _runci_guarded_test "C1AM admin_connect no-alloc 9" 9 \
+        cargo test -p wz-session-core --no-default-features --features adminspace-write --lib admin_connect --quiet || return 1
+    _runci_guarded_test "C1AM json5_lex no-alloc 2" 2 \
+        cargo test -p wz-session-core --no-default-features --features adminspace-write --lib json5_lex --quiet || return 1
     # The read-side resolver had NO guarded filter at all (only the write side did),
     # so `admin_read_permit_tests` was running in no lane — a population-0 hole on
     # the cfg site both admin GET hosts now resolve through. Pinned here.

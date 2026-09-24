@@ -624,6 +624,23 @@ pub mod json;
 #[cfg(feature = "alloc")]
 pub mod json5;
 
+/// R2824 — the grammar of `json5` with no allocator: the scans both the tree
+/// builder and the no-heap readers walk, so there is one JSON5 in this crate.
+/// Unconditional, because it needs nothing.
+pub mod json5_lex;
+
+/// R2824 (§5.23) — which sub-key a config write names in a node's config
+/// space, with no allocator: the membership gates the AP decoder
+/// (`adminspace`) and the MCU decoder (`admin_connect`) both run.
+#[cfg(any(feature = "adminspace-core", feature = "adminspace-write"))]
+pub mod admin_config_space;
+
+/// R2824 (§5.23 `adminspace-write`) — upstream's `connect/endpoints` config
+/// write, decided with no allocator, so an MCU can be told which peers to hold
+/// sessions with. The AP half of the write surface is `adminspace`.
+#[cfg(feature = "adminspace-write")]
+pub mod admin_connect;
+
 /// §5.23 — admin space `local_data` view: the `@/<zid>/<whatami>/**` built-in
 /// queryable keyexpr helpers + the `local_data` JSON body, the wz mirror of
 /// zenoh `net/runtime/adminspace.rs`. Pure data-view (the queryable wiring lives

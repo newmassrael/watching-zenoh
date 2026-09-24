@@ -1188,17 +1188,12 @@ fn admin_entity_key(zid_hex: &str, whatami: &str, kind: &str, pattern: &str) -> 
     s
 }
 
-/// The number of chunks in front of an admin config-write sub-key:
-/// `@` / `<zid>` / `<whatami>` / `config`. Upstream states the same four as a
-/// format, `@/${zid:*}/${whatami:*}/config/${key:**}`
-/// (`zenoh/src/net/runtime/adminspace.rs` @ `CONFIG_FORMAT`), whose `${..:*}`
-/// specs are ONE-CHUNK specs — which is why the count is a constant and the
-/// sub-key starts at a fixed index rather than wherever a scan finds `config`.
-const ADMIN_CONFIG_SPACE_PREFIX_CHUNKS: usize = 4;
-
-/// The trailing chunk that turns this node's config prefix into the SUBSCRIPTION
-/// pattern upstream declares (`adminspace.rs:350-353`).
-const ADMIN_CONFIG_WRITE_PATTERN_TAIL: &str = "**";
+// R2824 — the two constants, and the membership decision below, moved to the
+// no-alloc `admin_config_space` so the MCU's config-write surface decides with
+// the same code. Their documentation moved with them.
+use crate::admin_config_space::{
+    subkey_in_config_space, ConfigSpaceRefusal, ADMIN_CONFIG_WRITE_PATTERN_TAIL,
+};
 
 /// R311y48 (§5.23 Phase 3b) — the admin config-WRITE keyexpr PATTERN
 /// `@/<zid>/<whatami>/config/**`. The PATTERN is faithful to zenoh, which declares
@@ -1376,49 +1371,14 @@ impl AdminConfigWriteSpace {
     /// There is NO case where wz applies a key upstream does not, and NO case
     /// where wz applies a DIFFERENT key than upstream.
     pub fn subkey<'k>(&self, keyexpr: &'k str) -> Result<&'k str, AdminConfigWriteOutcome> {
-        let chunks: Vec<&str> = keyexpr.split('/').collect();
-        // GATE 1 — upstream's set-semantics membership test. This also rejects
-        // an empty chunk in the arriving key (`keyexpr_intersects_target` ->
-        // `target_chunks_well_formed`), which is the non-canonical shape
-        // upstream never receives because its wire expression was validated.
-        if !crate::keyexpr_match::keyexpr_intersects_target(&self.pattern, &chunks) {
-            return Err(AdminConfigWriteOutcome::NotAWrite);
-        }
-        // GATE 2a — a `**` where the format writes a one-chunk spec. Checked
-        // BEFORE the positional read so the refusal reported is the true reason:
-        // every measured divergence from upstream lands here and nowhere else,
-        // which is what makes the variant a statement about a class rather than
-        // about one input.
-        for slot in 1..ADMIN_CONFIG_SPACE_PREFIX_CHUNKS - 1 {
-            if chunks.get(slot) == Some(&ADMIN_CONFIG_WRITE_PATTERN_TAIL) {
-                return Err(AdminConfigWriteOutcome::AmbiguousSpaceAddress);
+        // R2824 — the gates above live in `admin_config_space`, unchanged, so
+        // the MCU's no-alloc write surface runs the same ones.
+        subkey_in_config_space(&self.pattern, keyexpr).map_err(|refusal| match refusal {
+            ConfigSpaceRefusal::NotInSpace => AdminConfigWriteOutcome::NotAWrite,
+            ConfigSpaceRefusal::AmbiguousSpaceAddress => {
+                AdminConfigWriteOutcome::AmbiguousSpaceAddress
             }
-        }
-        // GATE 2b — the format read positionally. The `@` and `config` literals
-        // are read out of this space's OWN pattern, so there is no second
-        // spelling of either to drift -- and read with `nth` rather than a
-        // `collect`, because a decoder the wire reaches should not allocate to
-        // compare two chunks.
-        let mut own = self.pattern.split('/');
-        let own_root = own.next();
-        let own_config = own.nth(ADMIN_CONFIG_SPACE_PREFIX_CHUNKS - 2);
-        if chunks.len() <= ADMIN_CONFIG_SPACE_PREFIX_CHUNKS
-            || Some(chunks[0]) != own_root
-            || Some(chunks[ADMIN_CONFIG_SPACE_PREFIX_CHUNKS - 1]) != own_config
-        {
-            return Err(AdminConfigWriteOutcome::NotAWrite);
-        }
-        // GATE 3 — non-empty. The sub-key is a contiguous SUFFIX of the input,
-        // so it is returned as a slice and costs no allocation.
-        let mut offset = 0usize;
-        for chunk in chunks.iter().take(ADMIN_CONFIG_SPACE_PREFIX_CHUNKS) {
-            offset += chunk.len() + 1;
-        }
-        let sub_key = &keyexpr[offset..];
-        if sub_key.is_empty() {
-            return Err(AdminConfigWriteOutcome::NotAWrite);
-        }
-        Ok(sub_key)
+        })
     }
 }
 
@@ -2328,10 +2288,11 @@ pub const ADMIN_CONFIG_WRITE_ACTIONS: &[&str] = &[
 /// [`AdminConfigWriteSpace`] whether the keyexpr belongs to this node's config
 /// space, and decodes the sub-key it names there.
 ///
-/// The caller supplies `permissions_write`: under the `adminspace-write` cfg it is
-/// [`AdminSpacePermissions::write`] (default `false`, the zenoh asymmetry), else
-/// `true` (the gate compiled out — the pre-gate behavior), so this decoder stays
-/// feature-toggle-independent (the gate is the value, not a cfg here). The payload
+/// The caller supplies `permissions_write`, which is
+/// [`AdminSpacePermissions::write`] (default `false`, the zenoh asymmetry), so
+/// this decoder stays feature-toggle-independent (the gate is the value, not a
+/// cfg here). R2822: there is no longer a build that passes a constant `true`;
+/// a host exists only where `adminspace-write` is compiled. The payload
 /// is decoded lossily then trimmed, byte-for-byte the demo's prior inline parse.
 ///
 /// R2646 — `body` replaced a bare `payload: &[u8]`, so this gate covers BOTH of

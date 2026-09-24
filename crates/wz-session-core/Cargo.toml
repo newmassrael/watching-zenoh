@@ -114,6 +114,19 @@ adminspace-core = [
     "pubsub-encoding",
 ]
 
+# adminspace-write (§5.23) — R2824: upstream's config-WRITE surface for
+# `connect/endpoints` WITHOUT an allocator (`admin_connect`), so an MCU can be
+# told at runtime which peers to hold sessions with. It composes the same two
+# wildcard features as adminspace-core and for the same reason: membership in
+# the config space is decided by set semantics (`admin_config_space`), and `*`
+# / `**` are part of the space's own definition. It deliberately does NOT
+# compose `alloc` or adminspace-core: the AP write surface lives there and
+# needs a heap, and this one exists for the targets that have none.
+adminspace-write = [
+    "keyexpr-wildcard-single",
+    "keyexpr-wildcard-double",
+]
+
 # adminspace-metrics (§5.23) — the @/<zid>/<whatami>/metrics OpenMetrics body
 # (the build-info `zenoh_build` gauge; the transport-stats OpenMetrics
 # composition is a documented follow-up). Pure data-view (the metrics_text

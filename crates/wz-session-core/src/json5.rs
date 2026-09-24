@@ -77,20 +77,10 @@ pub enum Json5Value {
     Object(Vec<(String, Json5Value)>),
 }
 
-/// Why a document could not be read, with the byte offset it failed at.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Json5Error {
-    /// Byte offset into the input where the parse stopped.
-    pub offset: usize,
-    /// What was expected there.
-    pub expected: &'static str,
-}
-
-impl core::fmt::Display for Json5Error {
-    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        write!(f, "at byte {}: expected {}", self.offset, self.expected)
-    }
-}
+/// Why a document could not be read. R2824: defined with the lexer, which has
+/// no allocator and is where every error is raised.
+pub use crate::json5_lex::Json5Error;
+use crate::json5_lex::{Json5Keyword, Json5Str, Lexer};
 
 impl Json5Value {
     /// The value at a `/`-separated leaf path, or `None` if any step is absent
@@ -308,327 +298,104 @@ fn write_json_number(text: &str, out: &mut String) {
 /// Trailing content after the top-level value is an error: a config file with
 /// a second document glued on is a mistake, not two configs.
 pub fn parse(input: &str) -> Result<Json5Value, Json5Error> {
-    let bytes = input.as_bytes();
-    let mut p = Parser { bytes, pos: 0 };
-    p.skip_trivia()?;
+    let mut p = Parser {
+        lex: Lexer::new(input),
+    };
+    p.lex.skip_trivia()?;
     let value = p.value()?;
-    p.skip_trivia()?;
-    if p.pos != bytes.len() {
-        return Err(p.err("end of document"));
+    p.lex.skip_trivia()?;
+    if !p.lex.at_end() {
+        return Err(p.lex.err("end of document"));
     }
     Ok(value)
 }
 
+/// The TREE BUILDER. R2824: every scan is the lexer's (`json5_lex`), which a
+/// no-heap reader walks too; what is left here is only the part that needs a
+/// heap — collecting members and elements, and decoding strings into `String`.
 struct Parser<'a> {
-    bytes: &'a [u8],
-    pos: usize,
+    lex: Lexer<'a>,
 }
 
-impl<'a> Parser<'a> {
-    fn err(&self, expected: &'static str) -> Json5Error {
-        Json5Error {
-            offset: self.pos,
-            expected,
-        }
-    }
-
-    fn peek(&self) -> Option<u8> {
-        self.bytes.get(self.pos).copied()
-    }
-
-    /// Whitespace and both comment forms. An unterminated block comment is an
-    /// error rather than an implicit end-of-file: it would otherwise swallow
-    /// the rest of a config silently.
-    fn skip_trivia(&mut self) -> Result<(), Json5Error> {
-        loop {
-            match self.peek() {
-                Some(b' ' | b'\t' | b'\r' | b'\n') => self.pos += 1,
-                Some(b'/') => match self.bytes.get(self.pos + 1) {
-                    Some(b'/') => {
-                        self.pos += 2;
-                        while let Some(c) = self.peek() {
-                            if c == b'\n' {
-                                break;
-                            }
-                            self.pos += 1;
-                        }
-                    }
-                    Some(b'*') => {
-                        let start = self.pos;
-                        self.pos += 2;
-                        loop {
-                            match self.peek() {
-                                None => {
-                                    self.pos = start;
-                                    return Err(self.err("*/ closing a block comment"));
-                                }
-                                Some(b'*') if self.bytes.get(self.pos + 1) == Some(&b'/') => {
-                                    self.pos += 2;
-                                    break;
-                                }
-                                Some(_) => self.pos += 1,
-                            }
-                        }
-                    }
-                    _ => return Ok(()),
-                },
-                _ => return Ok(()),
-            }
-        }
-    }
-
+impl Parser<'_> {
     fn value(&mut self) -> Result<Json5Value, Json5Error> {
-        match self.peek() {
+        match self.lex.peek() {
             Some(b'{') => self.object(),
             Some(b'[') => self.array(),
-            Some(b'"' | b'\'') => Ok(Json5Value::String(self.string()?)),
-            Some(c) if c == b'-' || c == b'+' || c.is_ascii_digit() || c == b'.' => self.number(),
-            Some(_) => self.keyword(),
-            None => Err(self.err("a value")),
-        }
-    }
-
-    fn keyword(&mut self) -> Result<Json5Value, Json5Error> {
-        for (word, value) in [
-            ("true", Json5Value::Bool(true)),
-            ("false", Json5Value::Bool(false)),
-            ("null", Json5Value::Null),
-        ] {
-            if self.bytes[self.pos..].starts_with(word.as_bytes()) {
-                self.pos += word.len();
-                return Ok(value);
+            Some(b'"' | b'\'') => {
+                let s = self.lex.string()?;
+                Ok(Json5Value::String(decode(&s)?))
             }
+            Some(_) if self.lex.at_number() => {
+                Ok(Json5Value::Number(self.lex.number()?.to_string()))
+            }
+            Some(_) => Ok(match self.lex.keyword()? {
+                Json5Keyword::True => Json5Value::Bool(true),
+                Json5Keyword::False => Json5Value::Bool(false),
+                Json5Keyword::Null => Json5Value::Null,
+            }),
+            None => Err(self.lex.err("a value")),
         }
-        // NaN / Infinity are JSON5 numbers, and a config has no business
-        // carrying either; refusing them here is deliberate.
-        Err(self.err("a value"))
     }
 
     fn object(&mut self) -> Result<Json5Value, Json5Error> {
-        self.pos += 1; // '{'
+        self.lex.bump(); // '{'
         let mut entries = Vec::new();
         loop {
-            self.skip_trivia()?;
-            match self.peek() {
+            self.lex.skip_trivia()?;
+            match self.lex.peek() {
                 Some(b'}') => {
-                    self.pos += 1;
+                    self.lex.bump();
                     return Ok(Json5Value::Object(entries));
                 }
-                None => return Err(self.err("} closing an object")),
+                None => return Err(self.lex.err("} closing an object")),
                 _ => {}
             }
-            let key = self.member_name()?;
-            self.skip_trivia()?;
-            if self.peek() != Some(b':') {
-                return Err(self.err(": after a member name"));
-            }
-            self.pos += 1;
-            self.skip_trivia()?;
+            let key = decode(&self.lex.member_name()?)?;
+            self.lex.skip_trivia()?;
+            self.lex.expect(b':', ": after a member name")?;
+            self.lex.skip_trivia()?;
             let value = self.value()?;
             entries.push((key, value));
-            self.skip_trivia()?;
-            match self.peek() {
-                Some(b',') => self.pos += 1,
+            self.lex.skip_trivia()?;
+            match self.lex.peek() {
+                Some(b',') => self.lex.bump(),
                 Some(b'}') => {}
-                _ => return Err(self.err(", or } after a member")),
+                _ => return Err(self.lex.err(", or } after a member")),
             }
         }
-    }
-
-    /// A quoted string or a bare ECMAScript-identifier key. The identifier set
-    /// is the ASCII one the reference config actually uses; a key needing more
-    /// than that must be quoted, which JSON5 always allows.
-    fn member_name(&mut self) -> Result<String, Json5Error> {
-        if matches!(self.peek(), Some(b'"' | b'\'')) {
-            return self.string();
-        }
-        let start = self.pos;
-        while let Some(c) = self.peek() {
-            if c.is_ascii_alphanumeric() || c == b'_' || c == b'$' {
-                self.pos += 1;
-            } else {
-                break;
-            }
-        }
-        if self.pos == start || self.bytes[start].is_ascii_digit() {
-            self.pos = start;
-            return Err(self.err("a member name"));
-        }
-        Ok(String::from_utf8_lossy(&self.bytes[start..self.pos]).to_string())
     }
 
     fn array(&mut self) -> Result<Json5Value, Json5Error> {
-        self.pos += 1; // '['
+        self.lex.bump(); // '['
         let mut items = Vec::new();
         loop {
-            self.skip_trivia()?;
-            match self.peek() {
+            self.lex.skip_trivia()?;
+            match self.lex.peek() {
                 Some(b']') => {
-                    self.pos += 1;
+                    self.lex.bump();
                     return Ok(Json5Value::Array(items));
                 }
-                None => return Err(self.err("] closing an array")),
+                None => return Err(self.lex.err("] closing an array")),
                 _ => {}
             }
             items.push(self.value()?);
-            self.skip_trivia()?;
-            match self.peek() {
-                Some(b',') => self.pos += 1,
+            self.lex.skip_trivia()?;
+            match self.lex.peek() {
+                Some(b',') => self.lex.bump(),
                 Some(b']') => {}
-                _ => return Err(self.err(", or ] after an element")),
+                _ => return Err(self.lex.err(", or ] after an element")),
             }
         }
     }
+}
 
-    fn string(&mut self) -> Result<String, Json5Error> {
-        let quote = self.bytes[self.pos];
-        self.pos += 1;
-        let mut out = String::new();
-        loop {
-            let Some(c) = self.peek() else {
-                return Err(self.err("a closing quote"));
-            };
-            self.pos += 1;
-            match c {
-                c if c == quote => return Ok(out),
-                b'\\' => {
-                    let Some(esc) = self.peek() else {
-                        return Err(self.err("an escape after backslash"));
-                    };
-                    self.pos += 1;
-                    match esc {
-                        b'"' => out.push('"'),
-                        b'\'' => out.push('\''),
-                        b'\\' => out.push('\\'),
-                        b'/' => out.push('/'),
-                        b'b' => out.push('\u{8}'),
-                        b'f' => out.push('\u{c}'),
-                        b'n' => out.push('\n'),
-                        b'r' => out.push('\r'),
-                        b't' => out.push('\t'),
-                        b'0' => out.push('\0'),
-                        // A backslash-newline is a JSON5 line continuation:
-                        // it contributes nothing to the value.
-                        b'\n' => {}
-                        b'\r' => {
-                            if self.peek() == Some(b'\n') {
-                                self.pos += 1;
-                            }
-                        }
-                        b'u' => out.push(self.unicode_escape()?),
-                        _ => {
-                            self.pos -= 1;
-                            return Err(self.err("a known escape"));
-                        }
-                    }
-                }
-                _ => {
-                    // Copy the whole UTF-8 sequence, not the lead byte.
-                    let start = self.pos - 1;
-                    while self.pos < self.bytes.len() && self.bytes[self.pos] & 0xC0 == 0x80 {
-                        self.pos += 1;
-                    }
-                    match core::str::from_utf8(&self.bytes[start..self.pos]) {
-                        Ok(s) => out.push_str(s),
-                        Err(_) => {
-                            self.pos = start;
-                            return Err(self.err("valid UTF-8"));
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    /// `\uXXXX`, including a surrogate pair — a config carrying a non-BMP
-    /// character in a path is unlikely but a lone unpaired surrogate must not
-    /// become a silent replacement character.
-    fn unicode_escape(&mut self) -> Result<char, Json5Error> {
-        let hi = self.hex4()?;
-        if (0xD800..0xDC00).contains(&hi) {
-            if self.peek() != Some(b'\\') || self.bytes.get(self.pos + 1) != Some(&b'u') {
-                return Err(self.err("a low surrogate escape"));
-            }
-            self.pos += 2;
-            let lo = self.hex4()?;
-            if !(0xDC00..0xE000).contains(&lo) {
-                return Err(self.err("a low surrogate escape"));
-            }
-            let cp = 0x1_0000 + ((hi - 0xD800) << 10) + (lo - 0xDC00);
-            return char::from_u32(cp).ok_or_else(|| self.err("a Unicode scalar"));
-        }
-        char::from_u32(hi).ok_or_else(|| self.err("a Unicode scalar"))
-    }
-
-    fn hex4(&mut self) -> Result<u32, Json5Error> {
-        if self.pos + 4 > self.bytes.len() {
-            return Err(self.err("four hex digits"));
-        }
-        let mut v = 0u32;
-        for i in 0..4 {
-            let d = (self.bytes[self.pos + i] as char)
-                .to_digit(16)
-                .ok_or_else(|| self.err("four hex digits"))?;
-            v = v * 16 + d;
-        }
-        self.pos += 4;
-        Ok(v)
-    }
-
-    /// Consume a number's source text. The SHAPE is validated here (so a bare
-    /// `-` or `0x` is rejected at the offset it occurs) while the VALUE is
-    /// left to the consumer, which knows the target type.
-    fn number(&mut self) -> Result<Json5Value, Json5Error> {
-        let start = self.pos;
-        if matches!(self.peek(), Some(b'-' | b'+')) {
-            self.pos += 1;
-        }
-        let digits_start = self.pos;
-        let hex =
-            self.peek() == Some(b'0') && matches!(self.bytes.get(self.pos + 1), Some(b'x' | b'X'));
-        if hex {
-            self.pos += 2;
-            let hd = self.pos;
-            while matches!(self.peek(), Some(c) if c.is_ascii_hexdigit()) {
-                self.pos += 1;
-            }
-            if self.pos == hd {
-                self.pos = start;
-                return Err(self.err("hex digits after 0x"));
-            }
-        } else {
-            while matches!(self.peek(), Some(c) if c.is_ascii_digit()) {
-                self.pos += 1;
-            }
-            if self.peek() == Some(b'.') {
-                self.pos += 1;
-                while matches!(self.peek(), Some(c) if c.is_ascii_digit()) {
-                    self.pos += 1;
-                }
-            }
-            if self.pos == digits_start {
-                self.pos = start;
-                return Err(self.err("a number"));
-            }
-            if matches!(self.peek(), Some(b'e' | b'E')) {
-                self.pos += 1;
-                if matches!(self.peek(), Some(b'-' | b'+')) {
-                    self.pos += 1;
-                }
-                let ed = self.pos;
-                while matches!(self.peek(), Some(c) if c.is_ascii_digit()) {
-                    self.pos += 1;
-                }
-                if self.pos == ed {
-                    self.pos = start;
-                    return Err(self.err("exponent digits"));
-                }
-            }
-        }
-        Ok(Json5Value::Number(
-            String::from_utf8_lossy(&self.bytes[start..self.pos]).to_string(),
-        ))
-    }
+/// A scanned string into a `String`. The scan checked the text, so the only
+/// failure left would be the destination's, and `String` does not run out.
+fn decode(s: &Json5Str<'_>) -> Result<String, Json5Error> {
+    let mut out = String::new();
+    s.decode_into(&mut out)?;
+    Ok(out)
 }
 
 /// Parse a [`Json5Value::Number`]'s source text as a `u64`, honouring a `0x`
