@@ -53,7 +53,11 @@ _wz_nda_terms_file() {
         printf '%s\n' "$WZ_NDA_TERMS"
         return 0
     fi
-    printf '%s/wz-nda-terms.txt\n' "$(git rev-parse --git-dir)"
+    # The COMMON dir, not `--git-dir`: in a linked worktree the latter is
+    # `.git/worktrees/<name>/`, which never holds this file, so every push from
+    # a worktree failed here on a list it could not find rather than on a term.
+    # The list is one per repository, and the common dir is where one lives.
+    printf '%s/wz-nda-terms.txt\n' "$(git rev-parse --git-common-dir)"
 }
 
 # wz_nda_scan <range>  e.g. wz_nda_scan "origin/main..HEAD"
