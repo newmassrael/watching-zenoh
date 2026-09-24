@@ -2068,6 +2068,36 @@ jobs:
           test -f target/zenohd-build/zenoh-src/commons/zenoh-protocol/src/lib.rs \
             || { echo "::error::zenoh-src is present but not a zenoh workspace — upstream_root() would reject it and the resolution arm would FAIL"; exit 1; }
 
+      # R2853 — hand the asserted zenohd to `cross-mcu` (Layer Qa) as a RUN
+      # artifact, not through the cache. R2842 made that job restore this job's
+      # cache entry after it ends, and run 36002723608 still red: this job saved
+      # the entry at 15:03:56, the queued `cross-mcu` restored at 20:26, and in
+      # between the repository's caches (13.6 GB, measured, against GitHub's
+      # eviction budget; the per-job rust caches alone re-save ~1 GB each)
+      # had evicted it, so neither the key nor the prefix found anything. A
+      # cache is a best-effort store shared by every run; an artifact belongs to
+      # THIS run and is not evicted by another run's saves, which is the
+      # guarantee a job that needs this run's zenohd requires.
+      #
+      # Tarred because `upload-artifact` does not keep the executable bit, and
+      # Layer Qa tests `-x` on the binary. Uploaded right after the assert, so a
+      # later red in this job's lanes still leaves the oracle for Layer Qa.
+      # `overwrite` because a re-run attempt of this job uploads under the same
+      # name in the same run.
+      # The tar goes to the runner's temp directory, outside the checkout, so no
+      # later lane that reads the working tree sees a 116 MB untracked file.
+      - name: Pack zenohd for the cross-mcu job
+        run: tar -cf "$RUNNER_TEMP/zenohd-oracle.tar" target/zenohd
+
+      - name: Publish zenohd for the cross-mcu job (run artifact)
+        uses: actions/upload-artifact@v4
+        with:
+          name: zenohd-oracle
+          path: ${{ runner.temp }}/zenohd-oracle.tar
+          retention-days: 1
+          overwrite: true
+          if-no-files-found: error
+
       - name: Build zenoh-pico CLI binaries
         run: bash scripts/build-zenoh-pico-cli.sh
 
@@ -2658,6 +2688,9 @@ jobs:
     # job saved at 11:02, found nothing under the prefix either, and red.
     # `!cancelled()` rather than the default `success()`: Layers G and Q do not
     # depend on interop, so an interop red must not take them down with it.
+    # R2853 — the ordering stays, the carrier changed: the zenohd now arrives as
+    # a run artifact interop publishes mid-job, since the cache entry it used to
+    # save at its end was evicted before this job, queued behind it, restored.
     needs: [interop]
     if: ${{ !cancelled() }}
     steps:
@@ -2761,31 +2794,31 @@ jobs:
           WZ_Q_REQUIRE: "1"
         run: bash scripts/run-ci.sh --layer Q
 
-      - name: Restore the zenohd oracle (the interop job's cache, restore only)
+      - name: Download the zenohd oracle (the interop job's run artifact)
         # R2839 — Layer Qa needs a stock zenohd BESIDE QEMU, and no job had both:
         # `interop` builds zenohd but carries no ARM toolchain or emulator, and
         # this job carries those but no zenohd. This job takes the binary the
-        # other one caches rather than the packages the other one lacks: at the
+        # other one builds rather than the packages the other one lacks: at the
         # 27 kB/s mirror `apt_package_census.py` measured, the ~135 MB this job
         # installs is a multi-run warm-up in any job that does not already hold
         # it, and this one does.
         #
-        # RESTORE ONLY, and the path list is the interop step's own, character
-        # for character: actions/cache folds the paths into the entry's version,
-        # so a different list restores nothing. This job `needs: [interop]`, so
-        # the entry that job saves at its end exists before this restore runs;
-        # `restore-keys` still takes the newest entry of the same version for a
-        # run whose interop could not save (a red interop saves nothing). What
-        # the restored entry IS is read, not trusted, by the pin gate next.
-        id: zenohd-cache
-        uses: actions/cache/restore@v4
+        # R2853 — taken as the RUN ARTIFACT that job publishes, not from its
+        # cache entry: the cache restore R2842 wired missed in run 36002723608
+        # because the entry had been evicted in the five hours this job queued
+        # behind `interop` (see the publish step there). An artifact is this
+        # run's own and outlives that wait. When `interop` never reached its
+        # publish step there is nothing to download; this step then fails and
+        # Layer Qa is not reached, which is the truth -- there is no oracle --
+        # rather than a restored entry from some other run. What the unpacked
+        # tree IS is read, not trusted, by the pin gate next.
+        uses: actions/download-artifact@v4
         with:
-          path: |
-            target/zenohd
-            target/zenohd-build/zenoh-src
-          key: zenohd-1.10.1-src-ubuntu-22.04-${{ hashFiles('scripts/build-zenohd.sh', 'scripts/lib/ensure_zenohd_at_pin.py') }}
-          restore-keys: |
-            zenohd-1.10.1-src-ubuntu-22.04-
+          name: zenohd-oracle
+          path: ${{ runner.temp }}
+
+      - name: Unpack zenohd
+        run: tar -xf "$RUNNER_TEMP/zenohd-oracle.tar"
 
       - name: Layer Qa — a stock zenohd reconfigures a wz MCU under QEMU
         # WZ_QA_REQUIRE=1 for the reason every provisioned lane arms its flag: this

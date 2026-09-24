@@ -19612,7 +19612,8 @@ layer_e17_stats_registry_writes_upstreams_document() {
 # zids in the JSON, never on the HTTP status alone.
 #
 # Runs on the `cross-mcu` job (QEMU + the ARM toolchain), with zenohd from
-# the `interop` job's cache (restore only). WZ_QA_REQUIRE=1 there: a missing
+# the `interop` job's run artifact (R2853; its cache entry was evicted before
+# this job restored it). WZ_QA_REQUIRE=1 there: a missing
 # prerequisite on a runner that provisions it is a regression, not a SKIP.
 _qa_unavailable() {
     if [[ -n "${WZ_QA_REQUIRE:-}" ]]; then
