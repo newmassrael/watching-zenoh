@@ -36,8 +36,7 @@ use core::cell::RefCell;
 use critical_section::Mutex;
 use wz_session_core::admin_config_space::write_config_space_pattern;
 use wz_session_core::admin_connect::{
-    parse_connect_endpoints_write, ConfigWriteBody, ConnectEndpoints, ConnectEntry,
-    ConnectWriteOutcome,
+    parse_connect_endpoints_write, ConfigWriteBody, ConnectEndpoints, ConnectWriteOutcome,
 };
 use wz_session_core::observer::ApplicationLayerObserver;
 use wz_session_core::sample_kind::SampleKind;
@@ -158,7 +157,11 @@ impl crate::admin_status::ConfigView for ConnectControl {
 /// its `Locators`, strategy in camelCase), so what was written reads back in
 /// the form it was written, an empty group included.
 #[cfg(feature = "adminspace-core")]
-fn push_connect_endpoints(list: &[ConnectEntry], out: &mut String) {
+fn push_connect_endpoints(list: &[wz_session_core::admin_connect::ConnectEntry], out: &mut String) {
+    // R2843 — the entry type is named HERE, not in the module's `use` list:
+    // this function is its only user and exists only under `adminspace-core`,
+    // so a module-scope import was unused in an `adminspace-write`-only build
+    // and Layer C1m failed it under `-D warnings` (hosted run 35989144794).
     use wz_session_core::json::{escape_into, push_str_array};
     out.push('[');
     let mut i = 0;
