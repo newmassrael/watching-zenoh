@@ -168,6 +168,11 @@ adminspace-write = [
     "wz-session-core/session-unicast-accept",
     "wz-session-core/codec-init-body",
     "wz-session-core/codec-open-body",
+    # R2838 — a router forwards a PUT only to a face that DECLARED a matching
+    # subscriber, so the node declares `<root>/config/**` on every session,
+    # as upstream's admin space does. Measured against a stock zenohd: the
+    # write never arrived until it did.
+    "wz-session-core/declare-subscriber",
 ]
 # R2829 (§5.23) — the node answers upstream's admin GET (`admin_status`)
 # through `wz_session_core::adminspace::answer_admin_query`, the AP's own
@@ -177,6 +182,9 @@ adminspace-core = [
     "query-queryable",
     "codec-response",
     "codec-response-final",
+    # R2838 — and the same for the GET: the node declares `<root>/**` as a
+    # queryable on every session, or a router has nowhere to route it.
+    "wz-session-core/declare-queryable",
 ]
 
 [dependencies]

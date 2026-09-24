@@ -57,6 +57,9 @@ deploy/mcu-multicast-e2e/target-loopback/
 # R311y27 — deploy/mcu-freertos-demo is the standalone FreeRTOS-profile
 # workspace (boot e2e; Layer Q.frt). Same target/ policy.
 deploy/mcu-freertos-demo/target/
+# R2838 — deploy/mcu-admin-node is the standalone mps2 Ethernet firmware a
+# zenoh host reconfigures (the ZA-2898 lane). Same target/ policy.
+deploy/mcu-admin-node/target/
 # R311y31 — deploy/zephyr-app/rust is the standalone Zephyr-profile Rust
 # staticlib (Path-B boot e2e; Layer Qz). Its target/ is the cargo cross
 # output (the west build dir lives outside the repo). Same target/ policy.

@@ -19,14 +19,24 @@
 //!   a write or a GET arriving on any of them is answered the same way.
 //! * Each tick reports every ESTABLISHED session, accepted and dialled, as
 //!   the GET's `sessions`, which is how upstream lists transports.
+//! * R2838 — once a session is established the node DECLARES, on it, what
+//!   upstream's admin space declares: a queryable on `@/<zid>/<whatami>/**`
+//!   and a subscriber on `@/<zid>/<whatami>/config/**`. A router forwards a
+//!   GET or a PUT only to a face that declared a match, so without these a
+//!   stock zenohd connected to the node holds a live session and still
+//!   routes nothing to it. That is what the first run against one showed.
 //!
 //! A firmware's loop is then: run the task set, poll its Ethernet interface,
 //! pump the link's timers, and `tick` the node with the time.
 
 use alloc::boxed::Box;
 use alloc::rc::Rc;
+use alloc::string::String;
 use alloc::vec::Vec;
 use core::cell::RefCell;
+
+use wz_session_core::admin_config_space::write_config_space_pattern;
+use wz_session_core::adminspace::admin_queryable_key;
 
 use wz_link_lwip::rx_sockets::bind_session_rx;
 use wz_link_lwip::LwipLink;
@@ -64,6 +74,30 @@ where
     timeouts: SessionTimeouts,
     accept: A,
     acceptor: Option<(CoopLocalJoinHandle<DriverOutcome>, Rc<McuActions<C>>)>,
+    admin_key: String,
+    config_key: String,
+    /// The sessions the admin declarations have been sent on, by identity.
+    declared: Vec<*const McuActions<C>>,
+}
+
+/// The declaration ids the node uses on each session; ids are per session.
+const ADMIN_QUERYABLE_ID: u64 = 1;
+const CONFIG_SUBSCRIBER_ID: u64 = 2;
+
+/// Declare upstream's two admin-space interests on `actions`: `true` once
+/// both went out.
+fn declare_admin<C: ClockSource + 'static>(
+    actions: &McuActions<C>,
+    admin_key: &str,
+    config_key: &str,
+) -> bool {
+    // `complete: false` is upstream's `QueryableInfoType::DEFAULT`.
+    actions
+        .send_declare_queryable(ADMIN_QUERYABLE_ID, 0, Some(admin_key), false)
+        .is_ok()
+        && actions
+            .send_declare_subscriber(CONFIG_SUBSCRIBER_ID, 0, Some(config_key))
+            .is_ok()
 }
 
 impl<'a, C, P, A> AdminNode<'a, C, P, A>
@@ -91,6 +125,10 @@ where
         dial_params: P,
         accept: A,
     ) -> Self {
+        let admin_key = admin_queryable_key(&identity.zid_hex, identity.whatami);
+        let mut config_key = String::new();
+        // Writing into a `String` cannot fail.
+        let _ = write_config_space_pattern(&mut config_key, &identity.zid_hex, identity.whatami);
         let observer = Rc::new(RefCell::new(ApplicationLayerObserver::new()));
         {
             let mut o = observer.borrow_mut();
@@ -112,6 +150,9 @@ where
             timeouts,
             accept,
             acceptor: None,
+            admin_key,
+            config_key,
+            declared: Vec::new(),
         }
     }
 
@@ -140,6 +181,7 @@ where
             self.acceptor = self.listen();
         }
         self.manager.tick(now_ms);
+        self.declare_on_new_sessions();
         let mut sessions: Vec<_> = self
             .acceptor
             .iter()
@@ -151,6 +193,28 @@ where
                 .filter_map(|(_, session)| session.admin_session()),
         );
         self.status.set_sessions(sessions);
+    }
+
+    /// Send the admin declarations on every established session that has
+    /// not had them, and forget the sessions that are gone.
+    fn declare_on_new_sessions(&mut self) {
+        let live: Vec<&Rc<McuActions<C>>> = self
+            .acceptor
+            .iter()
+            .map(|(_, actions)| actions)
+            .chain(self.manager.sessions().map(|(_, s)| s.actions()))
+            .collect();
+        self.declared
+            .retain(|done| live.iter().any(|a| Rc::as_ptr(a) == *done));
+        for actions in live {
+            let key = Rc::as_ptr(actions);
+            if actions.is_established()
+                && !self.declared.contains(&key)
+                && declare_admin(actions, &self.admin_key, &self.config_key)
+            {
+                self.declared.push(key);
+            }
+        }
     }
 
     fn listen(&mut self) -> Option<(CoopLocalJoinHandle<DriverOutcome>, Rc<McuActions<C>>)> {
@@ -282,6 +346,9 @@ mod tests {
         let far_sink: Rc<dyn BoxedLinkDriver> = far_driver.clone();
         let far_actions =
             new_session_actions(far_sink, params(0xc3), CoopTime::new(&runtime), Counting(9));
+        // R2838 — what the peer is told: every Declare the node sends it.
+        let declares = Rc::new(core::cell::Cell::new(0usize));
+        let seen = declares.clone();
         let _far = spawn_session(
             &local,
             link.clone(),
@@ -293,7 +360,17 @@ mod tests {
                 role: SessionRole::Acceptor,
                 max_iters: None,
             },
-            |_| {},
+            move |event| {
+                if let IterationEvent::Poll(DriverLoopOutcome::FramePayload { messages, .. }) =
+                    event
+                {
+                    let n = messages
+                        .iter()
+                        .filter(|m| matches!(m, NetworkMessage::Declare(_)))
+                        .count();
+                    seen.set(seen.get() + n);
+                }
+            },
         );
 
         let accept_runtime = runtime.clone();
@@ -347,5 +424,13 @@ mod tests {
         std::assert_eq!(reported.len(), 1, "the dialled session is reported");
         std::assert_eq!(reported[0].peer_zid_hex, zid_to_zenoh_hex(&[0xc3; 4]));
         std::assert!(far_actions.is_established(), "the peer holds it too");
+
+        // R2838 — the peer was told what upstream's admin space tells a
+        // router: the admin queryable and the config subscriber, once each.
+        for _ in 0..16 {
+            local.run_until_idle();
+            node.tick(0);
+        }
+        std::assert_eq!(declares.get(), 2, "one queryable and one subscriber");
     }
 }

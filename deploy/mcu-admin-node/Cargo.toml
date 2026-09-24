@@ -1,0 +1,70 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later OR LicenseRef-watching-zenoh-Commercial
+# SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
+#
+# mcu-admin-node — R2838 (§5.23), the QEMU `mps2-an385` firmware a stock
+# zenoh host reconfigures at runtime.
+#
+# Boots a wz MCU node on real Ethernet frames: the LAN9118 the mps2 machines
+# carry (`wz_link_lwip::lan9118`) under an lwIP Ethernet netif
+# (`wz_link_lwip::ethernet`), at QEMU user networking's guest address
+# 10.0.2.15. It runs `wz_session_lwip::admin_node::AdminNode`: it listens on
+# udp/10.0.2.15:7447, answers upstream's admin GET under its own zid, and
+# applies `connect/endpoints` writes by dialling what they name.
+#
+# The firmware has no verdict of its own: what it is FOR is decided by the
+# host that talks to it (the lane), so it runs until QEMU is stopped and
+# reports only what it sees over semihosting.
+#
+# This is a STANDALONE crate workspace (the `[workspace]` table below), like
+# the other deploys, so it is not pulled into `crates/`'s build.
+
+[workspace]
+
+[package]
+name = "mcu-admin-node"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.85"
+license = "AGPL-3.0-or-later OR LicenseRef-watching-zenoh-Commercial"
+authors = ["newmassrael"]
+description = "R2838 QEMU mps2 firmware: a wz MCU node on LAN9118 Ethernet that a zenoh host reconfigures through its admin space."
+
+[[bin]]
+name = "mcu-admin-node"
+path = "src/main.rs"
+
+[dependencies]
+cortex-m = { version = "0.7", features = ["critical-section-single-core"] }
+cortex-m-rt = "0.7"
+cortex-m-semihosting = "0.5"
+panic-semihosting = { version = "0.6", features = ["exit"] }
+embedded-alloc = "0.6"
+wz-mcu-clock = { path = "../../crates/wz-mcu-clock" }
+# The composable-framework route every deploy takes: the facade's features
+# unify onto the one wz-session-core the session shell is built against.
+# keepalive and close keep the zenoh host's lease and teardown honest.
+wz = { path = "../../crates/wz", default-features = false, features = [
+    "session-lwip",
+    "adminspace-core",
+    "adminspace-write",
+    "codec-frame",
+    "codec-keep-alive",
+    "codec-close",
+    "transport-keepalive",
+] }
+# The types the facade does not re-export (SessionInitParams, SigningKey,
+# SessionTimeouts, the entropy trait); features arrive through the facade.
+wz-session-core = { path = "../../crates/wz-session-core", default-features = false, features = [
+    "alloc",
+    "session-unicast",
+    "no_std",
+] }
+
+[profile.release]
+codegen-units = 1
+opt-level = "s"
+lto = true
+panic = "abort"
+
+[profile.dev]
+panic = "abort"
