@@ -390,6 +390,58 @@ pub fn multicast_put_literal(
     })
 }
 
+/// R2848 (`transport-stats`) — what a queued item counts as when it enters the
+/// transport: its registry class and the band it carries.
+///
+/// Upstream counts a sent network message by the message's OWN band
+/// (`io/zenoh-transport/src/multicast/tx.rs` @ `self.link_stats.inc_network_message(zenoh_stats::Tx, msg);`),
+/// which is the band BEFORE a non-QoS group clamps the frame to DEFAULT, just
+/// as the unicast send seam records the caller's band before its own clamp.
+/// A Push's band rides beside it on the item; every other variant carries its
+/// band in its own `ext_qos`.
+///
+/// The alias resolver answers `None`: the multicast egress keeps no id space
+/// of its own, and every producer re-literalizes a Push before queueing it
+/// (the router's group leg says why — a group leaf never saw the inbound
+/// face's declarations), so an item's key expression is already the literal
+/// its space is read from.
+#[cfg(all(
+    feature = "transport-stats",
+    any(
+        feature = "codec-push",
+        feature = "codec-response",
+        feature = "codec-response-final",
+        feature = "liveliness-token"
+    )
+))]
+pub fn multicast_tx_stats_class(
+    item: &MulticastTxItem,
+) -> (crate::qos::Priority, crate::stats::NetworkStatsClass) {
+    use crate::stats::{MessageLabel, NetworkStatsClass};
+    match item {
+        #[cfg(feature = "codec-push")]
+        MulticastTxItem::Push { push, priority, .. } => (
+            *priority,
+            crate::network_message::push_stats_class(push, |_| None),
+        ),
+        #[cfg(feature = "codec-response")]
+        MulticastTxItem::Response { response } => (
+            crate::declare_ext_qos::read_response_qos(response).priority(),
+            crate::network_message::response_stats_class(response, |_| None),
+        ),
+        #[cfg(feature = "codec-response-final")]
+        MulticastTxItem::ResponseFinal { qos, .. } => (
+            qos.priority(),
+            NetworkStatsClass::control(MessageLabel::ResponseFinal),
+        ),
+        #[cfg(feature = "liveliness-token")]
+        MulticastTxItem::DeclareReply { declare } => (
+            crate::declare_ext_qos::read_declare_qos(declare).priority(),
+            NetworkStatsClass::control(MessageLabel::Declare),
+        ),
+    }
+}
+
 // R311y227 — the emit-level witness: `multicast_tx_emit` clamps the band by the
 // group's `is_qos`, selects the per-priority TX conduit, and writes the frame
 // `ext_qos` — the composition the sn.rs (conduit) + frame_encode (wire) unit

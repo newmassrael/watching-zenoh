@@ -1310,6 +1310,18 @@ impl<const MAX_PEERS: usize> MulticastDispatcher<MAX_PEERS> {
         self.find_by_src(src)
     }
 
+    /// R2848 — the zid the live peer at source address `src` announced in the
+    /// JOIN that admitted it, or `None` if no live peer is keyed there. The
+    /// identity a received network message is counted under: the wire names
+    /// the sender only by its address.
+    pub fn peer_zid_by_src(&self, src: SocketAddr) -> Option<&[u8]> {
+        let idx = self.find_by_src(src)?;
+        self.peers[idx]
+            .zid
+            .as_ref()
+            .map(|(buf, len)| &buf[..*len as usize])
+    }
+
     /// Refresh a live peer's lease on any non-Join inbound message attributed
     /// by source address (§3.1 RxDispatch Frame / Fragment / KeepAlive / OAM,
     /// which carry NO zid on the wire). Returns `true` if a live peer was at
@@ -1541,6 +1553,55 @@ pub fn ingest_multicast_fragment_qos<
     S: crate::chain_staging::ChainStaging<SLOTS, CAP>,
     F: FnMut(IterationEvent<'_>),
 {
+    ingest_multicast_fragment_counted(
+        dispatcher,
+        reasm,
+        src,
+        reliable,
+        sn,
+        more,
+        priority,
+        markers,
+        payload,
+        now_ms,
+        on_event,
+        &mut |_: &[u8], _: &crate::network_message::NetworkMessage| {},
+    )
+}
+
+/// R2848 — [`ingest_multicast_fragment_qos`], also handing each network
+/// message of a COMPLETED chain to `count`, with the zid of the peer that sent
+/// it. The shared RX dispatch passes its stats recorder through here, so a
+/// reassembled message is counted at the same point of the pipeline as a
+/// whole Frame's: after the peer's aliases resolve it, before the namespace
+/// strip can drop it (see [`count_received_network_messages`]).
+#[cfg(all(feature = "reassembly", feature = "alloc"))]
+#[allow(clippy::too_many_arguments)] // the decoded fragment's wire fields ride flat, as above
+pub(crate) fn ingest_multicast_fragment_counted<
+    const MAX_PEERS: usize,
+    const SLOTS: usize,
+    const CAP: usize,
+    S,
+    F,
+    C,
+>(
+    dispatcher: &mut MulticastDispatcher<MAX_PEERS>,
+    reasm: &mut ReassemblyDispatcher<SLOTS, CAP, S>,
+    src: SocketAddr,
+    reliable: bool,
+    sn: u64,
+    more: bool,
+    priority: crate::qos::Priority,
+    markers: crate::extfragment::FragmentMarkers,
+    payload: &[u8],
+    now_ms: u64,
+    on_event: &mut F,
+    count: &mut C,
+) where
+    S: crate::chain_staging::ChainStaging<SLOTS, CAP>,
+    F: FnMut(IterationEvent<'_>),
+    C: FnMut(&[u8], &crate::network_message::NetworkMessage),
+{
     // R311y227 — a qos peer's oversize frame fragments ride its per-`priority`
     // conduit SN ring (the SAME conduit the whole-frame gate uses); admit against
     // it, and key the reassembly chain by that priority (the Router already keys
@@ -1635,6 +1696,7 @@ pub fn ingest_multicast_fragment_qos<
             dispatcher.apply_declared_subscriptions(src, &o);
             o
         };
+        count_received_network_messages(dispatcher, src, &o, count);
         // §5.21 routing-namespace — strip the REASSEMBLED batch (per-peer via
         // `src`) BEFORE the observer fan, symmetric with the whole-Frame seam in
         // `multicast_rx::dispatch_multicast_inbound`. The shadow keeps `o`
@@ -1650,6 +1712,51 @@ pub fn ingest_multicast_fragment_qos<
     }
     if let Some(reason) = ReassemblyDropReason::from_ingest(ingest_outcome) {
         on_event(IterationEvent::ReassemblyDropped(reason));
+    }
+}
+
+/// R2848 — hand every network message of a delivered batch to `count`, with the
+/// zid of the peer at `src` that sent it: the one point both the whole-Frame
+/// fan (`multicast_rx`) and the reassembled-chain fan above count at.
+///
+/// It sits AFTER the peer's alias pass, so a message is classified by the
+/// literal key expression its sender meant, and BEFORE the namespace strip,
+/// because upstream counts at its transport's hand-up
+/// (`io/zenoh-transport/src/multicast/rx.rs` @ `peer.stats.inc_network_message(`)
+/// and applies a namespace in the session above it, so a message the strip
+/// drops has still been received. A batch from an address no live peer holds
+/// is not counted: the admission gates in front of every caller already
+/// refuse one, and upstream dispatches only what arrives through a known peer.
+///
+/// Gated on the union of its two callers' gates: the reassembled-chain ingest
+/// above, and the RX dispatch module.
+#[cfg(all(
+    feature = "alloc",
+    any(
+        feature = "reassembly",
+        all(
+            feature = "codec-join",
+            feature = "codec-frame",
+            feature = "codec-close"
+        )
+    )
+))]
+pub(crate) fn count_received_network_messages<const MAX_PEERS: usize, C>(
+    dispatcher: &MulticastDispatcher<MAX_PEERS>,
+    src: SocketAddr,
+    outcome: &crate::driver_loop::DriverLoopOutcome,
+    count: &mut C,
+) where
+    C: FnMut(&[u8], &crate::network_message::NetworkMessage),
+{
+    let crate::driver_loop::DriverLoopOutcome::FramePayload { messages, .. } = outcome else {
+        return;
+    };
+    let Some(zid) = dispatcher.peer_zid_by_src(src) else {
+        return;
+    };
+    for msg in messages {
+        count(zid, msg);
     }
 }
 

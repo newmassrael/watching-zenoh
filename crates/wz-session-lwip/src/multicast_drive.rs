@@ -810,10 +810,13 @@ where
                 src,
                 now,
                 &mut on_event,
+                // R2848 — `transport-stats` is never on an MCU lane, so this
+                // loop keeps no counts to record into.
+                &(),
             );
             #[cfg(not(feature = "reassembly"))]
             if let MulticastRxNext::Close =
-                dispatch_multicast_inbound(dispatcher, params, bytes, src, now, &mut on_event)
+                dispatch_multicast_inbound(dispatcher, params, bytes, src, now, &mut on_event, &())
             {
                 // R311y784 — the MCU twin of the AP loop's announced departure.
                 // Both loops fire the identical event so an application's

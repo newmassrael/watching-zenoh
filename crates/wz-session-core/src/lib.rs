@@ -1684,6 +1684,19 @@ pub mod multicast_join;
 ))]
 pub mod multicast_rx;
 
+/// R2848 — the recording seam of a multicast transport's counts: what the
+/// shared RX dispatch ([`multicast_rx`]) and both drive loops report each
+/// datagram, transport message, network message and peer change into. `()`
+/// records nothing. Gated as its first consumer, [`multicast_rx`], is.
+#[cfg(all(
+    feature = "session-multicast",
+    feature = "codec-join",
+    feature = "codec-frame",
+    feature = "codec-close",
+    feature = "alloc"
+))]
+pub mod multicast_stats;
+
 /// R311lx — the shared multicast TX emit SSOT consumed by both the AP
 /// (`wz-runtime-tokio::multicast_glue`) and MCU
 /// (`wz-session-lwip::multicast_drive`) drive loops, so the §3.1 TxData

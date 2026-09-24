@@ -132,6 +132,8 @@ use wz_session_core::multicast_rx::{dispatch_multicast_inbound, MulticastRxNext}
 use wz_session_core::multicast_rx::{
     dispatch_multicast_inbound_reassembling, sweep_multicast_reassembling,
 };
+// R2848 — where the loop and the RX dispatch report this transport's counts.
+pub use wz_session_core::multicast_stats::MulticastStatsRecorder;
 // R311lx — the shared TX emit SSOT: the item-variant -> mint -> encode ->
 // fragment decision the loop's outbound arm used to carry inline. The enum +
 // the `multicast_put_literal` builder are re-exported so the loop's public TX
@@ -239,6 +241,143 @@ pub use wz_session_core::multicast_params::MulticastOutcome;
 // resolve.
 pub use wz_session_core::multicast_params::MulticastDriveConfig;
 
+/// R2848 (`transport-stats`) — the counts of ONE multicast transport, as a
+/// handle the drive loop records into and the node's registry reads from.
+///
+/// The partition itself is [`MulticastMetrics`](wz_session_core::stats_registry::MulticastMetrics),
+/// whose attribution R2847 proved against the pin's own registry; this is the
+/// shared place it lives while a group face runs. A mutex rather than
+/// per-counter atomics because one received network message touches two
+/// partitions (the sender's count and the group's payload), and a reader
+/// between the two would see half a message.
+///
+/// A peer that leaves hands its partition back with its link closed; it is
+/// kept here, in departure order, for the registry to mark disconnected
+/// ([`Self::take_departed`]), since upstream keeps a departed peer's counts
+/// until its registry collects them.
+#[cfg(feature = "transport-stats")]
+#[derive(Clone, Debug)]
+pub struct MulticastTransportStats {
+    inner: std::sync::Arc<std::sync::Mutex<MulticastTransportStatsInner>>,
+}
+
+#[cfg(feature = "transport-stats")]
+#[derive(Debug)]
+struct MulticastTransportStatsInner {
+    metrics: wz_session_core::stats_registry::MulticastMetrics,
+    departed: Vec<(
+        Vec<u8>,
+        wz_session_core::stats_registry::MulticastPeerMetrics,
+    )>,
+}
+
+#[cfg(feature = "transport-stats")]
+impl MulticastTransportStats {
+    /// The counts of a transport on the group `group`, received through the
+    /// local endpoint `src` — both as locators, the labels upstream gives the
+    /// transport and its one link.
+    pub fn new(src: &str, group: &str) -> Self {
+        MulticastTransportStats {
+            inner: std::sync::Arc::new(std::sync::Mutex::new(MulticastTransportStatsInner {
+                metrics: wz_session_core::stats_registry::MulticastMetrics::new(src, group),
+                departed: Vec::new(),
+            })),
+        }
+    }
+
+    fn with<T>(&self, f: impl FnOnce(&mut MulticastTransportStatsInner) -> T) -> T {
+        // A poisoned lock means a panic mid-record; the counts are still the
+        // best this transport has, so they are kept rather than lost.
+        let mut guard = match self.inner.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        f(&mut guard)
+    }
+
+    /// A copy of the transport's counts as of now: the group's partition and
+    /// the peers on the group.
+    pub fn metrics(&self) -> wz_session_core::stats_registry::MulticastMetrics {
+        self.with(|inner| inner.metrics.clone())
+    }
+
+    /// The partitions of the peers that left since the last call, by zid, in
+    /// the order they left.
+    pub fn take_departed(
+        &self,
+    ) -> Vec<(
+        Vec<u8>,
+        wz_session_core::stats_registry::MulticastPeerMetrics,
+    )> {
+        self.with(|inner| std::mem::take(&mut inner.departed))
+    }
+}
+
+#[cfg(feature = "transport-stats")]
+impl MulticastStatsRecorder for MulticastTransportStats {
+    fn datagram_sent(&self, bytes: usize, transport_messages: u64) {
+        self.with(|inner| inner.metrics.sent(bytes as u64, transport_messages));
+    }
+
+    fn datagram_received(&self, bytes: usize) {
+        self.with(|inner| inner.metrics.received_bytes(bytes as u64));
+    }
+
+    fn transport_message_received(&self) {
+        self.with(|inner| inner.metrics.received_transport_messages(1));
+    }
+
+    #[cfg(any(
+        feature = "codec-push",
+        feature = "codec-response",
+        feature = "codec-response-final",
+        feature = "liveliness-token"
+    ))]
+    fn network_message_sent(&self, item: &MulticastTxItem) {
+        let (priority, class) = wz_session_core::multicast_tx::multicast_tx_stats_class(item);
+        self.with(|inner| inner.metrics.sent_network_message(priority, &class));
+    }
+
+    /// Classified as the unicast receive seam classifies: by the message's own
+    /// band, with no alias table — a peer's ids name ITS space, and the
+    /// dispatch has already resolved the ones it declared on the group.
+    fn network_message_received(
+        &self,
+        zid: &[u8],
+        msg: &wz_session_core::network_message::NetworkMessage,
+    ) {
+        let class = wz_session_core::network_message::stats_class(msg, |_| None);
+        let priority = wz_session_core::network_message::network_message_priority(msg);
+        self.with(|inner| {
+            inner
+                .metrics
+                .received_network_message(zid, priority, &class)
+        });
+    }
+
+    /// A peer whose JOIN named a role this node does not recognize opens no
+    /// partition: upstream's decoder refuses that JOIN outright, so there is no
+    /// upstream partition to mirror, and its messages go uncounted as any
+    /// unadmitted sender's do.
+    fn peer_arrived(
+        &self,
+        arrived: &wz_session_core::multicast_peer_arrived::MulticastPeerArrived,
+    ) {
+        if let Some(whatami) = arrived.whatami {
+            self.with(|inner| inner.metrics.peer_joined(arrived.peer.as_slice(), whatami));
+        }
+    }
+
+    fn peer_lost(&self, lost: &wz_session_core::multicast_peer_lost::MulticastPeerLost) {
+        let zid = lost.peer.as_slice();
+        self.with(|inner| {
+            if let Some(peer) = inner.metrics.peer_left(zid) {
+                inner.departed.push((zid.to_vec(), peer));
+            }
+        });
+    }
+}
+
 /// Drive a multicast session: bring the link up, then own the §3.1 Running
 /// concerns (periodic JOIN emit, RX classify -> dispatch + the A1b data
 /// plane, lease sweep) until the link is lost or `cfg.max_iters` is reached.
@@ -296,6 +435,7 @@ where
         |_members: &[Vec<u8>]| {},
         |_subs: &[String]| {},
         None,
+        &(),
     )
     .await
 }
@@ -344,6 +484,7 @@ where
         |_members: &[Vec<u8>]| {},
         |_subs: &[String]| {},
         Some(shutdown),
+        &(),
     )
     .await
 }
@@ -427,7 +568,7 @@ impl McastFaceStop {
 /// `shared_nodes` master election carries (recomputed at every topology event).
 /// Startup damping (promote-slow / demote-fast) is a named follow-up.
 #[allow(clippy::too_many_arguments)]
-pub async fn drive_multicast_session_with_membership<D, T, F, G, H, const MAX_PEERS: usize>(
+pub async fn drive_multicast_session_with_membership<D, T, F, G, H, R, const MAX_PEERS: usize>(
     dispatcher: &mut MulticastDispatcher<MAX_PEERS>,
     cfg: MulticastDriveConfig<'_>,
     driver: &mut D,
@@ -437,6 +578,7 @@ pub async fn drive_multicast_session_with_membership<D, T, F, G, H, const MAX_PE
     on_members: G,
     on_group_subs: H,
     shutdown: Option<&mut tokio::sync::watch::Receiver<bool>>,
+    stats: &R,
 ) -> MulticastOutcome
 where
     D: LinkDriver,
@@ -444,7 +586,12 @@ where
     F: FnMut(IterationEvent<'_>),
     G: FnMut(&[Vec<u8>]),
     H: FnMut(&[String]),
+    R: MulticastStatsRecorder + Sync + ?Sized,
 {
+    // R2848 — and the transport's STATS recorder, the third optional concern,
+    // passed the same way: `&()` records nothing, which is what the two
+    // conveniences pass.
+    //
     // R2333 — this is the GENERAL entry point: membership relay AND the optional
     // graceful stop. It took no signal until this round, which is why the router
     // INGRESS face — the one host that needs membership — was structurally
@@ -464,6 +611,7 @@ where
         on_members,
         on_group_subs,
         shutdown,
+        stats,
     )
     .await
 }
@@ -474,12 +622,12 @@ where
 /// module already collapsed once (the `_with_membership` split kept ONE body on
 /// purpose), and a second copy would drift at the first arm anyone touches.
 #[allow(clippy::too_many_arguments)]
-async fn drive_multicast_session_inner<D, T, F, G, H, const MAX_PEERS: usize>(
+async fn drive_multicast_session_inner<D, T, F, G, H, R, const MAX_PEERS: usize>(
     dispatcher: &mut MulticastDispatcher<MAX_PEERS>,
     cfg: MulticastDriveConfig<'_>,
     driver: &mut D,
     clock: &T,
-    mut on_event: F,
+    on_event: F,
     outbound: &mut UnboundedReceiver<MulticastTxItem>,
     #[cfg_attr(
         not(feature = "multicast-declarations"),
@@ -500,6 +648,11 @@ async fn drive_multicast_session_inner<D, T, F, G, H, const MAX_PEERS: usize>(
     // bit-for-bit what it was: the `select!` arm this feeds is a
     // never-completing `pending()` when absent.
     mut shutdown: Option<&mut tokio::sync::watch::Receiver<bool>>,
+    // R2848 — where this transport's counts go: each datagram and its
+    // transport messages both ways, each network message sent, each one
+    // received (counted by the RX dispatch against its sender), and each peer
+    // that arrives or leaves. `&()` on every entry point but the general one.
+    stats: &R,
 ) -> MulticastOutcome
 where
     D: LinkDriver,
@@ -507,7 +660,23 @@ where
     F: FnMut(IterationEvent<'_>),
     G: FnMut(&[Vec<u8>]),
     H: FnMut(&[String]),
+    R: MulticastStatsRecorder + Sync + ?Sized,
 {
+    // R2848 — a peer's partition opens and closes with the membership events
+    // the dispatch already announces, so they are recorded HERE, where every
+    // one of them passes: the RX dispatch, both sweeps and the non-reassembly
+    // Close arm all report through this one callback. Wrapping it rather than
+    // teaching each producer to record keeps a later producer from being able
+    // to announce a peer the counts never hear of.
+    let mut observe = on_event;
+    let mut on_event = move |event: IterationEvent<'_>| {
+        match event {
+            IterationEvent::MulticastPeerArrived(arrived) => stats.peer_arrived(&arrived),
+            IterationEvent::MulticastPeerLost(lost) => stats.peer_lost(&lost),
+            _ => {}
+        }
+        observe(event);
+    };
     // Destructure into the same local names the loop body uses, so the body
     // is unchanged by the Introduce-Parameter-Object refactor.
     let MulticastDriveConfig {
@@ -586,7 +755,11 @@ where
             // Best-effort: a failed multicast send is non-fatal (the next
             // cadence retries), so unlike the scout path there is no
             // tx-failed transition to drive.
-            let _ = driver.send(&frame, Reliability::BestEffort).await;
+            // R2848 — one transport message, counted once written, as the
+            // pin counts its JOIN after `link.send` returns.
+            if driver.send(&frame, Reliability::BestEffort).await.is_ok() {
+                stats.datagram_sent(dgram.len(), 1);
+            }
             next_join_ms = now.saturating_add(params.join_interval_ms);
         }
 
@@ -628,6 +801,11 @@ where
                             continue;
                         }
                     }
+                    // R2848 — the network message is counted as it enters
+                    // the transport, whatever becomes of its datagrams; each
+                    // datagram, a frame or one fragment of a chain, is one
+                    // transport message and is counted once written.
+                    stats.network_message_sent(&item);
                     let frames = multicast_tx_emit(item, &mut tx_sn, params);
                     let reliability = if frames.reliable {
                         Reliability::Reliable
@@ -636,7 +814,9 @@ where
                     };
                     for dgram in frames.datagrams {
                         let frame = TxFrame { bytes: &dgram };
-                        let _ = driver.send(&frame, reliability).await;
+                        if driver.send(&frame, reliability).await.is_ok() {
+                            stats.datagram_sent(dgram.len(), 1);
+                        }
                     }
                 }
                 // No TX body codec: `MulticastTxItem` is uninhabited, so `recv()`
@@ -654,6 +834,10 @@ where
             },
             event = driver.poll_event() => match event {
                 LinkEvent::Rx(rx) => {
+                    // R2848 — the link received these bytes whether or not
+                    // anything in them can be attributed, so they are counted
+                    // before the source is looked at.
+                    stats.datagram_received(rx.bytes.len());
                     // RxDispatch: every multicast message is attributed by its
                     // datagram SOURCE ADDRESS (the peer key — Frame / KeepAlive
                     // / Close carry no zid on the wire). A multicast UdpDriver
@@ -681,6 +865,7 @@ where
                             src,
                             now,
                             &mut on_event,
+                            stats,
                         );
                         #[cfg(not(feature = "reassembly"))]
                         if let MulticastRxNext::Close = dispatch_multicast_inbound(
@@ -690,6 +875,7 @@ where
                             src,
                             now,
                             &mut on_event,
+                            stats,
                         ) {
                             // R311y784 — the non-reassembly twin of the
                             // `multicast_rx` Close arm: same announced
@@ -754,7 +940,9 @@ where
                 // is dropped rather than turned into a different outcome.
                 let dgram = wz_session_core::handshake_encode::encode_multicast_close();
                 let frame = TxFrame { bytes: &dgram };
-                let _ = driver.send(&frame, Reliability::BestEffort).await;
+                if driver.send(&frame, Reliability::BestEffort).await.is_ok() {
+                    stats.datagram_sent(dgram.len(), 1);
+                }
                 // Drive the transition rather than just returning: the peer table
                 // must be cleared on the way out, exactly as the link-loss arm
                 // above does through `notify_link_lost`. Returning the outcome
@@ -1375,6 +1563,9 @@ pub fn spawn_router_mcast_ingress(
                     let _ = group_subs_tx.send(subs.to_vec());
                 },
                 Some(&mut shutdown),
+                // R2848 — no registry holds this face's counts yet; the node
+                // registry takes the group and its peers in the next step.
+                &(),
             )
             .await;
             let Some(delay) = rejoin.wait_for(&outcome) else {
@@ -1829,6 +2020,7 @@ mod tests {
             |_members: &[Vec<u8>]| {},
             |_subs: &[String]| {},
             None,
+            &(),
         )
         .await;
         assert_eq!(admitted, MulticastOutcome::IterationLimit);
@@ -1851,6 +2043,7 @@ mod tests {
             |_members: &[Vec<u8>]| {},
             |_subs: &[String]| {},
             Some(&mut rx),
+            &(),
         )
         .await;
 
@@ -2474,6 +2667,7 @@ mod tests {
             src,
             now_ms,
             &mut |_| {},
+            &(),
         )
     }
 
@@ -2603,6 +2797,167 @@ mod tests {
             fired.load(Ordering::SeqCst),
             1,
             "the Push must reach the subscriber exactly once (replay SN-dropped)"
+        );
+    }
+
+    /// R2848 — the one sample of `family` whose labels contain every one of
+    /// `labels`, as the number it reports. A family written twice for the
+    /// same labels, or not at all, fails the test by name.
+    #[cfg(all(feature = "transport-stats", feature = "codec-push"))]
+    fn sample(doc: &str, family: &str, labels: &[&str]) -> u64 {
+        let found: Vec<&str> = doc
+            .lines()
+            .filter(|line| line.starts_with(&format!("{family}{{")))
+            .filter(|line| labels.iter().all(|l| line.contains(l)))
+            .collect();
+        assert_eq!(
+            found.len(),
+            1,
+            "`{family}` with {labels:?} must be written exactly once:\n{doc}"
+        );
+        let value = found[0].rsplit(' ').next().expect("a sample has a value");
+        value
+            .parse::<f64>()
+            .unwrap_or_else(|e| panic!("`{value}` is not a number: {e}")) as u64
+    }
+
+    /// R2848 — a REAL drive loop records every count a multicast transport
+    /// takes, at the point upstream's multicast transport takes it.
+    ///
+    /// The fixture is chosen so each count has one right answer and a wrong
+    /// seam gives a different one: the peer's JOIN and its first Frame arrive
+    /// batched in ONE datagram (so a per-datagram transport count reads 2
+    /// where the walk's reads 3, and the Put's sender is admitted by the very
+    /// datagram that carries it); the peer then announces its departure; and
+    /// this node publishes one Put. Read back through the stats registry
+    /// document, the form the admin metrics leg serves.
+    #[cfg(all(feature = "transport-stats", feature = "codec-push"))]
+    #[tokio::test]
+    async fn the_drive_loop_records_each_count_where_upstream_takes_it() {
+        use wz_session_core::frame_encode::encode_frame_with_push;
+        use wz_session_core::push_build::build_push_literal;
+        use wz_session_core::stats_registry::{MetricsQuery, StatsRegistry};
+
+        let peer = [0x01, 0x02, 0x03, 0x04];
+        let mut batch = join0(&params(&peer));
+        batch.extend(encode_frame_with_push(
+            0,
+            build_push_literal("demo/mc", b"hello").expect("push fixture"),
+            true,
+        ));
+        let close = wz_session_core::handshake_encode::encode_multicast_close();
+        let received = (batch.len() + close.len()) as u64;
+        let mut driver = FakeDriver::with([(batch, src(2)), (close, src(2))]);
+
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        tx.send(multicast_put_literal("demo/out", b"sent").expect("put item"))
+            .expect("queue publish");
+        drop(tx);
+
+        let group = "udp/224.0.0.224:7446";
+        let stats = MulticastTransportStats::new("udp/10.0.0.1:7446", group);
+        let mut dispatcher = MulticastDispatcher::<4>::new(MulticastConfig::new(5_000));
+        let clock = TokioTime::new();
+        let outcome = drive_multicast_session_with_membership(
+            &mut dispatcher,
+            MulticastDriveConfig {
+                params: &params(&[0xAA, 0xBB, 0xCC, 0xDD]),
+                tick_ms: 5,
+                max_iters: Some(8),
+            },
+            &mut driver,
+            &clock,
+            |_| {},
+            &mut rx,
+            |_members: &[Vec<u8>]| {},
+            |_subs: &[String]| {},
+            None,
+            &stats,
+        )
+        .await;
+        assert_eq!(outcome, MulticastOutcome::IterationLimit);
+
+        let metrics = stats.metrics();
+        assert_eq!(
+            metrics.peers().count(),
+            0,
+            "the peer announced its departure"
+        );
+        let departed = stats.take_departed();
+        assert_eq!(departed.len(), 1, "and handed its partition back");
+        assert!(stats.take_departed().is_empty(), "exactly once");
+
+        let mut registry = StatsRegistry::new("a1b2", WhatAmI::Peer, "v1");
+        let transport = registry.open_multicast_transport(metrics.group());
+        registry.set_transport_metrics(transport, metrics.transport().clone());
+        let (zid, left) = &departed[0];
+        let remote = format!(
+            "remote_zid=\"{}\"",
+            wz_session_core::zid_hex::zid_to_zenoh_hex(zid)
+        );
+        let id = registry.open_multicast_peer(
+            &wz_session_core::zid_hex::zid_to_zenoh_hex(zid),
+            left.whatami,
+            metrics.group(),
+        );
+        registry.set_transport_metrics(id, left.metrics().clone());
+        let mut doc = String::new();
+        registry.encode_metrics(&mut doc, MetricsQuery::default());
+
+        let group_part = "remote_zid=\"\"";
+        let sent: u64 = driver.sent.iter().map(|d| d.len() as u64).sum();
+        // RX: every byte the link read, and one per message the walk decoded.
+        assert_eq!(
+            sample(&doc, "zenoh_rx_per_transport_bytes_total", &[group_part]),
+            received
+        );
+        assert_eq!(
+            sample(
+                &doc,
+                "zenoh_rx_transport_message_per_transport_total",
+                &[group_part]
+            ),
+            3,
+            "JOIN and Frame from one datagram, then the Close"
+        );
+        // TX: every datagram written — the JOIN beacons and the one Frame —
+        // one transport message each.
+        assert_eq!(
+            sample(&doc, "zenoh_tx_per_transport_bytes_total", &[group_part]),
+            sent
+        );
+        assert_eq!(
+            sample(
+                &doc,
+                "zenoh_tx_transport_message_per_transport_total",
+                &[group_part]
+            ),
+            driver.sent.len() as u64
+        );
+        assert_eq!(
+            sample(
+                &doc,
+                "zenoh_tx_network_message_per_transport_total",
+                &[group_part, "message=\"put\""]
+            ),
+            1
+        );
+        // The received Put is counted on its SENDER, its payload on the group.
+        assert_eq!(
+            sample(
+                &doc,
+                "zenoh_rx_network_message_per_transport_total",
+                &[remote.as_str(), "message=\"put\""]
+            ),
+            1
+        );
+        assert_eq!(
+            sample(
+                &doc,
+                "zenoh_rx_network_message_payload_per_transport_bytes_count",
+                &[group_part, "message=\"put\""]
+            ),
+            1
         );
     }
 
@@ -3302,6 +3657,76 @@ mod tests {
                 fired.load(Ordering::SeqCst),
                 1,
                 "the reassembled Push must reach the subscriber exactly once"
+            );
+        }
+
+        /// R2848 — a REASSEMBLED message is counted too, once, on its sender:
+        /// the chain's completion fans from a different site than a whole
+        /// Frame's, so it is a separate recording point. Each fragment is a
+        /// transport message of its own, as upstream decodes one per fragment.
+        #[cfg(feature = "transport-stats")]
+        #[tokio::test]
+        async fn a_reassembled_message_is_counted_once_on_its_sender() {
+            use wz_session_core::stats_registry::{MetricsQuery, StatsRegistry};
+
+            let peer = [0x01, 0x02, 0x03, 0x04];
+            let batch = push_batch_bytes("demo/mc", b"frag-over-multicast");
+            let (head, tail) = batch.split_at(batch.len() / 2);
+            let mut driver = FakeDriver::with([
+                (join0(&params(&peer)), src(2)),
+                (fragment_dgram(0, true, true, head), src(2)),
+                (fragment_dgram(1, false, false, tail), src(2)),
+            ]);
+            let stats = MulticastTransportStats::new("udp/10.0.0.1:7446", "udp/224.0.0.224:7446");
+            let mut dispatcher = MulticastDispatcher::<4>::new(MulticastConfig::new(5_000));
+            let clock = TokioTime::new();
+            let _ = drive_multicast_session_with_membership(
+                &mut dispatcher,
+                MulticastDriveConfig {
+                    params: &params(&[0xAA, 0xBB, 0xCC, 0xDD]),
+                    tick_ms: 5,
+                    max_iters: Some(8),
+                },
+                &mut driver,
+                &clock,
+                |_| {},
+                &mut idle_outbound(),
+                |_members: &[Vec<u8>]| {},
+                |_subs: &[String]| {},
+                None,
+                &stats,
+            )
+            .await;
+
+            let metrics = stats.metrics();
+            let mut registry = StatsRegistry::new("a1b2", WhatAmI::Peer, "v1");
+            let transport = registry.open_multicast_transport(metrics.group());
+            registry.set_transport_metrics(transport, metrics.transport().clone());
+            let (zid, on_group) = metrics.peers().next().expect("the peer is on the group");
+            let hex = wz_session_core::zid_hex::zid_to_zenoh_hex(zid);
+            let id = registry.open_multicast_peer(&hex, on_group.whatami, metrics.group());
+            registry.set_transport_metrics(id, on_group.metrics().clone());
+            let mut doc = String::new();
+            registry.encode_metrics(&mut doc, MetricsQuery::default());
+
+            let remote = format!("remote_zid=\"{hex}\"");
+            assert_eq!(
+                sample(
+                    &doc,
+                    "zenoh_rx_network_message_per_transport_total",
+                    &[remote.as_str(), "message=\"put\""]
+                ),
+                1,
+                "the completed chain is one message, counted on its sender"
+            );
+            assert_eq!(
+                sample(
+                    &doc,
+                    "zenoh_rx_transport_message_per_transport_total",
+                    &["remote_zid=\"\""]
+                ),
+                3,
+                "the JOIN and each of the two fragments"
             );
         }
 

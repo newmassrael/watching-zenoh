@@ -244,7 +244,8 @@ fn s6() -> StatsRegistry {
     let mut multicast = MulticastMetrics::new("udp/10.0.0.1:7446", group);
     multicast.sent(20, 1);
     multicast.sent_network_message(Priority::Data, &put(4));
-    multicast.received(30, 2);
+    multicast.received_bytes(30);
+    multicast.received_transport_messages(2);
     // zenoh's rendering of the one-byte zid `[0xaa]` is "aa", the pin's peer.
     multicast.peer_joined(&[0xaa], WhatAmI::Peer);
     multicast.received_network_message(&[0xaa], Priority::Data, &put(6));

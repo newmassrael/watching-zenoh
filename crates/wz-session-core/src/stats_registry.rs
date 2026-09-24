@@ -989,12 +989,22 @@ impl MulticastMetrics {
             .inc_transport_message(tx, self.slot, transport_messages);
     }
 
-    /// A datagram of `bytes` came in, carrying `transport_messages`.
-    pub fn received(&mut self, bytes: u64, transport_messages: u64) {
-        let rx = StatsDirection::Rx;
-        self.transport.inc_bytes(rx, self.slot, bytes);
+    /// A datagram of `bytes` came in.
+    ///
+    /// R2848 — the bytes and the transport messages of a received datagram are
+    /// two calls, where [`Self::sent`] is one, because upstream takes them at
+    /// two points: the loop that read the datagram counts its bytes, and the
+    /// batch walk counts each message as it decodes one
+    /// (`io/zenoh-transport/src/multicast/rx.rs` @ `stats.inc_transport_message(zenoh_stats::Rx, 1);`).
+    pub fn received_bytes(&mut self, bytes: u64) {
         self.transport
-            .inc_transport_message(rx, self.slot, transport_messages);
+            .inc_bytes(StatsDirection::Rx, self.slot, bytes);
+    }
+
+    /// `transport_messages` were decoded out of a received datagram.
+    pub fn received_transport_messages(&mut self, transport_messages: u64) {
+        self.transport
+            .inc_transport_message(StatsDirection::Rx, self.slot, transport_messages);
     }
 
     /// A network message of `class` went out at `priority`: counted on the

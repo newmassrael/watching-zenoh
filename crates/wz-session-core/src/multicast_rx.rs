@@ -43,10 +43,13 @@ use wz_codecs::whatami::WhatAmI;
 // R311mh — the reassembly-divergent tail SSOT (dispatch_multicast_inbound_reassembling
 // below): the Fragment / FrameOutOfOrder / Close handlers a reassembly-capable
 // loop layers onto the classify. Gated like ingest_multicast_fragment.
+use crate::multicast_dispatch::count_received_network_messages;
 #[cfg(all(feature = "reassembly", feature = "alloc"))]
 use crate::multicast_dispatch::{
-    abort_peer_chains, ingest_multicast_fragment_qos, multicast_chain_key,
+    abort_peer_chains, ingest_multicast_fragment_counted, multicast_chain_key,
 };
+use crate::multicast_stats::MulticastStatsRecorder;
+use crate::network_message::NetworkMessage;
 #[cfg(all(feature = "reassembly", feature = "alloc"))]
 use crate::reassembly_dispatch::ReassemblyDispatcher;
 
@@ -117,21 +120,29 @@ fn multicast_message_len(msg: &[u8]) -> Option<usize> {
 /// The walk stops at the first message whose verdict is not
 /// [`MulticastRxNext::Done`]: `Frame` and `Fragment` consume the remainder, and
 /// a `Close` ends the peer whose later messages would otherwise re-admit it.
-pub fn dispatch_multicast_inbound<F, const MAX_PEERS: usize>(
+///
+/// R2848 — `stats` is told of each transport message decoded here and of each
+/// network message handed up, attributed to its sender (see
+/// [`MulticastStatsRecorder`]); the datagram's bytes are the caller's to count,
+/// since it is the caller that read them. `&()` records nothing.
+pub fn dispatch_multicast_inbound<F, R, const MAX_PEERS: usize>(
     dispatcher: &mut MulticastDispatcher<MAX_PEERS>,
     params: &MulticastParams,
     bytes: &[u8],
     src: SocketAddr,
     now_ms: u64,
     on_event: &mut F,
+    stats: &R,
 ) -> MulticastRxNext
 where
     F: FnMut(IterationEvent<'_>),
+    R: MulticastStatsRecorder + ?Sized,
 {
     let mut pos = 0usize;
     loop {
         let msg = &bytes[pos..];
-        let next = dispatch_multicast_message(dispatcher, params, msg, src, now_ms, on_event);
+        let next =
+            dispatch_multicast_message(dispatcher, params, msg, src, now_ms, on_event, stats);
         if !matches!(next, MulticastRxNext::Done) {
             return next;
         }
@@ -151,16 +162,25 @@ where
 /// reassembly-aware tail. `src` is the §3.2 peer key (the datagram source
 /// address — Frame / KeepAlive / Close carry no zid on the wire, exactly like
 /// zenoh-pico `_z_find_peer_entry`).
-fn dispatch_multicast_message<F, const MAX_PEERS: usize>(
+///
+/// R2848 — a transport message is counted where it DECODES, whoever sent it,
+/// because upstream counts inside its batch walk before it looks the sender up
+/// (`io/zenoh-transport/src/multicast/rx.rs` @ `stats.inc_transport_message(zenoh_stats::Rx, 1);`).
+/// A KeepAlive, a Close and a Fragment are counted off their MID, which is all
+/// of them this arm reads; a JOIN or a Frame that does not decode is not
+/// counted, as upstream's walk stops at a decoding error.
+fn dispatch_multicast_message<F, R, const MAX_PEERS: usize>(
     dispatcher: &mut MulticastDispatcher<MAX_PEERS>,
     params: &MulticastParams,
     bytes: &[u8],
     src: SocketAddr,
     now_ms: u64,
     on_event: &mut F,
+    stats: &R,
 ) -> MulticastRxNext
 where
     F: FnMut(IterationEvent<'_>),
+    R: MulticastStatsRecorder + ?Sized,
 {
     match bytes.first().map(|h| h & 0x1f) {
         Some(wire_const::T_MID_JOIN) => {
@@ -168,6 +188,9 @@ where
             // admit / refresh the peer at this address. Filter our own zid: a
             // node is not its own peer.
             if let Some(join) = decode_join(bytes) {
+                // R2848 — counted before the own-zid filter: the loopback echo
+                // of our own beacon is a message this link received.
+                stats.transport_message_received();
                 if join.zid != params.zid.as_slice() {
                     if let Some(baseline) = validate_join(&join, params) {
                         // R311y227 — group-agreed QoS admission (zenoh
@@ -302,6 +325,7 @@ where
                 ..
             }) = parse_inbound(bytes)
             {
+                stats.transport_message_received();
                 // R311y227 — admit against the frame's OWN per-priority conduit
                 // (the qos peer's per-conduit SN streams gate independently). A
                 // non-qos frame decodes as `Priority::DEFAULT`, so it rides the
@@ -356,6 +380,17 @@ where
                             // sub declaration.
                             #[cfg(feature = "multicast-declarations")]
                             dispatcher.apply_declared_subscriptions(src, &outcome);
+                            // R2848 — counted here, after the alias pass and
+                            // before the namespace strip; the reassembled
+                            // chain counts at the same point.
+                            count_received_network_messages(
+                                dispatcher,
+                                src,
+                                &outcome,
+                                &mut |zid: &[u8], msg: &NetworkMessage| {
+                                    stats.network_message_received(zid, msg)
+                                },
+                            );
                             #[cfg(feature = "routing-namespace")]
                             dispatcher.apply_namespace_ingress(src, &mut outcome);
                             on_event(IterationEvent::Poll(&outcome));
@@ -371,14 +406,21 @@ where
                 MulticastRxNext::Done
             }
         }
-        Some(wire_const::T_MID_FRAGMENT) => MulticastRxNext::Fragment,
+        Some(wire_const::T_MID_FRAGMENT) => {
+            stats.transport_message_received();
+            MulticastRxNext::Fragment
+        }
         Some(wire_const::T_MID_KEEP_ALIVE) => {
+            stats.transport_message_received();
             // A liveness ping refreshes the sender's lease (robustness if its
             // JOIN beacons are lost).
             dispatcher.refresh_by_src(src, now_ms);
             MulticastRxNext::Done
         }
-        Some(wire_const::T_MID_CLOSE) => MulticastRxNext::Close,
+        Some(wire_const::T_MID_CLOSE) => {
+            stats.transport_message_received();
+            MulticastRxNext::Close
+        }
         _ => MulticastRxNext::Done,
     }
 }
@@ -397,12 +439,14 @@ where
 /// chains BEFORE `close_by_src`, so a recycled slot index can never continue a
 /// dead peer's chain.
 #[cfg(all(feature = "reassembly", feature = "alloc"))]
+#[allow(clippy::too_many_arguments)] // the plain entry point's seven plus the caller's Router
 pub fn dispatch_multicast_inbound_reassembling<
     F,
     const MAX_PEERS: usize,
     const SLOTS: usize,
     const CAP: usize,
     S,
+    R,
 >(
     dispatcher: &mut MulticastDispatcher<MAX_PEERS>,
     reasm: &mut ReassemblyDispatcher<SLOTS, CAP, S>,
@@ -411,9 +455,11 @@ pub fn dispatch_multicast_inbound_reassembling<
     src: SocketAddr,
     now_ms: u64,
     on_event: &mut F,
+    stats: &R,
 ) where
     S: crate::chain_staging::ChainStaging<SLOTS, CAP>,
     F: FnMut(IterationEvent<'_>),
+    R: MulticastStatsRecorder + ?Sized,
 {
     // R311y633 (§17.6) — the SAME walk as the plain entry point, but the tail
     // has to run per MESSAGE: the `Fragment` arm re-parses the bytes it was
@@ -422,7 +468,7 @@ pub fn dispatch_multicast_inbound_reassembling<
     let mut pos = 0usize;
     loop {
         let msg = &bytes[pos..];
-        match dispatch_multicast_message(dispatcher, params, msg, src, now_ms, on_event) {
+        match dispatch_multicast_message(dispatcher, params, msg, src, now_ms, on_event, stats) {
             MulticastRxNext::Done => match multicast_message_len(msg) {
                 Some(consumed) => {
                     pos += consumed;
@@ -463,9 +509,23 @@ pub fn dispatch_multicast_inbound_reassembling<
                     // decoded and this arm used to discard through the `..`.
                     // Whether it is ACTED ON is the peer's negotiated patch
                     // level, resolved inside the ingest from the peer table.
-                    ingest_multicast_fragment_qos(
-                        dispatcher, reasm, src, reliable, sn, more, priority, markers, &payload,
-                        now_ms, on_event,
+                    // R2848 — a completed chain's messages are counted against
+                    // their sender inside the ingest, at the Frame arm's point.
+                    ingest_multicast_fragment_counted(
+                        dispatcher,
+                        reasm,
+                        src,
+                        reliable,
+                        sn,
+                        more,
+                        priority,
+                        markers,
+                        &payload,
+                        now_ms,
+                        on_event,
+                        &mut |zid: &[u8], msg: &NetworkMessage| {
+                            stats.network_message_received(zid, msg)
+                        },
                     );
                 }
             }
@@ -605,11 +665,19 @@ mod batch_walk_tests {
         unit.extend_from_slice(&frame_sn0());
 
         let mut polls = 0usize;
-        let next = dispatch_multicast_inbound(&mut d, &local, &unit, PEER, 1_000, &mut |event| {
-            if matches!(event, IterationEvent::Poll(_)) {
-                polls += 1;
-            }
-        });
+        let next = dispatch_multicast_inbound(
+            &mut d,
+            &local,
+            &unit,
+            PEER,
+            1_000,
+            &mut |event| {
+                if matches!(event, IterationEvent::Poll(_)) {
+                    polls += 1;
+                }
+            },
+            &(),
+        );
 
         assert!(
             matches!(next, MulticastRxNext::Done),
@@ -703,6 +771,7 @@ mod batch_walk_tests {
                 src,
                 0,
                 &mut |_| {},
+                &(),
             );
             assert!(
                 d.peer_index_by_src(src).is_some(),
@@ -720,6 +789,7 @@ mod batch_walk_tests {
                         drops.push(reason);
                     }
                 },
+                &(),
             );
         }
 
@@ -774,6 +844,7 @@ mod batch_walk_tests {
                     IterationEvent::ReassemblyDropped(reason) => chain_drops.push(reason),
                     _ => {}
                 },
+                &(),
             );
         }
         assert!(
@@ -800,11 +871,19 @@ mod batch_walk_tests {
         unit.extend_from_slice(&[0x00, 0x11, 0x22]);
 
         let mut polls = 0usize;
-        let next = dispatch_multicast_inbound(&mut d, &local, &unit, PEER, 1_000, &mut |event| {
-            if matches!(event, IterationEvent::Poll(_)) {
-                polls += 1;
-            }
-        });
+        let next = dispatch_multicast_inbound(
+            &mut d,
+            &local,
+            &unit,
+            PEER,
+            1_000,
+            &mut |event| {
+                if matches!(event, IterationEvent::Poll(_)) {
+                    polls += 1;
+                }
+            },
+            &(),
+        );
 
         assert!(matches!(next, MulticastRxNext::Done), "{next:?}");
         assert!(d.peer_index_by_src(PEER).is_some(), "the JOIN still landed");
@@ -833,11 +912,19 @@ mod batch_walk_tests {
         now_ms: u64,
     ) -> Vec<crate::multicast_peer_arrived::MulticastPeerArrived> {
         let mut seen = Vec::new();
-        dispatch_multicast_inbound(d, local, unit, PEER, now_ms, &mut |event| {
-            if let IterationEvent::MulticastPeerArrived(a) = event {
-                seen.push(a);
-            }
-        });
+        dispatch_multicast_inbound(
+            d,
+            local,
+            unit,
+            PEER,
+            now_ms,
+            &mut |event| {
+                if let IterationEvent::MulticastPeerArrived(a) = event {
+                    seen.push(a);
+                }
+            },
+            &(),
+        );
         seen
     }
 
