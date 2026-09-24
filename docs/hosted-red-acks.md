@@ -40,6 +40,8 @@ why the ordering rule says *before*.
 
 | round | run | commit | failing steps | debt | paid |
 |---|---|---|---|---|---|
+| R2842 | `35973841111` | `9956163d` | Layer Qa's FIRST hosted run. `cross-compile + QEMU` step **`Layer Qa`**: `zenohd not at target/zenohd/zenohd` — MINE: the restore ran at 10:34, the interop job saved the only zenohd entry at 11:02:49, and the prefix found nothing older. `validate + verify + test` step **`Layer 0`**: shellcheck SC2034 at the Qa poll loop — MINE. `default-off builds` step **`Layer C0 — binary-dep test`** and `validate + codegen` step **`Layer C0 (armed)`**: the attachment gate | — | Qa: cross-mcu `needs: [interop]` (R2842); Layer 0: the counter is `_`; C0: R2840 |
+| R2842 | `35972961449` | `43673b1e` | R2838's tip: the two C0 jobs only, the attachment gate, read on both verdict lines | — | R2840 |
 | R2841 | `35970829314` | `2b82fd84` | R2837's tip. `validate + codegen` step **`Layer C0 (armed)`** and `default-off builds` step **`Layer C0 — binary-dep test`**: the attachment capacity witness gate, which this tip predates the fix of. `passive-dissection feature set` step **`Layer C1bn`**: `uring::tests::a_dropped_ring_returns_its_locked_pages_before_the_next_registration` panicked, io_uring buffer registration ENOMEM (4198400 bytes needed, RLIMIT_MEMLOCK soft 9179136) — `uring.rs` unchanged since 09-20 and the same test passed on `618a25ee`'s C1bn, so intermittent under the runner's memlock | — | C0 by R2840; C1bn not this round's, carried, not registered |
 | R2841 | `35969804477` | `c0ee2e68` | R2836's tip: the two C0 jobs only, the attachment gate | — | R2840 |
 | R2841 | `35969121621` | `97fa954f` | R2835's tip: the two C0 jobs only, the attachment gate | — | R2840 |
