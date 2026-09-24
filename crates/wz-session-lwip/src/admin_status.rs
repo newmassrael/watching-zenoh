@@ -93,6 +93,11 @@ impl NodeStatus {
         critical_section::with(|cs| self.state.borrow(cs).borrow_mut().permit_read = permit);
     }
 
+    /// R2837 — the sessions the node currently reports.
+    pub fn sessions(&self) -> Vec<AdminSession> {
+        self.snapshot().1
+    }
+
     fn snapshot(&self) -> (bool, Vec<AdminSession>) {
         critical_section::with(|cs| {
             let s = self.state.borrow(cs).borrow();

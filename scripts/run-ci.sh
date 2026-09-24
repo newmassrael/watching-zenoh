@@ -10078,7 +10078,8 @@ layer_c1m_session_lwip() {
         cargo test -p wz-session-lwip --features adminspace-core --quiet || return 1
     # R2830 6 -> 9: the same three `connect_manager` tests.
     # R2831 9 -> 12: the same three R2831 tests.
-    _runci_guarded_test "C1m adminspace read+write" 12 \
+    # R2837 12 -> 13: `admin_node`'s end-to-end test, which needs both.
+    _runci_guarded_test "C1m adminspace read+write" 13 \
         cargo test -p wz-session-lwip --features adminspace-core,adminspace-write --quiet || return 1
     # R2390 (transport-multicast) — each `transport-multicast` leg moved by TWO:
     # the MCU loop's link-loss arm brought a witness test and an ordering test,

@@ -66,6 +66,10 @@ pub mod lwip_dialer;
 // through the shared answerer, on the same application layer.
 #[cfg(feature = "adminspace-core")]
 pub mod admin_status;
+// R2837 — the node a host reaches and reconfigures at runtime: listen, the
+// write subscriber, the status queryable and the dial manager, ticked as one.
+#[cfg(all(feature = "adminspace-core", feature = "adminspace-write"))]
+pub mod admin_node;
 pub mod driver;
 // R311lt — the MCU multicast drive loop (no_std mirror of the AP
 // wz-runtime-tokio multicast_glue), gated on the transport-multicast capability.

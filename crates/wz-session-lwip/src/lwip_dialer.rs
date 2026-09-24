@@ -120,25 +120,34 @@ impl<C: ClockSource + 'static> LwipUdpSession<C> {
     /// `ConnectManager::sessions`.
     #[cfg(feature = "adminspace-core")]
     pub fn admin_session(&self) -> Option<wz_session_core::adminspace::AdminSession> {
-        if !self.actions.is_established() {
-            return None;
-        }
-        Some(wz_session_core::adminspace::AdminSession {
-            peer_zid_hex: self
-                .actions
-                .peer_zid()
-                .map(|zid| wz_session_core::zid_hex::zid_to_zenoh_hex(&zid))
-                .unwrap_or_default(),
-            whatami: self
-                .actions
-                .peer_whatami_wire()
-                .and_then(wz_session_core::WhatAmI::from_wire)
-                .map(|role| alloc::string::String::from(role.to_str())),
-            links: self.actions.admin_links(),
-            shm: false,
-            weight: None,
-        })
+        admin_session_of(&self.actions)
     }
+}
+
+/// R2837 — any MCU session as a `sessions[]` entry, dialled or accepted:
+/// `None` until it is established. What
+/// `LwipUdpSession::admin_session` reports, for a session this dialer did not
+/// start (the node's acceptor).
+#[cfg(feature = "adminspace-core")]
+pub fn admin_session_of<C: ClockSource + 'static>(
+    actions: &McuActions<C>,
+) -> Option<wz_session_core::adminspace::AdminSession> {
+    if !actions.is_established() {
+        return None;
+    }
+    Some(wz_session_core::adminspace::AdminSession {
+        peer_zid_hex: actions
+            .peer_zid()
+            .map(|zid| wz_session_core::zid_hex::zid_to_zenoh_hex(&zid))
+            .unwrap_or_default(),
+        whatami: actions
+            .peer_whatami_wire()
+            .and_then(wz_session_core::WhatAmI::from_wire)
+            .map(|role| alloc::string::String::from(role.to_str())),
+        links: actions.admin_links(),
+        shm: false,
+        weight: None,
+    })
 }
 
 /// Dials UDP endpoints as initiator sessions on the firmware's task set.
