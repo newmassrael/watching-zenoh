@@ -6461,77 +6461,48 @@ async fn run_router_hat_until(
     // departing Close) since R311y782, but NO shipped host drove either: this
     // router could not stop its group faces short of link loss or process exit,
     // so it left the group silently and every member held a stale peer entry
-    // until the lease expired. Declared before the two spawn blocks so ONE
-    // teardown reaches both faces.
+    // until the lease expired.
     #[cfg(feature = "router-multicast-faces")]
     let mut mcast_stops: Vec<(
         &'static str,
         wz::runtime_tokio::multicast_glue::McastFaceStop,
     )> = Vec::new();
+
+    // R2850 (open-debt item 821) — the router's ONE face on the group: what it
+    // forwards into the group and what the group's members send it ride one
+    // socket and one drive loop. It used to be two faces, an egress (R311y188)
+    // and an ingress (R311y194), which a zenoh member saw as two peers under
+    // this router's zid, from two source addresses. The ingress half folds each
+    // admitted Push and Query into the `!Send` forwarder through peer_loop
+    // (`route_mcast_ingress`, echo-guarded off the groups); the RX self-zid gate
+    // drops this node's own loopback, so it never self-delivers. I3b relays the
+    // on-group ROUTER members (the Designated-Router candidates) and S2 the
+    // group-SUBSCRIBER key expressions, advertised into the mesh.
     #[cfg(feature = "router-multicast-faces")]
-    {
-        let (mcast_tx, mcast_egress_stop) =
-            wz::runtime_tokio::multicast_glue::spawn_router_mcast_egress(
-                mcast_group,
-                mcast_port,
-                params.zid.clone(),
-                multicast_qos,
-                mcast_opts.clone(),
-            );
-        forwarder.attach_mcast_group(mcast_tx);
-        mcast_stops.push(("egress", mcast_egress_stop));
+    let (mcast_ingress, mcast_members, mcast_group_subs) = {
+        let face = wz::runtime_tokio::multicast_glue::spawn_router_mcast_group(
+            mcast_group,
+            mcast_port,
+            params.zid.clone(),
+            multicast_qos,
+            mcast_opts.clone(),
+        );
+        forwarder.attach_mcast_group(face.outbound);
+        mcast_stops.push(("group", face.stop));
         // R2584 made the group either family; `SocketAddr` is what brackets a v6
         // address before its port, where `{group}:{port}` would print
         // `ff02::7a7a:4e20:7490`, which is ambiguous. A v4 group reads exactly as before.
         log::info!(
-            "wz-ap-demo router-hat: multicast egress group {} \
-             attached (router-multicast-faces, {mcast_opts:?}); routed Push \
-             forwards to the group",
+            "wz-ap-demo router-hat: multicast group {} joined \
+             (router-multicast-faces, {mcast_opts:?}); routed Push forwards to the \
+             group and received Push routes to unicast subscribers",
             std::net::SocketAddr::new(mcast_group, mcast_port)
         );
-    }
-
-    // R311y194 — router-multicast-faces INGRESS slice (I1): the router also JOINs
-    // the group (RX) so a real multicast peer's Put routes to the router's unicast
-    // subscribers. `spawn_router_mcast_ingress` binds+joins on a SEPARATE task and
-    // returns the channel of received Pushes; peer_loop folds each into the `!Send`
-    // forwarder (`route_mcast_ingress`, echo-guarded off the groups). Egress (above)
-    // + ingress share the router's single zid, so the RX self-zid gate
-    // (`multicast_rx.rs:97`) drops this node's own loopback — no self-delivery. The
-    // per-peer `mcast_faces` plane + mcast-peer declarations are the deferred I3
-    // milestone; ingress is LITERAL-only here.
-    #[cfg(feature = "router-multicast-faces")]
-    let (mcast_ingress, mcast_members, mcast_group_subs) = {
-        // R311y454 — the group is whatever the egress block above resolved, so the
-        // two halves cannot drift: the router is ONE bidirectional member, and a
-        // group/iface mismatch between its own egress and ingress would leave the
-        // RX self-zid gate as the only thing keeping it from refusing its own JOIN.
-        // Previously two independent `const` pairs that happened to agree.
-        // I3b — the ingress loop returns the received-Push channel and the on-group
-        // ROUTER member relay (the Designated-Router election candidates that keep
-        // the group egress + mcast-ingress federation loop-safe). S2 adds the third
-        // channel: the group-SUBSCRIBER keyexpr aggregate, advertised into the mesh
-        // so a mesh-side publisher reaches an on-group subscriber (reachability).
-        let (rx, members_rx, group_subs_rx, mcast_ingress_stop) =
-            wz::runtime_tokio::multicast_glue::spawn_router_mcast_ingress(
-                mcast_group,
-                mcast_port,
-                params.zid.clone(),
-                multicast_qos,
-                mcast_opts.clone(),
-            );
-        // R2333 — the ingress face's stop, beside the egress one. A router is ONE
-        // bidirectional group member, so both faces must announce their departure;
-        // stopping only the egress would leave the JOIN beacon of the RX face
-        // running until the process died.
-        mcast_stops.push(("ingress", mcast_ingress_stop));
-        log::info!(
-            "wz-ap-demo router-hat: multicast ingress group {} \
-             joined (router-multicast-faces, {mcast_opts:?}); received Push routes \
-             to unicast subscribers",
-            std::net::SocketAddr::new(mcast_group, mcast_port)
-        );
-        (Some(rx), Some(members_rx), Some(group_subs_rx))
+        (
+            Some(face.ingress),
+            Some(face.members),
+            Some(face.group_subs),
+        )
     };
     #[cfg(not(feature = "router-multicast-faces"))]
     let (mcast_ingress, mcast_members, mcast_group_subs) = (None, None, None);

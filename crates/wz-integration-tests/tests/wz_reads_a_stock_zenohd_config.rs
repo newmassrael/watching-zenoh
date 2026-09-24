@@ -2380,7 +2380,7 @@ fn beacon_reading_from_a_config(
     max_links: Option<usize>,
 ) -> Option<String> {
     // ⚠ SO_REUSEADDR IS LOAD-BEARING and `std::net::UdpSocket` cannot set it.
-    // The node JOINs its own group for ingress (`spawn_router_mcast_ingress`),
+    // The node JOINs its own group on its group face (`spawn_router_mcast_group`),
     // so two sockets share this port, and a receiver without the option gets
     // NOTHING. Measured on this tree already, against zenohd, by
     // `zenoh_join_qos_foreign_witness` — which recorded zero datagrams for a

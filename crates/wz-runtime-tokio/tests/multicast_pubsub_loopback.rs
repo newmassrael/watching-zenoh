@@ -1096,3 +1096,150 @@ async fn an_ipv6_group_datagram_arrives_through_its_membership_and_only_through_
         "a v6 receiver given #join={EXTRA} did not receive a datagram sent to that group"
     );
 }
+
+/// R2850 (open-debt item 821) — a router's face on a group is ONE member: every
+/// datagram it sends, its JOIN beacons and the data it forwards alike, leaves
+/// from ONE source address, and that address is its send socket rather than the
+/// group port it reads on.
+///
+/// The defect this pins: the router joined a group as two faces, an egress on a
+/// send-only socket and an ingress on the joined one, and both beaconed under
+/// the router's zid. Upstream keys a multicast peer by its locator, so a zenoh
+/// member admitted the router twice. A listener on the group sees exactly what
+/// a member sees, so the witness is the set of source addresses it records for
+/// the router's zid: it must hold one address, carrying both a beacon and a
+/// forwarded frame.
+#[cfg(feature = "routing-accept")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "multicast loopback e2e; Layer M runs via --layer M / WZ_RUN_LAYER_M=1 --ignored"]
+async fn a_router_group_face_is_one_member_from_one_source_address() {
+    use std::collections::BTreeSet;
+    use wz_runtime_tokio::multicast_glue::spawn_router_mcast_group;
+    use wz_runtime_tokio::{LinkDriver, LinkEvent};
+    use wz_session_core::wire_const;
+
+    const FACE_PORT: u16 = 7455;
+    let router_zid = vec![0xAC; 4];
+
+    let mut listener = UdpDriver::bind_multicast(GROUP, FACE_PORT, McastSocketConfig::default())
+        .await
+        .expect("bind the listening member");
+    let face = spawn_router_mcast_group(
+        GROUP,
+        FACE_PORT,
+        router_zid.clone(),
+        false,
+        McastGroupOptions::default(),
+    );
+
+    let mut beacon_sources = BTreeSet::new();
+    let mut frame_sources = BTreeSet::new();
+    let mut sent = false;
+    let deadline = tokio::time::Instant::now() + Duration::from_millis(1_500);
+    while tokio::time::Instant::now() < deadline {
+        if !sent && !beacon_sources.is_empty() {
+            face.outbound
+                .send(multicast_put_literal(KEYEXPR, PAYLOAD).expect("put item"))
+                .expect("queue a forwarded publish on the group face");
+            sent = true;
+        }
+        let event = tokio::time::timeout(Duration::from_millis(100), listener.poll_event()).await;
+        let Ok(LinkEvent::Rx(rx)) = event else {
+            continue;
+        };
+        let src = rx.src.expect("a multicast datagram carries its source");
+        match rx.bytes.first().map(|h| h & 0x1f) {
+            Some(wire_const::T_MID_JOIN) => {
+                if let Some(join) = wz_session_core::multicast_join::decode_join(&rx.bytes) {
+                    if join.zid == router_zid.as_slice() {
+                        beacon_sources.insert(src);
+                    }
+                }
+            }
+            // The listener sends nothing, and no other test uses this port, so
+            // every frame on it is the router's.
+            Some(wire_const::T_MID_FRAME) => {
+                frame_sources.insert(src);
+            }
+            _ => {}
+        }
+    }
+    face.stop.stop().await;
+
+    assert_eq!(
+        beacon_sources.len(),
+        1,
+        "the router's zid beaconed from {beacon_sources:?}: one member is one source address"
+    );
+    assert_eq!(
+        frame_sources, beacon_sources,
+        "the forwarded frame must leave from the address the beacons announce"
+    );
+    let only = beacon_sources.iter().next().expect("one source");
+    assert_ne!(
+        only.port(),
+        FACE_PORT,
+        "the face sends from its send socket, not from the group port it reads on"
+    );
+}
+
+/// R2850 — the same one face also READS the group: a member's Put reaches the
+/// face's ingress channel. The receive half moved with the send half onto one
+/// driver (`UdpDriver::bind_multicast_link`), so it is witnessed on its own
+/// rather than inferred from the send half working.
+#[cfg(feature = "routing-accept")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "multicast loopback e2e; Layer M runs via --layer M / WZ_RUN_LAYER_M=1 --ignored"]
+async fn a_router_group_face_receives_what_a_member_publishes() {
+    use wz_runtime_tokio::accept_loop::McastIngressBody;
+    use wz_runtime_tokio::multicast_glue::spawn_router_mcast_group;
+
+    const FACE_PORT: u16 = 7456;
+    let mut face = spawn_router_mcast_group(
+        GROUP,
+        FACE_PORT,
+        vec![0xAD; 4],
+        false,
+        McastGroupOptions::default(),
+    );
+
+    // The member: a peer loop on its own send socket, publishing one Put once
+    // its beacons have had time to admit it into the face's peer table.
+    let mut member = UdpDriver::bind_multicast_tx(GROUP, FACE_PORT, McastSocketConfig::default())
+        .await
+        .expect("bind the publishing member");
+    let mut dispatcher = MulticastDispatcher::<8>::new(MulticastConfig::new(5_000));
+    let params = mc_params(0xAE);
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    let clock = TokioTime::new();
+    let drive = drive_multicast_session(
+        &mut dispatcher,
+        MulticastDriveConfig {
+            params: &params,
+            tick_ms: 10,
+            max_iters: None,
+        },
+        &mut member,
+        &clock,
+        |_| {},
+        &mut rx,
+    );
+    let scenario = async {
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        tx.send(multicast_put_literal(KEYEXPR, PAYLOAD).expect("put item"))
+            .expect("queue the member's publish");
+        tokio::time::timeout(Duration::from_secs(3), face.ingress.recv())
+            .await
+            .expect("the face's ingress yielded nothing within 3s")
+            .expect("the face's ingress channel closed")
+    };
+    let item = tokio::select! {
+        _ = drive => panic!("the member's drive loop ended unexpectedly"),
+        item = scenario => item,
+    };
+    face.stop.stop().await;
+    assert!(
+        matches!(item.body, McastIngressBody::Push(_)),
+        "the member's Put arrives as a Push"
+    );
+}

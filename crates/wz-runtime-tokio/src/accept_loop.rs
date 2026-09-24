@@ -1753,13 +1753,13 @@ fn dial_decision(faces: &BTreeMap<FaceId, Option<Vec<u8>>>, intent: &DialIntent)
 /// One Push RECEIVED on a multicast INGRESS group, folded from the (separate,
 /// `Send`) multicast drive-loop task to the `!Send` forwarder on the peer-loop
 /// task (the deferred `mcast_faces` plane, I1 — see
-/// [`spawn_router_mcast_ingress`](crate::multicast_glue::spawn_router_mcast_ingress)).
+/// [`spawn_router_mcast_group`](crate::multicast_glue::spawn_router_mcast_group)).
 /// The owned `PushOwned` crosses the task boundary; the forwarder routes it via
 /// [`FaceForwarder::route_mcast_ingress`]. The struct is always defined so the
 /// accept-loop's `select!` arm needs no `#[cfg]` (tokio's `select!` rejects
 /// attributes on branches); the `PushOwned` payload is gated on `codec-push`
 /// (which provides it), and the struct is inert without `codec-push` — nothing
-/// constructs it (`spawn_router_mcast_ingress` is `codec-push`-gated).
+/// constructs it (`spawn_router_mcast_group` is `codec-push`-gated).
 pub struct McastIngressItem {
     /// What arrived, in the kinds the router ADMITS from a group.
     #[cfg(feature = "codec-push")]
@@ -1791,7 +1791,7 @@ pub struct McastIngressItem {
 /// local queryable. Oam is out of scope here -- it feeds upstream's linkstate
 /// machinery, which is a topology question this plane does not own.
 ///
-/// Gated with the plane it rides: `spawn_router_mcast_ingress` is
+/// Gated with the plane it rides: `spawn_router_mcast_group` is
 /// `codec-push`-gated, so without that feature nothing constructs either arm.
 #[cfg(feature = "codec-push")]
 pub enum McastIngressBody {
@@ -1905,18 +1905,18 @@ pub struct FaceSources {
     /// the loop's ingress arm parks forever and non-router / non-multicast builds
     /// are byte-identical. Gated on `codec-push` (the fold payload
     /// are byte-identical. The channel is always `None` without `codec-push` (its
-    /// producer `spawn_router_mcast_ingress` is `codec-push`-gated), so the arm is
+    /// producer `spawn_router_mcast_group` is `codec-push`-gated), so the arm is
     /// inert but present (no `#[cfg]` on the `select!` branch).
     pub mcast_ingress: Option<tokio::sync::mpsc::UnboundedReceiver<McastIngressItem>>,
     /// The multicast INGRESS on-group ROUTER member relay (I3b): the router-hat's
-    /// `spawn_router_mcast_ingress` loop sends its live Designated-Router election
+    /// `spawn_router_mcast_group` loop sends its live Designated-Router election
     /// candidate set here on each group membership change, and the drive loop
     /// forwards it to [`FaceForwarder::set_mcast_group_members`]. `None` when the
     /// ingress plane is off (the arm parks forever). The sibling of
     /// `mcast_ingress` from the same helper.
     pub mcast_members: Option<tokio::sync::mpsc::UnboundedReceiver<Vec<Vec<u8>>>>,
     /// The multicast INGRESS on-group SUBSCRIBER relay (sub plane, S2): the
-    /// router-hat's `spawn_router_mcast_ingress` loop sends the deduped group-
+    /// router-hat's `spawn_router_mcast_group` loop sends the deduped group-
     /// subscriber keyexpr aggregate here on each change, and the drive loop forwards
     /// it to [`FaceForwarder::set_mcast_group_subs`]. `None` when the ingress plane
     /// is off (the arm parks forever). The sibling of `mcast_members` from the same

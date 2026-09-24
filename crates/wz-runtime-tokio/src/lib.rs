@@ -2622,6 +2622,12 @@ impl LinkDriver for TcpDriver {
 #[cfg(feature = "transport-link-udp")]
 pub struct UdpDriver {
     socket: Option<UdpSocket>,
+    /// R2850 — the socket every send leaves from, when it is not `socket`.
+    /// `Some` only for [`Self::bind_multicast_link`]: upstream's multicast link
+    /// reads the group on one socket and writes from another, and a member's
+    /// locator is the address it writes from. `None` everywhere else, where
+    /// the one socket does both.
+    send_socket: Option<UdpSocket>,
     peer: Option<SocketAddr>,
 }
 
@@ -2634,8 +2640,52 @@ impl UdpDriver {
     pub fn from_socket(socket: UdpSocket, peer: SocketAddr) -> Self {
         Self {
             socket: Some(socket),
+            send_socket: None,
             peer: Some(peer),
         }
+    }
+
+    /// The socket a datagram leaves from: the send socket when this driver
+    /// has one, the one socket otherwise.
+    fn sending_socket(&self) -> io::Result<&UdpSocket> {
+        self.send_socket
+            .as_ref()
+            .or(self.socket.as_ref())
+            .ok_or_else(|| io::Error::new(io::ErrorKind::NotConnected, "no socket"))
+    }
+
+    /// R2850 (open-debt item 821) — a multicast LINK in upstream's shape: the
+    /// group is read on a joined socket ([`Self::bind_multicast`]) and every
+    /// datagram is written from a separate send socket
+    /// ([`Self::bind_multicast_tx`]), as zenoh's UDP multicast link reads on
+    /// its `mcast_sock` and writes from its unicast socket
+    /// (`io/zenoh-links/zenoh-link-udp/src/multicast.rs` @ `.unicast_socket`).
+    ///
+    /// Why two, when [`Self::bind_multicast`] alone can do both: the send half
+    /// honours `#bind=` (R2791), and a socket bound to a unicast address cannot
+    /// receive the group, so one socket cannot honour both the membership and
+    /// the source address a deploy asked for. And a group member is ONE source
+    /// address: everything this driver sends — beacons and data alike — leaves
+    /// from the send socket, which is what makes a face built on it one member
+    /// to a peer that keys members by locator.
+    ///
+    /// `cfg` configures both halves as their own constructors do: the joined
+    /// half takes the memberships (`iface`, `joins`), the send half the egress
+    /// interface, `bind`, the hop limit and the DSCP mark.
+    #[cfg(feature = "transport-multicast")]
+    pub async fn bind_multicast_link(
+        group: impl Into<std::net::IpAddr>,
+        port: u16,
+        cfg: McastSocketConfig<'_>,
+    ) -> io::Result<Self> {
+        let group: std::net::IpAddr = group.into();
+        let read = Self::bind_multicast(group, port, cfg).await?;
+        let write = Self::bind_multicast_tx(group, port, cfg).await?;
+        Ok(Self {
+            socket: read.socket,
+            send_socket: write.socket,
+            peer: read.peer,
+        })
     }
 
     /// R311es — bind an ephemeral local UDP socket and target `peer`
@@ -2787,6 +2837,7 @@ impl UdpDriver {
         }
         Ok(Self {
             socket: Some(socket),
+            send_socket: None,
             peer: Some(plan.peer(port)),
         })
     }
@@ -2848,6 +2899,7 @@ impl UdpDriver {
         }
         Ok(Self {
             socket: Some(socket),
+            send_socket: None,
             peer: Some(plan.peer(port)),
         })
     }
@@ -2880,6 +2932,7 @@ impl UdpDriver {
         let socket = UdpSocket::bind(SocketAddr::from((local, 0))).await?;
         Ok(Self {
             socket: Some(socket),
+            send_socket: None,
             peer: None,
         })
     }
@@ -2899,11 +2952,7 @@ impl UdpDriver {
     /// with one peer; a per-datagram destination is the shared-medium seam, the
     /// send-side mirror of [`wz_session_core::link::RxFrame::src`].
     pub async fn send_datagram_to(&self, bytes: &[u8], dst: SocketAddr) -> io::Result<()> {
-        let socket = self
-            .socket
-            .as_ref()
-            .ok_or_else(|| io::Error::new(io::ErrorKind::NotConnected, "no socket"))?;
-        socket.send_to(bytes, dst).await?;
+        self.sending_socket()?.send_to(bytes, dst).await?;
         Ok(())
     }
 
@@ -2937,11 +2986,8 @@ impl UdpDriver {
     /// leaves by the default route from one that was pinned to an address.
     #[cfg(all(feature = "locator-iface", feature = "transport-link-udp"))]
     pub fn multicast_egress_v4(&self) -> io::Result<std::net::Ipv4Addr> {
-        let socket = self
-            .socket
-            .as_ref()
-            .ok_or_else(|| io::Error::new(io::ErrorKind::NotConnected, "no socket"))?;
-        socket2::SockRef::from(socket).multicast_if_v4()
+        // The pin that matters is the one on the socket datagrams leave from.
+        socket2::SockRef::from(self.sending_socket()?).multicast_if_v4()
     }
 }
 
@@ -2963,14 +3009,10 @@ impl LinkDriver for UdpDriver {
         // hint is the session FSM's concern (it may resend on the
         // RELIABLE channel via a sequence-number window). Here we
         // just write the datagram.
-        let socket = self
-            .socket
-            .as_ref()
-            .ok_or_else(|| io::Error::new(io::ErrorKind::NotConnected, "no socket"))?;
         let peer = self
             .peer
             .ok_or_else(|| io::Error::new(io::ErrorKind::NotConnected, "no peer address"))?;
-        socket.send_to(frame.bytes, peer).await?;
+        self.sending_socket()?.send_to(frame.bytes, peer).await?;
         Ok(())
     }
 
@@ -2979,6 +3021,7 @@ impl LinkDriver for UdpDriver {
         // the socket releases the FD. Set our handle to None so
         // subsequent calls report NotConnected.
         self.socket = None;
+        self.send_socket = None;
         self.peer = None;
         Ok(())
     }

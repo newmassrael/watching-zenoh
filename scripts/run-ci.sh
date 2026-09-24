@@ -15283,6 +15283,16 @@ PY
     (cd crates && cargo test -p wz-runtime-tokio \
         --features transport-multicast,transport-fragmentation \
         --test multicast_pubsub_loopback -- --ignored --quiet) || return 1
+    # R2850 (open-debt item 821) — a router's GROUP face is one member: its
+    # beacons and forwarded frames leave from one source address, its send
+    # socket, and the same face reads what a member publishes. The face is
+    # `routing-accept`-gated (its ingress is the accept loop's item), which the
+    # line above does not compose, so these two need their own build.
+    # 2 = the number this command PRINTED.
+    _runci_guarded_test "M router group face" 2 \
+        cargo test -p wz-runtime-tokio \
+        --features transport-multicast,transport-fragmentation,routing-accept \
+        --test multicast_pubsub_loopback a_router_group_face -- --ignored --quiet || return 1
     # R311y232/y234 — the transport-qos ARM of the multicast e2e (BOTH qos tests, the
     # `qos` filter): the POSITIVE arm (both-is_qos group, a direct
     # TokioMulticastSession::publish_qos prioritized publish delivers -- the composed

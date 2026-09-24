@@ -9,7 +9,7 @@
 //! egress proof: wz publisher -> wz router -> pico z_sub). Here a FOREIGN
 //! zenoh-pico `z_pub -m peer` publishes a Put over the UDP multicast group; the wz
 //! `--router-hat` (built `--features router-multicast-faces`) RECEIVES it on its
-//! ingress group face (`spawn_router_mcast_ingress`, the deferred `mcast_faces`
+//! group face (`spawn_router_mcast_group`; `spawn_router_mcast_ingress` until R2850, the deferred `mcast_faces`
 //! plane slice I1) and routes it, over TCP, to a wz UNICAST subscriber client.
 //!
 //! Topology (three separate processes; the wz subscriber is a UNICAST client that

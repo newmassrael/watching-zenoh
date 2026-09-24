@@ -554,7 +554,7 @@ impl McastFaceStop {
 /// The membership-aware variant of [`drive_multicast_session`]: the identical
 /// drive loop, plus — after each iteration — a snapshot-diff of the dispatcher's
 /// on-group ROUTER member set. On a real change it calls `on_members`; the router
-/// INGRESS host (`spawn_router_mcast_ingress`) uses this to relay the
+/// group face (`spawn_router_mcast_group`) uses this to relay the
 /// Designated-Router election candidate set to its `RouterForwarder`. Without
 /// `multicast-declarations` the membership accessor does not exist, so the
 /// snapshot block is elided and `on_members` is never called (the base
@@ -1064,111 +1064,173 @@ pub fn spawn_router_mcast_egress(
 ) -> (UnboundedSender<MulticastTxItem>, McastFaceStop) {
     // Converted before the spawn: the task needs an owned `Copy` address.
     let group: core::net::IpAddr = group.into();
-    // R311y454 — `Ipv4Addr` / `SocketAddr` were needed only for the bare
-    // `UdpSocket::bind((UNSPECIFIED, 0))` + `from_socket(.., group:port)` this
-    // function used to spell out inline; `UdpDriver::bind_multicast_tx` now owns
-    // both, so the import goes with them.
-    use wz_session_core::multicast_dispatch::MulticastConfig;
-    use wz_session_core::multicast_params::MulticastParams;
-    use wz_session_core::WhatAmI;
+    let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+    // R311y454 — `bind_multicast_tx` is the ephemeral bind plus the
+    // `IP_MULTICAST_IF` pin when `#iface=` names one, so an unnarrowed egress
+    // is unchanged and a narrowed one fails LOUDLY rather than sending out an
+    // interface the deploy did not name. It installs no membership: this face
+    // SENDS and never reads the group, which is why R2850 keeps it for a host
+    // that only forwards INTO a group and gives a router that also reads the
+    // group [`spawn_router_mcast_group`] instead of this plus a second face.
+    //
+    // The TRANSMIT subsystem, as upstream puts its multicast transmit task
+    // (`io/zenoh-transport/src/multicast/link.rs` @ `ZRuntime::TX.spawn(async move {`):
+    // a face that only sends has nothing else to do.
+    let stop = spawn_group_face(
+        WzRuntime::Tx,
+        "router multicast egress",
+        router_group_params(zid, qos),
+        opts,
+        move |opts| {
+            Box::pin(crate::UdpDriver::bind_multicast_tx(
+                group,
+                port,
+                opts.as_socket_config(),
+            ))
+        },
+        // Egress-only: this face consumes no group ingress.
+        |_: IterationEvent<'_>| {},
+        rx,
+        |_: &[Vec<u8>]| {},
+        |_: &[String]| {},
+    );
+    (tx, stop)
+}
 
-    use crate::runtime_impl::TokioTime;
-    use crate::UdpDriver;
-
-    // A router group serves many leaf subscribers; the bound is the multicast
-    // dispatcher's fixed peer-table capacity.
-    const MCAST_MAX_PEERS: usize = 32;
-    // The group profile (zenoh multicast defaults). The router advertises
-    // `WhatAmI::Router` in its JOIN beacon so leaves attribute the source tier.
-    let params = MulticastParams {
+/// R2850 — the group profile a router's face advertises: zenoh's multicast
+/// defaults, `WhatAmI::Router` in the beacon so members attribute the source
+/// tier, and the router's own zid, so the RX self-zid gate drops the face's own
+/// looped-back traffic.
+///
+/// `qos` is the group's per-priority offer (R311y232), the wz seam for zenoh
+/// `transport.multicast.qos.enabled` — default FALSE and DISTINCT from the
+/// unicast `transport.unicast.qos.enabled` (default TRUE): zenoh's multicast
+/// manager reads `config.multicast.is_qos` on its own, so the offer does NOT
+/// reuse the unicast `WzConfig.qos`. `false` keeps the group pico-faithful
+/// 2-channel.
+#[cfg(all(feature = "transport-multicast", feature = "transport-link-udp"))]
+fn router_group_params(
+    zid: Vec<u8>,
+    qos: bool,
+) -> wz_session_core::multicast_params::MulticastParams {
+    wz_session_core::multicast_params::MulticastParams {
         version: 0x09,
-        whatami: WhatAmI::Router,
+        whatami: wz_session_core::WhatAmI::Router,
         zid,
         lease_ms: 5_000,
         join_interval_ms: 100,
         seq_num_res: 0x02,
         req_id_res: 0x02,
         batch_size: 2_048,
-        // R311y232 (transport-qos ACTIVATION) — the group's per-priority QoS offer,
-        // sourced from the deploy's `qos` choice (the demo `--multicast-qos` flag).
-        // This is the wz seam for zenoh `transport.multicast.qos.enabled` (default
-        // FALSE, `QoSMulticastConf`, commons/zenoh-config defaults.rs:234) — a knob
-        // DISTINCT from the unicast `transport.unicast.qos.enabled` (default TRUE):
-        // zenoh's multicast manager reads `config.multicast.is_qos` on its own
-        // (io/zenoh-transport multicast/establishment.rs:54), so the wz multicast
-        // offer does NOT reuse the unicast `WzConfig.qos`. `false` keeps the group
-        // pico-faithful 2-channel (byte-identical to the pre-y227 wire).
         is_qos: qos,
-    };
+    }
+}
 
-    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+/// The future a group face's bind returns, borrowing the face's options.
+#[cfg(all(feature = "transport-multicast", feature = "transport-link-udp"))]
+type GroupBind<'a> = core::pin::Pin<
+    Box<dyn core::future::Future<Output = std::io::Result<crate::UdpDriver>> + Send + 'a>,
+>;
+
+/// R2850 (open-debt item 821) — ONE group face: one socket, one dispatcher,
+/// one drive loop, re-joined on link loss, stoppable by the returned handle.
+///
+/// # Why a face is one loop
+///
+/// A router used to join a group as TWO faces, an egress loop on a send-only
+/// socket and an ingress loop on the joined one, each with its own dispatcher,
+/// its own SN state and its own JOIN beacon. From outside that is two members
+/// under one zid: the beacons leave from two source addresses, and upstream
+/// keys a multicast peer by its locator
+/// (`io/zenoh-transport/src/multicast/transport.rs` @ `pub(super) fn new_peer(&self, locator: &Locator, join: Join) -> ZResult<()> {`),
+/// so a zenoh member admitted the router twice. Upstream's own two tasks share
+/// ONE transport and send from ONE socket
+/// (`io/zenoh-links/zenoh-link-udp/src/multicast.rs` @ `.unicast_socket`).
+/// The face is therefore the unit here: whatever a host needs from a group —
+/// sending, receiving, membership — rides the one loop the face runs.
+///
+/// `bind` is the face's socket, taken as a function of the options so a
+/// re-join rebinds exactly as the first join did. `on_event`, `outbound`,
+/// `on_members` and `on_group_subs` are the drive loop's own seams, carried
+/// across re-joins; a fresh DISPATCHER is made per join (pico clears the
+/// transport before its reopen task re-enters `_z_open`, for the same reason:
+/// the peer table describes members reached over the link that just died).
+///
+/// Returns the stop handle. The task yields `None` when the FIRST bind fails —
+/// no loop ran, so no departure was announced and a host must not report one —
+/// and the loop's outcome otherwise.
+#[cfg(all(feature = "transport-multicast", feature = "transport-link-udp"))]
+#[allow(clippy::too_many_arguments)]
+fn spawn_group_face<B, F, G, H>(
+    pool: WzRuntime,
+    label: &'static str,
+    params: wz_session_core::multicast_params::MulticastParams,
+    opts: crate::McastGroupOptions,
+    bind: B,
+    mut on_event: F,
+    mut outbound: UnboundedReceiver<MulticastTxItem>,
+    mut on_members: G,
+    mut on_group_subs: H,
+) -> McastFaceStop
+where
+    B: for<'a> Fn(&'a crate::McastGroupOptions) -> GroupBind<'a> + Send + Sync + 'static,
+    F: FnMut(IterationEvent<'_>) + Send + 'static,
+    G: FnMut(&[Vec<u8>]) + Send + 'static,
+    H: FnMut(&[String]) + Send + 'static,
+{
+    use wz_session_core::multicast_dispatch::MulticastConfig;
+
+    use crate::runtime_impl::TokioTime;
+
+    // A router group serves many members; the bound is the multicast
+    // dispatcher's fixed peer-table capacity.
+    const MCAST_MAX_PEERS: usize = 32;
     // R2333 — the stop channel. `false` is the resting value; the loop watches for
     // a CHANGE, so the initial value is never mistaken for a stop.
     let (signal, mut shutdown) = tokio::sync::watch::channel(false);
-    // The TRANSMIT subsystem: this is the group's EGRESS pump, and upstream puts
-    // the multicast transmit task on `ZRuntime::TX`
-    // (`io/zenoh-transport/src/multicast/link.rs`
-    // @ `ZRuntime::TX.spawn(async move {`). Its ingress twin below
-    // takes `RX` from the same seam, so the two directions of one group
-    // are schedulable against each other rather than sharing a pool.
-    let task = WzRuntime::Tx.spawn(async move {
-        // R311y454 — was a bare `UdpSocket::bind((UNSPECIFIED, 0))` +
-        // `from_socket`. `bind_multicast_tx` is that same ephemeral bind plus
-        // the `IP_MULTICAST_IF` pin when `#iface=` names one, so an unnarrowed
-        // egress is unchanged and a narrowed one fails LOUDLY here rather than
-        // sending out an interface the deploy did not name.
+    let task = pool.spawn(async move {
         let clock = TokioTime::new();
         // R2376 — the FIRST bind is the host's own call and its failure is
-        // reported as it always was; every LATER one is a re-join. The
-        // distinction matters: a face that never came up is a deploy error the
-        // operator must see, while a face that came up and lost its link is the
-        // transient this loop exists to ride out.
-        let mut rejoin = GroupRejoin::new("router multicast egress");
-        let mut driver =
-            match UdpDriver::bind_multicast_tx(group, port, opts.as_socket_config()).await {
-                Ok(driver) => driver,
-                Err(e) => {
-                    log::error!(
-                        "router multicast egress: ephemeral bind failed ({e}); egress group absent"
-                    );
-                    // R2333 — `None` is the bind-failure verdict, distinct from
-                    // every `MulticastOutcome`: no loop ran, so no departure was
-                    // announced and a host must not report one.
-                    return None;
-                }
-            };
+        // reported as it always was; every LATER one is a re-join. A face that
+        // never came up is a deploy error the operator must see, while a face
+        // that came up and lost its link is the transient this loop rides out.
+        let mut rejoin = GroupRejoin::new(label);
+        let mut driver = match bind(&opts).await {
+            Ok(driver) => driver,
+            Err(e) => {
+                log::error!("{label}: group bind failed ({e}); face absent");
+                return None;
+            }
+        };
         loop {
-            // A FRESH dispatcher per join — pico clears the transport
-            // (`_z_transport_clear`) before its reopen task re-enters `_z_open`,
-            // and for the same reason: the peer table describes members reached
-            // over the link that just died. Carrying it across would re-announce
-            // a group membership this face can no longer observe, and every
-            // entry would sit there until its lease aged out.
             let mut dispatcher =
                 MulticastDispatcher::<MCAST_MAX_PEERS>::new(MulticastConfig::new(params.lease_ms));
-            let outcome = drive_multicast_session_with_shutdown(
+            let outcome = drive_multicast_session_with_membership(
                 &mut dispatcher,
                 MulticastDriveConfig {
                     params: &params,
                     tick_ms: 50,
-                    // production: no iteration budget — the loop runs until the host
-                    // stops it (R2333) or the link is lost.
+                    // production: no iteration budget — the loop runs until the
+                    // host stops it (R2333) or the link is lost.
                     max_iters: None,
                 },
                 &mut driver,
                 &clock,
-                // Egress-only: a router group face consumes no group ingress (the
-                // `mcast_faces` ingress plane is the deferred milestone).
-                |_| {},
-                &mut rx,
-                &mut shutdown,
+                &mut on_event,
+                &mut outbound,
+                &mut on_members,
+                &mut on_group_subs,
+                Some(&mut shutdown),
+                // The node registry takes a face's counts once a host opens the
+                // face in it; until then this records nothing.
+                &(),
             )
             .await;
             let Some(delay) = rejoin.wait_for(&outcome) else {
                 return Some(outcome);
             };
             driver = match rejoin_group_driver(
-                || UdpDriver::bind_multicast_tx(group, port, opts.as_socket_config()),
+                || bind(&opts),
                 &clock,
                 &mut rejoin,
                 &mut shutdown,
@@ -1184,11 +1246,11 @@ pub fn spawn_router_mcast_egress(
             };
         }
     });
-    (tx, McastFaceStop { signal, task })
+    McastFaceStop { signal, task }
 }
 
 /// R2376 (open-debt item 15, `session-reconnect`) — the group face's REJOIN
-/// pacing, shared by the egress and ingress spawners.
+/// pacing, which every group face's loop (`spawn_group_face`) follows.
 ///
 /// # What was missing
 ///
@@ -1205,15 +1267,13 @@ pub fn spawn_router_mcast_egress(
 /// failure arms — which re-enters `_z_open` and rebuilds the multicast
 /// transport. The retry is the identical 1s re-arm.
 ///
-/// # Why a struct and not a loop
+/// # Why a struct beside the loop
 ///
-/// The two spawners differ in what they drive (`_with_membership` versus
-/// `_with_shutdown`) and in the channels their closures capture, so a shared
-/// DRIVER would have to be generic over a closure returning a future that
-/// mutably borrows its environment — the shape that fights the borrow checker
-/// for no gain. What is genuinely common is the DECISION: is this outcome worth
-/// re-joining for, and how long should the face wait first. That is what lives
-/// here, so the two loops cannot drift on the part that carries the reasoning.
+/// What it holds is the DECISION — is this outcome worth re-joining for, and
+/// how long should the face wait first — apart from the loop that acts on it.
+/// R2850 made the loop itself one (`spawn_group_face`, which every group face
+/// now runs); the decision stays its own type because the WHICH half is shared
+/// further still, with the MCU profile (see [`Self::wait_for`]).
 #[cfg(all(feature = "transport-multicast", feature = "transport-link-udp"))]
 struct GroupRejoin {
     period: crate::retry_period::RetryPeriod,
@@ -1320,279 +1380,196 @@ where
     }
 }
 
-/// R311y194 — router-multicast-faces INGRESS slice (I1): spawn the multicast group
-/// RX drive loop for a router run-mode and return the channel of received Pushes.
+/// R2850 (open-debt item 821) — a router's face on a multicast group, BOTH
+/// directions: what the router forwards into the group, and what the group's
+/// members send it, over ONE socket and ONE drive loop.
 ///
-/// The wz analog of zenoh `Router::new_peer_multicast` (`router.rs:213`), reduced
-/// to a SINGLE group-ingress face (per-peer `mcast_faces` + declarations are the
-/// deferred I3 milestone): the router JOINs the group (RX) and each admitted `Push`
-/// is folded — over the returned [`UnboundedReceiver<McastIngressItem>`] — into the
-/// peer-loop task, where the `!Send`
-/// [`RouterForwarder`](crate::router_forward::RouterForwarder) routes it via
-/// [`route_mcast_ingress`](crate::router_forward::RouterForwarder::route_mcast_ingress)
-/// (delivered to unicast subscribers, echo-guarded off the groups). INGRESS is
-/// LITERAL-ONLY at I1: an aliased id-only push has no per-peer alias table on the
-/// router and is dropped downstream by `resolve_inbound_keyexpr`.
+/// It replaces the pair `spawn_router_mcast_egress` + `spawn_router_mcast_ingress`
+/// a router used to spawn for one group. Those were two members under one zid —
+/// two sockets, so two source addresses; two dispatchers, so two SN states; two
+/// JOIN beacons, the ingress one advertising an SN it never sent from — and
+/// upstream, which keys a multicast peer by its locator, admitted the router
+/// twice. See `spawn_group_face` for the pin.
 ///
-/// SELF-ECHO is handled by construction, NOT by a link-layer src filter: the RX
-/// dispatch self-zid gate (`multicast_rx.rs:97`, `join.zid != params.zid`) drops
-/// this node's OWN looped-back JOIN, so its own address is never admitted as a peer
-/// and its own egress data frames (attributed by src) are dropped as unknown-peer —
-/// PROVIDED this loop and any egress loop advertise the SAME zid (the router's
-/// single zid). So a router that BOTH egresses and ingresses on the group never
-/// self-delivers.
+/// The link is upstream's shape ([`UdpDriver::bind_multicast_link`](crate::UdpDriver::bind_multicast_link)):
+/// the group is read on a joined socket carrying every `#join=` membership,
+/// and everything the face sends — beacons and forwarded data — leaves from
+/// one send socket, which keeps the egress interface pin, `#bind=`, the hop
+/// limit and the DSCP mark the old egress face honoured. One sending socket is
+/// one source address, which is what makes the face one member.
 ///
-/// The loop is RX-driven but [`drive_multicast_session`] is bidirectional, so a
-/// dummy (never-sent) outbound channel is held alive in the task to keep its egress
-/// arm parked — egress rides the SEPARATE [`spawn_router_mcast_egress`] helper.
+/// What the fields carry:
 ///
-/// Gated on `transport-link-udp` (it builds a concrete [`UdpDriver`], like the
-/// egress helper — R311y192) AND `routing-accept`: it returns a receiver for the
-/// accept-loop's [`FaceSources::mcast_ingress`](crate::accept_loop::FaceSources)
-/// channel, so it references [`crate::accept_loop`] (itself `routing-accept`-gated).
-/// A build lacking any of these (e.g. `transport-multicast + transport-link-udp`
-/// WITHOUT `routing-accept`, the interop-test feature set; or `routing-accept`
-/// WITHOUT `codec-push`, the minimal accept foundation) keeps the generic
-/// multicast plane while this accept-loop-coupled ingress host is elided.
-/// `codec-push` is required because it matches `NetworkMessage::Push` and folds a
-/// `PushOwned` (both `codec-push`-gated) into the accept-loop channel.
-/// The three `Send` relay channels [`spawn_router_mcast_ingress`] hands the accept
-/// loop: (1) the received-Push stream ([`McastIngressItem`](crate::accept_loop::McastIngressItem)),
-/// (2) the on-group ROUTER member set (I3b Designated-Router election candidates),
-/// and (3) the group-SUBSCRIBER keyexpr aggregate (sub plane, S2 — advertised into
-/// the unicast mesh). Named to keep the ingress-host signature under
-/// `clippy::type_complexity`.
+/// - `outbound` — the group's send channel, what the caller hands to
+///   [`attach_mcast_group`](crate::router_forward::RouterForwarder::attach_mcast_group);
+///   a routed `Push` rides it into the loop, which mints the group SN and frames
+///   it (the `multicast_tx` SSOT).
+/// - `ingress` — each admitted `Push` and `Request` a member sent (R2734 says why
+///   those two of the seven kinds), for the accept loop to fold into the `!Send`
+///   forwarder.
+/// - `members` — the on-group ROUTER member set, on change (I3b, the
+///   Designated-Router election candidates).
+/// - `group_subs` — the deduped group-subscriber key expressions, on change (sub
+///   plane, S2 — advertised into the unicast mesh).
+/// - `stop` — the face's stop handle (R2333).
+///
+/// SELF-ECHO is handled by construction: the face's own traffic loops back with
+/// its own zid and the RX self-zid gate drops it, so the router never admits
+/// itself and never self-delivers.
 #[cfg(all(
     feature = "transport-multicast",
     feature = "transport-link-udp",
     feature = "routing-accept",
     feature = "codec-push"
 ))]
-/// R2333 (open-debt item 15) — the fourth slot is the group face's stop handle,
-/// the ingress twin of the one [`spawn_router_mcast_egress`] returns. It rides
-/// the alias rather than a separate return because the three channels and the
-/// handle share one lifetime: they are all this ONE face.
-type RouterMcastIngressChannels = (
-    UnboundedReceiver<crate::accept_loop::McastIngressItem>,
-    UnboundedReceiver<Vec<Vec<u8>>>,
-    UnboundedReceiver<Vec<String>>,
-    McastFaceStop,
-);
+pub struct RouterMcastGroup {
+    /// The group's send channel.
+    pub outbound: UnboundedSender<MulticastTxItem>,
+    /// What the group's members sent this router.
+    pub ingress: UnboundedReceiver<crate::accept_loop::McastIngressItem>,
+    /// The on-group router member set, on change.
+    pub members: UnboundedReceiver<Vec<Vec<u8>>>,
+    /// The group-subscriber key expressions, on change.
+    pub group_subs: UnboundedReceiver<Vec<String>>,
+    /// The face's stop handle.
+    pub stop: McastFaceStop,
+}
 
+/// R2850 (open-debt item 821) — spawn a router's [`RouterMcastGroup`] face.
+///
+/// Gated on `routing-accept` and `codec-push` beside the multicast link: the
+/// ingress channel is the accept loop's
+/// [`FaceSources::mcast_ingress`](crate::accept_loop::FaceSources) item, and the
+/// fold matches `NetworkMessage::Push`. A build without them still has
+/// [`spawn_router_mcast_egress`] for a host that only forwards into a group.
+///
+/// `opts` is the group locator's `#iface=`, `ttl`, `join`, `bind` and `dscp`
+/// (R311y454 / R311y832 / R2791): on this one socket `iface` selects both the
+/// membership's interface and the egress interface, and each extra `join` is a
+/// further membership on it, so one bound port serves several groups. `group`
+/// is either family (R2584).
+///
+/// The loop runs on the RECEIVE subsystem: it reads, decodes and dispatches
+/// every member's traffic, which is where a group face spends its time, and
+/// sends only what the router forwards
+/// (`io/zenoh-transport/src/multicast/link.rs` @ `ZRuntime::RX.spawn(async move {`).
 #[cfg(all(
     feature = "transport-multicast",
     feature = "transport-link-udp",
     feature = "routing-accept",
     feature = "codec-push"
 ))]
-/// R311y454 — `iface` is the group locator's `#iface=<name>`. On the INGRESS half
-/// it selects which interface's group membership is installed (`imr_interface`),
-/// the mirror of the egress pin. Owned, for the same reason: it crosses into the
-/// spawned task.
-///
-/// R311y832 — now [`McastGroupOptions`](crate::McastGroupOptions). This is the
-/// half where `join` bites: every extra group is a second membership on THIS
-/// socket, so one bound port serves several groups (zenoh
-/// `zenoh-link-udp/src/multicast.rs:316-347`).
-///
-/// R2584 — `group` is either family, as for the egress twin.
-pub fn spawn_router_mcast_ingress(
+pub fn spawn_router_mcast_group(
     group: impl Into<core::net::IpAddr>,
     port: u16,
     zid: Vec<u8>,
     qos: bool,
     opts: crate::McastGroupOptions,
-) -> RouterMcastIngressChannels {
-    let group: core::net::IpAddr = group.into();
+) -> RouterMcastGroup {
     use wz_session_core::driver_loop::DriverLoopOutcome;
-    use wz_session_core::multicast_dispatch::MulticastConfig;
-    use wz_session_core::multicast_params::MulticastParams;
     use wz_session_core::network_message::NetworkMessage;
-    use wz_session_core::WhatAmI;
 
     use crate::accept_loop::{McastIngressBody, McastIngressItem};
-    use crate::runtime_impl::TokioTime;
-    use crate::UdpDriver;
 
-    // A router group serves many leaf peers; the bound is the dispatcher's fixed
-    // peer-table capacity.
-    const MCAST_MAX_PEERS: usize = 32;
-    // Same group profile as the egress beacon (zenoh multicast defaults) + the
-    // router's own zid — so the RX self-zid gate drops this node's own loopback.
-    let params = MulticastParams {
-        version: 0x09,
-        whatami: WhatAmI::Router,
-        zid,
-        lease_ms: 5_000,
-        join_interval_ms: 100,
-        seq_num_res: 0x02,
-        req_id_res: 0x02,
-        batch_size: 2_048,
-        // R311y232 (transport-qos ACTIVATION) — MUST match the egress offer (a router
-        // is one bidirectional group member sharing one zid; a qos/non-qos mismatch
-        // between its own egress + ingress would make its RX self-zid gate the only
-        // thing saving it from refusing its own JOIN). Same deploy `qos` source as
-        // `spawn_router_mcast_egress`; zenoh `transport.multicast.qos.enabled`
-        // (default false, distinct from unicast) seam.
-        is_qos: qos,
-    };
-
-    let (ingress_tx, ingress_rx) = tokio::sync::mpsc::unbounded_channel::<McastIngressItem>();
-    // §5.21 router-multicast-faces (I3b) — relay the on-group ROUTER member set
-    // (the Designated-Router election candidates) to the accept loop / forwarder.
-    let (members_tx, members_rx) = tokio::sync::mpsc::unbounded_channel::<Vec<Vec<u8>>>();
-    // §5.21 router-multicast-faces (sub plane, S2) — relay the deduped group-
-    // subscriber keyexpr aggregate to the accept loop / forwarder, so it advertises
-    // the group's interest into the unicast mesh (cross-router reachability).
-    let (group_subs_tx, group_subs_rx) = tokio::sync::mpsc::unbounded_channel::<Vec<String>>();
-    // R2333 — the stop channel; see the egress twin for why the resting value is
-    // `false` and only a CHANGE stops the loop.
-    let (signal, mut shutdown) = tokio::sync::watch::channel(false);
-    // The RECEIVE subsystem — the egress twin's counterpart, and upstream's own
-    // split at the same seam (`io/zenoh-transport/src/multicast/link.rs`
-    // @ `ZRuntime::RX.spawn(async move {`).
-    let task = WzRuntime::Rx.spawn(async move {
-        // R2376 — see the egress twin: the FIRST bind is a deploy error, every
-        // later one is a re-join of a face that had come up.
-        let mut rejoin = GroupRejoin::new("router multicast ingress");
-        let mut driver = match UdpDriver::bind_multicast(group, port, opts.as_socket_config()).await
-        {
-            Ok(driver) => driver,
-            Err(e) => {
-                log::error!(
-                    "router multicast ingress: group bind/join failed ({e}); ingress absent"
-                );
-                // R2333 — the bind-failure verdict; see the egress twin.
-                return None;
-            }
-        };
-        let clock = TokioTime::new();
-        // Egress rides the separate `spawn_router_mcast_egress` helper; this loop is
-        // RX-only. `drive_multicast_session` is bidirectional, so hold a dummy
-        // outbound sender alive to keep its egress arm parked (a dropped receiver
-        // would end the loop).
-        let (_dummy_tx, mut dummy_rx) = tokio::sync::mpsc::unbounded_channel();
-        loop {
-            // A FRESH dispatcher per join — see the egress twin: the peer table
-            // describes members reached over the link that just died.
-            let mut dispatcher =
-                MulticastDispatcher::<MCAST_MAX_PEERS>::new(MulticastConfig::new(params.lease_ms));
-            let outcome = drive_multicast_session_with_membership(
-                &mut dispatcher,
-                MulticastDriveConfig {
-                    params: &params,
-                    tick_ms: 50,
-                    // production: no iteration budget — the loop runs until the host
-                    // stops it (R2333) or the link is lost.
-                    max_iters: None,
-                },
-                &mut driver,
-                &clock,
-                // Fold each admitted Push — and, since R2734, each admitted Query —
-                // to the peer-loop task. A closed receiver (peer loop gone) drops
-                // the item: fire-and-forget, matching the egress helper's group-sink
-                // contract.
-                //
-                // R2734 — THE QUERY ARM, AND WHY IT IS NOT ALL SEVEN KINDS.
-                // Upstream's multicast transport filters no kind on the way to the
-                // per-peer face, so the count here used to be 2 of 7 against its 7.
-                // But measuring what each kind would REACH showed the router
-                // declines a source-only face at every other entry point, each for
-                // a stated reason: a group peer's subscriptions already travel by
-                // `MulticastDispatcher` (and are advertised through
-                // `set_mcast_group_subs`), its Interests would be answered into a
-                // face with no send seam, and its Responses can match no pending
-                // query because no Request was ever sent to that face. Forwarding
-                // those would be wiring that dies one call later.
-                // A Query is the one kind with an effect wz was missing -- it runs
-                // a local queryable -- and Oam is out of scope, feeding upstream's
-                // linkstate machinery, which this plane does not own.
-                // Declarations are still not folded: they are handled per peer
-                // upstream of here, in the dispatcher.
-                |event: IterationEvent<'_>| {
-                    if let IterationEvent::Poll(DriverLoopOutcome::FramePayload {
-                        messages,
-                        reliable,
-                        priority,
-                        ..
-                    }) = event
-                    {
-                        for msg in messages {
-                            let body = match msg {
-                                NetworkMessage::Push(push) => {
-                                    Some(McastIngressBody::Push((**push).clone()))
-                                }
-                                NetworkMessage::Request(request) => {
-                                    Some(McastIngressBody::Request((**request).clone()))
-                                }
-                                _ => None,
-                            };
-                            if let Some(body) = body {
-                                // R311y227 — carry the frame's decoded QoS band across
-                                // the fold so the forwarder re-injects at that priority
-                                // (DEFAULT on a non-qos group). The Query arm carries it
-                                // too rather than branching the item: the band is a
-                                // property of the FRAME both rode in on, and
-                                // `route_mcast_ingress_request` simply has no argument
-                                // for it, which is that method's own note.
-                                let _ = ingress_tx.send(McastIngressItem {
-                                    body,
-                                    reliable: *reliable,
-                                    priority: *priority,
-                                });
-                            }
-                        }
-                    }
-                },
-                &mut dummy_rx,
-                // §5.21 router-multicast-faces (I3b) — on a membership change, relay
-                // the raw on-group ROUTER zid bytes to the forwarder (via the accept
-                // loop). The forwarder's `set_mcast_group_members` converts to `Zid`,
-                // keeping the routing-graph type off the accept-loop channel so a
-                // `routing-accept` build (which does not link `wz-routing-graph`) still
-                // compiles. A closed receiver (accept loop gone) is fire-and-forget.
-                |members: &[Vec<u8>]| {
-                    let _ = members_tx.send(members.to_vec());
-                },
-                // §5.21 router-multicast-faces (sub plane, S2) — on a group-subscriber
-                // change, relay the deduped keyexpr aggregate to the forwarder (via the
-                // accept loop). `set_mcast_group_subs` diffs it and advertises/withdraws
-                // the group's interest into the unicast mesh. Fire-and-forget on a closed
-                // receiver (accept loop gone), matching the member relay.
-                |subs: &[String]| {
-                    let _ = group_subs_tx.send(subs.to_vec());
-                },
-                Some(&mut shutdown),
-                // R2848 — no registry holds this face's counts yet; the node
-                // registry takes the group and its peers in the next step.
-                &(),
-            )
-            .await;
-            let Some(delay) = rejoin.wait_for(&outcome) else {
-                return Some(outcome);
-            };
-            driver = match rejoin_group_driver(
-                || UdpDriver::bind_multicast(group, port, opts.as_socket_config()),
-                &clock,
-                &mut rejoin,
-                &mut shutdown,
-                delay,
-            )
-            .await
+    let group: core::net::IpAddr = group.into();
+    let (outbound, outbound_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (ingress_tx, ingress) = tokio::sync::mpsc::unbounded_channel::<McastIngressItem>();
+    let (members_tx, members) = tokio::sync::mpsc::unbounded_channel::<Vec<Vec<u8>>>();
+    let (group_subs_tx, group_subs) = tokio::sync::mpsc::unbounded_channel::<Vec<String>>();
+    let stop = spawn_group_face(
+        WzRuntime::Rx,
+        "router multicast group",
+        router_group_params(zid, qos),
+        opts,
+        move |opts| {
+            Box::pin(crate::UdpDriver::bind_multicast_link(
+                group,
+                port,
+                opts.as_socket_config(),
+            ))
+        },
+        // Fold each admitted Push — and, since R2734, each admitted Query —
+        // to the peer-loop task. A closed receiver (peer loop gone) drops
+        // the item: fire-and-forget, matching the egress helper's group-sink
+        // contract.
+        //
+        // R2734 — THE QUERY ARM, AND WHY IT IS NOT ALL SEVEN KINDS.
+        // Upstream's multicast transport filters no kind on the way to the
+        // per-peer face, so the count here used to be 2 of 7 against its 7.
+        // But measuring what each kind would REACH showed the router
+        // declines a source-only face at every other entry point, each for
+        // a stated reason: a group peer's subscriptions already travel by
+        // `MulticastDispatcher` (and are advertised through
+        // `set_mcast_group_subs`), its Interests would be answered into a
+        // face with no send seam, and its Responses can match no pending
+        // query because no Request was ever sent to that face. Forwarding
+        // those would be wiring that dies one call later.
+        // A Query is the one kind with an effect wz was missing -- it runs
+        // a local queryable -- and Oam is out of scope, feeding upstream's
+        // linkstate machinery, which this plane does not own.
+        // Declarations are still not folded: they are handled per peer
+        // upstream of here, in the dispatcher.
+        move |event: IterationEvent<'_>| {
+            if let IterationEvent::Poll(DriverLoopOutcome::FramePayload {
+                messages,
+                reliable,
+                priority,
+                ..
+            }) = event
             {
-                Some(driver) => driver,
-                // Stopped while down — report the loss that took the face out,
-                // not a re-join that never happened. Same contract as egress.
-                None => return Some(outcome),
-            };
-        }
-    });
-    (
-        ingress_rx,
-        members_rx,
-        group_subs_rx,
-        McastFaceStop { signal, task },
-    )
+                for msg in messages {
+                    let body = match msg {
+                        NetworkMessage::Push(push) => {
+                            Some(McastIngressBody::Push((**push).clone()))
+                        }
+                        NetworkMessage::Request(request) => {
+                            Some(McastIngressBody::Request((**request).clone()))
+                        }
+                        _ => None,
+                    };
+                    if let Some(body) = body {
+                        // R311y227 — carry the frame's decoded QoS band across
+                        // the fold so the forwarder re-injects at that priority
+                        // (DEFAULT on a non-qos group). The Query arm carries it
+                        // too rather than branching the item: the band is a
+                        // property of the FRAME both rode in on, and
+                        // `route_mcast_ingress_request` simply has no argument
+                        // for it, which is that method's own note.
+                        let _ = ingress_tx.send(McastIngressItem {
+                            body,
+                            reliable: *reliable,
+                            priority: *priority,
+                        });
+                    }
+                }
+            }
+        },
+        outbound_rx,
+        // §5.21 router-multicast-faces (I3b) — on a membership change, relay the
+        // raw on-group ROUTER zid bytes to the forwarder (via the accept loop).
+        // The forwarder's `set_mcast_group_members` converts to `Zid`, keeping
+        // the routing-graph type off the accept-loop channel so a
+        // `routing-accept` build (which does not link `wz-routing-graph`) still
+        // compiles. A closed receiver (accept loop gone) is fire-and-forget.
+        move |members: &[Vec<u8>]| {
+            let _ = members_tx.send(members.to_vec());
+        },
+        // §5.21 router-multicast-faces (sub plane, S2) — on a group-subscriber
+        // change, relay the deduped keyexpr aggregate to the forwarder (via the
+        // accept loop). `set_mcast_group_subs` diffs it and advertises/withdraws
+        // the group's interest into the unicast mesh. Fire-and-forget on a closed
+        // receiver (accept loop gone), matching the member relay.
+        move |subs: &[String]| {
+            let _ = group_subs_tx.send(subs.to_vec());
+        },
+    );
+    RouterMcastGroup {
+        outbound,
+        ingress,
+        members,
+        group_subs,
+        stop,
+    }
 }
 
 #[cfg(test)]
