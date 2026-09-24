@@ -19732,7 +19732,8 @@ except (ValueError, IndexError, KeyError):
 print("ok" if doc is not None and ('"$1"') else doc)' 2>&1
         }
         local st
-        st="$(_qa_status 'doc["last_write"] == {"verdict": "replace"} and doc["endpoints"] == [{"endpoint": "udp/10.0.2.2:'"$b_port"'", "state": "live", "established": True}]')"
+        # R2851 (ZA-2939) — `seq` 1: Qa.2's PUT is the first write the node got.
+        st="$(_qa_status 'doc["last_write"] == {"seq": 1, "verdict": "replace"} and doc["endpoints"] == [{"endpoint": "udp/10.0.2.2:'"$b_port"'", "state": "live", "established": True}]')"
         if [[ "$st" == "ok" ]]; then
             echo "  Qa.5 status/connect: the write was replaced, B is live and established — OK"
         else
@@ -19746,7 +19747,7 @@ print("ok" if doc is not None and ('"$1"') else doc)' 2>&1
             "$rest/config/connect/endpoints" >/dev/null
         local _
         for _ in $(seq 1 30); do
-            st="$(_qa_status 'len(doc["endpoints"]) == 2 and all(e["state"] == "refused" and e["reason"] == "multi_link_group" for e in doc["endpoints"])')"
+            st="$(_qa_status 'doc["last_write"] == {"seq": 2, "verdict": "replace"} and len(doc["endpoints"]) == 2 and all(e["state"] == "refused" and e["reason"] == "multi_link_group" for e in doc["endpoints"])')"
             [[ "$st" == "ok" ]] && break
             sleep 1
         done

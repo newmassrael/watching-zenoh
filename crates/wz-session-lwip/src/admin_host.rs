@@ -47,6 +47,11 @@ struct State {
     live: ConnectEndpoints,
     generation: u32,
     last: Option<ConnectWriteOutcome>,
+    /// R2851 (ZA-2939) — how many writes this control has RECEIVED, applied
+    /// or refused. `generation` moves only on an applied one; this moves on
+    /// every one, which is what lets a host tell its own verdict from an
+    /// earlier one that reads the same.
+    writes: u32,
 }
 
 /// A node's runtime connection control: the endpoints it should hold
@@ -67,6 +72,7 @@ impl ConnectControl {
                 live: ConnectEndpoints::new(),
                 generation: 0,
                 last: None,
+                writes: 0,
             })),
         }
     }
@@ -129,6 +135,7 @@ impl ConnectControl {
                 _ => {}
             }
             s.last = Some(outcome);
+            s.writes = s.writes.wrapping_add(1);
         });
     }
 }
@@ -163,16 +170,28 @@ impl crate::admin_status::ConnectStatusSource for ConnectControl {
         critical_section::with(|cs| self.state.borrow(cs).borrow().permit_write)
     }
 
+    /// R2851 (ZA-2939) — every verdict carries `seq`, the number of writes
+    /// this node has received counting this one, so a host that reads `seq`
+    /// before it writes (`null` reads as 0) knows a verdict with a HIGHER
+    /// `seq` answers a write made after that read. Verdict and number are read
+    /// under one lock, so they always belong to the same write.
     fn write_last_write_json(&self, out: &mut String) {
         use core::fmt::Write as _;
-        let verdict = match self.last_outcome() {
+        let (last, seq) = critical_section::with(|cs| {
+            let s = self.state.borrow(cs).borrow();
+            (s.last.clone(), s.writes)
+        });
+        let verdict = match last {
             None => {
                 out.push_str("null");
                 return;
             }
             Some(ConnectWriteOutcome::Malformed(e)) => {
-                out.push_str(r#"{"verdict":"malformed","offset":"#);
-                let _ = write!(out, "{}", e.offset);
+                let _ = write!(
+                    out,
+                    r#"{{"seq":{seq},"verdict":"malformed","offset":{}"#,
+                    e.offset
+                );
                 out.push_str(r#","expected":"#);
                 wz_session_core::json::escape_into(e.expected, out);
                 out.push('}');
@@ -188,7 +207,7 @@ impl crate::admin_status::ConnectStatusSource for ConnectControl {
             Some(ConnectWriteOutcome::Replace) => "replace",
             Some(ConnectWriteOutcome::Remove) => "remove",
         };
-        out.push_str(r#"{"verdict":"#);
+        let _ = write!(out, r#"{{"seq":{seq},"verdict":"#);
         wz_session_core::json::escape_into(verdict, out);
         out.push('}');
     }
@@ -379,17 +398,28 @@ mod tests {
         std::assert_eq!(last(), "null");
         // Writes off: the refusal names itself, and the permit reads false.
         deliver(&mut observer, put(KEY, br#"["tcp/10.0.0.9:7447"]"#));
-        std::assert_eq!(last(), r#"{"verdict":"denied"}"#);
+        std::assert_eq!(last(), r#"{"seq":1,"verdict":"denied"}"#);
         std::assert!(!CONTROL.write_permit());
+        // R2851 (ZA-2939) — the SAME refusal again reads differently: its seq
+        // moved, so a host that read seq 1 before writing knows seq 2 is its.
+        deliver(&mut observer, put(KEY, br#"["tcp/10.0.0.9:7447"]"#));
+        std::assert_eq!(last(), r#"{"seq":2,"verdict":"denied"}"#);
         // A malformed value says where the parse stopped and what it wanted.
         CONTROL.set_write_permit(true);
         deliver(&mut observer, put(KEY, b"[7]"));
         std::assert_eq!(
             last(),
-            r#"{"verdict":"malformed","offset":1,"expected":"an endpoint string or a locators object"}"#
+            r#"{"seq":3,"verdict":"malformed","offset":1,"expected":"an endpoint string or a locators object"}"#
         );
         deliver(&mut observer, put(KEY, br#"["tcp/10.0.0.9:7447"]"#));
-        std::assert_eq!(last(), r#"{"verdict":"replace"}"#);
+        std::assert_eq!(last(), r#"{"seq":4,"verdict":"replace"}"#);
+        // A write for ANOTHER node never reaches this subscriber, so it moves
+        // nothing: seq counts what this node received.
+        deliver(
+            &mut observer,
+            put("@/ffff/peer/config/connect/endpoints", b"[]"),
+        );
+        std::assert_eq!(last(), r#"{"seq":4,"verdict":"replace"}"#);
     }
 
     /// R2829 — what the admin GET's `config` leg reads back is the list the
