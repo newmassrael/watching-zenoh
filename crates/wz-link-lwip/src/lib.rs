@@ -665,31 +665,9 @@ impl<const N: usize, const Q: usize> LwipUdpSocket<N, Q> {
         dst_port: u16,
         payload: &[u8],
     ) -> Result<(), LinkError> {
-        let len = payload.len().min(N) as u16;
-        // SAFETY: pbuf_alloc returns owned pbuf chain or null.
-        let p = unsafe { pbuf_alloc(pbuf_layer_PBUF_TRANSPORT, len, pbuf_type_PBUF_RAM) };
-        if p.is_null() {
-            return Err(LinkError::PbufAlloc);
-        }
-
-        // SAFETY: p valid + capacity `len`; payload ptr valid + len.
-        let take_err = unsafe { pbuf_take(p, payload.as_ptr() as *const c_void, len) };
-        if take_err as core::ffi::c_int != err_enum_t_ERR_OK {
-            // SAFETY: free the pbuf we just allocated.
-            unsafe { pbuf_free(p) };
-            return Err(LinkError::SendFailed(take_err));
-        }
-
-        let dst: ip_addr_t = ip_addr_t { addr: dst_addr };
-        // SAFETY: pcb valid (Inner owns it), p valid, &dst lifetime spans call.
-        let send_err = unsafe { udp_sendto(self.inner.pcb.as_ptr(), p, &dst, dst_port) };
-        // pbuf is freed by udp_sendto on success; only free on err.
-        if send_err as core::ffi::c_int != err_enum_t_ERR_OK {
-            // SAFETY: free the pbuf the stack didn't take ownership of.
-            unsafe { pbuf_free(p) };
-            return Err(LinkError::SendFailed(send_err));
-        }
-        Ok(())
+        let len = payload.len().min(N);
+        // SAFETY: the pcb is valid for the socket's life (removed in Drop).
+        unsafe { send_datagram(self.inner.pcb.as_ptr(), dst_addr, dst_port, &payload[..len]) }
     }
 
     /// Non-blocking dequeue from the per-socket receive queue. Returns
@@ -708,6 +686,49 @@ impl<const N: usize, const Q: usize> LwipUdpSocket<N, Q> {
     pub fn rx_drop_count(&self) -> u32 {
         self.inner.rx_drops
     }
+}
+
+/// R2851 — send one datagram from `pcb`, and give back the pbuf it took.
+///
+/// Every socket kind in this crate sends through here, so the pbuf's
+/// ownership is decided in one place. `udp_sendto` never takes the caller's
+/// pbuf, on success or on error (vendor/lwip/src/core/udp.c: "The pbuf is
+/// not deallocated."). Both sends used to free it only on error, leaking
+/// one pbuf per datagram: a fixed MCU heap ran dry within seconds, the node
+/// stopped sending, and its peer's lease expired. The host port hid it,
+/// because it allocates from libc malloc.
+///
+/// # Safety
+/// `pcb` must be a live pcb from `udp_new`.
+pub(crate) unsafe fn send_datagram(
+    pcb: *mut udp_pcb,
+    dst_addr: u32,
+    dst_port: u16,
+    payload: &[u8],
+) -> Result<(), LinkError> {
+    let len = u16::try_from(payload.len()).map_err(|_| LinkError::PbufAlloc)?;
+    // SAFETY: pbuf_alloc returns an owned pbuf chain or null.
+    let p = unsafe { pbuf_alloc(pbuf_layer_PBUF_TRANSPORT, len, pbuf_type_PBUF_RAM) };
+    if p.is_null() {
+        return Err(LinkError::PbufAlloc);
+    }
+    // SAFETY: p has capacity `len`; payload is valid for `len` bytes.
+    let take_err = unsafe { pbuf_take(p, payload.as_ptr() as *const c_void, len) };
+    let result = if take_err as core::ffi::c_int != err_enum_t_ERR_OK {
+        Err(LinkError::SendFailed(take_err))
+    } else {
+        let dst: ip_addr_t = ip_addr_t { addr: dst_addr };
+        // SAFETY: the caller vouches for pcb; p is valid; &dst spans the call.
+        let send_err = unsafe { udp_sendto(pcb, p, &dst, dst_port) };
+        if send_err as core::ffi::c_int != err_enum_t_ERR_OK {
+            Err(LinkError::SendFailed(send_err))
+        } else {
+            Ok(())
+        }
+    };
+    // SAFETY: p is ours on every path above; the stack holds no reference.
+    unsafe { pbuf_free(p) };
+    result
 }
 
 impl<const N: usize, const Q: usize> Drop for LwipUdpSocket<N, Q> {

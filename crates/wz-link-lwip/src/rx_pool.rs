@@ -61,12 +61,11 @@ use core::ptr::NonNull;
 
 use heapless::spsc::Queue;
 use lwip_sys::{
-    err_enum_t_ERR_OK, ip_addr_t, pbuf, pbuf_alloc, pbuf_copy_partial, pbuf_free,
-    pbuf_layer_PBUF_TRANSPORT, pbuf_take, pbuf_type_PBUF_RAM, u16_t, udp_bind, udp_new, udp_pcb,
-    udp_recv, udp_remove, udp_sendto,
+    err_enum_t_ERR_OK, ip_addr_t, pbuf, pbuf_copy_partial, pbuf_free, u16_t, udp_bind, udp_new,
+    udp_pcb, udp_recv, udp_remove,
 };
 
-use crate::{LinkError, LwipLink};
+use crate::{send_datagram, LinkError, LwipLink};
 
 // R2737 — `RxSlots` and `impl_rx_slots` MOVED to `wz-runtime-core`, and the
 // re-export below keeps every caller in this crate spelling them the same way.
@@ -298,28 +297,9 @@ impl<P: RxSlots, const Q: usize> PooledUdpRx<P, Q> {
         dst_port: u16,
         payload: &[u8],
     ) -> Result<(), LinkError> {
-        let len = payload.len().min(P::SLOT_SIZE) as u16;
-        // SAFETY: returns an owned pbuf chain or null.
-        let p = unsafe { pbuf_alloc(pbuf_layer_PBUF_TRANSPORT, len, pbuf_type_PBUF_RAM) };
-        if p.is_null() {
-            return Err(LinkError::PbufAlloc);
-        }
-        // SAFETY: p has capacity `len`; payload ptr valid for `len`.
-        let take_err = unsafe { pbuf_take(p, payload.as_ptr() as *const c_void, len) };
-        if take_err as core::ffi::c_int != err_enum_t_ERR_OK {
-            // SAFETY: free the pbuf we allocated.
-            unsafe { pbuf_free(p) };
-            return Err(LinkError::SendFailed(take_err));
-        }
-        let dst: ip_addr_t = ip_addr_t { addr: dst_addr };
-        // SAFETY: pcb valid (Inner owns it), p valid, &dst spans the call.
-        let send_err = unsafe { udp_sendto(self.inner.pcb.as_ptr(), p, &dst, dst_port) };
-        if send_err as core::ffi::c_int != err_enum_t_ERR_OK {
-            // SAFETY: the stack did not take ownership on the error path.
-            unsafe { pbuf_free(p) };
-            return Err(LinkError::SendFailed(send_err));
-        }
-        Ok(())
+        let len = payload.len().min(P::SLOT_SIZE);
+        // SAFETY: pcb valid for the socket's life (Inner owns it).
+        unsafe { send_datagram(self.inner.pcb.as_ptr(), dst_addr, dst_port, &payload[..len]) }
     }
 
     /// Slots currently on the freelist — the accounting gate, exposed so a
