@@ -1109,7 +1109,13 @@ CITATION = re.compile(r"\b((?:[A-Za-z0-9_.-]+/)*[A-Za-z0-9_.-]+\.(?:rs|c|h))(?::
 # upstream counts its group link and each peer on it. It re-enters in
 # `reached` (C1ak names its gated code), so UNREACHED and NO_SYMBOL hold at 2
 # and 2. READ off the census's own FAIL line, `reached: 12 against a pin of 11`.
-PIN_REACHED = 12
+#
+# R2852 — 12 -> 11. `transport-stats` RETIRES to COMPLETE again: every group
+# face records into the node registry it is handed (one multicast transport per
+# join), and the router host hands it its registry. It was in `reached`, so this
+# pin falls while UNREACHED and NO_SYMBOL hold at 2 and 2.
+# READ off the census's own FAIL line, `reached: 11 against a pin of 12`.
+PIN_REACHED = 11
 PIN_UNREACHED = 2
 PIN_NO_SYMBOL = 2
 # R2534 — 346 -> 347. The atom is `adminspace-metrics` and the citation is the
@@ -2129,7 +2135,11 @@ PIN_NO_SYMBOL = 2
 # green at 44 on this round's parent and the grade is the only store change
 # since, so the rise is that atom's wz citations: 46 - 44 = 2, the census's own
 # FAIL line, with PIN_AMBIGUOUS holding at 12.
-PIN_WZ_CITATIONS = 46
+#
+# R2852 — 46 -> 44, FALLING by the whole of the same atom: `transport-stats` is
+# COMPLETE again, so the two wz citations R2845 brought in leave with it:
+# 46 - 44 = 2, the census's own FAIL line, with PIN_AMBIGUOUS holding at 12.
+PIN_WZ_CITATIONS = 44
 # R2626 — 44 -> 42, and this one is worth a sentence because it HELD through
 # every earlier retirement in this run (R2612, R2622). `time-hlc`'s reason is the
 # first retiree carrying AMBIGUOUS citations of its own: its oldest clauses cite
