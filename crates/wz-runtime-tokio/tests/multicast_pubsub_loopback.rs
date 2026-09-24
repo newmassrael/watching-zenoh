@@ -768,6 +768,7 @@ async fn router_egress_helper_reaches_group_subscriber() {
         vec![0xAA; 4],
         false,
         McastGroupOptions::default(),
+        None,
     );
 
     let fired_probe = fired.clone();
@@ -1130,6 +1131,7 @@ async fn a_router_group_face_is_one_member_from_one_source_address() {
         router_zid.clone(),
         false,
         McastGroupOptions::default(),
+        None,
     );
 
     let mut beacon_sources = BTreeSet::new();
@@ -1201,6 +1203,7 @@ async fn a_router_group_face_receives_what_a_member_publishes() {
         vec![0xAD; 4],
         false,
         McastGroupOptions::default(),
+        None,
     );
 
     // The member: a peer loop on its own send socket, publishing one Put once
@@ -1241,5 +1244,147 @@ async fn a_router_group_face_receives_what_a_member_publishes() {
     assert!(
         matches!(item.body, McastIngressBody::Push(_)),
         "the member's Put arrives as a Push"
+    );
+}
+
+/// The one sample of `family` whose labels include every one of `labels`.
+#[cfg(all(feature = "routing-accept", feature = "transport-stats"))]
+fn sample(doc: &str, family: &str, labels: &[&str]) -> u64 {
+    let found: Vec<&str> = doc
+        .lines()
+        .filter(|line| line.starts_with(&format!("{family}{{")))
+        .filter(|line| labels.iter().all(|l| line.contains(l)))
+        .collect();
+    assert_eq!(
+        found.len(),
+        1,
+        "`{family}` with {labels:?} must be written exactly once:\n{doc}"
+    );
+    let value = found[0].rsplit(' ').next().expect("a sample has a value");
+    value
+        .parse::<f64>()
+        .unwrap_or_else(|e| panic!("`{value}` is not a number: {e}")) as u64
+}
+
+/// R2852 (`transport-stats`) — a router's group face reports its traffic in
+/// the NODE's registry, as a zenoh router's registry holds its multicast
+/// transport: one opened transport labelled by the group, the member's Put
+/// counted on the member, the face's own beacons counted as sent, and the
+/// transport listed disconnected once the face stops.
+///
+/// Until this round the face's loop recorded into `()`, so the registry a
+/// router serves on its metrics key reported zero for its group while zenoh
+/// reports every datagram. The control is that: pass `None` for the registry
+/// and the group is absent from the document.
+#[cfg(all(feature = "routing-accept", feature = "transport-stats"))]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "multicast loopback e2e; Layer M runs via --layer M / WZ_RUN_LAYER_M=1 --ignored"]
+async fn a_router_group_face_counts_its_traffic_in_the_node_registry() {
+    use wz_runtime_tokio::multicast_glue::spawn_router_mcast_group;
+    use wz_runtime_tokio::node_stats::NodeStats;
+    use wz_session_core::stats_registry::MetricsQuery;
+    use wz_session_core::zid_hex::zid_to_zenoh_hex;
+
+    const FACE_PORT: u16 = 7457;
+    let router_zid = vec![0xAF; 4];
+    let node = NodeStats::new(&zid_to_zenoh_hex(&router_zid), WhatAmI::Router, "v1");
+    let mut face = spawn_router_mcast_group(
+        GROUP,
+        FACE_PORT,
+        router_zid,
+        false,
+        McastGroupOptions::default(),
+        Some(node.clone()),
+    );
+
+    let mut member = UdpDriver::bind_multicast_tx(GROUP, FACE_PORT, McastSocketConfig::default())
+        .await
+        .expect("bind the publishing member");
+    let mut dispatcher = MulticastDispatcher::<8>::new(MulticastConfig::new(5_000));
+    let params = mc_params(0xB0);
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    let clock = TokioTime::new();
+    let drive = drive_multicast_session(
+        &mut dispatcher,
+        MulticastDriveConfig {
+            params: &params,
+            tick_ms: 10,
+            max_iters: None,
+        },
+        &mut member,
+        &clock,
+        |_| {},
+        &mut rx,
+    );
+    let scenario = async {
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        tx.send(multicast_put_literal(KEYEXPR, PAYLOAD).expect("put item"))
+            .expect("queue the member's publish");
+        tokio::time::timeout(Duration::from_secs(3), face.ingress.recv())
+            .await
+            .expect("the face's ingress yielded nothing within 3s")
+            .expect("the face's ingress channel closed")
+    };
+    tokio::select! {
+        _ = drive => panic!("the member's drive loop ended unexpectedly"),
+        _ = scenario => {}
+    };
+
+    let group = format!("remote_group=\"udp/{GROUP}:{FACE_PORT}\"");
+    let group_part = [group.as_str(), "remote_zid=\"\"", "disconnected=\"false\""];
+    let remote = format!("remote_zid=\"{}\"", zid_to_zenoh_hex(&[0xB0; 4]));
+    let mut open = String::new();
+    node.snapshot()
+        .encode_metrics(&mut open, MetricsQuery::default());
+    let local = format!("local_id=\"{}\"", zid_to_zenoh_hex(&[0xAF; 4]));
+    assert_eq!(
+        sample(&open, "zenoh_transports_opened", &[local.as_str()]),
+        1,
+        "the group face is ONE opened transport; its member is a partition"
+    );
+    assert!(
+        sample(&open, "zenoh_rx_per_transport_bytes_total", &group_part) > 0,
+        "the member's datagrams are counted on the group"
+    );
+    assert!(
+        sample(
+            &open,
+            "zenoh_tx_transport_message_per_transport_total",
+            &group_part
+        ) > 0,
+        "the face's own beacons are counted as sent"
+    );
+    assert_eq!(
+        sample(
+            &open,
+            "zenoh_rx_network_message_per_transport_total",
+            &[group.as_str(), remote.as_str(), "message=\"put\""]
+        ),
+        1,
+        "the member's Put is counted on the member"
+    );
+
+    face.stop.stop().await;
+    let mut closed = String::new();
+    node.snapshot().encode_metrics(
+        &mut closed,
+        MetricsQuery {
+            disconnected: true,
+            ..MetricsQuery::default()
+        },
+    );
+    assert!(
+        sample(
+            &closed,
+            "zenoh_rx_per_transport_bytes_total",
+            &[group.as_str(), "remote_zid=\"\"", "disconnected=\"true\""]
+        ) > 0,
+        "a stopped face's transport is listed disconnected, with its counts"
+    );
+    assert!(
+        !closed
+            .lines()
+            .any(|l| l.contains(&group) && l.contains("disconnected=\"false\"")),
+        "and nothing of it is still open:\n{closed}"
     );
 }

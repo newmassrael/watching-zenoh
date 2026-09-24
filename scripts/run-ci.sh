@@ -15293,6 +15293,16 @@ PY
         cargo test -p wz-runtime-tokio \
         --features transport-multicast,transport-fragmentation,routing-accept \
         --test multicast_pubsub_loopback a_router_group_face -- --ignored --quiet || return 1
+    # R2852 (`transport-stats`) — the same group face records its traffic into
+    # the node registry it is handed: one opened transport labelled by the group,
+    # the member's Put on the member, disconnected once the face stops. The
+    # registry half is `transport-stats`-gated, which the leg above does not
+    # compose, so the witness is compiled out there and counted here.
+    # 1 = the number this command PRINTED.
+    _runci_guarded_test "M router group face stats" 1 \
+        cargo test -p wz-runtime-tokio \
+        --features transport-multicast,transport-fragmentation,routing-accept,transport-stats \
+        --test multicast_pubsub_loopback a_router_group_face_counts -- --ignored --quiet || return 1
     # R311y232/y234 — the transport-qos ARM of the multicast e2e (BOTH qos tests, the
     # `qos` filter): the POSITIVE arm (both-is_qos group, a direct
     # TokioMulticastSession::publish_qos prioritized publish delivers -- the composed

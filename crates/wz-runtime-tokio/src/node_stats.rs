@@ -17,6 +17,12 @@
 //! storage host's own accept loop, which holds one client session at a time.
 //! Each reports a transport opening and closing here, keyed by an id of its
 //! own choosing, so no admin host re-learns a session lifecycle to report it.
+//! A multicast group face (`multicast_glue`) reports its transport the same
+//! way, once per join (R2852).
+//!
+//! R2852 — the registry is the NODE's, not the unicast plane's: upstream's is
+//! one per runtime whatever transports it holds. So this module is built for a
+//! node with either plane, and only the unicast half is gated on it.
 //!
 //! Each session records into its OWN partition without a node-wide lock
 //! (R2825); this registry copies a live transport's partition when a GET is
@@ -28,13 +34,25 @@
 //! recording side and the admin host each hold a clone, so neither has to
 //! share a clock with the other for the collection delay to mean what it says.
 
+// A node that holds transports of neither tracked kind keeps no transport map:
+// a multicast-only build without `transport-stats` has no group counts to hold.
+#[cfg(any(
+    feature = "transport-unicast",
+    all(feature = "transport-multicast", feature = "transport-stats")
+))]
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
-use wz_session_core::stats_registry::{StatsRegistry, StatsTransportId};
+use wz_session_core::stats_registry::StatsRegistry;
+#[cfg(any(
+    feature = "transport-unicast",
+    all(feature = "transport-multicast", feature = "transport-stats")
+))]
+use wz_session_core::stats_registry::StatsTransportId;
 use wz_session_core::WhatAmI;
 
+#[cfg(feature = "transport-unicast")]
 use crate::session_glue::SessionLinkActions;
 
 /// A cheap, cloneable handle on one node's stats registry. The code that
@@ -51,10 +69,11 @@ pub struct NodeStats {
 impl std::fmt::Debug for NodeStats {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         self.with(|inner| {
-            f.debug_struct("NodeStats")
-                .field("registry", &inner.registry)
-                .field("open", &inner.open.keys().collect::<Vec<_>>())
-                .finish()
+            let mut debug = f.debug_struct("NodeStats");
+            debug.field("registry", &inner.registry);
+            #[cfg(feature = "transport-unicast")]
+            debug.field("open", &inner.open.keys().collect::<Vec<_>>());
+            debug.finish()
         })
     }
 }
@@ -65,11 +84,17 @@ struct Inner {
     /// The open transports, by the recorder's own key. The session's actions
     /// are kept because its counters live in its own partition: they are read
     /// at every snapshot and once more when the transport closes.
+    #[cfg(feature = "transport-unicast")]
     open: BTreeMap<u64, (StatsTransportId, Arc<SessionLinkActions>)>,
     /// R2849 — the open MULTICAST transports, by the recorder's own key: one
     /// per group face, each with the peers the registry holds for it.
     #[cfg(all(feature = "transport-multicast", feature = "transport-stats"))]
     groups: BTreeMap<u64, OpenGroup>,
+    /// R2852 — the key the next group face is opened under. A group face has
+    /// no id of its own to key by (a unicast face has its `FaceId`), and a face
+    /// that re-joins opens a NEW transport, so the registry hands the key out.
+    #[cfg(all(feature = "transport-multicast", feature = "transport-stats"))]
+    next_group: u64,
 }
 
 /// R2849 — one group face as the registry holds it: the group's transport,
@@ -140,9 +165,12 @@ impl NodeStats {
             inner: Arc::new(Mutex::new(Inner {
                 registry: StatsRegistry::new(zid_hex, whatami, build_version),
                 origin: Instant::now(),
+                #[cfg(feature = "transport-unicast")]
                 open: BTreeMap::new(),
                 #[cfg(all(feature = "transport-multicast", feature = "transport-stats"))]
                 groups: BTreeMap::new(),
+                #[cfg(all(feature = "transport-multicast", feature = "transport-stats"))]
+                next_group: 0,
             })),
         }
     }
@@ -177,6 +205,7 @@ impl NodeStats {
     /// The session behind `actions` was established as this node's transport
     /// `key`: register it. A session whose handshake named no peer has no
     /// transport to register, and is not tracked.
+    #[cfg(feature = "transport-unicast")]
     pub fn transport_opened(&self, key: u64, actions: &Arc<SessionLinkActions>) {
         self.with(|inner| {
             if let Some(transport) = actions.open_stats_transport(&mut inner.registry) {
@@ -188,12 +217,14 @@ impl NodeStats {
     /// Transport `key` closed: close its links, take its final counts, and
     /// mark it disconnected. A later [`Self::snapshot`] retires it once the
     /// collection delay has passed.
+    #[cfg(feature = "transport-unicast")]
     pub fn transport_closed(&self, key: u64) {
         let now_ms = self.with(|inner| inner.now_ms());
         self.transport_closed_at(key, now_ms);
     }
 
     /// [`Self::transport_closed`] at `now_ms` on this handle's clock.
+    #[cfg(feature = "transport-unicast")]
     fn transport_closed_at(&self, key: u64, now_ms: u64) {
         self.with(|inner| {
             if let Some((transport, actions)) = inner.open.remove(&key) {
@@ -226,7 +257,7 @@ impl NodeStats {
     /// [`Self::snapshot`] at `now_ms` on this handle's clock.
     fn snapshot_at(&self, now_ms: u64) -> StatsRegistry {
         self.with(|inner| {
-            #[cfg(feature = "transport-stats")]
+            #[cfg(all(feature = "transport-unicast", feature = "transport-stats"))]
             for (transport, actions) in inner.open.values() {
                 inner
                     .registry
@@ -240,25 +271,22 @@ impl NodeStats {
         })
     }
 
-    /// R2849 — the group face `key`, recording into `stats`, has joined its
-    /// group: register it as one multicast transport. Its peers are
-    /// registered as the registry sees them, at each snapshot.
+    /// R2849 — a group face, recording into `stats`, has joined its group:
+    /// register it as one multicast transport, and return the key it is held
+    /// under, which [`Self::multicast_closed`] takes. Its peers are registered
+    /// as the registry sees them, at each snapshot.
     ///
     /// Upstream registers a multicast transport when its manager opens one on
     /// a group locator
     /// (`io/zenoh-transport/src/multicast/transport.rs` @ `.multicast_transport_stats(config.link.link.get_dst().to_string());`),
-    /// which is the moment a face's drive loop starts here. A key already open
-    /// is left as it is.
+    /// which is the moment a face's drive loop starts here. R2852 — the key is
+    /// the registry's own, so two faces cannot collide on one, and a re-join is
+    /// a new transport, as a deleted and re-created upstream transport is.
     #[cfg(all(feature = "transport-multicast", feature = "transport-stats"))]
-    pub fn multicast_opened(
-        &self,
-        key: u64,
-        stats: &crate::multicast_glue::MulticastTransportStats,
-    ) {
+    pub fn multicast_opened(&self, stats: &crate::multicast_glue::MulticastTransportStats) -> u64 {
         self.with(|inner| {
-            if inner.groups.contains_key(&key) {
-                return;
-            }
+            let key = inner.next_group;
+            inner.next_group += 1;
             let group = stats.metrics().group().to_string();
             let transport = inner.registry.open_multicast_transport(&group);
             inner.groups.insert(
@@ -269,7 +297,8 @@ impl NodeStats {
                     peers: BTreeMap::new(),
                 },
             );
-        });
+            key
+        })
     }
 
     /// R2849 — group face `key` stopped: take its final counts, then close its
@@ -310,7 +339,7 @@ impl NodeStats {
     }
 }
 
-#[cfg(all(test, feature = "transport-stats"))]
+#[cfg(all(test, feature = "transport-unicast", feature = "transport-stats"))]
 mod tests {
     use super::*;
     use crate::test_fixtures::recording_actions;
@@ -412,7 +441,7 @@ mod tests {
 
         let stats = NodeStats::new("a1b2", WhatAmI::Router, "v1");
         let face = MulticastTransportStats::new("udp/10.0.0.1:7446", "udp/224.0.0.224:7446");
-        stats.multicast_opened(5, &face);
+        let key = stats.multicast_opened(&face);
         face.datagram_received(30);
         let peer = MulticastPeerId::from_wire(&[0xaa]);
         face.peer_arrived(&MulticastPeerArrived {
@@ -463,7 +492,7 @@ mod tests {
         assert!(!peer_bytes(&left, "false"), "and listed once:\n{left}");
         assert_eq!(opened(&left), "0", "{left}");
 
-        stats.multicast_closed_at(5, 20);
+        stats.multicast_closed_at(key, 20);
         let closed = document(&stats.snapshot_at(20), all);
         assert_eq!(opened(&closed), "-1", "{closed}");
         assert_eq!(

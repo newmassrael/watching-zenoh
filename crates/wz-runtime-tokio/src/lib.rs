@@ -1909,8 +1909,9 @@ pub mod accept_loop;
 
 /// R2844 — the stats registry of a node, recorded by whatever drives its
 /// sessions (the face loop, the storage host) where a transport opens and
-/// closes. Gated as the session actions it records from are.
-#[cfg(feature = "transport-unicast")]
+/// closes. Built for a node with either transport plane (R2852); its unicast
+/// half is gated as the session actions it records from are.
+#[cfg(any(feature = "transport-unicast", feature = "transport-multicast"))]
 pub mod node_stats;
 
 /// R311qc — the data-plane forwarding atom: the [`routing_forward::RoutingForwarder`]
@@ -2970,6 +2971,24 @@ impl UdpDriver {
             .as_ref()
             .ok_or_else(|| io::Error::new(io::ErrorKind::NotConnected, "no socket"))?
             .local_addr()
+    }
+
+    /// R2852 — the address this driver's datagrams LEAVE from: the send socket's
+    /// when it has one (`Self::bind_multicast_link`, `transport-multicast`-gated
+    /// and so a code span here), the one socket's
+    /// otherwise. For a multicast link this is its source locator, the one
+    /// upstream labels the link with
+    /// (`io/zenoh-links/zenoh-link-udp/src/multicast.rs` @ `unicast_locator: socket_addr_to_udp_locator(&unicast_addr),`),
+    /// where [`Self::local_addr`] is the joined socket's wildcard.
+    pub fn source_addr(&self) -> io::Result<SocketAddr> {
+        self.sending_socket()?.local_addr()
+    }
+
+    /// R2852 — the address [`LinkDriver::send`] writes to: for a multicast
+    /// driver, the group and its port. `None` for a driver with no link peer
+    /// (`Self::bind_reply_unicast`).
+    pub fn peer_addr(&self) -> Option<SocketAddr> {
+        self.peer
     }
 
     /// R2611 — the egress interface the KERNEL holds for this socket, read back

@@ -4201,7 +4201,11 @@ mod tests {
     /// out and still listed as disconnected. Each snapshot is taken inside the
     /// loop's own FaceUp / FaceDown event, so it reads the registry exactly as
     /// the loop left it at that step.
-    #[cfg(feature = "transport-stats")]
+    ///
+    /// R2852 — gated on `routing-peer` too: the node under test is a
+    /// `peer_loop`, which a `routing-accept` + `transport-stats` build without
+    /// it does not have, and that build's test target did not compile.
+    #[cfg(all(feature = "transport-stats", feature = "routing-peer"))]
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn the_face_loop_records_each_face_into_the_node_registry() {
         use crate::node_stats::NodeStats;

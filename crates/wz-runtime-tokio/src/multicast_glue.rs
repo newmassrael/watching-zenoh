@@ -285,6 +285,23 @@ impl MulticastTransportStats {
         }
     }
 
+    /// R2852 — the counts of the transport a group face runs on `link`,
+    /// labelled as upstream labels its multicast transport and link: the
+    /// transport by the link's destination, the group
+    /// (`io/zenoh-transport/src/multicast/transport.rs` @ `.multicast_transport_stats(config.link.link.get_dst().to_string());`),
+    /// and the link by its source, the address its datagrams leave from
+    /// ([`UdpDriver::source_addr`](crate::UdpDriver::source_addr)).
+    ///
+    /// Refuses a driver with no group to send to: it is not a multicast link.
+    #[cfg(feature = "transport-link-udp")]
+    pub fn for_link(link: &crate::UdpDriver) -> std::io::Result<Self> {
+        let group = link.peer_addr().ok_or_else(|| {
+            std::io::Error::new(std::io::ErrorKind::NotConnected, "no group to send to")
+        })?;
+        let src = link.source_addr()?;
+        Ok(Self::new(&format!("udp/{src}"), &format!("udp/{group}")))
+    }
+
     fn with<T>(&self, f: impl FnOnce(&mut MulticastTransportStatsInner) -> T) -> T {
         // A poisoned lock means a panic mid-record; the counts are still the
         // best this transport has, so they are kept rather than lost.
@@ -1055,12 +1072,16 @@ where
 ///
 /// R2584 — `group` is either family. It was `Ipv4Addr`, which kept an IPv6
 /// `--multicast-locator` from reaching the socket at all.
+///
+/// R2852 — `node_stats` is the node's registry, when it keeps one: the face is
+/// a multicast transport in it, as every group face is (see `spawn_group_face`).
 pub fn spawn_router_mcast_egress(
     group: impl Into<core::net::IpAddr>,
     port: u16,
     zid: Vec<u8>,
     qos: bool,
     opts: crate::McastGroupOptions,
+    node_stats: Option<crate::node_stats::NodeStats>,
 ) -> (UnboundedSender<MulticastTxItem>, McastFaceStop) {
     // Converted before the spawn: the task needs an owned `Copy` address.
     let group: core::net::IpAddr = group.into();
@@ -1081,6 +1102,7 @@ pub fn spawn_router_mcast_egress(
         "router multicast egress",
         router_group_params(zid, qos),
         opts,
+        node_stats,
         move |opts| {
             Box::pin(crate::UdpDriver::bind_multicast_tx(
                 group,
@@ -1156,6 +1178,15 @@ type GroupBind<'a> = core::pin::Pin<
 /// transport before its reopen task re-enters `_z_open`, for the same reason:
 /// the peer table describes members reached over the link that just died).
 ///
+/// `node_stats` is the node's registry, when it keeps one (R2852): each join
+/// opens ONE multicast transport in it, labelled by the bound link
+/// (`MulticastTransportStats::for_link`), the loop records into it, and the
+/// transport is closed when that join's loop ends. A re-join is a new
+/// transport, because upstream deletes a multicast transport whose link fails
+/// and a reconnect creates another. Every group face is spawned here, so this
+/// is the one place a face's traffic can reach the registry — and the one
+/// place it can fail to.
+///
 /// Returns the stop handle. The task yields `None` when the FIRST bind fails —
 /// no loop ran, so no departure was announced and a host must not report one —
 /// and the loop's outcome otherwise.
@@ -1166,6 +1197,7 @@ fn spawn_group_face<B, F, G, H>(
     label: &'static str,
     params: wz_session_core::multicast_params::MulticastParams,
     opts: crate::McastGroupOptions,
+    node_stats: Option<crate::node_stats::NodeStats>,
     bind: B,
     mut on_event: F,
     mut outbound: UnboundedReceiver<MulticastTxItem>,
@@ -1205,6 +1237,7 @@ where
         loop {
             let mut dispatcher =
                 MulticastDispatcher::<MCAST_MAX_PEERS>::new(MulticastConfig::new(params.lease_ms));
+            let recorder = GroupFaceRecorder::open(node_stats.as_ref(), &driver, label);
             let outcome = drive_multicast_session_with_membership(
                 &mut dispatcher,
                 MulticastDriveConfig {
@@ -1221,11 +1254,12 @@ where
                 &mut on_members,
                 &mut on_group_subs,
                 Some(&mut shutdown),
-                // The node registry takes a face's counts once a host opens the
-                // face in it; until then this records nothing.
-                &(),
+                recorder.recorder(),
             )
             .await;
+            // This join's transport ends with its loop, before any re-join opens
+            // the next one.
+            recorder.close();
             let Some(delay) = rejoin.wait_for(&outcome) else {
                 return Some(outcome);
             };
@@ -1247,6 +1281,113 @@ where
         }
     });
     McastFaceStop { signal, task }
+}
+
+/// R2852 — one join's multicast transport in the node registry: opened when the
+/// join's loop starts, closed when it ends.
+///
+/// Closed on DROP rather than only by [`Self::close`], so a face task that is
+/// cancelled mid-loop (its stop handle aborting it, or the runtime shutting
+/// down) still marks its transport disconnected. Otherwise the registry would
+/// report a group this node has left as open for the rest of its life.
+#[cfg(all(
+    feature = "transport-multicast",
+    feature = "transport-link-udp",
+    feature = "transport-stats"
+))]
+struct GroupFaceRecorder {
+    stats: Option<MulticastTransportStats>,
+    registration: Option<(crate::node_stats::NodeStats, u64)>,
+}
+
+#[cfg(all(
+    feature = "transport-multicast",
+    feature = "transport-link-udp",
+    feature = "transport-stats"
+))]
+impl GroupFaceRecorder {
+    /// Open this join's transport in `node_stats`, labelled by `link`. A node
+    /// without a registry records nothing; a link whose addresses cannot be
+    /// read is not registered, and says so, rather than being counted under a
+    /// label that names no link.
+    fn open(
+        node_stats: Option<&crate::node_stats::NodeStats>,
+        link: &crate::UdpDriver,
+        label: &'static str,
+    ) -> Self {
+        let Some(node_stats) = node_stats else {
+            return Self {
+                stats: None,
+                registration: None,
+            };
+        };
+        match MulticastTransportStats::for_link(link) {
+            Ok(stats) => {
+                let key = node_stats.multicast_opened(&stats);
+                Self {
+                    stats: Some(stats),
+                    registration: Some((node_stats.clone(), key)),
+                }
+            }
+            Err(e) => {
+                log::warn!("{label}: group link has no locators ({e}); its traffic is not counted");
+                Self {
+                    stats: None,
+                    registration: None,
+                }
+            }
+        }
+    }
+
+    /// What the drive loop records into.
+    fn recorder(&self) -> &Option<MulticastTransportStats> {
+        &self.stats
+    }
+
+    /// Close this join's transport now.
+    fn close(self) {}
+}
+
+#[cfg(all(
+    feature = "transport-multicast",
+    feature = "transport-link-udp",
+    feature = "transport-stats"
+))]
+impl Drop for GroupFaceRecorder {
+    fn drop(&mut self) {
+        if let Some((node_stats, key)) = self.registration.take() {
+            node_stats.multicast_closed(key);
+        }
+    }
+}
+
+/// R2852 — without `transport-stats` a face has no counters to register.
+#[cfg(all(
+    feature = "transport-multicast",
+    feature = "transport-link-udp",
+    not(feature = "transport-stats")
+))]
+struct GroupFaceRecorder;
+
+#[cfg(all(
+    feature = "transport-multicast",
+    feature = "transport-link-udp",
+    not(feature = "transport-stats")
+))]
+impl GroupFaceRecorder {
+    fn open(
+        _node_stats: Option<&crate::node_stats::NodeStats>,
+        _link: &crate::UdpDriver,
+        _label: &'static str,
+    ) -> Self {
+        GroupFaceRecorder
+    }
+
+    fn recorder(&self) -> &() {
+        &()
+    }
+
+    fn close(self) {}
 }
 
 /// R2376 (open-debt item 15, `session-reconnect`) — the group face's REJOIN
@@ -1453,6 +1594,10 @@ pub struct RouterMcastGroup {
 /// every member's traffic, which is where a group face spends its time, and
 /// sends only what the router forwards
 /// (`io/zenoh-transport/src/multicast/link.rs` @ `ZRuntime::RX.spawn(async move {`).
+///
+/// R2852 — `node_stats` is the node's registry, when it keeps one: the face is
+/// ONE multicast transport in it per join, with a partition per member, which
+/// is what a zenoh router's registry holds for its group.
 #[cfg(all(
     feature = "transport-multicast",
     feature = "transport-link-udp",
@@ -1465,6 +1610,7 @@ pub fn spawn_router_mcast_group(
     zid: Vec<u8>,
     qos: bool,
     opts: crate::McastGroupOptions,
+    node_stats: Option<crate::node_stats::NodeStats>,
 ) -> RouterMcastGroup {
     use wz_session_core::driver_loop::DriverLoopOutcome;
     use wz_session_core::network_message::NetworkMessage;
@@ -1481,6 +1627,7 @@ pub fn spawn_router_mcast_group(
         "router multicast group",
         router_group_params(zid, qos),
         opts,
+        node_stats,
         move |opts| {
             Box::pin(crate::UdpDriver::bind_multicast_link(
                 group,

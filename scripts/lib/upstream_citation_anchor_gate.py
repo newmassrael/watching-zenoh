@@ -563,7 +563,13 @@ ROOTLESS_STALE_LINE_BUDGET = 1
 # discriminants by a root-less line range; the constant went when the locator
 # learned to parse `rel` as upstream does, and its replacement cites
 # `impl FromStr for Reliability {` with its root.
-ROOTLESS_UNDECLARED_BUDGET = 651
+# 651 -> 649 (R2850, paid by R2852): R2850 deleted the router's separate
+# ingress face and rewrote the egress face's docs, and root-less line
+# citations went with that text (among them the udp multicast link's
+# `multicast.rs:316-347` range and the multicast establishment's
+# `establishment.rs:54`). Its commit did not lower this budget; the next
+# round measured 649 at that commit's tip, before touching any of these files.
+ROOTLESS_UNDECLARED_BUDGET = 649
 #: EVERY root-less occurrence, graded or not: `rootless_line + rootless_bare +
 #: residue`. One ratchet over the union of the three above, and it exists
 #: because those three CANNOT express the invariant that matters.
@@ -629,7 +635,9 @@ ROOTLESS_UNDECLARED_BUDGET = 651
 # with the doc that carried it.
 # 780 -> 779 (R2810): the same single occurrence as the budget above, retired
 # with the constant whose doc carried it.
-ROOTLESS_TOTAL_BUDGET = 779
+# 779 -> 777 (R2850, paid by R2852): the same two occurrences as the budget
+# above, retired with the text R2850 deleted.
+ROOTLESS_TOTAL_BUDGET = 777
 
 #: A LIVE invocation of the RESOLUTION arm. R2242 split this gate in two and,
 #: in doing so, made `--resolve` a flag someone can simply stop passing: delete

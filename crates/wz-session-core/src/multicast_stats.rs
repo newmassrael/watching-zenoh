@@ -81,3 +81,56 @@ pub trait MulticastStatsRecorder {
 
 /// Records nothing.
 impl MulticastStatsRecorder for () {}
+
+/// R2852 — records into the inner recorder when there is one, and nothing
+/// otherwise: what a host passes when whether a transport is counted is decided
+/// at run time (a node registry it may or may not hold) rather than by type.
+impl<R: MulticastStatsRecorder> MulticastStatsRecorder for Option<R> {
+    fn datagram_sent(&self, bytes: usize, transport_messages: u64) {
+        if let Some(inner) = self {
+            inner.datagram_sent(bytes, transport_messages);
+        }
+    }
+
+    fn datagram_received(&self, bytes: usize) {
+        if let Some(inner) = self {
+            inner.datagram_received(bytes);
+        }
+    }
+
+    fn transport_message_received(&self) {
+        if let Some(inner) = self {
+            inner.transport_message_received();
+        }
+    }
+
+    #[cfg(any(
+        feature = "codec-push",
+        feature = "codec-response",
+        feature = "codec-response-final",
+        feature = "liveliness-token"
+    ))]
+    fn network_message_sent(&self, item: &crate::multicast_tx::MulticastTxItem) {
+        if let Some(inner) = self {
+            inner.network_message_sent(item);
+        }
+    }
+
+    fn network_message_received(&self, zid: &[u8], msg: &NetworkMessage) {
+        if let Some(inner) = self {
+            inner.network_message_received(zid, msg);
+        }
+    }
+
+    fn peer_arrived(&self, arrived: &MulticastPeerArrived) {
+        if let Some(inner) = self {
+            inner.peer_arrived(arrived);
+        }
+    }
+
+    fn peer_lost(&self, lost: &MulticastPeerLost) {
+        if let Some(inner) = self {
+            inner.peer_lost(lost);
+        }
+    }
+}

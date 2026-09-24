@@ -6455,6 +6455,15 @@ async fn run_router_hat_until(
             },
         }
     };
+    // R2844 — the node's stats registry, as on the peer host: the face loop
+    // records every face into it and the metrics leg serves a snapshot of it.
+    // R2852 — made here, before the group face, because the group face is one
+    // of the node's transports too and records into the same registry.
+    let node_stats = wz::runtime_tokio::node_stats::NodeStats::for_node(
+        &wz::runtime_tokio::zid_hex::zid_to_zenoh_hex(&params.zid),
+        params.whatami,
+        env!("CARGO_PKG_VERSION"),
+    );
     // R2333 (open-debt item 15, `transport-multicast`) — the group faces' stop
     // handles, held here for the whole run and driven at teardown. The library
     // has had a graceful multicast stop since R311y772 and its wire half (the
@@ -6486,6 +6495,7 @@ async fn run_router_hat_until(
             params.zid.clone(),
             multicast_qos,
             mcast_opts.clone(),
+            node_stats.clone(),
         );
         forwarder.attach_mcast_group(face.outbound);
         mcast_stops.push(("group", face.stop));
@@ -6616,13 +6626,6 @@ async fn run_router_hat_until(
     // deferral the code beneath it has already closed reads as the current
     // contract, which is how this atom's reason kept re-counting residuals.
     //
-    // R2844 — the node's stats registry, as on the peer host: the face loop
-    // records every face into it and the metrics leg serves a snapshot of it.
-    let node_stats = wz::runtime_tokio::node_stats::NodeStats::for_node(
-        &wz::runtime_tokio::zid_hex::zid_to_zenoh_hex(&params.zid),
-        params.whatami,
-        env!("CARGO_PKG_VERSION"),
-    );
     #[cfg(feature = "adminspace-router-linkstate")]
     {
         use wz::runtime_tokio::adminspace::{
