@@ -35,7 +35,7 @@ use wz_codecs::ext_zbuf::ExtZbufOwned;
 /// R311y769 renamed the concept from "PUSH body (Put / Del)" to PUT
 /// specifically, because the two arms do NOT share an id — see
 /// [`ATTACHMENT_EXT_ID_DEL`].
-pub const ATTACHMENT_EXT_ID_PUSH: u8 = 0x03;
+pub const ATTACHMENT_EXT_ID_PUSH: u8 = crate::ext_header::body_ext_id::PUT_ATTACHMENT;
 
 /// Attachment ext id inside a DEL push body — `0x02`, NOT the Put's `0x03`.
 ///
@@ -69,11 +69,11 @@ pub const ATTACHMENT_EXT_ID_PUSH: u8 = 0x03;
 /// accepted side of the trade above rather than a regression to repair, and
 /// pico cannot send the reciprocal message either — `has_attachment` is
 /// `pshb->_is_put && ..` (`src/protocol/codec/message.c:263`).
-pub const ATTACHMENT_EXT_ID_DEL: u8 = 0x02;
+pub const ATTACHMENT_EXT_ID_DEL: u8 = crate::ext_header::body_ext_id::DEL_ATTACHMENT;
 
 /// Attachment ext id inside a Query — zenoh-pico `_z_query_encode_ext`
 /// emits `0x05` at message.c 446-448.
-pub const ATTACHMENT_EXT_ID_QUERY: u8 = 0x05;
+pub const ATTACHMENT_EXT_ID_QUERY: u8 = crate::ext_header::body_ext_id::QUERY_ATTACHMENT;
 
 /// ENC_ZBUF marker packed into the ext header high bits: the 2-bit
 /// encoding field (`0b10`) shifted into bits 5..6 (`0b10 << 5 = 0x40`).

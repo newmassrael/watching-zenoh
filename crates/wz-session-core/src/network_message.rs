@@ -671,6 +671,34 @@ where
     }
 }
 
+/// R2825 — a received message's OWN priority band, read off its `ext_qos`:
+/// the `priority` label the stats registry files it under
+/// (`zenoh/src/net/routing/dispatcher/stats.rs` @ `fn priority(&self) -> Priority;`).
+///
+/// It is the band the message CARRIES, not the one the frame that brought it
+/// was on — upstream reads the message, and a non-QoS session carries every
+/// band in DEFAULT frames. Absent `ext_qos` is `Priority::DEFAULT`, as
+/// upstream's decoder leaves it. An undecoded body has no extension to read.
+#[cfg(feature = "transport-stats")]
+pub fn network_message_priority(msg: &NetworkMessage) -> crate::qos::Priority {
+    use crate::declare_ext_qos as qos;
+    match msg {
+        #[cfg(feature = "codec-push")]
+        NetworkMessage::Push(p) => qos::read_push_qos(p).priority(),
+        #[cfg(feature = "codec-request")]
+        NetworkMessage::Request(r) => qos::read_request_qos(r).priority(),
+        #[cfg(feature = "codec-response")]
+        NetworkMessage::Response(r) => qos::read_response_qos(r).priority(),
+        #[cfg(feature = "codec-response-final")]
+        NetworkMessage::ResponseFinal(f) => qos::read_response_final_qos(f).priority(),
+        #[cfg(feature = "codec-declare")]
+        NetworkMessage::Declare(d) => qos::read_declare_qos(d).priority(),
+        NetworkMessage::Oam(o) => qos::read_oam_qos(o).priority(),
+        NetworkMessage::Interest(i) => qos::read_interest_qos(i).priority(),
+        NetworkMessage::Unknown { .. } => crate::qos::Priority::DEFAULT,
+    }
+}
+
 /// The SPACE of a Wireexpr, resolving an alias through the caller's id space.
 /// See [`stats_class`]'s note on `resolve_alias`.
 #[cfg(all(
@@ -729,6 +757,61 @@ fn stats_data_class(
     class
 }
 
+/// The value length of the first ZBUF extension `id` in `extensions`, or `0`.
+#[cfg(all(
+    feature = "transport-stats",
+    any(
+        feature = "codec-push",
+        feature = "codec-request",
+        feature = "codec-response"
+    )
+))]
+fn zbuf_ext_len(extensions: Option<&[wz_codecs::ext_entry::ExtEntryOwned]>, id: u8) -> usize {
+    use wz_codecs::ext_entry::ExtEntryOwnedVariant as E;
+    extensions
+        .unwrap_or_default()
+        .iter()
+        .find(|ext| ext.ext_id() == id)
+        .and_then(|ext| match &ext.body {
+            E::CodecZenohExtZbuf(z) => Some(z.value.len()),
+            _ => None,
+        })
+        .unwrap_or(0)
+}
+
+/// R2825 (open-debt item 820) — a data body's payload SIZE as upstream counts
+/// it: the payload plus the ATTACHMENT, per carrier
+/// (`commons/zenoh-protocol/src/network/push.rs` @ `PushBody::Del(d) => d.ext_attachment.as_ref().map_or(0, |a| a.buffer.len()),`).
+/// A `Put` is its payload and its attachment, a `Del` its attachment alone.
+/// Before R2825 the attachment was left out and a Del counted `0`.
+#[cfg(all(
+    feature = "transport-stats",
+    any(
+        feature = "codec-push",
+        feature = "codec-request",
+        feature = "codec-response"
+    )
+))]
+fn put_payload_size(
+    payload_len: u64,
+    extensions: Option<&[wz_codecs::ext_entry::ExtEntryOwned]>,
+) -> usize {
+    payload_len as usize + zbuf_ext_len(extensions, crate::ext_header::body_ext_id::PUT_ATTACHMENT)
+}
+
+/// See [`put_payload_size`].
+#[cfg(all(
+    feature = "transport-stats",
+    any(
+        feature = "codec-push",
+        feature = "codec-request",
+        feature = "codec-response"
+    )
+))]
+fn del_payload_size(extensions: Option<&[wz_codecs::ext_entry::ExtEntryOwned]>) -> usize {
+    zbuf_ext_len(extensions, crate::ext_header::body_ext_id::DEL_ATTACHMENT)
+}
+
 /// [`stats_class`] for a `Push` body — the pub-sub data plane. Shared by the TX
 /// chokepoint (which holds the typed body, not the enum) and the RX walk.
 #[cfg(all(feature = "transport-stats", feature = "codec-push"))]
@@ -747,14 +830,14 @@ where
             MessageLabel::Put,
             StatMessage::Put,
             space,
-            b.payload_len as usize,
+            put_payload_size(b.payload_len, b.extensions.as_deref()),
             b.extensions.as_deref(),
         ),
         V::CodecZenohMsgDel(b) => stats_data_class(
             MessageLabel::Del,
             StatMessage::Del,
             space,
-            0,
+            del_payload_size(b.extensions.as_deref()),
             b.extensions.as_deref(),
         ),
     }
@@ -780,24 +863,46 @@ where
             MessageLabel::Query,
             StatMessage::Put,
             space,
-            b.payload_len as usize,
+            put_payload_size(b.payload_len, b.extensions.as_deref()),
             b.extensions.as_deref(),
         ),
         V::CodecZenohMsgDel(b) => stats_data_class(
             MessageLabel::Query,
             StatMessage::Del,
             space,
-            0,
+            del_payload_size(b.extensions.as_deref()),
             b.extensions.as_deref(),
         ),
         V::CodecZenohQuery(b) | V::Default { body: b, .. } => stats_data_class(
             MessageLabel::Query,
             StatMessage::Query,
             space,
-            b.parameters_len.unwrap_or(0) as usize,
+            query_payload_size(b.extensions.as_deref()),
             b.extensions.as_deref(),
         ),
     }
+}
+
+/// R2825 (open-debt item 820) — a Query's payload SIZE as upstream counts it:
+/// the VALUE its body extension carries, without the encoding in front of it,
+/// plus its attachment
+/// (`commons/zenoh-protocol/src/network/request.rs` @ `+ q.ext_attachment.as_ref().map_or(0, |a| a.buffer.len())`).
+/// Before R2825 this counted the selector PARAMETERS, which upstream never
+/// counts: a `get` with parameters and no value reported bytes where upstream
+/// reports none.
+#[cfg(all(feature = "transport-stats", feature = "codec-request"))]
+fn query_payload_size(extensions: Option<&[wz_codecs::ext_entry::ExtEntryOwned]>) -> usize {
+    use wz_codecs::ext_entry::ExtEntryOwnedVariant as E;
+    let value = extensions
+        .unwrap_or_default()
+        .iter()
+        .find(|ext| ext.ext_id() == crate::ext_header::body_ext_id::QUERY_BODY)
+        .and_then(|ext| match &ext.body {
+            E::CodecZenohExtZbuf(z) => crate::encoding::split_value_body(z.value.as_slice()),
+            _ => None,
+        })
+        .map_or(0, |(_, payload)| payload.len());
+    value + zbuf_ext_len(extensions, crate::ext_header::body_ext_id::QUERY_ATTACHMENT)
 }
 
 /// [`stats_class`] for a `Response` body. Reply and Err BOTH fold onto
@@ -818,18 +923,20 @@ where
         V::CodecZenohReply(b) | V::Default { body: b, .. } => {
             use wz_codecs::reply::ReplyOwnedVariant as RV;
             match &b.body {
+                // A reply's body IS a push body upstream, so it is sized as one
+                // (`commons/zenoh-protocol/src/network/response.rs` @ `ReplyBody::Del(d) => d.ext_attachment.as_ref().map_or(0, |a| a.buffer.len()),`).
                 RV::CodecZenohMsgPut(p) | RV::Default { body: p, .. } => stats_data_class(
                     MessageLabel::Reply,
                     StatMessage::Reply,
                     space,
-                    p.payload_len as usize,
+                    put_payload_size(p.payload_len, p.extensions.as_deref()),
                     p.extensions.as_deref(),
                 ),
                 RV::CodecZenohMsgDel(d) => stats_data_class(
                     MessageLabel::Reply,
                     StatMessage::Reply,
                     space,
-                    0,
+                    del_payload_size(d.extensions.as_deref()),
                     d.extensions.as_deref(),
                 ),
             }
@@ -1222,5 +1329,92 @@ mod declare_body_ext_chain_tests {
             "the decode left the extension bytes on the cursor"
         );
         assert_eq!(decoded.encode_to_vec(), wire);
+    }
+}
+
+// ── R2825 (open-debt item 820) — payload SIZE is upstream's `payload_size()`:
+//    the payload plus the attachment, a Del its attachment alone, a Query the
+//    value in its body extension without the encoding, never its parameters. ──
+#[cfg(all(
+    test,
+    feature = "transport-stats",
+    feature = "codec-push",
+    feature = "codec-request"
+))]
+mod payload_size_tests {
+    use super::*;
+    use crate::codec_owned::owned_bytes;
+    use crate::ext_header::body_ext_id;
+    use wz_codecs::ext_entry::{ExtEntryOwned, ExtEntryOwnedVariant};
+    use wz_codecs::ext_zbuf::ExtZbufOwned;
+
+    /// A ZBUF extension `id` carrying `value` — the shape an attachment and a
+    /// query value both have on the wire (`ENC_ZBUF` in the header's high bits).
+    fn zbuf_ext(id: u8, value: &[u8]) -> ExtEntryOwned {
+        ExtEntryOwned {
+            header: 0x40 | id,
+            body: ExtEntryOwnedVariant::CodecZenohExtZbuf(ExtZbufOwned {
+                value_len: value.len() as u64,
+                value: owned_bytes(value).expect("alloc profile"),
+            }),
+        }
+    }
+
+    #[test]
+    fn a_put_counts_its_payload_and_its_attachment() {
+        let exts = alloc::vec![zbuf_ext(body_ext_id::PUT_ATTACHMENT, b"attached")];
+        assert_eq!(put_payload_size(12, Some(&exts)), 12 + 8);
+        assert_eq!(put_payload_size(12, None), 12);
+        // The Del's id on a Put body is not the Put's attachment.
+        let wrong = alloc::vec![zbuf_ext(body_ext_id::DEL_ATTACHMENT, b"attached")];
+        assert_eq!(put_payload_size(12, Some(&wrong)), 12);
+    }
+
+    #[test]
+    fn a_del_counts_its_attachment_alone() {
+        let exts = alloc::vec![zbuf_ext(body_ext_id::DEL_ATTACHMENT, b"four")];
+        assert_eq!(del_payload_size(Some(&exts)), 4);
+        assert_eq!(del_payload_size(None), 0);
+    }
+
+    /// A Query's size is its VALUE's payload — the encoding in front of it is
+    /// not counted — plus its attachment. Parameters are not an extension and
+    /// cannot reach this function at all, which is the point.
+    #[test]
+    fn a_query_counts_its_value_payload_and_attachment_not_its_encoding() {
+        let encoding = crate::encoding::encoding_from_mime("text/plain;utf-8");
+        let mut value = encoding.to_codec().encode_to_vec();
+        let encoding_len = value.len();
+        value.extend_from_slice(b"value!");
+        let exts = alloc::vec![
+            zbuf_ext(body_ext_id::QUERY_BODY, &value),
+            zbuf_ext(body_ext_id::QUERY_ATTACHMENT, b"xyz"),
+        ];
+        assert!(
+            encoding_len > 1,
+            "the encoding really occupies bytes to leave out"
+        );
+        assert_eq!(query_payload_size(Some(&exts)), 6 + 3);
+        assert_eq!(query_payload_size(None), 0);
+    }
+
+    /// The classifier a Push goes through uses these sizes: a literal Put with
+    /// an attachment appended classifies at payload + attachment.
+    #[test]
+    fn the_push_classifier_sizes_with_the_attachment() {
+        use wz_codecs::push::PushOwnedVariant as V;
+        let mut push = crate::push_build::build_push_literal("demo/size", b"twelve bytes")
+            .expect("build a literal put");
+        match &mut push.body {
+            V::CodecZenohMsgPut(b) | V::Default { body: b, .. } => {
+                b.extensions
+                    .get_or_insert_with(Default::default)
+                    .push(zbuf_ext(body_ext_id::PUT_ATTACHMENT, b"attached"));
+            }
+            V::CodecZenohMsgDel(_) => unreachable!("a literal put"),
+        }
+        let class = push_stats_class(&push, |_| None);
+        assert_eq!(class.kind, Some(crate::stats::MessageLabel::Put));
+        assert_eq!(class.payload.map(|p| p.pl_bytes), Some(12 + 8));
     }
 }

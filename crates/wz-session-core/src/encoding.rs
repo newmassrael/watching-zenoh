@@ -165,6 +165,25 @@ pub fn id_for_mime(mime: &str) -> Option<EncodingId> {
     (0..=52).find(|&id| mime_for_id(id) == Some(mime))
 }
 
+/// Split a VALUE body — `encoding || payload`, the shape a `Query`'s body
+/// extension carries (upstream's `ValueType`, pico's `_z_value_decode`) — into
+/// its decoded encoding and the payload bytes after it. `None` when the
+/// encoding prefix does not decode.
+///
+/// R2825 — the one place this split is written. A query's payload SIZE is
+/// what the stats classifier counts
+/// (`commons/zenoh-protocol/src/network/request.rs` @ `q.ext_body.as_ref().map_or(0, |b| b.payload.len())`),
+/// and the Query VALUE decoder needs the same split, so both read it here
+/// rather than each re-deriving where the encoding ends.
+pub fn split_value_body(value: &[u8]) -> Option<(EncodingHint, &[u8])> {
+    let mut cursor = sce_forge_runtime::codec::SceCursor::new(value);
+    let encoding = wz_codecs::encoding::Encoding::decode(&mut cursor).ok()?;
+    // The bytes the encoding consumed are what the cursor no longer holds.
+    let consumed = value.len() - cursor.remaining();
+    let hint = EncodingHint::from_codec(&encoding.try_into_owned().ok()?);
+    Some((hint, &value[consumed..]))
+}
+
 /// Parse a MIME string into an [`EncodingHint`] (zenoh `Encoding::from_str`,
 /// `api/encoding.rs:604-628`): a known MIME maps to its predefined id; a
 /// `"mime;schema"` form splits the schema off; an UNKNOWN MIME falls back to the

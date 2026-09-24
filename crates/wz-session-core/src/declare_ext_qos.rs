@@ -231,6 +231,20 @@ pub fn read_request_qos(request: &wz_codecs::request::RequestOwned) -> QosLevel 
     read_qos_chain(request.extensions.as_ref())
 }
 
+/// R2825 — read a `Push`'s `ext_qos`. Absent means `QosLevel::DEFAULT`, as
+/// upstream's decoder leaves the field. Read by the stats registry, whose
+/// `priority` label is the message's own band
+/// (`zenoh/src/net/routing/dispatcher/stats.rs` @ `self.ext_qos.get_priority()`).
+#[cfg(feature = "codec-push")]
+pub fn read_push_qos(push: &wz_codecs::push::PushOwned) -> QosLevel {
+    read_qos_chain(push.extensions.as_ref())
+}
+
+/// R2825 — read an `OAM`'s `ext_qos`. Absent means `QosLevel::DEFAULT`.
+pub fn read_oam_qos(oam: &wz_codecs::oam::OamOwned) -> QosLevel {
+    read_qos_chain(oam.extensions.as_ref())
+}
+
 /// R2594 — read a `Response`'s `ext_qos`. Absent means `QosLevel::DEFAULT`.
 ///
 /// The dispatch reads the band and the express bit off the Response itself

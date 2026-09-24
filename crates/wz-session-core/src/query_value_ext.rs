@@ -36,8 +36,7 @@ use alloc::vec::Vec;
 
 use crate::codec_owned::owned_bytes;
 use crate::sample::EncodingHint;
-use sce_forge_runtime::codec::{CodecError, SceCursor};
-use wz_codecs::encoding::Encoding;
+use sce_forge_runtime::codec::CodecError;
 use wz_codecs::ext_entry::{ExtEntryOwned, ExtEntryOwnedVariant};
 use wz_codecs::ext_zbuf::ExtZbufOwned;
 
@@ -46,7 +45,7 @@ use wz_codecs::ext_zbuf::ExtZbufOwned;
 /// `message.c:461`. Distinct from the sibling Query body exts source_info
 /// (`0x01`, [`crate::source_info_ext::SOURCE_INFO_EXT_ID`]) and attachment
 /// (`0x05`, [`crate::attachment::ATTACHMENT_EXT_ID_QUERY`]).
-pub const QUERY_VALUE_EXT_ID: u8 = 0x03;
+pub const QUERY_VALUE_EXT_ID: u8 = crate::ext_header::body_ext_id::QUERY_BODY;
 
 /// ENC_ZBUF marker packed into the ext header high bits (`0b10 << 5 = 0x40`).
 /// The value ext never sets the mandatory bit (`0x10`) — a peer that does not
@@ -99,16 +98,11 @@ pub fn decode_query_value_ext(extensions: &[ExtEntryOwned]) -> Option<(EncodingH
     for ext in extensions {
         if ext.ext_id() == QUERY_VALUE_EXT_ID {
             if let ExtEntryOwnedVariant::CodecZenohExtZbuf(z) = &ext.body {
-                let slice = z.value.as_slice();
-                let mut cursor = SceCursor::new(slice);
-                let enc = Encoding::decode(&mut cursor).ok()?;
-                // Bytes the encoding consumed = slice.len() - what is left; the
-                // remainder is the payload (pico takes `_z_zbuf_len(zbf)` after
-                // `_z_encoding_decode`).
-                let consumed = slice.len() - cursor.remaining();
-                let payload = &slice[consumed..];
-                let hint = EncodingHint::from_codec(&enc.try_into_owned().ok()?);
-                return Some((hint, payload));
+                // The remainder after the encoding is the payload (pico takes
+                // `_z_zbuf_len(zbf)` after `_z_encoding_decode`); the split is
+                // `crate::encoding::split_value_body`'s, shared with the stats
+                // classifier that sizes the same payload.
+                return crate::encoding::split_value_body(z.value.as_slice());
             }
         }
     }

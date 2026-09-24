@@ -218,4 +218,22 @@ pub mod body_ext_id {
     /// Put `{sinfo 0x1, shm 0x2, attachment 0x3}`, Del `{sinfo 0x1,
     /// attachment 0x2}`, Query `{sinfo 0x1, body 0x3, attachment 0x5}`.
     pub const QUERY_BODY: u8 = 0x03;
+
+    /// R2825 — the three ATTACHMENT ids, one per carrier, moved here from
+    /// `crate::attachment` (which names them from this table). They were gated
+    /// on `attachment-bytes`, the feature that lets an application SEND an
+    /// attachment; the stats classifier must SIZE one in every build, because
+    /// upstream's payload size includes it
+    /// (`commons/zenoh-protocol/src/network/push.rs` @ `p.payload.len() + p.ext_attachment.as_ref().map_or(0, |a| a.buffer.len())`).
+    /// That is this module's rule — recognising an id is not the capability
+    /// it names.
+    ///
+    /// A `Put` body's attachment: `zextzbuf!(0x3, false)`, the same number as
+    /// [`QUERY_BODY`] on another carrier.
+    pub const PUT_ATTACHMENT: u8 = 0x03;
+    /// A `Del` body's attachment: `0x2`, NOT the Put's `0x3` — the reason is
+    /// written on `crate::attachment::ATTACHMENT_EXT_ID_DEL`.
+    pub const DEL_ATTACHMENT: u8 = 0x02;
+    /// A `Query` body's attachment: `0x5`.
+    pub const QUERY_ATTACHMENT: u8 = 0x05;
 }

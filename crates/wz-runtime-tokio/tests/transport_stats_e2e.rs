@@ -203,6 +203,108 @@ async fn a_publish_moves_the_network_and_payload_counters() {
     }
 }
 
+/// R2825 — the same publish, read through the STATS REGISTRY: the partition a
+/// real session recorded, handed to a node registry and written as the metrics
+/// document a zenoh node built with `stats` serves.
+///
+/// What it pins is that the three seams record under upstream's labels on the
+/// link that carried the traffic: the network message under `priority="data"`
+/// and `message="put"` on the `tcp` link, the payload histogram with the
+/// payload's own twelve bytes, bytes and transport messages on the same link,
+/// and a per-link series whose `dst_locator` is the address the initiator
+/// dialled — so the slot was opened from the driver's own endpoints, not left
+/// empty. The handshake sends no network message, so `1` is exact.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[cfg(feature = "codec-push")]
+async fn a_publish_is_recorded_in_the_registry_on_its_link() {
+    use wz_session_core::stats_registry::{MetricsQuery, StatsRegistry};
+    use wz_session_core::WhatAmI;
+
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind loopback");
+    let addr = listener.local_addr().expect("local_addr");
+
+    let acc_open = async {
+        let (stream, _peer) = listener.accept().await.expect("accept");
+        let mut params = fixture_session_init_params();
+        params.zid = vec![0x02; 4];
+        accept_and_open_session(
+            DialedLink::Tcp(stream),
+            params,
+            TokioTime::new(),
+            Some(ITER_CAP),
+            DEFAULT_OPEN_TICK_MS,
+        )
+        .await
+        .expect("acceptor reaches Established")
+    };
+    let init_open = async {
+        let locator = parse_any_locator(&format!("tcp/{addr}")).expect("parse loopback locator");
+        let mut params = fixture_session_init_params();
+        params.zid = vec![0x01; 4];
+        let cfg = DialConfig::default();
+        connect_and_open_session(
+            locator,
+            params,
+            &cfg,
+            TokioTime::new(),
+            Some(ITER_CAP),
+            DEFAULT_OPEN_TICK_MS,
+        )
+        .await
+        .expect("initiator reaches Established")
+    };
+    let (_opened_acc, opened_init) = tokio::join!(acc_open, init_open);
+
+    opened_init
+        .actions
+        .send_push_literal("demo/example/stats", b"twelve bytes", true)
+        .expect("the publish reaches the transport");
+
+    let mut registry = StatsRegistry::new("01010101", WhatAmI::Peer, "v1");
+    let transport = registry.open_unicast_transport("02020202", WhatAmI::Peer, None);
+    registry.set_transport_metrics(transport, opened_init.stats_metrics());
+    let mut doc = String::new();
+    registry.encode_metrics(&mut doc, MetricsQuery::default());
+
+    let head = r#"local_id="01010101",local_whatami="peer""#;
+    let sent = format!(
+        "zenoh_tx_network_message_total{{{head},priority=\"data\",message=\"put\",shm=\"false\",protocol=\"tcp\"}} 1\n"
+    );
+    assert!(doc.contains(&sent), "the Put on the tcp link:\n{doc}");
+    let payload = format!(
+        "zenoh_tx_network_message_payload_bytes_sum{{{head},space=\"user\",priority=\"data\",message=\"put\",shm=\"false\"}} 12.0\n"
+    );
+    assert!(
+        doc.contains(&payload),
+        "the payload's own twelve bytes:\n{doc}"
+    );
+
+    let counted = |name: &str| -> u64 {
+        let prefix = format!("{name}{{{head},protocol=\"tcp\"}} ");
+        doc.lines()
+            .find_map(|line| line.strip_prefix(prefix.as_str()))
+            .and_then(|value| value.parse().ok())
+            .unwrap_or_else(|| panic!("no `{name}` series on the tcp link:\n{doc}"))
+    };
+    assert!(counted("zenoh_tx_bytes_total") > 0);
+    assert!(counted("zenoh_rx_bytes_total") > 0);
+    assert!(
+        counted("zenoh_tx_transport_message_total") >= 3,
+        "the InitSyn, the OpenSyn and the Frame, at least"
+    );
+    assert!(counted("zenoh_rx_transport_message_total") >= 2);
+
+    let dialled = format!("dst_locator=\"tcp/{addr}\"");
+    assert!(
+        doc.lines()
+            .any(|line| line.starts_with("zenoh_tx_per_link_bytes_total{")
+                && line.contains(&dialled)),
+        "a per-link series names the dialled address, so the slot came from the driver:\n{doc}"
+    );
+}
+
 /// The admin-space Put cell as it stood before the publish — hoisted so the
 /// assertion above reads as a comparison rather than a nested expression.
 #[cfg(feature = "codec-push")]

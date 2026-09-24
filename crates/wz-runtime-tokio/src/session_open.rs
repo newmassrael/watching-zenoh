@@ -4072,6 +4072,15 @@ impl OpenedSession {
         self.actions.stats_report()
     }
 
+    /// R2825 — a copy of this session's stats-registry partition: the
+    /// labelled families a node's metrics document is written from. Delegates
+    /// to
+    /// [`SessionLinkActions::stats_metrics`](wz_session_core::session_actions::SessionLinkActions::stats_metrics).
+    #[cfg(feature = "transport-stats")]
+    pub fn stats_metrics(&self) -> wz_session_core::stats_registry::TransportMetrics {
+        self.actions.stats_metrics()
+    }
+
     /// R2455 — the ONE dismantle: consume this session into its parts, handing
     /// the liveness token back BY NAME.
     ///

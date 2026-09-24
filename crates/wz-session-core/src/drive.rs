@@ -76,8 +76,28 @@ fn count_rx_network_messages<R: SessionRuntime, T: TimeSource>(
     for msg in &messages {
         let class = crate::network_message::stats_class(msg, |_id| None);
         _actions.stats.inc_rx_network(&class);
+        // R2825 — the registry: the payload observed, and the message counted
+        // on the link that received it, under the message's own band.
+        let priority = crate::network_message::network_message_priority(msg);
+        let rx = crate::stats_registry::StatsDirection::Rx;
+        _actions.observe_payload(rx, priority, &class);
+        _actions.count_network_message(rx, &_actions.link, priority, &class);
     }
     messages
+}
+
+/// R2825 — count one received TRANSPORT message, on the JSON counters and on
+/// the receiving link's registry cell: one per message decoded out of a unit,
+/// as upstream's batch walk counts
+/// (`io/zenoh-transport/src/unicast/universal/rx.rs` @ `stats.inc_transport_message(zenoh_stats::Rx, 1);`).
+#[cfg(feature = "transport-stats")]
+fn count_rx_transport_message<R: SessionRuntime, T: TimeSource>(
+    actions: &SessionLinkActions<R, T>,
+) {
+    actions.stats.inc_rx_transport_message();
+    actions.record_on_link(&actions.link, |metrics, slot| {
+        metrics.inc_transport_message(crate::stats_registry::StatsDirection::Rx, slot, 1)
+    });
 }
 
 /// Drive one already-polled `LinkEvent` through the inbound chain so the
@@ -106,7 +126,16 @@ pub fn dispatch_link_event<R: SessionRuntime, T: TimeSource>(
             // rx_bytes parity point. The single inbound chokepoint every link
             // kind funnels through.
             #[cfg(feature = "transport-stats")]
-            actions.stats.inc_rx(rx.bytes.len());
+            {
+                actions.stats.inc_rx(rx.bytes.len());
+                // R2825 — the same bytes on this link's registry cell. The
+                // transport-message count is NOT here: a unit carries as many
+                // as the peer batched, and `dispatch_unit` counts each.
+                let bytes = rx.bytes.len() as u64;
+                actions.record_on_link(&actions.link, |metrics, slot| {
+                    metrics.inc_bytes(crate::stats_registry::StatsDirection::Rx, slot, bytes)
+                });
+            }
             // transport-compression — un-wrap the OUTERMOST wire layer FIRST
             // (zenoh decompresses the batch before any transport-message
             // dispatch). While compression is ACTIVE the datagram is
@@ -195,18 +224,24 @@ fn dispatch_unit<R: SessionRuntime, T: TimeSource>(
         };
         if lean_network {
             return match parse_frame_payload(bytes) {
-                Ok(messages) => DriverLoopOutcome::FramePayload {
-                    reliable: true,
-                    sn: 0,
-                    messages: count_rx_network_messages(actions, messages),
-                    has_ext: false,
-                    extensions: Vec::new(),
-                    // R311y221 — the lowlatency lean wire carries no Frame
-                    // envelope and no ext_qos (zenoh lowlatency tracks no
-                    // SN / no per-priority conduit), so the delivered band
-                    // is DEFAULT.
-                    priority: crate::qos::Priority::DEFAULT,
-                },
+                Ok(messages) => {
+                    // R2825 — a lean datagram is ONE transport message whatever
+                    // it carries, which is how upstream's lowlatency rx counts it.
+                    #[cfg(feature = "transport-stats")]
+                    count_rx_transport_message(actions);
+                    DriverLoopOutcome::FramePayload {
+                        reliable: true,
+                        sn: 0,
+                        messages: count_rx_network_messages(actions, messages),
+                        has_ext: false,
+                        extensions: Vec::new(),
+                        // R311y221 — the lowlatency lean wire carries no Frame
+                        // envelope and no ext_qos (zenoh lowlatency tracks no
+                        // SN / no per-priority conduit), so the delivered band
+                        // is DEFAULT.
+                        priority: crate::qos::Priority::DEFAULT,
+                    }
+                }
                 Err(codec_err) => {
                     engine.process_event(E::FramingError);
                     DriverLoopOutcome::ParseError(InboundParseError::Codec(codec_err))
@@ -223,6 +258,9 @@ fn dispatch_unit<R: SessionRuntime, T: TimeSource>(
     // do with a batch they cannot finish reading.
     let parsed = actions.handle_inbound_consuming(bytes);
     if let Ok((_, consumed)) = &parsed {
+        // R2825 — one transport message decoded off the front of the unit.
+        #[cfg(feature = "transport-stats")]
+        count_rx_transport_message(actions);
         if *consumed > 0 && *consumed < bytes.len() {
             actions.park_pending_batch(&bytes[*consumed..]);
         }

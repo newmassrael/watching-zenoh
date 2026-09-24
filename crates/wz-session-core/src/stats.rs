@@ -684,10 +684,26 @@ impl TransportStats {
         self.tx.inc_wire(bytes);
     }
 
-    /// Count one inbound WIRE read of `bytes` bytes — the RX dispatch.
+    /// Count one inbound WIRE read of `bytes` bytes — the RX dispatch. Bytes
+    /// only: see [`Self::inc_rx_transport_message`].
     #[inline]
     pub fn inc_rx(&self, bytes: usize) {
-        self.rx.inc_wire(bytes);
+        self.rx.bytes.fetch_add(bytes, Ordering::Relaxed);
+    }
+
+    /// Count one inbound TRANSPORT message — one per message decoded out of a
+    /// received unit, not one per read.
+    ///
+    /// R2825. The TX side can count a write as one transport message because
+    /// wz never puts two in one write (the module docs measure it). The RX side
+    /// cannot: a peer batches, and zenoh batches by default, so one read
+    /// carries several. Upstream counts inside its batch walk, one per decoded
+    /// message (`io/zenoh-transport/src/unicast/universal/rx.rs` @ `stats.inc_transport_message(zenoh_stats::Rx, 1);`),
+    /// and before R2825 this counter counted reads, which undercounts every
+    /// batched peer.
+    #[inline]
+    pub fn inc_rx_transport_message(&self) {
+        self.rx.t_msgs.fetch_add(1, Ordering::Relaxed);
     }
 
     /// Count one outbound NETWORK message — the `dispatch_network_message`
@@ -1047,13 +1063,18 @@ mod tests {
 
         s.inc_tx(100);
         s.inc_tx(40);
+        // R2825 — a READ is not a transport message: one unit of 12 bytes
+        // that carried two messages counts its bytes once and its messages
+        // twice, as upstream's batch walk counts them.
         s.inc_rx(12);
+        s.inc_rx_transport_message();
+        s.inc_rx_transport_message();
 
         let r = s.report();
         assert_eq!(r.tx.bytes, 140);
         assert_eq!(r.tx.t_msgs, 2);
         assert_eq!(r.rx.bytes, 12);
-        assert_eq!(r.rx.t_msgs, 1);
+        assert_eq!(r.rx.t_msgs, 2);
         // The network plane is untouched by a wire write: a Frame carrying N
         // network messages counts ONE here and N there.
         assert_eq!(r.tx.n_msgs_total(), 0);

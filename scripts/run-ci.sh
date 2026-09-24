@@ -6634,7 +6634,14 @@ layer_c1ak_cargo_test_transport_stats() {
         || return 1
     _runci_guarded_test C1ak 8 cargo test -p wz-session-core --lib stats_registry:: --quiet \
         || return 1
-    _runci_guarded_test C1ak 2 cargo test -p wz-runtime-tokio --features transport-stats --test transport_stats_e2e --quiet \
+    # R2825 (open-debt item 820) — payload SIZE is upstream's `payload_size()`.
+    # The classifier arms compile only with their codecs, so the features are
+    # named rather than inherited from a default that does not have them.
+    _runci_guarded_test C1ak 4 cargo test -p wz-session-core \
+        --features transport-stats,codec-push,codec-request --lib payload_size_tests --quiet \
+        || return 1
+    # R2825 — 2 -> 3: `a_publish_is_recorded_in_the_registry_on_its_link`.
+    _runci_guarded_test C1ak 3 cargo test -p wz-runtime-tokio --features transport-stats --test transport_stats_e2e --quiet \
         || return 1
     # R311y810 — the OpenMetrics renderer with the counting half OFF. The report
     # type and its rendering are unconditional (only the atomics are gated), and

@@ -513,6 +513,15 @@ pub struct SessionCore<R: SessionRuntime, T: TimeSource> {
     /// [`Self::stats_report`]. Off by default (the adminspace consumer is P4).
     #[cfg(feature = "transport-stats")]
     pub stats: crate::stats::TransportStats,
+    /// R2825 (`transport-stats`) — this session's partition of the node's
+    /// stats registry: the labelled families the metrics document is written
+    /// from. Recorded here, under a per-session lock, at the same seams as
+    /// [`Self::stats`]; the host copies it into its registry when it answers a
+    /// query and once more when the session closes
+    /// ([`crate::stats_registry::StatsRegistry::set_transport_metrics`]), so no
+    /// message ever takes a node-wide lock.
+    #[cfg(feature = "transport-stats")]
+    pub metrics: R::Mutex<crate::stats_registry::TransportMetrics>,
     /// R2678 (`session-close-ingress`) — a take-once request to close THIS
     /// session, raised by an ingress that cannot reach the FSM engine.
     ///
@@ -1342,6 +1351,16 @@ pub struct LinkState<R: SessionRuntime> {
     /// per-link field; changes no accessor signature.
     #[cfg(all(feature = "transport-multilink", feature = "transport-qos"))]
     pub priority_range: R::Mutex<Option<LinkPriorityRange>>,
+    /// R2825 (`transport-stats`) — this link's slot in the stats partition of
+    /// the core that records on it, or `None` when the driver names no
+    /// endpoints (the test doubles, the MCU drivers) and so has no link labels.
+    ///
+    /// Interior-mutable because the core that records can CHANGE: a link that
+    /// joins a multilink aggregate is re-opened in the PRIMARY's partition and
+    /// its slot rewritten there, since the slot is an index into one
+    /// partition and means nothing in another.
+    #[cfg(feature = "transport-stats")]
+    pub stats_slot: R::Mutex<Option<crate::stats_registry::LinkSlot>>,
 }
 
 /// R311y205 (transport-multilink IMPL-2b-iii) — the traffic-class preference a
@@ -1761,6 +1780,18 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         // value via its reliable-channel window tracking
         // (zenoh-pico unicast/transport.c:182-194).
         let initial_frame_sn = params.initial_sn;
+        // R2825 (`transport-stats`) — open this link in the session's stats
+        // partition, labelled with the locator pair its driver resolved at open.
+        // A driver with no endpoints gets no slot: its link-scoped families are
+        // not recorded, rather than recorded under invented labels.
+        #[cfg(feature = "transport-stats")]
+        let (stats_metrics, stats_slot) = {
+            let mut metrics = crate::stats_registry::TransportMetrics::default();
+            let slot = R::link_driver(&driver).link_endpoints().map(|ends| {
+                metrics.open_link(crate::stats_registry::LinkLabels::new(&ends.src, &ends.dst))
+            });
+            (metrics, slot)
+        };
         // R311ja — wrap through the per-profile `wrap_actions` seam (tokio
         // `Arc`, lwIP `Rc`) so this one constructor serves both the
         // multi-thread AP handle and the single-task MCU handle without
@@ -1784,10 +1815,14 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                 reliability_pref: R::new_mutex(LinkReliabilityPref::default()),
                 #[cfg(all(feature = "transport-multilink", feature = "transport-qos"))]
                 priority_range: R::new_mutex(None),
+                #[cfg(feature = "transport-stats")]
+                stats_slot: R::new_mutex(stats_slot),
             }),
             core: R::share(SessionCore {
                 #[cfg(feature = "transport-stats")]
                 stats: crate::stats::TransportStats::default(),
+                #[cfg(feature = "transport-stats")]
+                metrics: R::new_mutex(stats_metrics),
                 // Nobody has asked this session to close; the ingress is the
                 // only writer and it has not run yet.
                 #[cfg(feature = "session-close-ingress")]
@@ -2006,6 +2041,115 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         self.stats.report()
     }
 
+    /// R2825 — a copy of this session's stats-registry partition, what a host
+    /// hands its registry through
+    /// [`crate::stats_registry::StatsRegistry::set_transport_metrics`].
+    #[cfg(feature = "transport-stats")]
+    pub fn stats_metrics(&self) -> crate::stats_registry::TransportMetrics {
+        R::with_mutex_mut(&self.metrics, |metrics| metrics.clone())
+    }
+
+    /// R2825 — close every link of this session's partition: a transport's
+    /// teardown drops its links, which is what folds their counts into the
+    /// transport and takes them out of `zenoh_links_opened` upstream. A host
+    /// calls it before its last [`Self::stats_metrics`] of a closing session.
+    #[cfg(feature = "transport-stats")]
+    pub fn close_stats_links(&self) {
+        R::with_mutex_mut(&self.metrics, |metrics| metrics.close_all_links());
+    }
+
+    /// R2825 — record on `link`'s cells in this session's partition. A link
+    /// without a slot records nothing (see [`LinkState::stats_slot`]).
+    #[cfg(feature = "transport-stats")]
+    pub(crate) fn record_on_link(
+        &self,
+        link: &LinkState<R>,
+        record: impl FnOnce(
+            &mut crate::stats_registry::TransportMetrics,
+            crate::stats_registry::LinkSlot,
+        ),
+    ) {
+        let Some(slot) = R::with_mutex_mut(&link.stats_slot, |slot| *slot) else {
+            return;
+        };
+        R::with_mutex_mut(&self.metrics, |metrics| record(metrics, slot));
+    }
+
+    /// R2825 — observe one data message's payload in this session's partition.
+    ///
+    /// Once per message whatever link carries it, and before a link is chosen:
+    /// upstream observes the payload in the dispatcher, per face
+    /// (`zenoh/src/net/routing/dispatcher/stats.rs` @ `pub(super) fn observe_payload(`).
+    /// A control message has no payload class and a class with no kind (an
+    /// undecoded body, [`crate::stats::NetworkStatsClass::undecoded`]) no
+    /// label, so neither is observed. No per-key filter is configured here, so
+    /// the per-key family gets its series and no keys.
+    #[cfg(feature = "transport-stats")]
+    pub(crate) fn observe_payload(
+        &self,
+        direction: crate::stats_registry::StatsDirection,
+        priority: Priority,
+        class: &crate::stats::NetworkStatsClass,
+    ) {
+        let (Some(kind), Some(payload)) = (class.kind, class.payload) else {
+            return;
+        };
+        let shm = class.medium == crate::stats::StatMedium::Shm;
+        R::with_mutex_mut(&self.metrics, |metrics| {
+            metrics.observe_network_message_payload(
+                direction,
+                payload.space,
+                priority,
+                kind,
+                shm,
+                payload.pl_bytes as u64,
+                [],
+            )
+        });
+    }
+
+    /// R2825 — count one network message on the link that carries it
+    /// (`commons/zenoh-stats/src/link.rs` @ `pub fn inc_network_message(&self, direction: StatsDirection, msg: impl NetworkMessageExt) {`).
+    #[cfg(feature = "transport-stats")]
+    pub(crate) fn count_network_message(
+        &self,
+        direction: crate::stats_registry::StatsDirection,
+        link: &LinkState<R>,
+        priority: Priority,
+        class: &crate::stats::NetworkStatsClass,
+    ) {
+        let Some(kind) = class.kind else {
+            return;
+        };
+        let shm = class.medium == crate::stats::StatMedium::Shm;
+        self.record_on_link(link, |metrics, slot| {
+            metrics.inc_network_message(direction, slot, priority, kind, shm)
+        });
+    }
+
+    /// R2825 — a message no link could take: upstream counts it as a dropped
+    /// payload with reason `no-link`, on the transport rather than a link
+    /// (`commons/zenoh-stats/src/transport.rs` @ `pub fn tx_observe_no_link(&self, msg: NetworkMessageRef) {`).
+    /// Its size is the payload size, and `0` for a control message, which is
+    /// upstream's `payload_size().unwrap_or_default()`.
+    #[cfg(feature = "transport-stats")]
+    fn drop_for_no_link(&self, priority: Priority, class: &crate::stats::NetworkStatsClass) {
+        let Some(kind) = class.kind else {
+            return;
+        };
+        let size = class.payload.map_or(0, |p| p.pl_bytes as u64);
+        R::with_mutex_mut(&self.metrics, |metrics| {
+            metrics.observe_network_message_dropped_payload(
+                crate::stats_registry::StatsDirection::Tx,
+                priority,
+                kind,
+                None,
+                crate::stats_registry::ReasonLabel::NoLink,
+                size,
+            )
+        });
+    }
+
     /// R311kw — the one wire-emit seam: stamp [`Self::last_outbound_at`]
     /// and forward to the link driver. Every production TX path routes
     /// here (handshake t_msg senders, CLOSE, Frame / Fragment emits, the
@@ -2141,10 +2285,22 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         // build compiles neither, and `-D dead-code` caught the method there.
         // A closure is scoped to the seam by construction, so the two cannot
         // drift apart at all.
+        //
+        // R2825 — a SENT write also counts on this link's registry cells
+        // (`bytes`, `transport_message`), upstream's `LinkStats` pair. A refused
+        // write reached no wire and upstream has no registry family for a
+        // driver's refusal, so only the JSON `n_dropped` above sees it.
         let count_tx_wire = |_wire_bytes: usize, _outcome: crate::link::LinkSendOutcome| {
             #[cfg(feature = "transport-stats")]
             match _outcome {
-                crate::link::LinkSendOutcome::Sent => self.stats.inc_tx(_wire_bytes),
+                crate::link::LinkSendOutcome::Sent => {
+                    self.stats.inc_tx(_wire_bytes);
+                    self.record_on_link(link, |metrics, slot| {
+                        let tx = crate::stats_registry::StatsDirection::Tx;
+                        metrics.inc_bytes(tx, slot, _wire_bytes as u64);
+                        metrics.inc_transport_message(tx, slot, 1);
+                    });
+                }
                 crate::link::LinkSendOutcome::Dropped(_) => {
                     self.stats
                         .inc_tx_drop(crate::stats::StatDrop::Transport, 1, _wire_bytes)
@@ -3426,6 +3582,20 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// illegal-state-unrepresentable gate). Returns the new live link count.
     #[cfg(feature = "transport-multilink")]
     pub fn add_link(&self, link: R::Shared<LinkState<R>>, _bound: PubkeyBound) -> usize {
+        // R2825 (`transport-stats`) — from here this link records through THIS
+        // core, so it is opened in this core's partition and its slot rewritten
+        // to point there; the slot it had indexed the joining session's own
+        // partition, which this aggregate never reports. A link whose driver
+        // names no endpoints keeps no slot, as at open.
+        #[cfg(feature = "transport-stats")]
+        {
+            let slot = link.link_driver().link_endpoints().map(|ends| {
+                R::with_mutex_mut(&self.metrics, |metrics| {
+                    metrics.open_link(crate::stats_registry::LinkLabels::new(&ends.src, &ends.dst))
+                })
+            });
+            R::with_mutex_mut(&link.stats_slot, |own| *own = slot);
+        }
         let mut links = self.links.lock().expect("multilink set mutex");
         links.push(link);
         links.len()
@@ -3452,6 +3622,13 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// `0` (the session survives while ≥1 link is in the set).
     #[cfg(feature = "transport-multilink")]
     pub fn del_link(&self, link: &R::Shared<LinkState<R>>) -> usize {
+        // R2825 (`transport-stats`) — a link leaving the aggregate closes in the
+        // partition it recorded into: its counts fold into the transport, as
+        // upstream's `remove_link` folds them.
+        #[cfg(feature = "transport-stats")]
+        if let Some(slot) = R::with_mutex_mut(&link.stats_slot, |own| own.take()) {
+            R::with_mutex_mut(&self.metrics, |metrics| metrics.close_link(slot));
+        }
         let target: *const LinkState<R> = &**link;
         let mut links = self.links.lock().expect("multilink set mutex");
         links.retain(|l| {
@@ -5151,6 +5328,18 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         // different failures under one counter.
         #[cfg(feature = "transport-stats")]
         self.stats.inc_tx_network(&_stats_class);
+        // R2825 — the registry's payload histogram, at the same entry point:
+        // upstream observes a payload before a link is chosen. The label is the
+        // message's OWN band, captured before the effective-priority override
+        // below, because upstream labels the message rather than the frame.
+        #[cfg(feature = "transport-stats")]
+        let message_priority = priority;
+        #[cfg(feature = "transport-stats")]
+        self.observe_payload(
+            crate::stats_registry::StatsDirection::Tx,
+            message_priority,
+            &_stats_class,
+        );
         // R311y215 (transport-qos) — the EFFECTIVE Frame priority: the caller's
         // message priority when this session negotiated QoS, else forced to
         // DEFAULT (a non-QoS session has one PRIORITY conduit and writes no
@@ -5193,7 +5382,47 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         // still carry. A single-link session (and every non-feature build) gates
         // on `self.link` exactly as before.
         if !self.session_send_available() {
+            // R2825 — no link can take it: upstream's `no-link` drop.
+            #[cfg(feature = "transport-stats")]
+            self.drop_for_no_link(message_priority, &_stats_class);
             return Err(SendWireError::TransportUnavailable);
+        }
+        // R2825 — the network-message counter, on the link this message's
+        // conduit is routed to: the same `(reliability, priority)` choice the
+        // frame carrying it will make in `send_wire`, so a message and its
+        // frame are counted on one link.
+        #[cfg(feature = "transport-stats")]
+        {
+            let reliability = if reliable {
+                Reliability::Reliable
+            } else {
+                Reliability::BestEffort
+            };
+            #[cfg(not(feature = "transport-multilink"))]
+            let _ = reliability;
+            #[cfg(feature = "transport-multilink")]
+            if let Some(target) = self.select_link(reliability, priority) {
+                self.count_network_message(
+                    crate::stats_registry::StatsDirection::Tx,
+                    &target,
+                    message_priority,
+                    &_stats_class,
+                );
+            } else {
+                self.count_network_message(
+                    crate::stats_registry::StatsDirection::Tx,
+                    &self.link,
+                    message_priority,
+                    &_stats_class,
+                );
+            }
+            #[cfg(not(feature = "transport-multilink"))]
+            self.count_network_message(
+                crate::stats_registry::StatsDirection::Tx,
+                &self.link,
+                message_priority,
+                &_stats_class,
+            );
         }
         // transport-lowlatency — the lean send path (zenoh
         // `TransportBodyLowLatencyRef::Network(b) => write the bare
