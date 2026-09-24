@@ -10033,6 +10033,17 @@ layer_c1m_session_lwip() {
         cargo test -p wz-session-lwip --quiet || return 1
     _runci_guarded_test "C1m reassembly" 2 \
         cargo test -p wz-session-lwip --features reassembly --quiet || return 1
+    # R2827 — the UNICAST application layer: `app_layer::dispatch_to` wires the
+    # session drive's events into the observer and drains replies through the
+    # session's own actions. Its one test needs the Put arm and the queryable
+    # reply chain, which no leg here composed for unicast (the queryable legs
+    # below are all multicast). 3 = the two unconditional session_drive tests
+    # + `a_push_reaches_its_subscriber_and_a_reply_leaves_on_the_session`,
+    # the number this command PRINTED.
+    _runci_guarded_test "C1m unicast app layer" 3 \
+        cargo test -p wz-session-lwip \
+        --features query-queryable,codec-response,codec-response-final,pubsub-put \
+        --quiet || return 1
     # R2390 (transport-multicast) — each `transport-multicast` leg moved by TWO:
     # the MCU loop's link-loss arm brought a witness test and an ordering test,
     # both in `multicast_drive`, which is gated on that feature ALONE. So the
@@ -10071,6 +10082,9 @@ layer_c1m_session_lwip() {
     (cd crates \
         && cargo clippy -p wz-session-lwip --all-targets --quiet -- -D warnings \
         && cargo clippy -p wz-session-lwip --all-targets --features reassembly --quiet -- -D warnings \
+        && cargo clippy -p wz-session-lwip --all-targets \
+            --features query-queryable,codec-response,codec-response-final,pubsub-put \
+            --quiet -- -D warnings \
         && cargo clippy -p wz-session-lwip --all-targets --features transport-multicast --quiet -- -D warnings \
         && cargo clippy -p wz-session-lwip --all-targets --features transport-multicast,codec-push --quiet -- -D warnings \
         && cargo clippy -p wz-session-lwip --all-targets --features transport-multicast,liveliness-token --quiet -- -D warnings \

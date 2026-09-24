@@ -141,6 +141,11 @@ liveliness-token = ["wz-session-core/liveliness-token"]
 # codec-response + codec-response-final to emit the full Response + ResponseFinal
 # chain.
 query-queryable = ["wz-session-core/query-queryable"]
+# R2827 — the Put arm of the subscriber dispatch, forwarded so a unicast MCU
+# node's `app_layer::dispatch_to` delivers a Push to the subscribers it
+# registered (the observer fires a subscriber only under pubsub-put or
+# pubsub-delete).
+pubsub-put = ["wz-session-core/pubsub-put"]
 
 [dependencies]
 # §5.P runtime tier: CoopRuntime<C> + CoopTime<C> + the Runtime /
@@ -167,6 +172,9 @@ lwip-sys = { path = "../lwip-sys" }
 # + the portable-atomic polyfill on the host test path (the MCU deploy
 # supplies the cortex-m / riscv impl at final-binary link instead).
 critical-section = { version = "1", features = ["std"] }
+# R2827 — builds the Push / Request records `app_layer`'s test feeds the
+# observer. Dev-only: the library still names no wz_codecs type.
+wz-codecs = { path = "../wz-codecs", default-features = false }
 # R311lu — the test-support feature exposes wz-link-lwip's `lwip_test_link`
 # init-once harness so this crate's lwIP-touching tests (session_drive +
 # multicast_drive) share ONE process-global lwip_init + multicast-netif

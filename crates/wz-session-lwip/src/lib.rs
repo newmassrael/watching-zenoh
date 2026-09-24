@@ -46,6 +46,10 @@ extern crate alloc;
 #[cfg(test)]
 extern crate std;
 
+// R2827 — the application layer attached to the session drive: the `on_event`
+// that dispatches to an `ApplicationLayerObserver` and drains through the
+// session's own actions.
+pub mod app_layer;
 pub mod driver;
 // R311lt — the MCU multicast drive loop (no_std mirror of the AP
 // wz-runtime-tokio multicast_glue), gated on the transport-multicast capability.

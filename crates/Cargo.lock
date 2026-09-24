@@ -3180,6 +3180,7 @@ version = "0.1.0"
 dependencies = [
  "critical-section",
  "lwip-sys",
+ "wz-codecs",
  "wz-link-lwip",
  "wz-runtime-coop",
  "wz-runtime-core",
