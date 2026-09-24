@@ -180,6 +180,17 @@ pub const RUNTIME_MUTABLE_CONFIG_KEYS: &[RuntimeMutableKey] = &[
         discipline: MutationDiscipline::Pull,
         feature: "adminspace-core",
     },
+    // §5.23 `adminspace-core` — PULL for upstream's reason: `local_data` takes
+    // the value off the live config on every admin GET
+    // (`zenoh/src/net/runtime/adminspace.rs` @
+    // `"metadata": context.runtime.config().lock().metadata(),`), so a runtime
+    // write is visible to the next GET and storing it is applying it.
+    RuntimeMutableKey {
+        key: "metadata",
+        slice: "metadata",
+        discipline: MutationDiscipline::Pull,
+        feature: "adminspace-core",
+    },
     // PUSH: the forwarder holds a `zid -> weight` map built from these rows.
     RuntimeMutableKey {
         key: "routing/router/linkstate/transport_weights",
@@ -803,6 +814,22 @@ pub struct WzConfig {
     /// Default = zenoh's `PermissionsConf::default` (read `true`, write `false`).
     #[cfg(feature = "adminspace-core")]
     admin_permissions: wz_session_core::adminspace::AdminSpacePermissions,
+    /// §5.23 `adminspace-core` — the LIVE `metadata` value, already rendered as
+    /// the JSON upstream serves for it, which is all anything here does with it.
+    ///
+    /// A runtime-mutable PULL slice for the reason the permits are one: upstream
+    /// re-reads it off the live config inside every admin GET, so each admin
+    /// host reads this field per GET rather than capturing it at setup.
+    ///
+    /// RENDERED at store time, not at read time, so the per-GET read cannot
+    /// fail: the rendering refuses exactly the number literals upstream's
+    /// parser refuses, and the reader already refused those before a value
+    /// could reach here. Default `null`, upstream's value for an unset key.
+    ///
+    /// Named for the SLICE (`metadata`), not for its representation, because a
+    /// runtime-mutable slice is the field its `set_*` method is named after.
+    #[cfg(feature = "adminspace-core")]
+    metadata: String,
     /// R2634 (`router-hat-router`) — the LIVE configured router link weights,
     /// zenoh's `routing.router.linkstate.transport_weights`. A runtime-mutable
     /// typed slice, declared in [`RUNTIME_MUTABLE_CONFIG_KEYS`] — R2642 removed
@@ -1012,6 +1039,8 @@ impl Default for WzConfig {
             interceptor_inputs: InterceptorInputs::default(),
             #[cfg(feature = "adminspace-core")]
             admin_permissions: wz_session_core::adminspace::AdminSpacePermissions::default(),
+            #[cfg(feature = "adminspace-core")]
+            metadata: String::from("null"),
             // R2634 — no configured weight is upstream's default too: the config
             // row list is a `Vec` with no `Option` around it, so an absent key and
             // an empty array are the same document to a stock zenohd, and both
@@ -1504,6 +1533,22 @@ impl WzConfig {
         self
     }
 
+    /// §5.23 `adminspace-core` — builder-style initial `metadata`, for a host
+    /// that takes it from somewhere other than a config document (the demo's
+    /// `--metadata` flag). The document route is `apply_zenoh_config`, and both
+    /// store the same rendering.
+    ///
+    /// Refuses exactly what the config reader refuses: a number literal
+    /// upstream's parser cannot read.
+    #[cfg(feature = "adminspace-core")]
+    pub fn with_metadata(
+        mut self,
+        value: &wz_session_core::json5::Json5Value,
+    ) -> Result<Self, wz_session_core::json5::UpstreamNumberError> {
+        self.set_metadata(value)?;
+        Ok(self)
+    }
+
     /// Read the LIVE adminspace permissions — the accessor an admin host calls
     /// INSIDE its per-request handler, which is the whole point of the field.
     /// Returns by value (the type is two `bool`s and `Copy`), so a handler holding
@@ -1517,6 +1562,32 @@ impl WzConfig {
     #[cfg(feature = "adminspace-core")]
     pub fn admin_permissions(&self) -> wz_session_core::adminspace::AdminSpacePermissions {
         self.admin_permissions
+    }
+
+    /// §5.23 `adminspace-core` — runtime replace of the live `metadata`, the
+    /// PULL twin of [`Self::set_admin_permissions`]: the next admin GET reads the
+    /// new value, so storing it is applying it and no sink is involved.
+    ///
+    /// Refuses exactly what the config reader refuses — a number literal
+    /// upstream's parser cannot read — and leaves the old value in place when it
+    /// does.
+    #[cfg(feature = "adminspace-core")]
+    pub fn set_metadata(
+        &mut self,
+        value: &wz_session_core::json5::Json5Value,
+    ) -> Result<(), wz_session_core::json5::UpstreamNumberError> {
+        self.metadata = value.to_upstream_value_json_text()?;
+        Ok(())
+    }
+
+    /// §5.23 `adminspace-core` — the LIVE `metadata` value as the JSON the
+    /// adminspace serves in `local_data`: `null` when the config never set it.
+    ///
+    /// Read by an admin host INSIDE its per-GET handler, like
+    /// [`Self::admin_permissions`], because upstream reads it there too.
+    #[cfg(feature = "adminspace-core")]
+    pub fn admin_metadata_json(&self) -> &str {
+        &self.metadata
     }
 
     /// Runtime reconfigure of the live adminspace permissions — the admin-permit
@@ -2504,6 +2575,19 @@ impl WzConfig {
                 };
                 true
             }
+            // §5.23 `adminspace-core` — `metadata`, rendered once as the bytes
+            // upstream serves. The reader refused every value this rendering
+            // could refuse, so `false` here is an assertion about the reader, as
+            // the `plugins` arm's is. `None` (a delete) restores upstream's
+            // unset value, `null`.
+            #[cfg(feature = "adminspace-core")]
+            "metadata" => match source.and_then(|ingest| ingest.config.metadata.as_ref()) {
+                Some(value) => self.set_metadata(value).is_ok(),
+                None => {
+                    self.metadata = Self::default().metadata;
+                    true
+                }
+            },
             #[cfg(feature = "routing-router-hat")]
             "routing/router/linkstate/transport_weights" => {
                 self.router_link_weights = match source {
@@ -3051,6 +3135,66 @@ mod tests {
             "the SIBLING the document never named keeps its LIVE value; the parser \
              resolved it to `false` as a default, and applying that would carry a \
              decision the operator never made"
+        );
+    }
+
+    /// §5.23 `adminspace-core` — `metadata` reaches the adminspace's reading of
+    /// it three ways upstream's does: from the startup document, from a runtime
+    /// write, and back to `null` on a delete. And the bytes are upstream's, not
+    /// the document's: the keys come out SORTED and `1.50` comes out `1.5`.
+    ///
+    /// The startup value is deliberately written out of order and with a
+    /// respellable number, so a store that kept the source text would fail the
+    /// first assertion rather than pass it by coincidence.
+    #[cfg(all(feature = "zenoh-config", feature = "adminspace-core"))]
+    #[test]
+    fn metadata_is_applied_written_and_deleted_as_the_adminspace_reads_it() {
+        use crate::zenoh_config::ZenohNodeConfig;
+
+        let mut cfg = WzConfig::new();
+        assert_eq!(
+            cfg.admin_metadata_json(),
+            "null",
+            "unset is upstream's null"
+        );
+
+        let ingest = ZenohNodeConfig::from_json5(
+            r#"{ metadata: { name: 'strawberry', floor: 1.50, location: "Penny Lane" } }"#,
+        )
+        .expect("a metadata document parses");
+        assert_eq!(cfg.apply_zenoh_config(&ingest), vec!["metadata"]);
+        assert_eq!(
+            cfg.admin_metadata_json(),
+            r#"{"floor":1.5,"location":"Penny Lane","name":"strawberry"}"#
+        );
+
+        cfg.set_by_key("metadata", r#"{ "name": "banana" }"#)
+            .expect("metadata is runtime mutable, as upstream's is");
+        assert_eq!(cfg.admin_metadata_json(), r#"{"name":"banana"}"#);
+
+        // A runtime write of `null` is a value, not an absence: upstream stores
+        // it and serves it.
+        cfg.set_by_key("metadata", "null")
+            .expect("null is a value metadata may hold");
+        assert_eq!(cfg.admin_metadata_json(), "null");
+
+        cfg.set_by_key("metadata", "[1, 2]")
+            .expect("any JSON value is legal");
+        cfg.remove_by_key("metadata")
+            .expect("a delete restores the unset value");
+        assert_eq!(cfg.admin_metadata_json(), "null");
+
+        // The one refusal, which is upstream's own: a literal `json5` cannot read.
+        let refused = ZenohNodeConfig::from_json5(r#"{ metadata: { big: 0x100000000 } }"#);
+        assert!(
+            matches!(
+                refused,
+                Err(crate::zenoh_config::ConfigIngestError::UnreadableNumber {
+                    path: "metadata",
+                    ..
+                })
+            ),
+            "a zenoh node refuses this document, so wz must too: {refused:?}"
         );
     }
 

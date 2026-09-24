@@ -4294,8 +4294,14 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
         let version: String = version.into();
         // R311y40/y45 — the typed WzConfig read-at-open mirror, serialized once at
         // declare time (the handshake params are fixed for the session's life).
-        let config_json =
-            crate::config::WzConfig::from_init_params(&self.actions().params).to_admin_json();
+        let mirror = crate::config::WzConfig::from_init_params(&self.actions().params);
+        let config_json = mirror.to_admin_json();
+        // §5.23 `adminspace-core` — off the SAME mirror as the config leg, so the
+        // two fields of one reply cannot come from two sources. A session opened
+        // from handshake params has no config document, so this is `null` — the
+        // honest answer, and the value upstream serves for a config that sets no
+        // `metadata`. A host that has a document uses the live-input seam below.
+        let metadata_json = String::from(mirror.admin_metadata_json());
         // R311y237 — the node's compiled-in plugin registry (the wz-native
         // subsystem set this binary carries; `Loaded` state). Empty vec without
         // the feature so the answerer's `plugins` param is signature-stable.
@@ -4327,6 +4333,7 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
                 // already allocates its reply. A borrow cannot cross a `Fn()`.
                 plugins: plugins.clone(),
                 config_json: config_json.clone(),
+                metadata_json: metadata_json.clone(),
             }
         })
     }
@@ -4454,6 +4461,8 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
                 whatami,
                 version: &version,
                 locators: &locators,
+                // §5.23 `adminspace-core` — off the live source, with the permit.
+                metadata_json: &live.metadata_json,
                 read,
                 stats: live.stats.as_ref(),
             };

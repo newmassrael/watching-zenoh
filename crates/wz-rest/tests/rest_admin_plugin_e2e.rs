@@ -170,6 +170,8 @@ async fn the_bridge_reports_itself_on_the_adminspace() {
                 permissions: AdminSpacePermissions::default(),
                 plugins,
                 config_json: String::from("{}"),
+                // No config document here, so no `metadata` was set.
+                metadata_json: String::from("null"),
                 stats: None,
             }
         })

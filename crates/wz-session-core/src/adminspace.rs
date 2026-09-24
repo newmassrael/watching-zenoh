@@ -345,20 +345,18 @@ fn push_plugins_object(plugins: &[AdminPlugin], out: &mut String) {
 
 /// The `@/<zid>/<whatami>` `local_data` view — zenoh `local_data`'s JSON object
 /// (`adminspace.rs:678-685`): `{zid, version, metadata, locators, sessions,
-/// plugins}`. `metadata` is `null` at this core (wz has no config-metadata
-/// surface). `plugins` is `null` WITHOUT `adminspace-plugins-handlers` (the
-/// original byte-behavior) and, WITH the feature, the started-plugins object
-/// [`push_plugins_object`] builds from [`Self::plugins`] (surface A); the key set
-/// is preserved so a zenoh admin client parses the same shape either way.
+/// plugins}`. `metadata` is the node config's own value, as the host rendered
+/// it ([`Self::metadata_json`]). `plugins` is `null` WITHOUT
+/// `adminspace-plugins-handlers` (the original byte-behavior) and, WITH the
+/// feature, the started-plugins object [`push_plugins_object`] builds from
+/// [`Self::plugins`] (surface A); the key set is preserved so a zenoh admin
+/// client parses the same shape either way.
 ///
-/// NOT-THIS-KEY: metadata
-///
-/// R2155 (open-debt item 541) — the word `metadata` is everywhere in this tree
-/// as wz's own vocabulary, and this view is the one place upstream's CONFIG key
-/// of that name would land. It lands as the hardcoded null above, so this type
-/// is not what honours it. The disclaimer sits here rather than in the config
-/// reader's doc because a claim about a mechanism belongs beside the mechanism.
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+/// §5.23 `adminspace-core` — until this round this doc carried a
+/// `NOT-THIS-KEY: metadata` disclaimer (R2155, open-debt item 541), because the
+/// field landed as a hardcoded `null` and so this type did not honour the
+/// config key of that name. It does now, and the disclaimer went with the null.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AdminLocalData {
     /// This node's zid in zenoh `ZenohId` Display form.
     pub zid_hex: String,
@@ -374,6 +372,31 @@ pub struct AdminLocalData {
     /// emits `null`) without `adminspace-plugins-handlers`. Always present so the
     /// struct + [`answer_admin_query`] stay signature-stable across the toggle.
     pub plugins: Vec<AdminPlugin>,
+    /// §5.23 `adminspace-core` — the node config's `metadata`, as JSON TEXT
+    /// the host has already rendered the way upstream serves it
+    /// (`Json5Value::to_upstream_value_json_text`), and `null` when the config
+    /// did not set it — which is upstream's value for an unset key.
+    ///
+    /// TEXT rather than a parsed value because this crate emits by hand and
+    /// the one thing it does with the value is write it where upstream writes
+    /// it. It is written VERBATIM: it must be a single JSON value, which the
+    /// renderer guarantees and nothing here re-checks.
+    pub metadata_json: String,
+}
+
+impl Default for AdminLocalData {
+    /// Every field empty, and `metadata` `null` — the one field whose empty
+    /// text would not be a JSON value, so the derive cannot be used.
+    fn default() -> Self {
+        Self {
+            zid_hex: String::new(),
+            version: String::new(),
+            locators: Vec::new(),
+            sessions: Vec::new(),
+            plugins: Vec::new(),
+            metadata_json: String::from("null"),
+        }
+    }
 }
 
 /// Admin-space access permissions — the embedder-supplied gate values for the
@@ -444,6 +467,13 @@ pub struct AdminLiveInputs {
     /// the wire must render this per GET, or two answers in one reply could come
     /// from different moments.
     pub config_json: alloc::string::String,
+    /// §5.23 `adminspace-core` — the config's `metadata` as JSON text, `"null"`
+    /// when unset, read in the SAME call as [`Self::config_json`] for the same
+    /// reason: both come off the live config, and upstream reads `metadata`
+    /// inside the handler. A host with a `WzConfig` returns its
+    /// `admin_metadata_json()`; one with no config document has nothing an
+    /// operator could have set, and returns `"null"`.
+    pub metadata_json: alloc::string::String,
     /// The node's stats registry to serve the metrics leg from, or `None` to
     /// serve the build-info block alone.
     ///
@@ -550,21 +580,27 @@ impl AdminLocalData {
     ///   object the pin does, or `null` where it holds no weighted link to that
     ///   peer — which is the pin's answer for that case too. A host with no router
     ///   graph reports `null` for every session, correctly.
-    /// * `metadata` (top level) — upstream serves `config.metadata()`; wz's config
-    ///   has no such field at all, so this is a config-surface question.
+    /// * `metadata` (top level) — CLOSED by §5.23 `adminspace-core`. The config
+    ///   reader carries the value and the host renders it as upstream's
+    ///   `serde_json` writes it, keys sorted and numbers respelled; see
+    ///   [`Self::metadata_json`].
     ///
     /// So the honest statement is the one above — the key ORDER is upstream's, and
-    /// the field SET diverges by the TWO residuals still open (`region` and
-    /// `metadata`), `weight` having closed in R2637. `admin_unspoken_fields` is
-    /// where a consumer learns which of them arrive as `null`.
+    /// the field SET diverges by the ONE residual still open (`region`),
+    /// `weight` and `metadata` having closed. `admin_unspoken_fields` is where a
+    /// consumer learns which fields arrive as `null` because this build does not
+    /// speak them.
     pub fn to_json(&self) -> String {
         let mut out = String::new();
         // R311y60 — the locators string array via the json::push_str_array SSOT.
         out.push_str("{\"locators\":");
         crate::json::push_str_array(&self.locators, &mut out);
-        // `metadata` is null at this core; `plugins` is the started-plugins object
-        // under `adminspace-plugins-handlers`, else `null` (the original behavior).
-        out.push_str(",\"metadata\":null,\"plugins\":");
+        // `metadata` is the host's rendered config value (`null` when unset);
+        // `plugins` is the started-plugins object under
+        // `adminspace-plugins-handlers`, else `null` (the original behavior).
+        out.push_str(",\"metadata\":");
+        out.push_str(&self.metadata_json);
+        out.push_str(",\"plugins\":");
         #[cfg(feature = "adminspace-plugins-handlers")]
         push_plugins_object(&self.plugins, &mut out);
         #[cfg(not(feature = "adminspace-plugins-handlers"))]
@@ -906,13 +942,17 @@ pub fn admin_legs(zid_hex: &str, whatami: &str) -> Vec<AdminLeg> {
 /// census document (R2180, open-debt item 554), and it is filled the same way — by
 /// DECLARING, in the document, which `null`s are the library's silence.
 ///
-/// # One is permanent, one is a build fact
+/// # What is left is a build fact
 ///
-/// `metadata` is `null` in every wz build (the pin serves `config.metadata()`;
-/// wz's config has no such field at all), and `plugins` is `null` only on a build
-/// without the handlers. Both are listed because a consumer cannot tell a
-/// permanent silence from a build-conditional one, and both mean "do not wait
-/// for this".
+/// `plugins` is `null` only on a build without the handlers, and it is listed
+/// then because a consumer cannot otherwise tell that silence from "no plugin
+/// started". It means "do not wait for this".
+///
+/// §5.23 `adminspace-core` — `metadata` used to be named here as a PERMANENT
+/// silence, `null` in every build. It left for the reason `weight` did below:
+/// the config reader now carries the key and every host serves it, so a `null`
+/// there is the answer "this node's config set no metadata", which is upstream's
+/// answer for that config too. The surface revision moved 2 -> 3 with it.
 ///
 /// R2637 — `sessions[].weight` used to be named here as a third, permanent
 /// silence. It is no longer silent: a router fills it from its own `links_info`,
@@ -930,10 +970,13 @@ pub fn admin_unspoken_fields() -> Vec<&'static str> {
     // correct, and the shape (start from a base, add to it) is simply the wrong
     // one for a list with a single conditional entry. Two literals say the same
     // thing and say it in full.
+    //
+    // §5.23 `adminspace-core` — `metadata` LEFT both literals, so a build that
+    // speaks plugins now declares NO silence at all.
     #[cfg(feature = "adminspace-plugins-handlers")]
-    let fields = alloc::vec!["metadata"];
+    let fields = alloc::vec![];
     #[cfg(not(feature = "adminspace-plugins-handlers"))]
-    let fields = alloc::vec!["metadata", "plugins"];
+    let fields = alloc::vec!["plugins"];
     // `sessions[].weight` LEFT this list, unconditionally, and the reason
     // is semantic rather than a feature question. Once the field can be filled, a
     // `null` weight means "this node holds no weighted link to that peer" — which
@@ -954,9 +997,9 @@ pub fn admin_unspoken_fields() -> Vec<&'static str> {
 /// node replies under [`admin_surface_key`].
 ///
 /// ```json
-/// {"revision":2,
+/// {"revision":3,
 ///  "legs":[{"key":"@/<zid>/peer","encoding":"application/json","cardinality":"single"}, …],
-///  "unspoken":["metadata","plugins"]}
+///  "unspoken":["plugins"]}
 /// ```
 ///
 /// `revision` is the document's own contract number, the convention
@@ -988,7 +1031,12 @@ pub fn admin_surface_json(zid_hex: &str, whatami: &str) -> String {
     // value was permanently `null`; at revision 2 it is an object or a meaningful
     // `null`, so that consumer would misread it. A leg appearing or disappearing
     // still does NOT move it — that is what the document is for.
-    let mut out = String::from("{\"revision\":2,\"legs\":[");
+    //
+    // §5.23 `adminspace-core` — revision 2 -> 3, by the same rule and for the
+    // same kind of reason: a consumer of revision 2 read `metadata` in
+    // `unspoken` and knew it was permanently `null`, and it is now the node
+    // config's value.
+    let mut out = String::from("{\"revision\":3,\"legs\":[");
     for (i, leg) in admin_legs(zid_hex, whatami).iter().enumerate() {
         if i > 0 {
             out.push(',');
@@ -1438,6 +1486,15 @@ pub struct AdminAnswerCtx<'a> {
     pub version: &'a str,
     /// The node's listening locators.
     pub locators: &'a [String],
+    /// §5.23 `adminspace-core` — the node config's `metadata` as JSON text,
+    /// `"null"` when unset; see [`AdminLocalData::metadata_json`].
+    ///
+    /// Read by the host off its LIVE config in the same per-GET call as the
+    /// permit, because upstream takes it off the live config inside the handler
+    /// (`zenoh/src/net/runtime/adminspace.rs` @
+    /// `"metadata": context.runtime.config().lock().metadata(),`) — so a
+    /// runtime write to the key is visible to the very next GET.
+    pub metadata_json: &'a str,
     /// The admin GET permission (zenoh `permissions.read`, `adminspace.rs:457`):
     /// the caller passes `permissions.read` under `adminspace-read`, else `true`,
     /// so the answerer stays feature-toggle-independent (the gate is the value,
@@ -1543,6 +1600,7 @@ pub fn answer_admin_query(
             // `plugins` is a used parameter regardless of the feature; `to_json`
             // emits `null` when `adminspace-plugins-handlers` is off.
             plugins: plugins.to_vec(),
+            metadata_json: String::from(ctx.metadata_json),
         };
         reply_admin(
             out,
@@ -3142,6 +3200,8 @@ mod tests {
             locators: vec![],
             sessions: vec![],
             plugins: vec![],
+            // An unset `metadata`, which upstream serves as `null` too.
+            metadata_json: "null".to_string(),
         };
         // The zenoh `local_data` key set with no peers / locators, in
         // serde_json's BTreeMap (alphabetical) key order:
@@ -3190,6 +3250,10 @@ mod tests {
                 }),
             }],
             plugins: vec![],
+            // §5.23 `adminspace-core` — a SET `metadata`, so this test pins the
+            // value's slot and its verbatim write; its sibling above pins the
+            // unset `null`.
+            metadata_json: r#"{"location":"Penny Lane","name":"strawberry"}"#.to_string(),
         };
         // serde_json BTreeMap (alphabetical) key order at every level:
         // top locators/metadata/plugins/sessions/version/zid; session
@@ -3203,7 +3267,9 @@ mod tests {
             data.to_json(),
             format!(
                 concat!(
-                    r#"{{"locators":["tcp/127.0.0.1:7447"],"metadata":null,"plugins":{plugins_tok},"#,
+                    r#"{{"locators":["tcp/127.0.0.1:7447"],"#,
+                    r#""metadata":{{"location":"Penny Lane","name":"strawberry"}},"#,
+                    r#""plugins":{plugins_tok},"#,
                     r#""sessions":[{{"links":[{{"dst":"tcp/127.0.0.1:51000","src":"tcp/127.0.0.1:7447"}}],"#,
                     // R2637 — the weight OBJECT, with its own keys alphabetical
                     // for the same BTreeMap reason the outer levels are, and an
@@ -3235,6 +3301,7 @@ mod tests {
                 weight: None,
             }],
             plugins: vec![],
+            metadata_json: "null".to_string(),
         };
         assert!(data.to_json().contains(r#""whatami":"unknown""#));
         // R2415 — the `false` rendering and its alphabetical slot, the pair to the
@@ -3257,6 +3324,7 @@ mod tests {
             locators: vec![],
             sessions: vec![],
             plugins: vec![],
+            metadata_json: "null".to_string(),
         };
         assert!(data.to_json().contains(r#""version":"v\"1\\0\n""#));
     }
@@ -4855,6 +4923,10 @@ mod tests {
                 }),
             }],
             plugins: fixture_plugins(),
+            // §5.23 `adminspace-core` — FILLED for `weight`'s reason: an unset
+            // `metadata` is `null` as an ANSWER ("the config set none"), and set
+            // equality would otherwise demand it rejoin the list of silences.
+            metadata_json: String::from(r#"{"name":"strawberry"}"#),
         };
         let root: serde_json::Value =
             serde_json::from_str(&data.to_json()).expect("local_data is JSON");
@@ -4905,6 +4977,7 @@ mod tests {
             sessions: alloc::vec![],
             // Deliberately EMPTY: this is the case the consumer could not read.
             plugins: alloc::vec![],
+            metadata_json: String::from("null"),
         };
         let root: serde_json::Value =
             serde_json::from_str(&data.to_json()).expect("local_data is JSON");
@@ -5066,9 +5139,44 @@ mod tests {
             whatami: "peer",
             version: "0.1.0",
             locators: &[],
+            metadata_json: "null",
             read,
             stats: None,
         }
+    }
+
+    /// §5.23 `adminspace-core` — the answerer serves the context's `metadata`
+    /// as `local_data`'s field, and serves a CHANGED one on the next GET.
+    ///
+    /// Two GETs through one answerer with two contexts, because the host reads
+    /// the value per GET off its live config (upstream does it inside the
+    /// handler) and a field fixed at construction would pass a single GET. The
+    /// second value differs from the first in every way the field can carry —
+    /// an object against `null` — so neither can stand in for the other.
+    #[test]
+    fn local_data_serves_the_metadata_the_context_carries_on_each_get() {
+        let get = |metadata_json: &str| {
+            let mut out = RecordingReply::default();
+            let view = admin_view("@/a1b2/peer");
+            let ctx = AdminAnswerCtx {
+                metadata_json,
+                ..admin_ctx(true)
+            };
+            let _ = answer_admin_query(&view, &mut out, &ctx, &[], &[], &[], "{}");
+            let body = out
+                .replies
+                .iter()
+                .find(|(k, _)| k == "@/a1b2/peer")
+                .map(|(_, p)| String::from_utf8_lossy(p).into_owned())
+                .expect("local_data replied");
+            let root: serde_json::Value = serde_json::from_str(&body).expect("local_data is JSON");
+            root["metadata"].clone()
+        };
+        assert_eq!(
+            get(r#"{"location":"Penny Lane","name":"strawberry"}"#),
+            serde_json::json!({"location": "Penny Lane", "name": "strawberry"})
+        );
+        assert_eq!(get("null"), serde_json::Value::Null);
     }
 
     /// R311y810 — the same context carrying a stats registry, for the tests

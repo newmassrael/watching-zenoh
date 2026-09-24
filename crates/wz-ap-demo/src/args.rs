@@ -489,6 +489,32 @@ pub(crate) fn parse_pair(args: &[String], flag: &str) -> Option<String> {
     None
 }
 
+/// §5.23 `adminspace-core` — `--metadata <value>`: the node config's
+/// `metadata`, a JSON5 value, which a `--config` file's `metadata` key expands
+/// to. Every run-mode that hosts an adminspace serves it as `local_data`'s
+/// `metadata`.
+///
+/// Read ONCE, before any run-mode starts, and refused rather than dropped when
+/// it cannot be served: a value that is not JSON5, or that holds a number
+/// literal upstream's parser cannot read, is one a zenoh node would not start
+/// on, and a node that started with its metadata silently missing is the
+/// misconfiguration `--config` exists to end. A file's value never fails here —
+/// the config reader refused it first — so this refusal is for a flag typed by
+/// hand.
+pub(crate) fn metadata_flag(
+    args: &[String],
+) -> Result<Option<wz::runtime_tokio::json5::Json5Value>, String> {
+    let Some(text) = parse_pair(args, "--metadata") else {
+        return Ok(None);
+    };
+    let value = wz::runtime_tokio::json5::parse(&text)
+        .map_err(|e| format!("--metadata {text:?} is not a JSON5 value: {e}"))?;
+    value
+        .to_upstream_value_json_text()
+        .map_err(|e| format!("--metadata: {e}; stock zenoh refuses it too"))?;
+    Ok(Some(value))
+}
+
 /// R2099 (open-debt item 512) — one spelling of "an endpoint LIST on argv":
 /// comma-separated, each member trimmed, empty members dropped.
 ///
@@ -1798,6 +1824,37 @@ pub(crate) fn expand_stock_zenoh_config_for_build(
             .unwrap_or_default();
         exp.pair("plugins", "--plugins", section, blocked);
     }
+    // §5.23 `adminspace-core` — `metadata`, onto `--metadata <value>`: the whole
+    // value as JSON5 text, taken VERBATIM like `--plugins`, so nothing is
+    // approximated. Every run-mode that hosts an adminspace takes it; the value
+    // is served as `local_data`'s `metadata`.
+    if named("metadata") {
+        // The per-build sink list says whether ANY run-mode of this binary can
+        // serve the value; this says whether THIS run does. Three run-modes host
+        // an adminspace, and `--router-hat` only in a build with its admin host,
+        // so a one-shot client (the drop-in's shape) or a `--router` run is told
+        // the value was withheld rather than reported applied to a node that has
+        // nowhere to serve it.
+        let run_flag = typed_role
+            .map(|(flag, _)| flag)
+            .or(selected.as_ref().map(|s| s.flag));
+        let hosts_an_adminspace = match run_flag {
+            Some("--peer") | Some("--storage-host") => true,
+            Some("--router-hat") => cfg!(feature = "adminspace-router-linkstate"),
+            _ => false,
+        };
+        let blocked = no_sink("metadata").or_else(|| {
+            (!hosts_an_adminspace).then_some(KeyEffect::WithheldFromThisRun(
+                "an adminspace host (this run-mode serves none)",
+            ))
+        });
+        let value = cfg
+            .metadata
+            .as_ref()
+            .map(|value| value.to_json5_text())
+            .unwrap_or_default();
+        exp.pair("metadata", "--metadata", value, blocked);
+    }
     // The adminspace block, whose three upstream keys expand to four wz flags.
     // Keyed on the BLOCK rather than on `adminspace/enabled`, because a
     // document that names only a permission still describes an admin space —
@@ -3050,6 +3107,16 @@ pub(crate) const ARGV_ONLY_KIND_LEDGER: &[(&str, &str, &str)] = &[
          starts the host on a FILE naming one storage and requires a REAL pico \
          client to read the storage's status and then its own put back.",
     ),
+    // §5.23 `adminspace-core` — `metadata`. The value travels in the REPLY to an
+    // admin GET of the node's root key, and no leg reads it there yet.
+    (
+        "metadata",
+        KIND_NOT_YET_READ,
+        "expands to `--metadata <value>`; carried as the `metadata` field of \
+         the root admin reply, upstream's `local_data` \
+         (`zenoh/src/net/runtime/adminspace.rs` @ `\"metadata\": \
+         context.runtime.config().lock().metadata(),`).",
+    ),
 ];
 
 #[cfg(feature = "zenoh-config")]
@@ -3218,6 +3285,19 @@ pub(crate) fn config_keys_the_demo_drops() -> Vec<&'static str> {
     // compiles that run-mode at all: `--storage-host` exits(2) without it.
     if !cfg!(feature = "adminspace-config-hotreload") {
         out.push("plugins");
+    }
+    // §5.23 `adminspace-core` — `metadata`'s sink is an adminspace host's
+    // `local_data`, and this binary has three: `--peer` (`routing-peer`),
+    // `--router-hat` (its admin host is `adminspace-router-linkstate`, not the
+    // bare `router-hat-router`) and `--storage-host`
+    // (`adminspace-config-hotreload`). A build with none of them has nowhere to
+    // serve the value from.
+    if !cfg!(any(
+        feature = "routing-peer",
+        feature = "adminspace-router-linkstate",
+        feature = "adminspace-config-hotreload"
+    )) {
+        out.push("metadata");
     }
     // R2633 — `--router-link-weight` is parsed by the `--router-hat` arm alone,
     // and the types it builds come from an OPTIONAL dependency the same feature
@@ -4539,6 +4619,13 @@ mod stock_config_tests {
                 r#"{ mode: "peer" }"#,
                 r#"{ mode: "peer", plugins: { storage_manager: { storages:
                      { demo: { key_expr: "demo/**", volume: "memory" } } } } }"#,
+            ),
+            // §5.23 `adminspace-core` — a value, which the peer run-mode's
+            // adminspace serves.
+            (
+                "metadata",
+                r#"{ mode: "peer" }"#,
+                r#"{ mode: "peer", metadata: { name: "strawberry" } }"#,
             ),
         ]
     }

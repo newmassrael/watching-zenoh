@@ -235,6 +235,27 @@ fn main() -> ExitCode {
         }
     };
 
+    // §5.23 `adminspace-core` — `--metadata <value>`, read ONCE beside the
+    // tuning above for the same reason: every run-mode that hosts an
+    // adminspace serves the same value, and an unreadable one is refused before
+    // any of them starts.
+    let metadata = match crate::args::metadata_flag(rest) {
+        Ok(m) => m,
+        Err(message) => {
+            eprintln!("wz-ap-demo: {message}");
+            return ExitCode::from(2);
+        }
+    };
+    // A build that compiles none of the run-modes below still READS and CHECKS
+    // the value — a malformed flag is refused whatever the build — and then has
+    // nowhere to hand it.
+    #[cfg(not(any(
+        feature = "routing-peer",
+        feature = "router-hat-router",
+        feature = "adminspace-config-hotreload"
+    )))]
+    let _ = metadata;
+
     // R2112 (open-debt items 102 + 210) — `--timestamping <true|false>`, read
     // ONCE beside the tuning above and for the same reason: it is a NODE-scoped
     // policy, so every run mode must resolve one answer, and a malformed value
@@ -817,6 +838,7 @@ fn main() -> ExitCode {
                     config_writable,
                     config_write_permit,
                     no_admin_read,
+                    metadata: metadata.clone(),
                     put_key,
                     put_payload,
                     #[cfg(feature = "pubsub-delete")]
@@ -1108,6 +1130,8 @@ fn main() -> ExitCode {
                     // `Default` false with no flag to move it, so the config-write
                     // subscriber R2393 added could never apply anything.
                     config_write_permit: rest.iter().any(|a| a == "--config-write-permit"),
+                    // §5.23 `adminspace-core` — the one value read above.
+                    metadata: metadata.clone(),
                     connect_retry,
                     // R2159 (open-debt item 229) — resolved against the same
                     // column the peer arm uses: upstream's `connect` defaults
@@ -1228,6 +1252,8 @@ fn main() -> ExitCode {
                     // R2788 — the `plugins` section as JSON5 text, which a
                     // `--config` file's `plugins` key expands to.
                     plugins: parse_pair(rest, "--plugins"),
+                    // §5.23 `adminspace-core` — the one value read above.
+                    metadata: metadata.clone(),
                     tuning,
                 },
             )

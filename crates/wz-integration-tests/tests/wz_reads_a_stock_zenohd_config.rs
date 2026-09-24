@@ -559,6 +559,13 @@ fn the_defaults_each_implementation_falls_back_to_are_pinned_against_a_real_zeno
     // Keys a real zenohd resolves to `null` for a silent file: the tree has no
     // answer, so this leg deliberately does NOT compare them, and says so.
     const THE_TREE_ANSWERS_NULL: &[&str] = &[
+        // §5.23 `adminspace-core` — upstream's field is a bare `Value` with no
+        // default of its own (`commons/zenoh-config/src/lib.rs` @
+        // `metadata: Value,`), so a silent file resolves it to `null`. Unlike
+        // the rows below, that `null` IS the value upstream serves, and it is
+        // wz's too: `WzConfig::admin_metadata_json` answers `null` for a
+        // config that never set the key.
+        "metadata",
         "id",
         "namespace",
         "queries_default_timeout",
@@ -3347,6 +3354,12 @@ fn a_wz_node_configured_only_by_a_stock_zenoh_config_reaches_a_real_zenohd() {
     timeout_ms: 0,
     exit_on_failure: true,
   }},
+  // §5.23 `adminspace-core` — `metadata`, named for the reason the bind phase's
+  // three are: it must reach NOTHING in this invocation. Its sink is an
+  // adminspace host's `local_data`, and a one-shot client hosts none, so the
+  // expansion withholds it by name. The value is upstream's own example
+  // (`DEFAULT_CONFIG.json5` @ `metadata: {{`).
+  metadata: {{ name: "strawberry", location: "Penny Lane" }},
   // R311y846 — the four `multicast` leaves are named here BECAUSE they must
   // reach nothing in this invocation, which is the half the unit tests cannot
   // put in front of the binary. Each carries a command-line precondition this

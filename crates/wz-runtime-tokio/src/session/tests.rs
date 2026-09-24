@@ -3391,8 +3391,10 @@ fn declare_adminspace_surface_document_arrives_over_the_query_path() {
     // value, so a consumer that parsed revision 1 (and therefore knew that field
     // was permanently `null`) would misread this document. That is exactly the
     // condition the revision exists to signal.
+    // §5.23 `adminspace-core` — 2 -> 3, for the same reason: `metadata` left
+    // `unspoken` and is now the node config's value.
     assert_eq!(
-        doc["revision"], 2,
+        doc["revision"], 3,
         "the document declares its contract: {got}"
     );
 

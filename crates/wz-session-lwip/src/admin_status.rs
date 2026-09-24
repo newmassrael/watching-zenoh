@@ -271,6 +271,11 @@ pub fn host_admin_queryable(
             whatami: identity.whatami,
             version: &identity.version,
             locators: &identity.locators,
+            // §5.23 `adminspace-core` — this node's config is its connection
+            // control, which holds `connect/endpoints` and nothing else, so no
+            // document ever set `metadata` here: `null`, upstream's value for a
+            // config that sets none.
+            metadata_json: "null",
             read,
             stats: None,
         };

@@ -4086,6 +4086,9 @@ pub(crate) struct PeerOpts {
     /// compiled out it is a no-op (permissive read). The read-side mirror of
     /// [`config_write_permit`](Self::config_write_permit).
     pub no_admin_read: bool,
+    /// §5.23 `adminspace-core` — `--metadata <value>`, the node config's
+    /// `metadata`, served as `local_data`'s field. `None` = unset, served `null`.
+    pub metadata: Option<wz::runtime_tokio::json5::Json5Value>,
     /// R311y48 — originate a Put to this key each app tick carrying
     /// [`put_payload`](Self::put_payload) (the wire driver for a config-write
     /// PUT). Inert unless both are set.
@@ -4782,6 +4785,9 @@ async fn run_peer_until(
         read: !no_admin_read,
         write: config_write_permit,
     });
+    // §5.23 `adminspace-core` — the initial `metadata`, into the SAME live config
+    // the admin host reads per GET, so a runtime write replaces it there.
+    let cfg = with_metadata_flag(cfg, opts.metadata.as_ref());
     let wz_config = std::rc::Rc::new(std::cell::RefCell::new(cfg));
     {
         let cfg = wz_config.borrow();
@@ -4936,6 +4942,9 @@ async fn run_peer_until(
             let admin_read =
                 wz::runtime_tokio::admin_read_permit(&shared.borrow().admin_permissions());
             let config_json = shared.borrow().to_admin_json();
+            // §5.23 `adminspace-core` — per GET off the same live config, as
+            // upstream reads it inside its handler.
+            let metadata_json = String::from(shared.borrow().admin_metadata_json());
             // R2844 — the NODE's registry, which the face loop fills with every
             // face this peer holds. This was `None` since R311y810: wz's counters
             // are per-session and this node holds N faces, and there was no
@@ -4948,6 +4957,7 @@ async fn run_peer_until(
                 whatami: whatami_str,
                 version: &version,
                 locators: &locators,
+                metadata_json: &metadata_json,
                 read: admin_read,
                 stats: stats.as_ref(),
             };
@@ -5929,6 +5939,8 @@ pub(crate) struct RouterHatOpts {
     /// shipping wz ROUTER applied it; the permit now rides the same live
     /// `WzConfig::admin_permissions` slice the peer host reads, re-resolved per GET.
     pub no_admin_read: bool,
+    /// §5.23 `adminspace-core` — `--metadata <value>`; see [`PeerOpts::metadata`].
+    pub metadata: Option<wz::runtime_tokio::json5::Json5Value>,
     /// R2393 (§5.23 adminspace-write) — `--config-write-permit` GRANTS this router's
     /// config-WRITE gate, the write-side twin of `no_admin_read` above and the same
     /// bare-presence flag `--peer` and `--storage-host` already parse.
@@ -6298,6 +6310,14 @@ async fn run_router_hat_until(
                 // flag is what makes the grant expressible at all.
                 write: config_write_permit,
             });
+        // §5.23 `adminspace-core` — the initial `metadata`, under the same gate as
+        // the admin host that serves it.
+        #[cfg(feature = "adminspace-router-linkstate")]
+        let cfg = with_metadata_flag(cfg, opts.metadata.as_ref());
+        // A router built without its admin host has no `local_data` to serve the
+        // value from; `config_keys_the_demo_drops` reports the key for that build.
+        #[cfg(not(feature = "adminspace-router-linkstate"))]
+        let _ = &opts.metadata;
         cfg.with_router_link_weights(opts.router_link_weights.clone())
     }));
 
@@ -6693,11 +6713,15 @@ async fn run_router_hat_until(
             let stats = node_stats_h
                 .as_ref()
                 .map(wz::runtime_tokio::node_stats::NodeStats::snapshot);
+            // §5.23 `adminspace-core` — per GET off the same shared config the
+            // permit above is read from.
+            let metadata_json = String::from(admin_cfg.borrow().admin_metadata_json());
             let ctx = AdminAnswerCtx {
                 zid_hex: &zid_hex,
                 whatami: whatami_str,
                 version: &version,
                 locators: &locators,
+                metadata_json: &metadata_json,
                 read: admin_read,
                 // R2844 — the node's registry; see the peer host above.
                 stats: stats.as_ref(),
@@ -7661,6 +7685,47 @@ fn admin_config_json_of(
     }
 }
 
+/// §5.23 `adminspace-core` — seed a host's live config with the `--metadata`
+/// value, once, the way every run-mode that hosts an adminspace does.
+///
+/// ⚠ The `expect` is an assertion about `args::metadata_flag`, not a runtime
+/// failure mode: that parser refuses, before any run-mode starts, every value
+/// this builder could refuse, so reaching the `Err` arm means the two readers
+/// disagree about what upstream can read — a defect to surface, not a value to
+/// replace quietly with `null`.
+#[cfg(any(
+    feature = "routing-peer",
+    feature = "adminspace-router-linkstate",
+    feature = "adminspace-config-hotreload"
+))]
+fn with_metadata_flag(
+    cfg: wz::runtime_tokio::config::WzConfig,
+    metadata: Option<&wz::runtime_tokio::json5::Json5Value>,
+) -> wz::runtime_tokio::config::WzConfig {
+    match metadata {
+        Some(value) => cfg
+            .with_metadata(value)
+            .expect("--metadata was refused by args::metadata_flag if upstream cannot read it"),
+        None => cfg,
+    }
+}
+
+/// §5.23 `adminspace-core` — the storage host's `local_data` `metadata`, off
+/// that same live instance per GET.
+///
+/// A poisoned lock yields `null`, for the reason [`admin_permissions_of`]
+/// gives: the host reports nothing it cannot read, and `null` is the value
+/// that claims nothing.
+#[cfg(feature = "adminspace-config-hotreload")]
+fn admin_metadata_json_of(
+    cfg: &std::sync::Arc<std::sync::Mutex<wz::runtime_tokio::config::WzConfig>>,
+) -> String {
+    match cfg.lock() {
+        Ok(c) => c.admin_metadata_json().to_string(),
+        Err(_) => "null".to_string(),
+    }
+}
+
 /// R311y277 (§5.23 `adminspace-config-hotreload` ACTIVATION) — the storage-HOSTING
 /// run-mode (`--storage-host <listen>`): the config-diff-driven storage lifecycle
 /// driven END-TO-END over the wire by a stock zenoh-pico client. A pico `z_put`
@@ -7768,6 +7833,8 @@ pub(crate) struct StorageHostOpts {
     /// bare presence flag `--peer` and `--router-hat` parse, so one spelling means
     /// one thing across every run-mode that hosts an adminspace.
     pub no_admin_read: bool,
+    /// §5.23 `adminspace-core` — `--metadata <value>`; see [`PeerOpts::metadata`].
+    pub metadata: Option<wz::runtime_tokio::json5::Json5Value>,
     /// R2374 — `--config-write-permit` PERMITS the config writes this host's
     /// subscriber receives, the write-side twin of the flag above and the same
     /// spelling `--peer` already parses.
@@ -7802,6 +7869,7 @@ pub(crate) async fn run_storage_host(listen: &str, opts: StorageHostOpts) -> io:
         no_admin_read,
         config_write_permit,
         plugins: startup_plugins,
+        metadata,
         tuning,
     } = opts;
     // R2788 — the section is applied ONCE, at the first accepted session: a
@@ -7995,14 +8063,17 @@ pub(crate) async fn run_storage_host(listen: &str, opts: StorageHostOpts) -> io:
                                                                       // run-mode outside `permissions.write`. Seeded here, re-read per PUT below,
                                                                       // and default-DENY like zenoh's `PermissionsConf` — a host that granted writes
                                                                       // to anyone by default is the asymmetry the write gate exists to remove.
-    let admin_cfg = std::sync::Arc::new(std::sync::Mutex::new(
+    let admin_cfg = std::sync::Arc::new(std::sync::Mutex::new(with_metadata_flag(
         WzConfig::from_init_params(&params).with_admin_permissions(
             wz::runtime_tokio::adminspace::AdminSpacePermissions {
                 read: !no_admin_read,
                 write: config_write_permit,
             },
         ),
-    ));
+        // §5.23 `adminspace-core` — the initial `metadata`, into the live config
+        // the admin GET reads.
+        metadata.as_ref(),
+    )));
     log::info!(
         "wz-ap-demo storage-host: adminspace read permit = {}",
         wz::runtime_tokio::admin_read_permit(&admin_permissions_of(&admin_cfg))
@@ -8341,6 +8412,9 @@ pub(crate) async fn run_storage_host(listen: &str, opts: StorageHostOpts) -> io:
                     // GET, so the two things this reply reports about the config
                     // cannot come from different moments.
                     config_json: admin_config_json_of(&get_cfg),
+                    // §5.23 `adminspace-core` — the config's `metadata`, off the
+                    // same live instance per GET.
+                    metadata_json: admin_metadata_json_of(&get_cfg),
                     // R2844 — the host's registry across every client session it
                     // has served. This was `None` since R311y810 on the premise that
                     // this node holds N faces; re-measured, it holds ONE session at
@@ -9750,6 +9824,7 @@ mod peer_quic_cert_tests {
             config_writable: false,
             config_write_permit: false,
             no_admin_read: false,
+            metadata: None,
             put_key: None,
             put_payload: None,
             #[cfg(feature = "pubsub-delete")]
@@ -9889,6 +9964,7 @@ mod peer_failfast_tests {
             config_writable: false,
             config_write_permit: false,
             no_admin_read: false,
+            metadata: None,
             put_key: None,
             put_payload: None,
             #[cfg(feature = "pubsub-delete")]

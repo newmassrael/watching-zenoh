@@ -1199,6 +1199,21 @@ pub struct ZenohNodeConfig {
     /// `None` = the document named no section, which a running zenohd resolves
     /// to an empty one; a present-but-empty section is `Some({})`.
     pub plugins: Option<Json5Value>,
+    /// §5.23 `adminspace-core` — `metadata`, the operator's free-form value,
+    /// which upstream carries without interpreting and serves as the
+    /// `metadata` field of the adminspace's `local_data`
+    /// (`zenoh/src/net/runtime/adminspace.rs` @
+    /// `"metadata": context.runtime.config().lock().metadata(),`).
+    ///
+    /// Kept as the VALUE the document stated, because upstream keeps it as one
+    /// (`commons/zenoh-config/src/lib.rs` @ `metadata: Value,`) and nothing in
+    /// either implementation reads inside it. The reader refuses it only where
+    /// upstream's parser refuses it — a number literal `json5` cannot read —
+    /// which is checked here, at ingest, so a node never starts on a document
+    /// a zenoh node would not have started on.
+    ///
+    /// `None` = the document did not say, which upstream resolves to `null`.
+    pub metadata: Option<Json5Value>,
 }
 
 impl Default for ZenohNodeConfig {
@@ -1309,6 +1324,7 @@ impl Default for ZenohNodeConfig {
             downsampling: Vec::new(),
             access_control: AclConfigInputs::default(),
             plugins: None,
+            metadata: None,
         }
     }
 }
@@ -1925,6 +1941,13 @@ pub const HONOURED_CONFIG_KEYS: &[&str] = &[
     // leaf by leaf wherever it names something no plugin of wz reads — another
     // plugin entirely, or a storage manager field wz does not act on.
     "plugins",
+    // §5.23 `adminspace-core` — `metadata`, MOVED here from
+    // `UNHONOURED_UPSTREAM_CONFIG_KEYS`, so the surface total is unchanged. The
+    // reader carries the value and every adminspace host serves it as
+    // `local_data`'s `metadata`, which is the one thing upstream does with it.
+    // Its deeper leaves are claimed by `HONOURED_VALUES`: the whole value is
+    // served, so no leaf below it is one wz ignores.
+    "metadata",
 ];
 
 /// R311y849 — the leaves that live INSIDE a honoured key which is a subtree
@@ -2138,7 +2161,9 @@ pub const UNHONOURED_UPSTREAM_CONFIG_KEYS: &[&str] = &[
     // R2650 — `low_pass_filter` LEFT this list for `HONOURED_CONFIG_KEYS`. The
     // surface total is unchanged: this partition's two halves sum to the upstream
     // surface, so a move keeps the denominator and only shifts the fraction.
-    "metadata",
+    // §5.23 `adminspace-core` — `metadata` LEFT this list for
+    // `HONOURED_CONFIG_KEYS`: the reader carries the value and the adminspace
+    // serves it. Same partition, same total.
     "open/return_conditions/connect_scouted",
     "open/return_conditions/declares",
     // R2788 — `plugins` LEFT this list for `HONOURED_CONFIG_KEYS`: the reader
@@ -2299,9 +2324,9 @@ pub const UNHONOURED_UPSTREAM_CONFIG_KEYS: &[&str] = &[
 ///   large-message SHM promotion path (`LargeMessageTransportOpt`). wz HAS
 ///   shared memory and still lacks this one, which is why it is worth a group.
 /// * `scouting/delay` — a startup scouting delay (`ScoutingDelay`).
-/// * `metadata` — a config-metadata surface (`ConfigMetadata`). Free-form
-///   operator annotation upstream never reads either; `AdminLocalData` emits a
-///   hardcoded null where it would land.
+/// * (§5.23 `adminspace-core`: `metadata` LEFT this list. The row said upstream
+///   "never reads" it, which was true of the node and false of the adminspace:
+///   `local_data` serves it, and wz's `AdminLocalData` now does too.)
 /// * `scouting/gossip/enabled` — ⚠ the one judgement call in this list. wz HAS
 ///   the gossip plane (see [`UNHONOURED_READER_GAP`]), but no gate that turns it
 ///   OFF (`set_gossip_enabled`), so honouring this key means BUILDING the switch
@@ -2355,7 +2380,9 @@ pub const UNHONOURED_BEYOND_WZ: &[&str] = &[
     // was true when it was written and is what `crate::startup_phase` now is.
     // That is the group table working as designed — a capability wz grows reds
     // its own row.
-    "metadata",
+    // §5.23 `adminspace-core` — `metadata` LEFT this list. Its group row said
+    // wz lacked "a config-metadata surface", and the adminspace now serves the
+    // value, so the capability the row named is one wz has.
     "open/return_conditions/connect_scouted",
     "open/return_conditions/declares",
     "plugins_loading/search_dirs",
@@ -2766,7 +2793,8 @@ pub const UNHONOURED_BEYOND_GROUPS: &[(&str, &str, &[&str])] = &[
     // when wz built zenoh's drop arm, and a group anchored on "a name absent
     // from wz's code" cannot survive that name arriving. An empty group left
     // behind would be a claim with no subject.
-    ("a config-metadata surface", "ConfigMetadata", &["metadata"]),
+    // §5.23 `adminspace-core` — the config-metadata group is GONE for the same
+    // reason: its single key moved to [`HONOURED_CONFIG_KEYS`].
     (
         "a gate that turns the gossip plane off",
         "set_gossip_enabled",
@@ -2895,7 +2923,8 @@ pub const UNHONOURED_CITATION_LEDGER: &[(&str, &str, &str)] = &[
     // R2650 — `low_pass_filter`'s row is GONE: this ledger carries kind evidence
     // for UNHONOURED keys, and `unhonoured_kind_evidence_gate` reds on a row whose
     // key the reader now honours.
-    ("metadata", "not-this-key", "AdminLocalData"),
+    // §5.23 `adminspace-core` — `metadata`'s row is GONE: the reader honours
+    // the key now, and `AdminLocalData`'s "not this key" disclaimer went with it.
     // R2788 — `plugins`' row is GONE: the reader honours the key now, and this
     // ledger carries evidence for unhonoured keys only.
     ("plugins_loading/enabled", "wz-has-it", "PluginRegistry"),
@@ -3359,6 +3388,32 @@ pub fn honours_config_key(path: &str) -> bool {
         // R2788 — the leaves inside a SECTION that a plugin of wz reads.
         || (HONOURED_SECTIONS.iter().any(|section| path.starts_with(section))
             && plugins_leaf_disposition(path) == ConfigKeyDisposition::Honoured)
+        // §5.23 `adminspace-core` — the leaves inside a VALUE wz carries whole.
+        || inside_a_honoured_value(path)
+}
+
+/// §5.23 `adminspace-core` — the honoured keys whose content is a free-form
+/// VALUE that wz carries whole, so every leaf a document writes below one is a
+/// leaf wz acts on.
+///
+/// The fifth way a denominator-shifting key's leaves are claimed, and not one
+/// of the other four. A mode table and named subtree fields claim leaves that
+/// have MEANING to wz; a section splits its leaves between a plugin that reads
+/// them and a report. Here nothing reads inside the value at all — upstream
+/// does not either — and the value as a whole is what is served, so no leaf
+/// below it can be one "wz does not honour". Reporting `metadata/name` as
+/// ignored while the adminspace serves it back would be the item-215 defect in
+/// a new place.
+const HONOURED_VALUES: &[&str] = &["metadata"];
+
+/// Whether `path` is one of [`HONOURED_VALUES`] or lies strictly below one.
+fn inside_a_honoured_value(path: &str) -> bool {
+    HONOURED_VALUES.iter().any(|key| {
+        path == *key
+            || (path.len() > key.len()
+                && path.starts_with(key)
+                && path.as_bytes()[key.len()] == b'/')
+    })
 }
 
 /// R2797 — what this build can SAY about one upstream
@@ -3699,6 +3754,20 @@ pub enum ConfigIngestError {
         /// The value as given.
         value: String,
     },
+    /// §5.23 `adminspace-core` — a value wz carries whole holds a number
+    /// literal upstream's config parser (`json5` 0.4.1) cannot read, so a zenoh
+    /// node would not start on this document either.
+    ///
+    /// Its own variant rather than [`OutOfRange`](Self::OutOfRange) because
+    /// the key has no numeric type of its own: what is out of range is one
+    /// literal somewhere inside a free-form value, and the operator needs that
+    /// literal named.
+    UnreadableNumber {
+        /// The key path.
+        path: &'static str,
+        /// Which literal, and why upstream cannot read it.
+        reason: wz_session_core::json5::UpstreamNumberError,
+    },
     /// A key stock zenoh does not know either — a typo, or a config for
     /// something that is not zenoh. Refused because zenoh refuses it.
     UnknownKey {
@@ -3733,6 +3802,9 @@ impl core::fmt::Display for ConfigIngestError {
             }
             ConfigIngestError::OutOfRange { path, value } => {
                 write!(f, "{path} value {value} is out of range")
+            }
+            ConfigIngestError::UnreadableNumber { path, reason } => {
+                write!(f, "{path}: {reason}; stock zenoh refuses it too")
             }
             ConfigIngestError::UnknownKey { path } => {
                 write!(f, "unknown config key {path:?}; stock zenoh refuses it too")
@@ -5960,6 +6032,24 @@ impl ZenohNodeConfig {
             out.plugins = Some(value.clone());
             named.push("plugins");
         }
+        // §5.23 `adminspace-core` — `metadata`, kept whole. Any JSON value is
+        // legal, as upstream's `Value` field makes it; the only refusal is the
+        // one upstream's own parser makes, a number literal it cannot read.
+        //
+        // ⚠ Read with `get`, NOT `honoured`: `null` is not "no instruction"
+        // here. It is a value upstream stores and serves (`Value::Null`), and a
+        // runtime write of `null` must land as one — through `honoured` it would
+        // vanish and the write would be refused as naming nothing.
+        if let Some(value) = doc.get("metadata") {
+            if let Err(reason) = value.to_upstream_value_json_text() {
+                return Err(ConfigIngestError::UnreadableNumber {
+                    path: "metadata",
+                    reason,
+                });
+            }
+            out.metadata = Some(value.clone());
+            named.push("metadata");
+        }
         if let Some(v) = want_u64(&doc, "scouting/timeout")? {
             out.scouting_timeout_ms = Some(v);
             named.push("scouting/timeout");
@@ -7144,6 +7234,12 @@ mod tests {
                 r#"{ "plugins": { "storage_manager": { "storages": { "demo":
                      { "key_expr": "demo/**", "volume": "memory" } } } } }"#,
             ),
+            // §5.23 `adminspace-core` — a nested value with a number, so the
+            // leaves below the key are exercised and `ignored` must stay empty.
+            (
+                "metadata",
+                r#"{ "metadata": { "name": "strawberry", "floor": 3 } }"#,
+            ),
             // R2230 (items 579 / 582) — this row MOVED to the tail of the table
             // when the key left `HONOURED_CONFIG_KEYS` for
             // `WZ_EXTENSION_HONOURED_KEYS`. It is still driven, and driven the
@@ -7510,15 +7606,21 @@ mod tests {
         // assertion is actually for -- a honoured subtree and an unhonoured one
         // must partition the same document differently, and this now shows both
         // in one call.
+        //
+        // §5.23 `adminspace-core` — `metadata/name` LEFT it too, for the same
+        // reason: the value is carried whole and served back, so none of its
+        // leaves is ignored. What remains is a leaf of a plugin wz does not run.
         let filled = ZenohNodeConfig::from_json5(
             r#"{ "connect": { "retry": { "period_init_ms": 1000 } },
                  "metadata": { "name": "strawberry" },
                  "plugins": { "rest": { "http_port": 8000 } } }"#,
         )
         .expect("a filled-in upstream subtree is a valid config");
+        assert_eq!(filled.ignored, vec!["plugins/rest/http_port"]);
         assert_eq!(
-            filled.ignored,
-            vec!["metadata/name", "plugins/rest/http_port"]
+            filled.config.metadata,
+            Some(wz_session_core::json5::parse(r#"{ "name": "strawberry" }"#).unwrap()),
+            "the value the document stated is the value carried"
         );
         assert_eq!(
             filled
@@ -9443,6 +9545,7 @@ mod tests {
         let mut mode = Vec::new();
         let mut subtree = Vec::new();
         let mut section = Vec::new();
+        let mut value = Vec::new();
         let mut opaque = Vec::new();
         for key in DEEPENABLE_UPSTREAM_KEYS {
             let honoured = HONOURED_CONFIG_KEYS.contains(key);
@@ -9453,14 +9556,22 @@ mod tests {
             // R2788 — the fourth claim: a section whose members' leaves are
             // judged by their owner's reader.
             let claimed_by_section = HONOURED_SECTIONS.contains(key);
+            // §5.23 `adminspace-core` — the fifth claim: a value carried whole.
+            let claimed_by_value = HONOURED_VALUES.contains(key);
             assert!(
-                [claimed_by_table, claimed_by_fields, claimed_by_section]
-                    .iter()
-                    .filter(|claimed| **claimed)
-                    .count()
+                [
+                    claimed_by_table,
+                    claimed_by_fields,
+                    claimed_by_section,
+                    claimed_by_value
+                ]
+                .iter()
+                .filter(|claimed| **claimed)
+                .count()
                     <= 1,
-                "{key} is claimed twice: a mode table, named subtree fields and a \
-                 section's own reader are different readings of the same leaves"
+                "{key} is claimed twice: a mode table, named subtree fields, a \
+                 section's own reader and a value carried whole are different \
+                 readings of the same leaves"
             );
 
             if claimed_by_table {
@@ -9469,13 +9580,15 @@ mod tests {
                 subtree.push(*key);
             } else if claimed_by_section {
                 section.push(*key);
+            } else if claimed_by_value {
+                value.push(*key);
             } else {
                 opaque.push(*key);
             }
 
             if honoured {
                 assert!(
-                    claimed_by_table || claimed_by_fields || claimed_by_section,
+                    claimed_by_table || claimed_by_fields || claimed_by_section || claimed_by_value,
                     "{key} is HONOURED and its deeper leaves are claimed by \
                      nothing, so a file that fills the block gets it applied and \
                      its own fields reported as unhonoured. Add the fields to \
@@ -9485,12 +9598,18 @@ mod tests {
                 );
             } else {
                 assert!(
-                    !claimed_by_fields && !claimed_by_section,
+                    !claimed_by_fields && !claimed_by_section && !claimed_by_value,
                     "{key} is NOT honoured yet has its leaves claimed — claiming \
                      leaves under a key wz does not apply hides them from the \
                      operator"
                 );
             }
+        }
+        for key in HONOURED_VALUES {
+            assert!(
+                DEEPENABLE_UPSTREAM_KEYS.contains(key),
+                "{key} is declared a value but is not denominator-shifting"
+            );
         }
         // Every declared section is a member of the population: one that is
         // not would claim leaves below a key no zenohd lets a file deepen.
@@ -9506,17 +9625,19 @@ mod tests {
         // that stopped being exercised.
         println!(
             "denominator-shifting keys: {} total — {} mode-table {mode:?}, \
-             {} named-subtree {subtree:?}, {} section {section:?}, {} opaque \
-             {opaque:?}",
+             {} named-subtree {subtree:?}, {} section {section:?}, {} value \
+             {value:?}, {} opaque {opaque:?}",
             DEEPENABLE_UPSTREAM_KEYS.len(),
             mode.len(),
             subtree.len(),
             section.len(),
+            value.len(),
             opaque.len()
         );
         assert!(!mode.is_empty(), "the mode-table bucket emptied");
         assert!(!subtree.is_empty(), "the named-subtree bucket emptied");
         assert!(!section.is_empty(), "the section bucket emptied");
+        assert!(!value.is_empty(), "the value bucket emptied");
         assert!(!opaque.is_empty(), "the opaque bucket emptied");
     }
 
@@ -9622,7 +9743,8 @@ mod tests {
     /// * the opaque probe's value is never read by anything.
     #[test]
     fn every_denominator_shifting_key_puts_its_deeper_leaves_in_the_right_partition() {
-        let (mut mode_n, mut subtree_n, mut section_n, mut opaque_n) = (0usize, 0, 0, 0);
+        let (mut mode_n, mut subtree_n, mut section_n, mut value_n, mut opaque_n) =
+            (0usize, 0, 0, 0, 0);
 
         for key in DEEPENABLE_UPSTREAM_KEYS {
             let fields: Vec<&&str> = HONOURED_SUBTREE_LEAVES
@@ -9630,7 +9752,24 @@ mod tests {
                 .filter(|leaf| strictly_below(leaf, key))
                 .collect();
 
-            if HONOURED_SECTIONS.contains(key) {
+            if HONOURED_VALUES.contains(key) {
+                // §5.23 `adminspace-core` — a VALUE carried whole: any leaf a
+                // document writes below it is served back, so the probe that an
+                // opaque key must REPORT is one this key must NOT report, and it
+                // names the key it sits under. The same probe as the opaque arm,
+                // with the opposite verdict — which is the whole difference.
+                let probe = format!("{key}/zzz_probe_leaf");
+                let doc = nested(&probe, "1");
+                let ingest = ZenohNodeConfig::from_json5(&doc)
+                    .unwrap_or_else(|e| panic!("{probe}: refused: {e:?}\n{doc}"));
+                assert!(
+                    !ingest.ignored.contains(&probe) && ingest.named.contains(key),
+                    "{key}: `{probe}` is part of a value wz carries and serves, so \
+                     reporting it ignored would be false\n{:?}",
+                    ingest.ignored
+                );
+                value_n += 1;
+            } else if HONOURED_SECTIONS.contains(key) {
                 // R2788 — a SECTION: a leaf its owner's reader honours is
                 // named and not reported, and a leaf of a member nothing in wz
                 // reads is reported. Both probes put an OBJECT at member depth,
@@ -9731,16 +9870,16 @@ mod tests {
 
         println!(
             "deeper-leaf partitions driven: {mode_n} mode-table, {subtree_n} \
-             named-subtree, {section_n} section, {opaque_n} opaque"
+             named-subtree, {section_n} section, {value_n} value, {opaque_n} opaque"
         );
         assert_eq!(
-            mode_n + subtree_n + section_n + opaque_n,
+            mode_n + subtree_n + section_n + value_n + opaque_n,
             DEEPENABLE_UPSTREAM_KEYS.len(),
             "a member of the population was driven through no probe at all"
         );
         // Per-bucket floors. A total floor would let the opaque bucket carry a
         // shrinking mode bucket, and the mode arm is the one R2141 grew.
-        assert!(mode_n > 0 && subtree_n > 0 && section_n > 0 && opaque_n > 0);
+        assert!(mode_n > 0 && subtree_n > 0 && section_n > 0 && value_n > 0 && opaque_n > 0);
     }
 
     /// R2797 — the invariant `config_key_disposition`'s

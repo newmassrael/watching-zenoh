@@ -86,6 +86,13 @@ MIN_SLICES = 3
 #: is observable the moment it is made (a storage manager's storages follow its
 #: document). The slice is the section document, held because upstream's is a
 #: document and only the plugin knows what its JSON means.
+#:
+#: §5.23 `adminspace-core` — `metadata` joins, and it passes the same predicate
+#: by the route the permits do: upstream's `local_data` takes it off the LIVE
+#: config inside the admin handler
+#: (`zenoh/src/net/runtime/adminspace.rs` @
+#: `"metadata": context.runtime.config().lock().metadata(),`), so a runtime
+#: write is served by the very next GET. PULL, like `admin_permissions`.
 PINNED_SLICES = frozenset(
     {
         "interceptors",
@@ -93,6 +100,7 @@ PINNED_SLICES = frozenset(
         "router_link_weights",
         "connect_endpoints",
         "plugins",
+        "metadata",
     }
 )
 

@@ -118,6 +118,9 @@ pub(crate) fn print_usage() {
     eprintln!("                             re-stamps it. zenoh");
     eprintln!("                             timestamping/drop_future_timestamp, which unlike");
     eprintln!("                             its sibling above is NOT per-role");
+    eprintln!("    --metadata <json5>       free-form value this node's adminspace serves as");
+    eprintln!("                             the `metadata` field of @/<zid>/<whatami>, in every");
+    eprintln!("                             run-mode that hosts an adminspace. zenoh metadata");
     eprintln!("    --scout                  initiator mode with a DISCOVERED locator: emit a");
     eprintln!("                             multicast Scout on 224.0.0.224:7446 and dial the");
     eprintln!("                             locator the first peer Hello advertises. Mutually");
