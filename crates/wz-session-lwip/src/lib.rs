@@ -54,6 +54,10 @@ pub mod app_layer;
 // `connect/endpoints` config write on that application layer.
 #[cfg(feature = "adminspace-write")]
 pub mod admin_host;
+// R2830 — the node keeps a session with every endpoint the control names and
+// re-dials on upstream's retry schedule; the dialling is behind a trait.
+#[cfg(feature = "adminspace-write")]
+pub mod connect_manager;
 // R2829 (§5.23 `adminspace-core`) — the node answers upstream's admin GET
 // through the shared answerer, on the same application layer.
 #[cfg(feature = "adminspace-core")]

@@ -5887,8 +5887,13 @@ layer_c1ay_cargo_test_router_hat() {
     #      peer_loop actually consults the policy. A correct RedialSchedule sitting
     #      UNUSED passes (a) and (b) while the loop stays on a fixed cadence — the
     #      falsify that proved it reds only this step (gaps [61,61,61,61]).
+    # R2830 — the schedule and its eight tests MOVED to wz-session-core (the
+    # MCU connection manager needs the same arithmetic; wz-runtime-tokio
+    # re-exports it). The filter is the module path, `retry_period::`, because
+    # the bare word also names a locator test in that crate
+    # (`a_retry_period_that_is_not_a_number_is_refused`) and would read 9.
     _runci_guarded_test "C1AY retry_period 8" 8 \
-        cargo test -p wz-runtime-tokio --lib retry_period --quiet || return 1
+        cargo test -p wz-session-core --lib retry_period:: --quiet || return 1
     _runci_guarded_test "C1AY redial_schedule 5" 5 \
         cargo test -p wz-runtime-tokio --features routing-router-hat,router-connect-reconcile --lib --quiet -- \
         the_redial_wait_grows_per_address two_addresses_do_not_share_a_wait \
@@ -10052,7 +10057,9 @@ layer_c1m_session_lwip() {
     # (`admin_host`). 3 = the two unconditional session_drive tests +
     # `a_config_write_reaches_the_control_through_the_nodes_subscriber`, the
     # number this command PRINTED.
-    _runci_guarded_test "C1m adminspace-write" 3 \
+    # R2830 3 -> 6: `connect_manager`'s three (dial on write, the per-outage
+    # retry schedule, hang-up and refusal), PRINTED by the command.
+    _runci_guarded_test "C1m adminspace-write" 6 \
         cargo test -p wz-session-lwip --features adminspace-write --quiet || return 1
     # R2829 — the node ANSWERS upstream's admin GET (`admin_status`) through
     # the shared `answer_admin_query`. Alone: 2 + the lwIP GET test = 3. With
@@ -10061,7 +10068,8 @@ layer_c1m_session_lwip() {
     # as the `config` leg's view = 6. Both numbers PRINTED by the command.
     _runci_guarded_test "C1m adminspace-core" 3 \
         cargo test -p wz-session-lwip --features adminspace-core --quiet || return 1
-    _runci_guarded_test "C1m adminspace read+write" 6 \
+    # R2830 6 -> 9: the same three `connect_manager` tests.
+    _runci_guarded_test "C1m adminspace read+write" 9 \
         cargo test -p wz-session-lwip --features adminspace-core,adminspace-write --quiet || return 1
     # R2390 (transport-multicast) — each `transport-multicast` leg moved by TWO:
     # the MCU loop's link-loss arm brought a witness test and an ordering test,

@@ -93,6 +93,18 @@ impl ConnectControl {
         critical_section::with(|cs| self.state.borrow(cs).borrow().last.clone())
     }
 
+    /// A permitted PUT of `payload` on this node's own key, for tests of the
+    /// layers that read the control.
+    #[cfg(test)]
+    pub(crate) fn apply_for_test(&self, payload: &[u8]) {
+        self.apply(
+            "a1b2",
+            "peer",
+            "@/a1b2/peer/config/connect/endpoints",
+            ConfigWriteBody::Put(payload),
+        );
+    }
+
     fn apply(&self, zid_hex: &str, whatami: &str, keyexpr: &str, body: ConfigWriteBody<'_>) {
         let mut scratch = ConnectEndpoints::new();
         critical_section::with(|cs| {

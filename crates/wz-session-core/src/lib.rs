@@ -629,6 +629,12 @@ pub mod json5;
 /// Unconditional, because it needs nothing.
 pub mod json5_lex;
 
+/// R2830 — the connection-retry schedule (zenoh's `ConnectionRetryConf`),
+/// moved from wz-runtime-tokio so the MCU connection manager re-dials on the
+/// same arithmetic the AP's re-dial substrates use. Unconditional: it needs
+/// nothing but `core`.
+pub mod retry_period;
+
 /// R2824 (§5.23) — which sub-key a config write names in a node's config
 /// space, with no allocator: the membership gates the AP decoder
 /// (`adminspace`) and the MCU decoder (`admin_connect`) both run.
