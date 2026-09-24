@@ -40,6 +40,7 @@ why the ordering rule says *before*.
 
 | round | run | commit | failing steps | debt | paid |
 |---|---|---|---|---|---|
+| R2848 | `35992477252` | `08256a69` | One failing job, `isolated-crate lanes` step **`Layer C1m`**, read to its own line: `unused import: ConnectEntry` at `wz-session-lwip/src/admin_host.rs:39` under `adminspace-write` alone — the red R2846 read on `35989144794`. This run's tree predates the fix (`7cbd858c` is not an ancestor of `08256a69`), so it is the same debt, not a new one. `validate + verify + test` went failure -> success against `35989144794` (Layer 0, paid by R2842) | — | `7cbd858c` |
 | R2847 | `35989144794` | `302037f0` | The latest completed run again, from the R2847 push: every run after it is queued or in progress (`3ca015d0` is in progress). Read by the R2843 row; nothing new is claimed | — | R2843 |
 | R2846 | `35980600365` | `27efd973` | The first run carrying R2840: its two C0 jobs are GREEN. Reds: `cross-compile + QEMU` step **`Layer Qa`** (`zenohd not at target/zenohd/zenohd`; the restore ran at 11:01:18 and the interop save at 11:02:49, the race R2842 removed) and `validate + verify + test` step **`Layer 0`** (shellcheck SC2034 at the Qa poll loop) | — | both by R2842 |
 | R2846 | `35989144794` | `302037f0` | Read to its verdict lines: `validate + verify + test` step **`Layer 0`** (SC2034, R2839's poll loop) and `isolated-crate lanes` step **`Layer C1m`** (R2841's unused import under `adminspace-write` alone) | — | Layer 0 by R2842; C1m by `7cbd858c` |
