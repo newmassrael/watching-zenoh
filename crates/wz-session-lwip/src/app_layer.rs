@@ -11,7 +11,7 @@
 //! subscriber to land on and a query no queryable to answer it, however the
 //! firmware was written.
 //!
-//! [`dispatch_to`] is that missing step, as an `on_event` value both session
+//! [`crate::app_layer::dispatch_to`] is that missing step, as an `on_event` value both session
 //! drivers take ([`crate::session_drive::run_session`] and
 //! [`crate::session_drive::spawn_session`]): every iteration's event goes to
 //! the observer, and whatever the observer staged — replies and their finals,

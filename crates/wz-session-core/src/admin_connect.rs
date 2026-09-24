@@ -10,8 +10,9 @@
 //! A host tells a zenoh node to change its connections by writing its config:
 //! a PUT on `@/<zid>/<whatami>/config/connect/endpoints` replaces the list and
 //! a DEL removes it. That is what `send_push` in upstream's admin space does
-//! for every key under `config/**` (`zenoh/src/net/runtime/adminspace.rs`),
-//! gated by `adminspace.permissions.write`, default `false`. A host that
+//! for every key under `config/**`, gated by `adminspace.permissions.write`
+//! (`zenoh/src/net/runtime/adminspace.rs` @
+//! `if !conf.adminspace.permissions().write {`), default `false`. A host that
 //! drives a stock zenohd this way drives a wz MCU the same way, and no second
 //! grammar exists for a third implementation to learn.
 //!
@@ -40,7 +41,9 @@
 //! verdict, that is moved through every return on a stack an MCU sizes by
 //! hand. So the caller lends the storage and the verdict stays a few bytes:
 //! the list is written into it and is meaningful only when the verdict is
-//! [`ConnectWriteOutcome::Replace`]. A caller keeps its live list apart from
+//! [`crate::admin_connect::ConnectWriteOutcome::Replace`] (a full path: a
+//! module's inner doc resolves from the crate root). A caller keeps its live
+//! list apart from
 //! that storage and swaps on `Replace`, so a refused write never disturbs the
 //! connections the node holds.
 //!

@@ -313,6 +313,7 @@ router-connect-reconcile,transport-link-tcp,transport-unicast|session_lifecycle_
         adminspace-metrics,\
         adminspace-plugins-handlers,\
         adminspace-router-linkstate,\
+        adminspace-write,\
         attachment-bytes,\
         codec-close,\
         codec-declare,\
