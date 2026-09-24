@@ -40,6 +40,7 @@ why the ordering rule says *before*.
 
 | round | run | commit | failing steps | debt | paid |
 |---|---|---|---|---|---|
+| R2851 | `35992477252` | `08256a69` | The latest completed run again, from the R2851 push: every run after it is queued, and `0d3dcb78`'s run (`36028036180`) has none of its 21 jobs started. Read by the R2848 row; nothing new is claimed | — | `7cbd858c` |
 | R2850 | `35992477252` | `08256a69` | The latest completed run again, from the R2850 push: every run after it is queued (`a93b8997`'s run shows queued again after reading in progress). Read by the R2848 row; nothing new is claimed | — | `7cbd858c` |
 | R2849 | `35992477252` | `08256a69` | The latest completed run again, from the R2849 push: every run after it is queued or in progress (`a93b8997` is in progress, `f5d31ee6` queued). Read by the R2848 row; nothing new is claimed | — | `7cbd858c` |
 | R2848 | `35992477252` | `08256a69` | One failing job, `isolated-crate lanes` step **`Layer C1m`**, read to its own line: `unused import: ConnectEntry` at `wz-session-lwip/src/admin_host.rs:39` under `adminspace-write` alone — the red R2846 read on `35989144794`. This run's tree predates the fix (`7cbd858c` is not an ancestor of `08256a69`), so it is the same debt, not a new one. `validate + verify + test` went failure -> success against `35989144794` (Layer 0, paid by R2842) | — | `7cbd858c` |
