@@ -15604,6 +15604,22 @@ run: bash scripts/build-zenoh-pico-cli.sh)"
             --test wz_multicast_ttl_on_the_wire_netns_zenohd_interop \
             -- --ignored --test-threads=1 || return 1
     fi
+
+    # R2854 (`adminspace-metrics`, `transport-stats`) — a router PROCESS serves
+    # its multicast group on its admin metrics leg: the group face records into
+    # the node registry, and the admin handler reads that same registry. Each
+    # half has a library witness; this is the only leg that reads the join.
+    # LAST in the layer because it rebuilds the demo with the admin legs and the
+    # counters, a superset of the build the legs above were written for. Needs
+    # no foreign binary and no namespace (`#iface=lo`), so it is not behind
+    # either guard above. 1 = the number this command PRINTED.
+    (cd crates \
+        && cargo build -p wz-ap-demo --quiet --features \
+            router-multicast-faces,locator-iface,adminspace-router-linkstate,adminspace-metrics,wz/transport-stats \
+        && cargo build -p wz-e2e-admin-probe --quiet) || return 1
+    _runci_guarded_test "M router multicast group in its node registry" 1 \
+        cargo test -p wz-integration-tests \
+        --test wz_router_serves_its_multicast_group_in_its_node_registry -- --ignored || return 1
 }
 
 # ─── Layer Z — wz <-> zenohd (zenoh-full reference router) interop ────
