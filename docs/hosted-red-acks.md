@@ -40,6 +40,7 @@ why the ordering rule says *before*.
 
 | round | run | commit | failing steps | debt | paid |
 |---|---|---|---|---|---|
+| R2853 | `36002723608` | `3ca015d0` | One failing job, `cross-compile + QEMU` step **`Layer Qa`**: `zenohd not at target/zenohd/zenohd`. NOT the R2842 race recurring as stale debt: R2842's `needs: [interop]` (`47464287`) IS in this tree. The interop job saved `zenohd-1.10.1-src-…` at 15:03:56; `cross-mcu` started at 20:12 and at 20:26 found neither the key nor the prefix. `gh cache list` now holds 23 entries, 13.6 GB, no zenohd entry at all: evicted, with the per-job rust caches re-saving about 1 GB each in between. The cache cannot carry a file between two jobs of one run. The other reds of this run's jobs: none | — | R2853, `67137316` (run artifact) |
 | R2851 | `35992477252` | `08256a69` | The latest completed run again, from the R2851 push: every run after it is queued, and `0d3dcb78`'s run (`36028036180`) has none of its 21 jobs started. Read by the R2848 row; nothing new is claimed | — | `7cbd858c` |
 | R2850 | `35992477252` | `08256a69` | The latest completed run again, from the R2850 push: every run after it is queued (`a93b8997`'s run shows queued again after reading in progress). Read by the R2848 row; nothing new is claimed | — | `7cbd858c` |
 | R2849 | `35992477252` | `08256a69` | The latest completed run again, from the R2849 push: every run after it is queued or in progress (`a93b8997` is in progress, `f5d31ee6` queued). Read by the R2848 row; nothing new is claimed | — | `7cbd858c` |
