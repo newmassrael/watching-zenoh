@@ -104,6 +104,41 @@ impl<C: ClockSource + 'static> LwipUdpSession<C> {
     pub fn actions(&self) -> &Rc<McuActions<C>> {
         &self.actions
     }
+
+    /// R2834 (§5.23 `adminspace-core`) — this session as a `sessions[]` entry
+    /// of the node's admin GET, or `None` while it is not established.
+    ///
+    /// Upstream lists transports, and a transport exists only once its
+    /// handshake has finished, so a session still dialling is not reported.
+    /// The role is read off the wire through `WhatAmI::from_wire`; a role that
+    /// never arrived stays `None`, which the answerer renders as upstream's
+    /// `"unknown"`. SHM and the router link weight are `false` / `None`: this
+    /// build has neither, which is what those values say.
+    ///
+    /// A firmware reports its dialled sessions each time round its loop with
+    /// `NodeStatus::set_sessions`, collecting this over
+    /// `ConnectManager::sessions`.
+    #[cfg(feature = "adminspace-core")]
+    pub fn admin_session(&self) -> Option<wz_session_core::adminspace::AdminSession> {
+        if !self.actions.is_established() {
+            return None;
+        }
+        Some(wz_session_core::adminspace::AdminSession {
+            peer_zid_hex: self
+                .actions
+                .peer_zid()
+                .map(|zid| wz_session_core::zid_hex::zid_to_zenoh_hex(&zid))
+                .unwrap_or_default(),
+            whatami: self
+                .actions
+                .peer_whatami_wire()
+                .and_then(wz_session_core::WhatAmI::from_wire)
+                .map(|role| alloc::string::String::from(role.to_str())),
+            links: self.actions.admin_links(),
+            shm: false,
+            weight: None,
+        })
+    }
 }
 
 /// Dials UDP endpoints as initiator sessions on the firmware's task set.
@@ -350,6 +385,19 @@ mod tests {
         std::assert!(acceptor_actions.is_established(), "on both ends");
         std::assert_eq!(dialer.ended(&mut session), None, "still live");
 
+        // R2834 — the established session reports the acceptor it reached,
+        // as the admin GET's `sessions[]` entry.
+        #[cfg(feature = "adminspace-core")]
+        {
+            let entry = session.admin_session().expect("established, so reported");
+            std::assert_eq!(
+                entry.peer_zid_hex,
+                wz_session_core::zid_hex::zid_to_zenoh_hex(&[0xa1; 4])
+            );
+            std::assert_eq!(entry.whatami.as_deref(), Some("peer"));
+            std::assert_eq!(entry.links.len(), 1, "one UDP link");
+        }
+
         session.handle.abort();
         std::assert_eq!(dialer.ended(&mut session), Some(Ended::AfterEstablished));
 
@@ -363,6 +411,9 @@ mod tests {
         )
         .with_max_iters(8);
         let mut lost = unanswered.dial("udp/127.0.0.1:7495").expect("dialable");
+        // R2834 — CONTROL: a session nobody answered is not reported.
+        #[cfg(feature = "adminspace-core")]
+        std::assert!(lost.admin_session().is_none());
         for _ in 0..16 {
             local.run_until_idle();
         }

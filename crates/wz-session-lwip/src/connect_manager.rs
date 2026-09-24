@@ -158,6 +158,17 @@ impl<D: Dialer> ConnectManager<D> {
         })
     }
 
+    /// R2834 — the sessions this manager holds right now, with the endpoint
+    /// each was dialled for, in the list's order. A session is here from its
+    /// dial until the manager sees it end, so it may still be handshaking; a
+    /// caller that reports sessions asks each one whether it is established.
+    pub fn sessions(&self) -> impl Iterator<Item = (&str, &D::Session)> + '_ {
+        self.slots.iter().filter_map(|slot| match &slot.state {
+            State::Live { session, .. } => Some((slot.endpoint.as_str(), session)),
+            _ => None,
+        })
+    }
+
     /// Advance to `now_ms`: reconcile a new list, notice ended sessions, and
     /// dial what is due.
     pub fn tick(&mut self, now_ms: u64) {
@@ -321,6 +332,15 @@ mod tests {
         m.tick(5);
         std::assert_eq!(dials(&mut m), ["udp/10.0.0.1:7447", "udp/10.0.0.2:7447"]);
         std::assert!(m.states().all(|(_, s)| s == SlotState::Live));
+        // R2834 — every live slot's session is reachable, with its endpoint.
+        let held: Vec<(&str, &String)> = m.sessions().collect();
+        std::assert_eq!(
+            held,
+            [
+                ("udp/10.0.0.1:7447", &String::from("udp/10.0.0.1:7447")),
+                ("udp/10.0.0.2:7447", &String::from("udp/10.0.0.2:7447")),
+            ]
+        );
     }
 
     /// Failures before establishing are ONE outage and the wait grows on
@@ -420,6 +440,7 @@ mod tests {
         write(&CONTROL, &["serial//dev/ttyS0"]);
         m.tick(60_001);
         std::assert_eq!(m.dialer().hang_ups, vec![String::from("udp/10.0.0.1:7447")]);
+        std::assert_eq!(m.sessions().count(), 0, "a refused slot holds no session");
         std::assert_eq!(
             m.states().next().unwrap().1,
             SlotState::Refused(DialRefused::Unsupported),
