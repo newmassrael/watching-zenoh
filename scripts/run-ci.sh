@@ -19522,6 +19522,136 @@ layer_e17_stats_registry_writes_upstreams_document() {
         -- --exact || return 1
 }
 
+# ─── Layer Qa — a stock zenohd reconfigures a wz MCU under QEMU ───
+#
+# R2839 (§5.23, ZA-2898). The one lane where the canonical implementation
+# changes a wz MCU node's connections at runtime and reads them back:
+#
+#   1. build deploy/mcu-admin-node for mps2-an385 and boot it under QEMU with
+#      user networking (LAN9118), forwarding host udp 127.0.0.1:$port to the
+#      node's listener at 10.0.2.15:7447;
+#   2. start zenohd A connecting to that forward, with the REST plugin, and
+#      zenohd B listening on 127.0.0.1:$b_port (the guest reaches the host's
+#      loopback at 10.0.2.2);
+#   3. GET the node's admin space through A: ONE session (A);
+#   4. PUT `["udp/10.0.2.2:$b_port"]` on the node's `connect/endpoints`;
+#   5. GET again: TWO sessions (A and B), and the `config` leg names the list.
+#
+# Step 3 is the CONTROL: the same GET before the write must list B nowhere,
+# so step 5's B can only have come from the write. Every leg asserts on the
+# zids in the JSON, never on the HTTP status alone.
+#
+# Runs on the `cross-mcu` job (QEMU + the ARM toolchain), with zenohd from
+# the `interop` job's cache (restore only). WZ_QA_REQUIRE=1 there: a missing
+# prerequisite on a runner that provisions it is a regression, not a SKIP.
+_qa_unavailable() {
+    if [[ -n "${WZ_QA_REQUIRE:-}" ]]; then
+        echo "  $1 FAIL — required (WZ_QA_REQUIRE set) but $2" \
+             "(provisioning regression)" >&2
+        return 1
+    fi
+    echo "  $1 SKIP ($2)"
+    return 0
+}
+
+layer_qa_mcu_admin_node_vs_zenohd() {
+    local zenohd="${WZ_ZENOHD_BIN:-$PWD/target/zenohd/zenohd}"
+    local target=thumbv7m-none-eabi
+    local fw="deploy/mcu-admin-node/target/$target/release/mcu-admin-node"
+    local node=1000055434d7a77
+    local fwd_port=17447 b_port=17448 rest_port=17800
+    local tool
+    for tool in qemu-system-arm arm-none-eabi-gcc curl python3; do
+        command -v "$tool" >/dev/null 2>&1 \
+            || { _qa_unavailable "Qa" "$tool not on PATH"; return $?; }
+    done
+    [[ -x "$zenohd" ]] \
+        || { _qa_unavailable "Qa" "zenohd not at $zenohd"; return $?; }
+    [[ -f "$(dirname "$zenohd")/libzenoh_plugin_rest.so" ]] \
+        || { _qa_unavailable "Qa" "the REST plugin is not beside zenohd"; return $?; }
+    rustup target list --installed | grep -qx "$target" \
+        || { _qa_unavailable "Qa" "rustup target $target absent"; return $?; }
+
+    WZ_LWIP_PORT="$(realpath crates/lwip-sys/port/cross-test)" cargo build --release \
+        --manifest-path deploy/mcu-admin-node/Cargo.toml --target "$target" --quiet \
+        || { echo "  Qa build mcu-admin-node FAIL" >&2; return 1; }
+    echo "  Qa build mcu-admin-node $target OK"
+
+    local dir
+    dir="$(mktemp -d)"
+    local pids=()
+    qemu-system-arm -M mps2-an385 -cpu cortex-m3 -nographic -monitor none -serial none \
+        -semihosting-config enable=on,target=native \
+        -nic "user,model=lan9118,hostfwd=udp:127.0.0.1:$fwd_port-10.0.2.15:7447" \
+        -kernel "$fw" >"$dir/qemu.log" 2>&1 &
+    pids+=($!)
+    "$zenohd" --no-multicast-scouting -l "udp/127.0.0.1:$b_port" \
+        --cfg='id:"bbbbbbbbbbbbbbbb"' >"$dir/zenohd-b.log" 2>&1 &
+    pids+=($!)
+    "$zenohd" --no-multicast-scouting -e "udp/127.0.0.1:$fwd_port" \
+        --rest-http-port "127.0.0.1:$rest_port" --plugin-search-dir "$(dirname "$zenohd")" \
+        --cfg='id:"aaaaaaaaaaaaaaaa"' >"$dir/zenohd-a.log" 2>&1 &
+    pids+=($!)
+
+    local rest="http://127.0.0.1:$rest_port/@/$node/peer"
+    # The sessions the node reports, as sorted peer zids, off the GET's JSON.
+    _qa_sessions() {
+        curl -s -m 5 "$rest" | python3 -c '
+import json, sys
+try:
+    replies = json.load(sys.stdin)
+except ValueError:
+    replies = []
+peers = sorted(s["peer"] for r in replies for s in r["value"].get("sessions", []))
+print(" ".join(peers))'
+    }
+    # Poll until `want` is what the node reports, or 60 s pass.
+    _qa_await() {
+        local want="$1" got="" i
+        for i in $(seq 1 60); do
+            got="$(_qa_sessions)"
+            [[ "$got" == "$want" ]] && { echo "$got"; return 0; }
+            sleep 1
+        done
+        echo "$got"
+        return 1
+    }
+
+    local fail=0 got
+    if got="$(_qa_await "aaaaaaaaaaaaaaaa")"; then
+        echo "  Qa.1 GET before the write: the node reports A only — OK"
+    else
+        echo "  Qa.1 GET before the write FAIL: sessions [$got], want [A]" >&2
+        fail=1
+    fi
+    if [[ "$fail" -eq 0 ]]; then
+        curl -s -m 5 -X PUT -H 'content-type: application/json' \
+            -d "[\"udp/10.0.2.2:$b_port\"]" "$rest/config/connect/endpoints" >/dev/null
+        if got="$(_qa_await "aaaaaaaaaaaaaaaa bbbbbbbbbbbbbbbb")"; then
+            echo "  Qa.2 PUT connect/endpoints: the node dialled B, GET reports A and B — OK"
+        else
+            echo "  Qa.2 PUT connect/endpoints FAIL: sessions [$got], want [A B]" >&2
+            fail=1
+        fi
+        if curl -s -m 5 "$rest/config" | grep -qF "udp/10.0.2.2:$b_port"; then
+            echo "  Qa.3 GET config names the written list — OK"
+        else
+            echo "  Qa.3 GET config FAIL: the written endpoint is not in it" >&2
+            fail=1
+        fi
+    fi
+
+    kill "${pids[@]}" 2>/dev/null
+    wait "${pids[@]}" 2>/dev/null
+    if [[ "$fail" -ne 0 ]]; then
+        echo "  --- qemu" >&2; cat "$dir/qemu.log" >&2
+        echo "  --- zenohd A (tail)" >&2; tail -20 "$dir/zenohd-a.log" >&2
+        echo "  --- zenohd B (tail)" >&2; tail -10 "$dir/zenohd-b.log" >&2
+    fi
+    rm -rf "$dir"
+    return "$fail"
+}
+
 # ─── Layer Qz — Zephyr cooperative profile west build + QEMU boot e2e ───
 #
 # The REAL Zephyr link + boot proof (R311y31 / Z2). UNLIKE the FreeRTOS lane
@@ -19815,6 +19945,7 @@ run_layer E17 layer_e17_stats_registry_writes_upstreams_document || overall=1
 run_layer F layer_f_codec_footprint || overall=1
 run_layer G layer_g_cross_compile_cortex_m || overall=1
 run_layer Q layer_q_qemu_mcu_e2e || overall=1
+run_layer Qa layer_qa_mcu_admin_node_vs_zenohd || overall=1
 run_layer Qz layer_qz_zephyr_boot || overall=1
 run_layer M layer_m_scouting_multicast || overall=1
 run_layer Z layer_z_zenohd_interop || overall=1

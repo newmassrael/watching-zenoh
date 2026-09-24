@@ -2649,7 +2649,7 @@ jobs:
   # Lane logic still lives in scripts/run-ci.sh (the R65b single source of
   # truth); this job installs the toolchain and invokes the lanes.
   cross-mcu:
-    name: cross-compile + QEMU (Layer G + Q)
+    name: cross-compile + QEMU (Layer G + Q + Qa)
     runs-on: ubuntu-22.04
     timeout-minutes: 45
     steps:
@@ -2752,6 +2752,42 @@ jobs:
         env:
           WZ_Q_REQUIRE: "1"
         run: bash scripts/run-ci.sh --layer Q
+
+      - name: Restore the zenohd oracle (the interop job's cache, restore only)
+        # R2839 — Layer Qa needs a stock zenohd BESIDE QEMU, and no job had both:
+        # `interop` builds zenohd but carries no ARM toolchain or emulator, and
+        # this job carries those but no zenohd. This job takes the binary the
+        # other one caches rather than the packages the other one lacks: at the
+        # 27 kB/s mirror `apt_package_census.py` measured, the ~135 MB this job
+        # installs is a multi-run warm-up in any job that does not already hold
+        # it, and this one does.
+        #
+        # RESTORE ONLY, and the path list is the interop step's own, character
+        # for character: actions/cache folds the paths into the entry's version,
+        # so a different list restores nothing. `restore-keys` takes the newest
+        # entry of the same version when this run's exact key has not been saved
+        # yet (the interop job saves at its end); what that entry IS is then
+        # read, not trusted, by the pin gate in the next step.
+        id: zenohd-cache
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            target/zenohd
+            target/zenohd-build/zenoh-src
+          key: zenohd-1.10.1-src-ubuntu-22.04-${{ hashFiles('scripts/build-zenohd.sh', 'scripts/lib/ensure_zenohd_at_pin.py') }}
+          restore-keys: |
+            zenohd-1.10.1-src-ubuntu-22.04-
+
+      - name: Layer Qa — a stock zenohd reconfigures a wz MCU under QEMU
+        # WZ_QA_REQUIRE=1 for the reason every provisioned lane arms its flag: this
+        # job provides QEMU, the ARM toolchain and (above) zenohd, so a missing one
+        # is a regression, not a SKIP. The pin gate first: a restored oracle is
+        # graded before anything is concluded from it.
+        env:
+          WZ_QA_REQUIRE: "1"
+        run: |
+          python3 scripts/lib/oracle_pin_gate.py --check
+          bash scripts/run-ci.sh --layer Qa
 
   # R311y31 — REAL Zephyr cooperative-profile boot e2e (Layer Qz). UNLIKE the
   # pure-cargo G/Q lanes (cargo IS the build), the Zephyr port is
