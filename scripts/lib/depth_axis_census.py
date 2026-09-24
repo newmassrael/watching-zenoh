@@ -2150,7 +2150,13 @@ PIN_NO_SYMBOL = 2
 # R2854 — 44 -> 43, FALLING by the whole of one atom: `adminspace-metrics` is
 # COMPLETE, and its reason carried one wz citation: 44 - 43 = 1, the census's
 # own FAIL line, with PIN_AMBIGUOUS holding at 12.
-PIN_WZ_CITATIONS = 43
+#
+# R2855 — 43 -> 44, RISING by one citation in one atom: `adminspace-core`
+# stays PARTIAL, and its R2855 correction refutes the "pure-Session host does
+# not enumerate declarations" clause by citing the line that does it,
+# `crates/wz-runtime-tokio/src/session/mod.rs`. 44 - 43 = 1, the census's own
+# FAIL line (`wz citations: 44 against a pin of 43`), with PIN_AMBIGUOUS holding.
+PIN_WZ_CITATIONS = 44
 # R2626 — 44 -> 42, and this one is worth a sentence because it HELD through
 # every earlier retirement in this run (R2612, R2622). `time-hlc`'s reason is the
 # first retiree carrying AMBIGUOUS citations of its own: its oldest clauses cite

@@ -89,10 +89,9 @@ MIN_SLICES = 3
 #:
 #: §5.23 `adminspace-core` — `metadata` joins, and it passes the same predicate
 #: by the route the permits do: upstream's `local_data` takes it off the LIVE
-#: config inside the admin handler
-#: (`zenoh/src/net/runtime/adminspace.rs` @
-#: `"metadata": context.runtime.config().lock().metadata(),`), so a runtime
-#: write is served by the very next GET. PULL, like `admin_permissions`.
+#: config inside the admin handler, so a runtime write is served by the very
+#: next GET. PULL, like `admin_permissions`. The read:
+#: `zenoh/src/net/runtime/adminspace.rs` @ `"metadata": context.runtime.config().lock().metadata(),`
 PINNED_SLICES = frozenset(
     {
         "interceptors",
