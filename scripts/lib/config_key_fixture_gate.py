@@ -444,7 +444,9 @@ def wire_leg_lane_features() -> tuple[frozenset[str], list[str]]:
         ]
     builds = list(
         re.finditer(
-            r"cargo build -p wz-ap-demo[^\n|)]*?--features ([A-Za-z0-9_,-]+)",
+            # R2845 — `/` admitted: a dependency's feature (`wz/x`) is a valid
+            # `--features` spec, and the class used to truncate at it.
+            r"cargo build -p wz-ap-demo[^\n|)]*?--features ([A-Za-z0-9_,/-]+)",
             txt[:invocation],
         )
     )

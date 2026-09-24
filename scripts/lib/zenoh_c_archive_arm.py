@@ -455,7 +455,8 @@ def capi_c_test_feature_sets(text: str) -> list[set[str]]:
     out: list[set[str]] = []
     for call in re.finditer(r"cargo test -p wz-capi-c([^\n]*)", text):
         feats: set[str] = set()
-        for spelled in re.finditer(r"--features\s+([A-Za-z0-9_,-]+)",
+        # R2845 — `/` admitted, as in every other run-ci feature scraper.
+        for spelled in re.finditer(r"--features\s+([A-Za-z0-9_,/-]+)",
                                    call.group(1)):
             feats |= {f for f in spelled.group(1).split(",") if f}
         out.append(feats)

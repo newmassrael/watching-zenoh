@@ -272,8 +272,10 @@ def parse_guards(text):
 # host, and came back with no libtest summary at all -- `UNMEASURED`, which is
 # this gate refusing to invent a number and is why the hole surfaced instead of
 # passing. A guard's routing must follow the DEMO, not the feature list.
+# R2845 — `/` is in the class: E6f's second build names `wz/transport-stats`,
+# and a truncated `…,wz` would provision a demo cargo refuses to build.
 DEMO_BUILD_RE = re.compile(
-    r"cargo build -p wz-ap-demo\b(?:[^\n|)]*?--features ([A-Za-z0-9_,-]+))?"
+    r"cargo build -p wz-ap-demo\b(?:[^\n|)]*?--features ([A-Za-z0-9_,/-]+))?"
 )
 FN_OPEN_RE = re.compile(r"^[a-z_][a-z0-9_]*\(\) \{")
 

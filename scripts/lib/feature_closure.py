@@ -124,7 +124,12 @@ def ap_demo_lane_features() -> tuple[str, ...]:
     """
     feats: set[str] = set()
     txt = RUN_CI.read_text()
-    for m in re.finditer(r"cargo build -p wz-ap-demo[^\n|)]*?--features ([A-Za-z0-9_,-]+)", txt):
+    # R2845 — `/` is in the class: a lane may name a DEPENDENCY's feature
+    # (`wz/transport-stats`, R2844's second E6f build), which cargo accepts on
+    # `--features` and `cargo tree` resolves. Without it the match stopped at
+    # the slash and handed cargo a feature called `wz`, and the whole A4 audit
+    # died on "the package 'wz-ap-demo' does not contain this feature: wz".
+    for m in re.finditer(r"cargo build -p wz-ap-demo[^\n|)]*?--features ([A-Za-z0-9_,/-]+)", txt):
         feats.update(m.group(1).split(","))
     return tuple(sorted(feats))
 

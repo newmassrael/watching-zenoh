@@ -4546,7 +4546,7 @@ layer_c0d_doclink_dependents() {
 # prediction had been sitting in the file for the whole time.
 #
 # The duplication cannot be removed: `feature_closure.py`'s A4-5 scraper reads
-# `cargo build -p wz-ap-demo[^\n|)]*?--features ([A-Za-z0-9_,-]+)` off the
+# `cargo build -p wz-ap-demo[^\n|)]*?--features ([A-Za-z0-9_,/-]+)` off the
 # LITERAL line, so a shell variable there would capture as nothing and drop the
 # whole set from the closure. What can be removed is the silence.
 #
@@ -4561,7 +4561,7 @@ layer_c0f_lane_demo_feature_restore() {
         /^layer_z_zenohd_interop\(\) \{/ { inside = 1 }
         inside && /^\}/ { inside = 0 }
         inside && /cargo build -p wz-ap-demo/ {
-            if (match($0, /--features [A-Za-z0-9_,-]+/)) {
+            if (match($0, /--features [A-Za-z0-9_,\/-]+/)) {
                 print substr($0, RSTART + 11, RLENGTH - 11)
             }
         }
@@ -16111,7 +16111,7 @@ layer_z_zenohd_interop() {
     # of a crate the proof builds (`crossimpl_audit.py` containment). `locator-iface`
     # was in NEITHER closure, so the claim would have failed containment regardless
     # of the test. KEEP THIS ON ONE LINE: `feature_closure.py`'s scraper is
-    # `cargo build -p wz-ap-demo[^\n|)]*?--features ([A-Za-z0-9_,-]+)`, whose class
+    # `cargo build -p wz-ap-demo[^\n|)]*?--features ([A-Za-z0-9_,/-]+)`, whose class
     # cannot cross a newline — a `\`-continued build silently drops the WHOLE feature
     # set from the closure and reds A4-5.
     # R311y471 adds `routing-peer`: the new `wz_advertised_locator_zenohd_dial` leg
