@@ -146,6 +146,14 @@ query-queryable = ["wz-session-core/query-queryable"]
 # registered (the observer fires a subscriber only under pubsub-put or
 # pubsub-delete).
 pubsub-put = ["wz-session-core/pubsub-put"]
+# R2828 (§5.23) — the node hosts upstream's `connect/endpoints` config write
+# (`admin_host`). A write arrives as a PUT and a removal as a DEL, so both
+# sample kinds must reach the subscriber: pubsub-put and pubsub-delete.
+adminspace-write = [
+    "wz-session-core/adminspace-write",
+    "pubsub-put",
+    "wz-session-core/pubsub-delete",
+]
 
 [dependencies]
 # §5.P runtime tier: CoopRuntime<C> + CoopTime<C> + the Runtime /
@@ -166,6 +174,10 @@ wz-runtime-core = { path = "../wz-runtime-core", default-features = false, featu
 # lwip-sys direct dep SOLELY for DEP_LWIP_LWIP_REAL_BUILD -> lwip_real_build
 # cfg propagation in build.rs (mirrors wz-link-lwip); no FFI used here.
 lwip-sys = { path = "../lwip-sys" }
+# R2828 — `admin_host::ConnectControl` locks with the same IRQ-disabling
+# Mutex the cooperative runtime uses. No impl feature here: the firmware (or
+# the std impl in dev-dependencies, for host tests) supplies it at link time.
+critical-section = "1"
 
 [dev-dependencies]
 # critical-section's std impl backs CoopRuntime's critical_section::Mutex

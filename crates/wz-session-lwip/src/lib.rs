@@ -50,6 +50,10 @@ extern crate std;
 // that dispatches to an `ApplicationLayerObserver` and drains through the
 // session's own actions.
 pub mod app_layer;
+// R2828 (§5.23 `adminspace-write`) — the node hosts upstream's
+// `connect/endpoints` config write on that application layer.
+#[cfg(feature = "adminspace-write")]
+pub mod admin_host;
 pub mod driver;
 // R311lt — the MCU multicast drive loop (no_std mirror of the AP
 // wz-runtime-tokio multicast_glue), gated on the transport-multicast capability.

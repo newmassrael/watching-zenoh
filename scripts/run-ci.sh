@@ -10048,6 +10048,12 @@ layer_c1m_session_lwip() {
         cargo test -p wz-session-lwip \
         --features query-queryable,codec-response,codec-response-final,pubsub-put \
         --quiet || return 1
+    # R2828 — the node HOSTS upstream's `connect/endpoints` config write
+    # (`admin_host`). 3 = the two unconditional session_drive tests +
+    # `a_config_write_reaches_the_control_through_the_nodes_subscriber`, the
+    # number this command PRINTED.
+    _runci_guarded_test "C1m adminspace-write" 3 \
+        cargo test -p wz-session-lwip --features adminspace-write --quiet || return 1
     # R2390 (transport-multicast) — each `transport-multicast` leg moved by TWO:
     # the MCU loop's link-loss arm brought a witness test and an ordering test,
     # both in `multicast_drive`, which is gated on that feature ALONE. So the
@@ -10089,6 +10095,7 @@ layer_c1m_session_lwip() {
         && cargo clippy -p wz-session-lwip --all-targets \
             --features query-queryable,codec-response,codec-response-final,pubsub-put \
             --quiet -- -D warnings \
+        && cargo clippy -p wz-session-lwip --all-targets --features adminspace-write --quiet -- -D warnings \
         && cargo clippy -p wz-session-lwip --all-targets --features transport-multicast --quiet -- -D warnings \
         && cargo clippy -p wz-session-lwip --all-targets --features transport-multicast,codec-push --quiet -- -D warnings \
         && cargo clippy -p wz-session-lwip --all-targets --features transport-multicast,liveliness-token --quiet -- -D warnings \

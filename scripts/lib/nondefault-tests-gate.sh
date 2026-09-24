@@ -405,12 +405,14 @@ router-connect-reconcile,transport-link-tcp,transport-unicast|session_lifecycle_
         transport-stats\
         |"
     "wz-session-lwip|hook|\
+        adminspace-write,\
         buffer-pool-session-rx-slim,\
         codec-push,\
         codec-response,\
         codec-response-final,\
         liveliness-token,\
         loopif-multicast,\
+        pubsub-put,\
         query-queryable,\
         reassembly,\
         transport-fragmentation,\
