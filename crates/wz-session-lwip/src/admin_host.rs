@@ -152,6 +152,48 @@ impl crate::admin_status::ConfigView for ConnectControl {
     }
 }
 
+/// R2846 (ZA-2929) — the control is also what `status/connect` reads: the
+/// write permit, and the verdict on the last write, so a refused write is
+/// reported in the node's own words instead of only leaving the list as it
+/// was. Each verdict is its variant's name; a malformed value adds where the
+/// parse stopped and what it expected there.
+#[cfg(feature = "adminspace-core")]
+impl crate::admin_status::ConnectStatusSource for ConnectControl {
+    fn write_permit(&self) -> bool {
+        critical_section::with(|cs| self.state.borrow(cs).borrow().permit_write)
+    }
+
+    fn write_last_write_json(&self, out: &mut String) {
+        use core::fmt::Write as _;
+        let verdict = match self.last_outcome() {
+            None => {
+                out.push_str("null");
+                return;
+            }
+            Some(ConnectWriteOutcome::Malformed(e)) => {
+                out.push_str(r#"{"verdict":"malformed","offset":"#);
+                let _ = write!(out, "{}", e.offset);
+                out.push_str(r#","expected":"#);
+                wz_session_core::json::escape_into(e.expected, out);
+                out.push('}');
+                return;
+            }
+            Some(ConnectWriteOutcome::NotThisSpace) => "not_this_space",
+            Some(ConnectWriteOutcome::AmbiguousSpaceAddress) => "ambiguous_space_address",
+            Some(ConnectWriteOutcome::Denied) => "denied",
+            Some(ConnectWriteOutcome::OtherKey) => "other_key",
+            Some(ConnectWriteOutcome::TooMany) => "too_many",
+            Some(ConnectWriteOutcome::EndpointTooLong) => "endpoint_too_long",
+            Some(ConnectWriteOutcome::NotAnEndpoint) => "not_an_endpoint",
+            Some(ConnectWriteOutcome::Replace) => "replace",
+            Some(ConnectWriteOutcome::Remove) => "remove",
+        };
+        out.push_str(r#"{"verdict":"#);
+        wz_session_core::json::escape_into(verdict, out);
+        out.push('}');
+    }
+}
+
 /// R2841 — the endpoint list as upstream serializes its `EndPoints`: a bare
 /// entry as a string, a group as `{"strategy":…,"locators":[…]}` (the derive on
 /// its `Locators`, strategy in camelCase), so what was written reads back in
@@ -314,6 +356,40 @@ mod tests {
             CONTROL.last_outcome(),
             Some(ConnectWriteOutcome::Malformed(_))
         ));
+    }
+
+    /// R2846 (ZA-2929) — the verdict on the last write, as `status/connect`
+    /// reports it: `null` before the first, each refusal by its own name, a
+    /// malformed value with where it stopped and what it expected.
+    #[cfg(feature = "adminspace-core")]
+    #[test]
+    fn the_last_write_is_reported_in_the_nodes_words() {
+        use crate::admin_status::ConnectStatusSource;
+
+        static CONTROL: ConnectControl = ConnectControl::new(false);
+        let mut observer = ApplicationLayerObserver::new();
+        host_connect_writes(&mut observer, ZID, "peer", &CONTROL);
+        let last = || {
+            let mut out = String::new();
+            CONTROL.write_last_write_json(&mut out);
+            out
+        };
+
+        // Before any write there is no verdict to report.
+        std::assert_eq!(last(), "null");
+        // Writes off: the refusal names itself, and the permit reads false.
+        deliver(&mut observer, put(KEY, br#"["tcp/10.0.0.9:7447"]"#));
+        std::assert_eq!(last(), r#"{"verdict":"denied"}"#);
+        std::assert!(!CONTROL.write_permit());
+        // A malformed value says where the parse stopped and what it wanted.
+        CONTROL.set_write_permit(true);
+        deliver(&mut observer, put(KEY, b"[7]"));
+        std::assert_eq!(
+            last(),
+            r#"{"verdict":"malformed","offset":1,"expected":"an endpoint string or a locators object"}"#
+        );
+        deliver(&mut observer, put(KEY, br#"["tcp/10.0.0.9:7447"]"#));
+        std::assert_eq!(last(), r#"{"verdict":"replace"}"#);
     }
 
     /// R2829 — what the admin GET's `config` leg reads back is the list the

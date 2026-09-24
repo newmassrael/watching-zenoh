@@ -48,9 +48,11 @@ use wz_session_core::session_init_params::SessionInitParams;
 use wz_session_core::session_timeouts::SessionTimeouts;
 
 use crate::admin_host::{host_connect_writes, ConnectControl};
-use crate::admin_status::{host_admin_queryable, NodeIdentity, NodeStatus};
+use crate::admin_status::{
+    host_admin_queryable, DialStatus, EndpointStatus, NodeIdentity, NodeStatus,
+};
 use crate::app_layer::dispatch_to;
-use crate::connect_manager::ConnectManager;
+use crate::connect_manager::{ConnectManager, SlotState};
 use crate::driver::{LwipUdpDriver, SharedSessionSocket};
 use crate::lwip_dialer::{admin_session_of, EventSink, LwipUdpDialer, McuActions};
 use crate::session_drive::{spawn_session, SessionDriveConfig, SessionRole};
@@ -133,7 +135,7 @@ where
         {
             let mut o = observer.borrow_mut();
             host_connect_writes(&mut o, &identity.zid_hex, identity.whatami, control);
-            host_admin_queryable(&mut o, identity, status, Some(control));
+            host_admin_queryable(&mut o, identity, status, Some(control), Some(control));
         }
         let dial_observer = observer.clone();
         let on_event: DialSink<C> = Box::new(move |actions| {
@@ -193,6 +195,34 @@ where
                 .filter_map(|(_, session)| session.admin_session()),
         );
         self.status.set_sessions(sessions);
+        self.status.set_endpoints(self.endpoint_statuses(now_ms));
+    }
+
+    /// R2846 (ZA-2929) — every written endpoint and where it stands, for the
+    /// `status/connect` leg. `states()` and `sessions()` both walk the slots
+    /// in list order and `sessions()` yields exactly the live ones, so the two
+    /// are read side by side to say whether each live session is established.
+    fn endpoint_statuses(&self, now_ms: u64) -> Vec<EndpointStatus> {
+        let mut live = self.manager.sessions();
+        self.manager
+            .states()
+            .map(|(endpoint, state)| EndpointStatus {
+                endpoint: String::from(endpoint),
+                status: match state {
+                    SlotState::Live => DialStatus::Live {
+                        established: live
+                            .next()
+                            .is_some_and(|(_, session)| session.actions().is_established()),
+                    },
+                    SlotState::Waiting { at_ms } => DialStatus::Waiting {
+                        retry_in_ms: at_ms.saturating_sub(now_ms),
+                    },
+                    SlotState::Refused(why) => DialStatus::Refused {
+                        reason: why.as_str(),
+                    },
+                },
+            })
+            .collect()
     }
 
     /// Send the admin declarations on every established session that has
@@ -424,6 +454,14 @@ mod tests {
         std::assert_eq!(reported.len(), 1, "the dialled session is reported");
         std::assert_eq!(reported[0].peer_zid_hex, zid_to_zenoh_hex(&[0xc3; 4]));
         std::assert!(far_actions.is_established(), "the peer holds it too");
+        // R2846 — and `status/connect` says the same thing about the endpoint.
+        std::assert_eq!(
+            STATUS.endpoints(),
+            [EndpointStatus {
+                endpoint: String::from("udp/127.0.0.1:7522"),
+                status: DialStatus::Live { established: true },
+            }]
+        );
 
         // R2838 — the peer was told what upstream's admin space tells a
         // router: the admin queryable and the config subscriber, once each.

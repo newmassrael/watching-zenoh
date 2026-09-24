@@ -10092,13 +10092,16 @@ layer_c1m_session_lwip() {
     # the write surface too: + `app_layer`'s test (the write feature pulls
     # pubsub-put) + `admin_host`'s two, one of which reads the control back
     # as the `config` leg's view = 6. Both numbers PRINTED by the command.
-    _runci_guarded_test "C1m adminspace-core" 3 \
+    # R2846 3 -> 4: the `status/connect` document test (ZA-2929).
+    _runci_guarded_test "C1m adminspace-core" 4 \
         cargo test -p wz-session-lwip --features adminspace-core --quiet || return 1
     # R2830 6 -> 9: the same three `connect_manager` tests.
     # R2831 9 -> 12: the same three R2831 tests.
     # R2837 12 -> 13: `admin_node`'s end-to-end test, which needs both.
     # R2841 13 -> 14: the same group test.
-    _runci_guarded_test "C1m adminspace read+write" 14 \
+    # R2846 14 -> 16: the `status/connect` document test and the last-write
+    # verdict test (ZA-2929).
+    _runci_guarded_test "C1m adminspace read+write" 16 \
         cargo test -p wz-session-lwip --features adminspace-core,adminspace-write --quiet || return 1
     # R2390 (transport-multicast) — each `transport-multicast` leg moved by TWO:
     # the MCU loop's link-loss arm brought a witness test and an ordering test,
@@ -19691,6 +19694,43 @@ print("ok" if not bad and accepted == "udp/10.0.2.15:7447" else f"bad={bad} acce
             echo "  Qa.4 every session names its link src/dst; A reached udp/10.0.2.15:7447 — OK"
         else
             echo "  Qa.4 link src/dst FAIL: $links" >&2
+            fail=1
+        fi
+        # R2846 (ZA-2929) — the node's own account of the write, at the wz key
+        # `status/connect`: the verdict, and each endpoint's dial state.
+        # _qa_status <python expression over `doc`>: prints "ok" or the doc.
+        _qa_status() {
+            curl -s -m 5 "$rest/status/connect" | python3 -c '
+import json, sys
+try:
+    doc = [r["value"] for r in json.load(sys.stdin)][0]
+except (ValueError, IndexError, KeyError):
+    doc = None
+print("ok" if doc is not None and ('"$1"') else doc)' 2>&1
+        }
+        local st
+        st="$(_qa_status 'doc["last_write"] == {"verdict": "replace"} and doc["endpoints"] == [{"endpoint": "udp/10.0.2.2:'"$b_port"'", "state": "live", "established": True}]')"
+        if [[ "$st" == "ok" ]]; then
+            echo "  Qa.5 status/connect: the write was replaced, B is live and established — OK"
+        else
+            echo "  Qa.5 status/connect FAIL: $st" >&2
+            fail=1
+        fi
+        # A group of two locators is one transport over two links, which the
+        # node refuses BY NAME for each locator; the host reads the reason.
+        curl -s -m 5 -X PUT -H 'content-type: application/json' \
+            -d "[{\"strategy\":\"allOf\",\"locators\":[\"udp/10.0.2.2:$b_port\",\"udp/10.0.2.2:9\"]}]" \
+            "$rest/config/connect/endpoints" >/dev/null
+        local _
+        for _ in $(seq 1 30); do
+            st="$(_qa_status 'len(doc["endpoints"]) == 2 and all(e["state"] == "refused" and e["reason"] == "multi_link_group" for e in doc["endpoints"])')"
+            [[ "$st" == "ok" ]] && break
+            sleep 1
+        done
+        if [[ "$st" == "ok" ]]; then
+            echo "  Qa.6 a group of two is refused, and status/connect says multi_link_group — OK"
+        else
+            echo "  Qa.6 status/connect after a group write FAIL: $st" >&2
             fail=1
         fi
     fi

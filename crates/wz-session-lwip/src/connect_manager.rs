@@ -50,6 +50,18 @@ pub enum DialRefused {
     MultiLinkGroup,
 }
 
+impl DialRefused {
+    /// R2846 — the reason in the word the node reports it with, at
+    /// `status/connect`.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            DialRefused::Unsupported => "unsupported",
+            DialRefused::BadAddress => "bad_address",
+            DialRefused::MultiLinkGroup => "multi_link_group",
+        }
+    }
+}
+
 /// Why a dial did not start a session.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DialFailed {

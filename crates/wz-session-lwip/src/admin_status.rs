@@ -57,8 +57,109 @@ pub struct NodeIdentity {
     pub locators: Vec<String>,
 }
 
+/// R2846 (ZA-2929) — where one written endpoint stands, as the node reports
+/// it at `@/<zid>/<whatami>/status/connect`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DialStatus {
+    /// A session is held (or being opened) towards it.
+    Live {
+        /// Whether its handshake has finished.
+        established: bool,
+    },
+    /// Waiting to dial it again, this long from the moment of the report.
+    Waiting {
+        /// Milliseconds until the next dial.
+        retry_in_ms: u64,
+    },
+    /// This node will not dial it until the list is written again.
+    Refused {
+        /// Why, in the node's own word.
+        reason: &'static str,
+    },
+}
+
+/// R2846 — one endpoint of the written list and where it stands.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EndpointStatus {
+    /// The endpoint text as written.
+    pub endpoint: String,
+    /// Where it stands.
+    pub status: DialStatus,
+}
+
+/// R2846 — what the `status/connect` leg reads from the node's connection
+/// control: the write permit and the verdict on the last write. The
+/// connection control implements it when the write surface is compiled in.
+pub trait ConnectStatusSource {
+    /// `adminspace.permissions.write` as the node holds it now.
+    fn write_permit(&self) -> bool;
+    /// The verdict on the most recent write, as a JSON value; `null` before
+    /// the first.
+    fn write_last_write_json(&self, out: &mut String);
+}
+
+/// R2846 — the key of the connection status leg:
+/// `@/<zid>/<whatami>/status/connect`.
+///
+/// A wz key, not an upstream one. Upstream refuses a config write by logging
+/// it and nothing else, so a host that asks why its write did nothing has no
+/// admin key to read the answer from. This one sits under `status/`, beside
+/// upstream's `status/plugins`, and apart from the `config` leg, which keeps
+/// upstream's shape exactly.
+pub fn admin_connect_status_key(zid_hex: &str, whatami: &str) -> String {
+    let mut key = wz_session_core::adminspace::admin_root_key(zid_hex, whatami);
+    key.push_str("/status/connect");
+    key
+}
+
+/// R2846 — the `status/connect` document:
+/// `{"permissions":{"write":…},"last_write":…,"endpoints":[{…},…]}`, each
+/// endpoint `{"endpoint":…,"state":"live","established":…}`,
+/// `{"endpoint":…,"state":"waiting","retry_in_ms":…}` or
+/// `{"endpoint":…,"state":"refused","reason":…}`.
+pub fn connect_status_json(
+    source: &dyn ConnectStatusSource,
+    endpoints: &[EndpointStatus],
+    out: &mut String,
+) {
+    use core::fmt::Write as _;
+    use wz_session_core::json::escape_into;
+    out.push_str(r#"{"permissions":{"write":"#);
+    out.push_str(if source.write_permit() {
+        "true"
+    } else {
+        "false"
+    });
+    out.push_str(r#"},"last_write":"#);
+    source.write_last_write_json(out);
+    out.push_str(r#","endpoints":["#);
+    for (i, e) in endpoints.iter().enumerate() {
+        if i > 0 {
+            out.push(',');
+        }
+        out.push_str(r#"{"endpoint":"#);
+        escape_into(&e.endpoint, out);
+        match &e.status {
+            DialStatus::Live { established } => {
+                out.push_str(r#","state":"live","established":"#);
+                out.push_str(if *established { "true" } else { "false" });
+            }
+            DialStatus::Waiting { retry_in_ms } => {
+                let _ = write!(out, r#","state":"waiting","retry_in_ms":{retry_in_ms}"#);
+            }
+            DialStatus::Refused { reason } => {
+                out.push_str(r#","state":"refused","reason":"#);
+                escape_into(reason, out);
+            }
+        }
+        out.push('}');
+    }
+    out.push_str("]}");
+}
+
 struct StatusState {
     sessions: Vec<AdminSession>,
+    endpoints: Vec<EndpointStatus>,
     permit_read: bool,
 }
 
@@ -77,6 +178,7 @@ impl NodeStatus {
         Self {
             state: Mutex::new(RefCell::new(StatusState {
                 sessions: Vec::new(),
+                endpoints: Vec::new(),
                 permit_read,
             })),
         }
@@ -98,6 +200,16 @@ impl NodeStatus {
         self.snapshot().1
     }
 
+    /// R2846 — replace the endpoint statuses the `status/connect` leg reports.
+    pub fn set_endpoints(&self, endpoints: Vec<EndpointStatus>) {
+        critical_section::with(|cs| self.state.borrow(cs).borrow_mut().endpoints = endpoints);
+    }
+
+    /// R2846 — the endpoint statuses the node currently reports.
+    pub fn endpoints(&self) -> Vec<EndpointStatus> {
+        critical_section::with(|cs| self.state.borrow(cs).borrow().endpoints.clone())
+    }
+
     fn snapshot(&self) -> (bool, Vec<AdminSession>) {
         critical_section::with(|cs| {
             let s = self.state.borrow(cs).borrow();
@@ -112,15 +224,43 @@ impl NodeStatus {
 /// from `status` and, for the `config` leg, from `config` (an empty object
 /// when `None`). A denied read answers nothing, and the query is still
 /// terminated, which is upstream's behaviour.
+///
+/// R2846 — with `connect`, a GET that reaches `@/<zid>/<whatami>/status/connect`
+/// is also answered with the connection status document
+/// ([`connect_status_json`]). It is gated by the READ permit alone, as every
+/// admin leg is, so a node whose write permit is off still says so here —
+/// which is how a host tells "writes are off" from "my write was lost".
 pub fn host_admin_queryable(
     observer: &mut ApplicationLayerObserver,
     identity: NodeIdentity,
     status: &'static NodeStatus,
     config: Option<&'static (dyn ConfigView + Sync)>,
+    connect: Option<&'static (dyn ConnectStatusSource + Sync)>,
 ) {
     let pattern = admin_queryable_key(&identity.zid_hex, identity.whatami);
+    let status_key = admin_connect_status_key(&identity.zid_hex, identity.whatami);
     observer.queryables.register(pattern, move |query, out| {
         let (read, sessions) = status.snapshot();
+        if read {
+            if let Some(source) = connect {
+                let chunks: Vec<&str> = status_key.split('/').collect();
+                if wz_session_core::keyexpr_match::keyexpr_intersects_target(
+                    query.keyexpr(),
+                    &chunks,
+                ) {
+                    let mut body = String::new();
+                    connect_status_json(source, &status.endpoints(), &mut body);
+                    // A reply that cannot be sent is what upstream logs and
+                    // moves past; this crate has no log channel, and there is
+                    // nothing else to do with it, so it is dropped here.
+                    let _ = out.reply_keyed_encoded(
+                        &status_key,
+                        body.as_bytes(),
+                        Some(&wz_session_core::sample::EncodingHint::APPLICATION_JSON),
+                    );
+                }
+            }
+        }
         let mut config_json = String::new();
         match config {
             Some(view) => view.write_config_json(&mut config_json),
@@ -178,6 +318,53 @@ mod tests {
         }
     }
 
+    /// A control whose write permit is OFF and whose last write was refused
+    /// for it: the state a host must be able to read.
+    struct WritesOff;
+    impl ConnectStatusSource for WritesOff {
+        fn write_permit(&self) -> bool {
+            false
+        }
+        fn write_last_write_json(&self, out: &mut String) {
+            out.push_str(r#"{"verdict":"denied"}"#);
+        }
+    }
+
+    /// R2846 — the document itself, every state and the escaping.
+    #[test]
+    fn the_connect_status_document_names_every_state() {
+        let mut out = String::new();
+        connect_status_json(
+            &WritesOff,
+            &[
+                EndpointStatus {
+                    endpoint: String::from("udp/10.0.0.1:7447"),
+                    status: DialStatus::Live { established: true },
+                },
+                EndpointStatus {
+                    endpoint: String::from("udp/10.0.0.2:7447"),
+                    status: DialStatus::Waiting { retry_in_ms: 2000 },
+                },
+                EndpointStatus {
+                    endpoint: String::from("udp/10.0.0.3:7447"),
+                    status: DialStatus::Refused {
+                        reason: "multi_link_group",
+                    },
+                },
+            ],
+            &mut out,
+        );
+        std::assert_eq!(
+            out,
+            concat!(
+                r#"{"permissions":{"write":false},"last_write":{"verdict":"denied"},"endpoints":["#,
+                r#"{"endpoint":"udp/10.0.0.1:7447","state":"live","established":true},"#,
+                r#"{"endpoint":"udp/10.0.0.2:7447","state":"waiting","retry_in_ms":2000},"#,
+                r#"{"endpoint":"udp/10.0.0.3:7447","state":"refused","reason":"multi_link_group"}]}"#
+            )
+        );
+    }
+
     fn get(key: &str, rid: u64) -> DriverLoopOutcome {
         let request = Request {
             rid,
@@ -212,6 +399,7 @@ mod tests {
     fn the_admin_get_is_answered_from_the_nodes_status() {
         static STATUS: NodeStatus = NodeStatus::new(true);
         static CONFIG: FixedConfig = FixedConfig;
+        static WRITES_OFF: WritesOff = WritesOff;
 
         let (_serial, link) = wz_link_lwip::lwip_test_link();
         let (node_port, peer_port): (u16, u16) = (7481, 7482);
@@ -280,6 +468,7 @@ mod tests {
             },
             &STATUS,
             Some(&CONFIG),
+            Some(&WRITES_OFF),
         );
 
         on_event(IterationEvent::Poll(&get("@/b2a1/peer", 2)));
@@ -291,8 +480,34 @@ mod tests {
         on_event(IterationEvent::Poll(&get("@/b2a1/peer/config", 4)));
         std::assert!(wire_has(b"tcp/10.0.0.9:7447"), "the config leg read back");
 
+        // R2846 — the connection status leg, readable with writes OFF, naming
+        // the refusal in the node's words. The root GET is its CONTROL: the
+        // leg is its own key and does not ride on upstream's `local_data`.
+        STATUS.set_endpoints(vec![EndpointStatus {
+            endpoint: String::from("udp/10.0.0.3:7447"),
+            status: DialStatus::Refused {
+                reason: "multi_link_group",
+            },
+        }]);
+        on_event(IterationEvent::Poll(&get("@/b2a1/peer", 6)));
+        std::assert!(
+            !wire_has(b"multi_link_group"),
+            "CONTROL: not on the root leg"
+        );
+        on_event(IterationEvent::Poll(&get("@/b2a1/peer/status/connect", 7)));
+        std::assert!(wire_has(b"multi_link_group"), "the refusal's reason");
+        on_event(IterationEvent::Poll(&get("@/b2a1/peer/status/connect", 8)));
+        std::assert!(
+            wire_has(b"\"verdict\":\"denied\""),
+            "the last write's verdict"
+        );
+        on_event(IterationEvent::Poll(&get("@/b2a1/peer/**", 9)));
+        std::assert!(wire_has(b"\"write\":false"), "a ** GET reaches it too");
+
         STATUS.set_read_permit(false);
         on_event(IterationEvent::Poll(&get("@/b2a1/peer", 5)));
         std::assert!(!wire_has(b"\"sessions\""), "a denied read answers nothing");
+        on_event(IterationEvent::Poll(&get("@/b2a1/peer/status/connect", 10)));
+        std::assert!(!wire_has(b"multi_link_group"), "nor the status leg");
     }
 }
