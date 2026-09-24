@@ -66,11 +66,69 @@ struct Inner {
     /// are kept because its counters live in its own partition: they are read
     /// at every snapshot and once more when the transport closes.
     open: BTreeMap<u64, (StatsTransportId, Arc<SessionLinkActions>)>,
+    /// R2849 — the open MULTICAST transports, by the recorder's own key: one
+    /// per group face, each with the peers the registry holds for it.
+    #[cfg(all(feature = "transport-multicast", feature = "transport-stats"))]
+    groups: BTreeMap<u64, OpenGroup>,
+}
+
+/// R2849 — one group face as the registry holds it: the group's transport,
+/// the handle its drive loop records into, and a registry transport per peer
+/// the registry has seen on it, by zid.
+#[cfg(all(feature = "transport-multicast", feature = "transport-stats"))]
+struct OpenGroup {
+    transport: StatsTransportId,
+    stats: crate::multicast_glue::MulticastTransportStats,
+    peers: BTreeMap<Vec<u8>, StatsTransportId>,
 }
 
 impl Inner {
     fn now_ms(&self) -> u64 {
         u64::try_from(self.origin.elapsed().as_millis()).unwrap_or(u64::MAX)
+    }
+
+    /// R2849 — bring the registry's copy of every group face up to its
+    /// handle: the group's partition, each peer on it (registered the first
+    /// time the registry sees it), and each peer that left since the last sync
+    /// — its final partition copied in and its transport closed, which marks
+    /// it disconnected until collection retires it, as upstream's registry
+    /// does when a departed peer's stats handle is dropped.
+    ///
+    /// Departures are applied BEFORE the live peers: a peer that left and came
+    /// back between two syncs has an old partition in the departures and a new
+    /// one on the group, and they are two registry transports, as they are two
+    /// peer records upstream.
+    #[cfg(all(feature = "transport-multicast", feature = "transport-stats"))]
+    fn sync_groups(&mut self, now_ms: u64) {
+        let registry = &mut self.registry;
+        for group in self.groups.values_mut() {
+            let metrics = group.stats.metrics();
+            registry.set_transport_metrics(group.transport, metrics.transport().clone());
+            for (zid, left) in group.stats.take_departed() {
+                let id = match group.peers.remove(&zid) {
+                    Some(id) => id,
+                    // Joined and left between two syncs: registered only to be
+                    // reported as the disconnected transport it now is.
+                    None => registry.open_multicast_peer(
+                        &wz_session_core::zid_hex::zid_to_zenoh_hex(&zid),
+                        left.whatami,
+                        metrics.group(),
+                    ),
+                };
+                registry.set_transport_metrics(id, left.metrics().clone());
+                registry.close_transport(id, now_ms);
+            }
+            for (zid, peer) in metrics.peers() {
+                let id = *group.peers.entry(zid.to_vec()).or_insert_with(|| {
+                    registry.open_multicast_peer(
+                        &wz_session_core::zid_hex::zid_to_zenoh_hex(zid),
+                        peer.whatami,
+                        metrics.group(),
+                    )
+                });
+                registry.set_transport_metrics(id, peer.metrics().clone());
+            }
+        }
     }
 }
 
@@ -83,6 +141,8 @@ impl NodeStats {
                 registry: StatsRegistry::new(zid_hex, whatami, build_version),
                 origin: Instant::now(),
                 open: BTreeMap::new(),
+                #[cfg(all(feature = "transport-multicast", feature = "transport-stats"))]
+                groups: BTreeMap::new(),
             })),
         }
     }
@@ -172,10 +232,81 @@ impl NodeStats {
                     .registry
                     .set_transport_metrics(*transport, actions.stats_metrics());
             }
+            #[cfg(all(feature = "transport-multicast", feature = "transport-stats"))]
+            inner.sync_groups(now_ms);
             let answer = inner.registry.clone();
             inner.registry.collect_garbage(now_ms);
             answer
         })
+    }
+
+    /// R2849 — the group face `key`, recording into `stats`, has joined its
+    /// group: register it as one multicast transport. Its peers are
+    /// registered as the registry sees them, at each snapshot.
+    ///
+    /// Upstream registers a multicast transport when its manager opens one on
+    /// a group locator
+    /// (`io/zenoh-transport/src/multicast/transport.rs` @ `.multicast_transport_stats(config.link.link.get_dst().to_string());`),
+    /// which is the moment a face's drive loop starts here. A key already open
+    /// is left as it is.
+    #[cfg(all(feature = "transport-multicast", feature = "transport-stats"))]
+    pub fn multicast_opened(
+        &self,
+        key: u64,
+        stats: &crate::multicast_glue::MulticastTransportStats,
+    ) {
+        self.with(|inner| {
+            if inner.groups.contains_key(&key) {
+                return;
+            }
+            let group = stats.metrics().group().to_string();
+            let transport = inner.registry.open_multicast_transport(&group);
+            inner.groups.insert(
+                key,
+                OpenGroup {
+                    transport,
+                    stats: stats.clone(),
+                    peers: BTreeMap::new(),
+                },
+            );
+        });
+    }
+
+    /// R2849 — group face `key` stopped: take its final counts, then close its
+    /// peers and the group's transport, all marked disconnected until the
+    /// collection delay retires them. A stopped face's peers go with it, as a
+    /// deleted multicast transport drops every peer record it held.
+    #[cfg(all(feature = "transport-multicast", feature = "transport-stats"))]
+    pub fn multicast_closed(&self, key: u64) {
+        let now_ms = self.with(|inner| inner.now_ms());
+        self.multicast_closed_at(key, now_ms);
+    }
+
+    /// [`Self::multicast_closed`] at `now_ms` on this handle's clock.
+    #[cfg(all(feature = "transport-multicast", feature = "transport-stats"))]
+    fn multicast_closed_at(&self, key: u64, now_ms: u64) {
+        self.with(|inner| {
+            inner.sync_groups(now_ms);
+            let Some(group) = inner.groups.remove(&key) else {
+                return;
+            };
+            let mut last = group.stats.metrics();
+            last.close_links();
+            inner
+                .registry
+                .set_transport_metrics(group.transport, last.transport().clone());
+            for (zid, peer) in last.peers() {
+                if let Some(id) = group.peers.get(zid) {
+                    inner
+                        .registry
+                        .set_transport_metrics(*id, peer.metrics().clone());
+                }
+            }
+            for id in group.peers.values() {
+                inner.registry.close_transport(*id, now_ms);
+            }
+            inner.registry.close_transport(group.transport, now_ms);
+        });
     }
 }
 
@@ -257,6 +388,94 @@ mod tests {
                 MetricsQuery::default()
             )),
             "1"
+        );
+    }
+
+    /// R2849 — a group face through its whole life in the node registry: the
+    /// group is ONE opened transport and its peers are partitions that do not
+    /// count as opened; a peer that leaves is listed disconnected; stopping the
+    /// face closes the group, its link and the peers still on it.
+    ///
+    /// The gauge's walk below is upstream's: a peer's partition is built
+    /// without an increment, but dropping it decrements like any transport
+    /// (`commons/zenoh-stats/src/transport.rs` @ `self.registry.remove_transport(&self.transport)`),
+    /// so a group whose one peer left, then stopped, reads -1. The registry
+    /// keeps that asymmetry on purpose; this pins that the face drives it.
+    #[cfg(feature = "transport-multicast")]
+    #[test]
+    fn a_group_face_is_one_transport_whose_peers_come_and_go() {
+        use crate::multicast_glue::{MulticastStatsRecorder, MulticastTransportStats};
+        use wz_session_core::multicast_peer_arrived::MulticastPeerArrived;
+        use wz_session_core::multicast_peer_lost::{
+            MulticastPeerId, MulticastPeerLost, MulticastPeerLostReason,
+        };
+
+        let stats = NodeStats::new("a1b2", WhatAmI::Router, "v1");
+        let face = MulticastTransportStats::new("udp/10.0.0.1:7446", "udp/224.0.0.224:7446");
+        stats.multicast_opened(5, &face);
+        face.datagram_received(30);
+        let peer = MulticastPeerId::from_wire(&[0xaa]);
+        face.peer_arrived(&MulticastPeerArrived {
+            peer,
+            whatami: Some(WhatAmI::Peer),
+        });
+
+        let all = MetricsQuery {
+            disconnected: true,
+            ..MetricsQuery::default()
+        };
+        let links = |doc: &str| {
+            doc.lines()
+                .find_map(|l| {
+                    l.strip_prefix(&format!("zenoh_links_opened{{{HEAD},protocol=\"udp\"}} "))
+                })
+                .map(str::to_string)
+                .unwrap_or_else(|| panic!("no udp links gauge:\n{doc}"))
+        };
+        let peer_bytes = |doc: &str, disconnected: &str| {
+            doc.lines().any(|l| {
+                l.starts_with("zenoh_rx_per_transport_bytes_total{")
+                    && l.contains("remote_zid=\"aa\"")
+                    && l.contains(&format!("disconnected=\"{disconnected}\""))
+            })
+        };
+
+        let open = document(&stats.snapshot_at(0), all);
+        assert_eq!(opened(&open), "1", "the group, not its peer:\n{open}");
+        assert_eq!(links(&open), "1", "the group's one link:\n{open}");
+        assert!(peer_bytes(&open, "false"), "the peer is listed:\n{open}");
+        assert!(
+            open.contains(
+                "remote_group=\"udp/224.0.0.224:7446\",remote_cn=\"\",disconnected=\"false\"} 30"
+            ),
+            "the group's received bytes:\n{open}"
+        );
+
+        face.peer_lost(&MulticastPeerLost {
+            peer,
+            reason: MulticastPeerLostReason::Closed,
+        });
+        let left = document(&stats.snapshot_at(10), all);
+        assert!(
+            peer_bytes(&left, "true"),
+            "the peer that left is disconnected:\n{left}"
+        );
+        assert!(!peer_bytes(&left, "false"), "and listed once:\n{left}");
+        assert_eq!(opened(&left), "0", "{left}");
+
+        stats.multicast_closed_at(5, 20);
+        let closed = document(&stats.snapshot_at(20), all);
+        assert_eq!(opened(&closed), "-1", "{closed}");
+        assert_eq!(
+            links(&closed),
+            "0",
+            "the group's link closed with it:\n{closed}"
+        );
+        assert!(
+            closed.contains(
+                "remote_group=\"udp/224.0.0.224:7446\",remote_cn=\"\",disconnected=\"true\"} 30"
+            ),
+            "the group is kept, disconnected, with its counts:\n{closed}"
         );
     }
 

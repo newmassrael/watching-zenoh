@@ -1053,6 +1053,17 @@ impl MulticastMetrics {
         });
     }
 
+    /// R2849 — the transport is going away: close the group's link and every
+    /// peer's, so each count sits in its partition's transport-level cells, as
+    /// dropping a link's stats handle leaves it upstream, and the group's link
+    /// stops counting toward `zenoh_links_opened`.
+    pub fn close_links(&mut self) {
+        self.transport.close_link(self.slot);
+        for peer in self.peers.values_mut() {
+            peer.metrics.close_link(peer.slot);
+        }
+    }
+
     /// The peer `zid` left: its partition comes back with its link closed, so
     /// the counts sit in its transport-level cells, as a dropped link's do.
     pub fn peer_left(&mut self, zid: &[u8]) -> Option<MulticastPeerMetrics> {

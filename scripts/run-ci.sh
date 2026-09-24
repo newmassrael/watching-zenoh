@@ -6656,6 +6656,19 @@ layer_c1ak_cargo_test_transport_stats() {
     _runci_guarded_test C1ak 3 cargo test -p wz-runtime-tokio --features transport-stats,routing-peer --lib --quiet \
         -- node_stats:: the_face_loop_records_each_face_into_the_node_registry \
         || return 1
+    # R2848/R2849 — the MULTICAST transport's counts: the drive loop recording
+    # a whole Frame and a reassembled chain (`multicast_glue`), and the node
+    # registry holding the group and its peers (`node_stats`). None of the three
+    # is in any leg above: every guard that counts `multicast_glue` runs without
+    # `transport-stats`, and the node_stats leg above composes no multicast.
+    # `transport-fragmentation` brings the reassembly the second one needs.
+    # 3 = the number this command PRINTED.
+    _runci_guarded_test C1ak 3 cargo test -p wz-runtime-tokio \
+        --features transport-stats,transport-multicast,transport-fragmentation,codec-push,pubsub-put \
+        --lib --quiet -- a_group_face_is_one_transport_whose_peers_come_and_go \
+        the_drive_loop_records_each_count_where_upstream_takes_it \
+        a_reassembled_message_is_counted_once_on_its_sender \
+        || return 1
     # R311y810 — the OpenMetrics renderer with the counting half OFF. The report
     # type and its rendering are unconditional (only the atomics are gated), and
     # this is what holds that apart: a build that never counts must still be able
