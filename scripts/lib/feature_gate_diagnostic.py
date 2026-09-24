@@ -264,7 +264,16 @@ NO_PUBLIC_PATH: dict[str, dict[str, str]] = {
             # falsifies one is the round that owes the withdrawal — the comment
             # above exists because a previous round did not come back for it and
             # two gates reported the same defect.
-            "adminspace-write",
+            #
+            # R2827 — `adminspace-write` LEAVES this list by that same route.
+            # R2822 made the write surface exist only under the feature, so
+            # `lib.rs` now has `#[cfg(feature = "adminspace-write")] pub fn
+            # admin_write_permit` at the crate root, a publicly visible item
+            # this claim denied. The hosted run for R2822 (35951692857) is
+            # where it surfaced: this module reported the feature as both
+            # probed and declared, and `feature_public_surface_census` reported
+            # the declaration as false. The round that falsified it did not
+            # come back for it; this one does.
             "config-mutate-runtime",
             "ext-pubsub-sample-miss-detection",
             "multicast-declarations",

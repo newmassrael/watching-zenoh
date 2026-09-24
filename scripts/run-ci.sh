@@ -6932,8 +6932,12 @@ layer_c1am_cargo_test_adminspace() {
         cargo test -p wz-session-core --features storage-replication --lib zid_to_zenoh_hex --quiet || return 1
     _runci_guarded_test "C1AM declare_adminspace 4" 4 \
         cargo test -p wz-runtime-tokio --features adminspace-core,query-get --lib declare_adminspace --quiet || return 1
-    _runci_guarded_test "C1AM admin_write_permit 1" 1 \
-        cargo test -p wz-runtime-tokio --features adminspace-core,query-get --lib admin_write_permit --quiet || return 1
+    # R2827 — the `adminspace-core`-only `admin_write_permit` leg is GONE, not
+    # renumbered. It pinned the compiled-out arm (the resolver returning `true`
+    # with the feature off), and R2822 removed that arm: the resolver and its
+    # test module now exist only under `adminspace-write`, so this build selects
+    # no test, which is how hosted run 35951692857 redded here. The gated arm
+    # is still pinned by the `adminspace-write,query-get` leg below.
     _runci_guarded_test "C1AM declare_adminspace 6" 6 \
         cargo test -p wz-runtime-tokio --features adminspace-metrics,query-get --lib declare_adminspace --quiet || return 1
     # 6 -> 7: the LIVE-permit witness
@@ -18042,7 +18046,9 @@ layer_e6i_storage_host_adminspace_read_deny() {
     # R2374 — `adminspace-write` joined the build, and it is load-bearing rather
     # than additive. This lane now also witnesses that a config write is REFUSED
     # without `--config-write-permit`, and `admin_write_permit` with the gate
-    # compiled out returns a constant `true` — so on the previous two-feature build
+    # compiled out returned a constant `true` (until R2822 removed that arm, and
+    # with it any build that hosts a write subscriber without the gate) — so on
+    # the previous two-feature build
     # the refusal arm could not be taken and the test failed for the right reason
     # the first time it ran. The read-deny test above is unaffected: it writes
     # nothing.
