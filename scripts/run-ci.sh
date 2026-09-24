@@ -18153,6 +18153,13 @@ layer_e6h_adminspace_config_hotreload() {
     (cd crates && cargo clippy -p wz-ap-demo --features adminspace-config-hotreload,zenoh-config -- -D warnings) || return 1
     (cd crates && cargo test -p wz-integration-tests \
         --test wz_storage_host_plugins_section_pico -- --ignored --quiet --test-threads=1) || return 1
+    # §5.23 `adminspace-core` — the config's `metadata`, served by this same
+    # build's storage host from a `--config` FILE and compared byte for byte with
+    # what a stock zenohd serves for the same value. Same binary as the test
+    # above (it needs `zenoh-config` to read the file), so it runs after it. The
+    # zenohd is the one this job's Layer Z provisions.
+    (cd crates && cargo test -p wz-integration-tests \
+        --test wz_storage_host_metadata_matches_zenohd -- --ignored --quiet --test-threads=1) || return 1
 }
 
 # ─── Layer E6i — adminspace-read GET gate on the STORAGE-HOST tier (vs pico) ────

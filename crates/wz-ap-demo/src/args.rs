@@ -3108,14 +3108,15 @@ pub(crate) const ARGV_ONLY_KIND_LEDGER: &[(&str, &str, &str)] = &[
          client to read the storage's status and then its own put back.",
     ),
     // §5.23 `adminspace-core` — `metadata`. The value travels in the REPLY to an
-    // admin GET of the node's root key, and no leg reads it there yet.
+    // admin GET of the node's root key, and that reply is what the leg reads.
     (
         "metadata",
-        KIND_NOT_YET_READ,
-        "expands to `--metadata <value>`; carried as the `metadata` field of \
-         the root admin reply, upstream's `local_data` \
-         (`zenoh/src/net/runtime/adminspace.rs` @ `\"metadata\": \
-         context.runtime.config().lock().metadata(),`).",
+        KIND_LEG_JUDGED,
+        "expands to `--metadata <value>` on a run that hosts an adminspace; \
+         wz_storage_host_serves_its_config_metadata_as_zenohd_does, in \
+         wz-integration-tests/tests/wz_storage_host_metadata_matches_zenohd.rs, \
+         starts the host on a FILE and requires a REAL pico client to read the \
+         same bytes from it that it reads from a stock zenohd holding the value.",
     ),
 ];
 
