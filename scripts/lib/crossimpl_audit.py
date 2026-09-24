@@ -728,7 +728,14 @@ HOST_GATED_CI_TARGETS: dict[str, str] = {
 # reading wz's responder-side `reply ⊆ query` refusal (default get) and its
 # `_anyke` opt-out: 2 tests x 1 atom (`query-get`) = 2. Measured by
 # `audit-crossimpl-proof.sh` before the commit (`measured 936, declared 934`).
-FOREIGN_ADJUDICATOR_LINKS = 936
+# R2821 — 936 -> 937: `wz_plugin_config_write_starts_and_stops_a_library_plugin_via_pico`
+# (`wz_plugin_dynamic_loading_pico.rs`, R2820's `d031c23a`), a stock pico `z_put`
+# driving the config write that starts and stops a library plugin: 1 test x 1
+# atom (`adminspace-config-hotreload`) = 1. ⚠ Pushed WITHOUT this constant
+# moving, the R2790 / R2804 class again; hosted A4 redded on 35917348925.
+# Measured `937` by `run-ci.sh --layer A4` at R2821's HEAD, whose own commits
+# add no `wz-proves` line.
+FOREIGN_ADJUDICATOR_LINKS = 937
 
 # ── Execution disclosure ────────────────────────────────────────────────────────
 #
