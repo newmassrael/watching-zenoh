@@ -1,0 +1,35 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later OR LicenseRef-watching-zenoh-Commercial
+# SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
+#
+# R2821 — upstream's stats REGISTRY, driven directly, as the foreign party for
+# the metrics document `adminspace-metrics` serves under `transport-stats`.
+#
+# wz's `stats_registry` claims to write what a zenoh node built with `stats`
+# writes on `@/<zid>/<whatami>/metrics`. That document is shaped as much by the
+# third-party encoder (`prometheus-client`) as by zenoh, so it cannot honestly
+# be transcribed from reading source: this oracle performs fixed event sequences
+# on the real registry and prints what it encodes, and
+# `scripts/lib/zenoh_stats_golden.py` turns that into the golden the wz test
+# module compares against.
+#
+# ⚠ WHY THE REGISTRY AND NOT zenohd. The registry is what the metrics handler
+# encodes, and a router would only add sessions whose counts depend on timing.
+# Driving the registry with chosen events gives documents that are exactly
+# reproducible, which is what a golden must be.
+#
+# ⛔ NOT A MEMBER OF wz's WORKSPACE, like every oracle here (see ../Cargo.toml):
+# upstream never enters `crates/`'s dependency graph.
+[package]
+name = "wz-oracle-zenoh-stats-golden"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+# PINNED BY TAG, the pin every other oracle here and the citation gates use.
+# `zenoh-stats` is the registry itself; the other three type the events fed to
+# it (a network message, its payload buffer, a configured key expression).
+zenoh-stats = { git = "https://github.com/eclipse-zenoh/zenoh", tag = "1.10.1" }
+zenoh-protocol = { git = "https://github.com/eclipse-zenoh/zenoh", tag = "1.10.1" }
+zenoh-keyexpr = { git = "https://github.com/eclipse-zenoh/zenoh", tag = "1.10.1" }
+zenoh-buffers = { git = "https://github.com/eclipse-zenoh/zenoh", tag = "1.10.1" }

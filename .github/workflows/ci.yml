@@ -2418,6 +2418,14 @@ jobs:
         # `oracles/target` (the cache step's R2625 note).
         run: bash scripts/run-ci.sh --layer E16
 
+      - name: Layer E17 — the stats registry's document against upstream's registry
+        # R2821 — the metrics document wz writes under `transport-stats` is the
+        # one upstream's `zenoh-stats` registry writes. `oracles/zenoh-stats-golden`
+        # drives the REAL registry through fixed events; leg 1 requires the
+        # committed golden to be what it writes today, leg 2 requires wz's
+        # registry to write that golden. HERE for the oracle cache, as E16.
+        run: bash scripts/run-ci.sh --layer E17
+
       - name: Layer C1bp — §5.22 dynamic plugin loading, end to end
         # R311y495 — MOVED here from `validate + verify + test`, where R311y492
         # first wired it and where it SKIP-passed on its very first hosted run:

@@ -1077,6 +1077,14 @@ pub mod compression;
 /// the default-feature rustdoc Layer C1bz measures.)
 pub mod stats;
 
+/// R2821 — the pin's node-wide stats REGISTRY: transports and links as
+/// partitions of labelled families, collected and written as the OpenMetrics
+/// document a zenoh node built with `stats` serves on its admin metrics key.
+/// Pure data and encoding (`alloc` only, time supplied by the caller), so the
+/// runtime owns where it lives and how it is shared.
+#[cfg(feature = "alloc")]
+pub mod stats_registry;
+
 /// SSOT for the Z_EXT_COMPRESSION establishment ext (`session-extcompression`) —
 /// the wz mirror of zenoh `init::ext::Compression` (`zextunit!(0x6,false)`). The
 /// codec layer (the 0x6 unit ext + the peer-offer projector); the per-session

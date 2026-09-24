@@ -200,7 +200,7 @@ impl StatMedium {
 /// key expression addresses the admin space (`@`-prefixed, the
 /// `@/<zid>/...` subtree this tree's `adminspace` module serves) counts as
 /// `admin`; everything else is `user`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum StatSpace {
     /// The admin space — an `@`-prefixed key expression.
     Admin,

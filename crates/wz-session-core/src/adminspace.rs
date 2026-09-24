@@ -2821,18 +2821,15 @@ fn parse_volume_add_payload(text: &str) -> Option<AdminConfigWrite> {
 /// not copy it. It is a byte past the document terminator, it belongs to no line,
 /// and a strict reader may reject trailing content; copying a typo into a wire
 /// format is not fidelity. Everything before it is byte-for-byte the pin's.
+///
+/// R2821 — the three lines are written by
+/// [`crate::stats_registry::push_build_info`], the same writer the registry's
+/// document opens with, so the no-stats body and the stats body cannot drift
+/// apart on the one block they share.
 #[cfg(feature = "adminspace-metrics")]
 pub fn metrics_text(zid_hex: &str, whatami: &str, version: &str) -> String {
     let mut out = String::new();
-    out.push_str("# HELP zenoh_build Zenoh build version.\n");
-    out.push_str("# TYPE zenoh_build info\n");
-    out.push_str("zenoh_build_info{local_id=\"");
-    push_openmetrics_label(zid_hex, &mut out);
-    out.push_str("\",local_whatami=\"");
-    push_openmetrics_label(whatami, &mut out);
-    out.push_str("\",version=\"");
-    push_openmetrics_label(version, &mut out);
-    out.push_str("\"} 1\n");
+    crate::stats_registry::push_build_info(&mut out, zid_hex, whatami, version);
     out
 }
 
@@ -2842,22 +2839,6 @@ pub fn metrics_text(zid_hex: &str, whatami: &str, version: &str) -> String {
 #[cfg(feature = "adminspace-metrics")]
 pub fn metrics_eof() -> &'static str {
     "# EOF\n"
-}
-
-/// Append `s` as an OpenMetrics label value (escape `\`, `"`, newline per the
-/// OpenMetrics text format). A normal version contains none of these, so the
-/// output is byte-identical to zenoh's unescaped `format!`; the escape only
-/// guards a pathological version string.
-#[cfg(feature = "adminspace-metrics")]
-fn push_openmetrics_label(s: &str, out: &mut String) {
-    for c in s.chars() {
-        match c {
-            '\\' => out.push_str("\\\\"),
-            '"' => out.push_str("\\\""),
-            '\n' => out.push_str("\\n"),
-            c => out.push(c),
-        }
-    }
 }
 
 /// Append `s` to `out` as a quoted, escaped JSON string. R311y50 — delegates to

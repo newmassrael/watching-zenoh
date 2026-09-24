@@ -90,6 +90,29 @@ impl Priority {
         }
     }
 
+    /// The band as upstream DISPLAYS it — kebab-case, the spelling a metrics
+    /// consumer reads in a `priority="…"` label.
+    ///
+    /// Distinct from [`Self::name`] on purpose: `name` is the constant's
+    /// identifier (what a capture reader is told), this is upstream's
+    /// `impl Display for Priority`
+    /// (`commons/zenoh-protocol/src/core/mod.rs` @ `Priority::RealTime => "real-time",`),
+    /// which is what the pin's stats registry writes through its `PriorityLabel`
+    /// wrapper. The two vocabularies differ in every multi-word variant, so one
+    /// cannot be derived from the other without a second table anyway.
+    pub const fn display_str(self) -> &'static str {
+        match self {
+            Priority::Control => "control",
+            Priority::RealTime => "real-time",
+            Priority::InteractiveHigh => "interactive-high",
+            Priority::InteractiveLow => "interactive-low",
+            Priority::DataHigh => "data-high",
+            Priority::Data => "data",
+            Priority::DataLow => "data-low",
+            Priority::Background => "background",
+        }
+    }
+
     /// Inverse of [`Self::wire_byte`]: map a wire byte to its `Priority`.
     /// The 3-bit priority field cannot encode a value > 7, so the
     /// out-of-range arm is unreachable from a conforming wire; it clamps to

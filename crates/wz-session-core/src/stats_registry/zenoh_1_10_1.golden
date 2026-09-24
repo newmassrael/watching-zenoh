@@ -1,0 +1,770 @@
+# zenoh-stats 1.10.1 with prometheus-client 0.24.1: the documents oracles/zenoh-stats-golden makes the pinned registry write.
+# Regenerate with `python3 scripts/lib/zenoh_stats_golden.py --write`; never edit by hand.
+===== S1 empty per_transport=true per_link=true disconnected=false per_key=true
+# HELP zenoh_build Zenoh build version.
+# TYPE zenoh_build info
+zenoh_build_info{local_id="a1b2",local_whatami="router",version="v1"} 1
+# HELP zenoh_transports_opened Count of transports currently opened.
+# TYPE zenoh_transports_opened gauge
+zenoh_transports_opened{local_id="a1b2",local_whatami="router"} 0
+# HELP zenoh_tx_bytes Count of transport messages bytes sent
+# TYPE zenoh_tx_bytes counter
+# UNIT zenoh_tx_bytes bytes
+# HELP zenoh_tx_per_transport_bytes Count of transport messages bytes sent (per transport)
+# TYPE zenoh_tx_per_transport_bytes counter
+# UNIT zenoh_tx_per_transport_bytes bytes
+# HELP zenoh_tx_transport_message Count of transport messages sent
+# TYPE zenoh_tx_transport_message counter
+# HELP zenoh_tx_transport_message_per_transport Count of transport messages sent (per transport)
+# TYPE zenoh_tx_transport_message_per_transport counter
+# HELP zenoh_tx_network_message Count of network messages sent
+# TYPE zenoh_tx_network_message counter
+# HELP zenoh_tx_network_message_per_transport Count of network messages sent (per transport)
+# TYPE zenoh_tx_network_message_per_transport counter
+# HELP zenoh_tx_network_message_payload_bytes Histogram of network messages payload sent
+# TYPE zenoh_tx_network_message_payload_bytes histogram
+# UNIT zenoh_tx_network_message_payload_bytes bytes
+# HELP zenoh_tx_network_message_payload_per_transport_bytes Histogram of network messages payload sent (per transport)
+# TYPE zenoh_tx_network_message_payload_per_transport_bytes histogram
+# UNIT zenoh_tx_network_message_payload_per_transport_bytes bytes
+# HELP zenoh_tx_network_message_dropped_payload_bytes Histogram of network messages payload dropped while sent
+# TYPE zenoh_tx_network_message_dropped_payload_bytes histogram
+# UNIT zenoh_tx_network_message_dropped_payload_bytes bytes
+# HELP zenoh_tx_network_message_dropped_payload_per_transport_bytes Histogram of network messages payload dropped while sent (per transport)
+# TYPE zenoh_tx_network_message_dropped_payload_per_transport_bytes histogram
+# UNIT zenoh_tx_network_message_dropped_payload_per_transport_bytes bytes
+# HELP zenoh_tx_network_message_payload_per_key_bytes Histogram of network messages payload sent per key
+# TYPE zenoh_tx_network_message_payload_per_key_bytes histogram
+# UNIT zenoh_tx_network_message_payload_per_key_bytes bytes
+# HELP zenoh_tx_network_message_payload_per_key_per_transport_bytes Histogram of network messages payload sent per key (per transport)
+# TYPE zenoh_tx_network_message_payload_per_key_per_transport_bytes histogram
+# UNIT zenoh_tx_network_message_payload_per_key_per_transport_bytes bytes
+# HELP zenoh_rx_bytes Count of transport messages bytes received
+# TYPE zenoh_rx_bytes counter
+# UNIT zenoh_rx_bytes bytes
+# HELP zenoh_rx_per_transport_bytes Count of transport messages bytes received (per transport)
+# TYPE zenoh_rx_per_transport_bytes counter
+# UNIT zenoh_rx_per_transport_bytes bytes
+# HELP zenoh_rx_transport_message Count of transport messages received
+# TYPE zenoh_rx_transport_message counter
+# HELP zenoh_rx_transport_message_per_transport Count of transport messages received (per transport)
+# TYPE zenoh_rx_transport_message_per_transport counter
+# HELP zenoh_rx_network_message Count of network messages received
+# TYPE zenoh_rx_network_message counter
+# HELP zenoh_rx_network_message_per_transport Count of network messages received (per transport)
+# TYPE zenoh_rx_network_message_per_transport counter
+# HELP zenoh_rx_network_message_payload_bytes Histogram of network messages payload received
+# TYPE zenoh_rx_network_message_payload_bytes histogram
+# UNIT zenoh_rx_network_message_payload_bytes bytes
+# HELP zenoh_rx_network_message_payload_per_transport_bytes Histogram of network messages payload received (per transport)
+# TYPE zenoh_rx_network_message_payload_per_transport_bytes histogram
+# UNIT zenoh_rx_network_message_payload_per_transport_bytes bytes
+# HELP zenoh_rx_network_message_dropped_payload_bytes Histogram of network messages payload dropped while received
+# TYPE zenoh_rx_network_message_dropped_payload_bytes histogram
+# UNIT zenoh_rx_network_message_dropped_payload_bytes bytes
+# HELP zenoh_rx_network_message_dropped_payload_per_transport_bytes Histogram of network messages payload dropped while received (per transport)
+# TYPE zenoh_rx_network_message_dropped_payload_per_transport_bytes histogram
+# UNIT zenoh_rx_network_message_dropped_payload_per_transport_bytes bytes
+# HELP zenoh_rx_network_message_payload_per_key_bytes Histogram of network messages payload received per key
+# TYPE zenoh_rx_network_message_payload_per_key_bytes histogram
+# UNIT zenoh_rx_network_message_payload_per_key_bytes bytes
+# HELP zenoh_rx_network_message_payload_per_key_per_transport_bytes Histogram of network messages payload received per key (per transport)
+# TYPE zenoh_rx_network_message_payload_per_key_per_transport_bytes histogram
+# UNIT zenoh_rx_network_message_payload_per_key_per_transport_bytes bytes
+# EOF
+===== END
+===== S1 empty per_transport=false per_link=false disconnected=false per_key=false
+# HELP zenoh_build Zenoh build version.
+# TYPE zenoh_build info
+zenoh_build_info{local_id="a1b2",local_whatami="router",version="v1"} 1
+# HELP zenoh_transports_opened Count of transports currently opened.
+# TYPE zenoh_transports_opened gauge
+zenoh_transports_opened{local_id="a1b2",local_whatami="router"} 0
+# HELP zenoh_tx_bytes Count of transport messages bytes sent
+# TYPE zenoh_tx_bytes counter
+# UNIT zenoh_tx_bytes bytes
+# HELP zenoh_tx_transport_message Count of transport messages sent
+# TYPE zenoh_tx_transport_message counter
+# HELP zenoh_tx_network_message Count of network messages sent
+# TYPE zenoh_tx_network_message counter
+# HELP zenoh_tx_network_message_payload_bytes Histogram of network messages payload sent
+# TYPE zenoh_tx_network_message_payload_bytes histogram
+# UNIT zenoh_tx_network_message_payload_bytes bytes
+# HELP zenoh_tx_network_message_dropped_payload_bytes Histogram of network messages payload dropped while sent
+# TYPE zenoh_tx_network_message_dropped_payload_bytes histogram
+# UNIT zenoh_tx_network_message_dropped_payload_bytes bytes
+# HELP zenoh_rx_bytes Count of transport messages bytes received
+# TYPE zenoh_rx_bytes counter
+# UNIT zenoh_rx_bytes bytes
+# HELP zenoh_rx_transport_message Count of transport messages received
+# TYPE zenoh_rx_transport_message counter
+# HELP zenoh_rx_network_message Count of network messages received
+# TYPE zenoh_rx_network_message counter
+# HELP zenoh_rx_network_message_payload_bytes Histogram of network messages payload received
+# TYPE zenoh_rx_network_message_payload_bytes histogram
+# UNIT zenoh_rx_network_message_payload_bytes bytes
+# HELP zenoh_rx_network_message_dropped_payload_bytes Histogram of network messages payload dropped while received
+# TYPE zenoh_rx_network_message_dropped_payload_bytes histogram
+# UNIT zenoh_rx_network_message_dropped_payload_bytes bytes
+# EOF
+===== END
+===== S2 one per_transport=true per_link=true disconnected=false per_key=true
+# HELP zenoh_build Zenoh build version.
+# TYPE zenoh_build info
+zenoh_build_info{local_id="a1b2",local_whatami="router",version="v1"} 1
+# HELP zenoh_transports_opened Count of transports currently opened.
+# TYPE zenoh_transports_opened gauge
+zenoh_transports_opened{local_id="a1b2",local_whatami="router"} 1
+# HELP zenoh_links_opened Count of transports currently opened.
+# TYPE zenoh_links_opened gauge
+zenoh_links_opened{local_id="a1b2",local_whatami="router",protocol="tcp"} 1
+# HELP zenoh_resources_declared Count of resources currently declared.
+# TYPE zenoh_resources_declared gauge
+zenoh_resources_declared{local_id="a1b2",local_whatami="router",resource="subscriber",locality="local"} 1
+# HELP zenoh_tx_bytes Count of transport messages bytes sent
+# TYPE zenoh_tx_bytes counter
+# UNIT zenoh_tx_bytes bytes
+zenoh_tx_bytes_total{local_id="a1b2",local_whatami="router",protocol="tcp"} 100
+# HELP zenoh_tx_per_transport_bytes Count of transport messages bytes sent (per transport)
+# TYPE zenoh_tx_per_transport_bytes counter
+# UNIT zenoh_tx_per_transport_bytes bytes
+zenoh_tx_per_transport_bytes_total{local_id="a1b2",local_whatami="router",protocol="tcp",remote_zid="c3d4",remote_whatami="peer",remote_group="",remote_cn="",disconnected="false"} 100
+# HELP zenoh_tx_per_link_bytes Count of transport messages bytes sent (per link)
+# TYPE zenoh_tx_per_link_bytes counter
+# UNIT zenoh_tx_per_link_bytes bytes
+zenoh_tx_per_link_bytes_total{local_id="a1b2",local_whatami="router",protocol="tcp",remote_zid="c3d4",remote_whatami="peer",remote_group="",remote_cn="",src_locator="tcp/127.0.0.1:7447",dst_locator="tcp/127.0.0.1:50000"} 100
+# HELP zenoh_tx_transport_message Count of transport messages sent
+# TYPE zenoh_tx_transport_message counter
+zenoh_tx_transport_message_total{local_id="a1b2",local_whatami="router",protocol="tcp"} 2
+# HELP zenoh_tx_transport_message_per_transport Count of transport messages sent (per transport)
+# TYPE zenoh_tx_transport_message_per_transport counter
+zenoh_tx_transport_message_per_transport_total{local_id="a1b2",local_whatami="router",protocol="tcp",remote_zid="c3d4",remote_whatami="peer",remote_group="",remote_cn="",disconnected="false"} 2
+# HELP zenoh_tx_transport_message_per_link Count of transport messages sent (per link)
+# TYPE zenoh_tx_transport_message_per_link counter
+zenoh_tx_transport_message_per_link_total{local_id="a1b2",local_whatami="router",protocol="tcp",remote_zid="c3d4",remote_whatami="peer",remote_group="",remote_cn="",src_locator="tcp/127.0.0.1:7447",dst_locator="tcp/127.0.0.1:50000"} 2
+# HELP zenoh_tx_network_message Count of network messages sent
+# TYPE zenoh_tx_network_message counter
+zenoh_tx_network_message_total{local_id="a1b2",local_whatami="router",priority="data",message="put",shm="false",protocol="tcp"} 2
+# HELP zenoh_tx_network_message_per_transport Count of network messages sent (per transport)
+# TYPE zenoh_tx_network_message_per_transport counter
+zenoh_tx_network_message_per_transport_total{local_id="a1b2",local_whatami="router",priority="data",message="put",shm="false",protocol="tcp",remote_zid="c3d4",remote_whatami="peer",remote_group="",remote_cn="",disconnected="false"} 2
+# HELP zenoh_tx_network_message_per_link Count of network messages sent (per link)
+# TYPE zenoh_tx_network_message_per_link counter
+zenoh_tx_network_message_per_link_total{local_id="a1b2",local_whatami="router",priority="data",message="put",shm="false",protocol="tcp",remote_zid="c3d4",remote_whatami="peer",remote_group="",remote_cn="",src_locator="tcp/127.0.0.1:7447",dst_locator="tcp/127.0.0.1:50000"} 2
+# HELP zenoh_tx_network_message_payload_bytes Histogram of network messages payload sent
+# TYPE zenoh_tx_network_message_payload_bytes histogram
+# UNIT zenoh_tx_network_message_payload_bytes bytes
+zenoh_tx_network_message_payload_bytes_bucket{local_id="a1b2",local_whatami="router",le="+Inf",space="user",priority="data",message="put",shm="false"} 2
+zenoh_tx_network_message_payload_bytes_bucket{local_id="a1b2",local_whatami="router",le="0.0",space="user",priority="data",message="put",shm="false"} 0
+zenoh_tx_network_message_payload_bytes_bucket{local_id="a1b2",local_whatami="router",le="1024.0",space="user",priority="data",message="put",shm="false"} 1
+zenoh_tx_network_message_payload_bytes_bucket{local_id="a1b2",local_whatami="router",le="1048576.0",space="user",priority="data",message="put",shm="false"} 2
+zenoh_tx_network_message_payload_bytes_bucket{local_id="a1b2",local_whatami="router",le="1073741824.0",space="user",priority="data",message="put",shm="false"} 2
+zenoh_tx_network_message_payload_bytes_bucket{local_id="a1b2",local_whatami="router",le="32.0",space="user",priority="data",message="put",shm="false"} 0
+zenoh_tx_network_message_payload_bytes_bucket{local_id="a1b2",local_whatami="router",le="32768.0",space="user",priority="data",message="put",shm="false"} 2
+zenoh_tx_network_message_payload_bytes_bucket{local_id="a1b2",local_whatami="router",le="33554432.0",space="user",priority="data",message="put",shm="false"} 2
+zenoh_tx_network_message_payload_bytes_count{local_id="a1b2",local_whatami="router",space="user",priority="data",message="put",shm="false"} 2
+zenoh_tx_network_message_payload_bytes_sum{local_id="a1b2",local_whatami="router",space="user",priority="data",message="put",shm="false"} 2040.0
+# HELP zenoh_tx_network_message_payload_per_transport_bytes Histogram of network messages payload sent (per transport)
+# TYPE zenoh_tx_network_message_payload_per_transport_bytes histogram
+# UNIT zenoh_tx_network_message_payload_per_transport_bytes bytes
+zenoh_tx_network_message_payload_per_transport_bytes_bucket{local_id="a1b2",local_whatami="router",le="+Inf",space="user",priority="data",message="put",shm="false",remote_zid="c3d4",remote_whatami="peer",remote_group="",remote_cn="",disconnected="false"} 2
+zenoh_tx_network_message_payload_per_transport_bytes_bucket{local_id="a1b2",local_whatami="router",le="0.0",space="user",priority="data",message="put",shm="false",remote_zid="c3d4",remote_whatami="peer",remote_group="",remote_cn="",disconnected="false"} 0
+zenoh_tx_network_message_payload_per_transport_bytes_bucket{local_id="a1b2",local_whatami="router",le="1024.0",space="user",priority="data",message="put",shm="false",remote_zid="c3d4",remote_whatami="peer",remote_group="",remote_cn="",disconnected="false"} 1
+zenoh_tx_network_message_payload_per_transport_bytes_bucket{local_id="a1b2",local_whatami="router",le="1048576.0",space="user",priority="data",message="put",shm="false",remote_zid="c3d4",remote_whatami="peer",remote_group="",remote_cn="",disconnected="false"} 2
+zenoh_tx_network_message_payload_per_transport_bytes_bucket{local_id="a1b2",local_whatami="router",le="1073741824.0",space="user",priority="data",message="put",shm="false",remote_zid="c3d4",remote_whatami="peer",remote_group="",remote_cn="",disconnected="false"} 2
+zenoh_tx_network_message_payload_per_transport_bytes_bucket{local_id="a1b2",local_whatami="router",le="32.0",space="user",priority="data",message="put",shm="false",remote_zid="c3d4",remote_whatami="peer",remote_group="",remote_cn="",disconnected="false"} 0
+zenoh_tx_network_message_payload_per_transport_bytes_bucket{local_id="a1b2",local_whatami="router",le="32768.0",space="user",priority="data",message="put",shm="false",remote_zid="c3d4",remote_whatami="peer",remote_group="",remote_cn="",disconnected="false"} 2
+zenoh_tx_network_message_payload_per_transport_bytes_bucket{local_id="a1b2",local_whatami="router",le="33554432.0",space="user",priority="data",message="put",shm="false",remote_zid="c3d4",remote_whatami="peer",remote_group="",remote_cn="",disconnected="false"} 2
+zenoh_tx_network_message_payload_per_transport_bytes_count{local_id="a1b2",local_whatami="router",space="user",priority="data",message="put",shm="false",remote_zid="c3d4",remote_whatami="peer",remote_group="",remote_cn="",disconnected="false"} 2
+zenoh_tx_network_message_payload_per_transport_bytes_sum{local_id="a1b2",local_whatami="router",space="user",priority="data",message="put",shm="false",remote_zid="c3d4",remote_whatami="peer",remote_group="",remote_cn="",disconnected="false"} 2040.0
+# HELP zenoh_tx_network_message_dropped_payload_bytes Histogram of network messages payload dropped while sent
+# TYPE zenoh_tx_network_message_dropped_payload_bytes histogram
+# UNIT zenoh_tx_network_message_dropped_payload_bytes bytes
+zenoh_tx_network_message_dropped_payload_bytes_bucket{local_id="a1b2",local_whatami="router",le="+Inf",priority="background",message="put",protocol="tcp",reason="congestion"} 1
+zenoh_tx_network_message_dropped_payload_bytes_bucket{local_id="a1b2",local_whatami="router",le="0.0",priority="background",message="put",protocol="tcp",reason="congestion"} 0
+zenoh_tx_network_message_dropped_payload_bytes_bucket{local_id="a1b2",local_whatami="router",le="1024.0",priority="background",message="put",protocol="tcp",reason="congestion"} 1
+zenoh_tx_network_message_dropped_payload_bytes_bucket{local_id="a1b2",local_whatami="router",le="1048576.0",priority="background",message="put",protocol="tcp",reason="congestion"} 1
+zenoh_tx_network_message_dropped_payload_bytes_bucket{local_id="a1b2",local_whatami="router",le="1073741824.0",priority="background",message="put",protocol="tcp",reason="congestion"} 1
+zenoh_tx_network_message_dropped_payload_bytes_bucket{local_id="a1b2",local_whatami="router",le="32.0",priority="background",message="put",protocol="tcp",reason="congestion"} 1
+zenoh_tx_network_message_dropped_payload_bytes_bucket{local_id="a1b2",local_whatami="router",le="32768.0",priority="background",message="put",protocol="tcp",reason="congestion"} 1
+zenoh_tx_network_message_dropped_payload_bytes_bucket{local_id="a1b2",local_whatami="router",le="33554432.0",priority="background",message="put",protocol="tcp",reason="congestion"} 1
+zenoh_tx_network_message_dropped_payload_bytes_count{local_id="a1b2",local_whatami="router",priority="background",message="put",protocol="tcp",reason="congestion"} 1
+zenoh_tx_network_message_dropped_payload_bytes_sum{local_id="a1b2",local_whatami="router",priority="background",message="put",protocol="tcp",reason="congestion"} 9.0
+# HELP zenoh_tx_network_message_dropped_payload_per_transport_bytes Histogram of network messages payload dropped while sent (per transport)
+# TYPE zenoh_tx_network_message_dropped_payload_per_transport_bytes histogram
+# UNIT zenoh_tx_network_message_dropped_payload_per_transport_bytes bytes
+zenoh_tx_network_message_dropped_payload_per_transport_bytes_bucket{local_id="a1b2",local_whatami="router",le="+Inf",priority="background",message="put",protocol="tcp",reason="congestion",remote_zid="c3d4",remote_whatami="peer",remote_group="",remote_cn="",disconnected="false"} 1
+zenoh_tx_network_message_dropped_payload_per_transport_bytes_bucket{local_id="a1b2",local_whatami="router",le="0.0",priority="background",message="put",protocol="tcp",reason="congestion",remote_zid="c3d4",remote_whatami="peer",remote_group="",remote_cn="",disconnected="false"} 0
+zenoh_tx_network_message_dropped_payload_per_transport_bytes_bucket{local_id="a1b2",local_whatami="router",le="1024.0",priority="background",message="put",protocol="tcp",reason="congestion",remote_zid="c3d4",remote_whatami="peer",remote_group="",remote_cn="",disconnected="false"} 1
+zenoh_tx_network_message_dropped_payload_per_transport_bytes_bucket{local_id="a1b2",local_whatami="router",le="1048576.0",priority="background",message="put",protocol="tcp",reason="congestion",remote_zid="c3d4",remote_whatami="peer",remote_group="",remote_cn="",disconnected="false"} 1
+zenoh_tx_network_message_dropped_payload_per_transport_bytes_bucket{local_id="a1b2",local_whatami="router",le="1073741824.0",priority="background",message="put",protocol="tcp",reason="congestion",remote_zid="c3d4",remote_whatami="peer",remote_group="",remote_cn="",disconnected="false"} 1
+zenoh_tx_network_message_dropped_payload_per_transport_bytes_bucket{local_id="a1b2",local_whatami="router",le="32.0",priority="background",message="put",protocol="tcp",reason="congestion",remote_zid="c3d4",remote_whatami="peer",remote_group="",remote_cn="",disconnected="false"} 1
+zenoh_tx_network_message_dropped_payload_per_transport_bytes_bucket{local_id="a1b2",local_whatami="router",le="32768.0",priority="background",message="put",protocol="tcp",reason="congestion",remote_zid="c3d4",remote_whatami="peer",remote_group="",remote_cn="",disconnected="false"} 1
+zenoh_tx_network_message_dropped_payload_per_transport_bytes_bucket{local_id="a1b2",local_whatami="router",le="33554432.0",priority="background",message="put",protocol="tcp",reason="congestion",remote_zid="c3d4",remote_whatami="peer",remote_group="",remote_cn="",disconnected="false"} 1
+zenoh_tx_network_message_dropped_payload_per_transport_bytes_count{local_id="a1b2",local_whatami="router",priority="background",message="put",protocol="tcp",reason="congestion",remote_zid="c3d4",remote_whatami="peer",remote_group="",remote_cn="",disconnected="false"} 1
+zenoh_tx_network_message_dropped_payload_per_transport_bytes_sum{local_id="a1b2",local_whatami="router",priority="background",message="put",protocol="tcp",reason="congestion",remote_zid="c3d4",remote_whatami="peer",remote_group="",remote_cn="",disconnected="false"} 9.0
+# HELP zenoh_tx_network_message_payload_per_key_bytes Histogram of network messages payload sent per key
+# TYPE zenoh_tx_network_message_payload_per_key_bytes histogram
+# UNIT zenoh_tx_network_message_payload_per_key_bytes bytes
+# HELP zenoh_tx_network_message_payload_per_key_per_transport_bytes Histogram of network messages payload sent per key (per transport)
+# TYPE zenoh_tx_network_message_payload_per_key_per_transport_bytes histogram
+# UNIT zenoh_tx_network_message_payload_per_key_per_transport_bytes bytes
+# HELP zenoh_rx_bytes Count of transport messages bytes received
+# TYPE zenoh_rx_bytes counter
+# UNIT zenoh_rx_bytes bytes
+zenoh_rx_bytes_total{local_id="a1b2",local_whatami="router",protocol="tcp"} 50
+# HELP zenoh_rx_per_transport_bytes Count of transport messages bytes received (per transport)
+# TYPE zenoh_rx_per_transport_bytes counter
+# UNIT zenoh_rx_per_transport_bytes bytes
+zenoh_rx_per_transport_bytes_total{local_id="a1b2",local_whatami="router",protocol="tcp",remote_zid="c3d4",remote_whatami="peer",remote_group="",remote_cn="",disconnected="false"} 50
+# HELP zenoh_rx_per_link_bytes Count of transport messages bytes received (per link)
+# TYPE zenoh_rx_per_link_bytes counter
+# UNIT zenoh_rx_per_link_bytes bytes
+zenoh_rx_per_link_bytes_total{local_id="a1b2",local_whatami="router",protocol="tcp",remote_zid="c3d4",remote_whatami="peer",remote_group="",remote_cn="",src_locator="tcp/127.0.0.1:7447",dst_locator="tcp/127.0.0.1:50000"} 50
+# HELP zenoh_rx_transport_message Count of transport messages received
+# TYPE zenoh_rx_transport_message counter
+zenoh_rx_transport_message_total{local_id="a1b2",local_whatami="router",protocol="tcp"} 0
+# HELP zenoh_rx_transport_message_per_transport Count of transport messages received (per transport)
+# TYPE zenoh_rx_transport_message_per_transport counter
+zenoh_rx_transport_message_per_transport_total{local_id="a1b2",local_whatami="router",protocol="tcp",remote_zid="c3d4",remote_whatami="peer",remote_group="",remote_cn="",disconnected="false"} 0
+# HELP zenoh_rx_transport_message_per_link Count of transport messages received (per link)
+# TYPE zenoh_rx_transport_message_per_link counter
+zenoh_rx_transport_message_per_link_total{local_id="a1b2",local_whatami="router",protocol="tcp",remote_zid="c3d4",remote_whatami="peer",remote_group="",remote_cn="",src_locator="tcp/127.0.0.1:7447",dst_locator="tcp/127.0.0.1:50000"} 0
+# HELP zenoh_rx_network_message Count of network messages received
+# TYPE zenoh_rx_network_message counter
+zenoh_rx_network_message_total{local_id="a1b2",local_whatami="router",priority="real-time",message="put",shm="false",protocol="tcp"} 1
+# HELP zenoh_rx_network_message_per_transport Count of network messages received (per transport)
+# TYPE zenoh_rx_network_message_per_transport counter
+zenoh_rx_network_message_per_transport_total{local_id="a1b2",local_whatami="router",priority="real-time",message="put",shm="false",protocol="tcp",remote_zid="c3d4",remote_whatami="peer",remote_group="",remote_cn="",disconnected="false"} 1
+# HELP zenoh_rx_network_message_per_link Count of network messages received (per link)
+# TYPE zenoh_rx_network_message_per_link counter
+zenoh_rx_network_message_per_link_total{local_id="a1b2",local_whatami="router",priority="real-time",message="put",shm="false",protocol="tcp",remote_zid="c3d4",remote_whatami="peer",remote_group="",remote_cn="",src_locator="tcp/127.0.0.1:7447",dst_locator="tcp/127.0.0.1:50000"} 1
+# HELP zenoh_rx_network_message_payload_bytes Histogram of network messages payload received
+# TYPE zenoh_rx_network_message_payload_bytes histogram
+# UNIT zenoh_rx_network_message_payload_bytes bytes
+# HELP zenoh_rx_network_message_payload_per_transport_bytes Histogram of network messages payload received (per transport)
+# TYPE zenoh_rx_network_message_payload_per_transport_bytes histogram
+# UNIT zenoh_rx_network_message_payload_per_transport_bytes bytes
+# HELP zenoh_rx_network_message_dropped_payload_bytes Histogram of network messages payload dropped while received
+# TYPE zenoh_rx_network_message_dropped_payload_bytes histogram
+# UNIT zenoh_rx_network_message_dropped_payload_bytes bytes
+zenoh_rx_network_message_dropped_payload_bytes_bucket{local_id="a1b2",local_whatami="router",le="+Inf",priority="data",message="put",protocol="",reason="access-control"} 1
+zenoh_rx_network_message_dropped_payload_bytes_bucket{local_id="a1b2",local_whatami="router",le="0.0",priority="data",message="put",protocol="",reason="access-control"} 0
+zenoh_rx_network_message_dropped_payload_bytes_bucket{local_id="a1b2",local_whatami="router",le="1024.0",priority="data",message="put",protocol="",reason="access-control"} 1
+zenoh_rx_network_message_dropped_payload_bytes_bucket{local_id="a1b2",local_whatami="router",le="1048576.0",priority="data",message="put",protocol="",reason="access-control"} 1
+zenoh_rx_network_message_dropped_payload_bytes_bucket{local_id="a1b2",local_whatami="router",le="1073741824.0",priority="data",message="put",protocol="",reason="access-control"} 1
+zenoh_rx_network_message_dropped_payload_bytes_bucket{local_id="a1b2",local_whatami="router",le="32.0",priority="data",message="put",protocol="",reason="access-control"} 1
+zenoh_rx_network_message_dropped_payload_bytes_bucket{local_id="a1b2",local_whatami="router",le="32768.0",priority="data",message="put",protocol="",reason="access-control"} 1
+zenoh_rx_network_message_dropped_payload_bytes_bucket{local_id="a1b2",local_whatami="router",le="33554432.0",priority="data",message="put",protocol="",reason="access-control"} 1
+zenoh_rx_network_message_dropped_payload_bytes_count{local_id="a1b2",local_whatami="router",priority="data",message="put",protocol="",reason="access-control"} 1
+zenoh_rx_network_message_dropped_payload_bytes_sum{local_id="a1b2",local_whatami="router",priority="data",message="put",protocol="",reason="access-control"} 5.0
+# HELP zenoh_rx_network_message_dropped_payload_per_transport_bytes Histogram of network messages payload dropped while received (per transport)
+# TYPE zenoh_rx_network_message_dropped_payload_per_transport_bytes histogram
+# UNIT zenoh_rx_network_message_dropped_payload_per_transport_bytes bytes
+zenoh_rx_network_message_dropped_payload_per_transport_bytes_bucket{local_id="a1b2",local_whatami="router",le="+Inf",priority="data",message="put",protocol="",reason="access-control",remote_zid="c3d4",remote_whatami="peer",remote_group="",remote_cn="",disconnected="false"} 1
+zenoh_rx_network_message_dropped_payload_per_transport_bytes_bucket{local_id="a1b2",local_whatami="router",le="0.0",priority="data",message="put",protocol="",reason="access-control",remote_zid="c3d4",remote_whatami="peer",remote_group="",remote_cn="",disconnected="false"} 0
+zenoh_rx_network_message_dropped_payload_per_transport_bytes_bucket{local_id="a1b2",local_whatami="router",le="1024.0",priority="data",message="put",protocol="",reason="access-control",remote_zid="c3d4",remote_whatami="peer",remote_group="",remote_cn="",disconnected="false"} 1
+zenoh_rx_network_message_dropped_payload_per_transport_bytes_bucket{local_id="a1b2",local_whatami="router",le="1048576.0",priority="data",message="put",protocol="",reason="access-control",remote_zid="c3d4",remote_whatami="peer",remote_group="",remote_cn="",disconnected="false"} 1
+zenoh_rx_network_message_dropped_payload_per_transport_bytes_bucket{local_id="a1b2",local_whatami="router",le="1073741824.0",priority="data",message="put",protocol="",reason="access-control",remote_zid="c3d4",remote_whatami="peer",remote_group="",remote_cn="",disconnected="false"} 1
+zenoh_rx_network_message_dropped_payload_per_transport_bytes_bucket{local_id="a1b2",local_whatami="router",le="32.0",priority="data",message="put",protocol="",reason="access-control",remote_zid="c3d4",remote_whatami="peer",remote_group="",remote_cn="",disconnected="false"} 1
+zenoh_rx_network_message_dropped_payload_per_transport_bytes_bucket{local_id="a1b2",local_whatami="router",le="32768.0",priority="data",message="put",protocol="",reason="access-control",remote_zid="c3d4",remote_whatami="peer",remote_group="",remote_cn="",disconnected="false"} 1
+zenoh_rx_network_message_dropped_payload_per_transport_bytes_bucket{local_id="a1b2",local_whatami="router",le="33554432.0",priority="data",message="put",protocol="",reason="access-control",remote_zid="c3d4",remote_whatami="peer",remote_group="",remote_cn="",disconnected="false"} 1
+zenoh_rx_network_message_dropped_payload_per_transport_bytes_count{local_id="a1b2",local_whatami="router",priority="data",message="put",protocol="",reason="access-control",remote_zid="c3d4",remote_whatami="peer",remote_group="",remote_cn="",disconnected="false"} 1
+zenoh_rx_network_message_dropped_payload_per_transport_bytes_sum{local_id="a1b2",local_whatami="router",priority="data",message="put",protocol="",reason="access-control",remote_zid="c3d4",remote_whatami="peer",remote_group="",remote_cn="",disconnected="false"} 5.0
+# HELP zenoh_rx_network_message_payload_per_key_bytes Histogram of network messages payload received per key
+# TYPE zenoh_rx_network_message_payload_per_key_bytes histogram
+# UNIT zenoh_rx_network_message_payload_per_key_bytes bytes
+# HELP zenoh_rx_network_message_payload_per_key_per_transport_bytes Histogram of network messages payload received per key (per transport)
+# TYPE zenoh_rx_network_message_payload_per_key_per_transport_bytes histogram
+# UNIT zenoh_rx_network_message_payload_per_key_per_transport_bytes bytes
+# EOF
+===== END
+===== S3 first-gone per_transport=true per_link=true disconnected=false per_key=false
+# HELP zenoh_build Zenoh build version.
+# TYPE zenoh_build info
+zenoh_build_info{local_id="a1b2",local_whatami="router",version="v1"} 1
+# HELP zenoh_transports_opened Count of transports currently opened.
+# TYPE zenoh_transports_opened gauge
+zenoh_transports_opened{local_id="a1b2",local_whatami="router"} 1
+# HELP zenoh_links_opened Count of transports currently opened.
+# TYPE zenoh_links_opened gauge
+zenoh_links_opened{local_id="a1b2",local_whatami="router",protocol="tcp"} 0
+zenoh_links_opened{local_id="a1b2",local_whatami="router",protocol="udp"} 1
+# HELP zenoh_resources_declared Count of resources currently declared.
+# TYPE zenoh_resources_declared gauge
+zenoh_resources_declared{local_id="a1b2",local_whatami="router",resource="subscriber",locality="local"} 1
+# HELP zenoh_tx_bytes Count of transport messages bytes sent
+# TYPE zenoh_tx_bytes counter
+# UNIT zenoh_tx_bytes bytes
+zenoh_tx_bytes_total{local_id="a1b2",local_whatami="router",protocol="udp"} 7
+# HELP zenoh_tx_per_transport_bytes Count of transport messages bytes sent (per transport)
+# TYPE zenoh_tx_per_transport_bytes counter
+# UNIT zenoh_tx_per_transport_bytes bytes
+zenoh_tx_per_transport_bytes_total{local_id="a1b2",local_whatami="router",protocol="udp",remote_zid="e5f6",remote_whatami="client",remote_group="",remote_cn="cn1",disconnected="false"} 7
+# HELP zenoh_tx_per_link_bytes Count of transport messages bytes sent (per link)
+# TYPE zenoh_tx_per_link_bytes counter
+# UNIT zenoh_tx_per_link_bytes bytes
+zenoh_tx_per_link_bytes_total{local_id="a1b2",local_whatami="router",protocol="udp",remote_zid="e5f6",remote_whatami="client",remote_group="",remote_cn="cn1",src_locator="udp/10.0.0.1:7447",dst_locator="udp/10.0.0.2:7447"} 7
+# HELP zenoh_tx_transport_message Count of transport messages sent
+# TYPE zenoh_tx_transport_message counter
+zenoh_tx_transport_message_total{local_id="a1b2",local_whatami="router",protocol="udp"} 0
+# HELP zenoh_tx_transport_message_per_transport Count of transport messages sent (per transport)
+# TYPE zenoh_tx_transport_message_per_transport counter
+zenoh_tx_transport_message_per_transport_total{local_id="a1b2",local_whatami="router",protocol="udp",remote_zid="e5f6",remote_whatami="client",remote_group="",remote_cn="cn1",disconnected="false"} 0
+# HELP zenoh_tx_transport_message_per_link Count of transport messages sent (per link)
+# TYPE zenoh_tx_transport_message_per_link counter
+zenoh_tx_transport_message_per_link_total{local_id="a1b2",local_whatami="router",protocol="udp",remote_zid="e5f6",remote_whatami="client",remote_group="",remote_cn="cn1",src_locator="udp/10.0.0.1:7447",dst_locator="udp/10.0.0.2:7447"} 0
+# HELP zenoh_tx_network_message Count of network messages sent
+# TYPE zenoh_tx_network_message counter
+zenoh_tx_network_message_total{local_id="a1b2",local_whatami="router",priority="data",message="put",shm="false",protocol="udp"} 1
+# HELP zenoh_tx_network_message_per_transport Count of network messages sent (per transport)
+# TYPE zenoh_tx_network_message_per_transport counter
+zenoh_tx_network_message_per_transport_total{local_id="a1b2",local_whatami="router",priority="data",message="put",shm="false",protocol="udp",remote_zid="e5f6",remote_whatami="client",remote_group="",remote_cn="cn1",disconnected="false"} 1
+# HELP zenoh_tx_network_message_per_link Count of network messages sent (per link)
+# TYPE zenoh_tx_network_message_per_link counter
+zenoh_tx_network_message_per_link_total{local_id="a1b2",local_whatami="router",priority="data",message="put",shm="false",protocol="udp",remote_zid="e5f6",remote_whatami="client",remote_group="",remote_cn="cn1",src_locator="udp/10.0.0.1:7447",dst_locator="udp/10.0.0.2:7447"} 1
+# HELP zenoh_tx_network_message_payload_bytes Histogram of network messages payload sent
+# TYPE zenoh_tx_network_message_payload_bytes histogram
+# UNIT zenoh_tx_network_message_payload_bytes bytes
+# HELP zenoh_tx_network_message_payload_per_transport_bytes Histogram of network messages payload sent (per transport)
+# TYPE zenoh_tx_network_message_payload_per_transport_bytes histogram
+# UNIT zenoh_tx_network_message_payload_per_transport_bytes bytes
+# HELP zenoh_tx_network_message_dropped_payload_bytes Histogram of network messages payload dropped while sent
+# TYPE zenoh_tx_network_message_dropped_payload_bytes histogram
+# UNIT zenoh_tx_network_message_dropped_payload_bytes bytes
+# HELP zenoh_tx_network_message_dropped_payload_per_transport_bytes Histogram of network messages payload dropped while sent (per transport)
+# TYPE zenoh_tx_network_message_dropped_payload_per_transport_bytes histogram
+# UNIT zenoh_tx_network_message_dropped_payload_per_transport_bytes bytes
+# HELP zenoh_rx_bytes Count of transport messages bytes received
+# TYPE zenoh_rx_bytes counter
+# UNIT zenoh_rx_bytes bytes
+zenoh_rx_bytes_total{local_id="a1b2",local_whatami="router",protocol="udp"} 0
+# HELP zenoh_rx_per_transport_bytes Count of transport messages bytes received (per transport)
+# TYPE zenoh_rx_per_transport_bytes counter
+# UNIT zenoh_rx_per_transport_bytes bytes
+zenoh_rx_per_transport_bytes_total{local_id="a1b2",local_whatami="router",protocol="udp",remote_zid="e5f6",remote_whatami="client",remote_group="",remote_cn="cn1",disconnected="false"} 0
+# HELP zenoh_rx_per_link_bytes Count of transport messages bytes received (per link)
+# TYPE zenoh_rx_per_link_bytes counter
+# UNIT zenoh_rx_per_link_bytes bytes
+zenoh_rx_per_link_bytes_total{local_id="a1b2",local_whatami="router",protocol="udp",remote_zid="e5f6",remote_whatami="client",remote_group="",remote_cn="cn1",src_locator="udp/10.0.0.1:7447",dst_locator="udp/10.0.0.2:7447"} 0
+# HELP zenoh_rx_transport_message Count of transport messages received
+# TYPE zenoh_rx_transport_message counter
+zenoh_rx_transport_message_total{local_id="a1b2",local_whatami="router",protocol="udp"} 0
+# HELP zenoh_rx_transport_message_per_transport Count of transport messages received (per transport)
+# TYPE zenoh_rx_transport_message_per_transport counter
+zenoh_rx_transport_message_per_transport_total{local_id="a1b2",local_whatami="router",protocol="udp",remote_zid="e5f6",remote_whatami="client",remote_group="",remote_cn="cn1",disconnected="false"} 0
+# HELP zenoh_rx_transport_message_per_link Count of transport messages received (per link)
+# TYPE zenoh_rx_transport_message_per_link counter
+zenoh_rx_transport_message_per_link_total{local_id="a1b2",local_whatami="router",protocol="udp",remote_zid="e5f6",remote_whatami="client",remote_group="",remote_cn="cn1",src_locator="udp/10.0.0.1:7447",dst_locator="udp/10.0.0.2:7447"} 0
+# HELP zenoh_rx_network_message Count of network messages received
+# TYPE zenoh_rx_network_message counter
+# HELP zenoh_rx_network_message_per_transport Count of network messages received (per transport)
+# TYPE zenoh_rx_network_message_per_transport counter
+# HELP zenoh_rx_network_message_payload_bytes Histogram of network messages payload received
+# TYPE zenoh_rx_network_message_payload_bytes histogram
+# UNIT zenoh_rx_network_message_payload_bytes bytes
+# HELP zenoh_rx_network_message_payload_per_transport_bytes Histogram of network messages payload received (per transport)
+# TYPE zenoh_rx_network_message_payload_per_transport_bytes histogram
+# UNIT zenoh_rx_network_message_payload_per_transport_bytes bytes
+# HELP zenoh_rx_network_message_dropped_payload_bytes Histogram of network messages payload dropped while received
+# TYPE zenoh_rx_network_message_dropped_payload_bytes histogram
+# UNIT zenoh_rx_network_message_dropped_payload_bytes bytes
+# HELP zenoh_rx_network_message_dropped_payload_per_transport_bytes Histogram of network messages payload dropped while received (per transport)
+# TYPE zenoh_rx_network_message_dropped_payload_per_transport_bytes histogram
+# UNIT zenoh_rx_network_message_dropped_payload_per_transport_bytes bytes
+# EOF
+===== END
+===== S3 first-gone per_transport=true per_link=true disconnected=true per_key=false
+# HELP zenoh_build Zenoh build version.
+# TYPE zenoh_build info
+zenoh_build_info{local_id="a1b2",local_whatami="router",version="v1"} 1
+# HELP zenoh_transports_opened Count of transports currently opened.
+# TYPE zenoh_transports_opened gauge
+zenoh_transports_opened{local_id="a1b2",local_whatami="router"} 1
+# HELP zenoh_links_opened Count of transports currently opened.
+# TYPE zenoh_links_opened gauge
+zenoh_links_opened{local_id="a1b2",local_whatami="router",protocol="tcp"} 0
+zenoh_links_opened{local_id="a1b2",local_whatami="router",protocol="udp"} 1
+# HELP zenoh_resources_declared Count of resources currently declared.
+# TYPE zenoh_resources_declared gauge
+zenoh_resources_declared{local_id="a1b2",local_whatami="router",resource="subscriber",locality="local"} 1
+# HELP zenoh_tx_bytes Count of transport messages bytes sent
+# TYPE zenoh_tx_bytes counter
+# UNIT zenoh_tx_bytes bytes
+zenoh_tx_bytes_total{local_id="a1b2",local_whatami="router",protocol="tcp"} 100
+zenoh_tx_bytes_total{local_id="a1b2",local_whatami="router",protocol="udp"} 7
+# HELP zenoh_tx_per_transport_bytes Count of transport messages bytes sent (per transport)
+# TYPE zenoh_tx_per_transport_bytes counter
+# UNIT zenoh_tx_per_transport_bytes bytes
+zenoh_tx_per_transport_bytes_total{local_id="a1b2",local_whatami="router",protocol="tcp",remote_zid="c3d4",remote_whatami="peer",remote_group="",remote_cn="",disconnected="true"} 100
+zenoh_tx_per_transport_bytes_total{local_id="a1b2",local_whatami="router",protocol="udp",remote_zid="e5f6",remote_whatami="client",remote_group="",remote_cn="cn1",disconnected="false"} 7
+# HELP zenoh_tx_per_link_bytes Count of transport messages bytes sent (per link)
+# TYPE zenoh_tx_per_link_bytes counter
+# UNIT zenoh_tx_per_link_bytes bytes
+zenoh_tx_per_link_bytes_total{local_id="a1b2",local_whatami="router",protocol="udp",remote_zid="e5f6",remote_whatami="client",remote_group="",remote_cn="cn1",src_locator="udp/10.0.0.1:7447",dst_locator="udp/10.0.0.2:7447"} 7
+# HELP zenoh_tx_transport_message Count of transport messages sent
+# TYPE zenoh_tx_transport_message counter
+zenoh_tx_transport_message_total{local_id="a1b2",local_whatami="router",protocol="tcp"} 2
+zenoh_tx_transport_message_total{local_id="a1b2",local_whatami="router",protocol="udp"} 0
+# HELP zenoh_tx_transport_message_per_transport Count of transport messages sent (per transport)
+# TYPE zenoh_tx_transport_message_per_transport counter
+zenoh_tx_transport_message_per_transport_total{local_id="a1b2",local_whatami="router",protocol="tcp",remote_zid="c3d4",remote_whatami="peer",remote_group="",remote_cn="",disconnected="true"} 2
+zenoh_tx_transport_message_per_transport_total{local_id="a1b2",local_whatami="router",protocol="udp",remote_zid="e5f6",remote_whatami="client",remote_group="",remote_cn="cn1",disconnected="false"} 0
+# HELP zenoh_tx_transport_message_per_link Count of transport messages sent (per link)
+# TYPE zenoh_tx_transport_message_per_link counter
+zenoh_tx_transport_message_per_link_total{local_id="a1b2",local_whatami="router",protocol="udp",remote_zid="e5f6",remote_whatami="client",remote_group="",remote_cn="cn1",src_locator="udp/10.0.0.1:7447",dst_locator="udp/10.0.0.2:7447"} 0
+# HELP zenoh_tx_network_message Count of network messages sent
+# TYPE zenoh_tx_network_message counter
+zenoh_tx_network_message_total{local_id="a1b2",local_whatami="router",priority="data",message="put",shm="false",protocol="tcp"} 2
+zenoh_tx_network_message_total{local_id="a1b2",local_whatami="router",priority="data",message="put",shm="false",protocol="udp"} 1
+# HELP zenoh_tx_network_message_per_transport Count of network messages sent (per transport)
+# TYPE zenoh_tx_network_message_per_transport counter
+zenoh_tx_network_message_per_transport_total{local_id="a1b2",local_whatami="router",priority="data",message="put",shm="false",protocol="tcp",remote_zid="c3d4",remote_whatami="peer",remote_group="",remote_cn="",disconnected="true"} 2
+zenoh_tx_network_message_per_transport_total{local_id="a1b2",local_whatami="router",priority="data",message="put",shm="false",protocol="udp",remote_zid="e5f6",remote_whatami="client",remote_group="",remote_cn="cn1",disconnected="false"} 1
+# HELP zenoh_tx_network_message_per_link Count of network messages sent (per link)
+# TYPE zenoh_tx_network_message_per_link counter
+zenoh_tx_network_message_per_link_total{local_id="a1b2",local_whatami="router",priority="data",message="put",shm="false",protocol="udp",remote_zid="e5f6",remote_whatami="client",remote_group="",remote_cn="cn1",src_locator="udp/10.0.0.1:7447",dst_locator="udp/10.0.0.2:7447"} 1
+# HELP zenoh_tx_network_message_payload_bytes Histogram of network messages payload sent
+# TYPE zenoh_tx_network_message_payload_bytes histogram
+# UNIT zenoh_tx_network_message_payload_bytes bytes
+zenoh_tx_network_message_payload_bytes_bucket{local_id="a1b2",local_whatami="router",le="+Inf",space="user",priority="data",message="put",shm="false"} 2
+zenoh_tx_network_message_payload_bytes_bucket{local_id="a1b2",local_whatami="router",le="0.0",space="user",priority="data",message="put",shm="false"} 0
+zenoh_tx_network_message_payload_bytes_bucket{local_id="a1b2",local_whatami="router",le="1024.0",space="user",priority="data",message="put",shm="false"} 1
+zenoh_tx_network_message_payload_bytes_bucket{local_id="a1b2",local_whatami="router",le="1048576.0",space="user",priority="data",message="put",shm="false"} 2
+zenoh_tx_network_message_payload_bytes_bucket{local_id="a1b2",local_whatami="router",le="1073741824.0",space="user",priority="data",message="put",shm="false"} 2
+zenoh_tx_network_message_payload_bytes_bucket{local_id="a1b2",local_whatami="router",le="32.0",space="user",priority="data",message="put",shm="false"} 0
+zenoh_tx_network_message_payload_bytes_bucket{local_id="a1b2",local_whatami="router",le="32768.0",space="user",priority="data",message="put",shm="false"} 2
+zenoh_tx_network_message_payload_bytes_bucket{local_id="a1b2",local_whatami="router",le="33554432.0",space="user",priority="data",message="put",shm="false"} 2
+zenoh_tx_network_message_payload_bytes_count{local_id="a1b2",local_whatami="router",space="user",priority="data",message="put",shm="false"} 2
+zenoh_tx_network_message_payload_bytes_sum{local_id="a1b2",local_whatami="router",space="user",priority="data",message="put",shm="false"} 2040.0
+# HELP zenoh_tx_network_message_payload_per_transport_bytes Histogram of network messages payload sent (per transport)
+# TYPE zenoh_tx_network_message_payload_per_transport_bytes histogram
+# UNIT zenoh_tx_network_message_payload_per_transport_bytes bytes
+zenoh_tx_network_message_payload_per_transport_bytes_bucket{local_id="a1b2",local_whatami="router",le="+Inf",space="user",priority="data",message="put",shm="false",remote_zid="c3d4",remote_whatami="peer",remote_group="",remote_cn="",disconnected="true"} 2
+zenoh_tx_network_message_payload_per_transport_bytes_bucket{local_id="a1b2",local_whatami="router",le="0.0",space="user",priority="data",message="put",shm="false",remote_zid="c3d4",remote_whatami="peer",remote_group="",remote_cn="",disconnected="true"} 0
+zenoh_tx_network_message_payload_per_transport_bytes_bucket{local_id="a1b2",local_whatami="router",le="1024.0",space="user",priority="data",message="put",shm="false",remote_zid="c3d4",remote_whatami="peer",remote_group="",remote_cn="",disconnected="true"} 1
+zenoh_tx_network_message_payload_per_transport_bytes_bucket{local_id="a1b2",local_whatami="router",le="1048576.0",space="user",priority="data",message="put",shm="false",remote_zid="c3d4",remote_whatami="peer",remote_group="",remote_cn="",disconnected="true"} 2
+zenoh_tx_network_message_payload_per_transport_bytes_bucket{local_id="a1b2",local_whatami="router",le="1073741824.0",space="user",priority="data",message="put",shm="false",remote_zid="c3d4",remote_whatami="peer",remote_group="",remote_cn="",disconnected="true"} 2
+zenoh_tx_network_message_payload_per_transport_bytes_bucket{local_id="a1b2",local_whatami="router",le="32.0",space="user",priority="data",message="put",shm="false",remote_zid="c3d4",remote_whatami="peer",remote_group="",remote_cn="",disconnected="true"} 0
+zenoh_tx_network_message_payload_per_transport_bytes_bucket{local_id="a1b2",local_whatami="router",le="32768.0",space="user",priority="data",message="put",shm="false",remote_zid="c3d4",remote_whatami="peer",remote_group="",remote_cn="",disconnected="true"} 2
+zenoh_tx_network_message_payload_per_transport_bytes_bucket{local_id="a1b2",local_whatami="router",le="33554432.0",space="user",priority="data",message="put",shm="false",remote_zid="c3d4",remote_whatami="peer",remote_group="",remote_cn="",disconnected="true"} 2
+zenoh_tx_network_message_payload_per_transport_bytes_count{local_id="a1b2",local_whatami="router",space="user",priority="data",message="put",shm="false",remote_zid="c3d4",remote_whatami="peer",remote_group="",remote_cn="",disconnected="true"} 2
+zenoh_tx_network_message_payload_per_transport_bytes_sum{local_id="a1b2",local_whatami="router",space="user",priority="data",message="put",shm="false",remote_zid="c3d4",remote_whatami="peer",remote_group="",remote_cn="",disconnected="true"} 2040.0
+# HELP zenoh_tx_network_message_dropped_payload_bytes Histogram of network messages payload dropped while sent
+# TYPE zenoh_tx_network_message_dropped_payload_bytes histogram
+# UNIT zenoh_tx_network_message_dropped_payload_bytes bytes
+zenoh_tx_network_message_dropped_payload_bytes_bucket{local_id="a1b2",local_whatami="router",le="+Inf",priority="background",message="put",protocol="tcp",reason="congestion"} 1
+zenoh_tx_network_message_dropped_payload_bytes_bucket{local_id="a1b2",local_whatami="router",le="0.0",priority="background",message="put",protocol="tcp",reason="congestion"} 0
+zenoh_tx_network_message_dropped_payload_bytes_bucket{local_id="a1b2",local_whatami="router",le="1024.0",priority="background",message="put",protocol="tcp",reason="congestion"} 1
+zenoh_tx_network_message_dropped_payload_bytes_bucket{local_id="a1b2",local_whatami="router",le="1048576.0",priority="background",message="put",protocol="tcp",reason="congestion"} 1
+zenoh_tx_network_message_dropped_payload_bytes_bucket{local_id="a1b2",local_whatami="router",le="1073741824.0",priority="background",message="put",protocol="tcp",reason="congestion"} 1
+zenoh_tx_network_message_dropped_payload_bytes_bucket{local_id="a1b2",local_whatami="router",le="32.0",priority="background",message="put",protocol="tcp",reason="congestion"} 1
+zenoh_tx_network_message_dropped_payload_bytes_bucket{local_id="a1b2",local_whatami="router",le="32768.0",priority="background",message="put",protocol="tcp",reason="congestion"} 1
+zenoh_tx_network_message_dropped_payload_bytes_bucket{local_id="a1b2",local_whatami="router",le="33554432.0",priority="background",message="put",protocol="tcp",reason="congestion"} 1
+zenoh_tx_network_message_dropped_payload_bytes_count{local_id="a1b2",local_whatami="router",priority="background",message="put",protocol="tcp",reason="congestion"} 1
+zenoh_tx_network_message_dropped_payload_bytes_sum{local_id="a1b2",local_whatami="router",priority="background",message="put",protocol="tcp",reason="congestion"} 9.0
+# HELP zenoh_tx_network_message_dropped_payload_per_transport_bytes Histogram of network messages payload dropped while sent (per transport)
+# TYPE zenoh_tx_network_message_dropped_payload_per_transport_bytes histogram
+# UNIT zenoh_tx_network_message_dropped_payload_per_transport_bytes bytes
+zenoh_tx_network_message_dropped_payload_per_transport_bytes_bucket{local_id="a1b2",local_whatami="router",le="+Inf",priority="background",message="put",protocol="tcp",reason="congestion",remote_zid="c3d4",remote_whatami="peer",remote_group="",remote_cn="",disconnected="true"} 1
+zenoh_tx_network_message_dropped_payload_per_transport_bytes_bucket{local_id="a1b2",local_whatami="router",le="0.0",priority="background",message="put",protocol="tcp",reason="congestion",remote_zid="c3d4",remote_whatami="peer",remote_group="",remote_cn="",disconnected="true"} 0
+zenoh_tx_network_message_dropped_payload_per_transport_bytes_bucket{local_id="a1b2",local_whatami="router",le="1024.0",priority="background",message="put",protocol="tcp",reason="congestion",remote_zid="c3d4",remote_whatami="peer",remote_group="",remote_cn="",disconnected="true"} 1
+zenoh_tx_network_message_dropped_payload_per_transport_bytes_bucket{local_id="a1b2",local_whatami="router",le="1048576.0",priority="background",message="put",protocol="tcp",reason="congestion",remote_zid="c3d4",remote_whatami="peer",remote_group="",remote_cn="",disconnected="true"} 1
+zenoh_tx_network_message_dropped_payload_per_transport_bytes_bucket{local_id="a1b2",local_whatami="router",le="1073741824.0",priority="background",message="put",protocol="tcp",reason="congestion",remote_zid="c3d4",remote_whatami="peer",remote_group="",remote_cn="",disconnected="true"} 1
+zenoh_tx_network_message_dropped_payload_per_transport_bytes_bucket{local_id="a1b2",local_whatami="router",le="32.0",priority="background",message="put",protocol="tcp",reason="congestion",remote_zid="c3d4",remote_whatami="peer",remote_group="",remote_cn="",disconnected="true"} 1
+zenoh_tx_network_message_dropped_payload_per_transport_bytes_bucket{local_id="a1b2",local_whatami="router",le="32768.0",priority="background",message="put",protocol="tcp",reason="congestion",remote_zid="c3d4",remote_whatami="peer",remote_group="",remote_cn="",disconnected="true"} 1
+zenoh_tx_network_message_dropped_payload_per_transport_bytes_bucket{local_id="a1b2",local_whatami="router",le="33554432.0",priority="background",message="put",protocol="tcp",reason="congestion",remote_zid="c3d4",remote_whatami="peer",remote_group="",remote_cn="",disconnected="true"} 1
+zenoh_tx_network_message_dropped_payload_per_transport_bytes_count{local_id="a1b2",local_whatami="router",priority="background",message="put",protocol="tcp",reason="congestion",remote_zid="c3d4",remote_whatami="peer",remote_group="",remote_cn="",disconnected="true"} 1
+zenoh_tx_network_message_dropped_payload_per_transport_bytes_sum{local_id="a1b2",local_whatami="router",priority="background",message="put",protocol="tcp",reason="congestion",remote_zid="c3d4",remote_whatami="peer",remote_group="",remote_cn="",disconnected="true"} 9.0
+# HELP zenoh_rx_bytes Count of transport messages bytes received
+# TYPE zenoh_rx_bytes counter
+# UNIT zenoh_rx_bytes bytes
+zenoh_rx_bytes_total{local_id="a1b2",local_whatami="router",protocol="tcp"} 50
+zenoh_rx_bytes_total{local_id="a1b2",local_whatami="router",protocol="udp"} 0
+# HELP zenoh_rx_per_transport_bytes Count of transport messages bytes received (per transport)
+# TYPE zenoh_rx_per_transport_bytes counter
+# UNIT zenoh_rx_per_transport_bytes bytes
+zenoh_rx_per_transport_bytes_total{local_id="a1b2",local_whatami="router",protocol="tcp",remote_zid="c3d4",remote_whatami="peer",remote_group="",remote_cn="",disconnected="true"} 50
+zenoh_rx_per_transport_bytes_total{local_id="a1b2",local_whatami="router",protocol="udp",remote_zid="e5f6",remote_whatami="client",remote_group="",remote_cn="cn1",disconnected="false"} 0
+# HELP zenoh_rx_per_link_bytes Count of transport messages bytes received (per link)
+# TYPE zenoh_rx_per_link_bytes counter
+# UNIT zenoh_rx_per_link_bytes bytes
+zenoh_rx_per_link_bytes_total{local_id="a1b2",local_whatami="router",protocol="udp",remote_zid="e5f6",remote_whatami="client",remote_group="",remote_cn="cn1",src_locator="udp/10.0.0.1:7447",dst_locator="udp/10.0.0.2:7447"} 0
+# HELP zenoh_rx_transport_message Count of transport messages received
+# TYPE zenoh_rx_transport_message counter
+zenoh_rx_transport_message_total{local_id="a1b2",local_whatami="router",protocol="tcp"} 0
+zenoh_rx_transport_message_total{local_id="a1b2",local_whatami="router",protocol="udp"} 0
+# HELP zenoh_rx_transport_message_per_transport Count of transport messages received (per transport)
+# TYPE zenoh_rx_transport_message_per_transport counter
+zenoh_rx_transport_message_per_transport_total{local_id="a1b2",local_whatami="router",protocol="tcp",remote_zid="c3d4",remote_whatami="peer",remote_group="",remote_cn="",disconnected="true"} 0
+zenoh_rx_transport_message_per_transport_total{local_id="a1b2",local_whatami="router",protocol="udp",remote_zid="e5f6",remote_whatami="client",remote_group="",remote_cn="cn1",disconnected="false"} 0
+# HELP zenoh_rx_transport_message_per_link Count of transport messages received (per link)
+# TYPE zenoh_rx_transport_message_per_link counter
+zenoh_rx_transport_message_per_link_total{local_id="a1b2",local_whatami="router",protocol="udp",remote_zid="e5f6",remote_whatami="client",remote_group="",remote_cn="cn1",src_locator="udp/10.0.0.1:7447",dst_locator="udp/10.0.0.2:7447"} 0
+# HELP zenoh_rx_network_message Count of network messages received
+# TYPE zenoh_rx_network_message counter
+zenoh_rx_network_message_total{local_id="a1b2",local_whatami="router",priority="real-time",message="put",shm="false",protocol="tcp"} 1
+# HELP zenoh_rx_network_message_per_transport Count of network messages received (per transport)
+# TYPE zenoh_rx_network_message_per_transport counter
+zenoh_rx_network_message_per_transport_total{local_id="a1b2",local_whatami="router",priority="real-time",message="put",shm="false",protocol="tcp",remote_zid="c3d4",remote_whatami="peer",remote_group="",remote_cn="",disconnected="true"} 1
+# HELP zenoh_rx_network_message_payload_bytes Histogram of network messages payload received
+# TYPE zenoh_rx_network_message_payload_bytes histogram
+# UNIT zenoh_rx_network_message_payload_bytes bytes
+# HELP zenoh_rx_network_message_payload_per_transport_bytes Histogram of network messages payload received (per transport)
+# TYPE zenoh_rx_network_message_payload_per_transport_bytes histogram
+# UNIT zenoh_rx_network_message_payload_per_transport_bytes bytes
+# HELP zenoh_rx_network_message_dropped_payload_bytes Histogram of network messages payload dropped while received
+# TYPE zenoh_rx_network_message_dropped_payload_bytes histogram
+# UNIT zenoh_rx_network_message_dropped_payload_bytes bytes
+zenoh_rx_network_message_dropped_payload_bytes_bucket{local_id="a1b2",local_whatami="router",le="+Inf",priority="data",message="put",protocol="",reason="access-control"} 1
+zenoh_rx_network_message_dropped_payload_bytes_bucket{local_id="a1b2",local_whatami="router",le="0.0",priority="data",message="put",protocol="",reason="access-control"} 0
+zenoh_rx_network_message_dropped_payload_bytes_bucket{local_id="a1b2",local_whatami="router",le="1024.0",priority="data",message="put",protocol="",reason="access-control"} 1
+zenoh_rx_network_message_dropped_payload_bytes_bucket{local_id="a1b2",local_whatami="router",le="1048576.0",priority="data",message="put",protocol="",reason="access-control"} 1
+zenoh_rx_network_message_dropped_payload_bytes_bucket{local_id="a1b2",local_whatami="router",le="1073741824.0",priority="data",message="put",protocol="",reason="access-control"} 1
+zenoh_rx_network_message_dropped_payload_bytes_bucket{local_id="a1b2",local_whatami="router",le="32.0",priority="data",message="put",protocol="",reason="access-control"} 1
+zenoh_rx_network_message_dropped_payload_bytes_bucket{local_id="a1b2",local_whatami="router",le="32768.0",priority="data",message="put",protocol="",reason="access-control"} 1
+zenoh_rx_network_message_dropped_payload_bytes_bucket{local_id="a1b2",local_whatami="router",le="33554432.0",priority="data",message="put",protocol="",reason="access-control"} 1
+zenoh_rx_network_message_dropped_payload_bytes_count{local_id="a1b2",local_whatami="router",priority="data",message="put",protocol="",reason="access-control"} 1
+zenoh_rx_network_message_dropped_payload_bytes_sum{local_id="a1b2",local_whatami="router",priority="data",message="put",protocol="",reason="access-control"} 5.0
+# HELP zenoh_rx_network_message_dropped_payload_per_transport_bytes Histogram of network messages payload dropped while received (per transport)
+# TYPE zenoh_rx_network_message_dropped_payload_per_transport_bytes histogram
+# UNIT zenoh_rx_network_message_dropped_payload_per_transport_bytes bytes
+zenoh_rx_network_message_dropped_payload_per_transport_bytes_bucket{local_id="a1b2",local_whatami="router",le="+Inf",priority="data",message="put",protocol="",reason="access-control",remote_zid="c3d4",remote_whatami="peer",remote_group="",remote_cn="",disconnected="true"} 1
+zenoh_rx_network_message_dropped_payload_per_transport_bytes_bucket{local_id="a1b2",local_whatami="router",le="0.0",priority="data",message="put",protocol="",reason="access-control",remote_zid="c3d4",remote_whatami="peer",remote_group="",remote_cn="",disconnected="true"} 0
+zenoh_rx_network_message_dropped_payload_per_transport_bytes_bucket{local_id="a1b2",local_whatami="router",le="1024.0",priority="data",message="put",protocol="",reason="access-control",remote_zid="c3d4",remote_whatami="peer",remote_group="",remote_cn="",disconnected="true"} 1
+zenoh_rx_network_message_dropped_payload_per_transport_bytes_bucket{local_id="a1b2",local_whatami="router",le="1048576.0",priority="data",message="put",protocol="",reason="access-control",remote_zid="c3d4",remote_whatami="peer",remote_group="",remote_cn="",disconnected="true"} 1
+zenoh_rx_network_message_dropped_payload_per_transport_bytes_bucket{local_id="a1b2",local_whatami="router",le="1073741824.0",priority="data",message="put",protocol="",reason="access-control",remote_zid="c3d4",remote_whatami="peer",remote_group="",remote_cn="",disconnected="true"} 1
+zenoh_rx_network_message_dropped_payload_per_transport_bytes_bucket{local_id="a1b2",local_whatami="router",le="32.0",priority="data",message="put",protocol="",reason="access-control",remote_zid="c3d4",remote_whatami="peer",remote_group="",remote_cn="",disconnected="true"} 1
+zenoh_rx_network_message_dropped_payload_per_transport_bytes_bucket{local_id="a1b2",local_whatami="router",le="32768.0",priority="data",message="put",protocol="",reason="access-control",remote_zid="c3d4",remote_whatami="peer",remote_group="",remote_cn="",disconnected="true"} 1
+zenoh_rx_network_message_dropped_payload_per_transport_bytes_bucket{local_id="a1b2",local_whatami="router",le="33554432.0",priority="data",message="put",protocol="",reason="access-control",remote_zid="c3d4",remote_whatami="peer",remote_group="",remote_cn="",disconnected="true"} 1
+zenoh_rx_network_message_dropped_payload_per_transport_bytes_count{local_id="a1b2",local_whatami="router",priority="data",message="put",protocol="",reason="access-control",remote_zid="c3d4",remote_whatami="peer",remote_group="",remote_cn="",disconnected="true"} 1
+zenoh_rx_network_message_dropped_payload_per_transport_bytes_sum{local_id="a1b2",local_whatami="router",priority="data",message="put",protocol="",reason="access-control",remote_zid="c3d4",remote_whatami="peer",remote_group="",remote_cn="",disconnected="true"} 5.0
+# EOF
+===== END
+===== S4 mcast per_transport=true per_link=true disconnected=false per_key=false
+# HELP zenoh_build Zenoh build version.
+# TYPE zenoh_build info
+zenoh_build_info{local_id="a1b2",local_whatami="peer",version="v1"} 1
+# HELP zenoh_transports_opened Count of transports currently opened.
+# TYPE zenoh_transports_opened gauge
+zenoh_transports_opened{local_id="a1b2",local_whatami="peer"} 1
+# HELP zenoh_links_opened Count of transports currently opened.
+# TYPE zenoh_links_opened gauge
+zenoh_links_opened{local_id="a1b2",local_whatami="peer",protocol="udp"} 1
+# HELP zenoh_tx_bytes Count of transport messages bytes sent
+# TYPE zenoh_tx_bytes counter
+# UNIT zenoh_tx_bytes bytes
+zenoh_tx_bytes_total{local_id="a1b2",local_whatami="peer",protocol="udp"} 11
+# HELP zenoh_tx_per_transport_bytes Count of transport messages bytes sent (per transport)
+# TYPE zenoh_tx_per_transport_bytes counter
+# UNIT zenoh_tx_per_transport_bytes bytes
+zenoh_tx_per_transport_bytes_total{local_id="a1b2",local_whatami="peer",protocol="udp",remote_zid="",remote_whatami="",remote_group="udp/224.0.0.224:7446",remote_cn="",disconnected="false"} 11
+zenoh_tx_per_transport_bytes_total{local_id="a1b2",local_whatami="peer",protocol="udp",remote_zid="aa",remote_whatami="peer",remote_group="udp/224.0.0.224:7446",remote_cn="",disconnected="false"} 0
+# HELP zenoh_tx_per_link_bytes Count of transport messages bytes sent (per link)
+# TYPE zenoh_tx_per_link_bytes counter
+# UNIT zenoh_tx_per_link_bytes bytes
+zenoh_tx_per_link_bytes_total{local_id="a1b2",local_whatami="peer",protocol="udp",remote_zid="",remote_whatami="",remote_group="udp/224.0.0.224:7446",remote_cn="",src_locator="udp/10.0.0.1:7446",dst_locator="udp/224.0.0.224:7446"} 11
+zenoh_tx_per_link_bytes_total{local_id="a1b2",local_whatami="peer",protocol="udp",remote_zid="aa",remote_whatami="peer",remote_group="udp/224.0.0.224:7446",remote_cn="",src_locator="udp/10.0.0.1:7446",dst_locator="udp/224.0.0.224:7446"} 0
+# HELP zenoh_tx_transport_message Count of transport messages sent
+# TYPE zenoh_tx_transport_message counter
+zenoh_tx_transport_message_total{local_id="a1b2",local_whatami="peer",protocol="udp"} 0
+# HELP zenoh_tx_transport_message_per_transport Count of transport messages sent (per transport)
+# TYPE zenoh_tx_transport_message_per_transport counter
+zenoh_tx_transport_message_per_transport_total{local_id="a1b2",local_whatami="peer",protocol="udp",remote_zid="",remote_whatami="",remote_group="udp/224.0.0.224:7446",remote_cn="",disconnected="false"} 0
+zenoh_tx_transport_message_per_transport_total{local_id="a1b2",local_whatami="peer",protocol="udp",remote_zid="aa",remote_whatami="peer",remote_group="udp/224.0.0.224:7446",remote_cn="",disconnected="false"} 0
+# HELP zenoh_tx_transport_message_per_link Count of transport messages sent (per link)
+# TYPE zenoh_tx_transport_message_per_link counter
+zenoh_tx_transport_message_per_link_total{local_id="a1b2",local_whatami="peer",protocol="udp",remote_zid="",remote_whatami="",remote_group="udp/224.0.0.224:7446",remote_cn="",src_locator="udp/10.0.0.1:7446",dst_locator="udp/224.0.0.224:7446"} 0
+zenoh_tx_transport_message_per_link_total{local_id="a1b2",local_whatami="peer",protocol="udp",remote_zid="aa",remote_whatami="peer",remote_group="udp/224.0.0.224:7446",remote_cn="",src_locator="udp/10.0.0.1:7446",dst_locator="udp/224.0.0.224:7446"} 0
+# HELP zenoh_tx_network_message Count of network messages sent
+# TYPE zenoh_tx_network_message counter
+# HELP zenoh_tx_network_message_per_transport Count of network messages sent (per transport)
+# TYPE zenoh_tx_network_message_per_transport counter
+# HELP zenoh_tx_network_message_payload_bytes Histogram of network messages payload sent
+# TYPE zenoh_tx_network_message_payload_bytes histogram
+# UNIT zenoh_tx_network_message_payload_bytes bytes
+# HELP zenoh_tx_network_message_payload_per_transport_bytes Histogram of network messages payload sent (per transport)
+# TYPE zenoh_tx_network_message_payload_per_transport_bytes histogram
+# UNIT zenoh_tx_network_message_payload_per_transport_bytes bytes
+# HELP zenoh_tx_network_message_dropped_payload_bytes Histogram of network messages payload dropped while sent
+# TYPE zenoh_tx_network_message_dropped_payload_bytes histogram
+# UNIT zenoh_tx_network_message_dropped_payload_bytes bytes
+# HELP zenoh_tx_network_message_dropped_payload_per_transport_bytes Histogram of network messages payload dropped while sent (per transport)
+# TYPE zenoh_tx_network_message_dropped_payload_per_transport_bytes histogram
+# UNIT zenoh_tx_network_message_dropped_payload_per_transport_bytes bytes
+# HELP zenoh_rx_bytes Count of transport messages bytes received
+# TYPE zenoh_rx_bytes counter
+# UNIT zenoh_rx_bytes bytes
+zenoh_rx_bytes_total{local_id="a1b2",local_whatami="peer",protocol="udp"} 13
+# HELP zenoh_rx_per_transport_bytes Count of transport messages bytes received (per transport)
+# TYPE zenoh_rx_per_transport_bytes counter
+# UNIT zenoh_rx_per_transport_bytes bytes
+zenoh_rx_per_transport_bytes_total{local_id="a1b2",local_whatami="peer",protocol="udp",remote_zid="",remote_whatami="",remote_group="udp/224.0.0.224:7446",remote_cn="",disconnected="false"} 0
+zenoh_rx_per_transport_bytes_total{local_id="a1b2",local_whatami="peer",protocol="udp",remote_zid="aa",remote_whatami="peer",remote_group="udp/224.0.0.224:7446",remote_cn="",disconnected="false"} 13
+# HELP zenoh_rx_per_link_bytes Count of transport messages bytes received (per link)
+# TYPE zenoh_rx_per_link_bytes counter
+# UNIT zenoh_rx_per_link_bytes bytes
+zenoh_rx_per_link_bytes_total{local_id="a1b2",local_whatami="peer",protocol="udp",remote_zid="",remote_whatami="",remote_group="udp/224.0.0.224:7446",remote_cn="",src_locator="udp/10.0.0.1:7446",dst_locator="udp/224.0.0.224:7446"} 0
+zenoh_rx_per_link_bytes_total{local_id="a1b2",local_whatami="peer",protocol="udp",remote_zid="aa",remote_whatami="peer",remote_group="udp/224.0.0.224:7446",remote_cn="",src_locator="udp/10.0.0.1:7446",dst_locator="udp/224.0.0.224:7446"} 13
+# HELP zenoh_rx_transport_message Count of transport messages received
+# TYPE zenoh_rx_transport_message counter
+zenoh_rx_transport_message_total{local_id="a1b2",local_whatami="peer",protocol="udp"} 0
+# HELP zenoh_rx_transport_message_per_transport Count of transport messages received (per transport)
+# TYPE zenoh_rx_transport_message_per_transport counter
+zenoh_rx_transport_message_per_transport_total{local_id="a1b2",local_whatami="peer",protocol="udp",remote_zid="",remote_whatami="",remote_group="udp/224.0.0.224:7446",remote_cn="",disconnected="false"} 0
+zenoh_rx_transport_message_per_transport_total{local_id="a1b2",local_whatami="peer",protocol="udp",remote_zid="aa",remote_whatami="peer",remote_group="udp/224.0.0.224:7446",remote_cn="",disconnected="false"} 0
+# HELP zenoh_rx_transport_message_per_link Count of transport messages received (per link)
+# TYPE zenoh_rx_transport_message_per_link counter
+zenoh_rx_transport_message_per_link_total{local_id="a1b2",local_whatami="peer",protocol="udp",remote_zid="",remote_whatami="",remote_group="udp/224.0.0.224:7446",remote_cn="",src_locator="udp/10.0.0.1:7446",dst_locator="udp/224.0.0.224:7446"} 0
+zenoh_rx_transport_message_per_link_total{local_id="a1b2",local_whatami="peer",protocol="udp",remote_zid="aa",remote_whatami="peer",remote_group="udp/224.0.0.224:7446",remote_cn="",src_locator="udp/10.0.0.1:7446",dst_locator="udp/224.0.0.224:7446"} 0
+# HELP zenoh_rx_network_message Count of network messages received
+# TYPE zenoh_rx_network_message counter
+# HELP zenoh_rx_network_message_per_transport Count of network messages received (per transport)
+# TYPE zenoh_rx_network_message_per_transport counter
+# HELP zenoh_rx_network_message_payload_bytes Histogram of network messages payload received
+# TYPE zenoh_rx_network_message_payload_bytes histogram
+# UNIT zenoh_rx_network_message_payload_bytes bytes
+# HELP zenoh_rx_network_message_payload_per_transport_bytes Histogram of network messages payload received (per transport)
+# TYPE zenoh_rx_network_message_payload_per_transport_bytes histogram
+# UNIT zenoh_rx_network_message_payload_per_transport_bytes bytes
+# HELP zenoh_rx_network_message_dropped_payload_bytes Histogram of network messages payload dropped while received
+# TYPE zenoh_rx_network_message_dropped_payload_bytes histogram
+# UNIT zenoh_rx_network_message_dropped_payload_bytes bytes
+# HELP zenoh_rx_network_message_dropped_payload_per_transport_bytes Histogram of network messages payload dropped while received (per transport)
+# TYPE zenoh_rx_network_message_dropped_payload_per_transport_bytes histogram
+# UNIT zenoh_rx_network_message_dropped_payload_per_transport_bytes bytes
+# EOF
+===== END
+===== S5 perkey per_transport=true per_link=false disconnected=false per_key=true
+# HELP zenoh_build Zenoh build version.
+# TYPE zenoh_build info
+zenoh_build_info{local_id="a1b2",local_whatami="router",version="v1"} 1
+# HELP zenoh_transports_opened Count of transports currently opened.
+# TYPE zenoh_transports_opened gauge
+zenoh_transports_opened{local_id="a1b2",local_whatami="router"} 1
+# HELP zenoh_tx_bytes Count of transport messages bytes sent
+# TYPE zenoh_tx_bytes counter
+# UNIT zenoh_tx_bytes bytes
+# HELP zenoh_tx_per_transport_bytes Count of transport messages bytes sent (per transport)
+# TYPE zenoh_tx_per_transport_bytes counter
+# UNIT zenoh_tx_per_transport_bytes bytes
+# HELP zenoh_tx_transport_message Count of transport messages sent
+# TYPE zenoh_tx_transport_message counter
+# HELP zenoh_tx_transport_message_per_transport Count of transport messages sent (per transport)
+# TYPE zenoh_tx_transport_message_per_transport counter
+# HELP zenoh_tx_network_message Count of network messages sent
+# TYPE zenoh_tx_network_message counter
+# HELP zenoh_tx_network_message_per_transport Count of network messages sent (per transport)
+# TYPE zenoh_tx_network_message_per_transport counter
+# HELP zenoh_tx_network_message_payload_bytes Histogram of network messages payload sent
+# TYPE zenoh_tx_network_message_payload_bytes histogram
+# UNIT zenoh_tx_network_message_payload_bytes bytes
+# HELP zenoh_tx_network_message_payload_per_transport_bytes Histogram of network messages payload sent (per transport)
+# TYPE zenoh_tx_network_message_payload_per_transport_bytes histogram
+# UNIT zenoh_tx_network_message_payload_per_transport_bytes bytes
+# HELP zenoh_tx_network_message_dropped_payload_bytes Histogram of network messages payload dropped while sent
+# TYPE zenoh_tx_network_message_dropped_payload_bytes histogram
+# UNIT zenoh_tx_network_message_dropped_payload_bytes bytes
+# HELP zenoh_tx_network_message_dropped_payload_per_transport_bytes Histogram of network messages payload dropped while sent (per transport)
+# TYPE zenoh_tx_network_message_dropped_payload_per_transport_bytes histogram
+# UNIT zenoh_tx_network_message_dropped_payload_per_transport_bytes bytes
+# HELP zenoh_tx_network_message_payload_per_key_bytes Histogram of network messages payload sent per key
+# TYPE zenoh_tx_network_message_payload_per_key_bytes histogram
+# UNIT zenoh_tx_network_message_payload_per_key_bytes bytes
+# HELP zenoh_tx_network_message_payload_per_key_per_transport_bytes Histogram of network messages payload sent per key (per transport)
+# TYPE zenoh_tx_network_message_payload_per_key_per_transport_bytes histogram
+# UNIT zenoh_tx_network_message_payload_per_key_per_transport_bytes bytes
+# HELP zenoh_rx_bytes Count of transport messages bytes received
+# TYPE zenoh_rx_bytes counter
+# UNIT zenoh_rx_bytes bytes
+# HELP zenoh_rx_per_transport_bytes Count of transport messages bytes received (per transport)
+# TYPE zenoh_rx_per_transport_bytes counter
+# UNIT zenoh_rx_per_transport_bytes bytes
+# HELP zenoh_rx_transport_message Count of transport messages received
+# TYPE zenoh_rx_transport_message counter
+# HELP zenoh_rx_transport_message_per_transport Count of transport messages received (per transport)
+# TYPE zenoh_rx_transport_message_per_transport counter
+# HELP zenoh_rx_network_message Count of network messages received
+# TYPE zenoh_rx_network_message counter
+# HELP zenoh_rx_network_message_per_transport Count of network messages received (per transport)
+# TYPE zenoh_rx_network_message_per_transport counter
+# HELP zenoh_rx_network_message_payload_bytes Histogram of network messages payload received
+# TYPE zenoh_rx_network_message_payload_bytes histogram
+# UNIT zenoh_rx_network_message_payload_bytes bytes
+zenoh_rx_network_message_payload_bytes_bucket{local_id="a1b2",local_whatami="router",le="+Inf",space="user",priority="data",message="put",shm="false"} 1
+zenoh_rx_network_message_payload_bytes_bucket{local_id="a1b2",local_whatami="router",le="0.0",space="user",priority="data",message="put",shm="false"} 0
+zenoh_rx_network_message_payload_bytes_bucket{local_id="a1b2",local_whatami="router",le="1024.0",space="user",priority="data",message="put",shm="false"} 1
+zenoh_rx_network_message_payload_bytes_bucket{local_id="a1b2",local_whatami="router",le="1048576.0",space="user",priority="data",message="put",shm="false"} 1
+zenoh_rx_network_message_payload_bytes_bucket{local_id="a1b2",local_whatami="router",le="1073741824.0",space="user",priority="data",message="put",shm="false"} 1
+zenoh_rx_network_message_payload_bytes_bucket{local_id="a1b2",local_whatami="router",le="32.0",space="user",priority="data",message="put",shm="false"} 0
+zenoh_rx_network_message_payload_bytes_bucket{local_id="a1b2",local_whatami="router",le="32768.0",space="user",priority="data",message="put",shm="false"} 1
+zenoh_rx_network_message_payload_bytes_bucket{local_id="a1b2",local_whatami="router",le="33554432.0",space="user",priority="data",message="put",shm="false"} 1
+zenoh_rx_network_message_payload_bytes_count{local_id="a1b2",local_whatami="router",space="user",priority="data",message="put",shm="false"} 1
+zenoh_rx_network_message_payload_bytes_sum{local_id="a1b2",local_whatami="router",space="user",priority="data",message="put",shm="false"} 64.0
+# HELP zenoh_rx_network_message_payload_per_transport_bytes Histogram of network messages payload received (per transport)
+# TYPE zenoh_rx_network_message_payload_per_transport_bytes histogram
+# UNIT zenoh_rx_network_message_payload_per_transport_bytes bytes
+zenoh_rx_network_message_payload_per_transport_bytes_bucket{local_id="a1b2",local_whatami="router",le="+Inf",space="user",priority="data",message="put",shm="false",remote_zid="c3d4",remote_whatami="peer",remote_group="",remote_cn="",disconnected="false"} 1
+zenoh_rx_network_message_payload_per_transport_bytes_bucket{local_id="a1b2",local_whatami="router",le="0.0",space="user",priority="data",message="put",shm="false",remote_zid="c3d4",remote_whatami="peer",remote_group="",remote_cn="",disconnected="false"} 0
+zenoh_rx_network_message_payload_per_transport_bytes_bucket{local_id="a1b2",local_whatami="router",le="1024.0",space="user",priority="data",message="put",shm="false",remote_zid="c3d4",remote_whatami="peer",remote_group="",remote_cn="",disconnected="false"} 1
+zenoh_rx_network_message_payload_per_transport_bytes_bucket{local_id="a1b2",local_whatami="router",le="1048576.0",space="user",priority="data",message="put",shm="false",remote_zid="c3d4",remote_whatami="peer",remote_group="",remote_cn="",disconnected="false"} 1
+zenoh_rx_network_message_payload_per_transport_bytes_bucket{local_id="a1b2",local_whatami="router",le="1073741824.0",space="user",priority="data",message="put",shm="false",remote_zid="c3d4",remote_whatami="peer",remote_group="",remote_cn="",disconnected="false"} 1
+zenoh_rx_network_message_payload_per_transport_bytes_bucket{local_id="a1b2",local_whatami="router",le="32.0",space="user",priority="data",message="put",shm="false",remote_zid="c3d4",remote_whatami="peer",remote_group="",remote_cn="",disconnected="false"} 0
+zenoh_rx_network_message_payload_per_transport_bytes_bucket{local_id="a1b2",local_whatami="router",le="32768.0",space="user",priority="data",message="put",shm="false",remote_zid="c3d4",remote_whatami="peer",remote_group="",remote_cn="",disconnected="false"} 1
+zenoh_rx_network_message_payload_per_transport_bytes_bucket{local_id="a1b2",local_whatami="router",le="33554432.0",space="user",priority="data",message="put",shm="false",remote_zid="c3d4",remote_whatami="peer",remote_group="",remote_cn="",disconnected="false"} 1
+zenoh_rx_network_message_payload_per_transport_bytes_count{local_id="a1b2",local_whatami="router",space="user",priority="data",message="put",shm="false",remote_zid="c3d4",remote_whatami="peer",remote_group="",remote_cn="",disconnected="false"} 1
+zenoh_rx_network_message_payload_per_transport_bytes_sum{local_id="a1b2",local_whatami="router",space="user",priority="data",message="put",shm="false",remote_zid="c3d4",remote_whatami="peer",remote_group="",remote_cn="",disconnected="false"} 64.0
+# HELP zenoh_rx_network_message_dropped_payload_bytes Histogram of network messages payload dropped while received
+# TYPE zenoh_rx_network_message_dropped_payload_bytes histogram
+# UNIT zenoh_rx_network_message_dropped_payload_bytes bytes
+# HELP zenoh_rx_network_message_dropped_payload_per_transport_bytes Histogram of network messages payload dropped while received (per transport)
+# TYPE zenoh_rx_network_message_dropped_payload_per_transport_bytes histogram
+# UNIT zenoh_rx_network_message_dropped_payload_per_transport_bytes bytes
+# HELP zenoh_rx_network_message_payload_per_key_bytes Histogram of network messages payload received per key
+# TYPE zenoh_rx_network_message_payload_per_key_bytes histogram
+# UNIT zenoh_rx_network_message_payload_per_key_bytes bytes
+zenoh_rx_network_message_payload_per_key_bytes_bucket{local_id="a1b2",local_whatami="router",le="0.0",space="user",priority="data",message="put",shm="false",key="a/**"} 0
+zenoh_rx_network_message_payload_per_key_bytes_bucket{local_id="a1b2",local_whatami="router",le="0.0",space="user",priority="data",message="put",shm="false",key="a/b"} 0
+zenoh_rx_network_message_payload_per_key_bytes_bucket{local_id="a1b2",local_whatami="router",le="1024.0",space="user",priority="data",message="put",shm="false",key="a/**"} 1
+zenoh_rx_network_message_payload_per_key_bytes_bucket{local_id="a1b2",local_whatami="router",le="1024.0",space="user",priority="data",message="put",shm="false",key="a/b"} 1
+zenoh_rx_network_message_payload_per_key_bytes_bucket{local_id="a1b2",local_whatami="router",le="1048576.0",space="user",priority="data",message="put",shm="false",key="a/**"} 1
+zenoh_rx_network_message_payload_per_key_bytes_bucket{local_id="a1b2",local_whatami="router",le="1048576.0",space="user",priority="data",message="put",shm="false",key="a/b"} 1
+zenoh_rx_network_message_payload_per_key_bytes_bucket{local_id="a1b2",local_whatami="router",le="1073741824.0",space="user",priority="data",message="put",shm="false",key="a/**"} 1
+zenoh_rx_network_message_payload_per_key_bytes_bucket{local_id="a1b2",local_whatami="router",le="1073741824.0",space="user",priority="data",message="put",shm="false",key="a/b"} 1
+zenoh_rx_network_message_payload_per_key_bytes_bucket{local_id="a1b2",local_whatami="router",le="18446744073709553000.0",space="user",priority="data",message="put",shm="false",key="a/**"} 1
+zenoh_rx_network_message_payload_per_key_bytes_bucket{local_id="a1b2",local_whatami="router",le="18446744073709553000.0",space="user",priority="data",message="put",shm="false",key="a/b"} 1
+zenoh_rx_network_message_payload_per_key_bytes_bucket{local_id="a1b2",local_whatami="router",le="32.0",space="user",priority="data",message="put",shm="false",key="a/**"} 0
+zenoh_rx_network_message_payload_per_key_bytes_bucket{local_id="a1b2",local_whatami="router",le="32.0",space="user",priority="data",message="put",shm="false",key="a/b"} 0
+zenoh_rx_network_message_payload_per_key_bytes_bucket{local_id="a1b2",local_whatami="router",le="32768.0",space="user",priority="data",message="put",shm="false",key="a/**"} 1
+zenoh_rx_network_message_payload_per_key_bytes_bucket{local_id="a1b2",local_whatami="router",le="32768.0",space="user",priority="data",message="put",shm="false",key="a/b"} 1
+zenoh_rx_network_message_payload_per_key_bytes_bucket{local_id="a1b2",local_whatami="router",le="33554432.0",space="user",priority="data",message="put",shm="false",key="a/**"} 1
+zenoh_rx_network_message_payload_per_key_bytes_bucket{local_id="a1b2",local_whatami="router",le="33554432.0",space="user",priority="data",message="put",shm="false",key="a/b"} 1
+zenoh_rx_network_message_payload_per_key_bytes_count{local_id="a1b2",local_whatami="router",space="user",priority="data",message="put",shm="false",key="a/**"} 1
+zenoh_rx_network_message_payload_per_key_bytes_count{local_id="a1b2",local_whatami="router",space="user",priority="data",message="put",shm="false",key="a/b"} 1
+zenoh_rx_network_message_payload_per_key_bytes_sum{local_id="a1b2",local_whatami="router",space="user",priority="data",message="put",shm="false",key="a/**"} 64.0
+zenoh_rx_network_message_payload_per_key_bytes_sum{local_id="a1b2",local_whatami="router",space="user",priority="data",message="put",shm="false",key="a/b"} 64.0
+# HELP zenoh_rx_network_message_payload_per_key_per_transport_bytes Histogram of network messages payload received per key (per transport)
+# TYPE zenoh_rx_network_message_payload_per_key_per_transport_bytes histogram
+# UNIT zenoh_rx_network_message_payload_per_key_per_transport_bytes bytes
+zenoh_rx_network_message_payload_per_key_per_transport_bytes_bucket{local_id="a1b2",local_whatami="router",le="0.0",space="user",priority="data",message="put",shm="false",remote_zid="c3d4",remote_whatami="peer",remote_group="",remote_cn="",disconnected="false",key="a/**"} 0
+zenoh_rx_network_message_payload_per_key_per_transport_bytes_bucket{local_id="a1b2",local_whatami="router",le="0.0",space="user",priority="data",message="put",shm="false",remote_zid="c3d4",remote_whatami="peer",remote_group="",remote_cn="",disconnected="false",key="a/b"} 0
+zenoh_rx_network_message_payload_per_key_per_transport_bytes_bucket{local_id="a1b2",local_whatami="router",le="1024.0",space="user",priority="data",message="put",shm="false",remote_zid="c3d4",remote_whatami="peer",remote_group="",remote_cn="",disconnected="false",key="a/**"} 1
+zenoh_rx_network_message_payload_per_key_per_transport_bytes_bucket{local_id="a1b2",local_whatami="router",le="1024.0",space="user",priority="data",message="put",shm="false",remote_zid="c3d4",remote_whatami="peer",remote_group="",remote_cn="",disconnected="false",key="a/b"} 1
+zenoh_rx_network_message_payload_per_key_per_transport_bytes_bucket{local_id="a1b2",local_whatami="router",le="1048576.0",space="user",priority="data",message="put",shm="false",remote_zid="c3d4",remote_whatami="peer",remote_group="",remote_cn="",disconnected="false",key="a/**"} 1
+zenoh_rx_network_message_payload_per_key_per_transport_bytes_bucket{local_id="a1b2",local_whatami="router",le="1048576.0",space="user",priority="data",message="put",shm="false",remote_zid="c3d4",remote_whatami="peer",remote_group="",remote_cn="",disconnected="false",key="a/b"} 1
+zenoh_rx_network_message_payload_per_key_per_transport_bytes_bucket{local_id="a1b2",local_whatami="router",le="1073741824.0",space="user",priority="data",message="put",shm="false",remote_zid="c3d4",remote_whatami="peer",remote_group="",remote_cn="",disconnected="false",key="a/**"} 1
+zenoh_rx_network_message_payload_per_key_per_transport_bytes_bucket{local_id="a1b2",local_whatami="router",le="1073741824.0",space="user",priority="data",message="put",shm="false",remote_zid="c3d4",remote_whatami="peer",remote_group="",remote_cn="",disconnected="false",key="a/b"} 1
+zenoh_rx_network_message_payload_per_key_per_transport_bytes_bucket{local_id="a1b2",local_whatami="router",le="18446744073709553000.0",space="user",priority="data",message="put",shm="false",remote_zid="c3d4",remote_whatami="peer",remote_group="",remote_cn="",disconnected="false",key="a/**"} 1
+zenoh_rx_network_message_payload_per_key_per_transport_bytes_bucket{local_id="a1b2",local_whatami="router",le="18446744073709553000.0",space="user",priority="data",message="put",shm="false",remote_zid="c3d4",remote_whatami="peer",remote_group="",remote_cn="",disconnected="false",key="a/b"} 1
+zenoh_rx_network_message_payload_per_key_per_transport_bytes_bucket{local_id="a1b2",local_whatami="router",le="32.0",space="user",priority="data",message="put",shm="false",remote_zid="c3d4",remote_whatami="peer",remote_group="",remote_cn="",disconnected="false",key="a/**"} 0
+zenoh_rx_network_message_payload_per_key_per_transport_bytes_bucket{local_id="a1b2",local_whatami="router",le="32.0",space="user",priority="data",message="put",shm="false",remote_zid="c3d4",remote_whatami="peer",remote_group="",remote_cn="",disconnected="false",key="a/b"} 0
+zenoh_rx_network_message_payload_per_key_per_transport_bytes_bucket{local_id="a1b2",local_whatami="router",le="32768.0",space="user",priority="data",message="put",shm="false",remote_zid="c3d4",remote_whatami="peer",remote_group="",remote_cn="",disconnected="false",key="a/**"} 1
+zenoh_rx_network_message_payload_per_key_per_transport_bytes_bucket{local_id="a1b2",local_whatami="router",le="32768.0",space="user",priority="data",message="put",shm="false",remote_zid="c3d4",remote_whatami="peer",remote_group="",remote_cn="",disconnected="false",key="a/b"} 1
+zenoh_rx_network_message_payload_per_key_per_transport_bytes_bucket{local_id="a1b2",local_whatami="router",le="33554432.0",space="user",priority="data",message="put",shm="false",remote_zid="c3d4",remote_whatami="peer",remote_group="",remote_cn="",disconnected="false",key="a/**"} 1
+zenoh_rx_network_message_payload_per_key_per_transport_bytes_bucket{local_id="a1b2",local_whatami="router",le="33554432.0",space="user",priority="data",message="put",shm="false",remote_zid="c3d4",remote_whatami="peer",remote_group="",remote_cn="",disconnected="false",key="a/b"} 1
+zenoh_rx_network_message_payload_per_key_per_transport_bytes_count{local_id="a1b2",local_whatami="router",space="user",priority="data",message="put",shm="false",remote_zid="c3d4",remote_whatami="peer",remote_group="",remote_cn="",disconnected="false",key="a/**"} 1
+zenoh_rx_network_message_payload_per_key_per_transport_bytes_count{local_id="a1b2",local_whatami="router",space="user",priority="data",message="put",shm="false",remote_zid="c3d4",remote_whatami="peer",remote_group="",remote_cn="",disconnected="false",key="a/b"} 1
+zenoh_rx_network_message_payload_per_key_per_transport_bytes_sum{local_id="a1b2",local_whatami="router",space="user",priority="data",message="put",shm="false",remote_zid="c3d4",remote_whatami="peer",remote_group="",remote_cn="",disconnected="false",key="a/**"} 64.0
+zenoh_rx_network_message_payload_per_key_per_transport_bytes_sum{local_id="a1b2",local_whatami="router",space="user",priority="data",message="put",shm="false",remote_zid="c3d4",remote_whatami="peer",remote_group="",remote_cn="",disconnected="false",key="a/b"} 64.0
+# EOF
+===== END

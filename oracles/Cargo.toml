@@ -32,7 +32,7 @@
 # printed integer does not need it.
 [workspace]
 resolver = "2"
-members = ["future-stamp", "fs-backend"]
+members = ["future-stamp", "fs-backend", "zenoh-stats-golden"]
 
 # R2804 — ONE zenoh in this workspace, and it is the pinned tag.
 #

@@ -19418,6 +19418,29 @@ layer_e16_fs_backend_shares_a_directory_with_upstream() {
     done
 }
 
+# ─── Layer E17 — the stats registry's document against upstream's registry ───
+#
+# R2821 — `adminspace-metrics` serves, under `transport-stats`, the document a
+# zenoh node built with `stats` serves: upstream's `zenoh-stats` registry
+# encoded by `prometheus-client`. Its expected text is not transcribed from
+# source; `oracles/zenoh-stats-golden` performs fixed events on the REAL
+# registry and the golden is what it prints. The two legs close the loop from
+# both ends: leg 1 re-runs upstream and requires the committed golden to be
+# what upstream writes TODAY (so a golden that drifted from the pin cannot keep
+# a wz test green), leg 2 requires wz's registry to write that golden for the
+# same events. Either alone proves half: leg 2 without leg 1 compares wz with a
+# file, leg 1 without leg 2 compares upstream with itself.
+#
+# In the `interop` job for the same reason as E8t and E16: the oracle links the
+# pinned zenoh and only that job caches `oracles/target` (R2625).
+layer_e17_stats_registry_writes_upstreams_document() {
+    python3 scripts/lib/zenoh_stats_golden.py --check || return 1
+    _runci_guarded_test "Layer E17 (wz writes the golden)" 1 \
+        cargo test -p wz-session-core --lib --quiet \
+        stats_registry::tests::every_golden_scenario_is_written_as_the_pin_writes_it \
+        -- --exact || return 1
+}
+
 # ─── Layer Qz — Zephyr cooperative profile west build + QEMU boot e2e ───
 #
 # The REAL Zephyr link + boot proof (R311y31 / Z2). UNLIKE the FreeRTOS lane
@@ -19707,6 +19730,7 @@ run_layer E13 layer_e13_apfull_storage_plane_pico || overall=1
 run_layer E14 layer_e14_apfull_dynamic_volume_pico || overall=1
 run_layer E15 layer_e15_apfull_reconcile_federation_pico || overall=1
 run_layer E16 layer_e16_fs_backend_shares_a_directory_with_upstream || overall=1
+run_layer E17 layer_e17_stats_registry_writes_upstreams_document || overall=1
 run_layer F layer_f_codec_footprint || overall=1
 run_layer G layer_g_cross_compile_cortex_m || overall=1
 run_layer Q layer_q_qemu_mcu_e2e || overall=1
