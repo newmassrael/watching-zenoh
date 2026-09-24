@@ -1,0 +1,9 @@
+# R2826 — a GOLDEN is bytes a test compares against, not prose, so its line
+# endings are part of its content and must survive every checkout.
+#
+# Without a declaration, a Windows checkout (core.autocrlf, the runner default)
+# rewrites LF to CRLF, and the stats-registry golden's reader, which splits on
+# "===== END\n", found no scenario end: hosted `portability (windows-latest)`
+# failed `wz-session-core` on run 35951199951 while every Linux lane passed.
+# Declaring the kind rather than the one file is what covers the next golden.
+*.golden text eol=lf
