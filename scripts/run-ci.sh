@@ -18871,8 +18871,11 @@ layer_e11_apfull_advanced_pubsub_pico() {
 # membership ungated on every machine without the foreign CLI — which is exactly
 # how the membership drift this lane exists to catch would reach main invisibly.
 layer_e12_apfull_adminspace_pico() {
+    # The probe decodes the ONE leg pico cannot: the metrics document outgrew
+    # pico's reassembly bound once it carried the node registry (R2844).
     (cd crates && cargo build -p wz-ap-demo --no-default-features \
-        --features preset-ap-full --quiet) || return 1
+        --features preset-ap-full --quiet \
+        && cargo build -p wz-e2e-admin-probe --quiet) || return 1
     if [[ ! -x target/zenoh-pico-cli/z_get || ! -x target/zenoh-pico-cli/z_put ]]; then
         _pico_cli_unavailable "Layer E12" || return 1
         return 0

@@ -53,7 +53,10 @@
 //!   `-introspection-handlers` (the per-entity `subscriber/demo/data` leg carrying
 //!   the zenoh `Sources` body), `-metrics` (the OpenMetrics `zenoh_build` gauge),
 //!   `-plugins-handlers` (the `plugins/storage_manager` record at `state=Loaded`).
-//!   All four in one reply set from one process — the assertion y270 could not make.
+//!   All four from one process — the assertion y270 could not make. Three are in
+//!   pico's reply set; the metrics document outgrew pico's reassembly bound when
+//!   it began carrying the node registry, so that leg is read from the same
+//!   running host by the wz probe, and the test asserts the size that forces it.
 //! - **`apfull_adminspace_read_gate_denies_every_leg_to_a_real_pico_z_get`** —
 //!   `adminspace-read`. The SAME binary, `--no-admin-read`: pico receives only the
 //!   terminating Final. This is what keeps leg 1 from being a "gates are ignored"
@@ -107,9 +110,56 @@ use std::process::{Command, Stdio};
 use std::time::Duration;
 
 use wz_integration_tests::common::{
-    read_captured, wait_for_substring, wz_ap_demo_binary, zenoh_pico_cli_binary, ChildGuard,
-    PortReservation,
+    read_captured, wait_for_substring, wz_ap_demo_binary, wz_e2e_admin_probe_binary,
+    zenoh_pico_cli_binary, ChildGuard, PortReservation,
 };
+
+/// zenoh-pico's reassembly bound for one message, as its own CMake defaults set
+/// it: `set(FRAG_MAX_SIZE 4096 CACHE STRING ...)` in
+/// `vendor/zenoh-pico/CMakeLists.txt`. The lane's `z_get` is built by
+/// `scripts/build-zenoh-pico-cli.sh`, which does not override it. A reply
+/// larger than this is dropped by pico whoever sends it.
+const PICO_FRAG_MAX_SIZE: usize = 4096;
+
+/// One `wz-e2e-admin-probe` GET of `selector` against the host at `addr`,
+/// returned as the reply's body lines.
+///
+/// Used for the ONE leg pico cannot decode here — see the metrics block of
+/// `apfull_adminspace_plane_decoded_by_a_real_pico_z_get`. The probe is a wz
+/// session, so it carries no reassembly bound below the document's size.
+fn probe_body(addr: &str, selector: &str) -> Vec<String> {
+    let stderr = tempfile::tempfile().expect("tempfile for probe stderr");
+    let writer = stderr.try_clone().expect("dup probe stderr handle");
+    let mut reader = stderr;
+    let mut child = ChildGuard::wrap(
+        "wz-e2e-admin-probe (metrics leg)",
+        Command::new(wz_e2e_admin_probe_binary())
+            .args(["--connect", addr, "--get", selector])
+            .env("RUST_LOG", "info")
+            .stdout(Stdio::null())
+            .stderr(Stdio::from(writer))
+            .spawn()
+            .expect("spawn wz-e2e-admin-probe"),
+    );
+    let out = wait_for_substring(
+        &mut reader,
+        "SCRIPT COMPLETE steps=1",
+        Duration::from_secs(15),
+    )
+    .unwrap_or_else(|c| panic!("the probe never finished its GET\n--- probe ---\n{c}"));
+    let _ = child.child_mut().kill();
+    let _ = child.child_mut().wait();
+    assert!(
+        out.contains(&format!("STEP 1 GET '{selector}' FINAL replies=1")),
+        "the probe's GET is answered exactly once\n--- probe ---\n{out}"
+    );
+    out.lines()
+        .filter_map(|l| {
+            l.split_once("STEP 1 BODY #1 ")
+                .map(|(_, rest)| rest.to_string())
+        })
+        .collect()
+}
 
 /// Fail NOW, naming the feature list, if the binary at the shared demo path is not
 /// the AP-full one this file needs.
@@ -386,6 +436,9 @@ fn apfull_adminspace_plane_decoded_by_a_real_pico_z_get() {
         let h = read_captured(&mut host_log);
         panic!("pico z_get never saw the terminating Final within 15s\n--- z_get ---\n{c}\n--- host ---\n{h}")
     });
+    // The metrics leg, from the SAME host process, before it is stopped: see
+    // the metrics block below for why this one leg has a wz decoder.
+    let metrics_lines = probe_body(&addr, &format!("{root}/metrics"));
     let _ = host.child_mut().kill();
     let _ = host.child_mut().wait();
 
@@ -454,7 +507,35 @@ fn apfull_adminspace_plane_decoded_by_a_real_pico_z_get() {
     // This asserted `zenoh_build{version=` , the 1.5.0 gauge shape; the pin emits an
     // `info` family whose sample is `zenoh_build_info` carrying local_id and
     // local_whatami too, and closes the document with `# EOF`.
-    let metrics = reply_body(&out, &format!("{root}/metrics"), "in the composed GET");
+    //
+    // THE DECODER FOR THIS ONE LEG IS WZ, NOT PICO, and the reason is measured
+    // below rather than asserted. Since R2844 an AP-full peer serves its NODE
+    // stats registry here, which upstream serves too
+    // (`zenoh/src/net/runtime/adminspace.rs` @ `.encode_metrics(`), and that
+    // document is larger than pico reassembles. Upstream gzips the body; wz does
+    // not compress, by the owner's decision on open-debt item 677. pico's `z_get`
+    // sends no selector parameters, so it cannot narrow the document either. So
+    // pico's decode of the composed GET carries every leg EXCEPT this one, and
+    // the leg is read from the same host process, still running, by the probe.
+    // `wz_peer_serves_its_node_stats_registry.rs` made the same move for its own
+    // witness in R2844; this file was the second reader of the leg and kept pico.
+    //
+    // The size assertion is what keeps the substitution honest: if the document
+    // ever fits pico again, this reds and the leg goes back to the foreign
+    // decoder.
+    let metrics = metrics_lines.join("\n");
+    assert!(
+        metrics.len() > PICO_FRAG_MAX_SIZE,
+        "the metrics document fits pico's reassembly bound ({} <= {PICO_FRAG_MAX_SIZE} \
+         bytes), so pico must decode it again: move this leg back to \
+         `reply_body(&out, ..)`\n  got: {metrics}",
+        metrics.len()
+    );
+    assert!(
+        !out.contains(&format!("('{root}/metrics': ")),
+        "pico decoded a metrics body larger than its reassembly bound, which \
+         contradicts the size above; re-measure before trusting either\n--- z_get ---\n{out}"
+    );
     assert!(
         metrics.contains("zenoh_build_info{local_id="),
         "the metrics leg carries the pin's OpenMetrics `zenoh_build_info` sample — \

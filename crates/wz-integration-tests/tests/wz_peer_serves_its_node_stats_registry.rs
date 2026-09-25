@@ -31,8 +31,8 @@ use std::process::{Command, Stdio};
 use std::time::Duration;
 
 use wz_integration_tests::common::{
-    read_captured, wait_for_substring, wz_ap_demo_binary, wz_e2e_admin_probe_binary, ChildGuard,
-    PortReservation,
+    assert_demo_binary_newer_than_sources, read_captured, wait_for_substring, wz_ap_demo_binary,
+    wz_e2e_admin_probe_binary, ChildGuard, PortReservation,
 };
 
 /// How long the probe's whole script may take; the probe bounds each step
@@ -43,6 +43,9 @@ const SCRIPT_TIMEOUT: Duration = Duration::from_secs(30);
 #[ignore = "binary-dep e2e (wz-ap-demo --features routing-peer,adminspace-metrics,wz/transport-stats + wz-e2e-admin-probe); Layer E6f runs via --ignored"]
 fn wz_peer_serves_its_node_stats_registry_to_a_session_client() {
     let demo = wz_ap_demo_binary();
+    // The peer's registry is what this leg reads, so a demo older than the
+    // library it links reports the undamaged product.
+    assert_demo_binary_newer_than_sources(&demo);
     let probe = wz_e2e_admin_probe_binary();
     let port_res = PortReservation::pick();
     let addr = format!("127.0.0.1:{}", port_res.port());
