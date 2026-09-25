@@ -2151,8 +2151,8 @@ PIN_NO_SYMBOL = 2
 # COMPLETE, and its reason carried one wz citation: 44 - 43 = 1, the census's
 # own FAIL line, with PIN_AMBIGUOUS holding at 12.
 #
-# R2855 — 43 -> 44, RISING by one citation in one atom: `adminspace-core`
-# stays PARTIAL, and its R2855 correction refutes the "pure-Session host does
+# R2857 — 43 -> 44, RISING by one citation in one atom: `adminspace-core`
+# stays PARTIAL, and its R2857 correction refutes the "pure-Session host does
 # not enumerate declarations" clause by citing the line that does it,
 # `crates/wz-runtime-tokio/src/session/mod.rs`. 44 - 43 = 1, the census's own
 # FAIL line (`wz citations: 44 against a pin of 43`), with PIN_AMBIGUOUS holding.
