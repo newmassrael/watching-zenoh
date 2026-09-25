@@ -148,7 +148,9 @@ fn wz_router_hat_multicast_ingress_federates_loop_safe_from_pico_zpub() {
     let z_pub = zenoh_pico_cli_binary("z_pub");
     let iface = default_route_iface();
     let locator = format!("udp/{GROUP}:{PORT}#iface={iface}");
-    let ingress_marker = format!("multicast ingress group {GROUP}:{PORT} joined");
+    // R2859 — the router's ONE group face (R2850) logs `multicast group ..
+    // joined`; the `ingress` word left with the separate ingress face.
+    let ingress_marker = format!("multicast group {GROUP}:{PORT} joined");
     let converged_2 = "router-hat: routers-net converged (2 node(s))";
     let members_converged = "router-hat: on-group router members converged";
 

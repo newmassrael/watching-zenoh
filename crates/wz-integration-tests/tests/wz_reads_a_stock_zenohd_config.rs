@@ -360,6 +360,18 @@ fn wz_reads_the_same_values_out_of_a_config_that_zenohd_does() {
     let admin = wz.adminspace.expect("the fixture enables adminspace");
     let expected: Vec<(&str, String)> = vec![
         ("mode", format!("\"{}\"", wz.mode.to_str())),
+        // R2859 — `metadata` is honoured whole since R2857 (`a7edeb52`), so the
+        // file's value is compared here rather than reported as ignored below;
+        // that list still named it, which is the hosted Layer Z red on
+        // 36086732537 / 36088995113. Rendered as its JSON text, as the
+        // `plugins` object row is.
+        (
+            "metadata",
+            wz.metadata
+                .as_ref()
+                .map(|value| value.to_json5_text())
+                .unwrap_or_default(),
+        ),
         (
             "listen/endpoints",
             format!("[\"{}\"]", wz.listen.join("\",\"")),
@@ -496,10 +508,9 @@ fn wz_reads_the_same_values_out_of_a_config_that_zenohd_does() {
     // R311y844 — `queries_default_timeout` left this list because wz honours it
     // now; it was never a key wz could not act on (`--query-timeout-ms` has
     // carried it for rounds), only one the reader had not been taught.
-    assert_eq!(
-        ingest.ignored,
-        vec!["metadata/name", "transport/link/tx/threads"]
-    );
+    // R2859 — `metadata/name` left this list with R2857, which made the reader
+    // honour `metadata`; it is compared in `expected` above instead.
+    assert_eq!(ingest.ignored, vec!["transport/link/tx/threads"]);
     assert_eq!(
         resolved.get("transport/link/tx/threads"),
         Some(&Json5Value::Number(String::from("8"))),

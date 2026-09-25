@@ -41,6 +41,10 @@
 //! in `open.rs`). The `as u8` TRUNCATES first, so `256` reads as `0` (north)
 //! and is admitted; `2` and `257` are refused.
 
+// R2859 — gated: only the rendered `admin_region` needs an allocator. The
+// bound, its read and the region computation are allocation-free and compile
+// on the no-alloc MCU profile, which is where this import broke the build.
+#[cfg(feature = "alloc")]
 use alloc::string::String;
 use wz_codecs::ext_entry::{ExtEntryOwned, ExtEntryOwnedVariant};
 
@@ -163,6 +167,10 @@ pub fn region_of(mode: WhatAmI, remote: WhatAmI, remote_bound: Option<Bound>) ->
 /// `"unknown"` where it cannot be computed
 /// (`zenoh/src/net/runtime/adminspace.rs`
 /// @ `"region": transport_unicast_to_region(transport).map_or_else(|| "unknown".to_string(), |r| r.to_string())`).
+///
+/// `alloc`-gated with its only caller (`SessionLinkActions::admin_region`,
+/// whose module is itself `alloc`-only).
+#[cfg(feature = "alloc")]
 pub fn admin_region(mode: WhatAmI, remote: Option<WhatAmI>, remote_bound: Option<Bound>) -> String {
     use core::fmt::Write as _;
     let mut out = String::new();
@@ -243,6 +251,7 @@ mod tests {
         assert_eq!(region_of(Client, Client, Some(Bound::North)), None);
     }
 
+    #[cfg(feature = "alloc")]
     #[test]
     fn regions_render_as_upstream_displays_them() {
         assert_eq!(admin_region(Peer, Some(Client), None), "south:0:client");

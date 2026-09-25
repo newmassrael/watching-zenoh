@@ -133,7 +133,9 @@ fn wz_router_hat_multicast_ingress_from_pico_zpub() {
     // fast here instead of a silent timeout. It witnesses feature-presence + the
     // ingress task spawning, NOT a successful IGMP join (the bind runs inside the
     // spawned task) — the true end-to-end join proof is the SUBSCRIBER FIRED below.
-    let ingress_marker = format!("multicast ingress group {GROUP}:{PORT} joined");
+    // R2859 — the router's ONE group face (R2850) logs `multicast group ..
+    // joined`; the `ingress` word left with the separate ingress face.
+    let ingress_marker = format!("multicast group {GROUP}:{PORT} joined");
     if let Err(captured) =
         wait_for_substring(&mut r_reader, &ingress_marker, Duration::from_secs(3))
     {

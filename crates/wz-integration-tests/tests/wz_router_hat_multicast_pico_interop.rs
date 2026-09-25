@@ -171,7 +171,10 @@ fn wz_router_hat_multicast_egress_reaches_pico_zsub() {
     // silent delivery timeout. NOTE: the log fires synchronously BEFORE the async
     // egress socket bind, so it proves the feature is compiled in, not a working
     // socket — the pico Received witness below proves the working egress.
-    let attach_marker = format!("multicast egress group {GROUP}:{PORT} attached");
+    // R2859 — the router's ONE group face (R2850) both egresses and ingests,
+    // and logs `multicast group .. joined`; the separate egress face and its
+    // `attached` line are gone.
+    let attach_marker = format!("multicast group {GROUP}:{PORT} joined");
     if let Err(captured) = wait_for_substring(&mut r_reader, &attach_marker, Duration::from_secs(3))
     {
         let _ = r_guard.child_mut().kill();

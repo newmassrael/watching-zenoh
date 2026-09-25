@@ -1838,11 +1838,12 @@ pub(crate) fn expand_stock_zenoh_config_for_build(
         let run_flag = typed_role
             .map(|(flag, _)| flag)
             .or(selected.as_ref().map(|s| s.flag));
-        let hosts_an_adminspace = match run_flag {
-            Some("--peer") | Some("--storage-host") => true,
-            Some("--router-hat") => cfg!(feature = "adminspace-router-linkstate"),
-            _ => false,
-        };
+        // A boolean rather than a `match`: with the router's admin host compiled
+        // in, the `cfg!` arm is the constant `true`, and clippy then reads the
+        // three arms as a `matches!` (R2859 paid that red in the all-features
+        // lane).
+        let hosts_an_adminspace = matches!(run_flag, Some("--peer") | Some("--storage-host"))
+            || (run_flag == Some("--router-hat") && cfg!(feature = "adminspace-router-linkstate"));
         let blocked = no_sink("metadata").or_else(|| {
             (!hosts_an_adminspace).then_some(KeyEffect::WithheldFromThisRun(
                 "an adminspace host (this run-mode serves none)",

@@ -129,7 +129,9 @@ fn wz_router_hat_advertises_group_sub_reaches_pico_zsub() {
     let z_sub = zenoh_pico_cli_binary("z_sub");
     let iface = default_route_iface();
     let locator = format!("udp/{GROUP}:{PORT}#iface={iface}");
-    let ingress_marker = format!("multicast ingress group {GROUP}:{PORT} joined");
+    // R2859 — the router's ONE group face (R2850) logs `multicast group ..
+    // joined`; the `ingress` word left with the separate ingress face.
+    let ingress_marker = format!("multicast group {GROUP}:{PORT} joined");
     let advertised_marker = "router-hat: advertised on-group subscriber(s) into the mesh";
     let learned_interest = "peer: publisher learned subscriber interest";
 
