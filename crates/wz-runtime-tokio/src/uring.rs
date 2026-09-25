@@ -1032,7 +1032,21 @@ mod tests {
     /// ONCE. [`register_awaiting_reclaim`] would sleep up to half a second
     /// waiting for exactly the release this test exists to assert has already
     /// happened, and a witness that tolerates the defect cannot grade the fix.
+    ///
+    /// ⚠ R2855 — AND WHY IT RUNS ONLY WHERE NOTHING ELSE REGISTERS. The measured
+    /// ceiling leaves under one page of slack above the UID's charge AT THE
+    /// MOMENT OF MEASURING, so it is valid only while no other registration of
+    /// this UID starts. A lane that runs this binary's whole `--lib` in
+    /// parallel breaks that by construction: the registering siblings above,
+    /// and anything that lazily starts [`crate::uring_reactor::UringReactor::node`],
+    /// pin their pools beside the child. Hosted run 36064882812 is that case —
+    /// Layer C1bn refused the FIRST registration, at 1084, under a limit that
+    /// admitted it, which says nothing about the release this test grades. A
+    /// lock cannot fix it, because the lazy reactor has no fixed set of callers
+    /// to take one. So the test is ignored everywhere except Layer C1br, which
+    /// runs it `--test-threads=1` under a filter that holds no other charger.
     #[test]
+    #[ignore = "needs a quiescent memlock charge; owning lane Layer C1br runs it serialized with --include-ignored"]
     fn a_dropped_ring_returns_its_locked_pages_before_the_next_registration() {
         if std::env::var_os(RECLAIM_CHILD).is_some() {
             reclaim_child_body();
@@ -1042,6 +1056,7 @@ mod tests {
         let status = std::process::Command::new(exe)
             .args([
                 "--exact",
+                "--include-ignored",
                 "--nocapture",
                 "--test-threads=1",
                 "uring::tests::a_dropped_ring_returns_its_locked_pages_before_the_next_registration",

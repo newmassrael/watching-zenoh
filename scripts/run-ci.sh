@@ -10624,8 +10624,15 @@ layer_c1br_uring_fixed_buffers() {
     # lane kept passing and kept printing a count, which is the shape that gate
     # was written against. Both paths are named, so adding a third uring module
     # means adding a third filter rather than hoping a prefix reaches it.
+    #
+    # R2855 — `--include-ignored`, because this lane OWNS one ignored test:
+    # `uring::tests::a_dropped_ring_returns_its_locked_pages_before_the_next_registration`
+    # measures a ceiling with under a page of slack, which only holds while
+    # nothing else of this UID registers. Serialized and filtered, this lane is
+    # that condition; a whole-`--lib` parallel lane (C1bn) is not, and redded it
+    # on the FIRST registration in hosted run 36064882812.
     out="$(cd crates && cargo test -p wz-runtime-tokio --features runtime-tokio-uring \
-        --lib --quiet -- --test-threads=1 uring:: uring_reactor:: \
+        --lib --quiet -- --include-ignored --test-threads=1 uring:: uring_reactor:: \
         stream_link::ring_selection:: 2>&1)" \
         || { echo "$out"; return 1; }
     local tests
