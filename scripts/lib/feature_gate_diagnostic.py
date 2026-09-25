@@ -421,11 +421,19 @@ DEFERRED: dict[str, dict[str, str]] = {
                 # MODULE-LEVEL sites under a simple cfg, which is the shape
                 # `derived_probes` reads off the crate root. So it is probed, not
                 # deferred, and nothing is typed here for it.
+                #
+                # R2855 — `transport-stats` LEFT this list by the R2686 route a
+                # third time. R2848 added `pub struct MulticastTransportStats`
+                # under a bare `#[cfg(feature = "transport-stats")]` in the
+                # public module `multicast_glue`, which `submodule_probes`
+                # reads, so the feature became probed and this row false. The
+                # refusal stayed invisible because Layer C1bn is fail-fast and
+                # an intermittent uring red ahead of this gate kept it
+                # unreached (hosted run 36064882812: 3 of 13 legs).
                 "liveliness-get",
                 "router-multicast-faces",
                 "routing-interceptor-hotreload",
                 "routing-token-tables",
-                "transport-stats",
             )
         },
         # The THIRD reason, and the axis found it by building the probe and
