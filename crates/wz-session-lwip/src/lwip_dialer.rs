@@ -135,21 +135,22 @@ pub fn admin_session_of<C: ClockSource + 'static>(
     if !actions.is_established() {
         return None;
     }
-    Some(wz_session_core::adminspace::AdminSession {
-        peer_zid_hex: actions
-            .peer_zid()
-            .map(|zid| wz_session_core::zid_hex::zid_to_zenoh_hex(&zid))
-            .unwrap_or_default(),
-        whatami: actions
-            .peer_whatami_wire()
-            .and_then(wz_session_core::WhatAmI::from_wire)
-            .map(|role| alloc::string::String::from(role.to_str())),
-        links: actions.admin_links(),
-        shm: false,
-        weight: None,
-        // R2858 — the same computation the host runtimes use.
-        region: Some(actions.admin_region()),
-    })
+    // R2860 — the row constructor the host runtimes share, so `links`, `shm`
+    // and `region` are computed here exactly as they are there. An MCU session
+    // holds no router graph, so it reports no weight.
+    Some(
+        actions.admin_session(
+            actions
+                .peer_zid()
+                .map(|zid| wz_session_core::zid_hex::zid_to_zenoh_hex(&zid))
+                .unwrap_or_default(),
+            actions
+                .peer_whatami_wire()
+                .and_then(wz_session_core::WhatAmI::from_wire)
+                .map(|role| alloc::string::String::from(role.to_str())),
+            None,
+        ),
+    )
 }
 
 /// Dials UDP endpoints as initiator sessions on the firmware's task set.

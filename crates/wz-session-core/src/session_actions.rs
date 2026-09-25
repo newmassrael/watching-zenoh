@@ -4084,6 +4084,46 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         )
     }
 
+    /// R2860 — this session as one unicast `sessions[]` row, upstream's
+    /// `transport_unicast_to_json`
+    /// (`zenoh/src/net/runtime/adminspace.rs` @ `let transport_unicast_to_json = move |transport: &TransportUnicast| {`).
+    ///
+    /// The host supplies what only the host knows: which zid and role it files
+    /// the peer under (a Session reads the handshake's, a forwarder the routing
+    /// zid it keyed the face by) and the link weight, which only a router graph
+    /// holds. Everything upstream reads off the TRANSPORT itself — `links`,
+    /// `shm`, `region` — is read here, off this session.
+    ///
+    /// ⚠ WHY THE TRANSPORT HALF IS NOT A HOST'S TO SPELL. Four hosts used to
+    /// build this row as a struct literal, and `shm` in particular was written
+    /// four times. Replacing one host's `is_shm()` with a constant `false`
+    /// compiled and passed that host's tests, because no fixture negotiated SHM
+    /// through a forwarder — the one witness was the Session host's own. With
+    /// the value read here, a host cannot report a different `shm` from the
+    /// session's negotiation, and the witness that pins this method pins every
+    /// host that calls it.
+    #[cfg(feature = "adminspace-core")]
+    pub fn admin_session(
+        &self,
+        peer_zid_hex: alloc::string::String,
+        whatami: Option<alloc::string::String>,
+        weight: Option<crate::adminspace::AdminLinkWeight>,
+    ) -> crate::adminspace::AdminSession {
+        crate::adminspace::AdminSession {
+            peer_zid_hex,
+            whatami,
+            links: self.admin_links(),
+            // The pin binds `false` without `shared-memory`; a build without
+            // `transport-shm` has no negotiation to read and says the same.
+            #[cfg(feature = "transport-shm")]
+            shm: self.is_shm(),
+            #[cfg(not(feature = "transport-shm"))]
+            shm: false,
+            weight,
+            region: Some(self.admin_region()),
+        }
+    }
+
     /// R2539 — admit the peer's region identity off an Init's ext chain.
     ///
     /// `false` means the entry was THERE and its value is not a region name,

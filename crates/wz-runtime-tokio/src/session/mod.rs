@@ -415,6 +415,14 @@ use crate::session_glue::{ConsolidationMode, QueryTarget};
     feature = "adminspace-core"
 ))]
 mod admin_declarations;
+/// R2860 — the Session-hosted adminspace handle (queryable + config-write
+/// subscriber) and the library's one config-write handler.
+#[cfg(feature = "transport-unicast")]
+mod admin_space;
+#[cfg(all(feature = "transport-unicast", feature = "adminspace-write"))]
+pub use admin_space::apply_admin_config_write;
+#[cfg(feature = "transport-unicast")]
+pub use admin_space::{AdminSpace, AdminSpaceError};
 /// R2703 — buffered subscriptions, whose delivery can apply backpressure
 /// instead of dropping. See the module docs for why the waiting happens at a
 /// loop-awaited drain rather than in the callback.
@@ -4195,16 +4203,25 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
     /// handlers, and the per-link `{src,dst}` detail are SEPARATE §5.23 catalog
     /// atoms layered on this core.
     ///
-    /// Returns the [`Queryable`] handle; dropping it undeclares the admin
-    /// queryable (RAII). Without the `adminspace-core` feature this is a
-    /// signature-stable `Err(QueryableError::FeatureDisabled)`.
+    /// R2860 — and, like upstream's `AdminSpace::start`, it ALSO declares the
+    /// config-write subscriber on `@/<zid>/<whatami>/config/**` (under
+    /// `adminspace-write`, the feature that decides whether a node has a write
+    /// surface). Both answer from, and write into, ONE live config seeded from
+    /// this session's handshake params, so a permitted remote PUT is what the
+    /// next GET reports. See [`AdminSpace`].
+    ///
+    /// Returns the [`AdminSpace`] handle; dropping it undeclares both (RAII).
+    /// Without the `adminspace-core` feature this is a signature-stable
+    /// `Err(AdminSpaceError::Queryable(QueryableError::FeatureDisabled))`.
     pub fn declare_adminspace(
         &self,
         version: impl Into<String>,
         locators: Vec<String>,
-    ) -> Result<Queryable<R, T>, QueryableError>
+    ) -> Result<AdminSpace<R, T>, AdminSpaceError>
     where
         SessionLinkActions<R, T>: Send + Sync + 'static,
+        <R as SessionRuntime>::LinkSink: Send + Sync,
+        T: 'static,
     {
         #[cfg(feature = "adminspace-core")]
         {
@@ -4218,7 +4235,7 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
         #[cfg(not(feature = "adminspace-core"))]
         {
             let _ = (version, locators);
-            Err(QueryableError::FeatureDisabled)
+            Err(AdminSpaceError::Queryable(QueryableError::FeatureDisabled))
         }
     }
 
@@ -4233,26 +4250,93 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
     /// default. This method exists only under `adminspace-core` (its parameter
     /// type does), so it carries no `FeatureDisabled` arm.
     ///
-    /// The permissions are FIXED for this queryable's life. zenoh's gate is live —
-    /// it re-reads `conf.adminspace.permissions()` from the runtime config on every
-    /// request (`net/runtime/adminspace.rs:456-457`), so a runtime config change
-    /// flips it — and the wz analogue of that is
-    /// [`Self::declare_adminspace_with_permissions_source`], which this method
-    /// delegates to with a CONSTANT source. Use this one when the permits are a
-    /// deploy-time decision; use the source form when something can change them.
+    /// R2860 — `permissions` SEEDS the live config rather than being captured.
+    /// zenoh's gate is live — it re-reads `conf.adminspace.permissions()` from the
+    /// runtime config on every request (`net/runtime/adminspace.rs:456-457`) — and
+    /// the config it reads is the one its own `config/**` subscriber writes, so a
+    /// permitted PUT to `adminspace/permissions/read` flips the gate for the next
+    /// GET. This method now holds that same pair: one [`WzConfig`](crate::config::WzConfig)
+    /// seeded from the handshake params and `permissions`, read per GET, written
+    /// per PUT. Until R2860 it captured a constant, which was right only while
+    /// nothing could write the config.
     #[cfg(feature = "adminspace-core")]
     pub fn declare_adminspace_with_permissions(
         &self,
         version: impl Into<String>,
         locators: Vec<String>,
         permissions: wz_session_core::adminspace::AdminSpacePermissions,
-    ) -> Result<Queryable<R, T>, QueryableError>
+    ) -> Result<AdminSpace<R, T>, AdminSpaceError>
     where
         SessionLinkActions<R, T>: Send + Sync + 'static,
+        <R as SessionRuntime>::LinkSink: Send + Sync,
+        T: 'static,
     {
-        // A constant source — the degenerate case of the live one, not a second
-        // implementation of the gate (`AdminSpacePermissions` is `Copy`).
-        self.declare_adminspace_with_permissions_source(version, locators, move || permissions)
+        let config = Arc::new(std::sync::Mutex::new(
+            crate::config::WzConfig::from_init_params(&self.actions().params)
+                .with_admin_permissions(permissions),
+        ));
+        let get_config = Arc::clone(&config);
+        let queryable = self
+            .declare_adminspace_viewing(version, locators, move || {
+                admin_space::AdminConfigView::of(&get_config)
+            })
+            .map_err(AdminSpaceError::Queryable)?;
+        // ⚠ AFTER the queryable, and `?` drops it on refusal: a node must not be
+        // left answering GETs about a config nothing can write when the caller
+        // asked for both halves.
+        #[cfg(feature = "adminspace-write")]
+        let config_writer = self
+            .declare_adminspace_config_writer(Arc::clone(&config), |intent| {
+                // A Session holds no storage manager, ACL stack or plugin, so an
+                // intent that needs one is decoded and not applied — said by
+                // name, never dropped silently.
+                log::warn!(
+                    "adminspace config-write: intent {intent:?} decoded, but a Session-hosted \
+                     adminspace holds nothing that applies it; ignored"
+                )
+            })
+            .map_err(AdminSpaceError::ConfigWriter)?;
+        Ok(AdminSpace::new(
+            queryable,
+            #[cfg(feature = "adminspace-write")]
+            config_writer,
+            config,
+        ))
+    }
+
+    /// R2860 (§5.23 `adminspace-core` / `adminspace-write`) — declare this
+    /// node's config-write subscriber on `@/<zid>/<whatami>/config/**`, the
+    /// second declaration upstream's `AdminSpace::start` makes
+    /// (`zenoh/src/net/runtime/adminspace.rs` @ `wire_expr: [&root_key, "/config/**"].concat().into(),`),
+    /// applying each sample to `config` through
+    /// [`apply_admin_config_write`]: the write permit read off `config` per PUT,
+    /// config keys written into it, and every intent the library cannot apply
+    /// handed to `on_intent`.
+    ///
+    /// [`Self::declare_adminspace`] calls this for a Session with nothing else
+    /// to apply. A host that owns more — a storage manager, a plugin — calls it
+    /// with the SAME `config` its queryable reads, and applies what arrives at
+    /// `on_intent`.
+    #[cfg(feature = "adminspace-write")]
+    pub fn declare_adminspace_config_writer(
+        &self,
+        config: Arc<std::sync::Mutex<crate::config::WzConfig>>,
+        mut on_intent: impl FnMut(wz_session_core::adminspace::AdminConfigWrite) + Send + 'static,
+    ) -> Result<Subscriber<R>, SubscribeError>
+    where
+        SessionLinkActions<R, T>: Send + Sync + 'static,
+        <R as SessionRuntime>::LinkSink: Send + Sync,
+        T: 'static,
+    {
+        let zid_hex = wz_session_core::zid_hex::zid_to_zenoh_hex(&self.actions().params.zid);
+        let space = wz_session_core::adminspace::AdminConfigWriteSpace::new(
+            &zid_hex,
+            self.actions().params.whatami.to_str(),
+        );
+        let key = String::from(space.subscription_pattern());
+        self.declare_subscriber(key, SubscribeOptions::default(), move |sample| {
+            apply_admin_config_write(&space, &config, sample, &mut on_intent)
+        })
     }
 
     /// §5.23 `adminspace-read` / `adminspace-write` — the LIVE-permit form of
@@ -4276,6 +4360,14 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
     /// (`adminspace.rs:458-461`) — reported here by
     /// [`AdminAnswerOutcome`](wz_session_core::adminspace::AdminAnswerOutcome)
     /// rather than logged by the `no_std` answerer.
+    ///
+    /// R2860 — QUERYABLE ONLY, and that is the point of this form rather than a
+    /// gap in it: the permit comes from a source the CALLER owns and the config
+    /// leg is frozen at declare time, so there is no config here for a
+    /// `config/**` write to land in. A caller that wants the pair upstream
+    /// declares uses [`Self::declare_adminspace`]; one that owns its config
+    /// declares the writer itself with [`Self::declare_adminspace_config_writer`]
+    /// over that config.
     #[cfg(feature = "adminspace-core")]
     pub fn declare_adminspace_with_permissions_source(
         &self,
@@ -4286,12 +4378,6 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
     where
         SessionLinkActions<R, T>: Send + Sync + 'static,
     {
-        // R2645 — now a thin wrapper over the live-input seam, and deliberately so:
-        // one implementation answers, and this signature keeps the shape a session
-        // with FIXED inputs wants. The two frozen values are computed exactly where
-        // they were before — the config mirror once at declare time, the compiled
-        // registry from the version — so a caller of this method sees what it saw.
-        let version: String = version.into();
         // R311y40/y45 — the typed WzConfig read-at-open mirror, serialized once at
         // declare time (the handshake params are fixed for the session's life).
         let mirror = crate::config::WzConfig::from_init_params(&self.actions().params);
@@ -4300,8 +4386,34 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
         // two fields of one reply cannot come from two sources. A session opened
         // from handshake params has no config document, so this is `null` — the
         // honest answer, and the value upstream serves for a config that sets no
-        // `metadata`. A host that has a document uses the live-input seam below.
+        // `metadata`.
         let metadata_json = String::from(mirror.admin_metadata_json());
+        self.declare_adminspace_viewing(version, locators, move || admin_space::AdminConfigView {
+            permissions: permissions(),
+            config_json: config_json.clone(),
+            metadata_json: metadata_json.clone(),
+        })
+    }
+
+    /// R2860 — the ONE implementation both fixed-input forms answer through:
+    /// everything a Session-hosted GET reads that is not the caller's to choose
+    /// (the compiled plugin registry, the one-session stats registry), plus a
+    /// `view` of the config for what is.
+    ///
+    /// ⚠ `view` is called ONCE per GET, so the permit and the config a reply
+    /// reports come from the same moment — the rule
+    /// [`Self::declare_adminspace_with_live_inputs`] states for its own source.
+    #[cfg(feature = "adminspace-core")]
+    fn declare_adminspace_viewing(
+        &self,
+        version: impl Into<String>,
+        locators: Vec<String>,
+        view: impl Fn() -> admin_space::AdminConfigView + Send + 'static,
+    ) -> Result<Queryable<R, T>, QueryableError>
+    where
+        SessionLinkActions<R, T>: Send + Sync + 'static,
+    {
+        let version: String = version.into();
         // R311y237 — the node's compiled-in plugin registry (the wz-native
         // subsystem set this binary carries; `Loaded` state). Empty vec without
         // the feature so the answerer's `plugins` param is signature-stable.
@@ -4318,8 +4430,9 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
         #[cfg(feature = "transport-stats")]
         let stats_version = version.clone();
         self.declare_adminspace_with_live_inputs(version, locators, move || {
+            let config = view();
             wz_session_core::adminspace::AdminLiveInputs {
-                permissions: permissions(),
+                permissions: config.permissions,
                 // R2843 — the one-session host's registry: this node and its one
                 // transport, read per GET so a scrape reflects the traffic up to
                 // the moment it was served.
@@ -4327,13 +4440,11 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
                 stats: Some(stats_actions.session_stats_registry(&stats_version)),
                 #[cfg(not(feature = "transport-stats"))]
                 stats: None,
-                // ⚠ CLONED per GET where the old shape borrowed a captured value.
-                // Behaviourally identical — the same bytes, frozen at the same
-                // moment — and the cost is one `String` clone on a path that
-                // already allocates its reply. A borrow cannot cross a `Fn()`.
+                // ⚠ CLONED per GET: a borrow cannot cross a `Fn()`, and the cost
+                // is one vector clone on a path that already allocates its reply.
                 plugins: plugins.clone(),
-                config_json: config_json.clone(),
-                metadata_json: metadata_json.clone(),
+                config_json: config.config_json,
+                metadata_json: config.metadata_json,
             }
         })
     }
@@ -4369,7 +4480,6 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
         use wz_codecs::whatami::WhatAmI;
         use wz_session_core::adminspace::{
             admin_queryable_key, answer_admin_query, AdminAnswerCtx, AdminAnswerOutcome,
-            AdminSession,
         };
         use wz_session_core::zid_hex::zid_to_zenoh_hex;
 
@@ -4419,34 +4529,20 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
                     .peer_whatami_wire()
                     .and_then(WhatAmI::from_wire)
                     .map(|w| String::from(w.to_str()));
-                sessions.push(AdminSession {
-                    peer_zid_hex: zid_to_zenoh_hex(&peer),
-                    whatami: peer_whatami,
-                    // R311y473 — the session's REAL links, resolved live per query
-                    // off the same captured bundle the peer zid comes from. This
-                    // was a hard-coded `Vec::new()`, which is why R311y472 had to
-                    // read a multilink session's link count off ZENOH'S adminspace:
-                    // wz's own could not answer. An aggregating session reports one
-                    // entry per physical link here.
-                    links: actions.admin_links(),
-                    // R2415 (items 675/678) — the pin reports `shm` per transport
-                    // and wz already negotiates it; it simply was not surfaced. The
-                    // value is gated because `is_shm()` only exists under
-                    // `transport-shm`; a build without it reports `false`, which is
-                    // the same thing upstream binds when its own feature is off.
-                    #[cfg(feature = "transport-shm")]
-                    shm: actions.is_shm(),
-                    #[cfg(not(feature = "transport-shm"))]
-                    shm: false,
+                // R311y473 / R2415 / R2858 / R2860 — the session's REAL links
+                // (one entry per physical link of an aggregating session), its
+                // negotiated `shm` and its `region`, all resolved live per query
+                // off the same captured bundle the peer zid comes from, inside
+                // the one row constructor every admin host shares.
+                sessions.push(actions.admin_session(
+                    zid_to_zenoh_hex(&peer),
+                    peer_whatami,
                     // R2637 — `None` on the Session-hosted path for the same reason
                     // the forwarder-hosted peer reports none: a link weight is a
                     // ROUTER-tier graph value, and a Session holds no such graph.
                     // Reporting none is the answer, not a gap.
-                    weight: None,
-                    // R2858 — off the session's own modes and the peer's
-                    // announced bound, the one computation every host shares.
-                    region: Some(actions.admin_region()),
-                });
+                    None,
+                ));
             }
             // The match+reply SSOT (root local_data / metrics / config + the read
             // gate) — the SAME answerer the §5.23 routing-peer forwarder host calls

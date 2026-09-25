@@ -747,32 +747,27 @@ impl RouterSessionsView {
             .values()
             .map(|face| {
                 let zid = peer_zid_routing(&face.actions);
-                wz_session_core::adminspace::AdminSession {
-                    peer_zid_hex: zid
-                        .map(|z| wz_session_core::zid_hex::zid_to_zenoh_hex(z.as_slice()))
+                // R2860 — `links`, `shm` and `region` are the face's own, read by
+                // `admin_session`; the router supplies the identity it filed the
+                // face under and the one value only its graph holds.
+                face.actions.admin_session(
+                    zid.map(|z| wz_session_core::zid_hex::zid_to_zenoh_hex(z.as_slice()))
                         .unwrap_or_default(),
-                    whatami: Some(String::from(peer_whatami_routing(&face.actions).to_str())),
-                    links: face.actions.admin_links(),
-                    #[cfg(feature = "transport-shm")]
-                    shm: face.actions.is_shm(),
-                    #[cfg(not(feature = "transport-shm"))]
-                    shm: false,
+                    Some(String::from(peer_whatami_routing(&face.actions).to_str())),
                     // A face whose zid is absent from the ROUTERS-tier map reports
                     // `None`, and that covers three real cases with one rule: a
                     // Peer/Client-tier face, a Router face that has not
                     // reciprocated yet, and a face whose routing zid never
                     // surfaced. Upstream answers the same way — a transport absent
                     // from its `links_info` renders `null`.
-                    weight: zid.and_then(|z| weights.get(&z)).map(|i| {
+                    zid.and_then(|z| weights.get(&z)).map(|i| {
                         wz_session_core::adminspace::AdminLinkWeight {
                             actual_weight: i.actual_weight,
                             dst_weight: i.dst_weight,
                             src_weight: i.src_weight,
                         }
                     }),
-                    // R2858 — per face, as the forwarder host reads it.
-                    region: Some(face.actions.admin_region()),
-                }
+                )
             })
             .collect()
     }
@@ -7830,6 +7825,52 @@ mod tests {
             view.admin_sessions().len(),
             3,
             "the view is live, not a snapshot taken when it was made"
+        );
+    }
+
+    /// R2860 — the router reports each face's NEGOTIATED `shm`, per face.
+    ///
+    /// The pin reads `shm` off each transport
+    /// (`zenoh/src/net/runtime/adminspace.rs` @ `let transport_unicast_to_json = move |transport: &TransportUnicast| {`).
+    /// TWO faces with DIFFERENT answers, because a host that read one face's
+    /// value, or the host's own offer, for every row would satisfy a fixture in
+    /// which every face agreed. The `false` face is also what stops a constant
+    /// `true` from passing.
+    #[cfg(all(feature = "adminspace-core", feature = "session-extshm"))]
+    #[test]
+    fn admin_sessions_report_each_faces_negotiated_shm() {
+        use wz_session_core::zid_hex::zid_to_zenoh_hex;
+
+        let fwd = RouterForwarder::new(zid(0x01));
+        let (with_shm, _s1) = face(zid(0xAA), WIRE_ROUTER);
+        let (without_shm, _s2) = face(zid(0xBB), WIRE_PEER);
+        // The capability the establishment FSM leaves on each face.
+        with_shm.set_shm_offer(true);
+        without_shm.set_shm_offer(false);
+        fwd.register(FaceId(0), &with_shm);
+        fwd.register(FaceId(1), &without_shm);
+
+        let shm_of = |b: u8| {
+            let hex = zid_to_zenoh_hex(zid(b).as_slice());
+            fwd.admin_sessions()
+                .into_iter()
+                .find(|s| s.peer_zid_hex == hex)
+                .map(|s| s.shm)
+        };
+        assert_eq!(
+            shm_of(0xAA),
+            Some(true),
+            "the face that negotiated SHM says so"
+        );
+        assert_eq!(shm_of(0xBB), Some(false), "the face that did not says so");
+
+        // LIVE: the row is read per GET, so a later negotiation is what the
+        // next scrape reports.
+        with_shm.set_shm_offer(false);
+        assert_eq!(
+            shm_of(0xAA),
+            Some(false),
+            "a changed negotiation is reported"
         );
     }
 

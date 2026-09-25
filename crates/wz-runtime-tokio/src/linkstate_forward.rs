@@ -3143,28 +3143,24 @@ impl LinkstateForwarder {
         self.faces
             .borrow()
             .values()
-            .map(|face| wz_session_core::adminspace::AdminSession {
-                peer_zid_hex: peer_zid_routing(&face.actions)
-                    .map(|z| wz_session_core::zid_hex::zid_to_zenoh_hex(z.as_slice()))
-                    .unwrap_or_default(),
-                whatami: Some(String::from(peer_whatami_routing(&face.actions).to_str())),
-                links: face.actions.admin_links(),
-                // R2415 (items 675/678) — per FACE, the same way the pin reports it
-                // per transport: a mesh host holds N faces and each negotiates SHM
-                // on its own, so this is read off the face rather than off the host.
-                #[cfg(feature = "transport-shm")]
-                shm: face.actions.is_shm(),
-                #[cfg(not(feature = "transport-shm"))]
-                shm: false,
-                // R2637 — always `None` on this path, and that is an ANSWER rather
-                // than a deferral: link weights live in the ROUTER-tier graph, and
-                // this forwarder has no `routers_net` to read one from. A peer
-                // holds no weighted link, so it reports none. The router host's
-                // `RouterSessionsView` is where a real value comes from.
-                weight: None,
-                // R2858 — per FACE, like `shm`: each face has its own peer mode
-                // and its own announced bound.
-                region: Some(face.actions.admin_region()),
+            .map(|face| {
+                // R2415 / R2858 / R2860 — `links`, `shm` and `region` are read
+                // per FACE, inside `admin_session`: a mesh host holds N faces and
+                // each negotiates on its own, the way the pin reports them per
+                // transport.
+                face.actions.admin_session(
+                    peer_zid_routing(&face.actions)
+                        .map(|z| wz_session_core::zid_hex::zid_to_zenoh_hex(z.as_slice()))
+                        .unwrap_or_default(),
+                    Some(String::from(peer_whatami_routing(&face.actions).to_str())),
+                    // R2637 — always `None` on this path, and that is an ANSWER
+                    // rather than a deferral: link weights live in the ROUTER-tier
+                    // graph, and this forwarder has no `routers_net` to read one
+                    // from. A peer holds no weighted link, so it reports none. The
+                    // router host's `RouterSessionsView` is where a real value
+                    // comes from.
+                    None,
+                )
             })
             .collect()
     }
@@ -7226,6 +7222,54 @@ mod tests {
     /// zid for the `GreaterZid` tie-break to compare against the right operand.
     fn autoconnect_policy(self_zid: Zid, strategy: AutoConnectStrategy) -> AutoConnect {
         AutoConnect::new(self_zid, WhatAmIMatcher::empty().router().peer(), strategy)
+    }
+
+    /// R2860 — the forwarder host's `shm` value-tracking witness, the §5.23
+    /// residual R2415 named when Layer E12 could prove only that the field is
+    /// EMITTED here (a pico client negotiates no SHM, so every row it read was
+    /// `false`).
+    ///
+    /// Two faces with DIFFERENT answers: a host that read one face's value, or
+    /// its own offer, for every row passes a fixture in which the faces agree,
+    /// and the `false` face is what refuses a constant `true`. Upstream reads
+    /// `shm` per transport (`zenoh/src/net/runtime/adminspace.rs` @
+    /// `let transport_unicast_to_json = move |transport: &TransportUnicast| {`).
+    #[cfg(all(feature = "adminspace-core", feature = "session-extshm"))]
+    #[test]
+    fn admin_sessions_report_each_faces_negotiated_shm() {
+        use wz_session_core::zid_hex::zid_to_zenoh_hex;
+
+        let fwd = LinkstateForwarder::new(zid(0x01), WhatAmI::Peer);
+        let (with_shm, _s1) = peer_face_whatami(zid(0xAA), 0b01);
+        let (without_shm, _s2) = peer_face_whatami(zid(0xBB), 0b01);
+        // The capability the establishment FSM leaves on each face.
+        with_shm.set_shm_offer(true);
+        without_shm.set_shm_offer(false);
+        fwd.register(FaceId(0), &with_shm);
+        fwd.register(FaceId(1), &without_shm);
+
+        let shm_of = |b: u8| {
+            let hex = zid_to_zenoh_hex(zid(b).as_slice());
+            fwd.admin_sessions()
+                .into_iter()
+                .find(|s| s.peer_zid_hex == hex)
+                .map(|s| s.shm)
+        };
+        assert_eq!(
+            shm_of(0xAA),
+            Some(true),
+            "the face that negotiated SHM says so"
+        );
+        assert_eq!(shm_of(0xBB), Some(false), "the face that did not says so");
+
+        // LIVE: the row is read per GET, so a later negotiation is what the
+        // next scrape reports.
+        with_shm.set_shm_offer(false);
+        assert_eq!(
+            shm_of(0xAA),
+            Some(false),
+            "a changed negotiation is reported"
+        );
     }
 
     #[test]

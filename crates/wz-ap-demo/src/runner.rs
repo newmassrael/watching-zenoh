@@ -7920,13 +7920,11 @@ pub(crate) async fn run_storage_host(listen: &str, opts: StorageHostOpts) -> io:
     // run-mode no longer re-implements the admin answerer, it declares through
     // the library seam and hands it the live inputs.
     use wz::runtime_tokio::adminspace::{
-        admin_config_key, parse_admin_config_write, AdminConfigWrite, AdminConfigWriteBody,
-        AdminConfigWriteOutcome, AdminConfigWriteSpace,
+        admin_config_key, AdminConfigWrite, AdminConfigWriteSpace,
     };
     use wz::runtime_tokio::compiled_plugins_dyn;
     use wz::runtime_tokio::config::WzConfig;
     use wz::runtime_tokio::session_open::{accept_bound_on, bind_endpoint_with_config};
-    use wz::runtime_tokio::sink::SampleView;
     use wz::runtime_tokio::storage_manager_service::RuntimeStorageManager;
     use wz::runtime_tokio::storage_volume::MemoryVolume;
 
@@ -8476,167 +8474,34 @@ pub(crate) async fn run_storage_host(listen: &str, opts: StorageHostOpts) -> io:
         // through the queue would delay a permission change until the next
         // iteration event, and a permission that takes effect later than it was
         // granted is the frozen permit again, one seam over.
+        //
+        // R2860 — THE HANDLER IS THE LIBRARY'S NOW. This host used to hold its
+        // own copy of upstream's `send_push` (the permit read, the decode, the
+        // `admin-read` / `SetKey` / `RemoveKey` writes into `admin_cfg`, and the
+        // log line for every refusal), which is exactly the handler
+        // `Session::declare_adminspace` now declares for itself. The library's
+        // `declare_adminspace_config_writer` applies all of that to the SAME
+        // `admin_cfg` the GET reads; what reaches this closure is only what the
+        // library cannot apply — the storage intents, and a `plugins/...` key,
+        // whose validator is the task-local storage manager the dispatch
+        // closure owns.
         let sub_pending = pending.clone();
-        let sub_space = write_space.clone();
-        let sub_cfg = admin_cfg.clone();
-        let _config_write_sub: Option<Subscriber> = match session.declare_subscriber(
-            write_key.clone(),
-            SubscribeOptions::default(),
-            move |sample: &dyn SampleView| {
-                let write_permitted =
-                    wz::runtime_tokio::admin_write_permit(&admin_permissions_of(&sub_cfg));
-                match parse_admin_config_write(
-                    &sub_space,
-                    sample.keyexpr(),
-                    AdminConfigWriteBody::of_sample(sample),
-                    write_permitted,
-                    &wz::runtime_tokio::admin_write_knows_config_key,
-                ) {
-                    AdminConfigWriteOutcome::Apply(AdminConfigWrite::AdminReadPermit(read)) => {
-                        // ONE read-modify-write of the same slice both gates pull
-                        // from, so the next GET sees this and no GET can see a
-                        // half-applied pair.
-                        match sub_cfg.lock() {
-                            Ok(mut c) => {
-                                let mut permissions = c.admin_permissions();
-                                permissions.read = read;
-                                c.set_admin_permissions(permissions);
-                                log::info!(
-                                    "wz-ap-demo storage-host: adminspace read permit set to \
-                                     {read} over the wire"
-                                );
-                            }
-                            Err(_) => log::warn!(
-                                "wz-ap-demo storage-host: config-write admin-read ignored; \
-                                 the config lock is poisoned"
-                            ),
-                        }
-                    }
-                    // R2644 — the GENERIC config-key write, upstream's only admin-PUT
-                    // shape. The `admin-read` arm above is the same capability for one
-                    // key, hand-rolled; this one places any runtime-mutable key by
-                    // name. The refusal is LOGGED rather than swallowed: `set_by_key`
-                    // distinguishes a key wz never heard of, one it knowingly ignores,
-                    // and one it reads but cannot change while running, and an
-                    // operator needs to be told which.
-                    // ⚠ Gated on the feature `set_by_key` itself needs. Without it
-                    // the intent falls to the stash arm below, which LOGS it — a
-                    // build that cannot write a key says so rather than failing to
-                    // compile. The demo's combination space has no instrument
-                    // (open-debt item 374), so this is robust by construction
-                    // rather than by having enumerated the combinations.
-                    //
-                    // R2787 — EXCEPT a `plugins/...` key, which is guarded out here
-                    // and falls to the stash arm below. Its validator is the
-                    // storage manager, and the manager is task-local to the dispatch
-                    // closure (the `Volume` trait carries no `Send`), so this
-                    // `Send + 'static` handler cannot hand it in; applied here, the
-                    // write would answer `NeedsSink` on a host that HAS the plugin.
-                    #[cfg(feature = "zenoh-config")]
-                    AdminConfigWriteOutcome::Apply(AdminConfigWrite::SetKey { key, value })
-                        if !wz::runtime_tokio::config::is_plugins_key(&key) =>
-                    {
-                        match sub_cfg.lock() {
-                            Ok(mut c) => match c.set_by_key(&key, &value) {
-                                Ok(()) => log::info!(
-                                    "wz-ap-demo storage-host: config key {key} written \
-                                     over the wire"
-                                ),
-                                Err(err) => log::warn!(
-                                    "wz-ap-demo storage-host: config key {key} refused: \
-                                     {err:?}"
-                                ),
-                            },
-                            Err(_) => log::warn!(
-                                "wz-ap-demo storage-host: config key {key} ignored; the \
-                                 config lock is poisoned"
-                            ),
-                        }
-                    }
-                    // R2646 — the DELETE twin of the arm above, and deliberately
-                    // beside it: they are the two halves of upstream's ONE write
-                    // gate, and a reader who finds one must find the other. The
-                    // refusals are the same set and are logged the same way, because
-                    // `remove_by_key` answers with the same error type for the same
-                    // reasons — an operator deleting a key wz ignores needs the same
-                    // sentence as one writing it.
-                    // R2787 — and its `plugins/...` keys go to the stash for the
-                    // reason the set half gives.
-                    #[cfg(feature = "zenoh-config")]
-                    AdminConfigWriteOutcome::Apply(AdminConfigWrite::RemoveKey { key })
-                        if !wz::runtime_tokio::config::is_plugins_key(&key) =>
-                    {
-                        match sub_cfg.lock() {
-                            Ok(mut c) => match c.remove_by_key(&key) {
-                                Ok(()) => log::info!(
-                                    "wz-ap-demo storage-host: config key {key} deleted \
-                                     over the wire (restored to its schema default)"
-                                ),
-                                Err(err) => log::warn!(
-                                    "wz-ap-demo storage-host: config key {key} delete \
-                                     refused: {err:?}"
-                                ),
-                            },
-                            Err(_) => log::warn!(
-                                "wz-ap-demo storage-host: config key {key} delete \
-                                 ignored; the config lock is poisoned"
-                            ),
-                        }
-                    }
-                    AdminConfigWriteOutcome::Apply(intent) => {
-                        log::info!(
-                            "wz-ap-demo storage-host: config-write intent stashed: {intent:?}"
-                        );
-                        sub_pending
-                            .lock()
-                            .expect("storage-host pending mutex poisoned")
-                            .push(intent);
-                    }
-                    // R2374 — REACHABLE now, and reported the way zenoh reports it
-                    // (`adminspace.rs:397` logs an error on a denied write). Before
-                    // the permit was wired this arm could not be taken.
-                    AdminConfigWriteOutcome::Denied => log::error!(
-                        "wz-ap-demo storage-host: config-write on {} DENIED \
-                         (adminspace.permissions.write is false)",
-                        sample.keyexpr()
-                    ),
-                    AdminConfigWriteOutcome::Malformed => log::warn!(
-                        "wz-ap-demo storage-host: config-write malformed payload; ignored"
-                    ),
-                    AdminConfigWriteOutcome::UnknownKey(k) => log::warn!(
-                        "wz-ap-demo storage-host: config-write unknown key '{k}'; ignored"
-                    ),
-                    // R2646 — a DELETE of an action-named sub-key. Kept apart from
-                    // UnknownKey above: the node HAS this sub-key, and what it lacks
-                    // is a meaning for deleting it.
-                    AdminConfigWriteOutcome::NotDeletable(k) => log::warn!(
-                        "wz-ap-demo storage-host: config-write DELETE of '{k}' has no meaning \
-                         (it names an action, not a config key); ignored"
-                    ),
-                    // R2660 — the ENCODING is refused, not the value.
-                    AdminConfigWriteOutcome::NotUtf8 => log::error!(
-                        "wz-ap-demo storage-host: config-write payload is not utf8; ignored {}",
-                        sample.keyexpr()
-                    ),
-                    // R2661 — aimed at this space, but with a `**` where the
-                    // format writes a one-chunk slot; reported, never dropped.
-                    AdminConfigWriteOutcome::AmbiguousSpaceAddress => log::error!(
-                        "wz-ap-demo storage-host: config-write key addresses a SET of config \
-                         spaces (`**` in the zid or whatami chunk); ignored {}",
-                        sample.keyexpr()
-                    ),
-                    AdminConfigWriteOutcome::NotAWrite => {}
+        let _config_write_sub: Option<Subscriber> =
+            match session.declare_adminspace_config_writer(admin_cfg.clone(), move |intent| {
+                log::info!("wz-ap-demo storage-host: config-write intent stashed: {intent:?}");
+                sub_pending
+                    .lock()
+                    .expect("storage-host pending mutex poisoned")
+                    .push(intent);
+            }) {
+                Ok(s) => Some(s),
+                Err(e) => {
+                    log::warn!(
+                        "wz-ap-demo storage-host: config-write subscriber declare rejected: {e}"
+                    );
+                    None
                 }
-            },
-        ) {
-            Ok(s) => Some(s),
-            Err(e) => {
-                log::warn!(
-                    "wz-ap-demo storage-host: config-write subscriber declare rejected: {e}"
-                );
-                None
-            }
-        };
+            };
 
         // ── R311y496: rebind every hosted storage onto THIS client's session ──
         // A storage's stored data belongs to the storage; its capture subscriber

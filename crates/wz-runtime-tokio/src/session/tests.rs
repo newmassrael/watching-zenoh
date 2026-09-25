@@ -2759,6 +2759,101 @@ fn declare_adminspace_reports_the_negotiated_shm_flag() {
     );
 }
 
+/// R2860 — `declare_adminspace` declares upstream's SECOND admin declaration,
+/// the `config/**` subscriber, and a permitted PUT lands in the config the
+/// next GET answers from.
+///
+/// The pin's `AdminSpace::start` declares the root queryable AND
+/// `[&root_key, "/config/**"]` (`zenoh/src/net/runtime/adminspace.rs` @
+/// `wire_expr: [&root_key, "/config/**"].concat().into(),`), and its push
+/// handler inserts the value into the runtime config its GET handler reads.
+/// `metadata` is the probe because it is a PULL key the GET serves verbatim,
+/// so the reply itself says whether the write arrived.
+///
+/// TWO sessions, one granted and one on the default permit, because a
+/// subscriber that applied every write would satisfy the granted half alone:
+/// the default session is upstream's `PermissionsConf` (`write: false`) and
+/// must be left as it was.
+#[cfg(all(
+    feature = "query-get",
+    feature = "query-queryable",
+    feature = "adminspace-write",
+    feature = "zenoh-config",
+    feature = "pubsub-allow-loop"
+))]
+#[test]
+fn declare_adminspace_applies_a_permitted_config_write_to_what_it_serves() {
+    use wz_session_core::adminspace::AdminSpacePermissions;
+    use wz_session_core::zid_hex::zid_to_zenoh_hex;
+
+    // Write `metadata` over this session's own config-write keyexpr, then
+    // return the root GET's reply.
+    let write_then_get = |session: &TokioSession| -> String {
+        let zid_hex = zid_to_zenoh_hex(&session.actions().params.zid);
+        let whatami = session.actions().params.whatami.to_str();
+        let root = format!("@/{zid_hex}/{whatami}");
+        let publisher = session.declare_publisher(
+            format!("{root}/config/metadata"),
+            PublishOptions::put().with_locality(Locality::SessionLocal),
+        );
+        assert_eq!(
+            publisher.put(br#"{"name":"wz-r2860"}"#).unwrap(),
+            1,
+            "exactly one local subscriber — the adminspace's config writer — takes the PUT"
+        );
+        let payload = Arc::new(Mutex::new(Option::<Vec<u8>>::None));
+        let p = payload.clone();
+        session
+            .query(
+                &root,
+                QueryOptions::get().with_allowed_destination(Locality::SessionLocal),
+                move |reply| {
+                    *p.lock().unwrap() = Some(reply.payload().to_vec());
+                },
+                |_| {},
+            )
+            .expect("query-get ON in this build");
+        let got = payload.lock().unwrap().clone().expect("local_data replied");
+        String::from_utf8(got).unwrap()
+    };
+
+    let (granted, _d1) = build_session();
+    let granted_admin = granted
+        .declare_adminspace_with_permissions(
+            "0.9.9",
+            Vec::new(),
+            AdminSpacePermissions {
+                read: true,
+                write: true,
+            },
+        )
+        .expect("adminspace-core ON in this build");
+    let got = write_then_get(&granted);
+    assert!(
+        got.contains(r#""metadata":{"name":"wz-r2860"}"#),
+        "a permitted write lands in the config the GET serves\n{got}"
+    );
+    assert!(
+        granted_admin
+            .config()
+            .lock()
+            .unwrap()
+            .admin_metadata_json()
+            .contains("wz-r2860"),
+        "and it is the handle's own config that holds it"
+    );
+
+    let (defaulted, _d2) = build_session();
+    let _defaulted_admin = defaulted
+        .declare_adminspace("0.9.9", Vec::new())
+        .expect("adminspace-core ON in this build");
+    let got = write_then_get(&defaulted);
+    assert!(
+        got.contains(r#""metadata":null"#),
+        "upstream's default permit refuses the write, so nothing lands\n{got}"
+    );
+}
+
 #[cfg(all(
     feature = "query-get",
     feature = "query-queryable",
