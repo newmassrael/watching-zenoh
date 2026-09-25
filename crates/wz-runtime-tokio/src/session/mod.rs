@@ -4443,6 +4443,9 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
                     // ROUTER-tier graph value, and a Session holds no such graph.
                     // Reporting none is the answer, not a gap.
                     weight: None,
+                    // R2858 — off the session's own modes and the peer's
+                    // announced bound, the one computation every host shares.
+                    region: Some(actions.admin_region()),
                 });
             }
             // The match+reply SSOT (root local_data / metrics / config + the read

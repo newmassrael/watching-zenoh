@@ -3162,6 +3162,9 @@ impl LinkstateForwarder {
                 // holds no weighted link, so it reports none. The router host's
                 // `RouterSessionsView` is where a real value comes from.
                 weight: None,
+                // R2858 — per FACE, like `shm`: each face has its own peer mode
+                // and its own announced bound.
+                region: Some(face.actions.admin_region()),
             })
             .collect()
     }

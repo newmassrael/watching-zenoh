@@ -913,6 +913,12 @@ pub struct SessionCore<R: SessionRuntime, T: TimeSource> {
     /// distinguish them — its state field starts `None` and a peer without a
     /// region leaves it `None`.
     pub peer_region: R::Mutex<Option<crate::extregion::RegionName>>,
+    /// R2858 — the bound the PEER announced for us on its Open (zenoh
+    /// `RecvOpenSynOut::other_bound` / `RecvOpenAckOut::other_bound`, which the
+    /// transport keeps as `get_bound()`). `None` when it announced none, which
+    /// is what every peer on the default gateway preset does. Written by every
+    /// admitted Open, so a reconnect cannot inherit the last session's value.
+    pub peer_remote_bound: R::Mutex<Option<crate::extbound::Bound>>,
     /// transport-qos (R311y215) — the negotiated QoS-transport capability for
     /// THIS session (zenoh `TransportConfigUnicast::is_qos`). Seeded with the
     /// local offer ([`Self::set_qos_offer`]) at bring-up, then ANDed with the
@@ -1889,6 +1895,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                 negotiated_patch: R::new_mutex(None::<u8>),
                 local_region: R::new_mutex(None::<crate::extregion::RegionName>),
                 peer_region: R::new_mutex(None::<crate::extregion::RegionName>),
+                peer_remote_bound: R::new_mutex(None::<crate::extbound::Bound>),
                 // transport-qos — false until the AP layer offers it
                 // (`set_qos_offer`) and the peer's Init ext_qos offer is ANDed in.
                 #[cfg(feature = "transport-qos")]
@@ -4040,6 +4047,41 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                 (None, None) => {}
             }
         });
+    }
+
+    /// R2858 — admit the peer's `0x7` REMOTE-BOUND off an admitted Open, and
+    /// answer `false` for a present-but-invalid value, which must refuse the
+    /// handshake: upstream's two receive arms `?` the `Bound::try_from` error
+    /// out with `close::reason::GENERIC`
+    /// (`io/zenoh-transport/src/unicast/establishment/accept.rs`
+    /// @ `other_bound: match open_syn.ext_remote_bound {`). A refused value
+    /// leaves the slot untouched.
+    pub fn admit_peer_remote_bound(&self, extensions: &[ExtEntryOwned]) -> bool {
+        match crate::extbound::peer_remote_bound(extensions) {
+            Ok(bound) => {
+                R::with_mutex_mut(&self.peer_remote_bound, |s| *s = bound);
+                true
+            }
+            Err(_) => false,
+        }
+    }
+
+    /// R2858 — the bound the peer announced on its Open, `None` for none.
+    pub fn peer_remote_bound(&self) -> Option<crate::extbound::Bound> {
+        R::with_mutex_mut(&self.peer_remote_bound, |s| *s)
+    }
+
+    /// R2858 — this session's `sessions[].region`, as upstream's `local_data`
+    /// writes it: this node's mode, the peer's, and the bound the peer
+    /// announced, or `"unknown"` where that does not compute
+    /// ([`crate::extbound::admin_region`]). Every admin host reads it here, so
+    /// no host can compute it differently.
+    pub fn admin_region(&self) -> alloc::string::String {
+        crate::extbound::admin_region(
+            self.params.whatami,
+            self.peer_whatami_wire().and_then(crate::WhatAmI::from_wire),
+            self.peer_remote_bound(),
+        )
     }
 
     /// R2539 — admit the peer's region identity off an Init's ext chain.

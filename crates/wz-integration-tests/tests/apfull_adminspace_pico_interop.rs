@@ -476,7 +476,18 @@ fn apfull_adminspace_plane_decoded_by_a_real_pico_z_get() {
     assert!(
         core.contains(r#""shm":false,"weight":null"#),
         "the session entry carries `shm` in the alphabetical slot the pin's \
-         BTreeMap emits it in (between `peer` and `weight`)\n  got: {core}"
+         BTreeMap emits it in (between `region` and `weight`)\n  got: {core}"
+    );
+    // R2858 — the pin's per-session `region`, computed as upstream computes it
+    // for a PEER holding a CLIENT with no bound announced: `compute_auto_region`
+    // puts it in `Region::default_south(Client)` (`zenoh/src/net/runtime/region.rs`
+    // @ `(WhatAmI::Router, WhatAmI::Peer | WhatAmI::Client) | (WhatAmI::Peer, WhatAmI::Client) => {`),
+    // rendered `south:0:client`. pico sends no `RemoteBound`, so this is the auto
+    // arm; the announced-bound arms are pinned by the session-level wire test.
+    assert!(
+        core.contains(r#""region":"south:0:client","shm":false"#),
+        "the session entry carries the region a peer places a client in, in its \
+         alphabetical slot (between `peer` and `shm`)\n  got: {core}"
     );
 
     // ── adminspace-introspection-handlers — the per-entity view ─────

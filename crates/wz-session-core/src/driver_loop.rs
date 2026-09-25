@@ -180,6 +180,13 @@ pub enum DriverLoopOutcome {
     /// level.
     #[cfg(feature = "codec-init-body")]
     InitRegionRejected,
+    /// R2858 — the peer's `open::ext::RemoteBound` (`0x7` on the OPEN
+    /// carrier) was PRESENT and, after upstream's `as u8` truncation, is
+    /// neither bound. Both roles refuse it with GENERIC through
+    /// `establishment.ext_rejected`, as upstream's two receive arms do
+    /// ([`crate::extbound`]).
+    #[cfg(feature = "codec-open-body")]
+    OpenRemoteBoundRejected,
     /// session-extqos (R311y506) — the peer's `init::ext::QoSLink` body could
     /// not be reconciled with ours: its priority band is not on the required
     /// side of the containment, its reliability contradicts ours, it carried

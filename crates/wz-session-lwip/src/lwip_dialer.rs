@@ -147,6 +147,8 @@ pub fn admin_session_of<C: ClockSource + 'static>(
         links: actions.admin_links(),
         shm: false,
         weight: None,
+        // R2858 — the same computation the host runtimes use.
+        region: Some(actions.admin_region()),
     })
 }
 

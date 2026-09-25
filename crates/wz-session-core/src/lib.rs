@@ -1060,6 +1060,11 @@ pub mod extpatch;
 /// zenoh is its only reference: zenoh-pico has no region identity at all.
 pub mod extregion;
 
+/// SSOT for the `0x7` REMOTE-BOUND ext on the OPEN messages and for the region
+/// a unicast session lands in — `sessions[].region` in `local_data`. Added by
+/// the pin with its gateway plane; zenoh is its only reference.
+pub mod extbound;
+
 #[cfg(feature = "transport-lowlatency")]
 pub mod extlowlatency;
 

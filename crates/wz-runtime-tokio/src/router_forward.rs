@@ -770,6 +770,8 @@ impl RouterSessionsView {
                             src_weight: i.src_weight,
                         }
                     }),
+                    // R2858 — per face, as the forwarder host reads it.
+                    region: Some(face.actions.admin_region()),
                 }
             })
             .collect()

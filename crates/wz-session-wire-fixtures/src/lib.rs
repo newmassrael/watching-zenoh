@@ -266,6 +266,43 @@ pub fn craft_opensyn_wire(cookie: &[u8]) -> Vec<u8> {
     wire
 }
 
+/// R2858 — [`craft_initsyn_wire`] from a CLIENT (cbyte whatami wire `0x02`)
+/// rather than a peer. A peer accepting a client is the pair whose region
+/// the peer's announced bound CHANGES (auto `south:0:client`, `north` when
+/// it calls us south), which a peer-peer pair cannot show: it is `north`
+/// in every arm.
+pub fn craft_initsyn_wire_as_client() -> Vec<u8> {
+    let mut wire = craft_initsyn_wire();
+    wire[2] = 0x32; // cbyte: whatami=Client wire(0x02), zid_len=4
+    wire
+}
+
+/// R2858 — `open::ext::RemoteBound = zextz64!(0x7, false)` as a header byte
+/// on the OPEN carrier: id `0x7`, Z64 (`0x20`), M clear. The same byte as
+/// [`EXT_HDR_INIT_PATCH_ZINT`], which is the point of keeping both names:
+/// the carrier, not the byte, says which extension it is.
+pub const EXT_HDR_OPEN_REMOTE_BOUND_ZINT: u8 = 0x27;
+
+/// R2858 — [`craft_opensyn_wire`] carrying a `0x7` REMOTE-BOUND whose value
+/// is `value`, VLE-encoded so values past one byte (upstream truncates them)
+/// can be presented.
+pub fn craft_opensyn_wire_with_remote_bound(cookie: &[u8], value: u64) -> Vec<u8> {
+    let mut wire = craft_opensyn_wire(cookie);
+    wire[0] |= FLAG_T_Z;
+    wire.push(EXT_HDR_OPEN_REMOTE_BOUND_ZINT);
+    let mut v = value;
+    loop {
+        let byte = (v & 0x7f) as u8;
+        v >>= 7;
+        if v == 0 {
+            wire.push(byte);
+            break;
+        }
+        wire.push(byte | 0x80);
+    }
+    wire
+}
+
 /// `_Z_FLAG_T_OPEN_A` — OpenAck (the `A` discriminator on the OPEN MID).
 pub const FLAG_T_OPEN_A: u8 = 0x20;
 

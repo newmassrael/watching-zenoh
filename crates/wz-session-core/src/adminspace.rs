@@ -83,6 +83,14 @@ pub struct AdminSession {
     /// a matching `#[cfg]` at every construction site. Only the VALUE is gated —
     /// a host with no router graph has nothing to fill it from and says `None`.
     pub weight: Option<AdminLinkWeight>,
+    /// R2858 — the region this node places the peer in, the pin's `"region"`
+    /// (`zenoh/src/net/runtime/adminspace.rs`
+    /// @ `"region": transport_unicast_to_region(transport).map_or_else(|| "unknown".to_string(), |r| r.to_string())`).
+    /// Hosts fill it from `SessionLinkActions::admin_region`, the one place it
+    /// is computed. `None` renders `"unknown"`, which is upstream's word for a
+    /// region it could not compute — so a host that has no session state to
+    /// compute from says what upstream says.
+    pub region: Option<String>,
 }
 
 /// R2637 — a `u16` as JSON, and its optional twin. Written out rather than
@@ -556,7 +564,8 @@ impl AdminLocalData {
     /// `preserve_order` — so its `Map` is a `BTreeMap` and the emitted object keys
     /// are ALPHABETICALLY sorted, NOT `json!` source order. Key ORDER here is that
     /// order: top-level `locators, metadata, plugins, sessions, version, zid`; each
-    /// `sessions` entry `links, peer, shm, weight, whatami`; each link `dst, src`.
+    /// `sessions` entry `links, peer, region, shm, weight, whatami`; each link
+    /// `dst, src`.
     /// Manual emit (no `serde_json`) keeps the builder `alloc`-only and
     /// no_std-feasible.
     ///
@@ -572,9 +581,11 @@ impl AdminLocalData {
     /// * `shm` — CLOSED by this round. wz negotiates it already
     ///   (`SessionActions::is_shm` under `transport-shm`); it simply was not
     ///   reported. The field is now emitted, in its alphabetical position.
-    /// * `region` — upstream's own recent addition, still carrying a `FIXME(regions)`
-    ///   and recomputed per query there. wz has no analogue, so this is an honest
-    ///   ABSENCE, not a defect, and must not be written up as parity.
+    /// * `region` — CLOSED by R2858. The line above was wrong at the pin: upstream
+    ///   computes it per unicast session from this node's mode, the peer's, and
+    ///   the peer's `open::ext::RemoteBound`, writing `unknown` only where that
+    ///   fails. wz now reads that extension and computes it the same way
+    ///   ([`crate::extbound`]); every host fills it from one method.
     /// * `weight` — CLOSED by R2637. A router now fills it from its own
     ///   `links_info`, emitting the same `{actual_weight, dst_weight, src_weight}`
     ///   object the pin does, or `null` where it holds no weighted link to that
@@ -585,9 +596,9 @@ impl AdminLocalData {
     ///   `serde_json` writes it, keys sorted and numbers respelled; see
     ///   [`Self::metadata_json`].
     ///
-    /// So the honest statement is the one above — the key ORDER is upstream's, and
-    /// the field SET diverges by the ONE residual still open (`region`),
-    /// `weight` and `metadata` having closed. `admin_unspoken_fields` is where a
+    /// So the key ORDER is upstream's and, for a unicast session, so is the field
+    /// SET. Multicast peers are still absent from `sessions[]`, which is a
+    /// missing ROW rather than a missing field. `admin_unspoken_fields` is where a
     /// consumer learns which fields arrive as `null` because this build does not
     /// speak them.
     pub fn to_json(&self) -> String {
@@ -623,6 +634,10 @@ impl AdminLocalData {
             }
             out.push_str("],\"peer\":");
             push_json_str(&session.peer_zid_hex, &mut out);
+            // R2858 — `region` between `peer` and `shm`: the same BTreeMap
+            // order that places every other key here.
+            out.push_str(",\"region\":");
+            push_json_str(session.region.as_deref().unwrap_or("unknown"), &mut out);
             // R2415 — `shm` sits between `peer` and `weight` because upstream's
             // serde_json Map is a BTreeMap and emits keys ALPHABETICALLY; inserting
             // it anywhere else would be a different byte stream for the same facts.
@@ -3248,6 +3263,9 @@ mod tests {
                     dst_weight: Some(50),
                     src_weight: None,
                 }),
+                // R2858 — a computed region, so its slot between `peer` and
+                // `shm` is pinned; the sibling below pins the `unknown` word.
+                region: Some("south:0:router".to_string()),
             }],
             plugins: vec![],
             // §5.23 `adminspace-core` — a SET `metadata`, so this test pins the
@@ -3257,7 +3275,7 @@ mod tests {
         };
         // serde_json BTreeMap (alphabetical) key order at every level:
         // top locators/metadata/plugins/sessions/version/zid; session
-        // links/peer/shm/weight/whatami; link dst/src. `plugins` = `null` (feature
+        // links/peer/region/shm/weight/whatami; link dst/src. `plugins` = `null` (feature
         // off) or `{}` (feature on, no STARTED plugin).
         #[cfg(not(feature = "adminspace-plugins-handlers"))]
         let plugins_tok = "null";
@@ -3274,7 +3292,7 @@ mod tests {
                     // R2637 — the weight OBJECT, with its own keys alphabetical
                     // for the same BTreeMap reason the outer levels are, and an
                     // unadvertised end rendering `null` rather than the default.
-                    r#""peer":"c3d4","shm":true,"#,
+                    r#""peer":"c3d4","region":"south:0:router","shm":true,"#,
                     r#""weight":{{"actual_weight":300,"dst_weight":50,"src_weight":null}},"#,
                     r#""whatami":"router"}}],"#,
                     r#""version":"0.1.0","zid":"a1b2"}}"#
@@ -3299,16 +3317,18 @@ mod tests {
                 shm: false,
                 // R2637 — the `null` rendering, the twin of the `Some` above.
                 weight: None,
+                // R2858 — no region computed: upstream writes `"unknown"`.
+                region: None,
             }],
             plugins: vec![],
             metadata_json: "null".to_string(),
         };
         assert!(data.to_json().contains(r#""whatami":"unknown""#));
         // R2415 — the `false` rendering and its alphabetical slot, the pair to the
-        // `true` case pinned above. `shm` sits between `peer` and `weight`.
+        // `true` case pinned above. `shm` sits between `region` and `weight`.
         assert!(
             data.to_json()
-                .contains(r#""peer":"c3d4","shm":false,"weight":null"#),
+                .contains(r#""peer":"c3d4","region":"unknown","shm":false,"weight":null"#),
             "{}",
             data.to_json()
         );
@@ -4921,6 +4941,7 @@ mod tests {
                     dst_weight: None,
                     src_weight: None,
                 }),
+                region: Some(String::from("south:0:peer")),
             }],
             plugins: fixture_plugins(),
             // §5.23 `adminspace-core` — FILLED for `weight`'s reason: an unset

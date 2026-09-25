@@ -392,6 +392,21 @@ fn dispatch_unit<R: SessionRuntime, T: TimeSource>(
                 // read were back (they ride the cookie's head now), and on
                 // frames never admitted; and an unspent nonce let a replay of
                 // this very OpenSyn be admitted again after `Established`.
+                // R2858 — the peer's `0x7` REMOTE-BOUND, off either Open, and a
+                // present-but-invalid one REFUSED. Upstream reads it while
+                // building each Open's receive output, `?`-ing a bad value out
+                // with GENERIC (`io/zenoh-transport/src/unicast/establishment/accept.rs`
+                // @ `other_bound: match open_syn.ext_remote_bound {`), so it is
+                // an extension failure and leaves through `ext_rejected` like
+                // the region name below. Placed BEFORE the admissions so a
+                // refused Open seeds no SN and adopts no lease.
+                #[cfg(feature = "codec-open-body")]
+                if let InboundFrame::Open { extensions, .. } = &frame {
+                    if !actions.admit_peer_remote_bound(extensions) {
+                        engine.process_event(E::EstablishmentExtRejected);
+                        return DriverLoopOutcome::OpenRemoteBoundRejected;
+                    }
+                }
                 #[cfg(feature = "codec-open-body")]
                 if let InboundFrame::Open {
                     is_ack: false,
