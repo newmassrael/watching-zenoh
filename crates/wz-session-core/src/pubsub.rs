@@ -4291,8 +4291,9 @@ mod tests {
         registry.set_shm_negotiated(true);
         // No resolver installed -> the descriptor is unresolvable.
         let descriptor = crate::extshm::ShmDescriptor {
-            segment_id: 0x1234,
-            length: 4,
+            data_len: 4,
+            metadata_id: 0x12,
+            metadata_index: 0x34,
             generation: 0,
         };
         let push = crate::push_build::build_push_shm_literal(

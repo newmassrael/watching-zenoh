@@ -913,8 +913,9 @@ mod tests {
     #[test]
     fn build_push_shm_literal_carries_descriptor_and_marker() {
         let descriptor = crate::extshm::ShmDescriptor {
-            segment_id: 0x1234,
-            length: 4096,
+            data_len: 4096,
+            metadata_id: 0x12,
+            metadata_index: 0x34,
             generation: 0,
         };
         let meta = PushMetadata::default();

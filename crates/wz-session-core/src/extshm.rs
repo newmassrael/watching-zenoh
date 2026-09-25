@@ -21,12 +21,12 @@
 //! the 0x2 Put-body marker codec, and the [`ShmResolver`] trait seam. The actual
 //! POSIX segment (create / mmap / open) is `std` (mmap = libc), so it lives in
 //! `wz-runtime-tokio::shm_provider` behind this trait — the same no_std-core /
-//! AP-runtime split as the tls / quic config. SCOPED: wz collapses zenoh's
-//! `MetadataDescriptor{id:u16, index:u16}` (a slot within a watchdog metadata
-//! segment) to a single `segment_id` (one segment per payload, no pool), and the
-//! receiver copies the bytes out of the mmap into the owned Sample payload (wz's
-//! Sample is an owned `Vec`, so the wire is zero-copy but the local Sample is a
-//! single copy off the shared page — the bounded scoped characteristic).
+//! AP-runtime split as the tls / quic config. R2862 — the descriptor is
+//! upstream's four-field `ShmBufInfo`, addressing a header slot in a metadata
+//! segment rather than a data segment directly (see [`ShmDescriptor`]). The
+//! receiver still copies the bytes out of the mmap into the owned Sample payload
+//! (wz's Sample is an owned `Vec`, so the wire is zero-copy but the local Sample
+//! is a single copy off the shared page — the bounded scoped characteristic).
 //!
 //! R3a lands the codec + trait (inert: `is_shm` is always false, so nothing is
 //! emitted / resolved on the wire); the live TX swap, the RX resolver wiring, and
@@ -54,38 +54,63 @@ use wz_codecs::ext_zbuf::ExtZbufOwned;
 /// select `transport-shm`.
 pub const SHM_BODY_EXT_ID: u8 = crate::ext_header::body_ext_id::SHM;
 
-/// The scoped wz SHM descriptor: the wire stand-in for an SHM-backed payload. A
-/// `segment_id` (the POSIX shm object name the receiver re-opens), the payload
-/// `length`, and a `generation` (zenoh's buffer version; always 0 in the scoped
-/// one-segment-per-payload model — reserved for an R3b+ pool).
+/// The wire stand-in for an SHM-backed payload: upstream's `ShmBufInfo`
+/// (`commons/zenoh-shm/src/lib.rs` @ `pub struct ShmBufInfo {`).
+///
+/// R2862 — FOUR fields, as upstream writes them. Until this round wz put a
+/// single `segment_id` where upstream puts a `MetadataDescriptor{id, index}`,
+/// so its descriptor was THREE varints against upstream's four: a zenoh
+/// receiver read wz's segment id as the metadata segment id, wz's generation as
+/// the slot index, and ran out of bytes. SHM ESTABLISHMENT interoperated while
+/// the PAYLOAD could not, and the atom's "no pool / watchdog / generation"
+/// residual was downstream of that missing metadata layer.
+///
+/// * `data_len` — the payload's bytes (upstream `NonZeroUsize`, so 0 is not a
+///   descriptor);
+/// * `metadata_id` / `metadata_index` — the metadata SEGMENT and the header
+///   slot within it (`commons/zenoh-shm/src/metadata/descriptor.rs` @
+///   `pub type MetadataSegmentID = u16;`), where the chunk's data segment,
+///   offset and length actually live;
+/// * `generation` — the slot's generation when the buffer was sent; a receiver
+///   that finds another in the header refuses, because the slot was reused.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ShmDescriptor {
-    pub segment_id: u32,
-    pub length: u32,
+    pub data_len: u32,
+    pub metadata_id: u16,
+    pub metadata_index: u16,
     pub generation: u32,
 }
 
-/// Encode the descriptor as the Put payload stand-in: `VLE(length) ++
-/// VLE(segment_id) ++ VLE(generation)`, the field order mirroring zenoh's
-/// `ShmBufInfo` write (data_len first). Uses the [`crate::vle`] SSOT.
+/// Encode the descriptor as the Put payload stand-in, in upstream's field
+/// order (`commons/zenoh-codec/src/core/shm.rs` @
+/// `impl<W> WCodec<&ShmBufInfo, &mut W> for Zenoh080`): `VLE(data_len) ++
+/// VLE(metadata.id) ++ VLE(metadata.index) ++ VLE(generation)`. Uses the
+/// [`crate::vle`] SSOT, which is upstream's integer codec.
 pub fn encode_shm_descriptor(d: &ShmDescriptor) -> Vec<u8> {
     let mut out = Vec::with_capacity(12);
-    encode_vle_u64_into(&mut out, d.length as u64);
-    encode_vle_u64_into(&mut out, d.segment_id as u64);
+    encode_vle_u64_into(&mut out, d.data_len as u64);
+    encode_vle_u64_into(&mut out, d.metadata_id as u64);
+    encode_vle_u64_into(&mut out, d.metadata_index as u64);
     encode_vle_u64_into(&mut out, d.generation as u64);
     out
 }
 
 /// Decode a descriptor from a Put payload field that carried the `ext_shm`
-/// marker. `None` on truncation or a value past `u32` (a malformed peer — the
-/// caller rejects).
+/// marker. `None` on truncation, on a `data_len` of 0 (upstream reads it as a
+/// `NonZeroUsize` and refuses 0), or on a value past its field's width — a
+/// malformed peer, which the caller rejects.
 pub fn decode_shm_descriptor(bytes: &[u8]) -> Option<ShmDescriptor> {
-    let (length, n0) = read_vle_u64(bytes)?;
-    let (segment_id, n1) = read_vle_u64(bytes.get(n0..)?)?;
-    let (generation, _n2) = read_vle_u64(bytes.get(n0 + n1..)?)?;
+    let (data_len, n0) = read_vle_u64(bytes)?;
+    let (metadata_id, n1) = read_vle_u64(bytes.get(n0..)?)?;
+    let (metadata_index, n2) = read_vle_u64(bytes.get(n0 + n1..)?)?;
+    let (generation, _n3) = read_vle_u64(bytes.get(n0 + n1 + n2..)?)?;
+    if data_len == 0 {
+        return None;
+    }
     Some(ShmDescriptor {
-        segment_id: u32::try_from(segment_id).ok()?,
-        length: u32::try_from(length).ok()?,
+        data_len: u32::try_from(data_len).ok()?,
+        metadata_id: u16::try_from(metadata_id).ok()?,
+        metadata_index: u16::try_from(metadata_index).ok()?,
         generation: u32::try_from(generation).ok()?,
     })
 }
@@ -633,24 +658,28 @@ impl ShmAuthDispatch {
 mod tests {
     use super::*;
 
-    /// The descriptor round-trips across VLE 1-byte / multi-byte field widths.
+    /// The descriptor round-trips across VLE 1-byte / multi-byte field widths,
+    /// including each field at the top of its width.
     #[test]
     fn descriptor_round_trips() {
         for d in [
             ShmDescriptor {
-                segment_id: 0,
-                length: 0,
+                data_len: 1,
+                metadata_id: 0,
+                metadata_index: 0,
                 generation: 0,
             },
             ShmDescriptor {
-                segment_id: 7,
-                length: 63,
+                data_len: 63,
+                metadata_id: 7,
+                metadata_index: 200,
                 generation: 1,
             },
             ShmDescriptor {
-                segment_id: 0xDEAD_BEEF,
-                length: 1 << 20,
-                generation: 0,
+                data_len: 1 << 20,
+                metadata_id: u16::MAX,
+                metadata_index: u16::MAX,
+                generation: u32::MAX,
             },
         ] {
             let wire = encode_shm_descriptor(&d);
@@ -658,16 +687,49 @@ mod tests {
         }
     }
 
+    /// R2862 — the BYTES upstream's `ShmBufInfo` codec writes: four varints in
+    /// the order data_len, metadata id, metadata index, generation. Asserted
+    /// as bytes, with values chosen so no two fields are equal, because a
+    /// round-trip alone passes a codec that swaps two fields on both sides.
+    #[test]
+    fn descriptor_bytes_are_upstreams_four_varints_in_order() {
+        let wire = encode_shm_descriptor(&ShmDescriptor {
+            data_len: 300,
+            metadata_id: 5,
+            metadata_index: 9,
+            generation: 2,
+        });
+        // 300 = 0xAC 0x02 in LEB128; the rest are one byte each.
+        assert_eq!(wire, [0xAC, 0x02, 0x05, 0x09, 0x02]);
+    }
+
     /// A truncated descriptor decodes to `None` (no panic) — the malformed-peer
-    /// guard.
+    /// guard — and so does the THREE-varint form wz used to send, which is
+    /// what a zenoh receiver would have been handed.
     #[test]
     fn truncated_descriptor_is_rejected() {
         let wire = encode_shm_descriptor(&ShmDescriptor {
-            segment_id: 0xABCD,
-            length: 4096,
+            data_len: 4096,
+            metadata_id: 0xAB,
+            metadata_index: 0xCD,
             generation: 0,
         });
         assert_eq!(decode_shm_descriptor(&wire[..1]), None);
+        assert_eq!(decode_shm_descriptor(&wire[..wire.len() - 1]), None);
+    }
+
+    /// Upstream reads `data_len` as a `NonZeroUsize`, so a 0 is refused rather
+    /// than decoded as an empty payload; and a metadata id or index past `u16`
+    /// is refused rather than truncated onto another slot.
+    #[test]
+    fn a_zero_length_or_an_oversized_slot_is_refused() {
+        assert_eq!(decode_shm_descriptor(&[0x00, 0x01, 0x01, 0x00]), None);
+        let mut too_wide = Vec::new();
+        encode_vle_u64_into(&mut too_wide, 4);
+        encode_vle_u64_into(&mut too_wide, 1 << 16);
+        encode_vle_u64_into(&mut too_wide, 0);
+        encode_vle_u64_into(&mut too_wide, 0);
+        assert_eq!(decode_shm_descriptor(&too_wide), None);
     }
 
     /// The marker header byte is `0x02 | 0x10` (UNIT enc | id 0x02 | MANDATORY) —

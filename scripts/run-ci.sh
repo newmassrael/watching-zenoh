@@ -6259,7 +6259,9 @@ layer_c1af_cargo_test_shm() {
     # third: any test this crate gains with "establishment" in its name lands in
     # this leg. The count stays the MEASURED one — the guard's own refusal says
     # to move it to what the command printed, never to what the diff suggests.
-    _runci_guarded_test C1af 18 cargo test -p wz-session-core --features session-extshm,codec-push --lib shm --quiet \
+    # R2862 — 18 -> 20, MEASURED: the descriptor took upstream's four-field
+    # shape and gained its byte pin and its zero-length / oversized-slot arm.
+    _runci_guarded_test C1af 20 cargo test -p wz-session-core --features session-extshm,codec-push --lib shm --quiet \
         || return 1
     # R311y894 — the establishment SHM surface WITH THE DISSECTOR ON, which no
     # lane had. `dissect` and `session-extshm` are disjoint feature sets: the
@@ -6292,7 +6294,9 @@ layer_c1af_cargo_test_shm() {
     # the difference is the reason: that round's test was `#[cfg]`-gated to a
     # feature only one leg carried, while this one sits behind no feature gate
     # at all, so every leg whose filter matches compiles and runs it.
-    _runci_guarded_test C1af 28 cargo test -p wz-session-core --features session-extshm,dissect --lib shm --quiet \
+    # R2862 — 28 -> 30, MEASURED: the same two descriptor tests, which sit
+    # behind no gate this leg lacks.
+    _runci_guarded_test C1af 30 cargo test -p wz-session-core --features session-extshm,dissect --lib shm --quiet \
         || return 1
     # Round 2037, open-debt item 330 — THE TRANSPORT-OAM BATCH WALK, which no
     # lane in this file was running.
@@ -6325,7 +6329,11 @@ layer_c1af_cargo_test_shm() {
     # `an_oam_id_wider_than_u16_...`. `batch_walk` is what both names share.
     _runci_guarded_test C1af 2 cargo test -p wz-session-core --features dissect --lib batch_walk --quiet \
         || return 1
-    _runci_guarded_test C1af 3 cargo test -p wz-runtime-tokio --features session-extshm,transport-unicast,transport-link-tcp --lib shm_provider --quiet \
+    # R2862 — 3 -> 7. The provider follows upstream's metadata slot: the
+    # header layout pin, the descriptor-addresses-a-slot arm, the stale
+    # generation refusal and the zero-length refusal joined the three that
+    # were here (the round trip and the drop now go through the slot).
+    _runci_guarded_test C1af 7 cargo test -p wz-runtime-tokio --features session-extshm,transport-unicast,transport-link-tcp --lib shm_provider --quiet \
         || return 1
     # R311y507 — 2 -> 5. The target gained the challenge-response over a real
     # driven handshake plus the two half-mix arms (a ONE-SIDED authenticator must

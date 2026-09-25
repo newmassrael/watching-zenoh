@@ -71,14 +71,8 @@
 //! pool for it to guard, and taking a lock it never releases meaningfully would
 //! make wz's segments look invalid to a peer.
 
-use std::fs::{File, OpenOptions};
 use std::io;
-use std::os::unix::fs::OpenOptionsExt;
-use std::os::unix::io::AsRawFd;
-use std::path::PathBuf;
-use std::sync::atomic::{AtomicU32, Ordering};
 
-use memmap2::{Mmap, MmapMut, MmapOptions};
 use wz_session_core::extshm::ShmAuthenticator;
 
 /// zenoh `SHM_VERSION` (`commons/zenoh-shm/src/version.rs`, the `SHM_VERSION`
@@ -120,92 +114,18 @@ const SEGMENT_BYTES: usize = PROTOCOLS_OFFSET
     + PROTOCOL_SLOTS * core::mem::size_of::<u32>()
     + COUNTER_SLOTS * core::mem::size_of::<u32>();
 
-/// zenoh retries id allocation this many times before giving up
-/// (`posix_shm/segment.rs:22` `SEGMENT_DEDICATE_TRIES`).
-const SEGMENT_DEDICATE_TRIES: usize = 100;
+// R2862 — the id derivation (and its R2201 injectivity rationale), the object
+// NAME, the mode and the shared advisory lock moved to `crate::posix_shm`, the
+// one implementation every segment kind is made through. The payload provider's
+// metadata and data segments share this namespace, so they share its counter.
+#[cfg(test)]
+use crate::posix_shm::candidate_id;
+use crate::posix_shm::{next_candidate_id, OwnedSegment, PeerSegment};
 
-/// Per-process candidate-id source. Collisions BETWEEN PROCESSES are caught by
-/// `create_new` (`O_EXCL`) and retried, so this only needs to spread — the same
-/// discipline as `shm_provider::next_candidate_id`, and deliberately NOT
-/// `rand`, which this crate does not otherwise pull in on the SHM path.
-///
-/// ⚠ `create_new` does NOT cover a collision between two draws of THIS counter,
-/// which is why [`candidate_id`] must be injective in `c`. Retry only helps
-/// while the colliding id is still occupied; an id whose segment has just been
-/// unlinked is free, and a second draw then lands on it legitimately. R2201
-/// measured that window as a live red — see [`candidate_id`].
-static AUTH_ID_COUNTER: AtomicU32 = AtomicU32::new(1);
-
-/// The candidate id for counter value `c` in process `pid` — the whole of the
-/// derivation, as a pure function so its one load-bearing property can be
-/// asserted over a range this test picks rather than over whatever draws it
-/// happened to win from the atomic.
-///
-/// # The property, and what it cost to learn
-///
-/// INJECTIVE in `c`. Two different counter values must never produce the same
-/// id, and until R2201 they did — half the time.
-///
-/// The old form was `pid.wrapping_mul(K).wrapping_add(c) | 1`, where the `| 1`
-/// enforced "never 0" by flattening the low BIT. Writing `b = pid * K`, that
-/// makes `(b + c) | 1 == (b + c + 1) | 1` whenever `b + c` is even, so every
-/// other pair of CONSECUTIVE counter values collapsed onto one id. Measured
-/// over the first 64 draws (`c` from 1, as the counter starts): 33 distinct ids
-/// for pid 17730, 32 for pid 99999.
-///
-/// That is not absorbed by `create`'s retry loop. Retry answers "this id is
-/// TAKEN"; it says nothing about an id that was taken a microsecond ago and has
-/// since been unlinked. Two segments drawn back to back, the first dropped
-/// before the second is created, land on the SAME `/dev/shm/<id>.zenoh` — and
-/// a reader still holding the first id then reads the second segment's
-/// challenge. Layer C1bn caught exactly that, hosted, as
-/// `a_created_segment_is_reopenable_by_id_and_yields_its_challenge` reading
-/// `Some(42)` where it required `None`: `42` is the challenge of the test
-/// running beside it.
-///
-/// # Why the counter is SHIFTED rather than special-cased
-///
-/// "Never 0" is now structural instead of a correction. `c << 1` leaves bit 0
-/// free for the `| 1`, so the OR carries no information away: every id is odd,
-/// hence never 0, and distinct `c` still give distinct ids. Special-casing
-/// (`if v == 0 { 1 }`) would keep the full 2^32 range but re-introduce one
-/// collision pair — the values mapping to 0 and to 1 — and a rule with an
-/// exception is what this function is being repaired FOR.
-///
-/// The trade, stated rather than hidden: the period is 2^31 draws, not 2^32,
-/// and every id is odd. Both are irrelevant against a retry budget of
-/// [`SEGMENT_DEDICATE_TRIES`] and a namespace shared with foreign nodes that
-/// pick their ids independently.
-fn candidate_id(pid: u32, c: u32) -> u32 {
-    pid.wrapping_mul(0x9E37_79B1).wrapping_add(c << 1) | 1
-}
-
-fn next_candidate_id() -> u32 {
-    candidate_id(
-        std::process::id(),
-        AUTH_ID_COUNTER.fetch_add(1, Ordering::Relaxed),
-    )
-}
-
-/// The `/dev/shm` path zenoh's `shm_open("{id}.zenoh", ..)` resolves to. This
-/// name IS interop: a foreign peer opens exactly this string.
-fn auth_segment_path(segment_id: u32) -> PathBuf {
-    PathBuf::from(format!("/dev/shm/{segment_id}.zenoh"))
-}
-
-/// Take a SHARED advisory lock, as zenoh does on both create and open
-/// (`shm/unix.rs`, `try_lock(FileLockMode::Shared)`). Shared locks coexist, so
-/// this never blocks a zenoh peer holding its own; it exists so wz participates
-/// in the same protocol rather than silently opting out of it.
-fn lock_shared(file: &File) -> io::Result<()> {
-    // SAFETY: `flock` takes a borrowed fd and returns an error code; the fd is
-    // valid for the borrow and the call has no other effect on process state.
-    let rc = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_SH | libc::LOCK_NB) };
-    if rc == 0 {
-        Ok(())
-    } else {
-        Err(io::Error::last_os_error())
-    }
+/// This segment kind's `/dev/shm` path, for the tests that open one by hand.
+#[cfg(test)]
+fn auth_segment_path(segment_id: u32) -> std::path::PathBuf {
+    crate::posix_shm::segment_path(u64::from(segment_id))
 }
 
 fn read_u64(map: &[u8], index: usize) -> Option<u64> {
@@ -244,18 +164,13 @@ fn write_u32_at(map: &mut [u8], offset: usize, value: u32) {
 
 /// This node's own auth segment: created once at bring-up, unlinked on drop.
 ///
-/// Holding the `MmapMut` alive keeps the mapping valid; the FILE stays on
-/// `/dev/shm` until [`Drop`] unlinks it, which is what bounds the lifetime of
-/// an id a peer may still try to open (a peer that opens after the unlink gets
+/// The [`OwnedSegment`] keeps the mapping and its shared lock alive and
+/// unlinks the object when this drops, which is what bounds the lifetime of an
+/// id a peer may still try to open (a peer that opens after the unlink gets
 /// `None`, i.e. "no SHM", which is the correct outcome).
 pub struct ShmAuthSegment {
-    _map: MmapMut,
-    segment_id: u32,
+    segment: OwnedSegment,
     challenge: u64,
-    path: PathBuf,
-    /// Kept so the shared advisory lock lives as long as the segment does —
-    /// `flock` locks are released when the last fd for the open file closes.
-    _file: File,
 }
 
 impl ShmAuthSegment {
@@ -264,74 +179,30 @@ impl ShmAuthSegment {
     /// per upstream — 1.5.0 negated it, 1.10.0 does not (R2240), and a peer
     /// reading the negated form echoes a value that can never validate.
     pub fn create(challenge: u64) -> io::Result<Self> {
-        let mut last_err = None;
-        for _ in 0..SEGMENT_DEDICATE_TRIES {
-            let segment_id = next_candidate_id();
-            let path = auth_segment_path(segment_id);
-            match OpenOptions::new()
-                .read(true)
-                .write(true)
-                .create_new(true)
-                // 0600, matching zenoh's `Mode::S_IRUSR | Mode::S_IWUSR`. A
-                // peer running as another user cannot open it, which is
-                // upstream's posture and not something to widen here.
-                .mode(0o600)
-                .open(&path)
-            {
-                Ok(file) => {
-                    file.set_len(SEGMENT_BYTES as u64)?;
-                    lock_shared(&file)?;
-                    // SAFETY: the file was just created exclusively by this
-                    // process; the mapping is the only writer.
-                    let mut map = unsafe { MmapOptions::new().map_mut(&file)? };
-                    write_u64(&mut map, LEN_INDEX, WZ_PROTOCOLS.len() as u64);
-                    // VERBATIM, per the module doc. 1.5.0 stored `!challenge`
-                    // and 1.10.0 does not; a peer reading the inverted form
-                    // echoes a value that can never match.
-                    write_u64(&mut map, CHALLENGE_INDEX, challenge);
-                    write_u64(&mut map, VERSION_INDEX, SHM_VERSION);
-                    for (i, p) in WZ_PROTOCOLS.iter().enumerate() {
-                        write_u32_at(
-                            &mut map,
-                            PROTOCOLS_OFFSET + i * core::mem::size_of::<u32>(),
-                            *p,
-                        );
-                    }
-                    map.flush()?;
-                    return Ok(Self {
-                        _map: map,
-                        segment_id,
-                        challenge,
-                        path,
-                        _file: file,
-                    });
-                }
-                Err(e) if e.kind() == io::ErrorKind::AlreadyExists => last_err = Some(e),
-                Err(e) => return Err(e),
-            }
+        let mut segment = OwnedSegment::create(SEGMENT_BYTES, || u64::from(next_candidate_id()))?;
+        let map = segment.bytes_mut();
+        write_u64(map, LEN_INDEX, WZ_PROTOCOLS.len() as u64);
+        // VERBATIM, per the module doc. 1.5.0 stored `!challenge` and 1.10.0
+        // does not; a peer reading the inverted form echoes a value that can
+        // never match.
+        write_u64(map, CHALLENGE_INDEX, challenge);
+        write_u64(map, VERSION_INDEX, SHM_VERSION);
+        for (i, p) in WZ_PROTOCOLS.iter().enumerate() {
+            write_u32_at(map, PROTOCOLS_OFFSET + i * core::mem::size_of::<u32>(), *p);
         }
-        Err(last_err.unwrap_or_else(|| {
-            io::Error::other("could not dedicate a POSIX shm auth segment after 100 tries")
-        }))
+        segment.flush()?;
+        Ok(Self { segment, challenge })
     }
 
-    /// This segment's id — the value that goes on the wire.
+    /// This segment's id — the value that goes on the wire. The auth id is a
+    /// `u32` on the wire, and `next_candidate_id` draws only `u32`s.
     pub fn id(&self) -> u32 {
-        self.segment_id
+        u32::try_from(self.segment.id()).expect("auth segment ids are drawn as u32")
     }
 
     /// The challenge a peer must echo back to prove it mapped this segment.
     pub fn challenge(&self) -> u64 {
         self.challenge
-    }
-}
-
-impl Drop for ShmAuthSegment {
-    fn drop(&mut self) {
-        // Best-effort unlink, matching zenoh's cleanup registration. A failure
-        // here leaves a 32-byte file in /dev/shm; it is not worth panicking in
-        // a drop, and a stale segment reads as "no SHM" to any peer.
-        let _ = std::fs::remove_file(&self.path);
     }
 }
 
@@ -343,25 +214,18 @@ impl Drop for ShmAuthSegment {
 /// (`recv_init_ack` returns `Ok(None)`), so surfacing them as failures would
 /// turn a benign mismatch into a dropped session.
 pub fn open_peer_challenge(segment_id: u32) -> Option<u64> {
-    let file = OpenOptions::new()
-        .read(true)
-        .write(true)
-        .open(auth_segment_path(segment_id))
-        .ok()?;
-    lock_shared(&file).ok()?;
-    // SAFETY: a read-only view of a peer-owned mapping. The peer may write it
-    // concurrently, which is exactly the shared-memory contract; every field
-    // read is an 8-byte native load, and a torn value fails the comparison
-    // rather than being unsound.
-    let map: Mmap = unsafe { MmapOptions::new().map(&file).ok()? };
+    let segment = PeerSegment::open(u64::from(segment_id)).ok()?;
+    // Every field read is an 8-byte native load; a torn value fails the
+    // comparison rather than being unsound.
+    let map = segment.bytes();
     if map.len() < SEGMENT_BYTES {
         return None;
     }
-    if read_u64(&map, VERSION_INDEX)? != SHM_VERSION {
+    if read_u64(map, VERSION_INDEX)? != SHM_VERSION {
         return None;
     }
     // Verbatim, the mirror of `create`.
-    read_u64(&map, CHALLENGE_INDEX)
+    read_u64(map, CHALLENGE_INDEX)
 }
 
 /// The [`ShmAuthenticator`] a session is handed at bring-up: this node's own
@@ -404,6 +268,8 @@ impl ShmAuthenticator for PosixShmAuthenticator {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use memmap2::MmapOptions;
+    use std::fs::OpenOptions;
 
     /// How many consecutive counter values the injectivity witness walks.
     ///

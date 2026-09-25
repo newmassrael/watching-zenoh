@@ -1609,6 +1609,10 @@ pub mod unixpipe_pipeline;
 #[cfg(feature = "transport-link-quic")]
 pub mod quic_config;
 
+/// R2862 — the one POSIX shared-memory segment implementation (upstream's
+/// naming, mode and advisory lock) every wz segment kind is made through.
+#[cfg(feature = "transport-shm")]
+pub mod posix_shm;
 /// transport-shm — the AP POSIX shared-memory provider (memmap2 over /dev/shm):
 /// `ShmBackedPayload` (owner alloc/write) + `PosixShmResolver` (the reader-side
 /// impl of the no_std `wz_session_core::extshm::ShmResolver` seam). The std mmap
