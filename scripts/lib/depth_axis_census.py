@@ -2156,7 +2156,12 @@ PIN_NO_SYMBOL = 2
 # not enumerate declarations" clause by citing the line that does it,
 # `crates/wz-runtime-tokio/src/session/mod.rs`. 44 - 43 = 1, the census's own
 # FAIL line (`wz citations: 44 against a pin of 43`), with PIN_AMBIGUOUS holding.
-PIN_WZ_CITATIONS = 44
+#
+# R2858 — 44 -> 47, RISING by three citations in the same atom: its region
+# correction cites where the computation lives (`extbound.rs`), the one method
+# every host reads it through (`session_actions.rs`), and the wire test that
+# witnesses it. 47 - 44 = 3, the census's own FAIL line.
+PIN_WZ_CITATIONS = 47
 # R2626 — 44 -> 42, and this one is worth a sentence because it HELD through
 # every earlier retirement in this run (R2612, R2622). `time-hlc`'s reason is the
 # first retiree carrying AMBIGUOUS citations of its own: its oldest clauses cite
