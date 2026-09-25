@@ -874,6 +874,58 @@ fn clear_own_zid_forwards_to_subscriber_registry() {
 /// `get_best_key` prefers `ctx.remote_expr_id` and stamps it `Mapping::Receiver`
 /// (`zenoh/src/net/routing/dispatcher/resource.rs:625`).
 #[cfg(all(feature = "codec-push", feature = "declare-keyexpr"))]
+/// R2862 — a Session made by the ORDINARY constructor resolves an inbound SHM
+/// Put once SHM is negotiated, with no resolver installed by hand.
+///
+/// Until this round only tests called `set_shm_resolver`, so every shipped wz
+/// host negotiated SHM and then dropped each SHM payload a peer sent it. The
+/// payload here is a real slot-backed one: its descriptor names a metadata
+/// slot, and the delivered bytes come off `/dev/shm` through that slot.
+#[cfg(all(
+    feature = "session-extshm",
+    feature = "codec-push",
+    feature = "pubsub-put",
+    target_os = "linux"
+))]
+#[test]
+fn a_session_resolves_an_shm_put_without_a_hand_installed_resolver() {
+    let (session, _driver) = build_session();
+    session.actions().set_shm_offer(true);
+    assert!(session.actions().is_shm(), "the fixture negotiated SHM");
+
+    let got: Arc<Mutex<Vec<Vec<u8>>>> = Arc::new(Mutex::new(Vec::new()));
+    let got_cb = got.clone();
+    let _sub = session.declare_subscriber("demo/shm", SubscribeOptions::default(), move |s| {
+        got_cb.lock().unwrap().push(s.payload().to_vec());
+    });
+
+    let mut payload = crate::shm_provider::ShmBackedPayload::alloc(7).expect("alloc");
+    payload.write(b"off-shm");
+    let push = wz_session_core::push_build::build_push_shm_literal(
+        "demo/shm",
+        &payload.descriptor(),
+        &wz_session_core::metadata::PushMetadata::default(),
+    )
+    .expect("build the SHM Put");
+    let outcome = wz_session_core::driver_loop::DriverLoopOutcome::FramePayload {
+        priority: wz_session_core::qos::Priority::DEFAULT,
+        reliable: true,
+        sn: 0,
+        messages: vec![wz_session_core::network_message::NetworkMessage::Push(
+            Box::new(push),
+        )],
+        has_ext: false,
+        extensions: Vec::new(),
+    };
+    session.dispatch_iteration_event(crate::session_glue::IterationEvent::Poll(&outcome));
+
+    assert_eq!(
+        *got.lock().unwrap(),
+        vec![b"off-shm".to_vec()],
+        "the SHM Put is delivered with the bytes its slot names"
+    );
+}
+
 fn inbound_push_aliased_in_our_space(
     mapping_id: u64,
     payload: &[u8],

@@ -2347,6 +2347,17 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
         let own_space: Arc<dyn wz_session_core::wireexpr_resolve::OwnMappingSpace + Send + Sync> =
             session.actions().clone();
         session.set_own_mapping_space(own_space);
+        // R2862 — and the POSIX SHM resolver, for the reason the two installs
+        // above give: until this round only tests called `set_shm_resolver`, so
+        // every shipped wz host negotiated SHM with a zenoh peer and then
+        // dropped each SHM payload it was sent. Upstream's reader carries the
+        // POSIX client whenever `shared-memory` is built
+        // (`commons/zenoh-shm/src/reader.rs` @ `let client = self`), and wz
+        // already refuses an SHM Put from a peer that did NOT negotiate SHM
+        // (R311y516), so installing the reader for every session admits
+        // nothing that negotiation did not.
+        #[cfg(feature = "transport-shm")]
+        session.set_shm_resolver(Box::new(crate::shm_provider::PosixShmResolver));
         session
     }
 

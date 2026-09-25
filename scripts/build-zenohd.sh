@@ -327,6 +327,21 @@ if [[ -n "$ZH" ]]; then
         REST_SO_SRC=""
         EXT_EXAMPLES_SRC=""
         CORE_EXAMPLES_SRC=""
+        # R2862 — the shared-memory variant ALSO builds upstream's own SHM
+        # publisher and subscriber. zenohd relays an SHM buffer but never MAKES
+        # one, so without these no process on this machine writes a payload
+        # through upstream's metadata segment, and a wz reader of that segment
+        # would be graded against nothing but wz's own writer. They are the
+        # examples upstream ships for exactly this, behind the features their
+        # manifest requires (`required-features = ["shared-memory", "unstable"]`).
+        if [[ "$VARIANT_NAME" == "shared-memory" ]]; then
+            echo "build-zenohd: building zenoh SHM examples (z_pub_shm, z_sub_shm) ..." >&2
+            CARGO_TARGET_DIR="$BUILD_DIR" cargo "+$TOOLCHAIN" build \
+                -p zenoh-examples --example z_pub_shm --example z_sub_shm \
+                --features shared-memory,unstable \
+                --release --manifest-path "$ZH/Cargo.toml"
+            SHM_EXAMPLES_SRC="$BUILD_DIR/release/examples"
+        fi
     else
         echo "build-zenohd: building zenoh-plugin-storage-manager (release) ..." >&2
         CARGO_TARGET_DIR="$BUILD_DIR" cargo "+$TOOLCHAIN" build \
@@ -466,6 +481,15 @@ if [[ -n "$EXT_EXAMPLES_SRC" ]]; then
 else
     echo "build-zenohd: zenoh-ext examples NOT provisioned (variant or source B);" >&2
     echo "  the wz<->zenoh-ext advanced-pubsub interop legs cannot run." >&2
+fi
+if [[ -n "${SHM_EXAMPLES_SRC:-}" ]]; then
+    for ex in z_pub_shm z_sub_shm; do
+        install -m 0755 "$SHM_EXAMPLES_SRC/$ex" "$INSTALL_DIR/$ex"
+        echo "build-zenohd: installed -> $INSTALL_DIR/$ex" >&2
+    done
+elif [[ "${VARIANT_NAME:-}" == "shared-memory" ]]; then
+    echo "build-zenohd: zenoh SHM examples NOT provisioned;" >&2
+    echo "  the wz<->zenoh SHM payload interop legs cannot run." >&2
 fi
 if [[ -n "$DEFAULT_CONFIG_SRC" && -f "$DEFAULT_CONFIG_SRC" ]]; then
     # 0644, not 0755: this one is a document, and the only reader is a test that
