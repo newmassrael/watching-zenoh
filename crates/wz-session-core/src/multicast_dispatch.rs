@@ -120,9 +120,9 @@ use crate::namespace::NamespaceIngress;
 /// Router holds no allocation per peer.
 const ZID_MAX: usize = 16;
 
-/// §5.21 router-multicast-faces (I3b) — the on-group Designated-Router election
-/// reads each peer's JOIN-advertised role; `WhatAmI` classifies Router members.
-#[cfg(feature = "multicast-declarations")]
+/// Each peer's JOIN-advertised role. The on-group Designated-Router election
+/// (§5.21 router-multicast-faces, I3b) classifies Router members by it, and
+/// since R2859 every build's member view reports it.
 use wz_codecs::whatami::WhatAmI;
 
 /// §5.21 router-multicast-faces (I3a) — the per-peer keyexpr-alias table cap.
@@ -224,12 +224,34 @@ pub struct JoinBaseline {
     /// message (R311ks; zenoh-pico `entry->_lease = msg->_lease`,
     /// multicast/rx.c:393/456).
     pub lease_ms: u64,
-    /// §5.21 router-multicast-faces (I3b) — the announcer's node role, from the
-    /// JOIN's whatami wire field. `None` if the wire code is unrecognized. Read
-    /// by [`MulticastDispatcher::router_member_zids`] to build the on-group
-    /// Designated-Router election candidate set (Router members only).
-    #[cfg(feature = "multicast-declarations")]
+    /// The announcer's node role, from the JOIN's whatami wire field. `None` if
+    /// the wire code is unrecognized. Stored per slot, where the member view
+    /// ([`MulticastDispatcher::members`]) reports it and the Designated-Router
+    /// election (`router_member_zids`, §5.21 I3b) filters on it.
+    ///
+    /// R2859 — UNGATED. It used to exist only under `multicast-declarations`,
+    /// because the election was the first thing to read it. Upstream's peer
+    /// record carries the role in every build
+    /// (`io/zenoh-transport/src/multicast/transport.rs` @ `whatami: p.whatami,`),
+    /// and the admin `sessions[]` row it feeds is owed wherever a group is.
     pub whatami: Option<WhatAmI>,
+}
+
+/// R2859 — one live member of the group, as [`MulticastDispatcher::members`]
+/// reports it: the three facts upstream's multicast `TransportPeer` gives a
+/// node's adminspace (`io/zenoh-transport/src/multicast/transport.rs` @
+/// `pub(super) fn get_peers(&self) -> Vec<TransportPeer> {`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MulticastMember {
+    /// The zid the member's JOIN announced.
+    pub peer: MulticastPeerId,
+    /// The role its latest JOIN announced, `None` for a wire code this node
+    /// does not recognize.
+    pub whatami: Option<WhatAmI>,
+    /// The address its datagrams come from, which is how the table keys it.
+    /// Upstream records the same address as the member's locator and reports
+    /// it as the `dst` of the member's one link.
+    pub locator: SocketAddr,
 }
 
 /// Outcome of one [`MulticastDispatcher::ingest_frame_by_src`] admission
@@ -413,12 +435,12 @@ struct PeerSlot {
     /// peer here.
     #[cfg(feature = "multicast-declarations")]
     keyexpr_table: hashbrown::HashMap<u64, alloc::string::String>,
-    /// §5.21 router-multicast-faces (I3b) — this peer's node role, from its JOIN
-    /// whatami. Read by [`MulticastDispatcher::router_member_zids`] so the
-    /// router-hat's Designated-Router election counts only on-group ROUTER peers
-    /// (a Client/Peer publisher on the group is not a bridge candidate). Set on
-    /// admit/refresh from [`JoinBaseline::whatami`], cleared on [`Self::evict`].
-    #[cfg(feature = "multicast-declarations")]
+    /// This peer's node role, from its JOIN whatami. Reported by
+    /// [`MulticastDispatcher::members`], and read by the router-hat's
+    /// Designated-Router election (`router_member_zids`), which counts only
+    /// on-group ROUTER peers (a Client/Peer publisher on the group is not a
+    /// bridge candidate). Set on admit/refresh from [`JoinBaseline::whatami`],
+    /// cleared on [`Self::evict`]. Ungated since R2859, with the baseline field.
     whatami: Option<WhatAmI>,
     /// §5.21 router-multicast-faces (sub plane, S1) — this peer's
     /// `sub-id -> literal keyexpr` remote-subscription table, populated from the
@@ -484,7 +506,6 @@ impl PeerSlot {
             namespace_ingress: None,
             #[cfg(feature = "multicast-declarations")]
             keyexpr_table: hashbrown::HashMap::new(),
-            #[cfg(feature = "multicast-declarations")]
             whatami: None,
             #[cfg(feature = "multicast-declarations")]
             remote_subs: hashbrown::HashMap::new(),
@@ -593,10 +614,11 @@ impl PeerSlot {
         // id-only Push against a dead peer's declaration (the same recycle-safety
         // the SN / namespace reset above gives; wz reclaims where zenoh leaks the
         // mcast_faces shell).
+        // R2859 — the role is cleared whatever the build, with the field.
+        self.whatami = None;
         #[cfg(feature = "multicast-declarations")]
         {
             self.keyexpr_table.clear();
-            self.whatami = None;
             // §5.21 router-multicast-faces (sub plane) — drop this peer's declared
             // subscriptions with the slot so a recycled index can never advertise a
             // dead peer's interest into the mesh, and the next `group_sub_keyexprs`
@@ -875,6 +897,33 @@ impl<const MAX_PEERS: usize> MulticastDispatcher<MAX_PEERS> {
         self.session.get_current_state()
     }
 
+    /// R2859 (§5.23 `adminspace-core`) — the live members of the group, one per
+    /// occupied slot, as this peer table holds them: the wz mirror of upstream's
+    /// `get_peers()`, which a node's adminspace walks to list each multicast peer
+    /// in `sessions[]` (`zenoh/src/net/runtime/adminspace.rs` @
+    /// `for mcast_transport in transport_mgr.get_transports_multicast().await {`).
+    ///
+    /// Read off the table, not rebuilt from the arrival and departure events.
+    /// A JOIN from a known address under a new zid is a new peer taking the
+    /// slot, and the dispatcher answers it `Refreshed`, which announces nothing,
+    /// so a view kept from the events would go on naming the peer that left.
+    /// Upstream reads its own table for the same answer
+    /// (`io/zenoh-transport/src/multicast/transport.rs` @ `pub(super) fn get_peers(&self) -> Vec<TransportPeer> {`).
+    ///
+    /// Allocation-free, like the table: a host collects it into whatever it
+    /// keeps.
+    pub fn members(&self) -> impl Iterator<Item = MulticastMember> + '_ {
+        self.peers.iter().filter_map(|p| {
+            let locator = p.src?;
+            let (buf, len) = p.zid.as_ref()?;
+            Some(MulticastMember {
+                peer: MulticastPeerId::from_wire(&buf[..*len as usize]),
+                whatami: p.whatami,
+                locator,
+            })
+        })
+    }
+
     /// Number of pool slots currently holding a live peer (the
     /// `multicast_peer_table` occupancy gauge).
     pub fn active_peers(&self) -> usize {
@@ -1073,13 +1122,10 @@ impl<const MAX_PEERS: usize> MulticastDispatcher<MAX_PEERS> {
             }
             self.peers[idx].zid = Some(copy_zid(zid));
             self.peers[idx].seed_from_join(baseline, qos_next_sns);
-            // §5.21 router-multicast-faces (I3b) — refresh the peer's role from
-            // its latest JOIN (a peer's whatami is stable, but this keeps the DR
-            // candidate set correct even across a same-slot zid reuse).
-            #[cfg(feature = "multicast-declarations")]
-            {
-                self.peers[idx].whatami = baseline.whatami;
-            }
+            // Refresh the peer's role from its latest JOIN. A peer's whatami is
+            // stable, but a same-slot zid reuse is a different peer, and both the
+            // member view and the DR candidate set (§5.21 I3b) must see its role.
+            self.peers[idx].whatami = baseline.whatami;
             return JoinOutcome::Refreshed;
         }
         let idx = match self.peers.iter().position(PeerSlot::is_free) {
@@ -1095,12 +1141,9 @@ impl<const MAX_PEERS: usize> MulticastDispatcher<MAX_PEERS> {
         self.peers[idx].zid = Some(copy_zid(zid));
         self.peers[idx].last_seen_ms = now_ms;
         self.peers[idx].seed_from_join(baseline, qos_next_sns);
-        // §5.21 router-multicast-faces (I3b) — record the newly-admitted peer's
-        // node role for the on-group Designated-Router election.
-        #[cfg(feature = "multicast-declarations")]
-        {
-            self.peers[idx].whatami = baseline.whatami;
-        }
+        // Record the newly-admitted peer's node role, which the member view
+        // reports and the Designated-Router election (§5.21 I3b) filters on.
+        self.peers[idx].whatami = baseline.whatami;
         self.peers[idx]
             .engine
             .process_event(MulticastPeerEvent::PeerDiscovered);
@@ -1834,9 +1877,68 @@ mod tests {
             next_sn_reliable: 0,
             next_sn_best_effort: 0,
             lease_ms: 5_000,
-            #[cfg(feature = "multicast-declarations")]
             whatami: None,
         }
+    }
+
+    /// R2859 — the member view is the peer TABLE: who holds a slot, under the
+    /// zid and role its latest JOIN announced, keyed by the address its
+    /// datagrams come from.
+    ///
+    /// The middle step is the reason the view reads the table rather than the
+    /// arrival and departure events: a JOIN from a known address under a NEW
+    /// zid answers `Refreshed` and announces nothing, yet the member at that
+    /// address is now someone else. A view built from events would still name
+    /// the first peer; this one names the second, with its role. The last step
+    /// is the lease sweep, after which the member is gone.
+    #[test]
+    fn members_report_the_table_through_a_zid_change_and_a_lease_evict() {
+        let mut d = running_dispatcher::<4>(5_000);
+        assert_eq!(d.members().count(), 0, "an empty table has no member");
+
+        assert_eq!(
+            d.ingest_join(&[0xA1], SRC_A, sn0_whatami(WhatAmI::Client), 0),
+            JoinOutcome::Admitted
+        );
+        assert_eq!(
+            d.ingest_join(&[0xB2, 0xB3], SRC_B, sn0_whatami(WhatAmI::Router), 0),
+            JoinOutcome::Admitted
+        );
+        // Compared as iterators, with no collection: the view is allocation-free
+        // and this test runs on the no-alloc build too.
+        assert!(d.members().eq([
+            MulticastMember {
+                peer: MulticastPeerId::from_wire(&[0xA1]),
+                whatami: Some(WhatAmI::Client),
+                locator: SRC_A,
+            },
+            MulticastMember {
+                peer: MulticastPeerId::from_wire(&[0xB2, 0xB3]),
+                whatami: Some(WhatAmI::Router),
+                locator: SRC_B,
+            },
+        ]));
+
+        assert_eq!(
+            d.ingest_join(&[0xC4], SRC_A, sn0_whatami(WhatAmI::Peer), 1_000),
+            JoinOutcome::Refreshed,
+            "a new zid at a known address takes the slot and announces nothing"
+        );
+        assert!(d
+            .members()
+            .filter(|m| m.locator == SRC_A)
+            .eq([MulticastMember {
+                peer: MulticastPeerId::from_wire(&[0xC4]),
+                whatami: Some(WhatAmI::Peer),
+                locator: SRC_A,
+            }]));
+
+        // B was last heard at 0, A at 1_000; a sweep past B's lease only.
+        d.sweep(5_500);
+        assert!(d
+            .members()
+            .map(|m| m.peer)
+            .eq([MulticastPeerId::from_wire(&[0xC4])]));
     }
 
     /// The session lifecycle walks Idle -> LinkOpening -> Running ->
@@ -2497,7 +2599,6 @@ mod tests {
             next_sn_reliable: 42,
             next_sn_best_effort: 7,
             lease_ms: 5_000,
-            #[cfg(feature = "multicast-declarations")]
             whatami: None,
         };
         assert_eq!(
@@ -2529,7 +2630,6 @@ mod tests {
             next_sn_reliable: 10,
             next_sn_best_effort: 100,
             lease_ms: 5_000,
-            #[cfg(feature = "multicast-declarations")]
             whatami: None,
         };
         d.ingest_join(ZID_A, SRC_A, baseline, 0);
@@ -2595,7 +2695,6 @@ mod tests {
             next_sn_reliable: 0,
             next_sn_best_effort: 0,
             lease_ms: 5_000,
-            #[cfg(feature = "multicast-declarations")]
             whatami: None,
         };
         d.ingest_join(ZID_A, SRC_A, baseline, 0);
@@ -2624,7 +2723,6 @@ mod tests {
             next_sn_reliable: 1,
             next_sn_best_effort: 0,
             lease_ms: 5_000,
-            #[cfg(feature = "multicast-declarations")]
             whatami: None,
         };
         assert_eq!(
@@ -2675,7 +2773,6 @@ mod tests {
             next_sn_reliable: 42,
             next_sn_best_effort: 0,
             lease_ms: 5_000,
-            #[cfg(feature = "multicast-declarations")]
             whatami: None,
         };
         assert_eq!(
@@ -2732,7 +2829,6 @@ mod tests {
             next_sn_reliable: 10,
             next_sn_best_effort: 100,
             lease_ms: 5_000,
-            #[cfg(feature = "multicast-declarations")]
             whatami: None,
         };
         d.ingest_join(ZID_A, SRC_A, baseline, 0);
@@ -2884,7 +2980,6 @@ mod tests {
                 next_sn_reliable: 5,
                 next_sn_best_effort: 0,
                 lease_ms: 5_000,
-                #[cfg(feature = "multicast-declarations")]
                 whatami: None,
             };
             d.ingest_join(ZID_A, SRC_A, baseline, 0);
@@ -3584,8 +3679,8 @@ mod tests {
     // ---- §5.21 router-multicast-faces (sub plane, S1) — per-peer sub ingest ----
 
     /// A JOIN baseline carrying an explicit `whatami` (the sub-plane tests need a
-    /// Client-role peer to prove the sub union is whatami-agnostic).
-    #[cfg(feature = "multicast-declarations")]
+    /// Client-role peer to prove the sub union is whatami-agnostic, and the
+    /// member view reports the role in every build).
     fn sn0_whatami(w: WhatAmI) -> JoinBaseline {
         JoinBaseline {
             whatami: Some(w),

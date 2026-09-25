@@ -93,6 +93,51 @@ pub struct AdminSession {
     pub region: Option<String>,
 }
 
+/// R2859 — one member of a multicast group this node is on, a `sessions[]`
+/// entry of the second kind: the mirror of upstream's
+/// `transport_multicast_peer_to_json`
+/// (`zenoh/src/net/runtime/adminspace.rs` @
+/// `let transport_multicast_peer_to_json =`).
+///
+/// A different row from [`AdminSession`], not that row with fields left out.
+/// Upstream writes four keys here, `group, links, peer, whatami`, and none of
+/// the unicast row's `region`, `shm` or `weight`. Upstream lists every unicast
+/// transport first and then each member of each multicast transport, and
+/// [`AdminLocalData::to_json`] keeps that order.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct AdminMulticastPeer {
+    /// The member's zid in zenoh `ZenohId` Display form.
+    pub peer_zid_hex: String,
+    /// The member's role string, or `None` -> `"unknown"`. Upstream's peer
+    /// record always carries a role, so the fallback is wz's answer for a JOIN
+    /// whose wire code this node does not recognize.
+    pub whatami: Option<String>,
+    /// The group's locator, upstream's `"group"` (the multicast link's
+    /// destination). `None` renders `"unknown"`, upstream's word when the
+    /// link has no group.
+    pub group: Option<String>,
+    /// The member's one link: `src` is this node's own locator on the group,
+    /// `dst` the address the member's datagrams come from.
+    pub links: Vec<AdminLink>,
+}
+
+/// A transport's links as upstream's `link_to_json` writes each one,
+/// `{"dst":…,"src":…}`, in an array. Shared by both kinds of `sessions[]` row.
+fn push_admin_links(links: &[AdminLink], out: &mut String) {
+    out.push('[');
+    for (j, link) in links.iter().enumerate() {
+        if j > 0 {
+            out.push(',');
+        }
+        out.push_str("{\"dst\":");
+        push_json_str(&link.dst, out);
+        out.push_str(",\"src\":");
+        push_json_str(&link.src, out);
+        out.push('}');
+    }
+    out.push(']');
+}
+
 /// R2637 — a `u16` as JSON, and its optional twin. Written out rather than
 /// `format!`ed for the reason the whole builder is hand-rolled: it stays
 /// `alloc`-only and no_std-feasible, with no `serde_json` in the session kernel.
@@ -375,6 +420,9 @@ pub struct AdminLocalData {
     pub locators: Vec<String>,
     /// The connected peer(s).
     pub sessions: Vec<AdminSession>,
+    /// R2859 — the members of the multicast groups this node is on, written
+    /// into `sessions[]` after [`Self::sessions`], as upstream writes them.
+    pub multicast_peers: Vec<AdminMulticastPeer>,
     /// The node's compiled-in plugin registry (surface A, the `plugins` field).
     /// Only STARTED entries appear in the emitted object; ignored (and the field
     /// emits `null`) without `adminspace-plugins-handlers`. Always present so the
@@ -401,6 +449,7 @@ impl Default for AdminLocalData {
             version: String::new(),
             locators: Vec::new(),
             sessions: Vec::new(),
+            multicast_peers: Vec::new(),
             plugins: Vec::new(),
             metadata_json: String::from("null"),
         }
@@ -564,8 +613,8 @@ impl AdminLocalData {
     /// `preserve_order` — so its `Map` is a `BTreeMap` and the emitted object keys
     /// are ALPHABETICALLY sorted, NOT `json!` source order. Key ORDER here is that
     /// order: top-level `locators, metadata, plugins, sessions, version, zid`; each
-    /// `sessions` entry `links, peer, region, shm, weight, whatami`; each link
-    /// `dst, src`.
+    /// unicast `sessions` entry `links, peer, region, shm, weight, whatami`, each
+    /// multicast one `group, links, peer, whatami`; each link `dst, src`.
     /// Manual emit (no `serde_json`) keeps the builder `alloc`-only and
     /// no_std-feasible.
     ///
@@ -597,8 +646,9 @@ impl AdminLocalData {
     ///   [`Self::metadata_json`].
     ///
     /// So the key ORDER is upstream's and, for a unicast session, so is the field
-    /// SET. Multicast peers are still absent from `sessions[]`, which is a
-    /// missing ROW rather than a missing field. `admin_unspoken_fields` is where a
+    /// SET. R2859 added the second kind of row, one per member of each multicast
+    /// group ([`AdminMulticastPeer`]), after every unicast row, with upstream's
+    /// four keys `group, links, peer, whatami`. `admin_unspoken_fields` is where a
     /// consumer learns which fields arrive as `null` because this build does not
     /// speak them.
     pub fn to_json(&self) -> String {
@@ -621,18 +671,9 @@ impl AdminLocalData {
             if i > 0 {
                 out.push(',');
             }
-            out.push_str("{\"links\":[");
-            for (j, link) in session.links.iter().enumerate() {
-                if j > 0 {
-                    out.push(',');
-                }
-                out.push_str("{\"dst\":");
-                push_json_str(&link.dst, &mut out);
-                out.push_str(",\"src\":");
-                push_json_str(&link.src, &mut out);
-                out.push('}');
-            }
-            out.push_str("],\"peer\":");
+            out.push_str("{\"links\":");
+            push_admin_links(&session.links, &mut out);
+            out.push_str(",\"peer\":");
             push_json_str(&session.peer_zid_hex, &mut out);
             // R2858 — `region` between `peer` and `shm`: the same BTreeMap
             // order that places every other key here.
@@ -668,6 +709,24 @@ impl AdminLocalData {
                 Some(w) => push_json_str(w, &mut out),
                 None => push_json_str("unknown", &mut out),
             }
+            out.push('}');
+        }
+        // R2859 — then each member of each multicast group, after every
+        // unicast row: upstream's second loop over
+        // `get_transports_multicast()`. Keys alphabetical as above, and only
+        // the four upstream writes for this kind of row.
+        for (i, member) in self.multicast_peers.iter().enumerate() {
+            if i > 0 || !self.sessions.is_empty() {
+                out.push(',');
+            }
+            out.push_str("{\"group\":");
+            push_json_str(member.group.as_deref().unwrap_or("unknown"), &mut out);
+            out.push_str(",\"links\":");
+            push_admin_links(&member.links, &mut out);
+            out.push_str(",\"peer\":");
+            push_json_str(&member.peer_zid_hex, &mut out);
+            out.push_str(",\"whatami\":");
+            push_json_str(member.whatami.as_deref().unwrap_or("unknown"), &mut out);
             out.push('}');
         }
         out.push_str("],\"version\":");
@@ -1542,6 +1601,14 @@ pub struct AdminAnswerCtx<'a> {
     /// unification turned the flag on in `wz-session-core`. The field costs one
     /// `Option` in a build that never fills it.
     pub stats: Option<&'a crate::stats_registry::StatsRegistry>,
+    /// R2859 — the members of every multicast group this node is on, the rows
+    /// `local_data` writes after the unicast `sessions` the answerer is passed.
+    ///
+    /// On the CONTEXT, like [`Self::stats`], because only the host knows which
+    /// groups it runs: a router's group faces are its own, and a Session or an
+    /// MCU node that holds no multicast transport passes `&[]`, which is its
+    /// answer and not a gap.
+    pub multicast_peers: &'a [AdminMulticastPeer],
 }
 
 /// Stage one admin-space reply, logging a refusal the way upstream logs it.
@@ -1611,6 +1678,7 @@ pub fn answer_admin_query(
             version: String::from(ctx.version),
             locators: ctx.locators.to_vec(),
             sessions: sessions.to_vec(),
+            multicast_peers: ctx.multicast_peers.to_vec(),
             // Surface A: the `plugins` field object (started-only) — always set so
             // `plugins` is a used parameter regardless of the feature; `to_json`
             // emits `null` when `adminspace-plugins-handlers` is off.
@@ -3214,6 +3282,7 @@ mod tests {
             version: "0.1.0".to_string(),
             locators: vec![],
             sessions: vec![],
+            multicast_peers: vec![],
             plugins: vec![],
             // An unset `metadata`, which upstream serves as `null` too.
             metadata_json: "null".to_string(),
@@ -3242,6 +3311,7 @@ mod tests {
             zid_hex: "a1b2".to_string(),
             version: "0.1.0".to_string(),
             locators: vec!["tcp/127.0.0.1:7447".to_string()],
+            multicast_peers: vec![],
             sessions: vec![AdminSession {
                 peer_zid_hex: "c3d4".to_string(),
                 whatami: Some("router".to_string()),
@@ -3302,6 +3372,84 @@ mod tests {
         );
     }
 
+    /// R2859 — a multicast member is a `sessions[]` row of its OWN shape, after
+    /// every unicast row: upstream's `transport_multicast_peer_to_json`, whose
+    /// four keys are `group, links, peer, whatami` and which carries none of
+    /// the unicast row's `region`, `shm` or `weight`.
+    ///
+    /// Two documents, so both comma paths are pinned: one with a unicast row
+    /// ahead of two members (a member after a unicast row, and a member after
+    /// a member), and one with members alone (no separator before the first).
+    /// Each is also re-serialized through `serde_json`, the writer upstream
+    /// uses, so the key order is graded by that writer rather than by this
+    /// test's own spelling.
+    #[test]
+    fn local_data_writes_multicast_members_after_the_unicast_rows() {
+        let member = |zid: &str, whatami: Option<&str>, port: u16| AdminMulticastPeer {
+            peer_zid_hex: zid.to_string(),
+            whatami: whatami.map(str::to_string),
+            group: Some("udp/224.0.0.224:7446".to_string()),
+            links: vec![AdminLink {
+                src: "udp/10.0.0.1:41000".to_string(),
+                dst: format!("udp/10.0.0.2:{port}"),
+            }],
+        };
+        let members = vec![
+            member("e5f6", Some("client"), 40000),
+            // A role this node did not recognize, rendered as upstream's word.
+            member("a7b8", None, 40001),
+        ];
+        let unicast = AdminSession {
+            peer_zid_hex: "c3d4".to_string(),
+            whatami: Some("router".to_string()),
+            links: vec![],
+            shm: false,
+            weight: None,
+            region: None,
+        };
+        #[cfg(not(feature = "adminspace-plugins-handlers"))]
+        let plugins_tok = "null";
+        #[cfg(feature = "adminspace-plugins-handlers")]
+        let plugins_tok = "{}";
+        let rows = concat!(
+            r#"{"group":"udp/224.0.0.224:7446","links":[{"dst":"udp/10.0.0.2:40000","src":"udp/10.0.0.1:41000"}],"peer":"e5f6","whatami":"client"},"#,
+            r#"{"group":"udp/224.0.0.224:7446","links":[{"dst":"udp/10.0.0.2:40001","src":"udp/10.0.0.1:41000"}],"peer":"a7b8","whatami":"unknown"}"#,
+        );
+        let document = |sessions: Vec<AdminSession>| {
+            AdminLocalData {
+                zid_hex: "a1b2".to_string(),
+                version: "0.1.0".to_string(),
+                locators: vec![],
+                sessions,
+                multicast_peers: members.clone(),
+                plugins: vec![],
+                metadata_json: "null".to_string(),
+            }
+            .to_json()
+        };
+        let head =
+            format!(r#"{{"locators":[],"metadata":null,"plugins":{plugins_tok},"sessions":["#);
+        let tail = r#"],"version":"0.1.0","zid":"a1b2"}"#;
+        let with_unicast = document(vec![unicast]);
+        assert_eq!(
+            with_unicast,
+            format!(
+                r#"{head}{{"links":[],"peer":"c3d4","region":"unknown","shm":false,"weight":null,"whatami":"router"}},{rows}{tail}"#
+            )
+        );
+        let alone = document(vec![]);
+        assert_eq!(alone, format!("{head}{rows}{tail}"));
+        for doc in [&with_unicast, &alone] {
+            let value: serde_json::Value =
+                serde_json::from_str(doc).expect("the document parses as JSON");
+            assert_eq!(
+                &serde_json::to_string(&value).expect("re-serializes"),
+                doc,
+                "upstream's writer orders the keys the same way"
+            );
+        }
+    }
+
     #[test]
     fn unknown_peer_whatami_renders_as_zenoh_fallback() {
         // zenoh renders an unresolved peer role as the literal "unknown"
@@ -3310,6 +3458,7 @@ mod tests {
             zid_hex: "a1b2".to_string(),
             version: "0.1.0".to_string(),
             locators: vec![],
+            multicast_peers: vec![],
             sessions: vec![AdminSession {
                 peer_zid_hex: "c3d4".to_string(),
                 whatami: None,
@@ -3343,6 +3492,7 @@ mod tests {
             version: "v\"1\\0\n".to_string(),
             locators: vec![],
             sessions: vec![],
+            multicast_peers: vec![],
             plugins: vec![],
             metadata_json: "null".to_string(),
         };
@@ -4924,6 +5074,7 @@ mod tests {
             zid_hex: String::from("a1b2"),
             version: String::from("0.1.0"),
             locators: alloc::vec![String::from("tcp/127.0.0.1:7447")],
+            multicast_peers: alloc::vec![],
             // One session, so the `sessions[]` paths have an element to be null in.
             sessions: alloc::vec![AdminSession {
                 peer_zid_hex: String::from("c3d4"),
@@ -4996,6 +5147,7 @@ mod tests {
             version: String::from("0.1.0"),
             locators: alloc::vec![],
             sessions: alloc::vec![],
+            multicast_peers: alloc::vec![],
             // Deliberately EMPTY: this is the case the consumer could not read.
             plugins: alloc::vec![],
             metadata_json: String::from("null"),
@@ -5163,6 +5315,7 @@ mod tests {
             metadata_json: "null",
             read,
             stats: None,
+            multicast_peers: &[],
         }
     }
 

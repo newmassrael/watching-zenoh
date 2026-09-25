@@ -464,6 +464,71 @@ pub fn multicast_interface_addresses() -> Option<Vec<IpAddr>> {
     None
 }
 
+/// R2859 — EVERY unicast address, of either family, of every interface that can
+/// carry multicast: the wz counterpart of zenoh's
+/// `get_unicast_addresses_of_multicast_interfaces`
+/// (`commons/zenoh-util/src/net/mod.rs` @ `pub fn get_unicast_addresses_of_multicast_interfaces() -> Vec<IpAddr> {`).
+///
+/// NOT [`multicast_interface_addresses`], though the names are close and so are
+/// upstream's: that one keeps the first IPv4 address per interface, for the
+/// scouting sockets, while this one is what upstream's UDP multicast link reads
+/// to fill an unspecified local address, filtering by the group's family and
+/// loopback itself and taking the first
+/// (`io/zenoh-links/zenoh-link-udp/src/multicast.rs` @ `zenoh_util::net::get_unicast_addresses_of_multicast_interfaces()`).
+/// Order is `getifaddrs`' order, which is the order upstream's interface table
+/// is built in.
+///
+/// The qualifying rule is upstream's: UP, RUNNING and `IFF_MULTICAST`, and a
+/// multicast address is not a unicast one. The divergences are
+/// [`unicast_addresses_of_interface`]'s: resolved live per call, and `None` when
+/// the resolution could not run where upstream answers an empty vec.
+#[cfg(unix)]
+pub fn unicast_addresses_of_multicast_interfaces() -> Option<Vec<IpAddr>> {
+    let mut head: *mut libc::ifaddrs = std::ptr::null_mut();
+    // SAFETY: as in `interface_names_for` — `getifaddrs` allocates the list and
+    // writes its head through the out-pointer, returning 0 on success; on failure
+    // `head` is untouched and the early return never reads it.
+    if unsafe { libc::getifaddrs(&mut head) } != 0 {
+        return None;
+    }
+
+    let mut addrs: Vec<IpAddr> = Vec::new();
+    let mut cur = head;
+    while !cur.is_null() {
+        // SAFETY: `cur` is non-null and points at a node the successful
+        // `getifaddrs` above allocated; the list is not mutated while walked.
+        let ifa = unsafe { &*cur };
+        cur = ifa.ifa_next;
+
+        let flags = ifa.ifa_flags as i32;
+        if flags & libc::IFF_UP == 0
+            || flags & libc::IFF_RUNNING == 0
+            || flags & libc::IFF_MULTICAST == 0
+        {
+            continue;
+        }
+        if let Some(ip) = sockaddr_ip(ifa.ifa_addr) {
+            if !ip.is_multicast() && !addrs.contains(&ip) {
+                addrs.push(ip);
+            }
+        }
+    }
+
+    // SAFETY: `head` came from the successful `getifaddrs` above and is freed
+    // exactly once here; no node pointer outlives this call (the addresses are
+    // copied out by value).
+    unsafe { libc::freeifaddrs(head) };
+    Some(addrs)
+}
+
+/// Non-unix: no `getifaddrs`, so this cannot answer. `None`, which leaves the
+/// caller on the wildcard, and that is the answer upstream reaches on windows
+/// by returning an empty vec.
+#[cfg(not(unix))]
+pub fn unicast_addresses_of_multicast_interfaces() -> Option<Vec<IpAddr>> {
+    None
+}
+
 /// R2584 — the kernel index of the interface named `name`.
 ///
 /// IPv6 multicast selects an interface by INDEX where IPv4 selects it by address:

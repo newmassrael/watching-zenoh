@@ -278,6 +278,9 @@ pub fn host_admin_queryable(
             metadata_json: "null",
             read,
             stats: None,
+            // This node holds unicast sessions only, so there is no group
+            // member to list: upstream's answer for a node without one.
+            multicast_peers: &[],
         };
         let _ = answer_admin_query(query, out, &ctx, &sessions, &[], &[], &config_json);
     });

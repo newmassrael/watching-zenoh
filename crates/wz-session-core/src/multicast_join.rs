@@ -28,7 +28,6 @@ use alloc::vec::Vec;
 #[cfg(feature = "transport-qos")]
 use sce_forge_runtime::codec::SceCursor;
 use wz_codecs::join::Join;
-#[cfg(feature = "multicast-declarations")]
 use wz_codecs::whatami::WhatAmI;
 use wz_codecs::wire_const;
 
@@ -381,10 +380,9 @@ pub fn validate_join(join: &Join<'_>, params: &MulticastParams) -> Option<JoinBa
         // Always milliseconds here — decode_join projected the wire
         // T-flag seconds form back before this point (R311kr).
         lease_ms: join.lease,
-        // §5.21 router-multicast-faces (I3b) — the announcer's node role for the
-        // on-group Designated-Router election. `from_wire` maps the 2-bit JOIN
-        // whatami (Router=0b00); an unrecognized code yields `None`.
-        #[cfg(feature = "multicast-declarations")]
+        // The announcer's node role, for the member view and the on-group
+        // Designated-Router election (§5.21 I3b). `from_wire` maps the 2-bit
+        // JOIN whatami (Router=0b00); an unrecognized code yields `None`.
         whatami: WhatAmI::from_wire(join.whatami()),
     })
 }

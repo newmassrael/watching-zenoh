@@ -241,6 +241,22 @@ pub use wz_session_core::multicast_params::MulticastOutcome;
 // resolve.
 pub use wz_session_core::multicast_params::MulticastDriveConfig;
 
+/// R2859 — a group face's link as upstream labels a multicast link, `(src,
+/// group)`: the address this node's datagrams leave from, and the group they go
+/// to (`io/zenoh-links/zenoh-link-udp/src/multicast.rs` @ `fn get_src(&self) -> &Locator {`
+/// and `fn get_dst`). The one labelling both the stats registry and the admin
+/// member view use, so the two name a group the same way.
+///
+/// Refuses a driver with no group to send to: it is not a multicast link.
+#[cfg(feature = "transport-link-udp")]
+fn group_link_locators(link: &crate::UdpDriver) -> std::io::Result<(String, String)> {
+    let group = link.peer_addr().ok_or_else(|| {
+        std::io::Error::new(std::io::ErrorKind::NotConnected, "no group to send to")
+    })?;
+    let src = link.source_addr()?;
+    Ok((format!("udp/{src}"), format!("udp/{group}")))
+}
+
 /// R2848 (`transport-stats`) — the counts of ONE multicast transport, as a
 /// handle the drive loop records into and the node's registry reads from.
 ///
@@ -295,11 +311,8 @@ impl MulticastTransportStats {
     /// Refuses a driver with no group to send to: it is not a multicast link.
     #[cfg(feature = "transport-link-udp")]
     pub fn for_link(link: &crate::UdpDriver) -> std::io::Result<Self> {
-        let group = link.peer_addr().ok_or_else(|| {
-            std::io::Error::new(std::io::ErrorKind::NotConnected, "no group to send to")
-        })?;
-        let src = link.source_addr()?;
-        Ok(Self::new(&format!("udp/{src}"), &format!("udp/{group}")))
+        let (src, group) = group_link_locators(link)?;
+        Ok(Self::new(&src, &group))
     }
 
     fn with<T>(&self, f: impl FnOnce(&mut MulticastTransportStatsInner) -> T) -> T {
@@ -453,6 +466,7 @@ where
         |_subs: &[String]| {},
         None,
         &(),
+        None,
     )
     .await
 }
@@ -502,6 +516,7 @@ where
         |_subs: &[String]| {},
         Some(shutdown),
         &(),
+        None,
     )
     .await
 }
@@ -596,6 +611,7 @@ pub async fn drive_multicast_session_with_membership<D, T, F, G, H, R, const MAX
     on_group_subs: H,
     shutdown: Option<&mut tokio::sync::watch::Receiver<bool>>,
     stats: &R,
+    membership: Option<&McastGroupMembership>,
 ) -> MulticastOutcome
 where
     D: LinkDriver,
@@ -608,6 +624,10 @@ where
     // R2848 — and the transport's STATS recorder, the third optional concern,
     // passed the same way: `&()` records nothing, which is what the two
     // conveniences pass.
+    //
+    // R2859 — and the fourth, the member view a node's adminspace reads.
+    // `None` keeps no view, which is what the conveniences pass; a group face
+    // passes the handle its host holds.
     //
     // R2333 — this is the GENERAL entry point: membership relay AND the optional
     // graceful stop. It took no signal until this round, which is why the router
@@ -629,6 +649,7 @@ where
         on_group_subs,
         shutdown,
         stats,
+        membership,
     )
     .await
 }
@@ -670,6 +691,10 @@ async fn drive_multicast_session_inner<D, T, F, G, H, R, const MAX_PEERS: usize>
     // received (counted by the RX dispatch against its sender), and each peer
     // that arrives or leaves. `&()` on every entry point but the general one.
     stats: &R,
+    // R2859 — the member view, refreshed from the peer table at the loop tail
+    // whenever the table changes. `None` on every entry point but the general
+    // one.
+    membership: Option<&McastGroupMembership>,
 ) -> MulticastOutcome
 where
     D: LinkDriver,
@@ -747,6 +772,13 @@ where
     // reorder of the deduped `group_sub_keyexprs()` union is not a spurious change.
     #[cfg(feature = "multicast-declarations")]
     let mut last_group_subs: Vec<String> = Vec::new();
+    // R2859 — the member view last written to `membership`, for the same
+    // snapshot-diff: the view is written only when the table moved. `None`
+    // until the first write, so the first loop tail always publishes: this
+    // loop cannot know what the view held before it started, and a dispatcher
+    // it inherits may already have members, or may have none where the view
+    // still lists some.
+    let mut last_view: Option<Vec<wz_session_core::multicast_dispatch::MulticastMember>> = None;
 
     let mut iter: usize = 0;
     loop {
@@ -1021,6 +1053,21 @@ where
                 last_group_subs = subs;
             }
         }
+        // R2859 (§5.23 `adminspace-core`) — refresh the member view when the
+        // peer table moved: an admission or a same-address zid change in the
+        // RX arm, a lease evict in the sweep, a departing Close. Compared
+        // without collecting, so an unchanged table allocates nothing.
+        if let Some(membership) = membership {
+            // `map_or(true, ..)`: `is_none_or` postdates the workspace MSRV.
+            let moved = last_view
+                .as_ref()
+                .map_or(true, |last| !dispatcher.members().eq(last.iter().copied()));
+            if moved {
+                let now: Vec<_> = dispatcher.members().collect();
+                membership.set_members(&now);
+                last_view = Some(now);
+            }
+        }
     }
 }
 
@@ -1098,11 +1145,14 @@ pub fn spawn_router_mcast_egress(
     // (`io/zenoh-transport/src/multicast/link.rs` @ `ZRuntime::TX.spawn(async move {`):
     // a face that only sends has nothing else to do.
     let stop = spawn_group_face(
-        WzRuntime::Tx,
+        WzRuntime::Tx.handle(),
         "router multicast egress",
         router_group_params(zid, qos),
         opts,
         node_stats,
+        // No host reads this face's members: the egress helper hands back only
+        // its sender and its stop handle.
+        None,
         move |opts| {
             Box::pin(crate::UdpDriver::bind_multicast_tx(
                 group,
@@ -1193,11 +1243,17 @@ type GroupBind<'a> = core::pin::Pin<
 #[cfg(all(feature = "transport-multicast", feature = "transport-link-udp"))]
 #[allow(clippy::too_many_arguments)]
 fn spawn_group_face<B, F, G, H>(
-    pool: WzRuntime,
+    // R2859 — the caller's subsystem HANDLE, not a `WzRuntime` value: the
+    // caller names it (`WzRuntime::Rx.handle()`), which is where the
+    // subsystem-spawn gate reads the choice. A `WzRuntime` parameter spawned as
+    // `pool.spawn(..)` named no subsystem at either end, and the gate counted
+    // Rx as reached by nothing (hosted C0 on 36086732537 / 36088995113).
+    pool: &'static tokio::runtime::Handle,
     label: &'static str,
     params: wz_session_core::multicast_params::MulticastParams,
     opts: crate::McastGroupOptions,
     node_stats: Option<crate::node_stats::NodeStats>,
+    membership: Option<McastGroupMembership>,
     bind: B,
     mut on_event: F,
     mut outbound: UnboundedReceiver<MulticastTxItem>,
@@ -1238,6 +1294,22 @@ where
             let mut dispatcher =
                 MulticastDispatcher::<MCAST_MAX_PEERS>::new(MulticastConfig::new(params.lease_ms));
             let recorder = GroupFaceRecorder::open(node_stats.as_ref(), &driver, label);
+            // R2859 — this join's member view, labelled by the bound link as
+            // upstream labels a multicast transport's link. A link whose
+            // addresses cannot be read keeps no view, and says so, rather than
+            // listing members under a group it cannot name.
+            let membership_join =
+                membership
+                    .as_ref()
+                    .and_then(|membership| match group_link_locators(&driver) {
+                        Ok((src, group)) => Some(membership.open(src, group)),
+                        Err(e) => {
+                            log::warn!(
+                            "{label}: group link has no locators ({e}); its members are not listed"
+                        );
+                            None
+                        }
+                    });
             let outcome = drive_multicast_session_with_membership(
                 &mut dispatcher,
                 MulticastDriveConfig {
@@ -1255,11 +1327,13 @@ where
                 &mut on_group_subs,
                 Some(&mut shutdown),
                 recorder.recorder(),
+                membership_join.as_ref().map(|join| &join.membership),
             )
             .await;
             // This join's transport ends with its loop, before any re-join opens
-            // the next one.
+            // the next one — and its members with it.
             recorder.close();
+            drop(membership_join);
             let Some(delay) = rejoin.wait_for(&outcome) else {
                 return Some(outcome);
             };
@@ -1388,6 +1462,148 @@ impl GroupFaceRecorder {
     }
 
     fn close(self) {}
+}
+
+/// R2859 (§5.23 `adminspace-core`) — who is on a group face's group, as the
+/// face's own peer table holds it: the handle a node's adminspace reads to list
+/// each member in `sessions[]`, the way upstream walks each multicast
+/// transport's peers (`zenoh/src/net/runtime/adminspace.rs` @
+/// `for mcast_transport in transport_mgr.get_transports_multicast().await {`).
+///
+/// The drive loop refreshes it from the dispatcher
+/// ([`MulticastDispatcher::members`]) whenever the table changes, and a host
+/// reads it per GET. Empty while no join is live: upstream deletes a multicast
+/// transport whose link fails, so a face that is down between re-joins has no
+/// members to report, and a face that never came up has none either.
+///
+/// Shared by clone. The loop writes from the receive task and a host reads from
+/// its own, hence the mutex; one lock covers the member list and the two link
+/// locators, so a reader never pairs one join's members with another join's
+/// labels.
+#[derive(Clone, Debug, Default)]
+pub struct McastGroupMembership {
+    inner: std::sync::Arc<std::sync::Mutex<Option<McastGroupView>>>,
+}
+
+/// One join's view: the group's link, labelled as upstream labels it, and the
+/// members its peer table holds.
+#[derive(Debug)]
+struct McastGroupView {
+    /// This node's locator on the group, the address its datagrams leave from
+    /// (upstream's multicast link `src`).
+    src: String,
+    /// The group's locator (upstream's multicast link `dst`, and the row's
+    /// `group`).
+    group: String,
+    members: Vec<wz_session_core::multicast_dispatch::MulticastMember>,
+}
+
+impl McastGroupMembership {
+    /// A membership with no join live yet.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    fn with<T>(&self, f: impl FnOnce(&mut Option<McastGroupView>) -> T) -> T {
+        // A poisoned lock means a panic mid-update; the view is still the
+        // best this face has, so it is kept, as the stats handle keeps its
+        // counts.
+        let mut guard = match self.inner.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        f(&mut guard)
+    }
+
+    /// Start a join's view on the link labelled `src` / `group`, with no
+    /// member yet. The returned guard ends it.
+    ///
+    /// Public because a membership with no open join lists nobody, whatever
+    /// the loop writes: a host that drives
+    /// [`drive_multicast_session_with_membership`] itself, rather than through
+    /// a group face, opens the view for its link here. The group face labels
+    /// it off the bound UDP link.
+    pub fn open(&self, src: String, group: String) -> McastGroupMembershipJoin {
+        self.with(|view| {
+            *view = Some(McastGroupView {
+                src,
+                group,
+                members: Vec::new(),
+            })
+        });
+        McastGroupMembershipJoin {
+            membership: self.clone(),
+        }
+    }
+
+    /// Replace the members of the live join. No-op while none is live.
+    fn set_members(&self, members: &[wz_session_core::multicast_dispatch::MulticastMember]) {
+        self.with(|view| {
+            if let Some(view) = view.as_mut() {
+                view.members.clear();
+                view.members.extend_from_slice(members);
+            }
+        });
+    }
+
+    /// The members of the live join, in peer-table order.
+    pub fn members(&self) -> Vec<wz_session_core::multicast_dispatch::MulticastMember> {
+        self.with(|view| view.as_ref().map(|v| v.members.clone()).unwrap_or_default())
+    }
+
+    /// The live join's link as `(src, group)` locators, or `None` while no
+    /// join is live.
+    pub fn link(&self) -> Option<(String, String)> {
+        self.with(|view| view.as_ref().map(|v| (v.src.clone(), v.group.clone())))
+    }
+
+    /// The live join's members as adminspace `sessions[]` rows, the shape of
+    /// upstream's `transport_multicast_peer_to_json`: the member's zid and
+    /// role, the group, and one link from this node's locator on the group to
+    /// the member's (`io/zenoh-transport/src/multicast/transport.rs` @
+    /// `link.dst = p.locator.clone();`).
+    #[cfg(feature = "adminspace-core")]
+    pub fn admin_peers(&self) -> Vec<wz_session_core::adminspace::AdminMulticastPeer> {
+        self.with(|view| {
+            let Some(view) = view.as_ref() else {
+                return Vec::new();
+            };
+            view.members
+                .iter()
+                .map(|m| wz_session_core::adminspace::AdminMulticastPeer {
+                    peer_zid_hex: wz_session_core::zid_hex::zid_to_zenoh_hex(m.peer.as_slice()),
+                    whatami: m.whatami.map(|w| String::from(w.to_str())),
+                    group: Some(view.group.clone()),
+                    links: vec![wz_session_core::adminspace::AdminLink {
+                        src: view.src.clone(),
+                        dst: format!("udp/{}", m.locator),
+                    }],
+                })
+                .collect()
+        })
+    }
+}
+
+/// One join's hold on a [`McastGroupMembership`]: ending it (on drop, so a
+/// cancelled face task ends it too) empties the view, since the transport that
+/// held those members is gone.
+#[derive(Debug)]
+pub struct McastGroupMembershipJoin {
+    membership: McastGroupMembership,
+}
+
+impl McastGroupMembershipJoin {
+    /// The membership this join writes, which is what the drive loop is
+    /// given.
+    pub fn membership(&self) -> &McastGroupMembership {
+        &self.membership
+    }
+}
+
+impl Drop for McastGroupMembershipJoin {
+    fn drop(&mut self) {
+        self.membership.with(|view| *view = None);
+    }
 }
 
 /// R2376 (open-debt item 15, `session-reconnect`) — the group face's REJOIN
@@ -1552,6 +1768,8 @@ where
 ///   Designated-Router election candidates).
 /// - `group_subs` — the deduped group-subscriber key expressions, on change (sub
 ///   plane, S2 — advertised into the unicast mesh).
+/// - `membership` — every member on the group, read on demand (R2859 — the
+///   adminspace `sessions[]` rows).
 /// - `stop` — the face's stop handle (R2333).
 ///
 /// SELF-ECHO is handled by construction: the face's own traffic loops back with
@@ -1572,6 +1790,10 @@ pub struct RouterMcastGroup {
     pub members: UnboundedReceiver<Vec<Vec<u8>>>,
     /// The group-subscriber key expressions, on change.
     pub group_subs: UnboundedReceiver<Vec<String>>,
+    /// R2859 — every member on the group, of any role, as the face's peer
+    /// table holds them: what the node's adminspace lists in `sessions[]`.
+    /// Unlike `members`, a view read on demand rather than a stream of changes.
+    pub membership: McastGroupMembership,
     /// The face's stop handle.
     pub stop: McastFaceStop,
 }
@@ -1618,16 +1840,18 @@ pub fn spawn_router_mcast_group(
     use crate::accept_loop::{McastIngressBody, McastIngressItem};
 
     let group: core::net::IpAddr = group.into();
+    let membership = McastGroupMembership::new();
     let (outbound, outbound_rx) = tokio::sync::mpsc::unbounded_channel();
     let (ingress_tx, ingress) = tokio::sync::mpsc::unbounded_channel::<McastIngressItem>();
     let (members_tx, members) = tokio::sync::mpsc::unbounded_channel::<Vec<Vec<u8>>>();
     let (group_subs_tx, group_subs) = tokio::sync::mpsc::unbounded_channel::<Vec<String>>();
     let stop = spawn_group_face(
-        WzRuntime::Rx,
+        WzRuntime::Rx.handle(),
         "router multicast group",
         router_group_params(zid, qos),
         opts,
         node_stats,
+        Some(membership.clone()),
         move |opts| {
             Box::pin(crate::UdpDriver::bind_multicast_link(
                 group,
@@ -1715,6 +1939,7 @@ pub fn spawn_router_mcast_group(
         ingress,
         members,
         group_subs,
+        membership,
         stop,
     }
 }
@@ -2145,6 +2370,7 @@ mod tests {
             |_subs: &[String]| {},
             None,
             &(),
+            None,
         )
         .await;
         assert_eq!(admitted, MulticastOutcome::IterationLimit);
@@ -2168,6 +2394,7 @@ mod tests {
             |_subs: &[String]| {},
             Some(&mut rx),
             &(),
+            None,
         )
         .await;
 
@@ -2181,6 +2408,109 @@ mod tests {
             dispatcher.active_peers(),
             0,
             "and must clear the peer table on the way out, like its twin",
+        );
+    }
+
+    /// R2859 (§5.23 `adminspace-core`) — the drive loop keeps a group face's
+    /// member view in step with its peer table, and the view renders the rows
+    /// a node's adminspace lists: a member's JOIN puts its row in, with the
+    /// group and a link from this node's locator to the member's address, and
+    /// the member's departing Close takes it out. Ending the join empties the
+    /// view, as upstream's deleted transport lists no peer.
+    ///
+    /// The control is the first assertion: without the loop tail's refresh the
+    /// view stays empty however many members the table admits. The second run
+    /// starts on the table the first one filled, which is the case that found
+    /// the diff's baseline had to be "nothing written yet" rather than "empty":
+    /// with an empty baseline, the emptied table matched it and the departed
+    /// member stayed listed.
+    #[cfg(feature = "adminspace-core")]
+    #[tokio::test]
+    async fn the_drive_loop_keeps_the_member_view_the_admin_rows_come_from() {
+        use wz_session_core::adminspace::{AdminLink, AdminMulticastPeer};
+
+        let peer = [0x01, 0x02, 0x03, 0x04];
+        let group = "udp/224.0.0.224:7446";
+        let membership = McastGroupMembership::new();
+        let join = membership.open("udp/127.0.0.1:41000".to_string(), group.to_string());
+        let mut dispatcher = MulticastDispatcher::<4>::new(MulticastConfig::new(5_000));
+        let clock = TokioTime::new();
+        let self_params = params(&[0xAA, 0xBB, 0xCC, 0xDD]);
+        let cfg = || MulticastDriveConfig {
+            params: &self_params,
+            tick_ms: 5,
+            max_iters: Some(5),
+        };
+
+        let mut driver = FakeDriver::with([(join0(&params(&peer)), src(2))]);
+        drive_multicast_session_with_membership(
+            &mut dispatcher,
+            cfg(),
+            &mut driver,
+            &clock,
+            |_| {},
+            &mut idle_outbound(),
+            |_members: &[Vec<u8>]| {},
+            |_subs: &[String]| {},
+            None,
+            &(),
+            Some(&membership),
+        )
+        .await;
+        assert_eq!(
+            membership.admin_peers(),
+            vec![AdminMulticastPeer {
+                peer_zid_hex: wz_session_core::zid_hex::zid_to_zenoh_hex(&peer),
+                whatami: Some("peer".to_string()),
+                group: Some(group.to_string()),
+                links: vec![AdminLink {
+                    src: "udp/127.0.0.1:41000".to_string(),
+                    dst: "udp/127.0.0.1:2".to_string(),
+                }],
+            }],
+            "the admitted member is a row"
+        );
+
+        let mut driver = FakeDriver::with([(
+            wz_session_core::handshake_encode::encode_multicast_close(),
+            src(2),
+        )]);
+        drive_multicast_session_with_membership(
+            &mut dispatcher,
+            cfg(),
+            &mut driver,
+            &clock,
+            |_| {},
+            &mut idle_outbound(),
+            |_members: &[Vec<u8>]| {},
+            |_subs: &[String]| {},
+            None,
+            &(),
+            Some(&membership),
+        )
+        .await;
+        assert_eq!(dispatcher.active_peers(), 0, "the Close evicted the member");
+        assert!(
+            membership.admin_peers().is_empty(),
+            "a departed member is no longer a row"
+        );
+
+        // A view with a member in it, then the join ends.
+        membership.set_members(&[wz_session_core::multicast_dispatch::MulticastMember {
+            peer: wz_session_core::multicast_peer_lost::MulticastPeerId::from_wire(&peer),
+            whatami: None,
+            locator: src(2),
+        }]);
+        assert_eq!(membership.members().len(), 1);
+        assert_eq!(
+            membership.link(),
+            Some(("udp/127.0.0.1:41000".to_string(), group.to_string()))
+        );
+        drop(join);
+        assert_eq!(membership.link(), None);
+        assert!(
+            membership.admin_peers().is_empty(),
+            "a face whose join ended is on no group"
         );
     }
 
@@ -2997,6 +3327,7 @@ mod tests {
             |_subs: &[String]| {},
             None,
             &stats,
+            None,
         )
         .await;
         assert_eq!(outcome, MulticastOutcome::IterationLimit);
@@ -3819,6 +4150,7 @@ mod tests {
                 |_subs: &[String]| {},
                 None,
                 &stats,
+                None,
             )
             .await;
 

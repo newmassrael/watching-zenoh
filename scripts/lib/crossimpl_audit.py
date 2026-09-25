@@ -735,7 +735,14 @@ HOST_GATED_CI_TARGETS: dict[str, str] = {
 # moving, the R2790 / R2804 class again; hosted A4 redded on 35917348925.
 # Measured `937` by `run-ci.sh --layer A4` at R2821's HEAD, whose own commits
 # add no `wz-proves` line.
-FOREIGN_ADJUDICATOR_LINKS = 937
+# R2859 — 937 -> 939. +1 is R2857's `0f4a1603`
+# (`wz_storage_host_serves_its_config_metadata_as_zenohd_does`, a stock zenohd
+# and a pico `z_get` reading `metadata`), pushed without this constant moving:
+# the hosted A4 red on 36086732537 / 36088995113 (`measured 938, declared 937`).
+# +1 is this round's `wz_router_lists_a_pico_multicast_member_in_its_sessions`
+# (1 test x 1 atom, `adminspace-core`). Measured `939` by `run-ci.sh --layer A4`
+# at this round's working tree.
+FOREIGN_ADJUDICATOR_LINKS = 939
 
 # ── Execution disclosure ────────────────────────────────────────────────────────
 #

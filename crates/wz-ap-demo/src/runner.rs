@@ -4960,6 +4960,10 @@ async fn run_peer_until(
                 metadata_json: &metadata_json,
                 read: admin_read,
                 stats: stats.as_ref(),
+                // R2859 — this peer joins no data-plane group (the router host
+                // is the one run mode that runs a group face), so it lists no
+                // multicast member.
+                multicast_peers: &[],
             };
             // R311y237 — the node's compiled-in plugin registry (wz-native subsystem
             // set; e.g. storage_manager under `storage-backend`). Empty without the
@@ -6508,7 +6512,7 @@ async fn run_router_hat_until(
     // on-group ROUTER members (the Designated-Router candidates) and S2 the
     // group-SUBSCRIBER key expressions, advertised into the mesh.
     #[cfg(feature = "router-multicast-faces")]
-    let (mcast_ingress, mcast_members, mcast_group_subs) = {
+    let (mcast_ingress, mcast_members, mcast_group_subs, mcast_membership) = {
         let face = wz::runtime_tokio::multicast_glue::spawn_router_mcast_group(
             mcast_group,
             mcast_port,
@@ -6532,10 +6536,19 @@ async fn run_router_hat_until(
             Some(face.ingress),
             Some(face.members),
             Some(face.group_subs),
+            // R2859 — every member on the group, for the adminspace
+            // `sessions[]` rows upstream lists after the unicast ones.
+            face.membership,
         )
     };
     #[cfg(not(feature = "router-multicast-faces"))]
     let (mcast_ingress, mcast_members, mcast_group_subs) = (None, None, None);
+    // A router built without its adminspace has no reader for the member view.
+    #[cfg(all(
+        feature = "router-multicast-faces",
+        not(feature = "adminspace-router-linkstate")
+    ))]
+    drop(mcast_membership);
 
     // The runtime connect-list reconcile channel (`router-connect-reconcile`): the
     // loop drains `FaceSources::reconcile`; the host holds the sender and fires it
@@ -6693,6 +6706,8 @@ async fn run_router_hat_until(
             wz::runtime_tokio::admin_read_permit(&admin_cfg.borrow().admin_permissions())
         );
         let node_stats_h = node_stats.clone();
+        #[cfg(feature = "router-multicast-faces")]
+        let membership_h = mcast_membership.clone();
         let handler = move |view: &dyn QueryView, out: &mut dyn ReplyOut| {
             // Resolved per GET off the shared config, exactly as the peer host does —
             // zenoh re-reads the live config inside its admin handler
@@ -6716,6 +6731,15 @@ async fn run_router_hat_until(
             // §5.23 `adminspace-core` — per GET off the same shared config the
             // permit above is read from.
             let metadata_json = String::from(admin_cfg.borrow().admin_metadata_json());
+            // R2859 — the members of this router's group, per GET off the face's
+            // own peer table: the rows upstream lists after the unicast ones. A
+            // router built without a group face is on no group and lists none.
+            #[cfg(feature = "router-multicast-faces")]
+            let multicast_peers = membership_h.admin_peers();
+            #[cfg(not(feature = "router-multicast-faces"))]
+            let multicast_peers: Vec<
+                wz::runtime_tokio::adminspace::AdminMulticastPeer,
+            > = Vec::new();
             let ctx = AdminAnswerCtx {
                 zid_hex: &zid_hex,
                 whatami: whatami_str,
@@ -6725,6 +6749,7 @@ async fn run_router_hat_until(
                 read: admin_read,
                 // R2844 — the node's registry; see the peer host above.
                 stats: stats.as_ref(),
+                multicast_peers: &multicast_peers,
             };
             // R311y237 — the router node's compiled-in plugin registry.
             #[cfg(feature = "adminspace-plugins-handlers")]

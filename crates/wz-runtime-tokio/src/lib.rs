@@ -2884,7 +2884,7 @@ impl UdpDriver {
         plan.pin_egress(&raw)?;
         // R2791 — `#bind=`. This is the socket upstream binds to it, and the
         // fallback is the wildcard this line used to pass unconditionally.
-        raw.bind(&plan.egress_local_addr(cfg.bind, port)?.into())?;
+        raw.bind(&plan.egress_local_addr(cfg.bind, cfg.iface, port)?.into())?;
         // R311y832 — this is the SEND-only half, so the hop limit belongs here
         // most directly; it is zenoh's `ucast_sock`, the socket
         // `multicast.rs:363` sets the TTL on.
@@ -3671,12 +3671,24 @@ impl McastPlan {
     ///   silently falling back to the wildcard would egress from an address the
     ///   operator did not ask for -- the same posture as the group parse.
     ///
-    /// What is NOT mirrored: upstream then fills an UNSPECIFIED `local_addr`
-    /// from the interface address. wz pins egress by interface INDEX through
-    /// `pin_egress` instead, so there is no unspecified address left to fill.
-    fn egress_local_addr(&self, bind: Option<&str>, group_port: u16) -> io::Result<SocketAddr> {
+    /// R2859 — and upstream then fills an UNSPECIFIED `local_addr` from an
+    /// interface address, which this now does too ([`Self::fill_unspecified`]).
+    /// This paragraph used to say that was deliberately not mirrored, because wz
+    /// pins egress by interface INDEX through `pin_egress` and so "there is no
+    /// unspecified address left to fill". The pin is right about the wire and
+    /// wrong about the address: the socket still bound the wildcard, and the
+    /// bound address is what names the link. Upstream reports it as the
+    /// multicast link's `src`, in the adminspace `sessions[]` row and in the stats
+    /// registry's labels, so wz reported `udp/0.0.0.0:<port>` where upstream
+    /// reports the interface's own address.
+    fn egress_local_addr(
+        &self,
+        bind: Option<&str>,
+        iface: Option<&str>,
+        group_port: u16,
+    ) -> io::Result<SocketAddr> {
         let Some(bind) = bind else {
-            return Ok(self.wildcard(0));
+            return Ok(self.fill_unspecified(self.wildcard(0), iface));
         };
         let bind_addr: SocketAddr = bind.parse().map_err(|_| {
             io::Error::new(
@@ -3694,8 +3706,81 @@ impl McastPlan {
                 io::ErrorKind::InvalidInput,
                 format!("Protocols must match: Cannot bind to IPv4 {local} and join IPv6 {dest}"),
             )),
-            _ => Ok(bind_addr),
+            // Upstream fills after EITHER branch, so a `#bind=` naming the
+            // wildcard is filled like no `#bind=` at all.
+            _ => Ok(self.fill_unspecified(bind_addr, iface)),
         }
+    }
+
+    /// R2859 — upstream's fill of an unspecified multicast send address
+    /// (`io/zenoh-links/zenoh-link-udp/src/multicast.rs` @ `// Get default iface address to bind the socket on if provided`):
+    /// the `#iface=` value's address in the group's family when one is given,
+    /// else the first non-loopback address of the group's family on an interface
+    /// that can carry multicast, else the wildcard unchanged. A specified
+    /// address is returned as it is.
+    ///
+    /// One divergence, for bindability: an IPv6 LINK-LOCAL address is bound with
+    /// the interface's scope id, where upstream sets the address alone. The
+    /// kernel refuses to bind a link-local address without a scope, so the
+    /// unscoped form would turn upstream's fill into a failed bind on exactly
+    /// the hosts whose first v6 address is link-local.
+    fn fill_unspecified(&self, addr: SocketAddr, iface: Option<&str>) -> SocketAddr {
+        use crate::link_interfaces::{
+            interface_indices_of_address, unicast_addresses_of_interface,
+            unicast_addresses_of_multicast_interfaces,
+        };
+        use std::net::IpAddr;
+
+        if !addr.ip().is_unspecified() {
+            return addr;
+        }
+        let v6 = matches!(self, Self::V6 { .. });
+        let family = |ip: &IpAddr| ip.is_ipv6() == v6;
+        let chosen = match (self, iface) {
+            // The v4 plan already resolved `#iface=` to the address the
+            // membership and the egress pin use; it is the one upstream picks.
+            (
+                Self::V4 {
+                    iface: Some(ip), ..
+                },
+                _,
+            ) => Some(IpAddr::V4(*ip)),
+            // Only an `#iface=` the plan HONOURED (it resolved an index): a
+            // build without `locator-iface` ignores the key, and the fill must
+            // not honour what the membership and the egress pin did not.
+            (Self::V6 { iface: Some(_), .. }, Some(name)) => match name.parse::<IpAddr>() {
+                Ok(ip) => Some(ip).filter(family),
+                Err(_) => unicast_addresses_of_interface(name)
+                    .ok()
+                    .and_then(|ips| ips.into_iter().find(family)),
+            },
+            _ => unicast_addresses_of_multicast_interfaces()
+                .and_then(|ips| ips.into_iter().find(|ip| !ip.is_loopback() && family(ip))),
+        };
+        let Some(ip) = chosen else {
+            return addr;
+        };
+        let mut filled = SocketAddr::new(ip, addr.port());
+        if let (SocketAddr::V6(v6addr), IpAddr::V6(ip6)) = (&mut filled, ip) {
+            // `fe80::/10`, spelled out: `is_unicast_link_local` postdates the MSRV.
+            if ip6.segments()[0] & 0xffc0 == 0xfe80 {
+                let scope = match self {
+                    Self::V6 {
+                        iface: Some(index), ..
+                    } => Some(*index),
+                    _ => interface_indices_of_address(ip)
+                        .ok()
+                        .and_then(|ix| ix.into_iter().next()),
+                };
+                match scope {
+                    Some(scope) => v6addr.set_scope_id(scope),
+                    // A link-local address with no known interface cannot be
+                    // bound; the wildcard can.
+                    None => return addr,
+                }
+            }
+        }
+        filled
     }
 
     /// Where `LinkDriver::send` writes: the group itself.
@@ -3889,6 +3974,36 @@ mod udp_multicast_config_tests {
     /// wiring is removed. Reading the socket rather than the config is what
     /// makes this a witness at all -- the config round-trips whether or not it
     /// ever reaches a setsockopt, which is the state this round found.
+    /// R2859 — a sender pinned by `#iface=` binds that interface's address, as
+    /// upstream's fill does, so the link's `src` names the interface rather than
+    /// the wildcard. Read back from the kernel. `lo` is the one interface every
+    /// Linux runner has, and its address is fixed. Needs `locator-iface`: without
+    /// it the key is ignored, and the sender takes the default fill instead.
+    #[tokio::test]
+    #[cfg(all(target_os = "linux", feature = "locator-iface"))]
+    async fn an_iface_pinned_sender_binds_the_interfaces_address() {
+        let d = UdpDriver::bind_multicast_tx(
+            GROUP,
+            7446,
+            McastSocketConfig {
+                iface: Some("lo"),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("bind a sender on lo");
+        let local = d.source_addr().expect("addr");
+        assert_eq!(
+            local.ip(),
+            std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST)
+        );
+        assert_ne!(
+            local.port(),
+            0,
+            "the port is still the kernel's ephemeral one"
+        );
+    }
+
     #[tokio::test]
     #[cfg(target_os = "linux")]
     async fn the_commons_socket_keys_reach_the_multicast_sockets() {
@@ -3901,10 +4016,20 @@ mod udp_multicast_config_tests {
             .expect("bound")
             .local_addr()
             .expect("addr");
-        assert!(
-            unasked.ip().is_unspecified(),
-            "the fallback is the family wildcard, so a pinned address cannot pass for it"
+        // R2859 — the unasked value is upstream's FILL, no longer the bare
+        // wildcard: the first non-loopback v4 address of an interface that can
+        // carry multicast, and the wildcard only on a host that has none. Either
+        // way it is never the loopback address the asked arm below binds, so a
+        // pinned `127.0.0.1` still cannot pass for it.
+        let expected = crate::link_interfaces::unicast_addresses_of_multicast_interfaces()
+            .and_then(|ips| ips.into_iter().find(|ip| ip.is_ipv4() && !ip.is_loopback()))
+            .unwrap_or(std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED));
+        assert_eq!(
+            unasked.ip(),
+            expected,
+            "the fallback is upstream's interface fill, else the family wildcard"
         );
+        assert!(!unasked.ip().is_loopback());
 
         let d = UdpDriver::bind_multicast_tx(
             GROUP,

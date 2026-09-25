@@ -4468,6 +4468,10 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
                 metadata_json: &live.metadata_json,
                 read,
                 stats: live.stats.as_ref(),
+                // R2859 — this host is a unicast Session: `declare_adminspace`
+                // exists only on that typestate, so it is on no group and
+                // lists no member.
+                multicast_peers: &[],
             };
             // R2645 — the registry now comes from the LIVE source with the permit
             // and the config, rather than being rebuilt here from a compiled list.

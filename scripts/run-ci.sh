@@ -15627,6 +15627,16 @@ run: bash scripts/build-zenoh-pico-cli.sh)"
     _runci_guarded_test "M router multicast group in its node registry" 1 \
         cargo test -p wz-integration-tests \
         --test wz_router_serves_its_multicast_group_in_its_node_registry -- --ignored || return 1
+    # R2859 (`adminspace-core`) — the same router PROCESS lists a foreign pico
+    # multicast member in its adminspace `sessions[]`, as a row of upstream's
+    # multicast shape: the group face the router joins with is the one its
+    # admin handler reads. Reuses the demo built just above (its features are a
+    # superset of this leg's); needs the pico CLI, which the presence guard at
+    # the head of this layer has already required. 1 = the number this command
+    # PRINTED.
+    _runci_guarded_test "M router lists a pico multicast member" 1 \
+        cargo test -p wz-integration-tests \
+        --test wz_router_lists_a_pico_multicast_member_in_its_sessions -- --ignored || return 1
 }
 
 # ─── Layer Z — wz <-> zenohd (zenoh-full reference router) interop ────
