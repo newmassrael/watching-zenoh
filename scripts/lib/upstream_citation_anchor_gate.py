@@ -426,7 +426,10 @@ _ANY_TOKEN = re.compile(r"(?<![\w/.-])(\w[\w-]*)/[\w/.-]+\.rs")
 #: COUNT went with it. Both cited the upstream queryable module and the pico
 #: primitives file by line; their replacements say the same thing as needles.
 LINE_BUDGET = 286
-BARE_BUDGET = 58
+#: 58 -> 57 (R2862). The SHM payload provider's module doc named the upstream
+#: POSIX shm implementation file with no anchor; the rewrite that mirrors the
+#: metadata segment cites the files it follows by needle instead.
+BARE_BUDGET = 57
 #: The root-less axis, after R2317 repaired the 49 citations that named a file
 #: gone at the pin. Same two-directional ratchet as LINE and BARE.
 #:
@@ -484,7 +487,10 @@ BARE_BUDGET = 58
 # exactly this class in exactly this file. A budget note explaining a citation
 # must not BE one.
 ROOTLESS_LINE_BUDGET = 92
-ROOTLESS_BARE_BUDGET = 36
+# R2862 — 36 -> 35. The auth segment's helpers moved into the shared POSIX
+# segment module, and the retry-count note that named the upstream segment file
+# with no root went with them; its replacement is anchored.
+ROOTLESS_BARE_BUDGET = 35
 #: Root-less LINE citations whose file EXISTS at the pin but whose line number
 #: is past its end -- 1.5.0 line numbers on files that shrank. Measured, not
 #: chosen, and graded only by the RESOLUTION arm (it takes a checkout to know).
@@ -637,7 +643,11 @@ ROOTLESS_UNDECLARED_BUDGET = 649
 # with the constant whose doc carried it.
 # 779 -> 777 (R2850, paid by R2852): the same two occurrences as the budget
 # above, retired with the text R2850 deleted.
-ROOTLESS_TOTAL_BUDGET = 777
+# 777 -> 776 (R2862): the auth segment's note on where upstream's segment used
+# to live named the array module with no root; R2862's rooted citation of a
+# sibling module made that directory a graded segment, and the note now carries
+# its root and an anchor.
+ROOTLESS_TOTAL_BUDGET = 776
 
 #: A LIVE invocation of the RESOLUTION arm. R2242 split this gate in two and,
 #: in doing so, made `--resolve` a flag someone can simply stop passing: delete

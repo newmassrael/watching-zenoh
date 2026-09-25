@@ -16,7 +16,8 @@
 //! @ `pub struct TXAuthSegment`; 1.10.0 split the old single
 //! `ext/shm.rs` @ REMOVED into
 //! `ext/shm/{mod,auth,handoff,segment}.rs` and moved the segment out of
-//! `zenoh-shm`'s `posix_shm/array.rs`).
+//! `zenoh-shm`'s array type,
+//! `commons/zenoh-shm/src/posix_shm/array.rs` @ `pub struct ArrayInSHM<ID, Elem, ElemIndex>`).
 //!
 //! ## The layout is a wire format
 //!

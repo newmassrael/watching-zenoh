@@ -2172,7 +2172,12 @@ PIN_NO_SYMBOL = 2
 # COMPLETE, so the wz citations its PARTIAL reason carried leave the census
 # with it. 47 - 43 = 4, the census's own FAIL line (`wz citations: 43 against
 # a pin of 47`), with PIN_AMBIGUOUS holding at 12.
-PIN_WZ_CITATIONS = 43
+#
+# R2862 — 43 -> 46, RISING by three citations in one atom: `transport-shm`
+# stays PARTIAL, and its correction cites three wz files: the session-core
+# descriptor, the runtime provider's layout pin and the shared POSIX segment
+# module. 46 - 43 = 3, the census's own FAIL line.
+PIN_WZ_CITATIONS = 46
 # R2626 — 44 -> 42, and this one is worth a sentence because it HELD through
 # every earlier retirement in this run (R2612, R2622). `time-hlc`'s reason is the
 # first retiree carrying AMBIGUOUS citations of its own: its oldest clauses cite

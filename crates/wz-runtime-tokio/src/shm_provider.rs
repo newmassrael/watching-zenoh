@@ -9,8 +9,9 @@
 //! # R2862 — the payload is addressed the way upstream addresses it
 //!
 //! Upstream never names a data segment on the wire. Its `ShmBufInfo` names a
-//! header SLOT in a METADATA segment (`commons/zenoh-shm/src/metadata/segment.rs`
-//! @ `pub struct Metadata<const S: usize> {`), and that header holds the data
+//! header SLOT in a METADATA segment
+//! (`commons/zenoh-shm/src/metadata/segment.rs` @ `pub struct Metadata<const S: usize> {`),
+//! and that header holds the data
 //! segment's id, the chunk's offset in it, the chunk's length, the protocol
 //! that made it, a refcount, a generation and an invalidation flag
 //! (`commons/zenoh-shm/src/header/chunk_header.rs` @
