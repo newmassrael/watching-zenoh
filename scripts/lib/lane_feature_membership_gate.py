@@ -202,7 +202,12 @@ def ignored_tests(tests_dir=TESTS_DIR, packages=None):
 # ── side B: the lanes ────────────────────────────────────────────────
 LAYER_FN = re.compile(r'^(layer_[a-z0-9_]+)\(\)\s*\{', re.M)
 CARGO_TEST = re.compile(r'cargo test\b[^\n]*')
-CARGO_BUILD = re.compile(r'cargo build\b[^\n]*')
+# R2861 — builds are read by `feature_closure.cargo_builds`, not by a regex of
+# this gate's own. The one this used, `cargo build\b[^\n]*`, ran past `&&`:
+# continuations are joined before it ran, so `cargo build -p wz-ap-demo
+# --features … && cargo build -p wz-e2e-admin-probe` was ONE match, the second
+# `-p` overwrote the package, the demo build vanished, and Layer M's two admin
+# legs were graded against the earlier, featureless demo.
 
 
 class Unexpressable(Exception):
@@ -357,17 +362,12 @@ def lane_table(run_ci=RUN_CI):
         begin, name = starts[i]
         body = text[begin:starts[i + 1][0]]
         events = []
-        for m in CARGO_BUILD.finditer(body):
-            cmd = " ".join(m.group(0).split())
-            toks = [t.rstrip(")") for t in cmd.split()]
-            pkg, feats = None, ()
-            for j, t in enumerate(toks):
-                if t in ("-p", "--package") and j + 1 < len(toks):
-                    pkg = toks[j + 1]
-                elif t == "--features" and j + 1 < len(toks):
-                    feats = tuple(sorted(toks[j + 1].strip('"\'').split(",")))
+        # R2861 — through `feature_closure.cargo_builds`, the one reader of
+        # run-ci.sh's builds (the note above CARGO_TEST names the defect a
+        # reader of this gate's own carried).
+        for offset, pkg, feats in feature_closure.cargo_builds(body):
             if pkg:
-                events.append((m.start(), "build", (pkg, feats)))
+                events.append((offset, "build", (pkg, tuple(sorted(feats)))))
         for m in CARGO_TEST.finditer(body):
             cmd = " ".join(m.group(0).split())
             if "--ignored" in cmd:
@@ -581,6 +581,23 @@ def selftest():
             "layer_e() {\n"
             '    (cd crates && cargo test -p wz-integration-tests --test beta '
             '"$undeclared" -- --ignored)\n'
+            "}\n"
+            # R2861 — TWO builds chained by `&&` in one subshell, the second a
+            # different package, with the first's feature list continued
+            # onto its own line: Layer M's shape when it rebuilds the demo
+            # and the admin probe together.
+            # ⚠ The EARLIER plain build is load-bearing: without it the chained
+            # build's loss leaves `demo` unbuilt, the test reads UNGRADED, and
+            # this arm passed on the broken parser (measured, R2861). With it,
+            # the loss grades the test against the binary WITHOUT `needed`.
+            "layer_f() {\n"
+            "    (cd crates && cargo build -p demo --features harmless --quiet)\n"
+            "    (cd crates \\\n"
+            "        && cargo build -p demo --quiet --features \\\n"
+            "            needed,harmless \\\n"
+            "        && cargo build -p probe --quiet) || return 1\n"
+            "    (cd crates && cargo test -p wz-integration-tests --test alpha "
+            "alpha_needs_a_feature -- --ignored --exact)\n"
             "}\n")
         crates = d / "crates"
         crates.mkdir()
@@ -617,7 +634,14 @@ def selftest():
         shapes.append(("an absent feature with NO cfg site is silent",
                        all(v[3] != "inert" for v in res["violations"])))
         shapes.append(("a comment is not an invocation",
-                       "layer_a" in res["lanes"] and len(res["lanes"]) == 4))
+                       "layer_a" in res["lanes"] and len(res["lanes"]) == 5))
+        # R2861 — the chained build attributes `needed` to `demo`, so the
+        # test that needs it grades clean in layer_f. Read as ONE build, the
+        # second `-p` overwrote the package and the demo build vanished.
+        shapes.append(("a build chained by `&&` is read as its own build",
+                       not any(v[1] == "layer_f" for v in res["violations"])
+                       and any(r["fn"] == "alpha_needs_a_feature"
+                               for r in res["tests"])))
     ok = True
     for name, passed in shapes:
         print("  %s %s" % ("ok  " if passed else "FAIL", name))

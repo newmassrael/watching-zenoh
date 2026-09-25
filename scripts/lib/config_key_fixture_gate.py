@@ -88,6 +88,7 @@ import rust_comments  # noqa: E402  -- after the path insert that finds it
 # item 537's business, not this gate's; the dependency fails LOUDLY (ImportError)
 # if that script is reshaped, which is the acceptable direction.
 import deepenable_audit  # noqa: E402
+import feature_closure  # noqa: E402  -- the one reader of run-ci.sh's builds
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 KEY_SOURCE = REPO_ROOT / "crates" / "wz-runtime-tokio" / "src" / "zenoh_config.rs"
@@ -442,21 +443,22 @@ def wire_leg_lane_features() -> tuple[frozenset[str], list[str]]:
             f"in {rel(RUN_CI)} — without it this gate cannot say which build the "
             f"wire claims were measured on"
         ]
-    builds = list(
-        re.finditer(
-            # R2845 — `/` admitted: a dependency's feature (`wz/x`) is a valid
-            # `--features` spec, and the class used to truncate at it.
-            r"cargo build -p wz-ap-demo[^\n|)]*?--features ([A-Za-z0-9_,/-]+)",
-            txt[:invocation],
-        )
-    )
-    if not builds:
+    # R2861 — through `feature_closure.cargo_builds`, the one reader of
+    # run-ci.sh's builds, rather than a regex of this gate's own that could not
+    # see a `--features \` continued onto the next line. The build nearest the
+    # invocation is the binary the leg spawns, whatever features it names.
+    builds = [
+        feats
+        for offset, pkg, feats in feature_closure.cargo_builds(txt)
+        if offset < invocation and pkg == "wz-ap-demo"
+    ]
+    if not builds or not builds[-1]:
         return frozenset(), [
             f"found the wire leg's invocation in {rel(RUN_CI)} but no "
             f"`cargo build -p wz-ap-demo --features …` before it — the lane's "
             f"binary is what the wire claims are about"
         ]
-    return frozenset(builds[-1].group(1).split(",")), []
+    return frozenset(builds[-1]), []
 
 
 def fixture_fn_literal(src: str, name: str) -> str | None:

@@ -95,6 +95,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import count_guard_lint as cgl  # noqa: E402  -- after the path insert
+import feature_closure  # noqa: E402  -- the one reader of run-ci.sh's builds
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 RUNCI = REPO_ROOT / "scripts" / "run-ci.sh"
@@ -274,10 +275,23 @@ def parse_guards(text):
 # passing. A guard's routing must follow the DEMO, not the feature list.
 # R2845 — `/` is in the class: E6f's second build names `wz/transport-stats`,
 # and a truncated `…,wz` would provision a demo cargo refuses to build.
-DEMO_BUILD_RE = re.compile(
-    r"cargo build -p wz-ap-demo\b(?:[^\n|)]*?--features ([A-Za-z0-9_,/-]+))?"
-)
+# R2861 — the builds are now read by `feature_closure.cargo_builds`, the one
+# reader of run-ci.sh's builds. The per-line regex this used matched a
+# `--features \` line with its optional group EMPTY, so a demo built with its
+# list on the next line — Layer M's admin build, and 18 others — was routed
+# here as a FEATURELESS demo.
 FN_OPEN_RE = re.compile(r"^[a-z_][a-z0-9_]*\(\) \{")
+
+
+def demo_build_lines(text):
+    """{0-based line index: "a,b,c"} for each line a `wz-ap-demo` build starts
+    on, `""` for a featureless one. The last build wins where one line starts
+    two."""
+    out = {}
+    for offset, pkg, feats in feature_closure.cargo_builds(text):
+        if pkg == "wz-ap-demo":
+            out[text.count("\n", 0, offset)] = ",".join(feats)
+    return out
 
 
 def attach_demo_builds(text, guards):
@@ -288,21 +302,19 @@ def attach_demo_builds(text, guards):
     claim behind it.
     """
     lines = text.splitlines()
+    builds = demo_build_lines(text)
     for g in guards:
         features = None
         for i in range(min(g.lineno, len(lines)) - 1, -1, -1):
             line = lines[i]
             if FN_OPEN_RE.match(line):
                 break  # left the lane; a build in another one is not this guard's
-            if line.lstrip().startswith("#"):
-                continue
-            m = DEMO_BUILD_RE.search(line)
-            if m:
+            if i in builds:
                 # `""` (a featureless build) and `None` (no build in this lane)
                 # are DIFFERENT answers and the caller branches on which. A
                 # falsy-test would fold them and put the featureless case back
                 # on the build host.
-                features = m.group(1) or ""
+                features = builds[i]
                 break
         g.demo_features = features
     return guards

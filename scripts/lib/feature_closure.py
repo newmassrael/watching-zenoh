@@ -123,15 +123,71 @@ def ap_demo_lane_features() -> tuple[str, ...]:
     containment invariant would start rejecting legitimate new claims.
     """
     feats: set[str] = set()
-    txt = RUN_CI.read_text()
-    # R2845 — `/` is in the class: a lane may name a DEPENDENCY's feature
-    # (`wz/transport-stats`, R2844's second E6f build), which cargo accepts on
-    # `--features` and `cargo tree` resolves. Without it the match stopped at
-    # the slash and handed cargo a feature called `wz`, and the whole A4 audit
-    # died on "the package 'wz-ap-demo' does not contain this feature: wz".
-    for m in re.finditer(r"cargo build -p wz-ap-demo[^\n|)]*?--features ([A-Za-z0-9_,/-]+)", txt):
-        feats.update(m.group(1).split(","))
+    # R2861 — through `cargo_builds`, the one reader of run-ci.sh's builds. The
+    # regex this used could not see a `--features \` whose list sits on the
+    # next line, which is how 19 of 51 demo builds are written: five features
+    # (adminspace-write, pubsub-delete, router-config-mutate,
+    # routing-interceptor-hotreload, routing-interest-pending-gc) never reached
+    # this union.
+    for offset, pkg, build_feats in cargo_builds(RUN_CI.read_text()):
+        if pkg != "wz-ap-demo":
+            continue
+        # A shell-assembled list (`--features "$feats"`) names no feature this
+        # reader can resolve; handing it to `cargo tree` would fail there with a
+        # message about a feature called `$feats`. Refuse here, by position.
+        unresolved = [f for f in build_feats if "$" in f]
+        if unresolved:
+            raise RuntimeError(
+                "run-ci.sh offset %d builds wz-ap-demo with a shell-assembled "
+                "feature list %s; the lane feature union cannot resolve it"
+                % (offset, unresolved))
+        feats.update(build_feats)
     return tuple(sorted(feats))
+
+
+# R2861 — a `cargo build` invocation ends at the first shell operator. Stopping
+# at `&`, `|`, `;` and `)` is what lets `cd crates && cargo build -p A ... &&
+# cargo build -p B` read as TWO builds rather than one whose second `-p`
+# overwrites the first.
+_CARGO_BUILD = re.compile(r"cargo build\b[^\n;&|)]*")
+
+
+def cargo_builds(text: str) -> list[tuple[int, str | None, tuple[str, ...]]]:
+    """Every `cargo build` in `text` as `(offset, package, features)`.
+
+    THE ONE READER of the builds a lane runs. Four gates used to each carry a
+    regex of their own for this, and they disagreed in exactly the shapes
+    run-ci.sh writes most: a `--features \\` continued onto the next line was
+    invisible to three of them, and a build chained by `&&` to a second build
+    was misattributed by the fourth.
+
+    * Continuations are joined by replacing each backslash-newline with TWO
+      spaces, so every offset is the offset in `text` itself and a caller can
+      still turn one into a line number.
+    * A build on a comment line is not a build.
+    * `features` is `()` for a build that names none, which a caller must be
+      able to tell apart from "no build at all" (an absent entry).
+    * `/` stays in a feature: `wz/transport-stats` is a dependency's feature,
+      which cargo accepts (R2845).
+    """
+    joined = text.replace("\\\n", "  ")
+    out: list[tuple[int, str | None, tuple[str, ...]]] = []
+    for m in _CARGO_BUILD.finditer(joined):
+        line_start = text.rfind("\n", 0, m.start()) + 1
+        if text[line_start:m.start()].lstrip().startswith("#"):
+            continue
+        toks = m.group(0).split()
+        pkg: str | None = None
+        feats: tuple[str, ...] = ()
+        for j, tok in enumerate(toks):
+            if tok in ("-p", "--package") and j + 1 < len(toks):
+                pkg = toks[j + 1]
+            elif tok == "--features" and j + 1 < len(toks):
+                feats = tuple(f for f in toks[j + 1].strip("\"'").split(",") if f)
+            elif tok.startswith("--features="):
+                feats = tuple(f for f in tok.split("=", 1)[1].strip("\"'").split(",") if f)
+        out.append((m.start(), pkg, feats))
+    return out
 
 
 def binary_closure(binary: str) -> frozenset[str]:
