@@ -6725,7 +6725,8 @@ layer_c1ak_cargo_test_transport_stats() {
     # `metrics_reply_is_the_registry_document`, and
     # `metrics_parameters_reach_the_registry` is new. Both are gated on
     # `adminspace-metrics`, so only the arms that turn it on move.
-    _runci_guarded_test C1ak 47 cargo test -p wz-session-core --features adminspace-metrics,transport-stats --lib adminspace --quiet \
+    # R2859 — 47 -> 49, with its C1AM twin (see there). PRINTED.
+    _runci_guarded_test C1ak 49 cargo test -p wz-session-core --features adminspace-metrics,transport-stats --lib adminspace --quiet \
         || return 1
     (cd crates \
         && cargo clippy -p wz-runtime-tokio --all-targets --features transport-stats --quiet -- -D warnings \
@@ -6953,7 +6954,9 @@ layer_c1ba_cargo_clippy_transport_multilink() {
 # unused-ResponseSink import + the test-module dead-code re-gating).
 layer_c1am_cargo_test_adminspace() {
     # R2843 — 46 -> 47, the C1ak twin's arithmetic (see that guard).
-    _runci_guarded_test "C1AM adminspace 47" 47 \
+    # R2859 — 47 -> 49: R2858's region test (the hosted red printed 48) and
+    # R2859's multicast-row test. PRINTED by running the command.
+    _runci_guarded_test "C1AM adminspace 49" 49 \
         cargo test -p wz-session-core --features adminspace-metrics --lib adminspace --quiet || return 1
     # R2633 — 3 -> 5. `zenoh_hex_to_zid` grew the two refusals a conforming node
     # makes, needed because the router link-weight rows name neighbours by the
@@ -7012,9 +7015,13 @@ layer_c1am_cargo_test_adminspace() {
     # PRINTED, not to what the diff suggested. The label gains a word because the
     # count is what used to tell these two apart and the line below is already 44
     # (a different feature set that reaches neither the new test nor this one).
-    _runci_guarded_test "C1AM adminspace introspection 44" 44 \
+    # R2859 — every `--lib adminspace` guard moves by 2: R2858's region test
+    # and R2859's multicast-row test, both ungated in `adminspace::tests`.
+    # PRINTED by running each command; `guarded_count_gate.py --range` did not
+    # reach these guards, since the new tests' names do not carry the filter.
+    _runci_guarded_test "C1AM adminspace introspection 46" 46 \
         cargo test -p wz-session-core --features adminspace-introspection-handlers --lib adminspace --quiet || return 1
-    _runci_guarded_test "C1AM adminspace 44" 44 \
+    _runci_guarded_test "C1AM adminspace 46" 46 \
         cargo test -p wz-session-core --features adminspace-router-linkstate --lib adminspace --quiet || return 1
     # R311y828 25 -> 29: the storage_manager status SUB-TREE. Four legs — the
     # no-leaf CONTROL, the served sub-tree, the narrowed GET's own filtering, and
@@ -7022,7 +7029,7 @@ layer_c1am_cargo_test_adminspace() {
     # guard below because `wz-session-core`'s own `adminspace-config-hotreload`
     # does NOT compose `adminspace-plugins-handlers` (the runtime crate's does),
     # so the whole `tests::plugins` module is absent from that build.
-    _runci_guarded_test "C1AM adminspace 52" 52 \
+    _runci_guarded_test "C1AM adminspace 54" 54 \
         cargo test -p wz-session-core --features adminspace-plugins-handlers --lib adminspace --quiet || return 1
     _runci_guarded_test "C1AM declare_adminspace 4" 4 \
         cargo test -p wz-runtime-tokio --features adminspace-plugins-handlers,query-get --lib declare_adminspace --quiet || return 1
@@ -7047,7 +7054,7 @@ layer_c1am_cargo_test_adminspace() {
     # R2802 — 59 -> 60: `storage_add_payload_values_keep_their_json_type`, the
     # `?k=v` payload reading each value as the JSON5 scalar it spells. PRINTED
     # by `guarded_count_gate.py --range 69a8d5da..715e936a`.
-    _runci_guarded_test "C1AM adminspace 60" 60 \
+    _runci_guarded_test "C1AM adminspace 62" 62 \
         cargo test -p wz-session-core --features adminspace-config-hotreload --lib adminspace --quiet || return 1
     # R311y828 5 -> 6: the live manager's admin sub-tree render. It is gated on
     # `adminspace-plugins-handlers`, so the C1z sibling guard over the SAME module
@@ -7175,9 +7182,10 @@ layer_c1am_cargo_test_adminspace() {
 #      test-module dead-code (R311y38 re-gated them to their codec-response-final
 #      consumers), both of which only surface WITHOUT the full default codec set.
 layer_c1an_cargo_test_adminspace_nodefault() {
-    _runci_guarded_test "C1AN adminspace 39" 39 \
+    # R2859 — both +2, as the C1AM guards (see there).
+    _runci_guarded_test "C1AN adminspace 41" 41 \
         cargo test -p wz-session-core --no-default-features --features adminspace-core --lib adminspace --quiet || return 1
-    _runci_guarded_test "C1AN adminspace 44" 44 \
+    _runci_guarded_test "C1AN adminspace 46" 46 \
         cargo test -p wz-session-core --no-default-features --features adminspace-router-linkstate --lib adminspace --quiet || return 1
     _runci_guarded_test "C1AN declare_adminspace 4" 4 \
         cargo test -p wz-runtime-tokio --no-default-features --features adminspace-core,query-get --lib declare_adminspace --quiet || return 1
@@ -9907,9 +9915,10 @@ layer_c1p_multicast() {
     # three are the RX witnesses. Equal magnitude, unequal subject: said here so
     # a later reader does not read one cross-check where there are two facts.
     # Both numbers are what the commands PRINTED.
-    _runci_guarded_test C1p 44 cargo test -p wz-session-core --features session-multicast --lib multicast --quiet \
+    # R2859 — both +1: `multicast_dispatch`'s member-view test, ungated.
+    _runci_guarded_test C1p 45 cargo test -p wz-session-core --features session-multicast --lib multicast --quiet \
         || return 1
-    _runci_guarded_test C1p 62 cargo test -p wz-session-core --features session-multicast,reassembly,codec-push,codec-join --lib multicast --quiet \
+    _runci_guarded_test C1p 63 cargo test -p wz-session-core --features session-multicast,reassembly,codec-push,codec-join --lib multicast --quiet \
         || return 1
     # R311y633 (§17.6 / §11.2) — the arm that BUILDS `multicast_rx` and RUNS it.
     # The two arms above omit `codec-close`, and `pub mod multicast_rx` is gated
@@ -10012,7 +10021,9 @@ layer_c1q_multicast_glue() {
     # printed, not a diff count. One of the two reads the TOS byte back from the
     # kernel and is `#[cfg(target_os = "linux")]`, so this pin describes a Linux
     # host -- which is every lane that runs it -- and would read 8 elsewhere.
-    _runci_guarded_test C1q 9 cargo test -p wz-runtime-tokio --features transport-multicast,transport-link-udp,locator-iface --lib udp_multicast_config --quiet \
+    # R2859 — 9 -> 10: `an_iface_pinned_sender_binds_the_interfaces_address`,
+    # Linux and `locator-iface` too. PRINTED.
+    _runci_guarded_test C1q 10 cargo test -p wz-runtime-tokio --features transport-multicast,transport-link-udp,locator-iface --lib udp_multicast_config --quiet \
         || return 1
 }
 
