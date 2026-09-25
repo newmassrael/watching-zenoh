@@ -14,8 +14,9 @@
 //! Session host that did take writes (`wz-ap-demo`'s storage host)
 //! re-implemented the handler inline.
 //!
-//! [`apply_admin_config_write`] is that handler, once, in the library: the
-//! permit gate, the decode, and the write into the shared [`WzConfig`] the GET
+//! [`apply_admin_config_write`](crate::session::apply_admin_config_write) is
+//! that handler, once, in the library: the permit gate, the decode, and the
+//! write into the shared [`WzConfig`](crate::config::WzConfig) the GET
 //! also reads. What a Session cannot apply by itself (a storage intent, the
 //! ACL verb, a `plugins/...` key whose validator is a running plugin) goes to
 //! the host through `on_intent`, so a host adds what it owns rather than

@@ -1122,7 +1122,13 @@ CITATION = re.compile(r"\b((?:[A-Za-z0-9_.-]+/)*[A-Za-z0-9_.-]+\.(?:rs|c|h))(?::
 # same upstream handler block. It was in `reached`, so this pin falls while
 # UNREACHED and NO_SYMBOL hold at 2 and 2.
 # READ off the census's own FAIL line, `reached: 10 against a pin of 11`.
-PIN_REACHED = 10
+#
+# R2860 — 10 -> 9. `adminspace-core` RETIRES to COMPLETE: a Session-hosted
+# adminspace declares upstream's config/** subscriber beside its queryable,
+# and the forwarder hosts' `shm` value-tracking is witnessed with a control.
+# It was in `reached`, so this pin falls while UNREACHED and NO_SYMBOL hold at
+# 2 and 2. READ off the census's own FAIL line, `reached: 9 against a pin of 10`.
+PIN_REACHED = 9
 PIN_UNREACHED = 2
 PIN_NO_SYMBOL = 2
 # R2534 — 346 -> 347. The atom is `adminspace-metrics` and the citation is the
@@ -2161,7 +2167,12 @@ PIN_NO_SYMBOL = 2
 # correction cites where the computation lives (`extbound.rs`), the one method
 # every host reads it through (`session_actions.rs`), and the wire test that
 # witnesses it. 47 - 44 = 3, the census's own FAIL line.
-PIN_WZ_CITATIONS = 47
+#
+# R2860 — 47 -> 43, FALLING by the whole of that atom: `adminspace-core` is
+# COMPLETE, so the wz citations its PARTIAL reason carried leave the census
+# with it. 47 - 43 = 4, the census's own FAIL line (`wz citations: 43 against
+# a pin of 47`), with PIN_AMBIGUOUS holding at 12.
+PIN_WZ_CITATIONS = 43
 # R2626 — 44 -> 42, and this one is worth a sentence because it HELD through
 # every earlier retirement in this run (R2612, R2622). `time-hlc`'s reason is the
 # first retiree carrying AMBIGUOUS citations of its own: its oldest clauses cite
