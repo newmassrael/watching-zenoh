@@ -923,46 +923,44 @@ fn wz_router_hat_shares_a_router_across_both_meshes() {
     );
 }
 
-/// The NON-MASTER double-delivery guard, E2E over real transport — the GENUINE
-/// non-master discriminator. (The classic router-native black-hole is a y145
-/// STRUCTURAL false proof: any topology that makes R1 non-master co-locates the
-/// master R2 in R1's peer mesh, so a same-tier relay delivers regardless of R1's
-/// fold. The client double-delivery guard has no such bypass — Cb is R1's OWN
-/// client, and only R1 can (double-)deliver it.)
+/// The double-delivery guard, E2E over real transport. (The classic router-native
+/// black-hole is a y145 STRUCTURAL false proof: any topology that makes R1 defer
+/// co-locates the carrier R2 in R1's peer mesh, so a same-tier relay delivers
+/// regardless of R1's fold. The client double-delivery guard has no such bypass —
+/// Cb is R1's OWN client, and only R1 can (double-)deliver it.)
+///
+/// R2879 (open-debt item 751, step 5) re-founded this test. It was built on the
+/// per-keyexpr master election, which the data plane no longer uses: a
+/// peer-source Push now crosses into the router mesh only through the largest
+/// gateway its forwarder links to (the pin's inter-region filter, reading the G
+/// bit each router advertises into its south peer region since R2878). The name
+/// is kept because the `router-hat-router` atom's reason cites it.
 ///
 /// Topology = the triangle (see `wz_router_hat_shares_a_router_across_both_meshes`):
-/// R1<->R2 routers + a shared peer A, so `shared_nodes(R1) = {R1, R2} > 1` and HRW
-/// elects R2 master for some keyexprs, R1 non-master. A CLIENT `Cb` behind R1
-/// subscribes KE; a publisher peer `P` — dialing ONLY R1 — PUBLISHES KE, so its
-/// peer-source Push reaches R1 DETERMINISTICALLY (a publisher that dialed both
-/// routers could route its Push to either via the peer spanning tree, a flaky
-/// non-determinism). R1 being NON-master for KE, R1 DEFERS Cb's peer-source delivery
-/// (the block-3 master gate, `router_forward.rs`; without the defer Cb would ALSO
-/// receive the copy the master R2 bridges back as a router-source = a double
-/// delivery). The "delivers exactly once via the router-source" half is unit-proven
-/// (`local_client_delivery_deferred_on_non_master`); THIS E2E proves the DEFER fires
-/// over real transport, the load-bearing non-master behaviour a unit test cannot.
+/// R1<->R2 routers + a shared peer A, both routers gateways of the peer region.
+/// R2 has the LARGER zid (R1=02020202, R2=03030303), so R2 carries every
+/// peer-source Push north from a peer linked to both. A CLIENT `Cb` behind R1
+/// subscribes KE; the publisher peer `P` dials BOTH routers, so whichever path its
+/// Push takes into R1 through the peer mesh, the forwarder links to R2 and R1
+/// defers — deterministically, with no keyexpr to pick. Without the defer Cb would
+/// ALSO receive the copy R2 carries north and back as a router source = a double
+/// delivery. The "delivers exactly once via the router-source" half is unit-proven
+/// (`a_router_that_does_not_carry_a_peer_push_north_defers_its_client_delivery`);
+/// THIS E2E proves the DEFER fires over real transport.
 ///
-/// Witness: R1's `deferred a non-master client delivery` — a POSITIVE observable
-/// that fires ONLY inside the non-master block-3 gate. A broken guard (the gate
-/// removed) never defers, so the witness never fires: the RED discriminator. zids
-/// are FIXED (R1=02020202, R2=01010101 — the spelling the spawns below use, and
-/// R2641 corrects this line, which had them the other way round) so the HRW
-/// election is deterministic; KE is chosen so
-/// R1 is the non-master (the witness fires only when it is — empirically pinned).
+/// Witness: R1's `deferred a non-carrier client delivery` — a POSITIVE observable
+/// that fires ONLY inside the guard. A broken guard (the defer removed) never
+/// defers, so the witness never fires: the RED discriminator.
 #[test]
 #[ignore = "binary-dep e2e (wz-ap-demo --features router-hat-router); run via --ignored / Layer E7"]
 fn wz_router_hat_non_master_defers_a_client_double_delivery() {
     const KE: &str = "demo/key";
-    // FIXED zids (now honoured by --router-hat, R311 fix) so the HRW master election
-    // is DETERMINISTIC — the flaky root cause was a port-derived zid varying per run,
-    // flipping R1 between master and non-master for KE. Empirically pinned so R1
-    // (02020202) is REPRODUCIBLY the NON-master for KE=demo/key while R2 (01010101)
-    // is the master (the mirror assignment made R1 the master → no defer, all-fail
-    // deterministically — proof the election is now reproducible, not random).
+    // FIXED zids (honoured by --router-hat, R311 fix): the carrier is the LARGEST
+    // gateway, so R2 (03030303) must be larger than R1 (02020202) for R1 to defer.
+    // Port-derived zids would flip the order per run.
     let (mut r2_guard, mut r2_reader, p_r2) = spawn_router_hat(
         "router-hat-2",
-        &["--router-hat", "127.0.0.1:0", "--zid", "01010101"],
+        &["--router-hat", "127.0.0.1:0", "--zid", "03030303"],
     );
     let addr_r2 = format!("127.0.0.1:{p_r2}");
     let (mut r1_guard, mut r1_reader, p_r1) = spawn_router_hat(
@@ -977,24 +975,21 @@ fn wz_router_hat_non_master_defers_a_client_double_delivery() {
         ],
     );
     let addr_r1 = format!("127.0.0.1:{p_r1}");
-    // A: the shared peer dialing BOTH routers — its peer-net link-state carries R2
-    // into R1's linkstatepeers_net, making shared_nodes(R1) = {R1, R2} > 1. A does
-    // NOT publish (a both-dialing publisher's Push could route to EITHER router via
-    // the peer spanning tree — the non-determinism this A/P split removes).
+    // A: the shared peer dialing BOTH routers — its peer-net link-state carries R2,
+    // and R2's own link-state with its G bit, into R1's linkstatepeers_net.
     let both = format!("{addr_r1},{addr_r2}");
     let (mut a_guard, mut a_reader, _p_a) =
         spawn_peer("peer-a", &["--peer", "127.0.0.1:0", "--connect", &both]);
     // ── ORDER IS THE FLAKY-FREE FIX (root cause: a convergence race) ──
     // Earlier A/P/Cb all spawned at once, so P could publish BEFORE R2 propagated
-    // into R1's peer net (R1 still sole master → no defer), and peers-net could
-    // reach 3 as {R1, A, P} with R2 absent — a false barrier. Fix: converge the
-    // TRIANGLE first and gate on it, THEN spawn the publisher, so every Push lands
-    // on an already-non-master R1.
+    // into R1's peer net (R1 the only gateway it knew → no defer), and peers-net
+    // could reach 3 as {R1, A, P} with R2 absent — a false barrier. Fix: converge
+    // the TRIANGLE first and gate on it, THEN spawn the publisher, so every Push
+    // lands on an R1 that already knows the larger gateway R2.
     //
     // 1. Barrier — R1's peer net reaches 3. With only {R1, A, R2} up, the set IS
-    //    {R1, A, R2}: R2 has provably propagated into R1's linkstatepeers_net, so
-    //    shared_nodes(R1) = {R1, R2} > 1 and R1 is the non-master for KE. A consuming
-    //    wait is safe HERE — the defers come strictly after (P is not up yet).
+    //    {R1, A, R2}: R2 has provably propagated into R1's linkstatepeers_net. A
+    //    consuming wait is safe HERE — the defers come strictly after (P is not up).
     let converged = wait_for_substring(
         &mut r1_reader,
         "router-hat: peers-net converged (3 node(s))",
@@ -1012,26 +1007,20 @@ fn wz_router_hat_non_master_defers_a_client_double_delivery() {
         "router-hat: learned a client sub",
         Duration::from_secs(15),
     );
-    // 3. P: the publisher — a peer dialing ONLY R1, so its peer-source Push reaches
-    //    R1 deterministically. It now publishes into a CONVERGED, NON-master R1, so
-    //    the block-3 gate defers Cb's peer-source copy on the first matching Push.
+    // 3. P: the publisher — a peer dialing BOTH routers, so every forwarder its
+    //    Push can reach R1 through (P itself, or A) links to the larger gateway R2,
+    //    and R1 defers Cb's peer-source copy on the first matching Push. (A P that
+    //    dialed R1 alone would have R1 as its only gateway, and R1 would carry.)
     let (mut p_guard, mut p_reader, _p_p) = spawn_peer(
         "peer-pub",
-        &[
-            "--peer",
-            "127.0.0.1:0",
-            "--connect",
-            &addr_r1,
-            "--publish",
-            KE,
-        ],
+        &["--peer", "127.0.0.1:0", "--connect", &both, "--publish", KE],
     );
 
-    // THE DISCRIMINATOR: R1 defers a non-master client delivery. Fires ONLY from the
-    // non-master block-3 gate; a broken guard never logs it (the RED check).
+    // THE DISCRIMINATOR: R1 defers a non-carrier client delivery. Fires ONLY from
+    // the guard; a broken guard never logs it (the RED check).
     let deferred = wait_for_substring(
         &mut r1_reader,
-        "router-hat: deferred a non-master client delivery",
+        "router-hat: deferred a non-carrier client delivery",
         Duration::from_secs(30),
     );
 
@@ -1054,8 +1043,8 @@ fn wz_router_hat_non_master_defers_a_client_double_delivery() {
     converged.unwrap_or_else(|_c| {
         panic!(
             "R1's peer net never reached 3 ({{R1, A, R2}}) within 30s — R2 did not \
-             propagate into R1's linkstatepeers_net, so R1 could not become the \
-             non-master\n--- router-hat-1 stderr ---\n{r1_captured}"
+             propagate into R1's linkstatepeers_net, so R1 never knew the larger \
+             gateway\n--- router-hat-1 stderr ---\n{r1_captured}"
         )
     });
     learned_client.unwrap_or_else(|_c| {
@@ -1065,15 +1054,15 @@ fn wz_router_hat_non_master_defers_a_client_double_delivery() {
              {r1_captured}"
         )
     });
-    // The defer witness proves the non-master block-3 gate fired over real transport;
-    // it CANNOT fire unless R1 was non-master for KE (shared_nodes(R1) > 1), so a
-    // green also re-confirms the triangle topology.
+    // The defer witness proves the guard fired over real transport; it CANNOT fire
+    // unless R1 knew R2 as a larger gateway of the forwarder, so a green also
+    // re-confirms the triangle topology and R2's G bit reaching R1.
     deferred.unwrap_or_else(|_c| {
         panic!(
-            "R1 never logged 'deferred a non-master client delivery' within 30s — \
-             either R1 was the MASTER for KE={KE} (swap the zids or change KE until R1 \
-             is the non-master) OR the block-3 double-delivery guard did not fire\n--- \
-             router-hat-1 stderr ---\n{r1_captured}"
+            "R1 never logged 'deferred a non-carrier client delivery' within 30s — \
+             either R1 did not see R2 as a larger gateway of the forwarder (no G bit \
+             from R2, or the zid order flipped) OR the double-delivery guard did not \
+             fire\n--- router-hat-1 stderr ---\n{r1_captured}"
         )
     });
 }

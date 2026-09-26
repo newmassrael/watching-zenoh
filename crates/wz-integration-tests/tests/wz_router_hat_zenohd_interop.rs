@@ -621,6 +621,12 @@ fn wz_router_hat_and_zenohd_federate_pico_data_in_reverse() {
 // two sibling query legs) while every pubsub leg stays green, which is what
 // distinguishes the query-route compute from the data-route compute above.
 // wz-proves: routing-query-route-compute wz->zenohd
+// R2879 — and `router-master-election`'s partial witness moved here from leg 10:
+// the pico client's query reaches the zenohd backbone through block 1 of
+// `mesh_query_block`, gated `master || src == Router`, and a client source is not
+// a Router, so this leg needs the election to say `true`. Partial for R311y503's
+// reason (leg 10 below): with one wz router the election has one candidate.
+// wz-proves: router-master-election wz->zenohd partial
 #[test]
 #[ignore = "binary-dep e2e (zenohd + zenoh-pico z_querier/z_queryable + wz-ap-demo --features router-hat-router); run via Layer Z / --ignored"]
 fn wz_router_hat_and_zenohd_federate_a_pico_query() {
@@ -1550,8 +1556,9 @@ fn wz_router_hat_token_lifecycle_reaches_a_pico_liveliness_subscriber() {
 /// `register_router_subscription`). That is the `router_subs -> peer-mesh`
 /// direction the file header flags as UNIT-only — undrivable by the OBSERVE-only
 /// wz demo router (it originates no router-native declare), but a single foreign
-/// zenohd supplies one. wz is the sole master (`shared_nodes = {self}`) so the
-/// master gate admits the bridge.
+/// zenohd supplies one. wz is the only gateway of its peer region, so the
+/// inter-region filter admits the bridge (R2879; until then the master gate,
+/// with wz the sole master).
 ///
 /// Discriminator (why this is not leg 2/3 nor test #4): the wz `--peer` publisher
 /// knows only the wz router; the pico subscriber is zenohd's client — neither can
@@ -1561,6 +1568,15 @@ fn wz_router_hat_token_lifecycle_reaches_a_pico_liveliness_subscriber() {
 /// passes — so this witnesses the C4 bridge specifically. Barrier-gated on wz's
 /// `learned a mesh sub` (wz provably holds zenohd's router-native sub) before the
 /// peer publisher spawns, so a Put burst cannot outrun the mesh subscription.
+// R2879 — this leg is NO LONGER `router-master-election`'s witness, and the
+// paragraph below is kept as the record of why it was. The peer->router bridge it
+// drives is now admitted by the pin's inter-region filter, not by `is_master`
+// (open-debt item 751 step 5), so forcing `is_master` to `false` no longer reds
+// it. The election still gates the QUERY plane's cross-mesh blocks, so the marker
+// moved to `wz_router_hat_and_zenohd_federate_a_pico_query`, whose client-source
+// query enters the router mesh through the master-gated block 1. That move was
+// read from the code (`mesh_query_block`), not measured by a control run.
+//
 // R311y503 — and this leg is `router-master-election`'s cross-impl witness, but
 // only PARTIALLY, and the partial is measured rather than hedged. The atom is the
 // HRW route-master election (`elect_router` / `shared_nodes` / `is_master`) that
@@ -1577,7 +1593,6 @@ fn wz_router_hat_token_lifecycle_reaches_a_pico_liveliness_subscriber() {
 // needs a topology where a foreign zid sits in BOTH nets; until then this stays
 // partial.
 // wz-proves: router-hat-router wz->zenohd partial
-// wz-proves: router-master-election wz->zenohd partial
 #[test]
 #[ignore = "binary-dep e2e (zenohd + zenoh-pico z_sub + wz-ap-demo --features router-hat-router); run via Layer Z / --ignored"]
 fn wz_router_hat_bridges_a_peer_publish_to_a_zenohd_router_native_sub() {

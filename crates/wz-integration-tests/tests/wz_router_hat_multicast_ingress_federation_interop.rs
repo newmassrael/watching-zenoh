@@ -34,7 +34,7 @@
 //! BOTH routers; it never joins the multicast group. A `--peer` sub receives a
 //! mcast-ingress Put ONLY via the DR-gated federation path
 //! (`publish_client_push_into_meshes` into the peer tier) — NOT via a router's local
-//! client delivery (that is master-gated and reaches only `--key` CLIENT faces) — so
+//! client delivery (that reaches only `--key` CLIENT faces) — so
 //! P firing proves FEDERATION, not the I1/I2 local-delivery path. pico `z_pub -m
 //! peer` is a FOREIGN injector.
 //!

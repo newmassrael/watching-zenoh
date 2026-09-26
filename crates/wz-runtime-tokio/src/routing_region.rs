@@ -191,6 +191,80 @@ pub fn hat_kind(region: &Region, node_mode: WhatAmI) -> HatKind {
     }
 }
 
+/// R2879 (open-debt item 751, step 5) — what the inter-region filter asks of
+/// the hats: each region's gateway view, as the pin's `HatTrait` answers it
+/// (`zenoh/src/net/routing/hat/mod.rs` @ `fn gateways_of(&self, tables: &TablesData, zid: &ZenohIdProto) -> Option<Vec<ZenohIdProto>>;`).
+///
+/// `None` is "this hat has no gateway view": a broker hat answers `None`, and
+/// a mesh hat answers `None` for a node it does not know.
+pub trait GatewayView<Z> {
+    /// The gateways `zid` advertises a link to, in `region`'s hat.
+    fn gateways_of(&self, region: Region, zid: &Z) -> Option<Vec<Z>>;
+    /// Every gateway of `region`'s hat.
+    fn gateways(&self, region: Region) -> Option<Vec<Z>>;
+}
+
+/// R2879 (open-debt item 751, step 5) — the pin's decision whether a `Push` or
+/// a `Request` crosses a region boundary on one egress
+/// (`zenoh/src/net/routing/dispatcher/tables.rs` @ `pub(crate) struct InterRegionFilter<'a> {`).
+///
+/// Loop-freedom between regions is carried by this and by nothing else: of
+/// the gateways that could carry a message across a boundary, exactly one —
+/// the largest zid — does.
+#[derive(Debug, Clone, Copy)]
+pub struct InterRegionFilter<'a, Z> {
+    /// The region the message arrived from.
+    pub src: Region,
+    /// The region of the egress.
+    pub dst: Region,
+    /// The node that ORIGINATED the message, when the source region can name
+    /// it; the pin's `src_zid`.
+    pub src_zid: Option<&'a Z>,
+    /// The neighbour the message arrived from; the pin's `fwd_zid`.
+    pub fwd_zid: Option<&'a Z>,
+    /// The neighbour the egress sends to; the pin's `dst_zid`.
+    pub dst_zid: Option<&'a Z>,
+}
+
+impl<Z: Ord> InterRegionFilter<'_, Z> {
+    /// `false` when the message must not take this egress, as the pin's
+    /// `InterRegionFilter::resolve` decides it, arm for arm.
+    pub fn resolve(&self, self_zid: &Z, view: &impl GatewayView<Z>) -> bool {
+        // Same side of the boundary: nothing crosses, nothing to filter.
+        if self.src.bound() == self.dst.bound() {
+            return true;
+        }
+        // Down from the north the candidates are the DESTINATION's gateways;
+        // up from the south they are the FORWARDER's, since a gateway source
+        // cannot also be linked to itself
+        // (`zenoh/src/net/routing/dispatcher/tables.rs` @ `// NOTE(regions): in this case, we cannot have a link with`).
+        let gwys = match self.src.bound() {
+            Bound::North => match self.dst_zid {
+                Some(dst_zid) => view.gateways_of(self.dst, dst_zid),
+                None => view.gateways(self.dst),
+            },
+            Bound::South => match self.fwd_zid {
+                Some(fwd_zid) => view.gateways_of(self.src, fwd_zid),
+                None => view.gateways(self.src),
+            },
+        };
+        let Some(gwys) = gwys.filter(|g| !g.is_empty()) else {
+            return true;
+        };
+        // The pin reports an unnamed source as a bug and lets the message
+        // through; so does this.
+        let Some(src_zid) = self.src_zid else {
+            log::error!("inter-region filter: the message's source is unknown");
+            return true;
+        };
+        // A gateway source already reached this boundary itself.
+        if gwys.contains(src_zid) {
+            return false;
+        }
+        gwys.iter().max() == Some(self_zid)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -294,5 +368,131 @@ mod tests {
         assert_eq!(hats(Router), [RouterHat, Broker, PeerHat, Broker]);
         assert_eq!(hats(Peer), [PeerHat, Broker, Broker]);
         assert_eq!(hats(Client), [ClientHat, Broker]);
+    }
+
+    // ── R2879 (item 751, step 5): the inter-region filter, arm by arm ──
+
+    const PEERS: Region = Region::default_south(Peer);
+    const CLIENTS: Region = Region::default_south(Client);
+
+    /// A gateway view: per region, `(node, the gateways it links to)` pairs and
+    /// the region's gateway set; a region absent from `regions` has none (the
+    /// broker hat's `None`).
+    struct View {
+        regions: Vec<(Region, Vec<NodeGateways>, Vec<u8>)>,
+    }
+
+    /// A node and the gateways it links to.
+    type NodeGateways = (u8, Vec<u8>);
+
+    impl GatewayView<u8> for View {
+        fn gateways_of(&self, region: Region, zid: &u8) -> Option<Vec<u8>> {
+            let (_, links, _) = self.regions.iter().find(|(r, _, _)| *r == region)?;
+            links.iter().find(|(n, _)| n == zid).map(|(_, g)| g.clone())
+        }
+        fn gateways(&self, region: Region) -> Option<Vec<u8>> {
+            let (_, _, all) = self.regions.iter().find(|(r, _, _)| *r == region)?;
+            Some(all.clone())
+        }
+    }
+
+    /// Two gateways 1 and 2 of one south peer region, and a peer 9 linked to
+    /// both: the pin's multiple-gateway topology.
+    fn two_gateways() -> View {
+        View {
+            regions: vec![(
+                PEERS,
+                vec![(9, vec![1, 2]), (1, vec![]), (2, vec![])],
+                vec![1, 2],
+            )],
+        }
+    }
+
+    fn filter<'a>(
+        src: Region,
+        dst: Region,
+        src_zid: Option<&'a u8>,
+        fwd_zid: Option<&'a u8>,
+        dst_zid: Option<&'a u8>,
+    ) -> InterRegionFilter<'a, u8> {
+        InterRegionFilter {
+            src,
+            dst,
+            src_zid,
+            fwd_zid,
+            dst_zid,
+        }
+    }
+
+    /// Up from the south, of the gateways the forwarder links to only the
+    /// largest carries the message across: exactly one crossing.
+    #[test]
+    fn upstream_only_the_largest_gateway_of_the_forwarder_crosses() {
+        let view = two_gateways();
+        let up = filter(PEERS, Region::North, Some(&9), Some(&9), None);
+        assert!(!up.resolve(&1, &view), "gateway 1 is not the largest");
+        assert!(up.resolve(&2, &view), "gateway 2 is");
+    }
+
+    /// Down from the north, the candidates are the DESTINATION's gateways, so
+    /// the choice is per egress neighbour.
+    #[test]
+    fn downstream_the_candidates_are_the_destinations_gateways() {
+        let view = View {
+            regions: vec![(PEERS, vec![(8, vec![1]), (9, vec![1, 2])], vec![1, 2])],
+        };
+        let to = |dst: &'static u8| filter(Region::North, PEERS, Some(&5), Some(&5), Some(dst));
+        assert!(to(&8).resolve(&1, &view), "8 links to gateway 1 alone");
+        assert!(
+            !to(&9).resolve(&1, &view),
+            "9 also links to the larger gateway 2"
+        );
+        assert!(to(&9).resolve(&2, &view));
+    }
+
+    /// A source that is itself one of the candidate gateways crossed on its
+    /// own; nobody else carries it.
+    #[test]
+    fn a_gateway_source_is_not_carried_again() {
+        let view = two_gateways();
+        let from_gateway = filter(PEERS, Region::North, Some(&1), Some(&9), None);
+        assert!(
+            !from_gateway.resolve(&2, &view),
+            "even the largest gateway drops it"
+        );
+    }
+
+    /// No boundary, no filter; and no gateway view, or an empty one, passes.
+    #[test]
+    fn the_filter_passes_what_it_has_no_boundary_or_no_view_for() {
+        let view = two_gateways();
+        assert!(
+            filter(PEERS, CLIENTS, Some(&9), Some(&9), None).resolve(&1, &view),
+            "south to south"
+        );
+        assert!(
+            filter(CLIENTS, Region::North, Some(&7), Some(&7), None).resolve(&1, &view),
+            "a broker hat has no gateway view"
+        );
+        assert!(
+            filter(PEERS, Region::North, Some(&9), Some(&3), None).resolve(&1, &view),
+            "a forwarder the hat does not know has no view"
+        );
+        let empty = View {
+            regions: vec![(PEERS, vec![(9, vec![])], vec![])],
+        };
+        assert!(filter(PEERS, Region::North, Some(&9), Some(&9), None).resolve(&1, &empty));
+    }
+
+    /// No named neighbour falls back to the region's whole gateway set, and an
+    /// unnamed source passes, as the pin does after reporting it.
+    #[test]
+    fn unnamed_neighbours_fall_back_and_an_unnamed_source_passes() {
+        let view = two_gateways();
+        let up = filter(PEERS, Region::North, Some(&9), None, None);
+        assert!(!up.resolve(&1, &view) && up.resolve(&2, &view));
+        let down = filter(Region::North, PEERS, Some(&5), Some(&5), None);
+        assert!(!down.resolve(&1, &view) && down.resolve(&2, &view));
+        assert!(filter(PEERS, Region::North, None, Some(&9), None).resolve(&1, &view));
     }
 }

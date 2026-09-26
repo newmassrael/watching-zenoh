@@ -7396,17 +7396,18 @@ async fn run_router_hat_until(
                     last_data_seen = seen;
                     log::info!("wz-ap-demo router-hat: forwarded mesh data ({seen} push(es))");
                 }
-                // C4 double-delivery guard transit witness: this router was
-                // NON-master for a keyexpr its client subscribes and DEFERRED the
-                // duplicate peer/client-source copy (the master's bridged
-                // router-source copy delivers exactly once). A rise proves the
-                // non-master block-3 gate fired — the non-master corner's positive
-                // observable (a broken guard never defers, and double-delivers).
+                // Double-delivery guard transit witness: another gateway carries
+                // a peer-source Push north for a keyexpr this router's client
+                // subscribes, so this router DEFERRED the duplicate peer-source
+                // copy (the carrier's router-source copy delivers exactly once).
+                // R2879 keys it on the inter-region filter, which replaced the
+                // master election on the data plane. A rise proves the guard
+                // fired (a broken guard never defers, and double-delivers).
                 let deferred = forwarder.deferred_client_delivery_seen();
                 if deferred > last_deferred_client {
                     last_deferred_client = deferred;
                     log::info!(
-                        "wz-ap-demo router-hat: deferred a non-master client delivery \
+                        "wz-ap-demo router-hat: deferred a non-carrier client delivery \
                          ({deferred} suppressed)"
                     );
                 }

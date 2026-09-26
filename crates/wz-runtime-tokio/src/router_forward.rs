@@ -162,6 +162,18 @@
 //! (block 1). Cross-mesh loop-freedom rests on the election agreement (the
 //! self-origination resets the per-net hop budget), NOT the hop budget.
 //!
+//! ⚠ R2879 (open-debt item 751, step 5) — the paragraph above describes the
+//! DATA plane as it stood until this round. Every data crossing is now admitted
+//! by the pin's inter-region filter instead
+//! ([`InterRegionFilter`](crate::routing_region::InterRegionFilter), read
+//! through the hats' gateway bits): of the gateways that could carry a Push
+//! across a region boundary, only the largest zid does, and a Push originated by
+//! a gateway is carried by nobody else. The bridge asks it per egress, the
+//! client-delivery defer asks it for the peer-to-router crossing, and the
+//! client re-injection's router leg is no longer gated (a broker hat has no
+//! gateway view). The QUERY plane below still uses the election; step 6 moves
+//! it, and step 9 removes the election.
+//!
 //! ## Slice C5b (query-route FORWARD half — the Request) — landed
 //!
 //! An inbound `Request` (a Query) is ROUTED
@@ -298,7 +310,8 @@
 //!   (`shared_nodes` = {self}), so a non-master needs 3+ routers sharing both
 //!   meshes. Their E2E proof waits on a router that hosts/relays natives (or a
 //!   3-router harness); the DIRECT-injection unit tests
-//!   (`repropagate` / `push_bridges_cross_mesh_only_when_master`)
+//!   (`repropagate` / `a_peer_push_crosses_north_only_through_the_largest_gateway_of_its_forwarder`,
+//!   which R2879 substituted for the master-election bridge test)
 //!   cover the mechanism meanwhile. (The client-behind-a-router variant was already
 //!   rescued by C2.)
 //! - **Gossip / autoconnect / interceptors** — the per-net policy knobs the
@@ -363,7 +376,7 @@ use wz_session_core::linkstate_oam::{
 use wz_session_core::multicast_tx::MulticastTxItem;
 use wz_session_core::network_message::NetworkMessage;
 use wz_session_core::push_build::reliteralize_push;
-use wz_session_core::push_routing_context::set_push_source;
+use wz_session_core::push_routing_context::{read_push_source, set_push_source};
 use wz_session_core::qos::Priority;
 use wz_session_core::query::{QueryReply, QueryResponder};
 use wz_session_core::wireexpr_resolve::{resolve_wireexpr, wireexpr_is_empty};
@@ -386,7 +399,7 @@ use crate::linkstate_forward::{
     synthesize_drained_fan_finals, synthesize_expired_query_returns, LocalQueryHandler,
     LocalQueryView, LocalQueryable, LocalSubscriber, LocalSubscriberHandler,
 };
-use crate::routing_region::{hat_kind, HatKind, RegionMap};
+use crate::routing_region::{hat_kind, GatewayView, HatKind, InterRegionFilter, RegionMap};
 // R2393 — the host-subscriber dispatch's sample types, the same ones the peer
 // plane's `dispatch_local_subscribers` builds from.
 use wz_session_core::sample_kind::SampleKind;
@@ -614,6 +627,25 @@ impl Hat {
             Hat::Broker(hat) => Some(hat),
             Hat::Mesh(_) => None,
         }
+    }
+}
+
+/// R2879 (open-debt item 751, step 5) — the router's hats as the inter-region
+/// filter reads them: a mesh hat answers from its net's gateway bits (R2878),
+/// and a broker hat has no view, as the pin's broker hat answers `None`
+/// (`zenoh/src/net/routing/hat/broker/mod.rs` @ `fn gateways_of(&self, _tables: &TablesData, _zid: &ZenohIdProto) -> Option<Vec<ZenohIdProto>> {`).
+impl GatewayView<Zid> for RouterForwarder {
+    fn gateways_of(&self, region: Region, zid: &Zid) -> Option<Vec<Zid>> {
+        self.hats
+            .get(&region)?
+            .mesh()?
+            .net
+            .borrow()
+            .gateways_of(zid)
+    }
+
+    fn gateways(&self, region: Region) -> Option<Vec<Zid>> {
+        Some(self.hats.get(&region)?.mesh()?.net.borrow().gateways())
     }
 }
 
@@ -1615,14 +1647,15 @@ pub struct RouterForwarder {
     /// Push (no within-tier mesh) instead reaches subscribing clients (C3a) and is
     /// re-injected into the meshes (C3b,
     /// [`publish_client_push_into_meshes`](RouterForwarder::publish_client_push_into_meshes)),
-    /// and, when self is the route master, BRIDGED to the other mesh (C4,
+    /// and, where the inter-region filter admits it, BRIDGED to the other mesh (C4,
     /// [`bridge_push_cross_mesh`](RouterForwarder::bridge_push_cross_mesh)).
     data_seen: Cell<usize>,
-    /// C4 double-delivery guard witness: the number of local-client deliveries a
-    /// NON-master router DEFERRED (block-3 master gate) — the peer/client-source
-    /// copy suppressed in favour of the master's bridged router-source copy. A
-    /// POSITIVE observable that self was non-master for a keyexpr its client
-    /// subscribes AND correctly deferred; the guard is otherwise E2E-invisible (a
+    /// The double-delivery guard witness: the number of local-client deliveries a
+    /// router DEFERRED because it does not carry the peer-source Push north
+    /// (R2879: the crossing filter, until then the master gate) — the peer-source
+    /// copy suppressed in favour of the carrier's router-source copy. A
+    /// POSITIVE observable that another gateway carries a keyexpr its client
+    /// subscribes AND self correctly deferred; the guard is otherwise E2E-invisible (a
     /// correct guard delivers the client zero peer-source copies, same as a
     /// black-hole — only the counter distinguishes "suppressed a duplicate" from
     /// "never had one").
@@ -4002,23 +4035,23 @@ impl RouterForwarder {
     /// `compute_data_route` structure
     /// (`zenoh/src/net/routing/hat/router/pubsub.rs` @ `fn compute_data_route`):
     /// resolve the
-    /// keyexpr and elect the per-keyexpr route master ONCE, then apply the three
+    /// keyexpr and the Push's origin and forwarder ONCE, then apply the three
     /// route blocks —
     /// - blocks 1 & 2, the two meshes' subs: the WITHIN-tier transit
-    ///   ([`forward_push_tier`](Self::forward_push_tier), master-gate-free) plus
-    ///   the master-gated CROSS-mesh bridge
-    ///   ([`bridge_push_cross_mesh`](Self::bridge_push_cross_mesh));
+    ///   ([`forward_push_tier`](Self::forward_push_tier), unfiltered: nothing
+    ///   crosses a region boundary) plus the CROSS-mesh bridge
+    ///   ([`bridge_push_cross_mesh`](Self::bridge_push_cross_mesh)), each egress
+    ///   admitted by the inter-region filter ([`crosses`](Self::crosses));
     /// - block 3, the local CLIENT faces
     ///   ([`deliver_to_client_subscribers`](Self::deliver_to_client_subscribers),
-    ///   gated `master || source == Router`);
+    ///   deferred on a router that does not carry a peer-source Push north);
     /// - and, for a CLIENT-sourced Push, the self-sourced mesh re-injection
     ///   ([`publish_client_push_into_meshes`](Self::publish_client_push_into_meshes),
-    ///   router leg master-gated, peer leg ungated).
+    ///   both legs admitted, a broker hat having no gateway view).
     ///
-    /// The master decision ([`is_master`](Self::is_master)) is a no-op in a
-    /// single-router topology (`shared_nodes` = `{self}` ⇒ self always wins the
-    /// election ⇒ `master == true`), so every gate below reduces to the pre-C4
-    /// behavior and the single-router tests are unchanged. An unresolvable
+    /// R2879 replaced the per-keyexpr master election here with the filter. In
+    /// a single-router topology self is the only gateway, so every crossing is
+    /// its own and the single-router tests are unchanged. An unresolvable
     /// inbound alias drops the whole Push (each leg would independently drop it).
     fn route_push(
         &self,
@@ -4067,7 +4100,16 @@ impl RouterForwarder {
         } else {
             push
         };
-        let master = self.is_master(&keyexpr);
+        // R2879 (open-debt item 751, step 5) — the origin and the forwarder, as
+        // the inbound region's net names them: what the inter-region filter
+        // decides every crossing below on, in place of the per-keyexpr master
+        // election. A leaf region has no net and needs neither: its broker hat
+        // has no gateway view, so the filter passes whatever leaves it.
+        let (src_zid, fwd_zid) = if is_leaf(tier) {
+            (None, None)
+        } else {
+            self.push_origin(inbound, tier, push)
+        };
         // Blocks 1 & 2 — within-tier transit (ungated, the resolved-source route).
         // R311y224/y225 — the received band is threaded through EVERY unicast pubsub
         // re-forward this Push fans out to: the within-tier transit + the master-gated
@@ -4076,28 +4118,35 @@ impl RouterForwarder {
         // (broadcast_to_mcast_groups) is the one remaining DEFAULT wire egress — the
         // 2-channel mcast plane has no per-priority conduit (residual, not inert).
         self.forward_push_tier(inbound, tier, reliable, priority, push);
-        // Blocks 1 & 2 — the master-gated cross-mesh bridge (a received-frame transit
+        // Blocks 1 & 2 — the filtered cross-mesh bridge (a received-frame transit
         // re-injected into the other mesh; preserves the band).
-        self.bridge_push_cross_mesh(tier, reliable, priority, push, &keyexpr, master);
-        // Block 3 — local client delivery (master || source == Router). R311y225 —
-        // now PRESERVES the received band on the client-face egress (was the y224
-        // DEFAULT residual); a QoS-negotiated client observes the mesh legs' band.
+        let origin = (src_zid.as_ref(), fwd_zid.as_ref());
+        self.bridge_push_cross_mesh(tier, reliable, priority, push, &keyexpr, origin);
+        // Block 3 — local client delivery. A peer-sourced copy is delivered
+        // here only by the router that carries it north; every other router
+        // gets that carried copy back from the router mesh and delivers it
+        // then. R311y225 — PRESERVES the received band on the client-face egress;
+        // a QoS-negotiated client observes the mesh legs' band.
+        let defer = tier != ROUTERS_REGION
+            && !is_leaf(tier)
+            && !self.crosses(tier, ROUTERS_REGION, origin.0, origin.1, None);
         self.deliver_to_client_subscribers(
-            inbound, tier, reliable, priority, push, &keyexpr, master,
+            inbound, tier, reliable, priority, push, &keyexpr, defer,
         );
         // Block 3b (R2393) — local HOST delivery: a subscriber this router itself
         // registered. Beside block 3 rather than inside it, because a client
         // subscriber is a FACE to send to and a host subscriber is a CLOSURE to
         // invoke; folding them would make one of the two lie about what it does.
         //
-        // UNGATED by `master`, and that is the one decision here worth arguing.
-        // Blocks 1-3 gate on mastership because they RE-FORWARD onto a wire, and two
-        // routers both forwarding one Put is a duplicate a peer can observe. This
+        // UNGATED by the crossing filter, and that is the one decision here worth
+        // arguing. Blocks 1-3 are filtered because they RE-FORWARD onto a wire, and
+        // two routers both forwarding one Put is a duplicate a peer can observe. This
         // block terminates the Put in-process: nothing leaves, so there is nothing to
         // duplicate, and gating it would mean a router that is not master for a
         // keyexpr silently ignores what it was told over its own admin space.
         self.dispatch_local_subscribers(reliable, push, &keyexpr);
-        // Client-sourced mesh re-injection (peer leg ungated, router leg master).
+        // Client-sourced mesh re-injection, into both meshes (R2879: the router leg
+        // is no longer master-gated; a broker hat has no gateway view).
         // A multicast INGRESS Push (I3b) federates into the mesh ONLY when this
         // router is the Designated Router (DR) for its keyexpr: `is_group_dr`
         // elects exactly one on-group router (seedless HRW over the group's ROUTER
@@ -4130,7 +4179,7 @@ impl RouterForwarder {
                 }
             }
             if federate {
-                self.publish_client_push_into_meshes(reliable, priority, push, &keyexpr, master);
+                self.publish_client_push_into_meshes(tier, reliable, priority, push, &keyexpr);
             }
         }
         // EGRESS to any attached multicast group — UNCONDITIONAL, OUTSIDE the
@@ -4341,6 +4390,59 @@ impl RouterForwarder {
         }
     }
 
+    /// R2879 (open-debt item 751, step 5) — whether a data message crosses from
+    /// region `src` to an egress in region `dst`: the pin's inter-region filter
+    /// ([`InterRegionFilter`]) resolved against this router's hats.
+    fn crosses(
+        &self,
+        src: Region,
+        dst: Region,
+        src_zid: Option<&Zid>,
+        fwd_zid: Option<&Zid>,
+        dst_zid: Option<&Zid>,
+    ) -> bool {
+        let self_zid = *self.routers_net().borrow().self_zid();
+        InterRegionFilter {
+            src,
+            dst,
+            src_zid,
+            fwd_zid,
+            dst_zid,
+        }
+        .resolve(&self_zid, self)
+    }
+
+    /// The node that originated a mesh-inbound `Push` and the neighbour it came
+    /// through, both as zids of the inbound region's net: the `src_zid` and
+    /// `fwd_zid` the pin hands its filter
+    /// (`zenoh/src/net/routing/dispatcher/pubsub.rs` @ `.remote_node_id_to_zid(src_face, msg.ext_nodeid.node_id);`).
+    /// The source is `None` when the net cannot name it (an unmapped psid, or
+    /// self), and the forwarder `None` for a face no longer held.
+    fn push_origin(
+        &self,
+        inbound: FaceId,
+        tier: Region,
+        push: &PushOwned,
+    ) -> (Option<Zid>, Option<Zid>) {
+        let (inbound_zid, inbound_link) = {
+            let faces = self.faces.borrow();
+            match classify_inbound(&faces, inbound) {
+                InboundFace::Held(s) => (peer_zid_routing(&s.actions), s.link),
+                InboundFace::SourceOnly | InboundFace::Gone => return (None, None),
+            }
+        };
+        let source = self.plane(tier).and_then(|(net, _dirty)| {
+            resolve_source_in(
+                &net.borrow(),
+                inbound_zid,
+                inbound_link,
+                read_push_source(push),
+            )
+            .map(|(zid, _psid)| zid)
+        });
+        (source, inbound_zid)
+    }
+
     /// Whether SELF is the elected route master for `keyexpr` — the zenoh
     /// `compute_data_route` master decision
     /// (`zenoh/src/net/routing/hat/router/pubsub.rs` @ `fn compute_data_route`): master
@@ -4407,12 +4509,18 @@ impl RouterForwarder {
     /// as zenoh stamps `router_source` / `peer_source` = self's net index for a
     /// non-native source (`pubsub.rs:1295`/`:1311`), NOT the transit
     /// [`compute_push_forward`] (which would DROP the source: the peer/router
-    /// origin is not a node of the OTHER net). Master-gated so only the single
-    /// HRW-elected router bridges: in a federated 2-router mesh a cross-mesh Push
-    /// is delivered exactly once, and the bridged (now router-source) copy is not
-    /// re-bridged by the other router (it is not master). Routes through
+    /// origin is not a node of the OTHER net). Routes through
     /// [`fan_out_tier`](Self::fan_out_tier) so it inherits the future
     /// interceptor / egress-ACL gate (the y113 obligation).
+    ///
+    /// R2879 (open-debt item 751, step 5) — each egress is admitted by the
+    /// pin's inter-region filter, as the pin filters every data direction
+    /// (`zenoh/src/net/routing/dispatcher/pubsub.rs` @ `fwd_zid: Some(&src_face.zid),`),
+    /// in place of the per-keyexpr master election: of the gateways that could
+    /// carry the Push across, only the largest zid does, and a gateway source
+    /// is carried by nobody else. Up from the peer region the candidates are the
+    /// forwarder's gateways, so the decision is one for the whole leg; down into
+    /// it they are each egress neighbour's, so it is taken per neighbour.
     fn bridge_push_cross_mesh(
         &self,
         inbound_tier: Region,
@@ -4420,11 +4528,8 @@ impl RouterForwarder {
         priority: Priority,
         push: &PushOwned,
         keyexpr: &str,
-        master: bool,
+        (src_zid, fwd_zid): (Option<&Zid>, Option<&Zid>),
     ) {
-        if !master {
-            return; // only the elected master bridges (double-delivery / loop guard)
-        }
         let target_tier = match inbound_tier {
             PEERS_REGION => ROUTERS_REGION,
             ROUTERS_REGION => PEERS_REGION,
@@ -4434,7 +4539,9 @@ impl RouterForwarder {
         // tree root, node_id 0) via the shared self-publish-into-tier seam, PRESERVING
         // the received band (R311y224) — a mesh source can be QoS-negotiated, so the
         // bridged copy must carry the same priority the within-tier copy does.
-        self.self_publish_into_tier(target_tier, reliable, priority, push, keyexpr);
+        self.self_publish_into_tier(target_tier, reliable, priority, push, keyexpr, |dst| {
+            self.crosses(inbound_tier, target_tier, src_zid, fwd_zid, Some(dst))
+        });
     }
 
     /// Route a data `Push` WITHIN its inbound tier's mesh (C1) — the router twin
@@ -4511,14 +4618,14 @@ impl RouterForwarder {
     /// attracted toward this router by C2's client advertisement is now DELIVERED
     /// to the subscribing client(s), re-literalized to the resolved keyexpr (a
     /// client leaf shares no alias table). Excludes the inbound face, so it covers
-    /// mesh->client AND client->client. Zenoh block-3 MASTER-GATED
-    /// (`pubsub.rs:1323`, `master || source == Router`): a Push from a
-    /// Peer/Client source is delivered only when self is the route master
-    /// (`master`), so a NON-master router defers to the copy the master bridges
-    /// back as a ROUTER source — else a client on a non-master would get the Push
-    /// twice. A Router-source Push (the bridged copy) is always delivered. In a
-    /// single-router topology `master` is always true, so this is unconditional as
-    /// before. A client-sourced Push reaching the MESH (client->peer, a
+    /// mesh->client AND client->client. `defer` (R2879, replacing the master
+    /// gate): a peer-sourced Push is delivered here only by the router that
+    /// carries it into the router mesh, and every other router defers to that
+    /// carried copy, which reaches it back as a ROUTER source — else a client
+    /// on a non-carrying router would get the Push twice. A Router-source Push
+    /// (the carried copy) and a client-source one are always delivered. In a
+    /// single-router topology self carries everything, so this is unconditional
+    /// as before. A client-sourced Push reaching the MESH (client->peer, a
     /// self-sourced re-injection) is the SIBLING C3b path
     /// ([`publish_client_push_into_meshes`](Self::publish_client_push_into_meshes));
     /// LOCAL self-hosted delivery stays deferred (a pure router hosts no
@@ -4529,7 +4636,7 @@ impl RouterForwarder {
     /// obligation) rather than being a separate retrofit site.
     // R311y225 added the `priority` band arg (client-egress band preservation),
     // crossing the 7-arg lint; the args are the irreducible routing context
-    // (source, tier, reliability, band, payload, keyexpr, master-gate).
+    // (source, tier, reliability, band, payload, keyexpr, defer).
     #[allow(clippy::too_many_arguments)]
     fn deliver_to_client_subscribers(
         &self,
@@ -4539,18 +4646,16 @@ impl RouterForwarder {
         priority: Priority,
         push: &PushOwned,
         keyexpr: &str,
-        master: bool,
+        defer: bool,
     ) {
-        // Block-3 master gate (zenoh pubsub.rs:1323, `master || source == Router`):
-        // a NON-master router defers its local client delivery to the copy the
-        // master bridges back as a ROUTER source, so a client subscribing on a
-        // non-master router is NOT delivered its own Peer/Client-source copy (which
-        // it would then ALSO receive as the bridged router-source copy = a double
-        // delivery). Single-router => master => unconditional, as before C4.
-        if inbound_tier != ROUTERS_REGION && !master {
-            // C4 double-delivery guard fired: a non-master router defers this
-            // peer/client-source client delivery (the master's bridged
-            // router-source copy delivers instead). Count it — but only when a
+        // The caller decides `defer` from the crossing filter: a router that
+        // does not carry a peer-source Push north does not deliver it either,
+        // since the carrier's copy comes back to it as a ROUTER source.
+        if defer {
+            debug_assert!(inbound_tier != ROUTERS_REGION && !is_leaf(inbound_tier));
+            // The double-delivery guard fired: this router defers the
+            // peer-source client delivery (the carrier's router-source copy
+            // delivers instead). Count it — but only when a
             // client sub exists, so the witness reflects a delivery actually
             // suppressed, not a vacuous defer on a router hosting no clients.
             if self.any_client_sub() {
@@ -4634,29 +4739,30 @@ impl RouterForwarder {
     /// hard-coded `true` (a fresh local produce).
     fn publish_client_push_into_meshes(
         &self,
+        source_tier: Region,
         reliable: bool,
         priority: Priority,
         push: &PushOwned,
         keyexpr: &str,
-        master: bool,
     ) {
         // `keyexpr` is the literal already resolved against the inbound (client)
         // face's alias table by the [`route_push`](Self::route_push) head — a
         // downstream mesh peer shares no alias table, so the re-injection carries
         // the literal.
         for tier in [ROUTERS_REGION, PEERS_REGION] {
-            // Zenoh route_data for a CLIENT (non-router) source: the ROUTER-net leg
-            // (block 1, `pubsub.rs:1291`) requires `master`, while the PEER-net leg
-            // (block 2, `pubsub.rs:1307`) is UNgated for a non-router source. A
-            // non-master router that skips its router leg lets the single elected
-            // master be the sole injector, so a router-net subscriber reachable via
-            // two masters receives the Put exactly once. Single-router => master =>
-            // both legs fire, as before C4. (Zenoh also inserts `mcast_groups` faces
-            // at `pubsub.rs:1334` -- an unbuilt wz plane, deferred with multicast.)
-            if tier == ROUTERS_REGION && !master {
-                continue;
-            }
-            self.self_publish_into_tier(tier, reliable, priority, push, keyexpr);
+            // R2879 (open-debt item 751, step 5) — each leg is admitted by the
+            // inter-region filter, as every data egress is. A client region is
+            // served by a broker hat, which has no gateway view, so both legs
+            // pass: a client sits below exactly one router, and that router
+            // carries its Put into both meshes. The per-keyexpr master gate this
+            // replaces sent the router leg through the elected master instead;
+            // the copy another gateway receives through the peer mesh is now
+            // dropped there, its source being a gateway itself. (Zenoh also
+            // inserts `mcast_groups` faces -- an unbuilt wz plane, deferred with
+            // multicast.)
+            self.self_publish_into_tier(tier, reliable, priority, push, keyexpr, |dst| {
+                self.crosses(source_tier, tier, None, None, Some(dst))
+            });
         }
     }
 
@@ -4669,10 +4775,10 @@ impl RouterForwarder {
     /// [`compute_self_publish_forward`] core (self tree root, node_id 0) on the
     /// tier's `(net, subs)` and fans the result out through the
     /// [`fan_out_tier`](Self::fan_out_tier) egress SSOT. The CALLER owns the
-    /// master-gating + tier selection (bridge = the one opposite tier when master;
-    /// publish = both tiers, router leg master-gated); this seam is the gate-free
-    /// plumbing they shared verbatim. A drop (no interested sub / no tree child /
-    /// build err) is silent.
+    /// tier selection and the per-egress admission `admits` (R2879: the
+    /// inter-region filter, asked per egress neighbour); this seam is the
+    /// plumbing they share verbatim. A drop (no interested sub / no tree child /
+    /// no admitted egress / build err) is silent.
     fn self_publish_into_tier(
         &self,
         tier: Region,
@@ -4680,6 +4786,7 @@ impl RouterForwarder {
         priority: Priority,
         push: &PushOwned,
         keyexpr: &str,
+        admits: impl Fn(&Zid) -> bool,
     ) {
         let Some((net, _)) = self.plane(tier) else {
             return;
@@ -4705,7 +4812,7 @@ impl RouterForwarder {
         // DEFAULT — but the seam does not rely on it).
         let _ = self.fan_out_tier_qos(tier, reliable, priority, false, |_id, zid| {
             Ok(zid
-                .filter(|z| children.contains(z))
+                .filter(|z| children.contains(z) && admits(z))
                 .map(|_| NetworkMessage::Push(Box::new(carrier.clone()))))
         });
     }
@@ -7347,7 +7454,7 @@ mod tests {
     use wz_codecs::wireexpr::{WireexprOwned, WireexprOwnedVariant};
     use wz_codecs::wireexpr_local::WireexprLocalOwned;
     use wz_runtime_core::runtime::Runtime;
-    use wz_session_core::push_routing_context::{read_push_hoplimit, read_push_source};
+    use wz_session_core::push_routing_context::read_push_hoplimit;
 
     /// R2864 (open-debt item 751) — the tier is now read off the face's REGION,
     /// and for every remote that announces no bound (every stock node, every wz
@@ -7553,6 +7660,30 @@ mod tests {
             entry(0, 1, self_z, &[]),                 // self mapping (stale-gated)
             entry(psid_node, sn, node, &[1]),         // the distant node -> neighbour
             entry(1, sn, neighbour, &[0, psid_node]), // neighbour -> self + node
+        ]))
+        .expect("build oam");
+        forward_one(fwd, face, NetworkMessage::Oam(oam));
+    }
+
+    /// R2879 — [`discover_via`], with the distant `node` advertising itself a
+    /// region gateway (the G bit): another router serving the same south peer
+    /// region, which `neighbour` links to beside self.
+    fn discover_gateway_via(
+        fwd: &RouterForwarder,
+        face: FaceId,
+        self_z: u8,
+        neighbour: u8,
+        node: u8,
+        psid_node: u64,
+        sn: u64,
+    ) {
+        const OPT_G: u8 = 0x10; // region gateway (wz_routing_graph OPT_G)
+        let mut gateway = entry(psid_node, sn, node, &[1]);
+        gateway.options |= OPT_G;
+        let oam = build_linkstate_oam_owned(&list(vec![
+            entry(0, 1, self_z, &[]),
+            gateway,
+            entry(1, sn, neighbour, &[0, psid_node]),
         ]))
         .expect("build oam");
         forward_one(fwd, face, NetworkMessage::Oam(oam));
@@ -9604,108 +9735,172 @@ mod tests {
         );
     }
 
+    /// R2879 (open-debt item 751, step 5) — a PEER-source Push crosses into the
+    /// router mesh only through the largest gateway its forwarder links to: the
+    /// pin's inter-region filter, which replaced the per-keyexpr master
+    /// election on this leg. R2 is a second router serving the same peer region;
+    /// whether it is a gateway there (the G bit it advertises) and whether its
+    /// zid is larger than self's decides who crosses, for every keyexpr alike.
     #[test]
-    fn push_bridges_cross_mesh_only_when_master() {
-        // C4 federation: a PEER-source Push is bridged into the ROUTER mesh to a
-        // router-mesh subscriber ONLY when self is the elected route master. With
-        // two routers shared across both meshes (`shared_nodes = {self, R2}`), the
-        // HRW election makes self master for some keyexprs and R2 master for others;
-        // self bridges only its own, so exactly ONE router bridges (no
-        // double-delivery, cross-mesh loop-freedom).
-        let self_z = zid(0x01);
-        let r2 = zid(0x02);
-        let shared = [self_z, r2];
-        let ke_master = (0..256)
-            .map(|i| format!("demo/m{i}"))
-            .find(|k| elect_router(&self_z, k, shared.iter()) == self_z)
-            .expect("some ke elects self");
-        let ke_other = (0..256)
-            .map(|i| format!("demo/o{i}"))
-            .find(|k| elect_router(&self_z, k, shared.iter()) == r2)
-            .expect("some ke elects R2");
-
-        // Build the federated topology (R2 shared across both meshes, R2 subscribing
-        // `ke` on its router face), publish a peer-source Push, and return
-        // (router-face hits, shared_nodes len).
-        let run = |ke: &str| -> (usize, usize) {
-            let fwd = RouterForwarder::new(self_z);
-            let (a, _sa) = face(zid(0xAA), WIRE_PEER); // peer publisher + R2 discovery neighbour
-            let (r, sink_r) = face(r2, WIRE_ROUTER); // the other router R2 (subscriber)
+    fn a_peer_push_crosses_north_only_through_the_largest_gateway_of_its_forwarder() {
+        // Build the topology (R2 in both meshes, subscribing on its router face),
+        // publish a peer-source Push, and return R2's router-face hits.
+        let run = |other: u8, other_is_gateway: bool| -> usize {
+            let fwd = RouterForwarder::new(zid(0x05));
+            let (a, _sa) = face(zid(0xAA), WIRE_PEER); // peer publisher, linked to self and R2
+            let (r, sink_r) = face(zid(other), WIRE_ROUTER); // R2, the subscriber
             fwd.register(FaceId(0), &a);
             fwd.register(FaceId(1), &r);
-            advertise_link_back(&fwd, FaceId(1), 0x01, 0x02, 5); // R2 -> routers_net
-            discover_via(&fwd, FaceId(0), 0x01, 0xAA, 0x02, 7, 5); // R2 -> linkstatepeers_net
+            advertise_link_back(&fwd, FaceId(1), 0x05, other, 5); // R2 -> routers_net
+            if other_is_gateway {
+                discover_gateway_via(&fwd, FaceId(0), 0x05, 0xAA, other, 7, 5);
+            } else {
+                discover_via(&fwd, FaceId(0), 0x05, 0xAA, other, 7, 5);
+            }
             fwd.tick();
-            forward_one(&fwd, FaceId(1), declare_sub(ke)); // R2 subscribes on its router face
+            forward_one(&fwd, FaceId(1), declare_sub("demo/k"));
             sink_r.reset();
-            let push =
-                wz_session_core::push_build::build_push_literal(ke, b"payload").expect("push");
+            let push = wz_session_core::push_build::build_push_literal("demo/k", b"payload")
+                .expect("push");
             forward_one(&fwd, FaceId(0), NetworkMessage::Push(Box::new(push)));
-            (sink_r.frame_count(), fwd.shared_nodes().len())
+            sink_r.frame_count()
         };
-
-        let (master_hits, shared_len) = run(&ke_master);
-        assert_eq!(shared_len, 2, "self + R2 are shared across both meshes");
         assert_eq!(
-            master_hits, 1,
-            "master bridges the peer-source Push to the router-mesh sub"
+            run(0x09, true),
+            0,
+            "a larger gateway of the forwarder crosses, not self"
         );
-        let (other_hits, _) = run(&ke_other);
         assert_eq!(
-            other_hits, 0,
-            "a non-master suppresses the cross-mesh bridge"
+            run(0x02, true),
+            1,
+            "self is the largest gateway, so self crosses"
+        );
+        assert_eq!(
+            run(0x09, false),
+            1,
+            "a larger router that is no gateway of the region is no candidate"
         );
     }
 
+    /// R2879 — down from the router mesh the decision is PER egress neighbour:
+    /// each peer is reached through the gateways it links to
+    /// (`zenoh/src/net/routing/dispatcher/pubsub.rs` @ `dst_zid: Some(&dir.dst_face.zid),`).
+    /// A router R2 sends a Push; peer AA links to self and to R2, peer BB to
+    /// self alone. R2, a gateway of the peer region, reaches AA itself, so self
+    /// carries the Push to BB only. Control: R2 no gateway, self carries both.
     #[test]
-    fn local_client_delivery_deferred_on_non_master() {
-        // BLOCKER-2 double-delivery regression (zenoh block-3 gate, pubsub.rs:1323):
-        // a client on a NON-master router must NOT be delivered its own peer-source
-        // copy — it would ALSO receive the copy the master bridges back as a ROUTER
-        // source, i.e. the Push twice. The non-master DEFERS; the router-source
-        // (bridged) copy is what actually delivers, exactly once.
-        let self_z = zid(0x01);
-        let r2 = zid(0x02);
-        let shared = [self_z, r2];
-        let ke_other = (0..256)
-            .map(|i| format!("demo/o{i}"))
-            .find(|k| elect_router(&self_z, k, shared.iter()) == r2)
-            .expect("some ke elects R2 (self non-master)");
-
-        let fwd = RouterForwarder::new(self_z);
-        let (a, _sa) = face(zid(0xAA), WIRE_PEER); // peer publisher + R2 discovery neighbour
-        let (r, _sr) = face(r2, WIRE_ROUTER); // the shared router
-        let (cb, sink_cb) = face(zid(0xCC), WIRE_CLIENT); // local client subscriber
-        fwd.register(FaceId(0), &a);
-        fwd.register(FaceId(1), &r);
-        fwd.register(FaceId(2), &cb);
-        advertise_link_back(&fwd, FaceId(1), 0x01, 0x02, 5); // R2 -> routers_net
-        discover_via(&fwd, FaceId(0), 0x01, 0xAA, 0x02, 7, 5); // R2 -> linkstatepeers_net
-        fwd.tick();
-        forward_one(&fwd, FaceId(2), declare_sub(&ke_other)); // Cb subscribes
-        assert_eq!(fwd.shared_nodes().len(), 2, "federated: self + R2 shared");
-        assert!(
-            !fwd.is_master(&ke_other),
-            "self is NOT the elected master for this ke"
-        );
-        sink_cb.reset();
-
-        // The peer-source copy: a non-master DEFERS its local client delivery.
-        let p1 = wz_session_core::push_build::build_push_literal(&ke_other, b"x").expect("push");
-        forward_one(&fwd, FaceId(0), NetworkMessage::Push(Box::new(p1)));
+    fn a_router_push_enters_the_peer_region_per_neighbour() {
+        let run = |other_is_gateway: bool| -> (usize, usize) {
+            let fwd = RouterForwarder::new(zid(0x05));
+            let (a, sink_a) = face(zid(0xAA), WIRE_PEER);
+            let (b, sink_b) = face(zid(0xBB), WIRE_PEER);
+            let (r, _sr) = face(zid(0x09), WIRE_ROUTER);
+            fwd.register(FaceId(0), &a);
+            fwd.register(FaceId(1), &b);
+            fwd.register(FaceId(2), &r);
+            advertise_link_back(&fwd, FaceId(2), 0x05, 0x09, 5);
+            advertise_link_back(&fwd, FaceId(1), 0x05, 0xBB, 5);
+            if other_is_gateway {
+                discover_gateway_via(&fwd, FaceId(0), 0x05, 0xAA, 0x09, 7, 5);
+            } else {
+                discover_via(&fwd, FaceId(0), 0x05, 0xAA, 0x09, 7, 5);
+            }
+            fwd.tick();
+            forward_one(&fwd, FaceId(0), declare_sub("demo/k"));
+            forward_one(&fwd, FaceId(1), declare_sub("demo/k"));
+            sink_a.reset();
+            sink_b.reset();
+            let push = wz_session_core::push_build::build_push_literal("demo/k", b"payload")
+                .expect("push");
+            forward_one(&fwd, FaceId(2), NetworkMessage::Push(Box::new(push)));
+            (sink_a.frame_count(), sink_b.frame_count())
+        };
+        assert_eq!(run(true), (0, 1), "AA is R2's to reach; BB is self's");
         assert_eq!(
-            sink_cb.frame_count(),
-            0,
-            "non-master defers the peer-source copy (no double delivery)"
+            run(false),
+            (1, 1),
+            "control: with R2 no gateway, self reaches both"
         );
+    }
 
-        // The router-source (bridged-back) copy: delivered (source == Router ungated).
-        let p2 = wz_session_core::push_build::build_push_literal(&ke_other, b"x").expect("push");
-        forward_one(&fwd, FaceId(1), NetworkMessage::Push(Box::new(p2)));
+    /// R2879 — a Push whose ORIGIN is itself one of the forwarder's gateways
+    /// crossed at that gateway; no other gateway carries it again, even the
+    /// largest (`zenoh/src/net/routing/dispatcher/tables.rs` @ `if gwys.contains(src_zid) {`).
+    /// This is what keeps a client's Put, which its router now injects into
+    /// both meshes, from reaching the router mesh a second time through the
+    /// peer mesh.
+    #[test]
+    fn a_push_originated_by_a_gateway_is_not_carried_north_again() {
+        let run = |source_psid: u16| -> usize {
+            let fwd = RouterForwarder::new(zid(0x09));
+            let (a, _sa) = face(zid(0xAA), WIRE_PEER);
+            let (r, sink_r) = face(zid(0x02), WIRE_ROUTER);
+            fwd.register(FaceId(0), &a);
+            fwd.register(FaceId(1), &r);
+            advertise_link_back(&fwd, FaceId(1), 0x09, 0x02, 5);
+            discover_gateway_via(&fwd, FaceId(0), 0x09, 0xAA, 0x02, 7, 5);
+            fwd.tick();
+            forward_one(&fwd, FaceId(1), declare_sub("demo/k"));
+            sink_r.reset();
+            let mut push = wz_session_core::push_build::build_push_literal("demo/k", b"payload")
+                .expect("push");
+            set_push_source(&mut push, source_psid);
+            forward_one(&fwd, FaceId(0), NetworkMessage::Push(Box::new(push)));
+            sink_r.frame_count()
+        };
         assert_eq!(
-            sink_cb.frame_count(),
+            run(0),
             1,
-            "the bridged router-source copy delivers exactly once"
+            "control: the peer's own Push crosses through self, the largest"
+        );
+        assert_eq!(
+            run(7),
+            0,
+            "the same Push originated by gateway R2 does not cross again"
+        );
+    }
+
+    /// R2879 (open-debt item 751, step 5) — the double-delivery guard, keyed on
+    /// the crossing filter instead of the master election: a client on a router
+    /// that does NOT carry a peer-source Push north is not delivered that copy,
+    /// because the carrier's copy comes back to it from the router mesh as a
+    /// ROUTER source and is delivered then, exactly once. Control: when self IS
+    /// the carrier (R2 is no gateway of the region), the peer copy delivers.
+    #[test]
+    fn a_router_that_does_not_carry_a_peer_push_north_defers_its_client_delivery() {
+        let run = |other_is_gateway: bool| -> (usize, usize) {
+            let fwd = RouterForwarder::new(zid(0x01));
+            let (a, _sa) = face(zid(0xAA), WIRE_PEER); // peer publisher, linked to self and R2
+            let (r, _sr) = face(zid(0x02), WIRE_ROUTER); // R2, larger than self
+            let (cb, sink_cb) = face(zid(0xCC), WIRE_CLIENT); // local client subscriber
+            fwd.register(FaceId(0), &a);
+            fwd.register(FaceId(1), &r);
+            fwd.register(FaceId(2), &cb);
+            advertise_link_back(&fwd, FaceId(1), 0x01, 0x02, 5);
+            if other_is_gateway {
+                discover_gateway_via(&fwd, FaceId(0), 0x01, 0xAA, 0x02, 7, 5);
+            } else {
+                discover_via(&fwd, FaceId(0), 0x01, 0xAA, 0x02, 7, 5);
+            }
+            fwd.tick();
+            forward_one(&fwd, FaceId(2), declare_sub("demo/k"));
+            sink_cb.reset();
+            let p1 = wz_session_core::push_build::build_push_literal("demo/k", b"x").expect("push");
+            forward_one(&fwd, FaceId(0), NetworkMessage::Push(Box::new(p1)));
+            let from_peer = sink_cb.frame_count();
+            let p2 = wz_session_core::push_build::build_push_literal("demo/k", b"x").expect("push");
+            forward_one(&fwd, FaceId(1), NetworkMessage::Push(Box::new(p2)));
+            (from_peer, sink_cb.frame_count() - from_peer)
+        };
+        assert_eq!(
+            run(true),
+            (0, 1),
+            "R2 carries it north: the peer copy is deferred, the router copy delivers"
+        );
+        assert_eq!(
+            run(false).0,
+            1,
+            "control: self carries it, so the peer copy delivers"
         );
     }
 
@@ -9776,22 +9971,20 @@ mod tests {
         );
     }
 
+    /// R2879 (open-debt item 751, step 5) — a CLIENT-sourced Push leaves its one
+    /// router into BOTH meshes: a client region is served by a broker hat, which
+    /// has no gateway view, so the inter-region filter admits both legs
+    /// (`zenoh/src/net/routing/hat/broker/mod.rs` @ `fn gateways(&self, _tables: &TablesData) -> Option<Vec<ZenohIdProto>> {`).
+    /// The master gate this replaces sent the router leg through the elected
+    /// master instead, even though the client sits below this router alone;
+    /// here R2 is a larger gateway and self still injects both legs. The copy R2
+    /// then receives through the peer mesh does not cross again —
+    /// `a_push_originated_by_a_gateway_is_not_carried_north_again`.
     #[test]
-    fn client_push_router_leg_is_master_gated_peer_leg_ungated() {
-        // C4 re-gate of C3b (client->mesh re-injection): a CLIENT-sourced Push's
-        // ROUTER-net leg requires `master` (zenoh block 1, pubsub.rs:1291) while its
-        // PEER-net leg is UNgated for a non-router source (block 2, :1307). A
-        // non-master injects only the peer leg, so the elected master is the sole
-        // router-net injector (no double-injection to a router-net sub).
-        let self_z = zid(0x01);
+    fn a_client_push_enters_both_meshes_from_its_one_router() {
+        let ke_other = "demo/k".to_string();
         let r2 = zid(0x02);
-        let shared = [self_z, r2];
-        let ke_other = (0..256)
-            .map(|i| format!("demo/o{i}"))
-            .find(|k| elect_router(&self_z, k, shared.iter()) == r2)
-            .expect("some ke elects R2 (self non-master)");
-
-        let fwd = RouterForwarder::new(self_z);
+        let fwd = RouterForwarder::new(zid(0x01));
         let (p, sink_p) = face(zid(0xAA), WIRE_PEER); // peer-net subscriber + R2 discovery neighbour
         let (r, sink_r) = face(r2, WIRE_ROUTER); // router-net subscriber (R2)
         let (cpub, _sc) = face(zid(0xCC), WIRE_CLIENT); // client publisher
@@ -9799,24 +9992,19 @@ mod tests {
         fwd.register(FaceId(1), &r);
         fwd.register(FaceId(2), &cpub);
         advertise_link_back(&fwd, FaceId(1), 0x01, 0x02, 5); // R2 -> routers_net
-        discover_via(&fwd, FaceId(0), 0x01, 0xAA, 0x02, 7, 5); // R2 -> linkstatepeers_net
+        discover_gateway_via(&fwd, FaceId(0), 0x01, 0xAA, 0x02, 7, 5); // R2, a larger gateway
         fwd.tick();
         forward_one(&fwd, FaceId(0), declare_sub(&ke_other)); // P subscribes (peer leg target)
         forward_one(&fwd, FaceId(1), declare_sub(&ke_other)); // R2 subscribes (router leg target)
-        assert!(!fwd.is_master(&ke_other), "self is NOT master for this ke");
         sink_p.reset();
         sink_r.reset();
         let push = wz_session_core::push_build::build_push_literal(&ke_other, b"z").expect("push");
         forward_one(&fwd, FaceId(2), NetworkMessage::Push(Box::new(push))); // client publishes
-        assert_eq!(
-            sink_p.frame_count(),
-            1,
-            "the peer-net leg is ungated for a client source (delivered)"
-        );
+        assert_eq!(sink_p.frame_count(), 1, "the peer-net leg delivers");
         assert_eq!(
             sink_r.frame_count(),
-            0,
-            "the router-net leg is master-gated (a non-master suppresses it)"
+            1,
+            "the router-net leg delivers too, though R2 is the larger gateway"
         );
     }
 
@@ -15168,7 +15356,8 @@ mod tests {
 
     #[test]
     fn a_peer_request_bridges_cross_mesh_to_a_router_queryable_only_when_master() {
-        // The query twin of push_bridges_cross_mesh_only_when_master: a peer-source
+        // The query twin of the data plane's master-gated bridge (R2879 moved the
+        // data plane onto the inter-region filter; the query plane is step 6): a peer-source
         // Query is bridged into the ROUTER mesh toward a router-tier queryable ONLY
         // when self is the elected route master (block-1 gate). With two shared
         // routers, self bridges only the keyexprs it wins the HRW election for, so
