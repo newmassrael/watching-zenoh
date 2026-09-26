@@ -907,6 +907,50 @@ fn face_region(whatami: WhatAmI, remote_bound: Option<Bound>) -> Region {
         .unwrap_or_else(|| unreachable!("a router's Auto table places every remote"))
 }
 
+/// R2882 (open-debt item 751, step 7) — the direction the interest protocol
+/// flows in, as the pin's dispatcher enforces it before any hat sees a message.
+/// An interest travels NORTH, from a node toward the router above it, and its
+/// answers travel back SOUTH. The pin therefore refuses the three messages that
+/// arrive against that flow:
+///
+/// * an `Interest` from a north-bound face unless the remote is a peer, and
+///   from any router
+///   (`zenoh/src/net/routing/dispatcher/interests.rs` @ `if region.bound().is_north() && !self.state.whatami.is_peer() {`,
+///   then `@ if self.state.whatami.is_router() {`);
+/// * a token carrying an interest id, which is an ANSWER, from a south-bound
+///   face (`zenoh/src/net/routing/dispatcher/token.rs` @ `if interest_id.is_some() && self.state.region.bound().is_south() {`);
+/// * a `DeclareFinal` from a south-bound face
+///   (`zenoh/src/net/routing/dispatcher/interests.rs` @ `error!("Received DeclareFinal from south-bound face");`).
+///
+/// This router routes no `DeclareFinal` at all (it sends no interest, so it has
+/// no breadcrumb for one to close), so the third guard has no behaviour to
+/// change here and only the first two are consulted. The only answer this
+/// router can receive is a token, so [`Answer`](Self::Answer) exists with the
+/// token plane.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum InterestFlow {
+    /// A solicitation, which must come from below.
+    Solicitation,
+    /// An answer to a solicitation, which must come from above.
+    #[cfg(feature = "routing-token-tables")]
+    Answer,
+}
+
+impl InterestFlow {
+    /// Whether a message of this flow is admitted from a face in `region`
+    /// whose remote is a `whatami`.
+    fn admits(self, region: Region, whatami: WhatAmI) -> bool {
+        match self {
+            InterestFlow::Solicitation => {
+                !(region.bound().is_north() && whatami != WhatAmI::Peer)
+                    && whatami != WhatAmI::Router
+            }
+            #[cfg(feature = "routing-token-tables")]
+            InterestFlow::Answer => !region.bound().is_south(),
+        }
+    }
+}
+
 /// ⚠ R2880 (open-debt item 751, step 6) — the ROUTE master this function used
 /// to elect is gone: both the data and the query plane cross regions by the
 /// pin's inter-region filter, and `is_master` / `shared_nodes` were removed with
@@ -3634,8 +3678,9 @@ impl RouterForwarder {
     /// pushed ([`push_future_subscription`](Self::push_future_subscription)) — the
     /// pub-before-sub close (R311y146); an `Interest(Final)` tears the stored
     /// interest down. A body-less Final gets no wire reply. The current dump is
-    /// tier-agnostic — routers answer
-    /// interests from any tier — the faithful zenoh behavior.
+    /// tier-agnostic once an interest is admitted, but since R2882 an interest
+    /// is admitted only from below and never from a router ([`InterestFlow`]),
+    /// as the pin's dispatcher admits it; until then this answered every face.
     fn respond_to_interest(&self, inbound: FaceId, interest: &InterestOwned) {
         // Interest(Final) (`!c && !f`): a client CANCELLING a prior interest. pico
         // sends one on every publisher/querier drop (`net/primitives.c:
@@ -7273,12 +7318,14 @@ impl FaceForwarder for RouterForwarder {
             return;
         };
         // The inbound face's tier selects which net topology ingests into and
-        // which faces a re-flood reaches. Read once; the borrow is released
-        // before the per-message work re-borrows `faces`.
-        let tier = {
+        // which faces a re-flood reaches; with the remote's mode it also
+        // decides which way the interest protocol may flow ([`InterestFlow`]).
+        // Read once; the borrow is released before the per-message work
+        // re-borrows `faces`.
+        let (tier, whatami) = {
             let faces = self.faces.borrow();
             match faces.get(&id) {
-                Some(s) => s.tier,
+                Some(s) => (s.tier, peer_whatami_routing(&s.actions)),
                 None => {
                     log::debug!(
                         "router forward: DROP {} inbound message(s) from unregistered face {id:?}",
@@ -7388,6 +7435,17 @@ impl FaceForwarder for RouterForwarder {
                     DeclareOwnedVariant::CodecZenohUndeclQueryable(_) => {
                         self.undeclare_queryable(id, tier, *reliable, declare);
                     }
+                    // A token stamped with an interest id is an ANSWER, and an
+                    // answer from below is refused ([`InterestFlow`]).
+                    #[cfg(feature = "routing-token-tables")]
+                    DeclareOwnedVariant::CodecZenohDeclToken(_)
+                        if declare.interest_id.is_some()
+                            && !InterestFlow::Answer.admits(tier, whatami) =>
+                    {
+                        log::debug!(
+                            "router forward: DROP a token answer from south-bound face {id:?}"
+                        );
+                    }
                     #[cfg(feature = "routing-token-tables")]
                     DeclareOwnedVariant::CodecZenohDeclToken(_) => {
                         self.declare_token(id, tier, *reliable, declare);
@@ -7422,8 +7480,16 @@ impl FaceForwarder for RouterForwarder {
                 // pico publisher/querier drops its own data LOCALLY until it learns
                 // a matching remote declaration) deactivates. Previously dropped
                 // (`_ => {}`), which black-holed the reverse-data path.
+                // R2882 — only from below, and never from a router
+                // ([`InterestFlow`]).
                 NetworkMessage::Interest(interest) => {
-                    self.respond_to_interest(id, interest);
+                    if InterestFlow::Solicitation.admits(tier, whatami) {
+                        self.respond_to_interest(id, interest);
+                    } else {
+                        log::debug!(
+                            "router forward: DROP an interest from {whatami:?} face {id:?} in {tier}"
+                        );
+                    }
                 }
                 _ => {}
             }
@@ -10303,6 +10369,102 @@ mod tests {
             Some(NetworkMessage::Declare(d)) => *d,
             other => panic!("expected a forwarded Declare, got {other:?}"),
         }
+    }
+
+    /// R2882 (open-debt item 751, step 7) — [`InterestFlow`] admits what the
+    /// pin's dispatcher admits, over every face a router can hold: each remote
+    /// mode, announcing no bound or either bound. The population is asserted to
+    /// reach both north-bound non-routers, the only faces where the two flows
+    /// and the peer exception are all live.
+    #[test]
+    fn interest_flow_admits_what_the_pins_dispatcher_admits() {
+        let (mut north_peer, mut north_client) = (false, false);
+        for whatami in [WhatAmI::Router, WhatAmI::Peer, WhatAmI::Client] {
+            for bound in [None, Some(Bound::North), Some(Bound::South)] {
+                let region = face_region(whatami, bound);
+                let solicit = InterestFlow::Solicitation.admits(region, whatami);
+                let case = format!("{whatami:?} bound {bound:?} in {region}");
+                if whatami == WhatAmI::Router {
+                    assert!(!solicit, "{case}: a router's interest is ignored");
+                } else if region.bound().is_south() {
+                    assert!(solicit, "{case}: an interest from below is admitted");
+                } else {
+                    assert_eq!(
+                        solicit,
+                        whatami == WhatAmI::Peer,
+                        "{case}: from above only a peer may solicit"
+                    );
+                    north_peer |= whatami == WhatAmI::Peer;
+                    north_client |= whatami == WhatAmI::Client;
+                }
+                #[cfg(feature = "routing-token-tables")]
+                assert_eq!(
+                    InterestFlow::Answer.admits(region, whatami),
+                    region.bound().is_north(),
+                    "{case}: an answer is admitted only from above"
+                );
+            }
+        }
+        assert!(
+            north_peer && north_client,
+            "the population reaches a north-bound peer and client"
+        );
+    }
+
+    /// R2882 — the behaviour behind the table: an interest from a router face
+    /// gets no answer at all, while a peer's and a client's get the terminating
+    /// `DeclareFinal` (nothing matches here). Every wire mode is driven.
+    #[test]
+    fn an_interest_is_answered_only_from_below_and_never_from_a_router() {
+        let run = |wire| -> usize {
+            let fwd = RouterForwarder::new(zid(0x01));
+            let (f, sink) = face(zid(0xAA), wire);
+            fwd.register(FaceId(0), &f);
+            sink.reset();
+            forward_one(
+                &fwd,
+                FaceId(0),
+                interest_msg(7, "demo/key", true, false, true),
+            );
+            sink.frame_count()
+        };
+        assert_eq!(run(WIRE_ROUTER), 0, "a router's interest is ignored");
+        assert_eq!(run(WIRE_PEER), 1, "a peer's interest is answered");
+        assert_eq!(run(WIRE_CLIENT), 1, "a client's interest is answered");
+    }
+
+    /// R2882 — a token stamped with an interest id is an answer, and one from a
+    /// south-bound face is refused before any hat registers it. Control: the
+    /// same token unstamped registers, and a stamped one from a router face
+    /// (north-bound) registers, as the pin's `NoBreadcrumb` arm does.
+    #[cfg(feature = "routing-token-tables")]
+    #[test]
+    fn a_token_answer_from_below_is_refused() {
+        let run = |wire, region, stamped: bool| -> bool {
+            let fwd = RouterForwarder::new(zid(0x01));
+            let (f, _sink) = face(zid(0xAA), wire);
+            fwd.register(FaceId(0), &f);
+            let declare = if stamped {
+                build_declare_token_reply(3, "live/k").expect("token answer")
+            } else {
+                build_declare_token(0, 0, Some("live/k")).expect("token")
+            };
+            forward_one(&fwd, FaceId(0), NetworkMessage::Declare(Box::new(declare)));
+            let tokens = fwd.mesh(region).tokens.borrow();
+            !tokens.interested("live/k").is_empty()
+        };
+        assert!(
+            !run(WIRE_PEER, PEERS_REGION, true),
+            "a peer's token answer is refused"
+        );
+        assert!(
+            run(WIRE_PEER, PEERS_REGION, false),
+            "control: the same token unstamped registers"
+        );
+        assert!(
+            run(WIRE_ROUTER, ROUTERS_REGION, true),
+            "a router's token answer comes from above and registers"
+        );
     }
 
     #[test]
