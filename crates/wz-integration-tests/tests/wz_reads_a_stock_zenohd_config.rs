@@ -2637,8 +2637,17 @@ fn spawn_captured(
 /// read what it did to the Put it relayed.
 ///
 /// ```text
-///   P2 --publish--> [tap B] --> R (the document's node) --> [tap A] --> P1 --subscribe
+///   P2 --publish--> [tap B] --> R (the document's node) --> [tap A] --> C1 --key
 /// ```
+///
+/// R2892 — the subscriber is a CLIENT. A stock zenohd 1.10, as router and as
+/// peer, relays a Put from a peer to a client and NOT from one peer to another
+/// peer that reaches only it (measured: 5 samples to the client, 0 to the peer,
+/// with gossip off and no listener on either end), because its peer hat routes a
+/// Put only to a region other than the one it came from
+/// (`zenoh/src/net/routing/hat/peer/pubsub.rs` @ `self.region() != *src_region`).
+/// A peer subscriber made this star one the pin never relays, and after R2888
+/// the router arm read `NoInbound` for exactly that reason.
 ///
 /// The two taps are the whole instrument. Tap B says a Put ARRIVED (and that it
 /// arrived BARE — the control, since the publisher's own document is not the one
@@ -2690,14 +2699,12 @@ fn relay_reading_from_a_config(fragment: &str, run_mode: RunMode) -> RelayReadin
     });
 
     let (sub_guard, mut sub_err) = spawn_captured(
-        "wz-ap-demo (relay subscriber)",
+        "wz-ap-demo (relay subscriber, a client)",
         &demo,
         &[
-            String::from("--peer"),
-            String::from("127.0.0.1:0"),
             String::from("--connect"),
             format!("127.0.0.1:{sub_tap}"),
-            String::from("--subscribe"),
+            String::from("--key"),
             String::from(RELAY_KEYEXPR),
         ],
     );
@@ -2717,7 +2724,7 @@ fn relay_reading_from_a_config(fragment: &str, run_mode: RunMode) -> RelayReadin
     // A timeout is NOT a failure here: an arm whose run-mode does not relay will
     // never log this, and saying so is one of the four readings. What the taps
     // recorded is the verdict.
-    let delivered = wait_for_substring(&mut sub_err, "received mesh data", RELAY_BUDGET);
+    let delivered = wait_for_substring(&mut sub_err, "SUBSCRIBER FIRED", RELAY_BUDGET);
     drop(pub_guard);
     drop(sub_guard);
     drop(relay_guard);
