@@ -204,8 +204,9 @@ pub struct Face {
     pub peer: AcceptedPeer,
     pub peer_zid: Option<Vec<u8>>,
     /// R311y463 — the peer's handshake ROLE, the second half of the routing
-    /// classification `peer_zid` is the first half of. `tier_of` maps it to the
-    /// FaceTier that decides whether this face is eligible for the CLIENT-only
+    /// classification `peer_zid` is the first half of. The router places the
+    /// face in a region from it (R2866: `router_forward::face_region`), and the
+    /// region decides whether this face is eligible for the CLIENT-only
     /// token/subscriber current-dump and future-push paths, so a face-lifecycle
     /// observer that omits it cannot explain a face that routes nothing.
     /// `None` = the INIT never surfaced a role (kept distinct from `Some(Peer)`,

@@ -412,18 +412,35 @@ use wz_session_core::request_routing_context::{
 };
 use wz_session_core::response_build::set_response_keyexpr_literal;
 
-/// Which of a router's two link-state meshes a face belongs to — the routing
-/// classification of its handshake [`WhatAmI`] role. zenoh partitions faces by
-/// `match face.whatami` at `add_link` (`hat/router/mod.rs:424-438`): a Router
-/// joins `routers_net`, a Peer joins `linkstatepeers_net`, a Client joins
-/// neither (it is a leaf, not a transit node). [`FaceTier::Client`] therefore
-/// has no graph; such a face is HELD (its send seam kept) but routes no
-/// topology.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-enum FaceTier {
-    Routers,
-    LinkstatePeers,
-    Client,
+/// R2866 (open-debt item 751, step 2) — the router's faces, planes and tables
+/// are keyed by the pin's [`Region`] now. The 1.5.0 `FaceTier` classifier
+/// (Routers / LinkstatePeers / Client, from the remote's whatami) is gone. A
+/// value still named `tier` in this module IS a region: the region whose net or
+/// table the call works on. The names go when step 3 moves each region's net
+/// and tables into its own hat.
+///
+/// The region the pin's ROUTER hat serves on a router node: `North`, holding
+/// the routers (`zenoh/src/net/routing/gateway.rs`
+/// @ `(_, WhatAmI::Router) => {`). Its net is `routers_net`.
+const ROUTERS_REGION: Region = Region::North;
+
+/// The region the pin's PEER hat serves on a router node, the default peer
+/// subregion south of it. Its net is `linkstatepeers_net`.
+const PEERS_REGION: Region = Region::default_south(WhatAmI::Peer);
+
+/// The region a router's CLIENTS land in, which a broker hat serves. It has no
+/// net: a client is a leaf, HELD (its send seam kept) but routing no topology.
+const CLIENTS_REGION: Region = Region::default_south(WhatAmI::Client);
+
+/// Whether a face in `region` is a leaf, meaning its hat keeps no link-state
+/// net. That is the pin's client and broker hats. Read off the ported hat
+/// table ([`hat_kind`]) so the leaf set and the hats the pin builds cannot
+/// disagree.
+fn is_leaf(region: Region) -> bool {
+    matches!(
+        hat_kind(&region, WhatAmI::Router),
+        HatKind::Broker | HatKind::Client
+    )
 }
 
 /// The region a router places a face in, as the pin computes it when the
@@ -431,37 +448,24 @@ enum FaceTier {
 /// @ `compute_region_of(`, through [`region_and_bound_of`](wz_session_core::extbound::region_and_bound_of)):
 /// from the two modes and the bound the remote announced on its Open.
 ///
-/// R2864 (open-debt item 751) — the face's tier is DERIVED from this now, not
-/// from the remote's whatami. For a router node the Auto table never refuses a
-/// remote, so every face gets a region.
-fn face_region(whatami: WhatAmI, remote_bound: Option<Bound>) -> Region {
-    region_and_bound_of(WhatAmI::Router, whatami, remote_bound)
-        .map(|(region, _)| region)
-        .unwrap_or_else(|| unreachable!("a router's Auto table places every remote"))
-}
-
-/// The tier (which of the two nets) a face in `region` joins.
+/// R2865 (open-debt item 751) — the face's region, and so the net it joins, is
+/// DERIVED from this, not from the remote's whatami. For a router node the Auto
+/// table never refuses a remote, so every face gets a region.
 ///
-/// This is the first step of moving the router onto the pin's region-keyed
-/// hats, and it changes nothing a stock peer can see. The pin's router hat owns
-/// the `North` region and puts every face it owns into `routers_net`
+/// It changes nothing a stock peer can see. The pin's router hat owns `North`
+/// and puts every face it owns into `routers_net`
 /// (`hat/router/mod.rs` @ `let link_id = self.net_mut().add_link(transport.clone());`).
 /// Its peer hat serves `South { Peer }`, and broker hats serve the client
 /// regions. With no bound announced, which is what a stock node and every wz
 /// node send, a Router lands in `North`, a Peer in `South { 0, Peer }` and a
 /// Client in `South { 0, Client }`. That is exactly the old whatami table.
-/// The one face that now classifies differently is a remote that announces we
-/// are SOUTH of it. The pin puts that face in `North` whatever its mode, and
-/// so does this.
-///
-/// Read off the ported hat table ([`hat_kind`]) rather than a second match, so
-/// the tier and the hat the pin would build cannot disagree.
-fn tier_of(region: Region) -> FaceTier {
-    match hat_kind(&region, WhatAmI::Router) {
-        HatKind::Router => FaceTier::Routers,
-        HatKind::Peer => FaceTier::LinkstatePeers,
-        HatKind::Broker | HatKind::Client => FaceTier::Client,
-    }
+/// The one face that classifies differently is a remote that announces we are
+/// SOUTH of it. The pin puts that face in `North` whatever its mode, and so
+/// does this.
+fn face_region(whatami: WhatAmI, remote_bound: Option<Bound>) -> Region {
+    region_and_bound_of(WhatAmI::Router, whatami, remote_bound)
+        .map(|(region, _)| region)
+        .unwrap_or_else(|| unreachable!("a router's Auto table places every remote"))
 }
 
 /// Elect the master router for `keyexpr` among `candidates` by Highest-Random-
@@ -547,7 +551,7 @@ fn elect_router<'a>(
 /// neighbour to exclude in THIS net.
 struct MeshQueryBlock {
     /// Which mesh this block routes into (its faces + qabls table).
-    tier: FaceTier,
+    tier: Region,
     /// The tree root: the QUERIER's zid for the within-tier leg (route along the
     /// querier's tree), or SELF for a cross-tier self-originated leg.
     source_zid: Zid,
@@ -581,7 +585,7 @@ enum BestQueryWinner {
 /// handshake.
 struct RouterFaceState {
     actions: Arc<SessionLinkActions>,
-    tier: FaceTier,
+    tier: Region,
     /// R2685 — the peer's routing zid, kept for EVERY face that has one,
     /// independently of whether the face joined a graph.
     ///
@@ -1778,7 +1782,7 @@ impl RouterForwarder {
         {
             return false;
         }
-        let _ = self.flood_self_links_changed_tier(FaceTier::Routers, &self.routers_net);
+        let _ = self.flood_self_links_changed_tier(ROUTERS_REGION, &self.routers_net);
         self.trees_dirty_routers.set(true);
         true
     }
@@ -2178,14 +2182,14 @@ impl RouterForwarder {
     }
 
     /// The graph + coalescing flag for a tier, or `None` for
-    /// [`FaceTier::Client`] (a client is a leaf, in no mesh). The single
+    /// [`CLIENTS_REGION`] (a client is a leaf, in no mesh). The single
     /// classifier `register` / `deregister` / `forward` route a face's work
     /// through, so the routers-vs-peers selection lives in ONE place.
-    fn plane(&self, tier: FaceTier) -> Option<(&Rc<RefCell<LinkstateNetwork>>, &Cell<bool>)> {
+    fn plane(&self, tier: Region) -> Option<(&Rc<RefCell<LinkstateNetwork>>, &Cell<bool>)> {
         match tier {
-            FaceTier::Routers => Some((&self.routers_net, &self.trees_dirty_routers)),
-            FaceTier::LinkstatePeers => Some((&self.linkstatepeers_net, &self.trees_dirty_peers)),
-            FaceTier::Client => None,
+            ROUTERS_REGION => Some((&self.routers_net, &self.trees_dirty_routers)),
+            PEERS_REGION => Some((&self.linkstatepeers_net, &self.trees_dirty_peers)),
+            _ => None,
         }
     }
 
@@ -2203,7 +2207,7 @@ impl RouterForwarder {
     /// deferred with the interceptor plane.)
     fn fan_out_tier(
         &self,
-        tier: FaceTier,
+        tier: Region,
         reliable: bool,
         build: impl FnMut(FaceId, Option<Zid>) -> Result<Option<NetworkMessage>, CodecError>,
     ) -> Result<usize, CodecError> {
@@ -2245,7 +2249,7 @@ impl RouterForwarder {
     /// plane).
     fn fan_out_tier_qos(
         &self,
-        tier: FaceTier,
+        tier: Region,
         reliable: bool,
         priority: Priority,
         express: bool,
@@ -2302,7 +2306,7 @@ impl RouterForwarder {
     fn flood_link_added_tier(
         &self,
         new_face: FaceId,
-        tier: FaceTier,
+        tier: Region,
         net: &Rc<RefCell<LinkstateNetwork>>,
         neighbour: &Zid,
         neighbour_was_new: bool,
@@ -2336,7 +2340,7 @@ impl RouterForwarder {
     /// rest). Reliable.
     fn flood_self_links_changed_tier(
         &self,
-        tier: FaceTier,
+        tier: Region,
         net: &Rc<RefCell<LinkstateNetwork>>,
     ) -> Result<usize, CodecError> {
         let oam = build_linkstate_oam_owned(&net.borrow().build_self_links_delta())?;
@@ -2384,7 +2388,7 @@ impl RouterForwarder {
     fn propagate_tier(
         &self,
         source: FaceId,
-        tier: FaceTier,
+        tier: Region,
         net: &Rc<RefCell<LinkstateNetwork>>,
         changes: &Changes,
     ) -> Result<usize, CodecError> {
@@ -2422,17 +2426,17 @@ impl RouterForwarder {
     /// advertisement of it into the OPPOSITE mesh must be withdrawn (the flip
     /// true->false), and centralizing it covers BOTH remove paths by construction
     /// (the y107b lifecycle-asymmetry class — a remote detach is the path most
-    /// likely to be missed). No-op for [`FaceTier::Client`] (no tier tables). The
+    /// likely to be missed). No-op for [`CLIENTS_REGION`] (no tier tables). The
     /// self-bubble itself is never stored (derive-not-store); only the WIRE
     /// advertisement needs the explicit retraction.
-    fn purge_detached_interest_tier(&self, tier: FaceTier, removed: &[Zid]) {
+    fn purge_detached_interest_tier(&self, tier: Region, removed: &[Zid]) {
         if removed.is_empty() {
             return;
         }
         let (subs, qabls) = match tier {
-            FaceTier::Routers => (&self.router_subs, &self.router_qabls),
-            FaceTier::LinkstatePeers => (&self.linkstatepeer_subs, &self.linkstatepeer_qabls),
-            FaceTier::Client => return,
+            ROUTERS_REGION => (&self.router_subs, &self.router_qabls),
+            PEERS_REGION => (&self.linkstatepeer_subs, &self.linkstatepeer_qabls),
+            _ => return,
         };
         // Collect the sub + qabl keyexprs the departed natives held, so the
         // cross-tier advertisement they contributed to is re-evaluated AFTER the
@@ -2524,39 +2528,36 @@ impl RouterForwarder {
     }
 
     /// The subscription interest table for `tier`, or `None` for
-    /// [`FaceTier::Client`] (the leaf/simple store is slice 1d).
-    fn subs_table(&self, tier: FaceTier) -> Option<&RefCell<LinkstatepeerInterest<()>>> {
+    /// [`CLIENTS_REGION`] (the leaf/simple store is slice 1d).
+    fn subs_table(&self, tier: Region) -> Option<&RefCell<LinkstatepeerInterest<()>>> {
         match tier {
-            FaceTier::Routers => Some(&self.router_subs),
-            FaceTier::LinkstatePeers => Some(&self.linkstatepeer_subs),
-            FaceTier::Client => None,
+            ROUTERS_REGION => Some(&self.router_subs),
+            PEERS_REGION => Some(&self.linkstatepeer_subs),
+            _ => None,
         }
     }
 
     /// The liveliness-token interest table for `tier`, or `None` for
-    /// [`FaceTier::Client`] (a client token lands in `client_tokens`, never in a
+    /// [`CLIENTS_REGION`] (a client token lands in `client_tokens`, never in a
     /// Zid-keyed mesh tier table — derive-not-store) — the token twin of
     /// [`subs_table`](Self::subs_table). Tokens carry no value,
     /// so both tiers are `LinkstatepeerInterest<()>`, identical to the sub plane.
     #[cfg(feature = "routing-token-tables")]
-    fn tokens_table(&self, tier: FaceTier) -> Option<&RefCell<LinkstatepeerInterest<()>>> {
+    fn tokens_table(&self, tier: Region) -> Option<&RefCell<LinkstatepeerInterest<()>>> {
         match tier {
-            FaceTier::Routers => Some(&self.router_tokens),
-            FaceTier::LinkstatePeers => Some(&self.linkstatepeer_tokens),
-            FaceTier::Client => None,
+            ROUTERS_REGION => Some(&self.router_tokens),
+            PEERS_REGION => Some(&self.linkstatepeer_tokens),
+            _ => None,
         }
     }
 
     /// The queryable interest table for `tier` (the query-plane twin of
-    /// [`subs_table`](Self::subs_table)), or `None` for [`FaceTier::Client`].
-    fn qabls_table(
-        &self,
-        tier: FaceTier,
-    ) -> Option<&RefCell<LinkstatepeerInterest<QueryableInfo>>> {
+    /// [`subs_table`](Self::subs_table)), or `None` for [`CLIENTS_REGION`].
+    fn qabls_table(&self, tier: Region) -> Option<&RefCell<LinkstatepeerInterest<QueryableInfo>>> {
         match tier {
-            FaceTier::Routers => Some(&self.router_qabls),
-            FaceTier::LinkstatePeers => Some(&self.linkstatepeer_qabls),
-            FaceTier::Client => None,
+            ROUTERS_REGION => Some(&self.router_qabls),
+            PEERS_REGION => Some(&self.linkstatepeer_qabls),
+            _ => None,
         }
     }
 
@@ -2594,7 +2595,7 @@ impl RouterForwarder {
     fn ingest_interest<V: PartialEq>(
         &self,
         inbound: FaceId,
-        tier: FaceTier,
+        tier: Region,
         reliable: bool,
         declare: &DeclareOwned,
         wireexpr: &WireexprOwned,
@@ -2654,7 +2655,7 @@ impl RouterForwarder {
     fn ingest_subscription(
         &self,
         inbound: FaceId,
-        tier: FaceTier,
+        tier: Region,
         reliable: bool,
         declare: &DeclareOwned,
     ) {
@@ -2718,13 +2719,7 @@ impl RouterForwarder {
     /// [`purge_detached_interest_tier`](Self::purge_detached_interest_tier) drains
     /// a departed source's tokens on an ungraceful departure.
     #[cfg(feature = "routing-token-tables")]
-    fn ingest_token(
-        &self,
-        inbound: FaceId,
-        tier: FaceTier,
-        reliable: bool,
-        declare: &DeclareOwned,
-    ) {
+    fn ingest_token(&self, inbound: FaceId, tier: Region, reliable: bool, declare: &DeclareOwned) {
         let Some(wireexpr) = declare_token_wireexpr(declare) else {
             return;
         };
@@ -2780,7 +2775,7 @@ impl RouterForwarder {
     fn withdraw_token(
         &self,
         inbound: FaceId,
-        tier: FaceTier,
+        tier: Region,
         reliable: bool,
         declare: &DeclareOwned,
     ) {
@@ -3008,7 +3003,7 @@ impl RouterForwarder {
         self.faces
             .borrow()
             .get(&face)
-            .is_some_and(|s| s.tier == FaceTier::Client)
+            .is_some_and(|s| is_leaf(s.tier))
     }
 
     /// The CURRENT-dump SUBSCRIBER leg of [`respond_to_interest`]: reply with the
@@ -3223,7 +3218,7 @@ impl RouterForwarder {
     fn withdraw_subscription(
         &self,
         inbound: FaceId,
-        tier: FaceTier,
+        tier: Region,
         reliable: bool,
         declare: &DeclareOwned,
     ) {
@@ -3273,7 +3268,7 @@ impl RouterForwarder {
     fn withdraw_interest<V>(
         &self,
         inbound: FaceId,
-        tier: FaceTier,
+        tier: Region,
         reliable: bool,
         declare: &DeclareOwned,
         exts: Option<&Vec<ExtEntryOwned>>,
@@ -3331,7 +3326,7 @@ impl RouterForwarder {
     fn ingest_queryable(
         &self,
         inbound: FaceId,
-        tier: FaceTier,
+        tier: Region,
         reliable: bool,
         declare: &DeclareOwned,
     ) {
@@ -3388,7 +3383,7 @@ impl RouterForwarder {
     fn withdraw_queryable(
         &self,
         inbound: FaceId,
-        tier: FaceTier,
+        tier: Region,
         reliable: bool,
         declare: &DeclareOwned,
     ) {
@@ -3432,7 +3427,7 @@ impl RouterForwarder {
     /// codec atom made expressible (previously a no-op ⇒ a stale remote advertisement
     /// lingering until self-down). Centralized so BOTH the undeclare and the
     /// (local + Oam-detach) purge paths route through it.
-    fn withdraw_native_cross_tier_qabl(&self, native_tier: FaceTier, keyexpr: &str) {
+    fn withdraw_native_cross_tier_qabl(&self, native_tier: Region, keyexpr: &str) {
         let Some(target) = Self::opposite_mesh(native_tier) else {
             return;
         };
@@ -3458,7 +3453,7 @@ impl RouterForwarder {
     fn reflood_declaration(
         &self,
         inbound: FaceId,
-        tier: FaceTier,
+        tier: Region,
         net: &Rc<RefCell<LinkstateNetwork>>,
         source_zid: Zid,
         inbound_zid: Option<Zid>,
@@ -3508,7 +3503,7 @@ impl RouterForwarder {
     fn route_push(
         &self,
         inbound: FaceId,
-        tier: FaceTier,
+        tier: Region,
         reliable: bool,
         priority: Priority,
         push: &PushOwned,
@@ -3597,7 +3592,7 @@ impl RouterForwarder {
         // mesh-hop copy re-egresses and loops; the DR election is the wz superset.
         // Bounded transient: during JOIN/lease convergence two routers can briefly
         // both bridge (self-healing; the two-router cross-impl e2e proof is I3c).
-        if tier == FaceTier::Client {
+        if is_leaf(tier) {
             // `federate` is the pre-I3c condition, computed ONCE (behavior-identical:
             // `!inbound_is_mcast || DR`; `mcast_ingress_may_federate` is `false`
             // without `router-multicast-faces`, so a mcast-ingress never federates —
@@ -3636,7 +3631,7 @@ impl RouterForwarder {
             push,
             &keyexpr,
             inbound_is_mcast,
-            tier != FaceTier::Client,
+            !is_leaf(tier),
         );
     }
 
@@ -3883,7 +3878,7 @@ impl RouterForwarder {
     /// re-injected into the ROUTER mesh's subs, and a ROUTER-sourced Push into
     /// the PEER mesh's subs. The within-tier legs are
     /// [`forward_push_tier`](Self::forward_push_tier) (ungated); a
-    /// [`FaceTier::Client`] inbound has no mesh source (its mesh path is
+    /// [`CLIENTS_REGION`] inbound has no mesh source (its mesh path is
     /// [`publish_client_push_into_meshes`](Self::publish_client_push_into_meshes)),
     /// so it never bridges here.
     ///
@@ -3900,7 +3895,7 @@ impl RouterForwarder {
     /// interceptor / egress-ACL gate (the y113 obligation).
     fn bridge_push_cross_mesh(
         &self,
-        inbound_tier: FaceTier,
+        inbound_tier: Region,
         reliable: bool,
         priority: Priority,
         push: &PushOwned,
@@ -3911,9 +3906,9 @@ impl RouterForwarder {
             return; // only the elected master bridges (double-delivery / loop guard)
         }
         let target_tier = match inbound_tier {
-            FaceTier::LinkstatePeers => FaceTier::Routers,
-            FaceTier::Routers => FaceTier::LinkstatePeers,
-            FaceTier::Client => return, // a client's mesh path is C3b, not a bridge
+            PEERS_REGION => ROUTERS_REGION,
+            ROUTERS_REGION => PEERS_REGION,
+            _ => return, // a client's mesh path is C3b, not a bridge
         };
         // The cross leg re-injects the RECEIVED mesh frame into the target mesh (self
         // tree root, node_id 0) via the shared self-publish-into-tier seam, PRESERVING
@@ -3932,7 +3927,7 @@ impl RouterForwarder {
     /// ([`bridge_push_cross_mesh`](Self::bridge_push_cross_mesh), C4), local-client
     /// delivery ([`deliver_to_client_subscribers`](Self::deliver_to_client_subscribers),
     /// C3a), and master-election ([`is_master`](Self::is_master), C4) are the OTHER
-    /// [`route_push`](Self::route_push) legs, now landed. A [`FaceTier::Client`] Push
+    /// [`route_push`](Self::route_push) legs, now landed. A [`CLIENTS_REGION`] Push
     /// has no mesh to route within,
     /// so it is only counted (the reception witness in [`forward`]). A drop
     /// (unresolvable source / no interested subscriber / hop-exhausted) is silent,
@@ -3940,7 +3935,7 @@ impl RouterForwarder {
     fn forward_push_tier(
         &self,
         inbound: FaceId,
-        tier: FaceTier,
+        tier: Region,
         reliable: bool,
         priority: Priority,
         push: &PushOwned,
@@ -4009,7 +4004,7 @@ impl RouterForwarder {
     /// LOCAL self-hosted delivery stays deferred (a pure router hosts no
     /// subscribers — that is the combined-node seam). Routes through the
     /// [`fan_out_tier`](Self::fan_out_tier) egress SSOT
-    /// (`FaceTier::Client`) like every other router send, so it inherits the
+    /// ([`CLIENTS_REGION`]) like every other router send, so it inherits the
     /// interceptor / egress-ACL gate once that plane lands on the seam (the y113
     /// obligation) rather than being a separate retrofit site.
     // R311y225 added the `priority` band arg (client-egress band preservation),
@@ -4019,7 +4014,7 @@ impl RouterForwarder {
     fn deliver_to_client_subscribers(
         &self,
         inbound: FaceId,
-        inbound_tier: FaceTier,
+        inbound_tier: Region,
         reliable: bool,
         priority: Priority,
         push: &PushOwned,
@@ -4032,7 +4027,7 @@ impl RouterForwarder {
         // non-master router is NOT delivered its own Peer/Client-source copy (which
         // it would then ALSO receive as the bridged router-source copy = a double
         // delivery). Single-router => master => unconditional, as before C4.
-        if inbound_tier != FaceTier::Routers && !master {
+        if inbound_tier != ROUTERS_REGION && !master {
             // C4 double-delivery guard fired: a non-master router defers this
             // peer/client-source client delivery (the master's bridged
             // router-source copy delivers instead). Count it — but only when a
@@ -4079,7 +4074,7 @@ impl RouterForwarder {
         // unicast ext_qos so it stays DEFAULT. (The QUERY-plane client egress -- a
         // Response to a client querier -- is a separate, uniformly-DEFAULT plane, out
         // of scope here.)
-        let _ = self.fan_out_tier_qos(FaceTier::Client, reliable, priority, false, |id, _zid| {
+        let _ = self.fan_out_tier_qos(CLIENTS_REGION, reliable, priority, false, |id, _zid| {
             if id == inbound {
                 return Ok(None);
             }
@@ -4103,7 +4098,7 @@ impl RouterForwarder {
     /// `resolve_source_in` finds no psid for it). `reliteralize_push` preserves
     /// the client sample's encoding/attachment/timestamp/qos (a RE-injected
     /// sample, unlike `publish`'s fresh `build_push_literal`). Precondition: the
-    /// dispatch calls this ONLY for a [`FaceTier::Client`] inbound Push — a
+    /// dispatch calls this ONLY for a [`CLIENTS_REGION`] inbound Push — a
     /// mesh-sourced Push is routed within-tier by [`forward_push_tier`] and its
     /// cross-tier (mesh->other-mesh) bridge is the master-gated C4 slice, NOT this
     /// self-origination (calling it for a mesh source would self-source re-inject
@@ -4124,7 +4119,7 @@ impl RouterForwarder {
         // face's alias table by the [`route_push`](Self::route_push) head — a
         // downstream mesh peer shares no alias table, so the re-injection carries
         // the literal.
-        for tier in [FaceTier::Routers, FaceTier::LinkstatePeers] {
+        for tier in [ROUTERS_REGION, PEERS_REGION] {
             // Zenoh route_data for a CLIENT (non-router) source: the ROUTER-net leg
             // (block 1, `pubsub.rs:1291`) requires `master`, while the PEER-net leg
             // (block 2, `pubsub.rs:1307`) is UNgated for a non-router source. A
@@ -4133,7 +4128,7 @@ impl RouterForwarder {
             // two masters receives the Put exactly once. Single-router => master =>
             // both legs fire, as before C4. (Zenoh also inserts `mcast_groups` faces
             // at `pubsub.rs:1334` -- an unbuilt wz plane, deferred with multicast.)
-            if tier == FaceTier::Routers && !master {
+            if tier == ROUTERS_REGION && !master {
                 continue;
             }
             self.self_publish_into_tier(tier, reliable, priority, push, keyexpr);
@@ -4155,7 +4150,7 @@ impl RouterForwarder {
     /// build err) is silent.
     fn self_publish_into_tier(
         &self,
-        tier: FaceTier,
+        tier: Region,
         reliable: bool,
         priority: Priority,
         push: &PushOwned,
@@ -4199,7 +4194,7 @@ impl RouterForwarder {
     /// space) and flooded tier-scoped. NATIVES ONLY: the cross-tier self-bubble
     /// is DERIVED at compute (C2), a distinct self-sourced declaration, so it
     /// re-advertises on its own path.
-    fn recompute_and_advertise_tier(&self, tier: FaceTier) {
+    fn recompute_and_advertise_tier(&self, tier: Region) {
         let Some((net, _dirty)) = self.plane(tier) else {
             return;
         };
@@ -4251,7 +4246,7 @@ impl RouterForwarder {
     /// `tier` — the per-tier analogue of [`LinkstateForwarder`]'s
     /// `flood_to_children`. No inbound face to exclude: self is the re-advertise
     /// source, and the delta already names exactly the newly-gained children.
-    fn flood_delta_tier(&self, tier: FaceTier, children: &[Zid], declare: &DeclareOwned) {
+    fn flood_delta_tier(&self, tier: Region, children: &[Zid], declare: &DeclareOwned) {
         let _ = self.fan_out_tier(tier, true, |_id, zid| {
             Ok(zid
                 .filter(|z| children.contains(z))
@@ -4613,13 +4608,13 @@ impl RouterForwarder {
 
     /// The mesh a NATIVE in `tier` advertises its cross-tier interest INTO — the
     /// OPPOSITE mesh (a `Routers` native attracts publishers on the `LinkstatePeers`
-    /// mesh and vice versa), or `None` for [`FaceTier::Client`] (a client is in no
+    /// mesh and vice versa), or `None` for [`CLIENTS_REGION`] (a client is in no
     /// mesh; its advertisement targets BOTH meshes, handled by the caller loop).
-    fn opposite_mesh(tier: FaceTier) -> Option<FaceTier> {
+    fn opposite_mesh(tier: Region) -> Option<Region> {
         match tier {
-            FaceTier::Routers => Some(FaceTier::LinkstatePeers),
-            FaceTier::LinkstatePeers => Some(FaceTier::Routers),
-            FaceTier::Client => None,
+            ROUTERS_REGION => Some(PEERS_REGION),
+            PEERS_REGION => Some(ROUTERS_REGION),
+            _ => None,
         }
     }
 
@@ -4636,7 +4631,7 @@ impl RouterForwarder {
     /// (:296-297). DERIVE-not-STORE: the native is read from the OPPOSITE mesh's
     /// table (`contributor_subs_source_count`), self is never stored. NOT
     /// master-gated (every router advertises; only the DELIVERY bridge is gated).
-    fn self_advertises_sub_into(&self, target: FaceTier, keyexpr: &str) -> bool {
+    fn self_advertises_sub_into(&self, target: Region, keyexpr: &str) -> bool {
         self.any_client_subscribes(keyexpr)
             || self.group_subscribes(keyexpr)
             || self.host_subscribes(keyexpr)
@@ -4688,7 +4683,7 @@ impl RouterForwarder {
     /// `target = LinkstatePeers` this reads `router_subs`; for `target = Routers`,
     /// `linkstatepeer_subs`. `0` for a `Client` target (unused — clients are not a
     /// mesh) and when the opposite table has no exact-`keyexpr` source.
-    fn contributor_subs_source_count(&self, target: FaceTier, keyexpr: &str) -> usize {
+    fn contributor_subs_source_count(&self, target: Region, keyexpr: &str) -> usize {
         Self::opposite_mesh(target)
             .and_then(|src| self.subs_table(src))
             .map_or(0, |t| t.borrow().source_count(keyexpr))
@@ -4712,7 +4707,7 @@ impl RouterForwarder {
     /// either side. Adding a contributor to one of these two REQUIRES adding it to
     /// the other; `a_router_hosted_subscriber_is_re_advertised_to_a_late_joiner` is
     /// what now fails if a later round forgets again.
-    fn derived_cross_tier_subs_into(&self, target: FaceTier) -> Vec<String> {
+    fn derived_cross_tier_subs_into(&self, target: Region) -> Vec<String> {
         let mut set: HashSet<String> = HashSet::new();
         for keys in self.client_subs.borrow().values() {
             set.extend(keys.iter().cloned());
@@ -4748,7 +4743,7 @@ impl RouterForwarder {
     /// ([`re_advertise_self_cross_tier`](Self::re_advertise_self_cross_tier)) so a
     /// late-joining tree child converges on self's cross-tier token bubble.
     #[cfg(feature = "routing-token-tables")]
-    fn derived_cross_tier_tokens_into(&self, target: FaceTier) -> Vec<String> {
+    fn derived_cross_tier_tokens_into(&self, target: Region) -> Vec<String> {
         let mut set: HashSet<String> = HashSet::new();
         for ids in self.client_tokens.borrow().values() {
             set.extend(ids.values().cloned());
@@ -4779,7 +4774,7 @@ impl RouterForwarder {
         if self.group_subscribes(keyexpr) {
             return;
         }
-        for target in [FaceTier::Routers, FaceTier::LinkstatePeers] {
+        for target in [ROUTERS_REGION, PEERS_REGION] {
             // Flip false->true for this target IFF no native already covers it
             // (before this client, self_advertises_sub_into(target) == native-only,
             // since it was the first client).
@@ -4802,7 +4797,7 @@ impl RouterForwarder {
         // `any_client_subscribes` false), so withdraw from each mesh self NO
         // LONGER advertises into — the exact NEGATION of the advertise predicate
         // (a mesh whose opposite-tier native still holds `keyexpr` keeps it).
-        for target in [FaceTier::Routers, FaceTier::LinkstatePeers] {
+        for target in [ROUTERS_REGION, PEERS_REGION] {
             if !self.self_advertises_sub_into(target, keyexpr) {
                 self.flood_self_sourced(target, keyexpr, build_undeclare_subscriber_with_keyexpr);
             }
@@ -4824,7 +4819,7 @@ impl RouterForwarder {
         if self.any_client_subscribes(keyexpr) {
             return; // a local client already advertises the bubble into both meshes.
         }
-        for target in [FaceTier::Routers, FaceTier::LinkstatePeers] {
+        for target in [ROUTERS_REGION, PEERS_REGION] {
             if self.contributor_subs_source_count(target, keyexpr) == 0 {
                 self.flood_self_sourced(target, keyexpr, |ke| {
                     build_declare_subscriber(0, 0, Some(ke))
@@ -4844,7 +4839,7 @@ impl RouterForwarder {
     /// AFTER `keyexpr` is removed from `group_subs`.
     #[cfg(feature = "router-multicast-faces")]
     fn withdraw_group_cross_tier_sub(&self, keyexpr: &str) {
-        for target in [FaceTier::Routers, FaceTier::LinkstatePeers] {
+        for target in [ROUTERS_REGION, PEERS_REGION] {
             if !self.self_advertises_sub_into(target, keyexpr) {
                 self.flood_self_sourced(target, keyexpr, build_undeclare_subscriber_with_keyexpr);
             }
@@ -4857,7 +4852,7 @@ impl RouterForwarder {
     /// `keyexpr` (`source_count == 1` after register) AND no client already covers
     /// it. The federation half of the R311y120 fix: a router-native attracts peer
     /// publishers toward self (which bridges cross-tier, C4). NOT master-gated.
-    fn advertise_native_cross_tier_sub(&self, native_tier: FaceTier, keyexpr: &str) {
+    fn advertise_native_cross_tier_sub(&self, native_tier: Region, keyexpr: &str) {
         let Some(target) = Self::opposite_mesh(native_tier) else {
             return; // a client native has no mesh (unreachable: client subs != natives)
         };
@@ -4883,7 +4878,7 @@ impl RouterForwarder {
     /// [`advertise_native_cross_tier_sub`](Self::advertise_native_cross_tier_sub);
     /// centralized so BOTH the undeclare and the (local + Oam-detach) purge paths
     /// route through it (R311y125 lifecycle-symmetry).
-    fn withdraw_native_cross_tier_sub(&self, native_tier: FaceTier, keyexpr: &str) {
+    fn withdraw_native_cross_tier_sub(&self, native_tier: Region, keyexpr: &str) {
         let Some(target) = Self::opposite_mesh(native_tier) else {
             return;
         };
@@ -4909,7 +4904,7 @@ impl RouterForwarder {
     /// the qabl twin there is no merge. DERIVE-not-STORE: self is NOT stored in the
     /// opposite token table (`flood_self_sourced` floods self's tree children only).
     #[cfg(feature = "routing-token-tables")]
-    fn advertise_native_cross_tier_token(&self, native_tier: FaceTier, keyexpr: &str) {
+    fn advertise_native_cross_tier_token(&self, native_tier: Region, keyexpr: &str) {
         let Some(target) = Self::opposite_mesh(native_tier) else {
             return; // a client native has no mesh (its bubble is client_tokens')
         };
@@ -4934,7 +4929,7 @@ impl RouterForwarder {
     /// the graceful retraction and the (local + Oam-detach) purge paths route
     /// through it (the R311y125 lifecycle-symmetry class).
     #[cfg(feature = "routing-token-tables")]
-    fn withdraw_native_cross_tier_token(&self, native_tier: FaceTier, keyexpr: &str) {
+    fn withdraw_native_cross_tier_token(&self, native_tier: Region, keyexpr: &str) {
         let Some(target) = Self::opposite_mesh(native_tier) else {
             return;
         };
@@ -5089,7 +5084,7 @@ impl RouterForwarder {
     /// [`advertise_client_cross_tier_sub`](Self::advertise_client_cross_tier_sub).
     #[cfg(feature = "routing-token-tables")]
     fn advertise_client_cross_tier_token(&self, keyexpr: &str) {
-        for target in [FaceTier::Routers, FaceTier::LinkstatePeers] {
+        for target in [ROUTERS_REGION, PEERS_REGION] {
             if self.contributor_tokens_source_count(target, keyexpr) == 0 {
                 self.flood_self_sourced(target, keyexpr, |ke| build_declare_token(0, 0, Some(ke)));
             }
@@ -5105,7 +5100,7 @@ impl RouterForwarder {
     /// [`withdraw_client_cross_tier_sub`](Self::withdraw_client_cross_tier_sub).
     #[cfg(feature = "routing-token-tables")]
     fn withdraw_client_cross_tier_token(&self, keyexpr: &str) {
-        for target in [FaceTier::Routers, FaceTier::LinkstatePeers] {
+        for target in [ROUTERS_REGION, PEERS_REGION] {
             if !self.self_advertises_token_into(target, keyexpr) {
                 self.flood_self_sourced(target, keyexpr, build_undeclare_token_with_keyexpr);
             }
@@ -5119,7 +5114,7 @@ impl RouterForwarder {
     /// the client withdraw and — as its exact NEGATION — the native withdraw gate,
     /// keeping the two gates symmetric (no one-sided silent retraction).
     #[cfg(feature = "routing-token-tables")]
-    fn self_advertises_token_into(&self, target: FaceTier, keyexpr: &str) -> bool {
+    fn self_advertises_token_into(&self, target: Region, keyexpr: &str) -> bool {
         self.any_client_holds_token(keyexpr)
             || self.contributor_tokens_source_count(target, keyexpr) > 0
     }
@@ -5131,7 +5126,7 @@ impl RouterForwarder {
     /// For `target = LinkstatePeers` this reads `router_tokens`; for
     /// `target = Routers`, `linkstatepeer_tokens`. `0` for a `Client` target.
     #[cfg(feature = "routing-token-tables")]
-    fn contributor_tokens_source_count(&self, target: FaceTier, keyexpr: &str) -> usize {
+    fn contributor_tokens_source_count(&self, target: Region, keyexpr: &str) -> usize {
         Self::opposite_mesh(target)
             .and_then(|src| self.tokens_table(src))
             .map_or(0, |t| t.borrow().source_count(keyexpr))
@@ -5204,11 +5199,7 @@ impl RouterForwarder {
     /// DeclareQueryable ext for UPSTREAM propagation only. (The client-qabl fold is
     /// already wired so ACTIVATION-3 adds only the client-declare TRIGGER, not a
     /// derive change.)
-    fn derived_cross_tier_qabl_info(
-        &self,
-        target: FaceTier,
-        keyexpr: &str,
-    ) -> Option<QueryableInfo> {
+    fn derived_cross_tier_qabl_info(&self, target: Region, keyexpr: &str) -> Option<QueryableInfo> {
         let mut acc: Option<QueryableInfo> = None;
         if let Some(table) = Self::opposite_mesh(target).and_then(|src| self.qabls_table(src)) {
             for info in table.borrow().values_for(keyexpr) {
@@ -5238,7 +5229,7 @@ impl RouterForwarder {
     /// form of [`derived_cross_tier_qabl_info`](Self::derived_cross_tier_qabl_info)
     /// (a `K` is in this set IFF that returns `Some`), fed to the tick re-advertise
     /// for late-joining children (the qabl twin of `derived_cross_tier_subs_into`).
-    fn derived_cross_tier_qabls_into(&self, target: FaceTier) -> Vec<String> {
+    fn derived_cross_tier_qabls_into(&self, target: Region) -> Vec<String> {
         let mut set: HashSet<String> = HashSet::new();
         if let Some(table) = Self::opposite_mesh(target).and_then(|src| self.qabls_table(src)) {
             for (keyexpr, _peer, _info) in table.borrow().entries() {
@@ -5274,7 +5265,7 @@ impl RouterForwarder {
     /// (declare.rs:520-522, parity with the sub plane) — no longer the self-down-only
     /// staleness the codec deferral once left. A partial removal that leaves a
     /// contributor DOWNGRADES via a re-advertised `DeclareQueryable`.
-    fn advertise_native_cross_tier_qabl(&self, native_tier: FaceTier, keyexpr: &str) {
+    fn advertise_native_cross_tier_qabl(&self, native_tier: Region, keyexpr: &str) {
         let Some(target) = Self::opposite_mesh(native_tier) else {
             return;
         };
@@ -5292,7 +5283,7 @@ impl RouterForwarder {
     /// the DERIVED client interest, not a stored self-native.
     fn flood_self_sourced(
         &self,
-        tier: FaceTier,
+        tier: Region,
         keyexpr: &str,
         build: impl Fn(&str) -> Result<DeclareOwned, CodecError>,
     ) {
@@ -5324,7 +5315,7 @@ impl RouterForwarder {
     /// cross-tier bubble (both planes). The qabl re-advertise carries the MERGED
     /// info (`derived_cross_tier_qabl_info`), the same value the immediate advertise
     /// floods.
-    fn re_advertise_self_cross_tier(&self, tier: FaceTier, new_children: &[(Zid, Vec<Zid>)]) {
+    fn re_advertise_self_cross_tier(&self, tier: Region, new_children: &[(Zid, Vec<Zid>)]) {
         let Some((net, _dirty)) = self.plane(tier) else {
             return;
         };
@@ -5446,7 +5437,7 @@ impl RouterForwarder {
     /// The merged [`QueryableInfo`] ([`derived_cross_tier_qabl_info`](Self::derived_cross_tier_qabl_info))
     /// already folds every self source, so both callers reuse this one flood.
     fn advertise_cross_tier_qabl_both_meshes(&self, keyexpr: &str) {
-        for target in [FaceTier::Routers, FaceTier::LinkstatePeers] {
+        for target in [ROUTERS_REGION, PEERS_REGION] {
             let Some(info) = self.derived_cross_tier_qabl_info(target, keyexpr) else {
                 continue;
             };
@@ -5593,7 +5584,7 @@ impl RouterForwarder {
     /// per-tier info to derive as the queryable path has — a subscription carries no
     /// `complete` / distance — so this floods unconditionally into each tier.
     fn advertise_cross_tier_sub_both_meshes(&self, keyexpr: &str) {
-        for target in [FaceTier::Routers, FaceTier::LinkstatePeers] {
+        for target in [ROUTERS_REGION, PEERS_REGION] {
             self.flood_self_sourced(target, keyexpr, |ke| {
                 build_declare_subscriber(0, 0, Some(ke))
             });
@@ -5794,7 +5785,7 @@ impl RouterForwarder {
     /// flood a full `UndeclareQueryable` retraction (the `None` arm the ext_wire_expr
     /// codec atom made expressible).
     fn withdraw_client_cross_tier_qabl(&self, keyexpr: &str) {
-        for target in [FaceTier::Routers, FaceTier::LinkstatePeers] {
+        for target in [ROUTERS_REGION, PEERS_REGION] {
             match self.derived_cross_tier_qabl_info(target, keyexpr) {
                 Some(info) => self.flood_self_sourced(target, keyexpr, move |ke| {
                     build_declare_queryable_with_info(ke, info)
@@ -5836,13 +5827,7 @@ impl RouterForwarder {
     /// the querier so its `get()` terminates at once (a pure router hosts no local
     /// self-queryable to dispatch — a deferred combined-node seam). Single-router
     /// topologies elect self, so every master gate is a no-op.
-    fn route_request(
-        &self,
-        inbound: FaceId,
-        tier: FaceTier,
-        reliable: bool,
-        request: &RequestOwned,
-    ) {
+    fn route_request(&self, inbound: FaceId, tier: Region, reliable: bool, request: &RequestOwned) {
         // Resolve the query keyexpr + the inbound face's zid/link in one scoped
         // borrow (released before any send re-borrows `faces`).
         let resolved = {
@@ -5917,11 +5902,11 @@ impl RouterForwarder {
         // The two mesh blocks, gated + source-selected per compute_query_route; a
         // gated-off block is omitted. Block 3 (clients) gate is `master || src ==
         // Router`, the same as block 1's.
-        let blocks: Vec<MeshQueryBlock> = [FaceTier::Routers, FaceTier::LinkstatePeers]
+        let blocks: Vec<MeshQueryBlock> = [ROUTERS_REGION, PEERS_REGION]
             .into_iter()
             .filter_map(|bt| self.mesh_query_block(bt, tier, master, within, inbound_zid, self_zid))
             .collect();
-        let client_gate = master || tier == FaceTier::Routers;
+        let client_gate = master || tier == ROUTERS_REGION;
         // ONE shared fan target for this logical Query — every branch's pending
         // entry Rc-shares it, so the closing final aggregates LAST-OUT across all
         // the legs below (mesh tiers + clients): zenoh's one `Arc<Query>` cloned
@@ -6034,8 +6019,8 @@ impl RouterForwarder {
     ///   Query across meshes, the query twin of `bridge_push_cross_mesh`).
     fn mesh_query_block(
         &self,
-        block_tier: FaceTier,
-        src_tier: FaceTier,
+        block_tier: Region,
+        src_tier: Region,
         master: bool,
         within: Option<(Zid, u16)>,
         inbound_zid: Option<Zid>,
@@ -6044,9 +6029,9 @@ impl RouterForwarder {
         // The block gates: block 1 (routers_net) `master || src == Router`; block 2
         // (linkstatepeers_net) `master || src != Router`.
         let gated_on = match block_tier {
-            FaceTier::Routers => master || src_tier == FaceTier::Routers,
-            FaceTier::LinkstatePeers => master || src_tier != FaceTier::Routers,
-            FaceTier::Client => return None,
+            ROUTERS_REGION => master || src_tier == ROUTERS_REGION,
+            PEERS_REGION => master || src_tier != ROUTERS_REGION,
+            _ => return None,
         };
         if !gated_on {
             return None;
@@ -6299,7 +6284,7 @@ impl RouterForwarder {
         }
         let query_chunks: Vec<&str> = keyexpr.split('/').collect();
         let mut forwarded = 0;
-        let _ = self.fan_out_tier(FaceTier::Client, reliable, |id, _zid| {
+        let _ = self.fan_out_tier(CLIENTS_REGION, reliable, |id, _zid| {
             if id == inbound {
                 return Ok(None);
             }
@@ -6581,7 +6566,7 @@ impl RouterForwarder {
     /// the re-advertise emits. RESIDUAL, recorded rather than assumed: pico
     /// keys a publisher's write filter on `(decl_id, peer)`, so whether a
     /// first push at id 0 is enough for every consumer is not established here.
-    fn replay_declarations_to_new_face(&self, face: FaceId, tier: FaceTier) {
+    fn replay_declarations_to_new_face(&self, face: FaceId, tier: Region) {
         for keyexpr in self.derived_cross_tier_subs_into(tier) {
             match build_declare_subscriber(0, 0, Some(&keyexpr)) {
                 Ok(decl) => {
@@ -6656,7 +6641,7 @@ impl RouterForwarder {
         // cross-tier advertisement should do -- and nothing was measured about
         // it. The Client arm is the one the evidence reaches.
         #[cfg(feature = "routing-token-tables")]
-        if !matches!(tier, FaceTier::Client) {
+        if !is_leaf(tier) {
             for keyexpr in self.derived_cross_tier_tokens_into(tier) {
                 match build_declare_token(0, 0, Some(&keyexpr)) {
                     Ok(decl) => {
@@ -6686,7 +6671,7 @@ impl FaceForwarder for RouterForwarder {
         // a routing zid joins the matching net; a Client face — or one whose
         // zid never surfaced — is HELD without a graph link (it routes nothing).
         let whatami = peer_whatami_routing(actions);
-        let tier = tier_of(face_region(whatami, actions.peer_remote_bound()));
+        let tier = face_region(whatami, actions.peer_remote_bound());
         let added = match self.plane(tier) {
             Some((net, _dirty)) => {
                 // OBLIGATION-3 self-zid parity: a face whose routing zid IS self's
@@ -6889,10 +6874,10 @@ impl FaceForwarder for RouterForwarder {
         // tick. The cross-tier self-bubble re-advertise is C2 (a distinct
         // self-sourced declaration on its own path).
         if self.trees_dirty_routers.replace(false) {
-            self.recompute_and_advertise_tier(FaceTier::Routers);
+            self.recompute_and_advertise_tier(ROUTERS_REGION);
         }
         if self.trees_dirty_peers.replace(false) {
-            self.recompute_and_advertise_tier(FaceTier::LinkstatePeers);
+            self.recompute_and_advertise_tier(PEERS_REGION);
         }
         // Reap pending queries whose ResponseFinal never arrived on a still-up
         // face (zenoh's per-query QueryCleanup timeout) on the same coalescing
@@ -6940,9 +6925,14 @@ impl FaceForwarder for RouterForwarder {
         // a non-qos group). The mesh federation + local-client delivery then ride
         // that band via `route_push`, closing the ingress half of the
         // "mcast-egress band" residual (the egress half is `broadcast_to_mcast_groups`).
+        // R2866 — still the clients region, as the pre-region code routed it. ⚠ The
+        // pin places a ROUTER's multicast transport in `South { 0, Peer }`
+        // (`zenoh/src/net/runtime/region.rs`
+        // @ `WhatAmI::Router => Ok(Region::default_south(WhatAmI::Peer)),`), so
+        // this is a divergence that item 751's later steps move, not an equivalence.
         self.route_push(
             MCAST_INGRESS_FACE,
-            FaceTier::Client,
+            CLIENTS_REGION,
             reliable,
             priority,
             push,
@@ -6971,7 +6961,7 @@ impl FaceForwarder for RouterForwarder {
     #[cfg(feature = "router-multicast-faces")]
     fn route_mcast_ingress_request(&self, reliable: bool, request: &RequestOwned) {
         self.queries_seen.set(self.queries_seen.get() + 1);
-        self.route_request(MCAST_INGRESS_FACE, FaceTier::Client, reliable, request);
+        self.route_request(MCAST_INGRESS_FACE, CLIENTS_REGION, reliable, request);
     }
 
     /// Replace the on-group ROUTER member set (the I3b Designated-Router election
@@ -7154,21 +7144,21 @@ impl FaceForwarder for RouterForwarder {
                         self.absorb_keyexpr_declaration(id, declare);
                     }
                     DeclareOwnedVariant::CodecZenohDeclSubscriber(_) => {
-                        if tier == FaceTier::Client {
+                        if is_leaf(tier) {
                             self.ingest_client_subscription(id, declare);
                         } else {
                             self.ingest_subscription(id, tier, *reliable, declare);
                         }
                     }
                     DeclareOwnedVariant::CodecZenohUndeclSubscriber(_) => {
-                        if tier == FaceTier::Client {
+                        if is_leaf(tier) {
                             self.withdraw_client_subscription(id, declare);
                         } else {
                             self.withdraw_subscription(id, tier, *reliable, declare);
                         }
                     }
                     DeclareOwnedVariant::CodecZenohDeclQueryable(_) => {
-                        if tier == FaceTier::Client {
+                        if is_leaf(tier) {
                             self.ingest_client_queryable(id, declare);
                         } else {
                             self.ingest_queryable(id, tier, *reliable, declare);
@@ -7180,7 +7170,7 @@ impl FaceForwarder for RouterForwarder {
                     // withdraws the source's queryable interest per-keyexpr — the
                     // face-down purge stays the safety net for a departed peer.
                     DeclareOwnedVariant::CodecZenohUndeclQueryable(_) => {
-                        if tier == FaceTier::Client {
+                        if is_leaf(tier) {
                             self.withdraw_client_queryable(id, declare);
                         } else {
                             self.withdraw_queryable(id, tier, *reliable, declare);
@@ -7194,7 +7184,7 @@ impl FaceForwarder for RouterForwarder {
                     // is the UndeclareToken arm below.
                     #[cfg(feature = "routing-token-tables")]
                     DeclareOwnedVariant::CodecZenohDeclToken(_) => {
-                        if tier == FaceTier::Client {
+                        if is_leaf(tier) {
                             self.ingest_client_token(id, declare);
                         } else {
                             self.ingest_token(id, tier, *reliable, declare);
@@ -7206,7 +7196,7 @@ impl FaceForwarder for RouterForwarder {
                     // withdraw_client_token (slice-3, by decl id).
                     #[cfg(feature = "routing-token-tables")]
                     DeclareOwnedVariant::CodecZenohUndeclToken(_) => {
-                        if tier == FaceTier::Client {
+                        if is_leaf(tier) {
                             self.withdraw_client_token(id, declare);
                         } else {
                             self.withdraw_token(id, tier, *reliable, declare);
@@ -7350,31 +7340,35 @@ mod tests {
     #[test]
     fn a_face_joins_the_net_of_the_region_the_pin_places_it_in() {
         use WhatAmI::{Client, Peer, Router};
-        let placed = |w, b| {
-            let region = face_region(w, b);
-            (region, tier_of(region))
-        };
-        assert_eq!(placed(Router, None), (Region::North, FaceTier::Routers));
-        assert_eq!(
-            placed(Peer, None),
-            (Region::default_south(Peer), FaceTier::LinkstatePeers)
-        );
-        assert_eq!(
-            placed(Client, None),
-            (Region::default_south(Client), FaceTier::Client)
-        );
+        assert_eq!(face_region(Router, None), ROUTERS_REGION);
+        assert_eq!(face_region(Peer, None), PEERS_REGION);
+        assert_eq!(face_region(Client, None), CLIENTS_REGION);
         for w in [Router, Peer, Client] {
             assert_eq!(
-                placed(w, Some(Bound::North)),
-                placed(w, None),
+                face_region(w, Some(Bound::North)),
+                face_region(w, None),
                 "a north announcement agrees with the Auto table for a router"
             );
-            assert_eq!(
-                placed(w, Some(Bound::South)),
-                (Region::North, FaceTier::Routers)
-            );
+            assert_eq!(face_region(w, Some(Bound::South)), ROUTERS_REGION);
         }
-        assert_eq!(tier_of(Region::Local), FaceTier::Client);
+        assert!(!is_leaf(ROUTERS_REGION) && !is_leaf(PEERS_REGION));
+        assert!(is_leaf(CLIENTS_REGION) && is_leaf(Region::Local));
+    }
+
+    /// R2866 — the two regions this forwarder keeps a net for are DERIVED, not
+    /// listed: of the regions the pin's router builds on the Auto preset, the
+    /// non-leaf ones are exactly [`ROUTERS_REGION`] and [`PEERS_REGION`], and
+    /// its leaf ones are exactly the clients region and `Local`. A pin whose
+    /// router grew a third mesh region would red here rather than route
+    /// through a region the planes do not have.
+    #[test]
+    fn the_mesh_regions_are_the_non_leaf_regions_the_pins_router_builds() {
+        let (mesh, leaf): (Vec<Region>, Vec<Region>) =
+            crate::routing_region::auto_regions(WhatAmI::Router)
+                .into_iter()
+                .partition(|r| !is_leaf(*r));
+        assert_eq!(mesh, [ROUTERS_REGION, PEERS_REGION]);
+        assert_eq!(leaf, [CLIENTS_REGION, Region::Local]);
     }
 
     fn zid(b: u8) -> Zid {
@@ -7594,7 +7588,7 @@ mod tests {
         assert_eq!(fwd.routers_net.borrow().node_count(), 2);
         assert!(fwd.routers_net.borrow().get_node(&zid(0xAA)).is_some());
         assert_eq!(fwd.linkstatepeers_net.borrow().node_count(), 1);
-        assert_eq!(fwd.faces.borrow()[&FaceId(0)].tier, FaceTier::Routers);
+        assert_eq!(fwd.faces.borrow()[&FaceId(0)].tier, ROUTERS_REGION);
     }
 
     #[test]
@@ -7609,10 +7603,7 @@ mod tests {
             .get_node(&zid(0xBB))
             .is_some());
         assert_eq!(fwd.routers_net.borrow().node_count(), 1);
-        assert_eq!(
-            fwd.faces.borrow()[&FaceId(0)].tier,
-            FaceTier::LinkstatePeers
-        );
+        assert_eq!(fwd.faces.borrow()[&FaceId(0)].tier, PEERS_REGION);
     }
 
     #[test]
@@ -7622,7 +7613,7 @@ mod tests {
         fwd.register(FaceId(0), &c);
         // A client is a leaf: held in `faces` but in neither mesh.
         assert!(fwd.faces.borrow().contains_key(&FaceId(0)));
-        assert_eq!(fwd.faces.borrow()[&FaceId(0)].tier, FaceTier::Client);
+        assert_eq!(fwd.faces.borrow()[&FaceId(0)].tier, CLIENTS_REGION);
         assert_eq!(fwd.faces.borrow()[&FaceId(0)].link, None);
         assert_eq!(fwd.routers_net.borrow().node_count(), 1);
         assert_eq!(fwd.linkstatepeers_net.borrow().node_count(), 1);
@@ -7636,7 +7627,7 @@ mod tests {
         let (actions, _sink) = recording_actions();
         TokioRuntime::with_mutex_mut(&actions.peer_whatami, |s| *s = Some(WIRE_ROUTER));
         fwd.register(FaceId(0), &actions);
-        assert_eq!(fwd.faces.borrow()[&FaceId(0)].tier, FaceTier::Routers);
+        assert_eq!(fwd.faces.borrow()[&FaceId(0)].tier, ROUTERS_REGION);
         assert_eq!(fwd.faces.borrow()[&FaceId(0)].link, None);
         assert_eq!(
             fwd.routers_net.borrow().node_count(),
@@ -8473,7 +8464,7 @@ mod tests {
         // Before registering anything, the router advertises no interest in the
         // pattern — so the assertion after registration is a CHANGE, not a constant.
         assert!(
-            !fwd.self_advertises_sub_into(FaceTier::LinkstatePeers, "demo/host/k"),
+            !fwd.self_advertises_sub_into(PEERS_REGION, "demo/host/k"),
             "a router with no host subscriber must not advertise interest"
         );
 
@@ -8494,11 +8485,11 @@ mod tests {
         // HALF ONE — the derive now says yes, in BOTH meshes. A host sub is the
         // fourth contributor, so this is what a late joiner's fold reads.
         assert!(
-            fwd.self_advertises_sub_into(FaceTier::LinkstatePeers, "demo/host/k"),
+            fwd.self_advertises_sub_into(PEERS_REGION, "demo/host/k"),
             "a host subscriber must make the router advertise into the peer mesh"
         );
         assert!(
-            fwd.self_advertises_sub_into(FaceTier::Routers, "demo/host/k"),
+            fwd.self_advertises_sub_into(ROUTERS_REGION, "demo/host/k"),
             "and into the router mesh — a host sub is not tier-scoped"
         );
 
@@ -8623,7 +8614,7 @@ mod tests {
         let ke = "@/aabb/router/config/**";
 
         // Before registration the set omits it — so the assertion after is a CHANGE.
-        for tier in [FaceTier::Routers, FaceTier::LinkstatePeers] {
+        for tier in [ROUTERS_REGION, PEERS_REGION] {
             assert!(
                 !fwd.derived_cross_tier_subs_into(tier)
                     .contains(&ke.to_string()),
@@ -8634,7 +8625,7 @@ mod tests {
         fwd.register_local_subscriber(ke, Box::new(move |_s: &dyn SampleView| {}));
 
         // The set now carries it, in BOTH meshes — this is what a late joiner reads.
-        for tier in [FaceTier::Routers, FaceTier::LinkstatePeers] {
+        for tier in [ROUTERS_REGION, PEERS_REGION] {
             assert!(
                 fwd.derived_cross_tier_subs_into(tier)
                     .contains(&ke.to_string()),
@@ -15824,20 +15815,20 @@ mod tests {
     #[test]
     fn mcast_group_sub_folds_into_self_advertise_derive() {
         let fwd = RouterForwarder::new(zid(0x01));
-        assert!(!fwd.self_advertises_sub_into(FaceTier::LinkstatePeers, "demo/k"));
+        assert!(!fwd.self_advertises_sub_into(PEERS_REGION, "demo/k"));
         fwd.set_mcast_group_subs(&["demo/k".to_string()]);
         assert!(
-            fwd.self_advertises_sub_into(FaceTier::LinkstatePeers, "demo/k"),
+            fwd.self_advertises_sub_into(PEERS_REGION, "demo/k"),
             "a group sub makes self advertise interest (the third contributor)"
         );
         assert!(
-            fwd.derived_cross_tier_subs_into(FaceTier::LinkstatePeers)
+            fwd.derived_cross_tier_subs_into(PEERS_REGION)
                 .contains(&"demo/k".to_string()),
             "the tick re-advertise SSOT includes the group sub (late-joiner convergence)"
         );
         fwd.set_mcast_group_subs(&[]);
         assert!(
-            !fwd.self_advertises_sub_into(FaceTier::LinkstatePeers, "demo/k"),
+            !fwd.self_advertises_sub_into(PEERS_REGION, "demo/k"),
             "removing the group sub clears the derive (no client / native holds it)"
         );
     }
@@ -15856,7 +15847,7 @@ mod tests {
         let fwd = RouterForwarder::new(zid(0x01));
         let key = "@/self/router/**";
         // Before registration: neither the derive set nor the merged info holds it.
-        for tier in [FaceTier::Routers, FaceTier::LinkstatePeers] {
+        for tier in [ROUTERS_REGION, PEERS_REGION] {
             assert!(!fwd
                 .derived_cross_tier_qabls_into(tier)
                 .contains(&key.to_string()));
@@ -15867,7 +15858,7 @@ mod tests {
         // After: BOTH meshes carry it in the re-advertise SSOT + the merged info
         // (the fold; without it a startup-registered admin qabl is unreachable by a
         // late joiner).
-        for tier in [FaceTier::Routers, FaceTier::LinkstatePeers] {
+        for tier in [ROUTERS_REGION, PEERS_REGION] {
             assert!(
                 fwd.derived_cross_tier_qabls_into(tier)
                     .contains(&key.to_string()),
@@ -15895,7 +15886,7 @@ mod tests {
         fwd.set_mcast_group_subs(&["demo/k".to_string()]);
         fwd.set_mcast_group_subs(&[]); // group sub leaves; client still holds it
         assert!(
-            fwd.self_advertises_sub_into(FaceTier::LinkstatePeers, "demo/k"),
+            fwd.self_advertises_sub_into(PEERS_REGION, "demo/k"),
             "a client sub keeps the advertisement after the group sub leaves (no black-hole)"
         );
     }
