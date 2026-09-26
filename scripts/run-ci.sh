@@ -18596,13 +18596,12 @@ layer_e7g_router_adminspace_read_deny() {
 # The PRODUCT-CODE counterpart of Layer E5u (which proved the star --router over
 # unixpipe test-only): R311y396 makes run_router_hat's addressing seam non-IP safe
 # (the log + admin locator render from local_addr_display; the zid uses an explicit
-# --zid for any transport, IP keeps the port-derived fallback, a non-IP listen
-# REQUIRES --zid), so a wz --router-hat (a true wire WhatAmI::Router) binds a
+# --zid for any transport, and since R2883 a random one when none is configured,
+# so a non-IP listen no longer REQUIRES --zid), so a wz --router-hat (a true wire WhatAmI::Router) binds a
 # unixpipe listener and forwards a Put between two DISTINCT-zid --connect unixpipe
-# clients. Two guarded steps: (1) the fast product-code fail-fast UNIT
-# (run_router_hat on a unixpipe listen WITHOUT --zid returns an Err naming --zid,
-# binding to the R311y396 seam vs the pre-fix "no IP SocketAddr"); (2) the e2e
-# forward. Self-contained wz<->wz (NO external oracle), so it lives in the primary
+# clients. Two guarded steps: (1) the fast product-code UNIT on a unixpipe listen
+# WITHOUT --zid (R311y396 pinned its refusal; R2883 flipped it to SERVE with a
+# random zid); (2) the e2e forward. Self-contained wz<->wz (NO external oracle), so it lives in the primary
 # `ci` job beside E5u (NOT beside E7, which is in the oracle-required interop job),
 # NOT the zenohd Layer Z. No pre-existing lane builds
 # router-hat-router,transport-link-unixpipe together, so this lane builds its own
@@ -18614,14 +18613,18 @@ layer_e7u_router_hat_unixpipe_forward() {
         echo "Layer E7u SKIP (unixpipe is Linux-only; host is $(uname -s))"
         return 0
     fi
-    # (1) the R311y396 product-code fail-fast unit (non-IP router-hat REQUIRES --zid).
+    # (1) the product-code unit on a unixpipe listen WITHOUT --zid. R2883
+    # (open-debt item 825) FLIPPED it: the R311y396 refusal (non-IP router-hat
+    # REQUIRES --zid) is gone because an unconfigured zid is now random, as
+    # upstream's is, so the unit asserts the router-hat SERVES. The count stays 1;
+    # the name moved from `..._fails_fast` to `..._serves`.
     # R2074 — was a bare `| tee | grep -q` over an UNCONSTRAINED `cargo test -p
     # wz-ap-demo`; see the note on Layer C1bl for why that form dies with an
     # unattributable rc=101 once the package has a second test target.
     _runci_guarded_test "E7U router_hat_no_zid 1" 1 \
         cargo test -p wz-ap-demo \
         --features router-hat-router,transport-link-unixpipe \
-        run_router_hat_without_zid_on_a_unixpipe_listen_fails_fast \
+        run_router_hat_without_zid_on_a_unixpipe_listen_serves \
         -- --test-threads=1 --quiet || return 1
     # (2) the e2e: build the router-hat+unixpipe binary, then route a Put between two
     #     distinct-zid --connect unixpipe clients through the true-Router.
@@ -18637,13 +18640,14 @@ layer_e7u_router_hat_unixpipe_forward() {
 # The peer run-mode counterpart of Layer E5u (star --router, test-only) and E7u
 # (--router-hat, a true Router): R311y397 adds a --zid override to run_peer and makes
 # its addressing seam non-IP safe (the log + self locator render from
-# local_addr_display; the zid uses an explicit --zid for any transport, IP keeps the
-# port-derived fallback, a non-IP listen REQUIRES --zid), so a wz --peer binds a
+# local_addr_display; the zid uses an explicit --zid for any transport, and since
+# R2883 a random one when none is configured, so a non-IP listen no longer
+# REQUIRES --zid), so a wz --peer binds a
 # unixpipe listener and forwards a Put between two DISTINCT-zid --connect unixpipe
 # clients (deliver_to_client_subscribers routes among the peer's co-attached client
-# faces). Two guarded steps: (1) the fast product-code fail-fast UNIT (run_peer on a
-# unixpipe listen WITHOUT --zid returns an Err naming --zid, binding to the R311y397
-# seam vs the pre-fix "no IP SocketAddr"); (2) the e2e forward. Self-contained
+# faces). Two guarded steps: (1) the fast product-code UNIT on a unixpipe listen
+# WITHOUT --zid (R311y397 pinned its refusal; R2883 flipped it to SERVE with a
+# random zid); (2) the e2e forward. Self-contained
 # wz<->wz (NO external oracle), so it lives in the primary `ci` job beside E5u/E7u,
 # NOT the oracle-required interop job. No pre-existing lane builds
 # routing-peer,transport-link-unixpipe together, so this lane builds its own binary.
@@ -18655,12 +18659,14 @@ layer_e6u_peer_unixpipe_forward() {
         echo "Layer E6u SKIP (unixpipe is Linux-only; host is $(uname -s))"
         return 0
     fi
-    # (1) the R311y397 product-code fail-fast unit (non-IP peer REQUIRES --zid).
+    # (1) the product-code unit on a unixpipe listen WITHOUT --zid, flipped by
+    # R2883 exactly as Layer E7u's twin above: the R311y397 refusal is gone and
+    # the unit asserts the peer SERVES with a random zid.
     # R2074 — same conversion as Layer E7u's twin above, for the same reason.
     _runci_guarded_test "E6U peer_no_zid 1" 1 \
         cargo test -p wz-ap-demo \
         --features routing-peer,transport-link-unixpipe \
-        run_peer_without_zid_on_a_unixpipe_listen_fails_fast \
+        run_peer_without_zid_on_a_unixpipe_listen_serves \
         -- --test-threads=1 --quiet || return 1
     # (2) the e2e: build the peer+unixpipe binary, then route a Put between two
     #     distinct-zid --connect unixpipe clients through the peer.
