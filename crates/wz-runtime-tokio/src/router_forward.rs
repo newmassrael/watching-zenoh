@@ -4629,6 +4629,15 @@ impl RouterForwarder {
         priority: Priority,
         push: &PushOwned,
     ) {
+        // R2889 (open-debt item 751, step 8b) — not within a region the pin's
+        // PEER hat serves: that hat routes a Push to its own faces only when the
+        // Push came from ANOTHER region
+        // (`zenoh/src/net/routing/hat/peer/pubsub.rs` @ `if ctx.subs.is_some() && self.region() != *src_region {`).
+        // The peers of one region reach each other over their own links, which
+        // gossip autoconnect makes direct; the router does not relay between them.
+        if is_peer_hat(tier) {
+            return;
+        }
         let Some((net, _dirty)) = self.plane(tier) else {
             return; // Client tier: no mesh -> within-tier routes nowhere (C2/C3).
         };
@@ -4897,11 +4906,38 @@ impl RouterForwarder {
         if new_children.is_empty() {
             return;
         }
+        // R2889 (open-debt item 751, rule 8a, completed) — the NATIVE re-advertise
+        // below is a within-region propagation of one node's declaration to
+        // another node of the same region, the tick-time twin of
+        // `reflood_sourced`. R2888 gated only `reflood_sourced`, which left this
+        // path sending a peer's declaration to a late-joining peer; the
+        // re-founding of the 8b tests found it, because
+        // `tick_re_advertises_a_native_sub_to_a_late_joining_child` stayed green
+        // under a rule it contradicts. The self cross-tier re-advertise at the end
+        // is the `other_info` case and stays.
+        if !is_peer_hat(tier) {
+            self.re_advertise_natives_into(tier, net, &new_children);
+        }
+        // C2: also re-advertise self's DERIVED cross-tier subs (from client_subs)
+        // to self's NEW tree children — the derive's OBLIGATION-2 re-advertise feed
+        // (a distinct self-sourced declaration), so a late-joining mesh node learns
+        // to route toward this router for a keyexpr a local client subscribes.
+        self.re_advertise_self_cross_tier(tier, &new_children);
+    }
+
+    /// The native re-advertise of [`recompute_and_advertise_tier`](Self::recompute_and_advertise_tier):
+    /// every source's declarations in `tier`, to the tier's new tree children.
+    fn re_advertise_natives_into(
+        &self,
+        tier: Region,
+        net: &Rc<RefCell<LinkstateNetwork>>,
+        new_children: &[(Zid, Vec<Zid>)],
+    ) {
         if let Some(subs) = self.subs_table(tier) {
             re_advertise_interest_into(
                 net,
                 subs,
-                &new_children,
+                new_children,
                 |ke, _: &()| build_declare_subscriber(0, 0, Some(ke)),
                 |children, declare| self.flood_delta_tier(tier, children, declare),
             );
@@ -4910,7 +4946,7 @@ impl RouterForwarder {
             re_advertise_interest_into(
                 net,
                 qabls,
-                &new_children,
+                new_children,
                 |ke, info: &QueryableInfo| build_declare_queryable_with_info(ke, *info),
                 |children, declare| self.flood_delta_tier(tier, children, declare),
             );
@@ -4924,16 +4960,11 @@ impl RouterForwarder {
             re_advertise_interest_into(
                 net,
                 tokens,
-                &new_children,
+                new_children,
                 |ke, _: &()| build_declare_token(0, 0, Some(ke)),
                 |children, declare| self.flood_delta_tier(tier, children, declare),
             );
         }
-        // C2: also re-advertise self's DERIVED cross-tier subs (from client_subs)
-        // to self's NEW tree children — the derive's OBLIGATION-2 re-advertise feed
-        // (a distinct self-sourced declaration), so a late-joining mesh node learns
-        // to route toward this router for a keyexpr a local client subscribes.
-        self.re_advertise_self_cross_tier(tier, &new_children);
     }
 
     /// Flood a re-advertised declaration to a tree-recompute's NEW children within
@@ -6294,6 +6325,15 @@ impl RouterForwarder {
             // within-leg-only drop: this block is omitted while the cross-tier +
             // client legs (self-originated, no querier source) still route, the
             // route_push / zenoh per-block degrade parity.
+            //
+            // R2889 (open-debt item 751, step 8b) — and no within leg at all in a
+            // region the pin's PEER hat serves, the query twin of the data rule in
+            // `forward_push_tier`: that hat offers its own faces' queryables only
+            // to a query from another region
+            // (`zenoh/src/net/routing/hat/peer/queries.rs` @ `if self.region() != *src_region {`).
+            if is_peer_hat(block_tier) {
+                return None;
+            }
             let (source_zid, out_node_id) = within?;
             Some(MeshQueryBlock {
                 tier: block_tier,
@@ -8804,16 +8844,16 @@ mod tests {
         );
     }
 
+    /// R2889 (open-debt item 751, rule 8b) — a peer-sourced Push is bridged to a
+    /// router-mesh subscriber (it crosses a region boundary, admitted by the
+    /// inter-region filter, which a single router passes) and is NOT relayed to
+    /// a peer subscriber of its own region, which the pin's peer hat does not do.
+    /// Until R2889 this was
+    /// `push_peer_source_routes_within_tier_and_bridges_to_router_as_master`,
+    /// which also asserted the within-region relay and named the route-master
+    /// election R2880 removed.
     #[test]
-    fn push_peer_source_routes_within_tier_and_bridges_to_router_as_master() {
-        // A peer-sourced Push routes to peer-tier subscribers along the SOURCE's
-        // tree (the within-tier data route, C1) AND is bridged to a router-tier
-        // subscriber of the SAME keyexpr (the cross-mesh federation bridge, C4).
-        // In this single-router topology `shared_nodes = {self}`, so self wins the
-        // election and IS the route master, exactly as zenoh `compute_data_route`
-        // fires block 1 (router_subs) for a peer source when `master`
-        // (pubsub.rs:1291). A non-master router suppresses this bridge — see
-        // `push_non_master_suppresses_cross_mesh_bridge`.
+    fn a_peer_push_is_bridged_north_and_not_relayed_within_its_region() {
         let fwd = RouterForwarder::new(zid(0x01));
         let (a, sink_a) = face(zid(0xAA), WIRE_PEER); // peer source
         let (c, sink_c) = face(zid(0xCC), WIRE_PEER); // peer subscriber (tree child)
@@ -8836,14 +8876,14 @@ mod tests {
         assert_eq!(fwd.data_seen.get(), 1, "the Push is counted");
         assert_eq!(
             sink_c.frame_count(),
-            1,
-            "routed to the peer-tier subscriber C along A's tree"
+            0,
+            "not relayed to the peer subscriber C of the same region"
         );
         assert_eq!(sink_a.frame_count(), 0, "not back to the inbound source A");
         assert_eq!(
             sink_r.frame_count(),
             1,
-            "bridged to the router-tier subscriber (self is master in single-router)"
+            "bridged to the router-tier subscriber"
         );
     }
 
@@ -9085,21 +9125,26 @@ mod tests {
             priority
         }
 
+        // R2889 — the roles are swapped from peers-within, router-across to
+        // routers-within, peer-across: since open-debt item 751 rule 8b the router
+        // relays nothing within its peer region, so the within-tier leg this test
+        // measures exists only in the router mesh. The bridge into the peer region
+        // is the other leg, unchanged in kind.
         let fwd = RouterForwarder::new(zid(0x01));
-        let (a, _sink_a) = face(zid(0xAA), WIRE_PEER); // peer source
-        let (c, sink_c) = face(zid(0xCC), WIRE_PEER); // peer subscriber (within-tier child)
-        let (r, sink_r) = face(zid(0xDD), WIRE_ROUTER); // router subscriber (cross-mesh bridge)
+        let (a, _sink_a) = face(zid(0xAA), WIRE_ROUTER); // router source
+        let (c, sink_c) = face(zid(0xCC), WIRE_ROUTER); // router subscriber (within-tier child)
+        let (r, sink_r) = face(zid(0xDD), WIRE_PEER); // peer subscriber (cross-mesh bridge)
         c.set_qos_offer(true);
         r.set_qos_offer(true);
         fwd.register(FaceId(0), &a);
         fwd.register(FaceId(1), &c);
         fwd.register(FaceId(2), &r);
-        advertise_link_back(&fwd, FaceId(0), 0x01, 0xAA, 5); // peer edge self<->A
-        advertise_link_back(&fwd, FaceId(1), 0x01, 0xCC, 5); // peer edge self<->C
-        advertise_link_back(&fwd, FaceId(2), 0x01, 0xDD, 5); // router edge self<->R
+        advertise_link_back(&fwd, FaceId(0), 0x01, 0xAA, 5); // router edge self<->A
+        advertise_link_back(&fwd, FaceId(1), 0x01, 0xCC, 5); // router edge self<->C
+        advertise_link_back(&fwd, FaceId(2), 0x01, 0xDD, 5); // peer edge self<->R
         fwd.tick(); // compute both nets' spanning trees
-        forward_one(&fwd, FaceId(1), declare_sub("demo/data")); // C (peer) subscribes
-        forward_one(&fwd, FaceId(2), declare_sub("demo/data")); // R (router) subscribes
+        forward_one(&fwd, FaceId(1), declare_sub("demo/data")); // C (router) subscribes
+        forward_one(&fwd, FaceId(2), declare_sub("demo/data")); // R (peer) subscribes
 
         // A RealTime Put from A: preserved on BOTH the within-tier relay to C and the
         // master-gated cross-mesh bridge to R.
@@ -9185,14 +9230,18 @@ mod tests {
     /// child of self) with C subscribed to `demo/data` and both sinks reset —
     /// ready for a Put from A that routes A -> self -> C within the peer tier.
     #[cfg(feature = "access-acl")]
-    fn peer_source_and_subscriber() -> (
+    /// R2889 — the within-tier relay vehicle is the ROUTER mesh: since open-debt
+    /// item 751 rule 8b the router relays nothing within its peer region (the
+    /// pin's peer hat does not), so the relay these fixtures carry is the router
+    /// hat's. Until R2889 this was `peer_source_and_subscriber`, two peers.
+    fn router_source_and_subscriber() -> (
         RouterForwarder,
         Arc<RecordingLinkDriver>,
         Arc<RecordingLinkDriver>,
     ) {
         let fwd = RouterForwarder::new(zid(0x01));
-        let (a, sink_a) = face(zid(0xAA), WIRE_PEER); // peer source
-        let (c, sink_c) = face(zid(0xCC), WIRE_PEER); // peer subscriber (tree child)
+        let (a, sink_a) = face(zid(0xAA), WIRE_ROUTER); // router source
+        let (c, sink_c) = face(zid(0xCC), WIRE_ROUTER); // router subscriber (tree child)
         fwd.register(FaceId(0), &a);
         fwd.register(FaceId(1), &c);
         advertise_link_back(&fwd, FaceId(0), 0x01, 0xAA, 5);
@@ -9270,7 +9319,7 @@ mod tests {
         // at the top of forward(): not counted as received data, not routed to the
         // interested child C, and witnessed. The router twin of the single-net
         // an_acl_deny_drops_an_inbound_put_before_relay.
-        let (fwd, _sink_a, sink_c) = peer_source_and_subscriber();
+        let (fwd, _sink_a, sink_c) = router_source_and_subscriber();
         fwd.set_interceptors(InterceptorConfig {
             acl: Some(deny_put_policy("demo/**", AclFlow::Ingress)),
             ..Default::default()
@@ -9298,7 +9347,7 @@ mod tests {
         // from A is ADMITTED on ingress (counted, routed) but its within-tier relay
         // to the subscriber C is dropped at fan_out_tier's admit_outbound gate and
         // witnessed — the router↔single-net egress parity the fan_out gate closes.
-        let (fwd, _sink_a, sink_c) = peer_source_and_subscriber();
+        let (fwd, _sink_a, sink_c) = router_source_and_subscriber();
         fwd.set_interceptors(InterceptorConfig {
             acl: Some(deny_put_policy("demo/**", AclFlow::Egress)),
             ..Default::default()
@@ -9712,7 +9761,7 @@ mod tests {
         // Selective, not blanket: the EGRESS deny targets a DIFFERENT subtree
         // (admin/**), so the demo/data relay reaches C exactly as without an ACL —
         // proving the gate is a filter, not a block.
-        let (fwd, _sink_a, sink_c) = peer_source_and_subscriber();
+        let (fwd, _sink_a, sink_c) = router_source_and_subscriber();
         fwd.set_interceptors(InterceptorConfig {
             acl: Some(deny_put_policy("admin/**", AclFlow::Egress)),
             ..Default::default()
@@ -9729,16 +9778,20 @@ mod tests {
     fn tick_re_advertises_a_native_sub_to_a_late_joining_child() {
         // A subscription learned before a peer joined converges onto the new tree
         // child when the tick recompute adds it — the per-tier re-advertise (C1),
-        // fixing the prior slice's discard-the-new-children tick.
+        // fixing the prior slice's discard-the-new-children tick. R2889 — in the
+        // ROUTER mesh; the peer region does the opposite (the test below).
         let fwd = RouterForwarder::new(zid(0x01));
-        let (a, _sa) = face(zid(0xAA), WIRE_PEER); // the sub's source
-        let (c, sink_c) = face(zid(0xCC), WIRE_PEER); // joins AFTER the declare
+        let (a, _sa) = face(zid(0xAA), WIRE_ROUTER); // the sub's source
+        let (c, sink_c) = face(zid(0xCC), WIRE_ROUTER); // joins AFTER the declare
         fwd.register(FaceId(0), &a);
         advertise_link_back(&fwd, FaceId(0), 0x01, 0xAA, 5);
         fwd.tick();
         forward_one(&fwd, FaceId(0), declare_sub("demo/late")); // A subscribes; no C yet
         assert_eq!(
-            fwd.mesh(PEERS_REGION).subs.borrow().interested("demo/late"),
+            fwd.mesh(ROUTERS_REGION)
+                .subs
+                .borrow()
+                .interested("demo/late"),
             vec![zid(0xAA)],
             "self learned A's interest before C joined"
         );
@@ -9746,11 +9799,41 @@ mod tests {
         fwd.register(FaceId(1), &c);
         advertise_link_back(&fwd, FaceId(1), 0x01, 0xCC, 6);
         sink_c.reset();
-        fwd.tick(); // recompute peers_net -> C is a new child -> re-advertise to it
+        fwd.tick(); // recompute routers_net -> C is a new child -> re-advertise to it
         assert_eq!(
             sink_c.frame_count(),
             1,
             "A's subscription re-advertised to the late-joining child C"
+        );
+    }
+
+    /// R2889 (open-debt item 751, rule 8a completed) — in the PEER region the
+    /// tick does not re-advertise one peer's subscription to a late-joining
+    /// peer: the pin's peer hat sends its own faces only what other hats hold.
+    /// R2888 gated the declare-time re-flood and missed this tick-time twin;
+    /// the router-mesh test above is the control.
+    #[test]
+    fn a_late_joining_peer_is_not_re_advertised_another_peers_subscription() {
+        let fwd = RouterForwarder::new(zid(0x01));
+        let (a, _sa) = face(zid(0xAA), WIRE_PEER);
+        let (c, sink_c) = face(zid(0xCC), WIRE_PEER);
+        fwd.register(FaceId(0), &a);
+        advertise_link_back(&fwd, FaceId(0), 0x01, 0xAA, 5);
+        fwd.tick();
+        forward_one(&fwd, FaceId(0), declare_sub("demo/late"));
+        assert_eq!(
+            fwd.mesh(PEERS_REGION).subs.borrow().interested("demo/late"),
+            vec![zid(0xAA)],
+            "the router registers A's subscription"
+        );
+        fwd.register(FaceId(1), &c);
+        advertise_link_back(&fwd, FaceId(1), 0x01, 0xCC, 6);
+        sink_c.reset();
+        fwd.tick();
+        assert_eq!(
+            sink_c.frame_count(),
+            0,
+            "but does not re-advertise it to the late-joining peer C"
         );
     }
 
@@ -9759,23 +9842,25 @@ mod tests {
         // The queryable twin of the subscription re-advertise (C1): a queryable
         // learned before a peer joined converges onto the new tree child — the
         // SECOND table `recompute_and_advertise_tier` walks, pinned so the qabls
-        // half of the tick re-advertise is not left composed-untested.
+        // half of the tick re-advertise is not left composed-untested. R2889 —
+        // in the ROUTER mesh (751 rule 8a: the peer region re-advertises no
+        // peer's declaration to another peer).
         let fwd = RouterForwarder::new(zid(0x01));
-        let (a, _sa) = face(zid(0xAA), WIRE_PEER); // the queryable's source
-        let (c, sink_c) = face(zid(0xCC), WIRE_PEER); // joins AFTER the declare
+        let (a, _sa) = face(zid(0xAA), WIRE_ROUTER); // the queryable's source
+        let (c, sink_c) = face(zid(0xCC), WIRE_ROUTER); // joins AFTER the declare
         fwd.register(FaceId(0), &a);
         advertise_link_back(&fwd, FaceId(0), 0x01, 0xAA, 5);
         fwd.tick();
         forward_one(&fwd, FaceId(0), declare_qabl("demo/q", true)); // A declares; no C
         assert_eq!(
-            fwd.mesh(PEERS_REGION).qabls.borrow().interested("demo/q"),
+            fwd.mesh(ROUTERS_REGION).qabls.borrow().interested("demo/q"),
             vec![zid(0xAA)],
             "self learned A's queryable before C joined"
         );
         fwd.register(FaceId(1), &c);
         advertise_link_back(&fwd, FaceId(1), 0x01, 0xCC, 6);
         sink_c.reset();
-        fwd.tick(); // recompute peers_net -> C new child -> re-advertise the qabl
+        fwd.tick(); // recompute routers_net -> C new child -> re-advertise the qabl
         assert_eq!(
             sink_c.frame_count(),
             1,
@@ -12144,10 +12229,15 @@ mod tests {
         assert_eq!(sink_c2.frame_count(), 1, "delivered to client c2");
     }
 
+    /// R2889 (open-debt item 751, rule 8b) — a peer's Push reaches a CLIENT
+    /// subscriber (another region) and NOT a peer subscriber of its own region:
+    /// the pin's peer hat routes to its faces only a Push from another region
+    /// (`zenoh/src/net/routing/hat/peer/pubsub.rs` @ `if ctx.subs.is_some() && self.region() != *src_region {`),
+    /// and the peers reach each other directly. Until R2889 this test was
+    /// `a_peer_push_reaches_both_a_peer_subscriber_and_a_client_subscriber` and
+    /// asserted the peer subscriber was relayed to as well.
     #[test]
-    fn a_peer_push_reaches_both_a_peer_subscriber_and_a_client_subscriber() {
-        // forward_push_tier (mesh) and deliver_to_client_subscribers (client)
-        // COMPOSE: a peer's Push reaches BOTH a peer-mesh subscriber and a client.
+    fn a_peer_push_reaches_a_client_subscriber_but_not_a_peer_of_its_region() {
         let fwd = RouterForwarder::new(zid(0x01));
         let (a, _sa) = face(zid(0xAA), WIRE_PEER); // source peer
         let (peer_sub, sink_peer) = face(zid(0xCC), WIRE_PEER); // peer subscriber (tree child)
@@ -12167,8 +12257,8 @@ mod tests {
         forward_one(&fwd, FaceId(0), NetworkMessage::Push(Box::new(push))); // peer A publishes
         assert_eq!(
             sink_peer.frame_count(),
-            1,
-            "the peer-mesh subscriber got it (within-tier route)"
+            0,
+            "the peer of the same region is not relayed to"
         );
         assert_eq!(
             sink_client.frame_count(),
@@ -15270,12 +15360,17 @@ mod tests {
         ))
     }
 
+    /// R2889 (open-debt item 751, rule 8b) — a peer's Query is NOT routed to a
+    /// peer queryable of its own region: the pin's peer hat offers its faces'
+    /// queryables only to a query from another region
+    /// (`zenoh/src/net/routing/hat/peer/queries.rs` @ `if self.region() != *src_region {`).
+    /// With no other candidate the route is empty and the querier is closed
+    /// with the empty-route final. Until R2889 this test was
+    /// `a_peer_request_routes_within_tier_to_a_peer_queryable`; the within-tier
+    /// query route and its qid remap are witnessed on the router mesh by
+    /// `a_reply_routes_back_to_the_querier_and_the_final_frees_the_entry`.
     #[test]
-    fn a_peer_request_routes_within_tier_to_a_peer_queryable() {
-        // The query twin of push_peer_source_routes_within_tier: a peer-sourced
-        // Query for demo/q routes along the querier's tree to the peer-tier
-        // queryable C (the WITHIN-tier query route), not back to the inbound A, and
-        // ALLOCATES a pending-return entry with a remapped qid.
+    fn a_peer_request_is_not_routed_to_a_peer_queryable_of_its_region() {
         let fwd = RouterForwarder::new(zid(0x01));
         let (a, sink_a) = face(zid(0xAA), WIRE_PEER); // querier
         let (c, sink_c) = face(zid(0xCC), WIRE_PEER); // queryable
@@ -15291,17 +15386,14 @@ mod tests {
         assert_eq!(fwd.queries_seen.get(), 1, "the Request is counted");
         assert_eq!(
             sink_c.frame_count(),
-            1,
-            "routed to the peer-tier queryable C"
+            0,
+            "the peer queryable of the same region is not routed to"
         );
-        assert_eq!(sink_a.frame_count(), 0, "not back to the inbound querier A");
         assert_eq!(
             fwd.pending.borrow().len(),
-            1,
-            "a pending-return entry was allocated for the forwarded Request"
+            0,
+            "nothing was forwarded, so nothing waits for a reply"
         );
-        let fwd_req = forwarded_request(&sink_c.frame_bytes(0));
-        assert_ne!(fwd_req.rid, 42, "rid REMAPPED to a per-face local qid");
     }
 
     #[test]
@@ -15504,9 +15596,12 @@ mod tests {
         // (`compute_query_route` block 3 stamps `distance: 1`, mesh qabls stamp
         // `net.distances[..] as u16`). This proves the cross-block global min (a
         // client can beat a mesh candidate) AND single-winner (not the All fan-out).
+        // R2889 — the mesh candidate sits in the ROUTER mesh: since open-debt
+        // item 751 rule 8b a peer queryable is no candidate for a peer querier
+        // at all, so with peers this test passed without the comparison it names.
         let fwd = RouterForwarder::new(zid(0x01));
-        let (a, sink_a) = face(zid(0xAA), WIRE_PEER); // querier
-        let (c, sink_c) = face(zid(0xCC), WIRE_PEER); // complete peer queryable (~100)
+        let (a, sink_a) = face(zid(0xAA), WIRE_ROUTER); // querier
+        let (c, sink_c) = face(zid(0xCC), WIRE_ROUTER); // complete router queryable (~100)
         let (client, sink_client) = face(zid(0xEE), WIRE_CLIENT); // complete client (distance 1)
         fwd.register(FaceId(0), &a);
         fwd.register(FaceId(1), &c);
@@ -15540,11 +15635,12 @@ mod tests {
     #[test]
     fn best_matching_falls_back_to_all_when_no_queryable_is_complete() {
         // BestMatching with only INCOMPLETE matching queryables finds no complete
-        // one and falls back to QueryTarget::All — fan out to BOTH.
+        // one and falls back to QueryTarget::All — fan out to BOTH. R2889 — on the
+        // router mesh, the within-tier relay the router hat still makes.
         let fwd = RouterForwarder::new(zid(0x01));
-        let (a, sink_a) = face(zid(0xAA), WIRE_PEER); // querier
-        let (b, sink_b) = face(zid(0xBB), WIRE_PEER); // incomplete queryable
-        let (c, sink_c) = face(zid(0xCC), WIRE_PEER); // incomplete queryable
+        let (a, sink_a) = face(zid(0xAA), WIRE_ROUTER); // querier
+        let (b, sink_b) = face(zid(0xBB), WIRE_ROUTER); // incomplete queryable
+        let (c, sink_c) = face(zid(0xCC), WIRE_ROUTER); // incomplete queryable
         fwd.register(FaceId(0), &a);
         fwd.register(FaceId(1), &b);
         fwd.register(FaceId(2), &c);
@@ -15566,11 +15662,11 @@ mod tests {
     #[test]
     fn all_complete_skips_an_incomplete_queryable() {
         // QueryTarget::AllComplete fans out to EVERY complete queryable only — the
-        // incomplete one is skipped even though it matches.
+        // incomplete one is skipped even though it matches. R2889 — router mesh.
         let fwd = RouterForwarder::new(zid(0x01));
-        let (a, sink_a) = face(zid(0xAA), WIRE_PEER); // querier
-        let (b, sink_b) = face(zid(0xBB), WIRE_PEER); // COMPLETE
-        let (c, sink_c) = face(zid(0xCC), WIRE_PEER); // incomplete
+        let (a, sink_a) = face(zid(0xAA), WIRE_ROUTER); // querier
+        let (b, sink_b) = face(zid(0xBB), WIRE_ROUTER); // COMPLETE
+        let (c, sink_c) = face(zid(0xCC), WIRE_ROUTER); // incomplete
         fwd.register(FaceId(0), &a);
         fwd.register(FaceId(1), &b);
         fwd.register(FaceId(2), &c);
@@ -15599,11 +15695,11 @@ mod tests {
     #[test]
     fn all_target_fans_out_even_to_incomplete_queryables() {
         // QueryTarget::All fans out to EVERY matching queryable regardless of
-        // completeness (unlike AllComplete + BestMatching).
+        // completeness (unlike AllComplete + BestMatching). R2889 — router mesh.
         let fwd = RouterForwarder::new(zid(0x01));
-        let (a, sink_a) = face(zid(0xAA), WIRE_PEER);
-        let (b, sink_b) = face(zid(0xBB), WIRE_PEER);
-        let (c, sink_c) = face(zid(0xCC), WIRE_PEER);
+        let (a, sink_a) = face(zid(0xAA), WIRE_ROUTER);
+        let (b, sink_b) = face(zid(0xBB), WIRE_ROUTER);
+        let (c, sink_c) = face(zid(0xCC), WIRE_ROUTER);
         fwd.register(FaceId(0), &a);
         fwd.register(FaceId(1), &b);
         fwd.register(FaceId(2), &c);
@@ -15779,29 +15875,44 @@ mod tests {
     /// not carry the Query north: C must answer. Without the filter inside the
     /// pick, R2's hop wins and is then refused at the egress, and the Query ends
     /// with an empty route while C was there.
+    ///
+    /// R2889 — re-founded on a SOUTHBOUND query. The R2880 fixture fell through
+    /// to a peer queryable in the querier's own region, and since open-debt item
+    /// 751 rule 8b that is no candidate at all, so the fixture measured an empty
+    /// route. Here a router querier Q queries into the peer region, where the
+    /// filter decides per egress neighbour
+    /// (`zenoh/src/net/routing/dispatcher/queries.rs` @ `dst_zid: Some(&q.dir.dst_face.zid),`):
+    /// P1's queryable is fed first (it would win the tie) but P1 links to the
+    /// larger gateway R2 as well, so self is refused for it; P2 links to self
+    /// alone and must answer. Without the filter inside the pick, P1 wins, is
+    /// refused at the egress, and the Query ends with an empty route.
     #[test]
     fn best_matching_falls_through_a_refused_nearest_queryable() {
         let fwd = RouterForwarder::new(zid(0x01));
-        let (a, _sa) = face(zid(0xAA), WIRE_PEER); // querier, linked to self and R2
-        let (c, sink_c) = face(zid(0xCC), WIRE_PEER); // a peer queryable
-        let (r, sink_r) = face(zid(0x02), WIRE_ROUTER); // R2, the larger gateway
-        fwd.register(FaceId(0), &a);
-        fwd.register(FaceId(1), &c);
-        fwd.register(FaceId(2), &r);
-        advertise_link_back(&fwd, FaceId(2), 0x01, 0x02, 5);
-        advertise_link_back(&fwd, FaceId(1), 0x01, 0xCC, 5);
-        discover_gateway_via(&fwd, FaceId(0), 0x01, 0xAA, 0x02, 7, 5);
+        let (q, _sq) = face(zid(0x03), WIRE_ROUTER); // router querier
+        let (p1, sink_p1) = face(zid(0xAA), WIRE_PEER); // linked to self and R2
+        let (p2, sink_p2) = face(zid(0xBB), WIRE_PEER); // linked to self only
+        fwd.register(FaceId(0), &q);
+        fwd.register(FaceId(1), &p1);
+        fwd.register(FaceId(2), &p2);
+        advertise_link_back(&fwd, FaceId(0), 0x01, 0x03, 5);
+        advertise_link_back(&fwd, FaceId(2), 0x01, 0xBB, 5);
+        discover_gateway_via(&fwd, FaceId(1), 0x01, 0xAA, 0x02, 7, 5);
         fwd.tick();
-        forward_one(&fwd, FaceId(2), declare_qabl("demo/k", true));
         forward_one(&fwd, FaceId(1), declare_qabl("demo/k", true));
-        sink_c.reset();
-        sink_r.reset();
+        forward_one(&fwd, FaceId(2), declare_qabl("demo/k", true));
+        sink_p1.reset();
+        sink_p2.reset();
         forward_one(&fwd, FaceId(0), request_best(70, "demo/k"));
-        assert_eq!(sink_r.frame_count(), 0, "R2 carries it north, not self");
         assert_eq!(
-            sink_c.frame_count(),
+            sink_p1.frame_count(),
+            0,
+            "R2 is the larger gateway P1 links to: it carries the Query to P1"
+        );
+        assert_eq!(
+            sink_p2.frame_count(),
             1,
-            "the next-nearest complete queryable answers"
+            "the next complete queryable, admitted, answers"
         );
     }
 
@@ -16000,9 +16111,11 @@ mod tests {
         // rewritten to A's original rid; the final frees the entry; a straggler
         // Response after the final drops (the entry is gone). All through the
         // `forward` dispatch, so the new Response/ResponseFinal arms are covered.
+        // R2889 — a router querier and queryable: the router relays no query
+        // within its peer region (open-debt item 751 rule 8b).
         let fwd = RouterForwarder::new(zid(0x01));
-        let (a, sink_a) = face(zid(0xAA), WIRE_PEER); // querier
-        let (c, sink_c) = face(zid(0xCC), WIRE_PEER); // queryable
+        let (a, sink_a) = face(zid(0xAA), WIRE_ROUTER); // querier
+        let (c, sink_c) = face(zid(0xCC), WIRE_ROUTER); // queryable
         fwd.register(FaceId(0), &a);
         fwd.register(FaceId(1), &c);
         advertise_link_back(&fwd, FaceId(0), 0x01, 0xAA, 5);
@@ -16157,8 +16270,9 @@ mod tests {
         let offset_clock = offset.clone();
         let fwd =
             RouterForwarder::with_clock(zid(0x01), Box::new(move || base + offset_clock.get()));
-        let (a, sink_a) = face(zid(0xAA), WIRE_PEER); // querier
-        let (c, sink_c) = face(zid(0xCC), WIRE_PEER); // queryable (never replies)
+        // R2889 — router mesh (751 rule 8b: no query relay within the peer region).
+        let (a, sink_a) = face(zid(0xAA), WIRE_ROUTER); // querier
+        let (c, sink_c) = face(zid(0xCC), WIRE_ROUTER); // queryable (never replies)
         fwd.register(FaceId(0), &a);
         fwd.register(FaceId(1), &c);
         advertise_link_back(&fwd, FaceId(0), 0x01, 0xAA, 5);
@@ -16207,11 +16321,12 @@ mod tests {
         // falls back to All — both incomplete) must close upstream exactly ONCE,
         // after BOTH branches finalize. The first branch's final is ABSORBED; a
         // reply from the still-open second branch STILL routes; the second final
-        // closes the fan with a single upstream final.
+        // closes the fan with a single upstream final. R2889 — on the router
+        // mesh: the router relays no query within its peer region (751 rule 8b).
         let fwd = RouterForwarder::new(zid(0x01));
-        let (a, sink_a) = face(zid(0xAA), WIRE_PEER); // querier
-        let (b, sink_b) = face(zid(0xBB), WIRE_PEER); // queryable 1 (incomplete)
-        let (c, sink_c) = face(zid(0xCC), WIRE_PEER); // queryable 2 (incomplete)
+        let (a, sink_a) = face(zid(0xAA), WIRE_ROUTER); // querier
+        let (b, sink_b) = face(zid(0xBB), WIRE_ROUTER); // queryable 1 (incomplete)
+        let (c, sink_c) = face(zid(0xCC), WIRE_ROUTER); // queryable 2 (incomplete)
         fwd.register(FaceId(0), &a);
         fwd.register(FaceId(1), &b);
         fwd.register(FaceId(2), &c);
@@ -16383,8 +16498,9 @@ mod tests {
         let offset_clock = offset.clone();
         let fwd =
             RouterForwarder::with_clock(zid(0x01), Box::new(move || base + offset_clock.get()));
-        let (a, sink_a) = face(zid(0xAA), WIRE_PEER); // querier
-        let (c, _sc) = face(zid(0xCC), WIRE_PEER); // queryable (never replies)
+        // R2889 — router mesh (751 rule 8b: no query relay within the peer region).
+        let (a, sink_a) = face(zid(0xAA), WIRE_ROUTER); // querier
+        let (c, _sc) = face(zid(0xCC), WIRE_ROUTER); // queryable (never replies)
         fwd.register(FaceId(0), &a);
         fwd.register(FaceId(1), &c);
         advertise_link_back(&fwd, FaceId(0), 0x01, 0xAA, 5);
@@ -16430,10 +16546,10 @@ mod tests {
         // Err("Timeout") carries the EMPTY wireexpr (zenoh WireExpr::empty()).
         // The router must pass it THROUGH with only the rid rewritten (zenoh
         // route_send_response does no keyexpr resolution), not drop it at
-        // resolve_wireexpr.
+        // resolve_wireexpr. R2889 — router mesh (751 rule 8b).
         let fwd = RouterForwarder::new(zid(0x01));
-        let (a, sink_a) = face(zid(0xAA), WIRE_PEER); // querier
-        let (c, sink_c) = face(zid(0xCC), WIRE_PEER); // queryable
+        let (a, sink_a) = face(zid(0xAA), WIRE_ROUTER); // querier
+        let (c, sink_c) = face(zid(0xCC), WIRE_ROUTER); // queryable
         fwd.register(FaceId(0), &a);
         fwd.register(FaceId(1), &c);
         advertise_link_back(&fwd, FaceId(0), 0x01, 0xAA, 5);

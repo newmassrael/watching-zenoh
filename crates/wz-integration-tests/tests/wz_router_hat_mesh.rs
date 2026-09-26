@@ -217,14 +217,21 @@ fn wz_router_hat_converges_with_a_peer() {
 
 #[test]
 #[ignore = "binary-dep e2e (wz-ap-demo --features router-hat-router); Layer E runs via --ignored"]
-fn wz_router_hat_forwards_between_peers() {
-    // The 3-node STAR: a subscriber P1 and a publisher P2, each dialing ONLY the
-    // router R. With autoconnect off (the default), P1 and P2 never learn each
-    // other's address, so any delivery MUST route through R. R binds first.
+fn wz_router_hat_region_peers_exchange_data_directly() {
+    // R2889 (open-debt item 751, rule 8b) — the pin's router does not relay data
+    // between two peers of its own south peer region: its peer hat routes a Push
+    // to its faces only when it came from another region
+    // (`zenoh/src/net/routing/hat/peer/pubsub.rs` @ `if ctx.subs.is_some() && self.region() != *src_region {`),
+    // and the peers of that region link directly (gossip autoconnect). So the
+    // shape this test builds is the pin's: a subscriber P1 and a publisher P2
+    // both dial the router R, and P2 ALSO dials P1. P1 must receive, and R must
+    // NOT carry the data. Until R2889 this was `wz_router_hat_forwards_between_peers`,
+    // a star where P1 and P2 dialled only R and the router relayed within its
+    // peer tier; that relay is the behaviour rule 8b removed.
     let (mut r_guard, mut r_reader, p_r) =
         spawn_router_hat("router-hat", &["--router-hat", "127.0.0.1:0"]);
     let addr_r = format!("127.0.0.1:{p_r}");
-    let (mut sub_guard, mut sub_reader, _p_sub) = spawn_peer(
+    let (mut sub_guard, mut sub_reader, p_sub) = spawn_peer(
         "peer-sub",
         &[
             "--peer",
@@ -235,25 +242,23 @@ fn wz_router_hat_forwards_between_peers() {
             "demo/hat",
         ],
     );
+    let addr_sub = format!("127.0.0.1:{p_sub}");
+    let dials = format!("{addr_r},{addr_sub}");
     let (mut pub_guard, mut pub_reader, _p_pub) = spawn_peer(
         "peer-pub",
         &[
             "--peer",
             "127.0.0.1:0",
             "--connect",
-            &addr_r,
+            &dials,
             "--publish",
             "demo/hat",
         ],
     );
 
-    // The SUBSCRIBER must RECEIVE the publisher's data — but only via the router:
-    // P1's `DeclareSubscriber` floods P1 -> R -> P2 (so P2's any-interest gate
-    // opens), and P2's Put routes P2 -> R -> P1 through R's within-tier data
-    // route. P1 has no direct link to P2, so receiving proves the full
-    // router-forwarded chain over the wire. The publisher publishes every app
-    // tick, so once the mesh converges delivery is self-healing (no one-shot drop
-    // to race).
+    // The SUBSCRIBER must RECEIVE the publisher's data, over the direct P2-P1
+    // link. The publisher publishes every app tick, so once the mesh converges
+    // delivery is self-healing (no one-shot drop to race).
     let sub_data = wait_for_substring(
         &mut sub_reader,
         "received mesh data",
@@ -273,20 +278,24 @@ fn wz_router_hat_forwards_between_peers() {
     sub_data.unwrap_or_else(|c| {
         panic!(
             "peer-sub never logged 'received mesh data' within 15s — the \
-             publisher's data did not route through the router to the subscriber \
-             (the router did not forward within its peer tier)\n--- peer-sub \
-             stderr ---\n{c}"
+             publisher's data did not reach the subscriber over their direct \
+             link\n--- peer-sub stderr ---\n{c}"
         )
     });
-    // The transit pin: R's OWN data_seen rose (it counts every inbound Push before
-    // routing), so the delivery went THROUGH the router — not around it (the peers
-    // never knew each other's address). Without this a green subscriber-receipt
-    // could not distinguish a router forward from a direct peer link.
+    // R did not carry the data within its peer region. ⚠ This assertion does
+    // NOT discriminate rule 8b, and that was measured: with the rule reverted it
+    // stays green, because P2 routes to P1 over the shorter direct link and R
+    // never receives the Push. A star (no direct link) cannot discriminate it
+    // either, since under rule 8a P2 never learns P1's interest and publishes
+    // nothing. Rule 8b's discriminating witnesses are the unit tests
+    // `a_peer_push_is_bridged_north_and_not_relayed_within_its_region` and
+    // `a_peer_push_reaches_a_client_subscriber_but_not_a_peer_of_its_region`.
+    // This test stands for the SHAPE the pin expects: region peers linked
+    // directly, exchanging data with a wz router present.
     assert!(
-        r_captured.contains("router-hat: forwarded mesh data"),
-        "router-hat never forwarded a Push — the subscriber's data did not \
-         transit the router, so the delivery did not exercise the router's data \
-         route\n--- router-hat stderr ---\n{r_captured}"
+        !r_captured.contains("router-hat: forwarded mesh data"),
+        "router-hat forwarded a Push between two peers of its own region, which \
+         the pin's peer hat never does\n--- router-hat stderr ---\n{r_captured}"
     );
     // R's peer tier peaked at all three nodes (self + P1 + P2) — both peers
     // classified into `linkstatepeers_net`. Asserted on the DETERMINISTIC
@@ -300,15 +309,13 @@ fn wz_router_hat_forwards_between_peers() {
         "router-hat's peer tier did not peak at 3 nodes (self + both peers) — a \
          peer failed to join the peer mesh\n--- router-hat stderr ---\n{r_captured}"
     );
-    // The publisher must have LEARNED the subscriber's interest (P1's declaration
-    // flooded P1 -> R -> P2) before its any-interest gate would forward anything —
-    // the subscription half of the routed chain, proving the router ingested and
-    // re-flooded the DeclareSubscriber, not merely relayed the data.
+    // The publisher LEARNED the subscriber's interest before its any-interest gate
+    // would send anything; since rule 8a it learns it over the direct link, the
+    // router no longer re-flooding one peer's declaration to another.
     assert!(
         pub_captured.contains("publisher learned subscriber interest"),
-        "peer-pub never learned the subscriber's interest — the DeclareSubscriber \
-         did not flood through the router to the publisher\n--- peer-pub \
-         stderr ---\n{pub_captured}"
+        "peer-pub never learned the subscriber's interest over its direct link\n\
+         --- peer-pub stderr ---\n{pub_captured}"
     );
 }
 
