@@ -430,6 +430,14 @@ const PEERS_REGION: Region = Region::default_south(WhatAmI::Peer);
 
 /// The region a router's CLIENTS land in, which a broker hat serves. It has no
 /// net: a client is a leaf, HELD (its send seam kept) but routing no topology.
+///
+/// R2872b (step 3d) — no production path names this region any more: the
+/// broker hats are built from every derived leaf region and a client
+/// declaration registers in the hat of its face's region. The one remaining
+/// consumer is the multicast ingress, which still routes as the clients region
+/// (a recorded divergence from the pin, see `route_mcast_ingress`), so the
+/// constant exists only where that path or the tests do.
+#[cfg(any(test, feature = "router-multicast-faces"))]
 const CLIENTS_REGION: Region = Region::default_south(WhatAmI::Client);
 
 /// Whether a face in `region` is a leaf, meaning its hat keeps no link-state
@@ -493,6 +501,140 @@ impl MeshHat {
             tokens: Rc::new(RefCell::new(LinkstatepeerInterest::new())),
         }
     }
+}
+
+/// A client face's subscriber keyexprs, keyed by the face.
+type ClientSubs = HashMap<FaceId, HashSet<String>>;
+/// A client face's queryables, keyexpr -> the declared `QueryableInfo`.
+type ClientQabls = HashMap<FaceId, HashMap<String, QueryableInfo>>;
+/// A client face's liveliness tokens, decl id -> keyexpr (an `UndeclareToken`
+/// carries no keyexpr on the wire, so only an id map resolves a retraction).
+#[cfg(feature = "routing-token-tables")]
+type ClientTokens = HashMap<FaceId, HashMap<u64, String>>;
+
+/// R2872b (open-debt item 751, step 3d) — the state one LEAF region's hat owns:
+/// the declarations of the faces it holds, per face, as the pin's broker hat
+/// keeps them per owned face (`zenoh/src/net/routing/hat/broker/pubsub.rs`
+/// @ `srcs.clients.push(face.zid);`). A leaf region keeps no link-state net: a
+/// client is HELD, its send seam kept, but routes no topology.
+///
+/// Built for every leaf region the pin's router builds, not for a named one, so
+/// `Local` has its hat as upstream's does even though no remote face lands
+/// there. Each table is `Rc` for the reason [`MeshHat::subs`] is: the admin
+/// declarations view reads it through its own handle.
+///
+/// Every table is leaf state keyed by [`FaceId`], so
+/// [`deregister`](FaceForwarder::deregister) MUST purge the departing face from
+/// its region's hat BEFORE its linkless early-return (OBLIGATION 1).
+struct BrokerHat {
+    /// The per-client-face subscription store (C2), zenoh's per-`Resource`
+    /// `session_ctxs` leaf input (a client routes no topology, so its interest
+    /// cannot live in a zid-keyed mesh table). It is the SSOT contributor to
+    /// `cross_tier_self_source`: a client subscribing `K` makes SELF a virtual
+    /// sub-source that is ADVERTISED into the meshes (a self-sourced
+    /// `DeclareSubscriber` flooded to self's tree children, self NOT stored in
+    /// the mesh tables — derive-not-store), so a mesh publisher routes `K`
+    /// toward this router. The cross-tier DATA delivery to these clients is C3a
+    /// ([`deliver_to_client_subscribers`](RouterForwarder::deliver_to_client_subscribers)).
+    ///
+    /// CARRIED FOLLOW-UP (id-map): still KEYEXPR-keyed, so a client's ID-ONLY
+    /// graceful `UndeclareSubscriber` (no `ext_keyexpr`) no-ops in
+    /// `withdraw_client_subscription` -> stale until face-down. The wz-PEER
+    /// client planes were converted to id-keyed at R311y178 (and `tokens` below
+    /// at slice-3); `subs` and `qabls` are the remaining keyexpr-keyed holdouts.
+    subs: Rc<RefCell<ClientSubs>>,
+    /// The per-client-face QUERYABLE store (C5b), the query-plane twin of
+    /// `subs`: per hosted keyexpr, the declared [`QueryableInfo`] (`complete` /
+    /// `distance`) the query route reads.
+    /// [`route_request`](RouterForwarder::route_request) routes a Request toward
+    /// these queryables (zenoh `compute_query_route` block 3,
+    /// `zenoh/src/net/routing/hat/router/queries.rs` @ `fn compute_query_route`,
+    /// gated `master || source == Router`); their completeness feeds the GLOBAL
+    /// BestMatching at distance 1. A3 advertises them into both meshes
+    /// ([`advertise_client_cross_tier_qabl`](RouterForwarder::advertise_client_cross_tier_qabl))
+    /// and the store contributes to the merged
+    /// [`derived_cross_tier_qabl_info`](RouterForwarder::derived_cross_tier_qabl_info).
+    /// Same keyexpr-keyed follow-up as `subs` (`withdraw_client_queryable`).
+    qabls: Rc<RefCell<ClientQabls>>,
+    /// The per-client-face liveliness-TOKEN store (slice-3), keyed the way
+    /// zenoh's `face_hat.remote_tokens: HashMap<TokenId, Arc<Resource>>` is: the
+    /// client's DECL ID -> the resolved keyexpr, not a lossy keyexpr set. A
+    /// client (wz's own included — `send_undeclare_token` ->
+    /// `build_undeclare_token(id)`) retracts with an ID-KEYED
+    /// `UndeclareToken(id, ext=null)` carrying no keyexpr, and keeping the id
+    /// also refcounts two tokens sharing a keyexpr correctly. The cross-tier
+    /// advertisement is
+    /// [`advertise_client_cross_tier_token`](RouterForwarder::advertise_client_cross_tier_token)
+    /// (derive-not-store), so `declare_token_interest`'s CURRENT replay must
+    /// FOLD this store (excluding the requester), the twin of
+    /// `dump_interest_subs` folding `subs`.
+    #[cfg(feature = "routing-token-tables")]
+    tokens: Rc<RefCell<ClientTokens>>,
+}
+
+impl BrokerHat {
+    fn new() -> Self {
+        Self {
+            subs: Rc::new(RefCell::new(HashMap::new())),
+            qabls: Rc::new(RefCell::new(HashMap::new())),
+            #[cfg(feature = "routing-token-tables")]
+            tokens: Rc::new(RefCell::new(HashMap::new())),
+        }
+    }
+}
+
+/// R2872b (step 3d) — the hat a region is served by, held in ONE region map as
+/// the pin holds `Box<dyn HatTrait>` per region
+/// (`zenoh/src/net/routing/dispatcher/tables.rs` @ `pub hats: RegionMap<Box<dyn HatTrait + Send + Sync>>,`).
+/// The kind is read off the ported hat table ([`is_leaf`]), so which regions
+/// are meshes and which are brokers cannot drift from the pin's choice.
+enum Hat {
+    Mesh(MeshHat),
+    Broker(BrokerHat),
+}
+
+impl Hat {
+    fn for_region(region: Region, self_zid: Zid) -> Self {
+        if is_leaf(region) {
+            Hat::Broker(BrokerHat::new())
+        } else {
+            Hat::Mesh(MeshHat::new(self_zid))
+        }
+    }
+
+    fn mesh(&self) -> Option<&MeshHat> {
+        match self {
+            Hat::Mesh(hat) => Some(hat),
+            Hat::Broker(_) => None,
+        }
+    }
+
+    fn broker(&self) -> Option<&BrokerHat> {
+        match self {
+            Hat::Broker(hat) => Some(hat),
+            Hat::Mesh(_) => None,
+        }
+    }
+}
+
+/// The keyexprs every broker hat's per-face store holds, merged into one
+/// face-keyed map. A face is owned by exactly one hat, so no two regions
+/// contribute the same face.
+#[cfg(feature = "adminspace-introspection-handlers")]
+fn client_keyexprs<T>(
+    stores: &RegionMap<Rc<RefCell<HashMap<FaceId, T>>>>,
+    keys: impl Fn(&T) -> HashSet<String>,
+) -> ClientSubs {
+    stores
+        .values()
+        .flat_map(|store| {
+            store
+                .borrow()
+                .iter()
+                .map(|(face, entry)| (*face, keys(entry)))
+                .collect::<Vec<_>>()
+        })
+        .collect()
 }
 
 /// A mesh region's table out of a view's region map. Panics on a region the
@@ -886,8 +1028,11 @@ pub struct RouterDeclarationsView {
     /// dispatcher merges them (see [`subscribers`](Self::subscribers)).
     subs: RegionMap<Rc<RefCell<LinkstatepeerInterest<()>>>>,
     qabls: RegionMap<Rc<RefCell<LinkstatepeerInterest<QueryableInfo>>>>,
-    client_subs: Rc<RefCell<HashMap<FaceId, HashSet<String>>>>,
-    client_qabls: Rc<RefCell<HashMap<FaceId, HashMap<String, QueryableInfo>>>>,
+    /// R2872b (step 3d) — each broker hat's per-face stores, keyed by region.
+    /// Every one fills the `clients` bucket, as each of the pin's broker hats
+    /// does for the faces it owns.
+    client_subs: RegionMap<Rc<RefCell<ClientSubs>>>,
+    client_qabls: RegionMap<Rc<RefCell<ClientQabls>>>,
     /// The token plane's three tiers, present only where the tables are
     /// (`routing-token-tables`). The `token/**` leg is folded from exactly the
     /// same trio as the other two legs — upstream's router hat enumerates tokens
@@ -898,7 +1043,7 @@ pub struct RouterDeclarationsView {
     #[cfg(feature = "routing-token-tables")]
     tokens: RegionMap<Rc<RefCell<LinkstatepeerInterest<()>>>>,
     #[cfg(feature = "routing-token-tables")]
-    client_tokens: Rc<RefCell<HashMap<FaceId, HashMap<u64, String>>>>,
+    client_tokens: RegionMap<Rc<RefCell<ClientTokens>>>,
     /// A client's zid comes from its FACE: a Client joins no link-state graph,
     /// so there is nowhere else to read it from.
     faces: Rc<RefCell<HashMap<FaceId, RouterFaceState>>>,
@@ -944,10 +1089,11 @@ impl RouterDeclarationsView {
     /// here, which is why an isolated router answers these legs with nothing:
     /// what it knows about declarations is what its neighbours told it.
     pub fn subscribers(&self) -> Vec<(String, wz_session_core::adminspace::AdminSources)> {
+        let clients = client_keyexprs(&self.client_subs, |keys| keys.clone());
         self.bucket_by_tier(
             &region_table(&self.subs, ROUTERS_REGION).borrow(),
             &region_table(&self.subs, PEERS_REGION).borrow(),
-            &self.client_subs.borrow(),
+            &clients,
         )
     }
 
@@ -956,12 +1102,9 @@ impl RouterDeclarationsView {
     /// per-declaration `QueryableInfo` — so the client store's inner map is
     /// reduced to its keyexpr set here.
     pub fn queryables(&self) -> Vec<(String, wz_session_core::adminspace::AdminSources)> {
-        let clients: HashMap<FaceId, HashSet<String>> = self
-            .client_qabls
-            .borrow()
-            .iter()
-            .map(|(face, by_key)| (*face, by_key.keys().cloned().collect()))
-            .collect();
+        let clients = client_keyexprs(&self.client_qabls, |by_key| {
+            by_key.keys().cloned().collect()
+        });
         self.bucket_by_tier(
             &region_table(&self.qabls, ROUTERS_REGION).borrow(),
             &region_table(&self.qabls, PEERS_REGION).borrow(),
@@ -996,12 +1139,9 @@ impl RouterDeclarationsView {
     /// `native` predicate had to distinguish and this one does not.
     #[cfg(feature = "routing-token-tables")]
     pub fn tokens(&self) -> Vec<(String, wz_session_core::adminspace::AdminSources)> {
-        let clients: HashMap<FaceId, HashSet<String>> = self
-            .client_tokens
-            .borrow()
-            .iter()
-            .map(|(face, by_id)| (*face, by_id.values().cloned().collect()))
-            .collect();
+        let clients = client_keyexprs(&self.client_tokens, |by_id| {
+            by_id.values().cloned().collect()
+        });
         self.bucket_by_tier(
             &region_table(&self.tokens, ROUTERS_REGION).borrow(),
             &region_table(&self.tokens, PEERS_REGION).borrow(),
@@ -1082,16 +1222,17 @@ impl RouterDeclarationsView {
 /// single-net [`LinkstateForwarder`](crate::linkstate_forward). Slice 1a owns
 /// the topology STATE; see the module docs for the deferred slices.
 pub struct RouterForwarder {
-    /// R2867 (open-debt item 751, step 3a) — one [`MeshHat`] per MESH region,
-    /// keyed as the pin keys its hats
+    /// R2867 (open-debt item 751, step 3a) — one hat per region, keyed as the
+    /// pin keys its hats
     /// (`zenoh/src/net/routing/dispatcher/tables.rs` @ `pub hats: RegionMap<Box<dyn HatTrait + Send + Sync>>,`).
-    /// Built from
-    /// the regions the pin's router builds, not from a list: `North` (the
-    /// routers, zenoh's `routers_net`) and `South { 0, Peer }` (the peers, the
-    /// graph this router still runs full link-state over). Reached through
-    /// [`routers_net`](Self::routers_net) / [`linkstatepeers_net`](Self::linkstatepeers_net)
-    /// and [`plane`](Self::plane).
-    hats: RegionMap<MeshHat>,
+    /// Built from the regions the pin's router builds, not from a list. The
+    /// MESH regions are `North` (the routers, zenoh's `routers_net`) and
+    /// `South { 0, Peer }` (the peers, the graph this router still runs full
+    /// link-state over), reached through [`mesh_hat`](Self::mesh_hat). R2872b
+    /// (step 3d) adds the LEAF regions' broker hats to the same map —
+    /// `South { 0, Client }` and `Local` — reached through
+    /// [`broker_hat`](Self::broker_hat).
+    hats: RegionMap<Hat>,
     /// Held faces keyed by id, each carrying its send seam, its tier, and (once
     /// its zid is known) its graph link. One id-keyed map across BOTH tiers
     /// (the `RouterFaceState.tier` says which net), so the flood can scope to a
@@ -1169,73 +1310,6 @@ pub struct RouterForwarder {
     /// UndeclareSubscriber. Empty (and elided) without `router-multicast-faces`.
     #[cfg(feature = "router-multicast-faces")]
     group_subs: RefCell<HashSet<String>>,
-    /// Per-CLIENT-face liveliness-TOKEN store (slice-3) — the token twin of
-    /// [`client_subs`](Self#structfield.client_subs), but keyed the way zenoh's
-    /// `face_hat.remote_tokens: HashMap<TokenId, Arc<Resource>>` is
-    /// (`hat/router/token.rs:303`): the client's DECL ID -> the resolved keyexpr,
-    /// NOT a lossy keyexpr set. RATIONALE: a real client (incl wz's own —
-    /// `session_actions.rs::send_undeclare_token` -> `build_undeclare_token(id)`)
-    /// gracefully retracts a token with an ID-KEYED `UndeclareToken(id, ext=null)`
-    /// carrying NO keyexpr on the wire; only an id map can resolve that retraction
-    /// (zenoh `forget_simple_token` removes by id, token.rs:276). Keeping the id
-    /// also gives correct per-token refcount when two tokens share a keyexpr.
-    /// A Client face is HELD with no mesh, so — like `client_subs` — this leaf
-    /// state MUST be purged by [`deregister`](FaceForwarder::deregister) BEFORE its
-    /// linkless early-return (OBLIGATION 1). The cross-tier ADVERTISEMENT of a
-    /// client-held token into BOTH meshes is
-    /// [`advertise_client_cross_tier_token`](Self::advertise_client_cross_tier_token)
-    /// (derive-not-store: self is never stored in a mesh token table).
-    /// SLICE-4 OBLIGATION: because a client token is derive-not-store (kept OUT of
-    /// the mesh tables), `declare_token_interest`'s CURRENT-state replay must FOLD
-    /// `client_tokens` (excluding the requester) — the twin of `dump_interest_subs`
-    /// folding `client_subs` — else a client-sourced token is invisible to a
-    /// token-interest reader on this router.
-    #[cfg(feature = "routing-token-tables")]
-    client_tokens: Rc<RefCell<HashMap<FaceId, HashMap<u64, String>>>>,
-    /// Per-CLIENT-face subscription store (C2) — zenoh's per-`Resource`
-    /// `session_ctxs` leaf input, keyed by the client's [`FaceId`] (a Client face
-    /// is HELD with no mesh, so its interest cannot live in a Zid-keyed tier
-    /// table). This is the SSOT contributor to `cross_tier_self_source`: a client
-    /// subscribing `K` makes SELF a virtual sub-source that is ADVERTISED into the
-    /// meshes (a self-sourced `DeclareSubscriber` flooded to self's tree children,
-    /// self NOT stored in the tier tables — derive-not-store), so a mesh publisher
-    /// routes `K` toward this router. FaceId-keyed leaf state, so
-    /// [`deregister`](FaceForwarder::deregister) MUST purge it BEFORE its linkless
-    /// early-return (OBLIGATION 1). C2 is the ADVERTISEMENT half; the cross-tier
-    /// DATA delivery TO these clients is C3a
-    /// ([`deliver_to_client_subscribers`](RouterForwarder::deliver_to_client_subscribers)).
-    ///
-    /// CARRIED FOLLOW-UP (id-map): still KEYEXPR-keyed, so a client's ID-ONLY graceful
-    /// `UndeclareSubscriber` (no `ext_keyexpr`) no-ops in `withdraw_client_subscription` ->
-    /// stale until face-down. The wz-PEER client-sub/qabl planes were converted to id-keyed
-    /// at R311y178 (and `client_tokens` above at slice-3); the router client_subs/client_qabls
-    /// are the remaining keyexpr-keyed holdouts — the symmetric id-map fix is a named follow-up.
-    client_subs: Rc<RefCell<HashMap<FaceId, HashSet<String>>>>,
-    /// Per-CLIENT-face QUERYABLE store (C5b) — the query-plane twin of
-    /// [`client_subs`](Self#structfield.client_subs): zenoh's per-`Resource`
-    /// `session_ctxs[..].qabl` leaf input, keyed by the client's [`FaceId`] and, per
-    /// hosted keyexpr, the declared [`QueryableInfo`] (`complete` / `distance`) the
-    /// query route reads. A Client face is HELD with no mesh, so a client-hosted
-    /// queryable cannot live in a Zid-keyed tier table (`router_qabls` /
-    /// `linkstatepeer_qabls`); it lands here instead. [`route_request`](Self::route_request)
-    /// routes a Request TOWARD these client queryables (zenoh `compute_query_route`
-    /// block 3, `zenoh/src/net/routing/hat/router/queries.rs`
-    /// @ `fn compute_query_route`, gated `master || source == Router`);
-    /// their completeness feeds the GLOBAL BestMatching at distance 1. FaceId-keyed
-    /// leaf state, so [`deregister`](FaceForwarder::deregister) MUST purge it BEFORE
-    /// its linkless early-return (OBLIGATION 1), like `client_subs`. A3 landed the
-    /// cross-tier ADVERTISEMENT of these queryables into BOTH meshes (the query-plane
-    /// twin of C2's `advertise_client_cross_tier_sub`, so a REMOTE mesh querier routes
-    /// toward this router):
-    /// [`advertise_client_cross_tier_qabl`](Self::advertise_client_cross_tier_qabl) on
-    /// ingest, and a downgrade re-advertise on face-down. This store is also a
-    /// contributor to the merged
-    /// [`derived_cross_tier_qabl_info`](Self::derived_cross_tier_qabl_info).
-    ///
-    /// CARRIED FOLLOW-UP (id-map): still KEYEXPR-keyed, so a client's ID-ONLY graceful
-    /// `UndeclareQueryable` no-ops in `withdraw_client_queryable` -> stale until face-down.
-    /// The symmetric id-map fix (the wz-peer planes got it at R311y178) is a named follow-up.
-    client_qabls: Rc<RefCell<HashMap<FaceId, HashMap<String, QueryableInfo>>>>,
     /// Queryables HOSTED BY THIS ROUTER (§5.23 `adminspace-router-linkstate`) —
     /// e.g. the built-in admin queryable on `@/<self-zid>/router/**`. The
     /// router-idiom `derive-not-store` analogue of the peer
@@ -1583,8 +1657,7 @@ impl RouterForwarder {
         Self {
             hats: crate::routing_region::auto_regions(WhatAmI::Router)
                 .into_iter()
-                .filter(|region| !is_leaf(*region))
-                .map(|region| (region, MeshHat::new(self_zid)))
+                .map(|region| (region, Hat::for_region(region, self_zid)))
                 .collect(),
             // R311y450 — this router's §5.18 clock, over the SAME `WhatAmI::Router`
             // both nets above are seeded with, so the timestamping gate cannot
@@ -1610,10 +1683,6 @@ impl RouterForwarder {
             mcast_group_members: RefCell::new(Vec::new()),
             #[cfg(feature = "router-multicast-faces")]
             group_subs: RefCell::new(HashSet::new()),
-            #[cfg(feature = "routing-token-tables")]
-            client_tokens: Rc::new(RefCell::new(HashMap::new())),
-            client_subs: Rc::new(RefCell::new(HashMap::new())),
-            client_qabls: Rc::new(RefCell::new(HashMap::new())),
             local_queryables: RefCell::new(Vec::new()),
             local_subscribers: RefCell::new(Vec::new()),
             future_subs: RefCell::new(FutureSubStore::new()),
@@ -1716,7 +1785,7 @@ impl RouterForwarder {
     ///   value across every peer and router of a subsystem, so a router whose
     ///   peers run linkstate must too.
     pub fn set_gossip_multihop(&self, enabled: bool) {
-        for hat in self.hats.values() {
+        for hat in self.mesh_hats() {
             hat.net.borrow_mut().set_gossip_multihop(enabled);
         }
     }
@@ -1792,7 +1861,7 @@ impl RouterForwarder {
         {
             return false;
         }
-        let _ = self.flood_self_links_changed_tier(ROUTERS_REGION, &self.routers_net());
+        let _ = self.flood_self_links_changed_tier(ROUTERS_REGION, self.routers_net());
         self.mesh(ROUTERS_REGION).trees_dirty.set(true);
         true
     }
@@ -1820,7 +1889,7 @@ impl RouterForwarder {
     pub fn sessions_view(&self) -> RouterSessionsView {
         RouterSessionsView {
             faces: Rc::clone(&self.faces),
-            routers_net: Rc::clone(&self.routers_net()),
+            routers_net: Rc::clone(self.routers_net()),
         }
     }
 
@@ -1980,25 +2049,30 @@ impl RouterForwarder {
     }
 
     /// Total distinct queryable interests this router currently holds across all
-    /// tiers — client-hosted ([`client_qabls`](Self#structfield.client_qabls)) +
-    /// mesh-native (`router_qabls` + `linkstatepeer_qabls`). The query-plane
+    /// tiers — client-hosted (every broker hat's `qabls`) + mesh-native (every
+    /// mesh hat's `qabls`). The query-plane
     /// READINESS witness the ACTIVATION query e2e gates the issuer spawn on: a `>0`
     /// value proves R ingested a queryable's `DeclareQueryable` BEFORE the issuer
     /// fires its one-shot query, making that e2e a barrier rather than a race.
     pub fn queryables_seen(&self) -> usize {
-        let client: usize = self.client_qabls.borrow().values().map(|m| m.len()).sum();
-        let mesh: usize = self.hats.values().map(|h| h.qabls.borrow().count()).sum();
+        let client: usize = self
+            .broker_hats()
+            .map(|h| h.qabls.borrow().values().map(|m| m.len()).sum::<usize>())
+            .sum();
+        let mesh: usize = self.mesh_hats().map(|h| h.qabls.borrow().count()).sum();
         client + mesh
     }
 
     /// Total distinct client-hosted subscriptions this router currently holds
-    /// ([`client_subs`](Self#structfield.client_subs)). The data-plane READINESS
+    /// (every broker hat's `subs`). The data-plane READINESS
     /// witness — the twin of [`queryables_seen`](Self::queryables_seen): a `>0` value
-    /// proves R installed a client's `DeclareSubscriber` in `client_subs`, letting a
+    /// proves R installed a client's `DeclareSubscriber` in its broker hat, letting a
     /// data e2e gate a publisher spawn on a router-CONFIRMED subscription rather than
     /// racing declare-propagation with a Put burst.
     pub fn client_subs_seen(&self) -> usize {
-        self.client_subs.borrow().values().map(|s| s.len()).sum()
+        self.broker_hats()
+            .map(|h| h.subs.borrow().values().map(|s| s.len()).sum::<usize>())
+            .sum()
     }
 
     /// Total mesh-native subscriptions this router currently holds
@@ -2012,7 +2086,7 @@ impl RouterForwarder {
     /// a matching sub — which needs wz to already hold that sub HERE; an empty
     /// CURRENT dump leaves the filter active and the puts never reach the wire.
     pub fn mesh_subs_seen(&self) -> usize {
-        self.hats.values().map(|h| h.subs.borrow().count()).sum()
+        self.mesh_hats().map(|h| h.subs.borrow().count()).sum()
     }
 
     /// Install the full §5.16 interceptor configuration — the router twin of
@@ -2189,12 +2263,12 @@ impl RouterForwarder {
     }
 
     /// The graph + coalescing flag for a region, or `None` for a region with
-    /// no mesh hat — [`CLIENTS_REGION`] and every other leaf (a client is in no
+    /// no mesh hat — every leaf region, the clients' included (a client is in no
     /// mesh). The single classifier `register` / `deregister` / `forward` route
     /// a face's work through. R2867: a lookup in [`hats`](Self::hats), so the
     /// selection is the region map's and not a match over known regions.
     fn plane(&self, tier: Region) -> Option<(&Rc<RefCell<LinkstateNetwork>>, &Cell<bool>)> {
-        self.hats.get(&tier).map(|hat| (&hat.net, &hat.trees_dirty))
+        self.mesh_hat(tier).map(|hat| (&hat.net, &hat.trees_dirty))
     }
 
     /// The hat of a mesh region this router always builds. Panics on any other
@@ -2202,9 +2276,75 @@ impl RouterForwarder {
     /// `the_mesh_regions_are_the_non_leaf_regions_the_pins_router_builds` pins
     /// as exactly the hats the constructor creates.
     fn mesh(&self, region: Region) -> &MeshHat {
-        self.hats
-            .get(&region)
+        self.mesh_hat(region)
             .unwrap_or_else(|| unreachable!("{region} is not a mesh region of a router"))
+    }
+
+    /// R2872b (step 3d) — the hat of `region` when it is a MESH hat, `None` for a
+    /// leaf region (a broker hat) or a region this router builds no hat for.
+    fn mesh_hat(&self, region: Region) -> Option<&MeshHat> {
+        self.hats.get(&region).and_then(Hat::mesh)
+    }
+
+    /// Every mesh hat, in the pin's region order.
+    fn mesh_hats(&self) -> impl Iterator<Item = &MeshHat> {
+        self.hats.values().filter_map(Hat::mesh)
+    }
+
+    /// The hat of `region` when it is a leaf region's BROKER hat, `None`
+    /// otherwise. A face whose region is a leaf is owned by this hat, and its
+    /// declarations are held here.
+    fn broker_hat(&self, region: Region) -> Option<&BrokerHat> {
+        self.hats.get(&region).and_then(Hat::broker)
+    }
+
+    /// Every broker hat, in the pin's region order. A fold over "every client
+    /// declaration" is a fold over these.
+    fn broker_hats(&self) -> impl Iterator<Item = &BrokerHat> {
+        self.broker_regions().map(|(_, hat)| hat)
+    }
+
+    /// Every broker hat with the region it serves, for a fan-out that has to
+    /// scope its sends to the faces that hat owns.
+    fn broker_regions(&self) -> impl Iterator<Item = (Region, &BrokerHat)> {
+        self.hats
+            .iter()
+            .filter_map(|(region, hat)| hat.broker().map(|hat| (region, hat)))
+    }
+
+    /// The broker hat that OWNS a face placed in the leaf `region`: where that
+    /// face's declarations are registered, as the pin's dispatcher registers a
+    /// declaration in the hat of the face's region. The dispatch calls this only
+    /// for a leaf region, and the constructor builds a broker hat for every leaf
+    /// region the pin's router builds (pinned by
+    /// `the_mesh_regions_are_the_non_leaf_regions_the_pins_router_builds`), and
+    /// [`face_region`] places no face anywhere else, so it never panics.
+    fn owner_broker(&self, region: Region) -> &BrokerHat {
+        self.broker_hat(region)
+            .unwrap_or_else(|| unreachable!("{region} is not a leaf region of a router"))
+    }
+
+    /// One table out of every mesh hat, keyed by its region — the shape the
+    /// admin declarations view holds.
+    #[cfg(feature = "adminspace-introspection-handlers")]
+    fn mesh_tables<T>(&self, table: impl Fn(&MeshHat) -> T) -> RegionMap<T> {
+        self.hats
+            .iter()
+            .filter_map(|(region, hat)| hat.mesh().map(|hat| (region, table(hat))))
+            .collect()
+    }
+
+    /// The [`mesh_tables`](Self::mesh_tables) twin over the broker hats.
+    #[cfg(feature = "adminspace-introspection-handlers")]
+    fn broker_tables<T>(&self, table: impl Fn(&BrokerHat) -> T) -> RegionMap<T> {
+        self.broker_regions()
+            .map(|(region, hat)| (region, table(hat)))
+            .collect()
+    }
+
+    /// Whether any broker hat holds a client subscription at all.
+    fn any_client_sub(&self) -> bool {
+        self.broker_hats().any(|hat| !hat.subs.borrow().is_empty())
     }
 
     /// The routers region's graph — zenoh's router-hat `routers_net`.
@@ -2451,14 +2591,14 @@ impl RouterForwarder {
     /// advertisement of it into the OPPOSITE mesh must be withdrawn (the flip
     /// true->false), and centralizing it covers BOTH remove paths by construction
     /// (the y107b lifecycle-asymmetry class — a remote detach is the path most
-    /// likely to be missed). No-op for [`CLIENTS_REGION`] (no tier tables). The
+    /// likely to be missed). No-op for a leaf region (no tier tables). The
     /// self-bubble itself is never stored (derive-not-store); only the WIRE
     /// advertisement needs the explicit retraction.
     fn purge_detached_interest_tier(&self, tier: Region, removed: &[Zid]) {
         if removed.is_empty() {
             return;
         }
-        let Some(hat) = self.hats.get(&tier) else {
+        let Some(hat) = self.mesh_hat(tier) else {
             return;
         };
         let (subs, qabls) = (&hat.subs, &hat.qabls);
@@ -2551,26 +2691,26 @@ impl RouterForwarder {
         }
     }
 
-    /// The subscription interest table for `tier`, or `None` for
-    /// [`CLIENTS_REGION`] (the leaf/simple store is slice 1d).
+    /// The subscription interest table for `tier`, or `None` for a leaf region
+    /// (whose per-face store is its [`BrokerHat`]).
     fn subs_table(&self, tier: Region) -> Option<&RefCell<LinkstatepeerInterest<()>>> {
-        self.hats.get(&tier).map(|hat| &*hat.subs)
+        self.mesh_hat(tier).map(|hat| &*hat.subs)
     }
 
-    /// The liveliness-token interest table for `tier`, or `None` for
-    /// [`CLIENTS_REGION`] (a client token lands in `client_tokens`, never in a
+    /// The liveliness-token interest table for `tier`, or `None` for a leaf
+    /// region (a client token lands in its [`BrokerHat`], never in a
     /// Zid-keyed mesh tier table — derive-not-store) — the token twin of
     /// [`subs_table`](Self::subs_table). Tokens carry no value,
     /// so both tiers are `LinkstatepeerInterest<()>`, identical to the sub plane.
     #[cfg(feature = "routing-token-tables")]
     fn tokens_table(&self, tier: Region) -> Option<&RefCell<LinkstatepeerInterest<()>>> {
-        self.hats.get(&tier).map(|hat| &*hat.tokens)
+        self.mesh_hat(tier).map(|hat| &*hat.tokens)
     }
 
     /// The queryable interest table for `tier` (the query-plane twin of
-    /// [`subs_table`](Self::subs_table)), or `None` for [`CLIENTS_REGION`].
+    /// [`subs_table`](Self::subs_table)), or `None` for a leaf region.
     fn qabls_table(&self, tier: Region) -> Option<&RefCell<LinkstatepeerInterest<QueryableInfo>>> {
-        self.hats.get(&tier).map(|hat| &*hat.qabls)
+        self.mesh_hat(tier).map(|hat| &*hat.qabls)
     }
 
     /// Record (or drop) a link-local keyexpr alias from a sourced `DeclKexpr` /
@@ -3040,19 +3180,21 @@ impl RouterForwarder {
             return; // match-all deferred; the caller's DeclareFinal still closes the interest.
         };
         let mut per_ke: HashMap<String, ()> = HashMap::new();
-        for table in self.hats.values().map(|hat| &hat.subs) {
+        for table in self.mesh_hats().map(|hat| &hat.subs) {
             for (ke, _zid, ()) in table.borrow().matching_entries(target, Some(self_zid)) {
                 per_ke.insert(ke.to_string(), ());
             }
         }
         let target_chunks: Vec<&str> = target.split('/').collect();
-        for (face, keys) in self.client_subs.borrow().iter() {
-            if *face == inbound {
-                continue; // never advertise a face its own subscription
-            }
-            for k in keys {
-                if keyexpr_intersects_target(k, &target_chunks) {
-                    per_ke.insert(k.clone(), ());
+        for hat in self.broker_hats() {
+            for (face, keys) in hat.subs.borrow().iter() {
+                if *face == inbound {
+                    continue; // never advertise a face its own subscription
+                }
+                for k in keys {
+                    if keyexpr_intersects_target(k, &target_chunks) {
+                        per_ke.insert(k.clone(), ());
+                    }
                 }
             }
         }
@@ -3104,7 +3246,7 @@ impl RouterForwarder {
             return;
         };
         let mut per_ke: HashMap<String, QueryableInfo> = HashMap::new();
-        for table in self.hats.values().map(|hat| &hat.qabls) {
+        for table in self.mesh_hats().map(|hat| &hat.qabls) {
             for (ke, _zid, info) in table.borrow().matching_entries(target, Some(self_zid)) {
                 per_ke
                     .entry(ke.to_string())
@@ -3113,16 +3255,18 @@ impl RouterForwarder {
             }
         }
         let target_chunks: Vec<&str> = target.split('/').collect();
-        for (face, m) in self.client_qabls.borrow().iter() {
-            if *face == inbound {
-                continue;
-            }
-            for (k, info) in m {
-                if keyexpr_intersects_target(k, &target_chunks) {
-                    per_ke
-                        .entry(k.clone())
-                        .and_modify(|e| *e = e.merge(*info))
-                        .or_insert(*info);
+        for hat in self.broker_hats() {
+            for (face, m) in hat.qabls.borrow().iter() {
+                if *face == inbound {
+                    continue;
+                }
+                for (k, info) in m {
+                    if keyexpr_intersects_target(k, &target_chunks) {
+                        per_ke
+                            .entry(k.clone())
+                            .and_modify(|e| *e = e.merge(*info))
+                            .or_insert(*info);
+                    }
                 }
             }
         }
@@ -3181,19 +3325,21 @@ impl RouterForwarder {
             return; // match-all deferred; the caller's DeclareFinal still closes it.
         };
         let mut per_ke: HashMap<String, ()> = HashMap::new();
-        for table in self.hats.values().map(|hat| &hat.tokens) {
+        for table in self.mesh_hats().map(|hat| &hat.tokens) {
             for (ke, _zid, ()) in table.borrow().matching_entries(target, Some(self_zid)) {
                 per_ke.insert(ke.to_string(), ());
             }
         }
         let target_chunks: Vec<&str> = target.split('/').collect();
-        for (face, ids) in self.client_tokens.borrow().iter() {
-            if *face == inbound {
-                continue; // never replay a face its own token
-            }
-            for k in ids.values() {
-                if keyexpr_intersects_target(k, &target_chunks) {
-                    per_ke.insert(k.clone(), ());
+        for hat in self.broker_hats() {
+            for (face, ids) in hat.tokens.borrow().iter() {
+                if *face == inbound {
+                    continue; // never replay a face its own token
+                }
+                for k in ids.values() {
+                    if keyexpr_intersects_target(k, &target_chunks) {
+                        per_ke.insert(k.clone(), ());
+                    }
                 }
             }
         }
@@ -3890,7 +4036,7 @@ impl RouterForwarder {
     /// re-injected into the ROUTER mesh's subs, and a ROUTER-sourced Push into
     /// the PEER mesh's subs. The within-tier legs are
     /// [`forward_push_tier`](Self::forward_push_tier) (ungated); a
-    /// [`CLIENTS_REGION`] inbound has no mesh source (its mesh path is
+    /// leaf-region inbound has no mesh source (its mesh path is
     /// [`publish_client_push_into_meshes`](Self::publish_client_push_into_meshes)),
     /// so it never bridges here.
     ///
@@ -3939,7 +4085,7 @@ impl RouterForwarder {
     /// ([`bridge_push_cross_mesh`](Self::bridge_push_cross_mesh), C4), local-client
     /// delivery ([`deliver_to_client_subscribers`](Self::deliver_to_client_subscribers),
     /// C3a), and master-election ([`is_master`](Self::is_master), C4) are the OTHER
-    /// [`route_push`](Self::route_push) legs, now landed. A [`CLIENTS_REGION`] Push
+    /// [`route_push`](Self::route_push) legs, now landed. A leaf-region Push
     /// has no mesh to route within,
     /// so it is only counted (the reception witness in [`forward`]). A drop
     /// (unresolvable source / no interested subscriber / hop-exhausted) is silent,
@@ -4016,7 +4162,7 @@ impl RouterForwarder {
     /// LOCAL self-hosted delivery stays deferred (a pure router hosts no
     /// subscribers — that is the combined-node seam). Routes through the
     /// [`fan_out_tier`](Self::fan_out_tier) egress SSOT
-    /// ([`CLIENTS_REGION`]) like every other router send, so it inherits the
+    /// (per broker hat's region) like every other router send, so it inherits the
     /// interceptor / egress-ACL gate once that plane lands on the seam (the y113
     /// obligation) rather than being a separate retrofit site.
     // R311y225 added the `priority` band arg (client-egress band preservation),
@@ -4045,13 +4191,13 @@ impl RouterForwarder {
             // router-source copy delivers instead). Count it — but only when a
             // client sub exists, so the witness reflects a delivery actually
             // suppressed, not a vacuous defer on a router hosting no clients.
-            if !self.client_subs.borrow().is_empty() {
+            if self.any_client_sub() {
                 self.deferred_client_delivery
                     .set(self.deferred_client_delivery.get() + 1);
             }
             return;
         }
-        if self.client_subs.borrow().is_empty() {
+        if !self.any_client_sub() {
             return;
         }
         // Re-literalize once (payload / encoding / attachment preserved, literal
@@ -4086,16 +4232,21 @@ impl RouterForwarder {
         // unicast ext_qos so it stays DEFAULT. (The QUERY-plane client egress -- a
         // Response to a client querier -- is a separate, uniformly-DEFAULT plane, out
         // of scope here.)
-        let _ = self.fan_out_tier_qos(CLIENTS_REGION, reliable, priority, false, |id, _zid| {
-            if id == inbound {
-                return Ok(None);
-            }
-            let deliver = self.client_subs.borrow().get(&id).is_some_and(|keys| {
-                keys.iter()
-                    .any(|sub| keyexpr_intersects_target(sub, &target_chunks))
+        //
+        // R2872b (step 3d) — one fan-out per broker hat, each scoped to the
+        // region that hat owns and reading that hat's own table.
+        for (region, hat) in self.broker_regions() {
+            let _ = self.fan_out_tier_qos(region, reliable, priority, false, |id, _zid| {
+                if id == inbound {
+                    return Ok(None);
+                }
+                let deliver = hat.subs.borrow().get(&id).is_some_and(|keys| {
+                    keys.iter()
+                        .any(|sub| keyexpr_intersects_target(sub, &target_chunks))
+                });
+                Ok(deliver.then(|| NetworkMessage::Push(Box::new(carrier.clone()))))
             });
-            Ok(deliver.then(|| NetworkMessage::Push(Box::new(carrier.clone()))))
-        });
+        }
     }
 
     /// Re-inject a CLIENT-sourced data `Push` into BOTH meshes as a SELF-sourced
@@ -4110,7 +4261,7 @@ impl RouterForwarder {
     /// `resolve_source_in` finds no psid for it). `reliteralize_push` preserves
     /// the client sample's encoding/attachment/timestamp/qos (a RE-injected
     /// sample, unlike `publish`'s fresh `build_push_literal`). Precondition: the
-    /// dispatch calls this ONLY for a [`CLIENTS_REGION`] inbound Push — a
+    /// dispatch calls this ONLY for a leaf-region inbound Push — a
     /// mesh-sourced Push is routed within-tier by [`forward_push_tier`] and its
     /// cross-tier (mesh->other-mesh) bridge is the master-gated C4 slice, NOT this
     /// self-origination (calling it for a mesh source would self-source re-inject
@@ -4272,7 +4423,7 @@ impl RouterForwarder {
     /// cross-tier interest into the meshes. The mesh-face declare path
     /// ([`ingest_subscription`](Self::ingest_subscription)) drops a Client-tier
     /// declare (no tier table); this is where the leaf input lands instead.
-    fn ingest_client_subscription(&self, inbound: FaceId, declare: &DeclareOwned) {
+    fn ingest_client_subscription(&self, inbound: FaceId, owner: Region, declare: &DeclareOwned) {
         let Some(wireexpr) = declare_subscriber_wireexpr(declare) else {
             return;
         };
@@ -4299,7 +4450,8 @@ impl RouterForwarder {
         // advertises is skipped (R311y125 — no redundant flood).
         let already = self.any_client_subscribes(&keyexpr);
         let inserted = self
-            .client_subs
+            .owner_broker(owner)
+            .subs
             .borrow_mut()
             .entry(inbound)
             .or_default()
@@ -4406,19 +4558,21 @@ impl RouterForwarder {
                 None => info,
             });
         };
-        for table in self.hats.values().map(|hat| &hat.qabls) {
+        for table in self.mesh_hats().map(|hat| &hat.qabls) {
             for (_ke, _zid, info) in table.borrow().matching_entries(ke, Some(self_zid)) {
                 fold(*info);
             }
         }
         let ke_chunks: Vec<&str> = ke.split('/').collect();
-        for (face, m) in self.client_qabls.borrow().iter() {
-            if *face == exclude_face {
-                continue; // don't fold the destination querier's own queryable
-            }
-            for (k, info) in m {
-                if keyexpr_intersects_target(k, &ke_chunks) {
-                    fold(*info);
+        for hat in self.broker_hats() {
+            for (face, m) in hat.qabls.borrow().iter() {
+                if *face == exclude_face {
+                    continue; // don't fold the destination querier's own queryable
+                }
+                for (k, info) in m {
+                    if keyexpr_intersects_target(k, &ke_chunks) {
+                        fold(*info);
+                    }
                 }
             }
         }
@@ -4457,7 +4611,7 @@ impl RouterForwarder {
     /// Withdraw a CLIENT-face `UndeclareSubscriber` (C2) from
     /// [`client_subs`](Self#structfield.client_subs); when it removed the LAST
     /// client interested in the keyexpr, withdraw self's cross-tier advertisement.
-    fn withdraw_client_subscription(&self, inbound: FaceId, declare: &DeclareOwned) {
+    fn withdraw_client_subscription(&self, inbound: FaceId, owner: Region, declare: &DeclareOwned) {
         let exts = match &declare.body {
             DeclareOwnedVariant::CodecZenohUndeclSubscriber(u) => u.extensions.as_ref(),
             _ => return,
@@ -4477,7 +4631,7 @@ impl RouterForwarder {
             }
         };
         let removed = {
-            let mut store = self.client_subs.borrow_mut();
+            let mut store = self.owner_broker(owner).subs.borrow_mut();
             let removed = store
                 .get_mut(&inbound)
                 .is_some_and(|set| set.remove(&keyexpr));
@@ -4507,10 +4661,8 @@ impl RouterForwarder {
     /// native for `keyexpr` (the A2a federation contributor). Client-agnostic to
     /// tier — a client subscribing feeds BOTH meshes.
     fn any_client_subscribes(&self, keyexpr: &str) -> bool {
-        self.client_subs
-            .borrow()
-            .values()
-            .any(|set| set.contains(keyexpr))
+        self.broker_hats()
+            .any(|hat| hat.subs.borrow().values().any(|set| set.contains(keyexpr)))
     }
 
     /// Whether ANY subscription wz still holds INTERSECTS `ke` — the "still backed"
@@ -4521,16 +4673,18 @@ impl RouterForwarder {
     /// client sub, so a per-destination exclusion here would spuriously undeclare a
     /// reply ke still backed by a co-hosted or self sub.
     fn any_sub_matches(&self, ke: &str) -> bool {
-        for table in self.hats.values().map(|hat| &hat.subs) {
+        for table in self.mesh_hats().map(|hat| &hat.subs) {
             if !table.borrow().matching_entries(ke, None).is_empty() {
                 return true;
             }
         }
         let chunks: Vec<&str> = ke.split('/').collect();
-        self.client_subs
-            .borrow()
-            .values()
-            .any(|set| set.iter().any(|k| keyexpr_intersects_target(k, &chunks)))
+        self.broker_hats().any(|hat| {
+            hat.subs
+                .borrow()
+                .values()
+                .any(|set| set.iter().any(|k| keyexpr_intersects_target(k, &chunks)))
+        })
     }
 
     /// The queryable twin of [`any_sub_matches`](Self::any_sub_matches). An EXISTENCE
@@ -4538,16 +4692,18 @@ impl RouterForwarder {
     /// `QueryableInfo::DEFAULT` on zero matches — a value read would report "backed"
     /// even when no queryable exists and suppress every undeclare).
     fn any_qabl_matches(&self, ke: &str) -> bool {
-        for table in self.hats.values().map(|hat| &hat.qabls) {
+        for table in self.mesh_hats().map(|hat| &hat.qabls) {
             if !table.borrow().matching_entries(ke, None).is_empty() {
                 return true;
             }
         }
         let chunks: Vec<&str> = ke.split('/').collect();
-        self.client_qabls
-            .borrow()
-            .values()
-            .any(|m| m.keys().any(|k| keyexpr_intersects_target(k, &chunks)))
+        self.broker_hats().any(|hat| {
+            hat.qabls
+                .borrow()
+                .values()
+                .any(|m| m.keys().any(|k| keyexpr_intersects_target(k, &chunks)))
+        })
     }
 
     /// Emit the R311y151 UNDECLARE pushes a withdrawn SUBSCRIPTION `withdrawn_ke`
@@ -4620,7 +4776,7 @@ impl RouterForwarder {
 
     /// The mesh a NATIVE in `tier` advertises its cross-tier interest INTO — the
     /// OPPOSITE mesh (a `Routers` native attracts publishers on the `LinkstatePeers`
-    /// mesh and vice versa), or `None` for [`CLIENTS_REGION`] (a client is in no
+    /// mesh and vice versa), or `None` for a leaf region (a client is in no
     /// mesh; its advertisement targets BOTH meshes, handled by the caller loop).
     fn opposite_mesh(tier: Region) -> Option<Region> {
         match tier {
@@ -4721,8 +4877,10 @@ impl RouterForwarder {
     /// what now fails if a later round forgets again.
     fn derived_cross_tier_subs_into(&self, target: Region) -> Vec<String> {
         let mut set: HashSet<String> = HashSet::new();
-        for keys in self.client_subs.borrow().values() {
-            set.extend(keys.iter().cloned());
+        for hat in self.broker_hats() {
+            for keys in hat.subs.borrow().values() {
+                set.extend(keys.iter().cloned());
+            }
         }
         // R2393 — host subs, the fourth contributor, folded here for the same reason
         // the group-sub aggregate below is: a late-joining tree child converges on
@@ -4757,8 +4915,10 @@ impl RouterForwarder {
     #[cfg(feature = "routing-token-tables")]
     fn derived_cross_tier_tokens_into(&self, target: Region) -> Vec<String> {
         let mut set: HashSet<String> = HashSet::new();
-        for ids in self.client_tokens.borrow().values() {
-            set.extend(ids.values().cloned());
+        for hat in self.broker_hats() {
+            for ids in hat.tokens.borrow().values() {
+                set.extend(ids.values().cloned());
+            }
         }
         if let Some(table) = Self::opposite_mesh(target).and_then(|src| self.tokens_table(src)) {
             for (keyexpr, _peer, ()) in table.borrow().entries() {
@@ -4968,7 +5128,7 @@ impl RouterForwarder {
     /// [`push_future_token`](Self::push_future_token) (slice-4, wired in the tail);
     /// the self-delivery guard is a no-op in the forwarder (see that method).
     #[cfg(feature = "routing-token-tables")]
-    fn ingest_client_token(&self, inbound: FaceId, declare: &DeclareOwned) {
+    fn ingest_client_token(&self, inbound: FaceId, owner: Region, declare: &DeclareOwned) {
         let (decl_id, wireexpr) = match &declare.body {
             DeclareOwnedVariant::CodecZenohDeclToken(t) => (t.id, &t.keyexpr),
             _ => return,
@@ -4997,7 +5157,8 @@ impl RouterForwarder {
         // (advertise reads only the mesh token tables, but keep the discipline).
         let already = self.any_client_holds_token(&keyexpr);
         let displaced = self
-            .client_tokens
+            .owner_broker(owner)
+            .tokens
             .borrow_mut()
             .entry(inbound)
             .or_default()
@@ -5044,13 +5205,13 @@ impl RouterForwarder {
     /// The sourced (`id == 0`, ext) form is a MESH peer's and routes through
     /// [`withdraw_token`](Self::withdraw_token) instead.
     #[cfg(feature = "routing-token-tables")]
-    fn withdraw_client_token(&self, inbound: FaceId, declare: &DeclareOwned) {
+    fn withdraw_client_token(&self, inbound: FaceId, owner: Region, declare: &DeclareOwned) {
         let decl_id = match &declare.body {
             DeclareOwnedVariant::CodecZenohUndeclToken(u) => u.id,
             _ => return,
         };
         let keyexpr = {
-            let mut store = self.client_tokens.borrow_mut();
+            let mut store = self.owner_broker(owner).tokens.borrow_mut();
             let removed = store.get_mut(&inbound).and_then(|ids| ids.remove(&decl_id));
             // Prune an emptied per-face map (the same discipline
             // `withdraw_client_subscription` uses), so a client that drops every
@@ -5080,10 +5241,12 @@ impl RouterForwarder {
     /// [`self_advertises_token_into`](Self::self_advertises_token_into).
     #[cfg(feature = "routing-token-tables")]
     fn any_client_holds_token(&self, keyexpr: &str) -> bool {
-        self.client_tokens
-            .borrow()
-            .values()
-            .any(|ids| ids.values().any(|k| k == keyexpr))
+        self.broker_hats().any(|hat| {
+            hat.tokens
+                .borrow()
+                .values()
+                .any(|ids| ids.values().any(|k| k == keyexpr))
+        })
     }
 
     /// A CLIENT token for `keyexpr` just appeared (the FIRST client for it): flood
@@ -5156,16 +5319,18 @@ impl RouterForwarder {
     /// never in the mesh tables, so `None` (no self-zid filter) is correct.
     #[cfg(feature = "routing-token-tables")]
     fn any_token_matches(&self, ke: &str) -> bool {
-        for table in self.hats.values().map(|hat| &hat.tokens) {
+        for table in self.mesh_hats().map(|hat| &hat.tokens) {
             if !table.borrow().matching_entries(ke, None).is_empty() {
                 return true;
             }
         }
         let chunks: Vec<&str> = ke.split('/').collect();
-        self.client_tokens
-            .borrow()
-            .values()
-            .any(|ids| ids.values().any(|k| keyexpr_intersects_target(k, &chunks)))
+        self.broker_hats().any(|hat| {
+            hat.tokens
+                .borrow()
+                .values()
+                .any(|ids| ids.values().any(|k| keyexpr_intersects_target(k, &chunks)))
+        })
     }
 
     /// Emit the withdraw->reader UNDECLARE pushes a withdrawn TOKEN `withdrawn_ke`
@@ -5218,9 +5383,11 @@ impl RouterForwarder {
                 acc = Some(acc.map_or(info, |a| a.merge(info)));
             }
         }
-        for qabls in self.client_qabls.borrow().values() {
-            if let Some(info) = qabls.get(keyexpr) {
-                acc = Some(acc.map_or(*info, |a| a.merge(*info)));
+        for hat in self.broker_hats() {
+            for qabls in hat.qabls.borrow().values() {
+                if let Some(info) = qabls.get(keyexpr) {
+                    acc = Some(acc.map_or(*info, |a| a.merge(*info)));
+                }
             }
         }
         // §5.23 adminspace-router-linkstate — a queryable HOSTED BY THIS router
@@ -5248,8 +5415,10 @@ impl RouterForwarder {
                 set.insert(keyexpr);
             }
         }
-        for qabls in self.client_qabls.borrow().values() {
-            set.extend(qabls.keys().cloned());
+        for hat in self.broker_hats() {
+            for qabls in hat.qabls.borrow().values() {
+                set.extend(qabls.keys().cloned());
+            }
         }
         // §5.23 adminspace-router-linkstate — self-hosted queryables join the set
         // (the twin of the `client_qabls` fold above), so `re_advertise_self_cross_
@@ -5381,7 +5550,7 @@ impl RouterForwarder {
     /// which already folds `client_qabls` — the A2b seam), so A3 is a trigger-only
     /// add over the A2b machinery. Fires only on a real change (a new client
     /// queryable OR a changed info) so a redundant re-declare does not re-flood.
-    fn ingest_client_queryable(&self, inbound: FaceId, declare: &DeclareOwned) {
+    fn ingest_client_queryable(&self, inbound: FaceId, owner: Region, declare: &DeclareOwned) {
         let Some(wireexpr) = declare_queryable_wireexpr(declare) else {
             return;
         };
@@ -5413,7 +5582,8 @@ impl RouterForwarder {
         // NEW keyexpr for this face OR a CHANGED info — `insert` returns the prior
         // value, so `Some(prev) if prev == info` is the redundant re-declare.
         let prev = self
-            .client_qabls
+            .owner_broker(owner)
+            .qabls
             .borrow_mut()
             .entry(inbound)
             .or_default()
@@ -5611,26 +5781,14 @@ impl RouterForwarder {
     #[cfg(feature = "adminspace-introspection-handlers")]
     pub fn declarations_view(&self) -> RouterDeclarationsView {
         RouterDeclarationsView {
-            subs: self
-                .hats
-                .iter()
-                .map(|(region, hat)| (region, Rc::clone(&hat.subs)))
-                .collect(),
-            qabls: self
-                .hats
-                .iter()
-                .map(|(region, hat)| (region, Rc::clone(&hat.qabls)))
-                .collect(),
-            client_subs: Rc::clone(&self.client_subs),
-            client_qabls: Rc::clone(&self.client_qabls),
+            subs: self.mesh_tables(|hat| Rc::clone(&hat.subs)),
+            qabls: self.mesh_tables(|hat| Rc::clone(&hat.qabls)),
+            client_subs: self.broker_tables(|hat| Rc::clone(&hat.subs)),
+            client_qabls: self.broker_tables(|hat| Rc::clone(&hat.qabls)),
             #[cfg(feature = "routing-token-tables")]
-            tokens: self
-                .hats
-                .iter()
-                .map(|(region, hat)| (region, Rc::clone(&hat.tokens)))
-                .collect(),
+            tokens: self.mesh_tables(|hat| Rc::clone(&hat.tokens)),
             #[cfg(feature = "routing-token-tables")]
-            client_tokens: Rc::clone(&self.client_tokens),
+            client_tokens: self.broker_tables(|hat| Rc::clone(&hat.tokens)),
             faces: Rc::clone(&self.faces),
         }
     }
@@ -5660,14 +5818,14 @@ impl RouterForwarder {
     /// admin linkstate legs and have no consumer without them.
     #[cfg(feature = "adminspace-router-linkstate")]
     pub fn routers_net_view(&self) -> LinkstateNetView {
-        LinkstateNetView::new(Rc::clone(&self.routers_net()))
+        LinkstateNetView::new(Rc::clone(self.routers_net()))
     }
 
     /// A read-only [`LinkstateNetView`] over the PEER-tier graph
     /// (`linkstatepeers_net`) — the adminspace host's `linkstate/peers` render seam.
     #[cfg(feature = "adminspace-router-linkstate")]
     pub fn peers_net_view(&self) -> LinkstateNetView {
-        LinkstateNetView::new(Rc::clone(&self.linkstatepeers_net()))
+        LinkstateNetView::new(Rc::clone(self.linkstatepeers_net()))
     }
 
     /// Self-dispatch a routed GET whose only match is a queryable HOSTED BY THIS
@@ -5757,7 +5915,7 @@ impl RouterForwarder {
     /// [`withdraw_client_subscription`](Self::withdraw_client_subscription)) from
     /// [`client_qabls`](Self#structfield.client_qabls); when it removed the client's
     /// entry, recompute self's cross-tier advertisement into BOTH meshes.
-    fn withdraw_client_queryable(&self, inbound: FaceId, declare: &DeclareOwned) {
+    fn withdraw_client_queryable(&self, inbound: FaceId, owner: Region, declare: &DeclareOwned) {
         let exts = match &declare.body {
             DeclareOwnedVariant::CodecZenohUndeclQueryable(u) => u.extensions.as_ref(),
             _ => return,
@@ -5777,12 +5935,12 @@ impl RouterForwarder {
             }
         };
         let removed = {
-            let mut store = self.client_qabls.borrow_mut();
+            let mut store = self.owner_broker(owner).qabls.borrow_mut();
             let removed = store
                 .get_mut(&inbound)
                 .is_some_and(|m| m.remove(&keyexpr).is_some());
             // Prune an emptied map (the same discipline withdraw_client_subscription
-            // uses) so an emptied face does not linger in client_qabls.
+            // uses) so an emptied face does not linger in its hat's store.
             if store.get(&inbound).is_some_and(|m| m.is_empty()) {
                 store.remove(&inbound);
             }
@@ -6167,16 +6325,18 @@ impl RouterForwarder {
     /// same test [`complete_for_query_peers`] applies to a mesh queryable.
     fn first_complete_client(&self, inbound: FaceId, keyexpr: &str) -> Option<FaceId> {
         let query_chunks: Vec<&str> = keyexpr.split('/').collect();
-        self.client_qabls
-            .borrow()
-            .iter()
-            .filter(|(id, _)| **id != inbound)
-            .find(|(_, qabls)| {
-                qabls.iter().any(|(decl, info)| {
-                    info.complete && keyexpr_includes_target(decl, &query_chunks)
+        self.broker_hats().find_map(|hat| {
+            hat.qabls
+                .borrow()
+                .iter()
+                .filter(|(id, _)| **id != inbound)
+                .find(|(_, qabls)| {
+                    qabls.iter().any(|(decl, info)| {
+                        info.complete && keyexpr_includes_target(decl, &query_chunks)
+                    })
                 })
-            })
-            .map(|(id, _)| *id)
+                .map(|(id, _)| *id)
+        })
     }
 
     /// Route the Query to EVERY matching queryable (`QueryTarget::All`, and the
@@ -6304,28 +6464,31 @@ impl RouterForwarder {
         }
         let query_chunks: Vec<&str> = keyexpr.split('/').collect();
         let mut forwarded = 0;
-        let _ = self.fan_out_tier(CLIENTS_REGION, reliable, |id, _zid| {
-            if id == inbound {
-                return Ok(None);
-            }
-            let qualifies = self.client_qabls.borrow().get(&id).is_some_and(|qabls| {
-                qabls.iter().any(|(decl, info)| {
-                    if complete_only {
-                        info.complete && keyexpr_includes_target(decl, &query_chunks)
-                    } else {
-                        keyexpr_intersects_target(decl, &query_chunks)
-                    }
-                })
+        // R2872b (step 3d) — one fan-out per broker hat, scoped to its region.
+        for (region, hat) in self.broker_regions() {
+            let _ = self.fan_out_tier(region, reliable, |id, _zid| {
+                if id == inbound {
+                    return Ok(None);
+                }
+                let qualifies = hat.qabls.borrow().get(&id).is_some_and(|qabls| {
+                    qabls.iter().any(|(decl, info)| {
+                        if complete_only {
+                            info.complete && keyexpr_includes_target(decl, &query_chunks)
+                        } else {
+                            keyexpr_intersects_target(decl, &query_chunks)
+                        }
+                    })
+                });
+                if !qualifies {
+                    return Ok(None);
+                }
+                let qid = self.pending.borrow_mut().allocate(id, fan, deadline);
+                let mut carrier = template.clone();
+                carrier.rid = qid;
+                forwarded += 1;
+                Ok(Some(NetworkMessage::Request(Box::new(carrier))))
             });
-            if !qualifies {
-                return Ok(None);
-            }
-            let qid = self.pending.borrow_mut().allocate(id, fan, deadline);
-            let mut carrier = template.clone();
-            carrier.rid = qid;
-            forwarded += 1;
-            Ok(Some(NetworkMessage::Request(Box::new(carrier))))
-        });
+        }
         forwarded
     }
 
@@ -6784,7 +6947,17 @@ impl FaceForwarder for RouterForwarder {
                 .borrow_mut()
                 .retain(|(face_id, _), _| *face_id != id);
         }
-        let departed_qabls = self.client_qabls.borrow_mut().remove(&id);
+        // R2872b (step 3d) — the face's declarations live in the hat that owns
+        // it, which is the broker hat of its region when that region is a leaf.
+        // The `faces` entry is still present here (it is dropped below), so the
+        // region is read off it rather than searched for across hats. A mesh
+        // face owns no broker hat and has nothing to purge in this block.
+        let owner = self
+            .faces
+            .borrow()
+            .get(&id)
+            .and_then(|state| self.broker_hat(state.tier));
+        let departed_qabls = owner.and_then(|hat| hat.qabls.borrow_mut().remove(&id));
         if let Some(qabls) = departed_qabls {
             for keyexpr in qabls.into_keys() {
                 self.withdraw_client_cross_tier_qabl(&keyexpr);
@@ -6794,7 +6967,7 @@ impl FaceForwarder for RouterForwarder {
         // advertisement for any keyexpr this was the LAST client of. A Client face
         // is skipped by the peer/router fan-out (its tier), so flooding before its
         // `faces` entry is dropped is harmless.
-        let departed = self.client_subs.borrow_mut().remove(&id);
+        let departed = owner.and_then(|hat| hat.subs.borrow_mut().remove(&id));
         if let Some(keys) = departed {
             for keyexpr in keys {
                 if !self.any_client_subscribes(&keyexpr) {
@@ -6816,7 +6989,7 @@ impl FaceForwarder for RouterForwarder {
         // (which removes the departed face, so it is not self-notified).
         #[cfg(feature = "routing-token-tables")]
         let departed_token_keys: Vec<String> = {
-            let departed_tokens = self.client_tokens.borrow_mut().remove(&id);
+            let departed_tokens = owner.and_then(|hat| hat.tokens.borrow_mut().remove(&id));
             match departed_tokens {
                 Some(ids) => {
                     let keyexprs: HashSet<String> = ids.into_values().collect();
@@ -6898,6 +7071,7 @@ impl FaceForwarder for RouterForwarder {
         // which puts North (the routers) before the peers region, the order the
         // two hand-written flushes had.
         for (region, hat) in self.hats.iter() {
+            let Some(hat) = hat.mesh() else { continue };
             if hat.trees_dirty.replace(false) {
                 self.recompute_and_advertise_tier(region);
             }
@@ -7168,21 +7342,21 @@ impl FaceForwarder for RouterForwarder {
                     }
                     DeclareOwnedVariant::CodecZenohDeclSubscriber(_) => {
                         if is_leaf(tier) {
-                            self.ingest_client_subscription(id, declare);
+                            self.ingest_client_subscription(id, tier, declare);
                         } else {
                             self.ingest_subscription(id, tier, *reliable, declare);
                         }
                     }
                     DeclareOwnedVariant::CodecZenohUndeclSubscriber(_) => {
                         if is_leaf(tier) {
-                            self.withdraw_client_subscription(id, declare);
+                            self.withdraw_client_subscription(id, tier, declare);
                         } else {
                             self.withdraw_subscription(id, tier, *reliable, declare);
                         }
                     }
                     DeclareOwnedVariant::CodecZenohDeclQueryable(_) => {
                         if is_leaf(tier) {
-                            self.ingest_client_queryable(id, declare);
+                            self.ingest_client_queryable(id, tier, declare);
                         } else {
                             self.ingest_queryable(id, tier, *reliable, declare);
                         }
@@ -7194,7 +7368,7 @@ impl FaceForwarder for RouterForwarder {
                     // face-down purge stays the safety net for a departed peer.
                     DeclareOwnedVariant::CodecZenohUndeclQueryable(_) => {
                         if is_leaf(tier) {
-                            self.withdraw_client_queryable(id, declare);
+                            self.withdraw_client_queryable(id, tier, declare);
                         } else {
                             self.withdraw_queryable(id, tier, *reliable, declare);
                         }
@@ -7208,7 +7382,7 @@ impl FaceForwarder for RouterForwarder {
                     #[cfg(feature = "routing-token-tables")]
                     DeclareOwnedVariant::CodecZenohDeclToken(_) => {
                         if is_leaf(tier) {
-                            self.ingest_client_token(id, declare);
+                            self.ingest_client_token(id, tier, declare);
                         } else {
                             self.ingest_token(id, tier, *reliable, declare);
                         }
@@ -7220,7 +7394,7 @@ impl FaceForwarder for RouterForwarder {
                     #[cfg(feature = "routing-token-tables")]
                     DeclareOwnedVariant::CodecZenohUndeclToken(_) => {
                         if is_leaf(tier) {
-                            self.withdraw_client_token(id, declare);
+                            self.withdraw_client_token(id, tier, declare);
                         } else {
                             self.withdraw_token(id, tier, *reliable, declare);
                         }
@@ -7392,6 +7566,34 @@ mod tests {
                 .partition(|r| !is_leaf(*r));
         assert_eq!(mesh, [ROUTERS_REGION, PEERS_REGION]);
         assert_eq!(leaf, [CLIENTS_REGION, Region::Local]);
+    }
+
+    /// R2872b (open-debt item 751, step 3d) — the forwarder's ONE region map
+    /// holds a hat for every region the pin's router builds, and the kind of
+    /// each is the pin's: a broker hat exactly on the leaf regions, a mesh hat
+    /// everywhere else. The population is the regions `auto_regions` derives,
+    /// not a list, and an empty one fails.
+    #[test]
+    fn every_region_the_pins_router_builds_has_its_hat_in_one_map() {
+        let fwd = RouterForwarder::new(zid(0x01));
+        let regions = crate::routing_region::auto_regions(WhatAmI::Router);
+        assert!(
+            !regions.is_empty(),
+            "no region derived, so nothing was graded"
+        );
+        let mut built: Vec<Region> = fwd.hats.regions().collect();
+        let mut want = regions.clone();
+        built.sort_by_key(|r| r.to_string());
+        want.sort_by_key(|r| r.to_string());
+        assert_eq!(built, want);
+        for region in regions {
+            assert_eq!(
+                fwd.broker_hat(region).is_some(),
+                is_leaf(region),
+                "{region}"
+            );
+            assert_eq!(fwd.mesh_hat(region).is_some(), !is_leaf(region), "{region}");
+        }
     }
 
     fn zid(b: u8) -> Zid {
@@ -7788,11 +7990,11 @@ mod tests {
         fwd.register(FaceId(0), &a_r);
         fwd.register(FaceId(1), &b_p);
         assert_eq!(
-            self_link_weight(&fwd.routers_net(), 0xAA),
+            self_link_weight(fwd.routers_net(), 0xAA),
             LinkEdgeWeight::from_raw(250)
         );
         assert!(
-            !self_link_weight(&fwd.linkstatepeers_net(), 0xBB).is_set(),
+            !self_link_weight(fwd.linkstatepeers_net(), 0xBB).is_set(),
             "the peers tier takes no router link weight"
         );
     }
@@ -8325,7 +8527,7 @@ mod tests {
         fwd.register(FaceId(0), &a_r);
         fwd.tick();
         assert_eq!(
-            self_link_weight(&fwd.routers_net(), 0xAA),
+            self_link_weight(fwd.routers_net(), 0xAA),
             LinkEdgeWeight::from_raw(250),
             "the first flood already carries the configured weight"
         );
@@ -8341,7 +8543,7 @@ mod tests {
         {
             assert!(moved, "a live link moved");
             assert_eq!(
-                self_link_weight(&fwd.routers_net(), 0xAA),
+                self_link_weight(fwd.routers_net(), 0xAA),
                 LinkEdgeWeight::from_raw(400)
             );
             assert_eq!(sink_a.frame_count(), 1, "the Router face is re-flooded");
@@ -8373,7 +8575,7 @@ mod tests {
         {
             assert!(!moved, "the inert mirror moves nothing");
             assert_eq!(
-                self_link_weight(&fwd.routers_net(), 0xAA),
+                self_link_weight(fwd.routers_net(), 0xAA),
                 LinkEdgeWeight::from_raw(250),
                 "the graph keeps the installed weight"
             );
@@ -11322,7 +11524,11 @@ mod tests {
             "the client face-down withdrew its advertisement"
         );
         assert!(
-            fwd.client_subs.borrow().get(&FaceId(0)).is_none(),
+            fwd.owner_broker(CLIENTS_REGION)
+                .subs
+                .borrow()
+                .get(&FaceId(0))
+                .is_none(),
             "the client sub store was purged"
         );
     }
@@ -13949,7 +14155,7 @@ mod tests {
                 .is_empty(),
             "not in the peer tier"
         );
-        let store = fwd.client_qabls.borrow();
+        let store = fwd.owner_broker(CLIENTS_REGION).qabls.borrow();
         let hosted = store
             .get(&FaceId(0))
             .expect("the client's queryable is stored");
@@ -14917,13 +15123,19 @@ mod tests {
             "a pending entry keyed by the client face"
         );
         assert!(
-            fwd.client_qabls.borrow().contains_key(&FaceId(0)),
+            fwd.owner_broker(CLIENTS_REGION)
+                .qabls
+                .borrow()
+                .contains_key(&FaceId(0)),
             "the client's queryable is stored"
         );
         sink_p.reset();
         fwd.deregister(FaceId(0)); // the client face goes down (linkless)
         assert!(
-            !fwd.client_qabls.borrow().contains_key(&FaceId(0)),
+            !fwd.owner_broker(CLIENTS_REGION)
+                .qabls
+                .borrow()
+                .contains_key(&FaceId(0)),
             "client_qabls purged on face-down (OBLIGATION 1)"
         );
         assert!(
