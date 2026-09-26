@@ -390,7 +390,7 @@ use crate::linkstate_forward::{
     synthesize_drained_fan_finals, synthesize_expired_query_returns, LocalQueryHandler,
     LocalQueryView, LocalQueryable, LocalSubscriber, LocalSubscriberHandler,
 };
-use crate::routing_region::{hat_kind, HatKind};
+use crate::routing_region::{hat_kind, HatKind, RegionMap};
 // R2393 — the host-subscriber dispatch's sample types, the same ones the peer
 // plane's `dispatch_local_subscribers` builds from.
 use wz_session_core::sample_kind::SampleKind;
@@ -441,6 +441,36 @@ fn is_leaf(region: Region) -> bool {
         hat_kind(&region, WhatAmI::Router),
         HatKind::Broker | HatKind::Client
     )
+}
+
+/// R2867 (open-debt item 751, step 3a) — the state one MESH region's hat owns:
+/// its link-state net and the recompute flag for that net, as each of the
+/// pin's router and peer hats owns its own `Network`
+/// (`hat/router/mod.rs` @ `routers_net: Option<Network>,`). Steps 3b-3c bring
+/// the region's subscriber, queryable and token tables in here too.
+struct MeshHat {
+    /// The region's link-state graph. `Rc<RefCell>`, single-task, like every
+    /// forwarder graph, and shared with the read-only admin views.
+    net: Rc<RefCell<LinkstateNetwork>>,
+    /// A spanning-tree recompute of `net` is pending (the D2c coalescing flag).
+    /// zenoh runs a SEPARATE `TreesComputationWorker` per net; wz coalesces
+    /// every net onto the one [`tick`](FaceForwarder::tick) cadence the trait
+    /// seam offers, with one dirty flag per net (a functional-equivalent
+    /// simplification of the independent debounce workers).
+    trees_dirty: Cell<bool>,
+}
+
+impl MeshHat {
+    /// Every mesh net of a router is seeded as a Router node, as before.
+    fn new(self_zid: Zid) -> Self {
+        Self {
+            net: Rc::new(RefCell::new(LinkstateNetwork::new(
+                self_zid,
+                WhatAmI::Router,
+            ))),
+            trees_dirty: Cell::new(false),
+        }
+    }
 }
 
 /// The region a router places a face in, as the pin computes it when the
@@ -1019,14 +1049,15 @@ impl RouterDeclarationsView {
 /// single-net [`LinkstateForwarder`](crate::linkstate_forward). Slice 1a owns
 /// the topology STATE; see the module docs for the deferred slices.
 pub struct RouterForwarder {
-    /// The Router-tier link-state graph (zenoh `HatTables.routers_net`).
-    /// `Rc<RefCell>`, single-task, like every forwarder graph.
-    routers_net: Rc<RefCell<LinkstateNetwork>>,
-    /// The Peer-tier link-state graph (zenoh `HatTables.linkstatepeers_net`).
-    /// Unconditionally present (wz ports the full-linkstate peer model — no
-    /// p2p-peer hat — so the peer net is never the `Option::None` zenoh uses
-    /// for its default `peer_to_peer` config).
-    linkstatepeers_net: Rc<RefCell<LinkstateNetwork>>,
+    /// R2867 (open-debt item 751, step 3a) — one [`MeshHat`] per MESH region,
+    /// keyed as the pin keys its hats (`dispatcher/tables.rs`
+    /// @ `pub hats: RegionMap<Box<dyn HatTrait + Send + Sync>>,`). Built from
+    /// the regions the pin's router builds, not from a list: `North` (the
+    /// routers, zenoh's `routers_net`) and `South { 0, Peer }` (the peers, the
+    /// graph this router still runs full link-state over). Reached through
+    /// [`routers_net`](Self::routers_net) / [`linkstatepeers_net`](Self::linkstatepeers_net)
+    /// and [`plane`](Self::plane).
+    hats: RegionMap<MeshHat>,
     /// Held faces keyed by id, each carrying its send seam, its tier, and (once
     /// its zid is known) its graph link. One id-keyed map across BOTH tiers
     /// (the `RouterFaceState.tier` says which net), so the flood can scope to a
@@ -1440,14 +1471,6 @@ pub struct RouterForwarder {
     /// of the single-net `interceptor_dropped` witness (a coarse per-node count, not
     /// per-interceptor). `0` in any config with no ACL wired.
     interceptor_dropped: Cell<usize>,
-    /// A `routers_net` spanning-tree recompute is pending (D2c coalescing flag).
-    /// zenoh runs a SEPARATE `TreesComputationWorker` per net; wz coalesces both
-    /// nets onto the one [`tick`](FaceForwarder::tick) cadence the trait seam
-    /// offers, with one dirty flag per net (a functional-equivalent
-    /// simplification of the two independent debounce workers).
-    trees_dirty_routers: Cell<bool>,
-    /// A `linkstatepeers_net` spanning-tree recompute is pending (D2c).
-    trees_dirty_peers: Cell<bool>,
     /// Total spanning-tree recomputes flushed across both nets — the D2c
     /// coalescing witness (rises once per flushed net per tick window).
     recomputes: Cell<usize>,
@@ -1557,14 +1580,11 @@ impl RouterForwarder {
         timestamping: crate::node_clock::TimestampingEnabled,
     ) -> Self {
         Self {
-            routers_net: Rc::new(RefCell::new(LinkstateNetwork::new(
-                self_zid,
-                WhatAmI::Router,
-            ))),
-            linkstatepeers_net: Rc::new(RefCell::new(LinkstateNetwork::new(
-                self_zid,
-                WhatAmI::Router,
-            ))),
+            hats: crate::routing_region::auto_regions(WhatAmI::Router)
+                .into_iter()
+                .filter(|region| !is_leaf(*region))
+                .map(|region| (region, MeshHat::new(self_zid)))
+                .collect(),
             // R311y450 — this router's §5.18 clock, over the SAME `WhatAmI::Router`
             // both nets above are seeded with, so the timestamping gate cannot
             // disagree with the role. Router is the one role zenoh's shipped map
@@ -1639,8 +1659,6 @@ impl RouterForwarder {
             #[cfg(feature = "routing-interceptor-hotreload")]
             egress_interceptor_cache_recomputes: Cell::new(0),
             interceptor_dropped: Cell::new(0),
-            trees_dirty_routers: Cell::new(false),
-            trees_dirty_peers: Cell::new(false),
             recomputes: Cell::new(0),
             trees_delay: Self::DEFAULT_TREES_DELAY,
             clock,
@@ -1705,10 +1723,9 @@ impl RouterForwarder {
     ///   value across every peer and router of a subsystem, so a router whose
     ///   peers run linkstate must too.
     pub fn set_gossip_multihop(&self, enabled: bool) {
-        self.routers_net.borrow_mut().set_gossip_multihop(enabled);
-        self.linkstatepeers_net
-            .borrow_mut()
-            .set_gossip_multihop(enabled);
+        for hat in self.hats.values() {
+            hat.net.borrow_mut().set_gossip_multihop(enabled);
+        }
     }
 
     /// R2639 — emit a [`DialIntent`] for each node this ingest DISCOVERED that
@@ -1776,14 +1793,14 @@ impl RouterForwarder {
     /// counterpart of upstream's `compute_trees_async`. Returns that `bool`.
     pub fn update_router_link_weights(&self, link_weights: HashMap<Zid, LinkEdgeWeight>) -> bool {
         if !self
-            .routers_net
+            .routers_net()
             .borrow_mut()
             .update_link_weights(link_weights)
         {
             return false;
         }
-        let _ = self.flood_self_links_changed_tier(ROUTERS_REGION, &self.routers_net);
-        self.trees_dirty_routers.set(true);
+        let _ = self.flood_self_links_changed_tier(ROUTERS_REGION, &self.routers_net());
+        self.mesh(ROUTERS_REGION).trees_dirty.set(true);
         true
     }
 
@@ -1810,7 +1827,7 @@ impl RouterForwarder {
     pub fn sessions_view(&self) -> RouterSessionsView {
         RouterSessionsView {
             faces: Rc::clone(&self.faces),
-            routers_net: Rc::clone(&self.routers_net),
+            routers_net: Rc::clone(&self.routers_net()),
         }
     }
 
@@ -1824,7 +1841,7 @@ impl RouterForwarder {
     /// only there: the configured weights upstream reads are the routers
     /// network's, so the peers tier has nothing weighted to report.
     pub fn router_links_info(&self) -> HashMap<Zid, LinkInfo> {
-        self.routers_net.borrow().links_info()
+        self.routers_net().borrow().links_info()
     }
 
     /// Number of nodes in the ROUTER-tier graph (self + every learned Router) —
@@ -1834,7 +1851,7 @@ impl RouterForwarder {
     /// count) so each mirrors the field it reads and a caller cannot transpose
     /// them. A single-router topology (no Router faces) reads 1 (self alone).
     pub fn routers_net_node_count(&self) -> usize {
-        self.routers_net.borrow().node_count()
+        self.routers_net().borrow().node_count()
     }
 
     /// Number of nodes in the PEER-tier graph (self + every learned Peer) — the
@@ -1843,7 +1860,7 @@ impl RouterForwarder {
     /// N connected peers reads `1 + N` once converged (the E2E convergence
     /// witness the ACTIVATION harness asserts on).
     pub fn linkstatepeers_net_node_count(&self) -> usize {
-        self.linkstatepeers_net.borrow().node_count()
+        self.linkstatepeers_net().borrow().node_count()
     }
 
     /// Total link-state lists ingested across both nets — the control-plane
@@ -2181,16 +2198,34 @@ impl RouterForwarder {
         (self.clock)()
     }
 
-    /// The graph + coalescing flag for a tier, or `None` for
-    /// [`CLIENTS_REGION`] (a client is a leaf, in no mesh). The single
-    /// classifier `register` / `deregister` / `forward` route a face's work
-    /// through, so the routers-vs-peers selection lives in ONE place.
+    /// The graph + coalescing flag for a region, or `None` for a region with
+    /// no mesh hat — [`CLIENTS_REGION`] and every other leaf (a client is in no
+    /// mesh). The single classifier `register` / `deregister` / `forward` route
+    /// a face's work through. R2867: a lookup in [`hats`](Self::hats), so the
+    /// selection is the region map's and not a match over known regions.
     fn plane(&self, tier: Region) -> Option<(&Rc<RefCell<LinkstateNetwork>>, &Cell<bool>)> {
-        match tier {
-            ROUTERS_REGION => Some((&self.routers_net, &self.trees_dirty_routers)),
-            PEERS_REGION => Some((&self.linkstatepeers_net, &self.trees_dirty_peers)),
-            _ => None,
-        }
+        self.hats.get(&tier).map(|hat| (&hat.net, &hat.trees_dirty))
+    }
+
+    /// The hat of a mesh region this router always builds. Panics on any other
+    /// region: the callers name [`ROUTERS_REGION`] / [`PEERS_REGION`], which
+    /// `the_mesh_regions_are_the_non_leaf_regions_the_pins_router_builds` pins
+    /// as exactly the hats the constructor creates.
+    fn mesh(&self, region: Region) -> &MeshHat {
+        self.hats
+            .get(&region)
+            .unwrap_or_else(|| unreachable!("{region} is not a mesh region of a router"))
+    }
+
+    /// The routers region's graph — zenoh's router-hat `routers_net`.
+    fn routers_net(&self) -> &Rc<RefCell<LinkstateNetwork>> {
+        &self.mesh(ROUTERS_REGION).net
+    }
+
+    /// The peers region's graph, which this router still runs full link-state
+    /// over (item 751 step 8 moves it to the pin's gossip semantics).
+    fn linkstatepeers_net(&self) -> &Rc<RefCell<LinkstateNetwork>> {
+        &self.mesh(PEERS_REGION).net
     }
 
     /// Send to each held face of `tier` the message `build` produces for it,
@@ -2949,7 +2984,7 @@ impl RouterForwarder {
         // FUTURE-only interest (no `c()`) gets neither — an ongoing subscription has
         // no current snapshot to close.
         if interest.c() {
-            let self_zid = *self.routers_net.borrow().self_zid();
+            let self_zid = *self.routers_net().borrow().self_zid();
             if body.su() {
                 self.dump_interest_subs(
                     inbound,
@@ -3769,7 +3804,7 @@ impl RouterForwarder {
     /// member set.
     #[cfg(feature = "router-multicast-faces")]
     fn is_group_dr(&self, keyexpr: &str) -> bool {
-        let self_zid = *self.routers_net.borrow().self_zid();
+        let self_zid = *self.routers_net().borrow().self_zid();
         let members = self.mcast_group_members.borrow();
         elect_router(
             &self_zid,
@@ -3838,7 +3873,7 @@ impl RouterForwarder {
     /// lazily; deriving at read time is the wz equivalent that additionally can
     /// never drift from the live graph.
     fn is_master(&self, keyexpr: &str) -> bool {
-        let self_zid = *self.routers_net.borrow().self_zid();
+        let self_zid = *self.routers_net().borrow().self_zid();
         let shared = self.shared_nodes();
         elect_router(&self_zid, keyexpr, shared.iter()) == self_zid
     }
@@ -3852,9 +3887,9 @@ impl RouterForwarder {
     /// either mesh simply drops out of the next call's intersection, with no
     /// incremental teardown to order against `deregister`.
     fn shared_nodes(&self) -> Vec<Zid> {
-        let routers: HashSet<Zid> = self.routers_net.borrow().node_zids().collect();
+        let routers: HashSet<Zid> = self.routers_net().borrow().node_zids().collect();
         let mut shared: Vec<Zid> = self
-            .linkstatepeers_net
+            .linkstatepeers_net()
             .borrow()
             .node_zids()
             .filter(|z| routers.contains(z))
@@ -4422,7 +4457,7 @@ impl RouterForwarder {
     /// interned id (pico updates the `(decl_id, peer)` write-filter target in place).
     /// `origin` is never pushed (no self-echo).
     fn push_future_queryable(&self, new_ke: &str, origin: FaceId) {
-        let self_zid = *self.routers_net.borrow().self_zid();
+        let self_zid = *self.routers_net().borrow().self_zid();
         let pushes = self.future_qabls.borrow_mut().pushes_for_new(
             new_ke,
             Some(origin),
@@ -4581,7 +4616,7 @@ impl RouterForwarder {
     /// RefCells from `future_qabls`) via their closures — the proven `pushes_for_new`
     /// borrow shape.
     fn undeclare_push_qabls(&self, withdrawn_ke: &str) {
-        let self_zid = *self.routers_net.borrow().self_zid();
+        let self_zid = *self.routers_net().borrow().self_zid();
         let (forgets, re_pushes) = {
             let mut store = self.future_qabls.borrow_mut();
             let forgets = store.forgets_for_withdrawn(withdrawn_ke, |rk| self.any_qabl_matches(rk));
@@ -5640,14 +5675,14 @@ impl RouterForwarder {
     /// admin linkstate legs and have no consumer without them.
     #[cfg(feature = "adminspace-router-linkstate")]
     pub fn routers_net_view(&self) -> LinkstateNetView {
-        LinkstateNetView::new(Rc::clone(&self.routers_net))
+        LinkstateNetView::new(Rc::clone(&self.routers_net()))
     }
 
     /// A read-only [`LinkstateNetView`] over the PEER-tier graph
     /// (`linkstatepeers_net`) — the adminspace host's `linkstate/peers` render seam.
     #[cfg(feature = "adminspace-router-linkstate")]
     pub fn peers_net_view(&self) -> LinkstateNetView {
-        LinkstateNetView::new(Rc::clone(&self.linkstatepeers_net))
+        LinkstateNetView::new(Rc::clone(&self.linkstatepeers_net()))
     }
 
     /// Self-dispatch a routed GET whose only match is a queryable HOSTED BY THIS
@@ -5897,7 +5932,7 @@ impl RouterForwarder {
             ),
             None => None,
         };
-        let self_zid = *self.routers_net.borrow().self_zid();
+        let self_zid = *self.routers_net().borrow().self_zid();
         let master = self.is_master(&keyexpr);
         // The two mesh blocks, gated + source-selected per compute_query_route; a
         // gated-off block is omitted. Block 3 (clients) gate is `master || src ==
@@ -6873,11 +6908,14 @@ impl FaceForwarder for RouterForwarder {
         // flushing its OWN net. This fixes the prior slice's discard-the-delta
         // tick. The cross-tier self-bubble re-advertise is C2 (a distinct
         // self-sourced declaration on its own path).
-        if self.trees_dirty_routers.replace(false) {
-            self.recompute_and_advertise_tier(ROUTERS_REGION);
-        }
-        if self.trees_dirty_peers.replace(false) {
-            self.recompute_and_advertise_tier(PEERS_REGION);
+        //
+        // R2867 — one pass over the mesh hats in the region map's index order,
+        // which puts North (the routers) before the peers region, the order the
+        // two hand-written flushes had.
+        for (region, hat) in self.hats.iter() {
+            if hat.trees_dirty.replace(false) {
+                self.recompute_and_advertise_tier(region);
+            }
         }
         // Reap pending queries whose ResponseFinal never arrived on a still-up
         // face (zenoh's per-query QueryCleanup timeout) on the same coalescing
@@ -7585,9 +7623,9 @@ mod tests {
         let (a, _sink) = face(zid(0xAA), WIRE_ROUTER);
         fwd.register(FaceId(0), &a);
         // self + 0xAA in routers_net; only self in linkstatepeers_net.
-        assert_eq!(fwd.routers_net.borrow().node_count(), 2);
-        assert!(fwd.routers_net.borrow().get_node(&zid(0xAA)).is_some());
-        assert_eq!(fwd.linkstatepeers_net.borrow().node_count(), 1);
+        assert_eq!(fwd.routers_net().borrow().node_count(), 2);
+        assert!(fwd.routers_net().borrow().get_node(&zid(0xAA)).is_some());
+        assert_eq!(fwd.linkstatepeers_net().borrow().node_count(), 1);
         assert_eq!(fwd.faces.borrow()[&FaceId(0)].tier, ROUTERS_REGION);
     }
 
@@ -7596,13 +7634,13 @@ mod tests {
         let fwd = RouterForwarder::new(zid(0x01));
         let (b, _sink) = face(zid(0xBB), WIRE_PEER);
         fwd.register(FaceId(0), &b);
-        assert_eq!(fwd.linkstatepeers_net.borrow().node_count(), 2);
+        assert_eq!(fwd.linkstatepeers_net().borrow().node_count(), 2);
         assert!(fwd
-            .linkstatepeers_net
+            .linkstatepeers_net()
             .borrow()
             .get_node(&zid(0xBB))
             .is_some());
-        assert_eq!(fwd.routers_net.borrow().node_count(), 1);
+        assert_eq!(fwd.routers_net().borrow().node_count(), 1);
         assert_eq!(fwd.faces.borrow()[&FaceId(0)].tier, PEERS_REGION);
     }
 
@@ -7615,8 +7653,8 @@ mod tests {
         assert!(fwd.faces.borrow().contains_key(&FaceId(0)));
         assert_eq!(fwd.faces.borrow()[&FaceId(0)].tier, CLIENTS_REGION);
         assert_eq!(fwd.faces.borrow()[&FaceId(0)].link, None);
-        assert_eq!(fwd.routers_net.borrow().node_count(), 1);
-        assert_eq!(fwd.linkstatepeers_net.borrow().node_count(), 1);
+        assert_eq!(fwd.routers_net().borrow().node_count(), 1);
+        assert_eq!(fwd.linkstatepeers_net().borrow().node_count(), 1);
     }
 
     #[test]
@@ -7630,7 +7668,7 @@ mod tests {
         assert_eq!(fwd.faces.borrow()[&FaceId(0)].tier, ROUTERS_REGION);
         assert_eq!(fwd.faces.borrow()[&FaceId(0)].link, None);
         assert_eq!(
-            fwd.routers_net.borrow().node_count(),
+            fwd.routers_net().borrow().node_count(),
             1,
             "no neighbour added"
         );
@@ -7641,17 +7679,17 @@ mod tests {
         let fwd = RouterForwarder::new(zid(0x01));
         let (a, _sink) = face(zid(0xAA), WIRE_ROUTER);
         fwd.register(FaceId(0), &a);
-        assert_eq!(fwd.routers_net.borrow().node_count(), 2); // self + 0xAA
-                                                              // A flood on the ROUTER face discovers 0xDD into the routers tier only.
+        assert_eq!(fwd.routers_net().borrow().node_count(), 2); // self + 0xAA
+                                                                // A flood on the ROUTER face discovers 0xDD into the routers tier only.
         discover_via(&fwd, FaceId(0), 0x01, 0xAA, 0xDD, 3, 5);
         assert_eq!(fwd.ingested.get(), 1, "the OAM was ingested");
         assert_eq!(
-            fwd.routers_net.borrow().node_count(),
+            fwd.routers_net().borrow().node_count(),
             3,
             "0xDD discovered in the routers tier (self + 0xAA + 0xDD)"
         );
         assert_eq!(
-            fwd.linkstatepeers_net.borrow().node_count(),
+            fwd.linkstatepeers_net().borrow().node_count(),
             1,
             "the peers tier is untouched by a routers-tier flood"
         );
@@ -7696,13 +7734,13 @@ mod tests {
             0,
             "register only SCHEDULES, never recomputes inline"
         );
-        assert!(fwd.trees_dirty_routers.get());
-        assert!(fwd.trees_dirty_peers.get());
+        assert!(fwd.mesh(ROUTERS_REGION).trees_dirty.get());
+        assert!(fwd.mesh(PEERS_REGION).trees_dirty.get());
         fwd.tick();
         // Both nets had a pending change -> one recompute each, flags cleared.
         assert_eq!(fwd.recomputes.get(), 2);
-        assert!(!fwd.trees_dirty_routers.get());
-        assert!(!fwd.trees_dirty_peers.get());
+        assert!(!fwd.mesh(ROUTERS_REGION).trees_dirty.get());
+        assert!(!fwd.mesh(PEERS_REGION).trees_dirty.get());
         // An idle tick is a no-op poll.
         fwd.tick();
         assert_eq!(fwd.recomputes.get(), 2, "an idle window adds no recompute");
@@ -7756,17 +7794,20 @@ mod tests {
             !fwd.update_router_link_weights(link_weights(&[(0xAA, 250), (0xBB, 250)])),
             "no live link moved"
         );
-        assert!(!fwd.trees_dirty_routers.get(), "nothing to recompute");
+        assert!(
+            !fwd.mesh(ROUTERS_REGION).trees_dirty.get(),
+            "nothing to recompute"
+        );
         let (a_r, _s1) = face(zid(0xAA), WIRE_ROUTER);
         let (b_p, _s2) = face(zid(0xBB), WIRE_PEER);
         fwd.register(FaceId(0), &a_r);
         fwd.register(FaceId(1), &b_p);
         assert_eq!(
-            self_link_weight(&fwd.routers_net, 0xAA),
+            self_link_weight(&fwd.routers_net(), 0xAA),
             LinkEdgeWeight::from_raw(250)
         );
         assert!(
-            !self_link_weight(&fwd.linkstatepeers_net, 0xBB).is_set(),
+            !self_link_weight(&fwd.linkstatepeers_net(), 0xBB).is_set(),
             "the peers tier takes no router link weight"
         );
     }
@@ -7792,7 +7833,7 @@ mod tests {
         assert!(fwd.update_router_link_weights(link_weights(&[(0xAA, 300)])));
         assert_eq!(sink_b.frame_count(), 0, "no Peer face is flooded");
         let psid_a = fwd
-            .routers_net
+            .routers_net()
             .borrow()
             .local_psid_of(&zid(0xAA))
             .expect("A indexed");
@@ -7809,8 +7850,8 @@ mod tests {
             let weights = states[0].weights.as_ref().expect("a set weight rides");
             assert_eq!(weights[slot].weight, 300, "Router face {name} sees 300");
         }
-        assert!(fwd.trees_dirty_routers.get());
-        assert!(!fwd.trees_dirty_peers.get());
+        assert!(fwd.mesh(ROUTERS_REGION).trees_dirty.get());
+        assert!(!fwd.mesh(PEERS_REGION).trees_dirty.get());
         fwd.tick();
         assert_eq!(
             fwd.recomputes.get(),
@@ -7822,7 +7863,7 @@ mod tests {
         sink_c.reset();
         assert!(!fwd.update_router_link_weights(link_weights(&[(0xAA, 300)])));
         assert_eq!(sink_a.frame_count() + sink_c.frame_count(), 0);
-        assert!(!fwd.trees_dirty_routers.get());
+        assert!(!fwd.mesh(ROUTERS_REGION).trees_dirty.get());
     }
 
     /// R2636 (open-debt item 748) — the router reports its transports. Before
@@ -8193,21 +8234,21 @@ mod tests {
     fn gossip_multihop_reaches_both_of_the_routers_graphs() {
         let fwd = RouterForwarder::new(zid(0x01));
         assert!(
-            !fwd.routers_net.borrow().gossip_multihop(),
+            !fwd.routers_net().borrow().gossip_multihop(),
             "off by default, as zenoh's config default is"
         );
-        assert!(!fwd.linkstatepeers_net.borrow().gossip_multihop());
+        assert!(!fwd.linkstatepeers_net().borrow().gossip_multihop());
 
         fwd.set_gossip_multihop(true);
-        assert!(fwd.routers_net.borrow().gossip_multihop(), "routers tier");
+        assert!(fwd.routers_net().borrow().gossip_multihop(), "routers tier");
         assert!(
-            fwd.linkstatepeers_net.borrow().gossip_multihop(),
+            fwd.linkstatepeers_net().borrow().gossip_multihop(),
             "peers tier too — one config value, both graphs"
         );
 
         fwd.set_gossip_multihop(false);
-        assert!(!fwd.routers_net.borrow().gossip_multihop());
-        assert!(!fwd.linkstatepeers_net.borrow().gossip_multihop());
+        assert!(!fwd.routers_net().borrow().gossip_multihop());
+        assert!(!fwd.linkstatepeers_net().borrow().gossip_multihop());
     }
 
     /// R2637 — the weight reaches the WIRE record, end to end: a configured
@@ -8299,7 +8340,7 @@ mod tests {
         fwd.register(FaceId(0), &a_r);
         fwd.tick();
         assert_eq!(
-            self_link_weight(&fwd.routers_net, 0xAA),
+            self_link_weight(&fwd.routers_net(), 0xAA),
             LinkEdgeWeight::from_raw(250),
             "the first flood already carries the configured weight"
         );
@@ -8315,13 +8356,13 @@ mod tests {
         {
             assert!(moved, "a live link moved");
             assert_eq!(
-                self_link_weight(&fwd.routers_net, 0xAA),
+                self_link_weight(&fwd.routers_net(), 0xAA),
                 LinkEdgeWeight::from_raw(400)
             );
             assert_eq!(sink_a.frame_count(), 1, "the Router face is re-flooded");
             let states = flooded_link_states(&sink_a.frame_bytes(0));
             let psid_a = fwd
-                .routers_net
+                .routers_net()
                 .borrow()
                 .local_psid_of(&zid(0xAA))
                 .expect("A indexed");
@@ -8335,7 +8376,7 @@ mod tests {
                 weights[slot].weight, 400,
                 "the RELOADED weight is on the wire"
             );
-            assert!(fwd.trees_dirty_routers.get());
+            assert!(fwd.mesh(ROUTERS_REGION).trees_dirty.get());
             fwd.tick();
             assert_eq!(
                 fwd.recomputes.get(),
@@ -8347,12 +8388,12 @@ mod tests {
         {
             assert!(!moved, "the inert mirror moves nothing");
             assert_eq!(
-                self_link_weight(&fwd.routers_net, 0xAA),
+                self_link_weight(&fwd.routers_net(), 0xAA),
                 LinkEdgeWeight::from_raw(250),
                 "the graph keeps the installed weight"
             );
             assert_eq!(sink_a.frame_count(), 0, "nothing is re-flooded");
-            assert!(!fwd.trees_dirty_routers.get());
+            assert!(!fwd.mesh(ROUTERS_REGION).trees_dirty.get());
             let _ = recomputes;
         }
 
@@ -9380,7 +9421,7 @@ mod tests {
             "but with no graph link (self-connect guarded)"
         );
         assert_eq!(
-            fwd.linkstatepeers_net.borrow().node_count(),
+            fwd.linkstatepeers_net().borrow().node_count(),
             1,
             "no self-loop neighbour added to the peer net (only self)"
         );
@@ -11183,12 +11224,12 @@ mod tests {
             "removed on deregister"
         );
         assert_eq!(
-            fwd.routers_net.borrow().node_count(),
+            fwd.routers_net().borrow().node_count(),
             1,
             "routers_net untouched (only self)"
         );
         assert_eq!(
-            fwd.linkstatepeers_net.borrow().node_count(),
+            fwd.linkstatepeers_net().borrow().node_count(),
             1,
             "peers_net untouched (only self)"
         );
@@ -11948,11 +11989,11 @@ mod tests {
         let fwd = RouterForwarder::new(zid(0x01));
         let (a, _sink) = face(zid(0xAA), WIRE_ROUTER);
         fwd.register(FaceId(0), &a);
-        assert_eq!(fwd.routers_net.borrow().node_count(), 2);
+        assert_eq!(fwd.routers_net().borrow().node_count(), 2);
         fwd.deregister(FaceId(0));
         assert!(!fwd.faces.borrow().contains_key(&FaceId(0)), "face dropped");
         assert!(
-            fwd.routers_net.borrow().get_node(&zid(0xAA)).is_none(),
+            fwd.routers_net().borrow().get_node(&zid(0xAA)).is_none(),
             "the departed neighbour's link is removed from routers_net"
         );
     }
@@ -12001,16 +12042,16 @@ mod tests {
         let fwd = RouterForwarder::new(zid(0x01));
         let (p, _sink) = face(zid(0xBB), WIRE_PEER);
         fwd.register(FaceId(0), &p);
-        assert_eq!(fwd.linkstatepeers_net.borrow().node_count(), 2); // self + 0xBB
+        assert_eq!(fwd.linkstatepeers_net().borrow().node_count(), 2); // self + 0xBB
         discover_via(&fwd, FaceId(0), 0x01, 0xBB, 0xEE, 3, 5);
         assert_eq!(fwd.ingested.get(), 1);
         assert_eq!(
-            fwd.linkstatepeers_net.borrow().node_count(),
+            fwd.linkstatepeers_net().borrow().node_count(),
             3,
             "0xEE discovered in the peers tier (self + 0xBB + 0xEE)"
         );
         assert_eq!(
-            fwd.routers_net.borrow().node_count(),
+            fwd.routers_net().borrow().node_count(),
             1,
             "the routers tier is untouched by a peers-tier flood"
         );
@@ -12052,11 +12093,11 @@ mod tests {
         let (a, _sa) = face(zid(0xAA), WIRE_ROUTER);
         fwd.register(FaceId(0), &a);
         discover_via(&fwd, FaceId(0), 0x01, 0xAA, 0xDD, 3, 5);
-        assert_eq!(fwd.routers_net.borrow().node_count(), 3); // self + AA + DD (via OAM)
+        assert_eq!(fwd.routers_net().borrow().node_count(), 3); // self + AA + DD (via OAM)
         let (d, sink_d) = face(zid(0xDD), WIRE_ROUTER);
         fwd.register(FaceId(1), &d);
         assert_eq!(
-            fwd.routers_net.borrow().node_count(),
+            fwd.routers_net().borrow().node_count(),
             3,
             "0xDD was already a graph node via OAM; the direct link adds no node"
         );
