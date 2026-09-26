@@ -1241,12 +1241,13 @@ impl Default for ZenohNodeConfig {
             pubkey_private_key_pem: None,
             pubkey_public_key_file: None,
             pubkey_private_key_file: None,
-            // R2063 (item 214) — upstream's default is `linkstate`
-            // (`DEFAULT_CONFIG.json5`'s `routing.peer.mode`), and R2051's rule
-            // applies: a documented default is not a behaviour, so this
-            // matches what the SINK already defaults to -- `--peer-mode`
-            // absent is `full_linkstate = true` (`wz-ap-demo/src/main.rs:290`).
-            peer_linkstate: true,
+            // R2063 (item 214) — R2051's rule applies: a documented default is
+            // not a behaviour, so this matches what the SINK defaults to.
+            // R2896 (item 751, rules 8d+8e) — and the sink's default is now
+            // gossip, the pin's only peer mode (its peer hat passes
+            // `full_linkstate` false), so an absent key is `false`; the old
+            // `linkstate` default was the 1.5.0 document's.
+            peer_linkstate: false,
             batch_size: 65_535,
             lease_ms: 10_000,
             max_links: 1,
@@ -7226,10 +7227,11 @@ mod tests {
                 "listen/timeout_ms",
                 r#"{ "listen": { "timeout_ms": 1500 } }"#,
             ),
-            // R2063 (open-debt item 214) — `peer-to-peer` and not `linkstate`,
-            // because the default is `linkstate` and this gate requires the
-            // ingest to MOVE. A fixture naming the default would report the key
-            // honoured while proving only that the reader did not crash.
+            // R2063 (open-debt item 214) — the non-default value, because this
+            // gate requires the ingest to MOVE. A fixture naming the default
+            // would report the key honoured while proving only that the reader
+            // did not crash. R2896 (item 751): the default is now `peer-to-peer`,
+            // so the `routing/peer/mode` row names `linkstate`.
             //
             // R2788 — one storage in the storage manager's document, every leaf
             // of which is one the partition calls honoured, so `ignored` stays
@@ -7255,7 +7257,7 @@ mod tests {
             // through the exemption list.
             (
                 "routing/peer/mode",
-                r#"{ "routing": { "peer": { "mode": "peer-to-peer" } } }"#,
+                r#"{ "routing": { "peer": { "mode": "linkstate" } } }"#,
             ),
         ];
         // The case list IS the table, so a key added to one and not the other
@@ -7760,7 +7762,8 @@ mod tests {
             ),
             (
                 "routing/peer/mode",
-                r#"{ "routing": { "peer": { "mode": "peer-to-peer" } } }"#,
+                // R2896 — the non-default value (`peer-to-peer` is the default).
+                r#"{ "routing": { "peer": { "mode": "linkstate" } } }"#,
             ),
             (
                 "routing/router/peers_failover_brokering",

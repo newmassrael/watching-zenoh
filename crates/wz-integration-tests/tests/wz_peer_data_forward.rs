@@ -69,6 +69,13 @@ use wz_integration_tests::common::{
 /// Spawn a `--peer` demo on an ephemeral port and wait until it binds, then read
 /// the bound port back from its listen log. Returns the guard, its stderr
 /// reader, and the port.
+///
+/// R2896 (open-debt item 751, rules 8d+8e) — every peer here runs wz's
+/// LINK-STATE extension, NAMED: `--peer-mode linkstate`. This whole file is
+/// that extension's witness (multi-hop relay along a spanning tree, pruning,
+/// reciprocal edges), and its default was the pin's gossip mode from R2896 on,
+/// where no peer relays for another. Relying on the default would now test a
+/// mode these assertions do not describe.
 fn spawn_peer(label: &str, args: &[&str]) -> (ChildGuard, File, u16) {
     let stderr = tempfile::tempfile().expect("tempfile for peer stderr");
     let writer = stderr.try_clone().expect("dup peer stderr handle");
@@ -77,6 +84,7 @@ fn spawn_peer(label: &str, args: &[&str]) -> (ChildGuard, File, u16) {
         label.to_string(),
         Command::new(wz_ap_demo_binary())
             .args(args)
+            .args(["--peer-mode", "linkstate"])
             .env("RUST_LOG", "info")
             .stdout(Stdio::null())
             .stderr(Stdio::from(writer))
@@ -116,7 +124,8 @@ fn spawn_peer(label: &str, args: &[&str]) -> (ChildGuard, File, u16) {
 /// item 584 said the extension keeps its behaviour and moves its witness off the
 /// foreign impl; this leg is that witness.
 ///
-/// Two peers, wz's DEFAULT `linkstate` mode, no `--peer-mode` flag: B dials A,
+/// Two peers in wz's `linkstate` extension (named by `spawn_peer` since R2896,
+/// when the default became the pin's gossip mode): B dials A,
 /// each advertises a link to the other, and `update_edge` fires on both sides
 /// only when BOTH have. Asserted on BOTH logs, because a one-sided assertion
 /// would pass on a self-entry that was never reciprocated.

@@ -415,10 +415,15 @@ fn main() -> ExitCode {
             // own config, "needs to be set to the same value in all peers and
             // routers of the subsystem".
             //
-            // wz DEFAULTS TO `linkstate` even though zenoh defaults to
-            // `peer_to_peer`, and the divergence is deliberate: wz's data plane
-            // routes along the linkstate spanning tree, so `linkstate` is the
-            // mode its whole stack implements.
+            // ⛔ R2896 (open-debt item 751, rules 8d+8e) — the default is now
+            // `peer-to-peer`, the pin's only peer mode, and the paragraph that
+            // stood here defending a `linkstate` default is retired with it. It
+            // held while wz's gossip plane could not carry data (see R2236
+            // below) and while a wz router's peer region ran link-state; both
+            // ended, and a gossip router with link-state peers was measured to
+            // break the mesh. `linkstate` stays as an explicit opt-in, wz's
+            // extension kept on the owner's decision of 2026-08-31. The router
+            // run-mode reads the same flag through `args::parse_peer_mode`.
             //
             // R2236 (open-debt item 588) — `peer-to-peer` now carries a
             // DECLARATION and DATA plane too, and that sentence is why this
@@ -432,14 +437,10 @@ fn main() -> ExitCode {
             // in `LinkstateForwarder` (origin declaration, join-time
             // re-advertise, self-originated data) are what closed that, so this
             // mode is now the one to run against a stock zenoh subsystem.
-            let full_linkstate = match parse_pair(rest, "--peer-mode").as_deref() {
-                None | Some("linkstate") => true,
-                Some("peer-to-peer") => false,
-                Some(other) => {
-                    eprintln!(
-                        "wz-ap-demo: --peer-mode {other}: expected `linkstate` or \
-                         `peer-to-peer`"
-                    );
+            let full_linkstate = match crate::args::parse_peer_mode(rest) {
+                Ok(v) => v,
+                Err(msg) => {
+                    eprintln!("wz-ap-demo: {msg}");
                     return ExitCode::from(2);
                 }
             };
@@ -1062,6 +1063,14 @@ fn main() -> ExitCode {
                     return ExitCode::from(2);
                 }
             };
+            // R2896 (751 rules 8d+8e) — the peer region runs what its peers run.
+            let peer_region_full_linkstate = match crate::args::parse_peer_mode(rest) {
+                Ok(v) => v,
+                Err(msg) => {
+                    eprintln!("wz-ap-demo: {msg}");
+                    return ExitCode::from(2);
+                }
+            };
             return run_router_hat_mode(
                 // R2099 (open-debt item 512) — an endpoint LIST, exactly as
                 // `--peer` now takes: both are BINDING run-modes reading the same
@@ -1094,6 +1103,7 @@ fn main() -> ExitCode {
                     // R2633 — the router's configured link weights (see the
                     // parse above).
                     router_link_weights,
+                    peer_region_full_linkstate,
                     // R311y454 — `--multicast-locator udp/<group>:<port>[#iface=<name>]`:
                     // the router's data-plane multicast group, spelled as a LOCATOR so
                     // the `#iface=` tail is honoured by the same parser every unicast

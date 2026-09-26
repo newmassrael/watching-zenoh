@@ -530,8 +530,9 @@ impl MeshHat {
         // a subsystem, and a link-state peer's ingest GCs every link-less gossip
         // entry it is sent (measured: three router-hat mesh E2Es red). The two
         // flip together, as item 751 rule 8e.
-        let net =
+        let mut net =
             LinkstateNetwork::new_in_region(self_zid, WhatAmI::Router, region.bound().is_south());
+        net.set_full_linkstate(!region.bound().is_south());
         Self {
             net: Rc::new(RefCell::new(net)),
             trees_dirty: Cell::new(false),
@@ -2108,16 +2109,34 @@ impl RouterForwarder {
     ///   anyway since `default_gossip_target(Router) ==
     ///   default_gossip_target(Peer)`. A field here would look like parity and
     ///   do nothing.
-    /// * `full_linkstate` — left `true` on BOTH nets deliberately. The upstream
-    ///   call that passes `false` is the PEER hat's, for a network its own code
-    ///   names `"[Gossip]"` — a different kind of object from this router's
-    ///   linkstate peer-tier graph. And `routing.peer.mode` must hold the same
-    ///   value across every peer and router of a subsystem, so a router whose
-    ///   peers run linkstate must too.
+    /// * `full_linkstate` — see
+    ///   [`set_peer_region_full_linkstate`](Self::set_peer_region_full_linkstate).
+    ///   ⛔ R2896 retired this bullet's old claim, that it stays on for both
+    ///   nets because the `false` call site is "the PEER hat's, a different
+    ///   kind of object". Since item 751 this router's south region IS served
+    ///   by the peer hat, whose net is that object.
     pub fn set_gossip_multihop(&self, enabled: bool) {
         for hat in self.mesh_hats() {
             hat.net.borrow_mut().set_gossip_multihop(enabled);
         }
+    }
+
+    /// R2896 (open-debt item 751, rules 8d+8e) — choose the south peer
+    /// region's topology mode. Off is the pin's and the default: that region's
+    /// hat is the peer hat, which builds its south net with `full_linkstate`
+    /// false (`zenoh/src/net/routing/hat/peer/mod.rs` @ `Bound::South => {`).
+    /// On is wz's link-state peer extension (`routing/peer/mode: linkstate`,
+    /// kept on the owner's decision of 2026-08-31 so an existing deployment
+    /// still comes up). The router must follow its peers, because a mode has
+    /// to be the same across a subsystem: a link-state peer's ingest collects
+    /// every link-less gossip entry as detached, measured as three router-hat
+    /// mesh E2Es red with a gossip router and link-state peers. The router
+    /// mesh keeps full link-state either way; that is the router hat's.
+    pub fn set_peer_region_full_linkstate(&self, enabled: bool) {
+        self.mesh(PEERS_REGION)
+            .net
+            .borrow_mut()
+            .set_full_linkstate(enabled);
     }
 
     /// R2639 — emit a [`DialIntent`] for each node this ingest DISCOVERED that
@@ -8029,12 +8048,21 @@ mod tests {
         let fwd = RouterForwarder::new(zid(0x01));
         let (b, _sink) = face(zid(0xBB), WIRE_PEER);
         fwd.register(FaceId(0), &b);
-        assert_eq!(fwd.linkstatepeers_net().borrow().node_count(), 2);
-        assert!(fwd
-            .linkstatepeers_net()
-            .borrow()
-            .get_node(&zid(0xBB))
-            .is_some());
+        // R2896 (751 rules 8d+8e) — the peer region is a single-hop gossip
+        // `Network`: the face holds a LINK, and the neighbour's node waits for
+        // its own announcement (`zenoh/src/net/protocol/network.rs` @ `if self.full_linkstate || self.gossip_multihop {`).
+        // The link alone already makes it self's next hop.
+        assert!(fwd.faces.borrow()[&FaceId(0)].link.is_some());
+        let peers = fwd.linkstatepeers_net();
+        assert_eq!(
+            peers.borrow().node_count(),
+            1,
+            "no node before it announces"
+        );
+        assert_eq!(
+            peers.borrow().next_hop(&zid(0x01), &zid(0xBB)),
+            Some(zid(0xBB))
+        );
         assert_eq!(fwd.routers_net().borrow().node_count(), 1);
         assert_eq!(fwd.faces.borrow()[&FaceId(0)].tier, PEERS_REGION);
     }
@@ -8199,13 +8227,14 @@ mod tests {
     }
 
     /// R2878 (open-debt item 751, step 4) — the router is a gateway of its
-    /// SOUTH peer region and of nothing north: the G bit rides self's entry on
-    /// the wire to a Peer face and never to a Router face, as the pin seeds
-    /// each hat's net from that hat's region bound. Read off the frames each
-    /// face received, so the seam from the hat's region to the wire is what is
-    /// graded, not the graph alone.
+    /// SOUTH peer region and of nothing north, as the pin seeds each hat's net
+    /// from that hat's region bound; no self entry carrying G reaches a Router
+    /// face. R2896 (rules 8d+8e): the south region's single-hop gossip
+    /// `Network` sends a Peer face no self entry at all, and a peer learns this
+    /// router is a gateway from the link's bound (R2895), so the bit is graded
+    /// in the graph and on the router wire, and its absence on the peer wire.
     #[test]
-    fn the_router_advertises_g_into_its_south_peer_region_only() {
+    fn the_router_is_a_gateway_of_its_south_peer_region_only() {
         assert!(PEERS_REGION.bound().is_south() && ROUTERS_REGION.bound().is_north());
         let fwd = RouterForwarder::new(zid(0x01));
         let (a_r, sink_a) = face(zid(0xAA), WIRE_ROUTER);
@@ -8222,14 +8251,18 @@ mod tests {
         };
         let to_peer = own(&sink_b);
         let to_router = own(&sink_a);
-        assert!(!to_peer.is_empty(), "the Peer face received self's entry");
+        // The south region never announces self: its new-link bootstrap is the
+        // announced direct neighbours by zid and it tells existing links nothing
+        // (`zenoh/src/net/protocol/network.rs` @ `// Send all nodes linkstate on new link`).
+        // A peer takes this router's gateway bit from the link's remote bound
+        // (`zenoh/src/net/protocol/gossip.rs` @ `is_gateway: remote_bound.is_south(),`).
+        assert!(
+            to_peer.is_empty(),
+            "the south peer region is never sent self's entry"
+        );
         assert!(
             !to_router.is_empty(),
             "the Router face received self's entry"
-        );
-        assert!(
-            to_peer.iter().all(|e| e.g()),
-            "every self entry flooded into the south peer region carries G"
         );
         assert!(
             to_router.iter().all(|e| !e.g()),
@@ -8266,8 +8299,16 @@ mod tests {
             self_link_weight(fwd.routers_net(), 0xAA),
             LinkEdgeWeight::from_raw(250)
         );
+        // R2896 (751 rules 8d+8e) — the peers tier holds no self link to weigh
+        // at all: a single-hop gossip `Network` writes none, so no router
+        // weight can ride it.
         assert!(
-            !self_link_weight(fwd.linkstatepeers_net(), 0xBB).is_set(),
+            !fwd.linkstatepeers_net()
+                .borrow()
+                .get_node(&zid(0x01))
+                .expect("self")
+                .links
+                .contains_key(&zid(0xBB)),
             "the peers tier takes no router link weight"
         );
     }
@@ -12812,7 +12853,9 @@ mod tests {
         let fwd = RouterForwarder::new(zid(0x01));
         let (p, _sink) = face(zid(0xBB), WIRE_PEER);
         fwd.register(FaceId(0), &p);
-        assert_eq!(fwd.linkstatepeers_net().borrow().node_count(), 2); // self + 0xBB
+        // R2896 (751 rules 8d+8e) — self alone: the single-hop gossip `Network`
+        // learns 0xBB from 0xBB's own announcement, not from the link.
+        assert_eq!(fwd.linkstatepeers_net().borrow().node_count(), 1);
         discover_via(&fwd, FaceId(0), 0x01, 0xBB, 0xEE, 3, 5);
         assert_eq!(fwd.ingested.get(), 1);
         assert_eq!(

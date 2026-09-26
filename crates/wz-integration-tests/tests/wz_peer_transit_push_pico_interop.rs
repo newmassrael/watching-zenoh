@@ -65,7 +65,10 @@ fn wz_peer_delivers_a_transit_sourced_push_to_a_pico_client_sub() {
     let c_stderr = tempfile::tempfile().expect("tempfile for peer-C stderr");
     let (mut c_guard, mut c_reader, port_c) = spawn_on_ephemeral_port(
         &demo,
-        &["--peer", "127.0.0.1:0"],
+        // R2896 (open-debt item 751, rules 8d+8e) — the 3-peer line is wz's
+        // LINK-STATE extension, named on all three peers: only it relays for
+        // another peer, and the default became the pin's gossip mode.
+        &["--peer", "127.0.0.1:0", "--peer-mode", "linkstate"],
         "peer: listening on 127.0.0.1:",
         "peer-c",
         c_stderr,
@@ -79,6 +82,8 @@ fn wz_peer_delivers_a_transit_sourced_push_to_a_pico_client_sub() {
         &[
             "--peer",
             "127.0.0.1:0",
+            "--peer-mode",
+            "linkstate",
             "--connect",
             &format!("127.0.0.1:{port_c}"),
         ],
@@ -95,6 +100,8 @@ fn wz_peer_delivers_a_transit_sourced_push_to_a_pico_client_sub() {
         &[
             "--peer",
             "127.0.0.1:0",
+            "--peer-mode",
+            "linkstate",
             "--connect",
             &format!("127.0.0.1:{port_b}"),
             "--publish",

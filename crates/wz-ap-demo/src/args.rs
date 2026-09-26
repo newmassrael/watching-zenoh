@@ -444,6 +444,25 @@ pub(crate) fn parse_repeated(args: &[String], flag: &str) -> Vec<String> {
         .collect()
 }
 
+/// R2896 (open-debt item 751, rules 8d+8e) — `--peer-mode <peer-to-peer|linkstate>`,
+/// read the same way by both mesh run-modes: `Ok(true)` is wz's link-state
+/// peer extension, `Ok(false)` gossip, and absence is gossip because that is
+/// the pin's only peer mode (its peer hat passes `full_linkstate` false,
+/// `zenoh/src/net/routing/hat/peer/mod.rs` @ `Bound::South => {`). A router
+/// reads it too because a mode has to be the same across a subsystem: the
+/// router's peer region must run what its peers run. `Err` names the bad
+/// value. Gated on the two consumers, as `parse_max_sessions` below is.
+#[cfg(any(feature = "routing-peer", feature = "router-hat-router"))]
+pub(crate) fn parse_peer_mode(args: &[String]) -> Result<bool, String> {
+    match parse_pair(args, "--peer-mode").as_deref() {
+        None | Some("peer-to-peer") => Ok(false),
+        Some("linkstate") => Ok(true),
+        Some(other) => Err(format!(
+            "--peer-mode {other}: expected `peer-to-peer` or `linkstate`"
+        )),
+    }
+}
+
 /// R2758 — `--max-sessions <N>`, read the same way by every run-mode.
 ///
 /// A FREE FUNCTION rather than a local in one branch, because two run-modes
@@ -1530,8 +1549,8 @@ pub(crate) fn expand_stock_zenoh_config_for_build(
     // R2063 (open-debt item 214) — `routing/peer/mode` reaches the flag that
     // implements it.
     //
-    // Emitted only for `peer-to-peer`, because `linkstate` is what an absent
-    // `--peer-mode` already means: adding the flag for the default would put a
+    // Emitted only for the value that differs from an absent `--peer-mode`
+    // (`linkstate` since R2896, below): adding the flag for the default would put a
     // word on the command line that changes nothing, and R311y844's rule for
     // this expansion is that an added flag is a DIFFERENCE the file asked for.
     // Withheld when the operator typed the flag, on the same rule every arm
@@ -1578,14 +1597,18 @@ pub(crate) fn expand_stock_zenoh_config_for_build(
             );
         }
     }
+    // R2896 (open-debt item 751, rules 8d+8e) — the expansion now runs the
+    // other way: `peer-to-peer` is what an absent `--peer-mode` means, so it
+    // is the file stating the default, and `linkstate` is the difference that
+    // earns the flag. Both mesh run-modes read it (`args::parse_peer_mode`).
     if named("routing/peer/mode") {
-        if cfg.peer_linkstate {
+        if !cfg.peer_linkstate {
             exp.record("routing/peer/mode", KeyEffect::AlreadyTheBehaviour);
         } else {
             exp.pair(
                 "routing/peer/mode",
                 "--peer-mode",
-                String::from("peer-to-peer"),
+                String::from("linkstate"),
                 None,
             );
         }
@@ -4412,15 +4435,15 @@ mod stock_config_tests {
                 r#"{ listen: { endpoints: ["tcp/0.0.0.0:7447"] },
                      transport: { multicast: { qos: { enabled: true } } } }"#,
             ),
-            // R2063 (open-debt item 214) — `peer-to-peer` and not the default,
-            // for the reason the `scouting/multicast/listen` row above states:
-            // the delta this gate looks for is a VALUE the file asked for, and
-            // `linkstate` is what an absent flag already means.
+            // R2063 (open-debt item 214) — the non-default value, for the reason
+            // the `scouting/multicast/listen` row above states: the delta this
+            // gate looks for is a VALUE the file asked for. R2896 (item 751):
+            // `peer-to-peer` is now what an absent flag means, so `linkstate`.
             (
                 "routing/peer/mode",
                 LISTEN_ONLY,
                 r#"{ listen: { endpoints: ["tcp/0.0.0.0:7447"] },
-                     routing: { peer: { mode: "peer-to-peer" } } }"#,
+                     routing: { peer: { mode: "linkstate" } } }"#,
             ),
             (
                 "transport/shared_memory/enabled",

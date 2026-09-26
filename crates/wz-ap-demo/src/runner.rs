@@ -5828,6 +5828,11 @@ pub(crate) struct RouterHatOpts {
     /// judged too. Two entry points with one rule, rather than one rule per
     /// entry point.
     pub router_link_weights: Vec<wz::runtime_tokio::linkstate_forward::TransportWeight>,
+    /// R2896 (open-debt item 751, rules 8d+8e) — `--peer-mode linkstate` on a
+    /// router: its south peer region runs wz's link-state peer extension, so a
+    /// subsystem of link-state peers keeps meshing through it. Off (gossip) is
+    /// the pin's and the default.
+    pub peer_region_full_linkstate: bool,
 }
 
 #[cfg(feature = "router-hat-router")]
@@ -6137,6 +6142,9 @@ async fn run_router_hat_until(
     // config-file path is judged: one rule for both entry points. Hard error,
     // never a degraded default — the silently-dropped weight is the failure mode
     // that looks healthy.
+    // R2896 (751 rules 8d+8e) — the south peer region's mode, before any face
+    // registers: a link's graph shape is decided when it is added.
+    forwarder.set_peer_region_full_linkstate(opts.peer_region_full_linkstate);
     {
         let count = host_cfg.borrow().router_link_weights().len();
         match host_cfg.borrow().install_router_link_weights(&forwarder) {
