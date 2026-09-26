@@ -559,7 +559,10 @@ group = ["wz/ext-pubsub-group-membership"]
 # announced the Peer wire value and forwarded single-hop, a mode the pin does
 # not have (its hats are broker, client, peer and router), while a stock
 # config's `mode: router` already expanded to `--router-hat`.
-routing-router = ["wz/routing-router", "router-hat-router"]
+#
+# R2891 — the pin's router carries tokens unconditionally, so the atom pulls
+# the demo's `routing-token-tables` too (its witnesses sit in `run_router_hat`).
+routing-router = ["wz/routing-router", "router-hat-router", "routing-token-tables"]
 # R311qc — opt-in data-plane FORWARDING for `--router`: the catalog
 # `routing-routes` atom. Forwards the facade `routing-routes`. NOT in `default`.
 # R2886 — `--router` routes through the router hat whatever this says; the star

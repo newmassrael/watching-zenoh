@@ -507,11 +507,19 @@ routing-peer = ["transport-link-tcp", "transport-unicast", "wz-runtime-tokio?/ro
 # beside this atom rather than under it, so a build that asked for the router
 # got the accept loop and, in the demo, a star concentrator the pin does not
 # have.
+#
+# R2891 — and the pin's router carries the liveliness-token plane
+# unconditionally (`hat/router/token.rs` is a module of its router hat, not an
+# option), so this atom pulls `routing-token-tables` too. R2886 left it out,
+# and a `--router` built with `routing-router` alone dropped every pico token
+# the star it replaced had carried (Layer E3,
+# `wz_router_routes_liveliness_pico_interop`).
 routing-router = [
     "transport-link-tcp",
     "transport-unicast",
     "wz-runtime-tokio?/routing-accept",
     "routing-router-hat",
+    "routing-token-tables",
 ]
 # R311qc — routing-routes now composes REAL library code (the data-plane
 # forwarding kernel + the tokio RoutingForwarder), no longer a hollow marker:
