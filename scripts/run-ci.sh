@@ -11392,7 +11392,7 @@ layer_c1bz_docs_resolve() {
         wz-capi-pico:44
         wz-link-lwip:9
         wz-mcu-session-acceptor:4
-        wz-routing-graph:6
+        wz-routing-graph:5
         wz-runtime-coop:12
         wz-runtime-tokio:498
         wz-session-core:530

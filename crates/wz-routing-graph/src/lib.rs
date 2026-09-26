@@ -682,27 +682,29 @@ impl Link {
 enum Details {
     Full,
     LinksOnly,
+    /// zid, NO links — also the shape zenoh's GOSSIP re-flood uses
+    /// (`zenoh/src/net/protocol/network.rs` @ `links: false,`): a gossip mesh
+    /// advertises WHERE a node is, never how it is wired.
     ZidOnly,
-    /// zid + locators, NO links — the shape zenoh's GOSSIP (`peer_to_peer`)
-    /// re-flood uses (`network.rs:594-602` passes `Details { zid: true, links:
-    /// false, .. }` and `send_on_links` then fills `locators` from
-    /// [`propagate_locators`](LinkstateNetwork::propagate_locators)). A gossip
-    /// mesh advertises WHERE a node is, never how it is wired: the receiver in
-    /// that mode builds no edges, so links would be bytes nobody reads.
-    /// Distinct from [`ZidOnly`](Self::ZidOnly), which carries neither.
-    NodeOnly,
 }
 
 impl Details {
-    /// `(carry_zid, carry_links, carry_locators)` — the `LinkState` field gates
-    /// this variant selects, the form [`make_link_state`](LinkstateNetwork::make_link_state)
-    /// consumes (mirroring zenoh's `Details { zid, links, locators }` bool fields).
-    fn fields(self) -> (bool, bool, bool) {
+    /// `(carry_zid, carry_links)` — the `LinkState` field gates this variant
+    /// selects, the form [`make_link_state`](LinkstateNetwork::make_link_state)
+    /// consumes.
+    ///
+    /// R2897 — there is NO locators column, because the pin has none that
+    /// matters: every send overwrites the caller's choice with the per-node
+    /// gate (`zenoh/src/net/protocol/network.rs` @ `idx.1.locators = self.propagate_locators(idx.0, transport);`).
+    /// wz used to let the variant decide, so a links-only update or a zid-only
+    /// introduction left out the self and direct-neighbour locators the pin
+    /// sends with them, and a separate zid-plus-locators variant existed only
+    /// to put them back for the gossip re-flood.
+    fn fields(self) -> (bool, bool) {
         match self {
-            Details::Full => (true, true, true),
-            Details::LinksOnly => (false, true, false),
-            Details::ZidOnly => (true, false, false),
-            Details::NodeOnly => (true, false, true),
+            Details::Full => (true, true),
+            Details::LinksOnly => (false, true),
+            Details::ZidOnly => (true, false),
         }
     }
 }
@@ -1025,8 +1027,9 @@ impl LinkstateNetwork {
         self.gossip_multihop || self.links.values().any(|link| link.zid == *zid)
     }
 
-    /// Build the gossip (`peer_to_peer`) re-flood list: one
-    /// [`Details::NodeOnly`] entry per node — zid + locators, no links. The
+    /// Build the gossip (`peer_to_peer`) re-flood list: one zid-only entry per
+    /// node, which carries its locators where the per-node gate admits them
+    /// (see `Details::fields`) and no links. The
     /// gossip-mode counterpart of
     /// [`build_linkstate_split`](Self::build_linkstate_split), which is the
     /// linkstate-mode shape.
@@ -1035,7 +1038,7 @@ impl LinkstateNetwork {
             nodes
                 .iter()
                 .filter_map(|zid| self.get_idx(zid))
-                .map(|idx| self.make_link_state(idx, Details::NodeOnly))
+                .map(|idx| self.make_link_state(idx, Details::ZidOnly))
                 .collect(),
         )
     }
@@ -1497,7 +1500,7 @@ impl LinkstateNetwork {
     /// preserve-on-None rule keeps them across the links-only updates that follow.
     fn make_link_state(&self, idx: NodeIndex, details: Details) -> LinkstateOwned {
         let node = &self.graph[idx];
-        let (want_zid, want_links, want_locators) = details.fields();
+        let (want_zid, want_links) = details.fields();
         // links: resolve each neighbour zid to its local psid, with a weight per
         // link (zenoh make_link_state, `network.rs:308-325`) — ONLY when the
         // variant carries links; an entry that omits links (a zid-only neighbour
@@ -1529,20 +1532,19 @@ impl LinkstateNetwork {
                 }
             }
         }
-        // locators: the node's dial addresses, carried only by the FULL form
-        // (`want_locators`) and only when the node actually has some — a
-        // links-only/zid-only re-advertisement omits them, and the receiver
-        // keeps what it learned (the ingest's preserve-on-None rule). zenoh
-        // `make_link_state` `network.rs:336-341` (self reads the live
-        // `runtime.get_locators()`; wz stores self's locators on the self node,
-        // so both self and others read `node.locators` uniformly here).
-        // Even on the FULL form, a node's locators ride only when zenoh's
-        // per-source `propagate_locators` gate admits it (self or a direct
-        // neighbour) — a distant multihop node's reachability addresses are
-        // withheld, so locators travel one hop (the A4b TX complement of A4a's
-        // per-face gossip-target gate). `want_locators` selects the FULL form;
-        // the gate then narrows which sources within it actually advertise.
-        let locators = (want_locators && self.propagate_locators(idx))
+        // locators: the node's dial addresses, whenever zenoh's per-source
+        // `propagate_locators` gate admits the node (self or a direct
+        // neighbour, or every node under multihop) and the node has some, on
+        // EVERY form. R2897: the pin overwrites whatever the caller asked for
+        // with that gate on each send
+        // (`zenoh/src/net/protocol/network.rs` @ `idx.1.locators = self.propagate_locators(idx.0, transport);`),
+        // so a links-only update or a zid-only introduction carries them too;
+        // wz used to carry them on the full form only. Self reads the live
+        // `runtime.get_locators()` upstream; wz stores self's locators on the
+        // self node, so both read `node.locators` here. The per-TARGET half of
+        // the gate (`gossip_target`) is the driver's fan-out.
+        let locators = self
+            .propagate_locators(idx)
             .then(|| node.locators.as_deref().and_then(locators_to_wire))
             .flatten();
         // options: P (zid) set iff the variant carries the zid (the codec gates
@@ -1622,10 +1624,11 @@ impl LinkstateNetwork {
     /// (`zenoh/src/net/protocol/gossip.rs` @ `links: remote_bound.is_south(),`);
     /// its links are self's alone (`zenoh/src/net/protocol/gossip.rs` @ `let links = if details.links && idx == self.idx {`).
     ///
-    /// ⚠ The linkstate arm returns [`build_linkstate_list`](Self::build_linkstate_list)
-    /// unchanged, locators included, where the pin's bootstrap carries none;
-    /// that divergence predates this round and is registered, not repaired
-    /// here.
+    /// Locators ride every form where the per-node gate admits them (see
+    /// `Details::fields`). ⛔ R2897 CORRECTS R2893, which wrote here that the
+    /// pin's bootstrap "carries none" and registered that as a divergence: the
+    /// pin's own send overwrites the bootstrap's locator choice with the gate,
+    /// so it carries them exactly as wz's full list does.
     pub fn build_new_link_bootstrap(&self, new_link: LinkId) -> LinkstateListOwned {
         if self.is_single_hop_gossip() {
             let to_gateway = self
@@ -1639,7 +1642,7 @@ impl LinkstateNetwork {
                         let details = if idx == self.idx && to_gateway {
                             Details::Full
                         } else {
-                            Details::NodeOnly
+                            Details::ZidOnly
                         };
                         self.make_link_state(idx, details)
                     })
@@ -3320,7 +3323,7 @@ mod tests {
     /// `Network` and a peer's `Gossip` graph take the SAME links and answer
     /// differently, each as its pin object does. The `Network` keeps the link
     /// alone, bootstraps a new link with its announced direct neighbours by
-    /// zid (never self, never links or locators), tells existing and surviving
+    /// zid (never self, never links), tells existing and surviving
     /// links nothing, and hands back a departed neighbour it never held a node
     /// for. The `Gossip` graph keeps wz's earlier port: a node per link and
     /// self in the full bootstrap. Side by side, so neither can pass by
@@ -3378,6 +3381,61 @@ mod tests {
             .build_link_added_delta_for_existing(&near, false)
             .is_some());
         assert!(gossip.build_link_removed_delta().is_some());
+    }
+
+    /// R2897 — locators are decided per NODE, never per form: the pin
+    /// overwrites every entry's locator choice with its gate on each send
+    /// (`zenoh/src/net/protocol/network.rs` @ `idx.1.locators = self.propagate_locators(idx.0, transport);`).
+    /// So self's links-only update and a neighbour's zid-only introduction
+    /// carry the locators the gate admits, and a distant node's are withheld
+    /// on every form alike. A distant node is set beside the two admitted ones
+    /// so the gate, not a blanket rule, is what is graded.
+    #[test]
+    fn every_form_carries_the_locators_the_gate_admits() {
+        let (me, near, far) = (zid(0x01), zid(0xAA), zid(0xCC));
+        let mut net = LinkstateNetwork::new(me, WhatAmI::Router);
+        net.set_self_locators(vec!["tcp/10.0.0.1:7447".to_string()]);
+        net.add_link(near, WhatAmI::Router);
+        // `near` announces itself with a locator and a link to `far`, which
+        // announces its own locator: `far` is known but not a neighbour.
+        let mut near_graph = LinkstateNetwork::new(near, WhatAmI::Router);
+        near_graph.set_self_locators(vec!["tcp/10.0.0.2:7447".to_string()]);
+        near_graph.add_link(me, WhatAmI::Router);
+        near_graph.add_link(far, WhatAmI::Router);
+        let mut far_graph = LinkstateNetwork::new(far, WhatAmI::Router);
+        far_graph.set_self_locators(vec!["tcp/10.0.0.3:7447".to_string()]);
+        let far_link = near_graph.add_link(far, WhatAmI::Router);
+        near_graph.ingest_linkstate_list(far_link, far_graph.build_linkstate_list());
+        let link_from_near = net
+            .links
+            .iter()
+            .find(|(_, l)| l.zid == near)
+            .map(|(id, _)| *id)
+            .expect("the link to near");
+        net.ingest_linkstate_list(link_from_near, near_graph.build_linkstate_list());
+        assert!(net.get_node(&far).is_some(), "far is known");
+
+        let self_update = net.build_self_links_delta();
+        assert!(
+            self_update.link_states[0].locators.is_some(),
+            "self's links-only update carries self's locators"
+        );
+        let introduction = net.build_link_added_delta(&near);
+        let near_entry = introduction
+            .link_states
+            .iter()
+            .find(|e| e.zid.is_some())
+            .expect("the neighbour's zid-only entry");
+        assert!(
+            near_entry.locators.is_some(),
+            "a direct neighbour's zid-only introduction carries its locators"
+        );
+        let far_idx = net.get_idx(&far).expect("far indexed");
+        let far_entry = net.make_link_state(far_idx, Details::Full);
+        assert!(
+            far_entry.locators.is_none(),
+            "a distant node's locators are withheld even on the full form"
+        );
     }
 
     /// R2894b (open-debt item 751, rule 8e) — a peer's single-hop `Gossip`
@@ -4372,18 +4430,18 @@ mod tests {
         // receiver, one flag apart — which is what made a wz peer in a
         // default-configured zenoh subsystem see its sibling and forget it.
         let (list, third) = gossip_announcement_about_a_third_party();
-        assert_eq!(list.link_states.len(), 1, "one NodeOnly entry");
+        assert_eq!(list.link_states.len(), 1, "one zid-only entry");
         assert!(
             list.link_states[0].zid.is_some(),
-            "NodeOnly carries the zid"
+            "the gossip entry carries the zid"
         );
         assert!(
             list.link_states[0].locators.is_some(),
-            "NodeOnly carries the locators — without them it is not a dial candidate"
+            "the gossip entry carries the locators — without them it is not a dial candidate"
         );
         assert!(
             list.link_states[0].links.is_empty(),
-            "NodeOnly carries NO links; a gossip mesh advertises WHERE, not how-wired"
+            "the gossip entry carries NO links; a gossip mesh advertises WHERE, not how-wired"
         );
 
         // GOSSIP receiver: the node stands and is reported for discovery.
