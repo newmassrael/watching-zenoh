@@ -483,12 +483,17 @@ struct MeshHat {
 
 impl MeshHat {
     /// Every mesh net of a router is seeded as a Router node, as before.
-    fn new(self_zid: Zid) -> Self {
+    ///
+    /// R2878 (open-debt item 751, step 4) — and as a gateway of `region`
+    /// exactly when `region` lies south, so the router advertises the G bit in
+    /// the net of its south peer region and not in the router mesh, as the pin
+    /// seeds each hat's net from that hat's region
+    /// (`zenoh/src/net/routing/hat/router/mod.rs` @ `self.region().bound(),`).
+    fn new(region: Region, self_zid: Zid) -> Self {
+        let net =
+            LinkstateNetwork::new_in_region(self_zid, WhatAmI::Router, region.bound().is_south());
         Self {
-            net: Rc::new(RefCell::new(LinkstateNetwork::new(
-                self_zid,
-                WhatAmI::Router,
-            ))),
+            net: Rc::new(RefCell::new(net)),
             trees_dirty: Cell::new(false),
             subs: Rc::new(RefCell::new(LinkstatepeerInterest::new())),
             qabls: Rc::new(RefCell::new(LinkstatepeerInterest::new())),
@@ -593,7 +598,7 @@ impl Hat {
         if is_leaf(region) {
             Hat::Broker(BrokerHat::new())
         } else {
-            Hat::Mesh(MeshHat::new(self_zid))
+            Hat::Mesh(MeshHat::new(region, self_zid))
         }
     }
 
@@ -7783,6 +7788,71 @@ mod tests {
             },
             other => panic!("expected a flooded OAM, got {other:?}"),
         }
+    }
+
+    /// Every link-state entry `sink` received, from whichever of its frames are
+    /// link-state OAMs, in order.
+    fn received_link_states(sink: &RecordingLinkDriver) -> Vec<LinkstateOwned> {
+        use crate::session_glue::{parse_frame_payload, parse_inbound, InboundFrame};
+        let mut out = Vec::new();
+        for i in 0..sink.frame_count() {
+            let Ok(InboundFrame::Frame { payload, .. }) = parse_inbound(&sink.frame_bytes(i))
+            else {
+                continue;
+            };
+            for msg in parse_frame_payload(&payload).expect("parse frame payload") {
+                if let NetworkMessage::Oam(oam) = msg {
+                    if let LinkstateOam::Decoded(list) = try_parse_linkstate_oam(&oam) {
+                        out.extend(list.link_states);
+                    }
+                }
+            }
+        }
+        out
+    }
+
+    /// R2878 (open-debt item 751, step 4) — the router is a gateway of its
+    /// SOUTH peer region and of nothing north: the G bit rides self's entry on
+    /// the wire to a Peer face and never to a Router face, as the pin seeds
+    /// each hat's net from that hat's region bound. Read off the frames each
+    /// face received, so the seam from the hat's region to the wire is what is
+    /// graded, not the graph alone.
+    #[test]
+    fn the_router_advertises_g_into_its_south_peer_region_only() {
+        assert!(PEERS_REGION.bound().is_south() && ROUTERS_REGION.bound().is_north());
+        let fwd = RouterForwarder::new(zid(0x01));
+        let (a_r, sink_a) = face(zid(0xAA), WIRE_ROUTER);
+        let (b_p, sink_b) = face(zid(0xBB), WIRE_PEER);
+        fwd.register(FaceId(0), &a_r);
+        fwd.register(FaceId(1), &b_p);
+        fwd.tick();
+
+        let own = |sink: &RecordingLinkDriver| -> Vec<LinkstateOwned> {
+            received_link_states(sink)
+                .into_iter()
+                .filter(|e| e.psid == 0)
+                .collect()
+        };
+        let to_peer = own(&sink_b);
+        let to_router = own(&sink_a);
+        assert!(!to_peer.is_empty(), "the Peer face received self's entry");
+        assert!(
+            !to_router.is_empty(),
+            "the Router face received self's entry"
+        );
+        assert!(
+            to_peer.iter().all(|e| e.g()),
+            "every self entry flooded into the south peer region carries G"
+        );
+        assert!(
+            to_router.iter().all(|e| !e.g()),
+            "no self entry flooded into the north router region carries G"
+        );
+        assert_eq!(
+            fwd.linkstatepeers_net().borrow().gateways(),
+            vec![zid(0x01)]
+        );
+        assert!(fwd.routers_net().borrow().gateways().is_empty());
     }
 
     /// A weight configured before a Router face registers is the weight its

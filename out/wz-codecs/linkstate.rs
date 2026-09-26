@@ -1,4 +1,4 @@
-// SCE-MAP: linkstate:105 :: _forge_body
+// SCE-MAP: linkstate:109 :: _forge_body
 
 // SCE Forge: Auto-generated from Extended SCXML (sce:kind="codec")
 // Runtime: none
@@ -210,6 +210,18 @@ impl<'a> Linkstate<'a> {
         }
     }
 
+    pub fn g(&self) -> bool {
+        (self.options & 0x10) != 0
+    }
+
+    pub fn set_g(&mut self, v: bool) {
+        if v {
+            self.options |= 0x10;
+        } else {
+            self.options &= !0x10;
+        }
+    }
+
     /// Worst-case encoded byte count for this codec — the upper bound
     /// against which `VecSink::new` reserves capacity in the
     /// `encode_to_vec` facade, and the natural reserve hint for
@@ -356,6 +368,10 @@ impl<S: ::sce_forge_runtime::codec::CodecStorage> LinkstateOwned<S> {
 
     pub fn h(&self) -> bool {
         (self.options & 0x08) != 0
+    }
+
+    pub fn g(&self) -> bool {
+        (self.options & 0x10) != 0
     }
 }
 

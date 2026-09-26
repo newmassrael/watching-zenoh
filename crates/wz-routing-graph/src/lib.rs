@@ -123,6 +123,10 @@ const OPT_P: u8 = 0x01;
 const OPT_W: u8 = 0x02;
 const OPT_L: u8 = 0x04;
 const OPT_H: u8 = 0x08;
+/// R2878 (open-debt item 751, step 4) — G: the node is a region gateway. A flag
+/// that gates no field
+/// (`zenoh/src/net/protocol/linkstate.rs` @ `pub const GWY: u64 = 1 << 4;`).
+const OPT_G: u8 = 0x10;
 
 /// The sub-1% tie-break budget the edge jitter rides on (zenoh
 /// `network.rs:453`): equal base-weight edges differ by at most this
@@ -436,6 +440,7 @@ struct ResolvedEntry {
     links: Vec<LinkstateLink>,
     weights: Option<Vec<LinkstateWeight>>,
     locators: Option<Vec<String>>,
+    is_gateway: bool,
 }
 
 /// An edge weight (zenoh `LinkEdgeWeight`, `net/protocol/linkstate.rs:54`):
@@ -576,6 +581,12 @@ pub struct Node {
     pub locators: Option<Vec<String>>,
     pub sn: u64,
     pub links: HashMap<Zid, LinkEdgeWeight>,
+    /// R2878 (open-debt item 751, step 4) — whether the node is a region
+    /// gateway, as the node itself advertised it (the G bit); several nodes of
+    /// one net may carry it (`zenoh/src/net/protocol/network.rs`
+    /// @ `pub(crate) is_gateway: bool,`). Self's is fixed by
+    /// [`LinkstateNetwork::new_in_region`].
+    pub is_gateway: bool,
 }
 
 /// Per-link routing state — the `psid -> zid` translation a received
@@ -698,6 +709,7 @@ struct LocalLinkState {
     whatami: WhatAmI,
     links: HashMap<Zid, LinkEdgeWeight>,
     locators: Option<Vec<String>>,
+    is_gateway: bool,
 }
 
 /// What a LinkStateList ingest changed, split the way zenoh's re-flood needs:
@@ -798,6 +810,16 @@ impl LinkstateNetwork {
     /// A graph seeded with the local (self) node — sn starts at 1, as in
     /// zenoh `Network::new` (`network.rs:156-162`).
     pub fn new(self_zid: Zid, self_whatami: WhatAmI) -> Self {
+        Self::new_in_region(self_zid, self_whatami, false)
+    }
+
+    /// R2878 (open-debt item 751, step 4) — [`new`](Self::new) for a net that
+    /// serves a region, with self a gateway of it exactly when the region lies
+    /// south: the pin seeds its self node that way, at sn 1, and never changes
+    /// it (`zenoh/src/net/protocol/network.rs` @ `is_gateway: bound.is_south(),`).
+    /// [`new`](Self::new) is the north-bound case, as the pin's
+    /// `Bound::default()` is `North`.
+    pub fn new_in_region(self_zid: Zid, self_whatami: WhatAmI, is_gateway: bool) -> Self {
         let mut graph = StableUnGraph::default();
         let idx = graph.add_node(Node {
             zid: self_zid,
@@ -805,6 +827,7 @@ impl LinkstateNetwork {
             locators: None,
             sn: 1,
             links: HashMap::new(),
+            is_gateway,
         });
         let mut idx_by_zid = HashMap::new();
         idx_by_zid.insert(self_zid, idx);
@@ -854,6 +877,33 @@ impl LinkstateNetwork {
     /// signature-stable default for a node that does not announce locators).
     pub fn set_self_locators(&mut self, locators: Vec<String>) {
         self.graph[self.idx].locators = (!locators.is_empty()).then_some(locators);
+    }
+
+    /// The nodes of this net that advertise themselves as region gateways,
+    /// self included (`zenoh/src/net/routing/hat/router/mod.rs`
+    /// @ `.filter_map(|n| n.is_gateway.then_some(n.zid))`).
+    pub fn gateways(&self) -> Vec<Zid> {
+        self.graph
+            .node_weights()
+            .filter(|node| node.is_gateway)
+            .map(|node| node.zid)
+            .collect()
+    }
+
+    /// The gateways `zid` itself links to, or `None` when `zid` is not in the
+    /// net: the candidates the pin's inter-region filter picks the forwarding
+    /// gateway from
+    /// (`zenoh/src/net/routing/hat/router/mod.rs` @ `.filter_map(|n| (n.is_gateway && node.links.contains_key(&n.zid)).then_some(n.zid))`).
+    /// The links read are the ones `zid` ADVERTISED, not the graph's edges.
+    pub fn gateways_of(&self, zid: &Zid) -> Option<Vec<Zid>> {
+        let node = self.get_node(zid)?;
+        Some(
+            self.graph
+                .node_weights()
+                .filter(|n| n.is_gateway && node.links.contains_key(&n.zid))
+                .map(|n| n.zid)
+                .collect(),
+        )
     }
 
     /// Enable or disable zenoh `gossip_multihop` (`scouting.gossip.multihop`).
@@ -1071,6 +1121,9 @@ impl LinkstateNetwork {
             locators: None,
             sn: 0,
             links: HashMap::new(),
+            // a placeholder carries no bit until its own link-state does, as
+            // the pin's reintroduced node does not.
+            is_gateway: false,
         })
     }
 
@@ -1095,6 +1148,9 @@ impl LinkstateNetwork {
                 locators: None,
                 sn: 0,
                 links: HashMap::new(),
+                // the pin's `Network::add_link` introduces the neighbour
+                // without the bit; its own link-state brings it.
+                is_gateway: false,
             });
         }
         let weight = self
@@ -1388,6 +1444,12 @@ impl LinkstateNetwork {
         if has_weight {
             options |= OPT_H;
         }
+        // R2878 — G on every entry whose node is a gateway, relayed ones
+        // included, on every form (`zenoh/src/net/protocol/network.rs`
+        // @ `is_gateway: self.graph[idx].is_gateway,`).
+        if node.is_gateway {
+            options |= OPT_G;
+        }
         LinkstateOwned {
             options,
             psid: local_psid(idx),
@@ -1532,6 +1594,8 @@ impl LinkstateNetwork {
                 .expect("link present (checked above)");
             let mut resolved = Vec::with_capacity(list.link_states.len());
             for entry in list.link_states {
+                // The G bit, read before any field moves out of `entry`.
+                let is_gateway = entry.g();
                 // The entry's own zid: present (register the psid->zid
                 // mapping) or referenced by a previously-learned psid.
                 let zid = match entry.zid {
@@ -1588,6 +1652,7 @@ impl LinkstateNetwork {
                 resolved.push(ResolvedEntry {
                     zid,
                     whatami,
+                    is_gateway,
                     sn: entry.sn,
                     links: entry.links,
                     weights: entry.weights,
@@ -1616,6 +1681,7 @@ impl LinkstateNetwork {
                      links: entry_links,
                      weights,
                      locators,
+                     is_gateway,
                  }| {
                     let mut links = HashMap::with_capacity(entry_links.len());
                     for (i, link) in entry_links.iter().enumerate() {
@@ -1646,6 +1712,7 @@ impl LinkstateNetwork {
                         whatami,
                         links,
                         locators,
+                        is_gateway,
                     }
                 },
             )
@@ -1687,6 +1754,7 @@ impl LinkstateNetwork {
                         locators: ls.locators,
                         sn: ls.sn,
                         links: ls.links,
+                        is_gateway: ls.is_gateway,
                     }),
                     true,
                 ),
@@ -1700,6 +1768,10 @@ impl LinkstateNetwork {
                     let was_placeholder = node.sn == 0;
                     node.sn = ls.sn;
                     node.links = ls.links;
+                    // R2878 — a newer link-state restates the gateway bit, and
+                    // a cleared bit clears it
+                    // (`zenoh/src/net/protocol/network.rs` @ `node.is_gateway = ls.is_gateway;`).
+                    node.is_gateway = ls.is_gateway;
                     // Backfill the role of a node first seen as a link TARGET (a
                     // whatami-less `ensure_node` placeholder) when its own
                     // link-state arrives via this update path. ONLY when the
@@ -1792,6 +1864,10 @@ impl LinkstateNetwork {
                         locators: ls.locators,
                         sn: ls.sn,
                         links: ls.links,
+                        // R2878 — the gossip ingest takes the bit on INSERT only;
+                        // its update arm below leaves it, as the pin's does
+                        // (`zenoh/src/net/protocol/network.rs` @ `fn process_singlehop_gossip_linkstate`).
+                        is_gateway: ls.is_gateway,
                     });
                     changes.new.push(ls.zid);
                 }
@@ -2553,8 +2629,9 @@ mod tests {
     use wz_codecs::linkstate_link::LinkstateLink;
     use wz_codecs::linkstate_list::LinkstateList;
 
-    /// Build a LinkState entry. `options` is unused by the ingest (it reads
-    /// the typed `Option` fields, not the flag byte), so it is left 0.
+    /// Build a LinkState entry. The ingest reads the typed `Option` fields,
+    /// not their flag bits, so `options` is left 0; the one bit it reads is G,
+    /// which gates no field (see [`gateway`]).
     fn entry(
         psid: u64,
         sn: u64,
@@ -4598,6 +4675,198 @@ mod tests {
             b.node_locators(&zid(0x0A)),
             Some(["tcp/10.0.0.10:7447".to_string()].as_slice()),
             "A's locators survived encode->decode->ingest (OPT_L + num_locators consistent)"
+        );
+    }
+
+    // ── R2878 (open-debt item 751, step 4): the G (region-gateway) bit ──
+
+    /// `e` with the G bit set, as a south-bound node advertises itself.
+    fn gateway(mut e: LinkstateOwned) -> LinkstateOwned {
+        e.options |= OPT_G;
+        e
+    }
+
+    /// Build -> encode -> decode -> ingest: a south-bound net's self entry
+    /// carries G on the wire as byte bit 4, and the receiver records it.
+    #[test]
+    fn a_south_bound_net_advertises_g_and_the_receiver_records_it() {
+        let mut north = LinkstateNetwork::new(zid(0x0A), WhatAmI::Router);
+        north.add_link(zid(0x0B), WhatAmI::Peer);
+        assert!(
+            north
+                .build_linkstate_list()
+                .link_states
+                .iter()
+                .all(|e| !e.g()),
+            "`new` is the north-bound net: no entry carries G"
+        );
+
+        let mut a = LinkstateNetwork::new_in_region(zid(0x0A), WhatAmI::Router, true);
+        assert_eq!(
+            a.get_node(&zid(0x0A)).unwrap().sn,
+            1,
+            "seeded at sn 1, as the pin's self node"
+        );
+        a.add_link(zid(0x0B), WhatAmI::Peer);
+        let wire = a
+            .build_linkstate_list()
+            .try_as_borrowed()
+            .expect("borrow built list")
+            .encode_to_vec();
+        let decoded = LinkstateList::decode(&mut SceCursor::new(&wire))
+            .expect("decode list wire")
+            .try_into_owned()
+            .expect("into owned");
+        let own = decoded
+            .link_states
+            .iter()
+            .find(|e| e.psid == 0)
+            .expect("A's own entry is psid 0");
+        assert_eq!(own.options & 0x10, 0x10, "G is bit 4 of the options byte");
+        assert!(
+            decoded
+                .link_states
+                .iter()
+                .filter(|e| e.psid != 0)
+                .all(|e| !e.g()),
+            "only self is a gateway here, so no other entry carries G"
+        );
+
+        let mut b = LinkstateNetwork::new(zid(0x0B), WhatAmI::Peer);
+        let lb_a = b.add_link(zid(0x0A), WhatAmI::Router);
+        b.ingest_linkstate_list(lb_a, decoded);
+        assert!(
+            b.get_node(&zid(0x0A)).unwrap().is_gateway,
+            "B recorded A as a gateway"
+        );
+        assert!(
+            !b.get_node(&zid(0x0B)).unwrap().is_gateway,
+            "and not itself"
+        );
+        assert_eq!(b.gateways(), vec![zid(0x0A)]);
+    }
+
+    /// Every form of a gateway's entry carries G, a relayed one included: the
+    /// pin reads the bit off the node, not off the entry's details.
+    #[test]
+    fn every_form_of_a_gateways_entry_carries_g() {
+        let mut net = LinkstateNetwork::new(zid(0x01), WhatAmI::Peer);
+        let link = net.add_link(zid(0x07), WhatAmI::Peer);
+        net.ingest_linkstate_list(
+            link,
+            list(vec![
+                gateway(entry(10, 5, Some(&zid(0xAA)), Some(1), &[])),
+                relay(1, &[10]),
+            ]),
+        );
+        let full = net.build_linkstate_split(&[zid(0xAA)], &[]);
+        let links_only = net.build_linkstate_split(&[], &[zid(0xAA)]);
+        let gossip = net.build_linkstate_gossip(&[zid(0xAA), zid(0x07)]);
+        assert!(full.link_states[0].g(), "full");
+        assert!(links_only.link_states[0].g(), "links-only");
+        assert!(gossip.link_states[0].g(), "node-only (gossip)");
+        assert!(
+            !gossip.link_states[1].g(),
+            "a non-gateway relay does not carry it"
+        );
+    }
+
+    /// The linkstate ingest restates the bit on every newer state, so a
+    /// cleared bit clears it; a stale state changes nothing.
+    #[test]
+    fn a_newer_link_state_restates_the_gateway_bit() {
+        let mut net = LinkstateNetwork::new(zid(0x01), WhatAmI::Peer);
+        let link = net.add_link(zid(0x07), WhatAmI::Peer);
+        net.ingest_linkstate_list(
+            link,
+            list(vec![
+                relay(1, &[10]),
+                gateway(entry(10, 5, Some(&zid(0xAA)), Some(1), &[])),
+            ]),
+        );
+        assert!(
+            net.get_node(&zid(0xAA)).unwrap().is_gateway,
+            "inserted with G"
+        );
+
+        net.ingest_linkstate_list(link, list(vec![entry(10, 5, None, None, &[])]));
+        assert!(
+            net.get_node(&zid(0xAA)).unwrap().is_gateway,
+            "a same-sn state is stale: the bit it lacks is not applied"
+        );
+
+        net.ingest_linkstate_list(link, list(vec![entry(10, 6, None, None, &[])]));
+        assert!(
+            !net.get_node(&zid(0xAA)).unwrap().is_gateway,
+            "a newer state without G clears it"
+        );
+        assert!(net.gateways().is_empty());
+    }
+
+    /// The gossip ingest takes the bit when it INSERTS a node and never on an
+    /// update, as the pin's `process_singlehop_gossip_linkstate` does — a
+    /// mirror, not a choice; the linkstate ingest above restates it.
+    #[test]
+    fn the_gossip_ingest_takes_the_gateway_bit_on_insert_only() {
+        let mut net = LinkstateNetwork::new(zid(0x01), WhatAmI::Peer);
+        net.set_full_linkstate(false);
+        let link = net.add_link(zid(0x07), WhatAmI::Peer);
+        net.ingest_linkstate_list(
+            link,
+            list(vec![gateway(entry(10, 5, Some(&zid(0xAA)), Some(1), &[]))]),
+        );
+        assert!(
+            net.get_node(&zid(0xAA)).unwrap().is_gateway,
+            "inserted with G"
+        );
+        net.ingest_linkstate_list(link, list(vec![entry(10, 6, None, None, &[])]));
+        let node = net.get_node(&zid(0xAA)).unwrap();
+        assert_eq!(node.sn, 6, "the newer state was applied");
+        assert!(
+            node.is_gateway,
+            "but the gossip update does not touch the bit"
+        );
+
+        net.ingest_linkstate_list(
+            link,
+            list(vec![gateway(entry(11, 1, Some(&zid(0xBB)), Some(2), &[]))]),
+        );
+        net.ingest_linkstate_list(
+            link,
+            list(vec![gateway(entry(12, 1, Some(&zid(0xCC)), Some(2), &[]))]),
+        );
+        let mut gws = net.gateways();
+        gws.sort_by_key(|z| z.as_slice().to_vec());
+        assert_eq!(gws, vec![zid(0xAA), zid(0xBB), zid(0xCC)]);
+    }
+
+    /// `gateways_of` reads the links a node ADVERTISED and keeps only the
+    /// gateways among them; an unknown node has no answer.
+    #[test]
+    fn gateways_of_is_the_gateways_a_node_advertises_a_link_to() {
+        let mut net = LinkstateNetwork::new(zid(0x01), WhatAmI::Router);
+        let link = net.add_link(zid(0x07), WhatAmI::Router);
+        // 0xAA and 0xBB are gateways; 0xCC links to 0xAA and to the non-gateway
+        // relay 0x07, not to 0xBB.
+        net.ingest_linkstate_list(
+            link,
+            list(vec![
+                relay(1, &[10, 11, 12]),
+                gateway(entry(10, 1, Some(&zid(0xAA)), Some(1), &[7, 12])),
+                gateway(entry(11, 1, Some(&zid(0xBB)), Some(1), &[7])),
+                entry(12, 1, Some(&zid(0xCC)), Some(2), &[7, 10]),
+            ]),
+        );
+        assert_eq!(net.gateways_of(&zid(0xCC)), Some(vec![zid(0xAA)]));
+        assert_eq!(
+            net.gateways_of(&zid(0xBB)),
+            Some(vec![]),
+            "a gateway linked to no gateway has none"
+        );
+        assert_eq!(
+            net.gateways_of(&zid(0xEE)),
+            None,
+            "an unknown node has no answer"
         );
     }
 

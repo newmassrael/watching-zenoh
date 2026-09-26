@@ -18,10 +18,10 @@
 
          7 6 5 4 3 2 1 0
         +-+-+-+-+-+-+-+-+
-         X X X X H L W P
+         X X X G H L W P
         +-+-+-+-+-+-+-+-+
 
-         options   flag byte (VLE u64; only bits 0..3 ever set)
+         options   flag byte (VLE u64; only bits 0..4 ever set)
          psid      VLE u64                              (always)
          sn        VLE u64                              (always)
          zid       if P : VLE zid_len + zid_len bytes
@@ -32,7 +32,7 @@
 
      Field-by-field vs net/codec/linkstate.rs:39..79:
        options (line 55)  : zenoh writes the flag word as a VLE u64.
-                            Only PID|WAI|LOC|WGT = 0x0F is ever set, and a
+                            Only PID|WAI|LOC|WGT|GWY = 0x1F is ever set, and a
                             VLE u64 in 0..=0x7F is a single byte equal to
                             its value, so an 8-bit `<sce:flags>` byte is
                             byte-identical for every representable
@@ -40,7 +40,11 @@
                             oam.scxml's zint16-subset note). Bit values
                             are linkstate.rs:20..23: P=PID=0x01 (zid),
                             W=WAI=0x02 (whatami), L=LOC=0x04 (locators),
-                            H=WGT=0x08 (link_weights).
+                            H=WGT=0x08 (link_weights). G=GWY=0x10 is the
+                            node's region-gateway bit, a flag that gates no
+                            field (R2878, open-debt item 751 step 4):
+                            `zenoh/src/net/protocol/linkstate.rs`
+                            @ `pub const GWY: u64 = 1 << 4;`.
        psid / sn (58, 59) : VLE u64, always present.
        zid (60..62)       : `codec.write(zid)` resolves to the STANDALONE
                             `WCodec<&ZenohIdProto>` (commons/zenoh-codec/
@@ -114,6 +118,7 @@
       <sce:flag name="W" bit="1"/>
       <sce:flag name="L" bit="2"/>
       <sce:flag name="H" bit="3"/>
+      <sce:flag name="G" bit="4"/>
     </sce:flags>
     <sce:field id="psid" sce:type="uint64" sce:byte="1" sce:bit-size="vle"/>
     <sce:field id="sn"   sce:type="uint64" sce:byte="2" sce:bit-size="vle"/>
