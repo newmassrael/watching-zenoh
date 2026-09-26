@@ -32,6 +32,13 @@
 //! `gateway/south` is not a key wz honours, so a wz node is always on the
 //! `Auto` preset, where the callback answers `None`.
 //!
+//! NOT-THIS-KEY: gateway/south
+//!
+//! That marker is load-bearing (R2155, open-debt item 541). This module names
+//! the key to say what a wz node SENDS in its absence; the mechanism here is
+//! the extension's reader and the region a session lands in, which is not the
+//! gateway region-partitioning plane the key configures.
+//!
 //! ## What a present-but-invalid value does
 //!
 //! It FAILS the handshake. Both receive arms are

@@ -866,14 +866,6 @@ fn clear_own_zid_forwards_to_subscriber_registry() {
     );
 }
 
-// ── R311y739 Session::new auto-wire of OUR keyexpr id space ──
-
-/// Build an `IterationEvent`-shaped inbound Push whose keyexpr is an `M=0`
-/// (`Mapping::Receiver`) alias — an id that names OUR space. This is the exact
-/// wire shape a zenoh peer emits once we have declared a keyexpr, because
-/// `get_best_key` prefers `ctx.remote_expr_id` and stamps it `Mapping::Receiver`
-/// (`zenoh/src/net/routing/dispatcher/resource.rs:625`).
-#[cfg(all(feature = "codec-push", feature = "declare-keyexpr"))]
 /// R2862 — a Session made by the ORDINARY constructor resolves an inbound SHM
 /// Put once SHM is negotiated, with no resolver installed by hand.
 ///
@@ -926,6 +918,14 @@ fn a_session_resolves_an_shm_put_without_a_hand_installed_resolver() {
     );
 }
 
+// ── R311y739 Session::new auto-wire of OUR keyexpr id space ──
+
+/// Build an `IterationEvent`-shaped inbound Push whose keyexpr is an `M=0`
+/// (`Mapping::Receiver`) alias — an id that names OUR space. This is the exact
+/// wire shape a zenoh peer emits once we have declared a keyexpr, because
+/// `get_best_key` prefers `ctx.remote_expr_id` and stamps it `Mapping::Receiver`
+/// (`zenoh/src/net/routing/dispatcher/resource.rs:625`).
+#[cfg(all(feature = "codec-push", feature = "declare-keyexpr"))]
 fn inbound_push_aliased_in_our_space(
     mapping_id: u64,
     payload: &[u8],

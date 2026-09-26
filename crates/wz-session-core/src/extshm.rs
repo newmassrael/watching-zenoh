@@ -18,12 +18,14 @@
 //! with `common/shm/`).
 //!
 //! This module is the no_std SHM machinery: the descriptor type + its VLE codec,
-//! the 0x2 Put-body marker codec, and the [`ShmResolver`] trait seam. The actual
+//! the 0x2 Put-body marker codec, and the [`ShmResolver`](crate::extshm::ShmResolver)
+//! trait seam. The actual
 //! POSIX segment (create / mmap / open) is `std` (mmap = libc), so it lives in
 //! `wz-runtime-tokio::shm_provider` behind this trait — the same no_std-core /
 //! AP-runtime split as the tls / quic config. R2862 — the descriptor is
 //! upstream's four-field `ShmBufInfo`, addressing a header slot in a metadata
-//! segment rather than a data segment directly (see [`ShmDescriptor`]). The
+//! segment rather than a data segment directly (see
+//! [`ShmDescriptor`](crate::extshm::ShmDescriptor)). The
 //! receiver still copies the bytes out of the mmap into the owned Sample payload
 //! (wz's Sample is an owned `Vec`, so the wire is zero-copy but the local Sample
 //! is a single copy off the shared page — the bounded scoped characteristic).

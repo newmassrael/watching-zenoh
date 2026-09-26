@@ -2927,6 +2927,11 @@ pub const UNHONOURED_CITATION_LEDGER: &[(&str, &str, &str)] = &[
     // the key now, and `AdminLocalData`'s "not this key" disclaimer went with it.
     // R2788 — `plugins`' row is GONE: the reader honours the key now, and this
     // ledger carries evidence for unhonoured keys only.
+    // R2864 — the citing site is `extbound.rs`'s module doc, which names the key
+    // to say why a wz node never sends the OPEN `RemoteBound` extension. The
+    // mechanism there is that extension's reader, not the gateway plane the
+    // key configures, which stays in the `GatewayConf` beyond-wz group.
+    ("gateway/south", "not-this-key", "REMOTE_BOUND_EXT_HEADER"),
     ("plugins_loading/enabled", "wz-has-it", "PluginRegistry"),
     // The citing site is `PluginRegistry`'s doc, drawing the line at this key:
     // the host is wz's, the DISCOVERY is not. A citation that says "not this

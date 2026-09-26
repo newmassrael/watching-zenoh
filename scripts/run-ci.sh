@@ -11273,6 +11273,12 @@ layer_c1bz_docs_resolve() {
 # rounds; the function itself went this round (the 0x4 challenge is drawn at
 # InitAck now) and its dead link with it. The lane's own FAIL line said it:
 # "531 broken doc link(s) but the budget still says 532".
+#
+# R2864 — 531 -> 530. R2862 added a short `[`ShmDescriptor`]` to extshm.rs's
+# `//!`, which made 532 and a hosted red. That module doc sits beside an outer
+# `///` on `pub mod extshm;`, so its links resolve at the crate root. The older
+# `[`ShmResolver`]` two lines up was broken the same way. Both are full paths
+# now, and this lane's own command measured 530.
 # storage_config.rs now carries a non-doc `//` note above its `use` block
     # recording WHY every link in its `//!` is a full path, so the next author
     # does not re-earn the upward arm.
@@ -11300,7 +11306,7 @@ layer_c1bz_docs_resolve() {
         wz-routing-graph:6
         wz-runtime-coop:12
         wz-runtime-tokio:507
-        wz-session-core:531
+        wz-session-core:530
         wz-session-lwip:4
         wz-switchboard-codegen:8
         zenoh-pico-sys:3

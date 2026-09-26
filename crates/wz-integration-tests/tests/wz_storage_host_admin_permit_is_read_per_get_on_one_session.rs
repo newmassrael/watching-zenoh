@@ -188,7 +188,8 @@ fn wz_storage_host_admin_read_permit_is_resolved_per_get_not_per_connection() {
     // the second GET's count mean anything.
     let h_after = match wait_for_substring(
         &mut h_reader,
-        "adminspace read permit set to false over the wire",
+        // R2864 — the library handler's line since R2860 (`admin_space.rs`).
+        "adminspace config-write: read permit set to false",
         Duration::from_secs(10),
     ) {
         Ok(c) => c,

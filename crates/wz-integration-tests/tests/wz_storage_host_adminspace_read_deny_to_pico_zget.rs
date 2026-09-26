@@ -307,8 +307,14 @@ fn wz_storage_host_adminspace_read_deny_seen_by_pico_z_get() {
 /// ## Positive edges only
 ///
 /// Every wait is on a line that MUST appear: the host's readiness line, the host's
-/// own `read permit set to <v> over the wire` line after each PUT, and pico's
-/// terminating Final. Nothing waits for an absence.
+/// own `read permit set to <v>` line after each PUT, and pico's terminating
+/// Final. Nothing waits for an absence.
+///
+/// R2864 — those host lines are the LIBRARY's since R2860 moved the storage
+/// host's config-write handler into `Session::declare_adminspace`
+/// (`wz-runtime-tokio/src/session/admin_space.rs`, `apply_admin_config_write`).
+/// The runner's own wording (`... over the wire`, `config-write on ...`) is gone,
+/// and waiting on it red this lane on every run after that commit.
 // wz-proves: adminspace-read pico->wz
 #[test]
 #[ignore = "binary-dep e2e (wz-ap-demo --features adminspace-config-hotreload,adminspace-read,adminspace-write + zenoh-pico z_get/z_put CLIs); Layer E6i runs via --ignored"]
@@ -400,7 +406,7 @@ fn wz_storage_host_adminspace_read_permit_flips_over_the_wire() {
     );
     let after_revoke = match wait_for_substring(
         &mut h_reader,
-        "adminspace read permit set to false over the wire",
+        "adminspace config-write: read permit set to false",
         Duration::from_secs(10),
     ) {
         Ok(c) => c,
@@ -427,7 +433,7 @@ fn wz_storage_host_adminspace_read_permit_flips_over_the_wire() {
     );
     if let Err(c) = wait_for_substring(
         &mut h_reader,
-        "adminspace read permit set to true over the wire",
+        "adminspace config-write: read permit set to true",
         Duration::from_secs(10),
     ) {
         let _ = h_child.child_mut().kill();
@@ -530,8 +536,13 @@ fn wz_storage_host_refuses_a_config_write_without_the_permit() {
         &addr,
     );
     // The host's OWN refusal line, so a pass cannot come from a PUT that never
-    // arrived. zenoh logs an error on a denied config write (`adminspace.rs:397`).
-    if let Err(c) = wait_for_substring(&mut h_reader, "config-write on ", Duration::from_secs(10)) {
+    // arrived. zenoh logs an error on a denied config write (`adminspace.rs:397`),
+    // and the library handler logs upstream's own sentence for it.
+    if let Err(c) = wait_for_substring(
+        &mut h_reader,
+        "but adminspace.permissions.write=false in configuration",
+        Duration::from_secs(10),
+    ) {
         let _ = h_child.child_mut().kill();
         let _ = h_child.child_mut().wait();
         panic!("the host never reported the denied config-write\n--- host ---\n{c}");
