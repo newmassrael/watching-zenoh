@@ -7983,15 +7983,29 @@ layer_c1w_cargo_test_routing_accept() {
 # every command in them passes when run on its own. Moving them to the helper
 # captures the output instead of racing it, and makes a real failure legible
 # instead of opaque.
+#
+# R2886 (open-debt item 824) — `--router` is the router hat now, so the two
+# `routing-router` admit witnesses name the hat's twins: the star host that
+# owned `run_router_accepts_a_unixpipe_listen_at_bind` and
+# `run_router_admits_a_quic_listen_with_cert_at_bind` is gone, and
+# `routing-router` pulls `router-hat-router`, which compiles these. Each still
+# counts one.
 layer_c1bl_cargo_test_router_failfast() {
     _runci_guarded_test "C1BL unixpipe_listen 1" 1 \
         cargo test -p wz-ap-demo --features routing-router,transport-link-unixpipe \
-        run_router_accepts_a_unixpipe_listen_at_bind --quiet || return 1
+        run_router_hat_without_zid_on_a_unixpipe_listen_serves --quiet || return 1
     (cd crates && cargo clippy -p wz-ap-demo --all-targets \
         --features routing-router,transport-link-unixpipe --quiet -- -D warnings) || return 1
     _runci_guarded_test "C1BL router_quic_listen 1" 1 \
         cargo test -p wz-ap-demo --features routing-router,quic \
-        run_router_admits_a_quic_listen_with_cert_at_bind --quiet || return 1
+        run_router_hat_admits_a_quic_listen_with_cert_at_bind --quiet || return 1
+    # R2886 — the R2723 serial admit witness, moved onto the router hat with
+    # `--router`. It was a test no lane ran: nothing here or in the workflows
+    # built `wz-ap-demo` with `transport-link-serial`, so its cfg compiled it
+    # out of every run. Guarded like its two siblings above.
+    _runci_guarded_test "C1BL router_serial_listen 1" 1 \
+        cargo test -p wz-ap-demo --features routing-router,transport-link-serial \
+        run_router_accepts_a_serial_listen_at_bind --quiet || return 1
     (cd crates && cargo clippy -p wz-ap-demo --all-targets \
         --features routing-router,quic --quiet -- -D warnings) || return 1
     _runci_guarded_test "C1BL peer_quic_listen 1" 1 \
