@@ -598,14 +598,23 @@ pub struct Node {
 #[derive(Debug, Clone)]
 pub struct Link {
     pub zid: Zid,
+    /// R2894b (open-debt item 751, rule 8e) — whether the far end announced
+    /// itself SOUTH-bound of this node, i.e. a gateway of the region this
+    /// link belongs to. The pin's peer-side `Gossip` keeps the remote bound
+    /// on every link and reads three decisions off it
+    /// (`zenoh/src/net/protocol/gossip.rs` @ `is_gateway: remote_bound.is_south(),`):
+    /// whether the neighbour is a gateway, whether a link-added change is
+    /// sent on this link, and whether a new link's bootstrap carries links.
+    pub remote_is_gateway: bool,
     mappings: HashMap<Psid, Zid>,
 }
 
 impl Link {
     /// A fresh link to the neighbour identified by `zid`, no mappings yet.
-    pub fn new(zid: Zid) -> Self {
+    pub fn new(zid: Zid, remote_is_gateway: bool) -> Self {
         Link {
             zid,
+            remote_is_gateway,
             mappings: HashMap::new(),
         }
     }
@@ -845,6 +854,26 @@ impl LinkstateNetwork {
     /// announce and sends nothing on a link change.
     fn is_single_hop_network(&self) -> bool {
         self.object == NetObject::Network && !self.full_linkstate && !self.gossip_multihop
+    }
+
+    /// R2894b (751 rule 8e) — a peer's graph in the state the pin's `Gossip`
+    /// object always is: gossip, single hop. Its flood decisions read the
+    /// far end's bound off each link.
+    fn is_single_hop_gossip(&self) -> bool {
+        self.object == NetObject::Gossip && !self.full_linkstate && !self.gossip_multihop
+    }
+
+    /// R2894b — whether a link-added change is sent on `link`. A single-hop
+    /// `Network` tells no existing link (see
+    /// [`build_link_added_delta_for_existing`](Self::build_link_added_delta_for_existing));
+    /// a single-hop `Gossip` tells only its gateways
+    /// (`zenoh/src/net/protocol/gossip.rs` @ `.filter(|link| link.zid != zid && link.remote_bound.is_south())`);
+    /// every other graph tells every link.
+    pub fn link_hears_link_added(&self, link: LinkId) -> bool {
+        if !self.is_single_hop_gossip() {
+            return true;
+        }
+        self.links.get(&link).is_some_and(|l| l.remote_is_gateway)
     }
 
     /// R2878 (open-debt item 751, step 4) — [`new`](Self::new) for a net that
@@ -1171,10 +1200,29 @@ impl LinkstateNetwork {
     /// the weight configured for `peer_zid`, as zenoh's does through
     /// `get_default_link_weight_to`
     /// (`zenoh/src/net/protocol/network.rs` @ `fn get_default_link_weight_to`).
+    ///
+    /// A link whose far end announced no south bound; see
+    /// [`add_link_bound`](Self::add_link_bound).
     pub fn add_link(&mut self, peer_zid: Zid, peer_whatami: WhatAmI) -> LinkId {
+        self.add_link_bound(peer_zid, peer_whatami, false)
+    }
+
+    /// R2894b (open-debt item 751, rule 8e) — [`add_link`](Self::add_link)
+    /// for a link whose far end's bound is known: `remote_is_gateway` is
+    /// whether it announced itself south-bound of this node. A peer's
+    /// single-hop `Gossip` graph takes the neighbour's gateway bit from it,
+    /// where the pin's does (`zenoh/src/net/protocol/gossip.rs` @ `is_gateway: remote_bound.is_south(),`);
+    /// every graph keeps it on the link for the flood decisions that read it.
+    pub fn add_link_bound(
+        &mut self,
+        peer_zid: Zid,
+        peer_whatami: WhatAmI,
+        remote_is_gateway: bool,
+    ) -> LinkId {
         let id = self.next_link_id;
         self.next_link_id += 1;
-        self.links.insert(id, Link::new(peer_zid));
+        self.links
+            .insert(id, Link::new(peer_zid, remote_is_gateway));
 
         // R2893 (open-debt item 751, rule 8d) — a single-hop gossip `Network`
         // keeps the LINK and nothing else: no node for the neighbour, no self
@@ -1194,8 +1242,9 @@ impl LinkstateNetwork {
                 sn: 0,
                 links: HashMap::new(),
                 // the pin's `Network::add_link` introduces the neighbour
-                // without the bit; its own link-state brings it.
-                is_gateway: false,
+                // without the bit; its own link-state brings it. Its peer-side
+                // `Gossip` reads the bit off the link's remote bound instead.
+                is_gateway: self.is_single_hop_gossip() && remote_is_gateway,
             });
         }
         let weight = self
@@ -1565,13 +1614,38 @@ impl LinkstateNetwork {
     /// (`zenoh/src/net/protocol/network.rs` @ `// Send all nodes linkstate on new link`):
     /// a single-hop gossip `Network` has no links to give and does not relay
     /// one neighbour's existence past the next, and self is not among them.
-    /// A peer's `Gossip` graph keeps the full list (`NetObject`).
+    ///
+    /// R2894b (rule 8e) — a peer's single-hop `Gossip` sends every node, zid
+    /// and locators, and self's links only when `new_link` leads to a gateway,
+    /// which needs them to de-duplicate across several gateways and is the
+    /// only receiver that reads them
+    /// (`zenoh/src/net/protocol/gossip.rs` @ `links: remote_bound.is_south(),`);
+    /// its links are self's alone (`zenoh/src/net/protocol/gossip.rs` @ `let links = if details.links && idx == self.idx {`).
     ///
     /// ⚠ The linkstate arm returns [`build_linkstate_list`](Self::build_linkstate_list)
     /// unchanged, locators included, where the pin's bootstrap carries none;
     /// that divergence predates this round and is registered, not repaired
     /// here.
-    pub fn build_new_link_bootstrap(&self) -> LinkstateListOwned {
+    pub fn build_new_link_bootstrap(&self, new_link: LinkId) -> LinkstateListOwned {
+        if self.is_single_hop_gossip() {
+            let to_gateway = self
+                .links
+                .get(&new_link)
+                .is_some_and(|l| l.remote_is_gateway);
+            return into_list(
+                self.graph
+                    .node_indices()
+                    .map(|idx| {
+                        let details = if idx == self.idx && to_gateway {
+                            Details::Full
+                        } else {
+                            Details::NodeOnly
+                        };
+                        self.make_link_state(idx, details)
+                    })
+                    .collect(),
+            );
+        }
         if !self.is_single_hop_network() {
             return self.build_linkstate_list();
         }
@@ -3270,7 +3344,7 @@ mod tests {
             "routed off the link"
         );
         network.ensure_node(near); // `near` has announced itself; `quiet` has not
-        let bootstrap = network.build_new_link_bootstrap();
+        let bootstrap = network.build_new_link_bootstrap(quiet_link);
         assert_eq!(bootstrap.link_states.len(), 1, "announced neighbours only");
         let entry = &bootstrap.link_states[0];
         assert_ne!(entry.psid, 0, "self is not in the bootstrap");
@@ -3289,14 +3363,14 @@ mod tests {
 
         let mut gossip = LinkstateNetwork::new(me, WhatAmI::Peer);
         gossip.set_full_linkstate(false);
-        gossip.add_link(near, WhatAmI::Peer);
+        let gossip_link = gossip.add_link(near, WhatAmI::Peer);
         assert_eq!(
             gossip.node_count(),
             2,
             "the Gossip graph adds the neighbour"
         );
         assert!(gossip
-            .build_new_link_bootstrap()
+            .build_new_link_bootstrap(gossip_link)
             .link_states
             .iter()
             .any(|e| e.psid == 0));
@@ -3304,6 +3378,54 @@ mod tests {
             .build_link_added_delta_for_existing(&near, false)
             .is_some());
         assert!(gossip.build_link_removed_delta().is_some());
+    }
+
+    /// R2894b (open-debt item 751, rule 8e) — a peer's single-hop `Gossip`
+    /// reads the far end's BOUND off each link, as the pin's does: a gateway
+    /// neighbour (the far end south-bound) is marked a gateway, only a gateway
+    /// link hears a link-added change, and only a bootstrap sent to a gateway
+    /// carries links — self's alone. A peer and a gateway side by side, so
+    /// neither rule can pass by treating every link alike.
+    #[test]
+    fn a_single_hop_gossip_peer_reads_each_links_bound() {
+        let (me, peer, router) = (zid(0x01), zid(0xAA), zid(0xCC));
+        let mut gossip = LinkstateNetwork::new(me, WhatAmI::Peer);
+        gossip.set_full_linkstate(false);
+        let to_peer = gossip.add_link_bound(peer, WhatAmI::Peer, false);
+        let to_router = gossip.add_link_bound(router, WhatAmI::Router, true);
+
+        assert!(gossip.get_node(&router).expect("router").is_gateway);
+        assert!(!gossip.get_node(&peer).expect("peer").is_gateway);
+        assert!(gossip.link_hears_link_added(to_router));
+        assert!(!gossip.link_hears_link_added(to_peer));
+
+        let links_of = |list: &LinkstateListOwned| -> Vec<(u64, usize)> {
+            list.link_states
+                .iter()
+                .map(|e| (e.psid, e.links.len()))
+                .collect()
+        };
+        let to_gateway = links_of(&gossip.build_new_link_bootstrap(to_router));
+        let to_sibling = links_of(&gossip.build_new_link_bootstrap(to_peer));
+        assert_eq!(to_gateway.len(), 3, "every node, to a gateway");
+        assert_eq!(to_sibling.len(), 3, "every node, to a sibling peer");
+        assert!(
+            to_gateway.iter().any(|&(psid, n)| psid == 0 && n == 2),
+            "self's two links ride to the gateway"
+        );
+        assert!(
+            to_gateway.iter().all(|&(psid, n)| psid == 0 || n == 0),
+            "no other node's links"
+        );
+        assert!(
+            to_sibling.iter().all(|&(_, n)| n == 0),
+            "a sibling peer is sent no links"
+        );
+
+        // Linkstate mode reads none of it: every link hears every change.
+        let mut linkstate = LinkstateNetwork::new(me, WhatAmI::Peer);
+        let quiet = linkstate.add_link_bound(peer, WhatAmI::Peer, false);
+        assert!(linkstate.link_hears_link_added(quiet));
     }
 
     /// R2811 — the route queries answer upstream's peer-HAT rule in GOSSIP mode:

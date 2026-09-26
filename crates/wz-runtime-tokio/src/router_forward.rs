@@ -2810,7 +2810,10 @@ impl RouterForwarder {
         // pin object and mode it stands for: a single-hop gossip `Network` (the
         // south peer region) bootstraps the new face with its direct
         // neighbours' zids and tells the existing faces nothing.
-        let full = build_linkstate_oam_owned(&net.borrow().build_new_link_bootstrap())?;
+        let Some(new_link) = self.faces.borrow().get(&new_face).and_then(|s| s.link) else {
+            return Ok(0);
+        };
+        let full = build_linkstate_oam_owned(&net.borrow().build_new_link_bootstrap(new_link))?;
         let delta = match net
             .borrow()
             .build_link_added_delta_for_existing(neighbour, neighbour_was_new)
@@ -7051,7 +7054,15 @@ impl FaceForwarder for RouterForwarder {
                         // only self's links — zenoh add_link's `new` flag. Queried
                         // before add_link, under the one borrow.
                         let neighbour_was_new = net.get_node(&neighbour).is_none();
-                        let link = net.add_link(neighbour, whatami);
+                        // R2894b — the far end's bound on the link, from the
+                        // same computation the region above came from.
+                        let remote_is_gateway = region_and_bound_of(
+                            WhatAmI::Router,
+                            whatami,
+                            actions.peer_remote_bound(),
+                        )
+                        .is_some_and(|(_, bound)| bound.is_south());
+                        let link = net.add_link_bound(neighbour, whatami, remote_is_gateway);
                         (link, neighbour, neighbour_was_new)
                     })
             }

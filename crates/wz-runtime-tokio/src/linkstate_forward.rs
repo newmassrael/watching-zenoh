@@ -1765,10 +1765,11 @@ impl LinkstateForwarder {
     /// (one carrier re-wrapped per new face). The graph builds the full-topology `LinkStateList` (c3b
     /// [`LinkstateNetwork::build_linkstate_list`]); `build_linkstate_oam_owned`
     /// (c1) wraps it in the carrier. Mirrors zenoh `make_msg`.
-    fn build_self_oam(&self) -> Result<OamOwned, CodecError> {
+    fn build_self_oam(&self, new_link: LinkId) -> Result<OamOwned, CodecError> {
         // R2893 — the new-link bootstrap is the graph's decision by the pin
-        // object it stands for; a peer's graph gets the full list, as before.
-        let list = self.net.borrow().build_new_link_bootstrap();
+        // object it stands for; R2894b — and, for a single-hop gossip peer, by
+        // whether `new_link` leads to a gateway.
+        let list = self.net.borrow().build_new_link_bootstrap(new_link);
         build_linkstate_oam_owned(&list)
     }
 
@@ -1910,7 +1911,10 @@ impl LinkstateForwarder {
     ) -> Result<usize, CodecError> {
         // Build each shape once (NetworkMessage is not Clone, OamOwned is —
         // re-wrap a clone per face).
-        let full = self.build_self_oam()?;
+        let Some(new_link) = self.faces.borrow().get(&new_face).and_then(|s| s.link) else {
+            return Ok(0);
+        };
+        let full = self.build_self_oam(new_link)?;
         // In GOSSIP mode the 2-entry form is unconditional: a gossip receiver
         // has no other way to learn our psid for this neighbour, since the
         // gossip re-flood only relays DIRECT neighbours and this one was not
@@ -1940,6 +1944,18 @@ impl LinkstateForwarder {
                 // since that peer learns self's change on its own new face's full
                 // bootstrap. Skip it (otherwise it gets a redundant — if idempotent
                 // — self-links frame).
+                return Ok(None);
+            }
+            // R2894b (751 rule 8e) — which existing links hear it is the
+            // graph's decision too: a single-hop gossip peer tells only its
+            // gateways.
+            let hears = self
+                .faces
+                .borrow()
+                .get(&id)
+                .and_then(|s| s.link)
+                .map_or(true, |link| self.net.borrow().link_hears_link_added(link));
+            if !hears {
                 return Ok(None);
             }
             Ok(delta.clone().map(NetworkMessage::Oam))
@@ -6554,7 +6570,22 @@ impl FaceForwarder for LinkstateForwarder {
                 // flag (`network.rs:826`). Queried before add_link, under the one
                 // borrow.
                 let neighbour_was_new = net.get_node(&neighbour).is_none();
-                let link_id = net.add_link(neighbour, neighbour_whatami);
+                // R2894b (751 rule 8e) — the far end's bound, as the pin
+                // computes it for the face: announced, or else derived from the
+                // two roles (`zenoh/src/net/runtime/region.rs` @ `fn compute_auto_region(`).
+                // South is a gateway of this peer's region, which the graph's
+                // peer-side flood decisions read off the link.
+                let self_whatami = net
+                    .get_node(&self_zid)
+                    .and_then(|n| n.whatami)
+                    .unwrap_or(WhatAmI::Peer);
+                let remote_is_gateway = wz_session_core::extbound::region_and_bound_of(
+                    self_whatami,
+                    neighbour_whatami,
+                    actions.peer_remote_bound(),
+                )
+                .is_some_and(|(_, bound)| bound.is_south());
+                let link_id = net.add_link_bound(neighbour, neighbour_whatami, remote_is_gateway);
                 (link_id, neighbour, neighbour_was_new)
             });
         self.faces.borrow_mut().insert(
