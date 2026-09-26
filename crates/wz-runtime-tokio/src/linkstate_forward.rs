@@ -2070,9 +2070,9 @@ impl LinkstateForwarder {
     fn forward_push(&self, inbound: FaceId, reliable: bool, priority: Priority, push: &PushOwned) {
         // `push` arrives already stamped: the §5.18 stamp is applied once, at
         // the Push arm of `forward`, before this and every other destination of
-        // the same Put is served (zenoh's one `treat_timestamp!` in
-        // `route_data`, `zenoh/src/net/routing/dispatcher/pubsub.rs`). Not inside
-        // `compute_push_forward`, which `RouterForwarder` calls once per
+        // the same Put is served, zenoh's one stamp in `route_data`
+        // (`zenoh/src/net/routing/dispatcher/pubsub.rs` @ `treat_timestamp!(`).
+        // Not inside `compute_push_forward`, which `RouterForwarder` calls once per
         // tier-net and would mint a different timestamp per mesh leg.
         //
         // The inbound face's zid + graph link (source resolution) AND the Push's

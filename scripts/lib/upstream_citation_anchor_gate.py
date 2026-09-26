@@ -583,7 +583,11 @@ ROOTLESS_STALE_LINE_BUDGET = 1
 # `multicast.rs:316-347` range and the multicast establishment's
 # `establishment.rs:54`). Its commit did not lower this budget; the next
 # round measured 649 at that commit's tip, before touching any of these files.
-ROOTLESS_UNDECLARED_BUDGET = 649
+# 649 -> 648 (R2892, paid by R2894): the peer forwarder's stamp moved out of
+# `forward_push`, and its comment's root-less line citation of the dispatcher's
+# stamp went with it; the text that replaced it cites `treat_timestamp!(` with
+# its root.
+ROOTLESS_UNDECLARED_BUDGET = 648
 #: EVERY root-less occurrence, graded or not: `rootless_line + rootless_bare +
 #: residue`. One ratchet over the union of the three above, and it exists
 #: because those three CANNOT express the invariant that matters.
@@ -657,7 +661,8 @@ ROOTLESS_UNDECLARED_BUDGET = 649
 # its root and an anchor.
 # R2871 — 776 -> 774, the same two line-form removals as ROOTLESS_LINE_BUDGET.
 # R2874 — 774 -> 773, the same R2873 line-form removal as ROOTLESS_LINE_BUDGET.
-ROOTLESS_TOTAL_BUDGET = 773
+# R2894 — 773 -> 772, the same R2892 removal as ROOTLESS_UNDECLARED_BUDGET.
+ROOTLESS_TOTAL_BUDGET = 772
 
 #: A LIVE invocation of the RESOLUTION arm. R2242 split this gate in two and,
 #: in doing so, made `--resolve` a flag someone can simply stop passing: delete

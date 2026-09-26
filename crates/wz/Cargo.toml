@@ -509,8 +509,9 @@ routing-peer = ["transport-link-tcp", "transport-unicast", "wz-runtime-tokio?/ro
 # have.
 #
 # R2891 — and the pin's router carries the liveliness-token plane
-# unconditionally (`hat/router/token.rs` is a module of its router hat, not an
-# option), so this atom pulls `routing-token-tables` too. R2886 left it out,
+# unconditionally, as a module of its router hat and not an option
+# (`zenoh/src/net/routing/hat/router/token.rs` @ `impl HatTokenTrait for Hat {`),
+# so this atom pulls `routing-token-tables` too. R2886 left it out,
 # and a `--router` built with `routing-router` alone dropped every pico token
 # the star it replaced had carried (Layer E3,
 # `wz_router_routes_liveliness_pico_interop`).

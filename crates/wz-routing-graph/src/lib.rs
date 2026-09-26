@@ -812,8 +812,8 @@ pub struct LinkstateNetwork {
 
 /// R2893 (open-debt item 751, rule 8d) — the pin has TWO objects that gossip,
 /// and wz had one flag for both. A region's net is `Network`
-/// (`zenoh/src/net/protocol/network.rs`), which with `full_linkstate` and
-/// `gossip_multihop` both off keeps a new link's neighbour out of the graph,
+/// (`zenoh/src/net/protocol/network.rs` @ `pub(crate) full_linkstate: bool,`),
+/// which with `full_linkstate` and `gossip_multihop` both off keeps a new link's neighbour out of the graph,
 /// writes no self link and tells existing links nothing
 /// (`zenoh/src/net/protocol/network.rs` @ `if self.full_linkstate || self.gossip_multihop {`);
 /// the router's south peer region is that object. A peer's own north region
@@ -826,7 +826,7 @@ enum NetObject {
     Network,
     /// A peer's own gossip graph: what [`LinkstateNetwork::new`] builds. Its
     /// single-hop behaviour is wz's earlier gossip port, unchanged by R2893;
-    /// holding it to `gossip.rs` is item 751's rule 8e.
+    /// holding it to the pin's `Gossip` object is item 751's rule 8e.
     Gossip,
 }
 
