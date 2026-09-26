@@ -485,17 +485,34 @@ routing-client = []
 routing-failover = ["routing-router"]
 # R311qg — routing-peer atom 1 now composes REAL library code (the dial+accept
 # mesh-node foundation, `peer_loop`), no longer a hollow marker: it forwards the
-# wz-runtime-tokio `routing-peer` atom on top of the `routing-router`
-# accept-and-hold foundation it reuses. `?/` activates only on the AP path
+# wz-runtime-tokio `routing-peer` atom on top of the accept-and-hold
+# foundation it reuses. `?/` activates only on the AP path
 # (runtime-tokio profile pulls wz-runtime-tokio). Hold-only; mesh forwarding +
 # zid dedup is a later atom (so this does NOT pull `routing-routes`).
-routing-peer = ["routing-router", "wz-runtime-tokio?/routing-peer"]
+#
+# R2886 (open-debt item 824) — the accept foundation directly, no longer through
+# `routing-router`: the pin layers a router OVER a peer (its router carries a
+# peer region, served by a peer hat), and this edge said the reverse. The
+# runtime crate's `routing-peer` already enables `routing-accept`, so the edge
+# carried nothing but the two transport prerequisites, which it now names.
+routing-peer = ["transport-link-tcp", "transport-unicast", "wz-runtime-tokio?/routing-peer"]
 # R311qa — routing-router now composes REAL library code: it forwards the
 # wz-runtime-tokio `routing-accept` atom (the multi-peer `accept_loop` foundation)
 # and pulls its transport prerequisites, so selecting `routing-router` cannot leave
 # the code it names un-gated (the marker is no longer a no-op). `?/` activates only
 # when the runtime-tokio profile already pulls wz-runtime-tokio (the AP path).
-routing-router = ["transport-link-tcp", "transport-unicast", "wz-runtime-tokio?/routing-accept"]
+#
+# R2886 (open-debt item 824) — and the router it names is the pin's: the
+# dual-mesh `RouterForwarder` behind `routing-router-hat`. Until R2886 that sat
+# beside this atom rather than under it, so a build that asked for the router
+# got the accept loop and, in the demo, a star concentrator the pin does not
+# have.
+routing-router = [
+    "transport-link-tcp",
+    "transport-unicast",
+    "wz-runtime-tokio?/routing-accept",
+    "routing-router-hat",
+]
 # R311qc — routing-routes now composes REAL library code (the data-plane
 # forwarding kernel + the tokio RoutingForwarder), no longer a hollow marker:
 # it forwards the wz-runtime-tokio `routing-routes` atom on top of the
