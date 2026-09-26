@@ -137,6 +137,19 @@ impl<V> LinkstatepeerInterest<V> {
         dropped
     }
 
+    /// The keyexprs any of `peers` holds — the set
+    /// [`remove_peer_keys`](Self::remove_peer_keys) would drop them from, read
+    /// WITHOUT dropping. The router forwarder reads it before a purge, so the
+    /// propagate can compare each keyexpr's fold against the state the purge
+    /// is about to change.
+    pub fn keys_held_by(&self, peers: &[Zid]) -> HashSet<String> {
+        self.by_key
+            .iter()
+            .filter(|(_key, holders)| peers.iter().any(|peer| holders.contains_key(peer)))
+            .map(|(key, _holders)| key.clone())
+            .collect()
+    }
+
     /// Every `(keyexpr, interested-peer, declared value)` triple, as an owned
     /// snapshot — the input to the tree-change re-advertise (c3c-3 debt A2). On a
     /// topology change the forwarder re-floods each entry's `DeclareSubscriber` /

@@ -102,7 +102,7 @@
 //! [`client_subs`](RouterForwarder#structfield.client_subs) leaf store, and the
 //! router ADVERTISES self's now-derived cross-tier interest into BOTH meshes — a
 //! self-sourced `DeclareSubscriber` (node_id 0) flooded to self's tree children
-//! ([`propagate_sub`](RouterForwarder::propagate_sub)),
+//! (`RouterForwarder::repropagate`),
 //! re-derived on the tick for late-joining children
 //! ([`re_advertise_self_cross_tier`](RouterForwarder::re_advertise_self_cross_tier))
 //! — so a mesh publisher routes the keyexpr toward this router. This is
@@ -176,7 +176,7 @@
 //! / `bridge_push_cross_mesh` / `deliver_to_client_subscribers` /
 //! `publish_client_push_into_meshes`. A CLIENT-face `DeclareQueryable` lands in the
 //! per-face [`client_qabls`](RouterForwarder#structfield.client_qabls) store
-//! ([`ingest_client_queryable`](RouterForwarder::ingest_client_queryable)); the
+//! (`RouterForwarder::declare_queryable`); the
 //! query route reads its `complete` / `distance`.
 //!
 //! The one query-specific twist over the data plane is the `QueryTarget` dispatch,
@@ -240,15 +240,14 @@
 //! into the opposite mesh; a partial removal DOWNGRADES via a re-advertised
 //! `DeclareQueryable`, and the full retraction (last contributor leaves) floods an
 //! `UndeclareQueryable` carrying the keyexpr in its `ext_wire_expr` extension
-//! ([`repropagate_qabl`](RouterForwarder::repropagate_qabl)) —
+//! (`RouterForwarder::repropagate`) —
 //! parity with the sub plane now that the codec models the ext.
 //!
-//! A3 adds the CLIENT-queryable cross-tier advertisement (the query twin of C2's
-//! [`propagate_sub`](RouterForwarder::propagate_sub)):
+//! A3 adds the CLIENT-queryable cross-tier advertisement (the query twin of
+//! C2's):
 //! a client `DeclareQueryable` makes self flood a self-sourced `DeclareQueryable`
 //! carrying the merged info into BOTH meshes (a client is in neither), so a REMOTE
-//! mesh querier steers toward the client's queryable
-//! ([`repropagate_qabl`](RouterForwarder::repropagate_qabl)).
+//! mesh querier steers toward the client's queryable.
 //! It reuses [`derived_cross_tier_qabl_info`](RouterForwarder::derived_cross_tier_qabl_info)
 //! (which already folds `client_qabls`), so A3 is a trigger-only add; a client
 //! face-down re-advertises the downgraded merge. What remains for the query plane
@@ -299,7 +298,7 @@
 //!   (`shared_nodes` = {self}), so a non-master needs 3+ routers sharing both
 //!   meshes. Their E2E proof waits on a router that hosts/relays natives (or a
 //!   3-router harness); the DIRECT-injection unit tests
-//!   (`propagate_sub` / `push_bridges_cross_mesh_only_when_master`)
+//!   (`repropagate` / `push_bridges_cross_mesh_only_when_master`)
 //!   cover the mechanism meanwhile. (The client-behind-a-router variant was already
 //!   rescued by C2.)
 //! - **Gossip / autoconnect / interceptors** — the per-net policy knobs the
@@ -329,7 +328,6 @@ use wz_codecs::declare::{DeclareOwned, DeclareOwnedVariant};
 use wz_codecs::interest::InterestOwned;
 use wz_codecs::linkstate_list::LinkstateListOwned;
 use wz_codecs::push::{PushOwned, PushOwnedVariant};
-use wz_codecs::wireexpr::WireexprOwned;
 // R311wt-mc slice 1 — the EGRESS-only multicast group plane
 // (`router-multicast-faces`). Gated on `transport-multicast` (the existing §5.1
 // atom that makes `MulticastTxItem` + the drive loop available); the reserved
@@ -379,8 +377,6 @@ use crate::interceptor::InterceptorKeyexprCache;
 use crate::interceptor::{
     InterceptorChain, InterceptorConfig, InterceptorContext, InterceptorFlow, InterceptorVerdict,
 };
-#[cfg(feature = "routing-token-tables")]
-use crate::linkstate_forward::declare_token_wireexpr;
 use crate::linkstate_forward::{
     absorb_keyexpr_into, all_query_directions, build_declare_queryable_with_info,
     complete_query_directions, compute_push_forward, compute_self_publish_forward,
@@ -399,7 +395,6 @@ use wz_session_core::sink::BorrowedSample;
 use crate::linkstate_interest::LinkstatepeerInterest;
 use crate::linkstate_pending::{PendingQueries, QueryFan};
 use crate::session_glue::{IterationEvent, SessionLinkActions};
-use wz_codecs::ext_entry::ExtEntryOwned;
 use wz_codecs::request::RequestOwned;
 use wz_codecs::response::ResponseOwned;
 use wz_codecs::response_final::ResponseFinalOwned;
@@ -539,7 +534,7 @@ struct BrokerHat {
     ///
     /// CARRIED FOLLOW-UP (id-map): still KEYEXPR-keyed, so a client's ID-ONLY
     /// graceful `UndeclareSubscriber` (no `ext_keyexpr`) no-ops in
-    /// `withdraw_client_subscription` -> stale until face-down. The wz-PEER
+    /// `undeclare_subscriber` -> stale until face-down. The wz-PEER
     /// client planes were converted to id-keyed at R311y178 (and `tokens` below
     /// at slice-3); `subs` and `qabls` are the remaining keyexpr-keyed holdouts.
     subs: Rc<RefCell<ClientSubs>>,
@@ -551,10 +546,10 @@ struct BrokerHat {
     /// `zenoh/src/net/routing/hat/router/queries.rs` @ `fn compute_query_route`,
     /// gated `master || source == Router`); their completeness feeds the GLOBAL
     /// BestMatching at distance 1. A3 advertises them into both meshes
-    /// ([`repropagate_qabl`](RouterForwarder::repropagate_qabl))
+    /// ([`repropagate`](RouterForwarder::repropagate))
     /// and the store contributes to the merged
     /// [`derived_cross_tier_qabl_info`](RouterForwarder::derived_cross_tier_qabl_info).
-    /// Same keyexpr-keyed follow-up as `subs` (`withdraw_client_queryable`).
+    /// Same keyexpr-keyed follow-up as `subs` (`undeclare_queryable`).
     qabls: Rc<RefCell<ClientQabls>>,
     /// The per-client-face liveliness-TOKEN store (slice-3), keyed the way
     /// zenoh's `face_hat.remote_tokens: HashMap<TokenId, Arc<Resource>>` is: the
@@ -564,7 +559,7 @@ struct BrokerHat {
     /// `UndeclareToken(id, ext=null)` carrying no keyexpr, and keeping the id
     /// also refcounts two tokens sharing a keyexpr correctly. The cross-tier
     /// advertisement is
-    /// [`propagate_token`](RouterForwarder::propagate_token)
+    /// [`repropagate`](RouterForwarder::repropagate)
     /// (derive-not-store), so `declare_token_interest`'s CURRENT replay must
     /// FOLD this store (excluding the requester), the twin of
     /// `dump_interest_subs` folding `subs`.
@@ -662,22 +657,157 @@ struct Sourced {
     out_node_id: u16,
 }
 
-/// R2875 (step 3e, queryables) — the merged queryable info outside each mesh
+/// R2876 (step 3e) — a declaration resolved against the hat that owns its
+/// face, before any table is touched: the pin's dispatcher hands every
+/// declaration to `hats[region]` whatever kind of hat that is
+/// (`zenoh/src/net/routing/dispatcher/pubsub.rs` @ `hats[region].register_subscriber(ctx.reborrow(), id, res.clone(), node_id, sub_info);`),
+/// and what differs by kind is only who inside the hat the declaration
+/// belongs to.
+enum Declared {
+    /// A mesh hat's: the source the declaration names.
+    Sourced(Sourced),
+    /// A broker hat's: the client face that declared it, holding `keyexpr`.
+    Face(String),
+}
+
+impl Declared {
+    fn keyexpr(&self) -> &str {
+        match self {
+            Declared::Sourced(sourced) => &sourced.keyexpr,
+            Declared::Face(keyexpr) => keyexpr,
+        }
+    }
+}
+
+/// R2876 (step 3e) — one declaration plane as the cross-region propagate sees
+/// it: what self advertises into a mesh for one keyexpr, and the wire forms
+/// that carry it.
+///
+/// The pin propagates every plane by one rule: a hat compares the fold of the
+/// OTHER hats against what it last propagated, and declares or forgets on a
+/// difference. For a subscriber that stored state is the hat's own entry in
+/// the resource's router set
+/// (`zenoh/src/net/routing/hat/router/pubsub.rs` @ `if !self.res_hat(&res).router_subs.contains(&ctx.tables.zid) {`),
+/// for a queryable the info it propagated
+/// (`zenoh/src/net/routing/hat/router/queries.rs` @ `.is_none_or(|info| info != &other_info)`).
+/// Presence is the `()` case of the same comparison, so the planes differ
+/// only in [`Value`](Self::Value) and the wire forms.
+trait DeclPlane {
+    /// What self propagates for a keyexpr: `()` for a presence plane, the
+    /// merged info for queryables.
+    type Value: Copy + PartialEq;
+    /// The fold of every holder outside `target` for the EXACT `keyexpr`,
+    /// `None` when none holds it: the pin's `other_info`.
+    fn fold_outside(fwd: &RouterForwarder, target: Region, keyexpr: &str) -> Option<Self::Value>;
+    /// The self-sourced declaration carrying `value`.
+    fn declare(keyexpr: &str, value: Self::Value) -> Result<DeclareOwned, CodecError>;
+    /// The self-sourced retraction.
+    fn undeclare(keyexpr: &str) -> Result<DeclareOwned, CodecError>;
+}
+
+/// The subscriber plane.
+struct SubPlane;
+
+impl DeclPlane for SubPlane {
+    type Value = ();
+    fn fold_outside(fwd: &RouterForwarder, target: Region, keyexpr: &str) -> Option<()> {
+        fwd.self_advertises_sub_into(target, keyexpr).then_some(())
+    }
+    fn declare(keyexpr: &str, (): ()) -> Result<DeclareOwned, CodecError> {
+        build_declare_subscriber(0, 0, Some(keyexpr))
+    }
+    fn undeclare(keyexpr: &str) -> Result<DeclareOwned, CodecError> {
+        build_undeclare_subscriber_with_keyexpr(keyexpr)
+    }
+}
+
+/// The queryable plane, the one whose value can change without its presence
+/// changing: a register can REPLACE an info, and a downgrade re-declares.
+struct QablPlane;
+
+impl DeclPlane for QablPlane {
+    type Value = QueryableInfo;
+    fn fold_outside(fwd: &RouterForwarder, target: Region, keyexpr: &str) -> Option<QueryableInfo> {
+        fwd.derived_cross_tier_qabl_info(target, keyexpr)
+    }
+    fn declare(keyexpr: &str, info: QueryableInfo) -> Result<DeclareOwned, CodecError> {
+        build_declare_queryable_with_info(keyexpr, info)
+    }
+    fn undeclare(keyexpr: &str) -> Result<DeclareOwned, CodecError> {
+        build_undeclare_queryable_with_keyexpr(keyexpr)
+    }
+}
+
+/// The liveliness-token plane (§5.21 routing-token-tables).
+#[cfg(feature = "routing-token-tables")]
+struct TokenPlane;
+
+#[cfg(feature = "routing-token-tables")]
+impl DeclPlane for TokenPlane {
+    type Value = ();
+    fn fold_outside(fwd: &RouterForwarder, target: Region, keyexpr: &str) -> Option<()> {
+        fwd.self_advertises_token_into(target, keyexpr)
+            .then_some(())
+    }
+    fn declare(keyexpr: &str, (): ()) -> Result<DeclareOwned, CodecError> {
+        build_declare_token(0, 0, Some(keyexpr))
+    }
+    fn undeclare(keyexpr: &str) -> Result<DeclareOwned, CodecError> {
+        build_undeclare_token_with_keyexpr(keyexpr)
+    }
+}
+
+/// R2875, generalised to every plane by R2876 — the fold outside each mesh
 /// region for one keyexpr, read BEFORE a mutation so the propagate can diff
 /// against it afterwards.
 ///
-/// The pin's queryable propagate stores the value it last propagated per hat
-/// and re-propagates only when the new fold differs
-/// (`zenoh/src/net/routing/hat/router/queries.rs` @ `.is_none_or(|info| info != &other_info)`).
 /// wz stores no propagated value; the fold before the change IS that value,
-/// because every earlier change was propagated the same way. A snapshot, not
-/// a "without this contribution" derive as the presence planes use: a
-/// queryable register can REPLACE a value, and a face-down purge removes
-/// several sources' values at once, so the before-state is not recoverable
-/// from the after-state and one holder.
-struct QablSnapshot {
+/// because every earlier change was propagated by the same rule. A snapshot
+/// rather than a derive from the state after: a queryable register can
+/// REPLACE a value, and a face-down purge removes several sources' values at
+/// once, so the before-state is not recoverable from the after-state and one
+/// holder. Until R2876 the presence planes derived it ("held outside, not
+/// counting one contribution") while queryables snapshotted it; two
+/// mechanisms for the pin's one rule, each with its own correctness argument.
+struct Snapshot<P: DeclPlane> {
     keyexpr: String,
-    before: Vec<(Region, Option<QueryableInfo>)>,
+    before: Vec<(Region, Option<P::Value>)>,
+}
+
+/// Remove one entry from `face`'s store in a broker hat, by `remove`, and
+/// prune the face once its store is empty — so a client that withdraws
+/// everything does not linger in the derive and late-joiner folds, nor defeat
+/// the `is_empty()` delivery fast-path (the discipline
+/// [`LinkstatepeerInterest::withdraw`] applies to an emptied key).
+fn remove_from_face<M: FaceStore, R>(
+    store: &RefCell<HashMap<FaceId, M>>,
+    face: FaceId,
+    remove: impl FnOnce(&mut M) -> Option<R>,
+) -> Option<R> {
+    let mut store = store.borrow_mut();
+    let entries = store.get_mut(&face)?;
+    let removed = remove(entries);
+    if entries.is_empty() {
+        store.remove(&face);
+    }
+    removed
+}
+
+/// A client face's entries in one broker-hat store.
+trait FaceStore {
+    fn is_empty(&self) -> bool;
+}
+
+impl<T> FaceStore for HashSet<T> {
+    fn is_empty(&self) -> bool {
+        HashSet::is_empty(self)
+    }
+}
+
+impl<K, V> FaceStore for HashMap<K, V> {
+    fn is_empty(&self) -> bool {
+        HashMap::is_empty(self)
+    }
 }
 
 /// The keyexprs every broker hat's per-face store holds, merged into one
@@ -1196,7 +1326,7 @@ impl RouterDeclarationsView {
     ///
     /// ⚠ NO self-exclusion predicate, unlike the peer forwarder's token fold.
     /// This host never writes a self row for a client's token: a client-held
-    /// token is DERIVE-NOT-STORE here (`propagate_token`
+    /// token is DERIVE-NOT-STORE here (`repropagate`
     /// advertises it without storing it in a mesh table), so a self row in these
     /// tables can only be this router's own holding, which is what the peer's
     /// `native` predicate had to distinguish and this one does not.
@@ -1415,8 +1545,7 @@ pub struct RouterForwarder {
     /// `remote_interests` + `face_hat.local_subs`). The CURRENT half of the
     /// handshake is [`respond_to_interest`](Self::respond_to_interest)'s dump; this
     /// is the FUTURE half: a subscriber learned LATER
-    /// ([`ingest_subscription`](Self::ingest_subscription) /
-    /// [`ingest_client_subscription`](Self::ingest_client_subscription)) is
+    /// ([`declare_subscriber`](Self::declare_subscriber)) is
     /// proactively pushed via [`push_future_subscription`](Self::push_future_subscription)
     /// so a pub-BEFORE-sub publisher's write-filter deactivates. FaceId-keyed leaf
     /// state, so [`deregister`](FaceForwarder::deregister) MUST purge it BEFORE its
@@ -1425,8 +1554,7 @@ pub struct RouterForwarder {
     future_subs: RefCell<FutureSubStore>,
     /// The QUERYABLE-plane FUTURE store (R311y150) — the value-aware twin of
     /// [`future_subs`](Self#structfield.future_subs): a queryable learned LATER
-    /// ([`ingest_queryable`](Self::ingest_queryable) /
-    /// [`ingest_client_queryable`](Self::ingest_client_queryable)) is proactively
+    /// ([`declare_queryable`](Self::declare_queryable)) is proactively
     /// pushed via [`push_future_queryable`](Self::push_future_queryable) so a
     /// querier-BEFORE-queryable querier's write-filter deactivates, and a
     /// completeness flip re-pushes the same id. Same OBLIGATION-1 purge as
@@ -1436,7 +1564,7 @@ pub struct RouterForwarder {
     /// the token twin of [`future_subs`](Self#structfield.future_subs) (both
     /// `FutureInterestStore<()>` — tokens carry no value). A CLIENT face's FUTURE
     /// (`f()`) TOKEN interest is stored here so a token learned LATER
-    /// ([`ingest_token`](Self::ingest_token) / [`ingest_client_token`](Self::ingest_client_token))
+    /// ([`declare_token`](Self::declare_token))
     /// is proactively pushed via [`push_future_token`](Self::push_future_token). The
     /// CURRENT dump ([`dump_interest_tokens`](Self::dump_interest_tokens)) is the
     /// FIRST reader of the token tables — it makes the slice-1/2/3 bubble observable.
@@ -2665,54 +2793,55 @@ impl RouterForwarder {
             return;
         };
         let (subs, qabls) = (&hat.subs, &hat.qabls);
-        // Collect the sub + qabl keyexprs the departed natives held, so the
-        // cross-tier advertisement they contributed to is re-evaluated AFTER the
-        // removal (the borrows must be dropped before the withdraw/re-advertise,
-        // which re-read the tables).
-        let mut affected_sub_keys: HashSet<String> = HashSet::new();
-        // R2875 — the queryable plane diffs its fold against the state BEFORE
-        // the removal (see `QablSnapshot`), so the departed natives' keyexprs
-        // are read and snapshotted first, while their values still count.
-        let departing_qabl_keys: HashSet<String> = qabls
+        // Every plane diffs its fold against the state BEFORE the removal
+        // (R2876, see `Snapshot`), so the departed natives' keyexprs are read
+        // and snapshotted first, while they still count; the borrows drop
+        // before the propagate, which re-reads the tables.
+        let sub_snapshots: Vec<Snapshot<SubPlane>> = subs
             .borrow()
-            .entries()
-            .into_iter()
-            .filter(|(_keyexpr, peer, _info)| removed.contains(peer))
-            .map(|(keyexpr, _peer, _info)| keyexpr)
-            .collect();
-        let qabl_snapshots: Vec<QablSnapshot> = departing_qabl_keys
+            .keys_held_by(removed)
             .iter()
-            .map(|keyexpr| self.snapshot_qabl(keyexpr))
+            .map(|keyexpr| self.snapshot(keyexpr))
+            .collect();
+        let qabl_snapshots: Vec<Snapshot<QablPlane>> = qabls
+            .borrow()
+            .keys_held_by(removed)
+            .iter()
+            .map(|keyexpr| self.snapshot(keyexpr))
             .collect();
         {
             let mut subs = subs.borrow_mut();
             let mut qabls = qabls.borrow_mut();
             for zid in removed {
-                affected_sub_keys.extend(subs.remove_peer_keys(zid));
+                subs.remove_peer_keys(zid);
                 qabls.remove_peer_keys(zid);
             }
         }
         // §5.21 routing-token-tables — drain the departed natives' token entries,
-        // then (slice-2) withdraw self's CROSS-TIER advertisement for any keyexpr
-        // whose LAST native source just left — the token twin of the subs/qabls
-        // withdraw loops above (minus the client `undeclare_push`). tier is
-        // Routers|LinkstatePeers here (Client returned early), so `tokens_table` is
-        // `Some`. The drained keys are collected INSIDE the scoped `borrow_mut` and
-        // the withdraw runs AFTER it drops — `unpropagate_token`
-        // re-reads the same table via `source_count`, so withdrawing under the live
-        // borrow_mut would RefCell-panic (mirrors the subs/qabls collect-then-act
-        // shape at the top of this fn).
+        // then (slice-2) withdraw self's CROSS-TIER advertisement where the
+        // removal emptied the fold — the token twin of the subs/qabls
+        // snapshots above. tier is a mesh region here (a leaf returned early),
+        // so `tokens_table` is `Some`. The snapshots are read before the scoped
+        // `borrow_mut` and the propagate runs AFTER it drops: the fold re-reads
+        // the same table, so propagating under the live borrow_mut would
+        // RefCell-panic.
         #[cfg(feature = "routing-token-tables")]
         if let Some(tokens) = self.tokens_table(tier) {
-            let mut affected_token_keys: HashSet<String> = HashSet::new();
+            let token_snapshots: Vec<Snapshot<TokenPlane>> = tokens
+                .borrow()
+                .keys_held_by(removed)
+                .iter()
+                .map(|keyexpr| self.snapshot(keyexpr))
+                .collect();
             {
                 let mut tokens = tokens.borrow_mut();
                 for zid in removed {
-                    affected_token_keys.extend(tokens.remove_peer_keys(zid));
+                    tokens.remove_peer_keys(zid);
                 }
             }
-            for keyexpr in affected_token_keys {
-                self.unpropagate_token(Holder::Hat(tier), &keyexpr);
+            for snapshot in token_snapshots {
+                let keyexpr = snapshot.keyexpr.clone();
+                self.repropagate(snapshot);
                 // slice-5: the ungraceful node-detach twin of the graceful withdraw's
                 // notify (the token half of zenoh token_remove_node's
                 // propagate_forget_simple_token, the R311y152 detach-push for tokens).
@@ -2757,13 +2886,14 @@ impl RouterForwarder {
         // so a client that both publishes AND subscribes a ke keeps its OWN filter OFF
         // after the other backer detaches (over-deliver, never a spurious undeclare) — a
         // property of the reused graceful seam.
-        for keyexpr in affected_sub_keys {
-            self.unpropagate_sub(Holder::Hat(tier), &keyexpr);
+        for snapshot in sub_snapshots {
+            let keyexpr = snapshot.keyexpr.clone();
+            self.repropagate(snapshot);
             self.undeclare_push_subs(&keyexpr);
         }
         for snapshot in qabl_snapshots {
             let keyexpr = snapshot.keyexpr.clone();
-            self.repropagate_qabl(snapshot);
+            self.repropagate(snapshot);
             self.undeclare_push_qabls(&keyexpr);
         }
     }
@@ -2802,48 +2932,55 @@ impl RouterForwarder {
         absorb_keyexpr_into(&mut state.keyexpr_table, declare);
     }
 
-    /// The SSOT for a sourced interest declaration (subscriber `V = ()` /
-    /// queryable `V = QueryableInfo`) — the router twin of
-    /// [`LinkstateForwarder`]'s `forward_interest_declaration`. Register the
-    /// resolved SOURCE's interest (value `V`) in the inbound tier's `table`, and
-    /// — only on a real change (the value-diff gate: a NEW peer OR a CHANGED
-    /// value) — re-flood a clean declaration WITHIN that tier via `build`
-    /// (re-stamped with this node's psid for the source). The cross-tier bubble
-    /// is NOT stored (derived at compute). Only the wireexpr extractor, the
-    /// `table`, the `value`, and the carrier `build` differ between the two
-    /// planes; this holds everything they share (the alias-resolve +
-    /// source-resolve + change-gate + re-flood), so neither plane re-hand-rolls
-    /// it (the sibling factored the identical `V`-generic).
-    ///
-    /// Returns `Some(resolved_keyexpr)` IFF it registered a REAL change (and thus
-    /// re-flooded) — the signal the caller uses to decide the CROSS-tier
-    /// advertisement (R311y125): a native that first appears for a keyexpr may
-    /// flip self's cross-tier advertise-into-the-opposite-mesh state. `None` on
-    /// any drop (client tier / unresolvable / no change).
-    #[allow(clippy::too_many_arguments)]
-    fn ingest_interest<V: PartialEq>(
+    /// R2876 (step 3e) — resolve a declaration on `inbound` against the hat
+    /// that owns it, without touching any table: a mesh hat's to the source it
+    /// names ([`resolve_sourced`](Self::resolve_sourced)), a broker hat's to
+    /// the client face that made it. `keyexpr_of` reads the keyexpr from the
+    /// face's alias table (a declare carries it in its wire expr, an undeclare
+    /// in its ext). `None` for a region this router builds no hat for, an
+    /// unresolvable alias, or a source-only or gone face.
+    fn resolve_declared(
         &self,
         inbound: FaceId,
-        tier: Region,
-        reliable: bool,
+        region: Region,
         declare: &DeclareOwned,
-        wireexpr: &WireexprOwned,
-        table: &RefCell<LinkstatepeerInterest<V>>,
-        value: V,
-        build: impl Fn(&str) -> Result<DeclareOwned, CodecError>,
-    ) -> Option<String> {
-        let sourced = self.resolve_sourced(inbound, tier, declare, |t| {
-            resolve_wireexpr(&wireexpr.body, t)
-        })?;
-        self.commit_register(inbound, tier, reliable, &sourced, table, value, build)
-            .then_some(sourced.keyexpr)
+        keyexpr_of: impl FnOnce(&hashbrown::HashMap<u64, String>) -> Option<String>,
+    ) -> Option<Declared> {
+        match self.hats.get(&region)? {
+            Hat::Mesh(_) => self
+                .resolve_sourced(inbound, region, declare, keyexpr_of)
+                .map(Declared::Sourced),
+            Hat::Broker(_) => {
+                let faces = self.faces.borrow();
+                // R2734 — SourceOnly declines on every plane, each for its
+                // own reason. A group peer's SUBSCRIPTION is carried by a
+                // different structure: the MulticastDispatcher tracks
+                // `remote_subs` per peer and the union reaches the mesh through
+                // `set_mcast_group_subs`, so registering it on a client face too
+                // would advertise it twice, onto a face that can never be
+                // delivered to. The dispatcher does not track liveliness TOKENS
+                // at all; the pin would register one on its black-hole face,
+                // and wz declines, because a token on a face that can never be
+                // delivered to advertises liveliness this router cannot serve.
+                // For a QUERYABLE copying the pin would be worse than declining:
+                // upstream registers a group peer's queryable on a face whose
+                // primitives discard, so the router advertises a queryable it
+                // can never reach and attracts queries no one will answer. A
+                // withdrawal declines for the same faces: nothing was ever
+                // registered for one to remove.
+                let s = match classify_inbound(&faces, inbound) {
+                    InboundFace::Held(s) => s,
+                    InboundFace::SourceOnly | InboundFace::Gone => return None,
+                };
+                keyexpr_of(&s.keyexpr_table).map(Declared::Face)
+            }
+        }
     }
 
     /// Resolve a sourced declaration on a mesh face to the keyexpr it names
-    /// and the source that made it, without touching any table — the half of
-    /// [`ingest_interest`](Self::ingest_interest) /
-    /// [`withdraw_interest`](Self::withdraw_interest) that runs BEFORE the
-    /// mutation.
+    /// and the source that made it, without touching any table — the mesh
+    /// half of [`resolve_declared`](Self::resolve_declared), which runs BEFORE
+    /// the mutation.
     ///
     /// R2875 split it out because the queryable plane has to read the
     /// cross-region merged info for the keyexpr BEFORE its table changes: the
@@ -2969,164 +3106,446 @@ impl RouterForwarder {
         );
     }
 
-    /// Ingest a sourced `DeclareSubscriber` (1b) — the `V = ()` case of
-    /// [`ingest_interest`](Self::ingest_interest): register the SOURCE in the
-    /// inbound tier's `subs` table (Router face -> `router_subs`, Peer face ->
-    /// `linkstatepeer_subs`) + within-tier re-flood. A Client face (no tier
-    /// table) is slice 1d.
-    fn ingest_subscription(
+    // ── R2876 (step 3e): the declaration dispatch, one owner call per plane ──
+    //
+    // The pin's dispatcher does three things for every declaration, whatever
+    // hat owns the face: register in `hats[face.region]`, then propagate into
+    // every region whose fold moved
+    // (`zenoh/src/net/routing/dispatcher/pubsub.rs` @ `hats[region].register_subscriber(ctx.reborrow(), id, res.clone(), node_id, sub_info);`).
+    // Each plane below is that: resolve against the owner hat
+    // ([`resolve_declared`](Self::resolve_declared)), snapshot the fold,
+    // register or unregister in the owner hat, and
+    // [`repropagate`](Self::repropagate) what moved. Before R2876 `forward()`
+    // split each plane on `is_leaf(tier)` into a mesh path and a client path,
+    // twelve functions whose tails were the same and whose only difference
+    // was the register — which is the hat's business, not the dispatcher's.
+
+    /// A `DeclareSubscriber` on `inbound`: a mesh hat registers the SOURCE
+    /// and re-floods it within its region (1b); a broker hat records the
+    /// client face (C2). A registration then propagates where it moved the
+    /// fold — a publisher on another mesh then routes toward self, which
+    /// bridges cross-tier (C4), not master-gated (every router advertises; only
+    /// the delivery bridge is gated) — and is pushed to every CLIENT face whose
+    /// stored FUTURE interest matches (the pub-before-sub close), never echoed
+    /// to `inbound`. The push fires even when a co-client already subscribes:
+    /// it dedups per interest-holder via the pushed registry.
+    fn declare_subscriber(
         &self,
         inbound: FaceId,
-        tier: Region,
+        region: Region,
         reliable: bool,
         declare: &DeclareOwned,
     ) {
         let Some(wireexpr) = declare_subscriber_wireexpr(declare) else {
             return;
         };
-        let Some(subs) = self.subs_table(tier) else {
-            return; // Client tier -> slice 1d.
-        };
-        let changed =
-            self.ingest_interest(inbound, tier, reliable, declare, wireexpr, subs, (), |ke| {
-                build_declare_subscriber(0, 0, Some(ke))
-            });
-        log::debug!(
-            "router forward: mesh sub ingest on face {inbound:?} tier {tier:?} -> {}",
-            match &changed {
-                Some(ke) => format!("REGISTERED {ke:?}"),
-                None => "not registered (unresolvable / no-change)".to_string(),
-            }
-        );
-        // FEDERATION cross-tier bubble (R311y125): a NATIVE sub for `ke` in this
-        // tier makes self ADVERTISE `ke` into the OPPOSITE mesh (a router-native
-        // -> peer mesh; a peer-native -> router mesh) so a publisher on that mesh
-        // routes toward self, which then bridges cross-tier (C4). zenoh's
-        // register_router_subscription / declare_linkstatepeer_subscription
-        // cross-register self into the opposite tier here (pubsub.rs:248-250 /
-        // :296-297) — NOT master-gated (every router advertises; only the delivery
-        // bridge is gated). Fires on the flip false->true only.
-        if let Some(ke) = changed {
-            self.propagate_sub(Holder::Hat(tier), &ke);
-            // FUTURE-mode push: a mesh sub just became known -> declare it to any
-            // CLIENT face whose stored FUTURE interest matches (the pub-before-sub
-            // close). Never echoed to `inbound` (a mesh face is not a future holder,
-            // but the guard is faithful).
-            self.push_future_subscription(&ke, inbound);
-        }
-    }
-
-    /// Ingest a sourced `DeclareToken` (§5.21 routing-token-tables) — the
-    /// liveliness-token twin of
-    /// [`ingest_subscription`](Self::ingest_subscription): register the SOURCE
-    /// in the inbound tier's `tokens` table (Router face -> `router_tokens`,
-    /// Peer face -> `linkstatepeer_tokens`) + within-tier re-flood, carrier
-    /// `build_declare_token(0, 0, Some(ke))` (id 0 = sourced, keyexpr inline —
-    /// the identical convention `build_declare_subscriber(0, 0, Some(ke))` uses).
-    ///
-    /// Calls the shared [`ingest_interest`](Self::ingest_interest) core DIRECTLY,
-    /// NOT via the `ingest_subscription` wrapper; the CROSS-TIER advertise
-    /// ([`propagate_token`](Self::propagate_token),
-    /// slice-2) AND the FUTURE push
-    /// ([`push_future_token`](Self::push_future_token), slice-4 — declares the newly
-    /// learned token to any CLIENT face with a matching stored token interest) are
-    /// both invoked on the register flip in the tail here. A Client-tier `DeclareToken`
-    /// no longer reaches here: `forward()` routes it to
-    /// [`ingest_client_token`](Self::ingest_client_token) (slice-3), so the
-    /// `tokens_table` `None` guard below is defensive-only.
-    /// The retraction counterpart is
-    /// [`withdraw_token`](Self::withdraw_token): a peer router's graceful sourced
-    /// `UndeclareToken` (`{id:0, ext_wire_expr}`) withdraws by keyexpr (the
-    /// `UndeclToken` codec now carries the ext chain), and the face-down
-    /// [`purge_detached_interest_tier`](Self::purge_detached_interest_tier) drains
-    /// a departed source's tokens on an ungraceful departure.
-    #[cfg(feature = "routing-token-tables")]
-    fn ingest_token(&self, inbound: FaceId, tier: Region, reliable: bool, declare: &DeclareOwned) {
-        let Some(wireexpr) = declare_token_wireexpr(declare) else {
+        let Some(declared) = self.resolve_declared(inbound, region, declare, |t| {
+            resolve_wireexpr(&wireexpr.body, t)
+        }) else {
             return;
         };
-        let Some(tokens) = self.tokens_table(tier) else {
-            return; // Client tier: forward() routes it to the client-token plane.
-        };
-        let changed = self.ingest_interest(
-            inbound,
-            tier,
-            reliable,
-            declare,
-            wireexpr,
-            tokens,
-            (),
-            |ke| build_declare_token(0, 0, Some(ke)),
-        );
+        let snapshot = self.snapshot::<SubPlane>(declared.keyexpr());
+        let registered = self.register_subscriber(inbound, region, reliable, &declared);
         log::debug!(
-            "router forward: mesh token ingest on face {inbound:?} tier {tier:?} -> {}",
-            match &changed {
-                Some(ke) => format!("REGISTERED {ke:?}"),
-                None => "not registered (unresolvable / no-change)".to_string(),
+            "router forward: sub declare on face {inbound:?} region {region} -> {}",
+            if registered {
+                "REGISTERED"
+            } else {
+                "no change"
             }
         );
-        // Cross-tier PROPAGATION (slice-2): a NATIVE token for `ke` in this tier
-        // makes self ADVERTISE it into the OPPOSITE mesh (the token twin of
-        // ingest_subscription's propagate_sub tail). Fires on the
-        // register flip false->true only (ingest_interest returns Some).
-        if let Some(ke) = changed {
-            self.propagate_token(Holder::Hat(tier), &ke);
-            // FUTURE-mode push (slice-4): a mesh token just became known -> declare it
-            // to any CLIENT face whose stored FUTURE token interest matches (mirror of
-            // ingest_subscription's push_future_subscription). Never echoed to inbound.
-            self.push_future_token(&ke, inbound);
+        if registered {
+            self.repropagate(snapshot);
+            self.push_future_subscription(declared.keyexpr(), inbound);
         }
     }
 
-    /// Withdraw a sourced `UndeclareToken` (§5.21 routing-token-tables) — the
-    /// liveliness-token twin of [`withdraw_subscription`](Self::withdraw_subscription)
-    /// and the removal counterpart of [`ingest_token`](Self::ingest_token). The
-    /// retracted keyexpr rides the `ext_wire_expr` extension chain (now that the
-    /// `UndeclToken` codec models it); resolve it, withdraw the SOURCE from the
-    /// inbound tier's token table, and within-tier re-flood a clean sourced
-    /// retraction via `build_undeclare_token_with_keyexpr`. Reuses the shared
-    /// [`withdraw_interest`](Self::withdraw_interest) core DIRECTLY (like
-    /// ingest_token reuses ingest_interest); on a REAL removal it captures the
-    /// returned keyexpr and withdraws the CROSS-TIER advertisement
-    /// ([`unpropagate_token`](Self::unpropagate_token),
-    /// slice-2 — the negation of ingest_token's advertise) when the LAST native
-    /// source left. An id-keyed simple `UndeclareToken` (the RAII drop's form, no
-    /// ext) resolves no keyexpr and is a no-op — the router source-routes tokens
-    /// by keyexpr, never by id.
-    #[cfg(feature = "routing-token-tables")]
-    fn withdraw_token(
+    /// Register a resolved subscriber in the hat that owns `region`, whether
+    /// it changed anything.
+    fn register_subscriber(
         &self,
         inbound: FaceId,
-        tier: Region,
+        region: Region,
+        reliable: bool,
+        declared: &Declared,
+    ) -> bool {
+        match declared {
+            Declared::Sourced(sourced) => self.commit_register(
+                inbound,
+                region,
+                reliable,
+                sourced,
+                &self.mesh(region).subs,
+                (),
+                |ke| build_declare_subscriber(0, 0, Some(ke)),
+            ),
+            Declared::Face(keyexpr) => self
+                .owner_broker(region)
+                .subs
+                .borrow_mut()
+                .entry(inbound)
+                .or_default()
+                .insert(keyexpr.clone()),
+        }
+    }
+
+    /// An `UndeclareSubscriber` on `inbound` (its keyexpr rides the
+    /// `ext_wire_expr` extension): unregister it in the owner hat, propagate
+    /// where the removal moved the fold, and — R311y151 — re-arm any waiting
+    /// publisher whose pushed reply ke lost its LAST backer, with an
+    /// `UndeclareSubscriber` and `pushed` cleared.
+    fn undeclare_subscriber(
+        &self,
+        inbound: FaceId,
+        region: Region,
         reliable: bool,
         declare: &DeclareOwned,
     ) {
         let exts = match &declare.body {
-            DeclareOwnedVariant::CodecZenohUndeclToken(u) => u.extensions.as_ref(),
+            DeclareOwnedVariant::CodecZenohUndeclSubscriber(u) => u.extensions.as_ref(),
             _ => return,
         };
-        let Some(tokens) = self.tokens_table(tier) else {
-            return; // Client tier: forward() routes it to the client-token plane.
+        let Some(declared) =
+            self.resolve_declared(inbound, region, declare, |t| resolve_ext_keyexpr(exts, t))
+        else {
+            return;
         };
-        // Cross-tier PROPAGATION (slice-2): withdraw_interest returns Some(ke) on a
-        // REAL removal; if that was the LAST native token source, withdraw self's
-        // cross-tier advertisement into the opposite mesh (the flip true->false —
-        // the negation of ingest_token's advertise). Mirror of withdraw_subscription
-        // minus undeclare_push (a client-push concern).
-        if let Some(keyexpr) = self.withdraw_interest(
-            inbound,
-            tier,
-            reliable,
-            declare,
-            exts,
-            tokens,
-            build_undeclare_token_with_keyexpr,
-        ) {
-            self.unpropagate_token(Holder::Hat(tier), &keyexpr);
-            // slice-5 withdraw->notify: the mesh token is gone from the table, so a
-            // future-push reader whose pushed reply ke lost its LAST backer is told it
-            // withdrew (mirror of withdraw_subscription's undeclare_push_subs).
-            self.undeclare_push_token(&keyexpr);
+        let snapshot = self.snapshot::<SubPlane>(declared.keyexpr());
+        if self.unregister_subscriber(inbound, region, reliable, &declared) {
+            self.repropagate(snapshot);
+            self.undeclare_push_subs(declared.keyexpr());
+        }
+    }
+
+    /// Unregister a resolved subscriber from the hat that owns `region`,
+    /// whether it removed anything.
+    fn unregister_subscriber(
+        &self,
+        inbound: FaceId,
+        region: Region,
+        reliable: bool,
+        declared: &Declared,
+    ) -> bool {
+        match declared {
+            Declared::Sourced(sourced) => self.commit_withdraw(
+                inbound,
+                region,
+                reliable,
+                sourced,
+                &self.mesh(region).subs,
+                build_undeclare_subscriber_with_keyexpr,
+            ),
+            Declared::Face(keyexpr) => {
+                remove_from_face(&self.owner_broker(region).subs, inbound, |keys| {
+                    keys.remove(keyexpr).then_some(())
+                })
+                .is_some()
+            }
+        }
+    }
+
+    /// A `DeclareQueryable` on `inbound`, carrying its declared
+    /// [`QueryableInfo`] (complete / distance) on the ext chain; an absent
+    /// ext is zenoh's DEFAULT (incomplete). A mesh hat registers the SOURCE's
+    /// info and re-floods it within its region CARRYING that info, so a
+    /// multi-hop relay learns the queryable's completeness (1c); a broker hat
+    /// records it per client face (C5b). A registration is a NEW keyexpr for
+    /// the holder or a CHANGED info (the value-diff gate); it propagates where
+    /// the fold moved, and is pushed to every CLIENT face whose FUTURE
+    /// querier-interest matches with the RE-FOLDED merged info (R311y150), so
+    /// a completeness flip re-pushes the recomputed merge.
+    fn declare_queryable(
+        &self,
+        inbound: FaceId,
+        region: Region,
+        reliable: bool,
+        declare: &DeclareOwned,
+    ) {
+        let Some(wireexpr) = declare_queryable_wireexpr(declare) else {
+            return;
+        };
+        let info = match &declare.body {
+            DeclareOwnedVariant::CodecZenohDeclQueryable(dq) => {
+                read_queryable_info(dq.extensions.as_ref())
+            }
+            _ => QueryableInfo::DEFAULT,
+        };
+        let Some(declared) = self.resolve_declared(inbound, region, declare, |t| {
+            resolve_wireexpr(&wireexpr.body, t)
+        }) else {
+            return;
+        };
+        let snapshot = self.snapshot::<QablPlane>(declared.keyexpr());
+        if self.register_queryable(inbound, region, reliable, &declared, info) {
+            self.repropagate(snapshot);
+            self.push_future_queryable(declared.keyexpr(), inbound);
+        }
+    }
+
+    /// Register a resolved queryable with `info` in the hat that owns
+    /// `region`, whether it changed anything (a new holder or a changed info).
+    fn register_queryable(
+        &self,
+        inbound: FaceId,
+        region: Region,
+        reliable: bool,
+        declared: &Declared,
+        info: QueryableInfo,
+    ) -> bool {
+        match declared {
+            Declared::Sourced(sourced) => self.commit_register(
+                inbound,
+                region,
+                reliable,
+                sourced,
+                &self.mesh(region).qabls,
+                info,
+                move |ke| build_declare_queryable_with_info(ke, info),
+            ),
+            Declared::Face(keyexpr) => {
+                let previous = self
+                    .owner_broker(region)
+                    .qabls
+                    .borrow_mut()
+                    .entry(inbound)
+                    .or_default()
+                    .insert(keyexpr.clone(), info);
+                previous != Some(info)
+            }
+        }
+    }
+
+    /// An `UndeclareQueryable` on `inbound`, the query twin of
+    /// [`undeclare_subscriber`](Self::undeclare_subscriber): a downgrade where
+    /// a contributor remains, a full retraction where the fold is now `None`,
+    /// nothing where the removed holder did not change it — then the R311y151
+    /// undeclare-push re-arms any querier whose pushed reply ke lost its LAST
+    /// backing queryable. The face-down purge stays the safety net for a
+    /// departed peer.
+    fn undeclare_queryable(
+        &self,
+        inbound: FaceId,
+        region: Region,
+        reliable: bool,
+        declare: &DeclareOwned,
+    ) {
+        let exts = match &declare.body {
+            DeclareOwnedVariant::CodecZenohUndeclQueryable(u) => u.extensions.as_ref(),
+            _ => return,
+        };
+        let Some(declared) =
+            self.resolve_declared(inbound, region, declare, |t| resolve_ext_keyexpr(exts, t))
+        else {
+            return;
+        };
+        let snapshot = self.snapshot::<QablPlane>(declared.keyexpr());
+        if self.unregister_queryable(inbound, region, reliable, &declared) {
+            self.repropagate(snapshot);
+            self.undeclare_push_qabls(declared.keyexpr());
+        }
+    }
+
+    /// Unregister a resolved queryable from the hat that owns `region`,
+    /// whether it removed anything.
+    fn unregister_queryable(
+        &self,
+        inbound: FaceId,
+        region: Region,
+        reliable: bool,
+        declared: &Declared,
+    ) -> bool {
+        match declared {
+            Declared::Sourced(sourced) => self.commit_withdraw(
+                inbound,
+                region,
+                reliable,
+                sourced,
+                &self.mesh(region).qabls,
+                build_undeclare_queryable_with_keyexpr,
+            ),
+            Declared::Face(keyexpr) => {
+                remove_from_face(&self.owner_broker(region).qabls, inbound, |qabls| {
+                    qabls.remove(keyexpr)
+                })
+                .is_some()
+            }
+        }
+    }
+
+    /// A `DeclareToken` on `inbound` (§5.21 routing-token-tables): a mesh hat
+    /// registers the SOURCE and re-floods it within its region, carrier
+    /// `build_declare_token(0, 0, Some(ke))` (id 0 = sourced, keyexpr inline);
+    /// a broker hat records it under the client's decl id (slice-3). A
+    /// registration propagates where it moved the fold (slice-2) and is pushed
+    /// to every CLIENT face with a matching stored FUTURE token interest
+    /// (slice-4). A same-id/same-ke re-declare changes nothing.
+    ///
+    /// A client id RE-USED for a DIFFERENT keyexpr without an intervening
+    /// undeclare displaces its old mapping. Conforming clients (wz's own and
+    /// pico) allocate monotonic ids and undeclare first, so this is
+    /// unreachable in practice; the id-map makes it detectable, so the
+    /// displaced keyexpr is propagated as a removal and owes its readers the
+    /// slice-5 notify, and a liveliness token never leaks stale-live.
+    #[cfg(feature = "routing-token-tables")]
+    fn declare_token(
+        &self,
+        inbound: FaceId,
+        region: Region,
+        reliable: bool,
+        declare: &DeclareOwned,
+    ) {
+        let (decl_id, wireexpr) = match &declare.body {
+            DeclareOwnedVariant::CodecZenohDeclToken(t) => (t.id, &t.keyexpr),
+            _ => return,
+        };
+        let Some(declared) = self.resolve_declared(inbound, region, declare, |t| {
+            resolve_wireexpr(&wireexpr.body, t)
+        }) else {
+            return;
+        };
+        let displaced = match &declared {
+            Declared::Face(keyexpr) => self
+                .owner_broker(region)
+                .tokens
+                .borrow()
+                .get(&inbound)
+                .and_then(|ids| ids.get(&decl_id))
+                .filter(|old| *old != keyexpr)
+                .cloned(),
+            Declared::Sourced(_) => None,
+        };
+        let snapshot = self.snapshot::<TokenPlane>(declared.keyexpr());
+        let displaced = displaced.map(|old| self.snapshot::<TokenPlane>(&old));
+        let registered = self.register_token(inbound, region, reliable, &declared, decl_id);
+        log::debug!(
+            "router forward: token declare on face {inbound:?} region {region} -> {}",
+            if registered {
+                "REGISTERED"
+            } else {
+                "no change"
+            }
+        );
+        if registered {
+            self.repropagate(snapshot);
+            self.push_future_token(declared.keyexpr(), inbound);
+        }
+        if let Some(snapshot) = displaced {
+            let old = snapshot.keyexpr.clone();
+            self.repropagate(snapshot);
+            self.undeclare_push_token(&old);
+        }
+    }
+
+    /// Register a resolved token in the hat that owns `region`, whether it
+    /// changed anything. A broker hat keys it by the client's `decl_id`.
+    #[cfg(feature = "routing-token-tables")]
+    fn register_token(
+        &self,
+        inbound: FaceId,
+        region: Region,
+        reliable: bool,
+        declared: &Declared,
+        decl_id: u64,
+    ) -> bool {
+        match declared {
+            Declared::Sourced(sourced) => self.commit_register(
+                inbound,
+                region,
+                reliable,
+                sourced,
+                &self.mesh(region).tokens,
+                (),
+                |ke| build_declare_token(0, 0, Some(ke)),
+            ),
+            Declared::Face(keyexpr) => {
+                let previous = self
+                    .owner_broker(region)
+                    .tokens
+                    .borrow_mut()
+                    .entry(inbound)
+                    .or_default()
+                    .insert(decl_id, keyexpr.clone());
+                previous.as_deref() != Some(keyexpr.as_str())
+            }
+        }
+    }
+
+    /// An `UndeclareToken` on `inbound`: unregister it in the owner hat,
+    /// propagate where the removal moved the fold (slice-2), and tell every
+    /// future-push reader whose pushed reply ke lost its LAST backer that it
+    /// withdrew (slice-5).
+    ///
+    /// The two hats name the token differently, as the pin's do. A mesh
+    /// source's form is SOURCED (`{id: 0, ext_wire_expr}`) and is resolved by
+    /// keyexpr; an id-keyed `UndeclareToken` from a mesh face (the RAII drop's
+    /// form, no ext) resolves nothing and is a no-op, since the router
+    /// source-routes tokens by keyexpr. A client's form is ID-KEYED
+    /// (`build_undeclare_token(id)`, no ext — what wz's own liveliness `Drop`
+    /// and pico emit), so it is resolved BY ID against the face's own entries
+    /// (zenoh `forget_simple_token` id-first,
+    /// `zenoh/src/net/routing/hat/client/token.rs` @ `ext_wire_expr`), never by
+    /// an `ext_wire_expr` the client never sends.
+    #[cfg(feature = "routing-token-tables")]
+    fn undeclare_token(
+        &self,
+        inbound: FaceId,
+        region: Region,
+        reliable: bool,
+        declare: &DeclareOwned,
+    ) {
+        let (decl_id, exts) = match &declare.body {
+            DeclareOwnedVariant::CodecZenohUndeclToken(u) => (u.id, u.extensions.as_ref()),
+            _ => return,
+        };
+        let declared = match self.hats.get(&region) {
+            Some(Hat::Mesh(_)) => self
+                .resolve_sourced(inbound, region, declare, |t| resolve_ext_keyexpr(exts, t))
+                .map(Declared::Sourced),
+            Some(Hat::Broker(hat)) => hat
+                .tokens
+                .borrow()
+                .get(&inbound)
+                .and_then(|ids| ids.get(&decl_id))
+                .cloned()
+                .map(Declared::Face),
+            None => None,
+        };
+        let Some(declared) = declared else {
+            return;
+        };
+        let snapshot = self.snapshot::<TokenPlane>(declared.keyexpr());
+        if self.unregister_token(inbound, region, reliable, &declared, decl_id) {
+            self.repropagate(snapshot);
+            self.undeclare_push_token(declared.keyexpr());
+        }
+    }
+
+    /// Unregister a resolved token from the hat that owns `region`, whether
+    /// it removed anything. A broker hat removes the client's `decl_id` entry.
+    #[cfg(feature = "routing-token-tables")]
+    fn unregister_token(
+        &self,
+        inbound: FaceId,
+        region: Region,
+        reliable: bool,
+        declared: &Declared,
+        decl_id: u64,
+    ) -> bool {
+        match declared {
+            Declared::Sourced(sourced) => self.commit_withdraw(
+                inbound,
+                region,
+                reliable,
+                sourced,
+                &self.mesh(region).tokens,
+                build_undeclare_token_with_keyexpr,
+            ),
+            Declared::Face(_) => {
+                remove_from_face(&self.owner_broker(region).tokens, inbound, |ids| {
+                    ids.remove(&decl_id)
+                })
+                .is_some()
+            }
         }
     }
 
@@ -3535,186 +3954,6 @@ impl RouterForwarder {
             },
             |msg| self.send_one_to_face(inbound, msg),
         );
-    }
-
-    /// A sourced `UndeclareSubscriber` (1b): withdraw the SOURCE peer's interest
-    /// from the INBOUND tier's subs table (the keyexpr rides the `ext_keyexpr`
-    /// extension) and — only on a real removal — re-flood the retraction WITHIN
-    /// that tier. The mirror of [`LinkstateForwarder`]'s `forward_unsubscription`;
-    /// no bubble teardown (none is stored). A face-down purge is already covered
-    /// by [`purge_detached_interest_tier`](Self::purge_detached_interest_tier).
-    fn withdraw_subscription(
-        &self,
-        inbound: FaceId,
-        tier: Region,
-        reliable: bool,
-        declare: &DeclareOwned,
-    ) {
-        let exts = match &declare.body {
-            DeclareOwnedVariant::CodecZenohUndeclSubscriber(u) => u.extensions.as_ref(),
-            _ => return,
-        };
-        let Some(subs) = self.subs_table(tier) else {
-            return;
-        };
-        // FEDERATION cross-tier bubble (R311y125): on a real removal, if that was
-        // the LAST native source for `keyexpr` in this tier (and no client covers
-        // it), withdraw self's advertisement into the opposite mesh (flip
-        // true->false). The shared withdraw returns the resolved keyexpr on a real
-        // change, exactly as `ingest_interest` returns it for the advertise side.
-        if let Some(keyexpr) = self.withdraw_interest(
-            inbound,
-            tier,
-            reliable,
-            declare,
-            exts,
-            subs,
-            build_undeclare_subscriber_with_keyexpr,
-        ) {
-            self.unpropagate_sub(Holder::Hat(tier), &keyexpr);
-            // R311y151 undeclare-push: the mesh sub is gone from the table, so if a
-            // waiting publisher's pushed reply ke has now lost its LAST backer,
-            // re-arm its write-filter with an UndeclareSubscriber + clear `pushed`.
-            self.undeclare_push_subs(&keyexpr);
-        }
-    }
-
-    /// The SSOT for a sourced interest WITHDRAWAL (subscriber `V = ()` / queryable
-    /// `V = QueryableInfo`) — the router twin of
-    /// [`LinkstateForwarder`]'s `forward_interest_withdrawal`, and the removal
-    /// counterpart of [`ingest_interest`](Self::ingest_interest). Withdraw the
-    /// resolved SOURCE's interest from the inbound tier's `table` (the retracted
-    /// keyexpr rides `exts` = the body's `ext_wire_expr` chain) and — only on a
-    /// real removal — re-flood a clean sourced retraction WITHIN that tier via
-    /// `build` (re-stamped with this node's psid for the source). Returns
-    /// `Some(resolved keyexpr)` IFF it removed a REAL interest (the signal the
-    /// caller uses to recompute the CROSS-tier advertisement, mirroring
-    /// `ingest_interest`'s change-signal); `None` on any drop (client tier /
-    /// unresolvable / not held). The cross-tier bubble is NOT done here (it differs
-    /// per plane: presence for subs, merged-info for qabls) — the caller owns it.
-    #[allow(clippy::too_many_arguments)]
-    fn withdraw_interest<V>(
-        &self,
-        inbound: FaceId,
-        tier: Region,
-        reliable: bool,
-        declare: &DeclareOwned,
-        exts: Option<&Vec<ExtEntryOwned>>,
-        table: &RefCell<LinkstatepeerInterest<V>>,
-        build: impl Fn(&str) -> Result<DeclareOwned, CodecError>,
-    ) -> Option<String> {
-        let sourced =
-            self.resolve_sourced(inbound, tier, declare, |t| resolve_ext_keyexpr(exts, t))?;
-        self.commit_withdraw(inbound, tier, reliable, &sourced, table, build)
-            .then_some(sourced.keyexpr)
-    }
-
-    /// Ingest a sourced `DeclareQueryable` (1c) — the query-plane twin of
-    /// [`ingest_subscription`](Self::ingest_subscription). Register the SOURCE's
-    /// queryable interest (VALUE = its declared [`QueryableInfo`], read off the
-    /// DeclQueryable ext chain) in the INBOUND tier's qabls table, and — only on
-    /// a real change (a NEW peer OR a CHANGED `QueryableInfo`, the value-diff
-    /// gate) — re-flood a clean declaration CARRYING that info within the tier so
-    /// a multi-hop relay learns the queryable's completeness. Like the sub
-    /// bubble, the cross-tier bubble (a MERGED `local_*_qabl_info` in zenoh) is
-    /// DERIVED at compute (A2b), not stored. The removal twin is
-    /// [`withdraw_queryable`](Self::withdraw_queryable): a per-keyexpr
-    /// `UndeclareQueryable` withdraws via its `ext_wire_expr` extension, and the
-    /// whole-peer face-down purge stays the safety net for a departed peer.
-    fn ingest_queryable(
-        &self,
-        inbound: FaceId,
-        tier: Region,
-        reliable: bool,
-        declare: &DeclareOwned,
-    ) {
-        let Some(wireexpr) = declare_queryable_wireexpr(declare) else {
-            return;
-        };
-        let Some(qabls) = self.qabls_table(tier) else {
-            return; // Client tier -> slice 1d.
-        };
-        // The declared QueryableInfo (complete / distance) rides the DeclQueryable
-        // body's ext chain; absent ext = zenoh DEFAULT (incomplete).
-        let info = match &declare.body {
-            DeclareOwnedVariant::CodecZenohDeclQueryable(dq) => {
-                read_queryable_info(dq.extensions.as_ref())
-            }
-            _ => QueryableInfo::DEFAULT,
-        };
-        let Some(sourced) = self.resolve_sourced(inbound, tier, declare, |t| {
-            resolve_wireexpr(&wireexpr.body, t)
-        }) else {
-            return;
-        };
-        // FEDERATION cross-tier bubble (A2b, R2875): read the merged info outside
-        // each mesh BEFORE the register, then propagate where the register moved
-        // it — a new native or a changed info that alters the fold (an upgrade or
-        // a downgrade), and nothing when the fold is unchanged. CARRY the
-        // source's QueryableInfo downstream on the within-region re-flood.
-        let snapshot = self.snapshot_qabl(&sourced.keyexpr);
-        let changed = self
-            .commit_register(inbound, tier, reliable, &sourced, qabls, info, move |ke| {
-                build_declare_queryable_with_info(ke, info)
-            })
-            .then_some(sourced.keyexpr);
-        if let Some(ke) = changed {
-            self.repropagate_qabl(snapshot);
-            // FUTURE-push (R311y150): a queryable learned off the mesh is proactively
-            // pushed to any CLIENT face whose FUTURE querier-interest matches, with
-            // the RE-FOLDED merged info — the query twin of the mesh-sub future push.
-            self.push_future_queryable(&ke, inbound);
-        }
-    }
-
-    /// A sourced `UndeclareQueryable` — the query-plane twin of
-    /// [`withdraw_subscription`](Self::withdraw_subscription): withdraw the SOURCE
-    /// peer's interest from the INBOUND tier's qabls table (the keyexpr rides the
-    /// `ext_wire_expr` extension) and — only on a real removal — re-flood the
-    /// retraction WITHIN that tier, then recompute self's cross-tier advertisement.
-    /// Before the `UndeclareQueryable` codec modeled the keyexpr ext this arm was a
-    /// no-op (the face-down purge was the only qabl teardown); it now mirrors the
-    /// sub retraction. A face-down purge is still covered by
-    /// [`purge_detached_interest_tier`](Self::purge_detached_interest_tier).
-    fn withdraw_queryable(
-        &self,
-        inbound: FaceId,
-        tier: Region,
-        reliable: bool,
-        declare: &DeclareOwned,
-    ) {
-        let exts = match &declare.body {
-            DeclareOwnedVariant::CodecZenohUndeclQueryable(u) => u.extensions.as_ref(),
-            _ => return,
-        };
-        let Some(qabls) = self.qabls_table(tier) else {
-            return;
-        };
-        // FEDERATION cross-tier bubble (A2b, R2875): on a real removal, propagate
-        // where the fold outside a mesh moved — a downgrade if a contributor
-        // remains, a full `UndeclareQueryable` retraction if the fold is now
-        // `None`, nothing if the removed source did not change it.
-        let Some(sourced) =
-            self.resolve_sourced(inbound, tier, declare, |t| resolve_ext_keyexpr(exts, t))
-        else {
-            return;
-        };
-        let snapshot = self.snapshot_qabl(&sourced.keyexpr);
-        if self.commit_withdraw(
-            inbound,
-            tier,
-            reliable,
-            &sourced,
-            qabls,
-            build_undeclare_queryable_with_keyexpr,
-        ) {
-            let keyexpr = sourced.keyexpr;
-            self.repropagate_qabl(snapshot);
-            // R311y151 undeclare-push (query twin): a waiting querier whose pushed
-            // reply ke lost its LAST backing queryable is re-armed with an
-            // UndeclareQueryable + `pushed` cleared.
-            self.undeclare_push_qabls(&keyexpr);
-        }
     }
 
     /// Re-flood a clean sourced declaration WITHIN `tier` to the source's
@@ -4535,56 +4774,6 @@ impl RouterForwarder {
         });
     }
 
-    /// Ingest a CLIENT-face `DeclareSubscriber` (C2) into the per-face
-    /// [`client_subs`](Self#structfield.client_subs) store and — when it is the
-    /// FIRST client interested in the keyexpr — ADVERTISE self's now-derived
-    /// cross-tier interest into the meshes. The mesh-face declare path
-    /// ([`ingest_subscription`](Self::ingest_subscription)) drops a Client-tier
-    /// declare (no tier table); this is where the leaf input lands instead.
-    fn ingest_client_subscription(&self, inbound: FaceId, owner: Region, declare: &DeclareOwned) {
-        let Some(wireexpr) = declare_subscriber_wireexpr(declare) else {
-            return;
-        };
-        let keyexpr = {
-            let faces = self.faces.borrow();
-            // R2734 — SourceOnly declines. A group peer's subscription is not
-            // absent from wz, it is carried by a DIFFERENT structure: the
-            // MulticastDispatcher tracks `remote_subs` per peer and the union
-            // reaches the mesh through `set_mcast_group_subs`. Registering the
-            // same subscription on a client face too would advertise it twice,
-            // and onto a face that can never be delivered to.
-            let s = match classify_inbound(&faces, inbound) {
-                InboundFace::Held(s) => s,
-                InboundFace::SourceOnly | InboundFace::Gone => return,
-            };
-            match resolve_wireexpr(&wireexpr.body, &s.keyexpr_table) {
-                Some(k) => k,
-                None => return,
-            }
-        };
-        // Register in the owner hat, then propagate into every mesh this flips
-        // (R2874, step 3e): the edge is derived from the holders, so a co-client,
-        // a group sub, a hosted sub or an opposite-mesh native that already
-        // advertised `keyexpr` suppresses the flood alike.
-        let inserted = self
-            .owner_broker(owner)
-            .subs
-            .borrow_mut()
-            .entry(inbound)
-            .or_default()
-            .insert(keyexpr.clone());
-        if inserted {
-            self.propagate_sub(Holder::Hat(owner), &keyexpr);
-            // FUTURE-mode push: a new client sub -> declare it to any OTHER client
-            // face whose stored FUTURE interest matches (client-to-client via this
-            // router). Fires even when a co-client already subscribes: the push
-            // dedups per interest-holder via the pushed registry, so a holder the
-            // earlier sub already covered is a no-op. `inbound` (the source) is
-            // never echoed.
-            self.push_future_subscription(&keyexpr, inbound);
-        }
-    }
-
     /// Emit the unsolicited FUTURE `DeclareSubscriber` pushes a newly-learned
     /// subscription `new_ke` (sourced at `origin`) triggers: one per CLIENT face
     /// whose stored FUTURE interest matches and has not yet been told this reply ke
@@ -4723,50 +4912,6 @@ impl RouterForwarder {
         }
     }
 
-    /// Withdraw a CLIENT-face `UndeclareSubscriber` (C2) from
-    /// [`client_subs`](Self#structfield.client_subs); when it removed the LAST
-    /// client interested in the keyexpr, withdraw self's cross-tier advertisement.
-    fn withdraw_client_subscription(&self, inbound: FaceId, owner: Region, declare: &DeclareOwned) {
-        let exts = match &declare.body {
-            DeclareOwnedVariant::CodecZenohUndeclSubscriber(u) => u.extensions.as_ref(),
-            _ => return,
-        };
-        let keyexpr = {
-            let faces = self.faces.borrow();
-            // R2734 — SourceOnly declines, as its ingest twin does: a group
-            // peer's subscription lives in the MulticastDispatcher, so there is
-            // no client-face registration here for a withdrawal to remove.
-            let s = match classify_inbound(&faces, inbound) {
-                InboundFace::Held(s) => s,
-                InboundFace::SourceOnly | InboundFace::Gone => return,
-            };
-            match resolve_ext_keyexpr(exts, &s.keyexpr_table) {
-                Some(k) => k,
-                None => return,
-            }
-        };
-        let removed = {
-            let mut store = self.owner_broker(owner).subs.borrow_mut();
-            let removed = store
-                .get_mut(&inbound)
-                .is_some_and(|set| set.remove(&keyexpr));
-            // Prune an emptied set (the same prune discipline
-            // [`LinkstatepeerInterest::withdraw`] uses), so a client that
-            // unsubscribes everything does not defeat the `is_empty()` delivery
-            // fast-path with a lingering empty entry.
-            if store.get(&inbound).is_some_and(|set| set.is_empty()) {
-                store.remove(&inbound);
-            }
-            removed
-        };
-        if removed {
-            self.unpropagate_sub(Holder::Hat(owner), &keyexpr);
-            // R311y151 undeclare-push: this client sub is gone; re-arm any waiting
-            // publisher whose pushed reply ke lost its last backer.
-            self.undeclare_push_subs(&keyexpr);
-        }
-    }
-
     /// Whether ANY subscription wz still holds INTERSECTS `ke` — the "still backed"
     /// existence predicate the R311y151 undeclare-push consults AFTER a withdrawal to
     /// decide whether a pushed reply ke has lost its LAST backer (`false` => undeclare
@@ -4895,9 +5040,7 @@ impl RouterForwarder {
     /// no longer named one by one; they are every holder, so a region the map
     /// gains is a contributor without an edit here.
     fn self_advertises_sub_into(&self, target: Region, keyexpr: &str) -> bool {
-        self.held_outside(target, None, |holder| {
-            self.sub_contributions(holder, keyexpr)
-        })
+        self.held_outside(target, |holder| self.sub_contributions(holder, keyexpr))
     }
 
     /// Every holder a subscription can have, in a fixed order: each region's
@@ -4942,22 +5085,13 @@ impl RouterForwarder {
         }
     }
 
-    /// Whether a holder outside `target` has a contribution, not counting ONE
-    /// contribution of `without`. `contributions` is the plane's count for one
-    /// keyexpr ([`sub_contributions`](Self::sub_contributions) or its token
-    /// twin). `without = None` reads the current state; `Some(h)` reads the
-    /// state before `h` gained the contribution it just registered, which is
-    /// what lets a register find its flip edge without a stored "advertised"
-    /// bit (the pin stores one per hat; wz derives it).
-    fn held_outside(
-        &self,
-        target: Region,
-        without: Option<Holder>,
-        contributions: impl Fn(Holder) -> usize,
-    ) -> bool {
+    /// Whether a holder outside `target` has a contribution. `contributions`
+    /// is the plane's count for one keyexpr
+    /// ([`sub_contributions`](Self::sub_contributions) or its token twin).
+    fn held_outside(&self, target: Region, contributions: impl Fn(Holder) -> usize) -> bool {
         self.holders()
             .filter(|holder| holder.region() != Some(target))
-            .any(|holder| contributions(holder) > usize::from(without == Some(holder)))
+            .any(|holder| contributions(holder) > 0)
     }
 
     /// The mesh regions, the only targets self advertises into.
@@ -4968,79 +5102,48 @@ impl RouterForwarder {
             .collect()
     }
 
-    /// R2874 (step 3e) — `holder` just registered a declaration of `keyexpr`:
-    /// advertise self, by `build`, into every mesh this newly flips.
-    ///
-    /// The pin's declare loop
-    /// (`zenoh/src/net/routing/dispatcher/pubsub.rs` @ `hats[dst].propagate_subscriber(ctx.reborrow(), res.clone(), other_info);`)
-    /// registers in the owner hat, then for every region computes the fold of
-    /// the OTHER hats and propagates where that is newly `Some`. After the
-    /// register the fold outside any region but the holder's own is true, so a
-    /// flip happens exactly where it was false without this one contribution.
-    /// One dispatch for every holder and both presence planes: before it there
-    /// were five advertise functions, one per holder kind and plane, each
-    /// re-deriving "was this the first contributor" from its own kind, and
-    /// none of them counted the host.
-    fn propagate(
-        &self,
-        holder: Holder,
-        keyexpr: &str,
-        contributions: impl Fn(Holder) -> usize,
-        build: impl Fn(&str) -> Result<DeclareOwned, CodecError>,
-    ) {
-        for target in self.mesh_regions() {
-            if holder.region() != Some(target)
-                && !self.held_outside(target, Some(holder), &contributions)
-            {
-                self.flood_self_sourced(target, keyexpr, &build);
-            }
+    /// Read `P`'s fold outside every mesh region for `keyexpr`, before a
+    /// mutation — see [`Snapshot`].
+    fn snapshot<P: DeclPlane>(&self, keyexpr: &str) -> Snapshot<P> {
+        Snapshot {
+            keyexpr: keyexpr.to_string(),
+            before: self
+                .mesh_regions()
+                .into_iter()
+                .map(|target| (target, P::fold_outside(self, target, keyexpr)))
+                .collect(),
         }
     }
 
-    /// R2874 (step 3e) — `holder` just lost its declaration(s) of `keyexpr`:
-    /// withdraw self, by `build`, from every mesh nothing outside it still
-    /// justifies.
+    /// R2876 (step 3e) — after a mutation, propagate self into every mesh
+    /// whose fold outside it changed since `snapshot`: `P`'s declaration
+    /// carrying the new fold, or its retraction when nothing outside that mesh
+    /// holds the keyexpr any more.
     ///
-    /// The pin's undeclare
-    /// (`zenoh/src/net/routing/dispatcher/pubsub.rs` @ `last_owner.unpropagate_last_non_owned_subscriber(ctx, res.clone())`)
-    /// unpropagates every hat when no holder remains, and only the last
-    /// owner's own region when exactly one does. Both are "the fold outside
-    /// `target` is now empty"; the holder that just withdrew held it before,
-    /// so for every target outside its region that is a true -> false edge.
-    /// It takes no count, so a face-down purge that removes several sources
-    /// at once is one call per keyexpr.
-    fn unpropagate(
-        &self,
-        holder: Holder,
-        keyexpr: &str,
-        contributions: impl Fn(Holder) -> usize,
-        build: impl Fn(&str) -> Result<DeclareOwned, CodecError>,
-    ) {
-        for target in self.mesh_regions() {
-            if holder.region() != Some(target) && !self.held_outside(target, None, &contributions) {
-                self.flood_self_sourced(target, keyexpr, &build);
+    /// This is the pin's dispatch in both directions, for every plane. On a
+    /// declare it registers in the owner hat and propagates to every region
+    /// whose fold differs from what that hat propagated
+    /// (`zenoh/src/net/routing/dispatcher/pubsub.rs` @ `hats[dst].propagate_subscriber(ctx.reborrow(), res.clone(), other_info);`,
+    /// `zenoh/src/net/routing/dispatcher/queries.rs` @ `tables.hats[dst].propagate_queryable(ctx.reborrow(), res.clone(), other_info);`).
+    /// On an undeclare it unpropagates every hat when no holder remains and
+    /// only the last owner's own region when exactly one does
+    /// (`zenoh/src/net/routing/dispatcher/pubsub.rs` @ `last_owner.unpropagate_last_non_owned_subscriber(ctx, res.clone())`);
+    /// both are "the fold outside `target` is now `None`". The owner's own
+    /// region never changes here, since its fold excludes the owner, and a
+    /// face-down purge that removes several sources at once is one snapshot
+    /// per keyexpr.
+    fn repropagate<P: DeclPlane>(&self, snapshot: Snapshot<P>) {
+        let keyexpr = snapshot.keyexpr.as_str();
+        for (target, before) in snapshot.before {
+            let after = P::fold_outside(self, target, keyexpr);
+            if after == before {
+                continue;
+            }
+            match after {
+                Some(value) => self.flood_self_sourced(target, keyexpr, |ke| P::declare(ke, value)),
+                None => self.flood_self_sourced(target, keyexpr, P::undeclare),
             }
         }
-    }
-
-    /// [`propagate`](Self::propagate) for the subscriber plane.
-    fn propagate_sub(&self, holder: Holder, keyexpr: &str) {
-        self.propagate(
-            holder,
-            keyexpr,
-            |holder| self.sub_contributions(holder, keyexpr),
-            |ke| build_declare_subscriber(0, 0, Some(ke)),
-        );
-    }
-
-    /// [`unpropagate`](Self::unpropagate) for the subscriber plane.
-    fn unpropagate_sub(&self, holder: Holder, keyexpr: &str) {
-        self.unpropagate(
-            holder,
-            keyexpr,
-            |holder| self.sub_contributions(holder, keyexpr),
-            build_undeclare_subscriber_with_keyexpr,
-        );
     }
 
     /// Whether a multicast-group SUBSCRIBER holds `keyexpr` — the THIRD
@@ -5155,9 +5258,7 @@ impl RouterForwarder {
     /// outside `target` holds it (R2874, step 3e).
     #[cfg(feature = "routing-token-tables")]
     fn self_advertises_token_into(&self, target: Region, keyexpr: &str) -> bool {
-        self.held_outside(target, None, |holder| {
-            self.token_contributions(holder, keyexpr)
-        })
+        self.held_outside(target, |holder| self.token_contributions(holder, keyexpr))
     }
 
     /// The keyexprs `holder` holds a liveliness token on — the listing twin of
@@ -5208,146 +5309,6 @@ impl RouterForwarder {
             },
             Holder::Group | Holder::Host => 0,
         }
-    }
-
-    /// [`propagate`](Self::propagate) for the liveliness-token plane: a
-    /// self-sourced `DeclareToken` into every mesh a new token contribution
-    /// flips. Tokens carry no value, so unlike the qabl plane there is no
-    /// merged-info edge.
-    #[cfg(feature = "routing-token-tables")]
-    fn propagate_token(&self, holder: Holder, keyexpr: &str) {
-        self.propagate(
-            holder,
-            keyexpr,
-            |holder| self.token_contributions(holder, keyexpr),
-            |ke| build_declare_token(0, 0, Some(ke)),
-        );
-    }
-
-    /// [`unpropagate`](Self::unpropagate) for the liveliness-token plane. Every
-    /// removal path routes through it — graceful retraction, id reuse, face-down
-    /// and the Oam-detach purge (the R311y125 lifecycle-symmetry class).
-    #[cfg(feature = "routing-token-tables")]
-    fn unpropagate_token(&self, holder: Holder, keyexpr: &str) {
-        self.unpropagate(
-            holder,
-            keyexpr,
-            |holder| self.token_contributions(holder, keyexpr),
-            build_undeclare_token_with_keyexpr,
-        );
-    }
-
-    // ── §5.21 routing-token-tables (slice-3): CLIENT/simple liveliness-TOKEN plane ──
-
-    /// Ingest a CLIENT-face `DeclareToken` (slice-3) into the per-face
-    /// [`client_tokens`](Self#structfield.client_tokens) store (keyed by the
-    /// client's DECL ID -> keyexpr, the zenoh `remote_tokens` twin) and — when it
-    /// is the FIRST client holding the keyexpr — ADVERTISE self's now-derived
-    /// cross-tier interest into BOTH meshes. The token twin of
-    /// [`ingest_client_subscription`](Self::ingest_client_subscription); the
-    /// mesh-face path ([`ingest_token`](Self::ingest_token)) drops a Client-tier
-    /// declare (no tier table), so the leaf input lands here instead. The
-    /// FUTURE push to a CLIENT face with a matching stored token interest is
-    /// [`push_future_token`](Self::push_future_token) (slice-4, wired in the tail);
-    /// the self-delivery guard is a no-op in the forwarder (see that method).
-    #[cfg(feature = "routing-token-tables")]
-    fn ingest_client_token(&self, inbound: FaceId, owner: Region, declare: &DeclareOwned) {
-        let (decl_id, wireexpr) = match &declare.body {
-            DeclareOwnedVariant::CodecZenohDeclToken(t) => (t.id, &t.keyexpr),
-            _ => return,
-        };
-        let keyexpr = {
-            let faces = self.faces.borrow();
-            // R2734 — SourceOnly declines, and here the reason is stronger than
-            // "a different structure carries it": the MulticastDispatcher does
-            // NOT track liveliness tokens at all. The pin would register one on
-            // its black-hole face; wz declines, because a token registered on a
-            // face that can never be delivered to advertises liveliness this
-            // router cannot actually serve.
-            let s = match classify_inbound(&faces, inbound) {
-                InboundFace::Held(s) => s,
-                InboundFace::SourceOnly | InboundFace::Gone => return,
-            };
-            match resolve_wireexpr(&wireexpr.body, &s.keyexpr_table) {
-                Some(k) => k,
-                None => return,
-            }
-        };
-        // Register in the owner hat in a scoped borrow, THEN propagate after it
-        // drops (R2874, step 3e). A same-id/same-ke re-declare adds no
-        // contribution and propagates nothing; a new id for an already-held
-        // keyexpr adds one, and the derived edge finds it was already advertised.
-        let displaced = self
-            .owner_broker(owner)
-            .tokens
-            .borrow_mut()
-            .entry(inbound)
-            .or_default()
-            .insert(decl_id, keyexpr.clone());
-        if displaced.as_deref() != Some(keyexpr.as_str()) {
-            self.propagate_token(Holder::Hat(owner), &keyexpr);
-            // FUTURE-mode push (slice-4): declare this token to any CLIENT face whose
-            // stored FUTURE token interest matches (mirror of ingest_client_subscription's
-            // push_future_subscription). Skipped for a redundant same-id/same-ke
-            // re-declare (pushes_for_new dedups anyway, but match the sub
-            // `if inserted` discipline).
-            self.push_future_token(&keyexpr, inbound);
-        }
-        // Defensive: an id RE-USED for a DIFFERENT keyexpr without an intervening
-        // undeclare silently displaced its old mapping (conforming clients — wz's own
-        // + pico — allocate monotonic ids and undeclare first, so this is unreachable
-        // in practice; the id-map makes it detectable where the keyexpr-set sub twin
-        // could not). Retract the displaced keyexpr's cross-tier advertisement if this
-        // was its last holder, so a liveliness token never leaks stale-live.
-        if let Some(old) = displaced {
-            if old != keyexpr {
-                self.unpropagate_token(Holder::Hat(owner), &old);
-                // slice-5: the displaced old keyexpr also owes a reader-notify — the
-                // 5th token-removal path (id-reuse), which has NO sub mirror (client_subs
-                // is a HashSet that cannot displace), so the "3 sub sites" enumeration
-                // misses it. Closes the same stale-live residual as the other sites.
-                self.undeclare_push_token(&old);
-            }
-        }
-    }
-
-    /// Withdraw a CLIENT-face `UndeclareToken` (slice-3) from
-    /// [`client_tokens`](Self#structfield.client_tokens); when it removed the LAST
-    /// client holding the keyexpr, withdraw self's cross-tier advertisement. The
-    /// token twin of [`withdraw_client_subscription`](Self::withdraw_client_subscription).
-    /// A Client-tier `UndeclareToken` is ID-KEYED (`build_undeclare_token(id)`, no
-    /// ext — the form wz's own liveliness `Drop` and pico emit), so the retracted
-    /// keyexpr is resolved BY ID (zenoh `forget_simple_token` id-first,
-    /// `zenoh/src/net/routing/hat/client/token.rs` @ `ext_wire_expr`), NOT by an
-    /// `ext_wire_expr` the client never sends.
-    /// The sourced (`id == 0`, ext) form is a MESH peer's and routes through
-    /// [`withdraw_token`](Self::withdraw_token) instead.
-    #[cfg(feature = "routing-token-tables")]
-    fn withdraw_client_token(&self, inbound: FaceId, owner: Region, declare: &DeclareOwned) {
-        let decl_id = match &declare.body {
-            DeclareOwnedVariant::CodecZenohUndeclToken(u) => u.id,
-            _ => return,
-        };
-        let keyexpr = {
-            let mut store = self.owner_broker(owner).tokens.borrow_mut();
-            let removed = store.get_mut(&inbound).and_then(|ids| ids.remove(&decl_id));
-            // Prune an emptied per-face map (the same discipline
-            // `withdraw_client_subscription` uses), so a client that drops every
-            // token does not linger in the derive/late-joiner fold.
-            if store.get(&inbound).is_some_and(|ids| ids.is_empty()) {
-                store.remove(&inbound);
-            }
-            removed
-        };
-        let Some(keyexpr) = keyexpr else {
-            return; // unknown id (never ingested / already gone) — nothing to withdraw
-        };
-        self.unpropagate_token(Holder::Hat(owner), &keyexpr);
-        // slice-5 withdraw->notify (unconditional on a real removal, like
-        // withdraw_client_subscription): a future-push reader whose pushed reply ke is
-        // now un-backed is told the token withdrew. The internal `any_token_matches`
-        // gate keeps a ke another token still backs from being spuriously undeclared.
-        self.undeclare_push_token(&keyexpr);
     }
 
     // ── §5.21 routing-token-tables (slice-5): topology-reconcile withdraw->notify ──
@@ -5492,52 +5453,6 @@ impl RouterForwarder {
         }
     }
 
-    /// Read the merged queryable info outside every mesh region for
-    /// `keyexpr`, before a mutation — see [`QablSnapshot`].
-    fn snapshot_qabl(&self, keyexpr: &str) -> QablSnapshot {
-        QablSnapshot {
-            keyexpr: keyexpr.to_string(),
-            before: self
-                .mesh_regions()
-                .into_iter()
-                .map(|target| (target, self.derived_cross_tier_qabl_info(target, keyexpr)))
-                .collect(),
-        }
-    }
-
-    /// R2875 (step 3e) — after a mutation, propagate self's queryable into
-    /// every mesh whose merged info outside it changed since `snapshot`: a
-    /// `DeclareQueryable` carrying the new fold, or an `UndeclareQueryable`
-    /// when nothing outside that mesh holds one any more.
-    ///
-    /// This is the pin's queryable dispatch in both directions. On a declare it
-    /// registers in the owner hat and re-propagates to every region whose fold
-    /// differs from what it propagated
-    /// (`zenoh/src/net/routing/dispatcher/queries.rs` @ `tables.hats[dst].propagate_queryable(ctx.reborrow(), res.clone(), other_info);`).
-    /// On an undeclare it unpropagates where nothing remains and
-    /// re-propagates the downgraded fold where something does. The owner's own
-    /// region never changes here: its fold excludes the owner. Before R2875
-    /// every register re-flooded both meshes whatever the fold, and each
-    /// withdrawal re-declared an unchanged fold; the downstream value-diff gate
-    /// absorbed those, but they were wire traffic the pin never sends.
-    fn repropagate_qabl(&self, snapshot: QablSnapshot) {
-        let keyexpr = snapshot.keyexpr.as_str();
-        for (target, before) in snapshot.before {
-            let after = self.derived_cross_tier_qabl_info(target, keyexpr);
-            if after == before {
-                continue;
-            }
-            match after {
-                Some(info) => self.flood_self_sourced(target, keyexpr, move |ke| {
-                    build_declare_queryable_with_info(ke, info)
-                }),
-                None => {
-                    self.flood_self_sourced(target, keyexpr, build_undeclare_queryable_with_keyexpr)
-                }
-            }
-        }
-    }
-
     /// The keyexprs self should advertise a merged queryable for into `target`
     /// mesh — the OPPOSITE mesh's native qabls ∪ the client qabls, deduped. The set
     /// form of [`derived_cross_tier_qabl_info`](Self::derived_cross_tier_qabl_info)
@@ -5587,8 +5502,7 @@ impl RouterForwarder {
     /// tier's NEW tree children a recompute added — self is the source, so the
     /// flood targets the delta children of SELF's tree in this net. The tick
     /// counterpart of the immediate
-    /// [`propagate_sub`](Self::propagate_sub) /
-    /// [`repropagate_qabl`](Self::repropagate_qabl),
+    /// [`repropagate`](Self::repropagate),
     /// the OBLIGATION-2 feed of the re-advertise path with the DERIVED (not stored)
     /// self-source (node_id 0) — so a late-joining child converges on self's full
     /// cross-tier bubble (both planes). The qabl re-advertise carries the MERGED
@@ -5632,73 +5546,6 @@ impl RouterForwarder {
         }
     }
 
-    /// Ingest a CLIENT-face `DeclareQueryable` (C5b) into the per-face
-    /// [`client_qabls`](Self#structfield.client_qabls) store — the query-plane twin
-    /// of [`ingest_client_subscription`](Self::ingest_client_subscription). The
-    /// mesh-face declare path ([`ingest_queryable`](Self::ingest_queryable)) drops a
-    /// Client-tier declare (no Zid-keyed tier table); a client-hosted queryable
-    /// lands here instead, keyed by the client face + its declared
-    /// [`QueryableInfo`] (the query route reads `complete` / `distance`), and — A3
-    /// — ADVERTISES self's cross-tier merged queryable into BOTH meshes so a REMOTE
-    /// mesh querier routes toward this router (the query-plane twin of C2's
-    /// [`propagate_sub`](Self::propagate_sub)).
-    /// A client is a leaf in NEITHER mesh, so it steers both (unlike a native,
-    /// which steers only the opposite mesh). The advertised value is the MERGED
-    /// [`QueryableInfo`] ([`derived_cross_tier_qabl_info`](Self::derived_cross_tier_qabl_info),
-    /// which already folds `client_qabls` — the A2b seam), so A3 is a trigger-only
-    /// add over the A2b machinery. Fires only on a real change (a new client
-    /// queryable OR a changed info) so a redundant re-declare does not re-flood.
-    fn ingest_client_queryable(&self, inbound: FaceId, owner: Region, declare: &DeclareOwned) {
-        let Some(wireexpr) = declare_queryable_wireexpr(declare) else {
-            return;
-        };
-        let keyexpr = {
-            let faces = self.faces.borrow();
-            // R2734 — SourceOnly declines, and this is the arm where copying the
-            // pin would be WORSE than declining. Upstream registers a group
-            // peer's queryable on a face whose primitives discard, so the router
-            // then advertises a queryable it can never reach and attracts queries
-            // no one will answer. wz declines rather than inherit that.
-            let s = match classify_inbound(&faces, inbound) {
-                InboundFace::Held(s) => s,
-                InboundFace::SourceOnly | InboundFace::Gone => return,
-            };
-            match resolve_wireexpr(&wireexpr.body, &s.keyexpr_table) {
-                Some(k) => k,
-                None => return,
-            }
-        };
-        // The declared QueryableInfo rides the DeclQueryable ext chain; absent =
-        // zenoh DEFAULT (incomplete), the same read `ingest_queryable` does.
-        let info = match &declare.body {
-            DeclareOwnedVariant::CodecZenohDeclQueryable(dq) => {
-                read_queryable_info(dq.extensions.as_ref())
-            }
-            _ => QueryableInfo::DEFAULT,
-        };
-        // The change gate (mirrors the native value-diff): only a NEW keyexpr for
-        // this face OR a CHANGED info is a change — `insert` returns the prior
-        // value, so `Some(prev) if prev == info` is the redundant re-declare. The
-        // propagate then floods only the meshes whose fold it moved (R2875).
-        let snapshot = self.snapshot_qabl(&keyexpr);
-        let prev = self
-            .owner_broker(owner)
-            .qabls
-            .borrow_mut()
-            .entry(inbound)
-            .or_default()
-            .insert(keyexpr.clone(), info);
-        if prev != Some(info) {
-            self.repropagate_qabl(snapshot);
-            // FUTURE-push (R311y150): a client queryable is proactively pushed to
-            // ANOTHER client face whose FUTURE querier-interest matches (the value-
-            // aware site — `prev` carried the old info, so a completeness flip
-            // re-pushes the recomputed merge). `inbound` (the queryable's own face)
-            // is never self-echoed.
-            self.push_future_queryable(&keyexpr, inbound);
-        }
-    }
-
     /// Register a queryable HOSTED BY THIS router (§5.23 `adminspace-router-
     /// linkstate`) — the router twin of the peer
     /// [`LinkstateForwarder::register_local_queryable`](crate::linkstate_forward::LinkstateForwarder::register_local_queryable).
@@ -5718,13 +5565,13 @@ impl RouterForwarder {
         complete: bool,
         handler: LocalQueryHandler,
     ) {
-        let snapshot = self.snapshot_qabl(keyexpr);
+        let snapshot = self.snapshot::<QablPlane>(keyexpr);
         self.local_queryables.borrow_mut().push(LocalQueryable {
             keyexpr: keyexpr.to_string(),
             complete,
             handler: Rc::new(RefCell::new(handler)),
         });
-        self.repropagate_qabl(snapshot);
+        self.repropagate(snapshot);
     }
 
     /// R2393 (§5.21) — register a subscriber HOSTED BY THIS ROUTER: the Push-plane
@@ -5750,11 +5597,12 @@ impl RouterForwarder {
     /// meshes rather than one tree, so a single number would have to fold two
     /// answers into one and could not say which mesh a zero came from.
     pub fn register_local_subscriber(&self, keyexpr: &str, handler: LocalSubscriberHandler) {
+        let snapshot = self.snapshot::<SubPlane>(keyexpr);
         self.local_subscribers.borrow_mut().push(LocalSubscriber {
             keyexpr: keyexpr.to_string(),
             handler: Rc::new(RefCell::new(handler)),
         });
-        self.propagate_sub(Holder::Host, keyexpr);
+        self.repropagate(snapshot);
     }
 
     /// R2393 — deliver a routed Put to any subscriber HOSTED BY THIS ROUTER whose
@@ -5964,50 +5812,6 @@ impl RouterForwarder {
             NetworkMessage::ResponseFinal(final_msg.clone())
         });
         true
-    }
-
-    /// Withdraw a CLIENT-face `UndeclareQueryable` (the query twin of
-    /// [`withdraw_client_subscription`](Self::withdraw_client_subscription)) from
-    /// [`client_qabls`](Self#structfield.client_qabls); when it removed the client's
-    /// entry, recompute self's cross-tier advertisement into BOTH meshes.
-    fn withdraw_client_queryable(&self, inbound: FaceId, owner: Region, declare: &DeclareOwned) {
-        let exts = match &declare.body {
-            DeclareOwnedVariant::CodecZenohUndeclQueryable(u) => u.extensions.as_ref(),
-            _ => return,
-        };
-        let keyexpr = {
-            let faces = self.faces.borrow();
-            // R2734 — SourceOnly declines, as its ingest twin does: nothing was
-            // ever registered for a source-only face, so there is nothing here to
-            // withdraw.
-            let s = match classify_inbound(&faces, inbound) {
-                InboundFace::Held(s) => s,
-                InboundFace::SourceOnly | InboundFace::Gone => return,
-            };
-            match resolve_ext_keyexpr(exts, &s.keyexpr_table) {
-                Some(k) => k,
-                None => return,
-            }
-        };
-        let snapshot = self.snapshot_qabl(&keyexpr);
-        let removed = {
-            let mut store = self.owner_broker(owner).qabls.borrow_mut();
-            let removed = store
-                .get_mut(&inbound)
-                .is_some_and(|m| m.remove(&keyexpr).is_some());
-            // Prune an emptied map (the same discipline withdraw_client_subscription
-            // uses) so an emptied face does not linger in its hat's store.
-            if store.get(&inbound).is_some_and(|m| m.is_empty()) {
-                store.remove(&inbound);
-            }
-            removed
-        };
-        if removed {
-            self.repropagate_qabl(snapshot);
-            // R311y151 undeclare-push (query twin): re-arm any waiting querier whose
-            // pushed reply ke lost its last backing queryable.
-            self.undeclare_push_qabls(&keyexpr);
-        }
     }
 
     /// Route an inbound `Request` (a Query) through the router's full zenoh
@@ -6994,9 +6798,11 @@ impl FaceForwarder for RouterForwarder {
             .map(|state| state.tier)
             .filter(|region| self.broker_hat(*region).is_some());
         let owner = owner_region.and_then(|region| self.broker_hat(region));
-        // R2875 — snapshot the departing face's queryable keyexprs while its
-        // values still count, then propagate what the removal moved.
-        let qabl_snapshots: Vec<QablSnapshot> = owner
+        // R2875/R2876 — snapshot the departing face's keyexprs on each plane
+        // while they still count, then propagate what the removal moved. A
+        // Client face is skipped by the peer/router fan-out (its tier), so
+        // flooding before its `faces` entry is dropped is harmless.
+        let qabl_snapshots: Vec<Snapshot<QablPlane>> = owner
             .and_then(|hat| {
                 hat.qabls
                     .borrow()
@@ -7005,51 +6811,57 @@ impl FaceForwarder for RouterForwarder {
             })
             .unwrap_or_default()
             .iter()
-            .map(|keyexpr| self.snapshot_qabl(keyexpr))
+            .map(|keyexpr| self.snapshot(keyexpr))
             .collect();
         if let Some(hat) = owner {
             hat.qabls.borrow_mut().remove(&id);
         }
         for snapshot in qabl_snapshots {
-            self.repropagate_qabl(snapshot);
+            self.repropagate(snapshot);
         }
-        // Purge the FaceId-keyed client sub store, withdrawing self's cross-tier
-        // advertisement for any keyexpr nothing outside a mesh still justifies. A
-        // Client face is skipped by the peer/router fan-out (its tier), so flooding
-        // before its `faces` entry is dropped is harmless.
-        let departed = owner.and_then(|hat| hat.subs.borrow_mut().remove(&id));
-        if let (Some(keys), Some(region)) = (departed, owner_region) {
-            for keyexpr in keys {
-                self.unpropagate_sub(Holder::Hat(region), &keyexpr);
-            }
+        let sub_snapshots: Vec<Snapshot<SubPlane>> = owner
+            .and_then(|hat| hat.subs.borrow().get(&id).cloned())
+            .unwrap_or_default()
+            .iter()
+            .map(|keyexpr| self.snapshot(keyexpr))
+            .collect();
+        if let Some(hat) = owner {
+            hat.subs.borrow_mut().remove(&id);
+        }
+        for snapshot in sub_snapshots {
+            self.repropagate(snapshot);
         }
         // §5.21 routing-token-tables (slice-3) — purge the FaceId-keyed CLIENT
         // liveliness-token store too, withdrawing self's cross-tier advertisement
         // for any keyexpr this was the LAST client of (the token twin of the
         // client_subs purge above; the single client-token purge site — a Client
         // face is link==None so it never reaches the Oam-detach graph teardown).
-        // `remove` is bound to a `let` so the borrow_mut drops BEFORE the loop reads
-        // the token contributions; the keyexprs are deduped (a face may hold one
-        // keyexpr under several decl ids) so the withdraw fires once.
-        // Purge this face's client tokens + withdraw self's cross-tier advertisement
-        // for any keyexpr it was the LAST client of. The departed keyexprs are HOISTED
-        // so the slice-5 reader-notify can run AFTER `future_tokens.purge_face` below
-        // (which removes the departed face, so it is not self-notified).
+        // The keyexprs are deduped (a face may hold one keyexpr under several
+        // decl ids) so each is snapshotted once, before the removal. They are
+        // HOISTED so the slice-5 reader-notify can run AFTER
+        // `future_tokens.purge_face` below (which removes the departed face, so
+        // it is not self-notified).
         #[cfg(feature = "routing-token-tables")]
         let departed_token_keys: Vec<String> = {
-            let departed_tokens = owner.and_then(|hat| hat.tokens.borrow_mut().remove(&id));
-            match departed_tokens {
-                Some(ids) => {
-                    let keyexprs: HashSet<String> = ids.into_values().collect();
-                    if let Some(region) = owner_region {
-                        for keyexpr in &keyexprs {
-                            self.unpropagate_token(Holder::Hat(region), keyexpr);
-                        }
-                    }
-                    keyexprs.into_iter().collect()
-                }
-                None => Vec::new(),
+            let keyexprs: HashSet<String> = owner
+                .and_then(|hat| {
+                    hat.tokens
+                        .borrow()
+                        .get(&id)
+                        .map(|ids| ids.values().cloned().collect())
+                })
+                .unwrap_or_default();
+            let snapshots: Vec<Snapshot<TokenPlane>> = keyexprs
+                .iter()
+                .map(|keyexpr| self.snapshot(keyexpr))
+                .collect();
+            if let Some(hat) = owner {
+                hat.tokens.borrow_mut().remove(&id);
             }
+            for snapshot in snapshots {
+                self.repropagate(snapshot);
+            }
+            keyexprs.into_iter().collect()
         };
         // Purge this face's FUTURE-mode interest + pushed-declaration state
         // (OBLIGATION 1, alongside client_subs/client_qabls): a client face is
@@ -7242,22 +7054,20 @@ impl FaceForwarder for RouterForwarder {
     /// [`set_mcast_group_members`](Self::set_mcast_group_members)'s clear+extend) so
     /// the forwarder snapshot can never drift from the dispatch SSOT
     /// ([`MulticastDispatcher::group_sub_keyexprs`], the derive-not-store union).
-    /// The new set is committed BEFORE the diff walk so the withdraw predicate
-    /// ([`self_advertises_sub_into`](Self::self_advertises_sub_into)) sees the
-    /// post-removal state (a removed keyexpr no longer counts its own group sub, so
-    /// it withdraws iff no client / native still holds it). The `FaceForwarder`
-    /// default is a no-op — only the router advertises a group's interest.
+    /// Every changed keyexpr's fold is snapshotted BEFORE the new set is
+    /// committed and diffed AFTER (R2876), so a removed keyexpr withdraws iff
+    /// no client / native / host still holds it. The `FaceForwarder` default
+    /// is a no-op — only the router advertises a group's interest.
     #[cfg(feature = "router-multicast-faces")]
     fn set_mcast_group_subs(&self, subs: &[String]) {
         let new: HashSet<String> = subs.iter().cloned().collect();
-        // Diff against the current set, then COMMIT the new set (move — no clone),
-        // so `unpropagate_sub`'s `held_outside` check sees
-        // the removed keyexpr already gone from `group_subs`.
-        let (added, removed) = {
+        // Diff against the current set, snapshot every keyexpr it changes,
+        // then COMMIT the new set (move — no clone).
+        let changed: Vec<Snapshot<SubPlane>> = {
             let old = self.group_subs.borrow();
-            let added: Vec<String> = new.difference(&old).cloned().collect();
-            let removed: Vec<String> = old.difference(&new).cloned().collect();
-            (added, removed)
+            new.symmetric_difference(&old)
+                .map(|keyexpr| self.snapshot(keyexpr))
+                .collect()
         };
         *self.group_subs.borrow_mut() = new;
         // S3 reachability witness: high-water of DISTINCT group subs advertised, so a
@@ -7266,11 +7076,8 @@ impl FaceForwarder for RouterForwarder {
         let live = self.group_subs.borrow().len();
         self.group_subs_advertised_peak
             .set(self.group_subs_advertised_peak.get().max(live));
-        for keyexpr in &added {
-            self.propagate_sub(Holder::Group, keyexpr);
-        }
-        for keyexpr in &removed {
-            self.unpropagate_sub(Holder::Group, keyexpr);
+        for snapshot in changed {
+            self.repropagate(snapshot);
         }
     }
 
@@ -7377,75 +7184,36 @@ impl FaceForwarder for RouterForwarder {
                     self.data_seen.set(self.data_seen.get() + 1);
                     self.route_push(id, tier, *reliable, *priority, push, false);
                 }
-                // A declaration: ingest a DeclareSubscriber (1b) / DeclareQueryable
-                // (1c) into the inbound tier's subs/qabls table + re-flood within
-                // that tier; a keyexpr-alias declaration records the link-local
-                // alias for resolution. A Client-face declare is slice 1d, the
-                // cross-tier bubble is derived at compute, and the Request/Response
-                // query plane is the COMPUTE slice.
+                // A declaration: one owner call per plane, whichever hat owns the
+                // face (R2876, step 3e) — the pin's dispatcher registers in
+                // `hats[face.region]` and propagates, and never asks what kind
+                // of hat that is. A keyexpr-alias declaration records the
+                // link-local alias for resolution; the Request/Response query
+                // plane is the COMPUTE slice.
                 NetworkMessage::Declare(declare) => match &declare.body {
                     DeclareOwnedVariant::CodecZenohDeclKexpr(_)
                     | DeclareOwnedVariant::CodecZenohUndeclKexpr(_) => {
                         self.absorb_keyexpr_declaration(id, declare);
                     }
                     DeclareOwnedVariant::CodecZenohDeclSubscriber(_) => {
-                        if is_leaf(tier) {
-                            self.ingest_client_subscription(id, tier, declare);
-                        } else {
-                            self.ingest_subscription(id, tier, *reliable, declare);
-                        }
+                        self.declare_subscriber(id, tier, *reliable, declare);
                     }
                     DeclareOwnedVariant::CodecZenohUndeclSubscriber(_) => {
-                        if is_leaf(tier) {
-                            self.withdraw_client_subscription(id, tier, declare);
-                        } else {
-                            self.withdraw_subscription(id, tier, *reliable, declare);
-                        }
+                        self.undeclare_subscriber(id, tier, *reliable, declare);
                     }
                     DeclareOwnedVariant::CodecZenohDeclQueryable(_) => {
-                        if is_leaf(tier) {
-                            self.ingest_client_queryable(id, tier, declare);
-                        } else {
-                            self.ingest_queryable(id, tier, *reliable, declare);
-                        }
+                        self.declare_queryable(id, tier, *reliable, declare);
                     }
-                    // UndeclareQueryable: the query twin of the UndeclareSubscriber
-                    // arm above. The keyexpr rides the `ext_wire_expr` extension (now
-                    // that the wz-codecs body models the ext chain), so the retraction
-                    // withdraws the source's queryable interest per-keyexpr — the
-                    // face-down purge stays the safety net for a departed peer.
                     DeclareOwnedVariant::CodecZenohUndeclQueryable(_) => {
-                        if is_leaf(tier) {
-                            self.withdraw_client_queryable(id, tier, declare);
-                        } else {
-                            self.withdraw_queryable(id, tier, *reliable, declare);
-                        }
+                        self.undeclare_queryable(id, tier, *reliable, declare);
                     }
-                    // §5.21 routing-token-tables — a DeclareToken: a MESH face
-                    // (Router -> router_tokens, Peer -> linkstatepeer_tokens)
-                    // registers + re-floods within its tier (slice-1/2); a CLIENT
-                    // face lands the leaf in `client_tokens` + advertises self's
-                    // cross-tier interest into BOTH meshes (slice-3). Its retraction
-                    // is the UndeclareToken arm below.
                     #[cfg(feature = "routing-token-tables")]
                     DeclareOwnedVariant::CodecZenohDeclToken(_) => {
-                        if is_leaf(tier) {
-                            self.ingest_client_token(id, tier, declare);
-                        } else {
-                            self.ingest_token(id, tier, *reliable, declare);
-                        }
+                        self.declare_token(id, tier, *reliable, declare);
                     }
-                    // An UndeclareToken retracts a token: a MESH source's SOURCED
-                    // ({id:0, ext_wire_expr}) form routes to withdraw_token (slice-2,
-                    // by keyexpr); a CLIENT's ID-KEYED form routes to
-                    // withdraw_client_token (slice-3, by decl id).
                     #[cfg(feature = "routing-token-tables")]
                     DeclareOwnedVariant::CodecZenohUndeclToken(_) => {
-                        if is_leaf(tier) {
-                            self.withdraw_client_token(id, tier, declare);
-                        } else {
-                            self.withdraw_token(id, tier, *reliable, declare);
-                        }
+                        self.undeclare_token(id, tier, *reliable, declare);
                     }
                     _ => {}
                 },
@@ -7571,7 +7339,7 @@ mod tests {
     };
     use wz_codecs::linkstate::LinkstateOwned;
     use wz_codecs::linkstate_link::LinkstateLink;
-    use wz_codecs::wireexpr::WireexprOwnedVariant;
+    use wz_codecs::wireexpr::{WireexprOwned, WireexprOwnedVariant};
     use wz_codecs::wireexpr_local::WireexprLocalOwned;
     use wz_runtime_core::runtime::Runtime;
     use wz_session_core::push_routing_context::{read_push_hoplimit, read_push_source};
@@ -16389,7 +16157,7 @@ mod tests {
     /// §5.21 sub plane (S2) — union-refcount with a local client: a client sub AND a
     /// group sub for the same keyexpr; removing the group sub must NOT withdraw the
     /// mesh advertisement while the client still holds it (the R311y120 black-hole
-    /// guard — `unpropagate_sub` reads `held_outside`).
+    /// guard — `repropagate` reads the fold through `held_outside`).
     #[cfg(feature = "router-multicast-faces")]
     #[test]
     fn mcast_group_sub_union_refcounts_with_a_local_client() {
@@ -16433,7 +16201,7 @@ mod tests {
     /// sub advertises a keyexpr into the mesh; a LATER local client for the SAME
     /// keyexpr must NOT re-flood (group is already the `true` contributor, so the
     /// client is not the false->true edge). Regression for the IMPL-review should-fix
-    /// (R2874: `propagate_sub` counts the group as a holder outside the mesh).
+    /// (R2874: the fold counts the group as a holder outside the mesh).
     #[cfg(feature = "router-multicast-faces")]
     #[test]
     fn mcast_group_sub_advertise_is_flip_edge_idempotent_with_a_later_client() {

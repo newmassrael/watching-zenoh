@@ -11321,6 +11321,13 @@ layer_c1bz_docs_resolve() {
     # additions, which are fixed with full paths, together with the one older
     # `StorageBackend::get` link in the same sentence. Diffed again after the
     # fix: eleven removals, zero additions, 507.
+    # R2876 — 507 -> 501, by removal. The router dispatch collapse deleted
+    # the per-kind ingest/withdraw functions and the links that named them.
+    # This lane's own command read 504 with three successor links written
+    # into router_forward.rs's `//!`, and those three were the only entries
+    # in `cargo doc`'s error set naming anything the diff introduced: that
+    # module's inner doc resolves from the crate root, where no
+    # `RouterForwarder` is in scope. As code spans instead, 501.
     budget="
         wz:2
         wz-ap-demo:26
@@ -11331,7 +11338,7 @@ layer_c1bz_docs_resolve() {
         wz-mcu-session-acceptor:4
         wz-routing-graph:6
         wz-runtime-coop:12
-        wz-runtime-tokio:507
+        wz-runtime-tokio:501
         wz-session-core:530
         wz-session-lwip:4
         wz-switchboard-codegen:8
