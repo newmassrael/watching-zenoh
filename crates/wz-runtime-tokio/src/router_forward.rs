@@ -102,7 +102,7 @@
 //! [`client_subs`](RouterForwarder#structfield.client_subs) leaf store, and the
 //! router ADVERTISES self's now-derived cross-tier interest into BOTH meshes — a
 //! self-sourced `DeclareSubscriber` (node_id 0) flooded to self's tree children
-//! ([`advertise_client_cross_tier_sub`](RouterForwarder::advertise_client_cross_tier_sub)),
+//! ([`propagate_sub`](RouterForwarder::propagate_sub)),
 //! re-derived on the tick for late-joining children
 //! ([`re_advertise_self_cross_tier`](RouterForwarder::re_advertise_self_cross_tier))
 //! — so a mesh publisher routes the keyexpr toward this router. This is
@@ -244,7 +244,7 @@
 //! parity with the sub plane now that the codec models the ext.
 //!
 //! A3 adds the CLIENT-queryable cross-tier advertisement (the query twin of C2's
-//! [`advertise_client_cross_tier_sub`](RouterForwarder::advertise_client_cross_tier_sub)):
+//! [`propagate_sub`](RouterForwarder::propagate_sub)):
 //! a client `DeclareQueryable` makes self flood a self-sourced `DeclareQueryable`
 //! carrying the merged info into BOTH meshes (a client is in neither), so a REMOTE
 //! mesh querier steers toward the client's queryable
@@ -299,7 +299,7 @@
 //!   (`shared_nodes` = {self}), so a non-master needs 3+ routers sharing both
 //!   meshes. Their E2E proof waits on a router that hosts/relays natives (or a
 //!   3-router harness); the DIRECT-injection unit tests
-//!   (`advertise_native_cross_tier_sub` / `push_bridges_cross_mesh_only_when_master`)
+//!   (`propagate_sub` / `push_bridges_cross_mesh_only_when_master`)
 //!   cover the mechanism meanwhile. (The client-behind-a-router variant was already
 //!   rescued by C2.)
 //! - **Gossip / autoconnect / interceptors** — the per-net policy knobs the
@@ -564,7 +564,7 @@ struct BrokerHat {
     /// `UndeclareToken(id, ext=null)` carrying no keyexpr, and keeping the id
     /// also refcounts two tokens sharing a keyexpr correctly. The cross-tier
     /// advertisement is
-    /// [`advertise_client_cross_tier_token`](RouterForwarder::advertise_client_cross_tier_token)
+    /// [`propagate_token`](RouterForwarder::propagate_token)
     /// (derive-not-store), so `declare_token_interest`'s CURRENT replay must
     /// FOLD this store (excluding the requester), the twin of
     /// `dump_interest_subs` folding `subs`.
@@ -613,6 +613,41 @@ impl Hat {
         match self {
             Hat::Broker(hat) => Some(hat),
             Hat::Mesh(_) => None,
+        }
+    }
+}
+
+/// R2874 (step 3e) — one holder of a declaration, as the cross-region
+/// propagate sees it: the unit a register adds a contribution to, or a
+/// withdrawal removes one from.
+///
+/// The pin's propagate loop folds `remote_subscribers_of` over every hat but
+/// the destination
+/// (`zenoh/src/net/routing/dispatcher/pubsub.rs` @ `hats[dst].propagate_subscriber(ctx.reborrow(), res.clone(), other_info);`),
+/// so "some holder outside `dst` has it" is the whole question. Two of wz's
+/// holders are not hats: the multicast group aggregate and the subscribers
+/// this router hosts. Both sit in no mesh, so neither is ever the destination,
+/// which is how the pin treats a multicast face and its own session face.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Holder {
+    /// The hat of a region: a mesh hat's native sources, or a broker hat's
+    /// client faces.
+    Hat(Region),
+    /// The multicast group's subscriber aggregate.
+    Group,
+    /// The subscribers this router hosts itself.
+    Host,
+}
+
+impl Holder {
+    /// The region this holder sits in, `None` for one that sits in no region.
+    /// A holder never propagates into its own region: its own declarations are
+    /// already that region's, as the pin's `propagate_subscriber` returns
+    /// early when there is no `other_info` for the owner.
+    fn region(self) -> Option<Region> {
+        match self {
+            Holder::Hat(region) => Some(region),
+            Holder::Group | Holder::Host => None,
         }
     }
 }
@@ -1133,7 +1168,7 @@ impl RouterDeclarationsView {
     ///
     /// ⚠ NO self-exclusion predicate, unlike the peer forwarder's token fold.
     /// This host never writes a self row for a client's token: a client-held
-    /// token is DERIVE-NOT-STORE here (`advertise_client_cross_tier_token`
+    /// token is DERIVE-NOT-STORE here (`propagate_token`
     /// advertises it without storing it in a mesh table), so a self row in these
     /// tables can only be this router's own holding, which is what the peer's
     /// `native` predicate had to distinguish and this one does not.
@@ -2622,7 +2657,7 @@ impl RouterForwarder {
         // withdraw loops above (minus the client `undeclare_push`). tier is
         // Routers|LinkstatePeers here (Client returned early), so `tokens_table` is
         // `Some`. The drained keys are collected INSIDE the scoped `borrow_mut` and
-        // the withdraw runs AFTER it drops — `withdraw_native_cross_tier_token`
+        // the withdraw runs AFTER it drops — `unpropagate_token`
         // re-reads the same table via `source_count`, so withdrawing under the live
         // borrow_mut would RefCell-panic (mirrors the subs/qabls collect-then-act
         // shape at the top of this fn).
@@ -2636,7 +2671,7 @@ impl RouterForwarder {
                 }
             }
             for keyexpr in affected_token_keys {
-                self.withdraw_native_cross_tier_token(tier, &keyexpr);
+                self.unpropagate_token(Holder::Hat(tier), &keyexpr);
                 // slice-5: the ungraceful node-detach twin of the graceful withdraw's
                 // notify (the token half of zenoh token_remove_node's
                 // propagate_forget_simple_token, the R311y152 detach-push for tokens).
@@ -2682,7 +2717,7 @@ impl RouterForwarder {
         // after the other backer detaches (over-deliver, never a spurious undeclare) — a
         // property of the reused graceful seam.
         for keyexpr in affected_sub_keys {
-            self.withdraw_native_cross_tier_sub(tier, &keyexpr);
+            self.unpropagate_sub(Holder::Hat(tier), &keyexpr);
             self.undeclare_push_subs(&keyexpr);
         }
         for keyexpr in affected_qabl_keys {
@@ -2837,7 +2872,7 @@ impl RouterForwarder {
         // :296-297) — NOT master-gated (every router advertises; only the delivery
         // bridge is gated). Fires on the flip false->true only.
         if let Some(ke) = changed {
-            self.advertise_native_cross_tier_sub(tier, &ke);
+            self.propagate_sub(Holder::Hat(tier), &ke);
             // FUTURE-mode push: a mesh sub just became known -> declare it to any
             // CLIENT face whose stored FUTURE interest matches (the pub-before-sub
             // close). Never echoed to `inbound` (a mesh face is not a future holder,
@@ -2856,7 +2891,7 @@ impl RouterForwarder {
     ///
     /// Calls the shared [`ingest_interest`](Self::ingest_interest) core DIRECTLY,
     /// NOT via the `ingest_subscription` wrapper; the CROSS-TIER advertise
-    /// ([`advertise_native_cross_tier_token`](Self::advertise_native_cross_tier_token),
+    /// ([`propagate_token`](Self::propagate_token),
     /// slice-2) AND the FUTURE push
     /// ([`push_future_token`](Self::push_future_token), slice-4 — declares the newly
     /// learned token to any CLIENT face with a matching stored token interest) are
@@ -2897,10 +2932,10 @@ impl RouterForwarder {
         );
         // Cross-tier PROPAGATION (slice-2): a NATIVE token for `ke` in this tier
         // makes self ADVERTISE it into the OPPOSITE mesh (the token twin of
-        // ingest_subscription's advertise_native_cross_tier_sub tail). Fires on the
+        // ingest_subscription's propagate_sub tail). Fires on the
         // register flip false->true only (ingest_interest returns Some).
         if let Some(ke) = changed {
-            self.advertise_native_cross_tier_token(tier, &ke);
+            self.propagate_token(Holder::Hat(tier), &ke);
             // FUTURE-mode push (slice-4): a mesh token just became known -> declare it
             // to any CLIENT face whose stored FUTURE token interest matches (mirror of
             // ingest_subscription's push_future_subscription). Never echoed to inbound.
@@ -2918,7 +2953,7 @@ impl RouterForwarder {
     /// [`withdraw_interest`](Self::withdraw_interest) core DIRECTLY (like
     /// ingest_token reuses ingest_interest); on a REAL removal it captures the
     /// returned keyexpr and withdraws the CROSS-TIER advertisement
-    /// ([`withdraw_native_cross_tier_token`](Self::withdraw_native_cross_tier_token),
+    /// ([`unpropagate_token`](Self::unpropagate_token),
     /// slice-2 — the negation of ingest_token's advertise) when the LAST native
     /// source left. An id-keyed simple `UndeclareToken` (the RAII drop's form, no
     /// ext) resolves no keyexpr and is a no-op — the router source-routes tokens
@@ -2952,7 +2987,7 @@ impl RouterForwarder {
             tokens,
             build_undeclare_token_with_keyexpr,
         ) {
-            self.withdraw_native_cross_tier_token(tier, &keyexpr);
+            self.unpropagate_token(Holder::Hat(tier), &keyexpr);
             // slice-5 withdraw->notify: the mesh token is gone from the table, so a
             // future-push reader whose pushed reply ke lost its LAST backer is told it
             // withdrew (mirror of withdraw_subscription's undeclare_push_subs).
@@ -3401,7 +3436,7 @@ impl RouterForwarder {
             subs,
             build_undeclare_subscriber_with_keyexpr,
         ) {
-            self.withdraw_native_cross_tier_sub(tier, &keyexpr);
+            self.unpropagate_sub(Holder::Hat(tier), &keyexpr);
             // R311y151 undeclare-push: the mesh sub is gone from the table, so if a
             // waiting publisher's pushed reply ke has now lost its LAST backer,
             // re-arm its write-filter with an UndeclareSubscriber + clear `pushed`.
@@ -3578,7 +3613,7 @@ impl RouterForwarder {
     /// A NATIVE qabl for `keyexpr` in `native_tier` just left (undeclare or
     /// face-down purge): recompute self's cross-tier advertisement into the
     /// OPPOSITE mesh — the value-bearing query twin of
-    /// [`withdraw_native_cross_tier_sub`](Self::withdraw_native_cross_tier_sub). If
+    /// [`unpropagate_sub`](Self::unpropagate_sub). If
     /// a contributor remains (an opposite-mesh native or a client qabl), re-advertise
     /// the DOWNGRADED merged [`QueryableInfo`]; if NONE remains, flood a full
     /// `UndeclareQueryable` retraction. The `None` arm is what the `ext_wire_expr`
@@ -4444,11 +4479,10 @@ impl RouterForwarder {
                 None => return,
             }
         };
-        // The derive-level change gate: ADVERTISE only when this is the FIRST
-        // client interested in `keyexpr` (the client half of the derive flips
-        // false -> true). Per-target-tier: a mesh an opposite-tier native already
-        // advertises is skipped (R311y125 — no redundant flood).
-        let already = self.any_client_subscribes(&keyexpr);
+        // Register in the owner hat, then propagate into every mesh this flips
+        // (R2874, step 3e): the edge is derived from the holders, so a co-client,
+        // a group sub, a hosted sub or an opposite-mesh native that already
+        // advertised `keyexpr` suppresses the flood alike.
         let inserted = self
             .owner_broker(owner)
             .subs
@@ -4457,12 +4491,10 @@ impl RouterForwarder {
             .or_default()
             .insert(keyexpr.clone());
         if inserted {
-            if !already {
-                self.advertise_client_cross_tier_sub(&keyexpr);
-            }
+            self.propagate_sub(Holder::Hat(owner), &keyexpr);
             // FUTURE-mode push: a new client sub -> declare it to any OTHER client
             // face whose stored FUTURE interest matches (client-to-client via this
-            // router). Fires even when `already` (a co-client subscribes): the push
+            // router). Fires even when a co-client already subscribes: the push
             // dedups per interest-holder via the pushed registry, so a holder the
             // earlier sub already covered is a no-op. `inbound` (the source) is
             // never echoed.
@@ -4645,24 +4677,11 @@ impl RouterForwarder {
             removed
         };
         if removed {
-            if !self.any_client_subscribes(&keyexpr) {
-                self.withdraw_client_cross_tier_sub(&keyexpr);
-            }
+            self.unpropagate_sub(Holder::Hat(owner), &keyexpr);
             // R311y151 undeclare-push: this client sub is gone; re-arm any waiting
             // publisher whose pushed reply ke lost its last backer.
             self.undeclare_push_subs(&keyexpr);
         }
-    }
-
-    /// Whether ANY client face currently subscribes `keyexpr` — the CLIENT half of
-    /// the cross-tier advertise derive (the C2 contributor). The full predicate is
-    /// [`self_advertises_sub_into`](Self::self_advertises_sub_into): self is a
-    /// virtual sub-source in a mesh IFF this is true OR the OPPOSITE mesh holds a
-    /// native for `keyexpr` (the A2a federation contributor). Client-agnostic to
-    /// tier — a client subscribing feeds BOTH meshes.
-    fn any_client_subscribes(&self, keyexpr: &str) -> bool {
-        self.broker_hats()
-            .any(|hat| hat.subs.borrow().values().any(|set| set.contains(keyexpr)))
     }
 
     /// Whether ANY subscription wz still holds INTERSECTS `ke` — the "still backed"
@@ -4797,35 +4816,160 @@ impl RouterForwarder {
     /// self into the PEER tier for a router-native (or client) sub (pubsub.rs:248-250),
     /// declare_linkstatepeer_subscription into the ROUTER tier for a peer-native
     /// (:296-297). DERIVE-not-STORE: the native is read from the OPPOSITE mesh's
-    /// table (`contributor_subs_source_count`), self is never stored. NOT
-    /// master-gated (every router advertises; only the DELIVERY bridge is gated).
+    /// table, self is never stored. NOT master-gated (every router advertises;
+    /// only the DELIVERY bridge is gated).
+    ///
+    /// R2874 (step 3e) — this is the pin's `other_info` for a mesh `target`:
+    /// some [`Holder`] outside `target` holds `keyexpr`. The contributors are
+    /// no longer named one by one; they are every holder, so a region the map
+    /// gains is a contributor without an edit here.
     fn self_advertises_sub_into(&self, target: Region, keyexpr: &str) -> bool {
-        self.any_client_subscribes(keyexpr)
-            || self.group_subscribes(keyexpr)
-            || self.host_subscribes(keyexpr)
-            || self.contributor_subs_source_count(target, keyexpr) > 0
+        self.held_outside(target, None, |holder| {
+            self.sub_contributions(holder, keyexpr)
+        })
     }
 
-    /// R2393 — whether a subscriber HOSTED BY THIS ROUTER holds `keyexpr`: the
-    /// FOURTH self-advertise contributor, added beside client subs, group subs and
-    /// opposite-mesh natives.
+    /// Every holder a subscription can have, in a fixed order: each region's
+    /// hat, then the group aggregate, then the host.
+    fn holders(&self) -> impl Iterator<Item = Holder> + '_ {
+        self.hats
+            .regions()
+            .map(Holder::Hat)
+            .chain([Holder::Group, Holder::Host])
+    }
+
+    /// How many contributions `holder` has for the EXACT `keyexpr`: a mesh
+    /// hat's native sources, a broker hat's client faces, the group aggregate's
+    /// membership (0 or 1), and the host's registrations.
     ///
-    /// It belongs in the DERIVE rather than in a flood of its own for the reason
-    /// this predicate's own doc gives: self is never stored in either mesh's table,
-    /// so every question about "does this router want `keyexpr`" has to be answered
-    /// by asking its contributors. A host sub that advertised through a separate
-    /// path would be a second answer to that question, and the two could disagree —
-    /// which is exactly the drift `DERIVE-not-STORE` exists to make impossible.
-    ///
-    /// Matching is by the same intersection every other contributor uses, so a host
-    /// registering `@/<zid>/router/config/**` is advertised for, and reached by, a
-    /// concrete Put under it.
-    fn host_subscribes(&self, keyexpr: &str) -> bool {
-        let target_chunks: Vec<&str> = keyexpr.split('/').collect();
-        self.local_subscribers
-            .borrow()
+    /// Exact, not intersecting, for every holder alike: the pin propagates per
+    /// `Resource`, so a declaration is advertised as the keyexpr it was made
+    /// with. Before R2874 the host alone was counted by intersection, which
+    /// broke the `iff` between this predicate and
+    /// [`derived_cross_tier_subs_into`](Self::derived_cross_tier_subs_into)
+    /// (whose host fold inserts the exact pattern): a client under a hosted
+    /// wildcard never had its own advertisement withdrawn.
+    fn sub_contributions(&self, holder: Holder, keyexpr: &str) -> usize {
+        match holder {
+            Holder::Hat(region) => match self.hats.get(&region) {
+                Some(Hat::Mesh(hat)) => hat.subs.borrow().source_count(keyexpr),
+                Some(Hat::Broker(hat)) => hat
+                    .subs
+                    .borrow()
+                    .values()
+                    .filter(|keys| keys.contains(keyexpr))
+                    .count(),
+                None => 0,
+            },
+            Holder::Group => usize::from(self.group_subscribes(keyexpr)),
+            Holder::Host => self
+                .local_subscribers
+                .borrow()
+                .iter()
+                .filter(|sub| sub.keyexpr == keyexpr)
+                .count(),
+        }
+    }
+
+    /// Whether a holder outside `target` has a contribution, not counting ONE
+    /// contribution of `without`. `contributions` is the plane's count for one
+    /// keyexpr ([`sub_contributions`](Self::sub_contributions) or its token
+    /// twin). `without = None` reads the current state; `Some(h)` reads the
+    /// state before `h` gained the contribution it just registered, which is
+    /// what lets a register find its flip edge without a stored "advertised"
+    /// bit (the pin stores one per hat; wz derives it).
+    fn held_outside(
+        &self,
+        target: Region,
+        without: Option<Holder>,
+        contributions: impl Fn(Holder) -> usize,
+    ) -> bool {
+        self.holders()
+            .filter(|holder| holder.region() != Some(target))
+            .any(|holder| contributions(holder) > usize::from(without == Some(holder)))
+    }
+
+    /// The mesh regions, the only targets self advertises into.
+    fn mesh_regions(&self) -> Vec<Region> {
+        self.hats
             .iter()
-            .any(|ls| keyexpr_intersects_target(&ls.keyexpr, &target_chunks))
+            .filter_map(|(region, hat)| hat.mesh().map(|_| region))
+            .collect()
+    }
+
+    /// R2874 (step 3e) — `holder` just registered a declaration of `keyexpr`:
+    /// advertise self, by `build`, into every mesh this newly flips.
+    ///
+    /// The pin's declare loop
+    /// (`zenoh/src/net/routing/dispatcher/pubsub.rs` @ `hats[dst].propagate_subscriber(ctx.reborrow(), res.clone(), other_info);`)
+    /// registers in the owner hat, then for every region computes the fold of
+    /// the OTHER hats and propagates where that is newly `Some`. After the
+    /// register the fold outside any region but the holder's own is true, so a
+    /// flip happens exactly where it was false without this one contribution.
+    /// One dispatch for every holder and both presence planes: before it there
+    /// were five advertise functions, one per holder kind and plane, each
+    /// re-deriving "was this the first contributor" from its own kind, and
+    /// none of them counted the host.
+    fn propagate(
+        &self,
+        holder: Holder,
+        keyexpr: &str,
+        contributions: impl Fn(Holder) -> usize,
+        build: impl Fn(&str) -> Result<DeclareOwned, CodecError>,
+    ) {
+        for target in self.mesh_regions() {
+            if holder.region() != Some(target)
+                && !self.held_outside(target, Some(holder), &contributions)
+            {
+                self.flood_self_sourced(target, keyexpr, &build);
+            }
+        }
+    }
+
+    /// R2874 (step 3e) — `holder` just lost its declaration(s) of `keyexpr`:
+    /// withdraw self, by `build`, from every mesh nothing outside it still
+    /// justifies.
+    ///
+    /// The pin's undeclare
+    /// (`zenoh/src/net/routing/dispatcher/pubsub.rs` @ `last_owner.unpropagate_last_non_owned_subscriber(ctx, res.clone())`)
+    /// unpropagates every hat when no holder remains, and only the last
+    /// owner's own region when exactly one does. Both are "the fold outside
+    /// `target` is now empty"; the holder that just withdrew held it before,
+    /// so for every target outside its region that is a true -> false edge.
+    /// It takes no count, so a face-down purge that removes several sources
+    /// at once is one call per keyexpr.
+    fn unpropagate(
+        &self,
+        holder: Holder,
+        keyexpr: &str,
+        contributions: impl Fn(Holder) -> usize,
+        build: impl Fn(&str) -> Result<DeclareOwned, CodecError>,
+    ) {
+        for target in self.mesh_regions() {
+            if holder.region() != Some(target) && !self.held_outside(target, None, &contributions) {
+                self.flood_self_sourced(target, keyexpr, &build);
+            }
+        }
+    }
+
+    /// [`propagate`](Self::propagate) for the subscriber plane.
+    fn propagate_sub(&self, holder: Holder, keyexpr: &str) {
+        self.propagate(
+            holder,
+            keyexpr,
+            |holder| self.sub_contributions(holder, keyexpr),
+            |ke| build_declare_subscriber(0, 0, Some(ke)),
+        );
+    }
+
+    /// [`unpropagate`](Self::unpropagate) for the subscriber plane.
+    fn unpropagate_sub(&self, holder: Holder, keyexpr: &str) {
+        self.unpropagate(
+            holder,
+            keyexpr,
+            |holder| self.sub_contributions(holder, keyexpr),
+            build_undeclare_subscriber_with_keyexpr,
+        );
     }
 
     /// Whether a multicast-group SUBSCRIBER holds `keyexpr` — the THIRD
@@ -4845,18 +4989,6 @@ impl RouterForwarder {
         false
     }
 
-    /// The number of OPPOSITE-mesh NATIVE sub sources for the EXACT `keyexpr` that
-    /// make self advertise into `target` — the native half of
-    /// [`self_advertises_sub_into`](Self::self_advertises_sub_into). For
-    /// `target = LinkstatePeers` this reads `router_subs`; for `target = Routers`,
-    /// `linkstatepeer_subs`. `0` for a `Client` target (unused — clients are not a
-    /// mesh) and when the opposite table has no exact-`keyexpr` source.
-    fn contributor_subs_source_count(&self, target: Region, keyexpr: &str) -> usize {
-        Self::opposite_mesh(target)
-            .and_then(|src| self.subs_table(src))
-            .map_or(0, |t| t.borrow().source_count(keyexpr))
-    }
-
     /// The keyexprs self should advertise into `target` mesh — client subs ∪ group
     /// subs ∪ host subs ∪ the OPPOSITE mesh's native subs, deduped. The set form of
     /// [`self_advertises_sub_into`](Self::self_advertises_sub_into) (a `K` is in
@@ -4865,253 +4997,173 @@ impl RouterForwarder {
     /// ([`re_advertise_self_cross_tier`](Self::re_advertise_self_cross_tier)) for
     /// late-joining children.
     ///
-    /// ⚠ THE `IFF` ABOVE IS A CONTRACT BETWEEN TWO FUNCTIONS AND NOTHING ENFORCES
-    /// IT. R2393 added `host_subscribes` as the fourth contributor to the PREDICATE
-    /// and left this SET at three, so the two disagreed for exactly the case the
-    /// round was built for: the register-time flood reached members already in the
-    /// mesh, the tick re-advertise silently omitted host subs, and a child that
-    /// joined LATER never learned the router wanted anything. A publisher behind
-    /// that child then dropped its Put for want of a route — no error anywhere, on
-    /// either side. Adding a contributor to one of these two REQUIRES adding it to
-    /// the other; `a_router_hosted_subscriber_is_re_advertised_to_a_late_joiner` is
-    /// what now fails if a later round forgets again.
+    /// R2393 found the `iff` held by nothing: the host was added to the
+    /// PREDICATE and not to this SET, so the register-time flood reached the
+    /// members already in the mesh while the tick re-advertise omitted host subs,
+    /// and a child that joined LATER never learned the router wanted anything.
+    /// R2874 makes the set a FILTER of the predicate over every holder's keys,
+    /// so it cannot name a keyexpr the predicate refuses, and a holder the map
+    /// gains is folded here by the same [`holders`](Self::holders) walk.
+    /// `a_router_hosted_subscriber_is_re_advertised_to_a_late_joiner` still
+    /// checks the remaining half: that [`sub_keys`](Self::sub_keys) lists every
+    /// key a holder counts.
     fn derived_cross_tier_subs_into(&self, target: Region) -> Vec<String> {
-        let mut set: HashSet<String> = HashSet::new();
-        for hat in self.broker_hats() {
-            for keys in hat.subs.borrow().values() {
-                set.extend(keys.iter().cloned());
-            }
-        }
-        // R2393 — host subs, the fourth contributor, folded here for the same reason
-        // the group-sub aggregate below is: a late-joining tree child converges on
-        // self's cross-tier bubble for a subscription this router hosts too.
-        for sub in self.local_subscribers.borrow().iter() {
-            set.insert(sub.keyexpr.clone());
-        }
-        // §5.21 sub plane (S2) — the group-subscriber aggregate is a third source
-        // in the tick re-advertise (a late-joining tree child converges on self's
-        // cross-tier bubble for a group sub too, exactly as for a client sub).
-        #[cfg(feature = "router-multicast-faces")]
-        for keyexpr in self.group_subs.borrow().iter() {
-            set.insert(keyexpr.clone());
-        }
-        if let Some(table) = Self::opposite_mesh(target).and_then(|src| self.subs_table(src)) {
-            for (keyexpr, _peer, ()) in table.borrow().entries() {
-                set.insert(keyexpr);
-            }
-        }
-        set.into_iter().collect()
+        self.derived_into(
+            target,
+            |holder| self.sub_keys(holder),
+            |keyexpr| self.self_advertises_sub_into(target, keyexpr),
+        )
     }
 
-    /// The keyexprs self should advertise a cross-tier token for into `target` mesh
-    /// — CLIENT-held tokens ∪ the OPPOSITE mesh's native tokens, deduped. The exact
-    /// token twin of
-    /// [`derived_cross_tier_subs_into`](Self::derived_cross_tier_subs_into) (slice-3
-    /// added the `client_tokens` fold — the set form of
-    /// [`self_advertises_token_into`](Self::self_advertises_token_into)); fed to the
-    /// tick re-advertise
+    /// The keyexprs `holder` holds a subscription to — the listing twin of
+    /// [`sub_contributions`](Self::sub_contributions), over the same stores.
+    fn sub_keys(&self, holder: Holder) -> Vec<String> {
+        match holder {
+            Holder::Hat(region) => match self.hats.get(&region) {
+                Some(Hat::Mesh(hat)) => hat
+                    .subs
+                    .borrow()
+                    .entries()
+                    .into_iter()
+                    .map(|(keyexpr, _peer, ())| keyexpr)
+                    .collect(),
+                Some(Hat::Broker(hat)) => hat.subs.borrow().values().flatten().cloned().collect(),
+                None => Vec::new(),
+            },
+            #[cfg(feature = "router-multicast-faces")]
+            Holder::Group => self.group_subs.borrow().iter().cloned().collect(),
+            #[cfg(not(feature = "router-multicast-faces"))]
+            Holder::Group => Vec::new(),
+            Holder::Host => self
+                .local_subscribers
+                .borrow()
+                .iter()
+                .map(|sub| sub.keyexpr.clone())
+                .collect(),
+        }
+    }
+
+    /// The set form of a plane's advertise predicate for `target`: every key a
+    /// holder outside `target` lists, kept where `advertises` holds, deduped.
+    fn derived_into(
+        &self,
+        target: Region,
+        keys: impl Fn(Holder) -> Vec<String>,
+        advertises: impl Fn(&str) -> bool,
+    ) -> Vec<String> {
+        let candidates: HashSet<String> = self
+            .holders()
+            .filter(|holder| holder.region() != Some(target))
+            .flat_map(keys)
+            .collect();
+        candidates
+            .into_iter()
+            .filter(|keyexpr| advertises(keyexpr))
+            .collect()
+    }
+
+    /// The keyexprs self should advertise a cross-tier token for into `target`
+    /// mesh — the exact token twin of
+    /// [`derived_cross_tier_subs_into`](Self::derived_cross_tier_subs_into): a
+    /// filter of [`self_advertises_token_into`](Self::self_advertises_token_into)
+    /// over every holder's token keys, fed to the tick re-advertise
     /// ([`re_advertise_self_cross_tier`](Self::re_advertise_self_cross_tier)) so a
     /// late-joining tree child converges on self's cross-tier token bubble.
     #[cfg(feature = "routing-token-tables")]
     fn derived_cross_tier_tokens_into(&self, target: Region) -> Vec<String> {
-        let mut set: HashSet<String> = HashSet::new();
-        for hat in self.broker_hats() {
-            for ids in hat.tokens.borrow().values() {
-                set.extend(ids.values().cloned());
-            }
-        }
-        if let Some(table) = Self::opposite_mesh(target).and_then(|src| self.tokens_table(src)) {
-            for (keyexpr, _peer, ()) in table.borrow().entries() {
-                set.insert(keyexpr);
-            }
-        }
-        set.into_iter().collect()
+        self.derived_into(
+            target,
+            |holder| self.token_keys(holder),
+            |keyexpr| self.self_advertises_token_into(target, keyexpr),
+        )
     }
 
-    /// A CLIENT sub for `keyexpr` just appeared (the FIRST client for it): flood
-    /// self's cross-tier ADVERTISEMENT into each mesh the client newly flips ON —
-    /// a self-sourced `DeclareSubscriber` (node_id 0) to self's tree children, so
-    /// a publisher on that mesh routes `keyexpr` toward this router. Skips a mesh
-    /// an OPPOSITE-mesh native already advertises (the derive was already true for
-    /// that target — no redundant flood). DERIVE-not-STORE: self is NOT stored;
-    /// the advertisement is re-derived on the tick for late joiners. A single
-    /// router has no router tree children, so the router-mesh flood is a no-op.
-    fn advertise_client_cross_tier_sub(&self, keyexpr: &str) {
-        // A group sub (§5.21 sub plane, S2) is a THIRD self-advertise contributor
-        // that already flooded BOTH meshes, so the first client is NOT the false->true
-        // flip edge — skip to preserve the flood-only-on-flip invariant (the mirror of
-        // `advertise_group_cross_tier_sub`'s `!any_client_subscribes` early-out; the
-        // withdraw side already negates the full 3-contributor derive). No-op without
-        // `router-multicast-faces` (the `group_subscribes` cfg stub is `false`).
-        if self.group_subscribes(keyexpr) {
-            return;
-        }
-        for target in [ROUTERS_REGION, PEERS_REGION] {
-            // Flip false->true for this target IFF no native already covers it
-            // (before this client, self_advertises_sub_into(target) == native-only,
-            // since it was the first client).
-            if self.contributor_subs_source_count(target, keyexpr) == 0 {
-                self.flood_self_sourced(target, keyexpr, |ke| {
-                    build_declare_subscriber(0, 0, Some(ke))
-                });
-            }
-        }
-    }
-
-    /// The LAST client for `keyexpr` just left: flood self's cross-tier WITHDRAWAL
-    /// into each mesh no OPPOSITE-mesh native still holds — the exact negation of
-    /// [`advertise_client_cross_tier_sub`](Self::advertise_client_cross_tier_sub).
-    /// A mesh whose opposite-tier native still holds `keyexpr` keeps the
-    /// advertisement (else a native's interest would be silently retracted — the
-    /// R311y120 black-hole).
-    fn withdraw_client_cross_tier_sub(&self, keyexpr: &str) {
-        // Caller has already removed the client (last-client case ⇒
-        // `any_client_subscribes` false), so withdraw from each mesh self NO
-        // LONGER advertises into — the exact NEGATION of the advertise predicate
-        // (a mesh whose opposite-tier native still holds `keyexpr` keeps it).
-        for target in [ROUTERS_REGION, PEERS_REGION] {
-            if !self.self_advertises_sub_into(target, keyexpr) {
-                self.flood_self_sourced(target, keyexpr, build_undeclare_subscriber_with_keyexpr);
-            }
-        }
-    }
-
-    /// A group SUBSCRIBER keyexpr just appeared in the aggregate (§5.21 sub plane,
-    /// S2): flood self's cross-tier ADVERTISEMENT into each mesh nothing else
-    /// already covers — a self-sourced `DeclareSubscriber` (node_id 0), so a
-    /// mesh-side publisher routes `keyexpr` toward this router and it reaches the
-    /// on-group subscriber via the unconditional group egress. The group-sub twin of
-    /// [`advertise_client_cross_tier_sub`](Self::advertise_client_cross_tier_sub);
-    /// it additionally skips a keyexpr a local CLIENT already advertises (a group
-    /// sub is not necessarily the FIRST contributor, unlike the first-client case).
-    /// Called from [`set_mcast_group_subs`](Self::set_mcast_group_subs) on the
-    /// aggregate's false->true edge for `keyexpr`.
-    #[cfg(feature = "router-multicast-faces")]
-    fn advertise_group_cross_tier_sub(&self, keyexpr: &str) {
-        if self.any_client_subscribes(keyexpr) {
-            return; // a local client already advertises the bubble into both meshes.
-        }
-        for target in [ROUTERS_REGION, PEERS_REGION] {
-            if self.contributor_subs_source_count(target, keyexpr) == 0 {
-                self.flood_self_sourced(target, keyexpr, |ke| {
-                    build_declare_subscriber(0, 0, Some(ke))
-                });
-            }
-        }
-    }
-
-    /// A group SUBSCRIBER keyexpr just left the aggregate (§5.21 sub plane, S2):
-    /// flood self's cross-tier WITHDRAWAL into each mesh self NO LONGER advertises
-    /// into — the exact negation of
-    /// [`advertise_group_cross_tier_sub`](Self::advertise_group_cross_tier_sub),
-    /// reusing [`self_advertises_sub_into`](Self::self_advertises_sub_into) (which
-    /// now excludes the just-removed group sub) so a mesh whose client or native
-    /// still holds `keyexpr` keeps the advertisement (the R311y120 black-hole
-    /// guard). Called from [`set_mcast_group_subs`](Self::set_mcast_group_subs)
-    /// AFTER `keyexpr` is removed from `group_subs`.
-    #[cfg(feature = "router-multicast-faces")]
-    fn withdraw_group_cross_tier_sub(&self, keyexpr: &str) {
-        for target in [ROUTERS_REGION, PEERS_REGION] {
-            if !self.self_advertises_sub_into(target, keyexpr) {
-                self.flood_self_sourced(target, keyexpr, build_undeclare_subscriber_with_keyexpr);
-            }
-        }
-    }
-
-    /// A NATIVE sub for `keyexpr` in `native_tier` just registered: flood self's
-    /// cross-tier ADVERTISEMENT into the OPPOSITE mesh IFF it flipped that mesh's
-    /// derive false->true — i.e. this is the SOLE native source for the exact
-    /// `keyexpr` (`source_count == 1` after register) AND no client already covers
-    /// it. The federation half of the R311y120 fix: a router-native attracts peer
-    /// publishers toward self (which bridges cross-tier, C4). NOT master-gated.
-    fn advertise_native_cross_tier_sub(&self, native_tier: Region, keyexpr: &str) {
-        let Some(target) = Self::opposite_mesh(native_tier) else {
-            return; // a client native has no mesh (unreachable: client subs != natives)
-        };
-        let sole = self
-            .subs_table(native_tier)
-            .is_some_and(|t| t.borrow().source_count(keyexpr) == 1);
-        // `!group_subscribes` keeps the flip-edge invariant when a §5.21 group sub
-        // (S2) already advertised `keyexpr` into `target` (else a redundant flood);
-        // the withdraw side already negates the full 3-contributor derive. No-op
-        // without `router-multicast-faces` (the `group_subscribes` cfg stub is `false`).
-        if sole && !self.any_client_subscribes(keyexpr) && !self.group_subscribes(keyexpr) {
-            self.flood_self_sourced(target, keyexpr, |ke| {
-                build_declare_subscriber(0, 0, Some(ke))
-            });
-        }
-    }
-
-    /// A NATIVE sub for `keyexpr` in `native_tier` just left (undeclare or
-    /// face-down purge): flood self's cross-tier WITHDRAWAL into the OPPOSITE mesh
-    /// IFF it flipped that mesh's derive true->false — i.e. NO native source for
-    /// the exact `keyexpr` remains (`source_count == 0` after removal) AND no client
-    /// covers it. The exact negation of
-    /// [`advertise_native_cross_tier_sub`](Self::advertise_native_cross_tier_sub);
-    /// centralized so BOTH the undeclare and the (local + Oam-detach) purge paths
-    /// route through it (R311y125 lifecycle-symmetry).
-    fn withdraw_native_cross_tier_sub(&self, native_tier: Region, keyexpr: &str) {
-        let Some(target) = Self::opposite_mesh(native_tier) else {
-            return;
-        };
-        // The exact negation of the advertise predicate: after this native left,
-        // self no longer advertises `keyexpr` into `target` IFF no native source
-        // remains in `native_tier` (the `target` contributor) AND no client covers
-        // it — `!self_advertises_sub_into(target, keyexpr)`.
-        if !self.self_advertises_sub_into(target, keyexpr) {
-            self.flood_self_sourced(target, keyexpr, build_undeclare_subscriber_with_keyexpr);
-        }
-    }
-
-    /// §5.21 routing-token-tables (slice-2, slice-3 gate) — the liveliness-token
-    /// twin of
-    /// [`advertise_native_cross_tier_sub`](Self::advertise_native_cross_tier_sub):
-    /// a NATIVE token for `keyexpr` in `native_tier` makes self ADVERTISE it into
-    /// the OPPOSITE mesh (a self-sourced `DeclareToken` to self's tree children
-    /// there), so a token-interested face on that mesh learns self holds it. Fires
-    /// on the false->true flip ONLY — this is the SOLE native source (`source_count
-    /// == 1` after register) AND no client already covers the target (slice-3 added
-    /// the `!any_client_holds_token` term SYMMETRICALLY with the withdraw negation;
-    /// mirrors `advertise_native_cross_tier_sub`). Tokens carry no value, so unlike
-    /// the qabl twin there is no merge. DERIVE-not-STORE: self is NOT stored in the
-    /// opposite token table (`flood_self_sourced` floods self's tree children only).
+    /// Whether self SHOULD advertise a liveliness token for `keyexpr` into
+    /// `target` mesh — the token twin of
+    /// [`self_advertises_sub_into`](Self::self_advertises_sub_into): some holder
+    /// outside `target` holds it (R2874, step 3e).
     #[cfg(feature = "routing-token-tables")]
-    fn advertise_native_cross_tier_token(&self, native_tier: Region, keyexpr: &str) {
-        let Some(target) = Self::opposite_mesh(native_tier) else {
-            return; // a client native has no mesh (its bubble is client_tokens')
-        };
-        let sole = self
-            .tokens_table(native_tier)
-            .is_some_and(|t| t.borrow().source_count(keyexpr) == 1);
-        if sole && !self.any_client_holds_token(keyexpr) {
-            self.flood_self_sourced(target, keyexpr, |ke| build_declare_token(0, 0, Some(ke)));
+    fn self_advertises_token_into(&self, target: Region, keyexpr: &str) -> bool {
+        self.held_outside(target, None, |holder| {
+            self.token_contributions(holder, keyexpr)
+        })
+    }
+
+    /// The keyexprs `holder` holds a liveliness token on — the listing twin of
+    /// [`token_contributions`](Self::token_contributions).
+    #[cfg(feature = "routing-token-tables")]
+    fn token_keys(&self, holder: Holder) -> Vec<String> {
+        match holder {
+            Holder::Hat(region) => match self.hats.get(&region) {
+                Some(Hat::Mesh(hat)) => hat
+                    .tokens
+                    .borrow()
+                    .entries()
+                    .into_iter()
+                    .map(|(keyexpr, _peer, ())| keyexpr)
+                    .collect(),
+                Some(Hat::Broker(hat)) => hat
+                    .tokens
+                    .borrow()
+                    .values()
+                    .flat_map(|ids| ids.values().cloned())
+                    .collect(),
+                None => Vec::new(),
+            },
+            Holder::Group | Holder::Host => Vec::new(),
         }
     }
 
-    /// A NATIVE token for `keyexpr` in `native_tier` just left (retraction or
-    /// face-down purge): flood self's cross-tier WITHDRAWAL into the OPPOSITE mesh
-    /// IFF it flipped that mesh's advertise true->false — the EXACT negation of
-    /// [`advertise_native_cross_tier_token`](Self::advertise_native_cross_tier_token):
-    /// self no longer advertises `keyexpr` into `target` IFF NO native source
-    /// remains in `native_tier` AND no client holds it
-    /// (`!self_advertises_token_into`; slice-3 added the client term SYMMETRICALLY —
-    /// a native withdraw while a client still holds `keyexpr` MUST keep the
-    /// advertisement, else the client's interest is silently retracted, the R311y120
-    /// black-hole). Mirrors `withdraw_native_cross_tier_sub`. Centralized so BOTH
-    /// the graceful retraction and the (local + Oam-detach) purge paths route
-    /// through it (the R311y125 lifecycle-symmetry class).
+    /// How many contributions `holder` has for a liveliness token on the EXACT
+    /// `keyexpr` — the token twin of [`sub_contributions`](Self::sub_contributions).
+    ///
+    /// A mesh hat counts its native sources. A broker hat counts `(face, decl
+    /// id)` entries, not faces: a client may hold one keyexpr under several
+    /// ids, and each id is undeclared on its own, so the unit a register adds
+    /// and a withdrawal removes is the entry. The group and the host hold no
+    /// tokens (the multicast dispatcher does not track them, R2734).
     #[cfg(feature = "routing-token-tables")]
-    fn withdraw_native_cross_tier_token(&self, native_tier: Region, keyexpr: &str) {
-        let Some(target) = Self::opposite_mesh(native_tier) else {
-            return;
-        };
-        // The exact negation of the advertise predicate: after this native left,
-        // self no longer advertises `keyexpr` into `target` IFF no native source
-        // remains in `native_tier` (the `target` contributor) AND no client holds
-        // it — `!self_advertises_token_into(target, keyexpr)`.
-        if !self.self_advertises_token_into(target, keyexpr) {
-            self.flood_self_sourced(target, keyexpr, build_undeclare_token_with_keyexpr);
+    fn token_contributions(&self, holder: Holder, keyexpr: &str) -> usize {
+        match holder {
+            Holder::Hat(region) => match self.hats.get(&region) {
+                Some(Hat::Mesh(hat)) => hat.tokens.borrow().source_count(keyexpr),
+                Some(Hat::Broker(hat)) => hat
+                    .tokens
+                    .borrow()
+                    .values()
+                    .map(|ids| ids.values().filter(|k| *k == keyexpr).count())
+                    .sum(),
+                None => 0,
+            },
+            Holder::Group | Holder::Host => 0,
         }
+    }
+
+    /// [`propagate`](Self::propagate) for the liveliness-token plane: a
+    /// self-sourced `DeclareToken` into every mesh a new token contribution
+    /// flips. Tokens carry no value, so unlike the qabl plane there is no
+    /// merged-info edge.
+    #[cfg(feature = "routing-token-tables")]
+    fn propagate_token(&self, holder: Holder, keyexpr: &str) {
+        self.propagate(
+            holder,
+            keyexpr,
+            |holder| self.token_contributions(holder, keyexpr),
+            |ke| build_declare_token(0, 0, Some(ke)),
+        );
+    }
+
+    /// [`unpropagate`](Self::unpropagate) for the liveliness-token plane. Every
+    /// removal path routes through it — graceful retraction, id reuse, face-down
+    /// and the Oam-detach purge (the R311y125 lifecycle-symmetry class).
+    #[cfg(feature = "routing-token-tables")]
+    fn unpropagate_token(&self, holder: Holder, keyexpr: &str) {
+        self.unpropagate(
+            holder,
+            keyexpr,
+            |holder| self.token_contributions(holder, keyexpr),
+            build_undeclare_token_with_keyexpr,
+        );
     }
 
     // ── §5.21 routing-token-tables (slice-3): CLIENT/simple liveliness-TOKEN plane ──
@@ -5150,12 +5202,10 @@ impl RouterForwarder {
                 None => return,
             }
         };
-        // The derive-level change gate: ADVERTISE only when this is the FIRST client
-        // holding `keyexpr` (the client half of the cross-tier derive flips
-        // false->true). A re-declare of an already-held keyexpr (same or a new id)
-        // does not re-flood. Insert in a scoped borrow, THEN advertise after it drops
-        // (advertise reads only the mesh token tables, but keep the discipline).
-        let already = self.any_client_holds_token(&keyexpr);
+        // Register in the owner hat in a scoped borrow, THEN propagate after it
+        // drops (R2874, step 3e). A same-id/same-ke re-declare adds no
+        // contribution and propagates nothing; a new id for an already-held
+        // keyexpr adds one, and the derived edge finds it was already advertised.
         let displaced = self
             .owner_broker(owner)
             .tokens
@@ -5163,14 +5213,13 @@ impl RouterForwarder {
             .entry(inbound)
             .or_default()
             .insert(decl_id, keyexpr.clone());
-        if !already {
-            self.advertise_client_cross_tier_token(&keyexpr);
-        }
-        // FUTURE-mode push (slice-4): declare this token to any CLIENT face whose
-        // stored FUTURE token interest matches (mirror of ingest_client_subscription's
-        // push_future_subscription). Skip a redundant same-id/same-ke re-declare
-        // (pushes_for_new dedups anyway, but match the sub `if inserted` discipline).
         if displaced.as_deref() != Some(keyexpr.as_str()) {
+            self.propagate_token(Holder::Hat(owner), &keyexpr);
+            // FUTURE-mode push (slice-4): declare this token to any CLIENT face whose
+            // stored FUTURE token interest matches (mirror of ingest_client_subscription's
+            // push_future_subscription). Skipped for a redundant same-id/same-ke
+            // re-declare (pushes_for_new dedups anyway, but match the sub
+            // `if inserted` discipline).
             self.push_future_token(&keyexpr, inbound);
         }
         // Defensive: an id RE-USED for a DIFFERENT keyexpr without an intervening
@@ -5181,9 +5230,7 @@ impl RouterForwarder {
         // was its last holder, so a liveliness token never leaks stale-live.
         if let Some(old) = displaced {
             if old != keyexpr {
-                if !self.any_client_holds_token(&old) {
-                    self.withdraw_client_cross_tier_token(&old);
-                }
+                self.unpropagate_token(Holder::Hat(owner), &old);
                 // slice-5: the displaced old keyexpr also owes a reader-notify — the
                 // 5th token-removal path (id-reuse), which has NO sub mirror (client_subs
                 // is a HashSet that cannot displace), so the "3 sub sites" enumeration
@@ -5224,87 +5271,12 @@ impl RouterForwarder {
         let Some(keyexpr) = keyexpr else {
             return; // unknown id (never ingested / already gone) — nothing to withdraw
         };
-        if !self.any_client_holds_token(&keyexpr) {
-            self.withdraw_client_cross_tier_token(&keyexpr);
-        }
+        self.unpropagate_token(Holder::Hat(owner), &keyexpr);
         // slice-5 withdraw->notify (unconditional on a real removal, like
         // withdraw_client_subscription): a future-push reader whose pushed reply ke is
         // now un-backed is told the token withdrew. The internal `any_token_matches`
         // gate keeps a ke another token still backs from being spuriously undeclared.
         self.undeclare_push_token(&keyexpr);
-    }
-
-    /// Whether ANY client face currently holds a liveliness token for `keyexpr` —
-    /// the CLIENT half of the cross-tier advertise derive, the token twin of
-    /// [`any_client_subscribes`](Self::any_client_subscribes). Client-agnostic to
-    /// tier: a client-held token feeds BOTH meshes. The full predicate is
-    /// [`self_advertises_token_into`](Self::self_advertises_token_into).
-    #[cfg(feature = "routing-token-tables")]
-    fn any_client_holds_token(&self, keyexpr: &str) -> bool {
-        self.broker_hats().any(|hat| {
-            hat.tokens
-                .borrow()
-                .values()
-                .any(|ids| ids.values().any(|k| k == keyexpr))
-        })
-    }
-
-    /// A CLIENT token for `keyexpr` just appeared (the FIRST client for it): flood
-    /// self's cross-tier ADVERTISEMENT into each mesh the client newly flips ON — a
-    /// self-sourced `DeclareToken` (node_id 0) to self's tree children, so a
-    /// token-interested face on that mesh learns self holds it. Skips a mesh an
-    /// OPPOSITE-mesh native already advertises (no redundant flood). DERIVE-not-STORE:
-    /// self is NOT stored in either mesh token table; the advertisement is
-    /// re-derived on the tick for late joiners. The token twin of
-    /// [`advertise_client_cross_tier_sub`](Self::advertise_client_cross_tier_sub).
-    #[cfg(feature = "routing-token-tables")]
-    fn advertise_client_cross_tier_token(&self, keyexpr: &str) {
-        for target in [ROUTERS_REGION, PEERS_REGION] {
-            if self.contributor_tokens_source_count(target, keyexpr) == 0 {
-                self.flood_self_sourced(target, keyexpr, |ke| build_declare_token(0, 0, Some(ke)));
-            }
-        }
-    }
-
-    /// The LAST client for `keyexpr` just left: flood self's cross-tier WITHDRAWAL
-    /// into each mesh no OPPOSITE-mesh native still holds — the exact negation of
-    /// [`advertise_client_cross_tier_token`](Self::advertise_client_cross_tier_token).
-    /// A mesh whose opposite-tier native still holds `keyexpr` keeps the
-    /// advertisement (else a native's interest would be silently retracted — the
-    /// R311y120 black-hole). The token twin of
-    /// [`withdraw_client_cross_tier_sub`](Self::withdraw_client_cross_tier_sub).
-    #[cfg(feature = "routing-token-tables")]
-    fn withdraw_client_cross_tier_token(&self, keyexpr: &str) {
-        for target in [ROUTERS_REGION, PEERS_REGION] {
-            if !self.self_advertises_token_into(target, keyexpr) {
-                self.flood_self_sourced(target, keyexpr, build_undeclare_token_with_keyexpr);
-            }
-        }
-    }
-
-    /// Whether self SHOULD advertise a liveliness token for `keyexpr` into `target`
-    /// mesh — the per-target cross-tier-bubble derive SSOT, the token twin of
-    /// [`self_advertises_sub_into`](Self::self_advertises_sub_into). True when a
-    /// CLIENT holds `keyexpr` OR an OPPOSITE-mesh NATIVE token sources it. Read by
-    /// the client withdraw and — as its exact NEGATION — the native withdraw gate,
-    /// keeping the two gates symmetric (no one-sided silent retraction).
-    #[cfg(feature = "routing-token-tables")]
-    fn self_advertises_token_into(&self, target: Region, keyexpr: &str) -> bool {
-        self.any_client_holds_token(keyexpr)
-            || self.contributor_tokens_source_count(target, keyexpr) > 0
-    }
-
-    /// The number of OPPOSITE-mesh NATIVE token sources for the EXACT `keyexpr` that
-    /// make self advertise into `target` — the native half of
-    /// [`self_advertises_token_into`](Self::self_advertises_token_into), the token
-    /// twin of [`contributor_subs_source_count`](Self::contributor_subs_source_count).
-    /// For `target = LinkstatePeers` this reads `router_tokens`; for
-    /// `target = Routers`, `linkstatepeer_tokens`. `0` for a `Client` target.
-    #[cfg(feature = "routing-token-tables")]
-    fn contributor_tokens_source_count(&self, target: Region, keyexpr: &str) -> usize {
-        Self::opposite_mesh(target)
-            .and_then(|src| self.tokens_table(src))
-            .map_or(0, |t| t.borrow().source_count(keyexpr))
     }
 
     // ── §5.21 routing-token-tables (slice-5): topology-reconcile withdraw->notify ──
@@ -5489,7 +5461,7 @@ impl RouterForwarder {
     /// tier's NEW tree children a recompute added — self is the source, so the
     /// flood targets the delta children of SELF's tree in this net. The tick
     /// counterpart of the immediate
-    /// [`advertise_client_cross_tier_sub`](Self::advertise_client_cross_tier_sub) /
+    /// [`propagate_sub`](Self::propagate_sub) /
     /// [`advertise_native_cross_tier_qabl`](Self::advertise_native_cross_tier_qabl),
     /// the OBLIGATION-2 feed of the re-advertise path with the DERIVED (not stored)
     /// self-source (node_id 0) — so a late-joining child converges on self's full
@@ -5543,7 +5515,7 @@ impl RouterForwarder {
     /// [`QueryableInfo`] (the query route reads `complete` / `distance`), and — A3
     /// — ADVERTISES self's cross-tier merged queryable into BOTH meshes so a REMOTE
     /// mesh querier routes toward this router (the query-plane twin of C2's
-    /// [`advertise_client_cross_tier_sub`](Self::advertise_client_cross_tier_sub)).
+    /// [`propagate_sub`](Self::propagate_sub)).
     /// A client is a leaf in NEITHER mesh, so it steers both (unlike a native,
     /// which steers only the opposite mesh). The advertised value is the MERGED
     /// [`QueryableInfo`] ([`derived_cross_tier_qabl_info`](Self::derived_cross_tier_qabl_info),
@@ -5683,7 +5655,7 @@ impl RouterForwarder {
             keyexpr: keyexpr.to_string(),
             handler: Rc::new(RefCell::new(handler)),
         });
-        self.advertise_cross_tier_sub_both_meshes(keyexpr);
+        self.propagate_sub(Holder::Host, keyexpr);
     }
 
     /// R2393 — deliver a routed Put to any subscriber HOSTED BY THIS ROUTER whose
@@ -5754,22 +5726,6 @@ impl RouterForwarder {
                      the sample is dropped — this plane has no redelivery queue yet"
                 ),
             }
-        }
-    }
-
-    /// R2393 — advertise a self-hosted SUBSCRIPTION into both meshes, the subscriber
-    /// twin of [`advertise_cross_tier_qabl_both_meshes`](Self::advertise_cross_tier_qabl_both_meshes).
-    ///
-    /// `build_declare_subscriber(0, 0, …)` is the same self-sourced literal form the
-    /// peer plane uses: node_id 0 means self-originated (no `ext_nodeid` is emitted)
-    /// and mapping id 0 with a suffix is the literal-keyexpr wire shape. There is no
-    /// per-tier info to derive as the queryable path has — a subscription carries no
-    /// `complete` / distance — so this floods unconditionally into each tier.
-    fn advertise_cross_tier_sub_both_meshes(&self, keyexpr: &str) {
-        for target in [ROUTERS_REGION, PEERS_REGION] {
-            self.flood_self_sourced(target, keyexpr, |ke| {
-                build_declare_subscriber(0, 0, Some(ke))
-            });
         }
     }
 
@@ -5956,7 +5912,7 @@ impl RouterForwarder {
 
     /// Recompute self's cross-tier queryable advertisement into BOTH meshes after a
     /// client qabl left — the query twin of
-    /// [`withdraw_client_cross_tier_sub`](Self::withdraw_client_cross_tier_sub) and
+    /// [`unpropagate_sub`](Self::unpropagate_sub) and
     /// the removal counterpart of
     /// [`advertise_client_cross_tier_qabl`](Self::advertise_client_cross_tier_qabl).
     /// Per mesh: re-advertise the DOWNGRADED merge if a contributor remains, else
@@ -6952,11 +6908,13 @@ impl FaceForwarder for RouterForwarder {
         // The `faces` entry is still present here (it is dropped below), so the
         // region is read off it rather than searched for across hats. A mesh
         // face owns no broker hat and has nothing to purge in this block.
-        let owner = self
+        let owner_region = self
             .faces
             .borrow()
             .get(&id)
-            .and_then(|state| self.broker_hat(state.tier));
+            .map(|state| state.tier)
+            .filter(|region| self.broker_hat(*region).is_some());
+        let owner = owner_region.and_then(|region| self.broker_hat(region));
         let departed_qabls = owner.and_then(|hat| hat.qabls.borrow_mut().remove(&id));
         if let Some(qabls) = departed_qabls {
             for keyexpr in qabls.into_keys() {
@@ -6964,15 +6922,13 @@ impl FaceForwarder for RouterForwarder {
             }
         }
         // Purge the FaceId-keyed client sub store, withdrawing self's cross-tier
-        // advertisement for any keyexpr this was the LAST client of. A Client face
-        // is skipped by the peer/router fan-out (its tier), so flooding before its
-        // `faces` entry is dropped is harmless.
+        // advertisement for any keyexpr nothing outside a mesh still justifies. A
+        // Client face is skipped by the peer/router fan-out (its tier), so flooding
+        // before its `faces` entry is dropped is harmless.
         let departed = owner.and_then(|hat| hat.subs.borrow_mut().remove(&id));
-        if let Some(keys) = departed {
+        if let (Some(keys), Some(region)) = (departed, owner_region) {
             for keyexpr in keys {
-                if !self.any_client_subscribes(&keyexpr) {
-                    self.withdraw_client_cross_tier_sub(&keyexpr);
-                }
+                self.unpropagate_sub(Holder::Hat(region), &keyexpr);
             }
         }
         // §5.21 routing-token-tables (slice-3) — purge the FaceId-keyed CLIENT
@@ -6981,7 +6937,7 @@ impl FaceForwarder for RouterForwarder {
         // client_subs purge above; the single client-token purge site — a Client
         // face is link==None so it never reaches the Oam-detach graph teardown).
         // `remove` is bound to a `let` so the borrow_mut drops BEFORE the loop reads
-        // `any_client_holds_token`; the keyexprs are deduped (a face may hold one
+        // the token contributions; the keyexprs are deduped (a face may hold one
         // keyexpr under several decl ids) so the withdraw fires once.
         // Purge this face's client tokens + withdraw self's cross-tier advertisement
         // for any keyexpr it was the LAST client of. The departed keyexprs are HOISTED
@@ -6993,9 +6949,9 @@ impl FaceForwarder for RouterForwarder {
             match departed_tokens {
                 Some(ids) => {
                     let keyexprs: HashSet<String> = ids.into_values().collect();
-                    for keyexpr in &keyexprs {
-                        if !self.any_client_holds_token(keyexpr) {
-                            self.withdraw_client_cross_tier_token(keyexpr);
+                    if let Some(region) = owner_region {
+                        for keyexpr in &keyexprs {
+                            self.unpropagate_token(Holder::Hat(region), keyexpr);
                         }
                     }
                     keyexprs.into_iter().collect()
@@ -7203,7 +7159,7 @@ impl FaceForwarder for RouterForwarder {
     fn set_mcast_group_subs(&self, subs: &[String]) {
         let new: HashSet<String> = subs.iter().cloned().collect();
         // Diff against the current set, then COMMIT the new set (move — no clone),
-        // so `withdraw_group_cross_tier_sub`'s `self_advertises_sub_into` check sees
+        // so `unpropagate_sub`'s `held_outside` check sees
         // the removed keyexpr already gone from `group_subs`.
         let (added, removed) = {
             let old = self.group_subs.borrow();
@@ -7219,10 +7175,10 @@ impl FaceForwarder for RouterForwarder {
         self.group_subs_advertised_peak
             .set(self.group_subs_advertised_peak.get().max(live));
         for keyexpr in &added {
-            self.advertise_group_cross_tier_sub(keyexpr);
+            self.propagate_sub(Holder::Group, keyexpr);
         }
         for keyexpr in &removed {
-            self.withdraw_group_cross_tier_sub(keyexpr);
+            self.unpropagate_sub(Holder::Group, keyexpr);
         }
     }
 
@@ -8692,7 +8648,7 @@ mod tests {
         // Before registering anything, the router advertises no interest in the
         // pattern — so the assertion after registration is a CHANGE, not a constant.
         assert!(
-            !fwd.self_advertises_sub_into(PEERS_REGION, "demo/host/k"),
+            !fwd.self_advertises_sub_into(PEERS_REGION, "demo/host/**"),
             "a router with no host subscriber must not advertise interest"
         );
 
@@ -8711,13 +8667,16 @@ mod tests {
         }
 
         // HALF ONE — the derive now says yes, in BOTH meshes. A host sub is the
-        // fourth contributor, so this is what a late joiner's fold reads.
+        // fourth contributor, so this is what a late joiner's fold reads. It is
+        // advertised as the pattern it was declared with (R2874: per resource,
+        // as the pin propagates); a remote publisher's route to a concrete key
+        // under it is the mesh table's intersection, not a second advertisement.
         assert!(
-            fwd.self_advertises_sub_into(PEERS_REGION, "demo/host/k"),
+            fwd.self_advertises_sub_into(PEERS_REGION, "demo/host/**"),
             "a host subscriber must make the router advertise into the peer mesh"
         );
         assert!(
-            fwd.self_advertises_sub_into(ROUTERS_REGION, "demo/host/k"),
+            fwd.self_advertises_sub_into(ROUTERS_REGION, "demo/host/**"),
             "and into the router mesh — a host sub is not tier-scoped"
         );
 
@@ -8866,7 +8825,7 @@ mod tests {
             assert_eq!(
                 fwd.derived_cross_tier_subs_into(tier)
                     .contains(&ke.to_string()),
-                fwd.self_advertises_sub_into(tier, "@/aabb/router/config/connect-add"),
+                fwd.self_advertises_sub_into(tier, ke),
                 "the re-advertise SET and the advertise PREDICATE must agree about a \
                  host subscription in {tier:?} — they are two spellings of one fact"
             );
@@ -11503,6 +11462,77 @@ mod tests {
         );
     }
 
+    /// R2874 (step 3e) — a client subscription under a HOSTED wildcard withdraws
+    /// its own advertisement when the client leaves.
+    ///
+    /// Before R2874 the host alone was counted by intersection, so the hosted
+    /// `demo/host/**` answered "still held" for `demo/host/k` and the withdrawal
+    /// was skipped: the mesh kept a `demo/host/k` entry for this router after
+    /// the only declaration of that keyexpr was gone. The pin propagates per
+    /// resource, and the hosted pattern is its own advertisement.
+    #[test]
+    fn a_client_under_a_hosted_wildcard_withdraws_its_own_advertisement() {
+        use wz_session_core::sink::SampleView;
+        let fwd = RouterForwarder::new(zid(0x01));
+        let (client, _) = face(zid(0xAA), WIRE_CLIENT);
+        let (p, sink_p) = face(zid(0xBB), WIRE_PEER);
+        fwd.register(FaceId(0), &client);
+        fwd.register(FaceId(1), &p);
+        advertise_link_back(&fwd, FaceId(1), 0x01, 0xBB, 5);
+        fwd.tick();
+        fwd.register_local_subscriber("demo/host/**", Box::new(|_s: &dyn SampleView| {}));
+        forward_one(&fwd, FaceId(0), declare_sub("demo/host/k"));
+        sink_p.reset();
+        forward_one(&fwd, FaceId(0), undeclare_sub("demo/host/k"));
+        assert_eq!(
+            sink_p.frame_count(),
+            1,
+            "the client's own keyexpr is withdrawn; the hosted wildcard is a \
+             different declaration and does not keep it advertised"
+        );
+        assert!(
+            fwd.self_advertises_sub_into(PEERS_REGION, "demo/host/**"),
+            "the hosted pattern stays advertised"
+        );
+    }
+
+    /// R2874 (step 3e) — a hosted subscriber and a client subscriber to the SAME
+    /// keyexpr are two holders outside the mesh, so whichever comes second does
+    /// not re-flood, in either order.
+    ///
+    /// Before R2874 neither path counted the other: the host flooded
+    /// unconditionally, and the client's first-subscriber gate read only the
+    /// other clients, the group and the natives.
+    #[test]
+    fn a_hosted_and_a_client_subscriber_advertise_a_keyexpr_once() {
+        use wz_session_core::sink::SampleView;
+        for host_first in [true, false] {
+            let fwd = RouterForwarder::new(zid(0x01));
+            let (client, _) = face(zid(0xAA), WIRE_CLIENT);
+            let (p, sink_p) = face(zid(0xBB), WIRE_PEER);
+            fwd.register(FaceId(0), &client);
+            fwd.register(FaceId(1), &p);
+            advertise_link_back(&fwd, FaceId(1), 0x01, 0xBB, 5);
+            fwd.tick();
+            sink_p.reset();
+            let host = |fwd: &RouterForwarder| {
+                fwd.register_local_subscriber("demo/k", Box::new(|_s: &dyn SampleView| {}));
+            };
+            if host_first {
+                host(&fwd);
+                forward_one(&fwd, FaceId(0), declare_sub("demo/k"));
+            } else {
+                forward_one(&fwd, FaceId(0), declare_sub("demo/k"));
+                host(&fwd);
+            }
+            assert_eq!(
+                sink_p.frame_count(),
+                1,
+                "one advertisement for two holders outside the mesh (host first: {host_first})"
+            );
+        }
+    }
+
     #[test]
     fn client_face_down_purges_and_withdraws_before_the_linkless_early_return() {
         // OBLIGATION-1: a Client face-down (link == None) purges its FaceId-keyed
@@ -12978,7 +13008,7 @@ mod tests {
         fwd.register(FaceId(0), &c);
         forward_one(&fwd, FaceId(0), declare_client_token_msg(7, "live/data"));
         assert!(
-            fwd.any_client_holds_token("live/data"),
+            fwd.token_contributions(Holder::Hat(CLIENTS_REGION), "live/data") > 0,
             "the client-face token is registered in client_tokens"
         );
         assert!(
@@ -13063,7 +13093,7 @@ mod tests {
         sink_p.reset();
         forward_one(&fwd, FaceId(0), undeclare_client_token_msg(7)); // id-keyed, no ext
         assert!(
-            !fwd.any_client_holds_token("live/data"),
+            fwd.token_contributions(Holder::Hat(CLIENTS_REGION), "live/data") == 0,
             "the id-keyed client undeclare removed the token from client_tokens (by id)"
         );
         assert_eq!(
@@ -13090,7 +13120,7 @@ mod tests {
         sink_p.reset();
         fwd.deregister(FaceId(0)); // client down
         assert!(
-            !fwd.any_client_holds_token("live/data"),
+            fwd.token_contributions(Holder::Hat(CLIENTS_REGION), "live/data") == 0,
             "the client token store was purged on face-down"
         );
         assert_eq!(
@@ -13164,7 +13194,7 @@ mod tests {
         // first). Then a client declares K (router mesh already covered). When the
         // peer-native gracefully undeclares while the client STILL holds K, the
         // router-mesh advertisement MUST stay (the client now backs it) — the withdraw
-        // gate's !any_client_holds_token term suppresses the flood. The OLD gate
+        // gate counts the client as a holder outside the mesh. The OLD gate
         // (source_count==0 only) would black-hole the client's token.
         let fwd = RouterForwarder::new(zid(0x01));
         let (pn, _ps) = face(zid(0xBB), WIRE_PEER); // peer-native + peer child
@@ -13595,11 +13625,11 @@ mod tests {
         sink_p.reset();
         forward_one(&fwd, FaceId(0), declare_client_token_msg(7, "live/b")); // id 7 REUSED -> live/b
         assert!(
-            !fwd.any_client_holds_token("live/a"),
+            fwd.token_contributions(Holder::Hat(CLIENTS_REGION), "live/a") == 0,
             "the displaced old keyexpr is no longer held"
         );
         assert!(
-            fwd.any_client_holds_token("live/b"),
+            fwd.token_contributions(Holder::Hat(CLIENTS_REGION), "live/b") > 0,
             "the new keyexpr under the reused id is held"
         );
         assert_eq!(
@@ -16226,7 +16256,7 @@ mod tests {
     /// §5.21 sub plane (S2) — union-refcount with a local client: a client sub AND a
     /// group sub for the same keyexpr; removing the group sub must NOT withdraw the
     /// mesh advertisement while the client still holds it (the R311y120 black-hole
-    /// guard — `withdraw_group_cross_tier_sub` reuses `self_advertises_sub_into`).
+    /// guard — `unpropagate_sub` reads `held_outside`).
     #[cfg(feature = "router-multicast-faces")]
     #[test]
     fn mcast_group_sub_union_refcounts_with_a_local_client() {
@@ -16234,7 +16264,10 @@ mod tests {
         let (cli, _s) = face(zid(0xCC), WIRE_CLIENT);
         fwd.register(FaceId(0), &cli);
         forward_one(&fwd, FaceId(0), declare_sub("demo/k")); // a local client sub
-        assert!(fwd.any_client_subscribes("demo/k"));
+        assert_eq!(
+            fwd.sub_contributions(Holder::Hat(CLIENTS_REGION), "demo/k"),
+            1
+        );
         fwd.set_mcast_group_subs(&["demo/k".to_string()]);
         fwd.set_mcast_group_subs(&[]); // group sub leaves; client still holds it
         assert!(
@@ -16267,7 +16300,7 @@ mod tests {
     /// sub advertises a keyexpr into the mesh; a LATER local client for the SAME
     /// keyexpr must NOT re-flood (group is already the `true` contributor, so the
     /// client is not the false->true edge). Regression for the IMPL-review should-fix
-    /// (`advertise_client_cross_tier_sub` now skips when `group_subscribes`).
+    /// (R2874: `propagate_sub` counts the group as a holder outside the mesh).
     #[cfg(feature = "router-multicast-faces")]
     #[test]
     fn mcast_group_sub_advertise_is_flip_edge_idempotent_with_a_later_client() {
