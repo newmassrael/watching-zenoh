@@ -240,7 +240,7 @@
 //! into the opposite mesh; a partial removal DOWNGRADES via a re-advertised
 //! `DeclareQueryable`, and the full retraction (last contributor leaves) floods an
 //! `UndeclareQueryable` carrying the keyexpr in its `ext_wire_expr` extension
-//! ([`withdraw_native_cross_tier_qabl`](RouterForwarder::withdraw_native_cross_tier_qabl)) —
+//! ([`repropagate_qabl`](RouterForwarder::repropagate_qabl)) —
 //! parity with the sub plane now that the codec models the ext.
 //!
 //! A3 adds the CLIENT-queryable cross-tier advertisement (the query twin of C2's
@@ -248,7 +248,7 @@
 //! a client `DeclareQueryable` makes self flood a self-sourced `DeclareQueryable`
 //! carrying the merged info into BOTH meshes (a client is in neither), so a REMOTE
 //! mesh querier steers toward the client's queryable
-//! ([`advertise_client_cross_tier_qabl`](RouterForwarder::advertise_client_cross_tier_qabl)).
+//! ([`repropagate_qabl`](RouterForwarder::repropagate_qabl)).
 //! It reuses [`derived_cross_tier_qabl_info`](RouterForwarder::derived_cross_tier_qabl_info)
 //! (which already folds `client_qabls`), so A3 is a trigger-only add; a client
 //! face-down re-advertises the downgraded merge. What remains for the query plane
@@ -551,7 +551,7 @@ struct BrokerHat {
     /// `zenoh/src/net/routing/hat/router/queries.rs` @ `fn compute_query_route`,
     /// gated `master || source == Router`); their completeness feeds the GLOBAL
     /// BestMatching at distance 1. A3 advertises them into both meshes
-    /// ([`advertise_client_cross_tier_qabl`](RouterForwarder::advertise_client_cross_tier_qabl))
+    /// ([`repropagate_qabl`](RouterForwarder::repropagate_qabl))
     /// and the store contributes to the merged
     /// [`derived_cross_tier_qabl_info`](RouterForwarder::derived_cross_tier_qabl_info).
     /// Same keyexpr-keyed follow-up as `subs` (`withdraw_client_queryable`).
@@ -650,6 +650,34 @@ impl Holder {
             Holder::Group | Holder::Host => None,
         }
     }
+}
+
+/// R2875 — a sourced mesh declaration resolved to what it names, before any
+/// table is touched: the keyexpr, the source that declared it, and what the
+/// within-region re-flood needs to re-stamp it.
+struct Sourced {
+    keyexpr: String,
+    source_zid: Zid,
+    inbound_zid: Option<Zid>,
+    out_node_id: u16,
+}
+
+/// R2875 (step 3e, queryables) — the merged queryable info outside each mesh
+/// region for one keyexpr, read BEFORE a mutation so the propagate can diff
+/// against it afterwards.
+///
+/// The pin's queryable propagate stores the value it last propagated per hat
+/// and re-propagates only when the new fold differs
+/// (`zenoh/src/net/routing/hat/router/queries.rs` @ `.is_none_or(|info| info != &other_info)`).
+/// wz stores no propagated value; the fold before the change IS that value,
+/// because every earlier change was propagated the same way. A snapshot, not
+/// a "without this contribution" derive as the presence planes use: a
+/// queryable register can REPLACE a value, and a face-down purge removes
+/// several sources' values at once, so the before-state is not recoverable
+/// from the after-state and one holder.
+struct QablSnapshot {
+    keyexpr: String,
+    before: Vec<(Region, Option<QueryableInfo>)>,
 }
 
 /// The keyexprs every broker hat's per-face store holds, merged into one
@@ -2642,13 +2670,26 @@ impl RouterForwarder {
         // removal (the borrows must be dropped before the withdraw/re-advertise,
         // which re-read the tables).
         let mut affected_sub_keys: HashSet<String> = HashSet::new();
-        let mut affected_qabl_keys: HashSet<String> = HashSet::new();
+        // R2875 — the queryable plane diffs its fold against the state BEFORE
+        // the removal (see `QablSnapshot`), so the departed natives' keyexprs
+        // are read and snapshotted first, while their values still count.
+        let departing_qabl_keys: HashSet<String> = qabls
+            .borrow()
+            .entries()
+            .into_iter()
+            .filter(|(_keyexpr, peer, _info)| removed.contains(peer))
+            .map(|(keyexpr, _peer, _info)| keyexpr)
+            .collect();
+        let qabl_snapshots: Vec<QablSnapshot> = departing_qabl_keys
+            .iter()
+            .map(|keyexpr| self.snapshot_qabl(keyexpr))
+            .collect();
         {
             let mut subs = subs.borrow_mut();
             let mut qabls = qabls.borrow_mut();
             for zid in removed {
                 affected_sub_keys.extend(subs.remove_peer_keys(zid));
-                affected_qabl_keys.extend(qabls.remove_peer_keys(zid));
+                qabls.remove_peer_keys(zid);
             }
         }
         // §5.21 routing-token-tables — drain the departed natives' token entries,
@@ -2720,8 +2761,9 @@ impl RouterForwarder {
             self.unpropagate_sub(Holder::Hat(tier), &keyexpr);
             self.undeclare_push_subs(&keyexpr);
         }
-        for keyexpr in affected_qabl_keys {
-            self.withdraw_native_cross_tier_qabl(tier, &keyexpr);
+        for snapshot in qabl_snapshots {
+            let keyexpr = snapshot.keyexpr.clone();
+            self.repropagate_qabl(snapshot);
             self.undeclare_push_qabls(&keyexpr);
         }
     }
@@ -2790,6 +2832,37 @@ impl RouterForwarder {
         value: V,
         build: impl Fn(&str) -> Result<DeclareOwned, CodecError>,
     ) -> Option<String> {
+        let sourced = self.resolve_sourced(inbound, tier, declare, |t| {
+            resolve_wireexpr(&wireexpr.body, t)
+        })?;
+        self.commit_register(inbound, tier, reliable, &sourced, table, value, build)
+            .then_some(sourced.keyexpr)
+    }
+
+    /// Resolve a sourced declaration on a mesh face to the keyexpr it names
+    /// and the source that made it, without touching any table — the half of
+    /// [`ingest_interest`](Self::ingest_interest) /
+    /// [`withdraw_interest`](Self::withdraw_interest) that runs BEFORE the
+    /// mutation.
+    ///
+    /// R2875 split it out because the queryable plane has to read the
+    /// cross-region merged info for the keyexpr BEFORE its table changes: the
+    /// pin compares against the value it last propagated
+    /// (`zenoh/src/net/routing/hat/router/queries.rs` @ `.is_none_or(|info| info != &other_info)`),
+    /// and wz, which stores no propagated value, derives it from the state
+    /// before the change.
+    ///
+    /// `keyexpr_of` reads the keyexpr from the face's alias table (a declare
+    /// carries it in its wire expr, an undeclare in its ext). `None` on a
+    /// client tier (no net), an unresolvable alias, a source-only or gone face,
+    /// or an unresolvable source.
+    fn resolve_sourced(
+        &self,
+        inbound: FaceId,
+        tier: Region,
+        declare: &DeclareOwned,
+        keyexpr_of: impl FnOnce(&hashbrown::HashMap<u64, String>) -> Option<String>,
+    ) -> Option<Sourced> {
         let (net, _dirty) = self.plane(tier)?; // Client tier: no net -> slice 1d.
                                                // Resolve the keyexpr against the inbound face's alias table + read its
                                                // zid / link, in one scoped borrow (an unresolvable alias drops it).
@@ -2801,12 +2874,14 @@ impl RouterForwarder {
             // pin does route a multicast peer's Interest, but into a face whose
             // primitives discard, so registering one here would attract work
             // whose every reply is thrown away. Declining is the same OUTCOME by
-            // a shorter path, and is now said rather than fallen into.
+            // a shorter path, and is now said rather than fallen into. A
+            // withdrawal declines for the same face kinds: a source-only face
+            // never registers an interest for one to remove.
             let s = match classify_inbound(&faces, inbound) {
                 InboundFace::Held(s) => s,
                 InboundFace::SourceOnly | InboundFace::Gone => return None,
             };
-            let keyexpr = resolve_wireexpr(&wireexpr.body, &s.keyexpr_table)?;
+            let keyexpr = keyexpr_of(&s.keyexpr_table)?;
             (peer_zid_routing(&s.actions), s.link, keyexpr)
         };
         let (source_zid, out_node_id) = resolve_source_in(
@@ -2815,23 +2890,83 @@ impl RouterForwarder {
             inbound_link,
             read_declare_source(declare),
         )?;
-        // Register the SOURCE's native interest; re-flood ONLY on a real change
-        // (the value-diff gate -- a new peer OR a changed value).
-        if !table.borrow_mut().register(&keyexpr, source_zid, value) {
-            return None;
+        Some(Sourced {
+            keyexpr,
+            source_zid,
+            inbound_zid,
+            out_node_id,
+        })
+    }
+
+    /// Register a resolved source's interest (value `value`) in `table` and,
+    /// only on a real change (a new peer OR a changed value), re-flood it
+    /// within `tier`. Returns whether it changed anything.
+    #[allow(clippy::too_many_arguments)]
+    fn commit_register<V: PartialEq>(
+        &self,
+        inbound: FaceId,
+        tier: Region,
+        reliable: bool,
+        sourced: &Sourced,
+        table: &RefCell<LinkstatepeerInterest<V>>,
+        value: V,
+        build: impl Fn(&str) -> Result<DeclareOwned, CodecError>,
+    ) -> bool {
+        if !table
+            .borrow_mut()
+            .register(&sourced.keyexpr, sourced.source_zid, value)
+        {
+            return false;
         }
+        self.reflood_sourced(inbound, tier, reliable, sourced, build);
+        true
+    }
+
+    /// Withdraw a resolved source's interest from `table` and, only on a real
+    /// removal, re-flood the retraction within `tier`. Returns whether it
+    /// removed anything.
+    fn commit_withdraw<V>(
+        &self,
+        inbound: FaceId,
+        tier: Region,
+        reliable: bool,
+        sourced: &Sourced,
+        table: &RefCell<LinkstatepeerInterest<V>>,
+        build: impl Fn(&str) -> Result<DeclareOwned, CodecError>,
+    ) -> bool {
+        if !table
+            .borrow_mut()
+            .withdraw(&sourced.keyexpr, &sourced.source_zid)
+        {
+            return false;
+        }
+        self.reflood_sourced(inbound, tier, reliable, sourced, build);
+        true
+    }
+
+    /// [`reflood_declaration`](Self::reflood_declaration) for a resolved source.
+    fn reflood_sourced(
+        &self,
+        inbound: FaceId,
+        tier: Region,
+        reliable: bool,
+        sourced: &Sourced,
+        build: impl Fn(&str) -> Result<DeclareOwned, CodecError>,
+    ) {
+        let Some((net, _dirty)) = self.plane(tier) else {
+            return;
+        };
         self.reflood_declaration(
             inbound,
             tier,
             net,
-            source_zid,
-            inbound_zid,
-            out_node_id,
+            sourced.source_zid,
+            sourced.inbound_zid,
+            sourced.out_node_id,
             reliable,
-            &keyexpr,
+            &sourced.keyexpr,
             build,
         );
-        Some(keyexpr)
     }
 
     /// Ingest a sourced `DeclareSubscriber` (1b) — the `V = ()` case of
@@ -3468,40 +3603,10 @@ impl RouterForwarder {
         table: &RefCell<LinkstatepeerInterest<V>>,
         build: impl Fn(&str) -> Result<DeclareOwned, CodecError>,
     ) -> Option<String> {
-        let (net, _dirty) = self.plane(tier)?;
-        let (inbound_zid, inbound_link, keyexpr) = {
-            let faces = self.faces.borrow();
-            // R2734 — SourceOnly declines, as the ingest twin above does: a
-            // withdrawal is only meaningful for an interest this face registered,
-            // and a source-only face never registers one.
-            let s = match classify_inbound(&faces, inbound) {
-                InboundFace::Held(s) => s,
-                InboundFace::SourceOnly | InboundFace::Gone => return None,
-            };
-            let keyexpr = resolve_ext_keyexpr(exts, &s.keyexpr_table)?;
-            (peer_zid_routing(&s.actions), s.link, keyexpr)
-        };
-        let (source_zid, out_node_id) = resolve_source_in(
-            &net.borrow(),
-            inbound_zid,
-            inbound_link,
-            read_declare_source(declare),
-        )?;
-        if !table.borrow_mut().withdraw(&keyexpr, &source_zid) {
-            return None;
-        }
-        self.reflood_declaration(
-            inbound,
-            tier,
-            net,
-            source_zid,
-            inbound_zid,
-            out_node_id,
-            reliable,
-            &keyexpr,
-            build,
-        );
-        Some(keyexpr)
+        let sourced =
+            self.resolve_sourced(inbound, tier, declare, |t| resolve_ext_keyexpr(exts, t))?;
+        self.commit_withdraw(inbound, tier, reliable, &sourced, table, build)
+            .then_some(sourced.keyexpr)
     }
 
     /// Ingest a sourced `DeclareQueryable` (1c) — the query-plane twin of
@@ -3537,26 +3642,24 @@ impl RouterForwarder {
             }
             _ => QueryableInfo::DEFAULT,
         };
-        // CARRY the source's QueryableInfo downstream on the re-flood (info is Copy).
-        let changed = self.ingest_interest(
-            inbound,
-            tier,
-            reliable,
-            declare,
-            wireexpr,
-            qabls,
-            info,
-            move |ke| build_declare_queryable_with_info(ke, info),
-        );
-        // FEDERATION cross-tier bubble (A2b): a NATIVE qabl makes self ADVERTISE
-        // its MERGED QueryableInfo into the OPPOSITE mesh (the query twin of the
-        // sub advertise) so a REMOTE querier routes toward self. The advertise is
-        // done AFTER `ingest_interest` registered the native (so the merge INCLUDES
-        // the triggering native — the register-before-merge fidelity order), and
-        // fires on any real change (a new native OR a changed info re-declares the
-        // recomputed merge — an upgrade or downgrade).
+        let Some(sourced) = self.resolve_sourced(inbound, tier, declare, |t| {
+            resolve_wireexpr(&wireexpr.body, t)
+        }) else {
+            return;
+        };
+        // FEDERATION cross-tier bubble (A2b, R2875): read the merged info outside
+        // each mesh BEFORE the register, then propagate where the register moved
+        // it — a new native or a changed info that alters the fold (an upgrade or
+        // a downgrade), and nothing when the fold is unchanged. CARRY the
+        // source's QueryableInfo downstream on the within-region re-flood.
+        let snapshot = self.snapshot_qabl(&sourced.keyexpr);
+        let changed = self
+            .commit_register(inbound, tier, reliable, &sourced, qabls, info, move |ke| {
+                build_declare_queryable_with_info(ke, info)
+            })
+            .then_some(sourced.keyexpr);
         if let Some(ke) = changed {
-            self.advertise_native_cross_tier_qabl(tier, &ke);
+            self.repropagate_qabl(snapshot);
             // FUTURE-push (R311y150): a queryable learned off the mesh is proactively
             // pushed to any CLIENT face whose FUTURE querier-interest matches, with
             // the RE-FOLDED merged info — the query twin of the mesh-sub future push.
@@ -3587,50 +3690,30 @@ impl RouterForwarder {
         let Some(qabls) = self.qabls_table(tier) else {
             return;
         };
-        // FEDERATION cross-tier bubble (A2b): on a real removal, recompute self's
-        // advertisement into the opposite mesh — a downgrade if a contributor
-        // remains, or a full `UndeclareQueryable` retraction if the merge is now
-        // `None`. Shares the withdraw SSOT with the sub plane (only the table,
-        // carrier, and this cross-tier step differ), the query twin of the
-        // `ingest_queryable`/`ingest_subscription` split over `ingest_interest`.
-        if let Some(keyexpr) = self.withdraw_interest(
+        // FEDERATION cross-tier bubble (A2b, R2875): on a real removal, propagate
+        // where the fold outside a mesh moved — a downgrade if a contributor
+        // remains, a full `UndeclareQueryable` retraction if the fold is now
+        // `None`, nothing if the removed source did not change it.
+        let Some(sourced) =
+            self.resolve_sourced(inbound, tier, declare, |t| resolve_ext_keyexpr(exts, t))
+        else {
+            return;
+        };
+        let snapshot = self.snapshot_qabl(&sourced.keyexpr);
+        if self.commit_withdraw(
             inbound,
             tier,
             reliable,
-            declare,
-            exts,
+            &sourced,
             qabls,
             build_undeclare_queryable_with_keyexpr,
         ) {
-            self.withdraw_native_cross_tier_qabl(tier, &keyexpr);
+            let keyexpr = sourced.keyexpr;
+            self.repropagate_qabl(snapshot);
             // R311y151 undeclare-push (query twin): a waiting querier whose pushed
             // reply ke lost its LAST backing queryable is re-armed with an
             // UndeclareQueryable + `pushed` cleared.
             self.undeclare_push_qabls(&keyexpr);
-        }
-    }
-
-    /// A NATIVE qabl for `keyexpr` in `native_tier` just left (undeclare or
-    /// face-down purge): recompute self's cross-tier advertisement into the
-    /// OPPOSITE mesh — the value-bearing query twin of
-    /// [`unpropagate_sub`](Self::unpropagate_sub). If
-    /// a contributor remains (an opposite-mesh native or a client qabl), re-advertise
-    /// the DOWNGRADED merged [`QueryableInfo`]; if NONE remains, flood a full
-    /// `UndeclareQueryable` retraction. The `None` arm is what the `ext_wire_expr`
-    /// codec atom made expressible (previously a no-op ⇒ a stale remote advertisement
-    /// lingering until self-down). Centralized so BOTH the undeclare and the
-    /// (local + Oam-detach) purge paths route through it.
-    fn withdraw_native_cross_tier_qabl(&self, native_tier: Region, keyexpr: &str) {
-        let Some(target) = Self::opposite_mesh(native_tier) else {
-            return;
-        };
-        match self.derived_cross_tier_qabl_info(target, keyexpr) {
-            Some(info) => self.flood_self_sourced(target, keyexpr, move |ke| {
-                build_declare_queryable_with_info(ke, info)
-            }),
-            None => {
-                self.flood_self_sourced(target, keyexpr, build_undeclare_queryable_with_keyexpr)
-            }
         }
     }
 
@@ -4793,18 +4876,6 @@ impl RouterForwarder {
         }
     }
 
-    /// The mesh a NATIVE in `tier` advertises its cross-tier interest INTO — the
-    /// OPPOSITE mesh (a `Routers` native attracts publishers on the `LinkstatePeers`
-    /// mesh and vice versa), or `None` for a leaf region (a client is in no
-    /// mesh; its advertisement targets BOTH meshes, handled by the caller loop).
-    fn opposite_mesh(tier: Region) -> Option<Region> {
-        match tier {
-            ROUTERS_REGION => Some(PEERS_REGION),
-            PEERS_REGION => Some(ROUTERS_REGION),
-            _ => None,
-        }
-    }
-
     /// Whether self SHOULD advertise interest in `keyexpr` into `target` mesh —
     /// the per-target-tier cross-tier-bubble derive SSOT (R311y125), read by the
     /// immediate advertise (client + native ingest), the tick re-advertise, and —
@@ -5348,31 +5419,123 @@ impl RouterForwarder {
     /// DeclareQueryable ext for UPSTREAM propagation only. (The client-qabl fold is
     /// already wired so ACTIVATION-3 adds only the client-declare TRIGGER, not a
     /// derive change.)
+    ///
+    /// R2875 (step 3e) — the fold is over every [`Holder`] outside `target`
+    /// ([`qabl_contribution`](Self::qabl_contribution)), the value twin of the
+    /// presence planes' [`held_outside`](Self::held_outside): the pin's
+    /// `other_info` for a queryable.
     fn derived_cross_tier_qabl_info(&self, target: Region, keyexpr: &str) -> Option<QueryableInfo> {
-        let mut acc: Option<QueryableInfo> = None;
-        if let Some(table) = Self::opposite_mesh(target).and_then(|src| self.qabls_table(src)) {
-            for info in table.borrow().values_for(keyexpr) {
-                acc = Some(acc.map_or(info, |a| a.merge(info)));
-            }
+        self.holders()
+            .filter(|holder| holder.region() != Some(target))
+            .filter_map(|holder| self.qabl_contribution(holder, keyexpr))
+            .reduce(QueryableInfo::merge)
+    }
+
+    /// The merged [`QueryableInfo`] `holder` contributes for the EXACT
+    /// `keyexpr`, `None` if it holds no queryable there: a mesh hat's native
+    /// sources, a broker hat's client faces, the host's registrations (a
+    /// self-host is a leaf in neither mesh, §5.23). The group holds none.
+    fn qabl_contribution(&self, holder: Holder, keyexpr: &str) -> Option<QueryableInfo> {
+        match holder {
+            Holder::Hat(region) => match self.hats.get(&region)? {
+                Hat::Mesh(hat) => hat
+                    .qabls
+                    .borrow()
+                    .values_for(keyexpr)
+                    .into_iter()
+                    .reduce(QueryableInfo::merge),
+                Hat::Broker(hat) => hat
+                    .qabls
+                    .borrow()
+                    .values()
+                    .filter_map(|qabls| qabls.get(keyexpr).copied())
+                    .reduce(QueryableInfo::merge),
+            },
+            Holder::Group => None,
+            Holder::Host => self
+                .local_queryables
+                .borrow()
+                .iter()
+                .filter(|lq| lq.keyexpr == keyexpr)
+                .map(|lq| QueryableInfo::local(lq.complete))
+                .reduce(QueryableInfo::merge),
         }
-        for hat in self.broker_hats() {
-            for qabls in hat.qabls.borrow().values() {
-                if let Some(info) = qabls.get(keyexpr) {
-                    acc = Some(acc.map_or(*info, |a| a.merge(*info)));
+    }
+
+    /// The keyexprs `holder` holds a queryable on — the listing twin of
+    /// [`qabl_contribution`](Self::qabl_contribution).
+    fn qabl_keys(&self, holder: Holder) -> Vec<String> {
+        match holder {
+            Holder::Hat(region) => match self.hats.get(&region) {
+                Some(Hat::Mesh(hat)) => hat
+                    .qabls
+                    .borrow()
+                    .entries()
+                    .into_iter()
+                    .map(|(keyexpr, _peer, _info)| keyexpr)
+                    .collect(),
+                Some(Hat::Broker(hat)) => hat
+                    .qabls
+                    .borrow()
+                    .values()
+                    .flat_map(|qabls| qabls.keys().cloned())
+                    .collect(),
+                None => Vec::new(),
+            },
+            Holder::Group => Vec::new(),
+            Holder::Host => self
+                .local_queryables
+                .borrow()
+                .iter()
+                .map(|lq| lq.keyexpr.clone())
+                .collect(),
+        }
+    }
+
+    /// Read the merged queryable info outside every mesh region for
+    /// `keyexpr`, before a mutation — see [`QablSnapshot`].
+    fn snapshot_qabl(&self, keyexpr: &str) -> QablSnapshot {
+        QablSnapshot {
+            keyexpr: keyexpr.to_string(),
+            before: self
+                .mesh_regions()
+                .into_iter()
+                .map(|target| (target, self.derived_cross_tier_qabl_info(target, keyexpr)))
+                .collect(),
+        }
+    }
+
+    /// R2875 (step 3e) — after a mutation, propagate self's queryable into
+    /// every mesh whose merged info outside it changed since `snapshot`: a
+    /// `DeclareQueryable` carrying the new fold, or an `UndeclareQueryable`
+    /// when nothing outside that mesh holds one any more.
+    ///
+    /// This is the pin's queryable dispatch in both directions. On a declare it
+    /// registers in the owner hat and re-propagates to every region whose fold
+    /// differs from what it propagated
+    /// (`zenoh/src/net/routing/dispatcher/queries.rs` @ `tables.hats[dst].propagate_queryable(ctx.reborrow(), res.clone(), other_info);`).
+    /// On an undeclare it unpropagates where nothing remains and
+    /// re-propagates the downgraded fold where something does. The owner's own
+    /// region never changes here: its fold excludes the owner. Before R2875
+    /// every register re-flooded both meshes whatever the fold, and each
+    /// withdrawal re-declared an unchanged fold; the downstream value-diff gate
+    /// absorbed those, but they were wire traffic the pin never sends.
+    fn repropagate_qabl(&self, snapshot: QablSnapshot) {
+        let keyexpr = snapshot.keyexpr.as_str();
+        for (target, before) in snapshot.before {
+            let after = self.derived_cross_tier_qabl_info(target, keyexpr);
+            if after == before {
+                continue;
+            }
+            match after {
+                Some(info) => self.flood_self_sourced(target, keyexpr, move |ke| {
+                    build_declare_queryable_with_info(ke, info)
+                }),
+                None => {
+                    self.flood_self_sourced(target, keyexpr, build_undeclare_queryable_with_keyexpr)
                 }
             }
         }
-        // §5.23 adminspace-router-linkstate — a queryable HOSTED BY THIS router
-        // (e.g. `@/<self-zid>/router/**`) is a third self-sourced contributor,
-        // folded here EXACTLY like `client_qabls` (a self-host is a leaf in
-        // neither mesh) so it advertises + re-advertises through the same derive.
-        for lq in self.local_queryables.borrow().iter() {
-            if lq.keyexpr == keyexpr {
-                let info = QueryableInfo::local(lq.complete);
-                acc = Some(acc.map_or(info, |a| a.merge(info)));
-            }
-        }
-        acc
     }
 
     /// The keyexprs self should advertise a merged queryable for into `target`
@@ -5380,54 +5543,17 @@ impl RouterForwarder {
     /// form of [`derived_cross_tier_qabl_info`](Self::derived_cross_tier_qabl_info)
     /// (a `K` is in this set IFF that returns `Some`), fed to the tick re-advertise
     /// for late-joining children (the qabl twin of `derived_cross_tier_subs_into`).
+    ///
+    /// R2875 — a filter of that derive over every holder's keys (the host's
+    /// included, §5.23, which is what lets a router that registered its admin
+    /// queryable at startup still be reached by a node that joins later), so
+    /// the `iff` holds by construction, as for the presence planes.
     fn derived_cross_tier_qabls_into(&self, target: Region) -> Vec<String> {
-        let mut set: HashSet<String> = HashSet::new();
-        if let Some(table) = Self::opposite_mesh(target).and_then(|src| self.qabls_table(src)) {
-            for (keyexpr, _peer, _info) in table.borrow().entries() {
-                set.insert(keyexpr);
-            }
-        }
-        for hat in self.broker_hats() {
-            for qabls in hat.qabls.borrow().values() {
-                set.extend(qabls.keys().cloned());
-            }
-        }
-        // §5.23 adminspace-router-linkstate — self-hosted queryables join the set
-        // (the twin of the `client_qabls` fold above), so `re_advertise_self_cross_
-        // tier` re-advertises them to late-joining tree children for FREE — the
-        // single change that lets a router that registered its admin queryable at
-        // startup still be reached by a peer/router that joins the mesh later.
-        for lq in self.local_queryables.borrow().iter() {
-            set.insert(lq.keyexpr.clone());
-        }
-        set.into_iter().collect()
-    }
-
-    /// A NATIVE qabl for `keyexpr` in `native_tier` just registered, or its merged
-    /// value changed (A2b): (re-)advertise self's MERGED cross-tier `QueryableInfo`
-    /// into the OPPOSITE mesh — a self-sourced `DeclareQueryable` (node_id 0)
-    /// carrying the fold. Fires on any real change (upgrade OR downgrade): zenoh
-    /// re-declares `local_*_qabl_info` whenever it changes, and the downstream
-    /// value-diff gate absorbs a re-declare of the SAME value. NOT master-gated.
-    /// This is the ADVERTISE (register / value-change) path, where a contributor
-    /// always exists (the triggering native was just registered), so the `None` arm
-    /// below is unreachable from `ingest_queryable` and kept only as a safe guard.
-    /// The FULL retraction (last contributor leaves ⇒ merged `None`) is handled by
-    /// [`withdraw_native_cross_tier_qabl`](Self::withdraw_native_cross_tier_qabl),
-    /// which floods an `UndeclareQueryable` carrying the keyexpr in `ext_wire_expr`
-    /// (declare.rs:520-522, parity with the sub plane) — no longer the self-down-only
-    /// staleness the codec deferral once left. A partial removal that leaves a
-    /// contributor DOWNGRADES via a re-advertised `DeclareQueryable`.
-    fn advertise_native_cross_tier_qabl(&self, native_tier: Region, keyexpr: &str) {
-        let Some(target) = Self::opposite_mesh(native_tier) else {
-            return;
-        };
-        let Some(info) = self.derived_cross_tier_qabl_info(target, keyexpr) else {
-            return; // no contributor (unreachable from the register path; safe guard)
-        };
-        self.flood_self_sourced(target, keyexpr, move |ke| {
-            build_declare_queryable_with_info(ke, info)
-        });
+        self.derived_into(
+            target,
+            |holder| self.qabl_keys(holder),
+            |keyexpr| self.derived_cross_tier_qabl_info(target, keyexpr).is_some(),
+        )
     }
 
     /// Flood a self-sourced declaration for `keyexpr` (node_id 0) to self's tree
@@ -5462,7 +5588,7 @@ impl RouterForwarder {
     /// flood targets the delta children of SELF's tree in this net. The tick
     /// counterpart of the immediate
     /// [`propagate_sub`](Self::propagate_sub) /
-    /// [`advertise_native_cross_tier_qabl`](Self::advertise_native_cross_tier_qabl),
+    /// [`repropagate_qabl`](Self::repropagate_qabl),
     /// the OBLIGATION-2 feed of the re-advertise path with the DERIVED (not stored)
     /// self-source (node_id 0) — so a late-joining child converges on self's full
     /// cross-tier bubble (both planes). The qabl re-advertise carries the MERGED
@@ -5550,9 +5676,11 @@ impl RouterForwarder {
             }
             _ => QueryableInfo::DEFAULT,
         };
-        // The change gate (mirrors the native value-diff): re-advertise only on a
-        // NEW keyexpr for this face OR a CHANGED info — `insert` returns the prior
-        // value, so `Some(prev) if prev == info` is the redundant re-declare.
+        // The change gate (mirrors the native value-diff): only a NEW keyexpr for
+        // this face OR a CHANGED info is a change — `insert` returns the prior
+        // value, so `Some(prev) if prev == info` is the redundant re-declare. The
+        // propagate then floods only the meshes whose fold it moved (R2875).
+        let snapshot = self.snapshot_qabl(&keyexpr);
         let prev = self
             .owner_broker(owner)
             .qabls
@@ -5561,43 +5689,13 @@ impl RouterForwarder {
             .or_default()
             .insert(keyexpr.clone(), info);
         if prev != Some(info) {
-            self.advertise_client_cross_tier_qabl(&keyexpr);
+            self.repropagate_qabl(snapshot);
             // FUTURE-push (R311y150): a client queryable is proactively pushed to
             // ANOTHER client face whose FUTURE querier-interest matches (the value-
             // aware site — `prev` carried the old info, so a completeness flip
             // re-pushes the recomputed merge). `inbound` (the queryable's own face)
             // is never self-echoed.
             self.push_future_queryable(&keyexpr, inbound);
-        }
-    }
-
-    /// Flood self's cross-tier queryable ADVERTISEMENT for `keyexpr` into BOTH
-    /// meshes (A3) — a self-sourced `DeclareQueryable` (node_id 0) carrying the
-    /// MERGED [`QueryableInfo`] ([`derived_cross_tier_qabl_info`](Self::derived_cross_tier_qabl_info)),
-    /// so a REMOTE querier on either mesh routes `keyexpr` toward this router. The
-    /// client-qabl twin of [`advertise_native_cross_tier_qabl`](Self::advertise_native_cross_tier_qabl),
-    /// but into BOTH meshes (a client is in neither). This is the ADVERTISE
-    /// (register / value-change) path; the client face-down / undeclare REMOVAL
-    /// path is [`withdraw_client_cross_tier_qabl`](Self::withdraw_client_cross_tier_qabl)
-    /// (downgrade if a contributor remains, else a full `UndeclareQueryable`
-    /// retraction). NOT master-gated.
-    fn advertise_client_cross_tier_qabl(&self, keyexpr: &str) {
-        self.advertise_cross_tier_qabl_both_meshes(keyexpr);
-    }
-
-    /// Flood self's MERGED cross-tier queryable advertisement for `keyexpr` into
-    /// BOTH meshes — the shared both-meshes flood for a self-sourced queryable that
-    /// is a leaf in NEITHER mesh (a client qabl OR a self-hosted admin queryable).
-    /// The merged [`QueryableInfo`] ([`derived_cross_tier_qabl_info`](Self::derived_cross_tier_qabl_info))
-    /// already folds every self source, so both callers reuse this one flood.
-    fn advertise_cross_tier_qabl_both_meshes(&self, keyexpr: &str) {
-        for target in [ROUTERS_REGION, PEERS_REGION] {
-            let Some(info) = self.derived_cross_tier_qabl_info(target, keyexpr) else {
-                continue;
-            };
-            self.flood_self_sourced(target, keyexpr, move |ke| {
-                build_declare_queryable_with_info(ke, info)
-            });
         }
     }
 
@@ -5620,12 +5718,13 @@ impl RouterForwarder {
         complete: bool,
         handler: LocalQueryHandler,
     ) {
+        let snapshot = self.snapshot_qabl(keyexpr);
         self.local_queryables.borrow_mut().push(LocalQueryable {
             keyexpr: keyexpr.to_string(),
             complete,
             handler: Rc::new(RefCell::new(handler)),
         });
-        self.advertise_cross_tier_qabl_both_meshes(keyexpr);
+        self.repropagate_qabl(snapshot);
     }
 
     /// R2393 (§5.21) — register a subscriber HOSTED BY THIS ROUTER: the Push-plane
@@ -5890,6 +5989,7 @@ impl RouterForwarder {
                 None => return,
             }
         };
+        let snapshot = self.snapshot_qabl(&keyexpr);
         let removed = {
             let mut store = self.owner_broker(owner).qabls.borrow_mut();
             let removed = store
@@ -5903,31 +6003,10 @@ impl RouterForwarder {
             removed
         };
         if removed {
-            self.withdraw_client_cross_tier_qabl(&keyexpr);
+            self.repropagate_qabl(snapshot);
             // R311y151 undeclare-push (query twin): re-arm any waiting querier whose
             // pushed reply ke lost its last backing queryable.
             self.undeclare_push_qabls(&keyexpr);
-        }
-    }
-
-    /// Recompute self's cross-tier queryable advertisement into BOTH meshes after a
-    /// client qabl left — the query twin of
-    /// [`unpropagate_sub`](Self::unpropagate_sub) and
-    /// the removal counterpart of
-    /// [`advertise_client_cross_tier_qabl`](Self::advertise_client_cross_tier_qabl).
-    /// Per mesh: re-advertise the DOWNGRADED merge if a contributor remains, else
-    /// flood a full `UndeclareQueryable` retraction (the `None` arm the ext_wire_expr
-    /// codec atom made expressible).
-    fn withdraw_client_cross_tier_qabl(&self, keyexpr: &str) {
-        for target in [ROUTERS_REGION, PEERS_REGION] {
-            match self.derived_cross_tier_qabl_info(target, keyexpr) {
-                Some(info) => self.flood_self_sourced(target, keyexpr, move |ke| {
-                    build_declare_queryable_with_info(ke, info)
-                }),
-                None => {
-                    self.flood_self_sourced(target, keyexpr, build_undeclare_queryable_with_keyexpr)
-                }
-            }
         }
     }
 
@@ -6915,11 +6994,24 @@ impl FaceForwarder for RouterForwarder {
             .map(|state| state.tier)
             .filter(|region| self.broker_hat(*region).is_some());
         let owner = owner_region.and_then(|region| self.broker_hat(region));
-        let departed_qabls = owner.and_then(|hat| hat.qabls.borrow_mut().remove(&id));
-        if let Some(qabls) = departed_qabls {
-            for keyexpr in qabls.into_keys() {
-                self.withdraw_client_cross_tier_qabl(&keyexpr);
-            }
+        // R2875 — snapshot the departing face's queryable keyexprs while its
+        // values still count, then propagate what the removal moved.
+        let qabl_snapshots: Vec<QablSnapshot> = owner
+            .and_then(|hat| {
+                hat.qabls
+                    .borrow()
+                    .get(&id)
+                    .map(|qabls| qabls.keys().cloned().collect::<Vec<_>>())
+            })
+            .unwrap_or_default()
+            .iter()
+            .map(|keyexpr| self.snapshot_qabl(keyexpr))
+            .collect();
+        if let Some(hat) = owner {
+            hat.qabls.borrow_mut().remove(&id);
+        }
+        for snapshot in qabl_snapshots {
+            self.repropagate_qabl(snapshot);
         }
         // Purge the FaceId-keyed client sub store, withdrawing self's cross-tier
         // advertisement for any keyexpr nothing outside a mesh still justifies. A
@@ -13928,7 +14020,7 @@ mod tests {
 
     #[test]
     fn native_qabl_undeclare_retracts_the_cross_tier_advertisement() {
-        // The debt-closure witness for the NATIVE path (withdraw_native_cross_tier_qabl
+        // The debt-closure witness for the NATIVE path (repropagate_qabl's
         // None arm): a router-native queryable advertised into the peer mesh, then
         // retracted, floods a full UndeclareQueryable into that mesh once the last
         // contributor leaves — the frame-level proof that the cross-tier advertisement
@@ -14062,6 +14154,47 @@ mod tests {
                     .interested("demo/q")
                     .is_empty(),
             "derive-not-store: self is NOT stored in either qabls table"
+        );
+    }
+
+    /// R2875 (step 3e) — a queryable whose arrival or departure leaves the
+    /// merged info outside a mesh unchanged propagates NOTHING into it.
+    ///
+    /// The pin re-propagates only when the fold differs from what it last
+    /// propagated. Before R2875 every register re-flooded both meshes and every
+    /// withdrawal re-declared the fold, so a second client with the same info
+    /// sent a redundant `DeclareQueryable` on arrival and another on departure.
+    #[test]
+    fn a_queryable_that_does_not_move_the_fold_propagates_nothing() {
+        let fwd = RouterForwarder::new(zid(0x01));
+        let (c1, _) = face(zid(0xAA), WIRE_CLIENT);
+        let (c2, _) = face(zid(0xDD), WIRE_CLIENT);
+        let (p, sink_p) = face(zid(0xBB), WIRE_PEER);
+        fwd.register(FaceId(0), &c1);
+        fwd.register(FaceId(1), &c2);
+        fwd.register(FaceId(2), &p);
+        advertise_link_back(&fwd, FaceId(2), 0x01, 0xBB, 5);
+        fwd.tick();
+        forward_one(&fwd, FaceId(0), declare_qabl("demo/q", true));
+        sink_p.reset();
+        forward_one(&fwd, FaceId(1), declare_qabl("demo/q", true));
+        assert_eq!(
+            sink_p.frame_count(),
+            0,
+            "a second complete queryable leaves the fold complete: nothing to propagate"
+        );
+        forward_one(&fwd, FaceId(1), undeclare_qabl("demo/q"));
+        assert_eq!(
+            sink_p.frame_count(),
+            0,
+            "its departure leaves the fold complete too: nothing to propagate"
+        );
+        // Control inside the fixture: a change that DOES move the fold propagates.
+        forward_one(&fwd, FaceId(0), undeclare_qabl("demo/q"));
+        assert_eq!(
+            sink_p.frame_count(),
+            1,
+            "the last queryable leaving empties the fold: one UndeclareQueryable"
         );
     }
 
