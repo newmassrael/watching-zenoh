@@ -431,7 +431,7 @@ const PEERS_REGION: Region = Region::default_south(WhatAmI::Peer);
 /// The region a router's CLIENTS land in, which a broker hat serves. It has no
 /// net: a client is a leaf, HELD (its send seam kept) but routing no topology.
 ///
-/// R2872b (step 3d) — no production path names this region any more: the
+/// R2873 (step 3d) — no production path names this region any more: the
 /// broker hats are built from every derived leaf region and a client
 /// declaration registers in the hat of its face's region. The one remaining
 /// consumer is the multicast ingress, which still routes as the clients region
@@ -512,7 +512,7 @@ type ClientQabls = HashMap<FaceId, HashMap<String, QueryableInfo>>;
 #[cfg(feature = "routing-token-tables")]
 type ClientTokens = HashMap<FaceId, HashMap<u64, String>>;
 
-/// R2872b (open-debt item 751, step 3d) — the state one LEAF region's hat owns:
+/// R2873 (open-debt item 751, step 3d) — the state one LEAF region's hat owns:
 /// the declarations of the faces it holds, per face, as the pin's broker hat
 /// keeps them per owned face (`zenoh/src/net/routing/hat/broker/pubsub.rs`
 /// @ `srcs.clients.push(face.zid);`). A leaf region keeps no link-state net: a
@@ -583,7 +583,7 @@ impl BrokerHat {
     }
 }
 
-/// R2872b (step 3d) — the hat a region is served by, held in ONE region map as
+/// R2873 (step 3d) — the hat a region is served by, held in ONE region map as
 /// the pin holds `Box<dyn HatTrait>` per region
 /// (`zenoh/src/net/routing/dispatcher/tables.rs` @ `pub hats: RegionMap<Box<dyn HatTrait + Send + Sync>>,`).
 /// The kind is read off the ported hat table ([`is_leaf`]), so which regions
@@ -1028,7 +1028,7 @@ pub struct RouterDeclarationsView {
     /// dispatcher merges them (see [`subscribers`](Self::subscribers)).
     subs: RegionMap<Rc<RefCell<LinkstatepeerInterest<()>>>>,
     qabls: RegionMap<Rc<RefCell<LinkstatepeerInterest<QueryableInfo>>>>,
-    /// R2872b (step 3d) — each broker hat's per-face stores, keyed by region.
+    /// R2873 (step 3d) — each broker hat's per-face stores, keyed by region.
     /// Every one fills the `clients` bucket, as each of the pin's broker hats
     /// does for the faces it owns.
     client_subs: RegionMap<Rc<RefCell<ClientSubs>>>,
@@ -1228,7 +1228,7 @@ pub struct RouterForwarder {
     /// Built from the regions the pin's router builds, not from a list. The
     /// MESH regions are `North` (the routers, zenoh's `routers_net`) and
     /// `South { 0, Peer }` (the peers, the graph this router still runs full
-    /// link-state over), reached through [`mesh_hat`](Self::mesh_hat). R2872b
+    /// link-state over), reached through [`mesh_hat`](Self::mesh_hat). R2873
     /// (step 3d) adds the LEAF regions' broker hats to the same map —
     /// `South { 0, Client }` and `Local` — reached through
     /// [`broker_hat`](Self::broker_hat).
@@ -2280,7 +2280,7 @@ impl RouterForwarder {
             .unwrap_or_else(|| unreachable!("{region} is not a mesh region of a router"))
     }
 
-    /// R2872b (step 3d) — the hat of `region` when it is a MESH hat, `None` for a
+    /// R2873 (step 3d) — the hat of `region` when it is a MESH hat, `None` for a
     /// leaf region (a broker hat) or a region this router builds no hat for.
     fn mesh_hat(&self, region: Region) -> Option<&MeshHat> {
         self.hats.get(&region).and_then(Hat::mesh)
@@ -4233,7 +4233,7 @@ impl RouterForwarder {
         // Response to a client querier -- is a separate, uniformly-DEFAULT plane, out
         // of scope here.)
         //
-        // R2872b (step 3d) — one fan-out per broker hat, each scoped to the
+        // R2873 (step 3d) — one fan-out per broker hat, each scoped to the
         // region that hat owns and reading that hat's own table.
         for (region, hat) in self.broker_regions() {
             let _ = self.fan_out_tier_qos(region, reliable, priority, false, |id, _zid| {
@@ -6464,7 +6464,7 @@ impl RouterForwarder {
         }
         let query_chunks: Vec<&str> = keyexpr.split('/').collect();
         let mut forwarded = 0;
-        // R2872b (step 3d) — one fan-out per broker hat, scoped to its region.
+        // R2873 (step 3d) — one fan-out per broker hat, scoped to its region.
         for (region, hat) in self.broker_regions() {
             let _ = self.fan_out_tier(region, reliable, |id, _zid| {
                 if id == inbound {
@@ -6947,7 +6947,7 @@ impl FaceForwarder for RouterForwarder {
                 .borrow_mut()
                 .retain(|(face_id, _), _| *face_id != id);
         }
-        // R2872b (step 3d) — the face's declarations live in the hat that owns
+        // R2873 (step 3d) — the face's declarations live in the hat that owns
         // it, which is the broker hat of its region when that region is a leaf.
         // The `faces` entry is still present here (it is dropped below), so the
         // region is read off it rather than searched for across hats. A mesh
@@ -7568,7 +7568,7 @@ mod tests {
         assert_eq!(leaf, [CLIENTS_REGION, Region::Local]);
     }
 
-    /// R2872b (open-debt item 751, step 3d) — the forwarder's ONE region map
+    /// R2873 (open-debt item 751, step 3d) — the forwarder's ONE region map
     /// holds a hat for every region the pin's router builds, and the kind of
     /// each is the pin's: a broker hat exactly on the leaf regions, a mesh hat
     /// everywhere else. The population is the regions `auto_regions` derives,
