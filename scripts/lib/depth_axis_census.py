@@ -1128,7 +1128,13 @@ CITATION = re.compile(r"\b((?:[A-Za-z0-9_.-]+/)*[A-Za-z0-9_.-]+\.(?:rs|c|h))(?::
 # and the forwarder hosts' `shm` value-tracking is witnessed with a control.
 # It was in `reached`, so this pin falls while UNREACHED and NO_SYMBOL hold at
 # 2 and 2. READ off the census's own FAIL line, `reached: 9 against a pin of 10`.
-PIN_REACHED = 9
+#
+# R2898 — 9 -> 8. `routing-router` RETIRES to COMPLETE: its one residual, the
+# peer region routing by full link-state trees, is closed by open-debt item 751
+# rule 8 (R2888 to R2897). It was in `reached`, so this pin falls while
+# UNREACHED and NO_SYMBOL hold at 2 and 2. READ off the census's own FAIL
+# line, `reached: 8 against a pin of 9`.
+PIN_REACHED = 8
 PIN_UNREACHED = 2
 PIN_NO_SYMBOL = 2
 # R2534 — 346 -> 347. The atom is `adminspace-metrics` and the citation is the
@@ -2185,7 +2191,12 @@ PIN_NO_SYMBOL = 2
 # correction cites `router_forward.rs` once more, +1. ATTRIBUTED by the
 # per-atom `citation_audit` over the store at 88960d52, d2282a5b and HEAD
 # (5 -> 7 -> 8) with no other atom moving. Hosted Layer C0 read 48 on d2282a5b.
-PIN_WZ_CITATIONS = 49
+#
+# R2898 — 49 -> 41, FALLING by the whole of that atom: `routing-router` is
+# COMPLETE, so the eight wz citations its PARTIAL reason carried leave the
+# census with it. 49 - 41 = 8, the census's own FAIL line (`wz citations: 41
+# against a pin of 49`), with PIN_AMBIGUOUS holding at 12.
+PIN_WZ_CITATIONS = 41
 # R2626 — 44 -> 42, and this one is worth a sentence because it HELD through
 # every earlier retirement in this run (R2612, R2622). `time-hlc`'s reason is the
 # first retiree carrying AMBIGUOUS citations of its own: its oldest clauses cite
