@@ -2177,7 +2177,15 @@ PIN_NO_SYMBOL = 2
 # stays PARTIAL, and its correction cites three wz files: the session-core
 # descriptor, the runtime provider's layout pin and the shared POSIX segment
 # module. 46 - 43 = 3, the census's own FAIL line.
-PIN_WZ_CITATIONS = 46
+#
+# R2891 — 46 -> 49, RISING by three citations in one atom, and repaid a round
+# late: `routing-router` stays PARTIAL, and its R2886 re-grade cites where
+# `--router` is canonicalised (`crates/wz-ap-demo/src/args.rs`) and the hat that
+# now runs it (`crates/wz-runtime-tokio/src/router_forward.rs`), +2; the R2887
+# correction cites `router_forward.rs` once more, +1. ATTRIBUTED by the
+# per-atom `citation_audit` over the store at 88960d52, d2282a5b and HEAD
+# (5 -> 7 -> 8) with no other atom moving. Hosted Layer C0 read 48 on d2282a5b.
+PIN_WZ_CITATIONS = 49
 # R2626 — 44 -> 42, and this one is worth a sentence because it HELD through
 # every earlier retirement in this run (R2612, R2622). `time-hlc`'s reason is the
 # first retiree carrying AMBIGUOUS citations of its own: its oldest clauses cite
