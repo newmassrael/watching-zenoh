@@ -6201,7 +6201,7 @@ mod stock_config_tests {
         );
 
         let tuned = TransportTuning::from_argv(&exp.argv).expect("the expansion is parseable");
-        let params = demo_session_init_params(NodeKind::Initiator, &tuned)
+        let params = demo_session_init_params(NodeKind::Initiator, vec![0x0a], &tuned)
             .expect("OS entropy for the cookie signing key");
         assert_eq!(params.effective_batch_size(), 4096);
         assert_eq!(params.lease_ms, 3000);
@@ -6211,6 +6211,7 @@ mod stock_config_tests {
         // a coincidence between the fixture and the default.
         let bare = demo_session_init_params(
             NodeKind::Initiator,
+            vec![0x0a],
             &TransportTuning::from_argv(&argv(&["--connect", "tcp/r:7447"])).unwrap(),
         )
         .expect("OS entropy for the cookie signing key");
@@ -7756,13 +7757,43 @@ pub(crate) const RUN_MODE_ROLES: &[(&str, WhatAmI)] = &[
     ("--scout", WhatAmI::Client),
 ];
 
-/// The demo's default zenoh id, overridable with `--zid <hex>`.
+/// R2883 / R2885 (open-debt item 825) — a node's identity: the configured
+/// `--zid` when there is one, else a RANDOM 16-byte zid, as upstream draws one
+/// when the config names no `id` (`commons/zenoh-config/src/lib.rs` @ `id: Option<ZenohId>,`,
+/// resolved through `commons/zenoh-protocol/src/core/mod.rs` @ `impl Default for ZenohIdProto {`,
+/// whose body is `Self::rand()`). Every run-mode resolves its zid here, ONCE,
+/// and hands the one value to everything that announces it: the session
+/// handshake ([`demo_session_init_params`] takes it as a parameter, so no
+/// default exists to fall back to), and for the single-session modes also the
+/// Scout frame and the advanced publisher's source id, which must name the
+/// same identity the session opens with.
 ///
-/// R311y428 — named for the same reason as [`DEMO_PROTO_VERSION`]: `--scout`
-/// puts it on the wire a second time (the Scout frame's `I`-flagged id, which
-/// is how a responder identifies the scouter), and the Scout should announce
-/// the identity the session that follows will open with.
-pub(crate) const DEMO_ZID: [u8; 4] = [0x01, 0x02, 0x03, 0x04];
+/// Until R2883 the mesh modes derived a 4-byte zid from a fixed prefix and the
+/// listen PORT, so two hosts at the default 7447 shared an identity; until
+/// R2885 every other mode (client, acceptor, star router, storage host) opened
+/// with the constant `01020304`, so two wz clients of one zenohd router
+/// collided and zenohd closed the second session.
+///
+/// An all-zero draw is redrawn: zero is not a valid zid (upstream's is a
+/// `NonZeroU128`), and `Zid::from_slice` would read it as the empty zid. The
+/// draw is returned in its CANONICAL length, trailing zero bytes dropped, which
+/// is how upstream sizes a zid (`uhlc::ID::size()`, the significant bytes);
+/// otherwise a draw ending in a zero byte would print and travel as 16 bytes
+/// here and as 15 after any canonicalising hop.
+pub(crate) fn resolve_node_zid(zid_override: Option<Vec<u8>>) -> std::io::Result<Vec<u8>> {
+    use wz::runtime_tokio::session_glue::EntropySource;
+    if let Some(zid) = zid_override {
+        return Ok(zid);
+    }
+    let mut zid = [0u8; 16];
+    while zid.iter().all(|&b| b == 0) {
+        OsEntropy.try_fill_bytes(&mut zid).map_err(|_| {
+            std::io::Error::other("wz-ap-demo: the OS entropy pool is unavailable to draw a zid")
+        })?;
+    }
+    let significant = zid.iter().rposition(|&b| b != 0).map_or(0, |i| i + 1);
+    Ok(zid[..significant].to_vec())
+}
 
 /// `--scout-timeout-ms` default: the TOTAL active-scouting budget in ms, spent
 /// across repeated Scout cycles until a peer's Hello arrives.
@@ -8010,6 +8041,10 @@ impl NodeTimestamping {
 /// names.
 pub(crate) fn demo_session_init_params(
     kind: NodeKind,
+    // R2885 — the node's identity, resolved once by the caller through
+    // [`resolve_node_zid`]. A parameter rather than a default so that no
+    // run-mode can open a session under an identity it did not choose.
+    zid: Vec<u8>,
     tuning: &TransportTuning,
 ) -> std::io::Result<SessionInitParams> {
     let whatami = match kind {
@@ -8037,7 +8072,7 @@ pub(crate) fn demo_session_init_params(
     Ok(SessionInitParams {
         version: DEMO_PROTO_VERSION,
         whatami,
-        zid: DEMO_ZID.to_vec(),
+        zid,
         seq_num_res: 2,
         req_id_res: 2,
         // R311y843 — the two handshake fields an operator's stock zenoh config

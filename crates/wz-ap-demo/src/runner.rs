@@ -2889,7 +2889,7 @@ pub(crate) async fn run_demo(
     declare_spec: DeclareEmitSpec,
     remote_log_spec: RemoteLogSpec,
     reply_log_spec: ReplyConsumerSpec,
-    zid_override: Option<Vec<u8>>,
+    zid: Vec<u8>,
     tuning: TransportTuning,
     timestamping: crate::args::NodeTimestamping,
     // R2158 (open-debt item 230) — `--connect-retry` / the file's
@@ -2929,19 +2929,16 @@ pub(crate) async fn run_demo(
     // into the open helper, install_observer_callbacks, Session::new, the drive
     // loop, and sweep_task (TokioTime is Copy, so every copy is the same epoch).
     let session_clock = TokioTime::new();
-    let mut params = demo_session_init_params(role.node_kind(), &tuning)?;
+    // R2885 (open-debt item 825) — `zid` is the node's identity, resolved once
+    // in `main` (the configured `--zid`, else a random one) and shared with the
+    // Scout frame and the advanced publisher, so all three name one node.
+    let params = demo_session_init_params(role.node_kind(), zid, &tuning)?;
     // R2112 (open-debt items 102 + 210) — the role this node ANNOUNCES, read
     // off the params BEFORE they are moved into whichever open path this
     // lifecycle mode takes. It is the role `timestamping.enabled` resolves
     // against, and reading it here rather than restating `role.node_kind()`'s
     // mapping keeps one answer: `demo_session_init_params` owns that mapping.
     let node_whatami = params.whatami;
-    // `--zid <hex>` override: give this session node a DISTINCT identity so it can
-    // coexist with another session node inside a router mesh (the mesh graph keys
-    // on zid; the hardcoded demo zid would collide). No override -> the default.
-    if let Some(zid) = zid_override {
-        params.zid = zid;
-    }
     // R311q1 — the long-lived (reconnect) lifecycle drives a PERIODIC publisher
     // that re-arms emission across reconnects (data-plane continuity past a
     // sever), vs the default one-shot finite burst. Derived from the role so
@@ -3628,42 +3625,6 @@ fn zid_hex(zid: Option<&[u8]>) -> String {
     }
 }
 
-/// R2883 (open-debt item 825) — a mesh node's identity: the configured `--zid`
-/// when there is one, else a RANDOM 16-byte zid, as upstream draws one when the
-/// config names no `id` (`commons/zenoh-config/src/lib.rs` @ `id: Option<ZenohId>,`,
-/// resolved through `commons/zenoh-protocol/src/core/mod.rs` @ `impl Default for ZenohIdProto {`,
-/// whose body is `Self::rand()`).
-///
-/// Until R2883 both mesh modes derived a 4-byte zid from a fixed prefix and the
-/// listen PORT. That gave every wz node listening on the same port the same zid,
-/// so two routers on two hosts at the default 7447 saw each other as themselves
-/// and the self-connect guard kept them apart for good; the test harness never
-/// showed it because its nodes listen on different ephemeral ports. It also
-/// made a port-less listen (unixpipe, unixsock, vsock) refuse to start without
-/// `--zid`. A random identity has neither defect and is what upstream does.
-///
-/// An all-zero draw is redrawn: zero is not a valid zid (upstream's is a
-/// `NonZeroU128`), and `Zid::from_slice` would read it as the empty zid. The
-/// draw is returned in its CANONICAL length, trailing zero bytes dropped, which
-/// is how upstream sizes a zid (`uhlc::ID::size()`, the significant bytes) and
-/// how `Zid::from_slice` reads one; otherwise a draw ending in a zero byte would
-/// print and travel as 16 bytes here and as 15 after any canonicalising hop.
-#[cfg(feature = "routing-peer")]
-fn resolve_node_zid(zid_override: Option<Vec<u8>>) -> io::Result<Vec<u8>> {
-    use wz::runtime_tokio::session_glue::{EntropySource, OsEntropy};
-    if let Some(zid) = zid_override {
-        return Ok(zid);
-    }
-    let mut zid = [0u8; 16];
-    while zid.iter().all(|&b| b == 0) {
-        OsEntropy.try_fill_bytes(&mut zid).map_err(|_| {
-            io::Error::other("wz-ap-demo: the OS entropy pool is unavailable to draw a zid")
-        })?;
-    }
-    let significant = zid.iter().rposition(|&b| b != 0).map_or(0, |i| i + 1);
-    Ok(zid[..significant].to_vec())
-}
-
 /// The shared face-lifecycle observer for the multi-peer run-modes — one log line
 /// per `AcceptEvent`, prefixed with the caller's `node_label` (`"router"` /
 /// `"peer"` / `"router-hat"`). Extracted (rule-of-three) from the byte-identical
@@ -3868,7 +3829,13 @@ async fn run_router_until(
          faces (routing-router foundation, no forwarding)"
     );
 
-    let params = demo_session_init_params(NodeKind::Router, &tuning)?;
+    // R2885 — a random identity per process; until then every star router
+    // opened with the demo's constant `01020304`.
+    let params = demo_session_init_params(
+        NodeKind::Router,
+        crate::args::resolve_node_zid(None)?,
+        &tuning,
+    )?;
 
     // The forwarding seam: with `routing-routes` the router routes Puts between
     // faces ([`RoutingForwarder`]); without it the accept-and-hold foundation
@@ -4145,7 +4112,7 @@ pub(crate) struct PeerOpts {
     pub del_key: Option<String>,
     /// R311y397 (Slice B) — pin this peer's routing zid (`--zid <hex>`),
     /// mirroring [`run_router_hat`]'s override. `None` draws a random one for
-    /// every transport ([`resolve_node_zid`], R2883).
+    /// every transport ([`crate::args::resolve_node_zid`], R2883).
     pub zid_override: Option<Vec<u8>>,
     /// R311y213 (transport-multilink) — the aggregated-link budget for this peer
     /// (`--max-links`, the `unicast.max_links` analogue). `1` = single-link; `> 1`
@@ -4364,7 +4331,7 @@ async fn run_peer_until(
         InterceptorFlow, InterceptorLink, LinkstateForwarder, LowPassMessage, LowPassRule,
         Permission, SubjectSelector, WhatAmI, Zid,
     };
-    // Per-peer routing zid: see [`resolve_node_zid`]. (The periodic self-flood
+    // Per-peer routing zid: see `crate::args::resolve_node_zid`. (The periodic self-flood
     // cadence lives in the LinkstateForwarder itself — R311rf, on the
     // FaceForwarder seam — so this demo owns no flood timer.)
     //
@@ -4404,7 +4371,7 @@ async fn run_peer_until(
 
     // This peer's routing zid (the mesh routing graph keys on it). R2883: a
     // configured `--zid`, else a random one, for every transport alike.
-    let node_zid: Vec<u8> = resolve_node_zid(zid_override)?;
+    let node_zid: Vec<u8> = crate::args::resolve_node_zid(zid_override)?;
     log::info!("wz-ap-demo peer: zid {}", zid_hex(Some(&node_zid)));
 
     // Parse the outbound dial targets. R2233 (open-debt item 585) — this comment
@@ -4427,13 +4394,10 @@ async fn run_peer_until(
         }
     );
 
-    let mut params = demo_session_init_params(NodeKind::Peer, &tuning)?;
     // R311rc (c3d-4) — a DISTINCT zid per peer (the mesh routing graph keys on it,
-    // so two peers MUST NOT share one; the demo's single hardcoded 0x01020304 would
-    // collide — a node would ingest a remote link-state under its OWN zid).
-    // `node_zid` above is the configured `--zid` or a random one (R2883), as a
-    // zenoh node's is.
-    params.zid = node_zid;
+    // so two peers MUST NOT share one). `node_zid` above is the configured
+    // `--zid` or a random one (R2883), as a zenoh node's is.
+    let params = demo_session_init_params(NodeKind::Peer, node_zid, &tuning)?;
 
     // R311rb/rf — the peer maintains a linkstate-peer routing graph: each held
     // face feeds the topology graph ([`LinkstateForwarder`]), which floods its
@@ -6070,7 +6034,7 @@ async fn run_router_hat_until(
     dial_targets: &[String],
     connect_after: Option<(u64, Vec<String>)>,
     // Optional `--zid <hex>` override: pin this router's routing zid instead of
-    // drawing a random one ([`resolve_node_zid`]). The inter-region filter picks
+    // drawing a random one (`crate::args::resolve_node_zid`). The inter-region filter picks
     // the largest gateway zid, so a federation e2e that needs a reproducible
     // carrier pins both zids.
     zid_override: Option<Vec<u8>>,
@@ -6165,8 +6129,8 @@ async fn run_router_hat_until(
 
     // The node's routing zid — the mesh graph keys on it (RouterForwarder dedups
     // faces by zid). R2883: a configured `--zid`, else a random one, for every
-    // transport alike ([`resolve_node_zid`]).
-    let node_zid: Vec<u8> = resolve_node_zid(zid_override)?;
+    // transport alike (`crate::args::resolve_node_zid`).
+    let node_zid: Vec<u8> = crate::args::resolve_node_zid(zid_override)?;
     log::info!("wz-ap-demo router-hat: zid {}", zid_hex(Some(&node_zid)));
 
     // Parse the outbound dial targets (empty for a listen-only router; non-empty
@@ -6206,8 +6170,7 @@ async fn run_router_hat_until(
         dials.len()
     );
 
-    let mut params = demo_session_init_params(NodeKind::RouterHat, &opts.tuning)?;
-    params.zid = node_zid;
+    let params = demo_session_init_params(NodeKind::RouterHat, node_zid, &opts.tuning)?;
 
     // The dual-mesh router forwarder. Self is a WhatAmI::Router in BOTH meshes
     // (the ctor seeds both nets with Router); its zid is this node's own trusted
@@ -7985,12 +7948,15 @@ pub(crate) async fn run_storage_host(listen: &str, opts: StorageHostOpts) -> io:
     use crate::args::NodeKind;
 
     let session_clock = TokioTime::new();
-    let params = demo_session_init_params(NodeKind::StorageHost, &tuning)?;
     // The pico witness scrapes ONE zid across all four sequential client sessions,
-    // so the host zid must be STABLE across accept-loop iterations. The demo's fixed
-    // Peer zid is that stable identity; there is exactly one storage host, so the
-    // per-port zid derivation `run_peer` needs (mesh-graph collision avoidance) does
-    // not apply here — a fixed zid is both correct and simpler.
+    // so the host zid must be STABLE across accept-loop iterations: it is drawn
+    // once per process, here, before the loop (R2885; until then the demo's
+    // constant `01020304`, which every other wz node of the same build shared).
+    let params = demo_session_init_params(
+        NodeKind::StorageHost,
+        crate::args::resolve_node_zid(None)?,
+        &tuning,
+    )?;
     let node_zid = params.zid.clone();
     let zid_hex = zid_to_zenoh_hex(&node_zid);
     let whatami_str = params.whatami.to_str();
@@ -9353,10 +9319,11 @@ mod serial_caller_failfast_tests {
 /// one in a test would bind the assertion to a feature combination and break on
 /// every future field. The helper IS the whole of what the two sites do with a
 /// target — each site is now one `?` line — so pinning it pins the wiring.
-/// R2883 (open-debt item 825) — the mesh node's default identity.
-#[cfg(all(test, feature = "routing-peer"))]
+/// R2883 / R2885 (open-debt item 825) — a node's default identity, in every
+/// run-mode.
+#[cfg(test)]
 mod node_zid_tests {
-    use super::resolve_node_zid;
+    use crate::args::resolve_node_zid;
 
     #[test]
     fn a_configured_zid_is_kept_verbatim() {

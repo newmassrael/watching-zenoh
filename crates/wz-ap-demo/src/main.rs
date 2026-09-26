@@ -100,8 +100,6 @@ mod usage;
 use crate::args::parse_qos_link;
 #[cfg(feature = "adminspace-config-hotreload")]
 use crate::args::parse_repeated;
-#[cfg(feature = "scouting-active")]
-use crate::args::DEMO_ZID;
 use crate::args::{
     parse_pair, parse_pairs, AdvancedPublishSpec, DeclareEmitSpec, LivelinessGetSpec,
     PublisherSpec, PushOperation, QueryEmitSpec, QueryRoleSpec, QueryableReply, QueryableSpec,
@@ -1345,11 +1343,10 @@ fn main() -> ExitCode {
     env_logger::Builder::from_env(env_logger::Env::default().filter_or("RUST_LOG", "info")).init();
     eprintln!("{ABOUT}");
 
-    // Optional `--zid <hex>`: override the single-session node's demo zid. The
-    // mesh routing graph keys nodes by zid, so two session nodes behind routers
-    // sharing the hardcoded 0x01020304 would collide; a distinct --zid per node
-    // lets a query ISSUER + a QUERYABLE coexist in one router mesh (the P4 §5.21
-    // query-plane E2E). No-op for the default direct wz<->wz tests.
+    // Optional `--zid <hex>`: pin the single-session node's zid. Without it the
+    // node draws a random one (R2885, below), so two session nodes behind one
+    // router no longer collide by default; a pinned zid is for a test that needs
+    // to know the identity in advance.
     //
     // R311y428 — parsed HERE (was: just before the run_demo call) because
     // `--scout` puts this identity on the wire in its Scout frame, which is
@@ -1363,6 +1360,20 @@ fn main() -> ExitCode {
             }
         },
         None => None,
+    };
+    // R2885 (open-debt item 825) — the node's identity, resolved ONCE: the
+    // configured `--zid`, else a random one, as upstream draws one. The Scout
+    // frame, the reconnect's re-scout, the advanced publisher's source id and
+    // the session handshake all announce THIS value, so they name one node.
+    // Until R2885 each fell back to the constant `01020304` on its own, which
+    // agreed only because it was a constant, and made two wz clients of one
+    // router the same node.
+    let node_zid: Vec<u8> = match crate::args::resolve_node_zid(zid_override) {
+        Ok(zid) => zid,
+        Err(e) => {
+            eprintln!("{e}");
+            return ExitCode::from(1);
+        }
     };
 
     // Build the multi-thread runtime explicitly so the spawned
@@ -1393,7 +1404,7 @@ fn main() -> ExitCode {
     // an argv one).
     let connect_opt = if scout_requested {
         let budget_ms = scout_budget_ms.unwrap_or(DEFAULT_SCOUT_BUDGET_MS);
-        match resolve_scouted_locator(&runtime, zid_override.clone(), budget_ms, &scout_socket) {
+        match resolve_scouted_locator(&runtime, node_zid.clone(), budget_ms, &scout_socket) {
             Ok(locator) => Some(locator),
             Err(code) => return code,
         }
@@ -1526,9 +1537,7 @@ fn main() -> ExitCode {
                 // construction is feature-uniform like every other field of the
                 // variant (the flag PARSES in both builds and only its
                 // execution is gated — `resolve_scouted_locator`).
-                zid: zid_override
-                    .clone()
-                    .unwrap_or_else(|| crate::args::DEMO_ZID.to_vec()),
+                zid: node_zid.clone(),
                 socket: scout_socket.clone(),
             }),
         },
@@ -2536,11 +2545,8 @@ fn main() -> ExitCode {
             cache_max: advanced_cache_max,
             interval_ms: 200,
             heartbeat_ms: advanced_publish_heartbeat_ms,
-            // Full path, not the `use` above: that import is `scouting-active`-gated
-            // and this site is not.
-            zid: zid_override
-                .clone()
-                .unwrap_or_else(|| crate::args::DEMO_ZID.to_vec()),
+            // R2885 — the node's one identity (see `node_zid`).
+            zid: node_zid.clone(),
         }),
     };
     let remote_log_spec = RemoteLogSpec {
@@ -2571,7 +2577,7 @@ fn main() -> ExitCode {
             declare_spec,
             remote_log_spec,
             reply_log_spec,
-            zid_override,
+            node_zid,
             tuning,
             timestamping,
             connect_retry,
@@ -2680,9 +2686,8 @@ fn build_demo_runtime() -> std::io::Result<tokio::runtime::Runtime> {
 
 /// R311y428 — run one ACTIVE multicast scouting discovery and hand back the
 /// locator a peer's Hello advertised, which the caller uses as the Initiator's
-/// `--connect` target. `zid` is the `--zid <hex>` override when given; the Scout
-/// otherwise announces [`DEMO_ZID`], the same identity the session will open
-/// with.
+/// `--connect` target. `zid` is the node's resolved identity
+/// ([`crate::args::resolve_node_zid`]), the same one the session will open with.
 ///
 /// Blocks on the demo runtime rather than being awaited inside `run_demo`
 /// because the discovered locator is what CONSTRUCTS the role — there is no
@@ -2690,11 +2695,10 @@ fn build_demo_runtime() -> std::io::Result<tokio::runtime::Runtime> {
 #[cfg(feature = "scouting-active")]
 fn resolve_scouted_locator(
     runtime: &tokio::runtime::Runtime,
-    zid: Option<Vec<u8>>,
+    zid: Vec<u8>,
     budget_ms: u64,
     socket: &crate::args::ScoutSocketArgs,
 ) -> Result<String, ExitCode> {
-    let zid = zid.unwrap_or_else(|| DEMO_ZID.to_vec());
     runtime
         .block_on(crate::runner::scout_for_peer_locator(
             zid, budget_ms, socket,
@@ -2713,7 +2717,7 @@ fn resolve_scouted_locator(
 #[cfg(not(feature = "scouting-active"))]
 fn resolve_scouted_locator(
     _runtime: &tokio::runtime::Runtime,
-    _zid: Option<Vec<u8>>,
+    _zid: Vec<u8>,
     _budget_ms: u64,
     _socket: &crate::args::ScoutSocketArgs,
 ) -> Result<String, ExitCode> {
