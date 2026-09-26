@@ -1936,7 +1936,15 @@ jobs:
         # function of the version — cache the artifact itself rather than paying
         # a from-source build every run. Only a cold cache builds.
         id: zenohd-cache
-        uses: actions/cache@v4
+        # R2872 — RESTORE only; the save is its own step after the Assert below.
+        # The combined `actions/cache` saves in a POST step that does not run
+        # when the job ends red (register item 350, which paid this for the apt
+        # caches). So a red anywhere after the build threw the finished build
+        # away: R2863 moved this key, run 36156369002 built zenohd and then red
+        # on E6i, and 36207477909 rebuilt it cold and was cut off at 56 minutes
+        # inside this build, taking every E/Z leg and cross-mcu's download with
+        # it. The same split is applied to every combined cache in this file.
+        uses: actions/cache/restore@v4
         with:
           # R2242 — THE SOURCE TRAVELS WITH THE BINARY. `zenoh-src` is the shallow
           # clone the build below makes; it is what `upstream_anchors()` calls
@@ -1992,6 +2000,7 @@ jobs:
         run: bash scripts/build-zenohd.sh
 
       - name: Assert zenohd + the storage plugin + the zenoh-ext oracles are present
+        id: zenohd-assert
         # Trusting the cache is how a "restored" build quietly becomes a missing one. Layer
         # Z's guards would SKIP green on either absence, and Layer A4 would keep counting
         # its proofs as executed, so check before the lanes run rather than after.
@@ -2068,6 +2077,21 @@ jobs:
           test -f target/zenohd-build/zenoh-src/commons/zenoh-protocol/src/lib.rs \
             || { echo "::error::zenoh-src is present but not a zenoh workspace — upstream_root() would reject it and the resolution arm would FAIL"; exit 1; }
 
+      - name: Save the zenohd binary + its source (cache miss only)
+        # R2872 — saved HERE, the moment the Assert above has proved the build
+        # complete, so a red in any later lane of this job no longer discards
+        # it. Gated on the Assert's own outcome rather than on "the job is
+        # green": a build that is not at the pin, or is missing the plugin or
+        # the source tree, must never become the entry every later run
+        # restores. Same paths and the same key as the restore.
+        if: always() && steps.zenohd-cache.outputs.cache-hit != 'true' && steps.zenohd-assert.outcome == 'success'
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            target/zenohd
+            target/zenohd-build/zenoh-src
+          key: ${{ steps.zenohd-cache.outputs.cache-primary-key }}
+
       # R2853 — hand the asserted zenohd to `cross-mcu` (Layer Qa) as a RUN
       # artifact, not through the cache. R2842 made that job restore this job's
       # cache entry after it ends, and run 36002723608 still red: this job saved
@@ -2106,8 +2130,9 @@ jobs:
         # zenohd lives, and Layer C1cd needs the zenoh-c headers + examples AND
         # zenohd AND the pico CLIs at once. The key is identical to the other
         # job's, so the two share one cache entry rather than populating two.
+        # R2872 — restore/save split, for the reason on `zenohd-cache` above.
         id: zenoh-c-cache
-        uses: actions/cache@v4
+        uses: actions/cache/restore@v4
         with:
           path: |
             ~/.local/include
@@ -2116,8 +2141,19 @@ jobs:
           key: zenoh-c-1.10.1-ubuntu-22.04-${{ hashFiles('scripts/install-zenoh-c.sh') }}
 
       - name: Provision the zenoh-c oracle (cache miss only)
+        id: zenoh-c-provision
         if: steps.zenoh-c-cache.outputs.cache-hit != 'true'
         run: bash scripts/install-zenoh-c.sh
+
+      - name: Save the zenoh-c oracle (cache miss only)
+        if: always() && steps.zenoh-c-cache.outputs.cache-hit != 'true' && steps.zenoh-c-provision.outcome == 'success'
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            ~/.local/include
+            ~/.local/lib/libzenohc.so
+            ~/zenoh-c-ref
+          key: ${{ steps.zenoh-c-cache.outputs.cache-primary-key }}
 
       - name: Layer C1cd — §5.27 api-compat-c attachment, pico + zenohd
         # R311y500. HERE and not beside C1cc, and the placement is the whole
@@ -2476,7 +2512,8 @@ jobs:
         # pure function of the version + build script); keyed on the script content
         # so a changed recipe gets a fresh cache.
         id: zenohd-unixpipe-cache
-        uses: actions/cache@v4
+        # R2872 — restore/save split, for the reason on `zenohd-cache`.
+        uses: actions/cache/restore@v4
         with:
           path: target/zenohd-unixpipe
           key: zenohd-unixpipe-1.10.1-ubuntu-22.04-${{ hashFiles('scripts/build-zenohd.sh', 'scripts/lib/ensure_zenohd_at_pin.py') }}
@@ -2493,6 +2530,7 @@ jobs:
         run: bash scripts/build-zenohd.sh
 
       - name: Ensure the unixpipe zenohd ANSWERS at the pin (R2647)
+        id: zenohd-unixpipe-ensure
         # R2647 — was `test -x`, which asked whether a file exists. A cache
         # restores what a KEY promised; only the binary knows what it IS, and
         # runs 34977306103 / 34996365804 restored one answering `1211779c`
@@ -2504,6 +2542,16 @@ jobs:
         run: |
           python3 scripts/lib/ensure_zenohd_at_pin.py target/zenohd-unixpipe \
             || { echo "::error::the unixpipe zenohd is not at the pin and could not be rebuilt"; exit 1; }
+
+      - name: Save the unixpipe-enabled zenohd (cache miss only)
+        # Gated on the ANSWERS-at-the-pin check, not on the build: that check
+        # rebuilds a poisoned restore, and only its success says the binary is
+        # the one this key names.
+        if: always() && steps.zenohd-unixpipe-cache.outputs.cache-hit != 'true' && steps.zenohd-unixpipe-ensure.outcome == 'success'
+        uses: actions/cache/save@v4
+        with:
+          path: target/zenohd-unixpipe
+          key: ${{ steps.zenohd-unixpipe-cache.outputs.cache-primary-key }}
 
       - name: Enable AF_VSOCK loopback (R311y422)
         # MEASURED, not assumed. R311y421 shipped this as a probe because whether the
@@ -2539,7 +2587,8 @@ jobs:
         # with `--features zenoh/transport_vsock`. zenoh-pico has no vsock client, so
         # zenohd is the only foreign vsock dialer that can witness this atom.
         id: zenohd-vsock-cache
-        uses: actions/cache@v4
+        # R2872 — restore/save split, for the reason on `zenohd-cache`.
+        uses: actions/cache/restore@v4
         with:
           path: target/zenohd-vsock
           key: zenohd-vsock-1.10.1-ubuntu-22.04-${{ hashFiles('scripts/build-zenohd.sh', 'scripts/lib/ensure_zenohd_at_pin.py') }}
@@ -2552,6 +2601,7 @@ jobs:
         run: bash scripts/build-zenohd.sh
 
       - name: Ensure the vsock zenohd ANSWERS at the pin (R2647)
+        id: zenohd-vsock-ensure
         # R2647 — the unixpipe step's twin, and stale for the same reason: this
         # variant's cache entry also answered `1211779c` under a key naming
         # 1.10.1. Both are edited together because one presence check left
@@ -2559,6 +2609,14 @@ jobs:
         run: |
           python3 scripts/lib/ensure_zenohd_at_pin.py target/zenohd-vsock \
             || { echo "::error::the vsock zenohd is not at the pin and could not be rebuilt"; exit 1; }
+
+      - name: Save the vsock-enabled zenohd (cache miss only)
+        # The unixpipe save's twin, gated on this variant's own pin check.
+        if: always() && steps.zenohd-vsock-cache.outputs.cache-hit != 'true' && steps.zenohd-vsock-ensure.outcome == 'success'
+        uses: actions/cache/save@v4
+        with:
+          path: target/zenohd-vsock
+          key: ${{ steps.zenohd-vsock-cache.outputs.cache-primary-key }}
 
       - name: Layer Z — zenohd (zenoh-full) interop
         # The ONLY proofs against the canonical Rust implementation. Until this
@@ -4521,8 +4579,9 @@ jobs:
         # examples), which is exactly the source checkout both checks below
         # need. Sharing the key means whichever job runs first populates it for
         # the other rather than each paying for its own clone.
+        # R2872 — restore/save split, for the reason on `zenohd-cache`.
         id: zenoh-c-cache
-        uses: actions/cache@v4
+        uses: actions/cache/restore@v4
         with:
           path: |
             ~/.local/include
@@ -4531,8 +4590,19 @@ jobs:
           key: zenoh-c-1.10.1-ubuntu-22.04-${{ hashFiles('scripts/install-zenoh-c.sh') }}
 
       - name: Provision the zenoh-c oracle (cache miss only)
+        id: zenoh-c-provision
         if: steps.zenoh-c-cache.outputs.cache-hit != 'true'
         run: bash scripts/install-zenoh-c.sh
+
+      - name: Save the zenoh-c oracle (cache miss only)
+        if: always() && steps.zenoh-c-cache.outputs.cache-hit != 'true' && steps.zenoh-c-provision.outcome == 'success'
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            ~/.local/include
+            ~/.local/lib/libzenohc.so
+            ~/zenoh-c-ref
+          key: ${{ steps.zenoh-c-cache.outputs.cache-primary-key }}
 
       - name: Install zenoh-c's OWN pinned toolchain
         # Read out of the checkout rather than hardcoded, so an upstream pin bump
@@ -4552,7 +4622,8 @@ jobs:
 
       - name: Cache the unstable-arm zenoh-c oracle
         id: zenoh-c-unstable-cache
-        uses: actions/cache@v4
+        # R2872 — restore/save split, for the reason on `zenohd-cache`.
+        uses: actions/cache/restore@v4
         with:
           # R2281 (open-debt item 617) — this was `target/zenoh-c-shm`, the
           # `unstable-shm` arm, which is the arm `install-zenoh-c.sh` already
@@ -4563,6 +4634,7 @@ jobs:
           key: zenoh-c-unstable-1.10.1-ubuntu-22.04-${{ hashFiles('scripts/install-zenoh-c-arm.sh') }}
 
       - name: Provision the unstable-arm zenoh-c oracle (cache miss only)
+        id: zenoh-c-unstable-provision
         if: steps.zenoh-c-unstable-cache.outputs.cache-hit != 'true'
         # The colour-vs-parser trap that reded this job from R311y542 to
         # R311y559 is fixed inside the SCRIPT, not here — see
@@ -4571,13 +4643,25 @@ jobs:
         # finds the interaction instead of rediscovering it.
         run: bash scripts/install-zenoh-c-arm.sh unstable
 
+      - name: Save the unstable-arm zenoh-c oracle (cache miss only)
+        if: always() && steps.zenoh-c-unstable-cache.outputs.cache-hit != 'true' && steps.zenoh-c-unstable-provision.outcome == 'success'
+        uses: actions/cache/save@v4
+        with:
+          path: target/zenoh-c-unstable
+          key: ${{ steps.zenoh-c-unstable-cache.outputs.cache-primary-key }}
+
       - name: Cache the opaque-type size tables
         # Only the generator's STDERR is cached, not its target dirs. The stderr
         # IS the artifact — `check-capi-c-opaque-arms.sh` reuses any arm whose
         # file already carries size records — and it is a few tens of kilobytes
         # against gigabytes of build output.
         id: capi-c-arms-cache
-        uses: actions/cache@v4
+        # R2872 — restore/save split, for the reason on `zenohd-cache`. The save
+        # sits after the step that GENERATES these tables, gated on its success:
+        # the script reuses a file on "non-empty and carries one size record",
+        # so a truncated table saved from a red run would pass that test and be
+        # restored as though complete.
+        uses: actions/cache/restore@v4
         with:
           path: target/zenoh-c-opaque/*.stderr
           key: capi-c-opaque-1.10.1-ubuntu-22.04-${{ hashFiles('scripts/check-capi-c-opaque-arms.sh') }}
@@ -4607,9 +4691,21 @@ jobs:
         # says C1cc cannot live here, sitting in the job C1cc belongs in. The
         # same class as the two comments R311y864 fixed in `link.rs`, and the
         # reason this move looked impossible until the step list was read.
+        id: capi-c-arms
         env:
           WZ_CAPI_C_ARMS_REQUIRE: "1"
         run: bash scripts/check-capi-c-opaque-arms.sh
+
+      - name: Save the opaque-type size tables (cache miss only)
+        # ⚠ Stated rather than hidden: this step both GENERATES and CHECKS, so a
+        # genuine ABI mismatch also withholds the save, and the next run pays the
+        # four arm builds again. That is the conservative side of the choice; the
+        # other side is restoring a table no run has shown to be complete.
+        if: always() && steps.capi-c-arms-cache.outputs.cache-hit != 'true' && steps.capi-c-arms.outcome == 'success'
+        uses: actions/cache/save@v4
+        with:
+          path: target/zenoh-c-opaque/*.stderr
+          key: ${{ steps.capi-c-arms-cache.outputs.cache-primary-key }}
 
       - name: api-compat-c — WHY each footprint is that number (R2239, item 586)
         # The step above answers "is the number right". This answers "is it

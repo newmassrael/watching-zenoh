@@ -857,6 +857,10 @@ round_fed_gates=(
     # and was short twice. Grades against the pinned checkout where one is
     # reachable and DEFERS loudly where not; Layer Z runs it `--require`.
     "cookie_carrier_gate.py"
+    # R2872 — reads the tracked workflows, so a round that edits one feeds it:
+    # no combined `actions/cache`, and every restore has its save.
+    "workflow_cache_save_gate.py --selftest"
+    "workflow_cache_save_gate.py"
 )
 # ⚠ The module and its ARGUMENTS are expanded separately, and that too is
 # forced rather than chosen: `scripts/lib/"${cmd[@]}"` attaches the prefix to

@@ -3304,6 +3304,13 @@ layer_c0_test_discipline() {
     # twelve arms are the only place the failure branches are exercised.
     python3 scripts/lib/unhonoured_kind_evidence_gate.py --selftest || return 1
     python3 scripts/lib/unhonoured_kind_evidence_gate.py || return 1
+    # R2872 — no combined `actions/cache` anywhere, and every restore has its
+    # save. The combined action saves in a post step a red job never runs, so a
+    # red after the cached work discarded it; register item 350 fixed the apt
+    # members and left seven oracle caches, one of which cost run 36207477909
+    # every Layer E/Z leg. The gate derives the members from the workflows.
+    python3 scripts/lib/workflow_cache_save_gate.py --selftest || return 1
+    python3 scripts/lib/workflow_cache_save_gate.py || return 1
     # R2162 (unregistered open-debt item 199) — the upstream zenoh CAPABILITY
     # FEATURE surface as a denominator. Item 199 recorded "18 of 19 have a wz
     # atom" as a hand measurement and nothing re-derived it afterwards, so a
