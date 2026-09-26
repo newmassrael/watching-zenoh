@@ -2321,6 +2321,8 @@ impl LinkstateForwarder {
                         &source_zid,
                         &self_zid,
                         inbound_zid,
+                        // One net, one region: nothing crosses a boundary here.
+                        |_| true,
                     ) {
                         // A complete mesh queryable is the nearest-complete winner.
                         Some((_distance, hop)) => (vec![hop], Vec::new()),
@@ -6292,7 +6294,16 @@ pub(crate) fn compute_query_directions(
         // BestMatching (wire default): the SINGLE nearest COMPLETE queryable, else
         // fall back to QueryTarget::All (fan out to every matching one).
         None => {
-            match select_best_matching(&net, qabls, keyexpr, source_zid, &self_zid, inbound_zid) {
+            // One net, one region: nothing crosses a boundary here.
+            match select_best_matching(
+                &net,
+                qabls,
+                keyexpr,
+                source_zid,
+                &self_zid,
+                inbound_zid,
+                |_| true,
+            ) {
                 // The single net discards the distance (the router keeps it to
                 // rank the global-nearest across both meshes, C5b).
                 Some((_distance, hop)) => vec![hop],
@@ -6337,6 +6348,7 @@ pub(crate) fn select_best_matching(
     source_zid: &Zid,
     self_zid: &Zid,
     inbound_zid: Option<Zid>,
+    admits: impl Fn(&Zid) -> bool,
 ) -> Option<(f64, Zid)> {
     complete_for_query_peers(qabls, keyexpr, self_zid)
         .into_iter()
@@ -6346,6 +6358,14 @@ pub(crate) fn select_best_matching(
             // unreachable peer.
             let hop = net.next_hop(source_zid, &peer)?;
             if inbound_zid == Some(hop) {
+                return None;
+            }
+            // R2880 (open-debt item 751, step 6) — and a direction the caller's
+            // egress filter refuses, BEFORE the nearest is picked: the pin filters
+            // the route and then takes its first complete queryable
+            // (`zenoh/src/net/routing/dispatcher/queries.rs` @ `.resolve(tables)`),
+            // so a refused nearest falls through to the next, not to nothing.
+            if !admits(&hop) {
                 return None;
             }
             Some((net.distance_to(&peer)?, hop))

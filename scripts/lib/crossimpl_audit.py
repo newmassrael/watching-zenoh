@@ -742,7 +742,14 @@ HOST_GATED_CI_TARGETS: dict[str, str] = {
 # +1 is this round's `wz_router_lists_a_pico_multicast_member_in_its_sessions`
 # (1 test x 1 atom, `adminspace-core`). Measured `939` by `run-ci.sh --layer A4`
 # at this round's working tree.
-FOREIGN_ADJUDICATOR_LINKS = 939
+# R2880 — 939 -> 938, a witness WITHDRAWN, not lost: the
+# `router-master-election wz->zenohd partial` marker on
+# `wz_router_hat_and_zenohd_federate_a_pico_query`. Open-debt item 751 step 6
+# moved the query plane onto the inter-region filter and removed the
+# route-master election with its last caller, so the leg no longer exercises
+# the atom's subject (1 test x 1 atom = 1). Measured `938` by
+# `audit-crossimpl-proof.sh` at this round's working tree.
+FOREIGN_ADJUDICATOR_LINKS = 938
 
 # ── Execution disclosure ────────────────────────────────────────────────────────
 #

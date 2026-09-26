@@ -621,12 +621,12 @@ fn wz_router_hat_and_zenohd_federate_pico_data_in_reverse() {
 // two sibling query legs) while every pubsub leg stays green, which is what
 // distinguishes the query-route compute from the data-route compute above.
 // wz-proves: routing-query-route-compute wz->zenohd
-// R2879 — and `router-master-election`'s partial witness moved here from leg 10:
-// the pico client's query reaches the zenohd backbone through block 1 of
-// `mesh_query_block`, gated `master || src == Router`, and a client source is not
-// a Router, so this leg needs the election to say `true`. Partial for R311y503's
-// reason (leg 10 below): with one wz router the election has one candidate.
-// wz-proves: router-master-election wz->zenohd partial
+// R2879 moved `router-master-election`'s partial witness here from leg 10, since
+// the query plane was then the election's last user. R2880 (open-debt item 751,
+// step 6) moved the query plane onto the inter-region filter too and removed the
+// route-master election with its last caller, so this leg no longer exercises it
+// and the marker is withdrawn rather than moved again: there is no wz subject
+// left for it to witness. The atom's own grade is re-derived in the store.
 #[test]
 #[ignore = "binary-dep e2e (zenohd + zenoh-pico z_querier/z_queryable + wz-ap-demo --features router-hat-router); run via Layer Z / --ignored"]
 fn wz_router_hat_and_zenohd_federate_a_pico_query() {
@@ -1575,7 +1575,8 @@ fn wz_router_hat_token_lifecycle_reaches_a_pico_liveliness_subscriber() {
 // it. The election still gates the QUERY plane's cross-mesh blocks, so the marker
 // moved to `wz_router_hat_and_zenohd_federate_a_pico_query`, whose client-source
 // query enters the router mesh through the master-gated block 1. That move was
-// read from the code (`mesh_query_block`), not measured by a control run.
+// read from the code (`mesh_query_block`), not measured by a control run. R2880
+// then removed the election from the query plane as well, and the marker with it.
 //
 // R311y503 — and this leg is `router-master-election`'s cross-impl witness, but
 // only PARTIALLY, and the partial is measured rather than hedged. The atom is the

@@ -150,7 +150,7 @@
 //! @ `fn compute_data_route`). The master is elected per-keyexpr
 //! by HRW ([`elect_router`], a port of zenoh `Hat::elect_router`,
 //! `hat/router/mod.rs:245`) over the SHARED nodes — the routers present in BOTH
-//! meshes ([`shared_nodes`](RouterForwarder::shared_nodes), zenoh
+//! meshes (`shared_nodes`, removed at R2880; zenoh
 //! `network.rs:1197`), DERIVED per call (no stored field, the R311y109
 //! derive-not-store idiom). Self is a node of both meshes, so a single-router
 //! topology has `shared_nodes = {self}` ⇒ self is always master ⇒ the C4 gates are
@@ -171,8 +171,11 @@
 //! a gateway is carried by nobody else. The bridge asks it per egress, the
 //! client-delivery defer asks it for the peer-to-router crossing, and the
 //! client re-injection's router leg is no longer gated (a broker hat has no
-//! gateway view). The QUERY plane below still uses the election; step 6 moves
-//! it, and step 9 removes the election.
+//! gateway view). R2880 (step 6) moved the QUERY plane below onto the same
+//! filter, and with that the route-master election (`is_master` over
+//! `shared_nodes`) had no caller left and was removed, which is step 9's
+//! removal arriving with step 6. [`elect_router`] itself survives only for the
+//! multicast designated-router choice, which is wz's own and not the pin's.
 //!
 //! ## Slice C5b (query-route FORWARD half — the Request) — landed
 //!
@@ -181,9 +184,9 @@
 //! zenoh `compute_query_route`
 //! (`zenoh/src/net/routing/hat/router/queries.rs` @ `fn compute_query_route`) +
 //! `compute_final_route` (`dispatcher/queries.rs:205`) — the query-plane twin of
-//! [`route_push`](RouterForwarder::route_push). The SAME 3-block master-gated
+//! [`route_push`](RouterForwarder::route_push). The SAME 3-block
 //! structure (routers_net qabls / linkstatepeers_net qabls / client queryables),
-//! reusing C4's [`is_master`](RouterForwarder::is_master), with the within-tier +
+//! gated since R2880 by the inter-region filter as the data plane is, with the within-tier +
 //! cross-mesh + client legs split exactly as the data plane's `forward_push_tier`
 //! / `bridge_push_cross_mesh` / `deliver_to_client_subscribers` /
 //! `publish_client_push_into_meshes`. A CLIENT-face `DeclareQueryable` lands in the
@@ -328,8 +331,10 @@
 //!   parity obligation for the interceptor slice.
 
 use std::cell::{Cell, RefCell};
+#[cfg(feature = "router-multicast-faces")]
 use std::collections::hash_map::DefaultHasher;
 use std::collections::{HashMap, HashSet};
+#[cfg(feature = "router-multicast-faces")]
 use std::hash::Hasher;
 use std::rc::Rc;
 use std::sync::Arc;
@@ -562,7 +567,8 @@ struct BrokerHat {
     /// [`route_request`](RouterForwarder::route_request) routes a Request toward
     /// these queryables (zenoh `compute_query_route` block 3,
     /// `zenoh/src/net/routing/hat/router/queries.rs` @ `fn compute_query_route`,
-    /// gated `master || source == Router`); their completeness feeds the GLOBAL
+    /// deferred, since R2880, on a router that does not carry a peer-source
+    /// Query north); their completeness feeds the GLOBAL
     /// BestMatching at distance 1. A3 advertises them into both meshes
     /// ([`repropagate`](RouterForwarder::repropagate))
     /// and the store contributes to the merged
@@ -901,6 +907,13 @@ fn face_region(whatami: WhatAmI, remote_bound: Option<Bound>) -> Region {
         .unwrap_or_else(|| unreachable!("a router's Auto table places every remote"))
 }
 
+/// ⚠ R2880 (open-debt item 751, step 6) — the ROUTE master this function used
+/// to elect is gone: both the data and the query plane cross regions by the
+/// pin's inter-region filter, and `is_master` / `shared_nodes` were removed with
+/// their last caller. What remains is the multicast designated-router choice,
+/// which is wz's own. The paragraphs below are the record of the route-master
+/// use, kept because R2641's withdrawal in them is still the right reading.
+///
 /// Elect the master router for `keyexpr` among `candidates` by Highest-Random-
 /// Weight (rendezvous) hashing — a faithful port of zenoh `Hat::elect_router`
 /// (`hat/router/mod.rs:245`): a std `DefaultHasher` is fed each keyexpr byte
@@ -946,6 +959,10 @@ fn face_region(whatami: WhatAmI, remote_bound: Option<Bound>) -> Region {
 /// the claim names. Leave the marker at `partial` so Layer A4 keeps asking for
 /// the rest; open-debt item 751 carries the question this round does NOT answer,
 /// which is whether wz keeps a mechanism the reference dropped.
+///
+/// R2880 — gated with its one remaining caller,
+/// [`is_group_dr`](RouterForwarder::is_group_dr).
+#[cfg(feature = "router-multicast-faces")]
 fn elect_router<'a>(
     self_zid: &Zid,
     keyexpr: &str,
@@ -977,8 +994,8 @@ fn elect_router<'a>(
 
 /// One mesh tier's query-route parameters, resolved by
 /// [`RouterForwarder::mesh_query_block`] — zenoh `compute_query_route`'s block-1
-/// (routers_net) / block-2 (linkstatepeers_net) AFTER the master gate + source
-/// selection (`zenoh/src/net/routing/hat/router/queries.rs`
+/// (routers_net) / block-2 (linkstatepeers_net) after source
+/// selection (a cross block's egresses then pass the inter-region filter, R2880) (`zenoh/src/net/routing/hat/router/queries.rs`
 /// @ `fn insert_target_for_qabls`). Carries the tree ROOT to route
 /// the Query along, the `node_id` to stamp on the outbound Request, and the inbound
 /// neighbour to exclude in THIS net.
@@ -997,6 +1014,21 @@ struct MeshQueryBlock {
     /// on the within leg (never route a Query back at its source), or `None` for a
     /// cross leg (the inbound face is no node of this net).
     inbound_for_net: Option<Zid>,
+    /// R2880 (open-debt item 751, step 6) — for a CROSS leg, what the
+    /// inter-region filter reads of the Query's arrival: the region it came
+    /// from, its originating querier and the neighbour it came through. `None`
+    /// for the within leg, which crosses no region boundary.
+    crossing: Option<QueryCrossing>,
+}
+
+/// R2880 — the arrival side of a cross-region query leg, as the pin hands it to
+/// its filter (`zenoh/src/net/routing/dispatcher/queries.rs`
+/// @ `src: &src_face.region,`).
+#[derive(Clone, Copy)]
+struct QueryCrossing {
+    src: Region,
+    src_zid: Option<Zid>,
+    fwd_zid: Option<Zid>,
 }
 
 /// The GLOBAL-BestMatching winner — the single globally-nearest COMPLETE queryable
@@ -4322,7 +4354,7 @@ impl RouterForwarder {
     /// Whether SELF is the Designated Router (DR) that bridges the multicast
     /// group ↔ the unicast mesh for `keyexpr` — the I3b loop-safety election.
     /// Reuses the seedless-SipHash HRW [`elect_router`] (the same primitive
-    /// [`is_master`](Self::is_master) uses) over the on-group ROUTER members ∪
+    /// the route master used until R2880) over the on-group ROUTER members ∪
     /// self, keyed on the resolved literal keyexpr (zenoh's per-keyexpr master
     /// granularity). Determinism ⇒ every on-group router agrees on the ONE bridge
     /// for a keyexpr, so exactly one federates a group-ingress Push into the mesh
@@ -4443,56 +4475,6 @@ impl RouterForwarder {
         (source, inbound_zid)
     }
 
-    /// Whether SELF is the elected route master for `keyexpr` — the zenoh
-    /// `compute_data_route` master decision
-    /// (`zenoh/src/net/routing/hat/router/pubsub.rs` @ `fn compute_data_route`): master
-    /// IFF self wins the HRW election ([`elect_router`]) over the SHARED nodes
-    /// (routers present in BOTH meshes, [`shared_nodes`](Self::shared_nodes)).
-    /// `shared_nodes` ALWAYS contains self (seeded in both nets), so a
-    /// single-router topology ⇒ `shared = {self}` ⇒ self wins ⇒ `master = true`,
-    /// making every C4 gate a no-op (the pre-C4 single-router behavior and its
-    /// tests are unchanged).
-    ///
-    /// DERIVED per call — no stored `shared_nodes` field, hence no
-    /// topology-teardown obligation on `deregister` (the wz derive-not-store
-    /// idiom, R311y109). This also matches zenoh, which recomputes `shared_nodes`
-    /// synchronously at every topology event (`mod.rs:385..724`) rather than
-    /// lazily; deriving at read time is the wz equivalent that additionally can
-    /// never drift from the live graph.
-    fn is_master(&self, keyexpr: &str) -> bool {
-        let self_zid = *self.routers_net().borrow().self_zid();
-        let shared = self.shared_nodes();
-        elect_router(&self_zid, keyexpr, shared.iter()) == self_zid
-    }
-
-    /// The routers present in BOTH link-state meshes — zenoh `shared_nodes`
-    /// (`network.rs:1197`), the candidate set for the route-master election. A
-    /// pure zid intersection of the two nets' node sets (no whatami /
-    /// reachability filter, exactly as zenoh); self is a node in both (seeded at
-    /// each net's construction), so the result is never empty. DERIVED on demand
-    /// from the current graphs (the derive-not-store idiom): a router leaving
-    /// either mesh simply drops out of the next call's intersection, with no
-    /// incremental teardown to order against `deregister`.
-    fn shared_nodes(&self) -> Vec<Zid> {
-        let routers: HashSet<Zid> = self.routers_net().borrow().node_zids().collect();
-        let mut shared: Vec<Zid> = self
-            .linkstatepeers_net()
-            .borrow()
-            .node_zids()
-            .filter(|z| routers.contains(z))
-            .collect();
-        // Sort for a DETERMINISTIC election tie-break across routers: `node_zids`
-        // iterates a std `HashMap` (`RandomState` order), so an unsorted candidate
-        // set would let two wz routers break an HRW tie differently and disagree on
-        // the master. A tie needs a 2^-64 SipHash collision (zenoh carries the same
-        // exposure via its own graph order), and [`elect_router`] picks the MAX
-        // hash, so sorting is election-neutral for every non-colliding keyexpr while
-        // removing even that residual divergence — every wz router elects the same
-        // master from the same shared set.
-        shared.sort_unstable();
-        shared
-    }
-
     /// Bridge a MESH-sourced data `Push` across to the OTHER mesh (C4) — the
     /// master-gated CROSS-tier half of zenoh `compute_data_route` (the
     /// non-native-tier legs of blocks 1 & 2, `pubsub.rs:1291`/`:1307`): when self
@@ -4553,7 +4535,7 @@ impl RouterForwarder {
     /// master-gate-free in `compute_data_route`. The CROSS-tier bridge
     /// ([`bridge_push_cross_mesh`](Self::bridge_push_cross_mesh), C4), local-client
     /// delivery ([`deliver_to_client_subscribers`](Self::deliver_to_client_subscribers),
-    /// C3a), and master-election ([`is_master`](Self::is_master), C4) are the OTHER
+    /// C3a), and the crossing decision ([`crosses`](Self::crosses), R2879) are the OTHER
     /// [`route_push`](Self::route_push) legs, now landed. A leaf-region Push
     /// has no mesh to route within,
     /// so it is only counted (the reception witness in [`forward`]). A drop
@@ -5935,17 +5917,18 @@ impl RouterForwarder {
     /// Structure (mirroring the data plane's `route_push` legs, but the Query flows
     /// TOWARD queryables and the three blocks are UNIFIED by a GLOBAL BestMatching):
     /// - Blocks 1 & 2 — the two meshes' qabls: a WITHIN-tier leg (the inbound
-    ///   tier's own net, master-gate-free, stamped with the querier's psid) and a
-    ///   master-gated CROSS-mesh leg (self-originated, node_id 0), exactly the
+    ///   tier's own net, unfiltered, stamped with the querier's psid) and a
+    ///   CROSS-mesh leg (self-originated, node_id 0) whose egresses pass the
+    ///   inter-region filter (R2880), exactly the
     ///   `forward_push_tier` + `bridge_push_cross_mesh` split
     ///   ([`mesh_query_block`](Self::mesh_query_block) computes each).
     /// - Block 3 — the local CLIENT queryables
     ///   ([`forward_request_to_clients`](Self::forward_request_to_clients) /
-    ///   [`first_complete_client`](Self::first_complete_client)), gated
-    ///   `master || source == Router`.
-    /// - A CLIENT-sourced Query self-injects into BOTH meshes (both legs cross;
-    ///   peer ungated, router master-gated), the query twin of C3b — falls out of
-    ///   the same block gates (a client inbound has no within leg).
+    ///   [`first_complete_client`](Self::first_complete_client)), deferred on a
+    ///   router that does not carry a peer-source Query north.
+    /// - A CLIENT-sourced Query self-injects into BOTH meshes (both legs cross,
+    ///   both admitted: a broker hat has no gateway view), the query twin of C3b —
+    ///   falls out of the same blocks (a client inbound has no within leg).
     ///
     /// The `QueryTarget` dispatch (the wire DEFAULT — an absent ext_target — is
     /// BestMatching): `All` fans to every matching queryable, `AllComplete` to every
@@ -5954,8 +5937,8 @@ impl RouterForwarder {
     /// forwarded Request ALLOCATES a pending-return entry so the reverse Response
     /// route (C5c) finds its way back. An EMPTY route prompts a `ResponseFinal` to
     /// the querier so its `get()` terminates at once (a pure router hosts no local
-    /// self-queryable to dispatch — a deferred combined-node seam). Single-router
-    /// topologies elect self, so every master gate is a no-op.
+    /// self-queryable to dispatch — a deferred combined-node seam). In a
+    /// single-router topology self is the only gateway, so every crossing is its own.
     fn route_request(&self, inbound: FaceId, tier: Region, reliable: bool, request: &RequestOwned) {
         // Resolve the query keyexpr + the inbound face's zid/link in one scoped
         // borrow (released before any send re-borrows `faces`).
@@ -6027,15 +6010,26 @@ impl RouterForwarder {
             None => None,
         };
         let self_zid = *self.routers_net().borrow().self_zid();
-        let master = self.is_master(&keyexpr);
-        // The two mesh blocks, gated + source-selected per compute_query_route; a
-        // gated-off block is omitted. Block 3 (clients) gate is `master || src ==
-        // Router`, the same as block 1's.
+        // The two mesh blocks, source-selected per compute_query_route. R2880
+        // (open-debt item 751, step 6): a cross block's egresses are admitted by
+        // the inter-region filter, and the master election gates nothing here any
+        // more. Block 3 (clients) mirrors the data plane's defer: a peer-source
+        // Query is answered from this router's clients only by the router that
+        // carries it into the router mesh, since every other one receives that
+        // carried copy back as a ROUTER source and serves it then.
         let blocks: Vec<MeshQueryBlock> = [ROUTERS_REGION, PEERS_REGION]
             .into_iter()
-            .filter_map(|bt| self.mesh_query_block(bt, tier, master, within, inbound_zid, self_zid))
+            .filter_map(|bt| self.mesh_query_block(bt, tier, within, inbound_zid, self_zid))
             .collect();
-        let client_gate = master || tier == ROUTERS_REGION;
+        let client_gate = tier == ROUTERS_REGION
+            || is_leaf(tier)
+            || self.crosses(
+                tier,
+                ROUTERS_REGION,
+                within.map(|(zid, _psid)| zid).as_ref(),
+                inbound_zid.as_ref(),
+                None,
+            );
         // ONE shared fan target for this logical Query — every branch's pending
         // entry Rc-shares it, so the closing final aggregates LAST-OUT across all
         // the legs below (mesh tiers + clients): zenoh's one `Arc<Query>` cloned
@@ -6137,32 +6131,27 @@ impl RouterForwarder {
     /// The per-mesh-tier query-route parameters for a Request whose inbound source
     /// role is `src_tier` — zenoh `compute_query_route`'s block-1 / block-2 gate +
     /// source selection (`zenoh/src/net/routing/hat/router/queries.rs`
-    /// @ `fn insert_target_for_qabls`). `None` when the block
-    /// is master-gated OFF; else a [`MeshQueryBlock`]:
+    /// @ `fn insert_target_for_qabls`). `None` for a region that is no
+    /// mesh, or a within leg whose querier cannot be named; else a
+    /// [`MeshQueryBlock`]:
     /// - the block's OWN tier is the source's tier (within-tier leg): route along
-    ///   the QUERIER's tree, stamp its psid, exclude the real inbound neighbour —
-    ///   always allowed (the gate reduces to true), zenoh `router_source = source`.
+    ///   the QUERIER's tree, stamp its psid, exclude the real inbound neighbour,
+    ///   zenoh `router_source = source`.
     /// - a CROSS tier: route along SELF's tree (self-origination, node_id 0), no
     ///   inbound exclusion (the inbound face is no node of this net) — zenoh's
-    ///   `router_source = net.idx`; master-GATED (only the elected master bridges a
-    ///   Query across meshes, the query twin of `bridge_push_cross_mesh`).
+    ///   `router_source = net.idx`. R2880 (open-debt item 751, step 6): built
+    ///   always, carrying its [`QueryCrossing`]; each of its egresses is admitted
+    ///   by the inter-region filter, as the data plane's bridge is since R2879,
+    ///   in place of the master election that used to omit the whole block.
     fn mesh_query_block(
         &self,
         block_tier: Region,
         src_tier: Region,
-        master: bool,
         within: Option<(Zid, u16)>,
         inbound_zid: Option<Zid>,
         self_zid: Zid,
     ) -> Option<MeshQueryBlock> {
-        // The block gates: block 1 (routers_net) `master || src == Router`; block 2
-        // (linkstatepeers_net) `master || src != Router`.
-        let gated_on = match block_tier {
-            ROUTERS_REGION => master || src_tier == ROUTERS_REGION,
-            PEERS_REGION => master || src_tier != ROUTERS_REGION,
-            _ => return None,
-        };
-        if !gated_on {
+        if block_tier != ROUTERS_REGION && block_tier != PEERS_REGION {
             return None;
         }
         if src_tier == block_tier {
@@ -6179,6 +6168,7 @@ impl RouterForwarder {
                 source_zid,
                 source_psid: out_node_id,
                 inbound_for_net: inbound_zid,
+                crossing: None,
             })
         } else {
             // Cross-tier: self-origination into this mesh (self tree root, node_id
@@ -6188,8 +6178,30 @@ impl RouterForwarder {
                 source_zid: self_zid,
                 source_psid: 0,
                 inbound_for_net: None,
+                crossing: Some(QueryCrossing {
+                    src: src_tier,
+                    src_zid: within.map(|(zid, _psid)| zid),
+                    fwd_zid: inbound_zid,
+                }),
             })
         }
+    }
+
+    /// R2880 (open-debt item 751, step 6) — whether `block` may send the Query
+    /// to the neighbour `dst`: a within leg crosses nothing, a cross leg asks
+    /// the inter-region filter per egress, as the pin filters each query
+    /// direction (`zenoh/src/net/routing/dispatcher/queries.rs` @ `dst_zid: Some(&q.dir.dst_face.zid),`).
+    fn query_block_admits(&self, block: &MeshQueryBlock, dst: &Zid) -> bool {
+        // `map_or(true, ..)`: `is_none_or` postdates the workspace MSRV.
+        block.crossing.map_or(true, |c| {
+            self.crosses(
+                c.src,
+                block.tier,
+                c.src_zid.as_ref(),
+                c.fwd_zid.as_ref(),
+                Some(dst),
+            )
+        })
     }
 
     /// The GLOBAL BestMatching winner (zenoh `compute_final_route`'s BestMatching,
@@ -6223,6 +6235,7 @@ impl RouterForwarder {
                 &block.source_zid,
                 &self_zid,
                 block.inbound_for_net,
+                |hop| self.query_block_admits(block, hop),
             ) {
                 // Truncate the jittered graph distance to u16, exactly as zenoh
                 // stamps `distance: net.distances[qabl_idx] as u16`
@@ -6377,6 +6390,10 @@ impl RouterForwarder {
         let mut forwarded = 0;
         let _ = self.fan_out_tier(block.tier, reliable, |id, zid| {
             if !is_tree_forward_target(id, zid, inbound, block.inbound_for_net, hops) {
+                return Ok(None);
+            }
+            // R2880 — a cross leg's egress passes the inter-region filter.
+            if !zid.map_or(true, |z| self.query_block_admits(block, &z)) {
                 return Ok(None);
             }
             let qid = self.pending.borrow_mut().allocate(id, fan, deadline);
@@ -9680,6 +9697,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "router-multicast-faces")]
     #[test]
     fn elect_router_is_deterministic_max_hash() {
         // The HRW election is a pure, order-INDEPENDENT MAX over the candidate
@@ -9706,33 +9724,6 @@ mod tests {
             .map(|i| format!("demo/k{i}"))
             .any(|k| elect_router(&s, &k, [a, b].iter()) != ab);
         assert!(flips, "the keyexpr participates in the hash");
-    }
-
-    #[test]
-    fn shared_nodes_is_the_two_mesh_router_intersection() {
-        // shared_nodes = the routers present in BOTH meshes (zenoh
-        // `network.rs:1197`): self (seeded in both nets) plus a router R2 reachable
-        // in the router mesh (a direct router link) AND the peer mesh (a
-        // peer-linkstate node behind A). A peer-only node is excluded.
-        let fwd = RouterForwarder::new(zid(0x01));
-        let (a, _sa) = face(zid(0xAA), WIRE_PEER); // a peer-only node
-        let (r, _sr) = face(zid(0x02), WIRE_ROUTER); // R2, the shared router
-        fwd.register(FaceId(0), &a);
-        fwd.register(FaceId(1), &r);
-        advertise_link_back(&fwd, FaceId(1), 0x01, 0x02, 5); // R2 -> routers_net
-        discover_via(&fwd, FaceId(0), 0x01, 0xAA, 0x02, 7, 5); // R2 -> linkstatepeers_net (behind A)
-        fwd.tick();
-        let mut shared = fwd.shared_nodes();
-        shared.sort();
-        assert_eq!(
-            shared,
-            vec![zid(0x01), zid(0x02)],
-            "self + R2 are shared across both meshes"
-        );
-        assert!(
-            !shared.contains(&zid(0xAA)),
-            "a peer-only node is NOT in the shared set"
-        );
     }
 
     /// R2879 (open-debt item 751, step 5) — a PEER-source Push crosses into the
@@ -10102,10 +10093,11 @@ mod tests {
         // node_id-0 sourced DeclareSubscriber on the router face — the direct
         // neighbour IS the source — NOT a transit non-zero node_id. (psid ==
         // NodeIndex, make_link_state:328, so wz's link `mappings` and zenohd's
-        // ext_nodeid share one numbering.) In a pure router-tier topology zenohd is
-        // in routers_net ONLY, so `shared_nodes = {self}` and wz elects itself
-        // master (is_master true) => the client-push router leg (C3b block 1,
-        // publish_client_push_into_meshes) is NOT suppressed. A GREEN here redirects
+        // ext_nodeid share one numbering.) The client-push router leg (C3b block 1,
+        // publish_client_push_into_meshes) is not gated at all since R2879 — a
+        // broker hat has no gateway view, so the inter-region filter admits it
+        // (until then it rested on wz electing itself master in a pure router-tier
+        // topology, where zenohd sits in routers_net only). A GREEN here redirects
         // the remaining reverse-data gap OFF the wz side and onto zenohd's egress /
         // wire form; a RED pins a wz bug.
         let fwd = RouterForwarder::new(zid(0x01));
@@ -10125,10 +10117,6 @@ mod tests {
                 .interested("demo/data"),
             vec![zid(0xAA)],
             "the foreign router's client sub registers the peer in router_subs"
-        );
-        assert!(
-            fwd.is_master("demo/data"),
-            "pure router-tier topology: shared_nodes = {{self}} => self is master"
         );
         sink_zenohd.reset();
         // A wz local client publishes the keyexpr zenohd subscribed.
@@ -15354,96 +15342,128 @@ mod tests {
         );
     }
 
+    /// R2880 (open-debt item 751, step 6) — the query twin of
+    /// `a_peer_push_crosses_north_only_through_the_largest_gateway_of_its_forwarder`:
+    /// a peer-source Query crosses into the router mesh only through the largest
+    /// gateway its forwarder links to. It replaced the master-election test of
+    /// the same bridge. Both targets are driven — BestMatching goes through
+    /// `select_best_matching`'s `admits`, All through the fan-out.
     #[test]
-    fn a_peer_request_bridges_cross_mesh_to_a_router_queryable_only_when_master() {
-        // The query twin of the data plane's master-gated bridge (R2879 moved the
-        // data plane onto the inter-region filter; the query plane is step 6): a peer-source
-        // Query is bridged into the ROUTER mesh toward a router-tier queryable ONLY
-        // when self is the elected route master (block-1 gate). With two shared
-        // routers, self bridges only the keyexprs it wins the HRW election for, so
-        // exactly one router bridges each Query (no double-query).
-        let self_z = zid(0x01);
-        let r2 = zid(0x02);
-        let shared = [self_z, r2];
-        let ke_master = (0..256)
-            .map(|i| format!("demo/m{i}"))
-            .find(|k| elect_router(&self_z, k, shared.iter()) == self_z)
-            .expect("some ke elects self");
-        let ke_other = (0..256)
-            .map(|i| format!("demo/o{i}"))
-            .find(|k| elect_router(&self_z, k, shared.iter()) == r2)
-            .expect("some ke elects R2");
-        let run = |ke: &str| -> (usize, usize) {
-            let fwd = RouterForwarder::new(self_z);
-            let (a, _sa) = face(zid(0xAA), WIRE_PEER); // peer querier + R2 discovery neighbour
-            let (r, sink_r) = face(r2, WIRE_ROUTER); // the other router R2 (hosts a queryable)
+    fn a_peer_query_crosses_north_only_through_the_largest_gateway_of_its_forwarder() {
+        let run = |other: u8, other_is_gateway: bool, all: bool| -> usize {
+            let fwd = RouterForwarder::new(zid(0x05));
+            let (a, _sa) = face(zid(0xAA), WIRE_PEER); // peer querier, linked to self and R2
+            let (r, sink_r) = face(zid(other), WIRE_ROUTER); // R2, hosting a queryable
             fwd.register(FaceId(0), &a);
             fwd.register(FaceId(1), &r);
-            advertise_link_back(&fwd, FaceId(1), 0x01, 0x02, 5); // R2 -> routers_net
-            discover_via(&fwd, FaceId(0), 0x01, 0xAA, 0x02, 7, 5); // R2 -> linkstatepeers_net
+            advertise_link_back(&fwd, FaceId(1), 0x05, other, 5);
+            if other_is_gateway {
+                discover_gateway_via(&fwd, FaceId(0), 0x05, 0xAA, other, 7, 5);
+            } else {
+                discover_via(&fwd, FaceId(0), 0x05, 0xAA, other, 7, 5);
+            }
             fwd.tick();
-            forward_one(&fwd, FaceId(1), declare_qabl(ke, true)); // R2 hosts a complete queryable
+            forward_one(&fwd, FaceId(1), declare_qabl("demo/k", true));
             sink_r.reset();
-            forward_one(&fwd, FaceId(0), request_best(50, ke)); // peer queries
-            (sink_r.frame_count(), fwd.shared_nodes().len())
+            let request = if all {
+                request_with_target(50, "demo/k", QueryTarget::All)
+            } else {
+                request_best(50, "demo/k")
+            };
+            forward_one(&fwd, FaceId(0), request);
+            sink_r.frame_count()
         };
-        let (master_hits, shared_len) = run(&ke_master);
-        assert_eq!(shared_len, 2, "self + R2 are shared across both meshes");
+        for all in [false, true] {
+            assert_eq!(
+                run(0x09, true, all),
+                0,
+                "a larger gateway crosses, not self (all={all})"
+            );
+            assert_eq!(
+                run(0x02, true, all),
+                1,
+                "self is the largest gateway (all={all})"
+            );
+            assert_eq!(
+                run(0x09, false, all),
+                1,
+                "a router that is no gateway of the region is no candidate (all={all})"
+            );
+        }
+    }
+
+    /// R2880 — BestMatching filters BEFORE it picks: a refused nearest candidate
+    /// falls through to the next, as the pin filters the route and then takes its
+    /// first complete queryable. A peer querier A sees two complete queryables at
+    /// the same distance, R2's in the router mesh (fed first, so it would win the
+    /// tie) and peer C's in its own mesh. R2 is the larger gateway, so self may
+    /// not carry the Query north: C must answer. Without the filter inside the
+    /// pick, R2's hop wins and is then refused at the egress, and the Query ends
+    /// with an empty route while C was there.
+    #[test]
+    fn best_matching_falls_through_a_refused_nearest_queryable() {
+        let fwd = RouterForwarder::new(zid(0x01));
+        let (a, _sa) = face(zid(0xAA), WIRE_PEER); // querier, linked to self and R2
+        let (c, sink_c) = face(zid(0xCC), WIRE_PEER); // a peer queryable
+        let (r, sink_r) = face(zid(0x02), WIRE_ROUTER); // R2, the larger gateway
+        fwd.register(FaceId(0), &a);
+        fwd.register(FaceId(1), &c);
+        fwd.register(FaceId(2), &r);
+        advertise_link_back(&fwd, FaceId(2), 0x01, 0x02, 5);
+        advertise_link_back(&fwd, FaceId(1), 0x01, 0xCC, 5);
+        discover_gateway_via(&fwd, FaceId(0), 0x01, 0xAA, 0x02, 7, 5);
+        fwd.tick();
+        forward_one(&fwd, FaceId(2), declare_qabl("demo/k", true));
+        forward_one(&fwd, FaceId(1), declare_qabl("demo/k", true));
+        sink_c.reset();
+        sink_r.reset();
+        forward_one(&fwd, FaceId(0), request_best(70, "demo/k"));
+        assert_eq!(sink_r.frame_count(), 0, "R2 carries it north, not self");
         assert_eq!(
-            master_hits, 1,
-            "master bridges the peer-source Query to the router queryable"
-        );
-        let (other_hits, _) = run(&ke_other);
-        assert_eq!(
-            other_hits, 0,
-            "a non-master suppresses the cross-mesh query bridge"
+            sink_c.frame_count(),
+            1,
+            "the next-nearest complete queryable answers"
         );
     }
 
+    /// R2880 — the query twin of
+    /// `a_router_that_does_not_carry_a_peer_push_north_defers_its_client_delivery`:
+    /// a client queryable on a router that does not carry a peer-source Query
+    /// north is not queried with that copy; the carrier's copy reaches it back as
+    /// a ROUTER source and is served then, exactly once. Control: self carries.
     #[test]
-    fn client_query_delivery_deferred_on_a_non_master() {
-        // The query twin of local_client_delivery_deferred_on_non_master (zenoh
-        // block-3 gate): a peer-source Query for a keyexpr this router is NOT master
-        // for must NOT reach the local client queryable — it defers to the master's
-        // router-source query (else the client is queried twice). A ROUTER-source
-        // Query (the bridged-back copy) IS delivered (src == Router, ungated).
-        let self_z = zid(0x01);
-        let r2 = zid(0x02);
-        let shared = [self_z, r2];
-        let ke_other = (0..256)
-            .map(|i| format!("demo/o{i}"))
-            .find(|k| elect_router(&self_z, k, shared.iter()) == r2)
-            .expect("some ke elects R2 (self non-master)");
-        let fwd = RouterForwarder::new(self_z);
-        let (a, _sa) = face(zid(0xAA), WIRE_PEER); // peer querier + R2 discovery neighbour
-        let (r, _sr) = face(r2, WIRE_ROUTER); // the shared router
-        let (client, sink_client) = face(zid(0xCC), WIRE_CLIENT); // local client queryable
-        fwd.register(FaceId(0), &a);
-        fwd.register(FaceId(1), &r);
-        fwd.register(FaceId(2), &client);
-        advertise_link_back(&fwd, FaceId(1), 0x01, 0x02, 5); // R2 -> routers_net
-        discover_via(&fwd, FaceId(0), 0x01, 0xAA, 0x02, 7, 5); // R2 -> linkstatepeers_net
-        fwd.tick();
-        forward_one(&fwd, FaceId(2), declare_qabl(&ke_other, true)); // client hosts a queryable
-        assert_eq!(fwd.shared_nodes().len(), 2, "federated: self + R2 shared");
-        assert!(
-            !fwd.is_master(&ke_other),
-            "self is NOT the elected master for this ke"
-        );
-        sink_client.reset();
-        // Peer-source Query: a non-master DEFERS its local client query.
-        forward_one(&fwd, FaceId(0), request_best(60, &ke_other));
+    fn a_router_that_does_not_carry_a_peer_query_north_defers_its_client_queryable() {
+        let run = |other_is_gateway: bool| -> (usize, usize) {
+            let fwd = RouterForwarder::new(zid(0x01));
+            let (a, _sa) = face(zid(0xAA), WIRE_PEER);
+            let (r, _sr) = face(zid(0x02), WIRE_ROUTER); // R2, larger than self
+            let (client, sink_client) = face(zid(0xCC), WIRE_CLIENT);
+            fwd.register(FaceId(0), &a);
+            fwd.register(FaceId(1), &r);
+            fwd.register(FaceId(2), &client);
+            advertise_link_back(&fwd, FaceId(1), 0x01, 0x02, 5);
+            if other_is_gateway {
+                discover_gateway_via(&fwd, FaceId(0), 0x01, 0xAA, 0x02, 7, 5);
+            } else {
+                discover_via(&fwd, FaceId(0), 0x01, 0xAA, 0x02, 7, 5);
+            }
+            fwd.tick();
+            forward_one(&fwd, FaceId(2), declare_qabl("demo/k", true));
+            sink_client.reset();
+            forward_one(&fwd, FaceId(0), request_best(60, "demo/k"));
+            let from_peer = sink_client.frame_count();
+            forward_one(&fwd, FaceId(1), request_best(61, "demo/k"));
+            (from_peer, sink_client.frame_count() - from_peer)
+        };
         assert_eq!(
-            sink_client.frame_count(),
-            0,
-            "non-master defers the peer-source client query (no double query)"
+            run(true),
+            (0, 1),
+            "R2 carries it north: the peer copy defers, the router copy is served"
         );
-        // Router-source Query (the bridged-back copy): delivered (src == Router).
-        forward_one(&fwd, FaceId(1), request_best(61, &ke_other));
         assert_eq!(
-            sink_client.frame_count(),
+            run(false).0,
             1,
-            "the router-source Query reaches the client queryable exactly once"
+            "control: self carries it, so the peer copy is served"
         );
     }
 

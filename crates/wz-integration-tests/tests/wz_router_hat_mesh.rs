@@ -856,6 +856,13 @@ fn wz_router_hat_federates_a_query_across_two_routers() {
 
 /// TOPOLOGY PROBE for the non-master corner — can a wz router become NON-master?
 ///
+/// ⚠ R2880 (open-debt item 751, step 6) — the election this probe was written
+/// for is gone: `is_master` / `shared_nodes` were removed once both planes cross
+/// regions by the pin's inter-region filter. The probe still stands for what it
+/// measures, a second router present in BOTH of R1's meshes, which is now the
+/// precondition for R1 to see R2 as another gateway of the peer region (the
+/// defer E2E below). The paragraphs that follow are the record of the old reason.
+///
 /// The C4 master gate (`is_master` / `shared_nodes`) is a no-op unless
 /// `shared_nodes > 1`, i.e. a SECOND router present in BOTH of self's meshes
 /// (`router_forward.rs:6456`, the unit `shared_nodes` construction). A plain
