@@ -83,6 +83,16 @@ impl Bound {
             other => Err(InvalidBound(other)),
         }
     }
+
+    /// Upstream's `Bound::is_north`.
+    pub const fn is_north(self) -> bool {
+        matches!(self, Bound::North)
+    }
+
+    /// Upstream's `Bound::is_south`.
+    pub const fn is_south(self) -> bool {
+        matches!(self, Bound::South)
+    }
 }
 
 /// The bound the peer announced on its Open, `Ok(None)` when it announced
@@ -124,6 +134,25 @@ impl Region {
     pub const fn default_south(mode: WhatAmI) -> Self {
         Region::South { id: 0, mode }
     }
+
+    /// Upstream's `Region::bound`: `North` is the main region, and every
+    /// subregion (`Local` included) lies south of it.
+    pub const fn bound(&self) -> Bound {
+        match self {
+            Region::North => Bound::North,
+            Region::Local | Region::South { .. } => Bound::South,
+        }
+    }
+
+    /// Upstream's `Region::mode`: the mode of the nodes a subregion holds.
+    /// `None` for `North`, whose hat takes the node's OWN mode instead.
+    pub const fn mode(&self) -> Option<WhatAmI> {
+        match self {
+            Region::North => None,
+            Region::Local => Some(WhatAmI::Client),
+            Region::South { mode, .. } => Some(*mode),
+        }
+    }
 }
 
 impl core::fmt::Display for Region {
@@ -160,11 +189,28 @@ fn auto_region(mode: WhatAmI, remote: WhatAmI) -> Option<(Region, Bound)> {
 /// match are reachable. `None` is each arm's `bail!`, which upstream's
 /// `local_data` renders as `"unknown"`.
 pub fn region_of(mode: WhatAmI, remote: WhatAmI, remote_bound: Option<Bound>) -> Option<Region> {
+    region_and_bound_of(mode, remote, remote_bound).map(|(region, _)| region)
+}
+
+/// `compute_region_of` WHOLE, as its return type is: the region this node
+/// places the remote in AND the remote's own bound, which is what the pin's
+/// `Gateway::new_transport_unicast` stores on the face
+/// (`zenoh/src/net/routing/gateway.rs` @ `pub(crate) fn new_transport_unicast(`).
+/// R2864 (open-debt item 751) — the routing half of the region model reads
+/// both; the adminspace row reads only the first, through [`region_of`].
+///
+/// Only the three arms an `Auto`-preset node reaches are here, as in
+/// [`region_of`]; `None` is each arm's `bail!`.
+pub fn region_and_bound_of(
+    mode: WhatAmI,
+    remote: WhatAmI,
+    remote_bound: Option<Bound>,
+) -> Option<(Region, Bound)> {
     match remote_bound {
-        None => auto_region(mode, remote).map(|(region, _)| region),
-        Some(Bound::South) => Some(Region::North),
+        None => auto_region(mode, remote),
+        Some(Bound::South) => Some((Region::North, Bound::South)),
         Some(Bound::North) => match auto_region(mode, remote)? {
-            (region, Bound::North) => Some(region),
+            (region, Bound::North) => Some((region, Bound::North)),
             (_, Bound::South) => None,
         },
     }
@@ -306,5 +352,59 @@ mod tests {
     fn the_header_is_id_seven_z64_and_not_mandatory() {
         assert_eq!(crate::ext_header::ext_id(REMOTE_BOUND_EXT_HEADER), 0x07);
         assert!(!crate::ext_header::ext_mandatory(REMOTE_BOUND_EXT_HEADER));
+    }
+
+    /// R2864 — `Region::bound` / `Region::mode` as the pin writes them: only
+    /// `North` is north, and `Local` is a CLIENT subregion.
+    #[test]
+    fn a_region_knows_its_bound_and_mode_as_upstream_does() {
+        assert_eq!(Region::North.bound(), Bound::North);
+        assert_eq!(Region::Local.bound(), Bound::South);
+        assert_eq!(Region::default_south(Router).bound(), Bound::South);
+        assert_eq!(Region::North.mode(), None);
+        assert_eq!(Region::Local.mode(), Some(Client));
+        assert_eq!(Region::South { id: 3, mode: Peer }.mode(), Some(Peer));
+        assert!(Bound::North.is_north() && !Bound::North.is_south());
+        assert!(Bound::South.is_south() && !Bound::South.is_north());
+    }
+
+    /// R2864 — the remote bound `compute_region_of` returns alongside the
+    /// region, for every pair of modes and every announced bound, and the
+    /// region half is exactly [`region_of`].
+    #[test]
+    fn the_remote_bound_is_returned_with_the_region() {
+        // The Auto table's bound column (`compute_auto_region`).
+        assert_eq!(
+            region_and_bound_of(Router, Peer, None),
+            Some((Region::default_south(Peer), Bound::North))
+        );
+        assert_eq!(
+            region_and_bound_of(Router, Router, None),
+            Some((Region::North, Bound::North))
+        );
+        assert_eq!(
+            region_and_bound_of(Peer, Router, None),
+            Some((Region::North, Bound::South))
+        );
+        assert_eq!(
+            region_and_bound_of(Client, Peer, None),
+            Some((Region::North, Bound::South))
+        );
+        // A remote that calls us south is north of us, and says so.
+        assert_eq!(
+            region_and_bound_of(Router, Peer, Some(Bound::South)),
+            Some((Region::North, Bound::South))
+        );
+        for mode in [Router, Peer, Client] {
+            for remote in [Router, Peer, Client] {
+                for bound in [None, Some(Bound::North), Some(Bound::South)] {
+                    assert_eq!(
+                        region_and_bound_of(mode, remote, bound).map(|(r, _)| r),
+                        region_of(mode, remote, bound),
+                        "{mode:?} placing {remote:?} announcing {bound:?}"
+                    );
+                }
+            }
+        }
     }
 }

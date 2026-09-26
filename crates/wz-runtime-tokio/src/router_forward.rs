@@ -356,6 +356,7 @@ use wz_session_core::declare_build::{
 use wz_session_core::declare_ext_keyexpr::resolve_ext_keyexpr;
 use wz_session_core::declare_routing_context::{read_declare_source, set_declare_source};
 use wz_session_core::driver_loop::DriverLoopOutcome;
+use wz_session_core::extbound::{region_and_bound_of, Bound, Region};
 use wz_session_core::keyexpr_match::{keyexpr_includes_target, keyexpr_intersects_target};
 use wz_session_core::linkstate_oam::{
     build_linkstate_oam_owned, try_parse_linkstate_oam, LinkstateOam,
@@ -389,6 +390,7 @@ use crate::linkstate_forward::{
     synthesize_drained_fan_finals, synthesize_expired_query_returns, LocalQueryHandler,
     LocalQueryView, LocalQueryable, LocalSubscriber, LocalSubscriberHandler,
 };
+use crate::routing_region::{hat_kind, HatKind};
 // R2393 — the host-subscriber dispatch's sample types, the same ones the peer
 // plane's `dispatch_local_subscribers` builds from.
 use wz_session_core::sample_kind::SampleKind;
@@ -424,17 +426,41 @@ enum FaceTier {
     Client,
 }
 
-/// The routing tier of a handshake role. The wz `FaceForwarder` analogue of
-/// zenoh's `new_transport_unicast_face` whatami branch
-/// (`hat/router/mod.rs:424-438`): wz ports the FULL-linkstate peer model (there
-/// is no `p2p_peer` hat), so a Peer always classifies to the linkstate-peer
-/// tier — never to the simple tier zenoh's default `peer_to_peer` config would
-/// use.
-fn tier_of(whatami: WhatAmI) -> FaceTier {
-    match whatami {
-        WhatAmI::Router => FaceTier::Routers,
-        WhatAmI::Peer => FaceTier::LinkstatePeers,
-        WhatAmI::Client => FaceTier::Client,
+/// The region a router places a face in, as the pin computes it when the
+/// transport opens (`zenoh/src/net/runtime/mod.rs`
+/// @ `compute_region_of(`, through [`region_and_bound_of`](wz_session_core::extbound::region_and_bound_of)):
+/// from the two modes and the bound the remote announced on its Open.
+///
+/// R2864 (open-debt item 751) — the face's tier is DERIVED from this now, not
+/// from the remote's whatami. For a router node the Auto table never refuses a
+/// remote, so every face gets a region.
+fn face_region(whatami: WhatAmI, remote_bound: Option<Bound>) -> Region {
+    region_and_bound_of(WhatAmI::Router, whatami, remote_bound)
+        .map(|(region, _)| region)
+        .unwrap_or_else(|| unreachable!("a router's Auto table places every remote"))
+}
+
+/// The tier (which of the two nets) a face in `region` joins.
+///
+/// This is the first step of moving the router onto the pin's region-keyed
+/// hats, and it changes nothing a stock peer can see. The pin's router hat owns
+/// the `North` region and puts every face it owns into `routers_net`
+/// (`hat/router/mod.rs` @ `let link_id = self.net_mut().add_link(transport.clone());`).
+/// Its peer hat serves `South { Peer }`, and broker hats serve the client
+/// regions. With no bound announced, which is what a stock node and every wz
+/// node send, a Router lands in `North`, a Peer in `South { 0, Peer }` and a
+/// Client in `South { 0, Client }`. That is exactly the old whatami table.
+/// The one face that now classifies differently is a remote that announces we
+/// are SOUTH of it. The pin puts that face in `North` whatever its mode, and
+/// so does this.
+///
+/// Read off the ported hat table ([`hat_kind`]) rather than a second match, so
+/// the tier and the hat the pin would build cannot disagree.
+fn tier_of(region: Region) -> FaceTier {
+    match hat_kind(&region, WhatAmI::Router) {
+        HatKind::Router => FaceTier::Routers,
+        HatKind::Peer => FaceTier::LinkstatePeers,
+        HatKind::Broker | HatKind::Client => FaceTier::Client,
     }
 }
 
@@ -6660,7 +6686,7 @@ impl FaceForwarder for RouterForwarder {
         // a routing zid joins the matching net; a Client face — or one whose
         // zid never surfaced — is HELD without a graph link (it routes nothing).
         let whatami = peer_whatami_routing(actions);
-        let tier = tier_of(whatami);
+        let tier = tier_of(face_region(whatami, actions.peer_remote_bound()));
         let added = match self.plane(tier) {
             Some((net, _dirty)) => {
                 // OBLIGATION-3 self-zid parity: a face whose routing zid IS self's
@@ -7314,6 +7340,42 @@ mod tests {
     use wz_codecs::wireexpr_local::WireexprLocalOwned;
     use wz_runtime_core::runtime::Runtime;
     use wz_session_core::push_routing_context::{read_push_hoplimit, read_push_source};
+
+    /// R2864 (open-debt item 751) — the tier is now read off the face's REGION,
+    /// and for every remote that announces no bound (every stock node, every wz
+    /// node) that is the old whatami table exactly: Router -> North -> routers,
+    /// Peer -> South{0,Peer} -> linkstate peers, Client -> South{0,Client} ->
+    /// held. A remote that announces we are south of it lands in North, as the
+    /// pin's router hat owns it, whatever its mode.
+    #[test]
+    fn a_face_joins_the_net_of_the_region_the_pin_places_it_in() {
+        use WhatAmI::{Client, Peer, Router};
+        let placed = |w, b| {
+            let region = face_region(w, b);
+            (region, tier_of(region))
+        };
+        assert_eq!(placed(Router, None), (Region::North, FaceTier::Routers));
+        assert_eq!(
+            placed(Peer, None),
+            (Region::default_south(Peer), FaceTier::LinkstatePeers)
+        );
+        assert_eq!(
+            placed(Client, None),
+            (Region::default_south(Client), FaceTier::Client)
+        );
+        for w in [Router, Peer, Client] {
+            assert_eq!(
+                placed(w, Some(Bound::North)),
+                placed(w, None),
+                "a north announcement agrees with the Auto table for a router"
+            );
+            assert_eq!(
+                placed(w, Some(Bound::South)),
+                (Region::North, FaceTier::Routers)
+            );
+        }
+        assert_eq!(tier_of(Region::Local), FaceTier::Client);
+    }
 
     fn zid(b: u8) -> Zid {
         Zid::from_slice(&[b, b, b, b])

@@ -1910,6 +1910,12 @@ pub mod storage_gc_service;
 /// (nor pays for `futures-util`).
 #[cfg(feature = "routing-accept")]
 pub mod accept_loop;
+/// R2864 (open-debt item 751) — the pin's region-keyed routing structure
+/// (`RegionMap`, the `Auto` region set, the hat per region), ported before any
+/// forwarder routes on it. Gated on `routing-accept`, the lowest routing atom,
+/// because every node kind builds regions in the pin.
+#[cfg(feature = "routing-accept")]
+pub mod routing_region;
 
 /// R2844 — the stats registry of a node, recorded by whatever drives its
 /// sessions (the face loop, the storage host) where a transport opens and
