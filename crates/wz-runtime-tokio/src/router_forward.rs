@@ -4918,6 +4918,13 @@ impl RouterForwarder {
         if !is_peer_hat(tier) {
             self.re_advertise_natives_into(tier, net, &new_children);
         }
+        // R2890 (751 rule 8c) — a peer-hat region has no tree to take a delta of;
+        // a peer that joins it is told self's derived declarations when its FACE
+        // registers (`replay_declarations_to_new_face`), the pin's
+        // `new_transport_unicast_face` repropagation.
+        if is_peer_hat(tier) {
+            return;
+        }
         // C2: also re-advertise self's DERIVED cross-tier subs (from client_subs)
         // to self's NEW tree children — the derive's OBLIGATION-2 re-advertise feed
         // (a distinct self-sourced declaration), so a late-joining mesh node learns
@@ -5741,6 +5748,19 @@ impl RouterForwarder {
         let Some((net, _dirty)) = self.plane(tier) else {
             return;
         };
+        // R2890 (open-debt item 751, rule 8c) — in a peer-hat region the pin
+        // propagates to its OWNED faces, every face the region holds, not along
+        // a tree. The south net keeps no full link-state, so a tree there would
+        // name no child at all.
+        if is_peer_hat(tier) {
+            let Ok(declare) = build(keyexpr) else {
+                return;
+            };
+            let _ = self.fan_out_tier(tier, true, |_id, _zid| {
+                Ok(Some(NetworkMessage::Declare(Box::new(declare.clone()))))
+            });
+            return;
+        }
         let children = {
             let n = net.borrow();
             let self_zid = *n.self_zid();
@@ -10491,6 +10511,26 @@ mod tests {
         }
     }
 
+    /// The number of recorded frames whose first message is a `Declare` — the
+    /// face-up count net of the link-state bootstrap a routing face also gets.
+    fn declare_frame_count(sink: &RecordingLinkDriver) -> usize {
+        use crate::session_glue::{parse_frame_payload, parse_inbound, InboundFrame};
+        (0..sink.frame_count())
+            .filter(|&i| {
+                let Ok(InboundFrame::Frame { payload, .. }) = parse_inbound(&sink.frame_bytes(i))
+                else {
+                    return false;
+                };
+                matches!(
+                    parse_frame_payload(&payload)
+                        .ok()
+                        .and_then(|m| m.into_iter().next()),
+                    Some(NetworkMessage::Declare(_))
+                )
+            })
+            .count()
+    }
+
     /// R2882 (open-debt item 751, step 7) — [`InterestFlow`] admits what the
     /// pin's dispatcher admits, over every face a router can hold: each remote
     /// mode, announcing no bound or either bound. The population is asserted to
@@ -12004,23 +12044,30 @@ mod tests {
     }
 
     #[test]
-    fn tick_re_advertises_the_derived_self_sub_to_a_late_joining_peer() {
+    fn a_late_joining_peer_is_told_the_derived_self_sub_at_face_up() {
         // The DERIVED self cross-tier sub (not a stored native) converges onto a
-        // peer that joins AFTER the client declared — OBLIGATION-2's re-advertise
-        // feed of the derived self-source.
+        // peer that joins AFTER the client declared. R2890 (751 rule 8c): it is
+        // told when its FACE registers, as the pin's peer hat repropagates in
+        // `new_transport_unicast_face`, and the tick adds nothing — the peer
+        // region has no tree whose delta could name the newcomer.
         let fwd = RouterForwarder::new(zid(0x01));
         let (client, _) = face(zid(0xAA), WIRE_CLIENT);
         fwd.register(FaceId(0), &client);
         forward_one(&fwd, FaceId(0), declare_sub("demo/data")); // client subscribes; no peer yet
         let (p, sink_p) = face(zid(0xBB), WIRE_PEER); // joins LATER
         fwd.register(FaceId(1), &p);
+        assert_eq!(
+            declare_frame_count(&sink_p),
+            1,
+            "the derived self cross-tier sub told to the late-joining peer at face-up"
+        );
         advertise_link_back(&fwd, FaceId(1), 0x01, 0xBB, 6);
         sink_p.reset();
-        fwd.tick(); // recompute -> P is a new self-child -> re-advertise the derived sub
+        fwd.tick();
         assert_eq!(
             sink_p.frame_count(),
-            1,
-            "the derived self cross-tier sub re-advertised to the late-joining peer"
+            0,
+            "the tick re-advertises nothing more"
         );
     }
 
@@ -12595,9 +12642,12 @@ mod tests {
         // tree child, not the destination directly: directions_toward(self,
         // {distant}) returns the neighbour. Exercises the relay class no 1-hop fan
         // covers -- the router's wiring of directions_toward into the mesh fan.
+        // R2890 (751 rule 8c) — on the ROUTER mesh: a peer region holds no
+        // multi-hop route at the pin (no full link-state, no relay within it), so
+        // the relay this test names lives in the routers region only.
         let fwd = RouterForwarder::new(zid(0x01));
         let (client, _sc) = face(zid(0xAA), WIRE_CLIENT); // publishing client
-        let (peer, sink_peer) = face(zid(0xBB), WIRE_PEER); // the INTERMEDIATE neighbour
+        let (peer, sink_peer) = face(zid(0xBB), WIRE_ROUTER); // the INTERMEDIATE neighbour
         fwd.register(FaceId(0), &client);
         fwd.register(FaceId(1), &peer);
         // Discover a distant node 0xDD reachable self <-> 0xBB <-> 0xDD (psid 7 =
@@ -12611,7 +12661,10 @@ mod tests {
         set_declare_source(&mut decl, 7);
         forward_one(&fwd, FaceId(1), NetworkMessage::Declare(Box::new(decl)));
         assert_eq!(
-            fwd.mesh(PEERS_REGION).subs.borrow().interested("demo/data"),
+            fwd.mesh(ROUTERS_REGION)
+                .subs
+                .borrow()
+                .interested("demo/data"),
             vec![zid(0xDD)],
             "the distant node 0xDD's interest is registered (2 hops away)"
         );
@@ -13183,7 +13236,7 @@ mod tests {
             "re-flooded to the same-tier tree child C"
         );
         assert_eq!(sink_a.frame_count(), 0, "not back to the inbound source A");
-        assert_eq!(sink_p.frame_count(), 0, "not to the peer tier");
+        assert_only_the_bridge_reaches_the_peer_region(&sink_p);
     }
 
     #[cfg(feature = "routing-token-tables")]
@@ -13788,24 +13841,30 @@ mod tests {
 
     #[cfg(feature = "routing-token-tables")]
     #[test]
-    fn client_token_re_advertised_to_a_late_joining_peer() {
+    fn client_token_told_to_a_late_joining_peer_at_face_up() {
         // The DERIVED self cross-tier token converges onto a peer that joins AFTER the
-        // client declared the token — the tick re-advertise reads
+        // client declared the token — the face-up replay reads
         // derived_cross_tier_tokens_into (slice-3 taught it to fold client_tokens).
-        // Token twin of tick_re_advertises_the_derived_self_sub_to_a_late_joining_peer.
+        // Token twin of a_late_joining_peer_is_told_the_derived_self_sub_at_face_up
+        // (R2890, 751 rule 8c: at face-up, not on a tree delta).
         let fwd = RouterForwarder::new(zid(0x01));
         let (client, _) = face(zid(0xAA), WIRE_CLIENT);
         fwd.register(FaceId(0), &client);
         forward_one(&fwd, FaceId(0), declare_client_token_msg(7, "live/data")); // no peer yet
         let (p, sink_p) = face(zid(0xBB), WIRE_PEER); // joins LATER
         fwd.register(FaceId(1), &p);
+        assert_eq!(
+            declare_frame_count(&sink_p),
+            1,
+            "the derived self cross-tier token told to the late-joining peer at face-up"
+        );
         advertise_link_back(&fwd, FaceId(1), 0x01, 0xBB, 6);
         sink_p.reset();
-        fwd.tick(); // recompute -> P is a new self-child -> re-advertise the derived token
+        fwd.tick();
         assert_eq!(
             sink_p.frame_count(),
-            1,
-            "the derived self cross-tier token re-advertised to the late-joining peer"
+            0,
+            "the tick re-advertises nothing more"
         );
     }
 
@@ -14742,11 +14801,21 @@ mod tests {
             1,
             "a complete:false->true flip re-floods (the value-diff gate)"
         );
+        // R2890 (751 rule 8c) — the peer region hears the router's OWN merged
+        // advertisement, on the new queryable and again on the flip, which
+        // moves the merged completeness; never the routers-region re-flood.
         assert_eq!(
             sink_p.frame_count(),
-            0,
-            "the peer tier is never reached by a routers-tier queryable re-flood"
+            2,
+            "the cross-region advertisement, on the new queryable and the flip"
         );
+        for i in 0..2 {
+            assert_eq!(
+                read_declare_source(&forwarded_declare(&sink_p.frame_bytes(i))),
+                0,
+                "self-originated: the peer tier is never reached by the re-flood"
+            );
+        }
     }
 
     #[test]
@@ -14966,7 +15035,26 @@ mod tests {
             "re-flooded to the same-tier tree child C"
         );
         assert_eq!(sink_a.frame_count(), 0, "not back to the inbound source A");
-        assert_eq!(sink_p.frame_count(), 0, "not to the peer tier");
+        assert_only_the_bridge_reaches_the_peer_region(&sink_p);
+    }
+
+    /// R2890 (751 rule 8c) — what a peer face of the south region receives when
+    /// a ROUTERS-region declaration arrives: the router's OWN cross-region
+    /// advertisement (the pin peer hat's `other_info` case, propagated to every
+    /// owned face), never the source's within-region re-flood. The two carry
+    /// the same keyexpr, so the witness is the source: the bridge originates at
+    /// self (node id 0, the extension omitted), the re-flood names the source.
+    fn assert_only_the_bridge_reaches_the_peer_region(sink_p: &RecordingLinkDriver) {
+        assert_eq!(
+            sink_p.frame_count(),
+            1,
+            "the peer face is told once, by the cross-region advertisement"
+        );
+        assert_eq!(
+            read_declare_source(&forwarded_declare(&sink_p.frame_bytes(0))),
+            0,
+            "self-originated: the bridge, not the routers-region re-flood"
+        );
     }
 
     #[test]
