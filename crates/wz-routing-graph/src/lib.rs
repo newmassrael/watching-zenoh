@@ -804,13 +804,47 @@ pub struct LinkstateNetwork {
     /// [`add_link`](Self::add_link) and replaced by
     /// [`update_link_weights`](Self::update_link_weights). Empty by default.
     link_weights: HashMap<Zid, LinkEdgeWeight>,
+    /// R2893 (open-debt item 751, rule 8d) — WHICH of the pin's two gossiping
+    /// objects this graph stands for. The two agree whenever links are
+    /// flooded, and diverge in single-hop gossip; see [`NetObject`].
+    object: NetObject,
+}
+
+/// R2893 (open-debt item 751, rule 8d) — the pin has TWO objects that gossip,
+/// and wz had one flag for both. A region's net is `Network`
+/// (`zenoh/src/net/protocol/network.rs`), which with `full_linkstate` and
+/// `gossip_multihop` both off keeps a new link's neighbour out of the graph,
+/// writes no self link and tells existing links nothing
+/// (`zenoh/src/net/protocol/network.rs` @ `if self.full_linkstate || self.gossip_multihop {`);
+/// the router's south peer region is that object. A peer's own north region
+/// is `Gossip` (`zenoh/src/net/protocol/gossip.rs` @ `pub(crate) fn add_link`),
+/// which adds the neighbour's node and announces self on every link. The two
+/// only differ in single-hop gossip, so this is read only there.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum NetObject {
+    /// A region's net: what [`LinkstateNetwork::new_in_region`] builds.
+    Network,
+    /// A peer's own gossip graph: what [`LinkstateNetwork::new`] builds. Its
+    /// single-hop behaviour is wz's earlier gossip port, unchanged by R2893;
+    /// holding it to `gossip.rs` is item 751's rule 8e.
+    Gossip,
 }
 
 impl LinkstateNetwork {
     /// A graph seeded with the local (self) node — sn starts at 1, as in
-    /// zenoh `Network::new` (`network.rs:156-162`).
+    /// zenoh `Network::new` (`network.rs:156-162`). The peer's graph: in
+    /// single-hop gossip it is the pin's `Gossip` object ([`NetObject`]).
     pub fn new(self_zid: Zid, self_whatami: WhatAmI) -> Self {
-        Self::new_in_region(self_zid, self_whatami, false)
+        let mut net = Self::new_in_region(self_zid, self_whatami, false);
+        net.object = NetObject::Gossip;
+        net
+    }
+
+    /// R2893 — a region's `Network` with links flooded by neither mode: the
+    /// state in which the pin's `Network` keeps its graph to what neighbours
+    /// announce and sends nothing on a link change.
+    fn is_single_hop_network(&self) -> bool {
+        self.object == NetObject::Network && !self.full_linkstate && !self.gossip_multihop
     }
 
     /// R2878 (open-debt item 751, step 4) — [`new`](Self::new) for a net that
@@ -855,6 +889,7 @@ impl LinkstateNetwork {
             // no configured weights: every self link advertises the unset
             // weight, as a zenoh router with no `transport_weights` does.
             link_weights: HashMap::new(),
+            object: NetObject::Network,
         }
     }
 
@@ -1141,6 +1176,16 @@ impl LinkstateNetwork {
         self.next_link_id += 1;
         self.links.insert(id, Link::new(peer_zid));
 
+        // R2893 (open-debt item 751, rule 8d) — a single-hop gossip `Network`
+        // keeps the LINK and nothing else: no node for the neighbour, no self
+        // link, no sn bump. The pin puts all three under the same mode test
+        // (`zenoh/src/net/protocol/network.rs` @ `if self.full_linkstate || self.gossip_multihop {`),
+        // because such a graph floods no links and builds no edges; the
+        // neighbour's node arrives with its own announcement, and a route to
+        // it is read off the link table (`is_direct_neighbour`).
+        if self.is_single_hop_network() {
+            return id;
+        }
         if self.get_idx(&peer_zid).is_none() {
             self.insert_node(Node {
                 zid: peer_zid,
@@ -1240,6 +1285,27 @@ impl LinkstateNetwork {
             Some(link) => link,
             None => return Vec::new(),
         };
+        // R2893 (751 rule 8d) — the single-hop gossip `Network` arm: no self link was
+        // written and no edge exists, so there is nothing to re-flood or DFS;
+        // the neighbour's node goes with its last link, as the pin removes it
+        // (`zenoh/src/net/protocol/network.rs` @ `self.graph.remove_node(idx);`).
+        // The pin returns no detached set because its peer hat purges per
+        // face; this graph's caller purges interest per zid, so the removed
+        // neighbour is returned instead, which is the same purge.
+        if self.is_single_hop_network() {
+            if self.is_direct_neighbour(&link.zid) {
+                return Vec::new();
+            }
+            // The neighbour is gone whether or not it ever announced itself:
+            // its declarations were registered off the link, not the graph.
+            if let Some(idx) = self.get_idx(&link.zid) {
+                if self.graph.remove_node(idx).is_some() {
+                    self.idx_by_zid.remove(&link.zid);
+                    self.scrub_trees(&[idx]);
+                }
+            }
+            return vec![link.zid];
+        }
         self.graph[self.idx].links.remove(&link.zid);
         self.graph[self.idx].sn += 1;
         self.rebuild_edges(self.idx);
@@ -1493,6 +1559,31 @@ impl LinkstateNetwork {
                 .contains_key(&self.graph[idx].zid)
     }
 
+    /// R2893 (open-debt item 751, rule 8d) — what a NEW link is told, by mode.
+    /// The pin sends every node when the graph floods links, and otherwise
+    /// only the nodes that are its direct neighbours, by zid alone
+    /// (`zenoh/src/net/protocol/network.rs` @ `// Send all nodes linkstate on new link`):
+    /// a single-hop gossip `Network` has no links to give and does not relay
+    /// one neighbour's existence past the next, and self is not among them.
+    /// A peer's `Gossip` graph keeps the full list ([`NetObject`]).
+    ///
+    /// ⚠ The linkstate arm returns [`build_linkstate_list`](Self::build_linkstate_list)
+    /// unchanged, locators included, where the pin's bootstrap carries none;
+    /// that divergence predates this round and is registered, not repaired
+    /// here.
+    pub fn build_new_link_bootstrap(&self) -> LinkstateListOwned {
+        if !self.is_single_hop_network() {
+            return self.build_linkstate_list();
+        }
+        into_list(
+            self.graph
+                .node_indices()
+                .filter(|&idx| self.is_direct_neighbour(&self.graph[idx].zid))
+                .map(|idx| self.make_link_state(idx, Details::ZidOnly))
+                .collect(),
+        )
+    }
+
     /// Build the `LinkStateList` advertising THIS peer's full known topology,
     /// for flooding to neighbours (the TX counterpart of
     /// [`ingest_linkstate_list`](Self::ingest_linkstate_list)). Every graph
@@ -1561,6 +1652,82 @@ impl LinkstateNetwork {
         }
         entries.push(self.make_link_state(self.idx, Details::LinksOnly));
         into_list(entries)
+    }
+
+    /// R2893 (open-debt item 751, rule 8d) — what self's EXISTING links are
+    /// told when self gains a link to `neighbour`, by mode, or `None` when the
+    /// pin sends them nothing: its whole existing-links send sits under
+    /// `if self.full_linkstate || self.gossip_multihop {`
+    /// (`zenoh/src/net/protocol/network.rs` @ `// Send updated self linkstate on all existing links except new one`),
+    /// so a single-hop gossip `Network`, which wrote no self link, has no
+    /// change to tell. Otherwise the 2-entry form for a neighbour new to the
+    /// graph and self's links alone for a parallel link; a peer's `Gossip`
+    /// graph keeps the 2-entry form in every gossip case (R311y431: a gossip
+    /// receiver has no other way to learn self's psid for the neighbour). The
+    /// forwarders ask this rather than deciding the shape themselves, because
+    /// the mode is this graph's.
+    pub fn build_link_added_delta_for_existing(
+        &self,
+        neighbour: &Zid,
+        neighbour_was_new: bool,
+    ) -> Option<LinkstateListOwned> {
+        if self.is_single_hop_network() {
+            return None;
+        }
+        let gossip_introduces = self.object == NetObject::Gossip && !self.full_linkstate;
+        Some(if neighbour_was_new || gossip_introduces {
+            self.build_link_added_delta(neighbour)
+        } else {
+            self.build_self_links_delta()
+        })
+    }
+
+    /// R2893 — what the surviving links are told when self LOSES a link, or
+    /// `None` in a single-hop gossip `Network`, where the pin removes the node
+    /// and sends nothing (`zenoh/src/net/protocol/network.rs` @ `pub(crate) fn remove_link`).
+    pub fn build_link_removed_delta(&self) -> Option<LinkstateListOwned> {
+        (!self.is_single_hop_network()).then(|| self.build_self_links_delta())
+    }
+
+    /// R2893 — the re-flood an ingest's `changes` owe the face whose neighbour
+    /// is `target`, or `None` when that face is owed nothing. ONE decision for
+    /// both forwarders: the peer forwarder held it alone, and the router's
+    /// per-region copy had drifted from it, still withholding the whole list
+    /// from the source face that R311y431 found must receive the `new` half.
+    ///
+    /// - gossip (`full_linkstate` off): one zid+locators entry per changed node
+    ///   [`gossip_reflood_admits`](Self::gossip_reflood_admits) passes, never
+    ///   the target's own; the source is not otherwise excluded
+    ///   (`zenoh/src/net/protocol/network.rs` @ `|link| link.zid != ls.zid,`).
+    /// - linkstate: `new` in full and `updated` links-only, minus the target's
+    ///   own entry, and `updated` withheld from the source face
+    ///   (`zenoh/src/net/protocol/network.rs` @ `fn propagate_link_states`).
+    pub fn build_reflood_for(
+        &self,
+        changes: &Changes,
+        target: Option<Zid>,
+        target_is_source: bool,
+    ) -> Option<LinkstateListOwned> {
+        let not_target = |z: &&Zid| target != Some(**z);
+        if !self.full_linkstate {
+            let nodes: Vec<Zid> = changes
+                .new
+                .iter()
+                .chain(changes.updated.iter())
+                .filter(not_target)
+                .filter(|z| self.gossip_reflood_admits(z))
+                .cloned()
+                .collect();
+            return (!nodes.is_empty()).then(|| self.build_linkstate_gossip(&nodes));
+        }
+        let new: Vec<Zid> = changes.new.iter().filter(not_target).cloned().collect();
+        let updated: Vec<Zid> = if target_is_source {
+            Vec::new()
+        } else {
+            changes.updated.iter().filter(not_target).cloned().collect()
+        };
+        (!(new.is_empty() && updated.is_empty()))
+            .then(|| self.build_linkstate_split(&new, &updated))
     }
 
     /// Resolve a received list from psid-space to zid-space against the
@@ -1883,7 +2050,14 @@ impl LinkstateNetwork {
                     // the linkstate ingest applies too. Read before the write.
                     let was_placeholder = node.sn == 0;
                     node.sn = ls.sn;
-                    node.links = ls.links;
+                    // R2893 — an EMPTY links list is not "no links": a gossip
+                    // announcement carries none by construction, so it must not
+                    // wipe what a node's own link-state said
+                    // (`zenoh/src/net/protocol/network.rs` @ `if !ls.links.is_empty() {`).
+                    // A `Network`'s rule; a peer's `Gossip` graph is item 751 8e.
+                    if !ls.links.is_empty() || self.object == NetObject::Gossip {
+                        node.links = ls.links;
+                    }
                     if node.whatami.is_none() {
                         node.whatami = Some(ls.whatami);
                     }
@@ -3066,6 +3240,70 @@ mod tests {
         multihop.set_gossip_multihop(true);
         multihop.add_link(zid(0xAA), WhatAmI::Peer);
         assert!(multihop.update_link_weights(weights(&[(0xAA, 300)])));
+    }
+
+    /// R2893 (open-debt item 751, rule 8d) — a region's single-hop gossip
+    /// `Network` and a peer's `Gossip` graph take the SAME links and answer
+    /// differently, each as its pin object does. The `Network` keeps the link
+    /// alone, bootstraps a new link with its announced direct neighbours by
+    /// zid (never self, never links or locators), tells existing and surviving
+    /// links nothing, and hands back a departed neighbour it never held a node
+    /// for. The `Gossip` graph keeps wz's earlier port: a node per link and
+    /// self in the full bootstrap. Side by side, so neither can pass by
+    /// behaving like the other.
+    #[test]
+    fn a_single_hop_network_and_a_gossip_graph_answer_a_link_as_their_pin_objects() {
+        let (me, near, quiet) = (zid(0x01), zid(0xAA), zid(0xBB));
+
+        let mut network = LinkstateNetwork::new_in_region(me, WhatAmI::Router, true);
+        network.set_full_linkstate(false);
+        let near_link = network.add_link(near, WhatAmI::Peer);
+        let quiet_link = network.add_link(quiet, WhatAmI::Peer);
+        assert_eq!(network.node_count(), 1, "no node for a link alone");
+        assert!(
+            network.get_node(&me).expect("self").links.is_empty(),
+            "no self link written"
+        );
+        assert_eq!(
+            network.next_hop(&me, &quiet),
+            Some(quiet),
+            "routed off the link"
+        );
+        network.ensure_node(near); // `near` has announced itself; `quiet` has not
+        let bootstrap = network.build_new_link_bootstrap();
+        assert_eq!(bootstrap.link_states.len(), 1, "announced neighbours only");
+        let entry = &bootstrap.link_states[0];
+        assert_ne!(entry.psid, 0, "self is not in the bootstrap");
+        assert!(entry.zid.is_some() && entry.links.is_empty() && entry.locators.is_none());
+        assert!(network
+            .build_link_added_delta_for_existing(&near, true)
+            .is_none());
+        assert!(network.build_link_removed_delta().is_none());
+        assert_eq!(
+            network.remove_link(quiet_link),
+            vec![quiet],
+            "never a node, still purged"
+        );
+        assert_eq!(network.remove_link(near_link), vec![near]);
+        assert_eq!(network.node_count(), 1);
+
+        let mut gossip = LinkstateNetwork::new(me, WhatAmI::Peer);
+        gossip.set_full_linkstate(false);
+        gossip.add_link(near, WhatAmI::Peer);
+        assert_eq!(
+            gossip.node_count(),
+            2,
+            "the Gossip graph adds the neighbour"
+        );
+        assert!(gossip
+            .build_new_link_bootstrap()
+            .link_states
+            .iter()
+            .any(|e| e.psid == 0));
+        assert!(gossip
+            .build_link_added_delta_for_existing(&near, false)
+            .is_some());
+        assert!(gossip.build_link_removed_delta().is_some());
     }
 
     /// R2811 — the route queries answer upstream's peer-HAT rule in GOSSIP mode:

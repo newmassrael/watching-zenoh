@@ -400,9 +400,9 @@ use crate::linkstate_forward::{
     complete_query_directions, compute_push_forward, compute_self_publish_forward,
     declare_queryable_wireexpr, declare_subscriber_wireexpr, emit_current_interest_replies,
     is_tree_forward_target, peer_acl_username, peer_whatami_routing, peer_zid_routing,
-    re_advertise_interest_into, resolve_governed_keyexpr, resolve_source_in, select_best_matching,
-    synthesize_drained_fan_finals, synthesize_expired_query_returns, LocalQueryHandler,
-    LocalQueryView, LocalQueryable, LocalSubscriber, LocalSubscriberHandler,
+    re_advertise_interest_into, resolve_governed_keyexpr, resolve_source_in, resolve_source_zid_in,
+    select_best_matching, synthesize_drained_fan_finals, synthesize_expired_query_returns,
+    LocalQueryHandler, LocalQueryView, LocalQueryable, LocalSubscriber, LocalSubscriberHandler,
 };
 use crate::routing_region::{hat_kind, GatewayView, HatKind, InterRegionFilter, RegionMap};
 // R2393 — the host-subscriber dispatch's sample types, the same ones the peer
@@ -523,6 +523,13 @@ impl MeshHat {
     /// seeds each hat's net from that hat's region
     /// (`zenoh/src/net/routing/hat/router/mod.rs` @ `self.region().bound(),`).
     fn new(region: Region, self_zid: Zid) -> Self {
+        // R2893 (751 rule 8d) — the pin builds the south peer region's net with
+        // `full_linkstate` off (`zenoh/src/net/routing/hat/peer/mod.rs` @ `Bound::South => {`),
+        // and this one stays on until wz's own peers stop defaulting to the
+        // link-state peer mode the pin deleted: a mode must be the same across
+        // a subsystem, and a link-state peer's ingest GCs every link-less gossip
+        // entry it is sent (measured: three router-hat mesh E2Es red). The two
+        // flip together, as item 751 rule 8e.
         let net =
             LinkstateNetwork::new_in_region(self_zid, WhatAmI::Router, region.bound().is_south());
         Self {
@@ -712,7 +719,10 @@ struct Sourced {
     keyexpr: String,
     source_zid: Zid,
     inbound_zid: Option<Zid>,
-    out_node_id: u16,
+    /// R2893 — the psid a within-region re-flood stamps, or `None` where the
+    /// graph holds no node to number the source by: a single-hop gossip
+    /// `Network`, which is a peer-hat region, where nothing is re-flooded.
+    out_node_id: Option<u16>,
 }
 
 /// R2876 (step 3e) — a declaration resolved against the hat that owns its
@@ -2796,15 +2806,17 @@ impl RouterForwarder {
         neighbour: &Zid,
         neighbour_was_new: bool,
     ) -> Result<usize, CodecError> {
-        let full = build_linkstate_oam_owned(&net.borrow().build_linkstate_list())?;
-        let delta = {
-            let n = net.borrow();
-            let list = if neighbour_was_new {
-                n.build_link_added_delta(neighbour)
-            } else {
-                n.build_self_links_delta()
-            };
-            build_linkstate_oam_owned(&list)?
+        // R2893 (751 rule 8d) — both shapes are the graph's decision, by the
+        // pin object and mode it stands for: a single-hop gossip `Network` (the
+        // south peer region) bootstraps the new face with its direct
+        // neighbours' zids and tells the existing faces nothing.
+        let full = build_linkstate_oam_owned(&net.borrow().build_new_link_bootstrap())?;
+        let delta = match net
+            .borrow()
+            .build_link_added_delta_for_existing(neighbour, neighbour_was_new)
+        {
+            Some(list) => Some(build_linkstate_oam_owned(&list)?),
+            None => None,
         };
         self.fan_out_tier(tier, true, |id, zid| {
             if id == new_face {
@@ -2813,7 +2825,7 @@ impl RouterForwarder {
             if zid == Some(*neighbour) {
                 return Ok(None);
             }
-            Ok(Some(NetworkMessage::Oam(delta.clone())))
+            Ok(delta.clone().map(NetworkMessage::Oam))
         })
     }
 
@@ -2828,7 +2840,11 @@ impl RouterForwarder {
         tier: Region,
         net: &Rc<RefCell<LinkstateNetwork>>,
     ) -> Result<usize, CodecError> {
-        let oam = build_linkstate_oam_owned(&net.borrow().build_self_links_delta())?;
+        // R2893 — nothing to tell in a single-hop gossip `Network`.
+        let Some(list) = net.borrow().build_link_removed_delta() else {
+            return Ok(0);
+        };
+        let oam = build_linkstate_oam_owned(&list)?;
         self.fan_out_tier(tier, true, |_id, _zid| {
             Ok(Some(NetworkMessage::Oam(oam.clone())))
         })
@@ -2880,19 +2896,16 @@ impl RouterForwarder {
         if changes.new.is_empty() && changes.updated.is_empty() {
             return Ok(0);
         }
+        // R2893 — the shape and the per-face exclusions are the graph's
+        // (`build_reflood_for`), shared with the peer forwarder. This used to
+        // withhold the whole list from the source face, the defect R311y431
+        // found and repaired on the peer side only: psid space is per sender,
+        // so the source must get the `new` half back to learn self's psids.
         self.fan_out_tier(tier, true, |id, zid| {
-            if id == source {
-                return Ok(None);
+            match net.borrow().build_reflood_for(changes, zid, id == source) {
+                Some(list) => Ok(Some(NetworkMessage::Oam(build_linkstate_oam_owned(&list)?))),
+                None => Ok(None),
             }
-            let keep = |z: &&Zid| zid != Some(**z);
-            let new: Vec<Zid> = changes.new.iter().filter(keep).cloned().collect();
-            let updated: Vec<Zid> = changes.updated.iter().filter(keep).cloned().collect();
-            if new.is_empty() && updated.is_empty() {
-                return Ok(None);
-            }
-            let oam =
-                build_linkstate_oam_owned(&net.borrow().build_linkstate_split(&new, &updated))?;
-            Ok(Some(NetworkMessage::Oam(oam)))
         })
     }
 
@@ -3150,12 +3163,18 @@ impl RouterForwarder {
             let keyexpr = keyexpr_of(&s.keyexpr_table)?;
             (peer_zid_routing(&s.actions), s.link, keyexpr)
         };
-        let (source_zid, out_node_id) = resolve_source_in(
-            &net.borrow(),
+        // R2893 — the source is resolved without the graph, and the relay psid
+        // is read only if the graph numbers the source (see `Sourced`).
+        let net = net.borrow();
+        let source_zid = resolve_source_zid_in(
+            &net,
             inbound_zid,
             inbound_link,
             read_declare_source(declare),
         )?;
+        let out_node_id = net
+            .local_psid_of(&source_zid)
+            .and_then(|psid| u16::try_from(psid).ok());
         Some(Sourced {
             keyexpr,
             source_zid,
@@ -3242,13 +3261,16 @@ impl RouterForwarder {
         let Some((net, _dirty)) = self.plane(tier) else {
             return;
         };
+        let Some(out_node_id) = sourced.out_node_id else {
+            return;
+        };
         self.reflood_declaration(
             inbound,
             tier,
             net,
             sourced.source_zid,
             sourced.inbound_zid,
-            sourced.out_node_id,
+            out_node_id,
             reliable,
             &sourced.keyexpr,
             build,
@@ -4535,14 +4557,15 @@ impl RouterForwarder {
                 InboundFace::SourceOnly | InboundFace::Gone => return (None, None),
             }
         };
+        // R2893 — the origin alone, which needs no graph node (a peer-hat
+        // region's single-hop gossip `Network` has none for a new neighbour).
         let source = self.plane(tier).and_then(|(net, _dirty)| {
-            resolve_source_in(
+            resolve_source_zid_in(
                 &net.borrow(),
                 inbound_zid,
                 inbound_link,
                 read_push_source(push),
             )
-            .map(|(zid, _psid)| zid)
         });
         (source, inbound_zid)
     }
@@ -12747,6 +12770,27 @@ mod tests {
             sink_p.frame_count(),
             0,
             "the peer face is NOT reached by a routers-tier propagate"
+        );
+    }
+
+    /// R2893 — the source face of a topology flood gets the NEW node back:
+    /// psid space is per sender, so it learns self's psid for that node only
+    /// from the echo (the peer forwarder's R311y431 finding, measured against
+    /// zenohd). The router's re-flood withheld the whole list from the source
+    /// until it asked the graph's shared `build_reflood_for`.
+    #[test]
+    fn a_topology_reflood_returns_the_new_node_to_its_source() {
+        let fwd = RouterForwarder::new(zid(0x01));
+        let (a, sink_a) = face(zid(0xAA), WIRE_ROUTER);
+        fwd.register(FaceId(0), &a);
+        sink_a.reset();
+        discover_via(&fwd, FaceId(0), 0x01, 0xAA, 0xDD, 3, 5);
+        let echoed: Vec<LinkstateOwned> = received_link_states(&sink_a);
+        assert!(
+            echoed
+                .iter()
+                .any(|e| e.zid.as_deref() == Some(zid(0xDD).as_slice())),
+            "the source face is told self's entry for the node it introduced"
         );
     }
 

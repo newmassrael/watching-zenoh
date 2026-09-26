@@ -1663,50 +1663,14 @@ impl LinkstateForwarder {
         // A clone of the graph handle so the per-face builder can borrow it
         // (the `Rc` is the cell; `fan_out` only holds the `faces` borrow).
         let net = self.net.clone();
-        // GOSSIP (`peer_to_peer`) re-flood — zenoh `network.rs:594-602`. A
-        // different SHAPE, not a narrowed one: one `NodeOnly` entry (zid +
-        // locators, no links) per changed node, admitted only when
-        // `gossip_reflood_admits` says so (without multihop a gossip node relays
-        // its DIRECT neighbours only). The source face is NOT excluded here
-        // either — zenoh's filter is `|link| link.zid != ls.zid`, the per-node
-        // exclusion alone.
-        if !net.borrow().full_linkstate() {
-            return self.fan_out(true, Some(self.gossip_target.get()), |_id, zid| {
-                let net_ref = net.borrow();
-                let nodes: Vec<Zid> = changes
-                    .new
-                    .iter()
-                    .chain(changes.updated.iter())
-                    .filter(|z| zid != Some(**z))
-                    .filter(|z| net_ref.gossip_reflood_admits(z))
-                    .cloned()
-                    .collect();
-                if nodes.is_empty() {
-                    return Ok(None);
-                }
-                let oam = build_linkstate_oam_owned(&net_ref.build_linkstate_gossip(&nodes))?;
-                Ok(Some(NetworkMessage::Oam(oam)))
-            });
-        }
+        // R2893 — the shape (gossip or linkstate) and the per-face exclusions
+        // are the graph's decision, `build_reflood_for`, shared with the
+        // router's per-region re-flood; this only fans it out.
         self.fan_out(true, Some(self.gossip_target.get()), |id, zid| {
-            // Drop the node whose own state this is from the list sent to ITS
-            // face (zenoh `network.rs:663`) — the per-face payload differs, so
-            // each face gets its own built carrier.
-            let keep = |z: &&Zid| zid != Some(**z);
-            let new: Vec<Zid> = changes.new.iter().filter(keep).cloned().collect();
-            // The source face gets the `new` half (above) but NOT the `updated`
-            // half — zenoh `network.rs:661`.
-            let updated: Vec<Zid> = if id == source {
-                Vec::new()
-            } else {
-                changes.updated.iter().filter(keep).cloned().collect()
-            };
-            if new.is_empty() && updated.is_empty() {
-                return Ok(None);
+            match net.borrow().build_reflood_for(changes, zid, id == source) {
+                Some(list) => Ok(Some(NetworkMessage::Oam(build_linkstate_oam_owned(&list)?))),
+                None => Ok(None),
             }
-            let oam =
-                build_linkstate_oam_owned(&net.borrow().build_linkstate_split(&new, &updated))?;
-            Ok(Some(NetworkMessage::Oam(oam)))
         })
     }
 
@@ -1802,7 +1766,9 @@ impl LinkstateForwarder {
     /// [`LinkstateNetwork::build_linkstate_list`]); `build_linkstate_oam_owned`
     /// (c1) wraps it in the carrier. Mirrors zenoh `make_msg`.
     fn build_self_oam(&self) -> Result<OamOwned, CodecError> {
-        let list = self.net.borrow().build_linkstate_list();
+        // R2893 — the new-link bootstrap is the graph's decision by the pin
+        // object it stands for; a peer's graph gets the full list, as before.
+        let list = self.net.borrow().build_new_link_bootstrap();
         build_linkstate_oam_owned(&list)
     }
 
@@ -1945,25 +1911,22 @@ impl LinkstateForwarder {
         // Build each shape once (NetworkMessage is not Clone, OamOwned is —
         // re-wrap a clone per face).
         let full = self.build_self_oam()?;
-        let delta = {
-            let net = self.net.borrow();
-            // zenoh's condition is `new || (!full_linkstate && !gossip_multihop)`
-            // (`network.rs:867`, and the gossip twin at `p2p_peer/gossip.rs:519`
-            // where the `full_linkstate` term is absent because that Network is
-            // always gossip). So in GOSSIP mode the 2-entry form is unconditional:
-            // a gossip receiver has no other way to learn our psid for this
-            // neighbour, since the gossip re-flood only relays DIRECT neighbours
-            // and this one was not ours yet when its announcement arrived. Sending
-            // the 1-entry form there leaves the psid in self's `links` dangling
-            // and the peer rejects that edge (`unknown link mapping`), which is
-            // what a stock zenohd router did until R311y431.
-            let introduce_neighbour = neighbour_was_new || !net.full_linkstate();
-            let list = if introduce_neighbour {
-                net.build_link_added_delta(neighbour)
-            } else {
-                net.build_self_links_delta()
-            };
-            build_linkstate_oam_owned(&list)?
+        // In GOSSIP mode the 2-entry form is unconditional: a gossip receiver
+        // has no other way to learn our psid for this neighbour, since the
+        // gossip re-flood only relays DIRECT neighbours and this one was not
+        // ours yet when its announcement arrived. Sending the 1-entry form
+        // there leaves the psid in self's `links` dangling and the peer rejects
+        // that edge (`unknown link mapping`), which is what a stock zenohd
+        // router did until R311y431. R2893 moved that decision into the graph
+        // (`build_link_added_delta_for_existing`), which the router's
+        // per-region twin shares.
+        let delta = match self
+            .net
+            .borrow()
+            .build_link_added_delta_for_existing(neighbour, neighbour_was_new)
+        {
+            Some(list) => Some(build_linkstate_oam_owned(&list)?),
+            None => None,
         };
         let reached = self.fan_out(true, Some(self.gossip_target.get()), |id, zid| {
             if id == new_face {
@@ -1979,7 +1942,7 @@ impl LinkstateForwarder {
                 // — self-links frame).
                 return Ok(None);
             }
-            Ok(Some(NetworkMessage::Oam(delta.clone())))
+            Ok(delta.clone().map(NetworkMessage::Oam))
         });
         // R2236 (open-debt item 588) — the JOIN-time half, and without it the
         // other two arms are unreachable in practice.
@@ -2019,7 +1982,12 @@ impl LinkstateForwarder {
     /// and the links-only form (no zid) suffices since every survivor already
     /// mapped self. Reliable; returns the count of faces reached.
     fn flood_self_links_changed(&self) -> Result<usize, CodecError> {
-        let oam = build_linkstate_oam_owned(&self.net.borrow().build_self_links_delta())?;
+        // R2893 — the graph's decision, shared with the router's per-region
+        // twin (a peer's `Gossip` graph always has one to send).
+        let Some(list) = self.net.borrow().build_link_removed_delta() else {
+            return Ok(0);
+        };
+        let oam = build_linkstate_oam_owned(&list)?;
         self.fan_out(true, Some(self.gossip_target.get()), |_id, _zid| {
             Ok(Some(NetworkMessage::Oam(oam.clone())))
         })
@@ -6038,6 +6006,25 @@ pub(crate) fn resolve_source_in(
     inbound_link: Option<LinkId>,
     node_id: u16,
 ) -> Option<(Zid, u16)> {
+    let source_zid = resolve_source_zid_in(net, inbound_zid, inbound_link, node_id)?;
+    let out_node_id = u16::try_from(net.local_psid_of(&source_zid)?).ok()?;
+    Some((source_zid, out_node_id))
+}
+
+/// R2893 (open-debt item 751, rule 8d) — the SOURCE half of
+/// [`resolve_source_in`] alone: who originated a message, which the pin reads
+/// off the inbound link without consulting its graph
+/// (`zenoh/src/net/routing/hat/peer/mod.rs` @ `fn remote_node_id_to_zid`).
+/// The psid [`resolve_source_in`] adds is what self stamps when it RELAYS
+/// the message, and a single-hop gossip `Network` holds no node for a
+/// neighbour until that neighbour announces itself, so asking for both would
+/// drop a peer's first declaration in a region that never relays it anyway.
+pub(crate) fn resolve_source_zid_in(
+    net: &LinkstateNetwork,
+    inbound_zid: Option<Zid>,
+    inbound_link: Option<LinkId>,
+    node_id: u16,
+) -> Option<Zid> {
     let source_zid: Zid = match node_id {
         0 => inbound_zid?,
         nid => match inbound_link
@@ -6061,8 +6048,7 @@ pub(crate) fn resolve_source_in(
     if source_zid == *net.self_zid() {
         return None;
     }
-    let out_node_id = u16::try_from(net.local_psid_of(&source_zid)?).ok()?;
-    Some((source_zid, out_node_id))
+    Some(source_zid)
 }
 
 /// Compute the data-`Push` re-forward for ONE link-state mesh: given the tier's
