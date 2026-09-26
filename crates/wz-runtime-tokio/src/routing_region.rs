@@ -4,7 +4,8 @@
 //! R2864 (open-debt item 751) — the region-keyed STRUCTURE the pin's routing
 //! plane is built on, ported before anything routes on it.
 //!
-//! The pin keys every routing table by [`Region`]: a node builds one HAT per
+//! The pin keys every routing table by
+//! [`Region`](wz_session_core::extbound::Region): a node builds one HAT per
 //! region it serves, and a face is owned by the hat of the region it landed in
 //! (`zenoh/src/net/routing/dispatcher/tables.rs`
 //! @ `pub hats: RegionMap<Box<dyn HatTrait + Send + Sync>>,`). wz's routers
@@ -84,8 +85,9 @@ impl<D> RegionMap<D> {
     }
 
     /// The region's value, and every OTHER region's — the pin's
-    /// `partition_mut`, which is how a declaration registered on its owner's
-    /// hat reaches the rest (`dispatcher/pubsub.rs` @ `let (owner_hat, mut other_hats) =`).
+    /// `partition_mut`, which is how a new transport's face is handed to the
+    /// hat that owns its region alongside every other hat
+    /// (`zenoh/src/net/routing/gateway.rs` @ `let (owner_hat, other_hats) = tables`).
     /// `None` when `region` holds nothing.
     pub fn partition_mut(&mut self, region: &Region) -> Option<(&mut D, RegionMap<&mut D>)> {
         let target = region_to_index(region);
@@ -178,7 +180,7 @@ pub enum HatKind {
 }
 
 /// Which hat serves `region` on a node of `node_mode`, as the pin chooses it
-/// (`gateway.rs` @ `match (region.bound(), region.mode().unwrap_or(mode)) {`):
+/// (`zenoh/src/net/routing/gateway.rs` @ `match (region.bound(), region.mode().unwrap_or(mode)) {`):
 /// `North` takes the node's own mode, a subregion takes the mode it holds.
 pub fn hat_kind(region: &Region, node_mode: WhatAmI) -> HatKind {
     match (region.bound(), region.mode().unwrap_or(node_mode)) {
@@ -258,7 +260,7 @@ mod tests {
             .is_none());
     }
 
-    /// `gateway.rs`'s Auto arm, one line per mode.
+    /// The pin's Auto arm, one line per mode (the citation is on [`auto_regions`]).
     #[test]
     fn auto_regions_are_the_pins_per_mode() {
         assert_eq!(

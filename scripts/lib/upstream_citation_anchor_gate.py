@@ -486,7 +486,10 @@ BARE_BUDGET = 57
 # refused its own source over it, 59 against a budget of 58. R2577 paid for
 # exactly this class in exactly this file. A budget note explaining a citation
 # must not BE one.
-ROOTLESS_LINE_BUDGET = 92
+# R2871 — 92 -> 90, DOWNWARD by a removal: R2866 retired the router's
+# `FaceTier` classifier, and the two docs that went with it each cited the
+# router hat's whatami branch by line number with no root.
+ROOTLESS_LINE_BUDGET = 90
 # R2862 — 36 -> 35. The auth segment's helpers moved into the shared POSIX
 # segment module, and the retry-count note that named the upstream segment file
 # with no root went with them; its replacement is anchored.
@@ -647,7 +650,8 @@ ROOTLESS_UNDECLARED_BUDGET = 649
 # to live named the array module with no root; R2862's rooted citation of a
 # sibling module made that directory a graded segment, and the note now carries
 # its root and an anchor.
-ROOTLESS_TOTAL_BUDGET = 776
+# R2871 — 776 -> 774, the same two line-form removals as ROOTLESS_LINE_BUDGET.
+ROOTLESS_TOTAL_BUDGET = 774
 
 #: A LIVE invocation of the RESOLUTION arm. R2242 split this gate in two and,
 #: in doing so, made `--resolve` a flag someone can simply stop passing: delete

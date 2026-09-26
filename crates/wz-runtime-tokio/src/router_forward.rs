@@ -446,7 +446,7 @@ fn is_leaf(region: Region) -> bool {
 /// R2867 (open-debt item 751, step 3a) — the state one MESH region's hat owns:
 /// its link-state net and the recompute flag for that net, as each of the
 /// pin's router and peer hats owns its own `Network`
-/// (`hat/router/mod.rs` @ `routers_net: Option<Network>,`). Steps 3b-3c bring
+/// (`zenoh/src/net/routing/hat/router/mod.rs` @ `routers_net: Option<Network>,`). Steps 3b-3c bring
 /// the region's subscriber, queryable and token tables in here too.
 struct MeshHat {
     /// The region's link-state graph. `Rc<RefCell>`, single-task, like every
@@ -515,7 +515,7 @@ fn region_table<T>(map: &RegionMap<Rc<T>>, region: Region) -> &Rc<T> {
 ///
 /// It changes nothing a stock peer can see. The pin's router hat owns `North`
 /// and puts every face it owns into `routers_net`
-/// (`hat/router/mod.rs` @ `let link_id = self.net_mut().add_link(transport.clone());`).
+/// (`zenoh/src/net/routing/hat/router/mod.rs` @ `let link_id = self.net_mut().add_link(transport.clone());`).
 /// Its peer hat serves `South { Peer }`, and broker hats serve the client
 /// regions. With no bound announced, which is what a stock node and every wz
 /// node send, a Router lands in `North`, a Peer in `South { 0, Peer }` and a
@@ -1083,8 +1083,9 @@ impl RouterDeclarationsView {
 /// the topology STATE; see the module docs for the deferred slices.
 pub struct RouterForwarder {
     /// R2867 (open-debt item 751, step 3a) — one [`MeshHat`] per MESH region,
-    /// keyed as the pin keys its hats (`dispatcher/tables.rs`
-    /// @ `pub hats: RegionMap<Box<dyn HatTrait + Send + Sync>>,`). Built from
+    /// keyed as the pin keys its hats
+    /// (`zenoh/src/net/routing/dispatcher/tables.rs` @ `pub hats: RegionMap<Box<dyn HatTrait + Send + Sync>>,`).
+    /// Built from
     /// the regions the pin's router builds, not from a list: `North` (the
     /// routers, zenoh's `routers_net`) and `South { 0, Peer }` (the peers, the
     /// graph this router still runs full link-state over). Reached through

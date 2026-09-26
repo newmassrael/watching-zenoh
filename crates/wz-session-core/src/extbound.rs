@@ -195,7 +195,7 @@ pub fn region_of(mode: WhatAmI, remote: WhatAmI, remote_bound: Option<Bound>) ->
 /// `compute_region_of` WHOLE, as its return type is: the region this node
 /// places the remote in AND the remote's own bound, which is what the pin's
 /// `Gateway::new_transport_unicast` stores on the face
-/// (`zenoh/src/net/routing/gateway.rs` @ `pub(crate) fn new_transport_unicast(`).
+/// (`zenoh/src/net/routing/gateway.rs` @ `pub fn new_transport_unicast(`).
 /// R2864 (open-debt item 751) — the routing half of the region model reads
 /// both; the adminspace row reads only the first, through [`region_of`].
 ///
