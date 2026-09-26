@@ -431,6 +431,19 @@ async fn bind_all_endpoints(
             listen.len(),
             listener.local_addr_display()?,
         );
+        // R2723's operator notice, moved here by R2886 from the retired star
+        // `--router` host so every binding run-mode carries it: a listener that
+        // yields one peer at a time (serial) is ADMITTED — upstream serves a tty
+        // peer too — but "listening" on it does not mean what it means for every
+        // other transport, so the node says so rather than refusing.
+        if !listener.supports_mesh_multi_peer() {
+            log::info!(
+                "wz-ap-demo {run_mode}: {endpoint} is a {} listener, which carries ONE peer \
+                 at a time — this node holds a single face off it and accepts the next once \
+                 that peer has gone (every other transport holds N concurrently)",
+                listener.transport_name()
+            );
+        }
         bound.push(listener);
     }
     // R2159 — the residue named in this function's doc, made a DIAGNOSTIC rather
@@ -672,8 +685,7 @@ impl ConnectPhaseWatch {
 /// list is already long, so a named bundle both keeps it under the argument-count
 /// lint AND rules out a cert/key or tls/quic transposition at the call site).
 /// `Default` (all `None`) is the cert-free bind; [`Self::build`] threads them via
-/// [`build_accept_config`]. (`run_peer` carries the same four inside [`PeerOpts`];
-/// `run_router` passes them positionally — each caller's existing arg style.)
+/// [`build_accept_config`]. (`run_peer` carries the same four inside [`PeerOpts`].)
 #[cfg(feature = "router-hat-router")]
 #[derive(Default)]
 pub(crate) struct AcceptCertPaths {
@@ -3716,168 +3728,6 @@ fn log_face_event(node_label: &str, event: &wz::runtime_tokio::accept_loop::Acce
     }
 }
 
-/// R311qa — multi-peer ROUTER mode: bind once and hold N concurrent peer faces
-/// (the `routing-router` foundation), distinct from the one-shot `--listen`
-/// Acceptor. Binds the `--router` endpoint, then runs the library
-/// [`accept_loop`](wz::runtime_tokio::accept_loop) — every inbound peer is
-/// brought to Established and held as a *face* until it closes — logging each
-/// face up/down so the live hold set is observable. With the `routing-routes`
-/// feature the held faces become *routes*: a [`RoutingForwarder`](wz::runtime_tokio::routing_forward::RoutingForwarder)
-/// forwards a Put received on one face to every other face that declared a
-/// matching subscriber (the data-plane atom). Without it (`routing-router`
-/// alone) the loop is the accept-and-hold transport foundation — faces are
-/// held but route nothing between them.
-///
-/// Runs until the graceful-shutdown signal (SIGTERM / SIGINT, the same
-/// [`shutdown_signal`] the single-session drive races), then reports how many
-/// peers were served and the high-water concurrency. The node identity is the
-/// Acceptor params (whatami Peer) — the well-tested accept direction; a true
-/// `WhatAmI::Router` wire value is a later refinement, not part of this atom.
-#[cfg(feature = "routing-router")]
-pub(crate) async fn run_router(
-    listen: &str,
-    tls_cert: &Option<String>,
-    tls_key: &Option<String>,
-    quic_cert: &Option<String>,
-    quic_key: &Option<String>,
-    tuning: TransportTuning,
-) -> io::Result<()> {
-    run_router_until(
-        listen,
-        tls_cert,
-        tls_key,
-        quic_cert,
-        quic_key,
-        tuning,
-        shutdown_signal(),
-    )
-    .await
-}
-
-/// The testable inner of [`run_router`] (CALLER fail-fast slice) — takes the
-/// shutdown as a parameter so a unit test can inject an immediately-ready future
-/// and witness the bind-time mesh-capability reject WITHOUT hanging on the real
-/// SIGTERM/SIGINT signal. [`run_router`] is the production wrapper that passes
-/// [`shutdown_signal`].
-#[cfg(feature = "routing-router")]
-async fn run_router_until(
-    listen: &str,
-    tls_cert: &Option<String>,
-    tls_key: &Option<String>,
-    quic_cert: &Option<String>,
-    quic_key: &Option<String>,
-    tuning: TransportTuning,
-    shutdown: impl std::future::Future<Output = ()>,
-) -> io::Result<()> {
-    use crate::args::NodeKind;
-    use wz::runtime_tokio::accept_loop::{accept_loop, AcceptEvent};
-    use wz::runtime_tokio::session_open::bind_endpoint_with_config;
-
-    // R311y405 — thread the `--<scheme>-cert` / `--<scheme>-key` into the bind's
-    // AcceptConfig (the SAME build_accept_config the one-shot `--listen` Acceptor
-    // uses), so a `--router tls/...` / `--router quic/...` presents its server cert.
-    // Was `bind_endpoint(listen)` (a cert-free `AcceptConfig::default()`), which made
-    // `bind_locator` reject a tls/quic router listen at cert-absence -- the follow-up
-    // `bind_endpoint`'s own doc named. A cert-free transport (tcp/ws/udp) still binds
-    // (its cert slots stay None).
-    let accept_cfg = build_accept_config(
-        tls_cert,
-        tls_key,
-        quic_cert,
-        quic_key,
-        &tuning.link_defaults,
-    )?;
-    let listener = bind_endpoint_with_config(listen, &accept_cfg).await?;
-    // CALLER fail-fast (mesh accept loop): the router holds N faces off ONE
-    // listener, so a NON-mesh-capable acceptor (one that could not feed a
-    // multi-accept loop) is rejected at bind with a clear error instead of
-    // "listening" yet holding 0 faces. The BIND-time twin of the loop's runtime
-    // backstop (`AcceptedLink::supports_mesh_multi_peer`, the `Step::Accepted`
-    // arm).
-    //
-    // ⛔ R2723 -- THIS NO LONGER REFUSES. It used to reject any listener that
-    // could not yield N CONCURRENT peers, which since R311y805 has meant serial
-    // and only serial, so a `--listen serial/...` router could not be started at
-    // all. That was right while a wz serial listener yielded ONE link EVER;
-    // R2722 gave it link-liveness feedback, so it now serves peers one AT A TIME
-    // and feeds the accept loop like any other listener (`accept_any` rebuilds
-    // its future set each iteration, and the listener parks while its link is
-    // live). A gateway bridging a tty peer into a mesh is a real deployment and
-    // upstream serves it, so refusing was a parity gap rather than a guard.
-    //
-    // The predicate is still TRUE and still worth telling an operator: a router
-    // listening on a tty holds one face at a time off it, which is not what
-    // "listening" implies for every other transport. So the verb changes from
-    // refuse to REPORT -- the fact reaches the log, and the bind proceeds.
-    if !listener.supports_mesh_multi_peer() {
-        log::info!(
-            "wz-ap-demo router: --listen {listen:?} is a {} listener, which carries ONE peer at \
-             a time — the router holds a single face off it and accepts the next once that peer \
-             has gone (every other transport holds N concurrently)",
-            listener.transport_name()
-        );
-    }
-    let local = listener.local_addr_display()?;
-    #[cfg(feature = "routing-routes")]
-    log::info!(
-        "wz-ap-demo router: listening on {local}; holding N concurrent peer \
-         faces and FORWARDING Puts to matching subscribers (routing-routes)"
-    );
-    #[cfg(not(feature = "routing-routes"))]
-    log::info!(
-        "wz-ap-demo router: listening on {local}; holding N concurrent peer \
-         faces (routing-router foundation, no forwarding)"
-    );
-
-    // R2885 — a random identity per process; until then every star router
-    // opened with the demo's constant `01020304`.
-    let params = demo_session_init_params(
-        NodeKind::Router,
-        crate::args::resolve_node_zid(None)?,
-        &tuning,
-    )?;
-
-    // The forwarding seam: with `routing-routes` the router routes Puts between
-    // faces ([`RoutingForwarder`]); without it the accept-and-hold foundation
-    // holds faces but routes nothing ([`NoOpForwarder`]).
-    #[cfg(feature = "routing-routes")]
-    let forwarder = wz::runtime_tokio::routing_forward::RoutingForwarder::new();
-    #[cfg(not(feature = "routing-routes"))]
-    let forwarder = wz::runtime_tokio::accept_loop::NoOpForwarder;
-
-    let summary = accept_loop(
-        listener,
-        params,
-        TokioTime::new(),
-        DEFAULT_OPEN_TICK_MS,
-        shutdown,
-        |event: &AcceptEvent| log_face_event("router", event),
-        &forwarder,
-    )
-    .await;
-
-    // R311qj — `route_computations()` is logged here as a genuine cache-
-    // effectiveness ops signal (cumulative route scans; low relative to
-    // `forwarded` = good cache reuse), giving the `RouteTable`'s miss counter a
-    // production reader rather than a test-only one.
-    #[cfg(feature = "routing-routes")]
-    log::info!(
-        "wz-ap-demo router: shutdown; served {} peer(s), peak {} concurrent \
-         face(s), forwarded {} sample(s), computed {} route(s)",
-        summary.established,
-        summary.peak_concurrent,
-        forwarder.forwarded(),
-        forwarder.route_computations()
-    );
-    #[cfg(not(feature = "routing-routes"))]
-    log::info!(
-        "wz-ap-demo router: shutdown; served {} peer(s), peak {} concurrent face(s)",
-        summary.established,
-        summary.peak_concurrent
-    );
-    Ok(())
-}
-
 /// Resolve every configured `--connect` dial target for a mesh host, in order.
 ///
 /// R311y809 — ONE resolution for both mesh hosts, through the SHARED classifier.
@@ -3922,8 +3772,7 @@ async fn resolve_dial_targets(
 
 /// R311qg — peer-MESH mode: bind once, DIAL each configured peer, and accept
 /// inbound — holding both directions' faces (the `routing-peer` foundation,
-/// hold-only). The dial+accept generalisation of [`run_router`]: where a router
-/// only accepts, a peer also dials out to form a mesh. Binds `listen`, parses the
+/// hold-only). It accepts and also dials out to form a mesh. Binds `listen`, parses the
 /// `dial_targets` (TCP socket addresses for this atom), then runs the library
 /// [`peer_loop`](wz::runtime_tokio::accept_loop::peer_loop) with a
 /// [`LinkstateForwarder`](wz::runtime_tokio::linkstate_forward::LinkstateForwarder)
@@ -4260,7 +4109,7 @@ pub(crate) async fn run_peer(
 /// so a unit test can inject an immediately-ready future and witness the bind (e.g. a
 /// cert-threaded `--peer quic/` ADMIT) WITHOUT hanging on the real SIGTERM/SIGINT
 /// signal. [`run_peer`] is the production wrapper that passes [`shutdown_signal`]. The
-/// peer twin of [`run_router_until`].
+/// peer twin of [`run_router_hat_until`].
 #[cfg(feature = "routing-peer")]
 async fn run_peer_until(
     // R2099 (open-debt item 512) — the WHOLE `listen/endpoints` list, not its
@@ -5841,8 +5690,9 @@ async fn run_peer_until(
 /// run-mode to present a TRUE wire [`WhatAmI::Router`] and drive the dual-mesh
 /// [`RouterForwarder`](wz::runtime_tokio::router_forward::RouterForwarder) (the
 /// zenoh `hat/router` port) over real transport. The dial+accept
-/// [`peer_loop`](wz::runtime_tokio::accept_loop::peer_loop) generalisation of
-/// [`run_router`]: like the peer-mesh [`run_peer`] it binds `listen`, dials each
+/// [`peer_loop`](wz::runtime_tokio::accept_loop::peer_loop) host, and since
+/// R2886 the one router run-mode (`--router` is its other spelling): like the
+/// peer-mesh [`run_peer`] it binds `listen`, dials each
 /// `dial_targets` (a ROUTER dialing another router for federation — ACTIVATION-4),
 /// and holds both directions' faces; unlike the peer it announces Router, drives
 /// the router forwarder, and hosts NO local publisher / subscriber / interceptors
@@ -6025,7 +5875,7 @@ struct PendingConfigWrite {
 /// parameter so a unit test can inject an immediately-ready future and witness the
 /// bind (e.g. a cert-threaded `--router-hat quic/` ADMIT) WITHOUT hanging on the real
 /// SIGTERM/SIGINT signal. [`run_router_hat`] is the production wrapper that passes
-/// [`shutdown_signal`]. The router-hat twin of [`run_router_until`] / [`run_peer_until`].
+/// [`shutdown_signal`]. The router-hat twin of [`run_peer_until`].
 #[cfg(feature = "router-hat-router")]
 async fn run_router_hat_until(
     // R2099 (open-debt item 512) — the WHOLE `listen/endpoints` list; see
@@ -9206,65 +9056,14 @@ mod storage_host_volume_tests {
     }
 }
 
-#[cfg(all(
-    test,
-    feature = "routing-router",
-    feature = "transport-link-unixpipe",
-    target_os = "linux"
-))]
-mod caller_failfast_tests {
-    use super::{run_router_until, TransportTuning};
-
-    /// R311y392 — the once-`reject` discriminator flipped to ACCEPT: `run_router`
-    /// (via its testable inner `run_router_until`) now ADMITS a `--listen
-    /// unixpipe/..` at bind. The multi-client acceptor makes a unixpipe listener
-    /// mesh-capable, so the bind-time guard no longer rejects it; the router binds,
-    /// enters the accept loop, and (with the injected immediately-ready shutdown)
-    /// returns `Ok(())`. Replaces the retired
-    /// `run_router_rejects_a_unixpipe_listen_at_bind` (R311y390), whose `expect_err`
-    /// the flip broke.
-    ///
-    /// RED reproduction (proof this binds to the flipped guard, not the vehicle):
-    /// RESTORE the rejection — make `BoundListener::supports_mesh_multi_peer` return
-    /// `false` for `Unixpipe` again -> `run_router_until` returns `Err(Unsupported)`
-    /// -> this `expect` panics. The injected `std::future::ready(())` makes the
-    /// GREEN path a clean immediate return rather than a SIGTERM-wait hang.
-    #[tokio::test]
-    async fn run_router_accepts_a_unixpipe_listen_at_bind() {
-        let base = std::env::temp_dir()
-            .join(format!(
-                "wz-ap-demo-router-multiclient-{}",
-                std::process::id()
-            ))
-            .to_string_lossy()
-            .into_owned();
-        // Pre-clean any stale FIFO node from a crashed prior run (no-flaky).
-        let _ = std::fs::remove_file(format!("{base}_uplink"));
-
-        let listen = format!("unixpipe/{base}");
-        // R311y405 — a cert-free unixpipe listen: all four cert slots are `&None`
-        // (the run_router_until signature grew a tls/quic cert-path quartet).
-        run_router_until(
-            &listen,
-            &None,
-            &None,
-            &None,
-            &None,
-            TransportTuning::default(),
-            std::future::ready(()),
-        )
-        .await
-        .expect("the mesh router admits a multi-client unixpipe --listen (R311y392)");
-
-        // The acceptor's teardown unlinks the base request node; best-effort here.
-        let _ = std::fs::remove_file(format!("{base}_uplink"));
-    }
-}
-
-#[cfg(all(test, feature = "routing-router", feature = "transport-link-serial"))]
+#[cfg(all(test, feature = "router-hat-router", feature = "transport-link-serial"))]
 mod serial_caller_failfast_tests {
-    use super::{run_router_until, TransportTuning};
+    use super::run_router_hat_until;
 
+    /// R2886 — moved onto the router hat with `--router` itself; the retired
+    /// star host carried the original, and the unixpipe twin it names now lives
+    /// as `run_router_hat_without_zid_on_a_unixpipe_listen_serves`.
+    ///
     /// ⛔ R2723 — the mesh router ADMITS a `--listen serial/...`, where it used to
     /// refuse one at bind.
     ///
@@ -9291,19 +9090,19 @@ mod serial_caller_failfast_tests {
     /// returns `Ok(())`. An accept error is not a router failure; a REFUSED BIND
     /// is, which is exactly the difference this arm measures.
     ///
-    /// RED reproduction, and it is the change this round made: restore the
-    /// rejection in `run_router`'s bind guard -> `run_router_until` returns
-    /// `Err(Unsupported)` -> this `expect` panics.
+    /// RED reproduction: make the shared bind helper refuse a listener that is
+    /// not `supports_mesh_multi_peer` -> `run_router_hat_until` returns an error
+    /// -> this `expect` panics.
     #[tokio::test]
     async fn run_router_accepts_a_serial_listen_at_bind() {
         let listen = "serial//dev/wz-no-such-tty-r2723#baudrate=115200".to_string();
-        run_router_until(
-            &listen,
-            &None,
-            &None,
-            &None,
-            &None,
-            TransportTuning::default(),
+        run_router_hat_until(
+            std::slice::from_ref(&listen),
+            &[],
+            None,
+            None,
+            &super::AcceptCertPaths::default(),
+            &super::RouterHatOpts::default(),
             std::future::ready(()),
         )
         .await
@@ -9437,65 +9236,6 @@ mod mesh_dial_target_tests {
             err.to_string().contains("not a dialable endpoint"),
             "expected the malformed arm, got {err}"
         );
-    }
-}
-
-#[cfg(all(test, feature = "routing-router", feature = "quic"))]
-mod router_quic_cert_tests {
-    use super::{run_router_until, TransportTuning};
-
-    /// R311y405 — the `--router quic/` cert-threading discriminator: the mesh router
-    /// now ADMITS a `quic/...` --listen WHEN its `--quic-cert` / `--quic-key` are
-    /// threaded. Was rejected at bind cert-absence — `run_router` bound with a
-    /// cert-free `AcceptConfig::default()` (via `bind_endpoint`), the follow-up
-    /// `bind_endpoint`'s own doc named. Now `run_router_until` builds the AcceptConfig
-    /// from the cert paths (the SAME `build_accept_config` the one-shot `--listen`
-    /// uses) + `bind_endpoint_with_config`, so a cert-bearing quic listen binds; the
-    /// injected immediately-ready shutdown makes the accept loop return `Ok`. The QUIC
-    /// twin of `run_router_accepts_a_unixpipe_listen_at_bind`.
-    ///
-    /// RED reproduction (proof it binds to the cert-threading seam, not the vehicle):
-    /// RESTORE `bind_endpoint(listen)` (the cert-free default) in `run_router_until`
-    /// -> `bind_locator` rejects the quic listen at cert-absence -> `run_router_until`
-    /// returns `Err(Unsupported)` -> this `expect` panics.
-    ///
-    /// NON-FLAKY: a fresh self-signed `localhost` cert is written to a process-unique
-    /// temp path, `quic/127.0.0.1:0` binds an OS-chosen port, and the `ready(())`
-    /// shutdown returns the loop WITHOUT awaiting a peer — no network round-trip
-    /// races. Cert files are removed after the bind (best-effort, like the unixpipe
-    /// sibling's FIFO cleanup). [[feedback-no-flaky-ever]]
-    #[tokio::test]
-    async fn run_router_admits_a_quic_listen_with_cert_at_bind() {
-        use wz_runtime_tokio_test_support::localhost_cert_key_pem;
-        let (cert_pem, key_pem) = localhost_cert_key_pem();
-        let dir = std::env::temp_dir();
-        let pid = std::process::id();
-        let cert_path = dir
-            .join(format!("wz-ap-demo-router-quic-cert-{pid}.pem"))
-            .to_string_lossy()
-            .into_owned();
-        let key_path = dir
-            .join(format!("wz-ap-demo-router-quic-key-{pid}.pem"))
-            .to_string_lossy()
-            .into_owned();
-        std::fs::write(&cert_path, cert_pem.as_bytes()).expect("write cert pem");
-        std::fs::write(&key_path, key_pem.as_bytes()).expect("write key pem");
-
-        let result = run_router_until(
-            "quic/127.0.0.1:0",
-            &None,
-            &None,
-            &Some(cert_path.clone()),
-            &Some(key_path.clone()),
-            TransportTuning::default(),
-            std::future::ready(()),
-        )
-        .await;
-
-        // Best-effort cleanup BEFORE the assert, so a bind failure still unlinks.
-        let _ = std::fs::remove_file(&cert_path);
-        let _ = std::fs::remove_file(&key_path);
-        result.expect("the mesh router admits a quic --listen with --quic-cert (R311y405)");
     }
 }
 

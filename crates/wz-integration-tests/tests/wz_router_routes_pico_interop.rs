@@ -97,7 +97,7 @@ fn spawn_wz_router() -> (
     let (guard, reader, port) = spawn_on_ephemeral_port(
         &demo,
         &["--router", "127.0.0.1:0"],
-        "router: listening on 127.0.0.1:",
+        "router-hat: listening on 127.0.0.1:",
         "router",
         router_stderr,
     );
@@ -127,10 +127,12 @@ fn assert_routed(received_text: &str, key: &str, value: &str) {
 /// `routing-router`-only (`NoOpForwarder`) build emits no `forwarded` clause at
 /// all (the discriminator).
 fn assert_router_forwarded(router_stderr: &str) {
+    // R2886 — `--router` is the router hat; its summary counts pushes taken in.
     assert!(
-        router_stderr.contains("forwarded ") && !router_stderr.contains("forwarded 0 sample"),
-        "the wz router summary must report a non-zero forward count — the routing-routes \
-         RoutingForwarder did not carry the pico sample across faces\n--- router stderr ---\n{router_stderr}"
+        router_stderr.contains("data push(es) forwarded")
+            && !router_stderr.contains(" 0 data push(es) forwarded"),
+        "the wz router summary must report a non-zero push count — the router \
+         did not carry the pico sample\n--- router stderr ---\n{router_stderr}"
     );
 }
 

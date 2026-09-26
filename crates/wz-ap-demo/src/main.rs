@@ -110,6 +110,11 @@ use crate::usage::{print_usage, ABOUT};
 
 fn main() -> ExitCode {
     let args: Vec<String> = env::args().collect();
+    // R2886 (open-debt item 824) — `--router` is a spelling of `--router-hat`,
+    // resolved HERE, before any reader of the argv, so every later check sees
+    // one name for the one router mode ([`crate::args::canonical_run_flags`]).
+    #[cfg(feature = "routing-router")]
+    let args: Vec<String> = crate::args::canonical_run_flags(&args);
     let rest = &args[1..];
 
     // R311y482 — the BUILD FEATURES line, emitted HERE: ahead of the --help
@@ -331,35 +336,19 @@ fn main() -> ExitCode {
         listen_retry,
     );
 
-    // R311qa — `--router <addr>` selects the multi-peer router mode (bind once,
-    // HOLD N concurrent peer faces — the routing-router foundation), handled
-    // before the single-session role parse below (which requires exactly one of
-    // --listen / --connect). Opt-in behind the `routing-router` feature: a build
-    // without it rejects the flag rather than silently no-op'ing, so the catalog
-    // claim and the binary stay in lockstep.
-    if let Some(router_addr) = parse_pair(rest, "--router") {
-        // R311y405 — a `--router tls/...` / `--router quic/...` threads its server
-        // cert via the same `--<scheme>-cert` / `--<scheme>-key` flags the one-shot
-        // `--listen` acceptor uses, so mesh quic/tls works end-to-end (was rejected
-        // at bind cert-absence). Cert-free schemes (tcp/ws/udp) leave them None.
-        #[cfg(feature = "routing-router")]
-        return run_router_mode(
-            router_addr,
-            parse_pair(rest, "--tls-cert"),
-            parse_pair(rest, "--tls-key"),
-            parse_pair(rest, "--quic-cert"),
-            parse_pair(rest, "--quic-key"),
-            tuning,
+    // R311qa — `--router <addr>` is the router run-mode. R2886 (open-debt item
+    // 824): with `routing-router` the flag never reaches here, because `main`
+    // canonicalised it to `--router-hat` on entry ([`crate::args::canonical_run_flags`])
+    // and the router-hat branch below serves it. A build without the feature
+    // still rejects the flag BY NAME rather than silently no-op'ing, so the
+    // catalog claim and the binary stay in lockstep.
+    #[cfg(not(feature = "routing-router"))]
+    if parse_pair(rest, "--router").is_some() {
+        eprintln!(
+            "wz-ap-demo: --router requires the `routing-router` feature \
+             (build: cargo build -p wz-ap-demo --features routing-router)"
         );
-        #[cfg(not(feature = "routing-router"))]
-        {
-            let _ = router_addr;
-            eprintln!(
-                "wz-ap-demo: --router requires the `routing-router` feature \
-                 (build: cargo build -p wz-ap-demo --features routing-router)"
-            );
-            return ExitCode::from(2);
-        }
+        return ExitCode::from(2);
     }
 
     // R311qg — `--peer <listen>` selects the peer-MESH mode (dial the configured
@@ -2728,38 +2717,6 @@ fn resolve_scouted_locator(
     Err(ExitCode::from(2))
 }
 
-/// R311qa — drive the `--router` multi-peer mode: init logging, build the
-/// runtime, and run the accept-and-hold loop ([`runner::run_router`]) to the
-/// graceful-shutdown signal. Separate from the single-session `run_demo` entry
-/// because a router has no per-face application behaviour — it only holds peers.
-#[cfg(feature = "routing-router")]
-fn run_router_mode(
-    addr: String,
-    tls_cert: Option<String>,
-    tls_key: Option<String>,
-    quic_cert: Option<String>,
-    quic_key: Option<String>,
-    tuning: crate::args::TransportTuning,
-) -> ExitCode {
-    env_logger::Builder::from_env(env_logger::Env::default().filter_or("RUST_LOG", "info")).init();
-    let runtime = match build_demo_runtime() {
-        Ok(rt) => rt,
-        Err(e) => {
-            eprintln!("wz-ap-demo: tokio runtime build failed: {e}");
-            return ExitCode::from(1);
-        }
-    };
-    match runtime.block_on(crate::runner::run_router(
-        &addr, &tls_cert, &tls_key, &quic_cert, &quic_key, tuning,
-    )) {
-        Ok(()) => ExitCode::SUCCESS,
-        Err(e) => {
-            eprintln!("wz-ap-demo: {e}");
-            ExitCode::from(1)
-        }
-    }
-}
-
 /// R311tw — the §5.16 interceptor opt-ins (`--acl-deny` / `--downsample`)
 /// bundled into one parameter object, so the peer entry points stay under the
 /// argument-count lint as the interceptor flag set grows — the same param-object
@@ -2782,8 +2739,8 @@ pub(crate) struct InterceptorOpts {
 
 /// R311qg — peer-MESH mode entry: bind `listen`, dial each `dial_targets` peer,
 /// and hold both directions' faces (the `routing-peer` foundation, hold-only).
-/// Mirrors [`run_router_mode`] — a router has no per-face application behaviour,
-/// and neither does a hold-only mesh peer.
+/// Like the router run-mode, a hold-only mesh peer has no per-face application
+/// behaviour.
 #[cfg(feature = "routing-peer")]
 fn run_peer_mode(
     listen: Vec<String>,

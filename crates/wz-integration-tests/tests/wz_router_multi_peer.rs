@@ -52,7 +52,7 @@ fn wz_router_holds_two_concurrent_peers() {
 
     let bound = wait_for_substring(
         &mut router_reader,
-        "router: listening on",
+        "router-hat: listening on",
         Duration::from_secs(5),
     );
     if let Err(captured) = &bound {

@@ -108,7 +108,7 @@ fn spawn_star_router() -> (ChildGuard, File, u16) {
     );
     let captured = wait_for_substring(
         &mut reader,
-        "router: listening on 127.0.0.1:",
+        "router-hat: listening on 127.0.0.1:",
         Duration::from_secs(10),
     )
     .unwrap_or_else(|c| {

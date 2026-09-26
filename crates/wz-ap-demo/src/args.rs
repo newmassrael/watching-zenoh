@@ -706,6 +706,8 @@ pub(crate) fn expand_stock_zenoh_config_for_build(
     // file that deploys a zenoh router produced a wz node in a DIFFERENT role
     // that nothing on the network could find.  `--router-hat` is wz's router:
     // `WhatAmI::Router` on the wire, and since R2089 the responder host.
+    // R2886 — and since then `--router` is the same mode under another spelling
+    // ([`canonical_run_flags`]); the star concentrator described above is gone.
     //
     // Deliberately NOT `cfg!`-guarded, and that is the decision rather than an
     // omission. A guard would make the SAME file come up in a different
@@ -3622,7 +3624,8 @@ mod stock_config_tests {
         for role in [
             vec!["--listen", "127.0.0.1:1"],
             vec!["--connect", "127.0.0.1:1"],
-            vec!["--router", "127.0.0.1:1"],
+            // (No `--router` row since R2886: `main` rewrites it to `--router-hat`
+            // before this expansion runs, so the row below is its case.)
             // R2091 (open-debt item 508) — `--router-hat` is in the set BECAUSE
             // the role expansion now emits it. Without this row a typed
             // `--router-hat` plus the `mode: "router"` file below would append a
@@ -5784,12 +5787,13 @@ mod stock_config_tests {
     /// and reaches no flag is worse than one that is announced ignored — the
     /// operator has been told the opposite of what happened.
     ///
-    /// The negative arm is in the same test on purpose. `--router` is a
-    /// DIFFERENT run mode (it announces the peer role on the wire and hosts no
-    /// responder), so the widened precondition must not reach it: an expansion
-    /// that emitted `--scout-listen` there would hand the binary an argument it
-    /// exits(2) on, which is the failure R311y844 measured and this file's whole
-    /// `usable` discipline exists to prevent.
+    /// The negative arm is in the same test on purpose: a run mode that hosts no
+    /// responder must not receive the flag, or the expansion would hand the
+    /// binary an argument it exits(2) on, which is the failure R311y844 measured
+    /// and this file's whole `usable` discipline exists to prevent. Until R2886
+    /// the control was the star `--router`; that mode is gone (`--router` is now
+    /// `--router-hat`, which IS a responder host), so the control is the
+    /// single-session acceptor, which answers no scouts.
     #[test]
     #[cfg(all(feature = "scouting-responder", feature = "router-hat-router"))]
     fn a_router_hat_told_to_be_findable_by_a_file_gets_the_flag() {
@@ -5808,17 +5812,17 @@ mod stock_config_tests {
             drop_in.added
         );
 
-        // THE CONTROL: the star router is not the responder's host.
-        let star = expand(
-            &["--router", "tcp/127.0.0.1:0", "--config", "z.json5"],
+        // THE CONTROL: a single-session acceptor is not the responder's host.
+        let acceptor = expand(
+            &["--listen", "tcp/127.0.0.1:0", "--config", "z.json5"],
             file,
         )
         .unwrap();
         assert!(
-            !star.added.iter().any(|a| a == "--scout-listen"),
-            "--router hosts no responder and exits(2) on the flag, so the \
+            !acceptor.added.iter().any(|a| a == "--scout-listen"),
+            "--listen hosts no responder and exits(2) on the flag, so the \
              expansion must withhold it: {:?}",
-            star.added
+            acceptor.added
         );
     }
 
@@ -5867,8 +5871,8 @@ mod stock_config_tests {
         );
         assert!(
             !router.added.iter().any(|a| a == "--router"),
-            "the star router announces the PEER role and hosts no responder, so \
-             a router file that reached it is a node in the wrong role: {:?}",
+            "the expansion runs AFTER `main` canonicalises `--router` (R2886), so \
+             an expanded `--router` would reach no run-mode at all: {:?}",
             router.added
         );
         for flag in ["--scout-listen", "--scout-addr"] {
@@ -7677,21 +7681,17 @@ pub(crate) fn parse_qos_link(args: &[String]) -> Option<wz::runtime_tokio::extqo
 pub(crate) enum NodeKind {
     Acceptor,
     Initiator,
-    /// Only meaningful when the multi-peer router mode is compiled in.
-    #[cfg(feature = "routing-router")]
-    Router,
     /// Only meaningful when the peer-mesh mode is compiled in (R311qg). A peer
     /// both dials and accepts; like the router it announces the Peer `whatami`
     /// for now (a distinct WhatAmI refinement is a later atom).
     #[cfg(feature = "routing-peer")]
     Peer,
-    /// P4 §5.21 ACTIVATION — the router-hat node (`--router-hat`): the ONE demo
-    /// kind that announces a TRUE wire [`WhatAmI::Router`], driving the dual-mesh
-    /// `RouterForwarder`. Distinct from [`NodeKind::Router`] (the star
-    /// concentrator, which keeps the Peer stand-in wire value so the R121c/e
-    /// accept tests and `run_router` are unchanged): the router-hat node needs
+    /// P4 §5.21 ACTIVATION — the router-hat node (`--router-hat`, and since
+    /// R2886 also `--router`): the ONE demo kind that announces a TRUE wire
+    /// [`WhatAmI::Router`], driving the dual-mesh `RouterForwarder`. It needs
     /// the real Router role so connecting peers classify it into their linkstate
     /// graph as a router and this node partitions its two meshes by peer role.
+    /// (Until R2886 a separate star `Router` kind kept the Peer stand-in value.)
     #[cfg(feature = "router-hat-router")]
     RouterHat,
     /// R311y277 (§5.23 `adminspace-config-hotreload` ACTIVATION) — the
@@ -7724,13 +7724,42 @@ impl Role {
 /// inconsistency with no single place to correct it.
 pub(crate) const DEMO_PROTO_VERSION: u8 = 0x09;
 
+/// R2886 (open-debt item 824) — `--router` is a SPELLING of `--router-hat`, and
+/// this is the one place that says so: `main` applies it to the argv before
+/// `--check-topology`, the config expansion or any mode branch reads a flag, so
+/// every later reader sees one name for one mode.
+///
+/// Until R2886 `--router` was its own run-mode, a star concentrator that
+/// announced the Peer wire value and forwarded single-hop through the
+/// `RoutingForwarder`. The pin has no such mode (its hats are broker, client,
+/// peer and router), and a stock config's `mode: router` already expanded to
+/// `--router-hat`, so the flag named the router while running something else.
+/// Rewriting the token here rather than teaching each reader a second name is
+/// the point: the flag is enumerated by string in several places (the
+/// run-mode role table, the phase and scouting checks), and a second name
+/// would have to be added to every one of them and would be missed in one.
+///
+/// Only with `routing-router`: a build without it keeps refusing `--router` by
+/// name, as `wz_router_without_feature_rejects_with_exit_2` requires.
+#[cfg(feature = "routing-router")]
+pub(crate) fn canonical_run_flags(argv: &[String]) -> Vec<String> {
+    argv.iter()
+        .map(|a| {
+            if a == "--router" {
+                String::from("--router-hat")
+            } else {
+                a.clone()
+            }
+        })
+        .collect()
+}
+
 /// The wire role each run-mode flag announces, in the order `main` DISPATCHES
 /// them — so the first entry a command line matches is the mode that command
 /// line actually selects.
 ///
 /// The flag names do not carry this and cannot be read for it: `--connect`
-/// announces `client` while naming neither, `--router` announces `peer`, and
-/// only `--router-hat` announces `router`. [`demo_session_init_params`] is
+/// announces `client` while naming neither. [`demo_session_init_params`] is
 /// where the decision is made; this is that decision as a table, so the two
 /// callers who need it — the config expansion's `mode` verdict and the usage
 /// text's own gate — read one answer instead of keeping two.
@@ -7745,7 +7774,9 @@ pub(crate) const DEMO_PROTO_VERSION: u8 = 0x09;
 /// config reader.
 #[cfg(feature = "zenoh-config")]
 pub(crate) const RUN_MODE_ROLES: &[(&str, WhatAmI)] = &[
-    ("--router", WhatAmI::Peer),
+    // R2886 — no `--router` row: `main` canonicalises it to `--router-hat`
+    // ([`canonical_run_flags`]) before anything reads the argv, so a table
+    // entry for it could never match.
     ("--peer", WhatAmI::Peer),
     ("--router-hat", WhatAmI::Router),
     ("--storage-host", WhatAmI::Peer),
@@ -8049,11 +8080,10 @@ pub(crate) fn demo_session_init_params(
 ) -> std::io::Result<SessionInitParams> {
     let whatami = match kind {
         NodeKind::Acceptor => WhatAmI::Peer, // R121b/c/d/e baseline
-        // The router accepts via the same well-tested Client->Peer direction as
-        // the acceptor (a true WhatAmI::Router wire value is a later refinement,
-        // R311qa carry), so it also announces Peer.
-        #[cfg(feature = "routing-router")]
-        NodeKind::Router => WhatAmI::Peer,
+        // R2886 — no star `Router` kind any more: `--router` is `--router-hat`,
+        // which announces the true Router value below. The star mode kept the
+        // Peer stand-in "until a later refinement" (R311qa); the refinement is
+        // that the router is the router hat.
         // A hold-only mesh peer announces Peer too (whatami refinement later).
         #[cfg(feature = "routing-peer")]
         NodeKind::Peer => WhatAmI::Peer,
@@ -8668,6 +8698,40 @@ pub(crate) struct LivelinessGetSpec {
     /// returns `LivelinessGetError::FeatureDisabled` when elided, so the OFF arm
     /// walks the identical path and logs no reply.
     pub(crate) after_ms: Option<u64>,
+}
+
+/// R2886 (open-debt item 824) — `--router` becomes `--router-hat` and nothing
+/// else moves: a value that merely starts with the flag, and the flag's own
+/// argument, pass through untouched.
+#[cfg(all(test, feature = "routing-router"))]
+mod canonical_run_flag_tests {
+    use super::canonical_run_flags;
+
+    fn argv(a: &[&str]) -> Vec<String> {
+        a.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn router_is_canonicalised_to_the_router_hat() {
+        assert_eq!(
+            canonical_run_flags(&argv(&["wz-ap-demo", "--router", "tcp/0.0.0.0:7447"])),
+            argv(&["wz-ap-demo", "--router-hat", "tcp/0.0.0.0:7447"])
+        );
+    }
+
+    #[test]
+    fn only_the_exact_flag_moves() {
+        let untouched = argv(&[
+            "wz-ap-demo",
+            "--router-hat",
+            "tcp/a:1",
+            "--router-link-weight",
+            "0a=5",
+            "--peer",
+            "tcp/b:2",
+        ]);
+        assert_eq!(canonical_run_flags(&untouched), untouched);
+    }
 }
 
 // R2158 (open-debt item 230) — the feature gate went with

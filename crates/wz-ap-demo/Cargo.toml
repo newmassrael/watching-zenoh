@@ -552,14 +552,19 @@ group = ["wz/ext-pubsub-group-membership"]
 # (preset-ap-client is single-session client scope), so the footprint baseline
 # and every other lane build unchanged; only `--features routing-router`
 # compiles the multi-peer mode.
-routing-router = ["wz/routing-router"]
+#
+# R2886 (open-debt item 824) — `--router` IS the pin's router now: the flag is
+# a spelling of `--router-hat` (canonicalised once in `main`), so this atom
+# pulls the router-hat run-mode. Until R2886 it ran a star concentrator that
+# announced the Peer wire value and forwarded single-hop, a mode the pin does
+# not have (its hats are broker, client, peer and router), while a stock
+# config's `mode: router` already expanded to `--router-hat`.
+routing-router = ["wz/routing-router", "router-hat-router"]
 # R311qc — opt-in data-plane FORWARDING for `--router`: the catalog
-# `routing-routes` atom. On top of the `routing-router` accept-and-hold mode,
-# the router's `run_router` wires the `RoutingForwarder` so a Put received on
-# one peer face is forwarded to every other face that declared a matching
-# subscriber (vs `routing-router` alone, which holds faces but routes nothing).
-# Forwards the facade `routing-routes`. NOT in `default`; only
-# `--features routing-routes` compiles the forwarding router.
+# `routing-routes` atom. Forwards the facade `routing-routes`. NOT in `default`.
+# R2886 — `--router` routes through the router hat whatever this says; the star
+# `RoutingForwarder` this used to wire into the demo is no longer reachable
+# from a run-mode (open-debt item 824 step 4 decides what happens to it).
 routing-routes = ["routing-router", "wz/routing-routes"]
 # R311qg — opt-in peer-MESH mode (`--peer <listen> --connect <a,b>`): the catalog
 # `routing-peer` atom's foundation (dial a configured peer set AND accept

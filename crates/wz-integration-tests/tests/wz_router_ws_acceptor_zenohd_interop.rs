@@ -74,7 +74,7 @@ fn wz_router_ws_acceptor_holds_a_zenohd_ws_face() {
     let (mut r_guard, mut r_reader, ws_port) = spawn_on_ephemeral_port(
         &demo,
         &["--router", "ws/127.0.0.1:0"],
-        "router: listening on 127.0.0.1:",
+        "router-hat: listening on 127.0.0.1:",
         "the wz --router (ws acceptor)",
         r_stderr,
     );

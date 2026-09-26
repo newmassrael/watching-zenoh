@@ -129,7 +129,7 @@ fn wz_router_forwards_a_put_between_two_unixpipe_clients() {
 
     let bound = wait_for_substring(
         &mut router_reader,
-        "router: listening on",
+        "router-hat: listening on",
         Duration::from_secs(5),
     );
     if let Err(captured) = &bound {
@@ -294,9 +294,11 @@ fn wz_router_forwards_a_put_between_two_unixpipe_clients() {
     // The router's own summary independently confirms it forwarded at least one
     // sample (`forwarded 0 sample(s)` would mean the consumer fired off a path other
     // than the router, which the topology forbids).
+    // R2886 — the router hat's summary (see `wz_router_forward.rs`).
     assert!(
-        router_captured.contains("forwarded ") && !router_captured.contains("forwarded 0 sample"),
-        "router summary must report a non-zero forward count\n--- router stderr ---\n{router_captured}"
+        router_captured.contains("data push(es) forwarded")
+            && !router_captured.contains(" 0 data push(es) forwarded"),
+        "router summary must report a non-zero push count\n--- router stderr ---\n{router_captured}"
     );
 
     // The headline this test exists to prove over the TCP E5 template: the router

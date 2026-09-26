@@ -110,7 +110,7 @@ fn spawn_wz_router() -> (
     let (guard, reader, port) = spawn_on_ephemeral_port(
         &demo,
         &["--router", "127.0.0.1:0"],
-        "router: listening on 127.0.0.1:",
+        "router-hat: listening on 127.0.0.1:",
         "router",
         router_stderr,
     );

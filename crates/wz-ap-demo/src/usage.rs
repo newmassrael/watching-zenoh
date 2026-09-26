@@ -145,14 +145,10 @@ pub(crate) fn print_usage() {
     eprintln!("                             the node's own ADVERTISED SELF LOCATOR, and");
     eprintln!("                             --scout-addr/-iface/-ttl select the group it");
     eprintln!("                             answers on");
-    eprintln!("    --router <addr>          multi-peer router mode: bind once, HOLD N concurrent");
-    eprintln!(
-        "                             peer faces (routing-router foundation, no forwarding)."
-    );
-    eprintln!("                             Requires the `routing-router` build feature.");
-    eprintln!("                             NOTE: despite the flag name this announces the zenoh");
-    eprintln!("                             peer role on the wire, not the router role; only");
-    eprintln!("                             --router-hat announces router.");
+    eprintln!("    --router <a[,b..]>       the router mode: another spelling of --router-hat,");
+    eprintln!("                             which it becomes before anything else reads the");
+    eprintln!("                             command line. Requires the `routing-router` build");
+    eprintln!("                             feature.");
     eprintln!("    --router-hat <a[,b..]>   ROUTER mode proper: the only run mode that announces");
     eprintln!("                             the zenoh router role on the wire, so a connecting");
     eprintln!("                             peer's linkstate graph tags this node as a router and");

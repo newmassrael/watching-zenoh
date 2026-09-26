@@ -91,7 +91,7 @@ fn a_wz_router_terminates_a_pico_liveliness_get_instead_of_letting_it_time_out()
 
     let bound = wait_for_substring(
         &mut demo_stderr_reader,
-        "router: listening on",
+        "router-hat: listening on",
         Duration::from_secs(10),
     );
     if let Err(captured) = &bound {
