@@ -148,7 +148,7 @@
 //! zenoh `compute_data_route` cross-tier legs (blocks 1 & 2 for a non-native
 //! source, `zenoh/src/net/routing/hat/router/pubsub.rs`
 //! @ `fn compute_data_route`). The master is elected per-keyexpr
-//! by HRW ([`elect_router`], a port of zenoh `Hat::elect_router`,
+//! by HRW (`elect_router`, a port of zenoh `Hat::elect_router`,
 //! `hat/router/mod.rs:245`) over the SHARED nodes — the routers present in BOTH
 //! meshes (`shared_nodes`, removed at R2880; zenoh
 //! `network.rs:1197`), DERIVED per call (no stored field, the R311y109
@@ -174,7 +174,7 @@
 //! gateway view). R2880 (step 6) moved the QUERY plane below onto the same
 //! filter, and with that the route-master election (`is_master` over
 //! `shared_nodes`) had no caller left and was removed, which is step 9's
-//! removal arriving with step 6. [`elect_router`] itself survives only for the
+//! removal arriving with step 6. `elect_router` itself survives only for the
 //! multicast designated-router choice, which is wz's own and not the pin's.
 //!
 //! ## Slice C5b (query-route FORWARD half — the Request) — landed

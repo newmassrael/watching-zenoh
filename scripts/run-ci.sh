@@ -11353,6 +11353,14 @@ layer_c1bz_docs_resolve() {
     # in `cargo doc`'s error set naming anything the diff introduced: that
     # module's inner doc resolves from the crate root, where no
     # `RouterForwarder` is in scope. As code spans instead, 501.
+    # R2884 — 501 -> 498, and again the COUNT hid a substitution. R2880 deleted
+    # two broken `//!` links in router_forward.rs (`shared_nodes`, `is_master`)
+    # and wrote a new one in the same module doc (`elect_router`, which does
+    # not resolve from the crate root either), so the lane read 500 and hosted
+    # C1bz went red on run 36245519824 asking only for a lower budget. The
+    # error set of `cargo doc -p wz-runtime-tokio --no-deps --all-features`
+    # at 90b2fca2 named that link twice (the new one and an older twin a few
+    # lines up); both became code spans, and the same command then read 498.
     budget="
         wz:2
         wz-ap-demo:26
@@ -11363,7 +11371,7 @@ layer_c1bz_docs_resolve() {
         wz-mcu-session-acceptor:4
         wz-routing-graph:6
         wz-runtime-coop:12
-        wz-runtime-tokio:501
+        wz-runtime-tokio:498
         wz-session-core:530
         wz-session-lwip:4
         wz-switchboard-codegen:8
