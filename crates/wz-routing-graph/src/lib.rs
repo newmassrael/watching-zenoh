@@ -833,7 +833,7 @@ enum NetObject {
 impl LinkstateNetwork {
     /// A graph seeded with the local (self) node — sn starts at 1, as in
     /// zenoh `Network::new` (`network.rs:156-162`). The peer's graph: in
-    /// single-hop gossip it is the pin's `Gossip` object ([`NetObject`]).
+    /// single-hop gossip it is the pin's `Gossip` object (`NetObject`).
     pub fn new(self_zid: Zid, self_whatami: WhatAmI) -> Self {
         let mut net = Self::new_in_region(self_zid, self_whatami, false);
         net.object = NetObject::Gossip;
@@ -1565,7 +1565,7 @@ impl LinkstateNetwork {
     /// (`zenoh/src/net/protocol/network.rs` @ `// Send all nodes linkstate on new link`):
     /// a single-hop gossip `Network` has no links to give and does not relay
     /// one neighbour's existence past the next, and self is not among them.
-    /// A peer's `Gossip` graph keeps the full list ([`NetObject`]).
+    /// A peer's `Gossip` graph keeps the full list (`NetObject`).
     ///
     /// ⚠ The linkstate arm returns [`build_linkstate_list`](Self::build_linkstate_list)
     /// unchanged, locators included, where the pin's bootstrap carries none;
