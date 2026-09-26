@@ -307,6 +307,16 @@ impl<V> LinkstatepeerInterest<V> {
         self.by_key.get(keyexpr).map_or(0, |peers| peers.len())
     }
 
+    /// The sources registered under the EXACT `keyexpr` — the listing twin of
+    /// [`source_count`](Self::source_count), for a caller that decides per
+    /// source rather than counting them (R2881: the router's token plane asks
+    /// the inter-region filter once per origin). Order is unspecified.
+    pub fn sources_of(&self, keyexpr: &str) -> Vec<Zid> {
+        self.by_key
+            .get(keyexpr)
+            .map_or_else(Vec::new, |peers| peers.keys().copied().collect())
+    }
+
     /// The declared VALUES of every source under the EXACT `keyexpr` — the
     /// value-bearing twin of [`source_count`](Self::source_count). The router
     /// forwarder folds these (with [`QueryableInfo::merge`]) into the MERGED

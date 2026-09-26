@@ -5347,12 +5347,64 @@ impl RouterForwarder {
     }
 
     /// Whether self SHOULD advertise a liveliness token for `keyexpr` into
-    /// `target` mesh — the token twin of
-    /// [`self_advertises_sub_into`](Self::self_advertises_sub_into): some holder
-    /// outside `target` holds it (R2874, step 3e).
+    /// `target` mesh: some holder outside `target` holds it (R2874, step 3e)
+    /// AND, for a mesh holder, the pin's inter-region filter lets that holder's
+    /// token cross into `target` (R2881, open-debt item 751, step 7).
+    ///
+    /// The token plane is the one DECLARATION plane the pin filters: it
+    /// propagates a token into each region the filter admits, one decision per
+    /// destination region (`zenoh/src/net/routing/dispatcher/token.rs` @ `let filter = InterRegionFilter {`,
+    /// built with `dst_zid: None`), while subscribers and queryables propagate
+    /// their `other_info` unfiltered. So this predicate, unlike
+    /// [`self_advertises_sub_into`](Self::self_advertises_sub_into), is not a
+    /// bare [`held_outside`](Self::held_outside).
+    ///
+    /// The filter is asked per ORIGIN, since the pin asks it per arriving
+    /// declaration. Its `fwd_zid` is the neighbour the declaration arrived
+    /// through, which wz does not store — storing it as the table's value would
+    /// make a copy arriving through another neighbour count as a change and
+    /// re-flood. It is DERIVED instead, from the graph that routed it there:
+    /// [`token_forwarder`](Self::token_forwarder).
+    ///
+    /// A broker holder crosses unfiltered. A broker hat has no gateway view
+    /// (`zenoh/src/net/routing/hat/broker/mod.rs` @ `fn gateways(&self, _tables: &TablesData) -> Option<Vec<ZenohIdProto>> {`),
+    /// and a client region is south of its router, so the filter's candidate
+    /// set is always empty for it and the pin admits it (R2879's reading of
+    /// the same hat for the data plane).
     #[cfg(feature = "routing-token-tables")]
     fn self_advertises_token_into(&self, target: Region, keyexpr: &str) -> bool {
-        self.held_outside(target, |holder| self.token_contributions(holder, keyexpr))
+        self.holders()
+            .filter(|holder| holder.region() != Some(target))
+            .any(|holder| match holder {
+                Holder::Hat(region) => match self.hats.get(&region) {
+                    Some(Hat::Mesh(hat)) => {
+                        let sources = hat.tokens.borrow().sources_of(keyexpr);
+                        sources.iter().any(|source| {
+                            let forwarder = self.token_forwarder(region, source);
+                            self.crosses(region, target, Some(source), forwarder.as_ref(), None)
+                        })
+                    }
+                    Some(Hat::Broker(_)) => self.token_contributions(holder, keyexpr) > 0,
+                    None => false,
+                },
+                Holder::Group | Holder::Host => false,
+            })
+    }
+
+    /// The neighbour a mesh `source`'s declarations reach self through in
+    /// `region`: self's parent in `source`'s tree, which is where the flood
+    /// along that tree came from ([`next_hop`](wz_routing_graph::LinkstateNetwork::next_hop)
+    /// with the source as both root and destination). A gossip region has no
+    /// tree, and there a declaration comes from a direct neighbour only, so the
+    /// forwarder is the source itself when self links to it. `None` when the
+    /// graph cannot place the source, which the filter reads as the pin reads
+    /// an unknown forwarder: every gateway of the region is a candidate.
+    #[cfg(feature = "routing-token-tables")]
+    fn token_forwarder(&self, region: Region, source: &Zid) -> Option<Zid> {
+        let (net, _dirty) = self.plane(region)?;
+        let net = net.borrow();
+        net.next_hop(source, source)
+            .or_else(|| net.next_hop(net.self_zid(), source))
     }
 
     /// The keyexprs `holder` holds a liveliness token on — the listing twin of
@@ -13029,6 +13081,130 @@ mod tests {
                 .interested("live/data")
                 .is_empty(),
             "derive-not-store: self is NOT stored in the router tokens table"
+        );
+    }
+
+    /// R2881 (open-debt item 751, step 7) — the token twin of
+    /// `a_peer_push_crosses_north_only_through_the_largest_gateway_of_its_forwarder`:
+    /// a PEER-source token is advertised into the router mesh only by the
+    /// largest gateway its forwarder links to
+    /// (`zenoh/src/net/routing/dispatcher/token.rs` @ `let filter = InterRegionFilter {`).
+    /// Its withdrawal follows the same fold, so a router that never advertised
+    /// the token retracts nothing when it leaves.
+    #[cfg(feature = "routing-token-tables")]
+    #[test]
+    fn a_peer_token_crosses_north_only_through_the_largest_gateway_of_its_forwarder() {
+        // (frames on R2's router face after the declare, then after the undeclare)
+        let run = |other: u8, other_is_gateway: bool| -> (usize, usize) {
+            let fwd = RouterForwarder::new(zid(0x05));
+            let (a, _sa) = face(zid(0xAA), WIRE_PEER); // the token's source, linked to self and R2
+            let (r, sink_r) = face(zid(other), WIRE_ROUTER); // R2, self's router tree child
+            fwd.register(FaceId(0), &a);
+            fwd.register(FaceId(1), &r);
+            advertise_link_back(&fwd, FaceId(1), 0x05, other, 5);
+            if other_is_gateway {
+                discover_gateway_via(&fwd, FaceId(0), 0x05, 0xAA, other, 7, 5);
+            } else {
+                discover_via(&fwd, FaceId(0), 0x05, 0xAA, other, 7, 5);
+            }
+            fwd.tick();
+            sink_r.reset();
+            forward_one(&fwd, FaceId(0), declare_token_msg("live/k"));
+            let declared = sink_r.frame_count();
+            sink_r.reset();
+            forward_one(&fwd, FaceId(0), undeclare_token_msg("live/k"));
+            (declared, sink_r.frame_count())
+        };
+        assert_eq!(
+            run(0x09, true),
+            (0, 0),
+            "a larger gateway of the forwarder advertises it, not self; nothing to retract"
+        );
+        assert_eq!(
+            run(0x02, true),
+            (1, 1),
+            "self is the largest gateway, so self advertises and retracts"
+        );
+        assert_eq!(
+            run(0x09, false),
+            (1, 1),
+            "a larger router that is no gateway of the region is no candidate"
+        );
+    }
+
+    /// R2881 — the candidates are the gateways of the FORWARDER, not of the
+    /// region (`zenoh/src/net/routing/dispatcher/tables.rs` @ `.map(|fwd_zid| tables.hats[this.src].gateways_of(&tables.data, fwd_zid))`):
+    /// R2 is a larger gateway of the peer region but links only to BB, so a
+    /// token AA sends through its link to self still crosses at self. This is
+    /// the case that separates a derived forwarder from none at all, which
+    /// would make every gateway of the region a candidate and let R2 win.
+    #[cfg(feature = "routing-token-tables")]
+    #[test]
+    fn a_larger_gateway_the_forwarder_does_not_link_to_is_no_candidate() {
+        let fwd = RouterForwarder::new(zid(0x05));
+        let (a, _sa) = face(zid(0xAA), WIRE_PEER); // the token's source, linked to self only
+        let (b, _sb) = face(zid(0xBB), WIRE_PEER);
+        let (r, sink_r) = face(zid(0x09), WIRE_ROUTER);
+        fwd.register(FaceId(0), &a);
+        fwd.register(FaceId(1), &b);
+        fwd.register(FaceId(2), &r);
+        advertise_link_back(&fwd, FaceId(0), 0x05, 0xAA, 5);
+        advertise_link_back(&fwd, FaceId(2), 0x05, 0x09, 5);
+        discover_gateway_via(&fwd, FaceId(1), 0x05, 0xBB, 0x09, 7, 5);
+        fwd.tick();
+        sink_r.reset();
+        forward_one(&fwd, FaceId(0), declare_token_msg("live/k"));
+        assert_eq!(
+            sink_r.frame_count(),
+            1,
+            "self is the only gateway AA links to, so self advertises"
+        );
+        assert_eq!(
+            fwd.token_forwarder(PEERS_REGION, &zid(0xAA)),
+            Some(zid(0xAA)),
+            "because AA's declarations reach self over their direct link"
+        );
+    }
+
+    /// R2881 — down into the peer region the pin asks the filter with no
+    /// destination node, so the candidates are EVERY gateway of that region
+    /// (`zenoh/src/net/routing/dispatcher/tables.rs` @ `.unwrap_or_else(|| tables.hats[this.dst].gateways(&tables.data)),`):
+    /// a router-source token enters it through the largest gateway only. Router
+    /// CC declares; peer AA links to self and to R2. Control: R2 no gateway,
+    /// self advertises to both of its peer tree children.
+    #[cfg(feature = "routing-token-tables")]
+    #[test]
+    fn a_router_token_enters_the_peer_region_through_its_largest_gateway_only() {
+        let run = |other_is_gateway: bool| -> (usize, usize) {
+            let fwd = RouterForwarder::new(zid(0x05));
+            let (a, sink_a) = face(zid(0xAA), WIRE_PEER);
+            let (b, sink_b) = face(zid(0xBB), WIRE_PEER);
+            let (c, _sc) = face(zid(0xCC), WIRE_ROUTER); // the token's source
+            fwd.register(FaceId(0), &a);
+            fwd.register(FaceId(1), &b);
+            fwd.register(FaceId(2), &c);
+            advertise_link_back(&fwd, FaceId(2), 0x05, 0xCC, 5);
+            advertise_link_back(&fwd, FaceId(1), 0x05, 0xBB, 5);
+            if other_is_gateway {
+                discover_gateway_via(&fwd, FaceId(0), 0x05, 0xAA, 0x09, 7, 5);
+            } else {
+                discover_via(&fwd, FaceId(0), 0x05, 0xAA, 0x09, 7, 5);
+            }
+            fwd.tick();
+            sink_a.reset();
+            sink_b.reset();
+            forward_one(&fwd, FaceId(2), declare_token_msg("live/k"));
+            (sink_a.frame_count(), sink_b.frame_count())
+        };
+        assert_eq!(
+            run(true),
+            (0, 0),
+            "R2 is the region's largest gateway, so self advertises into it nowhere"
+        );
+        assert_eq!(
+            run(false),
+            (1, 1),
+            "control: with R2 no gateway, self advertises to both tree children"
         );
     }
 
