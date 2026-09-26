@@ -5889,7 +5889,11 @@ layer_c1ay_cargo_test_router_hat() {
     # _client_token and token_current_future_interest_matches_a_wildcard_target, both
     # cfg(routing-token-tables), so ONLY this arm of the six moves. The other five
     # feature sets compile them out, which is why they still read 137/139/140/143/137.
-    _runci_guarded_test "C1AY router_forward 193" 193 \
+    # R2881 — 193 -> 196, and ONLY this arm moves: step 7 of open-debt item 751
+    # added three token-plane filter witnesses, all cfg(routing-token-tables).
+    # Read off `guarded_count_gate.py --range 515c085f..09b18118`, which reported
+    # this arm red and the other twenty-seven it reached OK.
+    _runci_guarded_test "C1AY router_forward 196" 196 \
         cargo test -p wz-runtime-tokio --features routing-router-hat,routing-token-tables --lib router_forward --quiet || return 1
     # R2415 — 146 -> 140. NOT this round's tests: `d7cd078f` re-gated the mcast
     # egress plane from `transport-multicast` onto `router-multicast-faces`, so six
