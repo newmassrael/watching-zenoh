@@ -468,6 +468,14 @@ struct MeshHat {
     /// sources keyed by zid, VALUE = their declared `QueryableInfo`. The
     /// cross-region self-bubble (a MERGED info in zenoh) is DERIVED at compute.
     qabls: Rc<RefCell<LinkstatepeerInterest<QueryableInfo>>>,
+    /// R2870 (step 3c) — the region's liveliness-TOKEN interest (zenoh's
+    /// per-hat `router_tokens` / `linkstatepeer_tokens`), the token twin of
+    /// `subs`: a source-zid set with NO value payload, so `V = ()` exactly like
+    /// the sub plane. Native sources only; the cross-region self-bubble is
+    /// derived. `Rc` for the reason `subs` is: the admin `token/**` leg reads
+    /// it through the view rather than by recapturing the forwarder.
+    #[cfg(feature = "routing-token-tables")]
+    tokens: Rc<RefCell<LinkstatepeerInterest<()>>>,
 }
 
 impl MeshHat {
@@ -481,6 +489,8 @@ impl MeshHat {
             trees_dirty: Cell::new(false),
             subs: Rc::new(RefCell::new(LinkstatepeerInterest::new())),
             qabls: Rc::new(RefCell::new(LinkstatepeerInterest::new())),
+            #[cfg(feature = "routing-token-tables")]
+            tokens: Rc::new(RefCell::new(LinkstatepeerInterest::new())),
         }
     }
 }
@@ -883,10 +893,10 @@ pub struct RouterDeclarationsView {
     /// same trio as the other two legs — upstream's router hat enumerates tokens
     /// like every other hat (`zenoh/src/net/routing/hat/router/token.rs` @
     /// `fn sourced_tokens`), which is what says this host owes the leg at all.
+    /// R2870 (open-debt item 751, step 3c) — the mesh regions' token tables,
+    /// keyed by region like `subs` and `qabls`.
     #[cfg(feature = "routing-token-tables")]
-    router_tokens: Rc<RefCell<LinkstatepeerInterest<()>>>,
-    #[cfg(feature = "routing-token-tables")]
-    linkstatepeer_tokens: Rc<RefCell<LinkstatepeerInterest<()>>>,
+    tokens: RegionMap<Rc<RefCell<LinkstatepeerInterest<()>>>>,
     #[cfg(feature = "routing-token-tables")]
     client_tokens: Rc<RefCell<HashMap<FaceId, HashMap<u64, String>>>>,
     /// A client's zid comes from its FACE: a Client joins no link-state graph,
@@ -993,8 +1003,8 @@ impl RouterDeclarationsView {
             .map(|(face, by_id)| (*face, by_id.values().cloned().collect()))
             .collect();
         self.bucket_by_tier(
-            &self.router_tokens.borrow(),
-            &self.linkstatepeer_tokens.borrow(),
+            &region_table(&self.tokens, ROUTERS_REGION).borrow(),
+            &region_table(&self.tokens, PEERS_REGION).borrow(),
             &clients,
         )
     }
@@ -1158,23 +1168,6 @@ pub struct RouterForwarder {
     /// UndeclareSubscriber. Empty (and elided) without `router-multicast-faces`.
     #[cfg(feature = "router-multicast-faces")]
     group_subs: RefCell<HashSet<String>>,
-    /// Router-tier liveliness-TOKEN interest (zenoh `HatTables.router_tokens`).
-    /// The TOKEN TWIN of `router_subs` — a source-zid set with NO value payload
-    /// (tokens carry no info, unlike `QueryableInfo`), so `V = ()` exactly like
-    /// the sub plane. Populated by the token-INGEST slice: NATIVE Router token
-    /// sources keyed by their zid; within-tier re-flood (slice-1) + the cross-tier
-    /// self-bubble (slice-2) + read by the token-INTEREST current dump (slice-4).
-    ///
-    /// R2694 — behind an `Rc` for the reason `faces` is (R2636): the admin GET
-    /// handler is stored inside this forwarder, so the `token/**` leg reads this
-    /// table through a shared handle on [`RouterDeclarationsView`] rather than by
-    /// recapturing the forwarder. Use sites are unchanged.
-    #[cfg(feature = "routing-token-tables")]
-    router_tokens: Rc<RefCell<LinkstatepeerInterest<()>>>,
-    /// Peer-tier liveliness-TOKEN interest (zenoh `HatTables.linkstatepeer_tokens`).
-    /// The token twin of `linkstatepeer_subs` (native Peer token sources by zid).
-    #[cfg(feature = "routing-token-tables")]
-    linkstatepeer_tokens: Rc<RefCell<LinkstatepeerInterest<()>>>,
     /// Per-CLIENT-face liveliness-TOKEN store (slice-3) — the token twin of
     /// [`client_subs`](Self#structfield.client_subs), but keyed the way zenoh's
     /// `face_hat.remote_tokens: HashMap<TokenId, Arc<Resource>>` is
@@ -1616,10 +1609,6 @@ impl RouterForwarder {
             mcast_group_members: RefCell::new(Vec::new()),
             #[cfg(feature = "router-multicast-faces")]
             group_subs: RefCell::new(HashSet::new()),
-            #[cfg(feature = "routing-token-tables")]
-            router_tokens: Rc::new(RefCell::new(LinkstatepeerInterest::new())),
-            #[cfg(feature = "routing-token-tables")]
-            linkstatepeer_tokens: Rc::new(RefCell::new(LinkstatepeerInterest::new())),
             #[cfg(feature = "routing-token-tables")]
             client_tokens: Rc::new(RefCell::new(HashMap::new())),
             client_subs: Rc::new(RefCell::new(HashMap::new())),
@@ -2574,11 +2563,7 @@ impl RouterForwarder {
     /// so both tiers are `LinkstatepeerInterest<()>`, identical to the sub plane.
     #[cfg(feature = "routing-token-tables")]
     fn tokens_table(&self, tier: Region) -> Option<&RefCell<LinkstatepeerInterest<()>>> {
-        match tier {
-            ROUTERS_REGION => Some(&self.router_tokens),
-            PEERS_REGION => Some(&self.linkstatepeer_tokens),
-            _ => None,
-        }
+        self.hats.get(&tier).map(|hat| &*hat.tokens)
     }
 
     /// The queryable interest table for `tier` (the query-plane twin of
@@ -3195,7 +3180,7 @@ impl RouterForwarder {
             return; // match-all deferred; the caller's DeclareFinal still closes it.
         };
         let mut per_ke: HashMap<String, ()> = HashMap::new();
-        for table in [&self.router_tokens, &self.linkstatepeer_tokens] {
+        for table in self.hats.values().map(|hat| &hat.tokens) {
             for (ke, _zid, ()) in table.borrow().matching_entries(target, Some(self_zid)) {
                 per_ke.insert(ke.to_string(), ());
             }
@@ -5170,7 +5155,7 @@ impl RouterForwarder {
     /// never in the mesh tables, so `None` (no self-zid filter) is correct.
     #[cfg(feature = "routing-token-tables")]
     fn any_token_matches(&self, ke: &str) -> bool {
-        for table in [&self.router_tokens, &self.linkstatepeer_tokens] {
+        for table in self.hats.values().map(|hat| &hat.tokens) {
             if !table.borrow().matching_entries(ke, None).is_empty() {
                 return true;
             }
@@ -5638,9 +5623,11 @@ impl RouterForwarder {
             client_subs: Rc::clone(&self.client_subs),
             client_qabls: Rc::clone(&self.client_qabls),
             #[cfg(feature = "routing-token-tables")]
-            router_tokens: Rc::clone(&self.router_tokens),
-            #[cfg(feature = "routing-token-tables")]
-            linkstatepeer_tokens: Rc::clone(&self.linkstatepeer_tokens),
+            tokens: self
+                .hats
+                .iter()
+                .map(|(region, hat)| (region, Rc::clone(&hat.tokens)))
+                .collect(),
             #[cfg(feature = "routing-token-tables")]
             client_tokens: Rc::clone(&self.client_tokens),
             faces: Rc::clone(&self.faces),
@@ -12413,12 +12400,16 @@ mod tests {
         fwd.register(FaceId(0), &a);
         forward_one(&fwd, FaceId(0), declare_token_msg("live/data"));
         assert_eq!(
-            fwd.router_tokens.borrow().interested("live/data"),
+            fwd.mesh(ROUTERS_REGION)
+                .tokens
+                .borrow()
+                .interested("live/data"),
             vec![zid(0xAA)],
             "the router-face token source is registered in router_tokens"
         );
         assert!(
-            fwd.linkstatepeer_tokens
+            fwd.mesh(PEERS_REGION)
+                .tokens
                 .borrow()
                 .interested("live/data")
                 .is_empty(),
@@ -12434,11 +12425,15 @@ mod tests {
         fwd.register(FaceId(0), &b);
         forward_one(&fwd, FaceId(0), declare_token_msg("live/data"));
         assert_eq!(
-            fwd.linkstatepeer_tokens.borrow().interested("live/data"),
+            fwd.mesh(PEERS_REGION)
+                .tokens
+                .borrow()
+                .interested("live/data"),
             vec![zid(0xBB)],
         );
         assert!(fwd
-            .router_tokens
+            .mesh(ROUTERS_REGION)
+            .tokens
             .borrow()
             .interested("live/data")
             .is_empty());
@@ -12456,12 +12451,14 @@ mod tests {
         fwd.register(FaceId(0), &c);
         forward_one(&fwd, FaceId(0), declare_token_msg("live/data"));
         assert!(
-            fwd.router_tokens
+            fwd.mesh(ROUTERS_REGION)
+                .tokens
                 .borrow()
                 .interested("live/data")
                 .is_empty()
                 && fwd
-                    .linkstatepeer_tokens
+                    .mesh(PEERS_REGION)
+                    .tokens
                     .borrow()
                     .interested("live/data")
                     .is_empty(),
@@ -12491,7 +12488,10 @@ mod tests {
         sink_p.reset();
         forward_one(&fwd, FaceId(0), declare_token_msg("live/data"));
         assert_eq!(
-            fwd.router_tokens.borrow().interested("live/data"),
+            fwd.mesh(ROUTERS_REGION)
+                .tokens
+                .borrow()
+                .interested("live/data"),
             vec![zid(0xAA)],
             "self learned A's token"
         );
@@ -12538,12 +12538,16 @@ mod tests {
         fwd.register(FaceId(0), &a);
         forward_one(&fwd, FaceId(0), declare_token_msg("live/data"));
         assert_eq!(
-            fwd.router_tokens.borrow().interested("live/data"),
+            fwd.mesh(ROUTERS_REGION)
+                .tokens
+                .borrow()
+                .interested("live/data"),
             vec![zid(0xAA)]
         );
         fwd.deregister(FaceId(0));
         assert!(
-            fwd.router_tokens
+            fwd.mesh(ROUTERS_REGION)
+                .tokens
                 .borrow()
                 .interested("live/data")
                 .is_empty(),
@@ -12572,12 +12576,16 @@ mod tests {
         fwd.register(FaceId(0), &a);
         forward_one(&fwd, FaceId(0), declare_token_msg("live/data"));
         assert_eq!(
-            fwd.router_tokens.borrow().interested("live/data"),
+            fwd.mesh(ROUTERS_REGION)
+                .tokens
+                .borrow()
+                .interested("live/data"),
             vec![zid(0xAA)]
         );
         forward_one(&fwd, FaceId(0), undeclare_token_msg("live/data"));
         assert!(
-            fwd.router_tokens
+            fwd.mesh(ROUTERS_REGION)
+                .tokens
                 .borrow()
                 .interested("live/data")
                 .is_empty(),
@@ -12605,7 +12613,8 @@ mod tests {
         sink_c.reset();
         forward_one(&fwd, FaceId(0), undeclare_token_msg("live/data"));
         assert!(
-            fwd.router_tokens
+            fwd.mesh(ROUTERS_REGION)
+                .tokens
                 .borrow()
                 .interested("live/data")
                 .is_empty(),
@@ -12643,7 +12652,8 @@ mod tests {
             "a router-native token advertised self's cross-tier interest to the peer mesh"
         );
         assert!(
-            fwd.linkstatepeer_tokens
+            fwd.mesh(PEERS_REGION)
+                .tokens
                 .borrow()
                 .interested("live/data")
                 .is_empty(),
@@ -12670,7 +12680,8 @@ mod tests {
             "a peer-native token advertised into the router mesh"
         );
         assert!(
-            fwd.router_tokens
+            fwd.mesh(ROUTERS_REGION)
+                .tokens
                 .borrow()
                 .interested("live/data")
                 .is_empty(),
@@ -12764,12 +12775,14 @@ mod tests {
             "the client-face token is registered in client_tokens"
         );
         assert!(
-            fwd.router_tokens
+            fwd.mesh(ROUTERS_REGION)
+                .tokens
                 .borrow()
                 .interested("live/data")
                 .is_empty()
                 && fwd
-                    .linkstatepeer_tokens
+                    .mesh(PEERS_REGION)
+                    .tokens
                     .borrow()
                     .interested("live/data")
                     .is_empty(),
@@ -12807,12 +12820,14 @@ mod tests {
             "the client token advertised self's cross-tier interest into the router mesh"
         );
         assert!(
-            fwd.router_tokens
+            fwd.mesh(ROUTERS_REGION)
+                .tokens
                 .borrow()
                 .interested("live/data")
                 .is_empty()
                 && fwd
-                    .linkstatepeer_tokens
+                    .mesh(PEERS_REGION)
+                    .tokens
                     .borrow()
                     .interested("live/data")
                     .is_empty(),
