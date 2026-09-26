@@ -458,6 +458,16 @@ struct MeshHat {
     /// seam offers, with one dirty flag per net (a functional-equivalent
     /// simplification of the independent debounce workers).
     trees_dirty: Cell<bool>,
+    /// R2869 (step 3b) — the region's subscriber interest (zenoh's per-hat
+    /// `router_subs` / `linkstatepeer_subs`): NATIVE sources of this region
+    /// keyed by their zid. The cross-region self-bubble is NOT stored; it is
+    /// DERIVED at route-compute from the native tables. `Rc`, shared with the
+    /// admin `RouterDeclarationsView`.
+    subs: Rc<RefCell<LinkstatepeerInterest<()>>>,
+    /// The region's queryable interest, the query-plane twin of `subs`: native
+    /// sources keyed by zid, VALUE = their declared `QueryableInfo`. The
+    /// cross-region self-bubble (a MERGED info in zenoh) is DERIVED at compute.
+    qabls: Rc<RefCell<LinkstatepeerInterest<QueryableInfo>>>,
 }
 
 impl MeshHat {
@@ -469,8 +479,19 @@ impl MeshHat {
                 WhatAmI::Router,
             ))),
             trees_dirty: Cell::new(false),
+            subs: Rc::new(RefCell::new(LinkstatepeerInterest::new())),
+            qabls: Rc::new(RefCell::new(LinkstatepeerInterest::new())),
         }
     }
+}
+
+/// A mesh region's table out of a view's region map. Panics on a region the
+/// forwarder builds no hat for, which the view can only be handed by
+/// [`RouterForwarder::declarations_view`], so it never is.
+#[cfg(feature = "adminspace-introspection-handlers")]
+fn region_table<T>(map: &RegionMap<Rc<T>>, region: Region) -> &Rc<T> {
+    map.get(&region)
+        .unwrap_or_else(|| unreachable!("{region} is not a mesh region of a router"))
 }
 
 /// The region a router places a face in, as the pin computes it when the
@@ -849,10 +870,12 @@ impl RouterSessionsView {
 /// thing the reply body is actually about.
 #[cfg(feature = "adminspace-introspection-handlers")]
 pub struct RouterDeclarationsView {
-    router_subs: Rc<RefCell<LinkstatepeerInterest<()>>>,
-    linkstatepeer_subs: Rc<RefCell<LinkstatepeerInterest<()>>>,
-    router_qabls: Rc<RefCell<LinkstatepeerInterest<QueryableInfo>>>,
-    linkstatepeer_qabls: Rc<RefCell<LinkstatepeerInterest<QueryableInfo>>>,
+    /// R2869 (open-debt item 751, step 3b) — each mesh region's subscriber and
+    /// queryable tables, keyed by region as the forwarder's hats are. Each
+    /// region fills the bucket of its own hat, which is how the pin's
+    /// dispatcher merges them (see [`subscribers`](Self::subscribers)).
+    subs: RegionMap<Rc<RefCell<LinkstatepeerInterest<()>>>>,
+    qabls: RegionMap<Rc<RefCell<LinkstatepeerInterest<QueryableInfo>>>>,
     client_subs: Rc<RefCell<HashMap<FaceId, HashSet<String>>>>,
     client_qabls: Rc<RefCell<HashMap<FaceId, HashMap<String, QueryableInfo>>>>,
     /// The token plane's three tiers, present only where the tables are
@@ -912,8 +935,8 @@ impl RouterDeclarationsView {
     /// what it knows about declarations is what its neighbours told it.
     pub fn subscribers(&self) -> Vec<(String, wz_session_core::adminspace::AdminSources)> {
         self.bucket_by_tier(
-            &self.router_subs.borrow(),
-            &self.linkstatepeer_subs.borrow(),
+            &region_table(&self.subs, ROUTERS_REGION).borrow(),
+            &region_table(&self.subs, PEERS_REGION).borrow(),
             &self.client_subs.borrow(),
         )
     }
@@ -930,8 +953,8 @@ impl RouterDeclarationsView {
             .map(|(face, by_key)| (*face, by_key.keys().cloned().collect()))
             .collect();
         self.bucket_by_tier(
-            &self.router_qabls.borrow(),
-            &self.linkstatepeer_qabls.borrow(),
+            &region_table(&self.qabls, ROUTERS_REGION).borrow(),
+            &region_table(&self.qabls, PEERS_REGION).borrow(),
             &clients,
         )
     }
@@ -1135,22 +1158,6 @@ pub struct RouterForwarder {
     /// UndeclareSubscriber. Empty (and elided) without `router-multicast-faces`.
     #[cfg(feature = "router-multicast-faces")]
     group_subs: RefCell<HashSet<String>>,
-    /// Router-tier subscription interest (zenoh `HatTables.router_subs`).
-    /// POPULATED by the subscription-INGEST slice (1b, this round): NATIVE
-    /// Router sources keyed by their zid. The cross-tier self-bubble is NOT
-    /// stored — it is DERIVED at route-compute from the native tables.
-    router_subs: Rc<RefCell<LinkstatepeerInterest<()>>>,
-    /// Peer-tier subscription interest (zenoh `HatTables.linkstatepeer_subs`).
-    /// Populated by slice 1b (native Peer sources keyed by zid).
-    linkstatepeer_subs: Rc<RefCell<LinkstatepeerInterest<()>>>,
-    /// Router-tier queryable interest (zenoh `HatTables.router_qabls`).
-    /// POPULATED by the queryable-INGEST slice (1c, this round): NATIVE Router
-    /// queryable sources keyed by zid, VALUE = their declared `QueryableInfo`.
-    /// The cross-tier self-bubble (a MERGED info in zenoh) is DERIVED at compute.
-    router_qabls: Rc<RefCell<LinkstatepeerInterest<QueryableInfo>>>,
-    /// Peer-tier queryable interest (zenoh `HatTables.linkstatepeer_qabls`).
-    /// Populated by slice 1c (native Peer queryable sources keyed by zid).
-    linkstatepeer_qabls: Rc<RefCell<LinkstatepeerInterest<QueryableInfo>>>,
     /// Router-tier liveliness-TOKEN interest (zenoh `HatTables.router_tokens`).
     /// The TOKEN TWIN of `router_subs` — a source-zid set with NO value payload
     /// (tokens carry no info, unlike `QueryableInfo`), so `V = ()` exactly like
@@ -1609,10 +1616,6 @@ impl RouterForwarder {
             mcast_group_members: RefCell::new(Vec::new()),
             #[cfg(feature = "router-multicast-faces")]
             group_subs: RefCell::new(HashSet::new()),
-            router_subs: Rc::new(RefCell::new(LinkstatepeerInterest::new())),
-            linkstatepeer_subs: Rc::new(RefCell::new(LinkstatepeerInterest::new())),
-            router_qabls: Rc::new(RefCell::new(LinkstatepeerInterest::new())),
-            linkstatepeer_qabls: Rc::new(RefCell::new(LinkstatepeerInterest::new())),
             #[cfg(feature = "routing-token-tables")]
             router_tokens: Rc::new(RefCell::new(LinkstatepeerInterest::new())),
             #[cfg(feature = "routing-token-tables")]
@@ -1994,9 +1997,8 @@ impl RouterForwarder {
     /// fires its one-shot query, making that e2e a barrier rather than a race.
     pub fn queryables_seen(&self) -> usize {
         let client: usize = self.client_qabls.borrow().values().map(|m| m.len()).sum();
-        let router = self.router_qabls.borrow().count();
-        let peer = self.linkstatepeer_qabls.borrow().count();
-        client + router + peer
+        let mesh: usize = self.hats.values().map(|h| h.qabls.borrow().count()).sum();
+        client + mesh
     }
 
     /// Total distinct client-hosted subscriptions this router currently holds
@@ -2020,9 +2022,7 @@ impl RouterForwarder {
     /// a matching sub — which needs wz to already hold that sub HERE; an empty
     /// CURRENT dump leaves the filter active and the puts never reach the wire.
     pub fn mesh_subs_seen(&self) -> usize {
-        let router = self.router_subs.borrow().count();
-        let peer = self.linkstatepeer_subs.borrow().count();
-        router + peer
+        self.hats.values().map(|h| h.subs.borrow().count()).sum()
     }
 
     /// Install the full §5.16 interceptor configuration — the router twin of
@@ -2468,11 +2468,10 @@ impl RouterForwarder {
         if removed.is_empty() {
             return;
         }
-        let (subs, qabls) = match tier {
-            ROUTERS_REGION => (&self.router_subs, &self.router_qabls),
-            PEERS_REGION => (&self.linkstatepeer_subs, &self.linkstatepeer_qabls),
-            _ => return,
+        let Some(hat) = self.hats.get(&tier) else {
+            return;
         };
+        let (subs, qabls) = (&hat.subs, &hat.qabls);
         // Collect the sub + qabl keyexprs the departed natives held, so the
         // cross-tier advertisement they contributed to is re-evaluated AFTER the
         // removal (the borrows must be dropped before the withdraw/re-advertise,
@@ -2565,11 +2564,7 @@ impl RouterForwarder {
     /// The subscription interest table for `tier`, or `None` for
     /// [`CLIENTS_REGION`] (the leaf/simple store is slice 1d).
     fn subs_table(&self, tier: Region) -> Option<&RefCell<LinkstatepeerInterest<()>>> {
-        match tier {
-            ROUTERS_REGION => Some(&self.router_subs),
-            PEERS_REGION => Some(&self.linkstatepeer_subs),
-            _ => None,
-        }
+        self.hats.get(&tier).map(|hat| &*hat.subs)
     }
 
     /// The liveliness-token interest table for `tier`, or `None` for
@@ -2589,11 +2584,7 @@ impl RouterForwarder {
     /// The queryable interest table for `tier` (the query-plane twin of
     /// [`subs_table`](Self::subs_table)), or `None` for [`CLIENTS_REGION`].
     fn qabls_table(&self, tier: Region) -> Option<&RefCell<LinkstatepeerInterest<QueryableInfo>>> {
-        match tier {
-            ROUTERS_REGION => Some(&self.router_qabls),
-            PEERS_REGION => Some(&self.linkstatepeer_qabls),
-            _ => None,
-        }
+        self.hats.get(&tier).map(|hat| &*hat.qabls)
     }
 
     /// Record (or drop) a link-local keyexpr alias from a sourced `DeclKexpr` /
@@ -3063,7 +3054,7 @@ impl RouterForwarder {
             return; // match-all deferred; the caller's DeclareFinal still closes the interest.
         };
         let mut per_ke: HashMap<String, ()> = HashMap::new();
-        for table in [&self.router_subs, &self.linkstatepeer_subs] {
+        for table in self.hats.values().map(|hat| &hat.subs) {
             for (ke, _zid, ()) in table.borrow().matching_entries(target, Some(self_zid)) {
                 per_ke.insert(ke.to_string(), ());
             }
@@ -3127,7 +3118,7 @@ impl RouterForwarder {
             return;
         };
         let mut per_ke: HashMap<String, QueryableInfo> = HashMap::new();
-        for table in [&self.router_qabls, &self.linkstatepeer_qabls] {
+        for table in self.hats.values().map(|hat| &hat.qabls) {
             for (ke, _zid, info) in table.borrow().matching_entries(target, Some(self_zid)) {
                 per_ke
                     .entry(ke.to_string())
@@ -4429,7 +4420,7 @@ impl RouterForwarder {
                 None => info,
             });
         };
-        for table in [&self.router_qabls, &self.linkstatepeer_qabls] {
+        for table in self.hats.values().map(|hat| &hat.qabls) {
             for (_ke, _zid, info) in table.borrow().matching_entries(ke, Some(self_zid)) {
                 fold(*info);
             }
@@ -4544,7 +4535,7 @@ impl RouterForwarder {
     /// client sub, so a per-destination exclusion here would spuriously undeclare a
     /// reply ke still backed by a co-hosted or self sub.
     fn any_sub_matches(&self, ke: &str) -> bool {
-        for table in [&self.router_subs, &self.linkstatepeer_subs] {
+        for table in self.hats.values().map(|hat| &hat.subs) {
             if !table.borrow().matching_entries(ke, None).is_empty() {
                 return true;
             }
@@ -4561,7 +4552,7 @@ impl RouterForwarder {
     /// `QueryableInfo::DEFAULT` on zero matches — a value read would report "backed"
     /// even when no queryable exists and suppress every undeclare).
     fn any_qabl_matches(&self, ke: &str) -> bool {
-        for table in [&self.router_qabls, &self.linkstatepeer_qabls] {
+        for table in self.hats.values().map(|hat| &hat.qabls) {
             if !table.borrow().matching_entries(ke, None).is_empty() {
                 return true;
             }
@@ -5634,10 +5625,16 @@ impl RouterForwarder {
     #[cfg(feature = "adminspace-introspection-handlers")]
     pub fn declarations_view(&self) -> RouterDeclarationsView {
         RouterDeclarationsView {
-            router_subs: Rc::clone(&self.router_subs),
-            linkstatepeer_subs: Rc::clone(&self.linkstatepeer_subs),
-            router_qabls: Rc::clone(&self.router_qabls),
-            linkstatepeer_qabls: Rc::clone(&self.linkstatepeer_qabls),
+            subs: self
+                .hats
+                .iter()
+                .map(|(region, hat)| (region, Rc::clone(&hat.subs)))
+                .collect(),
+            qabls: self
+                .hats
+                .iter()
+                .map(|(region, hat)| (region, Rc::clone(&hat.qabls)))
+                .collect(),
             client_subs: Rc::clone(&self.client_subs),
             client_qabls: Rc::clone(&self.client_qabls),
             #[cfg(feature = "routing-token-tables")]
@@ -9361,7 +9358,7 @@ mod tests {
         fwd.tick();
         forward_one(&fwd, FaceId(0), declare_sub("demo/late")); // A subscribes; no C yet
         assert_eq!(
-            fwd.linkstatepeer_subs.borrow().interested("demo/late"),
+            fwd.mesh(PEERS_REGION).subs.borrow().interested("demo/late"),
             vec![zid(0xAA)],
             "self learned A's interest before C joined"
         );
@@ -9391,7 +9388,7 @@ mod tests {
         fwd.tick();
         forward_one(&fwd, FaceId(0), declare_qabl("demo/q", true)); // A declares; no C
         assert_eq!(
-            fwd.linkstatepeer_qabls.borrow().interested("demo/q"),
+            fwd.mesh(PEERS_REGION).qabls.borrow().interested("demo/q"),
             vec![zid(0xAA)],
             "self learned A's queryable before C joined"
         );
@@ -9855,7 +9852,10 @@ mod tests {
         // declare (zenohd, the direct neighbour, IS the source).
         forward_one(&fwd, FaceId(0), declare_sub("demo/data"));
         assert_eq!(
-            fwd.router_subs.borrow().interested("demo/data"),
+            fwd.mesh(ROUTERS_REGION)
+                .subs
+                .borrow()
+                .interested("demo/data"),
             vec![zid(0xAA)],
             "the foreign router's client sub registers the peer in router_subs"
         );
@@ -9912,7 +9912,7 @@ mod tests {
             )),
         );
         assert_eq!(
-            fwd.router_subs.borrow().interested("demo/**"),
+            fwd.mesh(ROUTERS_REGION).subs.borrow().interested("demo/**"),
             vec![zid(0xAA)],
             "the compound aliased (prefix 'demo' + suffix '/**') sub registers 'demo/**'"
         );
@@ -10011,7 +10011,7 @@ mod tests {
         fwd.register(FaceId(1), &client);
         forward_one(&fwd, FaceId(0), declare_sub("demo/**")); // zenohd's sub -> router_subs
         assert_eq!(
-            fwd.router_subs.borrow().interested("demo/**"),
+            fwd.mesh(ROUTERS_REGION).subs.borrow().interested("demo/**"),
             vec![zid(0xAA)]
         );
         sink_c.reset();
@@ -11263,7 +11263,8 @@ mod tests {
             "self advertised its cross-tier interest to the peer child P"
         );
         assert!(
-            fwd.linkstatepeer_subs
+            fwd.mesh(PEERS_REGION)
+                .subs
                 .borrow()
                 .interested("demo/data")
                 .is_empty(),
@@ -11941,7 +11942,7 @@ mod tests {
         set_declare_source(&mut decl, 7);
         forward_one(&fwd, FaceId(1), NetworkMessage::Declare(Box::new(decl)));
         assert_eq!(
-            fwd.linkstatepeer_subs.borrow().interested("demo/data"),
+            fwd.mesh(PEERS_REGION).subs.borrow().interested("demo/data"),
             vec![zid(0xDD)],
             "the distant node 0xDD's interest is registered (2 hops away)"
         );
@@ -12116,12 +12117,16 @@ mod tests {
         fwd.register(FaceId(0), &a);
         forward_one(&fwd, FaceId(0), declare_sub("demo/data"));
         assert_eq!(
-            fwd.router_subs.borrow().interested("demo/data"),
+            fwd.mesh(ROUTERS_REGION)
+                .subs
+                .borrow()
+                .interested("demo/data"),
             vec![zid(0xAA)],
             "the router-face source is registered in router_subs"
         );
         assert!(
-            fwd.linkstatepeer_subs
+            fwd.mesh(PEERS_REGION)
+                .subs
                 .borrow()
                 .interested("demo/data")
                 .is_empty(),
@@ -12136,10 +12141,15 @@ mod tests {
         fwd.register(FaceId(0), &b);
         forward_one(&fwd, FaceId(0), declare_sub("demo/data"));
         assert_eq!(
-            fwd.linkstatepeer_subs.borrow().interested("demo/data"),
+            fwd.mesh(PEERS_REGION).subs.borrow().interested("demo/data"),
             vec![zid(0xBB)],
         );
-        assert!(fwd.router_subs.borrow().interested("demo/data").is_empty());
+        assert!(fwd
+            .mesh(ROUTERS_REGION)
+            .subs
+            .borrow()
+            .interested("demo/data")
+            .is_empty());
     }
 
     #[test]
@@ -12165,7 +12175,8 @@ mod tests {
             "a router-native sub advertised self's cross-tier interest to the peer mesh"
         );
         assert!(
-            fwd.linkstatepeer_subs
+            fwd.mesh(PEERS_REGION)
+                .subs
                 .borrow()
                 .interested("demo/data")
                 .is_empty(),
@@ -12262,7 +12273,10 @@ mod tests {
         set_declare_source(&mut decl, 7);
         forward_one(&fwd, FaceId(0), NetworkMessage::Declare(Box::new(decl)));
         assert_eq!(
-            fwd.router_subs.borrow().interested("demo/data"),
+            fwd.mesh(ROUTERS_REGION)
+                .subs
+                .borrow()
+                .interested("demo/data"),
             vec![zid(0xBB)],
             "the router-native is sourced from the distant router Rd"
         );
@@ -12315,9 +12329,15 @@ mod tests {
         let (c, _sink) = face(zid(0xCC), WIRE_CLIENT);
         fwd.register(FaceId(0), &c);
         forward_one(&fwd, FaceId(0), declare_sub("demo/data"));
-        assert!(fwd.router_subs.borrow().interested("demo/data").is_empty());
         assert!(fwd
-            .linkstatepeer_subs
+            .mesh(ROUTERS_REGION)
+            .subs
+            .borrow()
+            .interested("demo/data")
+            .is_empty());
+        assert!(fwd
+            .mesh(PEERS_REGION)
+            .subs
             .borrow()
             .interested("demo/data")
             .is_empty());
@@ -12330,7 +12350,10 @@ mod tests {
         fwd.register(FaceId(0), &a);
         forward_one(&fwd, FaceId(0), declare_sub("demo/data"));
         assert_eq!(
-            fwd.router_subs.borrow().interested("demo/data"),
+            fwd.mesh(ROUTERS_REGION)
+                .subs
+                .borrow()
+                .interested("demo/data"),
             vec![zid(0xAA)]
         );
         let undecl = NetworkMessage::Declare(Box::new(
@@ -12338,7 +12361,11 @@ mod tests {
         ));
         forward_one(&fwd, FaceId(0), undecl);
         assert!(
-            fwd.router_subs.borrow().interested("demo/data").is_empty(),
+            fwd.mesh(ROUTERS_REGION)
+                .subs
+                .borrow()
+                .interested("demo/data")
+                .is_empty(),
             "the source's interest is withdrawn"
         );
     }
@@ -12350,12 +12377,19 @@ mod tests {
         fwd.register(FaceId(0), &a);
         forward_one(&fwd, FaceId(0), declare_sub("demo/data"));
         assert_eq!(
-            fwd.router_subs.borrow().interested("demo/data"),
+            fwd.mesh(ROUTERS_REGION)
+                .subs
+                .borrow()
+                .interested("demo/data"),
             vec![zid(0xAA)]
         );
         fwd.deregister(FaceId(0));
         assert!(
-            fwd.router_subs.borrow().interested("demo/data").is_empty(),
+            fwd.mesh(ROUTERS_REGION)
+                .subs
+                .borrow()
+                .interested("demo/data")
+                .is_empty(),
             "the departed source's interest is purged (no bubble to leak)"
         );
     }
@@ -13566,19 +13600,25 @@ mod tests {
         fwd.register(FaceId(0), &a);
         forward_one(&fwd, FaceId(0), declare_qabl("demo/q", true));
         assert_eq!(
-            fwd.router_qabls.borrow().interested("demo/q"),
+            fwd.mesh(ROUTERS_REGION).qabls.borrow().interested("demo/q"),
             vec![zid(0xAA)],
             "the router-face source is registered in router_qabls"
         );
         assert!(
-            fwd.linkstatepeer_qabls
+            fwd.mesh(PEERS_REGION)
+                .qabls
                 .borrow()
                 .interested("demo/q")
                 .is_empty(),
             "no native peer entry, and the cross-tier bubble is NOT stored"
         );
         // The subscription plane is untouched by a queryable declare.
-        assert!(fwd.router_subs.borrow().interested("demo/q").is_empty());
+        assert!(fwd
+            .mesh(ROUTERS_REGION)
+            .subs
+            .borrow()
+            .interested("demo/q")
+            .is_empty());
     }
 
     #[test]
@@ -13588,10 +13628,15 @@ mod tests {
         fwd.register(FaceId(0), &b);
         forward_one(&fwd, FaceId(0), declare_qabl("demo/q", false));
         assert_eq!(
-            fwd.linkstatepeer_qabls.borrow().interested("demo/q"),
+            fwd.mesh(PEERS_REGION).qabls.borrow().interested("demo/q"),
             vec![zid(0xBB)]
         );
-        assert!(fwd.router_qabls.borrow().interested("demo/q").is_empty());
+        assert!(fwd
+            .mesh(ROUTERS_REGION)
+            .qabls
+            .borrow()
+            .interested("demo/q")
+            .is_empty());
     }
 
     #[test]
@@ -13620,7 +13665,8 @@ mod tests {
             "the cross-tier advertisement carries the native's complete=true"
         );
         assert!(
-            fwd.linkstatepeer_qabls
+            fwd.mesh(PEERS_REGION)
+                .qabls
                 .borrow()
                 .interested("demo/q")
                 .is_empty(),
@@ -13652,7 +13698,11 @@ mod tests {
             )),
         );
         assert!(
-            fwd.router_qabls.borrow().interested("demo/q").is_empty(),
+            fwd.mesh(ROUTERS_REGION)
+                .qabls
+                .borrow()
+                .interested("demo/q")
+                .is_empty(),
             "the native queryable interest is withdrawn"
         );
         assert_eq!(
@@ -13748,9 +13798,14 @@ mod tests {
             "both meshes carry the client's complete=true"
         );
         assert!(
-            fwd.router_qabls.borrow().interested("demo/q").is_empty()
+            fwd.mesh(ROUTERS_REGION)
+                .qabls
+                .borrow()
+                .interested("demo/q")
+                .is_empty()
                 && fwd
-                    .linkstatepeer_qabls
+                    .mesh(PEERS_REGION)
+                    .qabls
                     .borrow()
                     .interested("demo/q")
                     .is_empty(),
@@ -13839,12 +13894,16 @@ mod tests {
         fwd.register(FaceId(0), &a);
         forward_one(&fwd, FaceId(0), declare_qabl("demo/q", true));
         assert_eq!(
-            fwd.router_qabls.borrow().interested("demo/q"),
+            fwd.mesh(ROUTERS_REGION).qabls.borrow().interested("demo/q"),
             vec![zid(0xAA)]
         );
         fwd.deregister(FaceId(0));
         assert!(
-            fwd.router_qabls.borrow().interested("demo/q").is_empty(),
+            fwd.mesh(ROUTERS_REGION)
+                .qabls
+                .borrow()
+                .interested("demo/q")
+                .is_empty(),
             "the departed queryable source is purged (the 1a purge covers qabls)"
         );
     }
@@ -13859,11 +13918,16 @@ mod tests {
         fwd.register(FaceId(0), &c);
         forward_one(&fwd, FaceId(0), declare_qabl("demo/q", true));
         assert!(
-            fwd.router_qabls.borrow().interested("demo/q").is_empty(),
+            fwd.mesh(ROUTERS_REGION)
+                .qabls
+                .borrow()
+                .interested("demo/q")
+                .is_empty(),
             "not in the router tier"
         );
         assert!(
-            fwd.linkstatepeer_qabls
+            fwd.mesh(PEERS_REGION)
+                .qabls
                 .borrow()
                 .interested("demo/q")
                 .is_empty(),
@@ -13962,7 +14026,7 @@ mod tests {
         fwd.register(FaceId(0), &a);
         forward_one(&fwd, FaceId(0), declare_qabl("demo/q", true));
         assert_eq!(
-            fwd.router_qabls.borrow().interested("demo/q"),
+            fwd.mesh(ROUTERS_REGION).qabls.borrow().interested("demo/q"),
             vec![zid(0xAA)]
         );
         forward_one(
@@ -13973,7 +14037,7 @@ mod tests {
             )),
         );
         assert_eq!(
-            fwd.router_qabls.borrow().interested("demo/q"),
+            fwd.mesh(ROUTERS_REGION).qabls.borrow().interested("demo/q"),
             vec![zid(0xAA)],
             "an id-only UndeclareQueryable carries no keyexpr — the interest survives"
         );
@@ -13990,7 +14054,7 @@ mod tests {
         fwd.register(FaceId(0), &a);
         forward_one(&fwd, FaceId(0), declare_qabl("demo/q", true));
         assert_eq!(
-            fwd.router_qabls.borrow().interested("demo/q"),
+            fwd.mesh(ROUTERS_REGION).qabls.borrow().interested("demo/q"),
             vec![zid(0xAA)]
         );
         let undecl = NetworkMessage::Declare(Box::new(
@@ -13998,7 +14062,11 @@ mod tests {
         ));
         forward_one(&fwd, FaceId(0), undecl);
         assert!(
-            fwd.router_qabls.borrow().interested("demo/q").is_empty(),
+            fwd.mesh(ROUTERS_REGION)
+                .qabls
+                .borrow()
+                .interested("demo/q")
+                .is_empty(),
             "the source's queryable interest is withdrawn"
         );
     }
@@ -14023,7 +14091,10 @@ mod tests {
         sink_p.reset();
         forward_one(&fwd, FaceId(0), declare_sub("demo/sub"));
         assert_eq!(
-            fwd.router_subs.borrow().interested("demo/sub"),
+            fwd.mesh(ROUTERS_REGION)
+                .subs
+                .borrow()
+                .interested("demo/sub"),
             vec![zid(0xAA)],
             "self learned A is interested"
         );
@@ -14073,7 +14144,10 @@ mod tests {
         ));
         forward_one(&fwd, FaceId(0), aliased);
         assert_eq!(
-            fwd.router_subs.borrow().interested("demo/aliased"),
+            fwd.mesh(ROUTERS_REGION)
+                .subs
+                .borrow()
+                .interested("demo/aliased"),
             vec![zid(0xAA)],
             "the aliased declare resolved to the literal via the face table"
         );
@@ -14228,7 +14302,10 @@ mod tests {
         set_declare_source(&mut decl, 7); // node_id 7 = A's psid for B
         forward_one(&fwd, FaceId(0), NetworkMessage::Declare(Box::new(decl)));
         assert_eq!(
-            fwd.router_subs.borrow().interested("demo/sub"),
+            fwd.mesh(ROUTERS_REGION)
+                .subs
+                .borrow()
+                .interested("demo/sub"),
             vec![zid(0xBB)],
             "keyed on the resolved transit source B, not the inbound neighbour A"
         );
@@ -14255,7 +14332,11 @@ mod tests {
         ));
         forward_one(&fwd, FaceId(0), undecl);
         assert!(
-            fwd.router_subs.borrow().interested("demo/sub").is_empty(),
+            fwd.mesh(ROUTERS_REGION)
+                .subs
+                .borrow()
+                .interested("demo/sub")
+                .is_empty(),
             "the source's interest is withdrawn"
         );
         assert_eq!(
@@ -14286,7 +14367,7 @@ mod tests {
         sink_r.reset();
         forward_one(&fwd, FaceId(0), declare_sub("demo/sub"));
         assert_eq!(
-            fwd.linkstatepeer_subs.borrow().interested("demo/sub"),
+            fwd.mesh(PEERS_REGION).subs.borrow().interested("demo/sub"),
             vec![zid(0xAA)]
         );
         assert_eq!(
@@ -14310,7 +14391,8 @@ mod tests {
         ));
         forward_one(&fwd, FaceId(0), undecl);
         assert!(fwd
-            .router_subs
+            .mesh(ROUTERS_REGION)
+            .subs
             .borrow()
             .interested("never/declared")
             .is_empty());
@@ -14346,7 +14428,8 @@ mod tests {
             )),
         );
         assert!(
-            fwd.router_subs
+            fwd.mesh(ROUTERS_REGION)
+                .subs
                 .borrow()
                 .interested("demo/aliased")
                 .is_empty(),
