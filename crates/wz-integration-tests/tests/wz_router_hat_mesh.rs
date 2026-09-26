@@ -964,7 +964,7 @@ fn wz_router_hat_non_master_defers_a_client_double_delivery() {
     const KE: &str = "demo/key";
     // FIXED zids (honoured by --router-hat, R311 fix): the carrier is the LARGEST
     // gateway, so R2 (03030303) must be larger than R1 (02020202) for R1 to defer.
-    // Port-derived zids would flip the order per run.
+    // Unpinned zids are random (R2883) and would flip the order per run.
     let (mut r2_guard, mut r2_reader, p_r2) = spawn_router_hat(
         "router-hat-2",
         &["--router-hat", "127.0.0.1:0", "--zid", "03030303"],

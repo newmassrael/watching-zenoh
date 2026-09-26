@@ -205,18 +205,27 @@ fn wz_peer_holds_a_dialed_and_an_accepted_face() {
         "peer-A summary must report the dial+accept split (dialed 1, accepted 1)\n\
          --- peer-A stderr ---\n{a_captured}"
     );
-    // R311rc (c3d-4) — SOURCE WITNESS (the anticipated upgrade): now that the
-    // LinkState routing graph keys on the zid, each peer derives a DISTINCT zid
-    // from its listen port (`0x7072` + port). So peer-A's face to B carries B's
-    // distinct `7072…` zid — NOT A's own, NOT the old shared hardcode. A
-    // wrong-source bug (logging the local zid, or all-share-one) would no longer
-    // pass. (The single-session client C is not a `--peer`, so it keeps the
-    // fixed demo zid `01020304`; A's face-1 log carries that, A's face-0 log
-    // carries B's `7072…` — both distinct from A's own.)
+    // R311rc (c3d-4) — SOURCE WITNESS: the LinkState routing graph keys on the
+    // zid, so peer-A's face to B must carry B's zid — NOT A's own, NOT a shared
+    // hardcode. R2883 (open-debt item 825) made each peer's zid RANDOM, as
+    // upstream's is when the config names no `id`, and each node now logs its
+    // own (`wz-ap-demo peer: zid <hex>`). So the witness reads B's zid off B and
+    // finds it on A's face log, which a wrong-source bug (logging the local zid,
+    // or all-share-one) cannot satisfy. Until R2883 it matched a `7072` prefix
+    // the port derivation produced.
+    let own_zid = |captured: &str| -> String {
+        captured
+            .lines()
+            .find_map(|l| l.split("wz-ap-demo peer: zid ").nth(1))
+            .map(|z| z.trim().to_string())
+            .unwrap_or_else(|| panic!("a peer logs its own zid\n{captured}"))
+    };
+    let (a_zid, b_zid) = (own_zid(&a_captured), own_zid(&b_captured));
+    assert_ne!(a_zid, b_zid, "two peers draw distinct zids");
     assert!(
-        a_captured.contains("zid 7072"),
-        "peer-A face-0 log must carry B's DISTINCT derived zid (7072…) — proving \
-         the handshake surfaced the remote's id, not a shared hardcode\n\
+        a_captured.contains(&format!("zid {b_zid}")),
+        "peer-A's face log must carry B's zid {b_zid} — proving the handshake \
+         surfaced the remote's id, not a shared hardcode\n\
          --- peer-A stderr ---\n{a_captured}"
     );
 }

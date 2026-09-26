@@ -3628,6 +3628,42 @@ fn zid_hex(zid: Option<&[u8]>) -> String {
     }
 }
 
+/// R2883 (open-debt item 825) — a mesh node's identity: the configured `--zid`
+/// when there is one, else a RANDOM 16-byte zid, as upstream draws one when the
+/// config names no `id` (`commons/zenoh-config/src/lib.rs` @ `id: Option<ZenohId>,`,
+/// resolved through `commons/zenoh-protocol/src/core/mod.rs` @ `impl Default for ZenohIdProto {`,
+/// whose body is `Self::rand()`).
+///
+/// Until R2883 both mesh modes derived a 4-byte zid from a fixed prefix and the
+/// listen PORT. That gave every wz node listening on the same port the same zid,
+/// so two routers on two hosts at the default 7447 saw each other as themselves
+/// and the self-connect guard kept them apart for good; the test harness never
+/// showed it because its nodes listen on different ephemeral ports. It also
+/// made a port-less listen (unixpipe, unixsock, vsock) refuse to start without
+/// `--zid`. A random identity has neither defect and is what upstream does.
+///
+/// An all-zero draw is redrawn: zero is not a valid zid (upstream's is a
+/// `NonZeroU128`), and `Zid::from_slice` would read it as the empty zid. The
+/// draw is returned in its CANONICAL length, trailing zero bytes dropped, which
+/// is how upstream sizes a zid (`uhlc::ID::size()`, the significant bytes) and
+/// how `Zid::from_slice` reads one; otherwise a draw ending in a zero byte would
+/// print and travel as 16 bytes here and as 15 after any canonicalising hop.
+#[cfg(feature = "routing-peer")]
+fn resolve_node_zid(zid_override: Option<Vec<u8>>) -> io::Result<Vec<u8>> {
+    use wz::runtime_tokio::session_glue::{EntropySource, OsEntropy};
+    if let Some(zid) = zid_override {
+        return Ok(zid);
+    }
+    let mut zid = [0u8; 16];
+    while zid.iter().all(|&b| b == 0) {
+        OsEntropy.try_fill_bytes(&mut zid).map_err(|_| {
+            io::Error::other("wz-ap-demo: the OS entropy pool is unavailable to draw a zid")
+        })?;
+    }
+    let significant = zid.iter().rposition(|&b| b != 0).map_or(0, |i| i + 1);
+    Ok(zid[..significant].to_vec())
+}
+
 /// The shared face-lifecycle observer for the multi-peer run-modes — one log line
 /// per `AcceptEvent`, prefixed with the caller's `node_label` (`"router"` /
 /// `"peer"` / `"router-hat"`). Extracted (rule-of-three) from the byte-identical
@@ -4107,11 +4143,9 @@ pub(crate) struct PeerOpts {
     /// everything else.
     #[cfg(feature = "pubsub-delete")]
     pub del_key: Option<String>,
-    /// R311y397 (Slice B) — pin this peer's routing zid (`--zid <hex>`) instead of
-    /// deriving it from the listen port, mirroring [`run_router_hat`]'s override.
-    /// REQUIRED for a non-IP listen (unixpipe / unixsock / vsock has no port to
-    /// derive a distinct mesh-graph zid from); an IP listen keeps the port-derived
-    /// fallback when this is `None`.
+    /// R311y397 (Slice B) — pin this peer's routing zid (`--zid <hex>`),
+    /// mirroring [`run_router_hat`]'s override. `None` draws a random one for
+    /// every transport ([`resolve_node_zid`], R2883).
     pub zid_override: Option<Vec<u8>>,
     /// R311y213 (transport-multilink) — the aggregated-link budget for this peer
     /// (`--max-links`, the `unicast.max_links` analogue). `1` = single-link; `> 1`
@@ -4330,15 +4364,10 @@ async fn run_peer_until(
         InterceptorFlow, InterceptorLink, LinkstateForwarder, LowPassMessage, LowPassRule,
         Permission, SubjectSelector, WhatAmI, Zid,
     };
-    // Per-peer routing zid = an explicit `--zid` when given, else this 2-byte prefix
-    // + the listen port (derived below; R311y397 — the `--zid` override, when
-    // present, bypasses this prefix entirely, and a non-IP listen REQUIRES it). The
-    // mesh routing graph keys on the zid, so two peers MUST NOT share one; the prefix
-    // keeps the demo's derived zids in a recognisable range. (The periodic
-    // self-flood cadence now lives in the
-    // LinkstateForwarder itself — R311rf, on the FaceForwarder seam — so this
-    // demo no longer owns a flood timer.)
-    const PEER_ZID_PREFIX: u16 = 0x7072;
+    // Per-peer routing zid: see [`resolve_node_zid`]. (The periodic self-flood
+    // cadence lives in the LinkstateForwarder itself — R311rf, on the
+    // FaceForwarder seam — so this demo owns no flood timer.)
+    //
     // Cadence of the DEMO APPLICATION driver (not the protocol flood): a
     // `--publish` peer originates a data Put each tick, and every peer observes
     // its received-data count. Fast enough to publish soon after convergence.
@@ -4365,57 +4394,18 @@ async fn run_peer_until(
         opts.listen_retry,
     )
     .await?;
-    // Non-IP-safe addressing (R311y397, mirroring run_router_hat's R311y396 seam):
-    // the "listening on" log + the self dial locator render from the per-variant
-    // display (`local_addr_display`, total over every transport), and the
-    // port-derived zid fallback applies ONLY when the listener has an IP
-    // `SocketAddr`. A non-IP listen (unixpipe / unixsock / vsock) has no port to
-    // derive a distinct routing zid from, so it REQUIRES an explicit `--zid` (the
-    // zenoh-faithful config-id; the port derivation is a demo IP-only convenience).
-    // `local_addr()` is the IP accessor that errors for the non-IP families, so it
-    // is taken as an `Option`, never `?`-propagated.
-    //
-    // R2099 — the node's IDENTITY reads the FIRST bound listener. A zenoh node has
-    // one zid no matter how many addresses it binds, so the derivation must pick
-    // one, and the first is the one the operator wrote first (and the one every
-    // pre-R2099 invocation already used, so a single-endpoint document is
-    // byte-identical). `bind_all_endpoints` rejects an empty list, so the index
-    // is total.
+    // Non-IP-safe addressing (R311y397): the "listening on" log + the self dial
+    // locator render from the per-variant display (`local_addr_display`, total
+    // over every transport), taken from the FIRST bound listener (R2099: the
+    // one the operator wrote first; `bind_all_endpoints` rejects an empty list,
+    // so the index is total).
     let primary = &listeners[0];
     let local_display = primary.local_addr_display()?;
-    let local_ip: Option<std::net::SocketAddr> = primary.local_addr().ok();
 
-    // This peer's DISTINCT routing zid (the mesh routing graph keys on it, so two
-    // peers MUST NOT share one). Computed BEFORE the "listening on" log so a non-IP
-    // listen without `--zid` fails fast rather than announcing a listen it will not
-    // serve. An explicit `--zid` override WINS for ANY transport; absent it, an IP
-    // listener derives a distinct zid from its listen port (deterministic,
-    // collision-free across the demo's ephemeral ports); a non-IP listen must supply
-    // `--zid`.
-    let node_zid: Vec<u8> = match zid_override {
-        Some(zid) => zid,
-        None => match local_ip {
-            Some(addr) => {
-                let port = addr.port();
-                vec![
-                    (PEER_ZID_PREFIX >> 8) as u8,
-                    (PEER_ZID_PREFIX & 0xff) as u8,
-                    (port >> 8) as u8,
-                    (port & 0xff) as u8,
-                ]
-            }
-            None => {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidInput,
-                    format!(
-                        "wz-ap-demo peer: --peer {listen:?} is a non-IP transport \
-                         (unixpipe / unixsock / vsock) with no listen port to derive a \
-                         distinct routing zid from; pass an explicit --zid <hex>"
-                    ),
-                ));
-            }
-        },
-    };
+    // This peer's routing zid (the mesh routing graph keys on it). R2883: a
+    // configured `--zid`, else a random one, for every transport alike.
+    let node_zid: Vec<u8> = resolve_node_zid(zid_override)?;
+    log::info!("wz-ap-demo peer: zid {}", zid_hex(Some(&node_zid)));
 
     // Parse the outbound dial targets. R2233 (open-debt item 585) — this comment
     // used to read "TCP socket addresses for this atom. Only the DIAL side is
@@ -4441,9 +4431,8 @@ async fn run_peer_until(
     // R311rc (c3d-4) — a DISTINCT zid per peer (the mesh routing graph keys on it,
     // so two peers MUST NOT share one; the demo's single hardcoded 0x01020304 would
     // collide — a node would ingest a remote link-state under its OWN zid).
-    // Production supplies a real per-process zid; the demo pins `--zid` or derives a
-    // deterministic distinct one from the listen port (R311y397 computed `node_zid`
-    // above, so a non-IP listen already fail-fasted on a missing `--zid`).
+    // `node_zid` above is the configured `--zid` or a random one (R2883), as a
+    // zenoh node's is.
     params.zid = node_zid;
 
     // R311rb/rf — the peer maintains a linkstate-peer routing graph: each held
@@ -6081,9 +6070,9 @@ async fn run_router_hat_until(
     dial_targets: &[String],
     connect_after: Option<(u64, Vec<String>)>,
     // Optional `--zid <hex>` override: pin this router's routing zid instead of
-    // deriving it from the ephemeral listen port. The mesh MASTER election (HRW over
-    // shared_nodes) keys on zid, so a deterministic zid makes a federation e2e's
-    // master choice reproducible — a port-derived zid varies per run (flaky).
+    // drawing a random one ([`resolve_node_zid`]). The inter-region filter picks
+    // the largest gateway zid, so a federation e2e that needs a reproducible
+    // carrier pins both zids.
     zid_override: Option<Vec<u8>>,
     // R311y406 — the server cert a `--router-hat tls/...` / `quic/...` presents.
     cert_paths: &AcceptCertPaths,
@@ -6150,13 +6139,6 @@ async fn run_router_hat_until(
     use wz::runtime_tokio::accept_loop::{peer_loop, AcceptEvent, FaceSources};
     use wz::runtime_tokio::linkstate_forward::Zid;
     use wz::runtime_tokio::router_forward::RouterForwarder;
-    // Distinct 2-byte zid prefix ("rh") so a router-hat node and a peer bound to
-    // the same port still derive DIFFERENT routing zids: RouterForwarder dedups
-    // faces by zid (`dedups_faces_by_zid`), and two mesh nodes sharing a zid would
-    // silently drop one's face and never converge. Ports differ across the harness
-    // nodes anyway, so the distinct prefix is belt-and-suspenders + keeps the
-    // router-hat's derived zids in a recognisable range (peers use 0x7072).
-    const ROUTER_HAT_ZID_PREFIX: u16 = 0x7268;
     // Cadence of the OBSERVE-only application driver (a pure router originates no
     // data); matches the peer's so the witnesses log promptly after convergence.
     const APP_TICK_MS: u64 = 250;
@@ -6176,51 +6158,16 @@ async fn run_router_hat_until(
     .await?;
     // Non-IP-safe addressing (R311y396): the log line + the adminspace `local_data`
     // dial locator render from the per-variant display (`local_addr_display`, total
-    // over every transport), and the port-derived zid fallback applies ONLY when the
-    // listener has an IP `SocketAddr`. A non-IP listen (unixpipe / unixsock / vsock)
-    // has no port to derive a distinct routing zid from, so it REQUIRES an explicit
-    // `--zid` (the zenoh-faithful config-id; the port derivation is a demo IP-only
-    // convenience). `local_addr()` is the IP accessor that errors for the non-IP
-    // families, so it is taken as an `Option`, never `?`-propagated (the R311y392
-    // multi-client unixpipe acceptor already makes such a listen mesh-capable).
-    //
-    // R2099 — the node's IDENTITY reads the FIRST bound listener, for the reason
-    // `run_peer_until` gives: one node, one zid, however many addresses it binds.
+    // over every transport), taken from the FIRST bound listener (R2099, for the
+    // reason `run_peer_until` gives).
     let primary = &listeners[0];
     let local_display = primary.local_addr_display()?;
-    let local_ip: Option<std::net::SocketAddr> = primary.local_addr().ok();
 
-    // The node's DISTINCT routing zid (the run_peer discipline) — the mesh graph
-    // keys on it (RouterForwarder dedups faces by zid). Computed BEFORE the
-    // "listening on" log so a non-IP listen without `--zid` fails fast rather than
-    // announcing a listen it will not serve. An explicit `--zid` override WINS for
-    // ANY transport (deterministic mesh master election). Absent it, derive a
-    // distinct zid from the listen port — but only an IP listener HAS a port; a
-    // non-IP (unixpipe / …) listen must supply `--zid`.
-    let node_zid: Vec<u8> = match zid_override {
-        Some(zid) => zid,
-        None => match local_ip {
-            Some(addr) => {
-                let port = addr.port();
-                vec![
-                    (ROUTER_HAT_ZID_PREFIX >> 8) as u8,
-                    (ROUTER_HAT_ZID_PREFIX & 0xff) as u8,
-                    (port >> 8) as u8,
-                    (port & 0xff) as u8,
-                ]
-            }
-            None => {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidInput,
-                    format!(
-                        "wz-ap-demo router-hat: --router-hat {listen:?} is a non-IP \
-                         transport (unixpipe / unixsock / vsock) with no listen port to \
-                         derive a distinct routing zid from; pass an explicit --zid <hex>"
-                    ),
-                ));
-            }
-        },
-    };
+    // The node's routing zid — the mesh graph keys on it (RouterForwarder dedups
+    // faces by zid). R2883: a configured `--zid`, else a random one, for every
+    // transport alike ([`resolve_node_zid`]).
+    let node_zid: Vec<u8> = resolve_node_zid(zid_override)?;
+    log::info!("wz-ap-demo router-hat: zid {}", zid_hex(Some(&node_zid)));
 
     // Parse the outbound dial targets (empty for a listen-only router; non-empty
     // for router-to-router federation, ACTIVATION-4). A malformed target fails
@@ -9406,6 +9353,36 @@ mod serial_caller_failfast_tests {
 /// one in a test would bind the assertion to a feature combination and break on
 /// every future field. The helper IS the whole of what the two sites do with a
 /// target — each site is now one `?` line — so pinning it pins the wiring.
+/// R2883 (open-debt item 825) — the mesh node's default identity.
+#[cfg(all(test, feature = "routing-peer"))]
+mod node_zid_tests {
+    use super::resolve_node_zid;
+
+    #[test]
+    fn a_configured_zid_is_kept_verbatim() {
+        let zid = vec![0x01, 0x02, 0x03, 0x04];
+        assert_eq!(resolve_node_zid(Some(zid.clone())).unwrap(), zid);
+    }
+
+    /// Two nodes with no `id` configured get different zids, whatever they
+    /// listen on: the property the port derivation lacked across hosts. Each
+    /// draw is non-empty, at most 16 bytes, and canonical (no trailing zero).
+    #[test]
+    fn an_unconfigured_zid_is_random_and_canonical() {
+        let draws: Vec<Vec<u8>> = (0..64).map(|_| resolve_node_zid(None).unwrap()).collect();
+        for zid in &draws {
+            assert!(!zid.is_empty() && zid.len() <= 16, "{zid:02x?}");
+            assert_ne!(zid.last(), Some(&0), "canonical length: {zid:02x?}");
+        }
+        let distinct: std::collections::HashSet<&Vec<u8>> = draws.iter().collect();
+        assert_eq!(
+            distinct.len(),
+            draws.len(),
+            "64 draws are pairwise distinct"
+        );
+    }
+}
+
 #[cfg(all(test, any(feature = "routing-peer", feature = "router-hat-router")))]
 mod mesh_dial_target_tests {
     use super::resolve_dial_targets;
@@ -9622,24 +9599,17 @@ mod router_hat_quic_cert_tests {
     target_os = "linux"
 ))]
 mod router_hat_failfast_tests {
-    use super::run_router_hat;
+    use super::run_router_hat_until;
 
-    /// R311y396 — a non-IP unixpipe `--router-hat` listen WITHOUT `--zid` fails fast:
-    /// `run_router_hat` binds the listener, then returns `Err(InvalidInput)` because a
-    /// unixpipe listen has no port to derive a distinct routing zid from and no
-    /// `zid_override` was supplied. The message names `--zid` (the R311y396 fix),
-    /// distinguishing it from the pre-R311y396 `local_addr()?` reject ("a unixpipe
-    /// listener has no IP SocketAddr"), so this unit binds to the product-code seam,
-    /// not just to "some error". The `None` zid_override makes the fn return BEFORE
-    /// `peer_loop` (the Err is raised at zid derivation), so this is a clean
-    /// non-hanging unit test — no SIGTERM injection needed.
+    /// R2883 (open-debt item 825) — a non-IP unixpipe `--router-hat` listen
+    /// WITHOUT `--zid` now SERVES with a random zid, the router twin of the peer
+    /// witness. Until R2883 this was the refusal R311y396 pinned.
     ///
-    /// RED reproduction (proof it binds to the R311y396 seam, not the vehicle):
-    /// RESTORE `let local = listener.local_addr()?;` at the top of `run_router_hat`
-    /// -> the fn errors with "no IP SocketAddr" (no "--zid" substring) -> the
-    /// substring assert below fails.
+    /// RED reproduction: restore the port-derived zid with its non-IP refusal ->
+    /// `run_router_hat_until` returns `Err(InvalidInput)` naming `--zid` -> the
+    /// `expect` below panics.
     #[tokio::test]
-    async fn run_router_hat_without_zid_on_a_unixpipe_listen_fails_fast() {
+    async fn run_router_hat_without_zid_on_a_unixpipe_listen_serves() {
         let base = std::env::temp_dir()
             .join(format!("wz-ap-demo-rh-failfast-{}", std::process::id()))
             .to_string_lossy()
@@ -9649,20 +9619,17 @@ mod router_hat_failfast_tests {
 
         let listen = format!("unixpipe/{base}");
         // R311y406 — cert-free unixpipe: the AcceptCertPaths quartet is all-None.
-        let err = run_router_hat(
+        run_router_hat_until(
             std::slice::from_ref(&listen),
             &[],
             None,
             None,
             &super::AcceptCertPaths::default(),
             &super::RouterHatOpts::default(),
+            std::future::ready(()),
         )
         .await
-        .expect_err("a non-IP unixpipe --router-hat without --zid must fail fast");
-        assert!(
-            err.to_string().contains("--zid"),
-            "the fail-fast must name --zid (the R311y396 fix), got: {err}"
-        );
+        .expect("a unixpipe --router-hat without --zid draws a random zid and serves");
 
         // bind_endpoint created the request node; its acceptor Drop unlinks it, but
         // SIGKILL-safe best-effort cleanup here too (mirrors the sibling test).
@@ -9815,26 +9782,21 @@ mod peer_quic_cert_tests {
     target_os = "linux"
 ))]
 mod peer_failfast_tests {
-    use super::{run_peer, PeerOpts};
+    use super::{run_peer_until, PeerOpts};
     use crate::InterceptorOpts;
 
-    /// R311y397 — a non-IP unixpipe `--peer` listen WITHOUT `--zid` fails fast:
-    /// `run_peer` binds the listener, then returns `Err(InvalidInput)` because a
-    /// unixpipe listen has no port to derive a distinct routing zid from and no
-    /// `zid_override` was supplied. The message names `--zid` (the R311y397 fix),
-    /// distinguishing it from the pre-R311y397 `local_addr()?` reject ("a unixpipe
-    /// listener has no IP SocketAddr"), so this unit binds to the product-code seam,
-    /// not just to "some error". The `None` zid_override makes the fn return BEFORE
-    /// `peer_loop` (the Err is raised at zid derivation), so this is a clean
-    /// non-hanging unit test — no SIGTERM injection needed. The sibling of
-    /// `router_hat_failfast_tests` (R311y396) on the peer run-mode.
+    /// R2883 (open-debt item 825) — a non-IP unixpipe `--peer` listen WITHOUT
+    /// `--zid` now SERVES: it draws a random zid, as upstream does when the
+    /// config names no `id`. Until R2883 this was the refusal R311y397 pinned,
+    /// because the zid was derived from a listen port a unixpipe does not have.
+    /// The injected immediately-ready shutdown makes the green path a clean
+    /// return rather than a SIGTERM wait.
     ///
-    /// RED reproduction (proof it binds to the R311y397 seam, not the vehicle):
-    /// RESTORE `let local = listener.local_addr()?;` at the top of `run_peer` -> the
-    /// fn errors with "no IP SocketAddr" (no "--zid" substring) -> the substring
-    /// assert below fails.
+    /// RED reproduction: restore the port-derived zid with its non-IP refusal ->
+    /// `run_peer_until` returns `Err(InvalidInput)` naming `--zid` -> the
+    /// `expect` below panics.
     #[tokio::test]
-    async fn run_peer_without_zid_on_a_unixpipe_listen_fails_fast() {
+    async fn run_peer_without_zid_on_a_unixpipe_listen_serves() {
         let base = std::env::temp_dir()
             .join(format!("wz-ap-demo-peer-failfast-{}", std::process::id()))
             .to_string_lossy()
@@ -9881,9 +9843,9 @@ mod peer_failfast_tests {
             tls_key: None,
             quic_cert: None,
             quic_key: None,
-            // R2233 — this fixture fails fast at zid derivation and never dials,
-            // so there is no client trust material to carry. The default is the
-            // honest value here, not a placeholder.
+            // R2233 — this fixture never dials, so there is no client trust
+            // material to carry. The default is the honest value here, not a
+            // placeholder.
             dial_certs: super::DialCertPaths::default(),
             #[cfg(feature = "routing-interest-pending-gc")]
             interest_timeout_ms: None,
@@ -9932,19 +9894,16 @@ mod peer_failfast_tests {
         };
 
         let listen = format!("unixpipe/{base}");
-        let err = run_peer(
+        run_peer_until(
             std::slice::from_ref(&listen),
             &[],
             &opts,
             &interceptors,
             super::TransportTuning::default(),
+            std::future::ready(()),
         )
         .await
-        .expect_err("a non-IP unixpipe --peer without --zid must fail fast");
-        assert!(
-            err.to_string().contains("--zid"),
-            "the fail-fast must name --zid (the R311y397 fix), got: {err}"
-        );
+        .expect("a unixpipe --peer without --zid draws a random zid and serves");
 
         // bind_endpoint created the request node; its acceptor Drop unlinks it, but
         // SIGKILL-safe best-effort cleanup here too (mirrors the sibling test).

@@ -22,7 +22,7 @@
 //!      forwarder-local admin queryable on `@/<A_zid>/peer/**` (R311y44
 //!      self-dispatch + R311y45 admin handler reading the shared WzConfig).
 //!   2. Wait for A's `adminspace config GET at <key>` log; scrape the exact
-//!      config keyexpr (so B need not derive A's port-derived zid).
+//!      config keyexpr (so B need not know A's zid, which is random, R2883).
 //!   3. Spawn client B: `--connect <addr> --query <key> --on-query-reply-log`.
 //!      B's z_get routes to A; A's forward_request finds no remote queryable
 //!      (the admin key is self-unique), self-dispatches to the admin handler,

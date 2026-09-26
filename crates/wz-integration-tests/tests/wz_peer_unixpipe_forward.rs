@@ -10,9 +10,9 @@
 //! unixpipe listener has no IP SocketAddr") AND run_peer had no `--zid` override at
 //! all. R311y397 adds the override and makes that seam non-IP safe: the log + self
 //! locator render from `local_addr_display()`, the zid uses an explicit `--zid` for
-//! ANY transport, IP listeners keep the port-derived fallback (TCP byte-identical),
-//! and a non-IP listen REQUIRES `--zid` (a zenoh-faithful config-id, not the demo
-//! port hack).
+//! ANY transport. R2883 (open-debt item 825) then replaced the port-derived
+//! fallback with a random zid, as upstream draws one, so a non-IP listen no
+//! longer REQUIRES `--zid`; this leg still pins one for its own determinism.
 //!
 //! Topology: one `--peer unixpipe/<base> --zid 70720001` + a `--key` consumer
 //! (`--zid 0a000001`) + a `--publish` producer (`--zid 0a000002`), all distinct
@@ -29,10 +29,10 @@
 //! through the peer, not a vehicle):
 //!  - a non-matching producer keyexpr -> the consumer never fires (delivery
 //!    discriminator);
-//!  - the peer spawned WITHOUT `--zid` -> the R311y397 fail-fast exits it
-//!    ("non-IP transport ... pass an explicit --zid") before it ever accepts, so no
-//!    client connects and the consumer never fires (proves the product-code seam is
-//!    load-bearing: a non-IP peer REQUIRES an explicit zid).
+//!  - (retired R2883) the peer spawned WITHOUT `--zid` used to exit on the
+//!    R311y397 fail-fast; it now serves with a random zid, so that reproduction
+//!    would stay GREEN. The unit witness `run_peer_without_zid_on_a_unixpipe_listen_serves`
+//!    owns that property now.
 //!
 //! Requires the binary built with `--features routing-peer,transport-link-unixpipe`
 //! (the peer run-mode + the unixpipe transport). Linux-only (the unixpipe backend's

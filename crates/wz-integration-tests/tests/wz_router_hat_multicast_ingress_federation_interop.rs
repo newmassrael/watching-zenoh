@@ -26,8 +26,8 @@
 //!                                          P (--peer --subscribe, OFF the group,
 //!                                             meshed to BOTH R1 and R2)
 //!
-//! R1 + R2 both `--router-hat`: each derives a DISTINCT port-based zid
-//! (`0x7268 ++ ephemeral listen port`), so on the shared group neither's RX
+//! R1 + R2 both `--router-hat`: each draws a DISTINCT random zid (R2883; it
+//! was `0x7268 ++ ephemeral listen port` before), so on the shared group neither's RX
 //! self-zid gate drops the other's JOIN and the DR election has a real 2-member
 //! candidate set. R2 `--connect`s R1, so they mesh-peer (both `WhatAmI::Router` ->
 //! each in the other's `routers_net`). P is a `--peer` subscriber `--connect`ing

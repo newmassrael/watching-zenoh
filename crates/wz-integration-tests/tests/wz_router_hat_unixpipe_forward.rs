@@ -9,9 +9,10 @@
 //! from the listen `.ip()`, so a non-IP unixpipe listen was rejected at bind
 //! ("a unixpipe listener has no IP SocketAddr"). R311y396 makes that seam non-IP
 //! safe: the log + admin locator render from `local_addr_display()`, the zid uses
-//! an explicit `--zid` for ANY transport, IP listeners keep the port-derived
-//! fallback (TCP byte-identical), and a non-IP listen REQUIRES `--zid` (a
-//! zenoh-faithful config-id, not the demo port hack). This is the ap/pico SUPERSET:
+//! an explicit `--zid` for ANY transport. R2883 (open-debt item 825) replaced the
+//! port-derived fallback with a random zid, as upstream draws one, so a non-IP
+//! listen no longer REQUIRES `--zid`; this leg still pins one for its own
+//! determinism. This is the ap/pico SUPERSET:
 //! zenoh-pico cannot be a router at all, so a wz true-Router routing over IPC has
 //! no ap/pico counterpart.
 //!
@@ -30,10 +31,10 @@
 //! through the router-hat, not a vehicle):
 //!  - a non-matching producer keyexpr -> the consumer never fires (delivery
 //!    discriminator);
-//!  - the router-hat spawned WITHOUT `--zid` -> the R311y396 fail-fast exits it
-//!    ("non-IP transport ... pass an explicit --zid") before it ever accepts, so no
-//!    client connects and the consumer never fires (proves the product-code seam is
-//!    load-bearing: a non-IP router-hat REQUIRES an explicit zid).
+//!  - (retired R2883) the router-hat spawned WITHOUT `--zid` used to exit on the
+//!    R311y396 fail-fast; it now serves with a random zid, so that reproduction
+//!    would stay GREEN. The unit witness `run_router_hat_without_zid_on_a_unixpipe_listen_serves`
+//!    owns that property now.
 //!
 //! Requires the binary built with `--features router-hat-router,transport-link-unixpipe`
 //! (the true-Router run-mode + the unixpipe transport). Linux-only (the unixpipe

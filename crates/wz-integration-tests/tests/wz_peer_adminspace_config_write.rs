@@ -98,8 +98,8 @@ fn spawn_peer(label: &str, args: &[&str]) -> (ChildGuard, File, u16, String) {
 fn wz_peer_config_write_acl_deny_flips_the_live_verdict_over_the_wire() {
     // A (the SUBSCRIBER + config-write host) binds first so B can dial it. A logs
     // `adminspace config WRITE at @/<zid>/peer/config/**` once registered — scrape
-    // the exact key so B can PUT A's `.../config/acl-deny` without deriving A's
-    // port-derived zid.
+    // the exact key so B can PUT A's `.../config/acl-deny` without knowing A's
+    // zid, which is random (R2883).
     let (mut a_guard, mut a_reader, p_a, a_listen_log) = spawn_peer(
         "peer-A",
         &[
