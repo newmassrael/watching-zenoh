@@ -464,6 +464,21 @@ fn is_leaf(region: Region) -> bool {
     )
 }
 
+/// R2888 (open-debt item 751, step 8a) — whether `region` is served by the
+/// pin's PEER hat on a router node: the south peer region. Read off the same
+/// ported table as [`is_leaf`].
+///
+/// wz still holds this region in a [`MeshHat`] (its link-state net and
+/// zid-keyed tables), which is the tree-routing shape of the pin's ROUTER hat.
+/// The pin's peer hat is face-based: it registers what its own faces declare,
+/// and sends to its own faces only what OTHER hats hold
+/// (`zenoh/src/net/routing/hat/peer/pubsub.rs` @ `for dst_face in self.owned_faces_mut(ctx.tables) {`,
+/// reached only with an `other_info`). Step 8 moves the region onto that
+/// behaviour rule by rule; this predicate is where each rule asks.
+fn is_peer_hat(region: Region) -> bool {
+    matches!(hat_kind(&region, WhatAmI::Router), HatKind::Peer)
+}
+
 /// R2867 (open-debt item 751, step 3a) — the state one MESH region's hat owns:
 /// its link-state net and the recompute flag for that net, as each of the
 /// pin's router and peer hats owns its own `Network`
@@ -3196,6 +3211,23 @@ impl RouterForwarder {
     }
 
     /// [`reflood_declaration`](Self::reflood_declaration) for a resolved source.
+    ///
+    /// R2888 (open-debt item 751, step 8a) — never within a region the pin's
+    /// PEER hat serves ([`is_peer_hat`]). The pin's router re-floods a router
+    /// mesh declaration along the router net's trees, but its peer hat does not
+    /// send one peer's declaration on to the other peers of the same region: it
+    /// registers it on the face that declared it and propagates to its own faces
+    /// only what OTHER hats hold (`propagate_subscriber` returns early when there
+    /// is no `other_info`,
+    /// `zenoh/src/net/routing/hat/peer/pubsub.rs` @ `let Some(other_info) = other_info else {`,
+    /// the queryable twin in `zenoh/src/net/routing/hat/peer/queries.rs` @ `let Some(other_info) = other_info else {`,
+    /// and the token plane's form of the same rule,
+    /// `zenoh/src/net/routing/hat/peer/token.rs` @ `if self.owns(ctx.src_face) {`).
+    /// All three planes commit through here, so the one gate covers them.
+    /// The peers of that region learn each other's declarations over their own
+    /// links, which gossip autoconnect makes direct. The cross-region
+    /// advertisement ([`repropagate`](Self::repropagate)) is untouched: that is
+    /// the `other_info` case.
     fn reflood_sourced(
         &self,
         inbound: FaceId,
@@ -3204,6 +3236,9 @@ impl RouterForwarder {
         sourced: &Sourced,
         build: impl Fn(&str) -> Result<DeclareOwned, CodecError>,
     ) {
+        if is_peer_hat(tier) {
+            return;
+        }
         let Some((net, _dirty)) = self.plane(tier) else {
             return;
         };
@@ -15084,11 +15119,17 @@ mod tests {
         assert_eq!(sink_a.frame_count(), 0, "not back to the inbound source A");
     }
 
+    /// R2888 (open-debt item 751, step 8a) — a peer's declaration is registered
+    /// on the router but NOT re-flooded to the other peers of the same region,
+    /// because the pin serves that region with its peer hat, which propagates to
+    /// its own faces only what other hats hold. Until R2888 this test asserted
+    /// the opposite (`peer_declare_re_floods_within_the_peers_tier`), the
+    /// router hat's tree re-flood applied to the peer region. The router-region
+    /// twins (`declare_re_floods_within_the_tier_only`,
+    /// `undeclare_re_floods_within_the_tier`) are the control: the router hat
+    /// still re-floods.
     #[test]
-    fn peer_declare_re_floods_within_the_peers_tier() {
-        // The peer-tier twin of `declare_re_floods_within_the_tier_only`: the
-        // re-flood machinery is tier-generic (a peer declare floods the peers
-        // tree, never the router tier).
+    fn a_peer_declare_is_not_re_flooded_within_the_peer_region() {
         let fwd = RouterForwarder::new(zid(0x01));
         let (a, sink_a) = face(zid(0xAA), WIRE_PEER); // source (peer)
         let (c, sink_c) = face(zid(0xCC), WIRE_PEER); // same-tier tree child
@@ -15109,8 +15150,8 @@ mod tests {
         );
         assert_eq!(
             sink_c.frame_count(),
-            1,
-            "re-flooded to the peer-tier tree child"
+            0,
+            "not re-flooded to the other peer of the same region"
         );
         assert_eq!(sink_r.frame_count(), 0, "not to the router tier");
     }
