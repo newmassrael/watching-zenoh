@@ -80,24 +80,27 @@ ATOM = "routing-token-tables"
 COUNTERPARTS: dict[str, tuple[str, ...]] = {
     # Register a token from a router on an OWNED face: record the source in the
     # inbound tier's table, then propagate along the SOURCE's spanning tree.
-    # wz: `ingest_token` -> the shared `ingest_interest` core -> the tree-scoped
-    # `reflood_declaration`.
-    "register_token": ("ingest_token", "tokens_table"),
+    # wz (R2876): the plane entry `declare_token` resolves the owner hat, and
+    # `register_token` is the one hat-dispatched step, as the pin's dispatcher
+    # calls `hats[region].register_token`.
+    "register_token": ("declare_token", "register_token", "tokens_table"),
     # The removal twin, gated on a REAL removal exactly as upstream gates on the
     # router set becoming empty.
-    "unregister_token": ("withdraw_token", "undeclare_push_token"),
+    "unregister_token": ("undeclare_token", "unregister_token", "undeclare_push_token"),
     # The cross-REGION arm: upstream inserts its OWN zid as a source and floods
     # from self's tree. wz derives self-membership instead of storing it
-    # (idiom-B, derive-not-store), so the twin is the cross-tier advertise.
-    "propagate_token": ("advertise_native_cross_tier_token", "push_future_token"),
-    "unpropagate_token": (
-        "withdraw_native_cross_tier_token",
-        "self_advertises_token_into",
-    ),
-    # "is this token sourced by someone other than me" -- upstream spells the
-    # self-exclusion `router != &tables.zid`; under derive-not-store self is
-    # never in the mesh tables, so wz folds globally and says why.
-    "remote_tokens_of": ("any_token_matches", "contributor_tokens_source_count"),
+    # (idiom-B, derive-not-store): `TokenPlane` is the token instance of the
+    # one snapshot-and-diff propagate rule (R2876), and its fold is
+    # `self_advertises_token_into`. The declare and the retract are the two
+    # arms of that one rule, so both methods land on the same pair.
+    "propagate_token": ("TokenPlane", "self_advertises_token_into", "push_future_token"),
+    "unpropagate_token": ("TokenPlane", "self_advertises_token_into"),
+    # "does this hat hold the token from someone other than me" -- upstream
+    # spells the self-exclusion `router != &tables.zid`; under derive-not-store
+    # self is never in the mesh tables, so the per-holder count
+    # `token_contributions` is the per-hat twin and `any_token_matches` the
+    # global fold.
+    "remote_tokens_of": ("any_token_matches", "token_contributions"),
     "remote_tokens_matching": ("any_token_matches",),
     # The CURRENT-dump leg, which carries upstream's self-exclusion explicitly.
     "sourced_tokens": ("dump_interest_tokens",),
