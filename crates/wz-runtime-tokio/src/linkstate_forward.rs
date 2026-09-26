@@ -2100,38 +2100,13 @@ impl LinkstateForwarder {
     /// needs no hop-limit — it is bounded by the [`LinkstatepeerInterest`] register
     /// change-gate (re-flood only on a NEW interest), the state-convergent bound.
     fn forward_push(&self, inbound: FaceId, reliable: bool, priority: Priority, push: &PushOwned) {
-        // R311y450 — the §5.18 forward-path stamp, applied ONCE here, at the head,
-        // before anything fans out. zenoh does the same at ONE point
-        // (`treat_timestamp!` at `dispatcher/pubsub.rs:328`) and then fans the one
-        // stamped `msg` to every leg of `route`.
+        // `push` arrives already stamped: the §5.18 stamp is applied once, at
+        // the Push arm of `forward`, before this and every other destination of
+        // the same Put is served (zenoh's one `treat_timestamp!` in
+        // `route_data`, `zenoh/src/net/routing/dispatcher/pubsub.rs`). Not inside
+        // `compute_push_forward`, which `RouterForwarder` calls once per
+        // tier-net and would mint a different timestamp per mesh leg.
         //
-        // NOT inside `compute_push_forward` below, even though that is where the
-        // carrier is already cloned and mutated (`set_push_source` /
-        // `set_push_hoplimit`) and where the `interested.is_empty()` early-out
-        // mirrors zenoh's `if !route.is_empty()`. That core is called PER TIER-NET
-        // by `RouterForwarder` (`router_forward.rs`'s `forward_push_tier`), so a
-        // stamp there would mint a DIFFERENT timestamp for each mesh leg of one
-        // Put — the opposite of what zenoh's single stamp point guarantees.
-        //
-        // No-op on this forwarder's production role: `WhatAmI::Peer` does not
-        // timestamp under zenoh's shipped map, so `node_hlc` holds no clock and
-        // the borrow below is skipped entirely.
-        let stamped;
-        let push = if self.node_hlc.is_stamping() {
-            let mut carrier = push.clone();
-            // R2626 — the DROP arm. zenoh spells it as a bare `return` out of
-            // `route_data`, so nothing reaches any destination; this is the same
-            // statement at wz's one stamp point, before any fan-out.
-            if self.node_hlc.treat_timestamp(&mut carrier)
-                == crate::node_clock::TimestampVerdict::Drop
-            {
-                return;
-            }
-            stamped = carrier;
-            &stamped
-        } else {
-            push
-        };
         // The inbound face's zid + graph link (source resolution) AND the Push's
         // keyexpr resolved against THIS face's link-local alias table (c3c-3 B1) —
         // taken in one SCOPED borrow so the `fan_out` below holds the only live
@@ -6938,6 +6913,17 @@ impl FaceForwarder for LinkstateForwarder {
                 // tree (loop-free), excluding the inbound face.
                 NetworkMessage::Push(push) => {
                     self.data_seen.set(self.data_seen.get() + 1);
+                    // R2892 — ONE stamp for every destination of this Put, the
+                    // mesh fan-out, the local subscribers, the client subscribers
+                    // and the client re-inject alike. It used to sit inside
+                    // `forward_push`, so the three other consumers below got the
+                    // Put bare while the mesh got it stamped.
+                    // A dropped Put is this message only: the rest of the batch
+                    // is still served, as each `route_data` call is one Push.
+                    let Some(stamped) = self.node_hlc.stamp_for_every_destination(push) else {
+                        continue;
+                    };
+                    let push: &PushOwned = &stamped;
                     // R311y221 — preserve the received band on the transit
                     // re-forward: a relay hop re-emits on the SAME priority the
                     // frame arrived with (the priority sub-field of the ext_qos
@@ -13360,25 +13346,38 @@ mod tests {
     }
 
     /// Relay one bare Put through a peer-role forwarder built with `map`, and
-    /// answer with the timestamp the EGRESSED copy carries.
+    /// answer with the timestamps the EGRESSED copies carry: the one a mesh peer
+    /// received, then the one a co-attached client subscriber received.
     ///
     /// R2112 — the two arms below differ in the `timestamping.enabled` map and
     /// in nothing else, which is what makes the pair a discriminator rather than
     /// two observations: same topology, same interest, same bare Put.
+    ///
+    /// R2892 — driven through the INGRESS (`forward`), not `forward_push`, and
+    /// with a client subscriber beside the mesh one. The stamp used to live in
+    /// `forward_push`, which serves the mesh only, so the client copy of the same
+    /// Put left bare; zenoh stamps once in `route_data` for every destination.
     #[cfg(feature = "time-hlc")]
     fn relay_bare_put_through_peer(
         map: crate::node_clock::TimestampingEnabled,
-    ) -> Option<wz_session_core::sample::TimestampHint> {
+    ) -> (
+        Option<wz_session_core::sample::TimestampHint>,
+        Option<wz_session_core::sample::TimestampHint>,
+    ) {
         let fwd = LinkstateForwarder::with_timestamping(zid(0x05), WhatAmI::Peer, map);
         let (face_a, sink_a) = peer_face(zid(0x0A));
         let (face_b, sink_b) = peer_face(zid(0x0B));
+        let (client_c, sink_c) = peer_face_whatami(zid(0x0C), 2);
         fwd.register(FaceId(0), &face_a);
         fwd.register(FaceId(1), &face_b);
+        fwd.register(FaceId(2), &client_c);
         advertise_link_back(&fwd, FaceId(0), 0x0A, 0x05);
         advertise_link_back(&fwd, FaceId(1), 0x0B, 0x05);
         declare_interest(&fwd, FaceId(1), "demo/data");
+        client_declare_sub(&fwd, FaceId(2), 1, "demo/data");
         sink_a.reset();
         sink_b.reset();
+        sink_c.reset();
 
         let push = data_push();
         assert_eq!(
@@ -13387,19 +13386,27 @@ mod tests {
             "the Put must enter this node BARE, or the stamp under test is the \
              publisher's rather than the node's",
         );
-        fwd.forward_push(
-            FaceId(0),
-            true,
-            wz_session_core::qos::Priority::DEFAULT,
-            &push,
-        );
-        assert_eq!(
-            sink_b.frame_count(),
-            1,
-            "the interested face must receive the relayed Put in both arms — a \
-             dropped Put would read as `no timestamp` for the wrong reason",
-        );
-        forwarded_timestamp(&sink_b.frame_bytes(0))
+        let outcome = DriverLoopOutcome::FramePayload {
+            priority: wz_session_core::qos::Priority::DEFAULT,
+            reliable: true,
+            sn: 0,
+            messages: vec![NetworkMessage::Push(Box::new(push))],
+            has_ext: false,
+            extensions: Vec::new(),
+        };
+        fwd.forward(FaceId(0), IterationEvent::Poll(&outcome));
+        for (sink, whom) in [(&sink_b, "mesh peer"), (&sink_c, "client subscriber")] {
+            assert_eq!(
+                sink.frame_count(),
+                1,
+                "the interested {whom} must receive the relayed Put in both arms \
+                 — a dropped Put would read as `no timestamp` for the wrong reason",
+            );
+        }
+        (
+            forwarded_timestamp(&sink_b.frame_bytes(0)),
+            forwarded_timestamp(&sink_c.frame_bytes(0)),
+        )
     }
 
     /// R2112 (open-debt item 102) — a peer whose config document turns
@@ -13425,17 +13432,19 @@ mod tests {
     fn the_config_map_decides_whether_a_relaying_peer_stamps() {
         use crate::node_clock::TimestampingEnabled;
 
-        let shipped = relay_bare_put_through_peer(TimestampingEnabled::default());
+        let (shipped_mesh, shipped_client) =
+            relay_bare_put_through_peer(TimestampingEnabled::default());
         assert!(
-            shipped.is_none(),
+            shipped_mesh.is_none() && shipped_client.is_none(),
             "zenoh's shipped map disables a PEER, so the relayed Put must leave \
-             bare — a stamp here is wz stamping where a real peer would not",
+             bare on every face — a stamp here is wz stamping where a real peer \
+             would not",
         );
 
-        let enabled = relay_bare_put_through_peer(
+        let (enabled_mesh, enabled_client) = relay_bare_put_through_peer(
             TimestampingEnabled::default().with_role(WhatAmI::Peer, true),
         );
-        let stamp = enabled.expect(
+        let stamp = enabled_mesh.expect(
             "a document that enables timestamping for this node's role must \
              reach the forward-path stamp",
         );
@@ -13444,6 +13453,13 @@ mod tests {
             zid(0x05).as_slice(),
             "the stamp carries THIS node's zid — zenoh's `uhlc::ID` is the node \
              zid, so a stamp bearing anything else came from the wrong clock",
+        );
+        // R2892 — the client copy of the same Put carries the SAME stamp: one
+        // stamp point, every destination (the Layer Z relay star read it bare).
+        assert_eq!(
+            enabled_client,
+            Some(stamp),
+            "the client subscriber's copy carries the one stamp the mesh copy does",
         );
     }
 

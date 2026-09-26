@@ -4195,23 +4195,15 @@ impl RouterForwarder {
         // wire-visible, and the counter is monotonic either way — and hoisting the
         // stamp is what buys the single-timestamp guarantee across four
         // independently-routed blocks.
-        let stamped;
-        let push = if self.node_hlc.is_stamping() {
-            let mut carrier = push.clone();
-            // R2626 — the DROP arm, at the same single stamp point the paragraph
-            // above defends. zenoh's spelling is a bare `return` out of
-            // `route_data`, so no destination is reached; here that means none of
-            // the four blocks below runs, which is the same statement.
-            if self.node_hlc.treat_timestamp(&mut carrier)
-                == crate::node_clock::TimestampVerdict::Drop
-            {
-                return;
-            }
-            stamped = carrier;
-            &stamped
-        } else {
-            push
+        // R2626 — the DROP arm, at the same single stamp point the paragraph
+        // above defends. zenoh's spelling is a bare `return` out of
+        // `route_data`, so no destination is reached; here that means none of
+        // the four blocks below runs, which is the same statement. R2892 — the
+        // stamp itself is `NodeHlc`'s, shared with the peer forwarder.
+        let Some(stamped) = self.node_hlc.stamp_for_every_destination(push) else {
+            return;
         };
+        let push: &PushOwned = &stamped;
         // R2879 (open-debt item 751, step 5) — the origin and the forwarder, as
         // the inbound region's net names them: what the inter-region filter
         // decides every crossing below on, in place of the per-keyexpr master

@@ -402,6 +402,27 @@ impl NodeHlc {
             TimestampVerdict::Relay
         }
     }
+
+    /// R2892 — [`treat_timestamp`](Self::treat_timestamp) over a BORROWED Push,
+    /// for the one call each forwarder makes at the head of its forward: the Put
+    /// every destination is then served, borrowed unchanged when this node does
+    /// not stamp, or `None` for the drop verdict. Both forwarders call this, so
+    /// the single stamp point is one function rather than two copies of it; the
+    /// peer forwarder's copy had drifted to cover its mesh leg only.
+    #[cfg(feature = "codec-push")]
+    pub fn stamp_for_every_destination<'a>(
+        &self,
+        push: &'a wz_codecs::push::PushOwned,
+    ) -> Option<std::borrow::Cow<'a, wz_codecs::push::PushOwned>> {
+        if !self.is_stamping() {
+            return Some(std::borrow::Cow::Borrowed(push));
+        }
+        let mut carrier = push.clone();
+        match self.treat_timestamp(&mut carrier) {
+            TimestampVerdict::Drop => None,
+            TimestampVerdict::Relay => Some(std::borrow::Cow::Owned(carrier)),
+        }
+    }
 }
 
 impl core::fmt::Debug for NodeHlc {
