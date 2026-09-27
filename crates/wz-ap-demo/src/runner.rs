@@ -9210,26 +9210,34 @@ mod mesh_dial_target_tests {
         assert_eq!(schemes, vec!["tls", "quic", "ws", "udp"]);
     }
 
-    /// What SURVIVES the widening: an endpoint shape with no address is REPORTED
-    /// as that, naming the scheme — not disguised as a malformed string. The role
-    /// prefix is part of the contract too: an operator reading stderr must know
-    /// which host refused.
+    /// R2900 (`routing-peer`, `routing-router`) — the INVERSE of what this test
+    /// asserted until now. An endpoint shape with no address was refused here,
+    /// naming the limit, because the mesh loop identified a dial target by its
+    /// address. The loop keys a `MeshDialKey` now, so all four shapes are mesh
+    /// dial targets on both hosts, as a pin peer or router connects over them.
+    /// The schemes are read back so the four cannot collapse into one.
     #[tokio::test]
-    async fn an_endpoint_with_no_address_is_named_not_called_malformed() {
-        let targets = vec!["unixsock-stream//tmp/wz.sock".to_string()];
-        let err = resolve_dial_targets("router-hat", &targets)
-            .await
-            .expect_err("a unixsock dial target is refused");
-        let msg = err.to_string();
-        assert!(msg.contains("router-hat"), "role must be named: {msg}");
-        assert!(
-            msg.contains("unixsock-stream"),
-            "the scheme must be named: {msg}"
-        );
-        assert!(
-            msg.contains("no address to identify it by"),
-            "the LIMIT must be stated, not just the rejection: {msg}"
-        );
+    async fn every_address_less_shape_is_admitted_as_a_mesh_dial_target() {
+        let targets = vec![
+            "unixsock-stream//tmp/wz.sock".to_string(),
+            "unixpipe//tmp/wz.pipe".to_string(),
+            "vsock/3:7447".to_string(),
+            "serial//dev/ttyUSB0#baudrate=115200".to_string(),
+        ];
+        for role in ["peer", "router-hat"] {
+            let dials = resolve_dial_targets(role, &targets)
+                .await
+                .unwrap_or_else(|e| panic!("{role}: every shape is a mesh dial target: {e}"));
+            let schemes: Vec<&str> = dials
+                .iter()
+                .map(wz::runtime_tokio::session_open::locator_scheme)
+                .collect();
+            assert_eq!(
+                schemes,
+                vec!["unixsock-stream", "unixpipe", "vsock", "serial"],
+                "{role}"
+            );
+        }
     }
 
     /// The widening must not swallow real garbage, and it must still fail FAST:

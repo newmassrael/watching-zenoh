@@ -2422,7 +2422,7 @@ mod tests {
     /// R2496b — THE SIZE CEILING, guarded in the crate that owns the type.
     ///
     /// `wz-runtime-tokio`'s `session_open::mesh_dial_plan` hands a rejected
-    /// locator BACK — `Result<ParsedLocator, AnyLocator>` — so every byte added
+    /// locator BACK — `Result<MeshDialTarget, AnyLocator>` — so every byte added
     /// to this family lands in an `Err` variant, and clippy refuses one of 128
     /// bytes or more (`result_large_err`). R2496 added 48 inline and the
     /// refusal arrived in a DIFFERENT crate, at the reduced-features gate,

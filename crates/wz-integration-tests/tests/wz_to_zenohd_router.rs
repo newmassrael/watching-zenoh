@@ -1409,6 +1409,100 @@ fn wz_publish_routes_through_zenohd_to_pico_zsub_over_unixsock() {
     );
 }
 
+/// R2900 — run a wz MESH node (`role` = `--peer` or `--router-hat`) that dials
+/// a stock zenohd over `unixsock-stream/` with `--connect`, and return the
+/// face-up line. Before R2900 the mesh dial refused every endpoint shape with no
+/// socket address, because its loop identified a dial target by the address;
+/// the pin connects over them in every mode
+/// (`zenoh/src/net/runtime/orchestrator.rs` @ `async fn peer_connector(&self, peer: EndPoint) -> ZResult<()> {`).
+///
+/// The line is the witness on three counts: the face's TAG names the unixsock
+/// transport where an IP dial prints an address (so a silent TCP dial cannot
+/// pass), the zid is zenohd's, and zenohd answers as a Router.
+fn mesh_node_dials_zenohd_over_unixsock(role: &str) -> String {
+    let demo = wz_ap_demo_binary();
+    let tcp_res = PortReservation::pick();
+    let tcp_port = tcp_res.port();
+    let sock = zenohd_unixsock_path(tcp_port);
+    let mut zenohd = spawn_zenohd_tcp_unixsock(tcp_port, &sock, || {
+        tempfile::tempfile().expect("tempfile for readiness probe stderr")
+    });
+    drop(tcp_res);
+
+    let stderr = tempfile::tempfile().expect("tempfile for wz mesh node stderr");
+    let writer = stderr.try_clone().expect("dup wz mesh node stderr");
+    let mut reader = stderr;
+    let mut node = ChildGuard::wrap(
+        format!("wz-ap-demo ({role} --connect unixsock/zenohd)"),
+        Command::new(&demo)
+            .arg(role)
+            .arg("127.0.0.1:0")
+            .arg("--connect")
+            .arg(format!("unixsock-stream/{sock}"))
+            .env("RUST_LOG", "info")
+            .stdout(Stdio::null())
+            .stderr(Stdio::from(writer))
+            .spawn()
+            .expect("spawn wz-ap-demo mesh node --connect unixsock"),
+    );
+    const NEEDLE: &str = "face 0 UP (peer <anonymous unixsock-stream peer>";
+    let face_up = wait_for_substring(&mut reader, NEEDLE, Duration::from_secs(10));
+
+    let _ = node.child_mut().kill();
+    let _ = node.child_mut().wait();
+    let _ = zenohd.child_mut().kill();
+    let _ = zenohd.child_mut().wait();
+    let _ = std::fs::remove_file(&sock);
+    let _ = std::fs::remove_file(format!("{sock}.lock"));
+
+    let captured = face_up.unwrap_or_else(|c| {
+        panic!(
+            "{role} never brought up a mesh face over its unixsock dial to zenohd.\n\
+             --- wz stderr ---\n{c}"
+        )
+    });
+    let line = captured
+        .lines()
+        .find(|l| l.contains(NEEDLE))
+        .expect("the capture holds the needle's line")
+        .to_string();
+    assert!(
+        line.contains("whatami Some(Router)"),
+        "{role}: the face to zenohd must come up as a Router: {line}"
+    );
+    line
+}
+
+/// R2900 (`routing-peer`) — a wz PEER's `--connect unixsock-stream/...` brings
+/// up a MESH face to a stock zenohd, rather than being refused.
+///
+/// Face level on purpose: whether data then flows over that face is a
+/// different question, and measured separately it fails over TCP as well, in
+/// either peer mode — a wz peer's Put does not reach a client of a stock
+/// zenohd ROUTER it is attached to. That is open-debt item 828, a
+/// `routing-peer` residual of its own, and asserting data here would grade the
+/// dial seam by it.
+// wz-proves: routing-peer wz->zenohd
+// wz-proves: transport-link-unixsock wz->zenohd
+#[test]
+#[ignore = "binary-dep e2e (zenohd router unixsock); set WZ_ZENOHD_BIN, run via Layer Z / --ignored"]
+fn wz_peer_mesh_dials_zenohd_over_unixsock() {
+    mesh_node_dials_zenohd_over_unixsock("--peer");
+}
+
+/// R2900 (`routing-router`) — the ROUTER twin: a wz router's `--connect`
+/// reaches a stock zenohd router over `unixsock-stream/`, through the same mesh
+/// dial seam, and the face comes up as a Router. Refused before R2900 for the
+/// reason the peer twin states, where a pin router connects over the same path
+/// its peer does.
+// wz-proves: routing-router wz->zenohd
+// wz-proves: transport-link-unixsock wz->zenohd
+#[test]
+#[ignore = "binary-dep e2e (zenohd router unixsock); set WZ_ZENOHD_BIN, run via Layer Z / --ignored"]
+fn wz_router_mesh_dials_zenohd_over_unixsock() {
+    mesh_node_dials_zenohd_over_unixsock("--router-hat");
+}
+
 /// Remove a cert-transport (tls/quic) leg's on-disk material: the cert, the key,
 /// and the zenohd config `spawn_zenohd_tcp_tls` / `spawn_zenohd_tcp_quic` wrote
 /// beside the cert (`<cert>.zenohd.json5`). Called after the children are reaped

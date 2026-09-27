@@ -67,16 +67,10 @@ use std::collections::BTreeMap;
 use std::future::Future;
 
 use std::io;
-// R2233 (open-debt item 585) — the dial axis's currency is the LOCATOR now, so
-// the bare address type is named only where the pre-handshake IDENTITY is: the
-// re-dial schedule's key, the reconcile `desired` index, and this module's own
-// fixtures. A build with neither re-dial substrate names it nowhere, and an
-// ungated import would be an unused one there.
-#[cfg(any(
-    test,
-    feature = "router-connect-reconcile",
-    feature = "transport-multilink"
-))]
+// R2233 (open-debt item 585) — the dial axis's currency is the LOCATOR now.
+// R2900 — and its pre-handshake identity is a `MeshDialKey`, so production code
+// names the bare address type nowhere; only this module's fixtures do.
+#[cfg(test)]
 use std::net::SocketAddr;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -115,10 +109,18 @@ use crate::session_glue::{
 #[cfg(any(test, feature = "transport-multilink"))]
 use crate::session_glue::drive_session_until_terminal;
 use crate::session_open::{
-    dial_locator, mesh_dial_plan, AcceptedLink, AcceptedPeer, BoundListener, DialConfig, OpenError,
-    OpenedSession,
+    dial_locator, mesh_dial_plan, AcceptedLink, AcceptedPeer, BoundListener, DialConfig,
+    MeshDialTarget, OpenError, OpenedSession,
 };
-use wz_session_core::locator::{parse_locator, AnyLocator, ParsedLocator};
+// R2900 — the identity is read only where a dial is deduped or re-dialed: the
+// reconcile and multilink substrates, and this module's tests.
+#[cfg(any(
+    test,
+    feature = "router-connect-reconcile",
+    feature = "transport-multilink"
+))]
+use crate::session_open::MeshDialKey;
+use wz_session_core::locator::AnyLocator;
 
 // R311y205 (transport-multilink) — the aggregation seam wired into the live
 // accept/dial path: when `WzConfig.max_links > 1` a face is opened via the
@@ -423,7 +425,7 @@ pub trait ConnectEndpointsSink {
 /// caller keeps the loop's wording and a test can count them without a logger.
 #[cfg(feature = "router-connect-reconcile")]
 pub fn apply_connect_reconcile(
-    desired: &mut std::collections::HashMap<SocketAddr, ParsedLocator>,
+    desired: &mut std::collections::HashMap<MeshDialKey, MeshDialTarget>,
     request: ConnectReconcile,
     mut on_refused: impl FnMut(AnyLocator),
 ) {
@@ -433,13 +435,13 @@ pub fn apply_connect_reconcile(
     };
     // R2233 — fold each through the ONE classification and refuse a member with
     // no pre-handshake identity, exactly as the startup seed does. Keyed by the
-    // resolved address, so a re-listed endpoint spelled differently still dedups
-    // to one dial.
-    let folded: std::collections::HashMap<SocketAddr, ParsedLocator> = rows
+    // identity (R2900: a `MeshDialKey`, the resolved address for the IP family),
+    // so a re-listed endpoint spelled differently still dedups to one dial.
+    let folded: std::collections::HashMap<MeshDialKey, MeshDialTarget> = rows
         .into_iter()
         .filter_map(
             |locator| match crate::session_open::mesh_dial_plan(locator) {
-                Ok(target) => Some((target.addr, target)),
+                Ok(target) => Some((target.key.clone(), target)),
                 Err(rejected) => {
                     on_refused(rejected);
                     None
@@ -875,15 +877,15 @@ async fn open_face(
 /// derived a second way.
 async fn dial_face(
     id: FaceId,
-    target: ParsedLocator,
+    target: MeshDialTarget,
     dial_config: Arc<DialConfig>,
     params: SessionInitParams,
     offer: SessionOffer,
     clock: TokioTime,
     tick_interval_ms: u64,
 ) -> OpenResult {
-    let peer = target.addr;
-    let result = match dial_locator(AnyLocator::Ip(target), &dial_config).await {
+    let peer = target.peer_tag();
+    let result = match dial_locator(target.locator, &dial_config).await {
         // R2095 (open-debt item 513) — THE seam the item names. Every capability
         // the node was configured with rides THIS InitSyn; before it a mesh dial
         // went out through the bare open, so a `--peer` / `--router-hat` node
@@ -897,11 +899,10 @@ async fn dial_face(
         }
         Err(e) => Err(OpenError::Dial(e)),
     };
-    // Wrap the dial target as an IP accepted-peer tag: a mesh dial target always
-    // has a `SocketAddr` (that is what `mesh_dial_plan` admits it for), so the
-    // `OpenResult` peer tag is `AcceptedPeer::Ip` (Slice B — only the accept
-    // side may be non-IP).
-    (id, AcceptedPeer::Ip(peer), result)
+    // R2900 — the tag is the target's own: an address for the IP family, the
+    // transport name for the four shapes that have none (the accept side's
+    // split, now that the dial side carries those shapes too).
+    (id, peer, result)
 }
 
 /// R311y205 (transport-multilink) — the per-link traffic-class preference the
@@ -1029,7 +1030,7 @@ async fn open_face_multilink(
 #[allow(clippy::too_many_arguments)]
 async fn dial_face_multilink(
     id: FaceId,
-    target: ParsedLocator,
+    target: MeshDialTarget,
     dial_config: Arc<DialConfig>,
     pref: LinkReliabilityPref,
     offer: SessionOffer,
@@ -1038,8 +1039,8 @@ async fn dial_face_multilink(
     clock: TokioTime,
     tick_interval_ms: u64,
 ) -> OpenResult {
-    let peer = target.addr;
-    let result = match dial_locator(AnyLocator::Ip(target), &dial_config).await {
+    let peer = target.peer_tag();
+    let result = match dial_locator(target.locator, &dial_config).await {
         // R2096 (open-debt item 516) — THE seam the item names. R2095 wired the
         // SINGLE-link dial (`dial_face`) to the whole offer and this one kept a
         // bare `qos: bool`, so on an aggregating node three of the four
@@ -1060,8 +1061,8 @@ async fn dial_face_multilink(
         }
         Err(e) => Err(OpenError::Dial(e)),
     };
-    // Dial target -> IP tag (Slice B), same as `dial_face`.
-    (id, AcceptedPeer::Ip(peer), result)
+    // Dial target -> its own tag, same as `dial_face`.
+    (id, peer, result)
 }
 
 /// R311y212 (transport-multilink per-link auto-re-add) — the backoff + 0x4 re-dial
@@ -1082,7 +1083,7 @@ async fn dial_face_multilink(
 #[allow(clippy::too_many_arguments)]
 async fn dial_face_multilink_after(
     id: FaceId,
-    target: ParsedLocator,
+    target: MeshDialTarget,
     dial_config: Arc<DialConfig>,
     backoff_ms: u64,
     pref: LinkReliabilityPref,
@@ -1133,7 +1134,9 @@ struct RedialSchedule {
     /// Only addresses with an outage IN PROGRESS. [`Self::forget`] removes an
     /// address the moment a dial to it succeeds, so this map does not grow with
     /// the mesh — it holds the peers currently down, not the peers ever seen.
-    periods: BTreeMap<SocketAddr, RetryPeriod>,
+    /// R2900 — keyed by the target's [`MeshDialKey`], the address for the IP
+    /// family and the naming value for the four shapes that have none.
+    periods: BTreeMap<MeshDialKey, RetryPeriod>,
 }
 
 #[cfg(any(feature = "router-connect-reconcile", feature = "transport-multilink"))]
@@ -1156,12 +1159,12 @@ impl RedialSchedule {
     /// instance for the whole loop while the overrides belong to one address.
     fn next_ms(
         &mut self,
-        addr: SocketAddr,
+        addr: &MeshDialKey,
         overrides: Option<&wz_session_core::locator::LocatorRetry>,
     ) -> u64 {
         let policy = self.policy.layered(overrides);
         self.periods
-            .entry(addr)
+            .entry(addr.clone())
             .or_insert_with(|| policy.period())
             .next_ms()
     }
@@ -1173,8 +1176,8 @@ impl RedialSchedule {
     /// address stops being desired (a reconcile removal — otherwise a peer
     /// re-added to the connect list an hour later would inherit the ceiling from
     /// the outage that preceded its removal).
-    fn forget(&mut self, addr: SocketAddr) {
-        self.periods.remove(&addr);
+    fn forget(&mut self, addr: &MeshDialKey) {
+        self.periods.remove(addr);
     }
 }
 
@@ -1190,7 +1193,7 @@ impl RedialSchedule {
 #[allow(clippy::too_many_arguments)]
 async fn dial_face_after(
     id: FaceId,
-    target: ParsedLocator,
+    target: MeshDialTarget,
     dial_config: Arc<DialConfig>,
     backoff_ms: u64,
     params: SessionInitParams,
@@ -1242,16 +1245,16 @@ async fn dial_face_after(
 #[cfg(feature = "router-connect-reconcile")]
 #[allow(clippy::too_many_arguments)]
 fn schedule_redial(
-    addr: SocketAddr,
+    addr: MeshDialKey,
     // R2233 (open-debt item 585) — a MAP, not a set. The desired connect-set is
     // keyed by address exactly as before (that is the pre-handshake identity),
     // but its value is now HOW to dial that address: the re-dial has to reach
     // the peer over the scheme the operator configured, and a set of bare
     // addresses had already thrown that away. One lookup answers both "is this
     // still wanted" and "what do I dial".
-    desired: &std::collections::HashMap<SocketAddr, ParsedLocator>,
+    desired: &std::collections::HashMap<MeshDialKey, MeshDialTarget>,
     dial_config: &Arc<DialConfig>,
-    dialed_targets: &mut BTreeMap<FaceId, SocketAddr>,
+    dialed_targets: &mut BTreeMap<FaceId, MeshDialKey>,
     redial: &mut RedialSchedule,
     opening: &mut FuturesUnordered<OpenFuture>,
     next_id: &mut u64,
@@ -1270,19 +1273,19 @@ fn schedule_redial(
         // No longer desired: drop any growth state with it, so a peer re-added to
         // the connect list later starts from `period_init_ms` rather than
         // inheriting the ceiling of the outage that preceded its removal.
-        redial.forget(addr);
+        redial.forget(&addr);
         return;
     };
     let id = FaceId(*next_id);
     *next_id += 1;
-    // Reserve the address under the new id before the backoff so a reconcile that
-    // arrives during the wait does not also dial it (the drop->redial dedup gap).
-    dialed_targets.insert(id, addr);
     // R311y786 — consume THIS peer's next wait (and grow it for the attempt after).
     // Read once and reused in both the log and the dial, so the line an operator
     // sees is the delay actually applied, not a second call that would double the
     // growth.
-    let backoff_ms = redial.next_ms(addr, target.retry.as_deref());
+    let backoff_ms = redial.next_ms(&addr, target.retry());
+    // Reserve the address under the new id before the backoff so a reconcile that
+    // arrives during the wait does not also dial it (the drop->redial dedup gap).
+    dialed_targets.insert(id, addr.clone());
     if announce {
         log::info!(
             "reconcile: re-dialing desired peer {addr} in {backoff_ms}ms (face {})",
@@ -1327,7 +1330,7 @@ fn schedule_redial(
 #[cfg(feature = "transport-multilink")]
 #[allow(clippy::too_many_arguments)]
 fn schedule_multilink_redial(
-    target: ParsedLocator,
+    target: MeshDialTarget,
     dial_config: &Arc<DialConfig>,
     pref: LinkReliabilityPref,
     offer: SessionOffer,
@@ -1335,10 +1338,10 @@ fn schedule_multilink_redial(
     // R2233 — the retained endpoint is the LOCATOR now, not a bare address: this
     // substrate has no `desired` map to look the dial plan up in (every retained
     // multilink endpoint is permanently wanted), so the plan has to travel with
-    // the retention. Its `addr` is still the schedule's key.
+    // the retention. Its key is the schedule's key.
     ml_dial_endpoints: &mut BTreeMap<
         FaceId,
-        (ParsedLocator, LinkReliabilityPref, (Priority, Priority)),
+        (MeshDialTarget, LinkReliabilityPref, (Priority, Priority)),
     >,
     redial: &mut RedialSchedule,
     opening: &mut FuturesUnordered<OpenFuture>,
@@ -1352,9 +1355,9 @@ fn schedule_multilink_redial(
     *next_id += 1;
     // Re-key the retained endpoint to the fresh id BEFORE the backoff, so the
     // re-add is tracked (a failed re-dial's Err arm finds it and retries).
-    let addr = target.addr;
+    let addr = target.key.clone();
     ml_dial_endpoints.insert(id, (target.clone(), pref, band));
-    let backoff_ms = redial.next_ms(addr, target.retry.as_deref());
+    let backoff_ms = redial.next_ms(&addr, target.retry());
     if announce {
         log::info!(
             "multilink: re-adding dropped link to {addr} in {backoff_ms}ms (face {})",
@@ -1696,19 +1699,29 @@ async fn recv_reconcile(rx: &mut Option<ReconcileReceiver>) -> ConnectReconcile 
 /// `TcpStream::connect`; now that the dial goes through [`dial_locator`], a
 /// discovered peer that advertises only `quic/...` or `tls/...` is dialable and
 /// skipping it was the same TCP-only bypass one plane over. What is still
-/// demanded is a NUMERIC address: the gossip arm runs on the loop's own task
-/// and must not block on a resolver, and the address is the dial's dedup key.
-/// `None` when no carried locator qualifies.
-fn first_dialable_locator(locators: &[String]) -> Option<ParsedLocator> {
-    locators.iter().find_map(|loc| parse_locator(loc).ok())
+/// demanded is that the locator names its target without a resolver: the
+/// gossip arm runs on the loop's own task and must not block on one.
+///
+/// R2900 — and that is ALL that is demanded. The dedup key is a
+/// [`MeshDialKey`](crate::session_open::MeshDialKey) now, so a peer that advertises only `unixsock-stream/...`,
+/// `unixpipe/...`, `serial/...` or `vsock/...` is dialable too, as the pin's
+/// autoconnect dials whatever locator a discovered peer carries. A DNS name is
+/// still skipped, for the resolver reason above. `None` when no carried locator
+/// qualifies.
+fn first_dialable_locator(locators: &[String]) -> Option<MeshDialTarget> {
+    locators.iter().find_map(|loc| {
+        crate::session_open::plan_endpoint(loc)
+            .ok()
+            .and_then(|locator| mesh_dial_plan(locator).ok())
+    })
 }
 
 /// The outcome of weighing a [`DialIntent`] against the held faces — the pure
 /// dial decision the [`Step::Dial`] arm acts on (extracted so it is unit-testable
 /// without standing up a TCP loop).
 enum DialDecision {
-    /// Dial the discovered peer at this numeric IP endpoint.
-    Dial(ParsedLocator),
+    /// Dial the discovered peer at this target.
+    Dial(MeshDialTarget),
     /// Skip — a face to this peer's zid is already held (the zenoh
     /// `get_transport_unicast(&zid).is_some()` dedup).
     AlreadyHeld,
@@ -2071,16 +2084,18 @@ where
     // so a caller CAN hand the loop a target the dial axis has no identity for.
     // Refusing and naming it is the honest answer — dropping it silently would
     // reproduce, one layer up, exactly the half-truth item 585 is about.
-    let dial_targets: Vec<ParsedLocator> = dial_targets
+    // R2900 — the one shape left to refuse is an UNRESOLVED name: the loop must
+    // not block on a resolver, and `resolve_mesh_dial_target` resolves names at
+    // configuration time. Every other shape has a `MeshDialKey`.
+    let dial_targets: Vec<MeshDialTarget> = dial_targets
         .into_iter()
         .filter_map(|locator| match mesh_dial_plan(locator) {
             Ok(target) => Some(target),
             Err(rejected) => {
                 log::warn!(
-                    "mesh dial: refusing configured target {rejected:?} — a {} endpoint \
-                     has no address to identify it by before the handshake, which is \
-                     what this loop's dial dedup and re-dial schedule key on",
-                    crate::session_open::locator_scheme(&rejected)
+                    "mesh dial: refusing configured target {rejected:?} — an unresolved \
+                     name; resolve it at configuration time \
+                     (session_open::resolve_mesh_dial_target)"
                 );
                 None
             }
@@ -2107,7 +2122,7 @@ where
     // ephemeral source port, never a connect-list target), so a reconcile never
     // touches an inbound peer. Maintained only when the feature is compiled.
     #[cfg(feature = "router-connect-reconcile")]
-    let mut dialed_targets: BTreeMap<FaceId, SocketAddr> = BTreeMap::new();
+    let mut dialed_targets: BTreeMap<FaceId, MeshDialKey> = BTreeMap::new();
     // The DESIRED outbound connect-set (`router-connect-reconcile` peer auto-
     // reconnect): the addresses the node WANTS to hold a dial to — seeded from the
     // static `dial_targets` and updated by each runtime reconcile (grows on add,
@@ -2121,10 +2136,14 @@ where
     // of addresses. The KEY is unchanged, and deliberately so: the address is the
     // pre-handshake identity, so two spellings of one endpoint still dedup to one
     // dial. What the value adds is the SCHEME, without which a re-dial of a
-    // `quic/...` peer would silently come back as TCP.
+    // `quic/...` peer would silently come back as TCP. R2900 — and the key is a
+    // `MeshDialKey`, the address for the IP family and the naming value for the
+    // four shapes that have none.
     #[cfg(feature = "router-connect-reconcile")]
-    let mut desired: std::collections::HashMap<SocketAddr, ParsedLocator> =
-        dial_targets.iter().map(|t| (t.addr, t.clone())).collect();
+    let mut desired: std::collections::HashMap<MeshDialKey, MeshDialTarget> = dial_targets
+        .iter()
+        .map(|t| (t.key.clone(), t.clone()))
+        .collect();
     // R311y786 — the per-address re-dial waits, replacing the fixed
     // `RECONNECT_BACKOFF_MS`. Loop-local (not per-face) because the growth must
     // survive the FaceId churn of the retries it is pacing, and one instance for
@@ -2171,7 +2190,7 @@ where
     #[cfg(feature = "transport-multilink")]
     let mut ml_dial_endpoints: BTreeMap<
         FaceId,
-        (ParsedLocator, LinkReliabilityPref, (Priority, Priority)),
+        (MeshDialTarget, LinkReliabilityPref, (Priority, Priority)),
     > = BTreeMap::new();
     let mut summary = AcceptLoopSummary::default();
     let mut opening: FuturesUnordered<OpenFuture> = FuturesUnordered::new();
@@ -2204,7 +2223,7 @@ where
         // Index the static dial so a later reconcile does not re-dial an address
         // already seeded here (dedup includes still-in-flight opens).
         #[cfg(feature = "router-connect-reconcile")]
-        dialed_targets.insert(id, target.addr);
+        dialed_targets.insert(id, target.key.clone());
         // R311y205 (transport-multilink) — a `max_links > 1` node dials with the
         // 0x4-negotiating variant so its outbound links aggregate (the pref tags
         // this link's traffic class); the `#[cfg(not)]` arm is the byte-identical
@@ -2305,11 +2324,11 @@ where
                         // reaches Established and then drops.
                         #[cfg(feature = "router-connect-reconcile")]
                         if let Some(addr) = dialed_targets.get(&id) {
-                            redial.forget(*addr);
+                            redial.forget(addr);
                         }
                         #[cfg(feature = "transport-multilink")]
                         if let Some((target, _, _)) = ml_dial_endpoints.get(&id) {
-                            redial.forget(target.addr);
+                            redial.forget(&target.key);
                         }
                         // R311qi — capture the remote peer's zid (the routing
                         // identity) from the established session before `opened`
@@ -2760,7 +2779,7 @@ where
                         // Index the gossip dial so a reconcile does not re-dial the
                         // same address (and vice-versa).
                         #[cfg(feature = "router-connect-reconcile")]
-                        dialed_targets.insert(id, target.addr);
+                        dialed_targets.insert(id, target.key.clone());
                         // R311y205 (transport-multilink) — a `max_links > 1` node
                         // dials the discovered peer with the 0x4-negotiating variant
                         // (aggregation), else the byte-identical single-link dial.
@@ -2827,7 +2846,7 @@ where
                                     next_id += 1;
                                     summary.dialed += 1;
                                     #[cfg(feature = "router-connect-reconcile")]
-                                    dialed_targets.insert(id, target.addr);
+                                    dialed_targets.insert(id, target.key.clone());
                                     // R311y212 — retain the aggregation-relax dial
                                     // endpoint for partial-loss re-add. R311y219 —
                                     // retain the pref AND the priority band.
@@ -2946,11 +2965,11 @@ where
                     // only the desired endpoints NOT among them (the address dedup;
                     // `desired` is keyed by address, so there are no intra-request
                     // dups).
-                    let already: std::collections::HashSet<SocketAddr> =
-                        dialed_targets.values().copied().collect();
+                    let already: std::collections::HashSet<MeshDialKey> =
+                        dialed_targets.values().cloned().collect();
                     for (addr, target) in desired
                         .iter()
-                        .map(|(a, t)| (*a, t.clone()))
+                        .map(|(a, t)| (a.clone(), t.clone()))
                         .collect::<Vec<_>>()
                     {
                         if already.contains(&addr) {
@@ -2959,7 +2978,7 @@ where
                         let id = FaceId(next_id);
                         next_id += 1;
                         summary.dialed += 1;
-                        dialed_targets.insert(id, addr);
+                        dialed_targets.insert(id, addr.clone());
                         log::debug!(
                             "reconcile: dialing newly-listed connect endpoint {addr} (face {})",
                             id.0
@@ -3256,11 +3275,11 @@ mod tests {
             .collect();
 
         // Seeded the way the loop seeds it: the resolved startup dial targets.
-        let seed = |m: &mut std::collections::HashMap<SocketAddr, ParsedLocator>| {
+        let seed = |m: &mut std::collections::HashMap<MeshDialKey, MeshDialTarget>| {
             m.clear();
             for a in &ep[..2] {
                 let t = crate::session_open::mesh_dial_plan(tcp_dial(*a)).expect("ip locator");
-                m.insert(t.addr, t);
+                m.insert(t.key.clone(), t);
             }
         };
 
@@ -3282,9 +3301,9 @@ mod tests {
             |_| refused += 1,
         );
         assert_eq!(refused, 0, "every fixture endpoint is mesh-dialable");
-        let mut got: Vec<SocketAddr> = desired.keys().copied().collect();
+        let mut got: Vec<MeshDialKey> = desired.keys().cloned().collect();
         got.sort();
-        let mut want = ep.clone();
+        let mut want: Vec<MeshDialKey> = ep.iter().map(|a| MeshDialKey::Ip(*a)).collect();
         want.sort();
         assert_eq!(
             got, want,
@@ -3299,8 +3318,8 @@ mod tests {
             |_| refused += 1,
         );
         assert_eq!(
-            desired.keys().copied().collect::<Vec<_>>(),
-            vec![ep[2]],
+            desired.keys().cloned().collect::<Vec<_>>(),
+            vec![MeshDialKey::Ip(ep[2])],
             "a REPLACE must adopt only what it carries -- otherwise the two verbs \
              are the same verb and this distinction buys nothing"
         );
@@ -3330,13 +3349,17 @@ mod tests {
     use crate::link_pipeline::bind_tcp;
     use crate::session_open::{initiate_and_open_session, DEFAULT_OPEN_TICK_MS};
     use wz_runtime_tokio_test_support::fixture_session_init_params;
+    #[cfg(any(feature = "router-connect-reconcile", feature = "transport-multilink"))]
+    use wz_session_core::locator::parse_locator;
 
     // ── R311y786 per-address re-dial schedule ──────────────────────────────
 
+    /// R2900 — the schedule's key is a [`MeshDialKey`]; these cases grade the
+    /// growth arithmetic, which is the same for every key shape, over IP keys.
     #[cfg(any(feature = "router-connect-reconcile", feature = "transport-multilink"))]
-    fn addr(port: u16) -> SocketAddr {
+    fn addr(port: u16) -> MeshDialKey {
         use std::net::{IpAddr, Ipv4Addr};
-        SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port)
+        MeshDialKey::Ip(SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port))
     }
 
     /// R2496 — an endpoint whose `#`-tail names no retry override, which is
@@ -3359,7 +3382,7 @@ mod tests {
             period_max_ms: 400,
             period_increase_factor: 2.0,
         });
-        let a = addr(7001);
+        let a = &addr(7001);
         assert_eq!(
             (0..5)
                 .map(|_| s.next_ms(a, no_overrides()))
@@ -3390,7 +3413,7 @@ mod tests {
             parse_locator("tcp/127.0.0.1:7001#retry_period_init_ms=25;retry_period_max_ms=50")
                 .expect("valid tuned locator")
                 .retry;
-        let a = addr(7001);
+        let a = &addr(7001);
         assert_eq!(
             (0..4)
                 .map(|_| s.next_ms(a, tuned.as_deref()))
@@ -3398,7 +3421,7 @@ mod tests {
             vec![25, 50, 50, 50],
             "the endpoint's own init and ceiling must be the ones that apply"
         );
-        let b = addr(7002);
+        let b = &addr(7002);
         assert_eq!(
             (0..3)
                 .map(|_| s.next_ms(b, no_overrides()))
@@ -3419,7 +3442,7 @@ mod tests {
             period_max_ms: 0,
             period_increase_factor: 2.0,
         });
-        let (a, b) = (addr(7001), addr(7002));
+        let (a, b) = (&addr(7001), &addr(7002));
         assert_eq!(s.next_ms(a, no_overrides()), 100);
         assert_eq!(s.next_ms(a, no_overrides()), 200);
         assert_eq!(
@@ -3447,7 +3470,7 @@ mod tests {
             period_max_ms: 0,
             period_increase_factor: 2.0,
         });
-        let a = addr(7001);
+        let a = &addr(7001);
         assert_eq!(s.next_ms(a, no_overrides()), 100);
         assert_eq!(s.next_ms(a, no_overrides()), 200);
         s.forget(a);
@@ -3458,7 +3481,7 @@ mod tests {
         );
         // And forgetting an address with no state is a no-op, not a panic — the
         // loop calls it for every successful dial, including first-time ones.
-        s.forget(addr(7099));
+        s.forget(&addr(7099));
     }
 
     /// The schedule holds only peers with an outage IN PROGRESS: `forget` removes
@@ -3468,7 +3491,7 @@ mod tests {
     #[test]
     fn a_recovered_address_leaves_no_entry_behind() {
         let mut s = RedialSchedule::new(RetryPolicy::ZENOH_DEFAULT);
-        let a = addr(7001);
+        let a = &addr(7001);
         s.next_ms(a, no_overrides());
         assert_eq!(s.periods.len(), 1);
         s.forget(a);
@@ -3484,7 +3507,7 @@ mod tests {
     #[test]
     fn a_constant_policy_reproduces_the_fixed_backoff() {
         let mut s = RedialSchedule::new(RetryPolicy::constant(1000));
-        let a = addr(7001);
+        let a = &addr(7001);
         assert_eq!(
             (0..4)
                 .map(|_| s.next_ms(a, no_overrides()))
@@ -3646,8 +3669,19 @@ mod tests {
     /// The dispatcher is in the path now, so the assertion INVERTS — a `tls/` or
     /// `quic/` peer is dialed — and what survives is the NUMERIC requirement:
     /// this arm runs on the loop's own task and must not block on a resolver.
+    ///
+    /// R2900 — and the requirement narrows once more: what survives is only that
+    /// the locator names its target WITHOUT a resolver. A peer that advertises
+    /// only an address-less shape is dialed by its own key, as the pin's
+    /// autoconnect dials whatever a discovered peer carries.
     #[test]
-    fn dial_decision_dedups_held_peers_and_requires_a_numeric_ip_locator() {
+    fn dial_decision_dedups_held_peers_and_requires_a_resolver_free_locator() {
+        fn ip(t: &MeshDialTarget) -> &wz_session_core::locator::ParsedLocator {
+            match &t.locator {
+                AnyLocator::Ip(parsed) => parsed,
+                other => panic!("expected an IP-family target, got {other:?}"),
+            }
+        }
         let acc = || DialIntent {
             zid: vec![0xAA; 4],
             locators: vec!["tcp/127.0.0.1:7447".into()],
@@ -3658,7 +3692,7 @@ mod tests {
         assert!(matches!(
             dial_decision(&empty, &acc()),
             DialDecision::Dial(t)
-                if t.addr == "127.0.0.1:7447".parse().unwrap() && t.proto == Proto::Tcp
+                if ip(&t).addr == "127.0.0.1:7447".parse().unwrap() && ip(&t).proto == Proto::Tcp
         ));
         // A held face to the peer's zid -> skip (the dedup), even with a valid
         // locator. A zid-less held face (None) matches no peer.
@@ -3681,7 +3715,7 @@ mod tests {
         };
         assert!(matches!(
             dial_decision(&empty, &tls_peer),
-            DialDecision::Dial(t) if t.proto == Proto::Tls
+            DialDecision::Dial(t) if ip(&t).proto == Proto::Tls
         ));
         let quic_peer = DialIntent {
             zid: vec![0xCC; 4],
@@ -3690,18 +3724,25 @@ mod tests {
         };
         assert!(matches!(
             dial_decision(&empty, &quic_peer),
-            DialDecision::Dial(t) if t.proto == Proto::Quic
+            DialDecision::Dial(t) if ip(&t).proto == Proto::Quic
         ));
-        // What is still refused: nothing that parses to a numeric IP endpoint. A
-        // DNS name would need a resolver this arm must not run, and a serial
-        // endpoint has no address to dedup or re-dial by.
+        // R2900 — a peer that advertises only a unix socket is dialed by the
+        // socket path, where it used to be skipped for having no address.
+        let unix_peer = DialIntent {
+            zid: vec![0xEE; 4],
+            locators: vec!["unixsock-stream//tmp/wz-peer.sock".into()],
+            origin: DialIntentOrigin::Gossip,
+        };
+        assert!(matches!(
+            dial_decision(&empty, &unix_peer),
+            DialDecision::Dial(t)
+                if t.key == MeshDialKey::Unixsock(String::from("/tmp/wz-peer.sock"))
+        ));
+        // What is still refused: a locator that needs a resolver this arm must
+        // not run, and one that does not parse.
         let undialable = DialIntent {
             zid: vec![0xDD; 4],
-            locators: vec![
-                "tcp/example.org:7447".into(),
-                "serial//dev/ttyUSB0#baudrate=115200".into(),
-                "nonsense".into(),
-            ],
+            locators: vec!["tcp/example.org:7447".into(), "nonsense".into()],
             origin: DialIntentOrigin::Gossip,
         };
         assert!(matches!(
@@ -3712,8 +3753,8 @@ mod tests {
         // its scheme — where it used to walk past every non-tcp one.
         let first = first_dialable_locator(&["udp/1.2.3.4:7447".into(), "tcp/9.9.9.9:7447".into()])
             .expect("a numeric locator");
-        assert_eq!(first.addr, "1.2.3.4:7447".parse().unwrap());
-        assert_eq!(first.proto, Proto::Udp);
+        assert_eq!(ip(&first).addr, "1.2.3.4:7447".parse().unwrap());
+        assert_eq!(ip(&first).proto, Proto::Udp);
         assert!(first_dialable_locator(&[]).is_none());
     }
 

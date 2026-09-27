@@ -273,23 +273,27 @@ mod tests {
         );
     }
 
-    /// A `connect=` member with no pre-handshake identity fails the WHOLE
-    /// deploy. The discriminator is that the GOOD member is present too: a
-    /// resolution that dropped the bad one and kept the good one would return
-    /// `Ok` here, which is exactly the silent half-honouring this module
-    /// exists to refuse.
+    /// A `connect=` member that cannot be dialed fails the WHOLE deploy. The
+    /// discriminator is that the GOOD member is present too: a resolution that
+    /// dropped the bad one and kept the good one would return `Ok` here, which
+    /// is exactly the silent half-honouring this module exists to refuse.
+    ///
+    /// R2900 — the bad member is a name that does not resolve. It used to be a
+    /// `serial` endpoint, refused for having no pre-handshake identity; every
+    /// shape has one now (`MeshDialKey`), so the only member this seam can
+    /// still refuse is one it cannot resolve (`.invalid` never does, RFC 2606).
     #[tokio::test]
     async fn one_undialable_member_refuses_the_whole_deploy() {
-        let connect = ["tcp/127.0.0.1:7447", "serial//dev/ttyUSB0#baudrate=115200"];
+        let connect = ["tcp/127.0.0.1:7447", "tcp/wz-static.invalid:7447"];
         let err = static_peer_sources(None, &connect, WhatAmI::Peer, &AcceptConfig::default())
             .await
-            .expect_err("a serial endpoint has no pre-handshake identity");
+            .expect_err("a name that does not resolve cannot be dialed");
         assert!(
             matches!(
                 err,
-                StaticPeerError::BadDialTarget(DialTargetError::UnsupportedScheme { .. })
+                StaticPeerError::BadDialTarget(DialTargetError::Resolve(_))
             ),
-            "expected BadDialTarget(UnsupportedScheme), got {err:?}"
+            "expected BadDialTarget(Resolve), got {err:?}"
         );
     }
 
