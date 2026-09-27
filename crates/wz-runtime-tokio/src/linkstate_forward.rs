@@ -794,7 +794,17 @@ pub struct LinkstateForwarder {
     /// `mode: InterestMode::Final,`). This is what lets the client's own Final,
     /// or its departure, be passed on.
     #[cfg(feature = "routing-interest-pending-gc")]
-    brokered_future: RefCell<HashMap<(FaceId, u64), Vec<(FaceId, u64)>>>,
+    brokered_future: RefCell<HashMap<(FaceId, u64), Vec<BrokeredCopy>>>,
+    /// R2904 — per GATEWAY face, the exact resources whose brokered CurrentFuture
+    /// interest that gateway has FINALIZED, by plane: the pin's per-resource,
+    /// per-face `subscriber_interest_finalized` / `queryable_interest_finalized`
+    /// (`zenoh/src/net/routing/dispatcher/face.rs` @ `ctx.subscriber_interest_finalized = true;`).
+    /// Once set, the gateway has told this node everything it holds for that
+    /// resource, so the south-sourced default send to it stops and only a
+    /// declaration it made routes there. Lives as long as the face, as the pin's
+    /// face context does.
+    #[cfg(feature = "routing-interest-pending-gc")]
+    gateway_finalized: RefCell<HashMap<FaceId, FinalizedResources>>,
     /// R311y512 — how long a PROPAGATED interest waits for its upstream's
     /// `DeclareFinal` before the sweep abandons it (zenoh's `interests_timeout`,
     /// `DEFAULT_CONFIG.json5` `routing.interests.timeout` = 10000ms). `Cell`
@@ -872,6 +882,31 @@ pub(crate) struct LocalQueryable {
 /// sub-plane's `(handler, Sample)` queue entry, carrying the extra query context
 /// (rid / keyexpr / face) the Final-hold needs (a query, unlike a fire-and-forget
 /// Put, has a return path + a terminating Final).
+/// R2903 / R2904 — one brokered CurrentFuture copy an upstream holds as live:
+/// where it went and under which id (for passing the client's Final on), and
+/// what it asked for (for marking the resource finalized when the upstream's
+/// current answer ends).
+#[cfg(feature = "routing-interest-pending-gc")]
+#[derive(Clone, Debug)]
+struct BrokeredCopy {
+    upstream: FaceId,
+    up_id: u64,
+    /// The interest's restricted keyexpr; `None` for an unrestricted interest,
+    /// which the pin finalizes on no resource.
+    target: Option<String>,
+    subscribers: bool,
+    queryables: bool,
+}
+
+/// R2904 — the resources one gateway has finalized, by plane (see
+/// [`LinkstateForwarder::gateway_withholds`]).
+#[cfg(feature = "routing-interest-pending-gc")]
+#[derive(Default, Debug)]
+struct FinalizedResources {
+    subscribers: HashSet<String>,
+    queryables: HashSet<String>,
+}
+
 struct DeferredQuery {
     handlers: Vec<Rc<RefCell<LocalQueryHandler>>>,
     rid: u64,
@@ -1091,6 +1126,8 @@ impl LinkstateForwarder {
             pending_interests: RefCell::new(PendingCurrentInterests::new()),
             #[cfg(feature = "routing-interest-pending-gc")]
             brokered_future: RefCell::new(HashMap::new()),
+            #[cfg(feature = "routing-interest-pending-gc")]
+            gateway_finalized: RefCell::new(HashMap::new()),
             #[cfg(feature = "routing-interest-pending-gc")]
             interest_timeout: Cell::new(Self::DEFAULT_INTEREST_TIMEOUT),
             local_queryables: RefCell::new(Vec::new()),
@@ -2359,8 +2396,15 @@ impl LinkstateForwarder {
         // AllComplete (a branch with no info passes its completeness filter), and
         // BestMatching when nothing complete was found. A query from a peer is
         // transit and does not take the arm.
+        // R2904 — less the gateways that finalized a QUERYABLES interest on this
+        // resource and declared no queryable matching it
+        // ([`gateway_withholds`](Self::gateway_withholds); the pin's
+        // `zenoh/src/net/routing/hat/peer/queries.rs` @
+        // `.is_some_and(|ctx| ctx.queryable_interest_finalized);`).
         let gateway_targets: Vec<FaceId> = if open && self.is_client_face(inbound) {
-            self.gateway_faces()
+            let mut gateways = self.gateway_faces();
+            gateways.retain(|g| !self.gateway_withholds(*g, &keyexpr, true));
+            gateways
         } else {
             Vec::new()
         };
@@ -2681,9 +2725,9 @@ impl LinkstateForwarder {
     /// ⚠ This node sends a gateway no interest of its own, which is exactly the
     /// pin's shape for data put without a declared publisher: nothing is ever
     /// finalized, so the gateway is always sent to. A client's brokered
-    /// write-filter interest is where the pin WOULD finalize and then withhold;
-    /// this node does not yet withhold (it over-sends, it never mis-delivers),
-    /// and open-debt item 828 carries that half with the query plane's twin.
+    /// write-filter interest is where the pin finalizes and then withholds, and
+    /// so does this node since R2904
+    /// ([`gateway_withholds`](Self::gateway_withholds)).
     ///
     /// Only data whose source lies SOUTH takes this route. A transit push from a
     /// peer is not re-sent to a gateway (the pin's arm is gated on
@@ -2697,7 +2741,10 @@ impl LinkstateForwarder {
         express: bool,
         build: impl FnOnce() -> Result<PushOwned, CodecError>,
     ) -> Result<usize, CodecError> {
-        let gateways = self.gateway_faces();
+        // R2904 — less the gateways that finalized this resource and declared no
+        // subscriber matching it ([`gateway_withholds`](Self::gateway_withholds)).
+        let mut gateways = self.gateway_faces();
+        gateways.retain(|g| !self.gateway_withholds(*g, keyexpr, false));
         let Some((push, children)) = compute_self_publish_forward(
             &self.net,
             &self.subs,
@@ -5594,7 +5641,13 @@ impl LinkstateForwarder {
                     .borrow_mut()
                     .entry((inbound, src_interest_id))
                     .or_default()
-                    .push((up, up_id));
+                    .push(BrokeredCopy {
+                        upstream: up,
+                        up_id,
+                        target: target.map(str::to_owned),
+                        subscribers: options.su(),
+                        queryables: options.qu(),
+                    });
             }
             sent += 1;
         }
@@ -5609,7 +5662,7 @@ impl LinkstateForwarder {
     /// `mode: InterestMode::Final,`), which is the minted one, not the client's.
     #[cfg(feature = "routing-interest-pending-gc")]
     fn finalize_brokered_future(&self, client: FaceId, client_id: Option<u64>) {
-        let copies: Vec<(FaceId, u64)> = {
+        let copies: Vec<BrokeredCopy> = {
             let mut table = self.brokered_future.borrow_mut();
             let keys: Vec<(FaceId, u64)> = table
                 .keys()
@@ -5621,14 +5674,99 @@ impl LinkstateForwarder {
                 .flatten()
                 .collect()
         };
-        for (up, up_id) in copies {
+        for copy in copies {
             self.send_one_to_face(
-                up,
+                copy.upstream,
                 NetworkMessage::Interest(wz_session_core::interest_build::build_interest_final(
-                    up_id,
+                    copy.up_id,
                 )),
             );
         }
+    }
+
+    /// R2904 — an upstream has sent the `DeclareFinal` for the brokered copy it
+    /// knows as `up_id`: when that copy was a CurrentFuture interest on a
+    /// restricted keyexpr, the upstream has now told this node everything it holds
+    /// there, and the resource is FINALIZED on that face for each plane it asked
+    /// about. The pin sets the same flags when a future-mode local interest is
+    /// finalized (`zenoh/src/net/routing/dispatcher/face.rs` @
+    /// `ctx.subscriber_interest_finalized = true;`), on the interest's own
+    /// resource and no other.
+    #[cfg(feature = "routing-interest-pending-gc")]
+    fn mark_brokered_finalized(&self, upstream: FaceId, up_id: u64) {
+        let copy = self
+            .brokered_future
+            .borrow()
+            .values()
+            .flatten()
+            .find(|c| c.upstream == upstream && c.up_id == up_id)
+            .cloned();
+        let Some(BrokeredCopy {
+            target: Some(target),
+            subscribers,
+            queryables,
+            ..
+        }) = copy
+        else {
+            return;
+        };
+        let mut finalized = self.gateway_finalized.borrow_mut();
+        let entry = finalized.entry(upstream).or_default();
+        if subscribers {
+            entry.subscribers.insert(target.clone());
+        }
+        if queryables {
+            entry.queryables.insert(target);
+        }
+    }
+
+    /// R2904 (open-debt item 828) — whether `face` is a gateway this node must NOT
+    /// send `keyexpr` to, on the subscriber plane (`queryables == false`) or the
+    /// queryable plane: the gateway has FINALIZED its interest on exactly that
+    /// resource AND declared no entity matching it. The pin reads the flag of the
+    /// data's own resource (`zenoh/src/net/routing/hat/peer/pubsub.rs` @
+    /// `.is_some_and(|ctx| ctx.subscriber_interest_finalized);`), so a key the
+    /// interest merely matched, or a wildcard, is not withheld.
+    ///
+    /// The declaration half is part of the rule and not left to the ordinary
+    /// route, and that is MEASURED: a gateway advertises no link back, so the
+    /// graph holds no edge to it and `directions_toward` never names it however
+    /// many subscribers it declares. The pin routes to a gateway's declaration by
+    /// the FACE the declaration came in on, which is what this does by reading
+    /// the face's own zid in the declaration tables.
+    #[cfg(feature = "routing-interest-pending-gc")]
+    fn gateway_withholds(&self, face: FaceId, keyexpr: &str, queryables: bool) -> bool {
+        let finalized = self.gateway_finalized.borrow().get(&face).is_some_and(|f| {
+            if queryables {
+                f.queryables.contains(keyexpr)
+            } else {
+                f.subscribers.contains(keyexpr)
+            }
+        });
+        if !finalized {
+            return false;
+        }
+        let Some(zid) = self
+            .faces
+            .borrow()
+            .get(&face)
+            .and_then(|s| peer_zid_routing(&s.actions))
+        else {
+            return true;
+        };
+        let declared = if queryables {
+            self.qabls.borrow().interested(keyexpr).contains(&zid)
+        } else {
+            self.subs.borrow().interested(keyexpr).contains(&zid)
+        };
+        !declared
+    }
+
+    /// Without the interest broker nothing is ever brokered, so nothing is ever
+    /// finalized and no gateway is withheld.
+    #[cfg(not(feature = "routing-interest-pending-gc"))]
+    fn gateway_withholds(&self, _face: FaceId, _keyexpr: &str, _queryables: bool) -> bool {
+        false
     }
 
     /// R311y512 — an inbound `Declare` on an UPSTREAM face carrying an interest id
@@ -5742,6 +5880,9 @@ impl LinkstateForwarder {
             {
                 return false;
             }
+            // R2904 — before the client hears its final: the gateway's answer is
+            // complete, so its resource is finalized from here on.
+            self.mark_brokered_finalized(upstream, up_id);
             let finished = self.pending_interests.borrow_mut().resolve(upstream, up_id);
             if let Some(interest) = finished {
                 self.finish_brokered_interest(&interest);
@@ -7012,8 +7153,10 @@ impl FaceForwarder for LinkstateForwarder {
             // finalized upstream (the pin undeclares a closed face's interests the
             // same way), and a departing upstream simply stops holding any.
             self.finalize_brokered_future(id, None);
+            // R2904 — and what a departed gateway had finalized goes with it.
+            self.gateway_finalized.borrow_mut().remove(&id);
             self.brokered_future.borrow_mut().retain(|_, copies| {
-                copies.retain(|(up, _)| *up != id);
+                copies.retain(|c| c.upstream != id);
                 !copies.is_empty()
             });
         }
@@ -12362,6 +12505,112 @@ mod tests {
             resolve_wireexpr(&d.keyexpr.body, &hashbrown::HashMap::new()).as_deref(),
             Some("demo/**"),
             "literal on the client's link, resolvable with no alias table at all"
+        );
+    }
+
+    /// R2904 (open-debt item 828) — once a gateway FINALIZES a brokered
+    /// CurrentFuture SUBSCRIBERS interest, the default send to it stops for that
+    /// exact resource and no other, and a subscriber it then declares routes the
+    /// data there again. Three sends, one fixture: the withheld key, a key the
+    /// interest never named, and the withheld key after the declaration.
+    #[cfg(feature = "routing-interest-pending-gc")]
+    #[test]
+    fn a_finalized_gateway_is_withheld_the_exact_resource_until_it_declares() {
+        use wz_session_core::interest_build::build_interest_subscribers;
+        use wz_session_core::push_build::build_push_literal;
+
+        let fwd = LinkstateForwarder::new(zid(0x05), WhatAmI::Peer);
+        let (router, sink_r) = peer_face_whatami(zid(0xAA), 0);
+        let (client, _sc) = peer_face_whatami(zid(0xCC), 2);
+        fwd.register(FaceId(0), &router);
+        fwd.register(FaceId(1), &client);
+        sink_r.reset();
+
+        let interest = build_interest_subscribers(5, true, true, 0, Some("demo/pp"))
+            .expect("build subscribers interest");
+        forward_one(&fwd, FaceId(1), NetworkMessage::Interest(interest));
+        let up_id = forwarded_interest(&sink_r.frame_bytes(0)).interest_id;
+        forward_one(
+            &fwd,
+            FaceId(0),
+            NetworkMessage::Declare(Box::new(build_declare_final_reply(up_id))),
+        );
+        sink_r.reset();
+
+        let push =
+            |ke: &str| NetworkMessage::Push(Box::new(build_push_literal(ke, b"v").expect("push")));
+        forward_one(&fwd, FaceId(1), push("demo/pp"));
+        assert_eq!(
+            sink_r.frame_count(),
+            0,
+            "finalized with no subscriber: withheld"
+        );
+
+        forward_one(&fwd, FaceId(1), push("demo/other"));
+        assert_eq!(
+            sink_r.frame_count(),
+            1,
+            "a resource never finalized is still sent"
+        );
+
+        sink_r.reset();
+        let sub = build_declare_subscriber(7, 0, Some("demo/pp")).expect("gateway sub");
+        forward_one(&fwd, FaceId(0), NetworkMessage::Declare(Box::new(sub)));
+        sink_r.reset();
+        forward_one(&fwd, FaceId(1), push("demo/pp"));
+        assert_eq!(
+            sink_r.frame_count(),
+            1,
+            "a declared subscriber routes it there again"
+        );
+    }
+
+    /// R2904 — the QUERYABLE twin: a gateway that finalized a QUERYABLES interest
+    /// on the queried resource is not a default branch of a client's query, and
+    /// becomes one again as the mesh direction of a queryable it declares.
+    #[cfg(feature = "routing-interest-pending-gc")]
+    #[test]
+    fn a_finalized_gateway_is_not_a_query_branch_until_it_declares_a_queryable() {
+        use wz_session_core::interest_build::build_interest_queryables;
+
+        let fwd = LinkstateForwarder::new(zid(0x05), WhatAmI::Peer);
+        let (router, sink_r) = peer_face_whatami(zid(0xAA), 0);
+        let (client, sink_c) = peer_face_whatami(zid(0xCC), 2);
+        fwd.register(FaceId(0), &router);
+        fwd.register(FaceId(1), &client);
+        sink_r.reset();
+
+        let interest = build_interest_queryables(5, true, true, 0, Some("demo/q"))
+            .expect("build queryables interest");
+        forward_one(&fwd, FaceId(1), NetworkMessage::Interest(interest));
+        let up_id = forwarded_interest(&sink_r.frame_bytes(0)).interest_id;
+        forward_one(
+            &fwd,
+            FaceId(0),
+            NetworkMessage::Declare(Box::new(build_declare_final_reply(up_id))),
+        );
+        sink_r.reset();
+        sink_c.reset();
+
+        let request = wz_session_core::request_build::build_request_query(99, 0, Some("demo/q"))
+            .expect("build request");
+        fwd.forward_request(FaceId(1), true, &request);
+        assert_eq!(
+            sink_r.frame_count(),
+            0,
+            "finalized with no queryable: withheld"
+        );
+        assert_eq!(sink_c.frame_count(), 1, "the querier is closed at once");
+
+        let qabl = wz_session_core::declare_build::build_declare_queryable(7, 0, Some("demo/q"))
+            .expect("gateway queryable");
+        forward_one(&fwd, FaceId(0), NetworkMessage::Declare(Box::new(qabl)));
+        sink_r.reset();
+        fwd.forward_request(FaceId(1), true, &request);
+        assert_eq!(
+            sink_r.frame_count(),
+            1,
+            "the declared queryable is a branch"
         );
     }
 
