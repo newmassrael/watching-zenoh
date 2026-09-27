@@ -3041,7 +3041,7 @@ mod fragment_tx_tests {
 
 /// R311kf — TX serialization parity: SN mint order == wire order under
 /// concurrent senders. pico holds its TX mutex across mint + write
-/// (common/tx.c:273-305); wz's `tx_mutex` (R311km name) covers the immediate
+/// (common/tx.c:273-305); wz's conduit TX lock (R2920; `tx_mutex` before) covers the immediate
 /// path's mint + emit too, so the recorded wire SN sequence of N
 /// concurrent frame-per-message sends is exactly the mint sequence. Any
 /// regression that re-opens the mint→emit window surfaces here as an
@@ -4115,6 +4115,100 @@ mod link_priority_tests {
             .send_push_literal_qos("home/rt", b"RT", true, Priority::RealTime)
             .expect("realtime push");
         assert_eq!(driver.frame_priority(0), Priority::DEFAULT);
+    }
+
+    /// A link write that STALLS on one band, and takes every other band at once.
+    struct StallOneBand {
+        stall: Priority,
+        entered: std::sync::Mutex<std::sync::mpsc::Sender<()>>,
+        release: std::sync::Mutex<std::sync::mpsc::Receiver<()>>,
+    }
+
+    impl super::BoxedLinkDriver for StallOneBand {
+        fn send_blocking(
+            &self,
+            bytes: &[u8],
+            reliability: crate::Reliability,
+        ) -> super::LinkSendOutcome {
+            self.send_prioritized(bytes, reliability, Priority::DEFAULT)
+        }
+        fn send_prioritized(
+            &self,
+            _bytes: &[u8],
+            _reliability: crate::Reliability,
+            priority: Priority,
+        ) -> super::LinkSendOutcome {
+            if priority == self.stall {
+                let _ = self.entered.lock().expect("entered").send(());
+                let _ = self.release.lock().expect("release").recv();
+            }
+            super::LinkSendOutcome::Sent
+        }
+        fn open_blocking(&self) {}
+        fn close_blocking(&self) {}
+    }
+
+    /// R2920 — a sender held on one priority conduit does not hold a sender on
+    /// another. The Background send stalls INSIDE its link write, which it
+    /// reaches holding its conduit's TX lock; the RealTime send must still
+    /// complete. With one TX lock for the whole session (the pre-R2920 shape)
+    /// the RealTime sender waits behind the stalled Background one — and once
+    /// a congested lane makes a sender wait for room, that wait would stall
+    /// every priority, which is exactly what zenoh's per-priority stage lock
+    /// exists to prevent.
+    #[test]
+    fn a_stalled_conduit_does_not_hold_another_priorities_send() {
+        use std::sync::mpsc::channel;
+        use std::sync::{Arc, Mutex};
+        use std::time::Duration;
+
+        let (entered_tx, entered_rx) = channel();
+        let (release_tx, release_rx) = channel::<()>();
+        let driver = Arc::new(StallOneBand {
+            stall: Priority::Background,
+            entered: Mutex::new(entered_tx),
+            release: Mutex::new(release_rx),
+        });
+        let actions = super::new_session_actions(
+            driver,
+            wz_runtime_tokio_test_support::fixture_session_init_params(),
+            crate::runtime_impl::TokioTime::new(),
+        );
+        assert!(actions.set_qos_offer(true), "qos offer applies");
+
+        let bg_actions = actions.clone();
+        let background = std::thread::spawn(move || {
+            bg_actions.send_push_literal_qos("home/bg", b"BG", true, Priority::Background)
+        });
+        entered_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("the Background send reached its link write");
+
+        let (done_tx, done_rx) = channel();
+        let rt_actions = actions.clone();
+        let realtime = std::thread::spawn(move || {
+            let sent = rt_actions.send_push_literal_qos("home/rt", b"RT", true, Priority::RealTime);
+            let _ = done_tx.send(());
+            sent
+        });
+        let realtime_finished = done_rx.recv_timeout(Duration::from_secs(2)).is_ok();
+
+        release_tx
+            .send(())
+            .expect("release the stalled Background send");
+        background
+            .join()
+            .expect("background thread")
+            .expect("background push");
+        realtime
+            .join()
+            .expect("realtime thread")
+            .expect("realtime push");
+        assert!(
+            realtime_finished,
+            "the RealTime send waited for the stalled Background conduit: one TX \
+             lock is serializing every priority"
+        );
     }
 
     /// A keepalive goes at `Priority::Control`, ahead of queued data, as

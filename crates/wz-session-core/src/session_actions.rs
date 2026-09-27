@@ -239,30 +239,190 @@ use crate::response_final_build::*;
 /// observability and tests; the flush trigger is the byte budget
 /// (`params.batch_size`), never the count.
 ///
-/// R311kf — the struct (and the `tx_mutex` lock around it) is UNGATED:
-/// the mutex doubles as the session's TX-ORDER serialization lock (pico
-/// holds its TX mutex across SN mint + wire write for every sender,
-/// common/tx.c:273-305), which every build needs — with
-/// `transport-batching` off, `active` stays `false` forever and only the
-/// lock role remains (as of R311y835 that is ALL that remains — the staging
+/// R311kf — the struct (and the lock around it) is UNGATED: the lock
+/// doubles as the TX-ORDER serialization lock (pico holds its TX mutex
+/// across SN mint + wire write for every sender, common/tx.c:273-305),
+/// which every build needs — with `transport-batching` off only the lock
+/// role remains (as of R311y835 that is ALL that remains — the staging
 /// buffer used to ride the OFF build too, at three words).
 ///
-/// R311y835 — the single open frame became `[BatchStage; N]`, one per
-/// `Priority` conduit, and the drain walks them in ASCENDING priority. See
-/// `BatchTx::stage_mut` for why that is the whole of temporal priority.
+/// R311y835 — the single open frame became one stage per `Priority` conduit,
+/// and the drain walks them in ASCENDING priority. See
+/// `TxConduits::conduit` for why that is the whole of temporal priority.
+///
+/// R2920 — ONE conduit's TX state, and its lock is that conduit's TX-ORDER
+/// lock. It used to be the whole session's: one `tx_mutex` guarded every
+/// priority's stage and serialized every sender, so a sender held on one
+/// conduit held every other conduit with it. zenoh locks per priority
+/// (`io/zenoh-transport/src/common/pipeline.rs`
+/// @ `// Each priority queue has its own Mutex`), and nothing needs more: a
+/// conduit's SN ring, its open frame and its fragment chains are its own,
+/// and no invariant spans two conduits. That independence is what lets a
+/// congested low-priority conduit wait for its link without stalling a
+/// higher-priority one.
 #[derive(Debug, Default)]
 pub struct BatchTx {
-    /// `zp_batch_start` .. `zp_batch_stop` window flag
-    /// (`_Z_BATCHING_ACTIVE` / `_Z_BATCHING_IDLE`).
-    pub active: bool,
-    /// The per-priority open frames — `stages[i]` is the conduit whose wire
-    /// priority byte is `i`. Without `transport-qos` there is exactly ONE
-    /// conduit and the array is `[_; 1]`; without `transport-batching` nothing
-    /// stages at all and the field is gone, leaving `BatchTx` its ungated
-    /// TX-ORDER lock role alone (which is smaller than the pre-y835 shape, where
-    /// an unused `buf` rode every build).
+    /// This conduit's open frame. Without `transport-batching` nothing stages
+    /// and the field is gone, leaving `BatchTx` its TX-ORDER lock role alone.
     #[cfg(feature = "transport-batching")]
-    stages: BatchStages,
+    stage: BatchStage,
+}
+
+/// R2920 — the session's TX conduits: one [`BatchTx`] behind its own lock
+/// per priority (one in all, without `transport-qos`), and the batching
+/// window flag they share.
+pub struct TxConduits<R: SessionRuntime> {
+    /// `zp_batch_start` .. `zp_batch_stop` window flag
+    /// (`_Z_BATCHING_ACTIVE` / `_Z_BATCHING_IDLE`). An atomic rather than a
+    /// field of a conduit, because the window spans every conduit and no
+    /// conduit's lock may stand for the others.
+    #[cfg(feature = "transport-batching")]
+    active: core::sync::atomic::AtomicBool,
+    conduits: [R::Mutex<BatchTx>; TX_CONDUITS],
+}
+
+/// The number of TX conduits, sized by the build's priority space.
+/// `transport-qos` is `alloc`-required by construction (a host/AP knob, never
+/// an MCU no-alloc one); the OFF build keeps the single conduit it always had.
+#[cfg(feature = "transport-qos")]
+const TX_CONDUITS: usize = Priority::NUM;
+#[cfg(not(feature = "transport-qos"))]
+const TX_CONDUITS: usize = 1;
+
+impl<R: SessionRuntime> TxConduits<R> {
+    fn new() -> Self {
+        Self {
+            #[cfg(feature = "transport-batching")]
+            active: core::sync::atomic::AtomicBool::new(false),
+            conduits: core::array::from_fn(|_| R::new_mutex(BatchTx::default())),
+        }
+    }
+
+    /// The conduit `priority` rides. With `transport-qos` this is zenoh's
+    /// `TransmissionPipeline::stage_in[priority]`
+    /// (`io/zenoh-transport/src/common/pipeline.rs`) — each priority
+    /// accumulates INDEPENDENTLY, which is what makes the drain order a real
+    /// scheduling decision rather than arrival order. Before R311y835 wz held
+    /// one frame and flushed it whenever the priority changed, so a Background
+    /// message staged first left the link BEFORE a RealTime message staged
+    /// second: the wire carried the ext_qos band while the schedule ignored it.
+    ///
+    /// Without `transport-qos` there is one conduit and every priority indexes
+    /// it. The same holds inside a `transport-qos` build on a session that did
+    /// NOT negotiate QoS, because `SessionLinkActions::dispatch_network_message`
+    /// forces `Priority::DEFAULT` there before reaching this seam.
+    ///
+    /// Gated on the union of its two callers' gates: the emit chokepoint's
+    /// (`dispatch_network_message`) and the batch drain's.
+    #[cfg(any(
+        feature = "codec-push",
+        feature = "codec-request",
+        feature = "codec-response",
+        feature = "codec-response-final",
+        feature = "declare-keyexpr",
+        feature = "declare-subscriber",
+        feature = "declare-queryable",
+        feature = "declare-token",
+        feature = "declare-interest",
+        feature = "liveliness-token",
+        feature = "transport-batching",
+    ))]
+    fn conduit(&self, priority: Priority) -> &R::Mutex<BatchTx> {
+        &self.conduits[Self::conduit_index(priority)]
+    }
+
+    /// `priority` -> conduit index. The wire priority byte IS the index under
+    /// `transport-qos` (`Priority::wire_byte`, 0..=7 ascending from `Control`),
+    /// so index order IS wire-priority order and the ascending walk in
+    /// `SessionLinkActions::flush_open_batch` is zenoh's strict-priority
+    /// drain (`pipeline.rs` pulls `for prio in 0..NUM_PRIO`). Off the feature
+    /// every priority collapses onto the single conduit.
+    #[cfg(any(
+        feature = "codec-push",
+        feature = "codec-request",
+        feature = "codec-response",
+        feature = "codec-response-final",
+        feature = "declare-keyexpr",
+        feature = "declare-subscriber",
+        feature = "declare-queryable",
+        feature = "declare-token",
+        feature = "declare-interest",
+        feature = "liveliness-token",
+        feature = "transport-batching",
+    ))]
+    const fn conduit_index(priority: Priority) -> usize {
+        #[cfg(feature = "transport-qos")]
+        {
+            priority.wire_byte() as usize
+        }
+        #[cfg(not(feature = "transport-qos"))]
+        {
+            let _ = priority;
+            0
+        }
+    }
+
+    /// The `Priority` conduit index `idx` carries — the inverse of
+    /// `Self::conduit_index`, used by the drain to route each flushed frame by
+    /// its OWN conduit (y217 #3: splitting one conduit across links would trip
+    /// the peer's per-conduit RX SN gate).
+    #[cfg(feature = "transport-batching")]
+    const fn conduit_priority(idx: usize) -> Priority {
+        #[cfg(feature = "transport-qos")]
+        {
+            Priority::from_wire(idx as u8)
+        }
+        #[cfg(not(feature = "transport-qos"))]
+        {
+            let _ = idx;
+            Priority::DEFAULT
+        }
+    }
+
+    /// Read by the emit chokepoint's window arm only, so gated as it is.
+    #[cfg(all(
+        feature = "transport-batching",
+        any(
+            feature = "codec-push",
+            feature = "codec-request",
+            feature = "codec-response",
+            feature = "codec-response-final",
+            feature = "declare-keyexpr",
+            feature = "declare-subscriber",
+            feature = "declare-queryable",
+            feature = "declare-token",
+            feature = "declare-interest",
+            feature = "liveliness-token",
+        )
+    ))]
+    fn is_active(&self) -> bool {
+        self.active.load(core::sync::atomic::Ordering::SeqCst)
+    }
+
+    #[cfg(feature = "transport-batching")]
+    fn set_active(&self, active: bool) {
+        self.active
+            .store(active, core::sync::atomic::Ordering::SeqCst);
+    }
+
+    /// Every conduit back to its initial state, the window closed. The
+    /// reopen path's (`reset_for_reopen`), and gated as that arm is.
+    #[cfg(feature = "session-reconnect")]
+    fn reset(&self) {
+        #[cfg(feature = "transport-batching")]
+        self.set_active(false);
+        for conduit in &self.conduits {
+            R::with_mutex_mut(conduit, |c| *c = BatchTx::default());
+        }
+    }
+}
+
+impl<R: SessionRuntime> core::fmt::Debug for TxConduits<R> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("TxConduits")
+            .field("conduits", &self.conduits.len())
+            .finish_non_exhaustive()
+    }
 }
 
 /// R311y835 — ONE priority conduit's staged outbound frame: the transport
@@ -278,75 +438,6 @@ struct BatchStage {
     /// Network messages absorbed into the open frame. The flush trigger is
     /// the byte budget (`params.batch_size`), never this count.
     count: usize,
-}
-
-/// The staged conduits, sized by the build's priority space. `transport-qos`
-/// is `alloc`-required by construction (it is a host/AP knob, never an MCU
-/// no-alloc one), so eight `Vec` headers here cost nothing an MCU profile
-/// pays: the OFF build keeps the single stage it always had.
-#[cfg(all(feature = "transport-batching", feature = "transport-qos"))]
-type BatchStages = [BatchStage; Priority::NUM];
-#[cfg(all(feature = "transport-batching", not(feature = "transport-qos")))]
-type BatchStages = [BatchStage; 1];
-
-/// The staging apparatus rides `transport-batching` as a whole: both of its
-/// consumers (`SessionLinkActions::dispatch_network_message`'s window arm and
-/// `SessionLinkActions::flush_open_batch`) are gated on it, so off the feature
-/// there is nothing to stage into and nothing to drain.
-#[cfg(feature = "transport-batching")]
-impl BatchTx {
-    /// The conduit `priority` stages into. With `transport-qos` this is
-    /// zenoh's `TransmissionPipeline::stage_in[priority]`
-    /// (`io/zenoh-transport/src/common/pipeline.rs`) — each priority
-    /// accumulates INDEPENDENTLY, which is what makes the drain order below a
-    /// real scheduling decision rather than arrival order. Before R311y835 wz
-    /// held one frame and flushed it whenever the priority changed, so a
-    /// Background message staged first left the link BEFORE a RealTime message
-    /// staged second: the wire carried the ext_qos band while the schedule
-    /// ignored it.
-    ///
-    /// Without `transport-qos` there is one conduit and every priority indexes
-    /// it — byte-identical to the pre-y835 single-`buf` batch. The same holds
-    /// inside a `transport-qos` build on a session that did NOT negotiate QoS,
-    /// because `SessionLinkActions::dispatch_network_message` forces
-    /// `Priority::DEFAULT` there before reaching this seam.
-    fn stage_mut(&mut self, priority: Priority) -> &mut BatchStage {
-        &mut self.stages[Self::stage_index(priority)]
-    }
-
-    /// `priority` -> conduit index. The wire priority byte IS the index under
-    /// `transport-qos` (`Priority::wire_byte`, 0..=7 ascending from `Control`),
-    /// so index order IS wire-priority order and the ascending walk in
-    /// `SessionLinkActions::flush_open_batch` is zenoh's strict-priority
-    /// drain (`pipeline.rs` pulls `for prio in 0..NUM_PRIO`). Off the feature
-    /// every priority collapses onto the single conduit.
-    const fn stage_index(priority: Priority) -> usize {
-        #[cfg(feature = "transport-qos")]
-        {
-            priority.wire_byte() as usize
-        }
-        #[cfg(not(feature = "transport-qos"))]
-        {
-            let _ = priority;
-            0
-        }
-    }
-
-    /// The `Priority` conduit index `idx` carries — the inverse of
-    /// `Self::stage_index`, used by the drain to route each flushed frame by
-    /// its OWN conduit (y217 #3: splitting one conduit across links would trip
-    /// the peer's per-conduit RX SN gate).
-    const fn stage_priority(idx: usize) -> Priority {
-        #[cfg(feature = "transport-qos")]
-        {
-            Priority::from_wire(idx as u8)
-        }
-        #[cfg(not(feature = "transport-qos"))]
-        {
-            let _ = idx;
-            Priority::DEFAULT
-        }
-    }
 }
 
 /// R311y214 — the unicast outbound Frame SN generator, SPLIT per
@@ -365,7 +456,7 @@ impl BatchTx {
 /// contiguous ring from `initial_sn`, matching pico exactly. Both channels
 /// seed from the one `params.initial_sn` (the OpenSyn/OpenAck origin) and
 /// share the negotiated ring mask. The mint stays lock-free (every mint
-/// site already runs under `tx_mutex`; the atomic additionally keeps a
+/// site already runs under its conduit's TX lock; the atomic additionally keeps a
 /// straggling reset from reordering — the SeqCst contract the reset store
 /// pairs with). R311y215 arrays this per `Priority` conduit behind
 /// `transport-qos`.
@@ -495,7 +586,7 @@ impl FrameTxConduits {
 /// R311y205 (transport-multilink IMPL-2a) — the SHARED session kernel: the
 /// ~30 fields that are one-per-logical-session regardless of how many physical
 /// links carry it (SN generators, RX-SN gate, negotiated caps, peer identity,
-/// id-spaces, declaration cache, namespace, the TX-order `tx_mutex`). Split out
+/// id-spaces, declaration cache, namespace, the TX-order `tx_conduits`). Split out
 /// of the former flat `SessionLinkActions` so a later multilink slice can share
 /// ONE core across N per-link [`LinkState`]s on separate drive loops; the 5
 /// per-link fields moved to [`LinkState`]. `SessionCore` holds NO reference to
@@ -1023,7 +1114,9 @@ pub struct SessionCore<R: SessionRuntime, T: TimeSource> {
     /// R311km — renamed from `batch_tx`: the name leads with the
     /// ungated lock role (pico `_z_transport_common_t._mutex_tx`
     /// parity); [`BatchTx`] keeps naming the guarded coalescing state.
-    pub tx_mutex: R::Mutex<BatchTx>,
+    /// R2920 — one lock PER CONDUIT (`tx_mutex` was one for the session):
+    /// see [`BatchTx`] for why a conduit's lock is all its sender needs.
+    pub tx_conduits: TxConduits<R>,
     /// R234 — outbound keyexpr mapping table. Mirrors zenoh-pico's
     /// `_z_session_t._local_resources` slot: every time
     /// [`Self::send_declare_keyexpr`] emits a `Declare(DeclKexpr)`
@@ -1542,7 +1635,7 @@ pub struct SessionLinkActions<R: SessionRuntime, T: TimeSource> {
 ///
 /// Grouped rather than passed as six positional arguments: they are ONE
 /// decision's inputs, they are resolved together at the top of
-/// `dispatch_network_message` (before the `tx_mutex` hold), and they travel
+/// `dispatch_network_message` (before the conduit lock is taken), and they travel
 /// together to both call sites. All `Copy`, so the grouping is free.
 ///
 /// Carries the SAME feature gate as
@@ -1914,7 +2007,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                 inbound_peer_init_caps: R::new_mutex(None::<PeerInitCaps>),
                 outbound_frame_sn: FrameTxConduits::new(initial_frame_sn),
                 rx_sn: R::new_mutex(crate::sn::RxConduits::default()),
-                tx_mutex: R::new_mutex(BatchTx::default()),
+                tx_conduits: TxConduits::new(),
                 outbound_mappings: R::new_mutex(HashMap::<u64, String>::new()),
                 #[cfg(feature = "session-reconnect")]
                 declaration_cache: R::new_mutex(Vec::<CachedDeclaration>::new()),
@@ -2640,7 +2733,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     }
 
     /// The configured reassembly cap, or `usize::MAX` when the host declared
-    /// none. Resolved BEFORE the `tx_mutex` hold by
+    /// none. Resolved BEFORE the conduit lock is taken by
     /// [`Self::dispatch_network_message`], for the same disjoint-mutex
     /// discipline `negotiated_batch_mtu` / `negotiated_sn_mask` follow.
     #[cfg(feature = "transport-fragmentation")]
@@ -5669,17 +5762,21 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         // non-oversize call is at most two emits (overflow flush + one
         // frame), each within the negotiated MTU. Revisit if a
         // preemptive MCU profile lands (5.P caveat, R311kg/R311kj).
-        R::with_mutex_mut(&self.tx_mutex, |batch| {
+        //
+        // R2920 — the hold is THIS CONDUIT's lock, not the session's: every
+        // ordering above is per conduit (the SN ring, the open frame, the
+        // fragment chain), so a sender on another priority proceeds.
+        R::with_mutex_mut(self.tx_conduits.conduit(priority), |batch| {
             #[cfg(feature = "transport-batching")]
-            if batch.active {
+            if self.tx_conduits.is_active() {
                 use crate::frame_encode::{begin_frame, frame_flags, frame_wire_reliability};
                 let encode_into = |buf: &mut Vec<u8>| {
                     let mut sink = sce_forge_runtime::codec::VecSink::new(buf);
                     encode_body(&mut sink).expect("VecSink is infallible");
                 };
                 // R311y835 — every arm below works on THIS message's own
-                // priority conduit (`BatchTx::stage_mut`); a message never
-                // sees, and never flushes, another priority's staged frame.
+                // priority conduit (R2920: the one locked above); a message
+                // never sees, and never flushes, another priority's staged frame.
                 // At most two iterations: a RELIABILITY change (R311y222)
                 // within the conduit OR an append overflow (pico
                 // `_z_transport_tx_batch_overflow` rollback+retry) flushes this
@@ -5687,9 +5784,9 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                 // open-fresh-frame arm, which is always terminal (it empties
                 // the stage and returns).
                 loop {
-                    if batch.stage_mut(priority).buf.is_empty() {
+                    if batch.stage.buf.is_empty() {
                         let sn = self.next_outbound_frame_sn(priority, reliable, sn_mask);
-                        let stage = batch.stage_mut(priority);
+                        let stage = &mut batch.stage;
                         // +2 for a possible ext_qos ([0x31][VLE(priority)]) that
                         // begin_frame may append (symmetric with encode_frame_envelope).
                         stage.buf.reserve(1 + 10 + 2 + worst_case_payload);
@@ -5737,7 +5834,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                     // (`zenoh-codec` `CurrentFrame`/`NewFrame`).
                     // Read the open frame's reliability once (its own R flag) —
                     // reused as the flush channel below (`prev` is the same bytes).
-                    let stage = batch.stage_mut(priority);
+                    let stage = &mut batch.stage;
                     let open_channel = frame_wire_reliability(&stage.buf);
                     if open_channel != Reliability::from_reliable_bool(reliable) {
                         let prev = core::mem::take(&mut stage.buf);
@@ -5816,7 +5913,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// (R311y206 — matching zenoh `pipeline.rs` + the
     /// `multicast_frame_or_fragments` twin; the pre-y206 code discarded `sn`
     /// and reserved a fresh block, leaving a 1-SN wire gap). The caller's `sn`
-    /// mint and this follow-on reserve both run inside the one `tx_mutex`
+    /// mint and this follow-on reserve both run inside the one conduit-lock
     /// hold, so the split reservation is atomic w.r.t. a concurrent sender
     /// (the reassembly dispatcher aborts a non-consecutive chain).
     #[cfg(any(
@@ -5905,7 +6002,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                 // the frame SN slot and the `multicast_frame_or_fragments`
                 // twin does the same). Reserving as we go rather than in
                 // advance is not a weakening: the whole walk runs inside the
-                // one `tx_mutex` hold, which is what made the split
+                // one conduit-lock hold, which is what made the split
                 // reservation atomic w.r.t. a concurrent sender in the first
                 // place. What it BUYS is that an abandoned chain reserves
                 // only the SNs it actually put on the wire, instead of
@@ -6002,15 +6099,19 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// under one lock hold.
     #[cfg(feature = "transport-batching")]
     fn flush_open_batch(&self) {
-        R::with_mutex_mut(&self.tx_mutex, |batch| {
-            for idx in 0..batch.stages.len() {
-                // The walk is over BANDS, not slots: the index names a priority
-                // and the priority selects its stage, so the drain and the
-                // staging seam agree by construction on which conduit is which.
-                let priority = BatchTx::stage_priority(idx);
-                let stage = batch.stage_mut(priority);
+        // R2920 — each conduit under its OWN lock, one after the other in
+        // ascending band: a conduit is still emitted whole under one hold, so
+        // its frames keep their SN order, and the order across conduits is the
+        // walk's.
+        for idx in 0..TX_CONDUITS {
+            // The walk is over BANDS, not slots: the index names a priority and
+            // the priority selects its conduit, so the drain and the staging
+            // seam agree by construction on which conduit is which.
+            let priority = TxConduits::<R>::conduit_priority(idx);
+            R::with_mutex_mut(self.tx_conduits.conduit(priority), |batch| {
+                let stage = &mut batch.stage;
                 if stage.buf.is_empty() {
-                    continue;
+                    return;
                 }
                 stage.count = 0;
                 let frame = core::mem::take(&mut stage.buf);
@@ -6018,8 +6119,8 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                 // Route each frame by its OWN conduit (y217 #3) — this drain path
                 // carries no caller priority, so the band comes from the walk.
                 self.send_wire(&frame, channel, priority);
-            }
-        });
+            });
+        }
     }
 
     /// zenoh-pico `zp_batch_start` parity — open a batching window: every
@@ -6040,7 +6141,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     pub fn batch_start(&self) -> Result<(), SendWireError> {
         #[cfg(feature = "transport-batching")]
         {
-            R::with_mutex_mut(&self.tx_mutex, |batch| batch.active = true);
+            self.tx_conduits.set_active(true);
             Ok(())
         }
         #[cfg(not(feature = "transport-batching"))]
@@ -6067,7 +6168,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     pub fn batch_stop(&self) -> Result<(), SendWireError> {
         #[cfg(feature = "transport-batching")]
         {
-            R::with_mutex_mut(&self.tx_mutex, |batch| batch.active = false);
+            self.tx_conduits.set_active(false);
             self.flush_open_batch();
             Ok(())
         }
@@ -8696,7 +8797,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                     ing.reset();
                 }
             });
-            R::with_mutex_mut(&self.tx_mutex, |batch| *batch = BatchTx::default());
+            self.tx_conduits.reset();
             // SeqCst pairs with `next_outbound_frame_sn`'s fetch_add — the
             // reset must not reorder against a straggling in-flight mint.
             // R311y214 — resets BOTH reliability channels to the origin.
