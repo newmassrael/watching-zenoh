@@ -2048,6 +2048,89 @@ mod tests {
         assert_eq!(fwd.queries_routed(), 1);
     }
 
+    /// R2906 — the simple router's relay hands the querier its OWN QoS back on
+    /// the reply as well as the final, as upstream's `route_send_response`
+    /// stamps `query.src_qos`. The final already did (R2595); the reply
+    /// carried the answerer's value. Every field differs between the two.
+    #[test]
+    fn a_relayed_reply_carries_the_querys_qos_not_the_answerers() {
+        use wz_session_core::declare_ext_qos::{read_response_final_qos, read_response_qos};
+        use wz_session_core::qos::{CongestionControl, Priority};
+        use wz_session_core::sample::QosLevel;
+        let asked = QosLevel::from_parts(Priority::RealTime, CongestionControl::Block, true);
+        let answered = QosLevel::from_parts(Priority::Background, CongestionControl::Drop, false);
+        let feed = |face: u64, message: NetworkMessage| {
+            let outcome = DriverLoopOutcome::FramePayload {
+                priority: wz_session_core::qos::Priority::DEFAULT,
+                reliable: true,
+                sn: 0,
+                messages: vec![message],
+                has_ext: false,
+                extensions: Vec::new(),
+            };
+            (face, outcome)
+        };
+        let fwd = RoutingForwarder::new();
+        let (qabl, qabl_sink) = recording_actions();
+        let (querier, querier_sink) = recording_actions();
+        fwd.register(FaceId(0), &qabl);
+        fwd.register(FaceId(1), &querier);
+        declare_qabl(&fwd, 0, 7, "demo/**");
+
+        let request =
+            wz_session_core::request_build::RequestQueryBuilder::new(42, 0, Some("demo/example"))
+                .request_qos(asked.raw)
+                .build()
+                .expect("query request");
+        let (face, outcome) = feed(1, NetworkMessage::Request(Box::new(request)));
+        fwd.forward(FaceId(face), IterationEvent::Poll(&outcome));
+        let downstream_rid = captured_requests(&qabl_sink)[0].0;
+
+        let reply = wz_session_core::response_build::ResponseReplyBuilder::new(
+            downstream_rid,
+            0,
+            Some("demo/example"),
+            b"answer",
+        )
+        .qos(answered)
+        .build()
+        .expect("reply");
+        let (face, outcome) = feed(0, NetworkMessage::Response(Box::new(reply)));
+        fwd.forward(FaceId(face), IterationEvent::Poll(&outcome));
+        let (face, outcome) = feed(
+            0,
+            NetworkMessage::ResponseFinal(
+                wz_session_core::response_final_build::build_response_final(
+                    downstream_rid,
+                    answered,
+                ),
+            ),
+        );
+        fwd.forward(FaceId(face), IterationEvent::Poll(&outcome));
+
+        let received = captured_messages(&querier_sink);
+        let reply_qos: Vec<QosLevel> = received
+            .iter()
+            .filter_map(|m| match m {
+                NetworkMessage::Response(r) => Some(read_response_qos(r)),
+                _ => None,
+            })
+            .collect();
+        let final_qos: Vec<QosLevel> = received
+            .iter()
+            .filter_map(|m| match m {
+                NetworkMessage::ResponseFinal(rf) => Some(read_response_final_qos(rf)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            reply_qos,
+            vec![asked],
+            "the relayed reply carries the query's QoS"
+        );
+        assert_eq!(final_qos, vec![asked], "and so does the final");
+    }
+
     /// Two queryables, ONE final. zenoh closes the querier when the last
     /// outstanding downstream query drops (`Drop for Query`), so a querier that
     /// counts finals (both zenoh and pico do) is not closed early by the first

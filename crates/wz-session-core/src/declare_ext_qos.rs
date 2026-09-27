@@ -250,10 +250,49 @@ pub fn read_oam_qos(oam: &wz_codecs::oam::OamOwned) -> QosLevel {
 /// The dispatch reads the band and the express bit off the Response itself
 /// through this, so a reply built here and a Response relayed from another
 /// node go out on the QoS they CARRY rather than on a constant the send seam
-/// chose — the relay forwards `msg.ext_qos` unchanged upstream.
+/// chose.
+///
+/// R2906 — what a RELAYED Response carries is the QUERIER's QoS, not the
+/// answerer's: upstream re-stamps it on the way back
+/// (`zenoh/src/net/routing/dispatcher/queries.rs` @
+/// `msg.ext_qos = query.src_qos;`). This paragraph used to say the relay
+/// forwards `msg.ext_qos` unchanged, which is what wz did and upstream does
+/// not; [`relay_response`](crate::response_build::relay_response) now stamps
+/// it through [`set_response_qos`].
 #[cfg(feature = "codec-response")]
 pub fn read_response_qos(response: &wz_codecs::response::ResponseOwned) -> QosLevel {
     read_qos_chain(response.extensions.as_ref())
+}
+
+/// R2906 — set a `Response`'s `ext_qos` in place, keeping every other entry
+/// of its chain (responder id, timestamp, timestamp stack) as it was.
+/// `QosLevel::DEFAULT` REMOVES the entry, the omit-on-DEFAULT gate every other
+/// setter here applies.
+///
+/// The entry goes FIRST rather than last, which is why this does not share
+/// [`set_qos_chain`]'s append: upstream's Response encoder writes `ext_qos`
+/// ahead of `ext_tstamp`, `ext_respid` and `ext_ts_stack`
+/// (`commons/zenoh-codec/src/network/response.rs` @
+/// `if ext_qos != &ext::QoSType::DEFAULT {`), so a relayed reply whose chain
+/// already holds a responder id would otherwise leave here in an order no
+/// upstream router emits. Receivers accept either order; the bytes are what
+/// a capture compares.
+#[cfg(feature = "codec-response")]
+pub fn set_response_qos(response: &mut wz_codecs::response::ResponseOwned, qos: QosLevel) {
+    let exts = &mut response.extensions;
+    if let Some(list) = exts.as_mut() {
+        list.retain(|e| ext_nodeid::ext_id(e.header) != QOS_EXT_ID);
+    }
+    if qos != QosLevel::DEFAULT {
+        exts.get_or_insert_with(Vec::new).insert(0, qos_ext(qos));
+    }
+    if exts.as_ref().is_some_and(|list| list.is_empty()) {
+        *exts = None;
+    }
+    if let Some(list) = exts.as_mut() {
+        ext_nodeid::apply_chain_z_bits(list);
+    }
+    ext_nodeid::sync_header_z(&mut response.header, exts.is_some());
 }
 
 /// R2595 — read a `ResponseFinal`'s `ext_qos`. Absent means `QosLevel::DEFAULT`,

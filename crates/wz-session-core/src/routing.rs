@@ -1890,23 +1890,26 @@ mod imp {
             let Some(pending) = self.pending_queries.get(&query_key) else {
                 return;
             };
-            let (src_face, src_rid) = (pending.src_face, pending.src_rid);
+            let (src_face, src_rid, src_qos) = (pending.src_face, pending.src_rid, pending.src_qos);
             let Some(querier) = self.faces.get(&src_face) else {
                 return;
             };
             let querier_actions = querier.actions.clone();
-            let mut out = response.clone();
-            out.request_id = src_rid;
-            if let Some(keyexpr) = keyexpr {
-                if let Err(e) =
-                    crate::response_build::set_response_keyexpr_literal(&mut out, &keyexpr)
-                {
+            // R2906 — the shared relay step: rid AND qos are the querier's.
+            let out = match crate::response_build::relay_response(
+                response,
+                src_rid,
+                src_qos,
+                keyexpr.as_deref(),
+            ) {
+                Ok(out) => out,
+                Err(e) => {
                     log::debug!(
                         "RouteTable: reply keyexpr could not be re-literalized ({e:?}); dropped"
                     );
                     return;
                 }
-            }
+            };
             let _ = querier_actions.send_network_message(
                 NetworkMessage::Response(Box::new(out)),
                 true,

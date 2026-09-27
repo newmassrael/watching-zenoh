@@ -109,6 +109,41 @@ pub fn set_response_keyexpr_literal(
     )
 }
 
+/// R2906 — the ONE relay step for a `Response` travelling back toward the
+/// face that asked: upstream's `route_send_response`
+/// (`zenoh/src/net/routing/dispatcher/queries.rs` @
+/// `pub(crate) fn route_send_response(`), which does three things to the
+/// message and nothing else — re-literalizes the keyexpr (skipped for the
+/// EMPTY keyexpr of an Err), rewrites the rid to the querier's
+/// (`msg.rid = query.src_qid;`) and re-stamps the QoS to the querier's
+/// (`msg.ext_qos = query.src_qos;`).
+///
+/// Every wz relay goes through here: the simple router's `RouteTable`, both
+/// runtime forwarders, and the timeout Err those forwarders originate, which
+/// upstream likewise sends through `route_send_response`. They used to each
+/// clone and patch the message inline, and all of them patched the first two
+/// and not the third, so a reply reached its querier on the ANSWERER's
+/// priority and congestion class. The step is shared so the three rewrites
+/// cannot drift apart again one call site at a time.
+///
+/// `keyexpr` is the reply's keyexpr already resolved in the answerer's alias
+/// context, or `None` to leave the wire expression as it came (the EMPTY one).
+#[cfg(feature = "codec-response")]
+pub fn relay_response(
+    response: &ResponseOwned,
+    src_rid: u64,
+    src_qos: crate::sample::QosLevel,
+    keyexpr: Option<&str>,
+) -> Result<ResponseOwned, CodecError> {
+    let mut out = response.clone();
+    if let Some(keyexpr) = keyexpr {
+        set_response_keyexpr_literal(&mut out, keyexpr)?;
+    }
+    out.request_id = src_rid;
+    crate::declare_ext_qos::set_response_qos(&mut out, src_qos);
+    Ok(out)
+}
+
 #[cfg(feature = "codec-response")]
 pub fn build_response_reply_literal(
     request_id: u64,
@@ -310,6 +345,12 @@ pub fn build_response_err_aliased(
 /// which this function's signature has no slot for. It
 /// shares that shape with every router-side relay, which upstream re-stamps
 /// with `query.src_qos`, so it is fixed with them rather than alone.
+///
+/// R2906 — and it is: the timeout sweep passes this through
+/// [`relay_response`], exactly as upstream's `QueryCleanup::run` passes its
+/// Err through `route_send_response`, so the QoS is stamped at the one relay
+/// step rather than here. The responder id upstream also attaches (the timed-out
+/// face's zid) is still omitted.
 ///
 /// Wire shape (empty-keyexpr case):
 ///
@@ -2711,5 +2752,72 @@ mod tests {
         } else {
             panic!("expected Reply");
         }
+    }
+
+    /// R2906 — a relayed reply reaches its querier as the QUERIER's query asked,
+    /// not as the answerer answered: upstream's `route_send_response` sets
+    /// `msg.rid = query.src_qid` and `msg.ext_qos = query.src_qos` and leaves
+    /// the rest of the message alone.
+    ///
+    /// The expected bytes are not written down: they are a reply BUILT at the
+    /// querier's rid and QoS with the same responder, so the relay must produce
+    /// exactly what a fresh reply would — which pins the QoS value, the
+    /// responder id surviving, and the chain ORDER (upstream writes `ext_qos`
+    /// ahead of `ext_respid`) at once. Every QoS field differs between the two
+    /// sides, so a relay that kept any of the answerer's reds.
+    #[test]
+    fn a_relayed_reply_carries_the_querys_rid_and_qos_and_keeps_the_rest() {
+        use crate::qos::{CongestionControl, Priority};
+        use crate::sample::QosLevel;
+        let answered = QosLevel::from_parts(Priority::Background, CongestionControl::Drop, false);
+        let asked = QosLevel::from_parts(Priority::RealTime, CongestionControl::Block, true);
+        assert_ne!(answered.raw, asked.raw);
+        let zid = [0x5Au8; 8];
+
+        let from_answerer = ResponseReplyBuilder::new(7, 0, Some("demo/q"), b"hi")
+            .qos(answered)
+            .responder(&zid, 3)
+            .build()
+            .expect("answerer's reply builds");
+        let relayed =
+            relay_response(&from_answerer, 99, asked, Some("demo/q")).expect("relay builds");
+        let as_the_query_asked = ResponseReplyBuilder::new(99, 0, Some("demo/q"), b"hi")
+            .qos(asked)
+            .responder(&zid, 3)
+            .build()
+            .expect("reference reply builds");
+        assert_eq!(
+            relayed.wire(),
+            as_the_query_asked.wire(),
+            "the relay re-stamps rid and QoS in place and changes nothing else"
+        );
+
+        // A DEFAULT query removes the answerer's QoS rather than keeping it: the
+        // omit-on-DEFAULT gate, with the responder id still in place.
+        let to_a_default_query =
+            relay_response(&from_answerer, 99, QosLevel::DEFAULT, None).expect("relay builds");
+        let default_reference = ResponseReplyBuilder::new(99, 0, Some("demo/q"), b"hi")
+            .responder(&zid, 3)
+            .build()
+            .expect("reference reply builds");
+        assert_eq!(to_a_default_query.wire(), default_reference.wire());
+    }
+
+    /// R2906 — the timeout Err a router originates goes back through the same
+    /// relay step, so it carries its query's QoS as upstream's `QueryCleanup`
+    /// Err does (`ext_qos: self.qos`), and keeps the EMPTY keyexpr.
+    #[test]
+    fn a_relayed_timeout_err_carries_the_querys_qos() {
+        use crate::qos::{CongestionControl, Priority};
+        use crate::sample::QosLevel;
+        let asked = QosLevel::from_parts(Priority::Data, CongestionControl::Block, false);
+        let err = build_response_err_empty(4, b"Timeout").expect("err builds");
+        let relayed = relay_response(&err, 99, asked, None).expect("relay builds");
+        assert_eq!(relayed.request_id, 99);
+        assert_eq!(crate::declare_ext_qos::read_response_qos(&relayed), asked);
+        assert_eq!(
+            relayed.keyexpr, err.keyexpr,
+            "the empty keyexpr passes through"
+        );
     }
 }

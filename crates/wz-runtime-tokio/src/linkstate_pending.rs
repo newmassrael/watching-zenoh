@@ -109,6 +109,40 @@ impl QueryFan {
     }
 }
 
+/// R2906 — where, and as what, anything owed to a query's asker goes back: the
+/// querier's face, the rid IT minted, and the QoS its Request arrived with.
+/// Upstream's `Query { src_face, src_qid, src_qos }`
+/// (`zenoh/src/net/routing/dispatcher/queries.rs` @ `pub(crate) struct Query {`)
+/// read whole.
+///
+/// It is ONE type because the table has four exits — a relayed `Response`
+/// ([`peek`](PendingQueries::peek)), a relayed `ResponseFinal`
+/// ([`take`](PendingQueries::take)), the face-down drain and the timeout sweep —
+/// and upstream answers all four from the same `Query`. R2595 threaded the QoS
+/// out of the last two as a tuple element and left the first two returning
+/// `(face, rid)`, so the relays could not stamp the querier's QoS even though
+/// the fan held it. An exit that returns this cannot drop one of the three.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct QueryReturn {
+    /// The face the Query arrived on — where every reply routes back.
+    pub face: FaceId,
+    /// The querier's own rid, stamped on every reply in place of the branch qid.
+    pub rid: u64,
+    /// The QoS the querier's Request arrived with: upstream's `Query::src_qos`,
+    /// stamped on every reply, final and timeout Err.
+    pub qos: wz_session_core::sample::QosLevel,
+}
+
+impl QueryFan {
+    fn query_return(&self) -> QueryReturn {
+        QueryReturn {
+            face: self.inbound,
+            rid: self.inbound_rid,
+            qos: self.src_qos,
+        }
+    }
+}
+
 /// The pending-query return table — one [`FacePending`] per outbound face.
 #[derive(Debug, Default)]
 pub struct PendingQueries {
@@ -165,14 +199,9 @@ pub struct ExpiredQuery {
     pub out_face: FaceId,
     /// The local qid that timed out on `out_face`.
     pub qid: u64,
-    /// The inbound face to route the timeout messages back to.
-    pub inbound: FaceId,
-    /// The upstream rid to stamp on them.
-    pub inbound_rid: u64,
-    /// R2595 — the query's own QoS, carried out of the fan so the timeout
-    /// messages read as the query did (zenoh's `QueryCleanup` stamps
-    /// `self.qos`, taken from the same `Query`).
-    pub src_qos: wz_session_core::sample::QosLevel,
+    /// Where the timeout messages go and as what: the querier's face, rid and
+    /// QoS (R2595 carried the QoS; R2906 made it the shared [`QueryReturn`]).
+    pub to: QueryReturn,
     /// Whether this branch was the LAST of its fan (the `Rc::into_inner` gate) —
     /// only then does the caller send the closing `ResponseFinal`; the `Err`
     /// reply goes per branch (zenoh runs one `QueryCleanup` per branch, each
@@ -213,17 +242,17 @@ impl PendingQueries {
     /// `ResponseFinal`, so the entry stays alive (zenoh `route_send_response`
     /// reads `pending_queries.get`, it does not remove). `None` for an unknown
     /// qid (no such pending query — already finalized, timed out, or never sent).
-    pub fn peek(&self, out_face: FaceId, qid: u64) -> Option<(FaceId, u64)> {
+    pub fn peek(&self, out_face: FaceId, qid: u64) -> Option<QueryReturn> {
         self.by_face
             .get(&out_face)
             .and_then(|fp| fp.returns.get(&qid))
-            .map(|r| (r.fan.inbound, r.fan.inbound_rid))
+            .map(|r| r.fan.query_return())
     }
 
     /// Take (remove) the return mapping for a `ResponseFinal` carrying `qid` on
     /// `out_face` — the final closes this BRANCH and frees the entry (zenoh
-    /// `route_send_response_final` removes the pending entry). Returns `(inbound
-    /// face, inbound rid, last)`: `last` is `true` IFF this was the fan's FINAL
+    /// `route_send_response_final` removes the pending entry). Returns the
+    /// fan's [`QueryReturn`] and `last`: `last` is `true` IFF this was the fan's FINAL
     /// live branch (the removed entry held the last `Rc` reference — zenoh's
     /// `Arc::into_inner` gate in `finalize_pending_query`), and only then must
     /// the caller forward the closing `ResponseFinal` upstream; a non-last final
@@ -232,19 +261,18 @@ impl PendingQueries {
     /// freed only by [`remove_face`](Self::remove_face) — so a later query on
     /// this face can never reuse a qid a stale in-flight reply still carries.
     /// `None` for an unknown qid (already closed / never sent).
-    pub fn take(&mut self, out_face: FaceId, qid: u64) -> Option<(FaceId, u64, bool)> {
+    pub fn take(&mut self, out_face: FaceId, qid: u64) -> Option<(QueryReturn, bool)> {
         let fp = self.by_face.get_mut(&out_face)?;
         let entry = fp.returns.remove(&qid);
         entry.map(|r| {
-            let inbound = r.fan.inbound;
-            let inbound_rid = r.fan.inbound_rid;
+            let to = r.fan.query_return();
             let last = Rc::into_inner(r.fan).is_some();
-            (inbound, inbound_rid, last)
+            (to, last)
         })
     }
 
     /// Drop ALL pending branches on a departed `face`, returning the fans this
-    /// DRAINED — the `(inbound face, inbound rid)` of each fan whose LAST live
+    /// DRAINED — the [`QueryReturn`] of each fan whose LAST live
     /// branch died with this face, so the forwarder's `deregister` can synthesize
     /// the closing `ResponseFinal` that terminates the querier (zenoh
     /// `finalize_pending_queries` on face teardown drains the face's
@@ -254,22 +282,17 @@ impl PendingQueries {
     /// back to this one as their inbound target are left to self-heal — a reply
     /// toward the dead face simply drops at send — and to the per-branch timeout
     /// [`expired`](Self::expired).
-    pub fn remove_face(
-        &mut self,
-        face: &FaceId,
-    ) -> Vec<(FaceId, u64, wz_session_core::sample::QosLevel)> {
+    pub fn remove_face(&mut self, face: &FaceId) -> Vec<QueryReturn> {
         let Some(fp) = self.by_face.remove(face) else {
             return Vec::new();
         };
         let mut drained = Vec::new();
         for (_qid, ret) in fp.returns {
-            let inbound = ret.fan.inbound;
-            let inbound_rid = ret.fan.inbound_rid;
-            // R2595 — carried out with the rid: the drained fan's terminator
-            // must read as its query did.
-            let src_qos = ret.fan.src_qos;
+            // R2595 — the QoS is carried out with the rid: the drained fan's
+            // terminator must read as its query did.
+            let to = ret.fan.query_return();
             if Rc::into_inner(ret.fan).is_some() {
-                drained.push((inbound, inbound_rid, src_qos));
+                drained.push(to);
             }
         }
         drained
@@ -291,28 +314,25 @@ impl PendingQueries {
     pub fn expired(&mut self, now: Instant) -> Vec<ExpiredQuery> {
         // Phase 1: collect the victims under a shared borrow (the `Rc::into_inner`
         // last-out accounting needs owned removal, which `retain` cannot express).
-        // R2595 — the fan's `src_qos` is read HERE, under the shared borrow that
-        // can still see the fan: phase 2 consumes the `Rc` through `take`, which
-        // answers the rid and the last-out flag but no longer the query's QoS.
-        let mut victims: Vec<(FaceId, u64, wz_session_core::sample::QosLevel)> = Vec::new();
+        let mut victims: Vec<(FaceId, u64)> = Vec::new();
         for (&out_face, fp) in &self.by_face {
             for (&qid, ret) in &fp.returns {
                 if ret.deadline <= now {
-                    victims.push((out_face, qid, ret.fan.src_qos));
+                    victims.push((out_face, qid));
                 }
             }
         }
         // Phase 2: remove each through the take path, which computes the
-        // per-branch `last` flag (the face's allocator slot survives).
+        // per-branch `last` flag (the face's allocator slot survives) and, since
+        // R2906, answers the whole `QueryReturn` — QoS included — so the fan's
+        // QoS no longer has to be read ahead of the take under the shared borrow.
         let mut reaped = Vec::with_capacity(victims.len());
-        for (out_face, qid, src_qos) in victims {
-            if let Some((inbound, inbound_rid, last)) = self.take(out_face, qid) {
+        for (out_face, qid) in victims {
+            if let Some((to, last)) = self.take(out_face, qid) {
                 reaped.push(ExpiredQuery {
                     out_face,
                     qid,
-                    inbound,
-                    inbound_rid,
-                    src_qos,
+                    to,
                     last,
                 });
             }
@@ -351,10 +371,19 @@ mod tests {
 
     /// R2595 — a fan at the DEFAULT query QoS. These tests are about the
     /// last-out accounting, not about what the query asked for, so they name
-    /// the QoS once here; `the_fan_carries_its_querys_qos_out_to_both_exits`
+    /// the QoS once here; `the_fan_carries_its_querys_qos_out_through_every_exit`
     /// is the case that varies it.
     fn fan(inbound: FaceId, rid: u64) -> Rc<QueryFan> {
         QueryFan::new(inbound, rid, wz_session_core::sample::QosLevel::DEFAULT)
+    }
+
+    /// The [`QueryReturn`] a [`fan`] at the DEFAULT query QoS answers with.
+    fn to(face: FaceId, rid: u64) -> QueryReturn {
+        QueryReturn {
+            face,
+            rid,
+            qos: wz_session_core::sample::QosLevel::DEFAULT,
+        }
     }
 
     #[test]
@@ -375,8 +404,8 @@ mod tests {
         let t = never(Instant::now());
         let qid = pq.allocate(face(10), &fan(face(3), 99), t);
         // Peek twice: the entry survives (a query may yield several Responses).
-        assert_eq!(pq.peek(face(10), qid), Some((face(3), 99)));
-        assert_eq!(pq.peek(face(10), qid), Some((face(3), 99)));
+        assert_eq!(pq.peek(face(10), qid), Some(to(face(3), 99)));
+        assert_eq!(pq.peek(face(10), qid), Some(to(face(3), 99)));
         assert_eq!(pq.len(), 1, "peek does not consume");
         // A qid on the wrong face, or an unknown qid, has no mapping.
         assert_eq!(pq.peek(face(11), qid), None);
@@ -391,13 +420,13 @@ mod tests {
         let q1 = pq.allocate(face(10), &fan(face(3), 99), t);
         let q2 = pq.allocate(face(10), &fan(face(4), 77), t);
         // Take q1: returns its mapping (last — a single-branch fan), leaves q2.
-        assert_eq!(pq.take(face(10), q1), Some((face(3), 99, true)));
+        assert_eq!(pq.take(face(10), q1), Some((to(face(3), 99), true)));
         assert_eq!(pq.peek(face(10), q1), None, "taken entry is gone");
-        assert_eq!(pq.peek(face(10), q2), Some((face(4), 77)), "q2 survives");
+        assert_eq!(pq.peek(face(10), q2), Some(to(face(4), 77)), "q2 survives");
         // A second take of the same qid is a no-op.
         assert_eq!(pq.take(face(10), q1), None);
         // Taking the last entry drains the face's branches...
-        assert_eq!(pq.take(face(10), q2), Some((face(4), 77, true)));
+        assert_eq!(pq.take(face(10), q2), Some((to(face(4), 77), true)));
         assert!(pq.is_empty(), "no pending branches remain");
         // ...but the face's qid ALLOCATOR survives the drain (face-lifetime,
         // zenoh next_qid): the next query continues the sequence.
@@ -439,12 +468,12 @@ mod tests {
         drop(fan); // the caller's handle drops; only the entries keep it alive
         assert_eq!(
             pq.take(face(10), qa),
-            Some((face(3), 99, false)),
+            Some((to(face(3), 99), false)),
             "first branch's final is absorbed (the other branch is still live)"
         );
         assert_eq!(
             pq.take(face(11), qb),
-            Some((face(3), 99, true)),
+            Some((to(face(3), 99), true)),
             "the LAST branch's final closes the fan"
         );
         assert!(pq.is_empty());
@@ -466,7 +495,7 @@ mod tests {
         drop(fan);
         assert_eq!(
             pq.take(face(10), qa),
-            Some((face(3), 99, true)),
+            Some((to(face(3), 99), true)),
             "a single-branch fan is last at its only take"
         );
     }
@@ -483,7 +512,7 @@ mod tests {
         assert_eq!(pq.peek(face(10), 2), None);
         assert_eq!(
             pq.peek(face(11), 1),
-            Some((face(4), 1)),
+            Some(to(face(4), 1)),
             "face 11 untouched"
         );
         // Both dropped entries were single-branch fans -> both drained (their
@@ -492,12 +521,8 @@ mod tests {
         // no ordering of its own (a raw QoS byte does not sort meaningfully —
         // the priority field runs the other way).
         let mut drained = drained;
-        drained.sort_by_key(|(f, rid, _)| (*f, *rid));
-        let default_qos = wz_session_core::sample::QosLevel::DEFAULT;
-        assert_eq!(
-            drained,
-            vec![(face(3), 1, default_qos), (face(3), 2, default_qos)]
-        );
+        drained.sort_by_key(|r| (r.face, r.rid));
+        assert_eq!(drained, vec![to(face(3), 1), to(face(3), 2)]);
         // Removing an absent face is a no-op.
         assert!(pq.remove_face(&face(99)).is_empty());
         assert_eq!(pq.len(), 1);
@@ -520,7 +545,7 @@ mod tests {
         );
         assert_eq!(
             pq.remove_face(&face(11)),
-            vec![(face(3), 99, wz_session_core::sample::QosLevel::DEFAULT)],
+            vec![to(face(3), 99)],
             "the last branch's face-down drains the fan"
         );
         assert!(pq.is_empty());
@@ -553,17 +578,13 @@ mod tests {
                 ExpiredQuery {
                     out_face: face(10),
                     qid: q_soon,
-                    inbound: face(3),
-                    inbound_rid: 99,
-                    src_qos: wz_session_core::sample::QosLevel::DEFAULT,
+                    to: to(face(3), 99),
                     last: true, // single-branch fan
                 },
                 ExpiredQuery {
                     out_face: face(11),
                     qid: q_other,
-                    inbound: face(5),
-                    inbound_rid: 77,
-                    src_qos: wz_session_core::sample::QosLevel::DEFAULT,
+                    to: to(face(5), 77),
                     last: true,
                 },
             ],
@@ -571,7 +592,7 @@ mod tests {
         assert_eq!(pq.peek(face(10), q_soon), None, "soon entry reaped");
         assert_eq!(
             pq.peek(face(10), q_late),
-            Some((face(4), 88)),
+            Some(to(face(4), 88)),
             "late entry survives"
         );
         assert_eq!(pq.peek(face(11), q_other), None, "other-face soon reaped");
@@ -609,22 +630,44 @@ mod tests {
         assert!(pq.is_empty());
     }
 
-    /// R2595 — the fan carries its QUERY's QoS out through BOTH exits: the
-    /// timeout sweep and the face-down drain. Each exit builds the querier's
-    /// closing `ResponseFinal`, and neither can read the QoS off the fan once
-    /// the `Rc` is consumed, so a value that did not travel with the record
-    /// would silently become DEFAULT.
+    /// R2595 / R2906 — the fan carries its QUERY's QoS out through ALL FOUR
+    /// exits: the relayed Response (`peek`), the relayed final (`take`), the
+    /// timeout sweep and the face-down drain. Upstream answers every one of them
+    /// from `Query::src_qos`. R2595 wrote this test over the last two only, and
+    /// the first two were exactly the ones that did not carry it.
     ///
     /// A NON-DEFAULT QoS, deliberately: at DEFAULT this test would pass against
-    /// a `remove_face` that invented the value.
+    /// an exit that invented the value.
     #[test]
-    fn the_fan_carries_its_querys_qos_out_to_both_exits() {
+    fn the_fan_carries_its_querys_qos_out_through_every_exit() {
         use wz_session_core::qos::{CongestionControl, Priority};
         use wz_session_core::sample::QosLevel;
         let asked = QosLevel::from_parts(Priority::RealTime, CongestionControl::Block, true);
         assert_ne!(asked, QosLevel::DEFAULT);
+        let owed = |face: FaceId, rid: u64| QueryReturn {
+            face,
+            rid,
+            qos: asked,
+        };
 
-        // Exit 1 — the timeout sweep.
+        // Exits 1 and 2 — the relayed Response, then the relayed final.
+        let mut pq = PendingQueries::new();
+        let t = never(Instant::now());
+        let answering = QueryFan::new(face(2), 55, asked);
+        let qid = pq.allocate(face(12), &answering, t);
+        drop(answering);
+        assert_eq!(
+            pq.peek(face(12), qid),
+            Some(owed(face(2), 55)),
+            "a relayed Response is owed the query's QoS"
+        );
+        assert_eq!(
+            pq.take(face(12), qid),
+            Some((owed(face(2), 55), true)),
+            "a relayed final is owed the query's QoS"
+        );
+
+        // Exit 3 — the timeout sweep.
         let mut pq = PendingQueries::new();
         let base = Instant::now();
         let soon = base + Duration::from_millis(10);
@@ -634,19 +677,19 @@ mod tests {
         let reaped = pq.expired(base + Duration::from_millis(20));
         assert_eq!(reaped.len(), 1);
         assert_eq!(
-            reaped[0].src_qos, asked,
+            reaped[0].to,
+            owed(face(3), 99),
             "the sweep carries the query's QoS"
         );
 
-        // Exit 2 — the face-down drain.
+        // Exit 4 — the face-down drain.
         let mut pq = PendingQueries::new();
-        let t = never(Instant::now());
         let departing = QueryFan::new(face(4), 77, asked);
         pq.allocate(face(11), &departing, t);
         drop(departing);
         assert_eq!(
             pq.remove_face(&face(11)),
-            vec![(face(4), 77, asked)],
+            vec![owed(face(4), 77)],
             "the drain carries the query's QoS"
         );
     }

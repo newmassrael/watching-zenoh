@@ -423,7 +423,6 @@ use wz_session_core::request_build::set_request_keyexpr_literal;
 use wz_session_core::request_routing_context::{
     read_request_source, read_request_target, read_request_timeout_ms, set_request_source,
 };
-use wz_session_core::response_build::set_response_keyexpr_literal;
 
 /// R2866 (open-debt item 751, step 2) — the router's faces, planes and tables
 /// are keyed by the pin's [`Region`] now. The 1.5.0 `FaceTier` classifier
@@ -6791,18 +6790,20 @@ impl RouterForwarder {
                 None => return,
             }
         };
-        let Some((orig_face, orig_rid)) = self.pending.borrow().peek(inbound, response.request_id)
-        else {
+        let Some(to) = self.pending.borrow().peek(inbound, response.request_id) else {
             return;
         };
-        let mut carrier = response.clone();
-        carrier.request_id = orig_rid;
-        if let Some(ke) = &keyexpr {
-            if set_response_keyexpr_literal(&mut carrier, ke).is_err() {
-                return;
-            }
-        }
-        self.send_to_face(orig_face, reliable, || {
+        // R2906 — the shared relay step: rid, QoS and a literal keyexpr, all the
+        // querier's (upstream `route_send_response`).
+        let Ok(carrier) = wz_session_core::response_build::relay_response(
+            response,
+            to.rid,
+            to.qos,
+            keyexpr.as_deref(),
+        ) else {
+            return;
+        };
+        self.send_to_face(to.face, reliable, || {
             NetworkMessage::Response(Box::new(carrier.clone()))
         });
     }
@@ -6820,9 +6821,9 @@ impl RouterForwarder {
     /// `Arc::into_inner` gate in `finalize_pending_query`
     /// (`dispatcher/queries.rs:670`), which propagates `ResponseFinal { rid:
     /// query.src_qid }` to `query.src_face` only on the LAST branch's removal.
-    /// The forwarded final is rewritten to the recorded upstream rid and unicast
-    /// to the recorded inbound face (a ResponseFinal carries no keyexpr, so no B1
-    /// normalize). An unknown qid drops silently.
+    /// The querier's final is built from its query's recorded rid and QoS and
+    /// unicast to the recorded inbound face (R2906; the last answerer's final is
+    /// not copied). An unknown qid drops silently.
     fn forward_response_final(
         &self,
         inbound: FaceId,
@@ -6830,7 +6831,7 @@ impl RouterForwarder {
         response_final: &ResponseFinalOwned,
     ) {
         // TAKE the branch — frees the entry; `last` is the fan's last-out gate.
-        let Some((orig_face, orig_rid, last)) = self
+        let Some((to, last)) = self
             .pending
             .borrow_mut()
             .take(inbound, response_final.request_id)
@@ -6840,9 +6841,11 @@ impl RouterForwarder {
         if !last {
             return; // other branches of the fan still answering: absorb
         }
-        let mut carrier = response_final.clone();
-        carrier.request_id = orig_rid;
-        self.send_to_face(orig_face, reliable, || {
+        // R2906 — built from the query, not copied from the last answerer:
+        // upstream's `finalize_pending_query` sends a fresh
+        // `ResponseFinal { rid: query.src_qid, ext_qos: query.src_qos, .. }`.
+        let carrier = wz_session_core::response_final_build::build_response_final(to.rid, to.qos);
+        self.send_to_face(to.face, reliable, || {
             NetworkMessage::ResponseFinal(carrier.clone())
         });
     }
@@ -16383,6 +16386,84 @@ mod tests {
             NetworkMessage::Response(Box::new(straggler)),
         );
         assert_eq!(sink_a.frame_count(), 2, "a post-final Response drops");
+    }
+
+    /// R2906 — the router twin of the linkstate forwarder's
+    /// `a_relayed_reply_and_final_carry_the_querys_qos_not_the_answerers`: the
+    /// querier gets its OWN QoS back on the reply and on the final, as upstream's
+    /// `route_send_response` and `finalize_pending_query` stamp
+    /// `query.src_qos`. The router's relay is separate code, so it is witnessed
+    /// separately.
+    #[test]
+    fn a_relayed_reply_and_final_carry_the_querys_qos_not_the_answerers() {
+        use crate::session_glue::{parse_frame_payload, parse_inbound, InboundFrame};
+        use wz_session_core::declare_ext_qos::{read_response_final_qos, read_response_qos};
+        use wz_session_core::qos::{CongestionControl, Priority};
+        use wz_session_core::sample::QosLevel;
+        let asked = QosLevel::from_parts(Priority::RealTime, CongestionControl::Block, true);
+        let answered = QosLevel::from_parts(Priority::Background, CongestionControl::Drop, false);
+        let final_qos = |frame: &[u8]| {
+            let InboundFrame::Frame { payload, .. } = parse_inbound(frame).expect("parse frame")
+            else {
+                panic!("not a Frame");
+            };
+            match parse_frame_payload(&payload)
+                .expect("parse payload")
+                .into_iter()
+                .next()
+            {
+                Some(NetworkMessage::ResponseFinal(rf)) => read_response_final_qos(&rf),
+                other => panic!("expected a ResponseFinal, got {other:?}"),
+            }
+        };
+
+        let fwd = RouterForwarder::new(zid(0x01));
+        let (a, sink_a) = face(zid(0xAA), WIRE_ROUTER); // querier
+        let (c, sink_c) = face(zid(0xCC), WIRE_ROUTER); // queryable
+        fwd.register(FaceId(0), &a);
+        fwd.register(FaceId(1), &c);
+        advertise_link_back(&fwd, FaceId(0), 0x01, 0xAA, 5);
+        advertise_link_back(&fwd, FaceId(1), 0x01, 0xCC, 5);
+        fwd.tick();
+        forward_one(&fwd, FaceId(1), declare_qabl("demo/q", true));
+        sink_a.reset();
+        sink_c.reset();
+
+        let request =
+            wz_session_core::request_build::RequestQueryBuilder::new(99, 0, Some("demo/q"))
+                .request_qos(asked.raw)
+                .build()
+                .expect("build request");
+        forward_one(&fwd, FaceId(0), NetworkMessage::Request(Box::new(request)));
+        let qid = forwarded_request(&sink_c.frame_bytes(0)).rid;
+
+        let response = wz_session_core::response_build::ResponseReplyBuilder::new(
+            qid,
+            0,
+            Some("demo/q"),
+            b"hi",
+        )
+        .qos(answered)
+        .build()
+        .expect("build response");
+        forward_one(
+            &fwd,
+            FaceId(1),
+            NetworkMessage::Response(Box::new(response)),
+        );
+        assert_eq!(
+            read_response_qos(&forwarded_response(&sink_a.frame_bytes(0))),
+            asked,
+            "the relayed reply carries the query's QoS"
+        );
+
+        let rf = wz_session_core::response_final_build::build_response_final(qid, answered);
+        forward_one(&fwd, FaceId(1), NetworkMessage::ResponseFinal(rf));
+        assert_eq!(
+            final_qos(&sink_a.frame_bytes(1)),
+            asked,
+            "the relayed final carries the query's QoS"
+        );
     }
 
     #[test]
