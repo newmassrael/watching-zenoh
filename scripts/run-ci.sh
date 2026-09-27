@@ -8258,7 +8258,13 @@ layer_c1y_cargo_test_routing_peer() {
     # It carries the same `pubsub-delete` gate as the receive-side test named
     # above, so it counts in on this default-features arm and stays out of the
     # bare one below -- the pair this note already describes, one test wider.
-    _runci_guarded_test "C1y linkstate" 209 \
+    # R2904 209 -> 215, and on the two siblings below: R2901's three gateway
+    # data-route tests and R2902's three gateway query-route tests are ungated
+    # under routing-peer, so all three arms take all six. R2903's and R2904's
+    # broker tests need `routing-interest-pending-gc`, which none of the three
+    # arms carries. Pushed unpinned in R2901-R2902 (hosted C1y red on
+    # 36287043784 / 36287710413); read off `guarded_count_gate.py --range`.
+    _runci_guarded_test "C1y linkstate" 215 \
         cargo test -p wz-runtime-tokio --features routing-peer --lib linkstate --quiet || return 1
     # R311y513 — the BARE routing peer, and the pin that would have caught the
     # defect this round fixed. Every arm above passes `--features routing-peer`
@@ -8273,7 +8279,8 @@ layer_c1y_cargo_test_routing_peer() {
     # need the access set, which bare routing-peer does not pull.
     # R2614 202 -> 203: the unrestricted-interest witness is ungated, so it lands
     # here exactly as the sibling comment above predicts.
-    _runci_guarded_test "C1y linkstate bare" 205 \
+    # R2904 205 -> 211, the six above.
+    _runci_guarded_test "C1y linkstate bare" 211 \
         cargo test -p wz-runtime-tokio --no-default-features --features routing-peer \
         --lib linkstate --quiet || return 1
     # R311y451 — 10 -> 16: the six low-pass fidelity tests (attachment in the
@@ -8401,7 +8408,8 @@ layer_c1y_cargo_test_routing_peer() {
     # `pubsub-delete`; they move together and a round that moved only one would
     # be reporting that the access subset changes what a Del origination test
     # sees, which it does not.
-    _runci_guarded_test "C1y linkstate+access" 220 \
+    # R2904 220 -> 226, the same six.
+    _runci_guarded_test "C1y linkstate+access" 226 \
         cargo test -p wz-runtime-tokio --features "$access" --lib linkstate --quiet || return 1
     # R2567 — the three usrpwd counts move together because ONE structure landed
     # under them: the shared credential store that closed `access-extauth-usrpwd`.
