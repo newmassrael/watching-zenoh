@@ -1924,16 +1924,6 @@ pub mod routing_region;
 #[cfg(any(feature = "transport-unicast", feature = "transport-multicast"))]
 pub mod node_stats;
 
-/// R311qc — the data-plane forwarding atom: the [`routing_forward::RoutingForwarder`]
-/// that backs the [`accept_loop`]'s `FaceForwarder` seam with the
-/// [`wz_session_core::routing::RouteTable`] kernel, turning a held face into a
-/// route (a Put on one face forwarded to every other face that declared a
-/// matching subscriber). Gated on `routing-routes` (which pulls `routing-accept`
-/// + the kernel + the Push / DeclareSubscriber codecs); the hold-only
-/// foundation builds without it (it uses `accept_loop::NoOpForwarder`).
-#[cfg(feature = "routing-routes")]
-pub mod routing_forward;
-
 /// P4 linkstate-peer routing — the driver (step c3) that connects the
 /// topology graph (the [`wz_routing_graph`] crate, lifted out of this
 /// runtime crate in R311qw) to the accept/peer-loop face lifecycle: a

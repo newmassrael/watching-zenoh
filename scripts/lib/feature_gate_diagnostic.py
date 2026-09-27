@@ -305,6 +305,11 @@ NO_PUBLIC_PATH: dict[str, dict[str, str]] = {
             # `reconfigure_connect_endpoints` beside it. ⚠ Unlike R2571 this did
             # NOT go unnoticed for a round: the census refused the push that
             # introduced it, which is the behaviour the note above wanted.
+            # R2912 — `routing-routes` gates NO item at all now: it names the
+            # routes the mesh forwarders compute, delivered whole by
+            # `routing-peer`, since the `routing_forward` module it gated was
+            # retired with the `RouteTable` engine.
+            "routing-routes",
             "storage-history",
             "storage-mgr-complete-flag",
             "storage-mgr-strip-prefix",
@@ -449,6 +454,8 @@ DEFERRED: dict[str, dict[str, str]] = {
             "a path; there is no resolution error for rustc to annotate"
         ),
     },
+    # R2912 — sixteen now: `routing-routes` left this package with the
+    # `RouteTable` engine it gated, so it has no site here to agree with.
     # R2207 — the seventeen this package's own features landed on when the axis
     # took it. NOT written from a reading: the row was left EMPTY, the census
     # was run, and it named exactly these seventeen as decided nowhere. Their
@@ -472,7 +479,6 @@ DEFERRED: dict[str, dict[str, str]] = {
                 "codec-linkstate",
                 "codec-scout",
                 "declare-undeclare",
-                "routing-routes",
                 "session-matching",
             )
         },

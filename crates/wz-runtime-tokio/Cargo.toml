@@ -1047,25 +1047,17 @@ transport-link-udp-reliable = ["transport-link-quic", "transport-link-udp", "dep
 # `routing-accept` test lane (run-ci Layer C1w) and the facade `routing-router`
 # preset select it.
 routing-accept = ["transport-link-tcp", "transport-unicast", "dep:futures-util"]
-# R311qc — the data-plane forwarding atom: gates `pub mod routing_forward`
-# (lib.rs) — the `RoutingForwarder` that backs the `accept_loop`'s
-# `FaceForwarder` seam with the `wz-session-core` `routing::RouteTable`. Pulls
-# the accept-and-hold foundation it forwards on top of (`routing-accept`), the
-# kernel (`wz-session-core/routing-routes`), and the Push / DeclareSubscriber
-# codecs the forward + route-build read (`codec-push` / `declare-subscriber`).
-# Off by default; the facade `routing-routes` preset and the run-ci forwarding
-# lanes select it.
-routing-routes = [
-    "routing-accept",
-    "wz-session-core/routing-routes",
-    "codec-push",
-    "declare-subscriber",
-    # R311y840 — the query half (see the session-core feature's own note).
-    "declare-queryable",
-    "codec-request",
-    "codec-response",
-    "codec-response-final",
-]
+# R2912 — the routes a node computes: data and query routes per source, cached
+# until a table they read changes (`route_cache`, the mesh forwarders' route
+# cores). Upstream computes and caches them inside every hat, which is why this
+# is not a toggle: a routing node that computed no routes would forward
+# nothing. So the feature is DELIVERED WHOLE by the mesh forwarders it names,
+# and gates no code of its own. Until R2912 it gated `routing_forward` and the
+# session-core `routing::RouteTable`, the single-hop star engine that no
+# run-mode had built since R2886 made `--router` spell `--router-hat`; that
+# engine duplicated routing rules the hats carry (R2906 had to fix one relay
+# rule in three places), and it is retired.
+routing-routes = ["routing-peer"]
 # R311qg — routing-peer atom 1: the dial+accept mesh-node foundation. Gates the
 # `peer_loop` entry in `accept_loop` — a node that DIALS a configured peer set
 # AND accepts inbound, holding both in one face set. Reuses the ENTIRE

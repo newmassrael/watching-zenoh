@@ -544,13 +544,13 @@ pub enum AcceptEvent {
 /// `drive_session_until_terminal` observer), and it left the set
 /// ([`deregister`](Self::deregister)).
 ///
-/// The hold-only path (the `routing-router` foundation with no `routing-routes`
-/// forwarding) passes [`NoOpForwarder`]; the `routing-routes` atom passes a
-/// forwarder backed by the [`RouteTable`](wz_session_core::routing::RouteTable)
-/// (see [`crate::routing_forward`]). Taken as `&dyn` so the loop carries one
-/// concrete future type in its [`FuturesUnordered`] regardless of which
-/// forwarder is wired, and `!Send` is fine — the whole loop is single-task.
-/// A future routing-peer reuses this same seam.
+/// The hold-only path passes [`NoOpForwarder`]; a routing node passes one of
+/// the mesh forwarders (the peer's `LinkstateForwarder`, the router hat's
+/// `RouterForwarder`). R2912 retired the third, the single-hop star engine
+/// over session-core's `RouteTable`, which no run-mode had built since R2886.
+/// Taken as `&dyn` so the loop carries one concrete future type in its
+/// [`FuturesUnordered`] regardless of which forwarder is wired, and `!Send` is
+/// fine — the whole loop is single-task.
 pub trait FaceForwarder {
     /// A face reached Established and entered the live set. `actions` is its
     /// transport send seam; a forwarder that routes clones it (an `Arc`) so it

@@ -1153,7 +1153,12 @@ CITATION = re.compile(r"\b((?:[A-Za-z0-9_.-]+/)*[A-Za-z0-9_.-]+\.(?:rs|c|h))(?::
 # the finalized withhold), each witnessed against a stock zenohd, the withhold
 # with a red control. UNREACHED and NO_SYMBOL hold at 2 and 2. READ off the
 # census's own FAIL line, `reached: 7 against a pin of 8`.
-PIN_REACHED = 7
+# R2912 — 7 -> 6. `routing-routes` leaves PARTIAL for FOUNDATIONAL: its route
+# cache residual is built on both mesh forwarders (R2908-R2911) and the engine
+# its feature gated is retired (R2912), so the feature gates no code of its
+# own. UNREACHED and NO_SYMBOL hold at 2 and 2. READ off the census's own FAIL
+# line, `reached: 6 against a pin of 7`.
+PIN_REACHED = 6
 PIN_UNREACHED = 2
 PIN_NO_SYMBOL = 2
 # R2534 — 346 -> 347. The atom is `adminspace-metrics` and the citation is the
@@ -2243,7 +2248,12 @@ PIN_NO_SYMBOL = 2
 # anchors of the relay-QoS build (`QueryReturn`, `relay_response`,
 # `set_response_qos`), and it is still PARTIAL, so they enter the census. READ
 # off the census's own FAIL line, `wz citations: 35 against a pin of 32`.
-PIN_WZ_CITATIONS = 35
+#
+# R2912 — 35 -> 23, one atom. `routing-routes` left PARTIAL (FOUNDATIONAL:
+# its residual built R2908-R2911, its engine retired R2912), and its twelve wz
+# citations leave the census with it. READ off the census's own FAIL line, `wz
+# citations: 23 against a pin of 35`.
+PIN_WZ_CITATIONS = 23
 # R2626 — 44 -> 42, and this one is worth a sentence because it HELD through
 # every earlier retirement in this run (R2612, R2622). `time-hlc`'s reason is the
 # first retiree carrying AMBIGUOUS citations of its own: its oldest clauses cite

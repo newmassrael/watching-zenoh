@@ -23,8 +23,8 @@
 //! [`FaceForwarder`](crate::accept_loop::FaceForwarder) trait is the same
 //! multi-hat seam expressed without type erasure: each forwarder owns TYPED
 //! self-state, and the run-mode selects the concrete forwarder. The router is
-//! the fourth such type alongside `NoOpForwarder`, `RoutingForwarder`, and
-//! `LinkstateForwarder`.
+//! the third such type alongside `NoOpForwarder` and `LinkstateForwarder`
+//! (R2912 retired a fourth, the single-hop `RoutingForwarder`).
 //!
 //! ## Slice 1a (topology STATE)
 //!
@@ -968,12 +968,15 @@ fn remove_from_face<M: FaceStore, R>(
 
 /// R2909 — a broker-hat store read as its per-face map, whether it is kept
 /// plain or [`Versioned`] (the subscriber store is, because a route is cached
-/// against it). The views fold every store through this one read.
+/// against it). The views fold every store through this one read, so it is
+/// gated as they are.
+#[cfg(feature = "adminspace-introspection-handlers")]
 trait FaceMap {
     type Entry;
     fn faces(&self) -> &HashMap<FaceId, Self::Entry>;
 }
 
+#[cfg(feature = "adminspace-introspection-handlers")]
 impl<T> FaceMap for HashMap<FaceId, T> {
     type Entry = T;
     fn faces(&self) -> &HashMap<FaceId, T> {
@@ -981,6 +984,7 @@ impl<T> FaceMap for HashMap<FaceId, T> {
     }
 }
 
+#[cfg(feature = "adminspace-introspection-handlers")]
 impl<T> FaceMap for Versioned<HashMap<FaceId, T>> {
     type Entry = T;
     fn faces(&self) -> &HashMap<FaceId, T> {
@@ -18185,6 +18189,286 @@ mod tests {
             0,
             "an aliased id-only mcast-ingress Push has no per-peer alias table (I1) \
              and is dropped, not mis-delivered"
+        );
+    }
+
+    // ── R2912 — ported from the retired `RoutingForwarder` engine ──
+    //
+    // Register item 829's sort (R2907) found seven behaviours the router hat
+    // implements that only the retired engine's C1x cases witnessed. Each is
+    // ported here onto the hat, with its original name and scenario; retiring
+    // the engine without them would have dropped the only proof of code the
+    // product runs.
+
+    /// Every `Declare` a sink recorded, in order (frames that are not a Declare
+    /// -- link-state, pushes -- are skipped).
+    fn recorded_declares(sink: &RecordingLinkDriver) -> Vec<DeclareOwned> {
+        use crate::session_glue::{parse_frame_payload, parse_inbound, InboundFrame};
+        (0..sink.frame_count())
+            .filter_map(|i| {
+                let Ok(InboundFrame::Frame { payload, .. }) = parse_inbound(&sink.frame_bytes(i))
+                else {
+                    return None;
+                };
+                match parse_frame_payload(&payload).ok()?.into_iter().next() {
+                    Some(NetworkMessage::Declare(d)) => Some(*d),
+                    _ => None,
+                }
+            })
+            .collect()
+    }
+
+    /// Every `Request` a sink recorded, as (the keyexpr id, its literal
+    /// suffix); frames that are not a Request are skipped.
+    fn recorded_request_keyexprs(sink: &RecordingLinkDriver) -> Vec<(u64, Option<String>)> {
+        use crate::session_glue::{parse_frame_payload, parse_inbound, InboundFrame};
+        (0..sink.frame_count())
+            .filter_map(|i| {
+                let Ok(InboundFrame::Frame { payload, .. }) = parse_inbound(&sink.frame_bytes(i))
+                else {
+                    return None;
+                };
+                match parse_frame_payload(&payload).ok()?.into_iter().next() {
+                    Some(NetworkMessage::Request(r)) => Some(*r),
+                    _ => None,
+                }
+            })
+            .map(|r| match &r.keyexpr.body {
+                WireexprOwnedVariant::WireexprLocal(a) => {
+                    (a.id, a.suffix.as_deref().map(str::to_owned))
+                }
+                WireexprOwnedVariant::WireexprNonlocal(a) => {
+                    (a.id, a.suffix.as_deref().map(str::to_owned))
+                }
+            })
+            .collect()
+    }
+
+    fn client_qabl(fwd: &RouterForwarder, face: u64, id: u64, keyexpr: &str, complete: bool) {
+        use wz_session_core::declare_build::build_declare_queryable_with_id_info;
+        let info = QueryableInfo {
+            complete,
+            distance: 0,
+        };
+        forward_one(
+            fwd,
+            FaceId(face),
+            NetworkMessage::Declare(Box::new(
+                build_declare_queryable_with_id_info(id, keyexpr, info).expect("declare qabl"),
+            )),
+        );
+    }
+
+    /// Ported: a face whose interest names SUBSCRIBERS is not told about a
+    /// token, and the face that asked for TOKENS is -- the router rule
+    /// (`hat/router/token.rs` gathers `remote_interests` filtered by
+    /// `options.tokens()`), not the client rule of telling every face.
+    #[cfg(feature = "routing-token-tables")]
+    #[test]
+    fn a_face_that_never_asked_for_tokens_is_told_nothing() {
+        let fwd = RouterForwarder::new(zid(0x01));
+        let (holder, _sh) = face(zid(0xAA), WIRE_CLIENT);
+        let (bystander, sink_b) = face(zid(0xBB), WIRE_CLIENT);
+        let (observer, sink_o) = face(zid(0xCC), WIRE_CLIENT);
+        fwd.register(FaceId(0), &holder);
+        fwd.register(FaceId(1), &bystander);
+        fwd.register(FaceId(2), &observer);
+        // The right keyexpr, the wrong KIND: the gate is on the kind bit.
+        forward_one(
+            &fwd,
+            FaceId(1),
+            interest_with_mode(8, "group/**", false, true, true, false, false),
+        );
+        forward_one(
+            &fwd,
+            FaceId(2),
+            token_interest_msg(4, "group/**", false, true, false),
+        );
+        sink_b.reset();
+        sink_o.reset();
+        forward_one(
+            &fwd,
+            FaceId(0),
+            declare_client_token_msg(77, "group/member/a"),
+        );
+        let is_token =
+            |d: &DeclareOwned| matches!(d.body, DeclareOwnedVariant::CodecZenohDeclToken(_));
+        assert!(
+            !recorded_declares(&sink_b).iter().any(is_token),
+            "a face that asked for SUBSCRIBERS is not told about a token"
+        );
+        assert!(
+            recorded_declares(&sink_o).iter().any(is_token),
+            "the face that asked for TOKENS is, so the assertion above is not \
+             grading a router that tells nobody"
+        );
+    }
+
+    /// Ported: a CURRENT subscriber interest whose keyexpr names an alias the
+    /// face never declared is still terminated by one Final under its id.
+    #[test]
+    fn a_current_interest_on_an_unresolvable_alias_is_still_terminated() {
+        let fwd = RouterForwarder::new(zid(0x01));
+        let (client, sink_c) = face(zid(0xCC), WIRE_CLIENT);
+        fwd.register(FaceId(0), &client);
+        let NetworkMessage::Interest(mut interest) = interest_msg(5, "ignored", true, false, false)
+        else {
+            unreachable!("interest_msg builds an Interest");
+        };
+        if let Some(body) = interest.body.as_mut() {
+            body.keyexpr = Some(WireexprOwned {
+                body: WireexprOwnedVariant::WireexprLocal(WireexprLocalOwned {
+                    id: 77,
+                    suffix_len: None,
+                    suffix: None,
+                }),
+            });
+        }
+        sink_c.reset();
+        forward_one(&fwd, FaceId(0), NetworkMessage::Interest(interest));
+        let replies = recorded_declares(&sink_c);
+        assert_eq!(replies.len(), 1, "terminated, not dropped: {replies:?}");
+        assert!(matches!(
+            replies[0].body,
+            DeclareOwnedVariant::CodecZenohDeclFinal(_)
+        ));
+        assert_eq!(replies[0].interest_id, Some(5));
+    }
+
+    /// Ported: a Put on a keyexpr ending in `/` is malformed and reaches no
+    /// face, not even a `**` subscriber; the same subscriber receives the
+    /// well-formed key, so the drop is the trailing slash.
+    #[test]
+    fn drops_a_put_on_a_trailing_slash_keyexpr() {
+        let fwd = RouterForwarder::new(zid(0x01));
+        let (consumer, sink_c) = face(zid(0xCC), WIRE_CLIENT);
+        let (producer, _sp) = face(zid(0xAA), WIRE_CLIENT);
+        fwd.register(FaceId(0), &consumer);
+        fwd.register(FaceId(1), &producer);
+        forward_one(
+            &fwd,
+            FaceId(0),
+            NetworkMessage::Declare(Box::new(
+                build_declare_subscriber(1, 0, Some("home/**")).expect("declare"),
+            )),
+        );
+        let put = |ke: &str| {
+            let push =
+                wz_session_core::push_build::build_push_literal(ke, b"v").expect("build push");
+            forward_one(&fwd, FaceId(1), NetworkMessage::Push(Box::new(push)));
+        };
+        sink_c.reset();
+        put("home/temp/");
+        assert_eq!(
+            sink_c.frame_count(),
+            0,
+            "a trailing-slash keyexpr reaches no face"
+        );
+        put("home/temp");
+        assert_eq!(sink_c.frame_count(), 1, "the well-formed key does");
+    }
+
+    /// Ported: an aliased query reaches the queryable as a LITERAL keyexpr,
+    /// since the destination never saw the querier's `DeclareKeyExpr`.
+    #[test]
+    fn re_literalizes_an_aliased_query_for_a_face_that_never_saw_the_alias() {
+        let fwd = RouterForwarder::new(zid(0x01));
+        let (host, sink_h) = face(zid(0xCC), WIRE_CLIENT);
+        let (querier, _sq) = face(zid(0xAA), WIRE_CLIENT);
+        fwd.register(FaceId(0), &host);
+        fwd.register(FaceId(1), &querier);
+        client_qabl(&fwd, 0, 7, "demo/**", false);
+        forward_one(
+            &fwd,
+            FaceId(1),
+            NetworkMessage::Declare(Box::new(
+                wz_session_core::declare_build::build_declare_kexpr(9, "demo/example")
+                    .expect("decl kexpr"),
+            )),
+        );
+        sink_h.reset();
+        let request = wz_session_core::request_build::build_request_query(42, 9, None)
+            .expect("aliased query request");
+        forward_one(&fwd, FaceId(1), NetworkMessage::Request(Box::new(request)));
+        assert_eq!(
+            recorded_request_keyexprs(&sink_h),
+            vec![(0, Some("demo/example".to_owned()))],
+            "the aliased query reached the queryable as a literal it can resolve"
+        );
+    }
+
+    /// Ported: a face that asked for nothing is told nothing about a
+    /// queryable -- telling every face is the client rule, not the router's.
+    #[test]
+    fn a_face_that_never_asked_for_queryables_is_told_nothing() {
+        let fwd = RouterForwarder::new(zid(0x01));
+        let (holder, _sh) = face(zid(0xAA), WIRE_CLIENT);
+        let (quiet, sink_q) = face(zid(0xBB), WIRE_CLIENT);
+        fwd.register(FaceId(0), &holder);
+        fwd.register(FaceId(1), &quiet);
+        sink_q.reset();
+        client_qabl(&fwd, 0, 7, "demo/example", true);
+        assert!(
+            recorded_declares(&sink_q).is_empty(),
+            "an uninterested face heard nothing"
+        );
+        assert_eq!(fwd.queryables_seen(), 1, "but the router recorded it");
+    }
+
+    /// Ported: a queryable complete for `demo/a` is not complete for a query on
+    /// `demo/*` it only intersects, so BestMatching degrades to All; asked for
+    /// `demo/a`, the same declaration answers alone.
+    #[test]
+    fn a_complete_queryable_that_only_intersects_the_query_is_not_complete_for_it() {
+        for (query, narrow_alone) in [("demo/*", false), ("demo/a", true)] {
+            let fwd = RouterForwarder::new(zid(0x01));
+            let (narrow, sink_n) = face(zid(0xAA), WIRE_CLIENT);
+            let (wide, sink_w) = face(zid(0xBB), WIRE_CLIENT);
+            let (querier, _sq) = face(zid(0xCC), WIRE_CLIENT);
+            fwd.register(FaceId(0), &narrow);
+            fwd.register(FaceId(1), &wide);
+            fwd.register(FaceId(2), &querier);
+            client_qabl(&fwd, 0, 7, "demo/a", true);
+            client_qabl(&fwd, 1, 8, "demo/**", false);
+            sink_n.reset();
+            sink_w.reset();
+            forward_one(&fwd, FaceId(2), request_best(42, query));
+            assert_eq!(
+                sink_n.frame_count(),
+                1,
+                "{query}: the narrow queryable is asked"
+            );
+            assert_eq!(
+                sink_w.frame_count(),
+                usize::from(!narrow_alone),
+                "{query}: the wide one only when the narrow is not complete for it"
+            );
+        }
+    }
+
+    /// Ported: BestMatching never selects the querier's own queryable, even the
+    /// only complete one; the source face is excluded before completeness.
+    #[test]
+    fn a_best_matching_query_never_selects_the_queriers_own_queryable() {
+        let fwd = RouterForwarder::new(zid(0x01));
+        let (querier, sink_q) = face(zid(0xAA), WIRE_CLIENT);
+        let (other, sink_o) = face(zid(0xBB), WIRE_CLIENT);
+        fwd.register(FaceId(0), &querier);
+        fwd.register(FaceId(1), &other);
+        client_qabl(&fwd, 0, 7, "demo/**", true);
+        client_qabl(&fwd, 1, 8, "demo/**", false);
+        sink_q.reset();
+        sink_o.reset();
+        forward_one(&fwd, FaceId(0), request_best(42, "demo/example"));
+        assert_eq!(
+            recorded_request_keyexprs(&sink_q).len(),
+            0,
+            "a query is never routed back to its source"
+        );
+        assert_eq!(
+            sink_o.frame_count(),
+            1,
+            "so the other face is the only candidate, by the All fallback"
         );
     }
 }

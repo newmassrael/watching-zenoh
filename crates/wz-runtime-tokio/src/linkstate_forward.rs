@@ -25,7 +25,7 @@
 //! re-send — but the spanning-tree RECOMPUTE each change triggers IS coalesced on
 //! a debounce timer (D2c, below), not run inline.
 //!
-//! Single-task model: like [`RoutingForwarder`](crate::routing_forward),
+//! Single-task model: like every [`FaceForwarder`](crate::accept_loop::FaceForwarder),
 //! the whole loop is one `!Send` task, so the graph is held behind a plain
 //! `Rc<RefCell<…>>` — no `Mutex`, no `Send` bound. Each handler borrows
 //! the cell only for its own synchronous duration, never across an
@@ -233,9 +233,8 @@ pub use wz_session_core::link::{InterceptorLink, LinkSubject};
 // has to be nameable by the caller), and that re-export is this import too.
 
 /// A [`FaceForwarder`] that maintains the [`LinkstateNetwork`] topology
-/// graph from the face lifecycle + inbound `OAM_LINKSTATE` messages. The
-/// linkstate-peer counterpart to the data-plane
-/// [`RoutingForwarder`](crate::routing_forward).
+/// graph from the face lifecycle + inbound `OAM_LINKSTATE` messages: the
+/// peer's forwarder, beside the router hat's `RouterForwarder`.
 /// Per-face state the forwarder keeps for each held face: the send seam to
 /// flood TO the face and, once the face's routing identity (zid) is known, the
 /// graph link it maps to for ingest. One [`FaceId`]-keyed map of these (rather
@@ -386,7 +385,7 @@ pub struct LinkstateForwarder {
     /// to" and "which graph link did this list arrive on".
     faces: RefCell<HashMap<FaceId, FaceState>>,
     /// Running total of link-state lists ingested — the control-plane work
-    /// witness (the linkstate analogue of `RoutingForwarder::forwarded`).
+    /// witness.
     ingested: Cell<usize>,
     /// Running total of data `Push` messages received on a face — the
     /// data-plane reception witness. A far peer's count rising above zero is

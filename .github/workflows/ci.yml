@@ -3971,7 +3971,7 @@ jobs:
         run: bash scripts/run-ci.sh --layer C1w
       - name: Layer C1y — routing-peer + access-* + extauth
         run: bash scripts/run-ci.sh --layer C1y
-      - name: Layer C1x — routing-routes forward tables
+      - name: Layer C1x — routing-routes route cache
         run: bash scripts/run-ci.sh --layer C1x
       - name: Layer C1ax — routing-namespace
         run: bash scripts/run-ci.sh --layer C1ax

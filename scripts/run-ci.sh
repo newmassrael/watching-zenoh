@@ -5857,9 +5857,16 @@ layer_c1ay_cargo_test_router_hat() {
     # the lowest-face tie among complete client queryables. Read off
     # `guarded_count_gate.py --range 8d682efc..d75cc55e`, which reported these
     # eight red by exactly four each.
-    _runci_guarded_test "C1AY router_forward 165" 165 \
+    # R2912 — ALL EIGHT arms +10, the token-tables arm +11. Four are the route
+    # cache witnesses R2908-R2911 pushed while count guards were deferred to
+    # hosted (one per round: mesh legs, client leg, query route, client query
+    # leg), so their hosted C1ay runs read these guards red; six are the
+    # UNGATED witnesses ported from the retired `RoutingForwarder` engine, and
+    # the seventh port is gated on `routing-token-tables`. Each arm read off its
+    # own command with `-- --list`: 175 177 194 180 183 217 175 177.
+    _runci_guarded_test "C1AY router_forward 175" 175 \
         cargo test -p wz-runtime-tokio --features routing-router-hat --lib router_forward --quiet || return 1
-    _runci_guarded_test "C1AY router_forward 167" 167 \
+    _runci_guarded_test "C1AY router_forward 177" 177 \
         cargo test -p wz-runtime-tokio --features routing-router-hat,transport-qos --lib router_forward --quiet || return 1
     # R2734 — THE EIGHTH ARM, and it exists because the seven above cannot see
     # this round's third test. `a_group_query_reaches_a_client_hosted_queryable`
@@ -5868,7 +5875,7 @@ layer_c1ay_cargo_test_router_hat() {
     # resolves to `FaceForwarder`'s no-op default. No arm here pulled the atom's
     # own feature, so the witness would have existed while no lane ran it --
     # "a test exists" and "a lane runs it" being different facts.
-    _runci_guarded_test "C1AY router_forward mcast-faces 184" 184 \
+    _runci_guarded_test "C1AY router_forward mcast-faces 194" 194 \
         cargo test -p wz-runtime-tokio --features routing-router-hat,router-multicast-faces --lib router_forward --quiet || return 1
     # R2346 — 140 -> 141, and ONLY this arm moves: the added test is
     # `#[cfg(feature = "access-acl")]`, so the five sibling resolutions that do
@@ -5889,7 +5896,7 @@ layer_c1ay_cargo_test_router_hat() {
     # unattributable message, which would strand a face that has merely not
     # finished its handshake. Still `#[cfg(feature = "access-acl")]`, so the
     # five sibling resolutions are unchanged for R2346's reason.
-    _runci_guarded_test "C1AY router_forward 170" 170 \
+    _runci_guarded_test "C1AY router_forward 180" 180 \
         cargo test -p wz-runtime-tokio --features routing-router-hat,access-acl --lib router_forward --quiet || return 1
     # R2348 — a NEW arm, and it exists because without it this round's central
     # tests would have been compiled out while the lane stayed green. The router
@@ -5907,7 +5914,7 @@ layer_c1ay_cargo_test_router_hat() {
     # before the cache is consulted (the same vacuity that made R311y508's first
     # cross-impl leg prove nothing), so a cache test with no policy installed
     # tests nothing.
-    _runci_guarded_test "C1AY router_forward hotreload 173" 173 \
+    _runci_guarded_test "C1AY router_forward hotreload 183" 183 \
         cargo test -p wz-runtime-tokio --features routing-router-hat,routing-interceptor-hotreload,access-acl --lib router_forward --quiet || return 1
     # R311y464 — 171 -> 173: y463 added token_current_future_interest_replies_with_a
     # _client_token and token_current_future_interest_matches_a_wildcard_target, both
@@ -5917,13 +5924,13 @@ layer_c1ay_cargo_test_router_hat() {
     # added three token-plane filter witnesses, all cfg(routing-token-tables).
     # Read off `guarded_count_gate.py --range 515c085f..09b18118`, which reported
     # this arm red and the other twenty-seven it reached OK.
-    _runci_guarded_test "C1AY router_forward 206" 206 \
+    _runci_guarded_test "C1AY router_forward 217" 217 \
         cargo test -p wz-runtime-tokio --features routing-router-hat,routing-token-tables --lib router_forward --quiet || return 1
     # R2415 — 146 -> 140. NOT this round's tests: `d7cd078f` re-gated the mcast
     # egress plane from `transport-multicast` onto `router-multicast-faces`, so six
     # tests that ran in this broad-feature lane now need the atom and no longer
     # appear here. The number moves because the plane correctly is not there.
-    _runci_guarded_test "C1AY router_forward 165" 165 \
+    _runci_guarded_test "C1AY router_forward 175" 175 \
         cargo test -p wz-runtime-tokio --features routing-router-hat,transport-multicast --lib router_forward --quiet || return 1
     # R2636 — 143 -> 144, and ONLY this arm of the seven moves. The added test
     # renders the router's `sessions[]` table and is `#[cfg(feature =
@@ -5936,7 +5943,7 @@ layer_c1ay_cargo_test_router_hat() {
     # command itself, after that round's full sweep STALLED with an empty log on a
     # machine at load 37 — so the one guard predicted to move and the one predicted
     # NOT to (`C1AM adminspace`, still 33) were each run directly instead.
-    _runci_guarded_test "C1AY router_forward 167" 167 \
+    _runci_guarded_test "C1AY router_forward 177" 177 \
         cargo test -p wz-runtime-tokio --features routing-router-hat,adminspace-router-linkstate --lib router_forward --quiet || return 1
     # R311y786 (§5.21 router-connect-reconcile) — the re-dial BACKOFF. Until y786
     # the loop slept a `const RECONNECT_BACKOFF_MS = 1000`, so an unreachable
@@ -8109,67 +8116,38 @@ layer_c1bm_cargo_test_pico_failfast() {
     _runci_lane_did C1bm "$total" "fail-fast listen test(s) over 2 link(s), each clippy-gated"
 }
 
-# ─── Layer C1x — routing-routes: forwarding kernel + forwarder unit + clippy ─
+# ─── Layer C1x — routing-routes: the route cache the forwarders compute through ─
 #
-# R311qc: the data-plane forwarding atom (`routing::RouteTable` kernel +
-# `routing_forward::RoutingForwarder`) is gated on the off-default
-# `routing-routes` feature, so the default Layer C1 does NOT compile it — this
-# lane restores its coverage, mirroring C1w for `routing-accept`:
-#   1. clippy-gates the GENERIC kernel in wz-session-core (it compiles + lints
-#      for the generic `<R, T>`). The kernel's BEHAVIOR is exercised in step 2,
-#      not here: its forward path needs a concrete `SessionLinkActions`, which
-#      only the tokio profile constructs (the test-support dev-dep-cycle keeps
-#      actions tokio-side, see feedback-test-support-dev-dep-cycle), so the
-#      kernel is tested transitively through the Tokio monomorphization.
-#   2. runs the forwarder unit suite (forward / no-match / fan-out / src-skip /
-#      undeclare / face-leave / wildcard / cross-talk / best-effort / Del, plus
-#      R311qd aliased: drop-without-mapping / resolve-after-declare /
-#      re-literalize / per-push-suffix concat / undeclare-keyexpr) under
-#      `--features routing-routes`;
-#   3. clippy-gates the `routing-routes` cfg (`--all-targets`);
-#   4. clippy-gates the LIB under `--no-default-features --features routing-routes`
-#      to prove the forwarder composes standalone (routing-routes pulls
-#      routing-accept + the kernel + codec-push + declare-subscriber).
-# The demo-binary forwarding e2e is Layer E5 (separate, --features routing-routes).
-# R311y224: the `routing-routes,transport-qos` arm additionally RUNS the switchboard
-# band-preservation test (forward_push_preserves_the_received_band_on_transit,
-# `#[cfg(feature="transport-qos")]`-gated) + clippy-gates the transport-qos cfg — the
-# switchboard twin of the router/linkstate transit band lanes (RouteTable::forward_push
-# now routes through send_network_message_qos on the received FramePayload.priority).
+# R2912 — this lane ran the 62/63 unit cases of the single-hop star engine
+# (`routing::RouteTable` + `routing_forward::RoutingForwarder`). No run-mode had
+# built that engine since R2886 made `--router` spell `--router-hat`, and R2912
+# retired it; its history is in the ledger (R311qc through R2906). The
+# `routing-routes` feature is now the routes the mesh forwarders compute and
+# cache (`route_cache` + the forwarders' route cores), delivered whole by
+# `routing-peer`, so this lane runs THOSE witnesses:
+#   * the cache's own contract (`route_cache::`);
+#   * each leg served until a table it reads changes, then recomputed and new:
+#     data (mesh + client), query (mesh + client), on the peer and, in the
+#     second arm, on the router hat;
+#   * the bound (an undeclared expression is never kept; a declared id is a
+#     resource, a suffix past it is not) and the relay's timeout Err naming
+#     its silent face.
+# Filters are libtest substrings, OR'ed; the counts were read off
+# `cargo test ... -- --list` with these exact filters (11 and 15), and the
+# router arm's +4 are the four `router_forward` witnesses. Written out in both
+# commands rather than in a variable, so the count gates can read them.
 layer_c1x_cargo_test_routing_routes() {
-    # R311y766 (carry N39) — 24 -> 25 and 25 -> 26: `the_relay_emits_no_alias_of_its_own`,
-    # the guard that binds the premise routing.rs's peer-only resolve rests on.
-    # R311y773: 25/26 -> 29/30. Four cases landed with the CURRENT-interest
-    # termination fix, none of them gated on transport-qos, so both counts move
-    # by the same +4 -- an unequal delta would mean a case is accidentally gated.
-    # R311y803: 29/30 -> 37/38. Eight cases landed with the LIVELINESS plane
-    # (advertise, interest gate, CURRENT dump, retraction by advertised id, the
-    # face-departure retraction, the second-holder guard, and both sourced
-    # forms), again none of them gated on transport-qos, so again +8 on both.
-    # R311y840: 37/38 -> 51/52. Fourteen cases landed with the QUERY plane (the
-    # fan-out, the minted request id, re-literalization, the empty-route final,
-    # the reply return path, the one-final rule, undeclare, face departure, the
-    # self-query guard, the cross-face reply refusal, and the four
-    # advertisement-plane cases), and again +14 on BOTH arms -- an unequal delta
-    # would mean a case is accidentally gated on transport-qos.
-    # R311y841: 51/52 -> 61/62. Ten cases landed with the QUERY TARGET being
-    # HONOURED rather than relayed (BestMatching selecting the one complete
-    # queryable, its nearest-wins ordering, its All fallback, the per-query
-    # completeness that an intersect-but-not-cover queryable fails, AllComplete
-    # as a filter, the All control, the immediate final on an emptied filter,
-    # the source-face exclusion, the deterministic tiebreak, and the one-final
-    # rule on a narrowed route). Again +10 on BOTH arms.
-    # R2906: 61/62 -> 62/63, one ungated witness on BOTH arms
-    # (`a_relayed_reply_carries_the_querys_qos_not_the_answerers`), read off
-    # `guarded_count_gate.py --range origin/main..872994be`.
-    _runci_guarded_test "C1X routing_forward 62" 62 \
-        cargo test -p wz-runtime-tokio --features routing-routes --lib routing_forward --quiet || return 1
-    _runci_guarded_test "C1X routing_forward 63" 63 \
-        cargo test -p wz-runtime-tokio --features routing-routes,transport-qos --lib routing_forward --quiet || return 1
+    _runci_guarded_test "C1X route cache peer 11" 11 \
+        cargo test -p wz-runtime-tokio --features routing-routes --lib --quiet -- \
+        route_cache:: _route_is_served _leg_is_served _route_is_computed_every_time \
+        a_push_naming_a_declared_id timeout_err_names a_router_serves_both_mesh_legs || return 1
+    _runci_guarded_test "C1X route cache router 15" 15 \
+        cargo test -p wz-runtime-tokio --features routing-routes,routing-router-hat --lib --quiet -- \
+        route_cache:: _route_is_served _leg_is_served _route_is_computed_every_time \
+        a_push_naming_a_declared_id timeout_err_names a_router_serves_both_mesh_legs || return 1
     (cd crates \
-        && cargo clippy -p wz-session-core --features routing-routes --quiet -- -D warnings \
         && cargo clippy -p wz-runtime-tokio --all-targets --features routing-routes --quiet -- -D warnings \
-        && cargo clippy -p wz-runtime-tokio --all-targets --features routing-routes,transport-qos --quiet -- -D warnings \
+        && cargo clippy -p wz-runtime-tokio --all-targets --features routing-routes,routing-router-hat --quiet -- -D warnings \
         && cargo clippy -p wz-runtime-tokio --no-default-features --features routing-routes --quiet -- -D warnings)
 }
 
@@ -8280,7 +8258,12 @@ layer_c1y_cargo_test_routing_peer() {
     # (`a_relayed_reply_and_final_carry_the_querys_qos_not_the_answerers`);
     # the renamed pending-table test moves no count. Read off
     # `guarded_count_gate.py --range origin/main..872994be`.
-    _runci_guarded_test "C1y linkstate" 216 \
+    # R2912 — all three arms +7, the ungated peer witnesses R2908-R2912 added
+    # (three data-route cache cases, the client leg, the query route, the
+    # client query leg, the timeout Err's responder). R2908-R2911 pushed them
+    # while count guards were deferred to hosted, so those runs read C1y red
+    # here. Each arm read off its own command with `-- --list`: 223 219 234.
+    _runci_guarded_test "C1y linkstate" 223 \
         cargo test -p wz-runtime-tokio --features routing-peer --lib linkstate --quiet || return 1
     # R311y513 — the BARE routing peer, and the pin that would have caught the
     # defect this round fixed. Every arm above passes `--features routing-peer`
@@ -8296,7 +8279,7 @@ layer_c1y_cargo_test_routing_peer() {
     # R2614 202 -> 203: the unrestricted-interest witness is ungated, so it lands
     # here exactly as the sibling comment above predicts.
     # R2904 205 -> 211, the six above.
-    _runci_guarded_test "C1y linkstate bare" 212 \
+    _runci_guarded_test "C1y linkstate bare" 219 \
         cargo test -p wz-runtime-tokio --no-default-features --features routing-peer \
         --lib linkstate --quiet || return 1
     # R311y451 — 10 -> 16: the six low-pass fidelity tests (attachment in the
@@ -8425,7 +8408,7 @@ layer_c1y_cargo_test_routing_peer() {
     # be reporting that the access subset changes what a Del origination test
     # sees, which it does not.
     # R2904 220 -> 226, the same six.
-    _runci_guarded_test "C1y linkstate+access" 227 \
+    _runci_guarded_test "C1y linkstate+access" 234 \
         cargo test -p wz-runtime-tokio --features "$access" --lib linkstate --quiet || return 1
     # R2567 — the three usrpwd counts move together because ONE structure landed
     # under them: the shared credential store that closed `access-extauth-usrpwd`.
@@ -11408,6 +11391,9 @@ layer_c1bz_docs_resolve() {
     # error set of `cargo doc -p wz-runtime-tokio --no-deps --all-features`
     # at 90b2fca2 named that link twice (the new one and an older twin a few
     # lines up); both became code spans, and the same command then read 498.
+    # R2912 — 498 -> 497 and 530 -> 513: the `RouteTable` engine was retired,
+    # and `routing.rs` / `routing_forward.rs` took their broken links with them.
+    # Measured with this lane's own command on both crates after the deletion.
     budget="
         wz:2
         wz-ap-demo:26
@@ -11418,8 +11404,8 @@ layer_c1bz_docs_resolve() {
         wz-mcu-session-acceptor:4
         wz-routing-graph:5
         wz-runtime-coop:12
-        wz-runtime-tokio:498
-        wz-session-core:530
+        wz-runtime-tokio:497
+        wz-session-core:513
         wz-session-lwip:4
         wz-switchboard-codegen:8
         zenoh-pico-sys:3
