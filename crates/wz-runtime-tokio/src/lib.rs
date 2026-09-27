@@ -2028,6 +2028,13 @@ pub mod interceptor;
 #[cfg(feature = "routing-peer")]
 pub mod linkstate_interest;
 
+/// R2908 — [`route_cache::RouteCache`]: the per-(source, keyexpr) route both
+/// mesh forwarders compute once and reuse until a table it was read from
+/// changes, upstream's `Routes<T>` on the routing `Resource`. Gated on
+/// `routing-peer`, with the tables it caches over.
+#[cfg(feature = "routing-peer")]
+pub mod route_cache;
+
 /// FUTURE-mode subscriber-interest store (R311y146) —
 /// [`future_interest::FutureInterestStore`]: which CLIENT faces declared a FUTURE
 /// (`f()`) subscriber `Interest`, and which `DeclareSubscriber`s wz has pushed back

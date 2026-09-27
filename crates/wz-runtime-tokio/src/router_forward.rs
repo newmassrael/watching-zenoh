@@ -384,7 +384,9 @@ use wz_session_core::push_build::reliteralize_push;
 use wz_session_core::push_routing_context::{read_push_source, set_push_source};
 use wz_session_core::qos::Priority;
 use wz_session_core::query::{QueryReply, QueryResponder};
-use wz_session_core::wireexpr_resolve::{resolve_wireexpr, wireexpr_is_empty};
+use wz_session_core::wireexpr_resolve::{
+    resolve_wireexpr, wireexpr_is_empty, wireexpr_names_a_declaration,
+};
 
 use crate::accept_loop::{
     DialIntent, DialIntentOrigin, DialIntentReceiver, DialIntentSender, FaceForwarder, FaceId,
@@ -402,7 +404,8 @@ use crate::linkstate_forward::{
     is_tree_forward_target, peer_acl_username, peer_whatami_routing, peer_zid_routing,
     re_advertise_interest_into, resolve_governed_keyexpr, resolve_source_in, resolve_source_zid_in,
     select_best_matching, synthesize_drained_fan_finals, synthesize_expired_query_returns,
-    LocalQueryHandler, LocalQueryView, LocalQueryable, LocalSubscriber, LocalSubscriberHandler,
+    DataRoutes, LocalQueryHandler, LocalQueryView, LocalQueryable, LocalSubscriber,
+    LocalSubscriberHandler,
 };
 use crate::routing_region::{hat_kind, GatewayView, HatKind, InterRegionFilter, RegionMap};
 // R2393 — the host-subscriber dispatch's sample types, the same ones the peer
@@ -499,6 +502,10 @@ struct MeshHat {
     /// DERIVED at route-compute from the native tables. `Rc`, shared with the
     /// admin `RouterDeclarationsView`.
     subs: Rc<RefCell<LinkstatepeerInterest<()>>>,
+    /// R2908 — the data routes computed over `net` and `subs`, per keyexpr and
+    /// source, served until either changes: the pin keeps them per hat on the
+    /// `Resource` (`zenoh/src/net/routing/dispatcher/resource.rs` @ `pub(crate) data_routes: RwLock<DataRoutes>,`).
+    data_routes: DataRoutes,
     /// The region's queryable interest, the query-plane twin of `subs`: native
     /// sources keyed by zid, VALUE = their declared `QueryableInfo`. The
     /// cross-region self-bubble (a MERGED info in zenoh) is DERIVED at compute.
@@ -536,6 +543,7 @@ impl MeshHat {
             net: Rc::new(RefCell::new(net)),
             trees_dirty: Cell::new(false),
             subs: Rc::new(RefCell::new(LinkstatepeerInterest::new())),
+            data_routes: DataRoutes::new(),
             qabls: Rc::new(RefCell::new(LinkstatepeerInterest::new())),
             #[cfg(feature = "routing-token-tables")]
             tokens: Rc::new(RefCell::new(LinkstatepeerInterest::new())),
@@ -2637,6 +2645,13 @@ impl RouterForwarder {
     #[cfg(feature = "routing-interceptor-hotreload")]
     pub fn interceptor_cache_recomputes(&self) -> usize {
         self.interceptor_cache_recomputes.get()
+    }
+
+    /// R2908 — how many mesh data routes this router COMPUTED rather than
+    /// served, over every mesh hat. Flat while Puts on a declared keyexpr flow
+    /// and nothing they route over changes.
+    pub fn data_route_computes(&self) -> usize {
+        self.mesh_hats().map(|hat| hat.data_routes.computes()).sum()
     }
 
     /// R2348 — the EGRESS twin of
@@ -4804,11 +4819,8 @@ impl RouterForwarder {
         if is_peer_hat(tier) {
             return;
         }
-        let Some((net, _dirty)) = self.plane(tier) else {
+        let Some(hat) = self.mesh_hat(tier) else {
             return; // Client tier: no mesh -> within-tier routes nowhere (C2/C3).
-        };
-        let Some(subs) = self.subs_table(tier) else {
-            return;
         };
         // Resolve the keyexpr against the inbound face's alias table + read its
         // zid / link in one scoped borrow (an unresolvable alias drops the Push).
@@ -4831,9 +4843,15 @@ impl RouterForwarder {
             };
             (peer_zid_routing(&s.actions), s.link, keyexpr)
         };
-        let Some((carrier, children)) =
-            compute_push_forward(net, subs, inbound_zid, inbound_link, push, &keyexpr)
-        else {
+        let Some((carrier, children)) = compute_push_forward(
+            &hat.net,
+            &hat.subs,
+            &hat.data_routes,
+            inbound_zid,
+            inbound_link,
+            push,
+            &keyexpr,
+        ) else {
             return;
         };
         // R311y224 — preserve the received band on the within-tier transit
@@ -5026,15 +5044,21 @@ impl RouterForwarder {
         keyexpr: &str,
         admits: impl Fn(&Zid) -> bool,
     ) {
-        let Some((net, _)) = self.plane(tier) else {
+        let Some(hat) = self.mesh_hat(tier) else {
             return;
         };
-        let Some(subs) = self.subs_table(tier) else {
-            return;
-        };
-        let carrier_children = compute_self_publish_forward(net, subs, keyexpr, false, || {
-            reliteralize_push(push, keyexpr)
-        });
+        // R2908 — both callers hand over the RECEIVED push, so whether it named
+        // a declared keyexpr is read off it here.
+        let resource = wireexpr_names_a_declaration(&push.keyexpr.body);
+        let carrier_children = compute_self_publish_forward(
+            &hat.net,
+            &hat.subs,
+            &hat.data_routes,
+            keyexpr,
+            resource,
+            false,
+            || reliteralize_push(push, keyexpr),
+        );
         let Ok(Some((carrier, children))) = carrier_children else {
             return; // no interested mesh sub / no tree direction / build err
         };
@@ -10185,6 +10209,76 @@ mod tests {
             1,
             "bridged to the peer-tier subscriber (self is master in single-router)"
         );
+    }
+
+    /// R2908 — the router twin of the peer's route-cache witness, over BOTH
+    /// mesh legs a router-sourced Put takes: the within-tier route along the
+    /// source's tree and the bridge into the peer mesh with self as root. Each
+    /// is computed once per declared keyexpr, then served; a new subscriber in
+    /// the router mesh recomputes that leg and reaches the newcomer, and a
+    /// departed peer-mesh subscriber recomputes the bridge and is no longer
+    /// sent to.
+    #[test]
+    fn a_router_serves_both_mesh_legs_of_a_declared_keyexpr_until_a_table_changes() {
+        let fwd = RouterForwarder::new(zid(0x01));
+        let (a, _sink_a) = face(zid(0xAA), WIRE_ROUTER); // router source
+        let (c, sink_c) = face(zid(0xCC), WIRE_ROUTER); // router subscriber
+        let (d, sink_d) = face(zid(0xDE), WIRE_ROUTER); // later router subscriber
+        let (p, sink_p) = face(zid(0xDD), WIRE_PEER); // peer-mesh subscriber
+        fwd.register(FaceId(0), &a);
+        fwd.register(FaceId(1), &c);
+        fwd.register(FaceId(2), &p);
+        fwd.register(FaceId(3), &d);
+        advertise_link_back(&fwd, FaceId(0), 0x01, 0xAA, 5);
+        advertise_link_back(&fwd, FaceId(1), 0x01, 0xCC, 5);
+        advertise_link_back(&fwd, FaceId(2), 0x01, 0xDD, 5);
+        advertise_link_back(&fwd, FaceId(3), 0x01, 0xDE, 5);
+        fwd.tick();
+        forward_one(&fwd, FaceId(1), declare_sub("demo/data"));
+        forward_one(&fwd, FaceId(2), declare_sub("demo/data"));
+        let put = |fwd: &RouterForwarder| {
+            let push = wz_session_core::push_build::build_push_literal("demo/data", b"payload")
+                .expect("build push");
+            forward_one(fwd, FaceId(0), NetworkMessage::Push(Box::new(push)));
+        };
+        sink_c.reset();
+        sink_p.reset();
+
+        put(&fwd);
+        let first = fwd.data_route_computes();
+        assert_eq!(first, 2, "one compute per mesh leg");
+        put(&fwd);
+        assert_eq!(fwd.data_route_computes(), first, "the second Put is served");
+        assert_eq!(
+            sink_c.frame_count(),
+            2,
+            "both reached the router subscriber"
+        );
+        assert_eq!(
+            sink_p.frame_count(),
+            2,
+            "and both were bridged to the peer mesh"
+        );
+
+        forward_one(&fwd, FaceId(3), declare_sub("demo/data")); // D subscribes
+        sink_d.reset();
+        put(&fwd);
+        assert_eq!(
+            fwd.data_route_computes(),
+            first + 1,
+            "only the router-mesh leg read the table that changed"
+        );
+        assert_eq!(sink_d.frame_count(), 1, "the new route reaches D");
+
+        forward_one(&fwd, FaceId(2), undeclare_sub("demo/data")); // P withdraws
+        sink_p.reset();
+        put(&fwd);
+        assert_eq!(
+            fwd.data_route_computes(),
+            first + 2,
+            "the bridge recomputes"
+        );
+        assert_eq!(sink_p.frame_count(), 0, "and no longer reaches P");
     }
 
     #[cfg(feature = "router-multicast-faces")]

@@ -105,6 +105,11 @@ pub use autoconnect::{
     AutoConnect, AutoConnectStrategies, AutoConnectStrategiesError, AutoConnectStrategy,
 };
 
+mod versioned;
+/// R2908 — [`Versioned`], the counted-mutation cell a route cache keys its
+/// freshness on; see the module for why the count lives in the table.
+pub use versioned::Versioned;
+
 /// Maximum zid length in bytes (zenoh `ZenohIdProto::MAX_SIZE`). zenoh
 /// rejects an oversized zid at DECODE (the zid codec caps at this); the wz
 /// codec carries the raw bytes without that check, so the ingest discharges
@@ -762,7 +767,7 @@ pub struct Tree {
 /// (zenoh's `trees` / `distances`) are step d.
 pub struct LinkstateNetwork {
     idx: NodeIndex,
-    graph: StableUnGraph<Node, f64>,
+    graph: Versioned<StableUnGraph<Node, f64>>,
     /// Secondary index `zid -> NodeIndex` so `get_idx` is O(1) instead of
     /// the O(n) scan zenoh does over its `Copy` 16-byte ids. Maintained as
     /// an invariant by `insert_node` (the single node-insertion path) and
@@ -770,16 +775,16 @@ pub struct LinkstateNetwork {
     /// in lockstep with the petgraph node set — zenoh needs no such index
     /// (its O(n) `get_idx` reads the graph directly), so this is wz's added
     /// bookkeeping obligation.
-    idx_by_zid: HashMap<Zid, NodeIndex>,
-    links: HashMap<LinkId, Link>,
+    idx_by_zid: Versioned<HashMap<Zid, NodeIndex>>,
+    links: Versioned<HashMap<LinkId, Link>>,
     next_link_id: LinkId,
     /// Per-root spanning trees from this peer's vantage, indexed by the
     /// root node's `NodeIndex::index()` (sparse; gaps are default Trees).
     /// Rebuilt by `compute_trees`.
-    trees: Vec<Tree>,
+    trees: Versioned<Vec<Tree>>,
     /// Shortest-path distance from this peer to each node, indexed by
     /// `NodeIndex::index()`. The self-rooted Bellman-Ford result.
-    distances: Vec<f64>,
+    distances: Versioned<Vec<f64>>,
     /// zenoh `gossip_multihop` (`scouting.gossip.multihop`, default false): when
     /// true, EVERY node's locators ride a flood, not just self's and its direct
     /// neighbours' — [`propagate_locators`](Self::propagate_locators) then admits
@@ -803,7 +808,7 @@ pub struct LinkstateNetwork {
     /// zenoh subsystem saw its sibling appear and vanish rather than becoming a
     /// dial candidate. Defaults to `true` (wz's own mode); flipped via
     /// [`set_full_linkstate`](Self::set_full_linkstate).
-    full_linkstate: bool,
+    full_linkstate: Versioned<bool>,
     /// zenoh `Network::link_weights`
     /// (`zenoh/src/net/protocol/network.rs` @ `pub(crate) link_weights`): the CONFIGURED weight
     /// self advertises on its link to each named neighbour, sourced upstream
@@ -855,14 +860,14 @@ impl LinkstateNetwork {
     /// state in which the pin's `Network` keeps its graph to what neighbours
     /// announce and sends nothing on a link change.
     fn is_single_hop_network(&self) -> bool {
-        self.object == NetObject::Network && !self.full_linkstate && !self.gossip_multihop
+        self.object == NetObject::Network && !*self.full_linkstate && !self.gossip_multihop
     }
 
     /// R2894b (751 rule 8e) — a peer's graph in the state the pin's `Gossip`
     /// object always is: gossip, single hop. Its flood decisions read the
     /// far end's bound off each link.
     fn is_single_hop_gossip(&self) -> bool {
-        self.object == NetObject::Gossip && !self.full_linkstate && !self.gossip_multihop
+        self.object == NetObject::Gossip && !*self.full_linkstate && !self.gossip_multihop
     }
 
     /// R2894b — whether a link-added change is sent on `link`. A single-hop
@@ -898,25 +903,25 @@ impl LinkstateNetwork {
         idx_by_zid.insert(self_zid, idx);
         LinkstateNetwork {
             idx,
-            graph,
-            idx_by_zid,
-            links: HashMap::new(),
+            graph: Versioned::new(graph),
+            idx_by_zid: Versioned::new(idx_by_zid),
+            links: Versioned::new(HashMap::new()),
             next_link_id: 0,
             // one (trivial) self-rooted tree + a zero self-distance, as in
             // zenoh `Network::new` (`network.rs:174-179`).
-            trees: vec![Tree {
+            trees: Versioned::new(vec![Tree {
                 parent: None,
                 children: vec![],
                 directions: vec![None],
-            }],
-            distances: vec![0.0],
+            }]),
+            distances: Versioned::new(vec![0.0]),
             // non-multihop by default: a node's locators travel one hop (zenoh
             // `scouting.gossip.multihop` default false).
             gossip_multihop: false,
             // wz's own peer mode is zenoh's `routing.peer.mode = "linkstate"`
             // (this graph mirrors `hat/linkstate_peer`), so the linkstate ingest
             // is the default; a deploy joining a gossip subsystem flips it.
-            full_linkstate: true,
+            full_linkstate: Versioned::new(true),
             // no configured weights: every self link advertises the unset
             // weight, as a zenoh router with no `transport_weights` does.
             link_weights: HashMap::new(),
@@ -1007,7 +1012,7 @@ impl LinkstateNetwork {
     /// parameter would churn every `LinkstateNetwork::new` call site for a value
     /// almost all of them leave alone.
     pub fn set_full_linkstate(&mut self, enabled: bool) {
-        self.full_linkstate = enabled;
+        *self.full_linkstate = enabled;
     }
 
     /// Whether this graph ingests in the LINKSTATE peer mode (see
@@ -1015,7 +1020,7 @@ impl LinkstateNetwork {
     /// pick the matching RE-FLOOD shape, so the two halves of the mode cannot
     /// drift apart.
     pub fn full_linkstate(&self) -> bool {
-        self.full_linkstate
+        *self.full_linkstate
     }
 
     /// Whether a gossip re-flood may carry `zid`'s announcement onward — zenoh
@@ -1054,6 +1059,33 @@ impl LinkstateNetwork {
     /// The number of nodes currently known (including self).
     pub fn node_count(&self) -> usize {
         self.graph.node_count()
+    }
+
+    /// R2908 — a number that changes whenever anything a ROUTE is read from
+    /// may have changed: the graph, the zid index, the links (their psid
+    /// mappings and the gossip neighbour test), the trees, the distances and
+    /// the peer mode. A route cached against one value is stale once this
+    /// differs, which is upstream's `routes_version` read off the table
+    /// rather than bumped at each call site
+    /// (`zenoh/src/net/routing/dispatcher/tables.rs` @ `pub(crate) routes_version: RoutesVersion,`).
+    ///
+    /// Each input is a [`Versioned`] field, so no mutation of one can skip
+    /// the count; the sum of increasing counters moves whenever any of them
+    /// does. What is deliberately NOT here: `link_weights` and the gossip
+    /// flags, which decide what this node FLOODS, not where a route goes; a
+    /// weight change reaches routes through the recompute of `trees` it
+    /// schedules.
+    pub fn route_version(&self) -> u64 {
+        [
+            self.graph.version(),
+            self.idx_by_zid.version(),
+            self.links.version(),
+            self.trees.version(),
+            self.distances.version(),
+            self.full_linkstate.version(),
+        ]
+        .into_iter()
+        .fold(0u64, u64::wrapping_add)
     }
 
     /// Iterate the zids of every node currently in the graph — self (seeded at
@@ -1296,7 +1328,7 @@ impl LinkstateNetwork {
 
         self.link_weights = link_weights;
 
-        if dests_to_update.is_empty() || !(self.full_linkstate || self.gossip_multihop) {
+        if dests_to_update.is_empty() || !(*self.full_linkstate || self.gossip_multihop) {
             return false;
         }
 
@@ -1446,7 +1478,7 @@ impl LinkstateNetwork {
                 *dist = f64::INFINITY;
             }
         }
-        for tree in &mut self.trees {
+        for tree in self.trees.iter_mut() {
             tree.children.retain(|c| !freed.contains(c));
             if tree.parent.is_some_and(|p| freed.contains(&p)) {
                 tree.parent = None;
@@ -1751,7 +1783,7 @@ impl LinkstateNetwork {
         if self.is_single_hop_network() {
             return None;
         }
-        let gossip_introduces = self.object == NetObject::Gossip && !self.full_linkstate;
+        let gossip_introduces = self.object == NetObject::Gossip && !*self.full_linkstate;
         Some(if neighbour_was_new || gossip_introduces {
             self.build_link_added_delta(neighbour)
         } else {
@@ -1786,7 +1818,7 @@ impl LinkstateNetwork {
         target_is_source: bool,
     ) -> Option<LinkstateListOwned> {
         let not_target = |z: &&Zid| target != Some(**z);
-        if !self.full_linkstate {
+        if !*self.full_linkstate {
             let nodes: Vec<Zid> = changes
                 .new
                 .iter()
@@ -1978,7 +2010,7 @@ impl LinkstateNetwork {
         // zenoh `link_states` (`network.rs:699-700`) dispatches on the same flag
         // before doing anything else: the GOSSIP mode has a different ingest, not
         // a narrowed one.
-        if !self.full_linkstate {
+        if !*self.full_linkstate {
             return self.process_linkstates_peer_to_peer(states);
         }
         let mut changes = Changes::default();
@@ -2291,10 +2323,10 @@ impl LinkstateNetwork {
             // Bellman-Ford cannot find a negative cycle. Assert it loudly
             // rather than silently leaving an empty tree, so a future
             // weight-model change that breaks the invariant fails fast.
-            let paths = petgraph::algo::bellman_ford(&self.graph, *tree_root_idx)
+            let paths = petgraph::algo::bellman_ford(&*self.graph, *tree_root_idx)
                 .expect("positive edge weights guarantee no negative cycle");
             if tree_root_idx.index() == self.idx.index() {
-                self.distances = paths.distances.clone();
+                *self.distances = paths.distances.clone();
             }
 
             let tree = &mut self.trees[tree_root_idx.index()];
@@ -2307,11 +2339,11 @@ impl LinkstateNetwork {
             tree.directions.resize(max_idx.index() + 1, None);
             let parent = tree.parent;
 
-            let mut dfs = petgraph::algo::DfsSpace::new(&self.graph);
+            let mut dfs = petgraph::algo::DfsSpace::new(&*self.graph);
             for destination in &indexes {
                 if self.idx == *destination
                     || !petgraph::algo::has_path_connecting(
-                        &self.graph,
+                        &*self.graph,
                         self.idx,
                         *destination,
                         Some(&mut dfs),
@@ -2405,7 +2437,7 @@ impl LinkstateNetwork {
     /// plane asked this method, got the edgeless answer, and a client of a wz
     /// peer could not reach a queryable behind a stock zenohd peer.
     pub fn next_hop(&self, source: &Zid, dest: &Zid) -> Option<Zid> {
-        if !self.full_linkstate {
+        if !*self.full_linkstate {
             return (source == self.self_zid() && self.is_direct_neighbour(dest)).then_some(*dest);
         }
         let root = self.get_idx(source)?;
@@ -2475,7 +2507,7 @@ impl LinkstateNetwork {
     /// distance, which is upstream's shape too: its peer HAT ranks peer
     /// queryables by their DECLARED distance, never by a graph.
     pub fn distance_to(&self, dest: &Zid) -> Option<f64> {
-        if !self.full_linkstate {
+        if !*self.full_linkstate {
             return if dest == self.self_zid() {
                 Some(0.0)
             } else {
@@ -2871,6 +2903,36 @@ mod tests {
             "the pruned node left the graph and the idx_by_zid index"
         );
         assert!(net.get_idx(&zid(0x08)).is_some(), "B remains a graph node");
+    }
+
+    /// R2908 — `route_version` moves on every change a route reads and on no
+    /// read. Each step names the input it changes, so a field that stops
+    /// being counted reds the step that changes it.
+    #[test]
+    fn route_version_moves_on_each_route_input_and_not_on_a_read() {
+        let mut net = LinkstateNetwork::new(zid(0x01), WhatAmI::Peer);
+        let mut last = net.route_version();
+        let mut moved = |net: &LinkstateNetwork, what: &str| {
+            let now = net.route_version();
+            assert_ne!(now, last, "{what} must move route_version");
+            last = now;
+        };
+        let a = net.add_link(zid(0x07), WhatAmI::Peer);
+        moved(&net, "a new link");
+        net.compute_trees();
+        moved(&net, "a tree recompute");
+        net.set_full_linkstate(false);
+        moved(&net, "the peer mode");
+        net.remove_link(a);
+        moved(&net, "a removed link");
+
+        let before = net.route_version();
+        let _ = net.directions_toward(&zid(0x01), &[zid(0x07), zid(0x08)]);
+        let _ = net.next_hop(&zid(0x01), &zid(0x08));
+        let _ = net.distance_to(&zid(0x08));
+        let _ = net.node_count();
+        let _ = net.local_psid_of(&zid(0x01));
+        assert_eq!(net.route_version(), before, "a read must not move it");
     }
 
     // ── c2b ingest ──────────────────────────────────────────────────

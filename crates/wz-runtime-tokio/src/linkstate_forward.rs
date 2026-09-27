@@ -143,7 +143,9 @@ use wz_session_core::request_routing_context::{
 use wz_session_core::sample::Sample;
 use wz_session_core::sample_kind::SampleKind;
 use wz_session_core::sink::{BorrowedSample, SampleView};
-use wz_session_core::wireexpr_resolve::{resolve_wireexpr, wireexpr_is_empty};
+use wz_session_core::wireexpr_resolve::{
+    resolve_wireexpr, wireexpr_is_empty, wireexpr_names_a_declaration,
+};
 
 use wz_routing_graph::{Changes, LinkId, LinkstateNetwork};
 
@@ -160,6 +162,7 @@ use crate::interceptor::{
 use crate::interest_broker::{CurrentInterest, PendingCurrentInterests};
 use crate::linkstate_interest::LinkstatepeerInterest;
 use crate::linkstate_pending::{ExpiredQuery, PendingQueries, QueryFan, QueryReturn};
+use crate::route_cache::{RouteCache, RouteInputs};
 use crate::session_glue::{IterationEvent, SessionLinkActions};
 
 /// Re-export `Zid`, the typed [`WhatAmI`] role, and the gossip
@@ -410,6 +413,10 @@ pub struct LinkstateForwarder {
     /// view. `RefCell` by the same single-task contract as the graph — borrowed
     /// only for a handler's synchronous duration.
     subs: RefCell<LinkstatepeerInterest<()>>,
+    /// R2908 — the data routes computed over [`net`](Self#structfield.net) and
+    /// [`subs`](Self#structfield.subs), per keyexpr and source, served until
+    /// either table changes (upstream's `data_routes` on the `Resource`).
+    data_routes: DataRoutes,
     /// Co-attached CLIENT subscriptions (R311y163 / D4) — per-client-face leaf
     /// store, the peer-tier twin of the router's
     /// [`client_subs`](crate::router_forward::RouterForwarder). A CLIENT is a leaf
@@ -1113,6 +1120,7 @@ impl LinkstateForwarder {
             future_pushes: Cell::new(0),
             future_qabl_pushes: Cell::new(0),
             subs: RefCell::new(LinkstatepeerInterest::new()),
+            data_routes: DataRoutes::new(),
             tokens: RefCell::new(LinkstatepeerInterest::new()),
             client_subs: RefCell::new(HashMap::new()),
             client_tokens: RefCell::new(HashMap::new()),
@@ -1338,6 +1346,13 @@ impl LinkstateForwarder {
     #[cfg(feature = "routing-interceptor-hotreload")]
     pub fn interceptor_cache_recomputes(&self) -> usize {
         self.interceptor_cache_recomputes.get()
+    }
+
+    /// R2908 — how many data routes this peer COMPUTED rather than served
+    /// from its cache. Flat while Puts on a declared keyexpr flow and nothing
+    /// they route over changes; one higher per change they then meet.
+    pub fn data_route_computes(&self) -> usize {
+        self.data_routes.computes()
     }
 
     /// R311y508 — how many (face, keyexpr) entries the ingress cache holds.
@@ -2171,6 +2186,7 @@ impl LinkstateForwarder {
         let Some((carrier, children)) = compute_push_forward(
             &self.net,
             &self.subs,
+            &self.data_routes,
             inbound_zid,
             inbound_link,
             push,
@@ -2736,9 +2752,13 @@ impl LinkstateForwarder {
     /// peer is not re-sent to a gateway (the pin's arm is gated on
     /// `src_region.bound().is_south()`), which is why
     /// [`forward_push`](Self::forward_push) does not come through here.
+    ///
+    /// R2908 — `resource`: the push named `keyexpr` by a declared id, so its
+    /// route is kept in [`data_routes`](Self#structfield.data_routes).
     fn fan_out_south_push(
         &self,
         keyexpr: &str,
+        resource: bool,
         reliable: bool,
         priority: Priority,
         express: bool,
@@ -2751,7 +2771,9 @@ impl LinkstateForwarder {
         let Some((push, children)) = compute_self_publish_forward(
             &self.net,
             &self.subs,
+            &self.data_routes,
             keyexpr,
+            resource,
             !gateways.is_empty(),
             build,
         )?
@@ -2808,7 +2830,7 @@ impl LinkstateForwarder {
             wz_session_core::qos::CongestionControl::Drop,
             express,
         );
-        self.fan_out_south_push(keyexpr, true, priority, express, || {
+        self.fan_out_south_push(keyexpr, false, true, priority, express, || {
             // A DEFAULT band carries no metadata: skip the meta bundle and emit
             // the stripped baseline (byte-identical to a plain `publish`). The
             // encoder `build_push_outer_extensions` suppresses a DEFAULT ext
@@ -2861,7 +2883,7 @@ impl LinkstateForwarder {
     /// no caller asking it.
     #[cfg(feature = "pubsub-delete")]
     pub fn publish_delete(&self, keyexpr: &str) -> Result<usize, CodecError> {
-        self.fan_out_south_push(keyexpr, true, Priority::DEFAULT, false, || {
+        self.fan_out_south_push(keyexpr, false, true, Priority::DEFAULT, false, || {
             wz_session_core::push_build::build_push_del_literal(keyexpr)
         })
     }
@@ -4592,9 +4614,12 @@ impl LinkstateForwarder {
         // client sends DEFAULT (no unicast ext_qos); a QoS wz client's band survives.
         // R2901 — a client is this peer's SOUTH, so its push takes the same
         // gateway arm as self's own publication.
-        if let Err(e) = self.fan_out_south_push(&keyexpr, reliable, priority, false, || {
-            reliteralize_push(push, &keyexpr)
-        }) {
+        let resource = wireexpr_names_a_declaration(&push.keyexpr.body);
+        if let Err(e) =
+            self.fan_out_south_push(&keyexpr, resource, reliable, priority, false, || {
+                reliteralize_push(push, &keyexpr)
+            })
+        {
             log::warn!("peer: client push re-inject build failed for {keyexpr:?}: {e:?}");
         }
     }
@@ -6499,6 +6524,44 @@ pub(crate) fn resolve_source_zid_in(
     Some(source_zid)
 }
 
+/// R2908 — the data-route cache of one (graph, subscription table) pair: per
+/// keyexpr and source, this node's tree children toward the remote
+/// subscribers. Each forwarder keeps one per mesh it routes over.
+pub(crate) type DataRoutes = RouteCache<Rc<[Zid]>>;
+
+/// A data forward: the carrier to send and the tree children to send it to,
+/// the second a route [`DataRoutes`] may be serving.
+pub(crate) type DataForward = (PushOwned, Rc<[Zid]>);
+
+/// R2908 — the data route from `source` for `keyexpr`: this node's children
+/// on `source`'s tree toward every REMOTE subscriber (self is the local sink,
+/// never a mesh target), served from `routes` while neither table changed
+/// (upstream's `get_hat_data_route`,
+/// `zenoh/src/net/routing/dispatcher/pubsub.rs` @ `fn get_hat_data_route(`).
+///
+/// `resource` says the caller's expression named a declared id; a keyexpr a
+/// subscriber declared verbatim is a resource too, as upstream keeps a
+/// `Resource` for every declaration. Anything else is computed and not kept.
+fn data_route(
+    net: &LinkstateNetwork,
+    subs: &RefCell<LinkstatepeerInterest<()>>,
+    routes: &DataRoutes,
+    source: &Zid,
+    keyexpr: &str,
+    resource: bool,
+) -> Rc<[Zid]> {
+    let subs = subs.borrow();
+    let inputs = RouteInputs {
+        net: net.route_version(),
+        table: subs.version(),
+    };
+    let resource = resource || subs.source_count(keyexpr) > 0;
+    routes.get_or_compute(inputs, source, keyexpr, resource, || {
+        let interested = subs.interested_remote(keyexpr, net.self_zid());
+        net.directions_toward(source, &interested).into()
+    })
+}
+
 /// Compute the data-`Push` re-forward for ONE link-state mesh: given the tier's
 /// `net` + subscription `subs` and a Push already resolved against the inbound
 /// link's alias table (`keyexpr`), return the re-stamped carrier + the
@@ -6520,25 +6583,21 @@ pub(crate) fn resolve_source_zid_in(
 pub(crate) fn compute_push_forward(
     net: &RefCell<LinkstateNetwork>,
     subs: &RefCell<LinkstatepeerInterest<()>>,
+    routes: &DataRoutes,
     inbound_zid: Option<Zid>,
     inbound_link: Option<LinkId>,
     push: &PushOwned,
     keyexpr: &str,
-) -> Option<(PushOwned, Vec<Zid>)> {
+) -> Option<DataForward> {
     let net = net.borrow();
     // Resolve the source (tree root) + this node's psid for it — the same seam a
     // sourced Declare uses; both flood along the source's tree.
     let (source_zid, out_node_id) =
         resolve_source_in(&net, inbound_zid, inbound_link, read_push_source(push))?;
-    // The data-route filter: forward only toward subtrees that hold an
-    // interested subscriber, excluding self (interested_remote) — self is the
-    // local sink, delivered by the session layer, not a mesh forward target.
-    let self_zid = *net.self_zid();
-    let interested = subs.borrow().interested_remote(keyexpr, &self_zid);
-    if interested.is_empty() {
-        return None;
-    }
-    let children = net.directions_toward(&source_zid, &interested);
+    // R2908 — the route from this source, served from `routes` while neither
+    // table it reads has changed (upstream's `get_data_route`).
+    let resource = wireexpr_names_a_declaration(&push.keyexpr.body);
+    let children = data_route(&net, subs, routes, &source_zid, keyexpr, resource);
     if children.is_empty() {
         return None;
     }
@@ -6657,27 +6716,26 @@ fn relay_answer_for_client(
 pub(crate) fn compute_self_publish_forward(
     net: &RefCell<LinkstateNetwork>,
     subs: &RefCell<LinkstatepeerInterest<()>>,
+    routes: &DataRoutes,
     keyexpr: &str,
+    resource: bool,
     to_gateways: bool,
     build: impl FnOnce() -> Result<PushOwned, CodecError>,
-) -> Result<Option<(PushOwned, Vec<Zid>)>, CodecError> {
+) -> Result<Option<DataForward>, CodecError> {
     // Borrow the net once for the whole route compute (the `compute_push_forward`
     // idiom); `subs` is a distinct cell borrowed as a temp, and `build` touches
     // neither, so the single held borrow is safe.
     let net = net.borrow();
     let self_zid = *net.self_zid();
-    let interested = subs.borrow().interested_remote(keyexpr, &self_zid);
     // R2236 (open-debt item 588) found that a gossip subsystem's edgeless graph
     // gave every self-originated Push zero directions, and answered it HERE.
     // R2811 moved that answer into the graph (`LinkstateNetwork::next_hop`),
     // because the query plane asked the same graph and kept the defect: in
     // gossip mode a direct neighbour is self's own next hop, so this is now the
     // one call for both modes.
-    let children = if interested.is_empty() {
-        Vec::new()
-    } else {
-        net.directions_toward(&self_zid, &interested)
-    };
+    // R2908 — self is the source here, so this is the transit route's cache
+    // keyed at self's own zid.
+    let children = data_route(&net, subs, routes, &self_zid, keyexpr, resource);
     if children.is_empty() && !to_gateways {
         return Ok(None);
     }
@@ -14829,6 +14887,129 @@ mod tests {
         );
         assert_eq!(sink_c.frame_count(), 0, "NOT to the uninterested child C");
         assert_eq!(sink_a.frame_count(), 0, "not back to the source A");
+    }
+
+    /// R2908 — the data route of a declared keyexpr is computed once and served
+    /// until a table it reads changes: a second Put costs no compute, a new
+    /// subscriber and a departed one each cost one, and after each the route
+    /// is the NEW one. The last two are what separate an invalidated cache from
+    /// a stale one, since a cache that never invalidates still delivers the
+    /// first two Puts.
+    #[test]
+    fn a_declared_keyexprs_data_route_is_served_until_a_table_it_reads_changes() {
+        let fwd = LinkstateForwarder::new(zid(0x05), WhatAmI::Peer); // S
+        let (face_a, _sink_a) = peer_face(zid(0x0A));
+        let (face_b, sink_b) = peer_face(zid(0x0B));
+        let (face_c, sink_c) = peer_face(zid(0x0C));
+        fwd.register(FaceId(0), &face_a);
+        fwd.register(FaceId(1), &face_b);
+        fwd.register(FaceId(2), &face_c);
+        advertise_link_back(&fwd, FaceId(0), 0x0A, 0x05);
+        advertise_link_back(&fwd, FaceId(1), 0x0B, 0x05);
+        advertise_link_back(&fwd, FaceId(2), 0x0C, 0x05);
+        declare_interest(&fwd, FaceId(1), "demo/data"); // B subscribes exactly
+        sink_b.reset();
+        sink_c.reset();
+        let put = |fwd: &LinkstateForwarder| {
+            fwd.forward_push(FaceId(0), true, Priority::DEFAULT, &data_push());
+        };
+
+        put(&fwd);
+        let first = fwd.data_route_computes();
+        assert_eq!(first, 1, "the first Put computes A's route");
+        put(&fwd);
+        assert_eq!(fwd.data_route_computes(), first, "the second is served");
+        assert_eq!(sink_b.frame_count(), 2, "and both reached B");
+
+        declare_interest(&fwd, FaceId(2), "demo/data"); // C subscribes
+        sink_c.reset();
+        put(&fwd);
+        assert_eq!(
+            fwd.data_route_computes(),
+            first + 1,
+            "a new subscriber recomputes"
+        );
+        assert_eq!(sink_c.frame_count(), 1, "and the new route reaches C");
+
+        fwd.deregister(FaceId(1)); // B leaves
+        sink_b.reset();
+        sink_c.reset();
+        put(&fwd);
+        assert_eq!(
+            fwd.data_route_computes(),
+            first + 2,
+            "a departed face recomputes"
+        );
+        assert_eq!(sink_b.frame_count(), 0, "B is no longer routed to");
+        assert_eq!(sink_c.frame_count(), 1, "C still is");
+    }
+
+    /// R2908 — an expression no one declared is routed but never kept, as
+    /// upstream keeps a route only on an existing `Resource`: a subscriber on
+    /// `demo/*` makes `demo/data` routable without making it a resource, so
+    /// every Put computes and the cache stays bounded by what was declared.
+    #[test]
+    fn an_undeclared_expressions_data_route_is_computed_every_time() {
+        let fwd = LinkstateForwarder::new(zid(0x05), WhatAmI::Peer);
+        let (face_a, _sink_a) = peer_face(zid(0x0A));
+        let (face_b, sink_b) = peer_face(zid(0x0B));
+        fwd.register(FaceId(0), &face_a);
+        fwd.register(FaceId(1), &face_b);
+        advertise_link_back(&fwd, FaceId(0), 0x0A, 0x05);
+        advertise_link_back(&fwd, FaceId(1), 0x0B, 0x05);
+        declare_interest(&fwd, FaceId(1), "demo/*");
+        sink_b.reset();
+        for _ in 0..2 {
+            fwd.forward_push(FaceId(0), true, Priority::DEFAULT, &data_push());
+        }
+        assert_eq!(
+            sink_b.frame_count(),
+            2,
+            "both Puts reach the wildcard subscriber"
+        );
+        assert_eq!(fwd.data_route_computes(), 2, "neither route was kept");
+        assert!(fwd.data_routes.is_empty());
+    }
+
+    /// R2908 — a Put naming a declared keyexpr by its id IS a resource even
+    /// when no subscriber declared that exact keyexpr, as upstream's
+    /// `DeclareKeyExpr` creates the `Resource` itself; the same id with a
+    /// per-message suffix names a child no one declared, and is not.
+    #[test]
+    fn a_push_naming_a_declared_id_is_a_resource_and_one_adding_a_suffix_is_not() {
+        let fwd = LinkstateForwarder::new(zid(0x05), WhatAmI::Peer);
+        let (face_a, _sa) = peer_face(zid(0x0A));
+        let (face_b, sink_b) = peer_face(zid(0x0B));
+        fwd.register(FaceId(0), &face_a);
+        fwd.register(FaceId(1), &face_b);
+        advertise_link_back(&fwd, FaceId(0), 0x0A, 0x05);
+        advertise_link_back(&fwd, FaceId(1), 0x0B, 0x05);
+        declare_interest(&fwd, FaceId(1), "demo/**");
+        for (id, ke) in [(7, "demo/data"), (8, "demo")] {
+            let decl =
+                wz_session_core::declare_build::build_declare_kexpr(id, ke).expect("decl kexpr");
+            fwd.absorb_keyexpr_declaration(FaceId(0), &decl);
+        }
+        sink_b.reset();
+        let put = |id: u64, suffix: Option<&str>| {
+            let aliased = wz_session_core::push_build::build_push_aliased(id, suffix, b"v")
+                .expect("build aliased push");
+            fwd.forward_push(FaceId(0), true, Priority::DEFAULT, &aliased);
+        };
+
+        put(7, None);
+        put(7, None);
+        assert_eq!(
+            fwd.data_route_computes(),
+            1,
+            "the declared id's route is kept"
+        );
+        // `demo/other`, not `demo/data`: a resource is a KEYEXPR, so a suffix
+        // resolving to the declared one would rightly be served.
+        put(8, Some("/other"));
+        put(8, Some("/other"));
+        assert_eq!(fwd.data_route_computes(), 3, "the suffixed child's is not");
+        assert_eq!(sink_b.frame_count(), 4, "all four reached B");
     }
 
     /// R311y221 — a relay hop preserves the band the frame arrived with: S relays

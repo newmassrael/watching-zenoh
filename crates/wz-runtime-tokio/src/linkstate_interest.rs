@@ -58,7 +58,7 @@
 
 use std::collections::{HashMap, HashSet};
 
-use wz_routing_graph::Zid;
+use wz_routing_graph::{Versioned, Zid};
 use wz_session_core::keyexpr_match::keyexpr_intersects_target;
 
 /// Per-key-expression map of interested PEER zid -> the per-peer value `V` they
@@ -74,13 +74,17 @@ pub struct LinkstatepeerInterest<V> {
     /// the entry. A lookup matches a published / queried key against these keys by
     /// keyexpr INTERSECTION ([`matching_peers`](Self::matching_peers)), so a
     /// `demo/**` key attracts a `demo/data` lookup.
-    by_key: HashMap<String, HashMap<Zid, V>>,
+    ///
+    /// R2908 — [`Versioned`], so every change to the table moves
+    /// [`version`](Self::version) whichever method made it; a route cached
+    /// against this table reads its freshness there.
+    by_key: Versioned<HashMap<String, HashMap<Zid, V>>>,
 }
 
 impl<V> Default for LinkstatepeerInterest<V> {
     fn default() -> Self {
         Self {
-            by_key: HashMap::new(),
+            by_key: Versioned::new(HashMap::new()),
         }
     }
 }
@@ -89,6 +93,14 @@ impl<V> LinkstatepeerInterest<V> {
     /// An empty interest table.
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// R2908 — a number that changes whenever the table may have: the
+    /// freshness a route computed from it is checked against. It moves on
+    /// any mutable access, including one that turns out to change nothing,
+    /// so it can cost a recompute and never serve a stale route.
+    pub fn version(&self) -> u64 {
+        self.by_key.version()
     }
 
     /// Withdraw `peer`'s interest in ONE `keyexpr` — a sourced
@@ -198,7 +210,7 @@ impl<V> LinkstatepeerInterest<V> {
         // Dedup peers across multiple matching keys via a `HashSet` (`Zid` is
         // `Copy + Hash`), not an O(matches^2) linear membership scan.
         let mut out: HashSet<Zid> = HashSet::new();
-        for (decl, peers) in &self.by_key {
+        for (decl, peers) in self.by_key.iter() {
             if keyexpr_intersects_target(decl, &target_chunks) {
                 out.extend(peers.keys().filter(|p| exclude != Some(*p)).copied());
             }
@@ -260,7 +272,7 @@ impl<V> LinkstatepeerInterest<V> {
     ) -> Vec<(&str, Zid, &V)> {
         let target_chunks: Option<Vec<&str>> = target.map(|t| t.split('/').collect());
         let mut out: Vec<(&str, Zid, &V)> = Vec::new();
-        for (decl, peers) in &self.by_key {
+        for (decl, peers) in self.by_key.iter() {
             let matched = match target_chunks.as_deref() {
                 None => true,
                 Some(chunks) => keyexpr_intersects_target(decl, chunks),

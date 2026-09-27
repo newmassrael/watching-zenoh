@@ -88,6 +88,21 @@ pub fn wireexpr_is_empty(body: &WireexprOwnedVariant) -> bool {
     id == 0 && suffix_opt.map_or(true, str::is_empty)
 }
 
+/// R2908 — whether a Wireexpr names a DECLARED keyexpr whole: an id with no
+/// suffix, which resolves to exactly what a `DeclareKeyExpr` bound. Upstream
+/// resolves such an expression to an existing routing `Resource`, the only
+/// kind of expression it keeps a route for
+/// (`zenoh/src/net/routing/dispatcher/pubsub.rs` @ `None => compute_route(),`);
+/// an id plus a suffix may name a child no one declared, so it is not
+/// answered here.
+pub fn wireexpr_names_a_declaration(body: &WireexprOwnedVariant) -> bool {
+    let (id, suffix_opt) = match body {
+        WireexprOwnedVariant::WireexprLocal(arm) => (arm.id, arm.suffix.as_deref()),
+        WireexprOwnedVariant::WireexprNonlocal(arm) => (arm.id, arm.suffix.as_deref()),
+    };
+    id != 0 && suffix_opt.map_or(true, str::is_empty)
+}
+
 /// The TWO id spaces a Wireexpr's mapping bit can name.
 ///
 /// A keyexpr id is only meaningful inside the space of whoever declared it,
