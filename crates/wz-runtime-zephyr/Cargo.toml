@@ -33,7 +33,11 @@ path = "src/lib.rs"
 zephyr-sys = { path = "../zephyr-sys" }
 # The cooperative executor SSOT (CoopRuntime + ClockSource), with its task pool
 # (alloc feature) — the Zephyr profile reuses it, parameterised by the clock.
-wz-runtime-coop = { path = "../wz-runtime-coop", features = ["alloc"] }
+wz-runtime-coop = { path = "../wz-runtime-coop", features = ["alloc", "session-unicast"] }
+# R2916 — the network seam's link types (`BoxedLinkDriver`, `RxFrame`,
+# `LinkEndpoints`). `session-unicast` above is what hands the drive loop's
+# `SessionDatagramLink`; both are no_std.
+wz-session-core = { path = "../wz-session-core", default-features = false, features = ["alloc", "no_std"] }
 
 [lints]
 workspace = true

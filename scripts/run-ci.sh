@@ -19974,12 +19974,19 @@ print("ok" if doc is not None and ('"$1"') else doc)' 2>&1
 #
 # The REAL Zephyr link + boot proof (R311y31 / Z2). UNLIKE the FreeRTOS lane
 # (Q.frt, pure-cargo: cargo IS the build + link), the Zephyr port is
-# west/cmake/kconfig-driven: this lane drives `west build -b qemu_cortex_m3
+# west/cmake/kconfig-driven: this lane drives `west build -b mps2/an385
 # deploy/zephyr-app`, which compiles the Zephyr kernel AND links the wz cargo
 # staticlib into the image via the CMakeLists.txt `--undefined` kernel-symbol
-# contract (libkernel.a is scanned before librustlib.a). It then boots the image
-# on qemu_cortex_m3 (= ti_lm3s6965 = machine lm3s6965evb, per the board.cmake)
-# and asserts the `ZEPHYR-WZ PASS` CONSOLE sentinel — Zephyr's idiomatic
+# contract (the Zephyr libraries are scanned before librustlib.a). It then boots
+# the image on QEMU machine mps2-an385 and asserts the `ZEPHYR-WZ PASS` CONSOLE
+# sentinel.
+#
+# R2916 — board qemu_cortex_m3 (lm3s6965evb, 64 KB of SRAM) -> mps2/an385
+# (4 MB), because the image now carries Zephyr's own net stack: the workload is
+# the profile's network seam, a round trip through `ZephyrUdpDriver` over
+# Zephyr's BSD sockets on the loopback interface, where it was a wz-link-lwip
+# echo. It is the machine the FreeRTOS image (Q.frt) boots on. The verdict is
+# still the console sentinel — Zephyr's idiomatic
 # console-regex verdict (twister-style), since this board's qemu launch has no
 # semihosting SYS_EXIT channel (so run_qemu_case's exit-code verdict does not
 # apply here). This is the executed boot that ends the G.16/G.17 pure-cargo
@@ -20017,9 +20024,8 @@ layer_qz_zephyr_boot() {
     if ! command -v qemu-system-arm >/dev/null 2>&1; then
         _qz_unavailable "qemu-system-arm not on PATH"; return $?
     fi
-    if ! command -v arm-none-eabi-gcc >/dev/null 2>&1; then
-        _qz_unavailable "arm-none-eabi-gcc not on PATH — lwip-sys cross cc"; return $?
-    fi
+    # R2916 — no arm-none-eabi-gcc prerequisite any more: it was lwip-sys's
+    # cross cc, and this image no longer builds lwIP.
     if [[ ! -f "$venv/bin/activate" ]]; then
         _qz_unavailable "Zephyr venv absent: $venv — set WZ_ZEPHYR_VENV"; return $?
     fi
@@ -20050,9 +20056,9 @@ layer_qz_zephyr_boot() {
         # shellcheck disable=SC1091
         source "$venv/bin/activate" 2>/dev/null
         export ZEPHYR_BASE="$zbase"
-        west build -b qemu_cortex_m3 -d "$build_dir" deploy/zephyr-app >"$west_log" 2>&1
+        west build -b mps2/an385 -d "$build_dir" deploy/zephyr-app >"$west_log" 2>&1
     ); then
-        echo "  Qz build deploy/zephyr-app (west, qemu_cortex_m3) OK"
+        echo "  Qz build deploy/zephyr-app (west, mps2/an385) OK"
     else
         echo "  Qz build deploy/zephyr-app (west) FAIL" >&2
         echo "  ── the build's last 60 line(s) ──" >&2
@@ -20076,12 +20082,11 @@ layer_qz_zephyr_boot() {
     # `ZEPHYR-WZ PASS\r`, so a bare `$` would FALSE-FAIL on the trailing \r. If
     # the C sentinel prefix is ever renamed, update BOTH patterns in lockstep.
     # The 350×0.1s (35s) poll stays inside the 40s
-    # qemu backstop; the loopback echo completes in well under a second of guest
-    # time, so the margin is large even on a slow/loaded runner.
+    # qemu backstop; the loopback round trip completes in well under a second of
+    # guest time, so the margin is large even on a slow/loaded runner.
     qlog="$(mktemp)"
-    timeout 40 qemu-system-arm -cpu cortex-m3 -machine lm3s6965evb -nographic \
-        -icount shift=6,align=off,sleep=off -rtc clock=vm -net none \
-        -kernel "$elf" >"$qlog" 2>&1 &
+    timeout 40 qemu-system-arm -cpu cortex-m3 -machine mps2-an385 -nographic \
+        -net none -kernel "$elf" >"$qlog" 2>&1 &
     qpid=$!
     for _ in $(seq 1 350); do
         grep -qE '^ZEPHYR-WZ ' "$qlog" 2>/dev/null && break
@@ -20092,7 +20097,7 @@ layer_qz_zephyr_boot() {
     wait "$qpid" 2>/dev/null
 
     if grep -qE '^ZEPHYR-WZ PASS[[:space:]]*$' "$qlog"; then
-        echo "  Qz run deploy/zephyr-app via qemu_cortex_m3 (lm3s6965evb) PASS"
+        echo "  Qz run deploy/zephyr-app via mps2/an385 (mps2-an385) PASS"
     else
         echo "  Qz run deploy/zephyr-app FAIL (no 'ZEPHYR-WZ PASS' console sentinel)" >&2
         echo "  ── Qz: captured qemu output ──" >&2

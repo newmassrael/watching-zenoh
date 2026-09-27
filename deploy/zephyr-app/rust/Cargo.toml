@@ -44,15 +44,17 @@ critical-section = { version = "1", features = ["restore-state-u32"] }
 # the wz-runtime-coop / wz-mcu-clock atomic-backend unification.
 portable-atomic = { version = "1", default-features = false, features = ["fallback", "critical-section"] }
 
-# Direct edge for the lwIP NO_SYS `sys_now()` shim, which reads the kernel tick
-# counter (sys_clock_tick_get) — the same source ZephyrClock uses.
-zephyr-sys = { path = "../../../crates/zephyr-sys" }
+# R2916 — the session's link types (`BoxedLinkDriver`, `LinkSendOutcome`,
+# `Reliability`) the image drives the Zephyr-socket link through. The direct
+# zephyr-sys edge is gone with lwIP: it served only lwIP's `sys_now()` shim.
+wz-session-core = { path = "../../../crates/wz-session-core", default-features = false, features = ["alloc", "no_std"] }
 
-# wz facade — `runtime-coop` pulls the CoopRuntime executor SSOT + CoopTime +
-# wz-link-lwip (the lwIP cross-build lights up once WZ_LWIP_PORT is set), and
-# `platform-zephyr` pulls the Zephyr profile seams under `wz::runtime_zephyr`
-# (ZephyrClock over sys_clock_tick_get + the k_malloc ZephyrAllocator +
-# ZephyrRuntime = CoopRuntime<ZephyrClock>). R311y32 routes the seams through the
+# wz facade — `runtime-coop` pulls the CoopRuntime executor SSOT + CoopTime
+# (its wz-link-lwip edge stays an empty shell: this build sets no WZ_LWIP_PORT
+# since R2916), and `platform-zephyr` pulls the Zephyr profile seams under
+# `wz::runtime_zephyr` (ZephyrClock over sys_clock_tick_get + the k_malloc
+# ZephyrAllocator + ZephyrRuntime = CoopRuntime<ZephyrClock> + the `net`
+# socket link). R311y32 routes the seams through the
 # facade gate — the direct wz-runtime-zephyr dep is gone — exactly as
 # mcu-freertos-demo consumes wz::runtime_freertos via `platform-freertos`. The
 # two axes compose here: the coop executor + the Zephyr clock/allocator.

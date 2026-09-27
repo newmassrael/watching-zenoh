@@ -2894,7 +2894,8 @@ jobs:
   # west/cmake/kconfig-driven, so this dedicated job provisions the Zephyr
   # toolchain the dev host carries — Python 3.12 + west + a PINNED Zephyr source
   # tree + the Zephyr SDK 1.0.1 arm toolchain — then runs `--layer Qz`, which
-  # `west build`s deploy/zephyr-app for qemu_cortex_m3 (linking the wz cargo
+  # `west build`s deploy/zephyr-app for mps2/an385 (R2916; qemu_cortex_m3
+  # before the image carried Zephyr's net stack) (linking the wz cargo
   # staticlib via the CMakeLists.txt --undefined kernel-symbol contract) and
   # boots it on QEMU, asserting the `ZEPHYR-WZ PASS` console sentinel. This ends
   # the G.16/G.17 pure-cargo lib-check staging with an EXECUTED boot on CI (the

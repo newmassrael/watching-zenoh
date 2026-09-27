@@ -166,7 +166,7 @@ pub use wz_runtime_freertos as runtime_freertos;
 // wz-runtime-coop executor). The profile runs that executor inside ONE Zephyr
 // thread = zenoh-pico's Z_FEATURE_MULTI_THREAD=0 single-thread mode; native
 // multi-task is a deliberate re-openable FUTURE profile, not what this ships.
-// The kernel-symbol link + QEMU qemu_cortex_m3 boot is deploy/zephyr-app (Z2,
+// The kernel-symbol link + QEMU mps2/an385 boot is deploy/zephyr-app (Z2,
 // run-ci Layer Qz + the GitHub zephyr-mcu job).
 #[cfg(feature = "platform-zephyr")]
 pub use wz_runtime_zephyr as runtime_zephyr;

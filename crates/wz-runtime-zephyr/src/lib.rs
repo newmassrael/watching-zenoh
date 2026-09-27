@@ -9,7 +9,7 @@
 //! pool, custom waker, cancel, timer queue), generic over a [`ClockSource`].
 //! The Zephyr profile is that executor running inside ONE Zephyr thread (the
 //! analogue of zenoh-pico's `Z_FEATURE_MULTI_THREAD=0` single-thread mode), so
-//! this crate supplies only the two Zephyr-specific SEAMS:
+//! this crate supplies only the Zephyr-specific SEAMS:
 //!
 //! 1. [`ZephyrClock`] — a [`ClockSource`] over the kernel tick counter
 //!    (`sys_clock_tick_get`), const-generic over `CONFIG_SYS_CLOCK_TICKS_PER_SEC`.
@@ -21,9 +21,18 @@
 //!
 //! The synchronisation seam needs nothing here: `CoopRuntime` already uses
 //! `critical_section::Mutex`, and the deploy supplies the `critical-section`
-//! impl (Zephyr/cortex-m has one). Networking reuses NO_SYS=1 lwIP via
-//! `wz-link-lwip`, unchanged from the bare-metal + FreeRTOS profiles.
+//! impl (Zephyr/cortex-m has one).
+//!
+//! 3. R2916 — [`net`], the network seam: UDP over Zephyr's own BSD sockets
+//!    and the session's link over them. Networking used to reuse `NO_SYS`
+//!    lwIP via `wz-link-lwip`, as the bare-metal and FreeRTOS profiles do,
+//!    which has no netif over Zephyr's drivers; zenoh-pico's Zephyr port
+//!    uses Zephyr's sockets, and so does this profile now.
 #![no_std]
+
+extern crate alloc;
+
+pub mod net;
 
 use core::alloc::{GlobalAlloc, Layout};
 use core::ffi::c_void;
@@ -35,7 +44,7 @@ use zephyr_sys::{k_free, k_malloc, sys_clock_tick_get};
 /// Monotonic [`ClockSource`] reading the Zephyr kernel tick counter.
 ///
 /// Const-generic over `TICK_HZ` = the deploy's `CONFIG_SYS_CLOCK_TICKS_PER_SEC`
-/// (the qemu_cortex_m3 reference uses 100). Mirrors the FreeRTOS profile's
+/// (the reference deploy pins 100). Mirrors the FreeRTOS profile's
 /// `FreertosClock<TICK_HZ>` and the bare-metal `SystickClock<CYCLES_PER_US>`
 /// const-generic shape: the timebase is a per-deploy compile-time constant, not
 /// a runtime field. Zero-sized + `Copy` (the tick counter is global kernel

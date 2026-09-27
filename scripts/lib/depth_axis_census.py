@@ -1163,8 +1163,18 @@ CITATION = re.compile(r"\b((?:[A-Za-z0-9_.-]+/)*[A-Za-z0-9_.-]+\.(?:rs|c|h))(?::
 # It was the unreached atom until R2914's crate tests named its symbols.
 # REACHED and NO_SYMBOL hold at 6 and 2. READ off the census's own FAIL line,
 # `unreached: 1 against a pin of 2`.
-PIN_REACHED = 6
-PIN_UNREACHED = 1
+# R2916 — REACHED 6 -> 7, UNREACHED 1 -> 0, and the move is NOT evidence.
+# `platform-zephyr` reads as reached because R2916 gave `wz-runtime-zephyr` a
+# socket API whose METHOD names (`bind`, `peer`, `send_to`, `try_recv`,
+# `acceptor`, `initiator`, `local`) and module name (`net`) also occur in other
+# crates' tests; `atom_test_graph` owns a feature-exclusive crate's indented
+# `pub fn`s by bare name, so any test naming `bind` anywhere "reaches" it. No
+# test names a Zephyr symbol. Registered as open-debt item 831 (the same
+# collision props up other atoms' reach), and the atom must not be graded on
+# this reach. READ off the census's own FAIL lines, `reached: 7 against a pin
+# of 6` and `unreached: 0 against a pin of 1`.
+PIN_REACHED = 7
+PIN_UNREACHED = 0
 PIN_NO_SYMBOL = 2
 # R2534 — 346 -> 347. The atom is `adminspace-metrics` and the citation is the
 # one R2533 added to its reason when the owner declined a gzip dependency: the

@@ -75,6 +75,18 @@ pub trait SessionDatagramLink {
     fn try_recv(&self) -> Option<RxFrame>;
 }
 
+/// A shared link is a link: the same object is usually the session's
+/// `Rc<dyn BoxedLinkDriver>` sink too, so the loop takes a clone of that `Rc`.
+impl<T: SessionDatagramLink + ?Sized> SessionDatagramLink for Rc<T> {
+    fn service(&self) {
+        (**self).service()
+    }
+
+    fn try_recv(&self) -> Option<RxFrame> {
+        (**self).try_recv()
+    }
+}
+
 /// The handshake role to activate the FSM with before the loop starts.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SessionRole {

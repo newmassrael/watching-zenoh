@@ -3197,6 +3197,7 @@ name = "wz-runtime-zephyr"
 version = "0.1.0"
 dependencies = [
  "wz-runtime-coop",
+ "wz-session-core",
  "zephyr-sys",
 ]
 
