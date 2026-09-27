@@ -403,10 +403,11 @@ use crate::linkstate_forward::{
     complete_query_directions, compute_push_forward, compute_self_publish_forward,
     declare_queryable_wireexpr, declare_subscriber_wireexpr, emit_current_interest_replies,
     is_tree_forward_target, peer_acl_username, peer_whatami_routing, peer_zid_routing,
-    re_advertise_interest_into, resolve_governed_keyexpr, resolve_source_in, resolve_source_zid_in,
-    select_best_matching, synthesize_drained_fan_finals, synthesize_expired_query_returns,
-    ClientRoutes, ClientSubStore, DataRoutes, LocalQueryHandler, LocalQueryView, LocalQueryable,
-    LocalSubscriber, LocalSubscriberHandler,
+    query_candidates, re_advertise_interest_into, resolve_governed_keyexpr, resolve_source_in,
+    resolve_source_zid_in, select_best_matching, synthesize_drained_fan_finals,
+    synthesize_expired_query_returns, Cached, ClientRoutes, ClientSubStore, DataRoutes,
+    LocalQueryHandler, LocalQueryView, LocalQueryable, LocalSubscriber, LocalSubscriberHandler,
+    QueryCandidate, QueryRoutes,
 };
 use crate::routing_region::{hat_kind, GatewayView, HatKind, InterRegionFilter, RegionMap};
 // R2393 — the host-subscriber dispatch's sample types, the same ones the peer
@@ -511,6 +512,9 @@ struct MeshHat {
     /// sources keyed by zid, VALUE = their declared `QueryableInfo`. The
     /// cross-region self-bubble (a MERGED info in zenoh) is DERIVED at compute.
     qabls: Rc<RefCell<LinkstatepeerInterest<QueryableInfo>>>,
+    /// R2910 — the query routes computed over `net` and `qabls`, per keyexpr
+    /// and source: the pin's per-hat `query_routes` on the `Resource`.
+    query_routes: QueryRoutes,
     /// R2870 (step 3c) — the region's liveliness-TOKEN interest (zenoh's
     /// per-hat `router_tokens` / `linkstatepeer_tokens`), the token twin of
     /// `subs`: a source-zid set with NO value payload, so `V = ()` exactly like
@@ -546,6 +550,7 @@ impl MeshHat {
             subs: Rc::new(RefCell::new(LinkstatepeerInterest::new())),
             data_routes: DataRoutes::new(),
             qabls: Rc::new(RefCell::new(LinkstatepeerInterest::new())),
+            query_routes: QueryRoutes::new(),
             #[cfg(feature = "routing-token-tables")]
             tokens: Rc::new(RefCell::new(LinkstatepeerInterest::new())),
         }
@@ -690,6 +695,33 @@ impl BrokerHat {
             tokens: Rc::new(RefCell::new(HashMap::new())),
         }
     }
+}
+
+/// R2910 — whether a mesh hat's TOKEN table declares `keyexpr` exactly; the
+/// token plane of [`RouterForwarder::names_a_resource`], split out because the
+/// table exists only under `routing-token-tables`.
+#[cfg(feature = "routing-token-tables")]
+fn mesh_tokens_name(hat: &MeshHat, keyexpr: &str) -> bool {
+    hat.tokens.borrow().source_count(keyexpr) > 0
+}
+
+#[cfg(not(feature = "routing-token-tables"))]
+fn mesh_tokens_name(_hat: &MeshHat, _keyexpr: &str) -> bool {
+    false
+}
+
+/// R2910 — the broker-hat twin of [`mesh_tokens_name`].
+#[cfg(feature = "routing-token-tables")]
+fn client_tokens_name(hat: &BrokerHat, keyexpr: &str) -> bool {
+    hat.tokens
+        .borrow()
+        .values()
+        .any(|ids| ids.values().any(|k| k == keyexpr))
+}
+
+#[cfg(not(feature = "routing-token-tables"))]
+fn client_tokens_name(_hat: &BrokerHat, _keyexpr: &str) -> bool {
+    false
 }
 
 /// R2873 (step 3d) — the hat a region is served by, held in ONE region map as
@@ -2692,6 +2724,51 @@ impl RouterForwarder {
         self.broker_hats()
             .map(|hat| hat.client_routes.computes())
             .sum()
+    }
+
+    /// R2910 — how many mesh query routes this router COMPUTED rather than
+    /// served, over every mesh hat.
+    pub fn query_route_computes(&self) -> usize {
+        self.mesh_hats()
+            .map(|hat| hat.query_routes.computes())
+            .sum()
+    }
+
+    /// R2910 — whether `keyexpr` is declared anywhere on this router: in any
+    /// mesh hat's tables, any broker hat's client stores, or by a local
+    /// handler. The node-wide existence test every hat's route cache is asked
+    /// through ([`Cached`]), as the pin's hats all hang their routes off one
+    /// resource tree. An exact match, as a `Resource` is one keyexpr.
+    fn names_a_resource(&self, keyexpr: &str) -> bool {
+        let in_mesh = self.mesh_hats().any(|hat| {
+            hat.subs.borrow().source_count(keyexpr) > 0
+                || hat.qabls.borrow().source_count(keyexpr) > 0
+                || mesh_tokens_name(hat, keyexpr)
+        });
+        let in_clients = self.broker_hats().any(|hat| {
+            hat.subs
+                .borrow()
+                .values()
+                .any(|ids| ids.values().any(|k| k == keyexpr))
+                || hat
+                    .qabls
+                    .borrow()
+                    .values()
+                    .any(|ids| ids.values().any(|(k, _)| k == keyexpr))
+                || client_tokens_name(hat, keyexpr)
+        });
+        in_mesh
+            || in_clients
+            || self
+                .local_queryables
+                .borrow()
+                .iter()
+                .any(|q| q.keyexpr == keyexpr)
+            || self
+                .local_subscribers
+                .borrow()
+                .iter()
+                .any(|s| s.keyexpr == keyexpr)
     }
 
     /// R2348 — the EGRESS twin of
@@ -4887,10 +4964,14 @@ impl RouterForwarder {
             };
             (peer_zid_routing(&s.actions), s.link, keyexpr)
         };
+        let names = |k: &str| self.names_a_resource(k);
         let Some((carrier, children)) = compute_push_forward(
             &hat.net,
             &hat.subs,
-            &hat.data_routes,
+            Cached {
+                routes: &hat.data_routes,
+                names_a_resource: &names,
+            },
             inbound_zid,
             inbound_link,
             push,
@@ -4990,7 +5071,8 @@ impl RouterForwarder {
         // `demo/data` sub (exact `HashSet::contains` would silently blackhole every
         // wildcard client sub, re-opening the very gap C3 closes).
         // R2909 — through each broker hat's client-leg cache ([`client_route`]).
-        let resource = wireexpr_names_a_declaration(&push.keyexpr.body);
+        let wire = wireexpr_names_a_declaration(&push.keyexpr.body);
+        let names = |k: &str| self.names_a_resource(k);
         // R311y225 — preserve the received band on the CLIENT-face egress (the y224
         // residual): route through `fan_out_tier_qos` on the frame's `priority`, so a
         // QoS-negotiated client observes the same band the mesh legs carry (zenoh
@@ -5003,7 +5085,15 @@ impl RouterForwarder {
         // R2873 (step 3d) — one fan-out per broker hat, each scoped to the
         // region that hat owns and reading that hat's own table.
         for (region, hat) in self.broker_regions() {
-            let clients = client_route(&hat.subs, &hat.client_routes, keyexpr, resource);
+            let clients = client_route(
+                &hat.subs,
+                Cached {
+                    routes: &hat.client_routes,
+                    names_a_resource: &names,
+                },
+                keyexpr,
+                wire,
+            );
             if clients.is_empty() {
                 continue;
             }
@@ -5091,13 +5181,16 @@ impl RouterForwarder {
         };
         // R2908 — both callers hand over the RECEIVED push, so whether it named
         // a declared keyexpr is read off it here.
-        let resource = wireexpr_names_a_declaration(&push.keyexpr.body);
+        let names = |k: &str| self.names_a_resource(k);
         let carrier_children = compute_self_publish_forward(
             &hat.net,
             &hat.subs,
-            &hat.data_routes,
+            Cached {
+                routes: &hat.data_routes,
+                names_a_resource: &names,
+            },
             keyexpr,
-            resource,
+            wireexpr_names_a_declaration(&push.keyexpr.body),
             false,
             || reliteralize_push(push, keyexpr),
         );
@@ -6472,12 +6565,18 @@ impl RouterForwarder {
                 .map(Duration::from_millis)
                 .unwrap_or_else(|| self.query_timeout.get());
 
+        // R2910 — each block's mesh queryables, read once per query from its
+        // hat's query-route cache; the target below is applied to these.
+        let wire = wireexpr_names_a_declaration(&request.keyexpr.body);
+        let mesh: Vec<Rc<[QueryCandidate]>> = blocks
+            .iter()
+            .map(|block| self.block_query_candidates(block, &keyexpr, wire))
+            .collect();
         let forwarded = match read_request_target(request) {
             // BestMatching (wire default): the SINGLE globally-nearest COMPLETE
             // queryable; fall back to All (every matching one) when none is
             // complete.
-            None => match self.best_query_winner(&blocks, client_gate, inbound, &keyexpr, self_zid)
-            {
+            None => match self.best_query_winner(&blocks, &mesh, client_gate, inbound, &keyexpr) {
                 Some(BestQueryWinner::Mesh(bi, hop)) => self.forward_request_to_tier(
                     &blocks[bi],
                     reliable,
@@ -6492,6 +6591,7 @@ impl RouterForwarder {
                     .forward_request_to_face(face, 0, reliable, request, &keyexpr, &fan, deadline),
                 None => self.forward_request_all(
                     &blocks,
+                    &mesh,
                     client_gate,
                     false,
                     reliable,
@@ -6500,11 +6600,11 @@ impl RouterForwarder {
                     &keyexpr,
                     &fan,
                     deadline,
-                    self_zid,
                 ),
             },
             Some(QueryTarget::All) => self.forward_request_all(
                 &blocks,
+                &mesh,
                 client_gate,
                 false,
                 reliable,
@@ -6513,10 +6613,10 @@ impl RouterForwarder {
                 &keyexpr,
                 &fan,
                 deadline,
-                self_zid,
             ),
             Some(QueryTarget::AllComplete) => self.forward_request_all(
                 &blocks,
+                &mesh,
                 client_gate,
                 true,
                 reliable,
@@ -6525,7 +6625,6 @@ impl RouterForwarder {
                 &keyexpr,
                 &fan,
                 deadline,
-                self_zid,
             ),
         };
 
@@ -6620,6 +6719,32 @@ impl RouterForwarder {
         }
     }
 
+    /// R2910 — the mesh queryables `block`'s Query can reach from its source,
+    /// served from the block's hat's [`QueryRoutes`] ([`query_candidates`]).
+    /// A tier this router builds no mesh hat for has none.
+    fn block_query_candidates(
+        &self,
+        block: &MeshQueryBlock,
+        keyexpr: &str,
+        wire: bool,
+    ) -> Rc<[QueryCandidate]> {
+        let names = |k: &str| self.names_a_resource(k);
+        match self.mesh_hat(block.tier) {
+            Some(hat) => query_candidates(
+                &hat.net.borrow(),
+                &hat.qabls,
+                Cached {
+                    routes: &hat.query_routes,
+                    names_a_resource: &names,
+                },
+                &block.source_zid,
+                keyexpr,
+                wire,
+            ),
+            None => Rc::from([]),
+        }
+    }
+
     /// R2880 (open-debt item 751, step 6) — whether `block` may send the Query
     /// to the neighbour `dst`: a within leg crosses nothing, a cross leg asks
     /// the inter-region filter per egress, as the pin filters each query
@@ -6648,28 +6773,18 @@ impl RouterForwarder {
     fn best_query_winner(
         &self,
         blocks: &[MeshQueryBlock],
+        mesh: &[Rc<[QueryCandidate]>],
         client_gate: bool,
         inbound: FaceId,
         keyexpr: &str,
-        self_zid: Zid,
     ) -> Option<BestQueryWinner> {
         let mut best: Option<(u16, BestQueryWinner)> = None;
-        for (bi, block) in blocks.iter().enumerate() {
-            let Some((net, _)) = self.plane(block.tier) else {
-                continue;
-            };
-            let Some(qabls) = self.qabls_table(block.tier) else {
-                continue;
-            };
-            if let Some((dist, hop)) = select_best_matching(
-                &net.borrow(),
-                qabls,
-                keyexpr,
-                &block.source_zid,
-                &self_zid,
-                block.inbound_for_net,
-                |hop| self.query_block_admits(block, hop),
-            ) {
+        for (bi, (block, candidates)) in blocks.iter().zip(mesh).enumerate() {
+            if let Some((dist, hop)) =
+                select_best_matching(candidates, block.inbound_for_net, |hop| {
+                    self.query_block_admits(block, hop)
+                })
+            {
                 // Truncate the jittered graph distance to u16, exactly as zenoh
                 // stamps `distance: net.distances[qabl_idx] as u16`
                 // (`zenoh/src/net/routing/hat/router/queries.rs` @ `distance`):
@@ -6755,6 +6870,7 @@ impl RouterForwarder {
     fn forward_request_all(
         &self,
         blocks: &[MeshQueryBlock],
+        mesh: &[Rc<[QueryCandidate]>],
         client_gate: bool,
         complete_only: bool,
         reliable: bool,
@@ -6763,25 +6879,13 @@ impl RouterForwarder {
         keyexpr: &str,
         fan: &Rc<QueryFan>,
         deadline: Instant,
-        self_zid: Zid,
     ) -> usize {
         let mut forwarded = 0;
-        for block in blocks {
-            let Some((net, _)) = self.plane(block.tier) else {
-                continue;
-            };
-            let Some(qabls) = self.qabls_table(block.tier) else {
-                continue;
-            };
-            // Compute the tree hops under the net borrow, then release it before the
-            // fan-out (which re-borrows `faces` + allocates pending).
-            let hops = {
-                let n = net.borrow();
-                if complete_only {
-                    complete_query_directions(&n, qabls, keyexpr, &block.source_zid, &self_zid)
-                } else {
-                    all_query_directions(&n, qabls, keyexpr, &block.source_zid, &self_zid)
-                }
+        for (block, candidates) in blocks.iter().zip(mesh) {
+            let hops = if complete_only {
+                complete_query_directions(candidates)
+            } else {
+                all_query_directions(candidates)
             };
             forwarded += self.forward_request_to_tier(
                 block, reliable, inbound, &hops, request, keyexpr, fan, deadline,
@@ -16246,6 +16350,60 @@ mod tests {
             0,
             "self-originated into the mesh (node_id 0)"
         );
+    }
+
+    /// R2910 — the router twin of the peer's query-route witness: a client's
+    /// query on a declared keyexpr reads each mesh's candidates from that
+    /// hat's cache. A second query computes nothing; a second peer queryable
+    /// recomputes the peer mesh's route and is reached, and a withdrawal
+    /// recomputes it again and is no longer reached. The queryables are
+    /// incomplete, so BestMatching falls back to All and every one is sent to.
+    #[test]
+    fn a_routers_query_route_is_served_until_a_queryable_table_changes() {
+        let fwd = RouterForwarder::new(zid(0x01));
+        let (client, _sink_client) = face(zid(0xAA), WIRE_CLIENT);
+        let (p, sink_p) = face(zid(0xBB), WIRE_PEER);
+        let (q, sink_q) = face(zid(0xBC), WIRE_PEER);
+        fwd.register(FaceId(0), &client);
+        fwd.register(FaceId(1), &p);
+        fwd.register(FaceId(2), &q);
+        advertise_link_back(&fwd, FaceId(1), 0x01, 0xBB, 5);
+        advertise_link_back(&fwd, FaceId(2), 0x01, 0xBC, 5);
+        fwd.tick();
+        forward_one(&fwd, FaceId(1), declare_qabl("demo/q", false));
+        sink_p.reset();
+        let rid = Cell::new(3);
+        let query = || {
+            rid.set(rid.get() + 1);
+            forward_one(&fwd, FaceId(0), request_best(rid.get(), "demo/q"));
+        };
+
+        query();
+        let first = fwd.query_route_computes();
+        assert!(first > 0, "the first query computes its mesh routes");
+        query();
+        assert_eq!(fwd.query_route_computes(), first, "the second is served");
+        assert_eq!(sink_p.frame_count(), 2, "and both reached P");
+
+        forward_one(&fwd, FaceId(2), declare_qabl("demo/q", false));
+        sink_q.reset();
+        query();
+        assert_eq!(
+            fwd.query_route_computes(),
+            first + 1,
+            "only the peer mesh's table changed"
+        );
+        assert_eq!(sink_q.frame_count(), 1, "the new route reaches Q");
+
+        forward_one(&fwd, FaceId(1), undeclare_qabl("demo/q"));
+        sink_p.reset();
+        query();
+        assert_eq!(
+            fwd.query_route_computes(),
+            first + 2,
+            "a withdrawal recomputes"
+        );
+        assert_eq!(sink_p.frame_count(), 0, "P is no longer queried");
     }
 
     /// R2906 — the queryable twin of
