@@ -31,6 +31,7 @@
 
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
+use std::hash::Hash;
 
 use wz_routing_graph::Zid;
 
@@ -38,32 +39,41 @@ use wz_routing_graph::Zid;
 /// fresh against. A route computed at one value is stale at any other.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RouteInputs {
-    /// The topology graph's [`route_version`](wz_routing_graph::LinkstateNetwork::route_version).
+    /// The topology graph's [`route_version`](wz_routing_graph::LinkstateNetwork::route_version),
+    /// or 0 for a route no graph enters: a CLIENT leg reaches leaf faces
+    /// directly, so only its declaration store decides it.
     pub net: u64,
-    /// The declaration table's [`version`](crate::linkstate_interest::LinkstatepeerInterest::version).
+    /// The declaration table's version: a mesh table's
+    /// [`version`](crate::linkstate_interest::LinkstatepeerInterest::version),
+    /// or a client store's [`Versioned::version`](wz_routing_graph::Versioned::version).
     pub table: u64,
 }
 
 /// Routes by keyexpr, then by source, all fresh at one [`RouteInputs`].
 #[derive(Debug)]
-struct Fresh<T> {
+struct Fresh<T, S> {
     inputs: Option<RouteInputs>,
-    routes: HashMap<String, HashMap<Zid, T>>,
+    routes: HashMap<String, HashMap<S, T>>,
 }
 
 /// A per-(keyexpr, source) route cache; see the module docs.
 ///
+/// `S` is what distinguishes one route for a keyexpr from another: the source
+/// node on a mesh, whose spanning tree the route follows (upstream's mapped
+/// `NodeId`). A client leg has no such dimension, since every source reaches
+/// the same leaf faces, and keys by `()`.
+///
 /// Interior-mutable because the forwarders route through `&self`.
 #[derive(Debug)]
-pub struct RouteCache<T> {
-    fresh: RefCell<Fresh<T>>,
+pub struct RouteCache<T, S = Zid> {
+    fresh: RefCell<Fresh<T, S>>,
     /// How many routes were COMPUTED rather than served. The witness that
     /// separates "the cache is consulted and invalidated" from "the cache
     /// exists": a delivery assertion alone passes with the cache bypassed.
     computes: Cell<usize>,
 }
 
-impl<T> Default for RouteCache<T> {
+impl<T, S> Default for RouteCache<T, S> {
     fn default() -> Self {
         Self {
             fresh: RefCell::new(Fresh {
@@ -75,7 +85,7 @@ impl<T> Default for RouteCache<T> {
     }
 }
 
-impl<T: Clone> RouteCache<T> {
+impl<T: Clone, S: Clone + Eq + Hash> RouteCache<T, S> {
     /// An empty cache.
     pub fn new() -> Self {
         Self::default()
@@ -83,7 +93,9 @@ impl<T: Clone> RouteCache<T> {
 
     /// The route from `source` for `keyexpr` at `inputs`: served when one was
     /// computed at the same inputs, else computed by `compute` and, when
-    /// `resource` (the expression is a declared one), kept.
+    /// `resource` answers that the expression is a declared one, kept.
+    /// `resource` is asked only on a miss, so a served route never pays for
+    /// the question.
     ///
     /// Storing at new inputs first drops every route kept at the old ones, as
     /// upstream's `Routes::set_route` clears on a version change, so stale
@@ -92,9 +104,9 @@ impl<T: Clone> RouteCache<T> {
     pub fn get_or_compute(
         &self,
         inputs: RouteInputs,
-        source: &Zid,
+        source: &S,
         keyexpr: &str,
-        resource: bool,
+        resource: impl FnOnce() -> bool,
         compute: impl FnOnce() -> T,
     ) -> T {
         {
@@ -107,7 +119,7 @@ impl<T: Clone> RouteCache<T> {
         }
         let route = compute();
         self.computes.set(self.computes.get() + 1);
-        if resource {
+        if resource() {
             let mut fresh = self.fresh.borrow_mut();
             if fresh.inputs != Some(inputs) {
                 fresh.routes.clear();
@@ -117,7 +129,7 @@ impl<T: Clone> RouteCache<T> {
                 .routes
                 .entry(keyexpr.to_owned())
                 .or_default()
-                .insert(*source, route.clone());
+                .insert(source.clone(), route.clone());
         }
         route
     }
@@ -151,8 +163,8 @@ mod tests {
     #[test]
     fn a_resource_route_is_computed_once_and_served_at_the_same_inputs() {
         let cache: RouteCache<Vec<Zid>> = RouteCache::new();
-        let first = cache.get_or_compute(AT, &zid(1), "demo/a", true, || vec![zid(9)]);
-        let again = cache.get_or_compute(AT, &zid(1), "demo/a", true, || unreachable!());
+        let first = cache.get_or_compute(AT, &zid(1), "demo/a", || true, || vec![zid(9)]);
+        let again = cache.get_or_compute(AT, &zid(1), "demo/a", || true, || unreachable!());
         assert_eq!(first, again);
         assert_eq!(cache.computes(), 1);
     }
@@ -160,9 +172,9 @@ mod tests {
     #[test]
     fn a_route_is_per_source_and_per_keyexpr() {
         let cache: RouteCache<Vec<Zid>> = RouteCache::new();
-        cache.get_or_compute(AT, &zid(1), "demo/a", true, || vec![zid(9)]);
-        let other_source = cache.get_or_compute(AT, &zid(2), "demo/a", true, || vec![zid(8)]);
-        let other_key = cache.get_or_compute(AT, &zid(1), "demo/b", true, || vec![zid(7)]);
+        cache.get_or_compute(AT, &zid(1), "demo/a", || true, || vec![zid(9)]);
+        let other_source = cache.get_or_compute(AT, &zid(2), "demo/a", || true, || vec![zid(8)]);
+        let other_key = cache.get_or_compute(AT, &zid(1), "demo/b", || true, || vec![zid(7)]);
         assert_eq!(other_source, vec![zid(8)]);
         assert_eq!(other_key, vec![zid(7)]);
         assert_eq!(cache.computes(), 3);
@@ -172,10 +184,10 @@ mod tests {
     #[test]
     fn either_input_moving_recomputes_and_drops_the_old_routes() {
         let cache: RouteCache<Vec<Zid>> = RouteCache::new();
-        cache.get_or_compute(AT, &zid(1), "demo/a", true, || vec![zid(9)]);
-        cache.get_or_compute(AT, &zid(1), "demo/b", true, || vec![zid(9)]);
+        cache.get_or_compute(AT, &zid(1), "demo/a", || true, || vec![zid(9)]);
+        cache.get_or_compute(AT, &zid(1), "demo/b", || true, || vec![zid(9)]);
         let net_moved = RouteInputs { net: 2, ..AT };
-        let got = cache.get_or_compute(net_moved, &zid(1), "demo/a", true, || vec![zid(3)]);
+        let got = cache.get_or_compute(net_moved, &zid(1), "demo/a", || true, || vec![zid(3)]);
         assert_eq!(
             got,
             vec![zid(3)],
@@ -190,7 +202,7 @@ mod tests {
             table: 2,
             ..net_moved
         };
-        let got = cache.get_or_compute(table_moved, &zid(1), "demo/a", true, || vec![zid(4)]);
+        let got = cache.get_or_compute(table_moved, &zid(1), "demo/a", || true, || vec![zid(4)]);
         assert_eq!(
             got,
             vec![zid(4)],
@@ -202,8 +214,8 @@ mod tests {
     #[test]
     fn an_expression_that_is_not_a_resource_is_computed_every_time_and_never_kept() {
         let cache: RouteCache<Vec<Zid>> = RouteCache::new();
-        cache.get_or_compute(AT, &zid(1), "demo/x", false, || vec![zid(9)]);
-        cache.get_or_compute(AT, &zid(1), "demo/x", false, || vec![zid(9)]);
+        cache.get_or_compute(AT, &zid(1), "demo/x", || false, || vec![zid(9)]);
+        cache.get_or_compute(AT, &zid(1), "demo/x", || false, || vec![zid(9)]);
         assert_eq!(cache.computes(), 2);
         assert!(cache.is_empty(), "an undeclared expression keeps nothing");
     }

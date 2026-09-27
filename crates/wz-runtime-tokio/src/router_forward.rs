@@ -354,7 +354,8 @@ use wz_codecs::push::{PushOwned, PushOwnedVariant};
 #[cfg(feature = "router-multicast-faces")]
 use tokio::sync::mpsc::UnboundedSender;
 use wz_routing_graph::{
-    AutoConnect, Changes, LinkEdgeWeight, LinkId, LinkInfo, LinkstateNetwork, WhatAmI, Zid,
+    AutoConnect, Changes, LinkEdgeWeight, LinkId, LinkInfo, LinkstateNetwork, Versioned, WhatAmI,
+    Zid,
 };
 use wz_session_core::declare_build::{
     build_declare_final_reply, build_declare_queryable_reply,
@@ -398,14 +399,14 @@ use crate::interceptor::{
     InterceptorChain, InterceptorConfig, InterceptorContext, InterceptorFlow, InterceptorVerdict,
 };
 use crate::linkstate_forward::{
-    absorb_keyexpr_into, all_query_directions, build_declare_queryable_with_info,
+    absorb_keyexpr_into, all_query_directions, build_declare_queryable_with_info, client_route,
     complete_query_directions, compute_push_forward, compute_self_publish_forward,
     declare_queryable_wireexpr, declare_subscriber_wireexpr, emit_current_interest_replies,
     is_tree_forward_target, peer_acl_username, peer_whatami_routing, peer_zid_routing,
     re_advertise_interest_into, resolve_governed_keyexpr, resolve_source_in, resolve_source_zid_in,
     select_best_matching, synthesize_drained_fan_finals, synthesize_expired_query_returns,
-    DataRoutes, LocalQueryHandler, LocalQueryView, LocalQueryable, LocalSubscriber,
-    LocalSubscriberHandler,
+    ClientRoutes, ClientSubStore, DataRoutes, LocalQueryHandler, LocalQueryView, LocalQueryable,
+    LocalSubscriber, LocalSubscriberHandler,
 };
 use crate::routing_region::{hat_kind, GatewayView, HatKind, InterRegionFilter, RegionMap};
 // R2393 — the host-subscriber dispatch's sample types, the same ones the peer
@@ -560,7 +561,10 @@ impl MeshHat {
 /// mode sends `_z_make_undecl_subscriber(sub->_entity_id, NULL)`
 /// (`vendor/zenoh-pico/src/net/primitives.c`), so a keyexpr-keyed store had no
 /// way to resolve it and a pico subscriber that undeclared kept being routed to.
-type ClientSubs = HashMap<FaceId, HashMap<u64, String>>;
+///
+/// R2909 — the shared [`ClientSubStore`], [`Versioned`] because the client leg
+/// of the data route is cached against it.
+type ClientSubs = ClientSubStore;
 /// A client face's queryables, decl id -> (keyexpr, declared `QueryableInfo`),
 /// id-keyed for the same reason as [`ClientSubs`] (pico's
 /// `_z_make_undecl_queryable(qle->_entity_id, NULL)`).
@@ -640,7 +644,12 @@ struct BrokerHat {
     /// `undeclare_subscriber` -> stale until face-down. The wz-PEER
     /// client planes were converted to id-keyed at R311y178 (and `tokens` below
     /// at slice-3); `subs` and `qabls` are the remaining keyexpr-keyed holdouts.
+    ///
+    /// R2909 — [`Versioned`], so the client leg cached in `client_routes` is
+    /// stale once it changes.
     subs: Rc<RefCell<ClientSubs>>,
+    /// R2909 — the client leg of the data route over `subs`, per keyexpr.
+    client_routes: ClientRoutes,
     /// The per-client-face QUERYABLE store (C5b), the query-plane twin of
     /// `subs`: per hosted keyexpr, the declared [`QueryableInfo`] (`complete` /
     /// `distance`) the query route reads.
@@ -674,7 +683,8 @@ struct BrokerHat {
 impl BrokerHat {
     fn new() -> Self {
         Self {
-            subs: Rc::new(RefCell::new(HashMap::new())),
+            subs: Rc::new(RefCell::new(Versioned::new(HashMap::new()))),
+            client_routes: ClientRoutes::new(),
             qabls: Rc::new(RefCell::new(HashMap::new())),
             #[cfg(feature = "routing-token-tables")]
             tokens: Rc::new(RefCell::new(HashMap::new())),
@@ -906,17 +916,38 @@ struct Snapshot<P: DeclPlane> {
 /// the `is_empty()` delivery fast-path (the discipline
 /// [`LinkstatepeerInterest::withdraw`] applies to an emptied key).
 fn remove_from_face<M: FaceStore, R>(
-    store: &RefCell<HashMap<FaceId, M>>,
+    store: &mut HashMap<FaceId, M>,
     face: FaceId,
     remove: impl FnOnce(&mut M) -> Option<R>,
 ) -> Option<R> {
-    let mut store = store.borrow_mut();
     let entries = store.get_mut(&face)?;
     let removed = remove(entries);
     if entries.is_empty() {
         store.remove(&face);
     }
     removed
+}
+
+/// R2909 — a broker-hat store read as its per-face map, whether it is kept
+/// plain or [`Versioned`] (the subscriber store is, because a route is cached
+/// against it). The views fold every store through this one read.
+trait FaceMap {
+    type Entry;
+    fn faces(&self) -> &HashMap<FaceId, Self::Entry>;
+}
+
+impl<T> FaceMap for HashMap<FaceId, T> {
+    type Entry = T;
+    fn faces(&self) -> &HashMap<FaceId, T> {
+        self
+    }
+}
+
+impl<T> FaceMap for Versioned<HashMap<FaceId, T>> {
+    type Entry = T;
+    fn faces(&self) -> &HashMap<FaceId, T> {
+        self
+    }
 }
 
 /// A client face's entries in one broker-hat store.
@@ -945,15 +976,16 @@ type FaceKeyexprs = HashMap<FaceId, HashSet<String>>;
 /// face-keyed map. A face is owned by exactly one hat, so no two regions
 /// contribute the same face.
 #[cfg(feature = "adminspace-introspection-handlers")]
-fn client_keyexprs<T>(
-    stores: &RegionMap<Rc<RefCell<HashMap<FaceId, T>>>>,
-    keys: impl Fn(&T) -> HashSet<String>,
+fn client_keyexprs<S: FaceMap>(
+    stores: &RegionMap<Rc<RefCell<S>>>,
+    keys: impl Fn(&S::Entry) -> HashSet<String>,
 ) -> FaceKeyexprs {
     stores
         .values()
         .flat_map(|store| {
             store
                 .borrow()
+                .faces()
                 .iter()
                 .map(|(face, entry)| (*face, keys(entry)))
                 .collect::<Vec<_>>()
@@ -2654,6 +2686,14 @@ impl RouterForwarder {
         self.mesh_hats().map(|hat| hat.data_routes.computes()).sum()
     }
 
+    /// R2909 — how many client legs of a data route this router COMPUTED
+    /// rather than served, over every broker hat.
+    pub fn client_route_computes(&self) -> usize {
+        self.broker_hats()
+            .map(|hat| hat.client_routes.computes())
+            .sum()
+    }
+
     /// R2348 — the EGRESS twin of
     /// [`interceptor_cache_recomputes`](Self::interceptor_cache_recomputes).
     #[cfg(feature = "routing-interceptor-hotreload")]
@@ -3562,13 +3602,15 @@ impl RouterForwarder {
                 &self.mesh(region).subs,
                 build_undeclare_subscriber_with_keyexpr,
             ),
-            Declared::Face(keyexpr) => {
-                remove_from_face(&self.owner_broker(region).subs, inbound, |by_id| {
+            Declared::Face(keyexpr) => remove_from_face(
+                &mut self.owner_broker(region).subs.borrow_mut(),
+                inbound,
+                |by_id| {
                     by_id.remove(&decl_id)?;
                     (!by_id.values().any(|k| k == keyexpr)).then_some(())
-                })
-                .is_some()
-            }
+                },
+            )
+            .is_some(),
         }
     }
 
@@ -3698,14 +3740,16 @@ impl RouterForwarder {
                 &self.mesh(region).qabls,
                 build_undeclare_queryable_with_keyexpr,
             ),
-            Declared::Face(keyexpr) => {
-                remove_from_face(&self.owner_broker(region).qabls, inbound, |by_id| {
+            Declared::Face(keyexpr) => remove_from_face(
+                &mut self.owner_broker(region).qabls.borrow_mut(),
+                inbound,
+                |by_id| {
                     let before = face_qabl_info(by_id, keyexpr);
                     by_id.remove(&decl_id)?;
                     (face_qabl_info(by_id, keyexpr) != before).then_some(())
-                })
-                .is_some()
-            }
+                },
+            )
+            .is_some(),
         }
     }
 
@@ -3877,12 +3921,12 @@ impl RouterForwarder {
                 &self.mesh(region).tokens,
                 build_undeclare_token_with_keyexpr,
             ),
-            Declared::Face(_) => {
-                remove_from_face(&self.owner_broker(region).tokens, inbound, |ids| {
-                    ids.remove(&decl_id)
-                })
-                .is_some()
-            }
+            Declared::Face(_) => remove_from_face(
+                &mut self.owner_broker(region).tokens.borrow_mut(),
+                inbound,
+                |ids| ids.remove(&decl_id),
+            )
+            .is_some(),
         }
     }
 
@@ -4945,7 +4989,8 @@ impl RouterForwarder {
         // subscribing `demo/**` must receive a `demo/data` Push, NOT just an exact
         // `demo/data` sub (exact `HashSet::contains` would silently blackhole every
         // wildcard client sub, re-opening the very gap C3 closes).
-        let target_chunks: Vec<&str> = keyexpr.split('/').collect();
+        // R2909 — through each broker hat's client-leg cache ([`client_route`]).
+        let resource = wireexpr_names_a_declaration(&push.keyexpr.body);
         // R311y225 — preserve the received band on the CLIENT-face egress (the y224
         // residual): route through `fan_out_tier_qos` on the frame's `priority`, so a
         // QoS-negotiated client observes the same band the mesh legs carry (zenoh
@@ -4958,15 +5003,12 @@ impl RouterForwarder {
         // R2873 (step 3d) — one fan-out per broker hat, each scoped to the
         // region that hat owns and reading that hat's own table.
         for (region, hat) in self.broker_regions() {
+            let clients = client_route(&hat.subs, &hat.client_routes, keyexpr, resource);
+            if clients.is_empty() {
+                continue;
+            }
             let _ = self.fan_out_tier_qos(region, reliable, priority, false, |id, _zid| {
-                if id == inbound {
-                    return Ok(None);
-                }
-                let deliver = hat.subs.borrow().get(&id).is_some_and(|by_id| {
-                    by_id
-                        .values()
-                        .any(|sub| keyexpr_intersects_target(sub, &target_chunks))
-                });
+                let deliver = id != inbound && clients.binary_search(&id).is_ok();
                 Ok(deliver.then(|| NetworkMessage::Push(Box::new(carrier.clone()))))
             });
         }
@@ -12569,6 +12611,81 @@ mod tests {
             sink_c2.frame_count(),
             0,
             "the client withdrew its subscriber by id; nothing is delivered"
+        );
+    }
+
+    /// R2909 — the client leg of a declared keyexpr's data route is computed
+    /// once and served until the broker hat's subscriber store changes: a
+    /// second client subscribing and the first withdrawing by id each cost one
+    /// compute, and the route after each is the new one. The publisher's own
+    /// face is left out at send time, so its route is the same as any other
+    /// source's.
+    #[test]
+    fn a_routers_client_leg_is_served_until_a_client_subscription_changes() {
+        use wz_session_core::declare_build::build_undeclare_subscriber;
+        let fwd = RouterForwarder::new(zid(0x01));
+        let (c1, sink_c1) = face(zid(0xAA), WIRE_CLIENT); // publisher
+        let (c2, sink_c2) = face(zid(0xCC), WIRE_CLIENT);
+        let (c3, sink_c3) = face(zid(0xDD), WIRE_CLIENT);
+        fwd.register(FaceId(0), &c1);
+        fwd.register(FaceId(1), &c2);
+        fwd.register(FaceId(2), &c3);
+        let declare = |face: u64, id: u64| {
+            forward_one(
+                &fwd,
+                FaceId(face),
+                NetworkMessage::Declare(Box::new(
+                    build_declare_subscriber(id, 0, Some("demo/data")).expect("declare"),
+                )),
+            );
+        };
+        let put = || {
+            let push = wz_session_core::push_build::build_push_literal("demo/data", b"payload")
+                .expect("build push");
+            forward_one(&fwd, FaceId(0), NetworkMessage::Push(Box::new(push)));
+        };
+        declare(1, 7);
+        sink_c1.reset();
+        sink_c2.reset();
+
+        put();
+        let first = fwd.client_route_computes();
+        assert_eq!(first, 1);
+        put();
+        assert_eq!(
+            fwd.client_route_computes(),
+            first,
+            "the second Put is served"
+        );
+        assert_eq!(sink_c2.frame_count(), 2);
+        assert_eq!(sink_c1.frame_count(), 0, "never echoed to the publisher");
+
+        declare(2, 8);
+        sink_c3.reset();
+        put();
+        assert_eq!(
+            fwd.client_route_computes(),
+            first + 1,
+            "a new subscriber recomputes"
+        );
+        assert_eq!(sink_c3.frame_count(), 1, "and the new route reaches it");
+
+        forward_one(
+            &fwd,
+            FaceId(1),
+            NetworkMessage::Declare(Box::new(build_undeclare_subscriber(7))),
+        );
+        sink_c2.reset();
+        put();
+        assert_eq!(
+            fwd.client_route_computes(),
+            first + 2,
+            "a withdrawal recomputes"
+        );
+        assert_eq!(
+            sink_c2.frame_count(),
+            0,
+            "the withdrawn client is not sent to"
         );
     }
 

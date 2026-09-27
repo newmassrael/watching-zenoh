@@ -147,7 +147,7 @@ use wz_session_core::wireexpr_resolve::{
     resolve_wireexpr, wireexpr_is_empty, wireexpr_names_a_declaration,
 };
 
-use wz_routing_graph::{Changes, LinkId, LinkstateNetwork};
+use wz_routing_graph::{Changes, LinkId, LinkstateNetwork, Versioned};
 
 use crate::accept_loop::{
     DialIntent, DialIntentOrigin, DialIntentReceiver, DialIntentSender, FaceForwarder, FaceId,
@@ -438,7 +438,11 @@ pub struct LinkstateForwarder {
     /// [`withdraw_client_subscription`](Self::withdraw_client_subscription) resolves the
     /// keyexpr BY ID (was a keyexpr-set that no-op'd an id-only undeclare -> stale until
     /// face-down). Per-FaceId namespace, so two clients may reuse an id.
-    client_subs: RefCell<HashMap<FaceId, HashMap<u64, String>>>,
+    client_subs: RefCell<ClientSubStore>,
+    /// R2909 — the client leg of the data route over
+    /// [`client_subs`](Self#structfield.client_subs), per keyexpr, served until
+    /// the store changes.
+    client_routes: ClientRoutes,
     /// R311y509 — the liveliness-TOKEN twin of
     /// [`client_subs`](Self#structfield.client_subs): per-client-face
     /// `decl_id -> keyexpr` for the tokens this peer's CLIENT leaves hold, read by
@@ -1122,7 +1126,8 @@ impl LinkstateForwarder {
             subs: RefCell::new(LinkstatepeerInterest::new()),
             data_routes: DataRoutes::new(),
             tokens: RefCell::new(LinkstatepeerInterest::new()),
-            client_subs: RefCell::new(HashMap::new()),
+            client_subs: RefCell::new(Versioned::new(HashMap::new())),
+            client_routes: ClientRoutes::new(),
             client_tokens: RefCell::new(HashMap::new()),
             qabls: RefCell::new(LinkstatepeerInterest::new()),
             client_qabls: RefCell::new(HashMap::new()),
@@ -1353,6 +1358,13 @@ impl LinkstateForwarder {
     /// they route over changes; one higher per change they then meet.
     pub fn data_route_computes(&self) -> usize {
         self.data_routes.computes()
+    }
+
+    /// R2909 — how many client legs of a data route this peer COMPUTED rather
+    /// than served; the client twin of
+    /// [`data_route_computes`](Self::data_route_computes).
+    pub fn client_route_computes(&self) -> usize {
+        self.client_routes.computes()
     }
 
     /// R311y508 — how many (face, keyexpr) entries the ingress cache holds.
@@ -4556,7 +4568,10 @@ impl LinkstateForwarder {
         // pubsub.rs (a client-sub data-route direction node-id is NodeId::default()=0).
         // The DATA-plane twin of the R311y179 forward_request_to_client_queryables fix.
         set_push_source(&mut carrier, 0);
-        let target_chunks: Vec<&str> = keyexpr.split('/').collect();
+        // R2909 — the subscribing client faces, served while the store is
+        // unchanged ([`client_route`]).
+        let resource = wireexpr_names_a_declaration(&push.keyexpr.body);
+        let clients = client_route(&self.client_subs, &self.client_routes, &keyexpr, resource);
         // R311y225 — preserve the received band on the CLIENT-face egress (the y224
         // residual): route through `fan_out_qos` on the frame's `priority` so a
         // QoS-negotiated client observes the same band the mesh transit carries (zenoh
@@ -4564,13 +4579,7 @@ impl LinkstateForwarder {
         // DEFAULT under a non-QoS session; a pico client negotiates no unicast ext_qos
         // so it stays DEFAULT. The peer-tier twin of the router's y225 client egress.
         let _ = self.fan_out_qos(reliable, priority, false, None, |id, _zid| {
-            if id == inbound {
-                return Ok(None);
-            }
-            let deliver = self.client_subs.borrow().get(&id).is_some_and(|ids| {
-                ids.values()
-                    .any(|sub| keyexpr_intersects_target(sub, &target_chunks))
-            });
+            let deliver = id != inbound && clients.binary_search(&id).is_ok();
             Ok(deliver.then(|| NetworkMessage::Push(Box::new(carrier.clone()))))
         });
     }
@@ -6555,10 +6564,65 @@ fn data_route(
         net: net.route_version(),
         table: subs.version(),
     };
-    let resource = resource || subs.source_count(keyexpr) > 0;
-    routes.get_or_compute(inputs, source, keyexpr, resource, || {
+    let declared = || resource || subs.source_count(keyexpr) > 0;
+    routes.get_or_compute(inputs, source, keyexpr, declared, || {
         let interested = subs.interested_remote(keyexpr, net.self_zid());
         net.directions_toward(source, &interested).into()
+    })
+}
+
+/// R2909 — the CLIENT faces a node holds, each with its subscribers by decl
+/// id: the leaf-face store both forwarders keep (the peer's co-attached
+/// clients, each router broker hat's). [`Versioned`] for the reason the mesh
+/// tables are: the client leg of a data route is cached against it.
+pub(crate) type ClientSubStore = Versioned<HashMap<FaceId, HashMap<u64, String>>>;
+
+/// R2909 — the client-leg route cache of one [`ClientSubStore`]: per keyexpr,
+/// the client faces subscribing to it. Keyed by `()` rather than a source,
+/// because every source reaches the same leaf faces; the inbound face is
+/// excluded at send time, as upstream excludes the source face when it walks
+/// a route rather than when it computes one.
+pub(crate) type ClientRoutes = RouteCache<Rc<[FaceId]>, ()>;
+
+/// R2909 — the client leg of the data route for `keyexpr`: every held client
+/// face with a subscriber whose keyexpr intersects it, in face order, served
+/// from `routes` while the store is unchanged. Upstream computes the client
+/// faces into the same route as the mesh directions
+/// (`zenoh/src/net/routing/hat/router/pubsub.rs` @ `fn insert_faces_for_subs`
+/// reads the resource's `session_ctxs`); wz keeps them as a second route
+/// because they are sent a differently stamped carrier (source 0).
+///
+/// `resource` as [`data_route`] takes it, with a client's verbatim
+/// declaration also making the keyexpr a resource.
+pub(crate) fn client_route(
+    store: &RefCell<ClientSubStore>,
+    routes: &ClientRoutes,
+    keyexpr: &str,
+    resource: bool,
+) -> Rc<[FaceId]> {
+    let store = store.borrow();
+    // A store holding no client has no client leg; a router keeps one per
+    // leaf region, most of them empty, and none of those is worth a route.
+    if store.is_empty() {
+        return Rc::from([]);
+    }
+    let inputs = RouteInputs {
+        net: 0,
+        table: store.version(),
+    };
+    let declared = || resource || store.values().any(|ids| ids.values().any(|k| k == keyexpr));
+    routes.get_or_compute(inputs, &(), keyexpr, declared, || {
+        let target: Vec<&str> = keyexpr.split('/').collect();
+        let mut faces: Vec<FaceId> = store
+            .iter()
+            .filter(|(_, ids)| {
+                ids.values()
+                    .any(|sub| keyexpr_intersects_target(sub, &target))
+            })
+            .map(|(face, _)| *face)
+            .collect();
+        faces.sort_unstable();
+        faces.into()
     })
 }
 
@@ -9126,6 +9190,70 @@ mod tests {
             sink_b.frame_count(),
             1,
             "the mesh child receives the sourced UndeclareSubscriber"
+        );
+    }
+
+    /// R2909 — the peer's client leg of a declared keyexpr's data route is
+    /// computed once and served until the co-attached client store changes;
+    /// a new client subscriber and a withdrawal each recompute it, and after
+    /// each the route is the new one.
+    #[test]
+    fn a_peers_client_leg_is_served_until_a_client_subscription_changes() {
+        let fwd = LinkstateForwarder::new(zid(0x05), WhatAmI::Peer);
+        let (peer_a, _sink_a) = peer_face(zid(0x0A));
+        let (c1, sink_c1) = peer_face_whatami(zid(0x0C), 2);
+        let (c2, sink_c2) = peer_face_whatami(zid(0x0D), 2);
+        fwd.register(FaceId(0), &peer_a);
+        fwd.register(FaceId(1), &c1);
+        fwd.register(FaceId(2), &c2);
+        advertise_link_back(&fwd, FaceId(0), 0x0A, 0x05);
+        client_declare_sub(&fwd, FaceId(1), 1, "demo/data");
+        sink_c1.reset();
+        let put = || {
+            let outcome = DriverLoopOutcome::FramePayload {
+                priority: Priority::DEFAULT,
+                reliable: true,
+                sn: 0,
+                messages: vec![NetworkMessage::Push(Box::new(data_push()))],
+                has_ext: false,
+                extensions: Vec::new(),
+            };
+            fwd.forward(FaceId(0), IterationEvent::Poll(&outcome));
+        };
+
+        put();
+        let first = fwd.client_route_computes();
+        assert_eq!(first, 1);
+        put();
+        assert_eq!(
+            fwd.client_route_computes(),
+            first,
+            "the second Put is served"
+        );
+        assert_eq!(sink_c1.frame_count(), 2);
+
+        client_declare_sub(&fwd, FaceId(2), 1, "demo/data");
+        sink_c2.reset();
+        put();
+        assert_eq!(
+            fwd.client_route_computes(),
+            first + 1,
+            "a new subscriber recomputes"
+        );
+        assert_eq!(sink_c2.frame_count(), 1, "and the new route reaches it");
+
+        client_undeclare_sub(&fwd, FaceId(1), 1);
+        sink_c1.reset();
+        put();
+        assert_eq!(
+            fwd.client_route_computes(),
+            first + 2,
+            "a withdrawal recomputes"
+        );
+        assert_eq!(
+            sink_c1.frame_count(),
+            0,
+            "the withdrawn client is not sent to"
         );
     }
 
