@@ -1158,8 +1158,13 @@ CITATION = re.compile(r"\b((?:[A-Za-z0-9_.-]+/)*[A-Za-z0-9_.-]+\.(?:rs|c|h))(?::
 # its feature gated is retired (R2912), so the feature gates no code of its
 # own. UNREACHED and NO_SYMBOL hold at 2 and 2. READ off the census's own FAIL
 # line, `reached: 6 against a pin of 7`.
+# R2914 — UNREACHED 2 -> 1. `platform-freertos` leaves PARTIAL for COMPLETE:
+# its epoch residual is built (R2914) after the session and RNG ones (R2913).
+# It was the unreached atom until R2914's crate tests named its symbols.
+# REACHED and NO_SYMBOL hold at 6 and 2. READ off the census's own FAIL line,
+# `unreached: 1 against a pin of 2`.
 PIN_REACHED = 6
-PIN_UNREACHED = 2
+PIN_UNREACHED = 1
 PIN_NO_SYMBOL = 2
 # R2534 — 346 -> 347. The atom is `adminspace-metrics` and the citation is the
 # one R2533 added to its reason when the owner declined a gzip dependency: the
@@ -2253,7 +2258,11 @@ PIN_NO_SYMBOL = 2
 # its residual built R2908-R2911, its engine retired R2912), and its twelve wz
 # citations leave the census with it. READ off the census's own FAIL line, `wz
 # citations: 23 against a pin of 35`.
-PIN_WZ_CITATIONS = 23
+#
+# R2914 — 23 -> 21, one atom. `platform-freertos` left PARTIAL (COMPLETE: its
+# epoch residual built R2914), and its wz citations leave the census with it.
+# READ off the census's own FAIL line, `wz citations: 21 against a pin of 23`.
+PIN_WZ_CITATIONS = 21
 # R2626 — 44 -> 42, and this one is worth a sentence because it HELD through
 # every earlier retirement in this run (R2612, R2622). `time-hlc`'s reason is the
 # first retiree carrying AMBIGUOUS citations of its own: its oldest clauses cite
@@ -2311,7 +2320,11 @@ PIN_WZ_CITATIONS = 23
 # `get.rs`, `session.rs` and `query.rs` by bare name. The promotion's addendum
 # writes every citation anchored. READ off the census's own FAIL line,
 # `ambiguous citations: 12 against a pin of 17`.
-PIN_AMBIGUOUS = 12
+# R2914 -- 12 -> 10. `platform-freertos` departs (COMPLETE) carrying TWO
+# ambiguous citations -- its R311y28 clauses cite `main.rs` and `lib.rs` by
+# bare name. READ off
+# the census's own FAIL line, `ambiguous citations: 10 against a pin of 12`.
+PIN_AMBIGUOUS = 10
 
 
 class Fatal(Exception):
