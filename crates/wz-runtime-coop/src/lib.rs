@@ -188,6 +188,13 @@ pub use time::{ClockSource, CoopTime};
 #[cfg(feature = "session-unicast")]
 pub mod session_runtime;
 
+// R2915 — the cooperative unicast session drive loop, generic over the
+// network stack through `session_drive::SessionDatagramLink`. It moved here
+// from `wz-session-lwip`, where it was typed on lwIP, so that a profile whose
+// network stack is not lwIP (Zephyr's own sockets) drives the same loop.
+#[cfg(feature = "session-unicast")]
+pub mod session_drive;
+
 // R311ih — re-export the runtime-agnostic static-scouting synth so the
 // MCU profile reaches it through its runtime crate, mirroring how the AP
 // profile reaches wz-session-core items through wz-runtime-tokio. The

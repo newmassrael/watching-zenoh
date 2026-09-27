@@ -79,5 +79,6 @@ pub mod session_drive;
 
 pub use driver::LwipUdpDriver;
 pub use session_drive::{
-    run_session, session_task, spawn_session, SessionDriveConfig, SessionPump, SessionRole,
+    run_session, session_task, spawn_session, LwipSessionLink, SessionDriveConfig, SessionPump,
+    SessionRole,
 };

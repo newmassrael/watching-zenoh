@@ -92,7 +92,11 @@ loopif-multicast = ["wz-link-lwip/loopif-multicast"]
 # send_keep_alive wire primitive); with it on, `run_session` emits a
 # KeepAlive whenever the line has been idle for
 # adopted_lease / LEASE_EXPIRE_FACTOR, exactly as the AP loop does.
-transport-keepalive = ["wz-session-core/transport-keepalive"]
+# R2915 — and to wz-runtime-coop's, where the loop that reads it now lives.
+transport-keepalive = [
+    "wz-session-core/transport-keepalive",
+    "wz-runtime-coop/transport-keepalive",
+]
 
 # R311lt — MCU multicast transport drive loop (`run_multicast_session`): the
 # no_std mirror of the AP `wz-runtime-tokio::multicast_glue` loop. Forwards to

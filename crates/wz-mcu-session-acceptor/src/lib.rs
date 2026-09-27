@@ -119,7 +119,8 @@ const MAX_ITERS: usize = 64;
 /// handshake from the §5.I intrinsics RNG.
 const FIXTURE_COOKIE_NONCE: u64 = 0x5A5A_5A5A_5A5A_5A5A;
 
-/// R311y819 — this e2e's [`EntropySource`], and the reason the fixed value
+/// R311y819 — this e2e's
+/// [`EntropySource`](wz_session_core::entropy::EntropySource), and the reason the fixed value
 /// above is now a FIXTURE rather than a deploy pattern.
 ///
 /// Before this round the constant was handed straight to
@@ -127,7 +128,7 @@ const FIXTURE_COOKIE_NONCE: u64 = 0x5A5A_5A5A_5A5A_5A5A;
 /// DEMONSTRATED installing a constant — and a board copying the demo inherited
 /// one cookie per zid for its whole service life. The constant now reaches the
 /// slot through the same port a real board plugs its TRNG into
-/// ([`wz_runtime_coop::session_runtime::new_session_actions`]), so what a
+/// ([`new_session_actions`](wz::runtime_coop::session_runtime::new_session_actions)), so what a
 /// deploy copies is the seam, and what it replaces is this type.
 ///
 /// It deliberately does NOT satisfy the port's stated contract — the bytes are
@@ -340,14 +341,17 @@ where
     // ── The acceptor: a session rx socket wrapped in the MCU BoxedLinkDriver.
     //    The initial peer target is a placeholder the first inbound datagram
     //    overwrites via set_peer (the acceptor-reply path).
+    //
+    //    R2915 — port 0, not PEER_PORT. It used to be PEER_PORT, so the
+    //    "placeholder" was already the right answer and the reply path was
+    //    never exercised: with the retarget removed from the drive loop's lwIP
+    //    link, this whole e2e still reached Established. An acceptor cannot
+    //    know its peer before the InitSyn, and now this one does not either;
+    //    port 0 also leaves the link's endpoints unrecorded until then.
     let acceptor_sock: SharedSessionSocket = Rc::new(RefCell::new(
         bind_session_rx(&link, SESSION_PORT).expect("bind acceptor session rx"),
     ));
-    let driver = Rc::new(LwipUdpDriver::new(
-        acceptor_sock,
-        ipv4_addr_loopback(),
-        PEER_PORT,
-    ));
+    let driver = Rc::new(LwipUdpDriver::new(acceptor_sock, ipv4_addr_loopback(), 0));
 
     // ── The reactive crafted peer: a second real loopback endpoint. Sized
     //    off the ACTIVE session-rx slot size (SESSION_RX_SLOT_SIZE: 1536
