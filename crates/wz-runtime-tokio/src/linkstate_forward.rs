@@ -5680,9 +5680,9 @@ impl LinkstateForwarder {
         for copy in copies {
             self.send_one_to_face(
                 copy.upstream,
-                NetworkMessage::Interest(wz_session_core::interest_build::build_interest_final(
-                    copy.up_id,
-                )),
+                NetworkMessage::Interest(
+                    wz_session_core::interest_build::build_interest_final_propagated(copy.up_id),
+                ),
             );
         }
     }
@@ -12727,6 +12727,15 @@ mod tests {
         let fin = forwarded_interest(&sink_r.frame_bytes(0));
         assert_eq!(fin.interest_id, first, "under the id the gateway was given");
         assert!(!fin.c() && !fin.f(), "a Final");
+        // R2906 — and as the ROUTER plane sends it: the pin's hat stamps
+        // `QoSType::INTEREST` on the Final it propagates, where the client's own
+        // Final (built bare above, as pico's is) carries none.
+        let router_qos = wz_session_core::declare_ext_qos::QOS_DECLARE;
+        assert_eq!(
+            wz_session_core::declare_ext_qos::read_interest_qos(&fin),
+            router_qos,
+            "the propagated Final carries the router plane's QoS"
+        );
 
         sink_r.reset();
         fwd.deregister(FaceId(1));
@@ -12735,9 +12744,12 @@ mod tests {
             1,
             "the departed client's last interest"
         );
+        let departed = forwarded_interest(&sink_r.frame_bytes(0));
+        assert_eq!(departed.interest_id, second);
         assert_eq!(
-            forwarded_interest(&sink_r.frame_bytes(0)).interest_id,
-            second
+            wz_session_core::declare_ext_qos::read_interest_qos(&departed),
+            router_qos,
+            "and so does the Final a departure sends"
         );
     }
 

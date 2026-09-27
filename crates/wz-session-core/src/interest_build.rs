@@ -523,6 +523,21 @@ pub fn build_interest_final(interest_id: u64) -> InterestOwned {
     }
 }
 
+/// R2906 — the ROUTER plane's `Interest(Final)`: the end of an interest this
+/// node PROPAGATED, sent on under the id the upstream was given. The twin of
+/// [`build_interest_propagated`] for the Final, and it stamps the same
+/// constant for the same reason: the pin's hat writes
+/// `ext_qos: interest::ext::QoSType::INTEREST` on the Final it propagates
+/// (`zenoh/src/net/routing/hat/peer/interests.rs` @
+/// `mode: InterestMode::Final,`), where [`build_interest_final`] -- the api
+/// plane's, which zenoh-pico's own `_z_make_interest_final` matches -- carries
+/// no extension at all. R2903's broker sent the bare one upstream.
+pub fn build_interest_final_propagated(interest_id: u64) -> InterestOwned {
+    let mut interest = build_interest_final(interest_id);
+    crate::declare_ext_qos::set_interest_qos(&mut interest, crate::declare_ext_qos::QOS_DECLARE);
+    interest
+}
+
 // The interest coverage tests assert against zenoh-pico DECLARE-context
 // wire bytes, so they gate on `codec-declare` even though the builders
 // themselves are codec-feature-agnostic.
