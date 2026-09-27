@@ -657,6 +657,14 @@ impl BoxedLinkDriver for UdpWriteDriver {
         self.send_prioritized(bytes, reliability, wz_session_core::qos::Priority::DEFAULT)
     }
 
+    fn wait_for_room(
+        &self,
+        priority: wz_session_core::qos::Priority,
+        wait_us: u64,
+    ) -> wz_session_core::link::LinkRoom {
+        self.tx.link_room(priority, wait_us)
+    }
+
     fn send_prioritized(
         &self,
         bytes: &[u8],

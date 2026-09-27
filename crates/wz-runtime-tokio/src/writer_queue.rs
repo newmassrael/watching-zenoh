@@ -61,8 +61,8 @@
 
 use std::collections::VecDeque;
 use std::future::Future;
-use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::sync::{Arc, Condvar, Mutex};
+use std::time::{Duration, Instant};
 
 use tokio::sync::{watch, Notify};
 use tokio::time::timeout;
@@ -90,14 +90,58 @@ use crate::runtime_pool::WzRuntime;
 /// A session that negotiated no QoS sends every data frame at
 /// `Priority::DEFAULT`, so its data is one lane and FIFO, as zenoh's
 /// single-queue pipeline is for such a transport.
+///
+/// R2921 — each lane is BOUNDED, at zenoh's defaults
+/// ([`DEFAULT_QUEUE_SIZE`] batches of [`BATCH_BYTES`]); see
+/// [`outbound_channel_with_capacity`].
 pub fn outbound_channel() -> (OutboundTx, OutboundRx) {
+    outbound_channel_with_capacity([DEFAULT_QUEUE_SIZE; Priority::NUM], BATCH_BYTES)
+}
+
+/// zenoh's default queue size per priority, in batches: 2 for every band
+/// (`commons/zenoh-config/src/defaults.rs` @ `impl Default for QueueSizeConf {`).
+pub const DEFAULT_QUEUE_SIZE: usize = 2;
+
+/// zenoh's default batch size, the unit a queue size counts in
+/// (`BatchSize::MAX`).
+pub const BATCH_BYTES: usize = u16::MAX as usize;
+
+/// R2921 — [`outbound_channel`] with each lane holding at most
+/// `queue_size[priority]` batches of `batch_bytes`.
+///
+/// zenoh bounds each priority queue by a pool of `queue_size` batches: a
+/// producer that finds no free batch waits for the consumer to return one
+/// (`io/zenoh-transport/src/common/pipeline.rs` @ `// Wait for an available batch until deadline`).
+/// wz hands the writer FRAMES, and outside a batch window every network
+/// message is its own frame, where zenoh coalesces a burst of small messages
+/// into one batch; counting the bound in frames would therefore congest a
+/// burst zenoh absorbs. The bound is counted in BYTES instead —
+/// `queue_size * batch_bytes` — which is the room zenoh's batches hold.
+///
+/// A frame occupies its lane from enqueue until the writer asks for the NEXT
+/// frame, which is when the one it was given has been written: zenoh returns
+/// a batch to the pool after the tx task writes it, so a batch in flight
+/// still counts against the bound.
+///
+/// Only [`OutboundTx::wait_for_room`] consults the bound. [`OutboundTx::send`]
+/// always enqueues: the frames that must never wait (a keepalive, a close)
+/// take it as they are, and a sender that must honour congestion asks for
+/// room first.
+pub fn outbound_channel_with_capacity(
+    queue_size: [usize; Priority::NUM],
+    batch_bytes: usize,
+) -> (OutboundTx, OutboundRx) {
     let shared = Arc::new(Lanes {
         state: Mutex::new(LaneState {
             lanes: std::array::from_fn(|_| VecDeque::new()),
+            capacity: queue_size.map(|n| n * batch_bytes),
+            occupied: [0; Priority::NUM],
+            in_flight: None,
             closed: false,
             senders: 1,
         }),
         ready: Notify::new(),
+        room: Condvar::new(),
     });
     (
         OutboundTx {
@@ -111,10 +155,20 @@ struct Lanes {
     state: Mutex<LaneState>,
     /// Wakes the (single) writer when a frame lands or the last sender goes.
     ready: Notify,
+    /// Wakes senders waiting for room when the writer frees some, or the
+    /// queue closes.
+    room: Condvar,
 }
 
 struct LaneState {
     lanes: [VecDeque<Vec<u8>>; Priority::NUM],
+    /// Each lane's bound, in bytes.
+    capacity: [usize; Priority::NUM],
+    /// Each lane's bytes queued or in flight.
+    occupied: [usize; Priority::NUM],
+    /// The frame the writer holds, as `(lane, bytes)`: still occupying its
+    /// lane until the writer asks for the next one.
+    in_flight: Option<(usize, usize)>,
     /// No further enqueue lands — set by the receiver's `close` (the seal).
     closed: bool,
     /// Live `OutboundTx` clones; the queue is finished once this reaches 0
@@ -123,9 +177,45 @@ struct LaneState {
 }
 
 impl LaneState {
-    fn pop_highest_priority(&mut self) -> Option<Vec<u8>> {
-        self.lanes.iter_mut().find_map(VecDeque::pop_front)
+    /// Take the next frame, highest priority first, after releasing the one
+    /// the writer held. Returns whether room was freed, so the caller wakes
+    /// senders waiting for it.
+    fn take_next(&mut self) -> (Option<Vec<u8>>, bool) {
+        let freed = self.release_in_flight();
+        let next = self
+            .lanes
+            .iter_mut()
+            .enumerate()
+            .find_map(|(lane, q)| q.pop_front().map(|f| (lane, f)));
+        match next {
+            Some((lane, frame)) => {
+                self.in_flight = Some((lane, frame.len()));
+                (Some(frame), freed)
+            }
+            None => (None, freed),
+        }
     }
+
+    fn release_in_flight(&mut self) -> bool {
+        match self.in_flight.take() {
+            Some((lane, bytes)) => {
+                self.occupied[lane] = self.occupied[lane].saturating_sub(bytes);
+                true
+            }
+            None => false,
+        }
+    }
+}
+
+/// R2921 — what [`OutboundTx::wait_for_room`] found.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Room {
+    /// The lane has room; the frame may be enqueued.
+    Free,
+    /// The lane stayed full for the whole wait.
+    Congested,
+    /// The queue is closed; nothing more will be written.
+    Closed,
 }
 
 /// The receiver half of [`outbound_channel`] was closed (the queue sealed),
@@ -146,16 +236,59 @@ pub struct OutboundTx {
 }
 
 impl OutboundTx {
-    /// Enqueue `frame` on `priority`'s lane.
+    /// Enqueue `frame` on `priority`'s lane, whatever the lane holds.
     pub fn send(&self, priority: Priority, frame: Vec<u8>) -> Result<(), OutboundClosed> {
         let mut st = self.shared.state.lock().expect("outbound lanes poisoned");
         if st.closed {
             return Err(OutboundClosed(frame));
         }
-        st.lanes[priority.wire_byte() as usize].push_back(frame);
+        let lane = priority.wire_byte() as usize;
+        st.occupied[lane] += frame.len();
+        st.lanes[lane].push_back(frame);
         drop(st);
         self.shared.ready.notify_one();
         Ok(())
+    }
+
+    /// R2921 — wait up to `wait` for `priority`'s lane to have room, zenoh's
+    /// "wait for an available batch until deadline". A lane has room while
+    /// what it holds is under its bound; a frame then takes it even if it
+    /// carries the lane past the bound, as a batch that exists is filled
+    /// whole. `Duration::ZERO` asks without waiting.
+    pub fn wait_for_room(&self, priority: Priority, wait: Duration) -> Room {
+        let lane = priority.wire_byte() as usize;
+        let deadline = Instant::now() + wait;
+        let mut st = self.shared.state.lock().expect("outbound lanes poisoned");
+        loop {
+            if st.closed {
+                return Room::Closed;
+            }
+            if st.occupied[lane] < st.capacity[lane] {
+                return Room::Free;
+            }
+            let now = Instant::now();
+            if now >= deadline {
+                return Room::Congested;
+            }
+            st = self
+                .shared
+                .room
+                .wait_timeout(st, deadline - now)
+                .expect("outbound lanes poisoned")
+                .0;
+        }
+    }
+
+    /// [`Self::wait_for_room`] in the terms of the session's link seam
+    /// (`BoxedLinkDriver::wait_for_room`), which every write driver over this
+    /// queue answers with.
+    pub fn link_room(&self, priority: Priority, wait_us: u64) -> wz_session_core::link::LinkRoom {
+        use wz_session_core::link::LinkRoom;
+        match self.wait_for_room(priority, Duration::from_micros(wait_us)) {
+            Room::Free => LinkRoom::Free,
+            Room::Congested => LinkRoom::Congested,
+            Room::Closed => LinkRoom::Gone,
+        }
     }
 
     /// Whether the receiving side has closed the queue.
@@ -202,6 +335,9 @@ pub struct OutboundRx {
 impl OutboundRx {
     /// The next frame, highest priority first; `None` once the queue is
     /// finished — closed or sender-less, and empty.
+    ///
+    /// Asking for the next frame is also what says the previous one has been
+    /// written: its bytes leave the lane's bound here.
     pub async fn recv(&mut self) -> Option<Vec<u8>> {
         loop {
             let notified = self.shared.ready.notified();
@@ -209,11 +345,14 @@ impl OutboundRx {
             notified.as_mut().enable();
             {
                 let mut st = self.shared.state.lock().expect("outbound lanes poisoned");
-                if let Some(frame) = st.pop_highest_priority() {
-                    return Some(frame);
+                let (frame, freed) = st.take_next();
+                let finished = frame.is_none() && (st.closed || st.senders == 0);
+                drop(st);
+                if freed {
+                    self.shared.room.notify_all();
                 }
-                if st.closed || st.senders == 0 {
-                    return None;
+                if frame.is_some() || finished {
+                    return frame;
                 }
             }
             notified.await;
@@ -222,20 +361,27 @@ impl OutboundRx {
 
     /// The next frame if one is queued right now, highest priority first.
     pub fn try_recv(&mut self) -> Option<Vec<u8>> {
-        self.shared
+        let (frame, freed) = self
+            .shared
             .state
             .lock()
             .expect("outbound lanes poisoned")
-            .pop_highest_priority()
+            .take_next();
+        if freed {
+            self.shared.room.notify_all();
+        }
+        frame
     }
 
     /// Stop accepting frames; the ones already queued stay to be received.
+    /// A sender waiting for room is told the queue is closed.
     pub fn close(&mut self) {
         self.shared
             .state
             .lock()
             .expect("outbound lanes poisoned")
             .closed = true;
+        self.shared.room.notify_all();
     }
 }
 
@@ -695,6 +841,77 @@ mod tests {
             order.push(String::from_utf8(frame).expect("ascii"));
         }
         assert_eq!(order, ["ctl", "rt", "data", "bg-1", "bg-2"]);
+    }
+
+    /// R2921 — a lane is bounded, the bound is its own, and a frame keeps its
+    /// place in the bound until the writer asks for the next one (zenoh returns
+    /// a batch to the pool only after writing it).
+    #[test]
+    fn a_full_lane_has_room_again_only_once_its_frame_is_written() {
+        let (tx, mut rx) = outbound_channel_with_capacity([1; Priority::NUM], 10);
+        assert_eq!(tx.wait_for_room(Priority::Data, Duration::ZERO), Room::Free);
+        tx.send(Priority::Data, vec![0u8; 10]).expect("enqueue");
+        assert_eq!(
+            tx.wait_for_room(Priority::Data, Duration::ZERO),
+            Room::Congested,
+            "the lane holds its whole bound"
+        );
+        assert_eq!(
+            tx.wait_for_room(Priority::RealTime, Duration::ZERO),
+            Room::Free,
+            "another lane's bound is its own"
+        );
+        assert!(rx.try_recv().is_some(), "the writer takes the frame");
+        assert_eq!(
+            tx.wait_for_room(Priority::Data, Duration::ZERO),
+            Room::Congested,
+            "a frame being written still counts"
+        );
+        assert!(rx.try_recv().is_none(), "the writer asks for the next");
+        assert_eq!(tx.wait_for_room(Priority::Data, Duration::ZERO), Room::Free);
+    }
+
+    /// A sender waiting for room is woken by the writer freeing it, well inside
+    /// its wait; one whose wait runs out is told the lane is congested; and
+    /// one waiting when the queue closes is told so.
+    #[test]
+    fn a_waiting_sender_is_woken_by_room_and_released_by_its_deadline() {
+        let (tx, mut rx) = outbound_channel_with_capacity([1; Priority::NUM], 4);
+        tx.send(Priority::Data, vec![1u8; 4]).expect("enqueue");
+
+        let started = Instant::now();
+        assert_eq!(
+            tx.wait_for_room(Priority::Data, Duration::from_millis(30)),
+            Room::Congested
+        );
+        assert!(started.elapsed() >= Duration::from_millis(30), "it waited");
+
+        let waiter = {
+            let tx = tx.clone();
+            std::thread::spawn(move || {
+                let started = Instant::now();
+                let room = tx.wait_for_room(Priority::Data, Duration::from_secs(10));
+                (room, started.elapsed())
+            })
+        };
+        std::thread::sleep(Duration::from_millis(20));
+        assert!(rx.try_recv().is_some());
+        assert!(
+            rx.try_recv().is_none(),
+            "the written frame leaves the bound"
+        );
+        let (room, waited) = waiter.join().expect("waiter");
+        assert_eq!(room, Room::Free);
+        assert!(waited < Duration::from_secs(5), "woken, not timed out");
+
+        tx.send(Priority::Data, vec![1u8; 4]).expect("enqueue");
+        let waiter = {
+            let tx = tx.clone();
+            std::thread::spawn(move || tx.wait_for_room(Priority::Data, Duration::from_secs(10)))
+        };
+        std::thread::sleep(Duration::from_millis(20));
+        rx.close();
+        assert_eq!(waiter.join().expect("waiter"), Room::Closed);
     }
 
     /// Within one priority the lane is FIFO: two conduits' frames minted in SN

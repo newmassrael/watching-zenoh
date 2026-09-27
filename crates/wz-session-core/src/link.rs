@@ -411,6 +411,17 @@ pub enum LinkDropCause {
     WriterGone,
 }
 
+/// R2921 — what [`BoxedLinkDriver::wait_for_room`] found.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LinkRoom {
+    /// The queue has room; build and send the frame.
+    Free,
+    /// The queue stayed full for the whole wait — zenoh's congestion.
+    Congested,
+    /// The writer is gone; nothing more will be written on this link.
+    Gone,
+}
+
 /// Synchronous outbound link-write seam the session FSM action layer
 /// drives. The FSM's link sink (`R::LinkSink`, resolved through
 /// [`SessionRuntime::link_driver`]) decouples the runtime-agnostic
@@ -464,6 +475,17 @@ pub trait BoxedLinkDriver {
     ) -> LinkSendOutcome {
         let _ = priority;
         self.send_blocking(bytes, reliability)
+    }
+
+    /// R2921 — wait up to `wait_us` microseconds for room on `priority`'s
+    /// outbound queue: zenoh's "wait for an available batch until deadline",
+    /// asked BEFORE a frame is built so a sender that gives up has spent no
+    /// sequence number. A driver whose writer drains a bounded queue answers
+    /// from it; a driver that writes synchronously (the MCU sockets) has no
+    /// queue to fill, and the default says there is always room.
+    fn wait_for_room(&self, priority: crate::qos::Priority, wait_us: u64) -> LinkRoom {
+        let _ = (priority, wait_us);
+        LinkRoom::Free
     }
 
     fn open_blocking(&self);
