@@ -1146,7 +1146,14 @@ CITATION = re.compile(r"\b((?:[A-Za-z0-9_.-]+/)*[A-Za-z0-9_.-]+\.(?:rs|c|h))(?::
 # target by the endpoint's identity, witnessed over unixsock against a stock
 # zenohd with a red control. UNREACHED and NO_SYMBOL hold at 2 and 2. READ off
 # the census's own FAIL line, `reached: 8 against a pin of 9`.
-PIN_REACHED = 8
+#
+# R2904 — 8 -> 7. `routing-peer` RETIRES to COMPLETE: its last residual, the
+# peer-to-gateway pull mode (open-debt item 828), is built across R2901-R2904
+# (the gateway data and query routes, the broker's every-plane interests, and
+# the finalized withhold), each witnessed against a stock zenohd, the withhold
+# with a red control. UNREACHED and NO_SYMBOL hold at 2 and 2. READ off the
+# census's own FAIL line, `reached: 7 against a pin of 8`.
+PIN_REACHED = 7
 PIN_UNREACHED = 2
 PIN_NO_SYMBOL = 2
 # R2534 — 346 -> 347. The atom is `adminspace-metrics` and the citation is the
@@ -2222,7 +2229,16 @@ PIN_NO_SYMBOL = 2
 # cites two wz files for the dial clause it closes, 13 -> 15. 60 - 15 + 2 = 47,
 # ATTRIBUTED by the per-atom `citation_audit` and READ off the census's own
 # FAIL line, `wz citations: 47 against a pin of 60`, PIN_AMBIGUOUS at 12.
-PIN_WZ_CITATIONS = 47
+#
+# R2904 — 47 -> 32, and the 47 was already stale by five. R2901, R2902 and R2903
+# each prepended a CORRECTION to `routing-peer`'s PARTIAL reason citing wz files,
+# 15 -> 20, and none moved this pin: the census is not a pre-push gate, so the
+# three pushes went out green and the hosted runs carried the red, `wz
+# citations: 52 against a pin of 47`. `routing-peer` is now COMPLETE and all 20
+# of its citations leave the census with it: 52 - 20 = 32, ATTRIBUTED by the
+# per-atom `citation_audit` and READ off the census's own FAIL line, `wz
+# citations: 32 against a pin of 47`, PIN_AMBIGUOUS holding.
+PIN_WZ_CITATIONS = 32
 # R2626 — 44 -> 42, and this one is worth a sentence because it HELD through
 # every earlier retirement in this run (R2612, R2622). `time-hlc`'s reason is the
 # first retiree carrying AMBIGUOUS citations of its own: its oldest clauses cite
