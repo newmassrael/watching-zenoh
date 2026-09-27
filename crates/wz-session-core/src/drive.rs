@@ -951,8 +951,14 @@ pub fn check_out_of_band<R: SessionRuntime, T: TimeSource>(
     if check_requested_close(actions, engine) {
         return true;
     }
-    #[cfg(not(feature = "session-close-ingress"))]
-    let _ = (actions, engine);
+    // R2923 — a sender's blocking message found no room in `wait_before_close`:
+    // the statechart's `tx.congestion.exhaust -> Closing` with
+    // `set_close_reason_unresponsive`, which nothing raised before.
+    if actions.take_congestion_close() {
+        use crate::session_fsm_unicast::SessionFsmUnicastEvent as E;
+        engine.process_event(E::TxCongestionExhaust);
+        return true;
+    }
     false
 }
 

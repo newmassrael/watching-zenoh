@@ -4243,6 +4243,172 @@ mod link_priority_tests {
     }
 }
 
+/// R2923 — the session's CONGESTION decision (zenoh's `push_network_message`
+/// and `handle_push_result`): before a data frame's sequence number is minted
+/// the link is asked for room, a droppable message it has none for is dropped
+/// with no sequence number spent, and a blocking one asks the drive loop to
+/// close the session as unresponsive.
+#[cfg(all(
+    test,
+    feature = "codec-push",
+    feature = "codec-frame",
+    feature = "declare-keyexpr"
+))]
+mod link_congestion_tests {
+    use std::sync::{Arc, Mutex};
+
+    use wz_session_core::link::{LinkRoom, RoomWait};
+    use wz_session_core::qos::Priority;
+
+    /// A link whose room is whatever the test says, recording what the session
+    /// asked it and the frames it was handed.
+    struct CongestibleLink {
+        room: Mutex<LinkRoom>,
+        asked: Mutex<Vec<RoomWait>>,
+        frames: Mutex<Vec<Vec<u8>>>,
+    }
+
+    impl CongestibleLink {
+        fn new() -> Arc<Self> {
+            Arc::new(Self {
+                room: Mutex::new(LinkRoom::Free),
+                asked: Mutex::new(Vec::new()),
+                frames: Mutex::new(Vec::new()),
+            })
+        }
+        fn set_room(&self, room: LinkRoom) {
+            *self.room.lock().expect("room") = room;
+        }
+        fn frames(&self) -> Vec<Vec<u8>> {
+            self.frames.lock().expect("frames").clone()
+        }
+        fn last_asked(&self) -> Option<RoomWait> {
+            self.asked.lock().expect("asked").last().copied()
+        }
+    }
+
+    impl super::BoxedLinkDriver for CongestibleLink {
+        fn send_blocking(
+            &self,
+            bytes: &[u8],
+            _reliability: crate::Reliability,
+        ) -> super::LinkSendOutcome {
+            self.frames.lock().expect("frames").push(bytes.to_vec());
+            super::LinkSendOutcome::Sent
+        }
+        fn wait_for_room(&self, _priority: Priority, wait: RoomWait) -> LinkRoom {
+            self.asked.lock().expect("asked").push(wait);
+            *self.room.lock().expect("room")
+        }
+        fn open_blocking(&self) {}
+        fn close_blocking(&self) {}
+    }
+
+    /// A session over `link` whose first frame carries SN 7, so a frame's SN
+    /// is its second byte.
+    fn session(link: Arc<CongestibleLink>) -> Arc<super::SessionLinkActions> {
+        let mut params = wz_runtime_tokio_test_support::fixture_session_init_params();
+        params.initial_sn = 7;
+        super::new_session_actions(link, params, crate::runtime_impl::TokioTime::new())
+    }
+
+    /// A droppable Push (its ext_qos says `Drop`, upstream's default for a put)
+    /// that finds no room is DROPPED: nothing reaches the link, the caller is
+    /// answered `Ok` as upstream's put is, and the next frame carries the very
+    /// sequence number the dropped one would have — no gap for the peer's
+    /// reliable channel to stall on. It asked for `wait_before_drop`.
+    #[test]
+    fn a_droppable_message_the_link_has_no_room_for_is_dropped_without_spending_a_sequence_number()
+    {
+        let link = CongestibleLink::new();
+        let actions = session(link.clone());
+        actions
+            .send_push_literal_qos("home/a", b"A", true, Priority::DEFAULT)
+            .expect("first push");
+        assert_eq!(link.frames().len(), 1);
+        assert_eq!(link.frames()[0][1], 7, "the first frame carries SN 7");
+
+        link.set_room(LinkRoom::Congested);
+        actions
+            .send_push_literal_qos("home/b", b"B", true, Priority::DEFAULT)
+            .expect("a congestion drop is not the caller's error");
+        assert_eq!(
+            link.last_asked(),
+            Some(RoomWait::Drop {
+                wait_us: wz_session_core::session_actions::WAIT_BEFORE_DROP_US
+            }),
+            "a droppable message waits `wait_before_drop` and may be dropped"
+        );
+        assert_eq!(
+            link.frames().len(),
+            1,
+            "the dropped message reached no link"
+        );
+        assert!(
+            !actions.take_congestion_close(),
+            "dropping a droppable message closes nothing"
+        );
+
+        link.set_room(LinkRoom::Free);
+        actions
+            .send_push_literal_qos("home/c", b"C", true, Priority::DEFAULT)
+            .expect("third push");
+        assert_eq!(link.frames().len(), 2);
+        assert_eq!(
+            link.frames()[1][1],
+            8,
+            "the drop spent no sequence number: the next frame carries SN 8"
+        );
+    }
+
+    /// A Declare may not be dropped (its ext_qos says `Block`, upstream's
+    /// `QoSType::DECLARE`). One that finds no room in `wait_before_close`
+    /// reaches no link either, and stages the session's congestion close for
+    /// the drive loop to raise — once.
+    #[test]
+    fn a_blocking_message_the_link_has_no_room_for_asks_the_loop_to_close_the_session() {
+        let link = CongestibleLink::new();
+        let actions = session(link.clone());
+        link.set_room(LinkRoom::Congested);
+        actions
+            .send_declare_keyexpr(1, "home/k")
+            .expect("the declare is refused by no gate of its own");
+        assert_eq!(
+            link.last_asked(),
+            Some(RoomWait::Block {
+                wait_us: wz_session_core::session_actions::WAIT_BEFORE_CLOSE_US
+            }),
+            "a blocking message waits `wait_before_close`"
+        );
+        assert!(link.frames().is_empty(), "nothing reached the link");
+        assert!(
+            actions.take_congestion_close(),
+            "the congestion close is staged for the loop"
+        );
+        assert!(!actions.take_congestion_close(), "and taken once");
+    }
+
+    /// The counts are upstream's: a congestion drop is `n_dropped` and NOT
+    /// `n_msgs`, which counts pushed messages only
+    /// (`io/zenoh-transport/src/unicast/universal/tx.rs` @ `if pushed {`).
+    #[cfg(feature = "transport-stats")]
+    #[test]
+    fn a_congestion_drop_counts_as_dropped_and_not_as_sent() {
+        let link = CongestibleLink::new();
+        let actions = session(link.clone());
+        actions
+            .send_push_literal_qos("home/a", b"A", true, Priority::DEFAULT)
+            .expect("pushed");
+        link.set_room(LinkRoom::Congested);
+        actions
+            .send_push_literal_qos("home/b", b"B", true, Priority::DEFAULT)
+            .expect("dropped");
+        let tx = actions.stats_report().tx;
+        assert_eq!(tx.n_msgs.iter().sum::<usize>(), 1, "one message was pushed");
+        assert_eq!(tx.n_dropped, 1, "one was dropped for congestion");
+    }
+}
+
 /// A4 (session-reconnect) — declaration-cache + transport-replacement
 /// behavioural guards. zenoh-pico `Z_FEATURE_AUTO_RECONNECT` parity at the
 /// actions tier: declares append cache entries (`_z_cache_declaration`),
@@ -4835,6 +5001,83 @@ mod reconnect_tx_tests {
             "post-swap emits land on the new sink"
         );
         assert_eq!(second.frame_bytes(0), b"frame-b".to_vec());
+    }
+
+    /// R2923 — both swap seams forward every write-side question to the LIVE
+    /// link, not only its bytes: the priority a frame is queued at, the room
+    /// its lane has, and the link's MTU. They used to take the trait defaults
+    /// for all three, so a reconnecting session's frames reached its link at
+    /// `Priority::DEFAULT` and its link was never congested.
+    #[test]
+    fn both_swap_seams_forward_priority_room_and_mtu_to_the_live_link() {
+        use std::sync::Mutex;
+        use wz_session_core::link::{BoxedLinkDriver as _, LinkRoom, LinkSendOutcome, RoomWait};
+        use wz_session_core::qos::Priority;
+        use wz_session_core::reconnect::LocalSwappableLink;
+        use wz_session_core::reliability::Reliability;
+
+        /// Answers every question differently from the trait's defaults.
+        #[derive(Default)]
+        struct Opinionated {
+            priorities: Mutex<Vec<Priority>>,
+        }
+        impl super::BoxedLinkDriver for Opinionated {
+            fn send_blocking(&self, bytes: &[u8], reliability: Reliability) -> LinkSendOutcome {
+                self.send_prioritized(bytes, reliability, Priority::DEFAULT)
+            }
+            fn send_prioritized(
+                &self,
+                _bytes: &[u8],
+                _reliability: Reliability,
+                priority: Priority,
+            ) -> LinkSendOutcome {
+                self.priorities.lock().expect("priorities").push(priority);
+                LinkSendOutcome::Sent
+            }
+            fn wait_for_room(&self, _priority: Priority, _wait: RoomWait) -> LinkRoom {
+                LinkRoom::Congested
+            }
+            fn link_mtu(&self) -> usize {
+                1234
+            }
+            fn open_blocking(&self) {}
+            fn close_blocking(&self) {}
+        }
+
+        let wait = RoomWait::Drop { wait_us: 0 };
+        let live = Arc::new(Opinionated::default());
+        let shared = SwappableLink::<TokioRuntime>::new(Arc::new(Opinionated::default()));
+        let _ = shared.swap(live.clone());
+        assert_eq!(
+            shared.send_prioritized(b"f", Reliability::Reliable, Priority::RealTime),
+            LinkSendOutcome::Sent
+        );
+        assert_eq!(
+            shared.wait_for_room(Priority::RealTime, wait),
+            LinkRoom::Congested
+        );
+        assert_eq!(shared.link_mtu(), 1234);
+        assert_eq!(
+            *live.priorities.lock().expect("priorities"),
+            [Priority::RealTime]
+        );
+
+        let local_live = Arc::new(Opinionated::default());
+        let local = LocalSwappableLink::<TokioRuntime>::new(Arc::new(Opinionated::default()));
+        let _ = local.swap(local_live.clone());
+        assert_eq!(
+            local.send_prioritized(b"f", Reliability::Reliable, Priority::Background),
+            LinkSendOutcome::Sent
+        );
+        assert_eq!(
+            local.wait_for_room(Priority::Background, wait),
+            LinkRoom::Congested
+        );
+        assert_eq!(local.link_mtu(), 1234);
+        assert_eq!(
+            *local_live.priorities.lock().expect("priorities"),
+            [Priority::Background]
+        );
     }
 }
 

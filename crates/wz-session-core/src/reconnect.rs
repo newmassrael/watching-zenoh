@@ -400,6 +400,40 @@ where
         })
     }
 
+    // R2923 — the swap seam forwards EVERY write-side question the session
+    // asks, not only the bytes. Without these two a reconnecting session's
+    // frames all reached the live link at `send_blocking`'s priority, so its
+    // writer could not order them (R2919), and its link was never congested,
+    // so a message could neither be dropped nor close the session (R2923).
+    fn send_prioritized(
+        &self,
+        bytes: &[u8],
+        reliability: Reliability,
+        priority: crate::qos::Priority,
+    ) -> LinkSendOutcome {
+        R::with_mutex_mut(&self.inner, |sink| {
+            R::link_driver(sink).send_prioritized(bytes, reliability, priority)
+        })
+    }
+
+    fn wait_for_room(
+        &self,
+        priority: crate::qos::Priority,
+        wait: crate::link::RoomWait,
+    ) -> crate::link::LinkRoom {
+        // The wait may last `wait_before_close`, so it runs on a clone of the
+        // live sink and NOT under the swap lock: holding the lock would stall
+        // every other priority's sender, and the supervisor's swap, behind one
+        // congested lane. A swap during the wait closes the old link's queue,
+        // which answers the waiter `Gone`.
+        let sink = R::with_mutex_mut(&self.inner, |sink| sink.clone());
+        R::link_driver(&sink).wait_for_room(priority, wait)
+    }
+
+    fn link_mtu(&self) -> usize {
+        R::with_mutex_mut(&self.inner, |sink| R::link_driver(sink).link_mtu())
+    }
+
     fn open_blocking(&self) {
         R::with_mutex_mut(&self.inner, |sink| {
             R::link_driver(sink).open_blocking();
@@ -461,6 +495,31 @@ impl<R: SessionRuntime> BoxedLinkDriver for LocalSwappableLink<R> {
     fn send_blocking(&self, bytes: &[u8], reliability: Reliability) -> LinkSendOutcome {
         // R2371 — forwards, for the same reason as the `SwappableLink` twin.
         R::link_driver(&self.inner.borrow()).send_blocking(bytes, reliability)
+    }
+
+    // R2923 — forwarded, for the same reason as the `SwappableLink` twin.
+    fn send_prioritized(
+        &self,
+        bytes: &[u8],
+        reliability: Reliability,
+        priority: crate::qos::Priority,
+    ) -> LinkSendOutcome {
+        R::link_driver(&self.inner.borrow()).send_prioritized(bytes, reliability, priority)
+    }
+
+    fn wait_for_room(
+        &self,
+        priority: crate::qos::Priority,
+        wait: crate::link::RoomWait,
+    ) -> crate::link::LinkRoom {
+        // A clone, as in the twin, so a swap during the wait is not a
+        // `RefCell` borrow conflict.
+        let sink = self.inner.borrow().clone();
+        R::link_driver(&sink).wait_for_room(priority, wait)
+    }
+
+    fn link_mtu(&self) -> usize {
+        R::link_driver(&self.inner.borrow()).link_mtu()
     }
 
     fn open_blocking(&self) {

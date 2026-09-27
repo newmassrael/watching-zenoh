@@ -66,6 +66,7 @@ use std::time::{Duration, Instant};
 
 use tokio::sync::{watch, Notify};
 use tokio::time::timeout;
+use wz_session_core::link::RoomWait;
 use wz_session_core::qos::Priority;
 
 use crate::runtime_impl::TokioJoinHandle;
@@ -136,6 +137,7 @@ pub fn outbound_channel_with_capacity(
             lanes: std::array::from_fn(|_| VecDeque::new()),
             capacity: queue_size.map(|n| n * batch_bytes),
             occupied: [0; Priority::NUM],
+            congested: [false; Priority::NUM],
             in_flight: None,
             closed: false,
             senders: 1,
@@ -166,6 +168,12 @@ struct LaneState {
     capacity: [usize; Priority::NUM],
     /// Each lane's bytes queued or in flight.
     occupied: [usize; Priority::NUM],
+    /// R2923 — each lane's CONGESTED mark, zenoh's per-priority
+    /// `set_congested`: raised when a wait for room on the lane runs out,
+    /// lowered when the writer frees some of it (zenoh's `refill`) or a later
+    /// wait finds room. While it stands a droppable message is dropped without
+    /// waiting.
+    congested: [bool; Priority::NUM],
     /// The frame the writer holds, as `(lane, bytes)`: still occupying its
     /// lane until the writer asks for the next one.
     in_flight: Option<(usize, usize)>,
@@ -196,10 +204,35 @@ impl LaneState {
         }
     }
 
+    /// R2923 — the answer to `wait` on `lane` if it needs no waiting: the
+    /// queue is closed, a droppable message meets the congested mark, the
+    /// lane has room, or the request may not wait at all. `None` means the
+    /// caller has to wait for the writer.
+    fn room_at_once(&mut self, lane: usize, wait: RoomWait) -> Option<Room> {
+        if self.closed {
+            return Some(Room::Closed);
+        }
+        if wait.is_droppable() && self.congested[lane] {
+            return Some(Room::Congested);
+        }
+        if self.occupied[lane] < self.capacity[lane] {
+            self.congested[lane] = false;
+            return Some(Room::Free);
+        }
+        if wait.wait_us() == 0 {
+            self.congested[lane] = true;
+            return Some(Room::Congested);
+        }
+        None
+    }
+
     fn release_in_flight(&mut self) -> bool {
         match self.in_flight.take() {
             Some((lane, bytes)) => {
                 self.occupied[lane] = self.occupied[lane].saturating_sub(bytes);
+                // zenoh lowers the mark when a written batch returns to its
+                // priority's pool (`fn refill(`), room or not.
+                self.congested[lane] = false;
                 true
             }
             None => false,
@@ -250,24 +283,39 @@ impl OutboundTx {
         Ok(())
     }
 
-    /// R2921 — wait up to `wait` for `priority`'s lane to have room, zenoh's
-    /// "wait for an available batch until deadline". A lane has room while
-    /// what it holds is under its bound; a frame then takes it even if it
-    /// carries the lane past the bound, as a batch that exists is filled
-    /// whole. `Duration::ZERO` asks without waiting.
-    pub fn wait_for_room(&self, priority: Priority, wait: Duration) -> Room {
+    /// R2921 — wait for `priority`'s lane to have room, zenoh's "wait for an
+    /// available batch until deadline". A lane has room while what it holds is
+    /// under its bound; a frame then takes it even if it carries the lane past
+    /// the bound, as a batch that exists is filled whole. A wait of zero asks
+    /// without waiting.
+    ///
+    /// R2923 — and the lane's congested mark decides whether a droppable
+    /// message waits at all, as zenoh's does
+    /// (`io/zenoh-transport/src/common/pipeline.rs` @
+    /// `if msg.is_droppable() && self.status.is_congested(priority) {`): while
+    /// the mark stands it is answered `Congested` at once. A wait that runs
+    /// out raises the mark, whichever kind of message it was; one that finds
+    /// room lowers it.
+    pub fn wait_for_room(&self, priority: Priority, wait: RoomWait) -> Room {
         let lane = priority.wire_byte() as usize;
-        let deadline = Instant::now() + wait;
+        let deadline = Instant::now() + Duration::from_micros(wait.wait_us());
         let mut st = self.shared.state.lock().expect("outbound lanes poisoned");
+        if let Some(room) = st.room_at_once(lane, wait) {
+            return room;
+        }
+        // Waiting now: the mark is consulted once, on entry, as zenoh consults
+        // it before it waits and not while it does.
         loop {
             if st.closed {
                 return Room::Closed;
             }
             if st.occupied[lane] < st.capacity[lane] {
+                st.congested[lane] = false;
                 return Room::Free;
             }
             let now = Instant::now();
             if now >= deadline {
+                st.congested[lane] = true;
                 return Room::Congested;
             }
             st = self
@@ -282,9 +330,37 @@ impl OutboundTx {
     /// [`Self::wait_for_room`] in the terms of the session's link seam
     /// (`BoxedLinkDriver::wait_for_room`), which every write driver over this
     /// queue answers with.
-    pub fn link_room(&self, priority: Priority, wait_us: u64) -> wz_session_core::link::LinkRoom {
+    pub fn link_room(&self, priority: Priority, wait: RoomWait) -> wz_session_core::link::LinkRoom {
         use wz_session_core::link::LinkRoom;
-        match self.wait_for_room(priority, Duration::from_micros(wait_us)) {
+        // R2923 — a sender that has to WAIT is usually on a runtime worker, and
+        // the writer that would free the lane may be queued behind it on that
+        // same worker. On a multi-thread runtime the wait therefore releases
+        // the worker (`block_in_place`), as zenoh's blocking put does; a request
+        // the lane can answer at once never leaves it. A current-thread runtime
+        // has no second worker to hand the task to, so there the wait runs to
+        // its deadline — the congestion verdict it was asked for.
+        let at_once = self
+            .shared
+            .state
+            .lock()
+            .expect("outbound lanes poisoned")
+            .room_at_once(priority.wire_byte() as usize, wait);
+        let room = match at_once {
+            Some(room) => room,
+            None => {
+                let wait = || self.wait_for_room(priority, wait);
+                match tokio::runtime::Handle::try_current() {
+                    Ok(handle)
+                        if handle.runtime_flavor()
+                            == tokio::runtime::RuntimeFlavor::MultiThread =>
+                    {
+                        tokio::task::block_in_place(wait)
+                    }
+                    _ => wait(),
+                }
+            }
+        };
+        match room {
             Room::Free => LinkRoom::Free,
             Room::Congested => LinkRoom::Congested,
             Room::Closed => LinkRoom::Gone,
@@ -846,29 +922,101 @@ mod tests {
     /// R2921 — a lane is bounded, the bound is its own, and a frame keeps its
     /// place in the bound until the writer asks for the next one (zenoh returns
     /// a batch to the pool only after writing it).
+    /// A blocking message's request, waiting up to `wait`.
+    fn block(wait: Duration) -> RoomWait {
+        RoomWait::Block {
+            wait_us: wait.as_micros() as u64,
+        }
+    }
+
+    /// A droppable message's request, waiting up to `wait`.
+    fn droppable(wait: Duration) -> RoomWait {
+        RoomWait::Drop {
+            wait_us: wait.as_micros() as u64,
+        }
+    }
+
     #[test]
     fn a_full_lane_has_room_again_only_once_its_frame_is_written() {
         let (tx, mut rx) = outbound_channel_with_capacity([1; Priority::NUM], 10);
-        assert_eq!(tx.wait_for_room(Priority::Data, Duration::ZERO), Room::Free);
+        assert_eq!(
+            tx.wait_for_room(Priority::Data, block(Duration::ZERO)),
+            Room::Free
+        );
         tx.send(Priority::Data, vec![0u8; 10]).expect("enqueue");
         assert_eq!(
-            tx.wait_for_room(Priority::Data, Duration::ZERO),
+            tx.wait_for_room(Priority::Data, block(Duration::ZERO)),
             Room::Congested,
             "the lane holds its whole bound"
         );
         assert_eq!(
-            tx.wait_for_room(Priority::RealTime, Duration::ZERO),
+            tx.wait_for_room(Priority::RealTime, block(Duration::ZERO)),
             Room::Free,
             "another lane's bound is its own"
         );
         assert!(rx.try_recv().is_some(), "the writer takes the frame");
         assert_eq!(
-            tx.wait_for_room(Priority::Data, Duration::ZERO),
+            tx.wait_for_room(Priority::Data, block(Duration::ZERO)),
             Room::Congested,
             "a frame being written still counts"
         );
         assert!(rx.try_recv().is_none(), "the writer asks for the next");
-        assert_eq!(tx.wait_for_room(Priority::Data, Duration::ZERO), Room::Free);
+        assert_eq!(
+            tx.wait_for_room(Priority::Data, block(Duration::ZERO)),
+            Room::Free
+        );
+    }
+
+    /// R2923 — once a wait on a lane runs out the lane is marked congested,
+    /// and while the mark stands a DROPPABLE message is answered at once
+    /// instead of spending its wait; a blocking one still waits. The writer
+    /// freeing the lane lowers the mark (zenoh's `set_congested` / `refill`).
+    #[test]
+    fn a_congested_lane_answers_a_droppable_message_at_once_until_the_writer_frees_it() {
+        let (tx, mut rx) = outbound_channel_with_capacity([1; Priority::NUM], 4);
+        tx.send(Priority::Data, vec![1u8; 4]).expect("enqueue");
+        assert_eq!(
+            tx.wait_for_room(Priority::Data, droppable(Duration::from_millis(20))),
+            Room::Congested,
+            "the first droppable message waits its deadline out and finds none"
+        );
+
+        let started = Instant::now();
+        assert_eq!(
+            tx.wait_for_room(Priority::Data, droppable(Duration::from_secs(10))),
+            Room::Congested
+        );
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "a droppable message on a marked lane must not wait: it waited {:?}",
+            started.elapsed()
+        );
+        assert_eq!(
+            tx.wait_for_room(Priority::RealTime, droppable(Duration::ZERO)),
+            Room::Free,
+            "the mark is the lane's own"
+        );
+
+        let started = Instant::now();
+        assert_eq!(
+            tx.wait_for_room(Priority::Data, block(Duration::from_millis(30))),
+            Room::Congested
+        );
+        assert!(
+            started.elapsed() >= Duration::from_millis(30),
+            "a blocking message waits whatever the mark says"
+        );
+
+        assert!(rx.try_recv().is_some(), "the writer takes the frame");
+        assert!(
+            rx.try_recv().is_none(),
+            "and asks for the next: it is written"
+        );
+        assert_eq!(
+            tx.wait_for_room(Priority::Data, droppable(Duration::ZERO)),
+            Room::Free,
+            "the freed lane is no longer marked"
+        );
     }
 
     /// A sender waiting for room is woken by the writer freeing it, well inside
@@ -881,7 +1029,7 @@ mod tests {
 
         let started = Instant::now();
         assert_eq!(
-            tx.wait_for_room(Priority::Data, Duration::from_millis(30)),
+            tx.wait_for_room(Priority::Data, block(Duration::from_millis(30))),
             Room::Congested
         );
         assert!(started.elapsed() >= Duration::from_millis(30), "it waited");
@@ -890,7 +1038,7 @@ mod tests {
             let tx = tx.clone();
             std::thread::spawn(move || {
                 let started = Instant::now();
-                let room = tx.wait_for_room(Priority::Data, Duration::from_secs(10));
+                let room = tx.wait_for_room(Priority::Data, block(Duration::from_secs(10)));
                 (room, started.elapsed())
             })
         };
@@ -907,7 +1055,9 @@ mod tests {
         tx.send(Priority::Data, vec![1u8; 4]).expect("enqueue");
         let waiter = {
             let tx = tx.clone();
-            std::thread::spawn(move || tx.wait_for_room(Priority::Data, Duration::from_secs(10)))
+            std::thread::spawn(move || {
+                tx.wait_for_room(Priority::Data, block(Duration::from_secs(10)))
+            })
         };
         std::thread::sleep(Duration::from_millis(20));
         rx.close();

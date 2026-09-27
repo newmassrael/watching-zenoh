@@ -617,8 +617,12 @@ impl BoxedLinkDriver for StreamWriteDriver {
         self.send_prioritized(bytes, reliability, Priority::DEFAULT)
     }
 
-    fn wait_for_room(&self, priority: Priority, wait_us: u64) -> wz_session_core::link::LinkRoom {
-        self.tx.link_room(priority, wait_us)
+    fn wait_for_room(
+        &self,
+        priority: Priority,
+        wait: wz_session_core::link::RoomWait,
+    ) -> wz_session_core::link::LinkRoom {
+        self.tx.link_room(priority, wait)
     }
 
     fn send_prioritized(

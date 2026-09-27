@@ -102,9 +102,15 @@
 //! Upstream charges `tx_n_dropped` on `ReasonLabel::Congestion`
 //! (`commons/zenoh-stats/src/stats.rs` @ `ReasonLabel::Congestion`) — a message
 //! its priority queue refused because the queue was full and the message's
-//! congestion control was `Drop`. wz has no bounded TX queue to congest: the
-//! link writers are unbounded channels, so no wz message is ever dropped for
+//! congestion control was `Drop`. wz had no bounded TX queue to congest: the
+//! link writers were unbounded channels, so no wz message was ever dropped for
 //! congestion.
+//!
+//! R2923 — that is no longer so. The AP link writers' lanes are bounded
+//! (R2921), a message that finds no room on its lane is dropped, and that drop
+//! is charged here exactly as upstream charges it. The paragraph below is the
+//! reason the counter had BEFORE, and it still holds on top: wz also charges a
+//! write the link driver refuses, which upstream does not have.
 //!
 //! What wz DOES drop — and used to drop silently — is a write the LINK DRIVER
 //! refuses: an oversize datagram past the link MTU, or a write onto a closed
@@ -298,13 +304,12 @@ impl StatMessage {
 pub enum StatDrop {
     /// The TRANSPORT refused the write — this tree's `n_dropped` subject.
     ///
-    /// ⚠ Upstream's `n_dropped` is charged on `ReasonLabel::Congestion`, a
-    /// message its bounded priority queue refused. wz has no bounded TX queue,
-    /// so nothing here is ever dropped for congestion; what IS dropped is a
-    /// write the link driver refuses — an oversize datagram past the link MTU,
-    /// or a write onto a closed writer channel, both reported through
-    /// [`LinkSendOutcome`](crate::link::LinkSendOutcome). Same quantity
-    /// (transport messages that never reached the wire), same name, a reason
+    /// Upstream's `n_dropped` is charged on `ReasonLabel::Congestion`, a
+    /// message its bounded priority queue refused, and since R2923 wz charges
+    /// it there too: a message whose link lane had no room. ⚠ It is ALSO
+    /// charged on a write the link driver refuses — an oversize datagram past
+    /// the link MTU, or a write onto a closed writer channel, both reported
+    /// through [`LinkSendOutcome`](crate::link::LinkSendOutcome) — a reason
     /// upstream does not have. The module docs carry the full note.
     Transport,
     /// The downsampling interceptor rate-limited the message

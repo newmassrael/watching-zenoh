@@ -422,6 +422,48 @@ pub enum LinkRoom {
     Gone,
 }
 
+/// R2923 — how a sender asks [`BoxedLinkDriver::wait_for_room`] for room: the
+/// wait it may spend, and whether its message may be dropped.
+///
+/// The two differ in more than the wait. zenoh marks a priority queue
+/// CONGESTED once a push to it gives up, and while the mark stands a droppable
+/// message is dropped without waiting at all; a blocking message always waits
+/// out its deadline. The mark clears when the queue's consumer returns a batch
+/// (`io/zenoh-transport/src/common/pipeline.rs` @
+/// `if msg.is_droppable() && self.status.is_congested(priority) {` and
+/// @ `self.status.set_congested(priority, false);`). So the queue, which is
+/// where the mark lives, has to be told which kind of message is asking.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RoomWait {
+    /// A droppable message — best effort, or `CongestionControl::Drop` — that
+    /// may wait `wait_us` microseconds, and none while its queue is marked
+    /// congested.
+    Drop {
+        /// zenoh's `wait_before_drop`.
+        wait_us: u64,
+    },
+    /// A message that may not be dropped, waiting up to `wait_us`
+    /// microseconds whatever the mark says.
+    Block {
+        /// zenoh's `wait_before_close`.
+        wait_us: u64,
+    },
+}
+
+impl RoomWait {
+    /// The longest this request may wait, in microseconds.
+    pub const fn wait_us(self) -> u64 {
+        match self {
+            Self::Drop { wait_us } | Self::Block { wait_us } => wait_us,
+        }
+    }
+
+    /// Whether the message asking may be dropped.
+    pub const fn is_droppable(self) -> bool {
+        matches!(self, Self::Drop { .. })
+    }
+}
+
 /// Synchronous outbound link-write seam the session FSM action layer
 /// drives. The FSM's link sink (`R::LinkSink`, resolved through
 /// [`SessionRuntime::link_driver`]) decouples the runtime-agnostic
@@ -467,6 +509,11 @@ pub trait BoxedLinkDriver {
     /// queued behind lower-priority frames leaves before them. A driver that
     /// writes synchronously (the MCU sockets) has no queue to order, and the
     /// default hands straight to [`Self::send_blocking`].
+    ///
+    /// R2923 — a driver that WRAPS another must forward this: the default
+    /// would hand the inner driver every frame at `send_blocking`'s priority,
+    /// which is how a reconnecting session's frames all left at
+    /// `Priority::DEFAULT` from R2919 until the swap seam forwarded it.
     fn send_prioritized(
         &self,
         bytes: &[u8],
@@ -477,14 +524,19 @@ pub trait BoxedLinkDriver {
         self.send_blocking(bytes, reliability)
     }
 
-    /// R2921 — wait up to `wait_us` microseconds for room on `priority`'s
-    /// outbound queue: zenoh's "wait for an available batch until deadline",
-    /// asked BEFORE a frame is built so a sender that gives up has spent no
-    /// sequence number. A driver whose writer drains a bounded queue answers
-    /// from it; a driver that writes synchronously (the MCU sockets) has no
-    /// queue to fill, and the default says there is always room.
-    fn wait_for_room(&self, priority: crate::qos::Priority, wait_us: u64) -> LinkRoom {
-        let _ = (priority, wait_us);
+    /// R2921 — wait for room on `priority`'s outbound queue: zenoh's "wait for
+    /// an available batch until deadline", asked BEFORE a frame is built so a
+    /// sender that gives up has spent no sequence number. A driver whose
+    /// writer drains a bounded queue answers from it; a driver that writes
+    /// synchronously (the MCU sockets) has no queue to fill, and the default
+    /// says there is always room.
+    ///
+    /// R2923 — `wait` says how long, and whether the asking message may be
+    /// dropped, which decides whether a queue already marked congested makes
+    /// it wait at all (see [`RoomWait`]). A driver that WRAPS another must
+    /// forward this, or every session behind the wrapper is never congested.
+    fn wait_for_room(&self, priority: crate::qos::Priority, wait: RoomWait) -> LinkRoom {
+        let _ = (priority, wait);
         LinkRoom::Free
     }
 

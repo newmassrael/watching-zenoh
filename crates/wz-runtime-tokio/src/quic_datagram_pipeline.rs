@@ -177,9 +177,9 @@ impl BoxedLinkDriver for QuicDatagramWriteDriver {
     fn wait_for_room(
         &self,
         priority: wz_session_core::qos::Priority,
-        wait_us: u64,
+        wait: wz_session_core::link::RoomWait,
     ) -> wz_session_core::link::LinkRoom {
-        self.tx.link_room(priority, wait_us)
+        self.tx.link_room(priority, wait)
     }
 
     fn send_prioritized(
