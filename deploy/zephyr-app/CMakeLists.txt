@@ -38,6 +38,12 @@ add_custom_target(wz_rust_lib ALL
 target_sources(app PRIVATE src/main.c)
 add_dependencies(app wz_rust_lib)
 
+# R2918 — the instant the board sets its realtime clock to at boot (src/main.c),
+# standing in for an SNTP sync on a board with no RTC: this build's own time,
+# in seconds since the Unix epoch, UTC.
+string(TIMESTAMP WZ_BOARD_EPOCH_SECS "%s" UTC)
+target_compile_definitions(app PRIVATE WZ_BOARD_EPOCH_SECS=${WZ_BOARD_EPOCH_SECS})
+
 # Link the staticlib + force-keep the Zephyr symbols ONLY the Rust side
 # references. Zephyr's libraries are scanned BEFORE the appended librustlib.a,
 # so without `--undefined` the linker would drop them (no C caller) and the

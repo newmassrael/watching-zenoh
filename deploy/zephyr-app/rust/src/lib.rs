@@ -42,12 +42,15 @@ use critical_section::RawRestoreState;
 // `platform-zephyr` gate (this deploy is the consumer that proves it), not a
 // direct wz-runtime-zephyr dep — mirroring mcu-freertos-demo's wz::runtime_freertos.
 use wz::runtime_zephyr::net::{ZephyrUdpDriver, ZephyrUdpSocket};
-use wz::runtime_zephyr::{ZephyrAllocator, ZephyrClock};
+use wz::runtime_zephyr::{ZephyrAllocator, ZephyrClock, ZephyrEntropy, ZephyrEpoch};
 use wz_mcu_session_acceptor::{
-    run_acceptor_e2e_on, AcceptorE2eOutcome, AcceptorTopology, DataMode, FixtureEntropy, PEER_PORT,
-    SESSION_PORT,
+    run_acceptor_e2e_on, AcceptorE2eOutcome, AcceptorTopology, DataMode, PEER_PORT, SESSION_PORT,
 };
+use wz_session_core::epoch::EpochSource;
 use wz_session_core::link::BoxedLinkDriver;
+
+/// 2020-01-01T00:00:00Z: an epoch reading below this is not the time.
+const EARLIEST_PLAUSIBLE_UNIX_SECS: u64 = 1_577_836_800;
 
 /// Every Rust allocation (the session bundle, the executor, the socket link's
 /// receive buffer) routes through the Zephyr kernel heap. The deploy's
@@ -74,6 +77,19 @@ extern "C" {
     fn wz_irq_lock() -> u32;
     /// `irq_unlock(key)` — restores the IRQ state `wz_irq_lock` saved.
     fn wz_irq_unlock(key: u32);
+    /// R2918 — how many times the board's random hook served `ZephyrEntropy`
+    /// (src/main.c), printed with the verdict so a PASS also shows the session
+    /// drew its secrets through the seam rather than around it.
+    fn wz_random_draws() -> u32;
+}
+
+/// Log a formatted line via the Zephyr printk seam.
+fn log_line(line: alloc::string::String) {
+    let mut bytes = line.into_bytes();
+    bytes.push(0);
+    // SAFETY: `bytes` is nul-terminated and outlives the call; `wz_log` only
+    // reads it (printk %s).
+    unsafe { wz_log(bytes.as_ptr() as *const c_char) };
 }
 
 /// Zephyr-native `critical_section` impl backing wz-runtime-coop's
@@ -170,11 +186,12 @@ pub extern "C" fn wz_app_main() -> i32 {
         rx: vec![0u8; 2048],
     };
 
-    // ⚠ FixtureEntropy until this profile has an entropy seam of its own.
+    // R2918 — the session's secrets come through the profile's entropy seam,
+    // from the board's random hook.
     let report = run_acceptor_e2e_on(
         topology,
         ZephyrClock::<TICK_HZ>,
-        FixtureEntropy,
+        ZephyrEntropy,
         DataMode::WholeFrame,
         || {},
     );
@@ -204,7 +221,37 @@ pub extern "C" fn wz_app_main() -> i32 {
         return 1;
     }
     log(c"wz: the session link reports udp/127.0.0.1:7460 -> udp/127.0.0.1:7461");
-    0
+    // SAFETY: reads a counter the board keeps; no preconditions.
+    let draws = unsafe { wz_random_draws() };
+    if draws == 0 {
+        log(c"wz: FAIL - the session drew nothing through ZephyrEntropy");
+        return 1;
+    }
+    log_line(alloc::format!(
+        "wz: the session drew its secrets through ZephyrEntropy ({draws} board draws)"
+    ));
+
+    // R2918 — the epoch seam: mint the NTP64 a timestamp carries from this
+    // board's clock, through the profile's `ZephyrEpoch`. A date before 2020
+    // means the board answered something that is not the time.
+    match ZephyrEpoch.try_now_ntp64() {
+        Ok(ntp) if ntp.whole_secs() >= EARLIEST_PLAUSIBLE_UNIX_SECS => {
+            log_line(alloc::format!(
+                "wz: epoch via ZephyrEpoch, NTP64 {:#018x} ({} s since 1970)",
+                ntp.as_word(),
+                ntp.whole_secs()
+            ));
+            0
+        }
+        Ok(_) => {
+            log(c"wz: FAIL - the board clock says a date before 2020");
+            1
+        }
+        Err(_) => {
+            log(c"wz: FAIL - no time since the epoch is available");
+            1
+        }
+    }
 }
 
 /// no_std panic handler — log + halt (yielding, not busy-spinning). The CI

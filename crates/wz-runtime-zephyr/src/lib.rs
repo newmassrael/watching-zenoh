@@ -28,6 +28,20 @@
 //!    lwIP via `wz-link-lwip`, as the bare-metal and FreeRTOS profiles do,
 //!    which has no netif over Zephyr's drivers; zenoh-pico's Zephyr port
 //!    uses Zephyr's sockets, and so does this profile now.
+//! 4. R2918 — [`ZephyrEntropy`], the session core's `EntropySource`, over the
+//!    board hook `wzApplicationGetRandom`, which a board serves from its RNG
+//!    (`sys_rand_get`, the call zenoh-pico's Zephyr port makes).
+//! 5. R2918 — [`ZephyrEpoch`], the session core's `EpochSource`, over the
+//!    board hook `wzApplicationGetTimeSinceEpoch` — the same hook, with the
+//!    same contract, the FreeRTOS profile reads — which a board serves from
+//!    `clock_gettime(CLOCK_REALTIME)`, the read zenoh-pico's port makes.
+//!
+//! Both are BOARD hooks rather than FFI to the kernel because neither kernel
+//! call is a link symbol this crate can name: `sys_rand_get` is a `__syscall`
+//! wrapper, and `getentropy` demands an entropy DEVICE, which a board without
+//! a TRNG does not have; `clock_gettime` is real but fills a `struct
+//! timespec` whose `time_t` width is the C library's choice, so the hook names
+//! fixed-width types instead.
 #![no_std]
 
 extern crate alloc;
@@ -73,6 +87,65 @@ impl<const TICK_HZ: u32> ClockSource for ZephyrClock<TICK_HZ> {
 /// pool / waker / timer queue are wz-runtime-coop's, only the clock seam is
 /// Zephyr-specific.
 pub type ZephyrRuntime<const TICK_HZ: u32> = CoopRuntime<ZephyrClock<TICK_HZ>>;
+
+extern "C" {
+    /// R2918 — the board's random source: fill `len` bytes at `buf` and return
+    /// 0, or return non-zero when the board cannot produce them. A board serves
+    /// it from `sys_rand_get` (what zenoh-pico's Zephyr port calls) or, where it
+    /// has one, `sys_csrand_get`.
+    fn wzApplicationGetRandom(buf: *mut c_void, len: usize) -> i32;
+
+    /// R2918 — the board's wall clock: fill `*secs` / `*nanos` with the time
+    /// since the Unix epoch (UTC, `nanos` below 1e9) and return 1, or return 0
+    /// when the board does not know the date (no RTC, SNTP not yet synced). The
+    /// same hook and contract the FreeRTOS profile reads, so one board-side
+    /// answer serves either RTOS.
+    fn wzApplicationGetTimeSinceEpoch(secs: *mut u64, nanos: *mut u32) -> i32;
+}
+
+/// R2918 — the session core's [`EntropySource`](wz_session_core::entropy::EntropySource)
+/// on this profile: the board's `wzApplicationGetRandom`, asked for the whole
+/// buffer in one call. A board that fails the call fails the fill — the cookie
+/// nonce and the signing key must never be made of whatever the buffer held.
+#[derive(Clone, Copy, Default)]
+pub struct ZephyrEntropy;
+
+impl wz_session_core::entropy::EntropySource for ZephyrEntropy {
+    fn try_fill_bytes(
+        &mut self,
+        buf: &mut [u8],
+    ) -> Result<(), wz_session_core::entropy::EntropyUnavailable> {
+        // SAFETY: `buf` is live and writable for its whole length.
+        let rc = unsafe { wzApplicationGetRandom(buf.as_mut_ptr() as *mut c_void, buf.len()) };
+        if rc != 0 {
+            return Err(wz_session_core::entropy::EntropyUnavailable);
+        }
+        Ok(())
+    }
+}
+
+/// R2918 — the session core's [`EpochSource`](wz_session_core::epoch::EpochSource)
+/// on this profile: the board's `wzApplicationGetTimeSinceEpoch`, read once
+/// per call. A board answer of `nanos >= 1e9` is refused rather than
+/// normalised, since it means the hook and this seam disagree about the unit.
+#[derive(Clone, Copy, Default)]
+pub struct ZephyrEpoch;
+
+impl wz_session_core::epoch::EpochSource for ZephyrEpoch {
+    fn try_since_epoch(
+        &self,
+    ) -> Result<wz_session_core::epoch::SinceEpoch, wz_session_core::epoch::EpochUnavailable> {
+        let mut secs = 0u64;
+        let mut nanos = 0u32;
+        // SAFETY: the hook writes one u64 and one u32 through pointers to live
+        // locals; the board's implementation is the application's own.
+        let rc = unsafe { wzApplicationGetTimeSinceEpoch(&mut secs, &mut nanos) };
+        if rc != 1 || nanos >= 1_000_000_000 {
+            return Err(wz_session_core::epoch::EpochUnavailable);
+        }
+        Ok(wz_session_core::epoch::SinceEpoch { secs, nanos })
+    }
+}
 
 /// Zephyr kernel-heap alignment guarantee for the **direct** `k_malloc` path.
 ///
@@ -133,5 +206,125 @@ unsafe impl GlobalAlloc for ZephyrAllocator {
             let base = unsafe { *((ptr as usize - size_of::<usize>()) as *mut usize) };
             unsafe { k_free(base as *mut c_void) };
         }
+    }
+}
+
+/// R2918 — host witnesses for the profile's seams. On the host there is no
+/// Zephyr kernel, so each symbol a seam calls is DEFINED here, answering from a
+/// static the test sets: the kernel tick for [`ZephyrClock`], and the two board
+/// hooks for [`ZephyrEntropy`] and [`ZephyrEpoch`]. What is under test is the
+/// seam's own arithmetic and failure handling, which is the same code the QEMU
+/// image runs against the real kernel and board. (The socket link in [`net`]
+/// has no such witness: its symbols are the host C library's own names, so it
+/// is witnessed on target, by Layer Qz.)
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use core::sync::atomic::{AtomicI32, AtomicI64, AtomicU32, AtomicU64, AtomicU8, Ordering};
+    use wz_session_core::entropy::{EntropySource, EntropyUnavailable};
+    use wz_session_core::epoch::{EpochSource, EpochUnavailable, SinceEpoch};
+
+    static TICKS: AtomicI64 = AtomicI64::new(0);
+    static RANDOM_BYTE: AtomicU8 = AtomicU8::new(0);
+    static RANDOM_RC: AtomicI32 = AtomicI32::new(0);
+    static EPOCH_SECS: AtomicU64 = AtomicU64::new(0);
+    static EPOCH_NANOS: AtomicU32 = AtomicU32::new(0);
+    static EPOCH_RC: AtomicI32 = AtomicI32::new(1);
+
+    #[no_mangle]
+    extern "C" fn sys_clock_tick_get() -> i64 {
+        TICKS.load(Ordering::SeqCst)
+    }
+
+    #[no_mangle]
+    extern "C" fn wzApplicationGetRandom(buf: *mut c_void, len: usize) -> i32 {
+        // SAFETY: `ZephyrEntropy` passes a live buffer of `len` bytes.
+        let out = unsafe { core::slice::from_raw_parts_mut(buf as *mut u8, len) };
+        for b in out {
+            *b = RANDOM_BYTE.fetch_add(1, Ordering::SeqCst);
+        }
+        RANDOM_RC.load(Ordering::SeqCst)
+    }
+
+    #[no_mangle]
+    extern "C" fn wzApplicationGetTimeSinceEpoch(secs: *mut u64, nanos: *mut u32) -> i32 {
+        // SAFETY: `ZephyrEpoch` passes pointers to live locals.
+        unsafe {
+            *secs = EPOCH_SECS.load(Ordering::SeqCst);
+            *nanos = EPOCH_NANOS.load(Ordering::SeqCst);
+        }
+        EPOCH_RC.load(Ordering::SeqCst)
+    }
+
+    #[test]
+    fn the_clock_converts_kernel_ticks_to_microseconds_at_the_tick_rate() {
+        TICKS.store(1234, Ordering::SeqCst);
+        assert_eq!(ZephyrClock::<100>.now_us(), 12_340_000);
+        assert_eq!(ZephyrClock::<1000>.now_us(), 1_234_000);
+        TICKS.store(i64::from(u32::MAX) * 10, Ordering::SeqCst);
+        assert_eq!(
+            ZephyrClock::<100>.now_us(),
+            u64::from(u32::MAX) * 100_000,
+            "a tick count past 32 bits converts without wrapping"
+        );
+    }
+
+    /// The entropy seam hands the board the whole buffer, and a board that
+    /// reports failure fails the fill. One test, because the hook's statics
+    /// are shared.
+    #[test]
+    fn entropy_fills_from_the_board_hook_and_fails_closed() {
+        RANDOM_RC.store(0, Ordering::SeqCst);
+        RANDOM_BYTE.store(0x10, Ordering::SeqCst);
+        let mut buf = [0u8; 5];
+        ZephyrEntropy
+            .try_fill_bytes(&mut buf)
+            .expect("the hook answers 0");
+        assert_eq!(buf, [0x10, 0x11, 0x12, 0x13, 0x14]);
+
+        RANDOM_RC.store(-5, Ordering::SeqCst);
+        assert_eq!(
+            ZephyrEntropy.try_fill_bytes(&mut buf),
+            Err(EntropyUnavailable),
+            "a non-zero answer from the board fails the fill"
+        );
+        RANDOM_RC.store(0, Ordering::SeqCst);
+    }
+
+    /// The epoch seam returns the board's instant, refuses a failed read and a
+    /// nanosecond count outside a second, and feeds the NTP64 a timestamp
+    /// carries. One test, because the hook's statics are shared.
+    #[test]
+    fn epoch_reads_the_board_clock_and_refuses_what_it_cannot_trust() {
+        EPOCH_RC.store(1, Ordering::SeqCst);
+        EPOCH_SECS.store(1_700_000_000, Ordering::SeqCst);
+        EPOCH_NANOS.store(250_000_000, Ordering::SeqCst);
+        assert_eq!(
+            ZephyrEpoch.try_since_epoch(),
+            Ok(SinceEpoch {
+                secs: 1_700_000_000,
+                nanos: 250_000_000
+            })
+        );
+        assert_eq!(
+            ZephyrEpoch.try_now_ntp64().map(|t| t.to_millis()),
+            Ok(1_700_000_000_250)
+        );
+
+        EPOCH_NANOS.store(1_000_000_000, Ordering::SeqCst);
+        assert_eq!(
+            ZephyrEpoch.try_since_epoch(),
+            Err(EpochUnavailable),
+            "a nanosecond count of a whole second is refused"
+        );
+
+        EPOCH_NANOS.store(0, Ordering::SeqCst);
+        EPOCH_RC.store(0, Ordering::SeqCst);
+        assert_eq!(
+            ZephyrEpoch.try_since_epoch(),
+            Err(EpochUnavailable),
+            "a board that does not know the date says so"
+        );
+        EPOCH_RC.store(1, Ordering::SeqCst);
     }
 }
