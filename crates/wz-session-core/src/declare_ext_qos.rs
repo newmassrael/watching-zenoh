@@ -270,7 +270,7 @@ pub fn read_response_qos(response: &wz_codecs::response::ResponseOwned) -> QosLe
 /// setter here applies.
 ///
 /// The entry goes FIRST rather than last, which is why this does not share
-/// [`set_qos_chain`]'s append: upstream's Response encoder writes `ext_qos`
+/// `set_qos_chain`'s append: upstream's Response encoder writes `ext_qos`
 /// ahead of `ext_tstamp`, `ext_respid` and `ext_ts_stack`
 /// (`commons/zenoh-codec/src/network/response.rs` @
 /// `if ext_qos != &ext::QoSType::DEFAULT {`), so a relayed reply whose chain
