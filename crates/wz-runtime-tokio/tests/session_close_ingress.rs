@@ -746,3 +746,82 @@ fn session_close_ingress_reads_the_name_off_the_machine() {
         None
     );
 }
+
+/// A link that never delivers anything: the loop driving it parks until a
+/// deadline, or until something wakes it.
+struct SilentLink;
+
+impl wz_runtime_tokio::LinkDriver for SilentLink {
+    async fn open(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+    async fn send(
+        &mut self,
+        _frame: &wz_runtime_tokio::TxFrame<'_>,
+        _reliability: wz_runtime_tokio::Reliability,
+    ) -> std::io::Result<()> {
+        Ok(())
+    }
+    async fn close(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+    async fn poll_event(&mut self) -> wz_runtime_tokio::LinkEvent {
+        std::future::pending().await
+    }
+}
+
+/// R2922 — the close request reaches a RUNNING drive loop.
+///
+/// Every other witness in this file stands in for the loop by calling
+/// `check_requested_close` itself, and that is how the join between the
+/// ingress and the loop went unmeasured: neither production loop called it,
+/// so a rail close was staged and never raised on a live session. Here the
+/// real `drive_session_until_terminal` runs an Established session over a link
+/// that delivers nothing, so the loop is PARKED — its next wake is the
+/// keepalive deadline, a quarter of the 10 s lease away. The request is made
+/// from outside, the way the ingress makes it, and the Close frame must leave
+/// long before that wake: the loop is woken by the request and raises it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_close_request_reaches_a_running_drive_loop() {
+    use std::time::Duration;
+    use wz_runtime_tokio::session_glue::drive_session_until_terminal;
+    use wz_session_core::session_timeouts::SessionTimeouts;
+
+    let (actions, mut engine) = established_session();
+    let loop_actions = actions.clone();
+    let session = tokio::spawn(async move {
+        let mut link = SilentLink;
+        let clock = TokioTime::new();
+        drive_session_until_terminal(
+            &mut link,
+            &loop_actions,
+            &mut engine,
+            None,
+            &clock,
+            &SessionTimeouts::spec_defaults(),
+            |_| {},
+        )
+        .await
+    });
+
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert_eq!(
+        actions.trace_snapshot().send_close_frame_with_reason,
+        0,
+        "nothing has asked the session to close yet"
+    );
+
+    actions.request_close();
+    let closed = tokio::time::timeout(Duration::from_millis(500), async {
+        while actions.trace_snapshot().send_close_frame_with_reason == 0 {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await;
+    session.abort();
+    assert!(
+        closed.is_ok(),
+        "the running loop did not raise the close request: it was staged and \
+         never reached the session"
+    );
+}

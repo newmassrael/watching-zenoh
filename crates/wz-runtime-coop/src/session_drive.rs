@@ -294,6 +294,13 @@ impl<C: ClockSource, L: SessionDatagramLink> SessionPump<C, L> {
             self.iter += 1;
         }
 
+        // R2922 — raise what the session was asked from OUTSIDE the loop (a
+        // rail close) before servicing the link. This loop polls every
+        // iteration, so it needs no wake of its own.
+        if wz_session_core::drive::check_out_of_band(&self.actions, &mut self.engine) {
+            return None;
+        }
+
         self.link.service();
 
         let now_ms = self.clock.now_monotonic_ms();

@@ -929,6 +929,33 @@ pub fn check_requested_close<R: SessionRuntime, T: TimeSource>(
     }
 }
 
+/// R2922 — raise, as FSM events, every request staged on the session's
+/// `OutOfBand` slot: what the session was asked from outside its drive loop.
+/// Both drive loops call this at the head of every iteration — the AP tokio
+/// loop (`wz_runtime_tokio::session_glue`) and the cooperative MCU pump
+/// (`wz_runtime_coop::session_drive`) — and the AP loop also parks on
+/// `OutOfBand::signalled`, so a request reaches a loop that is waiting on its
+/// link.
+///
+/// R2922 is also a CORRECTION of [`check_requested_close`]'s own doc, which
+/// said both loops called it. Neither did: only tests standing in for the
+/// loop called it, so a rail close was staged and never raised on a running
+/// session. This is the call the loops make.
+///
+/// Returns whether an event was raised.
+pub fn check_out_of_band<R: SessionRuntime, T: TimeSource>(
+    actions: &SessionLinkActions<R, T>,
+    engine: &mut Engine<SessionFsmUnicastPolicy<SessionActionsBinding<R, T>>>,
+) -> bool {
+    #[cfg(feature = "session-close-ingress")]
+    if check_requested_close(actions, engine) {
+        return true;
+    }
+    #[cfg(not(feature = "session-close-ingress"))]
+    let _ = (actions, engine);
+    false
+}
+
 /// R2678 (`session-close-ingress`) — the switchboard ingress for session
 /// lifetime: an [`crate::switchboard::EventInjector`] that turns a matched row
 /// into a close request on [`SessionLinkActions`] instead of into an engine

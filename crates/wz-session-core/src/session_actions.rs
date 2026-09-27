@@ -268,6 +268,101 @@ pub struct BatchTx {
     stage: BatchStage,
 }
 
+/// R2922 — what a session's drive loop is asked from OUTSIDE it, and the wake
+/// that tells the loop to look.
+///
+/// The drive loop owns the FSM engine for the session's whole life, so a
+/// party that is not the loop — a rail ingress closing the session, a sender
+/// giving up on a congested link — cannot raise an FSM event itself. It
+/// stages a request here, and the loop turns it into the event at the head of
+/// its next iteration (`crate::drive::check_out_of_band`). A loop PARKED on
+/// its link or a deadline must also be woken, or the request waits for the
+/// next packet or the lease timer: [`Self::signalled`] is the future the loop
+/// selects on for that.
+///
+/// The waker is a `core::task::Waker`, so the same slot wakes a tokio task on
+/// the AP profile and a cooperative task on the MCU one.
+pub struct OutOfBand<R: SessionRuntime> {
+    state: R::Mutex<OutOfBandState>,
+}
+
+/// The requests an [`OutOfBand`] can hold, and the waker of the loop parked on
+/// it.
+#[derive(Default)]
+pub struct OutOfBandState {
+    /// R2678 — close this session (`session.close`).
+    #[cfg(feature = "session-close-ingress")]
+    pub close: bool,
+    waker: Option<core::task::Waker>,
+}
+
+impl OutOfBandState {
+    fn any(&self) -> bool {
+        #[cfg(feature = "session-close-ingress")]
+        if self.close {
+            return true;
+        }
+        false
+    }
+}
+
+impl<R: SessionRuntime> OutOfBand<R> {
+    fn new() -> Self {
+        Self {
+            state: R::new_mutex(OutOfBandState::default()),
+        }
+    }
+
+    /// Stage a request (`set` marks it) and wake the loop if it is parked.
+    /// Gated with its only request today, the close ingress's.
+    #[cfg(feature = "session-close-ingress")]
+    fn raise(&self, set: impl FnOnce(&mut OutOfBandState)) {
+        let waker = R::with_mutex_mut(&self.state, |s| {
+            set(s);
+            s.waker.take()
+        });
+        if let Some(waker) = waker {
+            waker.wake();
+        }
+    }
+
+    /// Take a request (`take` reads and clears it).
+    #[cfg(feature = "session-close-ingress")]
+    fn take<U>(&self, take: impl FnOnce(&mut OutOfBandState) -> U) -> U {
+        R::with_mutex_mut(&self.state, take)
+    }
+
+    /// Resolves once any request is staged — the branch a parked drive loop
+    /// selects on so a request reaches it without waiting for the link.
+    /// Taking the request stays the loop's job; this only says there is one.
+    pub fn signalled(&self) -> OutOfBandSignalled<'_, R> {
+        OutOfBandSignalled { slot: self }
+    }
+}
+
+/// The future [`OutOfBand::signalled`] returns.
+pub struct OutOfBandSignalled<'a, R: SessionRuntime> {
+    slot: &'a OutOfBand<R>,
+}
+
+impl<R: SessionRuntime> core::future::Future for OutOfBandSignalled<'_, R> {
+    type Output = ();
+
+    fn poll(
+        self: core::pin::Pin<&mut Self>,
+        cx: &mut core::task::Context<'_>,
+    ) -> core::task::Poll<()> {
+        R::with_mutex_mut(&self.slot.state, |s| {
+            if s.any() {
+                core::task::Poll::Ready(())
+            } else {
+                s.waker = Some(cx.waker().clone());
+                core::task::Poll::Pending
+            }
+        })
+    }
+}
+
 /// R2920 — the session's TX conduits: one [`BatchTx`] behind its own lock
 /// per priority (one in all, without `transport-qos`), and the batching
 /// window flag they share.
@@ -634,21 +729,27 @@ pub struct SessionCore<R: SessionRuntime, T: TimeSource> {
     /// Behind `R::Mutex` rather than an atomic for the reason the whole struct
     /// gives: ARMv6-M has no `target_has_atomic = "ptr"` and every other
     /// set-once slot here uses the same seam.
-    #[cfg(feature = "session-close-ingress")]
-    pub requested_close: R::Mutex<bool>,
+    ///
+    /// R2922 — the request now lives in [`OutOfBand`], which also WAKES the
+    /// drive loop. It used to be a bare flag that no production loop read:
+    /// `crate::drive::check_requested_close` was called only by tests standing
+    /// in for the loop, so a rail close staged its request and the running
+    /// session never raised it.
+    pub out_of_band: OutOfBand<R>,
     /// R2708 (open-debt item 785) — what this session owes its drive loop every
     /// iteration, opaque to this crate. See `SessionRuntime::IterationWork` for
     /// why it is an associated type rather than something named here.
     ///
-    /// Per SESSION and not per link, for the reason `requested_close` gives one
+    /// Per SESSION and not per link, for the reason `out_of_band` gives one
     /// field up: an aggregated session's second link must not be able to
     /// deliver while the first is stalled, and the consumer a buffered
     /// subscription feeds belongs to the session.
     ///
     /// ⚠ Code spans rather than links, both of them: an associated type does
-    /// not resolve through that path form, and `requested_close` is
-    /// `#[cfg]`-gated, so a link to it breaks in every build without that
-    /// feature. C1bz counted one of them.
+    /// not resolve through that path form, and the field one up was
+    /// `#[cfg]`-gated when this was written (`requested_close`, R2922 made it
+    /// the ungated `out_of_band`), so a link to it broke in every build
+    /// without that feature. C1bz counted one of them.
     pub iteration_work: R::IterationWork,
     pub params: SessionInitParams,
     /// The largest message this profile can REASSEMBLE, in bytes — the TX
@@ -1922,10 +2023,8 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                 stats: crate::stats::TransportStats::default(),
                 #[cfg(feature = "transport-stats")]
                 metrics: R::new_mutex(stats_metrics),
-                // Nobody has asked this session to close; the ingress is the
-                // only writer and it has not run yet.
-                #[cfg(feature = "session-close-ingress")]
-                requested_close: R::new_mutex(false),
+                // Nobody has asked this session anything from outside its loop.
+                out_of_band: OutOfBand::new(),
                 // Empty: a session owes its loop nothing until something
                 // registers. What "empty" means is the profile's to decide,
                 // which is why `Default` is this kernel's only interaction
@@ -5419,11 +5518,11 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// many times".
     ///
     /// The caller is an ingress with no access to the FSM engine — see
-    /// [`SessionCore::requested_close`] for why that separation is deliberate
+    /// [`SessionCore::out_of_band`] for why that separation is deliberate
     /// rather than incidental.
     #[cfg(feature = "session-close-ingress")]
     pub fn request_close(&self) {
-        R::with_mutex_mut(&self.core.requested_close, |slot| *slot = true);
+        self.core.out_of_band.raise(|s| s.close = true);
     }
 
     /// R2678 — take the close request, if one is standing.
@@ -5436,9 +5535,9 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// already on its way out.
     #[cfg(feature = "session-close-ingress")]
     pub fn take_requested_close(&self) -> bool {
-        R::with_mutex_mut(&self.core.requested_close, |slot| {
-            core::mem::replace(slot, false)
-        })
+        self.core
+            .out_of_band
+            .take(|s| core::mem::replace(&mut s.close, false))
     }
 
     /// R311kc — initiator-side InitAck params admission, the dispatcher

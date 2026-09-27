@@ -1270,6 +1270,12 @@ where
             }
             iter += 1;
         }
+        // R2922 — raise what the session was asked from OUTSIDE this loop (a
+        // rail close) before anything else this iteration; the selects below
+        // wake on the same slot, so a request reaches a parked loop at once.
+        if wz_session_core::drive::check_out_of_band(actions, engine) {
+            continue;
+        }
         // R311im — abort + reclaim any reassembly chain past its deadline.
         // Swept once per loop iteration (whenever an event or deadline
         // fires); in Established the lease deadline guarantees the loop
@@ -1332,6 +1338,9 @@ where
                     // ONLY when the precondition holds, so `None` costs no
                     // `Notified` register/deregister per iteration.
                     _ = notified_or_pending(deadline_revised), if deadline_revised.is_some() => {}
+                    // R2922 — a request staged from outside the loop. Fall
+                    // through: the loop head raises it.
+                    _ = actions.core.out_of_band.signalled() => {}
                     outcome = poll_and_dispatch_one(driver, actions, engine) => {
                         // §5.21 routing-namespace — strip the DIRECT decoded
                         // FramePayload before dispatch. Covers BOTH the
@@ -1436,7 +1445,14 @@ where
                 }
             }
             None => {
-                let outcome = poll_and_dispatch_one(driver, actions, engine).await;
+                // R2922 — the same out-of-band wake as the select arm above.
+                let outcome = tokio::select! {
+                    _ = actions.core.out_of_band.signalled() => None,
+                    outcome = poll_and_dispatch_one(driver, actions, engine) => Some(outcome),
+                };
+                let Some(outcome) = outcome else {
+                    continue;
+                };
                 // §5.21 routing-namespace — strip the DIRECT decoded FramePayload
                 // before dispatch (the no-deadline arm; same rationale as the
                 // `tokio::select!` poll arm above).
