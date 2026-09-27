@@ -872,6 +872,11 @@ struct DeferredQuery {
     /// R2594 — the query's QoS, held so the redelivered answer inherits it as
     /// the immediate one does.
     qos: wz_session_core::sample::QosLevel,
+    /// R2902 — the fan this local answer is ONE branch of, when the query was
+    /// also forwarded. Holding it keeps the last-out gate open until the
+    /// redelivery has answered; `None` is a query answered here alone, which
+    /// closes with its own final as before.
+    fan: Option<Rc<QueryFan>>,
 }
 
 /// R311y46 (§5.23 Phase 3a) — the heap handler backing a [`LocalSubscriber`]:
@@ -2266,11 +2271,25 @@ impl LinkstateForwarder {
         // mesh + clients together (zenoh compute_final_route's distance-sorted
         // first-complete, else all).
         let self_zid = *self.net.borrow().self_zid();
-        let (children, client_targets): (Vec<Zid>, Vec<FaceId>) = match target {
+        // R2902 — this node's OWN queryables are candidates too, at distance 0, so a
+        // complete one is the nearest-complete winner of BestMatching before any
+        // client or mesh queryable (the pin's route holds the local session beside
+        // its remotes and sorts by distance, `zenoh/src/net/routing/dispatcher/queries.rs`
+        // @ `fn compute_final_route(`). It answers through `finish_unrouted_request`.
+        let local_complete = self.local_queryables.borrow().iter().any(|lq| {
+            lq.complete
+                && keyexpr_intersects_target(&lq.keyexpr, &query_chunks)
+                && keyexpr_includes_target(&lq.keyexpr, &query_chunks)
+        });
+        // `open` = no branch was picked as the nearest complete one, so the query
+        // is fanned: gateways join it (below) and so do this node's own
+        // queryables, as one branch of the fan rather than instead of it.
+        let (children, client_targets, open): (Vec<Zid>, Vec<FaceId>, bool) = match target {
+            None if local_complete => (Vec::new(), Vec::new(), false),
             None => {
                 if let Some(face) = client_candidates.iter().find(|(_, c)| *c).map(|(f, _)| *f) {
                     // A distance-1 COMPLETE client wins BestMatching over any mesh best.
-                    (Vec::new(), vec![face])
+                    (Vec::new(), vec![face], false)
                 } else {
                     let net = self.net.borrow();
                     match select_best_matching(
@@ -2284,7 +2303,7 @@ impl LinkstateForwarder {
                         |_| true,
                     ) {
                         // A complete mesh queryable is the nearest-complete winner.
-                        Some((_distance, hop)) => (vec![hop], Vec::new()),
+                        Some((_distance, hop)) => (vec![hop], Vec::new(), false),
                         // Nothing complete anywhere -> the All fallback: mesh + all clients.
                         None => (
                             all_query_directions(
@@ -2295,6 +2314,7 @@ impl LinkstateForwarder {
                                 &self_zid,
                             ),
                             client_candidates.iter().map(|(f, _)| *f).collect(),
+                            true,
                         ),
                     }
                 }
@@ -2311,17 +2331,35 @@ impl LinkstateForwarder {
                     inbound_zid,
                 ),
                 client_candidates.iter().map(|(f, _)| *f).collect(),
+                true,
             ),
+        };
+        // R2902 (open-debt item 828) — the query twin of
+        // [`fan_out_south_push`](Self::fan_out_south_push): a query whose source lies
+        // SOUTH of this peer (a co-attached client) is sent to every gateway face as
+        // well, because a gateway does not declare what its other remotes host. The
+        // pin adds each south-bound face with no queryable info
+        // (`zenoh/src/net/routing/hat/peer/queries.rs` @
+        // `dst.has_unfinalized_queryable_interest = true`), so a gateway is never the
+        // complete BestMatching winner and joins exactly the fanned cases: All,
+        // AllComplete (a branch with no info passes its completeness filter), and
+        // BestMatching when nothing complete was found. A query from a peer is
+        // transit and does not take the arm.
+        let gateway_targets: Vec<FaceId> = if open && self.is_client_face(inbound) {
+            self.gateway_faces()
+        } else {
+            Vec::new()
         };
         // zenoh route_query EMPTY route: no mesh direction AND no co-attached client
         // queryable -> try the self-hosted local queryables (the SYNCHRONOUS
         // dispatch_local_queryables self-final path, e.g. an admin GET), else a prompt
         // empty-route ResponseFinal so the querier's get() terminates. A client-qabl match
-        // takes the async fan path below, so the sync local dispatch runs ONLY when there
-        // is zero async branch (a client qabl on the SAME ke as a self-hosted queryable
-        // would suppress the local dispatch — no worse than the pre-existing local-vs-mesh
-        // gap, and self-hosted admin kes are zid-unique so it does not arise in practice).
-        if children.is_empty() && client_targets.is_empty() {
+        // takes the async fan path below. R2902 — which no longer silences this node's own
+        // queryables: a fanned query dispatches them as one more branch after the remote
+        // ones leave (below). That matters from the moment gateways join, because then
+        // every client query of a peer attached to a router is fanned, admin GETs of the
+        // peer's own keys included.
+        if children.is_empty() && client_targets.is_empty() && gateway_targets.is_empty() {
             self.finish_unrouted_request(inbound, reliable, request, &keyexpr);
             return;
         }
@@ -2351,8 +2389,12 @@ impl LinkstateForwarder {
         // MESH branches: allocate a fresh local qid PER tree-forward child + stamp it as the
         // outbound Request's rid, so its Response/ResponseFinal routes back via
         // forward_response/_final. The per-face qid is why each child gets its OWN carrier.
+        // R2902 — a gateway face is a branch on the same terms, and a gateway that is
+        // also a mesh direction is one face and one branch.
         let _ = self.fan_out(reliable, None, |id, zid| {
-            if !is_tree_forward_target(id, zid, inbound, inbound_zid, &children) {
+            if !is_tree_forward_target(id, zid, inbound, inbound_zid, &children)
+                && !gateway_targets.contains(&id)
+            {
                 return Ok(None);
             }
             let qid = self.pending.borrow_mut().allocate(id, &fan, deadline);
@@ -2377,6 +2419,21 @@ impl LinkstateForwarder {
         // guarantee here so the querier never hangs.
         if forwarded == 0 {
             self.finish_unrouted_request(inbound, reliable, request, &keyexpr);
+            return;
+        }
+        // R2902 — the LOCAL branch of a fanned query: this node's own queryables answer
+        // beside the remote branches instead of being skipped because they exist. It
+        // runs AFTER the remote branches hold their references, so the fan's last-out
+        // gate cannot close under it; its replies go out now and it sends no final.
+        if open {
+            self.dispatch_local_queryables(
+                inbound,
+                reliable,
+                request,
+                &keyexpr,
+                target,
+                Some(&fan),
+            );
         }
     }
 
@@ -2440,6 +2497,7 @@ impl LinkstateForwarder {
             request,
             keyexpr,
             read_request_target(request),
+            None,
         ) {
             return;
         }
@@ -3517,6 +3575,14 @@ impl LinkstateForwarder {
     /// before invoke. A `SmallVec<[_; 1]>` / SingleOrVec inline form (zenoh's
     /// `SingleOrVec`, session.rs) is a re-openable micro-opt if per-delivery alloc ever
     /// profiles hot — not warranted now (off the mesh fan-out hot path).
+    ///
+    /// R2902 — `fan` is `Some` when the same query was ALSO forwarded, so this
+    /// node's local queryables are one branch of it, as the pin's are one entry
+    /// of the route (its local session sits in the same route as its remotes,
+    /// `zenoh/src/net/routing/dispatcher/queries.rs` @ `fn compute_final_route(`).
+    /// A branch answers and does not close: the replies go out now and the
+    /// final belongs to the fan's last-out gate. A deferred self-query holds a
+    /// clone of the fan, so the gate cannot close before the redelivery answers.
     fn dispatch_local_queryables(
         &self,
         inbound: FaceId,
@@ -3524,6 +3590,7 @@ impl LinkstateForwarder {
         request: &RequestOwned,
         keyexpr: &str,
         target: Option<QueryTarget>,
+        fan: Option<&Rc<QueryFan>>,
     ) -> bool {
         let query_chunks: Vec<&str> = keyexpr.split('/').collect();
         let view = LocalQueryView {
@@ -3591,7 +3658,11 @@ impl LinkstateForwarder {
             // No self-query: emit the closing ResponseFinal now — the querier is one
             // hop away (rid = its own inbound rid); upstream hops unwind via the
             // existing forward_response path (the y44 behavior, unchanged).
-            self.emit_query_final(inbound, reliable, request.rid, view.qos);
+            // R2902 — unless this is one branch of a forwarded fan, whose last
+            // remote branch closes it.
+            if fan.is_none() {
+                self.emit_query_final(inbound, reliable, request.rid, view.qos);
+            }
         } else {
             // Self-query: queue the busy handler(s) + this query's return context with
             // the Final SUPPRESSED; drain_query_redelivery (outermost forward exit)
@@ -3605,6 +3676,7 @@ impl LinkstateForwarder {
                 inbound,
                 reliable,
                 qos: view.qos,
+                fan: fan.map(Rc::clone),
             });
         }
         true
@@ -3722,7 +3794,16 @@ impl LinkstateForwarder {
                 }
             }
             self.emit_query_responses(dq.inbound, dq.reliable, replies);
-            self.emit_query_final(dq.inbound, dq.reliable, dq.rid, dq.qos);
+            // R2902 — a branch of a forwarded fan closes the query only when it
+            // is the fan's LAST reference, the same `into_inner` gate the
+            // pending-query table applies to a remote branch.
+            let closes = match dq.fan {
+                None => true,
+                Some(fan) => Rc::into_inner(fan).is_some(),
+            };
+            if closes {
+                self.emit_query_final(dq.inbound, dq.reliable, dq.rid, dq.qos);
+            }
         }
     }
 
@@ -15608,6 +15689,122 @@ mod tests {
         assert_eq!(
             final_msg.request_id, 99,
             "final carries the client querier's rid"
+        );
+    }
+
+    /// R2902 (open-debt item 828) — a CLIENT's query reaches the gateway though
+    /// nothing declared a queryable, because the pin adds every south-bound face
+    /// to a south-sourced query's route (`zenoh/src/net/routing/hat/peer/queries.rs`
+    /// @ `dst.has_unfinalized_queryable_interest = true`). The PEER face beside it is
+    /// the control: registered the same way and silent, it gets nothing. And a
+    /// query that arrives from that peer is transit, so the gateway gets none of it.
+    #[test]
+    fn a_client_query_reaches_the_gateway_and_a_peer_query_does_not() {
+        let fwd = LinkstateForwarder::new(zid(0x05), WhatAmI::Peer);
+        let (router, sink_r) = peer_face_whatami(zid(0xAA), 0);
+        let (peer, sink_p) = peer_face_whatami(zid(0xBB), 1);
+        let (client, _sc) = peer_face_whatami(zid(0xCC), 2);
+        fwd.register(FaceId(0), &router);
+        fwd.register(FaceId(1), &peer);
+        fwd.register(FaceId(2), &client);
+        sink_r.reset();
+        sink_p.reset();
+
+        let request = wz_session_core::request_build::build_request_query(99, 0, Some("demo/q"))
+            .expect("build request");
+        fwd.forward_request(FaceId(1), true, &request);
+        assert_eq!(
+            sink_r.frame_count(),
+            0,
+            "a peer's query is not south-sourced"
+        );
+
+        let peer_before = sink_p.frame_count();
+        fwd.forward_request(FaceId(2), true, &request);
+        assert_eq!(
+            sink_r.frame_count(),
+            1,
+            "the client's query reached the gateway"
+        );
+        forwarded_request(&sink_r.frame_bytes(0));
+        assert_eq!(
+            sink_p.frame_count(),
+            peer_before,
+            "a non-gateway peer with no queryable is not a branch"
+        );
+    }
+
+    /// R2902 — this node's own COMPLETE queryable is the nearest complete one
+    /// (distance 0), so BestMatching ends here and the gateway is not asked.
+    #[test]
+    fn a_complete_local_queryable_keeps_a_client_query_from_the_gateway() {
+        let fwd = LinkstateForwarder::new(zid(0x05), WhatAmI::Peer);
+        let (router, sink_r) = peer_face_whatami(zid(0xAA), 0);
+        let (client, sink_c) = peer_face_whatami(zid(0xCC), 2);
+        fwd.register(FaceId(0), &router);
+        fwd.register(FaceId(1), &client);
+        fwd.register_local_queryable(
+            "demo/q",
+            true,
+            Box::new(|_view: &dyn QueryView, out: &mut dyn ReplyOut| out.reply(b"local")),
+        )
+        .expect("register local queryable");
+        sink_r.reset();
+        sink_c.reset();
+
+        let request = wz_session_core::request_build::build_request_query(99, 0, Some("demo/q"))
+            .expect("build request");
+        fwd.forward_request(FaceId(1), true, &request);
+        assert_eq!(
+            sink_r.frame_count(),
+            0,
+            "a complete local answer is the winner"
+        );
+        assert_eq!(sink_c.frame_count(), 2, "the local Reply and its final");
+    }
+
+    /// R2902 — when the query IS fanned, this node's own queryable is one BRANCH
+    /// of it: its reply goes out at once, and the final waits for the last remote
+    /// branch. Before R2902 a forwarded query skipped the local queryables
+    /// altogether, which the gateway arm would have made the case for every
+    /// client query of a peer attached to a router.
+    #[test]
+    fn a_fanned_client_query_is_answered_locally_and_closed_by_the_gateway() {
+        let fwd = LinkstateForwarder::new(zid(0x05), WhatAmI::Peer);
+        let (router, sink_r) = peer_face_whatami(zid(0xAA), 0);
+        let (client, sink_c) = peer_face_whatami(zid(0xCC), 2);
+        fwd.register(FaceId(0), &router);
+        fwd.register(FaceId(1), &client);
+        fwd.register_local_queryable(
+            "demo/q",
+            false,
+            Box::new(|_view: &dyn QueryView, out: &mut dyn ReplyOut| out.reply(b"local")),
+        )
+        .expect("register local queryable");
+        sink_r.reset();
+        sink_c.reset();
+
+        let request = wz_session_core::request_build::build_request_query(99, 0, Some("demo/q"))
+            .expect("build request");
+        fwd.forward_request(FaceId(1), true, &request);
+        assert_eq!(sink_r.frame_count(), 1, "the gateway is a branch");
+        assert_eq!(sink_c.frame_count(), 1, "the local Reply, and no final yet");
+        assert_eq!(forwarded_response(&sink_c.frame_bytes(0)).request_id, 99);
+
+        let qid = forwarded_request(&sink_r.frame_bytes(0)).rid;
+        let rf = wz_session_core::response_final_build::build_response_final(
+            qid,
+            wz_session_core::sample::QosLevel::DEFAULT,
+        );
+        fwd.forward_response_final(FaceId(0), true, &rf);
+        assert_eq!(
+            sink_c.frame_count(),
+            2,
+            "the gateway's final closed the fan"
+        );
+        assert_eq!(
+            forwarded_response_final(&sink_c.frame_bytes(1)).request_id,
+            99
         );
     }
 

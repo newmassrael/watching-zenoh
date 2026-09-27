@@ -1501,6 +1501,116 @@ fn wz_router_mesh_dials_zenohd_over_unixsock() {
     mesh_node_dials_zenohd_over_unixsock("--router-hat");
 }
 
+/// R2902 (`routing-peer`, open-debt item 828) — the QUERY twin of
+/// [`wz_peer_publish_routes_through_zenohd_to_pico_zsub`]: a wz CLIENT queries a
+/// wz PEER that is attached to a stock zenohd ROUTER, and a zenoh-pico queryable
+/// on that router answers.
+///
+/// The router declares nothing to the peer, so the only way the query reaches
+/// the queryable is the peer's gateway arm: a query whose source lies south of
+/// the peer goes to every gateway face (`zenoh/src/net/routing/hat/peer/queries.rs`
+/// @ `dst.has_unfinalized_queryable_interest = true`). Before R2902 the peer found
+/// no queryable, answered the empty route with a bare final, and the client got
+/// no reply.
+// wz-proves: routing-peer wz->zenohd
+#[test]
+#[ignore = "binary-dep e2e (zenohd router + zenoh-pico z_queryable); set WZ_ZENOHD_BIN, run via Layer Z / --ignored"]
+fn wz_client_query_through_a_wz_peer_reaches_a_pico_queryable_on_zenohd() {
+    let demo = wz_ap_demo_binary();
+    let z_queryable = zenoh_pico_cli_binary("z_queryable");
+    let query_key = "demo/zenohd-peer-q";
+    let reply_value = "pico-reply-through-a-wz-peer";
+
+    let (mut zenohd, port) = spawn_zenohd_on_ephemeral_tcp(|| {
+        tempfile::tempfile().expect("tempfile for readiness probe stderr")
+    });
+    let endpoint = format!("tcp/127.0.0.1:{port}");
+    let mut z_queryable_child =
+        spawn_ready_z_queryable(&z_queryable, query_key, reply_value, &endpoint);
+
+    let peer_res = PortReservation::pick();
+    let peer_port = peer_res.port();
+    drop(peer_res);
+    let peer_stderr = tempfile::tempfile().expect("tempfile for wz peer stderr");
+    let peer_stderr_writer = peer_stderr.try_clone().expect("dup wz peer stderr");
+    let mut peer_stderr_reader = peer_stderr;
+    let mut peer_child = ChildGuard::wrap(
+        "wz-ap-demo (--peer --connect zenohd)",
+        Command::new(&demo)
+            .arg("--peer")
+            .arg(format!("127.0.0.1:{peer_port}"))
+            .arg("--connect")
+            .arg(&endpoint)
+            .env("RUST_LOG", "info")
+            .stdout(Stdio::null())
+            .stderr(Stdio::from(peer_stderr_writer))
+            .spawn()
+            .expect("spawn wz-ap-demo --peer --connect zenohd"),
+    );
+    let peer_up = wait_for_substring(
+        &mut peer_stderr_reader,
+        "whatami Some(Router)",
+        Duration::from_secs(10),
+    );
+
+    // The client's one-shot query is emitted at Established; retry the client
+    // across the window in which the peer's face to zenohd is still coming up.
+    let mut wz_captured = String::new();
+    let mut wz_got_reply = false;
+    const ATTEMPTS: usize = 6;
+    for attempt in 1..=ATTEMPTS {
+        let client_stderr = tempfile::tempfile().expect("tempfile for wz client stderr");
+        let client_stderr_writer = client_stderr.try_clone().expect("dup wz client stderr");
+        let mut client_stderr_reader = client_stderr;
+        let mut client_child = ChildGuard::wrap(
+            "wz-ap-demo (--connect wz peer --query --on-query-reply-log)",
+            Command::new(&demo)
+                .arg("--connect")
+                .arg(format!("127.0.0.1:{peer_port}"))
+                .arg("--query")
+                .arg(query_key)
+                .arg("--on-query-reply-log")
+                .env("RUST_LOG", "info")
+                .stdout(Stdio::null())
+                .stderr(Stdio::from(client_stderr_writer))
+                .spawn()
+                .expect("spawn wz-ap-demo --connect wz peer --query"),
+        );
+        let received = wait_for_substring(
+            &mut client_stderr_reader,
+            "REPLY RECEIVED",
+            Duration::from_secs(8),
+        );
+        let _ = client_child.child_mut().kill();
+        let _ = client_child.child_mut().wait();
+        wz_captured = read_captured(&mut client_stderr_reader);
+        if received.is_ok() && wz_captured.contains(reply_value) {
+            wz_got_reply = true;
+            break;
+        }
+        eprintln!("wz client query attempt {attempt}/{ATTEMPTS} got no pico reply; retrying");
+    }
+
+    let _ = peer_child.child_mut().kill();
+    let _ = peer_child.child_mut().wait();
+    let _ = z_queryable_child.child_mut().kill();
+    let _ = z_queryable_child.child_mut().wait();
+    let _ = zenohd.child_mut().kill();
+    let _ = zenohd.child_mut().wait();
+
+    let peer_captured = read_captured(&mut peer_stderr_reader);
+    assert!(
+        peer_up.is_ok(),
+        "the wz peer never brought up its face to zenohd as a Router.\n{peer_captured}"
+    );
+    assert!(
+        wz_got_reply,
+        "the wz client got no reply carrying '{reply_value}' — the wz peer did not route \
+         its client's query to the zenohd gateway, or the reply did not come back.\n\
+         --- wz client stderr ---\n{wz_captured}\n--- wz peer stderr ---\n{peer_captured}"
+    );
+}
+
 /// R2901 (`routing-peer`, open-debt item 828) — a wz PEER attached to a stock
 /// zenohd ROUTER publishes, and a zenoh-pico client of that router receives.
 ///
