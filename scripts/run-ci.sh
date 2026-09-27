@@ -10173,10 +10173,14 @@ layer_c1q_multicast_glue() {
 # crate has no tests/ dir — all nine runs emit exactly two summaries, the lib
 # one and a 0-count doc-test — which is what makes an exact count meaningful
 # (contrast C1n below, where six summaries make it ambiguous).
+# R2915 moved EVERY leg below by one: `session_drive` gained
+# `the_lwip_session_link_retargets_replies_to_the_datagram_it_hands_over`,
+# unconditional like the module's other two, so it lands in all thirteen. Each
+# new value is the one `guarded_count_gate.py --range` PRINTED for that leg.
 layer_c1m_session_lwip() {
-    _runci_guarded_test "C1m default" 2 \
+    _runci_guarded_test "C1m default" 3 \
         cargo test -p wz-session-lwip --quiet || return 1
-    _runci_guarded_test "C1m reassembly" 2 \
+    _runci_guarded_test "C1m reassembly" 3 \
         cargo test -p wz-session-lwip --features reassembly --quiet || return 1
     # R2827 — the UNICAST application layer: `app_layer::dispatch_to` wires the
     # session drive's events into the observer and drains replies through the
@@ -10185,7 +10189,7 @@ layer_c1m_session_lwip() {
     # below are all multicast). 3 = the two unconditional session_drive tests
     # + `a_push_reaches_its_subscriber_and_a_reply_leaves_on_the_session`,
     # the number this command PRINTED.
-    _runci_guarded_test "C1m unicast app layer" 3 \
+    _runci_guarded_test "C1m unicast app layer" 4 \
         cargo test -p wz-session-lwip \
         --features query-queryable,codec-response,codec-response-final,pubsub-put \
         --quiet || return 1
@@ -10198,7 +10202,7 @@ layer_c1m_session_lwip() {
     # R2831 6 -> 9: the exhausted-dial wait, and `lwip_dialer`'s two (what is
     # dialable, and a dial that completes a real loopback handshake).
     # R2841 9 -> 10: a group of one is dialled, a group of several refused.
-    _runci_guarded_test "C1m adminspace-write" 10 \
+    _runci_guarded_test "C1m adminspace-write" 11 \
         cargo test -p wz-session-lwip --features adminspace-write --quiet || return 1
     # R2829 — the node ANSWERS upstream's admin GET (`admin_status`) through
     # the shared `answer_admin_query`. Alone: 2 + the lwIP GET test = 3. With
@@ -10206,7 +10210,7 @@ layer_c1m_session_lwip() {
     # pubsub-put) + `admin_host`'s two, one of which reads the control back
     # as the `config` leg's view = 6. Both numbers PRINTED by the command.
     # R2846 3 -> 4: the `status/connect` document test (ZA-2929).
-    _runci_guarded_test "C1m adminspace-core" 4 \
+    _runci_guarded_test "C1m adminspace-core" 5 \
         cargo test -p wz-session-lwip --features adminspace-core --quiet || return 1
     # R2830 6 -> 9: the same three `connect_manager` tests.
     # R2831 9 -> 12: the same three R2831 tests.
@@ -10214,7 +10218,7 @@ layer_c1m_session_lwip() {
     # R2841 13 -> 14: the same group test.
     # R2846 14 -> 16: the `status/connect` document test and the last-write
     # verdict test (ZA-2929).
-    _runci_guarded_test "C1m adminspace read+write" 16 \
+    _runci_guarded_test "C1m adminspace read+write" 17 \
         cargo test -p wz-session-lwip --features adminspace-core,adminspace-write --quiet || return 1
     # R2390 (transport-multicast) — each `transport-multicast` leg moved by TWO:
     # the MCU loop's link-loss arm brought a witness test and an ordering test,
@@ -10232,23 +10236,23 @@ layer_c1m_session_lwip() {
     # derivation: all nine legs were RUN and each number here is the one its own
     # run PRINTED (2/2/10/11/12/11/14/10/12). That distinction is the paragraph
     # below's whole subject, and it is cheap to honour — nine runs, ~8 minutes.
-    _runci_guarded_test "C1m multicast" 10 \
+    _runci_guarded_test "C1m multicast" 11 \
         cargo test -p wz-session-lwip --features transport-multicast --quiet || return 1
-    _runci_guarded_test "C1m multicast+push" 11 \
+    _runci_guarded_test "C1m multicast+push" 12 \
         cargo test -p wz-session-lwip --features transport-multicast,codec-push --quiet || return 1
-    _runci_guarded_test "C1m multicast+liveliness" 12 \
+    _runci_guarded_test "C1m multicast+liveliness" 13 \
         cargo test -p wz-session-lwip --features transport-multicast,liveliness-token --quiet || return 1
-    _runci_guarded_test "C1m multicast+queryable" 11 \
+    _runci_guarded_test "C1m multicast+queryable" 12 \
         cargo test -p wz-session-lwip \
         --features transport-multicast,query-queryable,codec-response,codec-response-final \
         --quiet || return 1
-    _runci_guarded_test "C1m multicast maximal" 14 \
+    _runci_guarded_test "C1m multicast maximal" 15 \
         cargo test -p wz-session-lwip \
         --features transport-multicast,codec-push,codec-response,codec-response-final,liveliness-token,query-queryable \
         --quiet || return 1
-    _runci_guarded_test "C1m multicast+reassembly" 10 \
+    _runci_guarded_test "C1m multicast+reassembly" 11 \
         cargo test -p wz-session-lwip --features transport-multicast,reassembly --quiet || return 1
-    _runci_guarded_test "C1m multicast+fragmentation" 12 \
+    _runci_guarded_test "C1m multicast+fragmentation" 13 \
         cargo test -p wz-session-lwip \
         --features transport-multicast,transport-fragmentation,codec-push --quiet || return 1
     (cd crates \
