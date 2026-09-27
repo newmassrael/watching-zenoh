@@ -44,7 +44,6 @@ use quinn::{
     ClientConfig as QuinnClientConfig, Connection, Endpoint, Incoming, RecvStream, SendStream,
     ServerConfig as QuinnServerConfig, TransportConfig,
 };
-use tokio::sync::mpsc;
 use tokio_rustls::rustls::{
     ClientConfig as RustlsClientConfig, ServerConfig as RustlsServerConfig,
 };
@@ -577,7 +576,7 @@ pub(crate) fn wire_stream_over_quic(
         send,
         recv,
     } = link;
-    let (tx, rx) = mpsc::unbounded_channel::<Vec<u8>>();
+    let (tx, rx) = crate::writer_queue::outbound_channel();
     let writer_handle = WriterHandle::spawn(rx, |queue| writer_task(send, queue));
     // transport-lowlatency is a TCP-path negotiation; QUIC keeps the universal
     // u16 prefix (an always-false flag on the write driver).

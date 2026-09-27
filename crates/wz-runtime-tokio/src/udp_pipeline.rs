@@ -465,7 +465,7 @@ pub fn wire_udp_socket(
     // beyond a failed `local_addr` syscall.
     let endpoints = ip_link_endpoints(LinkKind::Udp, socket.local_addr().ok(), Some(peer));
     let inbound = UdpReadDriver::from_socket(socket.clone());
-    let (tx, rx) = mpsc::unbounded_channel::<Vec<u8>>();
+    let (tx, rx) = crate::writer_queue::outbound_channel();
     let writer_handle = WriterHandle::spawn(rx, |queue| udp_writer_task(socket, peer, queue));
     let outbound = Arc::new(UdpWriteDriver::new(tx, subject, endpoints));
     (inbound, outbound, writer_handle)
@@ -497,7 +497,7 @@ pub fn wire_udp_demuxed(
     // they are one socket), and the DST is this face's own demultiplexed peer.
     let endpoints = ip_link_endpoints(LinkKind::Udp, send_socket.local_addr().ok(), Some(peer));
     let inbound = UdpReadDriver::from_demux(inbound_rx, peer, pump);
-    let (tx, rx) = mpsc::unbounded_channel::<Vec<u8>>();
+    let (tx, rx) = crate::writer_queue::outbound_channel();
     let writer_handle = WriterHandle::spawn(rx, |queue| udp_writer_task(send_socket, peer, queue));
     let outbound = Arc::new(UdpWriteDriver::new(tx, subject, endpoints));
     (inbound, outbound, writer_handle)
@@ -613,7 +613,7 @@ impl LinkDriver for UdpReadDriver {
     }
 }
 
-/// Outbound write side — holds an `mpsc::UnboundedSender<Vec<u8>>` whose
+/// Outbound write side — holds an `OutboundTx` (R2919: priority lanes) whose
 /// receiver is owned by the [`udp_writer_task`]. Impls [`BoxedLinkDriver`]
 /// with a NON-blocking enqueue, the same sync-from-async decoupling
 /// [`crate::link_pipeline::TcpWriteDriver`] uses: the sync Lua
@@ -621,7 +621,7 @@ impl LinkDriver for UdpReadDriver {
 /// where a nested `block_on` would trip the reentrancy check. The channel
 /// crosses that boundary cleanly.
 pub struct UdpWriteDriver {
-    tx: mpsc::UnboundedSender<Vec<u8>>,
+    tx: crate::writer_queue::OutboundTx,
     /// R311y453 — the §5.16 link-derived subject, resolved once at open.
     subject: LinkSubject,
     /// R311y474 — the adminspace `{src,dst}` locator pair, resolved once at open.
@@ -630,7 +630,7 @@ pub struct UdpWriteDriver {
 
 impl UdpWriteDriver {
     fn new(
-        tx: mpsc::UnboundedSender<Vec<u8>>,
+        tx: crate::writer_queue::OutboundTx,
         subject: LinkSubject,
         endpoints: Option<LinkEndpoints>,
     ) -> Self {
@@ -653,7 +653,16 @@ impl BoxedLinkDriver for UdpWriteDriver {
         self.endpoints.as_ref()
     }
 
-    fn send_blocking(&self, bytes: &[u8], _reliability: Reliability) -> LinkSendOutcome {
+    fn send_blocking(&self, bytes: &[u8], reliability: Reliability) -> LinkSendOutcome {
+        self.send_prioritized(bytes, reliability, wz_session_core::qos::Priority::DEFAULT)
+    }
+
+    fn send_prioritized(
+        &self,
+        bytes: &[u8],
+        _reliability: Reliability,
+        priority: wz_session_core::qos::Priority,
+    ) -> LinkSendOutcome {
         // UDP link layer is best-effort by definition; the Reliability hint
         // is the session FSM's concern. The transport TX path now caps its
         // fragment budget to THIS link's MTU ([`Self::link_mtu`] feeds
@@ -670,7 +679,7 @@ impl BoxedLinkDriver for UdpWriteDriver {
             );
             return LinkSendOutcome::Dropped(LinkDropCause::Oversize);
         }
-        if let Err(e) = self.tx.send(bytes.to_vec()) {
+        if let Err(e) = self.tx.send(priority, bytes.to_vec()) {
             log::warn!("wz-runtime-tokio: outbound channel closed; dropping datagram ({e})");
             return LinkSendOutcome::Dropped(LinkDropCause::WriterGone);
         }
@@ -770,7 +779,7 @@ mod tests {
     /// the channel stays usable afterwards.
     #[tokio::test]
     async fn write_driver_drops_oversize_datagram() {
-        let (tx, mut rx) = mpsc::unbounded_channel::<Vec<u8>>();
+        let (tx, mut rx) = crate::writer_queue::outbound_channel();
         let driver = UdpWriteDriver::new(tx, LinkSubject::UNKNOWN, None);
         // R2371 — the drop is stated by the return value as well as inferred
         // from the channel; see the stream-link twin for why both are kept.
@@ -804,7 +813,7 @@ mod tests {
         const _: () = assert!(UDP_LINK_MTU < wz_session_core::link::DEFAULT_LINK_MTU);
         const _: () = assert!(UDP_LINK_MTU < MAX_UDP_PAYLOAD);
 
-        let (tx, _rx) = mpsc::unbounded_channel::<Vec<u8>>();
+        let (tx, _rx) = crate::writer_queue::outbound_channel();
         let driver = UdpWriteDriver::new(tx, LinkSubject::UNKNOWN, None);
         assert_eq!(driver.link_mtu(), UDP_LINK_MTU);
     }

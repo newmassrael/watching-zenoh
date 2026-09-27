@@ -2288,14 +2288,15 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         // one conduit splits across links and the peer's per-conduit RX SN gate
         // drops the reorder). A non-multilink build never routes, so the key is
         // unused there.
-        #[cfg(not(feature = "transport-multilink"))]
-        let _ = priority;
+        //
+        // R2919 — and in every build it is the key the link's writer orders its
+        // queue by (`BoxedLinkDriver::send_prioritized`).
         #[cfg(feature = "transport-multilink")]
         if let Some(target) = self.select_link(reliability, priority) {
-            self.emit_on_link(&target, bytes, reliability);
+            self.emit_on_link(&target, bytes, reliability, priority);
             return;
         }
-        self.emit_on_link(&self.link, bytes, reliability);
+        self.emit_on_link(&self.link, bytes, reliability, priority);
     }
 
     /// R311y205 (transport-multilink IMPL-2b-iii) — emit a wire batch on ONE
@@ -2329,7 +2330,13 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         feature = "transport-batching",
         feature = "transport-keepalive",
     ))]
-    fn emit_on_link(&self, link: &LinkState<R>, bytes: &[u8], reliability: Reliability) {
+    fn emit_on_link(
+        &self,
+        link: &LinkState<R>,
+        bytes: &[u8],
+        reliability: Reliability,
+        priority: Priority,
+    ) {
         let now = self.clock.now_monotonic_ms();
         R::with_mutex_mut(&link.last_outbound_at, |slot| *slot = Some(now));
 
@@ -2450,12 +2457,16 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         if self.compresses_batches() {
             let wrapped = crate::compression::compress_batch(bytes);
             // transport-stats — count the ACTUAL wire bytes (post-compression).
-            let outcome = link.link_driver().send_blocking(&wrapped, reliability);
+            let outcome = link
+                .link_driver()
+                .send_prioritized(&wrapped, reliability, priority);
             count_tx_wire(wrapped.len(), outcome);
             dispose(outcome);
             return;
         }
-        let outcome = link.link_driver().send_blocking(bytes, reliability);
+        let outcome = link
+            .link_driver()
+            .send_prioritized(bytes, reliability, priority);
         count_tx_wire(bytes.len(), outcome);
         dispose(outcome);
     }
@@ -2466,9 +2477,19 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// targets that link), so they must reach the physical link the drive loop
     /// monitors — NOT the reliability-selected data link. At N=1 identical to
     /// [`Self::send_wire`].
+    ///
+    /// R2919 — `priority` is the lane the link's writer queues the frame on,
+    /// and the two callers differ on purpose, as zenoh's do: a keepalive goes
+    /// at `Priority::Control` (zenoh's tx task writes it directly, ahead of any
+    /// queued batch — `io/zenoh-transport/src/unicast/universal/link.rs`
+    /// @ `let n = link.send(&message, Some(Priority::Control)).await?;`), and a
+    /// close at `Priority::Background`, BEHIND everything already queued, so
+    /// the data a caller sent before closing leaves before the close does
+    /// (`io/zenoh-transport/src/unicast/universal/transport.rs`
+    /// @ `p.push_transport_message(msg, Priority::Background);`).
     #[cfg(any(feature = "codec-close", feature = "transport-keepalive",))]
-    fn send_wire_this_link(&self, bytes: &[u8], reliability: Reliability) {
-        self.emit_on_link(&self.link, bytes, reliability);
+    fn send_wire_this_link(&self, bytes: &[u8], reliability: Reliability, priority: Priority) {
+        self.emit_on_link(&self.link, bytes, reliability, priority);
     }
 
     /// R121d — derive the SessionInitParams the Accepting side
@@ -3824,7 +3845,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     #[cfg(all(feature = "transport-multilink", feature = "codec-close"))]
     pub fn send_link_close(&self, reason: u8) {
         let bytes = crate::handshake_encode::encode_close(reason, /*session=*/ false);
-        self.send_wire_this_link(&bytes, Reliability::Reliable);
+        self.send_wire_this_link(&bytes, Reliability::Reliable, Priority::Background);
     }
 
     /// R311y839 — the SCOPE a teardown on THIS link should announce: `true` for a
@@ -8416,8 +8437,9 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             // link survives it. See `close_scope_is_session`.
             let bytes = encode_close(reason as u8, self.close_scope_is_session());
             // R311y205 (transport-multilink) — CLOSE is per-link (targets the
-            // link this path is tearing down), not reliability-routed.
-            self.send_wire_this_link(&bytes, Reliability::Reliable);
+            // link this path is tearing down), not reliability-routed. R2919 —
+            // and it queues BEHIND the data already handed to the writer.
+            self.send_wire_this_link(&bytes, Reliability::Reliable, Priority::Background);
         }
         #[cfg(not(feature = "codec-close"))]
         let _ = reason;
@@ -8455,8 +8477,9 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             // ride the physical link this drive loop monitors (so that link's
             // `last_outbound_at` is stamped and its peer's lease stays fresh), not
             // the reliability-routed data link. `send_wire_this_link` bypasses the
-            // aggregation selector.
-            self.send_wire_this_link(&bytes, Reliability::Reliable);
+            // aggregation selector. R2919 — at `Priority::Control`, ahead of any
+            // queued data, as zenoh's tx task writes its keepalive.
+            self.send_wire_this_link(&bytes, Reliability::Reliable, Priority::Control);
         }
     }
 
@@ -9351,7 +9374,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionFsmUnicastActionsTrait
             // action removes only this link, so the announcement says session only
             // when this link was the session. See `close_scope_is_session`.
             let bytes = encode_close(reason, a.close_scope_is_session());
-            a.send_wire_this_link(&bytes, Reliability::Reliable);
+            a.send_wire_this_link(&bytes, Reliability::Reliable, Priority::Background);
         }
     }
 

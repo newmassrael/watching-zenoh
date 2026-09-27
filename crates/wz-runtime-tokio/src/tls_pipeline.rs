@@ -39,7 +39,6 @@ use std::sync::Arc;
 
 use tokio::io::{split, ReadHalf};
 use tokio::net::TcpStream;
-use tokio::sync::mpsc;
 use tokio_rustls::rustls::pki_types::ServerName;
 use tokio_rustls::rustls::{ClientConfig, ServerConfig};
 use tokio_rustls::{TlsAcceptor, TlsConnector, TlsStream};
@@ -180,7 +179,7 @@ pub fn wire_tls_stream(
             signal.fire();
         });
     }
-    let (tx, rx) = mpsc::unbounded_channel::<Vec<u8>>();
+    let (tx, rx) = crate::writer_queue::outbound_channel();
     let writer_handle = WriterHandle::spawn(rx, |queue| writer_task(writer, queue));
     // transport-lowlatency is a TCP-path negotiation; TLS keeps the universal
     // u16 prefix (an always-false flag on the write driver).

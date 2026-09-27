@@ -43,7 +43,6 @@ use std::sync::Arc;
 use futures_util::stream::{SplitSink, SplitStream};
 use futures_util::{SinkExt, StreamExt};
 use tokio::net::TcpStream;
-use tokio::sync::mpsc;
 use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::{accept_async, client_async, WebSocketStream};
 
@@ -105,7 +104,7 @@ pub fn wire_ws_stream(
     );
     let (sink, stream) = ws.split();
     let inbound = WsReadDriver::new(stream);
-    let (tx, rx) = mpsc::unbounded_channel::<Vec<u8>>();
+    let (tx, rx) = crate::writer_queue::outbound_channel();
     let writer_handle = WriterHandle::spawn(rx, |queue| ws_writer_task(sink, queue));
     let outbound = Arc::new(WsWriteDriver::new(tx, subject, endpoints));
     (inbound, outbound, writer_handle)
@@ -173,7 +172,7 @@ impl LinkDriver for WsReadDriver {
     }
 }
 
-/// Outbound write side — holds an `mpsc::UnboundedSender<Vec<u8>>` whose
+/// Outbound write side — holds an `OutboundTx` (R2919: priority lanes) whose
 /// receiver is owned by the [`ws_writer_task`]. Impls [`BoxedLinkDriver`] with
 /// a NON-blocking enqueue, the same sync-from-async decoupling
 /// [`crate::udp_pipeline::UdpWriteDriver`] uses: the sync script-action
@@ -182,7 +181,7 @@ impl LinkDriver for WsReadDriver {
 /// boundary cleanly. No `link_mtu` override — pico's `_z_get_link_mtu_ws` is
 /// the unbounded 65535 default a stream link inherits.
 pub struct WsWriteDriver {
-    tx: mpsc::UnboundedSender<Vec<u8>>,
+    tx: crate::writer_queue::OutboundTx,
     /// R311y453 — the §5.16 link-derived subject, resolved once at open.
     subject: LinkSubject,
     /// R311y473 — this link's `{src,dst}` locator pair for the adminspace.
@@ -191,7 +190,7 @@ pub struct WsWriteDriver {
 
 impl WsWriteDriver {
     fn new(
-        tx: mpsc::UnboundedSender<Vec<u8>>,
+        tx: crate::writer_queue::OutboundTx,
         subject: LinkSubject,
         endpoints: Option<wz_session_core::link::LinkEndpoints>,
     ) -> Self {
@@ -214,7 +213,16 @@ impl BoxedLinkDriver for WsWriteDriver {
         self.endpoints.as_ref()
     }
 
-    fn send_blocking(&self, bytes: &[u8], _reliability: Reliability) -> LinkSendOutcome {
+    fn send_blocking(&self, bytes: &[u8], reliability: Reliability) -> LinkSendOutcome {
+        self.send_prioritized(bytes, reliability, wz_session_core::qos::Priority::DEFAULT)
+    }
+
+    fn send_prioritized(
+        &self,
+        bytes: &[u8],
+        _reliability: Reliability,
+        priority: wz_session_core::qos::Priority,
+    ) -> LinkSendOutcome {
         if bytes.len() > u16::MAX as usize {
             // Oversize: drop with a warn. zenoh's batch ceiling is 65535
             // (u16), so a larger frame is a wz-side encoder bug — loud.
@@ -224,7 +232,7 @@ impl BoxedLinkDriver for WsWriteDriver {
             );
             return LinkSendOutcome::Dropped(LinkDropCause::Oversize);
         }
-        if let Err(e) = self.tx.send(bytes.to_vec()) {
+        if let Err(e) = self.tx.send(priority, bytes.to_vec()) {
             log::warn!("wz-runtime-tokio: outbound ws channel closed; dropping frame ({e})");
             return LinkSendOutcome::Dropped(LinkDropCause::WriterGone);
         }

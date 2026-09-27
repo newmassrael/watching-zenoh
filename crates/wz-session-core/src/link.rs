@@ -445,6 +445,27 @@ pub trait BoxedLinkDriver {
     /// driver that cannot refuse a write returns
     /// [`LinkSendOutcome::Sent`] unconditionally, which is most of them.
     fn send_blocking(&self, bytes: &[u8], reliability: Reliability) -> LinkSendOutcome;
+
+    /// R2919 — hand `bytes` to the link AT `priority`: the priority of the
+    /// frame the bytes carry (a data frame's conduit, `Priority::Control` for
+    /// a keepalive, `Priority::Background` for a close). The session emits
+    /// every frame through this seam.
+    ///
+    /// A driver whose writer drains a queue orders that queue by it — zenoh's
+    /// consumer pulls the lowest non-empty priority queue first — so a frame
+    /// queued behind lower-priority frames leaves before them. A driver that
+    /// writes synchronously (the MCU sockets) has no queue to order, and the
+    /// default hands straight to [`Self::send_blocking`].
+    fn send_prioritized(
+        &self,
+        bytes: &[u8],
+        reliability: Reliability,
+        priority: crate::qos::Priority,
+    ) -> LinkSendOutcome {
+        let _ = priority;
+        self.send_blocking(bytes, reliability)
+    }
+
     fn open_blocking(&self);
     fn close_blocking(&self);
 

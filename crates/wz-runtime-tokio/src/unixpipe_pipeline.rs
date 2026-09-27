@@ -777,7 +777,7 @@ pub fn wire_unixpipe_stream(
         .node_path()
         .map(|src| addressless_link_endpoints(LinkKind::Unixpipe, src, write_node.as_str()));
     let inbound = StreamReadDriver::new(read, Arc::new(std::sync::atomic::AtomicBool::new(false)));
-    let (tx, rx) = mpsc::unbounded_channel::<Vec<u8>>();
+    let (tx, rx) = crate::writer_queue::outbound_channel();
     let writer_handle = WriterHandle::spawn(rx, |queue| writer_task(sender, queue));
     // transport-lowlatency is a TCP-path negotiation; other stream links keep the
     // universal u16 prefix (an always-false flag on the write driver).

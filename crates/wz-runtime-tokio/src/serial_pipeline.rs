@@ -60,7 +60,6 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use tokio::io::{split, AsyncReadExt, AsyncWriteExt, ReadHalf, WriteHalf};
-use tokio::sync::mpsc;
 use tokio_serial::SerialStream;
 
 use crate::link_interfaces::{addressless_link_endpoints, addressless_link_subject};
@@ -653,7 +652,7 @@ pub fn wire_serial_stream(
     let retain = guard.as_ref().map(SerialLinkGuard::liveness);
     let (reader, writer) = split(stream);
     let inbound = SerialReadDriver::new(reader, guard);
-    let (tx, rx) = mpsc::unbounded_channel::<Vec<u8>>();
+    let (tx, rx) = crate::writer_queue::outbound_channel();
     let writer_handle =
         WriterHandle::spawn(rx, move |queue| serial_writer_task(writer, queue, retain));
     // R311y474 — the adminspace `{src,dst}` pair. BOTH ends are this tty's own
@@ -837,14 +836,14 @@ impl LinkDriver for SerialReadDriver {
 }
 
 /// Outbound write half of the split — holds an
-/// `mpsc::UnboundedSender<Vec<u8>>` whose receiver the [`serial_writer_task`]
+/// `OutboundTx` (R2919: priority lanes) whose receiver the [`serial_writer_task`]
 /// owns. Impls [`BoxedLinkDriver`] with a NON-blocking enqueue, the same
 /// sync-action / async-runtime decoupling
 /// [`crate::link_pipeline::TcpWriteDriver`] uses (a nested `block_on` from a
 /// sync FSM action handler would trip the runtime-reentrancy check). The
 /// channel carries the RAW payload; the writer task does the serial framing.
 pub struct SerialWriteDriver {
-    tx: mpsc::UnboundedSender<Vec<u8>>,
+    tx: crate::writer_queue::OutboundTx,
     /// R311y453 — the §5.16 link-derived subject, resolved once at open.
     subject: LinkSubject,
     /// R311y474 — the adminspace `{src,dst}` locator pair, resolved once at open.
@@ -853,7 +852,7 @@ pub struct SerialWriteDriver {
 
 impl SerialWriteDriver {
     fn new(
-        tx: mpsc::UnboundedSender<Vec<u8>>,
+        tx: crate::writer_queue::OutboundTx,
         subject: LinkSubject,
         endpoints: Option<LinkEndpoints>,
     ) -> Self {
@@ -876,7 +875,16 @@ impl BoxedLinkDriver for SerialWriteDriver {
         self.endpoints.as_ref()
     }
 
-    fn send_blocking(&self, bytes: &[u8], _reliability: Reliability) -> LinkSendOutcome {
+    fn send_blocking(&self, bytes: &[u8], reliability: Reliability) -> LinkSendOutcome {
+        self.send_prioritized(bytes, reliability, wz_session_core::qos::Priority::DEFAULT)
+    }
+
+    fn send_prioritized(
+        &self,
+        bytes: &[u8],
+        _reliability: Reliability,
+        priority: wz_session_core::qos::Priority,
+    ) -> LinkSendOutcome {
         // A single serial frame carries at most SERIAL_MTU payload bytes
         // (encode_frame rejects past it). The transport TX path now caps
         // its fragment budget to THIS link's MTU — [`Self::link_mtu`]
@@ -894,7 +902,7 @@ impl BoxedLinkDriver for SerialWriteDriver {
             );
             return LinkSendOutcome::Dropped(LinkDropCause::Oversize);
         }
-        if let Err(e) = self.tx.send(bytes.to_vec()) {
+        if let Err(e) = self.tx.send(priority, bytes.to_vec()) {
             log::warn!("wz-runtime-tokio: outbound serial channel closed; dropping frame ({e})");
             return LinkSendOutcome::Dropped(LinkDropCause::WriterGone);
         }
@@ -1091,7 +1099,7 @@ mod tests {
         // constant regression fails the build, not a runtime check.
         const _: () = assert!(SERIAL_MTU < wz_session_core::link::DEFAULT_LINK_MTU);
 
-        let (tx, _rx) = mpsc::unbounded_channel::<Vec<u8>>();
+        let (tx, _rx) = crate::writer_queue::outbound_channel();
         let driver = SerialWriteDriver::new(tx, LinkSubject::UNKNOWN, None);
         assert_eq!(driver.link_mtu(), SERIAL_MTU);
     }

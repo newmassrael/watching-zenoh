@@ -39,7 +39,6 @@ use std::io;
 use std::sync::Arc;
 
 use tokio::io::{split, ReadHalf};
-use tokio::sync::mpsc;
 use tokio_vsock::{VsockAddr, VsockListener, VsockStream};
 
 use crate::link_interfaces::{addressless_link_endpoints, addressless_link_subject};
@@ -197,7 +196,7 @@ pub fn wire_vsock_stream(
         },
         Arc::new(std::sync::atomic::AtomicBool::new(false)),
     );
-    let (tx, rx) = mpsc::unbounded_channel::<Vec<u8>>();
+    let (tx, rx) = crate::writer_queue::outbound_channel();
     let writer_handle = WriterHandle::spawn(rx, |queue| writer_task(writer, queue));
     // transport-lowlatency is a TCP-path negotiation; other stream links keep the
     // universal u16 prefix (an always-false flag on the write driver).

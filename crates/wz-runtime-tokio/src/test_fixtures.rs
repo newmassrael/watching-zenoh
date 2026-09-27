@@ -48,15 +48,27 @@ use crate::Reliability;
 /// (`frame_count() == 0` — "no wire bytes leave on Err").
 pub(crate) struct RecordingLinkDriver {
     frames: Mutex<Vec<(Vec<u8>, Reliability)>>,
+    /// R2919 — the priority each frame arrived at, index-aligned with
+    /// `frames`: what `send_prioritized` was handed, or `Priority::DEFAULT`
+    /// for a bare `send_blocking`.
+    priorities: Mutex<Vec<wz_session_core::qos::Priority>>,
 }
 
 impl RecordingLinkDriver {
     /// Number of frames observed via `send_blocking` so far.
     pub(crate) fn frame_count(&self) -> usize {
-        self.frames
+        let frames = self
+            .frames
             .lock()
             .expect("recording driver mutex poisoned")
-            .len()
+            .len();
+        let priorities = self
+            .priorities
+            .lock()
+            .expect("recording driver mutex poisoned")
+            .len();
+        assert_eq!(frames, priorities, "each recorded frame has its priority");
+        frames
     }
 
     /// Wire bytes of the `idx`-th recorded frame (panics if absent), so
@@ -75,6 +87,15 @@ impl RecordingLinkDriver {
         self.frames.lock().expect("recording driver mutex poisoned")[idx].1
     }
 
+    /// R2919 — the priority the `idx`-th frame was handed to the link at
+    /// (panics if absent): the key the link's writer queues it by.
+    #[cfg(feature = "transport-qos")]
+    pub(crate) fn frame_priority(&self, idx: usize) -> wz_session_core::qos::Priority {
+        self.priorities
+            .lock()
+            .expect("recording driver mutex poisoned")[idx]
+    }
+
     /// Discard all recorded frames — lets a test ignore set-up emits (e.g. a
     /// register-time bootstrap flood) so a later `frame_count()` counts only
     /// the frames the operation under test produced. Gated like its sole
@@ -86,15 +107,31 @@ impl RecordingLinkDriver {
             .lock()
             .expect("recording driver mutex poisoned")
             .clear();
+        self.priorities
+            .lock()
+            .expect("recording driver mutex poisoned")
+            .clear();
     }
 }
 
 impl BoxedLinkDriver for RecordingLinkDriver {
     fn send_blocking(&self, bytes: &[u8], reliability: Reliability) -> LinkSendOutcome {
+        self.send_prioritized(bytes, reliability, wz_session_core::qos::Priority::DEFAULT)
+    }
+    fn send_prioritized(
+        &self,
+        bytes: &[u8],
+        reliability: Reliability,
+        priority: wz_session_core::qos::Priority,
+    ) -> LinkSendOutcome {
         self.frames
             .lock()
             .expect("recording driver mutex poisoned")
             .push((bytes.to_vec(), reliability));
+        self.priorities
+            .lock()
+            .expect("recording driver mutex poisoned")
+            .push(priority);
         LinkSendOutcome::Sent
     }
     fn open_blocking(&self) {}
@@ -130,6 +167,7 @@ pub(crate) fn recording_actions_with_params(
 pub(crate) fn recording_driver() -> Arc<RecordingLinkDriver> {
     Arc::new(RecordingLinkDriver {
         frames: Mutex::new(Vec::new()),
+        priorities: Mutex::new(Vec::new()),
     })
 }
 

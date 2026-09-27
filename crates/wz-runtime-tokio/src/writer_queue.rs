@@ -59,14 +59,191 @@
 //! can seal — the seal wiring is not a step to remember, it is the only step
 //! available.
 
+use std::collections::VecDeque;
 use std::future::Future;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use tokio::sync::{mpsc, watch};
+use tokio::sync::{watch, Notify};
 use tokio::time::timeout;
+use wz_session_core::qos::Priority;
 
 use crate::runtime_impl::TokioJoinHandle;
 use crate::runtime_pool::WzRuntime;
+
+/// R2919 — the outbound channel between a session's emit and its link's
+/// writer: one FIFO LANE per `Priority`, drained in strict ascending priority.
+///
+/// zenoh's transmission pipeline keeps a queue per priority and its consumer
+/// pulls the lowest non-empty one first, so a RealTime batch enqueued behind a
+/// backlog of Background batches leaves before them
+/// (`io/zenoh-transport/src/common/pipeline.rs` @ `fn get_pending(&self) -> Option<Priority> {`).
+/// wz's writer used to read one unbounded FIFO, so a frame's priority decided
+/// only the frame header byte, never when the frame left: whatever was queued
+/// first went first. Inside a batch window the session already staged per
+/// priority, but once a frame was handed to the writer its place was fixed.
+///
+/// Each lane is FIFO, which is what keeps one conduit's SN order intact: a
+/// conduit is one `(priority, reliability)` pair, and both reliabilities of a
+/// priority share the lane, in the order they were minted.
+///
+/// A session that negotiated no QoS sends every data frame at
+/// `Priority::DEFAULT`, so its data is one lane and FIFO, as zenoh's
+/// single-queue pipeline is for such a transport.
+pub fn outbound_channel() -> (OutboundTx, OutboundRx) {
+    let shared = Arc::new(Lanes {
+        state: Mutex::new(LaneState {
+            lanes: std::array::from_fn(|_| VecDeque::new()),
+            closed: false,
+            senders: 1,
+        }),
+        ready: Notify::new(),
+    });
+    (
+        OutboundTx {
+            shared: shared.clone(),
+        },
+        OutboundRx { shared },
+    )
+}
+
+struct Lanes {
+    state: Mutex<LaneState>,
+    /// Wakes the (single) writer when a frame lands or the last sender goes.
+    ready: Notify,
+}
+
+struct LaneState {
+    lanes: [VecDeque<Vec<u8>>; Priority::NUM],
+    /// No further enqueue lands — set by the receiver's `close` (the seal).
+    closed: bool,
+    /// Live `OutboundTx` clones; the queue is finished once this reaches 0
+    /// and the lanes are empty.
+    senders: usize,
+}
+
+impl LaneState {
+    fn pop_highest_priority(&mut self) -> Option<Vec<u8>> {
+        self.lanes.iter_mut().find_map(VecDeque::pop_front)
+    }
+}
+
+/// The receiver half of [`outbound_channel`] was closed (the queue sealed),
+/// or dropped; the frame was not enqueued.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OutboundClosed(pub Vec<u8>);
+
+impl std::fmt::Display for OutboundClosed {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "outbound queue closed")
+    }
+}
+
+/// The sending half of [`outbound_channel`]. Cloneable; the queue ends when
+/// every clone has dropped (or the receiver sealed it).
+pub struct OutboundTx {
+    shared: Arc<Lanes>,
+}
+
+impl OutboundTx {
+    /// Enqueue `frame` on `priority`'s lane.
+    pub fn send(&self, priority: Priority, frame: Vec<u8>) -> Result<(), OutboundClosed> {
+        let mut st = self.shared.state.lock().expect("outbound lanes poisoned");
+        if st.closed {
+            return Err(OutboundClosed(frame));
+        }
+        st.lanes[priority.wire_byte() as usize].push_back(frame);
+        drop(st);
+        self.shared.ready.notify_one();
+        Ok(())
+    }
+
+    /// Whether the receiving side has closed the queue.
+    pub fn is_closed(&self) -> bool {
+        self.shared
+            .state
+            .lock()
+            .expect("outbound lanes poisoned")
+            .closed
+    }
+}
+
+impl Clone for OutboundTx {
+    fn clone(&self) -> Self {
+        self.shared
+            .state
+            .lock()
+            .expect("outbound lanes poisoned")
+            .senders += 1;
+        Self {
+            shared: self.shared.clone(),
+        }
+    }
+}
+
+impl Drop for OutboundTx {
+    fn drop(&mut self) {
+        let last = {
+            let mut st = self.shared.state.lock().expect("outbound lanes poisoned");
+            st.senders -= 1;
+            st.senders == 0
+        };
+        if last {
+            self.shared.ready.notify_one();
+        }
+    }
+}
+
+/// The receiving half of [`outbound_channel`].
+pub struct OutboundRx {
+    shared: Arc<Lanes>,
+}
+
+impl OutboundRx {
+    /// The next frame, highest priority first; `None` once the queue is
+    /// finished — closed or sender-less, and empty.
+    pub async fn recv(&mut self) -> Option<Vec<u8>> {
+        loop {
+            let notified = self.shared.ready.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+            {
+                let mut st = self.shared.state.lock().expect("outbound lanes poisoned");
+                if let Some(frame) = st.pop_highest_priority() {
+                    return Some(frame);
+                }
+                if st.closed || st.senders == 0 {
+                    return None;
+                }
+            }
+            notified.await;
+        }
+    }
+
+    /// The next frame if one is queued right now, highest priority first.
+    pub fn try_recv(&mut self) -> Option<Vec<u8>> {
+        self.shared
+            .state
+            .lock()
+            .expect("outbound lanes poisoned")
+            .pop_highest_priority()
+    }
+
+    /// Stop accepting frames; the ones already queued stay to be received.
+    pub fn close(&mut self) {
+        self.shared
+            .state
+            .lock()
+            .expect("outbound lanes poisoned")
+            .closed = true;
+    }
+}
+
+impl Drop for OutboundRx {
+    fn drop(&mut self) {
+        self.close();
+    }
+}
 
 /// Bound on a SINGLE outbound write once the queue is sealed — the wedged-peer
 /// defence that the wall-clock drain budget used to provide, at the one place
@@ -89,7 +266,7 @@ pub const WRITER_STALL_MS: u64 = 2_000;
 /// The receiving half of a writer's outbound channel, plus the seal that ends
 /// it. Constructed by [`WriterHandle::spawn`] and consumed by a writer task.
 pub struct OutboundQueue {
-    rx: mpsc::UnboundedReceiver<Vec<u8>>,
+    rx: OutboundRx,
     /// `None` once the queue has been sealed — by an explicit
     /// [`WriterHandle::drain`], or by the handle being DROPPED, which R2367
     /// made the same signal. See [`WriterHandle`] for why the two had to
@@ -249,7 +426,7 @@ impl WriterHandle {
     /// @ `ZRuntime::TX.spawn(async move {`) and around the multicast one
     /// (`io/zenoh-transport/src/multicast/link.rs`
     /// @ `ZRuntime::TX.spawn(async move {`).
-    pub fn spawn<F, Fut>(rx: mpsc::UnboundedReceiver<Vec<u8>>, task: F) -> Self
+    pub fn spawn<F, Fut>(rx: OutboundRx, task: F) -> Self
     where
         F: FnOnce(OutboundQueue) -> Fut,
         Fut: Future<Output = ()> + Send + 'static,
@@ -266,11 +443,7 @@ impl WriterHandle {
     /// [`WRITER_STALL_MS`] bound would then be spent in real seconds while the
     /// test believes it moved instantly. A host embedding wz inside its own
     /// reactor has the same need for the same reason.
-    pub fn spawn_on<F, Fut>(
-        handle: tokio::runtime::Handle,
-        rx: mpsc::UnboundedReceiver<Vec<u8>>,
-        task: F,
-    ) -> Self
+    pub fn spawn_on<F, Fut>(handle: tokio::runtime::Handle, rx: OutboundRx, task: F) -> Self
     where
         F: FnOnce(OutboundQueue) -> Fut,
         Fut: Future<Output = ()> + Send + 'static,
@@ -329,7 +502,7 @@ mod tests {
     /// surviving sender is held to the end of the test to prove it.
     #[tokio::test]
     async fn a_seal_ends_the_writer_while_a_sender_clone_survives() {
-        let (tx, rx) = mpsc::unbounded_channel::<Vec<u8>>();
+        let (tx, rx) = outbound_channel();
         let seen = Arc::new(AtomicUsize::new(0));
         let seen_task = seen.clone();
         let handle = WriterHandle::spawn(rx, move |mut queue| async move {
@@ -338,8 +511,8 @@ mod tests {
             }
         });
 
-        tx.send(vec![0u8; 3]).expect("enqueue");
-        tx.send(vec![0u8; 4]).expect("enqueue");
+        tx.send(Priority::DEFAULT, vec![0u8; 3]).expect("enqueue");
+        tx.send(Priority::DEFAULT, vec![0u8; 4]).expect("enqueue");
 
         // The clone that the drain cannot make go away.
         let survivor = tx.clone();
@@ -351,7 +524,7 @@ mod tests {
             "the sealed writer must hand over every frame that was already queued"
         );
         assert!(
-            survivor.send(vec![0u8; 5]).is_err(),
+            survivor.send(Priority::DEFAULT, vec![0u8; 5]).is_err(),
             "the seal must CLOSE the channel, so a surviving sender cannot enqueue \
              behind the drain"
         );
@@ -382,7 +555,7 @@ mod tests {
     /// expire on the property this test is about.
     #[tokio::test]
     async fn dropping_the_handle_ends_the_writer_while_a_sender_clone_survives() {
-        let (tx, rx) = mpsc::unbounded_channel::<Vec<u8>>();
+        let (tx, rx) = outbound_channel();
         let seen = Arc::new(AtomicUsize::new(0));
         let seen_task = seen.clone();
         let handle = WriterHandle::spawn(rx, move |mut queue| async move {
@@ -391,8 +564,8 @@ mod tests {
             }
         });
 
-        tx.send(vec![0u8; 3]).expect("enqueue");
-        tx.send(vec![0u8; 4]).expect("enqueue");
+        tx.send(Priority::DEFAULT, vec![0u8; 3]).expect("enqueue");
+        tx.send(Priority::DEFAULT, vec![0u8; 4]).expect("enqueue");
 
         // Held to the END of the test: it is the whole point that the writer
         // ends anyway. A `drop(tx)` before the await would prove nothing.
@@ -415,7 +588,7 @@ mod tests {
             "a dropped handle must SEAL — finish the queue — not discard it"
         );
         assert!(
-            survivor.send(vec![0u8; 5]).is_err(),
+            survivor.send(Priority::DEFAULT, vec![0u8; 5]).is_err(),
             "the dropped handle must close the channel, so a surviving sender \
              cannot enqueue behind a writer that has already exited"
         );
@@ -434,7 +607,7 @@ mod tests {
     /// seconds of wall clock while `start_paused` reported instants.
     #[tokio::test(start_paused = true)]
     async fn a_write_in_flight_when_the_seal_lands_is_bounded() {
-        let (tx, rx) = mpsc::unbounded_channel::<Vec<u8>>();
+        let (tx, rx) = outbound_channel();
         let bailed = Arc::new(AtomicUsize::new(0));
         let bailed_task = bailed.clone();
         let handle = WriterHandle::spawn_on(
@@ -450,7 +623,7 @@ mod tests {
             },
         );
 
-        tx.send(vec![0u8; 1]).expect("enqueue");
+        tx.send(Priority::DEFAULT, vec![0u8; 1]).expect("enqueue");
         // Let the writer reach the wedged write before teardown lands.
         tokio::task::yield_now().await;
         handle.drain().await;
@@ -481,7 +654,7 @@ mod tests {
     /// seal-on-drop; ordering the two removes it rather than widening a window.
     #[tokio::test]
     async fn a_released_handle_hands_over_what_was_already_queued() {
-        let (tx, rx) = mpsc::unbounded_channel::<Vec<u8>>();
+        let (tx, rx) = outbound_channel();
         let seen = Arc::new(AtomicUsize::new(0));
         let seen_task = seen.clone();
         let handle = WriterHandle::spawn(rx, move |mut queue| async move {
@@ -490,12 +663,55 @@ mod tests {
             }
         });
 
-        tx.send(vec![0u8; 2]).expect("enqueue");
+        tx.send(Priority::DEFAULT, vec![0u8; 2]).expect("enqueue");
         drop(tx);
         let join = handle.into_join();
         join.await
             .expect("the writer joins once the handle is released");
 
         assert_eq!(seen.load(Ordering::SeqCst), 2);
+    }
+
+    /// R2919 — frames already queued leave in strict ascending priority, not
+    /// in arrival order: a RealTime frame enqueued behind a Background backlog
+    /// overtakes it, and Control overtakes both (zenoh's consumer pulls the
+    /// lowest non-empty priority queue first).
+    #[tokio::test]
+    async fn queued_frames_leave_highest_priority_first() {
+        let (tx, mut rx) = outbound_channel();
+        tx.send(Priority::Background, b"bg-1".to_vec())
+            .expect("enqueue");
+        tx.send(Priority::Background, b"bg-2".to_vec())
+            .expect("enqueue");
+        tx.send(Priority::Data, b"data".to_vec()).expect("enqueue");
+        tx.send(Priority::RealTime, b"rt".to_vec())
+            .expect("enqueue");
+        tx.send(Priority::Control, b"ctl".to_vec())
+            .expect("enqueue");
+        drop(tx);
+
+        let mut order = Vec::new();
+        while let Some(frame) = rx.recv().await {
+            order.push(String::from_utf8(frame).expect("ascii"));
+        }
+        assert_eq!(order, ["ctl", "rt", "data", "bg-1", "bg-2"]);
+    }
+
+    /// Within one priority the lane is FIFO: two conduits' frames minted in SN
+    /// order at one priority must reach the wire in that order, or the peer's
+    /// per-conduit SN gate drops the later-minted one as stale.
+    #[tokio::test]
+    async fn one_priority_lane_keeps_arrival_order() {
+        let (tx, mut rx) = outbound_channel();
+        for i in 0u8..5 {
+            tx.send(Priority::Data, vec![i]).expect("enqueue");
+        }
+        assert_eq!(rx.try_recv(), Some(vec![0]));
+        drop(tx);
+        let mut rest = Vec::new();
+        while let Some(frame) = rx.recv().await {
+            rest.push(frame[0]);
+        }
+        assert_eq!(rest, [1, 2, 3, 4]);
     }
 }

@@ -36,7 +36,8 @@ use wz_runtime_tokio::runtime_pool::{
 use wz_runtime_tokio::link_socket::LinkSocket;
 #[cfg(feature = "transport-link-udp")]
 use wz_runtime_tokio::udp_pipeline::bind_udp_demux;
-use wz_runtime_tokio::writer_queue::WriterHandle;
+use wz_runtime_tokio::writer_queue::{outbound_channel, WriterHandle};
+use wz_session_core::qos::Priority;
 
 /// BACKSTOP on how long a saturating task may hold its worker. It is not the
 /// hold — the test RELEASES its holders (see [`Holders`]) — it is what stops a
@@ -640,7 +641,7 @@ async fn block_in_place_drives_the_future_in_its_subsystem_context() {
 /// crate at all.
 #[tokio::test]
 async fn the_link_writer_task_runs_on_the_tx_subsystem() {
-    let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
+    let (tx, rx) = outbound_channel();
     let slot = Arc::new(std::sync::Mutex::new(None));
     let task_slot = Arc::clone(&slot);
 
@@ -649,7 +650,7 @@ async fn the_link_writer_task_runs_on_the_tx_subsystem() {
         while queue.next().await.is_some() {}
     });
 
-    tx.send(vec![0u8; 1]).expect("enqueue");
+    tx.send(Priority::DEFAULT, vec![0u8; 1]).expect("enqueue");
     drop(tx);
     handle.drain().await;
 
@@ -670,7 +671,7 @@ async fn the_link_writer_task_runs_on_the_tx_subsystem() {
 /// same seam, same task, one argument different, and the landing moves.
 #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
 async fn writer_spawn_on_stays_on_the_callers_runtime() {
-    let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
+    let (tx, rx) = outbound_channel();
     let slot = Arc::new(std::sync::Mutex::new(None));
     let task_slot = Arc::clone(&slot);
 
@@ -683,7 +684,7 @@ async fn writer_spawn_on_stays_on_the_callers_runtime() {
         },
     );
 
-    tx.send(vec![0u8; 1]).expect("enqueue");
+    tx.send(Priority::DEFAULT, vec![0u8; 1]).expect("enqueue");
     drop(tx);
     handle.drain().await;
 

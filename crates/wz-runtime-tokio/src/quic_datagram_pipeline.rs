@@ -51,7 +51,6 @@ use std::sync::Arc;
 
 use bytes::Bytes;
 use quinn::{Connection, Endpoint};
-use tokio::sync::mpsc;
 use tokio_rustls::rustls::{
     ClientConfig as RustlsClientConfig, ServerConfig as RustlsServerConfig,
 };
@@ -144,7 +143,7 @@ impl LinkDriver for QuicDatagramReadDriver {
     }
 }
 
-/// Outbound write side — holds an `mpsc::UnboundedSender<Vec<u8>>` whose receiver
+/// Outbound write side — holds an `OutboundTx` (R2919: priority lanes) whose receiver
 /// is owned by the [`quic_datagram_writer_task`], plus the per-datagram `mtu`
 /// captured at wire time. Impls [`BoxedLinkDriver`] with a NON-blocking enqueue,
 /// the same sync-from-async decoupling [`crate::udp_pipeline::UdpWriteDriver`]
@@ -152,7 +151,7 @@ impl LinkDriver for QuicDatagramReadDriver {
 /// runtime drives, where a nested `block_on` would trip the reentrancy check;
 /// the channel crosses that boundary cleanly).
 pub struct QuicDatagramWriteDriver {
-    tx: mpsc::UnboundedSender<Vec<u8>>,
+    tx: crate::writer_queue::OutboundTx,
     mtu: usize,
     /// R311y453 — the §5.16 link-derived subject, resolved once at open.
     subject: LinkSubject,
@@ -171,7 +170,16 @@ impl BoxedLinkDriver for QuicDatagramWriteDriver {
         self.endpoints.as_ref()
     }
 
-    fn send_blocking(&self, bytes: &[u8], _reliability: Reliability) -> LinkSendOutcome {
+    fn send_blocking(&self, bytes: &[u8], reliability: Reliability) -> LinkSendOutcome {
+        self.send_prioritized(bytes, reliability, wz_session_core::qos::Priority::DEFAULT)
+    }
+
+    fn send_prioritized(
+        &self,
+        bytes: &[u8],
+        _reliability: Reliability,
+        priority: wz_session_core::qos::Priority,
+    ) -> LinkSendOutcome {
         // QUIC datagrams are best-effort by definition; the Reliability hint is
         // the session FSM's concern. The transport TX path caps its fragment
         // budget to THIS link's MTU ([`Self::link_mtu`] feeds
@@ -188,7 +196,7 @@ impl BoxedLinkDriver for QuicDatagramWriteDriver {
             );
             return LinkSendOutcome::Dropped(LinkDropCause::Oversize);
         }
-        if let Err(e) = self.tx.send(bytes.to_vec()) {
+        if let Err(e) = self.tx.send(priority, bytes.to_vec()) {
             log::warn!("wz-runtime-tokio: outbound channel closed; dropping quic datagram ({e})");
             return LinkSendOutcome::Dropped(LinkDropCause::WriterGone);
         }
@@ -354,7 +362,7 @@ pub fn wire_quic_datagram(
     let mtu = connection
         .max_datagram_size()
         .unwrap_or(QUIC_DATAGRAM_LINK_MTU);
-    let (tx, rx) = mpsc::unbounded_channel::<Vec<u8>>();
+    let (tx, rx) = crate::writer_queue::outbound_channel();
     let writer_handle = WriterHandle::spawn(rx, |queue| {
         quic_datagram_writer_task(connection.clone(), queue)
     });
@@ -440,7 +448,7 @@ mod tests {
     /// The QUIC-datagram mirror of `udp_pipeline`'s oversize-drop guard.
     #[tokio::test]
     async fn write_driver_drops_oversize_datagram() {
-        let (tx, mut rx) = mpsc::unbounded_channel::<Vec<u8>>();
+        let (tx, mut rx) = crate::writer_queue::outbound_channel();
         let driver = QuicDatagramWriteDriver {
             subject: LinkSubject::UNKNOWN,
             endpoints: None,

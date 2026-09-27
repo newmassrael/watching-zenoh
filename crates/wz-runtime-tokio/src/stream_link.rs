@@ -30,19 +30,19 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
-use tokio::sync::mpsc;
 
 use wz_codecs::stream_envelope::StreamEnvelope;
 
 use crate::frame_arena::{link_arena, LinkArena, LinkFrame};
 use crate::link_ring_fd::RingReadable;
-use crate::writer_queue::OutboundQueue;
+use crate::writer_queue::{OutboundQueue, OutboundTx};
 use crate::{poll_framed, LinkDriver, LinkEvent, ReadState, Reliability, TxFrame};
 use wz_session_core::link::BoxedLinkDriver;
 use wz_session_core::link::LinkEndpoints;
 use wz_session_core::link::LinkSubject;
 use wz_session_core::link::LostCause;
 use wz_session_core::link::{LinkDropCause, LinkSendOutcome};
+use wz_session_core::qos::Priority;
 
 /// Inbound read half of a split byte-stream link — owns the read half `R`
 /// (any `AsyncRead`) and impls [`LinkDriver`] with `poll_event` reading one
@@ -544,7 +544,7 @@ impl<R: AsyncRead + Unpin + RingReadable> LinkDriver for StreamReadDriver<R> {
 }
 
 /// Outbound write half of a split byte-stream link — holds an
-/// `mpsc::UnboundedSender<Vec<u8>>` whose receiver is owned by the
+/// [`OutboundTx`] (R2919: priority lanes) whose receiver is owned by the
 /// [`writer_task`]. Impls [`BoxedLinkDriver`] so the FSM's
 /// `Arc<dyn BoxedLinkDriver>` slot is satisfied with a NON-blocking enqueue:
 /// the sync script-action handlers fire from inside a future the same runtime
@@ -555,7 +555,7 @@ impl<R: AsyncRead + Unpin + RingReadable> LinkDriver for StreamReadDriver<R> {
 /// Transport-neutral (a plain channel sender with a u16-prefix oversize guard,
 /// carrying no per-transport state), so TCP and TLS share the one type.
 pub struct StreamWriteDriver {
-    tx: mpsc::UnboundedSender<Vec<u8>>,
+    tx: OutboundTx,
     /// transport-lowlatency — flipped true by the lowlatency open helper at
     /// Established (a fresh always-false flag for every non-lowlatency link).
     /// While true, [`Self::send_blocking`] frames with the 4-byte LE u32 zenoh
@@ -586,7 +586,7 @@ pub struct StreamWriteDriver {
 
 impl StreamWriteDriver {
     pub(crate) fn new(
-        tx: mpsc::UnboundedSender<Vec<u8>>,
+        tx: OutboundTx,
         lowlatency: Arc<AtomicBool>,
         subject: LinkSubject,
         endpoints: Option<LinkEndpoints>,
@@ -613,7 +613,16 @@ impl BoxedLinkDriver for StreamWriteDriver {
         self.endpoints.as_ref()
     }
 
-    fn send_blocking(&self, bytes: &[u8], _reliability: Reliability) -> LinkSendOutcome {
+    fn send_blocking(&self, bytes: &[u8], reliability: Reliability) -> LinkSendOutcome {
+        self.send_prioritized(bytes, reliability, Priority::DEFAULT)
+    }
+
+    fn send_prioritized(
+        &self,
+        bytes: &[u8],
+        _reliability: Reliability,
+        priority: Priority,
+    ) -> LinkSendOutcome {
         if bytes.len() > u16::MAX as usize {
             // Oversize: drop with a warn rather than overflow the length prefix.
             // zenoh-pico's Z_BATCH_UNICAST_SIZE ceiling is 65535 and the
@@ -641,7 +650,7 @@ impl BoxedLinkDriver for StreamWriteDriver {
             }
             .encode_to_vec()
         };
-        if let Err(e) = self.tx.send(wire) {
+        if let Err(e) = self.tx.send(priority, wire) {
             log::warn!("wz-runtime-tokio: outbound channel closed; dropping frame ({e})");
             return LinkSendOutcome::Dropped(LinkDropCause::WriterGone);
         }
@@ -764,7 +773,7 @@ mod tests {
     /// guard; exercised here once for both the TCP and TLS write paths.)
     #[tokio::test]
     async fn write_driver_drops_oversize_frame() {
-        let (tx, mut rx) = mpsc::unbounded_channel::<Vec<u8>>();
+        let (tx, mut rx) = crate::writer_queue::outbound_channel();
         let driver = StreamWriteDriver::new(
             tx,
             Arc::new(AtomicBool::new(false)),

@@ -68,7 +68,6 @@ use std::sync::Arc;
 
 use tokio::net::unix::OwnedReadHalf;
 use tokio::net::{UnixListener, UnixStream};
-use tokio::sync::mpsc;
 
 use crate::link_interfaces::{addressless_link_endpoints, addressless_link_subject};
 use crate::stream_link::{writer_task, StreamReadDriver, StreamWriteDriver};
@@ -335,7 +334,7 @@ pub fn wire_unixsock_stream(
     let (reader, writer) = stream.into_split();
     let inbound =
         StreamReadDriver::new(reader, Arc::new(std::sync::atomic::AtomicBool::new(false)));
-    let (tx, rx) = mpsc::unbounded_channel::<Vec<u8>>();
+    let (tx, rx) = crate::writer_queue::outbound_channel();
     let writer_handle = WriterHandle::spawn(rx, |queue| writer_task(writer, queue));
     // transport-lowlatency is a TCP-path negotiation; other stream links keep the
     // universal u16 prefix (an always-false flag on the write driver).

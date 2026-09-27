@@ -4075,6 +4075,64 @@ mod batch_tx_tests {
     }
 }
 
+/// R2919 — every frame reaches the link seam carrying the priority its
+/// writer queues it by (`BoxedLinkDriver::send_prioritized`), where the seam
+/// used to receive bytes and a reliability only, so a frame's band could
+/// decide its header byte and never when it left.
+#[cfg(all(
+    test,
+    feature = "transport-qos",
+    feature = "codec-push",
+    feature = "codec-frame"
+))]
+mod link_priority_tests {
+    use wz_session_core::qos::Priority;
+
+    /// A data frame on a QoS session goes to the link at its OWN band.
+    #[test]
+    fn a_data_frame_reaches_the_link_at_its_band() {
+        let (actions, driver) = crate::test_fixtures::recording_actions();
+        assert!(actions.set_qos_offer(true), "qos offer applies");
+        actions
+            .send_push_literal_qos("home/rt", b"RT", true, Priority::RealTime)
+            .expect("realtime push");
+        actions
+            .send_push_literal_qos("home/bg", b"BG", true, Priority::Background)
+            .expect("background push");
+        assert_eq!(driver.frame_count(), 2);
+        assert_eq!(driver.frame_priority(0), Priority::RealTime);
+        assert_eq!(driver.frame_priority(1), Priority::Background);
+    }
+
+    /// A session that negotiated no QoS sends its data at `Priority::DEFAULT`
+    /// whatever band the caller named — one lane, FIFO, as zenoh's
+    /// single-queue pipeline is for such a transport.
+    #[test]
+    fn a_non_qos_session_hands_every_data_frame_over_at_default() {
+        let (actions, driver) = crate::test_fixtures::recording_actions();
+        assert!(!actions.is_qos(), "the fixture session negotiated no QoS");
+        actions
+            .send_push_literal_qos("home/rt", b"RT", true, Priority::RealTime)
+            .expect("realtime push");
+        assert_eq!(driver.frame_priority(0), Priority::DEFAULT);
+    }
+
+    /// A keepalive goes at `Priority::Control`, ahead of queued data, as
+    /// zenoh's tx task writes it; a close at `Priority::Background`, behind
+    /// it, so data sent before a close leaves before the close does.
+    #[cfg(all(feature = "transport-keepalive", feature = "codec-close"))]
+    #[test]
+    fn a_keepalive_goes_at_control_and_a_close_at_background() {
+        use wz_session_core::close_reason::CloseReason;
+        let (actions, driver) = crate::test_fixtures::recording_actions();
+        actions.send_keep_alive();
+        actions.send_close_with_reason(CloseReason::Generic);
+        assert_eq!(driver.frame_count(), 2);
+        assert_eq!(driver.frame_priority(0), Priority::Control);
+        assert_eq!(driver.frame_priority(1), Priority::Background);
+    }
+}
+
 /// A4 (session-reconnect) — declaration-cache + transport-replacement
 /// behavioural guards. zenoh-pico `Z_FEATURE_AUTO_RECONNECT` parity at the
 /// actions tier: declares append cache entries (`_z_cache_declaration`),
