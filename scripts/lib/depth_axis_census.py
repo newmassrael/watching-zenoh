@@ -1134,7 +1134,13 @@ CITATION = re.compile(r"\b((?:[A-Za-z0-9_.-]+/)*[A-Za-z0-9_.-]+\.(?:rs|c|h))(?::
 # rule 8 (R2888 to R2897). It was in `reached`, so this pin falls while
 # UNREACHED and NO_SYMBOL hold at 2 and 2. READ off the census's own FAIL
 # line, `reached: 8 against a pin of 9`.
-PIN_REACHED = 8
+#
+# R2899 — 8 -> 9. `routing-router` RETURNS to PARTIAL: R2898 graded the region
+# model and missed the router's dial side, which refuses the four address-less
+# endpoint shapes the pin connects over. It rejoins `reached`, UNREACHED and
+# NO_SYMBOL holding at 2 and 2. READ off the census's own FAIL line,
+# `reached: 9 against a pin of 8`.
+PIN_REACHED = 9
 PIN_UNREACHED = 2
 PIN_NO_SYMBOL = 2
 # R2534 — 346 -> 347. The atom is `adminspace-metrics` and the citation is the
@@ -2196,7 +2202,15 @@ PIN_NO_SYMBOL = 2
 # COMPLETE, so the eight wz citations its PARTIAL reason carried leave the
 # census with it. 49 - 41 = 8, the census's own FAIL line (`wz citations: 41
 # against a pin of 49`), with PIN_AMBIGUOUS holding at 12.
-PIN_WZ_CITATIONS = 41
+#
+# R2899 — 41 -> 60, two atoms. `routing-router` RETURNS to PARTIAL and brings
+# its reason's fifteen wz citations back (R2898's COMPLETE head cited three,
+# the CORRECTION two more); `routing-peer`'s CORRECTION cites four wz files for
+# the clauses it closes and narrows, 9 -> 13. ATTRIBUTED by the per-atom
+# `citation_audit` over the store at HEAD against the working one, no other
+# atom moving. READ off the census's own FAIL line, `wz citations: 60 against
+# a pin of 41`, with PIN_AMBIGUOUS holding at 12.
+PIN_WZ_CITATIONS = 60
 # R2626 — 44 -> 42, and this one is worth a sentence because it HELD through
 # every earlier retirement in this run (R2612, R2622). `time-hlc`'s reason is the
 # first retiree carrying AMBIGUOUS citations of its own: its oldest clauses cite
