@@ -543,10 +543,60 @@ impl MeshHat {
     }
 }
 
-/// A client face's subscriber keyexprs, keyed by the face.
-type ClientSubs = HashMap<FaceId, HashSet<String>>;
-/// A client face's queryables, keyexpr -> the declared `QueryableInfo`.
-type ClientQabls = HashMap<FaceId, HashMap<String, QueryableInfo>>;
+/// A client face's subscribers, decl id -> keyexpr, keyed by the face.
+///
+/// R2906 — keyed by the declaration id, as the token store below always was
+/// and as the pin's broker hat keeps them (`zenoh/src/net/routing/hat/broker/pubsub.rs`
+/// @ `.remote_subs`, inserted and removed by `id`). A client's
+/// `UndeclareSubscriber` names the id and nothing else: zenoh-pico in client
+/// mode sends `_z_make_undecl_subscriber(sub->_entity_id, NULL)`
+/// (`vendor/zenoh-pico/src/net/primitives.c`), so a keyexpr-keyed store had no
+/// way to resolve it and a pico subscriber that undeclared kept being routed to.
+type ClientSubs = HashMap<FaceId, HashMap<u64, String>>;
+/// A client face's queryables, decl id -> (keyexpr, declared `QueryableInfo`),
+/// id-keyed for the same reason as [`ClientSubs`] (pico's
+/// `_z_make_undecl_queryable(qle->_entity_id, NULL)`).
+type ClientQabls = HashMap<FaceId, HashMap<u64, (String, QueryableInfo)>>;
+
+/// The one `QueryableInfo` a client face holds for `keyexpr`: the merge of
+/// every id on the face naming it, `None` when none does. This is what the
+/// pin recomputes when an id leaves
+/// (`zenoh/src/net/routing/hat/broker/queries.rs` @ `.reduce(merge_qabl_infos);`).
+/// ⚠ One stated divergence: on REGISTER the pin overwrites the face's info
+/// with the newest declaration (`get_mut_unchecked(ctx).qabl = Some(*info);`)
+/// rather than merging, so a face holding two DIFFERENT infos for one keyexpr
+/// reads as the newest there and as the merge here. Deriving it the same way
+/// in both directions keeps the answer independent of declaration order.
+fn face_qabl_info(
+    by_id: &HashMap<u64, (String, QueryableInfo)>,
+    keyexpr: &str,
+) -> Option<QueryableInfo> {
+    by_id
+        .values()
+        .filter(|(k, _)| k == keyexpr)
+        .map(|(_, info)| *info)
+        .reduce(QueryableInfo::merge)
+}
+
+/// R2906 — what a reader of one client face's SUBSCRIBERS sees: each keyexpr
+/// once, however many ids name it. Every reader goes through this rather than
+/// the id map, so a face with two subscribers on one key is never delivered
+/// to, advertised or counted twice.
+fn face_sub_keyexprs(by_id: &HashMap<u64, String>) -> HashSet<&str> {
+    by_id.values().map(String::as_str).collect()
+}
+
+/// R2906 — what a reader of one client face's QUERYABLES sees: each keyexpr
+/// once, with the merged info of every id naming it ([`face_qabl_info`]).
+fn face_qabls(by_id: &HashMap<u64, (String, QueryableInfo)>) -> HashMap<&str, QueryableInfo> {
+    let mut out: HashMap<&str, QueryableInfo> = HashMap::new();
+    for (keyexpr, info) in by_id.values() {
+        out.entry(keyexpr.as_str())
+            .and_modify(|merged| *merged = merged.merge(*info))
+            .or_insert(*info);
+    }
+    out
+}
 /// A client face's liveliness tokens, decl id -> keyexpr (an `UndeclareToken`
 /// carries no keyexpr on the wire, so only an id map resolves a retraction).
 #[cfg(feature = "routing-token-tables")]
@@ -878,6 +928,11 @@ impl<K, V> FaceStore for HashMap<K, V> {
     }
 }
 
+/// The set of keyexprs one face holds on a plane, per face — the shape the
+/// adminspace view buckets by, whatever the store keys its entries by.
+#[cfg(feature = "adminspace-introspection-handlers")]
+type FaceKeyexprs = HashMap<FaceId, HashSet<String>>;
+
 /// The keyexprs every broker hat's per-face store holds, merged into one
 /// face-keyed map. A face is owned by exactly one hat, so no two regions
 /// contribute the same face.
@@ -885,7 +940,7 @@ impl<K, V> FaceStore for HashMap<K, V> {
 fn client_keyexprs<T>(
     stores: &RegionMap<Rc<RefCell<HashMap<FaceId, T>>>>,
     keys: impl Fn(&T) -> HashSet<String>,
-) -> ClientSubs {
+) -> FaceKeyexprs {
     stores
         .values()
         .flat_map(|store| {
@@ -1420,7 +1475,7 @@ impl RouterDeclarationsView {
     /// here, which is why an isolated router answers these legs with nothing:
     /// what it knows about declarations is what its neighbours told it.
     pub fn subscribers(&self) -> Vec<(String, wz_session_core::adminspace::AdminSources)> {
-        let clients = client_keyexprs(&self.client_subs, |keys| keys.clone());
+        let clients = client_keyexprs(&self.client_subs, |by_id| by_id.values().cloned().collect());
         self.bucket_by_tier(
             &region_table(&self.subs, ROUTERS_REGION).borrow(),
             &region_table(&self.subs, PEERS_REGION).borrow(),
@@ -1433,8 +1488,8 @@ impl RouterDeclarationsView {
     /// per-declaration `QueryableInfo` — so the client store's inner map is
     /// reduced to its keyexpr set here.
     pub fn queryables(&self) -> Vec<(String, wz_session_core::adminspace::AdminSources)> {
-        let clients = client_keyexprs(&self.client_qabls, |by_key| {
-            by_key.keys().cloned().collect()
+        let clients = client_keyexprs(&self.client_qabls, |by_id| {
+            by_id.values().map(|(keyexpr, _)| keyexpr.clone()).collect()
         });
         self.bucket_by_tier(
             &region_table(&self.qabls, ROUTERS_REGION).borrow(),
@@ -3165,6 +3220,30 @@ impl RouterForwarder {
         }
     }
 
+    /// R2906 — resolve a WITHDRAWAL (`UndeclareSubscriber` / `UndeclareQueryable`)
+    /// the way each hat names it, as [`undeclare_token`](Self::undeclare_token)
+    /// already did for its plane: a mesh source's form is SOURCED and carries
+    /// its keyexpr on `ext_wire_expr`; a client's form is ID-KEYED and carries
+    /// nothing else, so it resolves against the face's own entry for `decl_id`
+    /// (`stored`). The pin's broker hat never reads the extension on this path
+    /// (`zenoh/src/net/routing/hat/broker/pubsub.rs` @
+    /// `.remote_subs.remove(&id)`).
+    fn resolve_withdrawn(
+        &self,
+        inbound: FaceId,
+        region: Region,
+        declare: &DeclareOwned,
+        exts: Option<&Vec<wz_codecs::ext_entry::ExtEntryOwned>>,
+        stored: impl FnOnce(&BrokerHat) -> Option<String>,
+    ) -> Option<Declared> {
+        match self.hats.get(&region)? {
+            Hat::Mesh(_) => self
+                .resolve_sourced(inbound, region, declare, |t| resolve_ext_keyexpr(exts, t))
+                .map(Declared::Sourced),
+            Hat::Broker(hat) => stored(hat).map(Declared::Face),
+        }
+    }
+
     /// Resolve a sourced declaration on a mesh face to the keyexpr it names
     /// and the source that made it, without touching any table — the mesh
     /// half of [`resolve_declared`](Self::resolve_declared), which runs BEFORE
@@ -3356,13 +3435,17 @@ impl RouterForwarder {
         let Some(wireexpr) = declare_subscriber_wireexpr(declare) else {
             return;
         };
+        let decl_id = match &declare.body {
+            DeclareOwnedVariant::CodecZenohDeclSubscriber(s) => s.id,
+            _ => return,
+        };
         let Some(declared) = self.resolve_declared(inbound, region, declare, |t| {
             resolve_wireexpr(&wireexpr.body, t)
         }) else {
             return;
         };
         let snapshot = self.snapshot::<SubPlane>(declared.keyexpr());
-        let registered = self.register_subscriber(inbound, region, reliable, &declared);
+        let registered = self.register_subscriber(inbound, region, reliable, &declared, decl_id);
         log::debug!(
             "router forward: sub declare on face {inbound:?} region {region} -> {}",
             if registered {
@@ -3378,13 +3461,16 @@ impl RouterForwarder {
     }
 
     /// Register a resolved subscriber in the hat that owns `region`, whether
-    /// it changed anything.
+    /// it changed anything. A broker hat keys it by the client's `decl_id`;
+    /// the face's subscription moves only when this is the first id on the
+    /// face naming that keyexpr, as the pin's resource-level `subs` does.
     fn register_subscriber(
         &self,
         inbound: FaceId,
         region: Region,
         reliable: bool,
         declared: &Declared,
+        decl_id: u64,
     ) -> bool {
         match declared {
             Declared::Sourced(sourced) => self.commit_register(
@@ -3396,13 +3482,14 @@ impl RouterForwarder {
                 (),
                 |ke| build_declare_subscriber(0, 0, Some(ke)),
             ),
-            Declared::Face(keyexpr) => self
-                .owner_broker(region)
-                .subs
-                .borrow_mut()
-                .entry(inbound)
-                .or_default()
-                .insert(keyexpr.clone()),
+            Declared::Face(keyexpr) => {
+                let store = &self.owner_broker(region).subs;
+                let mut store = store.borrow_mut();
+                let by_id = store.entry(inbound).or_default();
+                let already = by_id.values().any(|k| k == keyexpr);
+                by_id.insert(decl_id, keyexpr.clone());
+                !already
+            }
         }
     }
 
@@ -3418,30 +3505,38 @@ impl RouterForwarder {
         reliable: bool,
         declare: &DeclareOwned,
     ) {
-        let exts = match &declare.body {
-            DeclareOwnedVariant::CodecZenohUndeclSubscriber(u) => u.extensions.as_ref(),
+        let (decl_id, exts) = match &declare.body {
+            DeclareOwnedVariant::CodecZenohUndeclSubscriber(u) => (u.id, u.extensions.as_ref()),
             _ => return,
         };
-        let Some(declared) =
-            self.resolve_declared(inbound, region, declare, |t| resolve_ext_keyexpr(exts, t))
-        else {
+        let Some(declared) = self.resolve_withdrawn(inbound, region, declare, exts, |hat| {
+            hat.subs
+                .borrow()
+                .get(&inbound)
+                .and_then(|by_id| by_id.get(&decl_id))
+                .cloned()
+        }) else {
             return;
         };
         let snapshot = self.snapshot::<SubPlane>(declared.keyexpr());
-        if self.unregister_subscriber(inbound, region, reliable, &declared) {
+        if self.unregister_subscriber(inbound, region, reliable, &declared, decl_id) {
             self.repropagate(snapshot);
             self.undeclare_push_subs(declared.keyexpr());
         }
     }
 
     /// Unregister a resolved subscriber from the hat that owns `region`,
-    /// whether it removed anything.
+    /// whether it removed anything. A broker hat removes the client's
+    /// `decl_id`; the face's subscription goes only when no other id on the
+    /// face still names the keyexpr (the pin's "Duplicated subscriber" arm,
+    /// `zenoh/src/net/routing/hat/broker/pubsub.rs` @ `"Duplicated subscriber"`).
     fn unregister_subscriber(
         &self,
         inbound: FaceId,
         region: Region,
         reliable: bool,
         declared: &Declared,
+        decl_id: u64,
     ) -> bool {
         match declared {
             Declared::Sourced(sourced) => self.commit_withdraw(
@@ -3453,8 +3548,9 @@ impl RouterForwarder {
                 build_undeclare_subscriber_with_keyexpr,
             ),
             Declared::Face(keyexpr) => {
-                remove_from_face(&self.owner_broker(region).subs, inbound, |keys| {
-                    keys.remove(keyexpr).then_some(())
+                remove_from_face(&self.owner_broker(region).subs, inbound, |by_id| {
+                    by_id.remove(&decl_id)?;
+                    (!by_id.values().any(|k| k == keyexpr)).then_some(())
                 })
                 .is_some()
             }
@@ -3481,11 +3577,11 @@ impl RouterForwarder {
         let Some(wireexpr) = declare_queryable_wireexpr(declare) else {
             return;
         };
-        let info = match &declare.body {
+        let (decl_id, info) = match &declare.body {
             DeclareOwnedVariant::CodecZenohDeclQueryable(dq) => {
-                read_queryable_info(dq.extensions.as_ref())
+                (dq.id, read_queryable_info(dq.extensions.as_ref()))
             }
-            _ => QueryableInfo::DEFAULT,
+            _ => return,
         };
         let Some(declared) = self.resolve_declared(inbound, region, declare, |t| {
             resolve_wireexpr(&wireexpr.body, t)
@@ -3493,7 +3589,7 @@ impl RouterForwarder {
             return;
         };
         let snapshot = self.snapshot::<QablPlane>(declared.keyexpr());
-        if self.register_queryable(inbound, region, reliable, &declared, info) {
+        if self.register_queryable(inbound, region, reliable, &declared, decl_id, info) {
             self.repropagate(snapshot);
             self.push_future_queryable(declared.keyexpr(), inbound);
         }
@@ -3501,12 +3597,16 @@ impl RouterForwarder {
 
     /// Register a resolved queryable with `info` in the hat that owns
     /// `region`, whether it changed anything (a new holder or a changed info).
+    /// A broker hat keys it by the client's `decl_id`; what a reader sees for
+    /// the face is the merge of every id naming the keyexpr
+    /// ([`face_qabl_info`]), so the change is judged on that merge.
     fn register_queryable(
         &self,
         inbound: FaceId,
         region: Region,
         reliable: bool,
         declared: &Declared,
+        decl_id: u64,
         info: QueryableInfo,
     ) -> bool {
         match declared {
@@ -3520,14 +3620,12 @@ impl RouterForwarder {
                 move |ke| build_declare_queryable_with_info(ke, info),
             ),
             Declared::Face(keyexpr) => {
-                let previous = self
-                    .owner_broker(region)
-                    .qabls
-                    .borrow_mut()
-                    .entry(inbound)
-                    .or_default()
-                    .insert(keyexpr.clone(), info);
-                previous != Some(info)
+                let store = &self.owner_broker(region).qabls;
+                let mut store = store.borrow_mut();
+                let by_id = store.entry(inbound).or_default();
+                let before = face_qabl_info(by_id, keyexpr);
+                by_id.insert(decl_id, (keyexpr.clone(), info));
+                face_qabl_info(by_id, keyexpr) != before
             }
         }
     }
@@ -3546,30 +3644,35 @@ impl RouterForwarder {
         reliable: bool,
         declare: &DeclareOwned,
     ) {
-        let exts = match &declare.body {
-            DeclareOwnedVariant::CodecZenohUndeclQueryable(u) => u.extensions.as_ref(),
+        let (decl_id, exts) = match &declare.body {
+            DeclareOwnedVariant::CodecZenohUndeclQueryable(u) => (u.id, u.extensions.as_ref()),
             _ => return,
         };
-        let Some(declared) =
-            self.resolve_declared(inbound, region, declare, |t| resolve_ext_keyexpr(exts, t))
-        else {
+        let Some(declared) = self.resolve_withdrawn(inbound, region, declare, exts, |hat| {
+            hat.qabls
+                .borrow()
+                .get(&inbound)
+                .and_then(|by_id| by_id.get(&decl_id))
+                .map(|(keyexpr, _)| keyexpr.clone())
+        }) else {
             return;
         };
         let snapshot = self.snapshot::<QablPlane>(declared.keyexpr());
-        if self.unregister_queryable(inbound, region, reliable, &declared) {
+        if self.unregister_queryable(inbound, region, reliable, &declared, decl_id) {
             self.repropagate(snapshot);
             self.undeclare_push_qabls(declared.keyexpr());
         }
     }
 
     /// Unregister a resolved queryable from the hat that owns `region`,
-    /// whether it removed anything.
+    /// whether it changed the face's merged queryable for the keyexpr.
     fn unregister_queryable(
         &self,
         inbound: FaceId,
         region: Region,
         reliable: bool,
         declared: &Declared,
+        decl_id: u64,
     ) -> bool {
         match declared {
             Declared::Sourced(sourced) => self.commit_withdraw(
@@ -3581,8 +3684,10 @@ impl RouterForwarder {
                 build_undeclare_queryable_with_keyexpr,
             ),
             Declared::Face(keyexpr) => {
-                remove_from_face(&self.owner_broker(region).qabls, inbound, |qabls| {
-                    qabls.remove(keyexpr)
+                remove_from_face(&self.owner_broker(region).qabls, inbound, |by_id| {
+                    let before = face_qabl_info(by_id, keyexpr);
+                    by_id.remove(&decl_id)?;
+                    (face_qabl_info(by_id, keyexpr) != before).then_some(())
                 })
                 .is_some()
             }
@@ -3994,13 +4099,13 @@ impl RouterForwarder {
         }
         let target_chunks: Vec<&str> = target.split('/').collect();
         for hat in self.broker_hats() {
-            for (face, keys) in hat.subs.borrow().iter() {
+            for (face, by_id) in hat.subs.borrow().iter() {
                 if *face == inbound {
                     continue; // never advertise a face its own subscription
                 }
-                for k in keys {
+                for k in face_sub_keyexprs(by_id) {
                     if keyexpr_intersects_target(k, &target_chunks) {
-                        per_ke.insert(k.clone(), ());
+                        per_ke.insert(k.to_string(), ());
                     }
                 }
             }
@@ -4063,16 +4168,16 @@ impl RouterForwarder {
         }
         let target_chunks: Vec<&str> = target.split('/').collect();
         for hat in self.broker_hats() {
-            for (face, m) in hat.qabls.borrow().iter() {
+            for (face, by_id) in hat.qabls.borrow().iter() {
                 if *face == inbound {
                     continue;
                 }
-                for (k, info) in m {
+                for (k, info) in face_qabls(by_id) {
                     if keyexpr_intersects_target(k, &target_chunks) {
                         per_ke
-                            .entry(k.clone())
-                            .and_modify(|e| *e = e.merge(*info))
-                            .or_insert(*info);
+                            .entry(k.to_string())
+                            .and_modify(|e| *e = e.merge(info))
+                            .or_insert(info);
                     }
                 }
             }
@@ -4839,8 +4944,9 @@ impl RouterForwarder {
                 if id == inbound {
                     return Ok(None);
                 }
-                let deliver = hat.subs.borrow().get(&id).is_some_and(|keys| {
-                    keys.iter()
+                let deliver = hat.subs.borrow().get(&id).is_some_and(|by_id| {
+                    by_id
+                        .values()
                         .any(|sub| keyexpr_intersects_target(sub, &target_chunks))
                 });
                 Ok(deliver.then(|| NetworkMessage::Push(Box::new(carrier.clone()))))
@@ -5147,7 +5253,7 @@ impl RouterForwarder {
                 if *face == exclude_face {
                     continue; // don't fold the destination querier's own queryable
                 }
-                for (k, info) in m {
+                for (k, info) in m.values() {
                     if keyexpr_intersects_target(k, &ke_chunks) {
                         fold(*info);
                     }
@@ -5201,10 +5307,11 @@ impl RouterForwarder {
         }
         let chunks: Vec<&str> = ke.split('/').collect();
         self.broker_hats().any(|hat| {
-            hat.subs
-                .borrow()
-                .values()
-                .any(|set| set.iter().any(|k| keyexpr_intersects_target(k, &chunks)))
+            hat.subs.borrow().values().any(|by_id| {
+                by_id
+                    .values()
+                    .any(|k| keyexpr_intersects_target(k, &chunks))
+            })
         })
     }
 
@@ -5220,10 +5327,11 @@ impl RouterForwarder {
         }
         let chunks: Vec<&str> = ke.split('/').collect();
         self.broker_hats().any(|hat| {
-            hat.qabls
-                .borrow()
-                .values()
-                .any(|m| m.keys().any(|k| keyexpr_intersects_target(k, &chunks)))
+            hat.qabls.borrow().values().any(|by_id| {
+                by_id
+                    .values()
+                    .any(|(k, _)| keyexpr_intersects_target(k, &chunks))
+            })
         })
     }
 
@@ -5345,7 +5453,7 @@ impl RouterForwarder {
                     .subs
                     .borrow()
                     .values()
-                    .filter(|keys| keys.contains(keyexpr))
+                    .filter(|by_id| face_sub_keyexprs(by_id).contains(keyexpr))
                     .count(),
                 None => 0,
             },
@@ -5475,7 +5583,12 @@ impl RouterForwarder {
                     .into_iter()
                     .map(|(keyexpr, _peer, ())| keyexpr)
                     .collect(),
-                Some(Hat::Broker(hat)) => hat.subs.borrow().values().flatten().cloned().collect(),
+                Some(Hat::Broker(hat)) => hat
+                    .subs
+                    .borrow()
+                    .values()
+                    .flat_map(|by_id| face_sub_keyexprs(by_id).into_iter().map(str::to_string))
+                    .collect(),
                 None => Vec::new(),
             },
             #[cfg(feature = "router-multicast-faces")]
@@ -5735,7 +5848,7 @@ impl RouterForwarder {
                     .qabls
                     .borrow()
                     .values()
-                    .filter_map(|qabls| qabls.get(keyexpr).copied())
+                    .filter_map(|by_id| face_qabl_info(by_id, keyexpr))
                     .reduce(QueryableInfo::merge),
             },
             Holder::Group => None,
@@ -5765,7 +5878,7 @@ impl RouterForwarder {
                     .qabls
                     .borrow()
                     .values()
-                    .flat_map(|qabls| qabls.keys().cloned())
+                    .flat_map(|by_id| face_qabls(by_id).into_keys().map(str::to_string))
                     .collect(),
                 None => Vec::new(),
             },
@@ -6541,20 +6654,29 @@ impl RouterForwarder {
     /// "Complete for the query" is the declared
     /// `complete` AND the declaration keyexpr INCLUDING the full query keyexpr — the
     /// same test [`complete_for_query_peers`] applies to a mesh queryable.
+    ///
+    /// R2906 — among several such clients, the LOWEST face id. Every client is
+    /// at distance 1, so they tie, and this used to take whichever a `HashMap`
+    /// walk reached first: a per-process coin flip for which client answers.
+    /// The pin sorts an insertion-ordered route; a face-id key is the
+    /// deterministic stand-in the star router already used for the same tie.
     fn first_complete_client(&self, inbound: FaceId, keyexpr: &str) -> Option<FaceId> {
         let query_chunks: Vec<&str> = keyexpr.split('/').collect();
-        self.broker_hats().find_map(|hat| {
-            hat.qabls
-                .borrow()
-                .iter()
-                .filter(|(id, _)| **id != inbound)
-                .find(|(_, qabls)| {
-                    qabls.iter().any(|(decl, info)| {
-                        info.complete && keyexpr_includes_target(decl, &query_chunks)
+        self.broker_hats()
+            .filter_map(|hat| {
+                hat.qabls
+                    .borrow()
+                    .iter()
+                    .filter(|(id, _)| **id != inbound)
+                    .filter(|(_, by_id)| {
+                        by_id.values().any(|(decl, info)| {
+                            info.complete && keyexpr_includes_target(decl, &query_chunks)
+                        })
                     })
-                })
-                .map(|(id, _)| *id)
-        })
+                    .map(|(id, _)| *id)
+                    .min()
+            })
+            .min()
     }
 
     /// Route the Query to EVERY matching queryable (`QueryTarget::All`, and the
@@ -6692,8 +6814,8 @@ impl RouterForwarder {
                 if id == inbound {
                     return Ok(None);
                 }
-                let qualifies = hat.qabls.borrow().get(&id).is_some_and(|qabls| {
-                    qabls.iter().any(|(decl, info)| {
+                let qualifies = hat.qabls.borrow().get(&id).is_some_and(|by_id| {
+                    by_id.values().any(|(decl, info)| {
                         if complete_only {
                             info.complete && keyexpr_includes_target(decl, &query_chunks)
                         } else {
@@ -7204,10 +7326,12 @@ impl FaceForwarder for RouterForwarder {
         // flooding before its `faces` entry is dropped is harmless.
         let qabl_snapshots: Vec<Snapshot<QablPlane>> = owner
             .and_then(|hat| {
-                hat.qabls
-                    .borrow()
-                    .get(&id)
-                    .map(|qabls| qabls.keys().cloned().collect::<Vec<_>>())
+                hat.qabls.borrow().get(&id).map(|by_id| {
+                    face_qabls(by_id)
+                        .into_keys()
+                        .map(str::to_string)
+                        .collect::<Vec<_>>()
+                })
             })
             .unwrap_or_default()
             .iter()
@@ -7220,7 +7344,14 @@ impl FaceForwarder for RouterForwarder {
             self.repropagate(snapshot);
         }
         let sub_snapshots: Vec<Snapshot<SubPlane>> = owner
-            .and_then(|hat| hat.subs.borrow().get(&id).cloned())
+            .and_then(|hat| {
+                hat.subs.borrow().get(&id).map(|by_id| {
+                    face_sub_keyexprs(by_id)
+                        .into_iter()
+                        .map(str::to_string)
+                        .collect::<Vec<_>>()
+                })
+            })
             .unwrap_or_default()
             .iter()
             .map(|keyexpr| self.snapshot(keyexpr))
@@ -12309,6 +12440,114 @@ mod tests {
         );
     }
 
+    /// R2906 — a client's `UndeclareSubscriber` names the declaration ID and
+    /// nothing else: zenoh-pico in client mode sends
+    /// `_z_make_undecl_subscriber(sub->_entity_id, NULL)`. The router must
+    /// resolve it by that id, as the pin's broker hat does
+    /// (`remote_subs.remove(&id)`), and stop delivering. The keyexpr-keyed store
+    /// had nothing to resolve it against, so the withdrawn subscriber kept
+    /// receiving.
+    #[test]
+    fn a_clients_id_only_undeclare_stops_delivery_to_it() {
+        use wz_session_core::declare_build::build_undeclare_subscriber;
+        let fwd = RouterForwarder::new(zid(0x01));
+        let (c1, _sink_c1) = face(zid(0xAA), WIRE_CLIENT); // publisher
+        let (c2, sink_c2) = face(zid(0xCC), WIRE_CLIENT); // subscriber
+        fwd.register(FaceId(0), &c1);
+        fwd.register(FaceId(1), &c2);
+        forward_one(
+            &fwd,
+            FaceId(1),
+            NetworkMessage::Declare(Box::new(
+                build_declare_subscriber(7, 0, Some("demo/data")).expect("declare"),
+            )),
+        );
+        forward_one(
+            &fwd,
+            FaceId(1),
+            NetworkMessage::Declare(Box::new(build_undeclare_subscriber(7))),
+        );
+        sink_c2.reset();
+        let push = wz_session_core::push_build::build_push_literal("demo/data", b"payload")
+            .expect("build push");
+        forward_one(&fwd, FaceId(0), NetworkMessage::Push(Box::new(push)));
+        assert_eq!(
+            sink_c2.frame_count(),
+            0,
+            "the client withdrew its subscriber by id; nothing is delivered"
+        );
+    }
+
+    /// R2906 — two subscribers on ONE keyexpr under two ids: withdrawing one
+    /// leaves the face subscribed (the pin's "Duplicated subscriber" arm),
+    /// withdrawing the second ends it. A keyexpr-keyed store could not tell the
+    /// two apart and dropped both at the first withdrawal.
+    ///
+    /// The behaviour is held by DERIVATION, not by the "Duplicated
+    /// subscriber" check in `unregister_subscriber`: delivery reads the face's
+    /// remaining ids, and the mesh advertisement is decided by `repropagate`
+    /// comparing a before-snapshot with the tables AFTER the change. A control
+    /// that made the check report every removal as a change came back GREEN
+    /// here, twice -- once when this test watched delivery only, once when it
+    /// watched the mesh peer too. The check is an early exit that mirrors the
+    /// pin's branch and skips the redundant snapshot comparison; nothing
+    /// observable rests on it. This test pins the observable half: nothing on
+    /// the first withdrawal, a retraction on the last.
+    #[test]
+    fn a_face_stays_subscribed_until_its_last_id_on_the_keyexpr_goes() {
+        use wz_session_core::declare_build::build_undeclare_subscriber;
+        let fwd = RouterForwarder::new(zid(0x01));
+        let (c1, _sink_c1) = face(zid(0xAA), WIRE_CLIENT);
+        let (c2, sink_c2) = face(zid(0xCC), WIRE_CLIENT);
+        let (p, sink_p) = face(zid(0xBB), WIRE_PEER);
+        fwd.register(FaceId(0), &c1);
+        fwd.register(FaceId(1), &c2);
+        fwd.register(FaceId(2), &p);
+        advertise_link_back(&fwd, FaceId(2), 0x01, 0xBB, 5);
+        fwd.tick();
+        for id in [3, 4] {
+            forward_one(
+                &fwd,
+                FaceId(1),
+                NetworkMessage::Declare(Box::new(
+                    build_declare_subscriber(id, 0, Some("demo/data")).expect("declare"),
+                )),
+            );
+        }
+        let publish = || {
+            let push = wz_session_core::push_build::build_push_literal("demo/data", b"p")
+                .expect("build push");
+            forward_one(&fwd, FaceId(0), NetworkMessage::Push(Box::new(push)));
+        };
+        sink_p.reset();
+        forward_one(
+            &fwd,
+            FaceId(1),
+            NetworkMessage::Declare(Box::new(build_undeclare_subscriber(3))),
+        );
+        assert_eq!(
+            sink_p.frame_count(),
+            0,
+            "id 4 still subscribes, so the mesh is told nothing"
+        );
+        sink_c2.reset();
+        publish();
+        assert_eq!(sink_c2.frame_count(), 1, "id 4 still receives");
+        sink_p.reset();
+        forward_one(
+            &fwd,
+            FaceId(1),
+            NetworkMessage::Declare(Box::new(build_undeclare_subscriber(4))),
+        );
+        assert!(
+            sink_p.frame_count() > 0,
+            "the last id is gone, so the mesh advertisement is retracted"
+        );
+        sink_c2.reset();
+        publish();
+        assert_eq!(sink_c2.frame_count(), 0, "and nothing is delivered");
+    }
+
     #[test]
     fn a_push_is_not_delivered_to_a_client_that_did_not_subscribe_the_keyexpr() {
         let fwd = RouterForwarder::new(zid(0x01));
@@ -14993,8 +15232,8 @@ mod tests {
             .get(&FaceId(0))
             .expect("the client's queryable is stored");
         assert_eq!(
-            hosted.get("demo/q"),
-            Some(&QueryableInfo {
+            face_qabl_info(hosted, "demo/q"),
+            Some(QueryableInfo {
                 complete: true,
                 distance: 0,
             }),
@@ -15796,6 +16035,95 @@ mod tests {
             0,
             "self-originated into the mesh (node_id 0)"
         );
+    }
+
+    /// R2906 — the queryable twin of
+    /// `a_clients_id_only_undeclare_stops_delivery_to_it`: zenoh-pico in client
+    /// mode withdraws a queryable with `_z_make_undecl_queryable(id, NULL)`,
+    /// and the router must resolve it by that id. Afterwards a query has no
+    /// answerer and is finalized at once instead of being routed to the face
+    /// that withdrew.
+    #[test]
+    fn a_clients_id_only_queryable_undeclare_stops_routing_to_it() {
+        use wz_session_core::declare_build::{
+            build_declare_queryable_with_id_info, build_undeclare_queryable,
+        };
+        let fwd = RouterForwarder::new(zid(0x01));
+        let (querier, sink_q) = face(zid(0xAA), WIRE_CLIENT);
+        let (host, sink_h) = face(zid(0xCC), WIRE_CLIENT);
+        fwd.register(FaceId(0), &querier);
+        fwd.register(FaceId(1), &host);
+        let info = QueryableInfo {
+            complete: true,
+            distance: 0,
+        };
+        forward_one(
+            &fwd,
+            FaceId(1),
+            NetworkMessage::Declare(Box::new(
+                build_declare_queryable_with_id_info(5, "demo/q", info).expect("declare"),
+            )),
+        );
+        forward_one(
+            &fwd,
+            FaceId(1),
+            NetworkMessage::Declare(Box::new(build_undeclare_queryable(5))),
+        );
+        sink_q.reset();
+        sink_h.reset();
+        forward_one(&fwd, FaceId(0), request_best(21, "demo/q"));
+        assert_eq!(
+            sink_h.frame_count(),
+            0,
+            "the withdrawn queryable is not routed to"
+        );
+        assert_eq!(
+            forwarded_response_final_rid(&sink_q.frame_bytes(0)),
+            21,
+            "the query had no answerer and was finalized at once"
+        );
+    }
+
+    /// R2906 — several clients each hosting a queryable complete for the query
+    /// all sit at distance 1, so BestMatching has to break the tie, and it must
+    /// break it the same way every time. It used to take whichever face a
+    /// `HashMap` walk reached first. Several face-id sets, each on a fresh
+    /// forwarder, so an order that only happened to agree once cannot pass: the
+    /// winner is the lowest face id in every one.
+    #[test]
+    fn a_tie_between_complete_client_queryables_goes_to_the_lowest_face() {
+        for hosts in [
+            vec![9u64, 4],
+            vec![4, 9],
+            vec![20, 3, 11],
+            vec![7, 30, 12, 5],
+        ] {
+            let fwd = RouterForwarder::new(zid(0x01));
+            let (querier, _sink_q) = face(zid(0xAA), WIRE_CLIENT);
+            fwd.register(FaceId(100), &querier);
+            let mut sinks = Vec::new();
+            for (n, id) in hosts.iter().enumerate() {
+                let (host, sink) = face(zid(0xB0 + n as u8), WIRE_CLIENT);
+                fwd.register(FaceId(*id), &host);
+                forward_one(&fwd, FaceId(*id), declare_qabl("demo/q", true));
+                sinks.push((*id, sink));
+            }
+            for (_, sink) in &sinks {
+                sink.reset();
+            }
+            forward_one(&fwd, FaceId(100), request_best(1, "demo/q"));
+            let reached: Vec<u64> = sinks
+                .iter()
+                .filter(|(_, sink)| sink.frame_count() > 0)
+                .map(|(id, _)| *id)
+                .collect();
+            let lowest = *hosts.iter().min().expect("non-empty");
+            assert_eq!(
+                reached,
+                vec![lowest],
+                "hosts {hosts:?}: exactly the lowest face answers"
+            );
+        }
     }
 
     #[test]
