@@ -1476,12 +1476,10 @@ fn mesh_node_dials_zenohd_over_unixsock(role: &str) -> String {
 /// R2900 (`routing-peer`) — a wz PEER's `--connect unixsock-stream/...` brings
 /// up a MESH face to a stock zenohd, rather than being refused.
 ///
-/// Face level on purpose: whether data then flows over that face is a
-/// different question, and measured separately it fails over TCP as well, in
-/// either peer mode — a wz peer's Put does not reach a client of a stock
-/// zenohd ROUTER it is attached to. That is open-debt item 828, a
-/// `routing-peer` residual of its own, and asserting data here would grade the
-/// dial seam by it.
+/// Face level on purpose: whether data then flows over a face to a stock
+/// ROUTER is a different question, with a different base (the peer's gateway
+/// route, open-debt item 828), and
+/// [`wz_peer_publish_routes_through_zenohd_to_pico_zsub`] grades it.
 // wz-proves: routing-peer wz->zenohd
 // wz-proves: transport-link-unixsock wz->zenohd
 #[test]
@@ -1501,6 +1499,95 @@ fn wz_peer_mesh_dials_zenohd_over_unixsock() {
 #[ignore = "binary-dep e2e (zenohd router unixsock); set WZ_ZENOHD_BIN, run via Layer Z / --ignored"]
 fn wz_router_mesh_dials_zenohd_over_unixsock() {
     mesh_node_dials_zenohd_over_unixsock("--router-hat");
+}
+
+/// R2901 (`routing-peer`, open-debt item 828) — a wz PEER attached to a stock
+/// zenohd ROUTER publishes, and a zenoh-pico client of that router receives.
+///
+/// The router is a gateway of the peer's region and does not tell the peer
+/// what its clients subscribe to: the pin's peer hat is in pull mode toward a
+/// gateway, and a publication made without a declared publisher asks nothing.
+/// So the pin sends south-sourced data to the gateway unconditionally until an
+/// interest is finalized (`zenoh/src/net/routing/hat/peer/pubsub.rs` @
+/// `dst.has_unfinalized_subscriber_interest = true`). Before R2901 the wz peer
+/// sent only where its own subscription table pointed, the table never named
+/// the router, and this leg received nothing, over TCP and in either peer mode.
+///
+/// The client twin, [`wz_publish_routes_through_zenohd_to_pico_zsub`], is the
+/// harness's control: the same router, subscriber and keyexprs, with wz as a
+/// client, delivered before R2901 as well.
+// wz-proves: routing-peer wz->zenohd
+#[test]
+#[ignore = "binary-dep e2e (zenohd router + zenoh-pico z_sub); set WZ_ZENOHD_BIN, run via Layer Z / --ignored"]
+fn wz_peer_publish_routes_through_zenohd_to_pico_zsub() {
+    let demo = wz_ap_demo_binary();
+    let z_sub = zenoh_pico_cli_binary("z_sub");
+    let publish_key = "demo/zenohd-peer";
+    // The mesh publisher's payload is the demo's own constant: `--value` is a
+    // client-mode flag and `run_peer` does not read it.
+    let publish_value = "wz-mesh-data";
+
+    let (mut zenohd, port) = spawn_zenohd_on_ephemeral_tcp(|| {
+        tempfile::tempfile().expect("tempfile for readiness probe stderr")
+    });
+    let endpoint = format!("tcp/127.0.0.1:{port}");
+
+    let (mut z_sub_child, mut z_sub_stdout_reader) =
+        spawn_subscribed_zsub(&z_sub, "demo/**", &endpoint, "zenohd", || {
+            tempfile::tempfile().expect("tempfile for z_sub stdout")
+        });
+
+    let demo_stderr = tempfile::tempfile().expect("tempfile for wz peer stderr");
+    let demo_stderr_writer = demo_stderr.try_clone().expect("dup wz peer stderr");
+    let mut demo_stderr_reader = demo_stderr;
+    let mut demo_child = ChildGuard::wrap(
+        "wz-ap-demo (--peer --connect zenohd --publish)",
+        Command::new(&demo)
+            .arg("--peer")
+            .arg("127.0.0.1:0")
+            .arg("--connect")
+            .arg(&endpoint)
+            .arg("--publish")
+            .arg(publish_key)
+            .env("RUST_LOG", "info")
+            .stdout(Stdio::null())
+            .stderr(Stdio::from(demo_stderr_writer))
+            .spawn()
+            .expect("spawn wz-ap-demo --peer --connect zenohd"),
+    );
+
+    let received_substr = ">> [Subscriber] Received";
+    let received = wait_for_substring(
+        &mut z_sub_stdout_reader,
+        received_substr,
+        Duration::from_secs(10),
+    );
+
+    let _ = demo_child.child_mut().kill();
+    let _ = demo_child.child_mut().wait();
+    let _ = z_sub_child.child_mut().kill();
+    let _ = z_sub_child.child_mut().wait();
+    let _ = zenohd.child_mut().kill();
+    let _ = zenohd.child_mut().wait();
+
+    let demo_captured = read_captured(&mut demo_stderr_reader);
+    let received_text = received.unwrap_or_else(|c| {
+        panic!(
+            "z_sub did not log '{received_substr}' within 10s — the wz peer's Put did \
+             not reach a client of the zenohd router it is attached to.\n\
+             --- captured z_sub stdout at deadline ---\n{c}\n\
+             --- captured wz peer stderr ---\n{demo_captured}"
+        )
+    });
+    assert!(
+        demo_captured.contains("whatami Some(Router)"),
+        "the wz peer's face must be to zenohd as a Router, or this is not the gateway \
+         case.\n{demo_captured}"
+    );
+    assert!(
+        received_text.contains(publish_key) && received_text.contains(publish_value),
+        "z_sub received, but not the wz peer's sample.\n{received_text}"
+    );
 }
 
 /// Remove a cert-transport (tls/quic) leg's on-disk material: the cert, the key,

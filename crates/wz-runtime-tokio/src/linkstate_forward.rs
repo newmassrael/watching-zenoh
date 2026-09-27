@@ -2555,6 +2555,97 @@ impl LinkstateForwarder {
     /// [`forward_push`](Self::forward_push). The publishing counterpart to
     /// `forward_push` (which re-forwards a RECEIVED Push). Returns the number of
     /// interested-child faces the Put reached.
+    /// R2901 (open-debt item 828) — the faces this peer's hat treats as
+    /// GATEWAYS of its region: those whose far end is south-bound of it, which
+    /// [`register`](FaceForwarder::register) records on the face's graph link
+    /// (`remote_is_gateway`, the pin's `is_gateway: remote_bound.is_south()`).
+    /// A stock zenohd router is one for any peer that connects to it.
+    ///
+    /// Read off the LINK rather than the graph NODE on purpose: the node's
+    /// `is_gateway` is what the gossip announces and is gated on the graph's
+    /// mode, while the pin's data route reads the face's own `remote_bound`
+    /// in every mode (`zenoh/src/net/routing/hat/peer/pubsub.rs` @
+    /// `.filter(|f| f.remote_bound.is_south())`). A face with no graph link — a
+    /// client leaf, or a face whose handshake carried no zid — is never one.
+    fn gateway_faces(&self) -> Vec<FaceId> {
+        let net = self.net.borrow();
+        self.faces
+            .borrow()
+            .iter()
+            .filter(|(_, s)| {
+                s.link
+                    .and_then(|link| net.get_link(link))
+                    .is_some_and(|link| link.remote_is_gateway)
+            })
+            .map(|(id, _)| *id)
+            .collect()
+    }
+
+    /// R2901 (open-debt item 828) — the ONE egress for data this node's SOUTH
+    /// side originates: its own publications and the pushes its co-attached
+    /// clients send it. The interested children of self's tree, as before, AND
+    /// every gateway face, whether or not the subscription table names it.
+    ///
+    /// # Why the gateway arm is unconditional here
+    ///
+    /// A gateway does not tell this peer what its other remotes subscribe to.
+    /// The pin's peer hat is in PULL mode toward it: declarations cross only
+    /// in answer to an interest (`zenoh/src/net/routing/hat/peer/mod.rs` @
+    /// `let do_initial_interest =`, which is false unless both ends are
+    /// north-bound), and a session that never declared a publisher never sends
+    /// one. So the pin's data route does not wait to be told. Data whose source
+    /// region lies south goes to every south-bound face unless that face's
+    /// subscriber interest for the resource has been FINALIZED
+    /// (`zenoh/src/net/routing/hat/peer/pubsub.rs` @
+    /// `dst.has_unfinalized_subscriber_interest = true`), and the gateway, which
+    /// knows its own subscribers, routes it on or drops it.
+    ///
+    /// Until this seam, a wz peer sent data only where its subscription table
+    /// pointed, so a peer attached to a stock router delivered nothing to that
+    /// router's clients: the router never declared them, and nothing asked it
+    /// to. The subscriber direction worked all along, because the pin pushes a
+    /// peer's subscriptions to its gateway unconditionally and wz already did.
+    ///
+    /// ⚠ This node sends a gateway no interest of its own, which is exactly the
+    /// pin's shape for data put without a declared publisher: nothing is ever
+    /// finalized, so the gateway is always sent to. A client's brokered
+    /// write-filter interest is where the pin WOULD finalize and then withhold;
+    /// this node does not yet withhold (it over-sends, it never mis-delivers),
+    /// and open-debt item 828 carries that half with the query plane's twin.
+    ///
+    /// Only data whose source lies SOUTH takes this route. A transit push from a
+    /// peer is not re-sent to a gateway (the pin's arm is gated on
+    /// `src_region.bound().is_south()`), which is why
+    /// [`forward_push`](Self::forward_push) does not come through here.
+    fn fan_out_south_push(
+        &self,
+        keyexpr: &str,
+        reliable: bool,
+        priority: Priority,
+        express: bool,
+        build: impl FnOnce() -> Result<PushOwned, CodecError>,
+    ) -> Result<usize, CodecError> {
+        let gateways = self.gateway_faces();
+        let Some((push, children)) = compute_self_publish_forward(
+            &self.net,
+            &self.subs,
+            keyexpr,
+            !gateways.is_empty(),
+            build,
+        )?
+        else {
+            return Ok(0); // no remote subscriber, no tree direction, no gateway
+        };
+        // One send per FACE: a gateway that is also an interested child (it
+        // declared a matching subscriber) is reached once, not twice.
+        self.fan_out_qos(reliable, priority, express, None, |id, zid| {
+            Ok(
+                (gateways.contains(&id) || zid.is_some_and(|z| is_child(&children, z)))
+                    .then(|| NetworkMessage::Push(Box::new(push.clone()))),
+            )
+        })
+    }
+
     pub fn publish(&self, keyexpr: &str, payload: &[u8]) -> Result<usize, CodecError> {
         // R311y220 — the DEFAULT-priority origination: delegate to `publish_qos` so a
         // plain publish stays byte-identical to the prior `fan_out(true, None, ..)`
@@ -2595,34 +2686,25 @@ impl LinkstateForwarder {
             wz_session_core::qos::CongestionControl::Drop,
             express,
         );
-        let Some((push, children)) =
-            compute_self_publish_forward(&self.net, &self.subs, keyexpr, || {
-                // A DEFAULT band carries no metadata: skip the meta bundle and emit
-                // the stripped baseline (byte-identical to a plain `publish`). The
-                // encoder `build_push_outer_extensions` suppresses a DEFAULT ext
-                // anyway — it stays the correctness SSOT; this is the allocation
-                // fast-path that also keeps the two builders producing identical
-                // bytes for a DEFAULT publish.
-                if qos == wz_session_core::sample::QosLevel::DEFAULT {
-                    build_push_literal(keyexpr, payload)
-                } else {
-                    build_push_literal_with_meta(
-                        keyexpr,
-                        payload,
-                        &wz_session_core::metadata::PushMetadata {
-                            qos: Some(qos),
-                            ..Default::default()
-                        },
-                    )
-                }
-            })?
-        else {
-            return Ok(0); // no remote subscriber / no tree direction -> nothing to send
-        };
-        self.fan_out_qos(true, priority, express, None, |_id, zid| {
-            Ok(zid
-                .is_some_and(|z| is_child(&children, z))
-                .then(|| NetworkMessage::Push(Box::new(push.clone()))))
+        self.fan_out_south_push(keyexpr, true, priority, express, || {
+            // A DEFAULT band carries no metadata: skip the meta bundle and emit
+            // the stripped baseline (byte-identical to a plain `publish`). The
+            // encoder `build_push_outer_extensions` suppresses a DEFAULT ext
+            // anyway — it stays the correctness SSOT; this is the allocation
+            // fast-path that also keeps the two builders producing identical
+            // bytes for a DEFAULT publish.
+            if qos == wz_session_core::sample::QosLevel::DEFAULT {
+                build_push_literal(keyexpr, payload)
+            } else {
+                build_push_literal_with_meta(
+                    keyexpr,
+                    payload,
+                    &wz_session_core::metadata::PushMetadata {
+                        qos: Some(qos),
+                        ..Default::default()
+                    },
+                )
+            }
         })
     }
 
@@ -2642,9 +2724,9 @@ impl LinkstateForwarder {
     ///
     /// # What it shares with `publish`, deliberately
     ///
-    /// The same `compute_self_publish_forward` route, so a delete reaches
-    /// exactly the interested subscribers a Put to the same keyexpr would and a
-    /// keyexpr nobody subscribes to deletes nowhere (`Ok(0)`). Only the CARRIER
+    /// The same route ([`fan_out_south_push`](Self::fan_out_south_push)), so a
+    /// delete reaches exactly the interested subscribers and gateways a Put to
+    /// the same keyexpr would, and with neither it goes nowhere (`Ok(0)`). Only the CARRIER
     /// differs, and it differs in the one way a Del differs on the wire: it has
     /// no payload slot, which is why this takes no payload rather than taking
     /// one and discarding it.
@@ -2657,17 +2739,8 @@ impl LinkstateForwarder {
     /// no caller asking it.
     #[cfg(feature = "pubsub-delete")]
     pub fn publish_delete(&self, keyexpr: &str) -> Result<usize, CodecError> {
-        let Some((push, children)) =
-            compute_self_publish_forward(&self.net, &self.subs, keyexpr, || {
-                wz_session_core::push_build::build_push_del_literal(keyexpr)
-            })?
-        else {
-            return Ok(0); // no remote subscriber / no tree direction -> nothing to send
-        };
-        self.fan_out(true, None, |_id, zid| {
-            Ok(zid
-                .is_some_and(|z| is_child(&children, z))
-                .then(|| NetworkMessage::Push(Box::new(push.clone()))))
+        self.fan_out_south_push(keyexpr, true, Priority::DEFAULT, false, || {
+            wz_session_core::push_build::build_push_del_literal(keyexpr)
         })
     }
 
@@ -4367,28 +4440,18 @@ impl LinkstateForwarder {
                 None => return,
             }
         };
-        let computed = match compute_self_publish_forward(&self.net, &self.subs, &keyexpr, || {
-            reliteralize_push(push, &keyexpr)
-        }) {
-            Ok(c) => c,
-            Err(e) => {
-                log::warn!("peer: client push re-inject build failed for {keyexpr:?}: {e:?}");
-                return;
-            }
-        };
-        let Some((carrier, children)) = computed else {
-            return; // no remote subscriber / no tree direction -> nothing to re-inject
-        };
         // R311y225 — preserve the received band on the client->mesh re-inject: this
         // re-forwards a RECEIVED client frame into the mesh (reliteralize_push), so it
         // carries the client's band through `fan_out_qos`, the peer-tier twin of the
         // router's already-threaded `publish_client_push_into_meshes` (y224). A pico
         // client sends DEFAULT (no unicast ext_qos); a QoS wz client's band survives.
-        let _ = self.fan_out_qos(reliable, priority, false, None, |_id, zid| {
-            Ok(zid
-                .is_some_and(|z| is_child(&children, z))
-                .then(|| NetworkMessage::Push(Box::new(carrier.clone()))))
-        });
+        // R2901 — a client is this peer's SOUTH, so its push takes the same
+        // gateway arm as self's own publication.
+        if let Err(e) = self.fan_out_south_push(&keyexpr, reliable, priority, false, || {
+            reliteralize_push(push, &keyexpr)
+        }) {
+            log::warn!("peer: client push re-inject build failed for {keyexpr:?}: {e:?}");
+        }
     }
 
     /// Retract self's LOCAL queryable for `keyexpr` (R311y154, gap b) — the inverse of
@@ -6156,10 +6219,18 @@ pub(crate) fn compute_push_forward(
 /// (the self-excluded [`LinkstatepeerInterest::interested_remote`] view — the
 /// self-bubble is the local sink, never a data forward target) or an empty tree
 /// direction; a `build` codec failure propagates as `Err`.
+///
+/// R2901 (open-debt item 828) — unless `to_gateways`: then a keyexpr no remote
+/// peer subscribes to still yields the carrier, with an empty child set,
+/// because the caller owes it to its gateway faces whatever the subscription
+/// table says. Only the peer passes `true`;
+/// [`LinkstateForwarder::fan_out_south_push`] says why. The router passes
+/// `false` and keeps the contract above unchanged.
 pub(crate) fn compute_self_publish_forward(
     net: &RefCell<LinkstateNetwork>,
     subs: &RefCell<LinkstatepeerInterest<()>>,
     keyexpr: &str,
+    to_gateways: bool,
     build: impl FnOnce() -> Result<PushOwned, CodecError>,
 ) -> Result<Option<(PushOwned, Vec<Zid>)>, CodecError> {
     // Borrow the net once for the whole route compute (the `compute_push_forward`
@@ -6168,17 +6239,18 @@ pub(crate) fn compute_self_publish_forward(
     let net = net.borrow();
     let self_zid = *net.self_zid();
     let interested = subs.borrow().interested_remote(keyexpr, &self_zid);
-    if interested.is_empty() {
-        return Ok(None);
-    }
     // R2236 (open-debt item 588) found that a gossip subsystem's edgeless graph
     // gave every self-originated Push zero directions, and answered it HERE.
     // R2811 moved that answer into the graph (`LinkstateNetwork::next_hop`),
     // because the query plane asked the same graph and kept the defect: in
     // gossip mode a direct neighbour is self's own next hop, so this is now the
     // one call for both modes.
-    let children = net.directions_toward(&self_zid, &interested);
-    if children.is_empty() {
+    let children = if interested.is_empty() {
+        Vec::new()
+    } else {
+        net.directions_toward(&self_zid, &interested)
+    };
+    if children.is_empty() && !to_gateways {
         return Ok(None);
     }
     let mut carrier = build()?;
@@ -11118,6 +11190,81 @@ mod tests {
         assert_eq!(sink_a.frame_count(), 1, "A received the published Put");
         // self-originated -> node_id 0 on the wire (zenoh DEFAULT).
         assert_eq!(forwarded_source(&sink_a.frame_bytes(0)), 0);
+    }
+
+    /// R2901 (open-debt item 828) — a peer attached to a ROUTER, which is a
+    /// gateway of the peer's region, sends it self-originated data though the
+    /// router declared nothing: the pin's peer hat routes south-sourced data to
+    /// every south-bound face whose subscriber interest is unfinalized
+    /// (`zenoh/src/net/routing/hat/peer/pubsub.rs` @
+    /// `dst.has_unfinalized_subscriber_interest = true`).
+    ///
+    /// THE CONTROL IS THE PEER FACE beside it, registered the same way and
+    /// equally silent about subscriptions. It must get nothing: what selects
+    /// the router is its bound, not an empty table read as "send everywhere".
+    #[test]
+    fn publish_reaches_a_gateway_that_declared_nothing_and_no_other_face() {
+        let fwd = LinkstateForwarder::new(zid(0x05), WhatAmI::Peer);
+        let (router, sink_r) = peer_face_whatami(zid(0xAA), 0); // wire 0 = Router
+        let (peer, sink_p) = peer_face_whatami(zid(0xBB), 1); // wire 1 = Peer
+        fwd.register(FaceId(0), &router);
+        fwd.register(FaceId(1), &peer);
+        sink_r.reset();
+        sink_p.reset();
+
+        let sent = fwd.publish("demo/data", b"v").expect("publish");
+        assert_eq!(sent, 1, "the gateway, and only it");
+        assert_eq!(sink_r.frame_count(), 1, "the router received the Put");
+        assert_eq!(forwarded_source(&sink_r.frame_bytes(0)), 0);
+        assert_eq!(
+            sink_p.frame_count(),
+            0,
+            "a non-gateway with no sub gets none"
+        );
+    }
+
+    /// R2901 — a gateway that DID declare a matching subscriber is both an
+    /// interested child and a gateway; it is one face and receives one copy.
+    #[test]
+    fn a_gateway_that_subscribes_receives_one_copy_not_two() {
+        let fwd = LinkstateForwarder::new(zid(0x05), WhatAmI::Peer);
+        let (router, sink_r) = peer_face_whatami(zid(0xAA), 0);
+        fwd.register(FaceId(0), &router);
+        declare_interest(&fwd, FaceId(0), "demo/data");
+        sink_r.reset();
+
+        assert_eq!(fwd.publish("demo/data", b"v").expect("publish"), 1);
+        assert_eq!(sink_r.frame_count(), 1);
+    }
+
+    /// R2901 — a co-attached CLIENT is this peer's south too, so its push is
+    /// re-injected to the gateway on the same terms; a push that arrives from
+    /// a PEER is transit and is not (the pin gates the gateway arm on
+    /// `src_region.bound().is_south()`).
+    #[test]
+    fn a_client_push_reaches_the_gateway_and_a_peer_push_does_not() {
+        let fwd = LinkstateForwarder::new(zid(0x05), WhatAmI::Peer);
+        let (router, sink_r) = peer_face_whatami(zid(0xAA), 0);
+        let (peer, _sp) = peer_face_whatami(zid(0xBB), 1);
+        let (client, _sc) = peer_face_whatami(zid(0xCC), 2);
+        fwd.register(FaceId(0), &router);
+        fwd.register(FaceId(1), &peer);
+        fwd.register(FaceId(2), &client);
+        sink_r.reset();
+
+        forward_one(&fwd, FaceId(1), NetworkMessage::Push(Box::new(data_push())));
+        assert_eq!(
+            sink_r.frame_count(),
+            0,
+            "a peer's push is not south-sourced"
+        );
+
+        forward_one(&fwd, FaceId(2), NetworkMessage::Push(Box::new(data_push())));
+        assert_eq!(
+            sink_r.frame_count(),
+            1,
+            "the client's push reached the gateway"
+        );
     }
 
     /// R2655 — the DELETE twin of the test above, and the capability it grades

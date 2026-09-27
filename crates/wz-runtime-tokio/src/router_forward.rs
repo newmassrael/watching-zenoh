@@ -4902,8 +4902,9 @@ impl RouterForwarder {
         let Some(subs) = self.subs_table(tier) else {
             return;
         };
-        let carrier_children =
-            compute_self_publish_forward(net, subs, keyexpr, || reliteralize_push(push, keyexpr));
+        let carrier_children = compute_self_publish_forward(net, subs, keyexpr, false, || {
+            reliteralize_push(push, keyexpr)
+        });
         let Ok(Some((carrier, children))) = carrier_children else {
             return; // no interested mesh sub / no tree direction / build err
         };
