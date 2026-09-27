@@ -11398,6 +11398,10 @@ layer_c1bz_docs_resolve() {
     # R2912 — 498 -> 497 and 530 -> 513: the `RouteTable` engine was retired,
     # and `routing.rs` / `routing_forward.rs` took their broken links with them.
     # Measured with this lane's own command on both crates after the deletion.
+    # R2917 — wz-mcu-session-acceptor 4 -> 3: its crate doc no longer links the
+    # private `PeerPhase` (the topology rewrite reworded that paragraph). The
+    # three left are the ones it carried before: `OffsetClock`, and the private
+    # `DATA_FRAME_SN` / `FRAG_SN_1`. Read off this lane's own command.
     budget="
         wz:2
         wz-ap-demo:26
@@ -11405,7 +11409,7 @@ layer_c1bz_docs_resolve() {
         wz-capi-core:7
         wz-capi-pico:44
         wz-link-lwip:9
-        wz-mcu-session-acceptor:4
+        wz-mcu-session-acceptor:3
         wz-routing-graph:5
         wz-runtime-coop:12
         wz-runtime-tokio:497
@@ -19985,7 +19989,10 @@ print("ok" if doc is not None and ('"$1"') else doc)' 2>&1
 # (4 MB), because the image now carries Zephyr's own net stack: the workload is
 # the profile's network seam, a round trip through `ZephyrUdpDriver` over
 # Zephyr's BSD sockets on the loopback interface, where it was a wz-link-lwip
-# echo. It is the machine the FreeRTOS image (Q.frt) boots on. The verdict is
+# echo. It is the machine the FreeRTOS image (Q.frt) boots on. R2917 — the
+# workload is now the acceptor SESSION over that link (`run_acceptor_e2e_on`
+# with the image's Zephyr-socket topology): handshake to Established, cookie
+# round-tripped, a Frame dispatched, the link's locators learnt. The verdict is
 # still the console sentinel — Zephyr's idiomatic
 # console-regex verdict (twister-style), since this board's qemu launch has no
 # semihosting SYS_EXIT channel (so run_qemu_case's exit-code verdict does not

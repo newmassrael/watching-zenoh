@@ -14,79 +14,60 @@
 //! (forced kept by the CMakeLists.txt `--undefined` contract, since the Zephyr
 //! libraries are scanned before librustlib.a).
 //!
-//! R2916 — the workload is the profile's NETWORK SEAM over Zephyr's own
-//! sockets, where it used to be a wz-link-lwip loopback echo. lwIP `NO_SYS`
-//! has no netif over Zephyr's device drivers, while zenoh-pico's Zephyr port
-//! runs over Zephyr's sockets; `wz_runtime_zephyr::net` now does too. One task
-//! drives a [`ZephyrUdpDriver`] the way the session drive loop does, through
-//! its two seams, against a second socket standing in for the peer on the
-//! loopback interface:
+//! R2917 — the workload is a zenoh SESSION over Zephyr's own sockets: the
+//! acceptor handshake to `Established` against a reactive peer, with the
+//! anti-amplification cookie round-tripped, then a dispatched application
+//! Frame — the same `run_acceptor_e2e_on` scenario the bare-metal and FreeRTOS
+//! images run over lwIP, here through [`ZephyrTopology`]: the acceptor is a
+//! `ZephyrUdpDriver` built with NO peer (it learns it from the InitSyn), the
+//! peer a second socket on the loopback interface. R2916 proved the link's two
+//! seams with a single round trip; this drives the whole session through them.
 //!
-//! 1. the peer sends to the driver, which was built WITHOUT a peer — an
-//!    acceptor learns its peer from the InitSyn;
-//! 2. the driver hands the datagram over (`SessionDatagramLink::try_recv`) and
-//!    must have learnt the peer and the link's two locators from it;
-//! 3. the driver replies through the session's outbound seam
-//!    (`BoxedLinkDriver::send_blocking`), and the peer must receive it FROM the
-//!    driver's address.
-//!
-//! The executor, the Zephyr clock, the `k_malloc` allocator and the
-//! `irq_lock` critical section run it, so the profile's other seams stay under
-//! the same boot.
+//! The Zephyr clock times the loop, the `k_malloc` allocator backs every
+//! allocation and the `irq_lock` critical section guards the executor, so the
+//! profile's other seams run under the same boot.
 #![no_std]
 
 extern crate alloc;
 
 use alloc::rc::Rc;
+use alloc::vec;
+use alloc::vec::Vec;
 use core::ffi::{c_char, CStr};
 use core::panic::PanicInfo;
-use core::sync::atomic::{AtomicI32, Ordering};
 
 use critical_section::RawRestoreState;
 
-use wz::runtime_coop::session_drive::SessionDatagramLink;
-use wz::runtime_coop::{CoopLocalSet, CoopRuntime, CoopTime};
-use wz::runtime_core::TimeSource;
 // R311y32 — the Zephyr profile seams arrive through the wz facade's
 // `platform-zephyr` gate (this deploy is the consumer that proves it), not a
 // direct wz-runtime-zephyr dep — mirroring mcu-freertos-demo's wz::runtime_freertos.
 use wz::runtime_zephyr::net::{ZephyrUdpDriver, ZephyrUdpSocket};
 use wz::runtime_zephyr::{ZephyrAllocator, ZephyrClock};
-use wz_session_core::link::{BoxedLinkDriver, LinkSendOutcome};
-use wz_session_core::reliability::Reliability;
+use wz_mcu_session_acceptor::{
+    run_acceptor_e2e_on, AcceptorE2eOutcome, AcceptorTopology, DataMode, FixtureEntropy, PEER_PORT,
+    SESSION_PORT,
+};
+use wz_session_core::link::BoxedLinkDriver;
 
-/// Every Rust allocation (the executor task pool, the future boxes, the
-/// driver's receive buffer) routes through the Zephyr kernel heap. The
-/// deploy's prj.conf sets `CONFIG_HEAP_MEM_POOL_SIZE`.
+/// Every Rust allocation (the session bundle, the executor, the socket link's
+/// receive buffer) routes through the Zephyr kernel heap. The deploy's
+/// prj.conf sets `CONFIG_HEAP_MEM_POOL_SIZE`.
 #[global_allocator]
 static ALLOC: ZephyrAllocator = ZephyrAllocator;
 
 /// `CONFIG_SYS_CLOCK_TICKS_PER_SEC` pinned in prj.conf. The `ZephyrClock`
 /// timebase; 100 Hz = 10 ms tick resolution.
 const TICK_HZ: u32 = 100;
-/// The loopback address both sockets bind to.
+/// The loopback address both endpoints bind to.
 const LOOPBACK: [u8; 4] = [127, 0, 0, 1];
-/// The driver's port — zenoh's default.
-const LINK_PORT: u16 = 7447;
-/// The stand-in peer's port.
-const PEER_PORT: u16 = 7448;
-/// What the peer sends, and what the driver answers.
-const INBOUND: &[u8] = b"InitSyn stand-in";
-const REPLY: &[u8] = b"InitAck stand-in";
-/// Cooperative-loop budget: one `wz_yield_ms(1)` is ~1 tick (10 ms), so 600
-/// iterations ~= 6 s — under the CI QEMU timeout, ample for loopback.
-const POLL_BUDGET: u32 = 600;
-
-/// Outcome shared with the cooperative loop: -1 pending, 0 PASS, 1 FAIL.
-static RESULT: AtomicI32 = AtomicI32::new(-1);
 
 extern "C" {
     /// `printk("%s\n", msg)` — variadic printk is wrapped C-side (src/main.c)
     /// so the Rust FFI target is a plain non-variadic symbol.
     fn wz_log(msg: *const c_char);
     /// `k_msleep(ms)` — `k_msleep` is `static inline` in the Zephyr headers
-    /// (no link symbol), so it too is wrapped C-side. Yields the main thread
-    /// for ~`ms`, letting the tick and the net stack's threads run.
+    /// (no link symbol), so it too is wrapped C-side. The socket link's
+    /// `service` yields through it, and so does the panic handler.
     fn wz_yield_ms(ms: i32);
     /// `irq_lock()` — returns the prior IRQ key; wrapped C-side (the Zephyr
     /// `irq_lock` macro expands to `arch_irq_lock()`, an inline, on this UP SoC).
@@ -126,121 +107,104 @@ fn log(msg: &CStr) {
     unsafe { wz_log(msg.as_ptr()) };
 }
 
-fn fail(msg: &CStr) {
-    log(msg);
-    RESULT.store(1, Ordering::SeqCst);
-}
-
-/// Entry point the Zephyr C `main()` calls. Hosts `CoopRuntime<ZephyrClock>`
-/// in the Zephyr main thread (the cooperative single-task profile = pico
-/// `Z_FEATURE_MULTI_THREAD=0`) and drives the network-seam task to completion.
-/// Returns 0 on PASS.
-#[no_mangle]
-pub extern "C" fn wz_app_main() -> i32 {
-    log(c"wz: CoopRuntime<ZephyrClock> + Zephyr-socket session link starting");
-
-    let runtime = CoopRuntime::new(ZephyrClock::<TICK_HZ>);
-    let time = CoopTime::new(&runtime);
-
-    let link = match ZephyrUdpSocket::bind(LOOPBACK, LINK_PORT) {
-        Ok(s) => s,
-        Err(_) => {
-            log(c"wz: FAIL - bind the link socket on 127.0.0.1:7447");
-            return 1;
-        }
-    };
-    let peer = match ZephyrUdpSocket::bind(LOOPBACK, PEER_PORT) {
-        Ok(s) => s,
-        Err(_) => {
-            log(c"wz: FAIL - bind the peer socket on 127.0.0.1:7448");
-            return 1;
-        }
-    };
-    // Built with NO peer, as an acceptor is. `Rc`, because the session keeps
-    // the same object as its `Rc<dyn BoxedLinkDriver>` sink; so the task goes
-    // in the executor's `!Send` pool, which is what that pool is for.
-    let driver = Rc::new(ZephyrUdpDriver::acceptor(link));
-    let local = CoopLocalSet::new(&runtime);
-    let _task = local.spawn_local(link_task(driver, peer, time));
-
-    // Cooperative loop: run the executor's ready tasks and expired timers,
-    // then yield one tick so the systick advances and Zephyr's net threads
-    // move the loopback traffic. The task records the outcome.
-    for _ in 0..POLL_BUDGET {
-        local.run_until_idle();
-        let r = RESULT.load(Ordering::SeqCst);
-        if r >= 0 {
-            return r;
-        }
-        // SAFETY: standard FFI; blocks this thread for ~1 kernel tick.
-        unsafe { wz_yield_ms(1) };
-    }
-
-    log(c"wz: FAIL - the link task did not finish within budget");
-    1
-}
-
-/// The network-seam round trip, driven through the two seams the session
-/// drive loop uses.
-async fn link_task(
+/// The e2e's two endpoints on Zephyr's net stack: the acceptor's socket link
+/// and a plain socket for the crafted peer, both on the loopback interface.
+struct ZephyrTopology {
     driver: Rc<ZephyrUdpDriver>,
     peer: ZephyrUdpSocket,
-    time: CoopTime<ZephyrClock<TICK_HZ>>,
-) {
-    if peer.send_to(LOOPBACK, LINK_PORT, INBOUND).is_err() {
-        return fail(c"wz: FAIL - the peer's send to the link");
+    rx: Vec<u8>,
+}
+
+impl AcceptorTopology for ZephyrTopology {
+    // One object is both faces: the session's sink and the loop's link.
+    type Link = Rc<ZephyrUdpDriver>;
+
+    fn acceptor_sink(&self) -> Rc<dyn BoxedLinkDriver> {
+        self.driver.clone()
     }
 
-    // (1)+(2) The inbound datagram arrives through the loop's seam.
-    let mut frame = None;
-    for _ in 0..POLL_BUDGET {
-        if let Some(f) = driver.try_recv() {
-            frame = Some(f);
-            break;
-        }
-        if driver.rx_error().is_some() {
-            return fail(c"wz: FAIL - the link socket failed to receive");
-        }
-        time.sleep(10).await;
+    fn acceptor_link(&self) -> Self::Link {
+        self.driver.clone()
     }
-    let Some(frame) = frame else {
-        return fail(c"wz: FAIL - no datagram reached the link");
+
+    fn peer_send(&mut self, bytes: &[u8]) {
+        if self.peer.send_to(LOOPBACK, SESSION_PORT, bytes).is_err() {
+            log(c"wz: the peer's send was refused");
+        }
+    }
+
+    fn peer_try_recv(&mut self) -> Option<Vec<u8>> {
+        // Zephyr delivers on its own RX thread; the drive loop's `service`
+        // already yielded to it this iteration, so nothing to pump here.
+        match self.peer.try_recv(&mut self.rx) {
+            Ok(Some((len, _, _))) => Some(self.rx[..len].to_vec()),
+            Ok(None) => None,
+            Err(_) => {
+                log(c"wz: the peer socket failed to receive");
+                None
+            }
+        }
+    }
+}
+
+/// Entry point the Zephyr C `main()` calls: the acceptor session e2e over
+/// Zephyr's sockets, on the cooperative single-task profile (pico
+/// `Z_FEATURE_MULTI_THREAD=0`). Returns 0 on PASS.
+#[no_mangle]
+pub extern "C" fn wz_app_main() -> i32 {
+    log(c"wz: acceptor session over Zephyr's own sockets starting");
+
+    let Ok(link) = ZephyrUdpSocket::bind(LOOPBACK, SESSION_PORT) else {
+        log(c"wz: FAIL - bind the session socket on 127.0.0.1:7460");
+        return 1;
     };
-    if frame.bytes.as_slice() != INBOUND {
-        return fail(c"wz: FAIL - the link handed over other bytes");
+    let Ok(peer) = ZephyrUdpSocket::bind(LOOPBACK, PEER_PORT) else {
+        log(c"wz: FAIL - bind the peer socket on 127.0.0.1:7461");
+        return 1;
+    };
+    // Built with NO peer, as an acceptor is: it learns it from the InitSyn.
+    let driver = Rc::new(ZephyrUdpDriver::acceptor(link));
+    let topology = ZephyrTopology {
+        driver: driver.clone(),
+        peer,
+        rx: vec![0u8; 2048],
+    };
+
+    // ⚠ FixtureEntropy until this profile has an entropy seam of its own.
+    let report = run_acceptor_e2e_on(
+        topology,
+        ZephyrClock::<TICK_HZ>,
+        FixtureEntropy,
+        DataMode::WholeFrame,
+        || {},
+    );
+
+    if driver.rx_error().is_some() {
+        log(c"wz: FAIL - the session socket failed to receive");
+        return 1;
     }
-    if driver.peer() != Some((LOOPBACK, PEER_PORT)) {
-        return fail(c"wz: FAIL - the link did not learn its peer from the datagram");
+    if report.outcome != AcceptorE2eOutcome::EstablishedAndDispatched {
+        log(match report.outcome {
+            AcceptorE2eOutcome::NotEstablished => c"wz: FAIL - the handshake did not establish",
+            AcceptorE2eOutcome::FrameNotDispatched => {
+                c"wz: FAIL - established, but the Frame was not dispatched"
+            }
+            _ => c"wz: FAIL - an unexpected verdict",
+        });
+        return 1;
     }
+    log(c"wz: session Established over Zephyr sockets, cookie round-tripped, Frame dispatched");
+
+    // The link learnt its two locators from the InitSyn it answered.
     let learnt = driver
         .link_endpoints()
-        .map(|e| e.src == "udp/127.0.0.1:7447" && e.dst == "udp/127.0.0.1:7448");
+        .map(|e| e.src == "udp/127.0.0.1:7460" && e.dst == "udp/127.0.0.1:7461");
     if learnt != Some(true) {
-        return fail(c"wz: FAIL - the link's locators are not its two sockets");
+        log(c"wz: FAIL - the link's locators are not its two sockets");
+        return 1;
     }
-    log(c"wz: the link took the datagram and learnt its peer");
-
-    // (3) The reply leaves through the session's outbound seam.
-    if driver.send_blocking(REPLY, Reliability::Reliable) != LinkSendOutcome::Sent {
-        return fail(c"wz: FAIL - the link refused the reply");
-    }
-    let mut buf = [0u8; 64];
-    for _ in 0..POLL_BUDGET {
-        match peer.try_recv(&mut buf) {
-            Ok(Some((len, addr, port))) => {
-                if &buf[..len] == REPLY && addr == LOOPBACK && port == LINK_PORT {
-                    log(c"wz: the reply reached the peer from the link's address");
-                    RESULT.store(0, Ordering::SeqCst);
-                } else {
-                    fail(c"wz: FAIL - the peer received something else");
-                }
-                return;
-            }
-            Ok(None) => time.sleep(10).await,
-            Err(_) => return fail(c"wz: FAIL - the peer socket failed to receive"),
-        }
-    }
-    fail(c"wz: FAIL - the reply never reached the peer");
+    log(c"wz: the session link reports udp/127.0.0.1:7460 -> udp/127.0.0.1:7461");
+    0
 }
 
 /// no_std panic handler — log + halt (yielding, not busy-spinning). The CI

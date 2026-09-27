@@ -48,6 +48,9 @@ portable-atomic = { version = "1", default-features = false, features = ["fallba
 # `Reliability`) the image drives the Zephyr-socket link through. The direct
 # zephyr-sys edge is gone with lwIP: it served only lwIP's `sys_now()` shim.
 wz-session-core = { path = "../../../crates/wz-session-core", default-features = false, features = ["alloc", "no_std"] }
+# R2917 — the acceptor session e2e, over this profile's own `AcceptorTopology`
+# (Zephyr sockets), so without the crate's default lwIP topology.
+wz-mcu-session-acceptor = { path = "../../../crates/wz-mcu-session-acceptor", default-features = false }
 
 # wz facade — `runtime-coop` pulls the CoopRuntime executor SSOT + CoopTime
 # (its wz-link-lwip edge stays an empty shell: this build sets no WZ_LWIP_PORT

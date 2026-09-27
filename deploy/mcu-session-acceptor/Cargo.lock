@@ -1015,6 +1015,7 @@ version = "0.1.0"
 dependencies = [
  "lwip-sys",
  "wz",
+ "wz-runtime-coop",
  "wz-session-core",
  "wz-session-wire-fixtures",
 ]

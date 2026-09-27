@@ -69,8 +69,12 @@ path = "src/lib.rs"
 # funnel. transport-keepalive is intentionally omitted: the e2e proves
 # handshake + Frame dispatch, not the Established keepalive cadence, so
 # no keepalive worker is spawned onto the cooperative loop.
+#
+# R2917 — `runtime-coop` here, `session-lwip` only under the `lwip` feature:
+# the e2e runs on any network stack through `AcceptorTopology`, and lwIP is
+# one topology among them.
 wz = { path = "../wz", default-features = false, features = [
-    "session-lwip",
+    "runtime-coop",
     "codec-init-body",
     "codec-open-body",
     "codec-frame",
@@ -90,10 +94,14 @@ wz-session-core = { path = "../wz-session-core", default-features = false, featu
     "session-unicast",
     "no_std",
 ] }
+# R2917 — the cooperative drive loop the e2e steps (`session_drive`) and the
+# MCU construction seam (`session_runtime`), both behind `session-unicast`,
+# which the `lwip` topology used to bring in through wz-session-lwip.
+wz-runtime-coop = { path = "../wz-runtime-coop", features = ["alloc", "session-unicast"] }
 # Direct dep SOLELY for DEP_LWIP_LWIP_REAL_BUILD -> lwip_real_build cfg
 # propagation in build.rs (mirrors wz-link-lwip / wz-session-lwip). No
-# FFI is called here.
-lwip-sys = { path = "../lwip-sys" }
+# FFI is called here. Optional since R2917: only the lwIP topology needs it.
+lwip-sys = { path = "../lwip-sys", optional = true }
 # The no_std SSOT for the synthetic handshake wire bytes the reactive peer
 # opens with (craft_initsyn/opensyn) + the application Frame (craft_frame).
 # Shared with the wz-runtime-tokio session-FSM drive tests so both profiles
@@ -101,13 +109,20 @@ lwip-sys = { path = "../lwip-sys" }
 wz-session-wire-fixtures = { path = "../wz-session-wire-fixtures" }
 
 [features]
+default = ["lwip"]
+# R2917 — the lwIP topology (`lwip::LwipTopology`, `run_acceptor_e2e`): the
+# MCU session shell over lwIP loopback. On by default, so every existing
+# caller builds unchanged; a profile on another network stack (Zephyr's
+# sockets) turns it off and supplies its own `AcceptorTopology`.
+lwip = ["wz/session-lwip", "dep:lwip-sys"]
+
 # Tier B transport reassembly. Threads `wz/reassembly` (the facade atomic
 # feature -> wz-session-lwip/reassembly -> wz-runtime-coop + wz-session-core)
 # so `run_acceptor_e2e(.., DataMode::FragmentChain)` exercises the
 # `ReassemblyDispatcher` ingest + sweep on the MCU session loop. Off by
 # default: the Stage 5 whole-frame e2e (host_acceptor_e2e + the default QEMU
 # bin) builds with no reassembly slot pool, exactly as a minimal deploy does.
-reassembly = ["wz/reassembly", "wz-session-core/reassembly"]
+reassembly = ["wz/reassembly", "wz-session-core/reassembly", "wz-runtime-coop/reassembly"]
 
 # Slim session-rx buffer-pool profile (nrf51-class / Cortex-M0, 16 KB SRAM).
 # Threads `wz/buffer-pool-session-rx-slim` so the e2e binds a slim (4 x 256)
@@ -115,7 +130,7 @@ reassembly = ["wz/reassembly", "wz-session-core/reassembly"]
 # SESSION_RX_SLOT_SIZE, so the whole e2e topology fits the microbit 16 KB
 # budget (the deploy/mcu-session-acceptor thumbv6m bin enables this, lifting
 # the Layer Q.4 microbit lane from build-only to a real boot).
-buffer-pool-session-rx-slim = ["wz/buffer-pool-session-rx-slim"]
+buffer-pool-session-rx-slim = ["lwip", "wz/buffer-pool-session-rx-slim"]
 
 [dev-dependencies]
 # critical-section's std impl backs CoopRuntime's critical_section::Mutex
