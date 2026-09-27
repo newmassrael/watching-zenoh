@@ -105,10 +105,34 @@ use wz_session_core::sample::TimestampHint;
 /// two-replica convergence e2e) shares the SAME recipe rather than a
 /// re-derived duplicate.
 pub fn wall_clock_ntp64() -> u64 {
-    let since_epoch = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default();
-    Ntp64::from_unix(since_epoch.as_secs(), since_epoch.subsec_nanos()).as_word()
+    use wz_session_core::epoch::EpochSource;
+    // A clock set before 1970 reads as the epoch itself, as it always has here.
+    SystemEpoch
+        .try_now_ntp64()
+        .unwrap_or(Ntp64::from_unix(0, 0))
+        .as_word()
+}
+
+/// R2914 — this profile's [`EpochSource`](wz_session_core::epoch::EpochSource):
+/// `std::time::SystemTime` since `UNIX_EPOCH`. The AP's wall clock goes through
+/// the same port the MCU profiles implement (`FreertosEpoch`), so "what time is
+/// it" has one shape on every profile. A system clock set before 1970 is
+/// [`EpochUnavailable`](wz_session_core::epoch::EpochUnavailable).
+#[derive(Debug, Clone, Copy, Default)]
+pub struct SystemEpoch;
+
+impl wz_session_core::epoch::EpochSource for SystemEpoch {
+    fn try_since_epoch(
+        &self,
+    ) -> Result<wz_session_core::epoch::SinceEpoch, wz_session_core::epoch::EpochUnavailable> {
+        let since = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_err(|_| wz_session_core::epoch::EpochUnavailable)?;
+        Ok(wz_session_core::epoch::SinceEpoch {
+            secs: since.as_secs(),
+            nanos: since.subsec_nanos(),
+        })
+    }
 }
 
 /// The same wall clock as [`wall_clock_ntp64`], in plain milliseconds since

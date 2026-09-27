@@ -412,6 +412,7 @@ dependencies = [
  "portable-atomic",
  "wz",
  "wz-mcu-session-acceptor",
+ "wz-session-core",
 ]
 
 [[package]]

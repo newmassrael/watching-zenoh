@@ -5,9 +5,9 @@
 # FreeRTOS cooperative single-task profile end-to-end: the FreeRTOS scheduler
 # boots, ONE task hosts the wz-runtime-coop cooperative executor
 # (wz_runtime_freertos::FreertosRuntime = CoopRuntime<FreertosClock>), and that
-# task runs the same wz-link-lwip UDP loopback echo as the bare-metal sibling
-# deploy/mcu-qemu-demo — but driven by vTaskDelay + the FreeRTOS tick instead of
-# the bare-metal SysTick + wfi() loop. Standalone workspace (not a crates/
+# task runs the acceptor session e2e over lwIP loopback (R2913; it ran a UDP
+# echo before) on the profile's clock, allocator, entropy and epoch seams
+# (R2914 added the last). Standalone workspace (not a crates/
 # member); build with WZ_FREERTOS_CONFIG=<this dir> + WZ_LWIP_PORT=<cross-test>.
 
 # R311y33 — empty [workspace] table marks this as its OWN standalone workspace
@@ -53,6 +53,9 @@ wz = { path = "../../crates/wz", default-features = false, features = ["runtime-
 # same one the bare-metal Stage 5 deploy runs), which is what compiles the
 # session, codec and lwIP transport into a FreeRTOS image at all.
 wz-mcu-session-acceptor = { path = "../../crates/wz-mcu-session-acceptor" }
+# R2914 — for the `EpochSource` trait `FreertosEpoch` is read through (the
+# port's module is unconditional, so no feature is asked of the core).
+wz-session-core = { path = "../../crates/wz-session-core", default-features = false }
 
 [profile.release]
 codegen-units = 1

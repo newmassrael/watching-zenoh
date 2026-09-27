@@ -21,7 +21,9 @@
 //! round trip verified, then a post-handshake Frame dispatched to the app
 //! layer. It runs on this profile's three seams — `FreertosClock` (the kernel
 //! tick), `FreertosAllocator` (heap_4) and `FreertosEntropy` (the board's
-//! `xApplicationGetRandomNumber`) — inside the one FreeRTOS task. PASS/FAIL
+//! `xApplicationGetRandomNumber`) — inside the one FreeRTOS task. R2914 adds
+//! the fourth, `FreertosEpoch` (the board's `wzApplicationGetTimeSinceEpoch`),
+//! read after the session to mint the NTP64 a timestamp carries. PASS/FAIL
 //! are semihosted and propagated to the QEMU exit code via `debug::exit`.
 
 #![no_std]
@@ -40,8 +42,9 @@ use freertos_sys::{pdPASS, vTaskStartScheduler, xTaskCreate, xTaskGetTickCount, 
 // R311y28 — the FreeRTOS seams come through the wz facade's
 // `platform-freertos` gate (`wz::runtime_freertos`), not a direct
 // wz-runtime-freertos dep: this demo is the consumer that proves the gate.
-use wz::runtime_freertos::{FreertosAllocator, FreertosClock, FreertosEntropy};
+use wz::runtime_freertos::{FreertosAllocator, FreertosClock, FreertosEntropy, FreertosEpoch};
 use wz_mcu_session_acceptor::{run_acceptor_e2e, AcceptorE2eOutcome, DataMode};
+use wz_session_core::epoch::EpochSource;
 
 /// FreeRTOS heap_4 backs every Rust allocation (the executor, the session
 /// bundle, both lwIP sockets). Sized by `configTOTAL_HEAP_SIZE` in
@@ -101,7 +104,6 @@ extern "C" fn wz_task(_params: *mut c_void) {
                 report.peer_cookie_len,
                 RANDOM_DRAWS.load(Ordering::Relaxed),
             );
-            debug::exit(debug::EXIT_SUCCESS);
         }
         other => {
             hprintln!(
@@ -122,8 +124,51 @@ extern "C" fn wz_task(_params: *mut c_void) {
             debug::exit(debug::EXIT_FAILURE);
         }
     }
+    // R2914 — the epoch seam: mint the NTP64 a timestamp carries from this
+    // board's clock, through the profile's `FreertosEpoch`. A date before
+    // 2020 means the hook answered something that is not the time.
+    match FreertosEpoch.try_now_ntp64() {
+        Ok(ntp) if ntp.whole_secs() >= EARLIEST_PLAUSIBLE_UNIX_SECS => {
+            hprintln!(
+                "R2914 PASS: epoch via FreertosEpoch, NTP64 {:#018x} ({} s since 1970)",
+                ntp.as_word(),
+                ntp.whole_secs(),
+            );
+            debug::exit(debug::EXIT_SUCCESS);
+        }
+        Ok(ntp) => {
+            hprintln!(
+                "R2914 FAIL: the board clock says {} s since 1970, before 2020",
+                ntp.whole_secs(),
+            );
+            debug::exit(debug::EXIT_FAILURE);
+        }
+        Err(e) => {
+            hprintln!("R2914 FAIL: {}", e);
+            debug::exit(debug::EXIT_FAILURE);
+        }
+    }
     #[allow(clippy::empty_loop)]
     loop {}
+}
+
+/// 2020-01-01T00:00:00Z: an epoch reading below this is not the time.
+const EARLIEST_PLAUSIBLE_UNIX_SECS: u64 = 1_577_836_800;
+
+/// This board's wall clock for `FreertosEpoch`. QEMU mps2-an385 has no RTC, but
+/// semihosting's `SYS_TIME` (0x11) returns the HOST's seconds since 1970, which
+/// is a real clock rather than a fixture; it has one-second resolution, so
+/// `nanos` is 0. A board with an RTC or SNTP reads that here instead.
+#[unsafe(no_mangle)]
+pub extern "C" fn wzApplicationGetTimeSinceEpoch(secs: *mut u64, nanos: *mut u32) -> BaseType_t {
+    // SAFETY: SYS_TIME takes no argument block and returns seconds in r0.
+    let host_secs = unsafe { cortex_m_semihosting::syscall!(TIME) };
+    // SAFETY: `FreertosEpoch` passes pointers to live locals.
+    unsafe {
+        *secs = host_secs as u64;
+        *nanos = 0;
+    }
+    1 // pdTRUE
 }
 
 /// How many 32-bit numbers the board hook handed out. Printed with the

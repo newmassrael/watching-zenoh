@@ -16,10 +16,14 @@
 //! 2. [`FreertosAllocator`] — a [`GlobalAlloc`] over the FreeRTOS heap_4
 //!    allocator (`pvPortMalloc`/`vPortFree`). The deploy binary declares it as
 //!    its `#[global_allocator]`.
-//! 3. R2913 — [`FreertosEntropy`](crate::FreertosEntropy), the session core's
+//! 3. R2913 — [`FreertosEntropy`], the session core's
 //!    entropy port over the FreeRTOS application hook
 //!    `xApplicationGetRandomNumber`, the one zenoh-pico's FreeRTOS port draws
 //!    from (`vendor/zenoh-pico/src/system/freertos/system.c`, `z_random_u32`).
+//! 4. R2914 — [`FreertosEpoch`], the session core's
+//!    time-since-epoch port over the board hook
+//!    `wzApplicationGetTimeSinceEpoch`, the read zenoh-pico's FreeRTOS port
+//!    makes through `gettimeofday` (`_z_get_time_since_epoch`).
 //!
 //! [`FreertosRuntime`] is then just `CoopRuntime<FreertosClock<TICK_HZ>>`.
 //!
@@ -112,6 +116,40 @@ impl wz_session_core::entropy::EntropySource for FreertosEntropy {
     }
 }
 
+extern "C" {
+    /// R2914 — the board's wall clock: fill `*secs` / `*nanos` with the time
+    /// since the Unix epoch (UTC, `nanos` below 1e9) and return `pdTRUE`, or
+    /// return `pdFALSE` when the board does not know the date (no RTC, SNTP not
+    /// yet synced). zenoh-pico's FreeRTOS port reads the same instant through
+    /// `gettimeofday`; this hook names fixed-width types instead, because
+    /// `struct timeval`'s `time_t` differs across newlib builds and the Rust
+    /// side has to agree with it byte for byte.
+    fn wzApplicationGetTimeSinceEpoch(secs: *mut u64, nanos: *mut u32) -> freertos_sys::BaseType_t;
+}
+
+/// R2914 — the session core's [`EpochSource`](wz_session_core::epoch::EpochSource)
+/// on this profile: the board's `wzApplicationGetTimeSinceEpoch`, read once per
+/// call. A board answer of `nanos >= 1e9` is refused rather than normalised,
+/// since it means the hook and this seam disagree about the unit.
+#[derive(Clone, Copy, Default)]
+pub struct FreertosEpoch;
+
+impl wz_session_core::epoch::EpochSource for FreertosEpoch {
+    fn try_since_epoch(
+        &self,
+    ) -> Result<wz_session_core::epoch::SinceEpoch, wz_session_core::epoch::EpochUnavailable> {
+        let mut secs = 0u64;
+        let mut nanos = 0u32;
+        // SAFETY: the hook writes one u64 and one u32 through pointers to live
+        // locals; the board's implementation is the application's own.
+        let rc = unsafe { wzApplicationGetTimeSinceEpoch(&mut secs, &mut nanos) };
+        if rc != PD_TRUE || nanos >= 1_000_000_000 {
+            return Err(wz_session_core::epoch::EpochUnavailable);
+        }
+        Ok(wz_session_core::epoch::SinceEpoch { secs, nanos })
+    }
+}
+
 /// `portBYTE_ALIGNMENT` on the ARMv7-M (ARM_CM3) port — heap_4 returns blocks
 /// aligned to this.
 const HEAP_ALIGN: usize = 8;
@@ -161,5 +199,123 @@ unsafe impl GlobalAlloc for FreertosAllocator {
             let base = unsafe { *((ptr as usize - size_of::<usize>()) as *mut usize) };
             unsafe { vPortFree(base as *mut c_void) };
         }
+    }
+}
+
+/// R2914 — host witnesses for the profile's seams. On the host `freertos-sys`
+/// builds no kernel, so each symbol a seam calls is DEFINED here, answering from
+/// a static the test sets: the kernel tick for [`FreertosClock`], and the two
+/// board hooks for [`FreertosEntropy`] and [`FreertosEpoch`]. What is under test
+/// is the seam's own arithmetic and failure handling, which is the same code the
+/// QEMU image runs against the real kernel and board.
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use core::sync::atomic::{AtomicI32, AtomicU32, AtomicU64, Ordering};
+    use wz_session_core::entropy::{EntropySource, EntropyUnavailable};
+    use wz_session_core::epoch::{EpochSource, EpochUnavailable, SinceEpoch};
+
+    static TICKS: AtomicU32 = AtomicU32::new(0);
+    static NEXT_RANDOM: AtomicU32 = AtomicU32::new(0);
+    static RANDOM_RC: AtomicI32 = AtomicI32::new(1);
+    static EPOCH_SECS: AtomicU64 = AtomicU64::new(0);
+    static EPOCH_NANOS: AtomicU32 = AtomicU32::new(0);
+    static EPOCH_RC: AtomicI32 = AtomicI32::new(1);
+
+    #[no_mangle]
+    extern "C" fn xTaskGetTickCount() -> freertos_sys::TickType_t {
+        TICKS.load(Ordering::SeqCst)
+    }
+
+    #[no_mangle]
+    extern "C" fn xApplicationGetRandomNumber(pul_number: *mut u32) -> freertos_sys::BaseType_t {
+        // SAFETY: `FreertosEntropy` passes a pointer to a live u32.
+        unsafe { *pul_number = NEXT_RANDOM.fetch_add(1, Ordering::SeqCst) };
+        RANDOM_RC.load(Ordering::SeqCst)
+    }
+
+    #[no_mangle]
+    extern "C" fn wzApplicationGetTimeSinceEpoch(
+        secs: *mut u64,
+        nanos: *mut u32,
+    ) -> freertos_sys::BaseType_t {
+        // SAFETY: `FreertosEpoch` passes pointers to live locals.
+        unsafe {
+            *secs = EPOCH_SECS.load(Ordering::SeqCst);
+            *nanos = EPOCH_NANOS.load(Ordering::SeqCst);
+        }
+        EPOCH_RC.load(Ordering::SeqCst)
+    }
+
+    #[test]
+    fn the_clock_converts_kernel_ticks_to_microseconds_at_the_tick_rate() {
+        TICKS.store(1234, Ordering::SeqCst);
+        assert_eq!(FreertosClock::<1000>.now_us(), 1_234_000);
+        assert_eq!(FreertosClock::<100>.now_us(), 12_340_000);
+        TICKS.store(u32::MAX, Ordering::SeqCst);
+        assert_eq!(
+            FreertosClock::<1000>.now_us(),
+            u32::MAX as u64 * 1000,
+            "a full-width tick count converts without overflow"
+        );
+    }
+
+    /// The entropy seam draws 32 bits per hook call, little-endian, and a short
+    /// last chunk takes the low bytes; a hook that reports failure fails the
+    /// whole fill. One test, because the hook's statics are shared.
+    #[test]
+    fn entropy_fills_from_the_board_hook_and_fails_closed() {
+        RANDOM_RC.store(1, Ordering::SeqCst);
+        NEXT_RANDOM.store(0x0403_0201, Ordering::SeqCst);
+        let mut buf = [0u8; 6];
+        FreertosEntropy
+            .try_fill_bytes(&mut buf)
+            .expect("the hook answers pdTRUE");
+        assert_eq!(buf, [0x01, 0x02, 0x03, 0x04, 0x02, 0x02]);
+
+        RANDOM_RC.store(0, Ordering::SeqCst);
+        assert_eq!(
+            FreertosEntropy.try_fill_bytes(&mut buf),
+            Err(EntropyUnavailable),
+            "pdFALSE from the board fails the fill"
+        );
+        RANDOM_RC.store(1, Ordering::SeqCst);
+    }
+
+    /// The epoch seam returns the board's instant, refuses a failed read and a
+    /// nanosecond count outside a second, and feeds the NTP64 a timestamp
+    /// carries. One test, because the hook's statics are shared.
+    #[test]
+    fn epoch_reads_the_board_clock_and_refuses_what_it_cannot_trust() {
+        EPOCH_RC.store(1, Ordering::SeqCst);
+        EPOCH_SECS.store(1_700_000_000, Ordering::SeqCst);
+        EPOCH_NANOS.store(250_000_000, Ordering::SeqCst);
+        assert_eq!(
+            FreertosEpoch.try_since_epoch(),
+            Ok(SinceEpoch {
+                secs: 1_700_000_000,
+                nanos: 250_000_000
+            })
+        );
+        assert_eq!(
+            FreertosEpoch.try_now_ntp64().map(|t| t.to_millis()),
+            Ok(1_700_000_000_250)
+        );
+
+        EPOCH_NANOS.store(1_000_000_000, Ordering::SeqCst);
+        assert_eq!(
+            FreertosEpoch.try_since_epoch(),
+            Err(EpochUnavailable),
+            "a nanosecond count of a whole second is refused"
+        );
+
+        EPOCH_NANOS.store(0, Ordering::SeqCst);
+        EPOCH_RC.store(0, Ordering::SeqCst);
+        assert_eq!(
+            FreertosEpoch.try_since_epoch(),
+            Err(EpochUnavailable),
+            "a board that does not know the date says so"
+        );
+        EPOCH_RC.store(1, Ordering::SeqCst);
     }
 }

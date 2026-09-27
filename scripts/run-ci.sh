@@ -14895,7 +14895,10 @@ install qemu-system-arm" || fail=1
     # dispatched Frame. It used to bounce one UDP datagram, which compiled no
     # session, codec or transport code into a FreeRTOS image. SYS_EXIT=0 => the
     # scheduler booted AND the session reached Established and dispatched; the
-    # PASS line also prints how many numbers the entropy hook handed out. Build needs BOTH WZ_FREERTOS_CONFIG (the deploy's
+    # PASS line also prints how many numbers the entropy hook handed out.
+    # R2914 — it then reads FreertosEpoch (the board's
+    # wzApplicationGetTimeSinceEpoch) and exits 0 only on a post-2020 NTP64.
+    # Build needs BOTH WZ_FREERTOS_CONFIG (the deploy's
     # FreeRTOSConfig.h, with the cortex-m-rt direct-routing #defines) AND
     # WZ_LWIP_PORT (the lwIP cross-test port). Reaches here only with
     # arm-none-eabi-gcc present (the Q.1-3 toolchain gate returned early else).

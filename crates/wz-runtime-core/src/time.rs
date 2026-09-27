@@ -57,6 +57,11 @@ pub struct TimeoutElapsed;
 /// `time-rs` on MCU profiles that need it). Keeping wall clock out
 /// of the trait avoids the "every TimeSource must answer 'what
 /// timezone'" rabbit hole.
+///
+/// R2914 — a profile's wall clock now has a port of its own,
+/// `wz_session_core::epoch::EpochSource`: time since the Unix epoch, which
+/// is what a timestamp needs and carries no timezone. It stays a separate
+/// contract from this one, which remains monotonic and wall-clock free.
 pub trait TimeSource: Send + Sync {
     /// Monotonic time in milliseconds since an unspecified, impl-
     /// defined epoch. The only guarantee is monotonicity within a

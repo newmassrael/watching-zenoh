@@ -248,6 +248,12 @@ pub mod reliability;
 /// no_alloc (one trait, one payload-free error); unconditional.
 pub mod entropy;
 
+/// R2914 — the time-since-epoch PORT ([`epoch::EpochSource`]): the seam a
+/// profile plugs its wall clock into, beside the entropy port above and for
+/// the same reason -- the source is the board's, the shape is the core's. Pure
+/// no_std + no_alloc; unconditional.
+pub mod epoch;
+
 /// A1a — modular sequence-number arithmetic (zenoh-pico
 /// `transport/utils.c` mirror): the `seq_num_res` ring masks + the
 /// half-window `precedes` ordering every RX SN gate shares. First
