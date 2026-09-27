@@ -24,10 +24,11 @@
 //! Topology + ORDERING (no sleeps, deterministic barriers on in-tick positive-edge
 //! witnesses):
 //!   1. peer-A binds; peer-B dials A and meshes.
-//!   2. Barrier: peer-A confirms the reciprocal A <-> B edge (`reciprocal mesh link
-//!      confirmed`) BEFORE any client attaches, so A's later self-advertise of the
-//!      client queryable floods to B (a tree child) rather than racing an unconverged
-//!      graph — the non-racy peer-mesh barrier (cf. E6 load-flake lesson).
+//!   2. Barrier: peer-A has decoded peer-B's link-state (`ingested neighbour
+//!      link-state`) BEFORE any client attaches, so A's later self-advertise of the
+//!      client queryable reaches B over an established link rather than racing the
+//!      face — the non-racy peer-mesh barrier (cf. E6 load-flake lesson). A gossip
+//!      peer, the default since R2896, forms no reciprocal edge to wait on.
 //!   3. pico z_queryable dials A `-m client` and declares `demo/**`; peer-A ingests it
 //!      into `client_qabls` and self-advertises the queryable into the mesh under A's
 //!      zid.
@@ -107,13 +108,14 @@ fn wz_peer_hosts_a_pico_client_queryable_across_the_mesh() {
     );
     let endpoint_b = format!("tcp/127.0.0.1:{port_b}");
 
-    // Barrier 1 (determinism): peer-A confirms the A <-> B mutual edge BEFORE the client
-    // attaches, so A's self-advertise of the client queryable floods to B (a tree child)
-    // instead of racing an unconverged graph. In-tick positive-edge witness
-    // (`edge_count > 0`) — the non-racy peer-mesh barrier.
+    // Barrier 1 (determinism): peer-A has DECODED peer-B's link-state over their face
+    // BEFORE the client attaches, so A's self-advertise of the client queryable reaches
+    // B over an established link. R2900 moved this off `reciprocal mesh link
+    // confirmed`: that is a link-state edge, and since R2896 a peer runs the pin's
+    // gossip mode by default, whose single-hop net keeps no edge to confirm.
     let meshed = wait_for_substring(
         &mut a_reader,
-        "peer: reciprocal mesh link confirmed",
+        "peer: ingested neighbour link-state",
         Duration::from_secs(15),
     );
 
@@ -185,7 +187,7 @@ fn wz_peer_hosts_a_pico_client_queryable_across_the_mesh() {
     // plane.
     meshed.unwrap_or_else(|c| {
         panic!(
-            "peer-A never confirmed the reciprocal A <-> B mesh link within 15s — the two \
+            "peer-A never decoded peer-B's link-state within 15s — the two \
              wz peers did not federate, so no query could cross the mesh\n--- peer-A \
              stderr ---\n{c}"
         )
