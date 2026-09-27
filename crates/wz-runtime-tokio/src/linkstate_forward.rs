@@ -87,6 +87,8 @@ use sce_forge_runtime::codec::CodecError;
 use wz_codecs::declare::{DeclareOwned, DeclareOwnedVariant};
 use wz_codecs::ext_entry::ExtEntryOwned;
 use wz_codecs::interest::InterestOwned;
+#[cfg(feature = "routing-interest-pending-gc")]
+use wz_codecs::interest_body::InterestBodyOwned;
 use wz_codecs::linkstate_list::LinkstateListOwned;
 use wz_codecs::oam::OamOwned;
 use wz_codecs::push::{PushOwned, PushOwnedVariant};
@@ -107,7 +109,7 @@ use wz_session_core::declare_ext_keyexpr::resolve_ext_keyexpr;
 use wz_session_core::declare_routing_context::{read_declare_source, set_declare_source};
 use wz_session_core::driver_loop::DriverLoopOutcome;
 #[cfg(feature = "routing-interest-pending-gc")]
-use wz_session_core::interest_build::build_interest_propagated;
+use wz_session_core::interest_build::{build_interest_propagated, InterestKinds};
 // R2662 — `keyexpr_pattern_matches` is GONE from this file's imports, and its
 // absence is the repair: the forwarder's local-subscriber delivery was its last
 // caller here, so there is no longer a way to match an arriving key as a
@@ -783,6 +785,16 @@ pub struct LinkstateForwarder {
     /// one map because the forwarder owns every face.
     #[cfg(feature = "routing-interest-pending-gc")]
     pending_interests: RefCell<PendingCurrentInterests>,
+    /// R2903 — the FUTURE half of every brokered CurrentFuture interest: per
+    /// `(client face, the client's interest id)`, the `(upstream face, minted id)`
+    /// copies an upstream still holds as live. The pending table forgets a copy
+    /// once its current answer is final, but the upstream goes on pushing future
+    /// declarations until it is told to stop, which is the pin's
+    /// `route_interest_final` (`zenoh/src/net/routing/hat/peer/interests.rs` @
+    /// `mode: InterestMode::Final,`). This is what lets the client's own Final,
+    /// or its departure, be passed on.
+    #[cfg(feature = "routing-interest-pending-gc")]
+    brokered_future: RefCell<HashMap<(FaceId, u64), Vec<(FaceId, u64)>>>,
     /// R311y512 — how long a PROPAGATED interest waits for its upstream's
     /// `DeclareFinal` before the sweep abandons it (zenoh's `interests_timeout`,
     /// `DEFAULT_CONFIG.json5` `routing.interests.timeout` = 10000ms). `Cell`
@@ -1077,6 +1089,8 @@ impl LinkstateForwarder {
             pending: RefCell::new(PendingQueries::new()),
             #[cfg(feature = "routing-interest-pending-gc")]
             pending_interests: RefCell::new(PendingCurrentInterests::new()),
+            #[cfg(feature = "routing-interest-pending-gc")]
+            brokered_future: RefCell::new(HashMap::new()),
             #[cfg(feature = "routing-interest-pending-gc")]
             interest_timeout: Cell::new(Self::DEFAULT_INTEREST_TIMEOUT),
             local_queryables: RefCell::new(Vec::new()),
@@ -5240,6 +5254,8 @@ impl LinkstateForwarder {
             self.future_qabls
                 .borrow_mut()
                 .remove_interest(inbound, interest.interest_id);
+            #[cfg(feature = "routing-interest-pending-gc")]
+            self.finalize_brokered_future(inbound, Some(interest.interest_id));
             return;
         }
         let Some(body) = interest.body.as_ref() else {
@@ -5405,12 +5421,26 @@ impl LinkstateForwarder {
             // `propagate_current_interest` returns the number of copies it placed
             // on the wire; a non-zero count means the client's final is now OWED
             // BY THE UNWIND (`finish_brokered_interest`), not by this line.
+            //
+            // R2903 (open-debt item 828) — every plane, not only tokens. The pin's
+            // `route_interest` is plane-agnostic, and a client's SUBSCRIBERS interest
+            // is the one a publisher's write filter waits on: answered here alone, a
+            // pico publisher attached to a peer that sits under a router finalized an
+            // empty filter and never sent to a subscriber behind the router.
             #[cfg(feature = "routing-interest-pending-gc")]
-            if is_client
-                && body.to()
-                && self.propagate_current_interest(inbound, interest_id, interest.f(), &target) > 0
-            {
-                return;
+            if is_client {
+                let upstreams = self.interest_upstreams(inbound, body, interest.f());
+                if self.propagate_current_interest(
+                    inbound,
+                    interest_id,
+                    body,
+                    interest.f(),
+                    &target,
+                    upstreams,
+                ) > 0
+                {
+                    return;
+                }
             }
             self.send_one_to_face(
                 inbound,
@@ -5419,18 +5449,60 @@ impl LinkstateForwarder {
         }
     }
 
-    /// R311y512 — PROPAGATE a downstream CLIENT's CURRENT token interest to every
+    /// R2903 — WHERE a co-attached client's CURRENT interest is brokered, by plane.
+    ///
+    /// TOKENS keep R311y512's rule, every non-client face: this peer's token table
+    /// does not carry the mesh tier (see `dump_interest_tokens`), so it must ask
+    /// its peers as well as its gateways to answer at all.
+    ///
+    /// SUBSCRIBERS and QUERYABLES follow the pin's own rule, because for them this
+    /// peer DOES hold the mesh tier: peers flood their declarations to it, and only
+    /// a gateway keeps its other remotes' declarations to itself. So only gateways
+    /// are asked: every gateway for a CurrentFuture interest, one for a Current one
+    /// (`zenoh/src/net/routing/hat/peer/interests.rs` @
+    /// `let dsts = if msg.mode == InterestMode::Current {`, whose Current arm takes
+    /// at most one so that a stateless answer is not duplicated). The pin's third destination, a
+    /// peer whose initial interest is not finalized, has no wz counterpart: wz
+    /// peers flood declarations rather than exchange an initial interest.
+    #[cfg(feature = "routing-interest-pending-gc")]
+    fn interest_upstreams(
+        &self,
+        inbound: FaceId,
+        body: &InterestBodyOwned,
+        future: bool,
+    ) -> Vec<FaceId> {
+        if body.to() {
+            return self
+                .faces
+                .borrow()
+                .iter()
+                .filter(|(id, s)| {
+                    **id != inbound && peer_whatami_routing(&s.actions) != WhatAmI::Client
+                })
+                .map(|(id, _)| *id)
+                .collect();
+        }
+        let mut gateways = self.gateway_faces();
+        gateways.retain(|g| *g != inbound);
+        gateways.sort_unstable();
+        if !future {
+            gateways.truncate(1);
+        }
+        gateways
+    }
+
+    /// R311y512 — PROPAGATE a downstream CLIENT's CURRENT interest to every
     /// UPSTREAM face, recording one pending entry per copy. Returns how many
     /// copies were sent; `0` means there was no upstream and the caller still owes
     /// the client its `DeclareFinal` inline (zenoh's `Arc::into_inner` succeeding
     /// immediately when the propagation loop placed no copy).
     ///
-    /// UPSTREAM here is every non-CLIENT face — the wz shape of zenoh's
-    /// `f.whatami == Router || (Peer && !initial_interest finalized)` filter
-    /// (`zenoh/src/net/routing/hat/peer/interests.rs` @ `fn route_interest`). The
-    /// inbound face is excluded (a
-    /// client never brokers to itself), and so is any face that is itself a
-    /// client: a client is a LEAF, and soliciting it would invert the tree.
+    /// UPSTREAM is the caller's set, chosen per plane by
+    /// [`interest_upstreams`](Self::interest_upstreams) (R2903); it never holds the
+    /// inbound face (a client never brokers to itself) nor any client face (a
+    /// client is a LEAF, and soliciting it would invert the tree). `kinds` is the
+    /// client's own kind set, forwarded unchanged as the pin forwards
+    /// `msg.options`.
     ///
     /// The propagated copy is a fresh `Interest` with an id THIS node minted, not
     /// the client's — two clients may legally choose the same id, and the upstream
@@ -5450,19 +5522,18 @@ impl LinkstateForwarder {
         &self,
         inbound: FaceId,
         src_interest_id: u64,
+        options: &InterestBodyOwned,
         current_future: bool,
         target: &Option<String>,
+        upstreams: Vec<FaceId>,
     ) -> usize {
         let target = target.as_deref();
-        let upstreams: Vec<FaceId> = self
-            .faces
-            .borrow()
-            .iter()
-            .filter(|(id, s)| {
-                **id != inbound && peer_whatami_routing(&s.actions) != WhatAmI::Client
-            })
-            .map(|(id, _)| *id)
-            .collect();
+        // R2903 — the client's options are forwarded, as the pin forwards
+        // `options: msg.options`: its kind set, and its AGGREGATE bit, by which the
+        // client matches the answer it gets back.
+        let Some(kinds) = interest_kinds_of(options) else {
+            return 0;
+        };
         if upstreams.is_empty() {
             return 0;
         }
@@ -5480,8 +5551,13 @@ impl LinkstateForwarder {
             // propagation sites writes it), and reusing the api builders made
             // that true only for the CurrentFuture arm, by inheritance rather
             // than by decision.
-            let built =
-                build_interest_propagated(up_id, current_future, target.map(|t| (0, Some(t))));
+            let built = build_interest_propagated(
+                up_id,
+                kinds,
+                options.ag(),
+                current_future,
+                target.map(|t| (0, Some(t))),
+            );
             let Ok(msg) = built else {
                 continue; // a keyexpr this node cannot re-encode is not brokered
             };
@@ -5511,9 +5587,48 @@ impl LinkstateForwarder {
                 },
                 deadline,
             );
+            // R2903 — a CurrentFuture copy stays live upstream after its current
+            // answer: remember it so the client's Final can be passed on.
+            if current_future {
+                self.brokered_future
+                    .borrow_mut()
+                    .entry((inbound, src_interest_id))
+                    .or_default()
+                    .push((up, up_id));
+            }
             sent += 1;
         }
         sent
+    }
+
+    /// R2903 — pass a client's end-of-interest on to every upstream still holding
+    /// a brokered copy of it: the client sent `Interest(Final)` for `client_id`,
+    /// or (`client_id == None`) the client left and every interest of its goes.
+    /// The pin's `route_interest_final` sends the Final under the id the upstream
+    /// was given (`zenoh/src/net/routing/hat/peer/interests.rs` @
+    /// `mode: InterestMode::Final,`), which is the minted one, not the client's.
+    #[cfg(feature = "routing-interest-pending-gc")]
+    fn finalize_brokered_future(&self, client: FaceId, client_id: Option<u64>) {
+        let copies: Vec<(FaceId, u64)> = {
+            let mut table = self.brokered_future.borrow_mut();
+            let keys: Vec<(FaceId, u64)> = table
+                .keys()
+                .filter(|(face, id)| *face == client && client_id.map_or(true, |c| c == *id))
+                .copied()
+                .collect();
+            keys.into_iter()
+                .filter_map(|k| table.remove(&k))
+                .flatten()
+                .collect()
+        };
+        for (up, up_id) in copies {
+            self.send_one_to_face(
+                up,
+                NetworkMessage::Interest(wz_session_core::interest_build::build_interest_final(
+                    up_id,
+                )),
+            );
+        }
     }
 
     /// R311y512 — an inbound `Declare` on an UPSTREAM face carrying an interest id
@@ -5537,12 +5652,21 @@ impl LinkstateForwarder {
         else {
             return false;
         };
-        let mut relayed = declare.clone();
-        relayed.interest_id = Some(interest.src_interest_id);
-        self.send_one_to_face(
-            interest.src_face,
-            NetworkMessage::Declare(Box::new(relayed)),
-        );
+        // R2903 — rebuilt for the client's link, not cloned: see
+        // `relay_answer_for_client`. Consumed either way, since an answer addressed
+        // to a client is never a topology change.
+        let relayed = {
+            let faces = self.faces.borrow();
+            faces.get(&upstream).and_then(|s| {
+                relay_answer_for_client(declare, &s.keyexpr_table, interest.src_interest_id)
+            })
+        };
+        if let Some(relayed) = relayed {
+            self.send_one_to_face(
+                interest.src_face,
+                NetworkMessage::Declare(Box::new(relayed)),
+            );
+        }
         true
     }
 
@@ -5585,8 +5709,21 @@ impl LinkstateForwarder {
     /// - `DeclFinal` stamped with a propagated id — the upstream is DONE. Retire
     ///   the entry ([`resolve`](PendingCurrentInterests::resolve)); when it was
     ///   this client's last upstream, send the client its own final.
-    /// - any other `Declare` stamped with a propagated id (in practice
-    ///   `DeclToken`) — relay it down with the client's id.
+    /// - a `DeclToken` stamped with a propagated id — relay it down with the
+    ///   client's id.
+    ///
+    /// R2903 — a `DeclSubscriber` / `DeclQueryable` answer is NOT consumed. It
+    /// falls through to the ordinary ingest, which registers it as the gateway's
+    /// declaration and pushes it to every client whose stored future interest
+    /// matches, in that client's own reply shape (an aggregate interest is
+    /// answered under its own keyexpr). That is the pin's shape: the upstream
+    /// answer lands in the node's tables, the client-facing side answers the
+    /// client from them, and only the final is brokered
+    /// (`zenoh/src/net/routing/dispatcher/interests.rs` @
+    /// `Ignoring aggregate interest option from peer (unsupported)` is the upstream
+    /// refusing to aggregate for us, which is why relaying its raw answer to an
+    /// aggregate client could never match). Tokens keep the relay because this
+    /// peer's token table does not carry that tier.
     ///
     /// An id this node never minted falls through to `false`: an unsolicited
     /// declaration on a mesh face is an ordinary topology change, and a stale
@@ -5610,6 +5747,13 @@ impl LinkstateForwarder {
                 self.finish_brokered_interest(&interest);
             }
             return true;
+        }
+        if matches!(
+            declare.body,
+            DeclareOwnedVariant::CodecZenohDeclSubscriber(_)
+                | DeclareOwnedVariant::CodecZenohDeclQueryable(_)
+        ) {
+            return false;
         }
         self.relay_brokered_declare(upstream, declare)
     }
@@ -6275,6 +6419,65 @@ pub(crate) fn compute_push_forward(
     Some((carrier, children))
 }
 
+/// R2903 — the declaration kinds an inbound `Interest` asks for, as the
+/// [`InterestKinds`] union the broker re-emits upstream, or `None` when it names
+/// none of them (a KEYEXPRS-only interest has nothing an upstream could answer,
+/// and [`InterestKinds`] cannot represent the empty set on purpose).
+#[cfg(feature = "routing-interest-pending-gc")]
+fn interest_kinds_of(body: &InterestBodyOwned) -> Option<InterestKinds> {
+    [
+        (body.su(), InterestKinds::SUBSCRIBERS),
+        (body.qu(), InterestKinds::QUERYABLES),
+        (body.to(), InterestKinds::TOKENS),
+    ]
+    .into_iter()
+    .filter(|(asked, _)| *asked)
+    .map(|(_, kind)| kind)
+    .reduce(|acc, kind| acc | kind)
+}
+
+/// R2903 — an upstream's relayed TOKEN answer, re-expressed for the CLIENT's link.
+///
+/// A keyexpr on the wire is only meaningful on the link it was sent on: an
+/// answer to an interest that asked for KEYEXPRS names its resource by an id the
+/// upstream declared on THAT link (`zenoh/src/net/routing/dispatcher/resource.rs`
+/// @ `pub fn decl_key(`, which declares one whenever the face's interests asked
+/// for keyexprs), and the same id means nothing, or something else, on the link
+/// to the client. So the token is resolved against the upstream face's alias
+/// table and rebuilt as a literal reply under the client's own interest id,
+/// through the reply builder this node's own dump answers with. The relay had
+/// carried the scope across verbatim since R311y512; it was invisible only
+/// because no fixture's upstream had been asked for keyexprs.
+///
+/// Subscriber and queryable answers never reach this: they are ingested rather
+/// than relayed (see [`LinkstateForwarder::absorb_brokered_declare`]).
+///
+/// `None` is a token whose keyexpr cannot be resolved; it is dropped rather than
+/// forwarded with a scope the client would resolve wrongly. A body with no
+/// keyexpr of its own is relayed as it came, under the client's id.
+#[cfg(feature = "routing-interest-pending-gc")]
+fn relay_answer_for_client(
+    declare: &DeclareOwned,
+    upstream_aliases: &hashbrown::HashMap<u64, String>,
+    client_interest_id: u64,
+) -> Option<DeclareOwned> {
+    let rebuilt = match &declare.body {
+        DeclareOwnedVariant::CodecZenohDeclToken(t) => {
+            wz_session_core::declare_build::build_declare_token_reply_with_id(
+                client_interest_id,
+                t.id,
+                &resolve_wireexpr(&t.keyexpr.body, upstream_aliases)?,
+            )
+        }
+        _ => {
+            let mut relayed = declare.clone();
+            relayed.interest_id = Some(client_interest_id);
+            return Some(relayed);
+        }
+    };
+    rebuilt.ok()
+}
+
 /// Compute the self-ORIGINATED data-`Push` forward for ONE link-state mesh:
 /// treat SELF as the tree root (a node PUBLISHING its own data — or, for the
 /// router, a leaf CLIENT's data re-injected as self-sourced) and return the
@@ -6805,6 +7008,14 @@ impl FaceForwarder for LinkstateForwarder {
             for interest in &orphaned {
                 self.finish_brokered_interest(interest);
             }
+            // R2903 — the FUTURE half: a departing client's live copies are
+            // finalized upstream (the pin undeclares a closed face's interests the
+            // same way), and a departing upstream simply stops holding any.
+            self.finalize_brokered_future(id, None);
+            self.brokered_future.borrow_mut().retain(|_, copies| {
+                copies.retain(|(up, _)| *up != id);
+                !copies.is_empty()
+            });
         }
         // Purge this face's FUTURE-mode interest + pushed-declaration state
         // UNCONDITIONALLY, before the graph teardown below (a client face is
@@ -11861,7 +12072,7 @@ mod tests {
     fn a_peer_answers_an_unrestricted_liveliness_token_interest_with_every_token() {
         use wz_session_core::declare_build::build_declare_token;
         use wz_session_core::interest_build::{
-            build_interest_liveliness_get, build_interest_propagated,
+            build_interest_liveliness_get, build_interest_propagated, InterestKinds,
         };
 
         let fwd = LinkstateForwarder::new(zid(0x05), WhatAmI::Peer);
@@ -11887,8 +12098,14 @@ mod tests {
 
         // THE SUBJECT: no keyexpr at all.
         sink_b.reset();
-        let unrestricted = build_interest_propagated(7, /*current_future=*/ false, None)
-            .expect("build unrestricted get");
+        let unrestricted = build_interest_propagated(
+            7,
+            InterestKinds::TOKENS,
+            /*aggregate=*/ false,
+            /*current_future=*/ false,
+            None,
+        )
+        .expect("build unrestricted get");
         fwd.forward(
             FaceId(1),
             IterationEvent::Poll(&DriverLoopOutcome::FramePayload {
@@ -12003,6 +12220,265 @@ mod tests {
             "the client's terminating DeclareFinal is OWED BY THE UNWIND while an \
              upstream copy is outstanding; sending it here would close the get \
              before the upstream could answer"
+        );
+    }
+
+    /// R2903 (open-debt item 828) — a CLIENT's SUBSCRIBERS interest, the one a
+    /// publisher's write filter waits on, is brokered to the GATEWAY: the copy
+    /// carries the client's own kind set (not the token kind the broker used to
+    /// hard-code), the gateway's answer comes back under the client's id, and the
+    /// client's final is the gateway's. The PEER face beside the gateway is the
+    /// control: it floods its declarations to this node already, so the pin does
+    /// not ask it and neither does this.
+    #[cfg(feature = "routing-interest-pending-gc")]
+    #[test]
+    fn a_client_subscribers_interest_is_brokered_to_the_gateway_only() {
+        use wz_session_core::interest_build::build_interest_subscribers;
+
+        let fwd = LinkstateForwarder::new(zid(0x05), WhatAmI::Peer);
+        let (router, sink_r) = peer_face_whatami(zid(0xAA), 0);
+        let (peer, sink_p) = peer_face_whatami(zid(0xBB), 1);
+        let (client, sink_c) = peer_face_whatami(zid(0xCC), 2);
+        fwd.register(FaceId(0), &router);
+        fwd.register(FaceId(1), &peer);
+        fwd.register(FaceId(2), &client);
+        sink_r.reset();
+        sink_p.reset();
+        sink_c.reset();
+
+        // AGGREGATE, as zenoh-pico's write filter asks: it then matches the answer
+        // by keyexpr equality, so the gateway must be asked to aggregate too.
+        let mut interest = build_interest_subscribers(5, true, true, 0, Some("demo/**"))
+            .expect("build subscribers interest");
+        interest.body.as_mut().expect("body").header |= 0x80; // A (AGGREGATE)
+        forward_one(&fwd, FaceId(2), NetworkMessage::Interest(interest));
+
+        assert_eq!(sink_r.frame_count(), 1, "the gateway was asked");
+        let copy = forwarded_interest(&sink_r.frame_bytes(0));
+        let body = copy.body.as_ref().expect("a C|F interest has a body");
+        assert!(
+            body.su() && !body.to(),
+            "the client's kinds, not the token kind"
+        );
+        assert!(body.ag(), "the client's AGGREGATE bit is carried");
+        assert!(
+            copy.c() && copy.f(),
+            "CurrentFuture is forwarded as CurrentFuture"
+        );
+        assert_eq!(sink_p.frame_count(), 0, "a flooding peer is not asked");
+        assert_eq!(
+            sink_c.frame_count(),
+            0,
+            "the client's final waits for the gateway"
+        );
+
+        // The gateway's current answer, `I`-flagged under the id it was given.
+        let answer = wz_session_core::declare_build::build_declare_subscriber_reply_with_id(
+            copy.interest_id,
+            3,
+            "demo/pp",
+        )
+        .expect("build sub reply");
+        forward_one(&fwd, FaceId(0), NetworkMessage::Declare(Box::new(answer)));
+        forward_one(
+            &fwd,
+            FaceId(0),
+            NetworkMessage::Declare(Box::new(build_declare_final_reply(copy.interest_id))),
+        );
+        // The answer is INGESTED, not relayed: it becomes the gateway's
+        // declaration in this node's table, and the client hears it as the push
+        // its stored future interest earns, in the client's own reply shape.
+        assert_eq!(
+            fwd.interested("demo/pp"),
+            vec![zid(0xAA)],
+            "the gateway's subscriber is recorded under the gateway"
+        );
+        assert_eq!(
+            sink_c.frame_count(),
+            2,
+            "the pushed subscriber, then the brokered final"
+        );
+        let pushed = forwarded_declare(&sink_c.frame_bytes(0));
+        assert_eq!(
+            pushed.interest_id, None,
+            "a future push, not a relayed reply"
+        );
+        let DeclareOwnedVariant::CodecZenohDeclSubscriber(d) = &pushed.body else {
+            panic!("expected a pushed DeclareSubscriber");
+        };
+        assert_eq!(
+            resolve_wireexpr(&d.keyexpr.body, &hashbrown::HashMap::new()).as_deref(),
+            Some("demo/**"),
+            "an AGGREGATE interest is answered under its own keyexpr"
+        );
+        assert_eq!(
+            forwarded_declare(&sink_c.frame_bytes(1)).interest_id,
+            Some(5),
+            "the final is the brokered one, under the client's id"
+        );
+    }
+
+    /// R2903 — the shape a stock zenohd actually answers in, measured live: an
+    /// interest that asked for KEYEXPRS makes the gateway DECLARE a keyexpr id on
+    /// its link and name the subscriber by that scope. Relayed verbatim, the client
+    /// resolved the scope against ITS link and the pico write filter never opened;
+    /// ingested, the scope resolves on the gateway's link and the client is told a
+    /// literal `demo/**`.
+    #[cfg(feature = "routing-interest-pending-gc")]
+    #[test]
+    fn a_gateway_answer_named_by_a_link_alias_reaches_the_client_as_a_literal() {
+        use wz_session_core::declare_build::build_declare_kexpr;
+        use wz_session_core::interest_build::build_interest_subscribers;
+
+        let fwd = LinkstateForwarder::new(zid(0x05), WhatAmI::Peer);
+        let (router, sink_r) = peer_face_whatami(zid(0xAA), 0);
+        let (client, sink_c) = peer_face_whatami(zid(0xCC), 2);
+        fwd.register(FaceId(0), &router);
+        fwd.register(FaceId(1), &client);
+        sink_r.reset();
+        sink_c.reset();
+
+        let interest = build_interest_subscribers(5, true, true, 0, Some("demo/pp"))
+            .expect("build subscribers interest");
+        forward_one(&fwd, FaceId(1), NetworkMessage::Interest(interest));
+        let up_id = forwarded_interest(&sink_r.frame_bytes(0)).interest_id;
+
+        forward_one(
+            &fwd,
+            FaceId(0),
+            NetworkMessage::Declare(Box::new(build_declare_kexpr(9, "demo").expect("kexpr"))),
+        );
+        let mut scoped = build_declare_subscriber(3, 9, Some("/**")).expect("scoped sub");
+        scoped.header |= wz_session_core::wire_const::FLAG_N_DECLARE_I;
+        scoped.interest_id = Some(up_id);
+        forward_one(&fwd, FaceId(0), NetworkMessage::Declare(Box::new(scoped)));
+
+        assert_eq!(sink_c.frame_count(), 1, "the pushed subscriber");
+        let pushed = forwarded_declare(&sink_c.frame_bytes(0));
+        let DeclareOwnedVariant::CodecZenohDeclSubscriber(d) = &pushed.body else {
+            panic!("expected a pushed DeclareSubscriber");
+        };
+        assert_eq!(
+            resolve_wireexpr(&d.keyexpr.body, &hashbrown::HashMap::new()).as_deref(),
+            Some("demo/**"),
+            "literal on the client's link, resolvable with no alias table at all"
+        );
+    }
+
+    /// R2903 — with no gateway there is nobody to broker a SUBSCRIBERS interest
+    /// to, and the client is answered here alone, as before: the mesh tier is
+    /// already in this node's tables.
+    #[cfg(feature = "routing-interest-pending-gc")]
+    #[test]
+    fn a_subscribers_interest_without_a_gateway_is_answered_inline() {
+        use wz_session_core::interest_build::build_interest_subscribers;
+
+        let fwd = LinkstateForwarder::new(zid(0x05), WhatAmI::Peer);
+        let (peer, sink_p) = peer_face_whatami(zid(0xBB), 1);
+        let (client, sink_c) = peer_face_whatami(zid(0xCC), 2);
+        fwd.register(FaceId(0), &peer);
+        fwd.register(FaceId(1), &client);
+        sink_p.reset();
+        sink_c.reset();
+
+        let interest = build_interest_subscribers(5, true, true, 0, Some("demo/**"))
+            .expect("build subscribers interest");
+        forward_one(&fwd, FaceId(1), NetworkMessage::Interest(interest));
+        assert_eq!(sink_p.frame_count(), 0);
+        assert_eq!(fwd.pending_interests_len(), 0);
+        assert_eq!(sink_c.frame_count(), 1, "the inline DeclareFinal");
+    }
+
+    /// R2903 — a CURRENT-only interest goes to ONE gateway (the pin takes the
+    /// first south-bound face so a stateless answer is not duplicated), a
+    /// CurrentFuture one to every gateway.
+    #[cfg(feature = "routing-interest-pending-gc")]
+    #[test]
+    fn a_current_interest_asks_one_gateway_and_a_current_future_one_asks_all() {
+        use wz_session_core::interest_build::build_interest_subscribers;
+
+        let fwd = LinkstateForwarder::new(zid(0x05), WhatAmI::Peer);
+        let (r1, sink_1) = peer_face_whatami(zid(0xA1), 0);
+        let (r2, sink_2) = peer_face_whatami(zid(0xA2), 0);
+        let (client, _sc) = peer_face_whatami(zid(0xCC), 2);
+        fwd.register(FaceId(0), &r1);
+        fwd.register(FaceId(1), &r2);
+        fwd.register(FaceId(2), &client);
+        sink_1.reset();
+        sink_2.reset();
+
+        let current = build_interest_subscribers(5, true, false, 0, Some("demo/**"))
+            .expect("build current interest");
+        forward_one(&fwd, FaceId(2), NetworkMessage::Interest(current));
+        assert_eq!(
+            sink_1.frame_count() + sink_2.frame_count(),
+            1,
+            "one gateway"
+        );
+
+        sink_1.reset();
+        sink_2.reset();
+        let current_future = build_interest_subscribers(6, true, true, 0, Some("demo/**"))
+            .expect("build current-future interest");
+        forward_one(&fwd, FaceId(2), NetworkMessage::Interest(current_future));
+        assert_eq!(sink_1.frame_count(), 1, "every gateway");
+        assert_eq!(sink_2.frame_count(), 1, "every gateway");
+    }
+
+    /// R2903 — the FUTURE half of a brokered interest ends when the client's
+    /// does: the client's `Interest(Final)` is passed on under the MINTED id,
+    /// and so is its departure; an answered current half must not have erased
+    /// what the gateway still holds.
+    #[cfg(feature = "routing-interest-pending-gc")]
+    #[test]
+    fn a_clients_final_and_departure_end_the_brokered_future_interest() {
+        use wz_session_core::interest_build::{build_interest_final, build_interest_subscribers};
+
+        let fwd = LinkstateForwarder::new(zid(0x05), WhatAmI::Peer);
+        let (router, sink_r) = peer_face_whatami(zid(0xAA), 0);
+        let (client, _sc) = peer_face_whatami(zid(0xCC), 2);
+        fwd.register(FaceId(0), &router);
+        fwd.register(FaceId(1), &client);
+        sink_r.reset();
+
+        for id in [5, 6] {
+            let interest = build_interest_subscribers(id, true, true, 0, Some("demo/**"))
+                .expect("build interest");
+            forward_one(&fwd, FaceId(1), NetworkMessage::Interest(interest));
+        }
+        let first = forwarded_interest(&sink_r.frame_bytes(0)).interest_id;
+        let second = forwarded_interest(&sink_r.frame_bytes(1)).interest_id;
+        forward_one(
+            &fwd,
+            FaceId(0),
+            NetworkMessage::Declare(Box::new(build_declare_final_reply(first))),
+        );
+        sink_r.reset();
+
+        forward_one(
+            &fwd,
+            FaceId(1),
+            NetworkMessage::Interest(build_interest_final(5)),
+        );
+        assert_eq!(
+            sink_r.frame_count(),
+            1,
+            "the client's Final reached the gateway"
+        );
+        let fin = forwarded_interest(&sink_r.frame_bytes(0));
+        assert_eq!(fin.interest_id, first, "under the id the gateway was given");
+        assert!(!fin.c() && !fin.f(), "a Final");
+
+        sink_r.reset();
+        fwd.deregister(FaceId(1));
+        assert_eq!(
+            sink_r.frame_count(),
+            1,
+            "the departed client's last interest"
+        );
+        assert_eq!(
+            forwarded_interest(&sink_r.frame_bytes(0)).interest_id,
+            second
         );
     }
 

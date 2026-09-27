@@ -16366,7 +16366,14 @@ layer_z_zenohd_interop() {
     # `config_keys_the_demo_drops` behind the same cfg. Additive:
     # `--timestamping` is in no other leg's argv, and a build that carries the
     # feature stamps only where a document asks. Both restatements carry it.
-    (cd crates && cargo build -p wz-ap-demo --features ws,unixsock,tls,quic,quic-datagram,udp-reliable,routing-router,router-hat-router,router-connect-reconcile,router-multicast-faces,routing-token-tables,namespace,transport-qos,time-hlc,transport-lowlatency,session-extcompression,session-extshm,transport-link-unixpipe,vsock,advanced,group,locator-iface,routing-peer,transport-multilink,zenoh-config --quiet) || return 1
+    # R2903 adds `routing-interest-pending-gc` (open-debt item 828). A wz peer
+    # under a stock router answers a client's SUBSCRIBERS interest by brokering it
+    # to the router, as the pin's peer hat always does, and the broker is that
+    # atom; without it a pico publisher on the peer finalizes an empty write
+    # filter and `pico_publisher_on_a_wz_peer_reaches_a_pico_subscriber_on_zenohd`
+    # has nothing to measure. Additive: the broker acts only for a client face
+    # whose interest has an upstream to ask. Both restatements carry it.
+    (cd crates && cargo build -p wz-ap-demo --features ws,unixsock,tls,quic,quic-datagram,udp-reliable,routing-router,router-hat-router,router-connect-reconcile,router-multicast-faces,routing-token-tables,namespace,transport-qos,time-hlc,transport-lowlatency,session-extcompression,session-extshm,transport-link-unixpipe,vsock,advanced,group,locator-iface,routing-peer,routing-interest-pending-gc,transport-multilink,zenoh-config --quiet) || return 1
     # R311y442 review (REVIEWER 3, finding 3) added a clippy of the demo's
     # `advanced` arm right here, closing the `-D warnings` hole R311y433 closed
     # for transport-lowlatency and session-extcompression. R311y443-review
@@ -16486,7 +16493,7 @@ layer_z_zenohd_interop() {
     # RELAYED Put's `T` flag, and without the feature `NodeHlc::is_stamping` is
     # false unconditionally so both documents answer `bare`. Both restatements
     # carry it.
-    (cd crates && cargo build -p wz-ap-demo --features ws,unixsock,tls,quic,quic-datagram,udp-reliable,routing-router,router-hat-router,router-connect-reconcile,router-multicast-faces,routing-token-tables,namespace,transport-qos,time-hlc,transport-lowlatency,session-extcompression,session-extshm,transport-link-unixpipe,vsock,advanced,group,locator-iface,routing-peer,transport-multilink,zenoh-config --quiet) || return 1
+    (cd crates && cargo build -p wz-ap-demo --features ws,unixsock,tls,quic,quic-datagram,udp-reliable,routing-router,router-hat-router,router-connect-reconcile,router-multicast-faces,routing-token-tables,namespace,transport-qos,time-hlc,transport-lowlatency,session-extcompression,session-extshm,transport-link-unixpipe,vsock,advanced,group,locator-iface,routing-peer,routing-interest-pending-gc,transport-multilink,zenoh-config --quiet) || return 1
     # R311y435 — wz COMPOSED lowlatency x compression cross-impl: the measurement
     # R311y434 explicitly did NOT claim ("no leg dials zenohd with both modes,
     # because the demo cannot stage both offers"). The offer-SET widening of

@@ -172,9 +172,12 @@ pub fn build_interest_liveliness_get(
 /// @ `mode: msg.mode` unchanged, so CURRENT is never narrowed away — C is
 /// unconditionally set here and only F follows the flag.
 ///
-/// Kinds stay [`InterestKinds::TOKENS`]: the broker this serves is the
-/// liveliness one, and propagating a wider kind set than the node can itself
-/// answer is a separate decision from the QoS one this builder exists for.
+/// `kinds` is the downstream interest's own kind set, propagated as the mode
+/// is (R2903): the pin forwards `options: msg.options` unchanged
+/// (`zenoh/src/net/routing/hat/peer/interests.rs` @ `options: msg.options,`).
+/// It used to be fixed at [`InterestKinds::TOKENS`] because the only broker
+/// was the liveliness one, so a publisher's SUBSCRIBERS interest could not
+/// have been brokered without asking the upstream for the wrong thing.
 ///
 /// `keyexpr: None` propagates an UNRESTRICTED interest (R2614) — the copy of a
 /// downstream interest that itself carried no keyexpr. The broker used to
@@ -182,20 +185,47 @@ pub fn build_interest_liveliness_get(
 /// declined it too; now that the dump answers it, refusing to propagate would
 /// leave this node answering from what it happens to hold while never asking
 /// the upstreams that hold the rest.
+///
+/// `aggregate` is the downstream interest's `A` bit, CARRIED rather than
+/// decided (R2903). [`InterestKinds`] keeps it out of wz's own originations
+/// because wz stages no aggregate reply, and that reason does not reach a
+/// broker: here the UPSTREAM aggregates, and the downstream matches the answer
+/// by it. zenoh-pico's write filter asks with `A` set and matches an aggregate
+/// interest's replies by keyexpr EQUALITY with its own key
+/// (`vendor/zenoh-pico/src/net/filtering.c` @
+/// `flags |= _Z_INTEREST_FLAG_KEYEXPRS | _Z_INTEREST_FLAG_AGGREGATE | _Z_INTEREST_FLAG_FUTURE;`),
+/// so a copy that dropped the bit drew a gateway answer under the gateway's own
+/// wider key, which the filter never matched and never opened on.
 pub fn build_interest_propagated(
     interest_id: u64,
+    kinds: InterestKinds,
+    aggregate: bool,
     current_future: bool,
     keyexpr: Option<(u64, Option<&str>)>,
 ) -> Result<InterestOwned, CodecError> {
-    let mut interest = build_liveliness_token_interest(
+    let mut interest = build_restricted_interest(
         interest_id,
+        kinds,
         /*current=*/ true,
         /*future=*/ current_future,
         keyexpr,
     )?;
+    if aggregate {
+        if let Some(body) = interest.body.as_mut() {
+            body.header |= INTEREST_BODY_AGGREGATE;
+        }
+    }
     crate::declare_ext_qos::set_interest_qos(&mut interest, crate::declare_ext_qos::QOS_DECLARE);
     Ok(interest)
 }
+
+/// The `A` (AGGREGATE) bit of the `InterestBody` header: the mask the generated
+/// `InterestBodyOwned::ag` reads (`out/wz-codecs/interest_body.rs`) and
+/// zenoh-pico's `_Z_INTEREST_FLAG_AGGREGATE` (`1 << 7`). Private and written
+/// only by [`build_interest_propagated`], the one builder that CARRIES a
+/// downstream's bit; the generated owned body has no setter for it, and wz's
+/// own originations never set it (see [`InterestKinds`]).
+const INTEREST_BODY_AGGREGATE: u8 = 0x80;
 
 /// WHICH DECLARATION KINDS an `Interest` asks the peer for — the `S`, `Q`
 /// and `T` bits of the `InterestBody` header, and nothing else.
@@ -720,6 +750,8 @@ mod tests {
         //   outer header = MID(0x19) | C(0x20) | Z(0x80) = 0xB9
         let current = build_interest_propagated(
             7,
+            InterestKinds::TOKENS,
+            /*aggregate=*/ false,
             /*current_future=*/ false,
             Some((/*mapping_id=*/ 0, Some("demo/**"))),
         )
@@ -749,6 +781,8 @@ mod tests {
         //   outer header = MID | C | F(0x40) | Z = 0xF9
         let current_future = build_interest_propagated(
             7,
+            InterestKinds::TOKENS,
+            /*aggregate=*/ false,
             /*current_future=*/ true,
             Some((/*mapping_id=*/ 0, Some("demo/**"))),
         )

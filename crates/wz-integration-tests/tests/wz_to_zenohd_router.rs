@@ -1501,6 +1501,99 @@ fn wz_router_mesh_dials_zenohd_over_unixsock() {
     mesh_node_dials_zenohd_over_unixsock("--router-hat");
 }
 
+/// R2903 (`routing-peer`, open-debt item 828) — a zenoh-pico PUBLISHER attached
+/// to a wz PEER reaches a zenoh-pico subscriber on the stock zenohd ROUTER that
+/// the peer is attached to.
+///
+/// pico keeps a write filter: it sends only once a SUBSCRIBERS interest has
+/// told it a matching subscriber exists. The peer used to answer that interest
+/// from its own tables, which never hold what a gateway keeps to itself, so the
+/// filter finalized empty and pico sent nothing — while a wz client, which has
+/// no write filter, delivered on the same path. The pin brokers the interest to
+/// the gateway (`zenoh/src/net/routing/hat/peer/interests.rs` @
+/// `.filter(|f| f.remote_bound.is_south())`) and so does the peer now.
+// wz-proves: routing-peer zenohd->wz
+// wz-proves: routing-interest-pending-gc zenohd->wz
+#[test]
+#[ignore = "binary-dep e2e (zenohd router + zenoh-pico z_pub/z_sub); set WZ_ZENOHD_BIN, run via Layer Z / --ignored"]
+fn pico_publisher_on_a_wz_peer_reaches_a_pico_subscriber_on_zenohd() {
+    let demo = wz_ap_demo_binary();
+    let z_pub = zenoh_pico_cli_binary("z_pub");
+    let z_sub = zenoh_pico_cli_binary("z_sub");
+
+    let (mut zenohd, port) = spawn_zenohd_on_ephemeral_tcp(|| {
+        tempfile::tempfile().expect("tempfile for readiness probe stderr")
+    });
+    let endpoint = format!("tcp/127.0.0.1:{port}");
+    let (mut z_sub_child, mut z_sub_stdout_reader) =
+        spawn_subscribed_zsub(&z_sub, "demo/**", &endpoint, "zenohd", || {
+            tempfile::tempfile().expect("tempfile for z_sub stdout")
+        });
+
+    let peer_res = PortReservation::pick();
+    let peer_port = peer_res.port();
+    drop(peer_res);
+    let peer_stderr = tempfile::tempfile().expect("tempfile for wz peer stderr");
+    let peer_stderr_writer = peer_stderr.try_clone().expect("dup wz peer stderr");
+    let mut peer_stderr_reader = peer_stderr;
+    let mut peer_child = ChildGuard::wrap(
+        "wz-ap-demo (--peer --connect zenohd)",
+        Command::new(&demo)
+            .arg("--peer")
+            .arg(format!("127.0.0.1:{peer_port}"))
+            .arg("--connect")
+            .arg(&endpoint)
+            .env("RUST_LOG", "info")
+            .stdout(Stdio::null())
+            .stderr(Stdio::from(peer_stderr_writer))
+            .spawn()
+            .expect("spawn wz-ap-demo --peer --connect zenohd"),
+    );
+    let peer_up = wait_for_substring(
+        &mut peer_stderr_reader,
+        "whatami Some(Router)",
+        Duration::from_secs(10),
+    );
+
+    let publish_value = "pico-pub-through-a-wz-peer";
+    let mut z_pub_child = spawn_publishing_zpub(
+        &z_pub,
+        "demo/pico-via-peer",
+        publish_value,
+        &format!("tcp/127.0.0.1:{peer_port}"),
+        "wz peer",
+        || tempfile::tempfile().expect("tempfile for z_pub stdout"),
+    );
+    let received = wait_for_substring(
+        &mut z_sub_stdout_reader,
+        publish_value,
+        Duration::from_secs(15),
+    );
+
+    let _ = z_pub_child.child_mut().kill();
+    let _ = z_pub_child.child_mut().wait();
+    let _ = peer_child.child_mut().kill();
+    let _ = peer_child.child_mut().wait();
+    let _ = z_sub_child.child_mut().kill();
+    let _ = z_sub_child.child_mut().wait();
+    let _ = zenohd.child_mut().kill();
+    let _ = zenohd.child_mut().wait();
+
+    let peer_captured = read_captured(&mut peer_stderr_reader);
+    assert!(
+        peer_up.is_ok(),
+        "the wz peer never brought up its face to zenohd as a Router.\n{peer_captured}"
+    );
+    if let Err(c) = received {
+        panic!(
+            "the pico subscriber on zenohd never received the pico publisher's sample \
+             sent through the wz peer — the peer did not broker the publisher's \
+             SUBSCRIBERS interest to its gateway, so pico's write filter stayed shut.\n\
+             --- z_sub stdout ---\n{c}\n--- wz peer stderr ---\n{peer_captured}"
+        );
+    }
+}
+
 /// R2902 (`routing-peer`, open-debt item 828) — the QUERY twin of
 /// [`wz_peer_publish_routes_through_zenohd_to_pico_zsub`]: a wz CLIENT queries a
 /// wz PEER that is attached to a stock zenohd ROUTER, and a zenoh-pico queryable
