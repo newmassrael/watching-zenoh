@@ -749,7 +749,18 @@ HOST_GATED_CI_TARGETS: dict[str, str] = {
 # route-master election with its last caller, so the leg no longer exercises
 # the atom's subject (1 test x 1 atom = 1). Measured `938` by
 # `audit-crossimpl-proof.sh` at this round's working tree.
-FOREIGN_ADJUDICATOR_LINKS = 938
+# R2904 — 938 -> 946, EIGHT links from five legs that all went out without this
+# constant moving, the R2790 / R2804 / R2821 class a fourth time. ATTRIBUTED by
+# the `wz-proves` lines each commit since R2880's `004727ac` adds, tests x atoms:
+# +4 R2900 `ead1ede0`, `wz_peer_mesh_dials_zenohd_over_unixsock` and
+# `wz_router_mesh_dials_zenohd_over_unixsock` (2 x `routing-peer` /
+# `routing-router` + `transport-link-unixsock`); +1 R2901 `daf9cd50`,
+# `wz_peer_publish_routes_through_zenohd_to_pico_zsub`; +1 R2902 `c6c0f31c`,
+# `wz_client_query_through_a_wz_peer_reaches_a_pico_queryable_on_zenohd`; +2
+# R2903 `e4dab13b`, `pico_publisher_on_a_wz_peer_reaches_a_pico_subscriber_on_zenohd`
+# (`routing-peer` + `routing-interest-pending-gc`). 938 + 8 = 946, the value
+# `audit-crossimpl-proof.sh` measured at this round's working tree.
+FOREIGN_ADJUDICATOR_LINKS = 946
 
 # ── Execution disclosure ────────────────────────────────────────────────────────
 #
