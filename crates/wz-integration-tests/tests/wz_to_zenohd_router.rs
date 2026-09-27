@@ -87,10 +87,10 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use wz_integration_tests::common::{
-    read_captured, spawn_publishing_zpub, spawn_subscribed_zsub, spawn_zenohd_on_ephemeral_tcp,
-    spawn_zenohd_tcp_quic, spawn_zenohd_tcp_tls, spawn_zenohd_tcp_udp, spawn_zenohd_tcp_unixsock,
-    spawn_zenohd_tcp_ws, wait_for_substring, wz_ap_demo_binary, zenoh_pico_cli_binary, ChildGuard,
-    PortReservation,
+    assert_demo_binary_newer_than_sources, read_captured, spawn_publishing_zpub,
+    spawn_subscribed_zsub, spawn_zenohd_on_ephemeral_tcp, spawn_zenohd_tcp_quic,
+    spawn_zenohd_tcp_tls, spawn_zenohd_tcp_udp, spawn_zenohd_tcp_unixsock, spawn_zenohd_tcp_ws,
+    wait_for_substring, wz_ap_demo_binary, zenoh_pico_cli_binary, ChildGuard, PortReservation,
 };
 use wz_runtime_tokio_test_support::localhost_cert_key_pem;
 
@@ -1421,6 +1421,7 @@ fn wz_publish_routes_through_zenohd_to_pico_zsub_over_unixsock() {
 /// pass), the zid is zenohd's, and zenohd answers as a Router.
 fn mesh_node_dials_zenohd_over_unixsock(role: &str) -> String {
     let demo = wz_ap_demo_binary();
+    assert_demo_binary_newer_than_sources(&demo);
     let tcp_res = PortReservation::pick();
     let tcp_port = tcp_res.port();
     let sock = zenohd_unixsock_path(tcp_port);
@@ -1518,6 +1519,7 @@ fn wz_router_mesh_dials_zenohd_over_unixsock() {
 #[ignore = "binary-dep e2e (zenohd router + zenoh-pico z_pub/z_sub); set WZ_ZENOHD_BIN, run via Layer Z / --ignored"]
 fn pico_publisher_on_a_wz_peer_reaches_a_pico_subscriber_on_zenohd() {
     let demo = wz_ap_demo_binary();
+    assert_demo_binary_newer_than_sources(&demo);
     let z_pub = zenoh_pico_cli_binary("z_pub");
     let z_sub = zenoh_pico_cli_binary("z_sub");
 
@@ -1610,6 +1612,7 @@ fn pico_publisher_on_a_wz_peer_reaches_a_pico_subscriber_on_zenohd() {
 #[ignore = "binary-dep e2e (zenohd router + zenoh-pico z_queryable); set WZ_ZENOHD_BIN, run via Layer Z / --ignored"]
 fn wz_client_query_through_a_wz_peer_reaches_a_pico_queryable_on_zenohd() {
     let demo = wz_ap_demo_binary();
+    assert_demo_binary_newer_than_sources(&demo);
     let z_queryable = zenoh_pico_cli_binary("z_queryable");
     let query_key = "demo/zenohd-peer-q";
     let reply_value = "pico-reply-through-a-wz-peer";
@@ -1724,6 +1727,7 @@ fn wz_client_query_through_a_wz_peer_reaches_a_pico_queryable_on_zenohd() {
 #[ignore = "binary-dep e2e (zenohd router + zenoh-pico z_sub); set WZ_ZENOHD_BIN, run via Layer Z / --ignored"]
 fn wz_peer_publish_routes_through_zenohd_to_pico_zsub() {
     let demo = wz_ap_demo_binary();
+    assert_demo_binary_newer_than_sources(&demo);
     let z_sub = zenoh_pico_cli_binary("z_sub");
     let publish_key = "demo/zenohd-peer";
     // The mesh publisher's payload is the demo's own constant: `--value` is a

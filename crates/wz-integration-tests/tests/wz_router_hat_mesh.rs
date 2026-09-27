@@ -282,19 +282,28 @@ fn wz_router_hat_region_peers_exchange_data_directly() {
              link\n--- peer-sub stderr ---\n{c}"
         )
     });
-    // R did not carry the data within its peer region. ⚠ This assertion does
-    // NOT discriminate rule 8b, and that was measured: with the rule reverted it
-    // stays green, because P2 routes to P1 over the shorter direct link and R
-    // never receives the Push. A star (no direct link) cannot discriminate it
-    // either, since under rule 8a P2 never learns P1's interest and publishes
-    // nothing. Rule 8b's discriminating witnesses are the unit tests
+    // R did not carry the data within its peer region.
+    //
+    // R2904 — asserted on the RELAY witness, `relayed mesh data`, and no longer
+    // on `forwarded mesh data`, which counts what ARRIVES. The old proxy held
+    // only while a wz peer sent R nothing: R is P2's gateway, and since R2901 P2
+    // default-sends its own Put to its gateway exactly as the pin's peer does
+    // (`zenoh/src/net/routing/hat/peer/pubsub.rs` @
+    // `dst.has_unfinalized_subscriber_interest = true`). So R now RECEIVES the
+    // Push, correctly, and the hosted runs of R2901 and R2902 read that arrival as
+    // a relay and went red on this line.
+    //
+    // ⚠ It still does NOT discriminate rule 8b, and that was MEASURED, not
+    // assumed: with 8b reverted this leg stays green. R now holds the Push, but its
+    // within-tier forward follows P2's own tree, in which P1 is P2's direct child,
+    // so R has no child to relay to. The unit tests
     // `a_peer_push_is_bridged_north_and_not_relayed_within_its_region` and
-    // `a_peer_push_reaches_a_client_subscriber_but_not_a_peer_of_its_region`.
-    // This test stands for the SHAPE the pin expects: region peers linked
-    // directly, exchanging data with a wz router present.
+    // `a_peer_push_reaches_a_client_subscriber_but_not_a_peer_of_its_region` stay
+    // the per-rule witnesses; this leg stands for the pin's SHAPE, measured by the
+    // witness that says what the assertion claims.
     assert!(
-        !r_captured.contains("router-hat: forwarded mesh data"),
-        "router-hat forwarded a Push between two peers of its own region, which \
+        !r_captured.contains("router-hat: relayed mesh data"),
+        "router-hat relayed a Push between two peers of its own region, which \
          the pin's peer hat never does\n--- router-hat stderr ---\n{r_captured}"
     );
     // R's peer tier peaked at all three nodes (self + P1 + P2) — both peers

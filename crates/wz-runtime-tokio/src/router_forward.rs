@@ -1752,6 +1752,14 @@ pub struct RouterForwarder {
     /// and, where the inter-region filter admits it, BRIDGED to the other mesh (C4,
     /// [`bridge_push_cross_mesh`](RouterForwarder::bridge_push_cross_mesh)).
     data_seen: Cell<usize>,
+    /// R2904 — running total of data `Push` messages this router SENT on, on any
+    /// leg: the relay witness [`data_seen`](Self#structfield.data_seen) is not.
+    /// Until R2901 the two coincided in the topologies that asserted on them,
+    /// because a wz peer sent a router only what its graph route pointed at; since
+    /// R2901 a peer default-sends its own data to its gateway, as the pin's peer
+    /// does, so a router RECEIVES pushes it correctly declines to relay, and "not
+    /// relayed" is a question only this count answers.
+    data_sent: Cell<usize>,
     /// The double-delivery guard witness: the number of local-client deliveries a
     /// router DEFERRED because it does not carry the peer-source Push north
     /// (R2879: the crossing filter, until then the master gate) — the peer-source
@@ -2026,6 +2034,7 @@ impl RouterForwarder {
             timed_out: Cell::new(0),
             ingested: Cell::new(0),
             data_seen: Cell::new(0),
+            data_sent: Cell::new(0),
             deferred_client_delivery: Cell::new(0),
             #[cfg(feature = "router-multicast-faces")]
             mcast_ingress_federated: Cell::new(0),
@@ -2294,6 +2303,20 @@ impl RouterForwarder {
     /// asserts on.
     pub fn data_seen(&self) -> usize {
         self.data_seen.get()
+    }
+
+    /// R2904 — the data `Push` messages this router SENT on (see
+    /// [`data_sent`](Self#structfield.data_sent)): the "this router relayed it"
+    /// proof, where [`data_seen`](Self::data_seen) proves only that it arrived.
+    pub fn data_sent(&self) -> usize {
+        self.data_sent.get()
+    }
+
+    /// Count one data `Push` that left this router, at the two send seams.
+    fn note_sent(&self, was_push: bool) {
+        if was_push {
+            self.data_sent.set(self.data_sent.get() + 1);
+        }
     }
 
     /// C4 double-delivery guard witness — the number of local-client deliveries a
@@ -2796,12 +2819,14 @@ impl RouterForwarder {
                     );
                     continue;
                 }
+                let was_push = matches!(msg, NetworkMessage::Push(_));
                 if state
                     .actions
                     .send_network_message_qos(msg, reliable, express, priority)
                     .is_ok()
                 {
                     sent += 1;
+                    self.note_sent(was_push);
                 }
             }
         }
@@ -6896,10 +6921,15 @@ impl RouterForwarder {
             );
             return false;
         }
-        state
+        let was_push = matches!(msg, NetworkMessage::Push(_));
+        let sent = state
             .actions
             .send_network_message(msg, reliable, false)
-            .is_ok()
+            .is_ok();
+        if sent {
+            self.note_sent(was_push);
+        }
+        sent
     }
 
     /// [`send_to_face`](Self::send_to_face) for an already-BUILT owned message —

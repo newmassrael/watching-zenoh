@@ -6975,6 +6975,7 @@ async fn run_router_hat_until(
     let mut last_announced_peers = 1usize;
     let mut last_announced_routers = 1usize;
     let mut last_data_seen = 0usize;
+    let mut last_data_sent = 0usize;
     let mut last_queries_seen = 0usize;
     let mut last_deferred_client = 0usize;
     let mut announced_queryable = false;
@@ -7164,6 +7165,15 @@ async fn run_router_hat_until(
                     last_data_seen = seen;
                     log::info!("wz-ap-demo router-hat: forwarded mesh data ({seen} push(es))");
                 }
+                // R2904 — the RELAY witness: a Push LEFT this router. `forwarded
+                // mesh data` above counts what arrived, and since R2901 a wz peer
+                // default-sends its own data to its gateway, so arrival no longer
+                // implies relay.
+                let sent = forwarder.data_sent();
+                if sent > last_data_sent {
+                    last_data_sent = sent;
+                    log::info!("wz-ap-demo router-hat: relayed mesh data ({sent} push(es))");
+                }
                 // Double-delivery guard transit witness: another gateway carries
                 // a peer-source Push north for a keyexpr this router's client
                 // subscribes, so this router DEFERRED the duplicate peer-source
@@ -7333,6 +7343,12 @@ async fn run_router_hat_until(
         log::info!(
             "wz-ap-demo router-hat: forwarded mesh data ({} push(es))",
             forwarder.data_seen()
+        );
+    }
+    if forwarder.data_sent() > 0 {
+        log::info!(
+            "wz-ap-demo router-hat: relayed mesh data ({} push(es))",
+            forwarder.data_sent()
         );
     }
     // The query-plane transit counterpart (latched, emitted unconditionally on >0 at
