@@ -307,7 +307,10 @@ struct InterestRegistration<'t, V> {
 /// The id-keyed co-attached CLIENT-queryable store ([`client_qabls`](LinkstateForwarder#structfield.client_qabls)):
 /// per client `FaceId`, the client's declaration `id -> (keyexpr, QueryableInfo)` so an
 /// id-only `UndeclareQueryable` resolves the (ke, info) by id (R311y178 id-map).
-type ClientQabls = HashMap<FaceId, HashMap<u64, (String, QueryableInfo)>>;
+///
+/// R2911 — the shared [`ClientQablStore`], [`Versioned`] because the client leg
+/// of the query route is cached against it.
+type ClientQabls = ClientQablStore;
 
 /// A read-only, `Rc`-backed handle to a link-state graph, exposing ONLY the
 /// adminspace render seam (§5.23 `adminspace-router-linkstate`): the GraphViz
@@ -512,6 +515,9 @@ pub struct LinkstateForwarder {
     /// (`router_forward.rs` client_subs/client_qabls) still carries the keyexpr-keyed gap
     /// as a named symmetric follow-up (its client_tokens was already id-keyed at slice-3).
     client_qabls: RefCell<ClientQabls>,
+    /// R2911 — the client leg of the query route over
+    /// [`client_qabls`](Self#structfield.client_qabls), per keyexpr.
+    client_query_routes: ClientQueryRoutes,
     /// FUTURE-mode subscriber-interest store (R311y146) — which CLIENT faces
     /// declared a FUTURE (`f()`) subscriber `Interest`, and which
     /// `DeclareSubscriber`s this peer has pushed back to them (zenoh's per-`FaceState`
@@ -1135,7 +1141,8 @@ impl LinkstateForwarder {
             client_routes: ClientRoutes::new(),
             client_tokens: RefCell::new(HashMap::new()),
             qabls: RefCell::new(LinkstatepeerInterest::new()),
-            client_qabls: RefCell::new(HashMap::new()),
+            client_qabls: RefCell::new(Versioned::new(HashMap::new())),
+            client_query_routes: ClientQueryRoutes::new(),
             future_subs: RefCell::new(FutureSubStore::new()),
             future_qabls: RefCell::new(FutureQablStore::new()),
             pending: RefCell::new(PendingQueries::new()),
@@ -1370,6 +1377,12 @@ impl LinkstateForwarder {
     /// [`data_route_computes`](Self::data_route_computes).
     pub fn client_route_computes(&self) -> usize {
         self.client_routes.computes()
+    }
+
+    /// R2911 — how many client legs of a query route this peer COMPUTED
+    /// rather than served.
+    pub fn client_query_route_computes(&self) -> usize {
+        self.client_query_routes.computes()
     }
 
     /// R2910 — whether `keyexpr` is declared anywhere on this peer: by a mesh
@@ -2366,34 +2379,25 @@ impl LinkstateForwarder {
         // AND the declaration keyexpr INCLUDES the query (zenoh's `complete && includes`);
         // a plain INTERSECT is the BestMatching/All match. Wildcard-aware via the SAME
         // keyexpr_intersects_target / keyexpr_includes_target SSOTs the mesh + local dispatch use.
-        let client_candidates: Vec<(FaceId, bool)> = {
-            let cq = self.client_qabls.borrow();
-            let mut candidates = Vec::new();
-            for (&face, qabls) in cq.iter() {
-                if face == inbound {
-                    continue;
-                }
-                let mut intersects = false;
-                let mut complete = false;
-                for (decl, info) in qabls.values() {
-                    if keyexpr_intersects_target(decl, &query_chunks) {
-                        intersects = true;
-                        if info.complete && keyexpr_includes_target(decl, &query_chunks) {
-                            complete = true;
-                            break;
-                        }
-                    }
-                }
-                let matches = match target {
-                    Some(QueryTarget::AllComplete) => complete,
-                    _ => intersects,
-                };
-                if matches {
-                    candidates.push((face, complete));
-                }
-            }
-            candidates
-        };
+        // R2911 — the matching faces come from the client-leg query cache
+        // ([`client_query_route`]), in face order, so the first complete one is
+        // the lowest face, the tie the router already breaks that way (R2906).
+        let wire = wireexpr_names_a_declaration(&request.keyexpr.body);
+        let names = |k: &str| self.names_a_resource(k);
+        let client_candidates: Vec<(FaceId, bool)> = client_query_route(
+            &self.client_qabls,
+            Cached {
+                routes: &self.client_query_routes,
+                names_a_resource: &names,
+            },
+            &keyexpr,
+            wire,
+        )
+        .iter()
+        .filter(|c| c.face != inbound)
+        .filter(|c| !matches!(target, Some(QueryTarget::AllComplete)) || c.complete)
+        .map(|c| (c.face, c.complete))
+        .collect();
         // Select the mesh directions + client faces per QueryTarget. A client queryable is
         // distance 1: for BestMatching a COMPLETE client is the nearest-complete winner (it
         // suppresses the >= distance-1 mesh best); with no complete client the mesh's own
@@ -2405,6 +2409,10 @@ impl LinkstateForwarder {
         // client or mesh queryable (the pin's route holds the local session beside
         // its remotes and sorts by distance, `zenoh/src/net/routing/dispatcher/queries.rs`
         // @ `fn compute_final_route(`). It answers through `finish_unrouted_request`.
+        // R2911 — read per query, not cached: this list is the handlers THIS
+        // process registered, which grows with the application and not with the
+        // network, while the mesh and client legs above scan tables every peer
+        // and client of the system adds to.
         let local_complete = self.local_queryables.borrow().iter().any(|lq| {
             lq.complete
                 && keyexpr_intersects_target(&lq.keyexpr, &query_chunks)
@@ -2416,7 +2424,6 @@ impl LinkstateForwarder {
         // R2910 — the mesh queryables this query can reach from its source,
         // served from `query_routes` while neither table changed; the target is
         // applied to them below.
-        let names = |k: &str| self.names_a_resource(k);
         let mesh = query_candidates(
             &self.net.borrow(),
             &self.qabls,
@@ -2426,7 +2433,7 @@ impl LinkstateForwarder {
             },
             &source_zid,
             &keyexpr,
-            wireexpr_names_a_declaration(&request.keyexpr.body),
+            wire,
         );
         let (children, client_targets, open): (Vec<Zid>, Vec<FaceId>, bool) = match target {
             None if local_complete => (Vec::new(), Vec::new(), false),
@@ -6703,6 +6710,71 @@ pub(crate) fn client_route(
         })
 }
 
+/// R2911 — the CLIENT faces a node holds, each with its queryables by decl id
+/// and the `QueryableInfo` each declared: the query twin of [`ClientSubStore`],
+/// kept by both forwarders and [`Versioned`] for the same reason.
+pub(crate) type ClientQablStore = Versioned<HashMap<FaceId, HashMap<u64, (String, QueryableInfo)>>>;
+
+/// R2911 — one client face that can answer a query: the leaf twin of
+/// [`QueryCandidate`]. A client is directly attached, so there is no hop and
+/// its distance is the pin's constant 1
+/// (`zenoh/src/net/routing/hat/router/queries.rs` @ `fn compute_query_route`,
+/// block 3); what varies is whether it is complete for the query.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct ClientQueryable {
+    /// The client face.
+    pub(crate) face: FaceId,
+    /// Some queryable of the face is declared complete AND its keyexpr
+    /// includes the whole queried keyexpr.
+    pub(crate) complete: bool,
+}
+
+/// R2911 — the client-leg query-route cache of one [`ClientQablStore`], per
+/// keyexpr, keyed by `()` for the reason [`ClientRoutes`] is.
+pub(crate) type ClientQueryRoutes = RouteCache<Rc<[ClientQueryable]>, ()>;
+
+/// R2911 — the client faces able to answer a query for `keyexpr`: every held
+/// client with a queryable intersecting it, in face order, served while the
+/// store is unchanged. The querier's own face and the query target are
+/// applied by the caller, as upstream applies both to a cached route per
+/// query. `wire` and the resource test as [`data_route`] takes them.
+pub(crate) fn client_query_route(
+    store: &RefCell<ClientQablStore>,
+    cached: Cached<'_, ClientQueryRoutes>,
+    keyexpr: &str,
+    wire: bool,
+) -> Rc<[ClientQueryable]> {
+    let store = store.borrow();
+    if store.is_empty() {
+        return Rc::from([]);
+    }
+    let inputs = RouteInputs {
+        net: 0,
+        table: store.version(),
+    };
+    let resource = || wire || (cached.names_a_resource)(keyexpr);
+    cached
+        .routes
+        .get_or_compute(inputs, &(), keyexpr, resource, || {
+            let query_chunks: Vec<&str> = keyexpr.split('/').collect();
+            let mut out: Vec<ClientQueryable> = store
+                .iter()
+                .filter(|(_, ids)| {
+                    ids.values()
+                        .any(|(decl, _)| keyexpr_intersects_target(decl, &query_chunks))
+                })
+                .map(|(face, ids)| ClientQueryable {
+                    face: *face,
+                    complete: ids.values().any(|(decl, info)| {
+                        info.complete && keyexpr_includes_target(decl, &query_chunks)
+                    }),
+                })
+                .collect();
+            out.sort_unstable_by_key(|c| c.face);
+            out.into()
+        })
+}
+
 /// Compute the data-`Push` re-forward for ONE link-state mesh: given the tier's
 /// `net` + subscription `subs` and a Push already resolved against the inbound
 /// link's alias table (`keyexpr`), return the re-stamped carrier + the
@@ -9983,6 +10055,67 @@ mod tests {
             forwarded_response(&sink_q.frame_bytes(0)).request_id,
             99,
             "the Reply carries the querier's own rid"
+        );
+    }
+
+    /// R2911 — the client leg of a declared keyexpr's query route is computed
+    /// once and served until the client queryable store changes: a new client
+    /// queryable and a withdrawal each recompute it, and after each the route
+    /// is the new one. The queryables are incomplete, so BestMatching falls back
+    /// to All and every matching client is queried.
+    #[test]
+    fn a_peers_client_query_leg_is_served_until_a_client_queryable_changes() {
+        let fwd = LinkstateForwarder::new(zid(0x05), WhatAmI::Peer);
+        let (querier, _sink_q) = peer_face_whatami(zid(0x0A), 2);
+        let (c1, sink_c1) = peer_face_whatami(zid(0x0C), 2);
+        let (c2, sink_c2) = peer_face_whatami(zid(0x0D), 2);
+        fwd.register(FaceId(0), &querier);
+        fwd.register(FaceId(1), &c1);
+        fwd.register(FaceId(2), &c2);
+        client_declare_qabl(&fwd, FaceId(1), 1, "demo/q", false);
+        sink_c1.reset();
+        let rid = Cell::new(99);
+        let query = || {
+            rid.set(rid.get() + 1);
+            let request =
+                wz_session_core::request_build::build_request_query(rid.get(), 0, Some("demo/q"))
+                    .expect("build request");
+            fwd.forward_request(FaceId(0), true, &request);
+        };
+
+        query();
+        let first = fwd.client_query_route_computes();
+        assert_eq!(first, 1);
+        query();
+        assert_eq!(
+            fwd.client_query_route_computes(),
+            first,
+            "the second is served"
+        );
+        assert_eq!(sink_c1.frame_count(), 2);
+
+        client_declare_qabl(&fwd, FaceId(2), 1, "demo/q", false);
+        sink_c2.reset();
+        query();
+        assert_eq!(
+            fwd.client_query_route_computes(),
+            first + 1,
+            "a new queryable recomputes"
+        );
+        assert_eq!(sink_c2.frame_count(), 1, "and the new route reaches it");
+
+        client_undeclare_qabl(&fwd, FaceId(1), 1);
+        sink_c1.reset();
+        query();
+        assert_eq!(
+            fwd.client_query_route_computes(),
+            first + 2,
+            "a withdrawal recomputes"
+        );
+        assert_eq!(
+            sink_c1.frame_count(),
+            0,
+            "the withdrawn client is not queried"
         );
     }
 

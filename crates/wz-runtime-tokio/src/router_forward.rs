@@ -374,7 +374,7 @@ use wz_session_core::declare_ext_keyexpr::resolve_ext_keyexpr;
 use wz_session_core::declare_routing_context::{read_declare_source, set_declare_source};
 use wz_session_core::driver_loop::DriverLoopOutcome;
 use wz_session_core::extbound::{region_and_bound_of, Bound, Region};
-use wz_session_core::keyexpr_match::{keyexpr_includes_target, keyexpr_intersects_target};
+use wz_session_core::keyexpr_match::keyexpr_intersects_target;
 use wz_session_core::linkstate_oam::{
     build_linkstate_oam_owned, try_parse_linkstate_oam, LinkstateOam,
 };
@@ -399,15 +399,15 @@ use crate::interceptor::{
     InterceptorChain, InterceptorConfig, InterceptorContext, InterceptorFlow, InterceptorVerdict,
 };
 use crate::linkstate_forward::{
-    absorb_keyexpr_into, all_query_directions, build_declare_queryable_with_info, client_route,
-    complete_query_directions, compute_push_forward, compute_self_publish_forward,
-    declare_queryable_wireexpr, declare_subscriber_wireexpr, emit_current_interest_replies,
-    is_tree_forward_target, peer_acl_username, peer_whatami_routing, peer_zid_routing,
-    query_candidates, re_advertise_interest_into, resolve_governed_keyexpr, resolve_source_in,
-    resolve_source_zid_in, select_best_matching, synthesize_drained_fan_finals,
-    synthesize_expired_query_returns, Cached, ClientRoutes, ClientSubStore, DataRoutes,
-    LocalQueryHandler, LocalQueryView, LocalQueryable, LocalSubscriber, LocalSubscriberHandler,
-    QueryCandidate, QueryRoutes,
+    absorb_keyexpr_into, all_query_directions, build_declare_queryable_with_info,
+    client_query_route, client_route, complete_query_directions, compute_push_forward,
+    compute_self_publish_forward, declare_queryable_wireexpr, declare_subscriber_wireexpr,
+    emit_current_interest_replies, is_tree_forward_target, peer_acl_username, peer_whatami_routing,
+    peer_zid_routing, query_candidates, re_advertise_interest_into, resolve_governed_keyexpr,
+    resolve_source_in, resolve_source_zid_in, select_best_matching, synthesize_drained_fan_finals,
+    synthesize_expired_query_returns, Cached, ClientQablStore, ClientQueryRoutes, ClientQueryable,
+    ClientRoutes, ClientSubStore, DataRoutes, LocalQueryHandler, LocalQueryView, LocalQueryable,
+    LocalSubscriber, LocalSubscriberHandler, QueryCandidate, QueryRoutes,
 };
 use crate::routing_region::{hat_kind, GatewayView, HatKind, InterRegionFilter, RegionMap};
 // R2393 — the host-subscriber dispatch's sample types, the same ones the peer
@@ -573,7 +573,10 @@ type ClientSubs = ClientSubStore;
 /// A client face's queryables, decl id -> (keyexpr, declared `QueryableInfo`),
 /// id-keyed for the same reason as [`ClientSubs`] (pico's
 /// `_z_make_undecl_queryable(qle->_entity_id, NULL)`).
-type ClientQabls = HashMap<FaceId, HashMap<u64, (String, QueryableInfo)>>;
+///
+/// R2911 — the shared [`ClientQablStore`], [`Versioned`] because the client
+/// leg of the query route is cached against it.
+type ClientQabls = ClientQablStore;
 
 /// The one `QueryableInfo` a client face holds for `keyexpr`: the merge of
 /// every id on the face naming it, `None` when none does. This is what the
@@ -669,6 +672,8 @@ struct BrokerHat {
     /// [`derived_cross_tier_qabl_info`](RouterForwarder::derived_cross_tier_qabl_info).
     /// Same keyexpr-keyed follow-up as `subs` (`undeclare_queryable`).
     qabls: Rc<RefCell<ClientQabls>>,
+    /// R2911 — the client leg of the query route over `qabls`, per keyexpr.
+    client_query_routes: ClientQueryRoutes,
     /// The per-client-face liveliness-TOKEN store (slice-3), keyed the way
     /// zenoh's `face_hat.remote_tokens: HashMap<TokenId, Arc<Resource>>` is: the
     /// client's DECL ID -> the resolved keyexpr, not a lossy keyexpr set. A
@@ -690,7 +695,8 @@ impl BrokerHat {
         Self {
             subs: Rc::new(RefCell::new(Versioned::new(HashMap::new()))),
             client_routes: ClientRoutes::new(),
-            qabls: Rc::new(RefCell::new(HashMap::new())),
+            qabls: Rc::new(RefCell::new(Versioned::new(HashMap::new()))),
+            client_query_routes: ClientQueryRoutes::new(),
             #[cfg(feature = "routing-token-tables")]
             tokens: Rc::new(RefCell::new(HashMap::new())),
         }
@@ -1186,6 +1192,18 @@ fn elect_router<'a>(
         }
     }
     best.map_or(*self_zid, |(_, z)| z)
+}
+
+/// R2911 — one query's route as the caches serve it: the mesh queryables per
+/// [`MeshQueryBlock`] (same order) and the client queryables per broker hat
+/// ([`RouterForwarder::broker_regions`] order). The pin holds these in ONE
+/// `QueryTargetQablSet` and applies the target to it
+/// (`zenoh/src/net/routing/dispatcher/queries.rs` @ `fn compute_final_route(`);
+/// wz keeps the legs apart because a mesh leg is sent along a tree and a client
+/// leg to a face, and applies the same target to both.
+struct QueryRoute {
+    mesh: Vec<Rc<[QueryCandidate]>>,
+    clients: Vec<Rc<[ClientQueryable]>>,
 }
 
 /// One mesh tier's query-route parameters, resolved by
@@ -2731,6 +2749,14 @@ impl RouterForwarder {
     pub fn query_route_computes(&self) -> usize {
         self.mesh_hats()
             .map(|hat| hat.query_routes.computes())
+            .sum()
+    }
+
+    /// R2911 — how many client legs of a query route this router COMPUTED
+    /// rather than served, over every broker hat.
+    pub fn client_query_route_computes(&self) -> usize {
+        self.broker_hats()
+            .map(|hat| hat.client_query_routes.computes())
             .sum()
     }
 
@@ -6567,16 +6593,20 @@ impl RouterForwarder {
 
         // R2910 — each block's mesh queryables, read once per query from its
         // hat's query-route cache; the target below is applied to these.
+        // R2911 — and each broker hat's client queryables, the same way.
         let wire = wireexpr_names_a_declaration(&request.keyexpr.body);
-        let mesh: Vec<Rc<[QueryCandidate]>> = blocks
-            .iter()
-            .map(|block| self.block_query_candidates(block, &keyexpr, wire))
-            .collect();
+        let route = QueryRoute {
+            mesh: blocks
+                .iter()
+                .map(|block| self.block_query_candidates(block, &keyexpr, wire))
+                .collect(),
+            clients: self.client_query_legs(&keyexpr, wire),
+        };
         let forwarded = match read_request_target(request) {
             // BestMatching (wire default): the SINGLE globally-nearest COMPLETE
             // queryable; fall back to All (every matching one) when none is
             // complete.
-            None => match self.best_query_winner(&blocks, &mesh, client_gate, inbound, &keyexpr) {
+            None => match self.best_query_winner(&blocks, &route, client_gate, inbound) {
                 Some(BestQueryWinner::Mesh(bi, hop)) => self.forward_request_to_tier(
                     &blocks[bi],
                     reliable,
@@ -6591,7 +6621,7 @@ impl RouterForwarder {
                     .forward_request_to_face(face, 0, reliable, request, &keyexpr, &fan, deadline),
                 None => self.forward_request_all(
                     &blocks,
-                    &mesh,
+                    &route,
                     client_gate,
                     false,
                     reliable,
@@ -6604,7 +6634,7 @@ impl RouterForwarder {
             },
             Some(QueryTarget::All) => self.forward_request_all(
                 &blocks,
-                &mesh,
+                &route,
                 client_gate,
                 false,
                 reliable,
@@ -6616,7 +6646,7 @@ impl RouterForwarder {
             ),
             Some(QueryTarget::AllComplete) => self.forward_request_all(
                 &blocks,
-                &mesh,
+                &route,
                 client_gate,
                 true,
                 reliable,
@@ -6773,13 +6803,12 @@ impl RouterForwarder {
     fn best_query_winner(
         &self,
         blocks: &[MeshQueryBlock],
-        mesh: &[Rc<[QueryCandidate]>],
+        route: &QueryRoute,
         client_gate: bool,
         inbound: FaceId,
-        keyexpr: &str,
     ) -> Option<BestQueryWinner> {
         let mut best: Option<(u16, BestQueryWinner)> = None;
-        for (bi, (block, candidates)) in blocks.iter().zip(mesh).enumerate() {
+        for (bi, (block, candidates)) in blocks.iter().zip(&route.mesh).enumerate() {
             if let Some((dist, hop)) =
                 select_best_matching(candidates, block.inbound_for_net, |hop| {
                     self.query_block_admits(block, hop)
@@ -6805,7 +6834,7 @@ impl RouterForwarder {
             }
         }
         if client_gate {
-            if let Some(face) = self.first_complete_client(inbound, keyexpr) {
+            if let Some(face) = Self::first_complete_client(inbound, &route.clients) {
                 // A client-hosted queryable is a directly-attached leaf: distance 1
                 // (zenoh `compute_query_route` block 3's `distance: 1`).
                 Self::consider_best(&mut best, 1, BestQueryWinner::Client(face));
@@ -6834,30 +6863,43 @@ impl RouterForwarder {
     /// `zenoh/src/net/routing/hat/router/queries.rs` @ `qabl_info`).
     /// "Complete for the query" is the declared
     /// `complete` AND the declaration keyexpr INCLUDING the full query keyexpr — the
-    /// same test [`complete_for_query_peers`] applies to a mesh queryable.
+    /// same test [`query_candidates`] applies to a mesh queryable.
     ///
     /// R2906 — among several such clients, the LOWEST face id. Every client is
     /// at distance 1, so they tie, and this used to take whichever a `HashMap`
     /// walk reached first: a per-process coin flip for which client answers.
     /// The pin sorts an insertion-ordered route; a face-id key is the
     /// deterministic stand-in the star router already used for the same tie.
-    fn first_complete_client(&self, inbound: FaceId, keyexpr: &str) -> Option<FaceId> {
-        let query_chunks: Vec<&str> = keyexpr.split('/').collect();
-        self.broker_hats()
-            .filter_map(|hat| {
-                hat.qabls
-                    .borrow()
-                    .iter()
-                    .filter(|(id, _)| **id != inbound)
-                    .filter(|(_, by_id)| {
-                        by_id.values().any(|(decl, info)| {
-                            info.complete && keyexpr_includes_target(decl, &query_chunks)
-                        })
-                    })
-                    .map(|(id, _)| *id)
-                    .min()
-            })
+    ///
+    /// R2911 — read off the client legs [`client_query_legs`](Self::client_query_legs)
+    /// served for this query rather than off the stores.
+    fn first_complete_client(inbound: FaceId, clients: &[Rc<[ClientQueryable]>]) -> Option<FaceId> {
+        clients
+            .iter()
+            .flat_map(|leg| leg.iter())
+            .filter(|c| c.complete && c.face != inbound)
+            .map(|c| c.face)
             .min()
+    }
+
+    /// R2911 — the client leg of this query's route, one per broker hat in
+    /// [`broker_regions`](Self::broker_regions) order, each served from that
+    /// hat's [`ClientQueryRoutes`] ([`client_query_route`]).
+    fn client_query_legs(&self, keyexpr: &str, wire: bool) -> Vec<Rc<[ClientQueryable]>> {
+        let names = |k: &str| self.names_a_resource(k);
+        self.broker_regions()
+            .map(|(_, hat)| {
+                client_query_route(
+                    &hat.qabls,
+                    Cached {
+                        routes: &hat.client_query_routes,
+                        names_a_resource: &names,
+                    },
+                    keyexpr,
+                    wire,
+                )
+            })
+            .collect()
     }
 
     /// Route the Query to EVERY matching queryable (`QueryTarget::All`, and the
@@ -6870,7 +6912,7 @@ impl RouterForwarder {
     fn forward_request_all(
         &self,
         blocks: &[MeshQueryBlock],
-        mesh: &[Rc<[QueryCandidate]>],
+        route: &QueryRoute,
         client_gate: bool,
         complete_only: bool,
         reliable: bool,
@@ -6881,7 +6923,7 @@ impl RouterForwarder {
         deadline: Instant,
     ) -> usize {
         let mut forwarded = 0;
-        for (block, candidates) in blocks.iter().zip(mesh) {
+        for (block, candidates) in blocks.iter().zip(&route.mesh) {
             let hops = if complete_only {
                 complete_query_directions(candidates)
             } else {
@@ -6893,6 +6935,7 @@ impl RouterForwarder {
         }
         if client_gate {
             forwarded += self.forward_request_to_clients(
+                &route.clients,
                 complete_only,
                 reliable,
                 inbound,
@@ -6963,6 +7006,7 @@ impl RouterForwarder {
     #[allow(clippy::too_many_arguments)]
     fn forward_request_to_clients(
         &self,
+        clients: &[Rc<[ClientQueryable]>],
         complete_only: bool,
         reliable: bool,
         inbound: FaceId,
@@ -6976,23 +7020,20 @@ impl RouterForwarder {
         if set_request_keyexpr_literal(&mut template, keyexpr).is_err() {
             return 0;
         }
-        let query_chunks: Vec<&str> = keyexpr.split('/').collect();
         let mut forwarded = 0;
         // R2873 (step 3d) — one fan-out per broker hat, scoped to its region.
-        for (region, hat) in self.broker_regions() {
+        // R2911 — each hat's matching faces are its leg of this query's route.
+        for ((region, _hat), leg) in self.broker_regions().zip(clients) {
+            if leg.is_empty() {
+                continue;
+            }
             let _ = self.fan_out_tier(region, reliable, |id, _zid| {
                 if id == inbound {
                     return Ok(None);
                 }
-                let qualifies = hat.qabls.borrow().get(&id).is_some_and(|by_id| {
-                    by_id.values().any(|(decl, info)| {
-                        if complete_only {
-                            info.complete && keyexpr_includes_target(decl, &query_chunks)
-                        } else {
-                            keyexpr_intersects_target(decl, &query_chunks)
-                        }
-                    })
-                });
+                let qualifies = leg
+                    .binary_search_by_key(&id, |c| c.face)
+                    .is_ok_and(|i| !complete_only || leg[i].complete);
                 if !qualifies {
                     return Ok(None);
                 }
@@ -16450,6 +16491,84 @@ mod tests {
             forwarded_response_final_rid(&sink_q.frame_bytes(0)),
             21,
             "the query had no answerer and was finalized at once"
+        );
+    }
+
+    /// R2911 — a router's client leg of a declared keyexpr's query route is
+    /// computed once and served until the broker hat's queryable store
+    /// changes; a new client queryable and a withdrawal by id each recompute
+    /// it and the route after each is the new one. Incomplete queryables, so
+    /// BestMatching falls back to All and every matching client is queried.
+    #[test]
+    fn a_routers_client_query_leg_is_served_until_a_client_queryable_changes() {
+        use wz_session_core::declare_build::{
+            build_declare_queryable_with_id_info, build_undeclare_queryable,
+        };
+        let fwd = RouterForwarder::new(zid(0x01));
+        let (querier, _sink_q) = face(zid(0xAA), WIRE_CLIENT);
+        let (h1, sink_h1) = face(zid(0xCC), WIRE_CLIENT);
+        let (h2, sink_h2) = face(zid(0xDD), WIRE_CLIENT);
+        fwd.register(FaceId(0), &querier);
+        fwd.register(FaceId(1), &h1);
+        fwd.register(FaceId(2), &h2);
+        let info = QueryableInfo {
+            complete: false,
+            distance: 0,
+        };
+        let declare = |face: u64, id: u64| {
+            forward_one(
+                &fwd,
+                FaceId(face),
+                NetworkMessage::Declare(Box::new(
+                    build_declare_queryable_with_id_info(id, "demo/q", info).expect("declare"),
+                )),
+            );
+        };
+        let rid = Cell::new(20);
+        let query = || {
+            rid.set(rid.get() + 1);
+            forward_one(&fwd, FaceId(0), request_best(rid.get(), "demo/q"));
+        };
+        declare(1, 5);
+        sink_h1.reset();
+
+        query();
+        let first = fwd.client_query_route_computes();
+        assert_eq!(first, 1);
+        query();
+        assert_eq!(
+            fwd.client_query_route_computes(),
+            first,
+            "the second is served"
+        );
+        assert_eq!(sink_h1.frame_count(), 2);
+
+        declare(2, 6);
+        sink_h2.reset();
+        query();
+        assert_eq!(
+            fwd.client_query_route_computes(),
+            first + 1,
+            "a new queryable recomputes"
+        );
+        assert_eq!(sink_h2.frame_count(), 1, "and the new route reaches it");
+
+        forward_one(
+            &fwd,
+            FaceId(1),
+            NetworkMessage::Declare(Box::new(build_undeclare_queryable(5))),
+        );
+        sink_h1.reset();
+        query();
+        assert_eq!(
+            fwd.client_query_route_computes(),
+            first + 2,
+            "a withdrawal recomputes"
+        );
+        assert_eq!(
+            sink_h1.frame_count(),
+            0,
+            "the withdrawn client is not queried"
         );
     }
 
