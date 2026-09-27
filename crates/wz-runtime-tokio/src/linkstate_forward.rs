@@ -6304,7 +6304,16 @@ impl LinkstateForwarder {
             return;
         }
         self.timed_out.set(self.timed_out.get() + reaped.len());
-        synthesize_expired_query_returns(&reaped, |face, msg| self.send_one_to_face(face, msg));
+        synthesize_expired_query_returns(
+            &reaped,
+            |face| {
+                self.faces
+                    .borrow()
+                    .get(&face)
+                    .and_then(|s| peer_zid_routing(&s.actions))
+            },
+            |face, msg| self.send_one_to_face(face, msg),
+        );
     }
 
     /// Mark a spanning-tree recompute pending (D2c) — the coalescing entry the
@@ -6978,6 +6987,7 @@ pub(crate) fn compute_self_publish_forward(
 /// reaches the querier across relays, as does the final.
 pub(crate) fn synthesize_expired_query_returns(
     reaped: &[ExpiredQuery],
+    zid_of: impl Fn(FaceId) -> Option<Zid>,
     mut send: impl FnMut(FaceId, NetworkMessage),
 ) {
     for eq in reaped {
@@ -6985,12 +6995,22 @@ pub(crate) fn synthesize_expired_query_returns(
         // answerer's reply, as upstream's `QueryCleanup::run` hands its Err to
         // `route_send_response`: the step is what stamps the querier's rid and
         // QoS, so the Err is built at the branch's own qid and relayed.
-        if let Ok(err_msg) = wz_session_core::response_build::build_response_err_empty(
-            eq.qid, b"Timeout",
-        )
-        .and_then(|err| {
-            wz_session_core::response_build::relay_response(&err, eq.to.rid, eq.to.qos, None)
-        }) {
+        // R2912 — naming the face that never answered as its responder, as
+        // upstream does. Upstream sends no Err at all once that face is gone
+        // (`if let Some(mut face) = self.face.upgrade()`); a departed face's
+        // branches are drained at its deregister, so an unnamed face here is
+        // that same case and gets no Err, while a LAST branch still closes the
+        // querier below rather than leaving it waiting.
+        let err_msg = zid_of(eq.out_face).and_then(|zid| {
+            wz_session_core::response_build::build_response_timeout_err(eq.qid, zid.as_ref())
+                .and_then(|err| {
+                    wz_session_core::response_build::relay_response(
+                        &err, eq.to.rid, eq.to.qos, None,
+                    )
+                })
+                .ok()
+        });
+        if let Some(err_msg) = err_msg {
             send(eq.to.face, NetworkMessage::Response(Box::new(err_msg)));
         }
         if !eq.last {
@@ -19121,8 +19141,9 @@ mod tests {
         fwd.forward_request(FaceId(0), true, &request);
         let qid = forwarded_request(&sink_c.frame_bytes(0)).rid;
         // The downstream hop times out ITS branch and synthesizes the Err — the
-        // exact wire shape the reap emits — which arrives here as a Response.
-        let err = wz_session_core::response_build::build_response_err_empty(qid, b"Timeout")
+        // exact wire shape the reap emits (R2912: naming its silent face) —
+        // which arrives here as a Response.
+        let err = wz_session_core::response_build::build_response_timeout_err(qid, &[0xDD; 4])
             .expect("build err");
         fwd.forward_response(FaceId(1), true, &err);
         assert_eq!(
@@ -19134,6 +19155,72 @@ mod tests {
             forwarded_response(&sink_a.frame_bytes(0)).request_id,
             95,
             "with the rid rewritten to the querier's"
+        );
+        assert_eq!(
+            responder_ext(&forwarded_response(&sink_a.frame_bytes(0))),
+            Some(wz_session_core::response_build::encode_responder_ext_body(
+                &[0xDD; 4], 0
+            )),
+            "and the downstream hop's responder carried through"
+        );
+    }
+
+    /// The responder-id entry (ext id 0x03) a Response carries, as its raw body.
+    fn responder_ext(response: &ResponseOwned) -> Option<Vec<u8>> {
+        use wz_codecs::ext_entry::ExtEntryOwnedVariant;
+        response.extensions.as_ref()?.iter().find_map(|e| {
+            if e.header & 0x0F != 0x03 {
+                return None;
+            }
+            match &e.body {
+                ExtEntryOwnedVariant::CodecZenohExtZbuf(z) => Some(z.value.to_vec()),
+                _ => None,
+            }
+        })
+    }
+
+    /// R2912 — a relay's timeout Err names the face that never answered, as
+    /// upstream's `QueryCleanup::run` stamps `ext_respid` with that face's zid
+    /// and entity id 0. Before R2912 the Err carried no responder at all, and
+    /// both reap tests above passed, since they count frames.
+    #[test]
+    fn a_timeout_err_names_the_silent_face_as_its_responder() {
+        let base = Instant::now();
+        let offset = Rc::new(Cell::new(Duration::ZERO));
+        let offset_clock = offset.clone();
+        let fwd = LinkstateForwarder::with_clock(
+            zid(0x05),
+            WhatAmI::Peer,
+            Box::new(move || base + offset_clock.get()),
+        );
+        let (face_a, sink_a) = peer_face(zid(0x0A));
+        let (face_c, _sc) = peer_face(zid(0x0C)); // never replies
+        fwd.register(FaceId(0), &face_a);
+        fwd.register(FaceId(1), &face_c);
+        advertise_link_back(&fwd, FaceId(0), 0x0A, 0x05);
+        advertise_link_back(&fwd, FaceId(1), 0x0C, 0x05);
+        declare_queryable_interest(&fwd, FaceId(1), "demo/q");
+        fwd.tick();
+        sink_a.reset();
+        let request = wz_session_core::request_build::build_request_query_with_timeout_ms(
+            90,
+            0,
+            Some("demo/q"),
+            5,
+        )
+        .expect("build request");
+        fwd.forward_request(FaceId(0), true, &request);
+        offset.set(Duration::from_millis(5));
+        fwd.tick();
+        let err = forwarded_response(&sink_a.frame_bytes(0));
+        assert_eq!(err.request_id, 90, "the Err is the querier's");
+        assert_eq!(
+            responder_ext(&err),
+            Some(wz_session_core::response_build::encode_responder_ext_body(
+                zid(0x0C).as_ref(),
+                0
+            )),
+            "the responder is the silent face C, entity 0"
         );
     }
 

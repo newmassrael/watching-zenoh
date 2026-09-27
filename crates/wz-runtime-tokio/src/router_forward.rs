@@ -7206,7 +7206,14 @@ impl RouterForwarder {
             return;
         }
         self.timed_out.set(self.timed_out.get() + reaped.len());
-        synthesize_expired_query_returns(&reaped, |face, msg| self.send_one_to_face(face, msg));
+        synthesize_expired_query_returns(
+            &reaped,
+            |face| match classify_inbound(&self.faces.borrow(), face) {
+                InboundFace::Held(s) => peer_zid_routing(&s.actions),
+                InboundFace::SourceOnly | InboundFace::Gone => None,
+            },
+            |face, msg| self.send_one_to_face(face, msg),
+        );
     }
 
     /// Total live pending query branches — the pending-table witness the shutdown

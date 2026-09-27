@@ -349,8 +349,9 @@ pub fn build_response_err_aliased(
 /// R2906 — and it is: the timeout sweep passes this through
 /// [`relay_response`], exactly as upstream's `QueryCleanup::run` passes its
 /// Err through `route_send_response`, so the QoS is stamped at the one relay
-/// step rather than here. The responder id upstream also attaches (the timed-out
-/// face's zid) is still omitted.
+/// step rather than here. R2912 — and the responder id upstream also attaches
+/// (the timed-out face's zid) is [`build_response_timeout_err`]'s, which the
+/// relay's sweep now builds instead of this.
 ///
 /// Wire shape (empty-keyexpr case):
 ///
@@ -383,6 +384,28 @@ pub fn build_response_err_empty(
         extensions: None,
         body: err_body(payload)?,
     })
+}
+
+/// R2912 — the `Err("Timeout")` a relay sends toward the querier when a
+/// branch it forwarded is never finalized: [`build_response_err_empty`]'s
+/// shape plus the responder identity upstream's `QueryCleanup::run` puts on
+/// it, the zid of the face that did not answer with entity id 0
+/// (`zenoh/src/net/routing/dispatcher/queries.rs` @ `let ext_respid = Some(response::ext::ResponderIdType {`).
+/// Built at the branch's own qid; the relay step ([`relay_response`]) then
+/// stamps the querier's rid and QoS, putting the QoS ahead of this entry as
+/// upstream's encoder orders them.
+#[cfg(feature = "codec-response")]
+pub fn build_response_timeout_err(
+    request_id: u64,
+    silent_face_zid: &[u8],
+) -> Result<ResponseOwned, CodecError> {
+    let mut err = build_response_err_empty(request_id, b"Timeout")?;
+    stamp_envelope_extensions(
+        &mut err,
+        crate::sample::QosLevel::DEFAULT,
+        Some((silent_face_zid.to_vec(), 0)),
+    )?;
+    Ok(err)
 }
 
 /// The wz minimal `Reply(MsgPut)` BODY — Reply MID `0x04` (no C/Z) wrapping a
