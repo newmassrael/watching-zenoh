@@ -14888,12 +14888,14 @@ install qemu-system-arm" || fail=1
     #
     # Boots the LAYER-2 FreeRTOS cooperative single-task profile on mps2-an385
     # (Cortex-M3 only — the vendored ARM_CM3 port): cortex-m-rt #[entry] ->
-    # xTaskCreate(wz_task) -> vTaskStartScheduler; the wz task hosts
-    # CoopRuntime<FreertosClock> (the REUSED wz-runtime-coop executor) + the
-    # wz-link-lwip UDP loopback echo, yielding with vTaskDelay. SYS_EXIT=0 =>
-    # the FreeRTOS scheduler booted (SysTick/PendSV/SVCall vector wiring via the
-    # FreeRTOSConfig.h handler #defines works) AND the cooperative echo
-    # round-tripped. Build needs BOTH WZ_FREERTOS_CONFIG (the deploy's
+    # xTaskCreate(wz_task) -> vTaskStartScheduler. R2913 — the wz task runs a
+    # SESSION on the profile's seams (FreertosClock, heap_4, and FreertosEntropy
+    # over the board's xApplicationGetRandomNumber): the acceptor session e2e
+    # Q.4 runs bare-metal, handshake to Established over lwIP loopback plus a
+    # dispatched Frame. It used to bounce one UDP datagram, which compiled no
+    # session, codec or transport code into a FreeRTOS image. SYS_EXIT=0 => the
+    # scheduler booted AND the session reached Established and dispatched; the
+    # PASS line also prints how many numbers the entropy hook handed out. Build needs BOTH WZ_FREERTOS_CONFIG (the deploy's
     # FreeRTOSConfig.h, with the cortex-m-rt direct-routing #defines) AND
     # WZ_LWIP_PORT (the lwIP cross-test port). Reaches here only with
     # arm-none-eabi-gcc present (the Q.1-3 toolchain gate returned early else).

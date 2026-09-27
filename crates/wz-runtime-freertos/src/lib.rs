@@ -16,6 +16,10 @@
 //! 2. [`FreertosAllocator`] — a [`GlobalAlloc`] over the FreeRTOS heap_4
 //!    allocator (`pvPortMalloc`/`vPortFree`). The deploy binary declares it as
 //!    its `#[global_allocator]`.
+//! 3. R2913 — [`FreertosEntropy`](crate::FreertosEntropy), the session core's
+//!    entropy port over the FreeRTOS application hook
+//!    `xApplicationGetRandomNumber`, the one zenoh-pico's FreeRTOS port draws
+//!    from (`vendor/zenoh-pico/src/system/freertos/system.c`, `z_random_u32`).
 //!
 //! [`FreertosRuntime`] is then just `CoopRuntime<FreertosClock<TICK_HZ>>`.
 //!
@@ -63,6 +67,50 @@ impl<const TICK_HZ: u32> ClockSource for FreertosClock<TICK_HZ> {
 /// task pool / waker / timer queue are wz-runtime-coop's, only the clock seam
 /// is FreeRTOS-specific.
 pub type FreertosRuntime<const TICK_HZ: u32> = CoopRuntime<FreertosClock<TICK_HZ>>;
+
+extern "C" {
+    /// The FreeRTOS application's random-number hook, supplied by the BOARD:
+    /// `BaseType_t xApplicationGetRandomNumber(uint32_t *pulNumber)`, returning
+    /// `pdTRUE` with `*pulNumber` filled, or `pdFALSE` when no number is
+    /// available. FreeRTOS+TCP requires every application to define it, and
+    /// zenoh-pico's FreeRTOS port calls it for every random draw, so a board
+    /// that runs either already has it.
+    fn xApplicationGetRandomNumber(pul_number: *mut u32) -> freertos_sys::BaseType_t;
+}
+
+/// `pdTRUE` — the hook's success value.
+const PD_TRUE: freertos_sys::BaseType_t = 1;
+
+/// R2913 — the session core's [`EntropySource`](wz_session_core::entropy::EntropySource)
+/// on this profile: every byte comes from the board's
+/// `xApplicationGetRandomNumber`, drawn 32 bits at a time, as zenoh-pico's
+/// FreeRTOS port draws (`z_random_u32` then `z_random_fill`).
+///
+/// It makes no promise of its own about the bytes: they are exactly as
+/// unpredictable as the board's hook, which is the plugin-tier contract §2.5
+/// ratified -- the profile names the seam, the board owns the source. A hook
+/// that reports failure fails the whole fill, so the session's fail-closed
+/// slot stays empty rather than holding a partly-drawn value.
+#[derive(Clone, Copy, Default)]
+pub struct FreertosEntropy;
+
+impl wz_session_core::entropy::EntropySource for FreertosEntropy {
+    fn try_fill_bytes(
+        &mut self,
+        buf: &mut [u8],
+    ) -> Result<(), wz_session_core::entropy::EntropyUnavailable> {
+        for chunk in buf.chunks_mut(4) {
+            let mut word = 0u32;
+            // SAFETY: the hook writes one u32 through a pointer to a live
+            // local; the board's implementation is the application's own.
+            if unsafe { xApplicationGetRandomNumber(&mut word) } != PD_TRUE {
+                return Err(wz_session_core::entropy::EntropyUnavailable);
+            }
+            chunk.copy_from_slice(&word.to_le_bytes()[..chunk.len()]);
+        }
+        Ok(())
+    }
+}
 
 /// `portBYTE_ALIGNMENT` on the ARMv7-M (ARM_CM3) port — heap_4 returns blocks
 /// aligned to this.

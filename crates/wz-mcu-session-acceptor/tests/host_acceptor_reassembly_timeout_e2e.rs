@@ -30,7 +30,9 @@
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
 
-use wz_mcu_session_acceptor::{run_acceptor_e2e, AcceptorE2eOutcome, ClockSource, DataMode};
+use wz_mcu_session_acceptor::{
+    run_acceptor_e2e, AcceptorE2eOutcome, ClockSource, DataMode, FixtureEntropy,
+};
 
 /// Milliseconds the clock jumps once the lone fragment is ingested, to cross
 /// the chain's `reassembly_timeout_ms` (500ms) deadline so the next sweep
@@ -75,7 +77,12 @@ fn acceptor_evicts_stalled_fragment_chain_on_deadline_over_lwip() {
         }
     };
 
-    let report = run_acceptor_e2e(clock, DataMode::FragmentChainStalled, on_fragment);
+    let report = run_acceptor_e2e(
+        clock,
+        FixtureEntropy,
+        DataMode::FragmentChainStalled,
+        on_fragment,
+    );
     assert_eq!(
         report.outcome,
         AcceptorE2eOutcome::ReassemblyTimedOut,

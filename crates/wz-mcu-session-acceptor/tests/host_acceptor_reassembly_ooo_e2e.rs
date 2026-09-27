@@ -25,7 +25,8 @@
 //! per-file split of the other acceptor host tests.
 
 use wz_mcu_session_acceptor::{
-    run_acceptor_e2e, AcceptorE2eOutcome, ClockSource, DataMode, ReassemblyDropReason,
+    run_acceptor_e2e, AcceptorE2eOutcome, ClockSource, DataMode, FixtureEntropy,
+    ReassemblyDropReason,
 };
 
 /// Frozen host clock — `now_us` is constant; the ooo abort is event-driven
@@ -42,7 +43,12 @@ impl ClockSource for FrozenClock {
 #[test]
 fn acceptor_aborts_out_of_order_fragment_chain_over_lwip() {
     // No-op fragment hook: the abort is event-driven (no clock advance needed).
-    let report = run_acceptor_e2e(FrozenClock, DataMode::FragmentChainOoo, || {});
+    let report = run_acceptor_e2e(
+        FrozenClock,
+        FixtureEntropy,
+        DataMode::FragmentChainOoo,
+        || {},
+    );
     assert_eq!(
         report.outcome,
         AcceptorE2eOutcome::ReassemblyDropped,

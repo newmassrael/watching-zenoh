@@ -136,7 +136,12 @@ const FIXTURE_COOKIE_NONCE: u64 = 0x5A5A_5A5A_5A5A_5A5A;
 /// asserts that the peer's echo of the REAL minted cookie passes the guard,
 /// a property that holds for any nonce value and needs a deterministic one to
 /// be reproducible on a frozen-clock board.
-struct FixtureEntropy;
+///
+/// R2913 — PUBLIC, and no longer chosen inside [`run_acceptor_e2e`]: the
+/// source is the CALLER's, as it is on a real board, so a profile with an
+/// entropy seam of its own (FreeRTOS's `FreertosEntropy`) runs this e2e
+/// through that seam, and a caller that has none says so by passing this.
+pub struct FixtureEntropy;
 
 impl wz_session_core::entropy::EntropySource for FixtureEntropy {
     fn try_fill_bytes(
@@ -309,11 +314,22 @@ enum PeerPhase {
 /// chain deadline — so the test-only advancing-clock machinery stays in the
 /// test and the deploy binary's clock path is pristine. Only fires under the
 /// `reassembly` feature (`DriverLoopOutcome::Fragment` is gated).
-pub fn run_acceptor_e2e<C: ClockSource, H: FnMut()>(
+///
+/// `entropy` (R2913) is the profile's entropy source, installed through the
+/// MCU construction seam: the per-handshake cookie nonce is drawn from it.
+/// A board passes its own (`wz_runtime_freertos::FreertosEntropy` on
+/// FreeRTOS); a caller with no source passes [`FixtureEntropy`] by name.
+pub fn run_acceptor_e2e<C, E, H>(
     clock_source: C,
+    entropy: E,
     data_mode: DataMode,
     mut on_fragment: H,
-) -> AcceptorE2eReport {
+) -> AcceptorE2eReport
+where
+    C: ClockSource,
+    E: wz_session_core::entropy::EntropySource + Send + 'static,
+    H: FnMut(),
+{
     // The hook only fires under `reassembly` (the Fragment outcome is gated);
     // reference it so the non-reassembly build does not flag an unused param.
     #[cfg(not(feature = "reassembly"))]
@@ -358,11 +374,13 @@ pub fn run_acceptor_e2e<C: ClockSource, H: FnMut()>(
     // `new_session_actions` draws from `getrandom`. The former shape here was
     // `new_generic` + a bare `refresh_cookie_nonce(FIXTURE_COOKIE_NONCE)`,
     // which is what left the MCU profile with no production draw path at all.
+    let mut entropy = entropy;
+    let params = acceptor_params(&mut entropy);
     let actions = wz::runtime_coop::session_runtime::new_session_actions(
         driver_sink,
-        acceptor_params(),
+        params,
         clock.clone(),
-        FixtureEntropy,
+        entropy,
     );
     let timeouts = SessionTimeouts::spec_defaults();
 
@@ -594,7 +612,14 @@ pub fn run_acceptor_e2e<C: ClockSource, H: FnMut()>(
 /// HMAC-SHA256 cookie the acceptor mints on `InitAck` and verifies on
 /// `OpenSyn`; the peer never needs it (it reads the minted cookie off the
 /// wire). Mirrors `wz_session_lwip::session_drive` test params.
-fn acceptor_params() -> SessionInitParams {
+///
+/// R2913 — the key is drawn from the caller's `entropy`, the same source the
+/// cookie nonce comes from, so a board that supplies a source gets both
+/// secrets from it. A source that cannot produce the key stops the e2e loudly:
+/// a session with no signing key would admit nothing.
+fn acceptor_params(
+    entropy: &mut impl wz_session_core::entropy::EntropySource,
+) -> SessionInitParams {
     SessionInitParams {
         version: 0x05,
         whatami: WhatAmI::Peer,
@@ -607,11 +632,9 @@ fn acceptor_params() -> SessionInitParams {
         cookie: vec![0u8; 16],
         // R311y820 — through the SAME §2.5 port the cookie nonce uses, so this
         // fixture demonstrates the production shape rather than the literal a
-        // board would otherwise copy. Deterministic because `FixtureEntropy`
-        // is, which is what keeps the frozen-clock e2e reproducible; a real
-        // board replaces that one type and this line is unchanged.
-        cookie_signing_key: SigningKey::from_entropy(&mut FixtureEntropy)
-            .expect("FixtureEntropy never fails"),
+        // board would otherwise copy.
+        cookie_signing_key: SigningKey::from_entropy(entropy)
+            .expect("the entropy source produced no signing key"),
     }
 }
 

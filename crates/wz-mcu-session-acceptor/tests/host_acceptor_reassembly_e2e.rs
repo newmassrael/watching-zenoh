@@ -24,7 +24,9 @@
 //! loopback netif exactly once (a second `#[test]` in one binary would abort
 //! on the re-init — R71 / YAGNI, the per-file split is the harness).
 
-use wz_mcu_session_acceptor::{run_acceptor_e2e, AcceptorE2eOutcome, ClockSource, DataMode};
+use wz_mcu_session_acceptor::{
+    run_acceptor_e2e, AcceptorE2eOutcome, ClockSource, DataMode, FixtureEntropy,
+};
 
 /// Frozen host clock — `now_us` is constant, so no handshake / lease deadline
 /// ever elapses. The handshake + the fragment chain advance purely on
@@ -41,7 +43,7 @@ impl ClockSource for FrozenClock {
 #[test]
 fn acceptor_reassembles_fragment_chain_and_dispatches_over_lwip() {
     // No-op fragment hook: the chain completes on a frozen clock, no advance.
-    let report = run_acceptor_e2e(FrozenClock, DataMode::FragmentChain, || {});
+    let report = run_acceptor_e2e(FrozenClock, FixtureEntropy, DataMode::FragmentChain, || {});
     assert_eq!(
         report.outcome,
         AcceptorE2eOutcome::EstablishedAndDispatched,

@@ -49,6 +49,10 @@ freertos-sys = { path = "../../crates/freertos-sys" }
 # coop executor + the FreeRTOS clock/allocator. This makes the demo the real
 # consumer of the platform-freertos cfg gate (the Q.frt CI lane exercises it).
 wz = { path = "../../crates/wz", default-features = false, features = ["runtime-coop", "platform-freertos"] }
+# R2913 — the acceptor session e2e this image runs on the FreeRTOS seams (the
+# same one the bare-metal Stage 5 deploy runs), which is what compiles the
+# session, codec and lwIP transport into a FreeRTOS image at all.
+wz-mcu-session-acceptor = { path = "../../crates/wz-mcu-session-acceptor" }
 
 [profile.release]
 codegen-units = 1

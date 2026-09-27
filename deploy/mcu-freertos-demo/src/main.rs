@@ -11,12 +11,18 @@
 //! port.c thus DEFINES the cortex-m-rt vector symbols, overriding the weak
 //! defaults). FreeRTOS owns SysTick — there is no Rust `#[exception] SysTick`.
 //!
-//! `wz_task` hosts the wz-runtime-coop cooperative executor
-//! (`FreertosRuntime = CoopRuntime<FreertosClock>`, the SAME executor as the
-//! bare-metal sibling) and runs the wz-link-lwip UDP loopback echo — but yields
-//! with `vTaskDelay(1)` (one FreeRTOS tick) between cooperative passes instead
-//! of the bare-metal `wfi()`. PASS/FAIL are semihosted + propagated to the QEMU
-//! exit code via `debug::exit`, identical to deploy/mcu-qemu-demo.
+//! R2913 — `wz_task` runs a wz SESSION, not a socket echo. Until this round
+//! the task hosted the coop executor and bounced one UDP datagram off lwIP
+//! loopback, so no session, codec or transport code was even compiled into a
+//! FreeRTOS image, while zenoh-pico's FreeRTOS port runs the whole session.
+//! It now runs the acceptor session e2e the bare-metal Stage 5 deploy runs
+//! (`wz_mcu_session_acceptor::run_acceptor_e2e`): the acceptor handshake to
+//! `Established` against a reactive peer over lwIP loopback, with the cookie
+//! round trip verified, then a post-handshake Frame dispatched to the app
+//! layer. It runs on this profile's three seams — `FreertosClock` (the kernel
+//! tick), `FreertosAllocator` (heap_4) and `FreertosEntropy` (the board's
+//! `xApplicationGetRandomNumber`) — inside the one FreeRTOS task. PASS/FAIL
+//! are semihosted and propagated to the QEMU exit code via `debug::exit`.
 
 #![no_std]
 #![no_main]
@@ -24,40 +30,36 @@
 extern crate alloc;
 
 use core::ffi::{c_char, c_void};
+use core::sync::atomic::{AtomicU32, Ordering};
 
 use cortex_m_rt::entry;
 use cortex_m_semihosting::{debug, hprintln};
 use panic_semihosting as _;
 
-use freertos_sys::{pdPASS, vTaskDelay, vTaskStartScheduler, xTaskCreate, xTaskGetTickCount};
-use wz::link_lwip::{ipv4_addr_loopback, LwipLink, LwipUdpSocket};
-use wz::runtime_coop::{CoopRuntime, CoopTime};
-use wz::runtime_core::{Runtime, TimeSource};
-// R311y28 — the FreeRTOS seams now come through the wz facade's
+use freertos_sys::{pdPASS, vTaskStartScheduler, xTaskCreate, xTaskGetTickCount, BaseType_t};
+// R311y28 — the FreeRTOS seams come through the wz facade's
 // `platform-freertos` gate (`wz::runtime_freertos`), not a direct
 // wz-runtime-freertos dep: this demo is the consumer that proves the gate.
-use wz::runtime_freertos::{FreertosAllocator, FreertosClock};
+use wz::runtime_freertos::{FreertosAllocator, FreertosClock, FreertosEntropy};
+use wz_mcu_session_acceptor::{run_acceptor_e2e, AcceptorE2eOutcome, DataMode};
 
-/// FreeRTOS heap_4 backs every Rust allocation (the executor + the lwIP socket
-/// Inner). Sized by `configTOTAL_HEAP_SIZE` in FreeRTOSConfig.h.
+/// FreeRTOS heap_4 backs every Rust allocation (the executor, the session
+/// bundle, both lwIP sockets). Sized by `configTOTAL_HEAP_SIZE` in
+/// FreeRTOSConfig.h.
 #[global_allocator]
 static ALLOC: FreertosAllocator = FreertosAllocator;
 
 /// `configTICK_RATE_HZ` in FreeRTOSConfig.h — the `FreertosClock` timebase.
 const TICK_HZ: u32 = 1000;
-/// wz task stack in WORDS. Generous: hosts the executor + the lwIP poll path.
+/// wz task stack in WORDS (16 KiB). Hosts the executor, the session FSM
+/// dispatch and the lwIP poll path; `configCHECK_FOR_STACK_OVERFLOW = 2`
+/// reports an overrun through the hook below rather than corrupting silently.
 const WZ_TASK_STACK_WORDS: u16 = 4096;
-/// UDP echo port (matches the bare-metal sibling).
-const ECHO_PORT: u16 = 5555;
-/// Echo payload — identity-checked on receive to prove the full lwIP path.
-const PAYLOAD: &[u8] = b"FreeRTOS lwIP UDP loopback echo";
-/// Poll iterations before declaring no-echo failure (1 tick each ≈ 100 ms).
-const POLL_BUDGET: u32 = 100;
 
 #[entry]
 fn main() -> ! {
-    hprintln!("R311y27: FreeRTOS boot; xTaskCreate(wz) + vTaskStartScheduler");
-    // Create the single application task that hosts the cooperative executor.
+    hprintln!("R2913: FreeRTOS boot; xTaskCreate(wz) + vTaskStartScheduler");
+    // Create the single application task that hosts the session.
     // SAFETY: standard FFI; a null name-array / handle-out is permitted.
     let rc = unsafe {
         xTaskCreate(
@@ -70,67 +72,87 @@ fn main() -> ! {
         )
     };
     if rc != pdPASS {
-        hprintln!("R311y27 FAIL: xTaskCreate rc={}", rc);
+        hprintln!("R2913 FAIL: xTaskCreate rc={}", rc);
         debug::exit(debug::EXIT_FAILURE);
     }
     // Hand control to the scheduler; only returns on idle-task heap exhaustion.
     // SAFETY: the scheduler is not yet running; this is the standard start call.
     unsafe { vTaskStartScheduler() };
-    hprintln!("R311y27 FAIL: vTaskStartScheduler returned (heap?)");
+    hprintln!("R2913 FAIL: vTaskStartScheduler returned (heap?)");
     debug::exit(debug::EXIT_FAILURE);
     #[allow(clippy::empty_loop)]
     loop {}
 }
 
-/// The wz application task: hosts `CoopRuntime<FreertosClock>` (the
-/// wz-runtime-coop executor SSOT) + the lwIP UDP loopback echo, yielding to the
-/// scheduler with `vTaskDelay(1)` between cooperative passes.
+/// The wz application task: the acceptor session e2e on this profile's seams.
 extern "C" fn wz_task(_params: *mut c_void) {
-    let link = LwipLink::init();
-    let runtime = CoopRuntime::new(FreertosClock::<TICK_HZ>);
-    let time = CoopTime::new(&runtime);
-
-    let sock: LwipUdpSocket =
-        LwipUdpSocket::bind(&link, ECHO_PORT).expect("bind UDP socket on ANY:5555");
-    runtime.spawn(echo_task(sock, time));
-
-    // Cooperative loop: drain lwIP's loopback queue + its timer wheel, run the
-    // executor's ready tasks + expired timers, then yield one tick. The
-    // FreeRTOS idle task runs while we sleep; the tick ISR (xPortSysTickHandler)
-    // wakes us. echo_task calls debug::exit on PASS/FAIL, ending the demo.
-    loop {
-        link.poll_loopback();
-        link.check_timeouts();
-        runtime.run_until_idle();
-        // SAFETY: standard FFI; blocks this task for one tick.
-        unsafe { vTaskDelay(1) };
-    }
-}
-
-/// Async echo: send one PAYLOAD to loopback:ECHO_PORT and poll for it back.
-/// Identical shape to the bare-metal sibling; only the `CoopTime` clock param
-/// differs (`FreertosClock` vs the SysTick clock).
-async fn echo_task(mut sock: LwipUdpSocket, time: CoopTime<FreertosClock<TICK_HZ>>) {
-    if let Err(e) = sock.send_to(ipv4_addr_loopback(), ECHO_PORT, PAYLOAD) {
-        hprintln!("R311y27 FAIL: send_to {:?}", e);
-        debug::exit(debug::EXIT_FAILURE);
-    }
-    for _ in 0..POLL_BUDGET {
-        if let Some(dg) = sock.try_recv() {
-            if dg.data.as_slice() == PAYLOAD
-                && dg.src_port == ECHO_PORT
-                && dg.src_addr == ipv4_addr_loopback()
-            {
-                hprintln!("R311y27 PASS");
-                debug::exit(debug::EXIT_SUCCESS);
-            }
-            hprintln!("R311y27 FAIL: echo mismatch");
+    let report = run_acceptor_e2e(
+        FreertosClock::<TICK_HZ>,
+        FreertosEntropy,
+        DataMode::WholeFrame,
+        || {},
+    );
+    match report.outcome {
+        AcceptorE2eOutcome::EstablishedAndDispatched => {
+            hprintln!(
+                "R2913 PASS: FreeRTOS session Established + Frame dispatched \
+                 (advanced_fsm={} cookie_len={} random_draws={})",
+                report.advanced_fsm,
+                report.peer_cookie_len,
+                RANDOM_DRAWS.load(Ordering::Relaxed),
+            );
+            debug::exit(debug::EXIT_SUCCESS);
+        }
+        other => {
+            hprintln!(
+                "R2913 FAIL: {:?} (advanced_fsm={} side_effect={} parse_error={} \
+                 frame_payload={} initack_seen={} cookie_len={} openack_seen={} \
+                 frame_sent={} random_draws={})",
+                other,
+                report.advanced_fsm,
+                report.side_effect,
+                report.parse_error,
+                report.frame_payload,
+                report.peer_initack_seen,
+                report.peer_cookie_len,
+                report.peer_openack_seen,
+                report.peer_frame_sent,
+                RANDOM_DRAWS.load(Ordering::Relaxed),
+            );
             debug::exit(debug::EXIT_FAILURE);
         }
-        time.sleep(1).await;
     }
-    hprintln!("R311y27 FAIL: no echo within budget");
-    debug::exit(debug::EXIT_FAILURE);
+    #[allow(clippy::empty_loop)]
+    loop {}
+}
+
+/// How many 32-bit numbers the board hook handed out. Printed with the
+/// verdict, so a PASS also shows the session drew its secrets through
+/// `FreertosEntropy` rather than around it.
+static RANDOM_DRAWS: AtomicU32 = AtomicU32::new(0);
+/// The hook's generator state (xorshift32; never zero).
+static RANDOM_STATE: AtomicU32 = AtomicU32::new(0x9E37_79B9);
+
+/// The FreeRTOS application random-number hook this board supplies
+/// (`BaseType_t xApplicationGetRandomNumber(uint32_t *)`, the one FreeRTOS+TCP
+/// and zenoh-pico's FreeRTOS port call).
+///
+/// ⚠ QEMU mps2-an385 has NO entropy hardware, so this board's hook is a FIXTURE:
+/// an xorshift32 over a boot constant, predictable to anyone who reads this
+/// file. It exercises the seam; it does not satisfy the entropy contract, and a
+/// real board replaces this function with its TRNG (or its network stack's
+/// random source), not the profile code above.
+#[unsafe(no_mangle)]
+pub extern "C" fn xApplicationGetRandomNumber(pul_number: *mut u32) -> BaseType_t {
+    let mut x = RANDOM_STATE.load(Ordering::Relaxed);
+    x ^= x << 13;
+    x ^= x >> 17;
+    x ^= x << 5;
+    RANDOM_STATE.store(x, Ordering::Relaxed);
+    RANDOM_DRAWS.fetch_add(1, Ordering::Relaxed);
+    // SAFETY: the caller (`FreertosEntropy`) passes a pointer to a live u32.
+    unsafe { *pul_number = x };
+    1 // pdTRUE
 }
 
 /// lwIP NO_SYS=1 `sys_now()` — milliseconds since boot, from the FreeRTOS tick
@@ -144,16 +166,16 @@ pub extern "C" fn sys_now() -> u32 {
     ticks / (TICK_HZ / 1000)
 }
 
-/// FreeRTOS `configCHECK_FOR_STACK_OVERFLOW = 2` hook — bring-up diagnostic.
+/// FreeRTOS `configCHECK_FOR_STACK_OVERFLOW = 2` hook.
 #[unsafe(no_mangle)]
 pub extern "C" fn vApplicationStackOverflowHook(_task: *mut c_void, _name: *mut c_char) {
-    hprintln!("R311y27 FAIL: stack overflow");
+    hprintln!("R2913 FAIL: stack overflow");
     debug::exit(debug::EXIT_FAILURE);
 }
 
 /// FreeRTOS `configUSE_MALLOC_FAILED_HOOK = 1` hook — heap_4 exhaustion.
 #[unsafe(no_mangle)]
 pub extern "C" fn vApplicationMallocFailedHook() {
-    hprintln!("R311y27 FAIL: malloc failed (heap_4 exhausted)");
+    hprintln!("R2913 FAIL: malloc failed (heap_4 exhausted)");
     debug::exit(debug::EXIT_FAILURE);
 }

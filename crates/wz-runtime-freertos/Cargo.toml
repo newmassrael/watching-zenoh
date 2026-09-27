@@ -32,6 +32,10 @@ freertos-sys = { path = "../freertos-sys" }
 # The cooperative executor SSOT (CoopRuntime + ClockSource), with its task pool
 # (alloc feature) — the FreeRTOS profile reuses it, parameterised by the clock.
 wz-runtime-coop = { path = "../wz-runtime-coop", features = ["alloc"] }
+# R2913 — only for the `EntropySource` trait `FreertosEntropy` implements. Its
+# `entropy` module is unconditional, `no_std` and alloc-free, so no feature is
+# asked of the core.
+wz-session-core = { path = "../wz-session-core", default-features = false }
 
 [lints]
 workspace = true

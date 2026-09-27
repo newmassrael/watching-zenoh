@@ -45,7 +45,9 @@ use embedded_alloc::LlffHeap as Heap;
 use panic_semihosting as _;
 use wz_mcu_clock::SystickClock;
 
-use wz_mcu_session_acceptor::{run_acceptor_e2e, AcceptorE2eOutcome, ClockSource, DataMode};
+use wz_mcu_session_acceptor::{
+    run_acceptor_e2e, AcceptorE2eOutcome, ClockSource, DataMode, FixtureEntropy,
+};
 
 // Heap sizing fork per target SRAM budget. The mps2 family (M3/M4/M7) has
 // 4 MB SRAM, so a generous 256 KB heap holds the alloc-backed session stack
@@ -132,7 +134,10 @@ fn main() -> ! {
 
     // No-op fragment hook: the on-target clock is the real SysTick (never
     // artificially advanced); the advancing-clock seam is host-test-only.
-    let report = run_acceptor_e2e(SystickClockRef, DATA_MODE, || {});
+    // R2913 — this bare-metal board (QEMU mps2 / microbit) has no TRNG wired
+    // into the image, so it says so by passing the named fixture; a board with
+    // one passes its own `EntropySource` here.
+    let report = run_acceptor_e2e(SystickClockRef, FixtureEntropy, DATA_MODE, || {});
     // Read before anything else runs, so printing the verdict is not part of
     // what it measures.
     let verdict = stack.verdict();
