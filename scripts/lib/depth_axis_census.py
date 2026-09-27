@@ -2238,7 +2238,12 @@ PIN_NO_SYMBOL = 2
 # of its citations leave the census with it: 52 - 20 = 32, ATTRIBUTED by the
 # per-atom `citation_audit` and READ off the census's own FAIL line, `wz
 # citations: 32 against a pin of 47`, PIN_AMBIGUOUS holding.
-PIN_WZ_CITATIONS = 32
+#
+# R2906 — 32 -> 35, one atom. `routing-routes`' CORRECTION cites the three wz
+# anchors of the relay-QoS build (`QueryReturn`, `relay_response`,
+# `set_response_qos`), and it is still PARTIAL, so they enter the census. READ
+# off the census's own FAIL line, `wz citations: 35 against a pin of 32`.
+PIN_WZ_CITATIONS = 35
 # R2626 — 44 -> 42, and this one is worth a sentence because it HELD through
 # every earlier retirement in this run (R2612, R2622). `time-hlc`'s reason is the
 # first retiree carrying AMBIGUOUS citations of its own: its oldest clauses cite

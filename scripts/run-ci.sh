@@ -5848,9 +5848,13 @@ layer_c1ay_cargo_test_router_hat() {
     # (`a_topology_reflood_returns_the_new_node_to_its_source`). The first arm
     # was run by its own command and printed 160; the full sweep was stopped at
     # the owner's rule that broad batches go to hosted CI, which grades the rest.
-    _runci_guarded_test "C1AY router_forward 160" 160 \
+    # R2906 — ALL EIGHT arms +1 for one UNGATED witness
+    # (`a_relayed_reply_and_final_carry_the_querys_qos_not_the_answerers`). Read
+    # off `guarded_count_gate.py --range origin/main..872994be`, which reported
+    # these eight red by exactly one each.
+    _runci_guarded_test "C1AY router_forward 161" 161 \
         cargo test -p wz-runtime-tokio --features routing-router-hat --lib router_forward --quiet || return 1
-    _runci_guarded_test "C1AY router_forward 162" 162 \
+    _runci_guarded_test "C1AY router_forward 163" 163 \
         cargo test -p wz-runtime-tokio --features routing-router-hat,transport-qos --lib router_forward --quiet || return 1
     # R2734 — THE EIGHTH ARM, and it exists because the seven above cannot see
     # this round's third test. `a_group_query_reaches_a_client_hosted_queryable`
@@ -5859,7 +5863,7 @@ layer_c1ay_cargo_test_router_hat() {
     # resolves to `FaceForwarder`'s no-op default. No arm here pulled the atom's
     # own feature, so the witness would have existed while no lane ran it --
     # "a test exists" and "a lane runs it" being different facts.
-    _runci_guarded_test "C1AY router_forward mcast-faces 179" 179 \
+    _runci_guarded_test "C1AY router_forward mcast-faces 180" 180 \
         cargo test -p wz-runtime-tokio --features routing-router-hat,router-multicast-faces --lib router_forward --quiet || return 1
     # R2346 — 140 -> 141, and ONLY this arm moves: the added test is
     # `#[cfg(feature = "access-acl")]`, so the five sibling resolutions that do
@@ -5880,7 +5884,7 @@ layer_c1ay_cargo_test_router_hat() {
     # unattributable message, which would strand a face that has merely not
     # finished its handshake. Still `#[cfg(feature = "access-acl")]`, so the
     # five sibling resolutions are unchanged for R2346's reason.
-    _runci_guarded_test "C1AY router_forward 165" 165 \
+    _runci_guarded_test "C1AY router_forward 166" 166 \
         cargo test -p wz-runtime-tokio --features routing-router-hat,access-acl --lib router_forward --quiet || return 1
     # R2348 — a NEW arm, and it exists because without it this round's central
     # tests would have been compiled out while the lane stayed green. The router
@@ -5898,7 +5902,7 @@ layer_c1ay_cargo_test_router_hat() {
     # before the cache is consulted (the same vacuity that made R311y508's first
     # cross-impl leg prove nothing), so a cache test with no policy installed
     # tests nothing.
-    _runci_guarded_test "C1AY router_forward hotreload 168" 168 \
+    _runci_guarded_test "C1AY router_forward hotreload 169" 169 \
         cargo test -p wz-runtime-tokio --features routing-router-hat,routing-interceptor-hotreload,access-acl --lib router_forward --quiet || return 1
     # R311y464 — 171 -> 173: y463 added token_current_future_interest_replies_with_a
     # _client_token and token_current_future_interest_matches_a_wildcard_target, both
@@ -5908,13 +5912,13 @@ layer_c1ay_cargo_test_router_hat() {
     # added three token-plane filter witnesses, all cfg(routing-token-tables).
     # Read off `guarded_count_gate.py --range 515c085f..09b18118`, which reported
     # this arm red and the other twenty-seven it reached OK.
-    _runci_guarded_test "C1AY router_forward 201" 201 \
+    _runci_guarded_test "C1AY router_forward 202" 202 \
         cargo test -p wz-runtime-tokio --features routing-router-hat,routing-token-tables --lib router_forward --quiet || return 1
     # R2415 — 146 -> 140. NOT this round's tests: `d7cd078f` re-gated the mcast
     # egress plane from `transport-multicast` onto `router-multicast-faces`, so six
     # tests that ran in this broad-feature lane now need the atom and no longer
     # appear here. The number moves because the plane correctly is not there.
-    _runci_guarded_test "C1AY router_forward 160" 160 \
+    _runci_guarded_test "C1AY router_forward 161" 161 \
         cargo test -p wz-runtime-tokio --features routing-router-hat,transport-multicast --lib router_forward --quiet || return 1
     # R2636 — 143 -> 144, and ONLY this arm of the seven moves. The added test
     # renders the router's `sessions[]` table and is `#[cfg(feature =
@@ -5927,7 +5931,7 @@ layer_c1ay_cargo_test_router_hat() {
     # command itself, after that round's full sweep STALLED with an empty log on a
     # machine at load 37 — so the one guard predicted to move and the one predicted
     # NOT to (`C1AM adminspace`, still 33) were each run directly instead.
-    _runci_guarded_test "C1AY router_forward 162" 162 \
+    _runci_guarded_test "C1AY router_forward 163" 163 \
         cargo test -p wz-runtime-tokio --features routing-router-hat,adminspace-router-linkstate --lib router_forward --quiet || return 1
     # R311y786 (§5.21 router-connect-reconcile) — the re-dial BACKOFF. Until y786
     # the loop slept a `const RECONNECT_BACKOFF_MS = 1000`, so an unreachable
@@ -8150,9 +8154,12 @@ layer_c1x_cargo_test_routing_routes() {
     # as a filter, the All control, the immediate final on an emptied filter,
     # the source-face exclusion, the deterministic tiebreak, and the one-final
     # rule on a narrowed route). Again +10 on BOTH arms.
-    _runci_guarded_test "C1X routing_forward 61" 61 \
-        cargo test -p wz-runtime-tokio --features routing-routes --lib routing_forward --quiet || return 1
+    # R2906: 61/62 -> 62/63, one ungated witness on BOTH arms
+    # (`a_relayed_reply_carries_the_querys_qos_not_the_answerers`), read off
+    # `guarded_count_gate.py --range origin/main..872994be`.
     _runci_guarded_test "C1X routing_forward 62" 62 \
+        cargo test -p wz-runtime-tokio --features routing-routes --lib routing_forward --quiet || return 1
+    _runci_guarded_test "C1X routing_forward 63" 63 \
         cargo test -p wz-runtime-tokio --features routing-routes,transport-qos --lib routing_forward --quiet || return 1
     (cd crates \
         && cargo clippy -p wz-session-core --features routing-routes --quiet -- -D warnings \
@@ -8264,7 +8271,11 @@ layer_c1y_cargo_test_routing_peer() {
     # broker tests need `routing-interest-pending-gc`, which none of the three
     # arms carries. Pushed unpinned in R2901-R2902 (hosted C1y red on
     # 36287043784 / 36287710413); read off `guarded_count_gate.py --range`.
-    _runci_guarded_test "C1y linkstate" 215 \
+    # R2906 — all three arms +1 for one ungated witness
+    # (`a_relayed_reply_and_final_carry_the_querys_qos_not_the_answerers`);
+    # the renamed pending-table test moves no count. Read off
+    # `guarded_count_gate.py --range origin/main..872994be`.
+    _runci_guarded_test "C1y linkstate" 216 \
         cargo test -p wz-runtime-tokio --features routing-peer --lib linkstate --quiet || return 1
     # R311y513 — the BARE routing peer, and the pin that would have caught the
     # defect this round fixed. Every arm above passes `--features routing-peer`
@@ -8280,7 +8291,7 @@ layer_c1y_cargo_test_routing_peer() {
     # R2614 202 -> 203: the unrestricted-interest witness is ungated, so it lands
     # here exactly as the sibling comment above predicts.
     # R2904 205 -> 211, the six above.
-    _runci_guarded_test "C1y linkstate bare" 211 \
+    _runci_guarded_test "C1y linkstate bare" 212 \
         cargo test -p wz-runtime-tokio --no-default-features --features routing-peer \
         --lib linkstate --quiet || return 1
     # R311y451 — 10 -> 16: the six low-pass fidelity tests (attachment in the
@@ -8409,7 +8420,7 @@ layer_c1y_cargo_test_routing_peer() {
     # be reporting that the access subset changes what a Del origination test
     # sees, which it does not.
     # R2904 220 -> 226, the same six.
-    _runci_guarded_test "C1y linkstate+access" 226 \
+    _runci_guarded_test "C1y linkstate+access" 227 \
         cargo test -p wz-runtime-tokio --features "$access" --lib linkstate --quiet || return 1
     # R2567 — the three usrpwd counts move together because ONE structure landed
     # under them: the shared credential store that closed `access-extauth-usrpwd`.
