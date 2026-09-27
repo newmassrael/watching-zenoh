@@ -1173,7 +1173,12 @@ CITATION = re.compile(r"\b((?:[A-Za-z0-9_.-]+/)*[A-Za-z0-9_.-]+\.(?:rs|c|h))(?::
 # collision props up other atoms' reach), and the atom must not be graded on
 # this reach. READ off the census's own FAIL lines, `reached: 7 against a pin
 # of 6` and `unreached: 0 against a pin of 1`.
-PIN_REACHED = 7
+# R2918 — REACHED 7 -> 6. `platform-zephyr` leaves PARTIAL for COMPLETE (its
+# RNG and epoch seams built, with crate tests that name `ZephyrClock`,
+# `ZephyrEntropy` and `ZephyrEpoch` -- a reach that is real, where R2916's was a
+# name collision). UNREACHED and NO_SYMBOL hold at 0 and 2. READ off the
+# census's own FAIL line, `reached: 6 against a pin of 7`.
+PIN_REACHED = 6
 PIN_UNREACHED = 0
 PIN_NO_SYMBOL = 2
 # R2534 — 346 -> 347. The atom is `adminspace-metrics` and the citation is the
@@ -2272,7 +2277,11 @@ PIN_NO_SYMBOL = 2
 # R2914 — 23 -> 21, one atom. `platform-freertos` left PARTIAL (COMPLETE: its
 # epoch residual built R2914), and its wz citations leave the census with it.
 # READ off the census's own FAIL line, `wz citations: 21 against a pin of 23`.
-PIN_WZ_CITATIONS = 21
+#
+# R2918 — 21 -> 19, one atom. `platform-zephyr` left PARTIAL (COMPLETE), and
+# its wz citations leave the census with it. READ off the census's own FAIL
+# line, `wz citations: 19 against a pin of 21`.
+PIN_WZ_CITATIONS = 19
 # R2626 — 44 -> 42, and this one is worth a sentence because it HELD through
 # every earlier retirement in this run (R2612, R2622). `time-hlc`'s reason is the
 # first retiree carrying AMBIGUOUS citations of its own: its oldest clauses cite
@@ -2334,7 +2343,10 @@ PIN_WZ_CITATIONS = 21
 # ambiguous citations -- its R311y28 clauses cite `main.rs` and `lib.rs` by
 # bare name. READ off
 # the census's own FAIL line, `ambiguous citations: 10 against a pin of 12`.
-PIN_AMBIGUOUS = 10
+# R2918 -- 10 -> 9. `platform-zephyr` departs (COMPLETE) carrying ONE ambiguous
+# citation -- its R311y32 clauses cite `lib.rs` by bare name. READ off the
+# census's own FAIL line, `ambiguous citations: 9 against a pin of 10`.
+PIN_AMBIGUOUS = 9
 
 
 class Fatal(Exception):
