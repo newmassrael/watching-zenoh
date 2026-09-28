@@ -93,6 +93,10 @@ enum PendingReply {
         /// because a reply is flushed after the callback returns and the
         /// caller's `z_moved_source_info_t` is consumed at CALL time.
         source_info: Option<wz_runtime_tokio::sample::SourceInfo>,
+        /// R2947 — `z_query_reply_options_t::is_express`, `None` when the
+        /// caller passed no options (the reply then inherits the query's QoS
+        /// whole, R2594). See [`flush_one`] for how it is applied.
+        express: Option<bool>,
     },
     /// `z_query_reply_del` — a Del-form reply, R311y565.
     ///
@@ -106,6 +110,8 @@ enum PendingReply {
         attachment: Option<Vec<u8>>,
         timestamp: Option<wz_runtime_tokio::sample::TimestampHint>,
         source_info: Option<wz_runtime_tokio::sample::SourceInfo>,
+        /// R2947 — `z_query_reply_del_options_t::is_express`, as on the Put arm.
+        express: Option<bool>,
     },
     /// `z_query_reply_err` — an ERROR-form reply, R311y568.
     ///
@@ -156,7 +162,7 @@ impl DeferredResponder {
                 &mut replies,
             );
             let mut out: &mut dyn ReplyOut = &mut responder;
-            flush_one(&mut out, reply);
+            flush_one(&mut out, reply, self.qos);
         }
         for reply in replies.drain(..) {
             if let Ok(response) = reply.into_response() {
@@ -201,7 +207,19 @@ unsafe fn reply_source_info(
 
 /// Route ONE accumulated reply into a [`ReplyOut`]. Shared by the in-dispatch
 /// flush and the deferred emit so the two cannot answer differently.
-fn flush_one(out: &mut &mut dyn ReplyOut, reply: PendingReply) {
+///
+/// R2947 — `query_qos` is the QoS the reply otherwise inherits (R2594). A reply
+/// whose options named `is_express` overrides ONLY that bit over it, which is
+/// upstream's `reply.express(options.is_express)`
+/// (`zenoh-c/src/queryable.rs` @ `reply = reply.express(options.is_express);`);
+/// upstream applies neither the options' congestion control nor their
+/// priority to a reply, so neither is applied here.
+fn flush_one(
+    out: &mut &mut dyn ReplyOut,
+    reply: PendingReply,
+    query_qos: wz_runtime_tokio::sample::QosLevel,
+) {
+    let express_over = |express: Option<bool>| express.map(|e| query_qos.with_express(e));
     match reply {
         // R311y563 — ONE seam carries all four arms now
         // ([`wz_runtime_tokio::query_sink::ReplyMeta`], added the same round for
@@ -217,6 +235,7 @@ fn flush_one(out: &mut &mut dyn ReplyOut, reply: PendingReply) {
             attachment,
             timestamp,
             source_info,
+            express,
         } => admitted_at_the_abi(
             out.reply_keyed_meta(
                 &keyexpr,
@@ -225,7 +244,8 @@ fn flush_one(out: &mut &mut dyn ReplyOut, reply: PendingReply) {
                     .with_encoding(encoding.as_ref())
                     .with_timestamp(timestamp.as_ref())
                     .with_source_info(source_info.as_ref())
-                    .with_attachment(attachment.as_deref()),
+                    .with_attachment(attachment.as_deref())
+                    .with_qos(express_over(express)),
             ),
         ),
         // The SAME `ReplyMeta` seam, minus the payload and the encoding — so a
@@ -236,13 +256,15 @@ fn flush_one(out: &mut &mut dyn ReplyOut, reply: PendingReply) {
             attachment,
             timestamp,
             source_info,
+            express,
         } => admitted_at_the_abi(
             out.reply_keyed_del_meta(
                 &keyexpr,
                 ReplyMeta::new()
                     .with_timestamp(timestamp.as_ref())
                     .with_source_info(source_info.as_ref())
-                    .with_attachment(attachment.as_deref()),
+                    .with_attachment(attachment.as_deref())
+                    .with_qos(express_over(express)),
             ),
         ),
         // R311y568 — the ERROR arm. A separate seam method rather than a
@@ -551,8 +573,9 @@ impl QueryMarshal {
 
     /// Flush the accumulated replies into the dispatch's [`ReplyOut`].
     fn flush(&mut self, mut out: &mut dyn ReplyOut) {
+        let qos = self.qos;
         for reply in self.replies.get_mut().drain(..) {
-            flush_one(&mut out, reply);
+            flush_one(&mut out, reply, qos);
         }
     }
 
@@ -1250,11 +1273,14 @@ pub struct z_query_reply_options_t {
     /// from. Typed rather than `*mut c_void` now that the field is used; the
     /// layout is unchanged, a pointer being a pointer.
     pub encoding: *mut crate::abi::z_moved_encoding_t,
-    /// Congestion control. Accepted and ignored.
+    /// Congestion control. Accepted and ignored — deprecated upstream ("Reply
+    /// congestion control is not supported anymore"), which applies none.
     pub congestion_control: c_int,
-    /// Priority. Accepted and ignored.
+    /// Priority. Accepted and ignored — upstream marks it deprecated ("Reply
+    /// priority is not supported anymore") and does not apply it.
     pub priority: c_int,
-    /// Express flag. Accepted and ignored.
+    /// Express flag. R2947 — HONOURED over the query's inherited QoS, as
+    /// upstream's `reply.express(options.is_express)` is.
     pub is_express: bool,
     /// Explicit timestamp. R311y563 — READ. It was "accepted and ignored" on
     /// the reasoning that the type did not exist here; `z_timestamp_t` landed
@@ -1357,6 +1383,10 @@ pub unsafe extern "C" fn z_query_reply(
         if !reply_keyexpr_is_covered(&marshal.keyexpr, ke, marshal.anyke) {
             return Z_EINVAL;
         }
+        // R2947 — `is_express`, read only when options were given, as upstream
+        // applies it only inside its `if let Some(options)`.
+        // SAFETY: the caller's contract — null or a valid options struct.
+        let express = (!options.is_null()).then(|| unsafe { (*options).is_express });
         marshal.push_reply(PendingReply::Put {
             keyexpr: ke.to_owned(),
             payload,
@@ -1364,6 +1394,7 @@ pub unsafe extern "C" fn z_query_reply(
             attachment,
             timestamp,
             source_info,
+            express,
         });
         Z_OK
     })
@@ -1380,11 +1411,13 @@ pub unsafe extern "C" fn z_query_reply(
 /// has — see [`PendingReply::Del`] for why a Del carries none.
 #[repr(C)]
 pub struct z_query_reply_del_options_t {
-    /// Congestion control. Accepted and ignored, as on the Put reply.
+    /// Congestion control. Accepted and ignored, as on the Put reply (and as
+    /// upstream does).
     pub congestion_control: c_int,
-    /// Priority. Accepted and ignored.
+    /// Priority. Accepted and ignored — deprecated upstream, as on the Put
+    /// reply.
     pub priority: c_int,
-    /// Express flag. Accepted and ignored.
+    /// Express flag. R2947 — HONOURED, as on the Put reply.
     pub is_express: bool,
     /// Explicit timestamp. BORROWED — a concrete struct the caller keeps.
     pub timestamp: *mut crate::timestamp::z_timestamp_t,
@@ -1568,11 +1601,16 @@ pub unsafe extern "C" fn z_query_reply_del(
         if !reply_keyexpr_is_covered(&marshal.keyexpr, ke, marshal.anyke) {
             return Z_EINVAL;
         }
+        // R2947 — `is_express`, read only when options were given, as upstream
+        // applies it only inside its `if let Some(options)`.
+        // SAFETY: the caller's contract — null or a valid options struct.
+        let express = (!options.is_null()).then(|| unsafe { (*options).is_express });
         marshal.push_reply(PendingReply::Del {
             keyexpr: ke.to_owned(),
             attachment,
             timestamp,
             source_info,
+            express,
         });
         Z_OK
     })
@@ -1718,6 +1756,95 @@ pub unsafe extern "C" fn z_query_drop(this_: *mut z_moved_query_t) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A `ReplyOut` that records the per-reply QoS override each keyed reply
+    /// carried, which is the one value `flush_one`'s `is_express` fold feeds.
+    #[derive(Default)]
+    struct QosTap {
+        seen: Vec<Option<wz_runtime_tokio::sample::QosLevel>>,
+    }
+
+    impl ReplyOut for QosTap {
+        fn reply(&mut self, _payload: &[u8]) {}
+        fn reply_del(&mut self) {}
+        fn reply_err(&mut self, _id: Option<u32>, _schema: Option<&str>, _payload: &[u8]) {}
+        fn with_responder(&mut self, _zid: &[u8], _eid: u32) {}
+        fn clear_responder(&mut self) {}
+        fn responder(&self) -> Option<(&[u8], u32)> {
+            None
+        }
+        fn reply_keyed_meta(
+            &mut self,
+            _keyexpr: &str,
+            _payload: &[u8],
+            meta: ReplyMeta<'_>,
+        ) -> Result<(), wz_runtime_tokio::query_sink::ReplyError> {
+            self.seen.push(meta.qos);
+            Ok(())
+        }
+        fn reply_keyed_del_meta(
+            &mut self,
+            _keyexpr: &str,
+            meta: ReplyMeta<'_>,
+        ) -> Result<(), wz_runtime_tokio::query_sink::ReplyError> {
+            self.seen.push(meta.qos);
+            Ok(())
+        }
+    }
+
+    /// R2947 — a reply's `is_express` overrides ONLY the express bit of the
+    /// QoS it inherits from the query; absent options leave the inheritance
+    /// whole (`None`), which is what R2594 made every reply do. Both arms.
+    #[test]
+    fn a_reply_is_express_overrides_only_the_express_bit_it_inherits() {
+        use wz_runtime_tokio::qos::{CongestionControl, Priority};
+        use wz_runtime_tokio::sample::QosLevel;
+        let query_qos = QosLevel::from_parts(Priority::RealTime, CongestionControl::Block, false);
+        let put = |express| PendingReply::Put {
+            keyexpr: "a/b".to_owned(),
+            payload: vec![1],
+            encoding: None,
+            attachment: None,
+            timestamp: None,
+            source_info: None,
+            express,
+        };
+        let del = |express| PendingReply::Del {
+            keyexpr: "a/b".to_owned(),
+            attachment: None,
+            timestamp: None,
+            source_info: None,
+            express,
+        };
+        let mut tap = QosTap::default();
+        {
+            let mut out: &mut dyn ReplyOut = &mut tap;
+            flush_one(&mut out, put(Some(true)), query_qos);
+            flush_one(&mut out, del(Some(true)), query_qos);
+            flush_one(&mut out, put(None), query_qos);
+            flush_one(&mut out, del(Some(false)), query_qos.with_express(true));
+        }
+        let expressed = query_qos.with_express(true);
+        assert_eq!(
+            tap.seen[0],
+            Some(expressed),
+            "Put: express set, rest inherited"
+        );
+        assert_eq!(
+            tap.seen[1],
+            Some(expressed),
+            "Del: express set, rest inherited"
+        );
+        assert_eq!(
+            tap.seen[2], None,
+            "no options: the query's QoS is inherited whole"
+        );
+        assert_eq!(
+            tap.seen[3],
+            Some(query_qos),
+            "is_express=false clears an express query's bit"
+        );
+    }
 
     /// R311y554 — `allowed_origin` reaches the declaration, on every value,
     /// and `complete` still does. Both are asserted at the ONE seam that reads
