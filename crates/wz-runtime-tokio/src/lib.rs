@@ -1230,7 +1230,12 @@ pub use wz_session_core::link::{LinkEvent, LostCause, RxFrame, TxFrame};
 // either. Each arm is named explicitly instead of relying on the tls->tcp /
 // quic-datagram->quic implications, so a change to those does not silently
 // remove a pipeline's queue.
+//
+// R2929 — and `transport-multicast`: the multicast drive loop writes through a
+// transmit task over these lanes, and that module builds without any link key
+// (the join-only transport subset).
 #[cfg(any(
+    feature = "transport-multicast",
     feature = "transport-link-tcp",
     feature = "transport-link-tls",
     feature = "transport-link-udp",
@@ -2629,14 +2634,36 @@ impl LinkDriver for TcpDriver {
 /// link layer).
 #[cfg(feature = "transport-link-udp")]
 pub struct UdpDriver {
-    socket: Option<UdpSocket>,
+    /// R2929 — shared (`Arc`) so a multicast link's send half can leave the
+    /// driver for a transmit task of its own ([`Self::group_sender`]).
+    socket: Option<std::sync::Arc<UdpSocket>>,
     /// R2850 — the socket every send leaves from, when it is not `socket`.
     /// `Some` only for [`Self::bind_multicast_link`]: upstream's multicast link
     /// reads the group on one socket and writes from another, and a member's
     /// locator is the address it writes from. `None` everywhere else, where
     /// the one socket does both.
-    send_socket: Option<UdpSocket>,
+    send_socket: Option<std::sync::Arc<UdpSocket>>,
     peer: Option<SocketAddr>,
+}
+
+/// R2929 — the send half of a [`UdpDriver`]: the socket its datagrams leave
+/// from and the address they go to. A multicast link hands it to its transmit
+/// task, as upstream's multicast link writes from a TX task of its own while
+/// its RX task reads (`io/zenoh-transport/src/multicast/link.rs` @ `let handle = zenoh_runtime::ZRuntime::TX.spawn(async move {`).
+#[cfg(feature = "transport-link-udp")]
+#[derive(Clone)]
+pub struct UdpGroupSender {
+    socket: std::sync::Arc<UdpSocket>,
+    peer: SocketAddr,
+}
+
+#[cfg(feature = "transport-link-udp")]
+impl UdpGroupSender {
+    /// Write one datagram.
+    pub async fn send(&self, datagram: &[u8]) -> io::Result<()> {
+        self.socket.send_to(datagram, self.peer).await?;
+        Ok(())
+    }
 }
 
 #[cfg(feature = "transport-link-udp")]
@@ -2647,7 +2674,7 @@ impl UdpDriver {
     /// outbound-discovery + scout-driven peer-selection path.
     pub fn from_socket(socket: UdpSocket, peer: SocketAddr) -> Self {
         Self {
-            socket: Some(socket),
+            socket: Some(std::sync::Arc::new(socket)),
             send_socket: None,
             peer: Some(peer),
         }
@@ -2655,11 +2682,25 @@ impl UdpDriver {
 
     /// The socket a datagram leaves from: the send socket when this driver
     /// has one, the one socket otherwise.
-    fn sending_socket(&self) -> io::Result<&UdpSocket> {
+    fn sending_socket(&self) -> io::Result<&std::sync::Arc<UdpSocket>> {
         self.send_socket
             .as_ref()
             .or(self.socket.as_ref())
             .ok_or_else(|| io::Error::new(io::ErrorKind::NotConnected, "no socket"))
+    }
+
+    /// R2929 — this driver's send half: the socket its datagrams leave from and
+    /// the peer they go to, which for a multicast link is the group. Sending
+    /// through it is sending through this driver; closing the driver does not
+    /// close a sender already taken, which ends with its last clone.
+    pub fn group_sender(&self) -> io::Result<UdpGroupSender> {
+        let peer = self
+            .peer
+            .ok_or_else(|| io::Error::new(io::ErrorKind::NotConnected, "no peer address"))?;
+        Ok(UdpGroupSender {
+            socket: self.sending_socket()?.clone(),
+            peer,
+        })
     }
 
     /// R2850 (open-debt item 821) — a multicast LINK in upstream's shape: the
@@ -2844,7 +2885,7 @@ impl UdpDriver {
             crate::link_socket::apply_dscp(&socket, plan.peer(port), dscp)?;
         }
         Ok(Self {
-            socket: Some(socket),
+            socket: Some(std::sync::Arc::new(socket)),
             send_socket: None,
             peer: Some(plan.peer(port)),
         })
@@ -2906,7 +2947,7 @@ impl UdpDriver {
             crate::link_socket::apply_dscp(&socket, plan.peer(port), dscp)?;
         }
         Ok(Self {
-            socket: Some(socket),
+            socket: Some(std::sync::Arc::new(socket)),
             send_socket: None,
             peer: Some(plan.peer(port)),
         })
@@ -2939,7 +2980,7 @@ impl UdpDriver {
     pub async fn bind_reply_unicast(local: std::net::IpAddr) -> io::Result<Self> {
         let socket = UdpSocket::bind(SocketAddr::from((local, 0))).await?;
         Ok(Self {
-            socket: Some(socket),
+            socket: Some(std::sync::Arc::new(socket)),
             send_socket: None,
             peer: None,
         })

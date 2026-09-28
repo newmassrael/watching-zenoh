@@ -169,7 +169,8 @@ struct Lanes {
 }
 
 struct LaneState {
-    lanes: [VecDeque<Vec<u8>>; Priority::NUM],
+    /// Each lane's frames, each with the priority it was sent at.
+    lanes: [VecDeque<(Priority, Vec<u8>)>; Priority::NUM],
     /// Each lane's bound, in bytes.
     capacity: [usize; Priority::NUM],
     /// The bytes one batch holds, the unit a queue size counts in.
@@ -224,7 +225,10 @@ impl LaneState {
     /// Take the next frame, highest priority first, after releasing the one
     /// the writer held. Returns whether room was freed, so the caller wakes
     /// senders waiting for it.
-    fn take_next(&mut self) -> (Option<Vec<u8>>, bool) {
+    ///
+    /// R2929 — the frame comes with the priority it was sent at, which is not
+    /// its lane's when the lanes are one.
+    fn take_next(&mut self) -> (Option<(Priority, Vec<u8>)>, bool) {
         let freed = self.release_in_flight();
         let next = self
             .lanes
@@ -232,9 +236,9 @@ impl LaneState {
             .enumerate()
             .find_map(|(lane, q)| q.pop_front().map(|f| (lane, f)));
         match next {
-            Some((lane, frame)) => {
+            Some((lane, (priority, frame))) => {
                 self.in_flight = Some((lane, frame.len()));
-                (Some(frame), freed)
+                (Some((priority, frame)), freed)
             }
             None => (None, freed),
         }
@@ -313,7 +317,7 @@ impl OutboundTx {
         }
         let lane = st.lane_of(priority);
         st.occupied[lane] += frame.len();
-        st.lanes[lane].push_back(frame);
+        st.lanes[lane].push_back((priority, frame));
         drop(st);
         self.shared.ready.notify_one();
         Ok(())
@@ -474,6 +478,13 @@ impl OutboundRx {
     /// Asking for the next frame is also what says the previous one has been
     /// written: its bytes leave the lane's bound here.
     pub async fn recv(&mut self) -> Option<Vec<u8>> {
+        self.recv_tagged().await.map(|(_, frame)| frame)
+    }
+
+    /// R2929 — [`Self::recv`], with the priority the frame was sent at: a
+    /// writer that reports back what it wrote can say which sender's frame it
+    /// was, even when the lanes are one.
+    pub async fn recv_tagged(&mut self) -> Option<(Priority, Vec<u8>)> {
         loop {
             let notified = self.shared.ready.notified();
             tokio::pin!(notified);
@@ -505,7 +516,7 @@ impl OutboundRx {
         if freed {
             self.shared.room.notify_all();
         }
-        frame
+        frame.map(|(_, frame)| frame)
     }
 
     /// Stop accepting frames; the ones already queued stay to be received.

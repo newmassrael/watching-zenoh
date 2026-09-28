@@ -152,6 +152,15 @@ pub struct MulticastParams {
     /// conduit is elided, so the seam forces `false` and the wire stays the
     /// pico-faithful 2-channel default.
     pub is_qos: bool,
+    /// R2929 — the group link's transmission queue: per-priority sizes and the
+    /// congestion waits. Upstream builds a multicast link's pipeline from the
+    /// same manager configuration a unicast link's comes from
+    /// (`io/zenoh-transport/src/multicast/link.rs` @ `let tpc = TransmissionPipelineConf {`),
+    /// so it is the same type the unicast
+    /// [`SessionInitParams::tx_queue`](crate::session_init_params::SessionInitParams::tx_queue)
+    /// is. A loop with no queue ignores it, as the MCU loop does: zenoh-pico's
+    /// multicast TX writes straight to the socket.
+    pub tx_queue: crate::session_init_params::TxQueueConf,
 }
 
 impl MulticastParams {

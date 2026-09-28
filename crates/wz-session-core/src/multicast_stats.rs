@@ -60,14 +60,29 @@ pub trait MulticastStatsRecorder {
     /// sent it: the count is the link's, not a peer's.
     fn transport_message_received(&self) {}
 
-    /// A network message is about to enter the transport.
+    /// A network message was pushed onto the transport's queue.
+    ///
+    /// R2929 — reported by its tally, taken before the push, and only once the
+    /// push has succeeded: a message that found no room is
+    /// [`Self::network_message_dropped`] instead, as upstream's multicast
+    /// schedule counts one or the other.
     #[cfg(any(
         feature = "codec-push",
         feature = "codec-response",
         feature = "codec-response-final",
         feature = "liveliness-token"
     ))]
-    fn network_message_sent(&self, _item: &crate::multicast_tx::MulticastTxItem) {}
+    fn network_message_sent(&self, _tally: &crate::multicast_tx::MulticastTxTally) {}
+
+    /// R2929 — a network message found no room on the transport's queue within
+    /// its deadline: a congestion drop.
+    #[cfg(any(
+        feature = "codec-push",
+        feature = "codec-response",
+        feature = "codec-response-final",
+        feature = "liveliness-token"
+    ))]
+    fn network_message_dropped(&self, _tally: &crate::multicast_tx::MulticastTxTally) {}
 
     /// The admitted peer `zid` sent `msg`.
     fn network_message_received(&self, _zid: &[u8], _msg: &NetworkMessage) {}
@@ -110,9 +125,21 @@ impl<R: MulticastStatsRecorder> MulticastStatsRecorder for Option<R> {
         feature = "codec-response-final",
         feature = "liveliness-token"
     ))]
-    fn network_message_sent(&self, item: &crate::multicast_tx::MulticastTxItem) {
+    fn network_message_sent(&self, tally: &crate::multicast_tx::MulticastTxTally) {
         if let Some(inner) = self {
-            inner.network_message_sent(item);
+            inner.network_message_sent(tally);
+        }
+    }
+
+    #[cfg(any(
+        feature = "codec-push",
+        feature = "codec-response",
+        feature = "codec-response-final",
+        feature = "liveliness-token"
+    ))]
+    fn network_message_dropped(&self, tally: &crate::multicast_tx::MulticastTxTally) {
+        if let Some(inner) = self {
+            inner.network_message_dropped(tally);
         }
     }
 

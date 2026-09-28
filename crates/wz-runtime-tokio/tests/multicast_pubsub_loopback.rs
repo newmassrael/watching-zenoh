@@ -72,6 +72,7 @@ fn mc_params(zid_byte: u8) -> MulticastParams {
         req_id_res: 0x02,
         batch_size: 2_048,
         is_qos: false,
+        tx_queue: wz_session_core::session_init_params::TxQueueConf::default(),
     }
 }
 

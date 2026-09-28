@@ -124,6 +124,17 @@ impl TxSn {
         *slot = increment(self.mask, sn);
         sn
     }
+
+    /// R2929 — the transport message carrying `sn` on a channel has been
+    /// written: the next one this channel will WRITE is the one after it.
+    pub fn written(&mut self, reliable: bool, sn: u64) {
+        let slot = if reliable {
+            &mut self.next_reliable
+        } else {
+            &mut self.next_best_effort
+        };
+        *slot = increment(self.mask, sn);
+    }
 }
 
 /// R311ke — per-channel unicast RX SN gate state, the zenoh-pico
@@ -349,6 +360,18 @@ impl MulticastTxConduits {
     /// is byte-identical to the pre-QoS single [`TxSn::mint`].
     pub fn mint(&mut self, priority: crate::qos::Priority, reliable: bool) -> u64 {
         self.select_mut(priority).mint(reliable)
+    }
+
+    /// R2929 — the transport message carrying `sn` on the `(priority, reliable)`
+    /// conduit has been WRITTEN ([`TxSn::written`]). A loop whose sends pass
+    /// through a queue keeps a second set of conduits advanced only by this,
+    /// and advertises THAT in its JOIN: a receiver re-seeds its expected SN
+    /// from every JOIN (`MulticastDispatcher::ingest_join_qos`, as zenoh-pico's
+    /// `_z_multicast_handle_join_inner` does), so a JOIN that advertised an SN
+    /// minted but still queued would make the receiver drop that message as
+    /// stale when it arrives.
+    pub fn written(&mut self, priority: crate::qos::Priority, reliable: bool, sn: u64) {
+        self.select_mut(priority).written(reliable, sn);
     }
 
     /// The DEFAULT-priority conduit as a plain [`TxSn`] snapshot — the source of

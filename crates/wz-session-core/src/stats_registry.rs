@@ -1019,6 +1019,31 @@ impl MulticastMetrics {
         observe_payload(&mut self.transport, tx, priority, class);
     }
 
+    /// R2929 — a network message of `class` found no room on the group's
+    /// queue at `priority`: a congestion drop on the group's link, observed as
+    /// the unicast session observes one, and not counted as sent. Upstream's
+    /// multicast schedule takes the same fork
+    /// (`io/zenoh-transport/src/multicast/tx.rs` @ `self.link_stats.tx_observe_congestion(msg);`).
+    /// A class without a message kind has no series to land in.
+    pub fn dropped_network_message(
+        &mut self,
+        priority: Priority,
+        class: &crate::stats::NetworkStatsClass,
+    ) {
+        let Some(kind) = class.kind else {
+            return;
+        };
+        let size = class.payload.map_or(0, |p| p.pl_bytes as u64);
+        self.transport.observe_network_message_dropped_payload(
+            StatsDirection::Tx,
+            priority,
+            kind,
+            Some(self.slot),
+            ReasonLabel::Congestion,
+            size,
+        );
+    }
+
     /// A network message of `class` came in at `priority` from the peer `zid`:
     /// COUNTED in that peer's partition, its payload OBSERVED on the group's.
     /// A message from a peer that has not joined is neither, as upstream

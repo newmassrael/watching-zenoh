@@ -120,7 +120,7 @@ use wz_session_core::driver_loop::IterationEvent;
 // longer names them (it contributes only the `TokioReplyBacking`). The Frame
 // encoders + the egress splitter likewise live in the shared
 // `wz_session_core::multicast_tx` SSOT (R311lx).
-use wz_session_core::link::{LinkEvent, TxFrame};
+use wz_session_core::link::LinkEvent;
 use wz_session_core::multicast_dispatch::MulticastDispatcher;
 use wz_session_core::multicast_join::encode_join;
 // R311mh — the RX dispatch SSOTs: a reassembly build drives the reassembly-aware
@@ -151,8 +151,7 @@ pub use wz_session_core::multicast_tx::MulticastTxItem;
     feature = "codec-response-final",
     feature = "liveliness-token"
 ))]
-use wz_session_core::multicast_tx::multicast_tx_emit;
-use wz_session_core::reliability::Reliability;
+use wz_session_core::multicast_tx::{multicast_tx_push, MulticastTxTally};
 use wz_session_core::session_fsm_multicast::SessionFsmMulticastState;
 use wz_session_core::sn::{self, MulticastTxConduits};
 
@@ -363,9 +362,26 @@ impl MulticastStatsRecorder for MulticastTransportStats {
         feature = "codec-response-final",
         feature = "liveliness-token"
     ))]
-    fn network_message_sent(&self, item: &MulticastTxItem) {
-        let (priority, class) = wz_session_core::multicast_tx::multicast_tx_stats_class(item);
-        self.with(|inner| inner.metrics.sent_network_message(priority, &class));
+    fn network_message_sent(&self, tally: &wz_session_core::multicast_tx::MulticastTxTally) {
+        self.with(|inner| {
+            inner
+                .metrics
+                .sent_network_message(tally.priority(), tally.class())
+        });
+    }
+
+    #[cfg(any(
+        feature = "codec-push",
+        feature = "codec-response",
+        feature = "codec-response-final",
+        feature = "liveliness-token"
+    ))]
+    fn network_message_dropped(&self, tally: &wz_session_core::multicast_tx::MulticastTxTally) {
+        self.with(|inner| {
+            inner
+                .metrics
+                .dropped_network_message(tally.priority(), tally.class())
+        });
     }
 
     /// Classified as the unicast receive seam classifies: by the message's own
@@ -408,6 +424,240 @@ impl MulticastStatsRecorder for MulticastTransportStats {
     }
 }
 
+/// R2929 — a multicast link whose send half can leave it for a transmit task.
+///
+/// Upstream's multicast link reads on its RX task and writes from a TX task of
+/// its own, which drains the link's transmission pipeline
+/// (`io/zenoh-transport/src/multicast/link.rs` @ `let handle = zenoh_runtime::ZRuntime::TX.spawn(async move {`).
+/// The drive loop takes the same shape: it keeps the link for receiving, and
+/// a transmit task writes what the loop queues through this send half. One
+/// task doing both would make a message queued FROM the loop — a reply its own
+/// receive produced — wait for room only that same task can free.
+pub trait MulticastLinkDriver: LinkDriver {
+    /// The send half.
+    type Sender: MulticastDatagramSender;
+
+    /// This link's send half: the address its datagrams leave from and the
+    /// group they go to. An error means the link cannot send, and every
+    /// datagram queued on it is lost, as a failed send always was.
+    fn datagram_sender(&self) -> std::io::Result<Self::Sender>;
+}
+
+/// R2929 — the send half of a [`MulticastLinkDriver`], owned by the transmit
+/// task.
+pub trait MulticastDatagramSender: Send + Sync + 'static {
+    /// Write one datagram to the group.
+    fn send(
+        &self,
+        datagram: &[u8],
+    ) -> impl core::future::Future<Output = std::io::Result<()>> + Send;
+}
+
+#[cfg(feature = "transport-link-udp")]
+impl MulticastLinkDriver for crate::UdpDriver {
+    type Sender = crate::UdpGroupSender;
+
+    fn datagram_sender(&self) -> std::io::Result<crate::UdpGroupSender> {
+        self.group_sender()
+    }
+}
+
+#[cfg(feature = "transport-link-udp")]
+impl MulticastDatagramSender for crate::UdpGroupSender {
+    fn send(
+        &self,
+        datagram: &[u8],
+    ) -> impl core::future::Future<Output = std::io::Result<()>> + Send {
+        crate::UdpGroupSender::send(self, datagram)
+    }
+}
+
+/// R2929 — a group link's transmission side: the per-priority lanes the loop
+/// pushes datagrams onto, and the transmit task that writes them.
+///
+/// The lanes are the unicast writer's ([`crate::writer_queue`]), shaped by the
+/// group's [`TxQueueConf`](wz_session_core::session_init_params::TxQueueConf)
+/// in units of the group batch, one lane when the group runs no QoS. The
+/// transmit task reports each datagram it wrote, and the loop counts them: the
+/// loop holds the stats recorder, which is borrowed and cannot cross into a
+/// task.
+///
+/// The report also says what has reached the WIRE, which the JOIN beacon must
+/// advertise rather than what has been minted. A receiver re-seeds its
+/// expected SN from every JOIN (`MulticastDispatcher::ingest_join_qos`, as
+/// zenoh-pico does), and a JOIN written on the Control lane passes data still
+/// queued behind it; had it advertised the minted SNs, the receiver would drop
+/// that data as stale when it came. So the plane keeps, per sending priority
+/// and in queue order, the SN each queued datagram carries, and moves
+/// [`Self::on_wire`] as the transmit task reports each one written.
+struct MulticastTxPlane {
+    lanes: crate::writer_queue::OutboundTx,
+    /// Each datagram the transmit task is done with: the priority it was sent
+    /// at, and its size when it was written (`None` when the write failed).
+    written: tokio::sync::mpsc::UnboundedReceiver<(wz_session_core::qos::Priority, Option<usize>)>,
+    writer: tokio::task::JoinHandle<()>,
+    /// Per sending priority, in queue order: the `(reliable, sn)` each queued
+    /// datagram carries, `None` for a JOIN or a Close, which carry no SN.
+    queued: [std::collections::VecDeque<Option<(bool, u64)>>; wz_session_core::qos::Priority::NUM],
+    /// The conduits as written: what the JOIN advertises.
+    on_wire: MulticastTxConduits,
+}
+
+impl MulticastTxPlane {
+    /// Shape the lanes for `params` and start the transmit task over
+    /// `driver`'s send half, on the TX subsystem, as upstream starts its
+    /// multicast TX task.
+    fn open<D: MulticastLinkDriver>(
+        driver: &D,
+        params: &wz_session_core::multicast_params::MulticastParams,
+    ) -> Self {
+        let (lanes, mut queued) = crate::writer_queue::outbound_channel();
+        lanes.reshape(
+            params
+                .tx_queue
+                .shape(params.is_qos, usize::from(params.batch_size)),
+        );
+        let sender = match driver.datagram_sender() {
+            Ok(sender) => Some(sender),
+            Err(e) => {
+                log::warn!("multicast link has no send half ({e}); nothing it queues is sent");
+                None
+            }
+        };
+        let (report, written) = tokio::sync::mpsc::unbounded_channel();
+        let writer = crate::runtime_pool::WzRuntime::Tx.spawn(async move {
+            while let Some((priority, datagram)) = queued.recv_tagged().await {
+                // Best-effort, as every multicast send is: a datagram the
+                // socket refuses is not counted and is not retried. It is
+                // still REPORTED, as done with: the loop's record of what each
+                // queued datagram carries is in queue order, and a datagram
+                // left unreported would shift every later report onto the
+                // wrong one.
+                let wrote = match sender.as_ref() {
+                    Some(sender) => sender.send(&datagram).await.is_ok(),
+                    None => false,
+                };
+                let _ = report.send((priority, wrote.then_some(datagram.len())));
+            }
+        });
+        Self {
+            lanes,
+            written,
+            writer,
+            queued: std::array::from_fn(|_| std::collections::VecDeque::new()),
+            on_wire: MulticastTxConduits::new(sn::mask_from_res(params.seq_num_res)),
+        }
+    }
+
+    /// Queue a datagram that carries no SN — a JOIN or a Close — on the
+    /// Control lane, without asking for room: the transmit task writes the
+    /// highest lane first, and upstream's TX task writes its JOIN beside the
+    /// pipeline rather than through it
+    /// (`io/zenoh-transport/src/multicast/link.rs` @ `async fn tx_task(`).
+    fn enqueue_control(&mut self, datagram: Vec<u8>) {
+        let control = wz_session_core::qos::Priority::Control;
+        if self.lanes.send(control, datagram).is_ok() {
+            self.queued[control as usize].push_back(None);
+        }
+    }
+
+    /// Queue a datagram a push produced, remembering the SN it carries.
+    #[cfg(any(
+        feature = "codec-push",
+        feature = "codec-response",
+        feature = "codec-response-final",
+        feature = "liveliness-token"
+    ))]
+    fn enqueue_data(&mut self, datagram: wz_session_core::multicast_tx::MulticastTxDatagram) {
+        let wz_session_core::multicast_tx::MulticastTxDatagram {
+            priority,
+            reliable,
+            sn,
+            bytes,
+        } = datagram;
+        // A closed queue is a finished loop: the datagram is lost with it.
+        if self.lanes.send(priority, bytes).is_ok() {
+            self.queued[priority as usize].push_back(Some((reliable, sn)));
+        }
+    }
+
+    /// Take the transmit task's reports so far: count each datagram as one
+    /// transport message, and move the written conduits past the SN it
+    /// carried. Within one sending priority the lanes are FIFO, so the report
+    /// for a priority names the oldest datagram queued at it.
+    fn record_written<R: MulticastStatsRecorder + ?Sized>(&mut self, stats: &R) {
+        take_written(
+            &mut self.written,
+            &mut self.queued,
+            &mut self.on_wire,
+            stats,
+        );
+    }
+
+    /// End the transmission side: close the lanes to new datagrams, let the
+    /// transmit task write what they hold, and count it. A departing Close
+    /// queued just before is therefore on the wire when the loop returns.
+    async fn finish<R: MulticastStatsRecorder + ?Sized>(self, stats: &R) {
+        let Self {
+            lanes,
+            mut written,
+            writer,
+            mut queued,
+            mut on_wire,
+        } = self;
+        drop(lanes);
+        if let Err(e) = writer.await {
+            log::error!("multicast transmit task did not join cleanly: {e}");
+        }
+        take_written(&mut written, &mut queued, &mut on_wire, stats);
+    }
+}
+
+/// [`MulticastTxPlane::record_written`] over the plane's parts, so the plane
+/// can also take them after its lanes have been closed.
+fn take_written<R: MulticastStatsRecorder + ?Sized>(
+    written: &mut tokio::sync::mpsc::UnboundedReceiver<(
+        wz_session_core::qos::Priority,
+        Option<usize>,
+    )>,
+    queued: &mut [std::collections::VecDeque<Option<(bool, u64)>>;
+             wz_session_core::qos::Priority::NUM],
+    on_wire: &mut MulticastTxConduits,
+    stats: &R,
+) {
+    while let Ok((priority, bytes)) = written.try_recv() {
+        if let Some(bytes) = bytes {
+            stats.datagram_sent(bytes, 1);
+        }
+        // A datagram whose write failed is done with too: its SN will never
+        // arrive, and advertising past it keeps a receiver from expecting it.
+        if let Some(Some((reliable, sn))) = queued[priority as usize].pop_front() {
+            on_wire.written(priority, reliable, sn);
+        }
+    }
+}
+
+/// R2929 — the plane as the queue [`multicast_tx_push`] pushes onto.
+#[cfg(any(
+    feature = "codec-push",
+    feature = "codec-response",
+    feature = "codec-response-final",
+    feature = "liveliness-token"
+))]
+impl wz_session_core::multicast_tx::MulticastTxQueue for MulticastTxPlane {
+    fn wait_for_room(
+        &mut self,
+        priority: wz_session_core::qos::Priority,
+        wait: wz_session_core::link::RoomWait,
+    ) -> wz_session_core::link::RoomAnswer {
+        self.lanes.link_room(priority, wait)
+    }
+
+    fn enqueue(&mut self, datagram: wz_session_core::multicast_tx::MulticastTxDatagram) {
+        self.enqueue_data(datagram);
+    }
+}
+
 /// Drive a multicast session: bring the link up, then own the §3.1 Running
 /// concerns (periodic JOIN emit, RX classify -> dispatch + the A1b data
 /// plane, lease sweep) until the link is lost or `cfg.max_iters` is reached.
@@ -447,7 +697,7 @@ pub async fn drive_multicast_session<D, T, F, const MAX_PEERS: usize>(
     outbound: &mut UnboundedReceiver<MulticastTxItem>,
 ) -> MulticastOutcome
 where
-    D: LinkDriver,
+    D: MulticastLinkDriver,
     T: TimeSource,
     F: FnMut(IterationEvent<'_>),
 {
@@ -501,7 +751,7 @@ pub async fn drive_multicast_session_with_shutdown<D, T, F, const MAX_PEERS: usi
     shutdown: &mut tokio::sync::watch::Receiver<bool>,
 ) -> MulticastOutcome
 where
-    D: LinkDriver,
+    D: MulticastLinkDriver,
     T: TimeSource,
     F: FnMut(IterationEvent<'_>),
 {
@@ -614,7 +864,7 @@ pub async fn drive_multicast_session_with_membership<D, T, F, G, H, R, const MAX
     membership: Option<&McastGroupMembership>,
 ) -> MulticastOutcome
 where
-    D: LinkDriver,
+    D: MulticastLinkDriver,
     T: TimeSource,
     F: FnMut(IterationEvent<'_>),
     G: FnMut(&[Vec<u8>]),
@@ -659,8 +909,56 @@ where
 /// copies of the body: a duplicated select loop is exactly the shape this
 /// module already collapsed once (the `_with_membership` split kept ONE body on
 /// purpose), and a second copy would drift at the first arm anyone touches.
+///
+/// R2929 — the link's transmission side ([`MulticastTxPlane`]) opens before
+/// the loop runs and is finished after it returns, whichever way it returns,
+/// so what the loop queued — a departing Close included — is written before
+/// the outcome is reported.
 #[allow(clippy::too_many_arguments)]
 async fn drive_multicast_session_inner<D, T, F, G, H, R, const MAX_PEERS: usize>(
+    dispatcher: &mut MulticastDispatcher<MAX_PEERS>,
+    cfg: MulticastDriveConfig<'_>,
+    driver: &mut D,
+    clock: &T,
+    on_event: F,
+    outbound: &mut UnboundedReceiver<MulticastTxItem>,
+    on_members: G,
+    on_group_subs: H,
+    shutdown: Option<&mut tokio::sync::watch::Receiver<bool>>,
+    stats: &R,
+    membership: Option<&McastGroupMembership>,
+) -> MulticastOutcome
+where
+    D: MulticastLinkDriver,
+    T: TimeSource,
+    F: FnMut(IterationEvent<'_>),
+    G: FnMut(&[Vec<u8>]),
+    H: FnMut(&[String]),
+    R: MulticastStatsRecorder + Sync + ?Sized,
+{
+    let mut tx = MulticastTxPlane::open(driver, cfg.params);
+    let outcome = drive_multicast_session_running(
+        dispatcher,
+        cfg,
+        driver,
+        clock,
+        on_event,
+        outbound,
+        on_members,
+        on_group_subs,
+        shutdown,
+        stats,
+        membership,
+        &mut tx,
+    )
+    .await;
+    tx.finish(stats).await;
+    outcome
+}
+
+/// The loop itself: receive, beacon, sweep, and queue what goes out on `tx`.
+#[allow(clippy::too_many_arguments)]
+async fn drive_multicast_session_running<D, T, F, G, H, R, const MAX_PEERS: usize>(
     dispatcher: &mut MulticastDispatcher<MAX_PEERS>,
     cfg: MulticastDriveConfig<'_>,
     driver: &mut D,
@@ -695,9 +993,11 @@ async fn drive_multicast_session_inner<D, T, F, G, H, R, const MAX_PEERS: usize>
     // whenever the table changes. `None` on every entry point but the general
     // one.
     membership: Option<&McastGroupMembership>,
+    // R2929 — where everything this loop sends is queued.
+    tx: &mut MulticastTxPlane,
 ) -> MulticastOutcome
 where
-    D: LinkDriver,
+    D: MulticastLinkDriver,
     T: TimeSource,
     F: FnMut(IterationEvent<'_>),
     G: FnMut(&[Vec<u8>]),
@@ -733,22 +1033,18 @@ where
     // Emit the first JOIN beacon immediately, then every join_interval_ms.
     let mut next_join_ms = clock.now_monotonic_ms();
 
-    // The TX mint state (per-channel next SN). The JOIN beacon advertises
-    // the live values; every outbound data frame mints from here.
-    // R311mk — `tx_sn` is mutated only by the TX-emit arm below (gated on the
-    // data-plane body codecs). A JOIN-only multicast build (transport-multicast
-    // with no codec-push/response/response-final/liveliness-token, now reachable
-    // since the transport-unicast decouple) reads it for the beacon
-    // (`encode_join`) but never mints, so `mut` is conditionally unused.
-    #[cfg_attr(
-        not(any(
-            feature = "codec-push",
-            feature = "codec-response",
-            feature = "codec-response-final",
-            feature = "liveliness-token"
-        )),
-        allow(unused_mut)
-    )]
+    // The TX mint state (per-channel next SN); every outbound data frame
+    // mints from here.
+    // R2929 — the JOIN beacon no longer reads it: it advertises the conduits
+    // as WRITTEN (`MulticastTxPlane::on_wire`). So a JOIN-only multicast build
+    // (transport-multicast with no codec-push/response/response-final/
+    // liveliness-token), which never mints, has no mint state at all.
+    #[cfg(any(
+        feature = "codec-push",
+        feature = "codec-response",
+        feature = "codec-response-final",
+        feature = "liveliness-token"
+    ))]
     let mut tx_sn = MulticastTxConduits::new(sn::mask_from_res(params.seq_num_res));
     // R311kn — the loop owns the multicast reassembly Router: per-peer
     // fragment chains keyed by the peer's pool-slot index (zenoh-pico's
@@ -799,16 +1095,17 @@ where
             // SNs (the single-conduit beacon); a qos group additionally carries
             // the per-priority `ext_qos` advertisement (C2). `advertise_default`
             // is the DEFAULT (Data) conduit either way.
-            let dgram = encode_join(params, &tx_sn);
-            let frame = TxFrame { bytes: &dgram };
+            // R2929 — from the conduits as WRITTEN, not as minted: this JOIN
+            // may pass data still queued, and a receiver re-seeds from it
+            // ([`MulticastTxPlane`]).
+            tx.record_written(stats);
+            let dgram = encode_join(params, &tx.on_wire);
             // Best-effort: a failed multicast send is non-fatal (the next
             // cadence retries), so unlike the scout path there is no
             // tx-failed transition to drive.
             // R2848 — one transport message, counted once written, as the
             // pin counts its JOIN after `link.send` returns.
-            if driver.send(&frame, Reliability::BestEffort).await.is_ok() {
-                stats.datagram_sent(dgram.len(), 1);
-            }
+            tx.enqueue_control(dgram);
             next_join_ms = now.saturating_add(params.join_interval_ms);
         }
 
@@ -850,21 +1147,20 @@ where
                             continue;
                         }
                     }
-                    // R2848 — the network message is counted as it enters
-                    // the transport, whatever becomes of its datagrams; each
-                    // datagram, a frame or one fragment of a chain, is one
-                    // transport message and is counted once written.
-                    stats.network_message_sent(&item);
-                    let frames = multicast_tx_emit(item, &mut tx_sn, params);
-                    let reliability = if frames.reliable {
-                        Reliability::Reliable
-                    } else {
-                        Reliability::BestEffort
-                    };
-                    for dgram in frames.datagrams {
-                        let frame = TxFrame { bytes: &dgram };
-                        if driver.send(&frame, reliability).await.is_ok() {
-                            stats.datagram_sent(dgram.len(), 1);
+                    // R2929 — pushed onto the group's lanes: room asked before
+                    // each SN is minted, a congestion drop when none comes
+                    // within the message's deadline. The network message is
+                    // counted as sent only once pushed, and as a congestion
+                    // drop otherwise, as upstream's multicast schedule counts
+                    // it; each datagram is still one transport message,
+                    // counted by the transmit task once written.
+                    let tally = MulticastTxTally::of(&item);
+                    match multicast_tx_push(item, &mut tx_sn, params, &params.tx_queue, &mut *tx) {
+                        wz_session_core::tx_deadline::PushOutcome::Pushed => {
+                            stats.network_message_sent(&tally)
+                        }
+                        wz_session_core::tx_deadline::PushOutcome::Congested => {
+                            stats.network_message_dropped(&tally)
                         }
                     }
                 }
@@ -987,11 +1283,11 @@ where
                 // already leaving could take — the peers fall back to the lease
                 // sweep, which is exactly the pre-round behaviour. So the result
                 // is dropped rather than turned into a different outcome.
+                // R2929 — queued on the Control lane; the transmission side
+                // is finished before the outcome is reported, so the Close is
+                // written first.
                 let dgram = wz_session_core::handshake_encode::encode_multicast_close();
-                let frame = TxFrame { bytes: &dgram };
-                if driver.send(&frame, Reliability::BestEffort).await.is_ok() {
-                    stats.datagram_sent(dgram.len(), 1);
-                }
+                tx.enqueue_control(dgram);
                 // Drive the transition rather than just returning: the peer table
                 // must be cleared on the way out, exactly as the link-loss arm
                 // above does through `notify_link_lost`. Returning the outcome
@@ -1053,6 +1349,8 @@ where
                 last_group_subs = subs;
             }
         }
+        // R2929 — count what the transmit task has written since the last pass.
+        tx.record_written(stats);
         // R2859 (§5.23 `adminspace-core`) — refresh the member view when the
         // peer table moved: an admission or a same-address zid change in the
         // RX arm, a lease evict in the sweep, a departing Close. Compared
@@ -1195,6 +1493,7 @@ fn router_group_params(
         req_id_res: 0x02,
         batch_size: 2_048,
         is_qos: qos,
+        tx_queue: wz_session_core::session_init_params::TxQueueConf::default(),
     }
 }
 
@@ -1962,8 +2261,9 @@ mod tests {
         feature = "liveliness-token"
     ))]
     use wz_session_core::inbound::{parse_inbound, InboundFrame};
-    use wz_session_core::link::{LostCause, RxFrame};
+    use wz_session_core::link::{LostCause, RxFrame, TxFrame};
     use wz_session_core::multicast_dispatch::MulticastConfig;
+    use wz_session_core::reliability::Reliability;
     // `decode_join` is asserted only in the `codec-push`-gated next-SN test and
     // the fragment-TX block (which also requires `codec-push`).
     #[cfg(feature = "codec-push")]
@@ -1997,6 +2297,7 @@ mod tests {
             req_id_res: 0x02,
             batch_size: 2_048,
             is_qos: false,
+            tx_queue: wz_session_core::session_init_params::TxQueueConf::default(),
         }
     }
 
@@ -2023,17 +2324,76 @@ mod tests {
         /// Queued inbound datagrams, each with its source address (the
         /// multicast peer key).
         inbound: VecDeque<(Vec<u8>, SocketAddr)>,
-        sent: Vec<Vec<u8>>,
+        /// R2929 — every datagram written, by the driver or by its send half
+        /// on the loop's transmit task.
+        log: SentLog,
         lost: bool,
+    }
+
+    /// The written datagrams, shared between a [`FakeDriver`] and its send
+    /// half.
+    #[derive(Clone, Default)]
+    struct SentLog {
+        written: std::sync::Arc<std::sync::Mutex<Vec<Vec<u8>>>>,
+        /// R2929 — when set, the send half writes nothing until the gate
+        /// opens: a link whose writes do not complete, so its lanes fill.
+        gate: Option<std::sync::Arc<tokio::sync::Semaphore>>,
+    }
+
+    impl SentLog {
+        /// A log whose send half is held shut until `gate` has permits.
+        fn gated(gate: std::sync::Arc<tokio::sync::Semaphore>) -> Self {
+            Self {
+                written: Default::default(),
+                gate: Some(gate),
+            }
+        }
+
+        fn push(&self, datagram: &[u8]) {
+            self.written
+                .lock()
+                .expect("sent log")
+                .push(datagram.to_vec());
+        }
+    }
+
+    impl MulticastDatagramSender for SentLog {
+        fn send(
+            &self,
+            datagram: &[u8],
+        ) -> impl core::future::Future<Output = std::io::Result<()>> + Send {
+            let log = self.clone();
+            let datagram = datagram.to_vec();
+            async move {
+                if let Some(gate) = &log.gate {
+                    let _open = gate.acquire().await.expect("gate never closes");
+                }
+                log.push(&datagram);
+                Ok(())
+            }
+        }
     }
 
     impl FakeDriver {
         fn with(inbound: impl IntoIterator<Item = (Vec<u8>, SocketAddr)>) -> Self {
             Self {
                 inbound: inbound.into_iter().collect(),
-                sent: Vec::new(),
+                log: SentLog::default(),
                 lost: false,
             }
+        }
+
+        /// What has been written so far, in the order it was written.
+        fn sent(&self) -> Vec<Vec<u8>> {
+            self.log.written.lock().expect("sent log").clone()
+        }
+    }
+
+    impl MulticastLinkDriver for FakeDriver {
+        type Sender = SentLog;
+
+        fn datagram_sender(&self) -> std::io::Result<SentLog> {
+            Ok(self.log.clone())
         }
     }
 
@@ -2046,7 +2406,7 @@ mod tests {
             frame: &TxFrame<'_>,
             _reliability: Reliability,
         ) -> std::io::Result<()> {
-            self.sent.push(frame.bytes.to_vec());
+            self.log.push(frame.bytes);
             Ok(())
         }
         async fn close(&mut self) -> std::io::Result<()> {
@@ -2152,8 +2512,8 @@ mod tests {
         );
         // At least one self JOIN beacon was multicast, MID-framed correctly
         // (the non-default fixture batch advertises S=1, masked out here).
-        assert!(!driver.sent.is_empty(), "expected >= 1 JOIN beacon");
-        assert_eq!(driver.sent[0][0] & 0x1f, wire_const::T_MID_JOIN);
+        assert!(!driver.sent().is_empty(), "expected >= 1 JOIN beacon");
+        assert_eq!(driver.sent()[0][0] & 0x1f, wire_const::T_MID_JOIN);
     }
 
     /// An inbound Close (attributed by source address) evicts the peer.
@@ -2193,7 +2553,7 @@ mod tests {
     async fn drive_loop_returns_link_lost() {
         let mut driver = FakeDriver {
             inbound: VecDeque::new(),
-            sent: Vec::new(),
+            log: SentLog::default(),
             lost: true,
         };
         let mut dispatcher = MulticastDispatcher::<4>::new(MulticastConfig::new(5_000));
@@ -2525,7 +2885,7 @@ mod tests {
         // ONLY thing that can end it early is the stop arm.
         let mut driver = FakeDriver {
             inbound: VecDeque::new(),
-            sent: Vec::new(),
+            log: SentLog::default(),
             lost: false,
         };
         let mut dispatcher = MulticastDispatcher::<4>::new(MulticastConfig::new(5_000));
@@ -2901,10 +3261,10 @@ mod tests {
     /// the discriminator on purpose: the loop also beacons JOINs, so "the
     /// driver sent something" is true on EVERY run and would make the test
     /// below pass without an emit.
-    fn closes_sent(driver: &FakeDriver) -> Vec<&Vec<u8>> {
+    fn closes_sent(driver: &FakeDriver) -> Vec<Vec<u8>> {
         driver
-            .sent
-            .iter()
+            .sent()
+            .into_iter()
             .filter(|dg| dg.first().map(|h| h & 0x1f) == Some(wire_const::T_MID_CLOSE))
             .collect()
     }
@@ -2921,7 +3281,7 @@ mod tests {
     async fn a_graceful_stop_multicasts_a_close_to_the_group() {
         let mut driver = FakeDriver {
             inbound: VecDeque::new(),
-            sent: Vec::new(),
+            log: SentLog::default(),
             lost: false,
         };
         let mut dispatcher = MulticastDispatcher::<4>::new(MulticastConfig::new(5_000));
@@ -2950,7 +3310,7 @@ mod tests {
             closes.len(),
             1,
             "a departing member announces itself exactly once; sent = {:?}",
-            driver.sent,
+            driver.sent(),
         );
         assert_eq!(
             closes[0].as_slice(),
@@ -2967,6 +3327,236 @@ mod tests {
         );
     }
 
+    /// R2929 — a transport's network messages, counted by outcome.
+    #[cfg(feature = "codec-push")]
+    #[derive(Default)]
+    struct OutcomeCount {
+        sent: std::sync::atomic::AtomicUsize,
+        dropped: std::sync::atomic::AtomicUsize,
+    }
+
+    #[cfg(feature = "codec-push")]
+    impl OutcomeCount {
+        fn read(&self) -> (usize, usize) {
+            use std::sync::atomic::Ordering::SeqCst;
+            (self.sent.load(SeqCst), self.dropped.load(SeqCst))
+        }
+    }
+
+    #[cfg(feature = "codec-push")]
+    impl MulticastStatsRecorder for OutcomeCount {
+        fn network_message_sent(&self, _tally: &MulticastTxTally) {
+            self.sent.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        }
+
+        fn network_message_dropped(&self, _tally: &MulticastTxTally) {
+            self.dropped
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+
+    /// R2929 — queue `N` droppable 1000-byte puts through the loop over a link
+    /// whose writes are held shut (`gated`) or not, wait until each has an
+    /// outcome, then open the link so the loop can finish. Returns the sent
+    /// and dropped counts and every datagram written.
+    #[cfg(feature = "codec-push")]
+    async fn push_puts_through_the_loop(gated: bool) -> (usize, usize, Vec<Vec<u8>>) {
+        const N: usize = 16;
+        let gate = std::sync::Arc::new(tokio::sync::Semaphore::new(0));
+        let log = if gated {
+            SentLog::gated(gate.clone())
+        } else {
+            SentLog::default()
+        };
+        let mut driver = FakeDriver {
+            inbound: VecDeque::new(),
+            log: log.clone(),
+            lost: false,
+        };
+        let (items, mut outbound) = tokio::sync::mpsc::unbounded_channel();
+        for i in 0..N {
+            items
+                .send(multicast_put_literal("k", &[i as u8; 1_000]).expect("put"))
+                .expect("loop alive");
+        }
+        drop(items);
+        let count = std::sync::Arc::new(OutcomeCount::default());
+        let recorder = count.clone();
+        let task = tokio::spawn(async move {
+            let mut dispatcher = MulticastDispatcher::<4>::new(MulticastConfig::new(5_000));
+            let clock = TokioTime::new();
+            let mut params = params(&[0xAA, 0xBB, 0xCC, 0xDD]);
+            // One JOIN, then none: the lanes hold the puts and nothing else.
+            params.join_interval_ms = 60_000;
+            // Long enough that a link which is writing always frees room in
+            // time; the first drop on a stalled one raises the lane's mark,
+            // and every later droppable message is dropped without waiting.
+            params.tx_queue.wait_before_drop_us = 200_000;
+            drive_multicast_session_with_membership(
+                &mut dispatcher,
+                MulticastDriveConfig {
+                    params: &params,
+                    tick_ms: 1,
+                    max_iters: Some(N + 4),
+                },
+                &mut driver,
+                &clock,
+                |_| {},
+                &mut outbound,
+                |_: &[Vec<u8>]| {},
+                |_: &[String]| {},
+                None,
+                &*recorder,
+                None,
+            )
+            .await
+        });
+        loop {
+            let (sent, dropped) = count.read();
+            if sent + dropped == N {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+        }
+        gate.add_permits(tokio::sync::Semaphore::MAX_PERMITS / 2);
+        task.await.expect("loop task");
+        let (sent, dropped) = count.read();
+        let written = log.written.lock().expect("sent log").clone();
+        (sent, dropped, written)
+    }
+
+    /// R2929 — a group whose link stops writing fills its lanes, and a
+    /// droppable message that finds no room is a congestion drop: counted as
+    /// dropped, not sent, and holding no sequence number, so the frames that
+    /// did go out are gapless.
+    #[cfg(feature = "codec-push")]
+    #[tokio::test]
+    async fn a_stalled_group_link_drops_what_finds_no_room_and_spends_no_sn() {
+        let (sent, dropped, written) = push_puts_through_the_loop(true).await;
+        assert!(sent > 0, "the lanes took some before they filled");
+        assert!(dropped > 0, "a full lane drops a droppable message");
+        let sns: Vec<u64> = written
+            .iter()
+            .filter_map(|d| match parse_inbound(d) {
+                Ok(InboundFrame::Frame { sn, .. }) => Some(sn),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            sns,
+            (0..sent as u64).collect::<Vec<_>>(),
+            "every pushed message is written, on consecutive SNs"
+        );
+    }
+
+    /// R2929 — a JOIN advertises what has been WRITTEN. A put minted SN 0 and
+    /// then held in the lanes behind a stalled link; the JOINs queued while it
+    /// waits pass it on the Control lane, and a receiver re-seeds from each, so
+    /// every one of them must still advertise 0 — had they advertised the
+    /// minted ring (1), the put would reach the receiver as stale.
+    ///
+    /// A QoS group: its lanes are per priority, which is what lets a JOIN pass
+    /// data. A group without QoS has one lane, first in first out.
+    #[cfg(all(feature = "codec-push", feature = "transport-qos"))]
+    fn data_conduit_advertised(join: &[u8]) -> u64 {
+        // A QoS JOIN's base `next_sn` is a decoy; its SNs ride the `ext_qos`.
+        wz_session_core::multicast_join::decode_join_qos(join)
+            .expect("a QoS group's JOIN carries its per-priority SNs")
+            [wz_session_core::qos::Priority::DEFAULT as usize]
+            .reliable
+    }
+
+    #[cfg(all(feature = "codec-push", feature = "transport-qos"))]
+    #[tokio::test]
+    async fn a_join_passing_queued_data_advertises_what_was_written() {
+        let gate = std::sync::Arc::new(tokio::sync::Semaphore::new(0));
+        let log = SentLog::gated(gate.clone());
+        let mut driver = FakeDriver {
+            inbound: VecDeque::new(),
+            log: log.clone(),
+            lost: false,
+        };
+        let (items, mut outbound) = tokio::sync::mpsc::unbounded_channel();
+        items
+            .send(multicast_put_literal("k", b"v").expect("put"))
+            .expect("loop alive");
+        drop(items);
+        let count = std::sync::Arc::new(OutcomeCount::default());
+        let recorder = count.clone();
+        let task = tokio::spawn(async move {
+            let mut dispatcher = MulticastDispatcher::<4>::new(MulticastConfig::new(5_000));
+            let clock = TokioTime::new();
+            // A JOIN every iteration: several are queued while the put waits.
+            let mut params = params(&[0xAA, 0xBB, 0xCC, 0xDD]);
+            params.is_qos = true;
+            drive_multicast_session_with_membership(
+                &mut dispatcher,
+                MulticastDriveConfig {
+                    params: &params,
+                    tick_ms: 1,
+                    max_iters: Some(40),
+                },
+                &mut driver,
+                &clock,
+                |_| {},
+                &mut outbound,
+                |_: &[Vec<u8>]| {},
+                |_: &[String]| {},
+                None,
+                &*recorder,
+                None,
+            )
+            .await
+        });
+        while count.read().0 == 0 {
+            tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+        }
+        // Let the loop queue more JOINs behind the stalled write.
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        gate.add_permits(tokio::sync::Semaphore::MAX_PERMITS / 2);
+        task.await.expect("loop task");
+
+        let written = log.written.lock().expect("sent log").clone();
+        let frame_at = written
+            .iter()
+            .position(|d| d[0] & 0x1f == wire_const::T_MID_FRAME)
+            .expect("the put is written");
+        let passed: Vec<u64> = written[..frame_at]
+            .iter()
+            .filter(|d| d[0] & 0x1f == wire_const::T_MID_JOIN)
+            .map(|d| data_conduit_advertised(d))
+            .collect();
+        assert!(
+            passed.len() > 1,
+            "JOINs queued after the mint were written ahead of the put: {passed:?}"
+        );
+        assert!(
+            passed.iter().all(|&next| next == 0),
+            "a JOIN written before SN 0 must not advertise past it: {passed:?}"
+        );
+        // Once the put is out, a later JOIN advertises past it.
+        let after: Vec<u64> = written[frame_at..]
+            .iter()
+            .filter(|d| d[0] & 0x1f == wire_const::T_MID_JOIN)
+            .map(|d| data_conduit_advertised(d))
+            .collect();
+        assert!(after.iter().all(|&next| next <= 1), "{after:?}");
+    }
+
+    /// R2929 — the control: the same puts over a link that keeps writing are
+    /// all pushed and none is dropped.
+    #[cfg(feature = "codec-push")]
+    #[tokio::test]
+    async fn a_writing_group_link_pushes_every_message() {
+        let (sent, dropped, written) = push_puts_through_the_loop(false).await;
+        assert_eq!((sent, dropped), (16, 0));
+        let frames = written
+            .iter()
+            .filter(|d| d[0] & 0x1f == wire_const::T_MID_FRAME)
+            .count();
+        assert_eq!(frames, 16);
+    }
+
     /// ANTI-VACUITY. The identical fixture WITHOUT a signal sends no Close at
     /// all -- while still sending JOIN beacons, so the discriminator is proven
     /// to be the Close and not "the driver was used".
@@ -2974,7 +3564,7 @@ mod tests {
     async fn the_same_fixture_without_a_signal_announces_nothing() {
         let mut driver = FakeDriver {
             inbound: VecDeque::new(),
-            sent: Vec::new(),
+            log: SentLog::default(),
             lost: false,
         };
         let mut dispatcher = MulticastDispatcher::<4>::new(MulticastConfig::new(5_000));
@@ -2998,7 +3588,7 @@ mod tests {
         assert_eq!(outcome, MulticastOutcome::IterationLimit);
 
         assert!(
-            !driver.sent.is_empty(),
+            !driver.sent().is_empty(),
             "the fixture must have EXERCISED the send path (JOIN beacons), or \
              the empty Close set below proves nothing",
         );
@@ -3006,7 +3596,7 @@ mod tests {
             closes_sent(&driver).len(),
             0,
             "only a stop announces a departure; sent = {:?}",
-            driver.sent,
+            driver.sent(),
         );
     }
 
@@ -3020,7 +3610,7 @@ mod tests {
     async fn a_lost_link_announces_nothing() {
         let mut driver = FakeDriver {
             inbound: VecDeque::new(),
-            sent: Vec::new(),
+            log: SentLog::default(),
             lost: true,
         };
         let mut dispatcher = MulticastDispatcher::<4>::new(MulticastConfig::new(5_000));
@@ -3360,7 +3950,7 @@ mod tests {
         registry.encode_metrics(&mut doc, MetricsQuery::default());
 
         let group_part = "remote_zid=\"\"";
-        let sent: u64 = driver.sent.iter().map(|d| d.len() as u64).sum();
+        let sent: u64 = driver.sent().iter().map(|d| d.len() as u64).sum();
         // RX: every byte the link read, and one per message the walk decoded.
         assert_eq!(
             sample(&doc, "zenoh_rx_per_transport_bytes_total", &[group_part]),
@@ -3387,7 +3977,7 @@ mod tests {
                 "zenoh_tx_transport_message_per_transport_total",
                 &[group_part]
             ),
-            driver.sent.len() as u64
+            driver.sent().len() as u64
         );
         assert_eq!(
             sample(
@@ -3568,7 +4158,7 @@ mod tests {
         // decode each Frame payload, and tally the reply-chain messages.
         let mut responses = 0usize;
         let mut finals = 0usize;
-        for dg in &driver.sent {
+        for dg in &driver.sent() {
             if let Ok(InboundFrame::Frame { payload, .. }) = parse_inbound(dg) {
                 if let Ok(messages) = parse_frame_payload(&payload) {
                     for m in &messages {
@@ -3665,7 +4255,7 @@ mod tests {
         // The emitted Response carries the ABSOLUTE myns/demo/mc (the relative
         // reply re-prefixed at the egress dequeue).
         let mut responses = 0usize;
-        for dg in &driver.sent {
+        for dg in &driver.sent() {
             if let Ok(InboundFrame::Frame { payload, .. }) = parse_inbound(dg) {
                 if let Ok(messages) = parse_frame_payload(&payload) {
                     for m in &messages {
@@ -3771,7 +4361,7 @@ mod tests {
         // interest_id (9) — the correlation the querier matches on.
         let mut tokens = 0usize;
         let mut finals = 0usize;
-        for dg in &driver.sent {
+        for dg in &driver.sent() {
             if let Ok(InboundFrame::Frame { payload, .. }) = parse_inbound(dg) {
                 if let Ok(messages) = parse_frame_payload(&payload) {
                     for m in &messages {
@@ -3894,9 +4484,9 @@ mod tests {
         // Exactly one data frame went out, on the reliable channel
         // (R flag set — the pico put default), carrying SN 0 and the
         // Push payload.
-        let frames: Vec<&Vec<u8>> = driver
-            .sent
-            .iter()
+        let frames: Vec<Vec<u8>> = driver
+            .sent()
+            .into_iter()
             .filter(|d| d[0] & 0x1f == wire_const::T_MID_FRAME)
             .collect();
         assert_eq!(frames.len(), 1, "one queued publish = one data frame");
@@ -3905,7 +4495,7 @@ mod tests {
             0,
             "multicast_put_literal publishes reliable (pico Z_RELIABILITY_DEFAULT)"
         );
-        let parsed = parse_inbound(frames[0]).expect("frame parses");
+        let parsed = parse_inbound(&frames[0]).expect("frame parses");
         let InboundFrame::Frame { sn, payload, .. } = parsed else {
             panic!("expected Frame");
         };
@@ -3920,12 +4510,12 @@ mod tests {
         // The JOIN beacons emitted AFTER the publish advertise the
         // advanced reliable next_sn (init_rx_seq stays truthful).
         let last_join = driver
-            .sent
-            .iter()
+            .sent()
+            .into_iter()
             .rev()
             .find(|d| d[0] & 0x1f == wire_const::T_MID_JOIN)
             .expect("at least one JOIN beacon");
-        let join = decode_join(last_join).expect("JOIN decodes");
+        let join = decode_join(&last_join).expect("JOIN decodes");
         assert_eq!(join.next_sn_reliable, 1, "publish advanced the ring");
         assert_eq!(join.next_sn_best_effort, 0, "best-effort channel untouched");
     }
@@ -3974,13 +4564,13 @@ mod tests {
         .await;
         assert_eq!(outcome, MulticastOutcome::IterationLimit);
 
-        let frames: Vec<&Vec<u8>> = driver
-            .sent
-            .iter()
+        let frames: Vec<Vec<u8>> = driver
+            .sent()
+            .into_iter()
             .filter(|d| d[0] & 0x1f == wire_const::T_MID_FRAME)
             .collect();
         assert_eq!(frames.len(), 1, "one queued publish = one data frame");
-        let InboundFrame::Frame { payload, .. } = parse_inbound(frames[0]).expect("frame parses")
+        let InboundFrame::Frame { payload, .. } = parse_inbound(&frames[0]).expect("frame parses")
         else {
             panic!("expected Frame");
         };
@@ -4397,14 +4987,14 @@ mod tests {
 
             assert!(
                 !driver
-                    .sent
-                    .iter()
+                    .sent()
+                    .into_iter()
                     .any(|d| d[0] & 0x1f == wire_const::T_MID_FRAME),
                 "an oversize publish must never leave as a whole frame"
             );
-            let frags: Vec<&Vec<u8>> = driver
-                .sent
-                .iter()
+            let frags: Vec<Vec<u8>> = driver
+                .sent()
+                .into_iter()
                 .filter(|d| d[0] & 0x1f == wire_const::T_MID_FRAGMENT)
                 .collect();
             assert!(frags.len() > 1, "200-byte put at batch 64 must fragment");
@@ -4428,12 +5018,12 @@ mod tests {
             // The JOIN beacons emitted AFTER the chain advertise the
             // post-chain next_sn (the chain consumed count SNs total).
             let last_join = driver
-                .sent
-                .iter()
+                .sent()
+                .into_iter()
                 .rev()
                 .find(|d| d[0] & 0x1f == wire_const::T_MID_JOIN)
                 .expect("at least one JOIN beacon");
-            let join = decode_join(last_join).expect("JOIN decodes");
+            let join = decode_join(&last_join).expect("JOIN decodes");
             assert_eq!(
                 join.next_sn_reliable,
                 frags.len() as u64,
@@ -4472,8 +5062,11 @@ mod tests {
             .await;
 
             // Node B ingests A's wire output in emit order.
-            let inbound: Vec<(Vec<u8>, SocketAddr)> =
-                driver_a.sent.iter().map(|d| (d.clone(), src(7))).collect();
+            let inbound: Vec<(Vec<u8>, SocketAddr)> = driver_a
+                .sent()
+                .iter()
+                .map(|d| (d.clone(), src(7)))
+                .collect();
             let budget = inbound.len() + 6;
             let mut driver_b = FakeDriver::with(inbound);
             let mut dispatcher_b = MulticastDispatcher::<4>::new(MulticastConfig::new(5_000));

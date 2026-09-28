@@ -142,6 +142,7 @@ fn wz_mc_params(zid: Vec<u8>, lease_ms: u64) -> MulticastParams {
         req_id_res: PICO_SN_RESOLUTION,
         batch_size: PICO_BATCH_MULTICAST_SIZE,
         is_qos: false,
+        tx_queue: wz_session_core::session_init_params::TxQueueConf::default(),
     }
 }
 

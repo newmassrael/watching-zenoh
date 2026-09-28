@@ -534,3 +534,46 @@ fn closing_a_link_moves_its_counts_to_the_transport() {
         "the gauge's series stays at zero rather than disappearing:\n{doc}"
     );
 }
+
+/// R2929 — a multicast message that found no room on the group's queue is a
+/// congestion drop on the group's link: observed under the dropped-payload
+/// family with the link's protocol, and not counted as a sent message.
+#[test]
+fn a_multicast_congestion_drop_is_observed_and_not_counted_sent() {
+    let put = crate::stats::NetworkStatsClass::net(
+        MessageLabel::Put,
+        crate::stats::StatMessage::Put,
+        StatSpace::User,
+        7,
+    );
+    let mut multicast = MulticastMetrics::new("udp/10.0.0.1:7446", "udp/224.0.0.224:7446");
+    multicast.dropped_network_message(Priority::Data, &put);
+
+    let mut registry = StatsRegistry::new("a1b2", WhatAmI::Peer, "v1");
+    let transport = registry.open_multicast_transport(multicast.group());
+    registry.set_transport_metrics(transport, multicast.transport().clone());
+    let mut doc = String::new();
+    registry.encode_metrics(&mut doc, MetricsQuery::default());
+    let dropped = doc
+        .lines()
+        .find(|l| {
+            l.starts_with("zenoh_tx_network_message_dropped_payload_bytes_count{")
+                && l.contains("reason=\"congestion\"")
+        })
+        .unwrap_or_else(|| panic!("no congestion drop series:\n{doc}"));
+    assert!(dropped.contains("protocol=\"udp\""), "{dropped}");
+    assert!(dropped.ends_with(" 1"), "{dropped}");
+    // Every other tx network-message sample — the count, the per-transport
+    // count, the payload histograms — stays empty.
+    let sent: Vec<&str> = doc
+        .lines()
+        .filter(|l| {
+            l.starts_with("zenoh_tx_network_message")
+                && !l.starts_with("zenoh_tx_network_message_dropped")
+        })
+        .collect();
+    assert!(
+        sent.is_empty(),
+        "a dropped message is not counted sent: {sent:?}"
+    );
+}

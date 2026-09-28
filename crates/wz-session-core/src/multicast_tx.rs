@@ -220,11 +220,27 @@ pub trait MulticastTxQueue {
     /// Wait, within `wait`, for room on `priority`'s lane.
     fn wait_for_room(&mut self, priority: Priority, wait: RoomWait) -> RoomAnswer;
 
-    /// Put one wire datagram on `priority`'s lane. Room was asked first; a
+    /// Put one wire datagram on its conduit's lane. Room was asked first; a
     /// fragment chain's stop marker is the one datagram enqueued without it,
     /// outside the bound, as upstream's ephemeral stop batch is outside its
     /// pool.
-    fn enqueue(&mut self, priority: Priority, datagram: Vec<u8>);
+    fn enqueue(&mut self, datagram: MulticastTxDatagram);
+}
+
+/// R2929 — one datagram a push puts on the queue, with the conduit and the
+/// sequence number it carries: a queue that writes later can say, as it
+/// writes, which SN has reached the wire (`MulticastTxConduits::written`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MulticastTxDatagram {
+    /// The conduit's band: the effective priority the SN was minted on, and
+    /// the lane the datagram takes.
+    pub priority: Priority,
+    /// The conduit's channel.
+    pub reliable: bool,
+    /// The sequence number the datagram carries.
+    pub sn: u64,
+    /// The wire bytes.
+    pub bytes: Vec<u8>,
 }
 
 /// A queue that always has room and keeps what it is given: the pico-faithful
@@ -249,8 +265,8 @@ impl MulticastTxQueue for UnboundedCollect {
         RoomAnswer::at_once(LinkRoom::Free)
     }
 
-    fn enqueue(&mut self, _priority: Priority, datagram: Vec<u8>) {
-        self.0.push(datagram);
+    fn enqueue(&mut self, datagram: MulticastTxDatagram) {
+        self.0.push(datagram.bytes);
     }
 }
 
@@ -576,7 +592,12 @@ fn push_frame<Q: MulticastTxQueue + ?Sized>(
                     let marker =
                         crate::frame_encode::build_fragment_drop_wire(this_sn, reliable, ext_qos);
                     tx_sn.mint(priority, reliable);
-                    queue.enqueue(priority, marker);
+                    queue.enqueue(MulticastTxDatagram {
+                        priority,
+                        reliable,
+                        sn: this_sn,
+                        bytes: marker,
+                    });
                     return PushOutcome::Congested;
                 }
                 tx_sn.mint(priority, reliable);
@@ -586,7 +607,12 @@ fn push_frame<Q: MulticastTxQueue + ?Sized>(
                 // predicate negated, so this arm is unreachable.
                 break;
             };
-            queue.enqueue(priority, fragment);
+            queue.enqueue(MulticastTxDatagram {
+                priority,
+                reliable,
+                sn: this_sn,
+                bytes: fragment,
+            });
             emitted += 1;
             deadline.next_fragment();
         }
@@ -594,7 +620,12 @@ fn push_frame<Q: MulticastTxQueue + ?Sized>(
     }
     #[cfg(not(feature = "transport-fragmentation"))]
     let _ = (ext_qos, mtu);
-    queue.enqueue(priority, frame);
+    queue.enqueue(MulticastTxDatagram {
+        priority,
+        reliable,
+        sn,
+        bytes: frame,
+    });
     PushOutcome::Pushed
 }
 
@@ -677,6 +708,59 @@ pub fn multicast_tx_stats_class(
     }
 }
 
+/// R2929 — what a multicast transport's counts need of a message, taken before
+/// the push consumes it: whether the message is then counted as sent or as a
+/// congestion drop is known only after, and by then the item is on the wire or
+/// gone. Without `transport-stats` there is nothing to count and the tally is
+/// empty.
+#[cfg(any(
+    feature = "codec-push",
+    feature = "codec-response",
+    feature = "codec-response-final",
+    feature = "liveliness-token"
+))]
+pub struct MulticastTxTally {
+    #[cfg(feature = "transport-stats")]
+    priority: Priority,
+    #[cfg(feature = "transport-stats")]
+    class: crate::stats::NetworkStatsClass,
+}
+
+#[cfg(any(
+    feature = "codec-push",
+    feature = "codec-response",
+    feature = "codec-response-final",
+    feature = "liveliness-token"
+))]
+impl MulticastTxTally {
+    /// The tally of `item`, by its own band and class
+    /// (`multicast_tx_stats_class`).
+    pub fn of(item: &MulticastTxItem) -> Self {
+        #[cfg(feature = "transport-stats")]
+        {
+            let (priority, class) = multicast_tx_stats_class(item);
+            Self { priority, class }
+        }
+        #[cfg(not(feature = "transport-stats"))]
+        {
+            let _ = item;
+            Self {}
+        }
+    }
+
+    /// The message's own band.
+    #[cfg(feature = "transport-stats")]
+    pub fn priority(&self) -> Priority {
+        self.priority
+    }
+
+    /// The message's class.
+    #[cfg(feature = "transport-stats")]
+    pub fn class(&self) -> &crate::stats::NetworkStatsClass {
+        &self.class
+    }
+}
+
 // R311y227 — the emit-level witness: `multicast_tx_emit` clamps the band by the
 // group's `is_qos`, selects the per-priority TX conduit, and writes the frame
 // `ext_qos` — the composition the sn.rs (conduit) + frame_encode (wire) unit
@@ -703,6 +787,7 @@ mod qos_emit_tests {
             req_id_res: 0x02,
             batch_size: 2_048,
             is_qos,
+            tx_queue: TxQueueConf::default(),
         }
     }
 
@@ -795,6 +880,7 @@ mod push_tests {
             req_id_res: 0x02,
             batch_size,
             is_qos: false,
+            tx_queue: TxQueueConf::default(),
         }
     }
 
@@ -805,6 +891,8 @@ mod push_tests {
         answers: VecDeque<LinkRoom>,
         asks: Vec<RoomWait>,
         enqueued: Vec<Vec<u8>>,
+        /// The SN each enqueued datagram was declared to carry.
+        sns: Vec<u64>,
     }
 
     impl MulticastTxQueue for Scripted {
@@ -813,8 +901,9 @@ mod push_tests {
             RoomAnswer::at_once(self.answers.pop_front().unwrap_or(LinkRoom::Free))
         }
 
-        fn enqueue(&mut self, _priority: Priority, datagram: Vec<u8>) {
-            self.enqueued.push(datagram);
+        fn enqueue(&mut self, datagram: MulticastTxDatagram) {
+            self.sns.push(datagram.sn);
+            self.enqueued.push(datagram.bytes);
         }
     }
 
@@ -966,6 +1055,9 @@ mod push_tests {
             })
             .collect();
         assert_eq!(sns, [(0, false), (1, false), (2, true)]);
+        // R2929 — each datagram is declared to the queue with the SN it
+        // carries on the wire.
+        assert_eq!(queue.sns, [0, 1, 2]);
         assert_eq!(tx.advertise_default().next_reliable, 3);
         let step = conf.wait_before_drop_us;
         assert_eq!(
