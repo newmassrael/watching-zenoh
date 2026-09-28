@@ -270,26 +270,28 @@ impl FlowContext {
     ///
     /// Compression wraps the BATCH, not a message inside it: the sender
     /// reserves the header byte ahead of the batch's messages and compresses
-    /// everything behind it (`io/zenoh-transport/src/common/batch.rs`,
-    /// `WBatch::finalize` / `compress`), and the receiver reads the header and
-    /// decompresses the whole payload before it decodes one message
-    /// (`RBatch::initialize`). A stream unit is `[length][header][payload]`,
-    /// the length covering both.
+    /// everything behind it, and the receiver reads the header and
+    /// decompresses the whole payload before it decodes one message. A stream
+    /// unit is `[length][header][payload]`, the length covering both.
+    ///
+    /// `io/zenoh-transport/src/common/batch.rs` @ `fn compress(&mut self, support: &mut BBuf)`
+    /// `io/zenoh-transport/src/common/batch.rs` @ `let zslice = self.decompress(p, buff)?;`
     ///
     /// # When, and why per direction
     ///
     /// Each side reconfigures its link for compression once IT has sent its
-    /// `Open` (`unicast/establishment/open.rs` and `accept.rs`, the
-    /// `is_compression: state.link.ext_compression.is_compression()` link
-    /// config), and the acceptor sends its `OpenAck` with compression switched
-    /// off for that one message (`unicast/link.rs`, `send_open_ack`). So the
-    /// two directions start at their own `Open`, which is [`Self::open_seen`]
-    /// — the same per-direction switch lowlatency's width uses, for the same
-    /// reason.
+    /// `Open`, and the acceptor sends its `OpenAck` with compression switched
+    /// off for that one message. So the two directions start at their own
+    /// `Open`, which is [`Self::open_seen`] — the same per-direction switch
+    /// lowlatency's width uses, for the same reason.
+    ///
+    /// `io/zenoh-transport/src/unicast/establishment/open.rs` @ `is_compression: state.link.ext_compression.is_compression(),`
+    /// `io/zenoh-transport/src/unicast/link.rs` @ `pub(crate) async fn send_open_ack(mut self)`
     ///
     /// Not on a lowlatency link: that transport writes each message straight
-    /// to the link with no batch and no header (`unicast/lowlatency/link.rs`,
-    /// `send_with_link`).
+    /// to the link with no batch and no header.
+    ///
+    /// `io/zenoh-transport/src/unicast/lowlatency/link.rs` @ `pub(crate) async fn send_with_link(`
     pub fn batch_header_active(&self, direction: Direction) -> bool {
         self.negotiated()
             && self.compression

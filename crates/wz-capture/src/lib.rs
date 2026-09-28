@@ -6845,8 +6845,9 @@ mod datagram_tests {
     ///
     /// The caller spells the unit, BatchHeader and all, because the header is
     /// the subject: upstream prefixes every batch of a compression-negotiated
-    /// link with it once that side has sent its `Open`
-    /// (`io/zenoh-transport/src/common/batch.rs`, `RBatch::initialize`).
+    /// link with it once that side has sent its `Open`:
+    ///
+    /// `io/zenoh-transport/src/common/batch.rs` @ `let zslice = self.decompress(p, buff)?;`
     pub(crate) fn compressed_session_with_unit(unit: Vec<u8>) -> (Dissection, Vec<u8>) {
         let offer = compression_offer();
         let mut d = Dissection::new();

@@ -3371,9 +3371,11 @@ mod tests {
     ///
     /// Upstream: once a side has sent its `Open`, every batch it sends on a
     /// link that negotiated compression is `[BatchHeader][payload]`, and bit 0
-    /// of the header says whether the WHOLE payload is lz4
-    /// (`io/zenoh-transport/src/common/batch.rs`, `RBatch::initialize`). This
-    /// is the bit-CLEAR arm: the payload is the batch as it would otherwise be,
+    /// of the header says whether the WHOLE payload is lz4:
+    ///
+    /// `io/zenoh-transport/src/common/batch.rs` @ `let zslice = self.decompress(p, buff)?;`
+    ///
+    /// This is the bit-CLEAR arm: the payload is the batch as it would otherwise be,
     /// so the record must be read with no lz4 in the build at all. Reading the
     /// header byte as a transport MID is the failure this names.
     #[cfg(feature = "network-codecs")]
