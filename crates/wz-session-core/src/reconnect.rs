@@ -438,6 +438,20 @@ where
         R::link_driver(&sink).wait_for_room(priority, wait)
     }
 
+    // R2952 — the block-first slot, forwarded on a clone like the room wait
+    // above (the acquire may wait `wait_before_drop`). A swap between acquire
+    // and release lands the release on the new link, whose slot was not taken:
+    // a no-op there, and the old link's slot went with its closed queue.
+    fn block_first_acquire(&self, priority: crate::qos::Priority, wait_us: u64) -> bool {
+        let sink = R::with_mutex_mut(&self.inner, |sink| sink.clone());
+        R::link_driver(&sink).block_first_acquire(priority, wait_us)
+    }
+
+    fn block_first_release(&self, priority: crate::qos::Priority) {
+        let sink = R::with_mutex_mut(&self.inner, |sink| sink.clone());
+        R::link_driver(&sink).block_first_release(priority)
+    }
+
     fn link_mtu(&self) -> usize {
         R::with_mutex_mut(&self.inner, |sink| R::link_driver(sink).link_mtu())
     }
@@ -530,6 +544,17 @@ impl<R: SessionRuntime> BoxedLinkDriver for LocalSwappableLink<R> {
         // `RefCell` borrow conflict.
         let sink = self.inner.borrow().clone();
         R::link_driver(&sink).wait_for_room(priority, wait)
+    }
+
+    // R2952 — the block-first slot, forwarded as in the twin.
+    fn block_first_acquire(&self, priority: crate::qos::Priority, wait_us: u64) -> bool {
+        let sink = self.inner.borrow().clone();
+        R::link_driver(&sink).block_first_acquire(priority, wait_us)
+    }
+
+    fn block_first_release(&self, priority: crate::qos::Priority) {
+        let sink = self.inner.borrow().clone();
+        R::link_driver(&sink).block_first_release(priority)
     }
 
     fn link_mtu(&self) -> usize {

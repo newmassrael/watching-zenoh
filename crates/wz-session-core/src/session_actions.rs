@@ -1739,7 +1739,81 @@ pub struct SessionLinkActions<R: SessionRuntime, T: TimeSource> {
     /// [`SessionCore::links`] under the multilink feature, so the link's F2 gate
     /// / lease stamps are one instance the binding and the send router share.
     pub link: R::Shared<LinkState<R>>,
+    /// R2952 (open-debt item 835) — the runtime's block-first hand-off, if it
+    /// has one. See [`SessionLinkActions::install_block_first_handoff`].
+    pub block_first_handoff: R::Mutex<Option<BlockFirstHandoff>>,
 }
+
+/// R2952 (open-debt item 835) — one block-first message whose slot the core
+/// granted, as it hands it to the runtime to push off the sending thread.
+///
+/// The body is ENCODED here, once, by the same encoder the synchronous send
+/// would have run: the job is owned for the reason upstream owns its message
+/// before `spawn_blocking` (`NetworkMessageExt::to_owned(&msg)`), and carrying
+/// the bytes rather than a typed message keeps ONE chokepoint — the session's
+/// private `dispatch_network_message` — for every kind a session
+/// sends. Opaque to the runtime, which only passes it back to
+/// [`SessionLinkActions::run_block_first_job`].
+///
+/// A build with no dispatch arm sends no network message, so nothing there
+/// builds or reads one.
+#[cfg_attr(
+    not(any(
+        feature = "codec-push",
+        feature = "codec-request",
+        feature = "codec-response",
+        feature = "codec-response-final",
+        feature = "declare-keyexpr",
+        feature = "declare-subscriber",
+        feature = "declare-queryable",
+        feature = "declare-token",
+        feature = "declare-interest",
+        feature = "liveliness-token",
+    )),
+    allow(dead_code)
+)]
+pub struct BlockFirstJob {
+    /// The band the caller dispatched at, before the non-QoS clamp; the
+    /// background push dispatches at it again.
+    priority: Priority,
+    /// The link the slot was taken on is the conduit link of this band (the
+    /// clamped one), so the release goes back to the same link.
+    route: Priority,
+    reliable: bool,
+    /// The message's own `ext_qos`: its congestion control and the priority
+    /// its slot is keyed by.
+    qos: crate::sample::QosLevel,
+    stats_class: crate::stats::NetworkStatsClass,
+    body: alloc::vec::Vec<u8>,
+}
+
+/// R2952 — which pass through [`SessionLinkActions::dispatch_network_message`]
+/// a message is on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg(any(
+    feature = "codec-push",
+    feature = "codec-request",
+    feature = "codec-response",
+    feature = "codec-response-final",
+    feature = "declare-keyexpr",
+    feature = "declare-subscriber",
+    feature = "declare-queryable",
+    feature = "declare-token",
+    feature = "declare-interest",
+    feature = "liveliness-token",
+))]
+enum DispatchStage {
+    /// The caller's own send: observed, and scheduled if it is block-first.
+    Fresh,
+    /// A block-first message's background push: already observed, already
+    /// holding its slot, so it is pushed as it stands.
+    Scheduled,
+}
+
+/// R2952 — the runtime's hand-off: run a [`BlockFirstJob`] off the sending
+/// thread (tokio: `spawn_blocking`, upstream's own seam). `Send + Sync` because
+/// the session it lives in is shared across the runtime's threads.
+pub type BlockFirstHandoff = alloc::boxed::Box<dyn Fn(BlockFirstJob) + Send + Sync>;
 
 /// The per-frame context [`SessionLinkActions::emit_frame_or_fragments`]
 /// needs to decide between one frame and a fragment chain, and to route
@@ -2165,6 +2239,24 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                 #[cfg(feature = "transport-multilink")]
                 multilink_pubkey: R::new_mutex(None),
             }),
+            // R2952 — installed by the runtime's `wrap_actions` when it has one.
+            block_first_handoff: R::new_mutex(None),
+        })
+    }
+
+    /// R2952 — a second binding onto an existing session: `core` shared, `link`
+    /// its own. Built through [`SessionRuntime::wrap_actions`] like the first,
+    /// so the runtime installs its block-first hand-off on EVERY binding (the
+    /// multilink join used to build this struct literally, which would have
+    /// left a joined link sending block-first as blocking).
+    pub fn joined(
+        core: R::Shared<SessionCore<R, T>>,
+        link: R::Shared<LinkState<R>>,
+    ) -> R::ActionsHandle<T> {
+        R::wrap_actions(Self {
+            core,
+            link,
+            block_first_handoff: R::new_mutex(None),
         })
     }
 }
@@ -2502,6 +2594,183 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         #[cfg(not(feature = "transport-multilink"))]
         let _ = (reliability, priority);
         f(&self.link)
+    }
+
+    /// R2952 — a congestion drop, counted: upstream's `tx_n_dropped` is the
+    /// congestion reason's dropped-payload observations
+    /// (`commons/zenoh-stats/src/stats.rs` @ `(Tx, ReasonLabel::Congestion) => {`),
+    /// on the link the message's `(reliability, route)` conduit is routed to
+    /// ([`Self::drop_for_congestion`]). ONE counter for both of upstream's
+    /// congestion refusals — a message its link had no room for, and a
+    /// block-first message whose slot stayed taken — as upstream makes them
+    /// one (`stats.tx_observe_congestion(msg)` on both paths).
+    #[cfg(all(
+        feature = "transport-stats",
+        any(
+            feature = "codec-push",
+            feature = "codec-request",
+            feature = "codec-response",
+            feature = "codec-response-final",
+            feature = "declare-keyexpr",
+            feature = "declare-subscriber",
+            feature = "declare-queryable",
+            feature = "declare-token",
+            feature = "declare-interest",
+            feature = "liveliness-token",
+        )
+    ))]
+    fn count_congestion_drop(
+        &self,
+        reliability: Reliability,
+        route: Priority,
+        message_priority: Priority,
+        class: &crate::stats::NetworkStatsClass,
+    ) {
+        self.stats
+            .inc_tx_drop(crate::stats::StatDrop::Transport, 1, 0);
+        self.with_conduit_link(reliability, route, |link| {
+            self.drop_for_congestion(link, message_priority, class)
+        });
+    }
+
+    /// R2952 (open-debt item 835) — upstream's block-first schedule, the half
+    /// the core owns
+    /// (`io/zenoh-transport/src/unicast/universal/tx.rs` @ `if msg.congestion_control() == CongestionControl::BlockFirst {`).
+    ///
+    /// Called by [`Self::dispatch_network_message`] for a `BlockFirst` message
+    /// once the session has a link to send on. Answers `false` when the caller
+    /// is to send the message NOW: this session has no hand-off (a runtime
+    /// without a second thread, which sends block-first as blocking). Answers
+    /// `true` when the message is taken care of: its slot stayed taken for
+    /// `wait_before_drop`, so it is a congestion drop — upstream's
+    /// `tx_observe_congestion` on that path, the same count a message that
+    /// found no room gets — or its slot was granted and the job was handed to
+    /// the runtime, which pushes it off the caller's thread and then gives the
+    /// slot back ([`Self::run_block_first_job`]).
+    ///
+    /// The slot is the one of the link the message's conduit is routed to,
+    /// keyed by the message's OWN priority (upstream's `msg.priority()`), and
+    /// it waits `wait_before_drop` (`.wait_timeout(self.manager.config.wait_before_drop)`).
+    /// The core decides which link and how long; the link driver does the
+    /// waiting, because the sans-IO core has no primitive that blocks.
+    #[allow(clippy::too_many_arguments)]
+    #[cfg(any(
+        feature = "codec-push",
+        feature = "codec-request",
+        feature = "codec-response",
+        feature = "codec-response-final",
+        feature = "declare-keyexpr",
+        feature = "declare-subscriber",
+        feature = "declare-queryable",
+        feature = "declare-token",
+        feature = "declare-interest",
+        feature = "liveliness-token",
+    ))]
+    fn schedule_block_first<P>(
+        &self,
+        priority: Priority,
+        route: Priority,
+        reliable: bool,
+        qos: crate::sample::QosLevel,
+        worst_case_payload: usize,
+        stats_class: crate::stats::NetworkStatsClass,
+        encode_body: &P,
+    ) -> bool
+    where
+        P: Fn(
+            &mut sce_forge_runtime::codec::VecSink<'_>,
+        ) -> Result<(), sce_forge_runtime::codec::CodecError>,
+    {
+        // Asked BEFORE the slot is taken, so a session with no hand-off never
+        // holds a slot nothing would give back.
+        let installed = R::with_mutex_mut(&self.block_first_handoff, |slot| slot.is_some());
+        if !installed {
+            return false;
+        }
+        let wire_reliability = Reliability::from_reliable_bool(reliable);
+        let wait_us = self.params.tx_queue.wait_before_drop_us;
+        let granted = self.with_conduit_link(wire_reliability, route, |link| {
+            link.link_driver()
+                .block_first_acquire(qos.priority(), wait_us)
+        });
+        if !granted {
+            #[cfg(feature = "transport-stats")]
+            self.count_congestion_drop(wire_reliability, route, priority, &stats_class);
+            return true;
+        }
+        let mut body = Vec::with_capacity(worst_case_payload);
+        {
+            let mut sink = sce_forge_runtime::codec::VecSink::new(&mut body);
+            encode_body(&mut sink).expect("VecSink is infallible");
+        }
+        let job = BlockFirstJob {
+            priority,
+            route,
+            reliable,
+            qos,
+            stats_class,
+            body,
+        };
+        // The hand-off only asks the runtime to spawn, so calling it under the
+        // lock is brief.
+        R::with_mutex_mut(&self.block_first_handoff, |slot| {
+            if let Some(handoff) = slot.as_ref() {
+                handoff(job);
+            }
+        });
+        true
+    }
+
+    /// R2952 — the background half of a block-first message: push its bytes
+    /// the way any other message is pushed (it may wait `wait_before_close` for
+    /// room, as a blocking one does, and close the session if none comes),
+    /// then give its slot back — upstream's `spawn_blocking` body
+    /// (`io/zenoh-transport/src/unicast/universal/tx.rs` @ `let _ = block_first_notifier.notify();`).
+    /// Called by the runtime's hand-off, off the thread that sent it.
+    #[cfg(any(
+        feature = "codec-push",
+        feature = "codec-request",
+        feature = "codec-response",
+        feature = "codec-response-final",
+        feature = "declare-keyexpr",
+        feature = "declare-subscriber",
+        feature = "declare-queryable",
+        feature = "declare-token",
+        feature = "declare-interest",
+        feature = "liveliness-token",
+    ))]
+    pub fn run_block_first_job(&self, job: BlockFirstJob) {
+        let BlockFirstJob {
+            priority,
+            route,
+            reliable,
+            qos,
+            stats_class,
+            body,
+        } = job;
+        // A failure has no caller to reach, as upstream's background push has
+        // none: a congestion close or a lost link surfaces through the
+        // session's own machinery.
+        let _ = self.dispatch_network_message_at(
+            DispatchStage::Scheduled,
+            priority,
+            reliable,
+            qos,
+            body.len(),
+            stats_class,
+            |sink| sce_forge_runtime::codec::SceSink::write_bytes(sink, &body),
+        );
+        self.with_conduit_link(Reliability::from_reliable_bool(reliable), route, |link| {
+            link.link_driver().block_first_release(qos.priority())
+        });
+    }
+
+    /// R2952 — give this session the runtime's block-first hand-off: a
+    /// function that runs [`Self::run_block_first_job`] off the calling
+    /// thread. Installed by a runtime that has one (tokio, from its
+    /// `wrap_actions`); a session without one sends block-first as blocking.
+    pub fn install_block_first_handoff(&self, handoff: BlockFirstHandoff) {
+        R::with_mutex_mut(&self.block_first_handoff, |slot| *slot = Some(handoff));
     }
 
     /// R311kw — the one wire-emit seam: stamp [`Self::last_outbound_at`]
@@ -5800,7 +6069,53 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         // R2923 — the message's congestion control, off its own ext_qos:
         // `Drop` may be dropped when its conduit's link is congested, `Block`
         // waits and closes the session if the link never frees.
-        congestion: crate::qos::CongestionControl,
+        //
+        // R2952 — the whole `ext_qos`, not only its congestion control: a
+        // `BlockFirst` message's slot is keyed by its own priority.
+        qos: crate::sample::QosLevel,
+        worst_case_payload: usize,
+        stats_class: crate::stats::NetworkStatsClass,
+        encode_body: P,
+    ) -> Result<(), SendWireError>
+    where
+        P: Fn(
+            &mut sce_forge_runtime::codec::VecSink<'_>,
+        ) -> Result<(), sce_forge_runtime::codec::CodecError>,
+    {
+        self.dispatch_network_message_at(
+            DispatchStage::Fresh,
+            priority,
+            reliable,
+            qos,
+            worst_case_payload,
+            stats_class,
+            encode_body,
+        )
+    }
+
+    /// [`Self::dispatch_network_message`] at a given [`DispatchStage`]: a
+    /// block-first message's background push re-enters here as `Scheduled`
+    /// ([`Self::run_block_first_job`]), which is neither observed again nor
+    /// scheduled again.
+    #[cfg(any(
+        feature = "codec-push",
+        feature = "codec-request",
+        feature = "codec-response",
+        feature = "codec-response-final",
+        feature = "declare-keyexpr",
+        feature = "declare-subscriber",
+        feature = "declare-queryable",
+        feature = "declare-token",
+        feature = "declare-interest",
+        feature = "liveliness-token",
+    ))]
+    #[allow(clippy::too_many_arguments)]
+    fn dispatch_network_message_at<P>(
+        &self,
+        stage: DispatchStage,
+        priority: Priority,
+        reliable: bool,
+        qos: crate::sample::QosLevel,
         worst_case_payload: usize,
         _stats_class: crate::stats::NetworkStatsClass,
         encode_body: P,
@@ -5810,6 +6125,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             &mut sce_forge_runtime::codec::VecSink<'_>,
         ) -> Result<(), sce_forge_runtime::codec::CodecError>,
     {
+        let congestion = qos.congestion();
         // R2371 (`transport-stats`) — the NETWORK-message counters. Charged in
         // this function and not at `emit_on_link` because one wire write
         // carries a whole batch of these: the wire seam counts transport
@@ -5828,18 +6144,22 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         // upstream observes a payload before a link is chosen. The label is the
         // message's OWN band, captured before the effective-priority override
         // below, because upstream labels the message rather than the frame.
-        #[cfg(feature = "transport-stats")]
+        // R2952 — also the band a scheduled block-first push dispatches at.
         let message_priority = priority;
         // R2923 — zenoh's `is_droppable`: a best-effort message, or one whose
         // congestion control is `Drop`
         // (`commons/zenoh-protocol/src/network/mod.rs` @ `!self.is_reliable() || self.congestion_control() == CongestionControl::Drop`).
         let droppable = !reliable || congestion == crate::qos::CongestionControl::Drop;
+        // R2952 — observed once, on the caller's pass: a scheduled push is the
+        // same message.
         #[cfg(feature = "transport-stats")]
-        self.observe_payload(
-            crate::stats_registry::StatsDirection::Tx,
-            message_priority,
-            &_stats_class,
-        );
+        if stage == DispatchStage::Fresh {
+            self.observe_payload(
+                crate::stats_registry::StatsDirection::Tx,
+                message_priority,
+                &_stats_class,
+            );
+        }
         // R311y215 (transport-qos) — the EFFECTIVE Frame priority: the caller's
         // message priority when this session negotiated QoS, else forced to
         // DEFAULT (a non-QoS session has one PRIORITY conduit and writes no
@@ -5934,6 +6254,26 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             // pipeline to be full.
             count_pushed();
             self.send_wire(&wire, wire_reliability, priority);
+            return Ok(());
+        }
+        // R2952 (open-debt item 835) — a `BlockFirst` message leaves the
+        // synchronous path here, once it has a link (upstream schedules it
+        // after link selection, and its lowlatency transport, returned above,
+        // has no block-first at all): see [`Self::schedule_block_first`].
+        // Scheduled or dropped, it is a sent message to the caller, as
+        // upstream's `schedule` reports it.
+        if stage == DispatchStage::Fresh
+            && congestion == crate::qos::CongestionControl::BlockFirst
+            && self.schedule_block_first(
+                message_priority,
+                priority,
+                reliable,
+                qos,
+                worst_case_payload,
+                _stats_class,
+                &encode_body,
+            )
+        {
             return Ok(());
         }
         // Outbound MTU = the negotiated-min batch budget
@@ -6163,16 +6503,13 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             // its own conduit lock. Either way the put itself succeeded from
             // the caller's side, as upstream's does.
             Ok(PushOutcome::Congested) => {
-                // Upstream's `tx_n_dropped` IS this count: the congestion
-                // reason's dropped-payload observations
-                // (`commons/zenoh-stats/src/stats.rs` @ `(Tx, ReasonLabel::Congestion) => {`).
                 #[cfg(feature = "transport-stats")]
-                self.stats
-                    .inc_tx_drop(crate::stats::StatDrop::Transport, 1, 0);
-                #[cfg(feature = "transport-stats")]
-                self.with_conduit_link(wire_reliability, priority, |link| {
-                    self.drop_for_congestion(link, message_priority, &_stats_class)
-                });
+                self.count_congestion_drop(
+                    wire_reliability,
+                    priority,
+                    message_priority,
+                    &_stats_class,
+                );
                 if !droppable {
                     self.request_congestion_close();
                 }
@@ -6516,7 +6853,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             // R2923 — every arm's congestion control comes off the message's
             // OWN ext_qos, as upstream's `congestion_control()` reads it
             // (`commons/zenoh-protocol/src/network/mod.rs` @ `NetworkBodyRef::Push(msg) => msg.ext_qos.get_congestion_control(),`).
-            crate::declare_ext_qos::read_push_qos(&push).congestion(),
+            crate::declare_ext_qos::read_push_qos(&push),
             wz_codecs::push::Push::MAX_ENCODED_BYTES,
             class,
             crate::frame_encode::push_body(&push),
@@ -6851,7 +7188,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             // Declare = a control-plane message; zenoh `QoSType::DECLARE` = Control.
             Priority::Control,
             reliable,
-            crate::declare_ext_qos::read_declare_qos(&declare).congestion(),
+            crate::declare_ext_qos::read_declare_qos(&declare),
             wz_codecs::declare::Declare::MAX_ENCODED_BYTES,
             // Control plane: `n_msgs` only, no payload cell (upstream's payload
             // labels cover the four data kinds).
@@ -6882,7 +7219,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             // OAM = a control-plane message; zenoh `QoSType::OAM` = Control.
             Priority::Control,
             reliable,
-            crate::declare_ext_qos::read_oam_qos(&oam).congestion(),
+            crate::declare_ext_qos::read_oam_qos(&oam),
             wz_codecs::oam::Oam::MAX_ENCODED_BYTES,
             crate::stats::NetworkStatsClass::control(crate::stats::MessageLabel::Oam),
             crate::frame_encode::oam_body(&oam),
@@ -6901,7 +7238,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             // Request/Response = the data plane; zenoh default `Priority::Data`.
             Priority::DEFAULT,
             reliable,
-            crate::declare_ext_qos::read_request_qos(&request).congestion(),
+            crate::declare_ext_qos::read_request_qos(&request),
             wz_codecs::request::Request::MAX_ENCODED_BYTES,
             class,
             crate::frame_encode::request_body(&request),
@@ -6931,7 +7268,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         self.dispatch_network_message(
             qos.priority(),
             reliable,
-            qos.congestion(),
+            qos,
             wz_codecs::response::Response::MAX_ENCODED_BYTES,
             class,
             crate::frame_encode::response_body(&response),
@@ -6960,7 +7297,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         self.dispatch_network_message(
             qos.priority(),
             reliable,
-            qos.congestion(),
+            qos,
             wz_codecs::response_final::ResponseFinal::MAX_ENCODED_BYTES,
             // A pure correlation marker — no key expression and no payload, so
             // it is control plane even though it closes a data-plane exchange.
@@ -6987,7 +7324,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             // Interest carries `QoSType::DECLARE` = Control (zenoh interests.rs).
             Priority::Control,
             reliable,
-            crate::declare_ext_qos::read_interest_qos(&interest).congestion(),
+            crate::declare_ext_qos::read_interest_qos(&interest),
             wz_codecs::interest::Interest::MAX_ENCODED_BYTES,
             crate::stats::NetworkStatsClass::control(crate::stats::MessageLabel::Interest),
             crate::frame_encode::interest_body(&interest),

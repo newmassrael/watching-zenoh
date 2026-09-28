@@ -62,7 +62,12 @@ pub struct TimeoutElapsed;
 /// `wz_session_core::epoch::EpochSource`: time since the Unix epoch, which
 /// is what a timestamp needs and carries no timezone. It stays a separate
 /// contract from this one, which remains monotonic and wall-clock free.
-pub trait TimeSource: Send + Sync {
+///
+/// R2952 — `'static`, which every implementor already is (`TokioTime`, and
+/// `CoopTime<C>` over a `'static` `ClockSource`): a session's background work
+/// (the block-first push) holds the session past the call that started it, and
+/// the session holds its clock.
+pub trait TimeSource: Send + Sync + 'static {
     /// Monotonic time in milliseconds since an unspecified, impl-
     /// defined epoch. The only guarantee is monotonicity within a
     /// single TimeSource instance: subsequent calls return values

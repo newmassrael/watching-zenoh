@@ -669,6 +669,15 @@ impl BoxedLinkDriver for UdpWriteDriver {
         self.tx.reshape(shape)
     }
 
+    // R2952 — the block-first slot lives on this link's outbound queue.
+    fn block_first_acquire(&self, priority: wz_session_core::qos::Priority, wait_us: u64) -> bool {
+        self.tx.block_first_acquire(priority, wait_us)
+    }
+
+    fn block_first_release(&self, priority: wz_session_core::qos::Priority) {
+        self.tx.block_first_release(priority)
+    }
+
     fn send_prioritized(
         &self,
         bytes: &[u8],

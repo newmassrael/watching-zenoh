@@ -200,7 +200,24 @@ impl SessionRuntime for TokioRuntime {
 
     #[cfg(feature = "transport-unicast")]
     fn wrap_actions<T: TimeSource>(actions: SessionLinkActions<Self, T>) -> Self::ActionsHandle<T> {
-        Arc::new(actions)
+        let actions = Arc::new(actions);
+        // R2952 (open-debt item 835) — the block-first hand-off, installed on
+        // every binding: a block-first message whose slot the core granted is
+        // pushed on a blocking thread, upstream's own seam
+        // (`io/zenoh-transport/src/unicast/universal/tx.rs` @ `zenoh_runtime::ZRuntime::Net.spawn_blocking(move || {`),
+        // and the sender returns at once. WEAK, so the session does not keep
+        // itself alive through its own hand-off; a job for a session already
+        // gone has nowhere to go and is dropped.
+        let weak = Arc::downgrade(&actions);
+        actions.install_block_first_handoff(Box::new(move |job| {
+            let weak = weak.clone();
+            crate::runtime_pool::WzRuntime::Net.spawn_blocking(move || {
+                if let Some(actions) = weak.upgrade() {
+                    actions.run_block_first_job(job);
+                }
+            });
+        }));
+        actions
     }
 
     fn link_driver(sink: &Self::LinkSink) -> &dyn BoxedLinkDriver {

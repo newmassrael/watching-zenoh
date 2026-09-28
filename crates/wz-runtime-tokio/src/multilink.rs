@@ -180,10 +180,14 @@ pub fn join_link(
     // (4) attach the secondary's LinkState to the shared core + return the
     // transplant handle bound to that core.
     primary.add_link(secondary.link.clone(), bound);
-    JoinOutcome::Joined(Arc::new(SessionLinkActions {
-        core: primary.core.clone(),
-        link: secondary.link.clone(),
-    }))
+    // R2952 — through the runtime's `wrap_actions`, so the joined binding gets
+    // the same block-first hand-off the first one did.
+    JoinOutcome::Joined(
+        SessionLinkActions::<crate::runtime_impl::TokioRuntime>::joined(
+            primary.core.clone(),
+            secondary.link.clone(),
+        ),
+    )
 }
 
 #[cfg(test)]

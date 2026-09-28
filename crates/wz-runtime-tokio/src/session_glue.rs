@@ -4273,6 +4273,11 @@ mod link_congestion_tests {
         asked: Mutex<Vec<RoomWait>>,
         frames: Mutex<Vec<Vec<u8>>>,
         shapes: Mutex<Vec<wz_session_core::link::TxQueueShape>>,
+        /// R2952 — whether a block-first slot ask is granted, and every ask
+        /// (`(priority, wait_us)`) and release the session made.
+        grant_block_first: Mutex<bool>,
+        block_first_asked: Mutex<Vec<(Priority, u64)>>,
+        block_first_released: Mutex<Vec<Priority>>,
     }
 
     impl CongestibleLink {
@@ -4283,7 +4288,19 @@ mod link_congestion_tests {
                 asked: Mutex::new(Vec::new()),
                 frames: Mutex::new(Vec::new()),
                 shapes: Mutex::new(Vec::new()),
+                grant_block_first: Mutex::new(true),
+                block_first_asked: Mutex::new(Vec::new()),
+                block_first_released: Mutex::new(Vec::new()),
             })
+        }
+        fn grant_block_first(&self, grant: bool) {
+            *self.grant_block_first.lock().expect("grant") = grant;
+        }
+        fn block_first_asked(&self) -> Vec<(Priority, u64)> {
+            self.block_first_asked.lock().expect("asked").clone()
+        }
+        fn block_first_released(&self) -> Vec<Priority> {
+            self.block_first_released.lock().expect("released").clone()
         }
         fn set_room(&self, room: LinkRoom) {
             *self.room.lock().expect("room") = room;
@@ -4292,7 +4309,6 @@ mod link_congestion_tests {
         fn script(&self, answers: impl IntoIterator<Item = RoomAnswer>) {
             self.script.lock().expect("script").extend(answers);
         }
-        #[cfg(feature = "transport-fragmentation")]
         fn asked(&self) -> Vec<RoomWait> {
             self.asked.lock().expect("asked").clone()
         }
@@ -4324,8 +4340,152 @@ mod link_congestion_tests {
         fn shape_tx_queue(&self, shape: wz_session_core::link::TxQueueShape) {
             self.shapes.lock().expect("shapes").push(shape);
         }
+        fn block_first_acquire(&self, priority: Priority, wait_us: u64) -> bool {
+            self.block_first_asked
+                .lock()
+                .expect("asked")
+                .push((priority, wait_us));
+            *self.grant_block_first.lock().expect("grant")
+        }
+        fn block_first_release(&self, priority: Priority) {
+            self.block_first_released
+                .lock()
+                .expect("released")
+                .push(priority);
+        }
         fn open_blocking(&self) {}
         fn close_blocking(&self) {}
+    }
+
+    /// R2952 — wait (bounded) for the background push to give its slot back.
+    fn await_release(link: &CongestibleLink) -> Vec<Priority> {
+        for _ in 0..500 {
+            let released = link.block_first_released();
+            if !released.is_empty() {
+                return released;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+        link.block_first_released()
+    }
+
+    /// R2952 (open-debt item 835) — a BLOCK-FIRST message is scheduled as
+    /// upstream schedules it: the slot is asked for with `wait_before_drop`,
+    /// and once granted the push is handed to the runtime — the SENDER asks the
+    /// link for no room at all (that wait is the background push's, and it is
+    /// a blocking one), and the slot is released when the push is done.
+    #[test]
+    fn a_block_first_message_takes_the_slot_and_is_pushed_off_the_sender() {
+        use wz_session_core::qos::CongestionControl;
+        use wz_session_core::sample::QosLevel;
+        let link = CongestibleLink::new();
+        let actions = session_with_queue(
+            link.clone(),
+            super::TxQueueConf {
+                wait_before_drop_us: 42,
+                wait_before_close_us: 4_242,
+                ..super::TxQueueConf::default()
+            },
+        );
+        let meta = super::PushMetadata {
+            qos: Some(QosLevel::DEFAULT.with_congestion(CongestionControl::BlockFirst)),
+            ..super::PushMetadata::default()
+        };
+        actions
+            .send_push_with_meta_literal("home/bf", b"A", true, &meta)
+            .expect("a scheduled block-first push is not an error");
+        assert_eq!(
+            link.block_first_asked(),
+            [(Priority::DEFAULT, 42)],
+            "the slot is asked for once, at the message's priority, for wait_before_drop"
+        );
+        assert_eq!(
+            await_release(&link),
+            [Priority::DEFAULT],
+            "released after the push"
+        );
+        assert_eq!(
+            link.asked(),
+            [RoomWait::Block { wait_us: 4_242 }],
+            "the background push waits as a BLOCKING message does, and only it asks"
+        );
+        assert_eq!(link.frames().len(), 1, "and the message went out");
+    }
+
+    /// R2952 — the schedule is the dispatch chokepoint's, not the Push arm's:
+    /// a block-first ResponseFinal (a reply inherits its query's QoS) takes
+    /// its slot at its own priority and is pushed off the sender too.
+    #[cfg(feature = "codec-response-final")]
+    #[test]
+    fn a_block_first_response_final_is_scheduled_like_a_push() {
+        use wz_session_core::qos::CongestionControl;
+        use wz_session_core::sample::QosLevel;
+        let link = CongestibleLink::new();
+        let actions = session(link.clone());
+        let qos = QosLevel::DEFAULT
+            .with_congestion(CongestionControl::BlockFirst)
+            .with_priority(Priority::InteractiveHigh);
+        actions.send_response_final(9, qos);
+        assert_eq!(
+            link.block_first_asked(),
+            [(
+                Priority::InteractiveHigh,
+                super::TxQueueConf::default().wait_before_drop_us
+            )],
+            "keyed by the reply's own priority"
+        );
+        assert_eq!(await_release(&link), [Priority::InteractiveHigh]);
+        assert_eq!(link.frames().len(), 1, "and the reply went out");
+    }
+
+    /// R2952 — a block-first message whose slot stays taken is a congestion
+    /// drop: nothing is pushed, no room is asked, nothing is released, and the
+    /// session does not close (it was never a blocking push).
+    #[test]
+    fn a_block_first_message_whose_slot_stays_taken_is_dropped() {
+        use wz_session_core::qos::CongestionControl;
+        use wz_session_core::sample::QosLevel;
+        let link = CongestibleLink::new();
+        link.grant_block_first(false);
+        let actions = session(link.clone());
+        let meta = super::PushMetadata {
+            qos: Some(QosLevel::DEFAULT.with_congestion(CongestionControl::BlockFirst)),
+            ..super::PushMetadata::default()
+        };
+        actions
+            .send_push_with_meta_literal("home/bf", b"A", true, &meta)
+            .expect("a drop is not the caller's error");
+        assert_eq!(link.block_first_asked().len(), 1);
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        assert!(
+            link.frames().is_empty(),
+            "a refused block-first message is not sent"
+        );
+        assert!(link.asked().is_empty(), "nor does it wait for room");
+        assert!(
+            link.block_first_released().is_empty(),
+            "a slot never taken is not released"
+        );
+        assert!(!actions.take_congestion_close());
+    }
+
+    /// R2952 — the control: a BLOCK message never touches the slot and is
+    /// pushed on the sender's own thread, as before.
+    #[test]
+    fn a_block_message_is_not_scheduled_block_first() {
+        use wz_session_core::qos::CongestionControl;
+        use wz_session_core::sample::QosLevel;
+        let link = CongestibleLink::new();
+        let actions = session(link.clone());
+        let meta = super::PushMetadata {
+            qos: Some(QosLevel::DEFAULT.with_congestion(CongestionControl::Block)),
+            ..super::PushMetadata::default()
+        };
+        actions
+            .send_push_with_meta_literal("home/b", b"A", true, &meta)
+            .expect("push");
+        assert!(link.block_first_asked().is_empty());
+        assert_eq!(link.frames().len(), 1, "sent synchronously");
     }
 
     /// A session over `link` whose first frame carries SN 7, so a frame's SN

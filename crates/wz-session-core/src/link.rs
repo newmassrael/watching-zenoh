@@ -607,6 +607,29 @@ pub trait BoxedLinkDriver {
         RoomAnswer::at_once(LinkRoom::Free)
     }
 
+    /// R2952 (open-debt item 835) — take this link's block-first slot for
+    /// `priority`, waiting up to `wait_us` for it: zenoh's per-link,
+    /// per-priority `block_first_waiters`
+    /// (`io/zenoh-transport/src/unicast/universal/link.rs` @ `pub block_first_waiters: [Waiter; Priority::NUM],`),
+    /// waited on with `wait_before_drop`. `false` means the slot stayed taken
+    /// and the message is a congestion drop.
+    ///
+    /// The default always grants, which is the honest answer for a driver
+    /// with no second thread to hold the slot on (the MCU sockets): there a
+    /// block-first message is sent as a blocking one. A driver that WRAPS
+    /// another must forward this and [`Self::block_first_release`].
+    fn block_first_acquire(&self, priority: crate::qos::Priority, wait_us: u64) -> bool {
+        let _ = (priority, wait_us);
+        true
+    }
+
+    /// R2952 — give back the slot [`Self::block_first_acquire`] granted, once
+    /// the block-first message it covered has been pushed: zenoh's
+    /// `block_first_notifier.notify()` after the background push.
+    fn block_first_release(&self, priority: crate::qos::Priority) {
+        let _ = priority;
+    }
+
     /// R2924 — give the link's outbound queue the shape its established
     /// session needs ([`TxQueueShape`]): zenoh's pipeline built at
     /// establishment. A driver whose writer drains a bounded queue reshapes

@@ -144,6 +144,7 @@ pub fn outbound_channel_with_capacity(
             single_lane: false,
             occupied: [0; Priority::NUM],
             congested: [false; Priority::NUM],
+            block_first: [false; Priority::NUM],
             in_flight: None,
             closed: false,
             senders: 1,
@@ -186,6 +187,13 @@ struct LaneState {
     /// wait finds room. While it stands a droppable message is dropped without
     /// waiting.
     congested: [bool; Priority::NUM],
+    /// R2952 (open-debt item 835) — each priority's BLOCK-FIRST slot, zenoh's
+    /// per-link `block_first_waiters`: taken while a block-first message is
+    /// being pushed in the background, so a second one at the same priority
+    /// waits `wait_before_drop` for it and is dropped if it stays taken.
+    /// Indexed by the message's own priority, as zenoh indexes it — not by
+    /// lane, which a no-QoS session collapses to one.
+    block_first: [bool; Priority::NUM],
     /// The frame the writer holds, as `(lane, bytes)`: still occupying its
     /// lane until the writer asks for the next one.
     in_flight: Option<(usize, usize)>,
@@ -365,6 +373,57 @@ impl OutboundTx {
                 .expect("outbound lanes poisoned")
                 .0;
         }
+    }
+
+    /// R2952 (open-debt item 835) — take `priority`'s block-first slot, waiting
+    /// up to `wait_us` for it, as zenoh's
+    /// `block_first_waiters[priority].wait_timeout(wait_before_drop)` does.
+    /// `false` when it stays taken or the queue closes.
+    ///
+    /// The wait releases a multi-thread runtime's worker exactly as
+    /// [`Self::link_room`] does, and for the same reason: the background push
+    /// that would free the slot may be queued behind the waiter.
+    pub fn block_first_acquire(&self, priority: Priority, wait_us: u64) -> bool {
+        let slot = usize::from(priority.wire_byte());
+        let take = || {
+            let deadline = Instant::now() + Duration::from_micros(wait_us);
+            let mut st = self.shared.state.lock().expect("outbound lanes poisoned");
+            loop {
+                if st.closed {
+                    return false;
+                }
+                if !st.block_first[slot] {
+                    st.block_first[slot] = true;
+                    return true;
+                }
+                let now = Instant::now();
+                if now >= deadline {
+                    return false;
+                }
+                st = self
+                    .shared
+                    .room
+                    .wait_timeout(st, deadline - now)
+                    .expect("outbound lanes poisoned")
+                    .0;
+            }
+        };
+        match tokio::runtime::Handle::try_current() {
+            Ok(handle) if handle.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread => {
+                tokio::task::block_in_place(take)
+            }
+            _ => take(),
+        }
+    }
+
+    /// R2952 — give `priority`'s block-first slot back and wake whoever waits
+    /// for it: zenoh's `block_first_notifier.notify()`.
+    pub fn block_first_release(&self, priority: Priority) {
+        let slot = usize::from(priority.wire_byte());
+        let mut st = self.shared.state.lock().expect("outbound lanes poisoned");
+        st.block_first[slot] = false;
+        drop(st);
+        self.shared.room.notify_all();
     }
 
     /// [`Self::wait_for_room`] in the terms of the session's link seam
@@ -789,6 +848,38 @@ mod tests {
     use super::*;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
+
+    /// R2952 (open-debt item 835) — the block-first slot: one per priority;
+    /// a second ask at the same priority waits its full `wait_us` and is
+    /// refused, another priority is free, and a release wakes a waiter.
+    #[test]
+    fn the_block_first_slot_is_one_per_priority_and_a_release_wakes_a_waiter() {
+        let (tx, _rx) = outbound_channel();
+        assert!(tx.block_first_acquire(Priority::Data, 0));
+        let started = Instant::now();
+        assert!(
+            !tx.block_first_acquire(Priority::Data, 20_000),
+            "the slot is taken, so the ask runs out"
+        );
+        assert!(
+            started.elapsed() >= Duration::from_millis(20),
+            "and it waited"
+        );
+        assert!(
+            tx.block_first_acquire(Priority::RealTime, 0),
+            "another priority has its own slot"
+        );
+
+        let waiter = tx.clone();
+        let handle =
+            std::thread::spawn(move || waiter.block_first_acquire(Priority::Data, 2_000_000));
+        std::thread::sleep(Duration::from_millis(20));
+        tx.block_first_release(Priority::Data);
+        assert!(
+            handle.join().expect("waiter"),
+            "the release woke it and it took the slot"
+        );
+    }
 
     /// The seal ends the writer even though a sender clone is still ALIVE.
     ///
