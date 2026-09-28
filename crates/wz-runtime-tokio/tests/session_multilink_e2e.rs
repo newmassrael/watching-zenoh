@@ -40,7 +40,6 @@ use std::time::Duration;
 use tokio::net::{TcpListener, TcpStream};
 
 use wz_runtime_core::Runtime;
-use wz_runtime_tokio::config::LinkReliabilityPref;
 use wz_runtime_tokio::multilink::{join_link, JoinOutcome};
 use wz_runtime_tokio::runtime_impl::{TokioRuntime, TokioTime};
 use wz_runtime_tokio::session_glue::{drive_session_until_terminal, SessionLinkActions};
@@ -111,25 +110,38 @@ fn multilink_offer(qos: bool) -> SessionOffer {
 }
 
 /// Open ONE loopback-TCP link both-sides-established with the multilink 0x4
-/// handshake + a per-side reliability preference. Returns `(acceptor, initiator)`
-/// `OpenedSession`s (both Established, both having captured the peer's ephemeral
-/// pubkey).
+/// handshake. Returns `(acceptor, initiator)` `OpenedSession`s (both
+/// Established, both having captured the peer's ephemeral pubkey).
+///
+/// R2943 — no reliability class is passed any more: a link's class is its
+/// intrinsic one (TCP: reliable) unless a negotiation declares another, as
+/// upstream's is. [`open_multilink_link_declaring`] is the declaring twin.
 async fn open_multilink_link(
     listener: &TcpListener,
     acc_zid: u8,
     init_zid: u8,
-    acc_pref: LinkReliabilityPref,
-    init_pref: LinkReliabilityPref,
     qos: bool,
 ) -> (OpenedSession, OpenedSession) {
+    open_multilink_link_offering(listener, acc_zid, init_zid, multilink_offer(qos)).await
+}
+
+/// [`open_multilink_link`] with the DIALLED end's offer given whole, so a leg
+/// can declare `QoSLink` metadata on it; the accepted end offers the same mode
+/// and declares nothing, as upstream's TCP acceptor does.
+async fn open_multilink_link_offering(
+    listener: &TcpListener,
+    acc_zid: u8,
+    init_zid: u8,
+    dialled: SessionOffer,
+) -> (OpenedSession, OpenedSession) {
     let addr = listener.local_addr().expect("local_addr");
+    let accepted = SessionOffer::universal().with_mode(dialled.mode);
     let acc = async {
         let (stream, _peer) = listener.accept().await.expect("accept tcp peer");
         accept_and_open_session_with_multilink(
             DialedLink::Tcp(stream),
             fixture_params_with_zid(acc_zid),
-            acc_pref,
-            multilink_offer(qos),
+            accepted,
             // R311y219 — a full-range band; these tests assert reliability
             // segregation / qos NEGOTIATION, not priority routing, so the band
             // is inert (no prioritized send exercises select_link's band tier).
@@ -146,8 +158,7 @@ async fn open_multilink_link(
         initiate_and_open_session_with_multilink(
             DialedLink::Tcp(stream),
             fixture_params_with_zid(init_zid),
-            init_pref,
-            multilink_offer(qos),
+            dialled,
             (Priority::Control, Priority::Background),
             TokioTime::new(),
             Some(ITER_CAP),
@@ -185,32 +196,26 @@ fn spawn_drive(
     })
 }
 
-/// Assertions 1, 2, 3 — the full aggregation + segregation + failover survival
-/// path over real sockets.
+/// Assertions 1, 2, 3 — the full aggregation + failover survival path over real
+/// sockets.
+///
+/// R2943 — this used to be `two_links_aggregate_segregate_and_survive_link_death`
+/// and asserted that a reliable and a best-effort Put rode DIFFERENT links. That
+/// segregation came from a class the deploy stamped on each TCP link and never
+/// advertised; upstream has no such thing. Two TCP links are both reliable by
+/// their protocol, so upstream's select sends a best-effort message over the
+/// first live link, having no link of that class
+/// (`io/zenoh-transport/src/unicast/universal/tx.rs` @ `match_.full.or(match_.partial).or(match_.any)`).
+/// Segregating two TCP links takes a DECLARED class, which is
+/// `declared_reliability_segregates_two_tcp_links`.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn two_links_aggregate_segregate_and_survive_link_death() {
+async fn two_links_aggregate_and_survive_link_death() {
     let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
 
-    // Link 1 (reliable-pref on both ends) and link 2 (best-effort-pref). Same
-    // zids on both links each side (A=0x01, B=0x02) — the SAME logical peer.
-    let (b1, a1) = open_multilink_link(
-        &listener,
-        0x02,
-        0x01,
-        LinkReliabilityPref::Reliable,
-        LinkReliabilityPref::Reliable,
-        false,
-    )
-    .await;
-    let (b2, a2) = open_multilink_link(
-        &listener,
-        0x02,
-        0x01,
-        LinkReliabilityPref::BestEffort,
-        LinkReliabilityPref::BestEffort,
-        false,
-    )
-    .await;
+    // Two links. Same zids on both links each side (A=0x01, B=0x02) — the SAME
+    // logical peer.
+    let (b1, a1) = open_multilink_link(&listener, 0x02, 0x01, false).await;
+    let (b2, a2) = open_multilink_link(&listener, 0x02, 0x01, false).await;
 
     // Both sides captured the peer's ephemeral multilink pubkey (the 0x4
     // handshake ran), and the two links of a side agree on it (same peer).
@@ -285,21 +290,23 @@ async fn two_links_aggregate_segregate_and_survive_link_death() {
     // Let the drives spin up.
     tokio::time::sleep(Duration::from_millis(120)).await;
 
-    // Assertion 2: a reliable Put (-> A's reliable-pref link 1) and a best-effort
-    // Put (-> A's best-effort-pref link 2) both reach B on DIFFERENT links.
+    // Assertion 2: a reliable Put and a best-effort Put both reach B. Both TCP
+    // links are reliable, so both Puts ride the first live link: the reliable
+    // one as its class's first match, the best-effort one as the any-tier
+    // fallback, there being no best-effort link.
     a_send
         .send_push_literal("test/reliable", b"R1", /*reliable=*/ true)
-        .expect("reliable Put routes onto the reliable-pref link");
+        .expect("reliable Put routes onto a reliable link");
     a_send
         .send_push_literal("test/besteffort", b"B1", /*reliable=*/ false)
-        .expect("best-effort Put routes onto the best-effort-pref link");
+        .expect("best-effort Put falls back to a live link");
 
-    let two_links = poll_until(&b_log, Duration::from_secs(8), |log| {
+    let both = poll_until(&b_log, Duration::from_secs(8), |log| {
         log.iter().any(|d| d.reliable) && log.iter().any(|d| !d.reliable)
     })
     .await;
     assert!(
-        two_links,
+        both,
         "both a reliable AND a best-effort Put reached B: {:?}",
         b_log.lock().unwrap()
     );
@@ -309,9 +316,9 @@ async fn two_links_aggregate_segregate_and_survive_link_death() {
         let b = log.iter().find(|d| !d.reliable).unwrap().link_id;
         (r, b)
     };
-    assert_ne!(
+    assert_eq!(
         reliable_link, best_effort_link,
-        "reliability SEGREGATION: the reliable and best-effort Puts rode DIFFERENT physical links"
+        "two TCP links carry no class difference: both Puts rode the first live link"
     );
     let reliable_sn_1 = b_log
         .lock()
@@ -338,7 +345,7 @@ async fn two_links_aggregate_segregate_and_survive_link_death() {
     );
 
     // A subsequent RELIABLE Put must still deliver — failing over onto the
-    // surviving (best-effort-pref) link, since the reliable-pref link is dead.
+    // surviving link, since the link that carried the first one is dead.
     tokio::time::sleep(Duration::from_millis(60)).await;
     a_send
         .send_push_literal("test/reliable", b"R2", /*reliable=*/ true)
@@ -387,15 +394,7 @@ async fn two_links_aggregate_segregate_and_survive_link_death() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn mismatched_pubkey_link_is_rejected_invalid() {
     let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
-    let (b1, a1) = open_multilink_link(
-        &listener,
-        0x02,
-        0x01,
-        LinkReliabilityPref::Reliable,
-        LinkReliabilityPref::Reliable,
-        false,
-    )
-    .await;
+    let (b1, a1) = open_multilink_link(&listener, 0x02, 0x01, false).await;
 
     let bound = b1
         .multilink_pubkey()
@@ -428,33 +427,9 @@ async fn mismatched_pubkey_link_is_rejected_invalid() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn third_link_over_max_links_is_rejected() {
     let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
-    let (b1, a1) = open_multilink_link(
-        &listener,
-        0x02,
-        0x01,
-        LinkReliabilityPref::Reliable,
-        LinkReliabilityPref::Reliable,
-        false,
-    )
-    .await;
-    let (b2, a2) = open_multilink_link(
-        &listener,
-        0x02,
-        0x01,
-        LinkReliabilityPref::BestEffort,
-        LinkReliabilityPref::BestEffort,
-        false,
-    )
-    .await;
-    let (b3, a3) = open_multilink_link(
-        &listener,
-        0x02,
-        0x01,
-        LinkReliabilityPref::Any,
-        LinkReliabilityPref::Any,
-        false,
-    )
-    .await;
+    let (b1, a1) = open_multilink_link(&listener, 0x02, 0x01, false).await;
+    let (b2, a2) = open_multilink_link(&listener, 0x02, 0x01, false).await;
+    let (b3, a3) = open_multilink_link(&listener, 0x02, 0x01, false).await;
 
     let b_primary = b1.actions.clone();
     // First two aggregate (max_links = 2).
@@ -546,15 +521,7 @@ async fn plain_open_emits_no_multilink_ext() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn multilink_open_stages_multilink_ext() {
     let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
-    let (opened_acc, opened_init) = open_multilink_link(
-        &listener,
-        0x02,
-        0x01,
-        LinkReliabilityPref::Reliable,
-        LinkReliabilityPref::Reliable,
-        false,
-    )
-    .await;
+    let (opened_acc, opened_init) = open_multilink_link(&listener, 0x02, 0x01, false).await;
 
     assert!(
         opened_init.actions.staged_multilink_ext_count() > 0,
@@ -617,15 +584,7 @@ async fn multilink_link_negotiates_qos_when_both_offer() {
     let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
 
     // Both offer -> qos negotiated on over the multilink handshake.
-    let (acc, init) = open_multilink_link(
-        &listener,
-        0x02,
-        0x01,
-        LinkReliabilityPref::Reliable,
-        LinkReliabilityPref::Reliable,
-        /*qos=*/ true,
-    )
-    .await;
+    let (acc, init) = open_multilink_link(&listener, 0x02, 0x01, /*qos=*/ true).await;
     assert!(
         init.actions.is_qos(),
         "the initiator negotiated qos over the multilink 0x4 handshake"
@@ -636,15 +595,7 @@ async fn multilink_link_negotiates_qos_when_both_offer() {
     );
 
     // CONTROL: qos=false leaves it off -> the `qos` param drives it.
-    let (acc0, init0) = open_multilink_link(
-        &listener,
-        0x04,
-        0x03,
-        LinkReliabilityPref::Reliable,
-        LinkReliabilityPref::Reliable,
-        /*qos=*/ false,
-    )
-    .await;
+    let (acc0, init0) = open_multilink_link(&listener, 0x04, 0x03, /*qos=*/ false).await;
     assert!(
         !init0.actions.is_qos(),
         "qos=false leaves the initiator non-qos"
@@ -679,7 +630,6 @@ async fn the_dialled_band_is_advertised_and_the_acceptor_adopts_it() {
         accept_and_open_session_with_multilink(
             DialedLink::Tcp(stream),
             fixture_params_with_zid(0x02),
-            LinkReliabilityPref::Reliable,
             multilink_offer(true),
             (Priority::DataHigh, Priority::Background),
             TokioTime::new(),
@@ -694,7 +644,6 @@ async fn the_dialled_band_is_advertised_and_the_acceptor_adopts_it() {
         initiate_and_open_session_with_multilink(
             DialedLink::Tcp(stream),
             fixture_params_with_zid(0x01),
-            LinkReliabilityPref::Reliable,
             multilink_offer(true),
             dialled,
             TokioTime::new(),
@@ -717,6 +666,92 @@ async fn the_dialled_band_is_advertised_and_the_acceptor_adopts_it() {
         band,
         "the accepted end negotiated the band the dialled end advertised"
     );
+}
+
+/// R2943 (session-extqos) — two TCP links segregate the reliable and the
+/// best-effort channel only when a class is DECLARED: each dialled link
+/// declares one in its `QoSLink` body (upstream's endpoint `rel=`), the
+/// accepted end adopts it, and egress selection matches on the declared class
+/// ahead of the protocol's own (`io/zenoh-transport/src/unicast/universal/tx.rs`
+/// @ `.unwrap_or(Reliability::from(tl.link.link.is_reliable())),`).
+///
+/// Reds if the declared class is not the one selection reads (both Puts then
+/// ride the first live link, the undeclared outcome
+/// `two_links_aggregate_and_survive_link_death` pins), or if the accepted end
+/// does not adopt it.
+#[cfg(feature = "session-extqos")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn declared_reliability_segregates_two_tcp_links() {
+    use wz_session_core::extqos::QosLinkState;
+    use wz_session_core::reliability::Reliability;
+
+    let declaring = |reliability| {
+        multilink_offer(true).with_qos_link(QosLinkState {
+            priorities: None,
+            reliability: Some(reliability),
+        })
+    };
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let (b1, a1) =
+        open_multilink_link_offering(&listener, 0x02, 0x01, declaring(Reliability::Reliable)).await;
+    let (b2, a2) =
+        open_multilink_link_offering(&listener, 0x02, 0x01, declaring(Reliability::BestEffort))
+            .await;
+    assert_eq!(
+        b2.actions.qos_link_metadata().reliability,
+        Some(Reliability::BestEffort),
+        "the accepted end adopted the class the dialled end declared"
+    );
+
+    let a_send = a1.actions.clone();
+    let a_primary = a1.actions.clone();
+    let b_primary = b1.actions.clone();
+    let a_joined = match join_link(&a_primary, &a2.actions.clone(), 2) {
+        JoinOutcome::Joined(h) => h,
+        other => panic!("A join must aggregate, got {}", outcome_name(&other)),
+    };
+    let b_joined = match join_link(&b_primary, &b2.actions.clone(), 2) {
+        JoinOutcome::Joined(h) => h,
+        other => panic!("B join must aggregate, got {}", outcome_name(&other)),
+    };
+
+    let b_log: RxLog = Arc::new(StdMutex::new(Vec::new()));
+    let b1_task = spawn_drive(b1, b_primary.clone(), 1, b_log.clone());
+    let b2_task = spawn_drive(b2, b_joined, 2, b_log.clone());
+    let a1_task = spawn_drive(a1, a_primary, 11, Arc::new(StdMutex::new(Vec::new())));
+    let a2_task = spawn_drive(a2, a_joined, 12, Arc::new(StdMutex::new(Vec::new())));
+    tokio::time::sleep(Duration::from_millis(120)).await;
+
+    a_send
+        .send_push_literal("declared/reliable", b"R", /*reliable=*/ true)
+        .expect("reliable Put");
+    a_send
+        .send_push_literal("declared/besteffort", b"B", /*reliable=*/ false)
+        .expect("best-effort Put");
+    let both = poll_until(&b_log, Duration::from_secs(8), |log| {
+        log.iter().any(|d| d.reliable) && log.iter().any(|d| !d.reliable)
+    })
+    .await;
+    assert!(both, "both Puts reached B: {:?}", b_log.lock().unwrap());
+    let (reliable_link, best_effort_link) = {
+        let log = b_log.lock().unwrap();
+        let r = log.iter().find(|d| d.reliable).unwrap().link_id;
+        let b = log.iter().find(|d| !d.reliable).unwrap().link_id;
+        (r, b)
+    };
+    assert_eq!(
+        reliable_link, 1,
+        "the reliable Put rode the link declared reliable"
+    );
+    assert_eq!(
+        best_effort_link, 2,
+        "the best-effort Put rode the link declared best-effort"
+    );
+
+    b1_task.abort();
+    b2_task.abort();
+    a1_task.abort();
+    a2_task.abort();
 }
 
 /// R2783 — the multilink accept state rides the cookie: the challenge the

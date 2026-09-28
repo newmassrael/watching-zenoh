@@ -426,12 +426,34 @@ mod tests {
         Arc<crate::test_fixtures::RecordingLinkDriver>,
         Arc<crate::test_fixtures::RecordingLinkDriver>,
     ) {
+        // R2943 — two TCP links: both in the reliable class by their protocol,
+        // with nothing declared, which is where every leg below starts.
+        use wz_session_core::link::LinkKind;
+        joined_qos_pair_over(LinkKind::Tcp, LinkKind::Tcp)
+    }
+
+    /// [`joined_qos_pair`] over links of the given kinds, so a leg can put two
+    /// protocols of different intrinsic reliability in one aggregate.
+    #[cfg(all(
+        feature = "transport-qos",
+        feature = "codec-push",
+        feature = "codec-close"
+    ))]
+    fn joined_qos_pair_over(
+        primary_kind: wz_session_core::link::LinkKind,
+        secondary_kind: wz_session_core::link::LinkKind,
+    ) -> (
+        Arc<SessionLinkActions>,
+        Arc<SessionLinkActions>,
+        Arc<crate::test_fixtures::RecordingLinkDriver>,
+        Arc<crate::test_fixtures::RecordingLinkDriver>,
+    ) {
         use crate::runtime_impl::TokioRuntime;
         use wz_runtime_core::Runtime;
-        use wz_session_core::session_actions::LinkReliabilityPref;
 
-        let (primary, primary_driver) = crate::test_fixtures::recording_actions();
-        let (secondary, secondary_driver) = crate::test_fixtures::recording_actions();
+        let (primary, primary_driver) = crate::test_fixtures::recording_actions_over(primary_kind);
+        let (secondary, secondary_driver) =
+            crate::test_fixtures::recording_actions_over(secondary_kind);
 
         // Matching ephemeral identity so the config-equality gate authorizes.
         let key = vec![0x0Au8, 0x0B, 0x0C, 0x0D];
@@ -444,8 +466,6 @@ mod tests {
 
         TokioRuntime::with_mutex_mut(&primary.link.transport_available, |g| *g = true);
         TokioRuntime::with_mutex_mut(&secondary.link.transport_available, |g| *g = true);
-        primary.set_link_reliability_pref(LinkReliabilityPref::Reliable);
-        secondary.set_link_reliability_pref(LinkReliabilityPref::Reliable);
 
         assert!(
             primary.set_qos_offer(true),
@@ -1005,6 +1025,54 @@ mod tests {
             primary_driver.frame_count(),
             0,
             "the band-less link lost the full tier"
+        );
+    }
+
+    /// R2943 — an undeclared link is in its PROTOCOL's class, as upstream's is
+    /// (`io/zenoh-transport/src/unicast/universal/tx.rs`
+    /// @ `.unwrap_or(Reliability::from(tl.link.link.is_reliable())),`): a UDP
+    /// link and a TCP link in one aggregate, nothing declared on either, split
+    /// the best-effort and the reliable channel between them.
+    ///
+    /// The primary is the UDP link, so it is also the first live link. Reds when
+    /// the class is not read off the link's kind: with no class, both links fall
+    /// to the any tier and the reliable Put rides the first live link too, which
+    /// is what the pre-R2943 "no preference" default did.
+    #[cfg(all(
+        feature = "transport-qos",
+        feature = "codec-push",
+        feature = "codec-close"
+    ))]
+    #[test]
+    fn an_undeclared_link_is_in_its_protocols_class() {
+        use wz_session_core::link::LinkKind;
+        use wz_session_core::qos::Priority;
+
+        let (primary, _secondary, udp_driver, tcp_driver) =
+            joined_qos_pair_over(LinkKind::Udp, LinkKind::Tcp);
+
+        primary
+            .send_push_literal_qos("class/be", b"b", false, Priority::DEFAULT)
+            .expect("best-effort send");
+        assert_eq!(
+            udp_driver.frame_count(),
+            1,
+            "the best-effort Put rode the UDP link"
+        );
+        assert_eq!(tcp_driver.frame_count(), 0, "not the TCP link");
+
+        primary
+            .send_push_literal_qos("class/rel", b"r", true, Priority::DEFAULT)
+            .expect("reliable send");
+        assert_eq!(
+            tcp_driver.frame_count(),
+            1,
+            "the reliable Put rode the TCP link, though the UDP link is the first live one"
+        );
+        assert_eq!(
+            udp_driver.frame_count(),
+            1,
+            "the UDP link took nothing more"
         );
     }
 }

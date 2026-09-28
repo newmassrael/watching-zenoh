@@ -130,8 +130,6 @@ use wz_session_core::locator::AnyLocator;
 // [`join_link`] instead of registering a redundant face. Every symbol here is
 // feature-gated, so a non-multilink build compiles the accept loop UNCHANGED.
 #[cfg(feature = "transport-multilink")]
-use crate::config::LinkReliabilityPref;
-#[cfg(feature = "transport-multilink")]
 use crate::multilink::{join_link, JoinOutcome};
 // R311y219 (transport-multilink + transport-qos) — the per-face QoS-priority band
 // the loop tags each aggregated link with. `Priority` is unconditional (no feature
@@ -162,12 +160,6 @@ use crate::session_open::{
 #[cfg(feature = "transport-multilink")]
 use std::collections::BTreeSet;
 use wz_session_core::transport_mode::SessionOffer;
-// R2096 (open-debt item 516) — the loop reads the QoS half of its offer off the
-// mode (`multilink_pref_for`), which is the whole point of the item: the offer
-// is the SSOT and `FaceSources.qos` is gone. `transport-qos`-gated because that
-// is the only arm that reads it — an ungated import would warn everywhere else.
-#[cfg(all(feature = "transport-multilink", feature = "transport-qos"))]
-use wz_session_core::transport_mode::TransportMode;
 // R311y227 — also the multicast INGRESS band (McastIngressItem.priority +
 // route_mcast_ingress), which is `codec-push`-gated, not multilink.
 #[cfg(any(feature = "transport-multilink", feature = "codec-push"))]
@@ -905,58 +897,7 @@ async fn dial_face(
     (id, peer, result)
 }
 
-/// R311y205 (transport-multilink) — the per-link traffic-class preference the
-/// loop tags each aggregated physical link with, spreading the classes across
-/// the links so [`SessionCore::select_link`](wz_session_core::session_actions)
-/// can segregate the reliable channel onto one link and the best-effort channel
-/// onto another (the slice-1 reliability-segregation the deploy proves). A simple
-/// deterministic spread by open order — even [`FaceId`] -> `Reliable`, odd ->
-/// `BestEffort` — so a 2-link aggregation (the slice-1 shape) lands one link of
-/// each class; full per-priority ranges are the deferred slice-3 refinement. The
-/// pref is fixed at open (the `_with_multilink` variant stages it before the
-/// handshake), and only the SENDER's prefs decide which link carries each Put.
-#[cfg(feature = "transport-multilink")]
-fn multilink_pref(id: FaceId) -> LinkReliabilityPref {
-    if id.0 % 2 == 0 {
-        LinkReliabilityPref::Reliable
-    } else {
-        LinkReliabilityPref::BestEffort
-    }
-}
-
-/// R311y219 (transport-multilink) — the traffic-class preference for an aggregated
-/// link, choosing between the y205 reliability-SPREAD and the y219 priority-SPREAD.
-/// A 2-link aggregate can segregate on ONE axis only ([`SessionCore::select_link`]
-/// disqualifies a reliability-mismatched link BEFORE the priority band, faithful to
-/// zenoh `select`, `unicast/universal/tx.rs`): with QoS OFF the links split by
-/// reliability class ([`multilink_pref`], even -> Reliable / odd -> BestEffort);
-/// with QoS ON every link is UNIFORM `Reliable` so the per-face priority band (not
-/// the reliability class) is the live `select_link` discriminant for the reliable
-/// data channel. The `#[cfg(not(transport-qos))]` build never applies a band, so it
-/// keeps the y205 even/odd spread regardless of what was offered (byte-
-/// identical). Placed at the deploy caller (not inside the `_with_multilink`
-/// entrypoint) so a direct-entrypoint caller keeps the exact pref it passes.
-///
-/// R2096 (open-debt item 516) — reads the QoS half off the [`SessionOffer`]
-/// this loop carries, where it took a bare `qos: bool` before. The axis chosen
-/// here and the offer put on the wire are ONE fact, so they now come from one
-/// value: a node that reads `--qos` into the offer and `false` into this
-/// argument would segregate its links by reliability while telling the peer it
-/// segregates by priority, and nothing would say so.
-#[cfg(feature = "transport-multilink")]
-fn multilink_pref_for(
-    id: FaceId,
-    #[allow(unused_variables)] offer: &SessionOffer,
-) -> LinkReliabilityPref {
-    #[cfg(feature = "transport-qos")]
-    if offer.mode == TransportMode::Qos {
-        return LinkReliabilityPref::Reliable;
-    }
-    multilink_pref(id)
-}
-
-/// R311y219 (transport-multilink) — the priority analogue of [`multilink_pref`]: the
-/// deterministic per-face QoS-priority band that pins each priority conduit to one
+/// R311y219 (transport-multilink) — the deterministic per-face QoS-priority band that pins each priority conduit to one
 /// link when QoS segregates by priority. Even [`FaceId`] -> HIGH band
 /// `[Control..=InteractiveLow]`, odd -> LOW `[DataHigh..=Background]` — non-
 /// overlapping AND jointly covering the whole `Control..=Background` (0..=7) scale,
@@ -981,16 +922,14 @@ fn multilink_priority_range(id: FaceId) -> (Priority, Priority) {
 /// R311y205 (transport-multilink) — [`open_face`] negotiating the 0x4
 /// Z_EXT_MULTILINK aggregation ext: the accept-side open used when `max_links > 1`
 /// so the acceptor reflects the ext + captures the initiator's ephemeral pubkey
-/// (the key a second link is bound to the logical session by) and this link is
-/// tagged with `pref`. Byte-identical to [`open_face`] otherwise; the loop
-/// branches on `max_links` at the accept site.
+/// (the key a second link is bound to the logical session by). Byte-identical to
+/// [`open_face`] otherwise; the loop branches on `max_links` at the accept site.
 #[cfg(feature = "transport-multilink")]
 #[allow(clippy::too_many_arguments)]
 async fn open_face_multilink(
     id: FaceId,
     peer: AcceptedPeer,
     accepted: AcceptedLink,
-    pref: LinkReliabilityPref,
     offer: SessionOffer,
     band: (Priority, Priority),
     params: SessionInitParams,
@@ -1005,7 +944,6 @@ async fn open_face_multilink(
             accept_and_open_session_with_multilink(
                 link,
                 params,
-                pref,
                 offer,
                 band,
                 clock,
@@ -1023,16 +961,15 @@ async fn open_face_multilink(
 
 /// R311y205 (transport-multilink) — [`dial_face`] negotiating the 0x4
 /// Z_EXT_MULTILINK aggregation ext: the dial-side open used when `max_links > 1`
-/// so the initiator offers the ext + captures the responder's ephemeral pubkey
-/// and this link is tagged with `pref`. Byte-identical to [`dial_face`] otherwise;
-/// the loop branches on `max_links` at each dial site.
+/// so the initiator offers the ext + captures the responder's ephemeral pubkey.
+/// Byte-identical to [`dial_face`] otherwise; the loop branches on `max_links` at
+/// each dial site.
 #[cfg(feature = "transport-multilink")]
 #[allow(clippy::too_many_arguments)]
 async fn dial_face_multilink(
     id: FaceId,
     target: MeshDialTarget,
     dial_config: Arc<DialConfig>,
-    pref: LinkReliabilityPref,
     offer: SessionOffer,
     band: (Priority, Priority),
     params: SessionInitParams,
@@ -1050,7 +987,6 @@ async fn dial_face_multilink(
             initiate_and_open_session_with_multilink(
                 link,
                 params,
-                pref,
                 offer,
                 band,
                 clock,
@@ -1071,10 +1007,10 @@ async fn dial_face_multilink(
 /// retained `SocketAddr`), it captures the SAME REMOTE ephemeral multilink pubkey
 /// the survivor is bound to, so `join_link`'s `authorize_link` config-equality
 /// (the candidate's captured-peer key vs the session's bound-peer key) passes —
-/// the identity is the PEER's key, not this node's. It re-tags its traffic class
-/// via `pref` AND its QoS-priority `band` (both the DEAD link's retained values,
-/// not `multilink_pref(new_id)` / `multilink_priority_range(new_id)` — the fresh
-/// id's parity may differ, which would flip the band and collapse the segregation).
+/// the identity is the PEER's key, not this node's. It re-stages its QoS-priority
+/// `band` (the DEAD link's retained value, not `multilink_priority_range(new_id)`
+/// — the fresh id's parity may differ, which would flip the band and collapse
+/// the segregation).
 /// Completes into the same `opening` -> [`Step::Opened`] -> JOIN path as an
 /// immediate multilink dial, so a successful re-dial aggregates onto the surviving
 /// shared core (`join_link`) and a failed one surfaces `Err` -> the Err arm
@@ -1086,7 +1022,6 @@ async fn dial_face_multilink_after(
     target: MeshDialTarget,
     dial_config: Arc<DialConfig>,
     backoff_ms: u64,
-    pref: LinkReliabilityPref,
     offer: SessionOffer,
     band: (Priority, Priority),
     params: SessionInitParams,
@@ -1098,7 +1033,6 @@ async fn dial_face_multilink_after(
         id,
         target,
         dial_config,
-        pref,
         offer,
         band,
         params,
@@ -1320,9 +1254,9 @@ fn schedule_redial(
 /// it by address rather than by link is not a compromise here — the two arms are
 /// mutually exclusive per failed id). Re-keys the retained endpoint to a fresh [`FaceId`] BEFORE
 /// the backoff (so the re-add is tracked across the drop->redial gap and the Err
-/// arm can retry it), carrying the DEAD link's `pref` AND its QoS-priority `band`
-/// so the re-added link restores BOTH its traffic class and its priority band (a
-/// fresh-id band would flip on parity and collapse the segregation). `announce`
+/// arm can retry it), carrying the DEAD link's QoS-priority `band` so the
+/// re-added link restores its priority band (a fresh-id band would flip on
+/// parity and collapse the segregation). `announce`
 /// controls the log level: the first re-add after a drop logs at `info` (an
 /// operator-visible link flap), retries at `debug`. The re-dial completes into the
 /// SAME `opening` -> [`Step::Opened`] JOIN path, so it aggregates onto the
@@ -1332,17 +1266,13 @@ fn schedule_redial(
 fn schedule_multilink_redial(
     target: MeshDialTarget,
     dial_config: &Arc<DialConfig>,
-    pref: LinkReliabilityPref,
     offer: SessionOffer,
     band: (Priority, Priority),
     // R2233 — the retained endpoint is the LOCATOR now, not a bare address: this
     // substrate has no `desired` map to look the dial plan up in (every retained
     // multilink endpoint is permanently wanted), so the plan has to travel with
     // the retention. Its key is the schedule's key.
-    ml_dial_endpoints: &mut BTreeMap<
-        FaceId,
-        (MeshDialTarget, LinkReliabilityPref, (Priority, Priority)),
-    >,
+    ml_dial_endpoints: &mut BTreeMap<FaceId, (MeshDialTarget, (Priority, Priority))>,
     redial: &mut RedialSchedule,
     opening: &mut FuturesUnordered<OpenFuture>,
     next_id: &mut u64,
@@ -1356,7 +1286,7 @@ fn schedule_multilink_redial(
     // Re-key the retained endpoint to the fresh id BEFORE the backoff, so the
     // re-add is tracked (a failed re-dial's Err arm finds it and retries).
     let addr = target.key.clone();
-    ml_dial_endpoints.insert(id, (target.clone(), pref, band));
+    ml_dial_endpoints.insert(id, (target.clone(), band));
     let backoff_ms = redial.next_ms(&addr, target.retry());
     if announce {
         log::info!(
@@ -1374,7 +1304,6 @@ fn schedule_multilink_redial(
         target,
         Arc::clone(dial_config),
         backoff_ms,
-        pref,
         offer,
         band,
         params.clone(),
@@ -2188,10 +2117,8 @@ where
     // a PARTIAL loss it can be re-dialed + re-JOINed onto the surviving session. An
     // ACCEPTED link has no entry (no re-dial owner — the peer re-dials it).
     #[cfg(feature = "transport-multilink")]
-    let mut ml_dial_endpoints: BTreeMap<
-        FaceId,
-        (MeshDialTarget, LinkReliabilityPref, (Priority, Priority)),
-    > = BTreeMap::new();
+    let mut ml_dial_endpoints: BTreeMap<FaceId, (MeshDialTarget, (Priority, Priority))> =
+        BTreeMap::new();
     let mut summary = AcceptLoopSummary::default();
     let mut opening: FuturesUnordered<OpenFuture> = FuturesUnordered::new();
     // R311y205 (transport-multilink) — an aggregating loop drives three distinct
@@ -2242,23 +2169,15 @@ where
         opening.push(if max_links > 1 {
             // R311y212 — retain the dial endpoint so a partial-loss re-add can
             // re-dial this link (aggregating dials only; a single-link seed is not
-            // re-added through this substrate). R311y219 — retain the pref AND the
-            // priority band so a re-add restores both (a fresh-id band would flip
-            // on parity). R2233 — retained BEFORE the dial consumes the plan, and
+            // re-added through this substrate). R311y219 — retain the priority
+            // band so a re-add restores it (a fresh-id band would flip on
+            // parity). R2233 — retained BEFORE the dial consumes the plan, and
             // it is the plan (scheme included) that is retained now.
-            ml_dial_endpoints.insert(
-                id,
-                (
-                    target.clone(),
-                    multilink_pref_for(id, &offer),
-                    multilink_priority_range(id),
-                ),
-            );
+            ml_dial_endpoints.insert(id, (target.clone(), multilink_priority_range(id)));
             Box::pin(dial_face_multilink(
                 id,
                 target,
                 Arc::clone(&dial_config),
-                multilink_pref_for(id, &offer),
                 offer,
                 multilink_priority_range(id),
                 params.clone(),
@@ -2327,7 +2246,7 @@ where
                             redial.forget(addr);
                         }
                         #[cfg(feature = "transport-multilink")]
-                        if let Some((target, _, _)) = ml_dial_endpoints.get(&id) {
+                        if let Some((target, _)) = ml_dial_endpoints.get(&id) {
                             redial.forget(&target.key);
                         }
                         // R311qi — capture the remote peer's zid (the routing
@@ -2561,11 +2480,10 @@ where
                         // so a both-features build never double-dials one id.
                         #[cfg(feature = "transport-multilink")]
                         let ml_handled = if max_links > 1 {
-                            if let Some((target, pref, band)) = ml_dial_endpoints.remove(&id) {
+                            if let Some((target, band)) = ml_dial_endpoints.remove(&id) {
                                 schedule_multilink_redial(
                                     target,
                                     &dial_config,
-                                    pref,
                                     offer,
                                     band,
                                     &mut ml_dial_endpoints,
@@ -2662,7 +2580,7 @@ where
                                 }
                                 on_event(&AcceptEvent::FaceDown(primary_face, outcome));
                             }
-                        } else if let Some((target, pref, band)) = dead {
+                        } else if let Some((target, band)) = dead {
                             // R311y212 — PARTIAL loss of a link THIS node DIALED:
                             // re-dial + re-JOIN it onto the surviving shared core so
                             // the aggregate returns to strength. The survivor is
@@ -2681,7 +2599,6 @@ where
                             schedule_multilink_redial(
                                 target,
                                 &dial_config,
-                                pref,
                                 offer,
                                 band,
                                 &mut ml_dial_endpoints,
@@ -2797,20 +2714,13 @@ where
                         opening.push(if max_links > 1 {
                             // R311y212 — retain the discovered-peer dial endpoint for
                             // partial-loss re-add (aggregating dials only). R311y219 —
-                            // retain the pref AND the priority band.
-                            ml_dial_endpoints.insert(
-                                id,
-                                (
-                                    target.clone(),
-                                    multilink_pref_for(id, &offer),
-                                    multilink_priority_range(id),
-                                ),
-                            );
+                            // retain the priority band.
+                            ml_dial_endpoints
+                                .insert(id, (target.clone(), multilink_priority_range(id)));
                             Box::pin(dial_face_multilink(
                                 id,
                                 target,
                                 Arc::clone(&dial_config),
-                                multilink_pref_for(id, &offer),
                                 offer,
                                 multilink_priority_range(id),
                                 params.clone(),
@@ -2849,20 +2759,13 @@ where
                                     dialed_targets.insert(id, target.key.clone());
                                     // R311y212 — retain the aggregation-relax dial
                                     // endpoint for partial-loss re-add. R311y219 —
-                                    // retain the pref AND the priority band.
-                                    ml_dial_endpoints.insert(
-                                        id,
-                                        (
-                                            target.clone(),
-                                            multilink_pref_for(id, &offer),
-                                            multilink_priority_range(id),
-                                        ),
-                                    );
+                                    // retain the priority band.
+                                    ml_dial_endpoints
+                                        .insert(id, (target.clone(), multilink_priority_range(id)));
                                     opening.push(Box::pin(dial_face_multilink(
                                         id,
                                         target,
                                         Arc::clone(&dial_config),
-                                        multilink_pref_for(id, &offer),
                                         offer,
                                         multilink_priority_range(id),
                                         params.clone(),
@@ -3045,7 +2948,6 @@ where
                         id,
                         peer,
                         accepted,
-                        multilink_pref_for(id, &offer),
                         offer,
                         multilink_priority_range(id),
                         params.clone(),
@@ -3555,82 +3457,6 @@ mod tests {
             hi_hi.wire_byte() + 1,
             lo_lo.wire_byte(),
             "the two bands are contiguous + non-overlapping (jointly cover 0..=7)"
-        );
-    }
-
-    /// `multilink_pref_for` chooses the segregation AXIS: with QoS ON every link is
-    /// UNIFORM Reliable (so the priority band is the `select_link` discriminant),
-    /// with QoS OFF it keeps the y205 even/odd reliability spread. A build WITHOUT
-    /// `transport-qos` never applies a band, so the QoS mode is inert there.
-    ///
-    /// R2096 (open-debt item 516) — the axis is read off a [`SessionOffer`] now.
-    /// The LowLatency arm is new with it and is not decoration: the exclusive
-    /// mode is a THIRD state the old `qos: bool` could not represent, and the
-    /// spread it must take is the non-QoS one. A `!= Universal` test written in
-    /// place of `== Qos` would pass every other assertion here.
-    #[cfg(feature = "transport-multilink")]
-    #[test]
-    fn multilink_pref_for_uniform_reliable_iff_qos() {
-        let plain = SessionOffer::universal();
-        // QoS OFF: the y205 even/odd reliability spread (matches multilink_pref).
-        assert_eq!(
-            multilink_pref_for(FaceId(0), &plain),
-            LinkReliabilityPref::Reliable
-        );
-        assert_eq!(
-            multilink_pref_for(FaceId(1), &plain),
-            LinkReliabilityPref::BestEffort
-        );
-        assert_eq!(
-            multilink_pref_for(FaceId(0), &plain),
-            multilink_pref(FaceId(0))
-        );
-        assert_eq!(
-            multilink_pref_for(FaceId(1), &plain),
-            multilink_pref(FaceId(1))
-        );
-        // A capability that is NOT the QoS mode must not move the axis: the
-        // reliability spread answers `mode == Qos`, not "is anything offered".
-        let compressing = SessionOffer::universal().with_compression(true);
-        assert_eq!(
-            multilink_pref_for(FaceId(1), &compressing),
-            LinkReliabilityPref::BestEffort,
-            "compression is orthogonal to the segregation axis"
-        );
-        // QoS ON: uniform Reliable (priority is the discriminant) — but ONLY when
-        // transport-qos compiles (else the band is never applied, so the mode is
-        // inert).
-        #[cfg(feature = "transport-qos")]
-        {
-            let qos = SessionOffer::universal().with_mode(TransportMode::Qos);
-            assert_eq!(
-                multilink_pref_for(FaceId(0), &qos),
-                LinkReliabilityPref::Reliable
-            );
-            assert_eq!(
-                multilink_pref_for(FaceId(1), &qos),
-                LinkReliabilityPref::Reliable,
-                "with qos ON the odd link is Reliable too (uniform), not BestEffort"
-            );
-        }
-        #[cfg(not(feature = "transport-qos"))]
-        {
-            let qos = SessionOffer::universal()
-                .with_mode(wz_session_core::transport_mode::TransportMode::Qos);
-            assert_eq!(
-                multilink_pref_for(FaceId(1), &qos),
-                LinkReliabilityPref::BestEffort,
-                "without transport-qos the QoS mode is inert: even/odd spread holds"
-            );
-        }
-        // The exclusive THIRD mode: lowlatency is not qos, so it keeps the y205
-        // spread in every build.
-        let lean = SessionOffer::universal()
-            .with_mode(wz_session_core::transport_mode::TransportMode::LowLatency);
-        assert_eq!(
-            multilink_pref_for(FaceId(1), &lean),
-            LinkReliabilityPref::BestEffort,
-            "the lean mode is not the QoS mode: the reliability spread holds"
         );
     }
 

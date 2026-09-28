@@ -21,8 +21,10 @@
 //! gate on B (the production loop is the system under test; node A is a manual
 //! traffic generator + link-death injector):
 //!   1. B aggregates A's two links into ONE session (`live_link_count() == 2`).
-//!   2. A reliable Put and a best-effort Put both arrive at B on DIFFERENT
-//!      physical faces (reliability segregation across the 2 links).
+//!   2. A reliable Put and a best-effort Put both arrive at B. R2943 — on ONE
+//!      face: both links are TCP, reliable by their protocol, and nothing
+//!      declares otherwise, so there is no best-effort link to segregate onto
+//!      (the name keeps its old word because the store cites it).
 //!   3. A third inbound link over `max_links` is rejected MAX_LINKS — B stays at
 //!      2 links and never registers a second session.
 //!   4. Killing one link leaves B's session alive on the other (failover): B's
@@ -42,7 +44,6 @@ use tokio::sync::watch;
 
 use wz_runtime_core::Runtime;
 use wz_runtime_tokio::accept_loop::{peer_loop, AcceptEvent, FaceForwarder, FaceId, FaceSources};
-use wz_runtime_tokio::config::LinkReliabilityPref;
 use wz_runtime_tokio::multilink::{join_link, JoinOutcome};
 use wz_runtime_tokio::retry_period::RetryPolicy;
 use wz_runtime_tokio::runtime_impl::{TokioRuntime, TokioTime};
@@ -157,11 +158,11 @@ async fn shutdown_on(mut go: watch::Receiver<bool>) {
 }
 
 /// Dial one OUTBOUND multilink link to `addr` (initiator side, 0x4-negotiating)
-/// and bring it to Established with the given traffic-class preference.
+/// and bring it to Established. R2943 — the link's reliability class is its
+/// protocol's (TCP: reliable); nothing is staged for it.
 async fn dial_multilink(
     addr: std::net::SocketAddr,
     init_zid: u8,
-    pref: LinkReliabilityPref,
     qos: bool,
     band: (Priority, Priority),
 ) -> OpenedSession {
@@ -169,7 +170,6 @@ async fn dial_multilink(
     initiate_and_open_session_with_multilink(
         DialedLink::Tcp(stream),
         fixture_params_with_zid(init_zid),
-        pref,
         // R2096 (open-debt item 516) — the entrypoint takes the whole
         // `SessionOffer` now. This file's axis is still the one boolean, so the
         // adapter lives here rather than as a second representation in the
@@ -289,24 +289,10 @@ async fn deploy_active_two_links_aggregate_segregate_reject_survive() {
 
     let b_state_h = b_state.clone();
     let harness = async move {
-        // Node A (manual traffic generator): dial B twice with distinct traffic-
-        // class prefs, aggregate the two OUTBOUND links, and retain a send handle.
-        let a1 = dial_multilink(
-            b_addr,
-            0x0A,
-            LinkReliabilityPref::Reliable,
-            false,
-            FULL_BAND,
-        )
-        .await;
-        let a2 = dial_multilink(
-            b_addr,
-            0x0A,
-            LinkReliabilityPref::BestEffort,
-            false,
-            FULL_BAND,
-        )
-        .await;
+        // Node A (manual traffic generator): dial B twice, aggregate the two
+        // OUTBOUND links, and retain a send handle.
+        let a1 = dial_multilink(b_addr, 0x0A, false, FULL_BAND).await;
+        let a2 = dial_multilink(b_addr, 0x0A, false, FULL_BAND).await;
         let a1_actions = a1.actions.clone();
         let a_joined = match join_link(&a1.actions, &a2.actions, 2) {
             JoinOutcome::Joined(h) => h,
@@ -331,15 +317,20 @@ async fn deploy_active_two_links_aggregate_segregate_reject_survive() {
             "B registered exactly ONE forwarder face (the second link joined, not a new session)"
         );
 
-        // Assertion 2 — a reliable Put and a best-effort Put ride DIFFERENT links.
-        // A's send routes reliable -> the Reliable-pref link, best-effort -> the
-        // BestEffort-pref link (segregation); B observes them on distinct faces.
+        // Assertion 2 — a reliable Put and a best-effort Put both reach B. R2943:
+        // both links are TCP, reliable by their protocol, and nothing declares
+        // otherwise, so there is no best-effort link and both Puts ride the
+        // first live one, as upstream's select sends them
+        // (`io/zenoh-transport/src/unicast/universal/tx.rs`
+        // @ `match_.full.or(match_.partial).or(match_.any)`). Before R2943 the
+        // deploy stamped an unadvertised class on each face and this asserted
+        // the two rode different links.
         a_send
             .send_push_literal("test/reliable", b"R1", true)
-            .expect("reliable Put routes onto the reliable-pref link");
+            .expect("reliable Put routes onto a reliable link");
         a_send
             .send_push_literal("test/besteffort", b"B1", false)
-            .expect("best-effort Put routes onto the best-effort-pref link");
+            .expect("best-effort Put falls back to a live link");
         assert!(
             poll_state(&b_state_h, Duration::from_secs(8), |s| {
                 s.deliveries.iter().any(|d| d.1) && s.deliveries.iter().any(|d| !d.1)
@@ -354,15 +345,15 @@ async fn deploy_active_two_links_aggregate_segregate_reject_survive() {
             let b = s.deliveries.iter().find(|d| !d.1).unwrap();
             (r.0, r.2, b.0)
         };
-        assert_ne!(
+        assert_eq!(
             reliable_face, best_effort_face,
-            "reliability SEGREGATION: the reliable and best-effort Puts arrived on DIFFERENT faces"
+            "two TCP links carry no class difference: both Puts arrived on one face"
         );
 
         // Assertion 3 — a THIRD inbound link over max_links is rejected MAX_LINKS.
         // B must never aggregate it (stays at 2 live links) nor register a second
         // session. Drive it so B can accept + reject it; B closes it MAX_LINKS.
-        let a3 = dial_multilink(b_addr, 0x0A, LinkReliabilityPref::Any, false, FULL_BAND).await;
+        let a3 = dial_multilink(b_addr, 0x0A, false, FULL_BAND).await;
         let a3_actions = a3.actions.clone();
         let a3_task = spawn_drive(a3, a3_actions);
         // Give B time to accept + reject the third link, then confirm it never
@@ -380,7 +371,7 @@ async fn deploy_active_two_links_aggregate_segregate_reject_survive() {
         );
         a3_task.abort();
 
-        // Assertion 4 — kill link 1 (the reliable-pref link). Aborting its drive +
+        // Assertion 4 — kill link 1 (the one both Puts rode). Aborting its drive +
         // dropping A's references to its LinkState closes the socket, so B's loop
         // sees the link die and del_links it (failover): B survives on link 2.
         a1_task.abort();
@@ -396,7 +387,7 @@ async fn deploy_active_two_links_aggregate_segregate_reject_survive() {
             "B's session SURVIVES the link death on its other link (live_link_count == 1)"
         );
 
-        // A subsequent reliable Put fails over onto the surviving (best-effort-pref)
+        // A subsequent reliable Put fails over onto the surviving
         // link and still reaches B, on the OTHER face, with a CONTINUOUS RX SN
         // (shared SN generator + shared per-channel rx-SN gate, not a per-link reset).
         a_send
@@ -433,14 +424,7 @@ async fn deploy_active_two_links_aggregate_segregate_reject_survive() {
         // to 2). This exercises the join-after-link-death path — whichever face was
         // the primary, the session is resolved from its STABLE core handle, never a
         // per-link entry that teardown removed.
-        let a4 = dial_multilink(
-            b_addr,
-            0x0A,
-            LinkReliabilityPref::Reliable,
-            false,
-            FULL_BAND,
-        )
-        .await;
+        let a4 = dial_multilink(b_addr, 0x0A, false, FULL_BAND).await;
         let a4_actions = a4.actions.clone();
         let a4_task = spawn_drive(a4, a4_actions);
         assert!(
@@ -577,8 +561,8 @@ async fn deploy_active_dial_side_aggregates_through_the_loop() {
 }
 
 /// R311y219 (transport-multilink + transport-qos) — the DEPLOY-active priority-band
-/// segregation gate: the PRIORITY twin of the assertion-2 reliability segregation in
-/// [`deploy_active_two_links_aggregate_segregate_reject_survive`]. With QoS
+/// segregation gate, beside [`deploy_active_two_links_aggregate_segregate_reject_survive`]
+/// (whose reliability segregation R2943 retired with the per-face class). With QoS
 /// negotiated on a 2-link aggregate, an EXPRESS (Control-priority) Put and a LOW
 /// (Background-priority) Put ride DIFFERENT physical links — proving
 /// [`SessionCore::select_link`]'s priority (full) tier is reachable through the
@@ -604,8 +588,8 @@ async fn deploy_active_dial_side_aggregates_through_the_loop() {
 /// uses) + `select_link` over real TCP, proving distinct-priority Puts SEGREGATE
 /// onto two distinct physical links. It does NOT prove (a) the specific band->link
 /// mapping (the y217 recording-driver unit, `multilink.rs`), nor (b) the production
-/// loop's PER-ID auto-assignment (`multilink_priority_range` / `multilink_pref_for`
-/// at the dial/accept sites) driving a ROUTING decision — A is a manual generator
+/// loop's PER-ID auto-assignment (`multilink_priority_range` at the dial sites)
+/// driving a ROUTING decision — A is a manual generator
 /// passing EXPLICIT bands, so those helpers are proven here only by the accept_loop
 /// unit tests; the loop-auto-assigned routing observed over the wire needs a
 /// prioritized publish path and is deferred to y219b.
@@ -665,8 +649,8 @@ async fn deploy_active_qos_priority_segregates_across_links() {
         // code path the deploy accept/dial sites drive.
         const HIGH: (Priority, Priority) = (Priority::Control, Priority::InteractiveLow);
         const LOW: (Priority, Priority) = (Priority::DataHigh, Priority::Background);
-        let a1 = dial_multilink(b_addr, 0x0A, LinkReliabilityPref::Reliable, true, HIGH).await;
-        let a2 = dial_multilink(b_addr, 0x0A, LinkReliabilityPref::Reliable, true, LOW).await;
+        let a1 = dial_multilink(b_addr, 0x0A, true, HIGH).await;
+        let a2 = dial_multilink(b_addr, 0x0A, true, LOW).await;
         let a1_actions = a1.actions.clone();
         let a_joined = match join_link(&a1.actions, &a2.actions, 2) {
             JoinOutcome::Joined(h) => h,

@@ -1069,21 +1069,6 @@ impl Default for WzConfig {
     }
 }
 
-/// R311y205 (transport-multilink) — the per-link reliability preference the
-/// dial / accept path attaches to a physical link so the aggregation core
-/// segregates traffic classes across the aggregated links (the wz analogue of
-/// zenoh's per-channel `select`): the reliable channel prefers the `Reliable`
-/// link, the best-effort channel the `BestEffort` link, `Any` (default) the
-/// failover pool.
-///
-/// IMPL-2b — re-exported from the no_std session kernel, where
-/// [`LinkState`](wz_session_core::session_actions::LinkState) actually stores it
-/// (the reliability-routed `select_link` reads it), so the AP config surface and
-/// the kernel agree by construction (ONE type, no conversion at the
-/// `set_link_reliability_pref` seam).
-#[cfg(feature = "transport-multilink")]
-pub use wz_session_core::session_actions::LinkReliabilityPref;
-
 /// R311y217 (transport-multilink + transport-qos) — the per-link QoS-priority band
 /// the dial / accept path attaches to a physical link so the aggregation core pins
 /// each `(priority, reliability)` conduit to ONE link (the priority tier of

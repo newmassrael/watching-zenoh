@@ -52,6 +52,10 @@ pub(crate) struct RecordingLinkDriver {
     /// `frames`: what `send_prioritized` was handed, or `Priority::DEFAULT`
     /// for a bare `send_blocking`.
     priorities: Mutex<Vec<wz_session_core::qos::Priority>>,
+    /// R2943 — the link this recorder stands for, when a test needs one:
+    /// egress selection reads a link's intrinsic reliability class off its
+    /// kind. `None` (the default) is a driver that names no kind.
+    subject: Option<wz_session_core::link::LinkSubject>,
 }
 
 impl RecordingLinkDriver {
@@ -136,6 +140,37 @@ impl BoxedLinkDriver for RecordingLinkDriver {
     }
     fn open_blocking(&self) {}
     fn close_blocking(&self) {}
+    fn link_subject(&self) -> Option<&wz_session_core::link::LinkSubject> {
+        self.subject.as_ref()
+    }
+}
+
+/// R2943 — [`recording_actions`] over a recorder that stands for a link of
+/// `kind`, so egress selection sees that link's intrinsic reliability class.
+/// Gated like its sole consumer, `multilink`'s `joined_qos_pair`.
+#[cfg(all(
+    feature = "transport-multilink",
+    feature = "transport-qos",
+    feature = "codec-push",
+    feature = "codec-close"
+))]
+pub(crate) fn recording_actions_over(
+    kind: wz_session_core::link::LinkKind,
+) -> (Arc<SessionLinkActions>, Arc<RecordingLinkDriver>) {
+    let driver = Arc::new(RecordingLinkDriver {
+        frames: Mutex::new(Vec::new()),
+        priorities: Mutex::new(Vec::new()),
+        subject: Some(wz_session_core::link::LinkSubject {
+            kind: Some(kind),
+            ..wz_session_core::link::LinkSubject::UNKNOWN
+        }),
+    });
+    let actions = new_session_actions(
+        driver.clone(),
+        fixture_session_init_params(),
+        TokioTime::new(),
+    );
+    (actions, driver)
 }
 
 /// Build a [`SessionLinkActions`] backed by a fresh [`RecordingLinkDriver`]
@@ -168,6 +203,7 @@ pub(crate) fn recording_driver() -> Arc<RecordingLinkDriver> {
     Arc::new(RecordingLinkDriver {
         frames: Mutex::new(Vec::new()),
         priorities: Mutex::new(Vec::new()),
+        subject: None,
     })
 }
 

@@ -4848,8 +4848,8 @@ pub async fn initiate_and_open_session_with_auth(
 /// R311y205 (transport-multilink) — [`initiate_and_open_session`] negotiating the
 /// 0x4 Z_EXT_MULTILINK aggregation ext (the deploy set `max_links > 1`): installs
 /// the OPEN-side ephemeral-pubkey dispatch (so the InitSyn / OpenSyn carry the 0x4
-/// ext and the initiator captures the responder's ephemeral pubkey) and tags this
-/// physical link's `reliability_pref` before the handshake drives. The additive
+/// ext and the initiator captures the responder's ephemeral pubkey) and stages
+/// this physical link's priority band before the handshake drives. The additive
 /// multilink-on sibling of the bare open. Initiator side; the acceptor mirrors via
 /// [`accept_and_open_session_with_multilink`].
 ///
@@ -4874,7 +4874,6 @@ pub async fn initiate_and_open_session_with_auth(
 pub async fn initiate_and_open_session_with_multilink(
     connected: DialedLink,
     params: SessionInitParams,
-    reliability_pref: crate::config::LinkReliabilityPref,
     offer: SessionOffer,
     band: (Priority, Priority),
     clock: TokioTime,
@@ -4887,7 +4886,6 @@ pub async fn initiate_and_open_session_with_multilink(
         offer,
         |actions| {
             actions.install_multilink_dispatch(crate::multilink::open_multilink_dispatch());
-            actions.set_link_reliability_pref(reliability_pref);
             stage_link_priority_band(actions, &offer, band, LinkEnd::Dialled);
             Ok(())
         },
@@ -5096,12 +5094,13 @@ where
 ///
 /// Both capability-aware initiator entrypoints run through here:
 /// [`initiate_and_open_session_with_offer`] stages nothing extra, and
-/// [`initiate_and_open_session_with_multilink`] stages the 0x4 dispatch, the
-/// link's reliability preference and its QoS-priority band. That split is the
-/// [`SessionOffer`] doc's own line drawn in code — the offer is the SSOT for
-/// "which capability exts does the InitSyn carry", and multilink / reliability
-/// pref / priority band are deliberately NOT in it because they are not
-/// negotiated that way.
+/// [`initiate_and_open_session_with_multilink`] stages the 0x4 dispatch and the
+/// link's QoS-priority band. That split is the [`SessionOffer`] doc's own line
+/// drawn in code — the offer is the SSOT for "which capability exts does the
+/// InitSyn carry", and multilink / the per-link band are deliberately NOT in it
+/// because they are per physical link, not per session. R2943 — a link's
+/// reliability class is no longer staged at all: it is the link's intrinsic
+/// class unless a negotiation declares one.
 ///
 /// It exists because item 516 was the cost of NOT having it. The aggregating
 /// entrypoint was written as a sibling rather than a caller, so it carried its
@@ -5411,7 +5410,7 @@ pub async fn accept_and_open_session_with_auth(
 /// 0x4 Z_EXT_MULTILINK aggregation ext: installs the ACCEPT-side ephemeral-pubkey
 /// dispatch (key-lookup disabled — accept any initiator key), draws a FRESH
 /// per-handshake challenge nonce from OS entropy at the seam (the responder
-/// replay-defense, by construction), and tags this link's `reliability_pref`. The
+/// replay-defense, by construction), and stages this link's band end. The
 /// responder reflects the 0x4 ext in InitAck / OpenAck iff the peer offered it and
 /// captures the initiator's ephemeral pubkey. Accept-side twin of
 /// [`initiate_and_open_session_with_multilink`].
@@ -5430,7 +5429,6 @@ pub async fn accept_and_open_session_with_auth(
 pub async fn accept_and_open_session_with_multilink(
     accepted: DialedLink,
     params: SessionInitParams,
-    reliability_pref: crate::config::LinkReliabilityPref,
     offer: SessionOffer,
     band: (Priority, Priority),
     clock: TokioTime,
@@ -5443,7 +5441,6 @@ pub async fn accept_and_open_session_with_multilink(
         offer,
         |actions| {
             actions.install_multilink_dispatch(crate::multilink::accept_multilink_dispatch());
-            actions.set_link_reliability_pref(reliability_pref);
             stage_link_priority_band(actions, &offer, band, LinkEnd::Accepted);
             // R2783 — no challenge is drawn here any more. The session draws
             // the 0x4 method's challenge at InitAck from the entropy source

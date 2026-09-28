@@ -97,7 +97,6 @@ use std::time::Duration;
 
 use tokio::net::{TcpListener, TcpStream};
 
-use wz_runtime_tokio::config::LinkReliabilityPref;
 use wz_runtime_tokio::multilink::{join_link, JoinOutcome};
 use wz_runtime_tokio::runtime_impl::TokioTime;
 use wz_runtime_tokio::session_open::{
@@ -253,7 +252,6 @@ async fn open_link(
         accept_and_open_session_with_multilink(
             DialedLink::Tcp(stream),
             fixture_params_with_zid(acc_zid),
-            LinkReliabilityPref::Reliable,
             // R2096 (open-debt item 516) — the whole offer, where this took a
             // bare `qos: bool`. The zero offer is what `false` meant: this file
             // measures Close SCOPE over an aggregation, so the handshake stays
@@ -272,7 +270,6 @@ async fn open_link(
         initiate_and_open_session_with_multilink(
             DialedLink::Tcp(stream),
             fixture_params_with_zid(init_zid),
-            LinkReliabilityPref::Reliable,
             SessionOffer::universal(),
             (Priority::Control, Priority::Background),
             TokioTime::new(),

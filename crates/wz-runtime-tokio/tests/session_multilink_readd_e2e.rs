@@ -38,7 +38,6 @@ use tokio::net::TcpListener;
 use tokio::sync::watch;
 
 use wz_runtime_tokio::accept_loop::{peer_loop, AcceptEvent, FaceForwarder, FaceId, FaceSources};
-use wz_runtime_tokio::config::LinkReliabilityPref;
 use wz_runtime_tokio::retry_period::RetryPolicy;
 use wz_runtime_tokio::runtime_impl::TokioTime;
 use wz_runtime_tokio::session_glue::{drive_session_until_terminal, SessionLinkActions};
@@ -188,7 +187,6 @@ async fn readd_dialed_link_auto_reconnects_onto_surviving_session() {
             let opened = match accept_and_open_session_with_multilink(
                 DialedLink::Tcp(stream),
                 fixture_params_with_zid(0x0B),
-                LinkReliabilityPref::Any,
                 // R2096 (open-debt item 516) — the whole offer, where this took
                 // a bare `qos: bool`. The zero offer is what `false` meant, and
                 // it is what this suite wants: it measures the re-ADD, not a

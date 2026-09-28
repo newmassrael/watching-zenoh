@@ -5381,7 +5381,10 @@ layer_c1bb_cargo_test_qos() {
     # pinned an UNADVERTISED band's survival is gone, replaced by two that pin
     # its opposite (only a declared band outlives a metadata-less peer; a NoQoS
     # peer leaves no band). MEASURED: 12 passed on this command.
-    _runci_guarded_test C1bb 12 cargo test -p wz-runtime-tokio --features transport-qos,session-extqos,transport-multilink,transport-batching,codec-push,codec-close,transport-unicast --lib multilink:: --quiet \
+    # R2943 — 12 -> 13: `an_undeclared_link_is_in_its_protocols_class`, a
+    # UDP and a TCP link split by their protocols' classes with nothing
+    # declared. MEASURED: 13 passed on this command.
+    _runci_guarded_test C1bb 13 cargo test -p wz-runtime-tokio --features transport-qos,session-extqos,transport-multilink,transport-batching,codec-push,codec-close,transport-unicast --lib multilink:: --quiet \
         || return 1
     # R311y835 — the per-priority TX staging + strict-priority drain. `batch_tx_tests`
     # otherwise rides the DEFAULT Layer C1 workspace run, and `transport-qos` is not a
@@ -6968,7 +6971,11 @@ layer_c1ba_cargo_clippy_transport_multilink() {
     # the accepted end adopts it, over real loopback TCP with the two ends
     # handed opposite halves of the split. 7 -> 8 is that case; without this
     # arm it is compiled out of every run. MEASURED: 8 passed on this command.
-    _runci_guarded_test C1ba 8 cargo test -p wz-runtime-tokio --no-default-features --features "$ML_FEATURES,transport-qos,session-extqos" --test session_multilink_e2e --quiet \
+    # R2943 — 8 -> 9: `declared_reliability_segregates_two_tcp_links`, two TCP
+    # links split by a DECLARED class (upstream's `rel=`), the only way two
+    # links of one protocol segregate once a link's class is its protocol's.
+    # MEASURED: 9 passed on this command.
+    _runci_guarded_test C1ba 9 cargo test -p wz-runtime-tokio --no-default-features --features "$ML_FEATURES,transport-qos,session-extqos" --test session_multilink_e2e --quiet \
         || return 1
     _runci_guarded_test C1ba 2 cargo test -p wz-runtime-tokio --no-default-features --features "$ML_DEPLOY_FEATURES" --test session_multilink_deploy_e2e --quiet \
         || return 1
@@ -6987,12 +6994,15 @@ layer_c1ba_cargo_clippy_transport_multilink() {
         || return 1
     _runci_guarded_test C1ba 5 cargo test -p wz-runtime-tokio --no-default-features --features "$ML_FEATURES" --lib multilink --quiet \
         || return 1
-    # R311y219a — the per-face priority-band + reliability-axis POLICY unit
-    # tests live in accept_loop::tests (gated transport-multilink) inside the
-    # routing-accept/peer-gated module, so they need BOTH multilink AND the
-    # module gate to compile+run. No prior --lib lane combined them, so they
-    # were CI-invisible; ML_DEPLOY_FEATURES has both.
-    _runci_guarded_test C1ba 2 cargo test -p wz-runtime-tokio --no-default-features --features "$ML_DEPLOY_FEATURES" --lib --quiet -- multilink_priority_range multilink_pref_for \
+    # R311y219a — the per-face priority-band POLICY unit test lives in
+    # accept_loop::tests (gated transport-multilink) inside the
+    # routing-accept/peer-gated module, so it needs BOTH multilink AND the
+    # module gate to compile+run. No prior --lib lane combined them, so it
+    # was CI-invisible; ML_DEPLOY_FEATURES has both. R2943 — 2 -> 1: the
+    # reliability-axis policy (`multilink_pref_for`) is retired with the
+    # per-face class it chose; a link's class is its protocol's unless a
+    # negotiation declares one.
+    _runci_guarded_test C1ba 1 cargo test -p wz-runtime-tokio --no-default-features --features "$ML_DEPLOY_FEATURES" --lib --quiet -- multilink_priority_range \
         || return 1
     _runci_guarded_test C1ba 3 cargo test -p wz-session-core --no-default-features --features alloc,transport-multilink,session-unicast,codec-push,codec-close --lib extmultilink --quiet \
         || return 1

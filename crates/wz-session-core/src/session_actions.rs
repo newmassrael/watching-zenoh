@@ -1528,25 +1528,20 @@ pub struct LinkState<R: SessionRuntime> {
     /// (`_Z_ERR_TRANSPORT_NOT_AVAILABLE`); the handshake / CLOSE
     /// transport messages bypass the chokepoint and stay ungated.
     pub transport_available: R::Mutex<bool>,
-    /// R311y205 (transport-multilink IMPL-2b-iii) — this physical link's traffic-
-    /// class preference, set at dial / accept config time. The reliability-routed
-    /// send seam ([`SessionCore::select_link`]) picks the [`Reliable`]-pref link
-    /// for the reliable channel and the [`BestEffort`]-pref link for the
-    /// best-effort channel (the wz mirror of zenoh's per-channel `select` over
-    /// `(reliability, priority)`); [`Any`] links are the failover pool. Additive
-    /// per-link field, so it changes no accessor signature.
+    /// R2943 (transport-multilink) — the reliability class this link DECLARED
+    /// and negotiated, zenoh's `link.config.reliability`: `None` until a
+    /// negotiation settles one. It is the first of the two inputs
+    /// [`Self::reliability`] reads; the second is the link's intrinsic class,
+    /// so an undeclared link still has a class, as upstream's does
+    /// (`io/zenoh-transport/src/unicast/universal/tx.rs`
+    /// @ `.unwrap_or(Reliability::from(tl.link.link.is_reliable())),`).
     ///
-    /// [`Reliable`]: LinkReliabilityPref::Reliable
-    /// [`BestEffort`]: LinkReliabilityPref::BestEffort
-    /// [`Any`]: LinkReliabilityPref::Any
-    ///
-    /// Interior-mutable so the AP dial / accept path sets it at bring-up (through
-    /// the shared `R::Shared<LinkState>` handle, before the drive loop spins) via
-    /// [`SessionLinkActions::set_link_reliability_pref`] — the same
-    /// config-at-bringup discipline as `set_lowlatency_offer`. `Default` (`Any`)
-    /// until set.
+    /// Before R2943 this was a `LinkReliabilityPref` the deploy assigned per
+    /// face and never advertised, defaulting to a "no preference" upstream has
+    /// no word for — the reliability half of the two-source class R2941 closed
+    /// for the band.
     #[cfg(feature = "transport-multilink")]
-    pub reliability_pref: R::Mutex<LinkReliabilityPref>,
+    pub declared_reliability: R::Mutex<Option<Reliability>>,
     /// R311y217 (transport-multilink + transport-qos) — the QoS-priority band this
     /// link carries, so [`SessionCore::select_link`] pins each `(priority,
     /// reliability)` conduit to ONE link (the priority tier of zenoh's per-channel
@@ -1556,7 +1551,7 @@ pub struct LinkState<R: SessionRuntime> {
     /// `any`/first-alive failover tier), never a `full` priority match. Set at
     /// bring-up via
     /// [`SessionLinkActions::set_link_priority_range`], the same
-    /// config-at-bringup discipline as [`Self::reliability_pref`]. Additive
+    /// slot discipline as [`Self::declared_reliability`]. Additive
     /// per-link field; changes no accessor signature.
     #[cfg(all(feature = "transport-multilink", feature = "transport-qos"))]
     pub priority_range: R::Mutex<Option<LinkPriorityRange>>,
@@ -1570,27 +1565,6 @@ pub struct LinkState<R: SessionRuntime> {
     /// partition and means nothing in another.
     #[cfg(feature = "transport-stats")]
     pub stats_slot: R::Mutex<Option<crate::stats_registry::LinkSlot>>,
-}
-
-/// R311y205 (transport-multilink IMPL-2b-iii) — the traffic-class preference a
-/// physical link carries into the aggregation core, so the reliability-routed
-/// send seam ([`SessionCore::select_link`]) can segregate the reliable channel
-/// onto one link and the best-effort channel onto another (the wz mirror of
-/// zenoh's per-channel `select`). Defined in the no_std session kernel (where
-/// [`LinkState`] stores it) and re-exported by the AP config surface
-/// (`wz_runtime_tokio::config::LinkReliabilityPref`), so the two agree by
-/// construction. [`Any`](Self::Any) — the default — expresses NO preference
-/// (the homogeneous single-link / failover pool).
-#[cfg(feature = "transport-multilink")]
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum LinkReliabilityPref {
-    /// Prefer this link for the RELIABLE channel.
-    Reliable,
-    /// Prefer this link for the BEST-EFFORT channel.
-    BestEffort,
-    /// No preference — eligible for either channel (the failover default).
-    #[default]
-    Any,
 }
 
 /// R311y217 (transport-multilink + transport-qos) — the inclusive QoS-priority
@@ -1701,6 +1675,34 @@ impl<R: SessionRuntime> LinkState<R> {
     /// from [`SessionLinkActions::link_driver`], which forwards to this.
     fn link_driver(&self) -> &dyn BoxedLinkDriver {
         R::link_driver(&self.driver)
+    }
+
+    /// R2943 — the reliability class egress selection matches this link on:
+    /// the class it declared and negotiated, else the link's INTRINSIC class,
+    /// the one its protocol delivers (`io/zenoh-transport/src/unicast/universal/tx.rs`
+    /// @ `.unwrap_or(Reliability::from(tl.link.link.is_reliable())),`).
+    ///
+    /// The intrinsic class is read off the driver's
+    /// [`LinkSubject::kind`](crate::link::LinkSubject::kind) — the same fact
+    /// zenoh-c's `z_link_reliability` answers from, so the two cannot disagree.
+    /// A driver that names no kind (a test double) has no intrinsic class, and
+    /// an undeclared link over it is `None`: it matches neither class and is
+    /// only ever the any-tier fallback, which is fail-closed rather than a
+    /// guess.
+    #[cfg(feature = "transport-multilink")]
+    fn reliability(&self) -> Option<Reliability> {
+        R::with_mutex_mut(&self.declared_reliability, |d| *d).or_else(|| {
+            self.link_driver()
+                .link_subject()
+                .and_then(|s| s.kind)
+                .map(|kind| {
+                    if kind.is_reliable() {
+                        Reliability::Reliable
+                    } else {
+                        Reliability::BestEffort
+                    }
+                })
+        })
     }
 }
 
@@ -2041,7 +2043,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                 last_outbound_at: R::new_mutex(None::<u64>),
                 transport_available: R::new_mutex(true),
                 #[cfg(feature = "transport-multilink")]
-                reliability_pref: R::new_mutex(LinkReliabilityPref::default()),
+                declared_reliability: R::new_mutex(None),
                 #[cfg(all(feature = "transport-multilink", feature = "transport-qos"))]
                 priority_range: R::new_mutex(None),
                 #[cfg(feature = "transport-stats")]
@@ -3782,18 +3784,19 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         R::with_mutex_mut(&self.multilink_pubkey, |slot| slot.clone())
     }
 
-    /// Set this binding's link reliability preference at bring-up (before the
-    /// drive loop spins), through the shared `R::Shared<LinkState>` handle — the
-    /// `set_lowlatency_offer` config-at-bringup discipline. Read by
-    /// [`Self::select_link`] to segregate the reliable / best-effort channels.
+    /// R2943 — write this link's DECLARED reliability class, the egress twin of
+    /// [`Self::set_link_priority_range`]: the negotiation's outcome is what
+    /// writes it (`settle_qos_link`), and `None` returns the link to its
+    /// intrinsic class. [`SessionCore::select_link`] reads the pair through
+    /// `LinkState::reliability`.
     #[cfg(feature = "transport-multilink")]
-    pub fn set_link_reliability_pref(&self, pref: LinkReliabilityPref) {
-        R::with_mutex_mut(&self.link.reliability_pref, |s| *s = pref);
+    pub fn set_link_reliability(&self, declared: Option<Reliability>) {
+        R::with_mutex_mut(&self.link.declared_reliability, |s| *s = declared);
     }
 
     /// R311y217 — set this binding's link QoS-priority band at bring-up (before
     /// the drive loop spins), through the shared `R::Shared<LinkState>` handle —
-    /// the `set_link_reliability_pref` config-at-bringup discipline. Read by
+    /// the [`Self::set_link_reliability`] slot discipline. Read by
     /// [`Self::select_link`] to pin each `(priority, reliability)` conduit to one
     /// link. `None` clears the band (reliability-only, partial-tier candidate).
     #[cfg(all(feature = "transport-multilink", feature = "transport-qos"))]
@@ -3839,7 +3842,8 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// EMPTY (a single-link, non-aggregating session — [`Self::send_wire`] then
     /// uses `self.link`) OR when every link is dead (the send then falls through
     /// to `self.link`, whose F2 gate rejects it typed). Reads each link's
-    /// `transport_available` (liveness) + `reliability_pref` under their mutexes.
+    /// `transport_available` (liveness) + its reliability class
+    /// (`LinkState::reliability`) under their mutexes.
     ///
     /// R311y205 (slice-1 MF-E) — gated on the EXACT codec union of its sole caller
     /// [`Self::send_wire`]: codec-close + transport-keepalive are EXCLUDED (those
@@ -3875,10 +3879,6 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         if links.is_empty() {
             return None;
         }
-        let want = match reliability {
-            Reliability::Reliable => LinkReliabilityPref::Reliable,
-            Reliability::BestEffort => LinkReliabilityPref::BestEffort,
-        };
         // A non-qos build carries no per-link priority band, so selection degrades
         // to the reliability-only 2-tier (byte-identical to pre-y217); `priority`
         // is then unused (workspace warnings=deny).
@@ -3899,12 +3899,11 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             if first_alive.is_none() {
                 first_alive = Some(l);
             }
-            if R::with_mutex_mut(&l.reliability_pref, |p| *p) != want {
-                // Wrong reliability class -> only ever a first-alive fallback
-                // (LinkReliabilityPref::Any never equals `want`, so it lands here
-                // too — the failover pool, matching the pre-y217 contract and
+            if l.reliability() != Some(reliability) {
+                // Wrong reliability class -> only ever a first-alive fallback,
                 // zenoh's concrete-reliability primacy: a non-matching link can
-                // never be a full/partial pick).
+                // never be a full/partial pick. A link with no class at all (a
+                // driver that names no kind, nothing declared) lands here too.
                 continue;
             }
             // Reliability matches. In a qos build a covering band promotes this
@@ -4808,14 +4807,14 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// `None` outcome now means what it means upstream: neither end declared a
     /// band, or the session is NoQoS.
     ///
-    /// The reliability half still applies only a `Some` outcome, and that is a
-    /// residual, not fidelity: wz's [`LinkReliabilityPref::Any`] is "no
-    /// preference", whereas zenoh's undeclared case falls back to the link's
-    /// INTRINSIC class
-    /// (`config.reliability.unwrap_or(Reliability::from(link.is_reliable()))`),
-    /// and the multilink deploy still assigns a reliability class per face that
-    /// it does not advertise. Writing `None` through before that has an answer
-    /// would erase a class with nothing faithful to replace it.
+    /// R2943 — the reliability half is written through the same way. A `None`
+    /// outcome returns the link to its INTRINSIC class, the one its protocol
+    /// delivers, which is upstream's own fallback
+    /// (`io/zenoh-transport/src/unicast/universal/tx.rs`
+    /// @ `.unwrap_or(Reliability::from(tl.link.link.is_reliable())),`). Until
+    /// R2943 wz had no intrinsic class to fall back to — a link's class was a
+    /// deploy-assigned preference defaulting to "none" — so only a `Some`
+    /// outcome could be applied.
     #[cfg(all(
         feature = "session-extqos",
         any(
@@ -4827,12 +4826,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     ))]
     fn apply_negotiated_qos_to_link(&self, merged: &crate::extqos::QosLinkState) {
         self.set_link_priority_range(merged.priorities);
-        if let Some(reliability) = merged.reliability {
-            self.set_link_reliability_pref(match reliability {
-                crate::reliability::Reliability::Reliable => LinkReliabilityPref::Reliable,
-                crate::reliability::Reliability::BestEffort => LinkReliabilityPref::BestEffort,
-            });
-        }
+        self.set_link_reliability(merged.reliability);
     }
 
     /// Non-multilink twin of [`Self::apply_negotiated_qos_to_link`]. A session
