@@ -145,7 +145,7 @@ async fn wz_subscriber_admits_pico_multicast_push() {
         });
     }
 
-    let (_hold, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    let producer = wz_runtime_tokio::multicast_glue::MulticastTxProducer::new();
     let clock = TokioTime::new();
     let drive = drive_multicast_session(
         &mut dispatcher,
@@ -158,7 +158,7 @@ async fn wz_subscriber_admits_pico_multicast_push() {
         &mut driver,
         &clock,
         |event| observer.dispatch_event(event),
-        &mut rx,
+        &producer,
     );
 
     // ── pico z_pub (multicast peer + publisher) ──────────────────────

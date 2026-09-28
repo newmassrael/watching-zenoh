@@ -23,44 +23,76 @@
 mod tests {
     use std::sync::Arc;
 
-    use wz_runtime_tokio::multicast_glue::MulticastTxItem;
+    use wz_runtime_tokio::multicast_glue::MulticastTxTap;
     use wz_runtime_tokio::observer::ApplicationLayerObserver;
     use wz_runtime_tokio::runtime_impl::TokioTime;
     use wz_runtime_tokio::session::{PublishOptions, TokioMulticastSession};
+    use wz_session_core::network_message::NetworkMessage;
 
-    /// A multicast `Session::publish` builds a `MulticastTxItem::Push` (Put)
-    /// and enqueues exactly one onto the TX seam the drive loop drains — the
-    /// multicast analogue of the unicast publish wire leg, proving the unified
-    /// `Session` API reaches the multicast transport (the Level B north star).
-    /// The drive-loop framing of that queued item is covered separately by
-    /// `wz_runtime_tokio::multicast_glue`'s
-    /// `drive_loop_frames_queued_push` test; this asserts the new B3 wiring —
-    /// `publish` builds the right item and enqueues it onto the session's
-    /// transport sender.
-    #[test]
-    fn multicast_session_publish_enqueues_one_put_push() {
-        // The Session owns the sender; the drive loop would drain the receiver.
-        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<MulticastTxItem>();
-        let session: TokioMulticastSession = TokioMulticastSession::new_multicast(
+    /// R2931 — a multicast `Session` over a group whose pipeline the test
+    /// reads: the session pushes onto it on the caller's thread, and what it
+    /// pushed is read back as the group datagrams a transmit task would write.
+    fn tapped_session() -> (TokioMulticastSession, MulticastTxTap) {
+        let params = wz_session_core::multicast_params::MulticastParams {
+            version: 0x09,
+            whatami: wz_session_core::WhatAmI::Peer,
+            zid: vec![0xAA, 0xBB, 0xCC, 0xDD],
+            lease_ms: 5_000,
+            join_interval_ms: 100,
+            seq_num_res: 0x02,
+            req_id_res: 0x02,
+            batch_size: 2_048,
+            is_qos: false,
+            tx_queue: wz_session_core::session_init_params::TxQueueConf::default(),
+        };
+        let (producer, tap) = MulticastTxTap::attach(&params);
+        let session = TokioMulticastSession::new_multicast(
             Arc::new(wz_runtime_tokio::sync::Mutex::new(
                 ApplicationLayerObserver::new(),
             )),
             Arc::new(TokioTime::new()),
-            tx,
+            producer,
         );
+        (session, tap)
+    }
+
+    /// The network messages in the next group datagram, if one was pushed.
+    fn next_pushed(tap: &mut MulticastTxTap) -> Option<Vec<NetworkMessage>> {
+        use wz_session_core::inbound::{parse_inbound, InboundFrame};
+        let datagram = tap.try_next()?;
+        let Ok(InboundFrame::Frame { payload, .. }) = parse_inbound(&datagram) else {
+            panic!("a pushed datagram that is not a Frame");
+        };
+        Some(
+            wz_session_core::network_message::parse_frame_payload(&payload)
+                .expect("the pushed frame's payload parses"),
+        )
+    }
+
+    /// A multicast `Session::publish` builds a Put Push and pushes exactly one
+    /// onto the group — the multicast analogue of the unicast publish wire leg,
+    /// proving the unified `Session` API reaches the multicast transport (the
+    /// Level B north star). The drive loop's side of that pipeline is covered
+    /// separately by `wz_runtime_tokio::multicast_glue`'s
+    /// `drive_loop_frames_queued_push` test; this asserts the B3 wiring —
+    /// `publish` builds the right message and pushes it through the session's
+    /// transport producer (R2931).
+    #[test]
+    fn multicast_session_publish_enqueues_one_put_push() {
+        let (session, mut tap) = tapped_session();
 
         session
             .publish("demo/mc", b"hello-multicast", PublishOptions::put())
             .expect("multicast Put builds within codec capacity");
 
-        let item = rx.try_recv().expect("publish enqueued one tx item");
+        let messages = next_pushed(&mut tap).expect("publish pushed one datagram");
         assert!(
-            matches!(item, MulticastTxItem::Push { .. }),
-            "the enqueued multicast item is a Put Push"
+            matches!(messages.as_slice(), [NetworkMessage::Push(_)]),
+            "the pushed multicast message is a Put Push"
         );
         assert!(
-            rx.try_recv().is_err(),
-            "publish enqueued exactly one item (no duplicate)"
+            next_pushed(&mut tap).is_none(),
+            "publish pushed exactly one datagram (no duplicate)"
         );
     }
 
@@ -69,22 +101,15 @@ mod tests {
     /// `Session::publish` delivers the Put to that local subscriber via the
     /// loopback leg (`pubsub-allow-loop`) — exactly the unicast publish
     /// loopback contract, proving the multicast `Session` gained the subscriber
-    /// surface (the B4 north star) while the remote leg still enqueues onto the
-    /// TX seam. The callback fires on the caller thread (deferred-fire drain
+    /// surface (the B4 north star) while the remote leg still pushes onto the
+    /// group. The callback fires on the caller thread (deferred-fire drain
     /// inside `publish`), so the count is observable synchronously.
     #[test]
     fn multicast_session_publish_loops_back_to_declared_subscriber() {
         use std::sync::atomic::{AtomicUsize, Ordering};
         use wz_runtime_tokio::session::SubscribeOptions;
 
-        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<MulticastTxItem>();
-        let session: TokioMulticastSession = TokioMulticastSession::new_multicast(
-            Arc::new(wz_runtime_tokio::sync::Mutex::new(
-                ApplicationLayerObserver::new(),
-            )),
-            Arc::new(TokioTime::new()),
-            tx,
-        );
+        let (session, mut tap) = tapped_session();
 
         let fired = Arc::new(AtomicUsize::new(0));
         let sub = {
@@ -108,11 +133,11 @@ mod tests {
             "the deferred callback ran synchronously inside publish"
         );
 
-        // Remote leg still enqueued the Put onto the TX seam (both legs run).
-        let item = rx.try_recv().expect("remote leg enqueued the Put");
+        // Remote leg still pushed the Put onto the group (both legs run).
+        let messages = next_pushed(&mut tap).expect("remote leg pushed the Put");
         assert!(
-            matches!(item, MulticastTxItem::Push { .. }),
-            "the enqueued multicast item is a Put Push"
+            matches!(messages.as_slice(), [NetworkMessage::Push(_)]),
+            "the pushed multicast message is a Put Push"
         );
 
         // A non-matching keyexpr fires no local subscriber.
@@ -139,18 +164,16 @@ mod tests {
         use std::sync::atomic::{AtomicUsize, Ordering};
         use wz_runtime_tokio::session::SubscribeOptions;
         use wz_session_core::driver_loop::{DriverLoopOutcome, IterationEvent};
-        use wz_session_core::network_message::NetworkMessage;
         use wz_session_core::push_build::build_push_literal;
 
-        // No TX seam exercised here (the receiver is dropped); the proof is the
-        // RX dispatch path into the Session's subscriber registry.
-        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel::<MulticastTxItem>();
+        // No TX side exercised here (a producer no loop ever attaches); the
+        // proof is the RX dispatch path into the Session's subscriber registry.
         let session: TokioMulticastSession = TokioMulticastSession::new_multicast(
             Arc::new(wz_runtime_tokio::sync::Mutex::new(
                 ApplicationLayerObserver::new(),
             )),
             Arc::new(TokioTime::new()),
-            tx,
+            wz_runtime_tokio::multicast_glue::MulticastTxProducer::new(),
         );
 
         let fired = Arc::new(AtomicUsize::new(0));
@@ -187,33 +210,28 @@ mod tests {
 
     /// R311mr (B5b-1) — the transport-dispatch send seam
     /// (`Session::send_network_message`, the `_z_send_n_msg` analogue) routes a
-    /// built `NetworkMessage::Push` to the multicast TX channel directly. This
-    /// is the path `Session::publish` now sends through; testing the seam in
+    /// built `NetworkMessage::Push` to the multicast group directly. This is
+    /// the path `Session::publish` now sends through; testing the seam in
     /// isolation pins the public send entry point independent of `publish`.
     #[test]
     fn multicast_send_network_message_routes_push_to_channel() {
-        use wz_session_core::network_message::NetworkMessage;
         use wz_session_core::push_build::build_push_literal;
 
-        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<MulticastTxItem>();
-        let session: TokioMulticastSession = TokioMulticastSession::new_multicast(
-            Arc::new(wz_runtime_tokio::sync::Mutex::new(
-                ApplicationLayerObserver::new(),
-            )),
-            Arc::new(TokioTime::new()),
-            tx,
-        );
+        let (session, mut tap) = tapped_session();
 
         let push = build_push_literal("demo/mc", b"via-seam").expect("push fixture");
         session
             .send_network_message(NetworkMessage::Push(Box::new(push)), true, false)
-            .expect("the seam routes a Push to the multicast channel");
+            .expect("the seam routes a Push to the multicast group");
 
-        let item = rx.try_recv().expect("seam enqueued the Push");
+        let messages = next_pushed(&mut tap).expect("the seam pushed the Push");
         assert!(
-            matches!(item, MulticastTxItem::Push { .. }),
-            "the enqueued item is a Put Push"
+            matches!(messages.as_slice(), [NetworkMessage::Push(_)]),
+            "the pushed message is a Put Push"
         );
-        assert!(rx.try_recv().is_err(), "exactly one item enqueued");
+        assert!(
+            next_pushed(&mut tap).is_none(),
+            "exactly one datagram pushed"
+        );
     }
 }

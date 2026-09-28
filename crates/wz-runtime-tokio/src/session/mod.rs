@@ -2104,18 +2104,16 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Multicast> {
     /// R311mn (Level B, B2) / R311nf — construct a multicast `Session` from the
     /// shared observer + clock (the handshake-free multicast transport has no
     /// `SessionLinkActions` bundle). R311mo (B3) adds the `codec-push`-gated
-    /// `tx` argument: the sender half of the channel
+    /// `tx` argument: the group's producer (R2931), whose pipeline
     /// [`drive_multicast_session`](crate::multicast_glue::drive_multicast_session)
-    /// drains, so [`Self::publish`] can enqueue onto it (a bare multicast build
-    /// with no data plane omits `tx` and gets an RX-only session). R311nf —
-    /// returns the `Multicast` typestate; the `transport` field IS the
-    /// `MulticastPayload` (no enum-variant wrap, no `PhantomData`).
+    /// attaches, so [`Self::publish`] pushes onto it on the caller's thread (a
+    /// bare multicast build with no data plane omits `tx` and gets an RX-only
+    /// session). R311nf — returns the `Multicast` typestate; the `transport`
+    /// field IS the `MulticastPayload` (no enum-variant wrap, no `PhantomData`).
     pub fn new_multicast(
         observer: Arc<<R as Runtime>::Mutex<ApplicationLayerObserver>>,
         clock: Arc<T>,
-        #[cfg(feature = "codec-push")] tx: tokio::sync::mpsc::UnboundedSender<
-            wz_session_core::multicast_tx::MulticastTxItem,
-        >,
+        #[cfg(feature = "codec-push")] tx: crate::multicast_pipeline::MulticastTxProducer,
     ) -> Self {
         Self::from_inner(SessionInner {
             local_delivery: LocalDeliveryDrain::default(),

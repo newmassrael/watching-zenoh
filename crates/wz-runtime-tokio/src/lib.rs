@@ -1185,6 +1185,11 @@ pub mod scouting_static;
 #[cfg(feature = "transport-multicast")]
 pub mod multicast_glue;
 
+/// R2931 — a multicast group's transmission pipeline as its producers push onto
+/// it, and the drive loop's side of one attached link.
+#[cfg(feature = "transport-multicast")]
+pub mod multicast_pipeline;
+
 // R311di-4 — Reliability moved to wz-session-core::reliability; the
 // re-export keeps every `wz_runtime_tokio::Reliability` external
 // callsite (9 caller files across tests / wz-integration-tests /

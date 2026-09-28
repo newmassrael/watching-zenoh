@@ -111,8 +111,6 @@
 //! the transition. So a departing wz member announces itself on either profile,
 //! and `wz-mcu-multicast-e2e` drives it on-target under QEMU.
 
-use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
-
 use wz_session_core::driver_loop::IterationEvent;
 // R311md — the declarer-side liveliness reply builders (build_*_reply) moved into
 // the shared `wz_session_core::multicast_reply_sink::MulticastReplySink<Q>` SSOT
@@ -141,19 +139,12 @@ pub use wz_session_core::multicast_stats::MulticastStatsRecorder;
 #[cfg(feature = "codec-push")]
 pub use wz_session_core::multicast_tx::multicast_put_literal;
 pub use wz_session_core::multicast_tx::MulticastTxItem;
-// The emit SSOT exists only when a TX body codec inhabits `MulticastTxItem`;
-// gated on that union so a (degenerate) multicast-without-data build still
-// compiles — the loop's outbound arm consumes the then-uninhabited item with an
-// empty match instead of naming the gated-out `multicast_tx_emit`.
-#[cfg(any(
-    feature = "codec-push",
-    feature = "codec-response",
-    feature = "codec-response-final",
-    feature = "liveliness-token"
-))]
-use wz_session_core::multicast_tx::{multicast_tx_push, MulticastTxTally};
 use wz_session_core::session_fsm_multicast::SessionFsmMulticastState;
+#[cfg(test)]
 use wz_session_core::sn::{self, MulticastTxConduits};
+
+use crate::multicast_pipeline::MulticastTxPlane;
+pub use crate::multicast_pipeline::{MulticastTxProducer, MulticastTxRefused, MulticastTxTap};
 
 use wz_runtime_core::TimeSource;
 
@@ -177,30 +168,28 @@ use crate::LinkDriver;
 // in `multicast_tx_emit`.
 
 /// R311md — the AP loop's [`MulticastReplyEnqueue`] backing for the shared
-/// observer-drain reply sink. Wraps the loop's A1c outbound channel sender; the
-/// shared [`MulticastReplySink<Q>`](wz_session_core::multicast_reply_sink::MulticastReplySink)
+/// observer-drain reply sink. The shared
+/// [`MulticastReplySink<Q>`](wz_session_core::multicast_reply_sink::MulticastReplySink)
 /// constructs each [`MulticastTxItem`] and calls this backing's `enqueue`, which
-/// sends it onto the channel [`drive_multicast_session`] drains, frames into a
-/// `T_MID_FRAME`, and multicasts to the group — the multicast mirror of the
-/// unicast `SessionLinkActions` (which enqueues onto the per-peer writer
-/// channel). `Clone` so the `on_event` closure can hold a sender clone while the
-/// loop owns the paired receiver. Fire-and-forget: a dropped receiver (the loop
-/// ended) drops the item exactly as a dead link would.
+/// R2931 pushes through the group's [`MulticastTxProducer`], on the caller's
+/// thread — the multicast mirror of the unicast `SessionLinkActions`. `Clone`
+/// so the `on_event` closure can hold one. Fire-and-forget: a reply that finds
+/// no room, or no link, is dropped exactly as a dead link would drop it.
 #[derive(Clone)]
 pub struct TokioReplyBacking {
-    tx: UnboundedSender<MulticastTxItem>,
+    producer: MulticastTxProducer,
 }
 
 impl TokioReplyBacking {
-    /// Wrap a clone of the loop's outbound-channel sender as a reply backing.
-    pub fn new(tx: UnboundedSender<MulticastTxItem>) -> Self {
-        Self { tx }
+    /// A reply backing that pushes through `producer`.
+    pub fn new(producer: MulticastTxProducer) -> Self {
+        Self { producer }
     }
 }
 
 impl wz_session_core::multicast_reply_sink::MulticastReplyEnqueue for TokioReplyBacking {
     fn enqueue(&self, item: MulticastTxItem) {
-        let _ = self.tx.send(item);
+        let _ = self.producer.push(item);
     }
 }
 
@@ -472,192 +461,6 @@ impl MulticastDatagramSender for crate::UdpGroupSender {
     }
 }
 
-/// R2929 — a group link's transmission side: the per-priority lanes the loop
-/// pushes datagrams onto, and the transmit task that writes them.
-///
-/// The lanes are the unicast writer's ([`crate::writer_queue`]), shaped by the
-/// group's [`TxQueueConf`](wz_session_core::session_init_params::TxQueueConf)
-/// in units of the group batch, one lane when the group runs no QoS. The
-/// transmit task reports each datagram it wrote, and the loop counts them: the
-/// loop holds the stats recorder, which is borrowed and cannot cross into a
-/// task.
-///
-/// The report also says what has reached the WIRE, which the JOIN beacon must
-/// advertise rather than what has been minted. A receiver re-seeds its
-/// expected SN from every JOIN (`MulticastDispatcher::ingest_join_qos`, as
-/// zenoh-pico does), and a JOIN written on the Control lane passes data still
-/// queued behind it; had it advertised the minted SNs, the receiver would drop
-/// that data as stale when it came. So the plane keeps, per sending priority
-/// and in queue order, the SN each queued datagram carries, and moves
-/// [`Self::on_wire`] as the transmit task reports each one written.
-struct MulticastTxPlane {
-    lanes: crate::writer_queue::OutboundTx,
-    /// Each datagram the transmit task is done with: the priority it was sent
-    /// at, and its size when it was written (`None` when the write failed).
-    written: tokio::sync::mpsc::UnboundedReceiver<(wz_session_core::qos::Priority, Option<usize>)>,
-    writer: tokio::task::JoinHandle<()>,
-    /// Per sending priority, in queue order: the `(reliable, sn)` each queued
-    /// datagram carries, `None` for a JOIN or a Close, which carry no SN.
-    queued: [std::collections::VecDeque<Option<(bool, u64)>>; wz_session_core::qos::Priority::NUM],
-    /// The conduits as written: what the JOIN advertises.
-    on_wire: MulticastTxConduits,
-}
-
-impl MulticastTxPlane {
-    /// Shape the lanes for `params` and start the transmit task over
-    /// `driver`'s send half, on the TX subsystem, as upstream starts its
-    /// multicast TX task.
-    fn open<D: MulticastLinkDriver>(
-        driver: &D,
-        params: &wz_session_core::multicast_params::MulticastParams,
-    ) -> Self {
-        let (lanes, mut queued) = crate::writer_queue::outbound_channel();
-        lanes.reshape(
-            params
-                .tx_queue
-                .shape(params.is_qos, usize::from(params.batch_size)),
-        );
-        let sender = match driver.datagram_sender() {
-            Ok(sender) => Some(sender),
-            Err(e) => {
-                log::warn!("multicast link has no send half ({e}); nothing it queues is sent");
-                None
-            }
-        };
-        let (report, written) = tokio::sync::mpsc::unbounded_channel();
-        let writer = crate::runtime_pool::WzRuntime::Tx.spawn(async move {
-            while let Some((priority, datagram)) = queued.recv_tagged().await {
-                // Best-effort, as every multicast send is: a datagram the
-                // socket refuses is not counted and is not retried. It is
-                // still REPORTED, as done with: the loop's record of what each
-                // queued datagram carries is in queue order, and a datagram
-                // left unreported would shift every later report onto the
-                // wrong one.
-                let wrote = match sender.as_ref() {
-                    Some(sender) => sender.send(&datagram).await.is_ok(),
-                    None => false,
-                };
-                let _ = report.send((priority, wrote.then_some(datagram.len())));
-            }
-        });
-        Self {
-            lanes,
-            written,
-            writer,
-            queued: std::array::from_fn(|_| std::collections::VecDeque::new()),
-            on_wire: MulticastTxConduits::new(sn::mask_from_res(params.seq_num_res)),
-        }
-    }
-
-    /// Queue a datagram that carries no SN — a JOIN or a Close — on the
-    /// Control lane, without asking for room: the transmit task writes the
-    /// highest lane first, and upstream's TX task writes its JOIN beside the
-    /// pipeline rather than through it
-    /// (`io/zenoh-transport/src/multicast/link.rs` @ `async fn tx_task(`).
-    fn enqueue_control(&mut self, datagram: Vec<u8>) {
-        let control = wz_session_core::qos::Priority::Control;
-        if self.lanes.send(control, datagram).is_ok() {
-            self.queued[control as usize].push_back(None);
-        }
-    }
-
-    /// Queue a datagram a push produced, remembering the SN it carries.
-    #[cfg(any(
-        feature = "codec-push",
-        feature = "codec-response",
-        feature = "codec-response-final",
-        feature = "liveliness-token"
-    ))]
-    fn enqueue_data(&mut self, datagram: wz_session_core::multicast_tx::MulticastTxDatagram) {
-        let wz_session_core::multicast_tx::MulticastTxDatagram {
-            priority,
-            reliable,
-            sn,
-            bytes,
-        } = datagram;
-        // A closed queue is a finished loop: the datagram is lost with it.
-        if self.lanes.send(priority, bytes).is_ok() {
-            self.queued[priority as usize].push_back(Some((reliable, sn)));
-        }
-    }
-
-    /// Take the transmit task's reports so far: count each datagram as one
-    /// transport message, and move the written conduits past the SN it
-    /// carried. Within one sending priority the lanes are FIFO, so the report
-    /// for a priority names the oldest datagram queued at it.
-    fn record_written<R: MulticastStatsRecorder + ?Sized>(&mut self, stats: &R) {
-        take_written(
-            &mut self.written,
-            &mut self.queued,
-            &mut self.on_wire,
-            stats,
-        );
-    }
-
-    /// End the transmission side: close the lanes to new datagrams, let the
-    /// transmit task write what they hold, and count it. A departing Close
-    /// queued just before is therefore on the wire when the loop returns.
-    async fn finish<R: MulticastStatsRecorder + ?Sized>(self, stats: &R) {
-        let Self {
-            lanes,
-            mut written,
-            writer,
-            mut queued,
-            mut on_wire,
-        } = self;
-        drop(lanes);
-        if let Err(e) = writer.await {
-            log::error!("multicast transmit task did not join cleanly: {e}");
-        }
-        take_written(&mut written, &mut queued, &mut on_wire, stats);
-    }
-}
-
-/// [`MulticastTxPlane::record_written`] over the plane's parts, so the plane
-/// can also take them after its lanes have been closed.
-fn take_written<R: MulticastStatsRecorder + ?Sized>(
-    written: &mut tokio::sync::mpsc::UnboundedReceiver<(
-        wz_session_core::qos::Priority,
-        Option<usize>,
-    )>,
-    queued: &mut [std::collections::VecDeque<Option<(bool, u64)>>;
-             wz_session_core::qos::Priority::NUM],
-    on_wire: &mut MulticastTxConduits,
-    stats: &R,
-) {
-    while let Ok((priority, bytes)) = written.try_recv() {
-        if let Some(bytes) = bytes {
-            stats.datagram_sent(bytes, 1);
-        }
-        // A datagram whose write failed is done with too: its SN will never
-        // arrive, and advertising past it keeps a receiver from expecting it.
-        if let Some(Some((reliable, sn))) = queued[priority as usize].pop_front() {
-            on_wire.written(priority, reliable, sn);
-        }
-    }
-}
-
-/// R2929 — the plane as the queue [`multicast_tx_push`] pushes onto.
-#[cfg(any(
-    feature = "codec-push",
-    feature = "codec-response",
-    feature = "codec-response-final",
-    feature = "liveliness-token"
-))]
-impl wz_session_core::multicast_tx::MulticastTxQueue for MulticastTxPlane {
-    fn wait_for_room(
-        &mut self,
-        priority: wz_session_core::qos::Priority,
-        wait: wz_session_core::link::RoomWait,
-    ) -> wz_session_core::link::RoomAnswer {
-        self.lanes.link_room(priority, wait)
-    }
-
-    fn enqueue(&mut self, datagram: wz_session_core::multicast_tx::MulticastTxDatagram) {
-        self.enqueue_data(datagram);
-    }
-}
-
 /// Drive a multicast session: bring the link up, then own the §3.1 Running
 /// concerns (periodic JOIN emit, RX classify -> dispatch + the A1b data
 /// plane, lease sweep) until the link is lost or `cfg.max_iters` is reached.
@@ -679,22 +482,19 @@ impl wz_session_core::multicast_tx::MulticastTxQueue for MulticastTxPlane {
 /// to route multicast pub/sub data into the registered subscriber /
 /// queryable registries.
 ///
-/// `outbound` is the A1c TX seam: queued [`MulticastTxItem`]s are framed
-/// with a freshly minted per-channel SN (the loop-owned [`TxSn`] the JOIN
-/// beacon also advertises) and multicast to the group; a frame past the
-/// group batch budget leaves as a `T_MID_FRAGMENT` chain instead (R311ko,
-/// [`multicast_frame_or_fragments`](wz_session_core::frame_encode::multicast_frame_or_fragments)
-/// — the chain rides the minted SN and the follow-on mints). A
-/// publish-free caller passes the receiver of an
-/// idle channel; when every sender is dropped the arm disarms (the loop
-/// keeps serving RX + JOIN).
+/// `producer` is the A1c TX seam (R2931): while the loop runs, the link's
+/// pipeline is attached to it, and every clone of it pushes onto that pipeline
+/// on its own thread — a message is framed with an SN minted on its conduit,
+/// multicast to the group, and a frame past the group batch budget leaves as a
+/// `T_MID_FRAGMENT` chain (R311ko). A publish-free caller passes a producer
+/// nobody else holds.
 pub async fn drive_multicast_session<D, T, F, const MAX_PEERS: usize>(
     dispatcher: &mut MulticastDispatcher<MAX_PEERS>,
     cfg: MulticastDriveConfig<'_>,
     driver: &mut D,
     clock: &T,
     on_event: F,
-    outbound: &mut UnboundedReceiver<MulticastTxItem>,
+    producer: &MulticastTxProducer,
 ) -> MulticastOutcome
 where
     D: MulticastLinkDriver,
@@ -711,7 +511,7 @@ where
         driver,
         clock,
         on_event,
-        outbound,
+        producer,
         |_members: &[Vec<u8>]| {},
         |_subs: &[String]| {},
         None,
@@ -747,7 +547,7 @@ pub async fn drive_multicast_session_with_shutdown<D, T, F, const MAX_PEERS: usi
     driver: &mut D,
     clock: &T,
     on_event: F,
-    outbound: &mut UnboundedReceiver<MulticastTxItem>,
+    producer: &MulticastTxProducer,
     shutdown: &mut tokio::sync::watch::Receiver<bool>,
 ) -> MulticastOutcome
 where
@@ -761,7 +561,7 @@ where
         driver,
         clock,
         on_event,
-        outbound,
+        producer,
         |_members: &[Vec<u8>]| {},
         |_subs: &[String]| {},
         Some(shutdown),
@@ -856,7 +656,7 @@ pub async fn drive_multicast_session_with_membership<D, T, F, G, H, R, const MAX
     driver: &mut D,
     clock: &T,
     on_event: F,
-    outbound: &mut UnboundedReceiver<MulticastTxItem>,
+    producer: &MulticastTxProducer,
     on_members: G,
     on_group_subs: H,
     shutdown: Option<&mut tokio::sync::watch::Receiver<bool>>,
@@ -894,7 +694,7 @@ where
         driver,
         clock,
         on_event,
-        outbound,
+        producer,
         on_members,
         on_group_subs,
         shutdown,
@@ -921,7 +721,7 @@ async fn drive_multicast_session_inner<D, T, F, G, H, R, const MAX_PEERS: usize>
     driver: &mut D,
     clock: &T,
     on_event: F,
-    outbound: &mut UnboundedReceiver<MulticastTxItem>,
+    producer: &MulticastTxProducer,
     on_members: G,
     on_group_subs: H,
     shutdown: Option<&mut tokio::sync::watch::Receiver<bool>>,
@@ -936,14 +736,22 @@ where
     H: FnMut(&[String]),
     R: MulticastStatsRecorder + Sync + ?Sized,
 {
-    let mut tx = MulticastTxPlane::open(driver, cfg.params);
+    // R2931 — the pipeline is attached to `producer` for as long as the link
+    // runs; the egress namespace is the dispatcher's, installed before
+    // bring-up, so egress and ingress still come from one value.
+    let mut tx = MulticastTxPlane::open(
+        producer,
+        driver,
+        cfg.params,
+        #[cfg(feature = "routing-namespace")]
+        dispatcher.namespace(),
+    );
     let outcome = drive_multicast_session_running(
         dispatcher,
         cfg,
         driver,
         clock,
         on_event,
-        outbound,
         on_members,
         on_group_subs,
         shutdown,
@@ -964,7 +772,6 @@ async fn drive_multicast_session_running<D, T, F, G, H, R, const MAX_PEERS: usiz
     driver: &mut D,
     clock: &T,
     on_event: F,
-    outbound: &mut UnboundedReceiver<MulticastTxItem>,
     #[cfg_attr(
         not(feature = "multicast-declarations"),
         allow(unused_mut, unused_variables)
@@ -1033,19 +840,9 @@ where
     // Emit the first JOIN beacon immediately, then every join_interval_ms.
     let mut next_join_ms = clock.now_monotonic_ms();
 
-    // The TX mint state (per-channel next SN); every outbound data frame
-    // mints from here.
-    // R2929 — the JOIN beacon no longer reads it: it advertises the conduits
-    // as WRITTEN (`MulticastTxPlane::on_wire`). So a JOIN-only multicast build
-    // (transport-multicast with no codec-push/response/response-final/
-    // liveliness-token), which never mints, has no mint state at all.
-    #[cfg(any(
-        feature = "codec-push",
-        feature = "codec-response",
-        feature = "codec-response-final",
-        feature = "liveliness-token"
-    ))]
-    let mut tx_sn = MulticastTxConduits::new(sn::mask_from_res(params.seq_num_res));
+    // R2931 — the TX mint state is no longer the loop's: each conduit's SNs
+    // live in the pipeline's stage for that conduit, minted by whichever
+    // producer holds it (`crate::multicast_pipeline`).
     // R311kn — the loop owns the multicast reassembly Router: per-peer
     // fragment chains keyed by the peer's pool-slot index (zenoh-pico's
     // per-entry dbuf pair, generalised to the bounded §5.M slot pool).
@@ -1053,9 +850,6 @@ where
     // buffer-pool policy SSOT, two transports.
     #[cfg(feature = "reassembly")]
     let mut reasm = crate::reassembly::TokioReassembly::new(crate::reassembly::reassembly_config());
-    // Once every sender is dropped `recv()` would resolve `None` forever;
-    // disarm the select arm instead of busy-looping on it.
-    let mut outbound_open = true;
 
     // §5.21 router-multicast-faces (I3b) — last relayed on-group ROUTER member
     // set, for the snapshot-diff at the loop tail (relay to the forwarder only
@@ -1088,6 +882,11 @@ where
             iter += 1;
         }
 
+        // R2931 — count what producers pushed and what the transmit task
+        // wrote since the last turn. Producers push on their own threads, so
+        // this is where their counts reach the loop's recorder.
+        tx.record(stats);
+
         // JoinEmit: multicast the self-advertising JOIN beacon when due.
         let now = clock.now_monotonic_ms();
         if now >= next_join_ms {
@@ -1098,8 +897,7 @@ where
             // R2929 — from the conduits as WRITTEN, not as minted: this JOIN
             // may pass data still queued, and a receiver re-seeds from it
             // ([`MulticastTxPlane`]).
-            tx.record_written(stats);
-            let dgram = encode_join(params, &tx.on_wire);
+            let dgram = encode_join(params, tx.on_wire());
             // Best-effort: a failed multicast send is non-fatal (the next
             // cadence retries), so unlike the scout path there is no
             // tx-failed transition to drive.
@@ -1110,73 +908,10 @@ where
         }
 
         tokio::select! {
-            item = outbound.recv(), if outbound_open => match item {
-                // R311lx — hand the item to the shared TX emit SSOT (mint ->
-                // encode_frame_with_* -> fragment, the decision the four inline
-                // arms used to carry); multicast each returned datagram on this
-                // loop's driver. The SSOT pins reliability per variant (Push by
-                // its flag; Response / ResponseFinal / DeclareReply reliable).
-                // Send failure is non-fatal like the JOIN beacon — UDP multicast
-                // is best-effort; the SN gap a dropped datagram leaves stays
-                // inside receivers' half-window (a hole in a fragment chain
-                // aborts that chain at every receiver, as on pico).
-                #[cfg(any(
-                    feature = "codec-push",
-                    feature = "codec-response",
-                    feature = "codec-response-final",
-                    feature = "liveliness-token"
-                ))]
-                #[cfg_attr(not(feature = "routing-namespace"), allow(unused_mut))]
-                Some(mut item) => {
-                    // §5.21 routing-namespace — namespace this LOCAL-ORIGIN item
-                    // at the SINGLE multicast egress chokepoint (the outbound
-                    // dequeue): publish Push + the reply-plane Response /
-                    // ResponseFinal / DeclareReply all funnel here, and there is
-                    // NO relay path onto this channel (handshake-free multicast,
-                    // no multihat forwarder TODAY), so decorating here re-namespaces
-                    // nothing forwarded — unlike unicast, which decorates ABOVE the
-                    // shared send floor. A decorate failure (namespaced keyexpr over
-                    // codec capacity) DROPS the item rather than leaking the bare
-                    // keyexpr (the y106b live-vs-bare lesson); send is best-effort
-                    // anyway. No-op when no namespace is installed / feature off.
-                    #[cfg(feature = "routing-namespace")]
-                    if let Some(ns) = dispatcher.namespace() {
-                        if wz_session_core::namespace::apply_egress_multicast_item(ns, &mut item)
-                            .is_err()
-                        {
-                            continue;
-                        }
-                    }
-                    // R2929 — pushed onto the group's lanes: room asked before
-                    // each SN is minted, a congestion drop when none comes
-                    // within the message's deadline. The network message is
-                    // counted as sent only once pushed, and as a congestion
-                    // drop otherwise, as upstream's multicast schedule counts
-                    // it; each datagram is still one transport message,
-                    // counted by the transmit task once written.
-                    let tally = MulticastTxTally::of(&item);
-                    match multicast_tx_push(item, &mut tx_sn, params, &params.tx_queue, &mut *tx) {
-                        wz_session_core::tx_deadline::PushOutcome::Pushed => {
-                            stats.network_message_sent(&tally)
-                        }
-                        wz_session_core::tx_deadline::PushOutcome::Congested => {
-                            stats.network_message_dropped(&tally)
-                        }
-                    }
-                }
-                // No TX body codec: `MulticastTxItem` is uninhabited, so `recv()`
-                // can only yield `None`; consume the unconstructable item with an
-                // empty match to keep the arm exhaustive without naming the
-                // gated-out emit SSOT.
-                #[cfg(not(any(
-                    feature = "codec-push",
-                    feature = "codec-response",
-                    feature = "codec-response-final",
-                    feature = "liveliness-token"
-                )))]
-                Some(item) => match item {},
-                None => outbound_open = false,
-            },
+            // R2931 — there is no outbound arm: producers push onto the
+            // attached pipeline themselves (`MulticastTxProducer::push`), and
+            // the transmit task writes it, so nothing a producer sends waits
+            // on this loop's turn.
             event = driver.poll_event() => match event {
                 LinkEvent::Rx(rx) => {
                     // R2848 — the link received these bytes whether or not
@@ -1350,7 +1085,7 @@ where
             }
         }
         // R2929 — count what the transmit task has written since the last pass.
-        tx.record_written(stats);
+        tx.record(stats);
         // R2859 (§5.23 `adminspace-core`) — refresh the member view when the
         // peer table moved: an admission or a same-address zid change in the
         // RX arm, a lease evict in the sweep, a departing Close. Compared
@@ -1370,19 +1105,20 @@ where
 }
 
 /// R311y188 — router-multicast-faces slice 3: spawn the EGRESS-only multicast
-/// group drive loop for a router run-mode and return its `Send` outbound sender.
+/// group drive loop for a router run-mode and return its producer.
 ///
 /// The wz analog of zenoh `Router::new_transport_multicast` (`router.rs:181`): a
 /// router that forwards over a multicast group holds a `McastMux` egress face
-/// whose outbound is a group channel. Here the caller hands the returned
-/// [`UnboundedSender<MulticastTxItem>`] to
+/// whose outbound is the group. Here the caller hands the returned
+/// [`MulticastTxProducer`] to
 /// [`attach_mcast_group`](crate::router_forward::RouterForwarder::attach_mcast_group);
-/// a routed `Push` then rides the channel into this loop, which mints the group
-/// channel SN + frames it to the group (the `multicast_tx` SSOT). The loop runs
-/// on a SEPARATE `tokio::spawn` task — only the sender (`Send` + `Clone`) crosses
-/// to the `!Send` `RouterForwarder`, so the router needs no single-task fold (the
-/// INGRESS `mcast_faces` plane is the deferred milestone; this loop's `on_event`
-/// is a no-op — a router egress face consumes no group ingress).
+/// a routed `Push` is then pushed onto the group's pipeline on the forwarder's
+/// own thread (R2931), minting the group channel SN (the `multicast_tx` SSOT).
+/// The loop runs on a SEPARATE `tokio::spawn` task — only the producer, which is
+/// `Send` and `Clone`, crosses to the `!Send` `RouterForwarder`, so the router
+/// needs no single-task fold (the INGRESS `mcast_faces` plane is the deferred
+/// milestone; this loop's `on_event` is a no-op — a router egress face consumes
+/// no group ingress).
 ///
 /// TX-only egress shape: an ephemeral-bound socket TARGETING the group (the
 /// publisher shape — joining for INGRESS would need `SO_REUSEADDR` + the ingress
@@ -1427,10 +1163,10 @@ pub fn spawn_router_mcast_egress(
     qos: bool,
     opts: crate::McastGroupOptions,
     node_stats: Option<crate::node_stats::NodeStats>,
-) -> (UnboundedSender<MulticastTxItem>, McastFaceStop) {
+) -> (MulticastTxProducer, McastFaceStop) {
     // Converted before the spawn: the task needs an owned `Copy` address.
     let group: core::net::IpAddr = group.into();
-    let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+    let producer = MulticastTxProducer::new();
     // R311y454 — `bind_multicast_tx` is the ephemeral bind plus the
     // `IP_MULTICAST_IF` pin when `#iface=` names one, so an unnarrowed egress
     // is unchanged and a narrowed one fails LOUDLY rather than sending out an
@@ -1460,11 +1196,11 @@ pub fn spawn_router_mcast_egress(
         },
         // Egress-only: this face consumes no group ingress.
         |_: IterationEvent<'_>| {},
-        rx,
+        producer.clone(),
         |_: &[Vec<u8>]| {},
         |_: &[String]| {},
     );
-    (tx, stop)
+    (producer, stop)
 }
 
 /// R2850 — the group profile a router's face advertises: zenoh's multicast
@@ -1521,9 +1257,10 @@ type GroupBind<'a> = core::pin::Pin<
 /// sending, receiving, membership — rides the one loop the face runs.
 ///
 /// `bind` is the face's socket, taken as a function of the options so a
-/// re-join rebinds exactly as the first join did. `on_event`, `outbound`,
+/// re-join rebinds exactly as the first join did. `on_event`, `producer`,
 /// `on_members` and `on_group_subs` are the drive loop's own seams, carried
-/// across re-joins; a fresh DISPATCHER is made per join (pico clears the
+/// across re-joins (each join attaches its own link's pipeline to the same
+/// producer, R2931); a fresh DISPATCHER is made per join (pico clears the
 /// transport before its reopen task re-enters `_z_open`, for the same reason:
 /// the peer table describes members reached over the link that just died).
 ///
@@ -1555,7 +1292,7 @@ fn spawn_group_face<B, F, G, H>(
     membership: Option<McastGroupMembership>,
     bind: B,
     mut on_event: F,
-    mut outbound: UnboundedReceiver<MulticastTxItem>,
+    producer: MulticastTxProducer,
     mut on_members: G,
     mut on_group_subs: H,
 ) -> McastFaceStop
@@ -1621,7 +1358,7 @@ where
                 &mut driver,
                 &clock,
                 &mut on_event,
-                &mut outbound,
+                &producer,
                 &mut on_members,
                 &mut on_group_subs,
                 Some(&mut shutdown),
@@ -2056,10 +1793,10 @@ where
 ///
 /// What the fields carry:
 ///
-/// - `outbound` — the group's send channel, what the caller hands to
+/// - `outbound` — the group's producer, what the caller hands to
 ///   [`attach_mcast_group`](crate::router_forward::RouterForwarder::attach_mcast_group);
-///   a routed `Push` rides it into the loop, which mints the group SN and frames
-///   it (the `multicast_tx` SSOT).
+///   a routed `Push` is pushed onto the group's pipeline through it, minting the
+///   group SN (the `multicast_tx` SSOT, R2931).
 /// - `ingress` — each admitted `Push` and `Request` a member sent (R2734 says why
 ///   those two of the seven kinds), for the accept loop to fold into the `!Send`
 ///   forwarder.
@@ -2081,14 +1818,14 @@ where
     feature = "codec-push"
 ))]
 pub struct RouterMcastGroup {
-    /// The group's send channel.
-    pub outbound: UnboundedSender<MulticastTxItem>,
+    /// The group's producer.
+    pub outbound: MulticastTxProducer,
     /// What the group's members sent this router.
-    pub ingress: UnboundedReceiver<crate::accept_loop::McastIngressItem>,
+    pub ingress: tokio::sync::mpsc::UnboundedReceiver<crate::accept_loop::McastIngressItem>,
     /// The on-group router member set, on change.
-    pub members: UnboundedReceiver<Vec<Vec<u8>>>,
+    pub members: tokio::sync::mpsc::UnboundedReceiver<Vec<Vec<u8>>>,
     /// The group-subscriber key expressions, on change.
-    pub group_subs: UnboundedReceiver<Vec<String>>,
+    pub group_subs: tokio::sync::mpsc::UnboundedReceiver<Vec<String>>,
     /// R2859 — every member on the group, of any role, as the face's peer
     /// table holds them: what the node's adminspace lists in `sessions[]`.
     /// Unlike `members`, a view read on demand rather than a stream of changes.
@@ -2140,7 +1877,7 @@ pub fn spawn_router_mcast_group(
 
     let group: core::net::IpAddr = group.into();
     let membership = McastGroupMembership::new();
-    let (outbound, outbound_rx) = tokio::sync::mpsc::unbounded_channel();
+    let outbound = MulticastTxProducer::new();
     let (ingress_tx, ingress) = tokio::sync::mpsc::unbounded_channel::<McastIngressItem>();
     let (members_tx, members) = tokio::sync::mpsc::unbounded_channel::<Vec<Vec<u8>>>();
     let (group_subs_tx, group_subs) = tokio::sync::mpsc::unbounded_channel::<Vec<String>>();
@@ -2214,7 +1951,7 @@ pub fn spawn_router_mcast_group(
                 }
             }
         },
-        outbound_rx,
+        outbound.clone(),
         // §5.21 router-multicast-faces (I3b) — on a membership change, relay the
         // raw on-group ROUTER zid bytes to the forwarder (via the accept loop).
         // The forwarder's `set_mcast_group_members` converts to `Zid`, keeping
@@ -2310,11 +2047,6 @@ mod tests {
         )
     }
 
-    /// A publish-free outbound seam: the sender is dropped immediately, so
-    /// the loop disarms the TX arm on first poll.
-    fn idle_outbound() -> tokio::sync::mpsc::UnboundedReceiver<MulticastTxItem> {
-        tokio::sync::mpsc::unbounded_channel().1
-    }
     /// A fake in-memory link driver: replays queued inbound datagrams,
     /// captures sent frames, and (once drained) parks so the loop falls to
     /// the sweep tick. Lets the async drive loop be exercised deterministically
@@ -2341,7 +2073,9 @@ mod tests {
     }
 
     impl SentLog {
-        /// A log whose send half is held shut until `gate` has permits.
+        /// A log whose send half is held shut until `gate` has permits. Its
+        /// one user is the congestion fixture, which pushes Puts.
+        #[cfg(feature = "codec-push")]
         fn gated(gate: std::sync::Arc<tokio::sync::Semaphore>) -> Self {
             Self {
                 written: Default::default(),
@@ -2495,7 +2229,7 @@ mod tests {
             &mut driver,
             &clock,
             |_| {},
-            &mut idle_outbound(),
+            &MulticastTxProducer::new(),
         )
         .await;
 
@@ -2540,7 +2274,7 @@ mod tests {
             &mut driver,
             &clock,
             |_| {},
-            &mut idle_outbound(),
+            &MulticastTxProducer::new(),
         )
         .await;
 
@@ -2569,7 +2303,7 @@ mod tests {
             &mut driver,
             &clock,
             |_| {},
-            &mut idle_outbound(),
+            &MulticastTxProducer::new(),
         )
         .await;
 
@@ -2612,7 +2346,7 @@ mod tests {
             &mut driver,
             &clock,
             |_| {},
-            &mut idle_outbound(),
+            &MulticastTxProducer::new(),
         )
         .await;
         assert_eq!(admitted, MulticastOutcome::IterationLimit);
@@ -2631,7 +2365,7 @@ mod tests {
             &mut driver,
             &clock,
             |_| {},
-            &mut idle_outbound(),
+            &MulticastTxProducer::new(),
             &mut rx,
         )
         .await;
@@ -2677,7 +2411,7 @@ mod tests {
             &mut driver,
             &clock,
             |_| {},
-            &mut idle_outbound(),
+            &MulticastTxProducer::new(),
             &mut rx,
         )
         .await;
@@ -2725,7 +2459,7 @@ mod tests {
             &mut driver,
             &clock,
             |_| {},
-            &mut idle_outbound(),
+            &MulticastTxProducer::new(),
             |_members: &[Vec<u8>]| {},
             |_subs: &[String]| {},
             None,
@@ -2749,7 +2483,7 @@ mod tests {
             &mut driver,
             &clock,
             |_| {},
-            &mut idle_outbound(),
+            &MulticastTxProducer::new(),
             |_members: &[Vec<u8>]| {},
             |_subs: &[String]| {},
             Some(&mut rx),
@@ -2809,7 +2543,7 @@ mod tests {
             &mut driver,
             &clock,
             |_| {},
-            &mut idle_outbound(),
+            &MulticastTxProducer::new(),
             |_members: &[Vec<u8>]| {},
             |_subs: &[String]| {},
             None,
@@ -2841,7 +2575,7 @@ mod tests {
             &mut driver,
             &clock,
             |_| {},
-            &mut idle_outbound(),
+            &MulticastTxProducer::new(),
             |_members: &[Vec<u8>]| {},
             |_subs: &[String]| {},
             None,
@@ -2903,7 +2637,7 @@ mod tests {
             &mut driver,
             &clock,
             |_| {},
-            &mut idle_outbound(),
+            &MulticastTxProducer::new(),
             &mut rx,
         )
         .await;
@@ -2981,7 +2715,7 @@ mod tests {
             &mut driver,
             &clock,
             sink,
-            &mut idle_outbound(),
+            &MulticastTxProducer::new(),
         )
         .await;
         assert_eq!(outcome, MulticastOutcome::IterationLimit);
@@ -3034,7 +2768,7 @@ mod tests {
             &mut driver,
             &clock,
             sink,
-            &mut idle_outbound(),
+            &MulticastTxProducer::new(),
         )
         .await;
         assert_eq!(
@@ -3078,7 +2812,7 @@ mod tests {
             &mut driver,
             &clock,
             sink,
-            &mut idle_outbound(),
+            &MulticastTxProducer::new(),
         )
         .await;
         assert_eq!(dispatcher.active_peers(), 0, "it was never admitted");
@@ -3118,7 +2852,7 @@ mod tests {
             &mut driver,
             &clock,
             sink,
-            &mut idle_outbound(),
+            &MulticastTxProducer::new(),
         )
         .await;
         assert_eq!(outcome, MulticastOutcome::IterationLimit);
@@ -3162,7 +2896,7 @@ mod tests {
             &mut driver,
             &clock,
             sink,
-            &mut idle_outbound(),
+            &MulticastTxProducer::new(),
         )
         .await;
         assert_eq!(outcome, MulticastOutcome::IterationLimit);
@@ -3200,7 +2934,7 @@ mod tests {
             &mut driver,
             &clock,
             sink,
-            &mut idle_outbound(),
+            &MulticastTxProducer::new(),
         )
         .await;
         assert_eq!(outcome, MulticastOutcome::IterationLimit);
@@ -3240,7 +2974,7 @@ mod tests {
             &mut driver,
             &clock,
             sink,
-            &mut idle_outbound(),
+            &MulticastTxProducer::new(),
         )
         .await;
         assert_eq!(outcome, MulticastOutcome::IterationLimit);
@@ -3299,7 +3033,7 @@ mod tests {
             &mut driver,
             &clock,
             |_| {},
-            &mut idle_outbound(),
+            &MulticastTxProducer::new(),
             &mut rx,
         )
         .await;
@@ -3345,84 +3079,161 @@ mod tests {
 
     #[cfg(feature = "codec-push")]
     impl MulticastStatsRecorder for OutcomeCount {
-        fn network_message_sent(&self, _tally: &MulticastTxTally) {
+        fn network_message_sent(&self, _tally: &wz_session_core::multicast_tx::MulticastTxTally) {
             self.sent.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         }
 
-        fn network_message_dropped(&self, _tally: &MulticastTxTally) {
+        fn network_message_dropped(
+            &self,
+            _tally: &wz_session_core::multicast_tx::MulticastTxTally,
+        ) {
             self.dropped
                 .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         }
     }
 
-    /// R2929 — queue `N` droppable 1000-byte puts through the loop over a link
-    /// whose writes are held shut (`gated`) or not, wait until each has an
-    /// outcome, then open the link so the loop can finish. Returns the sent
-    /// and dropped counts and every datagram written.
+    /// R2931 — publish `items` through `producer` once a loop has attached its
+    /// pipeline: a push made before then is dropped, as upstream drops one
+    /// while its transport has no link. Run beside the loop (`tokio::join!`).
+    #[cfg(feature = "codec-push")]
+    async fn publish_when_linked(producer: &MulticastTxProducer, items: Vec<MulticastTxItem>) {
+        producer.linked().await;
+        for item in items {
+            assert_eq!(
+                producer.push(item),
+                Ok(wz_session_core::tx_deadline::PushOutcome::Pushed),
+                "an idle group has room"
+            );
+        }
+    }
+
+    /// R2929 / R2931 — run the loop over a link whose writes are held shut
+    /// (`gated`) or not, and push through `producer` once the loop has
+    /// attached its pipeline. The loop runs until `stop` is signalled, so the
+    /// test decides when it ends rather than an iteration budget racing the
+    /// pushes.
+    #[cfg(feature = "codec-push")]
+    struct GatedGroup {
+        producer: MulticastTxProducer,
+        count: std::sync::Arc<OutcomeCount>,
+        gate: std::sync::Arc<tokio::sync::Semaphore>,
+        log: SentLog,
+        stop: tokio::sync::watch::Sender<bool>,
+        task: tokio::task::JoinHandle<MulticastOutcome>,
+    }
+
+    #[cfg(feature = "codec-push")]
+    impl GatedGroup {
+        async fn start(gated: bool, params: MulticastParams) -> Self {
+            let gate = std::sync::Arc::new(tokio::sync::Semaphore::new(0));
+            let log = if gated {
+                SentLog::gated(gate.clone())
+            } else {
+                SentLog::default()
+            };
+            let mut driver = FakeDriver {
+                inbound: VecDeque::new(),
+                log: log.clone(),
+                lost: false,
+            };
+            let producer = MulticastTxProducer::new();
+            let count = std::sync::Arc::new(OutcomeCount::default());
+            let recorder = count.clone();
+            let (stop, mut shutdown) = tokio::sync::watch::channel(false);
+            let loop_producer = producer.clone();
+            let task = tokio::spawn(async move {
+                let mut dispatcher = MulticastDispatcher::<4>::new(MulticastConfig::new(5_000));
+                let clock = TokioTime::new();
+                drive_multicast_session_with_membership(
+                    &mut dispatcher,
+                    MulticastDriveConfig {
+                        params: &params,
+                        tick_ms: 1,
+                        max_iters: None,
+                    },
+                    &mut driver,
+                    &clock,
+                    |_| {},
+                    &loop_producer,
+                    |_: &[Vec<u8>]| {},
+                    |_: &[String]| {},
+                    Some(&mut shutdown),
+                    &*recorder,
+                    None,
+                )
+                .await
+            });
+            producer.linked().await;
+            Self {
+                producer,
+                count,
+                gate,
+                log,
+                stop,
+                task,
+            }
+        }
+
+        /// Push `items` from a thread of their own, as an application's
+        /// publishes are made: a push that waits for room blocks its caller.
+        async fn push(&self, items: Vec<MulticastTxItem>) {
+            let producer = self.producer.clone();
+            tokio::task::spawn_blocking(move || {
+                for item in items {
+                    let _ = producer.push(item);
+                }
+            })
+            .await
+            .expect("pushing thread");
+        }
+
+        /// Wait until the loop has counted `n` outcomes.
+        async fn counted(&self, n: usize) {
+            loop {
+                let (sent, dropped) = self.count.read();
+                if sent + dropped >= n {
+                    return;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+            }
+        }
+
+        /// Open the link, stop the loop, and return the counts and every
+        /// datagram written.
+        async fn finish(self) -> (usize, usize, Vec<Vec<u8>>) {
+            self.gate
+                .add_permits(tokio::sync::Semaphore::MAX_PERMITS / 2);
+            let _ = self.stop.send(true);
+            self.task.await.expect("loop task");
+            let (sent, dropped) = self.count.read();
+            let written = self.log.written.lock().expect("sent log").clone();
+            (sent, dropped, written)
+        }
+    }
+
+    /// R2929 — push `N` droppable 1000-byte puts through the group over a
+    /// link whose writes are held shut (`gated`) or not. Returns the sent and
+    /// dropped counts and every datagram written.
     #[cfg(feature = "codec-push")]
     async fn push_puts_through_the_loop(gated: bool) -> (usize, usize, Vec<Vec<u8>>) {
         const N: usize = 16;
-        let gate = std::sync::Arc::new(tokio::sync::Semaphore::new(0));
-        let log = if gated {
-            SentLog::gated(gate.clone())
-        } else {
-            SentLog::default()
-        };
-        let mut driver = FakeDriver {
-            inbound: VecDeque::new(),
-            log: log.clone(),
-            lost: false,
-        };
-        let (items, mut outbound) = tokio::sync::mpsc::unbounded_channel();
-        for i in 0..N {
-            items
-                .send(multicast_put_literal("k", &[i as u8; 1_000]).expect("put"))
-                .expect("loop alive");
-        }
-        drop(items);
-        let count = std::sync::Arc::new(OutcomeCount::default());
-        let recorder = count.clone();
-        let task = tokio::spawn(async move {
-            let mut dispatcher = MulticastDispatcher::<4>::new(MulticastConfig::new(5_000));
-            let clock = TokioTime::new();
-            let mut params = params(&[0xAA, 0xBB, 0xCC, 0xDD]);
-            // One JOIN, then none: the lanes hold the puts and nothing else.
-            params.join_interval_ms = 60_000;
-            // Long enough that a link which is writing always frees room in
-            // time; the first drop on a stalled one raises the lane's mark,
-            // and every later droppable message is dropped without waiting.
-            params.tx_queue.wait_before_drop_us = 200_000;
-            drive_multicast_session_with_membership(
-                &mut dispatcher,
-                MulticastDriveConfig {
-                    params: &params,
-                    tick_ms: 1,
-                    max_iters: Some(N + 4),
-                },
-                &mut driver,
-                &clock,
-                |_| {},
-                &mut outbound,
-                |_: &[Vec<u8>]| {},
-                |_: &[String]| {},
-                None,
-                &*recorder,
-                None,
+        let mut params = params(&[0xAA, 0xBB, 0xCC, 0xDD]);
+        // One JOIN, then none: the lanes hold the puts and nothing else.
+        params.join_interval_ms = 60_000;
+        // Long enough that a link which is writing always frees room in time;
+        // the first drop on a stalled one raises the lane's mark, and every
+        // later droppable message is dropped without waiting.
+        params.tx_queue.wait_before_drop_us = 200_000;
+        let group = GatedGroup::start(gated, params).await;
+        group
+            .push(
+                (0..N)
+                    .map(|i| multicast_put_literal("k", &[i as u8; 1_000]).expect("put"))
+                    .collect(),
             )
-            .await
-        });
-        loop {
-            let (sent, dropped) = count.read();
-            if sent + dropped == N {
-                break;
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(1)).await;
-        }
-        gate.add_permits(tokio::sync::Semaphore::MAX_PERMITS / 2);
-        task.await.expect("loop task");
-        let (sent, dropped) = count.read();
-        let written = log.written.lock().expect("sent log").clone();
-        (sent, dropped, written)
+            .await;
+        group.counted(N).await;
+        group.finish().await
     }
 
     /// R2929 — a group whose link stops writing fills its lanes, and a
@@ -3469,54 +3280,18 @@ mod tests {
     #[cfg(all(feature = "codec-push", feature = "transport-qos"))]
     #[tokio::test]
     async fn a_join_passing_queued_data_advertises_what_was_written() {
-        let gate = std::sync::Arc::new(tokio::sync::Semaphore::new(0));
-        let log = SentLog::gated(gate.clone());
-        let mut driver = FakeDriver {
-            inbound: VecDeque::new(),
-            log: log.clone(),
-            lost: false,
-        };
-        let (items, mut outbound) = tokio::sync::mpsc::unbounded_channel();
-        items
-            .send(multicast_put_literal("k", b"v").expect("put"))
-            .expect("loop alive");
-        drop(items);
-        let count = std::sync::Arc::new(OutcomeCount::default());
-        let recorder = count.clone();
-        let task = tokio::spawn(async move {
-            let mut dispatcher = MulticastDispatcher::<4>::new(MulticastConfig::new(5_000));
-            let clock = TokioTime::new();
-            // A JOIN every iteration: several are queued while the put waits.
-            let mut params = params(&[0xAA, 0xBB, 0xCC, 0xDD]);
-            params.is_qos = true;
-            drive_multicast_session_with_membership(
-                &mut dispatcher,
-                MulticastDriveConfig {
-                    params: &params,
-                    tick_ms: 1,
-                    max_iters: Some(40),
-                },
-                &mut driver,
-                &clock,
-                |_| {},
-                &mut outbound,
-                |_: &[Vec<u8>]| {},
-                |_: &[String]| {},
-                None,
-                &*recorder,
-                None,
-            )
-            .await
-        });
-        while count.read().0 == 0 {
-            tokio::time::sleep(std::time::Duration::from_millis(1)).await;
-        }
+        // A JOIN every few iterations: several are queued while the put waits.
+        let mut params = params(&[0xAA, 0xBB, 0xCC, 0xDD]);
+        params.is_qos = true;
+        let group = GatedGroup::start(true, params).await;
+        group
+            .push(vec![multicast_put_literal("k", b"v").expect("put")])
+            .await;
+        group.counted(1).await;
         // Let the loop queue more JOINs behind the stalled write.
-        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-        gate.add_permits(tokio::sync::Semaphore::MAX_PERMITS / 2);
-        task.await.expect("loop task");
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        let (_, _, written) = group.finish().await;
 
-        let written = log.written.lock().expect("sent log").clone();
         let frame_at = written
             .iter()
             .position(|d| d[0] & 0x1f == wire_const::T_MID_FRAME)
@@ -3581,7 +3356,7 @@ mod tests {
             &mut driver,
             &clock,
             |_| {},
-            &mut idle_outbound(),
+            &MulticastTxProducer::new(),
             &mut rx,
         )
         .await;
@@ -3627,7 +3402,7 @@ mod tests {
             &mut driver,
             &clock,
             |_| {},
-            &mut idle_outbound(),
+            &MulticastTxProducer::new(),
             &mut rx,
         )
         .await;
@@ -3737,7 +3512,7 @@ mod tests {
             &mut driver,
             &clock,
             |_| {},
-            &mut idle_outbound(),
+            &MulticastTxProducer::new(),
         )
         .await;
 
@@ -3776,7 +3551,7 @@ mod tests {
             &mut driver,
             &clock,
             |_| {},
-            &mut idle_outbound(),
+            &MulticastTxProducer::new(),
         )
         .await;
 
@@ -3831,7 +3606,7 @@ mod tests {
             &mut driver,
             &clock,
             |event| observer.dispatch_event(event),
-            &mut idle_outbound(),
+            &MulticastTxProducer::new(),
         )
         .await;
 
@@ -3893,33 +3668,35 @@ mod tests {
         let received = (batch.len() + close.len()) as u64;
         let mut driver = FakeDriver::with([(batch, src(2)), (close, src(2))]);
 
-        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
-        tx.send(multicast_put_literal("demo/out", b"sent").expect("put item"))
-            .expect("queue publish");
-        drop(tx);
-
+        let producer = MulticastTxProducer::new();
         let group = "udp/224.0.0.224:7446";
         let stats = MulticastTransportStats::new("udp/10.0.0.1:7446", group);
         let mut dispatcher = MulticastDispatcher::<4>::new(MulticastConfig::new(5_000));
         let clock = TokioTime::new();
-        let outcome = drive_multicast_session_with_membership(
-            &mut dispatcher,
-            MulticastDriveConfig {
-                params: &params(&[0xAA, 0xBB, 0xCC, 0xDD]),
-                tick_ms: 5,
-                max_iters: Some(8),
-            },
-            &mut driver,
-            &clock,
-            |_| {},
-            &mut rx,
-            |_members: &[Vec<u8>]| {},
-            |_subs: &[String]| {},
-            None,
-            &stats,
-            None,
-        )
-        .await;
+        let own = params(&[0xAA, 0xBB, 0xCC, 0xDD]);
+        let (outcome, ()) = tokio::join!(
+            drive_multicast_session_with_membership(
+                &mut dispatcher,
+                MulticastDriveConfig {
+                    params: &own,
+                    tick_ms: 5,
+                    max_iters: Some(8),
+                },
+                &mut driver,
+                &clock,
+                |_| {},
+                &producer,
+                |_members: &[Vec<u8>]| {},
+                |_subs: &[String]| {},
+                None,
+                &stats,
+                None,
+            ),
+            publish_when_linked(
+                &producer,
+                vec![multicast_put_literal("demo/out", b"sent").expect("put item")],
+            ),
+        );
         assert_eq!(outcome, MulticastOutcome::IterationLimit);
 
         let metrics = stats.metrics();
@@ -4072,7 +3849,7 @@ mod tests {
             &mut driver,
             &clock,
             |event| observer.dispatch_event(event),
-            &mut idle_outbound(),
+            &MulticastTxProducer::new(),
         )
         .await;
 
@@ -4125,11 +3902,11 @@ mod tests {
                 responder.reply(b"reply-over-multicast");
             });
 
-        // The reply sink shares the loop's outbound channel: the closure
-        // enqueues drained replies, the loop drains the channel and frames
-        // them onto the group (the A1c TX seam).
-        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
-        let sink = MulticastReplySink::new(TokioReplyBacking::new(tx));
+        // The reply sink pushes through the group's producer: the closure
+        // pushes each drained reply onto the pipeline the loop attached, and
+        // the transmit task writes it to the group (the A1c TX seam, R2931).
+        let producer = MulticastTxProducer::new();
+        let sink = MulticastReplySink::new(TokioReplyBacking::new(producer.clone()));
 
         let outcome = drive_multicast_session(
             &mut dispatcher,
@@ -4147,7 +3924,7 @@ mod tests {
                 // planes, so per R311lq it implements only `ResponseSink`.
                 observer.flush_query_replies(&sink);
             },
-            &mut rx,
+            &producer,
         )
         .await;
 
@@ -4230,8 +4007,8 @@ mod tests {
                 responder.reply(b"reply-over-multicast");
             });
 
-        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
-        let sink = MulticastReplySink::new(TokioReplyBacking::new(tx));
+        let producer = MulticastTxProducer::new();
+        let sink = MulticastReplySink::new(TokioReplyBacking::new(producer.clone()));
 
         let outcome = drive_multicast_session(
             &mut dispatcher,
@@ -4246,7 +4023,7 @@ mod tests {
                 observer.dispatch_event(event);
                 observer.flush_query_replies(&sink);
             },
-            &mut rx,
+            &producer,
         )
         .await;
 
@@ -4329,11 +4106,11 @@ mod tests {
             .register(/*token_id=*/ 3, "demo/live")
             .expect("register held token");
 
-        // The reply sink shares the loop's outbound channel: the closure
-        // drains the staged declare interest-response onto it, the loop frames
-        // each `Declare` onto the group (the A1c TX seam).
-        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
-        let sink = MulticastReplySink::new(TokioReplyBacking::new(tx));
+        // The reply sink pushes through the group's producer: the closure
+        // drains the staged declare interest-response onto the attached
+        // pipeline, one `Declare` per frame (the A1c TX seam, R2931).
+        let producer = MulticastTxProducer::new();
+        let sink = MulticastReplySink::new(TokioReplyBacking::new(producer.clone()));
 
         let outcome = drive_multicast_session(
             &mut dispatcher,
@@ -4348,7 +4125,7 @@ mod tests {
                 observer.dispatch_event(event);
                 observer.flush_declare_replies(&sink);
             },
-            &mut rx,
+            &producer,
         )
         .await;
 
@@ -4433,7 +4210,7 @@ mod tests {
             &mut driver,
             &clock,
             |event| observer.dispatch_event(event),
-            &mut idle_outbound(),
+            &MulticastTxProducer::new(),
         )
         .await;
 
@@ -4457,28 +4234,30 @@ mod tests {
     async fn drive_loop_frames_queued_push_and_advances_join_next_sn() {
         use wz_session_core::network_message::NetworkMessage;
 
-        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
-        tx.send(multicast_put_literal("demo/mc", b"tx-half").expect("put item"))
-            .expect("queue publish");
-        drop(tx); // after the publish drains, the TX arm disarms
-
+        let producer = MulticastTxProducer::new();
         let mut driver = FakeDriver::with([]);
         let mut dispatcher = MulticastDispatcher::<4>::new(MulticastConfig::new(5_000));
         let clock = TokioTime::new();
 
-        let outcome = drive_multicast_session(
-            &mut dispatcher,
-            MulticastDriveConfig {
-                params: &params(&[0xAA, 0xBB, 0xCC, 0xDD]),
-                tick_ms: 5,
-                max_iters: Some(8),
-            },
-            &mut driver,
-            &clock,
-            |_| {},
-            &mut rx,
-        )
-        .await;
+        let own = params(&[0xAA, 0xBB, 0xCC, 0xDD]);
+        let (outcome, ()) = tokio::join!(
+            drive_multicast_session(
+                &mut dispatcher,
+                MulticastDriveConfig {
+                    params: &own,
+                    tick_ms: 5,
+                    max_iters: Some(8),
+                },
+                &mut driver,
+                &clock,
+                |_| {},
+                &producer,
+            ),
+            publish_when_linked(
+                &producer,
+                vec![multicast_put_literal("demo/mc", b"tx-half").expect("put item")],
+            ),
+        );
         assert_eq!(outcome, MulticastOutcome::IterationLimit);
 
         // Exactly one data frame went out, on the reliable channel
@@ -4538,30 +4317,33 @@ mod tests {
         use wz_session_core::keyexpr_prefix::OwnedNonWildKeyExpr;
         use wz_session_core::network_message::NetworkMessage;
 
-        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
-        // The app publishes the RELATIVE keyexpr; the namespace is transparent.
-        tx.send(multicast_put_literal("demo/mc", b"ns-tx").expect("put item"))
-            .expect("queue publish");
-        drop(tx);
-
+        let producer = MulticastTxProducer::new();
         let mut driver = FakeDriver::with([]);
         let mut dispatcher = MulticastDispatcher::<4>::new(MulticastConfig::new(5_000));
         dispatcher.set_namespace(OwnedNonWildKeyExpr::new("myns").expect("valid namespace"));
         let clock = TokioTime::new();
 
-        let outcome = drive_multicast_session(
-            &mut dispatcher,
-            MulticastDriveConfig {
-                params: &params(&[0xAA, 0xBB, 0xCC, 0xDD]),
-                tick_ms: 5,
-                max_iters: Some(8),
-            },
-            &mut driver,
-            &clock,
-            |_| {},
-            &mut rx,
-        )
-        .await;
+        let own = params(&[0xAA, 0xBB, 0xCC, 0xDD]);
+        let (outcome, ()) = tokio::join!(
+            drive_multicast_session(
+                &mut dispatcher,
+                MulticastDriveConfig {
+                    params: &own,
+                    tick_ms: 5,
+                    max_iters: Some(8),
+                },
+                &mut driver,
+                &clock,
+                |_| {},
+                &producer,
+            ),
+            // The app publishes the RELATIVE keyexpr; the namespace is
+            // transparent, applied by the pipeline the loop attached.
+            publish_when_linked(
+                &producer,
+                vec![multicast_put_literal("demo/mc", b"ns-tx").expect("put item")],
+            ),
+        );
         assert_eq!(outcome, MulticastOutcome::IterationLimit);
 
         let frames: Vec<Vec<u8>> = driver
@@ -4693,7 +4475,7 @@ mod tests {
                 &mut driver,
                 &clock,
                 |event| observer.dispatch_event(event),
-                &mut idle_outbound(),
+                &MulticastTxProducer::new(),
             )
             .await;
 
@@ -4735,7 +4517,7 @@ mod tests {
                 &mut driver,
                 &clock,
                 |_| {},
-                &mut idle_outbound(),
+                &MulticastTxProducer::new(),
                 |_members: &[Vec<u8>]| {},
                 |_subs: &[String]| {},
                 None,
@@ -4801,7 +4583,7 @@ mod tests {
                 &mut driver,
                 &clock,
                 |event| observer.dispatch_event(event),
-                &mut idle_outbound(),
+                &MulticastTxProducer::new(),
             )
             .await;
 
@@ -4850,7 +4632,7 @@ mod tests {
                 &mut driver,
                 &clock,
                 |event| observer.dispatch_event(event),
-                &mut idle_outbound(),
+                &MulticastTxProducer::new(),
             )
             .await;
 
@@ -4907,7 +4689,7 @@ mod tests {
                 &mut driver,
                 &clock,
                 |event| observer.dispatch_event(event),
-                &mut idle_outbound(),
+                &MulticastTxProducer::new(),
             )
             .await;
 
@@ -4941,9 +4723,19 @@ mod tests {
         /// budget, exactly how the unicast fragmentation fixtures shrink
         /// the negotiated mtu rather than growing the message.
         fn small_batch_params(zid: &[u8]) -> MulticastParams {
+            let base = params(zid);
             MulticastParams {
                 batch_size: 64,
-                ..params(zid)
+                // R2931 — lanes that hold a whole chain: these witnesses are
+                // about the chain's shape, and a lane of the default two
+                // 64-byte batches would make each later fragment wait on the
+                // transmit task, which a push made as the link attaches can
+                // outrun (a congestion drop, and a different test).
+                tx_queue: wz_session_core::session_init_params::TxQueueConf {
+                    sizes: [16; wz_session_core::qos::Priority::NUM],
+                    ..base.tx_queue
+                },
+                ..base
             }
         }
 
@@ -4963,27 +4755,28 @@ mod tests {
         #[tokio::test]
         async fn drive_loop_publishes_oversize_put_as_fragment_chain() {
             let p = small_batch_params(&[0xAA, 0xBB, 0xCC, 0xDD]);
-            let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
-            tx.send(multicast_put_literal("demo/mc", &oversize_payload()).expect("put item"))
-                .expect("queue publish");
-            drop(tx);
-
+            let producer = MulticastTxProducer::new();
             let mut driver = FakeDriver::with([]);
             let mut dispatcher = MulticastDispatcher::<4>::new(MulticastConfig::new(5_000));
             let clock = TokioTime::new();
-            drive_multicast_session(
-                &mut dispatcher,
-                MulticastDriveConfig {
-                    params: &p,
-                    tick_ms: 5,
-                    max_iters: Some(8),
-                },
-                &mut driver,
-                &clock,
-                |_| {},
-                &mut rx,
-            )
-            .await;
+            tokio::join!(
+                drive_multicast_session(
+                    &mut dispatcher,
+                    MulticastDriveConfig {
+                        params: &p,
+                        tick_ms: 5,
+                        max_iters: Some(8),
+                    },
+                    &mut driver,
+                    &clock,
+                    |_| {},
+                    &producer,
+                ),
+                publish_when_linked(
+                    &producer,
+                    vec![multicast_put_literal("demo/mc", &oversize_payload()).expect("put item")],
+                ),
+            );
 
             assert!(
                 !driver
@@ -5039,27 +4832,29 @@ mod tests {
         #[tokio::test]
         async fn drive_loop_oversize_put_round_trips_through_peer_loop() {
             let payload = oversize_payload();
-            let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
-            tx.send(multicast_put_literal("demo/mc", &payload).expect("put item"))
-                .expect("queue publish");
-            drop(tx);
-
+            let producer = MulticastTxProducer::new();
             let mut driver_a = FakeDriver::with([]);
             let mut dispatcher_a = MulticastDispatcher::<4>::new(MulticastConfig::new(5_000));
             let clock = TokioTime::new();
-            drive_multicast_session(
-                &mut dispatcher_a,
-                MulticastDriveConfig {
-                    params: &small_batch_params(&[0xAA, 0xBB, 0xCC, 0xDD]),
-                    tick_ms: 5,
-                    max_iters: Some(8),
-                },
-                &mut driver_a,
-                &clock,
-                |_| {},
-                &mut rx,
-            )
-            .await;
+            let own = small_batch_params(&[0xAA, 0xBB, 0xCC, 0xDD]);
+            tokio::join!(
+                drive_multicast_session(
+                    &mut dispatcher_a,
+                    MulticastDriveConfig {
+                        params: &own,
+                        tick_ms: 5,
+                        max_iters: Some(8),
+                    },
+                    &mut driver_a,
+                    &clock,
+                    |_| {},
+                    &producer,
+                ),
+                publish_when_linked(
+                    &producer,
+                    vec![multicast_put_literal("demo/mc", &payload).expect("put item")],
+                ),
+            );
 
             // Node B ingests A's wire output in emit order.
             let inbound: Vec<(Vec<u8>, SocketAddr)> = driver_a
@@ -5092,7 +4887,7 @@ mod tests {
                 &mut driver_b,
                 &clock,
                 |event| observer.dispatch_event(event),
-                &mut idle_outbound(),
+                &MulticastTxProducer::new(),
             )
             .await;
 
@@ -5125,7 +4920,7 @@ mod tests {
             &mut driver,
             &clock,
             |_| {},
-            &mut idle_outbound(),
+            &MulticastTxProducer::new(),
         )
         .await;
 
@@ -5160,7 +4955,8 @@ mod tests {
         use crate::session::{PublishOptions, TokioMulticastSession};
         use std::sync::Arc;
 
-        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<MulticastTxItem>();
+        let (producer, mut tap) =
+            crate::multicast_pipeline::MulticastTxTap::attach(&params(&[0xAA, 0xBB, 0xCC, 0xDD]));
         // R311nf — `TokioMulticastSession` is the typestate alias for
         // `Session<TokioRuntime, TokioTime, Multicast>`. In a both-transport build
         // this is distinct from `TokioSession` (= `Session<_,_,Unicast>`) at the
@@ -5169,21 +4965,31 @@ mod tests {
         let session: TokioMulticastSession = TokioMulticastSession::new_multicast(
             Arc::new(crate::sync::Mutex::new(ApplicationLayerObserver::new())),
             Arc::new(TokioTime::new()),
-            tx,
+            producer,
         );
 
         // publish routes through the send seam's LIVE multicast arm -> one Push
-        // onto the TX channel the drive loop drains. No local subscriber, so
-        // the loopback leg fires nothing.
+        // pushed onto the group's pipeline (R2931). No local subscriber, so the
+        // loopback leg fires nothing.
         let fired = session
             .publish("demo/both", b"hello-both", PublishOptions::put())
             .expect("multicast Put builds within codec capacity");
         assert_eq!(fired, 0, "no local subscriber: loopback fires nothing");
-        let item = rx.try_recv().expect("publish enqueued one tx item");
+        let datagram = tap.try_next().expect("publish pushed one datagram");
+        let Ok(InboundFrame::Frame { payload, .. }) = parse_inbound(&datagram) else {
+            panic!("the pushed datagram is a Frame");
+        };
+        let messages = parse_frame_payload(&payload).expect("payload parses");
         assert!(
-            matches!(item, MulticastTxItem::Push { .. }),
-            "the enqueued multicast item is a Put Push"
+            matches!(
+                messages.as_slice(),
+                [wz_session_core::network_message::NetworkMessage::Push(_)]
+            ),
+            "the pushed multicast message is a Put Push"
         );
-        assert!(rx.try_recv().is_err(), "publish enqueued exactly one item");
+        assert!(
+            tap.try_next().is_none(),
+            "publish pushed exactly one datagram"
+        );
     }
 }

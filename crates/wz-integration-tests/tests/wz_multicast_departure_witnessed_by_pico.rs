@@ -249,7 +249,7 @@ async fn pico_witnesses_a_wz_multicast_departure() {
         let mut driver = UdpDriver::from_socket(sock, SocketAddr::from((GROUP, PORT)));
         let mut dispatcher = MulticastDispatcher::<8>::new(MulticastConfig::new(30_000));
         let params = wz_mc_params(vec![0xD1, 0xD2, 0xD3, 0xD4], ANNOUNCED_LEASE_MS);
-        let (_tx, mut outbound) = tokio::sync::mpsc::unbounded_channel();
+        let producer = wz_runtime_tokio::multicast_glue::MulticastTxProducer::new();
         let clock = TokioTime::new();
         let mut shutdown = shutdown_rx;
         drive_multicast_session_with_shutdown(
@@ -262,7 +262,7 @@ async fn pico_witnesses_a_wz_multicast_departure() {
             &mut driver,
             &clock,
             |_| {},
-            &mut outbound,
+            &producer,
             &mut shutdown,
         )
         .await
@@ -427,7 +427,7 @@ async fn pico_infers_a_wz_multicast_departure_from_silence() {
         let mut driver = UdpDriver::from_socket(sock, SocketAddr::from((GROUP, LEASE_PORT)));
         let mut dispatcher = MulticastDispatcher::<8>::new(MulticastConfig::new(30_000));
         let params = wz_mc_params(vec![0xE1, 0xE2, 0xE3, 0xE4], INFERRED_LEASE_MS);
-        let (_tx, mut outbound) = tokio::sync::mpsc::unbounded_channel();
+        let producer = wz_runtime_tokio::multicast_glue::MulticastTxProducer::new();
         let clock = TokioTime::new();
         let mut shutdown = shutdown_rx;
         drive_multicast_session_with_shutdown(
@@ -440,7 +440,7 @@ async fn pico_infers_a_wz_multicast_departure_from_silence() {
             &mut driver,
             &clock,
             |_| {},
-            &mut outbound,
+            &producer,
             &mut shutdown,
         )
         .await

@@ -507,6 +507,11 @@ impl OutboundRx {
 
     /// The next frame if one is queued right now, highest priority first.
     pub fn try_recv(&mut self) -> Option<Vec<u8>> {
+        self.try_recv_tagged().map(|(_, frame)| frame)
+    }
+
+    /// R2931 — [`Self::try_recv`], with the priority the frame was sent at.
+    pub fn try_recv_tagged(&mut self) -> Option<(Priority, Vec<u8>)> {
         let (frame, freed) = self
             .shared
             .state
@@ -516,7 +521,7 @@ impl OutboundRx {
         if freed {
             self.shared.room.notify_all();
         }
-        frame.map(|(_, frame)| frame)
+        frame
     }
 
     /// Stop accepting frames; the ones already queued stay to be received.

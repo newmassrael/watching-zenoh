@@ -10364,12 +10364,58 @@ fn remote_queryable_listener_rejects_typed_when_feature_off() {
 
 // ── R311y232 direct multicast Session publish QoS band ──
 
+/// R2931 — a multicast Session over a QoS group whose pipeline the test reads:
+/// what a publish pushes arrives as a group datagram, and its frame says the
+/// band it rode.
+#[cfg(all(
+    feature = "transport-multicast",
+    feature = "codec-push",
+    feature = "transport-qos"
+))]
+fn tapped_qos_group_session() -> (
+    TokioMulticastSession,
+    crate::multicast_pipeline::MulticastTxTap,
+) {
+    let params = wz_session_core::multicast_params::MulticastParams {
+        version: 0x09,
+        whatami: wz_session_core::WhatAmI::Peer,
+        zid: vec![0xAA, 0xBB, 0xCC, 0xDD],
+        lease_ms: 5_000,
+        join_interval_ms: 100,
+        seq_num_res: 0x02,
+        req_id_res: 0x02,
+        batch_size: 2_048,
+        is_qos: true,
+        tx_queue: wz_session_core::session_init_params::TxQueueConf::default(),
+    };
+    let (producer, tap) = crate::multicast_pipeline::MulticastTxTap::attach(&params);
+    let observer = Arc::new(Mutex::new(ApplicationLayerObserver::new()));
+    let clock = Arc::new(TokioTime::new());
+    (Session::new_multicast(observer, clock, producer), tap)
+}
+
+/// R2931 — the band of the next frame a publish pushed onto the group.
+#[cfg(all(
+    feature = "transport-multicast",
+    feature = "codec-push",
+    feature = "transport-qos"
+))]
+fn next_pushed_band(
+    tap: &mut crate::multicast_pipeline::MulticastTxTap,
+) -> wz_session_core::qos::Priority {
+    use wz_session_core::inbound::{parse_inbound, InboundFrame};
+    let datagram = tap.try_next().expect("the publish pushed a datagram");
+    let Ok(InboundFrame::Frame { priority, .. }) = parse_inbound(&datagram) else {
+        panic!("the pushed datagram is a Frame");
+    };
+    priority
+}
+
 /// R311y232 (transport-qos ACTIVATION) — the direct multicast-Session send seam
-/// threads the app QoS band onto the enqueued
-/// [`MulticastTxItem`](wz_session_core::multicast_tx::MulticastTxItem): `publish_qos`
-/// stamps the caller's chosen priority (closing the WHOLE-SESSION finding — the
-/// multicast arm formerly hard-coded `Priority::DEFAULT`, so a direct prioritized
-/// publish over a QoS group egressed at DEFAULT), while the base `publish` stays
+/// threads the app QoS band to the group: `publish_qos` stamps the caller's
+/// chosen priority (closing the WHOLE-SESSION finding — the multicast arm
+/// formerly hard-coded `Priority::DEFAULT`, so a direct prioritized publish
+/// over a QoS group egressed at DEFAULT), while the base `publish` stays
 /// DEFAULT (byte-identical to the pre-QoS single conduit). The group-level
 /// `is_qos` CLAMP that turns a non-DEFAULT band into the per-priority conduit +
 /// frame `ext_qos` is proven at the dispatch level by
@@ -10378,36 +10424,25 @@ fn remote_queryable_listener_rejects_typed_when_feature_off() {
 /// `non_qos_group_clamps_to_default_no_ext_qos`) — those need
 /// `transport-qos + codec-push`, so the run-ci C1bc lane RUNS them (the C1bb
 /// transport-qos test lane omits `codec-push` and cfg's them out). THIS witness
-/// pins the `Session` -> tx-item hand-off the finding named, which those cannot see.
-#[cfg(all(feature = "transport-multicast", feature = "codec-push"))]
+/// pins the `Session` -> group hand-off the finding named, which those cannot see.
+///
+/// R2931 — read off the frame the publish pushed rather than off a queued
+/// item: the session now pushes onto the group's pipeline itself, so the band
+/// is observable only where it lands, which is on a QoS group (a non-QoS one
+/// clamps every band to DEFAULT) and so under `transport-qos`.
+#[cfg(all(
+    feature = "transport-multicast",
+    feature = "codec-push",
+    feature = "transport-qos"
+))]
 #[test]
 fn multicast_publish_qos_stamps_band_base_publish_stays_default() {
-    use wz_session_core::multicast_tx::MulticastTxItem;
     use wz_session_core::qos::Priority;
 
-    // The band accessor: exhaustive in every feature combo the test runs in — the
-    // catch-all is cfg-gated to the codecs that add the reply-plane variants, so a
-    // codec-push-only lane (where `Push` is the sole variant) has no unreachable
-    // arm, and a lane with reply variants has a reachable one.
-    let tx_band = |item: &MulticastTxItem| -> Priority {
-        match item {
-            MulticastTxItem::Push { priority, .. } => *priority,
-            #[cfg(any(
-                feature = "codec-response",
-                feature = "codec-response-final",
-                feature = "liveliness-token"
-            ))]
-            _ => panic!("expected a multicast Push tx item"),
-        }
-    };
-
-    let observer = Arc::new(Mutex::new(ApplicationLayerObserver::new()));
-    let clock = Arc::new(TokioTime::new());
-    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<MulticastTxItem>();
-    let session: TokioMulticastSession = Session::new_multicast(observer, clock, tx);
+    let (session, mut tap) = tapped_qos_group_session();
 
     // `Remote` locality routes the codec-push wire leg only (no loopback subscriber
-    // needed); the leg enqueues one `MulticastTxItem::Push` per publish.
+    // needed); the leg pushes one Push per publish.
     let remote = PublishOptions::put().with_locality(Locality::Remote);
 
     session
@@ -10417,18 +10452,18 @@ fn multicast_publish_qos_stamps_band_base_publish_stays_default() {
             remote.clone(),
             Priority::InteractiveHigh,
         )
-        .expect("multicast publish_qos enqueues");
+        .expect("multicast publish_qos pushes");
     assert_eq!(
-        tx_band(&rx.try_recv().expect("publish_qos staged a tx item")),
+        next_pushed_band(&mut tap),
         Priority::InteractiveHigh,
         "publish_qos must stamp the app band, not the pre-y232 hard-coded DEFAULT"
     );
 
     session
         .publish("home/temp", b"cold", remote)
-        .expect("multicast publish enqueues");
+        .expect("multicast publish pushes");
     assert_eq!(
-        tx_band(&rx.try_recv().expect("publish staged a tx item")),
+        next_pushed_band(&mut tap),
         Priority::DEFAULT,
         "the base publish stays DEFAULT-band (byte-identical to the pre-QoS send)"
     );
@@ -10450,40 +10485,25 @@ fn multicast_publish_qos_stamps_band_base_publish_stays_default() {
 #[cfg(all(
     feature = "transport-multicast",
     feature = "codec-push",
-    feature = "pubsub-qos"
+    feature = "pubsub-qos",
+    feature = "transport-qos"
 ))]
 #[test]
 fn publish_with_priority_routes_multicast_conduit_band() {
-    use wz_session_core::multicast_tx::MulticastTxItem;
     use wz_session_core::qos::Priority;
 
-    let tx_band = |item: &MulticastTxItem| -> Priority {
-        match item {
-            MulticastTxItem::Push { priority, .. } => *priority,
-            #[cfg(any(
-                feature = "codec-response",
-                feature = "codec-response-final",
-                feature = "liveliness-token"
-            ))]
-            _ => panic!("expected a multicast Push tx item"),
-        }
-    };
-
-    let observer = Arc::new(Mutex::new(ApplicationLayerObserver::new()));
-    let clock = Arc::new(TokioTime::new());
-    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<MulticastTxItem>();
-    let session: TokioMulticastSession = Session::new_multicast(observer, clock, tx);
+    let (session, mut tap) = tapped_qos_group_session();
 
     // Base `publish` with with_priority set -> the band flows from
-    // `opts.qos.priority()` to the enqueued tx item (the item3 change).
+    // `opts.qos.priority()` to the frame the publish pushes (the item3 change).
     let hi = PublishOptions::put()
         .with_locality(Locality::Remote)
         .with_priority(Priority::InteractiveHigh);
     session
         .publish("home/temp", b"hot", hi)
-        .expect("multicast publish enqueues");
+        .expect("multicast publish pushes");
     assert_eq!(
-        tx_band(&rx.try_recv().expect("publish staged a tx item")),
+        next_pushed_band(&mut tap),
         Priority::InteractiveHigh,
         "base publish routes the conduit band from opts.with_priority (item3 unification)",
     );
@@ -10492,9 +10512,9 @@ fn publish_with_priority_routes_multicast_conduit_band() {
     let plain = PublishOptions::put().with_locality(Locality::Remote);
     session
         .publish("home/temp", b"cold", plain)
-        .expect("multicast publish enqueues");
+        .expect("multicast publish pushes");
     assert_eq!(
-        tx_band(&rx.try_recv().expect("publish staged a tx item")),
+        next_pushed_band(&mut tap),
         Priority::DEFAULT,
         "no with_priority -> DEFAULT band (unchanged base-publish contract)",
     );

@@ -271,12 +271,14 @@ impl<R: SessionRuntime, T: TimeSource> TransportState<R, T> for Unicast {
 #[cfg(feature = "transport-multicast")]
 #[derive(Clone)]
 pub struct MulticastPayload {
-    /// The sender half of the channel
+    /// The group's producer (R2931):
+    /// [`Session::publish`](super::Session::publish) pushes a `MulticastTxItem`
+    /// through it onto the pipeline
     /// [`drive_multicast_session`](crate::multicast_glue::drive_multicast_session)
-    /// drains; [`Session::publish`](super::Session::publish) enqueues a
-    /// `MulticastTxItem` here. Absent in a non-`codec-push` build (RX-only).
+    /// attaches, on the publisher's own thread. Absent in a non-`codec-push`
+    /// build (RX-only).
     #[cfg(feature = "codec-push")]
-    pub(crate) tx: tokio::sync::mpsc::UnboundedSender<MulticastTxItem>,
+    pub(crate) tx: crate::multicast_pipeline::MulticastTxProducer,
 }
 
 #[cfg(feature = "transport-multicast")]
@@ -309,7 +311,13 @@ impl<R: SessionRuntime, T: TimeSource> TransportState<R, T> for Multicast {
                 // variants Response / ResponseFinal / Oam are emitted by the
                 // drive-loop MulticastReplySink, never routed here).
                 NetworkMessage::Push(push) => {
-                    let _ = payload.tx.send(MulticastTxItem::Push {
+                    // R2931 — pushed here, on the publisher's thread: a
+                    // blocking publish waits for room within its
+                    // `wait_before_close`, a droppable one within its
+                    // `wait_before_drop`, and one that finds none is a
+                    // congestion drop the group counts. Upstream's multicast
+                    // put answers `Ok` for both, and for a group with no link.
+                    let _ = payload.tx.push(MulticastTxItem::Push {
                         push,
                         reliable,
                         // R311y232 (ACTIVATION) — the app's chosen QoS band, staged onto

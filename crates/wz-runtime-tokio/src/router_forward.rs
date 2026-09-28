@@ -346,13 +346,6 @@ use wz_codecs::declare::{DeclareOwned, DeclareOwnedVariant};
 use wz_codecs::interest::InterestOwned;
 use wz_codecs::linkstate_list::LinkstateListOwned;
 use wz_codecs::push::{PushOwned, PushOwnedVariant};
-// R311wt-mc slice 1 — the EGRESS-only multicast group plane
-// (`router-multicast-faces`). Gated on `transport-multicast` (the existing §5.1
-// atom that makes `MulticastTxItem` + the drive loop available); the reserved
-// `router-multicast-faces` atom stays cfg-site-free until a run-mode wires
-// `attach_mcast_group` (a later slice, the reserved→active flip).
-#[cfg(feature = "router-multicast-faces")]
-use tokio::sync::mpsc::UnboundedSender;
 use wz_routing_graph::{
     AutoConnect, Changes, LinkEdgeWeight, LinkId, LinkInfo, LinkstateNetwork, Versioned, WhatAmI,
     Zid,
@@ -1307,17 +1300,18 @@ struct RouterFaceState {
 
 /// One EGRESS-only multicast group face — the wz analog of a zenoh
 /// `mcast_groups` entry (`dispatcher/tables.rs:79`) whose primitives is a
-/// `McastMux` (`mux.rs:245`). Holds the outbound sender of a multicast drive
-/// loop ([`multicast_glue::drive_multicast_session`](crate::multicast_glue));
-/// the router enqueues a [`MulticastTxItem::Push`] and the (SEPARATE-task) loop
-/// mints the group channel SN + frames it through the `multicast_tx` SSOT, so
-/// this `!Send` forwarder only needs a `Send` sender (no single-task fold — that
-/// is the INGRESS milestone). A group is a broadcast SINK: no zid, no ingress,
+/// `McastMux` (`mux.rs:245`). Holds the producer of a multicast drive loop's
+/// group ([`multicast_glue::drive_multicast_session`](crate::multicast_glue));
+/// the router pushes a [`MulticastTxItem::Push`] through it, which mints the
+/// group channel SN and frames it through the `multicast_tx` SSOT onto the
+/// pipeline the (SEPARATE-task) loop attached (R2931), so this `!Send`
+/// forwarder only needs a `Send` handle (no single-task fold — that is the
+/// INGRESS milestone). A group is a broadcast SINK: no zid, no ingress,
 /// never a delivery-lookup key (zenoh's per-peer `DummyPrimitives` ingress face
 /// lives in the separate `mcast_faces` plane, deferred).
 #[cfg(feature = "router-multicast-faces")]
 struct McastGroup {
-    tx: UnboundedSender<MulticastTxItem>,
+    tx: crate::multicast_pipeline::MulticastTxProducer,
 }
 
 /// The synthetic FaceId for the single multicast INGRESS face (the deferred
@@ -4647,15 +4641,14 @@ impl RouterForwarder {
         );
     }
 
-    /// Attach a multicast drive loop's outbound sender as an EGRESS group face
-    /// (the wz analog of zenoh `Router::new_transport_multicast`, `router.rs:181`,
+    /// Attach a multicast drive loop's producer as an EGRESS group face (the wz
+    /// analog of zenoh `Router::new_transport_multicast`, `router.rs:181`,
     /// pushing a `McastMux` face into `mcast_groups`). A routed `Push` is
-    /// thereafter broadcast to this group. The sender is `Send` + `Clone`, so the
-    /// drive loop stays a SEPARATE task from this `!Send` forwarder — the EGRESS
-    /// half needs no single-task fold (that is the INGRESS milestone). Called by
-    /// the router+multicast run-mode (a later slice); until then the plane is empty.
+    /// thereafter broadcast to this group. The producer is `Send` + `Clone`, so
+    /// the drive loop stays a SEPARATE task from this `!Send` forwarder — the
+    /// EGRESS half needs no single-task fold (that is the INGRESS milestone).
     #[cfg(feature = "router-multicast-faces")]
-    pub fn attach_mcast_group(&self, tx: UnboundedSender<MulticastTxItem>) {
+    pub fn attach_mcast_group(&self, tx: crate::multicast_pipeline::MulticastTxProducer) {
         self.mcast_groups.borrow_mut().push(McastGroup { tx });
     }
 
@@ -4669,9 +4662,10 @@ impl RouterForwarder {
     /// @ `fn egress_filter`; 1.10.0 moved it out of the router hat): a
     /// Push whose source is itself a multicast face is NOT re-broadcast to a group
     /// (`inbound_is_mcast` ⇒ return; mcast→mcast is the both-multicast deny). The
-    /// group sink only ENQUEUES a [`MulticastTxItem::Push`]; the drive loop mints
-    /// the group channel SN + frames it (the `multicast_tx` SSOT), so egress here
-    /// never mints an SN (double-mint would desync the group ring). The routed push
+    /// group sink PUSHES a [`MulticastTxItem::Push`] through the group's producer,
+    /// which mints the group channel SN on the conduit it holds and frames it (the
+    /// `multicast_tx` SSOT, R2931); this forwarder mints nothing itself (a second
+    /// minter would desync the group ring). The routed push
     /// is RE-LITERALIZED against the resolved `keyexpr` first (a group leaf shares
     /// no expr-id alias table — an aliased id-only push would be a group blackhole),
     /// mirroring the client-leaf / mesh egress legs.
@@ -4746,9 +4740,9 @@ impl RouterForwarder {
             return;
         };
         for group in groups.iter() {
-            // Fire-and-forget: a dropped receiver = a dead multicast link, the
+            // Fire-and-forget: a group with no room or no link drops it, the
             // same contract the drive loop's own reply backing carries.
-            let _ = group.tx.send(MulticastTxItem::Push {
+            let _ = group.tx.push(MulticastTxItem::Push {
                 push: Box::new(carrier.clone()),
                 reliable,
                 // R311y227 — the received routing band (the inbound frame's decoded
@@ -17692,6 +17686,52 @@ mod tests {
         );
     }
 
+    /// R2931 — a group's producer with a pipeline attached, read back by the
+    /// test: what the forwarder pushed arrives as a group datagram.
+    #[cfg(feature = "router-multicast-faces")]
+    fn group_tap() -> (
+        crate::multicast_pipeline::MulticastTxProducer,
+        crate::multicast_pipeline::MulticastTxTap,
+    ) {
+        crate::multicast_pipeline::MulticastTxTap::attach(
+            &wz_session_core::multicast_params::MulticastParams {
+                version: 0x09,
+                whatami: wz_session_core::WhatAmI::Router,
+                zid: vec![0x01],
+                lease_ms: 5_000,
+                join_interval_ms: 100,
+                seq_num_res: 0x02,
+                req_id_res: 0x02,
+                batch_size: 2_048,
+                is_qos: false,
+                tx_queue: wz_session_core::session_init_params::TxQueueConf::default(),
+            },
+        )
+    }
+
+    /// R2931 — the next Push the group's pipeline received, decoded off the
+    /// wire bytes it queued, with the channel its frame rode.
+    #[cfg(feature = "router-multicast-faces")]
+    fn group_push(
+        tap: &mut crate::multicast_pipeline::MulticastTxTap,
+    ) -> Option<(wz_codecs::push::PushOwned, bool)> {
+        use wz_session_core::inbound::{parse_inbound, InboundFrame};
+        let datagram = tap.try_next()?;
+        let Ok(InboundFrame::Frame {
+            reliable, payload, ..
+        }) = parse_inbound(&datagram)
+        else {
+            panic!("a group datagram that is not a Frame");
+        };
+        let mut messages =
+            wz_session_core::network_message::parse_frame_payload(&payload).expect("frame payload");
+        assert_eq!(messages.len(), 1, "one routed message per frame");
+        match messages.remove(0) {
+            NetworkMessage::Push(push) => Some((*push, reliable)),
+            other => panic!("expected a Push, the group received {other:?}"),
+        }
+    }
+
     /// R311wt-mc slice 1 — the EGRESS-only multicast group plane: an attached
     /// group receives a routed Put as a `MulticastTxItem::Push` (carrying the
     /// reliable flag), and the echo guard suppresses a multicast-sourced Push
@@ -17703,7 +17743,7 @@ mod tests {
     #[test]
     fn mcast_group_receives_routed_push_and_echo_guards() {
         let fwd = RouterForwarder::new(zid(0x01));
-        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let (tx, mut rx) = group_tap();
         fwd.attach_mcast_group(tx);
         let push =
             wz_session_core::push_build::build_push_literal("demo/data", b"payload").expect("push");
@@ -17711,16 +17751,13 @@ mod tests {
         // A Put whose source is NOT a multicast face broadcasts to the group,
         // UNCONDITIONALLY (no matching sub is registered on this forwarder).
         fwd.broadcast_to_mcast_groups(true, Priority::DEFAULT, &push, "demo/data", false, false);
-        let item = rx.try_recv().expect("the routed Put reached the group");
-        assert!(
-            matches!(item, MulticastTxItem::Push { reliable: true, .. }),
-            "broadcast as a reliable MulticastTxItem::Push"
-        );
+        let (_, reliable) = group_push(&mut rx).expect("the routed Put reached the group");
+        assert!(reliable, "broadcast on the reliable channel");
 
         // Echo guard: a Push whose source IS a multicast face is not re-broadcast.
         fwd.broadcast_to_mcast_groups(true, Priority::DEFAULT, &push, "demo/data", true, false);
         assert!(
-            rx.try_recv().is_err(),
+            group_push(&mut rx).is_none(),
             "a multicast-sourced Push must not echo back to a group"
         );
     }
@@ -17743,19 +17780,15 @@ mod tests {
         // the sub-gated fan-out drops — only the unconditional group broadcast fires.
         let (a_p, _sink_p) = face(zid(0xAA), WIRE_PEER);
         fwd.register(FaceId(0), &a_p);
-        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let (tx, mut rx) = group_tap();
         fwd.attach_mcast_group(tx);
 
         let push = wz_session_core::push_build::build_push_literal("demo/data", b"payload")
             .expect("build push");
         forward_one(&fwd, FaceId(0), NetworkMessage::Push(Box::new(push)));
 
-        let item = rx
-            .try_recv()
-            .expect("the routed Push reached the group via the route_push tail");
-        let MulticastTxItem::Push { push, reliable, .. } = item else {
-            panic!("expected a MulticastTxItem::Push");
-        };
+        let (push, reliable) =
+            group_push(&mut rx).expect("the routed Push reached the group via the route_push tail");
         assert!(reliable, "broadcast on the reliable channel");
         // The group leaf shares NO alias table, so resolve the egressed keyexpr
         // against an EMPTY table (the leaf's view): a literal push forwards verbatim
@@ -17788,7 +17821,7 @@ mod tests {
             wz_session_core::declare_build::build_declare_kexpr(7, "demo/data").expect("kexpr"),
         ));
         forward_one(&fwd, FaceId(0), kexpr);
-        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let (tx, mut rx) = group_tap();
         fwd.attach_mcast_group(tx);
 
         // A pure-aliased push (id 7, no suffix): route_push resolves it via the face
@@ -17797,12 +17830,7 @@ mod tests {
             wz_session_core::push_build::build_push_aliased(7, None, b"payload").expect("aliased");
         forward_one(&fwd, FaceId(0), NetworkMessage::Push(Box::new(aliased)));
 
-        let item = rx
-            .try_recv()
-            .expect("the aliased routed Push reached the group");
-        let MulticastTxItem::Push { push, .. } = item else {
-            panic!("expected a MulticastTxItem::Push");
-        };
+        let (push, _) = group_push(&mut rx).expect("the aliased routed Push reached the group");
         // The group leaf has NO alias table: resolve against an empty one. The
         // aliased id 7 would resolve to None (blackhole); the reliteralized literal
         // resolves to "demo/data".
@@ -17825,7 +17853,7 @@ mod tests {
         let fwd = RouterForwarder::new(zid(0x01));
         let (a_p, _sink_p) = face(zid(0xAA), WIRE_PEER);
         fwd.register(FaceId(0), &a_p);
-        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let (tx, mut rx) = group_tap();
         fwd.attach_mcast_group(tx);
         // An explicit empty relay is equivalent to never relaying: no other
         // on-group router ⇒ self is the DR for every keyexpr.
@@ -17836,7 +17864,7 @@ mod tests {
         forward_one(&fwd, FaceId(0), NetworkMessage::Push(Box::new(push)));
 
         assert!(
-            rx.try_recv().is_ok(),
+            group_push(&mut rx).is_some(),
             "the sole on-group router is the DR ⇒ egress is unconditional"
         );
     }
@@ -17853,7 +17881,7 @@ mod tests {
         let fwd = RouterForwarder::new(self_zid);
         let (a_p, _sink_p) = face(zid(0xAA), WIRE_PEER);
         fwd.register(FaceId(0), &a_p);
-        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let (tx, mut rx) = group_tap();
         fwd.attach_mcast_group(tx);
 
         // HRW is ~uniform, so some zid always out-hashes self for the keyexpr.
@@ -17869,7 +17897,7 @@ mod tests {
         forward_one(&fwd, FaceId(0), NetworkMessage::Push(Box::new(push)));
 
         assert!(
-            rx.try_recv().is_err(),
+            group_push(&mut rx).is_none(),
             "a non-DR on-group router suppresses group egress (I3b loop-safety)"
         );
     }
@@ -17885,7 +17913,7 @@ mod tests {
         let fwd = RouterForwarder::new(self_zid);
         let (a_p, _sink_p) = face(zid(0xAA), WIRE_PEER);
         fwd.register(FaceId(0), &a_p);
-        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let (tx, mut rx) = group_tap();
         fwd.attach_mcast_group(tx);
 
         let key = "demo/data";
@@ -17900,7 +17928,7 @@ mod tests {
         forward_one(&fwd, FaceId(0), NetworkMessage::Push(Box::new(push)));
 
         assert!(
-            rx.try_recv().is_ok(),
+            group_push(&mut rx).is_some(),
             "self is the elected DR (member loses the HRW) ⇒ egress fires"
         );
     }
@@ -17918,7 +17946,7 @@ mod tests {
         let fwd = RouterForwarder::new(self_zid);
         let (cli, _sink) = face(zid(0xCC), WIRE_CLIENT);
         fwd.register(FaceId(0), &cli);
-        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let (tx, mut rx) = group_tap();
         fwd.attach_mcast_group(tx);
 
         // A member that out-hashes self ⇒ self is NOT the DR for the keyexpr.
@@ -17934,7 +17962,7 @@ mod tests {
         forward_one(&fwd, FaceId(0), NetworkMessage::Push(Box::new(push)));
 
         assert!(
-            rx.try_recv().is_ok(),
+            group_push(&mut rx).is_some(),
             "a non-DR router MUST still egress its OWN local client's Put to the group \
              (DR gate is mesh-sourced-only; else the client starves)"
         );
@@ -18149,7 +18177,7 @@ mod tests {
     #[test]
     fn mcast_ingress_push_is_echo_guarded_off_the_groups() {
         let fwd = RouterForwarder::new(zid(0x01));
-        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let (tx, mut rx) = group_tap();
         fwd.attach_mcast_group(tx);
 
         let push = wz_session_core::push_build::build_push_literal("demo/data", b"payload")
@@ -18157,7 +18185,7 @@ mod tests {
         fwd.route_mcast_ingress(Priority::DEFAULT, true, &push);
 
         assert!(
-            rx.try_recv().is_err(),
+            group_push(&mut rx).is_none(),
             "a multicast-ingress Push must not echo back out to a multicast group"
         );
     }

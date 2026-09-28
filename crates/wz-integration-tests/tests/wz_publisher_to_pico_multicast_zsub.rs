@@ -75,7 +75,7 @@ use wz_integration_tests::common::{
     Z_SUB_INIT_TIMEOUT,
 };
 use wz_runtime_tokio::multicast_glue::{
-    drive_multicast_session, multicast_put_literal, MulticastDriveConfig,
+    drive_multicast_session, multicast_put_literal, MulticastDriveConfig, MulticastTxProducer,
 };
 use wz_runtime_tokio::runtime_impl::TokioTime;
 use wz_runtime_tokio::UdpDriver;
@@ -171,7 +171,8 @@ async fn wz_publisher_reaches_pico_multicast_zsub() {
     let mut driver = UdpDriver::from_socket(sock, SocketAddr::from((GROUP, PORT)));
     let mut dispatcher = MulticastDispatcher::<8>::new(MulticastConfig::new(5_000));
     let params = wz_mc_params();
-    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    let producer = MulticastTxProducer::new();
+    let tx = producer.clone();
     let clock = TokioTime::new();
 
     let drive = drive_multicast_session(
@@ -185,7 +186,7 @@ async fn wz_publisher_reaches_pico_multicast_zsub() {
         &mut driver,
         &clock,
         |_| {},
-        &mut rx,
+        &producer,
     );
 
     // Scenario: republish the Put every 100 ms until z_sub prints the
@@ -197,7 +198,7 @@ async fn wz_publisher_reaches_pico_multicast_zsub() {
         let mut captured = String::new();
         for _ in 0..120 {
             let _ =
-                tx.send(multicast_put_literal(PUBLISH_KEY, PAYLOAD.as_bytes()).expect("put item"));
+                tx.push(multicast_put_literal(PUBLISH_KEY, PAYLOAD.as_bytes()).expect("put item"));
             tokio::time::sleep(Duration::from_millis(100)).await;
             captured = read_captured(&mut z_sub_reader);
             if captured.contains(PAYLOAD) {

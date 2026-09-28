@@ -39,7 +39,7 @@ use std::time::Duration;
 use tokio::net::UdpSocket;
 use wz_runtime_tokio::multicast_glue::{
     drive_multicast_session, multicast_put_literal, spawn_router_mcast_egress,
-    MulticastDriveConfig, MulticastOutcome,
+    MulticastDriveConfig, MulticastOutcome, MulticastTxProducer,
 };
 use wz_runtime_tokio::runtime_impl::TokioTime;
 use wz_runtime_tokio::{McastGroupOptions, McastSocketConfig, UdpDriver};
@@ -107,8 +107,8 @@ async fn publisher_push_reaches_group_subscriber() {
     let mut dispatcher_a = MulticastDispatcher::<8>::new(MulticastConfig::new(5_000));
     let params_a = mc_params(0xAA);
 
-    let (tx_a, mut rx_a) = tokio::sync::mpsc::unbounded_channel();
-    let (_hold_b, mut rx_b) = tokio::sync::mpsc::unbounded_channel();
+    let producer_a = MulticastTxProducer::new();
+    let producer_b = MulticastTxProducer::new();
 
     let clock = TokioTime::new();
     let drive_b = drive_multicast_session(
@@ -122,7 +122,7 @@ async fn publisher_push_reaches_group_subscriber() {
         &mut driver_b,
         &clock,
         |event| observer.dispatch_event(event),
-        &mut rx_b,
+        &producer_b,
     );
     let drive_a = drive_multicast_session(
         &mut dispatcher_a,
@@ -134,16 +134,18 @@ async fn publisher_push_reaches_group_subscriber() {
         &mut driver_a,
         &clock,
         |_| {},
-        &mut rx_a,
+        &producer_a,
     );
 
     // Scenario: give A's JOIN beacons time to admit it into B's peer
     // table, publish once, then wait for the subscriber to fire.
     let fired_probe = fired.clone();
+    let pusher_a = producer_a.clone();
     let scenario = async move {
         tokio::time::sleep(Duration::from_millis(300)).await;
-        tx_a.send(multicast_put_literal(KEYEXPR, PAYLOAD).expect("put item"))
-            .expect("queue publish");
+        pusher_a
+            .push(multicast_put_literal(KEYEXPR, PAYLOAD).expect("put item"))
+            .expect("A's loop has attached its pipeline");
         for _ in 0..100 {
             if fired_probe.load(Ordering::SeqCst) > 0 {
                 return;
@@ -226,15 +228,15 @@ async fn qos_group_publish_qos_reaches_subscriber() {
     let mut dispatcher_a = MulticastDispatcher::<8>::new(MulticastConfig::new(5_000));
     let params_a = qos_params(0xAA);
 
-    let (tx_a, mut rx_a) = tokio::sync::mpsc::unbounded_channel();
-    let (_hold_b, mut rx_b) = tokio::sync::mpsc::unbounded_channel();
+    let producer_a = MulticastTxProducer::new();
+    let producer_b = MulticastTxProducer::new();
 
     let clock = Arc::new(TokioTime::new());
     // The direct multicast Session whose `publish_qos` feeds A's drive-loop channel.
     let session_a: TokioMulticastSession = TokioMulticastSession::new_multicast(
         Arc::new(Mutex::new(ApplicationLayerObserver::new())),
         clock.clone(),
-        tx_a,
+        producer_a.clone(),
     );
 
     let drive_b = drive_multicast_session(
@@ -247,7 +249,7 @@ async fn qos_group_publish_qos_reaches_subscriber() {
         &mut driver_b,
         clock.as_ref(),
         |event| observer_b.dispatch_event(event),
-        &mut rx_b,
+        &producer_b,
     );
     let drive_a = drive_multicast_session(
         &mut dispatcher_a,
@@ -259,7 +261,7 @@ async fn qos_group_publish_qos_reaches_subscriber() {
         &mut driver_a,
         clock.as_ref(),
         |_| {},
-        &mut rx_a,
+        &producer_a,
     );
 
     let fired_probe = fired.clone();
@@ -355,14 +357,14 @@ async fn qos_publisher_refused_by_non_qos_subscriber() {
         ..mc_params(0xAA)
     };
 
-    let (tx_a, mut rx_a) = tokio::sync::mpsc::unbounded_channel();
-    let (_hold_b, mut rx_b) = tokio::sync::mpsc::unbounded_channel();
+    let producer_a = MulticastTxProducer::new();
+    let producer_b = MulticastTxProducer::new();
 
     let clock = Arc::new(TokioTime::new());
     let session_a: TokioMulticastSession = TokioMulticastSession::new_multicast(
         Arc::new(Mutex::new(ApplicationLayerObserver::new())),
         clock.clone(),
-        tx_a,
+        producer_a.clone(),
     );
 
     let drive_b = drive_multicast_session(
@@ -375,7 +377,7 @@ async fn qos_publisher_refused_by_non_qos_subscriber() {
         &mut driver_b,
         clock.as_ref(),
         |event| observer_b.dispatch_event(event),
-        &mut rx_b,
+        &producer_b,
     );
     let drive_a = drive_multicast_session(
         &mut dispatcher_a,
@@ -387,7 +389,7 @@ async fn qos_publisher_refused_by_non_qos_subscriber() {
         &mut driver_a,
         clock.as_ref(),
         |_| {},
-        &mut rx_a,
+        &producer_a,
     );
 
     let scenario = async move {
@@ -471,8 +473,8 @@ async fn oversize_put_fragments_and_reassembles_across_nodes() {
     let mut dispatcher_a = MulticastDispatcher::<8>::new(MulticastConfig::new(5_000));
     let params_a = frag_params(0xAA);
 
-    let (tx_a, mut rx_a) = tokio::sync::mpsc::unbounded_channel();
-    let (_hold_b, mut rx_b) = tokio::sync::mpsc::unbounded_channel();
+    let producer_a = MulticastTxProducer::new();
+    let producer_b = MulticastTxProducer::new();
 
     let clock = TokioTime::new();
     let drive_b = drive_multicast_session(
@@ -485,7 +487,7 @@ async fn oversize_put_fragments_and_reassembles_across_nodes() {
         &mut driver_b,
         &clock,
         |event| observer.dispatch_event(event),
-        &mut rx_b,
+        &producer_b,
     );
     let drive_a = drive_multicast_session(
         &mut dispatcher_a,
@@ -497,15 +499,17 @@ async fn oversize_put_fragments_and_reassembles_across_nodes() {
         &mut driver_a,
         &clock,
         |_| {},
-        &mut rx_a,
+        &producer_a,
     );
 
     let fired_probe = fired.clone();
     let put_payload = payload.clone();
+    let pusher_a = producer_a.clone();
     let scenario = async move {
         tokio::time::sleep(Duration::from_millis(300)).await;
-        tx_a.send(multicast_put_literal(FRAG_KEYEXPR, &put_payload).expect("put item"))
-            .expect("queue publish");
+        pusher_a
+            .push(multicast_put_literal(FRAG_KEYEXPR, &put_payload).expect("put item"))
+            .expect("A's loop has attached its pipeline");
         for _ in 0..100 {
             if fired_probe.load(Ordering::SeqCst) > 0 {
                 return;
@@ -603,9 +607,9 @@ async fn concurrent_peers_fragment_reassemble_in_isolation() {
     let mut dispatcher_c = MulticastDispatcher::<8>::new(MulticastConfig::new(5_000));
     let params_c = conc_params(0xCC);
 
-    let (tx_a, mut rx_a) = tokio::sync::mpsc::unbounded_channel();
-    let (tx_c, mut rx_c) = tokio::sync::mpsc::unbounded_channel();
-    let (_hold_b, mut rx_b) = tokio::sync::mpsc::unbounded_channel();
+    let producer_a = MulticastTxProducer::new();
+    let producer_c = MulticastTxProducer::new();
+    let producer_b = MulticastTxProducer::new();
 
     let clock = TokioTime::new();
     let drive_b = drive_multicast_session(
@@ -618,7 +622,7 @@ async fn concurrent_peers_fragment_reassemble_in_isolation() {
         &mut driver_b,
         &clock,
         |event| observer.dispatch_event(event),
-        &mut rx_b,
+        &producer_b,
     );
     let drive_a = drive_multicast_session(
         &mut dispatcher_a,
@@ -630,7 +634,7 @@ async fn concurrent_peers_fragment_reassemble_in_isolation() {
         &mut driver_a,
         &clock,
         |_| {},
-        &mut rx_a,
+        &producer_a,
     );
     let drive_c = drive_multicast_session(
         &mut dispatcher_c,
@@ -642,22 +646,26 @@ async fn concurrent_peers_fragment_reassemble_in_isolation() {
         &mut driver_c,
         &clock,
         |_| {},
-        &mut rx_c,
+        &producer_c,
     );
 
     let delivered_probe = delivered.clone();
     let exp_a = payload_a.clone();
     let exp_c = payload_c.clone();
+    let pusher_a = producer_a.clone();
+    let pusher_c = producer_c.clone();
     let scenario = async move {
         // Both publishers' JOIN beacons admit them into B's peer table first
         // (an un-admitted peer's fragments are dropped at B's SN gate).
         tokio::time::sleep(Duration::from_millis(400)).await;
         // Then both publish their oversize Put — the two fragment chains
         // interleave on the group and B's pool must keep them separate.
-        tx_a.send(multicast_put_literal(CONC_KEYEXPR, &exp_a).expect("put A"))
-            .expect("queue publish A");
-        tx_c.send(multicast_put_literal(CONC_KEYEXPR, &exp_c).expect("put C"))
-            .expect("queue publish C");
+        pusher_a
+            .push(multicast_put_literal(CONC_KEYEXPR, &exp_a).expect("put A"))
+            .expect("A's loop has attached its pipeline");
+        pusher_c
+            .push(multicast_put_literal(CONC_KEYEXPR, &exp_c).expect("put C"))
+            .expect("C's loop has attached its pipeline");
         for _ in 0..150 {
             {
                 let got = delivered_probe.lock().unwrap();
@@ -740,7 +748,7 @@ async fn router_egress_helper_reaches_group_subscriber() {
         });
     }
 
-    let (_hold_b, mut rx_b) = tokio::sync::mpsc::unbounded_channel();
+    let producer_b = MulticastTxProducer::new();
     let clock = TokioTime::new();
     let drive_b = drive_multicast_session(
         &mut dispatcher_b,
@@ -752,7 +760,7 @@ async fn router_egress_helper_reaches_group_subscriber() {
         &mut driver_b,
         &clock,
         |event| observer.dispatch_event(event),
-        &mut rx_b,
+        &producer_b,
     );
 
     // The router egress: the PRODUCTION helper spawns the group drive loop on its
@@ -776,8 +784,8 @@ async fn router_egress_helper_reaches_group_subscriber() {
     let scenario = async move {
         // Give the helper's JOIN beacons time to admit it into B's peer table.
         tokio::time::sleep(Duration::from_millis(300)).await;
-        tx.send(multicast_put_literal(KEYEXPR, PAYLOAD).expect("put item"))
-            .expect("queue publish on the egress helper's sender");
+        tx.push(multicast_put_literal(KEYEXPR, PAYLOAD).expect("put item"))
+            .expect("the egress helper's loop has attached its pipeline");
         for _ in 0..100 {
             if fired_probe.load(Ordering::SeqCst) > 0 {
                 return;
@@ -1142,8 +1150,8 @@ async fn a_router_group_face_is_one_member_from_one_source_address() {
     while tokio::time::Instant::now() < deadline {
         if !sent && !beacon_sources.is_empty() {
             face.outbound
-                .send(multicast_put_literal(KEYEXPR, PAYLOAD).expect("put item"))
-                .expect("queue a forwarded publish on the group face");
+                .push(multicast_put_literal(KEYEXPR, PAYLOAD).expect("put item"))
+                .expect("the group face's loop has attached its pipeline");
             sent = true;
         }
         let event = tokio::time::timeout(Duration::from_millis(100), listener.poll_event()).await;
@@ -1214,7 +1222,7 @@ async fn a_router_group_face_receives_what_a_member_publishes() {
         .expect("bind the publishing member");
     let mut dispatcher = MulticastDispatcher::<8>::new(MulticastConfig::new(5_000));
     let params = mc_params(0xAE);
-    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    let tx = MulticastTxProducer::new();
     let clock = TokioTime::new();
     let drive = drive_multicast_session(
         &mut dispatcher,
@@ -1226,12 +1234,12 @@ async fn a_router_group_face_receives_what_a_member_publishes() {
         &mut member,
         &clock,
         |_| {},
-        &mut rx,
+        &tx,
     );
     let scenario = async {
         tokio::time::sleep(Duration::from_millis(300)).await;
-        tx.send(multicast_put_literal(KEYEXPR, PAYLOAD).expect("put item"))
-            .expect("queue the member's publish");
+        tx.push(multicast_put_literal(KEYEXPR, PAYLOAD).expect("put item"))
+            .expect("the member's loop has attached its pipeline");
         tokio::time::timeout(Duration::from_secs(3), face.ingress.recv())
             .await
             .expect("the face's ingress yielded nothing within 3s")
@@ -1303,7 +1311,7 @@ async fn a_router_group_face_counts_its_traffic_in_the_node_registry() {
         .expect("bind the publishing member");
     let mut dispatcher = MulticastDispatcher::<8>::new(MulticastConfig::new(5_000));
     let params = mc_params(0xB0);
-    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    let tx = MulticastTxProducer::new();
     let clock = TokioTime::new();
     let drive = drive_multicast_session(
         &mut dispatcher,
@@ -1315,12 +1323,12 @@ async fn a_router_group_face_counts_its_traffic_in_the_node_registry() {
         &mut member,
         &clock,
         |_| {},
-        &mut rx,
+        &tx,
     );
     let scenario = async {
         tokio::time::sleep(Duration::from_millis(300)).await;
-        tx.send(multicast_put_literal(KEYEXPR, PAYLOAD).expect("put item"))
-            .expect("queue the member's publish");
+        tx.push(multicast_put_literal(KEYEXPR, PAYLOAD).expect("put item"))
+            .expect("the member's loop has attached its pipeline");
         tokio::time::timeout(Duration::from_secs(3), face.ingress.recv())
             .await
             .expect("the face's ingress yielded nothing within 3s")
