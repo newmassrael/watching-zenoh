@@ -5658,7 +5658,9 @@ layer_c1ax_cargo_test_routing_namespace() {
     # (`a_stalled_group_link_drops_what_finds_no_room_and_spends_no_sn` and the
     # writing-link control); the third, the QoS JOIN witness, needs
     # `transport-qos`. Printed numbers; the label moves with the value.
-    _runci_guarded_test "C1AX multicast_glue 34" 34 \
+    # R2937: 34 -> 35, `a_router_group_face_takes_the_operators_transmission_queue`
+    # (gated on `transport-link-udp`, a default feature). Printed number.
+    _runci_guarded_test "C1AX multicast_glue 35" 35 \
         cargo test -p wz-runtime-tokio --features transport-multicast,routing-namespace --lib multicast_glue --quiet || return 1
     (cd crates \
         && cargo clippy -p wz-session-core --features routing-namespace,session-unicast,codec-push,codec-request,codec-response,codec-response-final,codec-declare,reassembly --all-targets --quiet -- -D warnings \
@@ -10023,7 +10025,10 @@ layer_c1p_multicast() {
     # R2928 — 63 -> 64, the printed number: of the four `multicast_tx::push_tests`
     # only the no-room case compiles here; the rest need `codec-response-final`
     # or `transport-fragmentation`, which this arm leaves out.
-    _runci_guarded_test C1p 65 cargo test -p wz-session-core --features session-multicast,reassembly,codec-push,codec-join --lib multicast --quiet \
+    # R2936 — 65 -> 67: `multicast_tx::push_tests` gains the held-conduit pair
+    # (`a_held_conduit_takes_the_push_on_its_own_ring`, the refused mint), both
+    # `codec-push`, so the arm above, which has no push codec, does not move.
+    _runci_guarded_test C1p 67 cargo test -p wz-session-core --features session-multicast,reassembly,codec-push,codec-join --lib multicast --quiet \
         || return 1
     # R311y633 (§17.6 / §11.2) — the arm that BUILDS `multicast_rx` and RUNS it.
     # The two arms above omit `codec-close`, and `pub mod multicast_rx` is gated
@@ -10105,11 +10110,13 @@ layer_c1q_multicast_glue() {
     # numbers are what gate 4b printed for each command, not a diff count.
     # R2930: 29/33/35 -> 31/35/37, the transmit task's two ungated cases (see
     # C1AX); printed numbers.
-    _runci_guarded_test C1q 31 cargo test -p wz-runtime-tokio --features transport-multicast --lib multicast_glue --quiet \
+    # R2937: 31/35/37 -> 32/36/38, the router group face's queue witness (see
+    # C1AX); printed numbers.
+    _runci_guarded_test C1q 32 cargo test -p wz-runtime-tokio --features transport-multicast --lib multicast_glue --quiet \
         || return 1
-    _runci_guarded_test C1q 35 cargo test -p wz-runtime-tokio --features transport-multicast,reassembly --lib multicast_glue --quiet \
+    _runci_guarded_test C1q 36 cargo test -p wz-runtime-tokio --features transport-multicast,reassembly --lib multicast_glue --quiet \
         || return 1
-    _runci_guarded_test C1q 37 cargo test -p wz-runtime-tokio --features transport-multicast,transport-fragmentation --lib multicast_glue --quiet \
+    _runci_guarded_test C1q 38 cargo test -p wz-runtime-tokio --features transport-multicast,transport-fragmentation --lib multicast_glue --quiet \
         || return 1
     # R311y832 — the UDP multicast locator config surface (`ttl` / `join`, the
     # two keys of zenoh's `zenoh-link-udp` config module wz lacked). A NEW leg
