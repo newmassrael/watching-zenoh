@@ -45,7 +45,7 @@ pub(crate) unsafe fn session_state<'a>(zs: *const z_loaned_session_t) -> Option<
 ///
 /// Default PEER, which is zenoh's own default when the key is absent
 /// (`commons/zenoh-config/src/defaults.rs` @ `pub const mode: WhatAmI = WhatAmI::Peer;`).
-/// It said CLIENT until R2943 while claiming to match zenoh, and a config that
+/// It said CLIENT until R2948 while claiming to match zenoh, and a config that
 /// named no mode dialled with a client's one-attempt budget where zenoh-c's
 /// peer keeps trying behind the open.
 fn dial_whatami(cfg: &ConfigState) -> WhatAmI {
@@ -87,7 +87,7 @@ fn dial_phase(cfg: &ConfigState, whatami: WhatAmI) -> Option<DialPhase> {
                 .unwrap_or(default.exit_on_failure),
         },
         schedule,
-        // R2943 — zenoh re-dials a lost session's endpoints on the same
+        // R2948 — zenoh re-dials a lost session's endpoints on the same
         // `connect/retry` block, with no budget.
         redial: Some(schedule),
     })
@@ -120,7 +120,7 @@ pub unsafe extern "C" fn z_open(
         let Some(cfg) = (unsafe { config_state(loaned) }) else {
             return Z_ENULL;
         };
-        // R2943 — the whole list; each endpoint is dialled on its own schedule.
+        // R2948 — the whole list; each endpoint is dialled on its own schedule.
         let connect: Vec<String> = cfg
             .all(CONNECT_KEY)
             .into_iter()

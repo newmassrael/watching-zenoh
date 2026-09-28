@@ -108,7 +108,7 @@ impl ConfigState {
     }
 
     /// EVERY string the value at `key` denotes, in written order: a string
-    /// denotes itself, an array its string elements. R2943 — the open path's
+    /// denotes itself, an array its string elements. R2948 — the open path's
     /// `connect/endpoints`, because zenoh-c dials the whole list and
     /// [`Self::first`] reads one.
     pub(crate) fn all(&self, key: &str) -> Vec<&str> {

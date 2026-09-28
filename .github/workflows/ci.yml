@@ -4415,10 +4415,10 @@ jobs:
       - name: Layer C1n — wz-mcu-session-acceptor isolated e2e + clippy (R311y419)
         run: bash scripts/run-ci.sh --layer C1n
 
-      # R2943 — every member C1 excludes for no_std, tested isolated. The
+      # R2948 — every member C1 excludes for no_std, tested isolated. The
       # population is `nostd_workspace_members.py`'s, so wz-runtime-zephyr's
       # host tests (excluded since R2940, laneless) run here.
-      - name: Layer C1ns — no_std-forcing members, isolated (R2943)
+      - name: Layer C1ns — no_std-forcing members, isolated (R2948)
         run: bash scripts/run-ci.sh --layer C1ns
 
       # R311y420 — the MATRIX half of this job's genre, and the close of the

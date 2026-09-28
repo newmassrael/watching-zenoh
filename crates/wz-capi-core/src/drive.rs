@@ -57,7 +57,7 @@ pub struct DialPhase {
     pub policy: PhasePolicy,
     /// `connect/retry`.
     pub schedule: RetryPolicy,
-    /// R2943 — the schedule the session RE-DIALS on after an established link
+    /// R2948 — the schedule the session RE-DIALS on after an established link
     /// is lost, or `None` for a session that ends with its link. zenoh re-dials
     /// a closed session's configured endpoints
     /// (`zenoh/src/net/runtime/orchestrator.rs` @
@@ -301,7 +301,7 @@ async fn drive_dial(
     // than defaulted. Everything that can fail it runs before the handshake, so a
     // bad trust bundle reports an open failure to the C caller.
     //
-    // R2943 — for EVERY connect endpoint, not only the first: zenoh-c dials the
+    // R2948 — for EVERY connect endpoint, not only the first: zenoh-c dials the
     // whole `connect/endpoints` list, and each endpoint carries its own
     // schedule, the global `connect/retry` with its `#retry_period_*` tail on
     // top (`endpoint_schedule`).
@@ -347,7 +347,7 @@ async fn drive_dial(
     // and it is what `peers_connector_retry` re-attempts. A peer that is up but
     // not yet serving therefore retries like one that is down.
     //
-    // R2943 — over the whole list, by `drive_connect_phase`: the endpoints that
+    // R2948 — over the whole list, by `drive_connect_phase`: the endpoints that
     // do not retry once each in order, then the retrying ones raced on their own
     // schedules, the first to open winning. A peer here takes the same single
     // session a client does, because this session holds one dial face; see
@@ -370,7 +370,7 @@ async fn drive_dial(
                 .map_err(|_| ())
         }
     };
-    // R2943 — the RE-DIAL list, each endpoint on the re-dial schedule with its
+    // R2948 — the RE-DIAL list, each endpoint on the re-dial schedule with its
     // own `#` tail on top, run unbounded as upstream's `peers_connector_retry`
     // runs until the endpoint connects or the session is closed.
     let rescheduled: Vec<(String, RetryPolicy)> = match phase.redial {
@@ -382,7 +382,7 @@ async fn drive_dial(
     };
     let dialing = drive_connect_phase(phase.policy.budget, &scheduled, &attempt);
     let mut dialing = std::pin::pin!(dialing);
-    // R2943 — a peer's open does not return at once either: `start_peer` waits
+    // R2948 — a peer's open does not return at once either: `start_peer` waits
     // for its configured peers up to `scouting/delay` under
     // `open/return_conditions/connect_scouted`
     // (`zenoh/src/net/runtime/orchestrator.rs` @
@@ -571,7 +571,7 @@ async fn drive_dial(
         .drain_to_close()
         .await;
 
-        // R2943 — a session that ended for any reason but `z_close` has lost its
+        // R2948 — a session that ended for any reason but `z_close` has lost its
         // link, and zenoh re-dials the configured endpoints behind it. The latch is
         // what `z_close` sets before it notifies, so it tells the two apart.
         if stop.load(Ordering::SeqCst) || rescheduled.is_empty() {

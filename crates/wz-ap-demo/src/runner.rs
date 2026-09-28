@@ -114,7 +114,7 @@ use wz::runtime_tokio::session_open::{bind_endpoint_with_config, BoundListener};
 // The demo's rule is cfg on the set of consumers, not on the feature that
 // happens to be nearest. ZA-3308 put the one-shot client's connect phase in
 // that set, and the client is in every build, so what it uses is ungated;
-// `PhaseArm` and `drive_phase` are still read by the mesh arms alone (R2943
+// `PhaseArm` and `drive_phase` are still read by the mesh arms alone (R2948
 // moved the client onto `drive_connect_phase`).
 use wz::runtime_tokio::retry_period::RetryPolicy;
 #[cfg(any(feature = "routing-peer", feature = "router-hat-router"))]
@@ -1418,7 +1418,7 @@ fn role_names(matcher: wz::runtime_tokio::linkstate_forward::WhatAmIMatcher) -> 
 }
 
 /// Dial ONE `--connect` candidate, returning the link with the offer its open
-/// makes. R2943 — split out of [`establish_link`]'s walk so the client connect
+/// makes. R2948 — split out of [`establish_link`]'s walk so the client connect
 /// phase can race candidates on their own schedules; the walk and the phase
 /// dial through this one body.
 async fn dial_candidate(
@@ -2711,7 +2711,7 @@ async fn open_initiator_in_connect_phase(
         ));
     }
     let dial_cfg = build_dial_config(tls_ca, quic_ca, link_defaults)?;
-    // R2943 — each candidate on its own schedule: `connect/retry` with the
+    // R2948 — each candidate on its own schedule: `connect/retry` with the
     // endpoint's `#retry_period_*` tail on top, raced by the runtime's
     // `drive_connect_phase` as upstream's single-link connect races them.
     let scheduled: Vec<(String, RetryPolicy)> = connect
@@ -3141,7 +3141,7 @@ pub(crate) async fn run_demo(
             // root-CA slots stay empty, as the default this replaced left them:
             // threading `--tls-ca` into a reconnecting dial is a separate
             // question this round does not answer.
-            // R2943 — the FIRST open runs upstream's client startup connect
+            // R2948 — the FIRST open runs upstream's client startup connect
             // phase too: `connect/timeout_ms` decides whether it re-dials, as it
             // does for a one-shot client. The supervisor's schedule governs the
             // re-dials after an established link is lost, which is a different

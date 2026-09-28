@@ -115,7 +115,7 @@ PUSH_RE = re.compile(r"exp\.added\.push\s*\(")
 # this gate's own first run, it walked PAST the named table to an earlier inline
 # one and attributed five flags to the wrong keys. Both forms, or a failure.
 #
-# R2943 — and a THIRD form: a `const` table, named in this file or by a path
+# R2948 — and a THIRD form: a `const` table, named in this file or by a path
 # into another workspace crate (`wz::runtime_tokio::zenoh_config::…`). R2925's
 # queue-size keys are that shape, and a reader capturing only the first path
 # segment reported the site as having no table at all.
@@ -124,7 +124,7 @@ FOR_TABLE_RE = re.compile(
     re.S,
 )
 LET_RE = r"let\s+%s\s*(?::[^=]*)?=\s*"
-# R2943 — a flag written as an INDEX into a const array of flags, keyed by a
+# R2948 — a flag written as an INDEX into a const array of flags, keyed by a
 # loop binding: `TX_QUEUE_SIZE_FLAGS[byte as usize]`.
 INDEXED_FLAG_RE = re.compile(
     r"([A-Z_][A-Z0-9_]*)\[\s*([a-z_][a-z0-9_]*)(?:\s+as\s+usize)?\s*\]"
@@ -546,7 +546,7 @@ def emission_sites(src: str) -> list[Site]:
             continue
         indexed = INDEXED_FLAG_RE.fullmatch(args[1].strip())
         if flag_lit is None and indexed is not None:
-            # R2943 — `FLAGS[byte as usize]` inside `for (key, _, byte) in KEYS`:
+            # R2948 — `FLAGS[byte as usize]` inside `for (key, _, byte) in KEYS`:
             # each row's flag is the FLAGS element its index column names.
             flags_init = resolve_const(src, indexed.group(1))
             flags = [

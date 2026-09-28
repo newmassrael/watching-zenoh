@@ -196,7 +196,7 @@ fn a_client_that_states_exit_on_failure_false_still_fails_its_open() {
     unsafe { close_session(session) };
 }
 
-/// R2943 — a config naming no `mode` is a PEER, zenoh's default: with nothing
+/// R2948 — a config naming no `mode` is a PEER, zenoh's default: with nothing
 /// listening it opens after the start window rather than failing on one
 /// attempt as a client would.
 #[test]
@@ -212,7 +212,7 @@ fn a_config_without_a_mode_opens_as_a_peer() {
     unsafe { close_session(session) };
 }
 
-/// R2943 — and a peer whose peer IS listening answers the open from the
+/// R2948 — and a peer whose peer IS listening answers the open from the
 /// handshake, inside the start window, not after it.
 #[test]
 fn a_peer_with_its_peer_up_opens_on_the_handshake() {
@@ -291,7 +291,7 @@ fn a_peer_opens_at_once_and_connects_behind_the_open() {
         rc, Z_OK,
         "a peer's open does not wait for ever for its peer"
     );
-    // R2943 — it waits upstream's start window (`scouting/delay`, 500 ms) for
+    // R2948 — it waits upstream's start window (`scouting/delay`, 500 ms) for
     // the peer, then returns without it; it does not return at once, and it
     // does not wait for the dial to give up.
     assert!(
@@ -316,7 +316,7 @@ fn a_peer_opens_at_once_and_connects_behind_the_open() {
     }
 }
 
-/// R2943 — a session whose link is LOST re-dials, as zenoh re-dials a closed
+/// R2948 — a session whose link is LOST re-dials, as zenoh re-dials a closed
 /// session's configured endpoints: the listener goes away, a new one binds the
 /// same port, and a put from the new one reaches a subscription declared
 /// before the loss (`face_up` replays it onto the re-dialled link).

@@ -715,7 +715,7 @@ mod tests {
         assert_eq!(got.expect("the third attempt succeeds"), 3);
     }
 
-    /// R2943 — the one-shot arm tries each endpoint ONCE, in list order, and
+    /// R2948 — the one-shot arm tries each endpoint ONCE, in list order, and
     /// the first that opens ends the phase.
     #[tokio::test]
     async fn a_no_retry_connect_phase_walks_the_list_once_in_order() {
@@ -745,7 +745,7 @@ mod tests {
         );
     }
 
-    /// R2943 — the retrying endpoints RACE, each on its own schedule: the one
+    /// R2948 — the retrying endpoints RACE, each on its own schedule: the one
     /// whose schedule reaches its opening attempt first wins, whatever its
     /// place in the list.
     #[tokio::test(start_paused = true)]
@@ -772,7 +772,7 @@ mod tests {
         );
     }
 
-    /// R2943 — the budget bounds the WHOLE phase, the race included, and every
+    /// R2948 — the budget bounds the WHOLE phase, the race included, and every
     /// leg's attempts are counted in the failure.
     #[tokio::test(start_paused = true)]
     async fn the_budget_bounds_the_whole_connect_phase() {
@@ -800,7 +800,7 @@ mod tests {
         );
     }
 
-    /// R2943 — an endpoint's `#retry_period_*` tail is layered over the global
+    /// R2948 — an endpoint's `#retry_period_*` tail is layered over the global
     /// schedule, field by field, and a silent tail keeps the global one.
     #[test]
     fn an_endpoint_tail_overrides_the_global_schedule() {

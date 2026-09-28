@@ -1506,7 +1506,7 @@ pub(crate) fn expand_stock_zenoh_config_for_build(
     // one-shot `--connect` client runs upstream's client startup phase, and the
     // budget is what decides whether that phase re-dials: `0`, the client
     // default, is one attempt; `-1` or a positive bound keeps dialing.
-    // R2943 — a `--connect --reconnect` client too: its supervisor governs the
+    // R2948 — a `--connect --reconnect` client too: its supervisor governs the
     // re-dials after an established link is lost, and its FIRST open runs the
     // same startup phase a one-shot client does.
     let has_phases = |a: &String| a == "--peer" || a == "--router-hat";

@@ -297,7 +297,7 @@ pub unsafe extern "C" fn z_open(
             listen,
             tls,
             dial_whatami,
-            // R2943 — pico re-opens a lost client session by default
+            // R2948 — pico re-opens a lost client session by default
             // (`Z_FEATURE_AUTO_RECONNECT`), every 1000 ms
             // (`vendor/zenoh-pico/src/net/session.c` @
             // `return _z_fut_fn_result_wake_up_after(1000);`).
