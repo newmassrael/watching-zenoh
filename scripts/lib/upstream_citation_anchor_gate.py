@@ -425,7 +425,10 @@ _ANY_TOKEN = re.compile(r"(?<![\w/.-])(\w[\w-]*)/[\w/.-]+\.rs")
 #: reads, and the two doc paragraphs that justified the old responder-side
 #: COUNT went with it. Both cited the upstream queryable module and the pico
 #: primitives file by line; their replacements say the same thing as needles.
-LINE_BUDGET = 286
+#: 286 -> 285 (R2934). The RouteTable engine's retirement (`c867f7b8`) deleted
+#: the old routing modules and a line-form citation with them; that commit did
+#: not lower this, and hosted run 36327713731 measured 285 before R2934 began.
+LINE_BUDGET = 285
 #: 58 -> 57 (R2862). The SHM payload provider's module doc named the upstream
 #: POSIX shm implementation file with no anchor; the rewrite that mirrors the
 #: metadata segment cites the files it follows by needle instead.
@@ -494,11 +497,14 @@ BARE_BUDGET = 57
 # doc, and the router token hat's registration line, cited by number with no
 # root, went with the old wording. R2874 found it as a red gate at HEAD before
 # its own diff touched a citation.
-ROOTLESS_LINE_BUDGET = 89
+# R2934 — 89 -> 80, DOWNWARD by the removals `c867f7b8` made when it deleted
+# the RouteTable engine's modules; measured at the red tip, not chosen.
+ROOTLESS_LINE_BUDGET = 80
 # R2862 — 36 -> 35. The auth segment's helpers moved into the shared POSIX
 # segment module, and the retry-count note that named the upstream segment file
 # with no root went with them; its replacement is anchored.
-ROOTLESS_BARE_BUDGET = 35
+# R2934 — 35 -> 27, the same `c867f7b8` module deletion as ROOTLESS_LINE_BUDGET.
+ROOTLESS_BARE_BUDGET = 27
 #: Root-less LINE citations whose file EXISTS at the pin but whose line number
 #: is past its end -- 1.5.0 line numbers on files that shrank. Measured, not
 #: chosen, and graded only by the RESOLUTION arm (it takes a checkout to know).
@@ -587,7 +593,9 @@ ROOTLESS_STALE_LINE_BUDGET = 1
 # `forward_push`, and its comment's root-less line citation of the dispatcher's
 # stamp went with it; the text that replaced it cites `treat_timestamp!(` with
 # its root.
-ROOTLESS_UNDECLARED_BUDGET = 648
+# 648 -> 626 (R2934): the RouteTable engine's modules, deleted by `c867f7b8`,
+# carried these root-less occurrences; that commit did not lower the budget.
+ROOTLESS_UNDECLARED_BUDGET = 626
 #: EVERY root-less occurrence, graded or not: `rootless_line + rootless_bare +
 #: residue`. One ratchet over the union of the three above, and it exists
 #: because those three CANNOT express the invariant that matters.
@@ -662,7 +670,8 @@ ROOTLESS_UNDECLARED_BUDGET = 648
 # R2871 — 776 -> 774, the same two line-form removals as ROOTLESS_LINE_BUDGET.
 # R2874 — 774 -> 773, the same R2873 line-form removal as ROOTLESS_LINE_BUDGET.
 # R2894 — 773 -> 772, the same R2892 removal as ROOTLESS_UNDECLARED_BUDGET.
-ROOTLESS_TOTAL_BUDGET = 772
+# R2934 — 772 -> 733, the `c867f7b8` module deletion's line and bare removals.
+ROOTLESS_TOTAL_BUDGET = 733
 
 #: A LIVE invocation of the RESOLUTION arm. R2242 split this gate in two and,
 #: in doing so, made `--resolve` a flag someone can simply stop passing: delete

@@ -7046,7 +7046,7 @@ pub(crate) fn synthesize_drained_fan_finals(
 /// neighbour on the source's tree toward it, its graph distance from THIS node
 /// (`None` when unreachable by distance), and whether it is complete for the
 /// queried keyexpr. The wz form of upstream's `QueryTargetQabl`
-/// (`zenoh/src/net/routing/dispatcher/queries.rs` @ `pub(crate) struct QueryTargetQabl {`),
+/// (`zenoh/src/net/routing/dispatcher/resource.rs` @ `pub(crate) struct QueryTargetQabl {`),
 /// narrowed to what a mesh leg needs.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(crate) struct QueryCandidate {

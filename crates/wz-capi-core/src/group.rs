@@ -255,7 +255,7 @@ impl GroupAggregate {
 
     /// Install (or replace) the C sink, returning the one it displaced so the
     /// CALLER drops it outside every lock. Upstream's `subscribe` is
-    /// last-wins as well (`zenoh-ext/src/group.rs` @ `pub fn subscribe`).
+    /// last-wins as well (`zenoh-ext/src/group.rs` @ `pub async fn subscribe(&self)`).
     pub fn subscribe(
         &self,
         sink: GroupEventSink,
