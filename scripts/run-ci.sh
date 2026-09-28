@@ -10012,7 +10012,10 @@ layer_c1p_multicast() {
     # R2859 — both +1: `multicast_dispatch`'s member-view test, ungated.
     _runci_guarded_test C1p 45 cargo test -p wz-session-core --features session-multicast --lib multicast --quiet \
         || return 1
-    _runci_guarded_test C1p 63 cargo test -p wz-session-core --features session-multicast,reassembly,codec-push,codec-join --lib multicast --quiet \
+    # R2928 — 63 -> 64, the printed number: of the four `multicast_tx::push_tests`
+    # only the no-room case compiles here; the rest need `codec-response-final`
+    # or `transport-fragmentation`, which this arm leaves out.
+    _runci_guarded_test C1p 64 cargo test -p wz-session-core --features session-multicast,reassembly,codec-push,codec-join --lib multicast --quiet \
         || return 1
     # R311y633 (§17.6 / §11.2) — the arm that BUILDS `multicast_rx` and RUNS it.
     # The two arms above omit `codec-close`, and `pub mod multicast_rx` is gated
