@@ -41,13 +41,18 @@ pub(crate) unsafe fn session_state<'a>(zs: *const z_loaned_session_t) -> Option<
     Some(unsafe { &*(handle as *const SessionState) })
 }
 
-/// zenoh-c's `mode` values map onto wz roles. Default CLIENT, matching zenoh's
-/// own default when the key is absent.
+/// zenoh-c's `mode` values map onto wz roles.
+///
+/// Default PEER, which is zenoh's own default when the key is absent
+/// (`commons/zenoh-config/src/defaults.rs` @ `pub const mode: WhatAmI = WhatAmI::Peer;`).
+/// It said CLIENT until R2943 while claiming to match zenoh, and a config that
+/// named no mode dialled with a client's one-attempt budget where zenoh-c's
+/// peer keeps trying behind the open.
 fn dial_whatami(cfg: &ConfigState) -> WhatAmI {
     match cfg.first(MODE_KEY) {
-        Some("peer") => WhatAmI::Peer,
+        Some("client") => WhatAmI::Client,
         Some("router") => WhatAmI::Router,
-        _ => WhatAmI::Client,
+        _ => WhatAmI::Peer,
     }
 }
 

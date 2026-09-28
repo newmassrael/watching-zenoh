@@ -196,6 +196,51 @@ fn a_client_that_states_exit_on_failure_false_still_fails_its_open() {
     unsafe { close_session(session) };
 }
 
+/// R2943 — a config naming no `mode` is a PEER, zenoh's default: with nothing
+/// listening it opens after the start window rather than failing on one
+/// attempt as a client would.
+#[test]
+fn a_config_without_a_mode_opens_as_a_peer() {
+    let port = free_port();
+    // SAFETY: fresh config and session.
+    let (rc, session) = unsafe { open_with(&[("connect/endpoints", endpoint(port))]) };
+    assert_eq!(
+        rc, Z_OK,
+        "an unnamed mode is zenoh's peer, whose open comes up anyway"
+    );
+    // SAFETY: the session is live and owned here.
+    unsafe { close_session(session) };
+}
+
+/// R2943 — and a peer whose peer IS listening answers the open from the
+/// handshake, inside the start window, not after it.
+#[test]
+fn a_peer_with_its_peer_up_opens_on_the_handshake() {
+    let port = free_port();
+    let SendSession(listen) = listen_later(port, Duration::ZERO)
+        .join()
+        .expect("listener thread");
+    let started = Instant::now();
+    // SAFETY: fresh config and session.
+    let (rc, session) = unsafe {
+        open_with(&[
+            ("mode", String::from("\"peer\"")),
+            ("connect/endpoints", endpoint(port)),
+        ])
+    };
+    let waited = started.elapsed();
+    assert_eq!(rc, Z_OK);
+    assert!(
+        waited < Duration::from_millis(450),
+        "the peer was up, yet the open took {waited:?}: it waited out the window"
+    );
+    // SAFETY: both sessions are live and owned here.
+    unsafe {
+        close_session(session);
+        close_session(listen);
+    }
+}
+
 struct CountCtx {
     hits: Arc<AtomicUsize>,
 }
@@ -242,10 +287,16 @@ fn a_peer_opens_at_once_and_connects_behind_the_open() {
         ])
     };
     let opened_after = started.elapsed();
-    assert_eq!(rc, Z_OK, "a peer's open does not wait for its peer");
+    assert_eq!(
+        rc, Z_OK,
+        "a peer's open does not wait for ever for its peer"
+    );
+    // R2943 — it waits upstream's start window (`scouting/delay`, 500 ms) for
+    // the peer, then returns without it; it does not return at once, and it
+    // does not wait for the dial to give up.
     assert!(
-        opened_after < LISTENER_LATE_BY,
-        "the open waited {opened_after:?} with nothing listening"
+        opened_after >= Duration::from_millis(450) && opened_after < Duration::from_secs(3),
+        "the open returned after {opened_after:?}; the start window is 500 ms"
     );
 
     let hits = Arc::new(AtomicUsize::new(0));

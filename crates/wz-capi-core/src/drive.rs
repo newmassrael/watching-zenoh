@@ -56,6 +56,13 @@ pub struct DialPhase {
     pub schedule: RetryPolicy,
 }
 
+/// How long a peer's open waits for its configured peer before returning
+/// without it: upstream's `scouting/delay` default
+/// (`commons/zenoh-config/src/defaults.rs` @ `pub const delay: u64 = 500;`),
+/// applied because wz's reader does not
+/// honour that key yet.
+const PEER_START_DELAY: std::time::Duration = std::time::Duration::from_millis(500);
+
 impl DialPhase {
     /// One attempt, and a failure fails the open: upstream's client column,
     /// and what every open here did before ZA-3298.
@@ -306,9 +313,6 @@ async fn drive_dial(
     // never reads that key, and fails its open when no endpoint connected
     // (R2942 correcting R2936, which released a client too).
     let released_early = !phase.policy.exit_on_failure && whatami != WhatAmI::Client;
-    if released_early && tx.send(true).is_err() {
-        return;
-    }
     // The dial AND its handshake are one attempt, because that is upstream's
     // unit too: `open_transport_unicast` both connects and opens the session,
     // and it is what `peers_connector_retry` re-attempts. A peer that is up but
@@ -324,13 +328,39 @@ async fn drive_dial(
                 .map_err(|_| ())
         }
     });
-    // A session released early can be closed while it is still dialing, and
-    // its local plane has to run meanwhile. One that was not released has no
-    // caller yet, so neither arm can fire for it.
-    let opened = tokio::select! {
-        opened = dialing => opened.ok(),
-        _ = shared.drive_local_plane(), if released_early => None,
-        _ = shutdown_future(shutdown.clone(), stop.clone()), if released_early => return,
+    let mut dialing = std::pin::pin!(dialing);
+    // R2943 — a peer's open does not return at once either: `start_peer` waits
+    // for its configured peers up to `scouting/delay` under
+    // `open/return_conditions/connect_scouted`
+    // (`zenoh/src/net/runtime/orchestrator.rs` @
+    // `&& tokio::time::timeout(delay, self.state.start_conditions.notified())`),
+    // and only then returns without them. Both keys are still unhonoured by
+    // wz's reader, so their DEFAULTS apply: wait, up to 500 ms. A dial that
+    // settles inside that window answers the open itself.
+    let mut released = false;
+    let opened = if released_early {
+        let settled = tokio::select! {
+            opened = &mut dialing => Some(opened.ok()),
+            _ = tokio::time::sleep(PEER_START_DELAY) => None,
+        };
+        match settled {
+            Some(opened) => opened,
+            None => {
+                if tx.send(true).is_err() {
+                    return;
+                }
+                released = true;
+                // Released, the session can be closed while it is still
+                // dialing, and its local plane has to run meanwhile.
+                tokio::select! {
+                    opened = &mut dialing => opened.ok(),
+                    _ = shared.drive_local_plane() => None,
+                    _ = shutdown_future(shutdown.clone(), stop.clone()) => return,
+                }
+            }
+        }
+    } else {
+        dialing.await.ok()
     };
     // R2455 — an `OpenedSession` dismantles ONLY through `into_parts`, which is
     // what carries the writer handle out by name rather than letting it fall out
@@ -348,6 +378,11 @@ async fn drive_dial(
         // peer stays up with no connection. It serves its local plane until
         // `z_close`.
         None if released_early => {
+            // A dial that gave up inside the start window still opens a peer:
+            // `exit_on_failure: false` is "come up anyway".
+            if !released && tx.send(true).is_err() {
+                return;
+            }
             tokio::select! {
                 _ = shared.drive_local_plane() => {}
                 _ = shutdown_future(shutdown, stop) => {}
@@ -364,7 +399,7 @@ async fn drive_dial(
     // `DIAL_FACE_ID` slot; from here the C surface is role-agnostic (it fans
     // over whatever faces the registry holds).
     shared.face_up(DIAL_FACE_ID, &actions);
-    if !released_early && tx.send(true).is_err() {
+    if !released && tx.send(true).is_err() {
         return;
     }
 
