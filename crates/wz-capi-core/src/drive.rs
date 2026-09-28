@@ -300,7 +300,12 @@ async fn drive_dial(
     // released HERE, before the first dial, and the dial carries on on this
     // thread; `face_up` below replays whatever was declared meanwhile, and the
     // local plane serves the session until then as it would with no peer.
-    let released_early = !phase.policy.exit_on_failure;
+    //
+    // A CLIENT never takes this arm, whatever its `exit_on_failure` says:
+    // upstream's client connects through `connect_peers_single_link`, which
+    // never reads that key, and fails its open when no endpoint connected
+    // (R2942 correcting R2936, which released a client too).
+    let released_early = !phase.policy.exit_on_failure && whatami != WhatAmI::Client;
     if released_early && tx.send(true).is_err() {
         return;
     }

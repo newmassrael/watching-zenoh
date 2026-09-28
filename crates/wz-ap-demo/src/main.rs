@@ -322,19 +322,15 @@ fn main() -> ExitCode {
                 return ExitCode::from(2);
             }
         };
-    // The five above are consumed by the two MESH run-modes only — they are the
-    // wz hosts that own a bind phase and a dial phase. A build with neither
+    // Four of the five above are consumed by the two MESH run-modes only — they
+    // are the wz hosts that own a bind phase and a dial phase. A build with neither
     // still PARSES them, because this file's rule is that a flag's refusal does
     // not depend on the build, so the values are discarded HERE rather than the
     // parse being compiled away.
+    // ZA-3308 — `connect_timeout` is the fifth, and the one-shot client's
+    // startup connect phase reads it in every build.
     #[cfg(not(any(feature = "routing-peer", feature = "router-hat-router")))]
-    let _ = (
-        connect_timeout,
-        connect_exit,
-        listen_timeout,
-        listen_exit,
-        listen_retry,
-    );
+    let _ = (connect_exit, listen_timeout, listen_exit, listen_retry);
 
     // R311qa — `--router <addr>` is the router run-mode. R2886 (open-debt item
     // 824): with `routing-router` the flag never reaches here, because `main`
@@ -2580,6 +2576,7 @@ fn main() -> ExitCode {
             tuning,
             timestamping,
             connect_retry,
+            connect_timeout,
         )
         .await
     });

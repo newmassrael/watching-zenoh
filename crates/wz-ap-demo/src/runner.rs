@@ -112,11 +112,13 @@ use wz::runtime_tokio::session_open::{bind_endpoint_with_config, BoundListener};
 // consumer set has: the two MESH run-modes are the wz hosts that own a bind
 // phase and a dial phase, and `PeerOpts` / `RouterHatOpts` ride the same gate.
 // The demo's rule is cfg on the set of consumers, not on the feature that
-// happens to be nearest.
-#[cfg(any(feature = "routing-peer", feature = "router-hat-router"))]
+// happens to be nearest. ZA-3308 put the one-shot client's connect phase in
+// that set, and the client is in every build, so the three it uses are
+// ungated; `PhaseArm` is still read by the mesh arms alone.
 use wz::runtime_tokio::retry_period::RetryPolicy;
 #[cfg(any(feature = "routing-peer", feature = "router-hat-router"))]
-use wz::runtime_tokio::startup_phase::{drive_phase, PhaseArm, PhasePolicy};
+use wz::runtime_tokio::startup_phase::PhaseArm;
+use wz::runtime_tokio::startup_phase::{drive_phase, PhaseBudget, PhasePolicy};
 use wz::runtime_tokio::sync::Mutex;
 
 #[cfg(any(feature = "scouting-active", feature = "scouting-responder"))]
@@ -2639,6 +2641,63 @@ async fn open_initiator_with_offer(
         .await
 }
 
+/// ZA-3308 — a one-shot client's dial and open, run as upstream's client
+/// startup connect phase.
+///
+/// One attempt is the dial AND the handshake, because that is upstream's unit:
+/// `open_transport_unicast` both connects and opens, and it is what
+/// `peers_connector_retry` re-attempts. The loop is the runtime's
+/// [`drive_phase`], the same one the mesh arms run, so the budget and the
+/// schedule cannot mean one thing here and another there.
+///
+/// `exit_on_failure` is not read: upstream's client connect
+/// (`connect_peers_single_link`) never reads it, and a client that did not
+/// connect has nothing to come up as.
+///
+/// A phase that made ONE attempt returns that attempt's error untouched, so a
+/// client on the default budget fails exactly as it did before this phase
+/// existed.
+async fn open_initiator_in_connect_phase(
+    role: &Role,
+    link_defaults: &LinkDefaults,
+    offer: SessionOffer,
+    params: SessionInitParams,
+    clock: TokioTime,
+    phase: PhasePolicy,
+    schedule: RetryPolicy,
+) -> io::Result<OpenedSession> {
+    let outcome = drive_phase(phase, schedule, |attempt| {
+        let params = params.clone();
+        async move {
+            if attempt > 1 {
+                log::info!("wz-ap-demo: connect attempt {attempt}");
+            }
+            let dialed = establish_link(role, link_defaults).await?;
+            open_initiator_with_offer(offer, dialed, params, clock)
+                .await
+                .map_err(|e| io::Error::other(format!("wz-ap-demo: session open failed: {e:?}")))
+        }
+    })
+    .await;
+    outcome.map_err(|failed| match failed.last {
+        Some(last) if failed.attempts == 1 => last,
+        Some(last) => io::Error::new(
+            last.kind(),
+            format!(
+                "{last} (the connect phase gave up after {} attempts)",
+                failed.attempts
+            ),
+        ),
+        None => io::Error::new(
+            io::ErrorKind::TimedOut,
+            format!(
+                "wz-ap-demo: the connect phase's budget ran out during attempt {}",
+                failed.attempts
+            ),
+        ),
+    })
+}
+
 /// R2158 (open-debt item 230) — the CLIENT reconnect supervisor's re-dial
 /// schedule: zenoh's `connect/retry` SURFACE over pico's constant DEFAULT.
 ///
@@ -2915,6 +2974,10 @@ pub(crate) async fn run_demo(
     // for the mirrored reason -- their parity target is zenoh's
     // `peer_connector_retry`.
     connect_retry: Option<wz::runtime_tokio::retry_period::RetryPolicy>,
+    // ZA-3308 — `--connect-timeout` / the file's `connect/timeout_ms`, for a
+    // one-shot `--connect` client's startup connect phase. `None` is the
+    // client default, one attempt.
+    connect_timeout: Option<PhaseBudget>,
 ) -> io::Result<()> {
     let QueryRoleSpec {
         queryable: queryable_spec,
@@ -3050,7 +3113,6 @@ pub(crate) async fn run_demo(
         }
         // Acceptor + one-shot Initiator: dial/accept once, open one-shot.
         _ => {
-            let dialed = establish_link(&role, &tuning.link_defaults).await?;
             let opened = match &role {
                 // R311y505 — the accept side now goes through the OFFER seam too,
                 // so `--shm` stages the establishment capability before the
@@ -3060,6 +3122,7 @@ pub(crate) async fn run_demo(
                 // the `accept_and_open_session` call this replaces (that helper is
                 // itself a thin wrapper over the same `_with_offer` entrypoint).
                 Role::Acceptor { shm, .. } => {
+                    let dialed = establish_link(&role, &tuning.link_defaults).await?;
                     accept_and_open_session_with_offer(
                         dialed,
                         params,
@@ -3069,6 +3132,9 @@ pub(crate) async fn run_demo(
                         DEFAULT_OPEN_TICK_MS,
                     )
                     .await
+                    .map_err(|e| {
+                        io::Error::other(format!("wz-ap-demo: session open failed: {e:?}"))
+                    })?
                 }
                 Role::Initiator { .. } => {
                     // R311y372 / R311y433 / R2087 — an Initiator with `--qos`,
@@ -3095,10 +3161,26 @@ pub(crate) async fn run_demo(
                             .map_err(io::Error::other)?,
                         _ => SessionOffer::universal(),
                     };
-                    open_initiator_with_offer(offer, dialed, params, session_clock).await
+                    // ZA-3308 — the client's startup connect phase: upstream's
+                    // client column unless the invocation states a budget, paced
+                    // by `connect/retry` or zenoh's own 1s / 2s / 4s.
+                    let phase = PhasePolicy {
+                        budget: connect_timeout
+                            .unwrap_or(PhasePolicy::CONNECT_CLIENT_DEFAULT.budget),
+                        ..PhasePolicy::CONNECT_CLIENT_DEFAULT
+                    };
+                    open_initiator_in_connect_phase(
+                        &role,
+                        &tuning.link_defaults,
+                        offer,
+                        params,
+                        session_clock,
+                        phase,
+                        connect_retry.unwrap_or(RetryPolicy::ZENOH_DEFAULT),
+                    )
+                    .await?
                 }
-            }
-            .map_err(|e| io::Error::other(format!("wz-ap-demo: session open failed: {e:?}")))?;
+            };
             // R311y369 — an Initiator with `--namespace <prefix>` installs the
             // keyexpr namespace on the freshly-opened session, so every outbound
             // publish keyexpr is prefixed `<prefix>/<key>` on the wire. Applied

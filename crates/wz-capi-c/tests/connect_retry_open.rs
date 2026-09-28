@@ -177,6 +177,25 @@ fn a_spent_connect_budget_fails_the_open() {
     unsafe { close_session(session) };
 }
 
+/// A client is never released before its peer, whatever `exit_on_failure`
+/// says: upstream's client connect never reads that key and fails its open
+/// when no endpoint connected. (R2942 — R2936 released such a client.)
+#[test]
+fn a_client_that_states_exit_on_failure_false_still_fails_its_open() {
+    let port = free_port();
+    // SAFETY: fresh config and session.
+    let (rc, session) = unsafe {
+        open_with(&[
+            ("mode", String::from("\"client\"")),
+            ("connect/endpoints", endpoint(port)),
+            ("connect/exit_on_failure", String::from("false")),
+        ])
+    };
+    assert_eq!(rc, Z_ENETWORK, "a client's open waits for its one peer");
+    // SAFETY: a gravestone drops as a no-op.
+    unsafe { close_session(session) };
+}
+
 struct CountCtx {
     hits: Arc<AtomicUsize>,
 }

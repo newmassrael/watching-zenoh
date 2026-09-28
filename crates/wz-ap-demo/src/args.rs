@@ -1435,10 +1435,13 @@ pub(crate) fn expand_stock_zenoh_config_for_build(
     // refused member on this schedule — and R2158 adds the third, which is not
     // a mode but a LIFECYCLE: a `--connect` client re-dials only under
     // `--reconnect`, whose supervisor R2158 wired to this same key (open-debt
-    // item 230). A one-shot `--connect` client is deliberately still excluded:
-    // it dials once and never again, so the flag would be a word that changes
-    // nothing, and R311y844's rule for this expansion is that an added flag is a
-    // DIFFERENCE the file asked for.
+    // item 230). ZA-3308 adds the one-shot `--connect` client too: it was left
+    // out as a node that "dials once and never again", which is true only of
+    // the client DEFAULT. Upstream's client runs a startup connect phase
+    // (`start_client` -> `connect_peers`), and once `connect/timeout_ms` is
+    // non-zero that phase re-dials on this schedule until the budget is spent.
+    // The one-shot run now owns that phase (`run_demo`'s `connect_phase`), so
+    // the schedule has a sink there.
     //
     // The `cfg!` guard R311y849 wrote here is GONE with the parser's own: the
     // client supervisor is ungated, so every build has a sink and there is no
@@ -1457,11 +1460,7 @@ pub(crate) fn expand_stock_zenoh_config_for_build(
     // flag with no zenoh config key behind it, so this expansion has no site
     // that emits it and never will. `flag_precondition_gate.py` derives exactly
     // that and reports it as `no site`.
-    let re_dials = |a: &String| {
-        a == "--peer"
-            || a == "--router-hat"
-            || (a == "--connect" && exp.rest.iter().any(|t| t == "--reconnect"))
-    };
+    let re_dials = |a: &String| a == "--peer" || a == "--router-hat" || a == "--connect";
     let dials = exp.rest.iter().chain(exp.added.iter()).any(re_dials);
     if named("connect/retry") {
         let blocked = no_sink("connect/retry").or_else(|| {
@@ -1498,19 +1497,33 @@ pub(crate) fn expand_stock_zenoh_config_for_build(
     // unsaid. `exit_on_failure: false` means "come up anyway", which is only an
     // instruction on a node that has something else to come up as — upstream's
     // own reason for the asymmetric defaults (`crate::startup_phase`'s module
-    // doc has the table). A one-shot `--connect` client has no listener to
-    // survive a refused dial, and a `--connect --reconnect` client's supervisor
-    // governs re-dials AFTER an established link is lost rather than a startup
-    // phase. Both already behave as upstream's CLIENT column, so what is
-    // withheld here is a flag that would change nothing, not a behaviour the
-    // file asked for and did not get.
+    // doc has the table). A client has no listener to survive a refused dial,
+    // and upstream's client connect (`connect_peers_single_link`) never reads
+    // `exit_on_failure` at all, so for a client that key is withheld as a flag
+    // that would change nothing.
+    //
+    // ZA-3308 — `connect/timeout_ms` is NOT narrowed that way any more. A
+    // one-shot `--connect` client runs upstream's client startup phase, and the
+    // budget is what decides whether that phase re-dials: `0`, the client
+    // default, is one attempt; `-1` or a positive bound keeps dialing. A
+    // `--connect --reconnect` client is still excluded: its supervisor governs
+    // re-dials AFTER an established link is lost, not a startup phase.
     let has_phases = |a: &String| a == "--peer" || a == "--router-hat";
     let mesh = exp.rest.iter().chain(exp.added.iter()).any(has_phases);
     let not_a_mesh_run = (!mesh).then_some(KeyEffect::WithheldFromThisRun(
         "this run's mode has no startup phase to bound",
     ));
+    let one_shot_client = exp
+        .rest
+        .iter()
+        .chain(exp.added.iter())
+        .any(|a| a == "--connect")
+        && !exp.rest.iter().any(|t| t == "--reconnect");
+    let no_connect_phase = (!mesh && !one_shot_client).then_some(KeyEffect::WithheldFromThisRun(
+        "this run's mode has no startup connect phase to bound",
+    ));
     if named("connect/timeout_ms") {
-        let blocked = no_sink("connect/timeout_ms").or(not_a_mesh_run);
+        let blocked = no_sink("connect/timeout_ms").or(no_connect_phase);
         match cfg.connect_timeout_ms {
             Some(budget) => {
                 exp.pair(
@@ -3473,8 +3486,10 @@ pub(crate) fn config_keys_the_demo_drops() -> Vec<&'static str> {
     // carrying NEITHER feature compiles no startup-phase host at all and both
     // flags exit(2) naming the build — the R311y844 rule. A build with either
     // one has a sink, which is why this is a disjunction and not two rows.
+    // ZA-3308 — `connect/timeout_ms` left this list: the one-shot `--connect`
+    // client runs a startup connect phase in every build, so no build lacks
+    // its sink.
     if !cfg!(any(feature = "routing-peer", feature = "router-hat-router")) {
-        out.push("connect/timeout_ms");
         out.push("connect/exit_on_failure");
         out.push("listen/retry");
         out.push("listen/timeout_ms");
@@ -4233,9 +4248,10 @@ mod stock_config_tests {
             // `the_retry_schedule_reaches_only_the_modes_that_own_a_connect_list`,
             // which types both roles and covers the drop-in case for each.
             //
-            // `--reconnect` rides along because it is the lifecycle the schedule
-            // belongs to: without it the client dials once, and a flag pacing a
-            // re-dial that never happens is exactly what the expansion withholds.
+            // `--reconnect` rides along because it is the lifecycle R2158 wired.
+            // Since ZA-3308 the one-shot client is a sink too (its startup
+            // connect phase), so the row would reach without it; it stays so the
+            // row keeps naming the arm it was written for.
             "connect/retry" => &[
                 "--config",
                 "z.json5",
@@ -4243,20 +4259,24 @@ mod stock_config_tests {
                 "tcp/r:7447",
                 "--reconnect",
             ],
-            // R2159 (open-debt item 229) — the LIFECYCLE five, whose
+            // ZA-3308 — `connect/timeout_ms` reaches a one-shot client in
+            // every build, so its row names that run rather than `--peer`,
+            // which a build without the mesh features cannot reach.
+            "connect/timeout_ms" => &["--config", "z.json5", "--connect", "tcp/127.0.0.1:7447"],
+            // R2159 (open-debt item 229) — the LIFECYCLE keys (five until
+            // ZA-3308 moved `connect/timeout_ms` above), whose
             // precondition is a run-mode with a startup PHASE to bound, which is
             // `--peer` or `--router-hat`. `--peer` is named for the reason the
             // rows above name it: these builds compile it, and a row pointed at
             // the arm this table cannot reach would report "reaches nothing"
             // against a sink that exists.
             //
-            // ⚠ On a build with NEITHER mesh feature these five are exactly the
+            // ⚠ On a build with NEITHER mesh feature these four are exactly the
             // rows `config_keys_the_demo_drops` names, and the assertion that
             // "reaches nothing" equals that list is what forces the two to agree
             // — the contract `connect/retry`'s note above describes, now with a
             // live population again.
-            "connect/timeout_ms"
-            | "connect/exit_on_failure"
+            "connect/exit_on_failure"
             | "listen/retry"
             | "listen/timeout_ms"
             | "listen/exit_on_failure" => &["--config", "z.json5", "--peer", "tcp/127.0.0.1:0"],
@@ -5806,10 +5826,9 @@ mod stock_config_tests {
     ///
     /// R2158 (open-debt item 230) — THE CLIENT HALF, in both directions, and it
     /// is why the `cfg` came off this test. A `--connect --reconnect` run has
-    /// a re-dial supervisor and therefore a sink; a bare `--connect` run dials
-    /// once and still has none. The second is not a leftover from the old rule:
-    /// emitting a re-dial schedule into a node that never re-dials is a word on
-    /// the command line that changes nothing, which this expansion does not do.
+    /// a re-dial supervisor and therefore a sink. ZA-3308 — so does a bare
+    /// `--connect` run now: its startup connect phase re-dials on this
+    /// schedule when `connect/timeout_ms` permits, as upstream's client does.
     #[test]
     fn the_retry_schedule_reaches_only_the_modes_that_own_a_connect_list() {
         // A peer BINDS and dials, so the file carries both endpoint lists: the
@@ -5834,6 +5853,9 @@ mod stock_config_tests {
                 "tcp/r:7447",
                 "--reconnect",
             ],
+            // ZA-3308 — the one-shot client: its startup connect phase re-dials
+            // on this schedule once `connect/timeout_ms` permits it.
+            vec!["--config", "z.json5", "--connect", "tcp/r:7447"],
         ] {
             let out = expand(&mode, file).unwrap();
             let at = out
@@ -5855,12 +5877,8 @@ mod stock_config_tests {
         }
 
         // Every other run: nothing. A `--listen` acceptor never dials at all,
-        // and a bare `--connect` client dials ONCE -- neither has a schedule to
-        // pace, so the flag would be a difference the file did not ask for.
-        for mode in [
-            vec!["--config", "z.json5", "--listen", "tcp/127.0.0.1:0"],
-            vec!["--config", "z.json5", "--connect", "tcp/r:7447"],
-        ] {
+        // so the flag would be a difference the file did not ask for.
+        for mode in [vec!["--config", "z.json5", "--listen", "tcp/127.0.0.1:0"]] {
             let out = expand(&mode, file).unwrap();
             assert!(
                 !out.added.iter().any(|a| a == "--connect-retry"),
@@ -5897,19 +5915,19 @@ mod stock_config_tests {
             });
         assert_eq!(client_drop_in.added[at + 1], "250,9000,1.5");
 
-        // And the SAME document without the lifecycle flag: a one-shot client,
-        // no schedule. This is the pair that makes the case above mean
-        // something -- without it, an expansion that emitted the flag for every
-        // client would pass.
+        // And the SAME document without the lifecycle flag: a one-shot client.
+        // ZA-3308 — it gets the schedule too, for its startup connect phase.
+        // This was the control asserting the opposite ("a one-shot client
+        // never re-dials"), which held only of the client DEFAULT budget.
         let one_shot = expand(&["--config", "z.json5"], client_file).unwrap();
         assert!(
             one_shot.added.iter().any(|a| a == "--connect"),
-            "the control must still dial: {:?}",
+            "the one-shot drop-in must still dial: {:?}",
             one_shot.added
         );
         assert!(
-            !one_shot.added.iter().any(|a| a == "--connect-retry"),
-            "a one-shot client never re-dials: {:?}",
+            one_shot.added.iter().any(|a| a == "--connect-retry"),
+            "a one-shot client's connect phase is paced by the schedule: {:?}",
             one_shot.added
         );
 
