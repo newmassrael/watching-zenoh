@@ -1060,7 +1060,14 @@ impl SharedSession {
         let mut zid_bytes = [0u8; 16];
         let n = zid.len().min(16);
         zid_bytes[..n].copy_from_slice(&zid[..n]);
-        let params = crate::drive::init_params(wz_runtime_tokio::session_glue::WhatAmI::Peer, zid)?;
+        // The plane's driver is inert and queues nothing onto a link, so no
+        // transmit model reaches it; zenoh's default is passed as the neutral
+        // value rather than the calling ABI's.
+        let params = crate::drive::init_params(
+            wz_runtime_tokio::session_glue::WhatAmI::Peer,
+            zid,
+            wz_runtime_tokio::session_glue::TxQueueConf::default(),
+        )?;
         let actions = new_session_actions(driver, params, clock);
         let observer = Arc::new(WzMutex::new(ApplicationLayerObserver::new()));
         // R2932 — the plane's wake is handed to the plane itself, so a loopback

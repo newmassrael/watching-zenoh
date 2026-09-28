@@ -153,6 +153,28 @@ pub struct TxQueueSizeOutOfRange {
 }
 
 impl TxQueueConf {
+    /// zenoh-pico's transmit model: a DROP message waits for room as long as a
+    /// BLOCK one does.
+    ///
+    /// pico has no bounded outbound queue. Its `_z_transport_tx_send_n_msg`
+    /// drops a `Z_CONGESTION_CONTROL_DROP` message only when the transport's TX
+    /// mutex is already held (`vendor/zenoh-pico/src/transport/common/tx.c` @
+    /// `ret = _z_transport_tx_mutex_lock(ztc, cong_ctrl == Z_CONGESTION_CONTROL_BLOCK);`),
+    /// and otherwise writes on the calling thread, blocking in the socket write.
+    /// A full socket therefore slows a pico put and never drops it. wz's queue
+    /// is bounded, so the nearest equivalent is a drop deadline no shorter than
+    /// the close deadline: the sender waits for the writer as pico's would wait
+    /// for the socket, and a peer that never drains is still bounded by
+    /// `wait_before_close`.
+    pub const fn pico() -> Self {
+        Self {
+            sizes: [crate::link::TxQueueShape::DEFAULT_SIZE; crate::qos::Priority::NUM],
+            wait_before_drop_us: WAIT_BEFORE_CLOSE_US,
+            max_wait_before_drop_fragments_us: 0,
+            wait_before_close_us: WAIT_BEFORE_CLOSE_US,
+        }
+    }
+
     /// Refuse a size outside `1..=16`, as upstream's config does.
     pub fn validate(&self) -> Result<(), TxQueueSizeOutOfRange> {
         use crate::link::TxQueueShape;

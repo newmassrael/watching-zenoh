@@ -99,3 +99,52 @@ impl PushDeadline {
         self.left_us = self.left_us.saturating_add(add);
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::session_init_params::WAIT_BEFORE_CLOSE_US;
+
+    /// Under pico's transmit model a droppable message asks for room as long
+    /// as a blocking one does, and its fragments add nothing past that: pico
+    /// drops only on a contended TX mutex, never for a full socket.
+    #[test]
+    fn a_pico_droppable_message_waits_as_long_as_a_blocking_one() {
+        let pico = TxQueueConf::pico();
+        let mut drop = PushDeadline::new(true, &pico);
+        let block = PushDeadline::new(false, &pico);
+        assert_eq!(
+            drop.ask(),
+            RoomWait::Drop {
+                wait_us: WAIT_BEFORE_CLOSE_US
+            }
+        );
+        assert_eq!(
+            block.ask(),
+            RoomWait::Block {
+                wait_us: WAIT_BEFORE_CLOSE_US
+            }
+        );
+        drop.next_fragment();
+        assert_eq!(
+            drop.ask(),
+            RoomWait::Drop {
+                wait_us: WAIT_BEFORE_CLOSE_US
+            },
+            "a fragment must not stretch a pico drop past the close deadline"
+        );
+    }
+
+    /// The control: zenoh's default still drops after `wait_before_drop`.
+    #[test]
+    fn a_zenoh_droppable_message_still_waits_only_wait_before_drop() {
+        let zenoh = TxQueueConf::default();
+        let drop = PushDeadline::new(true, &zenoh);
+        assert_eq!(
+            drop.ask(),
+            RoomWait::Drop {
+                wait_us: crate::session_init_params::WAIT_BEFORE_DROP_US
+            }
+        );
+    }
+}

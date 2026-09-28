@@ -12,7 +12,7 @@ use std::ffi::c_void;
 
 use wz_capi_core::drive::{open_blocking, CapiTlsConfig, DialPhase, OpenError, SessionState};
 use wz_runtime_tokio::retry_period::RetryPolicy;
-use wz_runtime_tokio::session_glue::WhatAmI;
+use wz_runtime_tokio::session_glue::{TxQueueConf, WhatAmI};
 use wz_runtime_tokio::startup_phase::PhasePolicy;
 use wz_runtime_tokio::zenoh_config::ZenohNodeConfig;
 
@@ -149,7 +149,15 @@ pub unsafe extern "C" fn z_open(
         // populated one; when this ABI grows the JSON path it fills the same
         // struct, which is why the parameter is typed rather than a pair of
         // `None`s that only ever meant "no quic cert".
-        match open_blocking(connect, listen, CapiTlsConfig::default(), whatami, phase) {
+        // zenoh's own bounded queue and waits: this ABI stands for zenoh-c.
+        match open_blocking(
+            connect,
+            listen,
+            CapiTlsConfig::default(),
+            whatami,
+            phase,
+            TxQueueConf::default(),
+        ) {
             Ok(state) => {
                 let h = Box::into_raw(Box::new(state)) as Handle;
                 unsafe { *this_ = z_owned_session_t::from_handle(h) };

@@ -64,7 +64,7 @@ use crate::config::{
 use crate::ffi::{guard_val, guarded};
 use crate::result::{ZResult, Z_ERR_GENERIC, Z_ERR_NULL, Z_OK};
 use wz_capi_core::drive::{open_blocking, CapiTlsConfig, DialPhase, OpenError, SessionState};
-use wz_runtime_tokio::session_glue::WhatAmI;
+use wz_runtime_tokio::session_glue::{TxQueueConf, WhatAmI};
 
 /// Resolve one certificate value from its PATH key or its `*_BASE64` inline key.
 ///
@@ -288,7 +288,18 @@ pub unsafe extern "C" fn z_open(
         // ZA-3298 left this ABI on one attempt: the retry it added reads
         // zenoh's `connect/retry` and `connect/timeout_ms`, which are zenoh-c
         // config keys, and this shim resolves pico's numeric keys instead.
-        match open_blocking(connect, listen, tls, dial_whatami, DialPhase::ONCE) {
+        // pico's transmit model, not zenoh's: a pico put writes on the
+        // caller's thread and a full socket slows it rather than dropping it
+        // (see `TxQueueConf::pico`). zenoh's 1 ms drop wait here discarded the
+        // tail of a burst that `teardown_drain` puts before `z_close`.
+        match open_blocking(
+            connect,
+            listen,
+            tls,
+            dial_whatami,
+            DialPhase::ONCE,
+            TxQueueConf::pico(),
+        ) {
             Ok(state) => {
                 *zs = z_owned_session_t {
                     _val: Box::into_raw(Box::new(state)) as *mut c_void,

@@ -27,7 +27,8 @@ use wz_runtime_tokio::retry_period::RetryPolicy;
 use wz_runtime_tokio::runtime_impl::TokioTime;
 use wz_runtime_tokio::session_glue::{
     drive_session_until_terminal_with_extra_deadline, EntropyUnavailable, ExtraDeadline,
-    IterationEvent, OsEntropy, SessionInitParams, SessionTimeouts, SigningKey, WhatAmI,
+    IterationEvent, OsEntropy, SessionInitParams, SessionTimeouts, SigningKey, TxQueueConf,
+    WhatAmI,
 };
 use wz_runtime_tokio::session_open::{
     bind_endpoint_with_config, dial_endpoint, initiate_and_open_session, AcceptConfig, DialConfig,
@@ -212,6 +213,7 @@ fn fresh_zid() -> Option<[u8; ZID_LENGTH]> {
 pub(crate) fn init_params(
     whatami: WhatAmI,
     zid: Vec<u8>,
+    tx_queue: TxQueueConf,
 ) -> Result<SessionInitParams, EntropyUnavailable> {
     Ok(SessionInitParams {
         version: 0x09,
@@ -223,7 +225,7 @@ pub(crate) fn init_params(
         lease_ms: 10_000,
         initial_sn: 0,
         cookie: Vec::new(),
-        tx_queue: wz_runtime_tokio::session_glue::TxQueueConf::default(),
+        tx_queue,
         cookie_signing_key: SigningKey::from_entropy(&mut OsEntropy)?,
     })
 }
@@ -249,6 +251,9 @@ struct DriveContext {
     shutdown: Arc<Notify>,
     stop: Arc<AtomicBool>,
     clock: TokioTime,
+    /// The transmit model the calling ABI stands for: zenoh's bounded queue for
+    /// zenoh-c, pico's blocking write for zenoh-pico. See [`open_blocking`].
+    tx_queue: TxQueueConf,
 }
 
 /// The shutdown signal both roles race their drive against. See
@@ -279,6 +284,7 @@ async fn drive_dial(
         shutdown,
         stop,
         clock,
+        tx_queue,
     } = ctx;
     // R311y534 — the dial config is BUILT from the caller's TLS material rather
     // than defaulted. Everything that can fail it runs before the handshake, so a
@@ -294,7 +300,7 @@ async fn drive_dial(
     // the C caller rather than dial with a cookie key anybody could forge.
     // Minted ONCE, before the phase: it is not a connect failure, so it is not
     // what `connect/retry` re-attempts.
-    let params = match init_params(whatami, zid.to_vec()) {
+    let params = match init_params(whatami, zid.to_vec(), tx_queue) {
         Ok(p) => p,
         Err(_) => {
             let _ = tx.send(false);
@@ -718,6 +724,7 @@ async fn drive_listen(endpoint: String, tls: CapiTlsConfig, ctx: DriveContext) {
         shutdown,
         stop,
         clock,
+        tx_queue,
     } = ctx;
     // Everything that can fail the open runs BEFORE the success signal below,
     // so a failure is reported to the C caller rather than silently killing a
@@ -767,7 +774,7 @@ async fn drive_listen(endpoint: String, tls: CapiTlsConfig, ctx: DriveContext) {
     // succeeded, so an entropy failure could only be reported as "no peer ever
     // connects". Built before the bind is announced, it is an ordinary open
     // failure like the two above.
-    let params = match init_params(WhatAmI::Peer, zid.to_vec()) {
+    let params = match init_params(WhatAmI::Peer, zid.to_vec(), tx_queue) {
         Ok(p) => p,
         Err(_) => {
             let _ = tx.send(false);
@@ -815,12 +822,20 @@ async fn drive_listen(endpoint: String, tls: CapiTlsConfig, ctx: DriveContext) {
 ///
 /// `dial_phase` decides how long the `connect` role keeps trying before it
 /// reports the failure; the `listen` role does not read it.
+///
+/// `tx_queue` is the transmit model of the ABI calling this, and it is a
+/// parameter because the two ABIs this core serves transmit differently: a
+/// zenoh-c session puts onto zenoh's bounded queue and drops a droppable
+/// message after `wait_before_drop` ([`TxQueueConf::default`]), while pico
+/// writes on the caller's thread and never drops for a full socket
+/// ([`TxQueueConf::pico`]).
 pub fn open_blocking(
     connect: Option<String>,
     listen: Option<String>,
     tls: CapiTlsConfig,
     dial_whatami: WhatAmI,
     dial_phase: DialPhase,
+    tx_queue: TxQueueConf,
 ) -> Result<SessionState, OpenError> {
     let clock = TokioTime::new();
     // Minted here, on the CALLING thread, so `SessionState` can hand it to
@@ -868,6 +883,7 @@ pub fn open_blocking(
                 shutdown: drive_shutdown,
                 stop: drive_stop,
                 clock,
+                tx_queue,
             };
             rt.block_on(async move {
                 match (connect, listen) {
