@@ -5357,7 +5357,15 @@ layer_c1bb_cargo_test_qos() {
     # count-guard gate did not reach this guard on R2777's range and did on
     # R2779's, which is where it was measured. READ off the command, which
     # printed 26.
-    _runci_guarded_test C1bb 26 cargo test -p wz-session-core --features transport-qos,transport-fragmentation,transport-batching,reassembly,session-multicast --lib qos --quiet \
+    #
+    # R2946 — 26 -> 29, READ off the command's `--list`. Two are this round's
+    # (`qos::tests::congestion_flags_round_trip_and_nodrop_wins`,
+    # `sample::tests::qos_level_with_congestion_packs_upstreams_two_flags`, the
+    # BlockFirst vocabulary of open-debt item 403). The THIRD was left behind:
+    # `locator::tests::ip_leaf_keeps_the_endpoints_qos_metadata_as_written`
+    # (R2945, `74498494`) carries `qos` in its name and that range did not move
+    # this guard — the R2779 shape a fourth time.
+    _runci_guarded_test C1bb 29 cargo test -p wz-session-core --features transport-qos,transport-fragmentation,transport-batching,reassembly,session-multicast --lib qos --quiet \
         || return 1
     (cd crates \
         && cargo clippy -p wz-session-core --all-targets --features transport-qos,transport-fragmentation,transport-batching,reassembly,session-multicast --quiet -- -D warnings \
