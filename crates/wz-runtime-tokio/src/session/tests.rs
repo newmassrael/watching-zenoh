@@ -10364,14 +10364,11 @@ fn remote_queryable_listener_rejects_typed_when_feature_off() {
 
 // ── R311y232 direct multicast Session publish QoS band ──
 
-/// R2931 — a multicast Session over a QoS group whose pipeline the test reads:
-/// what a publish pushes arrives as a group datagram, and its frame says the
-/// band it rode.
-#[cfg(all(
-    feature = "transport-multicast",
-    feature = "codec-push",
-    feature = "transport-qos"
-))]
+/// R2931 — a multicast Session over a group that OFFERS QoS, whose pipeline
+/// the test reads: what a publish pushes arrives as a group datagram, and its
+/// frame says the band it rode. Without `transport-qos` compiled the offer
+/// cannot be honoured, and every band is clamped to DEFAULT.
+#[cfg(all(feature = "transport-multicast", feature = "codec-push"))]
 fn tapped_qos_group_session() -> (
     TokioMulticastSession,
     crate::multicast_pipeline::MulticastTxTap,
@@ -10395,11 +10392,7 @@ fn tapped_qos_group_session() -> (
 }
 
 /// R2931 — the band of the next frame a publish pushed onto the group.
-#[cfg(all(
-    feature = "transport-multicast",
-    feature = "codec-push",
-    feature = "transport-qos"
-))]
+#[cfg(all(feature = "transport-multicast", feature = "codec-push"))]
 fn next_pushed_band(
     tap: &mut crate::multicast_pipeline::MulticastTxTap,
 ) -> wz_session_core::qos::Priority {
@@ -10428,18 +10421,21 @@ fn next_pushed_band(
 ///
 /// R2931 — read off the frame the publish pushed rather than off a queued
 /// item: the session now pushes onto the group's pipeline itself, so the band
-/// is observable only where it lands, which is on a QoS group (a non-QoS one
-/// clamps every band to DEFAULT) and so under `transport-qos`.
-#[cfg(all(
-    feature = "transport-multicast",
-    feature = "codec-push",
-    feature = "transport-qos"
-))]
+/// is observed where it lands. Both C1bc builds run this one case: with
+/// `transport-qos` the frame carries the app's band; without it the group's
+/// QoS offer cannot be honoured and the frame is clamped to DEFAULT, which is
+/// what a non-QoS build must put on the wire.
+#[cfg(all(feature = "transport-multicast", feature = "codec-push"))]
 #[test]
 fn multicast_publish_qos_stamps_band_base_publish_stays_default() {
     use wz_session_core::qos::Priority;
 
     let (session, mut tap) = tapped_qos_group_session();
+    let stamped = if cfg!(feature = "transport-qos") {
+        Priority::InteractiveHigh
+    } else {
+        Priority::DEFAULT
+    };
 
     // `Remote` locality routes the codec-push wire leg only (no loopback subscriber
     // needed); the leg pushes one Push per publish.
@@ -10455,8 +10451,9 @@ fn multicast_publish_qos_stamps_band_base_publish_stays_default() {
         .expect("multicast publish_qos pushes");
     assert_eq!(
         next_pushed_band(&mut tap),
-        Priority::InteractiveHigh,
-        "publish_qos must stamp the app band, not the pre-y232 hard-coded DEFAULT"
+        stamped,
+        "publish_qos must stamp the app band where QoS is built, not the pre-y232 \
+         hard-coded DEFAULT, and clamp it where it is not"
     );
 
     session
@@ -10482,17 +10479,24 @@ fn multicast_publish_qos_stamps_band_base_publish_stays_default() {
 /// it, reaching the gate through that alias. R311y314: this said the test
 /// "needs pubsub-priority" while its own cfg below reads `pubsub-qos` -- the
 /// alias is sufficient, never necessary.
+///
+/// R2931 — observed on the frame the publish pushed; without `transport-qos`
+/// the group's offer is not honoured and the band is clamped to DEFAULT.
 #[cfg(all(
     feature = "transport-multicast",
     feature = "codec-push",
-    feature = "pubsub-qos",
-    feature = "transport-qos"
+    feature = "pubsub-qos"
 ))]
 #[test]
 fn publish_with_priority_routes_multicast_conduit_band() {
     use wz_session_core::qos::Priority;
 
     let (session, mut tap) = tapped_qos_group_session();
+    let stamped = if cfg!(feature = "transport-qos") {
+        Priority::InteractiveHigh
+    } else {
+        Priority::DEFAULT
+    };
 
     // Base `publish` with with_priority set -> the band flows from
     // `opts.qos.priority()` to the frame the publish pushes (the item3 change).
@@ -10504,7 +10508,7 @@ fn publish_with_priority_routes_multicast_conduit_band() {
         .expect("multicast publish pushes");
     assert_eq!(
         next_pushed_band(&mut tap),
-        Priority::InteractiveHigh,
+        stamped,
         "base publish routes the conduit band from opts.with_priority (item3 unification)",
     );
 
