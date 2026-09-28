@@ -21,9 +21,9 @@
 //! orchestration is behaviour-identical to the inline arm the AP loop carried
 //! before R311lx; only its home moved.
 //!
-//! R2928 — the orchestration is now [`multicast_tx_push`]: room is asked of a
-//! bounded [`MulticastTxQueue`] before each SN is minted, as upstream's
-//! multicast pipeline does. [`multicast_tx_emit`] is that push over a queue
+//! R2928 — the orchestration is now `multicast_tx_push`: room is asked of a
+//! bounded `MulticastTxQueue` before each SN is minted, as upstream's
+//! multicast pipeline does. `multicast_tx_emit` is that push over a queue
 //! that always has room, so both loops keep one producer.
 
 // Only the boxed variants (Push / Response / DeclareReply) name Box; a build
