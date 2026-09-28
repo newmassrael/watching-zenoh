@@ -661,6 +661,53 @@ impl LiveDissection {
         wz_capture::census_json::census_json_where(&self.dissection, filter)
     }
 
+    /// ZA-3214 ① — THE FIELD DOCUMENT OF WHAT THIS HANDLE HAS SEEN, each row
+    /// carrying the coordinates its record carries.
+    ///
+    /// # Why this is the join and a second dissection is not
+    ///
+    /// A consumer that drains records here and reads rows off a capture door
+    /// holds TWO dissections of one file, and nothing published joins them:
+    /// the records name lists by ids this handle minted, the document names
+    /// flows by 5-tuple. On one flow they line up by order; on several, or on
+    /// datagram rows, they do not line up at all. Rendered over THIS handle's
+    /// dissection with THIS handle's ids, a row and its record share
+    /// `(list_id, direction, anchor, batch_index)` by construction — the same
+    /// fact R2453 made true of the census.
+    ///
+    /// # `&mut`, and what that does and does not change
+    ///
+    /// A list this handle has not drained yet has no id, and a row with no id
+    /// cannot join the record a later drain hands out. So the ids are settled
+    /// FIRST, by a drain into an empty buffer: every list is reconciled
+    /// exactly as a drain reconciles it — minted, replaced, trimmed and
+    /// counted — and no record is handed out, so the next real drain returns
+    /// what it would have returned anyway, under the same ids. It changes no
+    /// decoded message; [`Self::end`] is still the one act that would.
+    ///
+    /// `capture` is the container this handle was read from, for the datagram
+    /// rows: this reader keeps no copy of a pushed packet, so those rows are
+    /// re-read from it exactly as the capture doors re-read theirs. An empty
+    /// slice renders none of them and says so with `capture_reread: false`.
+    pub fn fields_where(
+        &mut self,
+        capture: &[u8],
+        max_messages_shown_per_flow: Option<usize>,
+        declarations: Option<&wz_capture::payload_decode::Declarations<'_>>,
+        filter: &wz_capture::filter::Filter,
+    ) -> String {
+        self.drain(&mut []);
+        let ids = HandleIds::of(self);
+        wz_capture::fields_json::fields_json_where_coordinated(
+            &self.dissection,
+            capture,
+            max_messages_shown_per_flow,
+            declarations,
+            filter,
+            &ids,
+        )
+    }
+
     /// R2453 (open-debt item 700) — THE FEED ENDED: spend the patience that a
     /// capture's last packet spends.
     ///
@@ -766,6 +813,44 @@ fn record_of(
             Err(_) => KIND_UNDECODABLE,
         },
         flags,
+    }
+}
+
+/// ZA-3214 ① — this handle's list ids, in the shape the field renderer asks
+/// for them.
+///
+/// A snapshot taken after the ids were settled, keyed the way the renderer
+/// keys lists: by position in `Dissection::message_lists_with_origin`, which is
+/// the enumeration the marks were minted from, and by flow for a scouting list.
+struct HandleIds {
+    lists: Vec<Option<u64>>,
+    scouting: BTreeMap<FlowKey, u64>,
+}
+
+impl HandleIds {
+    fn of(handle: &LiveDissection) -> Self {
+        Self {
+            lists: handle
+                .dissection
+                .message_lists_with_origin()
+                .map(|(flow, origin, _)| handle.marks.get(&(flow, origin)).map(|m| m.list_id))
+                .collect(),
+            scouting: handle
+                .scouting_marks
+                .iter()
+                .map(|(flow, mark)| (*flow, mark.list_id))
+                .collect(),
+        }
+    }
+}
+
+impl wz_capture::fields_json::RowCoordinates for HandleIds {
+    fn list_id(&self, list: usize) -> Option<u64> {
+        self.lists.get(list).copied().flatten()
+    }
+
+    fn scouting_list_id(&self, flow: &FlowKey) -> Option<u64> {
+        self.scouting.get(flow).copied()
     }
 }
 

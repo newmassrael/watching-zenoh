@@ -979,6 +979,25 @@ pub const DOCUMENT_HISTORY: &[DocumentShape] = &[
         planes: &[],
         carries: FIELDS_R14_CARRIES,
     },
+    // ZA-3214 ① — a row can carry a RECORD's coordinates.
+    //
+    // `list_id`, `anchor` and `batch_index`, with the meanings the record door
+    // gives them, written only by the live door (`wz_dissect_live_fields_where`)
+    // whose handle minted the ids — a capture door has no handle and writes
+    // none of the three. Present, they are the join key between a drained
+    // record and its row on any capture: several flows, datagram rows and the
+    // scouting list alike. No family: the values are numbers. The carries
+    // axis moves with them — `offset_space`'s shapes gain the coordinates, and
+    // the `selected` shapes revisions 12 to 14 never listed.
+    DocumentShape {
+        document: FIELDS,
+        revision: 15,
+        keys: FIELDS_R15_KEYS,
+        retiring: &[],
+        families: FIELDS_R14_FAMILIES,
+        planes: &[],
+        carries: FIELDS_R15_CARRIES,
+    },
     DocumentShape {
         document: SUMMARY,
         revision: 1,
@@ -3636,6 +3655,105 @@ pub const FIELDS_R13_KEYS: &[&str] = &[
     "wrong",
 ];
 
+/// The keys the field document carries at revision 15 — revision 14's PLUS the
+/// record coordinates `anchor`, `batch_index` and `list_id`. ZA-3214 ①.
+/// Generated from revision 14's set, not typed.
+pub const FIELDS_R15_KEYS: &[&str] = &[
+    "abandoned_at_end",
+    "abandoned_on_eviction",
+    "above_transport",
+    "addr",
+    "anchor",
+    "batch_index",
+    "batch_size",
+    "caps",
+    "capture_reread",
+    "carried",
+    "carried_state",
+    "chain",
+    "chain_id",
+    "compression",
+    "conduit",
+    "context",
+    "datagram_flows",
+    "declaration_checked",
+    "declared",
+    "descriptor_bytes",
+    "despite_encoding",
+    "direction",
+    "document",
+    "dropped_by_limits",
+    "dst",
+    "end",
+    "example",
+    "expired_chains",
+    "fields",
+    "first_byte",
+    "flow",
+    "flows",
+    "format",
+    "frame_offset",
+    "frames",
+    "frames_per_flow",
+    "high",
+    "keyexpr",
+    "keyexpr_cause",
+    "kind",
+    "l2",
+    "link",
+    "list_id",
+    "low",
+    "lowlatency",
+    "max_flows_per_table",
+    "max_scout_askers",
+    "message",
+    "message_at",
+    "messages",
+    "missing",
+    "name",
+    "negotiated",
+    "note",
+    "offset_space",
+    "omitted",
+    "outcome",
+    "packet",
+    "patch",
+    "path",
+    "payload_decode",
+    "payload_mapping",
+    "payload_mapping_counts_exact",
+    "payload_offset",
+    "payload_refusals",
+    "phase",
+    "port",
+    "priority",
+    "qos",
+    "reason",
+    "reassembly",
+    "reliable",
+    "revision",
+    "samples",
+    "scout_askers",
+    "scouting",
+    "selected",
+    "shown",
+    "skipped",
+    "skipped_packets",
+    "sn",
+    "sn_mask",
+    "src",
+    "start",
+    "state",
+    "stream_bytes",
+    "stream_bytes_per_direction",
+    "stream_flows",
+    "under",
+    "value",
+    "verdict",
+    "why",
+    "wrong",
+];
+
 /// The value families the field document declares at revision 13 — revision
 /// 12's PLUS `selected`.
 pub const FIELDS_R13_FAMILIES: &[ValueFamily] = &[
@@ -4332,6 +4450,278 @@ pub const FIELD_OFFSET_SPACE_CARRIES_R12: &[WordCarries] = &[
                 "payload_decode",
             ],
         ],
+    },
+];
+
+/// Every shape each `offset_space` word's row takes at revision 15 — revision
+/// 14's, each ALSO with `selected`, and each also with `selected` and the
+/// three record coordinates.
+///
+/// ZA-3214 ①, and a correction it measured. `selected` has joined every row of
+/// the selector door since R2766, and no revision from 12 to 14 lists a shape
+/// carrying it: the gate that derives these shapes rendered no selector
+/// document, so the shape was never observed and never declared. Revision 13
+/// declared the key and its words and still missed this, which is the
+/// population-shaped hole this axis's own test warns about. It is stated here,
+/// at the revision that also adds the coordinates, rather than by rewriting
+/// published revisions' declarations.
+///
+/// The optional keys compose independently of the word: `payload_decode` with
+/// a format map, `selected` with a selector, and `anchor` / `batch_index` /
+/// `list_id` on the live door, which always takes a selector. So each word's
+/// shapes are its revision-14 shapes times those three cases, and the gate's
+/// population renders every field document through all three doors to reach
+/// exactly that product. Generated from the revision-14 table, not typed.
+pub const FIELD_OFFSET_SPACE_CARRIES_R15: &[WordCarries] = &[
+    WordCarries {
+        word: "packet",
+        shapes: &[
+            &[
+                "above_transport",
+                "anchor",
+                "batch_index",
+                "carried",
+                "chain",
+                "direction",
+                "fields",
+                "first_byte",
+                "l2",
+                "list_id",
+                "name",
+                "packet",
+                "payload_decode",
+                "selected",
+                "sn",
+            ],
+            &[
+                "above_transport",
+                "anchor",
+                "batch_index",
+                "carried",
+                "chain",
+                "direction",
+                "fields",
+                "first_byte",
+                "l2",
+                "list_id",
+                "name",
+                "packet",
+                "selected",
+                "sn",
+            ],
+            &[
+                "above_transport",
+                "carried",
+                "chain",
+                "direction",
+                "fields",
+                "first_byte",
+                "l2",
+                "name",
+                "packet",
+                "payload_decode",
+                "selected",
+                "sn",
+            ],
+            &[
+                "above_transport",
+                "carried",
+                "chain",
+                "direction",
+                "fields",
+                "first_byte",
+                "l2",
+                "name",
+                "packet",
+                "payload_decode",
+                "sn",
+            ],
+            &[
+                "above_transport",
+                "carried",
+                "chain",
+                "direction",
+                "fields",
+                "first_byte",
+                "l2",
+                "name",
+                "packet",
+                "selected",
+                "sn",
+            ],
+            &[
+                "above_transport",
+                "carried",
+                "chain",
+                "direction",
+                "fields",
+                "first_byte",
+                "l2",
+                "name",
+                "packet",
+                "sn",
+            ],
+        ],
+    },
+    WordCarries {
+        word: "stream_byte",
+        shapes: &[
+            &[
+                "above_transport",
+                "anchor",
+                "batch_index",
+                "carried",
+                "chain",
+                "direction",
+                "fields",
+                "first_byte",
+                "l2",
+                "list_id",
+                "message_at",
+                "name",
+                "payload_decode",
+                "selected",
+                "sn",
+            ],
+            &[
+                "above_transport",
+                "anchor",
+                "batch_index",
+                "carried",
+                "chain",
+                "direction",
+                "fields",
+                "first_byte",
+                "l2",
+                "list_id",
+                "message_at",
+                "name",
+                "selected",
+                "sn",
+            ],
+            &[
+                "above_transport",
+                "carried",
+                "chain",
+                "direction",
+                "fields",
+                "first_byte",
+                "l2",
+                "message_at",
+                "name",
+                "payload_decode",
+                "selected",
+                "sn",
+            ],
+            &[
+                "above_transport",
+                "carried",
+                "chain",
+                "direction",
+                "fields",
+                "first_byte",
+                "l2",
+                "message_at",
+                "name",
+                "payload_decode",
+                "sn",
+            ],
+            &[
+                "above_transport",
+                "carried",
+                "chain",
+                "direction",
+                "fields",
+                "first_byte",
+                "l2",
+                "message_at",
+                "name",
+                "selected",
+                "sn",
+            ],
+            &[
+                "above_transport",
+                "carried",
+                "chain",
+                "direction",
+                "fields",
+                "first_byte",
+                "l2",
+                "message_at",
+                "name",
+                "sn",
+            ],
+        ],
+    },
+];
+
+/// What each field-document family's WORD decides at revision 15 — revision
+/// 14's, with `offset_space`'s shapes corrected and widened (see
+/// [`FIELD_OFFSET_SPACE_CARRIES_R15`]). Generated from revision 14's table.
+pub const FIELDS_R15_CARRIES: &[KeyCarries] = &[
+    KeyCarries {
+        key: "carried_state",
+        shape: CarriesShape::Discriminant(CARRIED_STATE_CARRIES_R12),
+    },
+    KeyCarries {
+        key: "direction",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "keyexpr_cause",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "kind",
+        shape: CarriesShape::Discriminant(FIELD_VALUE_KIND_CARRIES_R4),
+    },
+    KeyCarries {
+        key: "link",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "message",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "offset_space",
+        shape: CarriesShape::Discriminant(FIELD_OFFSET_SPACE_CARRIES_R15),
+    },
+    KeyCarries {
+        key: "outcome",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "phase",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "priority",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "reason",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "selected",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "state",
+        shape: CarriesShape::Discriminant(PAYLOAD_STATE_CARRIES_R4),
+    },
+    KeyCarries {
+        key: "under",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "verdict",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "wrong",
+        shape: CarriesShape::Passenger,
     },
 ];
 
@@ -6795,7 +7185,8 @@ mod tests {
             // `l2`, flows gained `context`, and the document gained
             // `reassembly`: verdicts the session reached per frame and had
             // never handed over.
-            (FIELDS, 14),
+            // ZA-3214 ① — to 15 when a row could carry a record's coordinates.
+            (FIELDS, 15),
             // R2121 (open-debt item 460) — the summary moved to 2 when it
             // gained `inert_counters`; R2122 (item 238) to 3 when its
             // `framing` group stopped disagreeing with the capture report's.

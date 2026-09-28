@@ -948,6 +948,52 @@ pub struct LexedToken {
     pub class: TokenClass,
 }
 
+/// The selector verdict `wz_dissect_selector_diagnose` hands back, rendered
+/// HERE rather than in the ABI crate.
+///
+/// ZA-3214 ③ — moved beside the revision that declares it. The document's
+/// value family (`kind`) is declared in [`crate::doc_revision`], and the gate
+/// that derives each family's carries verdict renders every document that
+/// declares one. An emitter in another crate is one that gate cannot render,
+/// so the verdict it checks would be a claim with no measurement behind it —
+/// the shape `fields_json` and `census_json` already avoid by living here.
+///
+/// `{envelope,"ok":true,"tokens":[…]}`, or
+/// `{envelope,"ok":false,"at":N,"message":"…","tokens":[…]}` with `at` a BYTE
+/// offset. The tokens close both branches; see [`tokens`].
+pub fn diagnose_json(expr: &str) -> String {
+    let mut out = String::from("{");
+    crate::doc_revision::envelope_into(crate::doc_revision::SELECTOR_DIAGNOSE, &mut out);
+    match Filter::parse(expr) {
+        Ok(_) => out.push_str(",\"ok\":true"),
+        Err(e) => {
+            let _ = fmt::Write::write_fmt(&mut out, format_args!(",\"ok\":false,\"at\":{}", e.at));
+            out.push_str(",\"message\":");
+            // The SAME escaper the census document uses: a message quotes the
+            // operator's own text back (an unknown field name, a bad value), so
+            // it carries whatever they typed.
+            wz_session_core::json::escape_into(&e.to_string(), &mut out);
+        }
+    }
+    out.push_str(",\"tokens\":[");
+    for (i, t) in tokens(expr).into_iter().enumerate() {
+        if i > 0 {
+            out.push(',');
+        }
+        let _ = fmt::Write::write_fmt(
+            &mut out,
+            format_args!(
+                "{{\"start\":{},\"end\":{},\"kind\":\"{}\"}}",
+                t.start,
+                t.end,
+                t.class.word()
+            ),
+        );
+    }
+    out.push_str("]}");
+    out
+}
+
 /// ZA-3214 ③ — THE LEXER'S TOKENS, for a consumer that colours a selector.
 ///
 /// The same walk [`Filter::parse`] runs, so a colouring and a verdict cannot

@@ -303,6 +303,7 @@ pub extern "C" fn wz_dissect_abi_version() -> c_int {
     // The header's own rule is that this moves when a SYMBOL changes, and a
     // consumer pinned to 16 meeting 17 learns exactly that there is a door it
     // does not know about.
+    // ZA-3214 — 18, for `wz_dissect_live_fields_where`.
     WZ_DISSECT_ABI_REVISION
 }
 
@@ -320,7 +321,7 @@ pub extern "C" fn wz_dissect_abi_version() -> c_int {
 /// It lives AFTER the function rather than above it on purpose: an item placed
 /// between a doc comment and the item it documents takes that doc, which is
 /// the doc-ownership defect the C1bz budget records.
-pub const WZ_DISSECT_ABI_REVISION: c_int = 17;
+pub const WZ_DISSECT_ABI_REVISION: c_int = 18;
 
 /// R2108 (open-debt item 525) — THE RECORD'S LAYOUT, reported by the artifact.
 ///
@@ -1527,47 +1528,13 @@ pub unsafe extern "C" fn wz_dissect_selector_diagnose(
         Err(_) => return WZ_DISSECT_ERR_INVALID_ARG,
     };
     // R2100 (open-debt item 509) — the envelope opens BOTH branches, so the
-    // revision is readable off a verdict whichever way it went. A revision a
-    // consumer can only see on failure is one it cannot check before trusting
-    // a success.
-    let head = wz_capture::doc_revision::envelope(wz_capture::doc_revision::SELECTOR_DIAGNOSE);
-    let mut verdict = match wz_capture::filter::Filter::parse(expr) {
-        Ok(_) => format!("{{{head},\"ok\":true"),
-        Err(e) => {
-            let mut s = format!("{{{head},\"ok\":false,\"at\":");
-            s.push_str(&e.at.to_string());
-            s.push_str(",\"message\":");
-            // The SAME escaper the census document uses: a message quotes the
-            // operator's own text back (an unknown field name, a bad value), so
-            // it carries whatever they typed.
-            wz_session_core::json::escape_into(&e.to_string(), &mut s);
-            s
-        }
-    };
-    // ZA-3214 ③ — the lexer's tokens, on BOTH branches, last. A consumer
-    // colouring the selector as it is typed reads the spans from this walk
-    // instead of keeping a lexer of its own; on a lexical failure the list is
-    // what came before `at`, so the colouring survives an unclosed quote.
-    push_selector_tokens(expr, &mut verdict);
-    verdict.push('}');
-    write_string(verdict, out)
-}
-
-/// Write `,"tokens":[{"start":S,"end":E,"kind":"…"},…]` for `expr`.
-fn push_selector_tokens(expr: &str, out: &mut String) {
-    out.push_str(",\"tokens\":[");
-    for (i, t) in wz_capture::filter::tokens(expr).into_iter().enumerate() {
-        if i > 0 {
-            out.push(',');
-        }
-        out.push_str(&format!(
-            "{{\"start\":{},\"end\":{},\"kind\":\"{}\"}}",
-            t.start,
-            t.end,
-            t.class.word()
-        ));
-    }
-    out.push(']');
+    // revision is readable off a verdict whichever way it went.
+    //
+    // ZA-3214 ③ — rendered by `wz_capture::filter::diagnose_json`, beside the
+    // revision that declares the verdict's `kind` family, so the gate that
+    // derives every family's carries verdict can render this document too.
+    // The lexer's tokens close both branches; see that function.
+    write_string(wz_capture::filter::diagnose_json(expr), out)
 }
 
 // ── R2102 (ABI 11, open-debt item 524) — THE LIVE DOOR ──────────────────────
@@ -2024,6 +1991,103 @@ pub unsafe extern "C" fn wz_dissect_live_census(
     };
     // SAFETY: caller contract above.
     write_string(unsafe { (*handle).census(&filter) }, out)
+}
+
+/// ZA-3214 ① (ABI 18) — THE FIELD DOCUMENT OVER A LIVE HANDLE, each row
+/// carrying the record coordinates of that handle.
+///
+/// # The gap this closes
+///
+/// R2453 gave the census a live door, so its planes and the drained records
+/// describe ONE dissection. The field document had no such door: a consumer
+/// drained records from a handle and read rows from
+/// [`wz_dissect_pcap_fields_where_limited`] — a second dissection of the same
+/// file — and joined them by direction and anchor order. That holds on a
+/// capture with one flow and on nothing else: with several flows, or with
+/// datagram rows, a row's detail (endpoints, channel, sn, key, `selected`) had
+/// no published key to reach its record by.
+///
+/// This door renders the same document over the HANDLE's dissection, and every
+/// row gains `list_id`, `anchor` and `batch_index` with the meanings the record
+/// carries (field-document revision 15). A row and a record join on equal
+/// values of those three and `direction`: stream rows, datagram rows and the
+/// scouting rows of `WZ_DISSECT_ORIGIN_SCOUTING` alike.
+///
+/// # Arguments, against the capture door it mirrors
+///
+/// `max_messages_shown_per_flow`, `selector` and `declarations` are exactly
+/// [`wz_dissect_pcap_fields_where_limited`]'s. The limit preset is NOT an
+/// argument: it is the handle's, chosen at open, for the reason
+/// [`wz_dissect_live_census`] gives. `bytes` / `len` are the capture container
+/// the handle was read from (by [`wz_dissect_pcap_replay`], or by
+/// [`wz_dissect_live_follow`]'s prefix): datagram rows are walked from a second
+/// read of their packets, because this reader keeps no copy of a pushed packet,
+/// and that read needs the container. A handle fed by
+/// [`wz_dissect_live_push`] has no container; pass `NULL, 0`, and the document
+/// renders no datagram rows and says so with `"capture_reread":false`.
+///
+/// # `handle` is not `const`
+///
+/// A list not drained yet has no id, and a row without one could not join the
+/// record a later drain hands out. So the ids are settled first, by the
+/// reconciliation a drain performs, with no record handed out: the next
+/// [`wz_dissect_live_drain`] returns exactly what it would have, under the same
+/// ids, and [`wz_dissect_live_lost`] counts what a drain would have counted.
+/// Nothing decoded changes.
+///
+/// # Safety
+/// `handle` must be a handle from [`wz_dissect_live_open`] or
+/// [`wz_dissect_pcap_replay`] that has not been closed. `bytes` must point to
+/// at least `len` readable bytes, or be null with `len` zero. `selector` and
+/// `declarations` must be NUL-terminated C strings and `out` a writable pointer
+/// to a `*mut c_char`; none of those may be null.
+#[no_mangle]
+pub unsafe extern "C" fn wz_dissect_live_fields_where(
+    handle: *mut live::LiveDissection,
+    bytes: *const u8,
+    len: usize,
+    max_messages_shown_per_flow: usize,
+    selector: *const c_char,
+    declarations: *const c_char,
+    out: *mut *mut c_char,
+) -> c_int {
+    if handle.is_null()
+        || (bytes.is_null() && len != 0)
+        || selector.is_null()
+        || declarations.is_null()
+        || out.is_null()
+    {
+        return WZ_DISSECT_ERR_INVALID_ARG;
+    }
+    // SAFETY: caller contract above.
+    let expr = match unsafe { std::ffi::CStr::from_ptr(selector) }.to_str() {
+        Ok(s) => s,
+        Err(_) => return WZ_DISSECT_ERR_INVALID_ARG,
+    };
+    let filter = match wz_capture::filter::Filter::parse(expr) {
+        Ok(f) => f,
+        Err(_) => return WZ_DISSECT_ERR_SELECTOR,
+    };
+    // SAFETY: caller contract above.
+    let text = match unsafe { std::ffi::CStr::from_ptr(declarations) }.to_str() {
+        Ok(s) => s,
+        Err(_) => return WZ_DISSECT_ERR_INVALID_ARG,
+    };
+    let mut map = wz_capture::payload::formats::FormatMap::new();
+    if map.declare_all(text).is_err() {
+        return WZ_DISSECT_ERR_DECLARATION;
+    }
+    let capture: &[u8] = if len == 0 {
+        &[]
+    } else {
+        // SAFETY: caller contract above; non-null whenever `len` is non-zero.
+        unsafe { core::slice::from_raw_parts(bytes, len) }
+    };
+    let cap = (max_messages_shown_per_flow > 0).then_some(max_messages_shown_per_flow);
+    let declared = wz_capture::payload_decode::Declarations::new(&map);
+    // SAFETY: caller contract above.
+    let doc = unsafe { (*handle).fields_where(capture, cap, Some(&declared), &filter) };
+    write_string(doc, out)
 }
 
 /// R2453 (open-debt item 700) — THE FEED ENDED: spend the patience a capture's
@@ -4998,7 +5062,10 @@ mod tests {
         // the feed is declared over and 94 after, because the bytes BEHIND a
         // hole decode only once the hole is given up on.
         // R2766 (open debt 788) — 17, for `wz_dissect_pcap_fields_where_limited`.
-        assert_eq!(wz_dissect_abi_version(), 17);
+        // ZA-3214 — 18, for `wz_dissect_live_fields_where`: the field document
+        // over a live handle. One symbol, and the memory rule and the record
+        // layout both stay put.
+        assert_eq!(wz_dissect_abi_version(), 18);
     }
 
     /// R311y913 (unregistered item 435) — THE LINKED SURFACE CAN SAY WHAT IT
@@ -6515,6 +6582,124 @@ mod tests {
             "a drained scouting message must not come back"
         );
         assert_eq!(unsafe { wz_dissect_live_lost(handle) }, 0);
+        unsafe { wz_dissect_live_close(handle) };
+    }
+
+    /// Call `wz_dissect_live_fields_where` with an empty selector and no
+    /// declarations.
+    fn live_fields(handle: *mut live::LiveDissection, capture: &[u8]) -> String {
+        let selector = std::ffi::CString::new("").expect("no NUL");
+        let declarations = std::ffi::CString::new("").expect("no NUL");
+        let mut out: *mut c_char = core::ptr::null_mut();
+        let (bytes, len) = if capture.is_empty() {
+            (core::ptr::null(), 0)
+        } else {
+            (capture.as_ptr(), capture.len())
+        };
+        let rc = unsafe {
+            wz_dissect_live_fields_where(
+                handle,
+                bytes,
+                len,
+                0,
+                selector.as_ptr(),
+                declarations.as_ptr(),
+                &mut out,
+            )
+        };
+        assert_eq!(rc, WZ_DISSECT_OK, "live fields rc");
+        let doc = unsafe { std::ffi::CStr::from_ptr(out) }
+            .to_str()
+            .expect("utf8")
+            .to_string();
+        unsafe { wz_dissect_string_free(out) };
+        doc
+    }
+
+    /// ZA-3214 ① — EVERY DRAINED RECORD JOINS EXACTLY ONE ROW, on a capture
+    /// the order-based join could not line up.
+    ///
+    /// Four lists: a TCP stream carrying two framed messages (so a record's
+    /// anchor, the length prefix, differs from the row's `message_at`), two
+    /// UDP conversations, and a scout. The document is asked for BEFORE the
+    /// first drain, which is the order that proves the point: the ids it
+    /// writes are the ones the drain then hands out, not ones minted by
+    /// whichever door happened to run first.
+    #[test]
+    fn every_drained_record_joins_exactly_one_row_of_the_live_field_document() {
+        let framed = [0x01, 0x00, 0x04, 0x01, 0x00, 0x04];
+        let packets = [
+            tcp_packet(1000, &framed),
+            udp_packet([10, 0, 0, 1], 7447, [10, 0, 0, 2], 7447, &KEEPALIVE),
+            udp_packet([10, 0, 0, 3], 7447, [10, 0, 0, 4], 7447, &KEEPALIVE),
+            scout_to_group([192, 168, 1, 5], 43210),
+        ];
+        let rows: Vec<(u32, u32, &[u8])> = packets
+            .iter()
+            .enumerate()
+            .map(|(i, p)| (i as u32, 0, p.as_slice()))
+            .collect();
+        let capture = wz_capture::pcap::write(1, &rows);
+        let handle = replay(&capture, WZ_DISSECT_LIMITS_NONE).expect("the replay opens");
+
+        let doc = live_fields(handle, &capture);
+        let records = drain_live(handle, 64);
+        assert_eq!(
+            records.len(),
+            5,
+            "two stream, two datagram, one scout: {records:?}"
+        );
+        let mut origins: Vec<u8> = records.iter().map(|r| r.origin).collect();
+        origins.sort_unstable();
+        assert_eq!(origins, vec![1, 1, 2, 2, live::ORIGIN_SCOUTING]);
+
+        for r in &records {
+            let needle = format!(
+                "\"list_id\":{},\"anchor\":{},\"batch_index\":{},",
+                r.list_id, r.anchor, r.batch_index
+            );
+            assert_eq!(
+                doc.matches(needle.as_str()).count(),
+                1,
+                "record {r:?} must join exactly one row by {needle}: {doc}"
+            );
+        }
+        assert_eq!(
+            doc.matches("\"list_id\":").count(),
+            records.len(),
+            "and no row may carry a coordinate no record has"
+        );
+        // The stream's second message: anchor 3 is its length prefix, and the
+        // row's own `message_at` is the message's first byte two further on.
+        assert!(
+            doc.contains("\"message_at\":5,\"list_id\":")
+                && doc.contains("\"anchor\":3,\"batch_index\":0,"),
+            "a stream row carries both coordinates, and they differ: {doc}"
+        );
+
+        // A second call after the drain renders the same rows under the same
+        // ids: the door settles ids and never re-mints them.
+        assert_eq!(live_fields(handle, &capture), doc);
+        // The capture door has no handle, so it writes no coordinate at all.
+        let plain = call_fields(&capture, 0).expect("the capture door reads it");
+        assert!(!plain.contains("\"list_id\""), "{plain}");
+        unsafe { wz_dissect_live_close(handle) };
+    }
+
+    /// ZA-3214 ① — a handle with no container renders no datagram row and
+    /// SAYS so, rather than reading as a quiet link.
+    #[test]
+    fn a_pushed_handle_with_no_container_says_it_could_not_reread() {
+        let handle = open_live(WZ_DISSECT_LIMITS_NONE).expect("the preset opens");
+        let packet = udp_packet([10, 0, 0, 1], 7447, [10, 0, 0, 2], 7447, &KEEPALIVE);
+        push_live(handle, 1_000_000, &packet);
+        let doc = live_fields(handle, &[]);
+        assert!(doc.contains("\"capture_reread\":false"), "{doc}");
+        assert!(
+            !doc.contains("\"list_id\""),
+            "no datagram row was rendered: {doc}"
+        );
+        assert_eq!(drain_live(handle, 8).len(), 1, "and the drain is untouched");
         unsafe { wz_dissect_live_close(handle) };
     }
 

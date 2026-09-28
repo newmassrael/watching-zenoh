@@ -544,7 +544,7 @@
  *
  * Every family in `value_families` now carries a `carries` axis:
  *
- *     {"name":"fields","revision":14,"key":"kind","values":[...],
+ *     {"name":"fields","revision":15,"key":"kind","values":[...],
  *      "carries":[{"word":"bits","shapes":[["end","name","start","value"]]},
  *                 {"word":"opaque","shapes":[["end","name","start"]]}, ...]}
  *
@@ -881,7 +881,7 @@ extern "C" {
  * calls the function, and refuses when the two disagree.
  *
  * @unknown ABI not-an-enumeration */
-#define WZ_DISSECT_ABI_REVISION 17
+#define WZ_DISSECT_ABI_REVISION 18
 
 /* Symbol/memory-contract revision. Not a JSON-shape revision. This is the
  * revision the LOADED library reports; the block above says why it exists
@@ -1443,7 +1443,7 @@ int wz_dissect_declarations_diagnose(const char *declarations, char **out);
  *
  * R2175 -- the document is at REVISION 3, and the fourth key is `value_families`:
  *
- *     "value_families":[{"name":"fields","revision":14,"key":"state",
+ *     "value_families":[{"name":"fields","revision":15,"key":"state",
  *                        "values":["decoded","encoding_mismatch",…]}, …]
  *
  * every key in every document whose VALUE this build draws from a closed set,
@@ -1964,6 +1964,52 @@ int wz_dissect_live_census(const wz_dissect_live *h, const char *selector,
  * channel with no error in it is one a caller learns to ignore. Releasing the
  * handle is still wz_dissect_live_close's job. */
 void wz_dissect_live_end(wz_dissect_live *h);
+
+/* ZA-3214 (ABI 18) -- THE FIELD DOCUMENT OVER A LIVE HANDLE, each row
+ * carrying the record coordinates of that handle.
+ *
+ * R2453 gave the census a live door so its planes and the drained records
+ * describe ONE dissection. The field document had none: rows came from
+ * wz_dissect_pcap_fields_where_limited, a second dissection of the same file,
+ * and a consumer joined them to records by direction and anchor order -- which
+ * holds on a capture with one flow and on nothing else. With several flows, or
+ * datagram rows, a row's detail had no published key to reach its record by.
+ *
+ * This renders the same document over the HANDLE's dissection (field-document
+ * revision 15), and every row gains
+ *
+ *     "list_id":L,"anchor":A,"batch_index":B
+ *
+ * with the meanings wz_dissect_record gives them. A record and its row join on
+ * equal (list_id, direction, anchor, batch_index): stream rows, datagram rows,
+ * and the scouting rows whose records carry WZ_DISSECT_ORIGIN_SCOUTING. On a
+ * stream row `anchor` is NOT `message_at`: the record's anchor names the
+ * framing unit's length prefix, `message_at` the message's first byte.
+ *
+ * `max_messages_shown_per_flow`, `selector` and `declarations` are exactly
+ * wz_dissect_pcap_fields_where_limited's, refused the same way. The limit
+ * preset is not an argument: it is the handle's, chosen at open.
+ *
+ * `bytes`/`len` are the capture container the handle was read from -- by
+ * wz_dissect_pcap_replay, or the prefix given to wz_dissect_live_follow.
+ * Datagram rows are walked from a second read of their packets, because this
+ * reader keeps no copy of a pushed packet, and that read needs the container.
+ * A handle fed by wz_dissect_live_push has none: pass NULL, 0 and the document
+ * renders no datagram rows and says so with "capture_reread":false.
+ *
+ * `h` is not const. A list not drained yet has no id, so the ids are settled
+ * first by the reconciliation a drain performs, handing out no record: the next
+ * wz_dissect_live_drain returns exactly what it would have, under the same ids.
+ * Nothing decoded changes; wz_dissect_live_end is still the only act that
+ * would.
+ *
+ * @bound max_messages_shown_per_flow trims-output -- the DOCUMENT is
+ * shortened after the walk; `shown`/`omitted` report it. */
+int wz_dissect_live_fields_where(wz_dissect_live *h,
+                                 const unsigned char *bytes, size_t len,
+                                 size_t max_messages_shown_per_flow,
+                                 const char *selector,
+                                 const char *declarations, char **out);
 
 /* Release a live handle. Null is a no-op, so your cleanup path needs no
  * guard of its own -- the same rule wz_dissect_string_free follows, and the

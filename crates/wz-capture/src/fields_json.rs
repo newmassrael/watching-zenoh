@@ -141,7 +141,62 @@ pub fn fields_json_where(
         declarations,
         &grouping,
         Some(&verdicts),
+        None,
     )
+}
+
+/// ZA-3214 ① — the selector's document, with each row carrying the
+/// COORDINATES of a record door that shares this dissection.
+///
+/// # The join this makes possible
+///
+/// A consumer whose message list stands on drained records and whose detail
+/// comes from this document had to line the two up itself, and it could only
+/// do that by direction and anchor order on a capture with one flow: the
+/// document named flows by their 5-tuple and the records by numbers the handle
+/// minted, and nothing published said which was which. So on a capture with
+/// several flows, or with datagram rows, the detail simply did not attach.
+///
+/// With coordinates, every row carries `list_id`, `anchor` and `batch_index` —
+/// the three fields that identify a record within its handle — so a record
+/// and its row are joined on equal values rather than on a guess. The
+/// coordinates come from `coordinates`, which is the handle's own numbering; a
+/// list it has no id for gets no coordinate keys rather than an invented one.
+///
+/// Everything else is [`fields_json_where`], by the same function.
+pub fn fields_json_where_coordinated(
+    d: &crate::Dissection,
+    capture: &[u8],
+    max_messages_shown_per_flow: Option<usize>,
+    declarations: Option<&Declarations<'_>>,
+    filter: &crate::filter::Filter,
+    coordinates: &dyn RowCoordinates,
+) -> String {
+    let grouping = crate::node::session_grouping(d);
+    let verdicts = crate::payload::payloads_grouped(d, filter, &grouping);
+    fields_json_selected(
+        d,
+        capture,
+        max_messages_shown_per_flow,
+        declarations,
+        &grouping,
+        Some(&verdicts),
+        Some(coordinates),
+    )
+}
+
+/// ZA-3214 ① — the numbering a record door gave the lists of one dissection.
+///
+/// A trait rather than a map handed in, because the numbering is the CALLER's:
+/// this crate renders rows and has no business minting the ids a handle in
+/// another crate publishes. The two questions are the two kinds of list a row
+/// can come from.
+pub trait RowCoordinates {
+    /// The id for the list at `list` in `Dissection::message_lists_with_origin`
+    /// order, or `None` for a list the caller does not number.
+    fn list_id(&self, list: usize) -> Option<u64>;
+    /// The id for `flow`'s SCOUTING list, which is not in that enumeration.
+    fn scouting_list_id(&self, flow: &crate::link::FlowKey) -> Option<u64>;
 }
 
 /// R2458 (open-debt item 703) — the same document, against a grouping the
@@ -169,6 +224,7 @@ pub fn fields_json_grouped(
         declarations,
         grouping,
         None,
+        None,
     )
 }
 
@@ -185,6 +241,7 @@ fn fields_json_selected(
     declarations: Option<&Declarations<'_>>,
     grouping: &crate::node::SessionGrouping,
     verdicts: Option<&crate::payload::PayloadCensus>,
+    coordinates: Option<&dyn RowCoordinates>,
 ) -> String {
     // A map with no rules answers `NoRules` for every message, so it renders
     // nothing either way -- folded here so the row renderers ask one question
@@ -233,7 +290,13 @@ fn fields_json_selected(
             // and it is what the verdict map is keyed by: a TCP flow and a UDP
             // flow may carry the identical 5-tuple, so a flow key would read
             // one list's verdicts onto the other's rows.
-            RowSelection::of(verdicts, lists.stream.get(i).copied()),
+            RowTags {
+                selection: RowSelection::of(verdicts, lists.stream.get(i).copied()),
+                // ZA-3214 ① — keyed by the SAME list index, for the same
+                // reason: the index is what names this list unambiguously.
+                list_id: coordinates.and_then(|c| c.list_id(*lists.stream.get(i)?)),
+                scouting_list_id: None,
+            },
             &mut out,
         );
     }
@@ -259,7 +322,11 @@ fn fields_json_selected(
             // one whose rows this producer renders. The sub-lists folded after
             // this call are the ones the header says the document does not
             // show, so they have no rows here to carry a verdict.
-            RowSelection::of(verdicts, lists.datagram.get(i).copied()),
+            RowTags {
+                selection: RowSelection::of(verdicts, lists.datagram.get(i).copied()),
+                list_id: coordinates.and_then(|c| c.list_id(*lists.datagram.get(i)?)),
+                scouting_list_id: coordinates.and_then(|c| c.scouting_list_id(&flow.flow)),
+            },
             &mut out,
         );
         // R2460 (open-debt item 705) — the flow's QUIC sub-lists, folded after
@@ -430,7 +497,7 @@ fn push_stream_flow(
     reread: Option<&Reread>,
     cap: Option<usize>,
     declarations: Option<&Declarations<'_>>,
-    selection: Option<RowSelection<'_>>,
+    tags: RowTags<'_>,
     out: &mut String,
 ) {
     out.push_str("{\"flow\":");
@@ -492,7 +559,13 @@ fn push_stream_flow(
             dir_name(frame.direction),
             crate::anchor_space_of(frame).name()
         );
-        push_selected(selection, frame, out);
+        push_coordinates(
+            tags.list_id,
+            frame.stream_offset as u64,
+            frame.batch_index as u64,
+            out,
+        );
+        push_selected(tags.selection, frame, out);
         match flow.message_bytes(frame) {
             Err(why) => push_declined(&why, out),
             Ok(bytes) => push_walk(
@@ -529,7 +602,7 @@ fn push_datagram_flow(
     reread: Option<&Reread>,
     cap: Option<usize>,
     declarations: Option<&Declarations<'_>>,
-    selection: Option<RowSelection<'_>>,
+    tags: RowTags<'_>,
     out: &mut String,
 ) {
     out.push_str("{\"flow\":");
@@ -591,7 +664,8 @@ fn push_datagram_flow(
             dir_name(frame.direction),
             crate::anchor_space_of(frame).name()
         );
-        push_selected(selection, frame, out);
+        push_coordinates(tags.list_id, index as u64, frame.batch_index as u64, out);
+        push_selected(tags.selection, frame, out);
         push_walk(
             RowWalk {
                 bytes: message,
@@ -665,7 +739,11 @@ fn push_datagram_flow(
         // the map and answer `unjudged` by accident. Writing the word is the
         // same answer with its reason attached, and it cannot become wrong if
         // the map's keying changes.
-        if selection.is_some() {
+        // ZA-3214 ① — the scouting list's own id: this row joins a record the
+        // record door drains with ORIGIN_SCOUTING, whose batch index is 0
+        // because a scouting message is never batched.
+        push_coordinates(tags.scouting_list_id, index as u64, 0, out);
+        if tags.selection.is_some() {
             RowVerdict::Unjudged.push(out);
         }
         push_walk(
@@ -2010,6 +2088,38 @@ impl<'a> RowSelection<'a> {
             list: list?,
             census: census?,
         })
+    }
+}
+
+/// ZA-3214 ① — everything a row producer writes about a row BESIDES its walk:
+/// the selector's verdict and the record coordinates.
+///
+/// One value, for the reason [`RowSelection`] is one value: a producer's
+/// arguments were at clippy's bound, and each thing that joins a row to
+/// something outside this document is the same kind of input. `list_id` is the
+/// flow's own list; `scouting_list_id` is its scouting list, which only a
+/// datagram flow has.
+#[derive(Clone, Copy)]
+struct RowTags<'a> {
+    selection: Option<RowSelection<'a>>,
+    list_id: Option<u64>,
+    scouting_list_id: Option<u64>,
+}
+
+/// ZA-3214 ① — `"list_id":L,"anchor":A,"batch_index":B,` for a row whose list
+/// the caller numbered, and nothing for one it did not.
+///
+/// The three fields are the record's (`list_id`, `anchor`, `batch_index`) with
+/// the record's meanings, so a consumer joins on equal values. `anchor` is
+/// written even where the row already carries `message_at` or `packet`: it is
+/// the record's coordinate, which for a stream is the framing unit's LENGTH
+/// PREFIX and not the message's first byte, so it is not the same number.
+fn push_coordinates(list_id: Option<u64>, anchor: u64, batch_index: u64, out: &mut String) {
+    if let Some(list_id) = list_id {
+        let _ = write!(
+            out,
+            "\"list_id\":{list_id},\"anchor\":{anchor},\"batch_index\":{batch_index},"
+        );
     }
 }
 
@@ -3663,6 +3773,20 @@ mod tests {
         );
     }
 
+    /// ZA-3214 ① — a numbering that numbers every list, standing in for a live
+    /// handle's in a test that only needs the coordinate keys to appear.
+    struct EveryListNumbered;
+
+    impl RowCoordinates for EveryListNumbered {
+        fn list_id(&self, list: usize) -> Option<u64> {
+            Some(list as u64)
+        }
+
+        fn scouting_list_id(&self, _flow: &crate::link::FlowKey) -> Option<u64> {
+            Some(u64::MAX)
+        }
+    }
+
     /// R2175 (open-debt item 552) — THE PAYLOAD PLANE OF THIS DOCUMENT,
     /// RENDERED FROM ITS OWN TYPES RATHER THAN FROM WHATEVER A CAPTURE REACHED.
     ///
@@ -3711,12 +3835,18 @@ mod tests {
         // declared `selected` and this population never rendered a row that
         // carries it, so the equality below failed from the round that
         // declared it; a selector is the only input that emits the key.
-        rendered.push(fields_json_where(
+        let selector = crate::filter::Filter::parse("bytes > 6").expect("a selector");
+        rendered.push(fields_json_where(&d, &file, None, Some(&run), &selector));
+        // ZA-3214 ① — and through the live door's coordinated rendering, the
+        // only one that writes `list_id`, `anchor` and `batch_index` (revision
+        // 15). Without it those keys would be declared and pinned by nothing.
+        rendered.push(fields_json_where_coordinated(
             &d,
             &file,
             None,
             Some(&run),
-            &crate::filter::Filter::parse("bytes > 6").expect("a selector"),
+            &selector,
+            &EveryListNumbered,
         ));
         let states = PayloadDecoding::all();
         assert_eq!(
@@ -4298,6 +4428,13 @@ mod tests {
         dg.finish();
         let dgfile = crate::pcap::write(1, &[(0, 0, dgram_packet.as_slice())]);
         let dgram = fields_json(&dg, &dgfile, None, None);
+        // ZA-3214 ④ — the selector's document, so `selected` is measured and
+        // not only declared: a selector that matches the capture's key and one
+        // that does not, which between them reach `yes`, `no` and `unjudged`.
+        let hit = crate::filter::Filter::parse("key == demo/temp").expect("parses");
+        let miss = crate::filter::Filter::parse("key == elsewhere/x").expect("parses");
+        let where_hit = fields_json_where(&d, &file, None, None, &hit);
+        let where_miss = fields_json_where(&d, &file, None, None, &miss);
         let census = crate::census_json::census_json(&d);
         let censusl = crate::census_json::census_json(&dl);
         let censusdg = crate::census_json::census_json(&dg);
@@ -4420,19 +4557,64 @@ mod tests {
             &withl,
             &dgram,
             &multilink_fields,
-            &compressed_fields
+            &compressed_fields,
+            &where_hit,
+            &where_miss
         ];
+        // ZA-3214 ① — EVERY capture above through the two other doors as well:
+        // the selector's (rows gain `selected`) and the live door's (rows gain
+        // `selected` and the record coordinates). The optional keys compose
+        // with a word's own shapes independently, so the population has to be
+        // the same product the declaration states — a door rendered over only
+        // some captures would leave some products unmeasured and declared.
+        let every = crate::filter::Filter::parse("").expect("the empty selector");
+        let mut through: Vec<(&Dissection, &[u8], Option<&Declarations<'_>>)> = alloc::vec![
+            (&d, &file[..], Some(&run)),
+            (&d, &file[..], None),
+            (&dl, &filel[..], Some(&run)),
+            (&dg, &dgfile[..], None),
+            (&multilink_d, &multilink_file[..], None),
+            (&compressed_d, &compressed_file[..], None),
+        ];
+        #[cfg(all(feature = "reassembly", feature = "network-codecs"))]
+        through.push((&chain_d, &chain_file[..], None));
+        #[cfg(feature = "reassembly")]
+        through.push((&midsession_d, &midsession_file[..], None));
+        let mut widened: Vec<String> = Vec::new();
+        for (dissection, capture, decl) in through {
+            widened.push(fields_json_where(dissection, capture, None, decl, &every));
+            widened.push(fields_json_where_coordinated(
+                dissection,
+                capture,
+                None,
+                decl,
+                &every,
+                &EveryListNumbered,
+            ));
+        }
+        fields_docs.extend(widened.iter());
+        // ZA-3214 ③ — the selector verdict, over selectors that between them
+        // reach every token class, on both branches.
+        let diagnoses: Vec<String> = [
+            "(key == 'a b') && not size >= 3",
+            "x != 1 || !y < 2 and z > 3 or w <= 4",
+            "key == \"unclosed",
+        ]
+        .into_iter()
+        .map(crate::filter::diagnose_json)
+        .collect();
         #[cfg(all(feature = "reassembly", feature = "network-codecs"))]
         fields_docs.push(&chain_fields);
         #[cfg(feature = "reassembly")]
         fields_docs.push(&midsession_fields);
         fields_docs.extend(arms.iter());
-        let docs: [(&str, Vec<&String>); 2] = [
+        let docs: [(&str, Vec<&String>); 3] = [
             (rev::FIELDS, fields_docs),
             (
                 rev::CENSUS,
                 alloc::vec![&census, &censusl, &censusdg, &interests, &multilink],
             ),
+            (rev::SELECTOR_DIAGNOSE, diagnoses.iter().collect()),
         ];
 
         // ⚠ R2185 — THE DOCUMENTS THIS GATE RENDERS ARE THE DOCUMENTS THAT

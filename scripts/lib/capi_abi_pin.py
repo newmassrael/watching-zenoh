@@ -50,7 +50,7 @@ import subprocess
 import sys
 
 # The pinned pair. Edit BOTH halves deliberately -- see the module doc.
-EXPECTED_VERSION = 17
+EXPECTED_VERSION = 18
 
 # R2108 (open-debt item 525) -- THE RECORD'S LAYOUT, pinned HERE and read from
 # the artifact through `wz_dissect_record_layout`.
@@ -136,6 +136,12 @@ EXPECTED_SYMBOLS = {
     # combinations the container family needs four names for.
     "wz_dissect_live_census",
     "wz_dissect_live_end",
+    # ZA-3214 (ABI 18) — the FIELD DOCUMENT over a live handle, each row
+    # carrying the handle's record coordinates, so rows and drained records
+    # describe one dissection. The memory rule does not move: the document is
+    # a `char*` released by `wz_dissect_string_free`, and the container bytes
+    # are read from a buffer the CALLER holds.
+    "wz_dissect_live_fields_where",
     # R2171 (open-debt item 547) — the door BETWEEN the two families above and
     # the nine document doors below. It hands back the same opaque handle
     # `wz_dissect_live_open` does, so the memory rule does not move with it:

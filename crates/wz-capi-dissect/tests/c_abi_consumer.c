@@ -1581,8 +1581,10 @@ int main(void) {
      * held the words, so a switch over them had nothing to pin.
      * ZA-3215 -- 14: rows gain `sn`, `chain`, `first_byte` and `l2`, flows
      * gain `context`, and the document gains `reassembly` -- verdicts the
-     * session reached per frame and this document had never handed over. */
-    revisioned[2].revision = 14;
+     * session reached per frame and this document had never handed over.
+     * ZA-3214 -- 15: a row can carry a record's `list_id`, `anchor` and
+     * `batch_index`, written by wz_dissect_live_fields_where alone. */
+    revisioned[2].revision = 15;
     revisioned[2].doc = NULL;
     rc = wz_dissect_pcap_fields(pcap, sizeof pcap, 0, &revisioned[2].doc);
     CHECK(rc == WZ_DISSECT_OK, "fields rc=%d", rc);

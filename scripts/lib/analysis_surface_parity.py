@@ -535,6 +535,19 @@ ONLY_CAPI = {
         "above, and it is not double-counted here.",
         (),
     ),
+    # ZA-3214 — the field document over an open handle, rows carrying the
+    # handle's record coordinates. Filed in the round that added the symbol.
+    "the field document of an OPEN handle, joined to its records": (
+        "wz_dissect_live_fields_where",
+        "DELIBERATE, for the reason the live census row above gives. What "
+        "this symbol adds is a JOIN between two outputs of one handle -- "
+        "rows and the 56-byte records -- and the command line emits no "
+        "records to join to: its listing and its field document come out of "
+        "the one dissection it already holds, so the two cannot disagree "
+        "about which row is which. The coordinates are an answer to a "
+        "question only a record consumer has.",
+        (),
+    ),
     "declaring a live feed OVER": (
         "wz_dissect_live_end",
         "DELIBERATE. A terminal run cannot NOT end its feed: every flag "
