@@ -760,7 +760,10 @@ HOST_GATED_CI_TARGETS: dict[str, str] = {
 # R2903 `e4dab13b`, `pico_publisher_on_a_wz_peer_reaches_a_pico_subscriber_on_zenohd`
 # (`routing-peer` + `routing-interest-pending-gc`). 938 + 8 = 946, the value
 # `audit-crossimpl-proof.sh` measured at this round's working tree.
-FOREIGN_ADJUDICATOR_LINKS = 946
+# +1 R2949 `c8021257`, `a_cancellation_token_stops_a_get_identically_on_wz_and_libzenohc`
+# (`api-compat-c`, a first zenoh-c adjudicator for the cancellation plane).
+# 946 + 1 = 947, the value gate 2b measured on R2949's first push attempt.
+FOREIGN_ADJUDICATOR_LINKS = 947
 
 # ── Execution disclosure ────────────────────────────────────────────────────────
 #
