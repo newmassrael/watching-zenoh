@@ -493,27 +493,33 @@ pub unsafe extern "C" fn z_liveliness_get(
         // before `_z_send_n_msg`). The `Z_ERR_CANCELLED` arm is reached when the
         // token was ALREADY cancelled: no Interest goes out and `closure` /
         // `guard` drop on the return, so the C `drop(context)` still reports the
-        // get over. Shared with `z_get` through [`crate::get::CancellableFan`],
-        // so the two planes cannot drift in their cancellation semantics.
+        // get over. Shared with `z_get` through the core cancellation plane
+        // (`wz_capi_core::cancellation`, R2948), so the two planes cannot drift
+        // in their cancellation semantics — including `cancel`'s wait for every
+        // face's callback, which each [`crate::get::FaceReply`] holds open.
         let fan = match &token {
             None => None,
             Some(token) => {
-                let fan = Arc::new(crate::get::CancellableFan::new());
-                let on_cancel = Arc::clone(&fan);
-                if !crate::sync::register_on_cancel(token, move || on_cancel.cancel()) {
+                let Some((fan, registration)) = wz_capi_core::cancellation::register_fan(token)
+                else {
                     return crate::result::Z_ERR_CANCELLED;
-                }
-                Some(fan)
+                };
+                Some((fan, Arc::new(registration)))
             }
         };
+        let registration = fan.as_ref().map(|(_, r)| Arc::clone(r));
+        let fan = fan.map(|(f, _)| f);
         for (session, revised) in state.shared.face_sessions_with_wake() {
-            let per_face = closure.clone();
-            let per_face_gate = gate.clone();
+            let per_face = crate::get::FaceReply {
+                closure: closure.clone(),
+                gate: gate.clone(),
+                _registration: registration.clone(),
+            };
             let issued = session.liveliness_get(
                 ke.clone(),
                 opts,
                 move |view: &dyn wz_runtime_tokio::reply_sink::ReplyView| {
-                    crate::get::fire_reply(&per_face, &per_face_gate, view);
+                    per_face.fire(view);
                 },
                 // Completion is signalled by the pending entry's sink being
                 // DROPPED, which covers a real final, a timeout sweep and a
@@ -545,6 +551,8 @@ pub unsafe extern "C" fn z_liveliness_get(
             revised.notify_one();
         }
         drop(guard);
+        // After `guard`, for the reason `crate::get::fan_get` gives.
+        drop(registration);
         Z_OK
     })
 }

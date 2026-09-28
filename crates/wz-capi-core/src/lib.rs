@@ -53,6 +53,7 @@
 //! the values, so returning one ABI's constant from shared code would be a
 //! wrong-code bug in the other.
 
+pub mod cancellation;
 pub mod codec;
 pub mod drive;
 pub mod encoding_ids;

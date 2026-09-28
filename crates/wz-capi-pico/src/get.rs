@@ -1272,81 +1272,6 @@ pub(crate) fn issue_get(
     fan_get(shared, &keyexpr, &opts, closure, gate, token)
 }
 
-/// The pending registrations one C get made, and the seam a cancelled token
-/// unregisters them through.
-///
-/// R311y575. Two things make this a shared cell rather than a list the fan
-/// builds and then hands over:
-///
-/// * The fan issues ONE query per face, each with its own rid, so cancellation
-///   is a set operation and not a single id.
-/// * Upstream registers the cancellation BEFORE the Query goes out
-///   (`vendor/zenoh-pico/src/net/primitives.c:606-609`), so there is no window
-///   in which a cancelled token leaves a live pending query behind. Mirroring
-///   that ordering across a FAN means the handler must exist before the first
-///   face is issued and be able to stop the loop mid-way — which is what the
-///   `None` state below does.
-pub(crate) struct CancellableFan {
-    /// The UNDO for each registration issued so far, or `None` once the token has
-    /// cancelled. `None` is BOTH "everything issued has been undone" and "issue
-    /// nothing further", which is why one field carries both: a separate
-    /// `cancelled` flag could disagree with the vector under a concurrent
-    /// cancel.
-    ///
-    /// A per-registration CLOSURE rather than a `(session, id)` pair plus a
-    /// discriminator, because the two planes that cancel through this type
-    /// unregister from different registries (`cancel_pending_query` vs
-    /// `cancel_pending_liveliness_get`) and a third would need a third. Each
-    /// caller supplies its own undo, so this type never learns their names.
-    undo: crate::sync::OnCancelSlot,
-}
-
-impl CancellableFan {
-    pub(crate) fn new() -> Self {
-        Self {
-            undo: std::sync::Mutex::new(Some(Vec::new())),
-        }
-    }
-
-    /// Record one face's registration, or report that the token cancelled while
-    /// the fan was running — in which case `undo` is run HERE, since the handler
-    /// that already ran could not have seen this registration.
-    pub(crate) fn record(&self, undo: impl FnOnce() + Send + 'static) -> bool {
-        let mut slot = match self.undo.lock() {
-            Ok(slot) => slot,
-            // A poisoned lock means a handler panicked mid-cancel. Treat the fan
-            // as cancelled: continuing would issue gets nothing can stop.
-            Err(poisoned) => poisoned.into_inner(),
-        };
-        match slot.as_mut() {
-            Some(pending) => {
-                pending.push(Box::new(undo));
-                true
-            }
-            None => {
-                drop(slot);
-                undo();
-                false
-            }
-        }
-    }
-
-    /// Cancel: take the set and run every undo in it.
-    ///
-    /// Called from `z_cancellation_token_cancel`'s handler run, which is outside
-    /// the token's own lock — so the C `drop(context)` a sink drop fires is not
-    /// under it.
-    pub(crate) fn cancel(&self) {
-        let taken = match self.undo.lock() {
-            Ok(mut slot) => slot.take(),
-            Err(poisoned) => poisoned.into_inner().take(),
-        };
-        for undo in taken.into_iter().flatten() {
-            undo();
-        }
-    }
-}
-
 /// Fan one C get across every connected face, returning `Z_OK`.
 ///
 /// The C thread holds its own `Arc` clone (`guard`) for the whole loop. That is
@@ -1381,12 +1306,14 @@ fn fan_get(
     // cancellation under the session mutex, THEN `_z_send_n_msg`). Registering
     // afterwards would leave a window in which a token cancelled mid-fan left
     // live pending queries behind.
+    //
+    // R2948 — the registration is shared by every per-face callback (see
+    // [`FaceReply`]), so it drops only when the LAST of them does, and the
+    // token's `cancel` waits for that, as pico's `_z_sync_group_wait` does.
     let fan = match &token {
         None => None,
         Some(token) => {
-            let fan = Arc::new(CancellableFan::new());
-            let on_cancel = Arc::clone(&fan);
-            if !crate::sync::register_on_cancel(token, move || on_cancel.cancel()) {
+            let Some((fan, registration)) = wz_capi_core::cancellation::register_fan(token) else {
                 // ALREADY CANCELLED. Upstream's
                 // `_z_cancellation_token_add_on_cancel_handler` answers
                 // `Z_ERR_CANCELLED` here, `_z_query` unregisters the pending
@@ -1398,13 +1325,18 @@ fn fan_get(
                 // correctly reported over, exactly as upstream's
                 // `_z_unregister_pending_query` rollback reports it.
                 return crate::result::Z_ERR_CANCELLED;
-            }
-            Some(fan)
+            };
+            Some((fan, Arc::new(registration)))
         }
     };
+    let registration = fan.as_ref().map(|(_, r)| Arc::clone(r));
+    let fan = fan.map(|(f, _)| f);
     for (session, revised) in shared.face_sessions_with_wake() {
-        let per_face = closure.clone();
-        let per_face_gate = gate.clone();
+        let per_face = FaceReply {
+            closure: closure.clone(),
+            gate: gate.clone(),
+            _registration: registration.clone(),
+        };
         // Only `on_reply` carries the `Arc`. `on_final` needs no body at all:
         // completion is signalled by the pending entry's sink being DROPPED
         // (which drops this closure and releases the clone), and that happens on
@@ -1414,7 +1346,7 @@ fn fan_get(
         let issued = session.query(
             keyexpr,
             opts.clone(),
-            move |view: &dyn ReplyView| fire_reply(&per_face, &per_face_gate, view),
+            move |view: &dyn ReplyView| per_face.fire(view),
             |_rid| {},
         );
         // R311y575 — record this face's rid against the cancellation set before
@@ -1455,7 +1387,39 @@ fn fan_get(
         revised.notify_one();
     }
     drop(guard);
+    // After `guard`, explicitly: locals drop in REVERSE declaration order, so
+    // left implicit the registration would go first and a concurrent `cancel`
+    // could return before the zero-face path's C `drop(context)` had run.
+    drop(registration);
     Z_OK
+}
+
+/// R2948 — what each face's reply callback owns.
+///
+/// A struct rather than three captured locals because the DROP ORDER is the
+/// contract: fields drop in declaration order, so the C closure clone goes
+/// before the token registration, and a `cancel` waiting on the registration
+/// cannot return while this face's share of the C `drop(context)` is still
+/// pending. Captured locals of a closure promise no such order.
+///
+/// ⚠ The callback must name the WHOLE struct — hence [`Self::fire`] taking
+/// `&self`. A closure that wrote `per_face.closure` and `per_face.gate`
+/// captures only those two fields (Rust 2021 disjoint capture), so the
+/// registration was dropped at the end of the loop iteration, removing its
+/// handler before any cancel could run it. The pico cancellation differential
+/// test's legC measured exactly that.
+pub(crate) struct FaceReply {
+    pub(crate) closure: Arc<CReplyClosure>,
+    pub(crate) gate: Arc<ReplyGate>,
+    pub(crate) _registration: Option<Arc<wz_capi_core::cancellation::Registration>>,
+}
+
+impl FaceReply {
+    /// Deliver one reply. Taking `&self` is what makes a callback that calls it
+    /// capture the whole struct, registration included.
+    pub(crate) fn fire(&self, view: &dyn ReplyView) {
+        fire_reply(&self.closure, &self.gate, view);
+    }
 }
 
 /// Send a distributed query (pico `z_get`). Consumes the moved closure and the
