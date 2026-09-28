@@ -163,6 +163,11 @@ fn main() -> ExitCode {
     // parse. Handled HERE, ahead of every mode branch, because it can select
     // the mode. The expansion is owned by `args::expand_stock_zenoh_config`;
     // this is only where it is applied and reported.
+    //
+    // ZA-3343 — whether this node is DESCRIBED by a document, read before the
+    // expansion rebinds `rest`. See the no-action refusal below for what it
+    // decides.
+    let from_document = rest.iter().any(|a| a == "--config");
     #[cfg(feature = "zenoh-config")]
     let expanded;
     #[cfg(feature = "zenoh-config")]
@@ -329,6 +334,18 @@ fn main() -> ExitCode {
     // startup connect phase reads it in every build.
     #[cfg(not(any(feature = "routing-peer", feature = "router-hat-router")))]
     let _ = (connect_exit, listen_timeout, listen_exit, listen_retry);
+    // R2949 — the peer's start window, parsed in every build for the same
+    // reason and read by the `--peer` arm alone: upstream's router and client
+    // do not wait for their peers.
+    let start_window = match crate::args::parse_start_window(rest) {
+        Ok(window) => window,
+        Err(message) => {
+            eprintln!("wz-ap-demo: {message}");
+            return ExitCode::from(2);
+        }
+    };
+    #[cfg(not(feature = "routing-peer"))]
+    let _ = start_window;
 
     // R311qa — `--router <addr>` is the router run-mode. R2886 (open-debt item
     // 824): with `routing-router` the flag never reaches here, because `main`
@@ -816,6 +833,7 @@ fn main() -> ExitCode {
                         connect_exit,
                         wz::runtime_tokio::startup_phase::PhasePolicy::CONNECT_MESH_DEFAULT,
                     ),
+                    start_window,
                     listen_phase: crate::runner::resolve_phase(
                         listen_timeout,
                         listen_exit,
@@ -1906,7 +1924,15 @@ fn main() -> ExitCode {
         },
         None => 100,
     };
-    if key_opt.is_none()
+    // ZA-3343 — the refusal guards a TYPED command line against mis-wiring: an
+    // argv that names a role and no work is more likely a dropped flag than an
+    // intent. A node DESCRIBED by a `--config` document is not that: a document
+    // with a `mode` and endpoints and nothing else is a whole node, and zenohd
+    // runs it as one — a client that holds its session until signalled. Such a
+    // run drives the session through the same steady state as any other and
+    // ends on the shutdown signal.
+    if !from_document
+        && key_opt.is_none()
         && publish_opt.is_none()
         && delete_opt.is_none()
         && queryable_opt.is_none()

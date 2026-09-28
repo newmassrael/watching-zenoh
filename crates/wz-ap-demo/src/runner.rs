@@ -4230,6 +4230,13 @@ pub(crate) struct PeerOpts {
     /// is known. A malformed value must still ABORT rather than degrade to the
     /// default, which is why the parse stays in `main`.
     pub connect_phase: PhasePolicy,
+    /// R2949 — `scouting/delay` under `open/return_conditions/connect_scouted`:
+    /// how long this peer's APPLICATION waits for its dialled peers before it
+    /// starts, or `None` for no wait. Upstream's `start_peer` holds the session
+    /// open back for exactly this (`zenoh/src/net/runtime/orchestrator.rs` @
+    /// `&& tokio::time::timeout(delay, self.state.start_conditions.notified())`),
+    /// and the demo's application is what runs after that open.
+    pub start_window: Option<std::time::Duration>,
     /// R2159 (open-debt item 229) — `listen/{timeout_ms,exit_on_failure}`: the
     /// same decision for the BIND phase, whose upstream default (`0` / `true`)
     /// is one attempt and a fatal failure.
@@ -4319,6 +4326,8 @@ async fn run_peer_until(
     let mut connect_watch =
         ConnectPhaseWatch::new(opts.connect_phase, opts.connect_retry, dial_targets.len());
     let connect_faces_up = connect_watch.witness();
+    // R2949 — counted here, before the targets move into the loop's sources.
+    let dial_target_count = dial_targets.len();
     log::info!(
         "wz-ap-demo peer: {}",
         describe_phase("CONNECT", opts.connect_phase, opts.connect_retry)
@@ -5366,6 +5375,16 @@ async fn run_peer_until(
     // shutdown-latched read would miss it — the log line must be written while the
     // client is still attached so it survives in the captured stderr.
     let mut announced_client_qabl = false;
+    // R2949 — the START WINDOW: the application holds its first tick until
+    // every dialled peer is up, or `scouting/delay` has passed, as upstream's
+    // `start_peer` holds its open back. No dial target, or `connect_scouted`
+    // false, is no wait. The face count is `ConnectPhaseWatch`'s witness, with
+    // the same approximation that type's doc states.
+    let start_gate = opts
+        .start_window
+        .filter(|_| dial_target_count > 0)
+        .map(|w| tokio::time::Instant::now() + w);
+    let mut app_started = start_gate.is_none();
     let summary = loop {
         tokio::select! {
             done = &mut loop_fut => break done,
@@ -5384,6 +5403,19 @@ async fn run_peer_until(
                 }
             }
             _ = app_tick.tick() => {
+                if !app_started {
+                    let all_up = connect_watch.faces_up.get() >= dial_target_count;
+                    let window_passed =
+                        start_gate.is_some_and(|at| tokio::time::Instant::now() >= at);
+                    if !all_up && !window_passed {
+                        continue;
+                    }
+                    app_started = true;
+                    log::info!(
+                        "wz-ap-demo peer: START WINDOW {}",
+                        if all_up { "met (every dialled peer up)" } else { "passed" }
+                    );
+                }
                 peak_nodes = peak_nodes.max(forwarder.node_count());
                 peak_edges = peak_edges.max(forwarder.edge_count());
                 // Ingest witness: this peer decoded a neighbour's link-state flood
@@ -9619,6 +9651,7 @@ mod peer_quic_cert_tests {
             // is pre-push gate 2h, which R2153 added for exactly the gap
             // between compiling a test and running it.
             connect_phase: wz::runtime_tokio::startup_phase::PhasePolicy::CONNECT_MESH_DEFAULT,
+            start_window: None,
             listen_phase: wz::runtime_tokio::startup_phase::PhasePolicy::LISTEN_DEFAULT,
             listen_retry: wz::runtime_tokio::retry_period::RetryPolicy::ZENOH_DEFAULT,
             // R2133 — R2112 added `PeerOpts.timestamping` and did not reach
@@ -9752,6 +9785,7 @@ mod peer_failfast_tests {
             // is pre-push gate 2h, which R2153 added for exactly the gap
             // between compiling a test and running it.
             connect_phase: wz::runtime_tokio::startup_phase::PhasePolicy::CONNECT_MESH_DEFAULT,
+            start_window: None,
             listen_phase: wz::runtime_tokio::startup_phase::PhasePolicy::LISTEN_DEFAULT,
             listen_retry: wz::runtime_tokio::retry_period::RetryPolicy::ZENOH_DEFAULT,
             // R2133 — R2112 added `PeerOpts.timestamping` and did not reach

@@ -166,6 +166,49 @@ fn a_client_without_a_connect_budget_dials_once() {
     );
 }
 
+/// ZA-3343 — a client DOCUMENT that asks for no application work is a whole
+/// node, as zenohd runs it: it connects and holds its session. Spawned WITHOUT
+/// [`argv`], whose `--key` is exactly what hid this — every other leg here
+/// names an action, so the demo's no-action refusal was never reached.
+#[cfg(feature = "zenoh-config")]
+#[test]
+fn a_client_document_with_no_action_flag_is_a_whole_node() {
+    struct Dir(std::path::PathBuf);
+    impl Drop for Dir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+    let locator = late_locator();
+    let dir = Dir(std::env::temp_dir().join(format!(
+        "wz-ap-demo-bare-client-document-{}",
+        std::process::id()
+    )));
+    std::fs::create_dir_all(&dir.0).expect("a directory of this test's own");
+    let path = dir.0.join("client.json5");
+    std::fs::write(
+        &path,
+        format!(
+            r#"{{ mode: "client",
+                  connect: {{ endpoints: ["{locator}"], timeout_ms: -1,
+                              retry: {{ period_init_ms: 100, period_max_ms: 200 }} }},
+                  scouting: {{ multicast: {{ enabled: false }} }} }}"#
+        ),
+    )
+    .expect("the config file is written");
+    let client = vec![String::from("--config"), path.display().to_string()];
+    let client_node = Node::spawn(&client);
+    std::thread::sleep(LISTENER_LATE_BY);
+    let _listener = Node::spawn(&argv(&["--listen", &locator]));
+    let (established, seen) = client_node.watch_for(ESTABLISHED, DEADLINE);
+    assert!(
+        established,
+        "a client document with no action flag must still stand as a node\n\
+         --- transcript ---\n{}",
+        seen.join("\n")
+    );
+}
+
 /// From a FILE — the consumer's own case: a client document carrying
 /// `connect/timeout_ms: -1`.
 #[cfg(feature = "zenoh-config")]

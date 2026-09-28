@@ -196,6 +196,135 @@ fn a_client_that_states_exit_on_failure_false_still_fails_its_open() {
     unsafe { close_session(session) };
 }
 
+/// R2949 — a PEER connects to EVERY endpoint, each as a face of its own:
+/// a put from either listener reaches the peer's one subscription.
+#[test]
+fn a_peer_connects_to_every_endpoint() {
+    let (port_a, port_b) = (free_port(), free_port());
+    let SendSession(a) = listen_later(port_a, Duration::ZERO)
+        .join()
+        .expect("listener a");
+    let SendSession(b) = listen_later(port_b, Duration::ZERO)
+        .join()
+        .expect("listener b");
+    // SAFETY: fresh config and session.
+    let (rc, session) = unsafe {
+        open_with(&[
+            ("mode", String::from("\"peer\"")),
+            (
+                "connect/endpoints",
+                format!("[\"tcp/127.0.0.1:{port_a}\", \"tcp/127.0.0.1:{port_b}\"]"),
+            ),
+        ])
+    };
+    assert_eq!(rc, Z_OK);
+    // SAFETY: the session is live.
+    let (hits, ctx) = unsafe { count_samples(&session) };
+    // SAFETY: listener a is live.
+    assert!(
+        unsafe { put_until_it_arrives(&a, &hits) },
+        "endpoint a carried nothing"
+    );
+    hits.store(0, Ordering::SeqCst);
+    // SAFETY: listener b is live.
+    assert!(
+        unsafe { put_until_it_arrives(&b, &hits) },
+        "endpoint b carried nothing: the peer held one face, not one per endpoint"
+    );
+    // SAFETY: all three sessions are live; `ctx` is freed after its session.
+    unsafe {
+        close_session(session);
+        close_session(a);
+        close_session(b);
+        drop(Box::from_raw(ctx));
+    }
+}
+
+/// R2949 — an endpoint's `#exit_on_failure=true` tail makes ITS failure end a
+/// peer's open, over the peer's default `false`. The same endpoint without the
+/// tail is stepped over and the open comes up. `timeout_ms: 0` makes each one
+/// attempt, so the arm the tail picks is the whole difference.
+#[test]
+fn an_endpoint_exit_on_failure_tail_decides_a_peer_open() {
+    let port = free_port();
+    // SAFETY: fresh configs and sessions.
+    let (strict, s) = unsafe {
+        open_with(&[
+            ("mode", String::from("\"peer\"")),
+            (
+                "connect/endpoints",
+                format!("[\"tcp/127.0.0.1:{port}#exit_on_failure=true\"]"),
+            ),
+            ("connect/timeout_ms", String::from("0")),
+        ])
+    };
+    let (lenient, l) = unsafe {
+        open_with(&[
+            ("mode", String::from("\"peer\"")),
+            ("connect/endpoints", endpoint(port)),
+            ("connect/timeout_ms", String::from("0")),
+        ])
+    };
+    assert_eq!(
+        strict, Z_ENETWORK,
+        "the tail made this endpoint's failure fatal"
+    );
+    assert_eq!(
+        lenient, Z_OK,
+        "without the tail a peer steps over the failure"
+    );
+    // SAFETY: a gravestone and a live session, both owned here.
+    unsafe {
+        close_session(s);
+        close_session(l);
+    }
+}
+
+/// R2949 — the start window is CONFIG: `connect_scouted: false` returns the
+/// open at once, and `scouting/delay` sets how long it waits otherwise.
+#[test]
+fn the_start_window_follows_the_config() {
+    let port = free_port();
+    let started = Instant::now();
+    // SAFETY: fresh config and session.
+    let (rc, no_wait) = unsafe {
+        open_with(&[
+            ("mode", String::from("\"peer\"")),
+            ("connect/endpoints", endpoint(port)),
+            (
+                "open/return_conditions/connect_scouted",
+                String::from("false"),
+            ),
+        ])
+    };
+    assert_eq!(rc, Z_OK);
+    assert!(
+        started.elapsed() < Duration::from_millis(300),
+        "connect_scouted false must not wait: {:?}",
+        started.elapsed()
+    );
+    let started = Instant::now();
+    // SAFETY: fresh config and session.
+    let (rc, long_wait) = unsafe {
+        open_with(&[
+            ("mode", String::from("\"peer\"")),
+            ("connect/endpoints", endpoint(port)),
+            ("scouting/delay", String::from("1200")),
+        ])
+    };
+    assert_eq!(rc, Z_OK);
+    let waited = started.elapsed();
+    assert!(
+        waited >= Duration::from_millis(1150) && waited < Duration::from_secs(4),
+        "scouting/delay 1200 must set the window: {waited:?}"
+    );
+    // SAFETY: both sessions are live and owned here.
+    unsafe {
+        close_session(no_wait);
+        close_session(long_wait);
+    }
+}
+
 /// R2948 — a config naming no `mode` is a PEER, zenoh's default: with nothing
 /// listening it opens after the start window rather than failing on one
 /// attempt as a client would.

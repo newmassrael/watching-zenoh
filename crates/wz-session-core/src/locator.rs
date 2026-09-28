@@ -579,6 +579,11 @@ pub struct LocatorRetry {
     pub period_max_ms: Option<u64>,
     /// `#retry_period_increase_factor=<f>`, held as bits (see the type doc).
     period_increase_factor_bits: Option<u64>,
+    /// R2949 — `#exit_on_failure=<true|false>`: whether a failure on THIS
+    /// endpoint ends the open, over the global `connect/exit_on_failure`.
+    /// Read by a peer's connect, which forks on it per endpoint; a client's
+    /// never reads it, as upstream's single-link connect does not.
+    pub exit_on_failure: Option<bool>,
 }
 
 impl LocatorRetry {
@@ -596,6 +601,7 @@ impl LocatorRetry {
         self.period_init_ms.is_none()
             && self.period_max_ms.is_none()
             && self.period_increase_factor_bits.is_none()
+            && self.exit_on_failure.is_none()
     }
 }
 
@@ -794,18 +800,17 @@ const LOCATOR_MCAST_JOIN_KEY: &str = "join";
 /// moves an endpoint string between the two implementations unchanged, which is
 /// the whole point of honouring the span.
 ///
-/// ⚠ THE FOURTH KEY UPSTREAM READS THERE, `exit_on_failure`, IS DELIBERATELY
-/// NOT PARSED HERE, and the reason is that parsing it would be worse than
-/// leaving it: its consumer is the STARTUP-phase seam, which lives in
-/// `wz-runtime-tokio`'s `startup_phase` module and which this locator never
-/// reaches, so a parsed value would sit unread while the tail LOOKED honoured.
-/// It stays the named remainder of this residual rather than a field with no
-/// reader. (Named as a CRATE rather than written `crate::startup_phase`: this
-/// crate has no such module, and a code span is not resolved by rustdoc, so
-/// the wrong path would have read as true and failed nothing.)
+/// THE FOURTH KEY UPSTREAM READS THERE, `exit_on_failure`, was deliberately
+/// left unparsed until R2949, for a reason that held then: its consumer is the
+/// STARTUP-phase seam (`wz-runtime-tokio`'s `startup_phase` module), which had
+/// no per-endpoint reader, so a parsed value would have sat unread while the
+/// tail LOOKED honoured. R2949 gave it that reader (`endpoint_policy`, which a
+/// peer's connect forks on), and it is parsed below with the other three.
 const LOCATOR_RETRY_PERIOD_INIT_MS_KEY: &str = "retry_period_init_ms";
 const LOCATOR_RETRY_PERIOD_MAX_MS_KEY: &str = "retry_period_max_ms";
 const LOCATOR_RETRY_PERIOD_INCREASE_FACTOR_KEY: &str = "retry_period_increase_factor";
+/// R2949 — the fourth field `get_retry_config` reads off the tail.
+const LOCATOR_EXIT_ON_FAILURE_KEY: &str = "exit_on_failure";
 
 /// zenoh `Metadata::RELIABILITY` metadata key
 /// (`zenoh-protocol/src/core/endpoint.rs:196`).
@@ -1236,12 +1241,27 @@ fn parse_retry(config: &str) -> Result<Option<Box<LocatorRetry>>, LocatorParseEr
             config,
             LOCATOR_RETRY_PERIOD_INCREASE_FACTOR_KEY,
         )?,
+        exit_on_failure: parse_config_bool(config, LOCATOR_EXIT_ON_FAILURE_KEY)?,
     };
     Ok(if parsed.is_empty() {
         None
     } else {
         Some(Box::new(parsed))
     })
+}
+
+/// R2949 — `key=<true|false>` from the CONFIG span. Refused otherwise, as its
+/// numeric siblings refuse a value that does not parse.
+fn parse_config_bool(config: &str, key: &'static str) -> Result<Option<bool>, LocatorParseError> {
+    match lookup_param(config, key).filter(|v| !v.is_empty()) {
+        None => Ok(None),
+        Some("true") => Ok(Some(true)),
+        Some("false") => Ok(Some(false)),
+        Some(value) => Err(LocatorParseError::BadConfigValue {
+            key,
+            value: value.to_string(),
+        }),
+    }
 }
 
 /// `key=<u64>` from the CONFIG span.
@@ -2484,18 +2504,25 @@ mod tests {
     }
 
     #[test]
-    fn exit_on_failure_stays_an_unknown_key_here_and_says_so() {
-        // THE NAMED REMAINDER, pinned so a later round cannot mistake silence
-        // for coverage: upstream reads a fourth key off this span, and its
-        // consumer in wz is the startup-phase seam rather than the re-dial one.
-        // Parsing it here would leave a field no code reads while the tail
-        // looked honoured, so it stays an unknown key -- dropped, exactly like
-        // any other.
-        let p = parse_locator("tcp/1.2.3.4:7447#exit_on_failure=true")
-            .expect("an unknown key is not an error");
-        assert!(
-            p.retry.is_none(),
-            "exit_on_failure must NOT be silently collected into the retry set"
+    fn exit_on_failure_is_read_now_that_the_peer_connect_forks_on_it() {
+        // This test used to pin the OPPOSITE ("stays an unknown key"), and its
+        // reason was right for its time: parsing the key with no reader would
+        // have left the tail looking honoured. R2949 gave it the reader it
+        // named -- the startup-phase seam, `endpoint_policy`, which a peer's
+        // connect forks on per endpoint -- so the key is collected now.
+        let p = parse_locator("tcp/1.2.3.4:7447#exit_on_failure=true").expect("parses");
+        assert_eq!(
+            p.retry.as_deref().and_then(|r| r.exit_on_failure),
+            Some(true)
+        );
+        let e = parse_locator("tcp/1.2.3.4:7447#exit_on_failure=maybe").expect_err("refused");
+        assert_eq!(
+            e,
+            LocatorParseError::BadConfigValue {
+                key: "exit_on_failure",
+                value: "maybe".to_string(),
+            },
+            "a value that is not a bool is refused, as its numeric siblings are"
         );
     }
 

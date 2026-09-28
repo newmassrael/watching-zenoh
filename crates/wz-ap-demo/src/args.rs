@@ -1550,6 +1550,48 @@ pub(crate) fn expand_stock_zenoh_config_for_build(
             None => exp.record("connect/exit_on_failure", KeyEffect::AlreadyTheBehaviour),
         }
     }
+    // R2949 — the peer's START WINDOW. Upstream's `start_peer` alone waits for
+    // its peers (a router's and a client's start do not), so the precondition
+    // is a `--peer` run, typed or supplied by the file.
+    let peer_run = exp
+        .rest
+        .iter()
+        .chain(exp.added.iter())
+        .any(|a| a == "--peer");
+    let not_a_peer_run = (!peer_run).then_some(KeyEffect::WithheldFromThisRun(
+        "only a peer's startup waits for its peers",
+    ));
+    if named("scouting/delay") {
+        let blocked = no_sink("scouting/delay").or(not_a_peer_run);
+        match cfg.scouting_delay_ms {
+            Some(ms) => {
+                exp.pair(
+                    "scouting/delay",
+                    "--scouting-delay",
+                    ms.to_string(),
+                    blocked,
+                );
+            }
+            None => exp.record("scouting/delay", KeyEffect::AlreadyTheBehaviour),
+        }
+    }
+    if named("open/return_conditions/connect_scouted") {
+        let blocked = no_sink("open/return_conditions/connect_scouted").or(not_a_peer_run);
+        match cfg.open_connect_scouted {
+            Some(scouted) => {
+                exp.pair(
+                    "open/return_conditions/connect_scouted",
+                    "--connect-scouted",
+                    scouted.to_string(),
+                    blocked,
+                );
+            }
+            None => exp.record(
+                "open/return_conditions/connect_scouted",
+                KeyEffect::AlreadyTheBehaviour,
+            ),
+        }
+    }
     if named("listen/retry") {
         let blocked = no_sink("listen/retry").or(not_a_mesh_run);
         match cfg.listen_retry {
@@ -2786,6 +2828,20 @@ pub(crate) const ARGV_ONLY_KIND_LEDGER: &[(&str, &str, &str)] = &[
     ),
     // ── (2) no frame field carries it ───────────────────────────────────
     (
+        "scouting/delay",
+        KIND_OFF_WIRE,
+        "expands to `--scouting-delay`. How long THIS peer's application waits \
+         for its dialled peers before it starts: a local start barrier, and no \
+         frame any peer receives carries it.",
+    ),
+    (
+        "open/return_conditions/connect_scouted",
+        KIND_OFF_WIRE,
+        "expands to `--connect-scouted`. Whether this peer's application waits \
+         for its dialled peers at all: the same local start barrier, switched \
+         off, and equally absent from the wire.",
+    ),
+    (
         "connect/timeout_ms",
         KIND_OFF_WIRE,
         "expands to `--connect-timeout`. A local dial deadline: it decides how \
@@ -3489,6 +3545,11 @@ pub(crate) fn config_keys_the_demo_drops() -> Vec<&'static str> {
     // ZA-3308 — `connect/timeout_ms` left this list: the one-shot `--connect`
     // client runs a startup connect phase in every build, so no build lacks
     // its sink.
+    // R2949 — the peer's start window: its only sink is the `--peer` run.
+    if !cfg!(feature = "routing-peer") {
+        out.push("scouting/delay");
+        out.push("open/return_conditions/connect_scouted");
+    }
     if !cfg!(any(feature = "routing-peer", feature = "router-hat-router")) {
         out.push("connect/exit_on_failure");
         out.push("listen/retry");
@@ -4277,6 +4338,10 @@ mod stock_config_tests {
             // — the contract `connect/retry`'s note above describes, now with a
             // live population again.
             "connect/exit_on_failure"
+            // R2949 — the peer's start window has the `--peer` run as its
+            // one sink, the same row the lifecycle keys name.
+            | "scouting/delay"
+            | "open/return_conditions/connect_scouted"
             | "listen/retry"
             | "listen/timeout_ms"
             | "listen/exit_on_failure" => &["--config", "z.json5", "--peer", "tcp/127.0.0.1:0"],
@@ -4796,6 +4861,22 @@ mod stock_config_tests {
             // Each control also names `listen`, because `mode: "peer"` selects
             // the binding run-mode and the endpoint is what the expansion needs
             // to emit it.
+            // R2949 — the peer's start window. Each control STATES upstream's
+            // default, so the delta is the value.
+            (
+                "scouting/delay",
+                r#"{ mode: "peer", listen: { endpoints: ["tcp/127.0.0.1:0"] },
+                     scouting: { delay: 500 } }"#,
+                r#"{ mode: "peer", listen: { endpoints: ["tcp/127.0.0.1:0"] },
+                     scouting: { delay: 1500 } }"#,
+            ),
+            (
+                "open/return_conditions/connect_scouted",
+                r#"{ mode: "peer", listen: { endpoints: ["tcp/127.0.0.1:0"] },
+                     open: { return_conditions: { connect_scouted: true } } }"#,
+                r#"{ mode: "peer", listen: { endpoints: ["tcp/127.0.0.1:0"] },
+                     open: { return_conditions: { connect_scouted: false } } }"#,
+            ),
             (
                 "connect/timeout_ms",
                 r#"{ mode: "peer", listen: { endpoints: ["tcp/127.0.0.1:0"] },
@@ -7576,6 +7657,35 @@ fn parse_retry_schedule(args: &[String], flag: &str) -> Result<Option<RetryPolic
         period_increase_factor,
     }))
 }
+
+/// R2949 — `--scouting-delay <ms>` / `--connect-scouted <true|false>`, the argv
+/// shape `scouting/delay` and `open/return_conditions/connect_scouted` expand
+/// into, RESOLVED to a peer's start window: `None` when `connect_scouted` is
+/// false, otherwise the delay, upstream's 500 ms when unstated. A malformed
+/// value is an error, on [`parse_connect_retry`]'s rule.
+pub(crate) fn parse_start_window(args: &[String]) -> Result<Option<std::time::Duration>, String> {
+    let delay_ms = match parse_pair(args, "--scouting-delay") {
+        None => SCOUTING_DELAY_DEFAULT_MS,
+        Some(spec) => spec
+            .trim()
+            .parse::<u64>()
+            .map_err(|e| format!("--scouting-delay: `{spec}` is not a millisecond count ({e})"))?,
+    };
+    let scouted = match parse_pair(args, "--connect-scouted").as_deref() {
+        None | Some("true") => true,
+        Some("false") => false,
+        Some(other) => {
+            return Err(format!(
+                "--connect-scouted: `{other}` is neither `true` nor `false`"
+            ))
+        }
+    };
+    Ok(scouted.then(|| std::time::Duration::from_millis(delay_ms)))
+}
+
+/// Upstream's `scouting/delay` default
+/// (`commons/zenoh-config/src/defaults.rs` @ `pub const delay: u64 = 500;`).
+pub(crate) const SCOUTING_DELAY_DEFAULT_MS: u64 = 500;
 
 /// R2159 (open-debt item 229) — `--connect-timeout <ms>` / `--listen-timeout
 /// <ms>`, the argv shape `{connect,listen}/timeout_ms` expands into.

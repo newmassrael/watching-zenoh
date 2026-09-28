@@ -364,6 +364,26 @@ pub fn endpoint_schedule(global: RetryPolicy, endpoint: &str) -> RetryPolicy {
     }
 }
 
+/// One endpoint's failure policy: the global `connect/timeout_ms` and
+/// `connect/exit_on_failure`, with the endpoint's `#exit_on_failure` tail on top
+/// (`commons/zenoh-config/src/connection_retry.rs` @ `pub fn get_retry_config(`).
+///
+/// R2949. Only a PEER's connect reads this per endpoint; a client's single-link
+/// connect never reads `exit_on_failure`, upstream's or the tail's.
+pub fn endpoint_policy(global: PhasePolicy, endpoint: &str) -> PhasePolicy {
+    match wz_session_core::locator::parse_any_locator(endpoint) {
+        Ok(wz_session_core::locator::AnyLocator::Ip(parsed)) => PhasePolicy {
+            exit_on_failure: parsed
+                .retry
+                .as_deref()
+                .and_then(|r| r.exit_on_failure)
+                .unwrap_or(global.exit_on_failure),
+            ..global
+        },
+        _ => global,
+    }
+}
+
 /// A connect phase over SEVERAL endpoints that wants ONE session — upstream's
 /// client connect, `connect_peers_single_link`
 /// (`zenoh/src/net/runtime/orchestrator.rs` @
@@ -382,10 +402,12 @@ pub fn endpoint_schedule(global: RetryPolicy, endpoint: &str) -> RetryPolicy {
 /// `budget` is `connect/timeout_ms`, and it bounds the WHOLE phase as upstream's
 /// outer `tokio::time::timeout` does — the one-shot attempts included.
 ///
-/// The one place this narrows upstream: a single-link phase there keeps dialing
-/// the other retrying endpoints after one connects, and whether that yields a
-/// second session is the transport manager's business. A caller of this holds
-/// one session, so the first success ends the phase.
+/// The first success ends the phase. Upstream's single-link loop keeps dialing
+/// the other retrying endpoints after one connects, but it is the CLIENT's
+/// connect, and a client holds one session: "the client mode only allows
+/// connecting to a single endpoint" (`DEFAULT_CONFIG.json5`). R2949 — this was
+/// described as a narrowing until it was measured against that sentence; a
+/// peer, which does connect to every endpoint, does not come through here.
 ///
 /// `attempt(endpoint, n)` is called with the endpoint and its 1-based attempt
 /// number. It is `Fn`, not `FnMut`, because the retrying endpoints run

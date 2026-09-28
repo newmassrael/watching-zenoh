@@ -1001,6 +1001,16 @@ pub struct ZenohNodeConfig {
     pub interests_timeout_ms: Option<u64>,
     /// `scouting/timeout`, milliseconds. wz's `--scout-timeout-ms`.
     pub scouting_timeout_ms: Option<u64>,
+    /// R2949 — `scouting/delay`, milliseconds: how long a PEER's open waits for
+    /// its configured peers before returning without them
+    /// (`zenoh/src/net/runtime/orchestrator.rs` @
+    /// `&& tokio::time::timeout(delay, self.state.start_conditions.notified())`).
+    /// `None` is the key's absence; the default is upstream's 500.
+    pub scouting_delay_ms: Option<u64>,
+    /// R2949 — `open/return_conditions/connect_scouted`: whether a peer's open
+    /// waits for its peers at all. `None` is absence; upstream's default is
+    /// `true`.
+    pub open_connect_scouted: Option<bool>,
     /// `transport/multicast/qos/enabled`. wz's `--multicast-qos`. A real
     /// zenohd resolves this to `false`, so the default below is zenoh's.
     pub multicast_qos: bool,
@@ -1280,6 +1290,8 @@ impl Default for ZenohNodeConfig {
             queries_default_timeout_ms: None,
             interests_timeout_ms: None,
             scouting_timeout_ms: None,
+            scouting_delay_ms: None,
+            open_connect_scouted: None,
             multicast_qos: false,
             shared_memory: true,
             tls_root_ca: None,
@@ -1647,7 +1659,19 @@ impl ZenohNodeConfig {
         if let Some(ms) = self.scouting_timeout_ms {
             let _ = write!(out, ", \"timeout\": {ms}");
         }
-        out.push_str(" },\n  \"timestamping\": { \"enabled\": ");
+        if let Some(ms) = self.scouting_delay_ms {
+            let _ = write!(out, ", \"delay\": {ms}");
+        }
+        out.push_str(" },");
+        // R2949 — the open barrier's one honoured key, emitted only when held,
+        // as every optional scalar here is.
+        if let Some(scouted) = self.open_connect_scouted {
+            let _ = write!(
+                out,
+                "\n  \"open\": {{ \"return_conditions\": {{ \"connect_scouted\": {scouted} }} }},"
+            );
+        }
+        out.push_str("\n  \"timestamping\": { \"enabled\": ");
         let _ = write!(out, "{}", self.timestamping);
         // R2626 — the section's second key rides the same block, so a round-trip
         // through this emitter preserves it rather than silently dropping it.
@@ -1924,6 +1948,10 @@ pub const HONOURED_CONFIG_KEYS: &[&str] = &[
     "access_control/rules",
     "access_control/subjects",
     "scouting/timeout",
+    // R2949 — the peer open's start window: how long it waits for its peers,
+    // and whether it waits at all. Read by the C-ABI peer open.
+    "scouting/delay",
+    "open/return_conditions/connect_scouted",
     "transport/multicast/qos/enabled",
     "transport/shared_memory/enabled",
     "transport/link/tls/root_ca_certificate",
@@ -2235,7 +2263,9 @@ pub const UNHONOURED_UPSTREAM_CONFIG_KEYS: &[&str] = &[
     // §5.23 `adminspace-core` — `metadata` LEFT this list for
     // `HONOURED_CONFIG_KEYS`: the reader carries the value and the adminspace
     // serves it. Same partition, same total.
-    "open/return_conditions/connect_scouted",
+    // R2949 — `open/return_conditions/connect_scouted` LEFT this list for
+    // `HONOURED_CONFIG_KEYS`: the C-ABI peer open waits on it. Same partition,
+    // same total.
     "open/return_conditions/declares",
     // R2788 — `plugins` LEFT this list for `HONOURED_CONFIG_KEYS`: the reader
     // carries the section and the storage host runs the storage manager from
@@ -2259,7 +2289,8 @@ pub const UNHONOURED_UPSTREAM_CONFIG_KEYS: &[&str] = &[
     // R2633 — the ROUTER weighting left too, upward: it is in
     // [`HONOURED_CONFIG_KEYS`] now. The surface total is unchanged, which is the
     // invariant a move must keep and a deletion would break.
-    "scouting/delay",
+    // R2949 — `scouting/delay` LEFT this list for `HONOURED_CONFIG_KEYS`, with
+    // `open/return_conditions/connect_scouted` above.
     "scouting/gossip/autoconnect",
     "scouting/gossip/autoconnect_strategy",
     "scouting/gossip/enabled",
@@ -2445,7 +2476,7 @@ pub const UNHONOURED_BEYOND_WZ: &[&str] = &[
     // §5.23 `adminspace-core` — `metadata` LEFT this list. Its group row said
     // wz lacked "a config-metadata surface", and the adminspace now serves the
     // value, so the capability the row named is one wz has.
-    "open/return_conditions/connect_scouted",
+    // R2949 — `connect_scouted` left for the honoured list; `declares` stays.
     "open/return_conditions/declares",
     "plugins_loading/search_dirs",
     "qos/network",
@@ -2470,7 +2501,7 @@ pub const UNHONOURED_BEYOND_WZ: &[&str] = &[
     // `LinkstateNetwork` hardcoded the unset weight and had nowhere to put a
     // configured one. It has one now, so "a capability wz does not have" became
     // false in the direction this list cannot express.
-    "scouting/delay",
+    // R2949 — `scouting/delay` left for the honoured list.
     "scouting/gossip/enabled",
     // R2230 (open-debt item 579) — ARRIVED in 1.10.0, and it is the row most at
     // risk of being read as a reader gap, because wz DOES have a `transport-stats`
@@ -2782,7 +2813,8 @@ pub const UNHONOURED_BEYOND_GROUPS: &[(&str, &str, &[&str])] = &[
         "a session-open readiness barrier",
         "ReturnConditionsConf",
         &[
-            "open/return_conditions/connect_scouted",
+            // R2949 — `connect_scouted` left: the peer open's start window is
+            // the barrier it gates. `declares` has no such barrier yet.
             "open/return_conditions/declares",
         ],
     ),
@@ -2827,11 +2859,9 @@ pub const UNHONOURED_BEYOND_GROUPS: &[(&str, &str, &[&str])] = &[
             "transport/shared_memory/transport_optimization/pool_size",
         ],
     ),
-    (
-        "a startup scouting delay",
-        "ScoutingDelay",
-        &["scouting/delay"],
-    ),
+    // R2949 — the `ScoutingDelay` group is GONE, not emptied: wz grew "a
+    // startup scouting delay" (the C-ABI peer open's start window), and its one
+    // key moved to [`HONOURED_CONFIG_KEYS`].
     // R2626 — the `TimestampingConf` group is GONE, not emptied. Its single key
     // `timestamping/drop_future_timestamp` moved to [`HONOURED_CONFIG_KEYS`]
     // when wz built zenoh's drop arm, and a group anchored on "a name absent
@@ -6125,6 +6155,14 @@ impl ZenohNodeConfig {
             out.scouting_timeout_ms = Some(v);
             named.push("scouting/timeout");
         }
+        if let Some(v) = want_u64(&doc, "scouting/delay")? {
+            out.scouting_delay_ms = Some(v);
+            named.push("scouting/delay");
+        }
+        if let Some(v) = want_bool(&doc, "open/return_conditions/connect_scouted")? {
+            out.open_connect_scouted = Some(v);
+            named.push("open/return_conditions/connect_scouted");
+        }
         if let Some(v) = want_bool(&doc, "transport/multicast/qos/enabled")? {
             out.multicast_qos = v;
             named.push("transport/multicast/qos/enabled");
@@ -7203,6 +7241,11 @@ mod tests {
                      "usernames": ["alice"] } ] } }"#,
             ),
             ("scouting/timeout", r#"{ "scouting": { "timeout": 2500 } }"#),
+            ("scouting/delay", r#"{ "scouting": { "delay": 1500 } }"#),
+            (
+                "open/return_conditions/connect_scouted",
+                r#"{ "open": { "return_conditions": { "connect_scouted": false } } }"#,
+            ),
             (
                 "transport/multicast/qos/enabled",
                 r#"{ "transport": { "multicast": { "qos": { "enabled": true } } } }"#,

@@ -199,9 +199,17 @@ pub(crate) fn print_usage() {
     eprintln!("                             1000,0,1 unless this says otherwise. max 0 = no");
     eprintln!("                             ceiling; factor 1 = a constant delay.");
     eprintln!("    --connect-timeout <ms>   zenoh connect.timeout_ms — how long the DIAL phase");
-    eprintln!("                             gets. -1 (the mesh default) never gives up, 0 means");
-    eprintln!("                             one attempt, N gives up after N ms. Requires --peer");
-    eprintln!("                             or --router-hat.");
+    eprintln!("                             gets. -1 (the mesh default) never gives up, 0 (the");
+    eprintln!("                             client default) means one attempt, N gives up after");
+    eprintln!("                             N ms. Read by --peer, --router-hat and --connect.");
+    eprintln!(
+        "    --scouting-delay <ms>    zenoh scouting.delay — how long a --peer's application"
+    );
+    eprintln!("                             waits for its dialled peers before it starts.");
+    eprintln!("                             Default 500.");
+    eprintln!("    --connect-scouted <bool> zenoh open.return_conditions.connect_scouted —");
+    eprintln!("                             whether a --peer waits for its peers at all.");
+    eprintln!("                             Default true.");
     eprintln!("    --connect-exit-on-failure <bool>");
     eprintln!("                             zenoh connect.exit_on_failure — whether spending that");
     eprintln!("                             budget with no session ENDS the process (exit 3).");
