@@ -1606,8 +1606,10 @@ int main(void) {
      * gain `context`, and the document gains `reassembly` -- verdicts the
      * session reached per frame and this document had never handed over.
      * ZA-3214 -- 15: a row can carry a record's `list_id`, `anchor` and
-     * `batch_index`, written by wz_dissect_live_fields_where alone. */
-    revisioned[2].revision = 15;
+     * `batch_index`, written by wz_dissect_live_fields_where alone.
+     * ZA-3215 -- 16: a `packet` row can be a DECLINED one, over an lz4 batch
+     * this build cannot open. */
+    revisioned[2].revision = 16;
     revisioned[2].doc = NULL;
     rc = wz_dissect_pcap_fields(pcap, sizeof pcap, 0, &revisioned[2].doc);
     CHECK(rc == WZ_DISSECT_OK, "fields rc=%d", rc);

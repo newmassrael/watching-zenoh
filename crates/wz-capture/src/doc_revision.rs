@@ -998,6 +998,21 @@ pub const DOCUMENT_HISTORY: &[DocumentShape] = &[
         planes: &[],
         carries: FIELDS_R15_CARRIES,
     },
+    // ZA-3215 ⑤ — a row over an lz4 batch this build cannot open.
+    //
+    // The carries axis moves: `offset_space = packet` now also arrives as a
+    // declined row, because the batch stands as one record and the second
+    // walk over its wire bytes names no tree. See
+    // [`FIELD_OFFSET_SPACE_CARRIES_R16`].
+    DocumentShape {
+        document: FIELDS,
+        revision: 16,
+        keys: FIELDS_R15_KEYS,
+        retiring: &[],
+        families: FIELDS_R14_FAMILIES,
+        planes: &[],
+        carries: FIELDS_R16_CARRIES,
+    },
     DocumentShape {
         document: SUMMARY,
         revision: 1,
@@ -4655,6 +4670,305 @@ pub const FIELD_OFFSET_SPACE_CARRIES_R15: &[WordCarries] = &[
     },
 ];
 
+/// Every shape each `offset_space` word's row takes at revision 16 — revision
+/// 15's, with `packet` also arriving as a DECLINED row.
+///
+/// ZA-3215 ⑤. An lz4 batch this build cannot open stands as one record, and the
+/// second walk over its wire bytes declines rather than name a tree: they are a
+/// batch header and lz4, not a message. So the row has `declined` where a
+/// walked row has `name`, `fields` and `carried`, and keeps everything the
+/// session judged of the frame (`sn`, `chain`, `first_byte`, `l2`). The three
+/// shapes are that row under the three doors, as revision 15 composes them;
+/// `payload_decode` never joins, because a payload hangs off a walked tree.
+/// `stream_byte` keeps revision 15's shapes: the gate's population renders no
+/// declined stream row. Generated from the revision-15 table, not typed.
+pub const FIELD_OFFSET_SPACE_CARRIES_R16: &[WordCarries] = &[
+    WordCarries {
+        word: "packet",
+        shapes: &[
+            &[
+                "above_transport",
+                "anchor",
+                "batch_index",
+                "carried",
+                "chain",
+                "direction",
+                "fields",
+                "first_byte",
+                "l2",
+                "list_id",
+                "name",
+                "packet",
+                "payload_decode",
+                "selected",
+                "sn",
+            ],
+            &[
+                "above_transport",
+                "anchor",
+                "batch_index",
+                "carried",
+                "chain",
+                "direction",
+                "fields",
+                "first_byte",
+                "l2",
+                "list_id",
+                "name",
+                "packet",
+                "selected",
+                "sn",
+            ],
+            &[
+                "above_transport",
+                "anchor",
+                "batch_index",
+                "chain",
+                "declined",
+                "direction",
+                "first_byte",
+                "l2",
+                "list_id",
+                "packet",
+                "selected",
+                "sn",
+            ],
+            &[
+                "above_transport",
+                "carried",
+                "chain",
+                "direction",
+                "fields",
+                "first_byte",
+                "l2",
+                "name",
+                "packet",
+                "payload_decode",
+                "selected",
+                "sn",
+            ],
+            &[
+                "above_transport",
+                "carried",
+                "chain",
+                "direction",
+                "fields",
+                "first_byte",
+                "l2",
+                "name",
+                "packet",
+                "payload_decode",
+                "sn",
+            ],
+            &[
+                "above_transport",
+                "carried",
+                "chain",
+                "direction",
+                "fields",
+                "first_byte",
+                "l2",
+                "name",
+                "packet",
+                "selected",
+                "sn",
+            ],
+            &[
+                "above_transport",
+                "carried",
+                "chain",
+                "direction",
+                "fields",
+                "first_byte",
+                "l2",
+                "name",
+                "packet",
+                "sn",
+            ],
+            &[
+                "above_transport",
+                "chain",
+                "declined",
+                "direction",
+                "first_byte",
+                "l2",
+                "packet",
+                "selected",
+                "sn",
+            ],
+            &[
+                "above_transport",
+                "chain",
+                "declined",
+                "direction",
+                "first_byte",
+                "l2",
+                "packet",
+                "sn",
+            ],
+        ],
+    },
+    WordCarries {
+        word: "stream_byte",
+        shapes: &[
+            &[
+                "above_transport",
+                "anchor",
+                "batch_index",
+                "carried",
+                "chain",
+                "direction",
+                "fields",
+                "first_byte",
+                "l2",
+                "list_id",
+                "message_at",
+                "name",
+                "payload_decode",
+                "selected",
+                "sn",
+            ],
+            &[
+                "above_transport",
+                "anchor",
+                "batch_index",
+                "carried",
+                "chain",
+                "direction",
+                "fields",
+                "first_byte",
+                "l2",
+                "list_id",
+                "message_at",
+                "name",
+                "selected",
+                "sn",
+            ],
+            &[
+                "above_transport",
+                "carried",
+                "chain",
+                "direction",
+                "fields",
+                "first_byte",
+                "l2",
+                "message_at",
+                "name",
+                "payload_decode",
+                "selected",
+                "sn",
+            ],
+            &[
+                "above_transport",
+                "carried",
+                "chain",
+                "direction",
+                "fields",
+                "first_byte",
+                "l2",
+                "message_at",
+                "name",
+                "payload_decode",
+                "sn",
+            ],
+            &[
+                "above_transport",
+                "carried",
+                "chain",
+                "direction",
+                "fields",
+                "first_byte",
+                "l2",
+                "message_at",
+                "name",
+                "selected",
+                "sn",
+            ],
+            &[
+                "above_transport",
+                "carried",
+                "chain",
+                "direction",
+                "fields",
+                "first_byte",
+                "l2",
+                "message_at",
+                "name",
+                "sn",
+            ],
+        ],
+    },
+];
+
+/// What each field-document family's WORD decides at revision 16 — revision
+/// 15's, with `offset_space` read from [`FIELD_OFFSET_SPACE_CARRIES_R16`].
+pub const FIELDS_R16_CARRIES: &[KeyCarries] = &[
+    KeyCarries {
+        key: "carried_state",
+        shape: CarriesShape::Discriminant(CARRIED_STATE_CARRIES_R12),
+    },
+    KeyCarries {
+        key: "direction",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "keyexpr_cause",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "kind",
+        shape: CarriesShape::Discriminant(FIELD_VALUE_KIND_CARRIES_R4),
+    },
+    KeyCarries {
+        key: "link",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "message",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "offset_space",
+        shape: CarriesShape::Discriminant(FIELD_OFFSET_SPACE_CARRIES_R16),
+    },
+    KeyCarries {
+        key: "outcome",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "phase",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "priority",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "reason",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "selected",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "state",
+        shape: CarriesShape::Discriminant(PAYLOAD_STATE_CARRIES_R4),
+    },
+    KeyCarries {
+        key: "under",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "verdict",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "wrong",
+        shape: CarriesShape::Passenger,
+    },
+];
+
 /// What each field-document family's WORD decides at revision 15 — revision
 /// 14's, with `offset_space`'s shapes corrected and widened (see
 /// [`FIELD_OFFSET_SPACE_CARRIES_R15`]). Generated from revision 14's table.
@@ -7186,7 +7500,8 @@ mod tests {
             // `reassembly`: verdicts the session reached per frame and had
             // never handed over.
             // ZA-3214 ① — to 15 when a row could carry a record's coordinates.
-            (FIELDS, 15),
+            // ZA-3215 ⑤ — to 16 when a packet row could be a declined one.
+            (FIELDS, 16),
             // R2121 (open-debt item 460) — the summary moved to 2 when it
             // gained `inert_counters`; R2122 (item 238) to 3 when its
             // `framing` group stopped disagreeing with the capture report's.
