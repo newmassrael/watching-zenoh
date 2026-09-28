@@ -304,6 +304,7 @@ mod tests {
             lease_ms: 10_000,
             initial_sn: 0,
             cookie: vec![],
+            tx_queue: wz_session_core::session_init_params::TxQueueConf::default(),
             cookie_signing_key: wz_session_core::signing_key::SigningKey::new(vec![7u8; 32])
                 .expect("key"),
         }

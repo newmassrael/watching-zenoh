@@ -324,6 +324,7 @@ mod cookie_nonce_draw_tests {
             lease_ms: 10_000,
             initial_sn: 0,
             cookie: vec![0u8; 16],
+            tx_queue: wz_session_core::session_init_params::TxQueueConf::default(),
             cookie_signing_key: SigningKey::new(vec![7u8; 32]).expect(">=32-byte key"),
         }
     }

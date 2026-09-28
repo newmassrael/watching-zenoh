@@ -617,6 +617,7 @@ fn acceptor_params(
         // R311y820 — through the SAME §2.5 port the cookie nonce uses, so this
         // fixture demonstrates the production shape rather than the literal a
         // board would otherwise copy.
+        tx_queue: wz_session_core::session_init_params::TxQueueConf::default(),
         cookie_signing_key: SigningKey::from_entropy(entropy)
             .expect("the entropy source produced no signing key"),
     }

@@ -55,6 +55,7 @@ pub fn fixture_session_init_params() -> SessionInitParams {
         cookie: Vec::new(),
         // Deterministic 32-byte test key. Production callers MUST
         // supply real per-process entropy via `SigningKey::new_random`.
+        tx_queue: wz_runtime_tokio::session_glue::TxQueueConf::default(),
         cookie_signing_key: SigningKey::new(vec![0xAB; 32])
             .expect("32-byte test key satisfies >= 32 invariant"),
     }
@@ -88,6 +89,7 @@ pub fn zenoh_interop_session_init_params(whatami: WhatAmI, zid: Vec<u8>) -> Sess
         initial_sn: 0,
         cookie: Vec::new(),
         // Deterministic 32-byte test key (same discipline as the fixture).
+        tx_queue: wz_runtime_tokio::session_glue::TxQueueConf::default(),
         cookie_signing_key: SigningKey::new(vec![0xAB; 32])
             .expect("32-byte test key satisfies >= 32 invariant"),
     }

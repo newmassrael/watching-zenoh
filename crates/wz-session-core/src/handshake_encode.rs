@@ -365,6 +365,7 @@ mod tests {
             lease_ms,
             initial_sn: 0,
             cookie: Vec::new(),
+            tx_queue: crate::session_init_params::TxQueueConf::default(),
             cookie_signing_key: crate::signing_key::SigningKey::new(vec![0xAB; 32])
                 .expect("32-byte test key"),
         }

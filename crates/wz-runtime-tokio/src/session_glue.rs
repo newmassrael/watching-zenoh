@@ -247,6 +247,8 @@ impl wz_session_core::entropy::EntropySource for OsEntropy {
 // the fixture_session_init_params test-support builder) resolve
 // unchanged. DP3 leaf.
 pub use wz_session_core::session_init_params::SessionInitParams;
+/// R2924 — the outbound queue configuration a [`SessionInitParams`] carries.
+pub use wz_session_core::session_init_params::TxQueueConf;
 // Re-exported alongside `SessionInitParams` so a caller naming the param
 // bundle also names its `whatami` field type from one place.
 pub use wz_session_core::WhatAmI;
@@ -4266,6 +4268,7 @@ mod link_congestion_tests {
         room: Mutex<LinkRoom>,
         asked: Mutex<Vec<RoomWait>>,
         frames: Mutex<Vec<Vec<u8>>>,
+        shapes: Mutex<Vec<wz_session_core::link::TxQueueShape>>,
     }
 
     impl CongestibleLink {
@@ -4274,6 +4277,7 @@ mod link_congestion_tests {
                 room: Mutex::new(LinkRoom::Free),
                 asked: Mutex::new(Vec::new()),
                 frames: Mutex::new(Vec::new()),
+                shapes: Mutex::new(Vec::new()),
             })
         }
         fn set_room(&self, room: LinkRoom) {
@@ -4300,6 +4304,9 @@ mod link_congestion_tests {
             self.asked.lock().expect("asked").push(wait);
             *self.room.lock().expect("room")
         }
+        fn shape_tx_queue(&self, shape: wz_session_core::link::TxQueueShape) {
+            self.shapes.lock().expect("shapes").push(shape);
+        }
         fn open_blocking(&self) {}
         fn close_blocking(&self) {}
     }
@@ -4307,9 +4314,99 @@ mod link_congestion_tests {
     /// A session over `link` whose first frame carries SN 7, so a frame's SN
     /// is its second byte.
     fn session(link: Arc<CongestibleLink>) -> Arc<super::SessionLinkActions> {
+        session_with_queue(link, super::TxQueueConf::default())
+    }
+
+    /// [`session`] with the given outbound queue configuration.
+    fn session_with_queue(
+        link: Arc<CongestibleLink>,
+        tx_queue: super::TxQueueConf,
+    ) -> Arc<super::SessionLinkActions> {
         let mut params = wz_runtime_tokio_test_support::fixture_session_init_params();
         params.initial_sn = 7;
+        params.tx_queue = tx_queue;
         super::new_session_actions(link, params, crate::runtime_impl::TokioTime::new())
+    }
+
+    /// R2924 — the waits a sender spends are the session's CONFIGURED ones
+    /// (`transport/link/tx/queue/congestion_control/*`), not upstream's
+    /// defaults baked in.
+    #[test]
+    fn a_sender_waits_the_configured_congestion_waits() {
+        let link = CongestibleLink::new();
+        let actions = session_with_queue(
+            link.clone(),
+            super::TxQueueConf {
+                wait_before_drop_us: 42,
+                wait_before_close_us: 4_242,
+                ..super::TxQueueConf::default()
+            },
+        );
+        actions
+            .send_push_literal_qos("home/a", b"A", true, Priority::DEFAULT)
+            .expect("push");
+        assert_eq!(link.last_asked(), Some(RoomWait::Drop { wait_us: 42 }));
+        actions.send_declare_keyexpr(1, "home/k").expect("declare");
+        assert_eq!(link.last_asked(), Some(RoomWait::Block { wait_us: 4_242 }));
+    }
+
+    /// R2924 — reaching Established hands the link the session's queue shape:
+    /// its configured sizes, and the QoS it negotiated (none, for the fixture
+    /// session) — zenoh building a link's pipeline when it joins an
+    /// established transport. Nothing is shaped before.
+    #[test]
+    fn reaching_established_shapes_the_links_queue_as_configured() {
+        use crate::session_fsm_unicast::SessionFsmUnicastEvent as E;
+        let link = CongestibleLink::new();
+        let mut sizes = [2; Priority::NUM];
+        sizes[Priority::RealTime.wire_byte() as usize] = 7;
+        let actions = session_with_queue(
+            link.clone(),
+            super::TxQueueConf {
+                sizes,
+                ..super::TxQueueConf::default()
+            },
+        );
+        let mut engine = super::new_session_engine(&actions);
+        engine.initialize();
+        engine.process_event(E::OutboundStart);
+        engine.process_event(E::LinkOpened);
+        engine.process_event(E::InitAckReceived);
+        assert!(
+            link.shapes.lock().expect("shapes").is_empty(),
+            "no shape before the session is established"
+        );
+        engine.process_event(E::OpenAckReceived);
+        assert_eq!(
+            *link.shapes.lock().expect("shapes"),
+            [wz_session_core::link::TxQueueShape { sizes, qos: false }]
+        );
+    }
+
+    /// R2924 — a session that negotiated QoS gives its link one queue per
+    /// priority.
+    #[cfg(feature = "transport-qos")]
+    #[test]
+    fn a_qos_session_shapes_its_link_with_a_queue_per_priority() {
+        use crate::session_fsm_unicast::SessionFsmUnicastEvent as E;
+        let link = CongestibleLink::new();
+        let actions = session(link.clone());
+        assert!(actions.set_qos_offer(true), "qos offer applies");
+        actions.negotiate_qos_against_peer(true);
+        let mut engine = super::new_session_engine(&actions);
+        engine.initialize();
+        for event in [
+            E::OutboundStart,
+            E::LinkOpened,
+            E::InitAckReceived,
+            E::OpenAckReceived,
+        ] {
+            engine.process_event(event);
+        }
+        assert_eq!(
+            *link.shapes.lock().expect("shapes"),
+            [super::TxQueueConf::default().shape(true)]
+        );
     }
 
     /// A droppable Push (its ext_qos says `Drop`, upstream's default for a put)

@@ -8144,6 +8144,7 @@ pub(crate) fn demo_session_init_params(
         // so the note named a symbol that no longer existed and nothing ever
         // supplied the entropy. The key of every acceptor this binary opened
         // was therefore a literal in a public repository.
+        tx_queue: wz::runtime_tokio::session_glue::TxQueueConf::default(),
         cookie_signing_key: SigningKey::from_entropy(&mut OsEntropy).map_err(|e| {
             std::io::Error::other(format!(
                 "no OS entropy for the cookie signing key ({e}); refusing to open a \

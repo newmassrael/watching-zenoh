@@ -136,6 +136,8 @@ pub fn outbound_channel_with_capacity(
         state: Mutex::new(LaneState {
             lanes: std::array::from_fn(|_| VecDeque::new()),
             capacity: queue_size.map(|n| n * batch_bytes),
+            batch_bytes,
+            single_lane: false,
             occupied: [0; Priority::NUM],
             congested: [false; Priority::NUM],
             in_flight: None,
@@ -166,6 +168,11 @@ struct LaneState {
     lanes: [VecDeque<Vec<u8>>; Priority::NUM],
     /// Each lane's bound, in bytes.
     capacity: [usize; Priority::NUM],
+    /// The bytes one batch holds, the unit a queue size counts in.
+    batch_bytes: usize,
+    /// R2924 — every frame goes to the `Priority::DEFAULT` lane: the session
+    /// negotiated no QoS, and zenoh gives such a transport one queue.
+    single_lane: bool,
     /// Each lane's bytes queued or in flight.
     occupied: [usize; Priority::NUM],
     /// R2923 — each lane's CONGESTED mark, zenoh's per-priority
@@ -185,6 +192,30 @@ struct LaneState {
 }
 
 impl LaneState {
+    /// R2924 — the lane a frame of `priority` takes: its own, or the one lane
+    /// a non-QoS session has.
+    fn lane_of(&self, priority: Priority) -> usize {
+        if self.single_lane {
+            Priority::DEFAULT.wire_byte() as usize
+        } else {
+            priority.wire_byte() as usize
+        }
+    }
+
+    /// R2924 — take the shape an established session gives its link. Frames
+    /// already queued keep their lanes and drain as before; only the bounds
+    /// and where new frames go change.
+    fn reshape(&mut self, shape: wz_session_core::link::TxQueueShape) {
+        self.single_lane = !shape.qos;
+        self.capacity = shape.sizes.map(|n| n * self.batch_bytes);
+        if self.single_lane {
+            // zenoh sizes a non-QoS transport's one queue by the DEFAULT
+            // priority's size.
+            let default = Priority::DEFAULT.wire_byte() as usize;
+            self.capacity = [self.capacity[default]; Priority::NUM];
+        }
+    }
+
     /// Take the next frame, highest priority first, after releasing the one
     /// the writer held. Returns whether room was freed, so the caller wakes
     /// senders waiting for it.
@@ -275,7 +306,7 @@ impl OutboundTx {
         if st.closed {
             return Err(OutboundClosed(frame));
         }
-        let lane = priority.wire_byte() as usize;
+        let lane = st.lane_of(priority);
         st.occupied[lane] += frame.len();
         st.lanes[lane].push_back(frame);
         drop(st);
@@ -297,9 +328,9 @@ impl OutboundTx {
     /// out raises the mark, whichever kind of message it was; one that finds
     /// room lowers it.
     pub fn wait_for_room(&self, priority: Priority, wait: RoomWait) -> Room {
-        let lane = priority.wire_byte() as usize;
         let deadline = Instant::now() + Duration::from_micros(wait.wait_us());
         let mut st = self.shared.state.lock().expect("outbound lanes poisoned");
+        let lane = st.lane_of(priority);
         if let Some(room) = st.room_at_once(lane, wait) {
             return room;
         }
@@ -339,12 +370,11 @@ impl OutboundTx {
         // the lane can answer at once never leaves it. A current-thread runtime
         // has no second worker to hand the task to, so there the wait runs to
         // its deadline — the congestion verdict it was asked for.
-        let at_once = self
-            .shared
-            .state
-            .lock()
-            .expect("outbound lanes poisoned")
-            .room_at_once(priority.wire_byte() as usize, wait);
+        let at_once = {
+            let mut st = self.shared.state.lock().expect("outbound lanes poisoned");
+            let lane = st.lane_of(priority);
+            st.room_at_once(lane, wait)
+        };
         let room = match at_once {
             Some(room) => room,
             None => {
@@ -365,6 +395,18 @@ impl OutboundTx {
             Room::Congested => LinkRoom::Congested,
             Room::Closed => LinkRoom::Gone,
         }
+    }
+
+    /// R2924 — give the queue the shape its established session needs
+    /// (`BoxedLinkDriver::shape_tx_queue`), which every write driver over this
+    /// queue answers with. Senders waiting for room re-read the new bounds.
+    pub fn reshape(&self, shape: wz_session_core::link::TxQueueShape) {
+        self.shared
+            .state
+            .lock()
+            .expect("outbound lanes poisoned")
+            .reshape(shape);
+        self.shared.room.notify_all();
     }
 
     /// Whether the receiving side has closed the queue.
@@ -1062,6 +1104,54 @@ mod tests {
         std::thread::sleep(Duration::from_millis(20));
         rx.close();
         assert_eq!(waiter.join().expect("waiter"), Room::Closed);
+    }
+
+    /// R2924 — a session that negotiated no QoS has ONE queue, as zenoh's
+    /// non-QoS transport does: a keepalive at `Priority::Control` queued behind
+    /// data leaves behind it, and every priority draws on the one bound, sized
+    /// by the `Priority::DEFAULT` entry.
+    #[test]
+    fn a_non_qos_shape_is_one_fifo_queue_sized_by_the_default_priority() {
+        use wz_session_core::link::TxQueueShape;
+        let (tx, mut rx) = outbound_channel_with_capacity([4; Priority::NUM], 4);
+        let mut sizes = [16; Priority::NUM];
+        sizes[Priority::DEFAULT.wire_byte() as usize] = 1;
+        tx.reshape(TxQueueShape { sizes, qos: false });
+
+        tx.send(Priority::DEFAULT, b"data".to_vec())
+            .expect("enqueue");
+        assert_eq!(
+            tx.wait_for_room(Priority::Control, block(Duration::ZERO)),
+            Room::Congested,
+            "a Control frame draws on the one queue, which one batch fills"
+        );
+        tx.send(Priority::Control, b"ka".to_vec()).expect("enqueue");
+        assert_eq!(rx.try_recv(), Some(b"data".to_vec()), "arrival order holds");
+        assert_eq!(rx.try_recv(), Some(b"ka".to_vec()));
+    }
+
+    /// R2924 — a QoS shape bounds each priority by its own size.
+    #[test]
+    fn a_qos_shape_bounds_each_priority_by_its_own_size() {
+        use wz_session_core::link::TxQueueShape;
+        let (tx, mut rx) = outbound_channel_with_capacity([1; Priority::NUM], 4);
+        let mut sizes = [1; Priority::NUM];
+        sizes[Priority::Data.wire_byte() as usize] = 3;
+        tx.reshape(TxQueueShape { sizes, qos: true });
+
+        tx.send(Priority::RealTime, vec![0u8; 4]).expect("enqueue");
+        tx.send(Priority::Data, vec![0u8; 4]).expect("enqueue");
+        assert_eq!(
+            tx.wait_for_room(Priority::RealTime, block(Duration::ZERO)),
+            Room::Congested,
+            "one batch fills a size-1 queue"
+        );
+        assert_eq!(
+            tx.wait_for_room(Priority::Data, block(Duration::ZERO)),
+            Room::Free,
+            "a size-3 queue still has two"
+        );
+        assert_eq!(rx.try_recv(), Some(vec![0u8; 4]), "RealTime still first");
     }
 
     /// Within one priority the lane is FIFO: two conduits' frames minted in SN

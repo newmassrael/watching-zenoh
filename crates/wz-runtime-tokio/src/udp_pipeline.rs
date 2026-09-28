@@ -665,6 +665,10 @@ impl BoxedLinkDriver for UdpWriteDriver {
         self.tx.link_room(priority, wait)
     }
 
+    fn shape_tx_queue(&self, shape: wz_session_core::link::TxQueueShape) {
+        self.tx.reshape(shape)
+    }
+
     fn send_prioritized(
         &self,
         bytes: &[u8],

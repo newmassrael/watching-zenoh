@@ -186,6 +186,7 @@ pub(crate) fn init_params(
         lease_ms: 10_000,
         initial_sn: 0,
         cookie: Vec::new(),
+        tx_queue: wz_runtime_tokio::session_glue::TxQueueConf::default(),
         cookie_signing_key: SigningKey::from_entropy(&mut OsEntropy)?,
     })
 }

@@ -450,6 +450,49 @@ pub enum RoomWait {
     },
 }
 
+/// R2924 — the shape of a link's outbound queue once its session is
+/// established: how many batches each priority's queue holds, and whether the
+/// session negotiated QoS at all.
+///
+/// zenoh builds a transport's transmission pipeline when the link is added to
+/// an ESTABLISHED transport, from the manager's `queue_size` and the
+/// transport's `is_qos`: a QoS transport gets one queue per priority, sized per
+/// priority, and a non-QoS transport ONE queue sized `queue_size[DEFAULT]`,
+/// which its transport messages share with its data
+/// (`io/zenoh-transport/src/common/pipeline.rs` @ `let size_iter = if priority.len() == 1 {`).
+/// wz's writer queue exists from the moment the link is wired, before the
+/// handshake, so the session hands it this shape at Established instead.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TxQueueShape {
+    /// Batches each priority's queue holds, indexed by `Priority` wire byte;
+    /// each in upstream's `1..=16`.
+    pub sizes: [usize; crate::qos::Priority::NUM],
+    /// Whether the session negotiated QoS: `false` folds every priority onto
+    /// the `Priority::DEFAULT` queue.
+    pub qos: bool,
+}
+
+impl TxQueueShape {
+    /// Upstream's default queue size for every priority
+    /// (`commons/zenoh-config/src/defaults.rs` @ `impl Default for QueueSizeConf {`).
+    pub const DEFAULT_SIZE: usize = 2;
+
+    /// The smallest queue size upstream's config accepts.
+    pub const MIN_SIZE: usize = 1;
+
+    /// The largest queue size upstream's config accepts
+    /// (`commons/zenoh-config/src/defaults.rs` @ `pub const MAX: usize = 16;`).
+    pub const MAX_SIZE: usize = 16;
+
+    /// The shape upstream's defaults give a transport of the given QoS.
+    pub const fn default_for(qos: bool) -> Self {
+        Self {
+            sizes: [Self::DEFAULT_SIZE; crate::qos::Priority::NUM],
+            qos,
+        }
+    }
+}
+
 impl RoomWait {
     /// The longest this request may wait, in microseconds.
     pub const fn wait_us(self) -> u64 {
@@ -538,6 +581,15 @@ pub trait BoxedLinkDriver {
     fn wait_for_room(&self, priority: crate::qos::Priority, wait: RoomWait) -> LinkRoom {
         let _ = (priority, wait);
         LinkRoom::Free
+    }
+
+    /// R2924 — give the link's outbound queue the shape its established
+    /// session needs ([`TxQueueShape`]): zenoh's pipeline built at
+    /// establishment. A driver whose writer drains a bounded queue reshapes
+    /// it; a driver with no queue (the MCU sockets) has nothing to shape. A
+    /// driver that WRAPS another must forward this.
+    fn shape_tx_queue(&self, shape: TxQueueShape) {
+        let _ = shape;
     }
 
     fn open_blocking(&self);

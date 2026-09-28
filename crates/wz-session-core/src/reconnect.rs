@@ -434,6 +434,12 @@ where
         R::with_mutex_mut(&self.inner, |sink| R::link_driver(sink).link_mtu())
     }
 
+    fn shape_tx_queue(&self, shape: crate::link::TxQueueShape) {
+        R::with_mutex_mut(&self.inner, |sink| {
+            R::link_driver(sink).shape_tx_queue(shape)
+        })
+    }
+
     fn open_blocking(&self) {
         R::with_mutex_mut(&self.inner, |sink| {
             R::link_driver(sink).open_blocking();
@@ -520,6 +526,10 @@ impl<R: SessionRuntime> BoxedLinkDriver for LocalSwappableLink<R> {
 
     fn link_mtu(&self) -> usize {
         R::link_driver(&self.inner.borrow()).link_mtu()
+    }
+
+    fn shape_tx_queue(&self, shape: crate::link::TxQueueShape) {
+        R::link_driver(&self.inner.borrow()).shape_tx_queue(shape)
     }
 
     fn open_blocking(&self) {

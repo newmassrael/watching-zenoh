@@ -86,6 +86,85 @@ pub struct SessionInitParams {
     /// consume this field; the cookie value flows inbound from the
     /// peer's InitAck instead.
     pub cookie_signing_key: SigningKey,
+
+    /// R2924 — the session's outbound queue configuration: upstream's
+    /// `transport/link/tx/queue` sizes and congestion waits. Not a codec
+    /// value, unlike the fields above; it rides here because this bundle is
+    /// the one per-session carrier every open path — dial, accept, reconnect,
+    /// the C ABI and the MCU acceptor — already hands to the session.
+    pub tx_queue: TxQueueConf,
+}
+
+/// R2923 — how long a DROPPABLE message waits for room on its conduit's link
+/// before it is dropped, in microseconds: upstream's default
+/// `transport/link/tx/queue/congestion_control/drop/wait_before_drop`
+/// (`commons/zenoh-config/src/defaults.rs` @ `wait_before_drop: 1000,`).
+pub const WAIT_BEFORE_DROP_US: u64 = 1_000;
+
+/// R2923 — how long a BLOCKING message waits for room before the session is
+/// closed as unresponsive, in microseconds: upstream's default
+/// `transport/link/tx/queue/congestion_control/block/wait_before_close`
+/// (`commons/zenoh-config/src/defaults.rs` @ `wait_before_close: 5000000,`).
+pub const WAIT_BEFORE_CLOSE_US: u64 = 5_000_000;
+
+/// R2924 — a session's outbound queue configuration: upstream's
+/// `transport/link/tx/queue` section as far as a session acts on it — the
+/// per-priority queue sizes its links' writer queues take at Established
+/// ([`crate::link::TxQueueShape`]), and the two congestion waits its senders
+/// spend before dropping a message or closing the session.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TxQueueConf {
+    /// Batches each priority's queue holds, by `Priority` wire byte.
+    pub sizes: [usize; crate::qos::Priority::NUM],
+    /// `congestion_control/drop/wait_before_drop`, in microseconds.
+    pub wait_before_drop_us: u64,
+    /// `congestion_control/block/wait_before_close`, in microseconds.
+    pub wait_before_close_us: u64,
+}
+
+impl Default for TxQueueConf {
+    fn default() -> Self {
+        Self {
+            sizes: [crate::link::TxQueueShape::DEFAULT_SIZE; crate::qos::Priority::NUM],
+            wait_before_drop_us: WAIT_BEFORE_DROP_US,
+            wait_before_close_us: WAIT_BEFORE_CLOSE_US,
+        }
+    }
+}
+
+/// R2924 — a queue size outside upstream's accepted range, which upstream's
+/// config validator refuses (`QueueSizeConf::MIN..=QueueSizeConf::MAX`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TxQueueSizeOutOfRange {
+    /// The `Priority` wire byte whose size was out of range.
+    pub priority_byte: u8,
+    /// The size given.
+    pub size: usize,
+}
+
+impl TxQueueConf {
+    /// Refuse a size outside `1..=16`, as upstream's config does.
+    pub fn validate(&self) -> Result<(), TxQueueSizeOutOfRange> {
+        use crate::link::TxQueueShape;
+        for (byte, &size) in self.sizes.iter().enumerate() {
+            if !(TxQueueShape::MIN_SIZE..=TxQueueShape::MAX_SIZE).contains(&size) {
+                return Err(TxQueueSizeOutOfRange {
+                    priority_byte: byte as u8,
+                    size,
+                });
+            }
+        }
+        Ok(())
+    }
+
+    /// The shape a link of a session with this configuration takes at
+    /// Established, given whether the session negotiated QoS.
+    pub const fn shape(&self, qos: bool) -> crate::link::TxQueueShape {
+        crate::link::TxQueueShape {
+            sizes: self.sizes,
+            qos,
+        }
+    }
 }
 
 impl SessionInitParams {

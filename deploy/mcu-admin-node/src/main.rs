@@ -121,6 +121,7 @@ fn params(signing_key: &[u8]) -> SessionInitParams {
         lease_ms: 10_000,
         initial_sn: 0,
         cookie: Vec::new(),
+        tx_queue: wz_session_core::session_init_params::TxQueueConf::default(),
         cookie_signing_key: SigningKey::new(signing_key.to_vec()).expect("32-byte key"),
     }
 }

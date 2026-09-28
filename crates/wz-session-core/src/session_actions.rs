@@ -386,41 +386,12 @@ const TX_CONDUITS: usize = Priority::NUM;
 #[cfg(not(feature = "transport-qos"))]
 const TX_CONDUITS: usize = 1;
 
-/// R2923 — how long a DROPPABLE message waits for room on its conduit's link
-/// before it is dropped, in microseconds: upstream's default
-/// `transport/link/tx/queue/congestion_control/drop/wait_before_drop`
-/// (`commons/zenoh-config/src/defaults.rs` @ `wait_before_drop: 1000,`).
-#[cfg(any(
-    feature = "codec-push",
-    feature = "codec-request",
-    feature = "codec-response",
-    feature = "codec-response-final",
-    feature = "declare-keyexpr",
-    feature = "declare-subscriber",
-    feature = "declare-queryable",
-    feature = "declare-token",
-    feature = "declare-interest",
-    feature = "liveliness-token",
-))]
-pub const WAIT_BEFORE_DROP_US: u64 = 1_000;
-
-/// R2923 — how long a BLOCKING message waits for room before the session is
-/// closed as unresponsive, in microseconds: upstream's default
-/// `transport/link/tx/queue/congestion_control/block/wait_before_close`
-/// (`commons/zenoh-config/src/defaults.rs` @ `wait_before_close: 5000000,`).
-#[cfg(any(
-    feature = "codec-push",
-    feature = "codec-request",
-    feature = "codec-response",
-    feature = "codec-response-final",
-    feature = "declare-keyexpr",
-    feature = "declare-subscriber",
-    feature = "declare-queryable",
-    feature = "declare-token",
-    feature = "declare-interest",
-    feature = "liveliness-token",
-))]
-pub const WAIT_BEFORE_CLOSE_US: u64 = 5_000_000;
+/// R2923 / R2924 — the outbound queue configuration and its upstream
+/// defaults live with the per-session parameters that carry them
+/// ([`crate::session_init_params::TxQueueConf`]).
+pub use crate::session_init_params::{
+    TxQueueConf, TxQueueSizeOutOfRange, WAIT_BEFORE_CLOSE_US, WAIT_BEFORE_DROP_US,
+};
 
 impl<R: SessionRuntime> TxConduits<R> {
     fn new() -> Self {
@@ -4669,6 +4640,19 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         R::with_mutex_mut(&self.is_qos, |s| *s)
     }
 
+    /// R2924 — [`Self::is_qos`] in every build: a build without
+    /// `transport-qos` negotiates no QoS, so its answer is `false`.
+    pub fn negotiated_qos(&self) -> bool {
+        #[cfg(feature = "transport-qos")]
+        {
+            self.is_qos()
+        }
+        #[cfg(not(feature = "transport-qos"))]
+        {
+            false
+        }
+    }
+
     /// session-extqos (R311y506) — stage this link's QoS metadata (its priority
     /// band and/or reliability class) at bring-up, BEFORE the handshake drives:
     /// the wz counterpart of zenoh reading `prio=` / `rel=` off the endpoint's
@@ -5973,8 +5957,8 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         //
         // R2923 — and the hold spans the CONGESTION decision: before a frame's
         // sequence number is minted, the conduit's link is asked for room
-        // ([`BoxedLinkDriver::wait_for_room`]), waiting [`WAIT_BEFORE_DROP_US`]
-        // for a droppable message and [`WAIT_BEFORE_CLOSE_US`] for a blocking
+        // ([`BoxedLinkDriver::wait_for_room`]), waiting `wait_before_drop`
+        // for a droppable message and `wait_before_close` for a blocking
         // one. Upstream waits for a free batch under its per-priority stage
         // lock the same way
         // (`io/zenoh-transport/src/common/pipeline.rs` @ `fn push_network_message(`),
@@ -5985,14 +5969,18 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             Pushed,
             Congested,
         }
+        // R2924 — the waits are the session's configured ones
+        // (`transport/link/tx/queue/congestion_control/*`), upstream's
+        // defaults unless the operator set them.
+        let waits = self.params.tx_queue;
         let congested = || {
             let wait = if droppable {
                 crate::link::RoomWait::Drop {
-                    wait_us: WAIT_BEFORE_DROP_US,
+                    wait_us: waits.wait_before_drop_us,
                 }
             } else {
                 crate::link::RoomWait::Block {
-                    wait_us: WAIT_BEFORE_CLOSE_US,
+                    wait_us: waits.wait_before_close_us,
                 }
             };
             self.with_conduit_link(wire_reliability, priority, |link| {
@@ -9801,6 +9789,13 @@ impl<R: SessionRuntime, T: TimeSource> SessionFsmUnicastActionsTrait
         // F2 — Established (re-)entry re-opens the data-send gate (the
         // supervisor replays cached declarations right after this fires).
         R::with_mutex_mut(&self.link().transport_available, |g| *g = true);
+        // R2924 — the link's outbound queue takes the established session's
+        // shape: its configured sizes, one queue per priority if it negotiated
+        // QoS and one queue otherwise, as zenoh builds a link's pipeline when
+        // the link joins an established transport.
+        self.link()
+            .link_driver()
+            .shape_tx_queue(a.params.tx_queue.shape(a.negotiated_qos()));
     }
 
     #[inline(never)]
