@@ -2792,7 +2792,7 @@ mod tests {
         // against a rename and against each other and against NOTHING a
         // consumer could read.
         let mut failures: Vec<String> = Vec::new();
-        let live: [(&str, &str, Vec<&'static str>); 16] = [
+        let live: [(&str, &str, Vec<&'static str>); 17] = [
             // R2457 (open-debt item 702) — WHY a keyexpr reference did not
             // resolve. A key a consumer switches on precisely because the two
             // words send it to different places: `no_session` says the
@@ -2859,6 +2859,14 @@ mod tests {
             (rev::CENSUS, "kind", crate::interest::InterestKind::names()),
             (rev::CENSUS, "mode", crate::interest::InterestMode::names()),
             (rev::CENSUS, "offset_space", crate::AnchorSpace::names()),
+            // ZA-3214 ③ — the lexer's token classes, the first family on the
+            // selector verdict. Its walk is `TokenClass::names`, held to the
+            // lexer by the exhaustive `TokenClass::of`.
+            (
+                rev::SELECTOR_DIAGNOSE,
+                "kind",
+                crate::filter::TokenClass::names(),
+            ),
         ];
         // R2185 — what this table ACTUALLY held, collected as it is walked
         // rather than counted afterwards, so the closing comparison cannot

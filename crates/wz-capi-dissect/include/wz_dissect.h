@@ -971,7 +971,35 @@ int wz_dissect_pcap_census_where_limited(const unsigned char *bytes, size_t len,
  * The useful moment to ask "is this valid, and if not where" is while the
  * expression is being typed -- before there is a capture to run it against,
  * and long before a caller would want to pay four walks of a file to find
- * out. */
+ * out.
+ *
+ * ZA-3214 -- from verdict revision 2, BOTH branches close with the lexer's
+ * own tokens:
+ *
+ *     ...,"tokens":[{"start":0,"end":3,"kind":"word"},
+ *                   {"start":4,"end":6,"kind":"operator"}, ...]}
+ *
+ * `start` and `end` are BYTE offsets, `end` exclusive, in the unit `at`
+ * uses, so a caret and a colour run are placed by one rule. A consumer
+ * colouring the selector as it is typed reads these instead of keeping a
+ * lexer of its own, which would disagree with this one eventually about
+ * where a token begins. On a LEXICAL failure (an unclosed quote, a stray
+ * character) the list holds every token before the failure and none after
+ * it; on a parse failure every token is there. `kind` is one of:
+ *
+ *     `word`      an unquoted run: a field name or a value alike -- which of
+ *                 the two it is, is the parser's knowledge, and the parser
+ *                 may never reach a token the lexer produced
+ *     `quoted`    a quoted value, the span including both quotes
+ *     `operator`  a comparison: == != < <= > >=
+ *     `not`       `not` or `!`      (the span says which was typed)
+ *     `and`       `and` or `&&`
+ *     `or`        `or` or `||`
+ *     `open`      (
+ *     `close`     )
+ *
+ * @values selector_diagnose kind
+ * @carries selector_diagnose kind passenger */
 int wz_dissect_selector_diagnose(const char *selector, char **out);
 
 /* R311y855 (ABI 5) — THE FIELD LAYER: every message in the capture,

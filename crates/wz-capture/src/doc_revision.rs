@@ -1077,6 +1077,23 @@ pub const DOCUMENT_HISTORY: &[DocumentShape] = &[
         planes: &[],
         carries: &[],
     },
+    // ZA-3214 ③ — the verdict carries the LEXER'S TOKENS, on both branches.
+    //
+    // A consumer colouring a selector as it is typed had to keep a lexer of
+    // its own beside this one, and two lexers over one language disagree
+    // eventually about where a token begins. `tokens` is the library's walk:
+    // `start` / `end` byte offsets in the unit `at` already uses, and a `kind`
+    // drawn from a closed set. On a lexical failure the list holds what came
+    // before the failure, which is what makes it usable mid-keystroke.
+    DocumentShape {
+        document: SELECTOR_DIAGNOSE,
+        revision: 2,
+        keys: SELECTOR_DIAGNOSE_R2_KEYS,
+        retiring: &[],
+        families: SELECTOR_DIAGNOSE_R2_FAMILIES,
+        planes: &[],
+        carries: SELECTOR_DIAGNOSE_R2_CARRIES,
+    },
     DocumentShape {
         document: DECLARATIONS_DIAGNOSE,
         revision: 1,
@@ -4925,6 +4942,31 @@ pub const READABLE_SURFACES_R4_KEYS: &[&str] = &[
 /// over half a contract.
 pub const SELECTOR_DIAGNOSE_R1_KEYS: &[&str] =
     &["at", "document", "message", "name", "ok", "revision"];
+
+/// The selector verdict's key set at revision 2 — revision 1's PLUS `tokens`
+/// and the three keys each token object carries. ZA-3214 ③.
+pub const SELECTOR_DIAGNOSE_R2_KEYS: &[&str] = &[
+    "at", "document", "end", "kind", "message", "name", "ok", "revision", "start", "tokens",
+];
+
+/// What a token's `kind` says at selector-verdict revision 2 — the words of
+/// [`crate::filter::TokenClass`].
+pub const TOKEN_CLASS_R2: &[&str] = &[
+    "and", "close", "not", "open", "operator", "or", "quoted", "word",
+];
+
+/// The selector verdict's value families at revision 2: the token class.
+pub const SELECTOR_DIAGNOSE_R2_FAMILIES: &[ValueFamily] = &[ValueFamily {
+    key: "kind",
+    values: TOKEN_CLASS_R2,
+}];
+
+/// A token's `kind` is a PASSENGER: every token object carries `start`, `end`
+/// and `kind` whatever the word is.
+pub const SELECTOR_DIAGNOSE_R2_CARRIES: &[KeyCarries] = &[KeyCarries {
+    key: "kind",
+    shape: CarriesShape::Passenger,
+}];
 /// The declaration verdict's key set at revision 1, over BOTH branches.
 pub const DECLARATIONS_DIAGNOSE_R1_KEYS: &[&str] = &[
     "document",
@@ -6349,7 +6391,8 @@ mod tests {
             // `carries` and the `word` / `keys` under it, which is where the
             // third axis reaches a consumer at runtime.
             (READABLE_SURFACES, 4),
-            (SELECTOR_DIAGNOSE, 1),
+            // ZA-3214 ③ — to 2 when the verdict gained the lexer's `tokens`.
+            (SELECTOR_DIAGNOSE, 2),
             (DECLARATIONS_DIAGNOSE, 1),
         ] {
             named.push(name);

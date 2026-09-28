@@ -1292,9 +1292,14 @@ int main(void) {
     verdict = NULL;
     rc = wz_dissect_selector_diagnose("key == demo/**", &verdict);
     CHECK(rc == WZ_DISSECT_OK, "diagnose rc=%d", rc);
+    /* ZA-3214 -- revision 2 closes with the lexer's tokens, byte spans into
+     * `key == demo/**`, so a consumer colours the selector off this walk. */
     CHECK(strcmp(verdict,
-                 "{\"document\":{\"name\":\"selector_diagnose\",\"revision\":1},"
-                 "\"ok\":true}") == 0,
+                 "{\"document\":{\"name\":\"selector_diagnose\",\"revision\":2},"
+                 "\"ok\":true,\"tokens\":["
+                 "{\"start\":0,\"end\":3,\"kind\":\"word\"},"
+                 "{\"start\":4,\"end\":6,\"kind\":\"operator\"},"
+                 "{\"start\":7,\"end\":14,\"kind\":\"word\"}]}") == 0,
           "not a pass: %s", verdict);
     wz_dissect_string_free(verdict);
 
@@ -1714,6 +1719,9 @@ int main(void) {
         CHECK(verdict != NULL, "OK came back with no verdict");
         CHECK(strstr(verdict, "\"ok\":true") != NULL,
               "an unquoted non-ASCII word is a word: %s", verdict);
+        /* ZA-3214 -- and its token span counts BYTES: 7 + six UTF-8 bytes. */
+        CHECK(strstr(verdict, "{\"start\":7,\"end\":13,\"kind\":\"word\"}") != NULL,
+              "a multi-byte word's span is a byte span: %s", verdict);
         wz_dissect_string_free(verdict);
 
         /* A non-ASCII character that is NOT a word character (the euro sign).

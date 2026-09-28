@@ -1531,8 +1531,8 @@ pub unsafe extern "C" fn wz_dissect_selector_diagnose(
     // consumer can only see on failure is one it cannot check before trusting
     // a success.
     let head = wz_capture::doc_revision::envelope(wz_capture::doc_revision::SELECTOR_DIAGNOSE);
-    let verdict = match wz_capture::filter::Filter::parse(expr) {
-        Ok(_) => format!("{{{head},\"ok\":true}}"),
+    let mut verdict = match wz_capture::filter::Filter::parse(expr) {
+        Ok(_) => format!("{{{head},\"ok\":true"),
         Err(e) => {
             let mut s = format!("{{{head},\"ok\":false,\"at\":");
             s.push_str(&e.at.to_string());
@@ -1541,11 +1541,33 @@ pub unsafe extern "C" fn wz_dissect_selector_diagnose(
             // operator's own text back (an unknown field name, a bad value), so
             // it carries whatever they typed.
             wz_session_core::json::escape_into(&e.to_string(), &mut s);
-            s.push('}');
             s
         }
     };
+    // ZA-3214 ③ — the lexer's tokens, on BOTH branches, last. A consumer
+    // colouring the selector as it is typed reads the spans from this walk
+    // instead of keeping a lexer of its own; on a lexical failure the list is
+    // what came before `at`, so the colouring survives an unclosed quote.
+    push_selector_tokens(expr, &mut verdict);
+    verdict.push('}');
     write_string(verdict, out)
+}
+
+/// Write `,"tokens":[{"start":S,"end":E,"kind":"…"},…]` for `expr`.
+fn push_selector_tokens(expr: &str, out: &mut String) {
+    out.push_str(",\"tokens\":[");
+    for (i, t) in wz_capture::filter::tokens(expr).into_iter().enumerate() {
+        if i > 0 {
+            out.push(',');
+        }
+        out.push_str(&format!(
+            "{{\"start\":{},\"end\":{},\"kind\":\"{}\"}}",
+            t.start,
+            t.end,
+            t.class.word()
+        ));
+    }
+    out.push(']');
 }
 
 // ── R2102 (ABI 11, open-debt item 524) — THE LIVE DOOR ──────────────────────
@@ -4699,9 +4721,14 @@ mod tests {
         unsafe { wz_dissect_string_free(out) };
         // R2100 (open-debt item 509) — the verdict now OPENS with its own
         // revision, so a consumer can tell this shape from the next one.
+        // ZA-3214 ③ — revision 2 closes with the lexer's tokens, byte spans
+        // into `key == demo/**`.
         assert_eq!(
             verdict,
-            "{\"document\":{\"name\":\"selector_diagnose\",\"revision\":1},\"ok\":true}"
+            "{\"document\":{\"name\":\"selector_diagnose\",\"revision\":2},\"ok\":true,\
+             \"tokens\":[{\"start\":0,\"end\":3,\"kind\":\"word\"},\
+             {\"start\":4,\"end\":6,\"kind\":\"operator\"},\
+             {\"start\":7,\"end\":14,\"kind\":\"word\"}]}"
         );
 
         out = core::ptr::null_mut();
@@ -4718,9 +4745,19 @@ mod tests {
         unsafe { wz_dissect_string_free(out) };
         assert!(
             verdict.starts_with(
-                "{\"document\":{\"name\":\"selector_diagnose\",\"revision\":1},\"ok\":false,\"at\":"
+                "{\"document\":{\"name\":\"selector_diagnose\",\"revision\":2},\"ok\":false,\"at\":"
             ),
             "the verdict must carry a position: {verdict}"
+        );
+        // A refused selector still carries every token it lexed: this one
+        // fails in the PARSER, so all three are there.
+        assert!(
+            verdict.ends_with(
+                ",\"tokens\":[{\"start\":0,\"end\":4,\"kind\":\"word\"},\
+                 {\"start\":5,\"end\":7,\"kind\":\"operator\"},\
+                 {\"start\":8,\"end\":18,\"kind\":\"word\"}]}"
+            ),
+            "the tokens close the verdict on the refused branch too: {verdict}"
         );
         assert!(
             verdict.contains("frobnicate"),

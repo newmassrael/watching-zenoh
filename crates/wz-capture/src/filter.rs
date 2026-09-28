@@ -847,11 +847,127 @@ impl fmt::Display for FilterError {
     }
 }
 
-/// One lexical token plus where it started.
+/// One lexical token plus the byte span it covers.
+///
+/// ZA-3214 ③ — `end` joined `at` so the span a token covers is the lexer's
+/// answer rather than a consumer's re-derivation; see [`tokens`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct Token {
     at: usize,
+    end: usize,
     kind: TokenKind,
+}
+
+/// ZA-3214 ③ — WHAT A LEXED TOKEN IS, as the closed set a consumer colours by.
+///
+/// The words are the lexer's own distinctions and no finer: `word` covers a
+/// field name and an unquoted value alike, because telling those apart is the
+/// parser's knowledge and the parser may never reach a token the lexer
+/// produced (the verdict below carries tokens for a selector that failed).
+/// `and` covers `and` and `&&`, `or` covers `or` and `||`, `not` covers `not`
+/// and `!` — the span says which spelling was typed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TokenClass {
+    /// An unquoted run of word characters that is not a keyword.
+    Word,
+    /// A quoted value, span including both quotes.
+    Quoted,
+    /// A comparison operator: `==` `!=` `<` `<=` `>` `>=`.
+    Operator,
+    /// `not` or `!`.
+    Not,
+    /// `and` or `&&`.
+    And,
+    /// `or` or `||`.
+    Or,
+    /// `(`.
+    Open,
+    /// `)`.
+    Close,
+}
+
+impl TokenClass {
+    /// The word the selector verdict writes under a token's `kind`.
+    pub const fn word(self) -> &'static str {
+        match self {
+            Self::Word => "word",
+            Self::Quoted => "quoted",
+            Self::Operator => "operator",
+            Self::Not => "not",
+            Self::And => "and",
+            Self::Or => "or",
+            Self::Open => "open",
+            Self::Close => "close",
+        }
+    }
+
+    /// Every word [`Self::word`] can return. The exhaustive match in
+    /// [`Self::of`] is what breaks when the lexer gains a token kind, and this
+    /// list is what the declared value family is held to.
+    pub fn names() -> Vec<&'static str> {
+        [
+            Self::Word,
+            Self::Quoted,
+            Self::Operator,
+            Self::Not,
+            Self::And,
+            Self::Or,
+            Self::Open,
+            Self::Close,
+        ]
+        .into_iter()
+        .map(Self::word)
+        .collect()
+    }
+
+    fn of(kind: &TokenKind) -> Self {
+        match kind {
+            TokenKind::Word(_) => Self::Word,
+            TokenKind::Quoted(_) => Self::Quoted,
+            TokenKind::Op(_) => Self::Operator,
+            TokenKind::Not => Self::Not,
+            TokenKind::And => Self::And,
+            TokenKind::Or => Self::Or,
+            TokenKind::Open => Self::Open,
+            TokenKind::Close => Self::Close,
+        }
+    }
+}
+
+/// ZA-3214 ③ — one token as a consumer sees it: a BYTE span and a class.
+///
+/// `start..end` are byte offsets into the selector, the same unit as
+/// [`FilterError::at`], so a caret and a colour run are placed by one rule.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct LexedToken {
+    /// Byte offset of the token's first byte.
+    pub start: usize,
+    /// Byte offset one past the token's last byte.
+    pub end: usize,
+    /// What the lexer took it for.
+    pub class: TokenClass,
+}
+
+/// ZA-3214 ③ — THE LEXER'S TOKENS, for a consumer that colours a selector.
+///
+/// The same walk [`Filter::parse`] runs, so a colouring and a verdict cannot
+/// disagree about where a token begins. On a LEXICAL failure it returns every
+/// token lexed before the failure and stops there: a selector being typed is
+/// mostly well-formed, and colouring nothing because its last character is an
+/// unclosed quote would make the colouring useless at exactly the moment it is
+/// read. Where it stopped is [`Filter::parse`]'s `at`, not this function's to
+/// repeat.
+pub fn tokens(source: &str) -> Vec<LexedToken> {
+    let mut out = Vec::new();
+    // The error is deliberately dropped: it is the verdict's to report.
+    let _ = lex_into(source, &mut out);
+    out.into_iter()
+        .map(|t| LexedToken {
+            start: t.at,
+            end: t.end,
+            class: TokenClass::of(&t.kind),
+        })
+        .collect()
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -914,6 +1030,14 @@ fn is_word_char(c: char) -> bool {
 /// advances by whole characters.
 fn lex(source: &str) -> Result<Vec<Token>, FilterError> {
     let mut tokens = Vec::new();
+    lex_into(source, &mut tokens)?;
+    Ok(tokens)
+}
+
+/// The walk behind [`lex`], writing into `tokens` as it goes so that a caller
+/// who wants what was lexed BEFORE a failure — [`tokens`], colouring a
+/// half-typed selector — reads it from the same walk rather than a second one.
+fn lex_into(source: &str, tokens: &mut Vec<Token>) -> Result<(), FilterError> {
     let mut i = 0usize;
     while i < source.len() {
         let c = source[i..]
@@ -930,6 +1054,7 @@ fn lex(source: &str) -> Result<Vec<Token>, FilterError> {
             '(' => {
                 tokens.push(Token {
                     at,
+                    end: at + clen,
                     kind: TokenKind::Open,
                 });
                 i += clen;
@@ -937,6 +1062,7 @@ fn lex(source: &str) -> Result<Vec<Token>, FilterError> {
             ')' => {
                 tokens.push(Token {
                     at,
+                    end: at + clen,
                     kind: TokenKind::Close,
                 });
                 i += clen;
@@ -967,6 +1093,7 @@ fn lex(source: &str) -> Result<Vec<Token>, FilterError> {
                 }
                 tokens.push(Token {
                     at,
+                    end: j + quote.len_utf8(),
                     kind: TokenKind::Quoted(source[start..j].to_string()),
                 });
                 i = j + quote.len_utf8();
@@ -994,7 +1121,11 @@ fn lex(source: &str) -> Result<Vec<Token>, FilterError> {
                         })
                     }
                 };
-                tokens.push(Token { at, kind });
+                tokens.push(Token {
+                    at,
+                    end: at + width,
+                    kind,
+                });
                 i += width;
             }
             c if is_word_char(c) => {
@@ -1012,7 +1143,7 @@ fn lex(source: &str) -> Result<Vec<Token>, FilterError> {
                     "not" => TokenKind::Not,
                     _ => TokenKind::Word(word.to_string()),
                 };
-                tokens.push(Token { at, kind });
+                tokens.push(Token { at, end: j, kind });
                 i = j;
             }
             _ => {
@@ -1023,7 +1154,7 @@ fn lex(source: &str) -> Result<Vec<Token>, FilterError> {
             }
         }
     }
-    Ok(tokens)
+    Ok(())
 }
 
 struct Parser<'a> {
@@ -1115,6 +1246,7 @@ impl<'a> Parser<'a> {
             Some(Token {
                 at,
                 kind: TokenKind::Word(w),
+                ..
             }) => (*at, w.clone()),
             Some(t) => {
                 return Err(FilterError {
@@ -1134,6 +1266,7 @@ impl<'a> Parser<'a> {
             Some(Token {
                 at,
                 kind: TokenKind::Op(op),
+                ..
             }) => (*at, *op),
             Some(t) => {
                 return Err(FilterError {
@@ -1153,6 +1286,7 @@ impl<'a> Parser<'a> {
             Some(Token {
                 at,
                 kind: TokenKind::Word(w) | TokenKind::Quoted(w),
+                ..
             }) => (*at, w.clone()),
             Some(t) => {
                 return Err(FilterError {
@@ -2159,5 +2293,72 @@ mod tests {
             "key == 로봇 ".len(),
             "a byte offset, which is 13 here and 9 if someone counted characters"
         );
+    }
+
+    /// ZA-3214 ③ — every class, every spelling, and the span each covers,
+    /// written as the TEXT the span slices out so a wrong offset reads as the
+    /// wrong substring rather than as a number.
+    #[test]
+    fn tokens_carry_the_byte_span_and_class_the_lexer_saw() {
+        let src = "(key == 'a b') && not size>=3 || !x != \"로봇\" and y < 1 or z > 2";
+        let got: Vec<(&str, &str)> = tokens(src)
+            .into_iter()
+            .map(|t| (&src[t.start..t.end], t.class.word()))
+            .collect();
+        assert_eq!(
+            got,
+            alloc::vec![
+                ("(", "open"),
+                ("key", "word"),
+                ("==", "operator"),
+                ("'a b'", "quoted"),
+                (")", "close"),
+                ("&&", "and"),
+                ("not", "not"),
+                ("size", "word"),
+                (">=", "operator"),
+                ("3", "word"),
+                ("||", "or"),
+                ("!", "not"),
+                ("x", "word"),
+                ("!=", "operator"),
+                ("\"로봇\"", "quoted"),
+                ("and", "and"),
+                ("y", "word"),
+                ("<", "operator"),
+                ("1", "word"),
+                ("or", "or"),
+                ("z", "word"),
+                (">", "operator"),
+                ("2", "word"),
+            ]
+        );
+        // Every class the family declares was reached, so the table above is
+        // not silently narrower than the vocabulary it is evidence for.
+        let mut reached: Vec<&str> = got.iter().map(|(_, c)| *c).collect();
+        reached.sort_unstable();
+        reached.dedup();
+        let mut declared = TokenClass::names();
+        declared.sort_unstable();
+        assert_eq!(reached, declared);
+    }
+
+    /// ZA-3214 ③ — a LEXICAL failure keeps what came before it. The verdict's
+    /// `at` says where lexing stopped; the tokens are the part a colouring can
+    /// still use, and they end before that offset.
+    #[test]
+    fn tokens_stop_at_a_lexical_failure_and_keep_what_came_before() {
+        let src = "key == \"unterminated";
+        let got = tokens(src);
+        assert_eq!(
+            got.iter().map(|t| &src[t.start..t.end]).collect::<Vec<_>>(),
+            alloc::vec!["key", "=="]
+        );
+        let at = Filter::parse(src).expect_err("an open quote is refused").at;
+        assert!(got.iter().all(|t| t.end <= at));
+
+        // A PARSE failure is not a lexical one: every token is there.
+        assert_eq!(tokens("key ==").len(), 2);
+        assert!(tokens("").is_empty());
     }
 }
