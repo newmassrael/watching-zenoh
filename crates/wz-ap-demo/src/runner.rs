@@ -602,16 +602,14 @@ pub(crate) fn is_startup_phase_give_up(e: &io::Error) -> bool {
 /// (`orchestrator.rs:318-335`) expressed over a loop that does not stop when the
 /// phase ends.
 ///
-/// # The approximation, stated rather than hidden
+/// # What it counts
 ///
-/// The witness is `AcceptEvent::FaceUp`, which fires for an ACCEPTED face as
-/// well as a dialed one, where upstream's `connect_peers` counts only the
-/// outbound dial. `Face` carries no direction, so telling them apart here would
-/// mean matching resolved addresses against the connect list — and the
-/// difference is only reachable by a node whose own dials are all failing while
-/// a peer dials IN within the budget. Such a node HAS a mesh session, which is
-/// the state `exit_on_failure` is asking about, so the approximation errs toward
-/// letting a connected node live rather than killing one.
+/// `AcceptEvent::FaceUp` faces this node DIALED (`Face::dialed`), because that
+/// is what upstream's `connect_peers` and its start conditions count. R2951 —
+/// this counted every `FaceUp`, accepted faces included, and said so as an
+/// approximation: `Face` then carried no direction. It carries one now, so a
+/// node whose own dials all fail while a peer dials IN is told the truth about
+/// its connect phase, as upstream's is.
 #[cfg(any(feature = "routing-peer", feature = "router-hat-router"))]
 struct ConnectPhaseWatch {
     policy: PhasePolicy,
@@ -5302,7 +5300,8 @@ async fn run_peer_until(
                     buf.clear();
                     buf.extend(forwarder_ev.admin_sessions());
                 }
-                if matches!(event, AcceptEvent::FaceUp(_)) {
+                // R2951 — this node's own dials only, as upstream counts them.
+                if matches!(event, AcceptEvent::FaceUp(face) if face.dialed) {
                     faces_up_ev.set(faces_up_ev.get() + 1);
                 }
                 log_face_event("peer", event)
@@ -5378,8 +5377,8 @@ async fn run_peer_until(
     // R2950 — the START WINDOW: the application holds its first tick until
     // every dialled peer is up, or `scouting/delay` has passed, as upstream's
     // `start_peer` holds its open back. No dial target, or `connect_scouted`
-    // false, is no wait. The face count is `ConnectPhaseWatch`'s witness, with
-    // the same approximation that type's doc states.
+    // false, is no wait. The face count is `ConnectPhaseWatch`'s witness: this
+    // node's own dials, as upstream's start conditions count (R2951).
     let start_gate = opts
         .start_window
         .filter(|_| dial_target_count > 0)
@@ -7108,7 +7107,8 @@ async fn run_router_hat_until(
             // event stream the loop already reports through. See the peer twin.
             let faces_up_ev = connect_faces_up;
             move |event: &AcceptEvent| {
-                if matches!(event, AcceptEvent::FaceUp(_)) {
+                // R2951 — this node's own dials only, as upstream counts them.
+                if matches!(event, AcceptEvent::FaceUp(face) if face.dialed) {
                     faces_up_ev.set(faces_up_ev.get() + 1);
                 }
                 log_face_event("router-hat", event)

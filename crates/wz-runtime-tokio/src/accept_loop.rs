@@ -206,6 +206,12 @@ pub struct Face {
     /// `None` = the INIT never surfaced a role (kept distinct from `Some(Peer)`,
     /// which is what the routing boundary DEFAULTS such a face to).
     pub peer_whatami: Option<wz_codecs::whatami::WhatAmI>,
+    /// R2951 — whether THIS node dialed the face (a configured or discovered
+    /// connect target) rather than accepted it. Upstream's start conditions
+    /// count only the node's own dials (`start_conditions`, fed by
+    /// `spawn_peer_connector`), and a face event that could not say which side
+    /// opened it made every observer that needs that answer approximate it.
+    pub dialed: bool,
     /// session-extqos (R311y506) — the QoS link metadata NEGOTIATED on this face,
     /// after the directional containment merged the peer's `init::ext::QoSLink`
     /// into ours.
@@ -2051,6 +2057,10 @@ where
     // now that the dedups read it). `peak_concurrent` and the held-count read its
     // cardinality.
     let mut faces: BTreeMap<FaceId, Option<Vec<u8>>> = BTreeMap::new();
+    // R2951 — the ids of opens the loop ACCEPTED, from the accept push until the
+    // open resolves either way. What is not in it is a dial, which is how
+    // `Face::dialed` is answered without `router-connect-reconcile`'s index.
+    let mut accepted_ids: std::collections::BTreeSet<FaceId> = std::collections::BTreeSet::new();
     // The address index of the OUTBOUND dials (`router-connect-reconcile`): every
     // dialed face's `FaceId -> SocketAddr`, populated at each dial-push (startup
     // seed, gossip `Step::Dial`, reconcile-add) and pruned when the face leaves.
@@ -2268,6 +2278,8 @@ where
                             peer,
                             peer_zid: opened.peer_zid(),
                             peer_whatami: opened.peer_whatami(),
+                            // R2951 — not an accept, so one of this node's dials.
+                            dialed: !accepted_ids.remove(&id),
                             // session-extqos — read the MERGED metadata off the
                             // session actions, before `opened` moves into the
                             // drive future. Post-handshake, so it is the outcome
@@ -2482,6 +2494,8 @@ where
                             .push(Box::pin(drive_face(face, opened, forwarder)) as DriveFuture<'_>);
                     }
                     Err(cause) => {
+                        // R2951 — an accept that never opened leaves no mark behind.
+                        accepted_ids.remove(&id);
                         // R311y212 — a failed retained MULTILINK dial (a re-add or an
                         // initial aggregating dial that never connected) is
                         // re-scheduled: retry-until-success. Handled FIRST and
@@ -2939,6 +2953,10 @@ where
                 let id = FaceId(next_id);
                 next_id += 1;
                 summary.accepted += 1;
+                // R2951 — every open that is not an ACCEPT is one of this node's
+                // dials; this is the one accept push, so marking it here is what
+                // lets `Face::dialed` be answered in every build.
+                accepted_ids.insert(id);
                 // R311y205 (transport-multilink) — a `max_links > 1` acceptor opens
                 // with the 0x4-negotiating variant so an inbound peer's second link
                 // can aggregate (the ext captures its ephemeral pubkey); the
