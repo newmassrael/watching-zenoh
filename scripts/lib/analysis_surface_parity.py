@@ -480,6 +480,17 @@ ONLY_CAPI = {
         "`--csv` two rows up, where the reasoning runs the other way.",
         (4, 5),
     ),
+    # ZA-3215 — the JOINED buffer of a completed fragment chain. Filed in the
+    # round that added the symbol.
+    "the buffer a completed fragment chain was joined in": (
+        "wz_dissect_live_reassembled_bytes",
+        "DELIBERATE, on the row above's reasoning: the terminal holds the "
+        "dissection in its own process, and its `--fields` already renders the "
+        "records walked out of a joined chain. What this symbol adds is the "
+        "buffer CROSSING the boundary so a consumer can draw those spans on it, "
+        "and only the ABI has a boundary to cross.",
+        (),
+    ),
     "a FROZEN capture read into binary records": (
         "wz_dissect_pcap_replay",
         "DELIBERATE, and it rides `decoded messages as BINARY records` above. "

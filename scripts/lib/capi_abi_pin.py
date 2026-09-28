@@ -50,7 +50,7 @@ import subprocess
 import sys
 
 # The pinned pair. Edit BOTH halves deliberately -- see the module doc.
-EXPECTED_VERSION = 18
+EXPECTED_VERSION = 19
 
 # R2108 (open-debt item 525) -- THE RECORD'S LAYOUT, pinned HERE and read from
 # the artifact through `wz_dissect_record_layout`.
@@ -114,6 +114,12 @@ EXPECTED_SYMBOLS = {
     # CALLER sized add nothing to release and run no callback, so the revision
     # moves for the symbol alone.
     "wz_dissect_live_message_bytes",
+    # ZA-3215 (ABI 19) — the JOINED buffer of a record that completed a fragment
+    # chain, the bytes `above_transport.fields` indexes. Copied into a buffer
+    # the CALLER sized, exactly like the door above, so the memory rule does not
+    # move; it is its own symbol because it answers a different buffer of the
+    # same message, and folding the two would make one record mean two ranges.
+    "wz_dissect_live_reassembled_bytes",
     # R2453 (open-debt item 700) — the ANALYSIS PLANES over a live handle, and
     # the call that declares its feed over. Two symbols and ONE revision,
     # because they are one capability: measured, the census of a capture that

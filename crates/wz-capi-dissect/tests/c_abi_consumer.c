@@ -562,6 +562,29 @@ static int check_message_bytes_door(void) {
     rc = wz_dissect_live_message_bytes(h, &stream_rec, NULL, sizeof buf, &needed);
     CHECK(rc == WZ_DISSECT_ERR_INVALID_ARG,
           "a null buffer with a non-zero cap is a caller bug, rc=%d", rc);
+
+    /* ZA-3215 (ABI 19) -- THE JOINED-BUFFER DOOR, on the refusals a C caller
+     * branches on. A KeepAlive completed no fragment chain, so it has no joined
+     * buffer: refused PER RECORD, with nothing to size for. The positive arm --
+     * a completing Fragment answering the record that was split -- is driven in
+     * the crate's Rust tests over a capture this file has no builder for. */
+    needed = 999;
+    rc = wz_dissect_live_reassembled_bytes(h, &stream_rec, buf, sizeof buf, &needed);
+    CHECK(rc == WZ_DISSECT_ERR_NOT_REASSEMBLED,
+          "a record that completed no chain has no join, rc=%d", rc);
+    CHECK(needed == 0, "a refusal must not report a length: %zu", needed);
+    CHECK(WZ_DISSECT_ERR_NOT_REASSEMBLED != WZ_DISSECT_ERR_NO_BYTE_SOURCE &&
+              WZ_DISSECT_ERR_NOT_REASSEMBLED != WZ_DISSECT_ERR_BYTES_RETIRED,
+          "per-record, per-list and positional refusals are three codes");
+    rc = wz_dissect_live_reassembled_bytes(NULL, &stream_rec, buf, sizeof buf, &needed);
+    CHECK(rc == WZ_DISSECT_ERR_INVALID_ARG, "null handle rc=%d", rc);
+    rc = wz_dissect_live_reassembled_bytes(h, NULL, buf, sizeof buf, &needed);
+    CHECK(rc == WZ_DISSECT_ERR_INVALID_ARG, "null record rc=%d", rc);
+    rc = wz_dissect_live_reassembled_bytes(h, &stream_rec, buf, sizeof buf, NULL);
+    CHECK(rc == WZ_DISSECT_ERR_INVALID_ARG, "null needed rc=%d", rc);
+    rc = wz_dissect_live_reassembled_bytes(h, &stream_rec, NULL, sizeof buf, &needed);
+    CHECK(rc == WZ_DISSECT_ERR_INVALID_ARG,
+          "a null buffer with a non-zero cap is a caller bug, rc=%d", rc);
     wz_dissect_live_close(h);
 
     /* A BATCH, which is where the contract about the slice's END is visible at

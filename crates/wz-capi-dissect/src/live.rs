@@ -231,6 +231,22 @@ struct Mark {
     list_id: u64,
 }
 
+/// ZA-3215 ⑤ — what [`LiveDissection::reassembled_bytes`] answers.
+///
+/// Three answers and not [`wz_capture::MessageBytes`]'s three, because the
+/// question is narrower: the record either completed a chain or it did not, and
+/// only a record that DID can have lost its buffer since.
+pub enum ReassembledBytes<'a> {
+    /// The buffer the chain was joined in — the referent of the row's
+    /// `above_transport.fields` and `above_transport.carried` spans.
+    Joined(&'a [u8]),
+    /// The record names no message this handle still holds.
+    Retired,
+    /// The record's message did not complete a fragment chain, so there is no
+    /// joined buffer to hand back — structurally, for this record.
+    NotReassembled,
+}
+
 /// R2102 (open-debt item 524) — a dissection that outlives the call that made
 /// it, fed incrementally and drained into the caller's buffer.
 ///
@@ -547,6 +563,9 @@ impl LiveDissection {
     /// R2205 (open-debt item 560) — THE BYTES one drained record was decoded
     /// from, found by the coordinates that record already carries.
     ///
+    /// ZA-3215 ⑤ — the walk from record to frame moved to [`Self::resolve`],
+    /// which [`Self::reassembled_bytes`] shares.
+    ///
     /// # Why the RECORD is the key and not a span
     ///
     /// The obvious door takes `(list_id, direction, start, end)` and hands back
@@ -576,6 +595,53 @@ impl LiveDissection {
     /// and is answered `Retired` — the same word `wz-capture` uses for bytes a
     /// ceiling took, because from the consumer's side it is the same fact.
     pub fn message_bytes(&self, record: &WzDissectRecord) -> wz_capture::MessageBytes<'_> {
+        match self.resolve(record) {
+            Ok((flow, origin, index, _)) => self.dissection.message_bytes_at(flow, origin, index),
+            Err(answer) => answer,
+        }
+    }
+
+    /// ZA-3215 ⑤ — THE JOINED BUFFER of the record that completed a fragment
+    /// chain: the bytes `above_transport.fields` and `above_transport.carried`
+    /// index, for exactly the row whose `carried_state` is `reassembled`.
+    ///
+    /// Resolved through the same record-to-frame walk as [`Self::message_bytes`],
+    /// so the two doors cannot disagree about which message a record names.
+    /// They differ in WHICH bytes of that message they hand back, and that is
+    /// the whole reason there are two: `message_bytes` answers with the bytes
+    /// the row's own `fields` were walked from — for a completing `Fragment`,
+    /// the fragment as it crossed the wire — and this answers with the buffer
+    /// the chain was joined in, which never crossed the wire in one piece.
+    pub fn reassembled_bytes(&self, record: &WzDissectRecord) -> ReassembledBytes<'_> {
+        let frame = match self.resolve(record) {
+            Ok((_, _, _, frame)) => frame,
+            Err(wz_capture::MessageBytes::NoSource(_)) => return ReassembledBytes::NotReassembled,
+            Err(_) => return ReassembledBytes::Retired,
+        };
+        match &frame.carried {
+            wz_session_core::passive::Carried::Reassembled { joined, .. } => {
+                ReassembledBytes::Joined(joined)
+            }
+            _ => ReassembledBytes::NotReassembled,
+        }
+    }
+
+    /// The record-to-frame walk both byte doors share: which list the record
+    /// came out of, where in it, and the frame itself — or the answer to give
+    /// when there is no such frame.
+    #[allow(clippy::type_complexity)]
+    fn resolve(
+        &self,
+        record: &WzDissectRecord,
+    ) -> Result<
+        (
+            wz_capture::link::FlowKey,
+            wz_capture::MessageListOrigin,
+            usize,
+            &wz_session_core::passive::PassiveFrame,
+        ),
+        wz_capture::MessageBytes<'_>,
+    > {
         let direction = match record.direction {
             0 => Direction::A,
             1 => Direction::B,
@@ -584,9 +650,9 @@ impl LiveDissection {
             // and this library does not get to assume what is on the other side
             // of it.
             _ => {
-                return wz_capture::MessageBytes::Retired(String::from(
+                return Err(wz_capture::MessageBytes::Retired(String::from(
                     "no such direction on any message of this reader",
-                ))
+                )))
             }
         };
         // ZA-3214 ② — a SCOUTING record's bytes are a whole datagram the
@@ -599,38 +665,38 @@ impl LiveDissection {
             .values()
             .any(|mark| mark.list_id == record.list_id)
         {
-            return wz_capture::MessageBytes::NoSource(
+            return Err(wz_capture::MessageBytes::NoSource(
                 wz_capture::NoByteSource::CallerHoldsThePacket,
-            );
+            ));
         }
         let Some((&(flow, origin), _)) = self
             .marks
             .iter()
             .find(|(_, mark)| mark.list_id == record.list_id)
         else {
-            return wz_capture::MessageBytes::Retired(String::from(
+            return Err(wz_capture::MessageBytes::Retired(String::from(
                 "no list of this handle carries that list_id",
-            ));
+            )));
         };
         let Some((_, _, list)) = self
             .dissection
             .message_lists_with_origin()
             .find(|(f, o, _)| *f == flow && *o == origin)
         else {
-            return wz_capture::MessageBytes::Retired(String::from(
+            return Err(wz_capture::MessageBytes::Retired(String::from(
                 "the list this record came out of is no longer held",
-            ));
+            )));
         };
-        let Some(index) = list.iter().position(|f| {
+        let Some((index, frame)) = list.iter().enumerate().find(|(_, f)| {
             f.direction == direction
                 && f.stream_offset as u64 == record.anchor
                 && f.batch_index as u32 == record.batch_index
         }) else {
-            return wz_capture::MessageBytes::Retired(String::from(
+            return Err(wz_capture::MessageBytes::Retired(String::from(
                 "this message is no longer in its list",
-            ));
+            )));
         };
-        self.dissection.message_bytes_at(flow, origin, index)
+        Ok((flow, origin, index, frame))
     }
 
     /// R2453 (open-debt item 700) — THE ANALYSIS PLANES OF WHAT THIS HANDLE HAS

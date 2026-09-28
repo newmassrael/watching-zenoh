@@ -275,6 +275,96 @@ pub fn multilink_declaring_after_the_reference() -> (crate::Dissection, Vec<u8>)
     capture(&rows)
 }
 
+/// ZA-3215 ⑤ — ONE unicast session over UDP whose only record arrives as a
+/// COMPLETED fragment chain, as the pcap FILE, with the record it carries.
+///
+/// For a consumer of this crate that grades a door over the joined buffer: the
+/// buffer the chain is joined in must equal the record that was split, and the
+/// record is handed back so the comparison needs no knowledge of the split.
+///
+/// The handshake is the whole four-message exchange rather than
+/// [`handshake`]'s two Inits: a fragment chain is tracked only once an InitAck
+/// has fixed the SN resolution, and without one every fragment reads
+/// `fragment_without_resolution` and nothing is ever joined.
+pub fn completed_chain_capture() -> (Vec<u8>, Vec<u8>) {
+    let init = |is_ack: bool| {
+        let flags = if is_ack {
+            wz_codecs::wire_const::FLAG_T_INIT_A
+        } else {
+            0
+        };
+        let mut wire = alloc::vec![flags | wz_session_core::wire_const::T_MID_INIT];
+        let body = wz_codecs::init_body::InitBody {
+            version: 0x09,
+            cbyte: 0x31,
+            zid: if is_ack { ZID_B } else { ZID_A },
+            sn_res: None,
+            batch_size: None,
+            cookie_len: if is_ack { Some(0) } else { None },
+            cookie: if is_ack { Some(&[]) } else { None },
+        };
+        wire.extend_from_slice(&body.encode_to_vec(0, u8::from(is_ack)));
+        wire
+    };
+    let open = |is_ack: bool| {
+        let flags = if is_ack {
+            wz_codecs::wire_const::FLAG_T_OPEN_A
+        } else {
+            0
+        };
+        let mut wire = alloc::vec![flags | wz_session_core::wire_const::T_MID_OPEN];
+        wire.extend_from_slice(
+            &wz_codecs::open_body::OpenBody {
+                lease: 10_000,
+                initial_sn: 0,
+                cookie_len: if is_ack { None } else { Some(0) },
+                cookie: if is_ack { None } else { Some(&[]) },
+            }
+            .encode_to_vec(u8::from(is_ack)),
+        );
+        wire
+    };
+    let fragment = |sn: u8, more: bool, piece: &[u8]| {
+        let mut wire = alloc::vec![
+            wz_session_core::wire_const::T_MID_FRAGMENT
+                | wz_codecs::wire_const::FLAG_T_FRAGMENT_R
+                | if more {
+                    wz_codecs::wire_const::FLAG_T_FRAGMENT_M
+                } else {
+                    0
+                },
+            sn,
+        ];
+        wire.extend_from_slice(piece);
+        wire
+    };
+    let record = push(sender_space(0, Some("chain/joined")), &[7u8; 8]);
+    let split = record.len() / 2;
+    let rows = [
+        (true, init(false)),
+        (false, init(true)),
+        (true, open(false)),
+        (false, open(true)),
+        (true, fragment(0, true, &record[..split])),
+        (true, fragment(1, false, &record[split..])),
+    ];
+    let packets: Vec<Vec<u8>> = rows
+        .iter()
+        .map(|(from_low, wire)| {
+            if *from_low {
+                udp_packet(LOW, 43210, HIGH, 7447, wire)
+            } else {
+                udp_packet(HIGH, 7447, LOW, 43210, wire)
+            }
+        })
+        .collect();
+    let refs: Vec<(u32, u32, &[u8])> = packets.iter().map(|p| (0u32, 0u32, p.as_slice())).collect();
+    (
+        crate::pcap::write(crate::link::LINKTYPE_ETHERNET, &refs),
+        record,
+    )
+}
+
 /// The SHAPE both fixtures above claim, asserted rather than assumed.
 ///
 /// A fixture that stopped building two flows, or two links, or one session,

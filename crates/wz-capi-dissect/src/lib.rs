@@ -130,6 +130,16 @@ pub const WZ_DISSECT_ERR_NO_BYTE_SOURCE: c_int = -7;
 /// error it would send a consumer to inspect a capture that is fine, which is
 /// the longest kind of wrong turn this ABI can hand out.
 pub const WZ_DISSECT_ERR_CONTAINER_SHRANK: c_int = -8;
+/// ZA-3215 ⑤ — this record did not COMPLETE a fragment chain, so it has no
+/// joined buffer for [`wz_dissect_live_reassembled_bytes`] to hand back.
+///
+/// Its own code and not [`WZ_DISSECT_ERR_NO_BYTE_SOURCE`], which is about a
+/// LIST: every record of such a list is refused. This is about one RECORD, and
+/// the next record of the same list may well answer — the one whose field row
+/// says `carried_state: reassembled`. Nor [`WZ_DISSECT_ERR_BYTES_RETIRED`],
+/// which is retry-later positional: asking again for this record will never
+/// succeed.
+pub const WZ_DISSECT_ERR_NOT_REASSEMBLED: c_int = -9;
 
 /// R311y887 — read with no ceilings at all, which is what a FILE deserves: it
 /// ends, so keeping every byte of it is already bounded.
@@ -304,6 +314,7 @@ pub extern "C" fn wz_dissect_abi_version() -> c_int {
     // consumer pinned to 16 meeting 17 learns exactly that there is a door it
     // does not know about.
     // ZA-3214 — 18, for `wz_dissect_live_fields_where`.
+    // ZA-3215 — 19, for `wz_dissect_live_reassembled_bytes`.
     WZ_DISSECT_ABI_REVISION
 }
 
@@ -321,7 +332,7 @@ pub extern "C" fn wz_dissect_abi_version() -> c_int {
 /// It lives AFTER the function rather than above it on purpose: an item placed
 /// between a doc comment and the item it documents takes that doc, which is
 /// the doc-ownership defect the C1bz budget records.
-pub const WZ_DISSECT_ABI_REVISION: c_int = 18;
+pub const WZ_DISSECT_ABI_REVISION: c_int = 19;
 
 /// R2108 (open-debt item 525) — THE RECORD'S LAYOUT, reported by the artifact.
 ///
@@ -1915,6 +1926,98 @@ pub unsafe extern "C" fn wz_dissect_live_message_bytes(
     // SAFETY: `out` is writable for `cap >= bytes.len()` bytes by the caller
     // contract, and the two regions cannot overlap -- `bytes` is inside the
     // dissection this library owns.
+    unsafe { core::ptr::copy_nonoverlapping(bytes.as_ptr(), out, bytes.len()) };
+    WZ_DISSECT_OK
+}
+
+/// ZA-3215 ⑤ — THE JOINED BUFFER of a record that completed a fragment chain,
+/// copied into a buffer the caller owns.
+///
+/// # What it is for
+///
+/// A row whose `above_transport.carried_state` is `reassembled` carries
+/// `above_transport.fields` and `above_transport.carried`, and their spans
+/// index the buffer the chain was joined in — a buffer that never crossed the
+/// wire in one piece and that no other door hands out. This door hands it
+/// out, so those spans can be drawn on the bytes they describe.
+///
+/// # Addressed by the RECORD, and not by `chain_id`
+///
+/// The same record [`wz_dissect_live_drain`] wrote, resolved through the same
+/// `(list_id, direction, anchor, batch_index)` walk
+/// [`wz_dissect_live_message_bytes`] uses, and a live field row carries the
+/// same coordinates. `chain_id` was considered and refused: it is an identity
+/// the FIELD DOCUMENT assigns as it renders, per flow, and this library keeps
+/// no table from it back to a frame — a door keyed by it would have to re-run
+/// the renderer to answer. It also names a whole chain when the buffer belongs
+/// to one row of it, the one that completed it; a `begun` row's `chain_id` has
+/// no buffer behind it yet.
+///
+/// # Distinct from `wz_dissect_live_message_bytes`, on purpose
+///
+/// Both take the same record and answer DIFFERENT bytes of it: that door the
+/// bytes the row's own `fields` were walked from (for a completing `Fragment`,
+/// the fragment as it crossed the wire), this one the joined buffer under
+/// `above_transport`. One door with a flag would make one record name two
+/// ranges depending on an argument, which is the ambiguity keeping them apart
+/// avoids.
+///
+/// # Ownership: copied out, and never truncated
+///
+/// Exactly [`wz_dissect_live_message_bytes`]'s rule. `needed` always receives
+/// the buffer's full length; when `cap` is at least that, `out` holds it; when
+/// it is less NOTHING is written and the caller sizes and calls again. `out`
+/// may be null with `cap` zero, to ask for the length alone. A borrowed view
+/// into the handle was refused: the handle trims and evicts as it is fed, so a
+/// pointer into it would need a lifetime ("valid until the next push") that
+/// nothing on the C side can check, and this ABI has never handed out a
+/// pointer into library memory that the caller does not free itself.
+///
+/// # Answers
+///
+/// [`WZ_DISSECT_OK`] with the length; [`WZ_DISSECT_ERR_NOT_REASSEMBLED`] for a
+/// record whose message did not complete a chain (every scouting record, and
+/// every row whose `carried_state` is not `reassembled`);
+/// [`WZ_DISSECT_ERR_BYTES_RETIRED`] for a record this handle no longer holds.
+/// `needed` is zero on both failures.
+///
+/// # Safety
+/// `handle` must be a live handle, `record` must point at one readable
+/// [`WzDissectRecord`], `needed` must be a writable `size_t`, and `out` must
+/// point to at least `cap` writable bytes or be null with `cap` zero.
+#[no_mangle]
+pub unsafe extern "C" fn wz_dissect_live_reassembled_bytes(
+    handle: *const live::LiveDissection,
+    record: *const WzDissectRecord,
+    out: *mut u8,
+    cap: usize,
+    needed: *mut usize,
+) -> c_int {
+    if handle.is_null() || record.is_null() || needed.is_null() || (out.is_null() && cap != 0) {
+        return WZ_DISSECT_ERR_INVALID_ARG;
+    }
+    // SAFETY: caller contract above.
+    let (handle, record) = unsafe { (&*handle, &*record) };
+    let bytes = match handle.reassembled_bytes(record) {
+        live::ReassembledBytes::Joined(bytes) => bytes,
+        live::ReassembledBytes::NotReassembled => {
+            // SAFETY: null-checked above.
+            unsafe { *needed = 0 };
+            return WZ_DISSECT_ERR_NOT_REASSEMBLED;
+        }
+        live::ReassembledBytes::Retired => {
+            // SAFETY: null-checked above.
+            unsafe { *needed = 0 };
+            return WZ_DISSECT_ERR_BYTES_RETIRED;
+        }
+    };
+    // SAFETY: null-checked above.
+    unsafe { *needed = bytes.len() };
+    if cap < bytes.len() {
+        return WZ_DISSECT_OK;
+    }
+    // SAFETY: `out` is writable for `cap >= bytes.len()` bytes by the caller
+    // contract, and `bytes` is inside the dissection this library owns.
     unsafe { core::ptr::copy_nonoverlapping(bytes.as_ptr(), out, bytes.len()) };
     WZ_DISSECT_OK
 }
@@ -5065,7 +5168,10 @@ mod tests {
         // ZA-3214 — 18, for `wz_dissect_live_fields_where`: the field document
         // over a live handle. One symbol, and the memory rule and the record
         // layout both stay put.
-        assert_eq!(wz_dissect_abi_version(), 18);
+        // ZA-3215 — 19, for `wz_dissect_live_reassembled_bytes`: a joined
+        // chain's buffer copied out into a buffer the caller sized. One
+        // symbol; the memory rule and the record layout stay put.
+        assert_eq!(wz_dissect_abi_version(), 19);
     }
 
     /// R311y913 (unregistered item 435) — THE LINKED SURFACE CAN SAY WHAT IT
@@ -6379,6 +6485,121 @@ mod tests {
         );
         buffer.truncate(written);
         Ok(buffer)
+    }
+
+    /// ZA-3215 ⑤ — one record's JOINED buffer, through the published door,
+    /// sized first and read second, with the same never-truncate sentinel the
+    /// message-bytes helper above holds.
+    fn live_reassembled(
+        handle: *mut live::LiveDissection,
+        record: &WzDissectRecord,
+    ) -> Result<Vec<u8>, c_int> {
+        let mut needed = usize::MAX;
+        let rc = unsafe {
+            wz_dissect_live_reassembled_bytes(handle, record, core::ptr::null_mut(), 0, &mut needed)
+        };
+        if rc != WZ_DISSECT_OK {
+            assert_eq!(needed, 0, "a refusal must report no length to size for");
+            return Err(rc);
+        }
+        let mut buffer = vec![0xABu8; needed + 1];
+        let mut again = usize::MAX;
+        let rc = unsafe {
+            wz_dissect_live_reassembled_bytes(
+                handle,
+                record,
+                buffer.as_mut_ptr(),
+                needed.saturating_sub(1),
+                &mut again,
+            )
+        };
+        assert_eq!(rc, WZ_DISSECT_OK, "short-buffer rc");
+        assert_eq!(again, needed, "the length is reported whatever the cap");
+        assert!(
+            buffer.iter().all(|b| *b == 0xAB),
+            "a cap below the length must write NOTHING"
+        );
+        let mut written = usize::MAX;
+        let rc = unsafe {
+            wz_dissect_live_reassembled_bytes(
+                handle,
+                record,
+                buffer.as_mut_ptr(),
+                buffer.len(),
+                &mut written,
+            )
+        };
+        assert_eq!(rc, WZ_DISSECT_OK, "byte call rc");
+        assert_eq!(written, needed, "the length must not move between calls");
+        assert_eq!(
+            buffer[needed], 0xAB,
+            "nothing past the buffer may be written"
+        );
+        buffer.truncate(written);
+        Ok(buffer)
+    }
+
+    /// ZA-3215 ⑤ — THE JOINED BUFFER COMES BACK FOR THE ROW THAT COMPLETED THE
+    /// CHAIN, AND FOR NO OTHER.
+    ///
+    /// The capture splits one `Push` across two fragments. Of every record the
+    /// handle drains, exactly ONE answers, and its bytes ARE the record that
+    /// was split — the buffer `above_transport.fields` indexes. Every other
+    /// record, the chain's first fragment included, answers
+    /// `WZ_DISSECT_ERR_NOT_REASSEMBLED`. And the same record through
+    /// `wz_dissect_live_message_bytes` never answers with the join: on this
+    /// UDP link the fragment is in a packet the caller pushed, so that door
+    /// says `WZ_DISSECT_ERR_NO_BYTE_SOURCE` — the distinction the two doors
+    /// exist to keep.
+    #[test]
+    fn the_joined_buffer_comes_back_for_the_completing_record_only() {
+        let (pcap, record) = wz_capture::fixtures::completed_chain_capture();
+        let mut handle: *mut live::LiveDissection = core::ptr::null_mut();
+        let rc = unsafe {
+            wz_dissect_pcap_replay(
+                pcap.as_ptr(),
+                pcap.len(),
+                WZ_DISSECT_LIMITS_NONE,
+                &mut handle,
+            )
+        };
+        assert_eq!(rc, WZ_DISSECT_OK, "replay rc");
+        let records = drain_live(handle, 64);
+        assert!(
+            records.len() >= 6,
+            "four handshake messages and two fragments"
+        );
+
+        let mut joined: Vec<(usize, Vec<u8>)> = Vec::new();
+        for (i, r) in records.iter().enumerate() {
+            match live_reassembled(handle, r) {
+                Ok(bytes) => joined.push((i, bytes)),
+                Err(rc) => assert_eq!(rc, WZ_DISSECT_ERR_NOT_REASSEMBLED, "record {i}"),
+            }
+        }
+        assert_eq!(joined.len(), 1, "exactly one record completed the chain");
+        let (i, bytes) = &joined[0];
+        assert_eq!(
+            bytes, &record,
+            "the joined buffer is the record that was split"
+        );
+        // The fragment itself rode a UDP datagram the caller pushed, so the
+        // message door refuses it as a packet the caller holds — it never
+        // answers with the join, which is the distinction the two doors keep.
+        assert_eq!(
+            live_bytes(handle, &records[*i]),
+            Err(WZ_DISSECT_ERR_NO_BYTE_SOURCE),
+            "message_bytes must not answer a completing fragment with its join"
+        );
+
+        // A record from nowhere is RETIRED, never another record's buffer.
+        let mut stray = records[*i];
+        stray.list_id = u64::MAX;
+        assert_eq!(
+            live_reassembled(handle, &stray),
+            Err(WZ_DISSECT_ERR_BYTES_RETIRED)
+        );
+        unsafe { wz_dissect_live_close(handle) };
     }
 
     /// R2102 — THE RECORD'S LAYOUT IS THE ONE THE HEADER DECLARES.

@@ -357,6 +357,17 @@
  *     fails, reporting a MID word indistinguishable from one this build's
  *     wire vintage does not know; this word is what separates them.
  *
+ *     ZA-3215 -- MOVED FROM A FRAME TO A BATCH. Compression wraps the whole
+ *     batch behind a one-byte header, once each side has sent its Open; it
+ *     never wraps one Frame's payload, which is where this reader used to look.
+ *     A batch whose header says lz4 is now opened before any message is read
+ *     -- this library is built with lz4 -- and its messages arrive as ordinary
+ *     rows whose `first_byte` is `null` (no packet byte holds a decompressed
+ *     message). `undecompressible` is left for a batch that does not open: ONE
+ *     row stands for it, since no message inside it can be located, and its
+ *     own walk is declined. A clear header is stepped over and the batch read
+ *     as the wire carried it.
+ *
  * The other four (`batch`, `nothing`, `fragment`,
  * `fragment_without_resolution`) arrive alone in their object, which is what
  * makes the key a DISCRIMINANT. A scouting row has no session frame and
@@ -831,6 +842,11 @@ extern "C" {
  * file, a truncated one, a length taken from the wrong place. Folded into the
  * capture error it would send you to inspect a capture that is fine. */
 #define WZ_DISSECT_ERR_CONTAINER_SHRANK (-8)
+/* ZA-3215 -- this RECORD did not complete a fragment chain, so
+ * wz_dissect_live_reassembled_bytes has no joined buffer for it. Per record,
+ * unlike NO_BYTE_SOURCE, which refuses a whole list: another record of the
+ * same list may answer. Unlike BYTES_RETIRED, asking again never will. */
+#define WZ_DISSECT_ERR_NOT_REASSEMBLED (-9)
 
 /* R311y887 -- LIMIT PRESETS, for the doors that take one as an argument.
  *
@@ -880,7 +896,7 @@ extern "C" {
  * calls the function, and refuses when the two disagree.
  *
  * @unknown ABI not-an-enumeration */
-#define WZ_DISSECT_ABI_REVISION 18
+#define WZ_DISSECT_ABI_REVISION 19
 
 /* Symbol/memory-contract revision. Not a JSON-shape revision. This is the
  * revision the LOADED library reports; the block above says why it exists
@@ -1889,6 +1905,13 @@ uint64_t wz_dissect_live_lost(const wz_dissect_live *h);
  * names coordinates in another handle's spaces and is answered
  * WZ_DISSECT_ERR_BYTES_RETIRED -- a miss, never another message's bytes.
  *
+ * ZA-3215 -- A MESSAGE READ OUT OF AN LZ4 BATCH. On a session that negotiated
+ * compression the batch is lz4 on the wire and its messages exist only once
+ * this reader has opened it. For such a message this door answers the
+ * MESSAGE's own bytes, exactly -- not the rest of a unit, which was never on
+ * the wire in that form -- and they are still what the field walker was handed.
+ * Its field row's `first_byte` is `null`, because no packet byte holds it.
+ *
  * @bound cap buffer-capacity -- the size of YOUR array. This library imposes
  * nothing by it and discards nothing for it: below the length it writes
  * nothing at all, and `needed` says how much there is. */
@@ -1896,6 +1919,64 @@ int wz_dissect_live_message_bytes(const wz_dissect_live *h,
                                   const wz_dissect_record *record,
                                   unsigned char *out, size_t cap,
                                   size_t *needed);
+
+/* ── ZA-3215 (ABI 19) — THE JOINED BUFFER OF A COMPLETED FRAGMENT CHAIN ──
+ *
+ * A field row whose above_transport.carried_state is `reassembled` carries
+ * above_transport.fields and above_transport.carried, and their start/end
+ * index the buffer the chain was JOINED in -- which never crossed the wire in
+ * one piece, and which no other door hands out. This one does, so those spans
+ * can be drawn on the bytes they describe.
+ *
+ * WHICH ROW: the record, the same wz_dissect_record wz_dissect_live_drain
+ * wrote and a live field row carries (list_id, direction, anchor,
+ * batch_index), resolved exactly as wz_dissect_live_message_bytes resolves it.
+ * Not `chain_id`: that is an identity the FIELD DOCUMENT assigns as it renders,
+ * and this library keeps no table from it back to a message; and it names a
+ * whole chain, when the buffer belongs to the one row that completed it. Find
+ * that row by its `chain.outcome` of `reassembled` and pass its record.
+ *
+ * NOT wz_dissect_live_message_bytes WITH A FLAG. Both take the same record and
+ * answer DIFFERENT bytes of it: that door the bytes the row's own `fields` were
+ * walked from -- for a completing Fragment, the fragment as it crossed the
+ * wire, or NO_BYTE_SOURCE on a datagram link, where that is the packet you
+ * pushed -- and this one the buffer under `above_transport`. Two doors keep one
+ * record from meaning two ranges depending on an argument.
+ *
+ * OWNERSHIP, and it is the rule of the door above, unchanged. The buffer is
+ * COPIED into memory you own and sized; `needed` always receives its full
+ * length, and below it NOTHING is written -- size and call again. A borrowed
+ * view into the handle was weighed and refused: the handle trims and evicts as
+ * it is fed, so such a pointer would be valid only "until the next push", a
+ * lifetime nothing on your side can check, and this ABI has never handed out a
+ * pointer into its own memory that you do not free yourself.
+ *
+ *     size_t n;
+ *     if (wz_dissect_live_reassembled_bytes(h, &rec, NULL, 0, &n) == WZ_DISSECT_OK) {
+ *         unsigned char *buf = malloc(n);
+ *         wz_dissect_live_reassembled_bytes(h, &rec, buf, n, &n);
+ *         ...           // draw above_transport.fields spans over buf[0..n]
+ *         free(buf);
+ *     }
+ *
+ * ANSWERS. WZ_DISSECT_OK with the length; WZ_DISSECT_ERR_NOT_REASSEMBLED for a
+ * record whose message did not complete a chain (every scouting record, every
+ * row whose carried_state is not `reassembled`) -- per RECORD, so the next one
+ * may answer, and asking again for this one never will;
+ * WZ_DISSECT_ERR_BYTES_RETIRED for a record this handle no longer holds.
+ * `needed` is zero on both failures.
+ *
+ * ⚠ THESE ARE NOT CAPTURE BYTES. Offsets into this buffer are offsets into the
+ * reader's own join, never into a packet; do not add them to a row's
+ * `first_byte` or `message_at`.
+ *
+ * @bound cap buffer-capacity -- the size of YOUR array. This library imposes
+ * nothing by it and discards nothing for it: below the length it writes
+ * nothing at all, and `needed` says how much there is. */
+int wz_dissect_live_reassembled_bytes(const wz_dissect_live *h,
+                                      const wz_dissect_record *record,
+                                      unsigned char *out, size_t cap,
+                                      size_t *needed);
 
 /* ── R2453 (ABI 16) — THE ANALYSIS PLANES OVER A LIVE HANDLE ─────────────
  *
