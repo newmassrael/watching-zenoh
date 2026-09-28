@@ -604,7 +604,17 @@ ROOTLESS_STALE_LINE_BUDGET = 1
 # rewritten with rooted citations or dropped. (Written without the line
 # spellings on purpose: a budget note that repeats them is counted by the
 # scan it budgets.)
-ROOTLESS_UNDECLARED_BUDGET = 621
+# 621 -> 623 (R2945): a RAISE, and the one kind this ratchet can owe. R2944's
+# row in `docs/hosted-red-acks.md` (`73dc025e`, landed) quoted a hosted log's
+# two dispatcher module paths with no root. That file is an append-only record
+# -- a row is corrected by a new row, never edited -- so the two occurrences
+# cannot be given roots; the store's ledger is skipped for exactly that reason,
+# and this file is not. Measured on a copy with those two paths rooted: this
+# budget and the total below return to 621 / 728, and the bare-form budget then
+# reads 59 / 57, so the only form that would have passed is `path` @ `needle`.
+# An ack row is graded with `--check` on the tree BEFORE it is committed;
+# `--prose` does not read this axis.
+ROOTLESS_UNDECLARED_BUDGET = 623
 #: EVERY root-less occurrence, graded or not: `rootless_line + rootless_bare +
 #: residue`. One ratchet over the union of the three above, and it exists
 #: because those three CANNOT express the invariant that matters.
@@ -681,7 +691,8 @@ ROOTLESS_UNDECLARED_BUDGET = 621
 # R2894 — 773 -> 772, the same R2892 removal as ROOTLESS_UNDECLARED_BUDGET.
 # R2934 — 772 -> 733, the `c867f7b8` module deletion's line and bare removals.
 # R2944 — 733 -> 728, the same five removals as ROOTLESS_UNDECLARED_BUDGET.
-ROOTLESS_TOTAL_BUDGET = 728
+# R2945 — 728 -> 730, the same frozen ack row as ROOTLESS_UNDECLARED_BUDGET.
+ROOTLESS_TOTAL_BUDGET = 730
 
 #: A LIVE invocation of the RESOLUTION arm. R2242 split this gate in two and,
 #: in doing so, made `--resolve` a flag someone can simply stop passing: delete
