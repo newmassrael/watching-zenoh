@@ -40,6 +40,15 @@ pub struct OffsetRun {
     pub len: usize,
     /// Index of the capture packet that carried it.
     pub packet_index: usize,
+    /// ZA-3215 — where the run's first byte sits within that packet's
+    /// transport PAYLOAD (the segment body, header excluded).
+    ///
+    /// Zero for an ordinary segment; the number of bytes skipped for one that
+    /// partially overlapped what the stream already held, because only its
+    /// fresh tail became this run. Without it a byte's packet is known and its
+    /// position inside the packet is not, and a reader highlighting it would
+    /// have to re-derive the overlap this assembler already resolved.
+    pub segment_offset: usize,
 }
 
 /// What a reassembler did with one segment. Reported rather than swallowed:
@@ -337,6 +346,16 @@ impl StreamAssembler {
 
     /// Which capture packet carried the byte at `stream_offset`.
     pub fn packet_for_offset(&self, stream_offset: usize) -> Option<usize> {
+        self.origin_of_offset(stream_offset)
+            .map(|(packet, _)| packet)
+    }
+
+    /// ZA-3215 — which capture packet carried the byte at `stream_offset`, and
+    /// where inside that packet's transport payload it sat.
+    ///
+    /// One lookup for both halves, so the packet and the position can never
+    /// come from two different runs.
+    pub fn origin_of_offset(&self, stream_offset: usize) -> Option<(usize, usize)> {
         // An offset whose bytes were trimmed is UNANSWERABLE, not answerable
         // by the nearest surviving run: a live reader that reclaimed memory
         // must not thereby start misattributing old messages to new packets.
@@ -349,7 +368,12 @@ impl StreamAssembler {
         self.runs
             .get(idx)
             .filter(|r| stream_offset >= r.stream_offset)
-            .map(|r| r.packet_index)
+            .map(|r| {
+                (
+                    r.packet_index,
+                    r.segment_offset + (stream_offset - r.stream_offset),
+                )
+            })
     }
 
     /// Feed one segment belonging to THIS direction.
@@ -493,6 +517,7 @@ impl StreamAssembler {
             stream_offset,
             len: fresh.len(),
             packet_index,
+            segment_offset: already,
         });
         self.next_seq = Some(next.wrapping_add(fresh.len() as u32));
         SegmentOutcome::Appended {

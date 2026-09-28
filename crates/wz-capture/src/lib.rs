@@ -1830,6 +1830,26 @@ impl FlowDissection {
         self.assembler(direction).packet_for_offset(stream_offset)
     }
 
+    /// ZA-3215 — the packet that carried the byte at `stream_offset`, and where
+    /// inside that packet's TCP payload it sat.
+    ///
+    /// `None` on a WebSocket flow, and not because the lookup fails there: it
+    /// would SUCCEED and be wrong. A ws row's coordinate names the frame header
+    /// it began at, and the message's own first byte sits past that header and
+    /// under a mask, so "the byte at this row's offset" is a byte of the
+    /// framing rather than of the message. `None` too wherever
+    /// [`crate::tcp::StreamAssembler::origin_of_offset`] cannot answer.
+    pub fn byte_origin(
+        &self,
+        direction: Direction,
+        stream_offset: usize,
+    ) -> Option<(usize, usize)> {
+        if self.framing.is_websocket() {
+            return None;
+        }
+        self.assembler(direction).origin_of_offset(stream_offset)
+    }
+
     /// Feed newly-reassembled bytes for one direction into the zenoh observer
     /// and drain whatever frames become readable.
     ///

@@ -1293,7 +1293,9 @@ int main(void) {
     rc = wz_dissect_selector_diagnose("key == demo/**", &verdict);
     CHECK(rc == WZ_DISSECT_OK, "diagnose rc=%d", rc);
     /* ZA-3214 -- revision 2 closes with the lexer's tokens, byte spans into
-     * `key == demo/**`, so a consumer colours the selector off this walk. */
+     * the selector above, so a consumer colours the selector off this walk.
+     * (Not quoted here: its double star followed by a slash would open a
+     * nested comment, which -Werror=comment refuses.) */
     CHECK(strcmp(verdict,
                  "{\"document\":{\"name\":\"selector_diagnose\",\"revision\":2},"
                  "\"ok\":true,\"tokens\":["
@@ -1576,8 +1578,11 @@ int main(void) {
      * offsets.
      * ZA-3214 -- 13: `selected` and its four words are DECLARED. The selector
      * door wrote them from R2766 on; no revision named the key and no family
-     * held the words, so a switch over them had nothing to pin. */
-    revisioned[2].revision = 13;
+     * held the words, so a switch over them had nothing to pin.
+     * ZA-3215 -- 14: rows gain `sn`, `chain`, `first_byte` and `l2`, flows
+     * gain `context`, and the document gains `reassembly` -- verdicts the
+     * session reached per frame and this document had never handed over. */
+    revisioned[2].revision = 14;
     revisioned[2].doc = NULL;
     rc = wz_dissect_pcap_fields(pcap, sizeof pcap, 0, &revisioned[2].doc);
     CHECK(rc == WZ_DISSECT_OK, "fields rc=%d", rc);

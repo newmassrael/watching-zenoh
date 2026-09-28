@@ -207,6 +207,10 @@ fn fields_json_selected(
     let mut out = String::from("{");
     crate::doc_revision::envelope_into(crate::doc_revision::FIELDS, &mut out);
     out.push_str(",\"stream_flows\":[");
+    // ZA-3215 — re-read ONCE, ahead of both flow tables: a stream row now
+    // names the packet holding its first byte and that packet's link
+    // addresses, which only the capture's own bytes can say.
+    let reread = Reread::of(capture);
     for (i, flow) in d.flows().iter().enumerate() {
         if i > 0 {
             out.push(',');
@@ -221,6 +225,7 @@ fn fields_json_selected(
         push_stream_flow(
             flow,
             spaces,
+            reread.as_ref(),
             max_messages_shown_per_flow,
             declarations,
             // R2765 (open debt 788) — the LIST index, not the flow. The
@@ -233,7 +238,6 @@ fn fields_json_selected(
         );
     }
     out.push_str("],\"datagram_flows\":[");
-    let reread = Reread::of(capture);
     for (i, flow) in d.datagram_flows().iter().enumerate() {
         if i > 0 {
             out.push(',');
@@ -289,6 +293,18 @@ fn fields_json_selected(
     // "no caps" from "caps that did not bite".
     out.push_str("\"dropped_by_limits\":");
     out.push_str(&crate::report::dropped_by_limits_json(d));
+    // ZA-3215 — THE CHAINS NO ROW ENDED, beside the rows that begin them.
+    //
+    // A reader indexing `chain.chain_id` finds some chains with a `begun` row
+    // and no closing one, and the rows cannot say why: the router gave those up
+    // with no fragment in hand — past their deadline, still open when the
+    // capture stopped, or on a flow the cap evicted. Those three counts are
+    // this group, and it is the SAME rendering the command line's capture
+    // report carries (`report::reassembly_json`), a second consumer rather
+    // than a second spelling. Capture-wide because that is the grain the
+    // dissection books them at.
+    out.push_str(",\"reassembly\":");
+    out.push_str(&crate::report::reassembly_json(d));
     out.push(',');
     // R311y875 — the run's misbound rules, AFTER every row producer, for the
     // reason `wz-analyze` places its unbound-declaration note there: this is a
@@ -411,6 +427,7 @@ fn enter<'a>(
 fn push_stream_flow(
     flow: &crate::FlowDissection,
     spaces: &mut crate::agg::KeyexprSpaces,
+    reread: Option<&Reread>,
     cap: Option<usize>,
     declarations: Option<&Declarations<'_>>,
     selection: Option<RowSelection<'_>>,
@@ -418,8 +435,10 @@ fn push_stream_flow(
 ) {
     out.push_str("{\"flow\":");
     push_flow(&flow.flow, out);
+    push_context(&flow.session.context(), out);
     out.push_str(",\"messages\":[");
     let (mut shown, mut omitted, mut emitted) = (0usize, 0usize, 0usize);
+    let mut chains = ChainIds::default();
     // R311y856 — folded in FRAME ORDER and before the cap bites, which is the
     // rule R311y701 settled for the same table: a keyexpr id resolves through
     // the bindings that were live when the message travelled, and a listing
@@ -440,6 +459,8 @@ fn push_stream_flow(
             .packet_for(frame.direction, frame.stream_offset)
             .unwrap_or(last_packet);
         spaces.at_packet(last_packet);
+        // ZA-3215 — folded ahead of the cap, for the reason `ChainIds` gives.
+        let session_row = chains.observe(frame);
         if cap.is_some_and(|c| shown >= c) {
             omitted += 1;
             // Round 2029 (item 298) — TELL THE RULE RUN. The misbinding verdict
@@ -487,6 +508,16 @@ fn push_stream_flow(
                 out,
             ),
         }
+        push_session_row(&session_row, out);
+        push_first_byte(
+            flow.byte_origin(frame.direction, at)
+                .map(|(packet, payload_offset)| FirstByte {
+                    packet,
+                    payload_offset,
+                }),
+            reread,
+            out,
+        );
         out.push('}');
     }
     let _ = write!(out, "],\"shown\":{shown},\"omitted\":{omitted}}}");
@@ -503,8 +534,10 @@ fn push_datagram_flow(
 ) {
     out.push_str("{\"flow\":");
     push_flow(&flow.flow, out);
+    push_context(&flow.session.context(), out);
     out.push_str(",\"messages\":[");
     let (mut shown, mut omitted, mut emitted) = (0usize, 0usize, 0usize);
+    let mut chains = ChainIds::default();
     let mut disagreed = 0usize;
     let mut named: Vec<(usize, &'static str)> = Vec::new();
     // The stream half's rule, unchanged: anchored for every frame, ahead of
@@ -517,6 +550,10 @@ fn push_datagram_flow(
         // is.
         let index = frame.stream_offset;
         spaces.at_packet(index);
+        // ZA-3215 — ahead of every reason this loop has for skipping a row, so
+        // a datagram the second read disagrees about still advances the chain
+        // fold exactly as the router was advanced by it.
+        let session_row = chains.observe(frame);
         let Some(file) = reread else {
             continue;
         };
@@ -565,6 +602,15 @@ fn push_datagram_flow(
                 declarations,
                 carried: Some(&frame.carried),
             },
+            out,
+        );
+        push_session_row(&session_row, out);
+        push_first_byte(
+            Some(FirstByte {
+                packet: index,
+                payload_offset: frame.unit_offset,
+            }),
+            reread,
             out,
         );
         out.push('}');
@@ -635,6 +681,24 @@ fn push_datagram_flow(
                 // the key absent.
                 carried: None,
             },
+            out,
+        );
+        // ZA-3215 — no SN and no chain on a scouting message, said as `null`
+        // like `above_transport` above; the datagram IS the message, so its
+        // first byte is the payload's first.
+        push_session_row(
+            &SessionRow {
+                sn: None,
+                chain: None,
+            },
+            out,
+        );
+        push_first_byte(
+            Some(FirstByte {
+                packet: index,
+                payload_offset: 0,
+            }),
+            reread,
             out,
         );
         out.push('}');
@@ -1124,6 +1188,7 @@ fn carried_state(carried: &wz_session_core::passive::Carried) -> CarriedState {
 /// shrank with the emitter's feature set would make "this build cannot say
 /// `reassembled`" and "this capture had no chains" the same answer, which is
 /// the class this whole object exists to separate.
+#[cfg_attr(not(feature = "reassembly"), allow(dead_code))]
 #[derive(Clone, Copy)]
 enum CarriedState {
     Batch,
@@ -1184,6 +1249,9 @@ impl CarriedState {
 /// key through the same `subtree_keyexpr_outcome` [`push_carried`] uses. Two
 /// walkers over one shape, or two keyexpr rules, is the drift this document has
 /// paid for elsewhere; there is one of each.
+// `at` resolves the keys of a reassembled batch's records, which exist only
+// with `reassembly`.
+#[cfg_attr(not(feature = "reassembly"), allow(unused_variables))]
 fn push_above_transport(
     carried: Option<&wz_session_core::passive::Carried>,
     at: KeyexprAt<'_>,
@@ -1236,6 +1304,649 @@ fn push_above_transport(
         out.push(']');
     }
     out.push('}');
+}
+
+/// ZA-3215 — what the session decided about ONE row that this document had
+/// never said: the SN verdict with the conduit it was judged on, and the chain
+/// router's outcome with the identity of the chain it touched.
+///
+/// # Why these belong on the row and not in a plane
+///
+/// Both verdicts are per FRAME and both are already computed — `sn_verdict` by
+/// `PassiveSession::track_sn`, the outcome by the reassembly router, each
+/// carried on the `PassiveFrame` this row is rendered from. A consumer that
+/// wanted either had to rebuild it: re-read the SN, re-derive the conduit, and
+/// re-run a chain router of its own over the `Fragment` rows, which is a
+/// second implementation of a rule this library already enforces, holding it
+/// to the same answer by hope.
+///
+/// Emitted STRUCTURALLY on every row — `null` when the row carries no SN or
+/// touched no chain — so a reader's field lookup never depends on which
+/// message a row happens to be.
+struct SessionRow {
+    /// `None` for every message that carries no SN.
+    sn: Option<SnRow>,
+    /// `None` for every row the chain router did not see.
+    chain: Option<ChainRow>,
+}
+
+/// The SN half of [`SessionRow`].
+struct SnRow {
+    verdict: SnVerdictWord,
+    /// `Some` only for [`SnVerdictWord::Gap`].
+    missing: Option<u64>,
+    direction: Direction,
+    priority: wz_session_core::qos::Priority,
+    reliable: bool,
+}
+
+/// The chain half of [`SessionRow`].
+struct ChainRow {
+    outcome: ChainOutcome,
+    /// `Some` only for an abort or a refusal.
+    reason: Option<ChainReason>,
+    /// `None` for a refusal: the router refused the fragment BEFORE allocating
+    /// a chain, so there is nothing for an identity to name.
+    chain_id: Option<u64>,
+}
+
+/// ZA-3215 — the one word per `SnVerdict` variant this document writes under
+/// `sn.verdict`.
+///
+/// A type rather than a `&'static str`, on [`CarriedState`]'s rule: a word a
+/// consumer switches on is declared per revision and that declaration is held
+/// to a WALK, which needs something to walk.
+#[derive(Clone, Copy)]
+enum SnVerdictWord {
+    Baseline,
+    Continuous,
+    Duplicate,
+    Gap,
+    OutOfWindow,
+    WithoutResolution,
+}
+
+impl SnVerdictWord {
+    /// Exhaustive over the session's enum, so a verdict added there fails to
+    /// compile here rather than reaching a consumer under no word.
+    fn of(verdict: &wz_session_core::passive::SnVerdict) -> (Self, Option<u64>) {
+        use wz_session_core::passive::SnVerdict;
+        match *verdict {
+            SnVerdict::WithoutResolution => (Self::WithoutResolution, None),
+            SnVerdict::Baseline => (Self::Baseline, None),
+            SnVerdict::Continuous => (Self::Continuous, None),
+            SnVerdict::Gap { missing } => (Self::Gap, Some(missing)),
+            SnVerdict::Duplicate => (Self::Duplicate, None),
+            SnVerdict::OutOfWindow => (Self::OutOfWindow, None),
+        }
+    }
+
+    const fn name(self) -> &'static str {
+        match self {
+            Self::Baseline => "baseline",
+            Self::Continuous => "continuous",
+            Self::Duplicate => "duplicate",
+            Self::Gap => "gap",
+            Self::OutOfWindow => "out_of_window",
+            Self::WithoutResolution => "without_resolution",
+        }
+    }
+
+    #[cfg(test)]
+    fn next(self) -> Option<Self> {
+        Some(match self {
+            Self::Baseline => Self::Continuous,
+            Self::Continuous => Self::Duplicate,
+            Self::Duplicate => Self::Gap,
+            Self::Gap => Self::OutOfWindow,
+            Self::OutOfWindow => Self::WithoutResolution,
+            Self::WithoutResolution => return None,
+        })
+    }
+
+    /// Every word, WALKED.
+    #[cfg(test)]
+    pub(crate) fn names() -> Vec<&'static str> {
+        let mut out = Vec::new();
+        let mut cur = Some(Self::Baseline);
+        while let Some(v) = cur {
+            out.push(v.name());
+            cur = v.next();
+        }
+        out
+    }
+}
+
+/// ZA-3215 — the chain router's outcome for one fragment, as the word
+/// `chain.outcome` carries.
+///
+/// `reassembled` covers BOTH ways a chain completes on a row: the joined
+/// payload parsed (`carried_state: reassembled`) and it did not decompress
+/// (`carried_state: undecompressible` on a `Fragment` row). The router's
+/// verdict is the same in both; what differs is what came after it, and that is
+/// `above_transport`'s to say.
+// The words are the document's in every build, as `CarriedState`'s are; only
+// the router that produces them is feature-gated.
+#[cfg_attr(not(feature = "reassembly"), allow(dead_code))]
+#[derive(Clone, Copy)]
+enum ChainOutcome {
+    Aborted,
+    Begun,
+    Continued,
+    Reassembled,
+    Refused,
+}
+
+impl ChainOutcome {
+    const fn name(self) -> &'static str {
+        match self {
+            Self::Aborted => "aborted",
+            Self::Begun => "begun",
+            Self::Continued => "continued",
+            Self::Reassembled => "reassembled",
+            Self::Refused => "refused",
+        }
+    }
+
+    #[cfg(test)]
+    fn next(self) -> Option<Self> {
+        Some(match self {
+            Self::Aborted => Self::Begun,
+            Self::Begun => Self::Continued,
+            Self::Continued => Self::Reassembled,
+            Self::Reassembled => Self::Refused,
+            Self::Refused => return None,
+        })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn names() -> Vec<&'static str> {
+        let mut out = Vec::new();
+        let mut cur = Some(Self::Aborted);
+        while let Some(v) = cur {
+            out.push(v.name());
+            cur = v.next();
+        }
+        out
+    }
+}
+
+/// ZA-3215 — why the router aborted or refused, as the word `chain.reason`
+/// carries. One vocabulary over the router's two reason enums, because a
+/// consumer reads it beside `outcome`, which already says which of the two it
+/// is.
+///
+/// `superseded` is declared although no row carries it today: the router
+/// reports a restart as `Begun` for the NEW chain and the stranded one ends
+/// without a row of its own. The word is the router's, and a router that one
+/// day returns it must not reach a consumer under an undeclared word.
+#[cfg_attr(not(feature = "reassembly"), allow(dead_code))]
+#[derive(Clone, Copy)]
+enum ChainReason {
+    CapacityOverflow,
+    MissingStartMarker,
+    OutOfOrder,
+    PeerQuota,
+    PoolExhausted,
+    SenderDropped,
+    Superseded,
+}
+
+impl ChainReason {
+    #[cfg(feature = "reassembly")]
+    fn of_abort(reason: wz_session_core::reassembly_dispatch::AbortReason) -> Self {
+        use wz_session_core::reassembly_dispatch::AbortReason;
+        match reason {
+            AbortReason::OutOfOrder => Self::OutOfOrder,
+            AbortReason::CapacityOverflow => Self::CapacityOverflow,
+            AbortReason::SenderDropped => Self::SenderDropped,
+            AbortReason::Superseded => Self::Superseded,
+        }
+    }
+
+    #[cfg(feature = "reassembly")]
+    fn of_refusal(reason: wz_session_core::reassembly_dispatch::RefuseReason) -> Self {
+        use wz_session_core::reassembly_dispatch::RefuseReason;
+        match reason {
+            RefuseReason::PeerQuota => Self::PeerQuota,
+            RefuseReason::PoolExhausted => Self::PoolExhausted,
+            RefuseReason::MissingStartMarker => Self::MissingStartMarker,
+        }
+    }
+
+    const fn name(self) -> &'static str {
+        match self {
+            Self::CapacityOverflow => "capacity_overflow",
+            Self::MissingStartMarker => "missing_start_marker",
+            Self::OutOfOrder => "out_of_order",
+            Self::PeerQuota => "peer_quota",
+            Self::PoolExhausted => "pool_exhausted",
+            Self::SenderDropped => "sender_dropped",
+            Self::Superseded => "superseded",
+        }
+    }
+
+    #[cfg(test)]
+    fn next(self) -> Option<Self> {
+        Some(match self {
+            Self::CapacityOverflow => Self::MissingStartMarker,
+            Self::MissingStartMarker => Self::OutOfOrder,
+            Self::OutOfOrder => Self::PeerQuota,
+            Self::PeerQuota => Self::PoolExhausted,
+            Self::PoolExhausted => Self::SenderDropped,
+            Self::SenderDropped => Self::Superseded,
+            Self::Superseded => return None,
+        })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn names() -> Vec<&'static str> {
+        let mut out = Vec::new();
+        let mut cur = Some(Self::CapacityOverflow);
+        while let Some(v) = cur {
+            out.push(v.name());
+            cur = v.next();
+        }
+        out
+    }
+}
+
+/// ZA-3215 — chain IDENTITY, one per flow, assigned in frame order.
+///
+/// # What the identity is, and what it is not
+///
+/// A number shared by every row that touched ONE chain, unique within its flow
+/// and counted from 0 in the order chains began. It is an identity for ROWS:
+/// it says which fragments belong together. It is NOT a coordinate into the
+/// buffer the chain was joined in — R2706 keeps that buffer's offsets off the
+/// document, and nothing here changes that.
+///
+/// # Why it is folded here and cannot drift from the router
+///
+/// The router keys a chain by `(peer, reliable, priority)` and an observer
+/// holds one router per direction, so the key is `(direction, reliable,
+/// priority)` — read off the SAME `Fragment` fields the router was handed. The
+/// fold then follows the router's OWN outcome rather than re-judging anything:
+///
+/// * `Begun` opens a new identity. A chain already open on the key was ended
+///   by the router without a row (a `First` restart, or a deadline sweep), so
+///   minting unconditionally is what keeps the two in step.
+/// * `Continued` takes the key's open identity.
+/// * `Reassembled` and `Aborted` take it and close it — or mint one, for a
+///   chain that began and ended on this very fragment.
+/// * `Refused` has none: no chain was allocated.
+///
+/// Folded for EVERY frame, including rows the listing cap holds back, for the
+/// reason the keyexpr anchor is: an identity assigned only to printed rows
+/// would renumber when the cap moved.
+#[cfg_attr(not(feature = "reassembly"), allow(dead_code))]
+#[derive(Default)]
+struct ChainIds {
+    next: u64,
+    open: Vec<((Direction, bool, wz_session_core::qos::Priority), u64)>,
+}
+
+impl ChainIds {
+    /// The row's two session verdicts, advancing the chain fold by one frame.
+    fn observe(&mut self, frame: &PassiveFrame) -> SessionRow {
+        SessionRow {
+            sn: sn_row(frame),
+            chain: self.chain_row(frame),
+        }
+    }
+
+    #[cfg(feature = "reassembly")]
+    fn chain_row(&mut self, frame: &PassiveFrame) -> Option<ChainRow> {
+        use wz_session_core::inbound::InboundFrame;
+        use wz_session_core::passive::Carried;
+        use wz_session_core::reassembly_dispatch::IngestOutcome;
+        let Ok(InboundFrame::Fragment {
+            reliable, priority, ..
+        }) = &frame.frame
+        else {
+            return None;
+        };
+        let key = (frame.direction, *reliable, *priority);
+        let outcome = match &frame.carried {
+            Carried::Fragment(outcome) => *outcome,
+            // The joiner handed a payload back on this fragment, which is the
+            // router's `Reassembled` whatever happened to the bytes after it.
+            Carried::Reassembled { .. } | Carried::Undecompressible => IngestOutcome::Reassembled,
+            // No SN resolution, so no router ran: there is no outcome to name.
+            Carried::FragmentWithoutResolution | Carried::Nothing | Carried::Batch(_) => {
+                return None
+            }
+        };
+        Some(match outcome {
+            IngestOutcome::Begun => ChainRow {
+                outcome: ChainOutcome::Begun,
+                reason: None,
+                chain_id: Some(self.open(key)),
+            },
+            IngestOutcome::Continued => ChainRow {
+                outcome: ChainOutcome::Continued,
+                reason: None,
+                chain_id: self.current(key),
+            },
+            IngestOutcome::Reassembled => ChainRow {
+                outcome: ChainOutcome::Reassembled,
+                reason: None,
+                chain_id: Some(self.close(key)),
+            },
+            IngestOutcome::Aborted(why) => ChainRow {
+                outcome: ChainOutcome::Aborted,
+                reason: Some(ChainReason::of_abort(why)),
+                chain_id: Some(self.close(key)),
+            },
+            IngestOutcome::Refused(why) => ChainRow {
+                outcome: ChainOutcome::Refused,
+                reason: Some(ChainReason::of_refusal(why)),
+                chain_id: None,
+            },
+        })
+    }
+
+    /// A build without `reassembly` routes no fragment, so no row touched a
+    /// chain — the true answer, not a stub.
+    #[cfg(not(feature = "reassembly"))]
+    fn chain_row(&mut self, _frame: &PassiveFrame) -> Option<ChainRow> {
+        None
+    }
+
+    #[cfg(feature = "reassembly")]
+    fn open(&mut self, key: (Direction, bool, wz_session_core::qos::Priority)) -> u64 {
+        let id = self.next;
+        self.next += 1;
+        match self.open.iter_mut().find(|(k, _)| *k == key) {
+            Some(slot) => slot.1 = id,
+            None => self.open.push((key, id)),
+        }
+        id
+    }
+
+    #[cfg(feature = "reassembly")]
+    fn current(&self, key: (Direction, bool, wz_session_core::qos::Priority)) -> Option<u64> {
+        self.open.iter().find(|(k, _)| *k == key).map(|(_, id)| *id)
+    }
+
+    #[cfg(feature = "reassembly")]
+    fn close(&mut self, key: (Direction, bool, wz_session_core::qos::Priority)) -> u64 {
+        match self.open.iter().position(|(k, _)| *k == key) {
+            Some(i) => self.open.swap_remove(i).1,
+            None => {
+                let id = self.next;
+                self.next += 1;
+                id
+            }
+        }
+    }
+}
+
+/// The SN half of a row, off the frame's own verdict and the conduit fields
+/// `track_sn` judged it on.
+fn sn_row(frame: &PassiveFrame) -> Option<SnRow> {
+    use wz_session_core::inbound::InboundFrame;
+    let verdict = frame.sn_verdict.as_ref()?;
+    let (reliable, priority) = match &frame.frame {
+        Ok(InboundFrame::Frame {
+            reliable, priority, ..
+        }) => (*reliable, *priority),
+        #[cfg(feature = "reassembly")]
+        Ok(InboundFrame::Fragment {
+            reliable, priority, ..
+        }) => (*reliable, *priority),
+        // `track_sn` answers `None` for every other message, so a verdict here
+        // would be one this function cannot place on a conduit. Said as an
+        // absence rather than guessed.
+        _ => return None,
+    };
+    let (word, missing) = SnVerdictWord::of(verdict);
+    Some(SnRow {
+        verdict: word,
+        missing,
+        direction: frame.direction,
+        priority,
+        reliable,
+    })
+}
+
+/// Render the row's `sn` and `chain` keys.
+fn push_session_row(row: &SessionRow, out: &mut String) {
+    out.push_str(",\"sn\":");
+    match &row.sn {
+        None => out.push_str("null"),
+        Some(sn) => {
+            out.push_str("{\"verdict\":");
+            escape_into(sn.verdict.name(), out);
+            out.push_str(",\"missing\":");
+            match sn.missing {
+                Some(n) => {
+                    let _ = write!(out, "{n}");
+                }
+                None => out.push_str("null"),
+            }
+            let _ = write!(
+                out,
+                ",\"conduit\":{{\"direction\":\"{}\",\"priority\":",
+                dir_name(sn.direction)
+            );
+            escape_into(sn.priority.name(), out);
+            let _ = write!(out, ",\"reliable\":{}}}}}", sn.reliable);
+        }
+    }
+    out.push_str(",\"chain\":");
+    match &row.chain {
+        None => out.push_str("null"),
+        Some(chain) => {
+            out.push_str("{\"outcome\":");
+            escape_into(chain.outcome.name(), out);
+            out.push_str(",\"reason\":");
+            match chain.reason {
+                Some(reason) => escape_into(reason.name(), out),
+                None => out.push_str("null"),
+            }
+            out.push_str(",\"chain_id\":");
+            match chain.chain_id {
+                Some(id) => {
+                    let _ = write!(out, "{id}");
+                }
+                None => out.push_str("null"),
+            }
+            out.push('}');
+        }
+    }
+}
+
+/// ZA-3215 — the captured packet holding a row's FIRST BYTE, and the link
+/// addresses it travelled between.
+///
+/// * `packet` — the capture's packet index.
+/// * `payload_offset` — where that byte sits inside the packet's transport
+///   payload (the TCP segment body, the UDP datagram body, the raweth or vsock
+///   payload).
+/// * `frame_offset` — where it sits inside the CAPTURED FRAME, link header
+///   included, or `null` where `link::transport_payload_at` cannot place the
+///   payload in one packet's bytes. A reader highlighting the byte in a packet
+///   view reads this and parses no header.
+///
+/// `l2` is the packet's Ethernet II source and destination, `null` on any
+/// other link — including a cooked capture, which records one address, and
+/// every packet this document could not re-read.
+struct FirstByte {
+    packet: usize,
+    payload_offset: usize,
+}
+
+fn push_first_byte(at: Option<FirstByte>, reread: Option<&Reread>, out: &mut String) {
+    let packet = at
+        .as_ref()
+        .and_then(|a| reread.and_then(|file| file.packet(a.packet)));
+    out.push_str(",\"first_byte\":");
+    match &at {
+        None => out.push_str("null"),
+        Some(a) => {
+            let _ = write!(
+                out,
+                "{{\"packet\":{},\"payload_offset\":{},\"frame_offset\":",
+                a.packet, a.payload_offset
+            );
+            match packet
+                .as_ref()
+                .and_then(|p| crate::link::transport_payload_at(p.link_type, p.index, p.data))
+            {
+                Some(base) => {
+                    let _ = write!(out, "{}", base + a.payload_offset);
+                }
+                None => out.push_str("null"),
+            }
+            out.push('}');
+        }
+    }
+    push_l2(
+        packet
+            .as_ref()
+            .and_then(|p| crate::link::ethernet_endpoints(p.link_type, p.data)),
+        out,
+    );
+}
+
+/// The row's `l2` key: `(source, destination)` or `null`.
+fn push_l2(endpoints: Option<([u8; 6], [u8; 6])>, out: &mut String) {
+    out.push_str(",\"l2\":");
+    match endpoints {
+        None => out.push_str("null"),
+        Some((src, dst)) => {
+            out.push_str("{\"src\":\"");
+            push_mac(&src, out);
+            out.push_str("\",\"dst\":\"");
+            push_mac(&dst, out);
+            out.push_str("\"}");
+        }
+    }
+}
+
+fn push_mac(mac: &[u8; 6], out: &mut String) {
+    for (i, b) in mac.iter().enumerate() {
+        if i > 0 {
+            out.push(':');
+        }
+        let _ = write!(out, "{b:02x}");
+    }
+}
+
+/// ZA-3215 — the flow's observation CONTEXT: what the handshake it watched
+/// negotiated, as of the end of the flow.
+///
+/// A consumer re-read the `InitAck` tree for these, which is a second decode
+/// of a negotiation the session already folded — and folded correctly, which
+/// the re-read need not: every capability starts TRUE and is ANDed down per
+/// Init, so reading one before both Inits were seen reads the identity element
+/// of an `&=`. That is why `lowlatency`, `compression` and `qos` are `null`
+/// until `negotiated` is `true` rather than a `true` nobody agreed to.
+///
+/// `sn_mask` is the ring the SN verdicts on this flow were judged at, `null`
+/// until an `InitAck` (or `Join`) was observed — and `null` is then why every
+/// `sn.verdict` on the flow is `without_resolution`. ⚠ It can reach
+/// `2^63 - 1`, past what an IEEE double holds exactly: read it as an integer.
+fn push_context(context: &wz_session_core::passive::FlowContext, out: &mut String) {
+    let negotiated = context.negotiated();
+    let agreed = |v: bool| {
+        if negotiated {
+            if v {
+                "true"
+            } else {
+                "false"
+            }
+        } else {
+            "null"
+        }
+    };
+    out.push_str(",\"context\":{\"phase\":");
+    escape_into(phase_word(context.phase).name(), out);
+    let _ = write!(
+        out,
+        ",\"negotiated\":{negotiated},\"lowlatency\":{},\"compression\":{},\"qos\":{},\
+         \"patch\":",
+        agreed(context.lowlatency),
+        agreed(context.compression),
+        agreed(context.qos),
+    );
+    match context.patch {
+        Some(p) => {
+            let _ = write!(out, "{p}");
+        }
+        None => out.push_str("null"),
+    }
+    out.push_str(",\"sn_mask\":");
+    match context.sn_mask() {
+        Some(m) => {
+            let _ = write!(out, "{m}");
+        }
+        None => out.push_str("null"),
+    }
+    out.push_str(",\"batch_size\":");
+    match context.batch_size() {
+        Some(b) => {
+            let _ = write!(out, "{b}");
+        }
+        None => out.push_str("null"),
+    }
+    out.push('}');
+}
+
+/// The word `context.phase` carries, one per `SessionPhase` variant.
+#[derive(Clone, Copy)]
+enum PhaseWord {
+    Closed,
+    Established,
+    HalfInit,
+    InitComplete,
+    Unseen,
+}
+
+fn phase_word(phase: wz_session_core::passive::SessionPhase) -> PhaseWord {
+    use wz_session_core::passive::SessionPhase;
+    match phase {
+        SessionPhase::Unseen => PhaseWord::Unseen,
+        SessionPhase::HalfInit => PhaseWord::HalfInit,
+        SessionPhase::InitComplete => PhaseWord::InitComplete,
+        SessionPhase::Established => PhaseWord::Established,
+        SessionPhase::Closed => PhaseWord::Closed,
+    }
+}
+
+impl PhaseWord {
+    const fn name(self) -> &'static str {
+        match self {
+            Self::Closed => "closed",
+            Self::Established => "established",
+            Self::HalfInit => "half_init",
+            Self::InitComplete => "init_complete",
+            Self::Unseen => "unseen",
+        }
+    }
+
+    #[cfg(test)]
+    fn next(self) -> Option<Self> {
+        Some(match self {
+            Self::Closed => Self::Established,
+            Self::Established => Self::HalfInit,
+            Self::HalfInit => Self::InitComplete,
+            Self::InitComplete => Self::Unseen,
+            Self::Unseen => return None,
+        })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn names() -> Vec<&'static str> {
+        let mut out = Vec::new();
+        let mut cur = Some(Self::Closed);
+        while let Some(v) = cur {
+            out.push(v.name());
+            cur = v.next();
+        }
+        out
+    }
 }
 
 fn note(
@@ -2536,6 +3247,379 @@ mod tests {
         );
     }
 
+    /// ZA-3215 — the row and flow objects revision 14 added, RENDERED FROM
+    /// THEIR OWN TYPES, one per word.
+    ///
+    /// The rule `the_field_documents_payload_plane_is_pinned_over_every_arm`
+    /// states, applied to five new families: no one capture reaches every SN
+    /// verdict, every router outcome and reason, every band and every phase,
+    /// and a fixture that stopped reaching one would take that word out of the
+    /// pinned population in silence. Each walk is bound to an exhaustive
+    /// match, so a variant added later joins here at `cargo build`.
+    fn session_arms() -> Vec<String> {
+        use wz_session_core::passive::{FlowContext, SessionPhase};
+        use wz_session_core::qos::Priority;
+        let mut arms = Vec::new();
+        let mut verdict = Some(SnVerdictWord::Baseline);
+        let mut band = 0u8;
+        while let Some(word) = verdict {
+            // Every band too, cycled across the verdicts and then finished off
+            // below, so both walks are rendered in full.
+            let row = SessionRow {
+                sn: Some(SnRow {
+                    verdict: word,
+                    missing: matches!(word, SnVerdictWord::Gap).then_some(1),
+                    direction: Direction::A,
+                    priority: Priority::from_wire(band),
+                    reliable: true,
+                }),
+                chain: None,
+            };
+            let mut out = String::new();
+            push_session_row(&row, &mut out);
+            arms.push(out);
+            band += 1;
+            verdict = word.next();
+        }
+        while usize::from(band) < Priority::NUM {
+            let mut out = String::new();
+            push_session_row(
+                &SessionRow {
+                    sn: Some(SnRow {
+                        verdict: SnVerdictWord::Continuous,
+                        missing: None,
+                        direction: Direction::B,
+                        priority: Priority::from_wire(band),
+                        reliable: false,
+                    }),
+                    chain: None,
+                },
+                &mut out,
+            );
+            arms.push(out);
+            band += 1;
+        }
+        let mut outcome = Some(ChainOutcome::Aborted);
+        while let Some(word) = outcome {
+            let mut out = String::new();
+            push_session_row(
+                &SessionRow {
+                    sn: None,
+                    chain: Some(ChainRow {
+                        outcome: word,
+                        reason: None,
+                        chain_id: Some(0),
+                    }),
+                },
+                &mut out,
+            );
+            arms.push(out);
+            outcome = word.next();
+        }
+        let mut reason = Some(ChainReason::CapacityOverflow);
+        while let Some(word) = reason {
+            let mut out = String::new();
+            push_session_row(
+                &SessionRow {
+                    sn: None,
+                    chain: Some(ChainRow {
+                        outcome: ChainOutcome::Aborted,
+                        reason: Some(word),
+                        chain_id: None,
+                    }),
+                },
+                &mut out,
+            );
+            arms.push(out);
+            reason = word.next();
+        }
+        // The phases are the session's own enum, so they are listed here and
+        // held to the word walk by COUNT: a sixth `SessionPhase` fails
+        // `phase_word`'s match, and a sixth word fails this assertion.
+        let phases = [
+            SessionPhase::Unseen,
+            SessionPhase::HalfInit,
+            SessionPhase::InitComplete,
+            SessionPhase::Established,
+            SessionPhase::Closed,
+        ];
+        assert_eq!(phases.len(), PhaseWord::names().len());
+        for phase in phases {
+            let mut out = String::new();
+            push_context(
+                &FlowContext {
+                    phase,
+                    ..FlowContext::default()
+                },
+                &mut out,
+            );
+            arms.push(out);
+        }
+        let mut out = String::new();
+        push_first_byte(
+            Some(FirstByte {
+                packet: 0,
+                payload_offset: 0,
+            }),
+            None,
+            &mut out,
+        );
+        push_l2(Some(([2, 0, 0, 0, 0, 1], [2, 0, 0, 0, 0, 2])), &mut out);
+        arms.push(out);
+        arms
+    }
+
+    /// Every object in `doc` carrying `key`, each read as the values of
+    /// `fields` in that order, quotes stripped. `object_scopes` reads each
+    /// object at its OWN depth, so a key is never credited to the object it is
+    /// nested in.
+    fn scoped<'a>(doc: &'a str, key: &str, fields: &[&str]) -> Vec<Vec<&'a str>> {
+        crate::doc_revision::object_scopes(doc)
+            .into_iter()
+            .filter(|scope| scope.iter().any(|(k, _)| *k == key))
+            .map(|scope| {
+                fields
+                    .iter()
+                    .map(|f| {
+                        scope
+                            .iter()
+                            .find(|(k, _)| k == f)
+                            .map_or("<absent>", |(_, v)| v.trim_matches('"'))
+                    })
+                    .collect()
+            })
+            .collect()
+    }
+
+    /// ZA-3215 ① — EVERY FRAGMENT ROW NAMES WHAT THE ROUTER DID WITH IT, and
+    /// the rows of one chain share one identity.
+    ///
+    /// The sequence is chosen so each outcome the router reaches on a live
+    /// chain arrives once, and so the identity is exercised across the one
+    /// transition that makes it non-trivial: a `First` restart ends chain 0
+    /// WITHOUT a row of its own, so an identity that followed rows rather than
+    /// the router's key would run the two chains together.
+    ///
+    /// The SN half rides the same capture: the refused fragment is still
+    /// numbered by its sender, so skipping sn 4 is a gap of one on the SAME
+    /// conduit the others were judged on — the router refusing a fragment and
+    /// the SN tracker counting it are two verdicts about one frame.
+    #[cfg(feature = "reassembly")]
+    #[test]
+    fn each_fragment_row_names_its_chains_outcome_and_identity() {
+        let (d, file) = crate::datagram_tests::marked_fragment_dissection_with_file(&[
+            // (sn, more, first, drop)
+            (0, true, true, false),
+            (1, true, false, false),
+            (2, true, true, false),
+            (3, true, false, true),
+            (5, true, false, false),
+        ]);
+        let doc = fields_json(&d, &file, None, None);
+        assert_eq!(
+            scoped(&doc, "outcome", &["outcome", "reason", "chain_id"]),
+            alloc::vec![
+                alloc::vec!["begun", "null", "0"],
+                alloc::vec!["continued", "null", "0"],
+                alloc::vec!["begun", "null", "1"],
+                alloc::vec!["aborted", "sender_dropped", "1"],
+                alloc::vec!["refused", "missing_start_marker", "null"],
+            ],
+            "{doc}"
+        );
+        assert_eq!(
+            scoped(&doc, "verdict", &["verdict", "missing"]),
+            alloc::vec![
+                alloc::vec!["baseline", "null"],
+                alloc::vec!["continuous", "null"],
+                alloc::vec!["continuous", "null"],
+                alloc::vec!["continuous", "null"],
+                alloc::vec!["gap", "1"],
+            ],
+            "{doc}"
+        );
+        // The conduit is the one the fixture's fragments were sent on: the `R`
+        // flag set, no `ext_qos` (so the upstream default band), from the low
+        // endpoint.
+        let conduits = scoped(&doc, "reliable", &["direction", "priority", "reliable"]);
+        assert_eq!(conduits.len(), 5, "{doc}");
+        for conduit in &conduits {
+            assert_eq!(
+                conduit,
+                &alloc::vec!["a", wz_session_core::qos::Priority::DEFAULT.name(), "true"],
+                "{doc}"
+            );
+        }
+        // And the handshake rows, which carry no SN and touched no chain, say
+        // so as `null` rather than by omitting the key.
+        assert!(
+            doc.matches("\"sn\":null,\"chain\":null").count() >= 4,
+            "the four handshake rows must carry both keys as null: {doc}"
+        );
+    }
+
+    /// ZA-3215 ① — AND A COMPLETED CHAIN CLOSES UNDER THE IDENTITY IT BEGAN
+    /// WITH, while a chain the capture stopped inside is counted by the
+    /// top-level `reassembly` group, which is the only place a chain with no
+    /// closing row can be accounted for.
+    #[cfg(all(feature = "reassembly", feature = "network-codecs"))]
+    #[test]
+    fn a_completed_chain_closes_under_its_identity_and_an_open_one_is_counted() {
+        use crate::datagram_tests::{push, sender_space};
+        let record = push(sender_space(0, Some("split/across")), &[0u8; 8]);
+        let (d, file) = crate::datagram_tests::reassembled_record_dissection_with_file(&record);
+        let doc = fields_json(&d, &file, None, None);
+        assert_eq!(
+            scoped(&doc, "outcome", &["outcome", "chain_id"]),
+            alloc::vec![alloc::vec!["begun", "0"], alloc::vec!["reassembled", "0"]],
+            "{doc}"
+        );
+        assert_eq!(
+            scoped(&doc, "abandoned_at_end", &["abandoned_at_end"]),
+            alloc::vec![alloc::vec!["0"]],
+            "{doc}"
+        );
+
+        let (mut open, open_file) =
+            crate::datagram_tests::marked_fragment_dissection_with_file(&[(0, true, true, false)]);
+        // The fixture feeds packets and stops; ending the capture is the
+        // caller's verb, and it is where a still-open chain is booked. Every
+        // door that reads a whole file calls it.
+        open.finish();
+        assert!(
+            open.abandoned_chains() >= 1,
+            "the fixture must leave a chain open at the end, or the count below \
+             has no subject"
+        );
+        let open_doc = fields_json(&open, &open_file, None, None);
+        assert_eq!(
+            scoped(&open_doc, "abandoned_at_end", &["abandoned_at_end"]),
+            alloc::vec![alloc::vec![
+                alloc::format!("{}", open.abandoned_chains()).as_str()
+            ]],
+            "{open_doc}"
+        );
+    }
+
+    /// ZA-3215 ③ — THE FLOW SAYS WHAT ITS HANDSHAKE NEGOTIATED, and a flow
+    /// whose handshake this capture never saw says THAT rather than reporting
+    /// the `&=` fold's starting `true` as an agreement.
+    #[cfg(feature = "reassembly")]
+    #[test]
+    fn a_flows_context_is_its_negotiation_and_null_where_none_was_seen() {
+        let (d, file) =
+            crate::datagram_tests::marked_fragment_dissection_with_file(&[(0, true, true, false)]);
+        let doc = fields_json(&d, &file, None, None);
+        let fields = [
+            "phase",
+            "negotiated",
+            "lowlatency",
+            "compression",
+            "qos",
+            "sn_mask",
+        ];
+        let context = scoped(&doc, "phase", &fields);
+        assert_eq!(context.len(), 1, "one flow, one context: {doc}");
+        let mask = d.datagram_flows()[0]
+            .session
+            .context()
+            .sn_mask()
+            .expect("the fixture's InitAck names a resolution");
+        assert_eq!(context[0][0], "established", "{doc}");
+        assert_eq!(context[0][1], "true", "{doc}");
+        assert_eq!(context[0][5], alloc::format!("{mask}"), "{doc}");
+        for capability in &context[0][2..5] {
+            assert!(
+                *capability == "true" || *capability == "false",
+                "a negotiated capability is a boolean: {doc}"
+            );
+        }
+
+        let (unseen, unseen_file) =
+            crate::datagram_tests::midsession_fragment_dissection_with_file();
+        let unseen_doc = fields_json(&unseen, &unseen_file, None, None);
+        let context = scoped(&unseen_doc, "phase", &fields);
+        assert!(!context.is_empty(), "{unseen_doc}");
+        for flow in &context {
+            assert_eq!(
+                flow,
+                &alloc::vec!["unseen", "false", "null", "null", "null", "null"],
+                "no Init was seen, so nothing was agreed: {unseen_doc}"
+            );
+        }
+    }
+
+    /// ZA-3215 ④ — A STREAM ROW NAMES THE PACKET HOLDING ITS FIRST BYTE, and
+    /// the offset it gives is the byte, read back out of the capture file.
+    ///
+    /// Judged against the FILE and not against this module's own arithmetic:
+    /// `frame_offset` is only worth publishing if a reader holding the packet
+    /// finds the message's first byte there without parsing a header. Every
+    /// stream row is checked, and a length-prefixed stream puts every message
+    /// at least two bytes into its segment, so a locator that ignored the
+    /// prefix or the segment boundary would miss on every row.
+    #[cfg(feature = "network-codecs")]
+    #[test]
+    fn a_stream_rows_first_byte_is_the_byte_the_capture_holds_there() {
+        let (d, file) =
+            crate::census_json::fed_tests::every_plane_capture_with_file("demo/temp", None, false);
+        let doc = fields_json(&d, &file, None, None);
+        let pcap = crate::pcap::parse(&file).expect("the fixture writes a readable capture");
+        let rows = scoped(
+            &doc,
+            "payload_offset",
+            &["packet", "payload_offset", "frame_offset"],
+        );
+        let frames: Vec<(&crate::FlowDissection, &PassiveFrame)> = d
+            .flows()
+            .iter()
+            .flat_map(|flow| flow.frames.iter().map(move |frame| (flow, frame)))
+            .collect();
+        assert!(
+            frames.len() >= 2 && rows.len() >= frames.len(),
+            "the stream rows lead the document, one first_byte each: {doc}"
+        );
+        // `l2` is the Ethernet header of the SAME packet, both addresses, row
+        // by row: every stream row here carries one, so the two lists align.
+        let l2 = scoped(&doc, "src", &["src", "dst"]);
+        let mac = |b: &[u8]| {
+            b.iter()
+                .map(|x| alloc::format!("{x:02x}"))
+                .collect::<Vec<_>>()
+                .join(":")
+        };
+        for (((flow, frame), row), link) in frames.iter().zip(&rows).zip(&l2) {
+            let message = flow
+                .message_bytes(frame)
+                .expect("every fixture message is sliceable");
+            let packet: usize = row[0].parse().expect("a packet index");
+            let payload_offset: usize = row[1].parse().expect("a payload offset");
+            let frame_offset: usize = row[2]
+                .parse()
+                .expect("an Ethernet/IPv4/TCP frame is locatable");
+            assert!(
+                payload_offset >= frame.prefix_width,
+                "a message follows its length prefix: {row:?}"
+            );
+            let data = &pcap.packets[packet].data;
+            assert_eq!(
+                data.get(frame_offset),
+                message.first(),
+                "row {row:?} does not point at its message's first byte"
+            );
+            assert_eq!(
+                link,
+                &alloc::vec![mac(&data[6..12]).as_str(), mac(&data[0..6]).as_str()],
+                "row {row:?} names the wrong link addresses"
+            );
+        }
+        assert_eq!(
+            l2.len(),
+            rows.len(),
+            "every row read off Ethernet names both: {doc}"
+        );
+    }
+
     #[test]
     fn the_field_documents_key_set_is_pinned() {
         use crate::payload::formats::FormatMap;
@@ -2623,6 +3707,17 @@ mod tests {
         let run = Declarations::new(&map);
 
         let mut rendered = alloc::vec![fields_json(&d, &file, None, Some(&run))];
+        // ZA-3215 — AND THE SAME CAPTURE THROUGH THE SELECTOR DOOR. Revision 13
+        // declared `selected` and this population never rendered a row that
+        // carries it, so the equality below failed from the round that
+        // declared it; a selector is the only input that emits the key.
+        rendered.push(fields_json_where(
+            &d,
+            &file,
+            None,
+            Some(&run),
+            &crate::filter::Filter::parse("bytes > 6").expect("a selector"),
+        ));
         let states = PayloadDecoding::all();
         assert_eq!(
             states.len(),
@@ -2709,6 +3804,8 @@ mod tests {
             "a RefusedUnder arm was added"
         );
         assert_eq!(Misbound::names().len(), 2, "a Misbound arm was added");
+        // ZA-3215 — the row and flow objects revision 14 added.
+        rendered.extend(session_arms());
 
         let mut seen: Vec<&str> = Vec::new();
         for doc in &rendered {
@@ -2792,7 +3889,23 @@ mod tests {
         // against a rename and against each other and against NOTHING a
         // consumer could read.
         let mut failures: Vec<String> = Vec::new();
-        let live: [(&str, &str, Vec<&'static str>); 17] = [
+        let live: [(&str, &str, Vec<&'static str>); 22] = [
+            // ZA-3215 — the session's per-frame verdicts, each held to the
+            // walk its emitter's exhaustive match is bound to.
+            (rev::FIELDS, "verdict", SnVerdictWord::names()),
+            (rev::FIELDS, "outcome", ChainOutcome::names()),
+            (rev::FIELDS, "reason", ChainReason::names()),
+            (rev::FIELDS, "phase", PhaseWord::names()),
+            // The band's NAME is `Priority::name`, an exhaustive match over the
+            // eight variants; `from_wire` is total over the 3-bit field, so the
+            // walk over `0..NUM` reaches each exactly once.
+            (
+                rev::FIELDS,
+                "priority",
+                (0..wz_session_core::qos::Priority::NUM as u8)
+                    .map(|b| wz_session_core::qos::Priority::from_wire(b).name())
+                    .collect(),
+            ),
             // R2457 (open-debt item 702) — WHY a keyexpr reference did not
             // resolve. A key a consumer switches on precisely because the two
             // words send it to different places: `no_session` says the
@@ -3297,6 +4410,9 @@ mod tests {
         let (compressed_d, compressed_file) =
             crate::datagram_tests::compressed_session_dissection_with_file();
         let compressed_fields = fields_json(&compressed_d, &compressed_file, None, None);
+        // ZA-3215 — the five families revision 14 added, each word rendered
+        // from its own type; see `session_arms`.
+        arms.extend(session_arms());
 
         let mut fields_docs: Vec<&String> = alloc::vec![
             &with,

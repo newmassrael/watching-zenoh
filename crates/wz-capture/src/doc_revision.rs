@@ -947,6 +947,38 @@ pub const DOCUMENT_HISTORY: &[DocumentShape] = &[
         planes: &[],
         carries: FIELDS_R13_CARRIES,
     },
+    // ZA-3215 — THE VERDICTS THE SESSION REACHED PER FRAME, ON THE ROW.
+    //
+    // Thirty keys arrive and none retires. A consuming viewer rebuilt four
+    // indexes of its own out of this document because wz computed each fact
+    // internally and handed none of them over:
+    //
+    // 1. `chain` — the reassembly router's outcome for a `Fragment` row and an
+    //    identity shared by every row of one chain. An identity for ROWS, not
+    //    a coordinate: the joined buffer's offsets stay off this document for
+    //    R2706's reason. `reassembly` at the top level counts the chains that
+    //    ended with no row (deadline, capture end, eviction).
+    // 2. `sn` — `track_sn`'s verdict and the conduit it was judged on,
+    //    `(direction, priority, reliable)`. The priority is the fragment's too:
+    //    R2756 measured that the `ext_qos` body is decoded on every carrier.
+    // 3. `context` per flow — what the handshake negotiated, `null` for a
+    //    capability until both Inits were seen rather than the `&=` identity.
+    // 4. `first_byte` and `l2` — the packet holding the row's first byte, its
+    //    position in that packet's payload and frame, and the Ethernet II
+    //    addresses it travelled between.
+    //
+    // A consumer pinned to 13 loses nothing: every key is new, and each is
+    // emitted on every row / flow it can occur on, `null` where it does not
+    // apply.
+    DocumentShape {
+        document: FIELDS,
+        revision: 14,
+        keys: FIELDS_R14_KEYS,
+        retiring: &[],
+        families: FIELDS_R14_FAMILIES,
+        planes: &[],
+        carries: FIELDS_R14_CARRIES,
+    },
     DocumentShape {
         document: SUMMARY,
         revision: 1,
@@ -3532,20 +3564,6 @@ pub const FIELDS_R12_KEYS: &[&str] = &[
     "wrong",
 ];
 
-/// What `carried_state` decides at revision 12 — one word per
-/// `wz_session_core::passive::Carried` variant, and the enum is the population.
-///
-/// A code span rather than an intra-doc link: that type is not in this module's
-/// scope, and a link it cannot resolve is a `-D warnings` failure in a lane
-/// this file's own gates do not run.
-///
-/// R2706. Written out here and derived in `fields_json::carried_state` by an
-/// EXHAUSTIVE match, so a new variant fails to compile there rather than
-/// arriving under a word this table never declared.
-///
-/// ⚠ `reassembled` is the word that qualifies a coordinate: the spans under
-/// that object index the buffer the chain was joined in, which exists only
-/// inside the reader. Every other word carries no spans of its own.
 /// What `selected` says about one row at field-document revision 13 — the
 /// words of [`crate::fields_json::RowVerdict`].
 ///
@@ -3717,6 +3735,20 @@ pub const FIELDS_R13_CARRIES: &[KeyCarries] = &[
     },
 ];
 
+/// What `carried_state` decides at revision 12 — one word per
+/// `wz_session_core::passive::Carried` variant, and the enum is the population.
+///
+/// A code span rather than an intra-doc link: that type is not in this module's
+/// scope, and a link it cannot resolve is a `-D warnings` failure in a lane
+/// this file's own gates do not run.
+///
+/// R2706. Written out here and derived in `fields_json::carried_state` by an
+/// EXHAUSTIVE match, so a new variant fails to compile there rather than
+/// arriving under a word this table never declared.
+///
+/// ⚠ `reassembled` is the word that qualifies a coordinate: the spans under
+/// that object index the buffer the chain was joined in, which exists only
+/// inside the reader. Every other word carries no spans of its own.
 pub const CARRIED_STATE_R12: &[&str] = &[
     "batch",
     "fragment",
@@ -4379,6 +4411,388 @@ pub const FIELDS_R12_CARRIES: &[KeyCarries] = &[
     },
     KeyCarries {
         key: "under",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "wrong",
+        shape: CarriesShape::Passenger,
+    },
+];
+
+/// The field document's keys at revision 14 — revision 13's PLUS thirty.
+///
+/// ZA-3215. Four groups, each a verdict the session had already reached and
+/// this document had never carried:
+///
+/// * per row, `sn` (`verdict`, `missing`, `conduit` → `direction`,
+///   `priority`, `reliable`) and `chain` (`outcome`, `reason`, `chain_id`);
+/// * per row, `first_byte` (`packet`, `payload_offset`, `frame_offset`) and
+///   `l2` (`src`, `dst`);
+/// * per flow, `context` (`phase`, `negotiated`, `lowlatency`, `compression`,
+///   `qos`, `patch`, `sn_mask`, `batch_size`);
+/// * top level, `reassembly` (`expired_chains`, `abandoned_at_end`,
+///   `abandoned_on_eviction`).
+///
+/// ⚠ `packet` is not new to the RENDERING — datagram rows have written it
+/// since before revision 1 — and it is new to this LIST, because the pin that
+/// derives this set renders a stream capture and never reached that row. It is
+/// declared here because a stream row's `first_byte` now carries it too, which
+/// is the first time that capture emits it.
+pub const FIELDS_R14_KEYS: &[&str] = &[
+    "abandoned_at_end",
+    "abandoned_on_eviction",
+    "above_transport",
+    "addr",
+    "batch_size",
+    "caps",
+    "capture_reread",
+    "carried",
+    "carried_state",
+    "chain",
+    "chain_id",
+    "compression",
+    "conduit",
+    "context",
+    "datagram_flows",
+    "declaration_checked",
+    "declared",
+    "descriptor_bytes",
+    "despite_encoding",
+    "direction",
+    "document",
+    "dropped_by_limits",
+    "dst",
+    "end",
+    "example",
+    "expired_chains",
+    "fields",
+    "first_byte",
+    "flow",
+    "flows",
+    "format",
+    "frame_offset",
+    "frames",
+    "frames_per_flow",
+    "high",
+    "keyexpr",
+    "keyexpr_cause",
+    "kind",
+    "l2",
+    "link",
+    "low",
+    "lowlatency",
+    "max_flows_per_table",
+    "max_scout_askers",
+    "message",
+    "message_at",
+    "messages",
+    "missing",
+    "name",
+    "negotiated",
+    "note",
+    "offset_space",
+    "omitted",
+    "outcome",
+    "packet",
+    "patch",
+    "path",
+    "payload_decode",
+    "payload_mapping",
+    "payload_mapping_counts_exact",
+    "payload_offset",
+    "payload_refusals",
+    "phase",
+    "port",
+    "priority",
+    "qos",
+    "reason",
+    "reassembly",
+    "reliable",
+    "revision",
+    "samples",
+    "scout_askers",
+    "scouting",
+    "selected",
+    "shown",
+    "skipped",
+    "skipped_packets",
+    "sn",
+    "sn_mask",
+    "src",
+    "start",
+    "state",
+    "stream_bytes",
+    "stream_bytes_per_direction",
+    "stream_flows",
+    "under",
+    "value",
+    "verdict",
+    "why",
+    "wrong",
+];
+
+/// What `chain.outcome` says at revision 14 — the reassembly router's
+/// `IngestOutcome`, one word per variant.
+///
+/// ZA-3215. Derived in `fields_json` by an exhaustive match, so a new outcome
+/// fails to compile there rather than arriving under a word this table never
+/// declared.
+pub const CHAIN_OUTCOME_R14: &[&str] = &["aborted", "begun", "continued", "reassembled", "refused"];
+
+/// What `chain.reason` says at revision 14 — the router's `AbortReason` and
+/// `RefuseReason` together, since `outcome` beside it says which.
+///
+/// ZA-3215. ⚠ `superseded` is declared although no row carries it today: the
+/// router reports a `First` restart as `begun` for the new chain, and the
+/// stranded one ends without a row. The word is the router's own.
+pub const CHAIN_REASON_R14: &[&str] = &[
+    "capacity_overflow",
+    "missing_start_marker",
+    "out_of_order",
+    "peer_quota",
+    "pool_exhausted",
+    "sender_dropped",
+    "superseded",
+];
+
+/// What `context.phase` says at revision 14 — the observer's `SessionPhase`.
+pub const SESSION_PHASE_R14: &[&str] = &[
+    "closed",
+    "established",
+    "half_init",
+    "init_complete",
+    "unseen",
+];
+
+/// What `sn.conduit.priority` says at revision 14 — the eight bands, spelled
+/// as the upstream constant names (`Priority::name`), NOT as their numbers.
+pub const PRIORITY_R14: &[&str] = &[
+    "Background",
+    "Control",
+    "Data",
+    "DataHigh",
+    "DataLow",
+    "InteractiveHigh",
+    "InteractiveLow",
+    "RealTime",
+];
+
+/// What `sn.verdict` says at revision 14 — the session's `SnVerdict`.
+///
+/// ZA-3215. `gap` is the one word that fills `sn.missing`; every other word
+/// carries it as `null`, which is why the key is a passenger here rather than
+/// a discriminant.
+pub const SN_VERDICT_R14: &[&str] = &[
+    "baseline",
+    "continuous",
+    "duplicate",
+    "gap",
+    "out_of_window",
+    "without_resolution",
+];
+
+/// The value families the field document declares at revision 14 — revision
+/// 13's PLUS `outcome`, `phase`, `priority`, `reason` and `verdict`.
+pub const FIELDS_R14_FAMILIES: &[ValueFamily] = &[
+    ValueFamily {
+        key: "carried_state",
+        values: CARRIED_STATE_R12,
+    },
+    ValueFamily {
+        key: "direction",
+        values: DIRECTION_FIELDS_R2,
+    },
+    ValueFamily {
+        key: "keyexpr_cause",
+        values: UNRESOLVED_CAUSE_R11,
+    },
+    ValueFamily {
+        key: "kind",
+        values: FIELD_VALUE_KIND_R3,
+    },
+    ValueFamily {
+        key: "link",
+        values: LINK_KIND_R7,
+    },
+    ValueFamily {
+        key: "message",
+        values: MESSAGE_R10,
+    },
+    ValueFamily {
+        key: "offset_space",
+        values: ANCHOR_SPACE_FIELDS_R2,
+    },
+    ValueFamily {
+        key: "outcome",
+        values: CHAIN_OUTCOME_R14,
+    },
+    ValueFamily {
+        key: "phase",
+        values: SESSION_PHASE_R14,
+    },
+    ValueFamily {
+        key: "priority",
+        values: PRIORITY_R14,
+    },
+    ValueFamily {
+        key: "reason",
+        values: CHAIN_REASON_R14,
+    },
+    ValueFamily {
+        key: "selected",
+        values: SELECTED_R13,
+    },
+    ValueFamily {
+        key: "state",
+        values: PAYLOAD_STATE_R2,
+    },
+    ValueFamily {
+        key: "under",
+        values: REFUSED_UNDER_R2,
+    },
+    ValueFamily {
+        key: "verdict",
+        values: SN_VERDICT_R14,
+    },
+    ValueFamily {
+        key: "wrong",
+        values: MISBOUND_R2,
+    },
+];
+
+/// Every shape each `offset_space` word's row takes at revision 14 — revision
+/// 12's (which revision 13 kept), each PLUS `chain`, `first_byte`, `l2` and
+/// `sn`.
+///
+/// ZA-3215. The four keys are on EVERY row, `null` where they do not apply, so
+/// they join every shape and split none — the same uniform addition
+/// `above_transport` was at revision 12.
+pub const FIELD_OFFSET_SPACE_CARRIES_R14: &[WordCarries] = &[
+    WordCarries {
+        word: "packet",
+        shapes: &[
+            &[
+                "above_transport",
+                "carried",
+                "chain",
+                "direction",
+                "fields",
+                "first_byte",
+                "l2",
+                "name",
+                "packet",
+                "sn",
+            ],
+            &[
+                "above_transport",
+                "carried",
+                "chain",
+                "direction",
+                "fields",
+                "first_byte",
+                "l2",
+                "name",
+                "packet",
+                "payload_decode",
+                "sn",
+            ],
+        ],
+    },
+    WordCarries {
+        word: "stream_byte",
+        shapes: &[
+            &[
+                "above_transport",
+                "carried",
+                "chain",
+                "direction",
+                "fields",
+                "first_byte",
+                "l2",
+                "message_at",
+                "name",
+                "sn",
+            ],
+            &[
+                "above_transport",
+                "carried",
+                "chain",
+                "direction",
+                "fields",
+                "first_byte",
+                "l2",
+                "message_at",
+                "name",
+                "payload_decode",
+                "sn",
+            ],
+        ],
+    },
+];
+
+/// What each field-document family's WORD decides at revision 14 — revision
+/// 13's, with `offset_space` read from [`FIELD_OFFSET_SPACE_CARRIES_R14`], and
+/// the five new families all PASSENGERS: each sits in an object every word
+/// fills with the same keys, `null` where one does not apply.
+pub const FIELDS_R14_CARRIES: &[KeyCarries] = &[
+    KeyCarries {
+        key: "carried_state",
+        shape: CarriesShape::Discriminant(CARRIED_STATE_CARRIES_R12),
+    },
+    KeyCarries {
+        key: "direction",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "keyexpr_cause",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "kind",
+        shape: CarriesShape::Discriminant(FIELD_VALUE_KIND_CARRIES_R4),
+    },
+    KeyCarries {
+        key: "link",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "message",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "offset_space",
+        shape: CarriesShape::Discriminant(FIELD_OFFSET_SPACE_CARRIES_R14),
+    },
+    KeyCarries {
+        key: "outcome",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "phase",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "priority",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "reason",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "selected",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "state",
+        shape: CarriesShape::Discriminant(PAYLOAD_STATE_CARRIES_R4),
+    },
+    KeyCarries {
+        key: "under",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "verdict",
         shape: CarriesShape::Passenger,
     },
     KeyCarries {
@@ -6377,7 +6791,11 @@ mod tests {
             // only word that tells a compressed body from an unknown MID.
             // ZA-3214 ④ — to 13 when `selected` and its four words were
             // declared; the selector door had written them since R2766.
-            (FIELDS, 13),
+            // ZA-3215 — to 14 when rows gained `sn`, `chain`, `first_byte` and
+            // `l2`, flows gained `context`, and the document gained
+            // `reassembly`: verdicts the session reached per frame and had
+            // never handed over.
+            (FIELDS, 14),
             // R2121 (open-debt item 460) — the summary moved to 2 when it
             // gained `inert_counters`; R2122 (item 238) to 3 when its
             // `framing` group stopped disagreeing with the capture report's.

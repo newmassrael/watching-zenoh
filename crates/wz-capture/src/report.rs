@@ -1473,13 +1473,8 @@ impl<'a> CaptureReport<'a> {
         // R311y654 (§1.1f) — STRUCTURAL like `skips` and `encrypted`: present
         // with a zero on a build that reassembles nothing, so a consumer's
         // field lookup never depends on which features this binary carries.
-        s.push_str(&format!(
-            ",\"reassembly\":{{\"expired_chains\":{},\"abandoned_at_end\":{},\
-             \"abandoned_on_eviction\":{}}}",
-            d.expired_chains(),
-            d.abandoned_chains(),
-            d.evicted_chains()
-        ));
+        s.push_str(",\"reassembly\":");
+        s.push_str(&reassembly_json(d));
         s.push_str(",\"capture_reported_drops\":");
         s.push_str(&opt_u64(d.capture_reported_drops()));
         s.push('}');
@@ -3394,6 +3389,25 @@ fn skips_text(sk: &crate::SkipCensus, s: &mut String) {
             "    link type(s) not read by this build: {dlts}\n"
         ));
     }
+}
+
+/// The zenoh fragment chains this dissection gave up on WITHOUT a fragment in
+/// hand, one count per cause.
+///
+/// ZA-3215 — lifted out of the capture report so the field document can carry
+/// the same group: that document now names each fragment's chain, and a chain
+/// with no closing row is one of these. One emitter for both, on the rule
+/// R2122 set for `framing`.
+///
+/// The three are apart for the reason [`crate::Dissection::expired_chains`]
+/// gives, and STRUCTURAL: zeros on a build that reassembles nothing.
+pub fn reassembly_json(d: &crate::Dissection) -> String {
+    format!(
+        "{{\"expired_chains\":{},\"abandoned_at_end\":{},\"abandoned_on_eviction\":{}}}",
+        d.expired_chains(),
+        d.abandoned_chains(),
+        d.evicted_chains()
+    )
 }
 
 /// R311y885 — what THIS DISSECTION's caps cost, as one JSON object, rendered

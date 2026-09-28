@@ -1345,6 +1345,116 @@ pub fn decapsulate(
     )
 }
 
+/// ZA-3215 — where the transport payload [`decapsulate`] would hand back
+/// begins, as an offset into the captured packet `bytes`.
+///
+/// # Why a second walk and not a field on [`Segment`] / [`Datagram`]
+///
+/// Both types own their payload (`to_vec`), so by the time a caller holds one
+/// the fact "these bytes sat at offset N of the packet" is gone, and it is a
+/// fact only the strip that sliced them had. Threading it out through every
+/// strip would give every constructor of either type — tests, the vsock
+/// record, the IP-fragment reassembly door — a field that is meaningless for
+/// half of them. This walks the SAME doors instead ([`enter_link`],
+/// [`walk_ip_chain`]) and reads the header lengths through the SAME rules the
+/// strips use ([`tcp_header_len`], [`UDP_HEADER_LEN`]), so the two cannot
+/// disagree about where a body starts.
+///
+/// # When it answers `None`, and why that is not a failure
+///
+/// * an IP FRAGMENT, or anything the IP-fragment reassembler rebuilt: the
+///   payload is no longer one contiguous run of any single packet;
+/// * a vsockmon record: the reader re-sequences it into a stream and it has
+///   no transport header to be offset from;
+/// * a raweth frame inside a GRETAP tunnel: the walk hands back an owned
+///   datagram and the carrier's length is not re-derived here;
+/// * anything [`decapsulate`] itself would refuse.
+///
+/// An absent offset is reported as absent by every caller, never as `0`.
+pub fn transport_payload_at(link_type: u32, packet_index: usize, bytes: &[u8]) -> Option<usize> {
+    if link_type == LINKTYPE_VSOCK {
+        return None;
+    }
+    let (ip_bytes, is_v6) = match enter_link(link_type, bytes, packet_index).ok()? {
+        // The untunnelled raweth frame: the payload `strip_raweth` kept is a
+        // slice of these very bytes, so its position is read, not computed.
+        LinkBody::RawEth(_) => {
+            let (_, payload) = wz_session_core::raweth_link::deframe(bytes).ok()?;
+            return offset_within(bytes, payload);
+        }
+        LinkBody::Ip { bytes, is_v6 } => (bytes, is_v6),
+    };
+    let walked =
+        walk_ip_chain(ip_bytes, is_v6, 0, None, None, Tunnel::none(), packet_index).ok()?;
+    let ChainEnd::Ip(ip) = walked.end else {
+        return None;
+    };
+    if ip.fragment.is_some() {
+        return None;
+    }
+    let at = offset_within(bytes, ip.payload)?;
+    match ip.proto {
+        IP_PROTO_TCP => Some(at + tcp_header_len(ip.payload).ok()?),
+        IP_PROTO_UDP => Some(at + UDP_HEADER_LEN),
+        _ => None,
+    }
+}
+
+/// ZA-3215 — the two Ethernet II addresses of a captured frame, as
+/// `(source, destination)`.
+///
+/// `None` for every link type that is not Ethernet — a cooked (SLL) capture
+/// records one address and a raw-IP capture none — and for an IEEE 802.3
+/// frame whose type field is a LENGTH (below `0x0600`), which is not Ethernet
+/// II and not a frame this reader decapsulates. A VLAN tag does not change
+/// the answer: the addresses precede it.
+pub fn ethernet_endpoints(link_type: u32, bytes: &[u8]) -> Option<([u8; 6], [u8; 6])> {
+    if link_type != LINKTYPE_ETHERNET || bytes.len() < 14 {
+        return None;
+    }
+    if u16::from_be_bytes([bytes[12], bytes[13]]) < 0x0600 {
+        return None;
+    }
+    let mut dst = [0u8; 6];
+    let mut src = [0u8; 6];
+    dst.copy_from_slice(&bytes[0..6]);
+    src.copy_from_slice(&bytes[6..12]);
+    Some((src, dst))
+}
+
+/// Where `inner` starts within `outer`, when it is a sub-slice of it.
+///
+/// Answered from the two slices' address ranges and nothing else, so a slice
+/// that merely holds EQUAL bytes elsewhere is never mistaken for this one —
+/// the failure a search over the contents would have on a one-byte payload.
+fn offset_within(outer: &[u8], inner: &[u8]) -> Option<usize> {
+    let outer_range = outer.as_ptr_range();
+    let inner_range = inner.as_ptr_range();
+    let start = inner_range.start as usize;
+    let end = inner_range.end as usize;
+    if start < outer_range.start as usize || end > outer_range.end as usize {
+        return None;
+    }
+    Some(start - outer_range.start as usize)
+}
+
+/// The fixed UDP header length (RFC 768), shared by [`strip_udp`] and
+/// [`transport_payload_at`] so the two cannot place a body differently.
+const UDP_HEADER_LEN: usize = 8;
+
+/// A TCP header's length from its Data Offset field (RFC 9293 §3.1), shared by
+/// [`strip_tcp`] and [`transport_payload_at`].
+fn tcp_header_len(bytes: &[u8]) -> Result<usize, SkipReason> {
+    if bytes.len() < 20 {
+        return Err(SkipReason::Truncated);
+    }
+    let data_off = ((bytes[12] >> 4) as usize) * 4;
+    if data_off < 20 || bytes.len() < data_off {
+        return Err(SkipReason::Truncated);
+    }
+    Ok(data_off)
+}
+
 /// One GRE header: its payload and the ethertype that names what the payload
 /// is.
 ///
@@ -1829,7 +1939,7 @@ fn strip_udp(
     checksums: Checksums,
     tunnel: Tunnel,
 ) -> Result<Datagram, SkipReason> {
-    if bytes.len() < 8 {
+    if bytes.len() < UDP_HEADER_LEN {
         return Err(SkipReason::Truncated);
     }
     let src_port = u16::from_be_bytes([bytes[0], bytes[1]]);
@@ -1837,11 +1947,11 @@ fn strip_udp(
     let declared = u16::from_be_bytes([bytes[4], bytes[5]]) as usize;
     // `length` counts the header itself. A value below 8 is malformed; one
     // past the captured bytes means the capture was snapped short.
-    if declared < 8 {
+    if declared < UDP_HEADER_LEN {
         return Err(SkipReason::Truncated);
     }
-    let body_len = declared - 8;
-    if bytes.len() < 8 + body_len {
+    let body_len = declared - UDP_HEADER_LEN;
+    if bytes.len() < UDP_HEADER_LEN + body_len {
         return Err(SkipReason::Truncated);
     }
     let src = Endpoint::new(src.addr(), src_port as u32);
@@ -1850,7 +1960,7 @@ fn strip_udp(
     Ok(Datagram {
         flow,
         from_low,
-        payload: bytes[8..8 + body_len].to_vec(),
+        payload: bytes[UDP_HEADER_LEN..UDP_HEADER_LEN + body_len].to_vec(),
         packet_index,
         checksums,
         tunnel,
@@ -2357,16 +2467,10 @@ fn strip_tcp(
     checksums: Checksums,
     tunnel: Tunnel,
 ) -> Result<Segment, SkipReason> {
-    if bytes.len() < 20 {
-        return Err(SkipReason::Truncated);
-    }
+    let data_off = tcp_header_len(bytes)?;
     let src_port = u16::from_be_bytes([bytes[0], bytes[1]]);
     let dst_port = u16::from_be_bytes([bytes[2], bytes[3]]);
     let seq = u32::from_be_bytes([bytes[4], bytes[5], bytes[6], bytes[7]]);
-    let data_off = ((bytes[12] >> 4) as usize) * 4;
-    if data_off < 20 || bytes.len() < data_off {
-        return Err(SkipReason::Truncated);
-    }
     let flags = bytes[13];
     let src = Endpoint::new(src.addr(), src_port as u32);
     let dst = Endpoint::new(dst.addr(), dst_port as u32);

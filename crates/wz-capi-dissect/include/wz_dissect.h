@@ -369,6 +369,93 @@
  *
  * @values fields carried_state
  *
+ * ZA-3215 -- AND THE SESSION'S PER-FRAME VERDICTS, at field-document
+ * revision 14. Every key below is emitted on every row (or flow) it can occur
+ * on, and is `null` where it does not apply -- never absent.
+ *
+ * Per ROW:
+ *
+ *   "sn":{"verdict":..,"missing":N|null,
+ *         "conduit":{"direction":"a"|"b","priority":..,"reliable":bool}}
+ *
+ *     The sequence-number verdict, judged against the previous frame on the
+ *     SAME conduit -- zenoh numbers each (priority, reliability) pair
+ *     separately, per direction, so a lane keyed on anything less reads every
+ *     interleave as a gap. `missing` is filled for `gap` only. `null` on every
+ *     message that carries no SN (handshake, keepalive, close). A Fragment's
+ *     priority is its `ext_qos` band like a Frame's; `priority` is the band's
+ *     NAME, never its number.
+ *
+ *     `verdict` is one of `baseline` (first frame on the conduit),
+ *     `continuous`, `gap`, `duplicate`, `out_of_window` (behind, or past the
+ *     forward half-window -- a participant drops these, so they are not loss),
+ *     or `without_resolution` (no InitAck seen, so the ring is unknown).
+ *     `priority` is one of `Control`, `RealTime`, `InteractiveHigh`,
+ *     `InteractiveLow`, `DataHigh`, `Data`, `DataLow`, `Background`.
+ *
+ * @values fields verdict
+ * @values fields priority
+ *
+ *   "chain":{"outcome":..,"reason":..|null,"chain_id":N|null}
+ *
+ *     What the reassembly router did with a Fragment row, and an identity
+ *     shared by every row of one chain (unique within the flow, counted from 0
+ *     in the order chains began). The identity names ROWS; it is NOT a
+ *     coordinate into the joined buffer, whose offsets stay off this document.
+ *     `reason` is filled for `aborted` and `refused`; `chain_id` is `null` for
+ *     `refused`, which allocates no chain. `null` on a Fragment read before any
+ *     InitAck (`carried_state: fragment_without_resolution`: no router ran)
+ *     and on every non-Fragment row. `reassembled` is also the outcome of a
+ *     row whose joined payload then failed to decompress; `above_transport`
+ *     says which. `superseded` is declared and not emitted today: the router
+ *     reports a restart as `begun` for the new chain, so the stranded chain
+ *     ends WITHOUT a row.
+ *
+ *     `outcome` is one of `begun`, `continued`, `reassembled`, `aborted`,
+ *     `refused`. `reason` is one of `out_of_order`, `capacity_overflow`,
+ *     `sender_dropped`, `superseded` (with `aborted`) or `peer_quota`,
+ *     `pool_exhausted`, `missing_start_marker` (with `refused`).
+ *
+ * @values fields outcome
+ * @values fields reason
+ *
+ *   "first_byte":{"packet":N,"payload_offset":N,"frame_offset":N|null}
+ *   "l2":{"src":"aa:bb:cc:dd:ee:ff","dst":".."}|null
+ *
+ *     The capture packet holding the row's first byte, where that byte sits
+ *     in the packet's transport payload, and where it sits in the CAPTURED
+ *     FRAME (link header included) -- so a packet view can highlight it
+ *     without parsing a header. `frame_offset` is `null` where one packet's
+ *     bytes cannot place it (a payload rebuilt from IP fragments, a vsock
+ *     record). `first_byte` is `null` on a WebSocket flow: the row's
+ *     coordinate names the ws frame header, and the message sits past it,
+ *     masked. `l2` is the Ethernet II addresses of that packet, `null` on any
+ *     other link.
+ *
+ * Per FLOW, beside `flow`:
+ *
+ *   "context":{"phase":..,"negotiated":bool,"lowlatency":bool|null,
+ *              "compression":bool|null,"qos":bool|null,"patch":N|null,
+ *              "sn_mask":N|null,"batch_size":N|null}
+ *
+ *     What the handshake this flow carried negotiated, as of its end. The
+ *     three capabilities are `null` until BOTH Inits were seen, rather than
+ *     the `true` a half-folded negotiation starts from. `sn_mask` is the ring
+ *     every `sn.verdict` on the flow was judged at; `null` there is why they
+ *     all say `without_resolution`. It can reach 2^63-1: read it as a 64-bit
+ *     integer, not a double.
+ *
+ *     `phase` is one of `unseen`, `half_init`, `init_complete`,
+ *     `established`, `closed`.
+ *
+ * @values fields phase
+ *
+ * And at the TOP LEVEL, `"reassembly":{"expired_chains":N,
+ * "abandoned_at_end":N,"abandoned_on_eviction":N}` -- the chains that ended
+ * with NO row: past their deadline, still open when the capture stopped, or on
+ * a flow the cap evicted. A `chain_id` with a `begun` row and no closing one is
+ * one of these. The same group the command line's capture report carries.
+ *
  * R2629 -- AND A SCOUTING DATAGRAM IS A ROW, at field-document revision 10.
  *
  * A datagram flow's `messages` now also holds its SCOUT and HELLO datagrams.
@@ -457,7 +544,7 @@
  *
  * Every family in `value_families` now carries a `carries` axis:
  *
- *     {"name":"fields","revision":13,"key":"kind","values":[...],
+ *     {"name":"fields","revision":14,"key":"kind","values":[...],
  *      "carries":[{"word":"bits","shapes":[["end","name","start","value"]]},
  *                 {"word":"opaque","shapes":[["end","name","start"]]}, ...]}
  *
@@ -492,9 +579,14 @@
  * @carries fields link passenger
  * @carries fields message passenger
  * @carries fields offset_space discriminant
+ * @carries fields outcome passenger
+ * @carries fields phase passenger
+ * @carries fields priority passenger
+ * @carries fields reason passenger
  * @carries fields selected passenger
  * @carries fields state discriminant
  * @carries fields under passenger
+ * @carries fields verdict passenger
  * @carries fields wrong passenger
  *
  * `the_header_and_the_library_agree_about_every_carries_axis` holds both
@@ -1351,7 +1443,7 @@ int wz_dissect_declarations_diagnose(const char *declarations, char **out);
  *
  * R2175 -- the document is at REVISION 3, and the fourth key is `value_families`:
  *
- *     "value_families":[{"name":"fields","revision":13,"key":"state",
+ *     "value_families":[{"name":"fields","revision":14,"key":"state",
  *                        "values":["decoded","encoding_mismatch",…]}, …]
  *
  * every key in every document whose VALUE this build draws from a closed set,
