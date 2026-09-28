@@ -21,7 +21,7 @@
 //! [`push`](MulticastTxProducer::push) mints, asks for room and enqueues on the
 //! caller's own thread, under the lock of the one conduit the message rides.
 //!
-//! The drive loop owns the other side, [`MulticastTxPlane`]: it attaches a
+//! The drive loop owns the other side, `MulticastTxPlane`: it attaches a
 //! link's pipeline to the producer when the link comes up, starts the transmit
 //! task that writes the lanes, counts what was pushed and what was written,
 //! advertises the conduits as WRITTEN in its JOIN, and detaches the pipeline

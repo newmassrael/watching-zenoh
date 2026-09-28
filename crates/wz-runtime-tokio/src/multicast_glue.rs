@@ -1235,7 +1235,7 @@ fn router_group_params(
 /// R2937 — what a router's group face takes from the node's configuration.
 ///
 /// `qos` is the group's per-priority offer, `transport.multicast.qos.enabled`
-/// (see [`router_group_params`] for why it is not the unicast knob).
+/// (see `router_group_params` for why it is not the unicast knob).
 /// `tx_queue` is the operator's `transport/link/tx/queue` block, the SAME one
 /// the node's unicast sessions take: upstream keeps one set of queue sizes and
 /// congestion waits in its transport manager and builds a multicast link's

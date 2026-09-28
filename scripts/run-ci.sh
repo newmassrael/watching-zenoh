@@ -11434,6 +11434,11 @@ layer_c1bz_docs_resolve() {
     # c867f7b8 (where 497 was set) and at 66c97cae differ by exactly those two.
     # Every link in that module doc is now a full path, the eleven older ones
     # in the same doc included; the same command then read 486.
+    # R2936 — wz-runtime-tokio 486 -> 485. Diffed against 486's error set: the
+    # R2936 rewrite of the drive loop's doc removed its `TxSn` link, and the
+    # three links the new `multicast_pipeline` doc broke are fixed at the
+    # cause (lib.rs no longer puts an outer doc on that module, so its `//!`
+    # resolves in its own scope), with the one private-item link a code span.
     budget="
         wz:2
         wz-ap-demo:26
@@ -11444,7 +11449,7 @@ layer_c1bz_docs_resolve() {
         wz-mcu-session-acceptor:3
         wz-routing-graph:5
         wz-runtime-coop:12
-        wz-runtime-tokio:486
+        wz-runtime-tokio:485
         wz-session-core:513
         wz-session-lwip:4
         wz-switchboard-codegen:8

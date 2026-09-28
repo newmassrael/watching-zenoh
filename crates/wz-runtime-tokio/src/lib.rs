@@ -1185,8 +1185,10 @@ pub mod scouting_static;
 #[cfg(feature = "transport-multicast")]
 pub mod multicast_glue;
 
-/// R2931 — a multicast group's transmission pipeline as its producers push onto
-/// it, and the drive loop's side of one attached link.
+// R2936 — a multicast group's transmission pipeline as its producers push onto
+// it, and the drive loop's side of one attached link. A plain comment, not an
+// outer doc: the module documents itself with `//!`, and an outer doc here
+// would make rustdoc resolve that inner doc's links from the crate root.
 #[cfg(feature = "transport-multicast")]
 pub mod multicast_pipeline;
 
