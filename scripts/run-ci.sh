@@ -4705,10 +4705,16 @@ layer_c1_cargo_test() {
     # Session API (gated `not(transport-unicast)`), which the workspace's
     # transport-unicast feature unification would gate out; excluded here and
     # tested ISOLATED in C1s.
-    (cd crates && cargo test --workspace \
-        --exclude wz-session-lwip \
-        --exclude wz-mcu-session-acceptor \
-        --exclude wz-mcu-multicast-e2e \
+    # R2939 — the no_std-forcing set is DERIVED (`nostd_workspace_members.py`:
+    # a member whose own build switches `sce-rust-runtime/no_std` on). It was
+    # this hand list, twice (here and C2), and R2916 gave wz-runtime-zephyr a
+    # no_std `wz-session-core` without adding it, so C1 did not compile at all
+    # (hosted run 36338677128). The multicast-tests exclude stays by name: its
+    # reason is transport-unicast unification, not no_std.
+    local nostd excludes=()
+    nostd="$(python3 scripts/lib/nostd_workspace_members.py)" || return 1
+    for member in $nostd; do excludes+=(--exclude "$member"); done
+    (cd crates && cargo test --workspace "${excludes[@]}" \
         --exclude wz-runtime-tokio-multicast-tests --quiet)
 }
 
@@ -12746,11 +12752,11 @@ layer_c2_cargo_clippy() {
     # wz-mcu-multicast-e2e for the same reason (isolated clippy in C1r).
     # R311mo — wz-runtime-tokio-multicast-tests for the transport-unicast
     # feature-unification reason (isolated clippy in C1s). Same rationale as
-    # the C1 exclude.
-    (cd crates && cargo clippy --workspace --all-targets \
-        --exclude wz-session-lwip \
-        --exclude wz-mcu-session-acceptor \
-        --exclude wz-mcu-multicast-e2e \
+    # the C1 exclude, and since R2939 the same derived no_std set.
+    local nostd excludes=()
+    nostd="$(python3 scripts/lib/nostd_workspace_members.py)" || return 1
+    for member in $nostd; do excludes+=(--exclude "$member"); done
+    (cd crates && cargo clippy --workspace --all-targets "${excludes[@]}" \
         --exclude wz-runtime-tokio-multicast-tests --quiet -- -D warnings) || return 1
     legs=$((legs + 1))
 
