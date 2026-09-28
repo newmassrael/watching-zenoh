@@ -104,7 +104,7 @@ extern "C" {
  * without moving this number is red rather than shipped.
  * ------------------------------------------------------------------ */
 
-#define WZ_CAPI_C_ABI_REVISION 2
+#define WZ_CAPI_C_ABI_REVISION 3
 
 /* The revision the LOADED library reports. See the block above for why
  * this exists beside the macro. */
@@ -314,6 +314,221 @@ size_t wz_capi_c_config_zenoh_link_scheme_count(void);
 /* The name of stock zenoh's link scheme `index`, or NULL past the
  * end. */
 const char *wz_capi_c_config_zenoh_link_scheme(size_t index);
+
+/* ------------------------------------------------------------------ *
+ * Group membership: zenoh-ext's Group / Member / GroupEvent (R2932).
+ * Revision 3. Present only where Z_FEATURE_UNSTABLE_API is, as every
+ * ze_ door is: upstream marks zenoh-ext's group unstable.
+ *
+ * WHY wz_capi_c_ AND NOT ze_. Upstream zenoh-c has NO group surface
+ * at the pinned checkout, so there is no ze_ name to be a drop-in
+ * for, and a ze_ name wz invented would be a guess about a symbol
+ * upstream has not defined -- a wrong guess is a drop-in symbol with
+ * the wrong meaning, which is worse than none.
+ *
+ * THE NAMING RULE. Each name here is what zenoh-c's own convention
+ * for its zenoh-ext surface (the ze_advanced_* family) produces for
+ * the Rust item, with ze_ spelt wz_capi_c_ (and ZE_ as WZ_CAPI_C_):
+ *
+ *   type T         ze_{owned,loaned,moved}_<t>_t, ze_<t>_loan,
+ *                  ze_<t>_drop, ze_<t>_clone,
+ *                  ze_internal_<t>_null / _check
+ *   method T::m    ze_<t>_<m>(object, ...); a constructor takes its
+ *                  out-parameter first: Group::join -> ze_group_join
+ *   builder        ze_<t>_options_t + ze_<t>_options_default
+ *   stream result  a ze_closure_<item> callback, as zenoh-c does
+ *   enum E         ze_<e>_t with ZE_<E>_<VARIANT>
+ *
+ * So when upstream ships the surface, a caller renames wz_capi_c_ to
+ * ze_ and the rest should match. The least certain names are the
+ * member field readers (info, lease_ms, liveliness, refresh_ratio)
+ * and the group_event readers: upstream keeps those fields private or
+ * unpacks events with `match`, so those names apply the rule to a
+ * FIELD rather than to a method upstream has.
+ *
+ * ONE C SESSION, ONE GROUP. A wz session reaches its peers through
+ * one link each; the group you join is joined over every one of
+ * them and over the session itself, and what these doors report is
+ * the union: a member reached through two links is ONE member, and
+ * JOIN / LEAVE / LEASE_EXPIRED fire when it enters or leaves the
+ * union. A member only a lost link could see is reported
+ * LEASE_EXPIRED when that link goes, not one lease later as upstream
+ * would. Other groups joined on the same session see each other.
+ *
+ * STRINGS. A z_view_string_t written here borrows from the object it
+ * was read from and is valid while that object is.
+ *
+ * THREADS. The event closure runs on a library thread, never on the
+ * thread that called a door, and never twice at once for one group.
+ * From inside it you may read the view, the size, the leader and any
+ * member; wz_capi_c_group_subscribe answers Z_EBUSY_MUTEX there, and
+ * wz_capi_c_group_wait_for_view_size answers at once rather than
+ * waiting on a delivery the callback itself is holding up.
+ * ------------------------------------------------------------------ */
+
+#if defined(Z_FEATURE_UNSTABLE_API)
+
+/* zenoh-ext MemberLiveliness. */
+typedef int wz_capi_c_member_liveliness_t;
+#define WZ_CAPI_C_MEMBER_LIVELINESS_AUTO 0
+#define WZ_CAPI_C_MEMBER_LIVELINESS_MANUAL 1
+
+/* zenoh-ext GroupEvent's variants. NEW_LEADER is declared and never
+ * sent, upstream and here alike. */
+typedef int wz_capi_c_group_event_kind_t;
+#define WZ_CAPI_C_GROUP_EVENT_KIND_JOIN 0
+#define WZ_CAPI_C_GROUP_EVENT_KIND_LEAVE 1
+#define WZ_CAPI_C_GROUP_EVENT_KIND_LEASE_EXPIRED 2
+#define WZ_CAPI_C_GROUP_EVENT_KIND_NEW_LEADER 3
+
+/* Owned / loaned / moved. One pointer each: wz's own types, with no
+ * upstream footprint to match. */
+typedef struct wz_capi_c_owned_member_t { void *_handle; } wz_capi_c_owned_member_t;
+typedef struct wz_capi_c_loaned_member_t { void *_handle; } wz_capi_c_loaned_member_t;
+typedef struct wz_capi_c_moved_member_t { wz_capi_c_owned_member_t _this; } wz_capi_c_moved_member_t;
+typedef struct wz_capi_c_owned_group_t { void *_handle; } wz_capi_c_owned_group_t;
+typedef struct wz_capi_c_loaned_group_t { void *_handle; } wz_capi_c_loaned_group_t;
+typedef struct wz_capi_c_moved_group_t { wz_capi_c_owned_group_t _this; } wz_capi_c_moved_group_t;
+
+/* An event, lent to the event closure for the length of one call. */
+typedef struct wz_capi_c_loaned_group_event_t wz_capi_c_loaned_group_event_t;
+
+typedef struct wz_capi_c_owned_closure_member_t {
+  void *_context;
+  void (*_call)(const wz_capi_c_loaned_member_t *member, void *context);
+  void (*_drop)(void *context);
+} wz_capi_c_owned_closure_member_t;
+typedef wz_capi_c_owned_closure_member_t wz_capi_c_loaned_closure_member_t;
+typedef struct wz_capi_c_moved_closure_member_t {
+  wz_capi_c_owned_closure_member_t _this;
+} wz_capi_c_moved_closure_member_t;
+
+typedef struct wz_capi_c_owned_closure_group_event_t {
+  void *_context;
+  void (*_call)(const wz_capi_c_loaned_group_event_t *event, void *context);
+  void (*_drop)(void *context);
+} wz_capi_c_owned_closure_group_event_t;
+typedef wz_capi_c_owned_closure_group_event_t wz_capi_c_loaned_closure_group_event_t;
+typedef struct wz_capi_c_moved_closure_group_event_t {
+  wz_capi_c_owned_closure_group_event_t _this;
+} wz_capi_c_moved_closure_group_event_t;
+
+/* zenoh-ext Member's builder. `info` is consumed by
+ * wz_capi_c_member_new on every path; NULL for none. */
+typedef struct wz_capi_c_member_options_t {
+  z_moved_string_t *info;
+  uint64_t lease_ms;
+  float refresh_ratio;
+  wz_capi_c_member_liveliness_t liveliness;
+  z_priority_t priority;
+} wz_capi_c_member_options_t;
+
+/* Upstream's Member::new defaults: no info, an 18 s lease refreshed
+ * at 0.75 of it, AUTO liveliness, Z_PRIORITY_DATA_HIGH. */
+void wz_capi_c_member_options_default(wz_capi_c_member_options_t *this_);
+
+/* Member::new(id) plus the builder; NULL options are the defaults.
+ * Z_EINVAL for an id with a wildcard (upstream refuses it too), an
+ * info that is not UTF-8, or an unknown liveliness. */
+z_result_t wz_capi_c_member_new(wz_capi_c_owned_member_t *this_,
+                                const z_loaned_keyexpr_t *id,
+                                wz_capi_c_member_options_t *options);
+
+/* Member::id. */
+z_result_t wz_capi_c_member_id(const wz_capi_c_loaned_member_t *this_,
+                               z_view_string_t *out);
+/* The member's info; false, with an empty view, when it has none. */
+bool wz_capi_c_member_info(const wz_capi_c_loaned_member_t *this_,
+                           z_view_string_t *out);
+uint64_t wz_capi_c_member_lease_ms(const wz_capi_c_loaned_member_t *this_);
+wz_capi_c_member_liveliness_t wz_capi_c_member_liveliness(
+    const wz_capi_c_loaned_member_t *this_);
+float wz_capi_c_member_refresh_ratio(const wz_capi_c_loaned_member_t *this_);
+
+const wz_capi_c_loaned_member_t *wz_capi_c_member_loan(
+    const wz_capi_c_owned_member_t *this_);
+z_result_t wz_capi_c_member_clone(wz_capi_c_owned_member_t *dst,
+                                  const wz_capi_c_loaned_member_t *this_);
+void wz_capi_c_member_drop(wz_capi_c_moved_member_t *this_);
+void wz_capi_c_internal_member_null(wz_capi_c_owned_member_t *this_);
+bool wz_capi_c_internal_member_check(const wz_capi_c_owned_member_t *this_);
+
+void wz_capi_c_closure_member(
+    wz_capi_c_owned_closure_member_t *this_,
+    void (*call)(const wz_capi_c_loaned_member_t *member, void *context),
+    void (*drop)(void *context), void *context);
+void wz_capi_c_internal_closure_member_null(wz_capi_c_owned_closure_member_t *this_);
+bool wz_capi_c_internal_closure_member_check(
+    const wz_capi_c_owned_closure_member_t *this_);
+const wz_capi_c_loaned_closure_member_t *wz_capi_c_closure_member_loan(
+    const wz_capi_c_owned_closure_member_t *this_);
+void wz_capi_c_closure_member_call(const wz_capi_c_loaned_closure_member_t *closure,
+                                   const wz_capi_c_loaned_member_t *member);
+void wz_capi_c_closure_member_drop(wz_capi_c_moved_closure_member_t *this_);
+
+void wz_capi_c_closure_group_event(
+    wz_capi_c_owned_closure_group_event_t *this_,
+    void (*call)(const wz_capi_c_loaned_group_event_t *event, void *context),
+    void (*drop)(void *context), void *context);
+void wz_capi_c_internal_closure_group_event_null(
+    wz_capi_c_owned_closure_group_event_t *this_);
+bool wz_capi_c_internal_closure_group_event_check(
+    const wz_capi_c_owned_closure_group_event_t *this_);
+const wz_capi_c_loaned_closure_group_event_t *wz_capi_c_closure_group_event_loan(
+    const wz_capi_c_owned_closure_group_event_t *this_);
+void wz_capi_c_closure_group_event_call(
+    const wz_capi_c_loaned_closure_group_event_t *closure,
+    const wz_capi_c_loaned_group_event_t *event);
+void wz_capi_c_closure_group_event_drop(wz_capi_c_moved_closure_group_event_t *this_);
+
+/* Which kind of event this is. */
+wz_capi_c_group_event_kind_t wz_capi_c_group_event_kind(
+    const wz_capi_c_loaned_group_event_t *this_);
+/* The id of the member the event is about, for every kind. */
+z_result_t wz_capi_c_group_event_member_id(const wz_capi_c_loaned_group_event_t *this_,
+                                           z_view_string_t *out);
+/* The joining member of a JOIN, valid for the callback; NULL for the
+ * other kinds, for which upstream carries only an id. */
+const wz_capi_c_loaned_member_t *wz_capi_c_group_event_member(
+    const wz_capi_c_loaned_group_event_t *this_);
+
+/* Group::join. `member` is consumed on every path; `this_` holds a
+ * gravestone on failure. Z_EINVAL for a group or member id that is not
+ * a canonical, wildcard-free key expression. */
+z_result_t wz_capi_c_group_join(wz_capi_c_owned_group_t *this_,
+                                const z_loaned_session_t *session,
+                                const z_loaned_keyexpr_t *group,
+                                wz_capi_c_moved_member_t *member);
+/* Group::group_id and Group::local_member_id. */
+z_result_t wz_capi_c_group_group_id(const wz_capi_c_loaned_group_t *this_,
+                                    z_view_string_t *out);
+z_result_t wz_capi_c_group_local_member_id(const wz_capi_c_loaned_group_t *this_,
+                                           z_view_string_t *out);
+/* Group::size: every member, this one included. */
+size_t wz_capi_c_group_size(const wz_capi_c_loaned_group_t *this_);
+/* Group::view: `callback` once per member, ordered by id and this
+ * member included, on the calling thread; then it is dropped. */
+z_result_t wz_capi_c_group_view(const wz_capi_c_loaned_group_t *this_,
+                                wz_capi_c_moved_closure_member_t *callback);
+/* Group::leader: the member with the greatest id, as an owned copy. */
+z_result_t wz_capi_c_group_leader(const wz_capi_c_loaned_group_t *this_,
+                                  wz_capi_c_owned_member_t *out);
+/* Group::subscribe: later events go to `callback`. Last-wins, as
+ * upstream's is; the replaced closure is dropped before this returns. */
+z_result_t wz_capi_c_group_subscribe(const wz_capi_c_loaned_group_t *this_,
+                                     wz_capi_c_moved_closure_group_event_t *callback);
+/* Group::wait_for_view_size: whether the view reached `size` within
+ * `timeout_ms`. */
+bool wz_capi_c_group_wait_for_view_size(const wz_capi_c_loaned_group_t *this_,
+                                        size_t size, uint64_t timeout_ms);
+const wz_capi_c_loaned_group_t *wz_capi_c_group_loan(const wz_capi_c_owned_group_t *this_);
+/* Leave the group. The event closure's drop has run when this returns,
+ * unless it is called from inside that closure. */
+void wz_capi_c_group_drop(wz_capi_c_moved_group_t *this_);
+void wz_capi_c_internal_group_null(wz_capi_c_owned_group_t *this_);
+bool wz_capi_c_internal_group_check(const wz_capi_c_owned_group_t *this_);
+
+#endif /* Z_FEATURE_UNSTABLE_API */
 
 #ifdef __cplusplus
 }

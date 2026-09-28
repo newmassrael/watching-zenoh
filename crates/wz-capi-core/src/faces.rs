@@ -68,12 +68,15 @@ use std::sync::{Arc, Mutex as StdMutex, MutexGuard};
 
 use tokio::sync::Notify;
 
+use crate::group::{retire_copies, FaceGroup, GroupAggregate, GroupError, GroupId};
 use wz_runtime_tokio::accept_loop::{FaceForwarder, FaceId};
 use wz_runtime_tokio::advanced_publisher::{AdvancedPublisher, AdvancedPublisherOptions};
 use wz_runtime_tokio::advanced_subscriber::{AdvancedSubscriber, AdvancedSubscriberOptions, Miss};
 use wz_runtime_tokio::declare::LivelinessSample;
+use wz_runtime_tokio::group::Member;
 use wz_runtime_tokio::locality::Locality;
 use wz_runtime_tokio::observer::ApplicationLayerObserver;
+use wz_runtime_tokio::qos::Priority;
 use wz_runtime_tokio::query_sink::{QueryView, ReplyOut};
 use wz_runtime_tokio::runtime_impl::{TokioRuntime, TokioTime};
 use wz_runtime_tokio::session::{
@@ -235,6 +238,10 @@ struct FaceEntry {
     adv_pubs: BTreeMap<AdvPubId, AdvancedPublisher<TokioRuntime, TokioTime>>,
     /// Per-face ADVANCED subscribers, same replay contract as `subs`.
     adv_subs: BTreeMap<AdvSubId, AdvancedSubscriber<TokioRuntime>>,
+    /// R2932 — this session's copy of each C GROUP, same replay contract as
+    /// `subs`. Each copy forwards what it hears into the C group's
+    /// [`GroupAggregate`], which is what the C program reads.
+    groups: BTreeMap<GroupId, FaceGroup>,
     /// R311y532 — the tokio runtime this face is DRIVEN by.
     ///
     /// Captured at `face_up`, which runs inside that runtime, and entered
@@ -355,6 +362,15 @@ struct AdvSubEntry {
     keyexpr: String,
     options: AdvancedSubscriberOptions,
     sink: AdvancedSubscriberSink,
+}
+
+/// R2932 — a C-joined GROUP, the eighth SSOT. The aggregate carries the group
+/// id and the local member, so a replay joins the same group as the same
+/// member; `priority` is the one join knob the aggregate does not need.
+struct GroupEntry {
+    id: GroupId,
+    agg: Arc<GroupAggregate>,
+    priority: Priority,
 }
 
 /// A C-level liveliness token id, keying the per-face wz tokens one C
@@ -910,6 +926,8 @@ struct Inner {
     next_adv_pub_id: AdvPubId,
     adv_subs: Vec<AdvSubEntry>,
     next_adv_sub_id: AdvSubId,
+    groups: Vec<GroupEntry>,
+    next_group_id: GroupId,
     kexprs: Vec<KexprEntry>,
     /// Next alias id to hand out. Starts at 0 and is PRE-incremented, so the
     /// first id issued is 1: zero is reserved on the wire
@@ -1045,8 +1063,15 @@ impl SharedSession {
         let params = crate::drive::init_params(wz_runtime_tokio::session_glue::WhatAmI::Peer, zid)?;
         let actions = new_session_actions(driver, params, clock);
         let observer = Arc::new(WzMutex::new(ApplicationLayerObserver::new()));
+        // R2932 — the plane's wake is handed to the plane itself, so a loopback
+        // publish this file does not make (a group's keep-alive beacon, on its
+        // own task) still wakes `drive_local_plane`. The explicit notifies after
+        // this file's own publishes stay: they are the same permit, and
+        // `notify_one` stores at most one.
+        let local_wake = Arc::new(Notify::new());
         let local = TokioSession::new(actions, observer, Arc::new(clock))
-            .with_local_delivery_drain(LocalDeliveryDrain::DriveTask);
+            .with_local_delivery_drain(LocalDeliveryDrain::DriveTask)
+            .with_local_stage_wake(Arc::clone(&local_wake));
         // R2580 — the plane's face-shaped entry. Its `session` is a CLONE of
         // the field above rather than a move: the two name one session, and the
         // field stays where it is because `local_session` / `drive_local_plane`
@@ -1066,6 +1091,7 @@ impl SharedSession {
                 matches: BTreeMap::new(),
                 adv_pubs: BTreeMap::new(),
                 adv_subs: BTreeMap::new(),
+                groups: BTreeMap::new(),
                 // `None`: this constructor runs on the C application thread,
                 // where `Handle::current()` panics. See the field.
                 runtime: None,
@@ -1081,7 +1107,7 @@ impl SharedSession {
             inner: StdMutex::new(inner),
             clock,
             local,
-            local_wake: Arc::new(Notify::new()),
+            local_wake,
         })
     }
 
@@ -1287,6 +1313,18 @@ impl SharedSession {
                 adv_subs.insert(entry.id, sub);
             }
         }
+        // R2932 — the groups, so a member joined before this peer connected
+        // announces itself to it. Best-effort per face like every replay above:
+        // the join's only fallible checks (canon, wildcards) already passed on
+        // the local plane when the C program joined.
+        let mut groups = BTreeMap::new();
+        for entry in &guard.groups {
+            if let Ok(copy) =
+                FaceGroup::join(&session, &entry.agg, Locality::Remote, entry.priority)
+            {
+                groups.insert(entry.id, copy);
+            }
+        }
         // R2259 (item 593) — taken BEFORE the entry moves into the map, and
         // fired after the lock drops. The face is Established by the time
         // `face_up` runs (both callers reach it past a completed handshake), so
@@ -1303,6 +1341,7 @@ impl SharedSession {
                 matches,
                 adv_pubs,
                 adv_subs,
+                groups,
                 // `face_up` runs on the drive task, so this IS the runtime the
                 // face is driven by. Always `Some` for a real face; see the
                 // field for why the type admits `None`.
@@ -1311,7 +1350,11 @@ impl SharedSession {
             },
         );
         drop(guard);
-        drop(replaced);
+        // R2932 — a replaced entry's group copies are copies of a session that
+        // is gone, so their members leave the union the way `face_down`'s do.
+        if let Some(mut old) = replaced {
+            retire_copies(std::mem::take(&mut old.groups).into_values());
+        }
         // Outside the lock, for the reason `fire_face_event` states: a C
         // listener may re-enter this registry.
         if let Some(snapshot) = snapshot {
@@ -1412,7 +1455,13 @@ impl SharedSession {
         for state in watches {
             deliver_matching_flip(&state, |agg| agg.forget(id));
         }
-        drop(removed);
+        // R2932 — the same reasoning for the group plane: nothing will carry a
+        // Leave over a dead link, so the members only this face could see
+        // leave the union here. Outside the registry lock, because it delivers.
+        if let Some(mut entry) = removed {
+            retire_copies(std::mem::take(&mut entry.groups).into_values());
+            drop(entry);
+        }
     }
 
     /// Drop EVERY face — what `z_close` runs once its drive thread has joined.
@@ -1451,7 +1500,12 @@ impl SharedSession {
         // discipline: dropping a face runs the C `drop(context)` for any
         // closure it held the last reference to.
         let faces = std::mem::take(&mut self.lock().faces);
-        drop(faces);
+        // R2932 — a closed session sees no peer, so a C group's union loses
+        // every member it heard over the wire, as `face_down` would take them.
+        for mut entry in faces.into_values() {
+            retire_copies(std::mem::take(&mut entry.groups).into_values());
+            drop(entry);
+        }
     }
 
     /// One inbound iteration event for `id` — dispatched into that face's own
@@ -2579,6 +2633,84 @@ impl SharedSession {
             .iter()
             .find(|entry| entry.id == id)
             .map(|entry| entry.keyexpr.clone())
+    }
+
+    /// R2932 — join the zenoh-ext GROUP `gid` as `member`: record it in the
+    /// SSOT and join it on the local plane and on every live face. Returns
+    /// the C-level id and the [`GroupAggregate`] the C program reads.
+    ///
+    /// The PLANE joins first and its result is the verdict. Its join makes
+    /// every check a join can fail (canonical ids, no wildcards) and nothing a
+    /// per-face join adds can fail differently, so a refusal there is the
+    /// refusal the C program gets and nothing is recorded. The faces are then
+    /// best-effort, like every other per-face declaration: a face mid-teardown
+    /// is skipped, and `face_up` covers every face that arrives later.
+    pub fn join_group(
+        &self,
+        gid: String,
+        member: Member,
+        priority: Priority,
+    ) -> Result<(GroupId, Arc<GroupAggregate>), GroupError> {
+        let agg = Arc::new(GroupAggregate::new(gid, member));
+        let mut guard = self.lock();
+        // `local_face` is `Some` for the session's whole life (see the field);
+        // the `Option` is only `Inner: Default`'s.
+        let plane_copy = guard
+            .local_face
+            .as_ref()
+            .map(|plane| FaceGroup::join(&plane.session, &agg, Locality::SessionLocal, priority))
+            .transpose()?;
+        let id = guard.next_group_id;
+        guard.next_group_id = guard.next_group_id.wrapping_add(1);
+        for face in guard.faces.values_mut() {
+            if let Ok(copy) = FaceGroup::join(&face.session, &agg, Locality::Remote, priority) {
+                face.groups.insert(id, copy);
+            }
+        }
+        if let (Some(plane), Some(copy)) = (guard.local_face.as_mut(), plane_copy) {
+            plane.groups.insert(id, copy);
+        }
+        guard.groups.push(GroupEntry {
+            id,
+            agg: Arc::clone(&agg),
+            priority,
+        });
+        drop(guard);
+        // The plane copy announced itself with a loopback publish; the plane's
+        // stage wake already fired for it, and this is the same permit.
+        self.wake_local_plane();
+        Ok((id, agg))
+    }
+
+    /// R2932 — leave a C group: drop the SSOT entry so no future face replays
+    /// it, and drop every session's copy.
+    ///
+    /// The C sink is retired FIRST, so the teardown cannot deliver into a
+    /// group the C program has already released, and so its `drop(context)`
+    /// runs before this returns — unless this is called from inside that
+    /// group's own callback, where the sink falls with the aggregate instead
+    /// (see [`GroupAggregate::retire`]).
+    pub fn leave_group(&self, id: GroupId) {
+        let mut copies = Vec::new();
+        let agg = {
+            let mut guard = self.lock();
+            let agg = guard
+                .groups
+                .iter()
+                .position(|entry| entry.id == id)
+                .map(|pos| guard.groups.remove(pos).agg);
+            for face in guard.declaration_targets() {
+                if let Some(copy) = face.groups.remove(&id) {
+                    copies.push(copy);
+                }
+            }
+            agg
+        };
+        let sink = agg.as_ref().and_then(|agg| agg.retire());
+        // Outside the lock: dropping a copy undeclares its subscriber and
+        // queryable on that session.
+        drop(copies);
+        drop(sink);
     }
 
     /// Record a C queryable in the SSOT and declare it on every live face —

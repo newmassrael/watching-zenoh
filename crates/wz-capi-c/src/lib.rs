@@ -101,6 +101,13 @@ pub mod encoding;
 pub mod events;
 mod ffi;
 pub mod get;
+// R2932 — zenoh-ext's group membership, under wz's own `wz_capi_c_` prefix
+// (upstream zenoh-c has no group surface to be a drop-in for; the module doc
+// states the naming rule). On the unstable arm only, because zenoh-ext's
+// `Group` is `#[zenoh_macros::unstable]` upstream, which is the arm every
+// `ze_` door this crate exports sits behind.
+#[cfg(not(feature = "zenoh-c-no-unstable-api"))]
+pub mod group;
 pub mod handlers;
 pub mod keyexpr;
 pub mod liveliness;

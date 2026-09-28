@@ -118,6 +118,10 @@ getrandom = "0.2"
 # a link per interface, so it is exactly the build that owes the fan-out.
 # With either absent `scout_interface_addresses` reports "cannot ask" and the
 # window scouts on the group socket alone, which is what it did before.
+# R2932 — `ext-pubsub-group-membership` is selected unconditionally for the
+# reason the advanced pub/sub trio above is: the group plane lives in the face
+# registry (`faces.rs`), whose `FaceEntry` carries a slot per declaration kind,
+# and a slot behind a forwarding feature is a slot a build can silently lose.
 wz-runtime-tokio = { path = "../wz-runtime-tokio", features = [
     "routing-accept",
     "liveliness-get",
@@ -127,6 +131,7 @@ wz-runtime-tokio = { path = "../wz-runtime-tokio", features = [
     "ext-pubsub-advanced-publisher",
     "ext-pubsub-advanced-history",
     "ext-pubsub-sample-miss-detection",
+    "ext-pubsub-group-membership",
 ] }
 # R311y529 — the `TimeSource` trait, so this crate can read the clock it already
 # holds (`SharedSession::now_monotonic_ms`, which `z_timestamp_new` stamps

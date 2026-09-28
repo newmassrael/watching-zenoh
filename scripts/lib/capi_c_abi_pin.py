@@ -139,7 +139,7 @@ HEADER = ROOT / "crates" / "wz-capi-c" / "include" / "wz_capi_c.h"
 # in `wz_capi_c.h` can change on its own -- and still has to be a deliberate
 # edit here, because a revision that moves for a reason nobody wrote down is a
 # revision nobody can reason about.
-EXPECTED_REVISION = 2
+EXPECTED_REVISION = 3
 EXPECTED_SYMBOLS = {
     # R2301 (item 634) — the revision door itself.
     "wz_capi_c_abi_version",
@@ -163,6 +163,47 @@ EXPECTED_SYMBOLS = {
     "wz_capi_c_config_link_scheme_count",
     "wz_capi_c_config_zenoh_link_scheme",
     "wz_capi_c_config_zenoh_link_scheme_count",
+    # R2932 — zenoh-ext's group membership (revision 3). The pin reads the
+    # DEFAULT build, which is the unstable arm these doors live on.
+    "wz_capi_c_member_options_default",
+    "wz_capi_c_member_new",
+    "wz_capi_c_member_id",
+    "wz_capi_c_member_info",
+    "wz_capi_c_member_lease_ms",
+    "wz_capi_c_member_liveliness",
+    "wz_capi_c_member_refresh_ratio",
+    "wz_capi_c_member_loan",
+    "wz_capi_c_member_clone",
+    "wz_capi_c_member_drop",
+    "wz_capi_c_internal_member_null",
+    "wz_capi_c_internal_member_check",
+    "wz_capi_c_closure_member",
+    "wz_capi_c_internal_closure_member_null",
+    "wz_capi_c_internal_closure_member_check",
+    "wz_capi_c_closure_member_loan",
+    "wz_capi_c_closure_member_call",
+    "wz_capi_c_closure_member_drop",
+    "wz_capi_c_closure_group_event",
+    "wz_capi_c_internal_closure_group_event_null",
+    "wz_capi_c_internal_closure_group_event_check",
+    "wz_capi_c_closure_group_event_loan",
+    "wz_capi_c_closure_group_event_call",
+    "wz_capi_c_closure_group_event_drop",
+    "wz_capi_c_group_event_kind",
+    "wz_capi_c_group_event_member_id",
+    "wz_capi_c_group_event_member",
+    "wz_capi_c_group_join",
+    "wz_capi_c_group_group_id",
+    "wz_capi_c_group_local_member_id",
+    "wz_capi_c_group_size",
+    "wz_capi_c_group_view",
+    "wz_capi_c_group_leader",
+    "wz_capi_c_group_subscribe",
+    "wz_capi_c_group_wait_for_view_size",
+    "wz_capi_c_group_loan",
+    "wz_capi_c_group_drop",
+    "wz_capi_c_internal_group_null",
+    "wz_capi_c_internal_group_check",
 }
 
 PREFIX = "wz_capi_c_"

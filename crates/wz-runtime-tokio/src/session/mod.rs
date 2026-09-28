@@ -559,6 +559,20 @@ where
     /// `Copy`, and copied rather than shared on `clone()`: it is fixed at
     /// construction by the host and a clone is the same host.
     local_delivery: LocalDeliveryDrain,
+    /// R2932 — what a [`LocalDeliveryDrain::DriveTask`] host is woken on when a
+    /// loopback publish stages a fire, if it handed one over
+    /// ([`Session::with_local_stage_wake`]).
+    ///
+    /// That policy's contract is that the host owes the queue a wake, and until
+    /// this field the host could pay it only at the call sites IT owned: the C
+    /// ABIs' plane notified after its own `publish` calls. A publish the host
+    /// does not make — a zenoh-ext group's keep-alive beacon, running on its
+    /// own task over the same session — staged a fire and woke nobody, so it
+    /// waited for an unrelated event to be drained. The session is the one
+    /// place every loopback publish passes, so the wake is paid here.
+    ///
+    /// Shared on `clone()`: a clone is the same host with the same drive loop.
+    local_stage_wake: Option<Arc<tokio::sync::Notify>>,
     /// The transport-specific payload, projected from the [`Tp`](TransportState)
     /// typestate marker: the unicast [`SessionLinkActions`] bundle on a
     /// `Session<R, T, Unicast>`, or the multicast TX seam on a
@@ -975,6 +989,7 @@ where
     fn clone(&self) -> Self {
         Self {
             local_delivery: self.local_delivery,
+            local_stage_wake: self.local_stage_wake.clone(),
             transport: self.transport.clone(),
             observer: self.observer.clone(),
             fires: self.fires.clone(),
@@ -1691,6 +1706,20 @@ impl<R: SessionRuntime, T: TimeSource, Tp: TransportState<R, T>> Session<R, T, T
         self.local_delivery
     }
 
+    /// R2932 — hand a [`LocalDeliveryDrain::DriveTask`] session the `Notify`
+    /// its drive loop waits on, so every loopback publish that stages a fire
+    /// wakes it — including publishes the host did not make itself. See the
+    /// `local_stage_wake` field. Ignored under [`LocalDeliveryDrain::Caller`],
+    /// where the publishing call drains before it returns.
+    #[must_use]
+    pub fn with_local_stage_wake(mut self, wake: Arc<tokio::sync::Notify>) -> Self
+    where
+        <Tp as TransportState<R, T>>::Payload: Clone,
+    {
+        Arc::make_mut(&mut self.0).local_stage_wake = Some(wake);
+        self
+    }
+
     /// Whether a staged fire is waiting for a drain.
     ///
     /// The wake-arm companion to [`LocalDeliveryDrain::DriveTask`]: a host that
@@ -1788,7 +1817,15 @@ impl<R: SessionRuntime, T: TimeSource, Tp: TransportState<R, T>> Session<R, T, T
     fn drain_local_fires_if_inline(&self) -> usize {
         match self.local_delivery {
             LocalDeliveryDrain::Caller => self.drain_deferred_fires(),
-            LocalDeliveryDrain::DriveTask => 0,
+            LocalDeliveryDrain::DriveTask => {
+                // R2932 — the wake this policy owes, paid where every loopback
+                // publish passes. A spurious one (nothing matched) costs the
+                // drive loop one empty drain.
+                if let Some(wake) = &self.local_stage_wake {
+                    wake.notify_one();
+                }
+                0
+            }
         }
     }
 
@@ -2082,6 +2119,7 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Multicast> {
     ) -> Self {
         Self::from_inner(SessionInner {
             local_delivery: LocalDeliveryDrain::default(),
+            local_stage_wake: None,
             transport: transport::MulticastPayload {
                 #[cfg(feature = "codec-push")]
                 tx,
@@ -2288,6 +2326,7 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
             // needs the drive-task hand-off opts in with
             // [`Self::with_local_delivery_drain`].
             local_delivery: LocalDeliveryDrain::default(),
+            local_stage_wake: None,
             // R311nf — on `Session<R, T, Unicast>` the `transport` field IS the
             // `Arc<SessionLinkActions<R, T>>` payload (`<Unicast as
             // TransportState<R, T>>::Payload`); no enum-variant wrap.

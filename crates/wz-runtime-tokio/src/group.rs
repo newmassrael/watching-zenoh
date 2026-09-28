@@ -45,6 +45,11 @@
 //!   [`Locality::Any`]) controls the unknown-member `get` destination, the
 //!   same locality knob the advanced subscriber carries; it lets a
 //!   same-session loopback deployment/test exercise the recovery path.
+//! - [`GroupOptions::event_locality`] (a wz addition, default
+//!   [`Locality::Any`]) is the destination of every group EVENT publish. A
+//!   caller that presents several wz sessions as one logical session (the C
+//!   ABIs' per-face sessions plus a local plane) needs it to keep the wire
+//!   half and the in-process half disjoint.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -184,6 +189,21 @@ pub struct GroupOptions {
     /// setter it folds into is gated, and the field stays ungated so a struct
     /// literal keeps compiling either way.
     pub event_priority: Priority,
+    /// Where every group EVENT publish (the `Join` announcement, the
+    /// keep-alive beacon, the manual [`Group::assert_liveliness`] beacon) may
+    /// go. Default [`Locality::Any`], which is upstream's only behaviour: its
+    /// one declared event publisher has no locality knob.
+    ///
+    /// A wz addition for the reason [`Self::get_locality`] is one: a wz
+    /// session is ONE peer, so a caller presenting several of them as one
+    /// logical session (`wz-capi-core::faces`) joins the group once per wz
+    /// session and must say which half each copy serves. Each face copy
+    /// passes [`Locality::Remote`] and the local-plane copy
+    /// [`Locality::SessionLocal`]. With `Any` on every copy, each face would
+    /// also deliver the event to its own in-process subscribers, which the
+    /// local plane already serves, so an in-process subscriber on the group
+    /// key would see one announcement once per face.
+    pub event_locality: Locality,
 }
 
 impl Default for GroupOptions {
@@ -191,6 +211,7 @@ impl Default for GroupOptions {
         Self {
             get_locality: Locality::Any,
             event_priority: Priority::DEFAULT,
+            event_locality: Locality::Any,
         }
     }
 }
@@ -213,6 +234,13 @@ impl GroupOptions {
         self.event_priority = priority;
         self
     }
+
+    /// Set the group event publish locality (builder). See
+    /// [`Self::event_locality`].
+    pub fn with_event_locality(mut self, locality: Locality) -> Self {
+        self.event_locality = locality;
+        self
+    }
 }
 
 /// R2622 — the publish options every group EVENT goes out with, derived in one
@@ -230,8 +258,8 @@ impl GroupOptions {
 /// `AdvancedPublisherOptions` applies, and for the same measured reason: writing
 /// the default explicitly is not a no-op on the wire, it adds an extension every
 /// default publisher would suddenly emit.
-fn event_publish_options(priority: Priority) -> PublishOptions {
-    let opts = PublishOptions::put();
+fn event_publish_options(priority: Priority, locality: Locality) -> PublishOptions {
+    let opts = PublishOptions::put().with_locality(locality);
     #[cfg(feature = "pubsub-qos")]
     let opts = if priority != Priority::DEFAULT {
         opts.with_qos(wz_session_core::sample::QosLevel::default().with_priority(priority))
@@ -313,6 +341,9 @@ struct GroupState {
     /// state because that task outlives `join` and has no other route to the
     /// options; the two publishes `Group` itself makes read it off `self`.
     event_priority: Priority,
+    /// Where the keep-alive beacon and the manual beacon publish. Held here
+    /// for the reason [`Self::event_priority`] is.
+    event_locality: Locality,
 }
 
 impl GroupState {
@@ -399,7 +430,41 @@ where
         member: Member,
         options: GroupOptions,
     ) -> Result<Self, GroupError> {
-        let gid = group.into();
+        Self::join_inner(session, group.into(), member, options, None)
+    }
+
+    /// [`Self::join`], with the event subscription installed BEFORE the
+    /// group's event subscriber is declared.
+    ///
+    /// `join` followed by [`Self::subscribe`] leaves a window in which the
+    /// subscriber is live and the user channel is not: an event dispatched
+    /// there updates the view and is dropped, so a consumer that MIRRORS the
+    /// view from the events (the C ABIs' cross-face aggregate in
+    /// `wz-capi-core`) would hold a member it never heard join, and would
+    /// then drop that member's `Leave` as unknown. Upstream has the same
+    /// window and no consumer that needs it closed; wz has one, so the
+    /// channel is created first and the window does not exist.
+    ///
+    /// A later [`Self::subscribe`] still replaces this receiver, as upstream's
+    /// does.
+    pub fn join_with_events(
+        session: &Session<R, T, Unicast>,
+        group: impl Into<String>,
+        member: Member,
+        options: GroupOptions,
+    ) -> Result<(Self, UnboundedReceiver<GroupEvent>), GroupError> {
+        let (tx, rx) = unbounded_channel();
+        let group = Self::join_inner(session, group.into(), member, options, Some(tx))?;
+        Ok((group, rx))
+    }
+
+    fn join_inner(
+        session: &Session<R, T, Unicast>,
+        gid: String,
+        member: Member,
+        options: GroupOptions,
+        event_tx: Option<UnboundedSender<GroupEvent>>,
+    ) -> Result<Self, GroupError> {
         // R2622 — canonicity BEFORE the wildcard test, mirroring the order
         // upstream is forced into: its `try_into` to `OwnedKeyExpr` runs first
         // and its `is_wild` bail second, on both ids.
@@ -428,10 +493,11 @@ where
             gid,
             local_member: member.clone(),
             members: Mutex::new(HashMap::new()),
-            event_tx: Mutex::new(None),
+            event_tx: Mutex::new(event_tx),
             notify: Notify::new(),
             get_locality: options.get_locality,
             event_priority: options.event_priority,
+            event_locality: options.event_locality,
         });
 
         // 1) Announce the member BEFORE declaring the subscriber, so we never
@@ -442,7 +508,7 @@ where
             .publish(
                 &event_keyexpr,
                 &join_buf,
-                event_publish_options(options.event_priority),
+                event_publish_options(options.event_priority, options.event_locality),
             )
             .map_err(GroupError::Publish)?;
 
@@ -488,7 +554,7 @@ where
             let ka_clock = Arc::clone(session.clock());
             let ka_keyexpr = event_keyexpr.clone();
             let ka_buf = encode_net_event(&GroupNetEvent::KeepAlive(member.mid.clone()));
-            let ka_opts = event_publish_options(options.event_priority);
+            let ka_opts = event_publish_options(options.event_priority, options.event_locality);
             let period_ms = keepalive_period_ms(member.lease, member.refresh_ratio);
             // The APPLICATION subsystem. zenoh-ext's group runs its four tasks
             // through `TaskController::spawn_abortable`
@@ -610,7 +676,7 @@ where
         self.session.publish(
             &self.event_keyexpr,
             &buf,
-            event_publish_options(self.state.event_priority),
+            event_publish_options(self.state.event_priority, self.state.event_locality),
         )?;
         Ok(())
     }
@@ -824,7 +890,7 @@ mod tests {
         // ARM 1: a non-default priority lands on the qos byte.
         let opts = GroupOptions::new().with_event_priority(Priority::InteractiveHigh);
         assert_eq!(opts.event_priority, Priority::InteractiveHigh);
-        let folded = event_publish_options(opts.event_priority);
+        let folded = event_publish_options(opts.event_priority, opts.event_locality);
         #[cfg(feature = "pubsub-qos")]
         {
             let q = folded
@@ -835,7 +901,8 @@ mod tests {
 
         // ARM 2 (CONTROL): the DEFAULT group folds to a bare put().
         let base = PublishOptions::put();
-        let unchanged = event_publish_options(GroupOptions::default().event_priority);
+        let defaults = GroupOptions::default();
+        let unchanged = event_publish_options(defaults.event_priority, defaults.event_locality);
         assert_eq!(
             unchanged.allowed_destination, base.allowed_destination,
             "a default group must not move the locality"

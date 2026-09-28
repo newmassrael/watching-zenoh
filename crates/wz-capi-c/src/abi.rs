@@ -1416,7 +1416,9 @@ pub extern "C" fn wz_capi_c_abi_version() -> i32 {
 /// neither observes anything. A single door is tested by RESOLVING ITS SYMBOL;
 /// this number is what EXPLAINS an absence afterwards. The header block carries
 /// the full argument, because the caller who needs it is reading C.
-pub const WZ_CAPI_C_ABI_REVISION: i32 = 2;
+///
+/// R2932 moves it to 3: the group membership doors (`crate::group`).
+pub const WZ_CAPI_C_ABI_REVISION: i32 = 3;
 
 /// Report this build's footprints — the drop-in's half of the layout gate.
 ///

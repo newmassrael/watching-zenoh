@@ -57,5 +57,6 @@ pub mod codec;
 pub mod drive;
 pub mod encoding_ids;
 pub mod faces;
+pub mod group;
 pub mod listeners;
 pub mod scouting;
