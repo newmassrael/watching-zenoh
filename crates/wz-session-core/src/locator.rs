@@ -579,7 +579,7 @@ pub struct LocatorRetry {
     pub period_max_ms: Option<u64>,
     /// `#retry_period_increase_factor=<f>`, held as bits (see the type doc).
     period_increase_factor_bits: Option<u64>,
-    /// R2949 — `#exit_on_failure=<true|false>`: whether a failure on THIS
+    /// R2950 — `#exit_on_failure=<true|false>`: whether a failure on THIS
     /// endpoint ends the open, over the global `connect/exit_on_failure`.
     /// Read by a peer's connect, which forks on it per endpoint; a client's
     /// never reads it, as upstream's single-link connect does not.
@@ -801,15 +801,15 @@ const LOCATOR_MCAST_JOIN_KEY: &str = "join";
 /// the whole point of honouring the span.
 ///
 /// THE FOURTH KEY UPSTREAM READS THERE, `exit_on_failure`, was deliberately
-/// left unparsed until R2949, for a reason that held then: its consumer is the
+/// left unparsed until R2950, for a reason that held then: its consumer is the
 /// STARTUP-phase seam (`wz-runtime-tokio`'s `startup_phase` module), which had
 /// no per-endpoint reader, so a parsed value would have sat unread while the
-/// tail LOOKED honoured. R2949 gave it that reader (`endpoint_policy`, which a
+/// tail LOOKED honoured. R2950 gave it that reader (`endpoint_policy`, which a
 /// peer's connect forks on), and it is parsed below with the other three.
 const LOCATOR_RETRY_PERIOD_INIT_MS_KEY: &str = "retry_period_init_ms";
 const LOCATOR_RETRY_PERIOD_MAX_MS_KEY: &str = "retry_period_max_ms";
 const LOCATOR_RETRY_PERIOD_INCREASE_FACTOR_KEY: &str = "retry_period_increase_factor";
-/// R2949 — the fourth field `get_retry_config` reads off the tail.
+/// R2950 — the fourth field `get_retry_config` reads off the tail.
 const LOCATOR_EXIT_ON_FAILURE_KEY: &str = "exit_on_failure";
 
 /// zenoh `Metadata::RELIABILITY` metadata key
@@ -1250,7 +1250,7 @@ fn parse_retry(config: &str) -> Result<Option<Box<LocatorRetry>>, LocatorParseEr
     })
 }
 
-/// R2949 — `key=<true|false>` from the CONFIG span. Refused otherwise, as its
+/// R2950 — `key=<true|false>` from the CONFIG span. Refused otherwise, as its
 /// numeric siblings refuse a value that does not parse.
 fn parse_config_bool(config: &str, key: &'static str) -> Result<Option<bool>, LocatorParseError> {
     match lookup_param(config, key).filter(|v| !v.is_empty()) {
@@ -2507,7 +2507,7 @@ mod tests {
     fn exit_on_failure_is_read_now_that_the_peer_connect_forks_on_it() {
         // This test used to pin the OPPOSITE ("stays an unknown key"), and its
         // reason was right for its time: parsing the key with no reader would
-        // have left the tail looking honoured. R2949 gave it the reader it
+        // have left the tail looking honoured. R2950 gave it the reader it
         // named -- the startup-phase seam, `endpoint_policy`, which a peer's
         // connect forks on per endpoint -- so the key is collected now.
         let p = parse_locator("tcp/1.2.3.4:7447#exit_on_failure=true").expect("parses");

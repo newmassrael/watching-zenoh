@@ -196,7 +196,7 @@ fn a_client_that_states_exit_on_failure_false_still_fails_its_open() {
     unsafe { close_session(session) };
 }
 
-/// R2949 — a PEER connects to EVERY endpoint, each as a face of its own:
+/// R2950 — a PEER connects to EVERY endpoint, each as a face of its own:
 /// a put from either listener reaches the peer's one subscription.
 #[test]
 fn a_peer_connects_to_every_endpoint() {
@@ -240,7 +240,7 @@ fn a_peer_connects_to_every_endpoint() {
     }
 }
 
-/// R2949 — an endpoint's `#exit_on_failure=true` tail makes ITS failure end a
+/// R2950 — an endpoint's `#exit_on_failure=true` tail makes ITS failure end a
 /// peer's open, over the peer's default `false`. The same endpoint without the
 /// tail is stepped over and the open comes up. `timeout_ms: 0` makes each one
 /// attempt, so the arm the tail picks is the whole difference.
@@ -280,7 +280,7 @@ fn an_endpoint_exit_on_failure_tail_decides_a_peer_open() {
     }
 }
 
-/// R2949 — the start window is CONFIG: `connect_scouted: false` returns the
+/// R2950 — the start window is CONFIG: `connect_scouted: false` returns the
 /// open at once, and `scouting/delay` sets how long it waits otherwise.
 #[test]
 fn the_start_window_follows_the_config() {

@@ -90,7 +90,7 @@ fn dial_phase(cfg: &ConfigState, whatami: WhatAmI) -> Option<DialPhase> {
         // R2948 — zenoh re-dials a lost session's endpoints on the same
         // `connect/retry` block, with no budget.
         redial: Some(schedule),
-        // R2949 — a peer's open waits `scouting/delay` for its background
+        // R2950 — a peer's open waits `scouting/delay` for its background
         // endpoints unless `open/return_conditions/connect_scouted` is false;
         // upstream's defaults are 500 ms and true.
         start_window: node

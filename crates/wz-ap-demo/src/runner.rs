@@ -4230,7 +4230,7 @@ pub(crate) struct PeerOpts {
     /// is known. A malformed value must still ABORT rather than degrade to the
     /// default, which is why the parse stays in `main`.
     pub connect_phase: PhasePolicy,
-    /// R2949 — `scouting/delay` under `open/return_conditions/connect_scouted`:
+    /// R2950 — `scouting/delay` under `open/return_conditions/connect_scouted`:
     /// how long this peer's APPLICATION waits for its dialled peers before it
     /// starts, or `None` for no wait. Upstream's `start_peer` holds the session
     /// open back for exactly this (`zenoh/src/net/runtime/orchestrator.rs` @
@@ -4326,7 +4326,7 @@ async fn run_peer_until(
     let mut connect_watch =
         ConnectPhaseWatch::new(opts.connect_phase, opts.connect_retry, dial_targets.len());
     let connect_faces_up = connect_watch.witness();
-    // R2949 — counted here, before the targets move into the loop's sources.
+    // R2950 — counted here, before the targets move into the loop's sources.
     let dial_target_count = dial_targets.len();
     log::info!(
         "wz-ap-demo peer: {}",
@@ -5375,7 +5375,7 @@ async fn run_peer_until(
     // shutdown-latched read would miss it — the log line must be written while the
     // client is still attached so it survives in the captured stderr.
     let mut announced_client_qabl = false;
-    // R2949 — the START WINDOW: the application holds its first tick until
+    // R2950 — the START WINDOW: the application holds its first tick until
     // every dialled peer is up, or `scouting/delay` has passed, as upstream's
     // `start_peer` holds its open back. No dial target, or `connect_scouted`
     // false, is no wait. The face count is `ConnectPhaseWatch`'s witness, with

@@ -368,7 +368,7 @@ pub fn endpoint_schedule(global: RetryPolicy, endpoint: &str) -> RetryPolicy {
 /// `connect/exit_on_failure`, with the endpoint's `#exit_on_failure` tail on top
 /// (`commons/zenoh-config/src/connection_retry.rs` @ `pub fn get_retry_config(`).
 ///
-/// R2949. Only a PEER's connect reads this per endpoint; a client's single-link
+/// R2950. Only a PEER's connect reads this per endpoint; a client's single-link
 /// connect never reads `exit_on_failure`, upstream's or the tail's.
 pub fn endpoint_policy(global: PhasePolicy, endpoint: &str) -> PhasePolicy {
     match wz_session_core::locator::parse_any_locator(endpoint) {
@@ -405,7 +405,7 @@ pub fn endpoint_policy(global: PhasePolicy, endpoint: &str) -> PhasePolicy {
 /// The first success ends the phase. Upstream's single-link loop keeps dialing
 /// the other retrying endpoints after one connects, but it is the CLIENT's
 /// connect, and a client holds one session: "the client mode only allows
-/// connecting to a single endpoint" (`DEFAULT_CONFIG.json5`). R2949 — this was
+/// connecting to a single endpoint" (`DEFAULT_CONFIG.json5`). R2950 — this was
 /// described as a narrowing until it was measured against that sentence; a
 /// peer, which does connect to every endpoint, does not come through here.
 ///

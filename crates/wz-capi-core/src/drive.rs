@@ -66,7 +66,7 @@ pub struct DialPhase {
     /// and pico does too, by default (`Z_FEATURE_AUTO_RECONNECT`), on its own
     /// constant delay; each ABI names its own.
     pub redial: Option<RetryPolicy>,
-    /// R2949 — how long a PEER's open waits for the endpoints it connects in
+    /// R2950 — how long a PEER's open waits for the endpoints it connects in
     /// the background before returning without them, or `None` for an open
     /// that does not wait: `scouting/delay` under
     /// `open/return_conditions/connect_scouted` (`zenoh/src/net/runtime/orchestrator.rs` @
@@ -371,7 +371,7 @@ async fn drive_dial(
         params,
         clock,
     });
-    // R2949 — the two ROLES connect differently upstream, and each is built
+    // R2950 — the two ROLES connect differently upstream, and each is built
     // here as upstream builds it. A client connects through
     // `connect_peers_single_link` and holds ONE session ("the client mode only
     // allows connecting to a single endpoint", `DEFAULT_CONFIG.json5`); a peer
@@ -464,7 +464,7 @@ async fn drive_dial(
 /// take the face down and drain it. `on_up` runs once the face is registered,
 /// which is where a client's open is released.
 ///
-/// R2949 — split out of the dial loop so a client's one face and a peer's
+/// R2950 — split out of the dial loop so a client's one face and a peer's
 /// per-endpoint faces run the same body: the ordering arguments below are the
 /// whole of its correctness, and a second copy would be a second place for
 /// them to rot.
@@ -599,7 +599,7 @@ async fn drive_face(
 /// `async fn connect_peers_multiply_links(&self, peers: &[EndPoints]) -> ZResult<()> {`),
 /// with each connected endpoint as a face of its own.
 ///
-/// R2949. Every endpoint is walked in order and forks on ITS arm — the global
+/// R2950. Every endpoint is walked in order and forks on ITS arm — the global
 /// `connect/timeout_ms` and `connect/exit_on_failure` with its `#` tail on top
 /// ([`endpoint_policy`], [`endpoint_schedule`]):
 ///

@@ -1550,7 +1550,7 @@ pub(crate) fn expand_stock_zenoh_config_for_build(
             None => exp.record("connect/exit_on_failure", KeyEffect::AlreadyTheBehaviour),
         }
     }
-    // R2949 — the peer's START WINDOW. Upstream's `start_peer` alone waits for
+    // R2950 — the peer's START WINDOW. Upstream's `start_peer` alone waits for
     // its peers (a router's and a client's start do not), so the precondition
     // is a `--peer` run, typed or supplied by the file.
     let peer_run = exp
@@ -3545,7 +3545,7 @@ pub(crate) fn config_keys_the_demo_drops() -> Vec<&'static str> {
     // ZA-3308 — `connect/timeout_ms` left this list: the one-shot `--connect`
     // client runs a startup connect phase in every build, so no build lacks
     // its sink.
-    // R2949 — the peer's start window: its only sink is the `--peer` run.
+    // R2950 — the peer's start window: its only sink is the `--peer` run.
     if !cfg!(feature = "routing-peer") {
         out.push("scouting/delay");
         out.push("open/return_conditions/connect_scouted");
@@ -4338,7 +4338,7 @@ mod stock_config_tests {
             // — the contract `connect/retry`'s note above describes, now with a
             // live population again.
             "connect/exit_on_failure"
-            // R2949 — the peer's start window has the `--peer` run as its
+            // R2950 — the peer's start window has the `--peer` run as its
             // one sink, the same row the lifecycle keys name.
             | "scouting/delay"
             | "open/return_conditions/connect_scouted"
@@ -4861,7 +4861,7 @@ mod stock_config_tests {
             // Each control also names `listen`, because `mode: "peer"` selects
             // the binding run-mode and the endpoint is what the expansion needs
             // to emit it.
-            // R2949 — the peer's start window. Each control STATES upstream's
+            // R2950 — the peer's start window. Each control STATES upstream's
             // default, so the delta is the value.
             (
                 "scouting/delay",
@@ -7658,7 +7658,7 @@ fn parse_retry_schedule(args: &[String], flag: &str) -> Result<Option<RetryPolic
     }))
 }
 
-/// R2949 — `--scouting-delay <ms>` / `--connect-scouted <true|false>`, the argv
+/// R2950 — `--scouting-delay <ms>` / `--connect-scouted <true|false>`, the argv
 /// shape `scouting/delay` and `open/return_conditions/connect_scouted` expand
 /// into, RESOLVED to a peer's start window: `None` when `connect_scouted` is
 /// false, otherwise the delay, upstream's 500 ms when unstated. A malformed

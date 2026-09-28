@@ -334,7 +334,7 @@ fn main() -> ExitCode {
     // startup connect phase reads it in every build.
     #[cfg(not(any(feature = "routing-peer", feature = "router-hat-router")))]
     let _ = (connect_exit, listen_timeout, listen_exit, listen_retry);
-    // R2949 — the peer's start window, parsed in every build for the same
+    // R2950 — the peer's start window, parsed in every build for the same
     // reason and read by the `--peer` arm alone: upstream's router and client
     // do not wait for their peers.
     let start_window = match crate::args::parse_start_window(rest) {
