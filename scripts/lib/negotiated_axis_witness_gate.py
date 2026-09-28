@@ -41,8 +41,9 @@ here (which would be a list compared against its own length -- the class
   * the EXT axis is the `pub fn negotiate_<x>_against_peer` methods. The name is
     not the derivation -- the SIGNATURE is: each takes what the peer offered and
     merges it into a slot, and it is that WRITTEN SLOT this gate resolves, one
-    setter hop deep, because `negotiate_qos_link_against_peer` reaches its slot
-    through `set_qos_link_metadata`.
+    method hop deep: a `set_` setter, or (R2944) any method of the impl that
+    ASSIGNS a slot, because `negotiate_qos_link_against_peer` reaches its slot
+    through the private `settle_qos_link`.
 
 For each axis it then derives the RESULT ACCESSORS -- the `pub fn`s that read
 that slot (or, for a body field, that read `inbound_peer_init_caps` and name
@@ -123,6 +124,19 @@ PUB_FN_RE = re.compile(r"^    pub (?:const )?fn ([a-z0-9_]+)\b")
 SLOT_WRITE_RE = re.compile(r"R::with_mutex(?:_mut)?\(&self\.([a-z0-9_]+)")
 # One setter hop: `self.set_x(...)`.
 SETTER_CALL_RE = re.compile(r"\bself\.(set_[a-z0-9_]+)\(")
+# R2944 — one METHOD hop, chosen by what the callee DOES rather than by its
+# name: a callee whose body ASSIGNS a slot (`|s| *s = ...`). The `set_` hop
+# alone went blind when R2941 moved the QoS-link write into a private helper
+# (`settle_qos_link`), because the helper is neither `pub` nor named `set_`.
+# Requiring an assignment is what keeps a READ accessor the negotiation also
+# calls (`self.is_qos()` is `|s| *s`, no `=`) from being taken for the slot.
+METHOD_CALL_RE = re.compile(r"\bself\.([a-z0-9_]+)\(")
+SLOT_ASSIGN_RE = re.compile(
+    r"R::with_mutex_mut\(&self\.([a-z0-9_]+),\s*\|[a-z_]+\|\s*\*[a-z_]+\s*=[^=]"
+)
+# Every impl-level `fn`, public or not: the hop's population. A private helper
+# is still this impl's code, and it is where a refactor puts a shared write.
+ANY_FN_RE = re.compile(r"^    (?:pub(?:\([a-z]+\))? )?(?:const )?fn ([a-z0-9_]+)\b")
 
 ASSERT_MACROS = (
     "assert",
@@ -173,6 +187,17 @@ def fn_bodies(text: str) -> dict[str, str]:
     return out
 
 
+def all_fn_bodies(text: str) -> dict[str, str]:
+    """Every impl-level `fn` -- public or private -- mapped to its body."""
+    out: dict[str, str] = {}
+    lines = text.splitlines()
+    for i, line in enumerate(lines):
+        m = ANY_FN_RE.match(line)
+        if m:
+            out[m.group(1)] = block_from(lines, i)
+    return out
+
+
 def negotiation_methods(text: str) -> list[str]:
     return [
         m.group(1)
@@ -181,8 +206,17 @@ def negotiation_methods(text: str) -> list[str]:
     ]
 
 
-def written_slot(name: str, bodies: dict[str, str]) -> str | None:
-    """The slot a negotiation method writes, one setter hop deep."""
+def written_slot(
+    name: str, bodies: dict[str, str], every_fn: dict[str, str]
+) -> str | None:
+    """The slot a negotiation method writes, one hop deep.
+
+    The hop is a `set_` setter (as before), or any other method of the impl
+    whose body ASSIGNS a slot -- `every_fn` is that population, public and
+    private alike. REQUIRED, not defaulted: a caller that left it out would
+    lose the method hop without a word, which is how `genuine_axis_witness_gate`
+    stayed blind to R2941's helper after this gate learned to see it.
+    """
     body = bodies.get(name)
     if body is None:
         return None
@@ -194,6 +228,13 @@ def written_slot(name: str, bodies: dict[str, str]) -> str | None:
         if setter_body is None:
             continue
         hop = SLOT_WRITE_RE.search(setter_body)
+        if hop:
+            return hop.group(1)
+    for callee in METHOD_CALL_RE.findall(body):
+        callee_body = every_fn.get(callee)
+        if callee_body is None:
+            continue
+        hop = SLOT_ASSIGN_RE.search(callee_body)
         if hop:
             return hop.group(1)
     return None
@@ -357,6 +398,7 @@ def run(root: pathlib.Path) -> int:
     actions = (root / ACTIONS_REL).read_text(encoding="utf-8")
     caps = (root / CAPS_REL).read_text(encoding="utf-8")
     bodies = fn_bodies(actions)
+    every_fn = all_fn_bodies(actions)
 
     # An axis is (label, slot, [(accessor, token the same assertion must also
     # carry, or None)]).
@@ -364,7 +406,7 @@ def run(root: pathlib.Path) -> int:
     unresolved: list[str] = []
 
     for method in negotiation_methods(actions):
-        slot = written_slot(method, bodies)
+        slot = written_slot(method, bodies, every_fn)
         if slot is None:
             unresolved.append(method)
             continue
@@ -548,6 +590,56 @@ impl<R> SessionLinkActions<R> {
 }
 '''
 
+# R2944 — the shape R2941 gave the QoS-link negotiation: the write lives in a
+# PRIVATE helper that is not named `set_`, and the method calls a READ accessor
+# (`is_alpha`) before it, so a hop that took the first callee would resolve the
+# wrong slot.
+FIXTURE_HELPER_HOP = '''
+impl<R> SessionLinkActions<R> {
+    pub fn negotiate_epsilon_against_peer(&self, peer: u8) {
+        if !self.is_alpha() {
+            self.settle_epsilon(0);
+            return;
+        }
+        self.settle_epsilon(peer);
+    }
+
+    fn settle_epsilon(&self, v: u8) {
+        R::with_mutex_mut(&self.epsilon_slot, |s| *s = v);
+    }
+
+    pub fn negotiated_epsilon(&self) -> u8 {
+        R::with_mutex_mut(&self.epsilon_slot, |s| *s)
+    }
+}
+'''
+
+# The same method whose helper only READS: no slot is written, so the method
+# must stay UNRESOLVED -- red -- however well its accessor is asserted.
+FIXTURE_HELPER_READS = '''
+impl<R> SessionLinkActions<R> {
+    pub fn negotiate_epsilon_against_peer(&self, peer: u8) {
+        let _ = peer;
+        self.peek_epsilon();
+    }
+
+    fn peek_epsilon(&self) -> u8 {
+        R::with_mutex_mut(&self.epsilon_slot, |s| *s)
+    }
+
+    pub fn negotiated_epsilon(&self) -> u8 {
+        R::with_mutex_mut(&self.epsilon_slot, |s| *s)
+    }
+}
+'''
+
+FIXTURE_EPSILON_WITNESS = '''
+#[test]
+fn epsilon_is_asserted() {
+    assert_eq!(actions.negotiated_epsilon(), 2, "the negotiated epsilon");
+}
+'''
+
 
 def selftest() -> int:
     """Drive the gate against a fixture whose shape the OLD probe swallowed.
@@ -600,6 +692,17 @@ def selftest() -> int:
                   FIXTURE_ACTIONS,
                   FIXTURE_TEST + FIXTURE_GAMMA_WITNESS + FIXTURE_SHARED_WITNESS,
                   root, probe)
+        # Arms 6-8 are R2944's: the method hop, taken by what the callee does.
+        green = base + FIXTURE_GAMMA_WITNESS
+        rc |= arm(6, "a write in a PRIVATE helper, unasserted, is RED", 1,
+                  FIXTURE_ACTIONS + FIXTURE_HELPER_HOP, green, root, probe)
+        rc |= arm(7, "the same helper write, asserted, is GREEN -- so it "
+                     "RESOLVED", 0,
+                  FIXTURE_ACTIONS + FIXTURE_HELPER_HOP,
+                  green + FIXTURE_EPSILON_WITNESS, root, probe)
+        rc |= arm(8, "a helper that only READS resolves nothing and is RED", 1,
+                  FIXTURE_ACTIONS + FIXTURE_HELPER_READS,
+                  green + FIXTURE_EPSILON_WITNESS, root, probe)
     return rc
 
 

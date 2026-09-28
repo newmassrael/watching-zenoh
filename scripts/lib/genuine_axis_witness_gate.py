@@ -146,11 +146,12 @@ def axes_of(root: pathlib.Path):
     actions = (root / base.ACTIONS_REL).read_text(encoding="utf-8")
     caps = (root / base.CAPS_REL).read_text(encoding="utf-8")
     bodies = base.fn_bodies(actions)
+    every_fn = base.all_fn_bodies(actions)
 
     axes = []
     unresolved = []
     for method in base.negotiation_methods(actions):
-        slot = base.written_slot(method, bodies)
+        slot = base.written_slot(method, bodies, every_fn)
         if slot is None:
             unresolved.append(method)
             continue
