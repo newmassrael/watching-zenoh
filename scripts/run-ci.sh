@@ -10490,6 +10490,32 @@ layer_c1r_mcu_multicast_e2e() {
         && cargo clippy -p wz-mcu-multicast-e2e --all-targets --quiet -- -D warnings)
 }
 
+# ─── Layer C1ns — every no_std-forcing member, tested isolated ─────
+#
+# R2943. R2940 DERIVED the set C1 and C2 leave out of the workspace
+# (`nostd_workspace_members.py`), which fixed C1's compile; what it did not do
+# is test the member that brought the fix about. `wz-runtime-zephyr` joined the
+# no_std set at R2916, left C1 at R2940, and has no lane of its own the way
+# C1m / C1n / C1r are the other three's, so its host tests ran nowhere.
+#
+# The population is the SAME derivation, not a list: every member C1 excludes
+# for no_std is tested here with `-p`, where cargo resolves only its own
+# subgraph and `no_std` is correct. A member added to that set tomorrow is
+# tested here the day it is excluded there. The three with dedicated lanes run
+# again at their defaults, which is the price of not keeping a second list.
+#
+# Guarded for the one member no other lane reaches: its lib holds 3 tests
+# (measured R2943), and a cfg slip that emptied them would still exit 0.
+layer_c1ns_nostd_members_isolated() {
+    local nostd
+    nostd="$(python3 scripts/lib/nostd_workspace_members.py)" || return 1
+    for member in $nostd; do
+        (cd crates && cargo test -p "$member" --quiet) || return 1
+    done
+    _runci_guarded_test "C1ns zephyr lib" 3 \
+        cargo test -p wz-runtime-zephyr --lib --quiet || return 1
+}
+
 # ─── Layer C1s — wz-runtime-tokio-multicast-tests isolated test + clippy ─
 #
 # R311mo (Level B). The multicast-only Session API (Session::new_multicast,
@@ -20297,6 +20323,7 @@ run_layer C1l layer_c1l_reassembly || overall=1
 run_layer C1m layer_c1m_session_lwip || overall=1
 run_layer C1n layer_c1n_mcu_session_acceptor || overall=1
 run_layer C1r layer_c1r_mcu_multicast_e2e || overall=1
+run_layer C1ns layer_c1ns_nostd_members_isolated || overall=1
 run_layer C1s layer_c1s_runtime_tokio_multicast_tests || overall=1
 run_layer C1o layer_c1o_keyexpr_gating_behavior || overall=1
 run_layer C1p layer_c1p_multicast || overall=1
