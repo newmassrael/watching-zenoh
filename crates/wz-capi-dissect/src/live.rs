@@ -563,7 +563,7 @@ impl LiveDissection {
     /// R2205 (open-debt item 560) — THE BYTES one drained record was decoded
     /// from, found by the coordinates that record already carries.
     ///
-    /// ZA-3215 ⑤ — the walk from record to frame moved to [`Self::resolve`],
+    /// ZA-3215 ⑤ — the walk from record to frame moved to `Self::resolve`,
     /// which [`Self::reassembled_bytes`] shares.
     ///
     /// # Why the RECORD is the key and not a span

@@ -283,7 +283,7 @@ pub fn multilink_declaring_after_the_reference() -> (crate::Dissection, Vec<u8>)
 /// record is handed back so the comparison needs no knowledge of the split.
 ///
 /// The handshake is the whole four-message exchange rather than
-/// [`handshake`]'s two Inits: a fragment chain is tracked only once an InitAck
+/// `handshake`'s two Inits: a fragment chain is tracked only once an InitAck
 /// has fixed the SN resolution, and without one every fragment reads
 /// `fragment_without_resolution` and nothing is ever joined.
 pub fn completed_chain_capture() -> (Vec<u8>, Vec<u8>) {

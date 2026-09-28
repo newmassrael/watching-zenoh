@@ -1355,9 +1355,9 @@ pub fn decapsulate(
 /// fact only the strip that sliced them had. Threading it out through every
 /// strip would give every constructor of either type — tests, the vsock
 /// record, the IP-fragment reassembly door — a field that is meaningless for
-/// half of them. This walks the SAME doors instead ([`enter_link`],
-/// [`walk_ip_chain`]) and reads the header lengths through the SAME rules the
-/// strips use ([`tcp_header_len`], [`UDP_HEADER_LEN`]), so the two cannot
+/// half of them. This walks the SAME doors instead (`enter_link`,
+/// `walk_ip_chain`) and reads the header lengths through the SAME rules the
+/// strips use (`tcp_header_len`, `UDP_HEADER_LEN`), so the two cannot
 /// disagree about where a body starts.
 ///
 /// # When it answers `None`, and why that is not a failure

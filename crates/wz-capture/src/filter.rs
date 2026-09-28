@@ -902,7 +902,7 @@ impl TokenClass {
     }
 
     /// Every word [`Self::word`] can return. The exhaustive match in
-    /// [`Self::of`] is what breaks when the lexer gains a token kind, and this
+    /// `Self::of` is what breaks when the lexer gains a token kind, and this
     /// list is what the declared value family is held to.
     pub fn names() -> Vec<&'static str> {
         [

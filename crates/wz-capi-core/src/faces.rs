@@ -2689,7 +2689,7 @@ impl SharedSession {
     /// group the C program has already released, and so its `drop(context)`
     /// runs before this returns — unless this is called from inside that
     /// group's own callback, where the sink falls with the aggregate instead
-    /// (see [`GroupAggregate::retire`]).
+    /// (see `GroupAggregate::retire`).
     pub fn leave_group(&self, id: GroupId) {
         let mut copies = Vec::new();
         let agg = {
