@@ -3507,10 +3507,10 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         #[cfg(feature = "transport-qos")]
         R::with_mutex_mut(&self.is_qos, |s| *s = n.qos.negotiated());
         // R2777 — the band, from the same QoS state: one member, two slots.
+        // R2941 — and the link's egress band with it, so a band restored from
+        // a cookie routes as the band the merge settled does.
         #[cfg(feature = "session-extqos")]
-        R::with_mutex_mut(&self.qos_link, |s| {
-            *s = crate::extqos::QosLinkState::from_qos_accept_state(n.qos)
-        });
+        self.settle_qos_link(crate::extqos::QosLinkState::from_qos_accept_state(n.qos));
         #[cfg(feature = "transport-shm")]
         R::with_mutex_mut(&self.is_shm, |s| *s = n.shm.0);
         // R2779 — the auth challenges, into the methods that issued them.
@@ -4730,11 +4730,16 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         use crate::extqos::PeerQos;
         let peer = crate::extqos::peer_qos_ext_state(extensions)?;
         // Either side NoQoS drops the whole state (zenoh's `else { NoQoS }`
-        // arm), and a NoQoS session carries no band to negotiate.
+        // arm, `io/zenoh-transport/src/unicast/establishment/ext/qos.rs`
+        // @ `*state_self = State::NoQoS.into();`), and the link is then
+        // reconfigured from that state like any other: a NoQoS session carries
+        // no band, so it selects on reliability alone (R2941).
         let PeerQos::QoS(peer_state) = peer else {
+            self.settle_qos_link(crate::extqos::QosLinkState::default());
             return Ok(());
         };
         if !self.is_qos() {
+            self.settle_qos_link(crate::extqos::QosLinkState::default());
             return Ok(());
         }
         let mine = self.qos_link_metadata();
@@ -4743,12 +4748,32 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         } else {
             crate::extqos::merge_qos_link_init_syn(&mine, &peer_state)?
         };
-        // The OUTCOME, into the slot only — `set_qos_link_metadata` records an
-        // offer, and routing the merge through it would make the narrowed band
-        // this node's configuration.
-        R::with_mutex_mut(&self.qos_link, |s| *s = merged);
-        self.apply_negotiated_qos_to_link(&merged);
+        self.settle_qos_link(merged);
         Ok(())
+    }
+
+    /// The establishment's QoS OUTCOME, recorded and applied: the metadata slot
+    /// [`Self::qos_link_metadata`] reports, and this link's egress-selection
+    /// inputs. Into the slot only — `set_qos_link_metadata` records an offer,
+    /// and routing the outcome through it would make a narrowed band this
+    /// node's configuration.
+    ///
+    /// Its two writers are the two places an outcome comes from: the merge
+    /// ([`Self::negotiate_qos_link_against_peer`]) and the negotiated state a
+    /// cookie or a reopen carries back (`install_negotiated`). Both go through
+    /// here so the egress band is never a value the metadata slot does not
+    /// also report (R2941); the cfg is the union of theirs.
+    #[cfg(all(
+        feature = "session-extqos",
+        any(
+            feature = "codec-init-body",
+            feature = "session-reconnect",
+            all(feature = "session-unicast-accept", feature = "codec-open-body")
+        )
+    ))]
+    fn settle_qos_link(&self, outcome: crate::extqos::QosLinkState) {
+        R::with_mutex_mut(&self.qos_link, |s| *s = outcome);
+        self.apply_negotiated_qos_to_link(&outcome);
     }
 
     /// R311y514 — push the NEGOTIATED QoS metadata down onto this physical link's
@@ -4771,45 +4796,37 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// just given up, and [`Self::select_link`] could hand a message to a link the
     /// peer does not serve on that conduit.
     ///
-    /// Only a `Some` outcome is applied, and that is not a shortcut — it is what
-    /// makes this faithful. Upstream both the offer and the selection input come
-    /// from ONE endpoint-metadata field, so a merged `None` implies the local side
-    /// declared nothing, which implies `config.priorities` was ALREADY `None`
-    /// before the reconfigure: the `None` arm is a no-op in zenoh too. wz reaches
-    /// this seam with a second band source that never sees the wire (the deploy
-    /// split [`Self::set_link_priority_range`] installs at bring-up), so writing
-    /// `None` through would clear a band no negotiation ever contradicted —
-    /// divergence dressed up as fidelity.
+    /// The band is written through in BOTH arms, `None` included, as upstream's
+    /// reconfigure builds a fresh config from the negotiated state. R2941 made
+    /// that faithful by giving the band ONE source: the multilink deploy split
+    /// is staged as the dialled link's QoS metadata offer, so it reaches the
+    /// wire and comes back through the merge, and nothing writes the egress
+    /// band behind the negotiation's back. Before R2941 the split went straight
+    /// into the egress slot unadvertised, a `None` outcome had to be skipped to
+    /// keep it, and a NoQoS handshake (which never reached this function) left
+    /// it restricting egress where upstream selects on reliability alone. A
+    /// `None` outcome now means what it means upstream: neither end declared a
+    /// band, or the session is NoQoS.
     ///
-    /// The reliability half carries the same rule and one further limit: wz's
-    /// [`LinkReliabilityPref::Any`] is "no preference", whereas zenoh's undeclared
-    /// case falls back to the link's INTRINSIC class
-    /// (`config.reliability.unwrap_or(Reliability::from(link.is_reliable()))`).
-    /// That fallback difference is pre-existing and independent of the handshake;
-    /// it is not silently folded in here.
-    ///
-    /// R2422 — re-measured at the 1.10.0 pin, and the two-band-source residual has
-    /// a THIRD face this block did not name: the NoQoS path. Upstream, either side
-    /// being NoQoS overwrites its OWN ext state with `State::NoQoS`
-    /// (`io/zenoh-transport/src/unicast/establishment/ext/qos.rs`
-    /// @ `*state_self = State::NoQoS.into();`), and the reconfigure then builds a
-    /// FRESH `TransportLinkUnicastConfig` whose `priorities` is that state's
-    /// `None` — so a NoQoS handshake leaves upstream selecting on reliability
-    /// alone. wz's caller returns before reaching this function on that path, so a
-    /// band `set_link_priority_range` installed at bring-up SURVIVES a NoQoS
-    /// negotiation and keeps restricting egress. It is the same divergence the
-    /// paragraph above names — wz has a band source upstream does not — seen on
-    /// the path where upstream has no band at all rather than on the narrowed one,
-    /// and it is not a separate gap.
+    /// The reliability half still applies only a `Some` outcome, and that is a
+    /// residual, not fidelity: wz's [`LinkReliabilityPref::Any`] is "no
+    /// preference", whereas zenoh's undeclared case falls back to the link's
+    /// INTRINSIC class
+    /// (`config.reliability.unwrap_or(Reliability::from(link.is_reliable()))`),
+    /// and the multilink deploy still assigns a reliability class per face that
+    /// it does not advertise. Writing `None` through before that has an answer
+    /// would erase a class with nothing faithful to replace it.
     #[cfg(all(
         feature = "session-extqos",
-        feature = "codec-init-body",
+        any(
+            feature = "codec-init-body",
+            feature = "session-reconnect",
+            all(feature = "session-unicast-accept", feature = "codec-open-body")
+        ),
         feature = "transport-multilink"
     ))]
     fn apply_negotiated_qos_to_link(&self, merged: &crate::extqos::QosLinkState) {
-        if let Some(band) = merged.priorities {
-            self.set_link_priority_range(Some(band));
-        }
+        self.set_link_priority_range(merged.priorities);
         if let Some(reliability) = merged.reliability {
             self.set_link_reliability_pref(match reliability {
                 crate::reliability::Reliability::Reliable => LinkReliabilityPref::Reliable,
@@ -4827,7 +4844,11 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// cfg arms already imposes in this file.
     #[cfg(all(
         feature = "session-extqos",
-        feature = "codec-init-body",
+        any(
+            feature = "codec-init-body",
+            feature = "session-reconnect",
+            all(feature = "session-unicast-accept", feature = "codec-open-body")
+        ),
         not(feature = "transport-multilink")
     ))]
     fn apply_negotiated_qos_to_link(&self, merged: &crate::extqos::QosLinkState) {

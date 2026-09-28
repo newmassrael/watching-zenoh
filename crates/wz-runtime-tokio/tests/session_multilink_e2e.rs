@@ -655,6 +655,70 @@ async fn multilink_link_negotiates_qos_when_both_offer() {
     );
 }
 
+/// R2941 (session-extqos) — a multilink link's band is ONE field, as upstream's
+/// endpoint `prio=` metadata is: the dialled end ADVERTISES its per-face band in
+/// the `QoSLink` body and the accepted end ADOPTS it, so both ends of the
+/// physical link negotiate, and route on, the same band.
+///
+/// The two ends are handed OPPOSITE halves of the split on purpose — each end
+/// numbers its faces on its own, so a parity mismatch is the ordinary case.
+/// This reds two ways: an unadvertised band (the acceptor's metadata stays
+/// `None`, and each end routes on a band the other never heard of), and an
+/// acceptor that also DECLARES its own half (the containment then refuses the
+/// dialler's band as not a subset, and the handshake aborts).
+#[cfg(feature = "session-extqos")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_dialled_band_is_advertised_and_the_acceptor_adopts_it() {
+    use wz_session_core::session_actions::LinkPriorityRange;
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let addr = listener.local_addr().expect("local_addr");
+    let dialled = (Priority::Control, Priority::InteractiveLow);
+    let acc = async {
+        let (stream, _peer) = listener.accept().await.expect("accept tcp peer");
+        accept_and_open_session_with_multilink(
+            DialedLink::Tcp(stream),
+            fixture_params_with_zid(0x02),
+            LinkReliabilityPref::Reliable,
+            multilink_offer(true),
+            (Priority::DataHigh, Priority::Background),
+            TokioTime::new(),
+            Some(ITER_CAP),
+            DEFAULT_OPEN_TICK_MS,
+        )
+        .await
+        .expect("the acceptor adopts the dialled band rather than refusing it")
+    };
+    let init = async {
+        let stream = TcpStream::connect(addr).await.expect("dial loopback");
+        initiate_and_open_session_with_multilink(
+            DialedLink::Tcp(stream),
+            fixture_params_with_zid(0x01),
+            LinkReliabilityPref::Reliable,
+            multilink_offer(true),
+            dialled,
+            TokioTime::new(),
+            Some(ITER_CAP),
+            DEFAULT_OPEN_TICK_MS,
+        )
+        .await
+        .expect("the dialled end reaches Established")
+    };
+    let (acc, init) = tokio::join!(acc, init);
+
+    let band = Some(LinkPriorityRange::new(dialled.0, dialled.1));
+    assert_eq!(
+        init.actions.qos_link_metadata().priorities,
+        band,
+        "the dialled end keeps the band it declared"
+    );
+    assert_eq!(
+        acc.actions.qos_link_metadata().priorities,
+        band,
+        "the accepted end negotiated the band the dialled end advertised"
+    );
+}
+
 /// R2783 — the multilink accept state rides the cookie: the challenge the
 /// acceptor issued and the initiator's ephemeral key. Between InitAck and
 /// OpenSyn the acceptor holds neither -- not in the dispatch, not in the key

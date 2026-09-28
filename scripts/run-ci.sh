@@ -5377,7 +5377,11 @@ layer_c1bb_cargo_test_qos() {
     # `link.reconfigure` at the end of establishment). Without the key they are
     # compiled out, and the lane reports 8 green while the seam it is named for
     # goes unexercised — the R311y513 shape, one feature key over.
-    _runci_guarded_test C1bb 11 cargo test -p wz-runtime-tokio --features transport-qos,session-extqos,transport-multilink,transport-batching,codec-push,codec-close,transport-unicast --lib multilink:: --quiet \
+    # R2941 — 11 -> 12: the band became one field, so the negative arm that
+    # pinned an UNADVERTISED band's survival is gone, replaced by two that pin
+    # its opposite (only a declared band outlives a metadata-less peer; a NoQoS
+    # peer leaves no band). MEASURED: 12 passed on this command.
+    _runci_guarded_test C1bb 12 cargo test -p wz-runtime-tokio --features transport-qos,session-extqos,transport-multilink,transport-batching,codec-push,codec-close,transport-unicast --lib multilink:: --quiet \
         || return 1
     # R311y835 — the per-priority TX staging + strict-priority drain. `batch_tx_tests`
     # otherwise rides the DEFAULT Layer C1 workspace run, and `transport-qos` is not a
@@ -6960,6 +6964,12 @@ layer_c1ba_cargo_clippy_transport_multilink() {
     # step IS that proof: the qos build activates one more case.
     _runci_guarded_test C1ba 7 cargo test -p wz-runtime-tokio --no-default-features --features "$ML_FEATURES,transport-qos" --test session_multilink_e2e --quiet \
         || return 1
+    # R2941 — the session-extqos arm: the dialled end advertises its band and
+    # the accepted end adopts it, over real loopback TCP with the two ends
+    # handed opposite halves of the split. 7 -> 8 is that case; without this
+    # arm it is compiled out of every run. MEASURED: 8 passed on this command.
+    _runci_guarded_test C1ba 8 cargo test -p wz-runtime-tokio --no-default-features --features "$ML_FEATURES,transport-qos,session-extqos" --test session_multilink_e2e --quiet \
+        || return 1
     _runci_guarded_test C1ba 2 cargo test -p wz-runtime-tokio --no-default-features --features "$ML_DEPLOY_FEATURES" --test session_multilink_deploy_e2e --quiet \
         || return 1
     # R311y219 — qos x multilink PRIORITY segregation over the DEPLOY path: the
@@ -6992,6 +7002,7 @@ layer_c1ba_cargo_clippy_transport_multilink() {
         `# R311y218 — clippy the qos x multilink composition (entrypoint qos param,` \
         `# the demo --qos threading) under -D warnings, incl the wz-ap-demo bridge.` \
         && cargo clippy -p wz-runtime-tokio --no-default-features --features "$ML_FEATURES,transport-qos" --test session_multilink_e2e --quiet -- -D warnings \
+        && cargo clippy -p wz-runtime-tokio --no-default-features --features "$ML_FEATURES,transport-qos,session-extqos" --test session_multilink_e2e --quiet -- -D warnings \
         && cargo clippy -p wz-ap-demo --features transport-qos,transport-multilink --quiet -- -D warnings \
         `# R311y218 scope boundary — transport-qos WITHOUT transport-multilink: the` \
         `# demo --qos wires WzConfig.qos but the single-link arms do not offer it;` \

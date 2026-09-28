@@ -4863,12 +4863,12 @@ pub async fn initiate_and_open_session_with_auth(
 /// aggregating dial as well as the single-link one. Before this the same flag
 /// reached the wire on `--max-links 1` and nothing at all on `--max-links 2`.
 ///
-/// `band` stays a separate parameter, and that is the same line
-/// [`SessionOffer`] draws for multilink itself: the priority band is not
-/// negotiated at the handshake, it is a LOCAL `select_link` routing decision,
-/// and it is per PHYSICAL LINK where the offer is per session. It is applied
-/// only under a QoS offer, which is now read off the offer rather than told
-/// twice.
+/// `band` stays a separate parameter because it is per PHYSICAL LINK where the
+/// offer is per session. It is applied only under a QoS offer, which is read
+/// off the offer rather than told twice. With `session-extqos` it is this
+/// link's declared band, advertised and negotiated like any `prio=` metadata;
+/// without it there is no wire field for it, and it stays a local
+/// `select_link` routing decision (R2941, [`stage_link_priority_band`]).
 #[cfg(feature = "transport-multilink")]
 #[allow(clippy::too_many_arguments)]
 pub async fn initiate_and_open_session_with_multilink(
@@ -4888,7 +4888,7 @@ pub async fn initiate_and_open_session_with_multilink(
         |actions| {
             actions.install_multilink_dispatch(crate::multilink::open_multilink_dispatch());
             actions.set_link_reliability_pref(reliability_pref);
-            stage_link_priority_band(actions, &offer, band);
+            stage_link_priority_band(actions, &offer, band, LinkEnd::Dialled);
             Ok(())
         },
         clock,
@@ -4910,18 +4910,63 @@ pub async fn initiate_and_open_session_with_multilink(
 /// One function for both directions because the two used to be one copied
 /// block, and the copy is how item 516's defect spread: whatever the dial path
 /// staged, the accept path had to be edited separately to match.
+///
+/// R2941 (session-extqos) — with the `QoSLink` ext built, the band is ONE
+/// field, as upstream's endpoint `prio=` metadata is: it is staged as this
+/// link's QoS metadata OFFER, so it reaches the wire, and the egress band
+/// [`SessionLinkActions::set_link_priority_range`] holds is what the
+/// negotiation settles, written by the merge and by nothing else. Before this
+/// the deploy band went straight into the egress slot and was never advertised,
+/// so a multilink node negotiated one band and routed on another.
+///
+/// The two ends differ, and on purpose. The DIALLED end declares the band: an
+/// operator's configured band wins (it is this node's endpoint metadata), and
+/// the per-face split stands in for per-endpoint metadata only where the
+/// operator declared none. The ACCEPTED end declares only what the operator
+/// configured, which `apply_offer` has already staged, because upstream seeds
+/// the acceptor from the accepted link's own endpoint
+/// (`io/zenoh-transport/src/unicast/establishment/accept.rs`
+/// @ `let endpoint = link.get_src().to_endpoint();`) and the TCP link builds
+/// that with empty metadata
+/// (`io/zenoh-links/zenoh-link-tcp/src/unicast.rs`
+/// @ `src_locator: Locator::new(TCP_LOCATOR_PREFIX, src_addr.to_string(), "")`):
+/// the acceptor adopts the dialler's band. Declaring the acceptor's own
+/// per-face split would make the containment refuse every pairing whose two
+/// face ids differ in parity, since each end numbers its faces on its own.
+///
+/// Without `session-extqos` there is no wire field to carry a band, so the
+/// split stays what it was there: a local routing decision on each end.
 #[cfg(feature = "transport-multilink")]
 fn stage_link_priority_band(
     #[allow(unused_variables)] actions: &Arc<SessionLinkActions>,
     #[allow(unused_variables)] offer: &SessionOffer,
     #[allow(unused_variables)] band: (Priority, Priority),
+    #[allow(unused_variables)] end: LinkEnd,
 ) {
     #[cfg(feature = "transport-qos")]
     if offer.mode == TransportMode::Qos {
-        actions.set_link_priority_range(Some(
-            wz_session_core::session_actions::LinkPriorityRange::new(band.0, band.1),
-        ));
+        let split = wz_session_core::session_actions::LinkPriorityRange::new(band.0, band.1);
+        #[cfg(feature = "session-extqos")]
+        if end == LinkEnd::Dialled {
+            let configured = offer.qos_link.unwrap_or_default();
+            actions.set_qos_link_metadata(wz_session_core::extqos::QosLinkState {
+                priorities: configured.priorities.or(Some(split)),
+                ..configured
+            });
+        }
+        #[cfg(not(feature = "session-extqos"))]
+        actions.set_link_priority_range(Some(split));
     }
+}
+
+/// Which end of a physical link a multilink entrypoint is staging: the end
+/// that dialled it declares the link's band, the end that accepted it adopts
+/// it. See [`stage_link_priority_band`].
+#[cfg(feature = "transport-multilink")]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum LinkEnd {
+    Dialled,
+    Accepted,
 }
 
 /// transport-lowlatency — [`initiate_and_open_session`] with the lowlatency
@@ -5399,7 +5444,7 @@ pub async fn accept_and_open_session_with_multilink(
         |actions| {
             actions.install_multilink_dispatch(crate::multilink::accept_multilink_dispatch());
             actions.set_link_reliability_pref(reliability_pref);
-            stage_link_priority_band(actions, &offer, band);
+            stage_link_priority_band(actions, &offer, band, LinkEnd::Accepted);
             // R2783 — no challenge is drawn here any more. The session draws
             // the 0x4 method's challenge at InitAck from the entropy source
             // the bundle was built with, per handshake, as it has drawn the

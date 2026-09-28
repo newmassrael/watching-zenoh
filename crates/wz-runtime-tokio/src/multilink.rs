@@ -774,8 +774,9 @@ mod tests {
     /// peer's reliability class must change which conduit the link serves.
     ///
     /// Isolated from the band half on purpose: the peer here declares reliability
-    /// ONLY, so the merged band stays `None` and the links keep the bands set
-    /// directly. What moves the traffic is the reliability class, nothing else.
+    /// ONLY, so the merged band stays the one the primary declared. What moves
+    /// the traffic is the reliability class, nothing else. R2941 — the primary's
+    /// band is staged as its offer (one field), so the merge keeps it.
     #[cfg(all(
         feature = "transport-qos",
         feature = "codec-push",
@@ -793,10 +794,12 @@ mod tests {
         let (primary, secondary, primary_driver, secondary_driver) = joined_qos_pair();
         // Both links start in the RELIABLE class (`joined_qos_pair`); the primary
         // carries the narrower band so it wins every full-tier tie-break it enters.
-        primary.set_link_priority_range(Some(LinkPriorityRange::new(
-            Priority::DataHigh,
-            Priority::Background,
-        )));
+        let declared = LinkPriorityRange::new(Priority::DataHigh, Priority::Background);
+        primary.set_qos_link_metadata(QosLinkState {
+            priorities: Some(declared),
+            reliability: None,
+        });
+        primary.set_link_priority_range(Some(declared));
         secondary.set_link_priority_range(Some(LinkPriorityRange::new(
             Priority::Control,
             Priority::Background,
@@ -864,14 +867,18 @@ mod tests {
         );
     }
 
-    /// R311y514 (the negative arm) — a merged `None` must NOT clear the band the
-    /// deploy installed. Upstream this case cannot be observed: zenoh's offer and
-    /// its selection input are one endpoint-metadata field, so a merged `None`
-    /// means the config was already `None`. wz reaches the seam with a second band
-    /// source that never sees the wire (`set_link_priority_range` at bring-up), so
-    /// a literal transcription of `link.reconfigure` would clear a band no peer
-    /// ever contradicted — and the y217 multilink deploy split would silently stop
-    /// routing the moment a bare-QoS peer completed a handshake.
+    /// R2941 — the band is ONE field: what the link DECLARED survives a peer that
+    /// declares nothing, because the merge keeps it, and a band nobody declared
+    /// does not route at all, because the negotiation's outcome is the only
+    /// thing that writes the egress band. Upstream reconfigures the link from
+    /// the negotiated state (`io/zenoh-transport/src/unicast/establishment/accept.rs`
+    /// @ `let a_link = link_unicast.reconfigure(`), so a `None` outcome leaves no
+    /// band there either.
+    ///
+    /// Both halves in one test so neither can pass by the other's mechanism: the
+    /// declared-band leg reds if the merge dropped the offer, the undeclared leg
+    /// reds if an unadvertised band were kept (the pre-R2941 rule, which skipped a
+    /// `None` outcome to preserve a band written behind the negotiation's back).
     #[cfg(all(
         feature = "transport-qos",
         feature = "codec-push",
@@ -880,52 +887,124 @@ mod tests {
         feature = "codec-init-body"
     ))]
     #[test]
-    fn a_metadata_less_peer_does_not_clear_the_deploy_band() {
-        use wz_session_core::extqos::encode_qos_ext;
+    fn only_a_declared_band_outlives_a_metadata_less_peer() {
+        use wz_session_core::extqos::{encode_qos_ext, QosLinkState};
         use wz_session_core::qos::Priority;
         use wz_session_core::session_actions::LinkPriorityRange;
 
+        let low = LinkPriorityRange::new(Priority::DataHigh, Priority::Background);
+        let wide = LinkPriorityRange::new(Priority::Control, Priority::Background);
+
+        // DECLARED: the primary's band is its offer as well as its egress band.
         let (primary, secondary, primary_driver, secondary_driver) = joined_qos_pair();
-        // The deploy split: the primary owns the LOW band, the secondary the whole
-        // scale. Neither is staged as wire metadata — that is the point.
-        primary.set_link_priority_range(Some(LinkPriorityRange::new(
-            Priority::DataHigh,
-            Priority::Background,
-        )));
-        secondary.set_link_priority_range(Some(LinkPriorityRange::new(
-            Priority::Control,
-            Priority::Background,
-        )));
+        primary.set_qos_link_metadata(QosLinkState {
+            priorities: Some(low),
+            reliability: None,
+        });
+        primary.set_link_priority_range(Some(low));
+        secondary.set_link_priority_range(Some(wide));
+        primary
+            .negotiate_qos_link_against_peer(false, &[encode_qos_ext()])
+            .expect("a metadata-less QoS peer negotiates");
         assert_eq!(
             primary.qos_link_metadata().priorities,
-            None,
-            "nothing staged for the wire"
+            Some(low),
+            "the merge kept the band this link declared"
+        );
+        primary
+            .send_push_literal_qos("declared/band", b"d", true, Priority::Background)
+            .expect("post-negotiation send");
+        assert_eq!(
+            primary_driver.frame_count(),
+            1,
+            "the declared band still routes Background to the narrower link"
+        );
+        assert_eq!(
+            secondary_driver.frame_count(),
+            0,
+            "the wide link did not take it"
         );
 
-        // The peer sends the presence-only UNIT form: QoS on, no metadata at all.
+        // UNDECLARED: the same egress band, written with no offer behind it.
+        let (primary, secondary, primary_driver, secondary_driver) = joined_qos_pair();
+        primary.set_link_priority_range(Some(low));
+        secondary.set_link_priority_range(Some(wide));
         primary
             .negotiate_qos_link_against_peer(false, &[encode_qos_ext()])
             .expect("a metadata-less QoS peer negotiates");
         assert_eq!(
             primary.qos_link_metadata().priorities,
             None,
-            "and the merge produced no band"
+            "nothing was declared on either end"
         );
-
-        // The deploy band still routes: Background rides the primary, exactly as
-        // it did before any handshake.
         primary
-            .send_push_literal_qos("keep/band", b"k", true, Priority::Background)
+            .send_push_literal_qos("undeclared/band", b"u", true, Priority::Background)
             .expect("post-negotiation send");
         assert_eq!(
-            primary_driver.frame_count(),
+            secondary_driver.frame_count(),
             1,
-            "the deploy band survived a negotiation that never mentioned a band"
+            "an undeclared band no longer routes: the covering link takes Background"
         );
         assert_eq!(
-            secondary_driver.frame_count(),
+            primary_driver.frame_count(),
             0,
-            "the wide link did not take over"
+            "the band-less link lost the full tier"
+        );
+    }
+
+    /// R2941 — a NoQoS handshake leaves no band, as upstream's does: either side
+    /// being NoQoS overwrites the ext state with `State::NoQoS`
+    /// (`io/zenoh-transport/src/unicast/establishment/ext/qos.rs`
+    /// @ `*state_self = State::NoQoS.into();`) and the reconfigure builds the
+    /// link's config from it. Before R2941 this path returned before the
+    /// write-back, so a declared band kept restricting egress on a session that
+    /// negotiated no QoS at all.
+    #[cfg(all(
+        feature = "transport-qos",
+        feature = "codec-push",
+        feature = "codec-close",
+        feature = "session-extqos",
+        feature = "codec-init-body"
+    ))]
+    #[test]
+    fn a_noqos_peer_leaves_the_link_no_band() {
+        use wz_session_core::extqos::QosLinkState;
+        use wz_session_core::qos::Priority;
+        use wz_session_core::session_actions::LinkPriorityRange;
+
+        let low = LinkPriorityRange::new(Priority::DataHigh, Priority::Background);
+        let (primary, secondary, primary_driver, secondary_driver) = joined_qos_pair();
+        primary.set_qos_link_metadata(QosLinkState {
+            priorities: Some(low),
+            reliability: None,
+        });
+        primary.set_link_priority_range(Some(low));
+        secondary.set_link_priority_range(Some(LinkPriorityRange::new(
+            Priority::Control,
+            Priority::Background,
+        )));
+
+        // The peer's Init carries no QoS ext at all.
+        primary
+            .negotiate_qos_link_against_peer(false, &[])
+            .expect("a NoQoS peer is not an error");
+        assert_eq!(
+            primary.qos_link_metadata(),
+            QosLinkState::default(),
+            "a NoQoS session reports no metadata"
+        );
+        primary
+            .send_push_literal_qos("noqos/band", b"n", true, Priority::Background)
+            .expect("post-negotiation send");
+        assert_eq!(
+            secondary_driver.frame_count(),
+            1,
+            "the band the link declared no longer restricts egress"
+        );
+        assert_eq!(
+            primary_driver.frame_count(),
+            0,
+            "the band-less link lost the full tier"
         );
     }
 }
