@@ -215,6 +215,67 @@ pub enum QosLinkError {
     /// Both sides declared a reliability and they differ — zenoh "The
     /// Reliability received in Init{Syn,Ack} doesn't match my Reliability".
     ReliabilityMismatch,
+    /// R2944 — this link's own endpoint declares a `prio` or `rel` value that
+    /// does not parse: upstream's `State::new` reads both with `?`, so the
+    /// establishment is refused before a byte is sent.
+    InvalidEndpointMetadata,
+}
+
+/// R2944 — the link's QoS metadata as its endpoint declares it: the wz mirror
+/// of the `is_qos` arm of upstream's `State::new`, which reads the two keys
+/// off the endpoint's metadata
+/// (`io/zenoh-transport/src/unicast/establishment/ext/qos.rs`
+/// @ `let metadata = endpoint.metadata();`).
+///
+/// `prio` follows `PriorityRange::from_str`
+/// (`commons/zenoh-protocol/src/core/mod.rs` @ `impl FromStr for PriorityRange {`):
+/// `start-end`, or a single `n` meaning `n..=n`, each bound a `u8` in `0..=7`,
+/// and nothing after a second `-`. `rel` follows `Reliability::from_str`: a
+/// `u8` that is `0` (best effort) or `1` (reliable).
+///
+/// ONE NAMED DIVERGENCE: a range written backwards (`5-2`) is refused here.
+/// Upstream builds it as an empty `RangeInclusive`, a band that covers no
+/// priority, and [`LinkPriorityRange`](crate::session_actions::LinkPriorityRange)
+/// cannot hold one — its constructor orders its bounds, which would silently
+/// turn `5-2` into `2-5`. Refusing is the only answer that does not route
+/// traffic on a band the operator did not write.
+#[cfg(feature = "session-extqos")]
+pub fn qos_link_from_endpoint(
+    metadata: &crate::locator::LocatorQosMetadata,
+) -> Result<QosLinkState, QosLinkError> {
+    fn priority(bound: &str) -> Result<crate::qos::Priority, QosLinkError> {
+        let byte = bound
+            .parse::<u8>()
+            .map_err(|_| QosLinkError::InvalidEndpointMetadata)?;
+        priority_try_from_wire(byte).ok_or(QosLinkError::InvalidEndpointMetadata)
+    }
+    let priorities = match metadata.priorities.as_deref() {
+        None => None,
+        Some(written) => {
+            let mut bounds = written.split('-');
+            let start = priority(bounds.next().unwrap_or(""))?;
+            let end = match bounds.next() {
+                Some(end) => priority(end)?,
+                None => start,
+            };
+            if bounds.next().is_some() || end.wire_byte() < start.wire_byte() {
+                return Err(QosLinkError::InvalidEndpointMetadata);
+            }
+            Some(crate::session_actions::LinkPriorityRange::new(start, end))
+        }
+    };
+    let reliability = match metadata.reliability.as_deref() {
+        None => None,
+        Some(written) => Some(match written.parse::<u8>() {
+            Ok(0) => crate::reliability::Reliability::BestEffort,
+            Ok(1) => crate::reliability::Reliability::Reliable,
+            _ => return Err(QosLinkError::InvalidEndpointMetadata),
+        }),
+    };
+    Ok(QosLinkState {
+        priorities,
+        reliability,
+    })
 }
 
 /// Pack a QoS state into the `QoSLink` z64 body — byte-for-byte zenoh
@@ -474,6 +535,57 @@ mod tests {
 
         fn band(a: Priority, b: Priority) -> LinkPriorityRange {
             LinkPriorityRange::new(a, b)
+        }
+
+        /// R2944 — an endpoint's `prio` / `rel` read the way upstream's
+        /// `State::new` reads them: a range or a single priority, a `0` / `1`
+        /// class, and a refusal for anything else — including a backwards
+        /// range, the one named divergence (upstream builds an empty band).
+        #[test]
+        fn an_endpoints_metadata_is_read_the_way_upstream_reads_it() {
+            use crate::locator::LocatorQosMetadata;
+            let read = |prio: Option<&str>, rel: Option<&str>| {
+                qos_link_from_endpoint(&LocatorQosMetadata {
+                    priorities: prio.map(alloc::string::String::from),
+                    reliability: rel.map(alloc::string::String::from),
+                })
+            };
+            assert_eq!(
+                read(Some("1-4"), Some("1")),
+                Ok(state(
+                    Some(band(Priority::RealTime, Priority::DataHigh)),
+                    Some(Reliability::Reliable)
+                )),
+                "a range and a class"
+            );
+            assert_eq!(
+                read(Some("3"), None),
+                Ok(state(
+                    Some(band(Priority::InteractiveLow, Priority::InteractiveLow)),
+                    None
+                )),
+                "a single priority is the one-wide band n..=n"
+            );
+            assert_eq!(
+                read(None, Some("0")),
+                Ok(state(None, Some(Reliability::BestEffort))),
+                "a class alone"
+            );
+            for (prio, rel) in [
+                (Some("5-2"), None),
+                (Some("0-8"), None),
+                (Some("1-2-3"), None),
+                (Some("x"), None),
+                (Some(""), None),
+                (None, Some("2")),
+                (None, Some("yes")),
+            ] {
+                assert_eq!(
+                    read(prio, rel),
+                    Err(QosLinkError::InvalidEndpointMetadata),
+                    "prio={prio:?} rel={rel:?} is refused"
+                );
+            }
         }
 
         fn state(

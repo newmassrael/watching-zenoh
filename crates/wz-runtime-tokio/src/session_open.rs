@@ -2329,6 +2329,9 @@ pub async fn dial_locator(locator: AnyLocator, cfg: &DialConfig) -> io::Result<D
             tls,
             #[cfg(not(any(feature = "transport-link-quic", feature = "transport-link-tls")))]
                 tls: _,
+            // R2944 — the QoS metadata is the ESTABLISHMENT's input, not the
+            // link's: the dial caller stages it into the link's offer.
+            qos: _,
         } => match proto {
             Proto::Tcp => Ok(DialedLink::Tcp(
                 dial_tcp_host(
@@ -2931,6 +2934,7 @@ pub async fn resolve_mesh_dial_target(target: &str) -> Result<AnyLocator, DialTa
             socket,
             retry,
             tls,
+            qos,
         } => {
             let addrs = crate::link_pipeline::resolve_locator_addrs(&host, port)
                 .await
@@ -2955,6 +2959,9 @@ pub async fn resolve_mesh_dial_target(target: &str) -> Result<AnyLocator, DialTa
                 // config, so a mesh peer configured ENTIRELY by its locator
                 // would dial cert-absent while the numeric spelling worked.
                 tls,
+                // R2944 — and its QoS metadata, so a named peer's link
+                // declares what the endpoint says, as a numeric one's does.
+                qos,
             })
         }
         other => other,
@@ -3354,6 +3361,10 @@ pub async fn bind_locator(locator: AnyLocator, cfg: &AcceptConfig) -> io::Result
             tls,
             #[cfg(not(any(feature = "transport-link-quic", feature = "transport-link-tls")))]
                 tls: _,
+            // R2944 — a listener's QoS metadata declares nothing for the
+            // links it accepts: upstream seeds an accepted link from that
+            // link's own src endpoint, not from the listen endpoint.
+            qos: _,
         } => match proto {
             Proto::Tcp => Ok(BoundListener::Tcp(
                 bind_tcp_host(
@@ -4641,9 +4652,65 @@ pub async fn connect_and_open_session_with_offer(
     max_iters: Option<usize>,
     tick_interval_ms: u64,
 ) -> Result<OpenedSession, OpenError> {
+    let offer = offer_for_endpoint(offer, &locator)?;
     let dialed = dial_locator(locator, cfg).await.map_err(OpenError::Dial)?;
     initiate_and_open_session_with_offer(dialed, params, offer, clock, max_iters, tick_interval_ms)
         .await
+}
+
+/// R2944 — the offer a dial of `locator` makes: `offer`, with the link's QoS
+/// metadata taken from the ENDPOINT that names the link, as upstream takes it
+/// (`io/zenoh-transport/src/unicast/establishment/ext/qos.rs`
+/// @ `let metadata = endpoint.metadata();`). Every dial seam routes its offer
+/// through here, so a link's band and class have one source.
+///
+/// Read only under a QoS offer, which is upstream's `is_qos` arm: on any other
+/// mode the keys are not looked at, so a value that would not parse does not
+/// refuse a session that never reads it. Under a QoS offer an unreadable value
+/// refuses the open before the link is dialled, as upstream's `?` refuses the
+/// establishment before a byte is sent.
+///
+/// An endpoint that declares nothing gives a link that declares nothing: the
+/// offer's `qos_link` is REPLACED, never merged, because the endpoint is the
+/// whole of what upstream reads.
+pub fn offer_for_endpoint(
+    offer: SessionOffer,
+    #[allow(unused_variables)] locator: &AnyLocator,
+) -> Result<SessionOffer, OpenError> {
+    #[cfg(feature = "session-extqos")]
+    {
+        let mut offer = offer;
+        offer.qos_link = if offer.mode == TransportMode::Qos {
+            let declared = match locator {
+                AnyLocator::Ip(ip) => ip.qos.as_deref(),
+                AnyLocator::Named { qos, .. } => qos.as_deref(),
+                // The non-IP leaves keep no metadata span yet.
+                _ => None,
+            };
+            declared
+                .map(wz_session_core::extqos::qos_link_from_endpoint)
+                .transpose()
+                .map_err(OpenError::QosLinkRejected)?
+        } else {
+            None
+        };
+        Ok(offer)
+    }
+    #[cfg(not(feature = "session-extqos"))]
+    {
+        Ok(offer)
+    }
+}
+
+/// R2944 — [`offer_for_endpoint`] for a connect STRING, planned the way the
+/// dial plans it, for a caller that dials by string. A string that does not
+/// plan returns the offer unchanged: it is never dialled, and the dial is what
+/// reports why.
+pub fn offer_for_connect(offer: SessionOffer, connect: &str) -> Result<SessionOffer, OpenError> {
+    match plan_endpoint(connect) {
+        Ok(locator) => offer_for_endpoint(offer, &locator),
+        Err(_) => Ok(offer),
+    }
 }
 
 /// transport-qos (R311y216) — [`connect_and_open_session`] that OFFERS the QoS
@@ -6033,6 +6100,76 @@ pub async fn open_session_static_config(
 mod tests {
     use super::*;
 
+    /// R2944 — a dial's offer carries the QoS metadata of the ENDPOINT that
+    /// names the link, and only that: read under a QoS offer (upstream's
+    /// `is_qos` arm), refused when it does not parse, not looked at on any
+    /// other mode, and REPLACING whatever the offer carried rather than
+    /// merging with it — the endpoint is the whole of what upstream reads.
+    #[cfg(feature = "session-extqos")]
+    #[test]
+    fn a_dials_qos_metadata_is_its_endpoints() {
+        use wz_session_core::extqos::{QosLinkError, QosLinkState};
+        use wz_session_core::qos::Priority;
+        use wz_session_core::reliability::Reliability;
+        use wz_session_core::session_actions::LinkPriorityRange;
+
+        let qos = SessionOffer::universal().with_mode(TransportMode::Qos);
+        let at = |s: &str| plan_endpoint(s).expect("plans");
+
+        let declared = offer_for_endpoint(qos, &at("tcp/127.0.0.1:7447?prio=1-4;rel=1"))
+            .expect("a readable declaration");
+        assert_eq!(
+            declared.qos_link,
+            Some(QosLinkState {
+                priorities: Some(LinkPriorityRange::new(
+                    Priority::RealTime,
+                    Priority::DataHigh
+                )),
+                reliability: Some(Reliability::Reliable),
+            }),
+            "the endpoint's band and class become the link's"
+        );
+
+        let stale = qos.with_qos_link(QosLinkState {
+            priorities: Some(LinkPriorityRange::new(Priority::Control, Priority::Control)),
+            reliability: None,
+        });
+        assert_eq!(
+            offer_for_endpoint(stale, &at("tcp/127.0.0.1:7447"))
+                .expect("nothing to read")
+                .qos_link,
+            None,
+            "an endpoint that declares nothing gives a link that declares nothing"
+        );
+
+        assert!(
+            matches!(
+                offer_for_endpoint(qos, &at("tcp/127.0.0.1:7447?prio=9")),
+                Err(OpenError::QosLinkRejected(
+                    QosLinkError::InvalidEndpointMetadata
+                ))
+            ),
+            "under QoS an unreadable value refuses the open"
+        );
+
+        assert!(
+            matches!(
+                offer_for_endpoint(SessionOffer::universal(), &at("tcp/127.0.0.1:7447?prio=9")),
+                Ok(SessionOffer { qos_link: None, .. })
+            ),
+            "off QoS the keys are not read, so nothing is refused"
+        );
+
+        assert_eq!(
+            offer_for_endpoint(qos, &at("example.org:7447?rel=0"))
+                .expect("a named endpoint declares too")
+                .qos_link
+                .and_then(|q| q.reliability),
+            Some(Reliability::BestEffort),
+            "a DNS-named endpoint's metadata is read like a numeric one's"
+        );
+    }
+
     // ── R311pm/R311ps — dial-routing classifier (`plan_endpoint`). Pure (no
     //    socket / DNS I/O): proves the `--connect` two-path fork is dissolved
     //    and DNS-vs-numeric is a property of the PARSED value, not a string
@@ -6062,6 +6199,7 @@ mod tests {
                 socket: None,
                 retry: None,
                 tls: None,
+                qos: None,
             })
         );
     }
@@ -6089,6 +6227,7 @@ mod tests {
                 socket: None,
                 retry: None,
                 tls: None,
+                qos: None,
             })
         );
         assert_eq!(

@@ -16522,12 +16522,15 @@ layer_z_zenohd_interop() {
     # oracle above — `QoSLink` is not feature-gated in zenoh and its default config
     # has `transport.unicast.qos.enabled = true`, so no variant build is needed.
     #
-    # Three legs have zenohd DIAL wz, which is not a stylistic choice: zenoh seeds
-    # its QoS state from an ENDPOINT's `prio=`/`rel=` metadata, and on the ACCEPT
-    # side that endpoint is the accepted link's src locator, which zenoh-link-tcp
-    # builds with a hard-coded EMPTY metadata string (unicast.rs:103). A listening
-    # zenohd therefore has no band at all, and pointing wz at one witnesses nothing
-    # — measured first, and it accepted a deliberately non-subset band.
+    # zenoh seeds its QoS state from an ENDPOINT's `prio=`/`rel=` metadata, and
+    # on the ACCEPT side that endpoint is the accepted link's src locator, which
+    # zenoh-link-tcp builds with a hard-coded EMPTY metadata string
+    # (unicast.rs:103). A listening zenohd therefore has no band at all —
+    # measured first, and it accepted a deliberately non-subset band. R2944
+    # made wz's listener behave the same (a link's band is its dialled
+    # endpoint's), so two legs have zenohd DIAL wz (decode; a wz listener
+    # declaring nothing) and two have wz DIAL zenohd with the band on its
+    # connect endpoint (encode, with and without a reliability).
     #
     # The demo is rebuilt with `session-extqos` for these legs alone (the same
     # one-shared-artifact-path treatment as the SHM lane above), and the test

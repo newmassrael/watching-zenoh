@@ -96,8 +96,6 @@ mod tasks;
 mod teardown;
 mod usage;
 
-#[cfg(feature = "session-extqos")]
-use crate::args::parse_qos_link;
 #[cfg(feature = "adminspace-config-hotreload")]
 use crate::args::parse_repeated;
 use crate::args::{
@@ -580,66 +578,16 @@ fn main() -> ExitCode {
             // 47 is about, so it is stated as a property of this ARM instead.
             #[cfg(feature = "transport-qos")]
             let qos = rest.iter().any(|a| a == "--qos");
-            // R311y506 (session-extqos) — `--qos-band START-END` / `--qos-rel 0|1`
-            // declare this node's QoS LINK METADATA, zenoh's endpoint `prio=` /
-            // `rel=` metadata (`Metadata::PRIORITIES` / `RELIABILITY`,
-            // core/endpoint.rs:196-197). Unlike `--qos`, these work on the
-            // SINGLE-link path too: a declared band routes both the dial and the
-            // accept side through the `_with_offer` entrypoints, so the z64
-            // `QoSLink` rides the Init and the directional containment arms.
-            //
-            // The band is an INTEROP CONTRACT, not a hint: an acceptor refuses an
-            // initiator whose band is not a subset of its own, and an initiator
-            // refuses an acceptor whose band is not a superset of its own. Both
-            // refusals are zenoh's (`establishment/ext/qos.rs`).
-            #[cfg(feature = "session-extqos")]
-            let qos_link = parse_qos_link(rest);
-            // R311y506 — REFUSE `--qos-band` on an AGGREGATING node rather than
-            // dropping it.
-            //
-            // R2096 (open-debt item 516) CORRECTS the reason and KEEPS the rule,
-            // which is the honest half of paying that item. R311y506 wrote "the
-            // multilink open path stages no QoSLink, so the band would be
-            // silently dropped", and that stopped being true the moment the
-            // `_with_multilink` entrypoints started taking the whole
-            // `SessionOffer`: `apply_offer` stages `qos_link` on every path now.
-            // A reason that outlives the limitation it describes is open-debt
-            // item 47 in its code form, so it does not survive this round.
-            //
-            // The rule survives on a DIFFERENT and stronger ground. A declared
-            // band is now announced, uniformly, on every one of the N aggregated
-            // links — while `multilink_priority_range` gives each link a
-            // different LOCAL band (even ids `Control..=InteractiveLow`, odd ids
-            // `DataHigh..=Background`), which is what `select_link` actually
-            // routes by. So the node would announce a containment contract that
-            // no single link of it honours. Announcing something false is worse
-            // than announcing nothing, which is what the old wording described.
-            //
-            // Reconciling the two — per-link declared bands, zenoh's
-            // `PriorityRange` being per link — is a design step with an interop
-            // contract attached, and it needs a real zenohd oracle to settle
-            // (`wz_qos_link_zenohd_interop`). R2096 did not do it, so the
-            // refusal stands and says why.
-            #[cfg(all(feature = "session-extqos", feature = "transport-multilink"))]
-            if qos_link.is_some() && max_links > 1 {
-                eprintln!(
-                    "wz-ap-demo: --qos-band/--qos-rel is not supported with \
-                     --max-links > 1: the band would be announced uniformly on \
-                     every aggregated link, while each link routes a different \
-                     per-parity band — a containment contract no link honours. \
-                     Use a single link, or drop the band."
-                );
-                std::process::exit(2);
-            }
-            #[cfg(feature = "session-extqos")]
-            if qos_link.is_some() {
-                // A declared band implies the QoS offer (zenoh reaches the
-                // endpoint metadata only inside the `is_qos` arm of `State::new`),
-                // and `WzConfig::with_qos_link` makes that implication structural.
-                // Logged so an operator reading only `--qos-band` is not surprised
-                // that the node also offers QoS.
-                eprintln!("wz-ap-demo: --qos-band/--qos-rel implies the QoS offer");
-            }
+            // R2944 (session-extqos) — a link's QoS metadata is its ENDPOINT's,
+            // as upstream's is: write it on the endpoint, zenoh's own spelling
+            // (`--connect 'tcp/HOST:PORT?prio=1-4;rel=1'`), and every dial of
+            // that endpoint declares it. The node-wide band this arm used to
+            // read retired with it: upstream has no node-wide band, and a TCP
+            // acceptor declares none, because the accepted link's own endpoint
+            // carries no metadata. The aggregating refusal that stood here went
+            // with it — each aggregated link now declares what its own endpoint
+            // says, or its per-face band where the endpoint says nothing
+            // (`multilink_priority_range`), and that band is advertised (R2941).
             // R311y220 (transport-qos) — `--express-high` / `--low` select the QoS band
             // the `--publish` peer originates its data Puts at (mapped in `run_peer` to
             // `publish_qos`'s (priority, express) via `PublishBand`). Mutually exclusive;
@@ -833,8 +781,6 @@ fn main() -> ExitCode {
                     max_sessions,
                     #[cfg(feature = "transport-qos")]
                     qos,
-                    #[cfg(feature = "session-extqos")]
-                    qos_link,
                     #[cfg(feature = "transport-qos")]
                     publish_band,
                     // R311y406 — a `--peer tls/...` / `--peer quic/...` threads its
@@ -979,7 +925,7 @@ fn main() -> ExitCode {
             // R311y786 — `--connect-retry <init_ms>,<max_ms>,<factor>`. A malformed
             // value ABORTS: the alternative is a node that paces its re-dials by a
             // schedule the operator did not ask for, which nothing downstream
-            // contradicts (the shape `--qos-band` also refuses).
+            // contradicts.
             //
             // R2158 (open-debt item 230) — the PARSE moved to the one
             // node-scoped read above; this is the RESOLUTION, and it is zenoh's
@@ -2619,11 +2565,6 @@ fn mesh_dial_offer(
         rest.iter().any(|a| a == "--lowlatency"),
         rest.iter().any(|a| a == "--compression"),
         rest.iter().any(|a| a == "--shm"),
-        // A declared band is part of the offer, and `mesh_offer` folds it into
-        // the qos half of the exclusive pair BEFORE the refusal so that
-        // `--qos-band --lowlatency` is refused rather than silently resolved.
-        #[cfg(feature = "session-extqos")]
-        crate::args::parse_qos_link(rest),
     )
     .map_err(str::to_string)
 }

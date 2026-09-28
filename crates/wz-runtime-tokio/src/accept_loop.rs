@@ -877,6 +877,11 @@ async fn dial_face(
     tick_interval_ms: u64,
 ) -> OpenResult {
     let peer = target.peer_tag();
+    // R2944 — the link's QoS metadata is its endpoint's, read before the dial.
+    let offer = match crate::session_open::offer_for_endpoint(offer, &target.locator) {
+        Ok(offer) => offer,
+        Err(e) => return (id, peer, Err(e)),
+    };
     let result = match dial_locator(target.locator, &dial_config).await {
         // R2095 (open-debt item 513) — THE seam the item names. Every capability
         // the node was configured with rides THIS InitSyn; before it a mesh dial
@@ -977,6 +982,12 @@ async fn dial_face_multilink(
     tick_interval_ms: u64,
 ) -> OpenResult {
     let peer = target.peer_tag();
+    // R2944 — the link's QoS metadata is its endpoint's, read before the dial;
+    // `band` stands in only where the endpoint declares none.
+    let offer = match crate::session_open::offer_for_endpoint(offer, &target.locator) {
+        Ok(offer) => offer,
+        Err(e) => return (id, peer, Err(e)),
+    };
     let result = match dial_locator(target.locator, &dial_config).await {
         // R2096 (open-debt item 516) — THE seam the item names. R2095 wired the
         // SINGLE-link dial (`dial_face`) to the whole offer and this one kept a

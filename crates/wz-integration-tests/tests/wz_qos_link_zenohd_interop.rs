@@ -52,27 +52,31 @@
 //!    handshake. Neither value exists anywhere in wz's configuration; both are
 //!    decoded out of zenohd's z64 body, including the reliability bit at shift
 //!    19. This is the leg that cannot be faked by local state.
-//! 2. `wz_refuses_a_zenohd_whose_band_is_not_a_subset_of_its_own` — the NEGATIVE
-//!    arm, and it is what makes leg 1 a claim about the CONTAINMENT rather than
-//!    about decoding: wz declares `prio=3-4`, zenohd dials `?prio=0-7`, and wz
-//!    aborts with `QosLinkRejected(PriorityRangeNotSubset)`. A wz that decoded
-//!    the body and ignored the rule would establish here.
-//! 3. `wz_adopts_a_subset_band_from_zenohd_and_establishes` — the calibration
-//!    between 1 and 2: same acceptor role, a band that IS a subset, session up
-//!    with the band adopted. Without it, leg 2's failure could be "wz refuses any
-//!    QoSLink".
+//! 2. `a_wz_listener_declares_no_band_for_what_it_accepts` — R2944: wz listens
+//!    on `?prio=3-4`, zenohd dials `?prio=0-7`, and wz ADOPTS `0-7`, because a
+//!    listen endpoint's metadata is not the accepted link's — the same
+//!    behaviour this doc measured on zenohd. It replaced R311y506's refusal
+//!    leg, whose wz acceptor declared a band from a node-wide flag: a
+//!    capability no TCP acceptor has upstream.
+//! 3. `zenohd_accepts_a_band_only_qoslink_wz_encodes` — wz dials declaring
+//!    `prio=2-5` and no reliability; zenohd adopts and echoes it. It carries
+//!    the separating role R311y506's leg 3 had (see below).
 //! 4. `zenohd_accepts_the_qoslink_wz_encodes_when_wz_dials` — the ENCODE
-//!    direction: wz dials declaring `prio=1-4;rel=1`, zenohd's acceptor parses
-//!    wz's z64 body (its `State::try_from_u64` aborts the handshake on a
-//!    malformed one), adopts it, and echoes it in the InitAck, which wz's
-//!    initiator merge then accepts. A full encode -> foreign parse -> foreign
-//!    emit -> decode round trip.
+//!    direction: wz dials declaring `prio=1-4;rel=1` on the endpoint, zenohd's
+//!    acceptor parses wz's z64 body (its `State::try_from_u64` aborts the
+//!    handshake on a malformed one), adopts it, and echoes it in the InitAck,
+//!    which wz's initiator merge then accepts. A full encode -> foreign parse ->
+//!    foreign emit -> decode round trip.
 //!
-//! ## Damage that binds them (measured, R311y506)
+//! The containment REFUSAL itself is not a leg: it needs a band on both ends,
+//! and over TCP the accepting end has none in either implementation. The
+//! merge rules that decide it are unit-pinned in `extqos`.
 //!
-//! - DECODER, reading the range's END byte at shift 12 instead of 11: legs 1, 3
-//!   and 4 all red (`QosLinkRejected(InvalidValue)` / `Terminal`). The decoder is
-//!   on every leg, including leg 4, where wz reads zenohd's InitAck echo.
+//! ## Damage that binds them (measured on R311y506's legs; re-measure after R2944)
+//!
+//! - DECODER, reading the range's END byte at shift 12 instead of 11: every leg
+//!   reds (`QosLinkRejected(InvalidValue)` / `Terminal`) — the decoder is on
+//!   every leg, including the dialling ones, where wz reads zenohd's echo.
 //! - ENCODER, writing the reliability bit at shift 18 instead of 19: legs 1 and 4
 //!   red while **leg 3 stays GREEN** — leg 3 declares no reliability, so the
 //!   damaged bit is never written. That is what separates the legs from each
@@ -96,9 +100,11 @@ use wz_integration_tests::common::{
 /// The demo's post-handshake witness: the QoS link metadata NEGOTIATED on a
 /// face, rendered in zenoh's own endpoint spelling.
 const NEGOTIATED: &str = "qos link negotiated = ";
-/// The pre-handshake witness: what this node DECLARED. Read to prove the
-/// negotiated value did not simply echo local config.
-const DECLARED: &str = "qos link declared = ";
+/// R2944 — the barrier that says the wz peer has bound. It used to be a
+/// node-wide `qos link declared = ` line; a link's QoS metadata is its
+/// endpoint's now, so what a leg declares is exactly the endpoint string it
+/// passes, and the listen line is what says wz is ready.
+const LISTENING: &str = "wz-ap-demo peer: listening on";
 
 /// Fail NOW, naming the feature, if the shared demo binary is not the
 /// `session-extqos` one. Every feature-set lane writes the same artifact path, so
@@ -113,9 +119,10 @@ fn assert_extqos_was_built(captured: &str) {
         });
     assert!(
         line.contains(" session-extqos ") || line.contains("[session-extqos "),
-        "the wz-ap-demo was built WITHOUT `session-extqos`, so `--qos-band` stages \
-         no QoSLink and every leg below would assert nothing. Build it with \
-         `cargo build -p wz-ap-demo --features session-extqos`.\n{line}"
+        "the wz-ap-demo was built WITHOUT `session-extqos`, so an endpoint's \
+         `prio` / `rel` stages no QoSLink and every leg below would assert \
+         nothing. Build it with `cargo build -p wz-ap-demo --features \
+         session-extqos`.\n{line}"
     );
 }
 
@@ -129,35 +136,25 @@ fn negotiated(captured: &str) -> String {
         .unwrap_or_else(|| panic!("the demo never logged `{NEGOTIATED}`\n{captured}"))
 }
 
-/// Read the value of the `qos link declared = ` line in a capture.
-fn declared(captured: &str) -> String {
-    captured
-        .lines()
-        .filter_map(|l| l.split_once(DECLARED))
-        .map(|(_, v)| v.trim().to_string())
-        .next()
-        .unwrap_or_else(|| panic!("the demo never logged `{DECLARED}`\n{captured}"))
-}
-
 fn tempfile_pair() -> (std::fs::File, std::fs::File) {
     let f = tempfile::tempfile().expect("tempfile");
     let w = f.try_clone().expect("dup handle");
     (f, w)
 }
 
-/// Bring up a wz peer that BINDS `bind_addr` with `wz_flags`, wait for its
-/// declared-band line, then have a zenohd DIAL it with `dial_metadata` appended
-/// to the locator. Returns the wz capture once `needle` appears (or the capture
-/// so far, on timeout).
+/// Bring up a wz peer that BINDS `wz_listen` (an endpoint, metadata included)
+/// with `--qos`, wait for its listen line, then have a zenohd DIAL
+/// `bind_addr` with `dial_metadata` appended to the locator. Returns the wz
+/// capture once `needle` appears (or the capture so far, on timeout).
 ///
 /// The wz side binds and the zenohd side dials because that is the only ordering
 /// in which zenohd HAS a band (see the module doc): the fixture owns that
-/// ordering rather than sleeping toward it — the declared-band line is the
-/// barrier that says wz is listening.
+/// ordering rather than sleeping toward it — the listen line is the barrier
+/// that says wz is ready.
 fn run_leg(
     zenohd: &std::path::Path,
     bind_addr: &str,
-    wz_flags: &[&str],
+    wz_listen: &str,
     dial_metadata: &str,
     needle: &str,
 ) -> String {
@@ -165,16 +162,15 @@ fn run_leg(
     let mut wz = ChildGuard::wrap(
         "wz-ap-demo (--peer, session-extqos)",
         Command::new(wz_ap_demo_binary())
-            .args(["--peer", bind_addr, "--key", "demo/qos"])
-            .args(wz_flags)
+            .args(["--peer", wz_listen, "--key", "demo/qos", "--qos"])
             .env("RUST_LOG", "info")
             .stdout(Stdio::null())
             .stderr(Stdio::from(wz_w))
             .spawn()
             .expect("spawn wz-ap-demo"),
     );
-    if let Err(c) = wait_for_substring(&mut wz_log, DECLARED, Duration::from_secs(20)) {
-        panic!("wz never announced its declared QoS band within 20s\n--- wz ---\n{c}");
+    if let Err(c) = wait_for_substring(&mut wz_log, LISTENING, Duration::from_secs(20)) {
+        panic!("wz never announced its listener within 20s\n--- wz ---\n{c}");
     }
 
     let (_zd_log, zd_w) = tempfile_pair();
@@ -206,9 +202,9 @@ fn run_leg(
 /// (`(None, p) => p`, zenoh's own arm in both `recv_init_*`).
 ///
 /// This is the leg local state cannot fake: `prio=2-5` and `rel=1` appear in no
-/// wz configuration on this run — the demo logs `declared = none` — so the only
-/// place they can have come from is the z64 body a real zenohd put on the wire,
-/// reliability bit at shift 19 included.
+/// wz configuration on this run — wz listens on a bare `tcp/` endpoint — so the
+/// only place they can have come from is the z64 body a real zenohd put on the
+/// wire, reliability bit at shift 19 included.
 // wz-proves: session-extqos zenohd->wz
 #[test]
 #[ignore = "binary-dep e2e (build-zenohd.sh + wz-ap-demo --features session-extqos); Layer Z runs via --ignored"]
@@ -218,14 +214,8 @@ fn wz_reads_the_band_and_reliability_out_of_zenohds_qoslink_body() {
     let addr = format!("127.0.0.1:{}", port.port());
     drop(port);
 
-    let captured = run_leg(&zenohd, &addr, &["--qos"], "?prio=2-5;rel=1", NEGOTIATED);
+    let captured = run_leg(&zenohd, &addr, &addr, "?prio=2-5;rel=1", NEGOTIATED);
 
-    assert_eq!(
-        declared(&captured),
-        "none",
-        "this leg's whole point is that wz declared NOTHING, so the negotiated \
-         values can only have come off zenohd's wire\n--- wz ---\n{captured}"
-    );
     assert_eq!(
         negotiated(&captured),
         "prio=2-5;rel=1",
@@ -235,18 +225,23 @@ fn wz_reads_the_band_and_reliability_out_of_zenohds_qoslink_body() {
     );
 }
 
-/// Leg 2 — the NEGATIVE arm. zenohd dials with `prio=0-7` at a wz that declares
-/// `prio=3-4`; the acceptor rule is "the initiator's range must be a SUBSET of
-/// mine", `0-7` is not, and wz must ABORT the handshake exactly as zenoh does
-/// (`recv_init_syn`, "The PriorityRange received in InitSyn is not a subset of my
-/// PriorityRange").
+/// Leg 2 — R2944: a wz LISTENING on an endpoint that carries `?prio=3-4`
+/// declares no band for the links it accepts, exactly as the zenohd this
+/// module doc measured does: the accepted link's own endpoint is what the
+/// acceptor reads, and TCP gives it none. So zenohd dialling with `prio=0-7` —
+/// a range that is NOT inside `3-4` — is not refused; wz adopts it.
 ///
-/// Without this leg, leg 1 would only show that wz can decode a body. A wz that
-/// decoded it and then ignored the containment would pass leg 1 and fail here.
+/// This leg replaced R311y506's refusal leg, whose wz acceptor declared
+/// `3-4` from a node-wide flag and refused. That refusal was a capability no
+/// TCP acceptor has upstream, so it witnessed a divergence; a containment
+/// refusal needs a band on BOTH ends, which over TCP never happens in either
+/// implementation, and the merge rules that decide it are unit-pinned in
+/// `extqos` instead. A wz that read its LISTEN metadata as the accepted
+/// link's would refuse here.
 // wz-proves: session-extqos zenohd->wz
 #[test]
 #[ignore = "binary-dep e2e (build-zenohd.sh + wz-ap-demo --features session-extqos); Layer Z runs via --ignored"]
-fn wz_refuses_a_zenohd_whose_band_is_not_a_subset_of_its_own() {
+fn a_wz_listener_declares_no_band_for_what_it_accepts() {
     let zenohd = zenohd_binary();
     let port = PortReservation::pick();
     let addr = format!("127.0.0.1:{}", port.port());
@@ -255,61 +250,48 @@ fn wz_refuses_a_zenohd_whose_band_is_not_a_subset_of_its_own() {
     let captured = run_leg(
         &zenohd,
         &addr,
-        &["--qos-band", "3-4"],
+        &format!("tcp/{addr}?prio=3-4"),
         "?prio=0-7",
-        "FAILED",
-    );
-
-    assert_eq!(declared(&captured), "prio=3-4");
-    assert!(
-        captured.contains("QosLinkRejected(PriorityRangeNotSubset)"),
-        "wz must abort with the SUBSET violation, not some other failure: a \
-         generic teardown here would not distinguish the containment from a \
-         broken link\n--- wz ---\n{captured}"
-    );
-    assert!(
-        !captured.contains(NEGOTIATED),
-        "no face may reach the negotiated-band witness: the handshake is refused, \
-         not degraded to a band neither side agreed to\n--- wz ---\n{captured}"
-    );
-}
-
-/// Leg 3 — the calibration between legs 1 and 2. Same wz acceptor role, same
-/// foreign dialer, but a band that IS a subset (`2-5` inside wz's `0-7`): the
-/// session establishes and wz adopts the INITIATOR's narrower band, which is
-/// zenoh's `Some(theirs)` arm.
-///
-/// It is what rules out "wz refuses every `QoSLink`" as an explanation of leg 2.
-/// It also carries NO reliability, which is what makes the encoder damage
-/// (reliability bit at shift 18) leave this leg green while reddening the other
-/// two — the legs are separately bound, not one bundle.
-// wz-proves: session-extqos zenohd->wz
-#[test]
-#[ignore = "binary-dep e2e (build-zenohd.sh + wz-ap-demo --features session-extqos); Layer Z runs via --ignored"]
-fn wz_adopts_a_subset_band_from_zenohd_and_establishes() {
-    let zenohd = zenohd_binary();
-    let port = PortReservation::pick();
-    let addr = format!("127.0.0.1:{}", port.port());
-    drop(port);
-
-    let captured = run_leg(
-        &zenohd,
-        &addr,
-        &["--qos-band", "0-7"],
-        "?prio=2-5",
         NEGOTIATED,
     );
 
-    assert_eq!(declared(&captured), "prio=0-7");
     assert_eq!(
         negotiated(&captured),
-        "prio=2-5",
-        "the acceptor keeps the NARROWER band — the initiator's — not its own \
-         wider declaration\n--- wz ---\n{captured}"
+        "prio=0-7",
+        "the listen endpoint's band is not the accepted link's: wz adopts the \
+         dialler's band, as a zenohd listener does\n--- wz ---\n{captured}"
     );
     assert!(
         !captured.contains("QosLinkRejected"),
-        "a subset band must not be refused\n--- wz ---\n{captured}"
+        "nothing on the accepting end declared a band to refuse against\n\
+         --- wz ---\n{captured}"
+    );
+}
+
+/// Leg 3 — the ENCODE direction with a band and NO reliability. wz dials a
+/// zenohd with the endpoint `?prio=2-5`, so the z64 body wz puts on the wire
+/// carries a range and no reliability bit; zenohd adopts and echoes it.
+///
+/// Carrying no reliability is what separates it from leg 4: the encoder damage
+/// (reliability bit at shift 18) leaves this leg green while reddening legs 1
+/// and 4 — the legs are separately bound, not one bundle. R311y506's leg 3
+/// played that role from the acceptor side with a node-wide band; R2944
+/// retired that band, and the role moved to the dialling side, where a wz band
+/// now lives.
+// wz-proves: session-extqos wz->zenohd
+#[test]
+#[ignore = "binary-dep e2e (build-zenohd.sh + wz-ap-demo --features session-extqos); Layer Z runs via --ignored"]
+fn zenohd_accepts_a_band_only_qoslink_wz_encodes() {
+    let captured = wz_dials_zenohd_with("?prio=2-5");
+    assert_eq!(
+        negotiated(&captured),
+        "prio=2-5",
+        "zenohd must accept the band-only body wz encoded and echo it back\n\
+         --- wz ---\n{captured}"
+    );
+    assert!(
+        !captured.contains("QosLinkRejected"),
+        "the round trip must not be refused\n--- wz ---\n{captured}"
     );
 }
 
@@ -324,10 +306,31 @@ fn wz_adopts_a_subset_band_from_zenohd_and_establishes() {
 /// wz decode — and any of the four can break it. Measured: the encoder damage
 /// (reliability bit one position low) reds this leg, because zenohd then reads
 /// BestEffort, echoes it, and wz's own reliability-must-match rule refuses.
+///
+/// R2944 — wz declares it the way zenoh does, on the dialled endpoint
+/// (`--connect 'tcp/HOST:PORT?prio=1-4;rel=1'`), where it used to take two
+/// node-wide flags.
 // wz-proves: session-extqos wz->zenohd
 #[test]
 #[ignore = "binary-dep e2e (build-zenohd.sh + wz-ap-demo --features session-extqos); Layer Z runs via --ignored"]
 fn zenohd_accepts_the_qoslink_wz_encodes_when_wz_dials() {
+    let captured = wz_dials_zenohd_with("?prio=1-4;rel=1");
+    assert_eq!(
+        negotiated(&captured),
+        "prio=1-4;rel=1",
+        "a real zenohd must accept the z64 body wz encoded, adopt it, and echo it \
+         back unchanged; any drift in wz's bit packing shows up here as a refused \
+         handshake or a different band\n--- wz ---\n{captured}"
+    );
+    assert!(
+        !captured.contains("QosLinkRejected"),
+        "the round trip must not be refused\n--- wz ---\n{captured}"
+    );
+}
+
+/// Bring up a listening zenohd, have a wz peer DIAL it with `metadata` on the
+/// connect endpoint, and return the wz capture once a band is negotiated.
+fn wz_dials_zenohd_with(metadata: &str) -> String {
     let zenohd = zenohd_binary();
     // TWO ports under ONE lock acquisition. `pick()` twice on this thread
     // re-enters the process-global port mutex and DEADLOCKS — which is what the
@@ -365,8 +368,13 @@ fn zenohd_accepts_the_qoslink_wz_encodes_when_wz_dials() {
     let mut wz = ChildGuard::wrap(
         "wz-ap-demo (--peer --connect, session-extqos)",
         Command::new(wz_ap_demo_binary())
-            .args(["--peer", &wz_addr, "--connect", &zd_addr])
-            .args(["--key", "demo/qos", "--qos-band", "1-4", "--qos-rel", "1"])
+            .args([
+                "--peer",
+                &wz_addr,
+                "--connect",
+                &format!("tcp/{zd_addr}{metadata}"),
+            ])
+            .args(["--key", "demo/qos", "--qos"])
             .env("RUST_LOG", "info")
             .stdout(Stdio::null())
             .stderr(Stdio::from(wz_w))
@@ -382,17 +390,5 @@ fn zenohd_accepts_the_qoslink_wz_encodes_when_wz_dials() {
     let captured = captured
         .unwrap_or_else(|c| panic!("wz never logged `{NEGOTIATED}` within 25s\n--- wz ---\n{c}"));
     assert_extqos_was_built(&captured);
-
-    assert_eq!(declared(&captured), "prio=1-4;rel=1");
-    assert_eq!(
-        negotiated(&captured),
-        "prio=1-4;rel=1",
-        "a real zenohd must accept the z64 body wz encoded, adopt it, and echo it \
-         back unchanged; any drift in wz's bit packing shows up here as a refused \
-         handshake or a different band\n--- wz ---\n{captured}"
-    );
-    assert!(
-        !captured.contains("QosLinkRejected"),
-        "the round trip must not be refused\n--- wz ---\n{captured}"
-    );
+    captured
 }

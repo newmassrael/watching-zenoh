@@ -5666,8 +5666,6 @@ mod stock_config_tests {
             // it was undocumented — it only selected the aggregated multilink
             // arm — stopped being true, and the ratchet said so before this
             // round noticed.
-            "qos-band",
-            "qos-rel",
             "quic-ca",
             "quic-cert",
             "quic-key",
@@ -7420,8 +7418,8 @@ pub(crate) fn parse_pairs(args: &[String], flag: &str) -> Vec<String> {
 /// `Ok(None)` and the caller keeps [`RetryPolicy::ZENOH_DEFAULT`], which is what
 /// stock zenoh resolves for a config that omits the section.
 ///
-/// Returns `Result` rather than calling `std::process::exit` the way
-/// [`parse_qos_link`] does, for one reason: a parser that exits cannot be tested,
+/// Returns `Result` rather than calling `std::process::exit`, for one reason: a
+/// parser that exits cannot be tested,
 /// and the accept/reject SET is the whole content of this function. The caller
 /// turns `Err` into the same exit code — a malformed value is REFUSED, never
 /// degraded to the default. A silently-defaulted schedule is the failure mode
@@ -7847,67 +7845,6 @@ pub(crate) fn parse_scout_autoconnect(
         matcher,
         strategy,
     }))
-}
-
-/// R311y506 (session-extqos) — parse `--qos-band START-END` and `--qos-rel 0|1`
-/// into the `QoSLink` metadata this node declares.
-///
-/// The two spellings are deliberately zenoh's own endpoint-metadata VALUES
-/// (`prio=1-4` -> `--qos-band 1-4`, `rel=1` -> `--qos-rel 1`), so an operator can
-/// carry a band between a zenohd endpoint string and this demo without
-/// re-deriving it. `PriorityRange::from_str` accepts `start-end` over the wire
-/// bytes 0..=7 (`core/mod.rs:377`) and `Reliability::from_str` accepts the
-/// integer discriminant (`:531`, BestEffort=0 / Reliable=1) — both mirrored here.
-///
-/// A malformed value ABORTS rather than degrading to "no band". A band silently
-/// dropped would leave the node negotiating the presence-only UNIT ext, and the
-/// resulting session would look perfectly healthy while proving nothing about the
-/// band the operator asked for — the failure mode a proof harness cannot see.
-#[cfg(feature = "session-extqos")]
-pub(crate) fn parse_qos_link(args: &[String]) -> Option<wz::runtime_tokio::extqos::QosLinkState> {
-    use wz::runtime_tokio::config::LinkPriorityRange;
-    use wz::runtime_tokio::extqos::QosLinkState;
-    use wz::runtime_tokio::qos::Priority;
-
-    fn priority(s: &str, flag: &str) -> Priority {
-        let byte: u8 = s.parse().unwrap_or_else(|e| {
-            eprintln!("wz-ap-demo: {flag}: `{s}` is not a priority byte ({e}); expected 0..=7");
-            std::process::exit(2);
-        });
-        if byte as usize >= Priority::NUM {
-            eprintln!("wz-ap-demo: {flag}: priority {byte} is out of range; expected 0..=7");
-            std::process::exit(2);
-        }
-        Priority::from_wire(byte)
-    }
-
-    let priorities = parse_pair(args, "--qos-band").map(|spec| {
-        let (start, end) = spec.split_once('-').unwrap_or_else(|| {
-            eprintln!(
-                "wz-ap-demo: --qos-band: `{spec}` is not a range; expected START-END (e.g. 1-4)"
-            );
-            std::process::exit(2);
-        });
-        LinkPriorityRange::new(priority(start, "--qos-band"), priority(end, "--qos-band"))
-    });
-    let reliability = parse_pair(args, "--qos-rel").map(|spec| match spec.trim() {
-        "0" => wz::runtime_tokio::Reliability::BestEffort,
-        "1" => wz::runtime_tokio::Reliability::Reliable,
-        other => {
-            eprintln!(
-                "wz-ap-demo: --qos-rel: `{other}` is not a reliability; expected 0 \
-                     (best-effort) or 1 (reliable)"
-            );
-            std::process::exit(2);
-        }
-    });
-    if priorities.is_none() && reliability.is_none() {
-        return None;
-    }
-    Some(QosLinkState {
-        priorities,
-        reliability,
-    })
 }
 
 // R121d interop-tuned session params. Values aligned to

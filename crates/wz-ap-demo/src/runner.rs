@@ -96,8 +96,8 @@ use wz::runtime_tokio::session_glue::{
 };
 use wz::runtime_tokio::session_open::{
     accept_and_open_session_with_offer, accept_endpoint, dial_endpoint,
-    initiate_and_open_session_with_offer, AcceptConfig, DialConfig, DialedLink, OpenError,
-    OpenedSession, OpenedSessionParts, SessionOffer, DEFAULT_OPEN_TICK_MS,
+    initiate_and_open_session_with_offer, offer_for_connect, AcceptConfig, DialConfig, DialedLink,
+    OpenError, OpenedSession, OpenedSessionParts, SessionOffer, DEFAULT_OPEN_TICK_MS,
 };
 
 // R2592 — the node's per-link-kind socket configuration, carried in
@@ -1412,7 +1412,19 @@ fn role_names(matcher: wz::runtime_tokio::linkstate_forward::WhatAmIMatcher) -> 
     }
 }
 
-async fn establish_link(role: &Role, link_defaults: &LinkDefaults) -> io::Result<DialedLink> {
+/// Dial or accept this run's one link, returning it with the offer its open
+/// must make.
+///
+/// R2944 — the offer comes back because a DIALLED link's QoS metadata is the
+/// metadata of the endpoint that opened, and only this function knows which
+/// of the `--connect` candidates that was (`offer_for_connect`). An accepted
+/// link declares nothing of its own, as upstream's TCP acceptor does, so the
+/// acceptor's offer returns unchanged.
+async fn establish_link(
+    role: &Role,
+    link_defaults: &LinkDefaults,
+    offer: SessionOffer,
+) -> io::Result<(DialedLink, SessionOffer)> {
     match role {
         Role::Acceptor {
             listen,
@@ -1433,7 +1445,7 @@ async fn establish_link(role: &Role, link_defaults: &LinkDefaults) -> io::Result
             // (tcp/ws/udp) takes the default.
             let accept_cfg =
                 build_accept_config(tls_cert, tls_key, quic_cert, quic_key, link_defaults)?;
-            accept_endpoint(listen, &accept_cfg).await
+            Ok((accept_endpoint(listen, &accept_cfg).await?, offer))
         }
         Role::Initiator {
             connect,
@@ -1464,6 +1476,21 @@ async fn establish_link(role: &Role, link_defaults: &LinkDefaults) -> io::Result
             // succeeded on its third member still shows the two that did not.
             let mut last: Option<io::Error> = None;
             for endpoint in connect {
+                // R2944 — this candidate's own QoS metadata, read before its
+                // dial: an unreadable value refuses the candidate, as
+                // upstream's establishment refuses it, and the loop moves on.
+                let endpoint_offer = match offer_for_connect(offer, endpoint) {
+                    Ok(endpoint_offer) => endpoint_offer,
+                    Err(e) => {
+                        let e = io::Error::new(
+                            io::ErrorKind::InvalidInput,
+                            format!("wz-ap-demo: {endpoint}: {e:?}"),
+                        );
+                        log::warn!("wz-ap-demo: unable to connect to {endpoint}: {e}");
+                        last = Some(e);
+                        continue;
+                    }
+                };
                 match dial_endpoint(endpoint, &dial_cfg).await {
                     Ok(dialed) => {
                         // R311po — log WHICH transport was dialed (the DialedLink
@@ -1474,7 +1501,7 @@ async fn establish_link(role: &Role, link_defaults: &LinkDefaults) -> io::Result
                             "wz-ap-demo: connected to {endpoint} over {} transport",
                             dialed.transport_name()
                         );
-                        return Ok(dialed);
+                        return Ok((dialed, endpoint_offer));
                     }
                     Err(e) => {
                         log::warn!("wz-ap-demo: unable to connect to {endpoint}: {e}");
@@ -2550,16 +2577,9 @@ pub(crate) fn initiator_offer(
 ///
 /// It delegates to [`initiator_offer`] rather than re-deriving the set, because
 /// that function is where "a flag whose atom was not built is INERT" lives and
-/// where the qos x lowlatency refusal lives. What is added here is the declared
-/// QoS band, which the single-session path has no flag for.
-///
-/// A declared band IS a QoS offer — zenoh reaches the endpoint metadata only
-/// inside the `is_qos` arm of `State::new` — so it is folded into the `qos`
-/// half of the exclusive pair BEFORE the refusal rather than after it. Passing
-/// it through afterwards would let `--qos-band` + `--lowlatency` reach
-/// `with_qos_link`, whose `with_mode(Qos)` would silently overwrite the lean
-/// mode the operator asked for. That is the silent drop this whole seam exists
-/// to refuse.
+/// where the qos x lowlatency refusal lives. R2944 — it no longer adds a
+/// node-wide QoS band: a link's band is its endpoint's, staged at each dial
+/// (`session_open::offer_for_endpoint`).
 ///
 /// Gated on the two MESH run-modes: its only caller is `main`'s
 /// `mesh_dial_offer`, which those arms own. [`initiator_offer`] below stays
@@ -2570,17 +2590,8 @@ pub(crate) fn mesh_offer(
     lowlatency: bool,
     compression: bool,
     shm: bool,
-    #[cfg(feature = "session-extqos")] qos_link: Option<wz::runtime_tokio::extqos::QosLinkState>,
 ) -> Result<SessionOffer, &'static str> {
-    #[cfg(feature = "session-extqos")]
-    let qos = qos || qos_link.is_some();
-    #[allow(unused_mut)]
-    let mut offer = initiator_offer(qos, lowlatency, compression, shm)?;
-    #[cfg(feature = "session-extqos")]
-    if let Some(state) = qos_link {
-        offer = offer.with_qos_link(state);
-    }
-    Ok(offer)
+    initiator_offer(qos, lowlatency, compression, shm)
 }
 
 /// R2087 — the qos x lowlatency exclusivity, as ONE predicate this binary reads
@@ -2672,7 +2683,7 @@ async fn open_initiator_in_connect_phase(
             if attempt > 1 {
                 log::info!("wz-ap-demo: connect attempt {attempt}");
             }
-            let dialed = establish_link(role, link_defaults).await?;
+            let (dialed, offer) = establish_link(role, link_defaults, offer).await?;
             open_initiator_with_offer(offer, dialed, params, clock)
                 .await
                 .map_err(|e| io::Error::other(format!("wz-ap-demo: session open failed: {e:?}")))
@@ -3122,11 +3133,12 @@ pub(crate) async fn run_demo(
                 // the `accept_and_open_session` call this replaces (that helper is
                 // itself a thin wrapper over the same `_with_offer` entrypoint).
                 Role::Acceptor { shm, .. } => {
-                    let dialed = establish_link(&role, &tuning.link_defaults).await?;
+                    let (dialed, offer) =
+                        establish_link(&role, &tuning.link_defaults, acceptor_offer(*shm)).await?;
                     accept_and_open_session_with_offer(
                         dialed,
                         params,
-                        acceptor_offer(*shm),
+                        offer,
                         session_clock,
                         None,
                         DEFAULT_OPEN_TICK_MS,
@@ -4066,14 +4078,6 @@ pub(crate) struct PeerOpts {
     /// links (`--qos`). Routed through [`WzConfig::with_qos`] into `FaceSources.qos`.
     #[cfg(feature = "transport-qos")]
     pub qos: bool,
-    /// R311y506 (session-extqos) — the QoS link METADATA this peer declares
-    /// (`--qos-band` / `--qos-rel`). Routed through [`WzConfig::with_qos_link`]
-    /// so the admin GET renders the band actually in force; the value that
-    /// reaches the WIRE travels in [`Self::offer`], which
-    /// [`mesh_offer`] builds from the same flags.
-    /// `None` = undeclared (the presence-only UNIT ext, byte-identical to `--qos`).
-    #[cfg(feature = "session-extqos")]
-    pub qos_link: Option<wz::runtime_tokio::extqos::QosLinkState>,
     /// R2095 (open-debt item 513) — the capability SET every face this peer
     /// opens OFFERS at its handshake.
     ///
@@ -4227,8 +4231,6 @@ async fn run_peer_until(
     let max_links = opts.max_links;
     #[cfg(feature = "transport-qos")]
     let qos = opts.qos;
-    #[cfg(feature = "session-extqos")]
-    let qos_link = opts.qos_link;
     #[cfg(feature = "transport-qos")]
     let publish_band = opts.publish_band;
     // R2159 (open-debt item 229) — the DIAL phase's budget, armed here so its
@@ -4645,14 +4647,6 @@ async fn run_peer_until(
     let cfg = cfg.with_max_sessions(opts.max_sessions);
     #[cfg(feature = "transport-qos")]
     let cfg = cfg.with_qos(qos);
-    // R311y506 (session-extqos) — a declared band also turns the QoS offer ON
-    // (`with_qos_link` makes that implication structural), so it is applied AFTER
-    // `with_qos` and deliberately overrides a bare `--qos false`.
-    #[cfg(feature = "session-extqos")]
-    let cfg = match qos_link {
-        Some(state) => cfg.with_qos_link(state),
-        None => cfg,
-    };
     // §5.23 adminspace-read / -write — the startup permits land in the SAME shared
     // config both admin hosts read, rather than being captured as two independent
     // bools at two setup sites. That is what makes them LIVE: zenoh re-reads
@@ -4681,19 +4675,6 @@ async fn run_peer_until(
         );
         cfg.install_interceptors(&forwarder);
     }
-    // R311y506 (session-extqos) — echo the DECLARED QoS band in zenoh's own
-    // endpoint-metadata spelling, so a fixture can confirm the flag took effect
-    // (a band silently dropped would still open a healthy-looking session while
-    // proving nothing about the band asked for). `none` when undeclared, which is
-    // the presence-only UNIT ext on the wire.
-    #[cfg(feature = "session-extqos")]
-    log::info!(
-        "wz-ap-demo peer: qos link declared = {}",
-        match wz_config.borrow().qos_link {
-            None => "none".to_string(),
-            Some(state) => render_qos_link(&state),
-        }
-    );
     // R311y213 — echo the effective aggregation budget. `to_admin_json` above omits
     // max_links (it renders acl/read-at-open fields only), so this is the operator's
     // confirmation that --max-links took effect: `> 1` aggregates N links per peer
@@ -6996,12 +6977,10 @@ async fn run_router_hat_until(
             // open too, so a router configured `transport/unicast/lowlatency`
             // offered the lean transport to nobody.
             //
-            // R311y506's declared QoS band rides in it, and reaches this
-            // run-mode for the first time: `mesh_dial_offer` calls
-            // `parse_qos_link` for BOTH mesh arms, where the band used to be a
-            // `--peer`-only affordance. A router-hat holds one link per peer
-            // (`max_links: 1` above), so the aggregation path R2096 wired for
-            // item 516 is not reached from this run-mode at all.
+            // R2944 — a link's QoS band is not in it: it is each dialled
+            // endpoint's own, staged at the dial. A router-hat holds one link
+            // per peer (`max_links: 1` above), so the aggregation path R2096
+            // wired for item 516 is not reached from this run-mode at all.
             offer: opts.offer,
             // R311y786 — the re-dial schedule, from `--connect-retry` (default =
             // zenoh's own 1s/4s/x2). This is the router's ONE source for it: the
@@ -9521,8 +9500,6 @@ mod peer_quic_cert_tests {
             max_sessions: wz::runtime_tokio::config::DEFAULT_MAX_SESSIONS,
             #[cfg(feature = "transport-qos")]
             qos: false,
-            #[cfg(feature = "session-extqos")]
-            qos_link: None,
             // R2096 — R2095 added `PeerOpts.offer` and did not reach these two
             // `#[cfg(all(test, routing-peer, quic))]` fixtures, so the crate's
             // test target stopped compiling at that feature pair. The zero
@@ -9656,8 +9633,6 @@ mod peer_failfast_tests {
             max_sessions: wz::runtime_tokio::config::DEFAULT_MAX_SESSIONS,
             #[cfg(feature = "transport-qos")]
             qos: false,
-            #[cfg(feature = "session-extqos")]
-            qos_link: None,
             // R2096 — R2095 added `PeerOpts.offer` and did not reach these two
             // `#[cfg(all(test, routing-peer, quic))]` fixtures, so the crate's
             // test target stopped compiling at that feature pair. The zero

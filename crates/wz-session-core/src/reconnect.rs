@@ -95,6 +95,10 @@ pub enum ReconnectLocator {
         /// endpoint with no certificate material at all, so the FIRST dial
         /// would succeed and every later one would be refused as cert-absent.
         tls: Option<alloc::boxed::Box<crate::locator::LinkTlsMaterial>>,
+        /// R2944 — the endpoint's QoS metadata, preserved across the narrowing
+        /// for the reason the TLS material is: a reconnect that dropped it
+        /// would re-establish the link with a band and class nobody declared.
+        qos: Option<alloc::boxed::Box<crate::locator::LocatorQosMetadata>>,
     },
 }
 
@@ -143,6 +147,7 @@ impl From<ReconnectLocator> for AnyLocator {
                 socket,
                 retry,
                 tls,
+                qos,
             } => AnyLocator::Named {
                 proto,
                 host,
@@ -150,6 +155,7 @@ impl From<ReconnectLocator> for AnyLocator {
                 socket,
                 retry,
                 tls,
+                qos,
             },
         }
     }
@@ -171,6 +177,7 @@ impl TryFrom<AnyLocator> for ReconnectLocator {
                 socket,
                 retry,
                 tls,
+                qos,
             } => Ok(ReconnectLocator::Named {
                 proto,
                 host,
@@ -178,6 +185,7 @@ impl TryFrom<AnyLocator> for ReconnectLocator {
                 socket,
                 retry,
                 tls,
+                qos,
             }),
             AnyLocator::Serial(_) => Err(NotReconnectable::Serial),
             // R311xi — unix-domain socket: non-IP, not in the reconnect set
@@ -556,7 +564,17 @@ mod reconnect_locator_tests {
             mcast_join: alloc::vec::Vec::new(),
             retry: None,
             tls: None,
+            qos: None,
         }
+    }
+
+    /// R2944 — metadata a round trip must carry: a band and a class, as
+    /// written.
+    fn declared_qos() -> Option<alloc::boxed::Box<crate::locator::LocatorQosMetadata>> {
+        Some(alloc::boxed::Box::new(crate::locator::LocatorQosMetadata {
+            priorities: Some("1-4".into()),
+            reliability: Some("1".into()),
+        }))
     }
 
     #[test]
@@ -574,6 +592,8 @@ mod reconnect_locator_tests {
         // R311pw — a DNS-named endpoint is reconnectable (the debt-B fix): it
         // narrows to ReconnectLocator::Named and widens back verbatim, so the
         // supervisor can re-dial (and re-resolve) it.
+        // R2944 — with QoS metadata on it, so a narrowing that dropped the
+        // endpoint's band and class would not round-trip.
         let any = AnyLocator::Named {
             proto: Proto::Tcp,
             host: "example.org".into(),
@@ -581,6 +601,7 @@ mod reconnect_locator_tests {
             socket: None,
             retry: None,
             tls: None,
+            qos: declared_qos(),
         };
         let reconnectable =
             ReconnectLocator::try_from(any.clone()).expect("named is reconnectable");
@@ -593,6 +614,7 @@ mod reconnect_locator_tests {
                 socket: None,
                 retry: None,
                 tls: None,
+                qos: declared_qos(),
             }
         );
         assert_eq!(AnyLocator::from(reconnectable), any);

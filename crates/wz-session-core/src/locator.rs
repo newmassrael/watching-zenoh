@@ -224,6 +224,55 @@ pub struct ParsedLocator {
     /// tail can carry, so paying for it in every `ParsedLocator` would be the
     /// wrong trade.
     pub tls: Option<Box<LinkTlsMaterial>>,
+    /// R2944 — the QoS metadata on the locator's `?`-metadata span, `prio=`
+    /// and `rel=`. See [`LocatorQosMetadata`]; `None` when the span names
+    /// neither, which is nearly every locator, and boxed when it does for the
+    /// size reason [`Self::retry`] is.
+    pub qos: Option<Box<LocatorQosMetadata>>,
+}
+
+/// R2944 — the QoS metadata an endpoint declares for the link it names:
+/// upstream's `Metadata::PRIORITIES` and `Metadata::RELIABILITY`, which the
+/// establishment reads into the link's `QoSLink` state
+/// (`io/zenoh-transport/src/unicast/establishment/ext/qos.rs`
+/// @ `let metadata = endpoint.metadata();`).
+///
+/// The values are kept AS WRITTEN, not parsed, and that is the fidelity
+/// point: upstream parses them only inside the `is_qos` arm of that state's
+/// constructor, so a value it cannot read refuses a QoS establishment and is
+/// never looked at on a node that does not offer QoS. Parsing here would
+/// refuse, at config time, a locator upstream dials. The one parse that does
+/// happen at locator time is `rel` choosing a link kind on `quic` / `udp`
+/// ([`reliability_adjusted_proto`]), which upstream's link manager also does
+/// with `?` before choosing.
+///
+/// Before R2944 these two keys were parsed and dropped (the
+/// `reliability_adjusted_proto` doc said so), and a link's QoS metadata came
+/// from a node-wide setting instead of the endpoint that names the link.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LocatorQosMetadata {
+    /// The `prio` value as written (`"1-4"`, or `"3"` for a single priority).
+    pub priorities: Option<String>,
+    /// The `rel` value as written (`"0"` best-effort, `"1"` reliable).
+    pub reliability: Option<String>,
+}
+
+/// zenoh `Metadata::PRIORITIES` metadata key
+/// (`commons/zenoh-protocol/src/core/endpoint.rs` @ `pub const PRIORITIES: &'static str = "prio";`).
+const LOCATOR_PRIORITIES_KEY: &str = "prio";
+
+/// R2944 — the endpoint's QoS metadata, read off its `?`-metadata span:
+/// `None` when the span names neither key.
+fn parse_qos_metadata(metadata: &str) -> Option<Box<LocatorQosMetadata>> {
+    let priorities = lookup_param(metadata, LOCATOR_PRIORITIES_KEY).map(str::to_string);
+    let reliability = lookup_param(metadata, LOCATOR_RELIABILITY_KEY).map(str::to_string);
+    if priorities.is_none() && reliability.is_none() {
+        return None;
+    }
+    Some(Box::new(LocatorQosMetadata {
+        priorities,
+        reliability,
+    }))
 }
 
 /// R2590 — the options an IP-family link applies to the transport it creates,
@@ -634,6 +683,9 @@ pub fn parse_locator(locator: &str) -> Result<ParsedLocator, LocatorParseError> 
         // material off the endpoint's config, never its metadata
         // (`io/zenoh-link-commons/src/quic/unicast.rs` @ `let epconf = endpoint.config();`).
         tls: parse_tls_material(parts.config)?,
+        // R2944 — METADATA span: the QoS keys are metadata in zenoh, read by
+        // the establishment rather than by the link.
+        qos: parse_qos_metadata(parts.metadata),
     })
 }
 
@@ -1265,10 +1317,10 @@ fn parse_mcast_join(config: &str) -> Vec<String> {
 /// (`io/zenoh-links/zenoh-link-udp/src/unicast.rs` @ `let is_reliable = crate::UdpLocatorInspector`).
 /// Defaulting it instead would dial a link the operator did not name.
 ///
-/// Every OTHER metadata key is parsed and not honoured — `prio` (link selection
-/// by priority range, endpoint.rs:464-470) belongs to `transport-multilink`, and
-/// `rel` on the schemes where it selects no link to the reliability axis;
-/// neither is claimed here.
+/// R2944 — `prio` and `rel` are ALSO the endpoint's QoS metadata, which is a
+/// different reader: the establishment's `QoSLink` state, carried out of the
+/// parse as [`ParsedLocator::qos`]. This function claims only the link-kind
+/// choice.
 fn reliability_adjusted_proto(proto: Proto, metadata: &str) -> Result<Proto, LocatorParseError> {
     let reliability = match proto {
         Proto::Quic | Proto::Udp => lookup_param(metadata, LOCATOR_RELIABILITY_KEY)
@@ -1937,6 +1989,10 @@ pub enum AnyLocator {
         /// no certificate material, boxed when it does — the shape and the size
         /// reason of [`ParsedLocator::tls`].
         tls: Option<Box<LinkTlsMaterial>>,
+        /// R2944 — the QoS metadata from the `?`-metadata span, carried like
+        /// [`ParsedLocator::qos`]: the metadata belongs to the endpoint, not to
+        /// the address shape that spells it.
+        qos: Option<Box<LocatorQosMetadata>>,
     },
     /// A serial endpoint (`serial/...`) — see [`SerialEndpoint`]. ALWAYS
     /// present (R311ny: the serial locator leaf is ungated), so a
@@ -2058,7 +2114,7 @@ pub fn parse_any_locator(locator: &str) -> Result<AnyLocator, AnyLocatorError> {
         // them here makes DNS-vs-numeric an address-token property the dial seam
         // routes on, instead of a raw-string re-inspection at each caller.
         Err(LocatorParseError::BadAddress(addr)) => match classify_named_ip(locator) {
-            Some((proto, host, port, config)) => Ok(AnyLocator::Named {
+            Some((proto, host, port, metadata, config)) => Ok(AnyLocator::Named {
                 proto,
                 host,
                 port,
@@ -2072,6 +2128,9 @@ pub fn parse_any_locator(locator: &str) -> Result<AnyLocator, AnyLocatorError> {
                 // carries the same certificate material. Upstream resolves the
                 // name and reads one config either way.
                 tls: parse_tls_material(config).map_err(AnyLocatorError::Ip)?,
+                // R2944 — and the same metadata span, so a DNS-named endpoint
+                // declares its link's QoS metadata as a numeric one does.
+                qos: parse_qos_metadata(metadata),
             }),
             None => Err(AnyLocatorError::Ip(LocatorParseError::BadAddress(addr))),
         },
@@ -2087,7 +2146,7 @@ pub fn parse_any_locator(locator: &str) -> Result<AnyLocator, AnyLocatorError> {
 /// not already parse numerically — is genuinely malformed (`None`). This only
 /// classifies the token SHAPE; it performs NO DNS resolution (that is the std
 /// dial layer's concern, per this module's deferral contract).
-fn classify_named_ip(locator: &str) -> Option<(Proto, String, u16, &str)> {
+fn classify_named_ip(locator: &str) -> Option<(Proto, String, u16, &str, &str)> {
     let (proto_str, addr) = locator.split_once('/')?;
     let proto = match proto_str {
         "tcp" => Proto::Tcp,
@@ -2108,7 +2167,7 @@ fn classify_named_ip(locator: &str) -> Option<(Proto, String, u16, &str)> {
     // routing a name here, so the error arm is unreachable from
     // `parse_any_locator`; mapping it to `None` keeps this a pure shape test.
     let proto = reliability_adjusted_proto(proto, parts.metadata).ok()?;
-    let (addr, config) = (parts.address, parts.config);
+    let (addr, metadata, config) = (parts.address, parts.metadata, parts.config);
     // A bracketed address is an IPv6 literal; if it did not parse as a
     // SocketAddr above, it is malformed, not a name.
     if addr.starts_with('[') {
@@ -2125,8 +2184,9 @@ fn classify_named_ip(locator: &str) -> Option<(Proto, String, u16, &str)> {
     // `None` already means "not a name" — two different answers that must not
     // share a channel. R2590 — the socket options follow the same rule for the
     // same reason (a malformed `dscp` is an error), so `iface` no longer rides out
-    // pre-parsed beside them.
-    Some((proto, host.to_string(), port, config))
+    // pre-parsed beside them. R2944 — the METADATA span rides out too, for the
+    // endpoint's QoS metadata.
+    Some((proto, host.to_string(), port, metadata, config))
 }
 
 #[cfg(test)]
@@ -2676,6 +2736,7 @@ mod tests {
                 socket: None,
                 retry: None,
                 tls: None,
+                qos: None,
             })
         );
     }
@@ -2742,6 +2803,7 @@ mod tests {
                 })),
                 retry: None,
                 tls: None,
+                qos: None,
             })
         );
     }
@@ -2794,6 +2856,7 @@ mod tests {
                 socket: None,
                 retry: None,
                 tls: None,
+                qos: None,
             })
         );
     }
@@ -2818,6 +2881,7 @@ mod tests {
                     socket: None,
                     retry: None,
                     tls: None,
+                    qos: None,
                 }),
                 "{s} should classify as Named"
             );
@@ -3143,6 +3207,36 @@ mod tests {
         assert_eq!(p.socket().iface, None);
     }
 
+    /// R2944 — the metadata span is not only cut off the address: its QoS keys
+    /// are KEPT, as written, for the establishment to read. A value that would
+    /// not parse is kept too — upstream reads it only under QoS, so refusing it
+    /// here would refuse a locator upstream dials — and a span that names
+    /// neither key keeps nothing. Before R2944 both keys were dropped here.
+    #[test]
+    fn ip_leaf_keeps_the_endpoints_qos_metadata_as_written() {
+        let p = parse_locator("tcp/1.2.3.4:7447?prio=1-4;rel=1#iface=eth0")
+            .expect("metadata+config parses");
+        assert_eq!(
+            p.qos,
+            Some(Box::new(LocatorQosMetadata {
+                priorities: Some("1-4".to_string()),
+                reliability: Some("1".to_string()),
+            }))
+        );
+        let unread = parse_locator("tcp/1.2.3.4:7447?prio=9").expect("kept, not judged");
+        assert_eq!(
+            unread.qos.and_then(|q| q.priorities).as_deref(),
+            Some("9"),
+            "an unreadable value is the establishment's to refuse, not the parser's"
+        );
+        assert_eq!(
+            parse_locator("tcp/1.2.3.4:7447?other=x")
+                .expect("parses")
+                .qos,
+            None
+        );
+    }
+
     #[test]
     fn ip_leaf_takes_metadata_and_config_together() {
         // The full canon shape: address | metadata | config, in that order.
@@ -3180,6 +3274,12 @@ mod tests {
                 })),
                 retry: None,
                 tls: None,
+                // R2944 — on tcp `rel` selects no link, and it is still the
+                // endpoint's QoS metadata.
+                qos: Some(Box::new(LocatorQosMetadata {
+                    priorities: None,
+                    reliability: Some("0".to_string()),
+                })),
             })
         );
     }
@@ -3487,6 +3587,10 @@ mod tests {
                 socket: None,
                 retry: None,
                 tls: None,
+                qos: Some(Box::new(LocatorQosMetadata {
+                    priorities: None,
+                    reliability: Some("1".to_string()),
+                })),
             })
         );
     }
@@ -3550,6 +3654,10 @@ mod tests {
                 socket: None,
                 retry: None,
                 tls: None,
+                qos: Some(Box::new(LocatorQosMetadata {
+                    priorities: None,
+                    reliability: Some("0".to_string()),
+                })),
             })
         );
     }
