@@ -381,12 +381,36 @@ pub struct z_liveliness_get_options_t {
     /// Snapshot timeout in milliseconds. `0` means "use the default", NOT
     /// "never expire" — the runtime resolves it, as upstream does.
     pub timeout_ms: u64,
-    /// Cancellation token — unstable-only, NEW at zenoh 1.10.0. IGNORED, for
-    /// the reason given on [`crate::get::z_get_options_t`]'s copy: this slice
-    /// declares no cancellation-token family, and the field is here so the
-    /// struct's footprint matches upstream's.
+    /// Cancellation token — unstable-only, NEW at zenoh 1.10.0. R2948 —
+    /// HONOURED and TAKEN on every path, as on [`crate::get::z_get_options_t`].
     #[cfg(not(feature = "zenoh-c-no-unstable-api"))]
-    pub cancellation_token: *mut core::ffi::c_void,
+    pub cancellation_token: *mut crate::cancellation::z_moved_cancellation_token_t,
+}
+
+/// R2948 — TAKE a liveliness-get's cancellation token, on the arm that has one.
+///
+/// # Safety
+/// `options` must be null or a valid liveliness-get-options struct.
+#[cfg(not(feature = "zenoh-c-no-unstable-api"))]
+unsafe fn liveliness_get_token(
+    options: *mut z_liveliness_get_options_t,
+) -> Option<std::sync::Arc<wz_capi_core::cancellation::CancellationToken>> {
+    if options.is_null() {
+        return None;
+    }
+    // SAFETY: the caller's contract.
+    unsafe { crate::cancellation::take_moved_cancellation_token((*options).cancellation_token) }
+}
+
+/// The no-unstable arm: the field does not exist.
+///
+/// # Safety
+/// `options` is unused; the signature matches the sibling above.
+#[cfg(feature = "zenoh-c-no-unstable-api")]
+unsafe fn liveliness_get_token(
+    _options: *mut z_liveliness_get_options_t,
+) -> Option<std::sync::Arc<wz_capi_core::cancellation::CancellationToken>> {
+    None
 }
 
 const _: () = {
@@ -466,6 +490,10 @@ pub unsafe extern "C" fn z_liveliness_get(
         // "this snapshot is over".
         // SAFETY: the caller's contract.
         let closure = unsafe { crate::get::adopt_reply_closure(callback) };
+        // R2948 — the token, TAKEN on the same every-path line as the closure,
+        // as upstream's `z_liveliness_get` takes it.
+        // SAFETY: the caller's contract.
+        let token = unsafe { liveliness_get_token(options) };
 
         // SAFETY: the caller's contract for both handles.
         let (Some(state), Some(ke)) = (unsafe { crate::session::session_state(session) }, unsafe {
@@ -497,28 +525,65 @@ pub unsafe extern "C" fn z_liveliness_get(
             anyke: false,
         });
 
+        // R2948 — registered BEFORE the first face is issued, as for `z_get`
+        // (`crate::get::issue_get`); a token whose cancel has started fails the
+        // snapshot with `Z_EGENERIC`, upstream's answer to the same refusal.
+        let fan = match &token {
+            None => None,
+            Some(token) => {
+                let Some((fan, registration)) = wz_capi_core::cancellation::register_fan(token)
+                else {
+                    return crate::result::Z_EGENERIC;
+                };
+                Some((fan, std::sync::Arc::new(registration)))
+            }
+        };
+        let registration = fan.as_ref().map(|(_, r)| std::sync::Arc::clone(r));
+        let fan = fan.map(|(f, _)| f);
+
         let guard = closure.clone();
         for (face, revised) in state.shared.face_sessions_with_wake() {
-            let per_face = closure.clone();
-            let per_face_gate = gate.clone();
+            let per_face = crate::get::LegReply {
+                closure: closure.clone(),
+                gate: gate.clone(),
+                _registration: registration.clone(),
+            };
             let issued = face.liveliness_get(
                 ke.clone(),
                 opts,
                 move |view: &dyn wz_runtime_tokio::reply_sink::ReplyView| {
-                    crate::get::fire_reply(&per_face, &per_face_gate, view);
+                    per_face.fire(view);
                 },
                 // Completion is signalled by the pending entry's sink being
                 // DROPPED, which covers a real final, a timeout sweep and a face
                 // death alike — the same reason `z_get`'s `on_final` is empty.
                 |_id| {},
             );
+            // R2948 — the interest id this face registered under, recorded so
+            // a later cancel can unregister it; `false` means the token
+            // cancelled mid-fan and this registration is already undone.
+            let cancelled_mid_fan = match (&fan, &issued) {
+                (Some(fan), Ok(interest_id)) => {
+                    let undo = face.clone();
+                    let interest_id = *interest_id;
+                    !fan.record(move || {
+                        undo.cancel_pending_liveliness_get(interest_id);
+                    })
+                }
+                _ => false,
+            };
             drop(issued);
+            if cancelled_mid_fan {
+                break;
+            }
             // Wake this face's drive loop so it re-arms on the deadline just
             // registered; without it a silent session sweeps the snapshot only
             // at the next keepalive wake.
             revised.notify_one();
         }
         drop(guard);
+        // After `guard`, for the reason `crate::get::issue_get` gives.
+        drop(registration);
         crate::result::Z_OK
     })
 }

@@ -30,29 +30,25 @@
 //!
 //! ## What a token DOES here
 //!
-//! It carries a flag two sides can see: the holder cancels, and whoever was
-//! handed a loan observes it. That is the whole of upstream's contract on this
-//! type — `cancel` sets, `is_cancelled` reads, `clone` shares the same flag
-//! rather than copying its value, and `drop` releases one reference. Wiring a
-//! token into a running query is the NEXT question and is deliberately not
-//! answered here: the option fields keep their `*mut c_void` spelling until a
-//! round can honour them end to end, and this module is what makes such a
-//! round possible at all.
+//! R2948 — it now STOPS the gets it was handed, which it did not before: the
+//! token is `wz_capi_core::cancellation::CancellationToken`, the one model the
+//! pico ABI's gets already registered into, and `z_get`, `z_querier_get` and
+//! `z_liveliness_get` register their per-face fans on it
+//! ([`take_moved_cancellation_token`]). `cancel` runs every registered get's
+//! undo and then waits until each get's callbacks have been dropped, which is
+//! upstream's "If the query callback is being executed, the call blocks until
+//! execution of callback is finished" (`zenoh-c/src/cancellation_token.rs` @
+//! `/// @brief Interrupts all associated GET queries. If the query callback is being executed, the call blocks until execution of callback is finished.`).
+//! `clone` still SHARES the state rather than copying it, and `drop` releases
+//! one reference.
 
 use std::ffi::c_void;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use crate::result::{ZResult, Z_ENULL, Z_OK};
 
-/// The shared flag an owned token points at.
-///
-/// `Arc` rather than a raw box because `clone` must SHARE — a token cloned and
-/// then cancelled has to be observed as cancelled through the original, which
-/// is what makes the type worth having.
-struct TokenState {
-    cancelled: AtomicBool,
-}
+/// The shared state an owned token points at. `Arc` because `clone` must SHARE.
+type TokenState = wz_capi_core::cancellation::CancellationToken;
 
 /// Owned cancellation token (zenoh-c `z_owned_cancellation_token_t`,
 /// `zenoh_opaque.h`: `ALIGN(8) uint8_t _0[24]`).
@@ -118,9 +114,7 @@ pub unsafe extern "C" fn z_cancellation_token_new(
     if this_.is_null() {
         return Z_ENULL;
     }
-    let state = Arc::new(TokenState {
-        cancelled: AtomicBool::new(false),
-    });
+    let state: Arc<TokenState> = TokenState::new();
     let handle = Box::into_raw(Box::new(state)) as *mut c_void;
     // SAFETY: checked non-null above.
     unsafe {
@@ -132,7 +126,8 @@ pub unsafe extern "C" fn z_cancellation_token_new(
     Z_OK
 }
 
-/// zenoh-c `z_cancellation_token_cancel` — set the flag.
+/// zenoh-c `z_cancellation_token_cancel` — stop every get registered on the
+/// token, then wait until their callbacks have finished.
 ///
 /// # Safety
 /// `this_` must be a valid loaned token.
@@ -148,11 +143,37 @@ pub unsafe extern "C" fn z_cancellation_token_cancel(
     // SAFETY: the handle came from `z_cancellation_token_new`.
     match unsafe { state(handle) } {
         Some(st) => {
-            st.cancelled.store(true, Ordering::SeqCst);
+            st.cancel();
             Z_OK
         }
         None => Z_ENULL,
     }
+}
+
+/// Consume a MOVED token out of an options field, yielding the state it named.
+///
+/// Upstream's option structs type the field `z_moved_cancellation_token_t *`
+/// and take it unconditionally (`ct.take_rust_type()` in the options' drop), so
+/// the caller's owned handle is gravestoned on every path, including a get that
+/// fails.
+///
+/// # Safety
+/// `moved` must be null or a valid moved token this crate produced.
+pub(crate) unsafe fn take_moved_cancellation_token(
+    moved: *mut z_moved_cancellation_token_t,
+) -> Option<Arc<TokenState>> {
+    if moved.is_null() {
+        return None;
+    }
+    // SAFETY: the caller's contract.
+    let owned = unsafe { &mut (*moved)._this };
+    let handle = owned.handle;
+    *owned = z_owned_cancellation_token_t::null_value();
+    if handle.is_null() {
+        return None;
+    }
+    // SAFETY: the handle came from `Box::into_raw` in `new` or `clone`.
+    Some(*unsafe { Box::from_raw(handle as *mut Arc<TokenState>) })
 }
 
 /// zenoh-c `z_cancellation_token_is_cancelled`.
@@ -170,7 +191,7 @@ pub unsafe extern "C" fn z_cancellation_token_is_cancelled(
     let handle = unsafe { (*this_).handle };
     // SAFETY: the handle came from `z_cancellation_token_new`.
     match unsafe { state(handle) } {
-        Some(st) => st.cancelled.load(Ordering::SeqCst),
+        Some(st) => st.is_cancelled(),
         None => false,
     }
 }

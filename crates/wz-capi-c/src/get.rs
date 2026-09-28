@@ -202,17 +202,40 @@ pub struct z_get_options_t {
     pub attachment: *mut z_moved_bytes_t,
     /// Timeout in milliseconds. CARRIED.
     pub timeout_ms: u64,
-    /// Cancellation token — unstable-only, and NEW at zenoh 1.10.0
-    /// (`z_moved_cancellation_token_t *` in upstream's header). IGNORED: this
-    /// slice declares no cancellation-token family, so there is nothing a
-    /// caller could construct to put here, and the field exists to keep the
-    /// struct's FOOTPRINT and the offsets before it right. `*mut c_void`
-    /// rather than a typed pointer for exactly that reason — inventing a
-    /// `z_moved_cancellation_token_t` here would declare a type whose eleven
-    /// upstream functions are eleven link errors, which is the census's
-    /// question and not this one.
+    /// Cancellation token — unstable-only, NEW at zenoh 1.10.0.
+    ///
+    /// R2948 — HONOURED and typed. It used to be an untyped slot IGNORED on the
+    /// premise that no token family existed to put in it; `crate::cancellation`
+    /// has declared that family since R2203, and the slot was the one reader
+    /// left behind. TAKEN on every path, as upstream's options drop takes it.
     #[cfg(not(feature = "zenoh-c-no-unstable-api"))]
-    pub cancellation_token: *mut core::ffi::c_void,
+    pub cancellation_token: *mut crate::cancellation::z_moved_cancellation_token_t,
+}
+
+/// R2948 — TAKE a get-options' cancellation token, on the arm that declares one.
+///
+/// # Safety
+/// `options` must be null or a valid get-options struct.
+#[cfg(not(feature = "zenoh-c-no-unstable-api"))]
+unsafe fn take_get_token(
+    options: *mut z_get_options_t,
+) -> Option<Arc<wz_capi_core::cancellation::CancellationToken>> {
+    if options.is_null() {
+        return None;
+    }
+    // SAFETY: the caller's contract.
+    unsafe { crate::cancellation::take_moved_cancellation_token((*options).cancellation_token) }
+}
+
+/// The no-unstable arm: upstream declares no token field there.
+///
+/// # Safety
+/// `options` is unused; the signature matches the sibling above.
+#[cfg(feature = "zenoh-c-no-unstable-api")]
+unsafe fn take_get_token(
+    _options: *mut z_get_options_t,
+) -> Option<Arc<wz_capi_core::cancellation::CancellationToken>> {
+    None
 }
 
 /// The default target (zenoh-c `z_query_target_default`).
@@ -1000,7 +1023,26 @@ pub(crate) fn issue_get(
     parameters: Option<Vec<u8>>,
     opts: QueryOptions,
     closure: Arc<CReplyClosure>,
+    token: Option<Arc<wz_capi_core::cancellation::CancellationToken>>,
 ) -> ZResult {
+    // R2948 — the cancellation is registered BEFORE any leg is issued, which is
+    // upstream's ordering (`register_query_cancellation` runs before the query
+    // is sent). A token whose cancel has already started refuses the
+    // registration, and upstream then fails the get with "Query was cancelled"
+    // (`zenoh/src/api/session.rs` @ `bail!("Query was cancelled")`), which
+    // zenoh-c reports as `Z_EGENERIC`. `closure` drops on that return, so the C
+    // `drop(context)` still reports the get over.
+    let fan = match &token {
+        None => None,
+        Some(token) => {
+            let Some((fan, registration)) = wz_capi_core::cancellation::register_fan(token) else {
+                return crate::result::Z_EGENERIC;
+            };
+            Some((fan, Arc::new(registration)))
+        }
+    };
+    let registration = fan.as_ref().map(|(_, r)| Arc::clone(r));
+    let fan = fan.map(|(f, _)| f);
     let anyke = parameters
         .as_deref()
         .is_some_and(crate::query::parameters_has_anyke);
@@ -1029,10 +1071,26 @@ pub(crate) fn issue_get(
     // for why a face that finalises early must not be able to complete the get
     // while later faces are still being issued.
     let guard = closure.clone();
+    let leg = || LegReply {
+        closure: closure.clone(),
+        gate: gate.clone(),
+        _registration: registration.clone(),
+    };
+    // R2948 — record a leg's rid against the cancellation set; `false` means the
+    // token cancelled while the fan was running, and `record` has already undone
+    // THIS leg, so nothing further may be issued.
+    let cancelled_mid_fan = |session: &wz_runtime_tokio::session::TokioSession, rid: u64| {
+        fan.as_ref().is_some_and(|fan| {
+            let undo_session = session.clone();
+            !fan.record(move || {
+                undo_session.cancel_pending_query(rid);
+            })
+        })
+    };
+    let mut stopped = false;
     if want_remote {
         for (session, revised) in shared.face_sessions_with_wake() {
-            let per_face = closure.clone();
-            let per_face_gate = gate.clone();
+            let per_face = leg();
             // Only `on_reply` carries the `Arc`. Completion is signalled by the
             // pending entry's sink being DROPPED, which covers a real final, a
             // timeout sweep and a face death alike — whereas a counter
@@ -1041,28 +1099,37 @@ pub(crate) fn issue_get(
             let issued = session.query(
                 &keyexpr,
                 opts.clone().with_allowed_destination(Locality::Remote),
-                move |view: &dyn ReplyView| fire_reply(&per_face, &per_face_gate, view),
+                move |view: &dyn ReplyView| per_face.fire(view),
                 |_rid| {},
             );
+            stopped = matches!(&issued, Ok(handle) if cancelled_mid_fan(&session, handle.rid()));
             // A per-face issue error (a face mid-teardown) is swallowed,
             // matching the fan-out publish's best-effort discipline; its clone
             // was already dropped with the rolled-back sink.
             drop(issued);
+            if stopped {
+                break;
+            }
             // Wake this face's drive loop so it re-arms on the deadline just
             // registered; without it a silent session sweeps only at the next
             // keepalive wake.
             revised.notify_one();
         }
     }
-    if want_local {
-        let local = closure.clone();
-        let local_gate = gate.clone();
-        let issued = shared.local_session().query(
+    if want_local && !stopped {
+        let local = leg();
+        let local_session = shared.local_session();
+        let issued = local_session.query(
             &keyexpr,
             opts.with_allowed_destination(Locality::SessionLocal),
-            move |view: &dyn ReplyView| fire_reply(&local, &local_gate, view),
+            move |view: &dyn ReplyView| local.fire(view),
             |_rid| {},
         );
+        if let Ok(handle) = &issued {
+            // The local leg is cancellable like a face's: same registry, same
+            // undo, on the plane's own session.
+            let _ = cancelled_mid_fan(local_session, handle.rid());
+        }
         drop(issued);
         // The plane's own drain, for the deferred half: the loopback replies and
         // the Final are finalised INLINE by `Session::query`, but a local
@@ -1071,7 +1138,33 @@ pub(crate) fn issue_get(
         shared.wake_local_plane();
     }
     drop(guard);
+    // After `guard`, explicitly: locals drop in REVERSE declaration order, so
+    // left implicit the registration would go first and a concurrent `cancel`
+    // could return before a zero-leg get's C `drop(context)` had run.
+    drop(registration);
     Z_OK
+}
+
+/// R2948 — what one leg's reply callback owns: the C closure, the reply gate,
+/// and the token registration, dropped in that order (fields drop in
+/// declaration order, so a `cancel` waiting on the registration cannot return
+/// while this leg's share of the C `drop(context)` is pending).
+///
+/// ⚠ The callback must name the WHOLE struct, which [`Self::fire`] taking
+/// `&self` guarantees. A closure writing `leg.closure` and `leg.gate` captures
+/// only those two fields (Rust 2021 disjoint capture) and drops the
+/// registration at once — the defect the pico ABI's differential test measured
+/// when this shape was first built there.
+pub(crate) struct LegReply {
+    pub(crate) closure: Arc<CReplyClosure>,
+    pub(crate) gate: Arc<ReplyGate>,
+    pub(crate) _registration: Option<Arc<wz_capi_core::cancellation::Registration>>,
+}
+
+impl LegReply {
+    pub(crate) fn fire(&self, view: &dyn ReplyView) {
+        fire_reply(&self.closure, &self.gate, view);
+    }
 }
 
 /// Turn a `z_get_options_t` into wz [`QueryOptions`].
@@ -1304,6 +1397,9 @@ unsafe fn get_with_selector(
         // every path, for the same reason.
         // SAFETY: the caller's contract.
         let opts = unsafe { get_options(options) };
+        // R2948 — the token too, on the same every-path line.
+        // SAFETY: the caller's contract.
+        let token = unsafe { take_get_token(options) };
 
         // SAFETY: the caller's contract for both handles.
         let (Some(state), Some(ke)) = (unsafe { session_state(session) }, unsafe {
@@ -1315,7 +1411,7 @@ unsafe fn get_with_selector(
         if wz_runtime_tokio::keyexpr_canon::check_outbound_keyexpr_pico_safe(&ke).is_err() {
             return Z_EINVAL;
         }
-        issue_get(&state.shared, ke, params, opts, closure)
+        issue_get(&state.shared, ke, params, opts, closure, token)
     })
 }
 
@@ -1518,7 +1614,7 @@ mod tests {
             // Non-null, so `z_get_options_default` writing the null back is a
             // real observation rather than a value that was already there.
             #[cfg(not(feature = "zenoh-c-no-unstable-api"))]
-            cancellation_token: 99 as *mut core::ffi::c_void,
+            cancellation_token: 99 as *mut crate::cancellation::z_moved_cancellation_token_t,
         };
         // SAFETY: `opts` is a live local.
         unsafe { z_get_options_default(&mut opts) };

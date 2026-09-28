@@ -118,10 +118,33 @@ pub struct z_querier_get_options_t {
     pub source_info: *const crate::source_info::z_source_info_t,
     /// Query attachment. CARRIED — consumed by [`z_querier_get`].
     pub attachment: *mut z_moved_bytes_t,
-    /// Cancellation token — unstable-only, NEW at zenoh 1.10.0. IGNORED, for
-    /// the reason given on [`crate::get::z_get_options_t`]'s copy.
+    /// Cancellation token — unstable-only, NEW at zenoh 1.10.0. R2948 —
+    /// HONOURED and TAKEN on every path, as on [`crate::get::z_get_options_t`].
     #[cfg(not(feature = "zenoh-c-no-unstable-api"))]
-    pub cancellation_token: *mut core::ffi::c_void,
+    pub cancellation_token: *mut crate::cancellation::z_moved_cancellation_token_t,
+}
+
+/// R2948 — TAKE a querier-get's cancellation token, on the arm that has one.
+///
+/// # Safety
+/// `options` must be a valid querier-get-options struct.
+#[cfg(not(feature = "zenoh-c-no-unstable-api"))]
+unsafe fn querier_get_token(
+    options: *mut z_querier_get_options_t,
+) -> Option<Arc<wz_capi_core::cancellation::CancellationToken>> {
+    // SAFETY: the caller's contract.
+    unsafe { crate::cancellation::take_moved_cancellation_token((*options).cancellation_token) }
+}
+
+/// The no-unstable arm: the field does not exist.
+///
+/// # Safety
+/// `options` is unused; the signature matches the sibling above.
+#[cfg(feature = "zenoh-c-no-unstable-api")]
+unsafe fn querier_get_token(
+    _options: *mut z_querier_get_options_t,
+) -> Option<Arc<wz_capi_core::cancellation::CancellationToken>> {
+    None
 }
 
 /// Fill default per-get querier options (zenoh-c
@@ -456,8 +479,8 @@ unsafe fn querier_get_with_selector(
 
         // The per-get moved payload / attachment are consumed on every path
         // too, matching upstream's unconditional ownership transfer.
-        let (payload, attachment, encoding, source_info) = if options.is_null() {
-            (None, None, None, None)
+        let (payload, attachment, encoding, source_info, token) = if options.is_null() {
+            (None, None, None, None, None)
         } else {
             // SAFETY: the caller's contract.
             unsafe {
@@ -466,6 +489,7 @@ unsafe fn querier_get_with_selector(
                     crate::bytes::take_payload((*options).attachment),
                     crate::encoding::take_moved_encoding((*options).encoding),
                     querier_get_source_info(options),
+                    querier_get_token(options),
                 )
             }
         };
@@ -493,6 +517,7 @@ unsafe fn querier_get_with_selector(
             params,
             opts,
             closure,
+            token,
         )
     })
 }
@@ -678,7 +703,7 @@ mod tests {
             source_info: 1 as *const crate::source_info::z_source_info_t,
             attachment: 1 as *mut z_moved_bytes_t,
             #[cfg(not(feature = "zenoh-c-no-unstable-api"))]
-            cancellation_token: 1 as *mut core::ffi::c_void,
+            cancellation_token: 1 as *mut crate::cancellation::z_moved_cancellation_token_t,
         };
         // SAFETY: live locals.
         unsafe { z_querier_get_options_default(&mut get_opts) };

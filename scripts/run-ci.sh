@@ -19412,6 +19412,17 @@ layer_c1cc_api_compat_c() {
         --test-threads=1 \
         --exact a_session_local_queryable_satisfies_its_own_querier_on_wz_and_libzenohc \
         || return 1
+    # R2948 — the cancellation token plane: one program on wz and on libzenohc,
+    # an already-cancelled token on each of the three readers (get / querier get
+    # / liveliness get) and a live token cancelled while a get is outstanding.
+    # Needs the unstable arm the oracle selects above, which this layer built.
+    _runci_guarded_test \
+        "C1cc a_cancellation_token_stops_a_get_identically_on_wz_and_libzenohc" 1 \
+        cargo test -p wz-integration-tests \
+        --test zenoh_c_cancellation_token_twice_and_diff -- --ignored --quiet \
+        --test-threads=1 \
+        --exact a_cancellation_token_stops_a_get_identically_on_wz_and_libzenohc \
+        || return 1
     # R311y500 — the CROSS-IMPL half, and it is a different question from the
     # three legs above. Those establish that upstream's program LINKS wz and that
     # wz's answers match the real `libzenohc.so`; every byte on their wire was
