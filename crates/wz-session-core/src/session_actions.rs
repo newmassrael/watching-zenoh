@@ -9793,9 +9793,14 @@ impl<R: SessionRuntime, T: TimeSource> SessionFsmUnicastActionsTrait
         // shape: its configured sizes, one queue per priority if it negotiated
         // QoS and one queue otherwise, as zenoh builds a link's pipeline when
         // the link joins an established transport.
-        self.link()
-            .link_driver()
-            .shape_tx_queue(a.params.tx_queue.shape(a.negotiated_qos()));
+        //
+        // R2925 — its batches are the link's negotiated batch MTU, as
+        // upstream's pipeline batches are the link's `batch.mtu`.
+        self.link().link_driver().shape_tx_queue(
+            a.params
+                .tx_queue
+                .shape(a.negotiated_qos(), a.negotiated_batch_mtu()),
+        );
     }
 
     #[inline(never)]

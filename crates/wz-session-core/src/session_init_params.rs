@@ -158,11 +158,13 @@ impl TxQueueConf {
     }
 
     /// The shape a link of a session with this configuration takes at
-    /// Established, given whether the session negotiated QoS.
-    pub const fn shape(&self, qos: bool) -> crate::link::TxQueueShape {
+    /// Established, given whether the session negotiated QoS and the link's
+    /// negotiated batch MTU.
+    pub const fn shape(&self, qos: bool, batch_bytes: usize) -> crate::link::TxQueueShape {
         crate::link::TxQueueShape {
             sizes: self.sizes,
             qos,
+            batch_bytes,
         }
     }
 }

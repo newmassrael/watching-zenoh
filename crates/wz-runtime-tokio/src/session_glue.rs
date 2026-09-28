@@ -4360,13 +4360,17 @@ mod link_congestion_tests {
         let link = CongestibleLink::new();
         let mut sizes = [2; Priority::NUM];
         sizes[Priority::RealTime.wire_byte() as usize] = 7;
-        let actions = session_with_queue(
-            link.clone(),
-            super::TxQueueConf {
-                sizes,
-                ..super::TxQueueConf::default()
-            },
-        );
+        // R2925 — a batch size below the link's MTU, so the shape's batch is
+        // the session's negotiated one and not a constant that happens to
+        // equal it.
+        let mut params = wz_runtime_tokio_test_support::fixture_session_init_params();
+        params.batch_size = 1_024;
+        params.tx_queue = super::TxQueueConf {
+            sizes,
+            ..super::TxQueueConf::default()
+        };
+        let actions =
+            super::new_session_actions(link.clone(), params, crate::runtime_impl::TokioTime::new());
         let mut engine = super::new_session_engine(&actions);
         engine.initialize();
         engine.process_event(E::OutboundStart);
@@ -4379,7 +4383,11 @@ mod link_congestion_tests {
         engine.process_event(E::OpenAckReceived);
         assert_eq!(
             *link.shapes.lock().expect("shapes"),
-            [wz_session_core::link::TxQueueShape { sizes, qos: false }]
+            [wz_session_core::link::TxQueueShape {
+                sizes,
+                qos: false,
+                batch_bytes: 1_024,
+            }]
         );
     }
 
@@ -4405,7 +4413,7 @@ mod link_congestion_tests {
         }
         assert_eq!(
             *link.shapes.lock().expect("shapes"),
-            [super::TxQueueConf::default().shape(true)]
+            [super::TxQueueConf::default().shape(true, 65_535)]
         );
     }
 

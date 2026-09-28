@@ -470,6 +470,11 @@ pub struct TxQueueShape {
     /// Whether the session negotiated QoS: `false` folds every priority onto
     /// the `Priority::DEFAULT` queue.
     pub qos: bool,
+    /// R2925 — the bytes one batch holds on this link, the unit a queue size
+    /// counts in: the link's negotiated batch MTU, as upstream sizes a
+    /// pipeline's batches by the link's `batch.mtu`
+    /// (`io/zenoh-transport/src/unicast/universal/link.rs` @ `mtu: link.config.batch.mtu,`).
+    pub batch_bytes: usize,
 }
 
 impl TxQueueShape {
@@ -483,14 +488,6 @@ impl TxQueueShape {
     /// The largest queue size upstream's config accepts
     /// (`commons/zenoh-config/src/defaults.rs` @ `pub const MAX: usize = 16;`).
     pub const MAX_SIZE: usize = 16;
-
-    /// The shape upstream's defaults give a transport of the given QoS.
-    pub const fn default_for(qos: bool) -> Self {
-        Self {
-            sizes: [Self::DEFAULT_SIZE; crate::qos::Priority::NUM],
-            qos,
-        }
-    }
 }
 
 impl RoomWait {

@@ -105,6 +105,10 @@ pub const DEFAULT_QUEUE_SIZE: usize = 2;
 
 /// zenoh's default batch size, the unit a queue size counts in
 /// (`BatchSize::MAX`).
+///
+/// R2925 — only until the session is established: its shape
+/// ([`OutboundTx::reshape`]) replaces the unit with the link's negotiated
+/// batch MTU, as upstream's pipeline batches are the link's `batch.mtu`.
 pub const BATCH_BYTES: usize = u16::MAX as usize;
 
 /// R2921 — [`outbound_channel`] with each lane holding at most
@@ -207,6 +211,7 @@ impl LaneState {
     /// and where new frames go change.
     fn reshape(&mut self, shape: wz_session_core::link::TxQueueShape) {
         self.single_lane = !shape.qos;
+        self.batch_bytes = shape.batch_bytes;
         self.capacity = shape.sizes.map(|n| n * self.batch_bytes);
         if self.single_lane {
             // zenoh sizes a non-QoS transport's one queue by the DEFAULT
@@ -1116,7 +1121,11 @@ mod tests {
         let (tx, mut rx) = outbound_channel_with_capacity([4; Priority::NUM], 4);
         let mut sizes = [16; Priority::NUM];
         sizes[Priority::DEFAULT.wire_byte() as usize] = 1;
-        tx.reshape(TxQueueShape { sizes, qos: false });
+        tx.reshape(TxQueueShape {
+            sizes,
+            qos: false,
+            batch_bytes: 4,
+        });
 
         tx.send(Priority::DEFAULT, b"data".to_vec())
             .expect("enqueue");
@@ -1130,14 +1139,20 @@ mod tests {
         assert_eq!(rx.try_recv(), Some(b"ka".to_vec()));
     }
 
-    /// R2924 — a QoS shape bounds each priority by its own size.
+    /// R2924 — a QoS shape bounds each priority by its own size. R2925 — in
+    /// batches of the SHAPE's size, the link's negotiated MTU, not the size
+    /// the channel was built with.
     #[test]
     fn a_qos_shape_bounds_each_priority_by_its_own_size() {
         use wz_session_core::link::TxQueueShape;
-        let (tx, mut rx) = outbound_channel_with_capacity([1; Priority::NUM], 4);
+        let (tx, mut rx) = outbound_channel_with_capacity([1; Priority::NUM], 1_000);
         let mut sizes = [1; Priority::NUM];
         sizes[Priority::Data.wire_byte() as usize] = 3;
-        tx.reshape(TxQueueShape { sizes, qos: true });
+        tx.reshape(TxQueueShape {
+            sizes,
+            qos: true,
+            batch_bytes: 4,
+        });
 
         tx.send(Priority::RealTime, vec![0u8; 4]).expect("enqueue");
         tx.send(Priority::Data, vec![0u8; 4]).expect("enqueue");
