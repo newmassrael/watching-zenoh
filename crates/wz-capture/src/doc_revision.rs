@@ -929,6 +929,24 @@ pub const DOCUMENT_HISTORY: &[DocumentShape] = &[
         planes: &[],
         carries: FIELDS_R12_CARRIES,
     },
+    // ZA-3214 ④ — `selected` DECLARED, key and words, a defect repaid.
+    //
+    // R2766 put `selected` on every row of the selector door with a closed set
+    // of four words, and no revision named either: the key is in no key set
+    // and the words are in no family, so a consumer switching on them had no
+    // `@values` marker and no revision to pin — against R2175's contract that a
+    // closed vocabulary a consumer switches on is declared. The key is present
+    // only on a document asked for with a selector; its absence is the fourth
+    // answer and is not a word, so it is not in the family.
+    DocumentShape {
+        document: FIELDS,
+        revision: 13,
+        keys: FIELDS_R13_KEYS,
+        retiring: &[],
+        families: FIELDS_R13_FAMILIES,
+        planes: &[],
+        carries: FIELDS_R13_CARRIES,
+    },
     DocumentShape {
         document: SUMMARY,
         revision: 1,
@@ -3511,6 +3529,177 @@ pub const FIELDS_R12_KEYS: &[&str] = &[
 /// ⚠ `reassembled` is the word that qualifies a coordinate: the spans under
 /// that object index the buffer the chain was joined in, which exists only
 /// inside the reader. Every other word carries no spans of its own.
+/// What `selected` says about one row at field-document revision 13 — the
+/// words of [`crate::fields_json::RowVerdict`].
+///
+/// ZA-3214 ④. See that type for what each word means and why `undecided` and
+/// `unjudged` are two.
+pub const SELECTED_R13: &[&str] = &["no", "undecided", "unjudged", "yes"];
+
+/// The keys the field document carries at revision 13 — revision 12's PLUS
+/// `selected`, which the selector door has written since R2766.
+pub const FIELDS_R13_KEYS: &[&str] = &[
+    "above_transport",
+    "addr",
+    "caps",
+    "capture_reread",
+    "carried",
+    "carried_state",
+    "datagram_flows",
+    "declaration_checked",
+    "declared",
+    "descriptor_bytes",
+    "despite_encoding",
+    "direction",
+    "document",
+    "dropped_by_limits",
+    "end",
+    "example",
+    "fields",
+    "flow",
+    "flows",
+    "format",
+    "frames",
+    "frames_per_flow",
+    "high",
+    "keyexpr",
+    "keyexpr_cause",
+    "kind",
+    "link",
+    "low",
+    "max_flows_per_table",
+    "max_scout_askers",
+    "message",
+    "message_at",
+    "messages",
+    "name",
+    "note",
+    "offset_space",
+    "omitted",
+    "path",
+    "payload_decode",
+    "payload_mapping",
+    "payload_mapping_counts_exact",
+    "payload_refusals",
+    "port",
+    "revision",
+    "samples",
+    "scout_askers",
+    "scouting",
+    "selected",
+    "shown",
+    "skipped",
+    "skipped_packets",
+    "start",
+    "state",
+    "stream_bytes",
+    "stream_bytes_per_direction",
+    "stream_flows",
+    "under",
+    "value",
+    "why",
+    "wrong",
+];
+
+/// The value families the field document declares at revision 13 — revision
+/// 12's PLUS `selected`.
+pub const FIELDS_R13_FAMILIES: &[ValueFamily] = &[
+    ValueFamily {
+        key: "carried_state",
+        values: CARRIED_STATE_R12,
+    },
+    ValueFamily {
+        key: "direction",
+        values: DIRECTION_FIELDS_R2,
+    },
+    ValueFamily {
+        key: "keyexpr_cause",
+        values: UNRESOLVED_CAUSE_R11,
+    },
+    ValueFamily {
+        key: "kind",
+        values: FIELD_VALUE_KIND_R3,
+    },
+    ValueFamily {
+        key: "link",
+        values: LINK_KIND_R7,
+    },
+    ValueFamily {
+        key: "message",
+        values: MESSAGE_R10,
+    },
+    ValueFamily {
+        key: "offset_space",
+        values: ANCHOR_SPACE_FIELDS_R2,
+    },
+    ValueFamily {
+        key: "selected",
+        values: SELECTED_R13,
+    },
+    ValueFamily {
+        key: "state",
+        values: PAYLOAD_STATE_R2,
+    },
+    ValueFamily {
+        key: "under",
+        values: REFUSED_UNDER_R2,
+    },
+    ValueFamily {
+        key: "wrong",
+        values: MISBOUND_R2,
+    },
+];
+
+/// What each field-document family's WORD decides at revision 13 — revision
+/// 12's, with `selected` a PASSENGER: the four words qualify the row they sit
+/// on and change no key beside them.
+pub const FIELDS_R13_CARRIES: &[KeyCarries] = &[
+    KeyCarries {
+        key: "carried_state",
+        shape: CarriesShape::Discriminant(CARRIED_STATE_CARRIES_R12),
+    },
+    KeyCarries {
+        key: "direction",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "keyexpr_cause",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "kind",
+        shape: CarriesShape::Discriminant(FIELD_VALUE_KIND_CARRIES_R4),
+    },
+    KeyCarries {
+        key: "link",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "message",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "offset_space",
+        shape: CarriesShape::Discriminant(FIELD_OFFSET_SPACE_CARRIES_R12),
+    },
+    KeyCarries {
+        key: "selected",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "state",
+        shape: CarriesShape::Discriminant(PAYLOAD_STATE_CARRIES_R4),
+    },
+    KeyCarries {
+        key: "under",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "wrong",
+        shape: CarriesShape::Passenger,
+    },
+];
+
 pub const CARRIED_STATE_R12: &[&str] = &[
     "batch",
     "fragment",
@@ -6144,7 +6333,9 @@ mod tests {
             // session's own verdict on what the frame carried, which is the
             // only route to a record whose bytes were never contiguous and the
             // only word that tells a compressed body from an unknown MID.
-            (FIELDS, 12),
+            // ZA-3214 ④ — to 13 when `selected` and its four words were
+            // declared; the selector door had written them since R2766.
+            (FIELDS, 13),
             // R2121 (open-debt item 460) — the summary moved to 2 when it
             // gained `inert_counters`; R2122 (item 238) to 3 when its
             // `framing` group stopped disagreeing with the capture report's.

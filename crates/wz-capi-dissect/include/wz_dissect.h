@@ -457,7 +457,7 @@
  *
  * Every family in `value_families` now carries a `carries` axis:
  *
- *     {"name":"fields","revision":12,"key":"kind","values":[...],
+ *     {"name":"fields","revision":13,"key":"kind","values":[...],
  *      "carries":[{"word":"bits","shapes":[["end","name","start","value"]]},
  *                 {"word":"opaque","shapes":[["end","name","start"]]}, ...]}
  *
@@ -492,6 +492,7 @@
  * @carries fields link passenger
  * @carries fields message passenger
  * @carries fields offset_space discriminant
+ * @carries fields selected passenger
  * @carries fields state discriminant
  * @carries fields under passenger
  * @carries fields wrong passenger
@@ -1249,18 +1250,25 @@ int wz_dissect_pcap_fields_limited(const unsigned char *bytes, size_t len,
  * Each message object gains a "selected" key with ONE OF FOUR WORDS, and
  * they are four because two of them would otherwise be one:
  *
- *   "yes" / "no"  the row's records were judged and folded. Any match makes
+ *   `yes` / `no`  the row's records were judged and folded. Any match makes
  *                 the row a match; all misses make it a miss.
- *   "undecided"   records were judged and this capture does not carry what
+ *   `undecided`   records were judged and this capture does not carry what
  *                 deciding needs -- a keyexpr that never bound, an absent
  *                 clock.
- *   "unjudged"    the row carries nothing the record plane judges at all: a
+ *   `unjudged`    the row carries nothing the record plane judges at all: a
  *                 handshake, a keepalive, a declaration.
  *
  * A caller asking "why did my selector miss this" must be able to tell the
  * last two apart, because only "undecided" is about the selector. A document
  * asked for WITHOUT a selector carries no "selected" key at all -- absence
  * of the key is the fourth answer, and it is not the same as "unjudged".
+ *
+ * @values fields selected
+ *
+ * ZA-3214: the key and its four words are declared from field-document
+ * revision 13. Until then they were written and declared nowhere, so a
+ * consumer switching on them had no revision to pin -- a closed vocabulary
+ * this header had not marked, which R2175's contract forbids.
  *
  * The verdict is per ROW and not per record: a row may carry several
  * records, and a reassembled record's span exists only inside this library,
@@ -1315,7 +1323,7 @@ int wz_dissect_declarations_diagnose(const char *declarations, char **out);
  *
  * R2175 -- the document is at REVISION 3, and the fourth key is `value_families`:
  *
- *     "value_families":[{"name":"fields","revision":12,"key":"state",
+ *     "value_families":[{"name":"fields","revision":13,"key":"state",
  *                        "values":["decoded","encoding_mismatch",…]}, …]
  *
  * every key in every document whose VALUE this build draws from a closed set,

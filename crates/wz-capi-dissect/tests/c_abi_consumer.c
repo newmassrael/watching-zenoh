@@ -1568,8 +1568,11 @@ int main(void) {
      * the session could not decompress from a MID this build does not know.
      * ⚠ The spans under `above_transport.carried` when the word is
      * `reassembled` index the reader's own joined buffer and are NOT capture
-     * offsets. */
-    revisioned[2].revision = 12;
+     * offsets.
+     * ZA-3214 -- 13: `selected` and its four words are DECLARED. The selector
+     * door wrote them from R2766 on; no revision named the key and no family
+     * held the words, so a switch over them had nothing to pin. */
+    revisioned[2].revision = 13;
     revisioned[2].doc = NULL;
     rc = wz_dissect_pcap_fields(pcap, sizeof pcap, 0, &revisioned[2].doc);
     CHECK(rc == WZ_DISSECT_OK, "fields rc=%d", rc);

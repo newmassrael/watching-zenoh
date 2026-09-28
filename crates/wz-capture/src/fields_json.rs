@@ -620,7 +620,7 @@ fn push_datagram_flow(
         // same answer with its reason attached, and it cannot become wrong if
         // the map's keying changes.
         if selection.is_some() {
-            out.push_str("\"selected\":\"unjudged\",");
+            RowVerdict::Unjudged.push(out);
         }
         push_walk(
             RowWalk {
@@ -1330,13 +1330,61 @@ fn push_selected(selection: Option<RowSelection<'_>>, frame: &PassiveFrame, out:
         return;
     };
     let key = crate::payload::RowKey::of(list, frame);
-    let word = match census.row_verdict(&key).and_then(|v| v.folded()) {
-        Some(Truth::Yes) => "yes",
-        Some(Truth::No) => "no",
-        Some(Truth::Unknown) => "undecided",
-        None => "unjudged",
+    let verdict = match census.row_verdict(&key).and_then(|v| v.folded()) {
+        Some(Truth::Yes) => RowVerdict::Yes,
+        Some(Truth::No) => RowVerdict::No,
+        Some(Truth::Unknown) => RowVerdict::Undecided,
+        None => RowVerdict::Unjudged,
     };
-    let _ = write!(out, "\"selected\":\"{word}\",");
+    verdict.push(out);
+}
+
+/// ZA-3214 ④ — the four words a row's `selected` key carries, as ONE type.
+///
+/// R2766 wrote them as literals in two places — the arm above and the scouting
+/// arm, which writes `unjudged` directly — and declared neither the key nor
+/// the set, so a consumer switching on the word had no revision to pin and no
+/// `@values` marker to read, against R2175's contract that a closed set a
+/// consumer switches on is declared. This enum is the walk the declaration in
+/// [`crate::doc_revision::SELECTED_R13`] is held to.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RowVerdict {
+    /// The row's records were judged and at least one matched.
+    Yes,
+    /// The row's records were judged and none matched.
+    No,
+    /// Records were judged and the capture does not carry what deciding needs.
+    Undecided,
+    /// The row carries nothing the record plane judges.
+    Unjudged,
+}
+
+impl RowVerdict {
+    /// The word this verdict is written as.
+    pub const fn word(self) -> &'static str {
+        match self {
+            Self::Yes => "yes",
+            Self::No => "no",
+            Self::Undecided => "undecided",
+            Self::Unjudged => "unjudged",
+        }
+    }
+
+    /// Every word, by walking the variants — what the declared family is held to.
+    pub fn names() -> alloc::vec::Vec<&'static str> {
+        [Self::Yes, Self::No, Self::Undecided, Self::Unjudged]
+            .into_iter()
+            .map(|v| match v {
+                // Exhaustive on purpose: a variant added later fails to compile
+                // here rather than missing from the declaration.
+                Self::Yes | Self::No | Self::Undecided | Self::Unjudged => v.word(),
+            })
+            .collect()
+    }
+
+    fn push(self, out: &mut String) {
+        let _ = write!(out, "\"selected\":\"{}\",", self.word());
+    }
 }
 
 /// The same, where the record plane is not compiled in at all.
@@ -2744,7 +2792,7 @@ mod tests {
         // against a rename and against each other and against NOTHING a
         // consumer could read.
         let mut failures: Vec<String> = Vec::new();
-        let live: [(&str, &str, Vec<&'static str>); 15] = [
+        let live: [(&str, &str, Vec<&'static str>); 16] = [
             // R2457 (open-debt item 702) — WHY a keyexpr reference did not
             // resolve. A key a consumer switches on precisely because the two
             // words send it to different places: `no_session` says the
@@ -2794,6 +2842,15 @@ mod tests {
             (rev::FIELDS, "under", RefusedUnder::names()),
             (rev::FIELDS, "wrong", Misbound::names()),
             (rev::FIELDS, "offset_space", crate::AnchorSpace::names()),
+            // ZA-3214 ④ — the selector door's per-row verdict. It wrote these
+            // four words from R2766 on with no family declaring them, so a
+            // consumer's switch had no revision to pin and nothing here to
+            // break when a fifth word arrived.
+            (
+                rev::FIELDS,
+                "selected",
+                crate::fields_json::RowVerdict::names(),
+            ),
             (
                 rev::FIELDS,
                 "direction",
