@@ -1159,8 +1159,7 @@ where
 pub fn spawn_router_mcast_egress(
     group: impl Into<core::net::IpAddr>,
     port: u16,
-    zid: Vec<u8>,
-    qos: bool,
+    profile: RouterGroupProfile,
     opts: crate::McastGroupOptions,
     node_stats: Option<crate::node_stats::NodeStats>,
 ) -> (MulticastTxProducer, McastFaceStop) {
@@ -1181,7 +1180,7 @@ pub fn spawn_router_mcast_egress(
     let stop = spawn_group_face(
         WzRuntime::Tx.handle(),
         "router multicast egress",
-        router_group_params(zid, qos),
+        router_group_params(profile),
         opts,
         node_stats,
         // No host reads this face's members: the egress helper hands back only
@@ -1216,9 +1215,9 @@ pub fn spawn_router_mcast_egress(
 /// 2-channel.
 #[cfg(all(feature = "transport-multicast", feature = "transport-link-udp"))]
 fn router_group_params(
-    zid: Vec<u8>,
-    qos: bool,
+    profile: RouterGroupProfile,
 ) -> wz_session_core::multicast_params::MulticastParams {
+    let RouterGroupProfile { zid, qos, tx_queue } = profile;
     wz_session_core::multicast_params::MulticastParams {
         version: 0x09,
         whatami: wz_session_core::WhatAmI::Router,
@@ -1229,8 +1228,29 @@ fn router_group_params(
         req_id_res: 0x02,
         batch_size: 2_048,
         is_qos: qos,
-        tx_queue: wz_session_core::session_init_params::TxQueueConf::default(),
+        tx_queue,
     }
+}
+
+/// R2937 — what a router's group face takes from the node's configuration.
+///
+/// `qos` is the group's per-priority offer, `transport.multicast.qos.enabled`
+/// (see [`router_group_params`] for why it is not the unicast knob).
+/// `tx_queue` is the operator's `transport/link/tx/queue` block, the SAME one
+/// the node's unicast sessions take: upstream keeps one set of queue sizes and
+/// congestion waits in its transport manager and builds a multicast link's
+/// pipeline from it as it builds a unicast one's
+/// (`io/zenoh-transport/src/multicast/link.rs` @ `let tpc = TransmissionPipelineConf {`).
+/// Before this round the faces took the defaults whatever the operator set.
+#[cfg(all(feature = "transport-multicast", feature = "transport-link-udp"))]
+#[derive(Debug, Clone)]
+pub struct RouterGroupProfile {
+    /// The router's zid, which its beacon carries and its RX gate drops.
+    pub zid: Vec<u8>,
+    /// Whether the group offers per-priority conduits.
+    pub qos: bool,
+    /// The node's transmission queue: lane sizes and congestion waits.
+    pub tx_queue: wz_session_core::session_init_params::TxQueueConf,
 }
 
 /// The future a group face's bind returns, borrowing the face's options.
@@ -1865,8 +1885,7 @@ pub struct RouterMcastGroup {
 pub fn spawn_router_mcast_group(
     group: impl Into<core::net::IpAddr>,
     port: u16,
-    zid: Vec<u8>,
-    qos: bool,
+    profile: RouterGroupProfile,
     opts: crate::McastGroupOptions,
     node_stats: Option<crate::node_stats::NodeStats>,
 ) -> RouterMcastGroup {
@@ -1884,7 +1903,7 @@ pub fn spawn_router_mcast_group(
     let stop = spawn_group_face(
         WzRuntime::Rx.handle(),
         "router multicast group",
-        router_group_params(zid, qos),
+        router_group_params(profile),
         opts,
         node_stats,
         Some(membership.clone()),
@@ -2160,6 +2179,32 @@ mod tests {
             // tick, advancing the loop to its iteration budget.
             core::future::pending().await
         }
+    }
+
+    /// R2937 — a router's group face builds its pipeline from the operator's
+    /// transmission queue, lane sizes and both congestion waits, as upstream's
+    /// multicast link builds its pipeline from the transport manager's one
+    /// configuration. Every field differs from the default, so a face that
+    /// took the defaults cannot pass.
+    #[cfg(all(feature = "transport-multicast", feature = "transport-link-udp"))]
+    #[test]
+    fn a_router_group_face_takes_the_operators_transmission_queue() {
+        use wz_session_core::session_init_params::TxQueueConf;
+        let operator = TxQueueConf {
+            sizes: [3; wz_session_core::qos::Priority::NUM],
+            wait_before_drop_us: 7,
+            max_wait_before_drop_fragments_us: 13,
+            wait_before_close_us: 11,
+        };
+        assert_ne!(operator, TxQueueConf::default());
+        let group = router_group_params(RouterGroupProfile {
+            zid: vec![0x0A],
+            qos: true,
+            tx_queue: operator,
+        });
+        assert_eq!(group.tx_queue, operator);
+        assert!(group.is_qos);
+        assert_eq!(group.zid, [0x0A]);
     }
 
     /// R2376 — a LOST group face is worth re-joining, and the wait grows.

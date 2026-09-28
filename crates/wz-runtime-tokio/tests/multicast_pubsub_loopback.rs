@@ -61,6 +61,16 @@ const PORT: u16 = 7449;
 const KEYEXPR: &str = "demo/mc/e2e";
 const PAYLOAD: &[u8] = b"pub-over-multicast";
 
+/// A router group face's profile for these witnesses: no per-priority offer
+/// (the pico-faithful two-channel group) and the default transmission queue.
+fn router_profile(zid: Vec<u8>) -> wz_runtime_tokio::multicast_glue::RouterGroupProfile {
+    wz_runtime_tokio::multicast_glue::RouterGroupProfile {
+        zid,
+        qos: false,
+        tx_queue: wz_session_core::session_init_params::TxQueueConf::default(),
+    }
+}
+
 fn mc_params(zid_byte: u8) -> MulticastParams {
     MulticastParams {
         version: 0x09,
@@ -774,8 +784,7 @@ async fn router_egress_helper_reaches_group_subscriber() {
     let (tx, mcast_stop) = spawn_router_mcast_egress(
         GROUP,
         HELPER_PORT,
-        vec![0xAA; 4],
-        false,
+        router_profile(vec![0xAA; 4]),
         McastGroupOptions::default(),
         None,
     );
@@ -1137,8 +1146,7 @@ async fn a_router_group_face_is_one_member_from_one_source_address() {
     let face = spawn_router_mcast_group(
         GROUP,
         FACE_PORT,
-        router_zid.clone(),
-        false,
+        router_profile(router_zid.clone()),
         McastGroupOptions::default(),
         None,
     );
@@ -1209,8 +1217,7 @@ async fn a_router_group_face_receives_what_a_member_publishes() {
     let mut face = spawn_router_mcast_group(
         GROUP,
         FACE_PORT,
-        vec![0xAD; 4],
-        false,
+        router_profile(vec![0xAD; 4]),
         McastGroupOptions::default(),
         None,
     );
@@ -1300,8 +1307,7 @@ async fn a_router_group_face_counts_its_traffic_in_the_node_registry() {
     let mut face = spawn_router_mcast_group(
         GROUP,
         FACE_PORT,
-        router_zid,
-        false,
+        router_profile(router_zid),
         McastGroupOptions::default(),
         Some(node.clone()),
     );
