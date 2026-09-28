@@ -599,7 +599,7 @@ pub struct DatagramDissection {
     /// merges on it. This is deliberately not done here: the merge belongs to
     /// whoever is presenting, and doing it eagerly would force an ordering on
     /// a consumer that may want the two separated.
-    pub scouting: Vec<ScoutingDatagram>,
+    pub scouting: ScoutingList,
     /// R311y651 (§4.4) — the index of the last packet seen on this flow, which
     /// is what makes "least recently active" answerable here as it already was
     /// for a stream flow.
@@ -997,7 +997,7 @@ impl DatagramDissection {
             flow,
             session: new_session(window_ms),
             frames: messages::MessageList::new(),
-            scouting: Vec::new(),
+            scouting: ScoutingList::default(),
             last_activity: 0,
             quic: None,
             residue: ByteResidue::default(),
@@ -1121,6 +1121,82 @@ pub struct ScoutingDatagram {
     pub packet_index: usize,
     /// What the bytes decoded to, or why they did not.
     pub frame: Result<ScoutingFrame, InboundParseError>,
+    /// ZA-3214 ② — the observation instant, off the SAME clock a transport
+    /// frame of this flow is stamped from (`PassiveSession::observed_at`), so a
+    /// consumer merging the two lists on time compares one clock with itself.
+    /// `None` for a source with no clock, exactly as for a frame.
+    pub observed_at_ms: Option<u64>,
+    /// ZA-3214 ② — the datagram payload's length in bytes. A scouting message
+    /// is never batched, so the payload IS its framing unit; the record door
+    /// reports it as the unit length, as it does for a transport datagram.
+    pub unit_len: usize,
+}
+
+/// ZA-3214 ② — a flow's scouting messages, with the count EVER produced.
+///
+/// # Why a type and not the `Vec` it was
+///
+/// The record door drains lists incrementally, and its watermark is a produced
+/// index: `produced - len` is the produced-index of the oldest message still
+/// held. The scouting list is trimmed from the FRONT by the per-flow message
+/// ceiling, so a `Vec`'s length is not a watermark — every trim renumbers every
+/// position behind it and a drain would skip or repeat. This is the argument
+/// `wz_session_core::passive_messages::MessageList` makes for the transport
+/// list, and the answer is the same: growth and removal each get ONE door, and
+/// the counter is maintained by those doors and nothing else.
+///
+/// Not `MessageList` itself: that list's removal hands back a receipt that folds
+/// a discarded frame into the census's dropped-frame tallies, and a scouting
+/// message has no such tally to join — its loss is `drops.scouting`, counted by
+/// the caller of [`Self::discard_oldest`].
+///
+/// Read through [`Deref`](core::ops::Deref) as a slice, which is what every
+/// reader of the old `Vec` did.
+#[derive(Debug, Default)]
+pub struct ScoutingList {
+    held: alloc::collections::VecDeque<ScoutingDatagram>,
+    produced: u64,
+}
+
+impl ScoutingList {
+    /// Append one scouting message.
+    pub fn push(&mut self, datagram: ScoutingDatagram) {
+        self.held.push_back(datagram);
+        self.held.make_contiguous();
+        self.produced += 1;
+    }
+
+    /// Remove the oldest message; `false` when there was none. `produced` is
+    /// untouched, which is what keeps a drain's watermark meaningful.
+    pub fn discard_oldest(&mut self) -> bool {
+        let removed = self.held.pop_front().is_some();
+        self.held.make_contiguous();
+        removed
+    }
+
+    /// Messages EVER appended, a different number from `len` once the ceiling
+    /// bites. See the type doc.
+    pub fn produced(&self) -> u64 {
+        self.produced
+    }
+}
+
+impl core::ops::Deref for ScoutingList {
+    type Target = [ScoutingDatagram];
+
+    fn deref(&self) -> &[ScoutingDatagram] {
+        // Contiguous after every mutation, so the first slice is all of it.
+        self.held.as_slices().0
+    }
+}
+
+impl<'a> IntoIterator for &'a ScoutingList {
+    type Item = &'a ScoutingDatagram;
+    type IntoIter = core::slice::Iter<'a, ScoutingDatagram>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        (**self).iter()
+    }
 }
 
 /// R311y607 — does this datagram belong to the SCOUTING namespace?
@@ -5564,6 +5640,10 @@ impl Dissection {
                 direction,
                 packet_index: d.packet_index,
                 frame: parse_scouting(&d.payload),
+                // The clock was advanced for this datagram above, before the
+                // flow borrow; a transport frame on this flow reads the same.
+                observed_at_ms: flow.session.observed_at(),
+                unit_len: d.payload.len(),
             });
             // R311y651 (§4.4) — bounded by the SAME limit the frame list is,
             // because it answers the same question — how many decoded messages
@@ -5644,8 +5724,9 @@ impl Dissection {
             let flow = &mut self.datagram_flows[idx];
             match which {
                 1 => {
-                    flow.scouting.remove(0);
-                    self.drops.scouting += 1;
+                    if flow.scouting.discard_oldest() {
+                        self.drops.scouting += 1;
+                    }
                 }
                 2 => {
                     let Some(receipt) = flow.quic_datagrams.discard_oldest() else {

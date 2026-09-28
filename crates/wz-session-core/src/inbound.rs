@@ -441,6 +441,9 @@ impl InboundFrame {
             // added without a consumer's switch falling through to this one.
             #[cfg(feature = "codec-frame")]
             InboundFrame::Network { .. } => 9,
+            // ZA-3214 ② — 10 and 11 are TAKEN, by the scouting namespace's
+            // Scout and Hello (`ScoutingFrame::kind_code`): the two share one
+            // published kind space, so the next transport arm here is 12.
             InboundFrame::Unknown { .. } => 255,
         }
     }

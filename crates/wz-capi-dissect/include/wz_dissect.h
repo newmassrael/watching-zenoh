@@ -1544,6 +1544,16 @@ typedef struct wz_dissect_live wz_dissect_live;
 #define WZ_DISSECT_KIND_OAM 8
 /* Bare network envelope on a negotiated lowlatency link; no Frame or SN. */
 #define WZ_DISSECT_KIND_NETWORK 9
+/* ZA-3214 -- the SCOUTING namespace's two messages, on records whose origin
+ * is WZ_DISSECT_ORIGIN_SCOUTING. They share this one kind space rather than
+ * starting their own at 1, because a consumer switches on `kind` alone and a
+ * Scout numbered 1 would land on its Init case: the wire bytes are 0x01 in
+ * both namespaces, and which one is meant is exactly what the numbers must
+ * not leave to the switch. UNKNOWN (255) on a scouting record is a MID this
+ * build does not know in that namespace; UNDECODABLE (0) is the same failure
+ * it is everywhere. The next transport kind takes 12. */
+#define WZ_DISSECT_KIND_SCOUT 10
+#define WZ_DISSECT_KIND_HELLO 11
 #define WZ_DISSECT_KIND_UNKNOWN 255
 
 /* wz_dissect_record.origin — which of a flow's message lists this came
@@ -1563,6 +1573,19 @@ typedef struct wz_dissect_live wz_dissect_live;
 #define WZ_DISSECT_ORIGIN_QUIC_STREAM 3
 #define WZ_DISSECT_ORIGIN_QUIC_DATAGRAM 4
 #define WZ_DISSECT_ORIGIN_SERIAL 5
+/* ZA-3214 -- a datagram flow's SCOUTING list: Scout and Hello, the messages
+ * sent BEFORE any session. wz_dissect_live_drain hands them out after every
+ * other list, under the same watermark rule, on the datagram flow's flow_id
+ * and a list_id of their own. `anchor` is the packet index
+ * (WZ_DISSECT_ANCHOR_PACKET), the unit is the whole datagram so batch_index
+ * and unit_offset are 0, `flags` is 0 because every flag is a verdict about a
+ * session, and `kind` is WZ_DISSECT_KIND_SCOUT / _HELLO / _UNKNOWN /
+ * _UNDECODABLE. wz_dissect_live_message_bytes answers
+ * WZ_DISSECT_ERR_NO_BYTE_SOURCE for them, as it does for any datagram: the
+ * bytes are the packet you pushed. A build whose header predates this value
+ * groups these records under "another list of this flow", as the policy above
+ * says -- which is what they are. */
+#define WZ_DISSECT_ORIGIN_SCOUTING 6
 
 /* wz_dissect_record.anchor_space — how to read `anchor`. They are small
  * numbers either way and cannot be told apart by looking, which is why the

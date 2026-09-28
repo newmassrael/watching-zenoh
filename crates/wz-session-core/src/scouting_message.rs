@@ -204,6 +204,31 @@ impl ScoutingFrame {
             ScoutingFrame::Unknown { .. } => "Unknown",
         }
     }
+
+    /// ZA-3214 ② — the number a record's `kind` carries for this message,
+    /// in the ONE kind space `InboundFrame::kind_code` publishes.
+    ///
+    /// One space and not a second one starting at 1: a consumer switches on
+    /// `kind` alone, and a Scout numbered 1 would land on its Init case. So the
+    /// scouting kinds take the next numbers after the transport's (10 and 11),
+    /// `Unknown` shares 255 because it is the same fact — a MID this build does
+    /// not know — and `0` stays the caller's, for bytes that did not decode.
+    /// The record's `origin` still says which list, but the kind does not lean
+    /// on it. A transport kind added later takes 12, and `InboundFrame::kind_code`
+    /// says so beside its own arms.
+    ///
+    /// Adjacent to [`Self::kind_name`] for the reason `InboundFrame::kind_code`
+    /// sits beside its name: the arms share the variants' `#[cfg]`s, so a
+    /// variant added here fails this match rather than taking a default.
+    pub fn kind_code(&self) -> u8 {
+        match self {
+            #[cfg(feature = "codec-scout")]
+            ScoutingFrame::Scout { .. } => 10,
+            #[cfg(feature = "codec-hello")]
+            ScoutingFrame::Hello { .. } => 11,
+            ScoutingFrame::Unknown { .. } => 255,
+        }
+    }
 }
 
 #[cfg(test)]

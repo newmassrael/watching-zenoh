@@ -62,9 +62,19 @@ use std::collections::{BTreeMap, BTreeSet};
 use wz_capture::link::FlowKey;
 use wz_capture::{
     AnchorSpace, CaptureCursor, CaptureError, Dissection, DissectionLimits, FollowError,
-    MessageListOrigin,
+    MessageListOrigin, ScoutingDatagram,
 };
 use wz_session_core::passive::{Direction, PassiveFrame};
+
+/// ZA-3214 ② — the `origin` a SCOUTING record carries.
+///
+/// Not a `MessageListOrigin` code, because the scouting list is not one of that
+/// enumeration's lists: it is a flow's pre-session list, walked by nothing that
+/// walks `Dissection::message_lists_with_origin`, and adding it there would
+/// hand Scout and Hello to every census plane that folds transport messages.
+/// So this door names it itself, as the next number after the five that
+/// [`origin_code`] assigns.
+pub const ORIGIN_SCOUTING: u8 = 6;
 
 /// R2102 — a message this reader could not decode. Not a variant of
 /// `InboundFrame` at all — the failure lives in the `Result` around it — so its
@@ -229,6 +239,11 @@ struct Mark {
 pub struct LiveDissection {
     dissection: Dissection,
     marks: BTreeMap<(FlowKey, MessageListOrigin), Mark>,
+    /// ZA-3214 ② — the same watermarks, for each datagram flow's SCOUTING
+    /// list. A map of its own because that list is not in the enumeration the
+    /// map above is keyed by (see [`ORIGIN_SCOUTING`]); the bookkeeping is the
+    /// same function, [`advance`].
+    scouting_marks: BTreeMap<FlowKey, Mark>,
     flow_ids: BTreeMap<(FlowKey, u8), u64>,
     /// ONE counter behind BOTH [`WzDissectRecord::flow_id`] and
     /// [`WzDissectRecord::list_id`], so the two are never the same number by
@@ -360,6 +375,7 @@ impl LiveDissection {
         Self {
             dissection,
             marks: BTreeMap::new(),
+            scouting_marks: BTreeMap::new(),
             flow_ids: BTreeMap::new(),
             next_id: 0,
             lost: 0,
@@ -431,6 +447,7 @@ impl LiveDissection {
         let Self {
             dissection,
             marks,
+            scouting_marks,
             flow_ids,
             next_id,
             lost,
@@ -445,47 +462,8 @@ impl LiveDissection {
             present.insert(key);
 
             let produced = list.produced();
-            let held = list.len() as u64;
-            // The produced-index of the OLDEST message still in the list.
-            // Everything below it has been trimmed away.
-            let first_held = produced - held;
-
-            let mark = marks.entry(key).or_insert_with(|| {
-                let id = *next_id;
-                *next_id += 1;
-                Mark {
-                    drained: 0,
-                    seen: 0,
-                    list_id: id,
-                }
-            });
-
-            // A `produced` that went BACKWARDS is not this list any more: the
-            // flow was evicted and another opened under the same key, so the
-            // successor's counter starts again. What the predecessor still
-            // owed is owed by nobody now.
-            //
-            // The COORDINATE SPACE restarts with it, so the successor gets a
-            // fresh `list_id`. Inheriting the predecessor's would tell a
-            // consumer that byte 0 of a new stream is comparable with byte 0 of
-            // one that has gone, which is the merge this field exists to stop.
-            if produced < mark.seen {
-                *lost += mark.seen - mark.drained;
-                mark.drained = 0;
-                mark.seen = 0;
-                mark.list_id = *next_id;
-                *next_id += 1;
-            }
-
-            // Messages a ceiling discarded before this consumer reached them.
-            // Counted, then stepped over -- they are not in the list to hand
-            // out, and pretending the watermark is still valid would make the
-            // NEXT record come out under the wrong produced-index.
-            if mark.drained < first_held {
-                *lost += first_held - mark.drained;
-                mark.drained = first_held;
-            }
-            mark.seen = produced;
+            let mark = marks.entry(key).or_insert_with(|| fresh_mark(next_id));
+            let first_held = advance(mark, produced, list.len() as u64, next_id, lost);
 
             let list_id = mark.list_id;
             let flow_id = *flow_ids
@@ -509,6 +487,54 @@ impl LiveDissection {
         // size of the live table rather than of every flow ever seen.
         marks.retain(|key, mark| {
             if present.contains(key) {
+                return true;
+            }
+            *lost += mark.seen - mark.drained;
+            false
+        });
+
+        // ZA-3214 ② — THE SCOUTING LISTS, after every message list, under the
+        // same watermark rule. Before this a discovery capture drained to
+        // nothing: R2629 put Scout and Hello on the field document's rows, and
+        // a consumer whose message list stands on these records had no row to
+        // stand them on.
+        //
+        // A flow whose scouting list has never produced anything mints no id —
+        // most datagram flows are sessions and would otherwise burn a
+        // coordinate space each on a list that stays empty. A flow that HAS a
+        // mark is always walked, so a list emptied by eviction is still
+        // reconciled.
+        let mut scouting_present: BTreeSet<FlowKey> = BTreeSet::new();
+        for flow in dissection.datagram_flows() {
+            let list = &flow.scouting;
+            let produced = list.produced();
+            if produced == 0 && !scouting_marks.contains_key(&flow.flow) {
+                continue;
+            }
+            scouting_present.insert(flow.flow);
+            let mark = scouting_marks
+                .entry(flow.flow)
+                .or_insert_with(|| fresh_mark(next_id));
+            let first_held = advance(mark, produced, list.len() as u64, next_id, lost);
+            let list_id = mark.list_id;
+            // The datagram table's flow id: a scouting list is one more list
+            // of the same UDP conversation, as the QUIC lists are.
+            let flow_id = *flow_ids
+                .entry((flow.flow, flow_table(MessageListOrigin::Datagram)))
+                .or_insert_with(|| {
+                    let id = *next_id;
+                    *next_id += 1;
+                    id
+                });
+            while mark.drained < produced && written < out.len() {
+                let idx = (mark.drained - first_held) as usize;
+                out[written] = record_of_scouting(&list[idx], flow_id, list_id);
+                written += 1;
+                mark.drained += 1;
+            }
+        }
+        scouting_marks.retain(|key, mark| {
+            if scouting_present.contains(key) {
                 return true;
             }
             *lost += mark.seen - mark.drained;
@@ -563,6 +589,20 @@ impl LiveDissection {
                 ))
             }
         };
+        // ZA-3214 ② — a SCOUTING record's bytes are a whole datagram the
+        // caller pushed, which is exactly the answer a transport datagram's
+        // record gets: this reader keeps no copy of a pushed packet. Said as
+        // that, rather than as "no list carries this id", which would read as
+        // a stale record.
+        if self
+            .scouting_marks
+            .values()
+            .any(|mark| mark.list_id == record.list_id)
+        {
+            return wz_capture::MessageBytes::NoSource(
+                wz_capture::NoByteSource::CallerHoldsThePacket,
+            );
+        }
         let Some((&(flow, origin), _)) = self
             .marks
             .iter()
@@ -726,5 +766,91 @@ fn record_of(
             Err(_) => KIND_UNDECODABLE,
         },
         flags,
+    }
+}
+
+/// A watermark for a list this handle has not tracked before, on the shared
+/// id counter.
+fn fresh_mark(next_id: &mut u64) -> Mark {
+    let id = *next_id;
+    *next_id += 1;
+    Mark {
+        drained: 0,
+        seen: 0,
+        list_id: id,
+    }
+}
+
+/// Bring one list's watermark up to what the list now holds, and return the
+/// produced-index of the OLDEST message still in it.
+///
+/// ZA-3214 ② — ONE function for both kinds of list. It was the body of the
+/// message-list loop in [`LiveDissection::drain`]; the scouting lists need the
+/// same three rules, and a second copy of them is the copy that drifts.
+fn advance(mark: &mut Mark, produced: u64, held: u64, next_id: &mut u64, lost: &mut u64) -> u64 {
+    // Everything below this produced-index has been trimmed away.
+    let first_held = produced - held;
+
+    // A `produced` that went BACKWARDS is not this list any more: the flow was
+    // evicted and another opened under the same key, so the successor's
+    // counter starts again. What the predecessor still owed is owed by nobody
+    // now.
+    //
+    // The COORDINATE SPACE restarts with it, so the successor gets a fresh
+    // `list_id`. Inheriting the predecessor's would tell a consumer that byte 0
+    // of a new stream is comparable with byte 0 of one that has gone, which is
+    // the merge this field exists to stop.
+    if produced < mark.seen {
+        *lost += mark.seen - mark.drained;
+        mark.drained = 0;
+        mark.seen = 0;
+        mark.list_id = *next_id;
+        *next_id += 1;
+    }
+
+    // Messages a ceiling discarded before this consumer reached them. Counted,
+    // then stepped over -- they are not in the list to hand out, and pretending
+    // the watermark is still valid would make the NEXT record come out under
+    // the wrong produced-index.
+    if mark.drained < first_held {
+        *lost += first_held - mark.drained;
+        mark.drained = first_held;
+    }
+    mark.seen = produced;
+    first_held
+}
+
+/// ZA-3214 ② — one scouting message, projected into the SAME record.
+///
+/// Every field keeps the meaning it has for a transport datagram, because a
+/// consumer reads them by one rule: the anchor is the packet index
+/// (`WZ_DISSECT_ANCHOR_PACKET`), the unit is the whole datagram — a scouting
+/// message is never batched, so `batch_index` and `unit_offset` are zero — and
+/// the kind is `ScoutingFrame::kind_code`, in the one kind space. `flags` is
+/// zero: each flag is a verdict about a SESSION (a negotiated batch, a link's
+/// admissible messages, a resync of framing), and a scouting message has none.
+fn record_of_scouting(datagram: &ScoutingDatagram, flow_id: u64, list_id: u64) -> WzDissectRecord {
+    WzDissectRecord {
+        ts_ns: match datagram.observed_at_ms {
+            Some(ms) => ms.saturating_mul(1_000_000),
+            None => NO_TIMESTAMP,
+        },
+        flow_id,
+        list_id,
+        anchor: datagram.packet_index as u64,
+        unit_len: datagram.unit_len as u64,
+        batch_index: 0,
+        unit_offset: 0,
+        direction: match datagram.direction {
+            Direction::A => 0,
+            Direction::B => 1,
+        },
+        anchor_space: 0,
+        origin: ORIGIN_SCOUTING,
+        kind: match &datagram.frame {
+            Ok(f) => f.kind_code(),
+            Err(_) => KIND_UNDECODABLE,
+        },
+        flags: 0,
     }
 }

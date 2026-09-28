@@ -6410,6 +6410,173 @@ mod tests {
         unsafe { wz_dissect_live_close(handle) };
     }
 
+    /// A multicast SCOUT from `asker`, zenoh's IPv4 scouting group and port.
+    fn scout_to_group(asker: [u8; 4], asker_port: u16) -> Vec<u8> {
+        let mut scout = wz_codecs::scout::Scout::new();
+        scout.version = 0x09;
+        scout.set_what(0x03);
+        scout.set_i(true);
+        scout.set_zid_len_m1(3);
+        scout.zid = Some(&[0x11, 0x22, 0x33, 0x44]);
+        let mut wire = vec![wz_session_core::wire_const::S_MID_SCOUT];
+        wire.extend_from_slice(&scout.encode_to_vec());
+        udp_packet(asker, asker_port, [224, 0, 0, 224], 7446, &wire)
+    }
+
+    /// A HELLO from `responder` back to the endpoint that scouted — unicast,
+    /// which is how zenoh answers (`orchestrator.rs` `send_to(.., peer)`).
+    fn hello_to(responder: [u8; 4], asker: [u8; 4], asker_port: u16) -> Vec<u8> {
+        let hello = wz_codecs::hello::Hello {
+            version: 0x09,
+            cbyte: (3 << 4) | 0x01,
+            zid: &[0x55, 0x66, 0x77, 0x88],
+            num_locators: None,
+            locators: None,
+        };
+        let mut wire = vec![wz_session_core::wire_const::S_MID_HELLO];
+        wire.extend_from_slice(&hello.encode_to_vec(0));
+        udp_packet(responder, 7447, asker, asker_port, &wire)
+    }
+
+    /// The value `#define name` carries in the published header.
+    fn header_define(name: &str) -> u8 {
+        const HEADER: &str = include_str!("../include/wz_dissect.h");
+        let prefix = format!("#define {name} ");
+        HEADER
+            .lines()
+            .find_map(|l| l.strip_prefix(prefix.as_str()))
+            .unwrap_or_else(|| panic!("the header defines no {name}"))
+            .trim()
+            .parse()
+            .unwrap_or_else(|_| panic!("{name} is not a small integer"))
+    }
+
+    /// ZA-3214 ② — A DISCOVERY EXCHANGE DRAINS AS RECORDS.
+    ///
+    /// Before this the scouting list was walked by the field document alone
+    /// (R2629), so a consumer whose message list stands on these records drew
+    /// a scout-and-hello capture as an empty link. Held here THROUGH THE ABI:
+    /// the origin and both kinds as the header defines them, the anchor as the
+    /// push ordinal, the clock off the caller's reading, and the byte door's
+    /// refusal by name.
+    #[test]
+    fn a_scout_and_its_hello_drain_as_scouting_records() {
+        let handle = open_live(WZ_DISSECT_LIMITS_NONE).expect("the preset opens");
+        let asker = [192, 168, 1, 5];
+        let scout = scout_to_group(asker, 43210);
+        push_live(handle, 5_000_000, &scout);
+        push_live(handle, 6_000_000, &hello_to([192, 168, 1, 9], asker, 43210));
+
+        let records = drain_live(handle, 16);
+        assert_eq!(
+            records.len(),
+            2,
+            "one record per scouting message: {records:?}"
+        );
+        let origin = header_define("WZ_DISSECT_ORIGIN_SCOUTING");
+        assert_eq!(origin, live::ORIGIN_SCOUTING);
+        let kinds = [
+            header_define("WZ_DISSECT_KIND_SCOUT"),
+            header_define("WZ_DISSECT_KIND_HELLO"),
+        ];
+        for (i, r) in records.iter().enumerate() {
+            assert_eq!(r.origin, origin, "record {i} is on the scouting list");
+            assert_eq!(r.kind, kinds[i], "record {i}'s kind");
+            assert_eq!(r.anchor, i as u64, "the push ordinal IS the anchor");
+            assert_eq!(r.anchor_space, 0, "a packet index");
+            assert_eq!(
+                r.ts_ns,
+                (i as u64 + 5) * 1_000_000,
+                "the caller's clock, as a transport datagram carries it"
+            );
+            assert_eq!((r.batch_index, r.unit_offset, r.flags), (0, 0, 0));
+            assert_eq!(
+                live_bytes(handle, r),
+                Err(WZ_DISSECT_ERR_NO_BYTE_SOURCE),
+                "a scouting record's bytes are the packet the caller pushed"
+            );
+        }
+        // The UDP length field (Ethernet 14 + IPv4 20 + 4) less its own 8-byte
+        // header: the datagram payload, not the padded Ethernet frame.
+        let udp_len = u16::from_be_bytes([scout[38], scout[39]]) as u64;
+        assert_eq!(
+            records[0].unit_len,
+            udp_len - 8,
+            "the unit is the datagram payload"
+        );
+        assert_ne!(
+            records[0].flow_id, records[1].flow_id,
+            "the question and the answer are two conversations"
+        );
+        assert_ne!(records[0].list_id, records[1].list_id);
+
+        assert!(
+            drain_live(handle, 16).is_empty(),
+            "a drained scouting message must not come back"
+        );
+        assert_eq!(unsafe { wz_dissect_live_lost(handle) }, 0);
+        unsafe { wz_dissect_live_close(handle) };
+    }
+
+    /// ZA-3214 ② — THE WATERMARK SURVIVES A TRIM, which is the reason the
+    /// scouting list gained a produced counter before it could be drained.
+    ///
+    /// Three scouts under a ceiling of two: the oldest is discarded before the
+    /// consumer looks, so the drain must hand out the two held ones under
+    /// their OWN anchors and report exactly one lost. A watermark stated as a
+    /// length would have been renumbered by the trim and handed out the wrong
+    /// message or none.
+    #[test]
+    fn a_trimmed_scouting_list_drains_what_it_holds_and_counts_the_rest_lost() {
+        let mut handle = live::LiveDissection::new(wz_capture::DissectionLimits {
+            frames_per_flow: Some(2),
+            ..wz_capture::DissectionLimits::default()
+        });
+        let scout = scout_to_group([192, 168, 1, 5], 43210);
+        for i in 0..3u64 {
+            handle.push(LINKTYPE_ETHERNET, i * 1_000_000, &scout);
+        }
+        let blank = WzDissectRecord {
+            ts_ns: 0,
+            flow_id: 0,
+            list_id: 0,
+            anchor: 0,
+            unit_len: 0,
+            batch_index: 0,
+            unit_offset: 0,
+            direction: 0,
+            anchor_space: 0,
+            origin: 0,
+            kind: 0,
+            flags: 0,
+        };
+        let mut buffer = [blank; 8];
+        let n = handle.drain(&mut buffer);
+        assert_eq!(
+            buffer[..n].iter().map(|r| r.anchor).collect::<Vec<_>>(),
+            vec![1, 2],
+            "the two held scouts, under their own packet indices"
+        );
+        assert_eq!(
+            handle.lost(),
+            1,
+            "the trimmed one is reported, not swallowed"
+        );
+
+        handle.push(LINKTYPE_ETHERNET, 3_000_000, &scout);
+        let n = handle.drain(&mut buffer);
+        assert_eq!(
+            buffer[..n].iter().map(|r| r.anchor).collect::<Vec<_>>(),
+            vec![3],
+            "after a further trim, only the new scout comes out"
+        );
+        assert_eq!(
+            handle.lost(),
+            1,
+            "a trim of an already-drained scout loses nothing"
+        );
+    }
+
     /// R2102 — A BUFFER SMALLER THAN THE BACKLOG TAKES A PREFIX, AND THE REST
     /// STAY.
     ///
