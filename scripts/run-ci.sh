@@ -16851,6 +16851,15 @@ layer_z_zenohd_interop() {
     _runci_guarded_test Z 2 env WZ_ZENOHD_BIN="$zenohd" cargo test -p wz-capi-c \
         --test config_verdict_zenohd_interop -- --ignored --quiet --test-threads=1 \
         || return 1
+    # R2948 (F) — a wz-capi-c session RE-DIALS a lost link to a real zenohd.
+    # One leg: two client sessions (subscriber, publisher) through a zenohd that
+    # is killed and restarted on the same port; a put arrives before AND after,
+    # with no reopen by the test, so both sessions re-dialled and the
+    # subscription was declared again to the fresh router. In this crate for
+    # the reason the leg above gives. MEASURED: 1 passed against zenohd 1.10.0.
+    _runci_guarded_test Z 1 env WZ_ZENOHD_BIN="$zenohd" cargo test -p wz-capi-c \
+        --test redial_zenohd_interop -- --ignored --quiet --test-threads=1 \
+        || return 1
     # The READ direction, which is the one that bears on replacement: an operator
     # standing wz up in place of a zenoh node already HAS the config file, and
     # until R311y842 it was an input to nothing. Four legs: the differential
