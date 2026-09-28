@@ -595,7 +595,16 @@ ROOTLESS_STALE_LINE_BUDGET = 1
 # its root.
 # 648 -> 626 (R2934): the RouteTable engine's modules, deleted by `c867f7b8`,
 # carried these root-less occurrences; that commit did not lower the budget.
-ROOTLESS_UNDECLARED_BUDGET = 626
+# 626 -> 621 (R2944): measured, not derived. `55fa9e49` (R2943's landed tip)
+# already measured 625 — one removal landed with no budget move, the same
+# unpaid shape as `c867f7b8`'s — and R2944 retired four more with the
+# node-wide QoS band's docs (two line citations of zenoh's endpoint metadata
+# constants, one of its priority-range parser with its neighbour) and the
+# locator doc's line citation of the endpoint's priority-range selection, all
+# rewritten with rooted citations or dropped. (Written without the line
+# spellings on purpose: a budget note that repeats them is counted by the
+# scan it budgets.)
+ROOTLESS_UNDECLARED_BUDGET = 621
 #: EVERY root-less occurrence, graded or not: `rootless_line + rootless_bare +
 #: residue`. One ratchet over the union of the three above, and it exists
 #: because those three CANNOT express the invariant that matters.
@@ -671,7 +680,8 @@ ROOTLESS_UNDECLARED_BUDGET = 626
 # R2874 — 774 -> 773, the same R2873 line-form removal as ROOTLESS_LINE_BUDGET.
 # R2894 — 773 -> 772, the same R2892 removal as ROOTLESS_UNDECLARED_BUDGET.
 # R2934 — 772 -> 733, the `c867f7b8` module deletion's line and bare removals.
-ROOTLESS_TOTAL_BUDGET = 733
+# R2944 — 733 -> 728, the same five removals as ROOTLESS_UNDECLARED_BUDGET.
+ROOTLESS_TOTAL_BUDGET = 728
 
 #: A LIVE invocation of the RESOLUTION arm. R2242 split this gate in two and,
 #: in doing so, made `--resolve` a flag someone can simply stop passing: delete
