@@ -114,8 +114,25 @@ PUSH_RE = re.compile(r"exp\.added\.push\s*\(")
 # that knows only the inline form does not merely miss those sites -- measured on
 # this gate's own first run, it walked PAST the named table to an earlier inline
 # one and attributed five flags to the wrong keys. Both forms, or a failure.
-FOR_TABLE_RE = re.compile(r"for\s*\(([^)]*)\)\s*in\s*(\[|[A-Za-z_][A-Za-z0-9_]*)", re.S)
+#
+# R2943 — and a THIRD form: a `const` table, named in this file or by a path
+# into another workspace crate (`wz::runtime_tokio::zenoh_config::…`). R2925's
+# queue-size keys are that shape, and a reader capturing only the first path
+# segment reported the site as having no table at all.
+FOR_TABLE_RE = re.compile(
+    r"for\s*\(([^)]*)\)\s*in\s*(\[|[A-Za-z_][A-Za-z0-9_]*(?:::[A-Za-z_][A-Za-z0-9_]*)*)",
+    re.S,
+)
 LET_RE = r"let\s+%s\s*(?::[^=]*)?=\s*"
+# R2943 — a flag written as an INDEX into a const array of flags, keyed by a
+# loop binding: `TX_QUEUE_SIZE_FLAGS[byte as usize]`.
+INDEXED_FLAG_RE = re.compile(
+    r"([A-Z_][A-Z0-9_]*)\[\s*([a-z_][a-z0-9_]*)(?:\s+as\s+usize)?\s*\]"
+)
+# The facade's re-exports a table path may start with, and the crate each names.
+# The one prefix this gate meets is listed; any other FAILS rather than being
+# guessed, and meeting a new one is the moment to add it here.
+FACADE_CRATES = {"wz::runtime_tokio": "wz-runtime-tokio"}
 
 
 class GateFailure(Exception):
@@ -380,6 +397,47 @@ def resolve_binding(src: str, before: int, name: str) -> str | None:
     return None
 
 
+def resolve_const(src: str, path: str) -> str:
+    """The initializer of a `const` table, from this file or another crate.
+
+    `path` is a bare name (a `const` in `src`) or a facade path such as
+    `wz::runtime_tokio::zenoh_config::TX_QUEUE_SIZE_KEYS`, which is read from
+    that crate's module file. The text returned starts AFTER the `=`, so the
+    `[` of the type (`[(&str, &str, u8); 8]`) cannot be taken for the table's.
+    Anything this cannot find FAILS: a table skipped is an emission uncounted.
+    """
+    *module, name = path.split("::")
+    if module:
+        prefix = "::".join(module[:2])
+        crate = FACADE_CRATES.get(prefix)
+        if crate is None:
+            raise GateFailure(
+                f"flag-precondition: FAIL -- the table `{path}` starts with "
+                f"`{prefix}`, which this reader cannot map to a workspace crate."
+            )
+        base = REPO_ROOT / "crates" / crate / "src" / Path(*module[2:])
+        candidates = [base.with_suffix(".rs"), base / "mod.rs"]
+        found = next((p for p in candidates if p.is_file()), None)
+        if found is None:
+            raise GateFailure(
+                f"flag-precondition: FAIL -- the table `{path}` names a module "
+                f"with no file at {candidates[0]} or {candidates[1]}."
+            )
+        text = found.read_text()
+    else:
+        # The WHOLE file, not `src`: the caller hands the expansion's half (cut
+        # at the first test module), and a `const` is an item that may be
+        # declared below that cut -- `TX_QUEUE_SIZE_FLAGS` is.
+        text = src if re.search(r"const\s+%s\s*:" % re.escape(name), src) else ARGS_RS.read_text()
+    m = re.search(r"const\s+%s\s*:[^=]*=\s*" % re.escape(name), text)
+    if m is None or not text[m.end() :].lstrip().startswith("["):
+        raise GateFailure(
+            f"flag-precondition: FAIL -- no `const {name}` array literal was "
+            f"found for the table `{path}`. The flags it emits would go uncounted."
+        )
+    return text[m.end() :]
+
+
 def resolve_table(src: str, call_at: int, binding: str) -> tuple[list[str], list[list[str]]]:
     """The loop bindings and the rows of the table a site's call sits inside.
 
@@ -405,6 +463,9 @@ def resolve_table(src: str, call_at: int, binding: str) -> tuple[list[str], list
         # every failure is raised rather than searched past.
         if m.group(2) == "[":
             body = balanced(src, m.end() - 1)
+        elif "::" in m.group(2) or resolve_binding(src, m.start(), m.group(2)) is None:
+            init = resolve_const(src, m.group(2))
+            body = balanced(init, init.index("["))
         else:
             init = resolve_binding(src, m.start(), m.group(2))
             if init is None or "[" not in init:
@@ -482,6 +543,38 @@ def emission_sites(src: str) -> list[Site]:
             sites.append(
                 Site(flag_lit, key_lit, guard_text(src, m.start(), guard), m.group(1), m.start())
             )
+            continue
+        indexed = INDEXED_FLAG_RE.fullmatch(args[1].strip())
+        if flag_lit is None and indexed is not None:
+            # R2943 — `FLAGS[byte as usize]` inside `for (key, _, byte) in KEYS`:
+            # each row's flag is the FLAGS element its index column names.
+            flags_init = resolve_const(src, indexed.group(1))
+            flags = [
+                as_literal(f)
+                for f in split_args(balanced(flags_init, flags_init.index("[")))
+            ]
+            names, rows = resolve_table(src, m.start(), indexed.group(2))
+            if "key" not in names:
+                raise GateFailure(
+                    f"flag-precondition: FAIL -- the table behind the "
+                    f"`exp.{m.group(1)}` call at offset {m.start()} binds no `key`."
+                )
+            idx_col, key_col = names.index(indexed.group(2)), names.index("key")
+            for cols in rows:
+                key = as_literal(cols[key_col])
+                try:
+                    flag = flags[int(cols[idx_col].strip())]
+                except (ValueError, IndexError):
+                    flag = None
+                if flag is None or key is None:
+                    raise GateFailure(
+                        "flag-precondition: FAIL -- a row of the table behind "
+                        f"offset {m.start()} does not index a literal flag in "
+                        f"`{indexed.group(1)}` ({cols!r})."
+                    )
+                sites.append(
+                    Site(flag, key, guard_text(src, m.start(), guard), m.group(1), m.start())
+                )
             continue
         if flag_lit is None:
             binding = args[1].strip()
