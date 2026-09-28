@@ -11420,6 +11420,13 @@ layer_c1bz_docs_resolve() {
     # private `PeerPhase` (the topology rewrite reworded that paragraph). The
     # three left are the ones it carried before: `OffsetClock`, and the private
     # `DATA_FRAME_SN` / `FRAG_SN_1`. Read off this lane's own command.
+    # R2935 — wz-runtime-tokio 497 -> 486. R2932 wrote a new bullet into
+    # group.rs's `//!` (`GroupOptions::event_locality`, `Locality::Any`), which
+    # resolves from the crate root because lib.rs also documents `pub mod
+    # group`, so the lane read 499. The error SETS of this lane's command at
+    # c867f7b8 (where 497 was set) and at 66c97cae differ by exactly those two.
+    # Every link in that module doc is now a full path, the eleven older ones
+    # in the same doc included; the same command then read 486.
     budget="
         wz:2
         wz-ap-demo:26
@@ -11430,7 +11437,7 @@ layer_c1bz_docs_resolve() {
         wz-mcu-session-acceptor:3
         wz-routing-graph:5
         wz-runtime-coop:12
-        wz-runtime-tokio:497
+        wz-runtime-tokio:486
         wz-session-core:513
         wz-session-lwip:4
         wz-switchboard-codegen:8

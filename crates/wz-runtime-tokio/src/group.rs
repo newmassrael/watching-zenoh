@@ -5,19 +5,21 @@
 //! membership tasks. The AP-only tokio half over the no_std data + wire
 //! codec in [`wz_session_core::group_membership`].
 //!
-//! The wz mirror of zenoh-ext `group.rs`. A [`Group`] lets a set of peers
-//! form a named group on a shared key namespace and track its live
-//! membership (the "view"):
+//! The wz mirror of zenoh-ext `group.rs`. A [`Group`](crate::group::Group)
+//! lets a set of peers form a named group on a shared key namespace and track
+//! its live membership (the "view"):
 //!
-//! - On [`Group::join`] a member announces itself with a
-//!   [`GroupNetEvent::Join`] (carrying its full [`Member`] record) on the
+//! - On [`Group::join`](crate::group::Group::join) a member announces itself
+//!   with a [`GroupNetEvent::Join`](wz_session_core::group_membership::GroupNetEvent::Join)
+//!   (carrying its full [`Member`](crate::group::Member) record) on the
 //!   group **event key** `zenoh/ext/net/group/<gid>/evt`, then declares a
 //!   subscriber on that key to learn about peers.
 //! - An `Auto`-liveliness member refreshes its lease with periodic
-//!   [`GroupNetEvent::KeepAlive`] beacons (every `lease * refresh_ratio`);
-//!   a watchdog evicts a member whose lease elapses without a refresh and
-//!   emits a [`GroupEvent::LeaseExpired`].
-//! - Each member serves its own [`Member`] record from a per-member
+//!   [`GroupNetEvent::KeepAlive`](wz_session_core::group_membership::GroupNetEvent::KeepAlive)
+//!   beacons (every `lease * refresh_ratio`); a watchdog evicts a member whose
+//!   lease elapses without a refresh and emits a
+//!   [`GroupEvent::LeaseExpired`](crate::group::GroupEvent::LeaseExpired).
+//! - Each member serves its own [`Member`](crate::group::Member) record from a per-member
 //!   **query key** `zenoh/ext/net/group/<gid>/<mid>`, so a peer that hears a
 //!   beacon from a member it does not yet know `get`s that key to learn the
 //!   member's details (the late-joiner recovery path).
@@ -27,7 +29,8 @@
 //! zenoh-ext runs four background `recv_async` loop tasks (keep-alive,
 //! watchdog, net-event handler, query handler). wz's session is
 //! callback-driven, so the net-event handler and the query handler become
-//! callback registrations (a [`Subscriber`] and a [`Queryable`]) rather than
+//! callback registrations (a [`Subscriber`](crate::session::Subscriber) and a
+//! [`Queryable`](crate::session::Queryable)) rather than
 //! spawned loops — the dispatch fires them inline. Only the two genuinely
 //! time-driven loops are spawned tokio tasks: the keep-alive beacon and the
 //! watchdog. The unknown-member `get` issued from the net-event subscriber
@@ -41,12 +44,16 @@
 //!   wz `PublishOptions` exposes no priority setter, so the group events are
 //!   published at the default priority (a documented QoS omission, not a
 //!   protocol divergence — the membership wire is byte-identical).
-//! - [`GroupOptions::get_locality`] (a wz addition, default
-//!   [`Locality::Any`]) controls the unknown-member `get` destination, the
-//!   same locality knob the advanced subscriber carries; it lets a
-//!   same-session loopback deployment/test exercise the recovery path.
-//! - [`GroupOptions::event_locality`] (a wz addition, default
-//!   [`Locality::Any`]) is the destination of every group EVENT publish. A
+//! - [`GroupOptions::get_locality`](crate::group::GroupOptions::get_locality)
+//!   (a wz addition, default
+//!   [`Locality::Any`](wz_session_core::locality::Locality::Any)) controls the
+//!   unknown-member `get` destination, the same locality knob the advanced
+//!   subscriber carries; it lets a same-session loopback deployment/test
+//!   exercise the recovery path.
+//! - [`GroupOptions::event_locality`](crate::group::GroupOptions::event_locality)
+//!   (a wz addition, default
+//!   [`Locality::Any`](wz_session_core::locality::Locality::Any)) is the
+//!   destination of every group EVENT publish. A
 //!   caller that presents several wz sessions as one logical session (the C
 //!   ABIs' per-face sessions plus a local plane) needs it to keep the wire
 //!   half and the in-process half disjoint.
