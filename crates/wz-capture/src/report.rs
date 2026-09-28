@@ -4506,15 +4506,23 @@ mod tests {
         // above cannot say. They hold while every other leg fires too, so a
         // guard that widened would pass under them; this is the sentence that
         // says what is NOT in the verdict.
+        //
+        // ZA-3215 ⑤ — AND THE UNIT'S OWN BYTES, which is the change the
+        // corrected fixture makes rather than a widened guard. The batch is now
+        // lz4 behind a header, as upstream sends it, so no message inside it
+        // can even be located: the one record stands for the whole unit and
+        // its bytes are unaccounted for, by the same rule an undecodable
+        // datagram's are. It used to be a `Frame` whose payload alone was
+        // unreadable, which left the unit accounted for.
         assert_eq!(
             reasons,
             alloc::vec![
+                VerdictReason::UnaccountedBatchBytes,
                 VerdictReason::ThroughputGaps,
                 VerdictReason::ExchangeUnread,
                 VerdictReason::PayloadGaps,
             ],
-            "the undecompressible batch shortens these three planes and \
-             nothing else"
+            "the undecompressible batch shortens these planes and nothing else"
         );
     }
 

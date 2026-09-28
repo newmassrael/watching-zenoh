@@ -583,7 +583,10 @@ fn push_stream_flow(
         }
         push_session_row(&session_row, out);
         push_first_byte(
+            // A decompressed message's coordinate indexes the reader's own
+            // buffer, not the stream, so it names no packet byte.
             flow.byte_origin(frame.direction, at)
+                .filter(|_| frame.decompressed.is_none())
                 .map(|(packet, payload_offset)| FirstByte {
                     packet,
                     payload_offset,
@@ -637,7 +640,13 @@ fn push_datagram_flow(
                 continue;
             }
         };
-        let Some(message) = datagram.payload.get(frame.unit_offset..) else {
+        // ZA-3215 ⑤ — a message decompressed out of an lz4 batch is not in the
+        // packet; its own bytes travel with it.
+        let message = match &frame.decompressed {
+            Some(own) => Some(own.as_slice()),
+            None => datagram.payload.get(frame.unit_offset..),
+        };
+        let Some(message) = message else {
             note(&mut named, &mut disagreed, cap, index, "short_payload");
             continue;
         };
@@ -680,7 +689,8 @@ fn push_datagram_flow(
         );
         push_session_row(&session_row, out);
         push_first_byte(
-            Some(FirstByte {
+            // A decompressed message has no byte in the packet to point at.
+            frame.decompressed.is_none().then_some(FirstByte {
                 packet: index,
                 payload_offset: frame.unit_offset,
             }),
@@ -1498,11 +1508,9 @@ impl SnVerdictWord {
 /// ZA-3215 — the chain router's outcome for one fragment, as the word
 /// `chain.outcome` carries.
 ///
-/// `reassembled` covers BOTH ways a chain completes on a row: the joined
-/// payload parsed (`carried_state: reassembled`) and it did not decompress
-/// (`carried_state: undecompressible` on a `Fragment` row). The router's
-/// verdict is the same in both; what differs is what came after it, and that is
-/// `above_transport`'s to say.
+/// A joined payload is never decompressed on its own (compression wraps the
+/// whole batch, before any fragment is read), so `reassembled` always sits
+/// beside `carried_state: reassembled`.
 // The words are the document's in every build, as `CarriedState`'s are; only
 // the router that produces them is feature-gated.
 #[cfg_attr(not(feature = "reassembly"), allow(dead_code))]
@@ -1687,13 +1695,15 @@ impl ChainIds {
         let key = (frame.direction, *reliable, *priority);
         let outcome = match &frame.carried {
             Carried::Fragment(outcome) => *outcome,
-            // The joiner handed a payload back on this fragment, which is the
-            // router's `Reassembled` whatever happened to the bytes after it.
-            Carried::Reassembled { .. } | Carried::Undecompressible => IngestOutcome::Reassembled,
+            // The joiner handed a payload back on this fragment.
+            Carried::Reassembled { .. } => IngestOutcome::Reassembled,
             // No SN resolution, so no router ran: there is no outcome to name.
-            Carried::FragmentWithoutResolution | Carried::Nothing | Carried::Batch(_) => {
-                return None
-            }
+            // `Undecompressible` is a whole lz4 batch no message was read out
+            // of, so no fragment reached the router either.
+            Carried::FragmentWithoutResolution
+            | Carried::Undecompressible
+            | Carried::Nothing
+            | Carried::Batch(_) => return None,
         };
         Some(match outcome {
             IngestOutcome::Begun => ChainRow {
@@ -3295,20 +3305,15 @@ mod tests {
         // AND THE WALK FABRICATED NOTHING, which is the half of the consumer's
         // question that was about damage rather than absence: "it walks the
         // compressed bytes and reports whatever records fall out of them" would
-        // be worse than silence. MEASURED on this capture: the payload group
-        // holds one `unparsed` span and no record, and the row's ordinary
-        // `carried` names the `Frame` alone.
+        // be worse than silence.
         //
-        // ⚠ SCOPED TO THIS BODY. The fixture's payload is a four-byte marker,
-        // not the output of a real lz4 compressor, so this says the walk halts
-        // on bytes it cannot read — not that no lz4 frame anywhere could begin
-        // with something that decodes. Naming the state is what makes that
-        // residual harmless: a reader is told the bytes were compressed
-        // whatever the walk did with them.
+        // ZA-3215 ⑤ — the batch is now in upstream's shape, header byte first,
+        // and the session stands ONE record for the whole unopened batch. The
+        // second walk over those wire bytes must DECLINE rather than name a
+        // tree: they are a header and lz4, not a message.
         assert!(
-            doc.contains("\"name\":\"unparsed\""),
-            "the walk must leave the body unparsed rather than name records in \
-             it: {doc}"
+            doc.contains("\"declined\":"),
+            "the row over an unopened lz4 batch must be declined: {doc}"
         );
         assert!(
             !doc.contains("\"message\":\"Push\"") && !doc.contains("\"message\":\"Declare\""),
@@ -3332,6 +3337,105 @@ mod tests {
             !control.contains("\"carried_state\":\"undecompressible\""),
             "and nothing in it was undecompressible: {control}"
         );
+    }
+
+    /// An lz4 BLOCK holding `bytes` as one literal run, and nothing else.
+    ///
+    /// Written from the block format rather than produced by `lz4_flex`, so the
+    /// input these tests hand the reader does not come from the library that
+    /// reads it: a token whose high nibble is the literal length (15 meaning
+    /// "more follows, in 255-steps"), then the literals. A block that ends in a
+    /// literal run is the format's own required tail, so this is a complete and
+    /// valid block — larger than its input, which upstream would never SEND
+    /// (it keeps the raw form then) and which a receiver decodes all the same.
+    fn lz4_literal_block(bytes: &[u8]) -> Vec<u8> {
+        let mut out = Vec::new();
+        let n = bytes.len();
+        if n < 15 {
+            out.push((n as u8) << 4);
+        } else {
+            out.push(0xF0);
+            let mut rest = n - 15;
+            while rest >= 255 {
+                out.push(255);
+                rest -= 255;
+            }
+            out.push(rest as u8);
+        }
+        out.extend_from_slice(bytes);
+        out
+    }
+
+    /// ZA-3215 ⑤ — A COMPRESSION-NEGOTIATED LINK PUTS A BATCH HEADER IN FRONT
+    /// OF EVERY BATCH, and the reader must strip it before it reads a message.
+    ///
+    /// Upstream: once a side has sent its `Open`, every batch it sends on a
+    /// link that negotiated compression is `[BatchHeader][payload]`, and bit 0
+    /// of the header says whether the WHOLE payload is lz4
+    /// (`io/zenoh-transport/src/common/batch.rs`, `RBatch::initialize`). This
+    /// is the bit-CLEAR arm: the payload is the batch as it would otherwise be,
+    /// so the record must be read with no lz4 in the build at all. Reading the
+    /// header byte as a transport MID is the failure this names.
+    #[cfg(feature = "network-codecs")]
+    #[test]
+    fn a_raw_batch_behind_a_clear_batch_header_is_read_as_the_batch() {
+        let record = crate::datagram_tests::push(
+            crate::datagram_tests::sender_space(0, Some("zip/raw")),
+            &[1u8; 8],
+        );
+        let mut unit = alloc::vec![0x00u8];
+        unit.extend_from_slice(&crate::datagram_tests::frame_datagram(&record));
+        let (d, file) = crate::datagram_tests::compressed_session_with_unit(unit);
+        let doc = fields_json(&d, &file, None, None);
+        assert_eq!(
+            scoped(&doc, "message", &["message", "keyexpr"])
+                .iter()
+                .filter(|e| e[..] == ["Push", "zip/raw"])
+                .count(),
+            1,
+            "the Push behind a clear batch header must be read: {doc}"
+        );
+    }
+
+    /// ZA-3215 ⑤ — AND THE BIT-SET ARM: the whole batch is lz4, and a build
+    /// with `compression` reads the records inside it, while a build without
+    /// says `undecompressible` and invents nothing.
+    ///
+    /// The body is a literal-only lz4 block built from the format, see
+    /// [`lz4_literal_block`].
+    #[cfg(feature = "network-codecs")]
+    #[test]
+    fn an_lz4_batch_is_read_when_this_build_has_lz4_and_named_when_it_does_not() {
+        let record = crate::datagram_tests::push(
+            crate::datagram_tests::sender_space(0, Some("zip/ped")),
+            &[2u8; 8],
+        );
+        let mut unit = alloc::vec![0x01u8];
+        unit.extend_from_slice(&lz4_literal_block(&crate::datagram_tests::frame_datagram(
+            &record,
+        )));
+        let (d, file) = crate::datagram_tests::compressed_session_with_unit(unit);
+        let doc = fields_json(&d, &file, None, None);
+        let pushes = scoped(&doc, "message", &["message", "keyexpr"])
+            .iter()
+            .filter(|e| e[..] == ["Push", "zip/ped"])
+            .count();
+        if cfg!(feature = "compression") {
+            assert_eq!(
+                pushes, 1,
+                "lz4 is in this build, so the Push is read: {doc}"
+            );
+            assert!(
+                !doc.contains("\"carried_state\":\"undecompressible\""),
+                "{doc}"
+            );
+        } else {
+            assert_eq!(pushes, 0, "no lz4 here, so nothing is read: {doc}");
+            assert!(
+                doc.contains("\"carried_state\":\"undecompressible\""),
+                "and the row says why: {doc}"
+            );
+        }
     }
 
     #[cfg(feature = "reassembly")]

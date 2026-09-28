@@ -8599,6 +8599,7 @@ mod message_name_tests {
             observed_at_ms: None,
             reserved_header_bits: 0,
             undefined_mandatory_ext: None,
+            decompressed: None,
         };
         let name = message_name(&frame);
         assert!(
@@ -8641,6 +8642,7 @@ mod message_name_tests {
             observed_at_ms: None,
             reserved_header_bits: 0,
             undefined_mandatory_ext: None,
+            decompressed: None,
         }
     }
 

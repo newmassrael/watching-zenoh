@@ -405,9 +405,8 @@
  *     `reason` is filled for `aborted` and `refused`; `chain_id` is `null` for
  *     `refused`, which allocates no chain. `null` on a Fragment read before any
  *     InitAck (`carried_state: fragment_without_resolution`: no router ran)
- *     and on every non-Fragment row. `reassembled` is also the outcome of a
- *     row whose joined payload then failed to decompress; `above_transport`
- *     says which. `superseded` is declared and not emitted today: the router
+ *     and on every non-Fragment row. `superseded` is declared and not emitted
+ *     today: the router
  *     reports a restart as `begun` for the new chain, so the stranded chain
  *     ends WITHOUT a row.
  *

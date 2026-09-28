@@ -1847,9 +1847,23 @@ impl FlowDissection {
     /// the retention window, a framing unit longer than the stream that
     /// survived, and a batch coordinate past the end of its own unit. A caller
     /// renders it; nothing branches on it.
-    pub fn message_bytes(&self, frame: &PassiveFrame) -> Result<&[u8], alloc::string::String> {
+    ///
+    /// # ZA-3215 ⑤ — a message that came out of an lz4 batch
+    ///
+    /// Is not in the stream at all: its batch was compressed on the wire and
+    /// its bytes exist only as [`PassiveFrame::decompressed`]. Those are what
+    /// this answers for it — the MESSAGE, exactly, where a wire slice runs on
+    /// to the end of its unit — and slicing the stream at its coordinate would
+    /// hand back lz4.
+    pub fn message_bytes<'a>(
+        &'a self,
+        frame: &'a PassiveFrame,
+    ) -> Result<&'a [u8], alloc::string::String> {
         use core::fmt::Write as _;
 
+        if let Some(own) = &frame.decompressed {
+            return Ok(own);
+        }
         let assembler = self.assembler(frame.direction);
         let stream = assembler.stream();
         let origin = assembler.retained_from();
@@ -4374,7 +4388,22 @@ impl Dissection {
             // The cleartext datagram list and the recovered RFC 9221 one both
             // anchor to a packet INDEX, and that index is the caller's own push
             // ordinal. See [`NoByteSource::CallerHoldsThePacket`].
-            MessageListOrigin::Datagram | MessageListOrigin::QuicDatagram => {
+            // ZA-3215 ⑤ — EXCEPT a message decompressed out of an lz4 batch:
+            // the packet the caller holds carries lz4, and the message's bytes
+            // exist only as `PassiveFrame::decompressed`.
+            MessageListOrigin::Datagram => {
+                let own = self
+                    .datagram_flows
+                    .iter()
+                    .find(|f| f.flow == flow)
+                    .and_then(|f| f.frames.get(index))
+                    .and_then(|frame| frame.decompressed.as_deref());
+                match own {
+                    Some(bytes) => MessageBytes::Retained(bytes),
+                    None => MessageBytes::NoSource(NoByteSource::CallerHoldsThePacket),
+                }
+            }
+            MessageListOrigin::QuicDatagram => {
                 MessageBytes::NoSource(NoByteSource::CallerHoldsThePacket)
             }
             MessageListOrigin::QuicStream(_) => {
@@ -6762,7 +6791,12 @@ mod datagram_tests {
     }
 
     /// One `T_MID_FRAME` datagram carrying `body` as its batch, at sn 0.
-    fn frame_datagram(body: &[u8]) -> Vec<u8> {
+    ///
+    /// Gated on its callers' condition: since ZA-3215 ⑤ the compressed-session
+    /// fixture spells its unit itself, and the field document's tests are the
+    /// ones left building a `Frame` this way.
+    #[cfg(all(feature = "dissect", feature = "network-codecs"))]
+    pub(crate) fn frame_datagram(body: &[u8]) -> Vec<u8> {
         let mut wire = alloc::vec![
             wz_session_core::wire_const::T_MID_FRAME | wz_codecs::wire_const::FLAG_T_FRAME_R,
             // sn 0, the one-byte VLE arm `the_frame_fixture_decodes_as_the_
@@ -6797,6 +6831,23 @@ mod datagram_tests {
     /// compressed body could not produce such a capture at all; this tree has
     /// had one since R311y621 and the document had never been rendered over it.
     pub(crate) fn compressed_session_dissection_with_file() -> (Dissection, Vec<u8>) {
+        // ZA-3215 ⑤ — in the shape upstream puts on the wire: a BatchHeader
+        // with the COMPRESSION bit set, then a body that is not a valid lz4
+        // block (a literal-run token claiming more literals than follow). It
+        // was a `Frame` whose PAYLOAD was the marker, which is not where
+        // compression sits, and a build with lz4 then "decompressed" it.
+        compressed_session_with_unit(alloc::vec![0x01, 0xDE, 0xAD, 0xBE, 0xEF])
+    }
+
+    /// ZA-3215 ⑤ — the compressed session, ending in ONE post-handshake
+    /// datagram whose bytes are `unit` exactly as the sender put them on the
+    /// wire.
+    ///
+    /// The caller spells the unit, BatchHeader and all, because the header is
+    /// the subject: upstream prefixes every batch of a compression-negotiated
+    /// link with it once that side has sent its `Open`
+    /// (`io/zenoh-transport/src/common/batch.rs`, `RBatch::initialize`).
+    pub(crate) fn compressed_session_with_unit(unit: Vec<u8>) -> (Dissection, Vec<u8>) {
         let offer = compression_offer();
         let mut d = Dissection::new();
         let mut packets: Vec<(u32, u32, Vec<u8>)> = Vec::new();
@@ -6805,7 +6856,7 @@ mod datagram_tests {
             (false, init_datagram(true, &offer)),
             (true, open_datagram(false)),
             (false, open_datagram(true)),
-            (true, frame_datagram(&[0xDE, 0xAD, 0xBE, 0xEF])),
+            (true, unit),
         ]
         .into_iter()
         .enumerate()

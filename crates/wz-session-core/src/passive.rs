@@ -253,9 +253,49 @@ impl FlowContext {
             && self.open_seen[usize::from(direction == Direction::B)]
     }
 
-    /// Compression is NEGOTIATED and IN FORCE — frame bodies are wrapped.
+    /// Compression is NEGOTIATED and the session is ESTABLISHED.
+    ///
+    /// A session-wide answer. Whether a given BATCH carries the header that
+    /// compression puts on the wire is per direction: see
+    /// [`Self::batch_header_active`].
     pub fn compression_active(&self) -> bool {
         self.negotiated() && self.compression && self.phase == SessionPhase::Established
+    }
+
+    /// ZA-3215 ⑤ — every batch `direction` sends from here on begins with a
+    /// one-byte `BatchHeader`, whose bit 0 says whether the rest of the batch
+    /// is lz4.
+    ///
+    /// # Where the header is, measured against upstream
+    ///
+    /// Compression wraps the BATCH, not a message inside it: the sender
+    /// reserves the header byte ahead of the batch's messages and compresses
+    /// everything behind it (`io/zenoh-transport/src/common/batch.rs`,
+    /// `WBatch::finalize` / `compress`), and the receiver reads the header and
+    /// decompresses the whole payload before it decodes one message
+    /// (`RBatch::initialize`). A stream unit is `[length][header][payload]`,
+    /// the length covering both.
+    ///
+    /// # When, and why per direction
+    ///
+    /// Each side reconfigures its link for compression once IT has sent its
+    /// `Open` (`unicast/establishment/open.rs` and `accept.rs`, the
+    /// `is_compression: state.link.ext_compression.is_compression()` link
+    /// config), and the acceptor sends its `OpenAck` with compression switched
+    /// off for that one message (`unicast/link.rs`, `send_open_ack`). So the
+    /// two directions start at their own `Open`, which is [`Self::open_seen`]
+    /// — the same per-direction switch lowlatency's width uses, for the same
+    /// reason.
+    ///
+    /// Not on a lowlatency link: that transport writes each message straight
+    /// to the link with no batch and no header (`unicast/lowlatency/link.rs`,
+    /// `send_with_link`).
+    pub fn batch_header_active(&self, direction: Direction) -> bool {
+        self.negotiated()
+            && self.compression
+            && !self.lowlatency
+            && self.phase == SessionPhase::Established
+            && self.open_seen[usize::from(direction == Direction::B)]
     }
 
     /// Whether the Init exchange completed, i.e. whether the capability
@@ -611,6 +651,23 @@ pub struct PassiveFrame {
     /// verdict, and the capture layer's `is_complete` deliberately does not
     /// consult it.
     pub undefined_mandatory_ext: Option<u8>,
+    /// ZA-3215 ⑤ — this message's OWN bytes, when the batch it came out of was
+    /// lz4 on the wire; `None` for every message read straight off the wire.
+    ///
+    /// # Why the message carries them
+    ///
+    /// A message read off the wire is found again by its coordinate —
+    /// [`Self::stream_offset`], [`Self::prefix_width`], [`Self::unit_offset`] —
+    /// and a consumer slices it out of the capture. A decompressed message has
+    /// no such place: its bytes exist only in the buffer this reader made, and
+    /// that buffer is gone when the unit's walk returns. So [`Self::unit_offset`]
+    /// and [`Self::unit_len`] index THAT buffer, not the capture, and this field
+    /// is the only way to reach the bytes they describe. `Some` is also the
+    /// signal to a consumer that the coordinate is not a capture position.
+    ///
+    /// The message alone and not the batch: a batch of N messages would
+    /// otherwise be copied N times.
+    pub decompressed: Option<Vec<u8>>,
 }
 
 /// R311y609 (C12) — what the observer makes of ONE data frame's sequence
@@ -733,9 +790,17 @@ pub enum Carried {
     /// decoded, plus where the walk stopped if it did
     /// ([`crate::network_message::parse_frame_payload_best_effort`]).
     Batch(BatchParse),
-    /// The session negotiated `Compression` and lz4 refused the body. NOT an
-    /// empty batch: the bytes were there and are unreadable, which is a
-    /// different fact from a frame that carried nothing.
+    /// The session negotiated `Compression` and this BATCH is lz4 that this
+    /// reader could not open — the build has no lz4
+    /// (`transport-compression`), or the block is malformed. NOT an empty
+    /// batch: the bytes were there and are unreadable, which is a different
+    /// fact from a frame that carried nothing.
+    ///
+    /// ZA-3215 ⑤ — carried by ONE record standing for the whole unit, whose
+    /// [`PassiveFrame::frame`] is `InboundParseError::CompressionFailed`:
+    /// with the batch unopened no message inside it can even be located.
+    /// Until that round this was a verdict on one `Frame`'s payload, which is
+    /// not where upstream compresses.
     Undecompressible,
     /// A fragment that did not complete a chain, and what the chain router
     /// made of it — including the refusals and aborts, which are exactly the
@@ -1060,6 +1125,37 @@ pub struct PassiveSession {
     /// R311y609 — how many chained candidate frames must agree before the
     /// resynchronisation scan accepts a boundary. `0` disables recovery.
     resync_depth: usize,
+}
+
+/// ZA-3215 ⑤ — bit 0 of the `BatchHeader`: the batch behind it is lz4.
+///
+/// Spelled here as well as in [`crate::compression`], because the observer has
+/// to FIND the header in every build and that module exists only with
+/// `transport-compression`. The two are held equal below wherever both exist.
+const BATCH_HEADER_COMPRESSION: u8 = 0x01;
+
+#[cfg(feature = "transport-compression")]
+const _: () = assert!(BATCH_HEADER_COMPRESSION == crate::compression::BATCH_HEADER_COMPRESSION);
+
+/// ZA-3215 ⑤ — open one headed batch whose COMPRESSION bit is set: `wire` is
+/// the unit, header byte included.
+///
+/// Through the participant's own [`crate::compression::decompress_batch`], so
+/// the observer and the receiver cannot disagree about the format, bounded by
+/// [`MAX_FRAME_PAYLOAD`] like every untrusted length this reader acts on.
+/// `None` without `transport-compression`: the bytes are lz4 and this build
+/// cannot read them, which is the honest answer rather than a batch parsed out
+/// of compressed bytes.
+fn decompress_unit(wire: &[u8]) -> Option<Vec<u8>> {
+    #[cfg(feature = "transport-compression")]
+    {
+        crate::compression::decompress_batch(wire, MAX_FRAME_PAYLOAD)
+    }
+    #[cfg(not(feature = "transport-compression"))]
+    {
+        let _ = wire;
+        None
+    }
 }
 
 /// R311y609 (C12) — SN conduits per direction: one per
@@ -1403,6 +1499,9 @@ impl PassiveSession {
         // the same reason: both are facts about the LINK, and the borrow below
         // is of one direction's buffer.
         let lean = self.context.lowlatency_active(direction);
+        // ZA-3215 ⑤ — and whether the unit opens with a batch header rather
+        // than with a message.
+        let headed = self.context.batch_header_active(direction);
         let depth = self.resync_depth;
         let stream = self.stream_mut(direction);
 
@@ -1441,7 +1540,13 @@ impl PassiveSession {
         // transport-only question refuses every data frame on one. Measured: a
         // real capture desynchronised on its first Declare (`header 0x9e`) and
         // abandoned 20 KiB behind it, with the handshake before it read clean.
-        let credible = if lean {
+        // ZA-3215 ⑤ — on a headed unit the first byte is the BatchHeader, whose
+        // one defined bit is compression; a byte with any other bit set is not
+        // a boundary this sender could have written. What follows a set bit is
+        // lz4 and has no header to judge.
+        let credible = if headed {
+            header & !BATCH_HEADER_COMPRESSION == 0
+        } else if lean {
             wz_codecs::wire_const::is_credible_lowlatency_header(header)
         } else {
             wz_codecs::wire_const::is_credible_transport_header(header)
@@ -1541,12 +1646,63 @@ impl PassiveSession {
             offset,
             space: offset_space,
         } = anchor;
+        // The ceiling is on what the WIRE carried, so it is judged on these
+        // bytes and not on anything decompressed out of them.
         let exceeds_negotiated_batch = self.exceeds_batch(bytes.len());
+        // ZA-3215 ⑤ — THE BATCH HEADER, where this direction has one. See
+        // `FlowContext::batch_header_active` for where upstream puts it. A
+        // multicast link has no handshake to have negotiated it on.
+        let headed = handshake == LinkHandshake::Present
+            && self.context.batch_header_active(direction)
+            && !bytes.is_empty();
+        let plain: Vec<u8>;
+        // `unit` is what the messages are read out of and `pos` where the
+        // first one starts in it. The bit-clear arm keeps the WIRE bytes and
+        // steps over the header, so every coordinate below still points at the
+        // capture; only the lz4 arm reads out of a buffer this reader made.
+        let (unit, mut pos, decompressed): (&[u8], usize, bool) = if !headed {
+            (bytes, 0, false)
+        } else if bytes[0] & BATCH_HEADER_COMPRESSION == 0 {
+            (bytes, 1, false)
+        } else {
+            match decompress_unit(bytes) {
+                Some(p) => {
+                    plain = p;
+                    (&plain, 0, true)
+                }
+                None => {
+                    self.unaccounted_batch_bytes[usize::from(direction == Direction::B)] +=
+                        bytes.len() as u64;
+                    return alloc::vec![PassiveFrame {
+                        direction,
+                        stream_offset: offset,
+                        offset_space,
+                        batch_index: 0,
+                        unit_offset: 0,
+                        unit_len: bytes.len(),
+                        batch_offset: None,
+                        undefined_mandatory_ext: None,
+                        prefix_width,
+                        frame: Err(InboundParseError::CompressionFailed),
+                        context: self.context,
+                        exceeds_negotiated_batch,
+                        carried: Carried::Undecompressible,
+                        inadmissible_on_link: false,
+                        #[cfg(feature = "codec-frame")]
+                        sn_verdict: None,
+                        resync: resync.take(),
+                        observed_at_ms: self.observed_at,
+                        reserved_header_bits: 0,
+                        decompressed: None,
+                    }];
+                }
+            }
+        };
+        let front = pos;
         let mut out = Vec::new();
-        let mut pos = 0usize;
         let mut batch_index = 0usize;
-        while pos < bytes.len() {
-            let rest = &bytes[pos..];
+        while pos < unit.len() {
+            let rest = &unit[pos..];
             // R311y611 (§1.4b) — counted BEFORE the admissibility branch below:
             // a reserved bit is a fact about the SENDER's wire-spec vintage,
             // and it is one whether or not this link was entitled to carry the
@@ -1604,9 +1760,9 @@ impl PassiveSession {
             // there the offset is not in question — the caller handed these
             // bytes over as one framing unit — so an undecodable datagram
             // still reports the decode error rather than vanishing.
-            if consumed == 0 && pos > 0 {
+            if consumed == 0 && pos > front {
                 self.unaccounted_batch_bytes[usize::from(direction == Direction::B)] +=
-                    (bytes.len() - pos) as u64;
+                    (unit.len() - pos) as u64;
                 break;
             }
             let inadmissible = handshake == LinkHandshake::Absent
@@ -1623,14 +1779,30 @@ impl PassiveSession {
             let sn_verdict = self.track_sn(direction, &frame);
             let carried = self.decode_carried(direction, &frame);
             let undefined_mandatory_ext = self.note_undefined_mandatory_ext(direction, &frame);
-            let batch_offset = self.batch_offset_of(&frame, consumed);
+            // A decompressed message's payload sits in a buffer this reader
+            // made, so it has no offset on the wire to hand out.
+            let batch_offset = if decompressed {
+                None
+            } else {
+                self.batch_offset_of(&frame, consumed)
+            };
+            let own = if decompressed {
+                let end = if consumed == 0 {
+                    unit.len()
+                } else {
+                    pos + consumed
+                };
+                Some(unit[pos..end].to_vec())
+            } else {
+                None
+            };
             out.push(PassiveFrame {
                 direction,
                 stream_offset: offset,
                 offset_space,
                 batch_index,
                 unit_offset: pos,
-                unit_len: bytes.len(),
+                unit_len: unit.len(),
                 batch_offset,
                 undefined_mandatory_ext,
                 prefix_width,
@@ -1644,6 +1816,7 @@ impl PassiveSession {
                 resync: resync.take(),
                 observed_at_ms: self.observed_at,
                 reserved_header_bits: reserved,
+                decompressed: own,
             });
             batch_index += 1;
             if consumed == 0 {
@@ -1652,7 +1825,7 @@ impl PassiveSession {
                 // unaccounted for. Counting them is what makes an undecodable
                 // datagram say how much it could not explain.
                 self.unaccounted_batch_bytes[usize::from(direction == Direction::B)] +=
-                    (bytes.len() - pos) as u64;
+                    (unit.len() - pos) as u64;
                 break;
             }
             pos += consumed;
@@ -1950,14 +2123,12 @@ impl PassiveSession {
                 self.fold_keyexprs(direction, &b);
                 Carried::Batch(b)
             }
-            InboundFrame::Frame { payload, .. } => match self.batch_of(payload) {
-                Some(b) => {
-                    #[cfg(all(feature = "dissect", feature = "codec-declare"))]
-                    self.fold_keyexprs(direction, &b);
-                    Carried::Batch(b)
-                }
-                None => Carried::Undecompressible,
-            },
+            InboundFrame::Frame { payload, .. } => {
+                let b = self.batch_of(payload);
+                #[cfg(all(feature = "dissect", feature = "codec-declare"))]
+                self.fold_keyexprs(direction, &b);
+                Carried::Batch(b)
+            }
             #[cfg(feature = "reassembly")]
             InboundFrame::Fragment {
                 reliable,
@@ -2000,20 +2171,18 @@ impl PassiveSession {
                     |bytes| joined = Some(bytes.to_vec()),
                 );
                 match joined {
-                    Some(bytes) => match self.batch_of(&bytes) {
-                        Some(b) => {
-                            #[cfg(all(feature = "dissect", feature = "codec-declare"))]
-                            self.fold_keyexprs(direction, &b);
-                            // R2706 — the buffer travels WITH the parse. It was
-                            // already owned here and dropped one line later,
-                            // taking the referent of `b.spans` with it.
-                            Carried::Reassembled {
-                                batch: b,
-                                joined: bytes,
-                            }
+                    Some(bytes) => {
+                        let b = self.batch_of(&bytes);
+                        #[cfg(all(feature = "dissect", feature = "codec-declare"))]
+                        self.fold_keyexprs(direction, &b);
+                        // R2706 — the buffer travels WITH the parse. It was
+                        // already owned here and dropped one line later,
+                        // taking the referent of `b.spans` with it.
+                        Carried::Reassembled {
+                            batch: b,
+                            joined: bytes,
                         }
-                        None => Carried::Undecompressible,
-                    },
+                    }
                     None => Carried::Fragment(outcome),
                 }
             }
@@ -2031,10 +2200,9 @@ impl PassiveSession {
     /// would be a second opinion on a length this walk already measured, and
     /// the two could disagree.
     ///
-    /// Answers `None` for a COMPRESSED session even though the offset would be
-    /// arithmetically available: what sits at that offset on the wire is an lz4
-    /// block, and the batch's records were walked out of the decompressed
-    /// bytes. Their offsets index a buffer this reader made.
+    /// A message decompressed out of an lz4 batch never reaches here: its
+    /// caller answers `None` for it, because its offsets index a buffer this
+    /// reader made (see [`PassiveFrame::decompressed`]).
     #[cfg(feature = "codec-frame")]
     fn batch_offset_of(
         &self,
@@ -2047,35 +2215,20 @@ impl PassiveSession {
         let Ok(InboundFrame::Frame { payload, .. }) = frame else {
             return None;
         };
-        if self.context.compression_active() {
-            return None;
-        }
         consumed.checked_sub(payload.len())
     }
 
-    /// Decompress if the session negotiated it, then walk the batch.
+    /// Walk a `Frame`'s (or a joined chain's) batch of network messages.
     ///
-    /// `None` means the body was lz4-wrapped and would not decompress. The
-    /// ceiling passed to [`crate::compression::decompress_batch`] is the same
-    /// [`MAX_FRAME_PAYLOAD`] that bounds an untrusted length prefix, so a
-    /// corrupt block cannot ask this observer for an arbitrary allocation.
+    /// ZA-3215 ⑤ — no decompression HERE any more. This used to lz4-decode a
+    /// `Frame`'s payload on a compressed session, which is not where upstream
+    /// compresses: the whole BATCH is wrapped, header byte first, and it is
+    /// unwrapped before any transport message is read — see
+    /// [`FlowContext::batch_header_active`] and [`decompress_unit`]. A payload
+    /// reaching this function is therefore already plain.
     #[cfg(feature = "codec-frame")]
-    fn batch_of(&self, body: &[u8]) -> Option<BatchParse> {
-        if self.context.compression_active() {
-            // A build WITHOUT `transport-compression` reports the same
-            // absence, and that is the honest answer rather than a bug: the
-            // bytes are lz4 and this observer cannot read them. Saying so
-            // beats handing the caller a batch parsed out of compressed
-            // bytes, which decodes to confident nonsense.
-            #[cfg(not(feature = "transport-compression"))]
-            return None;
-            #[cfg(feature = "transport-compression")]
-            {
-                let plain = crate::compression::decompress_batch(body, MAX_FRAME_PAYLOAD)?;
-                return Some(parse_frame_payload_best_effort(&plain));
-            }
-        }
-        Some(parse_frame_payload_best_effort(body))
+    fn batch_of(&self, body: &[u8]) -> BatchParse {
+        parse_frame_payload_best_effort(body)
     }
 
     /// Advance the observed context by one decoded frame.
