@@ -529,7 +529,7 @@ pub unsafe extern "C" fn z_internal_condvar_null(cv: *mut z_owned_condvar_t) {
 /// one so that cancelling the token unregisters the get's pending query
 /// (`src/session/query.c:306-334`).
 ///
-/// R2948 — the model now lives in `wz_capi_core::cancellation`, shared with the
+/// R2949 — the model now lives in `wz_capi_core::cancellation`, shared with the
 /// zenoh-c ABI, and it gained what this crate's copy lacked: `cancel` WAITS for
 /// every registered get's callbacks to be dropped, which pico's
 /// `_z_cancellation_token_cancel` does (`_z_sync_group_wait` after running the
@@ -646,9 +646,9 @@ pub unsafe extern "C" fn z_cancellation_token_new(
 /// pending query, whose sink drop runs the C `drop(context)`, and a C callback
 /// is explicitly allowed to re-enter the session.
 ///
-/// R2948 — and it then WAITS until every get registered on the token has
+/// R2949 — and it then WAITS until every get registered on the token has
 /// dropped its callbacks, as pico's `_z_cancellation_token_cancel` does
-/// (`_z_sync_group_wait` after the handler run). Before R2948 it returned as
+/// (`_z_sync_group_wait` after the handler run). Before R2949 it returned as
 /// soon as the handlers had run, so a reply callback already executing on a
 /// drive task could still be running when `cancel` returned.
 ///

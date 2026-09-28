@@ -494,7 +494,7 @@ pub unsafe extern "C" fn z_liveliness_get(
         // token was ALREADY cancelled: no Interest goes out and `closure` /
         // `guard` drop on the return, so the C `drop(context)` still reports the
         // get over. Shared with `z_get` through the core cancellation plane
-        // (`wz_capi_core::cancellation`, R2948), so the two planes cannot drift
+        // (`wz_capi_core::cancellation`, R2949), so the two planes cannot drift
         // in their cancellation semantics — including `cancel`'s wait for every
         // face's callback, which each [`crate::get::FaceReply`] holds open.
         let fan = match &token {

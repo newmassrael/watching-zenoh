@@ -30,7 +30,7 @@
 //!
 //! ## What a token DOES here
 //!
-//! R2948 — it now STOPS the gets it was handed, which it did not before: the
+//! R2949 — it now STOPS the gets it was handed, which it did not before: the
 //! token is `wz_capi_core::cancellation::CancellationToken`, the one model the
 //! pico ABI's gets already registered into, and `z_get`, `z_querier_get` and
 //! `z_liveliness_get` register their per-face fans on it

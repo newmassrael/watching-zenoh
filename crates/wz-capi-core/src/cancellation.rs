@@ -1,11 +1,11 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later OR LicenseRef-watching-zenoh-Commercial
 // SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
 
-//! R2948 — the ONE cancellation token both C ABIs hand out.
+//! R2949 — the ONE cancellation token both C ABIs hand out.
 //!
 //! ## Why it lives here
 //!
-//! Until R2948 there were two. The pico ABI had the real plane (an on-cancel
+//! Until R2949 there were two. The pico ABI had the real plane (an on-cancel
 //! handler list, and a per-face undo set its gets registered into), while the
 //! zenoh-c ABI had a bare shared flag that no get, querier get or liveliness get
 //! ever consulted. Neither waited for a cancelled query's callback to finish.

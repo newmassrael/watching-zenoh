@@ -6,13 +6,13 @@
 //!
 //! ## The residual this closes
 //!
-//! Until R2948 the zenoh-c ABI declared the token family (new / cancel /
+//! Until R2949 the zenoh-c ABI declared the token family (new / cancel /
 //! is_cancelled / clone / drop) over a bare shared flag, and the three option
 //! structs that carry a token — `z_get_options_t`, `z_querier_get_options_t`,
 //! `z_liveliness_get_options_t` — typed the slot `void *` and ignored it. A C
 //! program could build a token, hand it to a get, cancel it, and the get ran on
 //! as if nothing had happened, with every call reporting success. The pico ABI
-//! had the real plane; R2948 moved it into `wz-capi-core` and put both ABIs on
+//! had the real plane; R2949 moved it into `wz-capi-core` and put both ABIs on
 //! it.
 //!
 //! ## What upstream does, read rather than inferred

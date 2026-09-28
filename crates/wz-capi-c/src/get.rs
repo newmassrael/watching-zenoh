@@ -204,7 +204,7 @@ pub struct z_get_options_t {
     pub timeout_ms: u64,
     /// Cancellation token — unstable-only, NEW at zenoh 1.10.0.
     ///
-    /// R2948 — HONOURED and typed. It used to be an untyped slot IGNORED on the
+    /// R2949 — HONOURED and typed. It used to be an untyped slot IGNORED on the
     /// premise that no token family existed to put in it; `crate::cancellation`
     /// has declared that family since R2203, and the slot was the one reader
     /// left behind. TAKEN on every path, as upstream's options drop takes it.
@@ -212,7 +212,7 @@ pub struct z_get_options_t {
     pub cancellation_token: *mut crate::cancellation::z_moved_cancellation_token_t,
 }
 
-/// R2948 — TAKE a get-options' cancellation token, on the arm that declares one.
+/// R2949 — TAKE a get-options' cancellation token, on the arm that declares one.
 ///
 /// # Safety
 /// `options` must be null or a valid get-options struct.
@@ -1025,7 +1025,7 @@ pub(crate) fn issue_get(
     closure: Arc<CReplyClosure>,
     token: Option<Arc<wz_capi_core::cancellation::CancellationToken>>,
 ) -> ZResult {
-    // R2948 — the cancellation is registered BEFORE any leg is issued, which is
+    // R2949 — the cancellation is registered BEFORE any leg is issued, which is
     // upstream's ordering (`register_query_cancellation` runs before the query
     // is sent). A token whose cancel has already started refuses the
     // registration, and upstream then fails the get with "Query was cancelled"
@@ -1076,7 +1076,7 @@ pub(crate) fn issue_get(
         gate: gate.clone(),
         _registration: registration.clone(),
     };
-    // R2948 — record a leg's rid against the cancellation set; `false` means the
+    // R2949 — record a leg's rid against the cancellation set; `false` means the
     // token cancelled while the fan was running, and `record` has already undone
     // THIS leg, so nothing further may be issued.
     let cancelled_mid_fan = |session: &wz_runtime_tokio::session::TokioSession, rid: u64| {
@@ -1145,7 +1145,7 @@ pub(crate) fn issue_get(
     Z_OK
 }
 
-/// R2948 — what one leg's reply callback owns: the C closure, the reply gate,
+/// R2949 — what one leg's reply callback owns: the C closure, the reply gate,
 /// and the token registration, dropped in that order (fields drop in
 /// declaration order, so a `cancel` waiting on the registration cannot return
 /// while this leg's share of the C `drop(context)` is pending).
@@ -1397,7 +1397,7 @@ unsafe fn get_with_selector(
         // every path, for the same reason.
         // SAFETY: the caller's contract.
         let opts = unsafe { get_options(options) };
-        // R2948 — the token too, on the same every-path line.
+        // R2949 — the token too, on the same every-path line.
         // SAFETY: the caller's contract.
         let token = unsafe { take_get_token(options) };
 

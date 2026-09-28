@@ -381,13 +381,13 @@ pub struct z_liveliness_get_options_t {
     /// Snapshot timeout in milliseconds. `0` means "use the default", NOT
     /// "never expire" — the runtime resolves it, as upstream does.
     pub timeout_ms: u64,
-    /// Cancellation token — unstable-only, NEW at zenoh 1.10.0. R2948 —
+    /// Cancellation token — unstable-only, NEW at zenoh 1.10.0. R2949 —
     /// HONOURED and TAKEN on every path, as on [`crate::get::z_get_options_t`].
     #[cfg(not(feature = "zenoh-c-no-unstable-api"))]
     pub cancellation_token: *mut crate::cancellation::z_moved_cancellation_token_t,
 }
 
-/// R2948 — TAKE a liveliness-get's cancellation token, on the arm that has one.
+/// R2949 — TAKE a liveliness-get's cancellation token, on the arm that has one.
 ///
 /// # Safety
 /// `options` must be null or a valid liveliness-get-options struct.
@@ -490,7 +490,7 @@ pub unsafe extern "C" fn z_liveliness_get(
         // "this snapshot is over".
         // SAFETY: the caller's contract.
         let closure = unsafe { crate::get::adopt_reply_closure(callback) };
-        // R2948 — the token, TAKEN on the same every-path line as the closure,
+        // R2949 — the token, TAKEN on the same every-path line as the closure,
         // as upstream's `z_liveliness_get` takes it.
         // SAFETY: the caller's contract.
         let token = unsafe { liveliness_get_token(options) };
@@ -525,7 +525,7 @@ pub unsafe extern "C" fn z_liveliness_get(
             anyke: false,
         });
 
-        // R2948 — registered BEFORE the first face is issued, as for `z_get`
+        // R2949 — registered BEFORE the first face is issued, as for `z_get`
         // (`crate::get::issue_get`); a token whose cancel has started fails the
         // snapshot with `Z_EGENERIC`, upstream's answer to the same refusal.
         let fan = match &token {
@@ -559,7 +559,7 @@ pub unsafe extern "C" fn z_liveliness_get(
                 // death alike — the same reason `z_get`'s `on_final` is empty.
                 |_id| {},
             );
-            // R2948 — the interest id this face registered under, recorded so
+            // R2949 — the interest id this face registered under, recorded so
             // a later cancel can unregister it; `false` means the token
             // cancelled mid-fan and this registration is already undone.
             let cancelled_mid_fan = match (&fan, &issued) {

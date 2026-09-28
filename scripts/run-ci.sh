@@ -11513,7 +11513,7 @@ layer_c1bz_docs_resolve() {
     # added (`CongestionControl::from_flags`, and two rewordings of an existing
     # `CongestionControl` link) resolve, and none of the 512 errors this lane's
     # command printed at 607bf23b falls on a line the round added.
-    # R2948 — wz-capi-pico 44 -> 43, by removal, diffed: the cancellation model
+    # R2949 — wz-capi-pico 44 -> 43, by removal, diffed: the cancellation model
     # moved to wz-capi-core and took the pico docs' links to the retired
     # `crate::get::CancellableFan` with it; every error left in the crate's set
     # blames to a commit older than this round.
@@ -19416,7 +19416,7 @@ layer_c1cc_api_compat_c() {
         --test-threads=1 \
         --exact a_session_local_queryable_satisfies_its_own_querier_on_wz_and_libzenohc \
         || return 1
-    # R2948 — the cancellation token plane: one program on wz and on libzenohc,
+    # R2949 — the cancellation token plane: one program on wz and on libzenohc,
     # an already-cancelled token on each of the three readers (get / querier get
     # / liveliness get) and a live token cancelled while a get is outstanding.
     # Needs the unstable arm the oracle selects above, which this layer built.

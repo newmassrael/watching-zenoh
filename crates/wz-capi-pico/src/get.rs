@@ -1307,7 +1307,7 @@ fn fan_get(
     // afterwards would leave a window in which a token cancelled mid-fan left
     // live pending queries behind.
     //
-    // R2948 — the registration is shared by every per-face callback (see
+    // R2949 — the registration is shared by every per-face callback (see
     // [`FaceReply`]), so it drops only when the LAST of them does, and the
     // token's `cancel` waits for that, as pico's `_z_sync_group_wait` does.
     let fan = match &token {
@@ -1394,7 +1394,7 @@ fn fan_get(
     Z_OK
 }
 
-/// R2948 — what each face's reply callback owns.
+/// R2949 — what each face's reply callback owns.
 ///
 /// A struct rather than three captured locals because the DROP ORDER is the
 /// contract: fields drop in declaration order, so the C closure clone goes

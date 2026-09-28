@@ -118,13 +118,13 @@ pub struct z_querier_get_options_t {
     pub source_info: *const crate::source_info::z_source_info_t,
     /// Query attachment. CARRIED — consumed by [`z_querier_get`].
     pub attachment: *mut z_moved_bytes_t,
-    /// Cancellation token — unstable-only, NEW at zenoh 1.10.0. R2948 —
+    /// Cancellation token — unstable-only, NEW at zenoh 1.10.0. R2949 —
     /// HONOURED and TAKEN on every path, as on [`crate::get::z_get_options_t`].
     #[cfg(not(feature = "zenoh-c-no-unstable-api"))]
     pub cancellation_token: *mut crate::cancellation::z_moved_cancellation_token_t,
 }
 
-/// R2948 — TAKE a querier-get's cancellation token, on the arm that has one.
+/// R2949 — TAKE a querier-get's cancellation token, on the arm that has one.
 ///
 /// # Safety
 /// `options` must be a valid querier-get-options struct.
