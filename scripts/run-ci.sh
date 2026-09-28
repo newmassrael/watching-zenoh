@@ -11513,12 +11513,16 @@ layer_c1bz_docs_resolve() {
     # added (`CongestionControl::from_flags`, and two rewordings of an existing
     # `CongestionControl` link) resolve, and none of the 512 errors this lane's
     # command printed at 607bf23b falls on a line the round added.
+    # R2948 — wz-capi-pico 44 -> 43, by removal, diffed: the cancellation model
+    # moved to wz-capi-core and took the pico docs' links to the retired
+    # `crate::get::CancellableFan` with it; every error left in the crate's set
+    # blames to a commit older than this round.
     budget="
         wz:2
         wz-ap-demo:25
         wz-capi-c:45
         wz-capi-core:7
-        wz-capi-pico:44
+        wz-capi-pico:43
         wz-link-lwip:9
         wz-mcu-session-acceptor:3
         wz-routing-graph:5
