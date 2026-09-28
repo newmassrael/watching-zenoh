@@ -232,6 +232,25 @@ pub(crate) fn congestion_from_c(c: z_congestion_control_t) -> CongestionControl 
     }
 }
 
+/// R2947 — zenoh-c's `z_reliability_t` as wz's typed reliability, as upstream's
+/// `From<z_reliability_t>` gives it (`BEST_EFFORT = 0`, `RELIABLE = 1`). An
+/// out-of-range value takes upstream's default (`z_reliability_default`,
+/// `RELIABLE`) rather than panicking.
+///
+/// Upstream folds it on put, delete and publisher declare, and documents what
+/// it is for: not retransmission, but "a marker on the wire" that "may be used
+/// to select the best link available"
+/// (`zenoh-c/src/commons.rs` @ `/// It is rather used as a marker on the wire and it may be used to select the best link available (e.g. TCP for reliable data and UDP for best effort data).`).
+/// In wz that marker is the frame's reliable flag, which
+/// `PublishOptions::reliability` already drives.
+#[cfg(not(feature = "zenoh-c-no-unstable-api"))]
+pub(crate) fn reliability_from_c(r: z_reliability_t) -> wz_runtime_tokio::Reliability {
+    match r {
+        Z_RELIABILITY_BEST_EFFORT => wz_runtime_tokio::Reliability::BestEffort,
+        _ => wz_runtime_tokio::Reliability::Reliable,
+    }
+}
+
 /// R2946 — wz's typed [`CongestionControl`] as zenoh-c's value, the inverse of
 /// [`congestion_from_c`] (upstream's `From<CongestionControl>`,
 /// `zenoh-c/src/commons.rs` @ `CongestionControl::BlockFirst => z_congestion_control_t::BLOCK_FIRST,`).
@@ -294,13 +313,15 @@ pub struct z_publisher_put_options_t {
     /// Encoding of the published data. Overrides the publisher's default when
     /// set, as upstream's `PutBuilder::encoding` does.
     pub encoding: *mut z_moved_encoding_t,
-    /// Timestamp of the publication.
+    /// Timestamp of the publication — a BORROWED `const z_timestamp_t*`,
+    /// null for "unstamped".
     ///
-    /// Still an opaque pointer, and still UNREAD — `z_timestamp_t` is not
-    /// declared by this crate and no upstream example sets the field, so
-    /// declaring the type would add an unmeasured entry to the footprint gate
-    /// to serve no driver. The residual is named here rather than left to be
-    /// inferred from the pointer's type.
+    /// R2947 — READ, as upstream's `z_publisher_put` reads it
+    /// (`zenoh-c/src/publisher.rs` @ `builder = builder.timestamp(Some(*timestamp.as_rust_type_ref()));`),
+    /// through the same `crate::timestamp::timestamp_hint` seam the
+    /// session-level put and both deletes use. It used to be UNREAD on the
+    /// premise that `z_timestamp_t` was not declared here; the type has been
+    /// declared since R311y557 and this field was the one reader left behind.
     pub timestamp: *const c_void,
     /// Source info. Present only under `Z_FEATURE_UNSTABLE_API`.
     ///
@@ -412,6 +433,10 @@ pub(crate) unsafe fn resolve_publisher_options(
         // `z_publisher_put` on this handle, which is upstream's shape:
         // `z_publisher_put_options_t` carries no locality field of its own.
         .with_locality(crate::put::locality_from_c(opts.allowed_destination));
+    // R2947 — reliability, declared once here like the QoS above and inherited
+    // by every put on the handle, as upstream's `z_declare_publisher` folds it.
+    #[cfg(not(feature = "zenoh-c-no-unstable-api"))]
+    let resolved = resolved.with_reliability(reliability_from_c(opts.reliability));
     // SAFETY: the caller's contract for the pointee.
     match unsafe { crate::encoding::take_moved_encoding(opts.encoding) } {
         Some(hint) => resolved.with_encoding(hint),
@@ -433,6 +458,9 @@ struct PutOverrides {
     /// R311y563 — the per-put source identity. Owned like the attachment, and
     /// for the same reason: upstream types it `z_moved_source_info_t*`.
     source_info: Option<wz_runtime_tokio::sample::SourceInfo>,
+    /// R2947 — the per-put timestamp. READ rather than taken: upstream types
+    /// it `const z_timestamp_t*`, a value the caller keeps.
+    timestamp: Option<wz_runtime_tokio::sample::TimestampHint>,
 }
 
 impl PutOverrides {
@@ -468,6 +496,8 @@ impl PutOverrides {
             // one options struct does not double-free.
             attachment: unsafe { take_payload(opts.attachment) },
             source_info: taken_source_info,
+            // SAFETY: as above — BORROWED, null or a live `z_timestamp_t`.
+            timestamp: unsafe { crate::timestamp::timestamp_hint(opts.timestamp) },
         }
     }
 
@@ -486,9 +516,13 @@ impl PutOverrides {
             Some(blob) => with_encoding.with_attachment(blob),
             None => with_encoding,
         };
-        match self.source_info {
+        let with_source_info = match self.source_info {
             Some(info) => with_attachment.with_source_info(info),
             None => with_attachment,
+        };
+        match self.timestamp {
+            Some(hint) => with_source_info.with_timestamp(hint),
+            None => with_source_info,
         }
     }
 }
@@ -567,9 +601,9 @@ pub unsafe extern "C" fn z_publisher_put_options_default(this_: *mut z_publisher
 /// starts from, which is what upstream's `_declare_publisher_inner` does with
 /// the same four. R311y554 makes it FIVE: `allowed_destination` is honoured
 /// too, declared once here and inherited by every `z_publisher_put`.
-/// `reliability` remains a link-selection marker upstream itself does not put
-/// on the wire ("`reliability` does not trigger any data retransmission on the
-/// wire", `zenoh-c/src/commons.rs:294`).
+/// R2947 makes it SIX: `reliability` is folded too. This comment used to say
+/// upstream does not put it on the wire, quoting half of upstream's note; the
+/// other half says it IS "a marker on the wire" (see `reliability_from_c`).
 ///
 /// # Safety
 /// `session` must be a valid loaned session; `publisher` must be valid and
@@ -904,6 +938,46 @@ mod locality_tests {
     }
 }
 
+/// R2947 — `z_publisher_put`'s per-put timestamp reaches the publish bundle.
+#[cfg(test)]
+mod put_timestamp_tests {
+    use super::*;
+
+    /// A caller-minted timestamp on `z_publisher_put_options_t` is read into
+    /// the bundle (trailing zid zeros trimmed, as every timestamp reader here
+    /// does); a null one leaves the bundle unstamped. Before R2947 the field was
+    /// skipped, so the first assertion is the one a regression reds.
+    #[test]
+    fn a_publisher_put_timestamp_reaches_the_bundle() {
+        let mut id = [0u8; crate::zid::Z_ID_SIZE];
+        id[..3].copy_from_slice(&[0xA1, 0xB2, 0xC3]);
+        let ts = crate::timestamp::z_timestamp_t {
+            _time: 0x0123_4567_89AB_CDEF,
+            _id: id,
+        };
+        let mut opts = std::mem::MaybeUninit::<z_publisher_put_options_t>::uninit();
+        // SAFETY: a live, writable options slot.
+        unsafe { z_publisher_put_options_default(opts.as_mut_ptr()) };
+        // SAFETY: written by the default above.
+        let mut opts = unsafe { opts.assume_init() };
+        opts.timestamp = &ts as *const _ as *const c_void;
+        // SAFETY: a live struct whose owned fields are null and whose timestamp
+        // borrows `ts`, which outlives the call.
+        let stamped = unsafe { PutOverrides::take(&mut opts) }.apply(publisher_put_options());
+        let hint = stamped.timestamp.expect("the per-put timestamp is carried");
+        assert_eq!(hint.time, 0x0123_4567_89AB_CDEF);
+        assert_eq!(hint.zid, vec![0xA1, 0xB2, 0xC3]);
+
+        opts.timestamp = std::ptr::null();
+        // SAFETY: as above, with a null timestamp.
+        let unstamped = unsafe { PutOverrides::take(&mut opts) }.apply(publisher_put_options());
+        assert!(
+            unstamped.timestamp.is_none(),
+            "null is upstream's unstamped"
+        );
+    }
+}
+
 /// R2946 (open-debt item 403) — the congestion mapping in both directions,
 /// per ABI arm.
 #[cfg(test)]
@@ -949,6 +1023,36 @@ mod congestion_tests {
         let qos = resolved.qos.expect("a publisher bundle carries its QoS");
         assert_eq!(qos.congestion(), CongestionControl::BlockFirst);
         assert_eq!(qos.raw & 0x28, 0x20, "block-first flag set, nodrop clear");
+    }
+
+    /// R2947 — the publisher's declared reliability reaches the bundle every
+    /// put on it starts from. `BEST_EFFORT` is the probe because the default is
+    /// `RELIABLE`.
+    #[cfg(not(feature = "zenoh-c-no-unstable-api"))]
+    #[test]
+    fn a_publisher_carries_its_declared_reliability() {
+        let mut o = z_publisher_options_t {
+            encoding: std::ptr::null_mut(),
+            congestion_control: Z_CONGESTION_CONTROL_DROP,
+            priority: Z_PRIORITY_DATA,
+            is_express: false,
+            reliability: Z_RELIABILITY_BEST_EFFORT,
+            allowed_destination: ZC_LOCALITY_ANY,
+        };
+        // SAFETY: a live local whose owned field is null.
+        let resolved = unsafe { resolve_publisher_options(&mut o) };
+        assert_eq!(
+            resolved.reliability,
+            wz_runtime_tokio::Reliability::BestEffort
+        );
+        assert_eq!(
+            reliability_from_c(Z_RELIABILITY_RELIABLE),
+            wz_runtime_tokio::Reliability::Reliable
+        );
+        assert_eq!(
+            reliability_from_c(7),
+            wz_runtime_tokio::Reliability::Reliable
+        );
     }
 
     /// Without the unstable API upstream cannot name `BLOCK_FIRST`, and the

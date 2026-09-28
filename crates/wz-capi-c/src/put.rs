@@ -50,8 +50,8 @@ pub struct z_put_options_t {
     pub priority: z_priority_t,
     /// Bypass batching for lower latency.
     pub is_express: bool,
-    /// Timestamp of this message. UNREAD — see
-    /// [`z_publisher_put_options_t::timestamp`](crate::publisher::z_publisher_put_options_t).
+    /// Timestamp of this message — a BORROWED `const z_timestamp_t*`, null for
+    /// "unstamped". READ since R311y557 (see `put_options` below).
     pub timestamp: *const c_void,
     /// Put reliability. Present only under `Z_FEATURE_UNSTABLE_API`.
     #[cfg(not(feature = "zenoh-c-no-unstable-api"))]
@@ -81,7 +81,8 @@ pub struct z_delete_options_t {
     pub priority: z_priority_t,
     /// Bypass batching for lower latency.
     pub is_express: bool,
-    /// Timestamp of this message. UNREAD, as on [`z_put_options_t`].
+    /// Timestamp of this message — READ since R311y557, as on
+    /// [`z_put_options_t`].
     pub timestamp: *const c_void,
     /// Delete reliability. Present only under `Z_FEATURE_UNSTABLE_API`.
     #[cfg(not(feature = "zenoh-c-no-unstable-api"))]
@@ -157,6 +158,10 @@ unsafe fn resolve_put_options(options: *mut z_put_options_t) -> PublishOptions {
         .with_express(opts.is_express)
         // R311y554 — HONOURED, no longer read for layout.
         .with_locality(locality_from_c(opts.allowed_destination));
+    // R2947 — reliability, as upstream's `z_put` folds it (unstable arm only,
+    // where the field exists).
+    #[cfg(not(feature = "zenoh-c-no-unstable-api"))]
+    let qos = qos.with_reliability(crate::publisher::reliability_from_c(opts.reliability));
     // SAFETY: as above. TAKEN — an encoding may be heap-owned since R311y564
     // (`z_encoding_from_str`), so a read would leak the caller's label and leave
     // their owned value non-null.
@@ -219,6 +224,9 @@ unsafe fn resolve_delete_options(options: *const z_delete_options_t) -> PublishO
         .with_express(opts.is_express)
         // R311y554 — HONOURED, as on the put side.
         .with_locality(locality_from_c(opts.allowed_destination));
+    // R2947 — reliability, as on the put side.
+    #[cfg(not(feature = "zenoh-c-no-unstable-api"))]
+    let qos = qos.with_reliability(crate::publisher::reliability_from_c(opts.reliability));
     // R311y557 — and the timestamp, as on the put side. A Del body carries the
     // same T-flag a Put does, which is what lets a storage backend order a
     // deletion against the value it deletes.
@@ -511,5 +519,38 @@ mod tests {
         // or rejecting: the field is a plain `c_int` on this ABI.
         assert_eq!(locality_from_c(99), Locality::Any);
         assert_eq!(locality_from_c(-1), Locality::Any);
+    }
+
+    /// R2947 — `reliability` is FOLDED on put and delete, as upstream's
+    /// `z_put` / `z_delete` fold it. The default arm is `RELIABLE`, so the
+    /// probe is `BEST_EFFORT`: an unread field would leave the bundle at the
+    /// default and red both assertions.
+    #[cfg(not(feature = "zenoh-c-no-unstable-api"))]
+    #[test]
+    fn put_and_delete_carry_the_callers_reliability() {
+        use crate::publisher::Z_RELIABILITY_BEST_EFFORT;
+        let mut o = put_options_struct(crate::publisher::ZC_LOCALITY_ANY);
+        o.reliability = Z_RELIABILITY_BEST_EFFORT;
+        // SAFETY: a live local whose owned fields are all null.
+        let resolved = unsafe { resolve_put_options(&mut o) };
+        assert_eq!(
+            resolved.reliability,
+            wz_runtime_tokio::Reliability::BestEffort
+        );
+
+        let d = z_delete_options_t {
+            congestion_control: Z_CONGESTION_CONTROL_DROP,
+            priority: Z_PRIORITY_DATA,
+            is_express: false,
+            timestamp: std::ptr::null(),
+            reliability: Z_RELIABILITY_BEST_EFFORT,
+            allowed_destination: crate::publisher::ZC_LOCALITY_ANY,
+        };
+        // SAFETY: a live local with no owned fields.
+        let resolved = unsafe { resolve_delete_options(&d) };
+        assert_eq!(
+            resolved.reliability,
+            wz_runtime_tokio::Reliability::BestEffort
+        );
     }
 }

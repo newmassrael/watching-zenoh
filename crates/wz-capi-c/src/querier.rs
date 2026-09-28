@@ -55,7 +55,8 @@ pub struct z_querier_options_t {
     pub congestion_control: c_int,
     /// Express flag. R311y551 — HONOURED (bit 4 of the Request QoS byte).
     pub is_express: bool,
-    /// Destination locality. Accepted and ignored.
+    /// Destination locality. R2947 — HONOURED: declared once here and
+    /// inherited by every `z_querier_get`, as on `z_get`.
     pub allowed_destination: c_int,
     /// Which reply keyexprs are accepted — unstable-only.
     #[cfg(not(feature = "zenoh-c-no-unstable-api"))]
@@ -252,29 +253,12 @@ pub unsafe extern "C" fn z_declare_querier(
             return Z_EINVAL;
         }
 
-        let mut base = QueryOptions::default();
-        if !options.is_null() {
+        let base = if options.is_null() {
+            QueryOptions::default()
+        } else {
             // SAFETY: the caller's contract.
-            let o = unsafe { &*options };
-            // SATURATE rather than wrap — a wrapped huge timeout becomes a tiny
-            // one and expires every get immediately.
-            base = base.with_timeout_ms(o.timeout_ms.min(u32::MAX as u64) as u32);
-            if let Some(target) = crate::get::query_target_of(o.target) {
-                base = base.with_target(target);
-            }
-            if let Some(mode) = crate::get::consolidation_of(o.consolidation.mode) {
-                base = base.with_consolidation(mode);
-            }
-            // R311y551 — the request-side QoS trio, previously accepted and
-            // ignored here exactly as on `z_get`. Declared ONCE on the querier
-            // and inherited by every `z_querier_get`, which is upstream's shape:
-            // `z_querier_get_options_t` carries no QoS fields at all, so the
-            // per-get call has nothing to override them with.
-            base = base
-                .with_priority(crate::publisher::priority_from_c(o.priority))
-                .with_congestion_control(crate::publisher::congestion_from_c(o.congestion_control))
-                .with_express(o.is_express);
-        }
+            querier_base(unsafe { &*options })
+        };
 
         let mut boxed = Box::new(QuerierState {
             shared: state.shared.clone(),
@@ -289,6 +273,42 @@ pub unsafe extern "C" fn z_declare_querier(
         unsafe { *querier = z_owned_querier_t::from_handle(handle) };
         Z_OK
     })
+}
+
+/// Fold a `z_querier_options_t` into the query bundle every `z_querier_get`
+/// on the handle starts from.
+///
+/// R2947 — lifted out of `z_declare_querier` so the fold is testable without a
+/// session; the body is unchanged apart from the locality it now also folds.
+fn querier_base(o: &z_querier_options_t) -> QueryOptions {
+    let mut base = QueryOptions::default();
+    {
+        // SATURATE rather than wrap — a wrapped huge timeout becomes a tiny
+        // one and expires every get immediately.
+        base = base.with_timeout_ms(o.timeout_ms.min(u32::MAX as u64) as u32);
+        if let Some(target) = crate::get::query_target_of(o.target) {
+            base = base.with_target(target);
+        }
+        if let Some(mode) = crate::get::consolidation_of(o.consolidation.mode) {
+            base = base.with_consolidation(mode);
+        }
+        // R311y551 — the request-side QoS trio, previously accepted and
+        // ignored here exactly as on `z_get`. Declared ONCE on the querier
+        // and inherited by every `z_querier_get`, which is upstream's shape:
+        // `z_querier_get_options_t` carries no QoS fields at all, so the
+        // per-get call has nothing to override them with.
+        base = base
+            .with_priority(crate::publisher::priority_from_c(o.priority))
+            .with_congestion_control(crate::publisher::congestion_from_c(o.congestion_control))
+            .with_express(o.is_express)
+            // R2947 — and the destination locality, declared once here as
+            // upstream's `z_declare_querier` does
+            // (`zenoh-c/src/querier.rs` @ `.allowed_destination(options.allowed_destination.into())`).
+            // Every `z_querier_get` then reaches `issue_get`, whose
+            // local/remote split already honours it for `z_get`.
+            .with_allowed_destination(crate::put::locality_from_c(o.allowed_destination));
+    }
+    base
 }
 
 /// Borrow a querier (zenoh-c `z_querier_loan`).
@@ -590,6 +610,42 @@ pub unsafe extern "C" fn z_querier_drop(this_: *mut z_moved_querier_t) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// R2947 — the querier's declared `allowed_destination` reaches the bundle
+    /// every `z_querier_get` starts from. Before R2947 it was accepted and
+    /// ignored, so every non-default value here resolved to `Any`.
+    #[test]
+    fn a_querier_carries_its_declared_allowed_destination() {
+        use wz_runtime_tokio::locality::Locality;
+        for (c_value, expected) in [
+            (crate::publisher::ZC_LOCALITY_ANY, Locality::Any),
+            (
+                crate::publisher::ZC_LOCALITY_SESSION_LOCAL,
+                Locality::SessionLocal,
+            ),
+            (crate::publisher::ZC_LOCALITY_REMOTE, Locality::Remote),
+        ] {
+            let mut o = z_querier_options_t {
+                target: 0,
+                consolidation: z_query_consolidation_t { mode: 0 },
+                congestion_control: 0,
+                is_express: false,
+                allowed_destination: 0,
+                #[cfg(not(feature = "zenoh-c-no-unstable-api"))]
+                accept_replies: 0,
+                priority: 0,
+                timeout_ms: 0,
+            };
+            // SAFETY: a live local.
+            unsafe { z_querier_options_default(&mut o) };
+            o.allowed_destination = c_value;
+            assert_eq!(
+                querier_base(&o).allowed_destination,
+                expected,
+                "z_querier_options_t.allowed_destination = {c_value}",
+            );
+        }
+    }
 
     /// The two options structs default to what upstream's do, and both timeouts
     /// start at 0 meaning "resolve the default".
