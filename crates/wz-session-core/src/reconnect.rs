@@ -629,6 +629,7 @@ mod reconnect_locator_tests {
             target: SerialTarget::Device("/dev/ttyUSB0".into()),
             baudrate: 115200,
             options: Default::default(),
+            qos: None,
         });
         assert_eq!(
             ReconnectLocator::try_from(any),
@@ -644,6 +645,7 @@ mod reconnect_locator_tests {
         // construction; a path arm is a clean extension point).
         let any = AnyLocator::Unixsock(UnixsockEndpoint {
             path: "/tmp/zenoh.sock".into(),
+            qos: None,
         });
         assert_eq!(
             ReconnectLocator::try_from(any),
@@ -659,6 +661,7 @@ mod reconnect_locator_tests {
         let any = AnyLocator::Vsock(VsockEndpoint {
             cid: 1,
             port: 17000,
+            qos: None,
         });
         assert_eq!(
             ReconnectLocator::try_from(any),

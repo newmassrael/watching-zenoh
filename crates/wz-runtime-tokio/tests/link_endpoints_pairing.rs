@@ -503,11 +503,13 @@ async fn serial_link_ends_report_their_own_endpoint_for_both_address_forms() {
         target: SerialTarget::Device("/dev/ttyUSB0".to_string()),
         baudrate: 115_200,
         options: SerialOptions::default(),
+        qos: None,
     };
     let pins_end = SerialEndpoint {
         target: SerialTarget::Pins { tx: 12, rx: 13 },
         baudrate: 9_600,
         options: SerialOptions::default(),
+        qos: None,
     };
 
     let (a, b) = SerialStream::pair().expect("openpty serial pair");

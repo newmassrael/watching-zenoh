@@ -1424,6 +1424,10 @@ pub struct SerialEndpoint {
     /// default row, so a locator that names none of them parses to exactly the
     /// behaviour zenoh would give it.
     pub options: SerialOptions,
+    /// R2945 — the endpoint's QoS metadata, `prio=` / `rel=` off its
+    /// `?`-metadata span, as [`ParsedLocator::qos`]: upstream reads it off any
+    /// endpoint, a serial one included, when the link's QoS state is built.
+    pub qos: Option<Box<LocatorQosMetadata>>,
 }
 
 impl SerialEndpoint {
@@ -1553,6 +1557,7 @@ pub fn parse_serial_locator(locator: &str) -> Result<SerialEndpoint, SerialLocat
         target,
         baudrate,
         options,
+        qos: parse_qos_metadata(parts.metadata),
     })
 }
 
@@ -1650,6 +1655,8 @@ pub struct UnixsockEndpoint {
     /// `unixsock-stream//tmp/zenoh.sock`, the same scheme+abs-path shape the
     /// serial leaf parses (`serial//dev/ttyUSB0`).
     pub path: String,
+    /// R2945 — the endpoint's QoS metadata, as [`ParsedLocator::qos`].
+    pub qos: Option<Box<LocatorQosMetadata>>,
 }
 
 /// Why a `unixsock-stream/...` locator string did not parse.
@@ -1687,12 +1694,14 @@ pub fn parse_unixsock_locator(locator: &str) -> Result<UnixsockEndpoint, Unixsoc
     // `#config` tail into the socket path; zenoh cuts at either (endpoint.rs:32-37).
     // A path containing `#` or `?` is unaddressable in zenoh and pico too — the
     // limitation is the grammar's, and mirroring it is the point.
-    let path = split_locator_parts(body).address;
+    let parts = split_locator_parts(body);
+    let path = parts.address;
     if path.is_empty() {
         return Err(UnixsockLocatorError::EmptyPath);
     }
     Ok(UnixsockEndpoint {
         path: path.to_string(),
+        qos: parse_qos_metadata(parts.metadata),
     })
 }
 
@@ -1735,6 +1744,8 @@ pub struct UnixpipeEndpoint {
     /// else on this host may open the link must not look like a working
     /// configuration. The ACCEPTED set is identical.
     pub file_mask: Option<u32>,
+    /// R2945 — the endpoint's QoS metadata, as [`ParsedLocator::qos`].
+    pub qos: Option<Box<LocatorQosMetadata>>,
 }
 
 /// Why a `unixpipe/...` locator string did not parse.
@@ -1782,6 +1793,7 @@ pub fn parse_unixpipe_locator(locator: &str) -> Result<UnixpipeEndpoint, Unixpip
     Ok(UnixpipeEndpoint {
         path: path.to_string(),
         file_mask: parse_file_mask(parts.config)?,
+        qos: parse_qos_metadata(parts.metadata),
     })
 }
 
@@ -1844,12 +1856,17 @@ pub const VMADDR_PORT_ANY: u32 = 0xFFFF_FFFF;
 /// serial / unixsock — this is a distinct non-IP endpoint shape rather than a
 /// [`Proto`] variant. Building the live `tokio_vsock::VsockAddr` is the
 /// backend's concern.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+///
+/// R2945 — no longer `Copy`: it carries the endpoint's QoS metadata, which is
+/// owned text.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VsockEndpoint {
     /// The context-id (a literal `u32`, or one of the `VMADDR_CID_*` sentinels).
     pub cid: u32,
     /// The port (a literal `u32`, or `VMADDR_PORT_ANY`).
     pub port: u32,
+    /// R2945 — the endpoint's QoS metadata, as [`ParsedLocator::qos`].
+    pub qos: Option<Box<LocatorQosMetadata>>,
 }
 
 /// Why a `vsock/<CID>:<PORT>` locator string did not parse.
@@ -1889,7 +1906,8 @@ pub fn parse_vsock_locator(locator: &str) -> Result<VsockEndpoint, VsockLocatorE
     }
     // R311y469 — the `<CID>:<PORT>` pair is the ADDRESS span; without the cut a
     // `?metadata` / `#config` tail landed in the PORT token and failed BadPort.
-    let addr = split_locator_parts(body).address;
+    let parts = split_locator_parts(body);
+    let addr = parts.address;
     // Exactly `<CID>:<PORT>` — zenoh's `split(':')` requires len == 2, so a
     // missing or extra `:` is rejected (an empty CID/PORT then fails its own
     // numeric parse below).
@@ -1902,6 +1920,7 @@ pub fn parse_vsock_locator(locator: &str) -> Result<VsockEndpoint, VsockLocatorE
     Ok(VsockEndpoint {
         cid: parse_vsock_cid(cid_str)?,
         port: parse_vsock_port(port_str)?,
+        qos: parse_qos_metadata(parts.metadata),
     })
 }
 
@@ -2031,6 +2050,23 @@ pub enum AnyLocator {
     /// feature-off — as serial/udp surface a missing backend. A non-IP
     /// `(cid, port)` pair, so — like serial / unixsock — not a [`Proto`].
     Vsock(VsockEndpoint),
+}
+
+impl AnyLocator {
+    /// R2945 — the QoS metadata this endpoint declares (`prio=` / `rel=`),
+    /// whatever its shape: upstream reads it off every endpoint when a link's
+    /// QoS state is built. Exhaustive and wildcard-free, so a shape added to
+    /// [`AnyLocator`] has to say where its metadata lives.
+    pub fn qos_metadata(&self) -> Option<&LocatorQosMetadata> {
+        match self {
+            AnyLocator::Ip(ip) => ip.qos.as_deref(),
+            AnyLocator::Named { qos, .. } => qos.as_deref(),
+            AnyLocator::Serial(serial) => serial.qos.as_deref(),
+            AnyLocator::Unixsock(unixsock) => unixsock.qos.as_deref(),
+            AnyLocator::Unixpipe(unixpipe) => unixpipe.qos.as_deref(),
+            AnyLocator::Vsock(vsock) => vsock.qos.as_deref(),
+        }
+    }
 }
 
 /// Why a locator string did not parse into an [`AnyLocator`] — the
@@ -2206,11 +2242,13 @@ mod tests {
                 target: SerialTarget::Device("/dev/ttyUSB0".into()),
                 baudrate: 115_200,
                 options: SerialOptions::default(),
+                qos: None,
             },
             SerialEndpoint {
                 target: SerialTarget::Pins { tx: 12, rx: 13 },
                 baudrate: 9_600,
                 options: SerialOptions::default(),
+                qos: None,
             },
             // R2704 — a NON-DEFAULT row, and it is the one that makes this test
             // grade the renderer rather than the parser. With defaults only,
@@ -2225,6 +2263,7 @@ mod tests {
                     timeout_us: 12_345,
                     release_on_close: false,
                 },
+                qos: None,
             },
         ] {
             let locator =
@@ -3295,6 +3334,7 @@ mod tests {
                 target: SerialTarget::Device("/dev/ttyUSB0".to_string()),
                 baudrate: 115200,
                 options: SerialOptions::default(),
+                qos: None,
             })
         );
     }
@@ -3309,6 +3349,7 @@ mod tests {
                 target: SerialTarget::Device("/dev/ttyUSB0".to_string()),
                 baudrate: SERIAL_DEFAULT_BAUDRATE,
                 options: SerialOptions::default(),
+                qos: None,
             })
         );
         // ...and the ANTI-VACUITY half: a MALFORMED value is still refused, so
@@ -3383,6 +3424,7 @@ mod tests {
             parse_unixsock_locator("unixsock-stream//tmp/zenoh.sock?meta=x#iface=eth0"),
             Ok(UnixsockEndpoint {
                 path: "/tmp/zenoh.sock".to_string(),
+                qos: None,
             })
         );
     }
@@ -3394,6 +3436,7 @@ mod tests {
             Ok(UnixpipeEndpoint {
                 path: "/tmp/wz.pipe".to_string(),
                 file_mask: None,
+                qos: None,
             })
         );
     }
@@ -3410,6 +3453,7 @@ mod tests {
             Ok(UnixpipeEndpoint {
                 path: "/tmp/wz.pipe".to_string(),
                 file_mask: Some(511),
+                qos: None,
             })
         );
         // Alongside another config key, in either order — the shared `;` list
@@ -3419,6 +3463,7 @@ mod tests {
             Ok(UnixpipeEndpoint {
                 path: "/tmp/wz.pipe".to_string(),
                 file_mask: Some(416),
+                qos: None,
             })
         );
     }
@@ -3433,6 +3478,7 @@ mod tests {
             Ok(UnixpipeEndpoint {
                 path: "/tmp/wz.pipe".to_string(),
                 file_mask: None,
+                qos: None,
             })
         );
     }
@@ -3454,6 +3500,7 @@ mod tests {
             Ok(UnixpipeEndpoint {
                 path: "/tmp/wz.pipe".to_string(),
                 file_mask: None,
+                qos: None,
             })
         );
     }
@@ -3477,7 +3524,16 @@ mod tests {
     fn vsock_leaf_cuts_address_at_both_separators() {
         assert_eq!(
             parse_vsock_locator("vsock/2:7447?prio=1-3#iface=eth0"),
-            Ok(VsockEndpoint { cid: 2, port: 7447 })
+            Ok(VsockEndpoint {
+                cid: 2,
+                port: 7447,
+                // R2945 — the metadata is cut off the address AND kept: a
+                // non-IP endpoint declares its link's band as an IP one does.
+                qos: Some(Box::new(LocatorQosMetadata {
+                    priorities: Some("1-3".to_string()),
+                    reliability: None,
+                })),
+            })
         );
     }
 

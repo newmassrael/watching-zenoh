@@ -62,6 +62,7 @@ fn pty_endpoint() -> SerialEndpoint {
         target: SerialTarget::Device("/dev/wz-test-pty".to_string()),
         baudrate: 115_200,
         options: SerialOptions::default(),
+        qos: None,
     }
 }
 use wz_session_core::session_timeouts::SessionTimeouts;

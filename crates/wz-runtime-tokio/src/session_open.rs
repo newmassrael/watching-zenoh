@@ -4681,13 +4681,8 @@ pub fn offer_for_endpoint(
     {
         let mut offer = offer;
         offer.qos_link = if offer.mode == TransportMode::Qos {
-            let declared = match locator {
-                AnyLocator::Ip(ip) => ip.qos.as_deref(),
-                AnyLocator::Named { qos, .. } => qos.as_deref(),
-                // The non-IP leaves keep no metadata span yet.
-                _ => None,
-            };
-            declared
+            locator
+                .qos_metadata()
                 .map(wz_session_core::extqos::qos_link_from_endpoint)
                 .transpose()
                 .map_err(OpenError::QosLinkRejected)?
@@ -6169,6 +6164,20 @@ mod tests {
             Some(Reliability::BestEffort),
             "a DNS-named endpoint's metadata is read like a numeric one's"
         );
+
+        // R2945 — and a non-IP endpoint's: R2944's seam answered `None` for
+        // every non-IP shape, whatever its metadata said.
+        assert_eq!(
+            offer_for_endpoint(qos, &at("unixsock-stream//tmp/wz.sock?prio=2"))
+                .expect("a non-IP endpoint declares too")
+                .qos_link
+                .and_then(|q| q.priorities),
+            Some(LinkPriorityRange::new(
+                Priority::InteractiveHigh,
+                Priority::InteractiveHigh
+            )),
+            "a unix-socket endpoint's band is read like an IP one's"
+        );
     }
 
     // ── R311pm/R311ps — dial-routing classifier (`plan_endpoint`). Pure (no
@@ -6747,7 +6756,7 @@ mod tests {
         assert_eq!(
             parse_any_locator(&advertised),
             Ok(AnyLocator::Unixsock(
-                wz_session_core::locator::UnixsockEndpoint { path }
+                wz_session_core::locator::UnixsockEndpoint { path, qos: None }
             )),
         );
         drop(listener);

@@ -1094,6 +1094,7 @@ mod tests {
             target: SerialTarget::Device("/dev/wz-test-pty".to_string()),
             baudrate: 115_200,
             options: SerialOptions::default(),
+            qos: None,
         }
     }
 
