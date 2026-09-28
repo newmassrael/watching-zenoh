@@ -1789,8 +1789,8 @@ struct FrameEmit {
     deadline: PushDeadline,
 }
 
-/// R2923 / R2926 — whether a message was pushed onto its conduit's link, or
-/// found no room within its deadline (a congestion drop).
+// R2928 — the outcome and the deadline moved to `crate::tx_deadline`, which
+// the multicast transmission pipeline shares.
 #[cfg(any(
     feature = "codec-push",
     feature = "codec-request",
@@ -1803,112 +1803,7 @@ struct FrameEmit {
     feature = "declare-interest",
     feature = "liveliness-token",
 ))]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum PushOutcome {
-    Pushed,
-    Congested,
-}
-
-/// R2926 — one message's congestion deadline, held across every ask for room
-/// its frame or fragment chain makes: upstream's `Deadline` over a
-/// `LazyDeadline` over a `WaitTime`
-/// (`io/zenoh-transport/src/common/pipeline.rs` @ `fn advance(&mut self, instant: &mut Instant) {`).
-///
-/// A droppable message starts with `wait_before_drop`, and each fragment it
-/// puts on the wire extends the deadline by an increment that DOUBLES, the
-/// extensions together capped by `max_wait_before_drop_fragments`. A blocking
-/// message has no cap to spend, so upstream's advance leaves its deadline
-/// where it is: the whole chain shares one `wait_before_close`.
-///
-/// The session holds the deadline as microseconds LEFT, not as an instant: it
-/// has no clock that fine, and each ask reports how long it waited
-/// ([`crate::link::RoomAnswer`]), which is what spends it.
-#[cfg(any(
-    feature = "codec-push",
-    feature = "codec-request",
-    feature = "codec-response",
-    feature = "codec-response-final",
-    feature = "declare-keyexpr",
-    feature = "declare-subscriber",
-    feature = "declare-queryable",
-    feature = "declare-token",
-    feature = "declare-interest",
-    feature = "liveliness-token",
-))]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[cfg_attr(not(feature = "transport-fragmentation"), allow(dead_code))]
-struct PushDeadline {
-    droppable: bool,
-    /// Microseconds left before the deadline.
-    left_us: u64,
-    /// The increment the next fragment adds (droppable only).
-    step_us: u64,
-    /// What is left of `max_wait_before_drop_fragments` (droppable only).
-    extend_left_us: u64,
-}
-
-#[cfg(any(
-    feature = "codec-push",
-    feature = "codec-request",
-    feature = "codec-response",
-    feature = "codec-response-final",
-    feature = "declare-keyexpr",
-    feature = "declare-subscriber",
-    feature = "declare-queryable",
-    feature = "declare-token",
-    feature = "declare-interest",
-    feature = "liveliness-token",
-))]
-impl PushDeadline {
-    fn new(droppable: bool, conf: &TxQueueConf) -> Self {
-        if droppable {
-            Self {
-                droppable,
-                left_us: conf.wait_before_drop_us,
-                step_us: conf.wait_before_drop_us,
-                extend_left_us: conf.max_wait_before_drop_fragments_us,
-            }
-        } else {
-            Self {
-                droppable,
-                left_us: conf.wait_before_close_us,
-                step_us: 0,
-                extend_left_us: 0,
-            }
-        }
-    }
-
-    /// The ask for room this deadline makes now.
-    fn ask(&self) -> crate::link::RoomWait {
-        if self.droppable {
-            crate::link::RoomWait::Drop {
-                wait_us: self.left_us,
-            }
-        } else {
-            crate::link::RoomWait::Block {
-                wait_us: self.left_us,
-            }
-        }
-    }
-
-    /// Spend what an ask waited.
-    fn spend(&mut self, waited_us: u64) {
-        self.left_us = self.left_us.saturating_sub(waited_us);
-    }
-
-    /// A fragment went out: upstream's `on_next_fragment`, which doubles the
-    /// increment and adds it, bounded by what is left of the cap.
-    #[cfg_attr(not(feature = "transport-fragmentation"), allow(dead_code))]
-    fn next_fragment(&mut self) {
-        if !self.droppable {
-            return;
-        }
-        self.step_us = self.step_us.saturating_mul(2);
-        let add = self.step_us.min(self.extend_left_us);
-        self.extend_left_us -= add;
-        self.left_us = self.left_us.saturating_add(add);
-    }
-}
+use crate::tx_deadline::{PushDeadline, PushOutcome};
 
 impl<R: SessionRuntime, T: TimeSource> Deref for SessionLinkActions<R, T> {
     type Target = SessionCore<R, T>;

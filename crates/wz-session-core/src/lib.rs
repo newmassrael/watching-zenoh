@@ -425,6 +425,12 @@ pub mod session_init_params;
 #[cfg(feature = "alloc")]
 pub mod link;
 
+/// R2928 — a pushed message's congestion outcome and deadline, shared by the
+/// unicast session and the multicast transmission pipeline. Alloc-gated with
+/// the two modules it reads ([`link`] and [`session_init_params`]).
+#[cfg(feature = "alloc")]
+pub mod tx_deadline;
+
 /// Inbound-parse error surface + ext-chain depth ceiling. Precursor
 /// for the NetworkMessage / DriverLoopOutcome dispatch cluster.
 /// no_std clean (core::fmt + core::error::Error); unconditional.

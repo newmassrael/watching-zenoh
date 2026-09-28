@@ -20,6 +20,11 @@
 //! The per-variant `mint -> encode_frame_with_* -> multicast_frame_or_fragments`
 //! orchestration is behaviour-identical to the inline arm the AP loop carried
 //! before R311lx; only its home moved.
+//!
+//! R2928 — the orchestration is now [`multicast_tx_push`]: room is asked of a
+//! bounded [`MulticastTxQueue`] before each SN is minted, as upstream's
+//! multicast pipeline does. [`multicast_tx_emit`] is that push over a queue
+//! that always has room, so both loops keep one producer.
 
 // Only the boxed variants (Push / Response / DeclareReply) name Box; a build
 // with only the unboxed ResponseFinal (or no data codec) must not import it.
@@ -31,11 +36,22 @@
 use alloc::boxed::Box;
 use alloc::vec::Vec;
 
-// R311y227 — the per-priority multicast conduit send-side band type. Gated on the
-// codecs that carry a band: Push, and (R2594) Response, which rides the band its
-// own `ext_qos` names. ResponseFinal and the declare reply stay DEFAULT.
-#[cfg(any(feature = "codec-push", feature = "codec-response"))]
+// R311y227 — the per-priority multicast conduit send-side band type. R2928 —
+// unconditional: every queue lane is named by it, whichever codecs are built.
 use crate::qos::Priority;
+
+use crate::link::{RoomAnswer, RoomWait};
+#[cfg(any(
+    feature = "codec-push",
+    feature = "codec-response",
+    feature = "codec-response-final",
+    feature = "liveliness-token"
+))]
+use crate::{
+    link::LinkRoom,
+    session_init_params::TxQueueConf,
+    tx_deadline::{PushDeadline, PushOutcome},
+};
 
 /// One queued outbound data emission for a multicast drive loop's TX half
 /// (A1c). The application enqueues items (the AP via a
@@ -158,28 +174,6 @@ pub struct MulticastTxFrames {
     pub reliable: bool,
 }
 
-/// Mint the channel SN for `item`, encode its network message into a
-/// `T_MID_FRAME` via the matching `encode_frame_with_*` SSOT, and re-frame it
-/// into a `T_MID_FRAGMENT` chain when the frame exceeds the group batch budget
-/// ([`batch_size`](crate::multicast_params::MulticastParams::batch_size)). The
-/// TX twin of
-/// [`dispatch_multicast_inbound`](crate::multicast_rx::dispatch_multicast_inbound);
-/// the caller multicasts the returned [`MulticastTxFrames::datagrams`] in order
-/// on its own driver.
-///
-/// `Push` mints on the channel its `reliable` flag selects; the queryable
-/// `Response` / `ResponseFinal` and the liveliness `DeclareReply` are pinned
-/// reliable (a dropped reply / terminal hangs the peer's pending get, so they
-/// ride the reliable SN ring + R flag — zenoh-pico parity). Every variant
-/// routes through the one
-/// [`multicast_frame_or_fragments`](crate::frame_encode::multicast_frame_or_fragments)
-/// egress path; a `ResponseFinal` is a single tiny VLE rid that never reaches
-/// the budget, so that call returns its one frame with no follow-on mint
-/// (byte-identical to a dedicated single send).
-///
-/// Gated on the union of the body codecs that inhabit [`MulticastTxItem`]: with
-/// none, the item is uninhabited and can never be enqueued, so the emit SSOT
-/// does not exist (the loops consume the uninhabited item with an empty match).
 /// R311y227 — the multicast send-side band clamp: the app / routing priority
 /// when the group negotiated `is_qos` under `transport-qos`, else
 /// [`Priority::DEFAULT`]. A build WITHOUT `transport-qos` has no per-priority
@@ -212,6 +206,71 @@ fn frame_ext_qos(priority: Priority) -> Option<Priority> {
     (priority != Priority::DEFAULT).then_some(priority)
 }
 
+/// R2928 — the bounded queue a multicast transmission pipeline pushes onto:
+/// upstream's per-priority stage of a multicast link's `TransmissionPipeline`,
+/// which is built from the same queue configuration as a unicast link's
+/// (`io/zenoh-transport/src/multicast/link.rs` @ `let tpc = TransmissionPipelineConf {`).
+///
+/// The two questions are the ones the unicast session asks of its link
+/// ([`BoxedLinkDriver::wait_for_room`](crate::link::BoxedLinkDriver::wait_for_room)),
+/// kept apart for the same reason: room is asked BEFORE a sequence number is
+/// minted, so a message that finds none spends no SN, and the datagram is
+/// enqueued only once it has one.
+pub trait MulticastTxQueue {
+    /// Wait, within `wait`, for room on `priority`'s lane.
+    fn wait_for_room(&mut self, priority: Priority, wait: RoomWait) -> RoomAnswer;
+
+    /// Put one wire datagram on `priority`'s lane. Room was asked first; a
+    /// fragment chain's stop marker is the one datagram enqueued without it,
+    /// outside the bound, as upstream's ephemeral stop batch is outside its
+    /// pool.
+    fn enqueue(&mut self, priority: Priority, datagram: Vec<u8>);
+}
+
+/// A queue that always has room and keeps what it is given: the pico-faithful
+/// shape, where a multicast send goes straight to the socket and there is no
+/// queue to be full (`multicast_tx_emit`'s backing).
+#[cfg(any(
+    feature = "codec-push",
+    feature = "codec-response",
+    feature = "codec-response-final",
+    feature = "liveliness-token"
+))]
+struct UnboundedCollect(Vec<Vec<u8>>);
+
+#[cfg(any(
+    feature = "codec-push",
+    feature = "codec-response",
+    feature = "codec-response-final",
+    feature = "liveliness-token"
+))]
+impl MulticastTxQueue for UnboundedCollect {
+    fn wait_for_room(&mut self, _priority: Priority, _wait: RoomWait) -> RoomAnswer {
+        RoomAnswer::at_once(LinkRoom::Free)
+    }
+
+    fn enqueue(&mut self, _priority: Priority, datagram: Vec<u8>) {
+        self.0.push(datagram);
+    }
+}
+
+/// Mint the channel SN for `item`, encode its network message into a
+/// `T_MID_FRAME` via the matching `encode_frame_with_*` SSOT, and re-frame it
+/// into a `T_MID_FRAGMENT` chain when the frame exceeds the group batch budget
+/// ([`batch_size`](crate::multicast_params::MulticastParams::batch_size)), with
+/// no queue in the way. The TX twin of
+/// [`dispatch_multicast_inbound`](crate::multicast_rx::dispatch_multicast_inbound);
+/// the caller multicasts the returned [`MulticastTxFrames::datagrams`] in order
+/// on its own driver.
+///
+/// R2928 — this is [`multicast_tx_push`] over a queue that always has room, so
+/// the wire and the SN walk have ONE producer whether or not a bounded queue
+/// sits under the loop. The MCU loop sends this way, as zenoh-pico does: its
+/// multicast TX writes straight to the socket.
+///
+/// Gated on the union of the body codecs that inhabit [`MulticastTxItem`]: with
+/// none, the item is uninhabited and can never be enqueued, so the emit SSOT
+/// does not exist (the loops consume the uninhabited item with an empty match).
 #[cfg(any(
     feature = "codec-push",
     feature = "codec-response",
@@ -223,6 +282,67 @@ pub fn multicast_tx_emit(
     tx_sn: &mut crate::sn::MulticastTxConduits,
     params: &crate::multicast_params::MulticastParams,
 ) -> MulticastTxFrames {
+    let reliable = multicast_tx_reliable(&item);
+    let mut collect = UnboundedCollect(Vec::new());
+    // Always room, so never `Congested`; the waits are never spent.
+    let _ = multicast_tx_push(item, tx_sn, params, &TxQueueConf::default(), &mut collect);
+    MulticastTxFrames {
+        datagrams: collect.0,
+        reliable,
+    }
+}
+
+/// The channel `item` rides: a Push's own flag; the replies are pinned
+/// reliable (a dropped reply / terminal hangs the peer's pending get, so they
+/// ride the reliable SN ring + R flag — zenoh-pico parity).
+#[cfg(any(
+    feature = "codec-push",
+    feature = "codec-response",
+    feature = "codec-response-final",
+    feature = "liveliness-token"
+))]
+fn multicast_tx_reliable(item: &MulticastTxItem) -> bool {
+    match item {
+        #[cfg(feature = "codec-push")]
+        MulticastTxItem::Push { reliable, .. } => *reliable,
+        #[cfg(feature = "codec-response")]
+        MulticastTxItem::Response { .. } => true,
+        #[cfg(feature = "codec-response-final")]
+        MulticastTxItem::ResponseFinal { .. } => true,
+        #[cfg(feature = "liveliness-token")]
+        MulticastTxItem::DeclareReply { .. } => true,
+    }
+}
+
+/// R2928 — push `item` onto a multicast link's bounded `queue`: upstream's
+/// `push_network_message` on the multicast link's pipeline
+/// (`io/zenoh-transport/src/common/pipeline.rs` @ `pub(crate) fn push_network_message(`).
+///
+/// The message's deadline is [`PushDeadline`] over `conf`: `wait_before_drop`
+/// for a droppable message, `wait_before_close` for a blocking one, each
+/// fragment of a chain extending a droppable one. Room is asked before the
+/// frame's SN is minted, so a message that finds none leaves its conduit's
+/// ring where it was; a chain that runs out between fragments is stopped with
+/// a drop marker that takes the next SN, as the unicast chain is.
+///
+/// `Congested` is the whole of what a multicast transport does with a message
+/// that found no room, blocking or not: upstream's multicast schedule counts it
+/// as a congestion drop and closes nothing
+/// (`io/zenoh-transport/src/multicast/tx.rs` @ `fn schedule_on_link(&self, msg: NetworkMessageRef) -> ZResult<bool> {`),
+/// where a unicast transport closes on a blocking one.
+#[cfg(any(
+    feature = "codec-push",
+    feature = "codec-response",
+    feature = "codec-response-final",
+    feature = "liveliness-token"
+))]
+pub fn multicast_tx_push<Q: MulticastTxQueue + ?Sized>(
+    item: MulticastTxItem,
+    tx_sn: &mut crate::sn::MulticastTxConduits,
+    params: &crate::multicast_params::MulticastParams,
+    conf: &TxQueueConf,
+    queue: &mut Q,
+) -> PushOutcome {
     match item {
         // TxData: mint the channel SN, wrap in a T_MID_FRAME (frame_encode
         // SSOT), and let multicast_frame_or_fragments re-frame an oversize
@@ -246,21 +366,24 @@ pub fn multicast_tx_emit(
             // to the pre-qos wire.
             let eff = effective_mcast_priority(priority, params.is_qos);
             let ext_qos = frame_ext_qos(eff);
-            let frame_sn = tx_sn.mint(eff, reliable);
-            let dgram =
-                crate::frame_encode::encode_frame_with_push_qos(frame_sn, *push, reliable, ext_qos);
-            let datagrams = crate::frame_encode::multicast_frame_or_fragments(
-                dgram,
-                frame_sn,
-                reliable,
-                params.batch_size as usize,
-                tx_sn,
+            // R2928 — the congestion control comes off the Push's own ext_qos,
+            // as upstream's `congestion_control()` reads it
+            // (`commons/zenoh-protocol/src/network/mod.rs` @ `NetworkBodyRef::Push(msg) => msg.ext_qos.get_congestion_control(),`).
+            let congestion = crate::declare_ext_qos::read_push_qos(&push).congestion();
+            let meta = FrameMeta {
+                priority: eff,
                 ext_qos,
-            );
-            MulticastTxFrames {
-                datagrams,
                 reliable,
-            }
+                droppable: is_droppable(reliable, congestion),
+            };
+            push_frame(
+                meta,
+                |sn| crate::frame_encode::encode_frame_with_push_qos(sn, *push, reliable, ext_qos),
+                tx_sn,
+                params,
+                conf,
+                queue,
+            )
         }
         // R311lq — queryable reply egress. Reliable like a reliable-ring put
         // (zenoh-pico replies via the same `_z_send_n_msg` multicast TX with
@@ -275,29 +398,27 @@ pub fn multicast_tx_emit(
             // This arm used to pin DEFAULT with a note that "zenoh treats reply
             // priority as a separate concern", which that match arm refutes. A
             // non-qos group still clamps to DEFAULT, byte-identical to before.
-            let eff = effective_mcast_priority(
-                crate::declare_ext_qos::read_response_qos(&response).priority(),
-                params.is_qos,
-            );
+            let qos = crate::declare_ext_qos::read_response_qos(&response);
+            let eff = effective_mcast_priority(qos.priority(), params.is_qos);
             let ext_qos = frame_ext_qos(eff);
-            let frame_sn = tx_sn.mint(eff, /* reliable = */ true);
-            let dgram = crate::frame_encode::encode_frame_with_response_qos(
-                frame_sn, *response, /* reliable = */ true, ext_qos,
-            );
-            let datagrams = crate::frame_encode::multicast_frame_or_fragments(
-                dgram,
-                frame_sn,
-                true,
-                params.batch_size as usize,
-                tx_sn,
-                // ResponseFinal and DeclareReply below stay DEFAULT-band: neither
-                // carries a band wz stamps yet.
+            let meta = FrameMeta {
+                priority: eff,
                 ext_qos,
-            );
-            MulticastTxFrames {
-                datagrams,
                 reliable: true,
-            }
+                droppable: is_droppable(true, qos.congestion()),
+            };
+            push_frame(
+                meta,
+                |sn| {
+                    crate::frame_encode::encode_frame_with_response_qos(
+                        sn, *response, /* reliable = */ true, ext_qos,
+                    )
+                },
+                tx_sn,
+                params,
+                conf,
+                queue,
+            )
         }
         // R311lq — the terminal of a multicast reply chain. Always reliable and
         // always tiny (a single VLE rid), so it never reaches the fragment
@@ -309,30 +430,31 @@ pub fn multicast_tx_emit(
             // Response arm above is, rather than a pinned DEFAULT.
             let eff = effective_mcast_priority(qos.priority(), params.is_qos);
             let ext_qos = frame_ext_qos(eff);
-            let frame_sn = tx_sn.mint(eff, /* reliable = */ true);
-            let dgram = crate::frame_encode::encode_frame_with_response_final_qos(
-                frame_sn,
-                crate::response_final_build::build_response_final(request_id, qos),
-                /* reliable = */ true,
+            let meta = FrameMeta {
+                priority: eff,
                 ext_qos,
-            );
-            // Uniform egress: a ResponseFinal is a single tiny VLE rid that never
-            // reaches the budget, so multicast_frame_or_fragments returns the one
-            // frame with no follow-on mint (byte-identical to a single send) -
-            // one path for all four variants rather than a special case.
-            let datagrams = crate::frame_encode::multicast_frame_or_fragments(
-                dgram,
-                frame_sn,
-                true,
-                params.batch_size as usize,
-                tx_sn,
-                // Control-plane reply frames (Response / ResponseFinal /
-                ext_qos,
-            );
-            MulticastTxFrames {
-                datagrams,
                 reliable: true,
-            }
+                droppable: is_droppable(true, qos.congestion()),
+            };
+            // Uniform egress: a ResponseFinal is a single tiny VLE rid that never
+            // reaches the budget, so `push_frame` enqueues the one frame with no
+            // follow-on mint (byte-identical to a single send) - one path for
+            // all four variants rather than a special case.
+            push_frame(
+                meta,
+                |sn| {
+                    crate::frame_encode::encode_frame_with_response_final_qos(
+                        sn,
+                        crate::response_final_build::build_response_final(request_id, qos),
+                        /* reliable = */ true,
+                        ext_qos,
+                    )
+                },
+                tx_sn,
+                params,
+                conf,
+                queue,
+            )
         }
         // R311lr — declarer-side liveliness interest-response egress. Reliable —
         // zenoh-pico's `_z_send_declare` rides `_z_send_n_msg` with
@@ -340,27 +462,140 @@ pub fn multicast_tx_emit(
         // keyexpr re-frames as a fragment chain exactly like an oversize Push.
         #[cfg(feature = "liveliness-token")]
         MulticastTxItem::DeclareReply { declare } => {
-            let frame_sn = tx_sn.mint(crate::qos::Priority::DEFAULT, /* reliable = */ true);
-            let dgram = crate::frame_encode::encode_frame_with_declare(
-                frame_sn, *declare, /* reliable = */ true,
-            );
-            let datagrams = crate::frame_encode::multicast_frame_or_fragments(
-                dgram,
-                frame_sn,
-                true,
-                params.batch_size as usize,
-                tx_sn,
-                // Control-plane reply frames (Response / ResponseFinal /
-                // DeclareReply) are DEFAULT-band (zenoh treats reply priority as a
-                // separate concern); no frame ext_qos, no per-priority conduit.
-                None,
-            );
-            MulticastTxFrames {
-                datagrams,
+            let congestion = crate::declare_ext_qos::read_declare_qos(&declare).congestion();
+            // The declare reply is DEFAULT-band: no frame ext_qos, no
+            // per-priority conduit.
+            let meta = FrameMeta {
+                priority: Priority::DEFAULT,
+                ext_qos: None,
                 reliable: true,
-            }
+                droppable: is_droppable(true, congestion),
+            };
+            push_frame(
+                meta,
+                |sn| {
+                    crate::frame_encode::encode_frame_with_declare(
+                        sn, *declare, /* reliable = */ true,
+                    )
+                },
+                tx_sn,
+                params,
+                conf,
+                queue,
+            )
         }
     }
+}
+
+/// zenoh's `is_droppable`: a best-effort message, or one whose congestion
+/// control is `Drop`
+/// (`commons/zenoh-protocol/src/network/mod.rs` @ `!self.is_reliable() || self.congestion_control() == CongestionControl::Drop`).
+#[cfg(any(
+    feature = "codec-push",
+    feature = "codec-response",
+    feature = "codec-response-final",
+    feature = "liveliness-token"
+))]
+fn is_droppable(reliable: bool, congestion: crate::qos::CongestionControl) -> bool {
+    !reliable || congestion == crate::qos::CongestionControl::Drop
+}
+
+/// What [`push_frame`] needs to know of a message besides its bytes.
+#[cfg(any(
+    feature = "codec-push",
+    feature = "codec-response",
+    feature = "codec-response-final",
+    feature = "liveliness-token"
+))]
+struct FrameMeta {
+    /// The effective (clamped) band: the conduit the SN mints on and the lane
+    /// the datagrams take.
+    priority: Priority,
+    /// The frame's `ext_qos` — `Some` iff `priority` is not DEFAULT.
+    ext_qos: Option<Priority>,
+    reliable: bool,
+    droppable: bool,
+}
+
+/// R2928 — one message's walk onto the queue: ask for room, mint, encode, and
+/// enqueue the frame, or stream it as a fragment chain that asks again before
+/// each further fragment. `encode` turns the minted SN into the framed
+/// message.
+///
+/// The chain's bytes are [`FragmentChain`](crate::frame_encode::FragmentChain)'s,
+/// the one producer `multicast_frame_or_fragments` collects too, and its SNs are
+/// ring-consecutive from the frame's: each further fragment mints exactly one,
+/// as that function's up-front mints do, so the two agree on the wire and on
+/// the ring whenever there is room throughout.
+#[cfg(any(
+    feature = "codec-push",
+    feature = "codec-response",
+    feature = "codec-response-final",
+    feature = "liveliness-token"
+))]
+fn push_frame<Q: MulticastTxQueue + ?Sized>(
+    meta: FrameMeta,
+    encode: impl FnOnce(u64) -> Vec<u8>,
+    tx_sn: &mut crate::sn::MulticastTxConduits,
+    params: &crate::multicast_params::MulticastParams,
+    conf: &TxQueueConf,
+    queue: &mut Q,
+) -> PushOutcome {
+    let FrameMeta {
+        priority,
+        ext_qos,
+        reliable,
+        droppable,
+    } = meta;
+    let mut deadline = PushDeadline::new(droppable, conf);
+    let has_room = |queue: &mut Q, deadline: &mut PushDeadline| {
+        let answer = queue.wait_for_room(priority, deadline.ask());
+        deadline.spend(answer.waited_us);
+        // A queue whose writer is gone is not congested: what is enqueued on
+        // it is lost with the link, as the unicast push treats it.
+        answer.room != LinkRoom::Congested
+    };
+    if !has_room(queue, &mut deadline) {
+        return PushOutcome::Congested;
+    }
+    let sn = tx_sn.mint(priority, reliable);
+    let frame = encode(sn);
+    let mtu = params.batch_size as usize;
+    #[cfg(feature = "transport-fragmentation")]
+    if frame.len() > mtu {
+        let body = crate::frame_encode::frame_wire_body(&frame, sn, ext_qos);
+        let mut chain =
+            crate::frame_encode::FragmentChain::new(body, reliable, mtu, sn, tx_sn.mask(), ext_qos);
+        let mut emitted = 0usize;
+        while chain.remaining_fragments() > 0 {
+            // The SN the fragment this iteration sends carries — and the one
+            // the stop marker takes if there is no room for it.
+            let this_sn = chain.next_sn();
+            if emitted > 0 {
+                if !has_room(queue, &mut deadline) {
+                    let marker =
+                        crate::frame_encode::build_fragment_drop_wire(this_sn, reliable, ext_qos);
+                    tx_sn.mint(priority, reliable);
+                    queue.enqueue(priority, marker);
+                    return PushOutcome::Congested;
+                }
+                tx_sn.mint(priority, reliable);
+            }
+            let Some(fragment) = chain.next() else {
+                // `remaining_fragments() > 0` and `next() == None` are the same
+                // predicate negated, so this arm is unreachable.
+                break;
+            };
+            queue.enqueue(priority, fragment);
+            emitted += 1;
+            deadline.next_fragment();
+        }
+        return PushOutcome::Pushed;
+    }
+    #[cfg(not(feature = "transport-fragmentation"))]
+    let _ = (ext_qos, mtu);
+    queue.enqueue(priority, frame);
+    PushOutcome::Pushed
 }
 
 /// Convenience builder: a literal-keyexpr Put as a queued [`MulticastTxItem`]
@@ -535,6 +770,215 @@ mod qos_emit_tests {
             tx.advertise_default().next_reliable,
             1,
             "minted on the DEFAULT conduit"
+        );
+    }
+}
+
+// R2928 — the multicast push against a scripted queue: room before the mint,
+// the deadline each ask carries, and a chain that runs out part-way.
+#[cfg(all(test, feature = "codec-push"))]
+mod push_tests {
+    use super::*;
+    use crate::multicast_params::MulticastParams;
+    use crate::sn::{mask_from_res, MulticastTxConduits};
+    use crate::WhatAmI;
+    use alloc::collections::VecDeque;
+
+    fn params(batch_size: u16) -> MulticastParams {
+        MulticastParams {
+            version: 0x09,
+            whatami: WhatAmI::Peer,
+            zid: alloc::vec![1, 2, 3, 4],
+            lease_ms: 5_000,
+            join_interval_ms: 50,
+            seq_num_res: 0x02,
+            req_id_res: 0x02,
+            batch_size,
+            is_qos: false,
+        }
+    }
+
+    /// Answers each ask from a script (room once the script is spent) and
+    /// keeps every ask and every datagram.
+    #[derive(Default)]
+    struct Scripted {
+        answers: VecDeque<LinkRoom>,
+        asks: Vec<RoomWait>,
+        enqueued: Vec<Vec<u8>>,
+    }
+
+    impl MulticastTxQueue for Scripted {
+        fn wait_for_room(&mut self, _priority: Priority, wait: RoomWait) -> RoomAnswer {
+            self.asks.push(wait);
+            RoomAnswer::at_once(self.answers.pop_front().unwrap_or(LinkRoom::Free))
+        }
+
+        fn enqueue(&mut self, _priority: Priority, datagram: Vec<u8>) {
+            self.enqueued.push(datagram);
+        }
+    }
+
+    fn put(reliable: bool, payload: &[u8]) -> MulticastTxItem {
+        MulticastTxItem::Push {
+            push: Box::new(crate::push_build::build_push_literal("k", payload).unwrap()),
+            reliable,
+            priority: Priority::DEFAULT,
+        }
+    }
+
+    /// A message that finds no room leaves nothing on the queue and its
+    /// conduit's ring where it was: the next message takes the SN it would
+    /// have.
+    #[test]
+    fn a_message_that_finds_no_room_spends_no_sequence_number() {
+        let params = params(2_048);
+        let conf = TxQueueConf::default();
+        let mut tx = MulticastTxConduits::new(mask_from_res(params.seq_num_res));
+        let mut queue = Scripted {
+            answers: [LinkRoom::Congested].into(),
+            ..Default::default()
+        };
+        let outcome = multicast_tx_push(put(true, b"v"), &mut tx, &params, &conf, &mut queue);
+        assert_eq!(outcome, PushOutcome::Congested);
+        assert!(queue.enqueued.is_empty());
+        assert_eq!(tx.advertise_default().next_reliable, 0);
+
+        let outcome = multicast_tx_push(put(true, b"v"), &mut tx, &params, &conf, &mut queue);
+        assert_eq!(outcome, PushOutcome::Pushed);
+        assert_eq!(queue.enqueued.len(), 1);
+        assert_eq!(tx.advertise_default().next_reliable, 1);
+    }
+
+    /// A droppable message asks with `wait_before_drop`; a blocking one with
+    /// `wait_before_close` — the configured values, not the defaults.
+    #[cfg(feature = "codec-response-final")]
+    #[test]
+    fn each_message_asks_with_the_wait_its_congestion_control_names() {
+        let params = params(2_048);
+        let conf = TxQueueConf {
+            wait_before_drop_us: 7,
+            wait_before_close_us: 11,
+            ..TxQueueConf::default()
+        };
+        let mut tx = MulticastTxConduits::new(mask_from_res(params.seq_num_res));
+        let mut queue = Scripted::default();
+        // A best-effort put is droppable whatever its congestion control.
+        multicast_tx_push(put(false, b"v"), &mut tx, &params, &conf, &mut queue);
+        let blocking = crate::sample::QosLevel::from_parts(
+            Priority::DEFAULT,
+            crate::qos::CongestionControl::Block,
+            false,
+        );
+        let terminal = MulticastTxItem::ResponseFinal {
+            request_id: 1,
+            qos: blocking,
+        };
+        multicast_tx_push(terminal, &mut tx, &params, &conf, &mut queue);
+        assert_eq!(
+            queue.asks,
+            [
+                RoomWait::Drop { wait_us: 7 },
+                RoomWait::Block { wait_us: 11 }
+            ]
+        );
+    }
+
+    /// With room throughout, the push puts on the queue exactly what the
+    /// queue-less emit returns — the same bytes, the same SN walk — for a
+    /// message that fragments.
+    #[cfg(feature = "transport-fragmentation")]
+    #[test]
+    fn with_room_throughout_a_chain_is_the_one_the_emit_returns() {
+        let params = params(128);
+        let payload = [0x5a; 1_000];
+        let mut emit_tx = MulticastTxConduits::new(mask_from_res(params.seq_num_res));
+        let emitted = multicast_tx_emit(put(true, &payload), &mut emit_tx, &params);
+        assert!(emitted.datagrams.len() > 2, "the message fragments");
+
+        let mut tx = MulticastTxConduits::new(mask_from_res(params.seq_num_res));
+        let mut queue = Scripted::default();
+        let outcome = multicast_tx_push(
+            put(true, &payload),
+            &mut tx,
+            &params,
+            &TxQueueConf::default(),
+            &mut queue,
+        );
+        assert_eq!(outcome, PushOutcome::Pushed);
+        assert_eq!(queue.enqueued, emitted.datagrams);
+        assert_eq!(
+            tx.advertise_default().next_reliable,
+            emitted.datagrams.len() as u64
+        );
+        // Against the whole-chain producer the pre-R2928 emit used.
+        let mut whole_tx = MulticastTxConduits::new(mask_from_res(params.seq_num_res));
+        let sn = whole_tx.mint(Priority::DEFAULT, true);
+        let frame = crate::frame_encode::encode_frame_with_push_qos(
+            sn,
+            crate::push_build::build_push_literal("k", &payload).unwrap(),
+            true,
+            None,
+        );
+        let whole = crate::frame_encode::multicast_frame_or_fragments(
+            frame,
+            sn,
+            true,
+            params.batch_size as usize,
+            &mut whole_tx,
+            None,
+        );
+        assert_eq!(queue.enqueued, whole);
+        assert_eq!(
+            whole_tx.advertise_default().next_reliable,
+            tx.advertise_default().next_reliable
+        );
+    }
+
+    /// A chain that finds no room part-way is stopped: the fragments already
+    /// out, then a drop marker on the next SN, which it spends. Each further
+    /// ask carries the extended deadline, doubling per fragment.
+    #[cfg(feature = "transport-fragmentation")]
+    #[test]
+    fn a_chain_that_runs_out_part_way_ends_with_a_drop_marker_on_the_next_sn() {
+        use crate::inbound::{parse_inbound, InboundFrame};
+        let params = params(128);
+        let conf = TxQueueConf::default();
+        let mut tx = MulticastTxConduits::new(mask_from_res(params.seq_num_res));
+        let mut queue = Scripted {
+            answers: [LinkRoom::Free, LinkRoom::Free, LinkRoom::Congested].into(),
+            ..Default::default()
+        };
+        let outcome = multicast_tx_push(
+            put(true, &[0x5a; 1_000]),
+            &mut tx,
+            &params,
+            &conf,
+            &mut queue,
+        );
+        assert_eq!(outcome, PushOutcome::Congested);
+        assert_eq!(queue.enqueued.len(), 3, "two fragments, then the marker");
+        let sns: Vec<(u64, bool)> = queue
+            .enqueued
+            .iter()
+            .map(|d| match parse_inbound(d).unwrap() {
+                InboundFrame::Fragment { sn, markers, .. } => (sn, markers.dropped),
+                _ => panic!("expected a Fragment"),
+            })
+            .collect();
+        assert_eq!(sns, [(0, false), (1, false), (2, true)]);
+        assert_eq!(tx.advertise_default().next_reliable, 3);
+        let step = conf.wait_before_drop_us;
+        assert_eq!(
+            queue.asks,
+            [
+                RoomWait::Drop { wait_us: step },
+                RoomWait::Drop {
+                    wait_us: step + 2 * step
+                },
+                RoomWait::Drop {
+                    wait_us: step + 2 * step + 4 * step
+                },
+            ]
         );
     }
 }
