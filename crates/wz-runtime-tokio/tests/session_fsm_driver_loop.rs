@@ -176,6 +176,111 @@ async fn r76_link_lost_peer_closed_drives_toward_terminal() {
     );
 }
 
+/// Walk a fresh session to Established.
+fn drive_to_established(engine: &mut Engine<SessionFsmUnicastPolicy<SessionActionsBinding>>) {
+    drive_to_sent_init_syn(engine);
+    engine.process_event(E::InitAckReceived);
+    engine.process_event(E::OpenAckReceived);
+    assert_eq!(engine.get_current_state(), S::Established);
+}
+
+// ── R2927: a Frame at a non-DEFAULT priority over a session that negotiated
+//          no QoS is LINK-FATAL, as upstream's is (its rx task bails and the
+//          transport deletes the link with no Close). The link goes the
+//          `link.lost` way: Closed, the link released, no Close frame sent.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn r2927_a_prioritized_frame_on_a_non_qos_session_tears_the_link_down_silently() {
+    use wz_session_wire_fixtures::craft_frame_wire_with_priority;
+
+    let (actions, mut engine) = fresh_setup();
+    drive_to_established(&mut engine);
+    // RealTime is wire byte 1.
+    let mut driver = QueueDriver::with(vec![LinkEvent::Rx(RxFrame::new(
+        craft_frame_wire_with_priority(3, true, 1),
+    ))]);
+    let outcome = poll_and_dispatch_one(&mut driver, &actions, &mut engine).await;
+    assert!(
+        matches!(
+            outcome,
+            DriverLoopOutcome::LinkLost(LostCause::UnknownPriority)
+        ),
+        "a prioritized frame on a non-QoS session ends the link; got {outcome:?}"
+    );
+    assert_eq!(engine.get_current_state(), S::Closed);
+    let trace = actions.trace_snapshot();
+    assert_eq!(trace.release_link, 1, "the link is released");
+    assert_eq!(
+        trace.send_close_frame_with_reason, 0,
+        "upstream closes the link without a Close message"
+    );
+}
+
+// R2927 — the FRAGMENT arm refuses the same way: upstream's fragment handler
+// bails on an unknown priority exactly as its frame handler does.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn r2927_a_prioritized_fragment_on_a_non_qos_session_tears_the_link_down_silently() {
+    use wz_session_wire_fixtures::craft_fragment_wire_with_priority;
+
+    let (actions, mut engine) = fresh_setup();
+    drive_to_established(&mut engine);
+    let mut driver = QueueDriver::with(vec![LinkEvent::Rx(RxFrame::new(
+        craft_fragment_wire_with_priority(true, true, 3, 1, b"chunk"),
+    ))]);
+    let outcome = poll_and_dispatch_one(&mut driver, &actions, &mut engine).await;
+    assert!(
+        matches!(
+            outcome,
+            DriverLoopOutcome::LinkLost(LostCause::UnknownPriority)
+        ),
+        "a prioritized fragment on a non-QoS session ends the link; got {outcome:?}"
+    );
+    assert_eq!(engine.get_current_state(), S::Closed);
+    assert_eq!(actions.trace_snapshot().send_close_frame_with_reason, 0);
+}
+
+// CONTROL for the witness above: the same frame at the DEFAULT priority, on the
+// same kind of session, is delivered — the refusal is the priority's, not the
+// extension's.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn r2927_a_default_priority_frame_on_a_non_qos_session_is_delivered() {
+    use wz_session_wire_fixtures::craft_frame_wire_with_priority;
+
+    let (actions, mut engine) = fresh_setup();
+    drive_to_established(&mut engine);
+    // Data (the DEFAULT priority) is wire byte 5.
+    let mut driver = QueueDriver::with(vec![LinkEvent::Rx(RxFrame::new(
+        craft_frame_wire_with_priority(3, true, 5),
+    ))]);
+    let outcome = poll_and_dispatch_one(&mut driver, &actions, &mut engine).await;
+    assert!(
+        matches!(outcome, DriverLoopOutcome::FramePayload { sn: 3, .. }),
+        "a DEFAULT-priority frame is admitted; got {outcome:?}"
+    );
+    assert_eq!(engine.get_current_state(), S::Established);
+}
+
+// R2927 — and a session that negotiated QoS admits the prioritized frame on
+// its own conduit.
+#[cfg(feature = "transport-qos")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn r2927_a_qos_session_admits_the_prioritized_frame() {
+    use wz_session_wire_fixtures::craft_frame_wire_with_priority;
+
+    let (actions, mut engine) = fresh_setup();
+    assert!(actions.set_qos_offer(true), "qos offer applies");
+    actions.negotiate_qos_against_peer(true);
+    drive_to_established(&mut engine);
+    let mut driver = QueueDriver::with(vec![LinkEvent::Rx(RxFrame::new(
+        craft_frame_wire_with_priority(3, true, 1),
+    ))]);
+    let outcome = poll_and_dispatch_one(&mut driver, &actions, &mut engine).await;
+    assert!(
+        matches!(outcome, DriverLoopOutcome::FramePayload { sn: 3, .. }),
+        "a QoS session admits every priority; got {outcome:?}"
+    );
+    assert_eq!(engine.get_current_state(), S::Established);
+}
+
 // ── R74 Scenario A: Rx(Frame) with empty payload → FramePayload
 //                    with messages=[]; FSM unchanged
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

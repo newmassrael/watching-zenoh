@@ -1084,6 +1084,17 @@ pub enum LostCause {
     /// [`Self::OsError`] — the divergence R2600 named and this round does not
     /// retire.
     CertificateExpired,
+    /// R2927 — THIS side tore the link down because the peer sent a Frame or
+    /// Fragment at a non-DEFAULT priority over a session that negotiated no
+    /// QoS. Upstream refuses such a frame as a link error: its rx task fails
+    /// (`io/zenoh-transport/src/unicast/universal/rx.rs` @
+    /// `} else if priority == Priority::DEFAULT {`) and the transport deletes
+    /// the link, closing it without a Close message and deleting the
+    /// transport when it was the last link
+    /// (`io/zenoh-transport/src/unicast/universal/transport.rs` @
+    /// `let Some((is_last, stl, associated_link)) = zwrite!(self.links).remove_link(&link) else {`).
+    /// The session's `link.lost` path is that teardown here.
+    UnknownPriority,
 }
 
 #[cfg(test)]

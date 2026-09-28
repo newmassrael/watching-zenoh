@@ -680,18 +680,19 @@ fn dispatch_unit<R: SessionRuntime, T: TimeSource>(
                     // R311y215 (SN-safety F5) — a non-DEFAULT ext_qos on
                     // a session that did NOT negotiate QoS is a wire-spec
                     // violation (a peer must not prioritize without a
-                    // negotiated `is_qos`); drop it rather than admit
-                    // prioritized traffic onto a non-QoS transport. Under
-                    // a non-QoS session `priority` is always DEFAULT, so
-                    // this never fires; a QoS session accepts every
+                    // negotiated `is_qos`). A QoS session accepts every
                     // priority on its own conduit.
-                    #[cfg(feature = "transport-qos")]
-                    if !actions.is_qos() && priority != crate::qos::Priority::DEFAULT {
-                        return DriverLoopOutcome::RxSnRejected {
-                            priority,
-                            reliable,
-                            sn,
-                        };
+                    //
+                    // R2927 — and it is LINK-FATAL, as upstream's is, where
+                    // wz used to drop the frame and keep the link: see
+                    // [`crate::link::LostCause::UnknownPriority`]. Every
+                    // build checks, since the priority is decoded in every
+                    // build; a build without `transport-qos` negotiates none.
+                    if !actions.negotiated_qos() && priority != crate::qos::Priority::DEFAULT {
+                        engine.process_event(E::LinkLost);
+                        return DriverLoopOutcome::LinkLost(
+                            crate::link::LostCause::UnknownPriority,
+                        );
                     }
                     // R311ke — per-channel RX SN gate (pico
                     // `_z_sn_precedes`, unicast/rx.c:108-131): a stale
@@ -744,15 +745,14 @@ fn dispatch_unit<R: SessionRuntime, T: TimeSource>(
                     priority,
                     markers,
                 } => {
-                    // R311y215 (SN-safety F5) — as with Frame, drop a
-                    // prioritized fragment on a non-QoS session.
-                    #[cfg(feature = "transport-qos")]
-                    if !actions.is_qos() && priority != crate::qos::Priority::DEFAULT {
-                        return DriverLoopOutcome::RxSnRejected {
-                            priority,
-                            reliable,
-                            sn,
-                        };
+                    // R311y215 (SN-safety F5) / R2927 — as with Frame, a
+                    // prioritized fragment on a non-QoS session is link-fatal
+                    // (upstream's fragment arm bails the same way).
+                    if !actions.negotiated_qos() && priority != crate::qos::Priority::DEFAULT {
+                        engine.process_event(E::LinkLost);
+                        return DriverLoopOutcome::LinkLost(
+                            crate::link::LostCause::UnknownPriority,
+                        );
                     }
                     // R311ke — fragments ride the same per-(priority,
                     // reliable) conduit SN counter as frames (pico gates

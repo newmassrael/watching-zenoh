@@ -335,6 +335,19 @@ pub fn craft_frame_wire(sn: u64, reliable: bool) -> Vec<u8> {
     vec![header, sn as u8]
 }
 
+/// R2927 — [`craft_frame_wire`] carrying an `ext_qos` for the `Priority` wire
+/// byte `priority`: the header's ext-chain `Z` flag, then the Frame's sole
+/// extension, `[0x31][VLE(priority)]` (zenoh's `QoSType`, id 0x1, z64, never
+/// chained on a Frame).
+pub fn craft_frame_wire_with_priority(sn: u64, reliable: bool, priority: u8) -> Vec<u8> {
+    assert!(sn < 0x80, "fixture: single-byte VLE sn only");
+    assert!(priority < 8, "fixture: a Priority wire byte is 0..=7");
+    let mut wire = craft_frame_wire(sn, reliable);
+    wire[0] |= FLAG_T_Z;
+    wire.extend_from_slice(&[0x31, priority]);
+    wire
+}
+
 /// Transport `Fragment` (`T_MID_FRAGMENT`): header byte
 /// `(R?|M?|T_MID_FRAGMENT)`, a single-byte-VLE `sn`, then the tail
 /// `payload`. The body mirrors `T_MID_FRAME` (VLE sn + tail) — only the
@@ -352,6 +365,24 @@ pub fn craft_fragment_wire(reliable: bool, more: bool, sn: u64, payload: &[u8]) 
         flags |= FLAG_T_FRAGMENT_M;
     }
     let mut wire = vec![flags | T_MID_FRAGMENT, sn as u8];
+    wire.extend_from_slice(payload);
+    wire
+}
+
+/// R2927 — [`craft_fragment_wire`] carrying an `ext_qos` for the `Priority`
+/// wire byte `priority`, as the Fragment's sole extension (`Z` on the header,
+/// `[0x31][VLE(priority)]`, not chained), ahead of the payload.
+pub fn craft_fragment_wire_with_priority(
+    reliable: bool,
+    more: bool,
+    sn: u64,
+    priority: u8,
+    payload: &[u8],
+) -> Vec<u8> {
+    assert!(priority < 8, "fixture: a Priority wire byte is 0..=7");
+    let mut wire = craft_fragment_wire(reliable, more, sn, &[]);
+    wire[0] |= FLAG_T_Z;
+    wire.extend_from_slice(&[0x31, priority]);
     wire.extend_from_slice(payload);
     wire
 }
