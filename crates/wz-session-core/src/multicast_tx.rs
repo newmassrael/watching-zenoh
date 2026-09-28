@@ -352,13 +352,21 @@ fn multicast_tx_reliable(item: &MulticastTxItem) -> bool {
     feature = "codec-response-final",
     feature = "liveliness-token"
 ))]
-pub fn multicast_tx_push<Q: MulticastTxQueue + ?Sized>(
+pub fn multicast_tx_push<M, Q>(
     item: MulticastTxItem,
-    tx_sn: &mut crate::sn::MulticastTxConduits,
+    tx_sn: &mut M,
     params: &crate::multicast_params::MulticastParams,
     conf: &TxQueueConf,
     queue: &mut Q,
-) -> PushOutcome {
+) -> PushOutcome
+where
+    M: MulticastTxMint + ?Sized,
+    Q: MulticastTxQueue + ?Sized,
+{
+    // R2931 — the meta is resolved once, by the function a producer also asks
+    // for the conduit it must hold (`multicast_tx_conduit`), so the conduit
+    // locked and the conduit minted on cannot come from two readings.
+    let meta = frame_meta(&item, params);
     match item {
         // TxData: mint the channel SN, wrap in a T_MID_FRAME (frame_encode
         // SSOT), and let multicast_frame_or_fragments re-frame an oversize
@@ -368,66 +376,35 @@ pub fn multicast_tx_push<Q: MulticastTxQueue + ?Sized>(
         // hole in a fragment chain aborts that chain at every receiver, as on
         // pico — so the loop's send is best-effort like the JOIN beacon.
         #[cfg(feature = "codec-push")]
-        MulticastTxItem::Push {
-            push,
-            reliable,
-            priority,
-        } => {
-            // R311y227 — clamp the app / routing band to DEFAULT unless the group
-            // negotiated `is_qos` (else a non-qos / pico receiver bails "Unknown
-            // priority"). Under `transport-qos` on a qos group the clamped `eff`
-            // selects the per-priority TX conduit AND rides the frame `ext_qos`;
-            // the fragment re-frame re-emits that SAME `ext_qos` and mints its
-            // follow-ons on the SAME conduit. `None` / DEFAULT is byte-identical
-            // to the pre-qos wire.
-            let eff = effective_mcast_priority(priority, params.is_qos);
-            let ext_qos = frame_ext_qos(eff);
-            // R2928 — the congestion control comes off the Push's own ext_qos,
-            // as upstream's `congestion_control()` reads it
-            // (`commons/zenoh-protocol/src/network/mod.rs` @ `NetworkBodyRef::Push(msg) => msg.ext_qos.get_congestion_control(),`).
-            let congestion = crate::declare_ext_qos::read_push_qos(&push).congestion();
-            let meta = FrameMeta {
-                priority: eff,
-                ext_qos,
-                reliable,
-                droppable: is_droppable(reliable, congestion),
-            };
-            push_frame(
-                meta,
-                |sn| crate::frame_encode::encode_frame_with_push_qos(sn, *push, reliable, ext_qos),
-                tx_sn,
-                params,
-                conf,
-                queue,
-            )
-        }
+        MulticastTxItem::Push { push, .. } => push_frame(
+            meta,
+            |sn| {
+                crate::frame_encode::encode_frame_with_push_qos(
+                    sn,
+                    *push,
+                    meta.reliable,
+                    meta.ext_qos,
+                )
+            },
+            tx_sn,
+            params,
+            conf,
+            queue,
+        ),
         // R311lq — queryable reply egress. Reliable like a reliable-ring put
         // (zenoh-pico replies via the same `_z_send_n_msg` multicast TX with
         // `Z_RELIABILITY_RELIABLE`); a large reply re-frames as a fragment
         // chain exactly like an oversize Push.
         #[cfg(feature = "codec-response")]
         MulticastTxItem::Response { response } => {
-            // R2594 — the band comes off the Response's own `ext_qos`, clamped
-            // exactly as a Push's is, because upstream's transport reads a
-            // Response's band there:
-            // `commons/zenoh-protocol/src/network/mod.rs` @ `NetworkBodyRef::Response(msg) => msg.ext_qos.get_priority(),`
-            // This arm used to pin DEFAULT with a note that "zenoh treats reply
-            // priority as a separate concern", which that match arm refutes. A
-            // non-qos group still clamps to DEFAULT, byte-identical to before.
-            let qos = crate::declare_ext_qos::read_response_qos(&response);
-            let eff = effective_mcast_priority(qos.priority(), params.is_qos);
-            let ext_qos = frame_ext_qos(eff);
-            let meta = FrameMeta {
-                priority: eff,
-                ext_qos,
-                reliable: true,
-                droppable: is_droppable(true, qos.congestion()),
-            };
             push_frame(
                 meta,
                 |sn| {
                     crate::frame_encode::encode_frame_with_response_qos(
-                        sn, *response, /* reliable = */ true, ext_qos,
+                        sn,
+                        *response,
+                        /* reliable = */ true,
+                        meta.ext_qos,
                     )
                 },
                 tx_sn,
@@ -442,16 +419,6 @@ pub fn multicast_tx_push<Q: MulticastTxQueue + ?Sized>(
         // `send_response_final` (reliability pinned).
         #[cfg(feature = "codec-response-final")]
         MulticastTxItem::ResponseFinal { request_id, qos } => {
-            // R2595 — the terminator rides its query's band, clamped as the
-            // Response arm above is, rather than a pinned DEFAULT.
-            let eff = effective_mcast_priority(qos.priority(), params.is_qos);
-            let ext_qos = frame_ext_qos(eff);
-            let meta = FrameMeta {
-                priority: eff,
-                ext_qos,
-                reliable: true,
-                droppable: is_droppable(true, qos.congestion()),
-            };
             // Uniform egress: a ResponseFinal is a single tiny VLE rid that never
             // reaches the budget, so `push_frame` enqueues the one frame with no
             // follow-on mint (byte-identical to a single send) - one path for
@@ -463,7 +430,7 @@ pub fn multicast_tx_push<Q: MulticastTxQueue + ?Sized>(
                         sn,
                         crate::response_final_build::build_response_final(request_id, qos),
                         /* reliable = */ true,
-                        ext_qos,
+                        meta.ext_qos,
                     )
                 },
                 tx_sn,
@@ -478,15 +445,6 @@ pub fn multicast_tx_push<Q: MulticastTxQueue + ?Sized>(
         // keyexpr re-frames as a fragment chain exactly like an oversize Push.
         #[cfg(feature = "liveliness-token")]
         MulticastTxItem::DeclareReply { declare } => {
-            let congestion = crate::declare_ext_qos::read_declare_qos(&declare).congestion();
-            // The declare reply is DEFAULT-band: no frame ext_qos, no
-            // per-priority conduit.
-            let meta = FrameMeta {
-                priority: Priority::DEFAULT,
-                ext_qos: None,
-                reliable: true,
-                droppable: is_droppable(true, congestion),
-            };
             push_frame(
                 meta,
                 |sn| {
@@ -516,6 +474,162 @@ fn is_droppable(reliable: bool, congestion: crate::qos::CongestionControl) -> bo
     !reliable || congestion == crate::qos::CongestionControl::Drop
 }
 
+/// R2931 — what a push of `item` onto a group of `params` must know besides
+/// its bytes: the conduit, the frame's `ext_qos`, the channel, and whether the
+/// message may be dropped. The one reading of an item's QoS on the TX side;
+/// [`multicast_tx_push`] and [`multicast_tx_conduit`] both ask it.
+#[cfg(any(
+    feature = "codec-push",
+    feature = "codec-response",
+    feature = "codec-response-final",
+    feature = "liveliness-token"
+))]
+fn frame_meta(
+    item: &MulticastTxItem,
+    params: &crate::multicast_params::MulticastParams,
+) -> FrameMeta {
+    // A declare-reply-only build pins its one band and never reads the group.
+    let _ = params;
+    match item {
+        #[cfg(feature = "codec-push")]
+        MulticastTxItem::Push {
+            push,
+            reliable,
+            priority,
+        } => {
+            // R311y227 — clamp the app / routing band to DEFAULT unless the group
+            // negotiated `is_qos` (else a non-qos / pico receiver bails "Unknown
+            // priority"). Under `transport-qos` on a qos group the clamped `eff`
+            // selects the per-priority TX conduit AND rides the frame `ext_qos`;
+            // the fragment re-frame re-emits that SAME `ext_qos` and mints its
+            // follow-ons on the SAME conduit. `None` / DEFAULT is byte-identical
+            // to the pre-qos wire.
+            let eff = effective_mcast_priority(*priority, params.is_qos);
+            // R2928 — the congestion control comes off the Push's own ext_qos,
+            // as upstream's `congestion_control()` reads it
+            // (`commons/zenoh-protocol/src/network/mod.rs` @ `NetworkBodyRef::Push(msg) => msg.ext_qos.get_congestion_control(),`).
+            let congestion = crate::declare_ext_qos::read_push_qos(push).congestion();
+            FrameMeta {
+                priority: eff,
+                ext_qos: frame_ext_qos(eff),
+                reliable: *reliable,
+                droppable: is_droppable(*reliable, congestion),
+            }
+        }
+        // R2594 — the band comes off the Response's own `ext_qos`, clamped
+        // exactly as a Push's is, because upstream's transport reads a
+        // Response's band there:
+        // `commons/zenoh-protocol/src/network/mod.rs` @ `NetworkBodyRef::Response(msg) => msg.ext_qos.get_priority(),`
+        // This arm used to pin DEFAULT with a note that "zenoh treats reply
+        // priority as a separate concern", which that match arm refutes. A
+        // non-qos group still clamps to DEFAULT, byte-identical to before.
+        #[cfg(feature = "codec-response")]
+        MulticastTxItem::Response { response } => {
+            let qos = crate::declare_ext_qos::read_response_qos(response);
+            let eff = effective_mcast_priority(qos.priority(), params.is_qos);
+            FrameMeta {
+                priority: eff,
+                ext_qos: frame_ext_qos(eff),
+                reliable: true,
+                droppable: is_droppable(true, qos.congestion()),
+            }
+        }
+        // R2595 — the terminator rides its query's band, clamped as the
+        // Response arm above is, rather than a pinned DEFAULT.
+        #[cfg(feature = "codec-response-final")]
+        MulticastTxItem::ResponseFinal { qos, .. } => {
+            let eff = effective_mcast_priority(qos.priority(), params.is_qos);
+            FrameMeta {
+                priority: eff,
+                ext_qos: frame_ext_qos(eff),
+                reliable: true,
+                droppable: is_droppable(true, qos.congestion()),
+            }
+        }
+        // The declare reply is DEFAULT-band: no frame ext_qos, no per-priority
+        // conduit.
+        #[cfg(feature = "liveliness-token")]
+        MulticastTxItem::DeclareReply { declare } => FrameMeta {
+            priority: Priority::DEFAULT,
+            ext_qos: None,
+            reliable: true,
+            droppable: is_droppable(
+                true,
+                crate::declare_ext_qos::read_declare_qos(declare).congestion(),
+            ),
+        },
+    }
+}
+
+/// R2931 — the conduit a push of `item` onto a group of `params` mints on:
+/// the effective (clamped) band. A producer that holds one conduit at a time,
+/// as upstream's pipeline holds one priority's stage while it waits for a
+/// batch (`io/zenoh-transport/src/common/pipeline.rs` @ `pub(crate) fn push_network_message(`),
+/// asks this for the conduit to lock and then pushes against it
+/// ([`MulticastTxConduit`]).
+#[cfg(any(
+    feature = "codec-push",
+    feature = "codec-response",
+    feature = "codec-response-final",
+    feature = "liveliness-token"
+))]
+pub fn multicast_tx_conduit(
+    item: &MulticastTxItem,
+    params: &crate::multicast_params::MulticastParams,
+) -> Priority {
+    frame_meta(item, params).priority
+}
+
+/// R2931 — where a push mints its sequence numbers: the whole set of a group's
+/// conduits ([`MulticastTxConduits`](crate::sn::MulticastTxConduits)), or the
+/// one conduit a producer holds ([`MulticastTxConduit`]).
+pub trait MulticastTxMint {
+    /// Mint the next SN on the `(priority, reliable)` conduit.
+    fn mint(&mut self, priority: Priority, reliable: bool) -> u64;
+    /// The SN ring's mask.
+    fn mask(&self) -> u64;
+}
+
+impl MulticastTxMint for crate::sn::MulticastTxConduits {
+    fn mint(&mut self, priority: Priority, reliable: bool) -> u64 {
+        crate::sn::MulticastTxConduits::mint(self, priority, reliable)
+    }
+
+    fn mask(&self) -> u64 {
+        crate::sn::MulticastTxConduits::mask(self)
+    }
+}
+
+/// R2931 — one conduit, held by the producer that pushes on it: its band and
+/// its SN state. A push that would mint on any other band is a producer that
+/// locked the wrong conduit, which would put two producers' SNs on one ring
+/// unsynchronised; that is refused rather than minted.
+pub struct MulticastTxConduit<'a> {
+    priority: Priority,
+    sn: &'a mut crate::sn::TxSn,
+}
+
+impl<'a> MulticastTxConduit<'a> {
+    /// The `priority` conduit, whose state is `sn`.
+    pub fn new(priority: Priority, sn: &'a mut crate::sn::TxSn) -> Self {
+        Self { priority, sn }
+    }
+}
+
+impl MulticastTxMint for MulticastTxConduit<'_> {
+    fn mint(&mut self, priority: Priority, reliable: bool) -> u64 {
+        assert_eq!(
+            priority, self.priority,
+            "a push minted on a conduit its producer does not hold"
+        );
+        self.sn.mint(reliable)
+    }
+
+    fn mask(&self) -> u64 {
+        self.sn.mask
+    }
+}
+
 /// What [`push_frame`] needs to know of a message besides its bytes.
 #[cfg(any(
     feature = "codec-push",
@@ -523,6 +637,7 @@ fn is_droppable(reliable: bool, congestion: crate::qos::CongestionControl) -> bo
     feature = "codec-response-final",
     feature = "liveliness-token"
 ))]
+#[derive(Clone, Copy)]
 struct FrameMeta {
     /// The effective (clamped) band: the conduit the SN mints on and the lane
     /// the datagrams take.
@@ -549,10 +664,10 @@ struct FrameMeta {
     feature = "codec-response-final",
     feature = "liveliness-token"
 ))]
-fn push_frame<Q: MulticastTxQueue + ?Sized>(
+fn push_frame<M: MulticastTxMint + ?Sized, Q: MulticastTxQueue + ?Sized>(
     meta: FrameMeta,
     encode: impl FnOnce(u64) -> Vec<u8>,
-    tx_sn: &mut crate::sn::MulticastTxConduits,
+    tx_sn: &mut M,
     params: &crate::multicast_params::MulticastParams,
     conf: &TxQueueConf,
     queue: &mut Q,
@@ -1071,6 +1186,51 @@ mod push_tests {
                     wait_us: step + 2 * step + 4 * step
                 },
             ]
+        );
+    }
+
+    /// R2931 — a producer that holds one conduit pushes against it alone: the
+    /// band it asks for is the CLAMPED band (a non-QoS group puts every band
+    /// on DEFAULT), and the push mints on that conduit's ring.
+    #[test]
+    fn a_held_conduit_takes_the_push_on_its_own_ring() {
+        let params = params(2_048);
+        let conf = TxQueueConf::default();
+        let item = MulticastTxItem::Push {
+            push: Box::new(crate::push_build::build_push_literal("k", b"v").unwrap()),
+            reliable: true,
+            priority: Priority::RealTime,
+        };
+        let band = multicast_tx_conduit(&item, &params);
+        assert_eq!(band, Priority::DEFAULT, "a non-QoS group clamps every band");
+        let mut sn = crate::sn::TxSn::new(mask_from_res(params.seq_num_res));
+        let mut queue = Scripted::default();
+        let outcome = multicast_tx_push(
+            item,
+            &mut MulticastTxConduit::new(band, &mut sn),
+            &params,
+            &conf,
+            &mut queue,
+        );
+        assert_eq!(outcome, PushOutcome::Pushed);
+        assert_eq!(queue.sns, [0]);
+        assert_eq!(sn.next_reliable, 1);
+        assert_eq!(sn.next_best_effort, 0);
+    }
+
+    /// R2931 — the control of the one above: a push whose band is not the one
+    /// held is refused, not minted on a ring another producer may hold.
+    #[test]
+    #[should_panic(expected = "a push minted on a conduit its producer does not hold")]
+    fn a_push_on_a_conduit_its_producer_does_not_hold_is_refused() {
+        let params = params(2_048);
+        let mut sn = crate::sn::TxSn::new(mask_from_res(params.seq_num_res));
+        let _ = multicast_tx_push(
+            put(true, b"v"),
+            &mut MulticastTxConduit::new(Priority::Background, &mut sn),
+            &params,
+            &TxQueueConf::default(),
+            &mut Scripted::default(),
         );
     }
 }
