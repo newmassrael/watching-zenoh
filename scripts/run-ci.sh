@@ -9497,8 +9497,13 @@ layer_c1ca_cargo_test_derived_initial_sn() {
 # `a_replayed_open_ack_after_established_is_not_admitted` is its witness (a
 # replay after Established used to reset the RX SN baseline). READ off the
 # count gate's own line, "declares 25 passed, the run printed 26".
+# R2927 — 26 -> 29. A non-DEFAULT-priority frame and fragment on a session that
+# negotiated no QoS are LINK-FATAL now, as upstream's are, and the DEFAULT-
+# priority control; the fourth R2927 case (a QoS session admitting the frame)
+# is `transport-qos`-gated and this lane builds without it. READ off the count
+# gate's own line, "declares 26 passed, the run printed 29".
 layer_c1cb_cargo_test_init_ack_admission() {
-    _runci_guarded_test C1cb 26 \
+    _runci_guarded_test C1cb 29 \
         cargo test -p wz-runtime-tokio --test session_fsm_driver_loop --quiet || return 1
 }
 
