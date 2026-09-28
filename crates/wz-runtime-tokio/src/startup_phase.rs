@@ -348,6 +348,153 @@ where
     })
 }
 
+/// One endpoint's retry schedule: the global `connect/retry` with the
+/// endpoint's own `#retry_period_*` tail layered on top, as upstream resolves
+/// it (`commons/zenoh-config/src/connection_retry.rs` @ `pub fn get_retry_config(`).
+///
+/// An endpoint that does not parse, or whose shape carries no tail, keeps the
+/// global schedule: the dial itself is what reports a bad locator, and a
+/// schedule is not the place to refuse one.
+pub fn endpoint_schedule(global: RetryPolicy, endpoint: &str) -> RetryPolicy {
+    match wz_session_core::locator::parse_any_locator(endpoint) {
+        Ok(wz_session_core::locator::AnyLocator::Ip(parsed)) => {
+            global.layered(parsed.retry.as_deref())
+        }
+        _ => global,
+    }
+}
+
+/// A connect phase over SEVERAL endpoints that wants ONE session — upstream's
+/// client connect, `connect_peers_single_link`
+/// (`zenoh/src/net/runtime/orchestrator.rs` @
+/// `async fn connect_peers_single_link(&self, peers: &[EndPoints]) -> ZResult<()> {`).
+///
+/// Each endpoint carries its OWN schedule, because upstream resolves retry per
+/// endpoint: the global `connect/retry` with the endpoint's `#retry_period_*`
+/// tail layered on top ([`RetryPolicy::layered`]). The phase then runs
+/// upstream's two arms in upstream's order:
+///
+/// - an endpoint whose arm does not retry (the budget is `0`, or its schedule
+///   has no first wait) is tried ONCE, in list order, before anything retries;
+/// - the endpoints that do retry are then raced, each on its own schedule, and
+///   the first to open wins.
+///
+/// `budget` is `connect/timeout_ms`, and it bounds the WHOLE phase as upstream's
+/// outer `tokio::time::timeout` does — the one-shot attempts included.
+///
+/// The one place this narrows upstream: a single-link phase there keeps dialing
+/// the other retrying endpoints after one connects, and whether that yields a
+/// second session is the transport manager's business. A caller of this holds
+/// one session, so the first success ends the phase.
+///
+/// `attempt(endpoint, n)` is called with the endpoint and its 1-based attempt
+/// number. It is `Fn`, not `FnMut`, because the retrying endpoints run
+/// concurrently and each holds it.
+pub async fn drive_connect_phase<'e, T, E, F, Fut>(
+    budget: PhaseBudget,
+    endpoints: &'e [(String, RetryPolicy)],
+    attempt: F,
+) -> Result<T, PhaseFailed<E>>
+where
+    F: Fn(&'e str, u32) -> Fut,
+    Fut: std::future::Future<Output = Result<T, E>>,
+{
+    let deadline = budget.deadline().map(|d| tokio::time::Instant::now() + d);
+    let failed = |last, attempts| PhaseFailed {
+        last,
+        attempts,
+        ends_startup: true,
+    };
+    let mut last: Option<E> = None;
+    let mut attempts: u32 = 0;
+    let mut retrying: Vec<(&'e str, RetryPolicy)> = Vec::new();
+    for (endpoint, schedule) in endpoints {
+        let arm = PhasePolicy {
+            budget,
+            exit_on_failure: true,
+        }
+        .arm(*schedule);
+        if arm.retries() {
+            retrying.push((endpoint.as_str(), *schedule));
+            continue;
+        }
+        attempts += 1;
+        let outcome = match deadline {
+            Some(at) => tokio::time::timeout_at(at, attempt(endpoint, 1)).await.ok(),
+            None => Some(attempt(endpoint, 1).await),
+        };
+        match outcome {
+            Some(Ok(value)) => return Ok(value),
+            Some(Err(e)) => last = Some(e),
+            None => return Err(failed(last, attempts)),
+        }
+    }
+    if retrying.is_empty() {
+        return Err(failed(last, attempts));
+    }
+    // What is left of the budget is each racing endpoint's budget, so none of
+    // them can outlive the phase.
+    let left = match deadline {
+        Some(at) => {
+            let rest = at.saturating_duration_since(tokio::time::Instant::now());
+            if rest.is_zero() {
+                return Err(failed(last, attempts));
+            }
+            PhaseBudget::from_ms(rest.as_millis().max(1) as i64)
+        }
+        None => budget,
+    };
+    let attempt = &attempt;
+    type Leg<'a, T, E> =
+        std::pin::Pin<Box<dyn std::future::Future<Output = Result<T, PhaseFailed<E>>> + 'a>>;
+    let mut legs: Vec<Leg<'_, T, E>> = retrying
+        .into_iter()
+        .map(|(endpoint, schedule)| {
+            let leg = drive_phase(
+                PhasePolicy {
+                    budget: left,
+                    exit_on_failure: true,
+                },
+                schedule,
+                move |n| attempt(endpoint, n),
+            );
+            Box::pin(leg) as Leg<'_, T, E>
+        })
+        .collect();
+    // The race: the first leg to open wins; a leg that gives up leaves the
+    // others running, and the phase fails only when every leg has.
+    let mut failures: Vec<PhaseFailed<E>> = Vec::new();
+    let won = std::future::poll_fn(|cx| {
+        let mut i = 0;
+        while i < legs.len() {
+            match legs[i].as_mut().poll(cx) {
+                std::task::Poll::Ready(Ok(value)) => return std::task::Poll::Ready(Some(value)),
+                std::task::Poll::Ready(Err(f)) => {
+                    failures.push(f);
+                    drop(legs.swap_remove(i));
+                }
+                std::task::Poll::Pending => i += 1,
+            }
+        }
+        if legs.is_empty() {
+            std::task::Poll::Ready(None)
+        } else {
+            std::task::Poll::Pending
+        }
+    })
+    .await;
+    if let Some(value) = won {
+        return Ok(value);
+    }
+    for f in failures {
+        attempts += f.attempts;
+        if f.last.is_some() {
+            last = f.last;
+        }
+    }
+    Err(failed(last, attempts))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -566,5 +713,108 @@ mod tests {
         })
         .await;
         assert_eq!(got.expect("the third attempt succeeds"), 3);
+    }
+
+    /// R2943 — the one-shot arm tries each endpoint ONCE, in list order, and
+    /// the first that opens ends the phase.
+    #[tokio::test]
+    async fn a_no_retry_connect_phase_walks_the_list_once_in_order() {
+        let endpoints = vec![
+            (String::from("tcp/a:1"), RetryPolicy::constant(100)),
+            (String::from("tcp/b:1"), RetryPolicy::constant(100)),
+            (String::from("tcp/c:1"), RetryPolicy::constant(100)),
+        ];
+        let tried = std::sync::Mutex::new(Vec::new());
+        let got = drive_connect_phase(PhaseBudget::NO_RETRY, &endpoints, |e, n| {
+            tried.lock().unwrap().push((e.to_owned(), n));
+            let ok = e == "tcp/b:1";
+            async move {
+                if ok {
+                    Ok(e)
+                } else {
+                    Err("refused")
+                }
+            }
+        })
+        .await;
+        assert_eq!(got.expect("b opens"), "tcp/b:1");
+        assert_eq!(
+            *tried.lock().unwrap(),
+            vec![(String::from("tcp/a:1"), 1), (String::from("tcp/b:1"), 1)],
+            "c is never tried once b has opened"
+        );
+    }
+
+    /// R2943 — the retrying endpoints RACE, each on its own schedule: the one
+    /// whose schedule reaches its opening attempt first wins, whatever its
+    /// place in the list.
+    #[tokio::test(start_paused = true)]
+    async fn retrying_endpoints_race_on_their_own_schedules() {
+        let endpoints = vec![
+            (String::from("tcp/slow:1"), RetryPolicy::constant(1000)),
+            (String::from("tcp/fast:1"), RetryPolicy::constant(100)),
+        ];
+        let started = tokio::time::Instant::now();
+        // Each endpoint opens on its THIRD attempt: after 2 waits of its own.
+        let got = drive_connect_phase(PhaseBudget::UNBOUNDED, &endpoints, |e, n| async move {
+            if n == 3 {
+                Ok(e)
+            } else {
+                Err("not yet")
+            }
+        })
+        .await;
+        assert_eq!(got.expect("one of them opens"), "tcp/fast:1");
+        assert!(
+            started.elapsed() < Duration::from_millis(500),
+            "the fast endpoint's schedule decides, not the list order: {:?}",
+            started.elapsed()
+        );
+    }
+
+    /// R2943 — the budget bounds the WHOLE phase, the race included, and every
+    /// leg's attempts are counted in the failure.
+    #[tokio::test(start_paused = true)]
+    async fn the_budget_bounds_the_whole_connect_phase() {
+        let endpoints = vec![
+            (String::from("tcp/a:1"), RetryPolicy::constant(100)),
+            (String::from("tcp/b:1"), RetryPolicy::constant(100)),
+        ];
+        let started = tokio::time::Instant::now();
+        let out: Result<(), _> =
+            drive_connect_phase(PhaseBudget::from_ms(500), &endpoints, |_, _| async {
+                Err::<(), &str>("refused")
+            })
+            .await;
+        let failed = out.expect_err("nothing opens");
+        assert!(
+            failed.attempts >= 8,
+            "two legs at 100 ms for 500 ms: {}",
+            failed.attempts
+        );
+        assert!(failed.last.is_some());
+        let spent = started.elapsed();
+        assert!(
+            spent >= Duration::from_millis(500) && spent < Duration::from_millis(700),
+            "the phase ends at its budget: {spent:?}"
+        );
+    }
+
+    /// R2943 — an endpoint's `#retry_period_*` tail is layered over the global
+    /// schedule, field by field, and a silent tail keeps the global one.
+    #[test]
+    fn an_endpoint_tail_overrides_the_global_schedule() {
+        let global = RetryPolicy::ZENOH_DEFAULT;
+        assert_eq!(endpoint_schedule(global, "tcp/127.0.0.1:7447"), global);
+        let layered = endpoint_schedule(
+            global,
+            "tcp/127.0.0.1:7447#retry_period_init_ms=20;retry_period_max_ms=80",
+        );
+        assert_eq!(layered.period_init_ms, 20);
+        assert_eq!(layered.period_max_ms, 80);
+        assert_eq!(
+            layered.period_increase_factor, global.period_increase_factor,
+            "a field the tail is silent about keeps the global value"
+        );
     }
 }

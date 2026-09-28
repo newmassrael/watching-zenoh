@@ -107,6 +107,24 @@ impl ConfigState {
         }
     }
 
+    /// EVERY string the value at `key` denotes, in written order: a string
+    /// denotes itself, an array its string elements. R2943 — the open path's
+    /// `connect/endpoints`, because zenoh-c dials the whole list and
+    /// [`Self::first`] reads one.
+    pub(crate) fn all(&self, key: &str) -> Vec<&str> {
+        match self.entries.get(key) {
+            Some(Json5Value::String(text)) => vec![text.as_str()],
+            Some(Json5Value::Array(items)) => items
+                .iter()
+                .filter_map(|item| match item {
+                    Json5Value::String(text) => Some(text.as_str()),
+                    _ => None,
+                })
+                .collect(),
+            _ => Vec::new(),
+        }
+    }
+
     /// Store one json5 VALUE at `key`, decomposing an object into the leaves it
     /// states and REPLACING whatever stood at or beneath that key.
     ///

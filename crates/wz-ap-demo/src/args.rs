@@ -1505,21 +1505,21 @@ pub(crate) fn expand_stock_zenoh_config_for_build(
     // ZA-3308 — `connect/timeout_ms` is NOT narrowed that way any more. A
     // one-shot `--connect` client runs upstream's client startup phase, and the
     // budget is what decides whether that phase re-dials: `0`, the client
-    // default, is one attempt; `-1` or a positive bound keeps dialing. A
-    // `--connect --reconnect` client is still excluded: its supervisor governs
-    // re-dials AFTER an established link is lost, not a startup phase.
+    // default, is one attempt; `-1` or a positive bound keeps dialing.
+    // R2943 — a `--connect --reconnect` client too: its supervisor governs the
+    // re-dials after an established link is lost, and its FIRST open runs the
+    // same startup phase a one-shot client does.
     let has_phases = |a: &String| a == "--peer" || a == "--router-hat";
     let mesh = exp.rest.iter().chain(exp.added.iter()).any(has_phases);
     let not_a_mesh_run = (!mesh).then_some(KeyEffect::WithheldFromThisRun(
         "this run's mode has no startup phase to bound",
     ));
-    let one_shot_client = exp
+    let client = exp
         .rest
         .iter()
         .chain(exp.added.iter())
-        .any(|a| a == "--connect")
-        && !exp.rest.iter().any(|t| t == "--reconnect");
-    let no_connect_phase = (!mesh && !one_shot_client).then_some(KeyEffect::WithheldFromThisRun(
+        .any(|a| a == "--connect");
+    let no_connect_phase = (!mesh && !client).then_some(KeyEffect::WithheldFromThisRun(
         "this run's mode has no startup connect phase to bound",
     ));
     if named("connect/timeout_ms") {

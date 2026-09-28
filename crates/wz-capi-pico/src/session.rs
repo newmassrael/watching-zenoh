@@ -293,11 +293,18 @@ pub unsafe extern "C" fn z_open(
         // (see `TxQueueConf::pico`). zenoh's 1 ms drop wait here discarded the
         // tail of a burst that `teardown_drain` puts before `z_close`.
         match open_blocking(
-            connect,
+            connect.into_iter().collect(),
             listen,
             tls,
             dial_whatami,
-            DialPhase::ONCE,
+            // R2943 — pico re-opens a lost client session by default
+            // (`Z_FEATURE_AUTO_RECONNECT`), every 1000 ms
+            // (`vendor/zenoh-pico/src/net/session.c` @
+            // `return _z_fut_fn_result_wake_up_after(1000);`).
+            DialPhase {
+                redial: Some(wz_runtime_tokio::retry_period::RetryPolicy::constant(1000)),
+                ..DialPhase::ONCE
+            },
             TxQueueConf::pico(),
         ) {
             Ok(state) => {

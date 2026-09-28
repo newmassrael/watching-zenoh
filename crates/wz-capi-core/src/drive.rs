@@ -34,7 +34,9 @@ use wz_runtime_tokio::session_open::{
     bind_endpoint_with_config, dial_endpoint, initiate_and_open_session, AcceptConfig, DialConfig,
     OpenedSession, OpenedSessionParts, DEFAULT_OPEN_TICK_MS,
 };
-use wz_runtime_tokio::startup_phase::{drive_phase, PhasePolicy};
+use wz_runtime_tokio::startup_phase::{
+    drive_connect_phase, endpoint_schedule, PhaseBudget, PhasePolicy,
+};
 
 use crate::faces::{CApiForwarder, SharedSession, DIAL_FACE_ID};
 
@@ -44,7 +46,7 @@ use crate::faces::{CApiForwarder, SharedSession, DIAL_FACE_ID};
 /// for the role the session dials as.
 ///
 /// ZA-3298. The two halves are the runtime's own types and the loop that runs
-/// them is [`drive_phase`], the runtime's transcription of upstream's
+/// them is [`drive_connect_phase`], the runtime's transcription of upstream's
 /// `connect_peers` fork (`zenoh/src/net/runtime/orchestrator.rs` @
 /// `async fn connect_peers_single_link(&self, peers: &[EndPoints]) -> ZResult<()> {`).
 /// Nothing here re-derives the arithmetic, so a C open cannot drift from the
@@ -55,6 +57,14 @@ pub struct DialPhase {
     pub policy: PhasePolicy,
     /// `connect/retry`.
     pub schedule: RetryPolicy,
+    /// R2943 — the schedule the session RE-DIALS on after an established link
+    /// is lost, or `None` for a session that ends with its link. zenoh re-dials
+    /// a closed session's configured endpoints
+    /// (`zenoh/src/net/runtime/orchestrator.rs` @
+    /// `.peers_connector_retry(peers, runtime.whatami() == WhatAmI::Client)`),
+    /// and pico does too, by default (`Z_FEATURE_AUTO_RECONNECT`), on its own
+    /// constant delay; each ABI names its own.
+    pub redial: Option<RetryPolicy>,
 }
 
 /// How long a peer's open waits for its configured peer before returning
@@ -70,6 +80,7 @@ impl DialPhase {
     pub const ONCE: Self = Self {
         policy: PhasePolicy::CONNECT_CLIENT_DEFAULT,
         schedule: RetryPolicy::ZENOH_DEFAULT,
+        redial: None,
     };
 }
 
@@ -271,7 +282,7 @@ async fn shutdown_future(shutdown: Arc<Notify>, stop: Arc<AtomicBool>) {
 /// the open does not wait for its peer, in which case it unblocks first (see
 /// the ZA-3298 note in the body).
 async fn drive_dial(
-    endpoint: String,
+    endpoints: Vec<String>,
     whatami: WhatAmI,
     tls: CapiTlsConfig,
     phase: DialPhase,
@@ -289,13 +300,25 @@ async fn drive_dial(
     // R311y534 — the dial config is BUILT from the caller's TLS material rather
     // than defaulted. Everything that can fail it runs before the handshake, so a
     // bad trust bundle reports an open failure to the C caller.
-    let dial_cfg = match dial_config(&tls, &endpoint) {
-        Ok(cfg) => cfg,
-        Err(_) => {
-            let _ = tx.send(false);
-            return;
+    //
+    // R2943 — for EVERY connect endpoint, not only the first: zenoh-c dials the
+    // whole `connect/endpoints` list, and each endpoint carries its own
+    // schedule, the global `connect/retry` with its `#retry_period_*` tail on
+    // top (`endpoint_schedule`).
+    let mut dial_cfgs: Vec<(String, DialConfig)> = Vec::with_capacity(endpoints.len());
+    for endpoint in &endpoints {
+        match dial_config(&tls, endpoint) {
+            Ok(cfg) => dial_cfgs.push((endpoint.clone(), cfg)),
+            Err(_) => {
+                let _ = tx.send(false);
+                return;
+            }
         }
-    };
+    }
+    let scheduled: Vec<(String, RetryPolicy)> = endpoints
+        .iter()
+        .map(|e| (e.clone(), endpoint_schedule(phase.schedule, e)))
+        .collect();
     // R311y820 — fallible the way the step above is: report the open failure to
     // the C caller rather than dial with a cookie key anybody could forge.
     // Minted ONCE, before the phase: it is not a connect failure, so it is not
@@ -323,17 +346,41 @@ async fn drive_dial(
     // unit too: `open_transport_unicast` both connects and opens the session,
     // and it is what `peers_connector_retry` re-attempts. A peer that is up but
     // not yet serving therefore retries like one that is down.
-    let dialing = drive_phase(phase.policy, phase.schedule, |_attempt| {
-        let dial_cfg = &dial_cfg;
-        let endpoint = &endpoint;
+    //
+    // R2943 — over the whole list, by `drive_connect_phase`: the endpoints that
+    // do not retry once each in order, then the retrying ones raced on their own
+    // schedules, the first to open winning. A peer here takes the same single
+    // session a client does, because this session holds one dial face; see
+    // that function for how that narrows upstream's peer, which connects to
+    // every endpoint it can.
+    let dial_cfgs = &dial_cfgs;
+    let params = &params;
+    let attempt = |endpoint: &str, _attempt: u32| {
         let params = params.clone();
+        let endpoint = endpoint.to_owned();
         async move {
-            let dialed = dial_endpoint(endpoint, dial_cfg).await.map_err(|_| ())?;
+            let dial_cfg = dial_cfgs
+                .iter()
+                .find(|(e, _)| *e == endpoint)
+                .map(|(_, cfg)| cfg)
+                .ok_or(())?;
+            let dialed = dial_endpoint(&endpoint, dial_cfg).await.map_err(|_| ())?;
             initiate_and_open_session(dialed, params, clock, None, DEFAULT_OPEN_TICK_MS)
                 .await
                 .map_err(|_| ())
         }
-    });
+    };
+    // R2943 — the RE-DIAL list, each endpoint on the re-dial schedule with its
+    // own `#` tail on top, run unbounded as upstream's `peers_connector_retry`
+    // runs until the endpoint connects or the session is closed.
+    let rescheduled: Vec<(String, RetryPolicy)> = match phase.redial {
+        Some(redial) => endpoints
+            .iter()
+            .map(|e| (e.clone(), endpoint_schedule(redial, e)))
+            .collect(),
+        None => Vec::new(),
+    };
+    let dialing = drive_connect_phase(phase.policy.budget, &scheduled, &attempt);
     let mut dialing = std::pin::pin!(dialing);
     // R2943 — a peer's open does not return at once either: `start_peer` waits
     // for its configured peers up to `scouting/delay` under
@@ -372,14 +419,8 @@ async fn drive_dial(
     // what carries the writer handle out by name rather than letting it fall out
     // of a capture (`OpenedSession`'s `Drop` impl states the rule). This task
     // holds it for the whole drive below, which is what it was already doing.
-    let OpenedSessionParts {
-        mut engine,
-        actions,
-        inbound,
-        writer_handle,
-        ..
-    } = match opened {
-        Some(opened) => opened.into_parts(),
+    let mut session = match opened {
+        Some(opened) => opened,
         // Released early, the session outlives a dial that gave up: upstream's
         // peer stays up with no connection. It serves its local plane until
         // `z_close`.
@@ -401,121 +442,151 @@ async fn drive_dial(
         }
     };
 
-    // A dialed session has exactly one peer, so it occupies the single
-    // `DIAL_FACE_ID` slot; from here the C surface is role-agnostic (it fans
-    // over whatever faces the registry holds).
-    shared.face_up(DIAL_FACE_ID, &actions);
-    if !released && tx.send(true).is_err() {
-        return;
-    }
+    loop {
+        let OpenedSessionParts {
+            mut engine,
+            actions,
+            inbound,
+            writer_handle,
+            ..
+        } = session.into_parts();
+        // A dialed session has exactly one peer, so it occupies the single
+        // `DIAL_FACE_ID` slot; from here the C surface is role-agnostic (it fans
+        // over whatever faces the registry holds). A re-dialled session lands in
+        // the same slot, and `face_up` replays the declarations onto it.
+        shared.face_up(DIAL_FACE_ID, &actions);
+        if !released {
+            if tx.send(true).is_err() {
+                return;
+            }
+            released = true;
+        }
 
-    let mut driver = inbound;
-    let timeouts = SessionTimeouts::spec_defaults();
-    let dispatch_shared = shared.clone();
-    // The `IterationEvent<'_>` annotation is load-bearing: `drive_session_until_terminal`
-    // needs a HIGHER-RANKED `FnMut(IterationEvent<'_>)`, and without it inference
-    // pins the closure to one specific lifetime ("implementation of `FnMut` is not
-    // general enough").
-    let mut dispatch = |event: IterationEvent<'_>| dispatch_shared.dispatch(DIAL_FACE_ID, event);
-    // R311y296 — the dial role does NOT go through `accept_loop`, so the
-    // `FaceForwarder::next_extra_deadline_ms` hook that arms the accepted
-    // faces' wakes cannot reach it; this closure is the dial role's equivalent,
-    // passed straight to the drive. Both roles therefore sweep expired `z_get`s
-    // on their own drive thread at the deadline rather than on the ~3333 ms
-    // keepalive cadence — a `connect` session is the ordinary pico get client
-    // (a `z_get` to a router), so leaving this path on the plain drive would
-    // have made the sweep late exactly where it matters most.
-    let deadline_shared = shared.clone();
-    let next_deadline = move || deadline_shared.next_reply_deadline_ms(DIAL_FACE_ID);
-    // `face_up` above registered the face, so its re-arm signal exists.
-    let revised = shared.deadline_revised(DIAL_FACE_ID);
+        let mut driver = inbound;
+        let timeouts = SessionTimeouts::spec_defaults();
+        let dispatch_shared = shared.clone();
+        // The `IterationEvent<'_>` annotation is load-bearing: `drive_session_until_terminal`
+        // needs a HIGHER-RANKED `FnMut(IterationEvent<'_>)`, and without it inference
+        // pins the closure to one specific lifetime ("implementation of `FnMut` is not
+        // general enough").
+        let mut dispatch =
+            |event: IterationEvent<'_>| dispatch_shared.dispatch(DIAL_FACE_ID, event);
+        // R311y296 — the dial role does NOT go through `accept_loop`, so the
+        // `FaceForwarder::next_extra_deadline_ms` hook that arms the accepted
+        // faces' wakes cannot reach it; this closure is the dial role's equivalent,
+        // passed straight to the drive. Both roles therefore sweep expired `z_get`s
+        // on their own drive thread at the deadline rather than on the ~3333 ms
+        // keepalive cadence — a `connect` session is the ordinary pico get client
+        // (a `z_get` to a router), so leaving this path on the plain drive would
+        // have made the sweep late exactly where it matters most.
+        let deadline_shared = shared.clone();
+        let next_deadline = move || deadline_shared.next_reply_deadline_ms(DIAL_FACE_ID);
+        // `face_up` above registered the face, so its re-arm signal exists.
+        let revised = shared.deadline_revised(DIAL_FACE_ID);
 
-    // R311y557 — the LOCAL PLANE's drain is an arm of THIS select, not a
-    // `tokio::spawn`. Both placements keep the C application thread out of the
-    // C callbacks, which is the `unsafe impl Sync` premise; only this one also
-    // keeps the plane's deliveries from overlapping the face's, because a
-    // `select!` polls its arms on ONE task while the per-session runtime has two
-    // worker threads a spawned task could land on.
-    let local_shared = shared.clone();
-    tokio::select! {
-        _ = drive_session_until_terminal_with_extra_deadline(
-            &mut driver,
-            &actions,
-            &mut engine,
-            None,
-            &clock,
-            &timeouts,
-            &mut dispatch,
-            ExtraDeadline {
-                next_ms: next_deadline,
-                revised: revised.as_deref(),
+        // R311y557 — the LOCAL PLANE's drain is an arm of THIS select, not a
+        // `tokio::spawn`. Both placements keep the C application thread out of the
+        // C callbacks, which is the `unsafe impl Sync` premise; only this one also
+        // keeps the plane's deliveries from overlapping the face's, because a
+        // `select!` polls its arms on ONE task while the per-session runtime has two
+        // worker threads a spawned task could land on.
+        let local_shared = shared.clone();
+        tokio::select! {
+            _ = drive_session_until_terminal_with_extra_deadline(
+                &mut driver,
+                &actions,
+                &mut engine,
+                None,
+                &clock,
+                &timeouts,
+                &mut dispatch,
+                ExtraDeadline {
+                    next_ms: next_deadline,
+                    revised: revised.as_deref(),
+                },
+                // R2702/R2703 — no session-owned stages: the C API drives a session
+                // whose §5.16 policy and whose subscriptions, if any, belong to the
+                // embedding application, and this loop does not own one.
+                wz_runtime_tokio::session_glue::LoopStages {
+                    // The parameter type is named rather than inferred: inside the
+                    // bundle, `|_| {}` infers a closure that is not general enough
+                    // over the outcome's lifetime, and rustc reports it as
+                    // "implementation of `FnMut` is not general enough" at the
+                    // `select!` rather than at the closure.
+                    ingress: |_: &mut wz_runtime_tokio::session_glue::DriverLoopOutcome| {},
+                    after_dispatch: || core::future::ready(()),
+                },
+            ) => {}
+            _ = local_shared.drive_local_plane() => {}
+            _ = shutdown_future(shutdown.clone(), stop.clone()) => {}
+        }
+
+        // `face_down` FIRST, and the ordering is load-bearing for LATENCY, not for
+        // delivery — a distinction established by damaging it rather than by
+        // reasoning about it. The registry's `FaceEntry` holds this session's
+        // `TokioSession`, hence a clone of the `Arc<SessionLinkActions>` that owns
+        // the outbound sender, and the drain below ends when that channel closes.
+        // Move this line after the drain and every byte still arrives (the writer
+        // drains the channel during the window either way; only its EXIT is missed),
+        // so the delivery gate stays green — while every `z_close` silently pays the
+        // full `WRITER_DRAIN_MS`: measured 51.5 ms against 0.1-0.5 ms.
+        // `an_idle_z_close_does_not_burn_the_whole_drain_window` is what holds it.
+        shared.face_down(DIAL_FACE_ID);
+        // R311y486 — DRAIN, do not detach. `drop(writer_handle)` only detaches the
+        // task, and `open_blocking`'s driver thread drops its per-session runtime on
+        // the very next line, which aborts that task wherever it stands: with an
+        // unbounded outbound channel and a peer that has stopped reading, "wherever
+        // it stands" routinely means blocked mid-write with encoded frames still
+        // queued, and every one of them is discarded after `z_put` already returned
+        // `Z_OK`.
+        //
+        // The pico contract this restores is NOT that its `z_close` flushes — read
+        // `_z_session_close` (`vendor/zenoh-pico/src/session/utils.c:167`) and it
+        // stops the runtime and frees the resource / subscription / queryable /
+        // pending-query registries; it moves no outbound byte. It does not have to:
+        // pico's `z_put` writes on the CALLING thread all the way down
+        // (`_z_write` -> `_z_send_n_msg` -> `_z_transport_tx_send_n_msg`,
+        // `vendor/zenoh-pico/src/net/primitives.c:170`,
+        // `vendor/zenoh-pico/src/transport/common/tx.c:487`), so when it returns the
+        // bytes are already the kernel's and there is no queue left to lose. This
+        // crate's `z_put` hands off to an async writer task instead — a queue pico
+        // does not have, and therefore a teardown obligation pico does not have.
+        // Draining it is what makes the two `z_put`s mean the same thing to a C
+        // caller.
+        //
+        // Reconstructing the struct to reach `drain_to_close` is deliberate: the
+        // drop order (engine before actions before the bounded await) is the whole
+        // correctness argument, and R311y484 recorded it as the thing to COPY. A
+        // hand-inlined copy here would be a second place for that order to rot, so
+        // the dial role runs the library's own primitive — the same one
+        // `accept_loop` drains every accepted face through, which is why the LISTEN
+        // role never had this defect.
+        OpenedSession {
+            engine,
+            actions,
+            inbound: driver,
+            writer_handle,
+            clock,
+        }
+        .drain_to_close()
+        .await;
+
+        // R2943 — a session that ended for any reason but `z_close` has lost its
+        // link, and zenoh re-dials the configured endpoints behind it. The latch is
+        // what `z_close` sets before it notifies, so it tells the two apart.
+        if stop.load(Ordering::SeqCst) || rescheduled.is_empty() {
+            return;
+        }
+        let redialing = drive_connect_phase(PhaseBudget::UNBOUNDED, &rescheduled, &attempt);
+        session = tokio::select! {
+            again = redialing => match again {
+                Ok(again) => again,
+                Err(_) => return,
             },
-            // R2702/R2703 — no session-owned stages: the C API drives a session
-            // whose §5.16 policy and whose subscriptions, if any, belong to the
-            // embedding application, and this loop does not own one.
-            wz_runtime_tokio::session_glue::LoopStages {
-                // The parameter type is named rather than inferred: inside the
-                // bundle, `|_| {}` infers a closure that is not general enough
-                // over the outcome's lifetime, and rustc reports it as
-                // "implementation of `FnMut` is not general enough" at the
-                // `select!` rather than at the closure.
-                ingress: |_: &mut wz_runtime_tokio::session_glue::DriverLoopOutcome| {},
-                after_dispatch: || core::future::ready(()),
-            },
-        ) => {}
-        _ = local_shared.drive_local_plane() => {}
-        _ = shutdown_future(shutdown, stop) => {}
+            _ = shared.drive_local_plane() => return,
+            _ = shutdown_future(shutdown.clone(), stop.clone()) => return,
+        };
     }
-
-    // `face_down` FIRST, and the ordering is load-bearing for LATENCY, not for
-    // delivery — a distinction established by damaging it rather than by
-    // reasoning about it. The registry's `FaceEntry` holds this session's
-    // `TokioSession`, hence a clone of the `Arc<SessionLinkActions>` that owns
-    // the outbound sender, and the drain below ends when that channel closes.
-    // Move this line after the drain and every byte still arrives (the writer
-    // drains the channel during the window either way; only its EXIT is missed),
-    // so the delivery gate stays green — while every `z_close` silently pays the
-    // full `WRITER_DRAIN_MS`: measured 51.5 ms against 0.1-0.5 ms.
-    // `an_idle_z_close_does_not_burn_the_whole_drain_window` is what holds it.
-    shared.face_down(DIAL_FACE_ID);
-    // R311y486 — DRAIN, do not detach. `drop(writer_handle)` only detaches the
-    // task, and `open_blocking`'s driver thread drops its per-session runtime on
-    // the very next line, which aborts that task wherever it stands: with an
-    // unbounded outbound channel and a peer that has stopped reading, "wherever
-    // it stands" routinely means blocked mid-write with encoded frames still
-    // queued, and every one of them is discarded after `z_put` already returned
-    // `Z_OK`.
-    //
-    // The pico contract this restores is NOT that its `z_close` flushes — read
-    // `_z_session_close` (`vendor/zenoh-pico/src/session/utils.c:167`) and it
-    // stops the runtime and frees the resource / subscription / queryable /
-    // pending-query registries; it moves no outbound byte. It does not have to:
-    // pico's `z_put` writes on the CALLING thread all the way down
-    // (`_z_write` -> `_z_send_n_msg` -> `_z_transport_tx_send_n_msg`,
-    // `vendor/zenoh-pico/src/net/primitives.c:170`,
-    // `vendor/zenoh-pico/src/transport/common/tx.c:487`), so when it returns the
-    // bytes are already the kernel's and there is no queue left to lose. This
-    // crate's `z_put` hands off to an async writer task instead — a queue pico
-    // does not have, and therefore a teardown obligation pico does not have.
-    // Draining it is what makes the two `z_put`s mean the same thing to a C
-    // caller.
-    //
-    // Reconstructing the struct to reach `drain_to_close` is deliberate: the
-    // drop order (engine before actions before the bounded await) is the whole
-    // correctness argument, and R311y484 recorded it as the thing to COPY. A
-    // hand-inlined copy here would be a second place for that order to rot, so
-    // the dial role runs the library's own primitive — the same one
-    // `accept_loop` drains every accepted face through, which is why the LISTEN
-    // role never had this defect.
-    OpenedSession {
-        engine,
-        actions,
-        inbound: driver,
-        writer_handle,
-        clock,
-    }
-    .drain_to_close()
-    .await;
 }
 
 /// The TLS material a C-ABI `z_open` carries, already RESOLVED to PEM bytes.
@@ -830,7 +901,7 @@ async fn drive_listen(endpoint: String, tls: CapiTlsConfig, ctx: DriveContext) {
 /// writes on the caller's thread and never drops for a full socket
 /// ([`TxQueueConf::pico`]).
 pub fn open_blocking(
-    connect: Option<String>,
+    connect: Vec<String>,
     listen: Option<String>,
     tls: CapiTlsConfig,
     dial_whatami: WhatAmI,
@@ -886,14 +957,14 @@ pub fn open_blocking(
                 tx_queue,
             };
             rt.block_on(async move {
-                match (connect, listen) {
-                    (Some(endpoint), _) => {
-                        drive_dial(endpoint, dial_whatami, tls, dial_phase, ctx).await;
+                match (connect.is_empty(), listen) {
+                    (false, _) => {
+                        drive_dial(connect, dial_whatami, tls, dial_phase, ctx).await;
                     }
-                    (None, Some(endpoint)) => {
+                    (true, Some(endpoint)) => {
                         drive_listen(endpoint, tls, ctx).await;
                     }
-                    (None, None) => {
+                    (true, None) => {
                         let _ = ctx.tx.send(false);
                     }
                 }

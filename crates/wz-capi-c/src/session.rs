@@ -78,6 +78,7 @@ fn dial_phase(cfg: &ConfigState, whatami: WhatAmI) -> Option<DialPhase> {
         .ok()?;
     let node = ZenohNodeConfig::from_json5(&document).ok()?.config;
     let default = PhasePolicy::connect_default_for(whatami);
+    let schedule = node.connect_retry.unwrap_or(RetryPolicy::ZENOH_DEFAULT);
     Some(DialPhase {
         policy: PhasePolicy {
             budget: node.connect_timeout_ms.unwrap_or(default.budget),
@@ -85,7 +86,10 @@ fn dial_phase(cfg: &ConfigState, whatami: WhatAmI) -> Option<DialPhase> {
                 .connect_exit_on_failure
                 .unwrap_or(default.exit_on_failure),
         },
-        schedule: node.connect_retry.unwrap_or(RetryPolicy::ZENOH_DEFAULT),
+        schedule,
+        // R2943 — zenoh re-dials a lost session's endpoints on the same
+        // `connect/retry` block, with no budget.
+        redial: Some(schedule),
     })
 }
 
@@ -116,7 +120,12 @@ pub unsafe extern "C" fn z_open(
         let Some(cfg) = (unsafe { config_state(loaned) }) else {
             return Z_ENULL;
         };
-        let connect = cfg.first(CONNECT_KEY).map(str::to_owned);
+        // R2943 — the whole list; each endpoint is dialled on its own schedule.
+        let connect: Vec<String> = cfg
+            .all(CONNECT_KEY)
+            .into_iter()
+            .map(str::to_owned)
+            .collect();
         let listen = cfg.first(LISTEN_KEY).map(str::to_owned);
         let whatami = dial_whatami(cfg);
         let phase = dial_phase(cfg, whatami);
@@ -128,12 +137,12 @@ pub unsafe extern "C" fn z_open(
         // A config with neither endpoint is a scouting open, which this slice
         // does not implement. Refused rather than silently opening a session
         // that reaches nothing.
-        if connect.is_none() && listen.is_none() {
+        if connect.is_empty() && listen.is_none() {
             return Z_EINVAL;
         }
         // Both is zenoh's dual-role peer; the core drives one role per session,
         // so refuse rather than silently dropping the listener.
-        if connect.is_some() && listen.is_some() {
+        if !connect.is_empty() && listen.is_some() {
             return Z_EINVAL;
         }
         // Checked after the two refusals above so a config that states no

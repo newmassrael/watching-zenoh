@@ -113,12 +113,17 @@ use wz::runtime_tokio::session_open::{bind_endpoint_with_config, BoundListener};
 // phase and a dial phase, and `PeerOpts` / `RouterHatOpts` ride the same gate.
 // The demo's rule is cfg on the set of consumers, not on the feature that
 // happens to be nearest. ZA-3308 put the one-shot client's connect phase in
-// that set, and the client is in every build, so the three it uses are
-// ungated; `PhaseArm` is still read by the mesh arms alone.
+// that set, and the client is in every build, so what it uses is ungated;
+// `PhaseArm` and `drive_phase` are still read by the mesh arms alone (R2943
+// moved the client onto `drive_connect_phase`).
 use wz::runtime_tokio::retry_period::RetryPolicy;
 #[cfg(any(feature = "routing-peer", feature = "router-hat-router"))]
+use wz::runtime_tokio::startup_phase::drive_phase;
+#[cfg(any(feature = "routing-peer", feature = "router-hat-router"))]
 use wz::runtime_tokio::startup_phase::PhaseArm;
-use wz::runtime_tokio::startup_phase::{drive_phase, PhaseBudget, PhasePolicy};
+use wz::runtime_tokio::startup_phase::{
+    drive_connect_phase, endpoint_schedule, PhaseBudget, PhasePolicy,
+};
 use wz::runtime_tokio::sync::Mutex;
 
 #[cfg(any(feature = "scouting-active", feature = "scouting-responder"))]
@@ -1412,6 +1417,44 @@ fn role_names(matcher: wz::runtime_tokio::linkstate_forward::WhatAmIMatcher) -> 
     }
 }
 
+/// Dial ONE `--connect` candidate, returning the link with the offer its open
+/// makes. R2943 — split out of [`establish_link`]'s walk so the client connect
+/// phase can race candidates on their own schedules; the walk and the phase
+/// dial through this one body.
+async fn dial_candidate(
+    endpoint: &str,
+    dial_cfg: &DialConfig,
+    offer: SessionOffer,
+) -> io::Result<(DialedLink, SessionOffer)> {
+    // R2944 — this candidate's own QoS metadata, read before its dial: an
+    // unreadable value refuses the candidate, as upstream's establishment
+    // refuses it.
+    let endpoint_offer = offer_for_connect(offer, endpoint).map_err(|e| {
+        let e = io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("wz-ap-demo: {endpoint}: {e:?}"),
+        );
+        log::warn!("wz-ap-demo: unable to connect to {endpoint}: {e}");
+        e
+    })?;
+    match dial_endpoint(endpoint, dial_cfg).await {
+        Ok(dialed) => {
+            // R311po — log WHICH transport was dialed (the DialedLink variant
+            // name). This is the WS legs' witness that a `ws/...` --connect
+            // really opened a WebSocket link, not a silent TCP fallback.
+            log::info!(
+                "wz-ap-demo: connected to {endpoint} over {} transport",
+                dialed.transport_name()
+            );
+            Ok((dialed, endpoint_offer))
+        }
+        Err(e) => {
+            log::warn!("wz-ap-demo: unable to connect to {endpoint}: {e}");
+            Err(e)
+        }
+    }
+}
+
 /// Dial or accept this run's one link, returning it with the offer its open
 /// must make.
 ///
@@ -1476,37 +1519,9 @@ async fn establish_link(
             // succeeded on its third member still shows the two that did not.
             let mut last: Option<io::Error> = None;
             for endpoint in connect {
-                // R2944 — this candidate's own QoS metadata, read before its
-                // dial: an unreadable value refuses the candidate, as
-                // upstream's establishment refuses it, and the loop moves on.
-                let endpoint_offer = match offer_for_connect(offer, endpoint) {
-                    Ok(endpoint_offer) => endpoint_offer,
-                    Err(e) => {
-                        let e = io::Error::new(
-                            io::ErrorKind::InvalidInput,
-                            format!("wz-ap-demo: {endpoint}: {e:?}"),
-                        );
-                        log::warn!("wz-ap-demo: unable to connect to {endpoint}: {e}");
-                        last = Some(e);
-                        continue;
-                    }
-                };
-                match dial_endpoint(endpoint, &dial_cfg).await {
-                    Ok(dialed) => {
-                        // R311po — log WHICH transport was dialed (the DialedLink
-                        // variant name). This is the WS legs' witness that a
-                        // `ws/...` --connect really opened a WebSocket link, not a
-                        // silent TCP fallback.
-                        log::info!(
-                            "wz-ap-demo: connected to {endpoint} over {} transport",
-                            dialed.transport_name()
-                        );
-                        return Ok((dialed, endpoint_offer));
-                    }
-                    Err(e) => {
-                        log::warn!("wz-ap-demo: unable to connect to {endpoint}: {e}");
-                        last = Some(e);
-                    }
+                match dial_candidate(endpoint, &dial_cfg, offer).await {
+                    Ok(dialed) => return Ok(dialed),
+                    Err(e) => last = Some(e),
                 }
             }
             Err(last.unwrap_or_else(|| {
@@ -2677,13 +2692,40 @@ async fn open_initiator_in_connect_phase(
     phase: PhasePolicy,
     schedule: RetryPolicy,
 ) -> io::Result<OpenedSession> {
-    let outcome = drive_phase(phase, schedule, |attempt| {
+    let Role::Initiator {
+        connect,
+        tls_ca,
+        quic_ca,
+        ..
+    } = role
+    else {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "wz-ap-demo: the connect phase runs for a --connect client only",
+        ));
+    };
+    if connect.is_empty() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "wz-ap-demo: --connect named no endpoint to dial",
+        ));
+    }
+    let dial_cfg = build_dial_config(tls_ca, quic_ca, link_defaults)?;
+    // R2943 — each candidate on its own schedule: `connect/retry` with the
+    // endpoint's `#retry_period_*` tail on top, raced by the runtime's
+    // `drive_connect_phase` as upstream's single-link connect races them.
+    let scheduled: Vec<(String, RetryPolicy)> = connect
+        .iter()
+        .map(|e| (e.clone(), endpoint_schedule(schedule, e)))
+        .collect();
+    let dial_cfg = &dial_cfg;
+    let outcome = drive_connect_phase(phase.budget, &scheduled, |endpoint, attempt| {
         let params = params.clone();
         async move {
             if attempt > 1 {
-                log::info!("wz-ap-demo: connect attempt {attempt}");
+                log::info!("wz-ap-demo: connect attempt {attempt} to {endpoint}");
             }
-            let (dialed, offer) = establish_link(role, link_defaults, offer).await?;
+            let (dialed, offer) = dial_candidate(endpoint, dial_cfg, offer).await?;
             open_initiator_with_offer(offer, dialed, params, clock)
                 .await
                 .map_err(|e| io::Error::other(format!("wz-ap-demo: session open failed: {e:?}")))
@@ -3099,16 +3141,51 @@ pub(crate) async fn run_demo(
             // root-CA slots stay empty, as the default this replaced left them:
             // threading `--tls-ca` into a reconnecting dial is a separate
             // question this round does not answer.
-            let mut recon = supervise_reconnect(
-                primary,
-                params,
-                build_dial_config(&None, &None, &tuning.link_defaults)?,
-                session_clock,
-                connect_retry,
+            // R2943 — the FIRST open runs upstream's client startup connect
+            // phase too: `connect/timeout_ms` decides whether it re-dials, as it
+            // does for a one-shot client. The supervisor's schedule governs the
+            // re-dials after an established link is lost, which is a different
+            // event; `connect/retry` paces both, as upstream's one block does.
+            let first_open_phase = PhasePolicy {
+                budget: connect_timeout.unwrap_or(PhasePolicy::CONNECT_CLIENT_DEFAULT.budget),
+                ..PhasePolicy::CONNECT_CLIENT_DEFAULT
+            };
+            let first_open_schedule = [(
+                primary.clone(),
+                endpoint_schedule(connect_retry.unwrap_or(RetryPolicy::ZENOH_DEFAULT), primary),
+            )];
+            let link_defaults = &tuning.link_defaults;
+            let mut recon = drive_connect_phase(
+                first_open_phase.budget,
+                &first_open_schedule,
+                |endpoint, attempt| {
+                    let params = params.clone();
+                    async move {
+                        if attempt > 1 {
+                            log::info!("wz-ap-demo: connect attempt {attempt} to {endpoint}");
+                        }
+                        let dial_config = build_dial_config(&None, &None, link_defaults)
+                            .map_err(|e| e.to_string())?;
+                        supervise_reconnect(
+                            endpoint,
+                            params,
+                            dial_config,
+                            session_clock,
+                            connect_retry,
+                        )
+                        .await
+                        .map_err(|e| format!("{e:?}"))
+                    }
+                },
             )
             .await
-            .map_err(|e| {
-                io::Error::other(format!("wz-ap-demo: reconnect session open failed: {e:?}"))
+            .map_err(|failed| {
+                io::Error::other(format!(
+                    "wz-ap-demo: reconnect session open failed: {}",
+                    failed
+                        .last
+                        .unwrap_or_else(|| String::from("the connect budget ran out"))
+                ))
             })?;
             // R2376 (open-debt item 15) — a DISCOVERED endpoint gets the
             // re-scouting plan; a typed one keeps re-dialing itself. Applied

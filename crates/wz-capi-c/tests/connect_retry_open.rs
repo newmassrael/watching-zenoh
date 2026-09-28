@@ -299,42 +299,14 @@ fn a_peer_opens_at_once_and_connects_behind_the_open() {
         "the open returned after {opened_after:?}; the start window is 500 ms"
     );
 
-    let hits = Arc::new(AtomicUsize::new(0));
-    let ctx = Box::into_raw(Box::new(CountCtx { hits: hits.clone() }));
-    // SAFETY: an all-zero owned subscriber is its null state.
-    let mut sub: z_owned_subscriber_t = unsafe { std::mem::zeroed() };
-    // SAFETY: the session is live; `ctx` outlives the session, freed below.
-    unsafe {
-        let mut closure: z_owned_closure_sample_t = std::mem::zeroed();
-        z_closure_sample(&mut closure, Some(on_sample), None, ctx.cast());
-        let ke = CString::new(KEYEXPR).unwrap();
-        let mut view: z_view_keyexpr_t = std::mem::zeroed();
-        assert_eq!(z_view_keyexpr_from_str(&mut view, ke.as_ptr()), Z_OK);
-        assert_eq!(
-            z_declare_subscriber(
-                z_session_loan(&session),
-                &mut sub,
-                z_view_keyexpr_loan(&view),
-                (&mut closure as *mut z_owned_closure_sample_t).cast::<z_moved_closure_sample_t>(),
-                std::ptr::null_mut(),
-            ),
-            Z_OK
-        );
-    }
-
+    // SAFETY: the session is live.
+    let (hits, ctx) = unsafe { count_samples(&session) };
     let SendSession(listen) = listen_later(port, LISTENER_LATE_BY)
         .join()
         .expect("listener thread");
-    let deadline = Instant::now() + Duration::from_secs(10);
-    while hits.load(Ordering::SeqCst) == 0 && Instant::now() < deadline {
-        // SAFETY: the listener is live.
-        unsafe { put_once(&listen) };
-        std::thread::sleep(Duration::from_millis(50));
-    }
-    assert!(
-        hits.load(Ordering::SeqCst) > 0,
-        "the peer never connected behind its open"
-    );
+    // SAFETY: the listener is live.
+    let arrived = unsafe { put_until_it_arrives(&listen, &hits) };
+    assert!(arrived, "the peer never connected behind its open");
     // SAFETY: both sessions are live; the subscriber's callback context is
     // freed only after its session has closed.
     unsafe {
@@ -342,4 +314,87 @@ fn a_peer_opens_at_once_and_connects_behind_the_open() {
         close_session(listen);
         drop(Box::from_raw(ctx));
     }
+}
+
+/// R2943 — a session whose link is LOST re-dials, as zenoh re-dials a closed
+/// session's configured endpoints: the listener goes away, a new one binds the
+/// same port, and a put from the new one reaches a subscription declared
+/// before the loss (`face_up` replays it onto the re-dialled link).
+#[test]
+fn a_session_that_loses_its_link_redials_it() {
+    let port = free_port();
+    let SendSession(first) = listen_later(port, Duration::ZERO)
+        .join()
+        .expect("listener thread");
+    // SAFETY: fresh config and session.
+    let (rc, session) = unsafe {
+        open_with(&[
+            ("mode", String::from("\"client\"")),
+            ("connect/endpoints", endpoint(port)),
+            (
+                "connect/retry",
+                String::from("{period_init_ms: 100, period_max_ms: 200}"),
+            ),
+        ])
+    };
+    assert_eq!(rc, Z_OK);
+    // SAFETY: the session is live.
+    let (hits, ctx) = unsafe { count_samples(&session) };
+    // SAFETY: the first listener is live.
+    assert!(
+        unsafe { put_until_it_arrives(&first, &hits) },
+        "the first link never carried a put"
+    );
+    // SAFETY: the first listener is live and owned here.
+    unsafe { close_session(first) };
+    hits.store(0, Ordering::SeqCst);
+    let SendSession(second) = listen_later(port, LISTENER_LATE_BY)
+        .join()
+        .expect("listener thread");
+    // SAFETY: the second listener is live.
+    let arrived = unsafe { put_until_it_arrives(&second, &hits) };
+    assert!(
+        arrived,
+        "the session never re-dialled after its link was lost"
+    );
+    // SAFETY: both sessions are live; `ctx` is freed after its session closed.
+    unsafe {
+        close_session(session);
+        close_session(second);
+        drop(Box::from_raw(ctx));
+    }
+}
+
+/// Declare a subscriber on [`KEYEXPR`] that counts its samples. The returned
+/// context must outlive `session` and be freed by the caller after it closes.
+unsafe fn count_samples(session: &z_owned_session_t) -> (Arc<AtomicUsize>, *mut CountCtx) {
+    let hits = Arc::new(AtomicUsize::new(0));
+    let ctx = Box::into_raw(Box::new(CountCtx { hits: hits.clone() }));
+    let mut sub: z_owned_subscriber_t = std::mem::zeroed();
+    let mut closure: z_owned_closure_sample_t = std::mem::zeroed();
+    z_closure_sample(&mut closure, Some(on_sample), None, ctx.cast());
+    let ke = CString::new(KEYEXPR).unwrap();
+    let mut view: z_view_keyexpr_t = std::mem::zeroed();
+    assert_eq!(z_view_keyexpr_from_str(&mut view, ke.as_ptr()), Z_OK);
+    assert_eq!(
+        z_declare_subscriber(
+            z_session_loan(session),
+            &mut sub,
+            z_view_keyexpr_loan(&view),
+            (&mut closure as *mut z_owned_closure_sample_t).cast::<z_moved_closure_sample_t>(),
+            std::ptr::null_mut(),
+        ),
+        Z_OK
+    );
+    (hits, ctx)
+}
+
+/// Put from `publisher` every 50 ms until a sample is counted, for up to 10 s.
+unsafe fn put_until_it_arrives(publisher: &z_owned_session_t, hits: &Arc<AtomicUsize>) -> bool {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while hits.load(Ordering::SeqCst) == 0 && Instant::now() < deadline {
+        put_once(publisher);
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    hits.load(Ordering::SeqCst) > 0
 }
