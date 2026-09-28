@@ -271,7 +271,7 @@ impl<R: SessionRuntime, T: TimeSource> TransportState<R, T> for Unicast {
 #[cfg(feature = "transport-multicast")]
 #[derive(Clone)]
 pub struct MulticastPayload {
-    /// The group's producer (R2931):
+    /// The group's producer (R2937):
     /// [`Session::publish`](super::Session::publish) pushes a `MulticastTxItem`
     /// through it onto the pipeline
     /// [`drive_multicast_session`](crate::multicast_glue::drive_multicast_session)
@@ -311,7 +311,7 @@ impl<R: SessionRuntime, T: TimeSource> TransportState<R, T> for Multicast {
                 // variants Response / ResponseFinal / Oam are emitted by the
                 // drive-loop MulticastReplySink, never routed here).
                 NetworkMessage::Push(push) => {
-                    // R2931 — pushed here, on the publisher's thread: a
+                    // R2937 — pushed here, on the publisher's thread: a
                     // blocking publish waits for room within its
                     // `wait_before_close`, a droppable one within its
                     // `wait_before_drop`, and one that finds none is a

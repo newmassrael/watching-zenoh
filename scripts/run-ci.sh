@@ -4705,7 +4705,7 @@ layer_c1_cargo_test() {
     # Session API (gated `not(transport-unicast)`), which the workspace's
     # transport-unicast feature unification would gate out; excluded here and
     # tested ISOLATED in C1s.
-    # R2939 — the no_std-forcing set is DERIVED (`nostd_workspace_members.py`:
+    # R2940 — the no_std-forcing set is DERIVED (`nostd_workspace_members.py`:
     # a member whose own build switches `sce-rust-runtime/no_std` on). It was
     # this hand list, twice (here and C2), and R2916 gave wz-runtime-zephyr a
     # no_std `wz-session-core` without adding it, so C1 did not compile at all
@@ -5664,7 +5664,7 @@ layer_c1ax_cargo_test_routing_namespace() {
     # (`a_stalled_group_link_drops_what_finds_no_room_and_spends_no_sn` and the
     # writing-link control); the third, the QoS JOIN witness, needs
     # `transport-qos`. Printed numbers; the label moves with the value.
-    # R2937: 34 -> 35, `a_router_group_face_takes_the_operators_transmission_queue`
+    # R2938: 34 -> 35, `a_router_group_face_takes_the_operators_transmission_queue`
     # (gated on `transport-link-udp`, a default feature). Printed number.
     _runci_guarded_test "C1AX multicast_glue 35" 35 \
         cargo test -p wz-runtime-tokio --features transport-multicast,routing-namespace --lib multicast_glue --quiet || return 1
@@ -10031,7 +10031,7 @@ layer_c1p_multicast() {
     # R2928 — 63 -> 64, the printed number: of the four `multicast_tx::push_tests`
     # only the no-room case compiles here; the rest need `codec-response-final`
     # or `transport-fragmentation`, which this arm leaves out.
-    # R2936 — 65 -> 67: `multicast_tx::push_tests` gains the held-conduit pair
+    # R2937 — 65 -> 67: `multicast_tx::push_tests` gains the held-conduit pair
     # (`a_held_conduit_takes_the_push_on_its_own_ring`, the refused mint), both
     # `codec-push`, so the arm above, which has no push codec, does not move.
     _runci_guarded_test C1p 67 cargo test -p wz-session-core --features session-multicast,reassembly,codec-push,codec-join --lib multicast --quiet \
@@ -10116,7 +10116,7 @@ layer_c1q_multicast_glue() {
     # numbers are what gate 4b printed for each command, not a diff count.
     # R2930: 29/33/35 -> 31/35/37, the transmit task's two ungated cases (see
     # C1AX); printed numbers.
-    # R2937: 31/35/37 -> 32/36/38, the router group face's queue witness (see
+    # R2938: 31/35/37 -> 32/36/38, the router group face's queue witness (see
     # C1AX); printed numbers.
     _runci_guarded_test C1q 32 cargo test -p wz-runtime-tokio --features transport-multicast --lib multicast_glue --quiet \
         || return 1
@@ -11440,8 +11440,8 @@ layer_c1bz_docs_resolve() {
     # c867f7b8 (where 497 was set) and at 66c97cae differ by exactly those two.
     # Every link in that module doc is now a full path, the eleven older ones
     # in the same doc included; the same command then read 486.
-    # R2936 — wz-runtime-tokio 486 -> 485. Diffed against 486's error set: the
-    # R2936 rewrite of the drive loop's doc removed its `TxSn` link, and the
+    # R2937 — wz-runtime-tokio 486 -> 485. Diffed against 486's error set: the
+    # R2937 rewrite of the drive loop's doc removed its `TxSn` link, and the
     # three links the new `multicast_pipeline` doc broke are fixed at the
     # cause (lib.rs no longer puts an outer doc on that module, so its `//!`
     # resolves in its own scope), with the one private-item link a code span.
@@ -12752,7 +12752,7 @@ layer_c2_cargo_clippy() {
     # wz-mcu-multicast-e2e for the same reason (isolated clippy in C1r).
     # R311mo — wz-runtime-tokio-multicast-tests for the transport-unicast
     # feature-unification reason (isolated clippy in C1s). Same rationale as
-    # the C1 exclude, and since R2939 the same derived no_std set.
+    # the C1 exclude, and since R2940 the same derived no_std set.
     local nostd excludes=()
     nostd="$(python3 scripts/lib/nostd_workspace_members.py)" || return 1
     for member in $nostd; do excludes+=(--exclude "$member"); done

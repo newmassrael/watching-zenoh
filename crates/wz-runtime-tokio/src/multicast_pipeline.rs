@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later OR LicenseRef-watching-zenoh-Commercial
 // SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
 
-//! R2931 — a multicast group's transmission pipeline, pushed onto by its
+//! R2937 — a multicast group's transmission pipeline, pushed onto by its
 //! PRODUCERS.
 //!
 //! Upstream's producer pushes a message into the link's pipeline on its own
@@ -370,7 +370,7 @@ impl wz_session_core::multicast_tx::MulticastTxQueue for StageQueue<'_> {
     }
 }
 
-/// R2929 / R2931 — the drive loop's side of one link's pipeline: the lanes'
+/// R2929 / R2937 — the drive loop's side of one link's pipeline: the lanes'
 /// transmit task, the counts of what producers pushed and what the task
 /// wrote, and the conduits as written, which the JOIN beacon advertises.
 ///
@@ -665,7 +665,7 @@ impl Drop for MulticastTxPlane {
     }
 }
 
-// R2931 — the producer's push against a pipeline whose lanes nobody drains (a
+// R2937 — the producer's push against a pipeline whose lanes nobody drains (a
 // tap that is never read is a link that has stopped writing). A reply
 // terminator carries its own congestion control, so one item shape gives both
 // a droppable and a blocking message.
@@ -723,7 +723,7 @@ mod tests {
     /// A blocking message on a full lane waits for room for its whole
     /// `wait_before_close` on the pushing thread, and only then is a
     /// congestion drop — upstream's blocking put on a stalled multicast link.
-    /// A droppable one on the same lane is answered at once. Before R2931 the
+    /// A droppable one on the same lane is answered at once. Before R2937 the
     /// producer handed the message to an unbounded channel and returned, so
     /// a blocking publish never blocked.
     #[test]

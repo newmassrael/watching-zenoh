@@ -29,7 +29,7 @@ mod tests {
     use wz_runtime_tokio::session::{PublishOptions, TokioMulticastSession};
     use wz_session_core::network_message::NetworkMessage;
 
-    /// R2931 — a multicast `Session` over a group whose pipeline the test
+    /// R2937 — a multicast `Session` over a group whose pipeline the test
     /// reads: the session pushes onto it on the caller's thread, and what it
     /// pushed is read back as the group datagrams a transmit task would write.
     fn tapped_session() -> (TokioMulticastSession, MulticastTxTap) {
@@ -76,7 +76,7 @@ mod tests {
     /// separately by `wz_runtime_tokio::multicast_glue`'s
     /// `drive_loop_frames_queued_push` test; this asserts the B3 wiring —
     /// `publish` builds the right message and pushes it through the session's
-    /// transport producer (R2931).
+    /// transport producer (R2937).
     #[test]
     fn multicast_session_publish_enqueues_one_put_push() {
         let (session, mut tap) = tapped_session();

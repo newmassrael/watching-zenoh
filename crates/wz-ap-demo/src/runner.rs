@@ -6284,7 +6284,7 @@ async fn run_router_hat_until(
         let face = wz::runtime_tokio::multicast_glue::spawn_router_mcast_group(
             mcast_group,
             mcast_port,
-            // R2937 — the group's pipeline takes the node's own
+            // R2938 — the group's pipeline takes the node's own
             // `transport/link/tx/queue`, as the unicast sessions do.
             wz::runtime_tokio::multicast_glue::RouterGroupProfile {
                 zid: params.zid.clone(),

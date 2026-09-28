@@ -171,7 +171,7 @@ use crate::LinkDriver;
 /// observer-drain reply sink. The shared
 /// [`MulticastReplySink<Q>`](wz_session_core::multicast_reply_sink::MulticastReplySink)
 /// constructs each [`MulticastTxItem`] and calls this backing's `enqueue`, which
-/// R2931 pushes through the group's [`MulticastTxProducer`], on the caller's
+/// R2937 pushes through the group's [`MulticastTxProducer`], on the caller's
 /// thread — the multicast mirror of the unicast `SessionLinkActions`. `Clone`
 /// so the `on_event` closure can hold one. Fire-and-forget: a reply that finds
 /// no room, or no link, is dropped exactly as a dead link would drop it.
@@ -482,7 +482,7 @@ impl MulticastDatagramSender for crate::UdpGroupSender {
 /// to route multicast pub/sub data into the registered subscriber /
 /// queryable registries.
 ///
-/// `producer` is the A1c TX seam (R2931): while the loop runs, the link's
+/// `producer` is the A1c TX seam (R2937): while the loop runs, the link's
 /// pipeline is attached to it, and every clone of it pushes onto that pipeline
 /// on its own thread — a message is framed with an SN minted on its conduit,
 /// multicast to the group, and a frame past the group batch budget leaves as a
@@ -736,7 +736,7 @@ where
     H: FnMut(&[String]),
     R: MulticastStatsRecorder + Sync + ?Sized,
 {
-    // R2931 — the pipeline is attached to `producer` for as long as the link
+    // R2937 — the pipeline is attached to `producer` for as long as the link
     // runs; the egress namespace is the dispatcher's, installed before
     // bring-up, so egress and ingress still come from one value.
     let mut tx = MulticastTxPlane::open(
@@ -840,7 +840,7 @@ where
     // Emit the first JOIN beacon immediately, then every join_interval_ms.
     let mut next_join_ms = clock.now_monotonic_ms();
 
-    // R2931 — the TX mint state is no longer the loop's: each conduit's SNs
+    // R2937 — the TX mint state is no longer the loop's: each conduit's SNs
     // live in the pipeline's stage for that conduit, minted by whichever
     // producer holds it (`crate::multicast_pipeline`).
     // R311kn — the loop owns the multicast reassembly Router: per-peer
@@ -882,7 +882,7 @@ where
             iter += 1;
         }
 
-        // R2931 — count what producers pushed and what the transmit task
+        // R2937 — count what producers pushed and what the transmit task
         // wrote since the last turn. Producers push on their own threads, so
         // this is where their counts reach the loop's recorder.
         tx.record(stats);
@@ -908,7 +908,7 @@ where
         }
 
         tokio::select! {
-            // R2931 — there is no outbound arm: producers push onto the
+            // R2937 — there is no outbound arm: producers push onto the
             // attached pipeline themselves (`MulticastTxProducer::push`), and
             // the transmit task writes it, so nothing a producer sends waits
             // on this loop's turn.
@@ -1113,7 +1113,7 @@ where
 /// [`MulticastTxProducer`] to
 /// [`attach_mcast_group`](crate::router_forward::RouterForwarder::attach_mcast_group);
 /// a routed `Push` is then pushed onto the group's pipeline on the forwarder's
-/// own thread (R2931), minting the group channel SN (the `multicast_tx` SSOT).
+/// own thread (R2937), minting the group channel SN (the `multicast_tx` SSOT).
 /// The loop runs on a SEPARATE `tokio::spawn` task — only the producer, which is
 /// `Send` and `Clone`, crosses to the `!Send` `RouterForwarder`, so the router
 /// needs no single-task fold (the INGRESS `mcast_faces` plane is the deferred
@@ -1232,7 +1232,7 @@ fn router_group_params(
     }
 }
 
-/// R2937 — what a router's group face takes from the node's configuration.
+/// R2938 — what a router's group face takes from the node's configuration.
 ///
 /// `qos` is the group's per-priority offer, `transport.multicast.qos.enabled`
 /// (see `router_group_params` for why it is not the unicast knob).
@@ -1280,7 +1280,7 @@ type GroupBind<'a> = core::pin::Pin<
 /// re-join rebinds exactly as the first join did. `on_event`, `producer`,
 /// `on_members` and `on_group_subs` are the drive loop's own seams, carried
 /// across re-joins (each join attaches its own link's pipeline to the same
-/// producer, R2931); a fresh DISPATCHER is made per join (pico clears the
+/// producer, R2937); a fresh DISPATCHER is made per join (pico clears the
 /// transport before its reopen task re-enters `_z_open`, for the same reason:
 /// the peer table describes members reached over the link that just died).
 ///
@@ -1816,7 +1816,7 @@ where
 /// - `outbound` — the group's producer, what the caller hands to
 ///   [`attach_mcast_group`](crate::router_forward::RouterForwarder::attach_mcast_group);
 ///   a routed `Push` is pushed onto the group's pipeline through it, minting the
-///   group SN (the `multicast_tx` SSOT, R2931).
+///   group SN (the `multicast_tx` SSOT, R2937).
 /// - `ingress` — each admitted `Push` and `Request` a member sent (R2734 says why
 ///   those two of the seven kinds), for the accept loop to fold into the `!Send`
 ///   forwarder.
@@ -2181,7 +2181,7 @@ mod tests {
         }
     }
 
-    /// R2937 — a router's group face builds its pipeline from the operator's
+    /// R2938 — a router's group face builds its pipeline from the operator's
     /// transmission queue, lane sizes and both congestion waits, as upstream's
     /// multicast link builds its pipeline from the transport manager's one
     /// configuration. Every field differs from the default, so a face that
@@ -3137,7 +3137,7 @@ mod tests {
         }
     }
 
-    /// R2931 — publish `items` through `producer` once a loop has attached its
+    /// R2937 — publish `items` through `producer` once a loop has attached its
     /// pipeline: a push made before then is dropped, as upstream drops one
     /// while its transport has no link. Run beside the loop (`tokio::join!`).
     #[cfg(feature = "codec-push")]
@@ -3152,7 +3152,7 @@ mod tests {
         }
     }
 
-    /// R2929 / R2931 — run the loop over a link whose writes are held shut
+    /// R2929 / R2937 — run the loop over a link whose writes are held shut
     /// (`gated`) or not, and push through `producer` once the loop has
     /// attached its pipeline. The loop runs until `stop` is signalled, so the
     /// test decides when it ends rather than an iteration budget racing the
@@ -3949,7 +3949,7 @@ mod tests {
 
         // The reply sink pushes through the group's producer: the closure
         // pushes each drained reply onto the pipeline the loop attached, and
-        // the transmit task writes it to the group (the A1c TX seam, R2931).
+        // the transmit task writes it to the group (the A1c TX seam, R2937).
         let producer = MulticastTxProducer::new();
         let sink = MulticastReplySink::new(TokioReplyBacking::new(producer.clone()));
 
@@ -4153,7 +4153,7 @@ mod tests {
 
         // The reply sink pushes through the group's producer: the closure
         // drains the staged declare interest-response onto the attached
-        // pipeline, one `Declare` per frame (the A1c TX seam, R2931).
+        // pipeline, one `Declare` per frame (the A1c TX seam, R2937).
         let producer = MulticastTxProducer::new();
         let sink = MulticastReplySink::new(TokioReplyBacking::new(producer.clone()));
 
@@ -4771,7 +4771,7 @@ mod tests {
             let base = params(zid);
             MulticastParams {
                 batch_size: 64,
-                // R2931 — lanes that hold a whole chain: these witnesses are
+                // R2937 — lanes that hold a whole chain: these witnesses are
                 // about the chain's shape, and a lane of the default two
                 // 64-byte batches would make each later fragment wait on the
                 // transmit task, which a push made as the link attaches can
@@ -5014,7 +5014,7 @@ mod tests {
         );
 
         // publish routes through the send seam's LIVE multicast arm -> one Push
-        // pushed onto the group's pipeline (R2931). No local subscriber, so the
+        // pushed onto the group's pipeline (R2937). No local subscriber, so the
         // loopback leg fires nothing.
         let fired = session
             .publish("demo/both", b"hello-both", PublishOptions::put())

@@ -510,7 +510,7 @@ impl OutboundRx {
         self.try_recv_tagged().map(|(_, frame)| frame)
     }
 
-    /// R2931 — [`Self::try_recv`], with the priority the frame was sent at.
+    /// R2937 — [`Self::try_recv`], with the priority the frame was sent at.
     pub fn try_recv_tagged(&mut self) -> Option<(Priority, Vec<u8>)> {
         let (frame, freed) = self
             .shared

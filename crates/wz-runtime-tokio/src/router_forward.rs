@@ -1304,7 +1304,7 @@ struct RouterFaceState {
 /// group ([`multicast_glue::drive_multicast_session`](crate::multicast_glue));
 /// the router pushes a [`MulticastTxItem::Push`] through it, which mints the
 /// group channel SN and frames it through the `multicast_tx` SSOT onto the
-/// pipeline the (SEPARATE-task) loop attached (R2931), so this `!Send`
+/// pipeline the (SEPARATE-task) loop attached (R2937), so this `!Send`
 /// forwarder only needs a `Send` handle (no single-task fold — that is the
 /// INGRESS milestone). A group is a broadcast SINK: no zid, no ingress,
 /// never a delivery-lookup key (zenoh's per-peer `DummyPrimitives` ingress face
@@ -4664,7 +4664,7 @@ impl RouterForwarder {
     /// (`inbound_is_mcast` ⇒ return; mcast→mcast is the both-multicast deny). The
     /// group sink PUSHES a [`MulticastTxItem::Push`] through the group's producer,
     /// which mints the group channel SN on the conduit it holds and frames it (the
-    /// `multicast_tx` SSOT, R2931); this forwarder mints nothing itself (a second
+    /// `multicast_tx` SSOT, R2937); this forwarder mints nothing itself (a second
     /// minter would desync the group ring). The routed push
     /// is RE-LITERALIZED against the resolved `keyexpr` first (a group leaf shares
     /// no expr-id alias table — an aliased id-only push would be a group blackhole),
@@ -17686,7 +17686,7 @@ mod tests {
         );
     }
 
-    /// R2931 — a group's producer with a pipeline attached, read back by the
+    /// R2937 — a group's producer with a pipeline attached, read back by the
     /// test: what the forwarder pushed arrives as a group datagram.
     #[cfg(feature = "router-multicast-faces")]
     fn group_tap() -> (
@@ -17709,7 +17709,7 @@ mod tests {
         )
     }
 
-    /// R2931 — the next Push the group's pipeline received, decoded off the
+    /// R2937 — the next Push the group's pipeline received, decoded off the
     /// wire bytes it queued, with the channel its frame rode.
     #[cfg(feature = "router-multicast-faces")]
     fn group_push(

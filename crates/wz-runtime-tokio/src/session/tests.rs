@@ -10364,7 +10364,7 @@ fn remote_queryable_listener_rejects_typed_when_feature_off() {
 
 // ── R311y232 direct multicast Session publish QoS band ──
 
-/// R2931 — a multicast Session over a group that OFFERS QoS, whose pipeline
+/// R2937 — a multicast Session over a group that OFFERS QoS, whose pipeline
 /// the test reads: what a publish pushes arrives as a group datagram, and its
 /// frame says the band it rode. Without `transport-qos` compiled the offer
 /// cannot be honoured, and every band is clamped to DEFAULT.
@@ -10391,7 +10391,7 @@ fn tapped_qos_group_session() -> (
     (Session::new_multicast(observer, clock, producer), tap)
 }
 
-/// R2931 — the band of the next frame a publish pushed onto the group.
+/// R2937 — the band of the next frame a publish pushed onto the group.
 #[cfg(all(feature = "transport-multicast", feature = "codec-push"))]
 fn next_pushed_band(
     tap: &mut crate::multicast_pipeline::MulticastTxTap,
@@ -10419,7 +10419,7 @@ fn next_pushed_band(
 /// transport-qos test lane omits `codec-push` and cfg's them out). THIS witness
 /// pins the `Session` -> group hand-off the finding named, which those cannot see.
 ///
-/// R2931 — read off the frame the publish pushed rather than off a queued
+/// R2937 — read off the frame the publish pushed rather than off a queued
 /// item: the session now pushes onto the group's pipeline itself, so the band
 /// is observed where it lands. Both C1bc builds run this one case: with
 /// `transport-qos` the frame carries the app's band; without it the group's
@@ -10480,7 +10480,7 @@ fn multicast_publish_qos_stamps_band_base_publish_stays_default() {
 /// "needs pubsub-priority" while its own cfg below reads `pubsub-qos` -- the
 /// alias is sufficient, never necessary.
 ///
-/// R2931 — observed on the frame the publish pushed; without `transport-qos`
+/// R2937 — observed on the frame the publish pushed; without `transport-qos`
 /// the group's offer is not honoured and the band is clamped to DEFAULT.
 #[cfg(all(
     feature = "transport-multicast",

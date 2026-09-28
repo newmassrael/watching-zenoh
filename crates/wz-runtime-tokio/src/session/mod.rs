@@ -2104,7 +2104,7 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Multicast> {
     /// R311mn (Level B, B2) / R311nf — construct a multicast `Session` from the
     /// shared observer + clock (the handshake-free multicast transport has no
     /// `SessionLinkActions` bundle). R311mo (B3) adds the `codec-push`-gated
-    /// `tx` argument: the group's producer (R2931), whose pipeline
+    /// `tx` argument: the group's producer (R2937), whose pipeline
     /// [`drive_multicast_session`](crate::multicast_glue::drive_multicast_session)
     /// attaches, so [`Self::publish`] pushes onto it on the caller's thread (a
     /// bare multicast build with no data plane omits `tx` and gets an RX-only

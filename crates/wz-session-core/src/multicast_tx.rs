@@ -363,7 +363,7 @@ where
     M: MulticastTxMint + ?Sized,
     Q: MulticastTxQueue + ?Sized,
 {
-    // R2931 — the meta is resolved once, by the function a producer also asks
+    // R2937 — the meta is resolved once, by the function a producer also asks
     // for the conduit it must hold (`multicast_tx_conduit`), so the conduit
     // locked and the conduit minted on cannot come from two readings.
     let meta = frame_meta(&item, params);
@@ -474,7 +474,7 @@ fn is_droppable(reliable: bool, congestion: crate::qos::CongestionControl) -> bo
     !reliable || congestion == crate::qos::CongestionControl::Drop
 }
 
-/// R2931 — what a push of `item` onto a group of `params` must know besides
+/// R2937 — what a push of `item` onto a group of `params` must know besides
 /// its bytes: the conduit, the frame's `ext_qos`, the channel, and whether the
 /// message may be dropped. The one reading of an item's QoS on the TX side;
 /// [`multicast_tx_push`] and [`multicast_tx_conduit`] both ask it.
@@ -561,7 +561,7 @@ fn frame_meta(
     }
 }
 
-/// R2931 — the conduit a push of `item` onto a group of `params` mints on:
+/// R2937 — the conduit a push of `item` onto a group of `params` mints on:
 /// the effective (clamped) band. A producer that holds one conduit at a time,
 /// as upstream's pipeline holds one priority's stage while it waits for a
 /// batch (`io/zenoh-transport/src/common/pipeline.rs` @ `pub(crate) fn push_network_message(`),
@@ -580,7 +580,7 @@ pub fn multicast_tx_conduit(
     frame_meta(item, params).priority
 }
 
-/// R2931 — where a push mints its sequence numbers: the whole set of a group's
+/// R2937 — where a push mints its sequence numbers: the whole set of a group's
 /// conduits ([`MulticastTxConduits`](crate::sn::MulticastTxConduits)), or the
 /// one conduit a producer holds ([`MulticastTxConduit`]).
 pub trait MulticastTxMint {
@@ -600,7 +600,7 @@ impl MulticastTxMint for crate::sn::MulticastTxConduits {
     }
 }
 
-/// R2931 — one conduit, held by the producer that pushes on it: its band and
+/// R2937 — one conduit, held by the producer that pushes on it: its band and
 /// its SN state. A push that would mint on any other band is a producer that
 /// locked the wrong conduit, which would put two producers' SNs on one ring
 /// unsynchronised; that is refused rather than minted.
@@ -1189,7 +1189,7 @@ mod push_tests {
         );
     }
 
-    /// R2931 — a producer that holds one conduit pushes against it alone: the
+    /// R2937 — a producer that holds one conduit pushes against it alone: the
     /// band it asks for is the CLAMPED band (a non-QoS group puts every band
     /// on DEFAULT), and the push mints on that conduit's ring.
     #[test]
@@ -1218,7 +1218,7 @@ mod push_tests {
         assert_eq!(sn.next_best_effort, 0);
     }
 
-    /// R2931 — the control of the one above: a push whose band is not the one
+    /// R2937 — the control of the one above: a push whose band is not the one
     /// held is refused, not minted on a ring another producer may hold.
     #[test]
     #[should_panic(expected = "a push minted on a conduit its producer does not hold")]
