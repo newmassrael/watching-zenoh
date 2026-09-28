@@ -114,6 +114,10 @@ pub(crate) fn print_usage() {
     eprintln!("    --wait-before-drop-us <us>");
     eprintln!("                             how long a droppable message waits for room (default");
     eprintln!("                             1000). zenoh transport/link/tx/queue/congestion_control/drop/wait_before_drop");
+    eprintln!("    --max-wait-before-drop-fragments-us <us>");
+    eprintln!("                             how far a droppable fragment chain's deadline grows");
+    eprintln!("                             (default 50000).");
+    eprintln!("                             zenoh transport/link/tx/queue/congestion_control/drop/max_wait_before_drop_fragments");
     eprintln!("    --wait-before-close-us <us>");
     eprintln!("                             how long a blocking message waits before the session");
     eprintln!("                             closes (default 5000000).");

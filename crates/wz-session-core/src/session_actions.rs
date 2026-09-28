@@ -1783,6 +1783,131 @@ struct FrameEmit {
     /// This profile's reassembly cap — a chain longer than this is refused,
     /// because no same-profile peer could rejoin it. `usize::MAX` = no cap.
     max_reassembly_bytes: usize,
+    /// R2926 — the message's congestion deadline, what is left of it after the
+    /// ask for the first frame's room: a fragment chain asks again before each
+    /// further fragment, against the same deadline.
+    deadline: PushDeadline,
+}
+
+/// R2923 / R2926 — whether a message was pushed onto its conduit's link, or
+/// found no room within its deadline (a congestion drop).
+#[cfg(any(
+    feature = "codec-push",
+    feature = "codec-request",
+    feature = "codec-response",
+    feature = "codec-response-final",
+    feature = "declare-keyexpr",
+    feature = "declare-subscriber",
+    feature = "declare-queryable",
+    feature = "declare-token",
+    feature = "declare-interest",
+    feature = "liveliness-token",
+))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PushOutcome {
+    Pushed,
+    Congested,
+}
+
+/// R2926 — one message's congestion deadline, held across every ask for room
+/// its frame or fragment chain makes: upstream's `Deadline` over a
+/// `LazyDeadline` over a `WaitTime`
+/// (`io/zenoh-transport/src/common/pipeline.rs` @ `fn advance(&mut self, instant: &mut Instant) {`).
+///
+/// A droppable message starts with `wait_before_drop`, and each fragment it
+/// puts on the wire extends the deadline by an increment that DOUBLES, the
+/// extensions together capped by `max_wait_before_drop_fragments`. A blocking
+/// message has no cap to spend, so upstream's advance leaves its deadline
+/// where it is: the whole chain shares one `wait_before_close`.
+///
+/// The session holds the deadline as microseconds LEFT, not as an instant: it
+/// has no clock that fine, and each ask reports how long it waited
+/// ([`crate::link::RoomAnswer`]), which is what spends it.
+#[cfg(any(
+    feature = "codec-push",
+    feature = "codec-request",
+    feature = "codec-response",
+    feature = "codec-response-final",
+    feature = "declare-keyexpr",
+    feature = "declare-subscriber",
+    feature = "declare-queryable",
+    feature = "declare-token",
+    feature = "declare-interest",
+    feature = "liveliness-token",
+))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(not(feature = "transport-fragmentation"), allow(dead_code))]
+struct PushDeadline {
+    droppable: bool,
+    /// Microseconds left before the deadline.
+    left_us: u64,
+    /// The increment the next fragment adds (droppable only).
+    step_us: u64,
+    /// What is left of `max_wait_before_drop_fragments` (droppable only).
+    extend_left_us: u64,
+}
+
+#[cfg(any(
+    feature = "codec-push",
+    feature = "codec-request",
+    feature = "codec-response",
+    feature = "codec-response-final",
+    feature = "declare-keyexpr",
+    feature = "declare-subscriber",
+    feature = "declare-queryable",
+    feature = "declare-token",
+    feature = "declare-interest",
+    feature = "liveliness-token",
+))]
+impl PushDeadline {
+    fn new(droppable: bool, conf: &TxQueueConf) -> Self {
+        if droppable {
+            Self {
+                droppable,
+                left_us: conf.wait_before_drop_us,
+                step_us: conf.wait_before_drop_us,
+                extend_left_us: conf.max_wait_before_drop_fragments_us,
+            }
+        } else {
+            Self {
+                droppable,
+                left_us: conf.wait_before_close_us,
+                step_us: 0,
+                extend_left_us: 0,
+            }
+        }
+    }
+
+    /// The ask for room this deadline makes now.
+    fn ask(&self) -> crate::link::RoomWait {
+        if self.droppable {
+            crate::link::RoomWait::Drop {
+                wait_us: self.left_us,
+            }
+        } else {
+            crate::link::RoomWait::Block {
+                wait_us: self.left_us,
+            }
+        }
+    }
+
+    /// Spend what an ask waited.
+    fn spend(&mut self, waited_us: u64) {
+        self.left_us = self.left_us.saturating_sub(waited_us);
+    }
+
+    /// A fragment went out: upstream's `on_next_fragment`, which doubles the
+    /// increment and adds it, bounded by what is left of the cap.
+    #[cfg_attr(not(feature = "transport-fragmentation"), allow(dead_code))]
+    fn next_fragment(&mut self) {
+        if !self.droppable {
+            return;
+        }
+        self.step_us = self.step_us.saturating_mul(2);
+        let add = self.step_us.min(self.extend_left_us);
+        self.extend_left_us -= add;
+        self.left_us = self.left_us.saturating_add(add);
+    }
 }
 
 impl<R: SessionRuntime, T: TimeSource> Deref for SessionLinkActions<R, T> {
@@ -5965,27 +6090,21 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         // and asking before the mint is what lets a message that gives up
         // leave no gap in the sequence. A message appended to an open frame
         // needs no room: that frame is already the conduit's.
-        enum Push {
-            Pushed,
-            Congested,
-        }
         // R2924 — the waits are the session's configured ones
         // (`transport/link/tx/queue/congestion_control/*`), upstream's
         // defaults unless the operator set them.
-        let waits = self.params.tx_queue;
+        //
+        // R2926 — held as ONE deadline for the message ([`PushDeadline`]):
+        // this first ask spends from it, and a fragment chain spends the rest.
+        let deadline = core::cell::Cell::new(PushDeadline::new(droppable, &self.params.tx_queue));
         let congested = || {
-            let wait = if droppable {
-                crate::link::RoomWait::Drop {
-                    wait_us: waits.wait_before_drop_us,
-                }
-            } else {
-                crate::link::RoomWait::Block {
-                    wait_us: waits.wait_before_close_us,
-                }
-            };
-            self.with_conduit_link(wire_reliability, priority, |link| {
-                link.link_driver().wait_for_room(priority, wait)
-            }) == crate::link::LinkRoom::Congested
+            let mut left = deadline.get();
+            let answer = self.with_conduit_link(wire_reliability, priority, |link| {
+                link.link_driver().wait_for_room(priority, left.ask())
+            });
+            left.spend(answer.waited_us);
+            deadline.set(left);
+            answer.room == crate::link::LinkRoom::Congested
         };
         let push = R::with_mutex_mut(self.tx_conduits.conduit(priority), |batch| {
             #[cfg(feature = "transport-batching")]
@@ -6007,7 +6126,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                 loop {
                     if batch.stage.buf.is_empty() {
                         if congested() {
-                            return Ok(Push::Congested);
+                            return Ok(PushOutcome::Congested);
                         }
                         let sn = self.next_outbound_frame_sn(priority, reliable, sn_mask);
                         let stage = &mut batch.stage;
@@ -6027,23 +6146,22 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                             // `count = 0` — the take above already cleared it,
                             // so the rejected message stages nothing for a
                             // later flush to emit half of.
-                            return self
-                                .emit_frame_or_fragments(
-                                    &frame,
-                                    FrameEmit {
-                                        ext_qos,
-                                        sn,
-                                        reliable,
-                                        mtu,
-                                        sn_mask,
-                                        max_reassembly_bytes,
-                                    },
-                                )
-                                .map(|()| Push::Pushed);
+                            return self.emit_frame_or_fragments(
+                                &frame,
+                                FrameEmit {
+                                    ext_qos,
+                                    sn,
+                                    reliable,
+                                    mtu,
+                                    sn_mask,
+                                    max_reassembly_bytes,
+                                    deadline: deadline.get(),
+                                },
+                            );
                         } else {
                             stage.count = 1;
                         }
-                        return Ok(Push::Pushed);
+                        return Ok(PushOutcome::Pushed);
                     }
                     // R311y222 — the open frame is ONE (priority, reliability)
                     // conduit. The PRIORITY half is now the stage index, so only
@@ -6078,7 +6196,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                     encode_into(&mut stage.buf);
                     if stage.buf.len() <= mtu {
                         stage.count += 1;
-                        return Ok(Push::Pushed);
+                        return Ok(PushOutcome::Pushed);
                     }
                     // Overflow: roll the partial encode back, flush this
                     // conduit's open frame, loop into the open-fresh-frame arm.
@@ -6102,7 +6220,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             // frame-per-message, mint + encode + emit under the SAME lock
             // hold (pico TX-mutex parity, R311kf).
             if congested() {
-                return Ok(Push::Congested);
+                return Ok(PushOutcome::Congested);
             }
             let sn = self.next_outbound_frame_sn(priority, reliable, sn_mask);
             let wire = crate::frame_encode::encode_frame_envelope(
@@ -6121,9 +6239,9 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                     mtu,
                     sn_mask,
                     max_reassembly_bytes,
+                    deadline: deadline.get(),
                 },
             )
-            .map(|()| Push::Pushed)
         });
         match push {
             // R2923 — upstream's `handle_push_result`
@@ -6134,7 +6252,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             // sender returns rather than tearing the session down from under
             // its own conduit lock. Either way the put itself succeeded from
             // the caller's side, as upstream's does.
-            Ok(Push::Congested) => {
+            Ok(PushOutcome::Congested) => {
                 // Upstream's `tx_n_dropped` IS this count: the congestion
                 // reason's dropped-payload observations
                 // (`commons/zenoh-stats/src/stats.rs` @ `(Tx, ReasonLabel::Congestion) => {`).
@@ -6190,7 +6308,11 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         feature = "declare-interest",
         feature = "liveliness-token",
     ))]
-    fn emit_frame_or_fragments(&self, frame: &[u8], emit: FrameEmit) -> Result<(), SendWireError> {
+    fn emit_frame_or_fragments(
+        &self,
+        frame: &[u8],
+        emit: FrameEmit,
+    ) -> Result<PushOutcome, SendWireError> {
         let FrameEmit {
             ext_qos,
             sn,
@@ -6198,6 +6320,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             mtu,
             sn_mask,
             max_reassembly_bytes,
+            deadline,
         } = emit;
         let reliability = if reliable {
             Reliability::Reliable
@@ -6278,12 +6401,37 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                     body, reliable, mtu, sn, sn_mask, ext_qos,
                 );
                 let mut emitted = 0usize;
+                let mut deadline = deadline;
                 while chain.remaining_fragments() > 0 {
                     // Read the SN BEFORE drawing, so it names the fragment
                     // this iteration is about to send — which is also the SN
                     // the stop fragment takes if the draw fails, keeping the
                     // conduit's ring gapless across the abandon.
                     let this_sn = chain.next_sn();
+                    // R2926 — each further fragment waits for room against the
+                    // message's ONE deadline, as upstream's chain waits for a
+                    // batch per fragment (`io/zenoh-transport/src/common/pipeline.rs`
+                    // @ `// Otherwise, an ephemeral batch is created to send the stop fragment`).
+                    // The first fragment's room was asked before its SN was
+                    // minted. A chain that runs out mid-way is abandoned the way
+                    // a spent fragment budget abandons it just below: the stop
+                    // fragment, outside the queue's bound as upstream's
+                    // ephemeral batch is outside its pool, and the message is a
+                    // congestion drop.
+                    if emitted > 0 {
+                        let answer = self.with_conduit_link(reliability, priority, |link| {
+                            link.link_driver().wait_for_room(priority, deadline.ask())
+                        });
+                        deadline.spend(answer.waited_us);
+                        if answer.room == crate::link::LinkRoom::Congested {
+                            let marker = crate::frame_encode::build_fragment_drop_wire(
+                                this_sn, reliable, ext_qos,
+                            );
+                            self.outbound_frame_sn.reserve_next(priority, reliable);
+                            self.send_wire(&marker, reliability, priority);
+                            return Ok(PushOutcome::Congested);
+                        }
+                    }
                     if !self.take_fragment_tx_credit() {
                         if emitted == 0 {
                             // Nothing left this session, and nothing has left
@@ -6329,16 +6477,17 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                     // chain pins to one link (y217 one-conduit=one-link).
                     self.send_wire(&frag, reliability, priority);
                     emitted += 1;
+                    deadline.next_fragment();
                 }
-                return Ok(());
+                return Ok(PushOutcome::Pushed);
             }
         }
         #[cfg(not(feature = "transport-fragmentation"))]
-        let _ = (sn, mtu, sn_mask, max_reassembly_bytes);
+        let _ = (sn, mtu, sn_mask, max_reassembly_bytes, deadline);
         // The frame's conduit reconstructed from its own ext_qos (`Some(p)` iff
         // `p != DEFAULT`, else `None -> DEFAULT`) — the same key the SN mint used.
         self.send_wire(frame, reliability, ext_qos.unwrap_or(Priority::DEFAULT));
-        Ok(())
+        Ok(PushOutcome::Pushed)
     }
 
     /// R311jq — drain the open batch frames to the link, if any. Private

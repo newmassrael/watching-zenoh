@@ -621,7 +621,7 @@ impl BoxedLinkDriver for StreamWriteDriver {
         &self,
         priority: Priority,
         wait: wz_session_core::link::RoomWait,
-    ) -> wz_session_core::link::LinkRoom {
+    ) -> wz_session_core::link::RoomAnswer {
         self.tx.link_room(priority, wait)
     }
 

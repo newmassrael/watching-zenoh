@@ -661,7 +661,7 @@ impl BoxedLinkDriver for UdpWriteDriver {
         &self,
         priority: wz_session_core::qos::Priority,
         wait: wz_session_core::link::RoomWait,
-    ) -> wz_session_core::link::LinkRoom {
+    ) -> wz_session_core::link::RoomAnswer {
         self.tx.link_room(priority, wait)
     }
 

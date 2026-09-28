@@ -1045,6 +1045,15 @@ pub(crate) fn expand_stock_zenoh_config_for_build(
             None,
         );
     }
+    // R2926 — the cap on how far a droppable fragment chain's deadline grows.
+    if named("transport/link/tx/queue/congestion_control/drop/max_wait_before_drop_fragments") {
+        exp.pair(
+            "transport/link/tx/queue/congestion_control/drop/max_wait_before_drop_fragments",
+            "--max-wait-before-drop-fragments-us",
+            cfg.tx_queue.max_wait_before_drop_fragments_us.to_string(),
+            None,
+        );
+    }
     if named("transport/link/tx/queue/congestion_control/block/wait_before_close") {
         exp.pair(
             "transport/link/tx/queue/congestion_control/block/wait_before_close",
@@ -2848,6 +2857,13 @@ pub(crate) const ARGV_ONLY_KIND_LEDGER: &[(&str, &str, &str)] = &[
          message that never left.",
     ),
     (
+        "transport/link/tx/queue/congestion_control/drop/max_wait_before_drop_fragments",
+        KIND_OFF_WIRE,
+        "expands to `--max-wait-before-drop-fragments-us`. How far the fragments \
+         of a droppable chain may extend its deadline: a local bound whose trace \
+         is at most a Drop stop fragment, which carries no number.",
+    ),
+    (
         "transport/link/tx/queue/congestion_control/block/wait_before_close",
         KIND_OFF_WIRE,
         "expands to `--wait-before-close-us`. How long a blocking message waits \
@@ -4409,6 +4425,13 @@ mod stock_config_tests {
                 r#"{ listen: { endpoints: ["tcp/0.0.0.0:7447"] },
                      transport: { link: { tx: { queue: {
                        congestion_control: { drop: { wait_before_drop: 3000 } } } } } } }"#,
+            ),
+            (
+                "transport/link/tx/queue/congestion_control/drop/max_wait_before_drop_fragments",
+                LISTEN_ONLY,
+                r#"{ listen: { endpoints: ["tcp/0.0.0.0:7447"] },
+                     transport: { link: { tx: { queue: {
+                       congestion_control: { drop: { max_wait_before_drop_fragments: 30000 } } } } } } }"#,
             ),
             (
                 "transport/link/tx/queue/congestion_control/block/wait_before_close",
@@ -6383,7 +6406,8 @@ mod stock_config_tests {
                  connect: { endpoints: ["tcp/r:7447"] },
                  transport: { link: { tx: { batch_size: 4096, lease: 3000,
                    queue: { size: { real_time: 5, data: 7 },
-                            congestion_control: { drop: { wait_before_drop: 2500 },
+                            congestion_control: { drop: { wait_before_drop: 2500,
+                                                          max_wait_before_drop_fragments: 40000 },
                                                   block: { wait_before_close: 7000000 } } } } } } }"#,
         )
         .unwrap();
@@ -6407,6 +6431,7 @@ mod stock_config_tests {
             wz::runtime_tokio::session_glue::TxQueueConf {
                 sizes,
                 wait_before_drop_us: 2_500,
+                max_wait_before_drop_fragments_us: 40_000,
                 wait_before_close_us: 7_000_000,
             },
             "the file's queue section reaches the session the node opens"
@@ -6561,6 +6586,8 @@ mod stock_config_tests {
             "9",
             "--wait-before-drop-us",
             "2500",
+            "--max-wait-before-drop-fragments-us",
+            "40000",
             "--wait-before-close-us",
             "7000000",
         ]))
@@ -6572,6 +6599,7 @@ mod stock_config_tests {
             wz::runtime_tokio::session_glue::TxQueueConf {
                 sizes,
                 wait_before_drop_us: 2_500,
+                max_wait_before_drop_fragments_us: 40_000,
                 wait_before_close_us: 7_000_000,
             }
         );
@@ -8182,6 +8210,11 @@ impl TransportTuning {
             out.tx_queue.wait_before_drop_us = v
                 .parse::<u64>()
                 .map_err(|_| format!("--wait-before-drop-us expects microseconds, got '{v}'"))?;
+        }
+        if let Some(v) = parse_pair(rest, "--max-wait-before-drop-fragments-us") {
+            out.tx_queue.max_wait_before_drop_fragments_us = v.parse::<u64>().map_err(|_| {
+                format!("--max-wait-before-drop-fragments-us expects microseconds, got '{v}'")
+            })?;
         }
         if let Some(v) = parse_pair(rest, "--wait-before-close-us") {
             out.tx_queue.wait_before_close_us = v

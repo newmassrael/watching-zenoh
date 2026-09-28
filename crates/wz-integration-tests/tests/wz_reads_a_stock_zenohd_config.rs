@@ -824,6 +824,10 @@ fn the_defaults_each_implementation_falls_back_to_are_pinned_against_a_real_zeno
             wz.tx_queue.wait_before_drop_us.to_string(),
         ),
         (
+            "transport/link/tx/queue/congestion_control/drop/max_wait_before_drop_fragments",
+            wz.tx_queue.max_wait_before_drop_fragments_us.to_string(),
+        ),
+        (
             "transport/link/tx/queue/congestion_control/block/wait_before_close",
             wz.tx_queue.wait_before_close_us.to_string(),
         ),
@@ -3515,7 +3519,7 @@ fn a_wz_node_configured_only_by_a_stock_zenoh_config_reaches_a_real_zenohd() {
             data_high: 3, data: 3, data_low: 3, background: 3,
           }},
           congestion_control: {{
-            drop: {{ wait_before_drop: 2000 }},
+            drop: {{ wait_before_drop: 2000, max_wait_before_drop_fragments: 40000 }},
             block: {{ wait_before_close: 6000000 }},
           }},
         }},

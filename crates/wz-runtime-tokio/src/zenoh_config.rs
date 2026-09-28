@@ -1696,9 +1696,12 @@ impl ZenohNodeConfig {
         }
         let _ = writeln!(
             out,
-            " }},\n          \"congestion_control\": {{ \"drop\": {{ \"wait_before_drop\": {} }}, \
+            " }},\n          \"congestion_control\": {{ \"drop\": {{ \"wait_before_drop\": {}, \
+             \"max_wait_before_drop_fragments\": {} }}, \
              \"block\": {{ \"wait_before_close\": {} }} }}\n        }}",
-            self.tx_queue.wait_before_drop_us, self.tx_queue.wait_before_close_us
+            self.tx_queue.wait_before_drop_us,
+            self.tx_queue.max_wait_before_drop_fragments_us,
+            self.tx_queue.wait_before_close_us
         );
         out.push_str("      }");
         // R2593 — the tcp block, only for the buffers the caller set: an absent
@@ -1867,6 +1870,8 @@ pub const HONOURED_CONFIG_KEYS: &[&str] = &[
     "transport/link/tx/queue/size/data_low",
     "transport/link/tx/queue/size/background",
     "transport/link/tx/queue/congestion_control/drop/wait_before_drop",
+    // R2926 — the last queue key: the per-fragment deadline it bounds is built.
+    "transport/link/tx/queue/congestion_control/drop/max_wait_before_drop_fragments",
     "transport/link/tx/queue/congestion_control/block/wait_before_close",
     "adminspace/enabled",
     "adminspace/permissions/read",
@@ -2306,7 +2311,6 @@ pub const UNHONOURED_UPSTREAM_CONFIG_KEYS: &[&str] = &[
     "transport/link/tx/queue/allocation/mode",
     "transport/link/tx/queue/batching/enabled",
     "transport/link/tx/queue/batching/time_limit",
-    "transport/link/tx/queue/congestion_control/drop/max_wait_before_drop_fragments",
     "transport/link/tx/sequence_number_resolution",
     "transport/link/tx/threads",
     "transport/link/unixpipe/file_access_mask",
@@ -2358,10 +2362,10 @@ pub const UNHONOURED_UPSTREAM_CONFIG_KEYS: &[&str] = &[
 ///   WIRE half (the auth-body codec has foreign witnesses) and nothing to
 ///   configure it from.
 /// * `transport/link/*` — a configurable link-TX surface (`LinkTxConf`):
-///   upstream's queue allocation, batching, the per-fragment drop deadline and
-///   the remaining link knobs, none of which wz exposes as configuration.
-///   (R2925 — the priority-queue sizes and the two congestion waits left for
-///   `HONOURED_CONFIG_KEYS`.)
+///   upstream's queue allocation, batching and the remaining link knobs, none
+///   of which wz exposes as configuration. (R2925 — the priority-queue sizes
+///   and the two congestion waits left for `HONOURED_CONFIG_KEYS`; R2926 — the
+///   per-fragment drop cap followed them.)
 /// * `transport/{unicast,multicast}/*`, `transport/shared_memory/mode` — a
 ///   configurable session table (`TransportUnicastConf`): accept backlog,
 ///   session caps, open/accept timeouts.
@@ -2505,7 +2509,6 @@ pub const UNHONOURED_BEYOND_WZ: &[&str] = &[
     "transport/link/tx/queue/allocation/mode",
     "transport/link/tx/queue/batching/enabled",
     "transport/link/tx/queue/batching/time_limit",
-    "transport/link/tx/queue/congestion_control/drop/max_wait_before_drop_fragments",
     "transport/link/tx/sequence_number_resolution",
     "transport/link/tx/threads",
     // R2363 — `transport/link/unixpipe/file_access_mask` LEFT here for
@@ -2734,10 +2737,8 @@ pub const UNHONOURED_BEYOND_GROUPS: &[(&str, &str, &[&str])] = &[
             "transport/link/tx/queue/batching/time_limit",
             // R2925 — the eight sizes and the two waits LEFT this group: wz
             // now has the per-priority bounded queues and the drop-vs-block
-            // waits they configure. `max_wait_before_drop_fragments` stays:
-            // wz asks for room once per fragment chain, so the per-fragment
-            // deadline it bounds has nothing to act on yet.
-            "transport/link/tx/queue/congestion_control/drop/max_wait_before_drop_fragments",
+            // waits they configure. R2926 — and the per-fragment drop cap
+            // followed, once a fragment chain asked for room per fragment.
             "transport/link/tx/sequence_number_resolution",
             "transport/link/tx/threads",
             // R2363 removed `transport/link/unixpipe/file_access_mask` from
@@ -5987,6 +5988,16 @@ impl ZenohNodeConfig {
             out.tx_queue.wait_before_drop_us = v;
             named.push("transport/link/tx/queue/congestion_control/drop/wait_before_drop");
         }
+        // R2926 — the cap a droppable fragment chain's deadline grows under.
+        if let Some(v) = want_u64(
+            &doc,
+            "transport/link/tx/queue/congestion_control/drop/max_wait_before_drop_fragments",
+        )? {
+            out.tx_queue.max_wait_before_drop_fragments_us = v;
+            named.push(
+                "transport/link/tx/queue/congestion_control/drop/max_wait_before_drop_fragments",
+            );
+        }
         if let Some(v) = want_u64(
             &doc,
             "transport/link/tx/queue/congestion_control/block/wait_before_close",
@@ -7096,6 +7107,10 @@ mod tests {
             (
                 "transport/link/tx/queue/congestion_control/drop/wait_before_drop",
                 r#"{ "transport": { "link": { "tx": { "queue": { "congestion_control": { "drop": { "wait_before_drop": 2000 } } } } } } }"#,
+            ),
+            (
+                "transport/link/tx/queue/congestion_control/drop/max_wait_before_drop_fragments",
+                r#"{ "transport": { "link": { "tx": { "queue": { "congestion_control": { "drop": { "max_wait_before_drop_fragments": 40000 } } } } } } }"#,
             ),
             (
                 "transport/link/tx/queue/congestion_control/block/wait_before_close",

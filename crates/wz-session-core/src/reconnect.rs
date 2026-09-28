@@ -420,7 +420,7 @@ where
         &self,
         priority: crate::qos::Priority,
         wait: crate::link::RoomWait,
-    ) -> crate::link::LinkRoom {
+    ) -> crate::link::RoomAnswer {
         // The wait may last `wait_before_close`, so it runs on a clone of the
         // live sink and NOT under the swap lock: holding the lock would stall
         // every other priority's sender, and the supervisor's swap, behind one
@@ -517,7 +517,7 @@ impl<R: SessionRuntime> BoxedLinkDriver for LocalSwappableLink<R> {
         &self,
         priority: crate::qos::Priority,
         wait: crate::link::RoomWait,
-    ) -> crate::link::LinkRoom {
+    ) -> crate::link::RoomAnswer {
         // A clone, as in the twin, so a swap during the wait is not a
         // `RefCell` borrow conflict.
         let sink = self.inner.borrow().clone();

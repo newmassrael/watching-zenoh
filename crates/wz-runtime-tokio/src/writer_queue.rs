@@ -366,8 +366,16 @@ impl OutboundTx {
     /// [`Self::wait_for_room`] in the terms of the session's link seam
     /// (`BoxedLinkDriver::wait_for_room`), which every write driver over this
     /// queue answers with.
-    pub fn link_room(&self, priority: Priority, wait: RoomWait) -> wz_session_core::link::LinkRoom {
-        use wz_session_core::link::LinkRoom;
+    ///
+    /// R2926 — with how long the ask waited, measured here, where the waiting
+    /// is done.
+    pub fn link_room(
+        &self,
+        priority: Priority,
+        wait: RoomWait,
+    ) -> wz_session_core::link::RoomAnswer {
+        use wz_session_core::link::{LinkRoom, RoomAnswer};
+        let started = Instant::now();
         // R2923 — a sender that has to WAIT is usually on a runtime worker, and
         // the writer that would free the lane may be queued behind it on that
         // same worker. On a multi-thread runtime the wait therefore releases
@@ -395,10 +403,14 @@ impl OutboundTx {
                 }
             }
         };
-        match room {
+        let room = match room {
             Room::Free => LinkRoom::Free,
             Room::Congested => LinkRoom::Congested,
             Room::Closed => LinkRoom::Gone,
+        };
+        RoomAnswer {
+            room,
+            waited_us: u64::try_from(started.elapsed().as_micros()).unwrap_or(u64::MAX),
         }
     }
 

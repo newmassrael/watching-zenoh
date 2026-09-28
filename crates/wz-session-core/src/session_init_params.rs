@@ -118,15 +118,25 @@ pub struct TxQueueConf {
     pub sizes: [usize; crate::qos::Priority::NUM],
     /// `congestion_control/drop/wait_before_drop`, in microseconds.
     pub wait_before_drop_us: u64,
+    /// R2926 — `congestion_control/drop/max_wait_before_drop_fragments`, in
+    /// microseconds: how far the fragments of a droppable chain may extend
+    /// its deadline, all together.
+    pub max_wait_before_drop_fragments_us: u64,
     /// `congestion_control/block/wait_before_close`, in microseconds.
     pub wait_before_close_us: u64,
 }
+
+/// R2926 — upstream's default
+/// `transport/link/tx/queue/congestion_control/drop/max_wait_before_drop_fragments`
+/// (`commons/zenoh-config/src/defaults.rs` @ `max_wait_before_drop_fragments: 50000,`).
+pub const MAX_WAIT_BEFORE_DROP_FRAGMENTS_US: u64 = 50_000;
 
 impl Default for TxQueueConf {
     fn default() -> Self {
         Self {
             sizes: [crate::link::TxQueueShape::DEFAULT_SIZE; crate::qos::Priority::NUM],
             wait_before_drop_us: WAIT_BEFORE_DROP_US,
+            max_wait_before_drop_fragments_us: MAX_WAIT_BEFORE_DROP_FRAGMENTS_US,
             wait_before_close_us: WAIT_BEFORE_CLOSE_US,
         }
     }

@@ -422,6 +422,30 @@ pub enum LinkRoom {
     Gone,
 }
 
+/// R2926 — what [`BoxedLinkDriver::wait_for_room`] answers: the room it found,
+/// and how long the ask actually waited for it.
+///
+/// The wait is what lets a sender keep ONE deadline across several asks. A
+/// fragment chain in upstream waits against a single deadline that each
+/// fragment sent pushes out (`io/zenoh-transport/src/common/pipeline.rs` @
+/// `fn on_next_fragment(&mut self) {`); the session has no clock fine enough
+/// to hold that deadline itself, and the link's queue, which does the waiting,
+/// knows exactly how much of it each ask spent.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RoomAnswer {
+    /// The room found.
+    pub room: LinkRoom,
+    /// Microseconds the ask spent waiting; `0` when it was answered at once.
+    pub waited_us: u64,
+}
+
+impl RoomAnswer {
+    /// An answer given without waiting.
+    pub const fn at_once(room: LinkRoom) -> Self {
+        Self { room, waited_us: 0 }
+    }
+}
+
 /// R2923 — how a sender asks [`BoxedLinkDriver::wait_for_room`] for room: the
 /// wait it may spend, and whether its message may be dropped.
 ///
@@ -575,9 +599,12 @@ pub trait BoxedLinkDriver {
     /// dropped, which decides whether a queue already marked congested makes
     /// it wait at all (see [`RoomWait`]). A driver that WRAPS another must
     /// forward this, or every session behind the wrapper is never congested.
-    fn wait_for_room(&self, priority: crate::qos::Priority, wait: RoomWait) -> LinkRoom {
+    ///
+    /// R2926 — the answer carries how long the ask waited ([`RoomAnswer`]),
+    /// which a fragment chain spends out of one shared deadline.
+    fn wait_for_room(&self, priority: crate::qos::Priority, wait: RoomWait) -> RoomAnswer {
         let _ = (priority, wait);
-        LinkRoom::Free
+        RoomAnswer::at_once(LinkRoom::Free)
     }
 
     /// R2924 — give the link's outbound queue the shape its established

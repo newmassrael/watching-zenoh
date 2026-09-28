@@ -4259,13 +4259,17 @@ mod link_priority_tests {
 mod link_congestion_tests {
     use std::sync::{Arc, Mutex};
 
-    use wz_session_core::link::{LinkRoom, RoomWait};
+    use wz_session_core::link::{LinkRoom, RoomAnswer, RoomWait};
     use wz_session_core::qos::Priority;
 
     /// A link whose room is whatever the test says, recording what the session
     /// asked it and the frames it was handed.
+    ///
+    /// R2926 — `script` answers the next asks in order, each with the time it
+    /// claims to have waited; once it runs dry, `room` answers at once.
     struct CongestibleLink {
         room: Mutex<LinkRoom>,
+        script: Mutex<std::collections::VecDeque<RoomAnswer>>,
         asked: Mutex<Vec<RoomWait>>,
         frames: Mutex<Vec<Vec<u8>>>,
         shapes: Mutex<Vec<wz_session_core::link::TxQueueShape>>,
@@ -4275,6 +4279,7 @@ mod link_congestion_tests {
         fn new() -> Arc<Self> {
             Arc::new(Self {
                 room: Mutex::new(LinkRoom::Free),
+                script: Mutex::new(std::collections::VecDeque::new()),
                 asked: Mutex::new(Vec::new()),
                 frames: Mutex::new(Vec::new()),
                 shapes: Mutex::new(Vec::new()),
@@ -4282,6 +4287,14 @@ mod link_congestion_tests {
         }
         fn set_room(&self, room: LinkRoom) {
             *self.room.lock().expect("room") = room;
+        }
+        #[cfg(feature = "transport-fragmentation")]
+        fn script(&self, answers: impl IntoIterator<Item = RoomAnswer>) {
+            self.script.lock().expect("script").extend(answers);
+        }
+        #[cfg(feature = "transport-fragmentation")]
+        fn asked(&self) -> Vec<RoomWait> {
+            self.asked.lock().expect("asked").clone()
         }
         fn frames(&self) -> Vec<Vec<u8>> {
             self.frames.lock().expect("frames").clone()
@@ -4300,9 +4313,13 @@ mod link_congestion_tests {
             self.frames.lock().expect("frames").push(bytes.to_vec());
             super::LinkSendOutcome::Sent
         }
-        fn wait_for_room(&self, _priority: Priority, wait: RoomWait) -> LinkRoom {
+        fn wait_for_room(&self, _priority: Priority, wait: RoomWait) -> RoomAnswer {
             self.asked.lock().expect("asked").push(wait);
-            *self.room.lock().expect("room")
+            self.script
+                .lock()
+                .expect("script")
+                .pop_front()
+                .unwrap_or(RoomAnswer::at_once(*self.room.lock().expect("room")))
         }
         fn shape_tx_queue(&self, shape: wz_session_core::link::TxQueueShape) {
             self.shapes.lock().expect("shapes").push(shape);
@@ -4326,6 +4343,135 @@ mod link_congestion_tests {
         params.initial_sn = 7;
         params.tx_queue = tx_queue;
         super::new_session_actions(link, params, crate::runtime_impl::TokioTime::new())
+    }
+
+    /// R2926 — a session whose batches hold 64 bytes, so a 300-byte payload
+    /// is a chain of fragments; its first frame carries SN 7.
+    #[cfg(feature = "transport-fragmentation")]
+    fn fragmenting_session(link: Arc<CongestibleLink>) -> Arc<super::SessionLinkActions> {
+        let mut params = wz_runtime_tokio_test_support::fixture_session_init_params();
+        params.initial_sn = 7;
+        params.batch_size = 64;
+        super::new_session_actions(link, params, crate::runtime_impl::TokioTime::new())
+    }
+
+    /// R2926 — a DROPPABLE chain asks for room before each fragment against
+    /// ONE deadline, as upstream's does: `wait_before_drop` first, less what
+    /// that ask waited, and each fragment on the wire extends it by an
+    /// increment that doubles (upstream's `WaitTime::advance`).
+    #[cfg(feature = "transport-fragmentation")]
+    #[test]
+    fn a_droppable_chain_asks_for_each_fragment_against_one_growing_deadline() {
+        let link = CongestibleLink::new();
+        link.script([RoomAnswer {
+            room: LinkRoom::Free,
+            waited_us: 400,
+        }]);
+        let actions = fragmenting_session(link.clone());
+        actions
+            .send_push_literal_qos("home/big", &[0x5A; 300], true, Priority::DEFAULT)
+            .expect("push");
+        let fragments = link.frames().len();
+        assert!(
+            fragments >= 4,
+            "a 300-byte payload over 64-byte batches: {fragments}"
+        );
+        assert_eq!(
+            link.asked().len(),
+            fragments,
+            "one ask per fragment, the first before its sequence number"
+        );
+        // 1000; then 1000 - 400 + 2000; + 4000; + 8000 (cap 50000 not reached).
+        let waits: Vec<u64> = link.asked().iter().take(4).map(|w| w.wait_us()).collect();
+        assert_eq!(waits, [1_000, 2_600, 6_600, 14_600]);
+        assert!(link.asked().iter().all(|w| w.is_droppable()));
+    }
+
+    /// R2926 — a droppable chain that finds no room part-way is ABANDONED as
+    /// upstream abandons it: the fragments already out are followed by a stop
+    /// fragment carrying the Drop extension, on the next sequence number, and
+    /// the message is a congestion drop, closing nothing.
+    #[cfg(feature = "transport-fragmentation")]
+    #[test]
+    fn a_droppable_chain_that_runs_out_mid_way_ends_with_a_drop_stop_fragment() {
+        let link = CongestibleLink::new();
+        link.script([
+            RoomAnswer::at_once(LinkRoom::Free),
+            RoomAnswer::at_once(LinkRoom::Free),
+            RoomAnswer::at_once(LinkRoom::Congested),
+        ]);
+        let actions = fragmenting_session(link.clone());
+        actions
+            .send_push_literal_qos("home/big", &[0x5A; 300], true, Priority::DEFAULT)
+            .expect("a congestion drop is not the caller's error");
+        let frames = link.frames();
+        assert_eq!(frames.len(), 3, "two fragments, then the stop fragment");
+        assert_eq!(
+            frames[2],
+            wz_session_core::frame_encode::build_fragment_drop_wire(9, true, None),
+            "the stop fragment names the SN the third fragment would have had"
+        );
+        assert!(
+            !actions.take_congestion_close(),
+            "a droppable drop closes nothing"
+        );
+
+        link.set_room(LinkRoom::Free);
+        actions
+            .send_push_literal_qos("home/a", b"A", true, Priority::DEFAULT)
+            .expect("push");
+        assert_eq!(
+            link.frames()[3][1],
+            10,
+            "the stop fragment spent SN 9; the next frame carries 10"
+        );
+    }
+
+    /// R2926 — a BLOCKING chain shares one `wait_before_close` across its
+    /// fragments (upstream's advance adds nothing without a cap), and one that
+    /// runs out part-way is abandoned the same way AND closes the session.
+    #[cfg(feature = "transport-fragmentation")]
+    #[test]
+    fn a_blocking_chain_shares_one_deadline_and_closes_the_session_when_it_runs_out() {
+        use wz_session_core::qos::CongestionControl;
+        use wz_session_core::sample::QosLevel;
+        let link = CongestibleLink::new();
+        link.script([
+            RoomAnswer {
+                room: LinkRoom::Free,
+                waited_us: 1_000,
+            },
+            RoomAnswer {
+                room: LinkRoom::Free,
+                waited_us: 2_000,
+            },
+            RoomAnswer::at_once(LinkRoom::Congested),
+        ]);
+        let actions = fragmenting_session(link.clone());
+        let meta = super::PushMetadata {
+            qos: Some(QosLevel::DEFAULT.with_congestion(CongestionControl::Block)),
+            ..super::PushMetadata::default()
+        };
+        actions
+            .send_push_with_meta_literal("home/big", &[0x5A; 300], true, &meta)
+            .expect("a congestion drop is not the caller's error");
+        assert_eq!(
+            link.asked(),
+            [
+                RoomWait::Block { wait_us: 5_000_000 },
+                RoomWait::Block { wait_us: 4_999_000 },
+                RoomWait::Block { wait_us: 4_997_000 },
+            ]
+        );
+        assert_eq!(
+            link.frames().len(),
+            3,
+            "two fragments, then the stop fragment"
+        );
+        assert!(
+            actions.take_congestion_close(),
+            "a blocking message that could not be pushed closes the session"
+        );
     }
 
     /// R2924 — the waits a sender spends are the session's CONFIGURED ones
@@ -5113,10 +5259,16 @@ mod reconnect_tx_tests {
     /// its lane has, and the link's MTU. They used to take the trait defaults
     /// for all three, so a reconnecting session's frames reached its link at
     /// `Priority::DEFAULT` and its link was never congested.
+    ///
+    /// R2926 — and the whole of the room answer (the time waited too, which a
+    /// fragment chain spends), and the queue shape an established session gives
+    /// its link (R2924 wired that forward; nothing exercised it).
     #[test]
     fn both_swap_seams_forward_priority_room_and_mtu_to_the_live_link() {
         use std::sync::Mutex;
-        use wz_session_core::link::{BoxedLinkDriver as _, LinkRoom, LinkSendOutcome, RoomWait};
+        use wz_session_core::link::{
+            BoxedLinkDriver as _, LinkRoom, LinkSendOutcome, RoomAnswer, RoomWait, TxQueueShape,
+        };
         use wz_session_core::qos::Priority;
         use wz_session_core::reconnect::LocalSwappableLink;
         use wz_session_core::reliability::Reliability;
@@ -5125,6 +5277,7 @@ mod reconnect_tx_tests {
         #[derive(Default)]
         struct Opinionated {
             priorities: Mutex<Vec<Priority>>,
+            shapes: Mutex<Vec<TxQueueShape>>,
         }
         impl super::BoxedLinkDriver for Opinionated {
             fn send_blocking(&self, bytes: &[u8], reliability: Reliability) -> LinkSendOutcome {
@@ -5139,8 +5292,14 @@ mod reconnect_tx_tests {
                 self.priorities.lock().expect("priorities").push(priority);
                 LinkSendOutcome::Sent
             }
-            fn wait_for_room(&self, _priority: Priority, _wait: RoomWait) -> LinkRoom {
-                LinkRoom::Congested
+            fn wait_for_room(&self, _priority: Priority, _wait: RoomWait) -> RoomAnswer {
+                RoomAnswer {
+                    room: LinkRoom::Congested,
+                    waited_us: 7,
+                }
+            }
+            fn shape_tx_queue(&self, shape: TxQueueShape) {
+                self.shapes.lock().expect("shapes").push(shape);
             }
             fn link_mtu(&self) -> usize {
                 1234
@@ -5148,6 +5307,15 @@ mod reconnect_tx_tests {
             fn open_blocking(&self) {}
             fn close_blocking(&self) {}
         }
+        let congested = RoomAnswer {
+            room: LinkRoom::Congested,
+            waited_us: 7,
+        };
+        let shape = TxQueueShape {
+            sizes: [3; Priority::NUM],
+            qos: true,
+            batch_bytes: 512,
+        };
 
         let wait = RoomWait::Drop { wait_us: 0 };
         let live = Arc::new(Opinionated::default());
@@ -5157,11 +5325,10 @@ mod reconnect_tx_tests {
             shared.send_prioritized(b"f", Reliability::Reliable, Priority::RealTime),
             LinkSendOutcome::Sent
         );
-        assert_eq!(
-            shared.wait_for_room(Priority::RealTime, wait),
-            LinkRoom::Congested
-        );
+        assert_eq!(shared.wait_for_room(Priority::RealTime, wait), congested);
         assert_eq!(shared.link_mtu(), 1234);
+        shared.shape_tx_queue(shape);
+        assert_eq!(*live.shapes.lock().expect("shapes"), [shape]);
         assert_eq!(
             *live.priorities.lock().expect("priorities"),
             [Priority::RealTime]
@@ -5174,11 +5341,10 @@ mod reconnect_tx_tests {
             local.send_prioritized(b"f", Reliability::Reliable, Priority::Background),
             LinkSendOutcome::Sent
         );
-        assert_eq!(
-            local.wait_for_room(Priority::Background, wait),
-            LinkRoom::Congested
-        );
+        assert_eq!(local.wait_for_room(Priority::Background, wait), congested);
         assert_eq!(local.link_mtu(), 1234);
+        local.shape_tx_queue(shape);
+        assert_eq!(*local_live.shapes.lock().expect("shapes"), [shape]);
         assert_eq!(
             *local_live.priorities.lock().expect("priorities"),
             [Priority::Background]

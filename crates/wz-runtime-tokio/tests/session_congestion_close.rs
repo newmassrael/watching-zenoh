@@ -32,7 +32,7 @@ use wz_runtime_tokio::session_glue::{
 };
 use wz_runtime_tokio_test_support::fixture_session_init_params;
 use wz_session_core::close_reason::CloseReason;
-use wz_session_core::link::{LinkRoom, RoomWait};
+use wz_session_core::link::{LinkRoom, RoomAnswer, RoomWait};
 use wz_session_core::qos::Priority;
 use wz_session_core::reliability::Reliability;
 use wz_session_core::session_timeouts::SessionTimeouts;
@@ -44,8 +44,8 @@ impl BoxedLinkDriver for FullLink {
     fn send_blocking(&self, _bytes: &[u8], _reliability: Reliability) -> LinkSendOutcome {
         LinkSendOutcome::Sent
     }
-    fn wait_for_room(&self, _priority: Priority, _wait: RoomWait) -> LinkRoom {
-        LinkRoom::Congested
+    fn wait_for_room(&self, _priority: Priority, _wait: RoomWait) -> RoomAnswer {
+        RoomAnswer::at_once(LinkRoom::Congested)
     }
     fn open_blocking(&self) {}
     fn close_blocking(&self) {}
