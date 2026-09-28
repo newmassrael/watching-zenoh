@@ -10,8 +10,11 @@
 
 use std::ffi::c_void;
 
-use wz_capi_core::drive::{open_blocking, CapiTlsConfig, OpenError, SessionState};
+use wz_capi_core::drive::{open_blocking, CapiTlsConfig, DialPhase, OpenError, SessionState};
+use wz_runtime_tokio::retry_period::RetryPolicy;
 use wz_runtime_tokio::session_glue::WhatAmI;
+use wz_runtime_tokio::startup_phase::PhasePolicy;
+use wz_runtime_tokio::zenoh_config::ZenohNodeConfig;
 
 use crate::abi::{
     z_loaned_session_t, z_moved_config_t, z_moved_session_t, z_owned_session_t, Handle,
@@ -48,6 +51,39 @@ fn dial_whatami(cfg: &ConfigState) -> WhatAmI {
     }
 }
 
+/// How the dial keeps trying, read from the config the way a zenoh node reads
+/// it (ZA-3298).
+///
+/// `connect/timeout_ms` and `connect/exit_on_failure` are mode-dependent
+/// upstream, and so are their defaults: a client makes ONE attempt, a peer or
+/// router retries without bound. Both are resolved for the role this session
+/// DIALS as, which is why the document is read with that role stated — see
+/// [`ConfigState::with_default_mode`]. `connect/retry` paces the attempts and
+/// falls back to upstream's 1s / 2s / 4s.
+///
+/// The document goes through [`ZenohNodeConfig::from_json5`], wz's one reader
+/// of a stock config, rather than a second reading of three keys here. A config
+/// that reader refuses (a key zenoh does not have, or two keys that cannot
+/// both be nested) is refused by the open too, which is where upstream stands:
+/// its insert refuses the same keys before an open is ever reached.
+fn dial_phase(cfg: &ConfigState, whatami: WhatAmI) -> Option<DialPhase> {
+    let document = cfg
+        .with_default_mode(whatami.to_str())
+        .render_nested()
+        .ok()?;
+    let node = ZenohNodeConfig::from_json5(&document).ok()?.config;
+    let default = PhasePolicy::connect_default_for(whatami);
+    Some(DialPhase {
+        policy: PhasePolicy {
+            budget: node.connect_timeout_ms.unwrap_or(default.budget),
+            exit_on_failure: node
+                .connect_exit_on_failure
+                .unwrap_or(default.exit_on_failure),
+        },
+        schedule: node.connect_retry.unwrap_or(RetryPolicy::ZENOH_DEFAULT),
+    })
+}
+
 /// Construct and open a session, consuming the moved config (zenoh-c `z_open`).
 ///
 /// # Safety
@@ -78,6 +114,7 @@ pub unsafe extern "C" fn z_open(
         let connect = cfg.first(CONNECT_KEY).map(str::to_owned);
         let listen = cfg.first(LISTEN_KEY).map(str::to_owned);
         let whatami = dial_whatami(cfg);
+        let phase = dial_phase(cfg, whatami);
         let handle = unsafe { (*config)._this.handle };
         // SAFETY: a live `Box<ConfigState>` this crate leaked; consumed here.
         drop(unsafe { Box::from_raw(handle as *mut ConfigState) });
@@ -94,6 +131,11 @@ pub unsafe extern "C" fn z_open(
         if connect.is_some() && listen.is_some() {
             return Z_EINVAL;
         }
+        // Checked after the two refusals above so a config that states no
+        // endpoint keeps answering what it always did.
+        let Some(phase) = phase else {
+            return Z_EINVAL;
+        };
 
         // R311y534 — `CapiTlsConfig::default()` is the cert-free tcp/udp/ws open,
         // which is every open this ABI currently parses: zenoh-c's config is a
@@ -102,7 +144,7 @@ pub unsafe extern "C" fn z_open(
         // populated one; when this ABI grows the JSON path it fills the same
         // struct, which is why the parameter is typed rather than a pair of
         // `None`s that only ever meant "no quic cert".
-        match open_blocking(connect, listen, CapiTlsConfig::default(), whatami) {
+        match open_blocking(connect, listen, CapiTlsConfig::default(), whatami, phase) {
             Ok(state) => {
                 let h = Box::into_raw(Box::new(state)) as Handle;
                 unsafe { *this_ = z_owned_session_t::from_handle(h) };

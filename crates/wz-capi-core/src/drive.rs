@@ -23,6 +23,7 @@ use std::thread::JoinHandle;
 use tokio::sync::Notify;
 
 use wz_runtime_tokio::accept_loop::accept_loop;
+use wz_runtime_tokio::retry_period::RetryPolicy;
 use wz_runtime_tokio::runtime_impl::TokioTime;
 use wz_runtime_tokio::session_glue::{
     drive_session_until_terminal_with_extra_deadline, EntropyUnavailable, ExtraDeadline,
@@ -32,8 +33,37 @@ use wz_runtime_tokio::session_open::{
     bind_endpoint_with_config, dial_endpoint, initiate_and_open_session, AcceptConfig, DialConfig,
     OpenedSession, OpenedSessionParts, DEFAULT_OPEN_TICK_MS,
 };
+use wz_runtime_tokio::startup_phase::{drive_phase, PhasePolicy};
 
 use crate::faces::{CApiForwarder, SharedSession, DIAL_FACE_ID};
+
+/// How the dial half of an open treats an attempt that fails — zenoh's
+/// `connect/timeout_ms` and `connect/exit_on_failure` ([`PhasePolicy`]) with the
+/// `connect/retry` schedule that paces it ([`RetryPolicy`]), already resolved
+/// for the role the session dials as.
+///
+/// ZA-3298. The two halves are the runtime's own types and the loop that runs
+/// them is [`drive_phase`], the runtime's transcription of upstream's
+/// `connect_peers` fork (`zenoh/src/net/runtime/orchestrator.rs` @
+/// `async fn connect_peers_single_link(&self, peers: &[EndPoints]) -> ZResult<()> {`).
+/// Nothing here re-derives the arithmetic, so a C open cannot drift from the
+/// router's connect phase.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct DialPhase {
+    /// `connect/timeout_ms` + `connect/exit_on_failure`.
+    pub policy: PhasePolicy,
+    /// `connect/retry`.
+    pub schedule: RetryPolicy,
+}
+
+impl DialPhase {
+    /// One attempt, and a failure fails the open: upstream's client column,
+    /// and what every open here did before ZA-3298.
+    pub const ONCE: Self = Self {
+        policy: PhasePolicy::CONNECT_CLIENT_DEFAULT,
+        schedule: RetryPolicy::ZENOH_DEFAULT,
+    };
+}
 
 /// Why [`open_blocking`] could not produce a live session.
 ///
@@ -224,9 +254,17 @@ async fn shutdown_future(shutdown: Arc<Notify>, stop: Arc<AtomicBool>) {
 }
 
 /// The `connect` role: dial, run the outbound handshake, land the one peer in
-/// the registry, then pump it until `z_close`. `tx` unblocks `z_open` only once
-/// the handshake has settled — pico's blocking client open.
-async fn drive_dial(endpoint: String, whatami: WhatAmI, tls: CapiTlsConfig, ctx: DriveContext) {
+/// the registry, then pump it until `z_close`. `tx` unblocks `z_open` once the
+/// handshake has settled — pico's blocking client open — unless `phase` says
+/// the open does not wait for its peer, in which case it unblocks first (see
+/// the ZA-3298 note in the body).
+async fn drive_dial(
+    endpoint: String,
+    whatami: WhatAmI,
+    tls: CapiTlsConfig,
+    phase: DialPhase,
+    ctx: DriveContext,
+) {
     let DriveContext {
         zid,
         shared,
@@ -245,16 +283,10 @@ async fn drive_dial(endpoint: String, whatami: WhatAmI, tls: CapiTlsConfig, ctx:
             return;
         }
     };
-    let dialed = match dial_endpoint(&endpoint, &dial_cfg).await {
-        Ok(link) => link,
-        Err(_) => {
-            let _ = tx.send(false);
-            return;
-        }
-    };
-    // R311y820 — the third fallible step in this prologue, and it fails the way
-    // the two above it do: report the open failure to the C caller rather than
-    // dial with a cookie key anybody could forge.
+    // R311y820 — fallible the way the step above is: report the open failure to
+    // the C caller rather than dial with a cookie key anybody could forge.
+    // Minted ONCE, before the phase: it is not a connect failure, so it is not
+    // what `connect/retry` re-attempts.
     let params = match init_params(whatami, zid.to_vec()) {
         Ok(p) => p,
         Err(_) => {
@@ -262,7 +294,39 @@ async fn drive_dial(endpoint: String, whatami: WhatAmI, tls: CapiTlsConfig, ctx:
             return;
         }
     };
-    let opened = initiate_and_open_session(dialed, params, clock, None, DEFAULT_OPEN_TICK_MS).await;
+    // ZA-3298 — `exit_on_failure: false` is upstream's open that does NOT wait
+    // for its peer: `connect_peers_multiply_links` makes its one attempt or
+    // spawns the connector, and the open returns either way. The C caller is
+    // released HERE, before the first dial, and the dial carries on on this
+    // thread; `face_up` below replays whatever was declared meanwhile, and the
+    // local plane serves the session until then as it would with no peer.
+    let released_early = !phase.policy.exit_on_failure;
+    if released_early && tx.send(true).is_err() {
+        return;
+    }
+    // The dial AND its handshake are one attempt, because that is upstream's
+    // unit too: `open_transport_unicast` both connects and opens the session,
+    // and it is what `peers_connector_retry` re-attempts. A peer that is up but
+    // not yet serving therefore retries like one that is down.
+    let dialing = drive_phase(phase.policy, phase.schedule, |_attempt| {
+        let dial_cfg = &dial_cfg;
+        let endpoint = &endpoint;
+        let params = params.clone();
+        async move {
+            let dialed = dial_endpoint(endpoint, dial_cfg).await.map_err(|_| ())?;
+            initiate_and_open_session(dialed, params, clock, None, DEFAULT_OPEN_TICK_MS)
+                .await
+                .map_err(|_| ())
+        }
+    });
+    // A session released early can be closed while it is still dialing, and
+    // its local plane has to run meanwhile. One that was not released has no
+    // caller yet, so neither arm can fire for it.
+    let opened = tokio::select! {
+        opened = dialing => opened.ok(),
+        _ = shared.drive_local_plane(), if released_early => None,
+        _ = shutdown_future(shutdown.clone(), stop.clone()), if released_early => return,
+    };
     // R2455 — an `OpenedSession` dismantles ONLY through `into_parts`, which is
     // what carries the writer handle out by name rather than letting it fall out
     // of a capture (`OpenedSession`'s `Drop` impl states the rule). This task
@@ -274,8 +338,18 @@ async fn drive_dial(endpoint: String, whatami: WhatAmI, tls: CapiTlsConfig, ctx:
         writer_handle,
         ..
     } = match opened {
-        Ok(opened) => opened.into_parts(),
-        Err(_) => {
+        Some(opened) => opened.into_parts(),
+        // Released early, the session outlives a dial that gave up: upstream's
+        // peer stays up with no connection. It serves its local plane until
+        // `z_close`.
+        None if released_early => {
+            tokio::select! {
+                _ = shared.drive_local_plane() => {}
+                _ = shutdown_future(shutdown, stop) => {}
+            }
+            return;
+        }
+        None => {
             let _ = tx.send(false);
             return;
         }
@@ -285,7 +359,7 @@ async fn drive_dial(endpoint: String, whatami: WhatAmI, tls: CapiTlsConfig, ctx:
     // `DIAL_FACE_ID` slot; from here the C surface is role-agnostic (it fans
     // over whatever faces the registry holds).
     shared.face_up(DIAL_FACE_ID, &actions);
-    if tx.send(true).is_err() {
+    if !released_early && tx.send(true).is_err() {
         return;
     }
 
@@ -698,11 +772,15 @@ async fn drive_listen(endpoint: String, tls: CapiTlsConfig, ctx: DriveContext) {
 /// Open a session: spawn the drive thread and wait for the role's open
 /// outcome. For `connect` that is the settled handshake; for `listen` it is
 /// only the bind.
+///
+/// `dial_phase` decides how long the `connect` role keeps trying before it
+/// reports the failure; the `listen` role does not read it.
 pub fn open_blocking(
     connect: Option<String>,
     listen: Option<String>,
     tls: CapiTlsConfig,
     dial_whatami: WhatAmI,
+    dial_phase: DialPhase,
 ) -> Result<SessionState, OpenError> {
     let clock = TokioTime::new();
     // Minted here, on the CALLING thread, so `SessionState` can hand it to
@@ -754,7 +832,7 @@ pub fn open_blocking(
             rt.block_on(async move {
                 match (connect, listen) {
                     (Some(endpoint), _) => {
-                        drive_dial(endpoint, dial_whatami, tls, ctx).await;
+                        drive_dial(endpoint, dial_whatami, tls, dial_phase, ctx).await;
                     }
                     (None, Some(endpoint)) => {
                         drive_listen(endpoint, tls, ctx).await;

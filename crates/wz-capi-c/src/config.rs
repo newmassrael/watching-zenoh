@@ -227,6 +227,22 @@ impl ConfigState {
             entries: self.entries.clone(),
         }
     }
+
+    /// A copy of this config that states `mode`, as `mode` when it states none.
+    ///
+    /// ZA-3298. The open path picks its role from `mode` and dials as a client
+    /// when the key is absent, while wz's reader resolves an absent `mode` to
+    /// upstream's default. A mode-dependent value such as
+    /// `connect/timeout_ms: { client: 0, peer: -1 }` read through that reader
+    /// would then be resolved for a role the session does not dial as; stating
+    /// the dialled role first makes the two readings one.
+    pub(crate) fn with_default_mode(&self, mode: &str) -> Self {
+        let mut copy = self.deep_copy();
+        if !copy.entries.contains_key(MODE_KEY) {
+            copy.insert_value(MODE_KEY, Json5Value::String(mode.to_owned()));
+        }
+        copy
+    }
 }
 
 /// Two stored keys that cannot both be nested, because one's path runs THROUGH
