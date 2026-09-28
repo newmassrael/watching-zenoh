@@ -11466,9 +11466,16 @@ layer_c1bz_docs_resolve() {
     # three links the new `multicast_pipeline` doc broke are fixed at the
     # cause (lib.rs no longer puts an outer doc on that module, so its `//!`
     # resolves in its own scope), with the one private-item link a code span.
+    # R2944 — wz-ap-demo 26 -> 25 and wz-runtime-tokio held at 485. The demo's
+    # `PeerOpts` doc linked `WzConfig::with_qos_link`, out of that crate's
+    # scope, and R2944 retired the builder with the doc. In wz-runtime-tokio
+    # the lane read 486: blaming each error line of this lane's command
+    # against the commits since `1b7cb13c` named exactly one, R2941's link
+    # from a public entrypoint's doc to the private `stage_link_priority_band`,
+    # now a code span; the same command then read 485.
     budget="
         wz:2
-        wz-ap-demo:26
+        wz-ap-demo:25
         wz-capi-c:45
         wz-capi-core:7
         wz-capi-pico:44

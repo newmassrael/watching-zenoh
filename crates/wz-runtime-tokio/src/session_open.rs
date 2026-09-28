@@ -4935,7 +4935,8 @@ pub async fn initiate_and_open_session_with_auth(
 /// off the offer rather than told twice. With `session-extqos` it is this
 /// link's declared band, advertised and negotiated like any `prio=` metadata;
 /// without it there is no wire field for it, and it stays a local
-/// `select_link` routing decision (R2941, [`stage_link_priority_band`]).
+/// `select_link` routing decision (R2941, `stage_link_priority_band` — a code
+/// span, not a link: the helper is private and this doc is public).
 #[cfg(feature = "transport-multilink")]
 #[allow(clippy::too_many_arguments)]
 pub async fn initiate_and_open_session_with_multilink(
