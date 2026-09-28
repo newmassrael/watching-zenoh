@@ -784,6 +784,49 @@ fn the_defaults_each_implementation_falls_back_to_are_pinned_against_a_real_zeno
         ),
         ("transport/link/tx/batch_size", wz.batch_size.to_string()),
         ("transport/link/tx/lease", wz.lease_ms.to_string()),
+        // R2925 — the queue sizes and the two congestion waits: zenohd resolves
+        // a silent file to numbers (2 per priority, 1000 and 5000000
+        // microseconds), so each is compared against wz's own default.
+        (
+            "transport/link/tx/queue/size/control",
+            wz.tx_queue.sizes[0].to_string(),
+        ),
+        (
+            "transport/link/tx/queue/size/real_time",
+            wz.tx_queue.sizes[1].to_string(),
+        ),
+        (
+            "transport/link/tx/queue/size/interactive_high",
+            wz.tx_queue.sizes[2].to_string(),
+        ),
+        (
+            "transport/link/tx/queue/size/interactive_low",
+            wz.tx_queue.sizes[3].to_string(),
+        ),
+        (
+            "transport/link/tx/queue/size/data_high",
+            wz.tx_queue.sizes[4].to_string(),
+        ),
+        (
+            "transport/link/tx/queue/size/data",
+            wz.tx_queue.sizes[5].to_string(),
+        ),
+        (
+            "transport/link/tx/queue/size/data_low",
+            wz.tx_queue.sizes[6].to_string(),
+        ),
+        (
+            "transport/link/tx/queue/size/background",
+            wz.tx_queue.sizes[7].to_string(),
+        ),
+        (
+            "transport/link/tx/queue/congestion_control/drop/wait_before_drop",
+            wz.tx_queue.wait_before_drop_us.to_string(),
+        ),
+        (
+            "transport/link/tx/queue/congestion_control/block/wait_before_close",
+            wz.tx_queue.wait_before_close_us.to_string(),
+        ),
         (
             "transport/multicast/qos/enabled",
             wz.multicast_qos.to_string(),
@@ -3461,7 +3504,22 @@ fn a_wz_node_configured_only_by_a_stock_zenoh_config_reaches_a_real_zenohd() {
         so_sndbuf: 24576,
       }},
       tcp: {{ so_rcvbuf: 65536, so_sndbuf: 65536 }},
-      tx: {{ batch_size: 4096, lease: 3000 }},
+      // R2925 — the queue sizes and the two congestion waits, each off its
+      // default so the demo has something to apply.
+      tx: {{
+        batch_size: 4096,
+        lease: 3000,
+        queue: {{
+          size: {{
+            control: 3, real_time: 3, interactive_high: 3, interactive_low: 3,
+            data_high: 3, data: 3, data_low: 3, background: 3,
+          }},
+          congestion_control: {{
+            drop: {{ wait_before_drop: 2000 }},
+            block: {{ wait_before_close: 6000000 }},
+          }},
+        }},
+      }},
     }},
   }},
   // R311y844 — this file now names EVERY honoured key, which turns this leg

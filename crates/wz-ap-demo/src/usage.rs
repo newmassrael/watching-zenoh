@@ -102,6 +102,22 @@ pub(crate) fn print_usage() {
     eprintln!("                             default 65535). zenoh transport/link/tx/batch_size");
     eprintln!("    --lease-ms <ms>          OpenSyn session lease announced to the peer");
     eprintln!("                             (default 10000). zenoh transport/link/tx/lease");
+    eprintln!("    --tx-queue-size-control <n>, --tx-queue-size-real-time <n>,");
+    eprintln!("    --tx-queue-size-interactive-high <n>, --tx-queue-size-interactive-low <n>,");
+    eprintln!("    --tx-queue-size-data-high <n>, --tx-queue-size-data <n>,");
+    eprintln!("    --tx-queue-size-data-low <n>, --tx-queue-size-background <n>");
+    eprintln!("                             batches a link's queue holds for that priority");
+    eprintln!("                             (1..=16, default 2).");
+    eprintln!(
+        "                             zenoh transport/link/tx/queue/size/data (and siblings)"
+    );
+    eprintln!("    --wait-before-drop-us <us>");
+    eprintln!("                             how long a droppable message waits for room (default");
+    eprintln!("                             1000). zenoh transport/link/tx/queue/congestion_control/drop/wait_before_drop");
+    eprintln!("    --wait-before-close-us <us>");
+    eprintln!("                             how long a blocking message waits before the session");
+    eprintln!("                             closes (default 5000000).");
+    eprintln!("                             zenoh transport/link/tx/queue/congestion_control/block/wait_before_close");
     eprintln!("    --link-config <kind>#<k=v;...>");
     eprintln!("                             socket options every <kind> link takes unless its");
     eprintln!("                             locator names the same key (repeatable). tcp and tls");

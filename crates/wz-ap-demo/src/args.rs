@@ -1022,6 +1022,37 @@ pub(crate) fn expand_stock_zenoh_config_for_build(
             None,
         );
     }
+    // R2925 — the queue sizes and the two congestion waits: local policy, not
+    // wire values, but honoured at any value for the reason `batch_size` is —
+    // there is no "off" for a size or a deadline. One flag per key, because an
+    // expansion decides "already typed" by the FLAG, so eight keys sharing one
+    // repeatable flag would let one typed size overrule the other seven.
+    for (key, _, byte) in wz::runtime_tokio::zenoh_config::TX_QUEUE_SIZE_KEYS {
+        if named(key) {
+            exp.pair(
+                key,
+                TX_QUEUE_SIZE_FLAGS[byte as usize],
+                cfg.tx_queue.sizes[byte as usize].to_string(),
+                None,
+            );
+        }
+    }
+    if named("transport/link/tx/queue/congestion_control/drop/wait_before_drop") {
+        exp.pair(
+            "transport/link/tx/queue/congestion_control/drop/wait_before_drop",
+            "--wait-before-drop-us",
+            cfg.tx_queue.wait_before_drop_us.to_string(),
+            None,
+        );
+    }
+    if named("transport/link/tx/queue/congestion_control/block/wait_before_close") {
+        exp.pair(
+            "transport/link/tx/queue/congestion_control/block/wait_before_close",
+            "--wait-before-close-us",
+            cfg.tx_queue.wait_before_close_us.to_string(),
+            None,
+        );
+    }
     // R311y844 — the ten keys wz already acted on. Each row is a flag that has
     // been in this binary for rounds, so what changed is not the capability but
     // the ability to ask for it from the file an operator already has. The
@@ -2754,6 +2785,75 @@ pub(crate) const ARGV_ONLY_KIND_LEDGER: &[(&str, &str, &str)] = &[
          `connect/timeout_ms`: a local deadline on binding, visible as whether \
          the socket came up in time.",
     ),
+    // R2925 — the queue sizes and the two congestion waits. Local capacity and
+    // local deadlines: they decide how much THIS node buffers per priority and
+    // how long a sender waits before dropping or closing, and a peer sees only
+    // the consequence (a message that never came, a session closed as
+    // unresponsive), never the number. Judged in the runtime crate by
+    // `session_glue`'s `link_congestion_tests` and `writer_queue`'s tests.
+    (
+        "transport/link/tx/queue/size/control",
+        KIND_OFF_WIRE,
+        "expands to `--tx-queue-size-control`. How many batches the Control \
+         queue holds on each link: local capacity no frame carries.",
+    ),
+    (
+        "transport/link/tx/queue/size/real_time",
+        KIND_OFF_WIRE,
+        "expands to `--tx-queue-size-real-time`. How many batches the RealTime \
+         queue holds on each link: local capacity no frame carries.",
+    ),
+    (
+        "transport/link/tx/queue/size/interactive_high",
+        KIND_OFF_WIRE,
+        "expands to `--tx-queue-size-interactive-high`. How many batches the \
+         InteractiveHigh queue holds on each link: local capacity no frame carries.",
+    ),
+    (
+        "transport/link/tx/queue/size/interactive_low",
+        KIND_OFF_WIRE,
+        "expands to `--tx-queue-size-interactive-low`. How many batches the \
+         InteractiveLow queue holds on each link: local capacity no frame carries.",
+    ),
+    (
+        "transport/link/tx/queue/size/data_high",
+        KIND_OFF_WIRE,
+        "expands to `--tx-queue-size-data-high`. How many batches the DataHigh \
+         queue holds on each link: local capacity no frame carries.",
+    ),
+    (
+        "transport/link/tx/queue/size/data",
+        KIND_OFF_WIRE,
+        "expands to `--tx-queue-size-data`. How many batches the Data queue \
+         holds on each link, and the size of the ONE queue a non-QoS session \
+         has: local capacity no frame carries.",
+    ),
+    (
+        "transport/link/tx/queue/size/data_low",
+        KIND_OFF_WIRE,
+        "expands to `--tx-queue-size-data-low`. How many batches the DataLow \
+         queue holds on each link: local capacity no frame carries.",
+    ),
+    (
+        "transport/link/tx/queue/size/background",
+        KIND_OFF_WIRE,
+        "expands to `--tx-queue-size-background`. How many batches the \
+         Background queue holds on each link: local capacity no frame carries.",
+    ),
+    (
+        "transport/link/tx/queue/congestion_control/drop/wait_before_drop",
+        KIND_OFF_WIRE,
+        "expands to `--wait-before-drop-us`. How long a droppable message waits \
+         for room before it is dropped: a local deadline whose only trace is a \
+         message that never left.",
+    ),
+    (
+        "transport/link/tx/queue/congestion_control/block/wait_before_close",
+        KIND_OFF_WIRE,
+        "expands to `--wait-before-close-us`. How long a blocking message waits \
+         for room before the session is closed as unresponsive: a local \
+         deadline, visible only as the Close it ends in.",
+    ),
     // R2758 — OFF-WIRE and not leg-judged, and the distinction is the point.
     // The bound IS judged by a leg, but that leg lives in the runtime crate
     // (`accept_loop.rs`, `max_sessions_refuses_the_peer_past_the_bound`), while
@@ -4253,6 +4353,69 @@ mod stock_config_tests {
                 LISTEN_ONLY,
                 r#"{ listen: { endpoints: ["tcp/0.0.0.0:7447"] },
                      transport: { link: { tx: { lease: 3000 } } } }"#,
+            ),
+            // R2925 — the queue sizes and the two congestion waits.
+            (
+                "transport/link/tx/queue/size/control",
+                LISTEN_ONLY,
+                r#"{ listen: { endpoints: ["tcp/0.0.0.0:7447"] },
+                     transport: { link: { tx: { queue: { size: { control: 4 } } } } } }"#,
+            ),
+            (
+                "transport/link/tx/queue/size/real_time",
+                LISTEN_ONLY,
+                r#"{ listen: { endpoints: ["tcp/0.0.0.0:7447"] },
+                     transport: { link: { tx: { queue: { size: { real_time: 4 } } } } } }"#,
+            ),
+            (
+                "transport/link/tx/queue/size/interactive_high",
+                LISTEN_ONLY,
+                r#"{ listen: { endpoints: ["tcp/0.0.0.0:7447"] },
+                     transport: { link: { tx: { queue: { size: { interactive_high: 4 } } } } } }"#,
+            ),
+            (
+                "transport/link/tx/queue/size/interactive_low",
+                LISTEN_ONLY,
+                r#"{ listen: { endpoints: ["tcp/0.0.0.0:7447"] },
+                     transport: { link: { tx: { queue: { size: { interactive_low: 4 } } } } } }"#,
+            ),
+            (
+                "transport/link/tx/queue/size/data_high",
+                LISTEN_ONLY,
+                r#"{ listen: { endpoints: ["tcp/0.0.0.0:7447"] },
+                     transport: { link: { tx: { queue: { size: { data_high: 4 } } } } } }"#,
+            ),
+            (
+                "transport/link/tx/queue/size/data",
+                LISTEN_ONLY,
+                r#"{ listen: { endpoints: ["tcp/0.0.0.0:7447"] },
+                     transport: { link: { tx: { queue: { size: { data: 4 } } } } } }"#,
+            ),
+            (
+                "transport/link/tx/queue/size/data_low",
+                LISTEN_ONLY,
+                r#"{ listen: { endpoints: ["tcp/0.0.0.0:7447"] },
+                     transport: { link: { tx: { queue: { size: { data_low: 4 } } } } } }"#,
+            ),
+            (
+                "transport/link/tx/queue/size/background",
+                LISTEN_ONLY,
+                r#"{ listen: { endpoints: ["tcp/0.0.0.0:7447"] },
+                     transport: { link: { tx: { queue: { size: { background: 4 } } } } } }"#,
+            ),
+            (
+                "transport/link/tx/queue/congestion_control/drop/wait_before_drop",
+                LISTEN_ONLY,
+                r#"{ listen: { endpoints: ["tcp/0.0.0.0:7447"] },
+                     transport: { link: { tx: { queue: {
+                       congestion_control: { drop: { wait_before_drop: 3000 } } } } } } }"#,
+            ),
+            (
+                "transport/link/tx/queue/congestion_control/block/wait_before_close",
+                LISTEN_ONLY,
+                r#"{ listen: { endpoints: ["tcp/0.0.0.0:7447"] },
+                     transport: { link: { tx: { queue: {
+                       congestion_control: { block: { wait_before_close: 7000000 } } } } } } }"#,
             ),
             (
                 "adminspace/enabled",
@@ -6213,11 +6376,15 @@ mod stock_config_tests {
     /// wz-session-core's own gate; the hop this round added is the one here.
     #[test]
     fn the_batch_size_and_lease_a_config_names_reach_the_params_the_node_announces() {
+        // R2925 — the queue sizes and congestion waits ride the same join.
         let exp = expand(
             &["--config", "z.json5"],
             r#"{ mode: "client",
                  connect: { endpoints: ["tcp/r:7447"] },
-                 transport: { link: { tx: { batch_size: 4096, lease: 3000 } } } }"#,
+                 transport: { link: { tx: { batch_size: 4096, lease: 3000,
+                   queue: { size: { real_time: 5, data: 7 },
+                            congestion_control: { drop: { wait_before_drop: 2500 },
+                                                  block: { wait_before_close: 7000000 } } } } } } }"#,
         )
         .unwrap();
         assert!(
@@ -6232,6 +6399,18 @@ mod stock_config_tests {
             .expect("OS entropy for the cookie signing key");
         assert_eq!(params.effective_batch_size(), 4096);
         assert_eq!(params.lease_ms, 3000);
+        let mut sizes = [2; 8];
+        sizes[1] = 5;
+        sizes[5] = 7;
+        assert_eq!(
+            params.tx_queue,
+            wz::runtime_tokio::session_glue::TxQueueConf {
+                sizes,
+                wait_before_drop_us: 2_500,
+                wait_before_close_us: 7_000_000,
+            },
+            "the file's queue section reaches the session the node opens"
+        );
 
         // CONTROL, in the same test: a node started WITHOUT the file announces
         // the demo's own pair, so the two assertions above cannot be passing on
@@ -6244,6 +6423,10 @@ mod stock_config_tests {
         .expect("OS entropy for the cookie signing key");
         assert_eq!(bare.effective_batch_size(), 65535);
         assert_eq!(bare.lease_ms, 10_000);
+        assert_eq!(
+            bare.tx_queue,
+            wz::runtime_tokio::session_glue::TxQueueConf::default()
+        );
     }
 
     /// The exact argv the adminspace block and the compression flag produce.
@@ -6352,6 +6535,17 @@ mod stock_config_tests {
             (vec!["--batch-size", "0"], "zero-byte TX batch"),
             (vec!["--lease-ms", "3s"], "--lease-ms expects"),
             (vec!["--lease-ms", "0"], "already expired"),
+            // R2925 — upstream's queue sizes are `1..=16`: both edges refused.
+            (vec!["--tx-queue-size-data", "0"], "1..=16"),
+            (vec!["--tx-queue-size-real-time", "17"], "1..=16"),
+            (
+                vec!["--wait-before-drop-us", "1ms"],
+                "--wait-before-drop-us expects",
+            ),
+            (
+                vec!["--wait-before-close-us", "-1"],
+                "--wait-before-close-us expects",
+            ),
         ] {
             let err = TransportTuning::from_argv(&argv(&cli))
                 .expect_err("a value outside the type is not a tuning");
@@ -6360,6 +6554,26 @@ mod stock_config_tests {
         assert_eq!(
             TransportTuning::from_argv(&argv(&["--listen", "tcp/a:1"])).unwrap(),
             TransportTuning::default()
+        );
+        // R2925 — and a readable one reaches the tuning at its own priority.
+        let tuned = TransportTuning::from_argv(&argv(&[
+            "--tx-queue-size-background",
+            "9",
+            "--wait-before-drop-us",
+            "2500",
+            "--wait-before-close-us",
+            "7000000",
+        ]))
+        .unwrap();
+        let mut sizes = [2; 8];
+        sizes[7] = 9;
+        assert_eq!(
+            tuned.tx_queue,
+            wz::runtime_tokio::session_glue::TxQueueConf {
+                sizes,
+                wait_before_drop_us: 2_500,
+                wait_before_close_us: 7_000_000,
+            }
         );
     }
 
@@ -7889,7 +8103,25 @@ pub(crate) struct TransportTuning {
     pub(crate) lease_ms: u64,
     /// R2592 — every `--link-config <kind>#<span>`, layered in argv order.
     pub(crate) link_defaults: wz::runtime_tokio::link_socket::LinkDefaults,
+    /// R2925 — the per-priority queue sizes and the two congestion waits:
+    /// `--tx-queue-size-<priority> <n>`, `--wait-before-drop-us <us>` and
+    /// `--wait-before-close-us <us>`. Upstream's defaults unless given.
+    pub(crate) tx_queue: wz::runtime_tokio::session_glue::TxQueueConf,
 }
+
+/// R2925 — the demo's flag for each priority's queue size, indexed by the
+/// `Priority` wire byte (Control = 0 … Background = 7): the argv spelling of
+/// `transport/link/tx/queue/size/<priority>`.
+pub(crate) const TX_QUEUE_SIZE_FLAGS: [&str; 8] = [
+    "--tx-queue-size-control",
+    "--tx-queue-size-real-time",
+    "--tx-queue-size-interactive-high",
+    "--tx-queue-size-interactive-low",
+    "--tx-queue-size-data-high",
+    "--tx-queue-size-data",
+    "--tx-queue-size-data-low",
+    "--tx-queue-size-background",
+];
 
 impl Default for TransportTuning {
     fn default() -> Self {
@@ -7897,6 +8129,7 @@ impl Default for TransportTuning {
             batch_size: 65535,
             lease_ms: 10_000,
             link_defaults: Default::default(),
+            tx_queue: Default::default(),
         }
     }
 }
@@ -7934,6 +8167,26 @@ impl TransportTuning {
                     "--lease-ms 0 would announce a lease that is already expired",
                 ));
             }
+        }
+        // R2925 — a size outside upstream's `1..=16` is refused, as upstream's
+        // config refuses it; the waits take any microsecond count.
+        for (byte, flag) in TX_QUEUE_SIZE_FLAGS.iter().enumerate() {
+            if let Some(v) = parse_pair(rest, flag) {
+                let size = v.parse::<usize>().ok().filter(|n| (1..=16).contains(n));
+                out.tx_queue.sizes[byte] = size.ok_or_else(|| {
+                    format!("{flag} expects a queue size in 1..=16 batches, got '{v}'")
+                })?;
+            }
+        }
+        if let Some(v) = parse_pair(rest, "--wait-before-drop-us") {
+            out.tx_queue.wait_before_drop_us = v
+                .parse::<u64>()
+                .map_err(|_| format!("--wait-before-drop-us expects microseconds, got '{v}'"))?;
+        }
+        if let Some(v) = parse_pair(rest, "--wait-before-close-us") {
+            out.tx_queue.wait_before_close_us = v
+                .parse::<u64>()
+                .map_err(|_| format!("--wait-before-close-us expects microseconds, got '{v}'"))?;
         }
         // R2592 — `<kind>#<span>`, the shape upstream gives each link kind's
         // configuration: a parameter span keyed by the kind. A refusal names the
@@ -8135,6 +8388,8 @@ pub(crate) fn demo_session_init_params(
         // this ten-second one.
         batch_size: tuning.batch_size,
         lease_ms: tuning.lease_ms,
+        // R2925 — the queue sizes and congestion waits the operator gave.
+        tx_queue: tuning.tx_queue,
         initial_sn: 0,
         cookie: Vec::new(),
         // R311y820 — DRAWN, not a literal. This site carried a 32-byte `0xAB`
@@ -8144,7 +8399,6 @@ pub(crate) fn demo_session_init_params(
         // so the note named a symbol that no longer existed and nothing ever
         // supplied the entropy. The key of every acceptor this binary opened
         // was therefore a literal in a public repository.
-        tx_queue: wz::runtime_tokio::session_glue::TxQueueConf::default(),
         cookie_signing_key: SigningKey::from_entropy(&mut OsEntropy).map_err(|e| {
             std::io::Error::other(format!(
                 "no OS entropy for the cookie signing key ({e}); refusing to open a \

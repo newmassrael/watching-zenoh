@@ -936,6 +936,14 @@ pub struct ZenohNodeConfig {
     pub batch_size: u16,
     /// `transport/link/tx/lease` (milliseconds).
     pub lease_ms: u64,
+    /// R2925 — `transport/link/tx/queue/size/*` (batches per priority, each in
+    /// upstream's `1..=16`) and the two congestion waits,
+    /// `.../congestion_control/drop/wait_before_drop` and
+    /// `.../congestion_control/block/wait_before_close` (microseconds, as
+    /// upstream's). The session takes them through `SessionInitParams`: its
+    /// senders spend the waits, and its links' writer queues take the sizes at
+    /// Established.
+    pub tx_queue: wz_session_core::session_init_params::TxQueueConf,
     /// `transport/unicast/max_links`.
     pub max_links: usize,
     /// `transport/unicast/max_sessions` — how many unicast sessions a node
@@ -1250,6 +1258,7 @@ impl Default for ZenohNodeConfig {
             peer_linkstate: false,
             batch_size: 65_535,
             lease_ms: 10_000,
+            tx_queue: wz_session_core::session_init_params::TxQueueConf::default(),
             max_links: 1,
             max_sessions: crate::config::DEFAULT_MAX_SESSIONS,
             qos: true,
@@ -1673,7 +1682,24 @@ impl ZenohNodeConfig {
         );
         out.push_str("    \"link\": {\n      \"tx\": {\n");
         let _ = writeln!(out, "        \"batch_size\": {},", self.batch_size);
-        let _ = writeln!(out, "        \"lease\": {}", self.lease_ms);
+        let _ = writeln!(out, "        \"lease\": {},", self.lease_ms);
+        // R2925 — the queue sizes and the two congestion waits, in upstream's
+        // `queue` shape.
+        out.push_str("        \"queue\": {\n          \"size\": {");
+        for (i, (_, leaf, byte)) in TX_QUEUE_SIZE_KEYS.iter().enumerate() {
+            let sep = if i == 0 { "" } else { "," };
+            let _ = write!(
+                out,
+                "{sep} \"{leaf}\": {}",
+                self.tx_queue.sizes[*byte as usize]
+            );
+        }
+        let _ = writeln!(
+            out,
+            " }},\n          \"congestion_control\": {{ \"drop\": {{ \"wait_before_drop\": {} }}, \
+             \"block\": {{ \"wait_before_close\": {} }} }}\n        }}",
+            self.tx_queue.wait_before_drop_us, self.tx_queue.wait_before_close_us
+        );
         out.push_str("      }");
         // R2593 — the tcp block, only for the buffers the caller set: an absent
         // key is zenoh's own "kernel default", so emitting nothing is exact.
@@ -1745,6 +1771,30 @@ impl ZenohNodeConfig {
     }
 }
 
+/// R2925 — upstream's `transport/link/tx/queue/size` leaves, each with the
+/// `Priority` wire byte whose queue it sizes, as upstream's transport manager
+/// maps them (`io/zenoh-transport/src/manager.rs` @
+/// `queue_size[Priority::InteractiveHigh as usize] = *self.queue_size.interactive_high();`).
+/// The one table the reader, the emitter and the demo's flag expansion walk.
+pub const TX_QUEUE_SIZE_KEYS: [(&str, &str, u8); 8] = [
+    ("transport/link/tx/queue/size/control", "control", 0),
+    ("transport/link/tx/queue/size/real_time", "real_time", 1),
+    (
+        "transport/link/tx/queue/size/interactive_high",
+        "interactive_high",
+        2,
+    ),
+    (
+        "transport/link/tx/queue/size/interactive_low",
+        "interactive_low",
+        3,
+    ),
+    ("transport/link/tx/queue/size/data_high", "data_high", 4),
+    ("transport/link/tx/queue/size/data", "data", 5),
+    ("transport/link/tx/queue/size/data_low", "data_low", 6),
+    ("transport/link/tx/queue/size/background", "background", 7),
+];
+
 /// Every upstream config leaf path [`ZenohNodeConfig::from_json5`] HONOURS,
 /// in the order `to_json5` emits them.
 ///
@@ -1803,6 +1853,21 @@ pub const HONOURED_CONFIG_KEYS: &[&str] = &[
     "transport/unicast/compression/enabled",
     "transport/link/tx/batch_size",
     "transport/link/tx/lease",
+    // R2925 — the queue sizes (in `TX_QUEUE_SIZE_KEYS` order) and the two
+    // congestion waits. They left `UNHONOURED_BEYOND_WZ` because the capability
+    // its `LinkTxConf` row said wz lacked — bounded per-priority queues with
+    // congestion drop-vs-block — is what R2919-R2924 built; gate 2g is what
+    // said so, once the session's own configuration named two of them.
+    "transport/link/tx/queue/size/control",
+    "transport/link/tx/queue/size/real_time",
+    "transport/link/tx/queue/size/interactive_high",
+    "transport/link/tx/queue/size/interactive_low",
+    "transport/link/tx/queue/size/data_high",
+    "transport/link/tx/queue/size/data",
+    "transport/link/tx/queue/size/data_low",
+    "transport/link/tx/queue/size/background",
+    "transport/link/tx/queue/congestion_control/drop/wait_before_drop",
+    "transport/link/tx/queue/congestion_control/block/wait_before_close",
     "adminspace/enabled",
     "adminspace/permissions/read",
     "adminspace/permissions/write",
@@ -2241,17 +2306,7 @@ pub const UNHONOURED_UPSTREAM_CONFIG_KEYS: &[&str] = &[
     "transport/link/tx/queue/allocation/mode",
     "transport/link/tx/queue/batching/enabled",
     "transport/link/tx/queue/batching/time_limit",
-    "transport/link/tx/queue/congestion_control/block/wait_before_close",
     "transport/link/tx/queue/congestion_control/drop/max_wait_before_drop_fragments",
-    "transport/link/tx/queue/congestion_control/drop/wait_before_drop",
-    "transport/link/tx/queue/size/background",
-    "transport/link/tx/queue/size/control",
-    "transport/link/tx/queue/size/data",
-    "transport/link/tx/queue/size/data_high",
-    "transport/link/tx/queue/size/data_low",
-    "transport/link/tx/queue/size/interactive_high",
-    "transport/link/tx/queue/size/interactive_low",
-    "transport/link/tx/queue/size/real_time",
     "transport/link/tx/sequence_number_resolution",
     "transport/link/tx/threads",
     "transport/link/unixpipe/file_access_mask",
@@ -2303,8 +2358,10 @@ pub const UNHONOURED_UPSTREAM_CONFIG_KEYS: &[&str] = &[
 ///   WIRE half (the auth-body codec has foreign witnesses) and nothing to
 ///   configure it from.
 /// * `transport/link/*` — a configurable link-TX surface (`LinkTxConf`):
-///   upstream's priority-queue sizing, batching, congestion-control waits and
-///   socket buffers, none of which wz exposes as configuration.
+///   upstream's queue allocation, batching, the per-fragment drop deadline and
+///   the remaining link knobs, none of which wz exposes as configuration.
+///   (R2925 — the priority-queue sizes and the two congestion waits left for
+///   `HONOURED_CONFIG_KEYS`.)
 /// * `transport/{unicast,multicast}/*`, `transport/shared_memory/mode` — a
 ///   configurable session table (`TransportUnicastConf`): accept backlog,
 ///   session caps, open/accept timeouts.
@@ -2448,17 +2505,7 @@ pub const UNHONOURED_BEYOND_WZ: &[&str] = &[
     "transport/link/tx/queue/allocation/mode",
     "transport/link/tx/queue/batching/enabled",
     "transport/link/tx/queue/batching/time_limit",
-    "transport/link/tx/queue/congestion_control/block/wait_before_close",
     "transport/link/tx/queue/congestion_control/drop/max_wait_before_drop_fragments",
-    "transport/link/tx/queue/congestion_control/drop/wait_before_drop",
-    "transport/link/tx/queue/size/background",
-    "transport/link/tx/queue/size/control",
-    "transport/link/tx/queue/size/data",
-    "transport/link/tx/queue/size/data_high",
-    "transport/link/tx/queue/size/data_low",
-    "transport/link/tx/queue/size/interactive_high",
-    "transport/link/tx/queue/size/interactive_low",
-    "transport/link/tx/queue/size/real_time",
     "transport/link/tx/sequence_number_resolution",
     "transport/link/tx/threads",
     // R2363 — `transport/link/unixpipe/file_access_mask` LEFT here for
@@ -2685,17 +2732,12 @@ pub const UNHONOURED_BEYOND_GROUPS: &[(&str, &str, &[&str])] = &[
             "transport/link/tx/queue/allocation/mode",
             "transport/link/tx/queue/batching/enabled",
             "transport/link/tx/queue/batching/time_limit",
-            "transport/link/tx/queue/congestion_control/block/wait_before_close",
+            // R2925 — the eight sizes and the two waits LEFT this group: wz
+            // now has the per-priority bounded queues and the drop-vs-block
+            // waits they configure. `max_wait_before_drop_fragments` stays:
+            // wz asks for room once per fragment chain, so the per-fragment
+            // deadline it bounds has nothing to act on yet.
             "transport/link/tx/queue/congestion_control/drop/max_wait_before_drop_fragments",
-            "transport/link/tx/queue/congestion_control/drop/wait_before_drop",
-            "transport/link/tx/queue/size/background",
-            "transport/link/tx/queue/size/control",
-            "transport/link/tx/queue/size/data",
-            "transport/link/tx/queue/size/data_high",
-            "transport/link/tx/queue/size/data_low",
-            "transport/link/tx/queue/size/interactive_high",
-            "transport/link/tx/queue/size/interactive_low",
-            "transport/link/tx/queue/size/real_time",
             "transport/link/tx/sequence_number_resolution",
             "transport/link/tx/threads",
             // R2363 removed `transport/link/unixpipe/file_access_mask` from
@@ -3067,31 +3109,12 @@ pub const UNHONOURED_CITATION_LEDGER: &[(&str, &str, &str)] = &[
         "wz-has-it",
         "DEFAULT_FILE_MASK",
     ),
-    // R2226 (open-debt item 575) — a capacity knob wz spells at a GENUINE
-    // zenohd and never at itself, on the same footing as
-    // `sequence_number_resolution` below.
+    // R2925 — the `queue/size/data` row R2226 (open-debt item 575) kept here is
+    // GONE, for the reason R2593's `so_sndbuf` row went: wz honours the key now,
+    // and the ledger answers only for keys wz does not act on. The zenohd
+    // fixture that spells it (`spawn_zenohd_shallow_tx_queue_on_ephemeral_tcp`)
+    // still configures the far side exactly as before.
     //
-    // The leg it exists for has to make a real router run out of batches
-    // mid-fragmentation. That needs the router to BLOCK in `write`, and how far
-    // it gets first is decided by how much it can hold: one batch object per
-    // priority (`queue/size/data`). It is configured on the far side; wz
-    // honours it nowhere.
-    //
-    // R2593 — this row used to cover a second key, `transport/link/tcp/so_sndbuf`,
-    // which the same fixture sets for the same reason. That key is honoured
-    // now (`HONOURED_CONFIG_KEYS`), so its row is gone: the ledger answers only
-    // for keys wz does not act on.
-    //
-    // ⚠ Kept apart from the DEADLINE the same leg depends on, which is left at
-    // its upstream default deliberately: capacity decides how far a sender
-    // gets, and only the deadline decides what it does when it stops. Naming
-    // that one here too would have made the router's willingness to abandon a
-    // property of this harness.
-    (
-        "transport/link/tx/queue/size/data",
-        "foreign-node-config",
-        "spawn_zenohd_shallow_tx_queue_on_ephemeral_tcp",
-    ),
     // R2221 (open-debt item 568) — wz's source spells
     // `transport/link/tx/sequence_number_resolution` to configure the GENUINE
     // zenohd, never itself, and the `qos/publication` row above is the same
@@ -5940,6 +5963,37 @@ impl ZenohNodeConfig {
             out.lease_ms = v;
             named.push("transport/link/tx/lease");
         }
+        // R2925 — the queue sizes, each refused outside upstream's `1..=16` at
+        // its own key, as upstream's config validator refuses the section.
+        for (path, _, byte) in TX_QUEUE_SIZE_KEYS {
+            if let Some(v) = want_u64(&doc, path)? {
+                let size = usize::try_from(v).ok().filter(|n| {
+                    (wz_session_core::link::TxQueueShape::MIN_SIZE
+                        ..=wz_session_core::link::TxQueueShape::MAX_SIZE)
+                        .contains(n)
+                });
+                out.tx_queue.sizes[byte as usize] =
+                    size.ok_or_else(|| ConfigIngestError::OutOfRange {
+                        path,
+                        value: v.to_string(),
+                    })?;
+                named.push(path);
+            }
+        }
+        if let Some(v) = want_u64(
+            &doc,
+            "transport/link/tx/queue/congestion_control/drop/wait_before_drop",
+        )? {
+            out.tx_queue.wait_before_drop_us = v;
+            named.push("transport/link/tx/queue/congestion_control/drop/wait_before_drop");
+        }
+        if let Some(v) = want_u64(
+            &doc,
+            "transport/link/tx/queue/congestion_control/block/wait_before_close",
+        )? {
+            out.tx_queue.wait_before_close_us = v;
+            named.push("transport/link/tx/queue/congestion_control/block/wait_before_close");
+        }
         // R311y844 — the ten keys wz already acts on. Read in
         // HONOURED_CONFIG_KEYS order so `named` reports them the way the table
         // lists them.
@@ -7006,6 +7060,46 @@ mod tests {
             (
                 "transport/link/tx/lease",
                 r#"{ "transport": { "link": { "tx": { "lease": 7000 } } } }"#,
+            ),
+            (
+                "transport/link/tx/queue/size/control",
+                r#"{ "transport": { "link": { "tx": { "queue": { "size": { "control": 3 } } } } } }"#,
+            ),
+            (
+                "transport/link/tx/queue/size/real_time",
+                r#"{ "transport": { "link": { "tx": { "queue": { "size": { "real_time": 3 } } } } } }"#,
+            ),
+            (
+                "transport/link/tx/queue/size/interactive_high",
+                r#"{ "transport": { "link": { "tx": { "queue": { "size": { "interactive_high": 3 } } } } } }"#,
+            ),
+            (
+                "transport/link/tx/queue/size/interactive_low",
+                r#"{ "transport": { "link": { "tx": { "queue": { "size": { "interactive_low": 3 } } } } } }"#,
+            ),
+            (
+                "transport/link/tx/queue/size/data_high",
+                r#"{ "transport": { "link": { "tx": { "queue": { "size": { "data_high": 3 } } } } } }"#,
+            ),
+            (
+                "transport/link/tx/queue/size/data",
+                r#"{ "transport": { "link": { "tx": { "queue": { "size": { "data": 3 } } } } } }"#,
+            ),
+            (
+                "transport/link/tx/queue/size/data_low",
+                r#"{ "transport": { "link": { "tx": { "queue": { "size": { "data_low": 3 } } } } } }"#,
+            ),
+            (
+                "transport/link/tx/queue/size/background",
+                r#"{ "transport": { "link": { "tx": { "queue": { "size": { "background": 3 } } } } } }"#,
+            ),
+            (
+                "transport/link/tx/queue/congestion_control/drop/wait_before_drop",
+                r#"{ "transport": { "link": { "tx": { "queue": { "congestion_control": { "drop": { "wait_before_drop": 2000 } } } } } } }"#,
+            ),
+            (
+                "transport/link/tx/queue/congestion_control/block/wait_before_close",
+                r#"{ "transport": { "link": { "tx": { "queue": { "congestion_control": { "block": { "wait_before_close": 6000000 } } } } } } }"#,
             ),
             (
                 "adminspace/enabled",
@@ -8585,6 +8679,22 @@ mod tests {
                 ConfigIngestError::OutOfRange {
                     path: "transport/link/tx/batch_size",
                     value: "65536".into(),
+                },
+            ),
+            (
+                // R2925 — upstream's `QueueSizeConf` admits `1..=16`, and
+                // refuses the section otherwise; both edges.
+                r#"{ "transport": { "link": { "tx": { "queue": { "size": { "data": 0 } } } } } }"#,
+                ConfigIngestError::OutOfRange {
+                    path: "transport/link/tx/queue/size/data",
+                    value: "0".into(),
+                },
+            ),
+            (
+                r#"{ "transport": { "link": { "tx": { "queue": { "size": { "real_time": 17 } } } } } }"#,
+                ConfigIngestError::OutOfRange {
+                    path: "transport/link/tx/queue/size/real_time",
+                    value: "17".into(),
                 },
             ),
         ] {
