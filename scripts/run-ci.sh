@@ -11481,6 +11481,12 @@ layer_c1bz_docs_resolve() {
     # against the commits since `1b7cb13c` named exactly one, R2941's link
     # from a public entrypoint's doc to the private `stage_link_priority_band`,
     # now a code span; the same command then read 485.
+    # R2946 — wz-session-core 513 -> 512, by removal, and diffed rather than
+    # counted: the BlockFirst rewrite of `QosLevel::with_congestion`'s doc
+    # dropped its link to the private `Self::NODROP_BIT`. The links the round
+    # added (`CongestionControl::from_flags`, and two rewordings of an existing
+    # `CongestionControl` link) resolve, and none of the 512 errors this lane's
+    # command printed at 607bf23b falls on a line the round added.
     budget="
         wz:2
         wz-ap-demo:25
@@ -11492,7 +11498,7 @@ layer_c1bz_docs_resolve() {
         wz-routing-graph:5
         wz-runtime-coop:12
         wz-runtime-tokio:485
-        wz-session-core:513
+        wz-session-core:512
         wz-session-lwip:4
         wz-switchboard-codegen:8
         zenoh-pico-sys:3
