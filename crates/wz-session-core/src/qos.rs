@@ -146,17 +146,50 @@ pub enum CongestionControl {
     /// `Z_CONGESTION_CONTROL_BLOCK = 1`. Producer blocks on
     /// congestion rather than dropping; nodrop bit set.
     Block,
+    /// R2946 (open-debt item 403) — zenoh's third strategy, which zenoh-pico
+    /// does not have: block for the FIRST message sent this way while it is in
+    /// flight, and drop the ones that find it still in flight
+    /// (`commons/zenoh-protocol/src/core/mod.rs` @ `BlockFirst = 2,`). It has
+    /// its own wire encoding — the `F` flag (bit 5) with `nodrop` clear
+    /// (`commons/zenoh-protocol/src/network/mod.rs` @
+    /// `CongestionControl::BlockFirst => inner |= Self::F_FLAG,`) — so a
+    /// two-variant enum could neither send it nor say what it had received.
+    BlockFirst,
 }
 
 impl CongestionControl {
-    /// Wire-side `nodrop` bit value (0 for Drop, 1 for Block) that
-    /// the qos packed byte's bit 3 carries. Named `wire_bit` rather
-    /// than `wire_byte` to keep the boolean semantics legible at the
-    /// call site in `RequestQueryBuilder::request_qos_typed`.
-    pub const fn wire_bit(self) -> u8 {
+    /// The `nodrop` flag (qos byte bit 3, upstream's `D_FLAG`): set for
+    /// `Block` alone.
+    pub const fn nodrop_flag(self) -> bool {
+        matches!(self, Self::Block)
+    }
+
+    /// The block-first flag (qos byte bit 5, upstream's `F_FLAG`): set for
+    /// `BlockFirst` alone, with `nodrop` clear.
+    pub const fn block_first_flag(self) -> bool {
+        matches!(self, Self::BlockFirst)
+    }
+
+    /// Decode the two congestion flags the way upstream's
+    /// `get_congestion_control` does: `nodrop` wins whatever the block-first
+    /// flag says, the block-first flag alone is `BlockFirst`, neither is `Drop`
+    /// (`commons/zenoh-protocol/src/network/mod.rs` @
+    /// `(false, true) => CongestionControl::BlockFirst,`).
+    pub const fn from_flags(nodrop: bool, block_first: bool) -> Self {
+        match (nodrop, block_first) {
+            (true, _) => Self::Block,
+            (false, true) => Self::BlockFirst,
+            (false, false) => Self::Drop,
+        }
+    }
+
+    /// Upstream's variant name, for a reader that renders the field
+    /// (`crate::dissect`'s QoS walker).
+    pub const fn name(self) -> &'static str {
         match self {
-            Self::Drop => 0,
-            Self::Block => 1,
+            Self::Drop => "Drop",
+            Self::Block => "Block",
+            Self::BlockFirst => "BlockFirst",
         }
     }
 }
@@ -181,7 +214,31 @@ mod tests {
         assert_eq!(Priority::DataLow.wire_byte(), 6);
         assert_eq!(Priority::Background.wire_byte(), 7);
 
-        assert_eq!(CongestionControl::Drop.wire_bit(), 0);
-        assert_eq!(CongestionControl::Block.wire_bit(), 1);
+        assert!(!CongestionControl::Drop.nodrop_flag());
+        assert!(CongestionControl::Block.nodrop_flag());
+        assert!(!CongestionControl::BlockFirst.nodrop_flag());
+        assert!(CongestionControl::BlockFirst.block_first_flag());
+        assert!(!CongestionControl::Block.block_first_flag());
+        assert!(!CongestionControl::Drop.block_first_flag());
+    }
+
+    /// R2946 — every variant round-trips through its two flags, and the
+    /// fourth flag pair (both set) decodes as upstream decodes it: `Block`.
+    #[test]
+    fn congestion_flags_round_trip_and_nodrop_wins() {
+        for cc in [
+            CongestionControl::Drop,
+            CongestionControl::Block,
+            CongestionControl::BlockFirst,
+        ] {
+            assert_eq!(
+                CongestionControl::from_flags(cc.nodrop_flag(), cc.block_first_flag()),
+                cc
+            );
+        }
+        assert_eq!(
+            CongestionControl::from_flags(true, true),
+            CongestionControl::Block
+        );
     }
 }

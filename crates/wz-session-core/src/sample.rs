@@ -244,6 +244,11 @@ impl QosLevel {
     const PRIORITY_MASK: u8 = 0x07; // bits 0-2
     const NODROP_BIT: u8 = 1 << 3; // bit 3 — set when congestion == Block
     const EXPRESS_BIT: u8 = 1 << 4; // bit 4
+                                    // R2946 (open-debt item 403) — bit 5, upstream's `QoSType::F_FLAG`: set
+                                    // when congestion == BlockFirst, with `nodrop` clear. zenoh-pico has no
+                                    // such bit (its `_z_n_qos_create` stops at bit 4), which is where the
+                                    // two-bit reading this layout used to state came from.
+    const BLOCK_FIRST_BIT: u8 = 1 << 5;
 
     /// Express flag (zenoh-pico `_Z_N_QOS_IS_EXPRESS_FLAG = 1 << 4`,
     /// `vendor/zenoh-pico/include/zenoh-pico/protocol/definitions/network.h`
@@ -257,12 +262,14 @@ impl QosLevel {
     /// [`Self::with_congestion`], and the congestion sibling of
     /// [`Self::priority`] / [`Self::is_express`] — the three unpackers now cover
     /// all three packed sub-fields.
+    ///
+    /// R2946 — the sub-field is TWO bits (`nodrop` and block-first), decoded by
+    /// [`crate::qos::CongestionControl::from_flags`] as upstream decodes them.
     pub const fn congestion(&self) -> crate::qos::CongestionControl {
-        if (self.raw & Self::NODROP_BIT) != 0 {
-            crate::qos::CongestionControl::Block
-        } else {
-            crate::qos::CongestionControl::Drop
-        }
+        crate::qos::CongestionControl::from_flags(
+            (self.raw & Self::NODROP_BIT) != 0,
+            (self.raw & Self::BLOCK_FIRST_BIT) != 0,
+        )
     }
 
     /// R311y255 — merge a typed [`crate::qos::Priority`] into the priority
@@ -276,12 +283,17 @@ impl QosLevel {
     }
 
     /// R311y255 — merge a typed [`crate::qos::CongestionControl`] into the
-    /// `nodrop` bit (3), PRESERVING the priority + express bits. `wire_bit()` is
-    /// 0 or 1, so multiplying by [`Self::NODROP_BIT`] lands it in position
-    /// without re-stating the shift.
+    /// `nodrop` bit (3), PRESERVING the priority + express bits.
+    ///
+    /// R2946 — and the block-first bit (5): both congestion flags are cleared
+    /// and the one the strategy names is set, as upstream's
+    /// `set_congestion_control` does, so re-stamping `Block` over a
+    /// `BlockFirst` byte cannot leave both set.
     pub const fn with_congestion(self, congestion: crate::qos::CongestionControl) -> Self {
         Self {
-            raw: (self.raw & !Self::NODROP_BIT) | (congestion.wire_bit() * Self::NODROP_BIT),
+            raw: (self.raw & !(Self::NODROP_BIT | Self::BLOCK_FIRST_BIT))
+                | ((congestion.nodrop_flag() as u8) * Self::NODROP_BIT)
+                | ((congestion.block_first_flag() as u8) * Self::BLOCK_FIRST_BIT),
         }
     }
 
@@ -1100,7 +1112,7 @@ mod tests {
     /// completes the trio with `priority()` / `is_express()`; a set express bit
     /// must not be misread as nodrop (and vice versa).
     #[test]
-    fn qos_level_congestion_unpacks_only_the_nodrop_bit() {
+    fn qos_level_congestion_unpacks_the_nodrop_and_block_first_bits() {
         use crate::qos::CongestionControl;
         // express set, nodrop clear -> Drop (bit 4 must not leak into bit 3).
         assert_eq!(
@@ -1112,8 +1124,41 @@ mod tests {
             QosLevel::from_raw(0b0000_1000).congestion(),
             CongestionControl::Block
         );
+        // R2946 — block-first alone -> BlockFirst; with nodrop too -> Block
+        // (upstream's `(true, _)` arm).
+        assert_eq!(
+            QosLevel::from_raw(0b0010_0000).congestion(),
+            CongestionControl::BlockFirst
+        );
+        assert_eq!(
+            QosLevel::from_raw(0b0010_1000).congestion(),
+            CongestionControl::Block
+        );
         // The wire DEFAULT byte is Drop.
         assert_eq!(QosLevel::DEFAULT.congestion(), CongestionControl::Drop);
+    }
+
+    /// R2946 — `with_congestion` packs each strategy into upstream's byte and
+    /// clears the OTHER flag, so re-stamping never leaves both bits set; and
+    /// it leaves priority + express alone.
+    #[test]
+    fn qos_level_with_congestion_packs_upstreams_two_flags() {
+        use crate::qos::{CongestionControl, Priority};
+        let base = QosLevel::from_parts(Priority::RealTime, CongestionControl::Drop, true);
+        assert_eq!(base.raw, 0x11);
+        assert_eq!(base.with_congestion(CongestionControl::Block).raw, 0x19);
+        assert_eq!(
+            base.with_congestion(CongestionControl::BlockFirst).raw,
+            0x31
+        );
+        let restamped = base
+            .with_congestion(CongestionControl::BlockFirst)
+            .with_congestion(CongestionControl::Block);
+        assert_eq!(
+            restamped.raw, 0x19,
+            "BlockFirst's flag must not survive a Block"
+        );
+        assert_eq!(restamped.with_congestion(CongestionControl::Drop).raw, 0x11);
     }
 
     #[test]

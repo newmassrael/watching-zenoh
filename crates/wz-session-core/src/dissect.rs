@@ -1165,18 +1165,19 @@ fn zbuf_body_walker(
 /// | `target` | ⚠ PARTIAL — [`crate::query_mode::QueryTarget`] | `zenoh-codec` `network/request.rs:59-67` |
 /// | `queryable_info` | [`crate::queryable_info`] | `zenoh-codec` `network/declare.rs:562-578` |
 ///
-/// ⚠ TWO of these read a value this tree's own typed enum CANNOT NAME, and
+/// ⚠ ONE of these (two until R2946) reads a value this tree's own typed enum CANNOT NAME, and
 /// the walker follows the WIRE rather than the enum — an observer that
 /// re-rendered a peer's bytes through a narrower vocabulary would report a
 /// message nobody sent:
 ///
-/// * congestion has THREE states upstream — `Drop`, `Block`, and
-///   `BlockFirst` at bit 5 (`QoSType::{D_FLAG, E_FLAG, F_FLAG}`,
-///   `get_congestion_control`'s `(false, true)` arm). This tree's
-///   [`crate::qos::CongestionControl`] has two, so a `BlockFirst` byte
-///   decodes here as `BlockFirst` and through `QosLevel::congestion()` as
-///   `Drop`. `a_qos_byte_that_blocks_only_the_first_is_read_as_neither_drop_nor_block`
-///   pins that divergence so it reds on the round the product closes it.
+/// * (closed, R2946 / open-debt item 403) congestion has THREE states
+///   upstream — `Drop`, `Block`, and `BlockFirst` at bit 5
+///   (`QoSType::{D_FLAG, E_FLAG, F_FLAG}`, `get_congestion_control`'s
+///   `(false, true)` arm). [`crate::qos::CongestionControl`] used to have two,
+///   so a `BlockFirst` byte decoded here as `BlockFirst` and through
+///   `QosLevel::congestion()` as `Drop`; it has three now, and the walker
+///   delegates to it. `a_qos_byte_that_blocks_only_the_first_is_read_as_neither_drop_nor_block`
+///   pins that the two readers AGREE.
 /// * `target` has three values upstream and `QueryTarget` carries the two
 ///   that a wz `get` can ASK for; `BestMatching` (0) is upstream's DEFAULT
 ///   and omitted from the wire when unset, so a capture from any other
@@ -1286,13 +1287,11 @@ fn read_qos_z64(value: u64, span: Span) -> Option<Vec<Field>> {
     let priority = crate::qos::Priority::from_wire((value & 0x07) as u8);
     // Upstream's `get_congestion_control` in its own order: `D` set means
     // `Block` whatever `F` says, `F` alone means `BlockFirst`, neither means
-    // `Drop`. `crate::qos::CongestionControl` cannot name the third, so this
-    // is a `&str` from the WIRE rather than a delegation — see the module doc.
-    let congestion = match (value & D_FLAG != 0, value & F_FLAG != 0) {
-        (true, _) => "Block",
-        (false, true) => "BlockFirst",
-        (false, false) => "Drop",
-    };
+    // `Drop`. R2946 (open-debt item 403) — the product's type names all three
+    // now, so the walker delegates to its decoder rather than keeping a second
+    // table that could drift from it.
+    let congestion =
+        crate::qos::CongestionControl::from_flags(value & D_FLAG != 0, value & F_FLAG != 0).name();
     let mut out = alloc::vec![
         label("priority", span, priority.name()),
         label("congestion", span, congestion),
@@ -7384,7 +7383,7 @@ mod tests {
         );
     }
 
-    /// The three-way congestion field, and the DIVERGENCE it pins.
+    /// The three-way congestion field.
     ///
     /// Upstream congestion is TWO bits: `D_FLAG` (3) means `Block` whatever
     /// else is set, and `F_FLAG` (5) ALONE means `BlockFirst` — block for the
@@ -7392,14 +7391,13 @@ mod tests {
     /// (`commons/zenoh-protocol/src/network/mod.rs`, `QoSType::
     /// get_congestion_control`, whose `(false, true)` arm is that value).
     ///
-    /// This tree's [`crate::qos::CongestionControl`] has TWO variants, so
-    /// `QosLevel::congestion()` reads bit 3 and nothing else: it calls this
-    /// byte `Drop`. The walker follows the WIRE, so it says `BlockFirst`, and
-    /// the two disagreeing is the point of this test — an observer that
-    /// re-rendered a peer's bytes through the narrower vocabulary would report
-    /// a publisher that drops when it does not. When the product gains the
-    /// third variant this test REDS, which is the round to delete the second
-    /// half of it.
+    /// Until R2946 this pinned a DIVERGENCE: the product's
+    /// [`crate::qos::CongestionControl`] had two variants, so
+    /// `QosLevel::congestion()` called this byte `Drop` while the walker said
+    /// `BlockFirst`. The product gained the third variant (open-debt item 403),
+    /// the divergence assertion redded as it said it would, and it now pins
+    /// the opposite — that the product's decoder and the walker AGREE, which a
+    /// regression of either reader breaks.
     #[test]
     fn a_qos_byte_that_blocks_only_the_first_is_read_as_neither_drop_nor_block() {
         // Data(5) | F_FLAG(1<<5), with bit 3 CLEAR — the arm a one-bit reading
@@ -7413,11 +7411,8 @@ mod tests {
         );
         assert_eq!(
             crate::sample::QosLevel::from_raw(0x25).congestion(),
-            crate::qos::CongestionControl::Drop,
-            "this pins the DIVERGENCE: the product's own decoder cannot name \
-             BlockFirst, so it reads this byte as Drop. If this line reds, \
-             `crate::qos::CongestionControl` gained the third variant — \
-             delete this assertion and delegate the walker to it",
+            crate::qos::CongestionControl::BlockFirst,
+            "the product's own decoder names the byte the walker names",
         );
         // The CONTROL that says bit 3 still dominates, which is upstream's
         // `(true, _)` arm and not a symmetry a reader would guess.

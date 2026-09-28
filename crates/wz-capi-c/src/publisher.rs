@@ -212,18 +212,42 @@ pub extern "C" fn z_locality_default() -> zc_locality_t {
 
 /// zenoh-c's `z_congestion_control_t` as wz's typed [`CongestionControl`].
 ///
-/// `BLOCK_FIRST` maps to `Block`: the packed QoS byte carries a single `nodrop`
-/// bit (`_z_n_qos_create`, pico `network.h:86`), so "block only the first" has
-/// no distinct wire encoding to project onto. An out-of-range value takes
-/// upstream's default rather than panicking, matching the permissive-decode
-/// spirit of [`Priority::from_wire`].
+/// R2946 (open-debt item 403) — `BLOCK_FIRST` maps to `BlockFirst`, as
+/// upstream's `From<z_congestion_control_t>` does
+/// (`zenoh-c/src/commons.rs` @ `z_congestion_control_t::BLOCK_FIRST => CongestionControl::BlockFirst,`).
+/// This used to map it to `Block` on the premise that the QoS byte has a single
+/// `nodrop` bit — true of zenoh-pico's byte, false of zenoh's, which encodes
+/// `BlockFirst` in a bit of its own. The constant exists only in the
+/// unstable-API arm, as upstream's enum variant does; in the other arm 2 is not
+/// a value of the type. An out-of-range value takes upstream's default rather
+/// than panicking, matching the permissive-decode spirit of
+/// [`Priority::from_wire`].
 pub(crate) fn congestion_from_c(c: z_congestion_control_t) -> CongestionControl {
     match c {
         Z_CONGESTION_CONTROL_BLOCK => CongestionControl::Block,
         Z_CONGESTION_CONTROL_DROP => CongestionControl::Drop,
-        // BLOCK_FIRST (2) and anything unrecognised.
-        2 => CongestionControl::Block,
+        #[cfg(not(feature = "zenoh-c-no-unstable-api"))]
+        Z_CONGESTION_CONTROL_BLOCK_FIRST => CongestionControl::BlockFirst,
         _ => CongestionControl::Drop,
+    }
+}
+
+/// R2946 — wz's typed [`CongestionControl`] as zenoh-c's value, the inverse of
+/// [`congestion_from_c`] (upstream's `From<CongestionControl>`,
+/// `zenoh-c/src/commons.rs` @ `CongestionControl::BlockFirst => z_congestion_control_t::BLOCK_FIRST,`).
+///
+/// Without the unstable API upstream has no `BLOCK_FIRST` to report, and the
+/// zenoh it is built on decodes the block-first flag alone as `Drop`
+/// (`commons/zenoh-protocol/src/network/mod.rs` @
+/// `(false, true) => CongestionControl::Drop,`), so that arm reports `DROP`.
+pub(crate) fn congestion_to_c(c: CongestionControl) -> z_congestion_control_t {
+    match c {
+        CongestionControl::Block => Z_CONGESTION_CONTROL_BLOCK,
+        CongestionControl::Drop => Z_CONGESTION_CONTROL_DROP,
+        #[cfg(not(feature = "zenoh-c-no-unstable-api"))]
+        CongestionControl::BlockFirst => Z_CONGESTION_CONTROL_BLOCK_FIRST,
+        #[cfg(feature = "zenoh-c-no-unstable-api")]
+        CongestionControl::BlockFirst => Z_CONGESTION_CONTROL_DROP,
     }
 }
 
@@ -877,5 +901,64 @@ mod locality_tests {
                 "z_publisher_options_t.allowed_destination = {c_value} -> {expected:?}",
             );
         }
+    }
+}
+
+/// R2946 (open-debt item 403) — the congestion mapping in both directions,
+/// per ABI arm.
+#[cfg(test)]
+mod congestion_tests {
+    use super::*;
+
+    /// Every value of the arm's enum maps to the variant upstream's `From`
+    /// gives it, and back. The damage this catches is the one it replaced:
+    /// `BLOCK_FIRST => Block` makes the round trip report `BLOCK`.
+    #[test]
+    fn every_c_congestion_value_round_trips_through_the_typed_enum() {
+        #[allow(unused_mut)]
+        let mut arm = vec![
+            (Z_CONGESTION_CONTROL_BLOCK, CongestionControl::Block),
+            (Z_CONGESTION_CONTROL_DROP, CongestionControl::Drop),
+        ];
+        #[cfg(not(feature = "zenoh-c-no-unstable-api"))]
+        arm.push((
+            Z_CONGESTION_CONTROL_BLOCK_FIRST,
+            CongestionControl::BlockFirst,
+        ));
+        for (c, typed) in arm {
+            assert_eq!(congestion_from_c(c), typed, "{c} -> {typed:?}");
+            assert_eq!(congestion_to_c(typed), c, "{typed:?} -> {c}");
+        }
+    }
+
+    /// A `BLOCK_FIRST` publisher option reaches the packed QoS byte as
+    /// upstream's block-first flag (bit 5), `nodrop` clear.
+    #[cfg(not(feature = "zenoh-c-no-unstable-api"))]
+    #[test]
+    fn a_block_first_publisher_option_packs_the_block_first_flag() {
+        let mut o = z_publisher_options_t {
+            encoding: std::ptr::null_mut(),
+            congestion_control: Z_CONGESTION_CONTROL_BLOCK_FIRST,
+            priority: Z_PRIORITY_DATA,
+            is_express: false,
+            reliability: Z_RELIABILITY_RELIABLE,
+            allowed_destination: ZC_LOCALITY_ANY,
+        };
+        // SAFETY: a live local whose owned field is null.
+        let resolved = unsafe { resolve_publisher_options(&mut o) };
+        let qos = resolved.qos.expect("a publisher bundle carries its QoS");
+        assert_eq!(qos.congestion(), CongestionControl::BlockFirst);
+        assert_eq!(qos.raw & 0x28, 0x20, "block-first flag set, nodrop clear");
+    }
+
+    /// Without the unstable API upstream cannot name `BLOCK_FIRST`, and the
+    /// zenoh under it decodes the flag alone as `Drop`.
+    #[cfg(feature = "zenoh-c-no-unstable-api")]
+    #[test]
+    fn a_block_first_sample_reads_as_drop_without_the_unstable_api() {
+        assert_eq!(
+            congestion_to_c(CongestionControl::BlockFirst),
+            Z_CONGESTION_CONTROL_DROP
+        );
     }
 }

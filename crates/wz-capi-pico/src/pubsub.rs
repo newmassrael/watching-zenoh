@@ -2053,9 +2053,16 @@ pub unsafe extern "C" fn z_sample_congestion_control(sample: *const z_loaned_sam
     /// pico `Z_CONGESTION_CONTROL_BLOCK`.
     const Z_CONGESTION_CONTROL_BLOCK: c_int = 1;
     crate::ffi::guard_val(Z_CONGESTION_CONTROL_DROP, || {
+        // R2946 — `BlockFirst` reports DROP, as pico itself would: its QoS byte
+        // decode reads the `nodrop` bit alone (`_z_n_qos_get_congestion_control`),
+        // and zenoh's block-first byte carries `nodrop` clear. Named rather than
+        // left to the wildcard, so the pico ABI's answer is a decision and not
+        // whatever a new variant happened to fall into.
         match sample_qos(sample).map(|q| q.congestion()) {
             Some(wz_runtime_tokio::qos::CongestionControl::Block) => Z_CONGESTION_CONTROL_BLOCK,
-            _ => Z_CONGESTION_CONTROL_DROP,
+            Some(wz_runtime_tokio::qos::CongestionControl::BlockFirst)
+            | Some(wz_runtime_tokio::qos::CongestionControl::Drop)
+            | None => Z_CONGESTION_CONTROL_DROP,
         }
     })
 }

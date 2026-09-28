@@ -36,8 +36,7 @@ use crate::encoding::EncodingState;
 use crate::ffi::guard_val;
 use crate::keyexpr::KeyexprState;
 use crate::publisher::{
-    z_congestion_control_t, z_priority_t, Z_CONGESTION_CONTROL_BLOCK, Z_CONGESTION_CONTROL_DROP,
-    Z_PRIORITY_DATA,
+    z_congestion_control_t, z_priority_t, Z_CONGESTION_CONTROL_BLOCK, Z_PRIORITY_DATA,
 };
 use crate::string::view_string_over;
 
@@ -477,12 +476,14 @@ pub unsafe extern "C" fn z_sample_congestion_control(
 ) -> z_congestion_control_t {
     guard_val(Z_CONGESTION_CONTROL_BLOCK, || {
         // SAFETY: the caller's contract, delegated.
+        // R2946 — through the one typed-to-C mapping, so a `BlockFirst` sample
+        // reports `BLOCK_FIRST` rather than falling into the `Block` default.
         match unsafe { marshal(this_) }
             .and_then(|m| m.qos)
             .map(|qos| qos.congestion())
         {
-            Some(wz_runtime_tokio::qos::CongestionControl::Drop) => Z_CONGESTION_CONTROL_DROP,
-            _ => Z_CONGESTION_CONTROL_BLOCK,
+            Some(congestion) => crate::publisher::congestion_to_c(congestion),
+            None => Z_CONGESTION_CONTROL_BLOCK,
         }
     })
 }
