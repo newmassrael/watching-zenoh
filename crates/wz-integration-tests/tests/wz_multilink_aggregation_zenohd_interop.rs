@@ -86,12 +86,13 @@ const WZ_PEER_ZID_ARG: &str = "70730002";
 
 /// The same zid AS ZENOH RENDERS IT in its adminspace reply.
 ///
-/// zenoh's `ZenohId` Display emits the id's bytes in the REVERSE order wz's
-/// `--zid` hex takes them, and drops the resulting leading zero nibble:
-/// `70 73 00 02` -> `02 00 73 70` -> `2007370`. Pinned as an observed value
-/// rather than recomputed, and paired below with a `whatami:"peer"` selection
-/// so a divergence names itself instead of matching nothing and passing.
-const WZ_PEER_ZID_AS_ZENOH_RENDERS: &str = "2007370";
+/// ZA-3362 — the same string. `--zid` now reads its text as zenoh prints a
+/// `ZenohId`, so zenohd renders the wz peer by the text it was given. Until
+/// ZA-3362 the flag decoded the text per byte and zenoh showed it reversed
+/// (`2007370`). Kept as its own constant, and paired below with a
+/// `whatami:"peer"` selection, so a divergence names itself instead of
+/// matching nothing and passing.
+const WZ_PEER_ZID_AS_ZENOH_RENDERS: &str = WZ_PEER_ZID_ARG;
 
 /// The needle the wz peer emits once it has joined a second physical link onto
 /// an existing session.

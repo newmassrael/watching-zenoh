@@ -548,7 +548,8 @@ fn wz_router_hat_routes_a_client_query_to_a_client_queryable() {
     // composed over real transport for the FIRST time (the query twin of the
     // data-forward E2E above). A queryable CLIENT and a query-issuer CLIENT each
     // dial ONLY the router R, with DISTINCT `--zid`s so they do not collide in R's
-    // mesh graph (the P4 §5.21 query-plane blocker the run-mode flip exposed). R
+    // mesh graph (the P4 §5.21 query-plane blocker the run-mode flip exposed;
+    // ZA-3362 — b0b0b0b0 / a0a0a0a0, was 0b0b0b0b / 0a0a0a0a: no leading 0). R
     // routes the issuer's `Request(Query)` to the queryable's `client_qabls` entry
     // and returns the `Reply` + `ResponseFinal` back down the querier's face. The
     // query ROUTE was UNIT-proven (route_request / forward_response, incl 2-router
@@ -569,7 +570,7 @@ fn wz_router_hat_routes_a_client_query_to_a_client_queryable() {
             "--reply",
             "value-from-router-mesh",
             "--zid",
-            "0b0b0b0b",
+            "b0b0b0b0",
         ],
     );
     // BARRIER (not a race): wait until R has actually INGESTED the queryable's
@@ -604,7 +605,7 @@ fn wz_router_hat_routes_a_client_query_to_a_client_queryable() {
             "--on-query-reply-log",
             "--on-query-final-log",
             "--zid",
-            "0a0a0a0a",
+            "a0a0a0a0",
         ],
     );
 
@@ -741,7 +742,7 @@ fn wz_router_hat_federates_a_query_across_two_routers() {
             "--reply",
             "value-across-two-routers",
             "--zid",
-            "0b0b0b0b",
+            "b0b0b0b0",
         ],
     );
     // BARRIER: wait until R1 (the ISSUER's router) has ingested the queryable's
@@ -781,7 +782,7 @@ fn wz_router_hat_federates_a_query_across_two_routers() {
             "--on-query-reply-log",
             "--on-query-final-log",
             "--zid",
-            "0a0a0a0a",
+            "a0a0a0a0",
         ],
     );
 
@@ -961,7 +962,7 @@ fn wz_router_hat_shares_a_router_across_both_meshes() {
 ///
 /// Topology = the triangle (see `wz_router_hat_shares_a_router_across_both_meshes`):
 /// R1<->R2 routers + a shared peer A, both routers gateways of the peer region.
-/// R2 has the LARGER zid (R1=02020202, R2=03030303), so R2 carries every
+/// R2 has the LARGER zid (R1=20202020, R2=30303030), so R2 carries every
 /// peer-source Push north from a peer linked to both. A CLIENT `Cb` behind R1
 /// subscribes KE; the publisher peer `P` dials BOTH routers, so whichever path its
 /// Push takes into R1 through the peer mesh, the forwarder links to R2 and R1
@@ -979,11 +980,14 @@ fn wz_router_hat_shares_a_router_across_both_meshes() {
 fn wz_router_hat_non_master_defers_a_client_double_delivery() {
     const KE: &str = "demo/key";
     // FIXED zids (honoured by --router-hat, R311 fix): the carrier is the LARGEST
-    // gateway, so R2 (03030303) must be larger than R1 (02020202) for R1 to defer.
+    // gateway, so R2 (30303030) must be larger than R1 (20202020) for R1 to defer.
     // Unpinned zids are random (R2883) and would flip the order per run.
+    // ZA-3362 — these were 03030303 / 02020202; zenoh refuses a leading 0 in a
+    // zid, which `--zid` now does too. Each value repeats one byte, so the
+    // order holds whichever way the bytes are read.
     let (mut r2_guard, mut r2_reader, p_r2) = spawn_router_hat(
         "router-hat-2",
-        &["--router-hat", "127.0.0.1:0", "--zid", "03030303"],
+        &["--router-hat", "127.0.0.1:0", "--zid", "30303030"],
     );
     let addr_r2 = format!("127.0.0.1:{p_r2}");
     let (mut r1_guard, mut r1_reader, p_r1) = spawn_router_hat(
@@ -992,7 +996,7 @@ fn wz_router_hat_non_master_defers_a_client_double_delivery() {
             "--router-hat",
             "127.0.0.1:0",
             "--zid",
-            "02020202",
+            "20202020",
             "--connect",
             &addr_r2,
         ],
@@ -1023,7 +1027,7 @@ fn wz_router_hat_non_master_defers_a_client_double_delivery() {
     //    populates R1's `client_subs`, the precondition for the client-delivery defer.
     let (mut cb_guard, mut cb_reader) = spawn_session(
         "client-cb",
-        &["--connect", &addr_r1, "--key", KE, "--zid", "0c0c0c0c"],
+        &["--connect", &addr_r1, "--key", KE, "--zid", "c0c0c0c0"],
     );
     let learned_client = wait_for_substring(
         &mut r1_reader,

@@ -473,7 +473,7 @@ fn pico_put_routes_through_zenohd_to_wz_unixpipe_acceptor_subscriber() {
 /// listener. The two demo instances MUST present DISTINCT zids: wz-ap-demo hardwires
 /// zid `0x01020304`, and a router rejects a second session bearing a zid it already
 /// holds ("session open failed: Terminal") — transport-independent, NOT a unixpipe
-/// limitation — so the publisher runs under `--zid 0a0b0c0d`. Sub-first ordering
+/// limitation — so the publisher runs under `--zid a0b0c0d`. Sub-first ordering
 /// installs the route on zenohd before the publisher's burst (deterministic, not a
 /// sleep).
 // wz-proves: transport-link-unixpipe wz->zenohd
@@ -487,7 +487,9 @@ fn wz_two_clients_route_a_put_via_one_zenohd_unixpipe_listener() {
     let publish_key = "demo/unixpipe/mc-put";
     let publish_value = "hello-multi-client-over-unixpipe";
     // Distinct from wz-ap-demo's hardwired 0x01020304 so zenohd holds BOTH sessions.
-    let publisher_zid = "0a0b0c0d";
+    // ZA-3362 — no leading 0 (it was `0a0b0c0d`): `--zid` reads a zid as zenoh
+    // prints one, and zenoh refuses a leading 0.
+    let publisher_zid = "a0b0c0d";
 
     // R311y412 — the tcp port is DISCOVERED from zenohd's own announcement rather
     // than reserved-then-released (the release opens a window another process can win,

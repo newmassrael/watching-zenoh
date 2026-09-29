@@ -903,7 +903,7 @@ fn wz_peer_reliable_quic_dialer_never_joins_the_datagram_mesh() {
     );
 }
 
-/// Leg 7 (REGRESSION, R311y411) — a peer whose zid ends in a ZERO BYTE still
+/// Leg 7 (REGRESSION, R311y411) — a peer whose zid ended in a ZERO BYTE still
 /// recognises itself, and still routes data OUT.
 ///
 /// This is the deterministic form of a flake that cost 6 failures in 250 runs of
@@ -917,12 +917,18 @@ fn wz_peer_reliable_quic_dialer_never_joins_the_datagram_mesh() {
 /// data never left the box (5 of the 6 failures), or the router tier counted 3
 /// nodes and skipped the `(2 node(s))` witness entirely (the 6th).
 ///
-/// `--zid 70728300` pins that shape with no lottery: the trailing zero is
-/// explicit. RED against a `Zid::from_slice` that keeps the caller's length
-/// (phantom node present, `peak 3 node(s)`, pico receives NOTHING); GREEN once the
-/// constructor canonicalises. The `peak 2` assertion is what binds this leg to the
-/// zid fix rather than to the data plane in general — leg 5 already covers the
-/// latter with a port-derived zid.
+/// `--zid 837270` pins the identity: the value whose 4-byte form `70 72 83 00`
+/// ended in the zero byte. ZA-3362 changed what this pin can reach. The flag was
+/// `70728300` and was decoded per byte into exactly that untrimmed 4-byte slice,
+/// so the leg was RED against a `Zid::from_slice` that keeps the caller's length
+/// (phantom node present, `peak 3 node(s)`, pico receives NOTHING) and GREEN once
+/// the constructor canonicalised. `--zid` now reads the text as zenoh does, and
+/// that parse always yields canonical bytes (`70 72 83` here), so the flag can no
+/// longer hand `from_slice` a trailing zero. The leg now pins the IDENTITY zenoh
+/// saw before, not the discriminator; `wz-routing-graph`'s
+/// `zid_from_slice_canonicalises_trailing_zero_bytes` holds that property, and
+/// the port-derived zid is the one production route that still reaches it. The
+/// `peak 2` assertion still fails on a phantom self node from any cause.
 // wz-proves: routing-peer zenohd->wz partial
 #[test]
 #[ignore = "binary-dep e2e (wz-ap-demo --features routing-peer,quic-datagram + zenohd peer + zenoh-pico z_sub); Layer Z runs via --ignored"]
@@ -931,12 +937,13 @@ fn wz_peer_with_a_trailing_zero_zid_still_routes_data_out() {
     let z_sub = zenoh_pico_cli_binary("z_sub");
     let (cert_path, key_path, _cleanup) = write_wz_cert("z0");
 
-    // The zid whose LAST byte is zero — the canonicalisation discriminator.
+    // ZA-3362 — was `70728300`; the same identity, now in zenoh's spelling. It
+    // no longer reaches `Zid::from_slice` untrimmed; see the leg's doc.
     let (mut wz_guard, mut wz_reader, udp_port) = spawn_wz_peer_quic_datagram(
         &demo,
         &cert_path,
         &key_path,
-        &["--zid", "70728300", "--publish", KEYEXPR],
+        &["--zid", "837270", "--publish", KEYEXPR],
     );
 
     let wz_datagram_addr = format!("127.0.0.1:{udp_port}");

@@ -197,11 +197,14 @@ fn wz_peer_admin_subscriber_introspection_over_the_wire() {
 /// a non-empty `clients` would also be satisfied by the wrong zid landing there.
 const CLIENT_B_ZID_ARG: &str = "70730003";
 
-/// The same zid AS THE ADMIN REPLY RENDERS IT. zenoh's `ZenohId` Display emits
-/// the bytes in the REVERSE order `--zid` takes them and drops the resulting
-/// leading zero nibble: `70 73 00 03` -> `03 00 73 70` -> `3007370`. The rule is
-/// `wz_multilink_aggregation_zenohd_interop`'s, applied to a second value.
-const CLIENT_B_ZID_RENDERED: &str = "3007370";
+/// The same zid AS THE ADMIN REPLY RENDERS IT.
+///
+/// ZA-3362 — the same string. `--zid` now reads its text as zenoh prints a
+/// `ZenohId`, so the reply names B by the text it was given. Until ZA-3362 the
+/// flag decoded the text per byte and the reply showed it reversed
+/// (`3007370`). The value is not a palindrome, so a render that reversed the
+/// bytes would still red; the rule is `wz_multilink_aggregation_zenohd_interop`'s.
+const CLIENT_B_ZID_RENDERED: &str = CLIENT_B_ZID_ARG;
 
 /// R2687 (§5.23 `adminspace-introspection-handlers`) — a CLIENT-declared
 /// subscription is reported in the `clients` bucket of the peer's admin

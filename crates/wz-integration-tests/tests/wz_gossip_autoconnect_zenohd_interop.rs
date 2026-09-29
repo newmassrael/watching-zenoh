@@ -152,7 +152,9 @@ const ROUTER_ID: &str = "ee";
 /// wz's pinned zid. Only the strategy pair (legs 4/5) depends on its ORDER — it
 /// sits below [`HIGH_PEER_ID`] there so `greater-zid` must decline what `always`
 /// dials. The other legs run the default `always`, which ignores zids entirely.
-const WZ_ZID: &str = "02";
+/// ZA-3362: `--zid` reads the text as zenoh does, and zenoh refuses a leading 0,
+/// so this is `2` (it was `02`). The wire id is the same one byte, `0x02`.
+const WZ_ZID: &str = "2";
 /// A third-party id ABOVE [`WZ_ZID`], for the strategy pair.
 const HIGH_PEER_ID: &str = "ff";
 /// [`HIGH_PEER_ID`] as wz LOGS it (no leading zero to pad here).

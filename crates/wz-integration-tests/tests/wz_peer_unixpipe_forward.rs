@@ -15,7 +15,7 @@
 //! longer REQUIRES `--zid`; this leg still pins one for its own determinism.
 //!
 //! Topology: one `--peer unixpipe/<base> --zid 70720001` + a `--key` consumer
-//! (`--zid 0a000001`) + a `--publish` producer (`--zid 0a000002`), all distinct
+//! (`--zid a0000001`) + a `--publish` producer (`--zid a0000002`), all distinct
 //! processes. The two clients carry DISTINCT `--zid`s (belt-and-suspenders across
 //! the peer's face keying — always safe). Neither client can hear the other directly
 //! (each holds a single unixpipe link to the peer); the consumer firing its
@@ -141,7 +141,8 @@ fn wz_peer_forwards_a_put_between_two_unixpipe_clients() {
     let fifo_ready = wait_for_unixpipe_request_fifo(&base, Duration::from_secs(5));
 
     // ── consumer: declare a routed subscriber over its own unixpipe link (--zid
-    //    0a000001, distinct from the producer so the peer holds two faces). ──
+    //    a0000001, distinct from the producer so the peer holds two faces;
+    //    ZA-3362: no leading 0, which zenoh refuses in a zid). ──
     let consumer_stderr = tempfile::tempfile().expect("tempfile for consumer stderr");
     let consumer_writer = consumer_stderr
         .try_clone()
@@ -155,7 +156,7 @@ fn wz_peer_forwards_a_put_between_two_unixpipe_clients() {
             .arg("--key")
             .arg(KEYEXPR)
             .arg("--zid")
-            .arg("0a000001")
+            .arg("a0000001")
             .env("RUST_LOG", "info")
             .stdout(Stdio::null())
             .stderr(Stdio::from(consumer_writer))
@@ -176,7 +177,7 @@ fn wz_peer_forwards_a_put_between_two_unixpipe_clients() {
     let face0 = wait_for_substring(&mut peer_reader, "face 0 UP", Duration::from_secs(10));
 
     // ── producer: publish a Put on the same keyexpr over its OWN unixpipe link
-    //    (--zid 0a000002 = the SECOND concurrent client). ──
+    //    (--zid a0000002 = the SECOND concurrent client). ──
     let producer_stderr = tempfile::tempfile().expect("tempfile for producer stderr");
     let producer_writer = producer_stderr
         .try_clone()
@@ -192,7 +193,7 @@ fn wz_peer_forwards_a_put_between_two_unixpipe_clients() {
             .arg("--value")
             .arg("forwarded-payload")
             .arg("--zid")
-            .arg("0a000002")
+            .arg("a0000002")
             .env("RUST_LOG", "info")
             .stdout(Stdio::null())
             .stderr(Stdio::from(producer_writer))

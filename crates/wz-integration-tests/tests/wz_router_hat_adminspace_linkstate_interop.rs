@@ -207,7 +207,8 @@ fn wz_router_hat_federates_admin_linkstate_across_two_routers() {
             "--on-query-reply-log",
             "--on-query-final-log",
             "--zid",
-            "0a0a0a0a",
+            // ZA-3362 — no leading 0: zenoh refuses one in a zid.
+            "a0a0a0a0",
         ],
     );
 
@@ -384,16 +385,13 @@ fn wz_router_hat_reports_declaration_sources_per_tier_across_two_routers() {
         });
     }
 
-    // The CLIENT-bucket source: a subscriber client of R2. The two spellings are
-    // BOTH pinned because they differ: `zid_to_zenoh_hex` reads the wire bytes
-    // little-endian into a `u128` and prints it big-endian, so the admin body
-    // reverses them. This fixture is chosen so neither end of that is guessed —
-    // the bytes are not a palindrome, so a render that skipped the reversal
-    // would show `1b0b0b0b` reversed and red; and the leading byte of the
-    // PRINTED form is `1b`, so the single-leading-zero strip in that same
-    // function never engages and cannot silently absorb a digit.
-    const CLIENT_ZID_WIRE: &str = "0b0b0b1b";
-    const CLIENT_ZID_HEX: &str = "1b0b0b0b";
+    // The CLIENT-bucket source: a subscriber client of R2. ZA-3362 — `--zid`
+    // reads the text as zenoh prints a `ZenohId`, so the admin body names the
+    // client by the SAME string it was given. Until ZA-3362 the flag decoded
+    // the text per byte and this fixture needed two spellings (wire `0b0b0b1b`,
+    // printed `1b0b0b0b`); the one below is now both. It is not a palindrome,
+    // so a render that reversed the bytes would still red.
+    const CLIENT_ZID: &str = "1b0b0b0b";
     let (mut sub_at_r2_guard, _sub_at_r2_reader) = spawn_session(
         "sub-at-r2",
         &[
@@ -402,7 +400,7 @@ fn wz_router_hat_reports_declaration_sources_per_tier_across_two_routers() {
             "--key",
             "wz/introspect/at-r2",
             "--zid",
-            CLIENT_ZID_WIRE,
+            CLIENT_ZID,
         ],
     );
     // The ROUTERS-bucket source: a subscriber client of R1, which R2 can only
@@ -415,7 +413,7 @@ fn wz_router_hat_reports_declaration_sources_per_tier_across_two_routers() {
             "--key",
             "wz/introspect/via-r1",
             "--zid",
-            "0c0c0c0c",
+            "c0c0c0c0",
         ],
     );
 
@@ -451,7 +449,8 @@ fn wz_router_hat_reports_declaration_sources_per_tier_across_two_routers() {
             "--on-query-reply-log",
             "--on-query-final-log",
             "--zid",
-            "0a0a0a0a",
+            // ZA-3362 — no leading 0: zenoh refuses one in a zid.
+            "a0a0a0a0",
         ],
     );
     let reply = wait_for_substring(&mut iss_reader, "REPLY RECEIVED", Duration::from_secs(15));
@@ -501,7 +500,7 @@ fn wz_router_hat_reports_declaration_sources_per_tier_across_two_routers() {
     });
     assert_eq!(
         at_r2,
-        format!("{{\"routers\":[],\"peers\":[],\"clients\":[\"{CLIENT_ZID_HEX}\"]}}"),
+        format!("{{\"routers\":[],\"peers\":[],\"clients\":[\"{CLIENT_ZID}\"]}}"),
         "a client's declaration belongs in the `clients` bucket, named by the \
          face's zid — a Client joins no link-state graph, so a body that read the \
          source's role off the graph would have nothing to put here"

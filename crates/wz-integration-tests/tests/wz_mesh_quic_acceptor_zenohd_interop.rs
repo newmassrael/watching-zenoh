@@ -87,8 +87,9 @@
 //!      remote sub over quic, and its Put routes wz --quic--> zenohd --tcp--> the
 //!      pico subscriber (`Received ('demo/key'`) — data OUT of wz over the link.
 //!   6. [`wz_peer_with_a_trailing_zero_zid_still_routes_data_out_over_quic`] — the
-//!      data-OUT leg with a zid ending in a ZERO BYTE, the Zid-canonicalisation
-//!      regression this lane once exposed.
+//!      data-OUT leg pinned to the identity whose untrimmed form ended in a ZERO
+//!      BYTE, the Zid-canonicalisation regression this lane once exposed (since
+//!      ZA-3362 `--zid` cannot deliver the untrimmed form; see the leg's doc).
 //!
 //! ## The discriminator (RED+TWIN) — binds to the R311y406 cert-threading seam
 //!
@@ -687,9 +688,17 @@ fn wz_peer_publishes_data_across_a_quic_mesh_link_to_pico() {
 /// pinned it. This closes that asymmetry: the same defect, over the reliable quic
 /// mesh link this file owns.
 ///
-/// `--zid 70728300` makes it deterministic. RED against a `Zid::from_slice` that keeps
-/// the caller's length: phantom node, `peak 3 node(s)`, and the pico subscriber
-/// receives nothing.
+/// `--zid 837270` pins the identity: the value whose 4-byte form `70 72 83 00`
+/// ended in the zero byte. ZA-3362 changed what this pin can reach. The flag was
+/// `70728300` and was decoded per byte into exactly that untrimmed 4-byte slice,
+/// so the leg was RED against a `Zid::from_slice` that keeps the caller's length
+/// (phantom node, `peak 3 node(s)`, pico receives nothing). `--zid` now reads the
+/// text as zenoh does, and that parse always yields canonical bytes (`70 72 83`
+/// here). The flag can no longer hand `from_slice` a trailing zero, so this
+/// leg now pins the IDENTITY zenoh saw before, not the
+/// discriminator; `wz-routing-graph`'s
+/// `zid_from_slice_canonicalises_trailing_zero_bytes` holds that property, and
+/// the port-derived zid is the one production route that still reaches it.
 // wz-proves: routing-peer zenohd->wz partial
 #[test]
 #[ignore = "binary-dep e2e (wz-ap-demo --features routing-peer,quic + zenohd peer + zenoh-pico z_sub); Layer Z runs via --ignored"]
@@ -708,7 +717,8 @@ fn wz_peer_with_a_trailing_zero_zid_still_routes_data_out_over_quic() {
             "--quic-key",
             &key_path,
             "--zid",
-            "70728300",
+            // ZA-3362 — was `70728300`; see the leg's doc.
+            "837270",
             "--publish",
             KEYEXPR,
             // R2236 — the same mode every other leg here runs; see
