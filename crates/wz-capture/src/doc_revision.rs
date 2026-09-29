@@ -3622,7 +3622,12 @@ pub const FIELDS_R12_KEYS: &[&str] = &[
 ];
 
 /// What `selected` says about one row at field-document revision 13 — the
-/// words of [`crate::fields_json::RowVerdict`].
+/// words of `crate::fields_json::RowVerdict`.
+///
+/// ⚠ A CODE SPAN, not a doc link: `fields_json` is gated on `dissect`, which is
+/// default-off, while this table is built in every configuration, so a link
+/// resolves only in a build that turns `dissect` on and breaks the default
+/// documentation build (`accessor_reach_census.py` reads it, and it failed).
 ///
 /// ZA-3214 ④. See that type for what each word means and why `undecided` and
 /// `unjudged` are two.
