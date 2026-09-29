@@ -766,7 +766,10 @@ HOST_GATED_CI_TARGETS: dict[str, str] = {
 # +1 R2953 `6335a542`, `a_held_local_query_keeps_its_get_open_identically_on_wz_and_libzenohc`
 # (`api-compat-c`, the session-local held query against libzenohc). 947 + 1 =
 # 948, the value `audit-crossimpl-proof.sh` measured at this round's tree.
-FOREIGN_ADJUDICATOR_LINKS = 948
+# +1 R2954, `orphaned_shm_segments_are_cleaned_up_identically_on_wz_and_libzenohc`
+# (`api-compat-c`, the SHM orphan cleanup against libzenohc). 948 + 1 = 949,
+# measured by the same script at this round's tree.
+FOREIGN_ADJUDICATOR_LINKS = 949
 
 # ── Execution disclosure ────────────────────────────────────────────────────────
 #

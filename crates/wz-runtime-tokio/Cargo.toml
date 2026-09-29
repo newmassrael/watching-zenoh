@@ -792,7 +792,15 @@ session-extcompression = ["wz-session-core/session-extcompression"]
 # pulls memmap2 for the AP POSIX segment (shm_provider). AP-only (no MCU forward
 # -- pico has no SHM). R3a is the inert provider + codec; R3b adds the live swap +
 # the Z_EXT_SHM challenge handshake (session-extshm).
-transport-shm = ["wz-session-core/transport-shm", "dep:memmap2"]
+transport-shm = ["wz-session-core/transport-shm", "posix-shm-segment"]
+# R2954 — the POSIX shm SEGMENT protocol on its own (`posix_shm`: upstream's
+# `{id}.zenoh` naming, 0600 mode, shared advisory lock, and the orphan cleanup
+# that protocol defines), without the SHM transport. The zenoh-c ABI's SHM arm
+# needs the protocol — `zc_cleanup_orphaned_shm_segments` is upstream's cleanup
+# of exactly these segments — and must NOT turn on SHM transport negotiation
+# for its sessions, which is what `transport-shm` also means. It names `libc`
+# itself because the lock is `flock`.
+posix-shm-segment = ["dep:memmap2", "dep:libc"]
 
 # session-extshm — the scoped Z_EXT_SHM establishment handshake (a UNIT capability
 # offer/`&=`, NOT zenoh's full challenge-response); forwards the session-core

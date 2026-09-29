@@ -19453,6 +19453,17 @@ layer_c1cc_api_compat_c() {
         --test-threads=1 \
         --exact a_held_local_query_keeps_its_get_open_identically_on_wz_and_libzenohc \
         || return 1
+    # R2954 — `zc_cleanup_orphaned_shm_segments` on both libraries over the
+    # same planted `/dev/shm` files: an orphaned `{id}.zenoh` goes, a held one
+    # and a non-zenoh file stay. SKIPs on an oracle without the SHM+unstable
+    # arm, where the function does not exist on either side.
+    _runci_guarded_test \
+        "C1cc orphaned_shm_segments_are_cleaned_up_identically_on_wz_and_libzenohc" 1 \
+        cargo test -p wz-integration-tests \
+        --test zenoh_c_shm_orphan_cleanup_twice_and_diff -- --ignored --quiet \
+        --test-threads=1 \
+        --exact orphaned_shm_segments_are_cleaned_up_identically_on_wz_and_libzenohc \
+        || return 1
     # R311y500 — the CROSS-IMPL half, and it is a different question from the
     # three legs above. Those establish that upstream's program LINKS wz and that
     # wz's answers match the real `libzenohc.so`; every byte on their wire was

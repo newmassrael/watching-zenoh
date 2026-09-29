@@ -128,7 +128,10 @@ zenoh-c-no-unstable-api = []
 # an attach is `mmap` — there is no std spelling for a shared read-only view of
 # a file. The dependency is optional and named only here, so the default build's
 # footprint is unchanged, which is what Layer F measures.
-zenoh-c-shared-memory = ["dep:libc"]
+# R2954 — and the runtime's POSIX segment PROTOCOL, without its SHM transport:
+# `zc_cleanup_orphaned_shm_segments` is that protocol's own orphan cleanup, and
+# the transport would turn on SHM negotiation for this ABI's sessions.
+zenoh-c-shared-memory = ["dep:libc", "wz-runtime-tokio/posix-shm-segment"]
 
 [dependencies]
 # R2299 — `mmap`/`munmap` for the SHM client registry's POSIX attach. Optional:

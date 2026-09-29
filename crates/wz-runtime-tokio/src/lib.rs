@@ -1623,7 +1623,9 @@ pub mod quic_config;
 
 /// R2862 — the one POSIX shared-memory segment implementation (upstream's
 /// naming, mode and advisory lock) every wz segment kind is made through.
-#[cfg(feature = "transport-shm")]
+/// R2954 — gated on the segment protocol itself, which `transport-shm` implies
+/// and which the zenoh-c ABI's SHM arm enables without the transport.
+#[cfg(feature = "posix-shm-segment")]
 pub mod posix_shm;
 /// transport-shm — the AP POSIX shared-memory provider (memmap2 over /dev/shm):
 /// `ShmBackedPayload` (owner alloc/write) + `PosixShmResolver` (the reader-side

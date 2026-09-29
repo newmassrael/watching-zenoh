@@ -1633,6 +1633,24 @@ pub unsafe extern "C" fn z_internal_shm_provider_check(
     })
 }
 
+/// Remove the POSIX shm segments no process holds any more (zenoh-c
+/// `zc_cleanup_orphaned_shm_segments`).
+///
+/// R2954 — the segment protocol's own cleanup,
+/// [`wz_runtime_tokio::posix_shm::cleanup_orphaned_segments`]: upstream's rule
+/// over every `/dev/shm/{id}.zenoh`, whoever made it, and a no-op off Linux as
+/// upstream's is. It acts on the SYSTEM's segments, not this crate's: this
+/// ABI's own providers are process memory and leave nothing in `/dev/shm`,
+/// but a crashed zenoh process — this workspace's SHM transport, or upstream's
+/// — does, and that is what the call is for.
+#[no_mangle]
+pub extern "C" fn zc_cleanup_orphaned_shm_segments() {
+    let _ = guarded(|| {
+        wz_runtime_tokio::posix_shm::cleanup_orphaned_segments();
+        Z_OK
+    });
+}
+
 // ---------------------------------------------------------------------------
 // the MEMORY LAYOUT — R2263 (open-debt item 607)
 // ---------------------------------------------------------------------------

@@ -90,6 +90,68 @@ fn lock_shared(file: &File) -> io::Result<()> {
     }
 }
 
+/// R2954 — remove every POSIX shm segment no process holds any more: upstream's
+/// `cleanup_orphaned_segments` (`commons/zenoh-shm/src/posix_shm/cleanup.rs` @
+/// `fn cleanup_orphaned_segments_inner() -> ZResult<()> {`), which zenoh-c
+/// exports as `zc_cleanup_orphaned_shm_segments`.
+///
+/// A segment whose creator crashed persists in `/dev/shm` — that is POSIX, not
+/// a bug of either side — so upstream enumerates every `{id}.zenoh` there
+/// whose stem is a `u64` and removes the ones that are DANGLING: gone between
+/// the listing and the open, or openable with an EXCLUSIVE non-blocking
+/// `flock` (`commons/zenoh-shm/src/shm/unix.rs` @ `.try_lock(FileLockMode::Exclusive)`). Every live
+/// holder, wz's included, keeps the SHARED lock `lock_shared` takes for as
+/// long as it maps the segment, so an exclusive lock succeeds exactly when no
+/// one does. Any other open error (a segment of another user, say) keeps the
+/// segment, as upstream's does.
+///
+/// Best-effort and silent, as upstream's is: it runs from exit paths where no
+/// error has anywhere to go. A no-op off Linux, where upstream's is too.
+pub fn cleanup_orphaned_segments() {
+    #[cfg(target_os = "linux")]
+    {
+        let Ok(entries) = std::fs::read_dir("/dev/shm") else {
+            return;
+        };
+        for entry in entries.filter_map(Result::ok) {
+            let path = entry.path();
+            if path.extension() != Some(std::ffi::OsStr::new("zenoh")) {
+                continue;
+            }
+            let Some(id) = path
+                .file_stem()
+                .and_then(|stem| stem.to_str())
+                .and_then(|stem| stem.parse::<u64>().ok())
+            else {
+                continue;
+            };
+            if segment_is_dangling(id) {
+                let _ = std::fs::remove_file(segment_path(id));
+            }
+        }
+    }
+}
+
+/// Whether segment `id` is held by no process — upstream's
+/// `is_dangling_segment`
+/// (`commons/zenoh-shm/src/shm/unix.rs` @ `fn is_dangling_segment(id: ID) -> bool {`).
+#[cfg(target_os = "linux")]
+fn segment_is_dangling(id: u64) -> bool {
+    let file = match OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(segment_path(id))
+    {
+        Ok(file) => file,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return true,
+        Err(_) => return false,
+    };
+    // SAFETY: `flock` takes a borrowed fd and returns an error code; the fd is
+    // valid for the borrow, and the lock it may take is released when `file`
+    // closes at the end of this function.
+    unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) == 0 }
+}
+
 /// A segment THIS process created: mapped read-write, and unlinked on drop.
 ///
 /// The file is held so the shared lock lives as long as the segment does —
@@ -198,5 +260,32 @@ impl PeerSegment {
     /// The segment's bytes.
     pub fn bytes(&self) -> &[u8] {
         &self.map
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// R2954 — the cleanup removes a segment no one holds and keeps one a
+    /// process holds, by upstream's rule (an exclusive `flock` succeeds only on
+    /// the first). The orphan's id sits above the `u32` range every
+    /// [`candidate_id`] draws from, so it can collide with no live segment.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn cleanup_removes_an_orphaned_segment_and_keeps_a_held_one() {
+        let orphan_id = (1u64 << 40) + u64::from(std::process::id());
+        let orphan = segment_path(orphan_id);
+        std::fs::write(&orphan, [0u8; 64]).expect("write an orphaned segment");
+        let held = OwnedSegment::create(64, || u64::from(next_candidate_id()))
+            .expect("create a held segment");
+        let held_path = segment_path(held.id());
+
+        cleanup_orphaned_segments();
+
+        assert!(!orphan.exists(), "a segment no process holds is removed");
+        assert!(held_path.exists(), "a segment this process holds is kept");
+        drop(held);
+        assert!(!held_path.exists(), "and its own drop still unlinks it");
     }
 }
