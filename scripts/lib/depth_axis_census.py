@@ -2281,7 +2281,16 @@ PIN_NO_SYMBOL = 2
 # R2918 — 21 -> 19, one atom. `platform-zephyr` left PARTIAL (COMPLETE), and
 # its wz citations leave the census with it. READ off the census's own FAIL
 # line, `wz citations: 19 against a pin of 21`.
-PIN_WZ_CITATIONS = 19
+#
+# R2970 — 19 -> 22, one atom. `api-compat-c`'s reason gains the paragraph on
+# the session's offer, which cites three wz files (the differential, the offer
+# in `wz-capi-c`'s session, the offering accept loop), and the atom is still
+# PARTIAL. READ off the census's own FAIL line, `wz citations: 22 against a pin
+# of 19`. The same run's `reached: 4 against a pin of 6` and `ambiguous
+# citations: 8 against a pin of 9` were already there before this round's
+# edit and are not moved here: this round did not make them and has not
+# attributed them.
+PIN_WZ_CITATIONS = 22
 # R2626 — 44 -> 42, and this one is worth a sentence because it HELD through
 # every earlier retirement in this run (R2612, R2622). `time-hlc`'s reason is the
 # first retiree carrying AMBIGUOUS citations of its own: its oldest clauses cite
