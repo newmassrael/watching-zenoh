@@ -785,7 +785,11 @@ HOST_GATED_CI_TARGETS: dict[str, str] = {
 # against libzenohpico, beside a peer and beside a router; until this round the
 # differential compared the client arm only). 952 + 2 = 954, measured by the
 # same script at this round's tree.
-FOREIGN_ADJUDICATOR_LINKS = 954
+# +1 R2970, `a_sessions_transport_capabilities_follow_its_config_on_wz_and_libzenohc`
+# (`api-compat-c`, what a session's links offer from its config — QoS,
+# lowlatency, compression and the qos+lowlatency refusal — against libzenohc).
+# 954 + 1 = 955, measured by the same script at this round's tree.
+FOREIGN_ADJUDICATOR_LINKS = 955
 
 # ── Execution disclosure ────────────────────────────────────────────────────────
 #

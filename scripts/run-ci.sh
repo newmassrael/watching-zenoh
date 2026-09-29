@@ -19495,6 +19495,19 @@ layer_c1cc_api_compat_c() {
         --test-threads=1 \
         --exact a_sessions_own_shm_provider_is_obtained_identically_on_wz_and_libzenohc \
         || return 1
+    # R2970 — what a session's links OFFER, read from its config: QoS by
+    # default, lowlatency and compression when asked, qos+lowlatency refused at
+    # the open, on the dialling and the accepting side alike. Before this round
+    # the session offered nothing on either side (`qos=0` where upstream says
+    # `1`). The shared-memory column is a held pin (open-debt item 823). Needs
+    # the unstable arm; SKIPs without it.
+    _runci_guarded_test \
+        "C1cc a_sessions_transport_capabilities_follow_its_config_on_wz_and_libzenohc" 1 \
+        cargo test -p wz-integration-tests \
+        --test zenoh_c_session_offer_twice_and_diff -- --ignored --quiet \
+        --test-threads=1 \
+        --exact a_sessions_transport_capabilities_follow_its_config_on_wz_and_libzenohc \
+        || return 1
     # R311y500 — the CROSS-IMPL half, and it is a different question from the
     # three legs above. Those establish that upstream's program LINKS wz and that
     # wz's answers match the real `libzenohc.so`; every byte on their wire was
