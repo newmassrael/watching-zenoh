@@ -525,9 +525,9 @@ impl QueryMarshal {
     ///
     /// MUST run only once the marshal sits at its FINAL address, and must not
     /// be folded back into [`Self::new`]. `loaned_payload.handle` /
-    /// `loaned_attachment.handle` store the address of the `Vec` STRUCT (that
-    /// is what [`crate::abi::handle_ref`] reconstructs a `&Vec<u8>` from), and
-    /// a struct field's address moves with the struct. `new` returns `Self` by
+    /// `loaned_attachment.handle` store the address of the `ByteBuf` STRUCT
+    /// (that is what [`crate::abi::handle_ref`] reconstructs a `&ByteBuf` from),
+    /// and a struct field's address moves with the struct. `new` returns `Self` by
     /// value, so binding inside it would record `new`'s frame and hand C a
     /// pointer into a dead frame the moment the value is moved out — return-
     /// value optimisation is not a language guarantee and does not save it.
@@ -1761,11 +1761,15 @@ mod tests {
         // The accessors built on those views resolve to the query's bytes.
         let query = &marshal as *const QueryMarshal as *const z_loaned_query_t;
         unsafe {
-            let buf = handle_ref::<z_loaned_bytes_t, Vec<u8>>(z_query_payload(query))
+            // Read as the type the handle IS. This used to say `Vec<u8>` and
+            // passed only because `ByteBuf`'s first field was one — a type pun
+            // that R2964's storage change turned into an empty read.
+            let buf = handle_ref::<z_loaned_bytes_t, crate::bytes::ByteBuf>(z_query_payload(query))
                 .expect("the cached payload view must resolve");
             assert_eq!(buf.as_slice(), b"value-payload");
-            let buf = handle_ref::<z_loaned_bytes_t, Vec<u8>>(z_query_attachment(query))
-                .expect("the cached attachment view must resolve");
+            let buf =
+                handle_ref::<z_loaned_bytes_t, crate::bytes::ByteBuf>(z_query_attachment(query))
+                    .expect("the cached attachment view must resolve");
             assert_eq!(buf.as_slice(), b"att");
             assert_eq!(
                 crate::keyexpr::keyexpr_str(z_query_keyexpr(query)),

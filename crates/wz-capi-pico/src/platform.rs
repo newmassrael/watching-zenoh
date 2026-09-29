@@ -470,11 +470,18 @@ unsafe fn random_value<const N: usize>() -> [u8; N] {
 /// `z_bytes_from_buf`).
 ///
 /// pico ADOPTS `data` and calls `deleter(data, context)` when the payload is
-/// released. wz copies into its owning [`crate::bytes::ByteBuf`], so the
-/// deleter is invoked HERE, as soon as the copy is taken — dropping it would
-/// leak the caller's buffer, which is the one thing a program handing over
-/// ownership cannot check for itself. A NULL deleter means the buffer is
-/// static and must not be released, which pico documents at the parameter.
+/// released. So does wz, since R2964: the payload DESCRIBES the caller's buffer
+/// (`z_bytes_get_contiguous_view` answers `data` itself), a clone shares it, and
+/// the deleter runs when the last holder is dropped. Until then this copied and
+/// invoked the deleter at construction, which `pico_bytes_alias_twice_and_diff`
+/// measured against the real library as three observable differences — the
+/// address, a change through the caller's own pointer, and the deleter's timing.
+///
+/// The deleter is owed on EVERY path, success or not: pico's ownership transfer
+/// is unconditional once the call is made, so it is held in a
+/// [`crate::bytes::Release`] before anything can return early. A NULL deleter
+/// means the buffer is static and must not be released, which pico documents at
+/// the parameter.
 #[no_mangle]
 pub unsafe extern "C" fn z_bytes_from_buf(
     bytes: *mut crate::abi::z_owned_bytes_t,
@@ -484,18 +491,13 @@ pub unsafe extern "C" fn z_bytes_from_buf(
     context: *mut c_void,
 ) -> ZResult {
     guarded(|| {
-        let rc = crate::bytes::z_bytes_copy_from_buf(bytes, data, len);
-        // Release the caller's buffer on EVERY path, success or not: pico's
-        // ownership transfer is unconditional once the call is made.
-        if let Some(free) = deleter {
-            free(data as *mut c_void, context);
-        }
-        rc
+        let release = crate::bytes::Release::new(deleter, data as *mut c_void, context);
+        crate::bytes::store_aliased_payload(bytes, data, len, release)
     })
 }
 
 /// Build a payload from a statically allocated buffer (pico
-/// `z_bytes_from_static_buf`). Copies, for the same reason
+/// `z_bytes_from_static_buf`). The payload DESCRIBES the caller's buffer, as
 /// [`crate::bytes::z_bytes_from_static_str`] does; no deleter, because static
 /// storage is never released.
 #[no_mangle]
@@ -504,7 +506,14 @@ pub unsafe extern "C" fn z_bytes_from_static_buf(
     data: *const u8,
     len: usize,
 ) -> ZResult {
-    crate::bytes::z_bytes_copy_from_buf(bytes, data, len)
+    guarded(|| {
+        crate::bytes::store_aliased_payload(
+            bytes,
+            data,
+            len,
+            crate::bytes::Release::new(None, std::ptr::null_mut(), std::ptr::null_mut()),
+        )
+    })
 }
 
 #[cfg(test)]

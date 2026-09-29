@@ -16,6 +16,7 @@
 //! borrowed shape a view string (from `z_keyexpr_as_view_string`) produces.
 
 use std::ffi::{c_char, c_void, CStr};
+use std::sync::Arc;
 
 use crate::abi::{
     handle_ref, impl_value_ownership, z_loaned_bytes_t, z_loaned_slice_t, z_loaned_string_t,
@@ -26,6 +27,90 @@ use crate::ffi::{guard_val, guarded};
 use crate::result::{ZResult, Z_ERR_NULL, Z_OK};
 
 // --- payloads -------------------------------------------------------------
+
+/// The caller's deleter and the buffer it releases: `deleter(value, context)`
+/// runs ONCE, when the last holder of the bytes it releases goes (pico's
+/// `_z_delete_context_t`, run by `_z_slice_clear`).
+///
+/// A `None` deleter is pico's "static": the caller keeps the buffer and nothing
+/// is released.
+pub(crate) struct Release {
+    deleter: Option<unsafe extern "C" fn(*mut c_void, *mut c_void)>,
+    value: *mut c_void,
+    context: *mut c_void,
+}
+
+impl Release {
+    /// Release `value` through `deleter` when this drops.
+    pub(crate) fn new(
+        deleter: Option<unsafe extern "C" fn(*mut c_void, *mut c_void)>,
+        value: *mut c_void,
+        context: *mut c_void,
+    ) -> Self {
+        Self {
+            deleter,
+            value,
+            context,
+        }
+    }
+}
+
+impl Drop for Release {
+    fn drop(&mut self) {
+        if let Some(deleter) = self.deleter.take() {
+            // SAFETY: the deleter is the caller's, handed over with the buffer
+            // it releases and with the promise pico's contract makes — that it
+            // may be called once, with exactly these two arguments.
+            unsafe { deleter(self.value, self.context) };
+        }
+    }
+}
+
+/// Where a payload's bytes LIVE.
+///
+/// wz's payload model was an owning `Vec<u8>` with a deep-copying `Clone`, and
+/// that is not what zenoh-pico's is: its constructors that take a caller's
+/// buffer ALIAS it, its moves take over the allocation they are given, its
+/// payload clone SHARES the storage, and the caller's deleter runs when the
+/// last holder is dropped. All four are observable from C (pointer identity,
+/// mutation through the alias, the deleter's timing), and
+/// `pico_bytes_alias_twice_and_diff` measures each against the real library.
+/// The storage therefore has two shapes, and holders share it through an
+/// [`Arc`].
+pub(crate) enum Backing {
+    /// Bytes this crate allocated.
+    Owned(Vec<u8>),
+    /// The CALLER'S bytes, described and not copied, with the caller's promise
+    /// to release them (or not to, for a static buffer) through `_release`.
+    Aliased {
+        start: *const u8,
+        len: usize,
+        _release: Release,
+    },
+}
+
+// SAFETY: the aliased pointer is the caller's, and pico's contract for every
+// constructor that takes one is that the buffer stays valid and unchanged until
+// the deleter runs. Nothing here writes through it, so sharing it between
+// threads is exactly as safe as the caller's promise.
+unsafe impl Send for Backing {}
+unsafe impl Sync for Backing {}
+
+impl Backing {
+    fn as_slice(&self) -> &[u8] {
+        match self {
+            Backing::Owned(bytes) => bytes,
+            Backing::Aliased { start, len, .. } => {
+                if *len == 0 || start.is_null() {
+                    &[]
+                } else {
+                    // SAFETY: the constructor's contract, above.
+                    unsafe { std::slice::from_raw_parts(*start, *len) }
+                }
+            }
+        }
+    }
+}
 
 /// Behind a `z_owned_bytes_t` / `z_owned_slice_t` handle: the raw bytes, plus
 /// the SEGMENT boundaries a `z_bytes_writer_append` left in them.
@@ -45,18 +130,83 @@ use crate::result::{ZResult, Z_ERR_NULL, Z_OK};
 /// offsets. `bounds` empty means "one implicit segment covering all the data"
 /// (or none, when the data is empty), which is the state every inbound sample
 /// and every single-shot constructor is in; only the writer ever populates it.
-#[derive(Clone, Debug, Default)]
+///
+/// `Clone` SHARES the storage, as pico's `z_bytes_clone` does; a copy is asked
+/// for by name ([`ByteBuf::copied`]), and a writer that needs to change shared
+/// or aliased bytes copies them first ([`ByteBuf::owned_mut`]).
+#[derive(Clone)]
 pub(crate) struct ByteBuf {
-    data: Vec<u8>,
+    backing: Arc<Backing>,
+    /// How much of `backing` this payload is. Shorter than the backing only for
+    /// a string that was MOVED into a payload: its allocation carries a NUL the
+    /// payload does not.
+    len: usize,
     /// END offset of each segment. Either empty (the implicit single segment)
-    /// or ending at `data.len()`.
+    /// or ending at `len`.
     bounds: Vec<usize>,
+}
+
+impl std::fmt::Debug for ByteBuf {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ByteBuf")
+            .field("len", &self.len)
+            .field("bounds", &self.bounds)
+            .finish()
+    }
+}
+
+impl Default for ByteBuf {
+    fn default() -> Self {
+        Self::from(Vec::new())
+    }
 }
 
 impl ByteBuf {
     /// An empty payload with no segments.
     pub(crate) fn new() -> Self {
         Self::default()
+    }
+
+    /// A payload that DESCRIBES the caller's `len` bytes at `start` and lets
+    /// `release` return them when the last holder is dropped.
+    ///
+    /// # Safety
+    /// `start` must be null with `len == 0`, or point at `len` readable bytes
+    /// that stay valid and unchanged until `release` has run.
+    pub(crate) unsafe fn aliased(start: *const u8, len: usize, release: Release) -> Self {
+        Self {
+            backing: Arc::new(Backing::Aliased {
+                start,
+                len,
+                _release: release,
+            }),
+            len,
+            bounds: Vec::new(),
+        }
+    }
+
+    /// The payload's bytes.
+    pub(crate) fn as_slice(&self) -> &[u8] {
+        &self.backing.as_slice()[..self.len]
+    }
+
+    /// A payload with the same bytes in storage of its own: the copy an
+    /// extraction (`z_bytes_to_slice`) makes and a clone does not.
+    pub(crate) fn copied(&self) -> Self {
+        Self::from(self.as_slice().to_vec())
+    }
+
+    /// The bytes as an owned, unshared `Vec`, copying them first when the
+    /// storage is shared or the caller's.
+    fn owned_mut(&mut self) -> &mut Vec<u8> {
+        let private = matches!(Arc::get_mut(&mut self.backing), Some(Backing::Owned(v)) if v.len() == self.len);
+        if !private {
+            self.backing = Arc::new(Backing::Owned(self.as_slice().to_vec()));
+        }
+        match Arc::get_mut(&mut self.backing) {
+            Some(Backing::Owned(bytes)) => bytes,
+            _ => unreachable!("the storage was made private and owned just above"),
+        }
     }
 
     /// Whether the payload is ONE slice, which is what
@@ -76,8 +226,9 @@ impl ByteBuf {
     /// The `idx`-th segment, or `None` past the end — what
     /// `z_bytes_slice_iterator_next` yields.
     pub(crate) fn segment(&self, idx: usize) -> Option<&[u8]> {
+        let data = self.as_slice();
         if self.bounds.is_empty() {
-            return (idx == 0 && !self.data.is_empty()).then_some(self.data.as_slice());
+            return (idx == 0 && !data.is_empty()).then_some(data);
         }
         let start = if idx == 0 {
             0
@@ -85,7 +236,7 @@ impl ByteBuf {
             *self.bounds.get(idx - 1)?
         };
         let end = *self.bounds.get(idx)?;
-        self.data.get(start..end)
+        data.get(start..end)
     }
 
     /// Append another payload AS ITS OWN SEGMENTS (pico
@@ -95,13 +246,18 @@ impl ByteBuf {
     /// close that implicit segment first, or the existing content would silently
     /// merge into the newly appended one.
     pub(crate) fn append_segments(&mut self, other: &ByteBuf) {
-        if self.bounds.is_empty() && !self.data.is_empty() {
-            self.bounds.push(self.data.len());
+        if self.bounds.is_empty() && self.len != 0 {
+            self.bounds.push(self.len);
         }
         let mut idx = 0usize;
         while let Some(segment) = other.segment(idx) {
-            self.data.extend_from_slice(segment);
-            self.bounds.push(self.data.len());
+            let end = {
+                let data = self.owned_mut();
+                data.extend_from_slice(segment);
+                data.len()
+            };
+            self.len = end;
+            self.bounds.push(end);
             idx += 1;
         }
     }
@@ -110,30 +266,31 @@ impl ByteBuf {
     /// `z_bytes_writer_write_all`, which writes into the buffer rather than
     /// adding a slice).
     pub(crate) fn write_all(&mut self, bytes: &[u8]) {
-        self.data.extend_from_slice(bytes);
+        let end = {
+            let data = self.owned_mut();
+            data.extend_from_slice(bytes);
+            data.len()
+        };
+        self.len = end;
         if let Some(last) = self.bounds.last_mut() {
-            *last = self.data.len();
+            *last = end;
         }
     }
 }
 
 impl core::ops::Deref for ByteBuf {
-    type Target = Vec<u8>;
-    fn deref(&self) -> &Vec<u8> {
-        &self.data
-    }
-}
-
-impl core::ops::DerefMut for ByteBuf {
-    fn deref_mut(&mut self) -> &mut Vec<u8> {
-        &mut self.data
+    type Target = [u8];
+    fn deref(&self) -> &[u8] {
+        self.as_slice()
     }
 }
 
 impl From<Vec<u8>> for ByteBuf {
     fn from(data: Vec<u8>) -> Self {
+        let len = data.len();
         Self {
-            data,
+            backing: Arc::new(Backing::Owned(data)),
+            len,
             bounds: Vec::new(),
         }
     }
@@ -145,66 +302,81 @@ impl From<&[u8]> for ByteBuf {
     }
 }
 
-/// Behind a `z_owned_string_t` handle. `data` is NUL-terminated so a C caller
-/// treating `z_string_data` as a C string is safe; `len` is the logical
-/// length (excluding the terminator). `self_view` is the cached borrowed
-/// `{ start, len }` that `z_string_loan` returns (stable: it points at
-/// `data`'s heap buffer, which does not move when the box does).
+/// A payload over the storage a slice or string state holds, SHARING it, so the
+/// payload has the state's own address and the caller's deleter waits for both
+/// (pico's `z_bytes_from_slice` / `z_bytes_from_string` take over the
+/// allocation they are given).
+///
+/// A state whose view no longer describes its storage — a caller emptied it, or
+/// moved it out through `take_from_loaned` — has nothing to share and reads as
+/// the bytes it now shows.
+///
+/// # Safety
+/// `start` / `len` must be a view a state made over `backing`, as the states'
+/// own `bytes` documents.
+unsafe fn payload_over(backing: &Arc<Backing>, start: *const u8, len: usize) -> ByteBuf {
+    let whole = backing.as_slice();
+    if start == whole.as_ptr() && len <= whole.len() {
+        return ByteBuf {
+            backing: Arc::clone(backing),
+            len,
+            bounds: Vec::new(),
+        };
+    }
+    ByteBuf::from(crate::abi::view_bytes(start, len).unwrap_or(&[]).to_vec())
+}
+
+/// Behind a `z_owned_string_t` handle. An OWNED string's `backing` is
+/// NUL-terminated so a C caller treating `z_string_data` as a C string is safe;
+/// an ALIASED one (`z_string_from_str`) is the caller's own C string, whose
+/// terminator is the caller's. `self_view` is the cached borrowed
+/// `{ start, len }` that `z_string_loan` returns, with `len` the logical length
+/// (excluding the terminator) — stable, because it points at `backing`'s bytes,
+/// which do not move when the box does.
 pub(crate) struct StringState {
-    /// Owns the NUL-terminated heap buffer that `self_view` borrows. Never
-    /// read directly — kept alive for the borrow and freed on drop.
-    #[allow(dead_code)]
-    data: Vec<u8>,
+    /// The storage `self_view` borrows, shared with any payload it was moved
+    /// into; released when the last of them goes.
+    backing: Arc<Backing>,
     self_view: z_loaned_string_t,
 }
 
-/// Behind a `z_owned_slice_t` handle. Mirrors [`StringState`]: `data` owns the
-/// heap buffer and `self_view` is the cached borrowed `{ start, len }` that
-/// `z_slice_loan` returns (stable — it points at `data`'s heap buffer, which
-/// does not move when the box does).
+/// Behind a `z_owned_slice_t` handle. Mirrors [`StringState`]: `backing` holds
+/// the bytes and `self_view` is the cached borrowed `{ start, len }` that
+/// `z_slice_loan` returns (stable — it points at `backing`'s bytes, which do not
+/// move when the box does).
 ///
 /// No NUL terminator, unlike the string: a slice is binary and pico's
 /// `z_slice_data` is not a C-string contract.
 pub(crate) struct SliceState {
-    /// Owns the heap buffer that `self_view` borrows. Never read directly —
-    /// kept alive for the borrow and freed on drop.
-    #[allow(dead_code)]
-    data: Vec<u8>,
+    /// The storage `self_view` borrows, shared with any payload it was moved
+    /// into; released when the last of them goes.
+    backing: Arc<Backing>,
     self_view: z_loaned_slice_t,
 }
 
 impl SliceState {
-    /// The bytes this state owns, read through the SAME cached view
-    /// `z_slice_data` / `z_slice_len` hand to C — so a caller reading them in
-    /// Rust and a caller reading them in C cannot see different lengths.
-    pub(crate) fn bytes(&self) -> &[u8] {
-        // SAFETY: `self_view` is built from `data`'s own pointer and length in
-        // `boxed`, and `data` is never reallocated afterwards.
-        unsafe { crate::abi::view_bytes(self.self_view._start, self.self_view._len) }.unwrap_or(&[])
-    }
-
     fn boxed(buf: ByteBuf) -> Box<SliceState> {
-        let buf = buf.data;
-        let len = buf.len();
-        let start = buf.as_ptr();
+        let len = buf.len;
+        let start = buf.as_slice().as_ptr();
         Box::new(SliceState {
-            data: buf,
+            backing: buf.backing,
             self_view: z_loaned_slice_t {
                 _start: start,
                 _len: len,
             },
         })
     }
+
+    /// This slice as a payload that SHARES its storage.
+    fn shared_payload(&self) -> ByteBuf {
+        // SAFETY: `self_view` is this state's own view.
+        unsafe { payload_over(&self.backing, self.self_view._start, self.self_view._len) }
+    }
 }
 
 impl StringState {
-    /// The string's LOGICAL bytes — the NUL terminator excluded, exactly as
-    /// `z_string_len` reports and for the same reason as [`SliceState::bytes`].
-    pub(crate) fn bytes(&self) -> &[u8] {
-        // SAFETY: as `SliceState::bytes`.
-        unsafe { crate::abi::view_bytes(self.self_view._start, self.self_view._len) }.unwrap_or(&[])
-    }
-
+    /// A string in storage of its own: the bytes, then the NUL a C caller
+    /// treating `z_string_data` as a C string relies on.
     fn boxed(bytes: &[u8]) -> Box<StringState> {
         let mut data = Vec::with_capacity(bytes.len() + 1);
         data.extend_from_slice(bytes);
@@ -212,12 +384,34 @@ impl StringState {
         let len = bytes.len();
         let start = data.as_ptr();
         Box::new(StringState {
-            data,
+            backing: Arc::new(Backing::Owned(data)),
             self_view: z_loaned_string_t {
                 _start: start,
                 _len: len,
             },
         })
+    }
+
+    /// A string that DESCRIBES the caller's `len` bytes at `start` (pico
+    /// `z_string_from_str`): `z_string_data` answers `start` itself.
+    ///
+    /// # Safety
+    /// As [`ByteBuf::aliased`].
+    unsafe fn aliased(start: *const u8, len: usize, release: Release) -> Box<StringState> {
+        let alias = ByteBuf::aliased(start, len, release);
+        Box::new(StringState {
+            self_view: z_loaned_string_t {
+                _start: alias.as_slice().as_ptr(),
+                _len: len,
+            },
+            backing: alias.backing,
+        })
+    }
+
+    /// This string as a payload that SHARES its storage, minus the terminator.
+    fn shared_payload(&self) -> ByteBuf {
+        // SAFETY: `self_view` is this state's own view.
+        unsafe { payload_over(&self.backing, self.self_view._start, self.self_view._len) }
     }
 }
 
@@ -382,16 +576,13 @@ pub unsafe extern "C" fn z_bytes_empty(bytes: *mut z_owned_bytes_t) {
 /// `z_string_from_str`).
 ///
 /// pico TAKES OWNERSHIP and calls `deleter(value, context)` when the string is
-/// dropped. wz COPIES the bytes into its own `StringState` and runs the deleter
-/// **immediately**, because the copy means the caller's buffer is no longer
-/// referenced.
-///
-/// That is a named divergence with one observable consequence, stated rather
-/// than buried: a program whose deleter has side effects sees them at
-/// construction rather than at drop. Running it immediately is the choice that
-/// keeps the ownership contract honest — the alternative, holding the pointer to
-/// honour the deleter's timing, would make the owned string borrow a buffer wz
-/// does not control for the rest of its life.
+/// dropped, and the string DESCRIBES the caller's buffer rather than copying it:
+/// `z_string_data` answers `value` itself. So does wz, since R2964 — until then
+/// this copied and ran the deleter at construction, on the recorded ground that
+/// the divergence was "one observable consequence". It was three (the address,
+/// a change made through the caller's own pointer, the deleter's timing), and
+/// `pico_bytes_alias_twice_and_diff` measures all of them against the real
+/// library.
 #[no_mangle]
 pub unsafe extern "C" fn z_string_from_str(
     str_out: *mut z_owned_string_t,
@@ -407,12 +598,12 @@ pub unsafe extern "C" fn z_string_from_str(
         if value.is_null() {
             return Z_ERR_NULL;
         }
-        let bytes = std::ffi::CStr::from_ptr(value).to_bytes().to_vec();
-        store_string(str_out, StringState::boxed(&bytes));
-        // The copy is complete, so the caller's buffer is released now.
-        if let Some(free) = deleter {
-            free(value as *mut c_void, context);
-        }
+        let len = std::ffi::CStr::from_ptr(value).to_bytes().len();
+        let release = Release::new(deleter, value as *mut c_void, context);
+        store_string(
+            str_out,
+            StringState::aliased(value as *const u8, len, release),
+        );
         Z_OK
     })
 }
@@ -480,24 +671,44 @@ pub unsafe extern "C" fn z_bytes_copy_from_str(
     })
 }
 
+/// Fill `bytes` with a payload that DESCRIBES the caller's `len` bytes at
+/// `data` and hands `release` to the last holder (pico's
+/// `_z_slice_from_buf_custom_deleter` behind every `z_bytes_from_*` that takes a
+/// buffer).
+///
+/// A null `data` is an empty payload, as the copying constructors treat it.
+///
+/// # Safety
+/// `bytes` must be null or valid and writable; `data` must be null or point at
+/// `len` readable bytes that stay valid and unchanged until `release` has run.
+pub(crate) unsafe fn store_aliased_payload(
+    bytes: *mut z_owned_bytes_t,
+    data: *const u8,
+    len: usize,
+    release: Release,
+) -> ZResult {
+    if bytes.is_null() {
+        return Z_ERR_NULL;
+    }
+    let (data, len) = if data.is_null() {
+        (std::ptr::null(), 0)
+    } else {
+        (data, len)
+    };
+    store_bytes(bytes, ByteBuf::aliased(data, len, release));
+    Z_OK
+}
+
 /// Build a payload from a statically allocated C string (pico
 /// `z_bytes_from_static_str`).
 ///
-/// pico's contract is ALIASING: the payload borrows the caller's static
-/// storage and never frees it, which is why the name says `static` and why
-/// there is no failure mode for allocation. wz COPIES instead, because this
-/// crate's payload model is an owning [`ByteBuf`] (`Vec<u8>`) shared by every
-/// consumer — a borrowing variant would have to widen `ByteBuf` into a
-/// two-arm owned/aliased type and re-audit every reader of it.
-///
-/// The divergence is confined to cost, not to observable behaviour: the C
-/// contract only requires the bytes to remain readable for the payload's
-/// lifetime, and an owned copy satisfies that strictly more safely than an
-/// alias (it survives even a caller that violates the `static` precondition).
-/// What a program CAN observe is the copy itself, so a pico program that
-/// passes a very large static buffer pays an allocation here that real pico
-/// does not. Recorded as a named divergence rather than hidden behind the
-/// shared name.
+/// The payload DESCRIBES the caller's storage and never frees it, which is why
+/// the name says `static` and why there is no failure mode for allocation:
+/// `z_bytes_get_contiguous_view` answers `value` itself, and a change made
+/// through the caller's own pointer shows in the payload. wz copied here until
+/// R2964, recording that as "confined to cost, not to observable behaviour" —
+/// a sentence read off the source that `pico_bytes_alias_twice_and_diff`
+/// falsified against the real library on the first run.
 #[no_mangle]
 pub unsafe extern "C" fn z_bytes_from_static_str(
     bytes: *mut z_owned_bytes_t,
@@ -507,9 +718,13 @@ pub unsafe extern "C" fn z_bytes_from_static_str(
         if bytes.is_null() || value.is_null() {
             return Z_ERR_NULL;
         }
-        let buf = CStr::from_ptr(value).to_bytes().to_vec();
-        store_bytes(bytes, ByteBuf::from(buf));
-        Z_OK
+        let len = CStr::from_ptr(value).to_bytes().len();
+        store_aliased_payload(
+            bytes,
+            value as *const u8,
+            len,
+            Release::new(None, std::ptr::null_mut(), std::ptr::null_mut()),
+        )
     })
 }
 
@@ -527,7 +742,9 @@ pub unsafe extern "C" fn z_bytes_to_slice(
         }
         match bytes_ref(bytes) {
             Some(buf) => {
-                store_slice(dst, buf.clone());
+                // A COPY, as pico's is: the slice this hands back owns storage
+                // of its own and outlives the payload it was read from.
+                store_slice(dst, buf.copied());
                 Z_OK
             }
             None => Z_ERR_NULL,
@@ -704,9 +921,11 @@ pub unsafe extern "C" fn z_string_take_from_loaned(
     })
 }
 
-// --- clone (deep copy) ----------------------------------------------------
+// --- clone ------------------------------------------------------------------
 
-/// Deep-copy a payload (pico `z_bytes_clone`).
+/// Clone a payload (pico `z_bytes_clone`): the clone SHARES the original's
+/// storage, and the caller's deleter, if the payload came with one, waits for
+/// both. Only the slice and string clones below copy, as pico's do.
 #[no_mangle]
 pub unsafe extern "C" fn z_bytes_clone(
     dst: *mut z_owned_bytes_t,
@@ -913,7 +1132,7 @@ pub unsafe extern "C" fn z_string_clone(
 /// `bytes` must be null or a live loaned payload.
 #[no_mangle]
 pub unsafe extern "C" fn z_bytes_len(bytes: *const z_loaned_bytes_t) -> usize {
-    guard_val(0, || bytes_ref(bytes).map_or(0, |buf| buf.data.len()))
+    guard_val(0, || bytes_ref(bytes).map_or(0, |buf| buf.len()))
 }
 
 /// Whether a payload carries no bytes (pico `z_bytes_is_empty`).
@@ -975,7 +1194,10 @@ pub unsafe extern "C" fn z_bytes_from_slice(
         } else {
             match handle_ref::<z_owned_slice_t, SliceState>(&(*slice)._this) {
                 Some(state) => {
-                    store_bytes(bytes, ByteBuf::from(state.bytes().to_vec()));
+                    // The payload takes over the slice's storage rather than
+                    // copying it (pico moves the allocation), so its address is
+                    // the slice's and an aliased slice's deleter waits for it.
+                    store_bytes(bytes, state.shared_payload());
                     Z_OK
                 }
                 None => Z_ERR_NULL,
@@ -1030,7 +1252,9 @@ pub unsafe extern "C" fn z_bytes_from_string(
         } else {
             match handle_ref::<z_owned_string_t, StringState>(&(*s)._this) {
                 Some(state) => {
-                    store_bytes(bytes, ByteBuf::from(state.bytes().to_vec()));
+                    // As `z_bytes_from_slice`: the string's own storage, minus
+                    // its terminator.
+                    store_bytes(bytes, state.shared_payload());
                     Z_OK
                 }
                 None => Z_ERR_NULL,
@@ -1044,9 +1268,13 @@ pub unsafe extern "C" fn z_bytes_from_string(
 /// Adopt a caller-allocated C string into an owned payload (pico
 /// `z_bytes_from_str`).
 ///
-/// COPIES and runs the deleter immediately, for the identical reason
-/// [`z_string_from_str`] does — see that function for the named divergence and
-/// its one observable consequence.
+/// The payload DESCRIBES the caller's string, and the deleter runs when the last
+/// holder of it is dropped — after a clone, once both are; see
+/// [`z_string_from_str`].
+///
+/// The deleter is owed on EVERY path once the call is made, a failed one
+/// included: pico's ownership transfer is unconditional, so it is held in a
+/// [`Release`] before anything can return early.
 ///
 /// # Safety
 /// `bytes` must be valid and writable; `value` must be null or a live
@@ -1059,11 +1287,12 @@ pub unsafe extern "C" fn z_bytes_from_str(
     context: *mut c_void,
 ) -> ZResult {
     guarded(|| {
-        let rc = z_bytes_copy_from_str(bytes, value);
-        if let Some(free) = deleter {
-            free(value as *mut c_void, context);
+        let release = Release::new(deleter, value as *mut c_void, context);
+        if value.is_null() {
+            return Z_ERR_NULL;
         }
-        rc
+        let len = CStr::from_ptr(value).to_bytes().len();
+        store_aliased_payload(bytes, value as *const u8, len, release)
     })
 }
 
@@ -1095,7 +1324,7 @@ pub unsafe extern "C" fn z_bytes_get_contiguous_view(
         if !buf.is_contiguous() {
             return crate::result::Z_ERR_INVALID;
         }
-        z_view_slice_from_buf(view, buf.data.as_ptr(), buf.data.len())
+        z_view_slice_from_buf(view, buf.as_slice().as_ptr(), buf.len())
     })
 }
 
@@ -1132,7 +1361,11 @@ pub unsafe extern "C" fn z_slice_copy_from_buf(
 
 /// Adopt a caller-owned buffer into an owned slice (pico `z_slice_from_buf`).
 ///
-/// Copies and runs the deleter immediately, as [`z_bytes_from_buf`] does.
+/// The slice DESCRIBES the caller's buffer — `z_slice_data` answers `data`
+/// itself — and the deleter runs when the last holder of it is dropped, which is
+/// after the payload the slice was moved into, if any. Held in a [`Release`]
+/// before anything can return early, so a failed call still runs it, as pico's
+/// unconditional ownership transfer requires.
 ///
 /// # Safety
 /// `slice` must be valid and writable; `data` must be null or point at `len`
@@ -1146,11 +1379,16 @@ pub unsafe extern "C" fn z_slice_from_buf(
     context: *mut c_void,
 ) -> ZResult {
     guarded(|| {
-        let rc = z_slice_copy_from_buf(slice, data, len);
-        if let Some(free) = deleter {
-            free(data as *mut c_void, context);
+        let release = Release::new(deleter, data as *mut c_void, context);
+        if slice.is_null() {
+            return Z_ERR_NULL;
         }
-        rc
+        *slice = z_owned_slice_t::null_value();
+        if data.is_null() && len != 0 {
+            return Z_ERR_NULL;
+        }
+        store_slice(slice, ByteBuf::aliased(data, len, release));
+        Z_OK
     })
 }
 
