@@ -97,7 +97,7 @@ int main(int argc, char **argv) {
 
     z_owned_config_t config;
     z_config_default(&config);
-    zp_config_insert(z_loan_mut(config), Z_CONFIG_MODE_KEY, "client");
+    zp_config_insert(z_loan_mut(config), Z_CONFIG_MODE_KEY, "@MODE@");
     zp_config_insert(z_loan_mut(config), Z_CONFIG_CONNECT_KEY, endpoint);
 
     z_owned_session_t s;
@@ -234,10 +234,18 @@ int main(int argc, char **argv) {
 
 /// Compile `DRIVER_SRC` against upstream's headers, linked to `lib`. Only the
 /// library differs between the arms, which is the whole point.
-fn compile_driver(out_dir: &Path, libdir: &Path, libname: &str, arm: &str) -> PathBuf {
-    let src = out_dir.join(format!("driver_{arm}.c"));
-    std::fs::write(&src, DRIVER_SRC).expect("write driver source");
-    let exe = out_dir.join(format!("driver_{arm}"));
+fn compile_driver(
+    out_dir: &Path,
+    libdir: &Path,
+    libname: &str,
+    arm: &str,
+    topology: Topology,
+) -> PathBuf {
+    let tag = format!("{arm}_{}", topology.name());
+    let src = out_dir.join(format!("driver_{tag}.c"));
+    std::fs::write(&src, DRIVER_SRC.replace("@MODE@", topology.session_mode()))
+        .expect("write driver source");
+    let exe = out_dir.join(format!("driver_{tag}"));
 
     let cc = std::env::var("CC").unwrap_or_else(|_| "cc".to_string());
     let mut cmd = Command::new(&cc);
@@ -260,31 +268,159 @@ fn compile_driver(out_dir: &Path, libdir: &Path, libname: &str, arm: &str) -> Pa
     exe
 }
 
-/// Run one arm against a fresh wz router behind a tap and return the
-/// recording.
-fn record_arm(driver: &Path, arm: &str) -> Vec<(wz_integration_tests::wire_tap::Side, Vec<u8>)> {
+/// What the driver's session is, and what it dials.
+///
+/// zenoh-pico asks for a keyexpr's peers differently by mode, and by WHAT its
+/// peer is: a client always asks (`_z_add_interest` @ `if (zn->_mode ==
+/// Z_WHATAMI_CLIENT || _z_session_has_router_peer(zn)`), a peer asks only when
+/// one of its peers announced itself a router, and a peer whose peers are all
+/// peers sends no Interest at all and reads what they push. wz's write filter
+/// implements the same three branches, so each one needs its own measurement
+/// against the real library.
+#[derive(Clone, Copy, Debug)]
+enum Topology {
+    /// A client session dialling a wz node: the arm this file first measured.
+    Client,
+    /// A peer session dialling a wz ROUTER (`WhatAmI::Router` on the wire).
+    PeerToRouter,
+    /// A peer session dialling a wz PEER: no router peer, so no Interest.
+    PeerToPeer,
+}
+
+impl Topology {
+    fn name(self) -> &'static str {
+        match self {
+            Topology::Client => "client",
+            Topology::PeerToRouter => "peer_to_router",
+            Topology::PeerToPeer => "peer_to_peer",
+        }
+    }
+
+    /// The `Z_CONFIG_MODE_KEY` value of the driver's own session.
+    fn session_mode(self) -> &'static str {
+        match self {
+            Topology::Client => "client",
+            Topology::PeerToRouter | Topology::PeerToPeer => "peer",
+        }
+    }
+
+    /// The entities the far side declares: a subscriber on everything under
+    /// `demo/`, which is what opens the publisher's write filter, and a
+    /// queryable on ONE key the driver's second querier names, which is what
+    /// opens that querier's.
+    const ENTITIES: [&'static str; 6] = [
+        "--key",
+        "demo/**",
+        "--queryable",
+        "demo/kd/qry2",
+        "--reply",
+        "kd",
+    ];
+
+    /// The wz node the driver dials, as a demo argv.
+    fn demo_args(self) -> Vec<&'static str> {
+        // `--listen` is the default build's acceptor, and it announces
+        // `WhatAmI::Peer` (`demo_session_init_params`, `NodeKind::Acceptor`), so
+        // it is the peer a peer session has no router among. `--router` needs the
+        // `routing-routes` feature and announces `WhatAmI::Router`.
+        match self {
+            Topology::Client | Topology::PeerToPeer => ["--listen", "127.0.0.1:0"]
+                .into_iter()
+                .chain(Self::ENTITIES)
+                .collect(),
+            // A router hosts no entities of its own: what it tells a peer is
+            // what ANOTHER face declared, so the entities ride a provider node
+            // behind it ([`Self::provider_args`]).
+            Topology::PeerToRouter => vec!["--router", "127.0.0.1:0"],
+        }
+    }
+
+    /// The node that declares [`Self::ENTITIES`] behind a router, when the
+    /// dialed node cannot: its argv after `--connect <router>`.
+    fn provider_args(self) -> Option<Vec<&'static str>> {
+        match self {
+            Topology::PeerToRouter => Some(Self::ENTITIES.to_vec()),
+            Topology::Client | Topology::PeerToPeer => None,
+        }
+    }
+}
+
+/// A wz node that connects to `router_addr` and declares `entities`, held
+/// until its guard drops. Returns once both declarations have gone out and the
+/// router has held the face.
+fn spawn_provider(
+    demo: &Path,
+    router_addr: &str,
+    entities: &[&str],
+    router_log: &mut std::fs::File,
+) -> wz_integration_tests::common::ChildGuard {
+    let stderr = tempfile::tempfile().expect("tempfile for provider stderr");
+    let writer = stderr.try_clone().expect("dup provider stderr handle");
+    let mut reader = stderr;
+    let mut guard = wz_integration_tests::common::ChildGuard::wrap(
+        "wz-ap-demo (provider behind the router)",
+        Command::new(demo)
+            .arg("--connect")
+            .arg(router_addr)
+            .args(entities)
+            .env("RUST_LOG", "info")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::from(writer))
+            .spawn()
+            .expect("spawn the provider"),
+    );
+    for needle in ["DECLARED ROUTED SUBSCRIBER", "DECLARED ROUTED QUERYABLE"] {
+        if let Err(captured) = wz_integration_tests::common::wait_for_substring(
+            &mut reader,
+            needle,
+            Duration::from_secs(10),
+        ) {
+            let _ = guard.child_mut().kill();
+            panic!("the provider never logged `{needle}`:\n{captured}");
+        }
+    }
+    if let Err(captured) = wz_integration_tests::common::wait_for_substring(
+        router_log,
+        "face 0 UP",
+        Duration::from_secs(10),
+    ) {
+        let _ = guard.child_mut().kill();
+        panic!("the router never held the provider's face:\n{captured}");
+    }
+    // The router records the declarations when its own poll of the face yields
+    // them, which is asynchronous to the provider logging that it sent them
+    // (the same allowance `wz_router_forward` makes). Waiting on a router log
+    // line would be waiting on one it does not write.
+    std::thread::sleep(Duration::from_millis(500));
+    guard
+}
+
+/// Run one arm against a fresh wz node behind a tap and return the recording.
+fn record_arm(
+    driver: &Path,
+    arm: &str,
+    topology: Topology,
+) -> Vec<(wz_integration_tests::wire_tap::Side, Vec<u8>)> {
     let demo = wz_ap_demo_binary();
     assert_demo_binary_newer_than_sources(&demo);
     let demo_stderr = tempfile::tempfile().expect("tempfile for router stderr");
-    let (mut router, _router_log, router_port) = spawn_on_ephemeral_port(
+    let (mut router, mut router_log, router_port) = spawn_on_ephemeral_port(
         &demo,
-        // A subscriber on everything under `demo/`, which is what opens the
-        // publisher's write filter, and a queryable on ONE key the driver's
-        // second querier names, which is what opens that querier's.
-        &[
-            "--listen",
-            "127.0.0.1:0",
-            "--key",
-            "demo/**",
-            "--queryable",
-            "demo/kd/qry2",
-            "--reply",
-            "kd",
-        ],
+        &topology.demo_args(),
         "listening on 127.0.0.1:",
-        "wz-ap-demo (router behind the tap)",
+        "wz-ap-demo (node behind the tap)",
         demo_stderr,
     );
+    // Before the tap, so the provider dials the node directly and its own
+    // handshake is not in the recording: the recording is the DRIVER's.
+    let provider = topology.provider_args().map(|entities| {
+        spawn_provider(
+            &demo,
+            &format!("127.0.0.1:{router_port}"),
+            &entities,
+            &mut router_log,
+        )
+    });
     let (proxy_port, recording) = tap_proxy(router_port);
 
     let mut capture = tempfile::tempfile().expect("the driver capture");
@@ -299,6 +435,9 @@ fn record_arm(driver: &Path, arm: &str) -> Vec<(wz_integration_tests::wire_tap::
         "{arm}: the driver exited {status:?}\n--- its stdout+stderr ---\n{}",
         read_captured(&mut capture)
     );
+    if let Some(mut provider) = provider {
+        graceful_terminate(provider.child_mut(), Duration::from_secs(5));
+    }
     graceful_terminate(router.child_mut(), Duration::from_secs(5));
     // Let the relay threads see EOF before the recording is read.
     std::thread::sleep(Duration::from_millis(200));
@@ -476,7 +615,13 @@ fn render(
                 // The header's Z bit (an extension chain follows) is left OUT
                 // of the rendering and pinned on its own, by
                 // [`INTEREST_EXTENSION_BIT`].
+                //
+                // It is NAMED in first-seen order all the same, and the name is
+                // carried onto the Final that retracts it, so a reading can say
+                // WHICH interest was retracted — the peer arms need that, since
+                // a pico peer retracts some of its interests and not others.
                 NetworkMessage::Interest(i) => {
+                    let name = names.name("I", i.interest_id);
                     lines.push(match &i.body {
                         Some(body) => {
                             // A Final has no body and, in both libraries, no
@@ -487,12 +632,12 @@ fn render(
                                 None => String::from("(no key)"),
                             };
                             format!(
-                                "Interest hdr={:#04x} body={:#04x} on {key}",
+                                "Interest hdr={:#04x} body={:#04x} on {key} as {name}",
                                 i.header & !INTEREST_EXTENSION_BIT,
                                 body.header
                             )
                         }
-                        None => String::from("Interest (final)"),
+                        None => format!("Interest (final) {name}"),
                     })
                 }
                 _ => {}
@@ -519,13 +664,17 @@ const INTEREST_EXTENSION_BIT: u8 = 0x80;
 /// The `T` (TOKENS) kind bit of an Interest body header: the liveliness plane.
 const INTEREST_BODY_TOKENS: u8 = 0x08;
 
-/// wz's drop-in declares, and aliases, exactly the keyexprs the real zenoh-pico
-/// does for the same program.
-// wz-proves: api-compat-pico wz->pico partial
-#[test]
-#[ignore = "cc-compiles a driver against both libraries and runs each through a \
-            tap to a wz-ap-demo router; run by run-ci Layer E"]
-fn a_declaring_program_puts_the_same_declarations_on_the_wire_as_the_real_pico() {
+/// What one topology's two arms put on the wire, rendered.
+struct Arms {
+    wz: Vec<String>,
+    wz_interest_headers: Vec<(u8, u8)>,
+    reference: Vec<String>,
+    reference_interest_headers: Vec<(u8, u8)>,
+}
+
+/// Compile the driver once per library, run each through its own tap to a
+/// fresh wz node of `topology`'s kind, and render what each dialer sent.
+fn record_both_arms(topology: Topology) -> Arms {
     let dir = tempfile::tempdir().expect("tempdir");
     let cdylib = wz_capi_pico_cdylib();
     let wz_libdir = cdylib
@@ -533,16 +682,39 @@ fn a_declaring_program_puts_the_same_declarations_on_the_wire_as_the_real_pico()
         .expect("cdylib has a parent directory")
         .to_path_buf();
 
-    let wz_driver = compile_driver(dir.path(), &wz_libdir, "wz_capi_pico", "wz");
+    let wz_driver = compile_driver(dir.path(), &wz_libdir, "wz_capi_pico", "wz", topology);
     let ref_driver = compile_driver(
         dir.path(),
         &zenoh_pico_library_dir(),
         "zenohpico",
         "reference",
+        topology,
     );
 
-    let (reference, reference_interest_headers) = render(&record_arm(&ref_driver, "reference"));
-    let (wz, wz_interest_headers) = render(&record_arm(&wz_driver, "wz"));
+    let (reference, reference_interest_headers) =
+        render(&record_arm(&ref_driver, "reference", topology));
+    let (wz, wz_interest_headers) = render(&record_arm(&wz_driver, "wz", topology));
+    Arms {
+        wz,
+        wz_interest_headers,
+        reference,
+        reference_interest_headers,
+    }
+}
+
+/// wz's drop-in declares, and aliases, exactly the keyexprs the real zenoh-pico
+/// does for the same program.
+// wz-proves: api-compat-pico wz->pico partial
+#[test]
+#[ignore = "cc-compiles a driver against both libraries and runs each through a \
+            tap to a wz-ap-demo router; run by run-ci Layer E"]
+fn a_declaring_program_puts_the_same_declarations_on_the_wire_as_the_real_pico() {
+    let Arms {
+        wz,
+        wz_interest_headers,
+        reference,
+        reference_interest_headers,
+    } = record_both_arms(Topology::Client);
 
     // ANTI-VACUITY: the reference arm must carry the explicit declaration, the
     // put through it, and one declaration per entity the driver made. Two
@@ -615,6 +787,18 @@ fn a_declaring_program_puts_the_same_declarations_on_the_wire_as_the_real_pico()
         reference.join("\n")
     );
 
+    // A CLIENT retracts its subscriber and its queryable by id alone. The peer
+    // arms below pin the other form, so each pin is a measurement of its own
+    // mode and neither can pass on the other's frames.
+    for exact in ["UndeclSubscriber S1", "UndeclQueryable Q1"] {
+        assert!(
+            reference.iter().any(|l| l == exact),
+            "the REFERENCE arm has no id-only `{exact}`, so a client no longer retracts \
+             by id alone:\n{}",
+            reference.join("\n")
+        );
+    }
+
     // Everything, in wire order, whole: which keys are declared, on which ids,
     // with which suffix, which Interests are asked and retracted, which Query
     // is sent and which is not, and what is retracted in which order — for a
@@ -628,4 +812,214 @@ fn a_declaring_program_puts_the_same_declarations_on_the_wire_as_the_real_pico()
         wz.join("\n"),
         reference.join("\n")
     );
+}
+
+/// The Request line the renderer prints for a query on `literal`: the driver
+/// declares each querier's key before it asks, and the renderer names a key by
+/// the order its declaration appeared, so the name is read off that line.
+fn request_on(lines: &[String], literal: &str) -> Option<String> {
+    let suffix = format!("= literal+{literal:?}");
+    lines.iter().find_map(|l| {
+        let named = l.strip_prefix("DeclKexpr ")?.strip_suffix(&suffix)?;
+        Some(format!("Request on {}+\"\"", named.trim_end()))
+    })
+}
+
+/// The names of the Interests a line list asked FOR AN ENTITY, in the order
+/// they were asked: every Interest whose body does not carry the liveliness
+/// kind bit. Each is paired with its body header.
+fn entity_interests(lines: &[String]) -> Vec<(String, u8)> {
+    lines
+        .iter()
+        .filter_map(|l| {
+            let rest = l.strip_prefix("Interest hdr=")?;
+            let body = rest.split("body=").nth(1)?.get(..4)?;
+            let body = u8::from_str_radix(body.trim_start_matches("0x"), 16).ok()?;
+            let name = l.rsplit(" as ").next()?.to_owned();
+            (body & INTEREST_BODY_TOKENS == 0).then_some((name, body))
+        })
+        .collect()
+}
+
+/// One measurement of a PEER session, in whichever topology, against the real
+/// zenoh-pico: what wz puts on the wire must equal what the real library puts,
+/// bar the two things named below, each of which is asserted to be exactly as
+/// large as it is claimed to be.
+///
+/// ## Two divergences, both upstream's, both wz doing LESS
+///
+/// Neither is reproduced, on the same ground: a program cannot observe either,
+/// and reproducing them would copy a defect rather than a behaviour.
+///
+/// 1. **A Query nothing answers is not sent.** A pico peer creates a write
+///    filter through `_z_interest_replay_declare`, which replays every
+///    declaration the session already holds against the new filter WITHOUT
+///    regard to kind, so a subscriber the peer declared opens a QUERIER's
+///    filter (`vendor/zenoh-pico/src/session/interest.c` @
+///    `msg.type = _Z_INTEREST_MSG_TYPE_DECL_SUBSCRIBER;` beside
+///    `_z_write_filter_callback`, which handles subscriber and queryable
+///    declarations in one arm). The replay is kind-blind only for a peer: a
+///    client's interest is AGGREGATE, and an aggregate replay matches on key
+///    equality instead of intersection. wz opens a querier's filter on
+///    queryables only, as zenoh does, so the first querier's Query — whose key
+///    intersects a peer's subscriber and no queryable — stays unsent. The
+///    querier is answered `Z_OK` with no reply either way.
+/// 2. **A peer's entity interests are retracted.** A pico peer that asked never
+///    sends `Interest(Final)` for a publisher's or querier's interest
+///    (`vendor/zenoh-pico/src/net/primitives.c` @ `_z_remove_interest`, which
+///    sends it for a client or multicast only), so a router keeps them until the
+///    session closes. wz retracts them. Only a router is asked, so the
+///    divergence is measured only where one exists.
+fn assert_a_peer_puts_the_same_wire_as_the_real_pico(topology: Topology) {
+    let Arms { wz, reference, .. } = record_both_arms(topology);
+    let show = || {
+        format!(
+            "--- wz ---\n{}\n--- reference ---\n{}",
+            wz.join("\n"),
+            reference.join("\n")
+        )
+    };
+
+    // ANTI-VACUITY: the entities are in the reference, and so are the pushes.
+    for needle in [
+        "DeclKexpr",
+        "DeclSubscriber",
+        "DeclQueryable",
+        "DeclToken",
+        "UndeclKexpr",
+    ] {
+        assert!(
+            reference.iter().any(|l| l.starts_with(needle)),
+            "the REFERENCE arm carries no `{needle}` line, so this leg is \
+             measuring the harness rather than wz:\n{}",
+            reference.join("\n")
+        );
+    }
+    assert!(
+        reference.iter().filter(|l| l.starts_with("Push")).count() >= 2,
+        "the REFERENCE arm should carry the publisher's put and the declared put:\n{}",
+        reference.join("\n")
+    );
+
+    // A peer retracts a subscriber and a queryable NAMING THE KEY, where a
+    // client retracts by id alone (pinned in the client leg above). The two
+    // bodies' lengths differ because the subscriber is held on its non-wild
+    // prefix and the queryable on its own.
+    for prefix in [
+        "UndeclSubscriber S1 ext(0x5f:zbuf[",
+        "UndeclQueryable Q1 ext(0x5f:zbuf[",
+    ] {
+        assert!(
+            reference.iter().any(|l| l.starts_with(prefix)),
+            "the REFERENCE arm has no `{prefix}` line, so a peer no longer names its \
+             key when it retracts:\n{}",
+            reference.join("\n")
+        );
+    }
+
+    // What the peer ASKS, by topology, in the reference and then as wz. An
+    // Interest asked for an entity carries the current/future flags on its
+    // header and, on its body, the kind and the aggregate bit; a client's is
+    // `0xd3` / `0xd5` (pinned above) and a peer's is the same with the aggregate
+    // bit (0x80) clear.
+    let asked = entity_interests(&reference);
+    match topology {
+        Topology::PeerToPeer => assert!(
+            asked.is_empty(),
+            "a pico peer with no router among its peers asks nothing for its \
+             entities, yet it asked {asked:?}:\n{}",
+            reference.join("\n")
+        ),
+        Topology::PeerToRouter => assert_eq!(
+            asked.iter().map(|(_, body)| *body).collect::<Vec<_>>(),
+            [0x53, 0x55, 0x55],
+            "a pico peer beside a router asks for the publisher's subscribers and for \
+             each querier's queryables, WITHOUT the aggregate bit:\n{}",
+            reference.join("\n")
+        ),
+        Topology::Client => unreachable!("the client leg is measured above"),
+    }
+
+    // Divergence 1, pinned from both sides. The Query of the querier whose key
+    // no queryable holds goes out from the real library and does not from wz;
+    // the other querier's goes out from both.
+    let unmatched = request_on(&reference, "demo/kd/qry")
+        .unwrap_or_else(|| panic!("no declaration of the first querier's key:\n{}", show()));
+    let matched = request_on(&reference, "demo/kd/qry2")
+        .unwrap_or_else(|| panic!("no declaration of the second querier's key:\n{}", show()));
+    assert!(
+        reference.contains(&unmatched) && reference.contains(&matched),
+        "the REFERENCE arm should send both Queries: a peer's replay opens a \
+         querier's filter on a subscriber it already holds:\n{}",
+        show()
+    );
+    assert!(
+        wz.contains(&matched) && !wz.contains(&unmatched),
+        "wz should send the matched querier's Query and not the unmatched one's:\n{}",
+        show()
+    );
+    let mut expected: Vec<String> = reference.clone();
+    expected.retain(|l| *l != unmatched);
+    assert_eq!(
+        expected.len() + 1,
+        reference.len(),
+        "the unsent Query is exactly one line:\n{}",
+        show()
+    );
+
+    // Divergence 2, pinned from both sides. Take out of wz's list the Finals it
+    // sent for entity interests; what remains must be what the real library
+    // sent, and the real library sent none of them.
+    let entity_finals: Vec<String> = entity_interests(&wz)
+        .into_iter()
+        .map(|(name, _)| format!("Interest (final) {name}"))
+        .collect();
+    assert!(
+        entity_finals.iter().all(|l| !reference.contains(l)),
+        "the real pico retracted an entity interest, so a peer's Finals are no longer \
+         the divergence this leg claims:\n{}",
+        show()
+    );
+    let mut observed: Vec<String> = wz.clone();
+    observed.retain(|l| !entity_finals.contains(l));
+    assert_eq!(
+        wz.len() - observed.len(),
+        asked.len(),
+        "wz should retract exactly the entity interests the peer asked, no more and \
+         no fewer:\n{}",
+        show()
+    );
+
+    // Everything else, whole and in wire order.
+    assert_eq!(
+        observed,
+        expected,
+        "wz's wire differs from the real zenoh-pico's beyond the two pinned divergences \
+         for the same program.\n{}",
+        show()
+    );
+}
+
+/// A pico PEER with no router among its peers: it asks nothing, learns what the
+/// peer volunteers, and retracts a subscriber and a queryable naming the key.
+// wz-proves: api-compat-pico wz->pico partial
+#[test]
+#[ignore = "cc-compiles a driver against both libraries and runs each through a \
+            tap to a wz-ap-demo peer; run by run-ci Layer E"]
+fn a_pico_peer_beside_a_peer_puts_the_same_wire_as_the_real_pico() {
+    assert_a_peer_puts_the_same_wire_as_the_real_pico(Topology::PeerToPeer);
+}
+
+/// A pico PEER whose peer is a ROUTER: it asks for what its entities need,
+/// without the aggregate bit a client sets, and is answered by what another
+/// face declared. The `wz_router_` prefix keeps Layer E's `--skip wz_router` from
+/// running it against the default-feature demo, which has no `--router`; Layer E5
+/// builds the routing demo and runs it by name.
+// wz-proves: api-compat-pico wz->pico partial
+#[test]
+#[ignore = "cc-compiles a driver against both libraries and runs each through a \
+            tap to a wz-ap-demo router with a provider behind it; run by run-ci \
+            Layer E5"]
+fn wz_router_hears_a_pico_peer_the_same_on_wz_and_on_the_real_pico() {
+    assert_a_peer_puts_the_same_wire_as_the_real_pico(Topology::PeerToRouter);
 }

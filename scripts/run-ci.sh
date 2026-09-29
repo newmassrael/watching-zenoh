@@ -17867,6 +17867,26 @@ layer_e5_router_forward() {
     fi
     (cd crates && cargo test -p wz-integration-tests \
         --test wz_router_routes_pico_interop -- --ignored --test-threads=1 --quiet) || return 1
+    # R2968 — the pico ABI's PEER session beside a wz ROUTER, against the real
+    # libzenohpico: what a peer asks a router for and how it retracts. It lives
+    # here because it needs the routing demo above (`--router`), which Layer E's
+    # default-feature demo does not have — its fn name starts `wz_router_`, so
+    # Layer E's `--skip wz_router` already leaves it to this lane. The oracle is
+    # the pico LIBRARY rather than a pico process, so it has its own guard: the
+    # CLI check above does not cover it, and a SKIP here must say which oracle is
+    # missing. The cdylib is built with the SAME feature set Layer E builds
+    # (`transport-link-tls`), because two lanes writing one artifact path at
+    # different feature sets is the shape this file already records as a
+    # misdiagnosis. Count-guarded at 1: a filter that matches nothing exits 0.
+    if [[ ! -f target/zenoh-pico-build/lib/libzenohpico.so ]]; then
+        _pico_cli_unavailable "Layer E5 (pico peer beside a router, libzenohpico oracle)" || return 1
+        return 0
+    fi
+    (cd crates && cargo build -p wz-capi-pico --features transport-link-tls --quiet) || return 1
+    _runci_guarded_test "E5 pico peer beside a router" 1 \
+        cargo test -p wz-integration-tests \
+        --test pico_keyexpr_declaration_twice_and_diff -- --ignored \
+        wz_router_hears_a_pico_peer --test-threads=1 --quiet || return 1
 }
 
 # ─── Layer E5z — router QUERY-TARGET e2e vs real zenoh (R311y841) ────

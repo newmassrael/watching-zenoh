@@ -779,7 +779,13 @@ HOST_GATED_CI_TARGETS: dict[str, str] = {
 # (`api-compat-pico`, which payload constructors alias and when the caller's
 # deleter runs, against libzenohpico). 951 + 1 = 952, measured by the same
 # script at this round's tree.
-FOREIGN_ADJUDICATOR_LINKS = 952
+# +2 R2968, `a_pico_peer_beside_a_peer_puts_the_same_wire_as_the_real_pico` and
+# `wz_router_hears_a_pico_peer_the_same_on_wz_and_on_the_real_pico`
+# (`api-compat-pico`, the entity declarations and write filter of a PEER session
+# against libzenohpico, beside a peer and beside a router; until this round the
+# differential compared the client arm only). 952 + 2 = 954, measured by the
+# same script at this round's tree.
+FOREIGN_ADJUDICATOR_LINKS = 954
 
 # ── Execution disclosure ────────────────────────────────────────────────────────
 #
