@@ -1731,10 +1731,18 @@ fn walk_pubkey_challenge_body(c: &mut SpanCursor<'_>) -> Result<Vec<Field>, Code
 ///
 /// Nothing in the body says which priority a pair belongs to; the index is
 /// the whole of it. `priority` therefore aliases the pair's own span — the
-/// bytes that evidence it — and carries the zenoh `Priority` discriminant
-/// (`Control` 0 … `Background` 7, [`crate::qos::Priority::wire_byte`]'s
-/// numbering) rather than a name, because a name would be an eleventh table
-/// in this tree with no adjudicator behind it.
+/// bytes that evidence it — and carries the band's NAME
+/// ([`crate::qos::Priority::name`], `Control` … `Background`), the label the
+/// Z64 `qos` reading emits, and NOT the discriminant
+/// ([`crate::qos::Priority::wire_byte`], 0 … 7).
+///
+/// R311y898 moved it from the number to the name. This walker used to emit
+/// the discriminant, on the argument that a name would be a table with no
+/// adjudicator behind it; the adjudicator exists (`qos`'s own test pins the
+/// eight names to the zenoh-pico constants), and one field name holding two
+/// value kinds made a consumer ask which walker had produced a row. The
+/// number is not a field of the row. Its position among the `priority_sn`
+/// siblings is the discriminant, and `Priority::from_wire` maps it back.
 ///
 /// # Why the count is exact, and declining is the alternative
 ///
