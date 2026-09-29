@@ -602,6 +602,19 @@ router-connect-reconcile,transport-link-tcp,transport-unicast|session_lifecycle_
     # honest reading of this row is that the combination axis now has a
     # population of one where it had none.
     "wz-runtime-tokio|hook|transport-multicast,reassembly|multicast_glue"
+    # ── R2967 — wz-capi-c's no-unstable arm ──
+    #
+    # `zenoh-c-no-unstable-api` is the axis that makes the C ABI match a zenoh-c
+    # built WITHOUT its unstable API, and it is non-default, so a test behind it
+    # is compiled and run by nothing at default features. `--census` said so the
+    # moment BlockFirst gave the crate its first one
+    # (`publisher::congestion_tests::a_block_first_sample_reads_as_drop_without_the_unstable_api`,
+    # added by 34470cfd on 2026-09-29): 1 test claimed by no leg, which is hosted
+    # Layer C1cn's verdict, not a warning. The decision the table asks for is
+    # "widen a leg or say why not", and there is nothing to say why not: it is a
+    # pure mapping assertion, quick and network-free. The filter is the MODULE, so
+    # a test added beside it is covered without touching this row.
+    "wz-capi-c|hook|zenoh-c-no-unstable-api|publisher::congestion_tests::"
 )
 
 # package|test-path|reason
