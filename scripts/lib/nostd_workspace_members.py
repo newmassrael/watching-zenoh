@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: AGPL-3.0-or-later OR LicenseRef-watching-zenoh-Commercial
 # SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
-"""The workspace members that force `sce-rust-runtime/no_std`, derived.
+"""R2940 (no register item) — the workspace members that force
+`sce-rust-runtime/no_std`, derived.
 
 `sce-rust-runtime`'s `no_std` and `http-send` are mutually exclusive (a
 `compile_error!` in the runtime), and `wz-runtime-tokio` pulls `http-send`.
