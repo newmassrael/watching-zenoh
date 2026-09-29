@@ -5819,11 +5819,19 @@ mod foreign_backend_tests {
     fn the_posix_constructors_size_and_align_their_segment() {
         let mut plain = z_owned_shm_provider_t::null_value();
         assert_eq!(unsafe { z_posix_shm_provider_new(&mut plain, 4096) }, Z_OK);
-        // SAFETY: the provider is live.
-        assert_eq!(
-            unsafe { z_shm_provider_available(z_shm_provider_loan(&plain)) },
-            4096
-        );
+        // R2973 — the SEGMENT's own length, not `available()`. This asserted
+        // `available() == 4096` until `available()` on the native arm became `0`,
+        // which is upstream's answer for its default POSIX backend (see
+        // `Provider::available`, measured against libzenohc), and the test went
+        // red on every machine that ran it -- pc2 and this one, on origin/main
+        // and on a tree with none of this round's changes. The constructor's
+        // sizing is what the test is about, and the second half already reads it
+        // where it lives.
+        // SAFETY: the provider is live and this crate minted its handle.
+        match unsafe { provider_of(z_shm_provider_loan(&plain)) }.expect("a live provider") {
+            Provider::Native(segment) => assert_eq!(segment.len, 4096),
+            Provider::Foreign(_) => panic!("the POSIX constructor builds a native provider"),
+        }
         // SAFETY: dropped once.
         unsafe { drop_provider(plain) };
 
