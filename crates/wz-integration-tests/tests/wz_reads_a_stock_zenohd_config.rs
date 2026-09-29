@@ -145,7 +145,10 @@ fn operator_config(port: u16) -> String {
   listen: {{
     endpoints: ["tcp/127.0.0.1:{port}",],   /* trailing comma */
   }},
-  scouting: {{ multicast: {{ enabled: false }}, timeout: 2500 }},
+  // R2958 (open-debt item 840) — `delay` and `connect_scouted`, honoured by
+  // R2950 and moved away from upstream's 500 / true per this fixture's rule.
+  scouting: {{ multicast: {{ enabled: false }}, timeout: 2500, delay: 250 }},
+  open: {{ return_conditions: {{ connect_scouted: false }} }},
   timestamping: {{ enabled: true }},
   // R2650 — the first interceptor key with a reader. The shape is the one a
   // REAL zenohd was measured to start on, not the one upstream's commented
@@ -424,6 +427,20 @@ fn wz_reads_the_same_values_out_of_a_config_that_zenohd_does() {
                 .expect("the fixture names it")
                 .to_string(),
         ),
+        // R2958 (open-debt item 840) — the two peer start-window keys R2950
+        // honoured, compared rather than only named.
+        (
+            "scouting/delay",
+            wz.scouting_delay_ms
+                .expect("the fixture names it")
+                .to_string(),
+        ),
+        (
+            "open/return_conditions/connect_scouted",
+            wz.open_connect_scouted
+                .expect("the fixture names it")
+                .to_string(),
+        ),
         (
             "transport/multicast/qos/enabled",
             wz.multicast_qos.to_string(),
@@ -582,6 +599,14 @@ fn the_defaults_each_implementation_falls_back_to_are_pinned_against_a_real_zeno
         "queries_default_timeout",
         "routing/interests/timeout",
         "scouting/timeout",
+        // R2958 (open-debt item 840) — MEASURED on zenohd 1.10.0 with this
+        // leg's silent census file: `"scouting":{"delay":null,…}` and
+        // `"open":{"return_conditions":{"connect_scouted":null,…}}`. Both are
+        // `Option` fields whose defaults (500, `true`) are applied at the read
+        // site (`zenoh/src/net/runtime/orchestrator.rs` @
+        // `unwrap_or_default!(guard.scouting().delay())`), as for the key above.
+        "scouting/delay",
+        "open/return_conditions/connect_scouted",
         "transport/link/tls/root_ca_certificate",
         "transport/link/tls/listen_certificate",
         "transport/link/tls/listen_private_key",
@@ -3456,7 +3481,14 @@ fn a_wz_node_configured_only_by_a_stock_zenoh_config_reaches_a_real_zenohd() {
       autoconnect_strategy: "always",
     }},
     timeout: 2500,
+    // R2958 (open-debt item 840) — named because it must reach NOTHING here:
+    // only a peer's startup waits for its peers, so a client's expansion
+    // withholds it. Upstream's own default (500).
+    delay: 500,
   }},
+  // R2958 — `scouting/delay`'s partner, withheld from a client for the same
+  // reason. Upstream's own default (`true`).
+  open: {{ return_conditions: {{ connect_scouted: true }} }},
   transport: {{
     unicast: {{
       max_links: 2,
