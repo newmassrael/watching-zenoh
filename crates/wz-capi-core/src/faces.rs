@@ -82,7 +82,7 @@ use wz_runtime_tokio::runtime_impl::{TokioRuntime, TokioTime};
 use wz_runtime_tokio::session::{
     InterestForm, LocalDeliveryDrain, MatchingInterestHold, MatchingListener, MatchingStatus,
     PublishAliasError, PublishError, PublishOptions, QueryOptions, Queryable, QueryableOptions,
-    SubscribeOptions, Subscriber, TokioSession,
+    RetractionKey, SubscribeOptions, Subscriber, TokioSession,
 };
 use wz_runtime_tokio::session::{
     LivelinessOptions, LivelinessSubscriber, LivelinessSubscriberOptions, LivelinessToken,
@@ -489,6 +489,12 @@ struct SubEntry {
     allowed_origin: Locality,
     /// How the peer is told the key — see [`WireKey`].
     wire: WireKey,
+    /// The key the retraction names beside the id, when the declaring ABI's
+    /// reference library names one — see
+    /// [`SubscribeOptions::with_retraction_naming`]. Kept for the same reason
+    /// as `wire`: a face that joins later replays the subscription and must
+    /// retract it the way the first face does.
+    retraction: Option<RetractionKey>,
     sink: SubscriberSink,
 }
 
@@ -507,6 +513,9 @@ struct QblEntry {
     allowed_origin: Locality,
     /// How the peer is told the key — see [`WireKey`].
     wire: WireKey,
+    /// The key the retraction names beside the id — see
+    /// [`SubEntry::retraction`].
+    retraction: Option<RetractionKey>,
     sink: QueryableSink,
 }
 
@@ -1424,7 +1433,9 @@ impl SharedSession {
                 &session,
                 &entry.keyexpr,
                 &entry.wire,
-                SubscribeOptions::default().with_allowed_origin(entry.allowed_origin),
+                SubscribeOptions::default()
+                    .with_allowed_origin(entry.allowed_origin)
+                    .with_retraction_naming(entry.retraction.clone()),
                 (entry.sink)(),
             ) {
                 subs.insert(entry.id, sub);
@@ -1436,7 +1447,8 @@ impl SharedSession {
                 &session,
                 &entry.keyexpr,
                 &entry.wire,
-                queryable_options(entry.complete, entry.allowed_origin),
+                queryable_options(entry.complete, entry.allowed_origin)
+                    .with_retraction_naming(entry.retraction.clone()),
                 (entry.sink)(&session),
             ) {
                 qbls.insert(entry.id, qbl);
@@ -2464,15 +2476,18 @@ impl SharedSession {
         allowed_origin: Locality,
         sink: SubscriberSink,
     ) -> SubId {
-        self.declare_subscriber_on_wire(keyexpr, WireKey::literal(), allowed_origin, sink)
+        self.declare_subscriber_on_wire(keyexpr, WireKey::literal(), allowed_origin, None, sink)
     }
 
-    /// [`Self::declare_subscriber`], announced to every peer as `wire`.
+    /// [`Self::declare_subscriber`], announced to every peer as `wire` and
+    /// retracted naming `retraction` when the declaring ABI's reference
+    /// library does (`None` retracts by id alone).
     pub fn declare_subscriber_on_wire(
         &self,
         keyexpr: String,
         wire: WireKey,
         allowed_origin: Locality,
+        retraction: Option<RetractionKey>,
         sink: SubscriberSink,
     ) -> SubId {
         let mut guard = self.lock();
@@ -2492,7 +2507,9 @@ impl SharedSession {
                 &face.session,
                 &keyexpr,
                 &wire,
-                SubscribeOptions::default().with_allowed_origin(allowed_origin),
+                SubscribeOptions::default()
+                    .with_allowed_origin(allowed_origin)
+                    .with_retraction_naming(retraction.clone()),
                 sink(),
             ) {
                 face.subs.insert(id, sub);
@@ -2503,6 +2520,7 @@ impl SharedSession {
             keyexpr,
             allowed_origin,
             wire,
+            retraction,
             sink,
         });
         id
@@ -3176,16 +3194,26 @@ impl SharedSession {
         allowed_origin: Locality,
         sink: QueryableSink,
     ) -> QblId {
-        self.declare_queryable_on_wire(keyexpr, WireKey::literal(), complete, allowed_origin, sink)
+        self.declare_queryable_on_wire(
+            keyexpr,
+            WireKey::literal(),
+            complete,
+            allowed_origin,
+            None,
+            sink,
+        )
     }
 
-    /// [`Self::declare_queryable`], announced to every peer as `wire`.
+    /// [`Self::declare_queryable`], announced to every peer as `wire` and
+    /// retracted naming `retraction` when the declaring ABI's reference
+    /// library does (`None` retracts by id alone).
     pub fn declare_queryable_on_wire(
         &self,
         keyexpr: String,
         wire: WireKey,
         complete: bool,
         allowed_origin: Locality,
+        retraction: Option<RetractionKey>,
         sink: QueryableSink,
     ) -> QblId {
         let mut guard = self.lock();
@@ -3203,7 +3231,8 @@ impl SharedSession {
                 &face.session,
                 &keyexpr,
                 &wire,
-                queryable_options(complete, allowed_origin),
+                queryable_options(complete, allowed_origin)
+                    .with_retraction_naming(retraction.clone()),
                 callback,
             ) {
                 face.qbls.insert(id, qbl);
@@ -3215,6 +3244,7 @@ impl SharedSession {
             complete,
             allowed_origin,
             wire,
+            retraction,
             sink,
         });
         id

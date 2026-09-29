@@ -12,7 +12,10 @@
 use std::ffi::{c_char, c_void, CStr};
 use std::sync::{Arc, Weak};
 
+use wz_capi_core::drive::SessionState;
 use wz_capi_core::faces::{SharedSession, WireKey};
+use wz_runtime_tokio::session::RetractionKey;
+use wz_runtime_tokio::session_glue::WhatAmI;
 
 use crate::abi::{
     view_bytes, z_loaned_keyexpr_t, z_loaned_string_t, z_moved_keyexpr_t, z_owned_keyexpr_t,
@@ -204,6 +207,31 @@ impl DeclaredKeyexpr {
             }
             None => WireKey::literal(),
         }
+    }
+
+    /// What an entity held on this key names when it retracts itself, or `None`
+    /// when it retracts by id alone.
+    ///
+    /// pico names the entity's OWN key in every mode but client (`vendor/zenoh-pico/src/net/primitives.c`
+    /// @ `_z_wireexpr_t expr = _z_declared_keyexpr_alias_to_wire(&_Z_RC_IN_VAL(&s)->_key, zn);`),
+    /// and that key is the one this is called on: for a subscriber it is not
+    /// the key the subscription was announced on, which is the caller's.
+    pub(crate) fn retraction_naming(&self, state: &SessionState) -> Option<RetractionKey> {
+        if crate::write_filter::session_mode(state) == WhatAmI::Client {
+            return None;
+        }
+        let wire = self.wire(&state.shared);
+        Some(if wire.mapping_id == 0 {
+            RetractionKey {
+                mapping_id: 0,
+                suffix: self.literal.clone(),
+            }
+        } else {
+            RetractionKey {
+                mapping_id: wire.mapping_id,
+                suffix: wire.suffix.unwrap_or_default(),
+            }
+        })
     }
 
     /// pico `_z_declared_keyexpr_declare`: a key whose declaration covers ALL

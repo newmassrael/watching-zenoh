@@ -5010,8 +5010,16 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
             // The retraction captures the unicast actions Arc + the wire id;
             // type-erased so `Queryable` stays free of the wire-codec types.
             let actions_for_drop = actions.clone();
-            Ok(Some(Box::new(move || {
-                actions_for_drop.send_undeclare_queryable(wire_id)
+            // Id-only unless the declaring ABI asked for the key too — see
+            // `QueryableOptions::with_retraction_naming`.
+            let names = options.retraction_key().cloned();
+            Ok(Some(Box::new(move || match &names {
+                Some(key) => actions_for_drop.send_undeclare_queryable_naming(
+                    wire_id,
+                    key.mapping_id,
+                    &key.suffix,
+                ),
+                None => actions_for_drop.send_undeclare_queryable(wire_id),
             })))
         }
         #[cfg(not(feature = "declare-queryable"))]
@@ -5388,8 +5396,16 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
             // The retraction captures the unicast actions Arc + the wire id;
             // type-erased so `Subscriber<R>` stays free of the `T` clock param.
             let actions_for_drop = actions.clone();
-            Ok(Some(Box::new(move || {
-                actions_for_drop.send_undeclare_subscriber(wire_id)
+            // Id-only unless the declaring ABI asked for the key too — see
+            // `SubscribeOptions::with_retraction_naming`.
+            let names = options.retraction_key().cloned();
+            Ok(Some(Box::new(move || match &names {
+                Some(key) => actions_for_drop.send_undeclare_subscriber_naming(
+                    wire_id,
+                    key.mapping_id,
+                    &key.suffix,
+                ),
+                None => actions_for_drop.send_undeclare_subscriber(wire_id),
             })))
         }
         #[cfg(not(feature = "declare-subscriber"))]

@@ -47,12 +47,31 @@ pub struct QueryableOptions {
     /// DEFAULT `QueryableInfo`, omitted on the wire (byte-identical to a
     /// plain declaration).
     pub complete: bool,
+    /// The key the retraction names, when it names one — see
+    /// [`Self::with_retraction_naming`].
+    retraction_key: Option<RetractionKey>,
 }
 
 impl QueryableOptions {
-    /// Default options — `allowed_origin = Locality::Any`, `complete = false`.
+    /// Default options — `allowed_origin = Locality::Any`, `complete = false`,
+    /// id-only retraction.
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Make the queryable's `UndeclareQueryable` carry `key` beside its id —
+    /// the query-plane twin of [`SubscribeOptions::with_retraction_naming`],
+    /// for the same reason: zenoh-pico does in every mode but client
+    /// (`vendor/zenoh-pico/src/net/primitives.c` @
+    /// `_z_wireexpr_t expr = _z_declared_keyexpr_alias_to_wire(&_Z_RC_IN_VAL(&q)->_key, zn);`).
+    pub fn with_retraction_naming(mut self, key: Option<RetractionKey>) -> Self {
+        self.retraction_key = key;
+        self
+    }
+
+    /// See [`Self::with_retraction_naming`].
+    pub fn retraction_key(&self) -> Option<&RetractionKey> {
+        self.retraction_key.as_ref()
     }
 
     /// Pin the queryable-side locality predicate.

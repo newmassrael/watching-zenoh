@@ -757,6 +757,62 @@ pub fn build_undeclare_queryable_with_keyexpr(keyexpr: &str) -> Result<DeclareOw
     })
 }
 
+/// Build a `Declare(UndeclSubscriber)` that retracts subscriber `subscriber_id`
+/// AND names the key the subscription is held on, in the wire form given.
+///
+/// The third retraction shape for a subscriber, beside the id-only
+/// [`build_undeclare_subscriber`] that zenoh's session sends and the sourced
+/// [`build_undeclare_subscriber_with_keyexpr`] a router sends (`id == 0`).
+/// zenoh-pico keeps the id AND attaches the key in every mode but client
+/// (`vendor/zenoh-pico/src/net/primitives.c` @
+/// `_z_wireexpr_t expr = _z_declared_keyexpr_alias_to_wire(&_Z_RC_IN_VAL(&s)->_key, zn);`),
+/// so a drop-in for it has to as well. Which key it names is the caller's: for
+/// pico it is the subscription's OWN key, which is not always the key the
+/// subscriber was announced on.
+pub fn build_undeclare_subscriber_on_wire(
+    subscriber_id: u64,
+    mapping_id: u64,
+    suffix: &str,
+) -> Result<DeclareOwned, CodecError> {
+    let ext = crate::declare_ext_keyexpr::build_ext_wireexpr(mapping_id, suffix)?;
+    Ok(DeclareOwned {
+        header: DECLARE_ENVELOPE_HEADER,
+        interest_id: None,
+        extensions: Some(declare_envelope_extensions()),
+        body: DeclareOwnedVariant::CodecZenohUndeclSubscriber(UndeclSubscriberOwned {
+            // Z (bit 7): the inner declaration carries an extension chain.
+            header: wire_const::D_MID_UNDECL_SUBSCRIBER | 0x80,
+            id: subscriber_id,
+            extensions: Some(alloc::vec![ext]),
+        }),
+    })
+}
+
+/// Build a `Declare(UndeclQueryable)` that retracts queryable `queryable_id`
+/// AND names the key it is held on, in the wire form given — the query-plane
+/// twin of [`build_undeclare_subscriber_on_wire`], differing only in the inner
+/// MID (0x05 against 0x03). zenoh-pico does the same for a queryable
+/// (`vendor/zenoh-pico/src/net/primitives.c` @
+/// `_z_wireexpr_t expr = _z_declared_keyexpr_alias_to_wire(&_Z_RC_IN_VAL(&q)->_key, zn);`).
+pub fn build_undeclare_queryable_on_wire(
+    queryable_id: u64,
+    mapping_id: u64,
+    suffix: &str,
+) -> Result<DeclareOwned, CodecError> {
+    let ext = crate::declare_ext_keyexpr::build_ext_wireexpr(mapping_id, suffix)?;
+    Ok(DeclareOwned {
+        header: DECLARE_ENVELOPE_HEADER,
+        interest_id: None,
+        extensions: Some(declare_envelope_extensions()),
+        body: DeclareOwnedVariant::CodecZenohUndeclQueryable(UndeclQueryableOwned {
+            // Z (bit 7): the inner declaration carries an extension chain.
+            header: wire_const::D_MID_UNDECL_QUERYABLE | 0x80,
+            id: queryable_id,
+            extensions: Some(alloc::vec![ext]),
+        }),
+    })
+}
+
 /// R121i-c — build a `Declare(UndeclToken)` network-message that
 /// retracts a previously declared liveliness token (id) on the peer.
 /// Same no-ext shape contract as [`build_undeclare_subscriber`];
@@ -2060,6 +2116,52 @@ mod tests {
         assert_eq!(
             wire, expected,
             "sourced UndeclareQueryable + ext_keyexpr wire must match zenoh-pico",
+        );
+    }
+
+    /// The retraction zenoh-pico sends in every mode but client keeps the
+    /// entity's ID (unlike the sourced form above, whose id is 0) and names its
+    /// key through the sender's own mapping: `[is_local | has_suffix, VLE(id),
+    /// suffix]`. The body sizes are the ones measured off the real library —
+    /// `ext(0x5f:zbuf[5])` for a subscriber held on declared prefix 7 and the
+    /// tail `/**`.
+    #[test]
+    fn build_undeclare_subscriber_on_wire_keeps_the_id_and_names_the_aliased_key() {
+        let d = build_undeclare_subscriber_on_wire(5, 7, "/**").unwrap();
+        let mut expected = envelope(&[
+            0x83, // UndeclSubscriber MID 0x03 | Z (ext chain present)
+            0x05, // VLE(id 5) — the entity's own id survives
+            0x5f, // ext_keyexpr header: ENC_ZBUF 0x40 | M 0x10 | id 0x0f
+            0x05, // ZBuf len VLE(5) = inner_header(1) + VLE(7)(1) + 3 suffix
+            0x03, // inner_header: is_local(2) | has_suffix(1)
+            0x07, // VLE(mapping id 7) — the declared prefix
+        ]);
+        expected.extend_from_slice(b"/**");
+        assert_eq!(
+            d.wire(),
+            expected,
+            "UndeclareSubscriber naming its key must match zenoh-pico"
+        );
+    }
+
+    /// The query-plane twin, and the whole-key case: a queryable held on a
+    /// declaration that covers all of its key has an EMPTY suffix, so the body
+    /// is two bytes and `has_suffix` is clear (upstream's `kelen != 0`).
+    #[test]
+    fn build_undeclare_queryable_on_wire_keeps_the_id_and_names_the_aliased_key() {
+        let d = build_undeclare_queryable_on_wire(9, 7, "").unwrap();
+        let expected = envelope(&[
+            0x85, // UndeclQueryable MID 0x05 | Z (ext chain present)
+            0x09, // VLE(id 9) — the entity's own id survives
+            0x5f, // ext_keyexpr header: ENC_ZBUF 0x40 | M 0x10 | id 0x0f
+            0x02, // ZBuf len VLE(2) = inner_header(1) + VLE(7)(1), no suffix
+            0x02, // inner_header: is_local(2), has_suffix clear
+            0x07, // VLE(mapping id 7) — the declaration covers the whole key
+        ]);
+        assert_eq!(
+            d.wire(),
+            expected,
+            "UndeclareQueryable naming its key must match zenoh-pico"
         );
     }
 

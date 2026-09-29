@@ -1175,6 +1175,9 @@ unsafe fn declare_queryable_inner(
         key.wire(&state.shared),
         complete,
         wz_runtime_tokio::locality::Locality::Remote,
+        // A peer or router-hat session retracts the queryable naming its key
+        // (`_z_undeclare_queryable`) — the announced one, for a queryable.
+        key.retraction_naming(&state),
         {
             // R311y498 — see the pubsub/liveliness twins: the shim mints, the
             // registry calls the factory per face, the C drop(context) is unmoved.

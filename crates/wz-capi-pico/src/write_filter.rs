@@ -23,12 +23,27 @@
 //! composition in `_z_write_filter_create`.) Both are read at DECLARE time and
 //! not again, as upstream reads them.
 //!
-//! ⚠ ONE DIVERGENCE IS NOT REPRODUCED, and it is upstream's: a pico peer that
-//! asked never sends the `Interest(Final)` — `_z_remove_interest` sends it for a
-//! client (or multicast) only — so the router keeps the interest until the
-//! session closes. wz retracts it, which no program can observe and which costs
-//! the peer nothing to hold. A peer-mode differential would name the difference,
-//! and the leg that adds one decides whether to pin it or to mirror the leak.
+//! ⚠ TWO DIVERGENCES ARE NOT REPRODUCED, both upstream's, both wz doing less,
+//! and both measured by the peer legs of `pico_keyexpr_declaration_twice_and_diff`
+//! (R2968), which pin each from both sides and compare everything else whole:
+//!
+//! - A pico peer that asked never sends the `Interest(Final)` —
+//!   `_z_remove_interest` sends it for a client (or multicast) only — so the
+//!   router keeps the interest until the session closes. wz retracts it, which
+//!   no program can observe and which costs the peer nothing to hold. Copying it
+//!   would be copying a leak.
+//! - A pico peer's filter is opened by ANY matching declaration the session
+//!   already holds, of either kind: `_z_interest_replay_declare` replays them
+//!   without regard to what the filter counts. A subscriber the peer declared
+//!   therefore opens a querier's filter, and pico sends a Query nothing can
+//!   answer. wz opens a querier's filter on queryables only, as zenoh does. The
+//!   replay is kind-blind for a peer alone: a client's interest is aggregate,
+//!   and an aggregate replay matches on key equality.
+//!
+//! What IS reproduced, and is what a peer's mode changes on the wire: whether it
+//! asks at all (above), and that its subscriber and queryable retractions name
+//! the key they were held on, which a client's do not
+//! (`DeclaredKeyexpr::retraction_naming`).
 
 use std::sync::Arc;
 
@@ -47,6 +62,15 @@ use crate::keyexpr::DeclaredKeyexpr;
 /// face records the PEER's role, not ours.
 pub(crate) struct PicoSessionMode(pub(crate) WhatAmI);
 
+/// This session's own role, [`WhatAmI::Client`] when none was recorded (a
+/// session this ABI did not open, which no C entry point can hand it).
+pub(crate) fn session_mode(state: &SessionState) -> WhatAmI {
+    state
+        .abi_extension::<PicoSessionMode>()
+        .map(|m| m.0)
+        .unwrap_or(WhatAmI::Client)
+}
+
 /// A publisher's or querier's write filter. Dropping it retracts the filter,
 /// which releases the Interest it took.
 ///
@@ -62,11 +86,7 @@ impl WriteFilter {
     /// Create the filter for an entity whose own key is `key`.
     pub(crate) fn declare(state: &SessionState, plane: FilterPlane, key: &DeclaredKeyexpr) -> Self {
         let shared = state.shared.clone();
-        let mode = state
-            .abi_extension::<PicoSessionMode>()
-            .map(|m| m.0)
-            .unwrap_or(WhatAmI::Client);
-        let ask = interest_form(&shared, mode, key);
+        let ask = interest_form(&shared, session_mode(state), key);
         let id = shared.declare_write_filter(plane, key.literal().to_owned(), ask);
         Self { shared, id }
     }

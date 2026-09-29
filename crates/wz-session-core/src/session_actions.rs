@@ -8403,19 +8403,45 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// Drop type-ungating that calls this unconditionally.
     pub fn send_undeclare_subscriber(&self, subscriber_id: u64) {
         #[cfg(all(feature = "declare-subscriber", feature = "declare-undeclare"))]
-        {
-            let declare = build_undeclare_subscriber(subscriber_id);
-            // F2 — this surface has no error channel; a transport-down
-            // reject drops the emit exactly as the dead link would.
-            let _ = self.dispatch_declare(declare, /*reliable=*/ true);
-            // A4 — drop the matching replay entry (pico
-            // `_z_prune_declaration` undeclare-filter on `_id`).
-            #[cfg(feature = "session-reconnect")]
-            self.prune_declaration(|entry| {
-                matches!(entry, CachedDeclaration::Subscriber { subscriber_id: s, .. } if *s == subscriber_id)
-            });
-        }
+        self.retract_subscriber(subscriber_id, build_undeclare_subscriber(subscriber_id));
         #[cfg(not(all(feature = "declare-subscriber", feature = "declare-undeclare")))]
+        let _ = subscriber_id;
+    }
+
+    /// [`Self::send_undeclare_subscriber`], with the retraction naming the key
+    /// the subscription is held on (`mapping_id` + `suffix`, the wire form) as
+    /// well as its id. See [`build_undeclare_subscriber_on_wire`] for who sends
+    /// which.
+    pub fn send_undeclare_subscriber_naming(
+        &self,
+        subscriber_id: u64,
+        mapping_id: u64,
+        suffix: &str,
+    ) {
+        #[cfg(all(feature = "declare-subscriber", feature = "declare-undeclare"))]
+        self.retract_subscriber(
+            subscriber_id,
+            build_undeclare_subscriber_on_wire(subscriber_id, mapping_id, suffix)
+                .expect("the ext body rides the alloc carrier, which is unbounded"),
+        );
+        #[cfg(not(all(feature = "declare-subscriber", feature = "declare-undeclare")))]
+        let _ = (subscriber_id, mapping_id, suffix);
+    }
+
+    /// The emit and the replay-cache prune every subscriber retraction shape
+    /// shares, so the shapes differ in the frame and in nothing else.
+    #[cfg(all(feature = "declare-subscriber", feature = "declare-undeclare"))]
+    fn retract_subscriber(&self, subscriber_id: u64, declare: DeclareOwned) {
+        // F2 — this surface has no error channel; a transport-down
+        // reject drops the emit exactly as the dead link would.
+        let _ = self.dispatch_declare(declare, /*reliable=*/ true);
+        // A4 — drop the matching replay entry (pico
+        // `_z_prune_declaration` undeclare-filter on `_id`).
+        #[cfg(feature = "session-reconnect")]
+        self.prune_declaration(|entry| {
+            matches!(entry, CachedDeclaration::Subscriber { subscriber_id: s, .. } if *s == subscriber_id)
+        });
+        #[cfg(not(feature = "session-reconnect"))]
         let _ = subscriber_id;
     }
 
@@ -8430,19 +8456,44 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// Drop type-ungating that calls this unconditionally.
     pub fn send_undeclare_queryable(&self, queryable_id: u64) {
         #[cfg(all(feature = "declare-queryable", feature = "declare-undeclare"))]
-        {
-            let declare = build_undeclare_queryable(queryable_id);
-            // F2 — this surface has no error channel; a transport-down
-            // reject drops the emit exactly as the dead link would.
-            let _ = self.dispatch_declare(declare, /*reliable=*/ true);
-            // A4 — drop the matching replay entry (pico
-            // `_z_prune_declaration` undeclare-filter on `_id`).
-            #[cfg(feature = "session-reconnect")]
-            self.prune_declaration(|entry| {
-                matches!(entry, CachedDeclaration::Queryable { queryable_id: q, .. } if *q == queryable_id)
-            });
-        }
+        self.retract_queryable(queryable_id, build_undeclare_queryable(queryable_id));
         #[cfg(not(all(feature = "declare-queryable", feature = "declare-undeclare")))]
+        let _ = queryable_id;
+    }
+
+    /// [`Self::send_undeclare_queryable`], with the retraction naming the key
+    /// the queryable is held on as well as its id — the query-plane twin of
+    /// [`Self::send_undeclare_subscriber_naming`].
+    pub fn send_undeclare_queryable_naming(
+        &self,
+        queryable_id: u64,
+        mapping_id: u64,
+        suffix: &str,
+    ) {
+        #[cfg(all(feature = "declare-queryable", feature = "declare-undeclare"))]
+        self.retract_queryable(
+            queryable_id,
+            build_undeclare_queryable_on_wire(queryable_id, mapping_id, suffix)
+                .expect("the ext body rides the alloc carrier, which is unbounded"),
+        );
+        #[cfg(not(all(feature = "declare-queryable", feature = "declare-undeclare")))]
+        let _ = (queryable_id, mapping_id, suffix);
+    }
+
+    /// The emit and the replay-cache prune every queryable retraction shape
+    /// shares — see [`Self::retract_subscriber`].
+    #[cfg(all(feature = "declare-queryable", feature = "declare-undeclare"))]
+    fn retract_queryable(&self, queryable_id: u64, declare: wz_codecs::declare::DeclareOwned) {
+        // F2 — this surface has no error channel; a transport-down
+        // reject drops the emit exactly as the dead link would.
+        let _ = self.dispatch_declare(declare, /*reliable=*/ true);
+        // A4 — drop the matching replay entry (pico
+        // `_z_prune_declaration` undeclare-filter on `_id`).
+        #[cfg(feature = "session-reconnect")]
+        self.prune_declaration(|entry| {
+            matches!(entry, CachedDeclaration::Queryable { queryable_id: q, .. } if *q == queryable_id)
+        });
+        #[cfg(not(feature = "session-reconnect"))]
         let _ = queryable_id;
     }
 

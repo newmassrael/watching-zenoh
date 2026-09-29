@@ -1797,9 +1797,13 @@ pub unsafe extern "C" fn z_declare_subscriber(
         let Some(wire) = subscriber_wire(keyexpr, &state.shared, &key) else {
             return Z_ERR_INVALID;
         };
+        // A peer or router-hat session retracts the subscription naming ITS key
+        // (`_z_undeclare_subscriber`), which is the prefix declaration above and
+        // not the caller's key the announce went out on.
+        let retraction = key.retraction_naming(state);
         let id = state
             .shared
-            .declare_subscriber_on_wire(ke, wire, Locality::Remote, {
+            .declare_subscriber_on_wire(ke, wire, Locality::Remote, retraction, {
                 let closure = Arc::new(cclosure);
                 Arc::new(move || Box::new(make_subscriber_callback(closure.clone())) as Box<_>)
             });
@@ -1875,10 +1879,14 @@ pub unsafe extern "C" fn z_declare_background_subscriber(
         let Some(wire) = subscriber_wire(keyexpr, &state.shared, &key) else {
             return Z_ERR_INVALID;
         };
+        // Named before the key is dropped: the entry keeps it alive through
+        // `wire`'s anchor (see `subscriber_wire`), so the id it names stays
+        // declared for as long as the entry can retract.
+        let retraction = key.retraction_naming(state);
         drop(key);
         let _ = state
             .shared
-            .declare_subscriber_on_wire(ke, wire, Locality::Remote, {
+            .declare_subscriber_on_wire(ke, wire, Locality::Remote, retraction, {
                 let closure = Arc::new(cclosure);
                 Arc::new(move || Box::new(make_subscriber_callback(closure.clone())) as Box<_>)
             });

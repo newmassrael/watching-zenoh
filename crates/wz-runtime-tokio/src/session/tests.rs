@@ -7779,6 +7779,117 @@ fn a_token_retraction_names_its_key_only_when_the_declaring_abi_asks() {
     }
 }
 
+/// R2968 — a subscriber's retraction names a key only when the declaring ABI
+/// hands it one, and then that key, which need not be the one it announced on.
+/// Both arms are checked byte for byte against the builders, so neither can
+/// pass by the other's frame.
+#[cfg(all(
+    feature = "codec-declare",
+    feature = "declare-keyexpr",
+    feature = "declare-subscriber",
+    feature = "declare-undeclare"
+))]
+#[test]
+fn a_subscriber_retraction_names_its_key_only_when_the_declaring_abi_asks() {
+    use wz_session_core::declare_build::{
+        build_undeclare_subscriber, build_undeclare_subscriber_on_wire,
+    };
+    let names = RetractionKey {
+        mapping_id: 8,
+        suffix: "/**".to_owned(),
+    };
+    for named in [None, Some(names.clone())] {
+        let (session, driver) = build_session();
+        session
+            .actions()
+            .send_declare_keyexpr(7, "home/temp")
+            .expect("hardcoded canonical literal keyexpr");
+        mark_session_established(&session);
+        // Announced on 7, retracted naming 8: pico's two keys for one
+        // subscriber (`z_declare_subscriber` announces the caller's key and
+        // retracts the subscription's own).
+        let sub = session
+            .declare_subscriber_aliased(
+                7,
+                None,
+                SubscribeOptions::default().with_retraction_naming(named.clone()),
+                |_| {},
+            )
+            .expect("declared mapping resolves");
+        let id = sub.id().as_u64();
+        let before = driver.frame_count();
+        drop(sub);
+        assert_eq!(driver.frame_count(), before + 1, "one retraction frame");
+        let frame = driver.frame_bytes(before);
+        let declare = match &named {
+            Some(key) => build_undeclare_subscriber_on_wire(id, key.mapping_id, &key.suffix)
+                .expect("alloc carrier"),
+            None => build_undeclare_subscriber(id),
+        };
+        let expected = declare
+            .try_as_borrowed()
+            .expect("test: <=N exts by construction")
+            .encode_to_vec();
+        assert!(
+            frame.windows(expected.len()).any(|w| w == expected),
+            "named={named:?}: the retraction is not the expected shape"
+        );
+    }
+}
+
+/// R2968 — the queryable twin of the subscriber test above.
+#[cfg(all(
+    feature = "codec-declare",
+    feature = "declare-keyexpr",
+    feature = "declare-queryable",
+    feature = "query-queryable",
+    feature = "declare-undeclare"
+))]
+#[test]
+fn a_queryable_retraction_names_its_key_only_when_the_declaring_abi_asks() {
+    use wz_session_core::declare_build::{
+        build_undeclare_queryable, build_undeclare_queryable_on_wire,
+    };
+    let names = RetractionKey {
+        mapping_id: 7,
+        suffix: "/*/x".to_owned(),
+    };
+    for named in [None, Some(names.clone())] {
+        let (session, driver) = build_session();
+        session
+            .actions()
+            .send_declare_keyexpr(7, "home/temp")
+            .expect("hardcoded canonical literal keyexpr");
+        mark_session_established(&session);
+        let qbl = session
+            .declare_queryable_aliased(
+                7,
+                Some("/*/x"),
+                QueryableOptions::default().with_retraction_naming(named.clone()),
+                |_, _| {},
+            )
+            .expect("declared mapping resolves");
+        let id = qbl.id().as_u64();
+        let before = driver.frame_count();
+        drop(qbl);
+        assert_eq!(driver.frame_count(), before + 1, "one retraction frame");
+        let frame = driver.frame_bytes(before);
+        let declare = match &named {
+            Some(key) => build_undeclare_queryable_on_wire(id, key.mapping_id, &key.suffix)
+                .expect("alloc carrier"),
+            None => build_undeclare_queryable(id),
+        };
+        let expected = declare
+            .try_as_borrowed()
+            .expect("test: <=N exts by construction")
+            .encode_to_vec();
+        assert!(
+            frame.windows(expected.len()).any(|w| w == expected),
+            "named={named:?}: the retraction is not the expected shape"
+        );
+    }
+}
+
 #[test]
 fn declare_subscriber_aliased_unknown_mapping_returns_err() {
     let (session, _driver) = build_session();

@@ -27,10 +27,26 @@ pub struct SubscribeOptions {
     /// loopback Samples (R227+
     /// [`crate::pubsub::SubscriberRegistry::local_publish`]).
     pub allowed_origin: Locality,
+    /// The key the retraction names, when it names one — see
+    /// [`Self::with_retraction_naming`].
+    retraction_key: Option<RetractionKey>,
+}
+
+/// The key an entity's `Undeclare*` names beside its id, in the wire form it
+/// is held under: a declared prefix's id and the rest of the key, or `0` and
+/// the whole literal. Shared by [`SubscribeOptions`] and
+/// [`crate::session::QueryableOptions`], whose retractions take the same shape.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RetractionKey {
+    /// The prefix's mapping id, or `0` for a literal.
+    pub mapping_id: u64,
+    /// The rest of the key after the prefix; the whole key when `mapping_id`
+    /// is `0`.
+    pub suffix: String,
 }
 
 impl SubscribeOptions {
-    /// Default options — `allowed_origin = Locality::Any`.
+    /// Default options — `allowed_origin = Locality::Any`, id-only retraction.
     pub fn new() -> Self {
         Self::default()
     }
@@ -39,6 +55,25 @@ impl SubscribeOptions {
     pub fn with_allowed_origin(mut self, locality: Locality) -> Self {
         self.allowed_origin = locality;
         self
+    }
+
+    /// Make the subscriber's `UndeclareSubscriber` carry `key` beside its id.
+    ///
+    /// Off by default because zenoh's session retracts by id alone; zenoh-pico
+    /// attaches the key in every mode but client
+    /// (`vendor/zenoh-pico/src/net/primitives.c` @
+    /// `_z_wireexpr_t expr = _z_declared_keyexpr_alias_to_wire(&_Z_RC_IN_VAL(&s)->_key, zn);`).
+    /// The two reference libraries disagree, so it is a declaring ABI's choice
+    /// and not this session's — and the key is the ABI's too, since pico names
+    /// the subscription's own key where it announced the caller's.
+    pub fn with_retraction_naming(mut self, key: Option<RetractionKey>) -> Self {
+        self.retraction_key = key;
+        self
+    }
+
+    /// See [`Self::with_retraction_naming`].
+    pub fn retraction_key(&self) -> Option<&RetractionKey> {
+        self.retraction_key.as_ref()
     }
 }
 
