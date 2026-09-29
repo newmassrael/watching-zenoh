@@ -701,6 +701,11 @@ round_fed_gates=(
     "upstream_feature_census.py"
     "upstream_link_axis_gate.py --check"
     "upstream_link_config_keys_gate.py --check"
+    # R2973 -- which hosts each link runs on, against upstream's own gates at the
+    # pin. Round-fed by what it reads: every workspace crate's cfg sites and the
+    # link module gates in wz-runtime-tokio's lib.rs. MEASURED: 2.3s, a text read
+    # plus one `cargo metadata --no-deps`, no build.
+    "platform_surface_matrix.py --check"
     "upstream_reads_the_surface.py"
     "apt_package_census.py"
     "armed_skip_guard.py --check"

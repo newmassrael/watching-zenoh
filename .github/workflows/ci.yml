@@ -5130,3 +5130,33 @@ jobs:
             echo "$out" >&2
             exit 1
           }
+
+      # ── R2973 — every link upstream serves on this host, not only TCP ────
+      #
+      # The three steps above prove TCP. `platform-macos` / `platform-windows`
+      # claim wz runs on these hosts, and TCP is one of the eleven links wz has.
+      # `scripts/lib/platform_surface_matrix.py` derives, from the pin, which
+      # links and host-restricted features upstream serves on each host, and
+      # declares the leg this host is owed: the integration-test targets that
+      # exercise each link wz serves here, run in ONE cargo invocation with the
+      # union feature set, each required to pass at least one test.
+      #
+      # It is `--run`, not `--check`: the static arms run on the Linux jobs (Layer
+      # C0 and Layer Z), and this step is the one thing only these two hosts can
+      # do. What it does NOT execute on a host is printed as `DOES NOT EXECUTE`
+      # with the open-debt item that owns it, so a gap cannot read as coverage.
+      #
+      # `setup-python` rather than the image's `python3`: the gate is python, and
+      # whether a bare `python3` resolves in bash on the Windows image is not a
+      # fact this file can check. `RUNNER_OS` is lower-cased with `tr` because
+      # macOS ships bash 3.2, which has no `${var,,}`.
+      - name: Set up Python (the platform-surface matrix gate is python)
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: platform surface matrix — the leg this host is owed
+        shell: bash
+        run: |
+          host="$(echo "$RUNNER_OS" | tr '[:upper:]' '[:lower:]')"
+          python scripts/lib/platform_surface_matrix.py --run "$host"

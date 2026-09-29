@@ -3607,6 +3607,19 @@ layer_c0_test_discipline() {
     # here and is REQUIRED in Layer Z, exactly like the two gates above.
     python3 scripts/lib/upstream_link_config_keys_gate.py --selftest || return 1
     python3 scripts/lib/upstream_link_config_keys_gate.py --check || return 1
+    # R2973 (open-debt items 851 / 852) — WHICH HOSTS each link and each
+    # host-restricted feature runs on. `platform-macos` / `platform-windows` claim
+    # wz runs there, and the only execution evidence was one link (TCP) on the
+    # `portability` job; nothing said what those hosts owed, so a Windows build
+    # naming `transport-link-unixsock` failed with twelve errors and one naming
+    # `runtime-tokio-uring` with fifty-four, neither on any lane.
+    #
+    # The SELFTEST and the wz arms run here; the UPSTREAM arm needs the pinned
+    # source and is REQUIRED in Layer Z, the same split as the link-axis gate
+    # above. The hosted legs (`--run macos|windows`) run on the `portability`
+    # job, which is the only place those hosts exist.
+    python3 scripts/lib/platform_surface_matrix.py --selftest || return 1
+    python3 scripts/lib/platform_surface_matrix.py --check || return 1
     # R2564 — the token-plane diff `routing-token-tables` rests on, re-derived
     # from upstream's own `HatTokenTrait` rather than asserted in prose. The
     # atom's residual was an UNDONE AUDIT, and the sentence naming it had already
@@ -16018,6 +16031,14 @@ layer_z_zenohd_interop() {
     # residual is an ungraded gap, and an atom tagged COMPLETE may have none.
     if ! python3 scripts/lib/upstream_link_config_keys_gate.py --check --require; then
         echo "  Layer Z FAIL: an upstream link config key is graded by nobody" >&2
+        return 1
+    fi
+    # R2973 — the UPSTREAM arm of the platform matrix: the population is upstream's
+    # own registry and link crates at the pin, so this is the lane that can demand
+    # a source tree. Without it the arm is a skip C0 prints, and a skip that read
+    # green here would be the shape open debt 581 condition 3 names.
+    if ! python3 scripts/lib/platform_surface_matrix.py --check --require; then
+        echo "  Layer Z FAIL: a host wz serves a link on differs from upstream's, or is unproven" >&2
         return 1
     fi
     # R2564 — the same shape again: the population is upstream's own
