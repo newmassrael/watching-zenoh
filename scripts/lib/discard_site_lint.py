@@ -284,6 +284,39 @@ ALLOWED = [
         "it is what makes sure everything queued reached the wire before the "
         "session closes. Named `drain` for the same reason a buffer is",
     ),
+    # R2972 — the four shapes 2026-09-28's dissect and capture rounds added
+    # without this gate, which pre-push defers to hosted CI, having run on them.
+    # Each was read, not assumed: none discards evidence it does not account for.
+    (
+        "wz-capi-dissect/lib.rs",
+        "let n = handle.drain(&mut buffer);",
+        "a TEST draining a live handle into a local buffer so it can assert on "
+        "the records AND on `handle.lost()`: the drain's own trim is counted by "
+        "`lost`, and the test asserts that count beside the removal",
+    ),
+    (
+        "wz-capi-dissect/live.rs",
+        "self.drain(&mut []);",
+        "a drain into an EMPTY buffer, which settles every list's id before a "
+        "document is rendered and hands out no record: `drain` writes at most "
+        "`out.len()` records, so a later drain returns what it would have, and "
+        "the trim it reconciles is counted by `drain` itself (`*lost +=`)",
+    ),
+    (
+        "wz-capture/fields_json.rs",
+        "Some(i) => self.open.swap_remove(i).1,",
+        "a fragment chain leaving the renderer's OPEN-chain index because it "
+        "closed; the removal returns the chain's id to the row being rendered. "
+        "The index is rendering bookkeeping, and nothing captured is in it",
+    ),
+    (
+        "wz-capture/lib.rs",
+        "let removed = self.held.pop_front().is_some();",
+        "`ScoutingList::discard_oldest`, THE DOOR: it reports whether it "
+        "removed a message, and its one caller counts `self.drops.scouting += 1` "
+        "on that answer, as the type doc says. The obligation is the caller's, "
+        "and that site is inside this gate's window and carries the token",
+    ),
 ]
 
 
