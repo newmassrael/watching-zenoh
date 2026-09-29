@@ -775,7 +775,11 @@ HOST_GATED_CI_TARGETS: dict[str, str] = {
 # +1 R2959, `a_declaring_program_puts_the_same_declarations_on_the_wire_as_the_real_pico`
 # (`api-compat-pico`, the keyexprs a pico program declares, against libzenohpico).
 # 950 + 1 = 951, measured by the same script at this round's tree.
-FOREIGN_ADJUDICATOR_LINKS = 951
+# +1 R2964, `payload_constructors_on_wz_capi_pico_alias_and_release_as_real_libzenohpico`
+# (`api-compat-pico`, which payload constructors alias and when the caller's
+# deleter runs, against libzenohpico). 951 + 1 = 952, measured by the same
+# script at this round's tree.
+FOREIGN_ADJUDICATOR_LINKS = 952
 
 # ── Execution disclosure ────────────────────────────────────────────────────────
 #
