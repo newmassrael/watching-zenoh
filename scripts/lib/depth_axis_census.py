@@ -1178,7 +1178,13 @@ CITATION = re.compile(r"\b((?:[A-Za-z0-9_.-]+/)*[A-Za-z0-9_.-]+\.(?:rs|c|h))(?::
 # `ZephyrEntropy` and `ZephyrEpoch` -- a reach that is real, where R2916's was a
 # name collision). UNREACHED and NO_SYMBOL hold at 0 and 2. READ off the
 # census's own FAIL line, `reached: 6 against a pin of 7`.
-PIN_REACHED = 6
+# R2972 — REACHED 6 -> 4, and PAID LATE, by two rounds that did not move it.
+# R2939 re-graded `transport-qos` COMPLETE and R2945 `session-extqos`; each was
+# a reached PARTIAL atom and each left the census with its grade. ATTRIBUTED by
+# running this census at each commit and its parent: 6 -> 5 across R2939 and
+# 5 -> 4 across R2945, UNREACHED and NO_SYMBOL holding at 0 and 2 throughout.
+# The reds sat at HEAD because pre-push defers this gate to hosted CI.
+PIN_REACHED = 4
 PIN_UNREACHED = 0
 PIN_NO_SYMBOL = 2
 # R2534 — 346 -> 347. The atom is `adminspace-metrics` and the citation is the
@@ -2362,7 +2368,12 @@ PIN_WZ_CITATIONS = 25
 # R2918 -- 10 -> 9. `platform-zephyr` departs (COMPLETE) carrying ONE ambiguous
 # citation -- its R311y32 clauses cite `lib.rs` by bare name. READ off the
 # census's own FAIL line, `ambiguous citations: 9 against a pin of 10`.
-PIN_AMBIGUOUS = 9
+# R2972 -- 9 -> 8, and PAID LATE. R2939 re-graded `transport-qos` COMPLETE and
+# it departed carrying ONE ambiguous citation, without this pin moving; the
+# reds sat at HEAD because pre-push defers this gate to hosted CI. ATTRIBUTED by
+# running this census at R2939's commit and its parent: `9 ambiguous` before,
+# `8 ambiguous` after, and no commit since moved it.
+PIN_AMBIGUOUS = 8
 
 
 class Fatal(Exception):
