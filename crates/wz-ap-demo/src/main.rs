@@ -2618,6 +2618,30 @@ fn parse_zid_hex(h: &str) -> Result<Vec<u8>, String> {
     })
 }
 
+#[cfg(test)]
+mod zid_flag_tests {
+    use super::parse_zid_hex;
+    use wz::runtime_tokio::zid_hex::zid_to_zenoh_hex;
+
+    /// ZA-3362 — the consumer's measured case: a node given `c11e47c11e49` must
+    /// report `c11e47c11e49`, as zenohd does, not the reversed `491ec1471ec1`.
+    #[test]
+    fn an_authored_zid_comes_back_as_written() {
+        let wire = parse_zid_hex("c11e47c11e49").expect("a valid zid");
+        assert_eq!(wire, vec![0x49, 0x1e, 0xc1, 0x47, 0x1e, 0xc1]);
+        assert_eq!(zid_to_zenoh_hex(&wire), "c11e47c11e49");
+    }
+
+    /// zenoh's refusals travel with the parse: a leading 0 (also how all-zero
+    /// is refused), uppercase, non-hex, empty, and more than 16 bytes.
+    #[test]
+    fn the_spellings_zenoh_refuses_are_refused() {
+        for bad in ["0a0b0c0d", "00", "ABC", "xyz", "", &"1".repeat(33)] {
+            assert!(parse_zid_hex(bad).is_err(), "{bad:?} must be refused");
+        }
+    }
+}
+
 /// The demo's multi-thread tokio runtime (2 workers + io + time) — the SSOT for
 /// both the single-session `run_demo` path and the `--router` multi-peer path.
 /// Multi-thread so the spawned writer tasks (per session, and per face in the
