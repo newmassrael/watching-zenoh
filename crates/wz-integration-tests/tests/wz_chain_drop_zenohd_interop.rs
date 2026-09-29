@@ -28,7 +28,8 @@
 //! The codec for `(&mut ZBufReader, &mut FragmentHeader)`
 //! (`zenoh-codec/src/transport/batch.rs:198-232`) writes the header, then ends
 //! with `r.siphon(&mut *writer)`. `ZBufReader::siphon` finishes
-//! `NonZeroUsize::new(read).ok_or(DidntSiphon)` (`zenoh-buffers/src/zbuf.rs:343`),
+//! `NonZeroUsize::new(read).ok_or(DidntSiphon)`
+//! (`commons/zenoh-buffers/src/zbuf.rs` @ `fn siphon<W>(&mut self, writer: &mut W) -> Result<NonZeroUsize, DidntSiphon>`),
 //! so a reader with NOTHING IN IT — which `fragbuf.clear()` guarantees — cannot
 //! return `Ok`. The codec rewinds, `encode` returns `Err`, THE RESULT IS
 //! DISCARDED, and an EMPTY batch is moved out and written to the link.
