@@ -437,7 +437,9 @@ impl<R: SessionRuntime, T: TimeSource> LivelinessToken<R, T> {
         // lives inside the `liveliness-token` arm.
         #[cfg(not(feature = "liveliness-token"))]
         {
-            let _ = &self.session;
+            // `declared_on` is read only by the retraction above, so a build
+            // without the feature reads it here, as it does `session`.
+            let _ = (&self.session, &self.declared_on);
             Ok(())
         }
         #[cfg(feature = "liveliness-token")]
