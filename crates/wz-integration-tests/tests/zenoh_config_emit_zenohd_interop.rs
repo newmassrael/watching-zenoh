@@ -48,7 +48,7 @@ use wz_integration_tests::common::{
     ZENOHD_TCP_ACCEPT_BUDGET,
 };
 use wz_runtime_tokio::zenoh_config::{
-    validate_topology, ConfigDefect, TopologyDefect, ZenohNodeConfig,
+    validate_topology, ConfigDefect, EndpointList, TopologyDefect, ZenohNodeConfig,
 };
 
 /// zenohd prints its resolved config on this line before doing anything else.
@@ -260,6 +260,7 @@ fn zenohd_refuses_every_config_the_validator_rejects() {
     let unknown_expected = ConfigDefect::UnknownProtocol {
         endpoint: String::from("carrier-pigeon/127.0.0.1:1"),
         protocol: String::from("carrier-pigeon"),
+        list: EndpointList::Listen,
     };
 
     let qos_port = PortReservation::pick();
@@ -474,7 +475,9 @@ fn zenohd_refuses_every_topology_the_validator_rejects() {
         (
             "no node accepts",
             vec![alone.clone()],
-            TopologyDefect::NoNodeAccepts,
+            TopologyDefect::NoNodeAccepts {
+                nodes: vec![String::from("node[0]")],
+            },
             alone,
         ),
     ] {

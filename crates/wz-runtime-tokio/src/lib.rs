@@ -907,6 +907,13 @@ pub mod startup_phase;
 #[cfg(feature = "zenoh-config")]
 pub mod zenoh_config;
 
+/// ZA-3469 — the verdicts of [`zenoh_config`] as FIELDS (a variant name, a
+/// message, an endpoint, and the node and config key each defect points at)
+/// for a reader that attaches a reason to the field it is about and so cannot
+/// take it as a sentence.
+#[cfg(feature = "zenoh-config")]
+pub mod zenoh_config_finding;
+
 /// R311y579 (G9) — the raweth (L2) link's TRANSPORT: an `AF_PACKET` socket and
 /// the `RawEthIo` seam that lets the framing above it be driven without
 /// `CAP_NET_RAW`. Framing SSOT is [`wz_session_core::raweth_link`].

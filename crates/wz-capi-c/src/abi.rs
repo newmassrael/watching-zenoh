@@ -1421,7 +1421,10 @@ pub extern "C" fn wz_capi_c_abi_version() -> i32 {
 /// the full argument, because the caller who needs it is reading C.
 ///
 /// R2932 moves it to 3: the group membership doors (`crate::group`).
-pub const WZ_CAPI_C_ABI_REVISION: i32 = 3;
+///
+/// ZA-3469 moves it to 4: the config verdict as rows
+/// (`crate::config_verdict_rows`), fifteen new symbols.
+pub const WZ_CAPI_C_ABI_REVISION: i32 = 4;
 
 /// Report this build's footprints — the drop-in's half of the layout gate.
 ///

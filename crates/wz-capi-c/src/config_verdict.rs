@@ -109,13 +109,127 @@
 use std::ffi::c_char;
 
 use wz_runtime_tokio::zenoh_config::{
-    validate_topology_with_external, ZenohNodeConfig, ZENOH_LINK_PROTOCOLS,
+    validate_topology_with_external, ConfigIngestError, ZenohNodeConfig, ZENOH_LINK_PROTOCOLS,
 };
+use wz_runtime_tokio::zenoh_config_finding::{variant_name, BlamedSite, Finding};
 
 use crate::abi::{z_loaned_config_t, z_owned_string_t};
-use crate::config::config_state;
+use crate::config::{config_state, NestConflict};
 use crate::ffi::guarded;
-use crate::result::{ZResult, Z_ENULL, Z_EPARSE, Z_OK};
+use crate::result::{ZResult, Z_EINVAL, Z_ENULL, Z_EPARSE, Z_OK};
+
+/// A refusal that is this door's own rather than a config's: an argument the
+/// caller handed over that cannot be used.
+///
+/// Its own enum, and not strings in the door bodies, so the row doors can name
+/// the variant the same way they name every other one: from `Debug`, which
+/// cannot go stale. The sentences are the ones the string doors have always
+/// written, so moving them here changes no caller's output.
+#[derive(Debug)]
+pub(crate) enum DoorRefusal {
+    /// The config pointer was null, or held nothing.
+    NoConfig,
+    /// A pointer in the external-listener array was null.
+    NoExternal {
+        /// Its position in the array.
+        index: usize,
+    },
+    /// An external-listener string that is not UTF-8.
+    ExternalNotUtf8 {
+        /// Its position in the array.
+        index: usize,
+    },
+    /// A node name that is not UTF-8.
+    NameNotUtf8 {
+        /// Its position in the array.
+        index: usize,
+    },
+    /// A node name that is the empty string.
+    NameEmpty {
+        /// Its position in the array.
+        index: usize,
+    },
+}
+
+impl std::fmt::Display for DoorRefusal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            DoorRefusal::NoConfig => write!(f, "no config"),
+            DoorRefusal::NoExternal { index } => write!(f, "external {index}: null"),
+            DoorRefusal::ExternalNotUtf8 { index } => write!(f, "external {index}: not UTF-8"),
+            DoorRefusal::NameNotUtf8 { index } => write!(f, "name {index}: not UTF-8"),
+            DoorRefusal::NameEmpty { index } => write!(f, "name {index}: empty"),
+        }
+    }
+}
+
+/// Why a door could not judge what it was handed.
+///
+/// One type for every way a door can decline, so the string doors and the row
+/// doors decide the code and the words in ONE place and cannot disagree about
+/// either. It is not an error type for a caller to match on: each door renders
+/// it, as a sentence or as a row.
+#[derive(Debug)]
+pub(crate) enum Refusal {
+    /// The door's own argument was unusable.
+    Door(DoorRefusal),
+    /// The config's stored keys cannot be nested into a document.
+    Nest(NestConflict),
+    /// wz's reader refused the document.
+    Ingest(ConfigIngestError),
+}
+
+impl Refusal {
+    /// The code a C caller receives. `Z_ENULL` for nothing to read,
+    /// `Z_EINVAL` for an argument that is present and unusable, `Z_EPARSE` for
+    /// a document, or a string, that could not be read.
+    pub(crate) fn code(&self) -> ZResult {
+        match self {
+            Refusal::Door(DoorRefusal::NoConfig | DoorRefusal::NoExternal { .. }) => Z_ENULL,
+            Refusal::Door(DoorRefusal::NameEmpty { .. }) => Z_EINVAL,
+            Refusal::Door(
+                DoorRefusal::ExternalNotUtf8 { .. } | DoorRefusal::NameNotUtf8 { .. },
+            )
+            | Refusal::Nest(_)
+            | Refusal::Ingest(_) => Z_EPARSE,
+        }
+    }
+
+    /// This refusal as fields. `node` is the name of the config it is about,
+    /// when it is about one.
+    ///
+    /// The variant name is the refused thing's own: `OutOfRange`, not
+    /// `Ingest`. What a caller wants to branch on is WHICH refusal, and the
+    /// wrapper here is an implementation detail of how this module sorts them.
+    pub(crate) fn finding(&self, node: Option<&str>) -> Finding {
+        match self {
+            Refusal::Door(door) => {
+                Finding::describing(door, None, vec![BlamedSite::at(node, None)])
+            }
+            // Both keys are blamed: the one that could not be placed, and the
+            // one already standing where it needed to go.
+            Refusal::Nest(conflict) => Finding::describing(
+                conflict,
+                None,
+                vec![
+                    BlamedSite::at(node, Some(&conflict.wanted)),
+                    BlamedSite::at(node, Some(&conflict.held)),
+                ],
+            ),
+            Refusal::Ingest(why) => why.finding(node),
+        }
+    }
+}
+
+impl std::fmt::Display for Refusal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Refusal::Door(door) => door.fmt(f),
+            Refusal::Nest(conflict) => conflict.fmt(f),
+            Refusal::Ingest(why) => why.fmt(f),
+        }
+    }
+}
 
 /// Read the `ZenohNodeConfig` a loaned config denotes, or say why not.
 ///
@@ -131,22 +245,25 @@ use crate::result::{ZResult, Z_ENULL, Z_EPARSE, Z_OK};
 /// consumer bisecting a config document by hand; the first draft of this
 /// function did drop it, and the compiler caught it as a field nobody read.
 ///
+/// ZA-3469 — the refusal keeps its TYPE now and is rendered by whichever door
+/// asked. The string doors write its `Display`, exactly as before; the row
+/// doors read the key path out of it as a column instead of leaving the caller
+/// to find it in the sentence.
+///
 /// # Safety
 /// `config` must be null or a valid loaned config.
-unsafe fn node_config(
+pub(crate) unsafe fn node_config(
     config: *const z_loaned_config_t,
-) -> Result<ZenohNodeConfig, (ZResult, String)> {
+) -> Result<ZenohNodeConfig, Refusal> {
     // SAFETY: the caller's contract; see `get_into` for the `const` cast, whose
     // argument this shares.
     let Some(state) = (unsafe { config_state(config as *mut z_loaned_config_t) }) else {
-        return Err((Z_ENULL, String::from("no config")));
+        return Err(Refusal::Door(DoorRefusal::NoConfig));
     };
-    let nested = state
-        .render_nested()
-        .map_err(|conflict| (Z_EPARSE, conflict.to_string()))?;
+    let nested = state.render_nested().map_err(Refusal::Nest)?;
     ZenohNodeConfig::from_json5(&nested)
         .map(|ingest| ingest.config)
-        .map_err(|why| (Z_EPARSE, why.to_string()))
+        .map_err(Refusal::Ingest)
 }
 
 /// One defect as the line a C caller reads: `<VariantName>: <message>`.
@@ -156,13 +273,13 @@ unsafe fn node_config(
 /// a second copy of the variant list and could name a variant that no longer
 /// exists. Generic over both defect enums because the rule is the same for
 /// each and a second copy of THIS would be the same mistake one level down.
+///
+/// The derivation itself lives with the domain types, in
+/// `wz_runtime_tokio::zenoh_config_finding::variant_name`, because the row
+/// doors need the same name and two derivations of it would be free to
+/// disagree.
 fn defect_line<D: std::fmt::Debug + std::fmt::Display>(defect: &D) -> String {
-    let debug = format!("{defect:?}");
-    let name = debug
-        .split(|c: char| c == '{' || c == '(' || c.is_whitespace())
-        .next()
-        .unwrap_or_default();
-    format!("{name}: {defect}")
+    format!("{}: {defect}", variant_name(defect))
 }
 
 /// Every defect as the lines a C caller reads, one per line.
@@ -224,10 +341,10 @@ pub unsafe extern "C" fn wz_capi_c_config_to_json5(
         // SAFETY: as above.
         let node = match unsafe { node_config(config) } {
             Ok(node) => node,
-            Err((code, why)) => {
+            Err(refusal) => {
                 // SAFETY: checked non-null above.
-                unsafe { write_string(out_config_string, &why) };
-                return code;
+                unsafe { write_string(out_config_string, &refusal.to_string()) };
+                return refusal.code();
             }
         };
         // SAFETY: checked non-null above.
@@ -314,10 +431,10 @@ unsafe fn validate_into(
         // SAFETY: as above.
         let node = match unsafe { node_config(config) } {
             Ok(node) => node,
-            Err((code, why)) => {
+            Err(refusal) => {
                 // SAFETY: checked non-null above.
-                unsafe { write_string(out_defects, &why) };
-                return code;
+                unsafe { write_string(out_defects, &refusal.to_string()) };
+                return refusal.code();
             }
         };
         let schemes = for_this_build.then(wz_runtime_tokio::compiled_in_link_schemes);
@@ -422,13 +539,13 @@ pub unsafe extern "C" fn wz_capi_c_config_validate_topology_with_external(
             // SAFETY: as above; each element is null or a valid loaned config.
             match unsafe { node_config(entry) } {
                 Ok(node) => nodes.push(node),
-                Err((code, why)) => {
+                Err(refusal) => {
                     // WHICH element, because a set of eight configs and a bare
                     // "unreadable" is a bisection the caller should not have to
                     // run.
                     // SAFETY: checked non-null above.
-                    unsafe { write_string(out_defects, &format!("config {i}: {why}")) };
-                    return code;
+                    unsafe { write_string(out_defects, &format!("config {i}: {refusal}")) };
+                    return refusal.code();
                 }
             }
         }
@@ -447,9 +564,10 @@ pub unsafe extern "C" fn wz_capi_c_config_validate_topology_with_external(
                 // unequal to whatever the caller meant while looking plausible
                 // in the report.
                 Err(_) => {
+                    let refusal = Refusal::Door(DoorRefusal::ExternalNotUtf8 { index: i });
                     // SAFETY: checked non-null above.
-                    unsafe { write_string(out_defects, &format!("external {i}: not UTF-8")) };
-                    return Z_EPARSE;
+                    unsafe { write_string(out_defects, &refusal.to_string()) };
+                    return refusal.code();
                 }
             }
         }
@@ -537,8 +655,12 @@ pub unsafe extern "C" fn wz_capi_c_config_zenoh_link_scheme(index: usize) -> *co
     table.get(index).map_or(std::ptr::null(), |s| s.as_ptr())
 }
 
+// `pub(crate)` so the row doors' tests build their fixtures and ask the string
+// doors through the SAME helpers: the rows are held to the lines by comparing
+// the two answers, and a second copy of the fixture builder would be free to
+// drift from the first.
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     use std::collections::BTreeSet;
@@ -558,7 +680,7 @@ mod tests {
     /// Deliberately NOT by reaching into `ConfigState`: the doors under test
     /// are reached through the C surface, and a fixture that built the state
     /// directly would skip the insert parser these keys actually pass through.
-    unsafe fn config_of(entries: &[(&str, &str)]) -> z_owned_config_t {
+    pub(crate) unsafe fn config_of(entries: &[(&str, &str)]) -> z_owned_config_t {
         // SAFETY: a zeroed owned config is the gravestone this ABI defines.
         let mut cfg: z_owned_config_t = unsafe { std::mem::zeroed() };
         // SAFETY: a writable owned slot.
@@ -590,7 +712,7 @@ mod tests {
     }
 
     /// Call a single-config door and hand back what a C caller would see.
-    unsafe fn ask(
+    pub(crate) unsafe fn ask(
         door: unsafe extern "C" fn(*const z_loaned_config_t, *mut z_owned_string_t) -> ZResult,
         entries: &[(&str, &str)],
     ) -> (ZResult, String) {
@@ -671,7 +793,7 @@ mod tests {
 
     /// Ask the topology door about a set of configs and a list of external
     /// listeners.
-    fn topology_verdict_with_external(
+    pub(crate) fn topology_verdict_with_external(
         nodes: &[Vec<(&str, &str)>],
         external: &[&str],
     ) -> (ZResult, String) {
@@ -1242,7 +1364,10 @@ mod tests {
         let samples: Vec<String> = vec![
             ConfigDefect::Unreachable.to_string(),
             ConfigDefect::QosWithLowlatency.to_string(),
-            TopologyDefect::NoNodeAccepts.to_string(),
+            TopologyDefect::NoNodeAccepts {
+                nodes: vec![String::from("A")],
+            }
+            .to_string(),
         ];
         assert!(!samples.is_empty());
         for text in samples {

@@ -92,6 +92,10 @@ pub mod config;
 // wz's own doors on an upstream capability flag would key them to a question
 // about zenoh-c that has no bearing on whether they work.
 pub mod config_verdict;
+// ZA-3469 — the same verdicts as ROWS (variant, node, key path, endpoint) read
+// column by column from an owned handle, for a caller that attaches a reason to
+// the config field it is about. Ungated for the reason `config_verdict` is.
+pub mod config_verdict_rows;
 pub mod encoding;
 // R2259 (open-debt item 593) — the LINK and TRANSPORT event planes. Gated for
 // the reason `cancellation` above is, and measured the same way: upstream's

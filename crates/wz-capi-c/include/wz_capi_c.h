@@ -104,7 +104,7 @@ extern "C" {
  * without moving this number is red rather than shipped.
  * ------------------------------------------------------------------ */
 
-#define WZ_CAPI_C_ABI_REVISION 3
+#define WZ_CAPI_C_ABI_REVISION 4
 
 /* The revision the LOADED library reports. See the block above for why
  * this exists beside the macro. */
@@ -291,6 +291,136 @@ z_result_t wz_capi_c_config_validate_topology_with_external(
     const char *const *external,
     size_t external_count,
     z_owned_string_t *out_defects);
+
+/* ------------------------------------------------------------------ *
+ * The config verdict as ROWS (ZA-3469). Revision 4.
+ *
+ * The verdict doors above answer in lines, `<VariantName>: <message>`,
+ * and a line is for a person. A caller that attaches each reason to the
+ * config field it is about would have to parse the message to find the
+ * key, and the message is prose that may be reworded in any release.
+ * These doors answer in a TABLE instead, read a column at a time from
+ * one owned handle.
+ *
+ * A verdict is a list of FINDINGS, one per defect (the count of lines
+ * the string doors would have written), and a finding can point at
+ * several places: Unreachable at the three keys that could have given a
+ * node a peer, a listen collision at every node claiming the address.
+ * So the table is FLAT: one ROW per (finding, place), the finding's own
+ * columns repeated. Walk the rows for places; group them by
+ * wz_capi_c_config_verdict_row_finding for defects.
+ *
+ * COLUMNS. variant and message are on every row. The other three are on
+ * a row only when the finding has one, and their readers say so: they
+ * return false, with an EMPTY view, when it has none.
+ *
+ *   variant   the stable name, the same one the string doors put before
+ *             the colon. Branch on this.
+ *   message   the prose. Show this.
+ *   node      the node, under the name YOU gave it, else its `id`, else
+ *             node[<index>]. Absent for a config judged on its own and
+ *             for a declaration typed at argv.
+ *   key       the config key path at fault, `/`-separated as zenoh
+ *             spells it: transport/link/tx/batch_size. Absent when no
+ *             key is at fault: the text was not JSON5, or the finding is
+ *             about an endpoint declared at argv.
+ *   endpoint  the endpoint the defect is about, as given.
+ *
+ * A REFUSAL IS A ROW. A config that cannot be READ returns the code its
+ * string door returns (Z_EPARSE for a config the reader refuses, Z_ENULL
+ * for none) AND the reason as rows, with the key at fault in the key
+ * column when the refusal is about one. The set door reports EVERY
+ * refusal in the call, not the first; the code is the first's, and no
+ * verdict is produced while anything is refused. A refusal is named as
+ * a defect is: OutOfRange, UnknownMode, NestConflict and the rest of the
+ * reader's own for a config; NoConfig, NoExternal, ExternalNotUtf8,
+ * NameNotUtf8 (Z_EPARSE) and NameEmpty (Z_EINVAL) for an argument.
+ *
+ * MEMORY. The verdict is yours and is freed by
+ * wz_capi_c_config_verdict_drop. It is written on EVERY path that can
+ * write one, the refusing paths included, and holds a gravestone where
+ * the door could not read its arguments at all (Z_ENULL for a NULL array
+ * with a non-zero count). A NULL `out` is the one case with nowhere to
+ * write. A z_view_string_t read from a verdict borrows from it and is
+ * valid until it is dropped; nothing is copied to you.
+ * ------------------------------------------------------------------ */
+
+/* Owned / loaned / moved. One pointer each: wz's own types, with no
+ * upstream footprint to match. */
+typedef struct wz_capi_c_owned_config_verdict_t { void *_handle; } wz_capi_c_owned_config_verdict_t;
+typedef struct wz_capi_c_loaned_config_verdict_t { void *_handle; } wz_capi_c_loaned_config_verdict_t;
+typedef struct wz_capi_c_moved_config_verdict_t {
+  wz_capi_c_owned_config_verdict_t _this;
+} wz_capi_c_moved_config_verdict_t;
+
+/* wz_capi_c_config_validate, in rows. A config that cannot be read
+ * returns the code that door returns and ONE refusal row. */
+z_result_t wz_capi_c_config_validate_rows(const z_loaned_config_t *config,
+                                          wz_capi_c_owned_config_verdict_t *out);
+
+/* wz_capi_c_config_validate_for_build, in rows: the same verdict plus
+ * ProtocolNotCompiledIn for a scheme this build lacks. */
+z_result_t wz_capi_c_config_validate_for_build_rows(
+    const z_loaned_config_t *config,
+    wz_capi_c_owned_config_verdict_t *out);
+
+/* wz_capi_c_config_validate_topology_with_external, in rows and with
+ * YOUR names for the nodes.
+ *
+ * `names` is NULL, or an array of `count` entries, each NULL or a
+ * NUL-terminated, non-empty UTF-8 name. A NULL array or entry leaves that
+ * node to its default name. A name is a label and not an identity: two
+ * nodes given one name are still two nodes. `external` is NULL or an
+ * array of `external_count` NUL-terminated UTF-8 endpoints, as for the
+ * door above; zero of them is the closed reading. */
+z_result_t wz_capi_c_config_validate_topology_rows(
+    const z_loaned_config_t *const *configs,
+    const char *const *names,
+    size_t count,
+    const char *const *external,
+    size_t external_count,
+    wz_capi_c_owned_config_verdict_t *out);
+
+/* How many rows the verdict has; 0 for a NULL verdict. */
+size_t wz_capi_c_config_verdict_len(const wz_capi_c_loaned_config_verdict_t *this_);
+/* How many findings: the count of defects. 0 for a NULL verdict. */
+size_t wz_capi_c_config_verdict_finding_count(
+    const wz_capi_c_loaned_config_verdict_t *this_);
+/* Which finding row `index` belongs to, counted from 0 in reporting
+ * order. Rows of one finding are adjacent and share it. Z_ENULL for a
+ * NULL verdict or `out`, Z_EINVAL for an index past the end. */
+z_result_t wz_capi_c_config_verdict_row_finding(
+    const wz_capi_c_loaned_config_verdict_t *this_, size_t index, size_t *out);
+
+/* The variant name and the prose, on every row. Z_ENULL / Z_EINVAL as
+ * above, with an empty view. */
+z_result_t wz_capi_c_config_verdict_row_variant(
+    const wz_capi_c_loaned_config_verdict_t *this_, size_t index,
+    z_view_string_t *out);
+z_result_t wz_capi_c_config_verdict_row_message(
+    const wz_capi_c_loaned_config_verdict_t *this_, size_t index,
+    z_view_string_t *out);
+
+/* The columns a row may lack: false, with an empty view, when this row
+ * has no value (or the verdict or index is not valid). */
+bool wz_capi_c_config_verdict_row_node(
+    const wz_capi_c_loaned_config_verdict_t *this_, size_t index,
+    z_view_string_t *out);
+bool wz_capi_c_config_verdict_row_key(
+    const wz_capi_c_loaned_config_verdict_t *this_, size_t index,
+    z_view_string_t *out);
+bool wz_capi_c_config_verdict_row_endpoint(
+    const wz_capi_c_loaned_config_verdict_t *this_, size_t index,
+    z_view_string_t *out);
+
+const wz_capi_c_loaned_config_verdict_t *wz_capi_c_config_verdict_loan(
+    const wz_capi_c_owned_config_verdict_t *this_);
+/* Release the verdict and every view read from it. A second drop is a
+ * no-op. */
+void wz_capi_c_config_verdict_drop(wz_capi_c_moved_config_verdict_t *this_);
+void wz_capi_c_internal_config_verdict_null(wz_capi_c_owned_config_verdict_t *this_);
+bool wz_capi_c_internal_config_verdict_check(
+    const wz_capi_c_owned_config_verdict_t *this_);
 
 /* ------------------------------------------------------------------ *
  * Link schemes: what this build carries, and what stock zenoh does.

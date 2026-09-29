@@ -201,6 +201,33 @@ pub fn link_scheme_feature(scheme: &str) -> Option<&'static str> {
         .map(|(_, feature)| *feature)
 }
 
+/// Which of a node's two endpoint lists an endpoint was read from.
+///
+/// ZA-3469 — an endpoint defect used to carry the endpoint STRING and nothing
+/// about where it sat, so a reader told `"nonsense"` is malformed could not
+/// tell whether to look under `listen/endpoints` or `connect/endpoints`. The
+/// list is known at the moment the defect is raised and is what names the key,
+/// so it travels with the defect rather than being guessed afterwards by
+/// searching both lists for the string (which would name both keys for an
+/// endpoint that appears in only one).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EndpointList {
+    /// `listen/endpoints`.
+    Listen,
+    /// `connect/endpoints`.
+    Connect,
+}
+
+impl EndpointList {
+    /// The config key path this list is read from.
+    pub const fn key(self) -> &'static str {
+        match self {
+            EndpointList::Listen => "listen/endpoints",
+            EndpointList::Connect => "connect/endpoints",
+        }
+    }
+}
+
 /// A reason a topology cannot work, stated before anything is started.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ConfigDefect {
@@ -208,6 +235,8 @@ pub enum ConfigDefect {
     MalformedEndpoint {
         /// The endpoint as given.
         endpoint: String,
+        /// The list it was read from.
+        list: EndpointList,
     },
     /// An endpoint whose protocol is not one stock zenoh carries. Catching
     /// this here matters because zenoh reports it as a listener that failed
@@ -217,6 +246,8 @@ pub enum ConfigDefect {
         endpoint: String,
         /// The scheme that was not recognised.
         protocol: String,
+        /// The list it was read from.
+        list: EndpointList,
     },
     /// An endpoint whose protocol IS one stock zenoh carries, but which the
     /// binary judging the config was not built with — so the node this config
@@ -234,6 +265,8 @@ pub enum ConfigDefect {
         endpoint: String,
         /// The scheme this build has no link backend for.
         protocol: String,
+        /// The list it was read from.
+        list: EndpointList,
     },
     /// The same listen endpoint twice. zenoh binds them in order and the
     /// second fails with an address-in-use whose cause is not obvious from
@@ -262,10 +295,14 @@ pub enum ConfigDefect {
 impl core::fmt::Display for ConfigDefect {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
-            ConfigDefect::MalformedEndpoint { endpoint } => {
+            // The list is a field for a MACHINE reader (`finding`); the prose
+            // stays what it was, so a C caller's message does not move with it.
+            ConfigDefect::MalformedEndpoint { endpoint, .. } => {
                 write!(f, "endpoint {endpoint:?} is not <proto>/<address>")
             }
-            ConfigDefect::UnknownProtocol { endpoint, protocol } => write!(
+            ConfigDefect::UnknownProtocol {
+                endpoint, protocol, ..
+            } => write!(
                 f,
                 "endpoint {endpoint:?} uses protocol {protocol:?}, which stock zenoh does not carry"
             ),
@@ -275,7 +312,9 @@ impl core::fmt::Display for ConfigDefect {
             // is the scheme an operator is least likely to know by heart. A
             // scheme with no entry is possible only if wz cannot serve it at
             // all, and then the honest ending is silence, not a guess.
-            ConfigDefect::ProtocolNotCompiledIn { endpoint, protocol } => {
+            ConfigDefect::ProtocolNotCompiledIn {
+                endpoint, protocol, ..
+            } => {
                 write!(
                     f,
                     "endpoint {endpoint:?} uses protocol {protocol:?}, which stock zenoh \
@@ -336,7 +375,13 @@ pub enum TopologyDefect {
     /// (upstream `orchestrator.rs`'s `start_client` reads `connect` and
     /// scouting only, and binds no listener), so a set of them has nothing
     /// to attach to.
-    NoNodeAccepts,
+    NoNodeAccepts {
+        /// Every node in the set, in slice order. The defect is about all of
+        /// them, and a reader attaching it to the nodes it is about has to be
+        /// told which those are rather than assume "all" means whatever set it
+        /// last asked about.
+        nodes: Vec<String>,
+    },
     /// R2117 (open-debt item 498) — an endpoint DECLARED to be listened on by
     /// a node outside this set, that no node in the set dials.
     ///
@@ -421,7 +466,7 @@ impl core::fmt::Display for TopologyDefect {
                 "listen endpoint {endpoint:?} is claimed by {}",
                 nodes.join(", ")
             ),
-            TopologyDefect::NoNodeAccepts => write!(
+            TopologyDefect::NoNodeAccepts { .. } => write!(
                 f,
                 "every node is a client, and a zenoh client never listens"
             ),
@@ -629,6 +674,61 @@ pub fn validate_topology_with_external(
     nodes: &[ZenohNodeConfig],
     external: &[String],
 ) -> TopologyVerdict {
+    let unlabelled: Vec<LabelledNode<'_>> = nodes
+        .iter()
+        .map(|config| LabelledNode::new(None, config))
+        .collect();
+    validate_labelled_topology(&unlabelled, external)
+}
+
+/// One node of a topology verdict, with the name its CALLER calls it by.
+///
+/// ZA-3469 — a verdict names its nodes, and until this type the only names
+/// available were the config's own `id` (a zid, hex, which is a machine
+/// identity rather than a label anybody chose) or the slice position. A caller
+/// that holds its nodes under names of its own — an inspector listing them, a
+/// deployment file keyed by host — could not have a defect say which one it
+/// meant without translating positions back, which is a second copy of an
+/// ordering the verdict already had.
+#[derive(Debug, Clone, Copy)]
+#[non_exhaustive]
+pub struct LabelledNode<'a> {
+    /// The name every defect about this node spells it with. `None` leaves the
+    /// choice to the config's `id`, then to [`positional_node_name`].
+    pub label: Option<&'a str>,
+    /// The node's config.
+    pub config: &'a ZenohNodeConfig,
+}
+
+impl<'a> LabelledNode<'a> {
+    /// A node under `label`, or under the default name when `label` is `None`.
+    pub fn new(label: Option<&'a str>, config: &'a ZenohNodeConfig) -> Self {
+        LabelledNode { label, config }
+    }
+}
+
+/// How a node with neither a caller's label nor an `id` is named: by its
+/// position in the slice the verdict was asked about, `node[<index>]`.
+///
+/// One function rather than a format string at each use, because the same
+/// spelling is what a reader who refused to read a config has to fall back on,
+/// and two spellings of one position would let a defect and a refusal about
+/// the same node look like they were about two.
+pub fn positional_node_name(index: usize) -> String {
+    format!("node[{index}]")
+}
+
+/// [`validate_topology_with_external`], for nodes the caller has named.
+///
+/// The verdict is the same one -- this is the body it delegates to, not a
+/// second implementation -- and only the spelling of a node differs. A label
+/// is a NAME and not an identity: two nodes given the same label are still two
+/// nodes, counted by slice position, and a collision between them is reported
+/// as it would be for two nodes that share an `id`.
+pub fn validate_labelled_topology(
+    nodes: &[LabelledNode<'_>],
+    external: &[String],
+) -> TopologyVerdict {
     // The node's name is built ONCE, here, so every defect below spells the
     // same node the same way. Two call sites deriving it independently is two
     // places for the identity to drift from the row it labels.
@@ -636,11 +736,12 @@ pub fn validate_topology_with_external(
         .iter()
         .enumerate()
         .map(|(i, node)| {
-            let name = match &node.id {
-                Some(id) => id.clone(),
-                None => format!("node[{i}]"),
+            let name = match (node.label, &node.config.id) {
+                (Some(label), _) => String::from(label),
+                (None, Some(id)) => id.clone(),
+                (None, None) => positional_node_name(i),
             };
-            (name, node)
+            (name, node.config)
         })
         .collect();
 
@@ -791,7 +892,9 @@ pub fn validate_topology_with_external(
         && !named.is_empty()
         && named.iter().all(|(_, node)| node.mode == WhatAmI::Client)
     {
-        out.push(TopologyDefect::NoNodeAccepts);
+        out.push(TopologyDefect::NoNodeAccepts {
+            nodes: named.iter().map(|(name, _)| name.clone()).collect(),
+        });
     }
 
     TopologyVerdict {
@@ -1493,22 +1596,35 @@ impl ZenohNodeConfig {
     /// twice would turn one typo into two lines of a start-up refusal.
     pub fn validate_for_build(&self, compiled_in_schemes: Option<&[&str]>) -> Vec<ConfigDefect> {
         let mut out = Vec::new();
-        for endpoint in self.listen.iter().chain(self.connect.iter()) {
-            match endpoint.split_once('/') {
-                None => out.push(ConfigDefect::MalformedEndpoint {
-                    endpoint: endpoint.clone(),
-                }),
-                Some((proto, _)) => {
-                    if !ZENOH_LINK_PROTOCOLS.contains(&proto) {
-                        out.push(ConfigDefect::UnknownProtocol {
-                            endpoint: endpoint.clone(),
-                            protocol: String::from(proto),
-                        });
-                    } else if compiled_in_schemes.is_some_and(|s| !s.contains(&proto)) {
-                        out.push(ConfigDefect::ProtocolNotCompiledIn {
-                            endpoint: endpoint.clone(),
-                            protocol: String::from(proto),
-                        });
+        // Listen first, then connect: the order this verdict has always had,
+        // which a caller reading the defects as a list may rely on. Each
+        // endpoint is judged WITH the list it sits in, because that list is
+        // what names the key at fault.
+        let lists = [
+            (EndpointList::Listen, &self.listen),
+            (EndpointList::Connect, &self.connect),
+        ];
+        for (list, endpoints) in lists {
+            for endpoint in endpoints {
+                match endpoint.split_once('/') {
+                    None => out.push(ConfigDefect::MalformedEndpoint {
+                        endpoint: endpoint.clone(),
+                        list,
+                    }),
+                    Some((proto, _)) => {
+                        if !ZENOH_LINK_PROTOCOLS.contains(&proto) {
+                            out.push(ConfigDefect::UnknownProtocol {
+                                endpoint: endpoint.clone(),
+                                protocol: String::from(proto),
+                                list,
+                            });
+                        } else if compiled_in_schemes.is_some_and(|s| !s.contains(&proto)) {
+                            out.push(ConfigDefect::ProtocolNotCompiledIn {
+                                endpoint: endpoint.clone(),
+                                protocol: String::from(proto),
+                                list,
+                            });
+                        }
                     }
                 }
             }
@@ -6384,6 +6500,7 @@ mod tests {
             vec![ConfigDefect::UnknownProtocol {
                 endpoint: String::from("carrier-pigeon/aviary:1"),
                 protocol: String::from("carrier-pigeon"),
+                list: EndpointList::Listen,
             }]
         );
 
@@ -6392,6 +6509,7 @@ mod tests {
             c.validate(),
             vec![ConfigDefect::MalformedEndpoint {
                 endpoint: String::from("tcp-no-slash"),
+                list: EndpointList::Listen,
             }]
         );
 
@@ -6469,6 +6587,7 @@ mod tests {
             vec![ConfigDefect::ProtocolNotCompiledIn {
                 endpoint: String::from("vsock/2:7447"),
                 protocol: String::from("vsock"),
+                list: EndpointList::Listen,
             }]
         );
         // A scheme the reader DOES carry is not a defect — otherwise the check
@@ -6487,6 +6606,7 @@ mod tests {
             vec![ConfigDefect::UnknownProtocol {
                 endpoint: String::from("carrier-pigeon/aviary:1"),
                 protocol: String::from("carrier-pigeon"),
+                list: EndpointList::Listen,
             }]
         );
         // CONNECT endpoints are judged too, not just listen — the harm is
@@ -6497,6 +6617,7 @@ mod tests {
             vec![ConfigDefect::ProtocolNotCompiledIn {
                 endpoint: String::from("ws/example.org:7447"),
                 protocol: String::from("ws"),
+                list: EndpointList::Connect,
             }]
         );
     }
@@ -6627,7 +6748,9 @@ mod tests {
             3,
             "the closed reading must still refuse a fragment: {closed:?}"
         );
-        assert!(closed.contains(&TopologyDefect::NoNodeAccepts));
+        assert!(closed.contains(&TopologyDefect::NoNodeAccepts {
+            nodes: vec![String::from("A"), String::from("B")],
+        }));
 
         // Declared, it is a working deployment, and the report SAYS what it
         // assumed rather than reading like a set that answers for itself.
@@ -6850,7 +6973,9 @@ mod tests {
         let b = node(WhatAmI::Client, "B").connecting_to("tcp/10.0.0.5:7447");
         let defects = validate_topology(&[a.clone(), b.clone()]);
         assert!(
-            defects.contains(&TopologyDefect::NoNodeAccepts),
+            defects.contains(&TopologyDefect::NoNodeAccepts {
+                nodes: vec![String::from("A"), String::from("B")],
+            }),
             "an all-client set was not called out: {defects:?}"
         );
 
@@ -6935,6 +7060,7 @@ mod tests {
         let named = ConfigDefect::ProtocolNotCompiledIn {
             endpoint: String::from("unixsock-stream//tmp/z.sock"),
             protocol: String::from("unixsock-stream"),
+            list: EndpointList::Listen,
         }
         .to_string();
         assert!(

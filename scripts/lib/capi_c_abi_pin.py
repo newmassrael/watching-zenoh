@@ -139,7 +139,7 @@ HEADER = ROOT / "crates" / "wz-capi-c" / "include" / "wz_capi_c.h"
 # in `wz_capi_c.h` can change on its own -- and still has to be a deliberate
 # edit here, because a revision that moves for a reason nobody wrote down is a
 # revision nobody can reason about.
-EXPECTED_REVISION = 3
+EXPECTED_REVISION = 4
 EXPECTED_SYMBOLS = {
     # R2301 (item 634) — the revision door itself.
     "wz_capi_c_abi_version",
@@ -204,6 +204,25 @@ EXPECTED_SYMBOLS = {
     "wz_capi_c_group_drop",
     "wz_capi_c_internal_group_null",
     "wz_capi_c_internal_group_check",
+    # ZA-3469 — the config verdict as ROWS (revision 4): a table of
+    # (variant, node, key path, endpoint) read a column at a time from an owned
+    # handle, for a caller that attaches each reason to the field it is about.
+    # The three doors, then the handle's own set, then one accessor per column.
+    "wz_capi_c_config_validate_rows",
+    "wz_capi_c_config_validate_for_build_rows",
+    "wz_capi_c_config_validate_topology_rows",
+    "wz_capi_c_config_verdict_len",
+    "wz_capi_c_config_verdict_finding_count",
+    "wz_capi_c_config_verdict_row_finding",
+    "wz_capi_c_config_verdict_row_variant",
+    "wz_capi_c_config_verdict_row_message",
+    "wz_capi_c_config_verdict_row_node",
+    "wz_capi_c_config_verdict_row_key",
+    "wz_capi_c_config_verdict_row_endpoint",
+    "wz_capi_c_config_verdict_loan",
+    "wz_capi_c_config_verdict_drop",
+    "wz_capi_c_internal_config_verdict_null",
+    "wz_capi_c_internal_config_verdict_check",
 }
 
 PREFIX = "wz_capi_c_"
