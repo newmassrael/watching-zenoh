@@ -19436,6 +19436,18 @@ layer_c1cc_api_compat_c() {
         --test-threads=1 \
         --exact a_cancellation_token_stops_a_get_identically_on_wz_and_libzenohc \
         || return 1
+    # R2953 (open-debt item 836) — a query ONE session asks of itself, kept by
+    # the queryable that received it (`z_query_clone`), holds the get open until
+    # it is dropped, and the reply made through it reaches the get. Measured
+    # before the repair: wz ended the get while the query was held
+    # (`dropped_while_held=1`) and lost the reply (`replies=0`).
+    _runci_guarded_test \
+        "C1cc a_held_local_query_keeps_its_get_open_identically_on_wz_and_libzenohc" 1 \
+        cargo test -p wz-integration-tests \
+        --test zenoh_c_local_held_query_twice_and_diff -- --ignored --quiet \
+        --test-threads=1 \
+        --exact a_held_local_query_keeps_its_get_open_identically_on_wz_and_libzenohc \
+        || return 1
     # R311y500 — the CROSS-IMPL half, and it is a different question from the
     # three legs above. Those establish that upstream's program LINKS wz and that
     # wz's answers match the real `libzenohc.so`; every byte on their wire was

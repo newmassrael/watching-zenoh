@@ -459,6 +459,9 @@ mod publish_common;
 mod publisher;
 #[cfg(feature = "transport-unicast")]
 mod querier;
+// R2953 — a query that outlives its handler, and the route it answers on.
+#[cfg(all(feature = "transport-unicast", feature = "query-queryable"))]
+mod held_query;
 #[cfg(feature = "transport-unicast")]
 mod queryable;
 mod subscriber;
@@ -471,6 +474,8 @@ mod transport;
 // atom, named only by the matching transport-gated alias + impl block.
 #[cfg(feature = "transport-unicast")]
 pub use decl_listener::*;
+#[cfg(all(feature = "transport-unicast", feature = "query-queryable"))]
+pub use held_query::HeldQuery;
 #[cfg(feature = "transport-unicast")]
 pub use liveliness::*;
 #[cfg(feature = "transport-unicast")]
@@ -673,8 +678,16 @@ where
     /// So a handler may take a HOLD before its dispatch's staged Final job runs
     /// (the job runs after every handler job in the same drain batch, which is
     /// what makes "before" well defined). The job then marks the terminator DUE
-    /// instead of emitting it, and [`Self::release_response_final`] emits it when
-    /// the last hold goes.
+    /// instead of emitting it, and the last hold's release emits it
+    /// ([`HeldQuery`]).
+    ///
+    /// R2953 (open-debt item 836) — keyed by rid AND origin. A query this
+    /// session made of ITSELF is held the same way — upstream's local query is a
+    /// `Query` like any other, answered through the session's own primitives,
+    /// and its `ResponseFinal` goes when the last holder drops it — so the local
+    /// get's Final is owed by the holder too. The two rid spaces are distinct
+    /// (a wire rid is the PEER's, a local one this session's own), which is why
+    /// the origin is part of the key rather than a property of the entry.
     ///
     /// A `std::sync::Mutex` rather than the runtime-projected `R::Mutex`: this
     /// map is touched from the application thread (a C `z_drop` on an escaped
@@ -687,7 +700,7 @@ where
     /// queryable dispatch emits no `ResponseFinal` at all, so there is nothing
     /// to hold and the map would be a field no code path can reach.
     #[cfg(feature = "query-queryable")]
-    final_holds: Arc<std::sync::Mutex<std::collections::HashMap<u64, FinalHold>>>,
+    final_holds: Arc<std::sync::Mutex<std::collections::HashMap<FinalKey, FinalHold>>>,
     /// R2577 — the SUBSCRIBERS Interest a publisher owns, REFCOUNTED by
     /// keyexpr: `keyexpr -> (interest_id, live publisher handles)`.
     ///
@@ -926,6 +939,39 @@ impl<R: SessionRuntime, T: TimeSource, Tp: TransportState<R, T>> Clone for WeakS
     fn clone(&self) -> Self {
         Self(self.0.clone())
     }
+}
+
+/// R2953 (open-debt item 836) — which query a [`FinalHold`] is for: its rid,
+/// and whether this session asked it of itself. See
+/// [`SessionInner::final_holds`] for why the origin is part of the key.
+#[cfg(feature = "query-queryable")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub(crate) struct FinalKey {
+    pub(crate) rid: u64,
+    pub(crate) local: bool,
+}
+
+/// R2953 — the terminator gate every owed `ResponseFinal` passes, wire and
+/// local alike: `true` when a holder has the query, in which case the Final is
+/// now DUE to that holder (with the query's QoS, when it has one) and the
+/// caller must NOT emit it. `false` when nothing holds it and the caller emits.
+#[cfg(feature = "query-queryable")]
+pub(crate) fn defer_final_to_holder(
+    holds: &std::sync::Mutex<std::collections::HashMap<FinalKey, FinalHold>>,
+    key: FinalKey,
+    qos: Option<wz_session_core::sample::QosLevel>,
+) -> bool {
+    let Ok(mut map) = holds.lock() else {
+        return false;
+    };
+    let Some(hold) = map.get_mut(&key) else {
+        return false;
+    };
+    hold.due = true;
+    if let Some(qos) = qos {
+        hold.qos = qos;
+    }
+    true
 }
 
 /// R311y531 — one request whose `ResponseFinal` is deferred; see
@@ -1848,11 +1894,21 @@ impl<R: SessionRuntime, T: TimeSource, Tp: TransportState<R, T>> Session<R, T, T
     /// Final is STAGED, so it lands in the same batch as the handler jobs and
     /// runs after them, and the `on_reply` fires those handlers stage land in
     /// the batch before the `on_final` this one stages. FIFO does the rest.
+    ///
+    /// R2953 (open-debt item 836) — and the Final is the HOLDER's when a
+    /// handler kept the query ([`HeldQuery`]): the same terminator gate the
+    /// wire dispatch's Final passes ([`defer_final_to_holder`]), consulted
+    /// after the handlers ran under either policy, so the get stays open until
+    /// the last holder drops the query, as upstream's does.
     #[cfg(feature = "query-get")]
     fn finalize_local_query(&self, rid: u64) {
         match self.local_delivery {
             LocalDeliveryDrain::Caller => {
                 self.drain_deferred_fires();
+                #[cfg(feature = "query-queryable")]
+                if defer_final_to_holder(&self.final_holds, FinalKey { rid, local: true }, None) {
+                    return;
+                }
                 R::with_mutex_mut(&self.observer, |observer| {
                     observer.replies.deliver_local_final(rid);
                 });
@@ -1860,7 +1916,13 @@ impl<R: SessionRuntime, T: TimeSource, Tp: TransportState<R, T>> Session<R, T, T
             }
             LocalDeliveryDrain::DriveTask => {
                 let observer = self.observer.clone();
+                #[cfg(feature = "query-queryable")]
+                let holds = self.final_holds.clone();
                 self.fires.stage(Box::new(move || {
+                    #[cfg(feature = "query-queryable")]
+                    if defer_final_to_holder(&holds, FinalKey { rid, local: true }, None) {
+                        return;
+                    }
                     R::with_mutex_mut(&observer, |observer| {
                         observer.replies.deliver_local_final(rid);
                     });
@@ -2472,65 +2534,6 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
         &self.transport.params.zid
     }
 
-    /// R311y531 — take over the `ResponseFinal` this dispatch owes for `rid`.
-    ///
-    /// For a queryable handler that lets its query ESCAPE the dispatch (the
-    /// zenoh-pico `z_query_take_from_loaned` shape, which is how a channel-based
-    /// queryable answers from the application thread). Once held, the staged
-    /// terminator job records the Final as DUE instead of emitting it, and
-    /// [`Self::release_response_final`] emits it when the last holder goes.
-    ///
-    /// MUST be called from inside the handler's own deferred job, which is what
-    /// makes the ordering well defined: every handler job of a drain batch runs
-    /// before that batch's terminator jobs, so a hold taken there is always
-    /// visible to the job it must suppress. Taking one afterwards is a lost
-    /// race — the terminator has already gone out and the requester has closed.
-    ///
-    /// Unbalanced calls are safe but wrong in opposite directions: a hold never
-    /// released leaves the requester waiting for its own timeout; a release
-    /// without a hold is a no-op.
-    #[cfg(feature = "query-queryable")]
-    pub fn hold_response_final(&self, rid: u64) {
-        if let Ok(mut map) = self.final_holds.lock() {
-            map.entry(rid).or_default().holds += 1;
-        }
-    }
-
-    /// R311y531 — release one [`Self::hold_response_final`], emitting the
-    /// `ResponseFinal` if this was the last holder and the dispatch already
-    /// wanted it sent.
-    ///
-    /// Callable from ANY thread: the emit path is `SessionLinkActions`, which is
-    /// the same lock-free wire seam the deferred reply drain uses, and the hold
-    /// map is never held across it.
-    ///
-    /// If the terminator was not yet DUE (the release beat the dispatch's staged
-    /// job, e.g. a handler that escaped and dropped the query within the same
-    /// drain), nothing is emitted here — the entry is simply gone, so the staged
-    /// job finds no hold and emits normally. Both orders end with exactly one
-    /// Final.
-    #[cfg(feature = "query-queryable")]
-    pub fn release_response_final(&self, rid: u64) {
-        let due = match self.final_holds.lock() {
-            Ok(mut map) => {
-                let Some(hold) = map.get_mut(&rid) else {
-                    return;
-                };
-                hold.holds = hold.holds.saturating_sub(1);
-                if hold.holds > 0 {
-                    return;
-                }
-                let due = hold.due.then_some(hold.qos);
-                map.remove(&rid);
-                due
-            }
-            Err(_) => return,
-        };
-        if let Some(qos) = due {
-            self.actions().send_response_final(rid, qos);
-        }
-    }
-
     /// R311y450 — borrow THIS node's §5.18 clock, wz's counterpart of zenoh's
     /// `Runtime::hlc()` (`zenoh/src/net/runtime/mod.rs:336`).
     ///
@@ -2765,20 +2768,15 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
                     // every handler job of this batch runs before this one.
                     let holds = self.final_holds.clone();
                     self.fires.stage(Box::new(move || {
-                        if let Ok(mut map) = holds.lock() {
-                            if let Some(hold) = map.get_mut(&rid) {
-                                // A handler escaped this query. The terminator
-                                // is now the last holder's to emit; emitting it
-                                // here would close the requester's pending
-                                // entry and silently discard every reply the
-                                // escaped query is about to make.
-                                hold.due = true;
-                                // R2595 — hand the holder the query's QoS with
-                                // the debt; `release_response_final` has only
-                                // the rid.
-                                hold.qos = qos;
-                                return;
-                            }
+                        // A handler escaped this query: the terminator is now
+                        // the last holder's to emit. Emitting it here would
+                        // close the requester's pending entry and silently
+                        // discard every reply the escaped query is about to
+                        // make. R2595 — the holder gets the query's QoS with
+                        // the debt; its release knows only the key.
+                        if defer_final_to_holder(&holds, FinalKey { rid, local: false }, Some(qos))
+                        {
+                            return;
                         }
                         // `actions` is the concrete `Arc<SessionLinkActions>`,
                         // so call its inherent `send_response_final` directly —

@@ -2654,6 +2654,73 @@ fn query_session_local_with_session_local_queryable_fires() {
     assert_eq!(reply_count.load(Ordering::SeqCst), 1);
 }
 
+/// R2953 (open-debt item 836) — a query this session asked of ITSELF and a
+/// handler kept is waited for, as upstream's is: the GET's final comes when
+/// the held query is dropped, not when the handler returns, and a reply the
+/// holder makes in between reaches the GET. Before R2953 the final went out
+/// as the handler returned, and the late reply had no route.
+#[cfg(all(feature = "query-get", feature = "query-queryable"))]
+#[test]
+fn a_held_local_query_keeps_its_get_open_until_it_is_dropped() {
+    let (session, _driver) = build_session();
+    let held: Arc<Mutex<Option<HeldQuery>>> = Arc::new(Mutex::new(None));
+    let keep = held.clone();
+    let holder = session.clone();
+    let _queryable = session
+        .declare_queryable(
+            "home/held",
+            QueryableOptions::default(),
+            move |query, _out| {
+                *keep.lock().unwrap() = Some(holder.hold_query(query));
+            },
+        )
+        .expect("query-queryable is ON in this test build");
+
+    let replies = Arc::new(AtomicUsize::new(0));
+    let finals = Arc::new(AtomicUsize::new(0));
+    let (r, f) = (replies.clone(), finals.clone());
+    session
+        .query(
+            "home/held",
+            QueryOptions::get().with_allowed_destination(Locality::SessionLocal),
+            move |_| {
+                r.fetch_add(1, Ordering::SeqCst);
+            },
+            move |_| {
+                f.fetch_add(1, Ordering::SeqCst);
+            },
+        )
+        .expect("query-get is ON in this test build");
+
+    assert!(held.lock().unwrap().is_some(), "the handler kept the query");
+    assert_eq!(finals.load(Ordering::SeqCst), 0, "the GET is still open");
+
+    held.lock()
+        .unwrap()
+        .as_ref()
+        .expect("held")
+        .reply(|out| out.reply(b"late"));
+    assert_eq!(
+        finals.load(Ordering::SeqCst),
+        0,
+        "a reply does not close it"
+    );
+
+    drop(held.lock().unwrap().take());
+    assert_eq!(
+        finals.load(Ordering::SeqCst),
+        1,
+        "dropping the held query closes it"
+    );
+    // Read after the final: the default GET consolidates (`Latest`), which
+    // hands replies over at the final, so this is where a routed reply shows.
+    assert_eq!(
+        replies.load(Ordering::SeqCst),
+        1,
+        "the late reply reached the GET"
+    );
+}
+
 #[cfg(all(
     feature = "query-get",
     feature = "query-queryable",

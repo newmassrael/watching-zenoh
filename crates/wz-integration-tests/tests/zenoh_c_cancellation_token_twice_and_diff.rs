@@ -44,7 +44,9 @@
 //!   BEFORE the cancel while zenoh-c kept it open — wz's local get finalises
 //!   its local leg before a C queryable that holds the query has run
 //!   (open-debt item 836). That is a divergence of the local query plane, not of
-//!   cancellation, so legC must not stand on it.
+//!   cancellation, so legC must not stand on it. R2953 closed it and pins the
+//!   local plane in its own leg (`zenoh_c_local_held_query_twice_and_diff`);
+//!   legC keeps the two-session shape so each leg claims one plane.
 //! - **legD** — `z_querier_get`, already-cancelled: the second reader of the
 //!   field, at a different offset.
 //! - **legE** — `z_liveliness_get`, already-cancelled: the third reader.

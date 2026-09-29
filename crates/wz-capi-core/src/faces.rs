@@ -134,9 +134,11 @@ pub type LivelinessSink =
 /// dispatch cannot supply: the deferred replies, and the `ResponseFinal` that
 /// must NOT be emitted until the last holder drops. Both are session
 /// operations, so the shim needs the face's session to build them
-/// ([`wz_runtime_tokio::session::Session::hold_response_final`]). Handing it in
+/// ([`wz_runtime_tokio::session::Session::hold_query`]). Handing it in
 /// here — rather than letting the shim keep a registry-wide session list — is
-/// what keeps the escape bound to the ONE face the query arrived on.
+/// what keeps the escape bound to the ONE face the query arrived on; for the
+/// local plane that face is the session itself, and the held query answers
+/// into its own pending GET (R2953).
 pub type QueryableSink = Arc<
     dyn Fn(&TokioSession) -> Box<dyn FnMut(&dyn QueryView, &mut dyn ReplyOut) + Send + 'static>
         + Send

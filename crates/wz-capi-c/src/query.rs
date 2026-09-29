@@ -22,22 +22,22 @@
 //!   a querier that sees the final considers the query answered and stops
 //!   listening, so an early one silently truncates the replies.
 //!
-//! [`DeferredResponder`] carries both. The HOLD is taken by the dispatch after
-//! the callback returns rather than inside the escape, because a hold is only
-//! effective if it is visible to the terminator job the same drain batch staged,
-//! and counting escapes after the callback is what keeps that ordering argument
-//! in one place. Escapes are COUNTED, not flagged: a callback that pushes the
-//! same query into two channels takes two holds and will see two responder
-//! drops.
+//! The runtime's [`HeldQuery`] carries both (R2953): it answers on the query's
+//! own route — the wire for a query a peer asked, this session's own pending
+//! GET for one it asked of itself — and dropping it releases the Final. The
+//! HOLD is taken inside the escape, i.e. inside the callback, which runs in the
+//! handler job the dispatch's terminator job runs after; that is what makes it
+//! visible to the job it must suppress. Each escape is its own hold: a callback
+//! that pushes the same query into two channels keeps it open until both
+//! copies are dropped.
 
-use std::cell::{Cell, UnsafeCell};
+use std::cell::UnsafeCell;
 use std::ffi::{c_int, c_void};
 use std::sync::Arc;
 
-use wz_runtime_tokio::query::{QueryReply, QueryResponder};
 use wz_runtime_tokio::query_sink::{QueryView, ReplyMeta, ReplyOut};
 use wz_runtime_tokio::reply_acceptance;
-use wz_runtime_tokio::session::TokioSession;
+use wz_runtime_tokio::session::{HeldQuery, TokioSession};
 
 use crate::abi::{
     z_closure_drop_callback_t, z_closure_query_callback_t, z_loaned_bytes_t, z_loaned_keyexpr_t,
@@ -130,54 +130,20 @@ enum PendingReply {
     },
 }
 
-/// The wire seam an ESCAPED query replies through.
+/// Emit one reply of an ESCAPED query NOW, on the query's own route.
 ///
-/// Holds the face's session so a reply issued long after the dispatch still
-/// reaches the right peer, and releases the `ResponseFinal` hold on drop — which
-/// is what makes "the query is answered when the C side drops it" true.
-struct DeferredResponder {
-    session: TokioSession,
-    rid: u64,
-    /// R311y834 — the escaped query's own `_anyke`, for the reason its
-    /// `wz-capi-pico` twin carries one: the deferred emit must build the SAME
-    /// acceptance policy as the in-dispatch leg, and neither default is right
-    /// without the query's actual selector.
-    accept: wz_runtime_tokio::reply_acceptance::ReplyKeyExpr,
-    /// R2594 — the escaped query's own QoS, for the reason its `wz-capi-pico`
-    /// twin carries one: a deferred reply inherits it as an immediate one does.
-    qos: wz_runtime_tokio::sample::QosLevel,
-}
-
-impl DeferredResponder {
-    /// Emit one reply NOW, through the same [`QueryResponder`] path the
-    /// in-dispatch flush uses, so the deferred and immediate legs cannot drift.
-    fn emit(&self, query_keyexpr: &str, reply: PendingReply) {
-        let mut replies: Vec<QueryReply> = Vec::new();
-        {
-            let mut responder = QueryResponder::new(
-                self.rid,
-                query_keyexpr.to_owned(),
-                self.accept,
-                self.qos,
-                &mut replies,
-            );
-            let mut out: &mut dyn ReplyOut = &mut responder;
-            flush_one(&mut out, reply, self.qos);
-        }
-        for reply in replies.drain(..) {
-            if let Ok(response) = reply.into_response() {
-                self.session.actions().send_response(response);
-            }
-        }
-    }
-}
-
-impl Drop for DeferredResponder {
-    fn drop(&mut self) {
-        // The terminator this escape has been holding open. Dropping the query
-        // is what sends the `ResponseFinal`.
-        self.session.release_response_final(self.rid);
-    }
+/// R2953 (open-debt item 836) — the route, the acceptance policy, the QoS and
+/// the `ResponseFinal` hold are the runtime's [`HeldQuery`]; this ABI only
+/// formats the reply, through the same [`flush_one`] the in-dispatch flush
+/// uses, so the deferred and immediate legs cannot drift. Until R2953 this
+/// crate carried its own wire-only responder, so a query the session asked of
+/// ITSELF could be escaped but not answered or waited for.
+fn emit_held(held: &HeldQuery, reply: PendingReply) {
+    let qos = held.qos();
+    held.reply(|out| {
+        let mut out = out;
+        flush_one(&mut out, reply, qos);
+    });
 }
 
 /// R311y563 — TAKE `z_query_reply_options_t::source_info`, on the arm that has
@@ -426,14 +392,14 @@ pub(crate) struct QueryMarshal {
     /// so the escaped responder can seed its replies from it, as the
     /// in-dispatch responder does.
     qos: wz_runtime_tokio::sample::QosLevel,
+    /// R2953 — whether the session asked this query of itself: the half of
+    /// the query's route the rid alone does not name ([`HeldQuery`]).
+    is_local: bool,
     /// The FACE's session, on a marshal the dispatch built. `None` on one built
     /// outside a dispatch, which is exactly the case that cannot be escaped.
     session: Option<TokioSession>,
-    /// How many times this BORROWED marshal has been escaped, read back by the
-    /// dispatch after the callback returns.
-    escapes: Cell<u32>,
-    /// Present only on an ESCAPED marshal.
-    deferred: Option<DeferredResponder>,
+    /// Present only on an ESCAPED marshal: the query held past its dispatch.
+    deferred: Option<HeldQuery>,
     /// Reply accumulator.
     ///
     /// `UnsafeCell` because the accessors receive `*const z_loaned_query_t` and
@@ -472,8 +438,8 @@ impl QueryMarshal {
             loaned_encoding: crate::abi::z_loaned_encoding_t::null_value(),
             rid: view.rid(),
             qos: view.qos(),
+            is_local: view.is_local(),
             session: None,
-            escapes: Cell::new(0),
             deferred: None,
             replies: UnsafeCell::new(Vec::new()),
         }
@@ -519,7 +485,7 @@ impl QueryMarshal {
     /// back. The reply accumulator starts EMPTY rather than copied: replies the
     /// callback already asked for belong to the borrowed marshal's flush, and
     /// duplicating them here would send each one twice.
-    fn deep_copy_deferred(&self, session: TokioSession) -> Self {
+    fn deep_copy_deferred(&self, held: HeldQuery) -> Self {
         Self {
             keyexpr: self.keyexpr.clone(),
             parameters: self.parameters.clone(),
@@ -548,27 +514,14 @@ impl QueryMarshal {
             loaned_encoding: crate::abi::z_loaned_encoding_t::null_value(),
             rid: self.rid,
             qos: self.qos,
-            // The COPY is the escaped end of the chain: it carries the responder
-            // rather than the raw session, so it can never be escaped again.
+            is_local: self.is_local,
+            // The COPY is the escaped end of the chain: it carries the held
+            // query rather than the raw session, so it can never be escaped
+            // again.
             session: None,
-            escapes: Cell::new(0),
-            deferred: Some(DeferredResponder {
-                session,
-                rid: self.rid,
-                accept: if self.anyke {
-                    wz_runtime_tokio::reply_acceptance::ReplyKeyExpr::Any
-                } else {
-                    wz_runtime_tokio::reply_acceptance::ReplyKeyExpr::MatchingQuery
-                },
-                qos: self.qos,
-            }),
+            deferred: Some(held),
             replies: UnsafeCell::new(Vec::new()),
         }
-    }
-
-    /// Take and clear the escape count.
-    fn take_escapes(&self) -> u32 {
-        self.escapes.replace(0)
     }
 
     /// Flush the accumulated replies into the dispatch's [`ReplyOut`].
@@ -583,7 +536,7 @@ impl QueryMarshal {
     /// an escaped one.
     fn push_reply(&self, reply: PendingReply) {
         match self.deferred.as_ref() {
-            Some(responder) => responder.emit(&self.keyexpr, reply),
+            Some(held) => emit_held(held, reply),
             // SAFETY: see the `replies` field docs — the accumulator is touched
             // only from the callback's own thread.
             None => unsafe { (*self.replies.get()).push(reply) },
@@ -593,6 +546,32 @@ impl QueryMarshal {
     /// This marshal viewed as the borrowed query the C side gets.
     fn as_loaned(&self) -> *mut z_loaned_query_t {
         self as *const QueryMarshal as *mut z_loaned_query_t
+    }
+}
+
+/// R2953 — the marshal IS the query the dispatch handed the callback, so it is
+/// what an escape holds ([`TokioSession::hold_query`]).
+impl QueryView for QueryMarshal {
+    fn keyexpr(&self) -> &str {
+        &self.keyexpr
+    }
+    fn parameters(&self) -> Option<&[u8]> {
+        Some(&self.parameters)
+    }
+    fn attachment(&self) -> Option<&[u8]> {
+        self.attachment.as_ref().map(|s| s.payload.as_slice())
+    }
+    fn payload(&self) -> Option<&[u8]> {
+        self.payload.as_ref().map(|s| s.payload.as_slice())
+    }
+    fn rid(&self) -> u64 {
+        self.rid
+    }
+    fn is_local(&self) -> bool {
+        self.is_local
+    }
+    fn qos(&self) -> wz_runtime_tokio::sample::QosLevel {
+        self.qos
     }
 }
 
@@ -629,11 +608,6 @@ fn make_queryable_callback(
         let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| unsafe {
             call(query_ptr, ctx);
         }));
-        // One `ResponseFinal` hold per escape the callback made — see the module
-        // doc for why this runs HERE and not inside the escape.
-        for _ in 0..marshal.take_escapes() {
-            session.hold_response_final(marshal.rid);
-        }
         marshal.flush(out);
     }
 }
@@ -655,9 +629,13 @@ pub(crate) unsafe fn escape_query(src: *const z_loaned_query_t) -> Handle {
     let Some(session) = marshal.session.as_ref() else {
         return std::ptr::null_mut();
     };
-    let mut boxed = Box::new(marshal.deep_copy_deferred(session.clone()));
+    // The hold is taken HERE, inside the callback — the handler job the
+    // dispatch's terminator job runs after — which is what makes it visible to
+    // that job. One hold per escape: a query escaped twice stays open until
+    // both copies are dropped.
+    let held = session.hold_query(marshal);
+    let mut boxed = Box::new(marshal.deep_copy_deferred(held));
     boxed.bind();
-    marshal.escapes.set(marshal.escapes.get() + 1);
     Box::into_raw(boxed) as Handle
 }
 
@@ -1496,8 +1474,7 @@ pub unsafe extern "C" fn z_query_reply_err_options_default(
 /// coverage gate the other two run has nothing to check.
 ///
 /// Accumulated into the query marshal like its siblings, so an error reply
-/// emitted from an ESCAPED query reaches the wire through the same
-/// [`DeferredResponder`] path.
+/// emitted from an ESCAPED query leaves through the same [`HeldQuery`] route.
 ///
 /// # Safety
 /// `this_` must be null or a live loaned query; `payload` must be null or a valid
@@ -1640,7 +1617,7 @@ pub unsafe extern "C" fn z_query_loan_mut(this_: *mut z_owned_query_t) -> *mut z
 /// Routed through [`escape_query`], the same path `z_fifo_channel_query_new`
 /// takes, rather than through a plain field copy. The reason is the
 /// `ResponseFinal`: a cloned query can be REPLIED to, so it must carry a
-/// [`DeferredResponder`] and must count as an escape, or the terminator would go
+/// [`HeldQuery`] and hold the query like any escape, or the terminator would go
 /// out while the clone still holds an unanswered query and the querier would see
 /// the replies truncated.
 ///
@@ -1732,7 +1709,7 @@ pub unsafe extern "C" fn z_internal_query_null(this_: *mut z_owned_query_t) {
 }
 
 /// Drop an owned query (zenoh-c `z_query_drop`) — which is what SENDS the
-/// `ResponseFinal` for an escaped query, via [`DeferredResponder::drop`].
+/// `ResponseFinal` for an escaped query, via its [`HeldQuery`]'s drop.
 ///
 /// # Safety
 /// `this_` must be null or a valid moved query.
@@ -2077,7 +2054,7 @@ mod tests {
             source_info: Some(wz_runtime_tokio::sample::SourceInfo::new(&[4u8; 16], 1, 2)),
         };
         let borrowed = QueryMarshal::new(&view);
-        let mut escaped = borrowed.deep_copy_deferred(shared.local_session().clone());
+        let mut escaped = borrowed.deep_copy_deferred(shared.local_session().hold_query(&borrowed));
         escaped.bind();
         let loaned = &escaped as *const QueryMarshal as *const z_loaned_query_t;
         // SAFETY: `loaned` aims at a live, bound marshal on this frame.
