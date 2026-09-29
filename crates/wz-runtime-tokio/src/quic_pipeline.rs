@@ -209,7 +209,11 @@ pub struct QuicLink {
 /// terms — `io/zenoh-links/zenoh-link-quic/src/unicast.rs` @ `fn get_fd` is
 /// `//TODO: expose FD for quinn??? bail!("Not supported")`.
 impl crate::link_ring_fd::RingReadable for RecvStream {
-    #[cfg(all(feature = "runtime-tokio-uring", feature = "transport-link-tcp"))]
+    #[cfg(all(
+        feature = "runtime-tokio-uring",
+        feature = "transport-link-tcp",
+        target_os = "linux"
+    ))]
     fn ring_fd(&self) -> Option<std::os::fd::RawFd> {
         None
     }

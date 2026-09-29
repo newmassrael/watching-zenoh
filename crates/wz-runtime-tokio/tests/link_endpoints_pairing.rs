@@ -54,12 +54,17 @@
 // plus its own link feature, so with none of them armed the file has no tests and
 // its shared helpers would be dead code. Gating the FILE rather than allow-ing the
 // warnings keeps a genuinely unused helper visible.
+//
+// R2973 — each arm carries its leg's HOST as well as its feature, for the same
+// reason: the serial leg opens an `openpty` pair (Unix only) and the unixpipe
+// leg's pipeline is Linux only, so on any other host naming either feature
+// armed the file and ran nothing in it.
 #![cfg(all(
     feature = "transport-unicast",
     any(
         feature = "transport-link-udp",
-        feature = "transport-link-serial",
-        feature = "transport-link-unixpipe",
+        all(feature = "transport-link-serial", unix),
+        all(feature = "transport-link-unixpipe", target_os = "linux"),
         feature = "transport-link-quic-datagram",
     )
 ))]
@@ -491,7 +496,7 @@ async fn unixpipe_link_ends_report_mirrored_dedicated_fifo_endpoints() {
 /// Both ends reporting the same locator for `src` and `dst` is upstream's DIAL-side
 /// behaviour verbatim (`io/zenoh-links/zenoh-link-serial/src/unicast.rs` @ `async fn new_link(&self, endpoint: EndPoint) -> ZResult<LinkUnicast> {`
 /// passes its one `path` as both), so `assert_mirrored`'s distinctness rule does not apply.
-#[cfg(all(feature = "transport-link-serial", feature = "transport-unicast"))]
+#[cfg(all(feature = "transport-link-serial", feature = "transport-unicast", unix))]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn serial_link_ends_report_their_own_endpoint_for_both_address_forms() {
     use tokio_serial::SerialStream;

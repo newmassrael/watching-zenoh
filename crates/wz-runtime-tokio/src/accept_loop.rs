@@ -3731,7 +3731,7 @@ mod tests {
     /// `accept()`s a distinct per-peer `UnixStream` per initiator — the genuine
     /// multi-peer property the non-IP ENABLEMENT discriminator asserts (unlike
     /// UDP's src-keyed demux, unixsock has a real per-connection stream accept).
-    #[cfg(feature = "transport-link-unixsock")]
+    #[cfg(all(feature = "transport-link-unixsock", unix))]
     async fn unixsock_idle_initiator(path: String, zid: u8, mut go: watch::Receiver<bool>) {
         use crate::session_open::{connect_and_open_session, DialConfig};
         use wz_session_core::locator::parse_any_locator;
@@ -4338,7 +4338,7 @@ mod tests {
     /// loopback unix socket is lossless + in-order, so two
     /// clean handshakes are deterministic (the assumption the udp/tcp N-peer
     /// siblings share). [[feedback-no-flaky-ever]]
-    #[cfg(feature = "transport-link-unixsock")]
+    #[cfg(all(feature = "transport-link-unixsock", unix))]
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn mesh_accept_loop_holds_two_unixsock_peers() {
         use crate::session_open::bind_endpoint;

@@ -114,11 +114,19 @@ pub struct StreamReadDriver<R> {
     /// [`crate::uring_reactor::UringReactor::attach`], which no longer takes a
     /// width at all — so this moment no longer has to be the one the width is
     /// knowable at, and the only thing left to justify is the cost.
-    #[cfg(all(feature = "runtime-tokio-uring", feature = "transport-link-tcp"))]
+    #[cfg(all(
+        feature = "runtime-tokio-uring",
+        feature = "transport-link-tcp",
+        target_os = "linux"
+    ))]
     ring: RingChoice,
     /// R2750 — WHOSE reactor [`Self::choose_ring`] consults. `None` is the
     /// node's. See that method for why a caller may need to own one.
-    #[cfg(all(feature = "runtime-tokio-uring", feature = "transport-link-tcp"))]
+    #[cfg(all(
+        feature = "runtime-tokio-uring",
+        feature = "transport-link-tcp",
+        target_os = "linux"
+    ))]
     reactor: Option<Arc<crate::uring_reactor::UringReactor>>,
 }
 
@@ -129,7 +137,11 @@ pub struct StreamReadDriver<R> {
 /// "asked, and the answer was no" must not collapse: the question costs a
 /// channel send and an `attach`, and a link that declined must not re-ask on
 /// every frame.
-#[cfg(all(feature = "runtime-tokio-uring", feature = "transport-link-tcp"))]
+#[cfg(all(
+    feature = "runtime-tokio-uring",
+    feature = "transport-link-tcp",
+    target_os = "linux"
+))]
 enum RingChoice {
     /// Not asked yet — see the field's doc for why the question waits.
     Undecided,
@@ -327,9 +339,17 @@ impl<R: AsyncRead + Unpin + RingReadable> StreamReadDriver<R> {
             lowlatency,
             expiry: None,
             arena,
-            #[cfg(all(feature = "runtime-tokio-uring", feature = "transport-link-tcp"))]
+            #[cfg(all(
+                feature = "runtime-tokio-uring",
+                feature = "transport-link-tcp",
+                target_os = "linux"
+            ))]
             ring: RingChoice::Undecided,
-            #[cfg(all(feature = "runtime-tokio-uring", feature = "transport-link-tcp"))]
+            #[cfg(all(
+                feature = "runtime-tokio-uring",
+                feature = "transport-link-tcp",
+                target_os = "linux"
+            ))]
             reactor: None,
         }
     }
@@ -347,7 +367,12 @@ impl<R: AsyncRead + Unpin + RingReadable> StreamReadDriver<R> {
     /// [`Self::set_expiry`] being gated on its one consumer's feature. When a
     /// node object exists, this loses the `test` and gains a caller in the same
     /// change.
-    #[cfg(all(test, feature = "runtime-tokio-uring", feature = "transport-link-tcp"))]
+    #[cfg(all(
+        test,
+        feature = "runtime-tokio-uring",
+        feature = "transport-link-tcp",
+        target_os = "linux"
+    ))]
     pub(crate) fn on_reactor(mut self, reactor: Arc<crate::uring_reactor::UringReactor>) -> Self {
         self.reactor = Some(reactor);
         self
@@ -362,7 +387,12 @@ impl<R: AsyncRead + Unpin + RingReadable> StreamReadDriver<R> {
     /// the same way whether or not anybody asks.
     ///
     /// Gated with its consumers for the reason [`Self::on_reactor`] is.
-    #[cfg(all(test, feature = "runtime-tokio-uring", feature = "transport-link-tcp"))]
+    #[cfg(all(
+        test,
+        feature = "runtime-tokio-uring",
+        feature = "transport-link-tcp",
+        target_os = "linux"
+    ))]
     pub(crate) fn reads_through_ring(&self) -> bool {
         matches!(self.ring, RingChoice::Ring(_))
     }
@@ -384,11 +414,17 @@ impl<R: AsyncRead + Unpin + RingReadable> StreamReadDriver<R> {
     /// [`Self::set_expiry`] being gated on its one consumer's feature. A second
     /// transport wanting this widens the gate in the change that adds the
     /// caller, not before.
+    ///
+    /// R2973 — and on the consumer's HOST as well as its feature: the vsock
+    /// pipeline is `target_os = "linux"`, so on any other host a build naming
+    /// the feature compiled this against a witness that is not there
+    /// (`platform_link_matrix.py`'s site arm).
     #[cfg(all(
         test,
         feature = "runtime-tokio-uring",
         feature = "transport-link-tcp",
-        feature = "transport-link-vsock"
+        feature = "transport-link-vsock",
+        target_os = "linux"
     ))]
     pub(crate) fn reader_ring_fd(&self) -> Option<std::os::fd::RawFd> {
         self.reader.ring_fd()
@@ -428,7 +464,11 @@ impl<R: AsyncRead + Unpin + RingReadable> StreamReadDriver<R> {
     /// for a ring no link can use. The descriptor question is local, free and
     /// decides the same thing, so it goes first and the reactor is built only
     /// for a link that can actually be put on it.
-    #[cfg(all(feature = "runtime-tokio-uring", feature = "transport-link-tcp"))]
+    #[cfg(all(
+        feature = "runtime-tokio-uring",
+        feature = "transport-link-tcp",
+        target_os = "linux"
+    ))]
     fn choose_ring(&self) -> RingChoice {
         let Some(fd) = self.reader.ring_fd() else {
             return RingChoice::Framed;
@@ -503,7 +543,11 @@ impl<R: AsyncRead + Unpin + RingReadable> LinkDriver for StreamReadDriver<R> {
     async fn poll_event(&mut self) -> LinkEvent {
         // R2750 — the dispatch, at the moment upstream dispatches: the first
         // time this link asks to read. See `RingChoice` and the `ring` field.
-        #[cfg(all(feature = "runtime-tokio-uring", feature = "transport-link-tcp"))]
+        #[cfg(all(
+            feature = "runtime-tokio-uring",
+            feature = "transport-link-tcp",
+            target_os = "linux"
+        ))]
         {
             if matches!(self.ring, RingChoice::Undecided) {
                 self.ring = self.choose_ring();
@@ -894,7 +938,12 @@ mod tests {
 /// not a child: `uring::` does not match `uring_reactor::`, and neither reaches
 /// `stream_link::`. Naming this module lets the lane run exactly these and not
 /// the whole of `stream_link`'s framing suite, which has no ring in it.
-#[cfg(all(test, feature = "runtime-tokio-uring", feature = "transport-link-tcp"))]
+#[cfg(all(
+    test,
+    feature = "runtime-tokio-uring",
+    feature = "transport-link-tcp",
+    target_os = "linux"
+))]
 mod ring_selection {
     use super::*;
     use crate::link_rx_arena::LinkRxArena;

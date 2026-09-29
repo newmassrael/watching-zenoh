@@ -94,7 +94,11 @@ pub type UnixsockReadDriver = StreamReadDriver<OwnedReadHalf>;
 /// `tokio::net::unix::OwnedReadHalf` — which is why the answer is written here
 /// rather than shared with [`crate::link_pipeline`]'s.
 impl crate::link_ring_fd::RingReadable for OwnedReadHalf {
-    #[cfg(all(feature = "runtime-tokio-uring", feature = "transport-link-tcp"))]
+    #[cfg(all(
+        feature = "runtime-tokio-uring",
+        feature = "transport-link-tcp",
+        target_os = "linux"
+    ))]
     fn ring_fd(&self) -> Option<std::os::fd::RawFd> {
         use std::os::fd::AsRawFd;
         // Upstream refuses a negative fd rather than trusting the accessor

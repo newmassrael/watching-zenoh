@@ -210,12 +210,12 @@ use tokio_tungstenite::WebSocketStream;
 // connected `UnixStream` reuses the same `stream_link` split as TCP via
 // `wire_unixsock_stream`; UNLIKE tls (no cert config), a `unixsock-stream/...`
 // locator dials directly through `dial_locator`, like `ws`/`udp`.
-#[cfg(feature = "transport-link-unixsock")]
+#[cfg(all(feature = "transport-link-unixsock", unix))]
 use crate::unixsock_pipeline::{
     accept_unixsock_on, bind_unixsock, dial_unixsock, wire_unixsock_stream, UnixsockListener,
     UnixsockReadDriver,
 };
-#[cfg(feature = "transport-link-unixsock")]
+#[cfg(all(feature = "transport-link-unixsock", unix))]
 use tokio::net::UnixStream;
 
 // R311xj — the vsock arm, like tls/unixsock, rides this tcp+unicast-gated
@@ -721,7 +721,7 @@ pub enum DialedLink {
     /// Produced by [`dial_locator`] for a `unixsock-stream/...` locator (no
     /// cert config needed, like `ws` / `udp`), or by an accepted `UnixStream`
     /// the acceptor wraps directly (no dial-time handshake, unlike serial/tls).
-    #[cfg(feature = "transport-link-unixsock")]
+    #[cfg(all(feature = "transport-link-unixsock", unix))]
     Unixsock(UnixStream),
     /// A connected AF_VSOCK stream, split downstream via [`wire_vsock_stream`]
     /// (R311xj). A reliable byte STREAM like TCP/unixsock, so the steady-state
@@ -797,7 +797,7 @@ impl DialedLink {
             DialedLink::Tls(..) => "tls",
             #[cfg(feature = "transport-link-ws")]
             DialedLink::Ws(_) => "ws",
-            #[cfg(feature = "transport-link-unixsock")]
+            #[cfg(all(feature = "transport-link-unixsock", unix))]
             DialedLink::Unixsock(_) => "unixsock",
             #[cfg(all(feature = "transport-link-vsock", target_os = "linux"))]
             DialedLink::Vsock(_) => "vsock",
@@ -890,7 +890,7 @@ pub enum BoundListener {
     /// unlink-on-teardown that zenoh's `ListenerUnixSocketStream` carries
     /// (`unicast.rs`). Dropping this `BoundListener` therefore removes the
     /// socket file, which is why no caller has to.
-    #[cfg(feature = "transport-link-unixsock")]
+    #[cfg(all(feature = "transport-link-unixsock", unix))]
     Unixsock(UnixsockListener),
     /// A bound AF_VSOCK [`VsockListener`]; [`accept_bound`] accepts a raw
     /// [`DialedLink::Vsock`] with NO post-accept handshake (direct wrap, like
@@ -1164,7 +1164,7 @@ impl BoundListener {
             BoundListener::Ws(_) => "ws",
             #[cfg(feature = "transport-link-tls")]
             BoundListener::Tls(..) => "tls",
-            #[cfg(feature = "transport-link-unixsock")]
+            #[cfg(all(feature = "transport-link-unixsock", unix))]
             BoundListener::Unixsock(_) => "unixsock",
             #[cfg(all(feature = "transport-link-vsock", target_os = "linux"))]
             BoundListener::Vsock(_) => "vsock",
@@ -1238,7 +1238,7 @@ impl BoundListener {
             BoundListener::Ws(_) => LinkKind::Ws,
             #[cfg(feature = "transport-link-tls")]
             BoundListener::Tls(..) => LinkKind::Tls,
-            #[cfg(feature = "transport-link-unixsock")]
+            #[cfg(all(feature = "transport-link-unixsock", unix))]
             BoundListener::Unixsock(_) => LinkKind::UnixsockStream,
             #[cfg(all(feature = "transport-link-vsock", target_os = "linux"))]
             BoundListener::Vsock(_) => LinkKind::Vsock,
@@ -1286,7 +1286,7 @@ impl BoundListener {
             BoundListener::Ws(_) => true,
             #[cfg(feature = "transport-link-tls")]
             BoundListener::Tls(..) => true,
-            #[cfg(feature = "transport-link-unixsock")]
+            #[cfg(all(feature = "transport-link-unixsock", unix))]
             BoundListener::Unixsock(_) => true,
             #[cfg(all(feature = "transport-link-vsock", target_os = "linux"))]
             BoundListener::Vsock(_) => true,
@@ -1363,7 +1363,7 @@ impl BoundListener {
             // A unix listener has no IP address; render the bound socket PATH
             // (the non-IP address type this per-variant String accessor exists
             // for, R311y374). An abstract/unnamed socket has no pathname.
-            #[cfg(feature = "transport-link-unixsock")]
+            #[cfg(all(feature = "transport-link-unixsock", unix))]
             BoundListener::Unixsock(l) => l
                 .local_addr()?
                 .as_pathname()
@@ -1431,7 +1431,7 @@ impl BoundListener {
             // typed error for the first non-IP variant); an IP-address caller
             // (the demo's `--peer` / `--router-hat` zid-from-port derivation)
             // never binds unixsock, and a non-IP caller uses `local_addr_display`.
-            #[cfg(feature = "transport-link-unixsock")]
+            #[cfg(all(feature = "transport-link-unixsock", unix))]
             BoundListener::Unixsock(_) => Err(io::Error::new(
                 io::ErrorKind::Unsupported,
                 "a unixsock listener has no IP SocketAddr; use local_addr_display",
@@ -1519,7 +1519,7 @@ impl BoundListener {
             // `UnixStream` with an anonymous peer (discarded by
             // `accept_unixsock_on`), wrapped DIRECTLY (no post-accept handshake,
             // like `tcp`). The peer is `NonIp("unixsock")`.
-            #[cfg(feature = "transport-link-unixsock")]
+            #[cfg(all(feature = "transport-link-unixsock", unix))]
             BoundListener::Unixsock(l) => {
                 let stream = accept_unixsock_on(l).await?;
                 (
@@ -1754,7 +1754,7 @@ pub enum AcceptedLink {
     /// A raw accepted unix-domain stream — NO post-accept handshake (like
     /// [`Self::Tcp`]); [`Self::handshake`] wraps it directly as
     /// [`DialedLink::Unixsock`] (R311y378).
-    #[cfg(feature = "transport-link-unixsock")]
+    #[cfg(all(feature = "transport-link-unixsock", unix))]
     Unixsock(UnixStream),
     /// A raw accepted AF_VSOCK stream — NO post-accept handshake (like
     /// [`Self::Tcp`] / [`Self::Unixsock`]); [`Self::handshake`] wraps it
@@ -1875,7 +1875,7 @@ impl AcceptedLink {
             // No post-accept handshake — a `UnixStream` is wrapped directly, the
             // acceptor mirror of `dial_locator`'s direct `DialedLink::Unixsock`
             // (R311y378).
-            #[cfg(feature = "transport-link-unixsock")]
+            #[cfg(all(feature = "transport-link-unixsock", unix))]
             AcceptedLink::Unixsock(stream) => DialedLink::Unixsock(stream),
             // Direct wrap, the acceptor mirror of dial_locator's
             // `DialedLink::Vsock` (R311y379).
@@ -1992,7 +1992,7 @@ impl AcceptedLink {
             #[cfg(feature = "transport-link-tls")]
             AcceptedLink::Tls(..) => "; tls server handshake",
             // Direct wrap, no server handshake (like tcp) — no completion note.
-            #[cfg(feature = "transport-link-unixsock")]
+            #[cfg(all(feature = "transport-link-unixsock", unix))]
             AcceptedLink::Unixsock(_) => "",
             #[cfg(all(feature = "transport-link-vsock", target_os = "linux"))]
             AcceptedLink::Vsock(_) => "",
@@ -2068,7 +2068,7 @@ pub const COMPILED_IN_LINK_SCHEMES: &[&str] = &[
     "quic",
     #[cfg(feature = "transport-link-serial")]
     "serial",
-    #[cfg(feature = "transport-link-unixsock")]
+    #[cfg(all(feature = "transport-link-unixsock", unix))]
     "unixsock-stream",
     #[cfg(all(feature = "transport-link-unixpipe", target_os = "linux"))]
     "unixpipe",
@@ -2553,7 +2553,7 @@ pub async fn dial_locator(locator: AnyLocator, cfg: &DialConfig) -> io::Result<D
         // owns the `UnixListener`, the not-yet-wired-here accept extension
         // point `bind_locator` documents). No cert config, so the locator dials
         // directly here (like `ws`/`udp`, unlike `tls`).
-        #[cfg(feature = "transport-link-unixsock")]
+        #[cfg(all(feature = "transport-link-unixsock", unix))]
         AnyLocator::Unixsock(ep) => Ok(DialedLink::Unixsock(dial_unixsock(&ep.path).await?)),
         // R311xi — `AnyLocator::Unixsock` is an ALWAYS-present variant (the
         // unixsock locator leaf is ungated in wz-session-core), so this arm
@@ -2562,7 +2562,7 @@ pub async fn dial_locator(locator: AnyLocator, cfg: &DialConfig) -> io::Result<D
         // do — keeping the match exhaustive in every feature combination (no
         // cross-crate skew: the variant's gate and this arm's gate cannot
         // disagree).
-        #[cfg(not(feature = "transport-link-unixsock"))]
+        #[cfg(not(all(feature = "transport-link-unixsock", unix)))]
         AnyLocator::Unixsock(_ep) => Err(io::Error::new(
             io::ErrorKind::Unsupported,
             "unixsock session-open requires the transport-link-unixsock feature",
@@ -3550,9 +3550,9 @@ pub async fn bind_locator(locator: AnyLocator, cfg: &AcceptConfig) -> io::Result
         // feature configs: backend-on binds; backend-off is a typed
         // `Unsupported` (no cross-crate gate skew — the variant's gate and this
         // arm's gate cannot disagree), exactly as the dial arm does.
-        #[cfg(feature = "transport-link-unixsock")]
+        #[cfg(all(feature = "transport-link-unixsock", unix))]
         AnyLocator::Unixsock(ep) => Ok(BoundListener::Unixsock(bind_unixsock(&ep.path).await?)),
-        #[cfg(not(feature = "transport-link-unixsock"))]
+        #[cfg(not(all(feature = "transport-link-unixsock", unix)))]
         AnyLocator::Unixsock(_ep) => Err(io::Error::new(
             io::ErrorKind::Unsupported,
             "unixsock accept requires the transport-link-unixsock feature",
@@ -3756,7 +3756,7 @@ pub enum InboundLink {
     Tls(TlsReadDriver),
     #[cfg(feature = "transport-link-ws")]
     Ws(WsReadDriver),
-    #[cfg(feature = "transport-link-unixsock")]
+    #[cfg(all(feature = "transport-link-unixsock", unix))]
     Unixsock(UnixsockReadDriver),
     #[cfg(all(feature = "transport-link-vsock", target_os = "linux"))]
     Vsock(VsockReadDriver),
@@ -3780,7 +3780,7 @@ impl LinkDriver for InboundLink {
             InboundLink::Tls(d) => d.open().await,
             #[cfg(feature = "transport-link-ws")]
             InboundLink::Ws(d) => d.open().await,
-            #[cfg(feature = "transport-link-unixsock")]
+            #[cfg(all(feature = "transport-link-unixsock", unix))]
             InboundLink::Unixsock(d) => d.open().await,
             #[cfg(all(feature = "transport-link-vsock", target_os = "linux"))]
             InboundLink::Vsock(d) => d.open().await,
@@ -3804,7 +3804,7 @@ impl LinkDriver for InboundLink {
             InboundLink::Tls(d) => d.send(frame, reliability).await,
             #[cfg(feature = "transport-link-ws")]
             InboundLink::Ws(d) => d.send(frame, reliability).await,
-            #[cfg(feature = "transport-link-unixsock")]
+            #[cfg(all(feature = "transport-link-unixsock", unix))]
             InboundLink::Unixsock(d) => d.send(frame, reliability).await,
             #[cfg(all(feature = "transport-link-vsock", target_os = "linux"))]
             InboundLink::Vsock(d) => d.send(frame, reliability).await,
@@ -3828,7 +3828,7 @@ impl LinkDriver for InboundLink {
             InboundLink::Tls(d) => d.close().await,
             #[cfg(feature = "transport-link-ws")]
             InboundLink::Ws(d) => d.close().await,
-            #[cfg(feature = "transport-link-unixsock")]
+            #[cfg(all(feature = "transport-link-unixsock", unix))]
             InboundLink::Unixsock(d) => d.close().await,
             #[cfg(all(feature = "transport-link-vsock", target_os = "linux"))]
             InboundLink::Vsock(d) => d.close().await,
@@ -3852,7 +3852,7 @@ impl LinkDriver for InboundLink {
             InboundLink::Tls(d) => d.poll_event().await,
             #[cfg(feature = "transport-link-ws")]
             InboundLink::Ws(d) => d.poll_event().await,
-            #[cfg(feature = "transport-link-unixsock")]
+            #[cfg(all(feature = "transport-link-unixsock", unix))]
             InboundLink::Unixsock(d) => d.poll_event().await,
             #[cfg(all(feature = "transport-link-vsock", target_os = "linux"))]
             InboundLink::Vsock(d) => d.poll_event().await,
@@ -3931,7 +3931,7 @@ pub fn wire_dialed_link_with_lowlatency(
             let (inbound, outbound, handle) = wire_ws_stream(*stream);
             (InboundLink::Ws(inbound), outbound, handle)
         }
-        #[cfg(feature = "transport-link-unixsock")]
+        #[cfg(all(feature = "transport-link-unixsock", unix))]
         DialedLink::Unixsock(stream) => {
             let (inbound, outbound, handle) = wire_unixsock_stream(stream);
             (InboundLink::Unixsock(inbound), outbound, handle)
@@ -6729,7 +6729,7 @@ mod tests {
     // (:183). These strings are FLOODED to peers via `set_self_locators` ->
     // `LinkstateForwarder` -> the neighbour graph, so they are a wire surface.
 
-    #[cfg(feature = "transport-link-unixsock")]
+    #[cfg(all(feature = "transport-link-unixsock", unix))]
     #[tokio::test]
     async fn advertised_unixsock_locator_uses_the_zenoh_scheme_and_parses_back() {
         let path = std::env::temp_dir()

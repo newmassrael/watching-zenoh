@@ -1765,15 +1765,6 @@ scouting-static = ["wz-session-core/scouting-static"]
 # codegen SSOT, so this crate has no build script and pulls no sce-codegen.
 
 [dependencies]
-# R311y589 — the LOW-LEVEL io_uring interface, deliberately not `tokio-uring`.
-# `tokio-uring` brings its own current-thread runtime, and wz already has a
-# multi-threaded one that everything else in this crate is written against; two
-# reactors competing for the same session would be a different feature from the
-# one ARCHITECTURE §9.5 row 3 describes. This crate is a thin `io_uring_setup` /
-# submission-queue binding, so the adapter registers the pool and submits SQEs
-# from wz's own runtime instead of importing a second one.
-# Linux-only and OPTIONAL: pulled solely by `runtime-tokio-uring`.
-io-uring = { version = "0.7", optional = true }
 # R311y492 — the host<->plugin C ABI contract, linked here and, INDEPENDENTLY,
 # by every plugin cdylib. Optional + pulled only by `plugin-dynamic-loading`.
 wz-plugin-abi = { path = "../wz-plugin-abi", optional = true }
@@ -2094,6 +2085,20 @@ dunce = { version = "1.0.3", optional = true }
 # to 0.5 to match zenoh-link-vsock 1.5.0.
 [target.'cfg(target_os = "linux")'.dependencies]
 tokio-vsock = { version = "0.5", optional = true }
+# R311y589 — the LOW-LEVEL io_uring interface, deliberately not `tokio-uring`.
+# `tokio-uring` brings its own current-thread runtime, and wz already has a
+# multi-threaded one that everything else in this crate is written against; two
+# reactors competing for the same session would be a different feature from the
+# one ARCHITECTURE §9.5 row 3 describes. This crate is a thin `io_uring_setup` /
+# submission-queue binding, so the adapter registers the pool and submits SQEs
+# from wz's own runtime instead of importing a second one.
+# OPTIONAL: pulled solely by `runtime-tokio-uring`.
+# R2973 — and in THIS table, because the comment above always said "Linux-only"
+# while the line sat in the host-independent one: a macOS or Windows build that
+# named the feature compiled the crate and failed inside it. Upstream's
+# `commons/zenoh-uring` keeps `io-uring` in a `target_os = "linux"` table for
+# the same reason.
+io-uring = { version = "0.7", optional = true }
 
 [target.'cfg(unix)'.dependencies]
 # R311y10 — `libc` for the one `mkfifo` FFI call the unixpipe backend needs to

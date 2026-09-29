@@ -396,15 +396,28 @@ pub fn open_serial_device(endpoint: &SerialEndpoint) -> io::Result<SerialStream>
     let builder = tokio_serial::new(path, endpoint.baudrate);
     // tokio_serial::Error impls std::error::Error -> io::Error::other carries
     // it without lossy stringly-typed remapping.
-    let mut stream = SerialStream::open(&builder).map_err(io::Error::other)?;
+    let stream = SerialStream::open(&builder).map_err(io::Error::other)?;
     // `exclusive` is stated in BOTH directions rather than only when false.
     // tokio-serial opens exclusive by default, so wz already matched upstream's
     // default -- what was missing was the CHOICE, and a call that only fired on
     // one value would leave the other resting on a library default that is
     // nobody's stated intent.
-    stream
-        .set_exclusive(endpoint.options.exclusive)
-        .map_err(io::Error::other)?;
+    //
+    // R2973 — on a Unix only, which is where the call exists: tokio-serial
+    // declares `set_exclusive` under `#[cfg(unix)]`, and a Windows COM handle is
+    // exclusive by the OS's own rule. Upstream's open is gated the same way
+    // (`z-serial-0.3.1` @ `pub fn new(port: String, baud_rate: u32, exclusive: bool)`
+    // spells it `#[cfg(unix)] serial.set_exclusive(exclusive)?;`). Ungated, the
+    // serial link did not compile on Windows at all -- a host upstream serves it
+    // on, and one no lane had ever built it for.
+    #[cfg(unix)]
+    let stream = {
+        let mut stream = stream;
+        stream
+            .set_exclusive(endpoint.options.exclusive)
+            .map_err(io::Error::other)?;
+        stream
+    };
     // R2727 — a freshly opened tty carries whatever the kernel buffered for the
     // device before this process reached it, and upstream's open clears it:
     // `z-serial-0.3.1` @ `pub fn new(port: String, baud_rate: u32, exclusive: bool)`
@@ -1036,10 +1049,15 @@ async fn drain_serial_writes(
     writer
 }
 
+// R2973 — every test here that opens a link carries `#[cfg(unix)]`, and the
+// reason is the TEST'S, not the link's: upstream serves serial on Windows and so
+// does wz, but `SerialStream::pair` is an `openpty` pair, `#[cfg(unix)]` inside
+// tokio-serial. Without it a Windows test build naming the feature did not
+// compile. The one test that opens nothing stays on every host. What running
+// serial on Windows would take is open-debt 852.
 #[cfg(test)]
 mod tests {
     use super::*;
-    use wz_session_core::locator::SerialOptions;
 
     /// R2704 — the locator's `tout` bounds the handshake, as upstream's does.
     ///
@@ -1047,6 +1065,7 @@ mod tests {
     /// upstream's `port.connect(Some(..))` exists for. Before this round the
     /// initiator would re-send INIT on every RESET forever, so the only bound
     /// was whatever the caller happened to compose.
+    #[cfg(unix)]
     #[tokio::test]
     async fn a_handshake_is_bounded_by_the_locators_tout() {
         let (mut a, _b) = SerialStream::pair().expect("openpty serial pair");
@@ -1078,6 +1097,7 @@ mod tests {
     /// The ANTI-VACUITY half: the bound must not be so eager that it refuses a
     /// handshake that DOES complete. Without this, a `drive_serial_handshake_within`
     /// that returned `TimedOut` unconditionally would satisfy the test above.
+    #[cfg(unix)]
     #[tokio::test]
     async fn a_bounded_handshake_still_completes_against_a_peer_that_answers() {
         let (mut a, mut b) = SerialStream::pair().expect("openpty serial pair");
@@ -1098,7 +1118,9 @@ mod tests {
     /// `openpty` pair and exposes NEITHER end's device name, so a wired PTY link
     /// has no readable address — the endpoint is supplied, exactly as the real dial
     /// path supplies the one it parsed from the locator.
+    #[cfg(unix)]
     fn pty_endpoint() -> SerialEndpoint {
+        use wz_session_core::locator::SerialOptions;
         SerialEndpoint {
             target: SerialTarget::Device("/dev/wz-test-pty".to_string()),
             baudrate: 115_200,
@@ -1130,6 +1152,7 @@ mod tests {
     /// Responder end replies INIT|ACK, both `drive_serial_handshake` futures
     /// resolve Ok. Bounded by a `timeout` so a handshake regression fails
     /// fast instead of hanging.
+    #[cfg(unix)]
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn pty_pair_completes_handshake_both_roles() {
         let (mut a, mut b) = SerialStream::pair().expect("openpty pair");
@@ -1146,6 +1169,7 @@ mod tests {
     /// `send_blocking` enqueues a raw payload, the writer task COBS-frames it
     /// with header 0x00, and the peer's read driver re-frames + delivers the
     /// payload unchanged.
+    #[cfg(unix)]
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn wired_pty_pair_round_trips_one_data_frame() {
         let (mut a, mut b) = SerialStream::pair().expect("openpty pair");

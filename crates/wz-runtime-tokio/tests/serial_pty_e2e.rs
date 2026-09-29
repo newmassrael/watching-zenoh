@@ -1,6 +1,10 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later OR LicenseRef-watching-zenoh-Commercial
 // SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
-#![cfg(feature = "transport-link-serial")]
+// R2973 — `unix` too, and it is NOT the link's host set: upstream serves serial
+// on Windows, and so does wz. It is this FILE's: every pair here is an `openpty`
+// pair (`SerialStream::pair`, `#[cfg(unix)]` in tokio-serial), which Windows
+// does not have. What running serial on Windows would need is open-debt 852.
+#![cfg(all(feature = "transport-link-serial", unix))]
 
 //! R311nv — wz<->wz SERIAL link end-to-end over a PTY pair.
 //!

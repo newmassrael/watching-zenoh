@@ -163,19 +163,36 @@ pub mod link_rx_arena;
 /// `--no-default-features --features runtime-tokio-uring` build is the tree's
 /// only `reassembly`-without-transport build, and giving the feature a link
 /// would have taken that away.
-#[cfg(all(feature = "runtime-tokio-uring", feature = "transport-link-tcp"))]
+///
+/// R2973 — and on Linux, because io_uring IS Linux and upstream's `uring` says
+/// so: its whole implementation is one module under `target_os = "linux"`
+/// (`commons/zenoh-uring/src/lib.rs` @ `mod linux;`), so on any other host the
+/// feature is inert and every link reads through tokio. wz named the feature
+/// alone, and a macOS or Windows build that enabled it did not compile at all
+/// (54 errors, the `io-uring` crate itself). Every site that names the feature
+/// now names the host beside it; `platform_surface_matrix.py` holds that.
+#[cfg(all(
+    feature = "runtime-tokio-uring",
+    feature = "transport-link-tcp",
+    target_os = "linux"
+))]
 pub mod uring;
 
 // R2748 — the TASK that drives [`uring`]'s fixed-buffer read, and the node
 // scope its ring lives at. Gated exactly like the adapter it drives: the
 // reactor registers [`link_rx_arena`]'s table and hands out `LinkEvent`s, so it
-// needs everything that module needs and nothing more.
+// needs everything that module needs and nothing more -- including the host
+// (R2973).
 //
 // ⚠ NO `///` HERE, DELIBERATELY — see [`link_rx_window`]'s declaration for the
 // finding: rustdoc merges a declaration doc with the module's `//!` block and
 // resolves the result in the OUTER scope, where the module's own items are not
 // in scope, and the doc-link budget counts every link that then fails.
-#[cfg(all(feature = "runtime-tokio-uring", feature = "transport-link-tcp"))]
+#[cfg(all(
+    feature = "runtime-tokio-uring",
+    feature = "transport-link-tcp",
+    target_os = "linux"
+))]
 pub mod uring_reactor;
 
 // Crate-local fixtures for this crate's OWN unit tests (recording driver
@@ -1255,7 +1272,7 @@ pub use wz_session_core::link::{LinkEvent, LostCause, RxBytes, RxFrame, RxStorag
     feature = "transport-link-udp",
     feature = "transport-link-serial",
     feature = "transport-link-ws",
-    feature = "transport-link-unixsock",
+    all(feature = "transport-link-unixsock", unix),
     feature = "transport-link-vsock",
     feature = "transport-link-unixpipe",
     feature = "transport-link-quic",
@@ -1583,7 +1600,16 @@ pub mod ws_pipeline;
 /// `transport-link-tcp`-gated session-open module as an additive arm, like
 /// serial/tls. A `unixsock-stream/...` locator dials from the locator like
 /// every other transport (no cert config needed).
-#[cfg(feature = "transport-link-unixsock")]
+///
+/// R2973 — and gated on `unix` beside the feature, as upstream's link is: its
+/// implementation module (`io/zenoh-links/zenoh-link-unixsock_stream/src/lib.rs`
+/// @ `mod unicast;`) is declared under `target_family = "unix"`, so the crate
+/// builds everywhere and serves `unixsock-stream/` only on a Unix. Without it a Windows build that named the
+/// feature did not compile at all — twelve errors, measured against the
+/// `x86_64-pc-windows-gnu` target — where upstream's simply has no such link.
+/// Every other gate on this feature carries the same `unix` term, so the
+/// scheme reads as unsupported on Windows instead.
+#[cfg(all(feature = "transport-link-unixsock", unix))]
 pub mod unixsock_pipeline;
 
 /// R311xj — AF_VSOCK backend for the vsock link (VM<->host / VM<->VM). The

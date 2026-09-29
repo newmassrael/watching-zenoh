@@ -63,9 +63,17 @@
 //! choose for this row — so it is a DIFFERENT atom's work, declared here so a
 //! later round grades this one against the right population.
 
-#[cfg(all(feature = "runtime-tokio-uring", feature = "transport-link-tcp"))]
+#[cfg(all(
+    feature = "runtime-tokio-uring",
+    feature = "transport-link-tcp",
+    target_os = "linux"
+))]
 use std::os::fd::AsRawFd;
-#[cfg(all(feature = "runtime-tokio-uring", feature = "transport-link-tcp"))]
+#[cfg(all(
+    feature = "runtime-tokio-uring",
+    feature = "transport-link-tcp",
+    target_os = "linux"
+))]
 use std::os::fd::RawFd;
 
 /// Can the kernel read this half's bytes into a registered buffer, and through
@@ -87,7 +95,11 @@ pub trait RingReadable {
     /// the contract `crate::uring_reactor::UringReactor::attach` documents, and
     /// it is upheld the same way: the driver owns the half and the ring body
     /// together.
-    #[cfg(all(feature = "runtime-tokio-uring", feature = "transport-link-tcp"))]
+    #[cfg(all(
+        feature = "runtime-tokio-uring",
+        feature = "transport-link-tcp",
+        target_os = "linux"
+    ))]
     fn ring_fd(&self) -> Option<RawFd>;
 }
 
@@ -97,7 +109,11 @@ pub trait RingReadable {
 /// `AsRef`, so the descriptor survives the split. Upstream's tcp answers `Ok`
 /// from the same socket for the same reason.
 impl RingReadable for tokio::net::tcp::OwnedReadHalf {
-    #[cfg(all(feature = "runtime-tokio-uring", feature = "transport-link-tcp"))]
+    #[cfg(all(
+        feature = "runtime-tokio-uring",
+        feature = "transport-link-tcp",
+        target_os = "linux"
+    ))]
     fn ring_fd(&self) -> Option<RawFd> {
         // Upstream refuses a negative fd rather than trusting the accessor
         // (`fd if fd < 0 => bail!("FD unavailable")`), and the same guard is
@@ -133,7 +149,11 @@ impl RingReadable for tokio::net::tcp::OwnedReadHalf {
 /// `None` even if the accessor existed, which is exactly why it is written out.
 #[cfg(feature = "transport-link-tls")]
 impl RingReadable for tokio::io::ReadHalf<tokio_rustls::TlsStream<tokio::net::TcpStream>> {
-    #[cfg(all(feature = "runtime-tokio-uring", feature = "transport-link-tcp"))]
+    #[cfg(all(
+        feature = "runtime-tokio-uring",
+        feature = "transport-link-tcp",
+        target_os = "linux"
+    ))]
     fn ring_fd(&self) -> Option<RawFd> {
         None
     }
@@ -143,7 +163,11 @@ impl RingReadable for tokio::io::ReadHalf<tokio_rustls::TlsStream<tokio::net::Tc
 /// the tests that frame over one exercise the framed body, which is what they
 /// are testing.
 impl RingReadable for tokio::io::DuplexStream {
-    #[cfg(all(feature = "runtime-tokio-uring", feature = "transport-link-tcp"))]
+    #[cfg(all(
+        feature = "runtime-tokio-uring",
+        feature = "transport-link-tcp",
+        target_os = "linux"
+    ))]
     fn ring_fd(&self) -> Option<RawFd> {
         None
     }
