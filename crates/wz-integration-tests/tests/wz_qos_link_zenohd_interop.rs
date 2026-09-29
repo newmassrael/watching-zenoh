@@ -52,7 +52,7 @@
 //!    handshake. Neither value exists anywhere in wz's configuration; both are
 //!    decoded out of zenohd's z64 body, including the reliability bit at shift
 //!    19. This is the leg that cannot be faked by local state.
-//! 2. `a_wz_listener_declares_no_band_for_what_it_accepts` — R2944: wz listens
+//! 2. `a_wz_listener_declares_no_band_for_what_zenohd_dials` — R2944: wz listens
 //!    on `?prio=3-4`, zenohd dials `?prio=0-7`, and wz ADOPTS `0-7`, because a
 //!    listen endpoint's metadata is not the accepted link's — the same
 //!    behaviour this doc measured on zenohd. It replaced R311y506's refusal
@@ -238,10 +238,15 @@ fn wz_reads_the_band_and_reliability_out_of_zenohds_qoslink_body() {
 /// implementation, and the merge rules that decide it are unit-pinned in
 /// `extqos` instead. A wz that read its LISTEN metadata as the accepted
 /// link's would refuse here.
+///
+/// The name carries `zenohd` because libtest's `--skip` matches the FUNCTION
+/// name, and Layer E's sweep skips this file's binary-dependent legs by that
+/// token (`test_discipline_gate.py`); R2944 named it without one, so Layer E's
+/// sweep ran it as well as Layer Z, the lane that owns it.
 // wz-proves: session-extqos zenohd->wz
 #[test]
 #[ignore = "binary-dep e2e (build-zenohd.sh + wz-ap-demo --features session-extqos); Layer Z runs via --ignored"]
-fn a_wz_listener_declares_no_band_for_what_it_accepts() {
+fn a_wz_listener_declares_no_band_for_what_zenohd_dials() {
     let zenohd = zenohd_binary();
     let port = PortReservation::pick();
     let addr = format!("127.0.0.1:{}", port.port());
