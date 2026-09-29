@@ -772,7 +772,10 @@ HOST_GATED_CI_TARGETS: dict[str, str] = {
 # +1 R2957, `a_sessions_own_shm_provider_is_obtained_identically_on_wz_and_libzenohc`
 # (`api-compat-c`, the session's own SHM provider against libzenohc). 949 + 1 =
 # 950, measured by the same script at this round's tree.
-FOREIGN_ADJUDICATOR_LINKS = 950
+# +1 R2959, `a_declaring_program_puts_the_same_declarations_on_the_wire_as_the_real_pico`
+# (`api-compat-pico`, the keyexprs a pico program declares, against libzenohpico).
+# 950 + 1 = 951, measured by the same script at this round's tree.
+FOREIGN_ADJUDICATOR_LINKS = 951
 
 # ── Execution disclosure ────────────────────────────────────────────────────────
 #
