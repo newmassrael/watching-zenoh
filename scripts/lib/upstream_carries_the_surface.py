@@ -312,10 +312,17 @@ def main() -> int:
     if args.selftest:
         return selftest()
 
-    surface = sorted(
-        set(rust_const("HONOURED_CONFIG_KEYS"))
-        | set(rust_const("UNHONOURED_UPSTREAM_CONFIG_KEYS"))
-    )
+    # R2963 (open-debt item 843) — the surface is `deepenable_audit`'s, not a
+    # union written out here: that function composes it from the ONE list of
+    # honoured parts and refuses it unless it is the pinned size, which is what
+    # would have turned this script red when R2957 took two keys out of the
+    # count instead of leaving it to report "surface 111, 111 carried".
+    try:
+        surface = deepenable_audit.upstream_surface()
+    except SystemExit as exc:  # its message names the other script
+        raise SystemExit(
+            f"upstream-carries: FAIL -- could not compose the surface: {exc}"
+        ) from exc
     extension = sorted(set(rust_const("WZ_EXTENSION_CONFIG_KEYS")))
     if len(surface) < SURFACE_FLOOR:
         print(

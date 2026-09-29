@@ -77,7 +77,7 @@
 //! fraction as two literals, "14 of the 111". Both were wrong when they were
 //! read this round: the numerator had been stale for many rounds while nothing
 //! measured it, and the denominator moved in this one. The numbers live in the
-//! constants' own `.len()`, which `the_two_halves_of_the_upstream_surface_do_not_overlap`
+//! constants' own `.len()`, which `the_parts_of_the_upstream_surface_do_not_overlap`
 //! pins and `scripts/lib/upstream_carries_the_surface.py` adjudicates against
 //! the pinned binary; a third copy in prose is a claim nobody re-measures, which
 //! is the whole shape of open-debt item 47. The alternative shapes are both worse: refusing an unknown key
@@ -3528,6 +3528,126 @@ pub const DEEPENABLE_UPSTREAM_KEYS: &[&str] = &[
     "timestamping/enabled",
 ];
 
+/// R2957 — the SIXTH organ of [`honours_config_key`]: keys a C ABI's session
+/// acts on when it opens, and the wz node does not.
+///
+/// Its own list rather than rows of [`HONOURED_CONFIG_KEYS`], because that one
+/// means more: every key in it is one the demo is asked to accept and whose
+/// expansion the stock-config fixture names (`config_key_fixture_gate.py`).
+/// These two change the zenoh-c session and nothing the demo runs, so filing
+/// them there would claim a node capability that does not exist, and leaving
+/// them in [`UNHONOURED_UPSTREAM_CONFIG_KEYS`] would tell an operator a key is
+/// ignored that just decided whether their session has a provider.
+///
+/// What each changes: `transport_optimization/enabled` whether the session
+/// owns a shared-memory provider (`z_obtain_shm_provider` answers DISABLED
+/// without it), `pool_size` that provider's size. The implicit promotion the
+/// first key ALSO turns on upstream is not built; its two remaining keys stay
+/// unhonoured, under the promotion group.
+///
+/// R2963 — it is a PART of [`HONOURED_SURFACE_PARTS`], which is the whole point
+/// of that list existing: R2957 gave it to the predicate and to nothing that
+/// counts the surface.
+pub const C_ABI_SESSION_HONOURED_KEYS: &[&str] = &[
+    "transport/shared_memory/transport_optimization/enabled",
+    "transport/shared_memory/transport_optimization/pool_size",
+];
+
+/// R2963 (open-debt item 843) — the flat lists whose members are HONOURED keys
+/// of the UPSTREAM surface, and the one place that says so.
+///
+/// Two readers of "which keys does wz honour" used to keep a spelling each.
+/// [`honours_config_key`] enumerated its organs one by one; every count of the
+/// surface — the pin test, the zenohd census leg, `deepenable_audit.py`,
+/// `upstream_carries_the_surface.py`, `upstream_reads_the_surface.py` and
+/// `runtime_mutable_surface_gate.py` — wrote `HONOURED_CONFIG_KEYS` plus
+/// [`UNHONOURED_UPSTREAM_CONFIG_KEYS`] out by hand. R2957 added an organ to the
+/// first spelling and to none of the second: two keys stayed on the upstream
+/// surface and left the surface, the denominator every script printed fell from
+/// 113 to 111 and stayed green, and only a unit test that a hosted lane did not
+/// reach said so. That is what two spellings of one set always produce, and it
+/// is the failure `wz_accepts` was already repaired for in the same round.
+///
+/// So there is one spelling. [`honours_config_key`] asks this list,
+/// [`honoured_surface`] and [`upstream_surface`] are built from it, and the
+/// scripts read THIS constant's members by name and take the unhonoured half
+/// from [`UNHONOURED_UPSTREAM_CONFIG_KEYS`] (`deepenable_audit.upstream_surface`).
+/// A new honoured list is one row here, and the predicate, the count and every
+/// consumer change together.
+///
+/// Lists of leaves BELOW an honoured key (`HONOURED_SUBTREE_LEAVES`), of
+/// wz-only extensions ([`WZ_EXTENSION_HONOURED_KEYS`]) and of key SHAPES (the
+/// mode tables, the sections, the honoured values) are not in it, because they
+/// are not flat lists of upstream surface keys — a leaf below `metadata` is a
+/// leaf a real zenohd never resolves, and counting it would inflate the
+/// denominator without any fixture changing.
+pub const HONOURED_SURFACE_PARTS: &[&[&str]] = &[HONOURED_CONFIG_KEYS, C_ABI_SESSION_HONOURED_KEYS];
+
+/// Every key wz honours that the pinned upstream carries: the members of
+/// [`HONOURED_SURFACE_PARTS`], in order.
+pub fn honoured_surface() -> impl Iterator<Item = &'static str> + Clone {
+    HONOURED_SURFACE_PARTS
+        .iter()
+        .flat_map(|part| part.iter().copied())
+}
+
+/// The UPSTREAM config surface: [`honoured_surface`], then the keys wz declares
+/// it does not honour ([`UNHONOURED_UPSTREAM_CONFIG_KEYS`]).
+///
+/// The fraction "of what a real zenoh does from its file, wz does N of M" takes
+/// M from here and nowhere else. It is NOT every key wz accepts: the
+/// extensions ([`WZ_EXTENSION_CONFIG_KEYS`]) and the inert keys
+/// ([`UPSTREAM_INERT_CONFIG_KEYS`]) are accepted and deliberately not counted,
+/// each for the reason its own doc gives.
+pub fn upstream_surface() -> impl Iterator<Item = &'static str> + Clone {
+    honoured_surface().chain(UNHONOURED_UPSTREAM_CONFIG_KEYS.iter().copied())
+}
+
+/// How many keys [`upstream_surface`] has, as a LITERAL.
+///
+/// A literal, and read by the scripts as well as by the Rust test, so that a
+/// surface which shrinks — or grows — without a decision is red in every
+/// instrument at once instead of green in the ones that count it themselves.
+/// `the_parts_of_the_upstream_surface_do_not_overlap` holds the Rust side and
+/// `deepenable_audit.upstream_surface` the script side.
+///
+/// ⚠ Lowering it is only ever legitimate beside a measurement that says
+/// upstream stopped carrying the key; `scripts/lib/upstream_carries_the_surface.py`
+/// is that measurement, and it reds if this list and the pinned binary disagree
+/// in EITHER direction.
+///
+/// R2230 (open-debt items 579 / 582) — 111 → 108. The three that left are
+/// `routing/peer/mode`, `routing/peer/linkstate/transport_weights` and
+/// `routing/router/peers_failover_brokering`, which the pin move to 1.10.0
+/// turned into deprecated no-ops upstream; they are `WZ_EXTENSION_CONFIG_KEYS`
+/// now. This pin is what made that a decision instead of a drift — it FAILED on
+/// the edit, which is the whole reason it is a literal.
+///
+/// Then 108 → 115 in the same round, and the two moves are opposite findings
+/// that happen to be about the same pin. SEVEN keys ARRIVED in 1.10.0 —
+/// `gateway/south`, `region_name`, `stats/filters` and the four
+/// `transport/shared_memory/transport_optimization/*` — and the census leg
+/// against a running zenohd is what found them. Netting them against the three
+/// that left would have reported "the surface moved by 4" and hidden both
+/// events; they are recorded as what they are.
+///
+/// R2336 (open-debt item 15, atom `access-extauth-pubkey`) — 115 → 113.
+/// `transport/auth/pubkey/key_size` and `known_keys_file` are
+/// `UPSTREAM_INERT_CONFIG_KEYS`: the pinned upstream declares and SERIALISES
+/// both — so `upstream_carries_the_surface.py` calls them carried, correctly —
+/// and READS neither, each leaf occurring exactly once in 647 upstream `.rs`
+/// files, on its own declaration line. Lowering this pin is legitimate here for
+/// the reason the paragraph above demands: beside a measurement, and the
+/// measurement is `scripts/lib/upstream_reads_the_surface.py`, which reds if a
+/// surface key has no upstream reader OR an inert key has one.
+///
+/// R2963 — 113 → 113. R2957 moved `transport_optimization/enabled` and
+/// `pool_size` into [`C_ABI_SESSION_HONOURED_KEYS`], which no count read, so the
+/// surface every consumer measured was 111 while upstream still carried both.
+/// The number did not move; the definition of what is counted did, and this
+/// round put the counted set back.
+pub const UPSTREAM_SURFACE_SIZE: usize = 113;
+
 /// Whether wz accepts this leaf path at all, rather than refusing the document.
 ///
 /// R2078 (open-debt item 501) — this used to accept anything BELOW a key it
@@ -3547,27 +3667,7 @@ pub const DEEPENABLE_UPSTREAM_KEYS: &[&str] = &[
 /// it now accepts are ones upstream parses and discards. This round exists
 /// because a surface whose NAME is wrong makes the number it yields
 /// unreadable, and a predicate is not exempt from that.
-/// R2957 — the SIXTH organ of [`honours_config_key`]: keys a C ABI's session
-/// acts on when it opens, and the wz node does not.
 ///
-/// Its own list rather than rows of [`HONOURED_CONFIG_KEYS`], because that one
-/// means more: every key in it is one the demo is asked to accept and whose
-/// expansion the stock-config fixture names (`config_key_fixture_gate.py`).
-/// These two change the zenoh-c session and nothing the demo runs, so filing
-/// them there would claim a node capability that does not exist, and leaving
-/// them in [`UNHONOURED_UPSTREAM_CONFIG_KEYS`] would tell an operator a key is
-/// ignored that just decided whether their session has a provider.
-///
-/// What each changes: `transport_optimization/enabled` whether the session
-/// owns a shared-memory provider (`z_obtain_shm_provider` answers DISABLED
-/// without it), `pool_size` that provider's size. The implicit promotion the
-/// first key ALSO turns on upstream is not built; its two remaining keys stay
-/// unhonoured, under the promotion group.
-pub const C_ABI_SESSION_HONOURED_KEYS: &[&str] = &[
-    "transport/shared_memory/transport_optimization/enabled",
-    "transport/shared_memory/transport_optimization/pool_size",
-];
-
 /// Whether a document naming `path` LANDS somewhere in wz, rather than coming
 /// back in [`ZenohConfigIngest::ignored`].
 ///
@@ -3584,11 +3684,15 @@ pub const C_ABI_SESSION_HONOURED_KEYS: &[&str] = &[
 /// wz parses and discards. This one answers "does writing this change
 /// anything".
 pub fn honours_config_key(path: &str) -> bool {
-    HONOURED_CONFIG_KEYS.contains(&path)
+    // R2963 — the flat lists of honoured surface keys are ONE list
+    // ([`HONOURED_SURFACE_PARTS`]): the node's keys, and the keys a C ABI's
+    // SESSION reads at open (R2957), which the node does not — writing one
+    // changes what that session does. The surface every denominator counts is
+    // built from the same list, so an organ added here cannot leave the count.
+    HONOURED_SURFACE_PARTS
+        .iter()
+        .any(|part| part.contains(&path))
         || HONOURED_SUBTREE_LEAVES.contains(&path)
-        // R2957 — the keys a C ABI's SESSION reads at open, which the node does
-        // not: writing one changes what that session does.
-        || C_ABI_SESSION_HONOURED_KEYS.contains(&path)
         // R2230 (items 579 / 582) — an extension key wz HONOURS is applied, so
         // reporting it ignored would tell the operator the opposite of what
         // just happened. The extension keys wz does NOT honour are absent from
@@ -3855,16 +3959,14 @@ pub(crate) fn wz_accepts(path: &str) -> bool {
     let under = |known: &&str| {
         path.len() > known.len() && path.starts_with(*known) && path.as_bytes()[known.len()] == b'/'
     };
-    HONOURED_CONFIG_KEYS
-        .iter()
-        .chain(UNHONOURED_UPSTREAM_CONFIG_KEYS)
-        .chain(WZ_EXTENSION_CONFIG_KEYS)
+    upstream_surface()
+        .chain(WZ_EXTENSION_CONFIG_KEYS.iter().copied())
         // R2336 (open-debt item 15) — an INERT key left the surface because
         // upstream reads it nowhere, NOT because wz stopped taking it. Dropping
         // it from this chain would make wz refuse a file a real zenohd starts
         // on, which is the same trade R2230 refused for the extension list.
-        .chain(UPSTREAM_INERT_CONFIG_KEYS)
-        .any(|known| path == *known)
+        .chain(UPSTREAM_INERT_CONFIG_KEYS.iter().copied())
+        .any(|known| path == known)
         || HONOURED_SUBTREE_LEAVES.contains(&path)
         || DEEPENABLE_UPSTREAM_KEYS.iter().any(under)
 }
@@ -7989,54 +8091,24 @@ mod tests {
         );
     }
 
-    /// The two key lists are the upstream surface, so they must be disjoint and
-    /// each internally unique — a path in both would be honoured and reported
-    /// at once.
+    /// The parts of the upstream surface ([`HONOURED_SURFACE_PARTS`] and
+    /// [`UNHONOURED_UPSTREAM_CONFIG_KEYS`]) are the surface, so they must be
+    /// disjoint and each internally unique — a path in two would be honoured
+    /// and reported at once — and their union is [`UPSTREAM_SURFACE_SIZE`].
+    ///
+    /// R2963 (open-debt item 843) — this used to chain the two lists by hand and
+    /// was the only instrument that noticed R2957 take two keys out of both.
     #[test]
-    fn the_two_halves_of_the_upstream_surface_do_not_overlap() {
-        let mut all: Vec<&str> = HONOURED_CONFIG_KEYS
-            .iter()
-            .chain(UNHONOURED_UPSTREAM_CONFIG_KEYS)
-            .copied()
-            .collect();
+    fn the_parts_of_the_upstream_surface_do_not_overlap() {
+        let mut all: Vec<&str> = upstream_surface().collect();
         let total = all.len();
         all.sort_unstable();
         all.dedup();
-        assert_eq!(all.len(), total, "a path appears in both halves");
+        assert_eq!(all.len(), total, "a path appears in two parts");
         // Pinned as a value so a silently shrinking surface is visible here as
-        // well as in the zenohd census.
-        //
-        // R2230 (open-debt items 579 / 582) — 111 → 108. The three that left are
-        // `routing/peer/mode`, `routing/peer/linkstate/transport_weights` and
-        // `routing/router/peers_failover_brokering`, which the pin move to
-        // 1.10.0 turned into deprecated no-ops upstream; they are
-        // `WZ_EXTENSION_CONFIG_KEYS` now. This pin is what made that a decision
-        // instead of a drift — it FAILED on the edit, which is the whole reason
-        // it is a literal. ⚠ Lowering it is only ever legitimate beside a
-        // measurement that says upstream stopped carrying the key;
-        // `scripts/lib/upstream_carries_the_surface.py` is that measurement, and
-        // it reds if this list and the pinned binary disagree in EITHER
-        // direction.
-        //
-        // Then 108 -> 115 in the same round, and the two moves are opposite
-        // findings that happen to be about the same pin. SEVEN keys ARRIVED in
-        // 1.10.0 — `gateway/south`, `region_name`, `stats/filters` and the four
-        // `transport/shared_memory/transport_optimization/*` — and the census
-        // leg against a running zenohd is what found them. Netting them against
-        // the three that left would have reported "the surface moved by 4" and
-        // hidden both events; they are recorded as what they are.
-        //
-        // R2336 (open-debt item 15, atom `access-extauth-pubkey`) — 115 -> 113.
-        // `transport/auth/pubkey/key_size` and `known_keys_file` are
-        // `UPSTREAM_INERT_CONFIG_KEYS`: the pinned upstream declares and
-        // SERIALISES both — so `upstream_carries_the_surface.py` calls them
-        // carried, correctly — and READS neither, each leaf occurring exactly
-        // once in 647 upstream `.rs` files, on its own declaration line.
-        // Lowering this pin is legitimate here for the reason the paragraph
-        // above demands: beside a measurement, and the measurement is
-        // `scripts/lib/upstream_reads_the_surface.py`, which reds if a surface
-        // key has no upstream reader OR an inert key has one.
-        assert_eq!(total, 113);
+        // well as in the zenohd census; the literal and its history are on
+        // [`UPSTREAM_SURFACE_SIZE`], where the scripts read it too.
+        assert_eq!(total, UPSTREAM_SURFACE_SIZE);
         let mut unhonoured = UNHONOURED_UPSTREAM_CONFIG_KEYS.to_vec();
         unhonoured.sort_unstable();
         assert_eq!(
@@ -8088,8 +8160,7 @@ mod tests {
         );
         for key in WZ_EXTENSION_CONFIG_KEYS {
             assert!(
-                !HONOURED_CONFIG_KEYS.contains(key)
-                    && !UNHONOURED_UPSTREAM_CONFIG_KEYS.contains(key),
+                !upstream_surface().any(|surface_key| surface_key == *key),
                 "{key} is an extension AND on the upstream surface — it would \
                  be counted in the denominator it was moved out of"
             );
@@ -8774,8 +8845,7 @@ mod tests {
         );
         for key in UPSTREAM_INERT_CONFIG_KEYS {
             assert!(
-                !HONOURED_CONFIG_KEYS.contains(key)
-                    && !UNHONOURED_UPSTREAM_CONFIG_KEYS.contains(key)
+                !upstream_surface().any(|surface_key| surface_key == *key)
                     && !WZ_EXTENSION_CONFIG_KEYS.contains(key),
                 "{key} is inert AND in another bucket — it would be counted in \
                  the denominator it was moved out of"
@@ -9472,7 +9542,7 @@ mod tests {
         assert!(!DEEPENABLE_UPSTREAM_KEYS.is_empty());
         for key in DEEPENABLE_UPSTREAM_KEYS {
             assert!(
-                HONOURED_CONFIG_KEYS.contains(key) || UNHONOURED_UPSTREAM_CONFIG_KEYS.contains(key),
+                upstream_surface().any(|surface_key| surface_key == *key),
                 "{key} is an exception to the boundary and is not in the surface at all"
             );
         }
@@ -9561,11 +9631,8 @@ mod tests {
     #[test]
     fn every_surface_key_outside_the_deepenable_list_refuses_a_deeper_shape() {
         let mut checked = 0usize;
-        for key in HONOURED_CONFIG_KEYS
-            .iter()
-            .chain(UNHONOURED_UPSTREAM_CONFIG_KEYS)
-        {
-            if DEEPENABLE_UPSTREAM_KEYS.contains(key) {
+        for key in upstream_surface() {
+            if DEEPENABLE_UPSTREAM_KEYS.contains(&key) {
                 continue;
             }
             let doc = nested(key, "{ zzz_not_a_mode: 1 }");
@@ -10043,10 +10110,7 @@ mod tests {
         };
 
         let mut checked = 0usize;
-        for key in HONOURED_CONFIG_KEYS
-            .iter()
-            .chain(UNHONOURED_UPSTREAM_CONFIG_KEYS)
-        {
+        for key in upstream_surface() {
             assert!(
                 !below_a_deepenable_key(key),
                 "{key} sits BELOW a deepenable key, so the surface it belongs to \
@@ -10058,8 +10122,7 @@ mod tests {
             checked += 1;
         }
         assert_eq!(
-            checked,
-            HONOURED_CONFIG_KEYS.len() + UNHONOURED_UPSTREAM_CONFIG_KEYS.len(),
+            checked, UPSTREAM_SURFACE_SIZE,
             "the sweep did not reach the whole surface"
         );
 
@@ -10070,8 +10133,7 @@ mod tests {
         assert!(!HONOURED_SUBTREE_LEAVES.is_empty());
         for leaf in HONOURED_SUBTREE_LEAVES {
             assert!(
-                !HONOURED_CONFIG_KEYS.contains(leaf)
-                    && !UNHONOURED_UPSTREAM_CONFIG_KEYS.contains(leaf),
+                !upstream_surface().any(|surface_key| surface_key == *leaf),
                 "{leaf} is a subtree FIELD and also a surface key — a real \
                  zenohd resolves one leaf there, so the surface must carry the \
                  subtree and not its contents"

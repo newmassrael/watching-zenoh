@@ -421,10 +421,12 @@ def main(argv: list[str]) -> int:
     verbose = "--verbose" in argv
 
     try:
-        surface = sorted(
-            set(rust_const("HONOURED_CONFIG_KEYS"))
-            | set(rust_const("UNHONOURED_UPSTREAM_CONFIG_KEYS"))
-        )
+        # R2963 (open-debt item 843) — composed and size-checked by
+        # `deepenable_audit.upstream_surface`, not a union written out here.
+        try:
+            surface = deepenable_audit.upstream_surface()
+        except SystemExit as exc:  # its message names the other script
+            raise InputError(f"could not compose the surface: {exc}") from exc
         inert = sorted(set(rust_const("UPSTREAM_INERT_CONFIG_KEYS")))
         check_population(surface, inert)
         root, texts = upstream_texts()

@@ -78,8 +78,8 @@ use wz_integration_tests::common::{
 };
 use wz_integration_tests::wire_tap::{synthesise_pcap, tap_proxy, Recording};
 use wz_runtime_tokio::zenoh_config::{
-    default_listen_endpoint, ZenohNodeConfig, CONFIG_KEYS_PROVEN_ON_THE_WIRE, DAEMON_DEFAULT_MODE,
-    DEEPENABLE_UPSTREAM_KEYS, HONOURED_CONFIG_KEYS, LIBRARY_DEFAULT_MODE,
+    default_listen_endpoint, honoured_surface, ZenohNodeConfig, CONFIG_KEYS_PROVEN_ON_THE_WIRE,
+    DAEMON_DEFAULT_MODE, DEEPENABLE_UPSTREAM_KEYS, HONOURED_CONFIG_KEYS, LIBRARY_DEFAULT_MODE,
     UNHONOURED_UPSTREAM_CONFIG_KEYS, UPSTREAM_INERT_CONFIG_KEYS, WZ_EXTENSION_CONFIG_KEYS,
     WZ_EXTENSION_HONOURED_KEYS,
 };
@@ -3306,9 +3306,14 @@ fn the_upstream_config_surface_zenohd_resolves_is_enumerated_and_accounted_for()
     // so this is the surface a replacement has to face.
     let upstream = resolved_config_of(&captured).leaf_paths();
 
+    // R2963 (open-debt item 843) — the honoured half is `honoured_surface()`,
+    // every flat list of honoured surface keys, not `HONOURED_CONFIG_KEYS`
+    // alone. R2957 gave the zenoh-c session two keys of its own; with only the
+    // node's list here both landed in `unhonoured` and this leg reddened on a
+    // surface that had not moved.
     let honoured: Vec<&String> = upstream
         .iter()
-        .filter(|p| HONOURED_CONFIG_KEYS.contains(&p.as_str()))
+        .filter(|p| honoured_surface().any(|key| key == p.as_str()))
         .collect();
     // R2336 (open-debt item 15) — the INERT keys are subtracted here and
     // adjudicated below, not silently skipped. They ARE in this dump; the whole
@@ -3318,7 +3323,7 @@ fn the_upstream_config_surface_zenohd_resolves_is_enumerated_and_accounted_for()
     let unhonoured: Vec<&str> = upstream
         .iter()
         .filter(|p| {
-            !HONOURED_CONFIG_KEYS.contains(&p.as_str())
+            !honoured_surface().any(|key| key == p.as_str())
                 && !UPSTREAM_INERT_CONFIG_KEYS.contains(&p.as_str())
         })
         .map(String::as_str)
@@ -3341,9 +3346,8 @@ fn the_upstream_config_surface_zenohd_resolves_is_enumerated_and_accounted_for()
     // Every key wz claims to honour must actually be IN the upstream surface —
     // a honoured key upstream does not have is wz reading a path that no zenoh
     // config will ever carry.
-    let missing: Vec<&&str> = HONOURED_CONFIG_KEYS
-        .iter()
-        .filter(|k| !upstream.iter().any(|p| p == *k))
+    let missing: Vec<&str> = honoured_surface()
+        .filter(|k| !upstream.iter().any(|p| p == k))
         .collect();
     assert!(
         missing.is_empty(),

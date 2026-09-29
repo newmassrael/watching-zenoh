@@ -137,8 +137,13 @@ RESOLVED_MARKER = "Initial conf:"
 UNDECIDABLE_BY_THIS_PROBE = {"plugins"}
 
 
-def rust_const(name: str) -> list[str]:
+def rust_const(name: str, text: str | None = None) -> list[str]:
     """Read a `&[&str]` constant out of the reader's own source.
+
+    `text` is the source to read INSTEAD of the file, for a caller that grades
+    a text it was handed (`runtime_mutable_surface_gate.py` damages copies of it
+    in its selftest). Passing it changes where the bytes come from and nothing
+    about how they are read.
 
     R2083 — COMMENT LINES ARE DROPPED FIRST, and that is not tidiness. These
     constants carry long `//` rationales between their entries, and several of
@@ -148,7 +153,7 @@ def rust_const(name: str) -> list[str]:
     wrong surface number into this project's own notes for a round. The floors
     below could not catch it: counting too MANY passes every one of them.
     """
-    src = SOURCE.read_text()
+    src = SOURCE.read_text() if text is None else text
     # R2230 — TWO shapes, and the single-line one is not a nicety. The pattern
     # was `= &\[(.*?)\n\];`, which a const declared entirely on its own line
     # (`= &["routing/peer/mode"];`) does not match at all -- so `.*?` ran on to
@@ -181,6 +186,79 @@ def rust_const(name: str) -> list[str]:
     # entry was never covered by "the line starts with //".
     body = rust_comments.strip_comments(m.group(1))
     return re.findall(r'"([^"]+)"', body)
+
+
+def rust_const_usize(name: str) -> int:
+    """Read a `usize` literal constant out of the reader's own source."""
+    src = rust_comments.strip_comments(SOURCE.read_text())
+    m = re.search(r"(?:pub )?const " + name + r": usize = (\d+);", src)
+    if not m:
+        raise SystemExit(f"deepenable-audit: FAIL -- {name} not found in {SOURCE}")
+    return int(m.group(1))
+
+
+def honoured_surface(text: str | None = None) -> list[str]:
+    """Every honoured key of the upstream surface, in `HONOURED_SURFACE_PARTS` order.
+
+    R2963 (open-debt item 843) -- the parts are read BY NAME out of that
+    constant, so a list added to it is a list every caller of this function
+    counts the day it lands. Before this, each script wrote
+    `HONOURED_CONFIG_KEYS` out by hand, R2957 added a second honoured list to
+    the Rust predicate, and the surface these scripts printed fell from 113 to
+    111 without one of them turning red.
+
+    The parts constant is a `&[&[&str]]` of identifiers, not string literals, so
+    it is read with the identifier pattern: comments are blanked first, for the
+    reason `rust_const` gives.
+    """
+    src = rust_comments.strip_comments(SOURCE.read_text() if text is None else text)
+    m = re.search(
+        r"(?:pub )?const HONOURED_SURFACE_PARTS: &\[&\[&str\]\] = &\[(.*?)\];",
+        src,
+        re.S,
+    )
+    if not m:
+        raise SystemExit(
+            f"deepenable-audit: FAIL -- HONOURED_SURFACE_PARTS not found in {SOURCE}"
+        )
+    parts = re.findall(r"\b[A-Z][A-Z0-9_]*\b", m.group(1))
+    if not parts:
+        raise SystemExit(
+            "deepenable-audit: FAIL -- HONOURED_SURFACE_PARTS names no list, so "
+            "the honoured half of the surface would read as empty and pass."
+        )
+    return [key for part in parts for key in rust_const(part, text)]
+
+
+def upstream_surface() -> list[str]:
+    """The UPSTREAM config surface, sorted: the honoured parts, then the
+    unhonoured list -- and REFUSED unless it is exactly `UPSTREAM_SURFACE_SIZE`
+    distinct keys.
+
+    The size check is the reason this is a function and not a union each caller
+    writes. The pin is a literal in Rust that the unit test holds; checking it
+    here as well makes a surface that moved without a decision red in every
+    instrument that counts it, instead of only in the one that happens to know
+    the literal.
+    """
+    keys = honoured_surface() + rust_const("UNHONOURED_UPSTREAM_CONFIG_KEYS")
+    distinct = sorted(set(keys))
+    if len(distinct) != len(keys):
+        dupes = sorted({k for k in keys if keys.count(k) > 1})
+        raise SystemExit(
+            f"deepenable-audit: FAIL -- {len(keys) - len(distinct)} key(s) sit in "
+            f"two parts of the upstream surface: {dupes}"
+        )
+    pinned = rust_const_usize("UPSTREAM_SURFACE_SIZE")
+    if len(distinct) != pinned:
+        raise SystemExit(
+            f"deepenable-audit: FAIL -- the upstream surface composed from "
+            f"HONOURED_SURFACE_PARTS and UNHONOURED_UPSTREAM_CONFIG_KEYS has "
+            f"{len(distinct)} key(s) and UPSTREAM_SURFACE_SIZE pins {pinned}. A "
+            f"surface that moved needs a decision beside a measurement "
+            f"(upstream_carries_the_surface.py), not a quiet new denominator."
+        )
+    return distinct
 
 
 def document_for(key: str) -> str:
@@ -249,10 +327,7 @@ def main() -> int:
         )
         return 2
 
-    surface = sorted(
-        set(rust_const("HONOURED_CONFIG_KEYS"))
-        | set(rust_const("UNHONOURED_UPSTREAM_CONFIG_KEYS"))
-    )
+    surface = upstream_surface()
     declared = set(rust_const("DEEPENABLE_UPSTREAM_KEYS"))
     # R2080 — FLOORS, not just non-emptiness. The constants are read out of Rust
     # by regex, so a reformat that split one of them differently would be read
@@ -356,7 +431,7 @@ def main() -> int:
     #     (`scouting/gossip/*`, the `connect`/`listen` timeouts) are correctly
     #     absent.
     mode_dependent = set(rust_const("MODE_DEPENDENT_CONFIG_KEYS"))
-    honoured = set(rust_const("HONOURED_CONFIG_KEYS"))
+    honoured = set(honoured_surface())
     if not mode_dependent:
         raise SystemExit(
             "deepenable-audit: FAIL -- MODE_DEPENDENT_CONFIG_KEYS read as empty, "

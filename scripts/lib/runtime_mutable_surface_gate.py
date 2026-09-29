@@ -54,8 +54,14 @@ import pathlib
 import re
 import sys
 
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
+
+# The surface is composed in one place, `deepenable_audit`, and this gate asks it
+# (R2963, open-debt item 843) rather than reading the key lists itself.
+import deepenable_audit  # noqa: E402  -- after the path insert that finds it
+
 ROOT = pathlib.Path(__file__).resolve().parents[2]
-CONFIG_RS = ROOT / "crates" / "wz-runtime-tokio" / "src" / "config.rs"
+CONFIG_RS =ROOT / "crates" / "wz-runtime-tokio" / "src" / "config.rs"
 ZENOH_CONFIG_RS = ROOT / "crates" / "wz-runtime-tokio" / "src" / "zenoh_config.rs"
 
 #: A parse that finds fewer than this many private fields has stopped matching
@@ -214,13 +220,21 @@ def applied_keys(text: str) -> frozenset[str]:
 
 
 def key_lists(text: str) -> dict[str, frozenset[str]]:
-    out = {}
-    for name in ("HONOURED_CONFIG_KEYS", "UNHONOURED_UPSTREAM_CONFIG_KEYS"):
-        m = re.search(r"pub const %s: &\[&str\] = &\[(.*?)\n\];" % name, text, re.S)
-        if not m:
-            raise SystemExit("zenoh_config.rs: no `%s`" % name)
-        out[name] = frozenset(re.findall(r'"([^"]+)"', m.group(1)))
-    return out
+    """The two halves of the upstream surface, read out of `text`.
+
+    R2963 (open-debt item 843) — read through `deepenable_audit`, which is where
+    the surface is composed: the honoured half is every part of
+    `HONOURED_SURFACE_PARTS`, not `HONOURED_CONFIG_KEYS` alone, so a runtime
+    mutable key that a C ABI's session honours is not reported as classified in
+    NEITHER list. The private reader this replaced did not strip comments, which
+    is the defect `rust_comments` records for the sweeps that carried it.
+    """
+    return {
+        "honoured": frozenset(deepenable_audit.honoured_surface(text)),
+        "unhonoured": frozenset(
+            deepenable_audit.rust_const("UNHONOURED_UPSTREAM_CONFIG_KEYS", text)
+        ),
+    }
 
 
 def grade(config_text: str, zenoh_text: str) -> tuple[int, list[str]]:
@@ -273,13 +287,13 @@ def grade(config_text: str, zenoh_text: str) -> tuple[int, list[str]]:
             )
 
     lists = key_lists(zenoh_text)
-    honoured = [r for r in rows if r["key"] in lists["HONOURED_CONFIG_KEYS"]]
-    unhonoured = [r for r in rows if r["key"] in lists["UNHONOURED_UPSTREAM_CONFIG_KEYS"]]
+    honoured = [r for r in rows if r["key"] in lists["honoured"]]
+    unhonoured = [r for r in rows if r["key"] in lists["unhonoured"]]
     unknown = [
         r["key"]
         for r in rows
-        if r["key"] not in lists["HONOURED_CONFIG_KEYS"]
-        and r["key"] not in lists["UNHONOURED_UPSTREAM_CONFIG_KEYS"]
+        if r["key"] not in lists["honoured"]
+        and r["key"] not in lists["unhonoured"]
     ]
     for key in unknown:
         findings.append(
@@ -301,7 +315,7 @@ def grade(config_text: str, zenoh_text: str) -> tuple[int, list[str]]:
             "would let every row claim a join nothing performs."
         )
     for row in rows:
-        if row["key"] not in lists["HONOURED_CONFIG_KEYS"]:
+        if row["key"] not in lists["honoured"]:
             continue
         if row["key"] not in applied:
             findings.append(
@@ -343,7 +357,7 @@ def grade(config_text: str, zenoh_text: str) -> tuple[int, list[str]]:
                     s,
                     "honoured"
                     if all(
-                        r["key"] in lists["HONOURED_CONFIG_KEYS"]
+                        r["key"] in lists["honoured"]
                         for r in rows
                         if r["slice"] == s
                     )
