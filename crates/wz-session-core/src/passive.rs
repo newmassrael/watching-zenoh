@@ -253,15 +253,6 @@ impl FlowContext {
             && self.open_seen[usize::from(direction == Direction::B)]
     }
 
-    /// Compression is NEGOTIATED and the session is ESTABLISHED.
-    ///
-    /// A session-wide answer. Whether a given BATCH carries the header that
-    /// compression puts on the wire is per direction: see
-    /// [`Self::batch_header_active`].
-    pub fn compression_active(&self) -> bool {
-        self.negotiated() && self.compression && self.phase == SessionPhase::Established
-    }
-
     /// ZA-3215 ⑤ — every batch `direction` sends from here on begins with a
     /// one-byte `BatchHeader`, whose bit 0 says whether the rest of the batch
     /// is lz4.
@@ -292,6 +283,16 @@ impl FlowContext {
     /// to the link with no batch and no header.
     ///
     /// `io/zenoh-transport/src/unicast/lowlatency/link.rs` @ `pub(crate) async fn send_with_link(`
+    ///
+    /// # The session-wide answer it replaced
+    ///
+    /// R2972 removed `compression_active`, a session-wide "negotiated and
+    /// established" that ZA-3215 had already stopped the decoder from using.
+    /// It answered `true` on a lowlatency link, where no batch carries a
+    /// header, and it could not say which direction had switched — the two
+    /// questions whose wrong answers were that defect. Its inputs stay on the
+    /// field document (`negotiated`, `compression`, `phase`), so no reader lost
+    /// a fact; `accessor_reach_census.py` found it asked by no shipped surface.
     pub fn batch_header_active(&self, direction: Direction) -> bool {
         self.negotiated()
             && self.compression

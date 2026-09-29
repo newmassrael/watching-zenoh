@@ -247,7 +247,10 @@ async fn a_tapped_handshake_replays_through_the_passive_tracker() {
         !ctx.lowlatency_active(Direction::A) && !ctx.lowlatency_active(Direction::B),
         "neither fixture offers lowlatency, so NEITHER direction ever reframes"
     );
-    assert!(!ctx.compression_active());
+    assert!(
+        !ctx.batch_header_active(Direction::A) && !ctx.batch_header_active(Direction::B),
+        "neither fixture offers compression, so no batch in EITHER direction carries a header"
+    );
 }
 
 /// The observer's context is a READING, not a default. Fed the SAME recorded
@@ -335,7 +338,8 @@ async fn a_one_sided_capture_does_not_claim_a_negotiation() {
     assert!(
         !ctx.lowlatency_active(Direction::A)
             && !ctx.lowlatency_active(Direction::B)
-            && !ctx.compression_active(),
+            && !ctx.batch_header_active(Direction::A)
+            && !ctx.batch_header_active(Direction::B),
         "an un-negotiated capability is never IN FORCE, whatever the fold holds"
     );
     // The patch level IS readable from one side — it is an announcement, and

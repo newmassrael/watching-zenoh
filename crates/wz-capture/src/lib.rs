@@ -7205,9 +7205,14 @@ mod datagram_tests {
             wz_session_core::passive::SessionPhase::Established,
             "the handshake must complete: {context:?}"
         );
+        // R2972 — asked per DIRECTION, the question the decoder asks: both
+        // sides have sent their `Open`, so both directions' batches carry the
+        // header (the session-wide `compression_active` this replaced could
+        // not say which).
         assert!(
-            context.compression_active(),
-            "compression must be NEGOTIATED and in force: {context:?}"
+            context.batch_header_active(wz_session_core::passive::Direction::A)
+                && context.batch_header_active(wz_session_core::passive::Direction::B),
+            "compression must be NEGOTIATED and in force in both directions: {context:?}"
         );
         assert!(
             matches!(
