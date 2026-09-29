@@ -272,9 +272,9 @@ mod tests {
     /// expression carries. It rendered per-byte wire-order hex until R2956, and
     /// this test pinned the two as DIFFERENT; it now pins them EQUAL, over
     /// shapes where a per-byte render would differ (reversal, an inner zero, a
-    /// single leading zero to strip). `wz-routing-graph` cannot depend on the
-    /// crate holding `zid_to_zenoh_hex`, so this is where the two recipes are
-    /// held to one answer.
+    /// single leading zero to strip). `wz-routing-graph` does not depend on
+    /// `wz-session-core`, which holds `zid_to_zenoh_hex`, so this is where the
+    /// two recipes are held to one answer.
     #[test]
     fn a_zid_displays_as_the_key_expression_renders_it() {
         for zid in [
