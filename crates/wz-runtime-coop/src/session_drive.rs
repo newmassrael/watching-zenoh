@@ -224,6 +224,14 @@ impl<C: ClockSource, L: SessionDatagramLink> SessionPump<C, L> {
     /// shared handle (`CoopRuntime` is `Arc`-backed; the action bundle is
     /// `Rc`; `CoopTime` is a clock handle), so owning them costs a refcount
     /// and buys the `'static` that [`CoopLocalSet::spawn_local`] requires.
+    ///
+    /// R2965 (open-debt item 847) — never inlined, for the caller's STACK. The
+    /// engine is built here as a local and MOVED into the pump; inlined, both
+    /// slots (1160 and 1264 bytes on the microbit image) sit in the caller's
+    /// frame for the life of the session, because ARMv6-M codegen does not
+    /// overlay a dead temporary. Out of line, the temporary is this function's
+    /// and is gone when it returns.
+    #[inline(never)]
     pub fn new(
         runtime: CoopRuntime<C>,
         link: L,

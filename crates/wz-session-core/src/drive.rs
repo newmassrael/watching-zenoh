@@ -39,6 +39,34 @@ use crate::inbound::InboundFrame;
 // parse_frame_payload backs the codec-frame `Frame` arm only.
 #[cfg(feature = "codec-frame")]
 use crate::network_message::parse_frame_payload;
+
+/// R2965 (open-debt item 847) — [`parse_frame_payload`], never inlined, for
+/// [`dispatch_unit`]'s callers of it and no one else's.
+///
+/// Decoding a batch builds each message into a local of that message's own size
+/// (an `Interest` is 336 bytes, an `Oam` 312, an extension chain 264), and a
+/// target whose codegen does not overlay the locals of disjoint arms (ARMv6-M)
+/// gives the enclosing function the SUM of them. Inlined into `dispatch_unit`
+/// that sum was 1440 bytes of the frame that stays live under the FSM's whole
+/// action chain — the deepest call the MCU acceptor makes — although a batch is
+/// decoded only on the Frame path, never while an InitAck is being built.
+/// Behind this call it is paid only while a batch is decoded.
+///
+/// A wrapper here rather than `#[inline(never)]` on the decoder itself, because
+/// the decoder has other callers and that change was measured on the multicast
+/// image: +592 and +668 bytes of text, past the footprint ledger's band, for a
+/// stack saving that image does not need. This keeps the out-of-line copy where
+/// the deep frame is.
+#[cfg(feature = "codec-frame")]
+#[inline(never)]
+fn parse_frame_payload_out_of_line(
+    bytes: &[u8],
+) -> Result<
+    alloc::vec::Vec<crate::network_message::NetworkMessage>,
+    sce_forge_runtime::codec::CodecError,
+> {
+    parse_frame_payload(bytes)
+}
 // transport-lowlatency — the lean rx branch reads the leading message id
 // (wire_const) and synthesizes an empty ext list (Vec); transport-compression's
 // rx un-wrap holds the decompressed batch in a Vec too.
@@ -223,7 +251,7 @@ fn dispatch_unit<R: SessionRuntime, T: TimeSource>(
             Some(_) => true,
         };
         if lean_network {
-            return match parse_frame_payload(bytes) {
+            return match parse_frame_payload_out_of_line(bytes) {
                 Ok(messages) => {
                     // R2825 — a lean datagram is ONE transport message whatever
                     // it carries, which is how upstream's lowlatency rx counts it.
@@ -709,7 +737,7 @@ fn dispatch_unit<R: SessionRuntime, T: TimeSource>(
                             sn,
                         };
                     }
-                    match parse_frame_payload(&payload) {
+                    match parse_frame_payload_out_of_line(&payload) {
                         Ok(messages) => DriverLoopOutcome::FramePayload {
                             reliable,
                             sn,
