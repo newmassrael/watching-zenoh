@@ -2595,44 +2595,27 @@ fn mesh_dial_offer(
     .map_err(str::to_string)
 }
 
-/// Decode a `--zid <hex>` value into raw zid bytes — non-empty, even-length hex
-/// (`"0a0b0c0d"` -> `[0x0a,0x0b,0x0c,0x0d]`). The demo zid override for a session
-/// node that must carry a distinct identity inside a router mesh (the query-plane
-/// E2E). Rejects odd-length / non-hex loudly so a mistyped flag fails fast.
+/// Decode a `--zid <hex>` value (or a config `id`, which expands to it) into the
+/// wire zid bytes, the way zenoh reads the same text.
+///
+/// ZA-3362 — the text is a `ZenohId` as zenoh PRINTS it: the 16-byte
+/// little-endian id read as a `u128` in hex. So `c11e47c11e49` is the wire bytes
+/// `[0x49, 0x1e, 0xc1, 0x47, 0x1e, 0xc1]`, and the node reports itself as
+/// `c11e47c11e49` again — as a zenohd started on the same document does. This
+/// decoded the text PER BYTE, in written order, until ZA-3362, which is the
+/// reverse; the display side (`zid_to_zenoh_hex`) was already zenoh's, so a
+/// node's own `id` came back reversed. The parse is now that function's inverse,
+/// `zid_hex::zenoh_hex_to_zid`, and so carries zenoh's refusals with it: empty,
+/// a leading `0` (which is also how an all-zero id is refused), uppercase,
+/// non-hex, and more than 16 bytes.
 fn parse_zid_hex(h: &str) -> Result<Vec<u8>, String> {
     let h = h.trim();
-    if h.is_empty() || h.len() % 2 != 0 {
-        return Err(format!("must be non-empty even-length hex (got {h:?})"));
-    }
-    // Reject any non-hex char up front — `u8::from_str_radix` otherwise accepts a
-    // leading `+`/`-` inside a pair (e.g. "+a"), which is not valid hex here.
-    if !h.bytes().all(|b| b.is_ascii_hexdigit()) {
-        return Err(format!("invalid hex in {h:?}"));
-    }
-    let bytes: Vec<u8> = (0..h.len())
-        .step_by(2)
-        .map(|i| u8::from_str_radix(&h[i..i + 2], 16).map_err(|_| format!("invalid hex in {h:?}")))
-        .collect::<Result<_, _>>()?;
-    // R311y412 — enforce zenoh's zid VALIDITY at the CLI boundary, the same rule the
-    // wire ctor `Zid::try_from` applies. Two gaps this closes:
-    //   * all-zero (`--zid 00`) has no significant bytes, so it is not an identity at
-    //     all; the node bound and then lost face after face forever.
-    //   * over 16 bytes silently CORRUPTS the wire in release: `handshake_encode`'s
-    //     `(zid_len - 1) & 0x0F` wraps, so a 17-byte zid encodes as length 1. The
-    //     `debug_assert!` there catches it in debug builds only.
-    if bytes.iter().all(|&b| b == 0) {
-        return Err(format!(
-            "must have at least one non-zero byte — zenoh identity is the VALUE, and \
-             an all-zero zid ({h:?}) is empty"
-        ));
-    }
-    if bytes.len() > 16 {
-        return Err(format!(
-            "must be at most 16 bytes (got {} in {h:?}) — zenoh's ZenohId MAX_SIZE",
-            bytes.len()
-        ));
-    }
-    Ok(bytes)
+    wz::runtime_tokio::zid_hex::zenoh_hex_to_zid(h).ok_or_else(|| {
+        format!(
+            "must be a zenoh id as zenoh prints it: lowercase hex, no leading 0, at \
+             most 32 digits (got {h:?})"
+        )
+    })
 }
 
 /// The demo's multi-thread tokio runtime (2 workers + io + time) — the SSOT for
