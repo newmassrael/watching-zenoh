@@ -1382,8 +1382,8 @@ int wz_dissect_pcap_fields_limited(const unsigned char *bytes, size_t len,
  * on its own side — a second implementation of this library's selector
  * language, living in the caller, disagreeing with this one eventually.
  *
- * Each message object gains a "selected" key with ONE OF FOUR WORDS, and
- * they are four because two of them would otherwise be one:
+ * Given a selector, each message object gains a "selected" key with ONE OF
+ * FOUR WORDS, and they are four because two of them would otherwise be one:
  *
  *   `yes` / `no`  the row's records were judged and folded. Any match makes
  *                 the row a match; all misses make it a miss.
@@ -1394,9 +1394,17 @@ int wz_dissect_pcap_fields_limited(const unsigned char *bytes, size_t len,
  *                 handshake, a keepalive, a declaration.
  *
  * A caller asking "why did my selector miss this" must be able to tell the
- * last two apart, because only "undecided" is about the selector. A document
- * asked for WITHOUT a selector carries no "selected" key at all -- absence
- * of the key is the fourth answer, and it is not the same as "unjudged".
+ * last two apart, because only "undecided" is about the selector.
+ *
+ * AN EMPTY SELECTOR IS THE IDENTITY, as it is for every census door: it
+ * selects everything and asks nothing, so the document that comes back is the
+ * one wz_dissect_pcap_fields_limited returns for the same cap, declarations
+ * and limits, byte for byte, and no row carries a "selected" key -- a verdict
+ * answers a question and none was asked. Absence of the key is the fourth
+ * answer, and it is not the same as "unjudged". Whitespace is the same
+ * selector as nothing. (ZA-3517: until then an empty selector wrote "yes" and
+ * "unjudged" on every row, against this paragraph. A test now holds every
+ * door this header marks SUBSUMED to the same bytes as its successor.)
  *
  * @values fields selected
  *

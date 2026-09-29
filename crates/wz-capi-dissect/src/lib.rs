@@ -4726,6 +4726,169 @@ mod tests {
         );
     }
 
+    /// ZA-3517 — THE SELECTOR DOOR, ASKED NOTHING, IS THE DOOR IT SUBSUMES.
+    ///
+    /// R2766 made `wz_dissect_pcap_fields_where_limited` the current shape of
+    /// the field family and marked the three older doors SUBSUMED by it, and the
+    /// census family's equivalent claim has been held byte for byte since
+    /// R311y887. This one never was: an empty selector wrote a `selected` word
+    /// on every row, so a consumer following the header's advice to use the
+    /// current door got a different document from the one it was replacing.
+    ///
+    /// Every argument the older door has is varied — the cap, the declarations
+    /// and the ceiling — and so is the spelling of "no selector", because
+    /// whitespace is the same selector as nothing.
+    #[test]
+    fn the_selector_field_door_asked_nothing_is_the_limited_field_door() {
+        let file = census_capture();
+        let rules = "demo/**=protobuf";
+        for (cap, declarations, limits) in [
+            (0, "", WZ_DISSECT_LIMITS_NONE),
+            (2, rules, WZ_DISSECT_LIMITS_NONE),
+            (0, "", WZ_DISSECT_LIMITS_LIVE_TAP),
+            (1, rules, WZ_DISSECT_LIMITS_LIVE_TAP),
+        ] {
+            let limited = call_fields_limited(&file, cap, declarations, limits).expect("reads");
+            for none in ["", "   ", "\t\n"] {
+                assert_eq!(
+                    call_fields_where_limited(&file, cap, none, declarations, limits)
+                        .expect("reads"),
+                    limited,
+                    "selector {none:?} with cap {cap}, declarations {declarations:?} and \
+                     limits {limits} must be the limited field door, byte for byte"
+                );
+            }
+        }
+    }
+
+    /// ZA-3517 — and what a selector adds is the verdict and nothing else.
+    ///
+    /// The other half of the identity above, and the arm that keeps it honest: a
+    /// door that never wrote `selected` would satisfy the equality trivially.
+    /// Taking the key out of a narrowed document must give back the document
+    /// that asked nothing, so the door has one shape and the selector is its
+    /// only argument that changes what is said about a row.
+    #[test]
+    fn a_selector_adds_the_verdict_to_the_field_document_and_changes_nothing_else() {
+        let file = census_capture();
+        let plain =
+            call_fields_where_limited(&file, 0, "", "", WZ_DISSECT_LIMITS_NONE).expect("reads");
+        assert!(
+            !plain.contains("\"selected\""),
+            "an empty selector carries no verdict: {plain}"
+        );
+        let narrowed = call_fields_where_limited(&file, 0, "bytes > 0", "", WZ_DISSECT_LIMITS_NONE)
+            .expect("reads");
+        assert!(
+            narrowed.contains("\"selected\":"),
+            "anti-vacuity: a narrowing selector must write it: {narrowed}"
+        );
+        let mut stripped = narrowed.clone();
+        for word in ["yes", "no", "undecided", "unjudged"] {
+            stripped = stripped.replace(&format!("\"selected\":\"{word}\","), "");
+        }
+        assert_eq!(stripped, plain, "nothing but the verdict differs");
+    }
+
+    /// ZA-3517 — EVERY SUBSUMED DOOR HAS A WITNESS THAT ITS SUCCESSOR ANSWERS
+    /// THE SAME BYTES, and the population of doors is the library's own.
+    ///
+    /// # The gap this closes
+    ///
+    /// `capi_header_subsumption.py` holds the header's `SUBSUMED BY` lines
+    /// against the `doors` axis, and that is all it holds: which door is named
+    /// the successor, never whether the successor says the same thing. So the
+    /// mark was true of R2766's field door for as long as it was written and
+    /// the claim a reader took from it was not, and nothing could tell.
+    ///
+    /// The witnesses are written out per door because what "asked nothing"
+    /// means is the door's own — the census family's identity arguments are not
+    /// the field family's — but the SET they cover is DERIVED, by walking
+    /// `Door` the way `wz_dissect_readable_surfaces` does. A door that becomes
+    /// subsumed without a witness is red here, in either direction, rather than
+    /// being carried by a mark nobody measures.
+    #[test]
+    fn every_subsumed_door_has_a_witness_that_its_successor_answers_the_same_bytes() {
+        let mut subsumed: Vec<(&str, &str)> = Vec::new();
+        let mut door = Some(Door::FIRST);
+        while let Some(d) = door {
+            if let Some(current) = d.subsumed_by() {
+                subsumed.push((d.name(), current.name()));
+            }
+            door = d.next();
+        }
+        assert!(
+            !subsumed.is_empty(),
+            "the walk found no subsumed door, so the population is broken and not empty"
+        );
+
+        let census = capture_one_flow_past_the_tap_cap();
+        let file = census_capture();
+        let rules = "demo/**=protobuf";
+        let none = WZ_DISSECT_LIMITS_NONE;
+        // (subsumed door, its successor, the older answer, the successor's answer
+        // to the SAME question)
+        let witnesses: Vec<(&str, &str, String, String)> = vec![
+            (
+                "wz_dissect_pcap_census",
+                "wz_dissect_pcap_census_where_limited",
+                call_census(&census).expect("reads"),
+                call_census_where_limited(&census, "", none).expect("reads"),
+            ),
+            (
+                "wz_dissect_pcap_census_bounded",
+                "wz_dissect_pcap_census_where_limited",
+                call_census_bounded(&census).expect("reads"),
+                call_census_where_limited(&census, "", WZ_DISSECT_LIMITS_LIVE_TAP).expect("reads"),
+            ),
+            (
+                "wz_dissect_pcap_census_where",
+                "wz_dissect_pcap_census_where_limited",
+                call_census_where(&census, "kind == put").expect("reads"),
+                call_census_where_limited(&census, "kind == put", none).expect("reads"),
+            ),
+            (
+                "wz_dissect_pcap_fields",
+                "wz_dissect_pcap_fields_where_limited",
+                call_fields(&file, 0).expect("reads"),
+                call_fields_where_limited(&file, 0, "", "", none).expect("reads"),
+            ),
+            (
+                "wz_dissect_pcap_fields_with_payloads",
+                "wz_dissect_pcap_fields_where_limited",
+                call_fields_with_payloads(&file, 2, rules).expect("reads"),
+                call_fields_where_limited(&file, 2, "", rules, none).expect("reads"),
+            ),
+            (
+                "wz_dissect_pcap_fields_limited",
+                "wz_dissect_pcap_fields_where_limited",
+                call_fields_limited(&file, 0, "", WZ_DISSECT_LIMITS_LIVE_TAP).expect("reads"),
+                call_fields_where_limited(&file, 0, "", "", WZ_DISSECT_LIMITS_LIVE_TAP)
+                    .expect("reads"),
+            ),
+        ];
+
+        let mut witnessed: Vec<(&str, &str)> = witnesses.iter().map(|w| (w.0, w.1)).collect();
+        witnessed.sort_unstable();
+        subsumed.sort_unstable();
+        assert_eq!(
+            witnessed, subsumed,
+            "the doors with a witness must be exactly the doors the library reports as \
+             subsumed: a door subsumed without one is a mark nothing measures, and a \
+             witness for a door that is not subsumed is a claim about nothing"
+        );
+        for (old, current, older, successor) in &witnesses {
+            assert!(
+                !older.is_empty(),
+                "{old} answered an empty document, so its witness proves nothing"
+            );
+            assert_eq!(
+                older, successor,
+                "{current}, asked what {old} asks, must answer byte for byte"
+            );
+        }
+    }
+
     /// R311y855 — THE FIELD LAYER CROSSES, AND THE WALK THIS HEADER DESCRIBED
     /// BECOMES POSSIBLE.
     ///

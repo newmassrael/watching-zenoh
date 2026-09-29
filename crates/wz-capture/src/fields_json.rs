@@ -125,6 +125,17 @@ pub fn fields_json(
 /// misses make it a miss, and anything else is undecided — the consumer's
 /// rule, adopted because a record's reassembled coordinates live only inside
 /// a reader, so a row per record would have to invent one for each.
+///
+/// # An EMPTY selector is the identity, and asks nothing
+///
+/// ZA-3517. It selects everything, so it is the document [`fields_json`]
+/// makes, byte for byte: no walk to judge the rows and no `selected` key on
+/// any of them, because a verdict is an answer to a question and none was
+/// asked. It used to render `yes` on every judged row and `unjudged` on the
+/// rest, which contradicted the header's own sentence that a document asked
+/// for without a selector carries no such key, and made the field family the
+/// one place where the empty selector was not the identity — the reading the
+/// census planes had taught every consumer.
 pub fn fields_json_where(
     d: &crate::Dissection,
     capture: &[u8],
@@ -133,16 +144,30 @@ pub fn fields_json_where(
     filter: &crate::filter::Filter,
 ) -> String {
     let grouping = crate::node::session_grouping(d);
-    let verdicts = crate::payload::payloads_grouped(d, filter, &grouping);
+    let verdicts = judged_by(d, filter, &grouping);
     fields_json_selected(
         d,
         capture,
         max_messages_shown_per_flow,
         declarations,
         &grouping,
-        Some(&verdicts),
+        verdicts.as_ref(),
         None,
     )
+}
+
+/// ZA-3517 — the walk that judges the rows, or nothing when no question was
+/// asked.
+///
+/// One function for both renderers that take a selector, so the rule that an
+/// empty selector is the identity is written in one place and cannot be kept
+/// by one of them and forgotten by the other.
+fn judged_by(
+    d: &crate::Dissection,
+    filter: &crate::filter::Filter,
+    grouping: &crate::node::SessionGrouping,
+) -> Option<crate::payload::PayloadCensus> {
+    (!filter.is_any()).then(|| crate::payload::payloads_grouped(d, filter, grouping))
 }
 
 /// ZA-3214 ① — the selector's document, with each row carrying the
@@ -173,14 +198,14 @@ pub fn fields_json_where_coordinated(
     coordinates: &dyn RowCoordinates,
 ) -> String {
     let grouping = crate::node::session_grouping(d);
-    let verdicts = crate::payload::payloads_grouped(d, filter, &grouping);
+    let verdicts = judged_by(d, filter, &grouping);
     fields_json_selected(
         d,
         capture,
         max_messages_shown_per_flow,
         declarations,
         &grouping,
-        Some(&verdicts),
+        verdicts.as_ref(),
         Some(coordinates),
     )
 }
@@ -2156,18 +2181,34 @@ fn push_coordinates(list_id: Option<u64>, anchor: u64, batch_index: u64, out: &m
 /// failure this axis was asked for in the first place.
 #[cfg(feature = "network-codecs")]
 fn push_selected(selection: Option<RowSelection<'_>>, frame: &PassiveFrame, out: &mut String) {
-    use crate::filter::Truth;
     let Some(RowSelection { list, census }) = selection else {
         return;
     };
+    row_verdict_of(census, list, frame).push(out);
+}
+
+/// ZA-3509 — the verdict for ONE row, asked of the walk that judged it.
+///
+/// Hoisted out of `push_selected` when the verdict-only document arrived, and
+/// for the reason that document exists at all: two renderers reading the same
+/// map are two places for the mapping from a fold to one of four words to
+/// drift, and a row whose word differs between the document with trees and the
+/// document without is the one disagreement neither consumer could debug from
+/// its own half.
+#[cfg(feature = "network-codecs")]
+pub(crate) fn row_verdict_of(
+    census: &crate::payload::PayloadCensus,
+    list: usize,
+    frame: &PassiveFrame,
+) -> RowVerdict {
+    use crate::filter::Truth;
     let key = crate::payload::RowKey::of(list, frame);
-    let verdict = match census.row_verdict(&key).and_then(|v| v.folded()) {
+    match census.row_verdict(&key).and_then(|v| v.folded()) {
         Some(Truth::Yes) => RowVerdict::Yes,
         Some(Truth::No) => RowVerdict::No,
         Some(Truth::Unknown) => RowVerdict::Undecided,
         None => RowVerdict::Unjudged,
-    };
-    verdict.push(out);
+    }
 }
 
 /// ZA-3214 ④ — the four words a row's `selected` key carries, as ONE type.
@@ -2684,6 +2725,111 @@ mod tests {
                 Some((key, cause))
             })
             .collect()
+    }
+
+    /// A document with every row's `selected` key taken out — what a selector
+    /// ADDS, so that the rest can be compared against a document made without
+    /// one. `RowVerdict::push` writes the key with its trailing comma, and the
+    /// four words are the whole vocabulary, so this removes exactly what the
+    /// selector put there.
+    #[cfg(feature = "network-codecs")]
+    fn without_selected(doc: &str) -> String {
+        let mut out = String::from(doc);
+        for word in RowVerdict::names() {
+            out = out.replace(&alloc::format!("\"selected\":\"{word}\","), "");
+        }
+        out
+    }
+
+    /// ZA-3517 — THE EMPTY SELECTOR IS THE IDENTITY, for the field document as
+    /// it is for every census plane: it asks no question, so it writes no answer.
+    ///
+    /// # What this holds, and where it was false
+    ///
+    /// `wz_dissect.h` says a document asked for without a selector carries no
+    /// `selected` key, and says three times that an empty selector selects
+    /// everything so that the door taking one is the door that does not. For the
+    /// census that is true byte for byte. For this document it was not: the
+    /// empty selector parsed to `Filter::any`, every row was judged against it,
+    /// and each carried a `selected` word — `yes` for a judged row, `unjudged`
+    /// for the rest. A consumer reading the SUBSUMED mark as "same answer"
+    /// swapped the older door for the newer one and its golden moved on every
+    /// row.
+    ///
+    /// Three arms, and the second is what keeps the first from being satisfied
+    /// by a door that never writes the key: a narrowing selector DOES write it,
+    /// and what it adds is that key and nothing else — so the two documents are
+    /// one document, differing by exactly the question asked.
+    #[cfg(feature = "network-codecs")]
+    #[test]
+    fn an_empty_selector_asks_no_question_and_writes_no_verdict() {
+        let (d, file) = crate::agg::tests::multilink_session_with_file();
+        let plain = fields_json(&d, &file, None, None);
+        assert!(
+            !plain.contains("\"selected\""),
+            "the document made with no selector must carry no verdict: {plain}"
+        );
+
+        let picky = crate::filter::Filter::parse("bytes > 6").expect("parses");
+        let narrowed = fields_json_where(&d, &file, None, None, &picky);
+        assert!(
+            narrowed.contains("\"selected\":\"yes\"") && narrowed.contains("\"selected\":\"no\""),
+            "anti-vacuity: a narrowing selector must write the key and divide the \
+             rows, or the identity below is satisfied by a door that never does: \
+             {narrowed}"
+        );
+
+        for source in ["", "   ", "\t\n"] {
+            let any = crate::filter::Filter::parse(source).expect("parses");
+            assert_eq!(
+                fields_json_where(&d, &file, None, None, &any),
+                plain,
+                "selector {source:?} selects everything, so it must be the document \
+                 that asks nothing, byte for byte"
+            );
+        }
+
+        assert_eq!(
+            without_selected(&narrowed),
+            plain,
+            "a selector adds the verdict key and nothing else"
+        );
+    }
+
+    /// ZA-3517 — the same identity through the door that also carries the
+    /// record coordinates, which is the one a live handle calls and the one a
+    /// consumer passes an empty selector to when it is not narrowing.
+    ///
+    /// The coordinates are a separate axis from the verdict and stay when the
+    /// verdict goes: an empty selector must not cost a consumer its join key.
+    #[cfg(feature = "network-codecs")]
+    #[test]
+    fn an_empty_selector_keeps_the_coordinates_and_drops_only_the_verdict() {
+        let (d, file) = crate::agg::tests::multilink_session_with_file();
+        let any = crate::filter::Filter::parse("").expect("parses");
+        let picky = crate::filter::Filter::parse("bytes > 6").expect("parses");
+
+        let every = fields_json_where_coordinated(&d, &file, None, None, &any, &EveryListNumbered);
+        assert!(
+            every.contains("\"list_id\":") && every.contains("\"anchor\":"),
+            "an empty selector must not cost a consumer its join key: {every}"
+        );
+        assert!(
+            !every.contains("\"selected\""),
+            "and it must not write a verdict either: {every}"
+        );
+
+        let narrowed =
+            fields_json_where_coordinated(&d, &file, None, None, &picky, &EveryListNumbered);
+        assert!(
+            narrowed.contains("\"selected\":"),
+            "anti-vacuity: {narrowed}"
+        );
+        assert_eq!(
+            without_selected(&narrowed),
+            every,
+            "a selector adds the verdict key and nothing else, coordinates included"
+        );
     }
 
     /// R2458 (open-debt item 703) — ACCEPTANCE, inherited from item 702 word for
@@ -4673,7 +4819,14 @@ mod tests {
         // with a word's own shapes independently, so the population has to be
         // the same product the declaration states — a door rendered over only
         // some captures would leave some products unmeasured and declared.
-        let every = crate::filter::Filter::parse("").expect("the empty selector");
+        //
+        // ZA-3517 — A NON-EMPTY selector, and that is the point of the line. This
+        // used to be the empty one, which judged every row and so put a `selected`
+        // word on each; the empty selector now asks nothing and writes none, so
+        // the population that measures the verdict's products has to ask a
+        // question. `bytes >= 0` is the weakest one the language has: it drops no
+        // row, and it still makes every row say which of the four words it is.
+        let every = crate::filter::Filter::parse("bytes >= 0").expect("a selector that asks");
         let mut through: Vec<(&Dissection, &[u8], Option<&Declarations<'_>>)> = alloc::vec![
             (&d, &file[..], Some(&run)),
             (&d, &file[..], None),
