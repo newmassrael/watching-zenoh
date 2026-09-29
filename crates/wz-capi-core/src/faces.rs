@@ -80,12 +80,12 @@ use wz_runtime_tokio::qos::Priority;
 use wz_runtime_tokio::query_sink::{QueryView, ReplyOut};
 use wz_runtime_tokio::runtime_impl::{TokioRuntime, TokioTime};
 use wz_runtime_tokio::session::{
-    LivelinessOptions, LivelinessSubscriber, LivelinessSubscriberOptions, LivelinessToken,
+    InterestForm, LocalDeliveryDrain, MatchingInterestHold, MatchingListener, MatchingStatus,
+    PublishAliasError, PublishError, PublishOptions, QueryOptions, Queryable, QueryableOptions,
+    SubscribeOptions, Subscriber, TokioSession,
 };
 use wz_runtime_tokio::session::{
-    LocalDeliveryDrain, MatchingListener, MatchingStatus, PublishAliasError, PublishError,
-    PublishOptions, QueryOptions, Queryable, QueryableOptions, SubscribeOptions, Subscriber,
-    TokioSession,
+    LivelinessOptions, LivelinessSubscriber, LivelinessSubscriberOptions, LivelinessToken,
 };
 use wz_runtime_tokio::session_glue::{
     new_session_actions, BoxedLinkDriver, IterationEvent, LinkKind, LinkSendOutcome,
@@ -157,6 +157,40 @@ pub type MatchingSink = Arc<dyn Fn(bool) + Send + Sync>;
 /// A C-level matching-listener id, keying the per-face wz listeners one C
 /// declaration spawned.
 pub type MatchId = u64;
+
+/// A C-level WRITE FILTER id — zenoh-pico's `_z_write_filter_t`, which a
+/// publisher or querier holds for its whole life.
+pub type FilterId = u64;
+
+/// Which declarations a write filter counts: pico's
+/// `_Z_WRITE_FILTER_SUBSCRIBER` for a publisher, `_Z_WRITE_FILTER_QUERYABLE`
+/// for a querier (`vendor/zenoh-pico/src/net/filtering.c` @
+/// `ctx->target_type = expects_queryable ? _Z_WRITE_FILTER_QUERYABLE : _Z_WRITE_FILTER_SUBSCRIBER;`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FilterPlane {
+    /// A publisher: does any peer subscribe to the key.
+    Subscribers,
+    /// A querier: does any peer answer on the key. `complete_required` is a
+    /// target of `ALL_COMPLETE`, which counts only queryables declared complete.
+    Queryables {
+        /// See the variant.
+        complete_required: bool,
+    },
+}
+
+/// A C-declared write filter — the SSOT replayed onto every face that comes up,
+/// as every other entry here is.
+struct FilterEntry {
+    id: FilterId,
+    plane: FilterPlane,
+    /// The LITERAL the peers' declarations are matched against.
+    keyexpr: String,
+    /// How the peer is asked, or `None` to ask nothing: zenoh-pico sends no
+    /// Interest at all from a peer with no router among its peers
+    /// (`vendor/zenoh-pico/src/net/primitives.c` @ `_z_add_interest`), and
+    /// learns only what peers volunteer.
+    ask: Option<InterestForm>,
+}
 
 /// Why a fan-out publish could not be delivered to ANY face.
 ///
@@ -388,6 +422,10 @@ struct FaceEntry {
     /// handle is what keeps the watch installed; dropping it undeclares that
     /// face's half of one C listener.
     matches: BTreeMap<MatchId, MatchingListener<TokioRuntime>>,
+    /// Per-face WRITE FILTER interests. Holding one is what keeps this peer
+    /// answering the filter's question; dropping it sends that face's
+    /// `Interest(Final)`. Only filters that ask carry an entry.
+    filters: BTreeMap<FilterId, MatchingInterestHold<TokioRuntime, TokioTime>>,
     /// Per-face ADVANCED publishers. Dropping one tears down that face's `@adv`
     /// cache queryable + liveliness token (RAII inside `AdvancedPublisher`).
     adv_pubs: BTreeMap<AdvPubId, AdvancedPublisher<TokioRuntime, TokioTime>>,
@@ -1088,6 +1126,8 @@ struct Inner {
     live_subs: Vec<LiveSubEntry>,
     matches: Vec<MatchEntry>,
     next_match_id: MatchId,
+    filters: Vec<FilterEntry>,
+    next_filter_id: FilterId,
     adv_pubs: Vec<AdvPubEntry>,
     next_adv_pub_id: AdvPubId,
     adv_subs: Vec<AdvSubEntry>,
@@ -1262,6 +1302,9 @@ impl SharedSession {
                 tokens: BTreeMap::new(),
                 live_subs: BTreeMap::new(),
                 matches: BTreeMap::new(),
+                // The plane asks nobody: a write filter counts what PEERS
+                // declare, and the plane's link is inert.
+                filters: BTreeMap::new(),
                 adv_pubs: BTreeMap::new(),
                 adv_subs: BTreeMap::new(),
                 groups: BTreeMap::new(),
@@ -1456,6 +1499,24 @@ impl SharedSession {
                 matches.insert(entry.id, listener);
             }
         }
+        // R2962 — write filters: ask the new peer the question each one holds.
+        // A hold has no callback, so taking it under the lock cannot re-enter
+        // (unlike the matching listeners above, which is why THOSE are
+        // installed where they are). Filters that ask nothing keep no hold.
+        let mut filters = BTreeMap::new();
+        for entry in &guard.filters {
+            if let Some(form) = &entry.ask {
+                let hold = match entry.plane {
+                    FilterPlane::Subscribers => {
+                        session.hold_subscribers_interest(&entry.keyexpr, form)
+                    }
+                    FilterPlane::Queryables { .. } => {
+                        session.hold_queryables_interest(&entry.keyexpr, form)
+                    }
+                };
+                filters.insert(entry.id, hold);
+            }
+        }
         // Advanced pub/sub replay, on the same best-effort per-face contract
         // as the four planes above. An advanced publisher declares its own
         // `@adv` cache queryable and liveliness token on the face it binds to,
@@ -1521,6 +1582,7 @@ impl SharedSession {
                 tokens,
                 live_subs,
                 matches,
+                filters,
                 adv_pubs,
                 adv_subs,
                 groups,
@@ -2305,6 +2367,19 @@ impl SharedSession {
             .collect()
     }
 
+    /// Whether any connected peer is a ROUTER — zenoh-pico's
+    /// `_z_session_has_router_peer`, the condition under which a peer-mode
+    /// session sends Interests at all. R2962.
+    ///
+    /// Read off the same INIT record as [`Self::peer_identities`], so a
+    /// half-open face is not counted, and `0` is the wire form of a router.
+    pub fn has_router_peer(&self) -> bool {
+        const WIRE_ROUTER: u8 = 0;
+        self.peer_identities()
+            .into_iter()
+            .any(|(_, whatami)| whatami == WIRE_ROUTER)
+    }
+
     /// Open a TX batching window on every face (pico `zp_batch_start`).
     ///
     /// pico has ONE transport, so its batch control is a single call; wz holds N
@@ -2605,6 +2680,110 @@ impl SharedSession {
                 .get_matching_status()
                 .matching
         })
+    }
+
+    /// Declare a WRITE FILTER — zenoh-pico's `_z_write_filter_create`, which a
+    /// publisher or querier does once, at declare.
+    ///
+    /// `ask` is how every peer is asked what the filter counts, or `None` to ask
+    /// none of them (a pico peer with no router among its peers asks nobody); the
+    /// entry is replayed onto every
+    /// face that comes up later, as each other declaration here is. The filter
+    /// reads what peers DECLARE, so it needs no callback and has no cached
+    /// state: [`Self::write_filter_active`] asks the registries when it is
+    /// asked, which is why it cannot drift from what the peers said.
+    ///
+    /// The local plane is not asked and not counted. zenoh-pico's default build
+    /// counts no session-local subscriber (`Z_FEATURE_LOCAL_SUBSCRIBER` is 0),
+    /// and the plane's link is inert.
+    pub fn declare_write_filter(
+        &self,
+        plane: FilterPlane,
+        keyexpr: String,
+        ask: Option<InterestForm>,
+    ) -> FilterId {
+        let mut guard = self.lock();
+        guard.next_filter_id = guard.next_filter_id.wrapping_add(1);
+        let id = guard.next_filter_id;
+        if let Some(form) = &ask {
+            for face in guard.faces.values_mut() {
+                let hold = match plane {
+                    FilterPlane::Subscribers => {
+                        face.session.hold_subscribers_interest(&keyexpr, form)
+                    }
+                    FilterPlane::Queryables { .. } => {
+                        face.session.hold_queryables_interest(&keyexpr, form)
+                    }
+                };
+                face.filters.insert(id, hold);
+            }
+        }
+        guard.filters.push(FilterEntry {
+            id,
+            plane,
+            keyexpr,
+            ask,
+        });
+        id
+    }
+
+    /// Retract a write filter: drop the SSOT entry so no future face asks, and
+    /// release every face's Interest (each emitting its `Interest(Final)` once
+    /// no other holder of that key remains).
+    ///
+    /// Released OUTSIDE the registry lock, as every teardown here is: a hold's
+    /// drop reaches the face's session and its link.
+    pub fn undeclare_write_filter(&self, id: FilterId) {
+        let mut dropped = Vec::new();
+        {
+            let mut guard = self.lock();
+            if let Some(pos) = guard.filters.iter().position(|e| e.id == id) {
+                guard.filters.remove(pos);
+            }
+            for face in guard.faces.values_mut() {
+                if let Some(hold) = face.filters.remove(&id) {
+                    dropped.push(hold);
+                }
+            }
+        }
+        drop(dropped);
+    }
+
+    /// Whether the filter says NOTHING matches — zenoh-pico's
+    /// `_z_write_filter_active`, and the reason a put, delete or get is not
+    /// sent. `true` until a peer has declared something the filter counts, which
+    /// is the state a filter is CREATED in (`ctx->state = WRITE_FILTER_ACTIVE`),
+    /// so a publisher with no peer yet suppresses, as upstream's does.
+    ///
+    /// An unknown id answers `false`: not filtered. A handle that outlived its
+    /// filter should send rather than drop silently.
+    ///
+    /// The registries are read OUTSIDE the registry lock: a face's observer
+    /// mutex is taken to answer, and holding this one across it would invert
+    /// their order against the drive thread.
+    pub fn write_filter_active(&self, id: FilterId) -> bool {
+        let (plane, keyexpr, sessions) = {
+            let guard = self.lock();
+            let Some(entry) = guard.filters.iter().find(|e| e.id == id) else {
+                return false;
+            };
+            let sessions: Vec<TokioSession> = guard
+                .faces
+                .values()
+                .map(|face| face.session.clone())
+                .collect();
+            (entry.plane, entry.keyexpr.clone(), sessions)
+        };
+        // `Remote`: only what a peer declared counts. See `declare_write_filter`.
+        let matching = sessions.iter().any(|session| match plane {
+            FilterPlane::Subscribers => {
+                session.remote_subscribers_match(&keyexpr, Locality::Remote)
+            }
+            FilterPlane::Queryables { complete_required } => {
+                session.remote_queryables_match(&keyexpr, Locality::Remote, complete_required)
+            }
+        });
+        !matching
     }
 
     /// Drop a C matching listener: remove the SSOT entry so no future face
@@ -3163,6 +3342,44 @@ mod matching_aggregate_tests {
     /// `open_blocking` mints, without the entropy call.
     fn test_zid() -> Vec<u8> {
         vec![0x11; 16]
+    }
+
+    /// R2962 — a write filter is created in the state ACTIVE, which reads as
+    /// "nothing matches": zenoh-pico's `ctx->state = WRITE_FILTER_ACTIVE`, and
+    /// the reason a publisher with no peer yet sends nothing. An id that has
+    /// outlived its filter answers the OTHER way, so a stale handle sends
+    /// rather than dropping silently.
+    ///
+    /// Face-free by construction: what a peer's declaration does to the state
+    /// needs a face and is the differential's business
+    /// (`pico_keyexpr_declaration_twice_and_diff`), which opens a filter with a
+    /// real router's answer.
+    #[test]
+    fn a_write_filter_starts_active_and_a_retracted_one_does_not_suppress() {
+        let shared = SharedSession::new(TokioTime::new(), test_zid()).expect("test host entropy");
+        let publisher =
+            shared.declare_write_filter(FilterPlane::Subscribers, "wz/wf/pub".to_owned(), None);
+        let querier = shared.declare_write_filter(
+            FilterPlane::Queryables {
+                complete_required: true,
+            },
+            "wz/wf/qry".to_owned(),
+            None,
+        );
+        assert_ne!(publisher, querier, "each filter is its own entry");
+        assert!(shared.write_filter_active(publisher));
+        assert!(shared.write_filter_active(querier));
+
+        shared.undeclare_write_filter(publisher);
+        assert!(
+            !shared.write_filter_active(publisher),
+            "a handle that outlived its filter must send"
+        );
+        assert!(
+            shared.write_filter_active(querier),
+            "and retracting one leaves the other's state alone"
+        );
+        assert!(!shared.has_router_peer(), "no face, so no router peer");
     }
 
     /// R311y557 — the CLOSING measurement for what R311y554 pinned as a named

@@ -1523,6 +1523,7 @@ impl<R: SessionRuntime, T: TimeSource> Querier<R, T> {
                     wz_session_core::interest_build::InterestKinds::QUERYABLES,
                     /*current=*/ true,
                     /*future=*/ true,
+                    /*aggregate=*/ false,
                     /*keyexpr_mapping_id=*/ 0,
                     Some(&self.keyexpr),
                 );

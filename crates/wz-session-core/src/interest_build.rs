@@ -203,18 +203,14 @@ pub fn build_interest_propagated(
     current_future: bool,
     keyexpr: Option<(u64, Option<&str>)>,
 ) -> Result<InterestOwned, CodecError> {
-    let mut interest = build_restricted_interest(
+    let mut interest = build_interest_composed(
         interest_id,
         kinds,
         /*current=*/ true,
         /*future=*/ current_future,
+        aggregate,
         keyexpr,
     )?;
-    if aggregate {
-        if let Some(body) = interest.body.as_mut() {
-            body.header |= INTEREST_BODY_AGGREGATE;
-        }
-    }
     crate::declare_ext_qos::set_interest_qos(&mut interest, crate::declare_ext_qos::QOS_DECLARE);
     Ok(interest)
 }
@@ -222,9 +218,10 @@ pub fn build_interest_propagated(
 /// The `A` (AGGREGATE) bit of the `InterestBody` header: the mask the generated
 /// `InterestBodyOwned::ag` reads (`out/wz-codecs/interest_body.rs`) and
 /// zenoh-pico's `_Z_INTEREST_FLAG_AGGREGATE` (`1 << 7`). Private and written
-/// only by [`build_interest_propagated`], the one builder that CARRIES a
-/// downstream's bit; the generated owned body has no setter for it, and wz's
-/// own originations never set it (see [`InterestKinds`]).
+/// only by [`build_interest_composed`]; the generated owned body has no setter
+/// for it. wz's own originations leave it clear unless a caller asks, through
+/// [`build_interest_kinds_with_aggregate`], to be answered the way a zenoh-pico
+/// client is (see [`InterestKinds`]).
 const INTEREST_BODY_AGGREGATE: u8 = 0x80;
 
 /// WHICH DECLARATION KINDS an `Interest` asks the peer for — the `S`, `Q`
@@ -385,6 +382,38 @@ fn build_restricted_interest(
     })
 }
 
+/// [`build_restricted_interest`] with the AGGREGATE bit — the one composition
+/// [`build_interest_propagated`] and the EMITTER-side
+/// [`build_interest_kinds_with_aggregate`] share, so the bit is set in exactly
+/// one place.
+///
+/// R2962 — the second caller. The bit is still not a kind and still not a claim
+/// that wz stages an aggregate reply (see [`InterestKinds`]): on an origination
+/// it is a request to the PEER. zenoh-pico sets it on every write filter it
+/// creates as a client
+/// (`vendor/zenoh-pico/src/net/filtering.c` @
+/// `flags |= _Z_INTEREST_FLAG_KEYEXPRS | _Z_INTEREST_FLAG_AGGREGATE | _Z_INTEREST_FLAG_FUTURE;`),
+/// so a drop-in for it has to put the same byte on the wire. What wz does with
+/// an aggregated ANSWER is the receiving side's business and unchanged: an
+/// aggregate is an ordinary declaration on a wild keyexpr, matched by
+/// intersection like any other.
+fn build_interest_composed(
+    interest_id: u64,
+    kinds: InterestKinds,
+    current: bool,
+    future: bool,
+    aggregate: bool,
+    keyexpr: Option<(u64, Option<&str>)>,
+) -> Result<InterestOwned, CodecError> {
+    let mut interest = build_restricted_interest(interest_id, kinds, current, future, keyexpr)?;
+    if aggregate {
+        if let Some(body) = interest.body.as_mut() {
+            body.header |= INTEREST_BODY_AGGREGATE;
+        }
+    }
+    Ok(interest)
+}
+
 /// The liveliness-token arm of [`build_restricted_interest`] — kinds fixed
 /// to [`InterestKinds::TOKENS`]. Kept as a named wrapper because the two
 /// public liveliness builders differ only in C / F and share this kind
@@ -493,11 +522,38 @@ pub fn build_interest_kinds(
     keyexpr_mapping_id: u64,
     keyexpr_suffix: Option<&str>,
 ) -> Result<InterestOwned, CodecError> {
-    build_restricted_interest(
+    build_interest_kinds_with_aggregate(
         interest_id,
         kinds,
         current,
         future,
+        /*aggregate=*/ false,
+        keyexpr_mapping_id,
+        keyexpr_suffix,
+    )
+}
+
+/// [`build_interest_kinds`] with the AGGREGATE bit under the caller's control.
+///
+/// R2962 — the write filter zenoh-pico creates for a client asks for aggregated
+/// answers, and nothing else in this tree needed to say so. The bit is a
+/// request to the peer, not a capability of ours; see [`InterestKinds`] for why
+/// wz stages no aggregate reply of its own.
+pub fn build_interest_kinds_with_aggregate(
+    interest_id: u64,
+    kinds: InterestKinds,
+    current: bool,
+    future: bool,
+    aggregate: bool,
+    keyexpr_mapping_id: u64,
+    keyexpr_suffix: Option<&str>,
+) -> Result<InterestOwned, CodecError> {
+    build_interest_composed(
+        interest_id,
+        kinds,
+        current,
+        future,
+        aggregate,
         Some((keyexpr_mapping_id, keyexpr_suffix)),
     )
 }

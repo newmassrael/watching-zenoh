@@ -8750,6 +8750,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                 InterestKinds::SUBSCRIBERS,
                 current,
                 future,
+                /*aggregate=*/ false,
                 keyexpr_mapping_id,
                 keyexpr_suffix,
             )
@@ -8790,6 +8791,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                 InterestKinds::QUERYABLES,
                 current,
                 future,
+                /*aggregate=*/ false,
                 keyexpr_mapping_id,
                 keyexpr_suffix,
             )
@@ -8831,23 +8833,30 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// break — the shape Layer C1bz caught this round. The two named wrappers
     /// above stay signature-stable, because their parameters are scalars, and
     /// they are what a caller reaches for.
+    ///
+    /// R2962 — `aggregate` is the emitter-side AGGREGATE bit (see
+    /// [`crate::interest_build::build_interest_kinds_with_aggregate`]): a request to the peer, recorded
+    /// in the reconnect cache so a replay re-asks identically.
     #[cfg(feature = "alloc")]
+    #[allow(clippy::too_many_arguments)]
     pub fn send_interest_kinds(
         &self,
         interest_id: u64,
         kinds: InterestKinds,
         current: bool,
         future: bool,
+        aggregate: bool,
         keyexpr_mapping_id: u64,
         keyexpr_suffix: Option<&str>,
     ) -> Result<(), SendWireError> {
         #[cfg(feature = "declare-interest")]
         {
-            let interest = build_interest_kinds(
+            let interest = build_interest_kinds_with_aggregate(
                 interest_id,
                 kinds,
                 current,
                 future,
+                aggregate,
                 keyexpr_mapping_id,
                 keyexpr_suffix,
             )?;
@@ -8857,6 +8866,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                 kinds,
                 current,
                 future,
+                aggregate,
                 keyexpr_mapping_id,
                 keyexpr_suffix,
             );
@@ -8869,6 +8879,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                 kinds,
                 current,
                 future,
+                aggregate,
                 keyexpr_mapping_id,
                 keyexpr_suffix,
             );
@@ -8887,12 +8898,14 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// while every matching listener stays registered — the silent half-dead
     /// state.
     #[cfg(all(feature = "declare-interest", feature = "alloc"))]
+    #[allow(clippy::too_many_arguments)]
     pub fn cache_matching_interest(
         &self,
         interest_id: u64,
         kinds: InterestKinds,
         current: bool,
         future: bool,
+        aggregate: bool,
         keyexpr_mapping_id: u64,
         keyexpr_suffix: Option<&str>,
     ) {
@@ -8902,6 +8915,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             kinds,
             current,
             future,
+            aggregate,
             mapping_id: keyexpr_mapping_id,
             suffix: keyexpr_suffix.map(ToString::to_string),
         });
@@ -8911,6 +8925,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             kinds,
             current,
             future,
+            aggregate,
             keyexpr_mapping_id,
             keyexpr_suffix,
         );
@@ -9673,16 +9688,18 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                 kinds,
                 current,
                 future,
+                aggregate,
                 mapping_id,
                 suffix,
             } => {
                 #[cfg(feature = "declare-interest")]
                 {
-                    let interest = build_interest_kinds(
+                    let interest = build_interest_kinds_with_aggregate(
                         interest_id,
                         kinds,
                         current,
                         future,
+                        aggregate,
                         mapping_id,
                         suffix.as_deref(),
                     )
@@ -9695,7 +9712,15 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                         .map_err(ReplayDeclarationsError::Interest)?;
                 }
                 #[cfg(not(feature = "declare-interest"))]
-                let _ = (interest_id, kinds, current, future, mapping_id, suffix);
+                let _ = (
+                    interest_id,
+                    kinds,
+                    current,
+                    future,
+                    aggregate,
+                    mapping_id,
+                    suffix,
+                );
             }
         }
         Ok(())

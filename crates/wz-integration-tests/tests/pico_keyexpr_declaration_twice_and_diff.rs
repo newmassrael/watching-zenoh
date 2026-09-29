@@ -107,9 +107,10 @@ int main(int argc, char **argv) {
     }
     z_sleep_ms(300);
 
-    z_view_keyexpr_t pub_ke, sub_ke, qbl_ke, qry_ke, tok_ke, lsub_ke, decl_ke;
+    z_view_keyexpr_t pub_ke, sub_ke, qbl_ke, qry_ke, qry2_ke, tok_ke, lsub_ke, decl_ke;
     if (view(&pub_ke, "demo/kd/pub") < 0 || view(&sub_ke, "demo/kd/sub/**") < 0 ||
         view(&qbl_ke, "demo/kd/qbl/*/x") < 0 || view(&qry_ke, "demo/kd/qry") < 0 ||
+        view(&qry2_ke, "demo/kd/qry2") < 0 ||
         view(&tok_ke, "demo/kd/tok") < 0 || view(&lsub_ke, "demo/kd/live/**") < 0 ||
         view(&decl_ke, "demo/kd/decl") < 0) {
         return -1;
@@ -163,6 +164,23 @@ int main(int argc, char **argv) {
     }
     z_sleep_ms(300);
 
+    /* A querier whose key the router DOES answer for: its write filter opens
+       once the router's queryable declaration arrives, so this get goes out
+       where the first querier's did not. Without this pair, two arms that both
+       sent nothing would compare equal. */
+    z_owned_querier_t qry2;
+    if (z_declare_querier(z_loan(s), &qry2, z_loan(qry2_ke), NULL) < 0) {
+        printf("driver: second querier failed\n");
+        return -1;
+    }
+    z_sleep_ms(400);
+    z_owned_closure_reply_t reply2_cb;
+    z_closure(&reply2_cb, on_reply, NULL, NULL);
+    if (z_querier_get(z_loan(qry2), NULL, z_move(reply2_cb), NULL) < 0) {
+        printf("driver: second querier get failed\n");
+    }
+    z_sleep_ms(300);
+
     z_owned_closure_sample_t lsub_cb;
     z_closure(&lsub_cb, on_sample, NULL, NULL);
     z_owned_subscriber_t lsub;
@@ -197,6 +215,8 @@ int main(int argc, char **argv) {
     z_drop(z_move(tok));
     z_sleep_ms(100);
     z_drop(z_move(lsub));
+    z_sleep_ms(100);
+    z_drop(z_move(qry2));
     z_sleep_ms(100);
     z_drop(z_move(qry));
     z_sleep_ms(100);
@@ -248,7 +268,19 @@ fn record_arm(driver: &Path, arm: &str) -> Vec<(wz_integration_tests::wire_tap::
     let demo_stderr = tempfile::tempfile().expect("tempfile for router stderr");
     let (mut router, _router_log, router_port) = spawn_on_ephemeral_port(
         &demo,
-        &["--listen", "127.0.0.1:0", "--key", "demo/**"],
+        // A subscriber on everything under `demo/`, which is what opens the
+        // publisher's write filter, and a queryable on ONE key the driver's
+        // second querier names, which is what opens that querier's.
+        &[
+            "--listen",
+            "127.0.0.1:0",
+            "--key",
+            "demo/**",
+            "--queryable",
+            "demo/kd/qry2",
+            "--reply",
+            "kd",
+        ],
         "listening on 127.0.0.1:",
         "wz-ap-demo (router behind the tap)",
         demo_stderr,
@@ -354,7 +386,9 @@ fn extensions(chain: Option<&[wz_codecs::ext_entry::ExtEntryOwned]>) -> String {
 }
 
 /// One line per declaration and per data message the dialer sent, in order.
-fn render(segments: &[(wz_integration_tests::wire_tap::Side, Vec<u8>)]) -> (Vec<String>, Vec<u8>) {
+fn render(
+    segments: &[(wz_integration_tests::wire_tap::Side, Vec<u8>)],
+) -> (Vec<String>, Vec<(u8, u8)>) {
     let pcap = synthesise_pcap(segments, DIALER_PORT, LISTENER_PORT);
     let dissection = Dissection::from_pcap(&pcap).expect("the synthesised pcap parses");
     let flows = dissection.flows();
@@ -447,7 +481,7 @@ fn render(segments: &[(wz_integration_tests::wire_tap::Side, Vec<u8>)]) -> (Vec<
                         Some(body) => {
                             // A Final has no body and, in both libraries, no
                             // extension chain, so only the others are pinned.
-                            interest_headers.push(i.header);
+                            interest_headers.push((i.header, body.header));
                             let key = match body.keyexpr.as_ref() {
                                 Some(k) => wire(&mut names, k),
                                 None => String::from("(no key)"),
@@ -471,64 +505,19 @@ fn render(segments: &[(wz_integration_tests::wire_tap::Side, Vec<u8>)]) -> (Vec<
 /// The Z bit of a network message's header: an extension chain follows.
 ///
 /// PINNED rather than masked away, because it is a real byte-level difference
-/// and hiding it would make this leg say more than it measured. wz stamps its
-/// QoS envelope on every Interest that carries a body (a Final carries none, in
-/// both libraries), as zenoh's session does; zenoh-pico's Interest carries no
-/// extension. Both readings are asserted below, so either
-/// side changing reds this leg by name. It is the ENVELOPE's question — which
-/// bytes an implementation wraps a message in — and not this leg's, which is
-/// about WHICH keys go on the wire; a pico peer decodes wz's interests
-/// (`apfull_*_pico_interop`), so the difference is not an interop break.
+/// and hiding it would make this leg say more than it measured. zenoh-pico's
+/// Interests carry no extension. wz's WRITE-FILTER Interests carry none either
+/// (header `0x79`, byte for byte pico's), but its LIVELINESS-subscriber Interest
+/// stamps the QoS envelope (`0xd9`) as zenoh's session does. Both readings are
+/// asserted below, so either side changing reds this leg by name. It is the
+/// ENVELOPE's question — which bytes an implementation wraps a message in — and
+/// not this leg's, which is about WHICH keys go on the wire; a pico peer decodes
+/// wz's liveliness interests (`apfull_*_pico_interop`), so the difference is not
+/// an interop break.
 const INTEREST_EXTENSION_BIT: u8 = 0x80;
 
-/// Lines the REAL pico puts on the wire and wz does not: pico's WRITE FILTER
-/// (open-debt item 841). Every publisher and querier sends an Interest on its
-/// own key (`_z_write_filter_create`, `vendor/zenoh-pico/src/net/filtering.c`)
-/// and retracts it with an `Interest(Final)` when it goes; wz's pico ABI sends
-/// neither, so it is one Interest short per entity, and short two Finals.
-///
-/// The two key-bearing entries decode as: header `0x79` = Interest | current |
-/// future; body `0xd3` = keyexprs | subscribers | restricted | mapping |
-/// aggregate (a publisher), `0xd5` the same with queryables (a querier).
-///
-/// The Finals are removed from the END of the arm's lines: the one that stays
-/// is the liveliness subscriber's, which wz does send, and it must line up with
-/// where the reference put it.
-///
-/// THIS IS A PIN, NOT A PASS. When the write filter is built, every entry here
-/// becomes absent from the wz arm and `without` panics naming the stale pin —
-/// which is the instruction to delete this list and compare whole.
-const WRITE_FILTER_REFERENCE_ONLY: &[&str] = &[
-    "Interest hdr=0x79 body=0xd3 on K1+\"\"",
-    "Interest hdr=0x79 body=0xd5 on K4+\"\"",
-    "Interest (final)",
-    "Interest (final)",
-];
-
-/// The line wz puts on the wire and the real pico does not: the querier's Query.
-/// Upstream's `z_querier_get` sends it only when its write filter says some
-/// queryable matches (`vendor/zenoh-pico/src/api/api.c` @
-/// `bool should_proceed = ret == _Z_RES_OK && !_z_write_filter_active(&querier->_filter);`),
-/// and this driver's router declares none. Same pin, same reason.
-const WRITE_FILTER_WZ_ONLY: &[&str] = &["Request on K4+\"\""];
-
-/// `lines` with each pinned entry removed once — the LAST occurrence, see
-/// [`WRITE_FILTER_REFERENCE_ONLY`]. Panics when one is absent: the pin is stale.
-fn without(lines: &[String], pinned: &[&str], arm: &str) -> Vec<String> {
-    let mut rest = lines.to_vec();
-    for entry in pinned {
-        let at = rest.iter().rposition(|l| l == entry).unwrap_or_else(|| {
-            panic!(
-                "the pinned residual `{entry}` is not in the {arm} arm, so the write filter \
-                 (open-debt item 841) has changed under this pin: delete the pin and compare \
-                 the arms whole:\n{}",
-                lines.join("\n")
-            )
-        });
-        rest.remove(at);
-    }
-    rest
-}
+/// The `T` (TOKENS) kind bit of an Interest body header: the liveliness plane.
+const INTEREST_BODY_TOKENS: u8 = 0x08;
 
 /// wz's drop-in declares, and aliases, exactly the keyexprs the real zenoh-pico
 /// does for the same program.
@@ -585,29 +574,57 @@ fn a_declaring_program_puts_the_same_declarations_on_the_wire_as_the_real_pico()
         !reference_interest_headers.is_empty()
             && reference_interest_headers
                 .iter()
-                .all(|h| h & INTEREST_EXTENSION_BIT == 0),
+                .all(|(header, _)| header & INTEREST_EXTENSION_BIT == 0),
         "the real pico's Interests should carry no extension chain: {reference_interest_headers:02x?}"
     );
     assert!(
-        !wz_interest_headers.is_empty()
-            && wz_interest_headers
-                .iter()
-                .all(|h| h & INTEREST_EXTENSION_BIT != 0),
-        "wz's Interests should carry its QoS envelope: {wz_interest_headers:02x?}"
+        wz_interest_headers
+            .iter()
+            .any(|(_, body)| body & INTEREST_BODY_TOKENS != 0),
+        "wz's arm carries no liveliness Interest, so the pin below is vacuous: {wz_interest_headers:02x?}"
+    );
+    assert!(
+        wz_interest_headers.iter().all(|(header, body)| {
+            (header & INTEREST_EXTENSION_BIT != 0) == (body & INTEREST_BODY_TOKENS != 0)
+        }),
+        "wz's Interests should carry the QoS envelope on the liveliness one and only \
+         there: {wz_interest_headers:02x?}"
     );
 
-    // Everything else, in wire order, whole: which keys are declared, on which
-    // ids, with which suffix, and retracted in which order — for a publisher, a
-    // subscriber, a queryable, a querier, a token, a liveliness subscriber and
-    // a keyexpr the program declared itself.
-    let reference_rest = without(&reference, WRITE_FILTER_REFERENCE_ONLY, "reference");
-    let wz_rest = without(&wz, WRITE_FILTER_WZ_ONLY, "wz");
+    // The write filter's two halves, in the REFERENCE arm, so equality below
+    // cannot be two arms that both stayed silent: an Interest on the
+    // publisher's own key and on each querier's, and one Query that WENT OUT
+    // (the second querier's, whose key the router answers for) beside one that
+    // did not (the first's, which nothing answers).
+    for needle in ["Interest hdr=0x79 body=0xd3", "Interest hdr=0x79 body=0xd5"] {
+        assert!(
+            reference.iter().any(|l| l.starts_with(needle)),
+            "the REFERENCE arm carries no `{needle}` line, so the write filter \
+             is not in this leg:\n{}",
+            reference.join("\n")
+        );
+    }
     assert_eq!(
-        wz_rest,
-        reference_rest,
+        reference
+            .iter()
+            .filter(|l| l.starts_with("Request"))
+            .count(),
+        1,
+        "the REFERENCE arm should send exactly the matched querier's Query and \
+         suppress the unmatched one's:\n{}",
+        reference.join("\n")
+    );
+
+    // Everything, in wire order, whole: which keys are declared, on which ids,
+    // with which suffix, which Interests are asked and retracted, which Query
+    // is sent and which is not, and what is retracted in which order — for a
+    // publisher, a subscriber, a queryable, two queriers, a token, a
+    // liveliness subscriber and a keyexpr the program declared itself.
+    assert_eq!(
+        wz,
+        reference,
         "wz's declarations differ from the real zenoh-pico's for the same \
-         program, apart from the pinned write-filter residual (item 841).\n\
-         --- wz ---\n{}\n--- reference ---\n{}",
+         program.\n--- wz ---\n{}\n--- reference ---\n{}",
         wz.join("\n"),
         reference.join("\n")
     );

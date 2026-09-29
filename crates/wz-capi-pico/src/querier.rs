@@ -42,7 +42,7 @@
 use std::ffi::{c_char, c_int, c_void};
 use std::sync::{Arc, Mutex as StdMutex};
 
-use wz_capi_core::faces::{MatchId, MatchingSink, SharedSession};
+use wz_capi_core::faces::{FilterPlane, MatchId, MatchingSink, SharedSession};
 
 use crate::abi::{handle_ref, impl_handle_ownership7, z_loaned_keyexpr_t, z_moved_bytes_t};
 use crate::ffi::guarded;
@@ -62,6 +62,7 @@ use crate::query::{
 };
 use crate::result::{ZResult, Z_ERR_INVALID, Z_ERR_NULL, Z_OK};
 use crate::session::{session_state, z_loaned_session_t};
+use crate::write_filter::WriteFilter;
 
 // --- options ---------------------------------------------------------------
 
@@ -175,6 +176,9 @@ pub unsafe extern "C" fn z_querier_get_options_default(options: *mut z_querier_g
 /// See `PublisherState::record_matching_listener` for the defect that taught it.
 pub(crate) struct QuerierState {
     shared: Arc<SharedSession>,
+    /// R2962 — pico's write filter for this querier, which decides whether a get
+    /// is SENT. Declared BEFORE `key` so it drops first, as the publisher's does.
+    filter: WriteFilter,
     /// R2959 — the querier's key with the whole-key declaration pico makes
     /// for it; retracted after the querier, as the publisher's is.
     key: DeclaredKeyexpr,
@@ -365,9 +369,21 @@ pub unsafe extern "C" fn z_declare_querier(
             Ok(key) => key,
             Err(rc) => return rc,
         };
+        // R2962 — and its write filter, counting QUERYABLES; a target of
+        // `ALL_COMPLETE` counts only the ones declared complete
+        // (`vendor/zenoh-pico/src/api/api.c` @
+        // `querier->_val._target == Z_QUERY_TARGET_ALL_COMPLETE`).
+        let filter = WriteFilter::declare(
+            state,
+            FilterPlane::Queryables {
+                complete_required: target == crate::get::Z_QUERY_TARGET_ALL_COMPLETE,
+            },
+            &key,
+        );
         let mut boxed = Box::new(QuerierState {
             eid: state.shared.next_entity_id(),
             shared: state.shared.clone(),
+            filter,
             key,
             loaned_keyexpr: crate::abi::z_loaned_keyexpr_t::borrowed(std::ptr::null(), 0),
             target,
@@ -465,6 +481,16 @@ pub unsafe extern "C" fn z_querier_get_with_parameters_substr(
             // `closure` drops here, running the caller's `drop(context)`.
             None => return Z_ERR_NULL,
         };
+        // R2962 — a write filter that says no queryable matches SENDS NOTHING and
+        // runs the closure's `drop`, which is how this get completes without a
+        // reply; the call still answers `Z_OK`
+        // (`vendor/zenoh-pico/src/api/api.c` @
+        // `} else if (closure.drop != NULL) { closure.drop(closure.context); }`).
+        // The bytes and the token were consumed above, as upstream's cleanup does.
+        if state.filter.active() {
+            drop(closure);
+            return Z_OK;
+        }
         let params_in: &[u8] = if parameters.is_null() || parameters_len == 0 {
             &[]
         } else {

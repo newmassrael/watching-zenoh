@@ -291,6 +291,10 @@ pub enum CachedDeclaration {
         kinds: crate::interest_build::InterestKinds,
         current: bool,
         future: bool,
+        /// R2962 — whether the send asked the peer to answer aggregated. In
+        /// the cache because the replay must put the SAME byte on the wire:
+        /// a replay that dropped it would re-ask as a different client.
+        aggregate: bool,
         mapping_id: u64,
         suffix: Option<String>,
     },

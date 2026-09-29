@@ -865,6 +865,52 @@ impl MatchingPlane {
     }
 }
 
+/// R2962 — HOW a matching Interest names its key and what it asks of the peer,
+/// for a caller that is not this session's own `declare_publisher` /
+/// `declare_querier`.
+///
+/// Those two ask in one fixed way: the literal keyexpr, no aggregate. A declaring
+/// C ABI asks in the way its reference library does — zenoh-pico's write filter
+/// names the entity's own DECLARED key (`mapping_id` plus the rest of the key as
+/// `suffix`) and, as a client, asks for aggregated answers
+/// (`vendor/zenoh-pico/src/net/filtering.c` @ `_z_write_filter_create`). The
+/// session has no opinion about that, so the ABI hands it in.
+#[cfg(all(feature = "session-matching", feature = "declare-interest"))]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct InterestForm {
+    /// The keyexpr declaration the Interest names, `0` for none.
+    pub mapping_id: u64,
+    /// What follows the declared prefix; the whole literal when `mapping_id` is 0.
+    pub suffix: Option<String>,
+    /// Ask the peer to answer aggregated (see
+    /// [`wz_session_core::interest_build::build_interest_kinds_with_aggregate`]).
+    pub aggregate: bool,
+}
+
+/// R2962 — a reference on a matching Interest, released on drop.
+///
+/// `Session::declare_publisher` / `declare_querier` take the same reference
+/// through a handle that ALSO publishes or queries; this is the reference alone,
+/// for a caller that publishes through its own path and only needs the peer
+/// asked and, later, told to stop. It shares the session's refcount, so a hold
+/// and a publisher on one key share ONE Interest: whichever asked first chose
+/// its form, and the Final goes out when the last of them lets go.
+#[cfg(all(feature = "session-matching", feature = "declare-interest"))]
+#[must_use = "a matching-interest hold is released the moment it is dropped"]
+pub struct MatchingInterestHold<R: SessionRuntime = TokioRuntime, T: TimeSource = TokioTime> {
+    session: Session<R, T, Unicast>,
+    plane: MatchingPlane,
+    keyexpr: String,
+}
+
+#[cfg(all(feature = "session-matching", feature = "declare-interest"))]
+impl<R: SessionRuntime, T: TimeSource> Drop for MatchingInterestHold<R, T> {
+    fn drop(&mut self) {
+        self.session
+            .release_matching_interest(self.plane, &self.keyexpr);
+    }
+}
+
 /// The session HANDLE: a shared, cheaply-cloned pointer to [`SessionInner`].
 ///
 /// R2543 made this a newtype over `Arc` where it used to be the state itself.
@@ -3909,6 +3955,21 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
     /// `send_interest_kinds` writes).
     #[cfg(all(feature = "session-matching", feature = "declare-interest"))]
     pub(crate) fn acquire_matching_interest(&self, plane: MatchingPlane, keyexpr: &str) {
+        self.acquire_matching_interest_as(plane, keyexpr, None);
+    }
+
+    /// [`Self::acquire_matching_interest`] naming the key as `form` says,
+    /// `None` being the literal keyexpr with no aggregate. R2962.
+    ///
+    /// The table is keyed by the LITERAL, so a second reference on a key whose
+    /// Interest already stands takes the first asker's form and emits nothing.
+    #[cfg(all(feature = "session-matching", feature = "declare-interest"))]
+    pub(crate) fn acquire_matching_interest_as(
+        &self,
+        plane: MatchingPlane,
+        keyexpr: &str,
+        form: Option<&InterestForm>,
+    ) {
         let key = (plane, keyexpr.to_string());
         let mut table = match self.matching_interests.lock() {
             Ok(t) => t,
@@ -3921,14 +3982,105 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
         let interest_id = self.actions().alloc_next_interest_id();
         table.insert(key, (interest_id, 1));
         drop(table);
+        let (aggregate, mapping_id, suffix) = match form {
+            Some(f) => (f.aggregate, f.mapping_id, f.suffix.as_deref()),
+            None => (false, 0, Some(keyexpr)),
+        };
         let _ = self.actions().send_interest_kinds(
             interest_id,
             plane.kinds(),
             /*current=*/ true,
             /*future=*/ true,
-            /*keyexpr_mapping_id=*/ 0,
-            Some(keyexpr),
+            aggregate,
+            mapping_id,
+            suffix,
         );
+    }
+
+    /// R2962 — ask the peer for the SUBSCRIBER declarations that answer "does
+    /// anyone subscribe to `keyexpr`", in `form`, and answer for the returned
+    /// hold. See [`MatchingInterestHold`].
+    #[cfg(all(feature = "session-matching", feature = "declare-interest"))]
+    pub fn hold_subscribers_interest(
+        &self,
+        keyexpr: &str,
+        form: &InterestForm,
+    ) -> MatchingInterestHold<R, T> {
+        self.acquire_matching_interest_as(MatchingPlane::Subscribers, keyexpr, Some(form));
+        MatchingInterestHold {
+            session: self.clone(),
+            plane: MatchingPlane::Subscribers,
+            keyexpr: keyexpr.to_string(),
+        }
+    }
+
+    /// R2962 — the QUERYABLE-plane twin of [`Self::hold_subscribers_interest`].
+    #[cfg(all(feature = "session-matching", feature = "declare-interest"))]
+    pub fn hold_queryables_interest(
+        &self,
+        keyexpr: &str,
+        form: &InterestForm,
+    ) -> MatchingInterestHold<R, T> {
+        self.acquire_matching_interest_as(MatchingPlane::Queryables, keyexpr, Some(form));
+        MatchingInterestHold {
+            session: self.clone(),
+            plane: MatchingPlane::Queryables,
+            keyexpr: keyexpr.to_string(),
+        }
+    }
+
+    /// R2962 — whether a REMOTE peer has declared a subscriber matching
+    /// `keyexpr`, read off the registry the peer fills. The poll behind a
+    /// publisher's matching status without the publisher: no handle is made and
+    /// no Interest is taken, so calling it asks the peer nothing.
+    ///
+    /// `locality` gates the remote half exactly as `Publisher::get_matching_status`
+    /// does; the session-local half is deliberately NOT read, because a caller
+    /// that wants only what a peer says (zenoh-pico's default build counts no
+    /// local subscriber) must be able to ask for that alone.
+    pub fn remote_subscribers_match(&self, keyexpr: &str, locality: Locality) -> bool {
+        #[cfg(feature = "declare-subscriber")]
+        {
+            R::with_mutex_mut(&self.observer, |obs| {
+                obs.remote_subscribers.has_matching_for(
+                    &wz_session_core::declare::subscriber::PublisherCriterion::new(
+                        keyexpr, locality,
+                    ),
+                )
+            })
+        }
+        #[cfg(not(feature = "declare-subscriber"))]
+        {
+            let _ = (keyexpr, locality);
+            false
+        }
+    }
+
+    /// R2962 — the QUERYABLE-plane twin of [`Self::remote_subscribers_match`],
+    /// `complete_required` being a querier whose target is `ALL_COMPLETE`.
+    pub fn remote_queryables_match(
+        &self,
+        keyexpr: &str,
+        locality: Locality,
+        complete_required: bool,
+    ) -> bool {
+        #[cfg(feature = "declare-queryable")]
+        {
+            R::with_mutex_mut(&self.observer, |obs| {
+                obs.remote_queryables.has_matching_for(
+                    &wz_session_core::declare::queryable::QuerierCriterion::new(
+                        keyexpr,
+                        locality,
+                        complete_required,
+                    ),
+                )
+            })
+        }
+        #[cfg(not(feature = "declare-queryable"))]
+        {
+            let _ = (keyexpr, locality, complete_required);
+            false
+        }
     }
 
     /// R2577 — the interest id standing for this plane and keyexpr, or `None`

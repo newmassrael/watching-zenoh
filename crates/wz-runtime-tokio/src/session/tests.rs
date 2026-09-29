@@ -5150,6 +5150,144 @@ fn the_two_matching_planes_do_not_share_a_reference_on_one_keyexpr() {
     drop(querier);
 }
 
+/// R2962 — a hold asks the peer in the form it was GIVEN, and its drop is the
+/// Final. Both directions are pinned against the builders' own bytes, and the
+/// literal form of the same Interest is asserted ABSENT, because an emit that
+/// ignored the form would still put a well-formed Interest on the wire.
+#[cfg(all(
+    feature = "session-matching",
+    feature = "declare-interest",
+    feature = "codec-declare"
+))]
+#[test]
+fn a_hold_asks_in_the_form_it_was_given_and_retracts_on_drop() {
+    use wz_session_core::interest_build::{
+        build_interest_final, build_interest_kinds_with_aggregate, InterestKinds,
+    };
+    let encode = |interest: wz_codecs::interest::InterestOwned| {
+        interest
+            .try_as_borrowed()
+            .expect("test: <=N exts by construction")
+            .encode_to_vec()
+    };
+
+    let (session, driver) = build_session();
+    let form = InterestForm {
+        mapping_id: 7,
+        suffix: Some("/x".to_string()),
+        aggregate: true,
+    };
+    let hold = session.hold_subscribers_interest("home/temp", &form);
+    assert_eq!(
+        driver.frame_count(),
+        1,
+        "the hold emits exactly the Interest"
+    );
+    let id = session
+        .matching_interest_id(crate::session::MatchingPlane::Subscribers, "home/temp")
+        .expect("the hold took a reference, so an id stands");
+
+    let wanted = encode(
+        build_interest_kinds_with_aggregate(
+            id,
+            InterestKinds::SUBSCRIBERS,
+            true,
+            true,
+            /*aggregate=*/ true,
+            7,
+            Some("/x"),
+        )
+        .unwrap(),
+    );
+    let literal = encode(
+        build_interest_kinds_with_aggregate(
+            id,
+            InterestKinds::SUBSCRIBERS,
+            true,
+            true,
+            false,
+            0,
+            Some("home/temp"),
+        )
+        .unwrap(),
+    );
+    let frame = driver.frame_bytes(0);
+    assert!(
+        frame.windows(wanted.len()).any(|w| w == wanted),
+        "the frame must carry the aliased, aggregate Interest; frame was {frame:02x?}",
+    );
+    assert!(
+        !frame.windows(literal.len()).any(|w| w == literal),
+        "the literal form must NOT be what went out",
+    );
+
+    drop(hold);
+    assert_eq!(
+        driver.frame_count(),
+        2,
+        "dropping the last holder sends the Final"
+    );
+    let fin = encode(build_interest_final(id));
+    let frame = driver.frame_bytes(1);
+    assert!(
+        frame.windows(fin.len()).any(|w| w == fin),
+        "the second frame must be the Final for id {id}; frame was {frame:02x?}",
+    );
+}
+
+/// R2962 — a hold and a publisher on one key share ONE Interest: the second
+/// reference emits nothing and the Final waits for the last of them. Pinned
+/// because the two take their references through different paths and the table
+/// that joins them is keyed by the literal.
+#[cfg(all(
+    feature = "session-matching",
+    feature = "declare-interest",
+    feature = "codec-declare"
+))]
+#[test]
+fn a_hold_and_a_publisher_on_one_key_share_one_interest() {
+    let (session, driver) = build_session();
+    let publisher = session.declare_publisher("home/temp", PublishOptions::put());
+    assert_eq!(driver.frame_count(), 1, "the publisher asked");
+
+    let form = InterestForm {
+        mapping_id: 7,
+        suffix: None,
+        aggregate: true,
+    };
+    let hold = session.hold_subscribers_interest("home/temp", &form);
+    assert_eq!(
+        driver.frame_count(),
+        1,
+        "a second reference on a standing Interest emits nothing, whatever form it names",
+    );
+
+    drop(publisher);
+    assert_eq!(driver.frame_count(), 1, "the hold still stands");
+    drop(hold);
+    assert_eq!(
+        driver.frame_count(),
+        2,
+        "the last holder's drop sends the Final"
+    );
+}
+
+/// R2962 — the registry polls ask NOBODY: a write filter is read on every put,
+/// and a poll that emitted would put an Interest on the wire per put.
+#[cfg(all(feature = "declare-subscriber", feature = "declare-queryable"))]
+#[test]
+fn the_remote_matching_polls_read_the_registry_and_emit_nothing() {
+    let (session, driver) = build_session();
+    assert!(!session.remote_subscribers_match("home/temp", Locality::Remote));
+    assert!(!session.remote_queryables_match("home/temp", Locality::Remote, false));
+    assert!(!session.remote_queryables_match("home/temp", Locality::Remote, true));
+    assert_eq!(
+        driver.frame_count(),
+        0,
+        "a poll is not a question to the peer"
+    );
+}
+
 #[cfg(all(feature = "query-get", feature = "query-queryable"))]
 #[test]
 fn querier_get_fires_loopback_through_session_query_session_local() {

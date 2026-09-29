@@ -88,6 +88,7 @@ pub mod scout;
 pub mod serde;
 pub mod session;
 pub mod sync;
+mod write_filter;
 pub mod zid;
 
 // Re-export the ABI types and every exported function at the crate root so the

@@ -292,6 +292,11 @@ pub unsafe extern "C" fn z_open(
         // caller's thread and a full socket slows it rather than dropping it
         // (see `TxQueueConf::pico`). zenoh's 1 ms drop wait here discarded the
         // tail of a burst that `teardown_drain` puts before `z_close`.
+        let session_mode = if listen.is_some() {
+            WhatAmI::Peer
+        } else {
+            dial_whatami
+        };
         match open_blocking(
             connect.into_iter().collect(),
             listen,
@@ -308,6 +313,13 @@ pub unsafe extern "C" fn z_open(
             TxQueueConf::pico(),
         ) {
             Ok(state) => {
+                // R2962 — this session's own role, for the write filters its
+                // publishers and queriers create: a client asks its peers
+                // differently from a peer (see `crate::write_filter`), and a
+                // `listen` config is a peer whatever `Z_CONFIG_MODE_KEY` says.
+                // Set once, right after the open, as the other ABI's shared
+                // memory state is.
+                let _ = state.set_abi_extension(crate::write_filter::PicoSessionMode(session_mode));
                 *zs = z_owned_session_t {
                     _val: Box::into_raw(Box::new(state)) as *mut c_void,
                     _cnt: std::ptr::null_mut(),

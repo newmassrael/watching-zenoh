@@ -342,6 +342,7 @@ impl<R: SessionRuntime, T: TimeSource> Publisher<R, T> {
                     wz_session_core::interest_build::InterestKinds::SUBSCRIBERS,
                     /*current=*/ true,
                     /*future=*/ true,
+                    /*aggregate=*/ false,
                     /*keyexpr_mapping_id=*/ 0,
                     Some(&self.keyexpr),
                 );

@@ -45,7 +45,8 @@ use crate::ffi::{guarded, CClosure as FfiClosure};
 use crate::keyexpr::{declared_of, keyexpr_str, wire_key_of, DeclaredKeyexpr};
 use crate::result::{ZResult, Z_ERR_GENERIC, Z_ERR_INVALID, Z_ERR_NULL, Z_OK};
 use crate::session::{session_state, z_loaned_session_t};
-use wz_capi_core::faces::{MatchId, SharedSession, SubId, WireKey};
+use crate::write_filter::WriteFilter;
+use wz_capi_core::faces::{FilterPlane, MatchId, SharedSession, SubId, WireKey};
 
 // --- opaque loaned sample --------------------------------------------------
 
@@ -707,6 +708,12 @@ pub unsafe extern "C" fn z_publisher_put_options_default(options: *mut z_publish
 /// face registry, so a put fans out to every connected peer.
 pub(crate) struct PublisherState {
     shared: Arc<SharedSession>,
+    /// R2962 — pico's write filter for this publisher: the Interest it asks its
+    /// peers, and the state that decides whether a put or delete is SENT.
+    /// Declared BEFORE `key`, so it drops first: the Interest is retracted while
+    /// the declaration it names still stands, which is upstream's order
+    /// (`_z_undeclare_publisher` clears the filter, then the key).
+    filter: WriteFilter,
     /// R2959 — the publisher's key WITH the declaration pico makes for it:
     /// `_z_declare_publisher` runs `_z_declared_keyexpr_declare` on the key
     /// (`vendor/zenoh-pico/src/net/primitives.c` @
@@ -739,8 +746,15 @@ impl PublisherState {
         self.loaned_keyexpr = self.key.loaned();
     }
 
-    /// Publish on this publisher's key, in its declared wire form.
+    /// Publish on this publisher's key, in its declared wire form — unless its
+    /// write filter says nothing matches, in which case NOTHING is sent and the
+    /// call still answers `Z_OK`, as `z_publisher_put` / `z_publisher_delete`
+    /// do upstream (`vendor/zenoh-pico/src/api/api.c` @
+    /// `!_z_write_filter_active(&pub->_filter)`).
     fn publish(&self, payload: &[u8], opts: &PublishOptions) -> ZResult {
+        if self.filter.active() {
+            return Z_OK;
+        }
         let wire = self.key.wire(&self.shared);
         match self
             .shared
@@ -1526,9 +1540,14 @@ pub unsafe extern "C" fn z_declare_publisher(
             Ok(key) => key,
             Err(rc) => return rc,
         };
+        // R2962 — the filter is created AFTER the key, because its Interest names
+        // the key's declaration (pico's order: `_z_declared_keyexpr_declare`, then
+        // `_z_write_filter_create`, in `z_declare_publisher`).
+        let filter = WriteFilter::declare(state, FilterPlane::Subscribers, &key);
         let mut boxed = Box::new(PublisherState {
             eid: state.shared.next_entity_id(),
             shared: state.shared.clone(),
+            filter,
             key,
             loaned_keyexpr: z_loaned_keyexpr_t::borrowed(std::ptr::null(), 0),
             matches: StdMutex::new(Vec::new()),
