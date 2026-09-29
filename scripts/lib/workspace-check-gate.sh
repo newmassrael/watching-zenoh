@@ -85,6 +85,32 @@ PY
 if ! mapfile -t excludes < <(python3 -c "$extract_py" <"$RUNCI"); then
     :
 fi
+
+# R2959 — the no_std-forcing members are DERIVED, as Layer C1 derives them.
+#
+# R2940 moved that set out of `--exclude NAME` literals and into
+# `nostd_workspace_members.py`, so C1's invocation now spells only the members
+# it excludes for another reason. This gate parsed literals, read that one name
+# and nothing else, and every run since has died in `sce-rust-runtime`'s
+# `compile_error!` — a red this gate caused itself, which is the very case the
+# refusal below exists to prevent. It went unseen because the default pre-push
+# defers this gate: R2940's own commit message says the gate's anchor is the
+# invocation, and the invocation changed shape under it.
+#
+# The derivation is asked for, not copied: the same script, so the two cannot
+# disagree about who is in the set. A failing derivation is a hard failure and
+# not an empty list — an empty list would be the run with no exclusions at all.
+nostd_members=$(python3 scripts/lib/nostd_workspace_members.py 2>/dev/null)
+nostd_rc=$?
+if [[ $nostd_rc -ne 0 ]]; then
+    echo "  workspace-check FAIL: scripts/lib/nostd_workspace_members.py exited" \
+         "$nostd_rc, so the no_std-forcing members are unknown and the" \
+         "workspace cannot be checked without them." >&2
+    exit 1
+fi
+for member in $nostd_members; do
+    excludes+=("$member")
+done
 if [[ ${#excludes[@]} -eq 0 ]]; then
     echo "  workspace-check FAIL: could not read Layer C1's" \
          "\`(cd crates && cargo test --workspace …)\` invocation out of" \
