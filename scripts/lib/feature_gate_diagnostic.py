@@ -159,7 +159,19 @@ PROBES: dict[str, dict[str, list[tuple[str, str, frozenset[str]]]]] = {
 # reader, which is what keeps this from being the escape hatch a reason-string
 # table would otherwise be.
 NO_PUBLIC_PATH: dict[str, dict[str, str]] = {
-    "wz-capture": {},
+    "wz-capture": {
+        # R2972 — `compression` gated `passive::compression_active`, a public
+        # accessor, until that accessor was removed (`compression_active` had no
+        # reader once the session-wide answer went). What is left is one
+        # `cfg!(feature = "compression")` inside a test: a runtime boolean, never
+        # a `#[cfg]` on an item. R2972 removed the accessor and did not come back
+        # for this table, so the feature sat undecided until R2973's 2z sweep.
+        "compression": (
+            "no `#[cfg]` in this package attaches this feature to a publicly "
+            "visible item; it appears only as `cfg!(feature = ..)` in a test, "
+            "which the census re-derives every run"
+        ),
+    },
     # R2207 — the thirty of this package's ninety-five non-default features
     # that attach to no publicly visible item at all.
     #
@@ -206,7 +218,13 @@ NO_PUBLIC_PATH: dict[str, dict[str, str]] = {
             # OR-contributed to twelve `any(..)` gates. The census caught this
             # on the first run after the change, which is the ratchet the
             # comment above promises.
-            "declare-keyexpr",
+            #
+            # R2973 — `declare-keyexpr` LEFT this list for `DEFERRED`, by that
+            # same route and for the same reason: three public sites, all behind
+            # a wrapped `all(..)` this census could not read until it read the
+            # whole attribute. `dissect-serde` STAYS, and for a different reason
+            # the census now states in terms: its five sites are `cfg_attr`
+            # derives, which are not gates (see `is_cfg_attr` there).
             "dissect-serde",
             "liveliness-subscriber",
             "no_macrostep_diagnostics",
@@ -290,11 +308,16 @@ NO_PUBLIC_PATH: dict[str, dict[str, str]] = {
             # on an item. The claim above names expressions in terms, so it is
             # true of it literally rather than by stretch.
             #
-            # `session-close-ingress` (R2678) forwards to wz-session-core and
-            # gates one integration-test crate root (`tests/`), which is not a
+            # `session-close-ingress` (R2678) forwarded to wz-session-core and
+            # gated one integration-test crate root (`tests/`), which is not a
             # publicly visible item of this library either.
+            #
+            # R2973 — that second sentence STOPPED BEING TRUE at R2721
+            # (2026-09-19): `pub mod session_lifecycle_open` is gated on it, in
+            # `lib.rs`. `session-close-ingress` MOVED to `DEFERRED` below. Nobody
+            # saw it for eleven days because that `all(..)` names six features,
+            # rustfmt wraps it, and the census read only the first line.
             "rest-http-bridge",
-            "session-close-ingress",
             # R2667 — `router-connect-reconcile` LEAVES this list, the same way
             # and for the same kind of reason `access-extauth-usrpwd` did above.
             # The round that falsified it wired `connect/endpoints` into the
@@ -378,10 +401,24 @@ DEFERRED: dict[str, dict[str, str]] = {
                 # gates is compound: the feature has exactly ONE `#[cfg]` site
                 # in this package, and it is that module's.
                 "runtime-tokio-uring",
+                # R2973 — `session-close-ingress`: see the note in
+                # `NO_PUBLIC_PATH` above. One public site
+                # (`pub mod session_lifecycle_open`), gated on an `all(..)` of six
+                # features, so every public item it gates is compound.
+                "session-close-ingress",
                 "storage-mgr-dynamic-volume-loading",
                 "time-hlc",
                 "transport-link-raweth",
                 "transport-link-unixpipe",
+                # R2973 — `transport-link-unixsock` JOINED this list, and the
+                # round that made it true is this one: `pub mod unixsock_pipeline`
+                # was gated on the feature alone (and so PROBED) until the module
+                # was put behind `all(feature, unix)`, because upstream compiles
+                # its unixsock link on a Unix only. The census flagged the feature
+                # on the first run after the change, the ratchet the note above
+                # promises. Both public sites are compound (`lib.rs`), which the
+                # census re-derives.
+                "transport-link-unixsock",
                 "transport-link-vsock",
             )
         },
@@ -478,6 +515,15 @@ DEFERRED: dict[str, dict[str, str]] = {
                 "codec-hello",
                 "codec-linkstate",
                 "codec-scout",
+                # R2973 — MOVED HERE from `NO_PUBLIC_PATH`. Its claim was that
+                # it gates no public item, and R2386's note in that table
+                # already recorded one such claim failing (`declare-final`); this
+                # one failed the same way and was not seen, because all three of
+                # its public sites sit behind an `all(..)` that rustfmt wraps
+                # onto several lines and the census used to read only the first
+                # line of an attribute. All three are compound
+                # (`session_actions.rs`), which is exactly `compound-cfg`.
+                "declare-keyexpr",
                 "declare-undeclare",
                 "session-matching",
             )

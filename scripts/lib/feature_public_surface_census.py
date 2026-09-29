@@ -119,20 +119,32 @@ import feature_gate_diagnostic as fgd  # noqa: E402 -- after the path insert
 FEATURE = re.compile(r'feature\s*=\s*"([^"]+)"')
 
 # An item keyword, after any leading qualifier.
+#
+# R2973 — `macro_rules!` is its own alternative and NOT in the keyword list. The
+# list is followed by `\b`, and there is no word boundary between `!` and the
+# space after it, so `macro_rules! name {` matched NOTHING: it fell through to
+# UNCLASSIFIED, and the two sites in the tree that reached it were invisible
+# only because the scan never read them (see `attribute_span`).
 _KW = (
-    r"(?:fn|mod|struct|enum|trait|impl|use|type|const|static|union"
-    r"|macro_rules!|macro|extern\s+crate)"
+    r"(?:(?:fn|mod|struct|enum|trait|impl|use|type|const|static|union"
+    r"|macro|extern\s+crate)\b|macro_rules!)"
 )
 _QUAL = r"(?:async\s+|unsafe\s+|extern\s+\"[^\"]*\"\s+|const\s+|default\s+)*"
 
-PUBLIC_ITEM = re.compile(r"^\s*pub\s+" + _QUAL + _KW + r"\b")
-RESTRICTED_ITEM = re.compile(r"^\s*pub\s*\([^)]*\)\s+" + _QUAL + _KW + r"\b")
-PRIVATE_ITEM = re.compile(r"^\s*" + _QUAL + _KW + r"\b")
+PUBLIC_ITEM = re.compile(r"^\s*pub\s+" + _QUAL + _KW)
+RESTRICTED_ITEM = re.compile(r"^\s*pub\s*\([^)]*\)\s+" + _QUAL + _KW)
+PRIVATE_ITEM = re.compile(r"^\s*" + _QUAL + _KW)
 # An assertion is a macro too, and it is never an item; checked FIRST so the
 # macro class stays the genuinely ambiguous one.
 ASSERTION = re.compile(r"^\s*(?:debug_)?assert(?:_eq|_ne|_matches)?!\s*\(")
 MACRO_CALL = re.compile(r"^\s*[A-Za-z_][A-Za-z0-9_]*!\s*[({\[]")
-FIELD = re.compile(r"^\s*(?:pub\s*(?:\([^)]*\)\s*)?)?[A-Za-z_][A-Za-z0-9_]*\s*:")
+# R2973 — `mut name: T,` is a gated function PARAMETER, the same non-item as
+# `name: T,`; `mut` was the one qualifier a parameter carries that a field does
+# not, and two parameters in multicast_glue.rs surfaced as unclassified once the
+# scan read the attributes they sit behind.
+FIELD = re.compile(
+    r"^\s*(?:pub\s*(?:\([^)]*\)\s*)?)?(?:mut\s+)?[A-Za-z_][A-Za-z0-9_]*\s*:"
+)
 BLOCK_OR_STMT = re.compile(
     r"^\s*(?:[{}()\[\]]|let\b|if\b|for\b|while\b|loop\b|match\b|return\b"
     r"|break\b|continue\b|else\b|\.|\||\"|\d|_\b)"
@@ -217,13 +229,17 @@ DEFER_MARKER = re.compile(r"@defer\s+([a-z-]+)")
 
 # path -> why this gate cannot classify the site there. BOTH DIRECTIONS: an
 # undeclared unclassified site FAILS, and a declaration with no site FAILS.
-UNCLASSIFIED_DECLARED: dict[str, str] = {
-    "crates/wz-runtime-tokio/tests/multicast_pubsub_loopback.rs": (
-        "the attribute is followed by the continuation of a multi-line string "
-        "literal belonging to an earlier attribute, so the next source line is "
-        "not the item this one is attached to"
-    ),
-}
+#
+# R2973 — EMPTY, and it was emptied by repairing the reader rather than by
+# fixing a file. The one entry it held, `multicast_pubsub_loopback.rs`, was a
+# declared exemption for exactly the defect `attribute_span` removes: the site
+# was "followed by the continuation of a multi-line string literal belonging to
+# an earlier attribute", i.e. a multi-line `#[ignore = "..."]` in the attribute
+# stack, which the scan read as a line of code. Every one of that file's eleven
+# sites now classifies as the item it is (`async fn`, `use`). The mechanism is
+# kept, both directions checked, so the next shape this reader cannot classify
+# is declared here rather than passed.
+UNCLASSIFIED_DECLARED: dict[str, str] = {}
 
 # Packages the diagnostic axis has NOT taken yet -> (why, the features that
 # gate a public item there).
@@ -356,10 +372,26 @@ OFF_AXIS: dict[str, tuple[str, frozenset[str]]] = {
     # so it is still true: the crate's consumers are MCU firmware images and
     # deploy probes that compile it with a fixed feature set, not a library a
     # Rust caller adds and then reaches into.
+    # R2973 — three features join the row: `codec-response`,
+    # `codec-response-final` and `liveliness-token` gate `pub struct
+    # MulticastReplyQueue` in `multicast_drive.rs` through one `any(..)` that
+    # rustfmt wraps onto four lines, which the scan could not read before it
+    # read whole attributes. The facade weak-forwards all three
+    # (`wz-session-lwip?/codec-response` and its two siblings), so they are
+    # reached through it exactly as the first three are.
     "wz-session-lwip": (
         "the lwip session glue; its consumers are MCU firmware images and "
         "deploy probes built with a fixed feature set",
-        frozenset({"adminspace-core", "adminspace-write", "transport-multicast"}),
+        frozenset(
+            {
+                "adminspace-core",
+                "adminspace-write",
+                "codec-response",
+                "codec-response-final",
+                "liveliness-token",
+                "transport-multicast",
+            }
+        ),
     ),
     "wz-tls-record": (
         "`publish = false`, and the only workspace edge that turns `fixtures` "
@@ -614,7 +646,16 @@ FACADE_ONLY: dict[str, frozenset[str]] = {
     # crate, so they are reached through the facade exactly as
     # `transport-multicast` is. Without that forward a predicate covering part
     # of the row would have left the rest excused by prose.
-    "wz-session-lwip": frozenset({"adminspace-core", "adminspace-write", "transport-multicast"}),
+    "wz-session-lwip": frozenset(
+        {
+            "adminspace-core",
+            "adminspace-write",
+            "codec-response",
+            "codec-response-final",
+            "liveliness-token",
+            "transport-multicast",
+        }
+    ),
 }
 
 # R2297 (open-debt item 606) — the AXIS-REACH form, and the fifth kind of claim.
@@ -905,31 +946,119 @@ def classify(following: str) -> str:
     return "UNCLASSIFIED"
 
 
-def after_attributes(line: str) -> str | None:
-    """What a line carries AFTER the attributes that open it, if anything.
+def _matching_bracket(text: str, open_at: int) -> int | None:
+    """Index of the `]` that closes the `[` at `open_at`, or `None`.
+
+    A bracket inside a string literal does not count: a feature name or a
+    message is free text, and counting it would end an attribute early or
+    never.
+    """
+    depth = 0
+    in_string = False
+    k = open_at
+    while k < len(text):
+        ch = text[k]
+        if in_string:
+            if ch == "\\":
+                k += 1
+            elif ch == '"':
+                in_string = False
+        elif ch == '"':
+            in_string = True
+        elif ch == "[":
+            depth += 1
+        elif ch == "]":
+            depth -= 1
+            if depth == 0:
+                return k
+        k += 1
+    return None
+
+
+def _without_line_comment(line: str) -> str:
+    """`line` up to a `//` that is not inside a string, trailing space trimmed."""
+    in_string = False
+    k = 0
+    while k < len(line):
+        ch = line[k]
+        if in_string:
+            if ch == "\\":
+                k += 1
+            elif ch == '"':
+                in_string = False
+        elif ch == '"':
+            in_string = True
+        elif line.startswith("//", k):
+            return line[:k].rstrip()
+        k += 1
+    return line.rstrip()
+
+
+def after_attributes(text: str) -> str | None:
+    """What `text` carries AFTER the attributes that open it, if anything.
 
     Each attribute is closed by its own balanced `]`, so `#[cfg(all(a, b))]`
     ends at the bracket that matches its opening one and not at the first `]`.
-    A line whose remainder is empty or a `//` comment carries no item.
+    Text whose remainder is empty or a `//` comment carries no item.
+
+    R2973 — `text` may be several lines joined (see [`attribute_span`]); a
+    bracket that closes on a later line is the same bracket.
     """
-    rest = line.strip()
+    rest = text.strip()
     while rest.startswith("#["):
-        depth = 0
-        end = None
-        for k, ch in enumerate(rest):
-            if ch == "[":
-                depth += 1
-            elif ch == "]":
-                depth -= 1
-                if depth == 0:
-                    end = k
-                    break
+        end = _matching_bracket(rest, 1)
         if end is None:
             return None
         rest = rest[end + 1 :].strip()
     if rest == "" or rest.startswith("//"):
         return None
     return rest
+
+
+def attribute_span(lines: list[str], start: int) -> tuple[str, int]:
+    """The attribute (or run of them) that OPENS at `lines[start]`, whole.
+
+    Returns (its text with comments dropped and lines joined by a space, the
+    index of the line it closes on).
+
+    R2973 — the population of this whole file used to be "the first line of an
+    attribute", and rustfmt wraps any attribute wider than 70 columns, so an
+    `all(...)` of three predicates puts its `feature = ...` on the SECOND line
+    and the scan never saw it: 547 attributes in the tree, of which 17 findings
+    were hiding (see the ledger). A site is an attribute, so it is read whole.
+    """
+    text = ""
+    for j in range(start, len(lines)):
+        text = f"{text} {_without_line_comment(lines[j]).strip()}".strip()
+        rest = text
+        closed = True
+        while rest.startswith("#["):
+            end = _matching_bracket(rest, 1)
+            if end is None:
+                closed = False
+                break
+            rest = rest[end + 1 :].lstrip()
+        if closed:
+            return text, j
+    return text, len(lines) - 1
+
+
+def is_cfg_attr(text: str) -> bool:
+    """True when the attribute run at the start of `text` is a `cfg_attr`.
+
+    R2973 — the axis this census feeds holds down ONE property: when a feature
+    is off and a path stops resolving, rustc's note names the feature. A
+    `#[cfg_attr(feature = "x", derive(..))]` never stops a path resolving; it
+    adds or removes an attribute on an item that is there either way. MEASURED
+    on rustc 1.97.0 with a probe of that shape, the consumer of the absent
+    derive is told `error[E0599]: no method named 'clone' found for struct 'S'`
+    and the feature is not named anywhere -- the path was fine. So the site is
+    no witness of the property, and counting it as a public item put five
+    `dissect-serde` derives into the denominator with no probe that could ever
+    be written for them (the R2454 shape: a marker that cannot be satisfied
+    is not a reason).
+    """
+    return text.lstrip().startswith("#[cfg_attr")
 
 
 def attached(lines: list[str], start: int) -> str | None:
@@ -947,13 +1076,27 @@ def attached(lines: list[str], start: int) -> str | None:
     the tree, two of which passed only because the next line happened to be
     classifiable, and the third surfaced as unclassified when its type wrapped
     onto a line of its own.
+
+    R2973 — and an attribute can span lines, in the stack as well as at
+    `start`: a stacked attribute is skipped WHOLE (its continuation lines are
+    not items), and one that carries its item inline ends the search there.
     """
-    inline = after_attributes(lines[start])
+    text, last = attribute_span(lines, start)
+    inline = after_attributes(text)
     if inline is not None:
         return inline
-    for j in range(start + 1, len(lines)):
+    j = last + 1
+    while j < len(lines):
         s = lines[j].strip()
-        if s == "" or s.startswith("//") or s.startswith("#["):
+        if s == "" or s.startswith("//"):
+            j += 1
+            continue
+        if s.startswith("#["):
+            stacked, end = attribute_span(lines, j)
+            inline = after_attributes(stacked)
+            if inline is not None:
+                return inline
+            j = end + 1
             continue
         return lines[j]
     return None
@@ -984,10 +1127,20 @@ def scan(
         except (UnicodeDecodeError, OSError):
             continue
         for i, line in enumerate(lines):
-            if not line.strip().startswith("#[cfg") or "feature" not in line:
+            if not line.strip().startswith("#[cfg"):
                 continue
-            feats = FEATURE.findall(line)
+            # R2973 — the WHOLE attribute, not its first line; see
+            # `attribute_span`.
+            text, _last = attribute_span(lines, i)
+            if "feature" not in text:
+                continue
+            feats = FEATURE.findall(text)
             if not feats:
+                continue
+            if is_cfg_attr(text):
+                # R2973 — a conditional ATTRIBUTE, not a gate: the item is there
+                # whichever way the feature goes. See `is_cfg_attr`.
+                counts["conditional-attribute"] += 1
                 continue
             following = attached(lines, i)
             if following is None:
@@ -1003,7 +1156,7 @@ def scan(
                 # reason can be held to it. See `DEFER_POLICY`.
                 shape = Shape(
                     where=f"{rel}:{i + 1}",
-                    compound=bool(COMPOUND.search(line)),
+                    compound=bool(COMPOUND.search(text)),
                     column=len(following) - len(following.lstrip()),
                 )
                 for f in feats:
@@ -1093,9 +1246,13 @@ def negated_in(package: str) -> frozenset[str]:
             text = (ROOT / rel).read_text(encoding="utf-8")
         except (UnicodeDecodeError, OSError):
             continue
-        for line in text.split("\n"):
-            if "not(" in line and "feature" in line:
-                out.update(FEATURE.findall(line))
+        lines = text.split("\n")
+        for i, line in enumerate(lines):
+            # R2973 — an attribute is read whole: `#[cfg(all(` on one line and
+            # `not(feature = "x")` on the next is still a negation.
+            seen = attribute_span(lines, i)[0] if line.strip().startswith("#[cfg") else line
+            if "not(" in seen and "feature" in seen:
+                out.update(FEATURE.findall(seen))
     return frozenset(out)
 
 
@@ -1405,7 +1562,9 @@ def platform_gated_findings(
                     findings.append(f"`{shape.where}` no longer exists")
                     continue
                 lines = path.read_text(encoding="utf-8", errors="replace").split("\n")
-                attr = lines[int(ln) - 1]
+                # R2973 — the whole attribute: `target_os` is often on the
+                # second line of one rustfmt wrapped.
+                attr = attribute_span(lines, int(ln) - 1)[0]
                 reached += 1
                 platform = PLATFORM_CFG.search(attr)
                 if not platform:
@@ -1470,7 +1629,10 @@ def abi_contract_findings(root: pathlib.Path, sites: dict[tuple[str, str], list[
                     continue
                 if ABI_PUB_FN.match(item):
                     stack = []
-                    j = int(ln)
+                    # R2973 — the stack starts after the attribute's LAST line;
+                    # `int(ln)` is one past its first, which is inside it when it
+                    # spans lines.
+                    j = attribute_span(lines, int(ln) - 1)[1] + 1
                     while j < len(lines) and lines[j].strip().startswith("#["):
                         stack.append(lines[j])
                         j += 1
@@ -1950,6 +2112,34 @@ def _fixture() -> dict[str, str]:
         # parameter). The item is `gated: u8`, NOT the public fn on the next
         # line, which a reader of the next line would count as public.
         "demo/src/inline.rs": f"{a} gated: u8,\npub fn after() {{}}\n",
+        # R2973 — the shapes the scan could not READ. Every one below has its
+        # `feature = ...` on a line the old first-line reading never looked at,
+        # or is an item shape `classify` had no word for.
+        #
+        # an `all(..)` rustfmt wraps: `feature` is on the SECOND line
+        "demo/src/wrapped.rs": (
+            '#[cfg(all(\n    feature = "alpha",\n    unix\n))]\npub fn wrapped() {}\n'
+        ),
+        # a comment between two arms, with a `]` in it and one in a string, which
+        # must neither end the attribute early nor be read as a feature
+        "demo/src/commented.rs": (
+            '#[cfg(all(\n    feature = "alpha", // note ]\n    not(target_os = "a]b")\n))]\n'
+            "pub fn commented() {}\n"
+        ),
+        # a WRAPPED attribute in the stack: its continuation lines are not items
+        # (`feature = "beta",` is what the old reader returned as the item), and
+        # the site itself is a `cfg_attr`, i.e. no gate
+        "demo/src/wrapped_stack.rs": (
+            f'{a}\n#[cfg_attr(\n    feature = "beta",\n    derive(Debug)\n)]\n'
+            "pub struct Late2;\n"
+        ),
+        # a `cfg_attr` derive: the item is there whichever way the feature goes
+        "demo/src/cfg_attr.rs": '#[cfg_attr(feature = "beta", derive(Debug))]\npub struct D;\n',
+        # `macro_rules!` is followed by a space, so `\b` after the keyword list
+        # never matched it
+        "demo/src/macro_rules.rs": f"{b}\nmacro_rules! helper {{\n    () => {{}};\n}}\n",
+        # a gated `mut` parameter
+        "demo/src/param.rs": f"fn f(\n    {a}\n    mut n: u8,\n) {{}}\n",
     }
 
 
@@ -2525,6 +2715,64 @@ def test_only_feature_selftest() -> int:
     return 0
 
 
+def attribute_selftest() -> int:
+    """R2973 — drive the attribute READER directly, both directions.
+
+    The scan's fixture proves the counts; this proves WHY, so a count that is
+    right for the wrong reason cannot pass: the span's last line, the text the
+    features are read from, and the two ways a naive bracket count goes wrong.
+    """
+    one = ['#[cfg(feature = "a")]', "pub fn f() {}"]
+    wrapped = ["#[cfg(all(", '    feature = "a",', "    unix", "))]", "pub fn f() {}"]
+    comment = [
+        "#[cfg(all(",
+        '    feature = "a", // a stray ] here',
+        '    not(target_os = "x]y")',
+        "))]",
+        "pub fn f() {}",
+    ]
+    stack = [
+        '#[cfg(feature = "a")]',
+        "#[cfg_attr(",
+        '    feature = "b",',
+        "    derive(Debug)",
+        ")]",
+        "// note",
+        "pub struct S;",
+    ]
+    inline = ['#[cfg(all(', '    feature = "a", unix', "))] pub fn g() {}"]
+    checks = [
+        ("one line", attribute_span(one, 0), ('#[cfg(feature = "a")]', 0)),
+        (
+            "wrapped",
+            attribute_span(wrapped, 0),
+            ('#[cfg(all( feature = "a", unix ))]', 3),
+        ),
+        ("a stray ] in a comment", attribute_span(comment, 0)[1], 3),
+        ("a ] in a string", attribute_span(comment, 0)[0].count('"x]y"'), 1),
+        ("the item after a wrapped attribute", attached(wrapped, 0), "pub fn f() {}"),
+        ("the item after a commented one", attached(comment, 0), "pub fn f() {}"),
+        ("the item past a wrapped STACKED attribute", attached(stack, 0), "pub struct S;"),
+        ("an item sharing the last line", attached(inline, 0), "pub fn g() {}"),
+    ]
+    for label, got, want in checks:
+        if got != want:
+            print(
+                f"feature-public-surface: SELFTEST FAIL -- attribute reader, "
+                f"{label}: expected {want!r} and got {got!r}"
+            )
+            return 1
+    if not is_cfg_attr("#[cfg_attr(feature = \"a\", derive(Debug))]") or is_cfg_attr(
+        '#[cfg(feature = "a")]'
+    ):
+        print(
+            "feature-public-surface: SELFTEST FAIL -- `is_cfg_attr` must be true "
+            "for a cfg_attr and false for a cfg"
+        )
+        return 1
+    return 0
+
+
 def selftest() -> int:
     """Every class, both denominator members, and the two late repairs."""
     dirs = {"demo": "demo"}
@@ -2540,12 +2788,17 @@ def selftest() -> int:
         )
 
     want_counts = {
-        "public-item": 2,
+        # pub_item, stacked, wrapped, commented, wrapped_stack's first attribute
+        "public-item": 5,
         "macro-invocation": 1,
         "restricted-item": 1,
-        "private-item": 1,
-        "not-an-item": 4,
+        # private, macro_rules
+        "private-item": 2,
+        # expr, field, assertion, inline, param
+        "not-an-item": 5,
         "UNCLASSIFIED": 1,
+        # wrapped_stack's second attribute, cfg_attr
+        "conditional-attribute": 2,
     }
     if dict(counts) != want_counts:
         print(
@@ -2553,8 +2806,13 @@ def selftest() -> int:
             f"and the scan produced {dict(counts)}. An assertion must not count "
             f"as a macro invocation, a stacked attribute must still find its "
             f"item, and an attribute sharing its line with its item must not "
-            f"be charged to the next line's (R2972)."
+            f"be charged to the next line's (R2972). R2973: an attribute is "
+            f"read WHOLE (a wrapped `all(..)`, a comment or a `]` inside one, a "
+            f"wrapped attribute in the stack), a `cfg_attr` is no gate, "
+            f"`macro_rules!` is an item and `mut n: T,` is a parameter."
         )
+        return 1
+    if attribute_selftest() != 0:
         return 1
     if denom != {("demo", "alpha"), ("demo", "beta")}:
         print(

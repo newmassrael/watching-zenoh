@@ -6115,7 +6115,22 @@ pub struct AttachedSegment {
 
 impl AttachedSegment {
     /// The address of one chunk, or null when the segment cannot map it.
-    pub fn map(&self, chunk: z_chunk_id_t) -> *mut u8 {
+    ///
+    /// R2973 — `pub(crate)`, not `pub`. This crate's contract under
+    /// `zenoh-c-shared-memory` is a C ABI, and the census that holds that claim
+    /// (`OFF_AXIS`'s `ABI_CONTRACT` reading) refuses a strictly-`pub` fn with no
+    /// `#[no_mangle]`: a Rust caller can name it. Nothing outside this file did
+    /// (the type is not named anywhere else in the workspace), so the claim was
+    /// false only by an accident of spelling. The census could not see it until
+    /// it read whole attributes, because the module's gate spans several lines.
+    ///
+    /// Its only caller today is a test, so a non-test build has no reader for it:
+    /// the read path is built ahead of its consumer (the session's SHM offer,
+    /// held for open-debt 823). `allow(dead_code)` is what keeps a `pub(crate)`
+    /// item from being reported for that, and the day the session maps through
+    /// it this attribute is deleted rather than kept.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) fn map(&self, chunk: z_chunk_id_t) -> *mut u8 {
         let Some(map_fn) = self.map_fn else {
             return std::ptr::null_mut();
         };
@@ -6217,7 +6232,16 @@ impl ShmClientStorageState {
 /// section's divergence note. Not `#[no_mangle]`: upstream has no such symbol,
 /// and inventing one would put a name in wz's surface the reference lacks,
 /// which the census reads as a defect in the other direction.
-pub fn z_shm_client_storage_attach(
+///
+/// R2973 — `pub(crate)`, for the reason on [`AttachedSegment::map`]: this crate's
+/// contract under the feature is a C ABI, and a strictly-`pub` fn with no
+/// `#[no_mangle]` is a Rust path a caller can name. Its callers are this file's
+/// tests, so it carries the same `allow(dead_code)` until the session reads
+/// through it (open-debt 823); the items only it reaches (`storage_state`,
+/// `ShmClientStorageState::client`, `ShmClientState::attach`,
+/// `z_shm_segment_t::delete_fn_of`) are live through it.
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) fn z_shm_client_storage_attach(
     storage: &z_loaned_shm_client_storage_t,
     protocol: z_protocol_id_t,
     segment: z_segment_id_t,
