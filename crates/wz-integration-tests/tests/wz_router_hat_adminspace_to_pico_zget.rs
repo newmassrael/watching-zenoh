@@ -118,10 +118,10 @@ fn wz_router_adminspace_decoded_by_pico_z_get() {
 
     // Barrier: R1 must have ingested R2 into its ROUTERS net before the query,
     // else the DOT names one node and the successor table is empty. The
-    // deterministic witness is R1's own convergence log — NOT a zid-string match,
-    // because wz logs faces in raw little-endian zid bytes while the admin space
-    // renders zenoh-hex (byte-reversed), so `r2_zid` never appears verbatim in R1's
-    // face log. "routers-net converged (2 node(s))" is the edge that means exactly
+    // deterministic witness is R1's own convergence log — NOT a face line naming
+    // `r2_zid`, which comes UP before the routers net has taken R2 in (and which,
+    // until R2956, printed the zid per byte, the reverse of `r2_zid`).
+    // "routers-net converged (2 node(s))" is the edge that means exactly
     // "the second router is in the graph the successor table is computed from".
     let federated = wait_for_substring(
         &mut r1_log,

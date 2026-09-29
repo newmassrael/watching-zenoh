@@ -1871,6 +1871,10 @@ pub mod common {
     ///   (`wz-ap-demo/src/runner.rs:601-605`) — so nothing is lost to nibble
     ///   formatting here. Item 417's 1/16 does NOT apply, and copying it would
     ///   have been wrong.
+    ///   ⚠ R2956 changed that renderer to zenoh's `Display` recipe
+    ///   (`zid_to_zenoh_hex`), which strips one leading zero NIBBLE — so item
+    ///   417's 1/16 now applies to this line too. The parse is by value, which
+    ///   is indifferent to both.
     /// * But the WIRE is variable-length. zenoh writes
     ///   `flags |= ((zid.size() - 1) as u8) << 4` and then exactly `zid.size()`
     ///   bytes (`zenoh-codec/src/scouting/hello.rs:62-66`), and `ID::size()` is
@@ -1888,27 +1892,24 @@ pub mod common {
 
     /// The VALUE a zid CONFIGURED as `hex` will be rendered as.
     ///
-    /// R311y903 — and this is NOT `u128::from_str_radix(hex, 16)`, which is the
-    /// trap that follows immediately after avoiding the first one. zenoh parses
-    /// the `id` config string into BYTES and holds them little-endian, and
-    /// `uhlc::ID`'s `Debug` renders `u128::from_le_bytes(self.0)` — so the
-    /// printed hex is the configured hex WITH ITS BYTES REVERSED.
+    /// R2956 — the config string's own numeric value, because both ends now
+    /// speak zenoh's form: zenoh parses an `id` string as the inverse of its
+    /// `Display` (R2955: `--zid c11e47c11e49` is reported as `c11e47c11e49`, as
+    /// zenohd reports a configured id), and wz's face and hello lines print a
+    /// zid with that same recipe (`zid_hex::zid_to_zenoh_hex`).
     ///
-    /// MEASURED, not derived: pinning `--cfg id:"2e0db2ae"` on a real zenohd
-    /// produced `face 0 UP (... zid aeb20d2e)`. Comparing against the config
-    /// string's own numeric value would compare against a number that appears on
-    /// no wire — the same shape as the length rule it replaced, one layer down.
+    /// ⛔ R311y903 wrote this as the bytes REVERSED, from a real measurement:
+    /// `--cfg id:"2e0db2ae"` produced `face 0 UP (... zid aeb20d2e)`. The
+    /// measurement was right and its attribution was not. That face line is
+    /// WZ's log, which printed wire-order per-byte hex until R2956; the
+    /// reversing was that render, not zenoh. Said here because the old
+    /// sentence read as a fact about upstream.
     pub fn configured_zid_value(hex: &str) -> u128 {
         assert!(
             hex.len() % 2 == 0 && hex.len() <= 32,
             "a zid config string is whole bytes, at most 16 of them: {hex:?}"
         );
-        let mut bytes = [0u8; 16];
-        for (i, pair) in hex.as_bytes().chunks(2).enumerate() {
-            let pair = core::str::from_utf8(pair).expect("hex is ascii");
-            bytes[i] = u8::from_str_radix(pair, 16).expect("hex byte parses");
-        }
-        u128::from_le_bytes(bytes)
+        u128::from_str_radix(hex, 16).expect("a zid config string is hex")
     }
 
     /// R2059 (open-debt item 421) — WHICH ZID WIDTH EACH SCOUTING E2E ACTUALLY
@@ -6737,24 +6738,24 @@ mod tests {
     /// `hellos=[v9 router zid=41831c3f locators=[...]]`, eight characters, and
     /// the old `len() == 32` assertion failed on it. A legal zenohd zid whose
     /// top byte is zero produces the same shape once in 256 runs.
+    ///
+    /// R2956 — that line was printed by wz's per-byte render; the same hello
+    /// now prints `zid=3f1c8341`, the config string, and the fixture says so.
     #[test]
     fn a_scouted_hello_zid_is_read_by_value_whatever_its_width() {
         let line = "wz-ap-demo: scouted peer locator tcp/127.0.0.1:38693 \
                     (scout_emit=1, record_hello=1) \
-                    hellos=[v9 router zid=41831c3f locators=[tcp/127.0.0.1:38693]]";
+                    hellos=[v9 router zid=3f1c8341 locators=[tcp/127.0.0.1:38693]]";
         assert_eq!(
             hello_zid_value(line),
-            Some(u128::from_str_radix("41831c3f", 16).expect("parses")),
+            Some(u128::from_str_radix("3f1c8341", 16).expect("parses")),
             "the hex run must end at the first non-hex character, so a short \
              zid followed by ` locators=[..]` still reads as its own value"
         );
-        // And it is the value the config produced: same relationship item 417
-        // measured on the other line, re-measured here rather than assumed.
         assert_eq!(
             hello_zid_value(line),
             Some(configured_zid_value("3f1c8341")),
-            "a zid configured as 3f1c8341 renders here as 41831c3f — the bytes \
-             reversed, exactly as on the face line"
+            "a zid configured as 3f1c8341 renders on the hello line as written"
         );
     }
 
@@ -6766,22 +6767,30 @@ mod tests {
         assert_eq!(hello_zid_value("hellos=[v9 router zid= locators=[]]"), None);
     }
 
-    /// The endianness fact, pinned because it is FOREIGN BEHAVIOUR the e2e
-    /// depends on and would otherwise re-learn by failing.
+    /// The config-to-log relation the e2e depend on, pinned so a change reds
+    /// here beside its reason rather than in an e2e that only says two numbers
+    /// differ.
     ///
-    /// Measured against a real zenohd during R311y903: `--cfg id:"2e0db2ae"`
-    /// produced `face 0 UP (... zid aeb20d2e)`. If upstream stops reversing,
-    /// this reds here — beside the reason — instead of in an e2e whose message
-    /// would only say two numbers differ.
+    /// R2956 — built from the two real recipes rather than spelled: the bytes
+    /// zenoh holds for an `id` string (`zenoh_hex_to_zid`, the inverse of its
+    /// `Display`), rendered by what the demo's face line calls
+    /// (`zid_to_zenoh_hex`). Until R2956 this pinned `aeb20d2e`, wz's per-byte
+    /// render, under a sentence blaming zenoh for the reversal.
     #[test]
-    fn a_configured_zenohd_zid_renders_with_its_bytes_reversed() {
-        assert_eq!(
-            configured_zid_value("2e0db2ae"),
-            u128::from_str_radix("aeb20d2e", 16).expect("parses"),
-            "zenoh holds the configured id bytes little-endian and renders \
-             `u128::from_le_bytes`, so the rendering is the config with its \
-             bytes reversed"
-        );
+    fn a_configured_zenohd_zid_renders_as_it_was_written() {
+        use wz_session_core::zid_hex::{zenoh_hex_to_zid, zid_to_zenoh_hex};
+        // No leading zero: zenohd refuses one in an id (`Leading 0s are not
+        // valid`), and so does the parse. Inner zeros are digits and stay.
+        for configured in ["2e0db2ae", "3f1c8341", "7a000c0d"] {
+            let held = zenoh_hex_to_zid(configured).expect("an id string parses");
+            let printed = zid_to_zenoh_hex(&held);
+            assert_eq!(
+                face_zid_value(&face_line(&printed)),
+                Some(configured_zid_value(configured)),
+                "a zid configured as {configured} must be the value the face line \
+                 prints ({printed})"
+            );
+        }
     }
     use std::net::TcpListener;
     use std::process::Command;

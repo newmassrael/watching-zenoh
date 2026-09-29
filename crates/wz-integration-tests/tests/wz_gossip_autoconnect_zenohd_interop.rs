@@ -141,11 +141,13 @@ use wz_integration_tests::common::{
 };
 
 /// zenohd rejects a leading zero in `--id` (`Invalid id: 01 - Leading 0s are not
-/// valid`), so the third party is `1` on the CLI while wz logs the same one-byte
-/// id zero-padded as `zid 01`. Same wire value, two spellings; they are named
-/// apart because conflating them silently breaks the face-UP needle.
+/// valid`), so the third party is `1` on the CLI.
+///
+/// R2956 — and wz logs it as `zid 1` too. Until R2956 wz's face line printed
+/// the one-byte id per byte as `zid 01`, so this file carried a second
+/// constant for the logged spelling; the face line now prints a zid as zenoh
+/// does, so the two spellings are one and so are the constants.
 const PEER_ID: &str = "1";
-const PEER_ZID_AS_LOGGED: &str = "01";
 /// The router's id. Never a gossip dial candidate in any leg: wz already holds a
 /// face to it (dialed from argv), so the intent dedups before `Step::Dial`.
 const ROUTER_ID: &str = "ee";
@@ -157,8 +159,6 @@ const ROUTER_ID: &str = "ee";
 const WZ_ZID: &str = "2";
 /// A third-party id ABOVE [`WZ_ZID`], for the strategy pair.
 const HIGH_PEER_ID: &str = "ff";
-/// [`HIGH_PEER_ID`] as wz LOGS it (no leading zero to pad here).
-const HIGH_PEER_ZID_AS_LOGGED: &str = "ff";
 
 /// How to spawn one zenohd of the fixture. A param object rather than six
 /// positional arguments (the R311lw precedent).
@@ -415,7 +415,7 @@ fn wz_peer_gossip_autoconnects_to_a_zenohd_peer_discovered_through_a_zenohd_rout
     // whatever non-loopback locator P announced; the PORT is still the fixture's
     // kernel-reserved one and still absent from wz's argv, which is the whole of
     // what this needle has to discriminate.
-    let face_needle = format!(":{peer_port}, zid {PEER_ZID_AS_LOGGED})");
+    let face_needle = format!(":{peer_port}, zid {PEER_ID})");
     let face_up = wait_for_substring(&mut wz_reader, &face_needle, Duration::from_secs(20));
 
     graceful_terminate(wz_guard.child_mut(), Duration::from_secs(5));
@@ -496,7 +496,7 @@ fn wz_peer_without_autoconnect_discovers_the_same_peer_and_dials_nothing() {
     // 0-100ms backoff — well past the flood. See `settle_needle`.
     let ingested = wait_for_substring(
         &mut wz_reader,
-        &settle_needle(true, PEER_ZID_AS_LOGGED),
+        &settle_needle(true, PEER_ID),
         Duration::from_secs(20),
     );
 
@@ -616,7 +616,7 @@ fn run_strategy_leg(strategy: &'static str, expects_a_dial: bool) -> String {
     // leg has no such event and settles on the flood. See `settle_needle`.
     let ingested = wait_for_substring(
         &mut wz_reader,
-        &settle_needle(expects_a_dial, HIGH_PEER_ZID_AS_LOGGED),
+        &settle_needle(expects_a_dial, HIGH_PEER_ID),
         Duration::from_secs(20),
     );
 
@@ -730,7 +730,7 @@ fn run_subsystem_leg(wz_peer_mode: &'static str, expects_a_dial: bool) -> (Strin
     // wrong-mode leg has no such event and settles on the flood.
     let ingested = wait_for_substring(
         &mut wz_reader,
-        &settle_needle(expects_a_dial, PEER_ZID_AS_LOGGED),
+        &settle_needle(expects_a_dial, PEER_ID),
         Duration::from_secs(20),
     );
 

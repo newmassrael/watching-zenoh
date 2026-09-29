@@ -841,10 +841,10 @@ fn apfull_router_hat_linkstate_decoded_by_a_real_pico_z_get() {
     .map(|(z, _)| z.to_string())
     .expect("R2 admin root is @/<zid>/router");
 
-    // BARRIER, not a sleep: R1's own convergence edge. Asserted on R1's log rather
-    // than on a zid string match, because wz logs faces in raw little-endian zid
-    // bytes while the admin space renders zenoh-hex (byte-reversed), so `r2_zid`
-    // never appears verbatim in R1's face log.
+    // BARRIER, not a sleep: R1's own convergence edge. A face line naming
+    // `r2_zid` would not be one: a face is UP before the routers net has taken
+    // R2 in, and it is the net the admin reply is computed from. (Until R2956
+    // the face line also printed the zid per byte, the reverse of `r2_zid`.)
     if let Err(c) = wait_for_substring(
         &mut r1_log,
         "routers-net converged (2 node(s))",
