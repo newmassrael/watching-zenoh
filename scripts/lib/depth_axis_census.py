@@ -2290,7 +2290,14 @@ PIN_NO_SYMBOL = 2
 # citations: 8 against a pin of 9` were already there before this round's
 # edit and are not moved here: this round did not make them and has not
 # attributed them.
-PIN_WZ_CITATIONS = 22
+#
+# R2971 — 22 -> 25, one atom. `runtime-zero-copy`'s reason gains the paragraph
+# on the lent receive frame, which cites three wz files (the owned sample
+# payload, `RxBytes`, and the pooled frame's witness), and the atom is still
+# PARTIAL. READ off the census's own FAIL line, `wz citations: 25 against a pin
+# of 22`; `reached` and `ambiguous` still read 4 and 8 as they did before this
+# round, and are still not attributed here.
+PIN_WZ_CITATIONS = 25
 # R2626 — 44 -> 42, and this one is worth a sentence because it HELD through
 # every earlier retirement in this run (R2612, R2622). `time-hlc`'s reason is the
 # first retiree carrying AMBIGUOUS citations of its own: its oldest clauses cite
