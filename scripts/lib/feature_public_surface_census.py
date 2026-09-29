@@ -905,6 +905,33 @@ def classify(following: str) -> str:
     return "UNCLASSIFIED"
 
 
+def after_attributes(line: str) -> str | None:
+    """What a line carries AFTER the attributes that open it, if anything.
+
+    Each attribute is closed by its own balanced `]`, so `#[cfg(all(a, b))]`
+    ends at the bracket that matches its opening one and not at the first `]`.
+    A line whose remainder is empty or a `//` comment carries no item.
+    """
+    rest = line.strip()
+    while rest.startswith("#["):
+        depth = 0
+        end = None
+        for k, ch in enumerate(rest):
+            if ch == "[":
+                depth += 1
+            elif ch == "]":
+                depth -= 1
+                if depth == 0:
+                    end = k
+                    break
+        if end is None:
+            return None
+        rest = rest[end + 1 :].strip()
+    if rest == "" or rest.startswith("//"):
+        return None
+    return rest
+
+
 def attached(lines: list[str], start: int) -> str | None:
     """The source line the attribute at `start` is attached to.
 
@@ -912,7 +939,18 @@ def attached(lines: list[str], start: int) -> str | None:
     the first line that is none of those IS the item. The window runs to the
     end of the file on purpose: a bounded one reported 31 sites as having no
     following line when they simply had a long attribute stack.
+
+    R2972 — but an attribute can share its line with its item, and then the
+    item is what follows the attribute ON THAT LINE: `#[cfg(feature = "x")]
+    namespace: Option<` is a gated function parameter rustfmt keeps inline.
+    Reading the next line instead classified a DIFFERENT item — three sites in
+    the tree, two of which passed only because the next line happened to be
+    classifiable, and the third surfaced as unclassified when its type wrapped
+    onto a line of its own.
     """
+    inline = after_attributes(lines[start])
+    if inline is not None:
+        return inline
     for j in range(start + 1, len(lines)):
         s = lines[j].strip()
         if s == "" or s.startswith("//") or s.startswith("#["):
@@ -1908,6 +1946,10 @@ def _fixture() -> dict[str, str]:
         ),
         # attached to nothing this gate can name
         "demo/src/weird.rs": f"{a}\n@@@ not rust @@@\n",
+        # R2972 — an attribute sharing its line with its item (a gated
+        # parameter). The item is `gated: u8`, NOT the public fn on the next
+        # line, which a reader of the next line would count as public.
+        "demo/src/inline.rs": f"{a} gated: u8,\npub fn after() {{}}\n",
     }
 
 
@@ -2502,15 +2544,16 @@ def selftest() -> int:
         "macro-invocation": 1,
         "restricted-item": 1,
         "private-item": 1,
-        "not-an-item": 3,
+        "not-an-item": 4,
         "UNCLASSIFIED": 1,
     }
     if dict(counts) != want_counts:
         print(
             f"feature-public-surface: SELFTEST FAIL -- expected {want_counts} "
             f"and the scan produced {dict(counts)}. An assertion must not count "
-            f"as a macro invocation, and a stacked attribute must still find "
-            f"its item."
+            f"as a macro invocation, a stacked attribute must still find its "
+            f"item, and an attribute sharing its line with its item must not "
+            f"be charged to the next line's (R2972)."
         )
         return 1
     if denom != {("demo", "alpha"), ("demo", "beta")}:
