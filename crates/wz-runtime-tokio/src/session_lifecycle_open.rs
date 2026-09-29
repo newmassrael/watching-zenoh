@@ -16,9 +16,9 @@
 //!
 //!   * `wz_session_core::zid_hex::zenoh_hex_to_zid` — the grammar's `<peer-zid>`
 //!     chunk is a zid rendered the way zenoh renders one INTO A KEY EXPRESSION,
-//!     and this module's SSOT parses it back. (`Zid`'s own `Display` is a
-//!     DIFFERENT, wire-order rendering for diagnostics; using it here would look
-//!     up a zid nobody advertised.)
+//!     and this module's SSOT parses it back. (`Zid`'s own `Display` renders
+//!     the same form since R2956; a per-byte wire-order spelling would look up
+//!     a zid nobody advertised.)
 //!   * `LinkstateNetwork::node_locators` — the retained zid -> dial-locator
 //!     directory, populated by the link-state flood this node already ingests.
 //!   * `session_open::plan_endpoint` — the locator-string parse.
@@ -268,17 +268,39 @@ mod tests {
         assert!(rx.try_recv().is_err());
     }
 
-    /// ⛔ THE RENDERING IS NOT INTERCHANGEABLE. `Zid`'s `Display` is wire-order
-    /// per-byte hex and the key expression carries zenoh's LE-u128 form; for
-    /// this peer they DIFFER, so an opener parsing the wrong one would look up a
-    /// zid nobody advertised. The arm pins that the two strings are different
-    /// and that only the key-expression one resolves.
+    /// R2956 — `Zid`'s `Display` IS zenoh's form now, the string the key
+    /// expression carries. It rendered per-byte wire-order hex until R2956, and
+    /// this test pinned the two as DIFFERENT; it now pins them EQUAL, over
+    /// shapes where a per-byte render would differ (reversal, an inner zero, a
+    /// single leading zero to strip). `wz-routing-graph` cannot depend on the
+    /// crate holding `zid_to_zenoh_hex`, so this is where the two recipes are
+    /// held to one answer.
     #[test]
-    fn the_key_carries_the_keyexpr_rendering_not_the_diagnostic_one() {
-        let display_form = Zid::from_slice(PEER_ZID).to_string();
-        let keyexpr_form = zid_to_zenoh_hex(PEER_ZID);
+    fn a_zid_displays_as_the_key_expression_renders_it() {
+        for zid in [
+            PEER_ZID,
+            &[0x1a, 0x2b, 0x0c][..],
+            &[0x01, 0x00, 0x02],
+            &[0x0f],
+        ] {
+            assert_eq!(
+                Zid::from_slice(zid).to_string(),
+                zid_to_zenoh_hex(zid),
+                "{zid:02x?}"
+            );
+        }
+    }
+
+    /// ⛔ The per-byte WIRE-ORDER spelling is not zenoh's and names no node: an
+    /// opener handed it would look up a zid nobody advertised. Kept after R2956
+    /// made `Zid`'s `Display` zenoh's, because that spelling still reaches a key
+    /// wherever something renders the bytes by hand.
+    #[test]
+    fn the_key_carries_the_keyexpr_rendering_not_the_wire_order_one() {
+        let wire_order: String = PEER_ZID.iter().map(|b| format!("{b:02x}")).collect();
         assert_ne!(
-            display_form, keyexpr_form,
+            wire_order,
+            zid_to_zenoh_hex(PEER_ZID),
             "this fixture only says something if the two renderings differ"
         );
 
@@ -286,11 +308,11 @@ mod tests {
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
         let opener = LinkstateOpener::new(net, tx);
 
-        let wrong = key_for(&display_form);
+        let wrong = key_for(&wire_order);
         let key = LifecycleKey::parse(&wrong).unwrap();
         assert!(
             !opener.request_open(&key),
-            "the diagnostic rendering names no node in the directory"
+            "the wire-order rendering names no node in the directory"
         );
         assert!(rx.try_recv().is_err());
     }

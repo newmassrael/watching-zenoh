@@ -327,22 +327,25 @@ impl Zid {
 }
 
 impl core::fmt::Display for Zid {
-    /// Lowercase per-byte hex in WIRE order — the bytes [`as_slice`](Self::as_slice)
-    /// yields, e.g. `[0x1a, 0x2b]` renders `"1a2b"`. wz's single zid string form:
-    /// [`Debug`](Self) wraps this in `Zid(..)`, and the demo's face logs print it.
+    /// zenoh's `ZenohIdProto::Display`: the 16-byte little-endian id read as a
+    /// `u128`, in lowercase hex, with a single leading zero stripped — so
+    /// `[0x1a, 0x2b]` renders `"2b1a"`. The string zenoh prints for the same id
+    /// in its logs, its adminspace and its key expressions, and the one an
+    /// operator writes in a config `id`.
     ///
-    /// DIVERGES (deliberately) from zenoh `ZenohIdProto::Display`, which prints the
-    /// bytes interpreted as a little-endian `u128` in hex with the leading zero
-    /// stripped (so `[0x1a, 0x2b]` would render `"2b1a"`). wz does not need that
-    /// form: zenoh's only use of it is turning a zid into a key expression
-    /// (`From<ZenohIdProto> for OwnedKeyExpr`), a path wz has no analogue of. A wz
-    /// zid is a routing identity shown only in diagnostics, where the wire-order
-    /// hex an operator also reads in a packet dump is the more useful rendering.
+    /// R2956 — this printed per-byte hex in WIRE order until now, and its doc
+    /// argued that zenoh's form was needed only for key expressions, which wz had
+    /// no analogue of. Both halves had stopped being true: wz's adminspace keys
+    /// carry zenoh's form (`zid_hex::zid_to_zenoh_hex`), and zenoh prints this
+    /// form everywhere a zid is shown, so wz's logs named a node by a string
+    /// found nowhere else — the reversed id ZA-3362 met from the other side. The
+    /// recipe is `zid_to_zenoh_hex`'s; this crate cannot depend on the crate
+    /// that holds it, so it is rendered here from the same `le16` input, and a
+    /// test in `wz-runtime-tokio` pins the two equal.
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        for b in self.as_slice() {
-            write!(f, "{b:02x}")?;
-        }
-        Ok(())
+        let id = u128::from_le_bytes(self.le16());
+        let s = format!("{id:02x}");
+        f.write_str(s.strip_prefix('0').unwrap_or(s.as_str()))
     }
 }
 
@@ -2532,10 +2535,11 @@ impl LinkstateNetwork {
     /// (`network.rs:64-68`), so a zenoh DOT node label is the bare zid; wz's
     /// [`Node`] derives `Debug` (the whole struct, incl. a `HashMap` whose order
     /// is non-deterministic), which would neither match zenoh nor render
-    /// stably. (2) a wz [`Zid`] `Display` is wire-order per-byte hex, while
-    /// zenoh prints the LE-`u128` form — the faithful recipe is
+    /// stably. (2) the faithful recipe for zenoh's LE-`u128` form is
     /// `zid_to_zenoh_hex`, a wz-session-core SSOT this crate sits BELOW, so the
-    /// adminspace host passes it in. The GRAMMAR reuses petgraph's `Dot::new`
+    /// adminspace host passes it in. ([`Zid`]'s `Display` renders the same form
+    /// since R2956, by its own copy of the recipe; the injection keeps the SSOT
+    /// the one that answers.) The GRAMMAR reuses petgraph's `Dot::new`
     /// (on a relabeled throwaway graph), so undirected `graph {`, `--` edges,
     /// and edge `label` = the `f64` weight are faithful to zenoh's grammar. The
     /// per-run zid values differ, and the node NUMBERING can too: this compacted
@@ -2806,21 +2810,20 @@ mod tests {
     }
 
     #[test]
-    fn zid_display_is_wire_order_lowercase_hex() {
-        // Display (and Debug, which wraps it) render the trimmed bytes as
-        // lowercase per-byte hex in WIRE order — the SSOT the demo face logs use.
+    fn zid_display_is_zenohs_rendering() {
+        // Display (and Debug, which wraps it) render zenoh's
+        // `ZenohIdProto::Display` (R2956; per-byte hex in WIRE order before it):
+        // the LE bytes read as a `u128`, so the order is reversed and ONE
+        // leading zero is stripped.
         let z = Zid::from_slice(&[0x1a, 0x2b, 0x0c]);
-        assert_eq!(z.to_string(), "1a2b0c");
-        assert_eq!(format!("{z:?}"), "Zid(1a2b0c)");
-        // A zero byte INSIDE the identity is preserved (no integer-style
-        // stripping) and the order is NOT reversed — the deliberate divergence
-        // from zenoh's u128 ZenohIdProto::Display, which would render the first
-        // zid "c2b1a".
+        assert_eq!(z.to_string(), "c2b1a");
+        assert_eq!(format!("{z:?}"), "Zid(c2b1a)");
+        // A zero byte INSIDE the identity is kept: it is a digit of the u128.
         let inner0 = Zid::from_slice(&[0x01, 0x00, 0x02]);
-        assert_eq!(inner0.to_string(), "010002");
+        assert_eq!(inner0.to_string(), "20001");
         // A TRAILING zero is not part of the identity at all (R311y411
-        // canonicalisation), so it is not rendered — `[0x01, 0x00]` IS `[0x01]`.
-        assert_eq!(Zid::from_slice(&[0x01, 0x00]).to_string(), "01");
+        // canonicalisation), so `[0x01, 0x00]` IS `[0x01]`, which is `1`.
+        assert_eq!(Zid::from_slice(&[0x01, 0x00]).to_string(), "1");
     }
 
     #[test]

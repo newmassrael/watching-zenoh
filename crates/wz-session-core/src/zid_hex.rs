@@ -41,8 +41,11 @@ pub(crate) fn zid_to_le_array(zid: &[u8]) -> [u8; 16] {
 /// (`uhlc-0.8.1/src/id.rs:281-291`) = the **16-byte little-endian id read as a
 /// `u128`, printed big-endian hex, with a single leading zero stripped**. So
 /// the printed string is the zid bytes *reversed* (LE->`u128`->BE hex), NOT a
-/// naive per-byte hex of the wire order. This single function is the only place
-/// that recipe lives.
+/// naive per-byte hex of the wire order. This function is the SSOT for that
+/// recipe. R2956 gave `wz_routing_graph::Zid`'s `Display` a copy, because that
+/// crate sits below this one; `wz-runtime-tokio`'s
+/// `a_zid_displays_as_the_key_expression_renders_it` holds the two to one
+/// answer.
 pub fn zid_to_zenoh_hex(zid: &[u8]) -> String {
     let id = u128::from_le_bytes(zid_to_le_array(zid));
     let s = alloc::format!("{id:02x}");

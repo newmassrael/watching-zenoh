@@ -1040,7 +1040,7 @@ pub(crate) async fn scout_for_peer_locator(
                             "v{} {} zid={} locators=[{}]",
                             h.version,
                             h.whatami.map(|w| w.to_str()).unwrap_or("unknown"),
-                            h.zid.iter().map(|b| format!("{b:02x}")).collect::<String>(),
+                            wz::runtime_tokio::zid_hex::zid_to_zenoh_hex(&h.zid),
                             h.locators.join(","),
                         )
                     })
@@ -1142,7 +1142,8 @@ pub(crate) async fn spawn_scouting_responder(
                     format!("wz-ap-demo: --scout-listen cannot answer: {e}"),
                 )
             })?;
-    let zid_hex = zid.iter().map(|b| format!("{b:02x}")).collect::<String>();
+    // R2956 — zenoh's zid form, as every zid this binary prints.
+    let zid_hex = wz::runtime_tokio::zid_hex::zid_to_zenoh_hex(&zid);
     // The socket ACTUALLY joined and the identity ACTUALLY answered with — the
     // y845 discipline. An operator reads this line to find out why nothing is
     // discovering them, and a banner naming the compiled-in default would be the
@@ -1355,7 +1356,7 @@ async fn spawn_scouting_autoconnect(
                     // the flag.
                     log::info!(
                         "wz-ap-demo: SCOUT AUTOCONNECT dialing zid {} at {locators:?}",
-                        zid.iter().map(|b| format!("{b:02x}")).collect::<String>()
+                        wz::runtime_tokio::zid_hex::zid_to_zenoh_hex(&zid)
                     );
                 }
                 // At debug: a busy group carries a Hello from every neighbour on
@@ -1366,7 +1367,7 @@ async fn spawn_scouting_autoconnect(
                 AutoconnectStep::Skipped { zid, why } => {
                     log::debug!(
                         "wz-ap-demo: scout autoconnect skipped zid {}: {why:?}",
-                        zid.iter().map(|b| format!("{b:02x}")).collect::<String>()
+                        wz::runtime_tokio::zid_hex::zid_to_zenoh_hex(&zid)
                     );
                 }
                 AutoconnectStep::Cycle { outcome, peers } => {
@@ -2938,10 +2939,7 @@ async fn install_rescout_plan(
              the supervisor would silently re-dial one address instead \
              (build: cargo build -p wz-ap-demo --features scouting-active)",
             plan.socket.address.as_deref().unwrap_or("<default group>"),
-            plan.zid
-                .iter()
-                .map(|b| format!("{b:02x}"))
-                .collect::<String>()
+            wz::runtime_tokio::zid_hex::zid_to_zenoh_hex(&plan.zid)
         ),
     ))
 }
@@ -3791,17 +3789,18 @@ pub(crate) async fn run_demo(
     Ok(())
 }
 
-/// R311qi — format a face's remote peer zid as lowercase hex for the multi-peer
-/// face logs (zid is the routing identity learned at handshake; `?` if the
-/// handshake did not surface it). Shared by the router and peer face observers.
+/// R311qi — format a face's remote peer zid for the multi-peer face logs (zid is
+/// the routing identity learned at handshake; `?` if the handshake did not
+/// surface it). Shared by the router and peer face observers.
+///
+/// R2956 — in zenoh's form, `zid_hex::zid_to_zenoh_hex`, the string zenohd, the
+/// adminspace and a config `id` all use for the same node. It printed per-byte
+/// hex in wire order until now, which is the reverse, so the zid in a face line
+/// could not be searched for anywhere else.
 #[cfg(any(feature = "routing-router", feature = "routing-peer"))]
 fn zid_hex(zid: Option<&[u8]>) -> String {
-    // Wire-order lowercase per-byte hex (same rendering as `Zid::Display`, but NOT
-    // via it): this helper is compiled for routing-ROUTER too, where the routing
-    // `Zid` (a routing-peer-only re-export) is absent — so it formats the bytes
-    // directly rather than coupling a router-mode log helper to the peer-mode type.
     match zid {
-        Some(bytes) => bytes.iter().map(|b| format!("{b:02x}")).collect(),
+        Some(bytes) => wz::runtime_tokio::zid_hex::zid_to_zenoh_hex(bytes),
         None => "?".to_string(),
     }
 }
