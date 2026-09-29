@@ -1169,6 +1169,26 @@ pub const DOCUMENT_HISTORY: &[DocumentShape] = &[
         planes: &[],
         carries: &[],
     },
+    // ZA-3509 — the selector's verdict over the field document's rows, with none
+    // of what the field document renders beside it.
+    //
+    // A consumer narrowing a list needs, per row, the four coordinates that join
+    // the row to a record and the word the selector said. The field document
+    // carries those beside every row's whole tree, and on a 25,360-row capture
+    // that was 58 MB read on every chip toggle. This is those five values per
+    // row and the ceilings that made the list short, and it is a document of its
+    // own rather than a mode of `fields` because its keys are a small fixed set:
+    // a `fields` revision that named a "shape" would make every consumer of the
+    // tree reason about a document that sometimes has none.
+    DocumentShape {
+        document: SELECTION,
+        revision: 1,
+        keys: SELECTION_R1_KEYS,
+        retiring: &[],
+        families: SELECTION_R1_FAMILIES,
+        planes: &[],
+        carries: SELECTION_R1_CARRIES,
+    },
 ];
 
 // The key sets below are MEASURED, never transcribed: each was printed by the
@@ -1190,6 +1210,9 @@ pub const READABLE_SURFACES: &str = "readable_surfaces";
 pub const SELECTOR_DIAGNOSE: &str = "selector_diagnose";
 /// A declaration block's verdict (`wz_dissect_declarations_diagnose`).
 pub const DECLARATIONS_DIAGNOSE: &str = "declarations_diagnose";
+/// A selector's verdict over the field document's rows, and nothing else
+/// (`wz_dissect_live_selection`). ZA-3509.
+pub const SELECTION: &str = "selection";
 
 /// The census document's key set at revision 1.
 ///
@@ -6097,6 +6120,76 @@ pub const DECLARATIONS_DIAGNOSE_R1_KEYS: &[&str] = &[
     "text",
 ];
 
+/// The selection document's key set at revision 1, over EVERY shape a row and
+/// the document take — the coordinates present or absent, `selected` present or
+/// absent. ZA-3509.
+///
+/// The five row keys are the field document's own, with the record's meanings;
+/// the rest is the envelope and the ceilings group, whose inner keys are the
+/// same ones the field and census documents carry. Spelled out rather than
+/// built from a sibling table, for the reason `CENSUS_R3_KEYS` gives: a pin
+/// that follows its subject is not a pin.
+pub const SELECTION_R1_KEYS: &[&str] = &[
+    "anchor",
+    "batch_index",
+    "caps",
+    "direction",
+    "document",
+    "dropped_by_limits",
+    "flows",
+    "frames",
+    "frames_per_flow",
+    "list_id",
+    "max_flows_per_table",
+    "max_scout_askers",
+    "name",
+    "revision",
+    "rows",
+    "scout_askers",
+    "scouting",
+    "selected",
+    "skipped",
+    "skipped_packets",
+    "stream_bytes",
+    "stream_bytes_per_direction",
+];
+
+/// Which end of a flow a row belongs to at selection revision 1 — spelled out
+/// again, for the reason `ANCHOR_SPACE_FIELDS_R2` gives.
+pub const SELECTION_DIRECTION_R1: &[&str] = &["a", "b"];
+
+/// What a selector said about a row at selection revision 1 — the field
+/// document's four words, written out here so that widening one vocabulary
+/// moves its own document's revision and not the other's.
+pub const SELECTION_SELECTED_R1: &[&str] = &["no", "undecided", "unjudged", "yes"];
+
+/// The selection document's value families at revision 1.
+pub const SELECTION_R1_FAMILIES: &[ValueFamily] = &[
+    ValueFamily {
+        key: "direction",
+        values: SELECTION_DIRECTION_R1,
+    },
+    ValueFamily {
+        key: "selected",
+        values: SELECTION_SELECTED_R1,
+    },
+];
+
+/// Both words are PASSENGERS: every row is `direction` plus the coordinates
+/// its list allows plus `selected` when a selector was asked, whichever word
+/// either of them is. What decides whether the coordinates and the verdict
+/// arrive is the caller's numbering and whether a selector was given.
+pub const SELECTION_R1_CARRIES: &[KeyCarries] = &[
+    KeyCarries {
+        key: "direction",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "selected",
+        shape: CarriesShape::Passenger,
+    },
+];
+
 /// The three keys the envelope itself contributes to every document.
 ///
 /// Named rather than repeated into six tables: they are the same three keys
@@ -7518,6 +7611,8 @@ mod tests {
             // ZA-3214 ③ — to 2 when the verdict gained the lexer's `tokens`.
             (SELECTOR_DIAGNOSE, 2),
             (DECLARATIONS_DIAGNOSE, 1),
+            // ZA-3509 — the selector's verdict over the field document's rows.
+            (SELECTION, 1),
         ] {
             named.push(name);
             assert_eq!(revision(name), Some(expected), "{name}");

@@ -447,11 +447,16 @@ fn fields_json_selected(
 /// The lists left out are the subject of a separate report — they are absent
 /// from this document's ROWS, which is a rendering question, and this type only
 /// records which indices the rows it does render stand at.
-struct RenderedLists {
+///
+/// ZA-3509 — crate-visible, because the verdict-only document renders exactly
+/// these lists and a second copy of "which lists are rows" is the enumeration
+/// this type exists to keep single. It reads `stream` and `datagram` and folds
+/// nothing, so `sub` stays this document's own.
+pub(crate) struct RenderedLists {
     /// One index per `d.flows()` row, in order.
-    stream: alloc::vec::Vec<usize>,
+    pub(crate) stream: alloc::vec::Vec<usize>,
     /// One index per `d.datagram_flows()` row, in order — its cleartext list.
-    datagram: alloc::vec::Vec<usize>,
+    pub(crate) datagram: alloc::vec::Vec<usize>,
     /// R2460 (open-debt item 705) — one ROW per `d.datagram_flows()` entry,
     /// holding EVERY list that flow contributes in
     /// `DatagramDissection::frame_lists_with_origin` order.
@@ -475,7 +480,7 @@ impl RenderedLists {
     /// cannot. What is shared is the INDEX; which origins a document renders
     /// stays each document's own decision, and this type is where this
     /// document's is written down.
-    fn of(d: &crate::Dissection) -> Self {
+    pub(crate) fn of(d: &crate::Dissection) -> Self {
         Self {
             stream: crate::node::stream_list_indices(d),
             datagram: crate::node::datagram_list_indices(d),
@@ -2832,6 +2837,279 @@ mod tests {
         );
     }
 
+    /// One row of a document that carries the record coordinates, as the raw
+    /// JSON values `(direction, list_id, anchor, batch_index, selected)` — the
+    /// last empty when the row has no verdict. Rows are found by the key only a
+    /// row carries, so the objects nested inside a row's tree never join them.
+    #[cfg(feature = "network-codecs")]
+    fn coordinate_rows(doc: &str) -> Vec<(String, String, String, String, String)> {
+        crate::doc_revision::object_scopes(doc)
+            .into_iter()
+            .filter(|scope| scope.iter().any(|(key, _)| *key == "list_id"))
+            .map(|scope| {
+                let get = |key: &str| {
+                    scope
+                        .iter()
+                        .find(|(k, _)| *k == key)
+                        .map_or_else(String::new, |(_, value)| String::from(*value))
+                };
+                (
+                    get("direction"),
+                    get("list_id"),
+                    get("anchor"),
+                    get("batch_index"),
+                    get("selected"),
+                )
+            })
+            .collect()
+    }
+
+    /// A numbering that numbers nothing — a caller whose handle minted no ids.
+    #[cfg(feature = "network-codecs")]
+    struct NoListNumbered;
+
+    #[cfg(feature = "network-codecs")]
+    impl RowCoordinates for NoListNumbered {
+        fn list_id(&self, _list: usize) -> Option<u64> {
+            None
+        }
+
+        fn scouting_list_id(&self, _flow: &crate::link::FlowKey) -> Option<u64> {
+            None
+        }
+    }
+
+    /// The captures the verdict document is held against: a session over two
+    /// links with a datagram flow, a flow with no handshake, a compressed
+    /// session, and — where the build reassembles — a capture that starts
+    /// mid-chain. Each carries rows the others do not.
+    #[cfg(feature = "network-codecs")]
+    fn verdict_fixtures() -> Vec<(&'static str, crate::Dissection, Vec<u8>)> {
+        let mut out = Vec::new();
+        let (d, file) = crate::agg::tests::multilink_session_with_file();
+        out.push(("multilink", d, file));
+        let (d, file) = crate::agg::tests::orphan_flow_session_with_file();
+        out.push(("orphan flow", d, file));
+        let (d, file) = crate::datagram_tests::compressed_session_dissection_with_file();
+        out.push(("compressed", d, file));
+        #[cfg(feature = "reassembly")]
+        {
+            let (d, file) = crate::datagram_tests::midsession_fragment_dissection_with_file();
+            out.push(("midsession", d, file));
+        }
+        out
+    }
+
+    /// ZA-3509 — THE VERDICT DOCUMENT IS THE FIELD DOCUMENT'S ROWS AND THE SAME
+    /// WORD ON EACH, without the trees.
+    ///
+    /// # The claim, and why it is the whole of the contract
+    ///
+    /// A consumer that narrows a list from this document and shows a detail from
+    /// the field document is reading two documents about one row, and the only
+    /// thing that makes that safe is that they agree about which rows there are
+    /// and what the selector said of each. So every row the field document
+    /// renders must be here, in its order, with its coordinates and its word —
+    /// over every capture the fixtures hold and every selector a consumer types
+    /// a chip for.
+    ///
+    /// Equality where the field document lost nothing, and the field document's
+    /// rows as an ORDERED SUBSET where it did: a datagram row is dropped there
+    /// when its second read disagrees, and this document has no second read to
+    /// disagree.
+    #[cfg(feature = "network-codecs")]
+    #[test]
+    fn the_verdict_document_is_the_field_documents_rows_without_the_trees() {
+        let mut compared = 0usize;
+        let mut exact = 0usize;
+        for (name, d, file) in verdict_fixtures() {
+            for source in ["bytes > 6", "bytes >= 0", "key == demo/temp", "kind == put"] {
+                let filter = crate::filter::Filter::parse(source).expect("parses");
+                let full = fields_json_where_coordinated(
+                    &d,
+                    &file,
+                    None,
+                    None,
+                    &filter,
+                    &EveryListNumbered,
+                );
+                let light = crate::selection_json::selection_json_where_coordinated(
+                    &d,
+                    &filter,
+                    &EveryListNumbered,
+                );
+                let (in_full, in_light) = (coordinate_rows(&full), coordinate_rows(&light));
+                assert!(
+                    !in_full.is_empty(),
+                    "{name}/{source}: anti-vacuity, the field document must render rows: {full}"
+                );
+                assert!(
+                    in_full.iter().all(|row| !row.4.is_empty()),
+                    "{name}/{source}: every field row must carry a verdict under a selector"
+                );
+
+                let mut from = 0usize;
+                for row in &in_full {
+                    let at = in_light[from..]
+                        .iter()
+                        .position(|candidate| candidate == row)
+                        .unwrap_or_else(|| {
+                            panic!(
+                                "{name}/{source}: the field document's row {row:?} is missing \
+                                 from, or out of order in, the verdict document: {light}"
+                            )
+                        });
+                    from += at + 1;
+                }
+                // Every datagram flow says how many rows its second read cost it; the
+                // documents must agree exactly only where every flow says none.
+                let lost_none = full.matches("\"disagreements\":{\"count\":0,").count()
+                    == full.matches("\"disagreements\":").count();
+                if lost_none && full.contains("\"capture_reread\":true") {
+                    assert_eq!(
+                        in_light, in_full,
+                        "{name}/{source}: where the field document lost no row the two \
+                         documents must list the same rows"
+                    );
+                    exact += 1;
+                }
+                assert!(
+                    light.len() < full.len(),
+                    "{name}/{source}: the verdict document must be the smaller one"
+                );
+                compared += 1;
+            }
+        }
+        assert!(
+            compared >= 12,
+            "the population shrank: {compared} comparisons"
+        );
+        assert!(
+            exact > 0,
+            "anti-vacuity: at least one capture must have lost no row, or the equality arm \
+             never ran"
+        );
+    }
+
+    /// ZA-3509 — AND IT NEEDS NO CAPTURE CONTAINER, which is what lets a handle
+    /// fed by `push` have datagram verdicts at all.
+    ///
+    /// The field document re-reads each datagram from the container to walk its
+    /// tree, so given none it renders no datagram row and says so with
+    /// `capture_reread: false`. The verdict is decided by the record plane, not
+    /// by that walk, so this document has the row anyway. The three counts are
+    /// the argument: the container-less field document has fewer rows than the
+    /// one with a container, and the verdict document has at least as many as
+    /// the latter.
+    #[cfg(feature = "network-codecs")]
+    #[test]
+    fn the_verdict_document_has_datagram_rows_a_container_less_field_document_cannot() {
+        let (d, file) = crate::agg::tests::multilink_session_with_file();
+        let filter = crate::filter::Filter::parse("bytes > 6").expect("parses");
+
+        let blind = fields_json_where_coordinated(&d, &[], None, None, &filter, &EveryListNumbered);
+        assert!(
+            blind.contains("\"capture_reread\":false"),
+            "anti-vacuity: with no container the field document must say it re-read nothing: \
+             {blind}"
+        );
+        let with =
+            fields_json_where_coordinated(&d, &file, None, None, &filter, &EveryListNumbered);
+        let light = crate::selection_json::selection_json_where_coordinated(
+            &d,
+            &filter,
+            &EveryListNumbered,
+        );
+
+        let (blind_rows, with_rows, light_rows) = (
+            coordinate_rows(&blind),
+            coordinate_rows(&with),
+            coordinate_rows(&light),
+        );
+        assert!(
+            blind_rows.len() < with_rows.len(),
+            "anti-vacuity: the fixture must hold a datagram row the container-less document \
+             loses: {} against {}",
+            blind_rows.len(),
+            with_rows.len()
+        );
+        assert!(
+            light_rows.len() >= with_rows.len(),
+            "the verdict document must not lose what the container-less field document does: \
+             {} against {}",
+            light_rows.len(),
+            with_rows.len()
+        );
+    }
+
+    /// ZA-3509 — AN EMPTY SELECTOR IS THE IDENTITY HERE TOO: the rows and their
+    /// coordinates, and no verdict on any of them.
+    ///
+    /// The verdict document is the one place an empty selector could have been
+    /// read as "everything matches" and answered `yes` throughout. It does not:
+    /// that would be the census-and-field family's one exception again, and a
+    /// consumer that passed an empty selector because it was not narrowing would
+    /// read a verdict nobody asked for.
+    #[cfg(feature = "network-codecs")]
+    #[test]
+    fn the_verdict_document_under_an_empty_selector_lists_rows_and_says_nothing_of_them() {
+        let (d, _file) = crate::agg::tests::multilink_session_with_file();
+        let any = crate::filter::Filter::parse("  ").expect("parses");
+        let picky = crate::filter::Filter::parse("bytes > 6").expect("parses");
+
+        let asked_nothing =
+            crate::selection_json::selection_json_where_coordinated(&d, &any, &EveryListNumbered);
+        let asked =
+            crate::selection_json::selection_json_where_coordinated(&d, &picky, &EveryListNumbered);
+        assert!(
+            !asked_nothing.contains("\"selected\""),
+            "an empty selector asks nothing and must write no verdict: {asked_nothing}"
+        );
+        assert!(
+            asked.contains("\"selected\":\"yes\"") && asked.contains("\"selected\":\"no\""),
+            "anti-vacuity: a selector must divide the rows, or the arm above proves nothing: \
+             {asked}"
+        );
+        let coordinates = |doc: &str| -> Vec<(String, String, String, String)> {
+            coordinate_rows(doc)
+                .into_iter()
+                .map(|r| (r.0, r.1, r.2, r.3))
+                .collect()
+        };
+        assert!(
+            !coordinates(&asked_nothing).is_empty(),
+            "an empty selector must not cost a consumer its rows: {asked_nothing}"
+        );
+        assert_eq!(
+            coordinates(&asked_nothing),
+            coordinates(&asked),
+            "the selector adds the verdict and changes neither the rows nor their order"
+        );
+    }
+
+    /// ZA-3509 — a list the caller does not number gets no coordinate keys and
+    /// no invented ones, on the field document's own rule, and the verdict still
+    /// arrives: a consumer that cannot join a row can still count it.
+    #[cfg(feature = "network-codecs")]
+    #[test]
+    fn a_row_of_a_list_nobody_numbered_carries_no_coordinates_and_still_a_verdict() {
+        let (d, _file) = crate::agg::tests::multilink_session_with_file();
+        let picky = crate::filter::Filter::parse("bytes > 6").expect("parses");
+        let doc =
+            crate::selection_json::selection_json_where_coordinated(&d, &picky, &NoListNumbered);
+        assert!(
+            !doc.contains("\"list_id\"")
+                && !doc.contains("\"anchor\"")
+                && !doc.contains("\"batch_index\""),
+            "no coordinate may be invented for a list nobody numbered: {doc}"
+        );
+        assert!(
+            doc.contains("{\"direction\":\"a\",\"selected\":")
+                || doc.contains("{\"direction\":\"b\",\"selected\":"),
+            "and the verdict must still be there: {doc}"
+        );
+    }
+
     /// R2458 (open-debt item 703) — ACCEPTANCE, inherited from item 702 word for
     /// word and asked of the document R2457 did not reach.
     ///
@@ -4271,7 +4549,7 @@ mod tests {
         // against a rename and against each other and against NOTHING a
         // consumer could read.
         let mut failures: Vec<String> = Vec::new();
-        let live: [(&str, &str, Vec<&'static str>); 22] = [
+        let live: [(&str, &str, Vec<&'static str>); 24] = [
             // ZA-3215 — the session's per-frame verdicts, each held to the
             // walk its emitter's exhaustive match is bound to.
             (rev::FIELDS, "verdict", SnVerdictWord::names()),
@@ -4361,6 +4639,21 @@ mod tests {
                 rev::SELECTOR_DIAGNOSE,
                 "kind",
                 crate::filter::TokenClass::names(),
+            ),
+            // ZA-3509 — the verdict document's two families, each held to the
+            // SAME walk the field document's is. Two declarations of one
+            // vocabulary at their own documents' revisions, and one walk behind
+            // both: that is what keeps the verdict document from drifting into a
+            // second answer about the four words.
+            (
+                rev::SELECTION,
+                "selected",
+                crate::fields_json::RowVerdict::names(),
+            ),
+            (
+                rev::SELECTION,
+                "direction",
+                crate::census_json::direction_names(),
             ),
         ];
         // R2185 — what this table ACTUALLY held, collected as it is walked
@@ -4840,7 +5133,7 @@ mod tests {
         #[cfg(feature = "reassembly")]
         through.push((&midsession_d, &midsession_file[..], None));
         let mut widened: Vec<String> = Vec::new();
-        for (dissection, capture, decl) in through {
+        for &(dissection, capture, decl) in &through {
             widened.push(fields_json_where(dissection, capture, None, decl, &every));
             widened.push(fields_json_where_coordinated(
                 dissection,
@@ -4852,6 +5145,24 @@ mod tests {
             ));
         }
         fields_docs.extend(widened.iter());
+        // ZA-3509 — THE VERDICT DOCUMENT, over every capture the field document
+        // is rendered over and under the selectors that between them reach the
+        // words: one that keeps every row, one that matches this capture's key
+        // and one that does not. Plus the empty selector, which is the shape the
+        // other three never write — rows with their coordinates and no verdict
+        // at all — so a declaration that forgot the key can be absent is
+        // measured against a document where it is.
+        let asked_nothing = crate::filter::Filter::parse("").expect("parses");
+        let mut verdict_docs: Vec<String> = Vec::new();
+        for &(dissection, _, _) in &through {
+            for selector in [&every, &hit, &miss, &asked_nothing] {
+                verdict_docs.push(crate::selection_json::selection_json_where_coordinated(
+                    dissection,
+                    selector,
+                    &EveryListNumbered,
+                ));
+            }
+        }
         // ZA-3214 ③ — the selector verdict, over selectors that between them
         // reach every token class, on both branches.
         let diagnoses: Vec<String> = [
@@ -4867,13 +5178,14 @@ mod tests {
         #[cfg(feature = "reassembly")]
         fields_docs.push(&midsession_fields);
         fields_docs.extend(arms.iter());
-        let docs: [(&str, Vec<&String>); 3] = [
+        let docs: [(&str, Vec<&String>); 4] = [
             (rev::FIELDS, fields_docs),
             (
                 rev::CENSUS,
                 alloc::vec![&census, &censusl, &censusdg, &interests, &multilink],
             ),
             (rev::SELECTOR_DIAGNOSE, diagnoses.iter().collect()),
+            (rev::SELECTION, verdict_docs.iter().collect()),
         ];
 
         // ⚠ R2185 — THE DOCUMENTS THIS GATE RENDERS ARE THE DOCUMENTS THAT

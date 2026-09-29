@@ -138,6 +138,16 @@ pub mod interest;
 /// links where both ends named themselves. The one plane whose unit is not a
 /// flow.
 pub mod node;
+/// ZA-3509 — a selector's VERDICT over the rows of [`fields_json`], and nothing
+/// beside it: five values per row and the ceilings, where the field document
+/// renders every row's whole tree.
+///
+/// Gated on `dissect` like the document whose rows it is, and on
+/// `network-codecs` as well: the verdict is decided by the record plane, so a
+/// build without it has no word to write and this document would be a list of
+/// coordinates claiming to answer a question it cannot ask.
+#[cfg(all(feature = "dissect", feature = "network-codecs"))]
+pub mod selection_json;
 use exit::ExitingFlow as _;
 /// R311y616 (§1.1f) — the FILTER LANGUAGE: a selector a reader types, compiled
 /// into a three-valued predicate over records.

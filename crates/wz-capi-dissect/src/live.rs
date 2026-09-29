@@ -774,6 +774,37 @@ impl LiveDissection {
         )
     }
 
+    /// ZA-3509 — THE SELECTOR'S VERDICT OVER THE ROWS OF THE FIELD DOCUMENT, and
+    /// nothing beside it: each row's four coordinates and the word the selector
+    /// said, with the ceilings that made the list short.
+    ///
+    /// # Why this is a method of its own and not a flag on the one above
+    ///
+    /// The field document renders every row's whole tree, carried state and
+    /// session verdicts, and a consumer narrowing a list needs none of them —
+    /// measured by that consumer at 58 MB and 1.5 s to read, per chip toggle, on
+    /// 25,360 rows. A "no tree" argument would make one document with two
+    /// shapes; this is two documents, each with its own revision, which is how
+    /// this library already tells a reader which shape it holds.
+    ///
+    /// # `&mut`, for the reason [`Self::fields_where`] is
+    ///
+    /// A list not drained yet has no id, and a row without one cannot join the
+    /// record a later drain hands out. The ids are settled first, by a drain into
+    /// an empty buffer: no record is handed out and no decoded message changes.
+    ///
+    /// # No capture container
+    ///
+    /// The field document re-reads each datagram from the container to walk its
+    /// tree. The verdict is decided by the record plane and needs no such walk,
+    /// so this takes no container and a handle fed by `push` gets datagram
+    /// verdicts it cannot get from the field document.
+    pub fn selection(&mut self, filter: &wz_capture::filter::Filter) -> String {
+        self.drain(&mut []);
+        let ids = HandleIds::of(self);
+        wz_capture::selection_json::selection_json_where_coordinated(&self.dissection, filter, &ids)
+    }
+
     /// R2453 (open-debt item 700) — THE FEED ENDED: spend the patience that a
     /// capture's last packet spends.
     ///

@@ -559,6 +559,20 @@ ONLY_CAPI = {
         "question only a record consumer has.",
         (),
     ),
+    # ZA-3509 — the selector's verdict over those rows, without the trees. Filed
+    # in the round that added the symbol.
+    "the selector's verdict over the rows of an OPEN handle": (
+        "wz_dissect_live_selection",
+        "DELIBERATE, for the reason the row above gives and one more. It is the "
+        "same JOIN -- a row's coordinates against a drained record's -- with "
+        "the part a narrowing consumer does not need taken out: the command "
+        "line has no records to join to and no list to narrow between "
+        "keystrokes, so its `--select` prints the picked rows and is finished. "
+        "What has no counterpart is the REPEATED question: a consumer that "
+        "re-asks on every chip toggle and would otherwise pay for every row's "
+        "tree each time.",
+        (),
+    ),
     "declaring a live feed OVER": (
         "wz_dissect_live_end",
         "DELIBERATE. A terminal run cannot NOT end its feed: every flag "

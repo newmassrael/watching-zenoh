@@ -70,8 +70,8 @@
  * open-debt item 554 is about one paragraph long. ASK the document; the number
  * here would only ever be a copy. (The envelope carries one more key for a
  * document that declares planes -- see R2180 below.) The names are "census",
- * "fields", "summary", "readable_surfaces", "selector_diagnose" and
- * "declarations_diagnose" — one per door group, because a consumer calls the
+ * "fields", "summary", "readable_surfaces", "selector_diagnose",
+ * "declarations_diagnose" and "selection" — one per door group, because a consumer calls the
  * door it wants and a single library-wide number would tell a reader of the
  * census that a document it never calls had moved.
  *
@@ -896,7 +896,7 @@ extern "C" {
  * calls the function, and refuses when the two disagree.
  *
  * @unknown ABI not-an-enumeration */
-#define WZ_DISSECT_ABI_REVISION 19
+#define WZ_DISSECT_ABI_REVISION 20
 
 /* Symbol/memory-contract revision. Not a JSON-shape revision. This is the
  * revision the LOADED library reports; the block above says why it exists
@@ -2098,6 +2098,70 @@ int wz_dissect_live_fields_where(wz_dissect_live *h,
                                  size_t max_messages_shown_per_flow,
                                  const char *selector,
                                  const char *declarations, char **out);
+
+/* ZA-3509 (ABI 20) -- THE VERDICT OF A SELECTOR OVER THE ROWS OF THAT
+ * DOCUMENT, and nothing beside it.
+ *
+ * wz_dissect_live_fields_where says which rows a selector picked inside a
+ * document that renders every row's whole tree, carried state and session
+ * verdicts. A consumer narrowing a message list needs, per row, only the four
+ * coordinates that join the row to a record and the word the selector said.
+ * Measured by that consumer on a capture of 25,360 rows: 171 ms for the door,
+ * 58 MB of document and 1.5 s to read it, on every chip toggle. This door
+ * writes those five values per row and the ceilings that made the list short:
+ *
+ *     {"document":{"name":"selection","revision":R},
+ *      "rows":[{"direction":"a","list_id":L,"anchor":A,"batch_index":B,
+ *               "selected":"yes"}, ...],
+ *      "dropped_by_limits":{...}}
+ *
+ * It is a document of its own, with its own revision, and not a "no tree" mode
+ * of the one above: two shapes behind one name would make every reader of the
+ * tree reason about a document that sometimes has none.
+ *
+ * THE VERDICT IS THE SAME ONE. Each row's word is decided by the same function
+ * the field document's is, the coordinates are the same numbers with the same
+ * meanings (a record and its row join on equal list_id, direction, anchor and
+ * batch_index), and the rows are the field document's rows in its order. Two
+ * differences, and both are that document's limitation and not this one's:
+ *
+ *   - The field document renders a datagram row only when it can re-read the
+ *     packet from the capture container and the second read agrees. This door
+ *     needs no packet -- the verdict is decided by the record plane, not by a
+ *     re-walk of the bytes -- so it has a row for every frame the dissection
+ *     framed and takes no container. A handle fed by wz_dissect_live_push,
+ *     which has none, gets datagram verdicts here that the field document
+ *     cannot give it.
+ *   - Neither renders a recovered QUIC stream or a serial line: those lists
+ *     have no row in the field document, and this document is its rows.
+ *
+ * AN EMPTY SELECTOR IS THE IDENTITY, as it is for every other door here: it
+ * asks nothing, so each row carries its coordinates and no "selected" key. The
+ * one thing this door could have done differently -- read an empty selector as
+ * "everything matches" and answered "yes" throughout -- would have made it the
+ * only door where no selector and the selector that matches all differ.
+ * Whitespace is the same selector as nothing. A row of a list you did not
+ * number carries no coordinate keys, and never an invented one.
+ *
+ * `selector` is the language wz_dissect_pcap_census_where_limited takes, and it
+ * is refused the same way -- WZ_DISSECT_ERR_SELECTOR, with
+ * wz_dissect_selector_diagnose available to say where. There is no `declarations`
+ * argument, because the verdict does not depend on how a payload is decoded,
+ * and no `max_messages_shown_per_flow`, which trims trees this document does
+ * not render. The limit preset is the handle's, chosen at open; a row the walk
+ * never reached is ABSENT rather than unmatched, and dropped_by_limits says so.
+ *
+ * `h` is not const, for the reason wz_dissect_live_fields_where gives: a list
+ * not drained yet has no id, so the ids are settled first by the reconciliation
+ * a drain performs, handing out no record. The next wz_dissect_live_drain
+ * returns exactly what it would have, under the same ids.
+ *
+ * @values selection direction
+ * @values selection selected
+ * @carries selection direction passenger
+ * @carries selection selected passenger */
+int wz_dissect_live_selection(wz_dissect_live *h, const char *selector,
+                              char **out);
 
 /* Release a live handle. Null is a no-op, so your cleanup path needs no
  * guard of its own -- the same rule wz_dissect_string_free follows, and the

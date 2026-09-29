@@ -315,6 +315,7 @@ pub extern "C" fn wz_dissect_abi_version() -> c_int {
     // does not know about.
     // ZA-3214 — 18, for `wz_dissect_live_fields_where`.
     // ZA-3215 — 19, for `wz_dissect_live_reassembled_bytes`.
+    // ZA-3509 — 20, for `wz_dissect_live_selection`.
     WZ_DISSECT_ABI_REVISION
 }
 
@@ -332,7 +333,7 @@ pub extern "C" fn wz_dissect_abi_version() -> c_int {
 /// It lives AFTER the function rather than above it on purpose: an item placed
 /// between a doc comment and the item it documents takes that doc, which is
 /// the doc-ownership defect the C1bz budget records.
-pub const WZ_DISSECT_ABI_REVISION: c_int = 19;
+pub const WZ_DISSECT_ABI_REVISION: c_int = 20;
 
 /// R2108 (open-debt item 525) — THE RECORD'S LAYOUT, reported by the artifact.
 ///
@@ -2190,6 +2191,77 @@ pub unsafe extern "C" fn wz_dissect_live_fields_where(
     let declared = wz_capture::payload_decode::Declarations::new(&map);
     // SAFETY: caller contract above.
     let doc = unsafe { (*handle).fields_where(capture, cap, Some(&declared), &filter) };
+    write_string(doc, out)
+}
+
+/// ZA-3509 (ABI 20) — THE VERDICT OF A SELECTOR OVER THE ROWS OF A LIVE
+/// HANDLE'S FIELD DOCUMENT, and nothing beside it.
+///
+/// # What a narrowing consumer was paying for
+///
+/// The only door that said which rows a selector picked was
+/// [`wz_dissect_live_fields_where`], and it says so inside a document that
+/// renders every row's whole tree, carried state and session verdicts. A consumer
+/// narrowing a message list needs, per row, the four coordinates that join the
+/// row to a record and the word the selector said. Measured by that consumer on
+/// a 25,360-row capture: 171 ms for the door, 58 MB of document, 1.5 s to read
+/// it, on every chip toggle — against the 0.1 to 0.2 s its own evaluator took
+/// before it was retired in favour of this library's.
+///
+/// This door writes those five values per row and the ceilings that made the
+/// list short, as the document `selection` at revision one. The verdict is the
+/// same one, from the same function, and the rows are the field document's rows
+/// in its order; `wz_capture::selection_json` states the two places they
+/// differ, both of which are the field document's limitation.
+///
+/// # What it does not take
+///
+/// No `bytes` / `len`: the field document re-reads each datagram from the capture
+/// container to walk its tree, and this document walks no tree. A handle fed by
+/// [`wz_dissect_live_push`], which has no container, therefore gets datagram
+/// verdicts here that it cannot get from the field document. No `declarations`
+/// and no `max_messages_shown_per_flow`: the verdict does not depend on how a
+/// payload is decoded, and a row cap is a statement about rendering trees. The
+/// limit preset is the handle's, as it is for every live door.
+///
+/// # An empty selector is the identity
+///
+/// It asks nothing, so rows carry their coordinates and no `selected` key, as
+/// they do through [`wz_dissect_pcap_fields_where_limited`]. A selector that
+/// does not parse is [`WZ_DISSECT_ERR_SELECTOR`], and
+/// [`wz_dissect_selector_diagnose`] says where.
+///
+/// # `handle` is not `const`
+///
+/// For the reason [`wz_dissect_live_fields_where`] gives: the ids are settled
+/// first by the reconciliation a drain performs, handing out no record, so the
+/// next [`wz_dissect_live_drain`] returns exactly what it would have.
+///
+/// # Safety
+/// `handle` must be a handle from [`wz_dissect_live_open`] or
+/// [`wz_dissect_pcap_replay`] that has not been closed. `selector` must be a
+/// NUL-terminated C string and `out` a writable pointer to a `*mut c_char`;
+/// none of the three may be null.
+#[no_mangle]
+pub unsafe extern "C" fn wz_dissect_live_selection(
+    handle: *mut live::LiveDissection,
+    selector: *const c_char,
+    out: *mut *mut c_char,
+) -> c_int {
+    if handle.is_null() || selector.is_null() || out.is_null() {
+        return WZ_DISSECT_ERR_INVALID_ARG;
+    }
+    // SAFETY: caller contract above.
+    let expr = match unsafe { std::ffi::CStr::from_ptr(selector) }.to_str() {
+        Ok(s) => s,
+        Err(_) => return WZ_DISSECT_ERR_INVALID_ARG,
+    };
+    let filter = match wz_capture::filter::Filter::parse(expr) {
+        Ok(f) => f,
+        Err(_) => return WZ_DISSECT_ERR_SELECTOR,
+    };
+    // SAFETY: caller contract above.
+    let doc = unsafe { (*handle).selection(&filter) };
     write_string(doc, out)
 }
 
@@ -5334,7 +5406,11 @@ mod tests {
         // ZA-3215 — 19, for `wz_dissect_live_reassembled_bytes`: a joined
         // chain's buffer copied out into a buffer the caller sized. One
         // symbol; the memory rule and the record layout stay put.
-        assert_eq!(wz_dissect_abi_version(), 19);
+        // ZA-3509 — 20, for `wz_dissect_live_selection`: the selector's verdict
+        // over the field document's rows. One symbol, a `char*` released by
+        // `wz_dissect_string_free`; the memory rule and the record layout stay
+        // put.
+        assert_eq!(wz_dissect_abi_version(), 20);
     }
 
     /// R311y913 (unregistered item 435) — THE LINKED SURFACE CAN SAY WHAT IT
@@ -5889,6 +5965,8 @@ mod tests {
             (rev::READABLE_SURFACES, vec![call_readable_surfaces()]),
             (rev::SELECTOR_DIAGNOSE, vec![selector_ok, selector_bad]),
             (rev::DECLARATIONS_DIAGNOSE, vec![decl_ok, decl_bad]),
+            // ZA-3509 — built by a door that takes a handle, so it comes from one.
+            (rev::SELECTION, selection_documents()),
         ];
 
         let mut failures: Vec<String> = Vec::new();
@@ -6016,6 +6094,15 @@ mod tests {
             (rev::READABLE_SURFACES, call_readable_surfaces()),
             (rev::SELECTOR_DIAGNOSE, call_selector_diagnose("")),
             (rev::DECLARATIONS_DIAGNOSE, call_declarations_diagnose("")),
+            // ZA-3509 — declares no plane, so it contributes no `@planes` marker,
+            // and being in this table is what makes that a checked fact.
+            (
+                rev::SELECTION,
+                selection_documents()
+                    .into_iter()
+                    .next()
+                    .expect("a document"),
+            ),
             (rev::CENSUS, call_census(&stream).expect("the census door")),
             (
                 rev::FIELDS,
@@ -6129,6 +6216,8 @@ mod tests {
                     call_declarations_diagnose("not a declaration"),
                 ],
             ),
+            // ZA-3509 — both shapes, for the reason `selection_documents` gives.
+            (rev::SELECTION, selection_documents()),
             (
                 rev::CENSUS,
                 vec![call_census(&stream).expect("the census door")],
@@ -6972,7 +7061,17 @@ mod tests {
     /// Call `wz_dissect_live_fields_where` with an empty selector and no
     /// declarations.
     fn live_fields(handle: *mut live::LiveDissection, capture: &[u8]) -> String {
-        let selector = std::ffi::CString::new("").expect("no NUL");
+        live_fields_under(handle, capture, "")
+    }
+
+    /// `wz_dissect_live_fields_where` under `selector`, no declarations — the
+    /// field document a verdict document is held against.
+    fn live_fields_under(
+        handle: *mut live::LiveDissection,
+        capture: &[u8],
+        selector: &str,
+    ) -> String {
+        let selector = std::ffi::CString::new(selector).expect("no NUL");
         let declarations = std::ffi::CString::new("").expect("no NUL");
         let mut out: *mut c_char = core::ptr::null_mut();
         let (bytes, len) = if capture.is_empty() {
@@ -7084,6 +7183,288 @@ mod tests {
             "no datagram row was rendered: {doc}"
         );
         assert_eq!(drain_live(handle, 8).len(), 1, "and the drain is untouched");
+        unsafe { wz_dissect_live_close(handle) };
+    }
+
+    /// `wz_dissect_live_selection` under `selector`, the way C calls it, with
+    /// the refusal code when it refuses.
+    fn live_selection(handle: *mut live::LiveDissection, selector: &str) -> Result<String, c_int> {
+        let expr = std::ffi::CString::new(selector).expect("no interior NUL");
+        let mut out: *mut c_char = core::ptr::null_mut();
+        let rc = unsafe { wz_dissect_live_selection(handle, expr.as_ptr(), &mut out) };
+        if rc != WZ_DISSECT_OK {
+            assert!(out.is_null(), "an error must hand back no string");
+            return Err(rc);
+        }
+        assert!(!out.is_null(), "OK must come with a string");
+        let doc = unsafe { std::ffi::CStr::from_ptr(out) }
+            .to_str()
+            .expect("utf8")
+            .to_string();
+        unsafe { wz_dissect_string_free(out) };
+        Ok(doc)
+    }
+
+    /// The capture the three verdict tests share: a TCP stream carrying two
+    /// framed messages, two UDP conversations and a scout — the shape
+    /// `every_drained_record_joins_exactly_one_row_of_the_live_field_document`
+    /// holds, so a difference between the two documents is a difference of
+    /// documents and not of fixtures.
+    fn verdict_capture() -> Vec<u8> {
+        let framed = [0x01, 0x00, 0x04, 0x01, 0x00, 0x04];
+        let packets = [
+            tcp_packet(1000, &framed),
+            udp_packet([10, 0, 0, 1], 7447, [10, 0, 0, 2], 7447, &KEEPALIVE),
+            udp_packet([10, 0, 0, 3], 7447, [10, 0, 0, 4], 7447, &KEEPALIVE),
+            scout_to_group([192, 168, 1, 5], 43210),
+        ];
+        let rows: Vec<(u32, u32, &[u8])> = packets
+            .iter()
+            .enumerate()
+            .map(|(i, p)| (i as u32, 0, p.as_slice()))
+            .collect();
+        wz_capture::pcap::write(1, &rows)
+    }
+
+    /// ZA-3509 — the verdict document as it CROSSES THE ABI, for the gates that
+    /// hold every document this library emits to a table.
+    ///
+    /// Two of them, because its key set is a union over two shapes: asked under
+    /// a selector it carries `selected` on every row, and asked nothing it
+    /// carries none, so a pin over one shape would leave the other's keys
+    /// unwatched. It comes from a handle because that is the only door that
+    /// builds it.
+    fn selection_documents() -> Vec<String> {
+        let capture = verdict_capture();
+        let handle = replay(&capture, WZ_DISSECT_LIMITS_NONE).expect("the replay opens");
+        let docs = vec![
+            live_selection(handle, "bytes >= 0").expect("a selector that asks"),
+            live_selection(handle, "").expect("an empty selector"),
+        ];
+        unsafe { wz_dissect_live_close(handle) };
+        docs
+    }
+
+    /// One row of a document that carries the record coordinates, as
+    /// `(direction, list_id, anchor, batch_index, selected)` raw JSON values.
+    fn coordinate_rows(doc: &str) -> Vec<(String, String, String, String, String)> {
+        wz_capture::doc_revision::object_scopes(doc)
+            .into_iter()
+            .filter(|scope| scope.iter().any(|(key, _)| *key == "list_id"))
+            .map(|scope| {
+                let get = |key: &str| {
+                    scope
+                        .iter()
+                        .find(|(k, _)| *k == key)
+                        .map_or_else(String::new, |(_, value)| String::from(*value))
+                };
+                (
+                    get("direction"),
+                    get("list_id"),
+                    get("anchor"),
+                    get("batch_index"),
+                    get("selected"),
+                )
+            })
+            .collect()
+    }
+
+    /// ZA-3509 — EVERY DRAINED RECORD JOINS EXACTLY ONE ROW OF THE VERDICT
+    /// DOCUMENT, and the door asks for no capture container.
+    ///
+    /// The same population the field document's join test holds — a stream with
+    /// two messages, two datagram conversations, a scout — through the door that
+    /// exists so a narrowing consumer does not pay for the trees. The container
+    /// is not an argument, and the datagram and scouting rows are here all the
+    /// same, which the field document could only render by re-reading it.
+    #[test]
+    fn every_drained_record_joins_exactly_one_row_of_the_live_selection() {
+        let capture = verdict_capture();
+        let handle = replay(&capture, WZ_DISSECT_LIMITS_NONE).expect("the replay opens");
+
+        let doc = live_selection(handle, "bytes >= 0").expect("the door answers");
+        let records = drain_live(handle, 64);
+        assert_eq!(
+            records.len(),
+            5,
+            "two stream, two datagram, one scout: {records:?}"
+        );
+
+        for r in &records {
+            let needle = format!(
+                "\"list_id\":{},\"anchor\":{},\"batch_index\":{},\"selected\":",
+                r.list_id, r.anchor, r.batch_index
+            );
+            assert_eq!(
+                doc.matches(needle.as_str()).count(),
+                1,
+                "record {r:?} must join exactly one row by {needle}: {doc}"
+            );
+        }
+        assert_eq!(
+            doc.matches("\"list_id\":").count(),
+            records.len(),
+            "and no row may carry a coordinate no record has: {doc}"
+        );
+        // The ids were settled by the first call and are not minted again by the
+        // second, whether or not a drain came between them.
+        assert_eq!(live_selection(handle, "bytes >= 0").expect("answers"), doc);
+        unsafe { wz_dissect_live_close(handle) };
+    }
+
+    /// ZA-3509 — THE TWO LIVE DOCUMENTS AGREE ROW FOR ROW: the same coordinates,
+    /// the same order, the same word, under a selector that divides the rows.
+    ///
+    /// The contract that makes the light document safe to narrow with while the
+    /// heavy one supplies the detail. The check is over what a consumer would
+    /// join on, read out of both documents by the same parser.
+    #[test]
+    fn the_live_selection_and_the_live_field_document_agree_row_for_row() {
+        let capture = verdict_capture();
+        let handle = replay(&capture, WZ_DISSECT_LIMITS_NONE).expect("the replay opens");
+        for selector in ["bytes >= 0", "bytes > 0", "kind == put"] {
+            let field = live_fields_under(handle, &capture, selector);
+            let light = live_selection(handle, selector).expect("the door answers");
+            let (in_field, in_light) = (coordinate_rows(&field), coordinate_rows(&light));
+            assert_eq!(
+                in_field.len(),
+                5,
+                "{selector}: the fixture's five rows: {field}"
+            );
+            assert!(
+                in_field.iter().all(|row| !row.4.is_empty()),
+                "{selector}: every field row carries a verdict under a selector: {field}"
+            );
+            assert_eq!(
+                in_light, in_field,
+                "{selector}: the verdict document must list the field document's rows, in its \
+                 order, with its words"
+            );
+            assert!(
+                light.len() < field.len(),
+                "{selector}: and it must be the smaller document"
+            );
+        }
+        unsafe { wz_dissect_live_close(handle) };
+    }
+
+    /// ZA-3509 — A HANDLE FED BY `push`, WHICH HAS NO CONTAINER, STILL GETS ITS
+    /// DATAGRAM VERDICTS.
+    ///
+    /// `a_pushed_handle_with_no_container_says_it_could_not_reread` holds the
+    /// other half: the field document renders no datagram row there and says so.
+    /// The verdict is decided by the record plane, so this door has the row, and
+    /// a KeepAlive — a message the record plane judges nothing about — is
+    /// `unjudged` on it.
+    #[test]
+    fn a_pushed_handle_has_datagram_verdicts_the_field_document_cannot_give_it() {
+        let handle = open_live(WZ_DISSECT_LIMITS_NONE).expect("the preset opens");
+        let packet = udp_packet([10, 0, 0, 1], 7447, [10, 0, 0, 2], 7447, &KEEPALIVE);
+        push_live(handle, 1_000_000, &packet);
+
+        assert!(
+            !live_fields_under(handle, &[], "bytes >= 0").contains("\"list_id\""),
+            "anti-vacuity: the field document has no datagram row here"
+        );
+        let doc = live_selection(handle, "bytes >= 0").expect("the door answers");
+        let rows = coordinate_rows(&doc);
+        assert_eq!(rows.len(), 1, "the datagram's row: {doc}");
+        assert_eq!(rows[0].4, "\"unjudged\"", "{doc}");
+        assert_eq!(drain_live(handle, 8).len(), 1, "and the drain is untouched");
+        unsafe { wz_dissect_live_close(handle) };
+    }
+
+    /// ZA-3509 — AN EMPTY SELECTOR ASKS NOTHING, at the door, and what a
+    /// selector adds is the verdict and nothing else.
+    ///
+    /// Whitespace is the same selector as nothing. The arm after it is the one
+    /// that keeps the first from being satisfied by a door that never writes the
+    /// key: taking the verdict out of a narrowed document gives back the
+    /// document that asked nothing.
+    #[test]
+    fn an_empty_selector_makes_the_live_selection_list_rows_and_say_nothing_of_them() {
+        let capture = verdict_capture();
+        let handle = replay(&capture, WZ_DISSECT_LIMITS_NONE).expect("the replay opens");
+
+        let nothing = live_selection(handle, "").expect("answers");
+        assert_eq!(live_selection(handle, "  \t").expect("answers"), nothing);
+        assert!(
+            !nothing.contains("\"selected\""),
+            "no question, no verdict: {nothing}"
+        );
+        assert_eq!(
+            coordinate_rows(&nothing).len(),
+            5,
+            "but every row is listed: {nothing}"
+        );
+
+        let asked = live_selection(handle, "bytes >= 0").expect("answers");
+        assert!(asked.contains("\"selected\":"), "anti-vacuity: {asked}");
+        let mut stripped = asked.clone();
+        for word in ["yes", "no", "undecided", "unjudged"] {
+            stripped = stripped.replace(&format!(",\"selected\":\"{word}\""), "");
+        }
+        assert_eq!(
+            stripped, nothing,
+            "a selector adds the verdict and nothing else"
+        );
+        unsafe { wz_dissect_live_close(handle) };
+    }
+
+    /// ZA-3509 — THE DOOR'S REFUSALS, each with its own code, and no string on
+    /// any of them.
+    ///
+    /// A selector that does not parse is `WZ_DISSECT_ERR_SELECTOR` and not a
+    /// bad argument: it is the text a person typed, and a consumer that saw
+    /// `INVALID_ARG` would send them to the wrong box, which is the argument
+    /// every selector door here makes. The document names its own revision, read
+    /// back from the library rather than typed here, so a revision that moved
+    /// without the door noticing is a red and not a stale literal.
+    #[test]
+    fn the_live_selection_refuses_by_code_and_names_its_own_revision() {
+        let capture = verdict_capture();
+        let handle = replay(&capture, WZ_DISSECT_LIMITS_NONE).expect("the replay opens");
+        let good = std::ffi::CString::new("bytes >= 0").expect("no NUL");
+        let bad = std::ffi::CString::new("key ==").expect("no NUL");
+        let not_utf8 = std::ffi::CString::new(vec![0xffu8, 0xfe]).expect("no NUL");
+        let mut out: *mut c_char = core::ptr::null_mut();
+        unsafe {
+            assert_eq!(
+                wz_dissect_live_selection(core::ptr::null_mut(), good.as_ptr(), &mut out),
+                WZ_DISSECT_ERR_INVALID_ARG
+            );
+            assert_eq!(
+                wz_dissect_live_selection(handle, core::ptr::null(), &mut out),
+                WZ_DISSECT_ERR_INVALID_ARG
+            );
+            assert_eq!(
+                wz_dissect_live_selection(handle, good.as_ptr(), core::ptr::null_mut()),
+                WZ_DISSECT_ERR_INVALID_ARG
+            );
+            assert_eq!(
+                wz_dissect_live_selection(handle, not_utf8.as_ptr(), &mut out),
+                WZ_DISSECT_ERR_INVALID_ARG
+            );
+            assert_eq!(
+                wz_dissect_live_selection(handle, bad.as_ptr(), &mut out),
+                WZ_DISSECT_ERR_SELECTOR
+            );
+        }
+        assert!(out.is_null(), "no refusal may hand back a string");
+
+        let doc = live_selection(handle, "bytes >= 0").expect("a selector that asks");
+        let revision = wz_capture::doc_revision::revision(wz_capture::doc_revision::SELECTION)
+            .expect("the document has a revision");
+        assert!(
+            doc.starts_with(&format!(
+                "{{\"document\":{{\"name\":\"selection\",\"revision\":{revision}}}"
+            )),
+            "the document must open with its own envelope: {doc}"
+        );
+        assert!(
+            doc.contains("\"dropped_by_limits\":"),
+            "and say what a ceiling cost: {doc}"
+        );
         unsafe { wz_dissect_live_close(handle) };
     }
 

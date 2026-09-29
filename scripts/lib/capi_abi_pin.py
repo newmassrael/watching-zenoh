@@ -50,7 +50,7 @@ import subprocess
 import sys
 
 # The pinned pair. Edit BOTH halves deliberately -- see the module doc.
-EXPECTED_VERSION = 19
+EXPECTED_VERSION = 20
 
 # R2108 (open-debt item 525) -- THE RECORD'S LAYOUT, pinned HERE and read from
 # the artifact through `wz_dissect_record_layout`.
@@ -148,6 +148,16 @@ EXPECTED_SYMBOLS = {
     # a `char*` released by `wz_dissect_string_free`, and the container bytes
     # are read from a buffer the CALLER holds.
     "wz_dissect_live_fields_where",
+    # ZA-3509 (ABI 20) — the selector's VERDICT over that document's rows, and
+    # nothing beside it: four coordinates and a word per row, where the field
+    # document renders every row's whole tree (a consumer measured 58 MB and
+    # 1.5 s to read it, per chip toggle, on 25,360 rows). The memory rule does
+    # not move: the document is a `char*` released by `wz_dissect_string_free`
+    # and the handle is the one `wz_dissect_live_open` made. It takes no
+    # capture container -- the field document re-reads datagrams from one to walk
+    # their trees and this document walks none -- so it is its own symbol and
+    # not a flag on the one above, which would have given one name two shapes.
+    "wz_dissect_live_selection",
     # R2171 (open-debt item 547) — the door BETWEEN the two families above and
     # the nine document doors below. It hands back the same opaque handle
     # `wz_dissect_live_open` does, so the memory rule does not move with it:
