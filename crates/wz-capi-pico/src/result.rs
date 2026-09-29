@@ -52,6 +52,13 @@ pub const Z_ERR_INVALID: ZResult = -1;
 /// `src/net/primitives.c:439`), so a C program that checks for it must see it.
 pub const Z_ERR_KEYEXPR_NOT_MATCH: ZResult = -108;
 
+/// `z_undeclare_keyexpr` was handed a keyexpr another session declared.
+/// Matches pico `_Z_ERR_KEYEXPR_DECLARED_ON_ANOTHER_SESSION`
+/// (`include/zenoh-pico/utils/result.h`) EXACTLY, for the reason the two codes
+/// around it are not collapsed: it is the one answer that tells a caller its
+/// retraction went to the wrong session rather than failed.
+pub const Z_ERR_KEYEXPR_DECLARED_ON_ANOTHER_SESSION: ZResult = -70;
+
 /// A get was issued with a cancellation token that had ALREADY cancelled.
 /// Matches pico `Z_ERR_CANCELLED` (`utils/result.h:98`) EXACTLY, for the reason
 /// [`Z_ERR_KEYEXPR_NOT_MATCH`] is not collapsed either: it is a code the caller

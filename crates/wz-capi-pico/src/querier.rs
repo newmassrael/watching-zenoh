@@ -51,7 +51,7 @@ use crate::get::{
     z_consolidation_mode_t, z_query_consolidation_t, z_query_target_t, Z_CONSOLIDATION_MODE_AUTO,
     Z_QUERY_TARGET_BEST_MATCHING,
 };
-use crate::keyexpr::keyexpr_str;
+use crate::keyexpr::{declared_of, keyexpr_str, DeclaredKeyexpr};
 use crate::matching::{
     consume_matching_closure, z_matching_status_t, z_moved_closure_matching_status_t,
     z_owned_matching_listener_t, MatchingListenerState,
@@ -175,12 +175,14 @@ pub unsafe extern "C" fn z_querier_get_options_default(options: *mut z_querier_g
 /// See `PublisherState::record_matching_listener` for the defect that taught it.
 pub(crate) struct QuerierState {
     shared: Arc<SharedSession>,
-    keyexpr: String,
+    /// R2959 — the querier's key with the whole-key declaration pico makes
+    /// for it; retracted after the querier, as the publisher's is.
+    key: DeclaredKeyexpr,
     /// R311y559 — the `eid` half of the global id `z_querier_id` reports,
     /// allocated once at declare. See `PublisherState::eid`.
     eid: u64,
-    /// R311y559 — cached `{ start, len }` over `keyexpr` for
-    /// `z_querier_keyexpr`; bound after boxing, as everywhere else here.
+    /// R311y559 — cached loan of `key` for `z_querier_keyexpr`; bound after
+    /// boxing, as everywhere else here.
     loaned_keyexpr: crate::abi::z_loaned_keyexpr_t,
     target: z_query_target_t,
     consolidation: z_consolidation_mode_t,
@@ -197,8 +199,7 @@ pub(crate) struct QuerierState {
 impl QuerierState {
     /// Point the cached view at this state's own keyexpr, after boxing.
     pub(crate) fn bind(&mut self) {
-        self.loaned_keyexpr =
-            crate::abi::z_loaned_keyexpr_t::borrowed(self.keyexpr.as_ptr(), self.keyexpr.len());
+        self.loaned_keyexpr = self.key.loaned();
     }
 
     /// The `eid` half of the global id `z_querier_id` reports.
@@ -217,7 +218,7 @@ impl QuerierState {
     }
 
     pub(crate) fn keyexpr(&self) -> &str {
-        &self.keyexpr
+        self.key.literal()
     }
 
     pub(crate) fn shared_session(&self) -> Arc<SharedSession> {
@@ -356,10 +357,18 @@ pub unsafe extern "C" fn z_declare_querier(
                 },
             )
         };
+        // R2959 — pico declares the querier's whole key
+        // (`vendor/zenoh-pico/src/net/primitives.c` @
+        // `_Z_CLEAN_RETURN_IF_ERR(_z_declared_keyexpr_declare(zn, &querier->_key, keyexpr), _z_undeclare_querier(querier));`)
+        // and its gets are issued on that declaration.
+        let key = match DeclaredKeyexpr::declare(&state.shared, &ke, declared_of(keyexpr)) {
+            Ok(key) => key,
+            Err(rc) => return rc,
+        };
         let mut boxed = Box::new(QuerierState {
             eid: state.shared.next_entity_id(),
             shared: state.shared.clone(),
-            keyexpr: ke,
+            key,
             loaned_keyexpr: crate::abi::z_loaned_keyexpr_t::borrowed(std::ptr::null(), 0),
             target,
             consolidation,
@@ -463,7 +472,8 @@ pub unsafe extern "C" fn z_querier_get_with_parameters_substr(
         };
         issue_get(
             &state.shared,
-            state.keyexpr.clone(),
+            state.key.literal().to_owned(),
+            state.key.wire(&state.shared),
             params_in,
             state.target,
             state.consolidation,

@@ -10,13 +10,19 @@
 //! `z_declare_*` read the borrowed UTF-8 back via [`keyexpr_str`].
 
 use std::ffi::{c_char, c_void, CStr};
+use std::sync::{Arc, Weak};
+
+use wz_capi_core::faces::{SharedSession, WireKey};
 
 use crate::abi::{
     view_bytes, z_loaned_keyexpr_t, z_loaned_string_t, z_moved_keyexpr_t, z_owned_keyexpr_t,
     z_view_keyexpr_t, z_view_string_t,
 };
 use crate::ffi::{guard_val, guarded};
-use crate::result::{ZResult, Z_ERR_GENERIC, Z_ERR_INVALID, Z_ERR_NULL, Z_OK};
+use crate::result::{
+    ZResult, Z_ERR_GENERIC, Z_ERR_INVALID, Z_ERR_KEYEXPR_DECLARED_ON_ANOTHER_SESSION, Z_ERR_NULL,
+    Z_OK,
+};
 use crate::session::{session_state, z_loaned_session_t};
 
 /// Resolve a loaned keyexpr to its borrowed UTF-8 string, or `None` if null /
@@ -35,24 +41,236 @@ pub(crate) unsafe fn keyexpr_str<'a>(ke: *const z_loaned_keyexpr_t) -> Option<&'
     std::str::from_utf8(bytes).ok()
 }
 
-/// The wire alias id a `z_declare_keyexpr` bound to this keyexpr, or `None`
-/// when it is an undeclared view.
+/// The [`DeclaredKeyexpr`] behind a loaned keyexpr, or `None` for a view.
 ///
-/// The publish path consults this to choose between an aliased Push (the
-/// bandwidth-efficient shape a declaration exists to enable) and a literal
-/// one. `0` is the "absent" encoding and is sound as such: the wire reserves
-/// it, so it can never name a real declaration.
+/// Only the owned keyexprs this crate builds, and the loans its entities hand
+/// out over their own keys, put anything in slot 2; a view leaves it null.
 ///
 /// # Safety
 /// `ke` must be a live `z_loaned_keyexpr_t` pointer (or null).
-pub(crate) unsafe fn keyexpr_mapping(ke: *const z_loaned_keyexpr_t) -> Option<u64> {
-    if ke.is_null() {
+pub(crate) unsafe fn declared_of<'a>(ke: *const z_loaned_keyexpr_t) -> Option<&'a DeclaredKeyexpr> {
+    if ke.is_null() || (*ke)._handle.is_null() {
         return None;
     }
-    match (*ke)._mapping {
-        0 => None,
-        id => Some(id as u64),
+    Some(&*((*ke)._handle as *const DeclaredKeyexpr))
+}
+
+/// How `ke` goes on `shared`'s wire: its own declaration's id and the rest of
+/// the key when the declaration is this session's, the literal otherwise.
+///
+/// pico `_z_declared_keyexpr_alias_to_wire`
+/// (`vendor/zenoh-pico/src/session/keyexpr.c`), which every message that names
+/// a caller's key goes through. `None` when `ke` is null or not UTF-8.
+///
+/// # Safety
+/// `ke` must be a live `z_loaned_keyexpr_t` pointer (or null).
+pub(crate) unsafe fn wire_key_of(
+    ke: *const z_loaned_keyexpr_t,
+    shared: &Arc<SharedSession>,
+) -> Option<WireKey> {
+    keyexpr_str(ke)?;
+    Some(match declared_of(ke) {
+        Some(declared) => declared.wire(shared),
+        None => WireKey::literal(),
+    })
+}
+
+/// pico `_z_keyexpr_wire_declaration_t` behind its refcount: ONE keyexpr
+/// declaration on ONE session, retracted when the last key holding it lets go.
+///
+/// Shared by every key that names it — the owned keyexpr `z_declare_keyexpr`
+/// returns, its clones, the keys `z_keyexpr_concat` / `z_keyexpr_join` build on
+/// it, and an entity declared on it — exactly as pico shares the
+/// `_z_keyexpr_wire_declaration_rc_t`. Its `Drop` is pico's
+/// `_z_keyexpr_wire_declaration_clear`, which undeclares
+/// (`vendor/zenoh-pico/src/session/keyexpr.c` @
+/// `void _z_keyexpr_wire_declaration_clear(`).
+///
+/// The session is held WEAKLY, as pico holds `_z_session_weak_t`: a key that
+/// outlives its session must not keep the session alive, and retracting on a
+/// session that is gone is moot.
+pub(crate) struct WireDeclaration {
+    session: Weak<SharedSession>,
+    id: u64,
+    /// How many bytes of the key the declaration covers — pico's `_prefix_len`.
+    prefix_len: usize,
+}
+
+impl Drop for WireDeclaration {
+    fn drop(&mut self) {
+        if let Some(session) = self.session.upgrade() {
+            session.undeclare_keyexpr(self.id);
+        }
     }
+}
+
+/// Behind a `z_owned_keyexpr_t` handle, and held by every entity for its own
+/// key: the OWNED literal plus the declaration that covers a prefix of it, if
+/// any — pico's `_z_declared_keyexpr_t` (`{ _declaration, _inner }`).
+///
+/// Owned, not borrowed, and that is the difference between this and the view
+/// type. pico's `z_declare_keyexpr` produces a value that outlives the string
+/// the caller built it from — upstream's `z_put.c` declares from `argv`-backed
+/// storage and keeps the owned keyexpr past it — so a borrow here would be a
+/// dangling read waiting for a caller that frees first.
+///
+/// `z_owned_keyexpr_t::_start` points into this `String`'s HEAP buffer, which
+/// is stable when the `Box` moves (the same distinction `crate::bytes`
+/// documents for `StringState`).
+pub(crate) struct DeclaredKeyexpr {
+    literal: String,
+    declaration: Option<Arc<WireDeclaration>>,
+}
+
+impl DeclaredKeyexpr {
+    /// A key with no declaration.
+    pub(crate) fn literal_only(literal: String) -> Self {
+        Self {
+            literal,
+            declaration: None,
+        }
+    }
+
+    /// The literal key.
+    pub(crate) fn literal(&self) -> &str {
+        &self.literal
+    }
+
+    /// A borrow of this key in the loaned layout, carrying the declaration so a
+    /// caller that publishes on it aliases as pico's `z_publisher_keyexpr` loan
+    /// does. Valid while `self` stays at its address.
+    pub(crate) fn loaned(&self) -> z_loaned_keyexpr_t {
+        z_loaned_keyexpr_t {
+            _start: self.literal.as_ptr(),
+            _len: self.literal.len(),
+            _handle: self as *const Self as *mut c_void,
+            _mapping: 0,
+        }
+    }
+
+    /// Another key sharing this one's literal and declaration — pico
+    /// `_z_declared_keyexpr_copy`, which clones the refcount.
+    pub(crate) fn share(&self) -> Self {
+        Self {
+            literal: self.literal.clone(),
+            declaration: self.declaration.clone(),
+        }
+    }
+
+    /// A new literal that keeps this key's declaration — pico's
+    /// `_z_declared_keyexpr_concat` / `_join`, which clone the left side's
+    /// refcount onto the result.
+    ///
+    /// Kept only while the new literal still begins with the declared prefix.
+    /// pico's concat appends raw bytes, so there it always does; wz canonizes
+    /// the joined text, which can in principle rewrite the seam, and a
+    /// declaration naming bytes the key no longer starts with would put the
+    /// wrong key on the wire.
+    fn extended(&self, literal: String) -> Self {
+        let declaration = self.declaration.clone().filter(|d| {
+            literal.get(..d.prefix_len).is_some()
+                && literal.get(..d.prefix_len) == self.literal.get(..d.prefix_len)
+        });
+        Self {
+            literal,
+            declaration,
+        }
+    }
+
+    fn declared_on(&self, shared: &Arc<SharedSession>) -> Option<&Arc<WireDeclaration>> {
+        self.declaration
+            .as_ref()
+            .filter(|d| std::ptr::eq(d.session.as_ptr(), Arc::as_ptr(shared)))
+    }
+
+    /// pico `_z_declared_keyexpr_alias_to_wire`: the declaration's id and the
+    /// remainder of the key when the declaration is `shared`'s, the literal
+    /// otherwise.
+    ///
+    /// An aliased key KEEPS its declaration: whatever records it — a registry
+    /// entry replayed onto later faces — holds the id declared for as long as
+    /// it names it.
+    pub(crate) fn wire(&self, shared: &Arc<SharedSession>) -> WireKey {
+        // Every constructor keeps the declared prefix at the front of the
+        // literal (see `extended`), so the remainder always exists; the `get`
+        // turns a broken invariant into the literal rather than a panic.
+        match self
+            .declared_on(shared)
+            .and_then(|d| Some((d, self.literal.get(d.prefix_len..)?)))
+        {
+            Some((d, rest)) => {
+                let anchor: Arc<dyn Send + Sync> = d.clone();
+                WireKey::aliased(d.id, (!rest.is_empty()).then(|| rest.to_owned())).keeping(anchor)
+            }
+            None => WireKey::literal(),
+        }
+    }
+
+    /// pico `_z_declared_keyexpr_declare`: a key whose declaration covers ALL
+    /// of it on `shared`, sharing the caller's when it already does.
+    pub(crate) fn declare(
+        shared: &Arc<SharedSession>,
+        literal: &str,
+        existing: Option<&DeclaredKeyexpr>,
+    ) -> Result<Self, ZResult> {
+        Self::declare_up_to(shared, literal, existing, literal.len())
+    }
+
+    /// pico `_z_declared_keyexpr_declare_non_wild_prefix`: the same, covering
+    /// only the part of the key before its first wild chunk.
+    pub(crate) fn declare_non_wild_prefix(
+        shared: &Arc<SharedSession>,
+        literal: &str,
+        existing: Option<&DeclaredKeyexpr>,
+    ) -> Result<Self, ZResult> {
+        Self::declare_up_to(shared, literal, existing, non_wild_prefix_len(literal))
+    }
+
+    fn declare_up_to(
+        shared: &Arc<SharedSession>,
+        literal: &str,
+        existing: Option<&DeclaredKeyexpr>,
+        prefix_len: usize,
+    ) -> Result<Self, ZResult> {
+        // Already optimized on THIS session to exactly this prefix: share it
+        // (pico's `_z_declared_keyexpr_is_fully_optimized` /
+        // `_is_non_wild_prefix_optimized` arm).
+        if let Some(existing) = existing {
+            if existing
+                .declared_on(shared)
+                .is_some_and(|d| d.prefix_len == prefix_len)
+            {
+                return Ok(existing.share());
+            }
+        }
+        // pico `_z_keyexpr_declare_prefix`: an empty prefix declares nothing.
+        // Its multicast skip has no counterpart here — this ABI's sessions are
+        // unicast.
+        if prefix_len == 0 {
+            return Ok(Self::literal_only(literal.to_owned()));
+        }
+        let Some(id) = shared.declare_keyexpr(literal[..prefix_len].to_owned()) else {
+            return Err(Z_ERR_GENERIC);
+        };
+        Ok(Self {
+            literal: literal.to_owned(),
+            declaration: Some(Arc::new(WireDeclaration {
+                session: Arc::downgrade(shared),
+                id,
+                prefix_len,
+            })),
+        })
+    }
+}
+
+/// pico `_z_keyexpr_non_wild_prefix_len`: the length up to the `/` before the
+/// first `*`, the whole key when there is none, 0 when the key opens wild.
+fn non_wild_prefix_len(literal: &str) -> usize {
+    let bytes = literal.as_bytes();
+    let Some(star) = bytes.iter().position(|&b| b == b'*') else {
+        return bytes.len();
+    };
+    bytes[..star].iter().rposition(|&b| b == b'/').unwrap_or(0)
 }
 
 /// Build a view keyexpr borrowing the caller's C string (pico
@@ -251,28 +469,16 @@ pub unsafe extern "C" fn z_view_string_loan(
 
 // --- declared keyexpr (the `z_declare_keyexpr` family) ---------------------
 
-/// Behind a `z_owned_keyexpr_t` handle: the OWNED literal.
-///
-/// Owned, not borrowed, and that is the difference between this and the view
-/// type. pico's `z_declare_keyexpr` produces a value that outlives the string
-/// the caller built it from — upstream's `z_put.c` declares from `argv`-backed
-/// storage and keeps the owned keyexpr past it — so a borrow here would be a
-/// dangling read waiting for a caller that frees first.
-///
-/// `z_owned_keyexpr_t::_start` points into this `String`'s HEAP buffer, which
-/// is stable when the `Box` moves (the same distinction `crate::bytes`
-/// documents for `StringState`).
-pub(crate) struct DeclaredKeyexpr {
-    literal: String,
-}
-
 /// Declare a keyexpr, binding it to a numerical id on every connected peer
-/// (pico `z_declare_keyexpr`).
+/// (pico `z_declare_keyexpr`, which is `_z_declared_keyexpr_declare` on the
+/// caller's key).
 ///
 /// The id is announced on every live face and REPLAYED onto faces that connect
 /// later (`SharedSession::declare_keyexpr` / `face_up`), so a program that
 /// declares before its first peer — which upstream's `z_put.c` does whenever it
-/// wins the race — still publishes aliased to that peer.
+/// wins the race — still publishes aliased to that peer. A key that already
+/// carries a whole-key declaration on this session shares it rather than
+/// declaring again, as upstream's does.
 ///
 /// Returns `Z_ERR_GENERIC` when the wire's `u16` alias space is exhausted.
 /// Refusing beats wrapping: a reused id would silently re-point a peer's live
@@ -291,32 +497,30 @@ pub unsafe extern "C" fn z_declare_keyexpr(
             Some(s) => s,
             None => return Z_ERR_NULL,
         };
-        let literal = match keyexpr_str(keyexpr) {
-            Some(k) => k.to_owned(),
-            None => return Z_ERR_INVALID,
+        let Some(literal) = keyexpr_str(keyexpr) else {
+            return Z_ERR_INVALID;
         };
-        let Some(mapping) = state.shared.declare_keyexpr(literal.clone()) else {
-            return Z_ERR_GENERIC;
-        };
-        let boxed = Box::new(DeclaredKeyexpr { literal });
-        // Read the heap pointer BEFORE the box is consumed by `into_raw`, and
-        // note it survives that: `String`'s buffer does not move with the box.
-        let start = boxed.literal.as_ptr();
-        let len = boxed.literal.len();
-        *declared = z_owned_keyexpr_t {
-            _start: start,
-            _len: len,
-            _handle: Box::into_raw(boxed) as *mut c_void,
-            _mapping: mapping as usize,
-            _pad: [0usize; 2],
-        };
-        Z_OK
+        match DeclaredKeyexpr::declare(&state.shared, literal, declared_of(keyexpr)) {
+            Ok(key) => {
+                store_owned_keyexpr(declared, key);
+                Z_OK
+            }
+            Err(rc) => rc,
+        }
     })
 }
 
 /// Retract a keyexpr declaration (pico `z_undeclare_keyexpr`). Consumes the
-/// moved value on every path, including the error paths — pico's
-/// `z_move` contract.
+/// moved value on every path, including the error paths — pico's `z_move`
+/// contract.
+///
+/// Upstream's three answers, in its order: `Z_ERR_INVALID` for a key that
+/// carries no declaration, `Z_ERR_KEYEXPR_DECLARED_ON_ANOTHER_SESSION` for one
+/// another session made, and otherwise the retraction — which happens only when
+/// this key is the LAST holder (`strong_count == 1`), because an entity
+/// declared on the same key shares the declaration and still needs it. Here
+/// that last-holder rule is the refcount's own: dropping the key retracts
+/// exactly when nothing else holds the declaration.
 #[no_mangle]
 pub unsafe extern "C" fn z_undeclare_keyexpr(
     zs: *const z_loaned_session_t,
@@ -326,22 +530,26 @@ pub unsafe extern "C" fn z_undeclare_keyexpr(
         if keyexpr.is_null() {
             return Z_ERR_NULL;
         }
-        // Take the value out first so the owned literal is freed and the
+        // Take the value out first so the owned key is released and the
         // caller's struct nulled whether or not the session resolves.
-        let mapping = (*keyexpr)._this._mapping;
         let handle = (*keyexpr)._this._handle;
         (*keyexpr)._this = z_owned_keyexpr_t::null_value();
-        if !handle.is_null() {
-            drop(Box::from_raw(handle as *mut DeclaredKeyexpr));
+        if handle.is_null() {
+            return Z_ERR_INVALID;
         }
-        let state = match session_state(zs) {
-            Some(s) => s,
-            None => return Z_ERR_NULL,
+        let key = Box::from_raw(handle as *mut DeclaredKeyexpr);
+        let Some(state) = session_state(zs) else {
+            return Z_ERR_NULL;
         };
-        if mapping != 0 {
-            state.shared.undeclare_keyexpr(mapping as u64);
+        if key.declaration.is_none() {
+            Z_ERR_INVALID
+        } else if key.declared_on(&state.shared).is_none() {
+            Z_ERR_KEYEXPR_DECLARED_ON_ANOTHER_SESSION
+        } else {
+            Z_OK
         }
-        Z_OK
+        // `key` drops here, retracting the declaration if it was the last
+        // holder.
     })
 }
 
@@ -398,12 +606,16 @@ pub unsafe extern "C" fn z_keyexpr_take(dst: *mut z_owned_keyexpr_t, src: *mut z
 
 /// Drop a declared keyexpr (pico `z_keyexpr_drop`).
 ///
-/// Frees the LOCAL value only; it does NOT retract the declaration from peers.
-/// That asymmetry is pico's, not an omission: the retraction is what
-/// [`z_undeclare_keyexpr`] is for, and it needs a session this signature does
-/// not take. A drop that silently retracted would also break the `z_move`
-/// contract in the other direction — the C side would lose a live alias by
-/// letting a value go out of scope.
+/// R2959 — this RETRACTS the declaration when the dropped key was its last
+/// holder. The doc here used to say the opposite, that a drop frees the local
+/// value only and retraction is `z_undeclare_keyexpr`'s alone; zenoh-pico
+/// 1.10.1 does not work that way. Its key holds the declaration through a
+/// refcount whose clear undeclares
+/// (`vendor/zenoh-pico/src/session/keyexpr.c` @
+/// `void _z_keyexpr_wire_declaration_clear(`), and a publisher dropped by a
+/// real pico program retracts its key's declaration on the wire, measured by
+/// `pico_keyexpr_declaration_twice_and_diff.rs`. The session the retraction
+/// needs is the one the declaration holds, not an argument.
 #[no_mangle]
 pub unsafe extern "C" fn z_keyexpr_drop(obj: *mut z_moved_keyexpr_t) {
     let _ = guarded(|| {
@@ -442,15 +654,16 @@ pub const Z_KEYEXPR_INTERSECTION_LEVEL_INCLUDES: z_keyexpr_intersection_level_t 
 /// They are equal.
 pub const Z_KEYEXPR_INTERSECTION_LEVEL_EQUALS: z_keyexpr_intersection_level_t = 3;
 
-/// Store an owned keyexpr over `literal`, replacing whatever `dst` held.
+/// Store `key` as an owned keyexpr, replacing whatever `dst` held.
 ///
 /// The `_start` slot points into the boxed `String`'s HEAP buffer, which is
 /// what makes the borrow survive the box moving — the distinction
-/// [`DeclaredKeyexpr`] documents. `_mapping` is 0, the wire's reserved
-/// "no declaration" value: these constructors build a LITERAL keyexpr, not a
-/// declared alias.
-unsafe fn store_owned_keyexpr(dst: *mut z_owned_keyexpr_t, literal: String) {
-    let boxed = Box::new(DeclaredKeyexpr { literal });
+/// [`DeclaredKeyexpr`] documents. The declaration, if any, rides in the box;
+/// `_mapping` stays 0 because nothing reads it any more — a key's wire form is
+/// asked of the key ([`wire_key_of`]), which is the only place that can tell a
+/// whole-key declaration from a prefix one.
+unsafe fn store_owned_keyexpr(dst: *mut z_owned_keyexpr_t, key: DeclaredKeyexpr) {
+    let boxed = Box::new(key);
     let start = boxed.literal.as_ptr();
     let len = boxed.literal.len();
     *dst = z_owned_keyexpr_t {
@@ -507,7 +720,7 @@ pub unsafe extern "C" fn z_keyexpr_from_substr(
         // form is exactly `_z_keyexpr_is_canon` returning OK.
         match wz_runtime_tokio::keyexpr_canon::canonize_keyexpr(&text) {
             Ok(canon) if canon.as_str() == text => {
-                store_owned_keyexpr(keyexpr, text);
+                store_owned_keyexpr(keyexpr, DeclaredKeyexpr::literal_only(text));
                 Z_OK
             }
             _ => Z_ERR_INVALID,
@@ -536,7 +749,10 @@ pub unsafe extern "C" fn z_keyexpr_from_str_autocanonize(
         };
         match wz_runtime_tokio::keyexpr_canon::canonize_keyexpr(&text) {
             Ok(canon) => {
-                store_owned_keyexpr(keyexpr, canon.as_str().to_owned());
+                store_owned_keyexpr(
+                    keyexpr,
+                    DeclaredKeyexpr::literal_only(canon.as_str().to_owned()),
+                );
                 Z_OK
             }
             Err(_) => Z_ERR_INVALID,
@@ -571,7 +787,10 @@ pub unsafe extern "C" fn z_keyexpr_from_substr_autocanonize(
         match wz_runtime_tokio::keyexpr_canon::canonize_keyexpr(&text) {
             Ok(canon) => {
                 *len = canon.as_str().len();
-                store_owned_keyexpr(keyexpr, canon.as_str().to_owned());
+                store_owned_keyexpr(
+                    keyexpr,
+                    DeclaredKeyexpr::literal_only(canon.as_str().to_owned()),
+                );
                 Z_OK
             }
             Err(_) => Z_ERR_INVALID,
@@ -600,14 +819,16 @@ unsafe fn owned_keyexpr_input(
     std::str::from_utf8(bytes).ok().map(str::to_owned)
 }
 
-/// Deep-copy a keyexpr into an owned one (pico `z_keyexpr_clone`).
+/// Copy a keyexpr into an owned one (pico `z_keyexpr_clone`, which is
+/// `_z_declared_keyexpr_copy`).
 ///
-/// The clone is a LITERAL keyexpr even when the source is a declared alias:
-/// `_mapping` is not copied. That is deliberate and it is the safe direction —
-/// an alias id belongs to the session that declared it and to the peers that
-/// were told about it, so a clone carrying the id would publish aliased on a
-/// keyexpr whose declaration it does not own a reference to. The literal is
-/// what every peer can resolve.
+/// R2959 — the clone SHARES the source's declaration. This used to make every
+/// clone a literal, on the argument that a clone carrying the id would publish
+/// on a declaration it held no reference to. The declaration is refcounted now
+/// (`WireDeclaration`), so the clone holds exactly such a reference, and a
+/// literal clone is no longer the safe direction but a divergence: upstream's
+/// copy clones the refcount (`vendor/zenoh-pico/src/session/keyexpr.c` @
+/// `dst->_declaration = _z_keyexpr_wire_declaration_rc_clone(&src->_declaration);`).
 ///
 /// # Safety
 /// `dst` must be valid and writable; `src` must be null or a live loaned
@@ -622,13 +843,15 @@ pub unsafe extern "C" fn z_keyexpr_clone(
             return Z_ERR_NULL;
         }
         *dst = z_owned_keyexpr_t::null_value();
-        match keyexpr_str(src) {
-            Some(text) => {
-                store_owned_keyexpr(dst, text.to_owned());
-                Z_OK
-            }
-            None => Z_ERR_NULL,
-        }
+        let Some(text) = keyexpr_str(src) else {
+            return Z_ERR_NULL;
+        };
+        let key = match declared_of(src) {
+            Some(declared) => declared.share(),
+            None => DeclaredKeyexpr::literal_only(text.to_owned()),
+        };
+        store_owned_keyexpr(dst, key);
+        Z_OK
     })
 }
 
@@ -696,12 +919,25 @@ pub unsafe extern "C" fn z_keyexpr_concat(
         let joined = format!("{head}{tail}");
         match wz_runtime_tokio::keyexpr_canon::canonize_keyexpr(&joined) {
             Ok(canon) => {
-                store_owned_keyexpr(key, canon.as_str().to_owned());
+                store_owned_keyexpr(key, extended_from(left, canon.as_str()));
                 Z_OK
             }
             Err(_) => Z_ERR_INVALID,
         }
     })
+}
+
+/// The result of extending `left` to `literal`: `left`'s declaration kept when
+/// `left` is a declared key (pico `_z_declared_keyexpr_concat` / `_join`), a
+/// plain literal otherwise.
+///
+/// # Safety
+/// `left` must be null or a live loaned keyexpr.
+unsafe fn extended_from(left: *const z_loaned_keyexpr_t, literal: &str) -> DeclaredKeyexpr {
+    match declared_of(left) {
+        Some(declared) => declared.extended(literal.to_owned()),
+        None => DeclaredKeyexpr::literal_only(literal.to_owned()),
+    }
 }
 
 /// Join two keyexprs with a `/` and canonize (pico `z_keyexpr_join`).
@@ -726,7 +962,7 @@ pub unsafe extern "C" fn z_keyexpr_join(
         let joined = format!("{l}/{r}");
         match wz_runtime_tokio::keyexpr_canon::canonize_keyexpr(&joined) {
             Ok(canon) => {
-                store_owned_keyexpr(key, canon.as_str().to_owned());
+                store_owned_keyexpr(key, extended_from(left, canon.as_str()));
                 Z_OK
             }
             Err(_) => Z_ERR_INVALID,
@@ -985,4 +1221,82 @@ pub unsafe extern "C" fn z_view_keyexpr_from_substr_autocanonize(
         }
         z_view_keyexpr_from_substr(keyexpr, name, *len)
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn session() -> Arc<SharedSession> {
+        Arc::new(
+            SharedSession::new(
+                wz_runtime_tokio::runtime_impl::TokioTime::new(),
+                vec![0x5a; 16],
+            )
+            .expect("test host entropy"),
+        )
+    }
+
+    /// R2959 — pico's `_z_keyexpr_non_wild_prefix_len`, case by case: up to the
+    /// `/` before the first `*`, the whole key without one, nothing when the
+    /// key opens wild.
+    #[test]
+    fn the_non_wild_prefix_stops_at_the_chunk_before_the_first_star() {
+        assert_eq!(non_wild_prefix_len("demo/kd/sub/**"), "demo/kd/sub".len());
+        assert_eq!(non_wild_prefix_len("demo/kd/qbl/*/x"), "demo/kd/qbl".len());
+        assert_eq!(non_wild_prefix_len("demo/kd/pub"), "demo/kd/pub".len());
+        assert_eq!(non_wild_prefix_len("**"), 0);
+        assert_eq!(non_wild_prefix_len("a/b$*/c"), "a".len());
+    }
+
+    /// R2959 — a declaration is retracted when its LAST holder lets go, and not
+    /// before: an entity sharing the key keeps it declared after the key the
+    /// program declared is dropped. This is pico's refcount, and the reason
+    /// `z_keyexpr_drop` now retracts.
+    ///
+    /// Control: making `share` copy the literal alone (no declaration) reds the
+    /// second assertion — the entity would declare a second id.
+    #[test]
+    fn a_declaration_lives_as_long_as_its_last_holder() {
+        let shared = session();
+        let program = DeclaredKeyexpr::declare(&shared, "demo/kd/decl", None).expect("declared");
+        assert_eq!(shared.keyexpr_declarations().len(), 1);
+        let entity = DeclaredKeyexpr::declare(&shared, "demo/kd/decl", Some(&program))
+            .expect("an already-declared key is shared, not redeclared");
+        assert_eq!(
+            shared.keyexpr_declarations().len(),
+            1,
+            "a fully optimized key shares its declaration"
+        );
+        drop(program);
+        assert_eq!(
+            shared.keyexpr_declarations().len(),
+            1,
+            "the entity still holds the declaration"
+        );
+        drop(entity);
+        assert!(shared.keyexpr_declarations().is_empty());
+    }
+
+    /// R2959 — the wire form: the declaration's id plus the remainder of the
+    /// key, and the literal on a session that did not make the declaration.
+    #[test]
+    fn a_prefix_declaration_names_the_rest_of_the_key_as_suffix() {
+        let shared = session();
+        let key = DeclaredKeyexpr::declare_non_wild_prefix(&shared, "demo/kd/qbl/*/x", None)
+            .expect("declared");
+        let declarations = shared.keyexpr_declarations();
+        assert_eq!(declarations.len(), 1);
+        assert_eq!(declarations[0].1, "demo/kd/qbl");
+        let wire = key.wire(&shared);
+        assert_eq!(wire.mapping_id, declarations[0].0);
+        assert_eq!(wire.suffix.as_deref(), Some("/*/x"));
+
+        let other = session();
+        assert_eq!(
+            key.wire(&other).mapping_id,
+            0,
+            "another session's id is not ours"
+        );
+    }
 }

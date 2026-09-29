@@ -330,7 +330,7 @@ pub unsafe extern "C" fn z_put(
         let sent = match unsafe { crate::keyexpr::keyexpr_mapping(key_expr) } {
             Some(mapping) => state
                 .shared
-                .publish_aliased_all(mapping, &payload, &publish),
+                .publish_aliased_all(mapping, None, &payload, &publish),
             None => state.shared.publish_all(keyexpr, &payload, &publish),
         };
         match sent {
@@ -377,7 +377,9 @@ pub unsafe extern "C" fn z_delete(
         // The DEL half of the same aliasing choice — see `z_put`.
         // SAFETY: the caller's contract for the handle.
         let sent = match unsafe { crate::keyexpr::keyexpr_mapping(key_expr) } {
-            Some(mapping) => state.shared.publish_aliased_all(mapping, &[], &publish),
+            Some(mapping) => state
+                .shared
+                .publish_aliased_all(mapping, None, &[], &publish),
             None => state.shared.publish_all(keyexpr, &[], &publish),
         };
         match sent {

@@ -42,10 +42,10 @@ use crate::abi::{
 };
 use crate::bytes::ByteBuf;
 use crate::ffi::{guarded, CClosure as FfiClosure};
-use crate::keyexpr::{keyexpr_mapping, keyexpr_str};
+use crate::keyexpr::{declared_of, keyexpr_str, wire_key_of, DeclaredKeyexpr};
 use crate::result::{ZResult, Z_ERR_GENERIC, Z_ERR_INVALID, Z_ERR_NULL, Z_OK};
 use crate::session::{session_state, z_loaned_session_t};
-use wz_capi_core::faces::{MatchId, SharedSession, SubId};
+use wz_capi_core::faces::{MatchId, SharedSession, SubId, WireKey};
 
 // --- opaque loaned sample --------------------------------------------------
 
@@ -707,17 +707,25 @@ pub unsafe extern "C" fn z_publisher_put_options_default(options: *mut z_publish
 /// face registry, so a put fans out to every connected peer.
 pub(crate) struct PublisherState {
     shared: Arc<SharedSession>,
-    keyexpr: String,
+    /// R2959 — the publisher's key WITH the declaration pico makes for it:
+    /// `_z_declare_publisher` runs `_z_declared_keyexpr_declare` on the key
+    /// (`vendor/zenoh-pico/src/net/primitives.c` @
+    /// `_Z_CLEAN_RETURN_IF_ERR(_z_declared_keyexpr_declare(zn, &publisher->_key, keyexpr),`),
+    /// and every put then rides the declared id. Dropping the state drops the
+    /// key, which retracts the declaration AFTER the publisher itself is gone —
+    /// upstream's order.
+    key: DeclaredKeyexpr,
     /// R311y559 — the `eid` half of the global id `z_publisher_id` reports,
     /// allocated ONCE at declare from the session's entity counter. See
     /// `SharedSession::next_entity_id` for why it is allocated rather than
     /// derived.
     eid: u64,
-    /// R311y559 — cached `{ start, len }` over `keyexpr`, so
-    /// `z_publisher_keyexpr` hands back a borrow of stable storage rather than
-    /// of a temporary. Bound by [`PublisherState::bind`] once the state sits at
-    /// its final address — the same discipline `QueryableState` and
-    /// `SampleMarshal` use, and for the same reason.
+    /// R311y559 — cached loan of `key`, so `z_publisher_keyexpr` hands back a
+    /// borrow of stable storage rather than of a temporary. Bound by
+    /// [`PublisherState::bind`] once the state sits at its final address — the
+    /// same discipline `QueryableState` and `SampleMarshal` use, and for the
+    /// same reason. R2959 — it carries the declaration, as pico's loan of
+    /// `&pub->_key` does, so a put on it aliases.
     loaned_keyexpr: z_loaned_keyexpr_t,
     /// Every matching listener declared THROUGH this publisher, retracted when
     /// it goes away. See [`PublisherState::record_matching_listener`].
@@ -728,8 +736,19 @@ impl PublisherState {
     /// Point the cached view at this state's own keyexpr. MUST run only once
     /// the state sits at its FINAL address (i.e. after `Box::new`).
     pub(crate) fn bind(&mut self) {
-        self.loaned_keyexpr =
-            z_loaned_keyexpr_t::borrowed(self.keyexpr.as_ptr(), self.keyexpr.len());
+        self.loaned_keyexpr = self.key.loaned();
+    }
+
+    /// Publish on this publisher's key, in its declared wire form.
+    fn publish(&self, payload: &[u8], opts: &PublishOptions) -> ZResult {
+        let wire = self.key.wire(&self.shared);
+        match self
+            .shared
+            .publish_on_wire_all(self.key.literal(), &wire, payload, opts)
+        {
+            Ok(_) => Z_OK,
+            Err(_) => Z_ERR_GENERIC,
+        }
     }
 
     /// The `eid` half of the global id `z_publisher_id` reports.
@@ -749,7 +768,7 @@ impl PublisherState {
 
     /// The declared keyexpr — what the MATCHING plane watches.
     pub(crate) fn keyexpr(&self) -> &str {
-        &self.keyexpr
+        self.key.literal()
     }
 
     /// The session registry this publisher publishes through. Cloned rather
@@ -852,17 +871,20 @@ pub(crate) struct SubscriberState {
     /// `z_subscriber_keyexpr` has something to borrow. The registry keys the
     /// per-face replicas on `id` alone, so the string was not kept anywhere the
     /// handle could reach.
-    pub(crate) keyexpr: String,
-    /// R311y559 — cached `{ start, len }` over `keyexpr`; see
-    /// [`PublisherState::bind`].
+    ///
+    /// R2959 — WITH the declaration pico makes for the subscription's own key:
+    /// the non-wild prefix for an ordinary subscriber, the whole key for a
+    /// liveliness one (see the two declare sites). Dropping the state retracts
+    /// it after the subscription, which is upstream's order.
+    pub(crate) key: DeclaredKeyexpr,
+    /// R311y559 — cached loan of `key`; see [`PublisherState::bind`].
     pub(crate) loaned_keyexpr: z_loaned_keyexpr_t,
 }
 
 impl SubscriberState {
     /// Point the cached view at this state's own keyexpr, after boxing.
     pub(crate) fn bind(&mut self) {
-        self.loaned_keyexpr =
-            z_loaned_keyexpr_t::borrowed(self.keyexpr.as_ptr(), self.keyexpr.len());
+        self.loaned_keyexpr = self.key.loaned();
     }
 }
 
@@ -1347,10 +1369,13 @@ pub unsafe extern "C" fn z_put(
         // Resolved AFTER the payload is taken and BEFORE any keyexpr branch, so
         // the moved encoding / attachment are consumed on every path.
         let resolved = session_put_options(options);
-        let result = match keyexpr_mapping(keyexpr) {
-            Some(mapping) => state.shared.publish_aliased_all(mapping, &buf, &resolved),
-            None => state.shared.publish_all(ke, &buf, &resolved),
+        // R2959 — the key's own wire form: its declaration's id plus the rest
+        // of the key when it is this session's, which a PREFIX declaration now
+        // makes a real case rather than only the whole-key one.
+        let Some(wire) = wire_key_of(keyexpr, &state.shared) else {
+            return Z_ERR_INVALID;
         };
+        let result = state.shared.publish_on_wire_all(ke, &wire, &buf, &resolved);
         match result {
             Ok(_) => Z_OK,
             Err(_) => Z_ERR_GENERIC,
@@ -1386,10 +1411,10 @@ pub unsafe extern "C" fn z_delete(
         let resolved = session_delete_options(options);
         // The empty payload is the Del body's own shape, not a stand-in for a
         // missing one: `_z_msg_del_t` has no payload field.
-        let result = match keyexpr_mapping(keyexpr) {
-            Some(mapping) => state.shared.publish_aliased_all(mapping, &[], &resolved),
-            None => state.shared.publish_all(ke, &[], &resolved),
+        let Some(wire) = wire_key_of(keyexpr, &state.shared) else {
+            return Z_ERR_INVALID;
         };
+        let result = state.shared.publish_on_wire_all(ke, &wire, &[], &resolved);
         match result {
             Ok(_) => Z_OK,
             Err(_) => Z_ERR_GENERIC,
@@ -1425,13 +1450,7 @@ pub unsafe extern "C" fn z_publisher_delete(
                 opts = opts.with_source_info(si);
             }
         }
-        match state
-            .shared_session()
-            .publish_all(state.keyexpr(), &[], &opts)
-        {
-            Ok(_) => Z_OK,
-            Err(_) => Z_ERR_GENERIC,
-        }
+        state.publish(&[], &opts)
     })
 }
 
@@ -1500,14 +1519,17 @@ pub unsafe extern "C" fn z_declare_publisher(
             Some(s) => s,
             None => return Z_ERR_NULL,
         };
-        let ke = match keyexpr_str(keyexpr) {
-            Some(k) => k.to_owned(),
-            None => return Z_ERR_INVALID,
+        let Some(ke) = keyexpr_str(keyexpr) else {
+            return Z_ERR_INVALID;
+        };
+        let key = match DeclaredKeyexpr::declare(&state.shared, ke, declared_of(keyexpr)) {
+            Ok(key) => key,
+            Err(rc) => return rc,
         };
         let mut boxed = Box::new(PublisherState {
             eid: state.shared.next_entity_id(),
             shared: state.shared.clone(),
-            keyexpr: ke,
+            key,
             loaned_keyexpr: z_loaned_keyexpr_t::borrowed(std::ptr::null(), 0),
             matches: StdMutex::new(Vec::new()),
         });
@@ -1545,10 +1567,7 @@ pub unsafe extern "C" fn z_publisher_put(
         // timestamp, because all three were being thrown away here. A link is
         // not a pass, and this is what the difference looked like.
         let opts = publisher_put_options(options);
-        match state.shared.publish_all(&state.keyexpr, &buf, &opts) {
-            Ok(_) => Z_OK,
-            Err(_) => Z_ERR_GENERIC,
-        }
+        state.publish(&buf, &opts)
     })
 }
 
@@ -1660,6 +1679,27 @@ pub unsafe extern "C" fn z_closure_sample_drop(closure: *mut z_moved_closure_sam
 
 // --- subscriber exports ----------------------------------------------------
 
+/// The wire form a subscriber on `keyexpr` is announced in: the CALLER's key
+/// (see the declare site for why it is not the subscription's own), keeping
+/// alive both the caller's declaration, if it named one, and the
+/// subscription's own `key` — the registry entry is the only holder a
+/// background subscriber has.
+///
+/// # Safety
+/// `keyexpr` must be null or a live loaned keyexpr.
+unsafe fn subscriber_wire(
+    keyexpr: *const z_loaned_keyexpr_t,
+    shared: &Arc<SharedSession>,
+    key: &DeclaredKeyexpr,
+) -> Option<WireKey> {
+    let wire = wire_key_of(keyexpr, shared)?;
+    let anchor: Arc<dyn Send + Sync> = Arc::new((
+        key.share(),
+        declared_of(keyexpr).map(DeclaredKeyexpr::share),
+    ));
+    Some(wire.keeping(anchor))
+}
+
 /// Declare a subscriber (pico `z_declare_subscriber`). Consumes the moved
 /// closure.
 #[no_mangle]
@@ -1717,17 +1757,37 @@ pub unsafe extern "C" fn z_declare_subscriber(
         // build and why this crate's mirror of it has none either. A default
         // pico build never delivers a session's own put to its own subscriber,
         // so neither does this ABI.
-        // R311y559 — kept for `z_subscriber_keyexpr`, which needs storage the
-        // handle owns; `ke` is moved into the registry below.
-        let keyexpr_literal = ke.clone();
-        let id = state.shared.declare_subscriber(ke, Locality::Remote, {
-            let closure = Arc::new(cclosure);
-            Arc::new(move || Box::new(make_subscriber_callback(closure.clone())) as Box<_>)
-        });
+        // R2959 — pico's two keys for one subscriber, and they are NOT the same
+        // one. The subscription's own key gets the NON-WILD PREFIX declared,
+        // and that declaration goes on the wire FIRST
+        // (`vendor/zenoh-pico/src/net/primitives.c` @
+        // `_Z_CLEAN_RETURN_IF_ERR(_z_declared_keyexpr_declare_non_wild_prefix(zn, &s._key, keyexpr),`);
+        // the `DeclSubscriber` is then announced on the CALLER's key, a literal
+        // for a view (`_z_declared_keyexpr_alias_to_wire(keyexpr, ...)` a few
+        // lines on). Measured on the wire by
+        // `pico_keyexpr_declaration_twice_and_diff.rs`: `DeclKexpr = demo/kd/sub`
+        // then `DeclSubscriber on "demo/kd/sub/**"`.
+        let key = match DeclaredKeyexpr::declare_non_wild_prefix(
+            &state.shared,
+            &ke,
+            declared_of(keyexpr),
+        ) {
+            Ok(key) => key,
+            Err(rc) => return rc,
+        };
+        let Some(wire) = subscriber_wire(keyexpr, &state.shared, &key) else {
+            return Z_ERR_INVALID;
+        };
+        let id = state
+            .shared
+            .declare_subscriber_on_wire(ke, wire, Locality::Remote, {
+                let closure = Arc::new(cclosure);
+                Arc::new(move || Box::new(make_subscriber_callback(closure.clone())) as Box<_>)
+            });
         let mut boxed = Box::new(SubscriberState {
             shared: state.shared.clone(),
             id,
-            keyexpr: keyexpr_literal,
+            key,
             loaned_keyexpr: z_loaned_keyexpr_t::borrowed(std::ptr::null(), 0),
         });
         boxed.bind();
@@ -1783,10 +1843,26 @@ pub unsafe extern "C" fn z_declare_background_subscriber(
         // there is nothing that could ever undeclare it, so retaining the id
         // would only invite a caller-less removal path that pico does not have.
         // R311y554 — same Remote pin, same reason as the owned form above.
-        let _ = state.shared.declare_subscriber(ke, Locality::Remote, {
-            let closure = Arc::new(cclosure);
-            Arc::new(move || Box::new(make_subscriber_callback(closure.clone())) as Box<_>)
-        });
+        // R2959 — and the same two keys: the declaration lives in the registry
+        // entry, which is the only holder a handle-less subscriber has.
+        let key = match DeclaredKeyexpr::declare_non_wild_prefix(
+            &state.shared,
+            &ke,
+            declared_of(keyexpr),
+        ) {
+            Ok(key) => key,
+            Err(rc) => return rc,
+        };
+        let Some(wire) = subscriber_wire(keyexpr, &state.shared, &key) else {
+            return Z_ERR_INVALID;
+        };
+        drop(key);
+        let _ = state
+            .shared
+            .declare_subscriber_on_wire(ke, wire, Locality::Remote, {
+                let closure = Arc::new(cclosure);
+                Arc::new(move || Box::new(make_subscriber_callback(closure.clone())) as Box<_>)
+            });
         Z_OK
     })
 }

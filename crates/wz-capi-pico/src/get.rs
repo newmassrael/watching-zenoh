@@ -136,14 +136,14 @@ use wz_runtime_tokio::session_glue::{ConsolidationMode, QueryTarget};
 
 use crate::abi::{z_loaned_bytes_t, z_loaned_keyexpr_t, z_moved_bytes_t};
 use crate::ffi::{guard_val, guarded, CClosure as FfiClosure};
-use crate::keyexpr::keyexpr_str;
+use crate::keyexpr::{keyexpr_str, wire_key_of};
 use crate::pubsub::{
     sample_kind_of, z_closure_drop_callback_t, z_loaned_sample_t, SampleMarshal, Z_SAMPLE_KIND_PUT,
 };
 use crate::query::{parameters_has_anyke, z_reply_keyexpr_t, ANYKE_PARAM, PARAM_SEPARATOR};
 use crate::result::{ZResult, Z_ERR_INVALID, Z_ERR_NULL, Z_OK};
 use crate::session::{session_state, z_loaned_session_t};
-use wz_capi_core::faces::SharedSession;
+use wz_capi_core::faces::{SharedSession, WireKey};
 
 // --- pico enum-typed option fields -----------------------------------------
 
@@ -1129,10 +1129,16 @@ unsafe fn get_inner(
     } else {
         std::slice::from_raw_parts(parameters as *const u8, parameters_len)
     };
+    // R2959 — the query names the caller's key in its own wire form, as pico's
+    // `_z_query` does (`_z_declared_keyexpr_alias_to_wire(keyexpr, ...)`).
+    let Some(wire) = wire_key_of(keyexpr, &state.shared) else {
+        return Z_ERR_INVALID;
+    };
 
     issue_get(
         &state.shared,
         ke,
+        wire,
         params_in,
         target,
         consolidation,
@@ -1234,6 +1240,7 @@ impl PicoQueryQos {
 pub(crate) fn issue_get(
     shared: &Arc<SharedSession>,
     keyexpr: String,
+    wire: WireKey,
     params_in: &[u8],
     target: z_query_target_t,
     consolidation: z_consolidation_mode_t,
@@ -1269,7 +1276,7 @@ pub(crate) fn issue_get(
         value_meta,
     );
 
-    fan_get(shared, &keyexpr, &opts, closure, gate, token)
+    fan_get(shared, &keyexpr, &wire, &opts, closure, gate, token)
 }
 
 /// Fan one C get across every connected face, returning `Z_OK`.
@@ -1294,6 +1301,7 @@ pub(crate) fn issue_get(
 fn fan_get(
     shared: &Arc<SharedSession>,
     keyexpr: &str,
+    wire: &WireKey,
     opts: &QueryOptions,
     closure: Arc<CReplyClosure>,
     gate: Arc<ReplyGate>,
@@ -1343,19 +1351,34 @@ fn fan_get(
         // a real final, a timeout sweep, and a face death alike — whereas a
         // counter incremented here would never be reached by the face-death
         // path. See the module doc.
-        let issued = session.query(
-            keyexpr,
-            opts.clone(),
-            move |view: &dyn ReplyView| per_face.fire(view),
-            |_rid| {},
-        );
+        let on_reply = move |view: &dyn ReplyView| per_face.fire(view);
+        // R2959 — a declared key goes out as its alias; the reply gate and the
+        // loopback still match the literal (`query_aliased`'s
+        // `loopback_keyexpr`). The alias error collapses onto the plain one's
+        // best-effort handling below: either way this face issued nothing.
+        let issued = if wire.mapping_id == 0 {
+            session
+                .query(keyexpr, opts.clone(), on_reply, |_rid| {})
+                .ok()
+        } else {
+            session
+                .query_aliased(
+                    wire.mapping_id,
+                    wire.suffix.as_deref(),
+                    keyexpr,
+                    opts.clone(),
+                    on_reply,
+                    |_rid| {},
+                )
+                .ok()
+        };
         // R311y575 — record this face's rid against the cancellation set before
         // moving on. `record` answers `false` when the token cancelled while the
         // fan was running; it has already unregistered THIS rid (the handler
         // that ran could not have seen it), so the only thing left is to stop
         // issuing on further faces.
         let cancelled_mid_fan = match (&fan, &issued) {
-            (Some(fan), Ok(handle)) => {
+            (Some(fan), Some(handle)) => {
                 let undo_session = session.clone();
                 let rid = handle.rid();
                 !fan.record(move || {
@@ -1367,8 +1390,8 @@ fn fan_get(
         // A per-face issue error (a face mid-teardown) is swallowed, matching
         // the fan-out publish's best-effort discipline. Its `Arc` clone was
         // already dropped with the rolled-back sink, so it cannot hold the get
-        // open — and if EVERY face errors, `guard` below completes it.
-        drop(issued);
+        // open — and if EVERY face errors, `guard` below completes it. (The
+        // handle itself is a plain rid, so there is nothing of it to release.)
         if cancelled_mid_fan {
             break;
         }

@@ -813,6 +813,36 @@ pub fn build_undeclare_token_with_keyexpr(keyexpr: &str) -> Result<DeclareOwned,
     })
 }
 
+/// Build a `Declare(UndeclareToken)` that retracts token `token_id` AND names
+/// the key it was declared on, in the wire form it was declared with.
+///
+/// The third retraction shape, beside the id-only [`build_undeclare_token`]
+/// that zenoh's session sends (`zenoh/src/api/session.rs` @
+/// `ext_wire_expr: WireExprType::null(),`) and the sourced
+/// [`build_undeclare_token_with_keyexpr`] a router sends. zenoh-pico keeps the
+/// id AND attaches the key (`vendor/zenoh-pico/src/net/liveliness.c` @
+/// `_z_declaration_t declaration = _z_make_undecl_token(id, &wireexpr);`), so a
+/// drop-in for it has to as well; which of the three a caller wants is the
+/// caller's ABI, not this builder's.
+pub fn build_undeclare_token_on_wire(
+    token_id: u64,
+    mapping_id: u64,
+    suffix: &str,
+) -> Result<DeclareOwned, CodecError> {
+    let ext = crate::declare_ext_keyexpr::build_ext_wireexpr(mapping_id, suffix)?;
+    Ok(DeclareOwned {
+        header: DECLARE_ENVELOPE_HEADER,
+        interest_id: None,
+        extensions: Some(declare_envelope_extensions()),
+        body: DeclareOwnedVariant::CodecZenohUndeclToken(UndeclTokenOwned {
+            // Z (bit 7): the inner declaration carries an extension chain.
+            header: wire_const::D_MID_UNDECL_TOKEN | 0x80,
+            id: token_id,
+            extensions: Some(alloc::vec![ext]),
+        }),
+    })
+}
+
 /// R121i-c — build a `Declare(DeclFinal)` marker that terminates a
 /// declaration sequence on the wire. Mirrors zenoh-pico
 /// `_z_decl_final_encode` at

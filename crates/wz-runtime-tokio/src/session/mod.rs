@@ -4056,16 +4056,15 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
                 composed
             }
         };
-        // R311ou — route the aliased subscriber by delegating to the emitting
-        // literal `declare_subscriber` on the resolved keyexpr: register the
-        // local callback AND emit `Declare(DeclSubscriber)` (locality-gated) so a
-        // router routes matching Pushes back, with the RAII `UndeclSubscriber` on
-        // Drop. The `SubscribeError` reject family projects to the alias surface
-        // via `From` (so `SubscribeAliasError` mirrors `LivelinessAliasError`),
-        // giving the literal + aliased subscriber declares ONE routed SSOT — and
-        // the same local-registration rollback on a gate reject.
-        self.declare_subscriber(resolved, options, callback)
-            .map_err(SubscribeAliasError::from)
+        // R311ou — ONE routed SSOT with the literal declare, and the same
+        // local-registration rollback on a gate reject.
+        //
+        // R2959 — the local registration matches the RESOLVED literal, and the
+        // announcement now carries the ALIAS. It used to announce the resolved
+        // literal too, which put a declared keyexpr's full text back on the wire
+        // — the one thing a declaration exists to keep off it, and not what
+        // zenoh-pico sends for a subscriber on a declared key.
+        self.declare_subscriber_on_wire(resolved, mapping_id, inline_suffix, options, callback)
     }
 
     /// R246 / R311ow — declare a ROUTED [`Queryable`] for `keyexpr` + `options`
@@ -4129,9 +4128,46 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
         // path adds no new constraint.
         SessionLinkActions<R, T>: Send + Sync + 'static,
     {
+        self.declare_queryable_on_wire(keyexpr.into(), 0, None, options, callback)
+            .map_err(|e| match e {
+                QueryableAliasError::InvalidKeyexpr(inner) => QueryableError::InvalidKeyexpr(inner),
+                QueryableAliasError::ExceedsCapacity => QueryableError::ExceedsCapacity,
+                QueryableAliasError::FeatureDisabled => QueryableError::FeatureDisabled,
+                QueryableAliasError::TransportUnavailable => QueryableError::TransportUnavailable,
+                QueryableAliasError::FragmentChainAbandoned => {
+                    QueryableError::FragmentChainAbandoned
+                }
+                // A literal announce names no mapping, so none can be unknown.
+                QueryableAliasError::UnknownMapping(id) => {
+                    unreachable!("a literal queryable declare reported unknown mapping {id}")
+                }
+            })
+    }
+
+    /// The one routed queryable declare — the twin of the subscriber's: the
+    /// callback is registered on `literal`, and the peer is told
+    /// `(mapping_id, suffix)`, the literal itself when `mapping_id == 0`.
+    ///
+    /// zenoh-pico announces a queryable on the key the QUERYABLE holds, which it
+    /// has just declared as the non-wild prefix of the caller's
+    /// (`vendor/zenoh-pico/src/net/primitives.c` @
+    /// `_z_wireexpr_t wire_expr = _z_declared_keyexpr_alias_to_wire(&q._key, _Z_RC_IN_VAL(zn));`),
+    /// so its announcement is an alias with the wild tail as suffix. Which form
+    /// to announce is the declaring ABI's, so it is a parameter here.
+    fn declare_queryable_on_wire(
+        &self,
+        literal: String,
+        mapping_id: u64,
+        suffix: Option<&str>,
+        options: QueryableOptions,
+        callback: impl FnMut(&dyn QueryView, &mut dyn ReplyOut) + Send + 'static,
+    ) -> Result<Queryable<R, T>, QueryableAliasError>
+    where
+        SessionLinkActions<R, T>: Send + Sync + 'static,
+    {
         #[cfg(feature = "query-queryable")]
         {
-            let keyexpr_string = keyexpr.into();
+            let keyexpr_string = literal;
             // R311nf — this method lives on `impl Session<R, T, Unicast>`, so
             // the unicast guarantee is structural: `actions()` is the
             // infallible bundle borrow (a multicast session has no
@@ -4185,7 +4221,12 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
             // reject so a rejected declare leaves no orphan queryable
             // (primitives.c:359). `cell.kill()` suppresses any query staged
             // between the register and this rollback.
-            let retraction = match self.announce_queryable(id, &keyexpr_string, &options) {
+            let wire_suffix = if mapping_id == 0 {
+                Some(keyexpr_string.as_str())
+            } else {
+                suffix
+            };
+            let retraction = match self.announce_queryable(id, mapping_id, wire_suffix, &options) {
                 Ok(retraction) => retraction,
                 Err(e) => {
                     cell.kill();
@@ -4223,8 +4264,8 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
         }
         #[cfg(not(feature = "query-queryable"))]
         {
-            let _ = (keyexpr, options, callback);
-            Err(QueryableError::FeatureDisabled)
+            let _ = (literal, mapping_id, suffix, options, callback);
+            Err(QueryableAliasError::FeatureDisabled)
         }
     }
 
@@ -4701,14 +4742,14 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
                     composed
                 }
             };
-            // R311ow — delegate to the routed literal declare_queryable, which
-            // registers locally + emits the wire `Declare(DeclQueryable)` (the
-            // alias resolved once here, at declare time). Its `QueryableError`
-            // reject variants project into `QueryableAliasError` via the `From`
-            // impl, giving the literal + aliased queryable declares ONE routed
-            // SSOT — and the same local-registration rollback on a gate reject.
-            self.declare_queryable(resolved, options, callback)
-                .map_err(QueryableAliasError::from)
+            // R311ow — ONE routed SSOT with the literal declare, and the same
+            // local-registration rollback on a gate reject.
+            //
+            // R2959 — local registration on the RESOLVED literal, announcement
+            // on the ALIAS. It used to announce the resolved literal, which is
+            // not what zenoh-pico sends for a queryable (see
+            // `declare_queryable_on_wire`).
+            self.declare_queryable_on_wire(resolved, mapping_id, inline_suffix, options, callback)
         }
         #[cfg(not(feature = "query-queryable"))]
         {
@@ -4740,9 +4781,10 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
     fn announce_queryable(
         &self,
         id: QueryableId,
-        keyexpr: &str,
+        mapping_id: u64,
+        suffix: Option<&str>,
         options: &QueryableOptions,
-    ) -> Result<Option<QueryableRetraction>, QueryableError>
+    ) -> Result<Option<QueryableRetraction>, QueryableAliasError>
     where
         SessionLinkActions<R, T>: Send + Sync + 'static,
     {
@@ -4754,43 +4796,46 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
             if !options.allowed_origin.allows_remote() {
                 return Ok(None);
             }
-            fn map_queryable_err(e: SendDeclareError) -> QueryableError {
+            fn map_queryable_err(e: SendDeclareError) -> QueryableAliasError {
                 match e {
-                    SendDeclareError::Keyexpr(inner) => QueryableError::InvalidKeyexpr(inner),
+                    SendDeclareError::Keyexpr(inner) => QueryableAliasError::InvalidKeyexpr(inner),
                     // W3 — literal keyexpr over MAX_KEYEXPR_BYTES, typed through.
                     // Both mean "too large to send; no wire bytes emitted, and
                     // nothing cached" — one bound is the codec's, the other the
                     // reassembly slot's.
                     SendDeclareError::Codec(_) | SendDeclareError::ExceedsReassemblyCap => {
-                        QueryableError::ExceedsCapacity
+                        QueryableAliasError::ExceedsCapacity
                     }
                     // R2238 — NOT folded in above: that group's shared claim
                     // includes "no wire bytes emitted", which this one breaks.
                     SendDeclareError::FragmentTxBudgetExhausted => {
-                        QueryableError::FragmentChainAbandoned
+                        QueryableAliasError::FragmentChainAbandoned
                     }
                     // F2 — reconnect-window reject, typed through.
-                    SendDeclareError::TransportUnavailable => QueryableError::TransportUnavailable,
+                    SendDeclareError::TransportUnavailable => {
+                        QueryableAliasError::TransportUnavailable
+                    }
                     // R311g1 — reachable only in a feature combo where
                     // `declare-queryable` is ON but the send-seam codec
                     // (`codec-declare`) is OFF; honest projection.
-                    SendDeclareError::FeatureDisabled => QueryableError::FeatureDisabled,
-                    // Literal mode (mapping_id=0, suffix=Some) cannot hit the
-                    // mapping-id arms; and `declare_queryable` lives on `impl
-                    // Session<R, T, Unicast>`, so the seam takes the unicast arm
-                    // and never returns RequiresUnicast (a multicast session is a
-                    // distinct type without this method).
-                    // R311y342 — MappingIdTooWideForWire joins the mapping-id
-                    // group: it is a `send_declare_keyexpr` gate, and this path
-                    // never calls it.
+                    SendDeclareError::FeatureDisabled => QueryableAliasError::FeatureDisabled,
+                    // An aliased announce resolves its id through the outbound
+                    // table; one retracted before this announce is unknown here.
+                    SendDeclareError::UnknownMappingId(id) => {
+                        QueryableAliasError::UnknownMapping(id)
+                    }
+                    // `declare_queryable` lives on `impl Session<R, T,
+                    // Unicast>`, so the seam never returns RequiresUnicast; every
+                    // caller hands a suffix for a literal, so neither the
+                    // reserved-zero nor the missing-key arm is reachable; and
+                    // MappingIdTooWideForWire (R311y342) is a
+                    // `send_declare_keyexpr` gate this path never calls.
                     SendDeclareError::RequiresUnicast
-                    | SendDeclareError::UnknownMappingId(_)
                     | SendDeclareError::ReservedMappingIdZero
                     | SendDeclareError::MappingIdTooWideForWire(_)
-                    | SendDeclareError::MissingKeyexpr => unreachable!(
-                        "declare_queryable literal-mode prepare/seam returned \
-                         {e:?} unexpectedly"
-                    ),
+                    | SendDeclareError::MissingKeyexpr => {
+                        unreachable!("declare_queryable prepare/seam returned {e:?} unexpectedly")
+                    }
                 }
             }
             let actions = self.actions();
@@ -4798,12 +4843,7 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
             // QueryableId (one entity id, mirroring `_z_get_entity_id`).
             let wire_id = id.as_u64();
             let declare = actions
-                .prepare_declare_queryable(
-                    wire_id,
-                    /*mapping_id=*/ 0,
-                    Some(keyexpr),
-                    options.complete,
-                )
+                .prepare_declare_queryable(wire_id, mapping_id, suffix, options.complete)
                 .map_err(map_queryable_err)?;
             self.send_network_message(
                 wz_session_core::network_message::NetworkMessage::Declare(Box::new(declare)),
@@ -4814,12 +4854,7 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
             // A4 — reconnect-replay cache (pico `_z_cache_declaration`);
             // session-state bookkeeping AROUND the seam emit, like
             // declare_subscriber.
-            actions.cache_queryable_declaration(
-                wire_id,
-                /*mapping_id=*/ 0,
-                Some(keyexpr),
-                options.complete,
-            );
+            actions.cache_queryable_declaration(wire_id, mapping_id, suffix, options.complete);
             // The retraction captures the unicast actions Arc + the wire id;
             // type-erased so `Queryable` stays free of the wire-codec types.
             let actions_for_drop = actions.clone();
@@ -4829,7 +4864,7 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
         }
         #[cfg(not(feature = "declare-queryable"))]
         {
-            let _ = (id, keyexpr, options);
+            let _ = (id, mapping_id, suffix, options);
             Ok(None)
         }
     }
@@ -5027,9 +5062,55 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
         wz_session_core::session_actions::SessionLinkActions<R, T>: Send + Sync,
         T: 'static,
     {
-        let keyexpr_string = keyexpr.into();
+        self.declare_subscriber_on_wire(keyexpr.into(), 0, None, options, callback)
+            .map_err(|e| match e {
+                SubscribeAliasError::InvalidKeyexpr(inner) => SubscribeError::InvalidKeyexpr(inner),
+                SubscribeAliasError::ExceedsCapacity => SubscribeError::ExceedsCapacity,
+                SubscribeAliasError::FeatureDisabled => SubscribeError::FeatureDisabled,
+                SubscribeAliasError::TransportUnavailable => SubscribeError::TransportUnavailable,
+                SubscribeAliasError::FragmentChainAbandoned => {
+                    SubscribeError::FragmentChainAbandoned
+                }
+                // A literal announce names no mapping, so none can be unknown.
+                SubscribeAliasError::UnknownMapping(id) => {
+                    unreachable!("a literal subscriber declare reported unknown mapping {id}")
+                }
+            })
+    }
+
+    /// The one routed subscriber declare: register the callback on `literal`
+    /// locally, and announce it to the peer as `(mapping_id, suffix)` — the
+    /// literal itself when `mapping_id == 0`.
+    ///
+    /// The two are separate because they answer different questions. The local
+    /// registration decides which samples THIS session delivers, so it matches
+    /// the resolved literal. The announcement decides what the peer reads, and a
+    /// declaring ABI chooses that form: zenoh-pico announces a subscriber on
+    /// the caller's own wire expression
+    /// (`vendor/zenoh-pico/src/net/primitives.c` @
+    /// `_z_wireexpr_t wire_expr = _z_declared_keyexpr_alias_to_wire(keyexpr, _Z_RC_IN_VAL(zn));`),
+    /// which is an alias whenever the caller's key carries a declaration.
+    fn declare_subscriber_on_wire(
+        &self,
+        literal: String,
+        mapping_id: u64,
+        suffix: Option<&str>,
+        options: SubscribeOptions,
+        callback: impl FnMut(&dyn SampleView) + Send + 'static,
+    ) -> Result<Subscriber<R>, SubscribeAliasError>
+    where
+        <R as SessionRuntime>::LinkSink: Send + Sync,
+        wz_session_core::session_actions::SessionLinkActions<R, T>: Send + Sync,
+        T: 'static,
+    {
+        let keyexpr_string = literal;
         let (id, cell) = self.register_subscriber_local(&keyexpr_string, &options, callback);
-        let retraction = match self.announce_subscriber(id, &keyexpr_string, &options) {
+        let wire_suffix = if mapping_id == 0 {
+            Some(keyexpr_string.as_str())
+        } else {
+            suffix
+        };
+        let retraction = match self.announce_subscriber(id, mapping_id, wire_suffix, &options) {
             Ok(retraction) => retraction,
             Err(e) => {
                 // pico parity (`_z_register_subscriber`, primitives.c:243): roll
@@ -5068,9 +5149,10 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
     fn announce_subscriber(
         &self,
         id: SubscriptionId,
-        keyexpr: &str,
+        mapping_id: u64,
+        suffix: Option<&str>,
         options: &SubscribeOptions,
-    ) -> Result<Option<SubscriberRetraction>, SubscribeError>
+    ) -> Result<Option<SubscriberRetraction>, SubscribeAliasError>
     where
         <R as SessionRuntime>::LinkSink: Send + Sync,
         // R311y205 (transport-multilink IMPL-2b-i) — the shared session kernel +
@@ -5092,43 +5174,47 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
             if !options.allowed_origin.allows_remote() {
                 return Ok(None);
             }
-            fn map_subscribe_err(e: SendDeclareError) -> SubscribeError {
+            fn map_subscribe_err(e: SendDeclareError) -> SubscribeAliasError {
                 match e {
-                    SendDeclareError::Keyexpr(inner) => SubscribeError::InvalidKeyexpr(inner),
+                    SendDeclareError::Keyexpr(inner) => SubscribeAliasError::InvalidKeyexpr(inner),
                     // W3 — literal keyexpr over MAX_KEYEXPR_BYTES, typed through.
                     // Both mean "too large to send; no wire bytes emitted, and
                     // nothing cached" — one bound is the codec's, the other the
                     // reassembly slot's.
                     SendDeclareError::Codec(_) | SendDeclareError::ExceedsReassemblyCap => {
-                        SubscribeError::ExceedsCapacity
+                        SubscribeAliasError::ExceedsCapacity
                     }
                     // R2238 — NOT folded in above: that group's shared claim
                     // includes "no wire bytes emitted", which this one breaks.
                     SendDeclareError::FragmentTxBudgetExhausted => {
-                        SubscribeError::FragmentChainAbandoned
+                        SubscribeAliasError::FragmentChainAbandoned
                     }
                     // F2 — reconnect-window reject, typed through.
-                    SendDeclareError::TransportUnavailable => SubscribeError::TransportUnavailable,
+                    SendDeclareError::TransportUnavailable => {
+                        SubscribeAliasError::TransportUnavailable
+                    }
                     // R311g1 — reachable only in a feature combo where
                     // `declare-subscriber` is ON but the send-seam codec
                     // (`codec-declare`) is OFF; honest projection.
-                    SendDeclareError::FeatureDisabled => SubscribeError::FeatureDisabled,
-                    // Literal mode (mapping_id=0, suffix=Some) cannot hit the
-                    // mapping-id arms; and `declare_subscriber` lives on `impl
-                    // Session<R, T, Unicast>`, so the seam takes the unicast arm
-                    // and never returns RequiresUnicast (a multicast session is a
-                    // distinct type without this method).
-                    // R311y342 — MappingIdTooWideForWire joins the mapping-id
-                    // group: it is a `send_declare_keyexpr` gate, and this path
-                    // never calls it.
+                    SendDeclareError::FeatureDisabled => SubscribeAliasError::FeatureDisabled,
+                    // An aliased announce resolves its id through the outbound
+                    // table; one retracted between the caller's declare and this
+                    // announce is unknown here.
+                    SendDeclareError::UnknownMappingId(id) => {
+                        SubscribeAliasError::UnknownMapping(id)
+                    }
+                    // `declare_subscriber` lives on `impl Session<R, T,
+                    // Unicast>`, so the seam takes the unicast arm and never
+                    // returns RequiresUnicast; every caller hands a suffix for a
+                    // literal, so neither the reserved-zero nor the missing-key
+                    // arm is reachable; and MappingIdTooWideForWire (R311y342) is
+                    // a `send_declare_keyexpr` gate this path never calls.
                     SendDeclareError::RequiresUnicast
-                    | SendDeclareError::UnknownMappingId(_)
                     | SendDeclareError::ReservedMappingIdZero
                     | SendDeclareError::MappingIdTooWideForWire(_)
-                    | SendDeclareError::MissingKeyexpr => unreachable!(
-                        "declare_subscriber literal-mode prepare/seam returned \
-                         {e:?} unexpectedly"
-                    ),
+                    | SendDeclareError::MissingKeyexpr => {
+                        unreachable!("declare_subscriber prepare/seam returned {e:?} unexpectedly")
+                    }
                 }
             }
             let actions = self.actions();
@@ -5136,7 +5222,7 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
             // SubscriptionId (one entity id, mirroring `_z_get_entity_id`).
             let wire_id = id.as_u64();
             let declare = actions
-                .prepare_declare_subscriber(wire_id, /*mapping_id=*/ 0, Some(keyexpr))
+                .prepare_declare_subscriber(wire_id, mapping_id, suffix)
                 .map_err(map_subscribe_err)?;
             self.send_network_message(
                 wz_session_core::network_message::NetworkMessage::Declare(Box::new(declare)),
@@ -5146,7 +5232,7 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
             .map_err(|e| map_subscribe_err(SendDeclareError::from(e)))?;
             // A4 — reconnect-replay cache (pico `_z_cache_declaration`);
             // session-state bookkeeping AROUND the seam emit, like declare_token.
-            actions.cache_subscriber_declaration(wire_id, /*mapping_id=*/ 0, Some(keyexpr));
+            actions.cache_subscriber_declaration(wire_id, mapping_id, suffix);
             // The retraction captures the unicast actions Arc + the wire id;
             // type-erased so `Subscriber<R>` stays free of the `T` clock param.
             let actions_for_drop = actions.clone();
@@ -5156,7 +5242,7 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
         }
         #[cfg(not(feature = "declare-subscriber"))]
         {
-            let _ = (id, keyexpr, options);
+            let _ = (id, mapping_id, suffix, options);
             Ok(None)
         }
     }
@@ -5295,10 +5381,12 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
             // R311mz — the held-token registration (R283) now lives inside
             // LivelinessToken::new_held, the sole constructor, so the literal
             // and aliased declare paths register identically by construction.
+            let declared_on = (0, keyexpr_string.clone());
             Ok(LivelinessToken::new_held(
                 self.clone(),
                 token_id,
                 keyexpr_string,
+                declared_on,
                 options,
             ))
         }
@@ -5454,6 +5542,7 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
                 self.clone(),
                 token_id,
                 resolved,
+                (mapping_id, inline_suffix.unwrap_or_default().to_string()),
                 options,
             ))
         }

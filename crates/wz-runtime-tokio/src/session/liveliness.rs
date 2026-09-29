@@ -20,10 +20,11 @@ use super::*;
 /// placeholder for future per-token options that the upstream Zenoh
 /// protocol has not yet defined.
 ///
-/// Empty `#[non_exhaustive]` so a future round can add per-token
-/// fields (e.g. completeness flag, expiry hint, attachment) without
-/// breaking external callers. Construct via [`Self::default`] /
-/// [`Self::new`].
+/// `#[non_exhaustive]` with private fields, so per-token options are added
+/// without breaking external callers. Construct via [`Self::default`] /
+/// [`Self::new`]. The one option it carries is not a C option at all but a
+/// choice between the two reference libraries' retractions; see
+/// [`Self::with_retraction_naming_the_key`].
 ///
 /// R311o — type-ungated per `feedback_signature_stability` MEMORY
 /// anchor. Always defined regardless of the `liveliness-token`
@@ -33,14 +34,35 @@ use super::*;
 /// `Err(LivelinessAliasError::FeatureDisabled)` when off.
 #[derive(Debug, Clone, Default)]
 #[non_exhaustive]
-pub struct LivelinessOptions {}
+pub struct LivelinessOptions {
+    /// Whether the retraction names the key the token was declared on.
+    retraction_names_the_key: bool,
+}
 
 impl LivelinessOptions {
-    /// Default options — currently empty, mirroring zenoh-pico's
-    /// `z_liveliness_token_options_default` which zeroes out the
-    /// `__dummy` slot.
+    /// Default options — the retraction is id-only.
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Make the token's `UndeclareToken` carry the key it was declared on, in
+    /// the wire form it was declared with, beside its id.
+    ///
+    /// Off by default because zenoh's session retracts by id alone
+    /// (`zenoh/src/api/session.rs` @ `ext_wire_expr: WireExprType::null(),`);
+    /// zenoh-pico attaches the key
+    /// (`vendor/zenoh-pico/src/net/liveliness.c` @
+    /// `_z_declaration_t declaration = _z_make_undecl_token(id, &wireexpr);`).
+    /// The two reference libraries disagree, so it is a declaring ABI's choice
+    /// and not this session's.
+    pub fn with_retraction_naming_the_key(mut self, on: bool) -> Self {
+        self.retraction_names_the_key = on;
+        self
+    }
+
+    /// See [`Self::with_retraction_naming_the_key`].
+    pub fn retraction_names_the_key(&self) -> bool {
+        self.retraction_names_the_key
     }
 }
 
@@ -141,6 +163,10 @@ pub struct LivelinessToken<R: SessionRuntime = TokioRuntime, T: TimeSource = Tok
     session: WeakSession<R, T, Unicast>,
     id: u64,
     keyexpr: String,
+    /// The wire form the token was DECLARED with — `(mapping_id, suffix)`,
+    /// `mapping_id == 0` for a literal — kept so a retraction that names the
+    /// key names it the same way ([`LivelinessOptions::retraction_names_the_key`]).
+    declared_on: (u64, String),
     options: LivelinessOptions,
     /// R311lo — RAII disarm flag. [`Self::undeclare`] emits the
     /// `Declare(UndeclToken)` once and clears this so the natural
@@ -175,6 +201,7 @@ impl<R: SessionRuntime, T: TimeSource> LivelinessToken<R, T> {
         session: Session<R, T, Unicast>,
         token_id: u64,
         keyexpr: String,
+        declared_on: (u64, String),
         options: LivelinessOptions,
     ) -> Self {
         // R283 — register the held token so an inbound non-final liveliness
@@ -197,6 +224,7 @@ impl<R: SessionRuntime, T: TimeSource> LivelinessToken<R, T> {
             session: session.downgrade(),
             id: token_id,
             keyexpr,
+            declared_on,
             options,
             // R311lo — armed: Drop/undeclare teardown frees this handle.
             armed: true,
@@ -361,7 +389,20 @@ impl<R: SessionRuntime, T: TimeSource> LivelinessToken<R, T> {
             // interests for a token it has given up.
             #[cfg(all(feature = "declare-token", feature = "declare-undeclare"))]
             let sent = {
-                let declare = wz_session_core::declare_build::build_undeclare_token(self.id);
+                // Id-only unless the declaring ABI asked for the key too — see
+                // `LivelinessOptions::with_retraction_naming_the_key` for why
+                // the two reference libraries differ here.
+                let declare = if self.options.retraction_names_the_key() {
+                    let (mapping_id, suffix) = &self.declared_on;
+                    wz_session_core::declare_build::build_undeclare_token_on_wire(
+                        self.id,
+                        *mapping_id,
+                        suffix,
+                    )
+                    .expect("the ext body rides the alloc carrier, which is unbounded")
+                } else {
+                    wz_session_core::declare_build::build_undeclare_token(self.id)
+                };
                 // R2544b — through the UPGRADED handle, not `self.session`,
                 // which is now weak. Upgrading once above and reusing it here
                 // is what keeps the emit and the prune on the SAME session:

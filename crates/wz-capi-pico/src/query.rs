@@ -75,7 +75,7 @@ use crate::abi::{
     z_view_string_t,
 };
 use crate::ffi::{guarded, CClosure as FfiClosure};
-use crate::keyexpr::keyexpr_str;
+use crate::keyexpr::{declared_of, keyexpr_str, DeclaredKeyexpr};
 use crate::result::{ZResult, Z_ERR_INVALID, Z_ERR_KEYEXPR_NOT_MATCH, Z_ERR_NULL, Z_OK};
 use crate::session::{session_state, z_loaned_session_t};
 use wz_capi_core::faces::{QblId, SharedSession};
@@ -1053,9 +1053,11 @@ pub unsafe extern "C" fn z_query_reply_err_options_default(
 struct QueryableState {
     shared: Arc<SharedSession>,
     id: QblId,
-    keyexpr: String,
-    /// Cached `{ start, len }` over `keyexpr`, so `z_queryable_keyexpr` hands
-    /// back a borrow of stable storage rather than of a temporary.
+    /// R2959 — the queryable's key with the non-wild-prefix declaration pico
+    /// makes for it; dropped after the queryable, so the retraction follows.
+    key: DeclaredKeyexpr,
+    /// Cached loan of `key`, so `z_queryable_keyexpr` hands back a borrow of
+    /// stable storage rather than of a temporary.
     loaned_keyexpr: z_loaned_keyexpr_t,
 }
 
@@ -1129,7 +1131,7 @@ unsafe fn declare_queryable_inner(
     keyexpr: *const z_loaned_keyexpr_t,
     callback: *mut z_moved_closure_query_t,
     options: *const z_queryable_options_t,
-) -> Result<(Arc<SharedSession>, QblId, String), ZResult> {
+) -> Result<(Arc<SharedSession>, QblId, DeclaredKeyexpr), ZResult> {
     if callback.is_null() {
         return Err(Z_ERR_NULL);
     }
@@ -1161,8 +1163,16 @@ unsafe fn declare_queryable_inner(
     // (`vendor/zenoh-pico/CMakeLists.txt:353`), so a default pico build has no
     // local queryable at all and its `z_queryable_options_t` carries no
     // `allowed_origin` field — which is why this crate's mirror carries none.
-    let id = state.shared.declare_queryable(
-        ke.clone(),
+    // R2959 — pico declares the queryable's NON-WILD PREFIX and announces the
+    // queryable ON that declaration, the wild tail as suffix
+    // (`vendor/zenoh-pico/src/net/primitives.c` @
+    // `_z_wireexpr_t wire_expr = _z_declared_keyexpr_alias_to_wire(&q._key, _Z_RC_IN_VAL(zn));`)
+    // — unlike the subscriber, which announces on the caller's key. Measured:
+    // `DeclKexpr = demo/kd/qbl` then `DeclQueryable on K + "/*/x"`.
+    let key = DeclaredKeyexpr::declare_non_wild_prefix(&state.shared, &ke, declared_of(keyexpr))?;
+    let id = state.shared.declare_queryable_on_wire(
+        ke,
+        key.wire(&state.shared),
         complete,
         wz_runtime_tokio::locality::Locality::Remote,
         {
@@ -1174,7 +1184,7 @@ unsafe fn declare_queryable_inner(
             })
         },
     );
-    Ok((state.shared.clone(), id, ke))
+    Ok((state.shared.clone(), id, key))
 }
 
 /// Declare a queryable (pico `z_declare_queryable`). Consumes the moved
@@ -1192,16 +1202,15 @@ pub unsafe extern "C" fn z_declare_queryable(
             return Z_ERR_NULL;
         }
         match declare_queryable_inner(zs, keyexpr, callback, options) {
-            Ok((shared, id, ke)) => {
+            Ok((shared, id, key)) => {
                 let mut boxed = Box::new(QueryableState {
                     shared,
                     id,
-                    keyexpr: ke,
+                    key,
                     loaned_keyexpr: z_loaned_keyexpr_t::borrowed(std::ptr::null(), 0),
                 });
                 // Point the cached view at the boxed keyexpr's final address.
-                boxed.loaned_keyexpr =
-                    z_loaned_keyexpr_t::borrowed(boxed.keyexpr.as_ptr(), boxed.keyexpr.len());
+                boxed.loaned_keyexpr = boxed.key.loaned();
                 *queryable = z_owned_queryable_t {
                     handle: Box::into_raw(boxed) as *mut c_void,
                     _pad: [std::ptr::null_mut(); 3],

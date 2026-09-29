@@ -695,7 +695,7 @@ pub unsafe extern "C" fn z_publisher_put(
         let sent = match state.keyexpr.mapping {
             Some(mapping) => state
                 .shared
-                .publish_aliased_all(mapping, &payload, &publish),
+                .publish_aliased_all(mapping, None, &payload, &publish),
             None => state
                 .shared
                 .publish_all(&state.keyexpr.keyexpr, &payload, &publish),
@@ -752,7 +752,9 @@ pub unsafe extern "C" fn z_publisher_delete(
             }
         };
         let sent = match state.keyexpr.mapping {
-            Some(mapping) => state.shared.publish_aliased_all(mapping, &[], &options),
+            Some(mapping) => state
+                .shared
+                .publish_aliased_all(mapping, None, &[], &options),
             None => state
                 .shared
                 .publish_all(&state.keyexpr.keyexpr, &[], &options),

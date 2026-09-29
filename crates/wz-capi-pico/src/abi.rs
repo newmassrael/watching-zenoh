@@ -230,11 +230,11 @@ impl z_owned_slice_t {
 /// one loan to it — `z_view_keyexpr_loan` and `z_keyexpr_loan` return the same
 /// type. wz reproduces that by giving the two producers ONE layout:
 ///
-/// | slot | view (borrowed literal) | declared (`z_declare_keyexpr`) |
-/// |------|-------------------------|--------------------------------|
+/// | slot | view (borrowed literal) | owned / entity key |
+/// |------|-------------------------|--------------------|
 /// | 0/1  | `{ start, len }` into the caller's storage | `{ start, len }` into the OWNED copy |
-/// | 2    | null                    | `Box<DeclaredKeyexpr>` handle  |
-/// | 3    | 0                       | the wire mapping id (never 0)  |
+/// | 2    | null                    | the `DeclaredKeyexpr` (boxed for an owned key, the entity's own for an entity's loan) |
+/// | 3    | 0                       | 0                  |
 ///
 /// Keeping `{ start, len }` at slots 0/1 for BOTH is what lets
 /// [`crate::keyexpr::keyexpr_str`] stay a single branchless read: the literal
@@ -243,9 +243,11 @@ impl z_owned_slice_t {
 /// would make slot 0 ambiguous (a non-null pointer means "literal" in one arm
 /// and "handle" in the other) and force every reader to carry a tag.
 ///
-/// Slot 3 doubles as the discriminant: `mapping == 0` is "not declared", which
-/// is sound rather than merely convenient, because 0 is RESERVED on the wire
-/// (`SendDeclareError::ReservedMappingIdZero`) and can never be a real id.
+/// R2959 — slot 3 used to carry the wire mapping id and double as the
+/// "declared" discriminant. A declaration can now cover a PREFIX of the key, so
+/// an id alone cannot say what goes on the wire; the key behind slot 2 answers
+/// that (`crate::keyexpr::wire_key_of`), and slot 3 is kept zeroed for the
+/// layout.
 #[repr(C)]
 pub struct z_loaned_keyexpr_t {
     pub(crate) _start: *const u8,

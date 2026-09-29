@@ -177,6 +177,159 @@ pub enum FanoutError {
     ExceedsCapacity,
 }
 
+/// How a C declaration's key goes on the WIRE, as distinct from the literal it
+/// matches on locally.
+///
+/// The two differ whenever a declaring ABI names a key through one of its own
+/// keyexpr declarations: the entity still matches the resolved literal, but the
+/// peer is told `(mapping_id, suffix)`. `mapping_id == 0` is the literal
+/// itself, which is what zenoh-c's session sends and the default here; the
+/// pico ABI announces through the declarations zenoh-pico makes for its
+/// entities (`_z_declared_keyexpr_declare` and its non-wild-prefix twin,
+/// `vendor/zenoh-pico/src/session/keyexpr.c`).
+///
+/// Recorded on each SSOT entry, because a face that joins later replays the
+/// declaration and must announce it the same way. The id stays valid there:
+/// keyexpr declarations are session-global and replayed onto a new face FIRST
+/// (see [`SharedSession::face_up`]).
+///
+/// ## What keeps the id declared
+///
+/// An entry that names `mapping_id` on the wire needs that declaration to
+/// outlive it, and the ABI that made the declaration is the one that knows what
+/// retracts it. So the key carries what it [`keeps`](Self::keeping) alive, and
+/// the entry holding the key holds that. For an entity with a handle the ABI
+/// usually holds its own reference too; for a BACKGROUND entity, which has no
+/// handle and lives as long as the session, the entry is the only holder —
+/// which is exactly the lifetime zenoh-pico gives the declaration, stored with
+/// the subscription in the session's table.
+///
+/// Entries are always released OUTSIDE the registry lock, so what they keep may
+/// re-enter the session as it drops (a keyexpr retraction does).
+#[derive(Clone, Default)]
+pub struct WireKey {
+    /// The keyexpr declaration the wire names, `0` for none.
+    pub mapping_id: u64,
+    /// What follows the declared prefix, `None` when it covers the whole key.
+    pub suffix: Option<String>,
+    keeps: Option<Arc<dyn Send + Sync>>,
+}
+
+impl std::fmt::Debug for WireKey {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("WireKey")
+            .field("mapping_id", &self.mapping_id)
+            .field("suffix", &self.suffix)
+            .field("keeps", &self.keeps.is_some())
+            .finish()
+    }
+}
+
+impl WireKey {
+    /// The literal itself — no declaration.
+    pub fn literal() -> Self {
+        Self::default()
+    }
+
+    /// Declaration `mapping_id` followed by `suffix`.
+    pub fn aliased(mapping_id: u64, suffix: Option<String>) -> Self {
+        Self {
+            mapping_id,
+            suffix,
+            keeps: None,
+        }
+    }
+
+    /// This key, holding `anchor` alive for as long as a declaration made on
+    /// it stays recorded.
+    pub fn keeping(mut self, anchor: Arc<dyn Send + Sync>) -> Self {
+        self.keeps = Some(anchor);
+        self
+    }
+
+    fn is_literal(&self) -> bool {
+        self.mapping_id == 0
+    }
+}
+
+/// Declare a subscriber on one face in `wire`'s form.
+fn declare_subscriber_on(
+    session: &TokioSession,
+    keyexpr: &str,
+    wire: &WireKey,
+    options: SubscribeOptions,
+    callback: impl FnMut(&dyn SampleView) + Send + 'static,
+) -> Option<Subscriber<TokioRuntime>> {
+    if wire.is_literal() {
+        session
+            .declare_subscriber(keyexpr.to_string(), options, callback)
+            .ok()
+    } else {
+        session
+            .declare_subscriber_aliased(wire.mapping_id, wire.suffix.as_deref(), options, callback)
+            .ok()
+    }
+}
+
+/// Declare a queryable on one face in `wire`'s form.
+fn declare_queryable_on(
+    session: &TokioSession,
+    keyexpr: &str,
+    wire: &WireKey,
+    options: QueryableOptions,
+    callback: impl FnMut(&dyn QueryView, &mut dyn ReplyOut) + Send + 'static,
+) -> Option<Queryable<TokioRuntime>> {
+    if wire.is_literal() {
+        session
+            .declare_queryable(keyexpr.to_string(), options, callback)
+            .ok()
+    } else {
+        session
+            .declare_queryable_aliased(wire.mapping_id, wire.suffix.as_deref(), options, callback)
+            .ok()
+    }
+}
+
+/// Declare a liveliness token on one face in `wire`'s form.
+fn declare_token_on(
+    session: &TokioSession,
+    keyexpr: &str,
+    wire: &WireKey,
+    options: LivelinessOptions,
+) -> Option<LivelinessToken<TokioRuntime>> {
+    if wire.is_literal() {
+        session.declare_token(keyexpr.to_string(), options).ok()
+    } else {
+        session
+            .declare_token_aliased(wire.mapping_id, wire.suffix.as_deref(), options)
+            .ok()
+    }
+}
+
+/// Declare a liveliness subscriber on one face in `wire`'s form.
+fn declare_liveliness_subscriber_on(
+    session: &TokioSession,
+    keyexpr: &str,
+    wire: &WireKey,
+    options: LivelinessSubscriberOptions,
+    sink: impl for<'a> FnMut(LivelinessSample<'a>) + Send + 'static,
+) -> Option<LivelinessSubscriber<TokioRuntime>> {
+    if wire.is_literal() {
+        session
+            .declare_liveliness_subscriber(keyexpr.to_string(), options, sink)
+            .ok()
+    } else {
+        session
+            .declare_liveliness_subscriber_aliased(
+                wire.mapping_id,
+                wire.suffix.as_deref(),
+                options,
+                sink,
+            )
+            .ok()
+    }
+}
+
 /// A C-level subscription id — what a `z_owned_subscriber_t` handle carries.
 /// It keys the per-face wz [`Subscriber`]s this one C subscription spawned.
 pub type SubId = u64;
@@ -296,6 +449,8 @@ struct SubEntry {
     /// declaration mean one thing on the face that was up at declare time and
     /// another on every face after it.
     allowed_origin: Locality,
+    /// How the peer is told the key — see [`WireKey`].
+    wire: WireKey,
     sink: SubscriberSink,
 }
 
@@ -312,6 +467,8 @@ struct QblEntry {
     /// R311y554 — the C caller's `allowed_origin`; kept for the same reason
     /// [`SubEntry::allowed_origin`] is.
     allowed_origin: Locality,
+    /// How the peer is told the key — see [`WireKey`].
+    wire: WireKey,
     sink: QueryableSink,
 }
 
@@ -337,6 +494,11 @@ struct KexprEntry {
 struct TokenEntry {
     id: TokenId,
     keyexpr: String,
+    /// How the peer is told the key — see [`WireKey`].
+    wire: WireKey,
+    /// The declaring ABI's retraction shape, kept so a replayed token retracts
+    /// the way the first one does.
+    options: LivelinessOptions,
 }
 
 /// A C-declared liveliness SUBSCRIPTION — the fifth SSOT. Shares `SubId` space
@@ -346,6 +508,8 @@ struct LiveSubEntry {
     id: SubId,
     keyexpr: String,
     history: bool,
+    /// How the peer is told the key — see [`WireKey`].
+    wire: WireKey,
     sink: LivelinessSink,
 }
 
@@ -1213,8 +1377,10 @@ impl SharedSession {
         }
         let mut subs = BTreeMap::new();
         for entry in &guard.subs {
-            if let Ok(sub) = session.declare_subscriber(
-                entry.keyexpr.clone(),
+            if let Some(sub) = declare_subscriber_on(
+                &session,
+                &entry.keyexpr,
+                &entry.wire,
                 SubscribeOptions::default().with_allowed_origin(entry.allowed_origin),
                 (entry.sink)(),
             ) {
@@ -1223,8 +1389,10 @@ impl SharedSession {
         }
         let mut qbls = BTreeMap::new();
         for entry in &guard.qbls {
-            if let Ok(qbl) = session.declare_queryable(
-                entry.keyexpr.clone(),
+            if let Some(qbl) = declare_queryable_on(
+                &session,
+                &entry.keyexpr,
+                &entry.wire,
                 queryable_options(entry.complete, entry.allowed_origin),
                 (entry.sink)(&session),
             ) {
@@ -1244,7 +1412,8 @@ impl SharedSession {
         // one C callback.
         let mut tokens = BTreeMap::new();
         for entry in &guard.tokens {
-            if let Ok(tok) = session.declare_token(entry.keyexpr.clone(), LivelinessOptions::new())
+            if let Some(tok) =
+                declare_token_on(&session, &entry.keyexpr, &entry.wire, entry.options.clone())
             {
                 tokens.insert(entry.id, tok);
             }
@@ -1253,9 +1422,13 @@ impl SharedSession {
         for entry in &guard.live_subs {
             let mut opts = LivelinessSubscriberOptions::default();
             opts.history = entry.history;
-            if let Ok(sub) =
-                session.declare_liveliness_subscriber(entry.keyexpr.clone(), opts, (entry.sink)())
-            {
+            if let Some(sub) = declare_liveliness_subscriber_on(
+                &session,
+                &entry.keyexpr,
+                &entry.wire,
+                opts,
+                (entry.sink)(),
+            ) {
                 live_subs.insert(entry.id, sub);
             }
         }
@@ -1699,6 +1872,23 @@ impl SharedSession {
         Ok(delivered)
     }
 
+    /// Fan a publish on `keyexpr` over every face, naming it on the wire as
+    /// `wire` says — [`Self::publish_all`] for a literal, otherwise
+    /// [`Self::publish_aliased_all`] on the alias.
+    pub fn publish_on_wire_all(
+        &self,
+        keyexpr: &str,
+        wire: &WireKey,
+        payload: &[u8],
+        opts: &PublishOptions,
+    ) -> Result<usize, FanoutError> {
+        if wire.is_literal() {
+            self.publish_all(keyexpr, payload, opts)
+        } else {
+            self.publish_aliased_all(wire.mapping_id, wire.suffix.as_deref(), payload, opts)
+        }
+    }
+
     /// Fan an ALIASED publish over every face (pico `_z_write` on a
     /// `_z_declared_keyexpr_t` whose declaration is live).
     ///
@@ -1713,9 +1903,17 @@ impl SharedSession {
     /// table entry, and skipping it lets the healthy peers still receive the
     /// sample. Every other error is deterministic and face-independent, so it
     /// is surfaced.
+    ///
+    /// R2959 — `suffix` is what follows the declared prefix, `None` when the
+    /// declaration covers the whole key. zenoh-pico declares a PREFIX for some
+    /// entities and publishes on `id + remainder`
+    /// (`_z_declared_keyexpr_alias_to_wire`,
+    /// `vendor/zenoh-pico/src/session/keyexpr.c`), so an alias is not always
+    /// the whole key.
     pub fn publish_aliased_all(
         &self,
         mapping_id: u64,
+        suffix: Option<&str>,
         payload: &[u8],
         opts: &PublishOptions,
     ) -> Result<usize, FanoutError> {
@@ -1731,7 +1929,7 @@ impl SharedSession {
         if opts.allowed_destination.allows_remote() {
             let remote = opts.clone().with_locality(Locality::Remote);
             for (session, _) in &sessions {
-                match session.publish_aliased_auto(mapping_id, None, payload, remote.clone()) {
+                match session.publish_aliased_auto(mapping_id, suffix, payload, remote.clone()) {
                     Ok(n) => delivered += n,
                     Err(PublishAliasError::UnknownMapping(_)) => {}
                     Err(PublishAliasError::TransportUnavailable) => {}
@@ -1743,7 +1941,7 @@ impl SharedSession {
             let local = opts.clone().with_locality(Locality::SessionLocal);
             match self
                 .local
-                .publish_aliased_auto(mapping_id, None, payload, local)
+                .publish_aliased_auto(mapping_id, suffix, payload, local)
             {
                 Ok(n) => delivered += n,
                 // An id the plane does not know is an id no face was told about
@@ -1794,6 +1992,16 @@ impl SharedSession {
         Some(id)
     }
 
+    /// The keyexpr declarations this session currently holds, `(id, keyexpr)`
+    /// in declaration order — the SSOT every new face is replayed from.
+    pub fn keyexpr_declarations(&self) -> Vec<(u64, String)> {
+        self.lock()
+            .kexprs
+            .iter()
+            .map(|entry| (entry.id, entry.keyexpr.clone()))
+            .collect()
+    }
+
     /// Retract a C keyexpr declaration: drop the SSOT entry so no future face
     /// replays it, and emit the wire undeclare on every live face.
     ///
@@ -1827,6 +2035,17 @@ impl SharedSession {
     /// [`Self::declare_keyexpr`] refuses: a reused id would retract a live
     /// token belonging to someone else.
     pub fn declare_liveliness_token(&self, keyexpr: String) -> Option<TokenId> {
+        self.declare_liveliness_token_on_wire(keyexpr, WireKey::literal(), LivelinessOptions::new())
+    }
+
+    /// [`Self::declare_liveliness_token`], announced as `wire` and retracted
+    /// the way `options` says — the declaring ABI's two choices.
+    pub fn declare_liveliness_token_on_wire(
+        &self,
+        keyexpr: String,
+        wire: WireKey,
+        options: LivelinessOptions,
+    ) -> Option<TokenId> {
         let mut guard = self.lock();
         let id = guard.next_token_id.checked_add(1)?;
         guard.next_token_id = id;
@@ -1838,14 +2057,16 @@ impl SharedSession {
         // machinery was never broken; the declaration just never reached the
         // plane, because the plane had no `tokens` slot to reach.
         for face in guard.declaration_targets() {
-            if let Ok(tok) = face
-                .session
-                .declare_token(keyexpr.clone(), LivelinessOptions::new())
-            {
+            if let Some(tok) = declare_token_on(&face.session, &keyexpr, &wire, options.clone()) {
                 face.tokens.insert(id, tok);
             }
         }
-        guard.tokens.push(TokenEntry { id, keyexpr });
+        guard.tokens.push(TokenEntry {
+            id,
+            keyexpr,
+            wire,
+            options,
+        });
         Some(id)
     }
 
@@ -1854,10 +2075,14 @@ impl SharedSession {
     /// UndeclToken, which is what tells subscribers the resource is gone.
     pub fn undeclare_liveliness_token(&self, id: TokenId) {
         let mut dropped = Vec::new();
+        let mut dropped_entry = None;
         {
             let mut guard = self.lock();
+            // R2959 — moved OUT, like every other plane's entry: its `WireKey`
+            // may keep a keyexpr declaration alive, and releasing the last one
+            // retracts it through this registry.
             if let Some(pos) = guard.tokens.iter().position(|e| e.id == id) {
-                guard.tokens.remove(pos);
+                dropped_entry = Some(guard.tokens.remove(pos));
             }
             // R2580 — including the plane's, or a C `z_drop` on the token would
             // leave the in-process copy alive and the DELETE sample unsent.
@@ -1870,7 +2095,10 @@ impl SharedSession {
         // Drop OUTSIDE the lock. A token teardown emits on the wire and can
         // re-enter the session, which the non-reentrant registry mutex would
         // deadlock on — the same discipline every other teardown here follows.
+        // The per-face tokens go first, so their retractions reach the wire
+        // before the entry's keyexpr declaration can be released.
         drop(dropped);
+        drop(dropped_entry);
     }
 
     /// Record a C liveliness SUBSCRIPTION in the SSOT and declare it on every
@@ -1886,6 +2114,18 @@ impl SharedSession {
         options: LivelinessSubscriberOptions,
         sink: LivelinessSink,
     ) -> SubId {
+        self.declare_liveliness_subscriber_on_wire(keyexpr, WireKey::literal(), options, sink)
+    }
+
+    /// [`Self::declare_liveliness_subscriber`], its interest announced as
+    /// `wire`.
+    pub fn declare_liveliness_subscriber_on_wire(
+        &self,
+        keyexpr: String,
+        wire: WireKey,
+        options: LivelinessSubscriberOptions,
+        sink: LivelinessSink,
+    ) -> SubId {
         let mut guard = self.lock();
         let id = guard.next_sub_id;
         guard.next_sub_id = guard.next_sub_id.wrapping_add(1);
@@ -1894,10 +2134,13 @@ impl SharedSession {
         // measurement: without it this subscriber cannot hear a token its own
         // session declared, however many peers it has or has not.
         for face in guard.declaration_targets() {
-            if let Ok(sub) =
-                face.session
-                    .declare_liveliness_subscriber(keyexpr.clone(), options.clone(), sink())
-            {
+            if let Some(sub) = declare_liveliness_subscriber_on(
+                &face.session,
+                &keyexpr,
+                &wire,
+                options.clone(),
+                sink(),
+            ) {
                 face.live_subs.insert(id, sub);
             }
         }
@@ -1905,6 +2148,7 @@ impl SharedSession {
             id,
             keyexpr,
             history: options.history,
+            wire,
             sink,
         });
         id
@@ -2145,6 +2389,17 @@ impl SharedSession {
         allowed_origin: Locality,
         sink: SubscriberSink,
     ) -> SubId {
+        self.declare_subscriber_on_wire(keyexpr, WireKey::literal(), allowed_origin, sink)
+    }
+
+    /// [`Self::declare_subscriber`], announced to every peer as `wire`.
+    pub fn declare_subscriber_on_wire(
+        &self,
+        keyexpr: String,
+        wire: WireKey,
+        allowed_origin: Locality,
+        sink: SubscriberSink,
+    ) -> SubId {
         let mut guard = self.lock();
         let id = guard.next_sub_id;
         guard.next_sub_id = guard.next_sub_id.wrapping_add(1);
@@ -2158,8 +2413,10 @@ impl SharedSession {
         // R2580 — and it is in the walk rather than in a second block after it.
         // The second block is what the other six planes did not have.
         for face in guard.declaration_targets() {
-            if let Ok(sub) = face.session.declare_subscriber(
-                keyexpr.clone(),
+            if let Some(sub) = declare_subscriber_on(
+                &face.session,
+                &keyexpr,
+                &wire,
                 SubscribeOptions::default().with_allowed_origin(allowed_origin),
                 sink(),
             ) {
@@ -2170,6 +2427,7 @@ impl SharedSession {
             id,
             keyexpr,
             allowed_origin,
+            wire,
             sink,
         });
         id
@@ -2739,6 +2997,18 @@ impl SharedSession {
         allowed_origin: Locality,
         sink: QueryableSink,
     ) -> QblId {
+        self.declare_queryable_on_wire(keyexpr, WireKey::literal(), complete, allowed_origin, sink)
+    }
+
+    /// [`Self::declare_queryable`], announced to every peer as `wire`.
+    pub fn declare_queryable_on_wire(
+        &self,
+        keyexpr: String,
+        wire: WireKey,
+        complete: bool,
+        allowed_origin: Locality,
+        sink: QueryableSink,
+    ) -> QblId {
         let mut guard = self.lock();
         let id = guard.next_qbl_id;
         guard.next_qbl_id = guard.next_qbl_id.wrapping_add(1);
@@ -2749,10 +3019,13 @@ impl SharedSession {
         // deferred replies and its `ResponseFinal` to the session the query
         // arrived on, and for a local query that session is the plane's.
         for face in guard.declaration_targets() {
-            if let Ok(qbl) = face.session.declare_queryable(
-                keyexpr.clone(),
+            let callback = sink(&face.session);
+            if let Some(qbl) = declare_queryable_on(
+                &face.session,
+                &keyexpr,
+                &wire,
                 queryable_options(complete, allowed_origin),
-                sink(&face.session),
+                callback,
             ) {
                 face.qbls.insert(id, qbl);
             }
@@ -2762,6 +3035,7 @@ impl SharedSession {
             keyexpr,
             complete,
             allowed_origin,
+            wire,
             sink,
         });
         id
@@ -3010,6 +3284,7 @@ mod matching_aggregate_tests {
         let delivered = shared
             .publish_aliased_all(
                 mapping,
+                None,
                 b"aliased",
                 &PublishOptions::put().with_locality(Locality::Any),
             )
@@ -3048,6 +3323,7 @@ mod matching_aggregate_tests {
         let delivered = shared
             .publish_aliased_all(
                 mapping,
+                None,
                 b"aliased",
                 &PublishOptions::put().with_locality(Locality::Any),
             )

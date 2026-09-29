@@ -34,11 +34,11 @@ use std::ffi::c_void;
 use std::sync::Arc;
 
 use wz_runtime_tokio::declare::LivelinessSampleKind;
-use wz_runtime_tokio::session::LivelinessSubscriberOptions;
+use wz_runtime_tokio::session::{LivelinessOptions, LivelinessSubscriberOptions};
 
 use crate::abi::{handle_ref, z_loaned_keyexpr_t};
 use crate::ffi::{guard_val, guarded};
-use crate::keyexpr::keyexpr_str;
+use crate::keyexpr::{declared_of, keyexpr_str, DeclaredKeyexpr};
 use crate::pubsub::{
     z_moved_closure_sample_t, z_owned_closure_sample_t, z_owned_subscriber_t, CClosure,
     SubscriberState, Z_SAMPLE_KIND_DELETE, Z_SAMPLE_KIND_PUT,
@@ -106,6 +106,9 @@ impl z_owned_liveliness_token_t {
 pub(crate) struct TokenState {
     shared: Arc<SharedSession>,
     id: TokenId,
+    /// R2959 — the token's key with the whole-key declaration pico makes for
+    /// it; dropped after the token, so its retraction follows the token's.
+    _key: DeclaredKeyexpr,
 }
 
 impl Drop for TokenState {
@@ -163,16 +166,29 @@ pub unsafe extern "C" fn z_liveliness_declare_token(
             Some(s) => s,
             None => return Z_ERR_NULL,
         };
-        let ke = match keyexpr_str(keyexpr) {
-            Some(k) => k.to_owned(),
-            None => return Z_ERR_INVALID,
+        let Some(ke) = keyexpr_str(keyexpr) else {
+            return Z_ERR_INVALID;
         };
-        let Some(id) = state.shared.declare_liveliness_token(ke) else {
+        // R2959 — pico declares the whole key, announces the token on that
+        // declaration, and names it again in the retraction
+        // (`vendor/zenoh-pico/src/net/liveliness.c` @
+        // `_Z_RETURN_IF_ERR(_z_declared_keyexpr_declare(zn, &ke, keyexpr));` and
+        // `_z_declaration_t declaration = _z_make_undecl_token(id, &wireexpr);`).
+        let key = match DeclaredKeyexpr::declare(&state.shared, ke, declared_of(keyexpr)) {
+            Ok(key) => key,
+            Err(rc) => return rc,
+        };
+        let Some(id) = state.shared.declare_liveliness_token_on_wire(
+            ke.to_owned(),
+            key.wire(&state.shared),
+            LivelinessOptions::new().with_retraction_naming_the_key(true),
+        ) else {
             return Z_ERR_GENERIC;
         };
         let boxed = Box::new(TokenState {
             shared: state.shared.clone(),
             id,
+            _key: key,
         });
         *token = z_owned_liveliness_token_t {
             handle: Box::into_raw(boxed) as *mut c_void,
@@ -315,22 +331,32 @@ pub unsafe extern "C" fn z_liveliness_declare_subscriber(
         // survives upstream adding a field.
         let mut opts = LivelinessSubscriberOptions::default();
         opts.history = history;
-        // R311y559 — kept for `z_subscriber_keyexpr`; `ke` is moved below.
-        let keyexpr_literal = ke.clone();
-        let id = state.shared.declare_liveliness_subscriber(ke, opts, {
-            // R311y498 — the ABI shim mints the callback; the registry only
-            // calls the factory (once per face). The `Arc<CClosure>` lives
-            // in the factory, so the C `drop(context)` still fires when the
-            // last one is released.
-            let closure = Arc::new(cclosure);
-            Arc::new(move || {
-                Box::new(crate::pubsub::make_liveliness_callback(closure.clone())) as Box<_>
-            })
-        });
+        // R2959 — pico declares the WHOLE key for a liveliness subscriber and
+        // sends its interest on that declaration
+        // (`vendor/zenoh-pico/src/net/liveliness.c` @
+        // `_Z_CLEAN_RETURN_IF_ERR(_z_declared_keyexpr_declare(zn, &s._key, keyexpr), _z_subscription_clear(&s));`
+        // and the `_z_make_interest(&wireexpr, ...)` on `sp_s->_key` below it).
+        let key = match DeclaredKeyexpr::declare(&state.shared, &ke, declared_of(keyexpr)) {
+            Ok(key) => key,
+            Err(rc) => return rc,
+        };
+        let wire = key.wire(&state.shared);
+        let id = state
+            .shared
+            .declare_liveliness_subscriber_on_wire(ke, wire, opts, {
+                // R311y498 — the ABI shim mints the callback; the registry only
+                // calls the factory (once per face). The `Arc<CClosure>` lives
+                // in the factory, so the C `drop(context)` still fires when the
+                // last one is released.
+                let closure = Arc::new(cclosure);
+                Arc::new(move || {
+                    Box::new(crate::pubsub::make_liveliness_callback(closure.clone())) as Box<_>
+                })
+            });
         let mut boxed = Box::new(SubscriberState {
             shared: state.shared.clone(),
             id,
-            keyexpr: keyexpr_literal,
+            key,
             loaned_keyexpr: crate::abi::z_loaned_keyexpr_t::borrowed(std::ptr::null(), 0),
         });
         boxed.bind();

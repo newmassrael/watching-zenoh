@@ -1365,18 +1365,28 @@ pub unsafe extern "C" fn ze_advanced_subscriber_detect_publishers(
         };
         let mut opts = wz_runtime_tokio::session::LivelinessSubscriberOptions::default();
         opts.history = history;
-        // R311y559 — kept for `z_subscriber_keyexpr`; `ke` is moved below.
-        let keyexpr_literal = ke.clone();
-        let id = state.shared.declare_liveliness_subscriber(ke, opts, {
-            let closure = Arc::new(cclosure);
-            Arc::new(move || {
-                Box::new(crate::pubsub::make_liveliness_callback(closure.clone())) as Box<_>
-            })
-        });
+        // R2959 — upstream builds this listener with the plain
+        // `z_liveliness_declare_subscriber`
+        // (`vendor/zenoh-pico/src/api/advanced_subscriber.c` @
+        // `z_liveliness_declare_subscriber(&sess_rc, liveliness_subscriber, z_keyexpr_loan(&keyexpr), callback, &opt);`),
+        // so it gets that call's whole-key declaration and interest on it.
+        let key = match crate::keyexpr::DeclaredKeyexpr::declare(&state.shared, &ke, None) {
+            Ok(key) => key,
+            Err(rc) => return rc,
+        };
+        let wire = key.wire(&state.shared);
+        let id = state
+            .shared
+            .declare_liveliness_subscriber_on_wire(ke, wire, opts, {
+                let closure = Arc::new(cclosure);
+                Arc::new(move || {
+                    Box::new(crate::pubsub::make_liveliness_callback(closure.clone())) as Box<_>
+                })
+            });
         let mut boxed = Box::new(SubscriberState {
             shared: state.shared.clone(),
             id,
-            keyexpr: keyexpr_literal,
+            key,
             loaned_keyexpr: crate::abi::z_loaned_keyexpr_t::borrowed(std::ptr::null(), 0),
         });
         boxed.bind();

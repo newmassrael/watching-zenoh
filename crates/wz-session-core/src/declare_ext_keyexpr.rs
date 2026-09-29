@@ -71,12 +71,31 @@ const INNER_HAS_SUFFIX: u8 = 0x01;
 /// is gated to, the owned ZBuf is unbounded (R311nq `SceBytes`), so a literal
 /// keyexpr is never length-rejected.
 pub fn build_ext_keyexpr(literal: &str) -> Result<ExtEntryOwned, CodecError> {
-    // ZBuf body: [inner_header, mapping-id VLE (literal sentinel 0 = 1 byte),
-    // suffix bytes]. is_local + has_suffix for a freshly built literal keyexpr.
-    let mut body: Vec<u8> = Vec::with_capacity(2 + literal.len());
-    body.push(INNER_IS_LOCAL | INNER_HAS_SUFFIX);
-    body.push(0x00);
-    body.extend_from_slice(literal.as_bytes());
+    build_ext_wireexpr(0, literal)
+}
+
+/// Build the `ext_keyexpr` extension entry for a key named through the SENDER's
+/// own mapping table — `mapping_id` (0 for none) plus `suffix`.
+///
+/// The general form [`build_ext_keyexpr`] is the `mapping_id == 0` case of:
+/// zenoh-pico's `_z_decl_ext_keyexpr_encode` writes
+/// `[inner_header | VLE(id) | suffix]` for whatever wire expression it is
+/// handed, and `_z_liveliness_send_undeclare_token` hands it the token's
+/// ALIASED key (`vendor/zenoh-pico/src/net/liveliness.c` @
+/// `_z_declaration_t declaration = _z_make_undecl_token(id, &wireexpr);`). So a
+/// token declared on an id retracts on that id, and the body is two bytes —
+/// `[is_local, id]` — when the declaration covers the whole key and the suffix
+/// is empty. `has_suffix` follows the suffix, as upstream's `kelen != 0` does.
+pub fn build_ext_wireexpr(mapping_id: u64, suffix: &str) -> Result<ExtEntryOwned, CodecError> {
+    let mut body: Vec<u8> = Vec::with_capacity(2 + suffix.len());
+    let has_suffix = if suffix.is_empty() {
+        0
+    } else {
+        INNER_HAS_SUFFIX
+    };
+    body.push(INNER_IS_LOCAL | has_suffix);
+    crate::vle::encode_vle_u64_into(&mut body, mapping_id);
+    body.extend_from_slice(suffix.as_bytes());
     let value_len = body.len() as u64;
     // alloc carrier: `owned_bytes` is the unbounded `SceBytes` Vec (R311nq), so
     // no length cap; the `?` covers only the profile-generic signature.

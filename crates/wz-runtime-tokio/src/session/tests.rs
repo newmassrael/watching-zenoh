@@ -7534,6 +7534,113 @@ fn declare_subscriber_aliased_with_inline_suffix_composes_literal() {
     assert_eq!(sub.keyexpr(), "home/temp/kitchen");
 }
 
+/// R2959 — the aliased subscriber is ANNOUNCED on its alias. It used to be
+/// announced on the resolved literal, which put the declared keyexpr's text
+/// back on the wire; the absence of that text is the assertion, so the old
+/// behaviour reds here rather than passing on a frame that merely exists.
+#[cfg(all(
+    feature = "codec-declare",
+    feature = "declare-keyexpr",
+    feature = "declare-subscriber"
+))]
+#[test]
+fn declare_subscriber_aliased_announces_the_alias_not_the_literal() {
+    let (session, driver) = build_session();
+    session
+        .actions()
+        .send_declare_keyexpr(7, "home/temp")
+        .expect("hardcoded canonical literal keyexpr");
+    mark_session_established(&session);
+    let baseline = driver.frame_count();
+    let _sub = session
+        .declare_subscriber_aliased(7, Some("/kitchen"), SubscribeOptions::default(), |_| {})
+        .expect("declared mapping resolves");
+    assert_eq!(driver.frame_count(), baseline + 1, "one Declare frame");
+    let frame = driver.frame_bytes(baseline);
+    let carries = |needle: &[u8]| frame.windows(needle.len()).any(|w| w == needle);
+    assert!(carries(b"/kitchen"), "the suffix rides the alias");
+    assert!(
+        !carries(b"home/temp"),
+        "the declared prefix is named by its id, never spelled out again"
+    );
+}
+
+/// R2959 — the queryable twin of the subscriber test above.
+#[cfg(all(
+    feature = "codec-declare",
+    feature = "declare-keyexpr",
+    feature = "declare-queryable",
+    feature = "query-queryable"
+))]
+#[test]
+fn declare_queryable_aliased_announces_the_alias_not_the_literal() {
+    let (session, driver) = build_session();
+    session
+        .actions()
+        .send_declare_keyexpr(7, "home/temp")
+        .expect("hardcoded canonical literal keyexpr");
+    mark_session_established(&session);
+    let baseline = driver.frame_count();
+    let _qbl = session
+        .declare_queryable_aliased(7, Some("/*/x"), QueryableOptions::default(), |_, _| {})
+        .expect("declared mapping resolves");
+    assert_eq!(driver.frame_count(), baseline + 1, "one Declare frame");
+    let frame = driver.frame_bytes(baseline);
+    let carries = |needle: &[u8]| frame.windows(needle.len()).any(|w| w == needle);
+    assert!(carries(b"/*/x"), "the suffix rides the alias");
+    assert!(
+        !carries(b"home/temp"),
+        "the declared prefix is named by its id, never spelled out again"
+    );
+}
+
+/// R2959 — a token's retraction names its key only when asked, and then in the
+/// form it was declared with. Both arms are checked byte for byte against the
+/// builders, so neither can pass by the other's frame.
+#[cfg(all(
+    feature = "codec-declare",
+    feature = "declare-keyexpr",
+    feature = "liveliness-token",
+    feature = "declare-undeclare"
+))]
+#[test]
+fn a_token_retraction_names_its_key_only_when_the_declaring_abi_asks() {
+    use wz_session_core::declare_build::{build_undeclare_token, build_undeclare_token_on_wire};
+    for names_the_key in [false, true] {
+        let (session, driver) = build_session();
+        session
+            .actions()
+            .send_declare_keyexpr(7, "home/token")
+            .expect("hardcoded canonical literal keyexpr");
+        mark_session_established(&session);
+        let token = session
+            .declare_token_aliased(
+                7,
+                None,
+                LivelinessOptions::new().with_retraction_naming_the_key(names_the_key),
+            )
+            .expect("declared mapping resolves");
+        let id = token.id();
+        let before = driver.frame_count();
+        drop(token);
+        assert_eq!(driver.frame_count(), before + 1, "one retraction frame");
+        let frame = driver.frame_bytes(before);
+        let declare = if names_the_key {
+            build_undeclare_token_on_wire(id, 7, "").expect("alloc carrier")
+        } else {
+            build_undeclare_token(id)
+        };
+        let expected = declare
+            .try_as_borrowed()
+            .expect("test: <=N exts by construction")
+            .encode_to_vec();
+        assert!(
+            frame.windows(expected.len()).any(|w| w == expected),
+            "names_the_key={names_the_key}: the retraction is not the expected shape"
+        );
+    }
+}
+
 #[test]
 fn declare_subscriber_aliased_unknown_mapping_returns_err() {
     let (session, _driver) = build_session();
