@@ -1127,7 +1127,7 @@ mod tests {
         }
         async fn poll_event(&mut self) -> LinkEvent {
             if let Some(bytes) = self.inbound.pop_front() {
-                return LinkEvent::Rx(wz_session_core::link::RxFrame { bytes, src: None });
+                return LinkEvent::Rx(wz_session_core::link::RxFrame::new(bytes));
             }
             // Drained: never resolve, so the loop reaches its deadline.
             core::future::pending().await

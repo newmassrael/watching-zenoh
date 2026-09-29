@@ -1966,7 +1966,11 @@ wz-codecs = { path = "../wz-codecs", default-features = false, features = ["allo
 # panic-capture variant; the trait crate itself stays unconditionally
 # no_std (std is available at the binary linker level for AP).
 wz-runtime-core = { path = "../wz-runtime-core", features = ["alloc"] }
-wz-session-core = { path = "../wz-session-core", features = ["alloc", "deferred-fire"] }
+# R2971 — `rx-shared-bytes`: every read half here reads into a buffer of its
+# own (a recycled one, a slot of the node's receive pool) and hands that buffer
+# up as the frame instead of copying out of it. Unconditional, as
+# `deferred-fire` is: both arenas lend, and this crate is AP-only.
+wz-session-core = { path = "../wz-session-core", features = ["alloc", "deferred-fire", "rx-shared-bytes"] }
 sce-forge-runtime = { path = "../../vendor/sce/backends/rust/forge-runtime" }
 sce-rust-runtime = { path = "../../vendor/sce/backends/rust/runtime" }
 # R311il — sce-rust-lua dropped: the session FSM (the last Lua-bound

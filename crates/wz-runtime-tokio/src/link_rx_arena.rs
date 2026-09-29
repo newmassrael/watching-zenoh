@@ -251,10 +251,19 @@ enum Storage {
 // reach those bytes until `Drop` returns the handle. The `Arc<NodeTable>` keeps
 // the boxed storage alive and at its address for at least as long as the
 // pointer, so moving the value between threads moves an exclusive, live
-// reference and nothing else. `Sync` is deliberately NOT claimed: sharing `&`
-// would say two threads may read the slot at once, which this type has no
-// caller for.
+// reference and nothing else.
 unsafe impl Send for LinkRxFrame {}
+
+// SAFETY: R2971 — `Sync` is claimed now, where the comment above used to say it
+// deliberately was not, because it has a caller: a completed frame is handed
+// up AS this value (`RxStorage`, behind an `Arc`), so two threads may read its
+// slot at once. That is sound for the same reason the `Send` impl is, plus one
+// fact about `&self`: every `&self` method reads — `as_ref` makes a shared
+// slice of the slot and `is_pooled` reads the tag — and the only writer is
+// `as_mut`, which needs `&mut self`, which nothing can have while the value is
+// shared. The slot is this value's alone until `Drop`, so no other frame and
+// no table operation writes those bytes under a reader either.
+unsafe impl Sync for LinkRxFrame {}
 
 impl LinkRxFrame {
     fn spilled(len: usize) -> Self {
@@ -312,6 +321,16 @@ impl AsRef<[u8]> for LinkRxFrame {
             Storage::Slot { data, .. } => unsafe { std::slice::from_raw_parts(*data, self.len) },
             Storage::Spilled(bytes) => bytes,
         }
+    }
+}
+
+/// R2971 — a completed frame is handed up as this slot rather than copied out
+/// of it, and the slot goes back to the node's table when the last range of it
+/// drops. This is what ARCHITECTURE §9.2's single-frame RX being pool-routed
+/// now means past the read: the frame the session decodes IS the slot.
+impl wz_session_core::link::RxStorage for LinkRxFrame {
+    fn as_slice(&self) -> &[u8] {
+        self.as_ref()
     }
 }
 
@@ -406,10 +425,10 @@ mod tests {
     /// passes just as well when the arena hands out a copy, which is exactly
     /// what the two arenas this one joins do.
     ///
-    /// The frame is observed MID-READ because that is the only moment it
-    /// exists: `poll_framed` reads a completed frame in place and drops the
-    /// buffer as it resets, so a test that waited for `LinkEvent::Rx` would be
-    /// holding the copy `RxFrame` owns and the slot would already be home.
+    /// The frame is observed MID-READ, which until R2971 was the only moment it
+    /// existed: `poll_framed` copied a completed frame out and dropped the
+    /// buffer as it reset. Since R2971 the completed frame IS the slot too —
+    /// `a_completed_frame_is_its_slot_until_its_last_range_drops` below.
     #[tokio::test]
     async fn a_framing_read_fills_a_slot_of_the_table_it_was_given() {
         let mut arena = LinkRxArena::new();
@@ -456,10 +475,21 @@ mod tests {
         );
     }
 
-    /// The slot goes home when the frame is done, which is what keeps a link
-    /// that reads forever from draining the table.
+    /// R2971 — THE COMPLETED FRAME IS ITS SLOT, and the slot goes home when
+    /// the LAST range of it drops, which is still what keeps a link that reads
+    /// forever from draining the table.
+    ///
+    /// This test replaced `a_completed_frame_returns_its_slot`, whose claim was
+    /// the opposite and was true until this round: the frame was a COPY, so
+    /// the slot was back on the freelist the moment the read returned. That is
+    /// the copy R2971 retired, and a test pinning it would have had to be
+    /// deleted or inverted; it is inverted here, so the old arm is what reds it.
+    ///
+    /// The address is the pool's answer (`slot_of`), as in the mid-read test
+    /// above, and the clone is the upstream `ZSlice` property: a second range
+    /// of the same storage keeps the slot out after the frame itself is gone.
     #[tokio::test]
-    async fn a_completed_frame_returns_its_slot() {
+    async fn a_completed_frame_is_its_slot_until_its_last_range_drops() {
         let mut arena = LinkRxArena::new();
         let mut st: ReadState<LinkRxFrame> = ReadState::Idle;
         let wire = framed(b"pool-routed");
@@ -470,10 +500,32 @@ mod tests {
             panic!("a complete frame is an Rx");
         };
         assert_eq!(&rx.bytes[..], b"pool-routed");
+        // The frame's bytes are the payload, which starts past the prefix the
+        // read kept in the slot; the pool answers only for a slot's FIRST byte.
+        let frame_start = rx.bytes.as_ptr().wrapping_sub(crate::prefix_width(false));
+        let idx = arena
+            .slot_of(frame_start)
+            .expect("the frame's bytes ARE a slot of this table, by the pool's own answer");
+        assert_eq!(
+            arena.slot_state(idx),
+            Some(SlotState::CpuMut),
+            "the slot is still checked out while the frame lives"
+        );
+        assert_eq!(arena.free_slots(), SLOT_COUNT - 1);
+
+        let second_range = rx.bytes.clone();
+        drop(rx);
+        assert_eq!(
+            arena.free_slots(),
+            SLOT_COUNT - 1,
+            "a clone is a second range of the same slot, so the slot stays out"
+        );
+        assert_eq!(&second_range[..], b"pool-routed");
+        drop(second_range);
         assert_eq!(
             arena.free_slots(),
             SLOT_COUNT,
-            "the frame is done, so its slot is back on the freelist"
+            "the last range is gone, so the slot is back on the freelist"
         );
     }
 

@@ -50,16 +50,15 @@
 //!   completion carried. It is also what lets a completion be keyed by the
 //!   `buf_index` it wrote into — see
 //!   [`FixedSlotRing::FIRST_FREE_KEY`](crate::uring::FixedSlotRing::FIRST_FREE_KEY).
-//! * **THE PAYLOAD IS COPIED AT THE SAME BOUNDARY `poll_framed` COPIES IT.**
-//!   `RxFrame` carries an owned `Vec<u8>` (`wz-session-core`'s own note: "R51
-//!   baseline: owned `Vec<u8>`. Future rounds ... will switch this to a
-//!   pool-slot borrow") and `crate::poll_framed` ends with
-//!   `RxFrame::new(payload.to_vec())`. This body does the same, in the
-//!   callback. ⚠ So the zero-copy claim of this path is UNCHANGED and is not
-//!   weakened here: the kernel still writes into the pool slot and nothing
-//!   intermediate exists before the `LinkEvent`. Retiring that last copy is
-//!   `RxFrame`'s own residual and belongs to `runtime-zero-copy`, not to this
-//!   module — written down so a later round grades against the right thing.
+//! * **THE FRAMES ARE THE SLOT.** Until R2971 the payload was copied at the
+//!   boundary `crate::poll_framed` copied it, because `RxFrame` could only
+//!   carry an owned `Vec<u8>`; this header said that retiring the copy was
+//!   `RxFrame`'s residual and `runtime-zero-copy`'s. R2971 retired it in both
+//!   bodies at once: `RxFrame` carries `RxBytes`, and each frame that lies
+//!   whole inside one completion is a range of that completion's slot, the slot
+//!   going home when the last of them drops. A frame the window assembled
+//!   across completions is still copied — out of the window's carry, since it
+//!   lies in no one slot.
 //!
 //! ## What this module does NOT do
 //!
@@ -80,7 +79,7 @@ use std::sync::Arc;
 
 use tokio::sync::mpsc as frame_chan;
 
-use wz_session_core::link::{LinkEvent, LostCause, RxFrame};
+use wz_session_core::link::{LinkEvent, LostCause, RxBytes, RxFrame, RxStorage};
 
 use crate::link_rx_arena::{LinkRxArena, LinkRxFrame};
 use crate::link_rx_window::RxWindow;
@@ -104,8 +103,9 @@ const RING_ENTRIES: u32 = 256;
 /// What the worker hands a link for one of its completions.
 enum Delivery {
     /// The frames that ENDED inside one completion, in wire order. May be
-    /// EMPTY: a completion carrying only part of a frame ends none.
-    Frames(Vec<Vec<u8>>),
+    /// EMPTY: a completion carrying only part of a frame ends none. Each is a
+    /// range of the completion's slot unless it was assembled across reads.
+    Frames(Vec<RxBytes>),
     /// The link ended, and why.
     Lost(LostCause),
 }
@@ -338,7 +338,7 @@ pub struct UringRx {
     /// Bounded BY THE PROTOCOL rather than by a capacity: one read is armed at
     /// a time and the next is armed only once this is empty, so it holds at
     /// most what a single `SLOT_SIZE` completion can.
-    pending: VecDeque<Vec<u8>>,
+    pending: VecDeque<RxBytes>,
     /// Whether a read is already asked for. Kept across a cancelled
     /// [`Self::poll_event`] so a lost race does not arm a second one.
     armed: bool,
@@ -680,11 +680,28 @@ fn deliver_completion(
         return;
     }
     frame.truncate(n);
-    let mut frames: Vec<Vec<u8>> = Vec::new();
-    // The copy `RxFrame` still asks for, at the same boundary `poll_framed`
-    // makes it. See the module header: this is not where the zero-copy claim
-    // lives or dies.
-    let mut collect = |payload: &[u8]| frames.push(payload.to_vec());
+    // R2971 — the completion's slot is handed up WITH the frames that lie in
+    // it: each one is a range of the slot, and the slot goes home when the last
+    // of them drops. Only a frame the window assembled across completions is
+    // copied, out of the window's own carry, because that one does not lie in
+    // this slot at all. `RxWindow::push` passes a whole-in-this-read frame as a
+    // subslice of what it was given, so "is this payload inside the slot" is
+    // the test, and it is a pointer comparison rather than a claim.
+    let slot = Arc::new(frame);
+    let whole: &[u8] = AsRef::<[u8]>::as_ref(&*slot);
+    let (base, len) = (whole.as_ptr() as usize, whole.len());
+    let mut frames: Vec<RxBytes> = Vec::new();
+    let mut collect = |payload: &[u8]| {
+        let start = (payload.as_ptr() as usize).wrapping_sub(base);
+        let lent = start < len && payload.len() <= len - start;
+        frames.push(if lent {
+            let storage: Arc<dyn RxStorage> = slot.clone();
+            RxBytes::shared(storage, start..start + payload.len())
+                .expect("a payload inside the slot is a range of it")
+        } else {
+            RxBytes::from(payload.to_vec())
+        });
+    };
     // R2755 — RE-DERIVE THE WIDTH AT A FRAME BOUNDARY, and only there. This is
     // `crate::poll_framed`'s rule ("the width is fixed HERE, at frame start, so
     // a flag flip cannot widen a prefix that is already half-read") stated for
@@ -701,7 +718,7 @@ fn deliver_completion(
     if ctx.window.between_frames() {
         ctx.width = crate::prefix_width(ctx.lowlatency.load(Ordering::Acquire));
     }
-    match ctx.window.push(frame.as_ref(), ctx.width, &mut collect) {
+    match ctx.window.push(whole, ctx.width, &mut collect) {
         Ok(()) => {
             let _ = ctx.deliver.send(Delivery::Frames(frames));
         }
@@ -759,7 +776,7 @@ mod tests {
 
     fn payload_of(event: LinkEvent) -> Vec<u8> {
         match event {
-            LinkEvent::Rx(frame) => frame.bytes,
+            LinkEvent::Rx(frame) => frame.bytes.into_vec(),
             other => panic!("expected a frame, got {other:?}"),
         }
     }
@@ -790,6 +807,68 @@ mod tests {
         let mut rx = reactor.attach(rd.as_raw_fd(), universal()).expect("attach");
         assert_eq!(payload_of(within(rx.poll_event()).await), b"alpha");
         assert_eq!(payload_of(within(rx.poll_event()).await), b"beta");
+
+        drop(rx);
+        drop((wr, rd));
+    }
+
+    /// R2971 — THE FRAMES OF ONE COMPLETION ARE RANGES OF ITS SLOT, and the
+    /// slot goes home only when the last of them drops.
+    ///
+    /// The population is the witness: a completion holds ONE slot, and a link
+    /// arms its next read only once it has consumed what the last completion
+    /// carried, so with both frames of one completion alive exactly one slot is
+    /// out. Under the copy this replaced the slot was home as soon as the
+    /// worker had split it, so the count would already be full here.
+    #[tokio::test]
+    async fn two_frames_of_one_completion_are_ranges_of_its_slot() {
+        use crate::session_rx_pool_ap::SLOT_COUNT;
+
+        let arena = LinkRxArena::new();
+        let reactor = UringReactor::start(arena.clone()).expect("a reactor");
+
+        let (rd, mut wr) = std::io::pipe().expect("pipe");
+        let mut wire = framed(b"alpha");
+        wire.extend_from_slice(&framed(b"beta"));
+        wr.write_all(&wire)
+            .expect("one write, so one read can carry both");
+
+        let mut rx = reactor.attach(rd.as_raw_fd(), universal()).expect("attach");
+        let LinkEvent::Rx(alpha) = within(rx.poll_event()).await else {
+            panic!("the first frame");
+        };
+        let LinkEvent::Rx(beta) = within(rx.poll_event()).await else {
+            panic!("the second frame");
+        };
+        assert_eq!(alpha.bytes, b"alpha");
+        assert_eq!(beta.bytes, b"beta");
+        assert!(alpha.bytes.is_shared() && beta.bytes.is_shared());
+        let slot_start = alpha
+            .bytes
+            .as_ptr()
+            .wrapping_sub(crate::prefix_width(false));
+        assert!(
+            arena.slot_of(slot_start).is_some(),
+            "the first frame starts a slot of this table, by the pool's own answer"
+        );
+        assert_eq!(
+            arena.free_slots(),
+            SLOT_COUNT - 1,
+            "both frames are ranges of the one slot their completion filled"
+        );
+
+        drop(alpha);
+        assert_eq!(
+            arena.free_slots(),
+            SLOT_COUNT - 1,
+            "the second frame still holds the slot"
+        );
+        drop(beta);
+        assert_eq!(
+            arena.free_slots(),
+            SLOT_COUNT,
+            "the last range is gone, so the slot is home"
+        );
 
         drop(rx);
         drop((wr, rd));

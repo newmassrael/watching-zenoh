@@ -1210,7 +1210,7 @@ pub use wz_session_core::reliability::Reliability;
 // impls (TcpDriver / UdpDriver) stay in this crate. Re-exports keep
 // every external callsite (`wz_runtime_tokio::{TxFrame, RxFrame,
 // LinkEvent, LostCause}`) verbatim across the migration.
-pub use wz_session_core::link::{LinkEvent, LostCause, RxFrame, TxFrame};
+pub use wz_session_core::link::{LinkEvent, LostCause, RxBytes, RxFrame, RxStorage, TxFrame};
 
 /// R311et — canonical split-link session-open transport pipeline. Lifts the
 /// read/write-split + writer-task idiom (originally `wz-ap-demo`'s
@@ -2322,6 +2322,9 @@ pub(crate) async fn poll_framed<S, A>(
 where
     S: tokio::io::AsyncRead + Unpin,
     A: frame_arena::FrameArena,
+    // R2971 — a completed frame is handed up AS its buffer, so the buffer must
+    // be storage a frame can be a range of.
+    A::Buf: RxStorage + 'static,
 {
     loop {
         match read_state {
@@ -2489,21 +2492,31 @@ where
                     // costs one syscall each and stays cancel-safe -- exactly what
                     // it costs the two implementations above.
                     //
-                    // R2740 — the event is built BEFORE the state reset
-                    // because `payload` borrows the arena buffer the reset
-                    // drops. The copy out of the buffer is what stops
-                    // `RxFrame` from being pooled storage's owner, and it is
-                    // the residual `docs/runtime-crate-tokio.md` §2.3 names:
-                    // upstream has no counterpart to it, because its `ZSlice`
-                    // is an owned handle over the same allocation rather than
-                    // a second one.
-                    let event = (!payload.is_empty())
-                        .then(|| LinkEvent::Rx(RxFrame::new(payload.to_vec())));
-                    *read_state = ReadState::Idle;
-                    match event {
-                        Some(event) => return event,
-                        None => continue,
+                    // R2971 — THE FRAME IS ITS BUFFER. Until this round the
+                    // payload was copied out (`payload.to_vec()`) so the state
+                    // reset could send the buffer home, which is the residual
+                    // `docs/runtime-crate-tokio.md` §2.3 named: upstream has no
+                    // counterpart to that copy, because its `ZSlice` is an owned
+                    // handle over the same allocation rather than a second one.
+                    // Now the buffer leaves the state machine WITH the frame,
+                    // as the range after its prefix, and goes home when the
+                    // last range of it drops — a recycled box to its free list,
+                    // a pool slot to the node's table. An empty batch still
+                    // reads as no messages and its buffer goes home at once.
+                    let empty = payload.is_empty();
+                    let ReadState::Payload { frame, .. } =
+                        std::mem::replace(read_state, ReadState::Idle)
+                    else {
+                        unreachable!("this arm matched `ReadState::Payload`");
+                    };
+                    if empty {
+                        continue;
                     }
+                    let end = frame.as_ref().len();
+                    let storage: std::sync::Arc<dyn RxStorage> = std::sync::Arc::new(frame);
+                    let bytes = RxBytes::shared(storage, w..end)
+                        .expect("a frame's payload is a range of that frame");
+                    return LinkEvent::Rx(RxFrame::new(bytes));
                 }
                 match src.read(&mut frame.as_mut()[*offset..]).await {
                     Ok(0) => {
@@ -3155,8 +3168,9 @@ mod poll_framed_lowlatency_tests {
     ///
     /// What discriminates is the ARENA'S OWN STORAGE AFTER THE FRAME. The pool
     /// is poisoned to `0xFF` before the loop sees it and holds exactly one
-    /// buffer, so once a frame completes and the state reset sends that buffer
-    /// home, taking it back answers whether the loop wrote there:
+    /// buffer, so once a frame completes and is dropped — which since R2971 is
+    /// what sends that buffer home — taking it back answers whether the loop
+    /// wrote there:
     ///
     ///   * `[..2]` is the LENGTH PREFIX the loop copied in, which nothing else
     ///     in this test could have written;
@@ -3193,6 +3207,12 @@ mod poll_framed_lowlatency_tests {
             panic!("the first frame decodes, got {first:?}");
         };
         assert_eq!(first.bytes, b"ABCDEF", "the long frame reads back whole");
+        // R2971 — the buffer goes home when the FRAME drops, not when the read
+        // completes: the frame is the buffer now (see
+        // `frame_arena`'s `a_completed_frame_holds_its_pooled_buffer_until_it_drops`).
+        // So the storage is inspected after the frame is gone, which is when a
+        // loop reusing it would next see it.
+        drop(first);
 
         {
             let back = arena.take(MAX_FRAME);

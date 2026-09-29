@@ -333,6 +333,15 @@ impl AsMut<[u8]> for RecycledBuf {
     }
 }
 
+/// R2971 — a completed frame is handed up as this buffer rather than copied
+/// out of it, and the box goes back to its free list when the last range of it
+/// drops: upstream's `RecyclingObject` inside a `ZSlice`.
+impl wz_session_core::link::RxStorage for RecycledBuf {
+    fn as_slice(&self) -> &[u8] {
+        self.as_ref()
+    }
+}
+
 impl Drop for RecycledBuf {
     fn drop(&mut self) {
         let (Some(bytes), Some(home)) = (self.bytes.take(), self.home.upgrade()) else {
@@ -451,6 +460,48 @@ mod tests {
             third.as_ref()[0],
             0x5A,
             "the pooled buffer returns to the arena and is handed out again"
+        );
+    }
+
+    /// R2971 — THE COMPLETED FRAME IS THE POOLED BUFFER, in the default build's
+    /// arm: the frame a framing read hands up holds the buffer it was read into,
+    /// and the buffer goes home when the frame drops rather than when the read
+    /// completes.
+    ///
+    /// The population is the witness, as the mark is in the test above and for
+    /// the reason given there — an address could be a recycled allocation. A
+    /// frame that were a COPY would leave the buffer home the moment the read
+    /// returned, so "the population is empty while the frame is alive" is
+    /// exactly the claim, and it reds under the `to_vec` this replaced.
+    #[cfg(feature = "transport-link-tcp")]
+    #[tokio::test]
+    async fn a_completed_frame_holds_its_pooled_buffer_until_it_drops() {
+        let mut arena = RecyclingArena::new(1, MAX_FRAME);
+        let mut state: crate::ReadState<RecycledBuf> = crate::ReadState::Idle;
+        let payload = b"recycled, not copied";
+        let mut wire = (payload.len() as u16).to_le_bytes().to_vec();
+        wire.extend_from_slice(payload);
+        let mut src = &wire[..];
+
+        let event = crate::poll_framed(&mut state, &mut src, false, &mut arena).await;
+        let crate::LinkEvent::Rx(frame) = event else {
+            panic!("a complete frame is an Rx");
+        };
+        assert_eq!(frame.bytes, payload);
+        assert!(
+            frame.bytes.is_shared(),
+            "the frame is a range of lent storage"
+        );
+        assert_eq!(
+            arena.free.lock().expect("uncontended").len(),
+            0,
+            "the frame holds the pooled buffer it was read into"
+        );
+        drop(frame);
+        assert_eq!(
+            arena.free.lock().expect("uncontended").len(),
+            1,
+            "the buffer goes home when the frame drops"
         );
     }
 

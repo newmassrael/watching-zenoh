@@ -68,7 +68,7 @@ const DELIVERY_BUDGET: Duration = Duration::from_secs(2);
 /// The next datagram to arrive at `rx` within `budget`, or `None`.
 async fn arrives(rx: &mut UdpDriver, budget: Duration) -> Option<Vec<u8>> {
     match tokio::time::timeout(budget, rx.poll_event()).await {
-        Ok(LinkEvent::Rx(frame)) => Some(frame.bytes),
+        Ok(LinkEvent::Rx(frame)) => Some(frame.bytes.into_vec()),
         Ok(_) => None,
         Err(_) => None,
     }

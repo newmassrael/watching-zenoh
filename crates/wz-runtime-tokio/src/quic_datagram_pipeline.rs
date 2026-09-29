@@ -64,7 +64,26 @@ use crate::quic_pipeline::{
     tls_server_crypto,
 };
 use crate::writer_queue::{OutboundQueue, WriterHandle};
-use crate::{LinkDriver, LinkEvent, LostCause, Reliability, RxFrame, TxFrame};
+use crate::{LinkDriver, LinkEvent, LostCause, Reliability, RxBytes, RxFrame, RxStorage, TxFrame};
+
+/// R2971 — a received datagram as frame storage: quinn hands it over as a
+/// refcounted `Bytes`, so the frame can be that buffer instead of a copy.
+struct Datagram(Bytes);
+
+impl RxStorage for Datagram {
+    fn as_slice(&self) -> &[u8] {
+        &self.0
+    }
+}
+
+/// R2971 — a received datagram as a frame: the refcounted buffer quinn already
+/// gave it, handed up whole rather than copied out (`bytes.to_vec()` until
+/// this round).
+fn frame_of_datagram(bytes: Bytes) -> RxFrame {
+    let len = bytes.len();
+    let storage: Arc<dyn RxStorage> = Arc::new(Datagram(bytes));
+    RxFrame::new(RxBytes::shared(storage, 0..len).expect("a datagram is a range of itself"))
+}
 use wz_session_core::link::BoxedLinkDriver;
 use wz_session_core::link::{LinkDropCause, LinkSendOutcome};
 use wz_session_core::link::{LinkEndpoints, LinkKind, LinkSubject};
@@ -135,7 +154,7 @@ impl LinkDriver for QuicDatagramReadDriver {
         // (the FSM maps every LostCause to LinkLost, so this is diagnostic
         // fidelity, not behavior).
         match self.connection.read_datagram().await {
-            Ok(bytes) => LinkEvent::Rx(RxFrame::new(bytes.to_vec())),
+            Ok(bytes) => LinkEvent::Rx(frame_of_datagram(bytes)),
             Err(_) => LinkEvent::Lost {
                 cause: LostCause::OsError,
             },
@@ -462,6 +481,26 @@ mod tests {
     #[test]
     fn quic_datagram_mtu_floor_binds_below_stream_default() {
         const _: () = assert!(QUIC_DATAGRAM_LINK_MTU < DEFAULT_LINK_MTU);
+    }
+
+    /// R2971 — A RECEIVED DATAGRAM IS QUINN'S BUFFER, not a copy of it.
+    ///
+    /// An address is a sound witness here where it is not for a freed buffer:
+    /// the `Bytes` is alive inside the frame for the whole assertion, so no
+    /// allocation can have reused its storage. Under the `to_vec` this replaced
+    /// the frame's bytes were a second allocation and the addresses differ.
+    #[test]
+    fn a_received_datagram_is_the_buffer_quinn_gave_it() {
+        let datagram = Bytes::from(b"one datagram, one frame".to_vec());
+        let at = datagram.as_ptr();
+        let frame = frame_of_datagram(datagram);
+        assert_eq!(frame.bytes, b"one datagram, one frame");
+        assert!(frame.bytes.is_shared());
+        assert_eq!(
+            frame.bytes.as_ptr(),
+            at,
+            "the frame IS the datagram's storage"
+        );
     }
 
     /// `send_blocking` drops an oversize datagram (one larger than the captured

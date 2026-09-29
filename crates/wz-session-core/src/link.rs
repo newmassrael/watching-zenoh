@@ -1036,12 +1036,203 @@ pub struct TxFrame<'a> {
     pub bytes: &'a [u8],
 }
 
-/// Inbound frame received from a link. R51 baseline: owned `Vec<u8>`.
-/// Future rounds (per docs/runtime-crate-tokio.md §2.3) will switch
-/// this to a pool-slot borrow `RxFrame<'pool>` for zero-copy decode.
+/// The storage an inbound frame's bytes live in when a link LENDS it instead
+/// of copying out of it.
+///
+/// Upstream's `ZSliceBuffer`
+/// (`commons/zenoh-buffers/src/zslice.rs` @ `pub trait ZSliceBuffer: Any + Send + Sync + fmt::Debug {`)
+/// without the downcasting, which wz has no caller for: a buffer a link read
+/// into — a recycled one, a slot of the node's receive pool, a datagram the
+/// transport already refcounts — handed up whole, with the frame a range of
+/// it. `as_slice` must answer the same bytes every time it is asked; nothing
+/// writes into a storage once it has been lent.
+///
+/// `Send + Sync` because the frame is shared by `Arc`, as upstream's is, and
+/// that is also why this exists only under `rx-shared-bytes`: `Arc` needs
+/// pointer-width atomics, which ARMv6-M does not have, and the MCU profiles
+/// hand their frames up owned.
+#[cfg(feature = "rx-shared-bytes")]
+pub trait RxStorage: Send + Sync {
+    /// The whole of the storage. A frame is a range of it.
+    fn as_slice(&self) -> &[u8];
+}
+
+#[cfg(feature = "rx-shared-bytes")]
+impl RxStorage for Vec<u8> {
+    fn as_slice(&self) -> &[u8] {
+        self
+    }
+}
+
+/// An inbound frame's bytes: owned, or a range of storage the link lent.
+///
+/// R2971 — the lent arm is upstream's `ZSlice`
+/// (`commons/zenoh-buffers/src/zslice.rs` @ `pub struct ZSlice {`): an `Arc`
+/// on the storage plus a range, so cloning one shares the storage rather than
+/// copying it and the storage goes home when the last range of it drops. Until
+/// R2971 an inbound frame could only be an owned `Vec`, so every link that read
+/// into a buffer of its own copied the frame out of it before handing it up —
+/// including the node's receive pool, whose slot therefore never outlived the
+/// read. This type is what lets a frame be the storage it arrived in.
+///
+/// Reads are through [`core::ops::Deref`] to `[u8]`, whichever arm it
+/// is.
+pub struct RxBytes(RxRepr);
+
+enum RxRepr {
+    Owned(Vec<u8>),
+    #[cfg(feature = "rx-shared-bytes")]
+    Shared {
+        storage: alloc::sync::Arc<dyn RxStorage>,
+        start: usize,
+        end: usize,
+    },
+}
+
+impl RxBytes {
+    /// The `range` of `storage`, sharing it. `None` when the storage does not
+    /// hold that range — upstream's `ZSlice::subslice` answers the same.
+    #[cfg(feature = "rx-shared-bytes")]
+    pub fn shared(
+        storage: alloc::sync::Arc<dyn RxStorage>,
+        range: core::ops::Range<usize>,
+    ) -> Option<Self> {
+        let fits = range.start <= range.end && range.end <= storage.as_slice().len();
+        fits.then(|| {
+            Self(RxRepr::Shared {
+                storage,
+                start: range.start,
+                end: range.end,
+            })
+        })
+    }
+
+    /// The frame's bytes.
+    pub fn as_slice(&self) -> &[u8] {
+        match &self.0 {
+            RxRepr::Owned(bytes) => bytes,
+            #[cfg(feature = "rx-shared-bytes")]
+            RxRepr::Shared {
+                storage,
+                start,
+                end,
+            } => &storage.as_slice()[*start..*end],
+        }
+    }
+
+    /// Whether the bytes are a range of lent storage rather than owned.
+    #[cfg(feature = "rx-shared-bytes")]
+    pub fn is_shared(&self) -> bool {
+        matches!(self.0, RxRepr::Shared { .. })
+    }
+
+    /// The bytes as an owned `Vec`: moved out when owned, copied when lent.
+    pub fn into_vec(self) -> Vec<u8> {
+        match self.0 {
+            RxRepr::Owned(bytes) => bytes,
+            #[cfg(feature = "rx-shared-bytes")]
+            RxRepr::Shared { .. } => self.as_slice().to_vec(),
+        }
+    }
+}
+
+impl From<Vec<u8>> for RxBytes {
+    fn from(bytes: Vec<u8>) -> Self {
+        Self(RxRepr::Owned(bytes))
+    }
+}
+
+impl core::ops::Deref for RxBytes {
+    type Target = [u8];
+
+    fn deref(&self) -> &[u8] {
+        self.as_slice()
+    }
+}
+
+impl AsRef<[u8]> for RxBytes {
+    fn as_ref(&self) -> &[u8] {
+        self.as_slice()
+    }
+}
+
+/// A lent frame's clone shares its storage, as upstream's `ZSlice` clone does;
+/// an owned one's copies, as the `Vec` it is.
+impl Clone for RxBytes {
+    fn clone(&self) -> Self {
+        match &self.0 {
+            RxRepr::Owned(bytes) => Self(RxRepr::Owned(bytes.clone())),
+            #[cfg(feature = "rx-shared-bytes")]
+            RxRepr::Shared {
+                storage,
+                start,
+                end,
+            } => Self(RxRepr::Shared {
+                storage: storage.clone(),
+                start: *start,
+                end: *end,
+            }),
+        }
+    }
+}
+
+/// The bytes, as a `Vec` of them prints: which arm holds them is not part of
+/// what a frame says.
+impl core::fmt::Debug for RxBytes {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        core::fmt::Debug::fmt(self.as_slice(), f)
+    }
+}
+
+impl PartialEq for RxBytes {
+    fn eq(&self, other: &Self) -> bool {
+        self.as_slice() == other.as_slice()
+    }
+}
+
+impl Eq for RxBytes {}
+
+impl PartialEq<[u8]> for RxBytes {
+    fn eq(&self, other: &[u8]) -> bool {
+        self.as_slice() == other
+    }
+}
+
+impl PartialEq<&[u8]> for RxBytes {
+    fn eq(&self, other: &&[u8]) -> bool {
+        self.as_slice() == *other
+    }
+}
+
+impl<const N: usize> PartialEq<[u8; N]> for RxBytes {
+    fn eq(&self, other: &[u8; N]) -> bool {
+        self.as_slice() == other.as_slice()
+    }
+}
+
+impl<const N: usize> PartialEq<&[u8; N]> for RxBytes {
+    fn eq(&self, other: &&[u8; N]) -> bool {
+        self.as_slice() == other.as_slice()
+    }
+}
+
+impl PartialEq<Vec<u8>> for RxBytes {
+    fn eq(&self, other: &Vec<u8>) -> bool {
+        self.as_slice() == other.as_slice()
+    }
+}
+
+impl PartialEq<RxBytes> for Vec<u8> {
+    fn eq(&self, other: &RxBytes) -> bool {
+        self.as_slice() == other.as_slice()
+    }
+}
+
+/// Inbound frame received from a link: its bytes, owned or lent (see
+/// [`RxBytes`]), and where a shared medium says they came from.
 #[derive(Debug)]
 pub struct RxFrame {
-    pub bytes: Vec<u8>,
+    pub bytes: RxBytes,
     /// The datagram SOURCE address, when the link is a shared medium that
     /// needs per-message attribution. `None` on point-to-point links
     /// (unicast TCP/UDP — one peer per socket, so the source is implicit);
@@ -1056,15 +1247,18 @@ pub struct RxFrame {
 impl RxFrame {
     /// A point-to-point inbound frame (no source attribution needed — the
     /// link has one implicit peer). The common case for unicast links.
-    pub fn new(bytes: Vec<u8>) -> Self {
-        Self { bytes, src: None }
+    pub fn new(bytes: impl Into<RxBytes>) -> Self {
+        Self {
+            bytes: bytes.into(),
+            src: None,
+        }
     }
 
     /// A shared-medium (multicast) inbound frame carrying its datagram
     /// source address for per-peer attribution.
-    pub fn with_src(bytes: Vec<u8>, src: core::net::SocketAddr) -> Self {
+    pub fn with_src(bytes: impl Into<RxBytes>, src: core::net::SocketAddr) -> Self {
         Self {
-            bytes,
+            bytes: bytes.into(),
             src: Some(src),
         }
     }
@@ -1123,6 +1317,54 @@ pub enum LostCause {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// R2971 — a shared range is refused when the storage does not hold it,
+    /// as upstream's `ZSlice::subslice` answers `None`, and otherwise reads
+    /// exactly that range.
+    #[cfg(feature = "rx-shared-bytes")]
+    #[test]
+    fn a_shared_range_is_exactly_the_range_the_storage_holds() {
+        use alloc::sync::Arc;
+        let storage: Arc<dyn RxStorage> = Arc::new(alloc::vec![1u8, 2, 3, 4]);
+        assert!(
+            RxBytes::shared(storage.clone(), 2..5).is_none(),
+            "past the end"
+        );
+        #[allow(clippy::reversed_empty_ranges)]
+        let reversed = 3..2;
+        assert!(
+            RxBytes::shared(storage.clone(), reversed).is_none(),
+            "reversed"
+        );
+        let middle = RxBytes::shared(storage, 1..3).expect("inside the storage");
+        assert_eq!(middle, [2u8, 3]);
+        assert!(middle.is_shared());
+    }
+
+    /// R2971 — a clone of a shared range SHARES the storage (upstream's
+    /// `ZSlice` clone), and the storage goes when the last range does; turning
+    /// one into a `Vec` copies, leaving the storage to the ranges still alive.
+    #[cfg(feature = "rx-shared-bytes")]
+    #[test]
+    fn a_clone_shares_the_storage_and_the_last_range_frees_it() {
+        use alloc::sync::Arc;
+        let storage: Arc<dyn RxStorage> = Arc::new(alloc::vec![7u8; 8]);
+        let weak = Arc::downgrade(&storage);
+        let first = RxBytes::shared(storage, 0..8).expect("whole storage");
+        let second = first.clone();
+        assert_eq!(first.as_ptr(), second.as_ptr(), "a clone is the same bytes");
+        let copied = first.into_vec();
+        assert_eq!(copied, alloc::vec![7u8; 8]);
+        assert!(
+            weak.upgrade().is_some(),
+            "the clone still holds the storage"
+        );
+        drop(second);
+        assert!(
+            weak.upgrade().is_none(),
+            "the last range is gone, and the storage with it"
+        );
+    }
 
     /// R2650 — [`InterceptorLink::ALL`] is COMPLETE, and the compiler is what
     /// says so rather than this test's own reading.

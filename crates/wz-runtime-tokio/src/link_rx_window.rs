@@ -342,7 +342,7 @@ mod tests {
         let mut out = Vec::new();
         loop {
             match poll_framed(&mut st, &mut src, lowlatency, &mut HeapArena).await {
-                LinkEvent::Rx(frame) => out.push(frame.bytes.clone()),
+                LinkEvent::Rx(frame) => out.push(frame.bytes.into_vec()),
                 // The slice runs out, which that loop reads as EOF. Every other
                 // event ends the stream too and none is expected here.
                 _ => return out,

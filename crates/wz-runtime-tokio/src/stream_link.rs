@@ -908,7 +908,7 @@ mod ring_selection {
 
     fn payload_of(event: LinkEvent) -> Vec<u8> {
         match event {
-            LinkEvent::Rx(frame) => frame.bytes,
+            LinkEvent::Rx(frame) => frame.bytes.into_vec(),
             other => panic!("expected a frame, got {other:?}"),
         }
     }

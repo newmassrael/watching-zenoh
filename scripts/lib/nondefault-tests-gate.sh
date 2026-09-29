@@ -369,6 +369,7 @@ router-connect-reconcile,transport-link-tcp,transport-unicast|session_lifecycle_
         reassembly,\
         reply-source-info,\
         routing-namespace,\
+        rx-shared-bytes,\
         scouting-active,\
         scouting-static,\
         session-close-ingress,\
