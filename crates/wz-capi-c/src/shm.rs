@@ -20,22 +20,30 @@
 //!
 //! This module implements (1) completely and does not implement (2), and the
 //! difference is stated here rather than left for a reader to infer from a
-//! symbol list. wz's transport advertises no SHM segment, so a wz peer never
-//! negotiates the optimisation — which means every wz put of an SHM buffer
-//! serialises, and every payload a wz session RECEIVES is an ordinary one.
+//! symbol list. This ABI's session offers no SHM at its handshake, so it never
+//! negotiates the optimisation — which means every put of an SHM buffer from
+//! it serialises, and every payload it RECEIVES is an ordinary one.
 //!
-//! That is not wz declining to implement a wire feature it should have; it is
-//! upstream's own documented fallback for a peer that does not negotiate SHM,
-//! and it is why the two arms of the drop-in test agree. `z_sub_shm.c` prints
-//! the buffer type it detects, and against a publisher that did not negotiate
-//! SHM the REAL `libzenohc.so` prints `RAW` for the same reason wz does. The
-//! lane measures that rather than asserting it.
+//! ⚠ R2970 corrected the two sentences that stood here. They said this was
+//! "not wz declining to implement a wire feature it should have" but upstream's
+//! fallback, and that the fallback is why the two arms of the drop-in test
+//! agree. Both were wrong. wz's transport does negotiate SHM (session-extshm,
+//! with a real zenohd), and upstream's zenoh-c sessions negotiate it with each
+//! other BY DEFAULT on the shared-memory build — measured, `z_transport_is_shm`
+//! answers `1` between two of them (`zenoh_c_session_offer_twice_and_diff`).
+//! The arms of `z_sub_shm.c` agree on `RAW` because that leg's publisher is a
+//! zenoh-pico CLI, which negotiates no SHM at all. So it IS this session
+//! declining, and for a stated reason: a zenoh peer that agreed on SHM would
+//! send Puts laid out as slices, which the generated Put codec cannot read yet
+//! (open-debt item 823). See `crate::session`'s `session_offer`.
 //!
 //! The named consequence, with its re-open trigger: [`z_bytes_as_loaned_shm`]
 //! and [`z_bytes_as_mut_loaned_shm`] answer "this payload is not carrying an
-//! SHM buffer" for every payload wz can produce or receive. That answer is
-//! TRUE today. It stops being true the day wz's transport learns SHM segment
-//! negotiation, and that is the round that should revisit these two functions.
+//! SHM buffer" for every payload this session can produce or receive. That
+//! answer is TRUE today. It stops being true the day the session offers SHM,
+//! which waits on item 823, and that is the round that should revisit these
+//! two functions — and the payload delivery behind them, which today copies an
+//! SHM payload out of its segment rather than handing the segment over.
 //!
 //! ## The allocator is real, because the examples depend on it being real
 //!
@@ -52,7 +60,7 @@
 //!
 //! The segment is ordinary process memory rather than a POSIX `/dev/shm`
 //! mapping. A real mapping would be strictly more machinery for the same
-//! observable behaviour while wz negotiates no SHM transport — nothing outside
+//! observable behaviour while this session negotiates no SHM transport — nothing outside
 //! this process can attach to it — and it would add a cleanup obligation
 //! (`shm_unlink` on abnormal exit) that buys nothing. The type is what upstream
 //! names `z_owned_shm_provider_t`; what backs it is not ABI.

@@ -22,7 +22,7 @@ use std::thread::JoinHandle;
 
 use tokio::sync::Notify;
 
-use wz_runtime_tokio::accept_loop::accept_loop;
+use wz_runtime_tokio::accept_loop::accept_loop_offering;
 use wz_runtime_tokio::retry_period::RetryPolicy;
 use wz_runtime_tokio::runtime_impl::TokioTime;
 use wz_runtime_tokio::session_glue::{
@@ -31,8 +31,9 @@ use wz_runtime_tokio::session_glue::{
     WhatAmI,
 };
 use wz_runtime_tokio::session_open::{
-    bind_endpoint_with_config, dial_endpoint, initiate_and_open_session, AcceptConfig, DialConfig,
-    OpenedSession, OpenedSessionParts, DEFAULT_OPEN_TICK_MS,
+    bind_endpoint_with_config, dial_endpoint, initiate_and_open_session_with_offer,
+    offer_for_connect, AcceptConfig, DialConfig, OpenedSession, OpenedSessionParts, SessionOffer,
+    DEFAULT_OPEN_TICK_MS,
 };
 use wz_runtime_tokio::startup_phase::{
     drive_connect_phase, drive_phase, endpoint_policy, endpoint_schedule, PhaseArm, PhaseBudget,
@@ -92,6 +93,9 @@ struct Dialer {
     /// fails the open rather than one attempt.
     dial_cfgs: Vec<(String, DialConfig)>,
     params: SessionInitParams,
+    /// What every link this session dials offers at its handshake. See
+    /// [`open_blocking`].
+    offer: SessionOffer,
     clock: TokioTime,
 }
 
@@ -107,10 +111,14 @@ impl Dialer {
             .find(|(e, _)| e == endpoint)
             .map(|(_, cfg)| cfg)
             .ok_or(())?;
+        // The endpoint's own QoS band rides the node's offer, as upstream's
+        // opener reads it off the endpoint it dials.
+        let offer = offer_for_connect(self.offer, endpoint).map_err(|_| ())?;
         let dialed = dial_endpoint(endpoint, dial_cfg).await.map_err(|_| ())?;
-        initiate_and_open_session(
+        initiate_and_open_session_with_offer(
             dialed,
             self.params.clone(),
+            offer,
             self.clock,
             None,
             DEFAULT_OPEN_TICK_MS,
@@ -321,6 +329,9 @@ struct DriveContext {
     /// The transmit model the calling ABI stands for: zenoh's bounded queue for
     /// zenoh-c, pico's blocking write for zenoh-pico. See [`open_blocking`].
     tx_queue: TxQueueConf,
+    /// The capabilities the calling ABI's session offers, dialled and accepted
+    /// alike. See [`open_blocking`].
+    offer: SessionOffer,
 }
 
 /// The shutdown signal both roles race their drive against. See
@@ -352,6 +363,7 @@ async fn drive_dial(
         stop,
         clock,
         tx_queue,
+        offer,
     } = ctx;
     // R311y534 — the dial config is BUILT from the caller's TLS material rather
     // than defaulted. Everything that can fail it runs before the handshake, so a
@@ -389,6 +401,7 @@ async fn drive_dial(
     let dialer = Arc::new(Dialer {
         dial_cfgs,
         params,
+        offer,
         clock,
     });
     // R2950 — the two ROLES connect differently upstream, and each is built
@@ -1074,6 +1087,7 @@ async fn drive_listen(endpoint: String, tls: CapiTlsConfig, ctx: DriveContext) {
         stop,
         clock,
         tx_queue,
+        offer,
     } = ctx;
     // Everything that can fail the open runs BEFORE the success signal below,
     // so a failure is reported to the C caller rather than silently killing a
@@ -1152,9 +1166,10 @@ async fn drive_listen(endpoint: String, tls: CapiTlsConfig, ctx: DriveContext) {
     // peer connects had nowhere to deliver in-process. The drain rides this
     // task's `select!` for the same one-task reason `drive_dial` does.
     tokio::select! {
-        _summary = accept_loop(
+        _summary = accept_loop_offering(
             listener,
             params,
+            offer,
             clock,
             DEFAULT_OPEN_TICK_MS,
             shutdown_future(shutdown, stop),
@@ -1178,6 +1193,16 @@ async fn drive_listen(endpoint: String, tls: CapiTlsConfig, ctx: DriveContext) {
 /// message after `wait_before_drop` ([`TxQueueConf::default`]), while pico
 /// writes on the caller's thread and never drops for a full socket
 /// ([`TxQueueConf::pico`]).
+///
+/// `offer` is the other half of the same fact: what the session's links offer
+/// at their handshake, every dialled link and every accepted one alike. A
+/// zenoh-c session offers what its config enables — QoS, and shared memory on
+/// the shared-memory build, are on by default upstream — while zenoh-pico
+/// negotiates none of them on unicast (its InitSyn carries the patch ext and
+/// nothing else, `vendor/zenoh-pico/src/protocol/codec/transport.c` @
+/// `z_result_t _z_init_encode(`) and passes [`SessionOffer::universal`].
+/// It is a parameter rather than a value this crate derives because the two
+/// ABIs read their configs through different keys.
 pub fn open_blocking(
     connect: Vec<String>,
     listen: Option<String>,
@@ -1185,6 +1210,7 @@ pub fn open_blocking(
     dial_whatami: WhatAmI,
     dial_phase: DialPhase,
     tx_queue: TxQueueConf,
+    offer: SessionOffer,
 ) -> Result<SessionState, OpenError> {
     let clock = TokioTime::new();
     // Minted here, on the CALLING thread, so `SessionState` can hand it to
@@ -1233,6 +1259,7 @@ pub fn open_blocking(
                 stop: drive_stop,
                 clock,
                 tx_queue,
+                offer,
             };
             rt.block_on(async move {
                 match (connect.is_empty(), listen) {

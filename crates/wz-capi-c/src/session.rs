@@ -13,6 +13,7 @@ use std::ffi::c_void;
 use wz_capi_core::drive::{open_blocking, CapiTlsConfig, DialPhase, OpenError, SessionState};
 use wz_runtime_tokio::retry_period::RetryPolicy;
 use wz_runtime_tokio::session_glue::{TxQueueConf, WhatAmI};
+use wz_runtime_tokio::session_open::{SessionOffer, TransportMode};
 use wz_runtime_tokio::startup_phase::PhasePolicy;
 use wz_runtime_tokio::zenoh_config::ZenohNodeConfig;
 
@@ -91,6 +92,56 @@ fn dial_phase(node: &ZenohNodeConfig, whatami: WhatAmI) -> DialPhase {
     }
 }
 
+/// Why a config cannot be offered: it enables both halves of the one exclusive
+/// transport choice.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct QosWithLowlatency;
+
+/// What this session's links offer at their handshake, read from its config
+/// the way zenoh's transport manager reads it.
+///
+/// Upstream builds the unicast half from three keys
+/// (`io/zenoh-transport/src/unicast/manager.rs` @
+/// `self = self.qos(*config.transport().unicast().qos().enabled());`, the
+/// lowlatency line after it, and the compression line behind
+/// `transport_compression`, which zenoh-c's default build carries). Both the
+/// dialling and the accepting side read the same manager config, so one value
+/// serves both.
+///
+/// The defaults are upstream's, and QoS is ON: an unconfigured zenoh-c session
+/// offers it. A session that offered nothing — what this ABI did until R2970 —
+/// agreed on no QoS with another zenoh-c session, where two real ones do.
+///
+/// QoS and lowlatency together are refused, as upstream's manager refuses them
+/// when it is built (`bail!("'qos' and 'lowlatency' options are incompatible");`),
+/// which is inside `zenoh::open` and so reaches a C caller as an open failure.
+///
+/// ## Shared memory is NOT offered, and that is a held divergence
+///
+/// Upstream's shared-memory build also offers SHM, from
+/// `transport/shared_memory/enabled`
+/// (`io/zenoh-transport/src/common/shm/shm_context.rs` @ `if !*cfg.enabled() {`),
+/// default on. This session does not, on any arm. Negotiating it would let a
+/// zenoh peer send this session SHM payloads — explicitly, or implicitly for any
+/// payload past `message_size_threshold` — and a Put carrying one is laid out
+/// as slices on the wire, which wz's generated Put codec cannot read yet
+/// (open-debt item 823, an SCE predicate this tree cannot write). A session that
+/// agreed on SHM would then lose every such sample and misread the message
+/// after it, where today the same peer sends it the ordinary way. So
+/// `node.shared_memory` is read by the config reader and deliberately not
+/// staged here; the SHM half of this offer lands with item 823.
+fn session_offer(node: &ZenohNodeConfig) -> Result<SessionOffer, QosWithLowlatency> {
+    let mode = match (node.qos, node.lowlatency) {
+        (true, true) => return Err(QosWithLowlatency),
+        (true, false) => TransportMode::Qos,
+        (false, true) => TransportMode::LowLatency,
+        (false, false) => TransportMode::Universal,
+    };
+    Ok(SessionOffer::universal()
+        .with_mode(mode)
+        .with_compression(node.compression))
+}
+
 /// The session's configuration, read ONCE, the way a zenoh node reads it.
 ///
 /// The document goes through [`ZenohNodeConfig::from_json5`], wz's one reader
@@ -151,6 +202,15 @@ pub unsafe extern "C" fn z_open(
         drop(unsafe { Box::from_raw(handle as *mut ConfigState) });
         unsafe { (*config)._this = crate::abi::z_owned_config_t::null_value() };
 
+        // Decided before anything else about the open, as upstream decides it
+        // when the transport manager is built — before a single endpoint is
+        // looked at. A config the reader refused has no offer to derive; the
+        // `phase` check below refuses that open.
+        let offer = match node.as_ref().map(session_offer).transpose() {
+            Ok(offer) => offer.unwrap_or_else(SessionOffer::universal),
+            Err(QosWithLowlatency) => return Z_ENETWORK,
+        };
+
         // A config with neither endpoint is a scouting open, which this slice
         // does not implement. Refused rather than silently opening a session
         // that reaches nothing.
@@ -183,6 +243,7 @@ pub unsafe extern "C" fn z_open(
             whatami,
             phase,
             TxQueueConf::default(),
+            offer,
         ) {
             Ok(state) => {
                 // R2957 — the session's own shared-memory provider, as its
@@ -529,4 +590,73 @@ pub unsafe extern "C" fn z_session_is_closed(session: *const z_loaned_session_t)
         // SAFETY: the caller's contract, delegated.
         unsafe { session_state(session) }.map_or(true, SessionState::is_closed)
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The offer for a config document, read by the one reader `z_open` uses.
+    fn offer_for(document: &str) -> Result<SessionOffer, QosWithLowlatency> {
+        let node = ZenohNodeConfig::from_json5(document)
+            .expect("the document is one the reader accepts")
+            .config;
+        session_offer(&node)
+    }
+
+    /// R2970 — an unconfigured session offers QoS, upstream's default, and no
+    /// other capability.
+    #[test]
+    fn an_unconfigured_session_offers_qos_and_nothing_else() {
+        assert_eq!(
+            offer_for("{}"),
+            Ok(SessionOffer::universal().with_mode(TransportMode::Qos))
+        );
+    }
+
+    /// Each unicast key reaches the offer on its own. Compression is the one
+    /// half the C-level differential cannot see — no zenoh-c accessor reports
+    /// it — so its staging is held here.
+    #[test]
+    fn each_unicast_key_reaches_the_offer() {
+        assert_eq!(
+            offer_for(r#"{ transport: { unicast: { qos: { enabled: false } } } }"#),
+            Ok(SessionOffer::universal())
+        );
+        assert_eq!(
+            offer_for(
+                r#"{ transport: { unicast: { qos: { enabled: false }, lowlatency: true } } }"#
+            ),
+            Ok(SessionOffer::universal().with_mode(TransportMode::LowLatency))
+        );
+        assert_eq!(
+            offer_for(r#"{ transport: { unicast: { compression: { enabled: true } } } }"#),
+            Ok(SessionOffer::universal()
+                .with_mode(TransportMode::Qos)
+                .with_compression(true))
+        );
+    }
+
+    /// QoS stays on by default, so lowlatency alone is the refused pair — the
+    /// configuration upstream's manager refuses when it is built.
+    #[test]
+    fn lowlatency_with_the_default_qos_is_refused() {
+        assert_eq!(
+            offer_for(r#"{ transport: { unicast: { lowlatency: true } } }"#),
+            Err(QosWithLowlatency)
+        );
+    }
+
+    /// Shared memory is read and NOT offered, on every arm: the held
+    /// divergence `session_offer` states (open-debt item 823). This is the test
+    /// that moves with that item.
+    #[test]
+    fn shared_memory_is_read_and_not_offered() {
+        let node =
+            ZenohNodeConfig::from_json5(r#"{ transport: { shared_memory: { enabled: true } } }"#)
+                .expect("the document is one the reader accepts")
+                .config;
+        assert!(node.shared_memory, "the reader carries the key");
+        assert!(!session_offer(&node).expect("no mode conflict").shm);
+    }
 }

@@ -3031,9 +3031,55 @@ where
 /// dials — every face comes from accepting. `on_event` observes each
 /// [`AcceptEvent`]; the loop runs until `shutdown` resolves, then returns its
 /// [`AcceptLoopSummary`].
+///
+/// Every face opens with the ZERO offer: this is the entry for a node that
+/// carries no capability configuration of its own. One that does, and still
+/// only accepts, reaches [`accept_loop_offering`].
 pub async fn accept_loop<S, F>(
     listener: BoundListener,
     params: SessionInitParams,
+    clock: TokioTime,
+    tick_interval_ms: u64,
+    shutdown: S,
+    on_event: F,
+    forwarder: &dyn FaceForwarder,
+) -> AcceptLoopSummary
+where
+    S: Future<Output = ()>,
+    F: FnMut(&AcceptEvent),
+{
+    accept_loop_offering(
+        listener,
+        params,
+        SessionOffer::universal(),
+        clock,
+        tick_interval_ms,
+        shutdown,
+        on_event,
+        forwarder,
+    )
+    .await
+}
+
+/// [`accept_loop`] for an accept-only node that DOES carry a capability
+/// configuration: every face it accepts opens with `offer`.
+///
+/// Its caller is the zenoh-c ABI's listening session. zenoh builds the accept
+/// side of every transport from the same manager config the open side reads —
+/// `accept_link` stages QoS from it
+/// (`io/zenoh-transport/src/unicast/establishment/accept.rs` @ `ext_qos: ext::qos::StateAccept::new(manager.config.unicast.is_qos, &endpoint)?,`),
+/// and lowlatency, compression and the SHM authenticator beside it — so a
+/// zenoh-c session that listens offers what its config enables exactly as one
+/// that dials does. Without this entry the listening half of that session could
+/// only offer nothing, which is what it did.
+///
+/// The offer is the node's; a listener endpoint's own QoS band is not staged
+/// here, as it is not by [`accept_loop`] either.
+#[allow(clippy::too_many_arguments)]
+pub async fn accept_loop_offering<S, F>(
+    listener: BoundListener,
+    params: SessionInitParams,
+    offer: SessionOffer,
     clock: TokioTime,
     tick_interval_ms: u64,
     shutdown: S,
@@ -3077,11 +3123,11 @@ where
             // always compares against it. A caller that needs a different bound
             // reaches `peer_loop`, which takes the configured `FaceSources`.
             max_sessions: crate::config::DEFAULT_MAX_SESSIONS,
-            // accept-only: the zero offer. `accept_loop` is the entry for a node
-            // that carries no capability configuration of its own — a mesh node
-            // that does reaches `peer_loop`, which is where R2095 threads the
-            // configured offer.
-            offer: SessionOffer::universal(),
+            // The caller's: [`accept_loop`] passes the zero offer, an accept-only
+            // node with a configuration of its own passes that configuration's.
+            // A mesh node reaches `peer_loop`, which is where R2095 threads the
+            // configured offer for dials as well.
+            offer,
             // accept-only: the loop schedules no outbound dial at all, so no
             // re-dial either. Carried because the field is unconditional; never
             // read on this path.

@@ -131,6 +131,9 @@ zenoh-c-no-unstable-api = []
 # R2954 — and the runtime's POSIX segment PROTOCOL, without its SHM transport:
 # `zc_cleanup_orphaned_shm_segments` is that protocol's own orphan cleanup, and
 # the transport would turn on SHM negotiation for this ABI's sessions.
+# R2970 — why that must not happen yet is written where the session's offer is
+# built (`session::session_offer`): a zenoh peer that agreed on SHM would send
+# Puts laid out as slices, which the generated Put codec cannot read (item 823).
 zenoh-c-shared-memory = ["dep:libc", "wz-runtime-tokio/posix-shm-segment"]
 
 [dependencies]
@@ -139,7 +142,11 @@ zenoh-c-shared-memory = ["dep:libc", "wz-runtime-tokio/posix-shm-segment"]
 # is the other half of this workspace that maps a /dev/shm segment.
 libc = { version = "0.2", optional = true }
 # The ABI-neutral session model, shared with wz-capi-pico.
-wz-capi-core = { path = "../wz-capi-core" }
+#
+# R2970 — `transport-qos` so its transport snapshot reports what a zenoh-c
+# session now negotiates: QoS is on by default upstream, and `z_transport_is_qos`
+# read `false` for every session because the ext was not built here at all.
+wz-capi-core = { path = "../wz-capi-core", features = ["transport-qos"] }
 # `query-reply-err` is DECLARED rather than inherited from the default set, and
 # R311y568 is why: `z_query_reply_err` routes through
 # `ReplyOut::reply_err`, whose body is `#[cfg(feature = "query-reply-err")]` and
@@ -158,6 +165,16 @@ wz-runtime-tokio = { path = "../wz-runtime-tokio", features = [
     # getting an empty set when it moves. A symbol a caller cannot rely on
     # finding is not an answer.
     "zenoh-config",
+    # R2970 — the unicast capabilities a zenoh-c session offers from its config
+    # (`session::session_offer`). Upstream compiles QoS and lowlatency into every
+    # build and compression into zenoh-c's default one, and reads each from
+    # `transport/unicast/*`; the session only offers what is built, and an offer
+    # for a capability that is not is refused at the open rather than dropped.
+    # `session-extqos` carries the endpoint's own QoS band, which upstream's
+    # opener reads off every endpoint it dials.
+    "session-extqos",
+    "transport-lowlatency",
+    "session-extcompression",
 ] }
 
 [dev-dependencies]
