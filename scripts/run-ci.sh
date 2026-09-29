@@ -11517,10 +11517,15 @@ layer_c1bz_docs_resolve() {
     # moved to wz-capi-core and took the pico docs' links to the retired
     # `crate::get::CancellableFan` with it; every error left in the crate's set
     # blames to a commit older than this round.
+    # R2953 — wz-capi-c 45 -> 40, by removal, diffed: the crate's private
+    # `DeferredResponder` retired into the runtime's public `HeldQuery`, and the
+    # module and function docs that linked it privately now link that. None of
+    # the 40 errors `cargo doc -p wz-capi-c --no-deps --all-features` printed at
+    # 6335a542 falls on a line the round added.
     budget="
         wz:2
         wz-ap-demo:25
-        wz-capi-c:45
+        wz-capi-c:40
         wz-capi-core:7
         wz-capi-pico:43
         wz-link-lwip:9
