@@ -2765,6 +2765,26 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         });
     }
 
+    /// R2954 — the same entry point in a build with NO dispatch arm, so a
+    /// runtime installs its hand-off on every build without mirroring this
+    /// crate's feature union. Such a build sends no network message, so no job
+    /// is ever scheduled and there is nothing to run.
+    #[cfg(not(any(
+        feature = "codec-push",
+        feature = "codec-request",
+        feature = "codec-response",
+        feature = "codec-response-final",
+        feature = "declare-keyexpr",
+        feature = "declare-subscriber",
+        feature = "declare-queryable",
+        feature = "declare-token",
+        feature = "declare-interest",
+        feature = "liveliness-token",
+    )))]
+    pub fn run_block_first_job(&self, job: BlockFirstJob) {
+        drop(job);
+    }
+
     /// R2952 — give this session the runtime's block-first hand-off: a
     /// function that runs [`Self::run_block_first_job`] off the calling
     /// thread. Installed by a runtime that has one (tokio, from its
