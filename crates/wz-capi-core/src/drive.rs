@@ -152,9 +152,29 @@ pub struct SessionState {
     shutdown: Arc<Notify>,
     stop: Arc<AtomicBool>,
     driver: StdMutex<Option<JoinHandle<()>>>,
+    /// R2957 — per-session state that belongs to ONE C ABI and not to this
+    /// ABI-neutral core: zenoh-c's session owns a shared-memory provider
+    /// (upstream's `Runtime::get_shm_provider`), and zenoh-pico has no shared
+    /// memory at all. Set once, by the shim, right after the open; see
+    /// [`Self::set_abi_extension`].
+    abi_extension: std::sync::OnceLock<Box<dyn std::any::Any + Send + Sync>>,
 }
 
 impl SessionState {
+    /// Attach this ABI's per-session state. Once: a second call is refused and
+    /// returns the value it was handed, so a shim cannot silently replace
+    /// state a live handle already reads.
+    pub fn set_abi_extension<E: std::any::Any + Send + Sync>(&self, ext: E) -> Result<(), E> {
+        self.abi_extension
+            .set(Box::new(ext))
+            .map_err(|boxed| *boxed.downcast::<E>().expect("the value just boxed"))
+    }
+
+    /// This ABI's per-session state, if the shim attached one of type `E`.
+    pub fn abi_extension<E: std::any::Any>(&self) -> Option<&E> {
+        self.abi_extension.get()?.downcast_ref::<E>()
+    }
+
     /// This session's own zid (pico `z_info_zid`). Always the id the INIT
     /// carried — see the field.
     pub fn zid(&self) -> [u8; ZID_LENGTH] {
@@ -1238,6 +1258,7 @@ pub fn open_blocking(
             shutdown,
             stop,
             driver: StdMutex::new(Some(handle)),
+            abi_extension: std::sync::OnceLock::new(),
         }),
         _ => {
             // Open failed (bind / link / handshake error, or the drive thread

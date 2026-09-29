@@ -42,8 +42,10 @@
 //! `z_pub_shm.c` creates a 4096-byte provider and allocates a 1024-byte chunk
 //! once per second, forever. A provider that never reclaimed would fail on the
 //! fifth iteration, so reclamation is not decoration: a chunk returns to the
-//! segment when its owner drops, adjacent free ranges coalesce, and
-//! `z_shm_provider_available` reports what is left. `z_get_shm.c` goes further
+//! segment when its owner drops and adjacent free ranges coalesce.
+//! (`z_shm_provider_available` does NOT report what is left, on purpose: R2957
+//! measured upstream's default POSIX backend answering `0` there, so this
+//! allocator's native providers answer the same.) `z_get_shm.c` goes further
 //! and creates a provider of EXACTLY the size it needs, so an allocator with any
 //! per-chunk overhead taken out of the segment would fail its very first
 //! allocation.
@@ -69,7 +71,7 @@ use std::sync::{Arc, Condvar, Mutex};
 use crate::abi::{z_loaned_bytes_t, z_owned_bytes_t, Handle};
 use crate::bytes::{bytes_slice, BytesState};
 use crate::ffi::{guard_val, guarded};
-use crate::result::{ZResult, Z_EINVAL, Z_ENULL, Z_OK};
+use crate::result::{ZResult, Z_EINVAL, Z_ENULL, Z_EUNAVAILABLE, Z_OK};
 
 /// `z_owned_shm_t` / `z_loaned_shm_t` / `z_owned_shm_mut_t` /
 /// `z_loaned_shm_mut_t` — 80 bytes at align 8, measured by upstream's own
@@ -98,6 +100,18 @@ pub type zc_buf_alloc_status_t = std::ffi::c_int;
 pub const ZC_BUF_ALLOC_STATUS_OK: zc_buf_alloc_status_t = 0;
 /// `ZC_BUF_ALLOC_STATUS_ALLOC_ERROR` = 1.
 pub const ZC_BUF_ALLOC_STATUS_ALLOC_ERROR: zc_buf_alloc_status_t = 1;
+
+/// R2957 — zenoh-c `z_shm_provider_state` (`zenoh_commons.h` @
+/// `typedef enum z_shm_provider_state {`).
+pub type z_shm_provider_state = std::ffi::c_int;
+/// `Z_SHM_PROVIDER_STATE_DISABLED` = 0 — disabled by configuration.
+pub const Z_SHM_PROVIDER_STATE_DISABLED: z_shm_provider_state = 0;
+/// `Z_SHM_PROVIDER_STATE_INITIALIZING` = 1 — concurrently initializing.
+pub const Z_SHM_PROVIDER_STATE_INITIALIZING: z_shm_provider_state = 1;
+/// `Z_SHM_PROVIDER_STATE_READY` = 2.
+pub const Z_SHM_PROVIDER_STATE_READY: z_shm_provider_state = 2;
+/// `Z_SHM_PROVIDER_STATE_ERROR` = 3 — initializing failed.
+pub const Z_SHM_PROVIDER_STATE_ERROR: z_shm_provider_state = 3;
 
 /// zenoh-c `z_alloc_error_t` (`zenoh_opaque.h:24-43`).
 pub type z_alloc_error_t = std::ffi::c_int;
@@ -206,6 +220,12 @@ impl SegmentBooks {
 
     /// The largest single free range — what an allocation of that size could
     /// still satisfy without any further reclamation.
+    ///
+    /// Test-only since R2957: `defragment` stopped reporting it, because
+    /// upstream's default backend reports `0` there
+    /// ([`Provider::available`]). The coalescing it measures is still the
+    /// allocator's, and the tests still hold it.
+    #[cfg(test)]
     fn largest(&self) -> usize {
         self.free.iter().map(|r| r.end - r.start).max().unwrap_or(0)
     }
@@ -583,6 +603,19 @@ define_shm_opaque!(
     z_moved_shm_provider_t,
     SHM_PROVIDER_SIZE
 );
+// R2957 — the SHARED provider: upstream's `Arc<ShmProvider>` behind the same
+// 104-byte shape (`zenoh_opaque.h` @ `typedef struct ALIGN(8) z_owned_shared_shm_provider_t {`).
+// Its handle is the same `Box<Provider>` a plain provider's is, and that is the
+// whole design: `Provider` is already a handle onto `Arc`-shared state, so a
+// shallow copy is a second box of the same provider, and `loan_as` — "use this
+// where a provider is expected" — is a pointer cast every provider function
+// already reads.
+define_shm_opaque!(
+    z_owned_shared_shm_provider_t,
+    z_loaned_shared_shm_provider_t,
+    z_moved_shared_shm_provider_t,
+    SHM_PROVIDER_SIZE
+);
 
 /// zenoh-c `z_alloc_alignment_t` (`zenoh_opaque.h:181-183`): a power-of-two
 /// exponent in ONE byte.
@@ -681,18 +714,32 @@ impl Provider {
         }
     }
 
-    /// Bytes still allocatable.
+    /// Bytes still allocatable, as the BACKEND reports them.
+    ///
+    /// R2957 — the native arm answers `0`, and that is upstream's answer rather
+    /// than a stub: every provider wz builds natively stands for upstream's
+    /// DEFAULT POSIX backend (`PosixShmProviderBackend` is its talc backend,
+    /// `commons/zenoh-shm/src/api/protocol_implementations/posix/posix_shm_provider_backend.rs` @
+    /// `pub type PosixShmProviderBackend = PosixShmProviderBackendTalc;`), and
+    /// that backend does not account: its `available` and `defragment` both
+    /// return `0`
+    /// (`commons/zenoh-shm/src/api/protocol_implementations/posix/posix_shm_provider_backend_talc.rs` @ `fn available(&self) -> usize {`).
+    /// Measured through the C ABI against libzenohc on the session's own
+    /// provider. wz's books still decide every allocation; they are not what a
+    /// caller of this function is told. A C-supplied backend answers for
+    /// itself.
     fn available(&self) -> usize {
         match self {
-            Provider::Native(segment) => segment.books().available(),
+            Provider::Native(_) => 0,
             Provider::Foreign(backend) => backend.available(),
         }
     }
 
-    /// Defragment, reporting what that leaves reachable.
+    /// Defragment, reporting what that leaves reachable — `0` on the native
+    /// arm for the reason [`Self::available`] gives.
     fn defragment(&self) -> usize {
         match self {
-            Provider::Native(segment) => segment.books().largest(),
+            Provider::Native(_) => 0,
             Provider::Foreign(backend) => backend.defragment(),
         }
     }
@@ -1542,8 +1589,10 @@ pub unsafe extern "C" fn z_shm_provider_garbage_collect(
     })
 }
 
-/// Defragment the free list (zenoh-c `z_shm_provider_defragment`), reporting the
-/// largest range now available.
+/// Defragment the free list (zenoh-c `z_shm_provider_defragment`), reporting
+/// what the BACKEND reports: `0` for a native provider, as upstream's default
+/// POSIX backend answers (R2957, [`Provider::available`]); a C-supplied
+/// backend answers for itself.
 ///
 /// # Safety
 /// `provider` must be null or a valid loaned provider.
@@ -1626,6 +1675,271 @@ pub unsafe extern "C" fn z_internal_shm_provider_null(this_: *mut z_owned_shm_pr
 #[no_mangle]
 pub unsafe extern "C" fn z_internal_shm_provider_check(
     this_: *const z_owned_shm_provider_t,
+) -> bool {
+    guard_val(false, || {
+        // SAFETY: the caller's contract.
+        !this_.is_null() && !unsafe { (*this_).handle }.is_null()
+    })
+}
+
+// ---------------------------------------------------------------------------
+// the SESSION's provider — R2957
+// ---------------------------------------------------------------------------
+//
+// Upstream's runtime owns one provider when BOTH `transport/shared_memory` and
+// its `transport_optimization` are enabled, sized `pool_size`, and builds it
+// LAZILY on a blocking task the first time anything asks
+// (`io/zenoh-transport/src/common/shm/interop.rs` @ `pub fn try_get_provider(&self) -> ProviderInitState {`).
+// `z_obtain_shm_provider` is that ask made from C. The provider is this
+// crate's own segment allocator, as every other provider here is; what upstream
+// ALSO uses it for — promoting large messages into SHM implicitly — is not
+// built, which is why only `enabled` and `pool_size` are honoured
+// (`wz_runtime_tokio::zenoh_config::C_ABI_SESSION_HONOURED_KEYS`).
+
+/// Where the session's provider is in its life, upstream's
+/// `ProviderInitStateInner` without the configuration it no longer needs.
+enum SessionProviderInit {
+    /// Enabled and never asked for: the next ask starts building it.
+    Idle,
+    /// Being built on its own thread.
+    Initializing,
+    /// Built.
+    Ready(Provider),
+}
+
+/// The zenoh-c session's shared-memory state, attached to its `SessionState`
+/// at open ([`wz_capi_core::drive::SessionState::set_abi_extension`]).
+pub(crate) struct SessionShm {
+    /// `None` when disabled by configuration; else the pool size in bytes.
+    pool_size: Option<usize>,
+    state: Mutex<SessionProviderInit>,
+    ready: Condvar,
+}
+
+impl SessionShm {
+    /// The session's shared-memory state as its config states it:
+    /// `transport/shared_memory/enabled` and its `transport_optimization`
+    /// both, as upstream's `ShmContext::new` requires, and `pool_size`.
+    pub(crate) fn from_config(
+        shared_memory: bool,
+        optimization: bool,
+        pool_size: u64,
+    ) -> Arc<Self> {
+        Arc::new(Self {
+            pool_size: (shared_memory && optimization).then_some(pool_size as usize),
+            state: Mutex::new(SessionProviderInit::Idle),
+            ready: Condvar::new(),
+        })
+    }
+
+    /// Ask for the provider: upstream's `try_get_provider`, which answers
+    /// what the state is NOW and starts the build on the first ask.
+    fn try_get(self: &Arc<Self>) -> (z_shm_provider_state, Option<Provider>) {
+        let Some(pool_size) = self.pool_size else {
+            return (Z_SHM_PROVIDER_STATE_DISABLED, None);
+        };
+        let Ok(mut state) = self.state.lock() else {
+            return (Z_SHM_PROVIDER_STATE_ERROR, None);
+        };
+        match &*state {
+            SessionProviderInit::Ready(provider) => {
+                (Z_SHM_PROVIDER_STATE_READY, Some(provider.clone()))
+            }
+            SessionProviderInit::Initializing => (Z_SHM_PROVIDER_STATE_INITIALIZING, None),
+            SessionProviderInit::Idle => {
+                *state = SessionProviderInit::Initializing;
+                let this = Arc::clone(self);
+                let spawned = std::thread::Builder::new()
+                    .name("wz-shm-provider-init".into())
+                    .spawn(move || {
+                        let provider = Provider::Native(Segment::new(pool_size));
+                        if let Ok(mut state) = this.state.lock() {
+                            *state = SessionProviderInit::Ready(provider);
+                        }
+                        this.ready.notify_all();
+                    });
+                if spawned.is_err() {
+                    // Upstream's `Error`: the build could not run. Back to
+                    // `Idle`, so a later ask tries again rather than hanging.
+                    *state = SessionProviderInit::Idle;
+                    return (Z_SHM_PROVIDER_STATE_ERROR, None);
+                }
+                (Z_SHM_PROVIDER_STATE_INITIALIZING, None)
+            }
+        }
+    }
+
+    /// Wait for a build that has started: upstream's blocking `recv` on the
+    /// initializer.
+    fn wait_ready(&self) -> Option<Provider> {
+        let mut state = self.state.lock().ok()?;
+        loop {
+            match &*state {
+                SessionProviderInit::Ready(provider) => return Some(provider.clone()),
+                SessionProviderInit::Idle => return None,
+                SessionProviderInit::Initializing => state = self.ready.wait(state).ok()?,
+            }
+        }
+    }
+}
+
+/// Obtain the session's own provider (zenoh-c `z_obtain_shm_provider`,
+/// `zenoh-c/src/session.rs` @ `pub extern "C" fn z_obtain_shm_provider(`).
+///
+/// Upstream's four answers, in upstream's order: disabled by configuration;
+/// still initializing, which a `blocking` call waits out; ready, the one
+/// `Z_OK` and the one that writes `out_provider`; and an error. `out_state` is
+/// written on every path, `out_provider` only on `Z_OK`, as upstream's.
+///
+/// # Safety
+/// `this_` must be null or a valid loaned session; `out_provider` and
+/// `out_state` must be null or valid and writable.
+#[no_mangle]
+pub unsafe extern "C" fn z_obtain_shm_provider(
+    this_: *const crate::abi::z_loaned_session_t,
+    blocking: bool,
+    out_provider: *mut z_owned_shared_shm_provider_t,
+    out_state: *mut z_shm_provider_state,
+) -> ZResult {
+    guarded(|| {
+        if out_provider.is_null() || out_state.is_null() {
+            return Z_ENULL;
+        }
+        // SAFETY: the caller's contract.
+        let Some(session) = (unsafe { crate::session::session_state(this_) }) else {
+            // SAFETY: checked non-null above.
+            unsafe { *out_state = Z_SHM_PROVIDER_STATE_DISABLED };
+            return Z_ENULL;
+        };
+        let Some(shm) = session.abi_extension::<Arc<SessionShm>>() else {
+            // SAFETY: checked non-null above.
+            unsafe { *out_state = Z_SHM_PROVIDER_STATE_DISABLED };
+            return Z_EUNAVAILABLE;
+        };
+        let (mut state, mut provider) = shm.try_get();
+        if state == Z_SHM_PROVIDER_STATE_INITIALIZING && blocking {
+            provider = shm.wait_ready();
+            state = if provider.is_some() {
+                Z_SHM_PROVIDER_STATE_READY
+            } else {
+                Z_SHM_PROVIDER_STATE_ERROR
+            };
+        }
+        // SAFETY: checked non-null above.
+        unsafe { *out_state = state };
+        match provider {
+            Some(provider) => {
+                let handle = Box::into_raw(Box::new(provider)) as Handle;
+                // SAFETY: checked non-null above.
+                unsafe { *out_provider = z_owned_shared_shm_provider_t::from_handle(handle) };
+                Z_OK
+            }
+            None => Z_EUNAVAILABLE,
+        }
+    })
+}
+
+// ---------------------------------------------------------------------------
+// the SHARED provider — R2957
+// ---------------------------------------------------------------------------
+
+/// Borrow a shared provider (zenoh-c `z_shared_shm_provider_loan`).
+///
+/// # Safety
+/// `this_` must be null or a valid owned shared provider.
+#[no_mangle]
+pub unsafe extern "C" fn z_shared_shm_provider_loan(
+    this_: *const z_owned_shared_shm_provider_t,
+) -> *const z_loaned_shared_shm_provider_t {
+    this_ as *const z_loaned_shared_shm_provider_t
+}
+
+/// Use a shared provider where a provider is expected (zenoh-c
+/// `z_shared_shm_provider_loan_as`): the same handle, so every provider
+/// function reads it unchanged.
+///
+/// # Safety
+/// `this_` must be null or a valid loaned shared provider.
+#[no_mangle]
+pub unsafe extern "C" fn z_shared_shm_provider_loan_as(
+    this_: *const z_loaned_shared_shm_provider_t,
+) -> *const z_loaned_shm_provider_t {
+    this_ as *const z_loaned_shm_provider_t
+}
+
+/// Shallow-copy a shared provider (zenoh-c `z_shared_shm_provider_clone`):
+/// both copies allocate from, and keep alive, the one backend.
+///
+/// # Safety
+/// `dst` must be valid and writable; `this_` must be null or a live loan.
+#[no_mangle]
+pub unsafe extern "C" fn z_shared_shm_provider_clone(
+    dst: *mut z_owned_shared_shm_provider_t,
+    this_: *const z_loaned_shared_shm_provider_t,
+) {
+    guard_val((), || {
+        if dst.is_null() {
+            return;
+        }
+        // SAFETY: the caller's contract; `loan_as` is a cast, so the provider
+        // reader applies to a shared loan as it does to a plain one.
+        let copy = unsafe { provider_of(this_ as *const z_loaned_shm_provider_t) }
+            .map(|provider| Box::into_raw(Box::new(provider.clone())) as Handle);
+        // SAFETY: `dst` was checked non-null above.
+        unsafe {
+            *dst = match copy {
+                Some(handle) => z_owned_shared_shm_provider_t::from_handle(handle),
+                None => z_owned_shared_shm_provider_t::null_value(),
+            }
+        };
+    })
+}
+
+/// Drop a shared provider (zenoh-c `z_shared_shm_provider_drop`); the backend
+/// goes when its last copy, and its last outstanding buffer, does.
+///
+/// # Safety
+/// `this_` must be null or a valid moved shared provider.
+#[no_mangle]
+pub unsafe extern "C" fn z_shared_shm_provider_drop(this_: *mut z_moved_shared_shm_provider_t) {
+    let _ = guarded(|| {
+        if this_.is_null() {
+            return Z_OK;
+        }
+        // SAFETY: the caller's contract.
+        let handle = unsafe { (*this_)._this.handle };
+        if !handle.is_null() {
+            // SAFETY: a live `Box<Provider>` this crate leaked.
+            drop(unsafe { Box::from_raw(handle as *mut Provider) });
+            // SAFETY: the caller's contract.
+            unsafe { (*this_)._this = z_owned_shared_shm_provider_t::null_value() };
+        }
+        Z_OK
+    });
+}
+
+/// Zero an owned shared provider (zenoh-c `z_internal_shared_shm_provider_null`).
+///
+/// # Safety
+/// `this_` must be null or a valid, writable owned shared provider.
+#[no_mangle]
+pub unsafe extern "C" fn z_internal_shared_shm_provider_null(
+    this_: *mut z_owned_shared_shm_provider_t,
+) {
+    if !this_.is_null() {
+        // SAFETY: the caller's contract.
+        unsafe { *this_ = z_owned_shared_shm_provider_t::null_value() };
+    }
+}
+
+/// `true` iff the owned shared provider holds a live handle (zenoh-c
+/// `z_internal_shared_shm_provider_check`).
+///
+/// # Safety
+/// `this_` must be null or a valid owned shared provider.
+#[no_mangle]
+pub unsafe extern "C" fn z_internal_shared_shm_provider_check(
+    this_: *const z_owned_shared_shm_provider_t,
 ) -> bool {
     guard_val(false, || {
         // SAFETY: the caller's contract.

@@ -66,20 +66,11 @@ fn dial_whatami(cfg: &ConfigState) -> WhatAmI {
 /// [`ConfigState::with_default_mode`]. `connect/retry` paces the attempts and
 /// falls back to upstream's 1s / 2s / 4s.
 ///
-/// The document goes through [`ZenohNodeConfig::from_json5`], wz's one reader
-/// of a stock config, rather than a second reading of three keys here. A config
-/// that reader refuses (a key zenoh does not have, or two keys that cannot
-/// both be nested) is refused by the open too, which is where upstream stands:
-/// its insert refuses the same keys before an open is ever reached.
-fn dial_phase(cfg: &ConfigState, whatami: WhatAmI) -> Option<DialPhase> {
-    let document = cfg
-        .with_default_mode(whatami.to_str())
-        .render_nested()
-        .ok()?;
-    let node = ZenohNodeConfig::from_json5(&document).ok()?.config;
+/// Read from the document [`read_node`] parsed.
+fn dial_phase(node: &ZenohNodeConfig, whatami: WhatAmI) -> DialPhase {
     let default = PhasePolicy::connect_default_for(whatami);
     let schedule = node.connect_retry.unwrap_or(RetryPolicy::ZENOH_DEFAULT);
-    Some(DialPhase {
+    DialPhase {
         policy: PhasePolicy {
             budget: node.connect_timeout_ms.unwrap_or(default.budget),
             exit_on_failure: node
@@ -97,7 +88,25 @@ fn dial_phase(cfg: &ConfigState, whatami: WhatAmI) -> Option<DialPhase> {
             .open_connect_scouted
             .unwrap_or(true)
             .then(|| std::time::Duration::from_millis(node.scouting_delay_ms.unwrap_or(500))),
-    })
+    }
+}
+
+/// The session's configuration, read ONCE, the way a zenoh node reads it.
+///
+/// The document goes through [`ZenohNodeConfig::from_json5`], wz's one reader
+/// of a stock config, rather than a second reading of a few keys here — the
+/// dial phase and (R2957) the shared-memory provider both read the result. It
+/// is read for the role this session DIALS as, because several keys are
+/// mode-dependent upstream ([`ConfigState::with_default_mode`]). A config that
+/// reader refuses (a key zenoh does not have, two keys that cannot both be
+/// nested, a value out of range) is refused by the open too, which is where
+/// upstream stands: its insert refuses the same keys before an open is reached.
+fn read_node(cfg: &ConfigState, whatami: WhatAmI) -> Option<ZenohNodeConfig> {
+    let document = cfg
+        .with_default_mode(whatami.to_str())
+        .render_nested()
+        .ok()?;
+    Some(ZenohNodeConfig::from_json5(&document).ok()?.config)
 }
 
 /// Construct and open a session, consuming the moved config (zenoh-c `z_open`).
@@ -135,7 +144,8 @@ pub unsafe extern "C" fn z_open(
             .collect();
         let listen = cfg.first(LISTEN_KEY).map(str::to_owned);
         let whatami = dial_whatami(cfg);
-        let phase = dial_phase(cfg, whatami);
+        let node = read_node(cfg, whatami);
+        let phase = node.as_ref().map(|node| dial_phase(node, whatami));
         let handle = unsafe { (*config)._this.handle };
         // SAFETY: a live `Box<ConfigState>` this crate leaked; consumed here.
         drop(unsafe { Box::from_raw(handle as *mut ConfigState) });
@@ -175,6 +185,19 @@ pub unsafe extern "C" fn z_open(
             TxQueueConf::default(),
         ) {
             Ok(state) => {
+                // R2957 — the session's own shared-memory provider, as its
+                // config states it; built on first ask, as upstream's is.
+                #[cfg(all(
+                    feature = "zenoh-c-shared-memory",
+                    not(feature = "zenoh-c-no-unstable-api")
+                ))]
+                if let Some(node) = node.as_ref() {
+                    let _ = state.set_abi_extension(crate::shm::SessionShm::from_config(
+                        node.shared_memory,
+                        node.shm_transport_optimization,
+                        node.shm_pool_size,
+                    ));
+                }
                 let h = Box::into_raw(Box::new(state)) as Handle;
                 unsafe { *this_ = z_owned_session_t::from_handle(h) };
                 Z_OK

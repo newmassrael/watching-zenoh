@@ -769,7 +769,10 @@ HOST_GATED_CI_TARGETS: dict[str, str] = {
 # +1 R2954, `orphaned_shm_segments_are_cleaned_up_identically_on_wz_and_libzenohc`
 # (`api-compat-c`, the SHM orphan cleanup against libzenohc). 948 + 1 = 949,
 # measured by the same script at this round's tree.
-FOREIGN_ADJUDICATOR_LINKS = 949
+# +1 R2957, `a_sessions_own_shm_provider_is_obtained_identically_on_wz_and_libzenohc`
+# (`api-compat-c`, the session's own SHM provider against libzenohc). 949 + 1 =
+# 950, measured by the same script at this round's tree.
+FOREIGN_ADJUDICATOR_LINKS = 950
 
 # ── Execution disclosure ────────────────────────────────────────────────────────
 #

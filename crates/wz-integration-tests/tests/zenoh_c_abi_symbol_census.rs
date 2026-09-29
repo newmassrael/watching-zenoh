@@ -338,7 +338,19 @@ const BASELINES: &[(&str, usize, &str, &str)] = &[
     // grepping the INSTALLED `zenoh_configure.h` for `Z_FEATURE_SHARED_MEMORY`
     // and `Z_FEATURE_UNSTABLE_API`, so a hand-built cdylib is measured against
     // an oracle it was not built for. Build it the way the lane does.
-    ("unstable-shm", 9, "1.10.1", "C1cc"),
+    // R2957 lowered this 9 -> 2 by answering the question R2294 left open —
+    // "whether [a wz session] should own [a provider]" — with upstream's own
+    // answer: yes, when `transport/shared_memory` and its
+    // `transport_optimization` are enabled, sized `pool_size`, built lazily
+    // (`io/zenoh-transport/src/common/shm/interop.rs` @ `pub fn try_get_provider(&self) -> ProviderInitState {`).
+    // That gave the shared-provider plane its producer, `z_obtain_shm_provider`,
+    // so the six are no longer the dead arm R2288 named;
+    // `zenoh_c_session_shm_provider_twice_and_diff` obtains, allocates through,
+    // clones and disables one against libzenohc. The TWO left are
+    // `z_open_with_custom_shm_clients` and `z_ref_shm_client_storage_global`:
+    // they choose the clients a session READS shared memory through, and wz's
+    // receive path for an SHM payload waits on open-debt item 823.
+    ("unstable-shm", 2, "1.10.1", "C1cc"),
     // R311y614 — the two arms that had NO oracle on any machine, and therefore
     // no row: the gate hard-FAILED on them rather than guessing a ceiling from
     // a neighbour. `scripts/install-zenoh-c-arm.sh` builds any of the four, so

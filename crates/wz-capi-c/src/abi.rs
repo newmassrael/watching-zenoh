@@ -1187,6 +1187,8 @@ pub const WZ_CAPI_C_LAYOUT_NAMES_SHM: &[&str] = &[
     "z_owned_shm_t",
     "z_owned_shm_mut_t",
     "z_owned_shm_provider_t",
+    // R2957 — upstream's Arc-shared provider, the same 104 bytes.
+    "z_owned_shared_shm_provider_t",
     "z_alloc_alignment_t",
     "z_buf_layout_alloc_result_t",
     "z_buf_alloc_result_t",
@@ -1324,6 +1326,7 @@ fn layout_values() -> Vec<usize> {
         size_of::<crate::shm::z_owned_shm_t>(),
         size_of::<crate::shm::z_owned_shm_mut_t>(),
         size_of::<crate::shm::z_owned_shm_provider_t>(),
+        size_of::<crate::shm::z_owned_shared_shm_provider_t>(),
         size_of::<crate::shm::z_alloc_alignment_t>(),
         size_of::<crate::shm::z_buf_layout_alloc_result_t>(),
         size_of::<crate::shm::z_buf_alloc_result_t>(),

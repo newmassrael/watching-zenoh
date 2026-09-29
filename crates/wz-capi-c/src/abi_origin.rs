@@ -173,6 +173,11 @@ pub const WZ_CAPI_C_ABI_ORIGIN: &[(&str, &str)] = &[
     ("z_owned_shm_t", "Option<ZShm>"),
     ("z_owned_shm_mut_t", "Option<ZShmMut>"),
     ("z_owned_shm_provider_t", "Option<CDummySHMProvider>"),
+    // R2957 — `build-resources/opaque-types/src/lib.rs` @ `Option<DummySharedShmProvider>,`.
+    (
+        "z_owned_shared_shm_provider_t",
+        "Option<DummySharedShmProvider>",
+    ),
     ("z_alloc_alignment_t", "@transparent"),
     ("z_buf_layout_alloc_result_t", "@transparent"),
     ("z_buf_alloc_result_t", "@transparent"),

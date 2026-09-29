@@ -488,6 +488,11 @@ fn the_wz_capi_c_type_footprints_equal_upstreams_on_this_installation() {
         ("z_owned_shm_t", "sizeof(z_owned_shm_t)"),
         ("z_owned_shm_mut_t", "sizeof(z_owned_shm_mut_t)"),
         ("z_owned_shm_provider_t", "sizeof(z_owned_shm_provider_t)"),
+        // R2957 — the shared provider, in `WZ_CAPI_C_LAYOUT_NAMES_SHM`'s order.
+        (
+            "z_owned_shared_shm_provider_t",
+            "sizeof(z_owned_shared_shm_provider_t)",
+        ),
         ("z_alloc_alignment_t", "sizeof(z_alloc_alignment_t)"),
         (
             "z_buf_layout_alloc_result_t",

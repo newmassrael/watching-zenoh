@@ -1022,6 +1022,17 @@ pub struct ZenohNodeConfig {
     /// the operator's file; the expansion still acts only on a value the
     /// document NAMED, so an unmentioned key changes no invocation.
     pub shared_memory: bool,
+    /// R2957 — `transport/shared_memory/transport_optimization/enabled`:
+    /// whether the session owns a shared-memory provider of its own
+    /// (upstream's `ShmContext::new` @ `if *cfg.transport_optimization.enabled() {`).
+    /// Read by the zenoh-c ABI's session, which hands that provider out
+    /// through `z_obtain_shm_provider`; the implicit large-message promotion
+    /// the same switch also turns on upstream is not built here. Default
+    /// zenoh's, `true`.
+    pub shm_transport_optimization: bool,
+    /// R2957 — `transport/shared_memory/transport_optimization/pool_size`: the
+    /// size in bytes of that provider, zenoh's default 16 MiB.
+    pub shm_pool_size: u64,
     /// `transport/link/tls/root_ca_certificate`. wz's `--tls-ca`.
     pub tls_root_ca: Option<String>,
     /// `transport/link/tls/listen_certificate`. wz's `--tls-cert`.
@@ -1294,6 +1305,9 @@ impl Default for ZenohNodeConfig {
             open_connect_scouted: None,
             multicast_qos: false,
             shared_memory: true,
+            // Upstream's defaults (`DEFAULT_CONFIG.json5` @ `pool_size: 16777216,`).
+            shm_transport_optimization: true,
+            shm_pool_size: 16 * 1024 * 1024,
             tls_root_ca: None,
             tls_listen_certificate: None,
             tls_listen_private_key: None,
@@ -2351,10 +2365,10 @@ pub const UNHONOURED_UPSTREAM_CONFIG_KEYS: &[&str] = &[
     "transport/shared_memory/mode",
     // R2230 (open-debt item 579) — the four `transport_optimization` knobs
     // ARRIVED in 1.10.0. Their group sentence carries the evidence.
-    "transport/shared_memory/transport_optimization/enabled",
+    // R2957 — `enabled` and `pool_size` LEFT: the zenoh-c session reads them
+    // ([`C_ABI_SESSION_HONOURED_KEYS`]). The two left name the promotion alone.
     "transport/shared_memory/transport_optimization/message_size_threshold",
     "transport/shared_memory/transport_optimization/messages",
-    "transport/shared_memory/transport_optimization/pool_size",
     "transport/unicast/accept_pending",
     "transport/unicast/accept_timeout",
     // R2758 — `transport/unicast/max_sessions` LEFT this list: wz honours it.
@@ -2416,6 +2430,9 @@ pub const UNHONOURED_UPSTREAM_CONFIG_KEYS: &[&str] = &[
 /// * `transport/shared_memory/transport_optimization/*` — an implicit
 ///   large-message SHM promotion path (`LargeMessageTransportOpt`). wz HAS
 ///   shared memory and still lacks this one, which is why it is worth a group.
+///   (R2957 — `enabled` and `pool_size` left it: the zenoh-c session's own
+///   provider reads them, [`C_ABI_SESSION_HONOURED_KEYS`]. The promotion's
+///   threshold and message set stay.)
 /// * `scouting/delay` — a startup scouting delay (`ScoutingDelay`).
 /// * (§5.23 `adminspace-core`: `metadata` LEFT this list. The row said upstream
 ///   "never reads" it, which was true of the node and false of the adminspace:
@@ -2558,10 +2575,10 @@ pub const UNHONOURED_BEYOND_WZ: &[&str] = &[
     "transport/shared_memory/mode",
     // R2230 (open-debt item 579) — the four `transport_optimization` knobs
     // ARRIVED in 1.10.0. Their group sentence carries the evidence.
-    "transport/shared_memory/transport_optimization/enabled",
+    // R2957 — `enabled` and `pool_size` LEFT: the zenoh-c session reads them
+    // ([`C_ABI_SESSION_HONOURED_KEYS`]). The two left name the promotion alone.
     "transport/shared_memory/transport_optimization/message_size_threshold",
     "transport/shared_memory/transport_optimization/messages",
-    "transport/shared_memory/transport_optimization/pool_size",
     "transport/unicast/accept_pending",
     "transport/unicast/accept_timeout",
     // R2758 — `transport/unicast/max_sessions` LEFT this list too, and this is
@@ -2853,10 +2870,8 @@ pub const UNHONOURED_BEYOND_GROUPS: &[(&str, &str, &[&str])] = &[
         "an implicit large-message SHM promotion path",
         "LargeMessageTransportOpt",
         &[
-            "transport/shared_memory/transport_optimization/enabled",
             "transport/shared_memory/transport_optimization/message_size_threshold",
             "transport/shared_memory/transport_optimization/messages",
-            "transport/shared_memory/transport_optimization/pool_size",
         ],
     ),
     // R2950 — the `ScoutingDelay` group is GONE, not emptied: wz grew "a
@@ -3416,6 +3431,27 @@ pub const DEEPENABLE_UPSTREAM_KEYS: &[&str] = &[
 /// it now accepts are ones upstream parses and discards. This round exists
 /// because a surface whose NAME is wrong makes the number it yields
 /// unreadable, and a predicate is not exempt from that.
+/// R2957 — the SIXTH organ of [`honours_config_key`]: keys a C ABI's session
+/// acts on when it opens, and the wz node does not.
+///
+/// Its own list rather than rows of [`HONOURED_CONFIG_KEYS`], because that one
+/// means more: every key in it is one the demo is asked to accept and whose
+/// expansion the stock-config fixture names (`config_key_fixture_gate.py`).
+/// These two change the zenoh-c session and nothing the demo runs, so filing
+/// them there would claim a node capability that does not exist, and leaving
+/// them in [`UNHONOURED_UPSTREAM_CONFIG_KEYS`] would tell an operator a key is
+/// ignored that just decided whether their session has a provider.
+///
+/// What each changes: `transport_optimization/enabled` whether the session
+/// owns a shared-memory provider (`z_obtain_shm_provider` answers DISABLED
+/// without it), `pool_size` that provider's size. The implicit promotion the
+/// first key ALSO turns on upstream is not built; its two remaining keys stay
+/// unhonoured, under the promotion group.
+pub const C_ABI_SESSION_HONOURED_KEYS: &[&str] = &[
+    "transport/shared_memory/transport_optimization/enabled",
+    "transport/shared_memory/transport_optimization/pool_size",
+];
+
 /// Whether a document naming `path` LANDS somewhere in wz, rather than coming
 /// back in [`ZenohConfigIngest::ignored`].
 ///
@@ -3434,6 +3470,9 @@ pub const DEEPENABLE_UPSTREAM_KEYS: &[&str] = &[
 pub fn honours_config_key(path: &str) -> bool {
     HONOURED_CONFIG_KEYS.contains(&path)
         || HONOURED_SUBTREE_LEAVES.contains(&path)
+        // R2957 — the keys a C ABI's SESSION reads at open, which the node does
+        // not: writing one changes what that session does.
+        || C_ABI_SESSION_HONOURED_KEYS.contains(&path)
         // R2230 (items 579 / 582) — an extension key wz HONOURS is applied, so
         // reporting it ignored would tell the operator the opposite of what
         // just happened. The extension keys wz does NOT honour are absent from
@@ -3685,7 +3724,18 @@ fn plugins_leaf_disposition(path: &str) -> ConfigKeyDisposition {
 /// must decode as a config write so the runtime can answer `NotHonoured` for it
 /// by name, rather than the decoder answering "never heard of it" a crate
 /// earlier and collapsing the distinction R2644 built.
+///
+/// R2957 — and "wider" is now true BY CONSTRUCTION: the first arm is
+/// [`honours_config_key`] itself, so every organ that predicate grows is one
+/// this accepts the day it lands. The enumeration below it used to be the only
+/// arm, repeating that predicate's lists one by one; the sixth organ
+/// ([`C_ABI_SESSION_HONOURED_KEYS`]) was honoured and REFUSED at once — a C
+/// program setting `transport_optimization/pool_size` could not open a session
+/// — which is the drift two spellings of one set always produce.
 pub(crate) fn wz_accepts(path: &str) -> bool {
+    if honours_config_key(path) {
+        return true;
+    }
     let under = |known: &&str| {
         path.len() > known.len() && path.starts_with(*known) && path.as_bytes()[known.len()] == b'/'
     };
@@ -6170,6 +6220,28 @@ impl ZenohNodeConfig {
         if let Some(v) = want_bool(&doc, "transport/shared_memory/enabled")? {
             out.shared_memory = v;
             named.push("transport/shared_memory/enabled");
+        }
+        if let Some(v) = want_bool(
+            &doc,
+            "transport/shared_memory/transport_optimization/enabled",
+        )? {
+            out.shm_transport_optimization = v;
+            named.push("transport/shared_memory/transport_optimization/enabled");
+        }
+        if let Some(v) = want_u64(
+            &doc,
+            "transport/shared_memory/transport_optimization/pool_size",
+        )? {
+            // Upstream types it `NonZeroUsize`, so its parser refuses `0`
+            // before any session exists; so does this one.
+            if v == 0 {
+                return Err(ConfigIngestError::OutOfRange {
+                    path: "transport/shared_memory/transport_optimization/pool_size",
+                    value: "0".to_owned(),
+                });
+            }
+            out.shm_pool_size = v;
+            named.push("transport/shared_memory/transport_optimization/pool_size");
         }
         if let Some(v) = want_string(&doc, "transport/link/tls/root_ca_certificate", "a path")? {
             out.tls_root_ca = Some(v);
