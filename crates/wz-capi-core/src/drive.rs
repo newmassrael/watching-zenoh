@@ -2005,6 +2005,20 @@ mod tests {
         closer.join().expect("the closer");
     }
 
+    /// Stop the gate from a thread of its own and fail if that does not return in
+    /// five seconds: a stop that never returns is the defect, and it must read as
+    /// a failed test rather than a hung one.
+    fn stop_within_five_seconds(gate: &Arc<ReadGate>) {
+        let (tx, rx) = mpsc::channel();
+        let stopper = gate.clone();
+        std::thread::spawn(move || {
+            stopper.stop().expect("a stop off the drive thread");
+            let _ = tx.send(());
+        });
+        rx.recv_timeout(std::time::Duration::from_secs(5))
+            .expect("a stop did not return within five seconds");
+    }
+
     /// Spin until `cond` holds, or fail after ten seconds.
     fn wait_until(what: &str, mut cond: impl FnMut() -> bool) {
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
@@ -2045,7 +2059,7 @@ mod tests {
         };
 
         wait_until("a step in flight", || in_flight.load(Ordering::SeqCst));
-        gate.stop().expect("a stop off the drive thread");
+        stop_within_five_seconds(&gate);
         assert!(
             !in_flight.load(Ordering::SeqCst),
             "the stop returned while a step was still running"
@@ -2072,19 +2086,26 @@ mod tests {
     fn a_stop_or_a_start_on_the_drive_thread_is_refused_and_changes_nothing() {
         let gate = Arc::new(ReadGate::new(true));
         gate.mark_opened();
-        let seen = Arc::new(StdMutex::new(None));
-        let (seen_in, gate_in) = (seen.clone(), gate.clone());
-        runtime().block_on(Pausable {
-            gate: gate.clone(),
-            inner: Box::pin(async move {
-                let stop = gate_in.stop();
-                let start = gate_in.start();
-                *seen_in.lock().expect("the record") = Some((stop, start, gate_in.is_running()));
-            }),
+        let (tx, rx) = mpsc::channel();
+        // On a thread of its own: a stop that waited for itself would never return,
+        // and that must read as a failed test rather than a hung one.
+        let gate_in = gate.clone();
+        std::thread::spawn(move || {
+            runtime().block_on(Pausable {
+                gate: gate_in.clone(),
+                inner: Box::pin(async move {
+                    let stop = gate_in.stop();
+                    let start = gate_in.start();
+                    let _ = tx.send((stop, start, gate_in.is_running()));
+                }),
+            });
         });
+        let seen = rx
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("a stop on the drive thread waited for itself");
         assert_eq!(
-            *seen.lock().expect("the record"),
-            Some((Err(CalledFromReadTask), Err(CalledFromReadTask), true)),
+            seen,
+            (Err(CalledFromReadTask), Err(CalledFromReadTask), true),
             "a stop and a start on the drive thread must be refused, leaving the task running"
         );
     }
@@ -2114,14 +2135,7 @@ mod tests {
         };
         wait_until("the drive's first poll", || polled.load(Ordering::SeqCst));
 
-        let (tx, rx) = mpsc::channel();
-        let stopper = gate.clone();
-        std::thread::spawn(move || {
-            stopper.stop().expect("a stop off the drive thread");
-            let _ = tx.send(());
-        });
-        rx.recv_timeout(std::time::Duration::from_secs(5))
-            .expect("a stop never reached an idle drive thread");
+        stop_within_five_seconds(&gate);
 
         // Let the drive end, so its thread can be joined.
         gate.start().expect("a start off the drive thread");
@@ -2139,13 +2153,6 @@ mod tests {
             gate: gate.clone(),
             inner: Box::pin(async {}),
         });
-        let (tx, rx) = mpsc::channel();
-        let stopper = gate.clone();
-        std::thread::spawn(move || {
-            stopper.stop().expect("a stop off the drive thread");
-            let _ = tx.send(());
-        });
-        rx.recv_timeout(std::time::Duration::from_secs(5))
-            .expect("a stop waited for a drive that is gone");
+        stop_within_five_seconds(&gate);
     }
 }
